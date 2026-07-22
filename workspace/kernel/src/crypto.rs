@@ -114,6 +114,25 @@ pub fn is_key_trusted(id: &[u8; KEY_ID_SIZE]) -> bool {
     TRUSTED_KEYS.lock().iter().any(|k| k.id == *id)
 }
 
+/// Snapshot of a trusted key for display purposes.
+#[derive(Debug, Clone)]
+pub struct KeyInfo {
+    pub id: [u8; KEY_ID_SIZE],
+    pub label: &'static str,
+}
+
+/// Return a snapshot of all registered trusted keys.
+pub fn list_trusted_keys() -> alloc::vec::Vec<KeyInfo> {
+    TRUSTED_KEYS
+        .lock()
+        .iter()
+        .map(|k| KeyInfo {
+            id: k.id,
+            label: k.label,
+        })
+        .collect()
+}
+
 /// Lookup a trusted key by its ID.
 fn find_trusted_key(id: &[u8; KEY_ID_SIZE]) -> Option<TrustedKey> {
     TRUSTED_KEYS.lock().iter().find(|k| k.id == *id).cloned()

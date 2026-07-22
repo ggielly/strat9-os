@@ -31,6 +31,11 @@ static APIC_TICKS_PER_10MS: AtomicU32 = AtomicU32::new(0);
 /// Configures PIT channel 0 to generate interrupts at the specified frequency.
 /// Used as a fallback when APIC timer calibration fails.
 pub fn init_pit(frequency_hz: u32) {
+    if frequency_hz == 0 {
+        log::error!("PIT init: frequency_hz=0, refusing to configure");
+        return;
+    }
+
     log::info!("========================================");
     log::info!("PIT INITIALIZATION (fallback mode)");
     log::info!("========================================");
@@ -367,17 +372,10 @@ pub fn calibrate_apic_timer() -> u32 {
 pub fn start_apic_timer(ticks_per_10ms: u32) {
     use super::apic;
 
-    log::info!("========================================");
-    log::info!("APIC TIMER START");
-    log::info!("========================================");
-
     if ticks_per_10ms == 0 {
         log::warn!("APIC timer: cannot start with 0 ticks");
         return;
     }
-
-    log::info!("Ticks per 10ms: {}", ticks_per_10ms);
-    log::info!("Target frequency: 100Hz (10ms interval)");
 
     // Ensure the LAPIC timer vector is routed in the IDT before unmasking it.
     super::idt::register_lapic_timer_vector(apic::LVT_TIMER_VECTOR);
@@ -385,57 +383,26 @@ pub fn start_apic_timer(ticks_per_10ms: u32) {
     // SAFETY: APIC is initialized
     unsafe {
         // Set divide to 16 (same as calibration)
-        let divide_val = apic::read_reg(apic::REG_TIMER_DIVIDE);
-        log::info!("APIC timer divide register before: 0x{:08X}", divide_val);
         apic::write_reg(apic::REG_TIMER_DIVIDE, 0x03);
-        let divide_val_after = apic::read_reg(apic::REG_TIMER_DIVIDE);
-        log::info!(
-            "APIC timer divide register after: 0x{:08X}",
-            divide_val_after
-        );
 
         // Configure LVT Timer: periodic mode on dedicated LAPIC timer vector
-        let lvt_before = apic::read_reg(apic::REG_LVT_TIMER);
-        log::info!("LVT Timer register before: 0x{:08X}", lvt_before);
-
         let lvt_config = apic::LVT_TIMER_PERIODIC | (apic::LVT_TIMER_VECTOR as u32);
-        log::info!(
-            "LVT Timer config: 0x{:08X} (periodic + vector {:#x})",
-            lvt_config,
-            apic::LVT_TIMER_VECTOR
-        );
         apic::write_reg(apic::REG_LVT_TIMER, lvt_config);
-
-        let lvt_after = apic::read_reg(apic::REG_LVT_TIMER);
-        log::info!("LVT Timer register after: 0x{:08X}", lvt_after);
 
         stop_pit();
 
         // Set initial count (fires every ~10ms = 100Hz)
-        log::info!(
-            "Setting timer initial count to: {} (0x{:08X})",
-            ticks_per_10ms,
-            ticks_per_10ms
-        );
         apic::write_reg(apic::REG_TIMER_INIT, ticks_per_10ms);
-
-        let init_verify = apic::read_reg(apic::REG_TIMER_INIT);
-        log::info!(
-            "Timer initial count verified: {} (0x{:08X})",
-            init_verify,
-            init_verify
-        );
     }
 
     APIC_TIMER_ACTIVE.store(true, Ordering::Relaxed);
 
     log::info!(
-        "APIC timer: started periodic mode, vector={:#x}, count={} ({}Hz)",
+        "APIC timer: periodic, vector={:#x}, ticks/10ms={} ({}Hz)",
         apic::LVT_TIMER_VECTOR,
         ticks_per_10ms,
         TIMER_HZ,
     );
-    log::info!("========================================");
 }
 
 /// Return the cached calibration value (ticks per 10ms).
@@ -450,8 +417,9 @@ pub fn apic_ticks_per_10ms() -> u32 {
 pub fn start_apic_timer_cached() {
     let ticks = apic_ticks_per_10ms();
     if ticks == 0 {
-        log::warn!("APIC timer: cached ticks=0, falling back to PIT");
+        log::warn!("APIC timer: calibration failed, falling back to PIT");
         init_pit(TIMER_HZ as u32);
+        log::warn!("PIT fallback: {} Hz", TIMER_HZ);
         return;
     }
     start_apic_timer(ticks);

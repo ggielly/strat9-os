@@ -219,7 +219,7 @@ Admin operations require a `ResourceType::Silo` capability with `grant` permissi
 
 | Operation | Function | Description |
 |-----------|----------|-------------|
-| Create | `kernel_spawn_strate()` | Register module, create silo, spawn task |
+| Create | `kernel_spawn_silo()` | Register module, create silo, spawn task |
 | Start | `kernel_start_silo()` | Transitions Ready → Running |
 | Stop | `kernel_stop_silo()` | Graceful stop (tasks exit) |
 | Kill | `kernel_stop_silo(force=true)` | Force kill all tasks |

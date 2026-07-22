@@ -60,7 +60,7 @@ fn run_strate_lifecycle_e2e() -> bool {
         }
     };
 
-    let sid = match silo::kernel_spawn_strate(&ram, Some("e2e-ram-a"), None) {
+    let sid = match silo::kernel_spawn_silo(&ram, Some("e2e-ram-a"), None) {
         Ok(id) => id,
         Err(e) => {
             crate::serial_println!("[selftest][strate] FAIL: spawn: {:?}", e);
@@ -82,7 +82,7 @@ fn run_strate_lifecycle_e2e() -> bool {
     }
     crate::serial_println!("[selftest][strate] alias mount ok");
 
-    match silo::kernel_spawn_strate(&ram, Some("e2e-ram-a"), None) {
+    match silo::kernel_spawn_silo(&ram, Some("e2e-ram-a"), None) {
         Err(SyscallError::AlreadyExists) => {
             crate::serial_println!("[selftest][strate] duplicate label protection ok")
         }

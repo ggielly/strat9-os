@@ -147,11 +147,14 @@ pub fn tick_period_ns() -> u32 {
     }
 }
 
-/// Get HPET frequency in Hz
+/// Get HPET frequency in Hz.
+///
+/// Rejects periods shorter than 1 ns (1 000 000 fs) which would overflow
+/// or produce nonsensical frequencies on real hardware.
 pub fn frequency_hz() -> u64 {
     let info = HPET_INFO.lock();
     match *info {
-        Some(ref hpet) if hpet.tick_period_fs > 0 => {
+        Some(ref hpet) if hpet.tick_period_fs >= 1_000_000 => {
             1_000_000_000_000_000u64 / hpet.tick_period_fs as u64
         }
         _ => 0,

@@ -1,14 +1,14 @@
 use super::*;
 
-/// Attach to a silo's debug output stream.
+/// Debug output stream viewer for a silo.
 ///
-/// Usage: `silo attach <id|label|name>`
+/// Usage: `silo debug <id|label|name>`
 ///
 /// Displays output from `sys_debug_log` calls made by tasks in the silo.
 /// Press Ctrl+C or 'q' to detach.
-pub(super) fn cmd_silo_attach(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_silo_debug(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: silo attach <id|label|name>");
+        shell_println!("Usage: silo debug <id|label|name>");
         return Err(ShellError::InvalidArguments);
     }
     let selector = normalize_current_silo_selector(args[1].as_str());
@@ -16,14 +16,14 @@ pub(super) fn cmd_silo_attach(args: &[String]) -> Result<(), ShellError> {
     let sid = match silo::silo_detail_snapshot(selector.as_str()) {
         Ok(detail) => {
             shell_println!(
-                "Attached to silo {} ({}). Press Ctrl+C or 'q' to detach.",
+                "Debug stream attached to silo {} ({}). Press Ctrl+C or 'q' to detach.",
                 detail.base.id,
                 detail.base.name
             );
             detail.base.id
         }
         Err(e) => {
-            shell_println!("silo attach: {:?}", e);
+            shell_println!("silo debug: {:?}", e);
             return Err(ShellError::ExecutionFailed);
         }
     };

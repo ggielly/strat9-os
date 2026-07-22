@@ -175,7 +175,7 @@ impl ProcScheme {
             "id\tstate\ttasks\tmem_used\tmem_min\tmem_max\tgfx_flags\tgfx_sessions\tgfx_ttl\tlabel\tname"
         );
         for s in silos {
-            let label = s.strate_label.unwrap_or_else(|| String::from("-"));
+            let label = s.silo_label.unwrap_or_else(|| String::from("-"));
             let max = if s.mem_max_bytes == 0 {
                 String::from("unlimited")
             } else {

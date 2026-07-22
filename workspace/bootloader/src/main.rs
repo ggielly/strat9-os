@@ -24,7 +24,7 @@ use strat9_abi::boot::{KernelArgs, MemoryKind, MemoryRegion};
 #[entry]
 fn efi_main() -> Status {
     uefi::system::with_stdout(|stdout| {
-        let _ = writeln!(stdout, "Strat9-OS bootloader. Version 0.1.0, UEFI mode.");
+        let _ = writeln!(stdout, "Strat9-OS bootloader = UEFI mode. Version 0.1.0.");
     });
 
     // Open filesystem
@@ -97,7 +97,7 @@ fn efi_main() -> Status {
     let mut fb_width: u32 = 0;
     let mut fb_height: u32 = 0;
     let mut fb_stride: u32 = 0;
-    let mut fb_bpp: u16 = 32;
+    let fb_bpp: u16 = 32;
     let mut fb_red_size: u8 = 8;
     let mut fb_red_shift: u8 = 16;
     let mut fb_green_size: u8 = 8;
@@ -228,7 +228,7 @@ fn efi_main() -> Status {
     let env_total_size = env_len + 1;
 
     uefi::system::with_stdout(|stdout| {
-        let _ = writeln!(stdout, "[boot] ExitBootServices...");
+        let _ = writeln!(stdout, "[boot] ExitBootServices now...");
     });
 
     let _mmap = uefi::boot::memory_map(MemoryType::LOADER_DATA).expect("Failed to get memory map");
@@ -327,7 +327,7 @@ fn efi_main() -> Status {
         }
     }
 
-    // Step 11: Build KernelArgs
+    //  Build KernelArgs
     let args = KernelArgs {
         magic: strat9_abi::boot::STRAT9_BOOT_MAGIC,
         abi_version: strat9_abi::boot::STRAT9_BOOT_ABI_VERSION,
@@ -384,7 +384,7 @@ fn efi_main() -> Status {
         },
     };
 
-    // Step 12: Page tables and context switch
+    // Page tables and context switch
     unsafe {
         let write_com1 = |s: &[u8]| {
             let lsr: u16 = 0x3F8 + 5;

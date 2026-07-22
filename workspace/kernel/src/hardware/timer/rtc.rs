@@ -146,18 +146,23 @@ static RTC_DRIVER: Mutex<Option<RtcDriver>> = Mutex::new(None);
 static RTC_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static RTC_LAST_TICK: AtomicU64 = AtomicU64::new(0);
 
-/// Read CMOS register
+/// Read CMOS register.
+///
+/// Preserves the NMI-disable bit (bit 7) state: if NMI was already disabled
+/// by a prior caller it stays disabled; if it was enabled it stays enabled.
 fn cmos_read(reg: u8) -> u8 {
     unsafe {
-        outb(CMOS_ADDR_PORT, reg | 0x80); // NMI disable
+        outb(CMOS_ADDR_PORT, reg); // preserve existing NMI state
         inb(CMOS_DATA_PORT)
     }
 }
 
-/// Write CMOS register
+/// Write CMOS register.
+///
+/// Same NMI preservation as `cmos_read`.
 fn cmos_write(reg: u8, value: u8) {
     unsafe {
-        outb(CMOS_ADDR_PORT, reg | 0x80); // NMI disable
+        outb(CMOS_ADDR_PORT, reg); // preserve existing NMI state
         outb(CMOS_DATA_PORT, value);
     }
 }
@@ -432,7 +437,16 @@ pub fn set_periodic_interrupt(enable: bool) {
     cmos_write(CMOS_REG_STATUS_B, status_b);
 }
 
-/// Get seconds since boot (approximate, based on RTC updates)
-pub fn uptime_secs() -> u64 {
+/// Get raw RTC tick count since boot (not seconds — each tick is one RTC update interrupt).
+pub fn tick_count() -> u64 {
     RTC_LAST_TICK.load(Ordering::Relaxed)
+}
+
+/// Get seconds since boot. Uses the HPET uptime if available, otherwise falls back to tick count.
+pub fn uptime_secs() -> u64 {
+    if let Some(hpet_secs) = Some(crate::hardware::timer::hpet::uptime_secs()).filter(|&s| s > 0) {
+        hpet_secs
+    } else {
+        RTC_LAST_TICK.load(Ordering::Relaxed)
+    }
 }

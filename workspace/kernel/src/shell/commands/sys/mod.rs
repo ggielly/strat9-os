@@ -47,7 +47,7 @@ pub use trace::cmd_trace;
 pub use version::cmd_version;
 pub use wasm_run::cmd_wasm_run;
 
-use silo_attach::cmd_silo_attach;
+use silo_attach::cmd_silo_debug;
 use silo_limit::cmd_silo_limit;
 
 use crate::{
@@ -69,8 +69,8 @@ use ratatui::{
     Terminal,
 };
 
-const STRATE_USAGE: &str = "Usage: strate <list|spawn|start|stop|kill|destroy|rename|config|info|suspend|resume|events|pledge|unveil|sandbox|limit|attach|top|logs> ...";
-const SILO_USAGE: &str = "Usage: silo <list|spawn|start|stop|kill|destroy|rename|config|info|suspend|resume|events|pledge|unveil|sandbox|limit|attach|top|logs> ...";
+const STRATE_USAGE: &str = "Usage: strate <list|spawn|start|stop|kill|destroy|rename|config|info|suspend|resume|events|pledge|unveil|sandbox|limit|debug|top|logs> ...";
+const SILO_USAGE: &str = "Usage: silo <list|spawn|start|stop|kill|destroy|rename|config|info|suspend|resume|events|pledge|unveil|sandbox|limit|debug|top|logs> ...";
 const DEFAULT_MANAGED_SILO_TOML: &str = r#"
 [[silos]]
 name = "console-admin"
@@ -819,7 +819,7 @@ fn print_silo_usage() {
     shell_println!("  silo unveil <id|label> <path> <rwx>");
     shell_println!("  silo sandbox <id|label>");
     shell_println!("  silo limit <id|label> <mem_max|mem_min|max_tasks|cpu_shares> <value>");
-    shell_println!("  silo attach <id|label>");
+    shell_println!("  silo debug <id|label>");
     shell_println!("  silo top [--sort mem|tasks]");
     shell_println!("  silo logs <id|label>");
 }
@@ -839,7 +839,7 @@ pub(super) fn cmd_silo_impl(args: &[String]) -> Result<(), ShellError> {
         "unveil" => cmd_silo_unveil(args),
         "sandbox" => cmd_silo_sandbox(args),
         "limit" => cmd_silo_limit(args),
-        "attach" => cmd_silo_attach(args),
+        "debug" => cmd_silo_debug(args),
         "top" => cmd_silo_top(args),
         "logs" => cmd_silo_logs(args),
         "spawn" | "start" | "stop" | "kill" | "destroy" | "rename" | "config" => cmd_strate(args),
@@ -1351,7 +1351,7 @@ fn cmd_silo_list(args: &[String]) -> Result<(), ShellError> {
     for s in silos.iter() {
         let display_name = managed_name_for_runtime_sid(&managed_runtime_sids, s.id)
             .unwrap_or_else(|| s.name.clone());
-        let label = s.strate_label.clone().unwrap_or_else(|| String::from("-"));
+        let label = s.silo_label.clone().unwrap_or_else(|| String::from("-"));
         let mut strates = Vec::new();
         for m in &managed {
             if managed_runtime_sids
@@ -1461,7 +1461,7 @@ fn cmd_strate_list(_args: &[String]) -> Result<(), ShellError> {
             }
         }
         if names.is_empty() {
-            if let Some(label) = runtime.strate_label {
+            if let Some(label) = runtime.silo_label {
                 names.push(label);
             } else {
                 continue;
@@ -1600,7 +1600,7 @@ fn cmd_strate_spawn(args: &[String]) -> Result<(), ShellError> {
     };
     let _ = vfs::close(fd);
 
-    match silo::kernel_spawn_strate(&data, label, dev) {
+    match silo::kernel_spawn_silo(&data, label, dev) {
         Ok(sid) => {
             shell_println!(
                 "strate spawn: started (sid={}, path={}, label={})",
@@ -1954,7 +1954,7 @@ pub(super) fn cmd_strate_impl(args: &[String]) -> Result<(), ShellError> {
         "unveil" => cmd_silo_unveil(args),
         "sandbox" => cmd_silo_sandbox(args),
         "limit" => cmd_silo_limit(args),
-        "attach" => cmd_silo_attach(args),
+        "debug" => cmd_silo_debug(args),
         "top" => cmd_silo_top(args),
         "logs" => cmd_silo_logs(args),
         _ => {
@@ -1989,7 +1989,7 @@ fn cmd_silo_info(args: &[String]) -> Result<(), ShellError> {
 
     shell_println!("SID:        {}", b.id);
     shell_println!("Name:       {}", b.name);
-    shell_println!("Label:      {}", b.strate_label.as_deref().unwrap_or("-"));
+    shell_println!("Label:      {}", b.silo_label.as_deref().unwrap_or("-"));
     shell_println!("Tier:       {:?}", b.tier);
     shell_println!("State:      {:?}", b.state);
     shell_println!("Family:     {:?}", detail.family);

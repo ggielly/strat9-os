@@ -807,7 +807,7 @@ fn stress_userspace_workload() -> StressOutcome {
     let _ = crate::vfs::close(fd);
 
     let label = alloc::format!("heap-stress-{}", crate::process::scheduler::ticks());
-    let silo_id = match crate::silo::kernel_spawn_strate(&data, Some(label.as_str()), None) {
+    let silo_id = match crate::silo::kernel_spawn_silo(&data, Some(label.as_str()), None) {
         Ok(sid) => sid,
         Err(_) => return StressOutcome::Fail("failed to spawn userspace stress workload"),
     };

@@ -206,7 +206,7 @@ pub fn sys_silo_enter_sandbox() -> Result<u64, SyscallError> {
     Ok(0)
 }
 
-/// Sets the `strate_label` of a silo identified by handle.
+/// Sets the `silo_label` of a silo identified by handle.
 ///
 /// Requires silo-admin capability. The label must be non-empty, at most 31
 /// bytes, and contain ONLY ASCII alphanumeric characters, `-`, `_`, or `.`.
@@ -229,12 +229,12 @@ pub fn sys_silo_rename(handle: u64, label_ptr: u64, label_len: u64) -> Result<u6
     if mgr
         .silos
         .values()
-        .any(|s| s.id.sid != silo_id && s.strate_label.as_deref() == Some(label))
+        .any(|s| s.id.sid != silo_id && s.silo_label.as_deref() == Some(label))
     {
         return Err(SyscallError::AlreadyExists);
     }
     let silo = mgr.get_mut(silo_id)?;
-    silo.strate_label = Some(String::from(label));
+    silo.silo_label = Some(String::from(label));
     Ok(0)
 }
 
@@ -609,7 +609,7 @@ pub fn pack_fault(reason: SiloFaultReason, subcode: u64) -> u64 {
 struct Silo {
     id: SiloId,
     name: String,
-    strate_label: Option<String>,
+    silo_label: Option<String>,
     state: SiloState,
     config: SiloConfig,
     mode: OctalMode,
@@ -682,7 +682,7 @@ pub struct SiloSnapshot {
     pub id: u32,
     pub tier: SiloTier,
     pub name: String,
-    pub strate_label: Option<String>,
+    pub silo_label: Option<String>,
     pub state: SiloState,
     pub task_count: usize,
     pub mem_usage_bytes: u64,
@@ -757,7 +757,7 @@ impl SiloManager {
         let silo = Silo {
             id,
             name,
-            strate_label: None,
+            silo_label: None,
             state: SiloState::Created,
             config: *config,
             mode: OctalMode::from_octal(config.mode),
@@ -1309,7 +1309,7 @@ pub fn release_current_task_memory(bytes: u64) {
 }
 
 /// Performs the extract strate label operation.
-fn extract_strate_label(path: &str) -> Option<String> {
+fn extract_silo_label(path: &str) -> Option<String> {
     let prefix = "/srv/strate-fs-";
     let rest = path.strip_prefix(prefix)?;
     let mut parts = rest.split('/').filter(|p| !p.is_empty());
@@ -1346,7 +1346,7 @@ fn is_valid_label(raw: &str) -> bool {
 
 /// Sets current silo label from path.
 pub fn set_current_silo_label_from_path(path: &str) -> Result<(), SyscallError> {
-    let Some(label) = extract_strate_label(path) else {
+    let Some(label) = extract_silo_label(path) else {
         return Ok(());
     };
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
@@ -1355,10 +1355,10 @@ pub fn set_current_silo_label_from_path(path: &str) -> Result<(), SyscallError> 
         return Ok(());
     };
     let silo = mgr.get_mut(silo_id)?;
-    // Do not overwrite a label that was already set (e.g. by kernel_spawn_strate).
+    // Do not overwrite a label that was already set (e.g. by kernel_spawn_silo).
     // The spawner's requested label takes precedence over the default path-derived one.
-    if silo.strate_label.is_none() {
-        silo.strate_label = Some(label);
+    if silo.silo_label.is_none() {
+        silo.silo_label = Some(label);
     }
     Ok(())
 }
@@ -1369,7 +1369,7 @@ pub fn current_task_silo_label() -> Option<String> {
     let mgr = SILO_MANAGER.lock();
     let silo_id = mgr.silo_for_task(task.id)?;
     let silo = mgr.get(silo_id).ok()?;
-    silo.strate_label.clone()
+    silo.silo_label.clone()
 }
 
 /// Performs the list silos snapshot operation.
@@ -1381,7 +1381,7 @@ pub fn list_silos_snapshot() -> Vec<SiloSnapshot> {
             id: s.id.sid,
             tier: s.id.tier,
             name: s.name.clone(),
-            strate_label: s.strate_label.clone(),
+            silo_label: s.silo_label.clone(),
             state: s.state,
             task_count: s.tasks.len(),
             mem_usage_bytes: s.mem_usage_bytes,
@@ -1423,7 +1423,7 @@ pub fn silo_info_for_task(task_id: TaskId) -> Option<(u32, Option<String>, u64, 
     let silo = mgr.get(silo_id).ok()?;
     Some((
         silo.id.sid,
-        silo.strate_label.clone(),
+        silo.silo_label.clone(),
         silo.mem_usage_bytes,
         silo.config.mem_min,
         silo.config.mem_max,
@@ -1451,7 +1451,7 @@ fn compute_silo_xcr0(config: &SiloConfig) -> u64 {
 }
 
 /// Performs the kernel spawn strate operation.
-pub fn kernel_spawn_strate(
+pub fn kernel_spawn_silo(
     elf_data: &[u8],
     label: Option<&str>,
     dev_path: Option<&str>,
@@ -1463,7 +1463,7 @@ pub fn kernel_spawn_strate(
 
     let silo_id = {
         let mut mgr = SILO_MANAGER.lock();
-        // For kernel_spawn_strate (manual command), we auto-assign SID > 1000.
+        // For kernel_spawn_silo (manual command), we auto-assign SID > 1000.
         // In a production system, this would follow the "42" rule from Init.
         let mut sid = 1000u32;
         while mgr.silos.contains_key(&sid) {
@@ -1478,7 +1478,7 @@ pub fn kernel_spawn_strate(
         if mgr
             .silos
             .values()
-            .any(|s| s.strate_label.as_deref() == Some(requested_label.as_str()))
+            .any(|s| s.silo_label.as_deref() == Some(requested_label.as_str()))
         {
             return Err(SyscallError::AlreadyExists);
         }
@@ -1494,7 +1494,7 @@ pub fn kernel_spawn_strate(
         let silo = Silo {
             id,
             name: alloc::format!("silo-{}", id.sid),
-            strate_label: Some(requested_label),
+            silo_label: Some(requested_label),
             state: SiloState::Ready,
             config: cfg,
             mode: OctalMode::from_octal(0),
@@ -1542,7 +1542,7 @@ pub fn kernel_spawn_strate(
     let display = {
         let mgr = SILO_MANAGER.lock();
         let silo = mgr.get(silo_id)?;
-        silo.strate_label
+        silo.silo_label
             .clone()
             .unwrap_or_else(|| alloc::format!("silo-{}", silo.id.sid))
     };
@@ -1591,7 +1591,7 @@ fn resolve_selector_to_silo_id(selector: &str, mgr: &SiloManager) -> Result<u32,
     }
     let mut found: Option<u32> = None;
     for s in mgr.silos.values() {
-        if s.strate_label.as_deref() == Some(selector) {
+        if s.silo_label.as_deref() == Some(selector) {
             if found.is_some() {
                 return Err(SyscallError::InvalidArgument);
             }
@@ -1697,14 +1697,14 @@ pub fn kernel_rename_silo_label(selector: &str, new_label: &str) -> Result<u32, 
     if mgr
         .silos
         .values()
-        .any(|s| s.id.sid != silo_id && s.strate_label.as_deref() == Some(new_label))
+        .any(|s| s.id.sid != silo_id && s.silo_label.as_deref() == Some(new_label))
     {
         return Err(SyscallError::AlreadyExists);
     }
     let silo = mgr.get_mut(silo_id)?;
     match silo.state {
         SiloState::Stopped | SiloState::Created | SiloState::Ready | SiloState::Crashed => {
-            silo.strate_label = Some(String::from(new_label));
+            silo.silo_label = Some(String::from(new_label));
             Ok(silo_id)
         }
         _ => Err(SyscallError::InvalidArgument),
@@ -1747,7 +1747,7 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
         if mgr
             .silos
             .values()
-            .any(|s| s.strate_label.as_deref() == Some(sanitized.as_str()))
+            .any(|s| s.silo_label.as_deref() == Some(sanitized.as_str()))
         {
             return Err(SyscallError::AlreadyExists);
         }
@@ -1757,7 +1757,7 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
         let silo = Silo {
             id,
             name: alloc::format!("silo-{}", id.sid),
-            strate_label: Some(sanitized),
+            silo_label: Some(sanitized),
             state: SiloState::Running,
             config: SiloConfig {
                 sid: id.sid,
@@ -1790,7 +1790,7 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
         if mgr
             .silos
             .values()
-            .any(|s| s.strate_label.as_deref() == silo.strate_label.as_deref())
+            .any(|s| s.silo_label.as_deref() == silo.silo_label.as_deref())
         {
             return Err(SyscallError::AlreadyExists);
         }
@@ -2213,7 +2213,7 @@ fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
         let granted_caps = silo.granted_caps.clone();
         let silo_flags = silo.config.flags;
         let silo_name = silo.name.clone();
-        let silo_label = silo.strate_label.clone();
+        let silo_label = silo.silo_label.clone();
         if can_start && within_task_limit {
             silo.state = SiloState::Loading;
         }
@@ -2897,7 +2897,7 @@ pub fn silo_detail_snapshot(selector: &str) -> Result<SiloDetailSnapshot, Syscal
             id: s.id.sid,
             tier: s.id.tier,
             name: s.name.clone(),
-            strate_label: s.strate_label.clone(),
+            silo_label: s.silo_label.clone(),
             state: s.state,
             task_count: s.tasks.len(),
             mem_usage_bytes: s.mem_usage_bytes,

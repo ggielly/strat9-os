@@ -184,7 +184,7 @@ fn collect_snapshot() -> TopSnapshot {
         silo_snapshots.sort_by_key(|s| s.id);
 
         for s in silo_snapshots {
-            let label = s.strate_label.unwrap_or_default();
+            let label = s.silo_label.unwrap_or_default();
             let strate_name = if !label.is_empty() {
                 label.clone()
             } else {

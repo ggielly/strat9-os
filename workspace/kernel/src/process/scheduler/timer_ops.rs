@@ -226,7 +226,6 @@ fn check_wake_deadlines(current_time_ns: u64) {
         // Arc<Task> drop and BEFORE send_resched_ipi_to_cpu.
         // --- end critical section ---
     }
-    unsafe { core::arch::asm!("mov al, '2'; out 0xe9, al", out("al") _) };
 
     // Drop orphaned task Arcs outside the scheduler lock so that
     // KernelStack::drop => free_frames => buddy_alloc.lock() does not race

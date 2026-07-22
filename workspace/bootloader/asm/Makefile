@@ -1,5 +1,5 @@
 # Makefile for CascadeOS Bootloader Assembly
-# Assembles Stage 1 and Stage 2 bootloader
+# Assembles stage 1 and stage 2 bootloader
 
 # Tools
 NASM = nasm
@@ -31,7 +31,7 @@ $(STAGE1): $(STAGE1_SRC)
 	$(NASM) $(NASMFLAGS) -o $@ $<
 	@echo "Stage 1 size: $$(stat -c%s $@) bytes (must be exactly 512)"
 	@if [ $$(stat -c%s $@) -ne 512 ]; then \
-		echo "ERROR: Stage 1 must be exactly 512 bytes!"; \
+		echo "ERROR: stage 1 must be exactly 512 bytes !"; \
 		exit 1; \
 	fi
 
@@ -41,7 +41,7 @@ $(STAGE2): $(STAGE2_SRC) $(ASM_DIR)/*.asm
 	$(NASM) $(NASMFLAGS) -I$(ASM_DIR)/ -o $@ $<
 	@echo "Stage 2 size: $$(stat -c%s $@) bytes (max 4096)"
 	@if [ $$(stat -c%s $@) -gt 4096 ]; then \
-		echo "ERROR: Stage 2 exceeds 4KB limit!"; \
+		echo "ERROR: stage 2 exceeds 4KB limit !"; \
 		exit 1; \
 	fi
 
