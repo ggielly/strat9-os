@@ -284,28 +284,25 @@ impl EhciController {
 
     /// Execute a USB control transfer on the async schedule.
     ///
-    /// Builds a QH + TD chain in the async schedule, rings the doorbell,
-    /// and polls for completion.
+    /// Builds a QH + TD chain, inserts into the async schedule, and polls
+    /// for completion.
     unsafe fn ctrl_transfer(
         &self,
-        port: usize,
+        _port: usize,
         setup_data: &[u8; 8],
         data_buf: Option<&mut [u8]>,
         data_len: usize,
         device_addr: u8,
         max_packet: u32,
     ) -> Result<usize, &'static str> {
-        // Allocate QH (32-byte aligned)
         let qh_frame = allocate_zeroed_frame().ok_or("EHCI: QH alloc failed")?;
         let qh_phys = qh_frame.start_address.as_u64();
         let qh_virt = phys_to_virt(qh_phys) as *mut u32;
 
-        // Allocate TD (32-byte aligned)
         let td_frame = allocate_zeroed_frame().ok_or("EHCI: TD alloc failed")?;
         let td_phys = td_frame.start_address.as_u64();
         let td_virt = phys_to_virt(td_phys) as *mut u32;
 
-        // Allocate setup buffer
         let setup_frame = allocate_zeroed_frame().ok_or("EHCI: setup buf alloc failed")?;
         let setup_buf_phys = setup_frame.start_address.as_u64();
         let setup_buf_virt = phys_to_virt(setup_buf_phys) as *mut u8;
@@ -314,48 +311,54 @@ impl EhciController {
         let dir_in = (setup_data[0] & 0x80) != 0;
         let has_data = data_buf.is_some();
 
-        // EHCI QH layout (48 bytes, 32-byte aligned):
-        //   +0x00: horizontal link pointer (next QH)
+        // EHCI QH (48 bytes, 32-byte aligned):
+        //   +0x00: horizontal link pointer
         //   +0x04: endpoint characteristics
         //   +0x08: endpoint capabilities
         //   +0x0C: current TD pointer
-        //   +0x10: next TD pointer (vertical link)
+        //   +0x10: next TD pointer
         //   +0x14: alternate next TD pointer
-        //   +0x18..+0x24: buffer pointer 0-3
         qh_virt.add(0).write_volatile(0x0000_0002); // horizontal: terminate
-        // endpoint characteristics: device addr | ep 0 | head of reclaim=0 | max packet | direction
-        qh_virt
-            .add(1)
-            .write_volatile((device_addr as u32 & 0x7F) | ((max_packet & 0x7FF) << 16));
-        qh_virt.add(2).write_volatile(0); // endpoint capabilities
+        qh_virt.add(1).write_volatile(
+            (device_addr as u32 & 0x7F)            // bits 6:0 = device address
+            | ((max_packet & 0x7FF) << 16),        // bits 26:16 = max packet size
+        );
+        qh_virt.add(2).write_volatile(0);          // endpoint capabilities
         qh_virt.add(3).write_volatile(td_phys as u32); // current TD
         qh_virt.add(4).write_volatile(td_phys as u32); // next TD
-        qh_virt.add(5).write_volatile(0x0000_0002); // alt next TD: terminate
 
-        // EHCI TD layout (32 bytes):
+        // EHCI TD (32 bytes, 32-byte aligned):
         //   +0x00: next TD pointer
         //   +0x04: alternate next TD pointer
         //   +0x08: token
         //   +0x0C..+0x18: buffer pointer 0-3
+        //
+        // Token bits (EHCI spec §3.3.2):
+        //   31    = Active
+        //   30    = Data Toggle
+        //   29:28 = CERR (error count)
+        //   27:26 = Current Page
+        //   25    = IOC (Interrupt On Complete)
+        //   30:16 = Total bytes to transfer (NOTE: overlaps Data Toggle bit)
+        //   15:0  = PID code
+        //
+        // Encoding: Active(1) | Toggle(0/1) | Bytes(15b) | IOC(1) | CERR(2b) | Page(2b) | PID(16b)
+        //   = (1<<31) | (toggle<<30) | (bytes<<16) | (ioc<<25) | (cerr<<26) | (page<<26) | pid
 
-        // Build setup TD (8 bytes, PID_SETUP=0x2D, DATA0)
-        let setup_token = (1u32 << 31) // active
-            | (0u32 << 31) // toggle = 0
-            | (3u32 << 26) // CERR = 3
-            | (0u32 << 24) // page=0
-            | (0x2Du32 << 0) // PID: setup
-            | ((8u32 & 0x7FFF) << 16); // total bytes = 8
-        let setup_token = (1u32 << 31) | (0u32 << 31) | (3u32 << 26) | (0x2Du32) | (8u32 << 16);
-
+        // --- Setup TD: PID_SETUP=0x2D, 8 bytes, DATA0 (toggle=0) ---
+        let setup_token = (1u32 << 31)              // Active
+            | (0u32 << 30)                          // Data Toggle = 0 (DATA0)
+            | ((8u32 & 0x7FFF) << 16)               // Total bytes = 8
+            | (0u32 << 25)                          // IOC = 0
+            | (3u32 << 26)                          // CERR = 3
+            | (0x2Du32);                            // PID = SETUP
         td_virt.add(0).write_volatile(0x0000_0002); // next: terminate
         td_virt.add(1).write_volatile(0x0000_0002); // alt next: terminate
         td_virt.add(2).write_volatile(setup_token);
-        td_virt.add(3).write_volatile(setup_buf_phys as u32); // buffer 0
+        td_virt.add(3).write_volatile(setup_buf_phys as u32);
 
         if has_data && data_len > 0 {
-            // Allocate data buffer
-            let data_frame =
-                allocate_zeroed_frame().ok_or("EHCI: data buf alloc failed")?;
+            let data_frame = allocate_zeroed_frame().ok_or("EHCI: data buf alloc failed")?;
             let data_buf_phys = data_frame.start_address.as_u64();
             let data_buf_virt = phys_to_virt(data_buf_phys) as *mut u8;
 
@@ -365,66 +368,61 @@ impl EhciController {
                 }
             }
 
-            // Data TD (+0x20 from setup TD): toggle=1, PID IN/OUT
-            let data_pid: u32 = if dir_in { 0x69 } else { 0xE1 }; // IN or OUT
-            let data_token = (1u32 << 31) // active
-                | (1u32 << 31) // toggle = 1
-                | (3u32 << 26) // CERR = 3
-                | (data_pid) // PID
-                | (((data_len as u32) & 0x7FFF) << 16);
+            // --- Data TD: toggle=1 (DATA1), PID IN/OUT ---
+            let data_pid: u32 = if dir_in { 0x69 } else { 0xE1 };
+            let data_token = (1u32 << 31)           // Active
+                | (1u32 << 30)                      // Data Toggle = 1 (DATA1)
+                | (((data_len as u32) & 0x7FFF) << 16) // Total bytes
+                | (0u32 << 25)                      // IOC = 0
+                | (3u32 << 26)                      // CERR = 3
+                | data_pid;                         // PID = IN/OUT
             let data_td_virt = (td_virt as *mut u8).add(0x20) as *mut u32;
-            data_td_virt.add(0).write_volatile(0x0000_0002); // next: terminate
-            data_td_virt.add(1).write_volatile(0x0000_0002); // alt next: terminate
+            data_td_virt.add(0).write_volatile(0x0000_0002);
+            data_td_virt.add(1).write_volatile(0x0000_0002);
             data_td_virt.add(2).write_volatile(data_token);
             data_td_virt.add(3).write_volatile(data_buf_phys as u32);
 
-            // Status TD (+0x40 from setup TD): toggle=0, 0 bytes, IOC
-            let status_token = (1u32 << 31) // active
-                | (0u32 << 31) // toggle = 0
-                | (3u32 << 26) // CERR = 3
-                | (0u32 << 16) // 0 bytes
-                | (1u32 << 24); // IOC
+            // --- Status TD: toggle=0, 0 bytes, IOC=1 ---
+            let status_token = (1u32 << 31)        // Active
+                | (0u32 << 30)                      // Data Toggle = 0
+                | (0u32 << 16)                      // Total bytes = 0
+                | (1u32 << 25)                      // IOC = 1
+                | (3u32 << 26)                      // CERR = 3
+                | (0u32);                           // PID = OUT (for IN transfer status)
             let status_td_virt = (td_virt as *mut u8).add(0x40) as *mut u32;
-            status_td_virt.add(0).write_volatile(0x0000_0002); // next: terminate
-            status_td_virt.add(1).write_volatile(0x0000_0002); // alt next: terminate
+            status_td_virt.add(0).write_volatile(0x0000_0002);
+            status_td_virt.add(1).write_volatile(0x0000_0002);
             status_td_virt.add(2).write_volatile(status_token);
             status_td_virt.add(3).write_volatile(0);
 
-            // Chain: setup TD -> data TD -> status TD
+            // Chain: setup -> data -> status
             td_virt.add(0).write_volatile((td_phys + 0x20) as u32);
             data_td_virt.add(0).write_volatile((td_phys + 0x40) as u32);
-
-            // Update QH current TD and next TD to setup TD
-            qh_virt.add(3).write_volatile(td_phys as u32);
-            qh_virt.add(4).write_volatile(td_phys as u32);
         } else {
-            // Status-only TD (+0x20 from setup TD): toggle=1, 0 bytes, IOC
-            let status_token = (1u32 << 31) // active
-                | (1u32 << 31) // toggle = 1
-                | (3u32 << 26) // CERR = 3
-                | (0u32 << 16) // 0 bytes
-                | (1u32 << 24); // IOC
+            // --- Status-only TD: toggle=1, 0 bytes, IOC=1 ---
+            let status_token = (1u32 << 31)
+                | (1u32 << 30)                      // Data Toggle = 1 (status stage)
+                | (0u32 << 16)
+                | (1u32 << 25)                      // IOC = 1
+                | (3u32 << 26)
+                | (0x69u32);                        // PID = IN (for OUT transfer status)
             let status_td_virt = (td_virt as *mut u8).add(0x20) as *mut u32;
-            status_td_virt.add(0).write_volatile(0x0000_0002); // next: terminate
-            status_td_virt.add(1).write_volatile(0x0000_0002); // alt next: terminate
+            status_td_virt.add(0).write_volatile(0x0000_0002);
+            status_td_virt.add(1).write_volatile(0x0000_0002);
             status_td_virt.add(2).write_volatile(status_token);
             status_td_virt.add(3).write_volatile(0);
 
-            // Chain: setup TD -> status TD
             td_virt.add(0).write_volatile((td_phys + 0x20) as u32);
-
-            qh_virt.add(3).write_volatile(td_phys as u32);
-            qh_virt.add(4).write_volatile(td_phys as u32);
         }
 
-        // Link QH into async schedule (prepend)
+        // Insert QH at head of async schedule
         let async_head = self.async_list;
-        let old_next = core::ptr::read_volatile(async_head) & 0xFFFFFFE0;
-        qh_virt.add(0).write_volatile(old_next | 0x02); // point to old head
+        let old_head = core::ptr::read_volatile(async_head);
+        qh_virt.add(0).write_volatile(old_head & 0xFFFFFFE0 | 0x02);
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         core::ptr::write_volatile(
             async_head,
-            (qh_phys as u32 & 0xFFFFFFE0) | 0x02, // new head points to QH
+            (qh_phys as u32 & 0xFFFFFFE0) | 0x02,
         );
 
         // Enable async schedule
@@ -434,7 +432,7 @@ impl EhciController {
             core::hint::spin_loop();
         }
 
-        // Poll for completion: check the last TD in the chain (status TD)
+        // Poll status TD for completion
         let status_td_virt = if has_data && data_len > 0 {
             (td_virt as *mut u8).add(0x40) as *mut u32
         } else {
@@ -445,12 +443,11 @@ impl EhciController {
         for _ in 0..1_000_000u32 {
             let token = core::ptr::read_volatile(status_td_virt.add(2));
             if token & (1u32 << 31) == 0 {
-                // Status TD completed — entire transfer done
                 if dir_in && has_data && data_len > 0 {
                     if let Some(buf) = data_buf {
-                        let data_td_virt = (td_virt as *mut u8).add(0x20) as *const u32;
-                        let data_buf_phys = core::ptr::read_volatile(data_td_virt.add(3));
-                        let src = phys_to_virt(data_buf_phys as u64) as *const u8;
+                        let data_td = (td_virt as *mut u8).add(0x20) as *const u32;
+                        let buf_phys = core::ptr::read_volatile(data_td.add(3));
+                        let src = phys_to_virt(buf_phys as u64) as *const u8;
                         core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), data_len);
                         transferred = data_len;
                     }
@@ -460,12 +457,12 @@ impl EhciController {
             core::hint::spin_loop();
         }
 
-        // Disable async schedule and unlink
+        // Disable async schedule and restore head
         core::ptr::write_volatile(cmd as *mut u32, cmd.read_volatile() & !USBCMD_ASE);
         for _ in 0..10_000u32 {
             core::hint::spin_loop();
         }
-        core::ptr::write_volatile(async_head, old_next | 0x02);
+        core::ptr::write_volatile(async_head, old_head);
 
         Ok(transferred)
     }
@@ -491,71 +488,69 @@ impl EhciController {
             let max_packet: u32 = if speed as u32 == SPEED_HIGH { 64 } else { 8 };
             log::info!("[EHCI] Port {} speed={} max_pkt={}", port, speed, max_packet);
 
-            // Get device descriptor (first 8 bytes to learn max_packet0)
-            let mut setup = [0x80u8, 0x06, 0x00, 0x01, 0x00, 0x00, 8, 0x00];
-            let mut dev_desc_short = [0u8; 8];
+            // Phase 1: SET_ADDRESS at address 0 (default)
             let addr = usb_address;
-            let ctrl_dev_addr = [0x00u8, 0x05, addr, 0x00, 0x00, 0x00, 0x00, 0x00];
-
-            if unsafe {
-                self.ctrl_transfer(
-                    port,
-                    &ctrl_dev_addr,
-                    None,
-                    0,
-                    0,
-                    max_packet,
-                )
-            }
-            .is_err()
-            {
+            let set_addr = [0x00u8, 0x05, addr, 0x00, 0x00, 0x00, 0x00, 0x00];
+            if unsafe { self.ctrl_transfer(port, &set_addr, None, 0, 0, max_packet) }.is_err() {
                 log::warn!("[EHCI] Port {} set address failed", port);
                 continue;
             }
-            usb_address += 1;
 
+            // Phase 2: GET_DESCRIPTOR (first 8 bytes at new address to learn max_packet0)
+            let get_desc_8 = [0x80u8, 0x06, 0x00, 0x01, 0x00, 0x00, 8, 0x00];
+            let mut desc8 = [0u8; 8];
             if unsafe {
+                self.ctrl_transfer(port, &get_desc_8, Some(&mut desc8), 8, addr, max_packet)
+            }
+            .is_err()
+            {
+                log::warn!("[EHCI] Port {} get desc (8) failed", addr);
+                usb_address += 1;
+                continue;
+            }
+
+            let vid = u16::from_le_bytes([desc8[2], desc8[3]]);
+            let pid = u16::from_le_bytes([desc8[4], desc8[5]]);
+            let max_pkt0 = desc8[7] as u32;
+            log::info!(
+                "[EHCI] Port {} device VID={:04x} PID={:04x} max_pkt0={}",
+                port,
+                vid,
+                pid,
+                max_pkt0
+            );
+
+            // Phase 3: GET_DESCRIPTOR (full 18 bytes with real max_packet0)
+            let mut desc18 = [0u8; 18];
+            let get_desc_18 = [0x80u8, 0x06, 0x00, 0x01, 0x00, 0x00, 18, 0x00];
+            let _ = unsafe {
                 self.ctrl_transfer(
                     port,
-                    &setup,
-                    Some(&mut dev_desc_short),
-                    8,
+                    &get_desc_18,
+                    Some(&mut desc18),
+                    18,
                     addr,
-                    max_packet,
+                    max_pkt0,
                 )
-            }
-            .is_ok()
-            {
-                let vid = u16::from_le_bytes([dev_desc_short[2], dev_desc_short[3]]);
-                let pid = u16::from_le_bytes([dev_desc_short[4], dev_desc_short[5]]);
-                let dev_class = dev_desc_short[4];
-                let max_pkt0 = dev_desc_short[7] as u16;
-                log::info!(
-                    "[EHCI] Device: VID={:04x} PID={:04x} class={:02x} max_pkt0={}",
-                    vid,
-                    pid,
-                    dev_class,
-                    max_pkt0
-                );
+            };
 
-                // Get full 18-byte device descriptor
-                let mut dev_desc = [0u8; 18];
-                setup[6] = 18;
-                let _ = unsafe {
-                    self.ctrl_transfer(
-                        port,
-                        &setup,
-                        Some(&mut dev_desc),
-                        18,
-                        addr,
-                        max_pkt0 as u32,
-                    )
-                };
+            let dev_class = desc18[4];
+            log::info!(
+                "[EHCI] Port {} class={:02x}",
+                port,
+                dev_class
+            );
 
-                crate::hardware::usb::hid::enumerate_device(port, addr as u8, &dev_desc);
-            } else {
-                log::warn!("[EHCI] Port {} get device descriptor failed", port);
-            }
+            // Phase 4: SET_CONFIGURATION (value=1)
+            let set_config = [0x00u8, 0x09, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00];
+            let _ = unsafe {
+                self.ctrl_transfer(port, &set_config, None, 0, addr, max_pkt0)
+            };
+
+            // Phase 5: Hand off to HID driver
+            crate::hardware::usb::hid::enumerate_device(port, addr, &desc18);
+
+            usb_address += 1;
         }
     }
 }
