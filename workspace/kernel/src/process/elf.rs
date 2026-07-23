@@ -2116,20 +2116,42 @@ pub fn load_elf_image(
     elf_data: &[u8],
     user_as: &AddressSpace,
 ) -> Result<LoadedElfInfo, &'static str> {
-    let loaded = load_segment(elf_data, user_as)?;
+    // Parse ELF header
+    let header = parse_header(elf_data)?;
+
+    // Get program headers
+    let phdrs: Vec<Elf64Phdr> = program_headers(elf_data, &header).collect();
+
+    // Compute load bias (for ET_DYN / PIE binaries)
+    let (load_bias, entry) = compute_load_bias_and_entry(user_as, &header, &phdrs)?;
+
+    // Load all PT_LOAD segments
+    let mut load_count = 0u32;
+    for phdr in phdrs.iter() {
+        if phdr.p_type == PT_LOAD && phdr.p_memsz != 0 {
+            load_segment(user_as, elf_data, phdr, load_bias)?;
+            load_count += 1;
+        }
+    }
+    if load_count == 0 {
+        return Err("No PT_LOAD segments found");
+    }
+
+    // Find phdr vaddr (for AT_PHDR auxiliary entry)
+    let phdr_vaddr = find_relocated_phdr_vaddr(&header, &phdrs, load_bias)?;
 
     Ok(LoadedElfInfo {
-        runtime_entry: loaded.runtime_entry,
-        entry: loaded.entry,
-        phdr_vaddr: loaded.phdr_vaddr,
-        phent: loaded.header.e_phentsize,
-        phnum: loaded.header.e_phnum,
-        interp_base: loaded.interp_base,
-        tls_vaddr: loaded.tls_vaddr,
-        tls_filesz: loaded.tls_filesz,
-        tls_memsz: loaded.tls_memsz,
-        tls_align: loaded.tls_align,
-        stack_exec: loaded.stack_exec,
+        runtime_entry: entry,
+        entry,
+        phdr_vaddr,
+        phent: header.e_phentsize,
+        phnum: header.e_phnum,
+        interp_base: None,
+        tls_vaddr: 0,
+        tls_filesz: 0,
+        tls_memsz: 0,
+        tls_align: 0,
+        stack_exec: phdrs.iter().any(|ph| ph.p_type == PT_GNU_STACK && (ph.p_flags & 0x1) != 0),
     })
 }
 
