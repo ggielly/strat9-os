@@ -173,7 +173,29 @@ echo "============================================"
 echo ""
 echo "  Bootloader : $BOOTLOADER_EFI ($bootloader_size bytes)"
 echo "  Kernel     : $KERNEL_ELF ($kernel_size bytes)"
-echo "  Image      : $IMAGE_FILE"
+echo "  Modules    : $(ls -1 "$ISO_ROOT/boot/initfs/" 2>/dev/null | wc -l) file(s)"
+echo ""
+echo "  Image file:"
+echo "    Path     : $IMAGE_FILE"
+if [ -f "$IMAGE_FILE" ]; then
+    img_size=$(stat -c%s "$IMAGE_FILE" 2>/dev/null || stat -f%z "$IMAGE_FILE" 2>/dev/null)
+    img_kb=$((img_size / 1024))
+    img_mb=$((img_kb / 1024))
+    echo "    Size     : $img_size bytes ($img_kb KB, ~${img_mb} MB)"
+    echo "    Type     : $(file -b "$IMAGE_FILE" 2>/dev/null | head -c 80)"
+    if command -v parted >/dev/null 2>&1; then
+        echo "    Partitions:"
+        parted -s "$IMAGE_FILE" print 2>/dev/null | grep -E "^ [0-9]" | while read -r line; do
+            echo "      $line"
+        done
+    fi
+fi
+echo ""
+echo "  All build artifacts:"
+echo "    build/"
+ls -lh "$BUILD_DIR"/*.img "$BUILD_DIR"/*.iso "$BUILD_DIR"/*.efi 2>/dev/null | while read -r line; do
+    echo "      $line"
+done
 echo ""
 echo "--------------------------------------------"
 echo "  Launch with: cargo make run-uefi"
