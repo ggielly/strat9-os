@@ -429,6 +429,10 @@ fn efi_main() -> Status {
         write_com1(b"[boot] Creating page tables...\r\n");
     }
 
+    // The page tables must map the actual physical memory used by the kernel.
+    // We use phys_end (which includes p_filesz + BSS_MAP_EXTRA) as the size.
+    // The BSS is virtual memory that the kernel will zero at its virtual addresses;
+    // we do NOT need to map 2GB of physical pages for it.
     let pml4_phys = unsafe {
         paging::create_page_tables(
             elf_info.segments[0].phys_addr,
@@ -514,6 +518,12 @@ fn efi_main() -> Status {
 
     let args_ptr = &args as *const KernelArgs;
     unsafe {
+        // Force the compiler to keep pml4_phys in memory (prevent optimization)
+        let pml4_val = core::ptr::read_volatile(&pml4_phys as *const u64);
+        let stack_val = stack_base + stack_size;
+        let entry_val = elf_info.entry;
+        let args_val = args_ptr as u64;
+
         // Write '>' to serial to confirm we're about to call context_switch
         core::arch::asm!(
             "mov dx, 0x3F8",
@@ -522,10 +532,10 @@ fn efi_main() -> Status {
             options(nomem, nostack, preserves_flags)
         );
         paging::context_switch(
-            pml4_phys,
-            stack_base + stack_size,
-            elf_info.entry,
-            args_ptr as u64,
+            pml4_val,
+            stack_val,
+            entry_val,
+            args_val,
         );
     }
 }

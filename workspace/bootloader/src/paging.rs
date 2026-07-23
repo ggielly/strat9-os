@@ -4,7 +4,6 @@ pub const ENVIRONMENT_BASE: u64 = 0xFFFF_BEEF_0000_0000;
 const PAGE_SIZE: u64 = 0x1000;
 const PRESENT: u64 = 1;
 const WRITABLE: u64 = 1 << 1;
-const HUGE_PAGE: u64 = 1 << 7;
 
 pub const PHYS_OFFSET: u64 = 0;
 
@@ -29,7 +28,9 @@ pub unsafe fn create_page_tables(
     _env_phys: u64,
     _env_size: u64,
 ) -> u64 {
-    unsafe { NEXT_FRAME = (kernel_phys_end + 0x10_0000) & !0xFFF; }
+    // Start allocator after kernel + large safety margin
+    // Need ~8 page tables per 2MB of kernel, kernel is ~13MB = ~52 page tables = ~208KB
+    unsafe { NEXT_FRAME = (kernel_phys_end + 0x40_0000) & !0xFFF; } // +4MB margin
 
     let pml4 = alloc_frame() as *mut u64;
 
@@ -39,11 +40,11 @@ pub unsafe fn create_page_tables(
         *pml4.add(0) = pdp as u64 | PRESENT | WRITABLE;
 
         for i in 0..8u64 {
-            *pdp.add(i as usize) = (i * 0x4000_0000) | PRESENT | WRITABLE | HUGE_PAGE;
+            *pdp.add(i as usize) = (i * 0x4000_0000) | PRESENT | WRITABLE | (1 << 7);
         }
     }
 
-    // Higher-half kernel: PML4[511] => PDP[510] => PD => PT
+    // Higher-half kernel: PML4[511] => PDP[510] => PD => PT (4KB pages)
     unsafe {
         let pdp = alloc_frame() as *mut u64;
         *pml4.add(511) = pdp as u64 | PRESENT | WRITABLE;
