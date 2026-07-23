@@ -446,6 +446,8 @@ fn compute_load_bias_and_entry(
         0
     } else {
         let n_pages = (span as usize).div_ceil(4096);
+        // find_free_vma_range scans the VMA tree and skips past any existing
+        // mappings, so the fallback hint (0x1000_0000) will never overlap them.
         let load_base = user_as
             .find_free_vma_range(pie_base(), n_pages, VmaPageSize::Small)
             .or_else(|| {
