@@ -507,7 +507,7 @@ impl UhciController {
 
             let vid = u16::from_le_bytes([desc8[2], desc8[3]]);
             let pid = u16::from_le_bytes([desc8[4], desc8[5]]);
-            let max_pkt0 = u16::from_le_bytes([desc8[7], desc8[8]]);
+            let max_pkt0 = desc8[7] as u16;
             log::info!(
                 "[UHCI] Port {} device VID={:04x} PID={:04x} max_pkt0={}",
                 port,
