@@ -34,8 +34,10 @@ SECTIONS
         *(.bss.stack)
     } :bss
 
-    /* Section header string table - placed last, forced ALLOC to close BSS segment */
-    .shstrtab : ALIGN(4K) { *(.shstrtab) } :bss
+    /* Section header string table - NOT in a PT_LOAD PHDR.
+     * Placing PROGBITS (.shstrtab) in the :bss PHDR inflates p_filesz
+     * to ~2 GB because lld covers the entire segment range. */
+    .shstrtab : { *(.shstrtab) }
 
     /* Discard unneeded sections */
     /DISCARD/ :
