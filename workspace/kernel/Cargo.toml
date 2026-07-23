@@ -48,7 +48,7 @@ driver-net-proto = { path = "../drivers/nic/driver-net-proto" }
 ratatui = { version = "0.30.0", default-features = false }
 
 # Cryptography: Ed25519 signature verification for CMOD modules
-ed25519-dalek = { version = "3", default-features = false, features = [
+ed25519-dalek = { version = "2", default-features = false, features = [
     "alloc",
 ] }
 sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
