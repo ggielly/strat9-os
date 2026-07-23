@@ -16,8 +16,9 @@ rustflags = [
     # N3 send() captures sender_rip via [rbp + 8]; frame pointers mandatory.
     "-C",
     "force-frame-pointers=yes",
-    "--cfg",
-    "curve25519_dalek_backend=\"fiat\"",
-    "--cfg",
-    "curve25519_dalek_bits=\"32\"",
+    # TODO: re-enable if ed25519-dalek is restored
+    # "--cfg",
+    # "curve25519_dalek_backend=\"fiat\"",
+    # "--cfg",
+    # "curve25519_dalek_bits=\"32\"",
 ]
