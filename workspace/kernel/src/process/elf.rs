@@ -1926,11 +1926,11 @@ fn load_elf_task_inner(
         &user_as,
         name,
         extra_args,
-        phdr_vaddr,
+        loaded.phdr_vaddr,
         header.e_phentsize,
         header.e_phnum,
-        entry,
-        interp_base,
+        loaded.entry,
+        loaded.interp_base,
     )?;
 
     // Step 5: Create kernel task : trampoline params are stored inside the task
@@ -1980,7 +1980,7 @@ fn load_elf_task_inner(
         itimers: super::timer::ITimers::new(),
         wake_pending: core::sync::atomic::AtomicBool::new(false),
         wake_deadline_ns: core::sync::atomic::AtomicU64::new(0),
-        trampoline_entry: core::sync::atomic::AtomicU64::new(runtime_entry),
+        trampoline_entry: core::sync::atomic::AtomicU64::new(loaded.runtime_entry),
         trampoline_stack_top: core::sync::atomic::AtomicU64::new(boot_sp),
         trampoline_arg0: core::sync::atomic::AtomicU64::new(0),
         ticks: core::sync::atomic::AtomicU64::new(0),
@@ -2004,7 +2004,7 @@ fn load_elf_task_inner(
         "[trace][elf] load_elf_task task_built tid={} pid={} entry={:#x} sp={:#x}",
         task.id.as_u64(),
         task.pid,
-        runtime_entry,
+        loaded.runtime_entry,
         boot_sp
     );
     // Seed capabilities into the new task (before scheduling).
@@ -2050,9 +2050,9 @@ fn load_elf_task_inner(
             .trampoline_arg0
             .load(core::sync::atomic::Ordering::Acquire),
         rdx: 0,
-        rcx: runtime_entry,
+        rcx: loaded.runtime_entry,
         rax: 0,
-        iret_rip: runtime_entry,
+        iret_rip: loaded.runtime_entry,
         iret_cs: crate::arch::x86_64::gdt::user_code_selector().0 as u64,
         iret_rflags: USER_RFLAGS,
         iret_rsp: boot_sp,
@@ -2069,7 +2069,7 @@ fn load_elf_task_inner(
                 "[elf] Task '{}' prepared: entry={:#x}, stack_top={:#x} \
                  new_arc={:#x} new_fpu={:#x} cur_arc={:#x} cur_strong={}",
                 name,
-                runtime_entry,
+                loaded.runtime_entry,
                 boot_sp,
                 arc_data_ptr,
                 fpu_ptr,
@@ -2081,7 +2081,7 @@ fn load_elf_task_inner(
                 "[elf] Task '{}' prepared: entry={:#x}, stack_top={:#x} \
                  new_arc={:#x} new_fpu={:#x} (no current task)",
                 name,
-                runtime_entry,
+                loaded.runtime_entry,
                 boot_sp,
                 arc_data_ptr,
                 fpu_ptr,
@@ -2098,102 +2098,20 @@ pub fn load_elf_image(
     elf_data: &[u8],
     user_as: &AddressSpace,
 ) -> Result<LoadedElfInfo, &'static str> {
-    let header = match parse_header(elf_data) {
-        Ok(h) => h,
-        Err(e) => {
-            crate::serial_println!("[elf] load_elf_image parse_header FAILED: {}", e);
-            return Err(e);
-        }
-    };
-    let phdrs: Vec<Elf64Phdr> = program_headers(elf_data, &header).collect();
-    let interp_path = parse_interp_path(elf_data, &phdrs)?;
-    let (load_bias, entry) = compute_load_bias_and_entry(user_as, &header, &phdrs)?;
-    let phdr_vaddr = find_relocated_phdr_vaddr(&header, &phdrs, load_bias)?;
-
-    for phdr in phdrs.iter() {
-        if phdr.p_type == PT_LOAD && phdr.p_memsz != 0 {
-            load_segment(user_as, elf_data, phdr, load_bias)?;
-        }
-    }
-    if interp_path.is_none() {
-        apply_dynamic_relocations(user_as, &phdrs, header.e_type, load_bias)?;
-    }
-
-    // PT_GNU_RELRO: mark the RELRO range read-only after relocations.
-    if let Some(relro) = phdrs.iter().find(|ph| ph.p_type == PT_GNU_RELRO) {
-        if relro.p_memsz > 0 {
-            let relro_start = relro.p_vaddr.wrapping_add(load_bias) & !0xFFF;
-            let relro_end =
-                (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz + 0xFFF) & !0xFFF;
-            if relro_end > relro_start && relro_end <= USER_ADDR_MAX {
-                let ro_flags = VmaFlags {
-                    readable: true,
-                    writable: false,
-                    executable: false,
-                    user_accessible: true,
-                };
-                let relro_pages = ((relro_end - relro_start) / 4096) as usize;
-                apply_segment_permissions(user_as, relro_start, relro_pages, ro_flags)?;
-                log::debug!(
-                    "[elf] PT_GNU_RELRO: {:#x}..{:#x} made read-only",
-                    relro_start,
-                    relro_end
-                );
-            }
-        }
-    }
-
-    let (tls_vaddr, tls_filesz, tls_memsz, tls_align) =
-        if let Some(tls) = phdrs.iter().find(|ph| ph.p_type == PT_TLS) {
-            let align = core::cmp::max(tls.p_align, 1).next_power_of_two();
-            (
-                tls.p_vaddr.saturating_add(load_bias),
-                tls.p_filesz,
-                tls.p_memsz,
-                align,
-            )
-        } else {
-            (0, 0, 0, 1)
-        };
-
-    let mut runtime_entry = entry;
-    let mut interp_base = None;
-    if let Some(path) = interp_path {
-        let interp_data = read_elf_from_vfs(path)?;
-        let interp_header = parse_header(&interp_data)?;
-        let interp_phdrs: Vec<Elf64Phdr> = program_headers(&interp_data, &interp_header).collect();
-        if parse_interp_path(&interp_data, &interp_phdrs)?.is_some() {
-            return Err("Nested PT_INTERP is not supported");
-        }
-        let (interp_bias, interp_entry) =
-            compute_load_bias_and_entry(user_as, &interp_header, &interp_phdrs)?;
-        let (interp_min_vaddr, _) = compute_load_bounds(&interp_phdrs)?;
-        for phdr in interp_phdrs.iter() {
-            if phdr.p_type == PT_LOAD && phdr.p_memsz != 0 {
-                load_segment(user_as, &interp_data, phdr, interp_bias)?;
-            }
-        }
-        apply_dynamic_relocations(user_as, &interp_phdrs, interp_header.e_type, interp_bias)?;
-        runtime_entry = interp_entry;
-        interp_base = Some(interp_min_vaddr.saturating_add(interp_bias));
-    }
-
-    let stack_exec = phdrs
-        .iter()
-        .any(|ph| ph.p_type == PT_GNU_STACK && (ph.p_flags & PF_X) != 0);
+    let loaded = load_elf_segments(elf_data, user_as)?;
 
     Ok(LoadedElfInfo {
-        runtime_entry,
-        program_entry: entry,
-        phdr_vaddr,
-        phent: header.e_phentsize,
-        phnum: header.e_phnum,
-        interp_base,
-        tls_vaddr,
-        tls_filesz,
-        tls_memsz,
-        tls_align,
-        stack_exec,
+        runtime_entry: loaded.runtime_entry,
+        program_entry: loaded.entry,
+        phdr_vaddr: loaded.phdr_vaddr,
+        phent: loaded.header.e_phentsize,
+        phnum: loaded.header.e_phnum,
+        interp_base: loaded.interp_base,
+        tls_vaddr: loaded.tls_vaddr,
+        tls_filesz: loaded.tls_filesz,
+        tls_memsz: loaded.tls_memsz,
+        tls_align: loaded.tls_align,
+        stack_exec: loaded.stack_exec,
     })
 }
 
