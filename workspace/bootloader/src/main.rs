@@ -19,6 +19,61 @@ mod elf;
 mod modules;
 mod paging;
 
+/// RSDP signature "RSD PTR " (8 bytes)
+const RSDP_SIGNATURE: &[u8; 8] = b"RSD PTR ";
+
+/// Validate RSDP checksum: sum of all bytes must be 0 mod 256
+unsafe fn validate_rsdp(ptr: *const u8) -> bool {
+    let mut sum: u8 = 0;
+    for i in 0..20 {
+        sum = sum.wrapping_add(core::ptr::read_volatile(ptr.add(i)));
+    }
+    sum == 0
+}
+
+/// Scan physical memory for RSDP signature. Checks EBDA pointer, then 0xE0000-0xFFFFF.
+fn scan_for_rsdp() -> u64 {
+    unsafe {
+        // Try EBDA (Extended BIOS Data Area) — read from 0x40E (real mode vector)
+        let ebda_seg: u16 = core::ptr::read_volatile(0x40E as *const u16);
+        if ebda_seg != 0 {
+            let ebda_addr = (ebda_seg as u64) << 4;
+            // Scan first 1KB of EBDA
+            let end = (ebda_addr + 0x400).min(0x10_0000);
+            for addr in (ebda_addr..end).step_by(16) {
+                if addr + 20 > 0x10_0000 {
+                    break;
+                }
+                if core::ptr::read_volatile(addr as *const [u8; 8]) == *RSDP_SIGNATURE
+                    && validate_rsdp(addr as *const u8)
+                {
+                    return addr;
+                }
+            }
+        }
+
+        // Scan legacy EBDA region 0x80000-0x9FFFF
+        for addr in (0x80_000u64..0xA0_000).step_by(16) {
+            if core::ptr::read_volatile(addr as *const [u8; 8]) == *RSDP_SIGNATURE
+                && validate_rsdp(addr as *const u8)
+            {
+                return addr;
+            }
+        }
+
+        // Scan ROM area 0xE0000-0xFFFFF
+        for addr in (0xE0_000u64..0x100_000).step_by(16) {
+            if core::ptr::read_volatile(addr as *const [u8; 8]) == *RSDP_SIGNATURE
+                && validate_rsdp(addr as *const u8)
+            {
+                return addr;
+            }
+        }
+
+        0
+    }
+}
+
 use strat9_abi::boot::{KernelArgs, MemoryKind, MemoryRegion};
 
 #[entry]
@@ -29,9 +84,11 @@ fn efi_main() -> Status {
 
     // Open filesystem
     let image_handle = uefi::boot::image_handle();
-    let mut fs =
-        uefi::boot::get_image_file_system(image_handle).expect("Failed to get file system");
-    let mut volume = (*fs).open_volume().expect("Failed to open volume");
+    let mut fs = uefi::boot::get_image_file_system(image_handle)
+        .expect("[boot] FATAL: UEFI file system protocol unavailable");
+    let mut volume = (*fs)
+        .open_volume()
+        .expect("[boot] FATAL: Cannot open boot volume");
 
     uefi::system::with_stdout(|stdout| {
         let _ = writeln!(stdout, "[boot] The filesystem is OK");
@@ -44,14 +101,14 @@ fn efi_main() -> Status {
             FileMode::Read,
             FileAttribute::empty(),
         )
-        .expect("Failed to open kernel.elf")
+        .expect("[boot] FATAL: \\boot\\kernel.elf not found on boot volume")
         .into_regular_file()
-        .expect("kernel.elf is not a regular file");
+        .expect("[boot] FATAL: \\boot\\kernel.elf exists but is not a regular file (is it a directory?)");
 
     let mut file_info_buf = [0u8; 512];
     let file_info = file
         .get_info::<FileInfo>(&mut file_info_buf)
-        .expect("Failed to get file info");
+        .expect("[boot] FATAL: Cannot read kernel.elf metadata (file info query failed)");
     let file_size = file_info.file_size() as usize;
 
     uefi::system::with_stdout(|stdout| {
@@ -60,7 +117,8 @@ fn efi_main() -> Status {
 
     // Read kernel into memory
     let mut buf = alloc::vec![0u8; file_size];
-    file.read(&mut buf).expect("Failed to read kernel");
+    file.read(&mut buf)
+        .expect("[boot] FATAL: Failed to read kernel.elf contents into memory");
 
     let ptr = buf.as_mut_ptr();
     let len = buf.len();
@@ -75,7 +133,8 @@ fn efi_main() -> Status {
         let _ = writeln!(stdout, "[boot] Parsing kernel ELF file...");
     });
 
-    let elf_info = elf::parse_elf64(kernel_data).expect("Failed to parse kernel ELF");
+    let elf_info = elf::parse_elf64(kernel_data)
+        .expect("[boot] FATAL: kernel.elf is not a valid ELF64 binary");
 
     uefi::system::with_stdout(|stdout| {
         let _ = writeln!(
@@ -146,7 +205,28 @@ fn efi_main() -> Status {
         let (r_s, r_sh, g_s, g_sh, b_s, b_sh) = match pixel_format {
             uefi::proto::console::gop::PixelFormat::Rgb => (8, 16, 8, 8, 8, 0),
             uefi::proto::console::gop::PixelFormat::Bgr => (8, 0, 8, 8, 8, 16),
-            _ => (8, 0, 8, 8, 8, 16),
+            uefi::proto::console::gop::PixelFormat::Bitmask => {
+                if let Some(mask) = info.pixel_bitmask() {
+                    let r_sh = mask.red.trailing_zeros() as u8;
+                    let r_s = mask.red.count_ones() as u8;
+                    let g_sh = mask.green.trailing_zeros() as u8;
+                    let g_s = mask.green.count_ones() as u8;
+                    let b_sh = mask.blue.trailing_zeros() as u8;
+                    let b_s = mask.blue.count_ones() as u8;
+                    (r_s, r_sh, g_s, g_sh, b_s, b_sh)
+                } else {
+                    (8, 16, 8, 8, 8, 0)
+                }
+            }
+            _ => {
+                uefi::system::with_stdout(|stdout| {
+                    let _ = writeln!(
+                        stdout,
+                        "[boot] WARNING: Unknown pixel format, defaulting to BGR888"
+                    );
+                });
+                (8, 0, 8, 8, 8, 16)
+            }
         };
         fb_red_size = r_s;
         fb_red_shift = r_sh;
@@ -156,16 +236,89 @@ fn efi_main() -> Status {
         fb_blue_shift = b_sh;
     }
 
-    // Get ACPI RSDP
-    let rsdp_addr = uefi::system::with_config_table(|tables| {
-        tables
-            .iter()
-            .find(|e| {
-                e.guid == ConfigTableEntry::ACPI2_GUID || e.guid == ConfigTableEntry::ACPI_GUID
-            })
-            .map(|e| e.address as u64)
-            .unwrap_or(0)
-    });
+    // Validate framebuffer — ensure physical address is valid
+    if fb_phys == 0 && (fb_width != 0 || fb_height != 0) {
+        uefi::system::with_stdout(|stdout| {
+            let _ = writeln!(
+                stdout,
+                "[boot] WARNING: Framebuffer pointer is NULL despite reporting non-zero dimensions — disabling framebuffer"
+            );
+        });
+        fb_width = 0;
+        fb_height = 0;
+        fb_stride = 0;
+    }
+
+    // Get ACPI RSDP — try UEFI config tables first, fallback to physical memory scan
+    let rsdp_addr = {
+        let mut addr = uefi::system::with_config_table(|tables| {
+            tables
+                .iter()
+                .find(|e| {
+                    e.guid == ConfigTableEntry::ACPI2_GUID || e.guid == ConfigTableEntry::ACPI_GUID
+                })
+                .map(|e| e.address as u64)
+                .unwrap_or(0)
+        });
+
+        if addr == 0 {
+            // Fallback: scan first 1MB of physical memory for RSDP signature
+            // PhilOpp pattern: check EBDA pointer, then 0xE0000-0xFFFFF
+            addr = scan_for_rsdp();
+            if addr != 0 {
+                uefi::system::with_stdout(|stdout| {
+                    let _ = writeln!(
+                        stdout,
+                        "[boot] RSDP found via physical memory scan at 0x{:x}",
+                        addr
+                    );
+                });
+            } else {
+                uefi::system::with_stdout(|stdout| {
+                    let _ = writeln!(stdout, "[boot] WARNING: RSDP not found — ACPI unavailable");
+                });
+            }
+        }
+        addr
+    };
+
+    // Validate RSDP and check XSDT vs RSDT availability
+    if rsdp_addr != 0 {
+        unsafe {
+            let rsdp_ptr = rsdp_addr as *const u8;
+            let revision: u8 = core::ptr::read_volatile(rsdp_ptr.add(15));
+            if revision >= 2 {
+                // ACPI 2.0+ — has XSDT at offset 24
+                let xsdt_addr: u64 = core::ptr::read_volatile((rsdp_addr + 24) as *const u64);
+                uefi::system::with_stdout(|stdout| {
+                    let _ = writeln!(
+                        stdout,
+                        "[boot] ACPI {} (XSDT at 0x{:x})",
+                        revision, xsdt_addr
+                    );
+                });
+                if xsdt_addr == 0 {
+                    uefi::system::with_stdout(|stdout| {
+                        let _ = writeln!(
+                            stdout,
+                            "[boot] WARNING: ACPI revision {} but XSDT address is NULL",
+                            revision
+                        );
+                    });
+                }
+            } else {
+                // ACPI 1.0 — has RSDT at offset 16
+                let rsdt_addr: u32 = core::ptr::read_volatile((rsdp_addr + 16) as *const u32);
+                uefi::system::with_stdout(|stdout| {
+                    let _ = writeln!(
+                        stdout,
+                        "[boot] ACPI {} (RSDT at 0x{:x})",
+                        revision, rsdt_addr as u64
+                    );
+                });
+            }
+        }
+    }
 
     // Build environment string
     let mut env_buf = [0u8; 4096];
@@ -240,7 +393,7 @@ fn efi_main() -> Status {
         let base: u16 = 0x3F8;
         core::arch::asm!("out dx, al", in("al") 0x00u8, in("dx") base + 1, options(nomem, nostack)); // Disable interrupts
         core::arch::asm!("out dx, al", in("al") 0x80u8, in("dx") base + 3, options(nomem, nostack)); // Enable DLAB
-        core::arch::asm!("out dx, al", in("al") 0x03u8, in("dx") base + 0, options(nomem, nostack)); // Set divisor lo (38400 baud)
+        core::arch::asm!("out dx, al", in("al") 0x01u8, in("dx") base + 0, options(nomem, nostack)); // Set divisor lo (115200 baud)
         core::arch::asm!("out dx, al", in("al") 0x00u8, in("dx") base + 1, options(nomem, nostack)); // Set divisor hi
         core::arch::asm!("out dx, al", in("al") 0x03u8, in("dx") base + 3, options(nomem, nostack)); // 8 bits, no parity, one stop
         core::arch::asm!("out dx, al", in("al") 0xC7u8, in("dx") base + 2, options(nomem, nostack)); // Enable FIFO
@@ -291,6 +444,51 @@ fn efi_main() -> Status {
         region_count += 1;
     }
 
+    // Sort regions by base address
+    {
+        let mut sorted = true;
+        while sorted {
+            sorted = false;
+            for i in 0..region_count - 1 {
+                if regions[i].base > regions[i + 1].base {
+                    regions.swap(i, i + 1);
+                    sorted = true;
+                }
+            }
+        }
+    }
+
+    // Validate no overlapping regions (merge adjacent same-type regions)
+    {
+        let mut write = 0;
+        let mut read = 0;
+        while read < region_count {
+            let mut merged_base = regions[read].base;
+            let mut merged_size = regions[read].size;
+            let merged_kind = regions[read].kind;
+            let mut next = read + 1;
+            // Merge adjacent or overlapping regions of same type
+            while next < region_count
+                && regions[next].kind == merged_kind
+                && regions[next].base <= merged_base + merged_size
+            {
+                let end = regions[next].base + regions[next].size;
+                if end > merged_base + merged_size {
+                    merged_size = end - merged_base;
+                }
+                next += 1;
+            }
+            regions[write] = MemoryRegion {
+                base: merged_base,
+                size: merged_size,
+                kind: merged_kind,
+            };
+            write += 1;
+            read = next;
+        }
+        region_count = write;
+    }
+
     fn alloc_from_free(
         regions: &mut [MemoryRegion],
         region_count: usize,
@@ -334,7 +532,10 @@ fn efi_main() -> Status {
     }
 
     let stack_size: u64 = 64 * 1024;
-    let stack_base = alloc_from_free(&mut regions, region_count, stack_size, 16);
+    let guard_page_size: u64 = 4096;
+    let total_stack_alloc = guard_page_size + stack_size;
+    let stack_region_base = alloc_from_free(&mut regions, region_count, total_stack_alloc, 4096);
+    let stack_base = stack_region_base + guard_page_size;
 
     let module_table_size = modules::module_table_size(module_list.len());
     let module_table_size_aligned = (module_table_size + 4095) & !4095;
@@ -413,6 +614,30 @@ fn efi_main() -> Status {
     };
 
     // Page tables and context switch
+    // Kernel entry validation
+    let kernel_virt_base: u64 = 0xFFFF_FFFF_8000_0000;
+    if elf_info.entry == 0 {
+        panic!(
+            "[boot] FATAL: Kernel entry point is NULL (0x0) — kernel.elf is corrupt or not linked correctly"
+        );
+    }
+    if elf_info.entry < kernel_virt_base {
+        uefi::system::with_stdout(|stdout| {
+            let _ = writeln!(
+                stdout,
+                "[boot] WARNING: Entry point 0x{:x} is below higher-half (0x{:x})",
+                elf_info.entry, kernel_virt_base
+            );
+        });
+    }
+    // Verify entry point is within a reasonable mapped range (within 2GB of kernel base)
+    let max_mapped = kernel_virt_base + 0x2000_0000; // 2GB higher-half
+    if elf_info.entry > max_mapped {
+        panic!(
+            "[boot] FATAL: Entry point 0x{:x} exceeds mapped kernel range (max 0x{:x})",
+            elf_info.entry, max_mapped
+        );
+    }
     unsafe {
         let write_com1 = |s: &[u8]| {
             let lsr: u16 = 0x3F8 + 5;
@@ -500,6 +725,31 @@ fn efi_main() -> Status {
         write_com1(b" first_kind=");
         write_com1(hex_str(first_kind, &mut hexbuf));
         write_com1(b"\r\n");
+
+        // Paging diagnostics
+        write_com1(b"[boot] Page table: pml4 at 0x");
+        write_com1(hex_str(pml4_phys, &mut hexbuf));
+        write_com1(b"\r\n");
+
+        // Verify key PML4 entries
+        let pml4_ptr = pml4_phys as *const u64;
+        let pml4_pml4e = core::ptr::read_volatile(pml4_ptr);
+        let pml4_pml4e_511 = core::ptr::read_volatile(pml4_ptr.add(511));
+        write_com1(b"[boot] PML4[0]=0x");
+        write_com1(hex_str(pml4_pml4e, &mut hexbuf));
+        write_com1(b" PML4[511]=0x");
+        write_com1(hex_str(pml4_pml4e_511, &mut hexbuf));
+        write_com1(b"\r\n");
+
+        // Verify identity map is present (PML4[0] must have PRESENT bit)
+        if pml4_pml4e & 1 == 0 {
+            write_com1(b"[boot] FATAL: PML4[0] not present - identity map broken!\r\n");
+        }
+        // Verify higher-half map is present (PML4[511] must have PRESENT bit)
+        if pml4_pml4e_511 & 1 == 0 {
+            write_com1(b"[boot] FATAL: PML4[511] not present - higher-half map broken!\r\n");
+        }
+
         write_com1(b"[boot] Jumping to kernel (pause loop)...\r\n");
 
         // Small delay to let serial flush
