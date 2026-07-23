@@ -637,6 +637,14 @@ fn write_user_u64(user_as: &AddressSpace, vaddr: u64, value: u64) -> Result<(), 
 /// The resolver is located at `resolver_vaddr` in the user address space.
 /// All RELATIVE relocations for this binary must have been applied first so
 /// that the resolver's own calls/addresses are correct.
+///
+/// # Security note
+///
+/// IFUNC resolvers execute as ordinary user-space functions, but this helper
+/// calls them from Ring 0 via HHDM.  A malicious or corrupted resolver can
+/// read/write kernel memory and escalate privileges.  This is acceptable for
+/// a single-address-space kernel that loads only trusted binaries, but must
+/// NOT be used if untrusted ELF images are ever loaded.
 fn call_ifunc_resolver(user_as: &AddressSpace, resolver_vaddr: u64) -> Result<u64, &'static str> {
     if resolver_vaddr >= USER_ADDR_MAX {
         return Err("IFUNC resolver address outside user space");
@@ -645,10 +653,16 @@ fn call_ifunc_resolver(user_as: &AddressSpace, resolver_vaddr: u64) -> Result<u6
         .translate(VirtAddr::new(resolver_vaddr))
         .ok_or("IFUNC resolver page not mapped")?;
     let hhdm_ptr = crate::memory::phys_to_virt(phys.as_u64());
+    log::warn!(
+        "[elf] IFUNC resolver at {:#x} executing in Ring 0 — security risk if binary is untrusted",
+        resolver_vaddr
+    );
     // SAFETY: hhdm_ptr points to a user page containing executable code.
     // The resolver is a simple function that returns a u64; it must not
     // access kernel state.  All RELATIVE relocations for this binary have
     // already been applied, so the resolver's own target addresses are valid.
+    //
+    // WARNING: this executes user code in Ring 0.  Safe only for trusted binaries.
     let resolver: extern "C" fn() -> u64 = unsafe { core::mem::transmute(hhdm_ptr as *const ()) };
     Ok(resolver())
 }
