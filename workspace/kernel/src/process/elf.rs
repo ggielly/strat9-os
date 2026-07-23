@@ -87,8 +87,8 @@ const R_X86_64_IRELATIVE: u32 = 37;
 /// Maximum virtual address we accept for user-space mappings.
 pub const USER_ADDR_MAX: u64 = 0x0000_8000_0000_0000;
 
-/// Number of 4 KiB pages for the user stack (16 pages = 64 KiB).
-pub const USER_STACK_PAGES: usize = 16;
+/// Number of 4 KiB pages for the user stack (128 pages = 512 KiB).
+pub const USER_STACK_PAGES: usize = 128;
 /// Standard user-mode RFLAGS: IF=1, reserved bit 1 set.
 const USER_RFLAGS: u64 = 0x202;
 
