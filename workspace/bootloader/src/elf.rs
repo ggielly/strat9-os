@@ -95,6 +95,7 @@ pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
         let copy_size = p_filesz as usize;
         if phys_offset >= 0x1000
             && phys_offset < 0x1000_0000
+            && phys_offset + copy_size as u64 <= 0x1000_0000
             && (p_offset as usize) + copy_size <= data.len()
         {
             unsafe {

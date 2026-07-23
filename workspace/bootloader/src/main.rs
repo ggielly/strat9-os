@@ -31,6 +31,25 @@ unsafe fn validate_rsdp(ptr: *const u8) -> bool {
     sum == 0
 }
 
+/// Validate ACPI table header checksum: sum of all bytes in the
+/// 36-byte SDT header must be 0 mod 256. Used for XSDT/RSDT.
+unsafe fn validate_acpi_table_header(base: u64) -> bool {
+    if base == 0 {
+        return false;
+    }
+    let mut sum: u8 = 0;
+    // SDT header is 36 bytes: signature(4) + length(4) + revision(1) +
+    // checksum(1) + oem_id(6) + oem_table_id(8) + oem_revision(4) +
+    // creator_id(4) + creator_revision(4)
+    let ptr = base as *const u8;
+    let length_field = core::ptr::read_volatile((ptr.add(4)) as *const u32) as usize;
+    let validate_len = length_field.min(36);
+    for i in 0..validate_len {
+        sum = sum.wrapping_add(core::ptr::read_volatile(ptr.add(i)));
+    }
+    sum == 0
+}
+
 /// Scan physical memory for RSDP signature. Checks EBDA pointer, then 0xE0000-0xFFFFF.
 fn scan_for_rsdp() -> u64 {
     unsafe {
@@ -305,6 +324,21 @@ fn efi_main() -> Status {
                             revision
                         );
                     });
+                } else {
+                    // Validate XSDT header checksum
+                    if validate_acpi_table_header(xsdt_addr) {
+                        uefi::system::with_stdout(|stdout| {
+                            let _ = writeln!(stdout, "[boot] XSDT header checksum OK");
+                        });
+                    } else {
+                        uefi::system::with_stdout(|stdout| {
+                            let _ = writeln!(
+                                stdout,
+                                "[boot] WARNING: XSDT header checksum invalid at 0x{:x}",
+                                xsdt_addr
+                            );
+                        });
+                    }
                 }
             } else {
                 // ACPI 1.0 — has RSDT at offset 16
@@ -316,6 +350,22 @@ fn efi_main() -> Status {
                         revision, rsdt_addr as u64
                     );
                 });
+                if rsdt_addr != 0 {
+                    // Validate RSDT header checksum
+                    if validate_acpi_table_header(rsdt_addr as u64) {
+                        uefi::system::with_stdout(|stdout| {
+                            let _ = writeln!(stdout, "[boot] RSDT header checksum OK");
+                        });
+                    } else {
+                        uefi::system::with_stdout(|stdout| {
+                            let _ = writeln!(
+                                stdout,
+                                "[boot] WARNING: RSDT header checksum invalid at 0x{:x}",
+                                rsdt_addr
+                            );
+                        });
+                    }
+                }
             }
         }
     }

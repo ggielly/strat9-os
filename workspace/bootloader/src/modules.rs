@@ -13,7 +13,6 @@ pub struct LoadedModule {
 #[repr(C)]
 pub struct ModuleTable {
     pub count: u32,
-    _pad: u32,
     pub entries: [ModuleEntry; 64],
 }
 
@@ -26,9 +25,10 @@ pub struct ModuleEntry {
 }
 
 pub fn module_table_size(count: usize) -> u64 {
-    let header_size = core::mem::size_of::<ModuleTable>() as u64;
+    let table_size = core::mem::size_of::<ModuleTable>() as u64;
     let entry_size = core::mem::size_of::<ModuleEntry>() as u64;
-    header_size + entry_size * count as u64 - entry_size * 64
+    let max_entries = 64u64;
+    table_size - entry_size * max_entries + entry_size * count as u64
 }
 
 pub fn write_module_table(modules: &[LoadedModule], base: u64) {

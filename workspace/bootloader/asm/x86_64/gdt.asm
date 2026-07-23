@@ -47,7 +47,7 @@ istruc GDTEntry
     at GDTEntry.limitl,         dw 0
     at GDTEntry.basel,          dw 0
     at GDTEntry.basem,          db 0
-    at GDTEntry.attribute,      db gdt_attr.present | gdt_attr.user | gdt_attr.code
+    at GDTEntry.attribute,      db gdt_attr.present | gdt_attr.user | gdt_attr.code | gdt_attr.accessed
     at GDTEntry.flags__limith,  db gdt_flag.long_mode
     at GDTEntry.baseh,          db 0
 iend
@@ -57,7 +57,7 @@ istruc GDTEntry
     at GDTEntry.limitl,         dw 0
     at GDTEntry.basel,          dw 0
     at GDTEntry.basem,          db 0
-    at GDTEntry.attribute,      db gdt_attr.present | gdt_attr.user | gdt_attr.writable
+    at GDTEntry.attribute,      db gdt_attr.present | gdt_attr.user | gdt_attr.writable | gdt_attr.accessed
     at GDTEntry.flags__limith,  db 0
     at GDTEntry.baseh,          db 0
 iend
@@ -67,7 +67,7 @@ istruc GDTEntry
     at GDTEntry.limitl,         dw 0xFFFF
     at GDTEntry.basel,          dw 0
     at GDTEntry.basem,          db 0
-    at GDTEntry.attribute,      db gdt_attr.present | gdt_attr.user | gdt_attr.code | gdt_attr.readable
+    at GDTEntry.attribute,      db gdt_attr.present | gdt_attr.user | gdt_attr.code | gdt_attr.readable | gdt_attr.accessed
     at GDTEntry.flags__limith,  db 0xF | gdt_flag.granularity | gdt_flag.default_operand_size
     at GDTEntry.baseh,          db 0
 iend
@@ -77,7 +77,7 @@ istruc GDTEntry
     at GDTEntry.limitl,         dw 0xFFFF
     at GDTEntry.basel,          dw 0
     at GDTEntry.basem,          db 0
-    at GDTEntry.attribute,      db gdt_attr.present | gdt_attr.user | gdt_attr.writable
+    at GDTEntry.attribute,      db gdt_attr.present | gdt_attr.user | gdt_attr.writable | gdt_attr.accessed
     at GDTEntry.flags__limith,  db 0xF | gdt_flag.granularity | gdt_flag.default_operand_size
     at GDTEntry.baseh,          db 0
 iend
@@ -87,7 +87,7 @@ istruc GDTEntry
     at GDTEntry.limitl,         dw 0xFFFF
     at GDTEntry.basel,          dw 0
     at GDTEntry.basem,          db 0
-    at GDTEntry.attribute,      db gdt_attr.present | gdt_attr.user | gdt_attr.code | gdt_attr.readable
+    at GDTEntry.attribute,      db gdt_attr.present | gdt_attr.user | gdt_attr.code | gdt_attr.readable | gdt_attr.accessed
     at GDTEntry.flags__limith,  db 0xF
     at GDTEntry.baseh,          db 0
 iend
@@ -97,7 +97,7 @@ istruc GDTEntry
     at GDTEntry.limitl,         dw 0xFFFF
     at GDTEntry.basel,          dw 0
     at GDTEntry.basem,          db 0
-    at GDTEntry.attribute,      db gdt_attr.present | gdt_attr.user | gdt_attr.writable
+    at GDTEntry.attribute,      db gdt_attr.present | gdt_attr.user | gdt_attr.writable | gdt_attr.accessed
     at GDTEntry.flags__limith,  db 0xF
     at GDTEntry.baseh,          db 0
 iend

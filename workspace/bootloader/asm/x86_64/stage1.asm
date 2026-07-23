@@ -35,6 +35,28 @@ stage1:
     call print_line
 
     ; =============================================
+    ; Check INT 13h extensions support (from PhilOpp)
+    ; Without this, disk reads fail silently on old BIOSes
+    ; =============================================
+    mov ah, 0x41
+    mov bx, 0x55AA
+    mov dl, [disk]
+    int 0x13
+    jc .no_extensions
+    cmp bx, 0xAA55
+    jne .no_extensions
+    jmp .has_extensions
+
+.no_extensions:
+    mov al, '!'
+    call print_char
+    mov si, msg_no_ext
+    call print
+    jmp error
+
+.has_extensions:
+
+    ; =============================================
     ; Load Stage 2 from disk (sectors 1-8 -> 4KB)
     ; =============================================
     mov eax, (stage2 - stage1) / 512
@@ -84,8 +106,11 @@ load:
     ret
 
 error:
+    push ax                          ; save error code on stack (PhilOpp pattern)
     call print_line
-    mov bh, 0
+    mov al, '!'
+    call print_char
+    pop ax                           ; retrieve error code
     mov bl, ah
     call print_hex
     mov al, ' '
@@ -98,6 +123,17 @@ error:
     hlt
     jmp .halt
 
+; Unified fail handler: prints ASCII code from stack (PhilOpp pattern)
+; Usage: push 'X' / call fail
+fail:
+    pop bx                           ; get error code character
+    mov al, bl
+    call print_char
+.halt_fail:
+    cli
+    hlt
+    jmp .halt_fail
+
 %include "print.asm"
 
 ; =============================================
@@ -105,6 +141,7 @@ error:
 ; =============================================
 msg_stage:  db "Strat9-OS Stage ", 0
 msg_error:  db "DISK ERROR", 0
+msg_no_ext: db " INT13h ext required", 0
 
 disk: db 0
 

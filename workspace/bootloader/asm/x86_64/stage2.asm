@@ -74,7 +74,19 @@ stage2_entry:
     call print_line
 
     ; =============================================
-    ; Step 4: Setup Page Tables
+    ; Step 4: Detect physical memory (INT 15h E820)
+    ; =============================================
+    mov si, s2_msg_memmap
+    call print
+
+    call e820_detect
+
+    mov si, s2_msg_ok
+    call print
+    call print_line
+
+    ; =============================================
+    ; Step 5: Setup Page Tables
     ; =============================================
     mov si, s2_msg_paging
     call print
@@ -86,7 +98,7 @@ stage2_entry:
     call print_line
 
     ; =============================================
-    ; Step 5: Enter Protected Mode -> Long Mode
+    ; Step 6: Enter Protected Mode -> Long Mode
     ; =============================================
     mov si, s2_msg_enter_pm
     call print
@@ -138,6 +150,77 @@ setup_page_tables:
     pop cx
     pop di
     pop es
+    ret
+
+; =============================================
+; E820 Memory Detection (INT 15h, EAX=0xE820)
+; Stores MemoryRegion entries at physical 0x8000
+; Fills [e820_entry_count] with number of entries
+; =============================================
+e820_detect:
+    pusha
+    pushf
+    push es
+
+    ; Setup buffer at physical 0x8000
+    mov ax, 0
+    mov es, ax
+    mov di, 0x8000
+
+    xor ebx, ebx            ; Continuation = 0 (first call)
+    xor bp, bp              ; Entry counter
+
+.e820_loop:
+    mov eax, 0xE820
+    mov ecx, 24             ; Our MemoryRegion size
+    mov edx, 0x534D4150     ; 'SMAP'
+    int 0x15
+
+    jc .e820_done           ; CF set = error or end of list
+
+    cmp eax, 0x534D4150     ; Verify 'SMAP' returned
+    jne .e820_done
+
+    cmp ecx, 24             ; Did we get a full entry?
+    jb .e820_check_more
+
+    ; Map E820 type to MemoryKind
+    ; E820 type at offset 16 (dword): 1=usable, 2=reserved, 3=ACPI reclaim, 4=ACPI NVS, 5=bad
+    cmp dword [es:di + 16], 1
+    je .e820_type_free
+    cmp dword [es:di + 16], 3
+    je .e820_type_reclaim
+    ; Everything else (2, 4, 5, ...) -> Reserved
+    mov dword [es:di + 16], 3       ; MemoryKind::Reserved (3)
+    mov dword [es:di + 20], 0
+    jmp .e820_type_done
+
+.e820_type_free:
+    mov dword [es:di + 16], 1       ; MemoryKind::Free (1)
+    mov dword [es:di + 20], 0
+    jmp .e820_type_done
+
+.e820_type_reclaim:
+    mov dword [es:di + 16], 2       ; MemoryKind::Reclaim (2)
+    mov dword [es:di + 20], 0
+
+.e820_type_done:
+    inc bp
+    cmp bp, 512                     ; Max entries
+    jae .e820_done
+    add di, 24                      ; Advance to next entry slot
+
+.e820_check_more:
+    test ebx, ebx                   ; EBX=0 means last entry
+    jz .e820_done
+    jmp .e820_loop
+
+.e820_done:
+    mov [e820_entry_count], bp
+
+    pop es
+    popf
+    popa
     ret
 
 ; =============================================
@@ -225,16 +308,6 @@ s2_pm32_entry:
 
 .elf_done:
     ; ----- Setup KernelArgs at 0x60000 -----
-    ; First: create a minimal memory map at 0x60100
-    ; MemoryRegion { base: u64, size: u64, kind: u64 }
-    ; Entry 0: Free memory from 2MB to 254MB
-    mov dword [0x60100], 0x00200000      ; base low = 2MB
-    mov dword [0x60104], 0               ; base high
-    mov dword [0x60108], 0x0FE00000      ; size low = 254MB
-    mov dword [0x6010C], 0               ; size high
-    mov dword [0x60110], 1               ; kind = Free
-    mov dword [0x60114], 0               ; kind high
-
     ; KernelArgs struct at 0x60000 (repr(C, packed(8)))
     ; Zero-fill first 144 bytes (struct size) to clear padding + trailing fields
     mov edi, 0x60000
@@ -253,16 +326,18 @@ s2_pm32_entry:
     mov dword [0x60018], 0x00080000
     ; stack_size (u64)
     mov dword [0x60020], 0x00010000      ; 64KB
-    ; env_base (u64) = 0 (already zeroed)
-    ; env_size (u64) = 0
     ; acpi_rsdp_base (u64) = 0
-    ; acpi_rsdp_size (u64) = 0
-    ; memory_map_base (u64)
-    mov dword [0x60048], 0x00060100      ; -> 0x60100
-    ; memory_map_size (u64) = 24 bytes (one MemoryRegion)
-    mov dword [0x60050], 24
-    ; initfs_base (u64) = 0
-    ; initfs_size (u64) = 0
+    ; memory_map_base (u64) = 0x8000 (E820 map)
+    mov dword [0x60048], 0x00008000
+    mov dword [0x6004C], 0
+    ; memory_map_size (u64) = entry_count * 24
+    mov eax, [e820_entry_count]
+    mov ecx, eax
+    shl eax, 3                           ; count * 8
+    shl ecx, 4                           ; count * 16
+    add eax, ecx                         ; count * 24
+    mov [0x60050], eax
+    mov dword [0x60054], 0
     ; framebuffer_addr (u64)
     mov dword [0x60068], 0x000B8000      ; VGA text buffer
     ; framebuffer_width (u32)
@@ -311,6 +386,7 @@ s2_msg_banner:    db 'Strat9-OS stage 2 bootloader :', 0
 s2_msg_a20:       db '  A20 line........... ', 0
 s2_msg_cpuid:     db '  CPU features....... ', 0
 s2_msg_kernel:    db '  Kernel loading..... ', 0
+s2_msg_memmap:    db '  Memory map........ ', 0
 s2_msg_paging:    db '  Page tables........ ', 0
 s2_msg_enter_pm:  db '  Entering long mode...', 0
 s2_msg_ok:        db '[OK]', 0
@@ -320,6 +396,9 @@ kernel_entry_addr: dq 0
 
 ; Number of sectors loaded in the first chunk.
 kernel_chunk1_sectors: dd 0
+
+; Number of E820 memory map entries (filled by e820_detect)
+e820_entry_count: dd 0
 
 ; Padding to 8KB (16 sectors) to fit the extra code
 times 8192-($-stage2) db 0
