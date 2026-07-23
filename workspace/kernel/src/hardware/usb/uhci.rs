@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 use crate::{
+    arch::x86_64::io::{inw, outw},
     hardware::pci_client::{self as pci, Bar, ProbeCriteria},
     memory::{allocate_zeroed_frame, phys_to_virt},
 };
@@ -265,8 +266,11 @@ impl UhciController {
     }
 
     /// Execute a USB control transfer via a frame list slot.
+    ///
+    /// Temporarily replaces a frame list entry with our QH, waits for
+    /// completion, then restores the original entry.
     unsafe fn ctrl_transfer(
-        &mut self,
+        &self,
         port: usize,
         setup_data: &[u8; 8],
         data_buf: Option<&mut [u8]>,
@@ -403,7 +407,7 @@ impl UhciController {
         };
 
         // Point current frame to QH
-        let frame_idx = self.frnum.read() as usize % 1024;
+        let frame_idx = unsafe { inw(self.io_base + UHCI_FRNUM) } as usize % 1024;
         let old_frame = core::ptr::read_volatile(self.frame_list.add(frame_idx));
         core::ptr::write_volatile(
             self.frame_list.add(frame_idx),
@@ -439,7 +443,7 @@ impl UhciController {
     }
 
     /// Enumerate connected ports and hand off HID devices.
-    fn enumerate_all_ports(&mut self) {
+    fn enumerate_all_ports(&self) {
         let mut usb_address: u8 = 1;
 
         for port in 0..self.max_ports {
@@ -580,6 +584,7 @@ pub fn init() {
         match unsafe { UhciController::new(pci_dev) } {
             Ok(controller) => {
                 log::info!("[UHCI] Initialized with {} ports", controller.port_count());
+                controller.enumerate_all_ports();
                 UHCI_CONTROLLERS.lock().push(controller);
             }
             Err(e) => {
