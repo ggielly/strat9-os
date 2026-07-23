@@ -230,9 +230,8 @@ pub fn parse_madt() -> Option<MadtInfo> {
             }
             5 => {
                 let entry = unsafe { &*(offset as *const MadtLocalApicOverride) };
-                let lapic_override_addr = unsafe {
-                    core::ptr::read_unaligned(core::ptr::addr_of!((*entry).phys_addr))
-                };
+                let lapic_override_addr =
+                    unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*entry).phys_addr)) };
                 if entry.flags & 1 != 0 {
                     log::info!(
                         "MADT: Local APIC address override 0x{:X}",

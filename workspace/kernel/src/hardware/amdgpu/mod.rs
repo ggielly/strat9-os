@@ -10,8 +10,10 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
-use crate::arch::x86_64::pci;
-use crate::memory::{allocate_zeroed_frame, PhysFrame};
+use crate::{
+    arch::x86_64::pci,
+    memory::{allocate_zeroed_frame, PhysFrame},
+};
 
 /// ATI/AMD display controller vendor ID.
 pub const AMD_VENDOR: u16 = 0x1002;
@@ -86,7 +88,10 @@ pub fn init() {
     let dev = &devs[0];
     crate::serial_println!(
         "[amdgpu] Found: {:04X}:{:04X} (class {:02X}:{:02X})",
-        dev.vendor_id, dev.device_id, dev.class_code, dev.subclass
+        dev.vendor_id,
+        dev.device_id,
+        dev.class_code,
+        dev.subclass
     );
 
     let bar0 = match dev.read_bar_raw(0) {
@@ -163,13 +168,25 @@ impl AmdGpu {
             core::hint::spin_loop();
         }
 
-        self.mmio.write32(regs::CRTC_FB_BASE_LO, self.fb_phys as u32);
-        self.mmio.write32(regs::CRTC_FB_BASE_HI, (self.fb_phys >> 32) as u32);
+        self.mmio
+            .write32(regs::CRTC_FB_BASE_LO, self.fb_phys as u32);
+        self.mmio
+            .write32(regs::CRTC_FB_BASE_HI, (self.fb_phys >> 32) as u32);
         self.mmio.write32(regs::CRTC_FB_PITCH, self.fb_pitch / 4);
-        self.mmio.write32(regs::CRTC_FB_SIZE, self.fb_width | (self.fb_height << 16));
-        self.mmio.write32(regs::CRTC_DIMENSIONS, self.fb_width | (self.fb_height << 16));
-        self.mmio.write32(regs::CRTC_H_TOTAL, (self.fb_width + 160 - 1) | ((self.fb_width + 160 - 1) << 16));
-        self.mmio.write32(regs::CRTC_V_TOTAL, (self.fb_height + 30 - 1) | ((self.fb_height + 30 - 1) << 16));
+        self.mmio
+            .write32(regs::CRTC_FB_SIZE, self.fb_width | (self.fb_height << 16));
+        self.mmio.write32(
+            regs::CRTC_DIMENSIONS,
+            self.fb_width | (self.fb_height << 16),
+        );
+        self.mmio.write32(
+            regs::CRTC_H_TOTAL,
+            (self.fb_width + 160 - 1) | ((self.fb_width + 160 - 1) << 16),
+        );
+        self.mmio.write32(
+            regs::CRTC_V_TOTAL,
+            (self.fb_height + 30 - 1) | ((self.fb_height + 30 - 1) << 16),
+        );
         self.mmio.write32(regs::CRTC_FORMAT, 0);
         self.mmio.write32(regs::CRTC_CONTROL, 1 << 0);
         // Brief delay for display pipeline to settle
@@ -183,6 +200,11 @@ impl AmdGpu {
     pub fn present_region(&self, _x: u32, _y: u32, _w: u32, _h: u32) {}
 
     pub fn framebuffer_info(&self) -> (u32, u32, u32, u32) {
-        (self.fb_phys as u32, self.fb_width, self.fb_height, self.fb_pitch)
+        (
+            self.fb_phys as u32,
+            self.fb_width,
+            self.fb_height,
+            self.fb_pitch,
+        )
     }
 }

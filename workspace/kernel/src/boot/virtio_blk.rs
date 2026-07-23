@@ -242,8 +242,9 @@ impl BootVirtqueue {
         );
 
         // Place head index into the available ring.
-        let avail_ring_ptr =
-            (self.vring_virt + avail_off as u64 + core::mem::size_of::<VringAvail>() as u64) as *mut u16;
+        let avail_ring_ptr = (self.vring_virt
+            + avail_off as u64
+            + core::mem::size_of::<VringAvail>() as u64) as *mut u16;
         let avail_slot = (self.avail_idx as usize) % qs;
         core::ptr::write(avail_ring_ptr.add(avail_slot), 0u16); // head descriptor index
 

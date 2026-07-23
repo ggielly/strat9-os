@@ -26,13 +26,19 @@ SECTIONS
     /* Initialized data */
     .data : ALIGN(4K) { *(.data .data.*) __start_component_entries = .; KEEP(*(.component_entries)) __stop_component_entries = .; } :data
 
+    /* Bootstrap stack — placed before .bss so BSS clear doesn't touch it */
+    .boot.stack : ALIGN(4K) { *(.boot.stack) } :data
+
     /* Uninitialized data (zero-filled) */
     .bss : ALIGN(4K)
     {
         *(.bss .bss.*)
         *(COMMON)
-        *(.bss.stack)
     } :bss
+
+    /* BSS bounds via ADDR/SIZEOF — works reliably in all code models */
+    __bss_start = ADDR(.bss);
+    __bss_end = ADDR(.bss) + SIZEOF(.bss);
 
     /* Section header string table - NOT in a PT_LOAD PHDR.
      * Placing PROGBITS (.shstrtab) in the :bss PHDR inflates p_filesz

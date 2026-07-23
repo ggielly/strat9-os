@@ -7,12 +7,13 @@ const WRITABLE: u64 = 1 << 1;
 
 pub const PHYS_OFFSET: u64 = 0;
 
-/// Bump allocator for page table frames
 static mut NEXT_FRAME: u64 = 0;
 
 unsafe fn alloc_frame() -> u64 {
     let addr = unsafe { NEXT_FRAME };
-    unsafe { NEXT_FRAME += PAGE_SIZE; }
+    unsafe {
+        NEXT_FRAME += PAGE_SIZE;
+    }
     unsafe {
         core::ptr::write_bytes(addr as *mut u8, 0, PAGE_SIZE as usize);
     }
@@ -28,9 +29,9 @@ pub unsafe fn create_page_tables(
     _env_phys: u64,
     _env_size: u64,
 ) -> u64 {
-    // Start allocator after kernel + large safety margin
-    // Need ~8 page tables per 2MB of kernel, kernel is ~13MB = ~52 page tables = ~208KB
-    unsafe { NEXT_FRAME = (kernel_phys_end + 0x40_0000) & !0xFFF; } // +4MB margin
+    unsafe {
+        NEXT_FRAME = (kernel_phys_end + 0x10_0000) & !0xFFF;
+    }
 
     let pml4 = alloc_frame() as *mut u64;
 
@@ -44,7 +45,7 @@ pub unsafe fn create_page_tables(
         }
     }
 
-    // Higher-half kernel: PML4[511] => PDP[510] => PD => PT (4KB pages)
+    // Higher-half kernel: PML4[511] => PDP[510] => PD => PT
     unsafe {
         let pdp = alloc_frame() as *mut u64;
         *pml4.add(511) = pdp as u64 | PRESENT | WRITABLE;
@@ -52,18 +53,24 @@ pub unsafe fn create_page_tables(
         let pd = alloc_frame() as *mut u64;
         *pdp.add(510) = pd as u64 | PRESENT | WRITABLE;
 
-        let pages_needed = ((kernel_size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
+        // Map enough pages to cover kernel + BSS + page tables + safety margin
+        // Use kernel_size which is phys_end - phys_start (covers file data)
+        // Add extra pages for page tables and other boot data
+        let total_pages = ((kernel_size + 0x100_0000) / PAGE_SIZE) as usize; // +16MB margin
         let mut phys = kernel_phys;
 
-        for pt_idx in 0..(pages_needed + 511) / 512 {
+        for pt_idx in 0..(total_pages + 511) / 512 {
             let pt = alloc_frame() as *mut u64;
 
             for entry in 0..512usize {
                 let page_num = pt_idx * 512 + entry;
-                if page_num >= pages_needed {
+                if page_num >= total_pages {
                     break;
                 }
-                *pt.add(entry) = phys | PRESENT | WRITABLE;
+                // Map all pages including those beyond kernel_phys_end
+                // This ensures page tables and other boot data are accessible
+                let target_phys = phys;
+                *pt.add(entry) = target_phys | PRESENT | WRITABLE;
                 phys += PAGE_SIZE;
             }
 
@@ -87,7 +94,9 @@ pub unsafe fn create_page_tables(
             let pages = (_framebuffer_size + PAGE_SIZE - 1) / PAGE_SIZE;
 
             for _page in 0..pages {
-                if pd_idx >= 512 { break; }
+                if pd_idx >= 512 {
+                    break;
+                }
                 let pt = alloc_frame() as *mut u64;
                 let pt_phys = _framebuffer_phys + mapped;
                 *pt.add(0) = pt_phys | PRESENT | WRITABLE;
@@ -113,7 +122,9 @@ pub unsafe fn create_page_tables(
             let mut pt_idx: usize = 0;
 
             for page in 0..pages {
-                if pt_idx >= 512 { break; }
+                if pt_idx >= 512 {
+                    break;
+                }
                 let pt = alloc_frame() as *mut u64;
                 let pt_phys = _env_phys + page * PAGE_SIZE;
                 *pt.add(0) = pt_phys | PRESENT | WRITABLE;

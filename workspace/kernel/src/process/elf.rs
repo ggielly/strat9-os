@@ -2151,7 +2151,9 @@ pub fn load_elf_image(
         tls_filesz: 0,
         tls_memsz: 0,
         tls_align: 0,
-        stack_exec: phdrs.iter().any(|ph| ph.p_type == PT_GNU_STACK && (ph.p_flags & 0x1) != 0),
+        stack_exec: phdrs
+            .iter()
+            .any(|ph| ph.p_type == PT_GNU_STACK && (ph.p_flags & 0x1) != 0),
     })
 }
 

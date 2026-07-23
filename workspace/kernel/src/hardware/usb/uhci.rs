@@ -323,22 +323,20 @@ impl UhciController {
         let setup_token = (8u32 << TD_TOKEN_MAXPKT_SHIFT)
             | ((device_addr as u32 & 0x7F) << TD_TOKEN_DEVADDR_SHIFT)
             | (0u32 << TD_TOKEN_ENDPT_SHIFT)
-            | 0x2Du32;                                     // PID = SETUP
+            | 0x2Du32; // PID = SETUP
         (*td_setup_virt).link_ptr = 0;
         (*td_setup_virt).ctrl_status = ctrl_base;
         (*td_setup_virt).token = setup_token;
         (*td_setup_virt).buffer = setup_buf_phys as u32;
 
         // Allocate status TD (always needed)
-        let td_status_frame =
-            allocate_zeroed_frame().ok_or("UHCI: status TD alloc failed")?;
+        let td_status_frame = allocate_zeroed_frame().ok_or("UHCI: status TD alloc failed")?;
         let td_status_phys = td_status_frame.start_address.as_u64();
         let td_status_virt = phys_to_virt(td_status_phys) as *mut UhciTD;
 
         if has_data && data_len > 0 {
             // Allocate data buffer
-            let data_buf_frame =
-                allocate_zeroed_frame().ok_or("UHCI: data buf alloc failed")?;
+            let data_buf_frame = allocate_zeroed_frame().ok_or("UHCI: data buf alloc failed")?;
             let data_buf_phys_addr = data_buf_frame.start_address.as_u64();
             let data_buf_virt_addr = phys_to_virt(data_buf_phys_addr) as *mut u8;
 
@@ -349,8 +347,7 @@ impl UhciController {
             }
 
             // Data TD: toggle=1 (DATA1), PID IN/OUT
-            let td_data_frame =
-                allocate_zeroed_frame().ok_or("UHCI: data TD alloc failed")?;
+            let td_data_frame = allocate_zeroed_frame().ok_or("UHCI: data TD alloc failed")?;
             let td_data_phys = td_data_frame.start_address.as_u64();
             let td_data_virt = phys_to_virt(td_data_phys) as *mut UhciTD;
 
@@ -382,11 +379,12 @@ impl UhciController {
             (*td_data_virt).link_ptr = (td_status_phys as u32) | TD_LINK_VF;
         } else {
             // Status-only TD: toggle=1, 0 bytes, IOC=1
-            let status_token = TD_TOKEN_IOC | TD_TOKEN_TOGGLE
+            let status_token = TD_TOKEN_IOC
+                | TD_TOKEN_TOGGLE
                 | (0u32 << TD_TOKEN_MAXPKT_SHIFT)
                 | ((device_addr as u32 & 0x7F) << TD_TOKEN_DEVADDR_SHIFT)
                 | (0u32 << TD_TOKEN_ENDPT_SHIFT)
-                | 0x69u32;                                  // PID = IN
+                | 0x69u32; // PID = IN
             (*td_status_virt).link_ptr = 0;
             (*td_status_virt).ctrl_status = ctrl_base;
             (*td_status_virt).token = status_token;
@@ -423,10 +421,8 @@ impl UhciController {
                 if dir_in && has_data && data_len > 0 {
                     if let Some(buf) = data_buf {
                         // Data is in the data TD's buffer (setup + 32 bytes)
-                        let data_td_virt =
-                            phys_to_virt(td_setup_phys + 32) as *const UhciTD;
-                        let data_buf_ptr =
-                            phys_to_virt((*data_td_virt).buffer as u64) as *const u8;
+                        let data_td_virt = phys_to_virt(td_setup_phys + 32) as *const UhciTD;
+                        let data_buf_ptr = phys_to_virt((*data_td_virt).buffer as u64) as *const u8;
                         core::ptr::copy_nonoverlapping(data_buf_ptr, buf.as_mut_ptr(), data_len);
                         transferred = data_len;
                     }
@@ -472,15 +468,7 @@ impl UhciController {
             let addr = usb_address;
             let ctrl_dev_addr = [0x00u8, 0x05, addr, 0x00, 0x00, 0x00, 0x00, 0x00];
             if unsafe {
-                self.ctrl_transfer(
-                    port,
-                    &ctrl_dev_addr,
-                    None,
-                    0,
-                    0,
-                    max_packet,
-                    low_speed,
-                )
+                self.ctrl_transfer(port, &ctrl_dev_addr, None, 0, 0, max_packet, low_speed)
             }
             .is_err()
             {
@@ -538,15 +526,7 @@ impl UhciController {
             // Set configuration (value=1)
             let set_config = [0x00u8, 0x09, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00];
             let _ = unsafe {
-                self.ctrl_transfer(
-                    port,
-                    &set_config,
-                    None,
-                    0,
-                    addr,
-                    max_pkt0 as u32,
-                    low_speed,
-                )
+                self.ctrl_transfer(port, &set_config, None, 0, addr, max_pkt0 as u32, low_speed)
             };
 
             crate::hardware::usb::hid::enumerate_device(port, addr as u8, &dev_desc);

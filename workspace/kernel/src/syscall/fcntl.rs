@@ -2,8 +2,7 @@
 //!
 //! Provides fcntl operations for file descriptor flags (CLOEXEC).
 
-use crate::{process::current_task_clone, syscall::error::SyscallError};
-use crate::vfs::scheme::OpenFlags;
+use crate::{process::current_task_clone, syscall::error::SyscallError, vfs::scheme::OpenFlags};
 
 // fcntl commands
 pub const F_DUPFD: u64 = 0;
@@ -30,21 +29,17 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
 
     match cmd {
-        F_GETFD => {
-            unsafe {
-                let fd_table = &*task.process.fd_table.get();
-                let cloexec = fd_table.get_cloexec(fd as u32)?;
-                Ok(if cloexec { FD_CLOEXEC } else { 0 })
-            }
-        }
-        F_SETFD => {
-            unsafe {
-                let fd_table = &mut *task.process.fd_table.get();
-                let cloexec = (arg & FD_CLOEXEC) != 0;
-                fd_table.set_cloexec(fd as u32, cloexec)?;
-                Ok(0)
-            }
-        }
+        F_GETFD => unsafe {
+            let fd_table = &*task.process.fd_table.get();
+            let cloexec = fd_table.get_cloexec(fd as u32)?;
+            Ok(if cloexec { FD_CLOEXEC } else { 0 })
+        },
+        F_SETFD => unsafe {
+            let fd_table = &mut *task.process.fd_table.get();
+            let cloexec = (arg & FD_CLOEXEC) != 0;
+            fd_table.set_cloexec(fd as u32, cloexec)?;
+            Ok(0)
+        },
         F_DUPFD => {
             if arg > u32::MAX as u64 {
                 return Err(SyscallError::InvalidArgument);
@@ -62,8 +57,7 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> Result<u64, SyscallError> {
         }
         F_SETFL => {
             // Only O_APPEND, O_NONBLOCK, O_ASYNC can be changed via F_SETFL
-            const CHANGEABLE: u32 = OpenFlags::APPEND.bits()
-                | OpenFlags::NONBLOCK.bits();
+            const CHANGEABLE: u32 = OpenFlags::APPEND.bits() | OpenFlags::NONBLOCK.bits();
             let new_flags = OpenFlags::from_bits_truncate((arg as u32) & CHANGEABLE);
             unsafe {
                 let fd_table = &mut *task.process.fd_table.get();

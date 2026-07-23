@@ -128,7 +128,7 @@ ${QEMU} \
     -device qemu-xhci \
     -device virtio-net-pci,netdev=net0 \
     -netdev user,id=net0,hostfwd=tcp::2222-:22 \
-    -serial mon:stdio \
+    -serial stdio \
     -no-reboot
 ''']
 
@@ -153,7 +153,7 @@ ${QEMU} \
     -device qemu-xhci \
     -device virtio-net-pci,netdev=net0 \
     -netdev user,id=net0,hostfwd=tcp::2222-:22 \
-    -serial mon:stdio \
+    -serial stdio \
     -no-reboot
 ''']
 
@@ -327,7 +327,7 @@ ${QEMU} \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive if=pflash,format=raw,file=/usr/share/OVMF/OVMF_VARS_4M.fd \
     -drive file=build/strat9-os-uefi.img,format=raw \
-    -serial mon:stdio \
+    -serial stdio \
     -no-reboot
 ''']
 
@@ -352,7 +352,7 @@ ${QEMU} \
     -device qemu-xhci \
     -device virtio-net-pci,netdev=net0 \
     -netdev user,id=net0,hostfwd=tcp::2222-:22 \
-    -serial mon:stdio \
+    -serial stdio \
     -no-reboot
 ''']
 

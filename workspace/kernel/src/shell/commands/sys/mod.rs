@@ -1277,9 +1277,7 @@ pub(super) fn cmd_test_exec_impl(_args: &[String]) -> Result<(), ShellError> {
         Ok(fd) => fd,
         Err(e) => {
             shell_println!("open failed: {:?}", e);
-            shell_println!(
-                "test_exec not found; ensure it's in the FAT32 boot partition"
-            );
+            shell_println!("test_exec not found; ensure it's in the FAT32 boot partition");
             return Err(ShellError::ExecutionFailed);
         }
     };

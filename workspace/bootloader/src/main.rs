@@ -254,7 +254,9 @@ fn efi_main() -> Status {
             loop {
                 let status: u8;
                 core::arch::asm!("in al, dx", out("al") status, in("dx") lsr, options(nomem, nostack));
-                if status & 0x20 != 0 { break; }
+                if status & 0x20 != 0 {
+                    break;
+                }
             }
             core::arch::asm!("out dx, al", in("al") b, in("dx") thr, options(nomem, nostack));
         }
@@ -531,12 +533,7 @@ fn efi_main() -> Status {
             "out dx, al",
             options(nomem, nostack, preserves_flags)
         );
-        paging::context_switch(
-            pml4_val,
-            stack_val,
-            entry_val,
-            args_val,
-        );
+        paging::context_switch(pml4_val, stack_val, entry_val, args_val);
     }
 }
 

@@ -37,7 +37,9 @@ fn run_panic_hooks(info: &PanicInfo) {
             }
         }
         None => {
-            crate::serial_force_println!("[panic] WARNING: panic hooks skipped (lock held by panicking context)");
+            crate::serial_force_println!(
+                "[panic] WARNING: panic hooks skipped (lock held by panicking context)"
+            );
         }
     }
 }
@@ -137,13 +139,7 @@ fn dump_backtrace() {
             if offset == 0 {
                 crate::serial_println!("  #{:02}: RIP=0x{:016X}  {}", i, ret, name);
             } else {
-                crate::serial_println!(
-                    "  #{:02}: RIP=0x{:016X}  {}+0x{:x}",
-                    i,
-                    ret,
-                    name,
-                    offset
-                );
+                crate::serial_println!("  #{:02}: RIP=0x{:016X}  {}+0x{:x}", i, ret, name, offset);
             }
         } else {
             crate::serial_println!("  #{:02}: RIP=0x{:016X}", i, ret);
@@ -247,7 +243,11 @@ pub fn panic_handler(info: &PanicInfo) -> ! {
         let (cr0, cr2, cr3, cr4) = read_cr_regs();
         crate::serial_force_println!(
             "CPU={}  CR0={:#X}  CR2={:#X}  CR3={:#X}  CR4={:#X}",
-            cpu, cr0, cr2, cr3, cr4
+            cpu,
+            cr0,
+            cr2,
+            cr3,
+            cr4
         );
         crate::serial_force_println!("RSP={:#018X}  RBP={:#018X}", read_rsp(), read_rbp());
         dump_backtrace();
@@ -290,7 +290,13 @@ pub fn panic_handler(info: &PanicInfo) -> ! {
             writer.clear();
             let _ = writeln!(writer, "=== GURU MEDiTATiON :: KERNEL PANiK ===");
             if let Some(loc) = info.location() {
-                let _ = writeln!(writer, "File: {}:{}:{}", loc.file(), loc.line(), loc.column());
+                let _ = writeln!(
+                    writer,
+                    "File: {}:{}:{}",
+                    loc.file(),
+                    loc.line(),
+                    loc.column()
+                );
             }
             let _ = writeln!(writer, "Message: {}", info.message());
             let _ = writeln!(writer, "");

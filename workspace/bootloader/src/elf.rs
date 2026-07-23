@@ -55,7 +55,13 @@ pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
 
     let mut info = Elf64Info {
         entry,
-        segments: [Segment { phys_addr: 0, virt_addr: 0, mem_size: 0, file_size: 0, flags: 0 }; 16],
+        segments: [Segment {
+            phys_addr: 0,
+            virt_addr: 0,
+            mem_size: 0,
+            file_size: 0,
+            flags: 0,
+        }; 16],
         segment_count: 0,
         phys_end: 0,
     };
@@ -87,7 +93,8 @@ pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
 
         // Safety: only copy if dest is in low memory (identity-mapped)
         let copy_size = p_filesz as usize;
-        if phys_offset >= 0x1000 && phys_offset < 0x1000_0000
+        if phys_offset >= 0x1000
+            && phys_offset < 0x1000_0000
             && (p_offset as usize) + copy_size <= data.len()
         {
             unsafe {
@@ -126,12 +133,23 @@ fn read_u16_le(data: &[u8], offset: usize) -> u16 {
 }
 
 fn read_u32_le(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
+    u32::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ])
 }
 
 fn read_u64_le(data: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes([
-        data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
-        data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+        data[offset + 4],
+        data[offset + 5],
+        data[offset + 6],
+        data[offset + 7],
     ])
 }

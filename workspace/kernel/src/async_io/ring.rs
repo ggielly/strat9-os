@@ -155,11 +155,7 @@ impl Ring {
         let cq_mapping_cap_ids = alloc::vec![self.cq_mapping_cap_id; cq_page_count];
 
         let sq_base = addr_space
-            .find_free_vma_range(
-                crate::kaslr::mmap_base(),
-                sq_page_count,
-                VmaPageSize::Small,
-            )
+            .find_free_vma_range(crate::kaslr::mmap_base(), sq_page_count, VmaPageSize::Small)
             .ok_or("async ring: no free range for SQ")?;
         addr_space.map_shared_frames_with_cap_ids(
             sq_base,

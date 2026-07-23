@@ -1545,7 +1545,9 @@ impl BuddyAllocator {
                 continue;
             }
 
-            if fragmentation_score < COMPACTION_FRAGMENTATION_THRESHOLD.load(AtomicOrdering::Relaxed) {
+            if fragmentation_score
+                < COMPACTION_FRAGMENTATION_THRESHOLD.load(AtomicOrdering::Relaxed)
+            {
                 continue;
             }
 
@@ -2823,5 +2825,3 @@ pub fn set_compaction_threshold(threshold: usize) {
 pub fn compaction_threshold() -> usize {
     COMPACTION_FRAGMENTATION_THRESHOLD.load(AtomicOrdering::Relaxed)
 }
-
-

@@ -322,7 +322,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             loop {
                 let s: u8;
                 core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
-                if s & 0x20 != 0 { break; }
+                if s & 0x20 != 0 {
+                    break;
+                }
             }
             core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
         }
@@ -342,7 +344,13 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         let lsr: u16 = 0x3F8 + 5;
         let msg = b"[km] after debug_assert\r\n";
         for &b in msg {
-            loop { let s: u8; core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags)); if s & 0x20 != 0 { break; } }
+            loop {
+                let s: u8;
+                core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
+                if s & 0x20 != 0 {
+                    break;
+                }
+            }
             core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
         }
     }
@@ -358,7 +366,13 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         let lsr: u16 = 0x3F8 + 5;
         let msg = b"[km] after boot_timestamp\r\n";
         for &b in msg {
-            loop { let s: u8; core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags)); if s & 0x20 != 0 { break; } }
+            loop {
+                let s: u8;
+                core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
+                if s & 0x20 != 0 {
+                    break;
+                }
+            }
             core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
         }
     }
@@ -373,7 +387,13 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         let lsr: u16 = 0x3F8 + 5;
         let msg = b"[km] before init_serial\r\n";
         for &b in msg {
-            loop { let s: u8; core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags)); if s & 0x20 != 0 { break; } }
+            loop {
+                let s: u8;
+                core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
+                if s & 0x20 != 0 {
+                    break;
+                }
+            }
             core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
         }
     }
@@ -407,7 +427,13 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         let lsr: u16 = 0x3F8 + 5;
         let msg = b"[km] IDT initialized\r\n";
         for &b in msg {
-            loop { let s: u8; core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags)); if s & 0x20 != 0 { break; } }
+            loop {
+                let s: u8;
+                core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
+                if s & 0x20 != 0 {
+                    break;
+                }
+            }
             core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
         }
     }
@@ -553,12 +579,20 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     crate::e9_println!("MM pre-regions");
     serial_println!("[init] Memory manager...");
-    serial_println!("[init] Memory map: 0x{:x} ({} bytes)", memory_map_base, memory_map_size);
+    serial_println!(
+        "[init] Memory map: 0x{:x} ({} bytes)",
+        memory_map_base,
+        memory_map_size
+    );
     let regions = args.memory_regions();
     serial_println!("[init] Memory regions count: {}", regions.len());
     if let Some(first) = regions.first() {
-        serial_println!("[init] First region: base={:#x} size={:#x} kind={:?}",
-            first.base, first.size, first.kind);
+        serial_println!(
+            "[init] First region: base={:#x} size={:#x} kind={:?}",
+            first.base,
+            first.size,
+            first.kind
+        );
     }
     crate::e9_println!("MM regions");
     // Safety: single-threaded boot, no concurrent access

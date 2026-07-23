@@ -1,6 +1,8 @@
 use alloc::vec::Vec;
-use uefi::prelude::*;
-use uefi::proto::media::file::{File, FileAttribute, FileInfo, FileMode};
+use uefi::{
+    prelude::*,
+    proto::media::file::{File, FileAttribute, FileInfo, FileMode},
+};
 
 pub struct LoadedModule {
     pub name: [u8; 64],
@@ -125,7 +127,11 @@ pub fn load_modules(image_handle: Handle) -> Vec<LoadedModule> {
         let base = buf.as_ptr() as u64;
         core::mem::forget(buf);
 
-        modules.push(LoadedModule { name, base, size: file_size as u64 });
+        modules.push(LoadedModule {
+            name,
+            base,
+            size: file_size as u64,
+        });
     }
 
     modules

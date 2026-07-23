@@ -31,7 +31,9 @@ unsafe fn early_print(s: &[u8]) {
         loop {
             let status: u8;
             core::arch::asm!("in al, dx", out("al") status, in("dx") lsr, options(nomem, nostack, preserves_flags));
-            if status & 0x20 != 0 { break; }
+            if status & 0x20 != 0 {
+                break;
+            }
         }
         core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
     }
@@ -82,7 +84,7 @@ unsafe fn enable_cpu_features() {
     let mut cr0: u64;
     core::arch::asm!("mov {}, cr0", out(reg) cr0);
     cr0 &= !4; // Clear EM (bit 2)
-    cr0 |= 2;  // Set MP (bit 1)
+    cr0 |= 2; // Set MP (bit 1)
     core::arch::asm!("mov cr0, {}", in(reg) cr0);
 }
 
@@ -107,7 +109,9 @@ pub unsafe extern "C" fn kmain(args_ptr: u64) -> ! {
             core::arch::asm!("in al, dx", in("dx") 0x3F8 + 5, out("al") lsr, options(nostack, preserves_flags));
             loop {
                 core::arch::asm!("in al, dx", in("dx") 0x3F8 + 5, out("al") lsr, options(nostack, preserves_flags));
-                if lsr & 0x20 != 0 { break; }
+                if lsr & 0x20 != 0 {
+                    break;
+                }
             }
             core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nostack, preserves_flags));
         }
@@ -149,22 +153,42 @@ pub unsafe extern "C" fn kmain(args_ptr: u64) -> ! {
             acpi_rsdp_base: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).acpi_rsdp_base)),
             memory_map_base: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).memory_map_base)),
             memory_map_size: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).memory_map_size)),
-            framebuffer_addr: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_addr)),
+            framebuffer_addr: core::ptr::read_unaligned(core::ptr::addr_of!(
+                (*ptr).framebuffer_addr
+            )),
             hhdm_offset: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).hhdm_offset)),
             cmdline_ptr: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).cmdline_ptr)),
             cmdline_len: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).cmdline_len)),
             modules_base: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).modules_base)),
             modules_size: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).modules_size)),
-            framebuffer_width: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_width)),
-            framebuffer_height: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_height)),
-            framebuffer_stride: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_stride)),
+            framebuffer_width: core::ptr::read_unaligned(core::ptr::addr_of!(
+                (*ptr).framebuffer_width
+            )),
+            framebuffer_height: core::ptr::read_unaligned(core::ptr::addr_of!(
+                (*ptr).framebuffer_height
+            )),
+            framebuffer_stride: core::ptr::read_unaligned(core::ptr::addr_of!(
+                (*ptr).framebuffer_stride
+            )),
             framebuffer_bpp: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_bpp)),
-            framebuffer_red_mask_size: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_red_mask_size)),
-            framebuffer_red_mask_shift: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_red_mask_shift)),
-            framebuffer_green_mask_size: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_green_mask_size)),
-            framebuffer_green_mask_shift: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_green_mask_shift)),
-            framebuffer_blue_mask_size: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_blue_mask_size)),
-            framebuffer_blue_mask_shift: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).framebuffer_blue_mask_shift)),
+            framebuffer_red_mask_size: core::ptr::read_unaligned(core::ptr::addr_of!(
+                (*ptr).framebuffer_red_mask_size
+            )),
+            framebuffer_red_mask_shift: core::ptr::read_unaligned(core::ptr::addr_of!(
+                (*ptr).framebuffer_red_mask_shift
+            )),
+            framebuffer_green_mask_size: core::ptr::read_unaligned(core::ptr::addr_of!(
+                (*ptr).framebuffer_green_mask_size
+            )),
+            framebuffer_green_mask_shift: core::ptr::read_unaligned(core::ptr::addr_of!(
+                (*ptr).framebuffer_green_mask_shift
+            )),
+            framebuffer_blue_mask_size: core::ptr::read_unaligned(core::ptr::addr_of!(
+                (*ptr).framebuffer_blue_mask_size
+            )),
+            framebuffer_blue_mask_shift: core::ptr::read_unaligned(core::ptr::addr_of!(
+                (*ptr).framebuffer_blue_mask_shift
+            )),
             bss_virt_base: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).bss_virt_base)),
             bss_virt_size: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).bss_virt_size)),
         }
@@ -172,15 +196,21 @@ pub unsafe extern "C" fn kmain(args_ptr: u64) -> ! {
 
     if args.magic != strat9_abi::boot::STRAT9_BOOT_MAGIC {
         early_print(b"[kmain] ERROR: Bad KernelArgs magic: 0x");
-        early_print_hex(unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.magic)) } as u64);
+        early_print_hex(
+            unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.magic)) } as u64,
+        );
         early_print(b"\r\n");
         hlt_loop();
     }
 
-    let memory_map_base = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.memory_map_base)) };
-    let memory_map_size = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.memory_map_size)) };
-    let framebuffer_addr = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.framebuffer_addr)) };
-    let acpi_rsdp_base = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.acpi_rsdp_base)) };
+    let memory_map_base =
+        unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.memory_map_base)) };
+    let memory_map_size =
+        unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.memory_map_size)) };
+    let framebuffer_addr =
+        unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.framebuffer_addr)) };
+    let acpi_rsdp_base =
+        unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.acpi_rsdp_base)) };
     early_print(b"[kmain] mmap=0x");
     early_print_hex(memory_map_base);
     early_print(b"/0x");

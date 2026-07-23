@@ -63,5 +63,4 @@ impl CircularBuffer {
         line.cells[..copy_len].copy_from_slice(&cells[..copy_len]);
         line.len = copy_len;
     }
-
 }

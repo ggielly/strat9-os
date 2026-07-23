@@ -30,10 +30,19 @@ _start:
                               mov                                                                            $'C', %al
                               out                                                                            %al, %dx
 
-                              # NOTE: BSS clear skipped -- page tables don't cover the
-                              # full .bss.stack range, and the stack doesn't need zeroing.
+                              # Clear BSS: zero-fill from __bss_start to __bss_end.
+                              # NOTE: Use movabs (64-bit absolute) instead of RIP-relative lea,
+                              # because in code-model=kernel the distance from _start (~0xFFFF...
+                              # 80000000) to __bss_start (~0xFFFF...8046xxxx) causes a 32-bit
+                              # signed displacement overflow in PC-relative addressing.
+                              movq                                                                           $__bss_start, %rdi
+                              movq                                                                           $__bss_end, %rcx
+                              subq                                                                           %rdi, %rcx           # size
+                              xorl                                                                           %eax, %eax
+                              shrq                                                                           $3, %rcx             # size / 8
+                              rep                                                                           stosq
 
-                              # E9: 'D' after (skipped) BSS clear
+                              # E9: 'D' after BSS clear
                               mov                                                                            $0xE9, %dx
                               mov                                                                            $'D', %al
                               out                                                                            %al, %dx
@@ -72,13 +81,9 @@ entry:                        # should not return; if it does, halt
                               hlt
                               jmp                                                                            .-1
 
-# Bootstrap stack - placed at end of BSS in linker script (last .bss section).
-.section                      .bss.stack, "aw", @nobits
+# Bootstrap stack - separate from .bss so BSS clear doesn't destroy it.
+.section                      .boot.stack, "aw", @nobits
 .align                        16
-.global                       __bss_start
-__bss_start:
 boot_stack_bottom:
                               .skip                                                                          65536           # 64 KB bootstrap stack
 boot_stack_top:
-.global                       __bss_end
-__bss_end:

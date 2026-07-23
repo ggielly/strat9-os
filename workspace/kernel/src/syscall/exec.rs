@@ -233,10 +233,10 @@ pub fn sys_execve(
         .process
         .brk
         .store(0, core::sync::atomic::Ordering::Relaxed);
-    current
-        .process
-        .mmap_hint
-        .store(crate::kaslr::mmap_base(), core::sync::atomic::Ordering::Relaxed);
+    current.process.mmap_hint.store(
+        crate::kaslr::mmap_base(),
+        core::sync::atomic::Ordering::Relaxed,
+    );
     // Set FS.base MSR for the new image TLS (or 0 if no PT_TLS).
     unsafe {
         let lo = new_fs_base as u32;
@@ -356,7 +356,7 @@ fn setup_user_stack(
     if let Some(base) = elf_info.interp_base {
         auxv.push((AT_BASE, base));
     }
-    auxv.push((AT_ENTRY, elf_info.program_entry));
+    auxv.push((AT_ENTRY, elf_info.entry));
     auxv.push((AT_RANDOM, rand_ptr));
     if execfn_ptr != 0 {
         auxv.push((AT_EXECFN, execfn_ptr));
