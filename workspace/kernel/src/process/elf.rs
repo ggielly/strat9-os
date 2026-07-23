@@ -116,7 +116,7 @@ fn pie_base() -> u64 {
 #[derive(Debug, Clone, Copy)]
 pub struct LoadedElfInfo {
     pub runtime_entry: u64,
-    pub program_entry: u64,
+    pub entry: u64,
     pub phdr_vaddr: u64,
     pub phent: u16,
     pub phnum: u16,
@@ -1854,10 +1854,14 @@ fn load_elf_task_inner(
 
     // TLS setup (Variant II: data at negative offsets from FS:0)
     let mut user_fs_base_val = 0u64;
+    let mut tls_vaddr = 0u64;
+    let mut tls_filesz = 0u64;
+    let mut tls_memsz = 0u64;
+    let mut tls_align = 0u64;
     if let Some(tls) = phdrs.iter().find(|p| p.p_type == PT_TLS) {
-        let tls_memsz = tls.p_memsz;
-        let tls_filesz = tls.p_filesz;
-        let tls_align = core::cmp::max(tls.p_align, 8).next_power_of_two();
+        tls_memsz = tls.p_memsz;
+        tls_filesz = tls.p_filesz;
+        tls_align = core::cmp::max(tls.p_align, 8).next_power_of_two();
         let aligned_memsz = (tls_memsz + tls_align - 1) & !(tls_align - 1);
         let total_size = aligned_memsz + 8;
         let n_tls_pages = ((total_size + 4095) / 4096) as usize;
@@ -1890,18 +1894,32 @@ fn load_elf_task_inner(
         let tp = tls_base + aligned_memsz;
         write_user_u64(&user_as, tp, tp)?;
         user_fs_base_val = tp;
+        tls_vaddr = tls_base;
     }
+
+    let loaded = LoadedElfInfo {
+        runtime_entry,
+        entry,
+        phdr_vaddr,
+        phent: header.e_phentsize,
+        phnum: header.e_phnum,
+        interp_base,
+        tls_vaddr,
+        tls_filesz,
+        tls_memsz,
+        tls_align,
+        stack_exec: phdrs
+            .iter()
+            .any(|ph| ph.p_type == PT_GNU_STACK && (ph.p_flags & PF_X) != 0),
+    };
 
     // Step 4: Map user stack
     // PT_GNU_STACK with PF_X means the stack should be executable (legacy ABI).
     // Without PT_GNU_STACK or without PF_X, the stack is NX (modern default).
-    let stack_exec = phdrs
-        .iter()
-        .any(|ph| ph.p_type == PT_GNU_STACK && (ph.p_flags & PF_X) != 0);
     let stack_flags = VmaFlags {
         readable: true,
         writable: true,
-        executable: stack_exec,
+        executable: loaded.stack_exec,
         user_accessible: true,
     };
     user_as.map_region(
@@ -2098,11 +2116,11 @@ pub fn load_elf_image(
     elf_data: &[u8],
     user_as: &AddressSpace,
 ) -> Result<LoadedElfInfo, &'static str> {
-    let loaded = load_elf_segments(elf_data, user_as)?;
+    let loaded = load_segment(elf_data, user_as)?;
 
     Ok(LoadedElfInfo {
         runtime_entry: loaded.runtime_entry,
-        program_entry: loaded.entry,
+        entry: loaded.entry,
         phdr_vaddr: loaded.phdr_vaddr,
         phent: loaded.header.e_phentsize,
         phnum: loaded.header.e_phnum,
