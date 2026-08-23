@@ -722,7 +722,7 @@ impl Framebuffer {
                     let mut idx = 0;
                     while idx < region_count {
                         let (px, py, pw, ph) = regions[idx];
-                        let _ = gpu.present_from_linear(src, stride, px, py, pw, ph);
+                        let _ = unsafe { gpu.present_from_linear(src, stride, px, py, pw, ph) };
                         idx += 1;
                     }
                 }

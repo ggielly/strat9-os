@@ -16,5 +16,5 @@
   "target-endian": "little",
   "target-pointer-width": 64,
   "disable-redzone": true,
-  "features": "-mmx"
+  "features": "-mmx,-soft-float"
 }

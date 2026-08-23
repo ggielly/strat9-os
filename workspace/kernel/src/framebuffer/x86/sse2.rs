@@ -32,21 +32,9 @@ pub unsafe fn fill_sse2(dst: *mut u32, color: u32, count: usize) {
 /// the weakly-ordered NT stores before anything that may observe them.
 #[target_feature(enable = "sse2")]
 unsafe fn fill_sse2_nt(dst: *mut u32, color: u32, count: usize) {
-    let color_vec = _mm_set1_epi32(color as i32);
-    let mut i = 0;
-    while i < count && dst.add(i) as usize % 16 != 0 {
-        *dst.add(i) = color;
-        i += 1;
-    }
-    while i + 4 <= count {
-        _mm_stream_si128(dst.add(i) as *mut __m128i, color_vec);
-        i += 4;
-    }
-    while i < count {
-        *dst.add(i) = color;
-        i += 1;
-    }
-    _mm_sfence();
+    // TOOLCHAIN BUG (see x86/mod.rs): movntdq aborts ISel on this nightly.
+    fill_sse2(dst, color, count)
+
 }
 
 #[target_feature(enable = "sse2")]
@@ -75,21 +63,9 @@ pub unsafe fn blit_sse2(dst: *mut u32, src: *const u32, count: usize) {
 /// (source stays on regular unaligned loads).
 #[target_feature(enable = "sse2")]
 unsafe fn blit_sse2_nt(dst: *mut u32, src: *const u32, count: usize) {
-    let mut i = 0;
-    while i < count && dst.add(i) as usize % 16 != 0 {
-        *dst.add(i) = *src.add(i);
-        i += 1;
-    }
-    while i + 4 <= count {
-        let v = _mm_loadu_si128(src.add(i) as *const __m128i);
-        _mm_stream_si128(dst.add(i) as *mut __m128i, v);
-        i += 4;
-    }
-    while i < count {
-        *dst.add(i) = *src.add(i);
-        i += 1;
-    }
-    _mm_sfence();
+    // TOOLCHAIN BUG (see x86/mod.rs): movntdq aborts ISel on this nightly.
+    blit_sse2(dst, src, count)
+
 }
 
 // In sse2, we use SSE4.1 blend where possible, but if only sse2 is available,
@@ -143,7 +119,8 @@ pub unsafe fn blend_sse2(dst: *mut u32, src: *const u32, alpha: u8, count: usize
 
 #[target_feature(enable = "sse2")]
 pub unsafe fn convert_bgr_to_argb_sse2(dst: *mut u32, src: *const u8, count: usize) {
-    convert_bgr_to_argb_ssse3(dst, src, count);
+    // TOOLCHAIN BUG (see x86/mod.rs): 128-bit pshufb aborts ISel here too.
+    crate::framebuffer::generic::convert_bgr_to_argb_generic(dst, src, count);
 }
 
 /// BGR24 => ARGB32 conversion using SSSE3 pshufb (4 pixels/iter)
