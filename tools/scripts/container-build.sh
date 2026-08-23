@@ -15,13 +15,13 @@ case "$cmd" in
     cargo make kernel
     ;;
   image)
-    echo "Creating limine image..."
-    cargo make limine-image
+    echo "Creating UEFI image..."
+    cargo make uefi-image
     ;;
   all)
-    echo "Full build: kernel + limine-image"
+    echo "Full build: kernel + uefi-image"
     cargo make kernel
-    cargo make limine-image
+    cargo make uefi-image
     ;;
   *)
     echo "Unknown command: $cmd" >&2

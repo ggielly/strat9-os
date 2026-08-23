@@ -83,9 +83,10 @@ check_dependencies() {
     # QEMU
     command -v qemu-system-x86_64 >/dev/null 2>&1 || missing+=("qemu-system-x86")
 
-    # ISO creation tools
-    command -v xorriso >/dev/null 2>&1 || missing+=("xorriso")
+    # Disk image creation tools (UEFI image: GPT/FAT32)
+    command -v parted >/dev/null 2>&1 || missing+=("parted")
     command -v mtools >/dev/null 2>&1 || missing+=("mtools")
+    command -v mkfs.fat >/dev/null 2>&1 || missing+=("dosfstools")
 
     # Rust toolchain
     if ! command -v rustc >/dev/null 2>&1; then
@@ -111,7 +112,7 @@ check_dependencies() {
         log_info ""
         log_info "to install on Debian/Ubuntu:"
         log_info "  sudo apt-get install gcc g++ make cmake git curl nasm yasm \\"
-        log_info "    qemu-system-x86 xorriso mtools parted dosfstools gdb \\"
+        log_info "    qemu-system-x86 ovmf parted mtools dosfstools gdb \\"
         log_info "    python3 python3-pip pkg-config ca-certificates"
         log_info ""
         log_info "to install Rust:"
@@ -125,29 +126,6 @@ check_dependencies() {
     fi
 
     log_success "all required dependencies found"
-}
-
-# =============================================================================
-# Limine bootloader setup
-# =============================================================================
-
-setup_limine() {
-    local limine_dir="${SCRIPT_DIR}/limine"
-
-    if [ -d "${limine_dir}" ]; then
-        log_info "limine bootloader already present at ${limine_dir}"
-        return 0
-    fi
-
-    log_info "cloning and building limine bootloader..."
-
-    git clone https://github.com/limine-bootloader/limine.git \
-        --depth=1 --branch=v8.x-binary "${limine_dir}"
-
-    (cd "${limine_dir}" && make)
-
-    log_success "limine bootloader ready"
-    log_info "add to PATH: export PATH=\"${limine_dir}:\$PATH\""
 }
 
 # =============================================================================
@@ -238,35 +216,6 @@ setup_build_scripts() {
     # Create tools/scripts directory if needed
     mkdir -p "${SCRIPT_DIR}/tools/scripts"
 
-    # Create setup-limine.sh script if it doesn't exist
-    if [ ! -f "${SCRIPT_DIR}/tools/scripts/setup-limine.sh" ]; then
-        log_info "creating setup-limine.sh script..."
-        cat > "${SCRIPT_DIR}/tools/scripts/setup-limine.sh" <<'LIMINESCRIPT'
-#!/usr/bin/env bash
-# Setup Limine bootloader
-
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-LIMINE_DIR="${SCRIPT_DIR}/limine"
-
-if [ -d "${LIMINE_DIR}" ]; then
-    echo "Limine already present at ${LIMINE_DIR}"
-    exit 0
-fi
-
-echo "Cloning Limine bootloader..."
-git clone https://github.com/limine-bootloader/limine.git \
-    --depth=1 --branch=v8.x-binary "${LIMINE_DIR}"
-
-echo "Building Limine..."
-cd "${LIMINE_DIR}" && make
-
-echo "Limine ready!"
-LIMINESCRIPT
-        chmod +x "${SCRIPT_DIR}/tools/scripts/setup-limine.sh"
-    fi
-
     log_success "build scripts ready"
 }
 
@@ -282,9 +231,6 @@ build_os() {
     # Ensure workspace is properly set up
     setup_workspace_links
     setup_build_scripts
-
-    # Ensure Limine is in PATH
-    export PATH="${SCRIPT_DIR}/limine:$PATH"
 
     # Check if workspace has content
     if [ ! -d "${WORKSPACE_DIR}/kernel" ]; then
@@ -305,33 +251,35 @@ build_os() {
     cd "${SCRIPT_DIR}"
 
     if command -v cargo-make >/dev/null 2>&1; then
-        cargo make build-all
+        cargo make uefi-image
     else
         log_warning "cargo-make not found, using cargo build directly"
         cargo build --release --target x86_64-unknown-none
     fi
 
     log_success "build completed successfully"
-    log_info "bootable image: build/strat9-os.iso"
+    log_info "bootable image: build/strat9-os-uefi.img"
 }
 
 run_qemu() {
     log_info "launching QEMU with strat9-os [NATIVE MODE]"
 
-    if [ ! -f "${BUILD_DIR}/strat9-os.iso" ]; then
-        log_error "ISO not found at ${BUILD_DIR}/strat9-os.iso"
+    if [ ! -f "${BUILD_DIR}/strat9-os-uefi.img" ]; then
+        log_error "UEFI image not found at ${BUILD_DIR}/strat9-os-uefi.img"
         log_info "run: $0 build first"
         exit 1
     fi
 
     if command -v cargo-make >/dev/null 2>&1; then
-        cargo make run
+        cargo make run-uefi
     else
-        log_info "running QEMU directly..."
+        log_info "running QEMU directly (OVMF required)..."
         qemu-system-x86_64 \
             -machine q35 \
-            -m 256M \
-            -cdrom "${BUILD_DIR}/strat9-os.iso" \
+            -m 2G \
+            -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+            -drive if=pflash,format=raw,file=/usr/share/OVMF/OVMF_VARS_4M.fd \
+            -drive file="${BUILD_DIR}/strat9-os-uefi.img",format=raw \
             -serial stdio \
             -display none \
             -no-reboot
@@ -358,9 +306,6 @@ setup_environment() {
     # Clone repositories
     clone_repos
 
-    # Setup Limine
-    setup_limine
-
     # Setup workspace links and scripts
     setup_workspace_links
     setup_build_scripts
@@ -371,7 +316,7 @@ setup_environment() {
     log_success "native environment setup complete!"
     log_info ""
     log_info "next steps:"
-    log_info "  1. Add limine to PATH: export PATH=\"${SCRIPT_DIR}/limine:\$PATH\""
+    log_info "  1. Install OVMF for QEMU UEFI runs: sudo apt-get install ovmf"
     log_info "  2. Build the OS: $0 build"
     log_info "  3. Run in QEMU: $0 run"
 }
@@ -388,7 +333,7 @@ show_info() {
     cargo --version 2>/dev/null || echo "  not installed"
     log_info ""
     log_info "key tools:"
-    for tool in gcc g++ nasm yasm qemu-system-x86_64 xorriso cargo-make; do
+    for tool in gcc g++ nasm yasm qemu-system-x86_64 parted mtools cargo-make; do
         if command -v "$tool" >/dev/null 2>&1; then
             printf "  %-20s %s\n" "$tool" "$(command -v "$tool")"
         else
@@ -409,13 +354,12 @@ USAGE:
     $0 <command> [options]
 
 COMMANDS:
-    setup           Setup native environment (check deps, clone repos, setup limine)
+    setup           Setup native environment (check deps, clone repos)
     check-deps      Check if all required dependencies are installed
     info            Show information about the native build environment
 
     clone           Clone/update all repositories from repos.toml
     update          Update all cloned repositories (git pull)
-    setup-limine    Clone and build Limine bootloader locally
     setup-links     Create symlinks from root to workspace/* for Cargo
 
     build [profile] Build strat9-os natively (default: release)
@@ -483,10 +427,6 @@ main() {
 
         update)
             update_repos
-            ;;
-
-        setup-limine)
-            setup_limine
             ;;
 
         setup-links)

@@ -4,8 +4,8 @@
 # Scans workspace/components/ and workspace/components/netutils/ for crates
 # with binary targets, then:
 #   1. Generates Makefile.toml tasks (debug, release, dev-opt)
-#   2. Adds them to limine-image dependencies
-#   3. Updates create-limine-image.sh to auto-copy binaries
+#   2. Checks they are listed in the uefi-image dependencies
+#   3. Reminds to update create-uefi-image.sh to auto-copy binaries
 #
 # Usage: bash tools/scripts/discover-components.sh [--dry-run]
 
@@ -134,26 +134,28 @@ for dir in $(echo "${!CRATES[@]}" | tr ' ' '\n' | sort); do
 done
 
 # ---------------------------------------------------------------------------
-# 3. Update limine-image dependencies
+# 3. Check uefi-image dependencies
 # ---------------------------------------------------------------------------
 
-echo "=== Checking limine-image dependencies ==="
+echo "=== Checking uefi-image dependencies ==="
 
-# Build the list of tasks that should be in limine-image
+UEFI_IMAGE_TASK="uefi-image"
+
+# Build the list of tasks that should be in uefi-image
 REQUIRED_TASKS=()
 for dir in $(echo "${!CRATES[@]}" | tr ' ' '\n' | sort); do
     task_name="strate-${dir#strate-}"
-    REQUIRED_TASKS+=("$task_name")
+    REQUIRED_TASKS+=("${task_name}-release")
 done
 
-# Check which tasks are missing from limine-image
+# Check which tasks are missing from the uefi-image dependencies block
 for task in "${REQUIRED_TASKS[@]}"; do
-    if ! grep -q "\"${task}\"" "$MAKEFILE" | grep -q "limine-image"; then
-        echo "  [INFO] ${task} may need to be added to limine-image dependencies"
+    if ! sed -n "/^\[tasks\.${UEFI_IMAGE_TASK}\]/,/^\[tasks\./p" "$MAKEFILE" | grep -q "\"${task}\""; then
+        echo "  [INFO] ${task} may need to be added to ${UEFI_IMAGE_TASK} dependencies"
     fi
 done
 
 echo ""
 echo "=== Done ==="
-echo "Review the changes to Makefile.toml and create-limine-image.sh"
+echo "Review the changes to Makefile.toml and create-uefi-image.sh"
 echo "Run with --dry-run to see what would be changed without modifying files"

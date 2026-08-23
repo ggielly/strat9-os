@@ -58,7 +58,7 @@ The kernel, ABI definitions, and bootloader : the foundation of the OS.
 |-------|-------------|-----|
 | **strat9-kernel** | OS kernel: scheduler, memory management, drivers, IPC | [docs](./api/strat9_kernel/index.html) · [source](https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/kernel) |
 | **strat9-abi** | ABI definitions shared between kernel and userspace (syscalls, data structs, flags, errno) | [docs](./api/strat9_abi/index.html) · [source](https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/abi) |
-| **strat9-bootloader** | BIOS/UEFI bootloader: stage1 MBR, stage2 protected/long mode switch | [docs](./api/bootloader/index.html) · [source](https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/bootloader) |
+| **strat9-bootloader** | UEFI bootloader: ELF loading, module table, memory map, page tables, framebuffer | [source](https://git.strat9-os.org/strat9-os/strat9-os/tree/main/workspace/bootloader) |
 
 ### Syscall & Userspace
 
