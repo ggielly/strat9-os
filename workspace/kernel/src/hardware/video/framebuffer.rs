@@ -20,7 +20,7 @@ use crate::{
     memory::{self, phys_to_virt},
 };
 use core::sync::atomic::{AtomicBool, Ordering};
-use spin::Mutex;
+use spin::{Mutex, Once};
 
 /// Maximum supported resolution
 const MAX_WIDTH: u32 = 3840;
@@ -106,7 +106,17 @@ unsafe impl Send for Framebuffer {}
 unsafe impl Sync for Framebuffer {}
 
 static FRAMEBUFFER: Mutex<Option<Framebuffer>> = Mutex::new(None);
+/// Lockless snapshot of the display geometry, published once at init.
+///
+/// Getters (`info`/`width`/`height`/`stride`/`source`) read this instead of
+/// taking the framebuffer mutex, so hot paths and frequent queries never
+/// contend with drawing (G4).
+static FB_INFO: Once<FramebufferInfo> = Once::new();
 static FRAMEBUFFER_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+fn publish_info(info: FramebufferInfo) {
+    FB_INFO.call_once(|| info);
+}
 
 impl Framebuffer {
     fn request_present(&mut self) {
@@ -203,6 +213,7 @@ impl Framebuffer {
         };
 
         *FRAMEBUFFER.lock() = Some(fb);
+        publish_info(info);
         FRAMEBUFFER_INITIALIZED.store(true, Ordering::SeqCst);
 
         log::info!(
@@ -308,6 +319,7 @@ impl Framebuffer {
         };
 
         *FRAMEBUFFER.lock() = Some(fb);
+        publish_info(info);
         FRAMEBUFFER_INITIALIZED.store(true, Ordering::SeqCst);
 
         log::info!(
@@ -376,6 +388,7 @@ impl Framebuffer {
             console_defer_present: false,
             zero_copy_backing: false,
         });
+        publish_info(info);
 
         log::info!(
             "[FB] AMDGPU framebuffer: {}x{} @ {}bpp, {} bytes",
@@ -388,36 +401,24 @@ impl Framebuffer {
         Ok(())
     }
 
-    /// Get framebuffer info
+    /// Get framebuffer info (lockless: reads the init-time snapshot)
     pub fn info() -> Option<FramebufferInfo> {
-        FRAMEBUFFER.lock().as_ref().map(|fb| fb.info)
+        FB_INFO.get().copied()
     }
 
-    /// Get framebuffer width
+    /// Get framebuffer width (lockless)
     pub fn width() -> u32 {
-        FRAMEBUFFER
-            .lock()
-            .as_ref()
-            .map(|fb| fb.info.width)
-            .unwrap_or(0)
+        FB_INFO.get().map(|i| i.width).unwrap_or(0)
     }
 
-    /// Get framebuffer height
+    /// Get framebuffer height (lockless)
     pub fn height() -> u32 {
-        FRAMEBUFFER
-            .lock()
-            .as_ref()
-            .map(|fb| fb.info.height)
-            .unwrap_or(0)
+        FB_INFO.get().map(|i| i.height).unwrap_or(0)
     }
 
-    /// Get stride (bytes per row)
+    /// Get stride in bytes per row (lockless)
     pub fn stride() -> u32 {
-        FRAMEBUFFER
-            .lock()
-            .as_ref()
-            .map(|fb| fb.info.stride)
-            .unwrap_or(0)
+        FB_INFO.get().map(|i| i.stride).unwrap_or(0)
     }
 
     /// Check if framebuffer is initialized
@@ -425,12 +426,11 @@ impl Framebuffer {
         FRAMEBUFFER_INITIALIZED.load(Ordering::Relaxed)
     }
 
-    /// Get framebuffer source
+    /// Get framebuffer source (lockless)
     pub fn source() -> FramebufferSource {
-        FRAMEBUFFER
-            .lock()
-            .as_ref()
-            .map(|fb| fb.info.source)
+        FB_INFO
+            .get()
+            .map(|i| i.source)
             .unwrap_or(FramebufferSource::None)
     }
 
@@ -447,8 +447,9 @@ impl Framebuffer {
 
     /// Set a pixel at (x, y) with RGB color.
     ///
-    /// Does NOT present to screen. Call `swap_buffers()` or `present()`
-    /// after a batch of draw operations.
+    /// Takes the framebuffer lock for a single pixel: fine for sparse dots,
+    /// but batched drawing MUST go through [`Self::blit_rect`] instead
+    /// (one lock acquisition and one dirty rectangle per call).
     pub fn set_pixel(x: u32, y: u32, r: u8, g: u8, b: u8) {
         {
             let mut guard = FRAMEBUFFER.lock();
@@ -483,6 +484,7 @@ impl Framebuffer {
 
     /// Fill rectangle with color.
     ///
+    /// Takes the framebuffer lock once for the whole rectangle.
     /// Does NOT present to screen. Call `swap_buffers()` or `present()`
     /// after a batch of draw operations.
     pub fn fill_rect(x: u32, y: u32, width: u32, height: u32, r: u8, g: u8, b: u8) {
@@ -522,8 +524,11 @@ impl Framebuffer {
             let stride = fb.info.stride as usize;
             let stride_pixels = fb.info.stride as usize / 4;
             let width_pixels = width as usize;
-            if stride_pixels == width_pixels {
-                let first = unsafe { offset.add(y as usize * stride + x as usize * 4) as *mut u32 };
+            // Contiguous fast path only when the rect IS the full row at
+            // column zero AND the target has no row padding — otherwise a
+            // linear fill would spill into following rows (G4 hardening).
+            if x == 0 && width_pixels == fb.info.width as usize && stride_pixels == width_pixels {
+                let first = unsafe { offset.add(y as usize * stride) as *mut u32 };
                 unsafe {
                     (fb.canvas.ops.fill)(first, pixel, width_pixels * height as usize);
                 }
@@ -541,6 +546,66 @@ impl Framebuffer {
             fb.canvas.dirty.include(x, y, width, height);
             fb.request_present();
         }
+    }
+
+    /// Blit a packed 32bpp XRGB rectangle into the current draw target
+    /// (double buffer when enabled, else the hardware framebuffer).
+    ///
+    /// This is the batch primitive: the framebuffer lock is taken exactly
+    /// once and a single dirty rectangle is marked, whatever the size.
+    /// `src` holds `h` rows of `w` pixels with a tight row stride of `w*4`
+    /// bytes; the rect is clipped against screen bounds.
+    pub fn blit_rect(src: &[u8], x: u32, y: u32, w: u32, h: u32) {
+        if w == 0 || h == 0 || x >= Self::width() || y >= Self::height() {
+            return;
+        }
+        let needed = w as usize * h as usize * 4;
+        if src.len() < needed {
+            return;
+        }
+
+        let mut guard = FRAMEBUFFER.lock();
+        let fb = match guard.as_mut() {
+            Some(f) => f,
+            None => return,
+        };
+
+        let max_w = fb.info.width - x;
+        let max_h = fb.info.height - y;
+        let w = w.min(max_w);
+        let h = h.min(max_h);
+        if w == 0 || h == 0 {
+            return;
+        }
+
+        let offset = if fb.use_double_buffer {
+            fb.double_buffer.unwrap_or(fb.info.base_virt as *mut u8)
+        } else {
+            fb.info.base_virt as *mut u8
+        };
+
+        let stride = fb.info.stride as usize;
+        let stride_pixels = stride / 4;
+        let src_row_bytes = w as usize * 4;
+        let full_width_contiguous =
+            x == 0 && w as usize == fb.info.width as usize && stride_pixels == w as usize;
+
+        unsafe {
+            if full_width_contiguous {
+                let dst = offset.add(y as usize * stride) as *mut u32;
+                let s = src.as_ptr() as *const u32;
+                (fb.canvas.ops.blit)(dst, s, w as usize * h as usize);
+            } else {
+                for dy in 0..h as usize {
+                    let dst = offset.add((y as usize + dy) * stride + x as usize * 4) as *mut u32;
+                    let s = src.as_ptr().add(dy * src_row_bytes) as *const u32;
+                    (fb.canvas.ops.blit)(dst, s, w as usize);
+                }
+            }
+        }
+
+        fb.canvas.dirty.include(x, y, w, h);
+        fb.request_present();
     }
 
     /// Draw a horizontal line
