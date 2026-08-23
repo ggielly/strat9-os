@@ -13,6 +13,8 @@ static FONT_8X16: [[u8; 16]; 95] = include!("font_data.rs");
 
 pub struct Renderer {
     fb_fd: usize,
+    /// /dev/display/damage — present commands ("present" / "x,y,w,h").
+    dmg_fd: usize,
     _fb_width: usize,
     _fb_height: usize,
     pub cols: usize,
@@ -29,6 +31,13 @@ unsafe impl Send for Renderer {}
 impl Renderer {
     pub fn open() -> Option<Self> {
         let fd = call::openat(0, "/dev/display/0.0", 0x1, 0).ok()?;
+        let dmg_fd = match call::openat(0, "/dev/display/damage", 0x1, 0) {
+            Ok(fd) => fd,
+            Err(_) => {
+                let _ = call::debug_log(b"[console] FATAL: cannot open /dev/display/damage\n");
+                return None;
+            }
+        };
         let info_fd = call::openat(0, "/dev/display/info", 0x1, 0).ok()?;
         let mut info_buf = [0u8; 256];
         let _ = call::read(info_fd, &mut info_buf);
@@ -43,6 +52,7 @@ impl Renderer {
 
         Some(Renderer {
             fb_fd: fd,
+            dmg_fd,
             _fb_width: w,
             _fb_height: h,
             cols: cols.min(MAX_COLS),
@@ -76,7 +86,7 @@ impl Renderer {
             }
         }
         self.prev_initialized = true;
-        let _ = call::write(self.fb_fd, b"present");
+        let _ = call::write(self.dmg_fd, b"present");
     }
 
     fn render_glyph(&self, col: usize, row: usize, cell: &Cell, is_cursor: bool) {
@@ -95,13 +105,16 @@ impl Renderer {
             &FONT_8X16[0]
         };
 
-        let mut pixel_data = [0u8; 4 + GLYPH_W * GLYPH_H * 3];
+        // Wire format v2: [x u16le][y u16le][w u16le][RGB888 w*h pixels]
+        let mut pixel_data = [0u8; 6 + GLYPH_W * GLYPH_H * 3];
         pixel_data[0] = x as u8;
         pixel_data[1] = (x >> 8) as u8;
         pixel_data[2] = y as u8;
         pixel_data[3] = (y >> 8) as u8;
+        pixel_data[4] = GLYPH_W as u8;
+        pixel_data[5] = 0;
 
-        let mut offset = 4;
+        let mut offset = 6;
         for row_bit in 0..GLYPH_H {
             let row_bits = glyph[row_bit];
             for col_bit in 0..GLYPH_W {

@@ -531,15 +531,8 @@ fn draw_glyph(buf: &Buffer, x: i32, y: i32, ch: u8, c: Color) {
 // ============================================================================
 
 /// Present the full offscreen buffer to the display via the kernel scheme.
-///
-/// Full-width single write is safe: the kernel Screen handler restarts each
-/// row at column x, so with x=0 and w==screen width the linear pixel stream
-/// maps row after row correctly.
-fn present_full(dfd: u32, dmg_fd: u32, buf: &Buffer) {
-    let total = buf.stride as usize * buf.h as usize;
-    let _ = call::write(dfd as usize, unsafe {
-        core::slice::from_raw_parts(buf.ptr, total)
-    });
+fn present_full(dfd: u32, dmg_fd: u32, buf: &Buffer, scratch: &mut Vec<u8>) {
+    write_rect_packet(dfd, buf, scratch, 0, 0, buf.w, buf.h);
     send_damage(dmg_fd, 0, 0, buf.w, buf.h);
 }
 
@@ -553,37 +546,68 @@ fn send_damage(dmg_fd: u32, x: u32, y: u32, w: u32, h: u32) {
     let _ = call::write(dmg_fd as usize, s.as_bytes());
 }
 
-/// Write the pixels of one damaged row to the screen handle.
+/// Write one rectangle of pixels in a SINGLE scheme write using wire
+/// format v2: [x u16le][y u16le][w u16le][RGB888 w*h pixels]. The kernel
+/// consumes exactly w pixels per row, so arbitrary sub-rectangles work
+/// without per-row syscalls.
 ///
-/// The kernel Screen handler has no explicit width field: it consumes pixels
-/// from column x up to the right edge or buffer end. Supplying exactly one
-/// row of `w` pixels therefore fills columns [x, x+w) of that row only.
-fn write_row_packet(dfd: u32, buf: &Buffer, x: u32, y: u32, w: u32) -> bool {
+/// `scratch` must be pre-sized to at least 6 + w*h*bpp bytes; it is reused
+/// across frames to avoid per-present allocations.
+fn write_rect_packet(
+    dfd: u32,
+    buf: &Buffer,
+    scratch: &mut Vec<u8>,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+) -> bool {
+    if w == 0 || h == 0 {
+        return false;
+    }
     let b = buf.bpp as usize / 8;
-    let mut packet: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(4 + w as usize * b);
-    packet.push((x & 0xFF) as u8);
-    packet.push((x >> 8) as u8);
-    packet.push((y & 0xFF) as u8);
-    packet.push((y >> 8) as u8);
-    let row_off = y as usize * buf.stride as usize + x as usize * b;
-    let row_bytes = w as usize * b;
-    packet.extend_from_slice(unsafe {
-        core::slice::from_raw_parts(buf.ptr.add(row_off), row_bytes)
-    });
-    matches!(call::write(dfd as usize, &packet), Ok(_))
+
+    // Gather rows into the scratch packet (rows are contiguous only when
+    // the rect spans the full width).
+    let needed = 6 + w as usize * h as usize * b;
+    scratch.clear();
+    scratch.reserve(needed.saturating_sub(scratch.capacity()));
+
+    scratch.push((x & 0xFF) as u8);
+    scratch.push((x >> 8) as u8);
+    scratch.push((y & 0xFF) as u8);
+    scratch.push((y >> 8) as u8);
+    scratch.push((w & 0xFF) as u8);
+    scratch.push((w >> 8) as u8);
+
+    for row in y..y.saturating_add(h) {
+        let row_off = row as usize * buf.stride as usize + x as usize * b;
+        let row_bytes = w as usize * b;
+        scratch.extend_from_slice(unsafe {
+            core::slice::from_raw_parts(buf.ptr.add(row_off), row_bytes)
+        });
+    }
+
+    matches!(call::write(dfd as usize, scratch), Ok(_))
 }
 
-/// Present only the given rectangle: one write per row, then a partial
-/// damage command. Returns the number of rows actually sent.
-fn present_rect(dfd: u32, dmg_fd: u32, buf: &Buffer, x: u32, y: u32, w: u32, h: u32) -> usize {
-    let mut sent = 0usize;
-    for row in y..y.saturating_add(h) {
-        if write_row_packet(dfd, buf, x, row, w) {
-            sent += 1;
-        }
+/// Present only the given rectangle, then send the matching partial damage
+/// command. Returns true when the pixel write succeeded.
+fn present_rect(
+    dfd: u32,
+    dmg_fd: u32,
+    buf: &Buffer,
+    scratch: &mut Vec<u8>,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+) -> bool {
+    let ok = write_rect_packet(dfd, buf, scratch, x, y, w, h);
+    if ok {
+        send_damage(dmg_fd, x, y, w, h);
     }
-    send_damage(dmg_fd, x, y, w, h);
-    sent
+    ok
 }
 
 /// Compare the freshly composited frame against the previously presented one
@@ -818,8 +842,10 @@ pub extern "C" fn _start() -> ! {
         }
     };
 
-    // Step 5c: previous-frame copy for damage computation.
+    // Step 5c: previous-frame copy for damage computation + reusable packet
+    // scratch (sized for a full-screen rect, worst case).
     let mut prev_frame: alloc::vec::Vec<u8> = vec![0u8; fb_sz];
+    let mut packet_scratch: alloc::vec::Vec<u8> = Vec::with_capacity(fb_sz);
 
     let buf = Buffer {
         w,
@@ -843,7 +869,7 @@ pub extern "C" fn _start() -> ! {
     // Step 7: First composite and present
     log("[display-server] step 7: initial composite...");
     srv.composite();
-    present_full(dfd as u32, dmg_fd as u32, &srv.buf);
+    present_full(dfd as u32, dmg_fd as u32, &srv.buf, &mut packet_scratch);
     prev_frame.copy_from_slice(unsafe {
         core::slice::from_raw_parts(srv.buf.ptr, fb_sz)
     });
@@ -922,15 +948,25 @@ pub extern "C" fn _start() -> ! {
         {
             None => {}
             Some((x, y, w, h)) => {
-                let sent = present_rect(dfd as u32, dmg_fd as u32, &srv.buf, x, y, w, h);
-                sync_prev_rect(
-                    &mut prev_frame,
-                    cur,
-                    srv.buf.stride as usize,
+                let sent = present_rect(
+                    dfd as u32,
+                    dmg_fd as u32,
+                    &srv.buf,
+                    &mut packet_scratch,
+                    x,
                     y,
+                    w,
                     h,
                 );
-                let _ = sent;
+                if sent {
+                    sync_prev_rect(
+                        &mut prev_frame,
+                        cur,
+                        srv.buf.stride as usize,
+                        y,
+                        h,
+                    );
+                }
             }
         }
 
