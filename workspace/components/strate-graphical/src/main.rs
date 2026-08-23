@@ -530,17 +530,161 @@ fn draw_glyph(buf: &Buffer, x: i32, y: i32, ch: u8, c: Color) {
 // Display scheme integration
 // ============================================================================
 
-/// Present the offscreen buffer to the display via the kernel scheme.
-fn present(dfd: u32, buf: &Buffer) {
+/// Present the full offscreen buffer to the display via the kernel scheme.
+///
+/// Full-width single write is safe: the kernel Screen handler restarts each
+/// row at column x, so with x=0 and w==screen width the linear pixel stream
+/// maps row after row correctly.
+fn present_full(dfd: u32, dmg_fd: u32, buf: &Buffer) {
     let total = buf.stride as usize * buf.h as usize;
-
-    // Write the entire framebuffer to the display scheme.
     let _ = call::write(dfd as usize, unsafe {
         core::slice::from_raw_parts(buf.ptr, total)
     });
+    send_damage(dmg_fd, 0, 0, buf.w, buf.h);
+}
 
-    // Trigger present via the damage path.
-    let _ = call::write(dfd as usize, b"present");
+/// Send a partial damage command ("x,y,w,h") so the kernel blits only the
+/// changed rectangle from its offscreen HeapScreen to the hardware.
+fn send_damage(dmg_fd: u32, x: u32, y: u32, w: u32, h: u32) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    let s = format!("{},{},{},{}", x, y, w, h);
+    let _ = call::write(dmg_fd as usize, s.as_bytes());
+}
+
+/// Write the pixels of one damaged row to the screen handle.
+///
+/// The kernel Screen handler has no explicit width field: it consumes pixels
+/// from column x up to the right edge or buffer end. Supplying exactly one
+/// row of `w` pixels therefore fills columns [x, x+w) of that row only.
+fn write_row_packet(dfd: u32, buf: &Buffer, x: u32, y: u32, w: u32) -> bool {
+    let b = buf.bpp as usize / 8;
+    let mut packet: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(4 + w as usize * b);
+    packet.push((x & 0xFF) as u8);
+    packet.push((x >> 8) as u8);
+    packet.push((y & 0xFF) as u8);
+    packet.push((y >> 8) as u8);
+    let row_off = y as usize * buf.stride as usize + x as usize * b;
+    let row_bytes = w as usize * b;
+    packet.extend_from_slice(unsafe {
+        core::slice::from_raw_parts(buf.ptr.add(row_off), row_bytes)
+    });
+    matches!(call::write(dfd as usize, &packet), Ok(_))
+}
+
+/// Present only the given rectangle: one write per row, then a partial
+/// damage command. Returns the number of rows actually sent.
+fn present_rect(dfd: u32, dmg_fd: u32, buf: &Buffer, x: u32, y: u32, w: u32, h: u32) -> usize {
+    let mut sent = 0usize;
+    for row in y..y.saturating_add(h) {
+        if write_row_packet(dfd, buf, x, row, w) {
+            sent += 1;
+        }
+    }
+    send_damage(dmg_fd, x, y, w, h);
+    sent
+}
+
+/// Compare the freshly composited frame against the previously presented one
+/// and return the bounding box of differing pixels (or None if identical).
+///
+/// Rows are compared in u64 chunks; only changed rows are scanned byte-wise
+/// for the exact horizontal extent. Cost is ~one RAM pass over unchanged
+/// frames (~3 MB memcmp), far below the syscall+blit it avoids.
+fn damage_bbox(
+    prev: &[u8],
+    cur: &[u8],
+    stride: usize,
+    height: usize,
+    bpp_bytes: usize,
+) -> Option<(u32, u32, u32, u32)> {
+    if prev.len() != cur.len() || prev.len() < stride * height {
+        return Some((0, 0, u32::MAX, u32::MAX)); // size mismatch: force full
+    }
+
+    let mut min_row: usize = usize::MAX;
+    let mut max_row: usize = 0;
+    let mut min_col: usize = usize::MAX;
+    let mut max_col: usize = 0;
+
+    for row in 0..height {
+        let start = row * stride;
+        let end = start + stride;
+        let a = &prev[start..end];
+        let c = &cur[start..end];
+
+        // Fast reject: identical rows cost 8 bytes per step.
+        let mut changed = false;
+        let mut i = 0usize;
+        while i + 8 <= stride {
+            if a[i..i + 8] != c[i..i + 8] {
+                changed = true;
+                break;
+            }
+            i += 8;
+        }
+        if !changed {
+            while i < stride {
+                if a[i] != c[i] {
+                    changed = true;
+                    break;
+                }
+                i += 1;
+            }
+        }
+        if !changed {
+            continue;
+        }
+
+        // Locate exact extent on this row.
+        let mut rmin = stride;
+        let mut rmax = 0usize;
+        for col in 0..stride {
+            if a[col] != c[col] {
+                if col < rmin {
+                    rmin = col;
+                }
+                rmax = col;
+            }
+        }
+        if rmin > rmax {
+            continue;
+        }
+        if row < min_row {
+            min_row = row;
+        }
+        if row > max_row {
+            max_row = row;
+        }
+        let pmin = rmin / bpp_bytes;
+        let pmax = rmax / bpp_bytes;
+        if pmin < min_col {
+            min_col = pmin;
+        }
+        if pmax > max_col {
+            max_col = pmax;
+        }
+    }
+
+    if min_row == usize::MAX {
+        return None;
+    }
+    Some((
+        min_col as u32,
+        min_row as u32,
+        (max_col - min_col + 1) as u32,
+        (max_row - min_row + 1) as u32,
+    ))
+}
+
+/// Copy one rect worth of rows from `cur` into `prev` after presentation.
+fn sync_prev_rect(prev: &mut [u8], cur: &[u8], stride: usize, y: u32, h: u32) {
+    let y = y as usize;
+    let h = h as usize;
+    let start = y * stride;
+    let end = (y + h) * stride;
+    prev[start..end].copy_from_slice(&cur[start..end]);
 }
 
 // ============================================================================
@@ -656,6 +800,27 @@ pub extern "C" fn _start() -> ! {
         fb_sz, w, h, bpp_b
     ));
 
+    // Step 5b: open the damage handle (the screen fd only accepts pixels;
+    // "present"/"x,y,w,h" commands go through /dev/display/damage).
+    let dmg_fd = match call::open("/dev/display/damage", 0) {
+        Ok(fd) => {
+            log(&format!("[display-server]   damage fd={}", fd));
+            fd
+        }
+        Err(e) => {
+            log(&format!(
+                "[display-server] FATAL: cannot open /dev/display/damage: {:?}",
+                e
+            ));
+            loop {
+                core::hint::spin_loop();
+            }
+        }
+    };
+
+    // Step 5c: previous-frame copy for damage computation.
+    let mut prev_frame: alloc::vec::Vec<u8> = vec![0u8; fb_sz];
+
     let buf = Buffer {
         w,
         h,
@@ -678,7 +843,10 @@ pub extern "C" fn _start() -> ! {
     // Step 7: First composite and present
     log("[display-server] step 7: initial composite...");
     srv.composite();
-    present(dfd as u32, &srv.buf);
+    present_full(dfd as u32, dmg_fd as u32, &srv.buf);
+    prev_frame.copy_from_slice(unsafe {
+        core::slice::from_raw_parts(srv.buf.ptr, fb_sz)
+    });
     log("[display-server]   initial frame presented");
 
     log("[display-server] === entering main loop ===");
@@ -691,9 +859,16 @@ pub extern "C" fn _start() -> ! {
     let mut kb = [0u8; 64];
     let mut mb = [0u8; 56];
     let mut frame_count: u64 = 0;
+    let mut skipped_frames: u64 = 0;
+    // Event-driven redraw: only composite + present when something changed.
+    // (Raw keyboard scancodes do not alter the display today; mouse events
+    // and window operations do.)
+    let mut need_redraw = false;
 
     // Main loop
     loop {
+        let mut had_mouse = false;
+
         // Read keyboard
         if kfd != 0 {
             if let Ok(n) = call::read(kfd, &mut kb) {
@@ -708,6 +883,7 @@ pub extern "C" fn _start() -> ! {
             if let Ok(n) = call::read(mfd, &mut mb) {
                 let mut i = 0;
                 while i + 7 <= n {
+                    had_mouse = true;
                     let dx = mb[i] as i16 | ((mb[i + 1] as i16) << 8);
                     let dy = mb[i + 2] as i16 | ((mb[i + 3] as i16) << 8);
                     let new_btns = mb[i + 5];
@@ -723,13 +899,48 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
-        // Composite and present
-        srv.composite();
-        present(dfd as u32, &srv.buf);
+        if had_mouse {
+            need_redraw = true;
+        }
 
+        // Nothing changed: skip compositing AND presenting entirely. The
+        // diff below would find no damage anyway, but skipping composite
+        // also saves the full offscreen redraw.
+        if !need_redraw {
+            skipped_frames += 1;
+            let _ = call::sched_yield();
+            continue;
+        }
+
+        // Composite into the offscreen buffer, then present only the
+        // rectangle that actually differs from the last presented frame.
+        srv.composite();
+
+        let bpp_bytes = (srv.buf.bpp / 8) as usize;
+        let cur = unsafe { core::slice::from_raw_parts(srv.buf.ptr, fb_sz) };
+        match damage_bbox(&prev_frame, cur, srv.buf.stride as usize, srv.buf.h as usize, bpp_bytes)
+        {
+            None => {}
+            Some((x, y, w, h)) => {
+                let sent = present_rect(dfd as u32, dmg_fd as u32, &srv.buf, x, y, w, h);
+                sync_prev_rect(
+                    &mut prev_frame,
+                    cur,
+                    srv.buf.stride as usize,
+                    y,
+                    h,
+                );
+                let _ = sent;
+            }
+        }
+
+        need_redraw = false;
         frame_count += 1;
         if frame_count % 500 == 0 {
-            log(&format!("[display-server] frame {}", frame_count));
+            log(&format!(
+                "[display-server] frames={} idle-skips={}",
+                frame_count, skipped_frames
+            ));
         }
 
         // Yield
