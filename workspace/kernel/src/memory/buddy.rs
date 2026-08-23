@@ -203,6 +203,24 @@ impl BuddyAllocator {
         // allocator and must not appear in any buddy segment.
         let remaining_len = boot_alloc::snapshot_free_regions(&mut remaining);
 
+        // R2 invariant: the post-reservation snapshot must not contain more
+        // per-zone regions than the capacity reserved above. Growth would
+        // mean the boot allocator split a region (interior carve), which the
+        // carve-from-front policy forbids. Panic here with an actionable
+        // message instead of the generic capacity panic inside
+        // pass_build_segments.
+        let built_counts = Self::zone_intersection_counts(&remaining[..remaining_len]);
+        for zi in 0..ZoneType::COUNT {
+            let reserved = self.zones[zi].segment_capacity;
+            if built_counts[zi] > reserved {
+                panic!(
+                    "Buddy bootstrap invariant broken: zone {:?} needs {} segments after reservations but only {} were reserved. \
+                     The boot allocator must keep carving from region fronts (page-aligned, align <= PAGE_SIZE) so region counts never grow between snapshots.",
+                    self.zones[zi].zone_type, built_counts[zi], reserved,
+                );
+            }
+        }
+
         self.pass_build_segments(&remaining[..remaining_len]);
         self.pass_finalize_zone_accounting();
         self.pass_setup_segment_bitmaps();
@@ -221,13 +239,14 @@ impl BuddyAllocator {
                 0
             };
             serial_println!(
-                "  [buddy] Zone {:?}: segments={}/{} managed={} present={} reserved={} span={} holes={} min/low/high={}/{}/{} reserve={} ({}% utilized, {} MB managed)",
+                "  [buddy] Zone {:?}: segments={}/{} managed={} present={} reserved={} unmanaged={} span={} holes={} min/low/high={}/{}/{} reserve={} ({}% utilized, {} MB managed)",
                 zone.zone_type,
                 zone.segment_count,
                 zone.segment_capacity,
                 zone.page_count,
                 zone.present_pages,
                 zone.reserved_pages,
+                zone.unmanaged_pages,
                 zone.span_pages,
                 hole_pages,
                 zone.watermark_min,
@@ -276,6 +295,7 @@ impl BuddyAllocator {
             zone.span_pages = 0;
             zone.allocated = 0;
             zone.reserved_pages = 0;
+            zone.unmanaged_pages = 0;
             zone.lowmem_reserve_pages = 0;
             zone.watermark_min = 0;
             zone.watermark_low = 0;
@@ -292,16 +312,15 @@ impl BuddyAllocator {
     }
 
     /// Reserve per-zone segment tables sized to the actual fragmented layout.
+    ///
+    /// Invariant (R2): this capacity is derived from the *pre-reservation*
+    /// snapshot, while [`Self::pass_build_segments`] consumes the *post*
+    /// reservation snapshot. The two agree only because the boot allocator
+    /// carves exclusively from region fronts (page-aligned starts, see
+    /// `boot_alloc::try_alloc_accessible`), so region counts can never grow
+    /// between the two snapshots. `init()` re-checks this explicitly.
     fn pass_reserve_segment_storage(&mut self, memory_regions: &[MemoryRegion]) {
-        let mut segment_counts = [0usize; ZoneType::COUNT];
-
-        for region in memory_regions {
-            for (zi, count) in segment_counts.iter_mut().enumerate() {
-                if Self::zone_intersection_aligned(region, zi).is_some() {
-                    *count = count.saturating_add(1);
-                }
-            }
-        }
+        let segment_counts = Self::zone_intersection_counts(memory_regions);
 
         for (zi, &segment_count) in segment_counts.iter().enumerate() {
             let zone = &mut self.zones[zi];
@@ -378,23 +397,27 @@ impl BuddyAllocator {
     /// Finalise zone accounting once the managed segment set is known.
     fn pass_finalize_zone_accounting(&mut self) {
         for zone in &mut self.zones {
-            zone.reserved_pages = zone.present_pages.saturating_sub(zone.page_count);
+            // Pages inside segments that protected-range skipping removed
+            // from management count as reserved, not as available (R1).
+            let seedable_pages = zone.page_count.saturating_sub(zone.unmanaged_pages);
+            zone.reserved_pages = zone.present_pages.saturating_sub(seedable_pages);
             zone.lowmem_reserve_pages =
-                Self::lowmem_reserve_target_pages(zone.zone_type, zone.page_count);
+                Self::lowmem_reserve_target_pages(zone.zone_type, seedable_pages);
             // Watermark parameters: (divisor, floor_pages, cap_pages)
             // watermark_min: at least 16 pages, up to 2048, ~0.4% of zone
-            zone.watermark_min = Self::watermark_target_pages(zone.page_count, 256, 16, 2048);
+            zone.watermark_min =
+                Self::watermark_target_pages(seedable_pages, 256, 16, 2048);
 
             // watermark_low/high: increment of at least 16 pages, up to 2048, ~0.2% of zone
-            let delta = Self::watermark_target_pages(zone.page_count, 512, 16, 2048);
+            let delta = Self::watermark_target_pages(seedable_pages, 512, 16, 2048);
             zone.watermark_low = zone
                 .watermark_min
                 .saturating_add(delta)
-                .min(zone.page_count);
+                .min(seedable_pages);
             zone.watermark_high = zone
                 .watermark_low
                 .saturating_add(delta)
-                .min(zone.page_count);
+                .min(seedable_pages);
         }
     }
 
@@ -459,6 +482,12 @@ impl BuddyAllocator {
                 }
 
                 let slot = zone.segment_count;
+                // R1: pages covered by protected ranges are inside this
+                // segment extent but never seeded into free lists. Track
+                // them so zone accounting does not over-report free pages.
+                let unmanaged =
+                    Self::protected_pages_in_range(start, end);
+                zone.unmanaged_pages = zone.unmanaged_pages.saturating_add(unmanaged);
                 zone.segments_mut()[slot] = ZoneSegment {
                     base: PhysAddr::new(start),
                     page_count: ((end - start) / PAGE_SIZE) as usize,
@@ -1276,6 +1305,82 @@ impl BuddyAllocator {
     #[inline]
     fn pageblock_tag_bytes_upper_bound_for_pages(page_count: usize) -> usize {
         page_count
+    }
+
+    /// Count, per zone, how many snapshot regions intersect it.
+    ///
+    /// Single source of truth used both to reserve segment-table capacity
+    /// (pre-reservation snapshot) and to assert the bootstrap invariant
+    /// after reservations (post-reservation snapshot).
+    fn zone_intersection_counts(memory_regions: &[MemoryRegion]) -> [usize; ZoneType::COUNT] {
+        let mut counts = [0usize; ZoneType::COUNT];
+        for region in memory_regions {
+            for zi in 0..ZoneType::COUNT {
+                if Self::zone_intersection_aligned(region, zi).is_some() {
+                    counts[zi] = counts[zi].saturating_add(1);
+                }
+            }
+        }
+        counts
+    }
+
+    /// Pages of `[start, end)` covered by page-aligned protected ranges
+    /// (R1). Overlapping protected ranges are merged so pages are never
+    /// double-counted. Pure except for the protected-range snapshot lookup;
+    /// see [`Self::count_pages_union`] for the testable core.
+    fn protected_pages_in_range(start: u64, end: u64) -> usize {
+        let mut intervals = [(0u64, 0u64); boot_alloc::MAX_PROTECTED_RANGES];
+        let mut n = 0usize;
+        for (base, size) in Self::protected_module_ranges().into_iter().flatten() {
+            if size == 0 || n >= intervals.len() {
+                continue;
+            }
+            let pstart = Self::align_down(base, PAGE_SIZE);
+            let pend = Self::align_up(base.saturating_add(size), PAGE_SIZE);
+            let s = core::cmp::max(pstart, start);
+            let e = core::cmp::min(pend, end);
+            if s < e {
+                intervals[n] = (s, e);
+                n += 1;
+            }
+        }
+        Self::count_pages_union(&intervals[..n])
+    }
+
+    /// Sum of pages covered by the union of page-aligned `(start, end)`
+    /// intervals, merging overlaps. Testable core of R1 accounting.
+    fn count_pages_union(intervals: &[(u64, u64)]) -> usize {
+        if intervals.is_empty() {
+            return 0;
+        }
+
+        // Insertion sort by start (interval count is tiny: MAX_PROTECTED_RANGES).
+        let mut sorted = [(0u64, 0u64); boot_alloc::MAX_PROTECTED_RANGES];
+        let mut len = 0usize;
+        for &(s, e) in intervals {
+            let mut j = len;
+            while j > 0 && sorted[j - 1].0 > s {
+                sorted[j] = sorted[j - 1];
+                j -= 1;
+            }
+            sorted[j] = (s, e);
+            len += 1;
+        }
+
+        let mut total_pages = 0usize;
+        let mut cur_start = sorted[0].0;
+        let mut cur_end = sorted[0].1;
+        for &(s, e) in sorted.iter().take(len).skip(1) {
+            if s <= cur_end {
+                cur_end = core::cmp::max(cur_end, e);
+            } else {
+                total_pages = total_pages.saturating_add(((cur_end - cur_start) / PAGE_SIZE) as usize);
+                cur_start = s;
+                cur_end = e;
+            }
+        }
+        total_pages = total_pages.saturating_add(((cur_end - cur_start) / PAGE_SIZE) as usize);
+        total_pages
     }
 
     /// Performs the align up operation.
@@ -2587,6 +2692,8 @@ pub struct ZoneStats {
     pub spanned_pages: usize,
     /// Pages removed from management during bootstrap.
     pub reserved_pages: usize,
+    /// Pages inside segments excluded from free lists (protected ranges, R1).
+    pub unmanaged_pages: usize,
     /// Pages allocated to live callers.
     pub allocated_pages: usize,
     /// Order-0 pages currently parked in per-CPU caches.
@@ -2633,6 +2740,7 @@ impl ZoneStats {
             present_pages: 0,
             spanned_pages: 0,
             reserved_pages: 0,
+            unmanaged_pages: 0,
             allocated_pages: 0,
             cached_pages: 0,
             cached_unmovable_pages: 0,
@@ -2789,6 +2897,7 @@ impl BuddyAllocator {
                 present_pages: zone.present_pages,
                 spanned_pages: zone.span_pages,
                 reserved_pages: zone.reserved_pages,
+                unmanaged_pages: zone.unmanaged_pages,
                 allocated_pages: zone.allocated.saturating_sub(cached),
                 cached_pages: cached,
                 cached_unmovable_pages: cached_unmovable,
@@ -2825,3 +2934,9 @@ pub fn set_compaction_threshold(threshold: usize) {
 pub fn compaction_threshold() -> usize {
     COMPACTION_FRAGMENTATION_THRESHOLD.load(AtomicOrdering::Relaxed)
 }
+
+/// Runtime buddy self-test battery (`buddy_selftest.rs`), mounted as a child
+/// module of `buddy` so it can exercise private helpers directly.
+#[cfg(feature = "selftest")]
+#[path = "buddy_selftest.rs"]
+pub mod selftest;

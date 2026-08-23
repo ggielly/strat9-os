@@ -9,8 +9,9 @@ extern crate alloc;
 
 /// Kernel entry point
 ///
-/// Convention: rdi = DTB physical address
+/// Convention: rdi = pointer to `KernelArgs` (0 for PVH boot, see
+/// `boot::dtb_boot::kmain`)
 #[no_mangle]
-pub unsafe extern "C" fn kernel_main(dtb_ptr: u64) -> ! {
-    strat9_kernel::boot::dtb_boot::kmain(dtb_ptr)
+pub unsafe extern "C" fn kernel_main(args_ptr: u64) -> ! {
+    strat9_kernel::boot::dtb_boot::kmain(args_ptr)
 }

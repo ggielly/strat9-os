@@ -199,6 +199,64 @@ fn reserve_range_in_map(
     }
 }
 
+/// Reserve every frame of the boot page-table hierarchy rooted at
+/// `pml4_phys` so the allocator never hands out a frame that still holds a
+/// live table (PML4/PDPT/PD/PT of the CR3 installed by the bootloader).
+///
+/// Reads go through `phys_to_virt`, which works both with the bootloader's
+/// 8 GiB identity map (hhdm_offset = 0) and with a real HHDM.
+///
+/// # Safety
+/// Single-threaded early boot; `pml4_phys` must be the current CR3 root.
+unsafe fn reserve_boot_page_tables(
+    map: &mut [boot::entry::MemoryRegion],
+    len: &mut usize,
+    pml4_phys: u64,
+) {
+    const PRESENT: u64 = 1;
+    const HUGE_PAGE: u64 = 1 << 7;
+    const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
+    let virt = |phys: u64| crate::memory::phys_to_virt(phys) as *const u64;
+
+    // L4 root
+    reserve_range_in_map(map, len, pml4_phys, pml4_phys + PAGE_SIZE);
+    let l4 = virt(pml4_phys);
+
+    for i in 0..512usize {
+        let e_l3 = core::ptr::read_volatile(l4.add(i));
+        if e_l3 & PRESENT == 0 || e_l3 & HUGE_PAGE != 0 {
+            continue;
+        }
+        let l3_phys = e_l3 & ADDR_MASK;
+        reserve_range_in_map(map, len, l3_phys, l3_phys + PAGE_SIZE);
+
+        let l3 = virt(l3_phys);
+        for j in 0..512usize {
+            let e_l2 = core::ptr::read_volatile(l3.add(j));
+            if e_l2 & PRESENT == 0 {
+                continue;
+            }
+            if e_l2 & HUGE_PAGE != 0 {
+                continue; // 1 GiB leaf: no child table
+            }
+            let l2_phys = e_l2 & ADDR_MASK;
+            reserve_range_in_map(map, len, l2_phys, l2_phys + PAGE_SIZE);
+
+            let l2 = virt(l2_phys);
+            for k in 0..512usize {
+                let e_l1 = core::ptr::read_volatile(l2.add(k));
+                if e_l1 & PRESENT == 0 || e_l1 & HUGE_PAGE != 0 {
+                    continue; // absent or 2 MiB leaf
+                }
+                let l1_phys = e_l1 & ADDR_MASK;
+                reserve_range_in_map(map, len, l1_phys, l1_phys + PAGE_SIZE);
+                // L1 entries are 4 KiB leaves: no recursion below.
+            }
+        }
+    }
+}
+
 #[inline]
 fn count_free_like_regions(map: &[boot::entry::MemoryRegion], len: usize) -> usize {
     map[..len]
@@ -272,7 +330,7 @@ fn register_initfs_module(path: &str, module: Option<(u64, u64)>) {
     }
 }
 
-/// Register modules from the bootloader module table (ABI v2).
+/// Register modules from the bootloader module table (see `STRAT9_BOOT_ABI_VERSION`).
 ///
 /// Each module has a name, physical base address, and size.
 /// The kernel maps them into the VFS at /initfs/<name>.
@@ -598,15 +656,59 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // Safety: single-threaded boot, no concurrent access
     let mmap_work = unsafe { &mut *core::ptr::addr_of_mut!(MMAP_WORK) };
     crate::e9_println!("MM work array");
-    let mmap_work_len = core::cmp::min(regions.len(), mmap_work.len());
+    let mut mmap_work_len = core::cmp::min(regions.len(), mmap_work.len());
     crate::e9_println!("MM len calc");
     for (dst, src) in mmap_work.iter_mut().zip(regions.iter()).take(mmap_work_len) {
         *dst = *src;
     }
     crate::e9_println!("MM copy done");
 
+    // ------------------------------------------------------------------
+    // Reserve bootloader-owned physical ranges from the working map BEFORE
+    // any allocator sees it. Without this, the boot/buddy allocators can
+    // hand out pages that hold:
+    //   - the running kernel image (loaded in Free RAM by the bootloader),
+    //   - the boot page-table frames reachable from CR3,
+    //   - initfs module data placed by the bootloader in Reclaim memory.
+    // ------------------------------------------------------------------
+    {
+        let kernel_base = args.kernel_base;
+        let kernel_size = args.kernel_size;
+        if kernel_base != 0 && kernel_size != 0 {
+            reserve_range_in_map(
+                mmap_work,
+                &mut mmap_work_len,
+                kernel_base,
+                kernel_base.saturating_add(kernel_size),
+            );
+        }
+
+        for module in args.modules() {
+            if module.base == 0 || module.size == 0 {
+                continue;
+            }
+            reserve_range_in_map(
+                mmap_work,
+                &mut mmap_work_len,
+                module.base,
+                module.base.saturating_add(module.size),
+            );
+        }
+
+        let cr3_phys: u64;
+        core::arch::asm!("mov {}, cr3", out(reg) cr3_phys, options(nomem));
+        reserve_boot_page_tables(mmap_work, &mut mmap_work_len, cr3_phys & 0x000F_FFFF_FFFF_F000);
+
+        serial_println!(
+            "[init] Reserved: kernel image [{:#x}..{:#x}]), module data, boot page tables (CR3={:#x})",
+            kernel_base,
+            kernel_base.saturating_add(kernel_size),
+            cr3_phys & 0x000F_FFFF_FFFF_F000
+        );
+    }
+
     // Modules are loaded from the FAT32 boot partition.
-    // Protected ranges will be set up after module loading is implemented in Phase 4.
+    // Module data ranges coming from the bootloader are reserved above.
     let protected_ranges = [None; memory::boot_alloc::MAX_PROTECTED_RANGES];
     crate::e9_println!("MM prot ranges");
     memory::boot_alloc::set_protected_ranges(&protected_ranges);
@@ -651,12 +753,17 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     }
     serial_println!("[init] Frame metadata ready.");
 
-    // TODO: Phase 4 - Reserve module memory ranges when FAT32 loader is implemented
-    // For now, skip module reservation since we're using the custom bootloader + FAT32
+    // Module data ranges coming from the bootloader are reserved above.
 
     memory::buddy::init_buddy_allocator(&mmap_work[..mmap_work_len]);
 
     serial_println!("[init] Buddy allocator ready.");
+
+    // Buddy self-test battery (feature = "selftest", cargo make kernel-test).
+    // Runs before anything else allocates from buddy so the baseline
+    // accounting identity is exact.
+    #[cfg(feature = "selftest")]
+    memory::buddy::selftest::run_buddy_selftests();
 
     // =============================================
     // Stack switch: migrate off the 8 KB bootstrap stack

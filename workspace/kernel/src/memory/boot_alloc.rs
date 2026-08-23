@@ -138,6 +138,19 @@ impl BootAllocator {
         None
     }
 
+    /// Allocate from a free region and consume the used range.
+    ///
+    /// # Bootstrap invariant relied upon by the buddy allocator
+    ///
+    /// Region starts are page-aligned and alignment requests are clamped up
+    /// to at least `PAGE_SIZE`, so `alloc_start == region.start` and this
+    /// function always carves from the **front** (or consumes the whole
+    /// region). Region counts therefore never grow between snapshots taken
+    /// around reservations. The buddy allocator bootstrap depends on this:
+    /// it reserves segment-table capacity from one snapshot and builds its
+    /// segments from the next one (`buddy::BuddyAllocator::init`). An
+    /// interior split (possible only for `align > PAGE_SIZE`) would grow the
+    /// count and trip the explicit capacity check added there.
     pub fn try_alloc_accessible(&mut self, size: usize, align: usize) -> Option<PhysAddr> {
         if size == 0 {
             return Some(PhysAddr::new(0));

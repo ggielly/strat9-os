@@ -400,6 +400,42 @@ That combination is usually what turns a hobby-style allocator into a kernel sub
 3. optional background pressure handling once the VM policy side of the kernel matures;
 4. more stress testing under VMware and real hardware for high-order allocation churn.
 
+## 2026-08 hardening addendum
+
+Following a dedicated review, two bootstrap-correctness gaps were fixed and a
+runtime test battery was added:
+
+1. **Protected-page accounting (R1).** Pages inside managed segments that
+   `seed_range_as_free` skips because they overlap a protected range are now
+   tracked per zone (`Zone::unmanaged_pages`). They are subtracted from
+   `available_pages()` and from watermark inputs and are reported as
+   reserved. Previously, populating `set_protected_ranges` would have made
+   zones over-report free pages that no free list could ever provide.
+2. **Segment-capacity invariant (R2).** Segment-table capacity is derived
+   from the pre-reservation boot snapshot while segments are built from the
+   post-reservation snapshot. The equality of those two counts relies on the
+   boot allocator carving exclusively from region fronts; `init()` now
+   re-checks it explicitly with an actionable panic message, and
+   `boot_alloc::try_alloc_accessible` documents the constraint
+   (page-aligned starts, alignment requests above `PAGE_SIZE` may split
+   regions and break the invariant).
+3. **Self-test battery (`feature = "selftest"`, `cargo make kernel-test`).**
+   `memory/buddy_selftest.rs` runs at early boot, before anything else uses
+   buddy: pure-helper checks (protected-interval union counting, zone
+   intersection counting), watermark sanity, the accounting identity
+   (free-list pages == seedable − allocated − quarantined), free-list
+   structural integrity (bounded walk: acyclicity, prev/next symmetry,
+   FREE/UNUSED sentinel metadata, order/migratetype match, no overlap with
+   protected ranges), parity-bit balance across a deterministic alloc/free
+   storm (all bits must read zero once every block is freed), high-order
+   churn with totals restored, and the R1 zero-protection case.
+
+Known limitation at the time of writing: linking the kernel binary crashes
+the LLVM backend of the pinned nightly ("Do not know how to split the result
+of this operator!") independently of these changes; `cargo check` passes for
+both feature configurations. The battery therefore needs a toolchain that can
+codegen the rest of the kernel.
+
 ## References
 
 The design was informed by public documentation and widely accepted allocator practices, especially around zone accounting, watermark-based pressure, per-CPU fast paths, and anti-fragmentation grouping.

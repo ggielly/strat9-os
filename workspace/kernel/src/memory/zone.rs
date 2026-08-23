@@ -271,6 +271,11 @@ pub struct Zone {
     /// Pages removed from management during boot reservations.
     pub reserved_pages: usize,
 
+    /// Pages inside managed segments excluded from the free lists because
+    /// they overlap a protected range (R1). They are part of `page_count`
+    /// (segment geometry) but can never be allocated.
+    pub unmanaged_pages: usize,
+
     /// Hard reserve kept available for lower zones or emergency paths.
     pub lowmem_reserve_pages: usize,
 
@@ -311,6 +316,7 @@ impl Zone {
             segment_count: 0,
             segment_capacity: 0,
             segments: ptr::null_mut(),
+            unmanaged_pages: 0,
         }
     }
 
@@ -351,8 +357,13 @@ impl Zone {
     }
 
     /// Get number of available (free) pages
+    ///
+    /// R1: excludes protected pages that live inside segments but were never
+    /// seeded into any free list, so this matches what the lists actually hold.
     pub fn available_pages(&self) -> usize {
-        self.page_count.saturating_sub(self.allocated)
+        self.page_count
+            .saturating_sub(self.unmanaged_pages)
+            .saturating_sub(self.allocated)
     }
 
     /// Count the number of free blocks at a given order.

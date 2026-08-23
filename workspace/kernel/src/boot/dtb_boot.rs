@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! boot64.S (_start)
-//!   => save KernelArgs pointer, setup 8 KB bootstrap stack, clear BSS
+//!   => save KernelArgs pointer, setup 64 KB bootstrap stack, clear BSS
 //!   => call kmain(args_ptr)
 //!     => enable SSE/OSXSAVE (CPU features)
 //!     => early serial output
@@ -93,7 +93,7 @@ unsafe fn enable_cpu_features() {
 /// For bootloader: rdi = pointer to [`strat9_abi::boot::KernelArgs`]
 /// For PVH: rdi = 0 (no KernelArgs provided; build a minimal set)
 ///
-/// Runs on the 8 KB bootstrap stack from boot64.S. The KernelArgs are
+/// Runs on the 64 KB bootstrap stack from boot64.S. The KernelArgs are
 /// read (or built) here. The real kernel init and stack switch happen
 /// in `crate::kernel_main` after the buddy allocator is ready.
 #[no_mangle]
