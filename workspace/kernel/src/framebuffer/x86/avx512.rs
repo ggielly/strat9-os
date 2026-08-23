@@ -5,8 +5,19 @@ pub unsafe fn fill_avx512(dst: *mut u32, color: u32, count: usize) {
     let color_vec = _mm512_set1_epi32(color as i32);
     let mut i = 0;
 
-    // Note : _mm512_stream_si512 (NT store) is not available for x86_64-unknown-none;
-    // we use _mm512_storeu_si512 (normal store) which still does 16 pixels per iteration.
+    // S2: streaming stores above the threshold (movntdq requires 64-byte
+    // alignment; scalar head/tail handle unaligned edges).
+    if count * 4 >= super::stream_threshold() {
+        while i < count && dst.add(i) as usize % 64 != 0 {
+            *dst.add(i) = color;
+            i += 1;
+        }
+        while i + 16 <= count {
+            _mm512_stream_si512(dst.add(i) as *mut __m512i, color_vec);
+            i += 16;
+        }
+        _mm_sfence(); // sfence orders NT stores regardless of vector width
+    }
 
     while i + 16 <= count {
         _mm512_storeu_si512(dst.add(i) as *mut __m512i, color_vec);

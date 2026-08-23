@@ -1,9 +1,8 @@
-// Note : _mm512_stream_si512 (NT store) is not available for x86_64-unknown-none;
 // Framebuffer abstraction layer
 //
 // Provides a unified framebuffer interface that can use:
-// - UEFI bootloader framebuffer (bootloader-provided)
-// - VirtIO GPU framebuffer (native driver)
+// - UEFI bootloader framebuffer (bootloader-provided, WC-mapped via PAT)
+// - VirtIO GPU framebuffer (native driver, zero-copy backing)
 // - Future/TODO : other GPU drivers (Bochs DRM, etc.)
 //
 // Features:
@@ -11,6 +10,7 @@
 // - Double buffering
 // - Basic 2D drawing primitives
 // - Text rendering support
+// - SIMD pixel ops with streaming stores above the L2-derived threshold
 
 #![allow(dead_code)]
 

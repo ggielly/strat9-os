@@ -3,7 +3,37 @@ pub mod avx512;
 pub mod sse2;
 
 use crate::framebuffer::{generic, FramebufferOps};
+use core::sync::atomic::{AtomicUsize, Ordering};
 use raw_cpuid::CpuId;
+
+/// Non-temporal store threshold in bytes (S2): fill/blit operations writing
+/// at least this much use streaming stores so a full-screen present does not
+/// evict the working set from cache. Initialized from half the detected L2
+/// size, clamped to [256 KiB, 4 MiB]; default 512 KiB until detection runs.
+static STREAM_THRESHOLD_BYTES: AtomicUsize = AtomicUsize::new(512 * 1024);
+
+#[inline]
+pub fn stream_threshold() -> usize {
+    STREAM_THRESHOLD_BYTES.load(Ordering::Relaxed)
+}
+
+/// Detect the streaming-store threshold from the L2 cache size (CPUID leaf
+/// 0x80000006): threshold = L2 / 2, clamped to sane bounds.
+fn detect_stream_threshold() {
+    let l2_kib = CpuId::new()
+        .get_l2_l3_cache_and_tlb_info()
+        .map(|l23| l23.l2cache_size() as usize)
+        .filter(|&k| k > 0)
+        .unwrap_or(1024);
+    let l2_bytes = l2_kib.saturating_mul(1024);
+    let threshold = if l2_bytes >= 64 * 1024 {
+        (l2_bytes / 2).clamp(256 * 1024, 4 * 1024 * 1024)
+    } else {
+        // Unknown L2: conservative default (assumes ~1 MiB L2).
+        512 * 1024
+    };
+    STREAM_THRESHOLD_BYTES.store(threshold, Ordering::Relaxed);
+}
 
 #[inline]
 fn kernel_can_use_extended_simd() -> bool {
@@ -42,7 +72,29 @@ unsafe fn blit_avx2_asm(dst: *mut u32, src: *const u32, count: usize) {
     strat9_fb_framebuffer_blit_avx2(dst, src, count);
 }
 
+/// Dispatchers (S2): large operations take the streaming-store path,
+/// everything else keeps the hand-tuned NASM cached path.
+#[target_feature(enable = "avx2")]
+pub unsafe fn fill_avx2_dispatch(dst: *mut u32, color: u32, count: usize) {
+    if dst as usize % 32 == 0 && count * 4 >= stream_threshold() {
+        avx2::fill_avx2_nt(dst, color, count);
+    } else {
+        fill_avx2_asm(dst, color, count);
+    }
+}
+
+#[target_feature(enable = "avx2")]
+pub unsafe fn blit_avx2_dispatch(dst: *mut u32, src: *const u32, count: usize) {
+    if dst as usize % 32 == 0 && count * 4 >= stream_threshold() {
+        avx2::blit_avx2_nt(dst, src, count);
+    } else {
+        blit_avx2_asm(dst, src, count);
+    }
+}
+
 pub fn detect_and_init_ops() -> FramebufferOps {
+    detect_stream_threshold();
+
     let cpuid = CpuId::new();
 
     let has_avx512f = kernel_can_use_extended_simd()
@@ -76,8 +128,8 @@ pub fn detect_and_init_ops() -> FramebufferOps {
         }
     } else if has_avx2 {
         FramebufferOps {
-            fill: fill_avx2_asm, // NASM ASM implementation
-            blit: blit_avx2_asm, // NASM ASM implementation
+            fill: fill_avx2_dispatch,
+            blit: blit_avx2_dispatch,
             blend: avx2::blend_avx2,
             convert: avx2::convert_bgr_to_argb_avx2,
         }
