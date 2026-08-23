@@ -22,6 +22,42 @@ mod paging;
 /// RSDP signature "RSD PTR " (8 bytes)
 const RSDP_SIGNATURE: &[u8; 8] = b"RSD PTR ";
 
+/// Release-mode linker shim for uefi-rs: with optimizations enabled, LLVM
+/// lowers the CStr16 length loop inside `FileInfo::from_uefi` to a call to
+/// the C `wcslen`, which no UEFI-provided library implements
+/// (undefined symbol at link time). Provide the obvious implementation.
+///
+/// See also: `cargo make bootloader-uefi-release`.
+#[no_mangle]
+extern "C" fn wcslen(mut s: *const u16) -> usize {
+    let mut n = 0usize;
+    unsafe {
+        while core::ptr::read_volatile(s) != 0 {
+            s = s.add(1);
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Upper bound for kernel.elf on the ESP (L3: bounded allocations).
+const MAX_KERNEL_FILE_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
+
+/// Read exactly `buf.len()` bytes from `file`, looping over short reads.
+/// Returns the total number of bytes read; callers must treat anything less
+/// than `buf.len()` as a truncated image (M4).
+fn read_full(file: &mut uefi::proto::media::file::RegularFile, buf: &mut [u8]) -> usize {
+    let mut total = 0usize;
+    while total < buf.len() {
+        match file.read(&mut buf[total..]) {
+            Ok(0) => break, // EOF before the buffer was filled
+            Ok(n) => total += n,
+            Err(_) => break,
+        }
+    }
+    total
+}
+
 /// Validate RSDP checksum: sum of all bytes must be 0 mod 256
 unsafe fn validate_rsdp(ptr: *const u8) -> bool {
     let mut sum: u8 = 0;
@@ -31,8 +67,10 @@ unsafe fn validate_rsdp(ptr: *const u8) -> bool {
     sum == 0
 }
 
-/// Validate ACPI table header checksum: sum of all bytes in the
-/// 36-byte SDT header must be 0 mod 256. Used for XSDT/RSDT.
+/// Validate ACPI table checksum: the sum of every byte of the table (as
+/// declared by its Length field) must be 0 mod 256. Tables declaring a
+/// length smaller than the 36-byte SDT header, or absurdly large, are
+/// rejected outright instead of trivially passing an empty sum.
 unsafe fn validate_acpi_table_header(base: u64) -> bool {
     if base == 0 {
         return false;
@@ -43,8 +81,10 @@ unsafe fn validate_acpi_table_header(base: u64) -> bool {
     // creator_id(4) + creator_revision(4)
     let ptr = base as *const u8;
     let length_field = core::ptr::read_volatile((ptr.add(4)) as *const u32) as usize;
-    let validate_len = length_field.min(36);
-    for i in 0..validate_len {
+    if length_field < 36 || length_field > 0x10000 {
+        return false;
+    }
+    for i in 0..length_field {
         sum = sum.wrapping_add(core::ptr::read_volatile(ptr.add(i)));
     }
     sum == 0
@@ -130,14 +170,28 @@ fn efi_main() -> Status {
         .expect("[boot] FATAL: Cannot read kernel.elf metadata (file info query failed)");
     let file_size = file_info.file_size() as usize;
 
+    // L3: refuse absurd sizes up front instead of attempting the allocation.
+    if file_size == 0 || file_size > MAX_KERNEL_FILE_SIZE {
+        panic!(
+            "[boot] FATAL: kernel.elf size {} bytes is outside the supported range (max {})",
+            file_size, MAX_KERNEL_FILE_SIZE
+        );
+    }
+
     uefi::system::with_stdout(|stdout| {
         let _ = writeln!(stdout, "[boot] kernel.elf: {} bytes", file_size);
     });
 
-    // Read kernel into memory
+    // Read kernel into memory. Loop until the whole file is consumed: UEFI
+    // file reads may return short (M4). A truncated kernel is fatal.
     let mut buf = alloc::vec![0u8; file_size];
-    file.read(&mut buf)
-        .expect("[boot] FATAL: Failed to read kernel.elf contents into memory");
+    let bytes_read = read_full(&mut file, &mut buf);
+    if bytes_read != file_size {
+        panic!(
+            "[boot] FATAL: kernel.elf truncated on the boot volume (read {} of {} bytes)",
+            bytes_read, file_size
+        );
+    }
 
     let ptr = buf.as_mut_ptr();
     let len = buf.len();
@@ -171,16 +225,18 @@ fn efi_main() -> Status {
     });
 
     // Step 6: Get framebuffer (optional : may not be available in -nographic mode)
+    // Everything stays zeroed when no GOP is available so the kernel sees a
+    // consistently disabled framebuffer.
     let mut fb_phys: u64 = 0;
     let mut fb_width: u32 = 0;
     let mut fb_height: u32 = 0;
     let mut fb_stride: u32 = 0;
-    let fb_bpp: u16 = 32;
-    let mut fb_red_size: u8 = 8;
-    let mut fb_red_shift: u8 = 16;
-    let mut fb_green_size: u8 = 8;
-    let mut fb_green_shift: u8 = 8;
-    let mut fb_blue_size: u8 = 8;
+    let mut fb_bpp: u16 = 0;
+    let mut fb_red_size: u8 = 0;
+    let mut fb_red_shift: u8 = 0;
+    let mut fb_green_size: u8 = 0;
+    let mut fb_green_shift: u8 = 0;
+    let mut fb_blue_size: u8 = 0;
     let mut fb_blue_shift: u8 = 0;
 
     'gop: {
@@ -220,6 +276,7 @@ fn efi_main() -> Status {
         fb_width = width as u32;
         fb_height = height as u32;
         fb_stride = stride as u32;
+        fb_bpp = 32;
 
         let (r_s, r_sh, g_s, g_sh, b_s, b_sh) = match pixel_format {
             uefi::proto::console::gop::PixelFormat::Rgb => (8, 16, 8, 8, 8, 0),
@@ -266,6 +323,13 @@ fn efi_main() -> Status {
         fb_width = 0;
         fb_height = 0;
         fb_stride = 0;
+        fb_bpp = 0;
+        fb_red_size = 0;
+        fb_red_shift = 0;
+        fb_green_size = 0;
+        fb_green_shift = 0;
+        fb_blue_size = 0;
+        fb_blue_shift = 0;
     }
 
     // Get ACPI RSDP — try UEFI config tables first, fallback to physical memory scan
@@ -495,7 +559,7 @@ fn efi_main() -> Status {
     }
 
     // Sort regions by base address
-    {
+    if region_count > 1 {
         let mut sorted = true;
         while sorted {
             sorted = false;
@@ -513,7 +577,7 @@ fn efi_main() -> Status {
         let mut write = 0;
         let mut read = 0;
         while read < region_count {
-            let mut merged_base = regions[read].base;
+            let merged_base = regions[read].base;
             let mut merged_size = regions[read].size;
             let merged_kind = regions[read].kind;
             let mut next = read + 1;
@@ -560,26 +624,78 @@ fn efi_main() -> Status {
         0
     }
 
-    let mmap_count = region_count;
+    let mut mmap_count = region_count;
     let mmap_byte_size = (mmap_count as u64) * (core::mem::size_of::<MemoryRegion>() as u64);
     let mmap_region_size = (mmap_byte_size + 4095) & !4095;
     let mut mmap_region_base = alloc_from_free(&mut regions, region_count, mmap_region_size, 4096);
 
-    if mmap_region_base != 0 {
-        unsafe {
-            let dst = mmap_region_base as *mut MemoryRegion;
-            core::ptr::copy_nonoverlapping(regions.as_ptr(), dst, mmap_count);
+    if mmap_region_base == 0 {
+        // Fallback: fixed location below 1MB (0x100000) that is not used by
+        // the kernel or page tables. The page table allocator starts at
+        // phys_end, so we must avoid that range. The range MUST be carved out
+        // of whatever Free region contains it, otherwise the kernel would see
+        // the memory map itself as usable memory.
+        const FALLBACK_START: u64 = 0x90000;
+        let fallback_end = FALLBACK_START + mmap_region_size;
+
+        let mut containing: Option<usize> = None;
+        for (i, region) in regions[..region_count].iter().enumerate() {
+            if region.kind == MemoryKind::Free
+                && region.base <= FALLBACK_START
+                && fallback_end <= region.base + region.size
+            {
+                containing = Some(i);
+                break;
+            }
         }
-    } else {
-        // Use a fixed location below 1MB (0x100000) that's not used by kernel
-        // or page tables. The page table allocator starts at phys_end, so we
-        // must avoid that range.
-        mmap_region_base = 0x90000;
-        unsafe {
-            let dst = mmap_region_base as *mut MemoryRegion;
-            core::ptr::copy_nonoverlapping(regions.as_ptr(), dst, mmap_count);
+
+        let Some(idx) = containing else {
+            panic!(
+                "Failed to place memory map: no free region contains 0x{:x}-0x{:x}",
+                FALLBACK_START, fallback_end
+            );
+        };
+
+        let base = regions[idx].base;
+        let end = regions[idx].base + regions[idx].size;
+
+        if FALLBACK_START == base {
+            // Range starts at region start: just advance the base.
+            regions[idx].base = fallback_end;
+            regions[idx].size = end - fallback_end;
+        } else if fallback_end == end {
+            // Range ends at region end: just shrink the size.
+            regions[idx].size = FALLBACK_START - base;
+        } else if region_count < regions.len() {
+            // Range in the middle: split into [base..FALLBACK_START] and
+            // [fallback_end..end], shifting the tail entries to the right.
+            regions.copy_within(idx + 1..region_count, idx + 2);
+            regions[idx].size = FALLBACK_START - base;
+            regions[idx + 1] = MemoryRegion {
+                base: fallback_end,
+                size: end - fallback_end,
+                kind: MemoryKind::Free,
+            };
+            region_count += 1;
+        } else {
+            // No slot left for the split: keep only the lower part and warn.
+            // The tail above the fallback range becomes untracked (lost).
+            uefi::system::with_stdout(|stdout| {
+                let _ = writeln!(
+                    stdout,
+                    "[boot] WARNING: memory map full, losing free space above 0x{:x}",
+                    FALLBACK_START
+                );
+            });
+            regions[idx].size = FALLBACK_START - base;
         }
+
+        mmap_region_base = FALLBACK_START;
     }
+
+    // NOTE: the map is copied to its final location only AFTER every
+    // alloc_from_free() carve below (stack, module table, env), so the
+    // handed-over regions reflect all bootloader allocations.
 
     let stack_size: u64 = 64 * 1024;
     let guard_page_size: u64 = 4096;
@@ -606,12 +722,40 @@ fn efi_main() -> Status {
         }
     }
 
-    //  Build KernelArgs
+    // L6: carve a page for KernelArgs itself so the struct does not live on
+    // the (Reclaim-classified) firmware stack after the jump. Untracked
+    // carved memory is invisible to the kernel allocator.
+    let args_phys = alloc_from_free(&mut regions, region_count, 4096, 4096);
+    if args_phys == 0 {
+        paging::fatal("[boot] FATAL: cannot place KernelArgs");
+    }
+
+    // All carve-outs are done: copy the final region list to its location.
+    // The kernel receives a map that already excludes every bootloader
+    // allocation (memory map, boot stack, module table, environment, args).
+    mmap_count = region_count;
+    if mmap_region_base == 0 {
+        paging::fatal("[boot] FATAL: memory map has no location");
+    }
+    unsafe {
+        let dst = mmap_region_base as *mut MemoryRegion;
+        core::ptr::copy_nonoverlapping(regions.as_ptr(), dst, mmap_count);
+    }
+
+    //  Build KernelArgs.
+    // L4: kernel_base is the LOWEST loaded physical address and kernel_size
+    // spans up to phys_end (which includes the capped BSS margins) — no
+    // assumption that segments[] are ordered by address.
+    let kernel_phys_lo = elf_info.segments[..elf_info.segment_count]
+        .iter()
+        .map(|s| s.phys_addr)
+        .min()
+        .unwrap_or(0);
     let args = KernelArgs {
         magic: strat9_abi::boot::STRAT9_BOOT_MAGIC,
         abi_version: strat9_abi::boot::STRAT9_BOOT_ABI_VERSION,
-        kernel_base: elf_info.segments[0].phys_addr,
-        kernel_size: elf_info.phys_end - elf_info.segments[0].phys_addr,
+        kernel_base: kernel_phys_lo,
+        kernel_size: elf_info.phys_end.saturating_sub(kernel_phys_lo),
         acpi_rsdp_base: rsdp_addr,
         memory_map_base: mmap_region_base,
         memory_map_size: mmap_count as u64 * core::mem::size_of::<MemoryRegion>() as u64,
@@ -643,7 +787,7 @@ fn efi_main() -> Status {
         },
         bss_virt_size: {
             let kernel_virt_base: u64 = 0xFFFF_FFFF_8000_0000;
-            let kernel_size = elf_info.phys_end - elf_info.segments[0].phys_addr;
+            let kernel_size = elf_info.phys_end.saturating_sub(kernel_phys_lo);
             let large_pages = ((kernel_size + 0x1FFFFF) / 0x200000).max(1);
             let mapped_end = kernel_virt_base + large_pages * 0x200000;
             let bss_base: u64 = {
@@ -663,30 +807,41 @@ fn efi_main() -> Status {
         },
     };
 
+    // Publish KernelArgs at its carved physical location (L6): the struct on
+    // this stack frame lives in Reclaim-classified memory after EBS.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            &args as *const KernelArgs,
+            args_phys as *mut KernelArgs,
+            1,
+        );
+    }
+    let args_ptr = args_phys as *const KernelArgs;
+
     // Page tables and context switch
     // Kernel entry validation
     let kernel_virt_base: u64 = 0xFFFF_FFFF_8000_0000;
     if elf_info.entry == 0 {
-        panic!(
-            "[boot] FATAL: Kernel entry point is NULL (0x0) — kernel.elf is corrupt or not linked correctly"
+        paging::fatal(
+            "[boot] FATAL: Kernel entry point is NULL (0x0) — kernel.elf is corrupt or not linked correctly",
         );
     }
     if elf_info.entry < kernel_virt_base {
-        uefi::system::with_stdout(|stdout| {
-            let _ = writeln!(
-                stdout,
-                "[boot] WARNING: Entry point 0x{:x} is below higher-half (0x{:x})",
-                elf_info.entry, kernel_virt_base
-            );
-        });
+        // Post-EBS: stdout is gone, warn over COM1 instead.
+        paging::serial_write_str(&alloc::format!(
+            "[boot] WARNING: Entry point 0x{:x} is below higher-half (0x{:x})\r\n",
+            elf_info.entry,
+            kernel_virt_base
+        ));
     }
     // Verify entry point is within a reasonable mapped range (within 2GB of kernel base)
     let max_mapped = kernel_virt_base + 0x2000_0000; // 2GB higher-half
     if elf_info.entry > max_mapped {
-        panic!(
+        paging::fatal(&alloc::format!(
             "[boot] FATAL: Entry point 0x{:x} exceeds mapped kernel range (max 0x{:x})",
-            elf_info.entry, max_mapped
-        );
+            elf_info.entry,
+            max_mapped
+        ));
     }
     unsafe {
         let write_com1 = |s: &[u8]| {
@@ -706,19 +861,19 @@ fn efi_main() -> Status {
         write_com1(b"[boot] Creating page tables...\r\n");
     }
 
-    // The page tables must map the actual physical memory used by the kernel.
-    // We use phys_end (which includes p_filesz + BSS_MAP_EXTRA) as the size.
-    // The BSS is virtual memory that the kernel will zero at its virtual addresses;
-    // we do NOT need to map 2GB of physical pages for it.
+    // Build the boot page tables: per-segment W^X mapping of the kernel,
+    // identity map, framebuffer and env. Table frames are validated against
+    // the final memory map (M5).
     let pml4_phys = unsafe {
         paging::create_page_tables(
-            elf_info.segments[0].phys_addr,
-            elf_info.phys_end,
-            elf_info.phys_end - elf_info.segments[0].phys_addr,
+            &elf_info.segments,
+            elf_info.segment_count,
             fb_phys,
             fb_stride as u64 * fb_height as u64,
             env_phys_base,
             env_total_size as u64,
+            &regions,
+            region_count,
         )
     };
 
@@ -764,7 +919,7 @@ fn efi_main() -> Status {
         write_com1(b"  entry=");
         write_com1(hex_str(elf_info.entry, &mut hexbuf));
         write_com1(b"  args=");
-        write_com1(hex_str(&args as *const KernelArgs as u64, &mut hexbuf));
+        write_com1(hex_str(args_ptr as u64, &mut hexbuf));
         write_com1(b")\r\n");
         write_com1(b"[boot] mmap_base=");
         write_com1(hex_str(mmap_region_base, &mut hexbuf));
@@ -818,7 +973,6 @@ fn efi_main() -> Status {
         core::arch::asm!("mov cr4, {}", in(reg) cr4);
     }
 
-    let args_ptr = &args as *const KernelArgs;
     unsafe {
         // Force the compiler to keep pml4_phys in memory (prevent optimization)
         let pml4_val = core::ptr::read_volatile(&pml4_phys as *const u64);

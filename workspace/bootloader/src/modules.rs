@@ -4,6 +4,9 @@ use uefi::{
     proto::media::file::{File, FileAttribute, FileInfo, FileMode},
 };
 
+/// Upper bound for a single initfs module file (bounded allocations).
+pub const MAX_MODULE_FILE_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
+
 pub struct LoadedModule {
     pub name: [u8; 64],
     pub base: u64,
@@ -111,11 +114,28 @@ pub fn load_modules(image_handle: Handle) -> Vec<LoadedModule> {
         if file_size == 0 {
             continue;
         }
+        // Bound the allocation: a corrupted/huge file must not OOM the loader.
+        if file_size > MAX_MODULE_FILE_SIZE {
+            continue;
+        }
 
         let alloc_size = (file_size + 4095) & !4095;
         let mut buf = alloc::vec![0u8; alloc_size];
 
-        if file.read(&mut buf).is_err() {
+        // Read fully: UEFI reads may be short. A truncated module is skipped
+        // rather than passed to the kernel with zero-filled tail bytes.
+        let mut total = 0usize;
+        loop {
+            match file.read(&mut buf[total..]) {
+                Ok(0) => break,
+                Ok(n) => total += n,
+                Err(_) => break,
+            }
+            if total >= file_size {
+                break;
+            }
+        }
+        if total < file_size {
             continue;
         }
 

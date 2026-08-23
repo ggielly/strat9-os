@@ -12,8 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 uefi = { version = "0.39", features = ["alloc", "global_allocator", "logger", "panic_handler"] }
-x86_64 = "0.15"
-log = "0.4"
 
 # Re-use the ABI definitions from the kernel
 strat9-abi = { workspace = true }

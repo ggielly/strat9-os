@@ -8,12 +8,14 @@
 //! # Boot flow
 //!
 //! ```text
-//! UEFI/BIOS => bootloader => kernel_main(KernelArgs)
+//! UEFI firmware => strat9 UEFI bootloader => boot64.S (_start)
+//!   => kmain(KernelArgs*) => kernel_main(&KernelArgs)
 //! ```
 //!
-//! The bootloader populates `KernelArgs` in a reserved memory region,
-//! then jumps to the kernel entry point with a pointer to this structure
-//! in RDI (System V AMD64 ABI first argument).
+//! The bootloader populates `KernelArgs` in reserved memory, creates the
+//! initial page tables, then jumps to the kernel entry point (`_start`)
+//! with a pointer to this structure in RDI (System V AMD64 ABI first
+//! argument). A value of 0 in RDI means "no arguments" (PVH boot).
 //!
 //! # ABI stability
 //!
@@ -27,7 +29,7 @@
 //! 0xFFFF_DEAD_0000_0000  => Framebuffer (read-only after boot)
 //! 0xFFFF_BEEF_0000_0000  => Environment string (key=value)
 //! 0xFFFFFFFF_8000_0000  => Kernel code/data
-//! 0x0000_0000_0000_0000  => Identity map (first 4GB)
+//! 0x0000_0000_0000_0000  => Identity map (first 8GB)
 //! ```
 //!
 //! # Example (kernel side)
@@ -69,19 +71,18 @@ pub const STRAT9_BOOT_ABI_VERSION: u32 = 4;
 /// Magic number validating the boot handoff (`"ST9B"` in ASCII).
 pub const STRAT9_BOOT_MAGIC: u32 = 0x5354_3942; // "ST9B"
 
-/// Bootloader-to-kernel handoff structure (ABI v2, 136 bytes).
+/// Bootloader-to-kernel handoff structure (132 bytes).
 ///
-/// Field layout is ordered to avoid internal padding:
-/// - u64 fields first (8-byte aligned)
-/// - u32 fields next
-/// - u16 field
-/// - u8 fields last
+/// Field layout is ordered to avoid internal padding (`repr(C, packed)`):
+/// - `magic`/`abi_version` (u32) first
+/// - u64 fields next
+/// - u32 fields, then the u16 field, then the u8 fields
 ///
 /// # Field groups
 ///
 /// ## Identity (8 bytes)
 /// - `magic`: must equal [`STRAT9_BOOT_MAGIC`] (`0x5354_3942`)
-/// - `abi_version`: must equal [`STRAT9_BOOT_ABI_VERSION`] (currently `3`)
+/// - `abi_version`: must equal [`STRAT9_BOOT_ABI_VERSION`] (currently `4`)
 ///
 /// ## Kernel memory (16 bytes)
 /// - `kernel_base`: physical address of the kernel ELF image
@@ -137,8 +138,11 @@ pub struct KernelArgs {
     pub framebuffer_green_mask_shift: u8,
     pub framebuffer_blue_mask_size: u8,
     pub framebuffer_blue_mask_shift: u8,
-    // --- BSS region ---
+    // --- BSS region (16 bytes) ---
+    /// Virtual address where the zero-initialized region begins
+    /// (end of the loaded segments, rounded by the bootloader).
     pub bss_virt_base: u64,
+    /// Size of the mapped-but-not-file-backed region the kernel must zero.
     pub bss_virt_size: u64,
 }
 

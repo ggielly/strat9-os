@@ -9,15 +9,14 @@ cache:
     - target/
 
 before_script:
-  - apt-get update -yq
-  - apt-get install -yq nasm make
+  # The bootloader is a UEFI binary: it needs the x86_64-unknown-uefi target.
+  # No NASM required: the old BIOS assembly stages are legacy and not built.
+  - rustup target add x86_64-unknown-uefi
 
 stages:
   - build
-  - test
 
 compilation:
   stage: build
   script:
-    - cargo build --verbose
-    - cd asm && make
+    - cargo build --verbose --target x86_64-unknown-uefi
