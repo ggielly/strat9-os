@@ -15,7 +15,9 @@
 #![allow(dead_code)]
 
 use crate::{
-    framebuffer::{CanvasBuffer, DirtyRectSet, FramebufferOps, MAX_DIRTY_RECTS},
+    framebuffer::{
+        CanvasBuffer, DirtyRectSet, FramebufferOps, MAX_DIRTY_RECTS, PRESENT_MIN_TICKS,
+    },
     hardware::virtio::gpu,
     memory::{self, phys_to_virt},
 };
@@ -25,7 +27,6 @@ use spin::{Mutex, Once};
 /// Maximum supported resolution
 const MAX_WIDTH: u32 = 3840;
 const MAX_HEIGHT: u32 = 2160;
-const PRESENT_MIN_TICKS: u64 = 1;
 
 /// Framebuffer source
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

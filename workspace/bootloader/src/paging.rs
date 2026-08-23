@@ -19,6 +19,7 @@ unsafe fn alloc_frame() -> u64 {
     addr
 }
 
+
 pub unsafe fn create_page_tables(
     kernel_phys: u64,
     kernel_phys_end: u64,
@@ -39,8 +40,10 @@ pub unsafe fn create_page_tables(
         let pdp = alloc_frame() as *mut u64;
         *pml4.add(0) = pdp as u64 | PRESENT | WRITABLE;
 
+        // S1: identity map keeps WB — the PTE PAT bit is reserved for the
+        // framebuffer mapping (PAT entry 4 = Write-Combining).
         for i in 0..8u64 {
-            *pdp.add(i as usize) = (i * 0x4000_0000) | PRESENT | WRITABLE | (1 << 7);
+            *pdp.add(i as usize) = (i * 0x4000_0000) | PRESENT | WRITABLE;
         }
     }
 
@@ -90,7 +93,8 @@ pub unsafe fn create_page_tables(
                 if pd_idx >= 512 { break; }
                 let pt = alloc_frame() as *mut u64;
                 let pt_phys = _framebuffer_phys + mapped;
-                *pt.add(0) = pt_phys | PRESENT | WRITABLE;
+                // S1: Write-Combining via PTE PAT bit -> IA32_PAT entry 4.
+                *pt.add(0) = pt_phys | PRESENT | WRITABLE | (1 << 7);
                 *pd.add(pd_idx) = pt as u64 | PRESENT | WRITABLE;
                 pd_idx += 1;
                 mapped += PAGE_SIZE;
@@ -131,6 +135,20 @@ pub unsafe fn context_switch(pml4_phys: u64, stack_top: u64, entry: u64, args: u
     unsafe {
         core::arch::asm!(
             "xor rbp, rbp",
+            // Enable IA32_EFER.NXE (bit 11) so NX page bits are enforced.
+            "mov ecx, 0xC0000080",          // IA32_EFER
+            "rdmsr",
+            "or eax, 1 << 11",              // NXE (LME already set: we run in long mode)
+            "wrmsr",
+            // S1: program IA32_PAT entry 4 to Write-Combining (0x01).
+            // Default PAT = 0x0007040600070406 (entry4 = WB); entry 4 spans
+            // bits 35:32, i.e. the low nibble of EDX. Only PTEs carrying the
+            // PAT bit (framebuffer mapping) use this entry.
+            "mov ecx, 0x277",               // IA32_PAT
+            "rdmsr",
+            "and edx, 0xFFFFFFF0",
+            "or edx, 0x00000001",
+            "wrmsr",
             "mov cr3, {pml4}",
             "mov rsp, {stack}",
             "and rsp, -16",
