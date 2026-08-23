@@ -5,6 +5,51 @@ unsafe fn load_u32_unaligned(src: *const u8) -> i32 {
     core::ptr::read_unaligned(src as *const u32) as i32
 }
 
+/// Streaming fill (S2): vmovntdq requires 32-byte-aligned destinations.
+/// Callers gate on size and alignment; sfence orders the NT stores.
+#[target_feature(enable = "avx2")]
+pub unsafe fn fill_avx2_nt(dst: *mut u32, color: u32, count: usize) {
+    let color_vec = _mm256_set1_epi32(color as i32);
+    let mut i = 0;
+    while i < count && dst.add(i) as usize % 32 != 0 {
+        *dst.add(i) = color;
+        i += 1;
+    }
+    while i + 8 <= count {
+        _mm256_stream_si256(dst.add(i) as *mut __m256i, color_vec);
+        i += 8;
+    }
+    while i + 4 <= count {
+        _mm_storeu_si128(dst.add(i) as *mut __m128i, _mm256_castsi256_si128(color_vec));
+        i += 4;
+    }
+    while i < count {
+        *dst.add(i) = color;
+        i += 1;
+    }
+    _mm_sfence();
+}
+
+/// Streaming blit (S2): regular unaligned source loads, aligned NT stores.
+#[target_feature(enable = "avx2")]
+pub unsafe fn blit_avx2_nt(dst: *mut u32, src: *const u32, count: usize) {
+    let mut i = 0;
+    while i < count && dst.add(i) as usize % 32 != 0 {
+        *dst.add(i) = *src.add(i);
+        i += 1;
+    }
+    while i + 8 <= count {
+        let v = _mm256_loadu_si256(src.add(i) as *const __m256i);
+        _mm256_stream_si256(dst.add(i) as *mut __m256i, v);
+        i += 8;
+    }
+    while i < count {
+        *dst.add(i) = *src.add(i);
+        i += 1;
+    }
+    _mm_sfence();
+}
+
 #[target_feature(enable = "avx2")]
 pub unsafe fn blend_avx2(dst: *mut u32, src: *const u32, alpha: u8, count: usize) {
     let alpha_u16 = alpha as u16;
