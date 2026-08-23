@@ -197,10 +197,11 @@ impl Framebuffer {
             back_buffer: None,
             draw_to_back: false,
             dirty: DirtyRectSet::empty(),
-            track_dirty: false,
+            track_dirty: true,
             present_pending: false,
             last_present_tick: 0,
             ops: FramebufferOps::detect(),
+            present_row_buf: None,
         };
 
         let fb = Framebuffer {
@@ -303,10 +304,11 @@ impl Framebuffer {
             back_buffer: None,
             draw_to_back: false,
             dirty: DirtyRectSet::empty(),
-            track_dirty: false,
+            track_dirty: true,
             present_pending: false,
             last_present_tick: 0,
             ops: FramebufferOps::detect(),
+            present_row_buf: None,
         };
 
         let fb = Framebuffer {
@@ -374,10 +376,11 @@ impl Framebuffer {
             back_buffer: None,
             draw_to_back: false,
             dirty: DirtyRectSet::empty(),
-            track_dirty: false,
+            track_dirty: true,
             present_pending: false,
             last_present_tick: 0,
             ops: FramebufferOps::detect(),
+            present_row_buf: None,
         };
 
         *FRAMEBUFFER.lock() = Some(Framebuffer {
@@ -448,105 +451,64 @@ impl Framebuffer {
 
     /// Set a pixel at (x, y) with RGB color.
     ///
-    /// Takes the framebuffer lock for a single pixel: fine for sparse dots,
-    /// but batched drawing MUST go through [`Self::blit_rect`] instead
-    /// (one lock acquisition and one dirty rectangle per call).
+    /// Delegates to [`CanvasBuffer::write_pixel`] (S6: single implementation
+    /// of target selection). Takes the framebuffer lock for a single pixel:
+    /// fine for sparse dots, but batched drawing MUST go through
+    /// [`Self::blit_rect`] instead.
     pub fn set_pixel(x: u32, y: u32, r: u8, g: u8, b: u8) {
-        {
-            let mut guard = FRAMEBUFFER.lock();
-            let fb = match guard.as_mut() {
-                Some(f) => f,
-                None => return,
-            };
+        let mut guard = FRAMEBUFFER.lock();
+        let fb = match guard.as_mut() {
+            Some(f) => f,
+            None => return,
+        };
 
-            if x >= fb.info.width || y >= fb.info.height {
-                return;
-            }
-
-            let pixel = ((r as u32) << fb.info.format.red_shift)
-                | ((g as u32) << fb.info.format.green_shift)
-                | ((b as u32) << fb.info.format.blue_shift);
-
-            let offset = if fb.use_double_buffer {
-                fb.double_buffer.unwrap_or(fb.info.base_virt as *mut u8)
-            } else {
-                fb.info.base_virt as *mut u8
-            };
-
-            unsafe {
-                let pixel_ptr = offset.add((y * fb.info.stride + x * 4) as usize);
-                core::ptr::write(pixel_ptr as *mut u32, pixel);
-            }
-
-            fb.canvas.dirty.include(x, y, 1, 1);
-            fb.request_present();
+        if x >= fb.info.width || y >= fb.info.height {
+            return;
         }
+
+        let pixel = ((r as u32) << fb.info.format.red_shift)
+            | ((g as u32) << fb.info.format.green_shift)
+            | ((b as u32) << fb.info.format.blue_shift);
+
+        fb.canvas.write_pixel(x as usize, y as usize, pixel);
+        fb.canvas.dirty.include(x, y, 1, 1);
+        fb.request_present();
     }
 
     /// Fill rectangle with color.
     ///
-    /// Takes the framebuffer lock once for the whole rectangle.
-    /// Does NOT present to screen. Call `swap_buffers()` or `present()`
-    /// after a batch of draw operations.
+    /// Delegates to [`CanvasBuffer::fill_rect`] (S6: one implementation of
+    /// clipping, SIMD dispatch, target selection and dirty marking). Takes
+    /// the framebuffer lock once for the whole rectangle. Does NOT present;
+    /// call `swap_buffers()` after a batch of draw operations.
     pub fn fill_rect(x: u32, y: u32, width: u32, height: u32, r: u8, g: u8, b: u8) {
         if width == 0 || height == 0 {
             return;
         }
 
-        {
-            let mut guard = FRAMEBUFFER.lock();
-            let fb = match guard.as_mut() {
-                Some(f) => f,
-                None => return,
-            };
+        let mut guard = FRAMEBUFFER.lock();
+        let fb = match guard.as_mut() {
+            Some(f) => f,
+            None => return,
+        };
 
-            if x >= fb.info.width || y >= fb.info.height {
-                return;
-            }
-
-            let max_w = fb.info.width - x;
-            let max_h = fb.info.height - y;
-            let width = width.min(max_w);
-            let height = height.min(max_h);
-            if width == 0 || height == 0 {
-                return;
-            }
-
-            let pixel = ((r as u32) << fb.info.format.red_shift)
-                | ((g as u32) << fb.info.format.green_shift)
-                | ((b as u32) << fb.info.format.blue_shift);
-
-            let offset = if fb.use_double_buffer {
-                fb.double_buffer.unwrap_or(fb.info.base_virt as *mut u8)
-            } else {
-                fb.info.base_virt as *mut u8
-            };
-
-            let stride = fb.info.stride as usize;
-            let stride_pixels = fb.info.stride as usize / 4;
-            let width_pixels = width as usize;
-            // Contiguous fast path only when the rect IS the full row at
-            // column zero AND the target has no row padding — otherwise a
-            // linear fill would spill into following rows (G4 hardening).
-            if x == 0 && width_pixels == fb.info.width as usize && stride_pixels == width_pixels {
-                let first = unsafe { offset.add(y as usize * stride) as *mut u32 };
-                unsafe {
-                    (fb.canvas.ops.fill)(first, pixel, width_pixels * height as usize);
-                }
-            } else {
-                for dy in 0..height as usize {
-                    let row_ptr = unsafe {
-                        offset.add((y as usize + dy) * stride + x as usize * 4) as *mut u32
-                    };
-                    unsafe {
-                        (fb.canvas.ops.fill)(row_ptr, pixel, width_pixels);
-                    }
-                }
-            }
-
-            fb.canvas.dirty.include(x, y, width, height);
-            fb.request_present();
+        if x >= fb.info.width || y >= fb.info.height {
+            return;
         }
+
+        let width = width.min(fb.info.width - x);
+        let height = height.min(fb.info.height - y);
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        let pixel = ((r as u32) << fb.info.format.red_shift)
+            | ((g as u32) << fb.info.format.green_shift)
+            | ((b as u32) << fb.info.format.blue_shift);
+
+        fb.canvas
+            .fill_rect(x as usize, y as usize, width as usize, height as usize, pixel);
+        fb.request_present();
     }
 
     /// Blit a packed 32bpp XRGB rectangle into the current draw target

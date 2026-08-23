@@ -244,6 +244,7 @@ impl VgaWriter {
             present_pending: false,
             last_present_tick: 0,
             ops: crate::framebuffer::FramebufferOps::detect(),
+            present_row_buf: None,
         });
         self.fmt = fmt;
         self.cols = cols;
