@@ -98,6 +98,8 @@ pub struct Framebuffer {
     fb_size: usize,
     /// Whether console deferred present is active
     console_defer_present: bool,
+    /// True when the VirtIO backing IS our double buffer (zero-copy present)
+    zero_copy_backing: bool,
 }
 
 unsafe impl Send for Framebuffer {}
@@ -197,6 +199,7 @@ impl Framebuffer {
             use_double_buffer: false,
             fb_size: (stride as usize) * (height as usize),
             console_defer_present: false,
+            zero_copy_backing: false,
         };
 
         *FRAMEBUFFER.lock() = Some(fb);
@@ -214,8 +217,16 @@ impl Framebuffer {
     }
 
     /// Initialize framebuffer with VirtIO GPU
+    ///
+    /// G3: the double buffer is allocated FIRST and attached as the scanout
+    /// resource backing itself, so draws land directly in what
+    /// TRANSFER_TO_HOST_2D reads — presentation becomes zero-copy.
     pub fn init_virtio_gpu() -> Result<(), &'static str> {
-        let gpu_info = gpu::get_framebuffer_info().ok_or("VirtIO GPU not initialized")?;
+        let gpu = crate::hardware::virtio::gpu::get_gpu().ok_or("VirtIO GPU not initialized")?;
+        let gpu_info = gpu.info();
+        if gpu_info.width == 0 || gpu_info.height == 0 {
+            return Err("Invalid VirtIO GPU dimensions");
+        }
 
         let format = PixelFormat {
             red_mask: 0x00FF0000,
@@ -227,18 +238,9 @@ impl Framebuffer {
             bits_per_pixel: 32,
         };
 
-        let info = FramebufferInfo {
-            base: gpu_info.framebuffer_phys,
-            base_virt: gpu_info.framebuffer_virt as usize,
-            width: gpu_info.width,
-            height: gpu_info.height,
-            stride: gpu_info.stride,
-            format,
-            source: FramebufferSource::VirtioGpu,
-        };
-
-        // Allocate double buffer for VirtIO GPU
-        let db_size = (info.stride as usize) * (info.height as usize);
+        // Allocate double buffer for VirtIO GPU (physically contiguous).
+        let stride = gpu_info.stride;
+        let db_size = (stride as usize) * (gpu_info.height as usize);
         if db_size == 0 {
             return Err("Invalid VirtIO framebuffer size");
         }
@@ -248,15 +250,40 @@ impl Framebuffer {
             memory::allocate_phys_contiguous(token, db_order)
         })
         .map_err(|_| "Failed to allocate double buffer")?;
-        let db_virt = phys_to_virt(db_frame.start_address.as_u64()) as *mut u8;
+        let db_phys = db_frame.start_address.as_u64();
+        let db_virt = phys_to_virt(db_phys) as *mut u8;
         unsafe {
             // SAFETY: `db_virt` is a freshly allocated contiguous buffer of at
             // least `db_size` bytes.
             core::ptr::write_bytes(db_virt, 0, db_size);
         }
 
+        // Attach the double buffer AS the resource backing (zero-copy path).
+        // On failure we fall back to the legacy bounce-buffer behaviour.
+        let zero_copy = match gpu.attach_external_backing(db_phys, db_size) {
+            Ok(()) => {
+                // Push the zeroed buffer to the scanout for a clean start.
+                let _ = gpu.present_scanout_rect(0, 0, gpu_info.width, gpu_info.height);
+                true
+            }
+            Err(e) => {
+                log::warn!("[FB] external backing attach failed ({}): using bounce copy", e);
+                false
+            }
+        };
+
+        let info = FramebufferInfo {
+            base: db_phys,
+            base_virt: db_virt as usize,
+            width: gpu_info.width,
+            height: gpu_info.height,
+            stride: gpu_info.stride,
+            format,
+            source: FramebufferSource::VirtioGpu,
+        };
+
         let canvas = CanvasBuffer {
-            addr: info.base_virt as *mut u8,
+            addr: db_virt,
             width: info.width as usize,
             height: info.height as usize,
             pitch: info.stride as usize,
@@ -275,19 +302,21 @@ impl Framebuffer {
             canvas,
             double_buffer: Some(db_virt),
             use_double_buffer: true,
-            fb_size: (info.stride as usize) * (info.height as usize),
+            fb_size: (stride as usize) * (gpu_info.height as usize),
             console_defer_present: false,
+            zero_copy_backing: zero_copy,
         };
 
         *FRAMEBUFFER.lock() = Some(fb);
         FRAMEBUFFER_INITIALIZED.store(true, Ordering::SeqCst);
 
         log::info!(
-            "[FB] VirtIO GPU framebuffer: {}x{} @ {}bpp, stride={}",
+            "[FB] VirtIO GPU framebuffer: {}x{} @ {}bpp, stride={} ({})",
             info.width,
             info.height,
             info.format.bits_per_pixel,
-            info.stride
+            info.stride,
+            if zero_copy { "zero-copy backing" } else { "bounce copy" }
         );
 
         Ok(())
@@ -345,6 +374,7 @@ impl Framebuffer {
             use_double_buffer: false,
             fb_size: (pitch as usize) * (height as usize),
             console_defer_present: false,
+            zero_copy_backing: false,
         });
 
         log::info!(
@@ -533,6 +563,16 @@ impl Framebuffer {
 
     /// Swap buffers (for double buffering)
     pub fn swap_buffers() {
+        enum VirtioPresent {
+            ZeroCopy { x: u32, y: u32, w: u32, h: u32 },
+            BounceCopy {
+                src: *const u8,
+                stride: u32,
+                regions: [(u32, u32, u32, u32); MAX_DIRTY_RECTS],
+                count: usize,
+            },
+        }
+
         let mut virtio_present = None;
         {
             let mut guard = FRAMEBUFFER.lock();
@@ -551,24 +591,54 @@ impl Framebuffer {
             }
 
             if fb.info.source == FramebufferSource::VirtioGpu {
-                let mut regions = [(0u32, 0u32, 0u32, 0u32); MAX_DIRTY_RECTS];
+                // G3: coalesce dirty rects into their bounding box, then
+                // present. With an attached external backing this is a
+                // single TRANSFER+FLUSH pair straight from our draw target
+                // (zero copy); otherwise fall back to the bounce-copy path
+                // per rect.
+                let mut bx0 = u32::MAX;
+                let mut by0 = u32::MAX;
+                let mut bx1 = 0u32;
+                let mut by1 = 0u32;
                 let mut idx = 0;
                 while idx < fb.canvas.dirty.len {
                     let rect = fb.canvas.dirty.rects[idx];
-                    regions[idx] = (
-                        rect.x0,
-                        rect.y0,
-                        rect.x1.saturating_sub(rect.x0),
-                        rect.y1.saturating_sub(rect.y0),
-                    );
+                    if rect.is_valid() {
+                        bx0 = bx0.min(rect.x0);
+                        by0 = by0.min(rect.y0);
+                        bx1 = bx1.max(rect.x1);
+                        by1 = by1.max(rect.y1);
+                    }
                     idx += 1;
                 }
-                virtio_present = Some((
-                    db as *const u8,
-                    fb.info.stride,
-                    regions,
-                    fb.canvas.dirty.len,
-                ));
+
+                virtio_present = if fb.zero_copy_backing && bx1 > bx0 && by1 > by0 {
+                    Some(VirtioPresent::ZeroCopy {
+                        x: bx0,
+                        y: by0,
+                        w: bx1 - bx0,
+                        h: by1 - by0,
+                    })
+                } else {
+                    let mut regions = [(0u32, 0u32, 0u32, 0u32); MAX_DIRTY_RECTS];
+                    let mut idx = 0;
+                    while idx < fb.canvas.dirty.len {
+                        let rect = fb.canvas.dirty.rects[idx];
+                        regions[idx] = (
+                            rect.x0,
+                            rect.y0,
+                            rect.x1.saturating_sub(rect.x0),
+                            rect.y1.saturating_sub(rect.y0),
+                        );
+                        idx += 1;
+                    }
+                    Some(VirtioPresent::BounceCopy {
+                        src: db as *const u8,
+                        stride: fb.info.stride,
+                        regions,
+                        count: fb.canvas.dirty.len,
+                    })
+                };
             } else {
                 let dst = fb.info.base_virt as *mut u32;
                 let src_base = db as *const u32;
@@ -606,15 +676,28 @@ impl Framebuffer {
             fb.canvas.last_present_tick = crate::process::scheduler::ticks();
         }
 
-        if let Some((src, src_stride, regions, region_count)) = virtio_present {
-            if let Some(gpu) = gpu::get_gpu() {
-                let mut idx = 0;
-                while idx < region_count {
-                    let (px, py, pw, ph) = regions[idx];
-                    let _ = gpu.present_from_linear(src, src_stride, px, py, pw, ph);
-                    idx += 1;
+        match virtio_present {
+            Some(VirtioPresent::ZeroCopy { x, y, w, h }) => {
+                if let Some(gpu) = gpu::get_gpu() {
+                    let _ = gpu.present_scanout_rect(x, y, w, h);
                 }
             }
+            Some(VirtioPresent::BounceCopy {
+                src,
+                stride,
+                regions,
+                count: region_count,
+            }) => {
+                if let Some(gpu) = gpu::get_gpu() {
+                    let mut idx = 0;
+                    while idx < region_count {
+                        let (px, py, pw, ph) = regions[idx];
+                        let _ = gpu.present_from_linear(src, stride, px, py, pw, ph);
+                        idx += 1;
+                    }
+                }
+            }
+            None => {}
         }
     }
 
