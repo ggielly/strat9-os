@@ -107,7 +107,12 @@ The loader and the early kernel cooperate on memory safety:
 - **W^X per segment** — the higher-half kernel mapping applies ELF `p_flags`
   per segment: code is execute-only, data/stack writable but non-executable,
   rodata read-only. The 8 GiB identity map is RW+NX and `EFER.NXE` is set
-  before CR3 is loaded.
+  before CR3 is loaded. The framebuffer mapping uses Write-Combining through
+  a dedicated IA32_PAT entry (entry 4, programmed at context switch), so
+  full-rate pixel stores do not pollute the caches.
+- **Unified present throttling** — one shared `PRESENT_MIN_TICKS` constant
+  (16 ticks ≈ 160 ms at TIMER_HZ=100) gates console and driver redraws;
+  self-paced paths (compositor damage loop, `swap_buffers`) bypass it.
 - **No allocator foot-guns** — every bootloader allocation (memory map, boot
   stack with guard page, module table, env string, `KernelArgs` page) is
   carved out of Free regions before the map is handed over; page-table frames

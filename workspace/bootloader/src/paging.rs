@@ -79,6 +79,10 @@ unsafe fn alloc_frame() -> u64 {
 /// using 4 KiB pages with the given permissions inside the PT hierarchy
 /// rooted at `pml4`. Requires 4 KiB-aligned addresses (guaranteed by the
 /// linker script for kernel segments).
+///
+/// When `wc` is set the PTE PAT bit is raised so the mapping uses PAT
+/// entry 4, which `context_switch` programs to Write-Combining (S1).
+/// Used for the linear framebuffer only.
 unsafe fn map_range(
     pml4: *mut u64,
     mut virt: u64,
@@ -86,6 +90,7 @@ unsafe fn map_range(
     size: u64,
     writable: bool,
     executable: bool,
+    wc: bool,
 ) {
     let end = virt + size;
     while virt < end {
@@ -99,6 +104,9 @@ unsafe fn map_range(
         }
         if !executable {
             entry |= NO_EXECUTE;
+        }
+        if wc {
+            entry |= 1 << 7; // PTE PAT bit -> IA32_PAT entry 4 (WC)
         }
         *pt.add(((virt >> 12) & 0x1FF) as usize) = entry;
 
@@ -187,6 +195,7 @@ pub unsafe fn create_page_tables(
                 seg.map_size,
                 seg.writable(),
                 seg.executable(),
+                false,
             );
         }
 
@@ -196,6 +205,8 @@ pub unsafe fn create_page_tables(
             let phys_lo = fb_phys & !(PAGE_SIZE - 1);
             let span = (fb_phys - phys_lo) + fb_size;
             let pages = span.div_ceil(PAGE_SIZE);
+            // S1: Write-Combining via PAT entry 4 (programmed by
+            // context_switch) — full-rate stores without cache pollution.
             map_range(
                 pml4,
                 FRAMEBUFFER_BASE & !(PAGE_SIZE - 1),
@@ -203,6 +214,7 @@ pub unsafe fn create_page_tables(
                 pages * PAGE_SIZE,
                 true,
                 false,
+                true,
             );
         }
 
@@ -217,6 +229,7 @@ pub unsafe fn create_page_tables(
                 phys_lo,
                 pages * PAGE_SIZE,
                 true,
+                false,
                 false,
             );
         }
@@ -237,6 +250,15 @@ pub unsafe fn context_switch(pml4_phys: u64, stack_top: u64, entry: u64, args: u
             "mov ecx, 0xC0000080",          // IA32_EFER
             "rdmsr",
             "or eax, 1 << 11",              // NXE (LME already set: we run in long mode)
+            "wrmsr",
+            // S1: program IA32_PAT entry 4 to Write-Combining (0x01).
+            // Default PAT = 0x0007040600070406 (entry4 = WB); entry 4 spans
+            // bits 35:32, i.e. the low nibble of EDX. Only PTEs carrying the
+            // PAT bit (framebuffer mapping) use this entry.
+            "mov ecx, 0x277",               // IA32_PAT
+            "rdmsr",
+            "and edx, 0xFFFFFFF0",
+            "or edx, 0x00000001",
             "wrmsr",
             "mov cr3, {pml4}",
             "mov rsp, {stack}",

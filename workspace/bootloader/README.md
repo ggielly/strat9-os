@@ -150,7 +150,7 @@ amplifying a corrupted input into loader-level memory corruption.
 | ELF parsing (`src/elf.rs`) | All header/program-header accesses bounds-checked with checked arithmetic; higher-half `p_paddr` rebasing restricted to `[KERNEL_VIRT_BASE, KERNEL_VIRT_BASE + 16 MiB)` — no integer wrap can produce an out-of-window physical write; segments outside the supported window are fatal errors instead of silently skipped |
 | Kernel mapping | Per-segment W^X built from ELF `p_flags`: writable data/stack get `W`, only code stays executable, everything else read-only; identity map is RW+NX and `EFER.NXE` is enabled before CR3 is loaded so NX is actually enforced |
 | Page tables | Table frames allocated above the kernel image are validated against the final memory map before use; the whole window must lie inside usable RAM |
-| Framebuffer | Mapped with exact-span 4 KiB pages (no 2 MiB rounding over neighbouring MMIO) |
+| Framebuffer | Mapped with exact-span 4 KiB pages (no 2 MiB rounding over neighbouring MMIO) in **Write-Combining** via a dedicated IA32_PAT entry (entry 4 programmed at context switch, PTE PAT bit on the fb mapping only) |
 | File reads | Full-read loops for `kernel.elf` and initfs modules; truncated images are rejected/skipped, never partially executed |
 | Allocation limits | `kernel.elf` and each module capped at 64 MiB; oversized inputs are rejected instead of OOM-ing the loader |
 | Memory map | Every bootloader allocation (map itself, boot stack with guard page, module table, env string, `KernelArgs`) is carved out of Free regions; the handed-over map never lists them as available |

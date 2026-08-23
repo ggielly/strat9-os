@@ -503,15 +503,20 @@ impl CanvasBuffer {
         if !self.present_pending || !self.draw_to_back {
             return;
         }
-        if force || now.saturating_sub(self.last_present_tick) >= PRESENT_MIN_TICKS_CB {
+        if force || now.saturating_sub(self.last_present_tick) >= PRESENT_MIN_TICKS {
             self.last_present_tick = now;
             self.present();
         }
     }
 }
 
-/// Local constant for present throttling (matches VgaWriter's PRESENT_MIN_TICKS).
-const PRESENT_MIN_TICKS_CB: u64 = 1;
+/// Minimum scheduler ticks between two throttled presents, shared by the
+/// VGA console writer and the video driver.
+///
+/// `TIMER_HZ` is 100 (one tick = 10 ms), so 16 ticks ≈ 160 ms of pacing for
+/// redraw-heavy paths. Paths that pace themselves (the userspace compositor,
+/// `Framebuffer::swap_buffers`) do not go through this gate.
+pub const PRESENT_MIN_TICKS: u64 = 16;
 
 impl FramebufferOps {
     pub fn detect() -> Self {
