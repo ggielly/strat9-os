@@ -256,8 +256,8 @@ impl BusSchemeServer {
             return match path {
                 PCI_PREFIX | "pci/inventory" | "pci/count" | "pci/rescan" | "pci/find"
                 | "pci/cfg" => true,
-                p if p.starts_with("pci/find/") => Self::parse_find_path(p).is_some(),
-                p if p.starts_with("pci/cfg/") => Self::parse_cfg_path(p).is_some(),
+                p if p.starts_with("pci/find/") => BusSchemeServer::parse_find_path(p).is_some(),
+                p if p.starts_with("pci/cfg/") => BusSchemeServer::parse_cfg_path(p).is_some(),
                 _ => false,
             };
         }
@@ -272,7 +272,7 @@ impl BusSchemeServer {
                 return true;
             }
             if sub.starts_with(DRV_REG_PREFIX) {
-                return Self::parse_reg_offset(sub).is_some();
+                return BusSchemeServer::parse_reg_offset(sub).is_some();
             }
             // Child device check
             if self.drivers[idx].1.children().iter().any(|c| c.name == sub) {
@@ -285,7 +285,7 @@ impl BusSchemeServer {
 
     fn parse_reg_offset(path: &str) -> Option<usize> {
         let reg_str = path.strip_prefix(DRV_REG_PREFIX)?;
-        Self::parse_hex_usize(reg_str)
+        BusSchemeServer::parse_hex_usize(reg_str)
     }
 
     /// Parse an unsigned hex value, rejecting inputs `from_str_radix`
@@ -301,11 +301,11 @@ impl BusSchemeServer {
     }
 
     fn parse_hex_u8(s: &str) -> Option<u8> {
-        Self::parse_hex_usize(s)?.try_into().ok()
+        BusSchemeServer::parse_hex_usize(s)?.try_into().ok()
     }
 
     fn parse_hex_u16(s: &str) -> Option<u16> {
-        Self::parse_hex_usize(s)?.try_into().ok()
+        BusSchemeServer::parse_hex_usize(s)?.try_into().ok()
     }
 
     // === Open ================================================================
@@ -320,7 +320,7 @@ impl BusSchemeServer {
         if raw_path.len() > IpcMessage::OPEN_INLINE_CAPACITY {
             return Self::err_reply(sender, EINVAL);
         }
-        let path = match Self::normalize_path(raw_path) {
+        let path = match BusSchemeServer::normalize_path(raw_path) {
             Some(p) => p,
             // `..` escaping the namespace root.
             None => return Self::err_reply(sender, EINVAL),
@@ -433,7 +433,7 @@ impl BusSchemeServer {
             "pci/inventory" => self.render_inventory(),
             "pci/count" => format!("{}\n", self.pci_cache.len()).into_bytes(),
             path if path.starts_with("pci/find/") => {
-                let Some((vendor_id, device_id)) = Self::parse_find_path(path) else {
+                let Some((vendor_id, device_id)) = BusSchemeServer::parse_find_path(path) else {
                     return b"invalid path\n".to_vec();
                 };
                 // Serve repeated/sequential reads from the cache; the
@@ -505,7 +505,7 @@ impl BusSchemeServer {
                 rendered
             }
             path if path.starts_with("pci/cfg/") => {
-                let Some((addr, reg, width)) = Self::parse_cfg_path(path) else {
+                let Some((addr, reg, width)) = BusSchemeServer::parse_cfg_path(path) else {
                     return b"invalid path\n".to_vec();
                 };
                 match call::pci_cfg_read(&addr, reg, width) {
@@ -537,7 +537,7 @@ impl BusSchemeServer {
             }
             DRV_ERROR_COUNT => format!("{}\n", driver.error_count()).into_bytes(),
             s if s.starts_with(DRV_REG_PREFIX) => {
-                if let Some(reg_offset) = Self::parse_reg_offset(s) {
+                if let Some(reg_offset) = BusSchemeServer::parse_reg_offset(s) {
                     match driver.read_reg(reg_offset) {
                         Ok(val) => format!("0x{:08x}\n", val).into_bytes(),
                         Err(_) => b"error\n".to_vec(),
@@ -583,7 +583,7 @@ impl BusSchemeServer {
                 }
             }
             HandleKind::Pci(path) if path.starts_with("pci/cfg/") => {
-                let Some((addr, reg, width)) = Self::parse_cfg_path(path) else {
+                let Some((addr, reg, width)) = BusSchemeServer::parse_cfg_path(path) else {
                     return Self::err_reply(sender, EINVAL);
                 };
                 if len < 4 {
@@ -614,7 +614,7 @@ impl BusSchemeServer {
                 driver_idx,
                 sub_path,
             } if sub_path.starts_with(DRV_REG_PREFIX) => {
-                let Some(reg_offset) = Self::parse_reg_offset(sub_path) else {
+                let Some(reg_offset) = BusSchemeServer::parse_reg_offset(sub_path) else {
                     return Self::err_reply(sender, EINVAL);
                 };
                 if len < 4 {
@@ -789,9 +789,9 @@ impl BusSchemeServer {
     fn parse_pci_bdf(s: &str) -> Option<PciAddress> {
         let (bus_s, rest) = s.split_once(':')?;
         let (dev_s, fun_s) = rest.split_once('.')?;
-        let bus = Self::parse_hex_u8(bus_s)?;
-        let device = Self::parse_hex_u8(dev_s)?;
-        let function = Self::parse_hex_u8(fun_s)?;
+        let bus = BusSchemeServer::parse_hex_u8(bus_s)?;
+        let device = BusSchemeServer::parse_hex_u8(dev_s)?;
+        let function = BusSchemeServer::parse_hex_u8(fun_s)?;
         if device > 31 || function > 7 {
             return None;
         }
@@ -811,8 +811,8 @@ impl BusSchemeServer {
         if parts.next().is_some() {
             return None;
         }
-        let addr = Self::parse_pci_bdf(bdf)?;
-        let offset = Self::parse_hex_u8(off)?;
+        let addr = BusSchemeServer::parse_pci_bdf(bdf)?;
+        let offset = BusSchemeServer::parse_hex_u8(off)?;
         let width = width.parse::<u8>().ok()?;
         if !matches!(width, 1 | 2 | 4) {
             return None;
@@ -822,8 +822,8 @@ impl BusSchemeServer {
 
     fn parse_find_path(path: &str) -> Option<(u16, u16)> {
         let mut parts = path.strip_prefix("pci/find/")?.split('/');
-        let ven = Self::parse_hex_u16(parts.next()?)?;
-        let dev = Self::parse_hex_u16(parts.next()?)?;
+        let ven = BusSchemeServer::parse_hex_u16(parts.next()?)?;
+        let dev = BusSchemeServer::parse_hex_u16(parts.next()?)?;
         if parts.next().is_some() {
             return None;
         }
@@ -850,5 +850,96 @@ impl BusSchemeServer {
             out.extend_from_slice(line.as_bytes());
         }
         out
+    }
+}
+
+// ===========================================================================
+// Tests — pure path/parsing helpers pinned by the security review.
+// Host-runnable: cargo test -p strat9-bus-drivers
+// ===========================================================================
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+
+    // S5 — normalize_path: dot segments, `..` traversal, repeated slashes.
+
+    #[test]
+    fn s5_normalize_collapses_dots_and_slashes() {
+        assert_eq!(BusSchemeServer::normalize_path("pci//find"), Some(String::from("pci/find")));
+        assert_eq!(BusSchemeServer::normalize_path("./status"), Some(String::from("status")));
+        assert_eq!(BusSchemeServer::normalize_path("/"), Some(String::new()));
+        assert_eq!(BusSchemeServer::normalize_path(""), Some(String::new()));
+    }
+
+    #[test]
+    fn s5_normalize_resolves_parent_segments_lexically() {
+        // Before the fix, `..` passed through untouched and could bypass
+        // prefix matching.
+        assert_eq!(
+            BusSchemeServer::normalize_path("pci/../nvme0/status"),
+            Some(String::from("nvme0/status"))
+        );
+        assert_eq!(BusSchemeServer::normalize_path("a/b/../c"), Some(String::from("a/c")));
+    }
+
+    #[test]
+    fn s5_normalize_rejects_root_escaping_traversal() {
+        assert_eq!(BusSchemeServer::normalize_path("../etc/passwd"), None);
+        assert_eq!(BusSchemeServer::normalize_path("pci/../../x"), None);
+    }
+
+    // A4 — hardened hex parsing.
+
+    #[test]
+    fn a4_hex_parsers_reject_sign_and_repeated_prefixes() {
+        assert!(BusSchemeServer::parse_hex_usize("0x10").is_some());
+        assert_eq!(BusSchemeServer::parse_hex_usize("10"), Some(16));
+        // Previously accepted (trim_start_matches looped):
+        assert!(BusSchemeServer::parse_hex_usize("0x0x10").is_none());
+        // Previously accepted (from_str_radix allows '+'):
+        assert!(BusSchemeServer::parse_hex_usize("+1f").is_none());
+        assert!(BusSchemeServer::parse_hex_usize("-1f").is_none());
+        assert!(BusSchemeServer::parse_hex_usize("").is_none());
+        assert!(BusSchemeServer::parse_hex_u8("100").is_none()); // > u8::MAX
+        assert!(BusSchemeServer::parse_hex_u16("10000").is_none()); // > u16::MAX
+    }
+
+    #[test]
+    fn a4_reg_offset_requires_valid_hex() {
+        assert_eq!(BusSchemeServer::parse_reg_offset("reg/0x1c"), Some(28));
+        assert!(BusSchemeServer::parse_reg_offset("reg/").is_none());
+        assert!(BusSchemeServer::parse_reg_offset("reg/+4").is_none());
+    }
+
+    // V3 — strict pci sub-path validation.
+
+    #[test]
+    fn v3_pci_cfg_path_rejects_bad_width_and_bdf() {
+        let (addr, off, w) = BusSchemeServer::parse_cfg_path("pci/cfg/00:1f.2/10/4").unwrap();
+        assert_eq!((addr.device, addr.function), (31, 2));
+        assert_eq!((off, w), (16, 4));
+        // width must be 1, 2 or 4:
+        assert!(BusSchemeServer::parse_cfg_path("pci/cfg/00:1f.2/10/3").is_none());
+        // device > 31 / function > 7 are invalid BDFs:
+        assert!(BusSchemeServer::parse_cfg_path("pci/cfg/00:20.0/10/4").is_none());
+        assert!(BusSchemeServer::parse_cfg_path("pci/cfg/00:01.8/10/4").is_none());
+        // extra segments rejected:
+        assert!(BusSchemeServer::parse_cfg_path("pci/cfg/00:1f.2/10/4/x").is_none());
+    }
+
+    #[test]
+    fn v3_pci_find_path_is_strictly_two_fields() {
+        assert_eq!(BusSchemeServer::parse_find_path("pci/find/8086:100e"), None); // ':' not a separator
+        assert_eq!(BusSchemeServer::parse_find_path("pci/find/8086/100e"), Some((0x8086, 0x100e)));
+        assert!(BusSchemeServer::parse_find_path("pci/find/8086").is_none());
+        assert!(BusSchemeServer::parse_find_path("pci/find/8086/100e/x").is_none());
+    }
+
+    #[test]
+    fn v3_pci_bdf_bounds_device_and_function() {
+        assert!(BusSchemeServer::parse_pci_bdf("ff:1f.7").is_some());
+        assert!(BusSchemeServer::parse_pci_bdf("00:20.0").is_none()); // device 32
+        assert!(BusSchemeServer::parse_pci_bdf("00:00.8").is_none()); // function 8
     }
 }
