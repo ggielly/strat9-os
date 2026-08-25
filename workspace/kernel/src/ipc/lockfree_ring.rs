@@ -266,8 +266,10 @@ mod tests {
 
     #[test]
     fn full_ring() {
+        // F9 fix (L2 host harness): capacity is slot_count.next_power_of_two(),
+        // so a 4-slot ring accepts 4 messages before returning Full.
         let ring = LockFreeRing::new(4, 64).unwrap();
-        for _ in 0..3 {
+        for _ in 0..4 {
             ring.write(b"hello").unwrap();
         }
         assert_eq!(ring.write(b"world"), Err(RingError::Full));

@@ -1,0 +1,5 @@
+# L2 host harness: signals "kernel code compiled for host tests" so ring-0
+#-only code paths (port I/O, privileged asm) can compile out. See
+# workspace/kernel-l2-tests/src/lib.rs header.
+[build]
+rustflags = ["--cfg", "kernel_l2_host"]

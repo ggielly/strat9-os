@@ -168,7 +168,11 @@ impl<T: ?Sized> SpinLock<T, IrqDisabled> {
                 // Diagnostic only: distinguish "IRQs enabled" from ordinary
                 // lock contention at call sites that intentionally treat both
                 // as a best-effort `None` return in hot paths.
+                // F10: ring-0 port I/O compiled out under kernel_l2_host.
+                #[cfg(not(kernel_l2_host))]
                 unsafe { core::arch::asm!("mov al, 'V'; out 0xe9, al", out("al") _) };
+                #[cfg(kernel_l2_host)]
+                let _ = 0u8;
                 return None;
             }
         };
@@ -249,7 +253,14 @@ fn emit_trace_e9(lock_addr: usize, tag_offset: u8) {
     for (i, slot) in DEBUG_TRACE_WATCH_ADDRS.iter().enumerate() {
         if slot.load(Ordering::Relaxed) == lock_addr {
             let ch = b'A' + tag_offset + (i as u8);
+            // L2 host harness (testing-findings.md F10): `out 0xe9` is ring-0
+            // port I/O; executing it from userspace faults with SIGSEGV.
+            // Compiled out only under the kernel-l2-tests harness cfg;
+            // production behavior is unchanged.
+            #[cfg(not(kernel_l2_host))]
             unsafe { core::arch::asm!("out 0xe9, al", in("al") ch) };
+            #[cfg(kernel_l2_host)]
+            let _ = ch;
         }
     }
 }
@@ -326,7 +337,11 @@ impl<'a, T: ?Sized, G: Guardian> Drop for SpinLockGuard<'a, T, G> {
         for (i, slot) in DEBUG_TRACE_WATCH_ADDRS.iter().enumerate() {
             if slot.load(Ordering::Relaxed) == lock_addr {
                 let ch = b'a' + (i as u8);
+                // F10: see acquire-side note above.
+                #[cfg(not(kernel_l2_host))]
                 unsafe { core::arch::asm!("out 0xe9, al", in("al") ch) };
+                #[cfg(kernel_l2_host)]
+                let _ = ch;
             }
         }
 
