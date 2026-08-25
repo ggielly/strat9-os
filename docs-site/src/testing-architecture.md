@@ -45,6 +45,18 @@ tables de capabilities, routage de schemes) :
   arch (`mod pure`), tester ces modules avec `#[cfg(test)]` compilés pour hôte ;
 - Alternative : harness de test custom embarqué dans l'image (voir L3).
 
+### L2 — opérationnel : crate ombre `workspace/kernel-l2-tests`
+Les modules purs du kernel sont compilés **verbatim** (`#[path]` includes)
+dans une crate hôte qui fournit des fakes fonctionnels :
+`sync/irq` (token factice), `arch/x86_64/percpu` (compteurs), `silo`,
+translation HHDM (offset réel vers une arena hôte → l'allocateur buddy
+travaille sur de la vraie mémoire). Les tests inline `#[cfg(test)]` du
+kernel s'exécutent enfin. Cible : `cargo make test-kernel-l2`.
+Modules couverts : `sync/{fixed_queue,guardian,spinlock}`, `ipc/{message,
+lockfree_ring,mailbox}`, `memory/{boot_alloc,zone,frame,buddy}`,
+`namespace`, `boot/toml`. Prochains candidats : `ipc/channel`, `vfs`
+(routeur de schemes), classes d'ordonnancement.
+
 ### L3 — Self-tests kernel in-QEMU (feature `selftest`)
 Le kernel dispose déjà de `cargo make kernel-test` + `selftest.rs`.
 Convention à généraliser :

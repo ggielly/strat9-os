@@ -138,9 +138,15 @@ args = [
     "-p", "strate-fs-abstraction", "--features", "strate-fs-abstraction/alloc",
 ]
 
+[tasks.test-kernel-l2]
+description = "L2: real kernel pure modules (buddy, sync, IPC rings, namespace) on host"
+cwd = "workspace/kernel-l2-tests"
+command = "cargo"
+args = ["test", "--target", "x86_64-unknown-linux-gnu"]
+
 [tasks.ci-tests]
-description = "Full CI gate: host tests (default + alloc features)"
-dependencies = ["test-host", "test-host-alloc"]
+description = "Full CI gate: host tests (default + alloc) + kernel L2 mirror"
+dependencies = ["test-host", "test-host-alloc", "test-kernel-l2"]
 
 [tasks.qemu-selftest]
 description = "L3/L4: boot kernel with selftests in QEMU, verify serial markers"

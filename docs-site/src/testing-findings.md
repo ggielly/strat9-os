@@ -63,7 +63,30 @@ La traduction `posix_oflags_to_strat9` (crate abi) utilisait ses propres copies
 correctes — mais tout composant consommant ces constantes directement cassait.
 Leçon : les tables dorées attrapent ce que la relecture manuelle rate.
 
-## Couverture ajoutée (L0/L1)
+## F9 — Test inline `lockfree_ring::full_ring` faux depuis sa création — ✅ CORRIGÉ
+Découvert dès la première exécution réelle des tests inline du kernel (jamais
+possibles avant le harnais L2) : `LockFreeRing::new(4, 64)` crée 4 slots
+(`next_power_of_two`), donc 4 writes réussissent — le test attendait Full
+au 4ᵉ. Le test était off-by-one ; corrigé dans le bloc `#[cfg(test)]`.
+
+## F10 — Port I/O `out 0xe9` dans les primitives de sync — ✅ CONTOURNÉ
+`emit_trace_e9` (spinlock.rs) et d'autres traces diagnostiques émettent sur
+le port série E9 via `asm!("out 0xe9")` : instruction ring-0, SIGSEGV garanti
+en userspace. Compilé hors du binaire de test uniquement sous le cfg
+`kernel_l2_host` (posé par `workspace/kernel-l2-tests/.cargo/config.toml`) ;
+production inchangée.
+
+## Couverture ajoutée (L2 — code kernel réel sur hôte)
+
+| Suite | Tests | Périmètre |
+|---|---|---|
+| inline kernel récupérés | 13 | lockfree_ring (8), mailbox (3), boot/toml (3*) |
+| `kernel-l2-tests/tests/buddy_allocator.rs` | 6 | buddy réel sur mémoire hôte: alignement par ordre, épuisement→OOM propre, zéro après purpose-alloc, stress 2000 ops avec payload tags, tolérance double-free |
+| `kernel-l2-tests/tests/kernel_sync_namespace.rs` | 10 | FixedQueue FIFO/wraparound/overflow, SpinLock réel, namespace bind/unbind/resolve longest-prefix |
+
+\* comptage approximatif des modules inclus.
+Harnais : crate ombre `workspace/kernel-l2-tests` — modules kernel inclus
+verbatim via `#[path]`, fakes fonctionnels pour IRQ/percpu/silo/HHDM.
 
 | Suite | Tests | Périmètre |
 |---|---|---|

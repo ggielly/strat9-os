@@ -1,0 +1,24 @@
+[package]
+name = "kernel-l2-tests"
+publish = false
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+# L2 host-test harness: compiles PURE modules of the Bedrock kernel verbatim
+# (via #[path] includes) against functional stand-ins for hardware-bound
+# dependencies (IRQ tokens, frame allocator). Zero modification of kernel
+# sources -> no merge friction with active development branches.
+#
+# See docs-site/src/testing-architecture.md (layer L2).
+
+[dependencies]
+strat9-abi = { path = "../abi" }
+strat9-syscall = { path = "../components/syscall" }
+crossbeam-queue = { version = "0.3.12", default-features = false, features = ["alloc"] }
+num_enum = { version = "0.7", default-features = false }
+thiserror = { version = "2", default-features = false }
+x86_64 = "0.15"
+zerocopy = { version = "0.8", features = ["derive"] }
+static_assertions = "1.1"
+
+[workspace]
