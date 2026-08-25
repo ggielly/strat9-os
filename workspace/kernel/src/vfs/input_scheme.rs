@@ -62,7 +62,7 @@ impl Scheme for InputScheme {
             KBD_FILE_ID => {
                 let mut count = 0;
                 for slot in buf.iter_mut() {
-                    match crate::arch::x86_64::keyboard::read_char() {
+                    match crate::arch::keyboard::read_char() {
                         Some(ch) => {
                             *slot = ch;
                             count += 1;
@@ -76,7 +76,7 @@ impl Scheme for InputScheme {
                 // Each mouse event is 7 bytes: [dx_lo, dx_hi, dy_lo, dy_hi, dz, buttons, 0]
                 let mut count = 0;
                 while count + 7 <= buf.len() {
-                    match crate::arch::x86_64::mouse::read_event() {
+                    match crate::arch::mouse::read_event() {
                         Some(ev) => {
                             buf[count] = ev.dx as u8;
                             buf[count + 1] = (ev.dx >> 8) as u8;

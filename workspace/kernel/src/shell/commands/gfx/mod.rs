@@ -1,6 +1,6 @@
 //! Graphics console commands
 use crate::{
-    arch::x86_64::vga::{self, RgbColor, TextAlign, TextOptions, UiTheme},
+    arch::vga::{self, RgbColor, TextAlign, TextOptions, UiTheme},
     shell::ShellError,
     shell_println,
 };

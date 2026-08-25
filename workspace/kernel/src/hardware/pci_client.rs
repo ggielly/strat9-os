@@ -1,9 +1,9 @@
-pub use crate::arch::x86_64::pci::{
+pub use crate::arch::pci::{
     cap_id, class, command, config, device, intel_eth, msi_cap, msi_ctrl, msix_cap, msix_ctrl,
     net_subclass, sata_progif, storage_subclass, vendor, MSI_ADDR_BASE, MSI_ADDR_DEST_SHIFT,
 };
 use crate::{
-    arch::x86_64::pci as arch_pci,
+    arch::pci as arch_pci,
     vfs::{self, OpenFlags},
 };
 use alloc::{format, string::String, vec::Vec};

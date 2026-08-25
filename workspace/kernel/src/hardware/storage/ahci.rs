@@ -1179,7 +1179,7 @@ pub fn init() {
 
             // Register IRQ handler in the IDT now that the controller is live.
             let irq = AHCI_IRQ_LINE.load(Ordering::Relaxed);
-            crate::arch::x86_64::idt::register_ahci_irq(irq);
+            crate::arch::idt::register_ahci_irq(irq);
         }
         Err(AhciError::NoController) => {
             log::info!("AHCI: no controller found (not a SATA system?)");

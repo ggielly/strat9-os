@@ -46,13 +46,13 @@ impl CpuId {
         // This is safe if per-CPU data has been set up via
         // arch::x86_64::percpu::init_gs_base(). The "racy" suffix indicates
         // that no additional synchronization is performed.
-        let cpu_index = crate::arch::x86_64::percpu::current_cpu_index();
+        let cpu_index = crate::arch::percpu::current_cpu_index();
         Self::new(cpu_index)
     }
 
     /// Returns the number of CPUs in the system
     pub fn num_cpus() -> usize {
-        crate::arch::x86_64::percpu::get_cpu_count()
+        crate::arch::percpu::get_cpu_count()
     }
 
     /// Returns an iterator over all CPUs
@@ -113,7 +113,7 @@ impl Iterator for CpuIter {
 pub fn halt_cpu() {
     // hlt is a privileged instruction that halts the CPU until
     // the next interrupt. This is safe to call in kernel mode.
-    crate::arch::x86_64::hlt();
+    crate::arch::hlt();
 }
 
 /// Disable interrupts on the current CPU
@@ -122,7 +122,7 @@ pub fn disable_irqs() {
     // cli is a privileged instruction that disables interrupts.
     // This is safe to call in kernel mode and is commonly used to
     // protect critical sections.
-    crate::arch::x86_64::cli();
+    crate::arch::cli();
 }
 
 /// Enable interrupts on the current CPU
@@ -130,13 +130,13 @@ pub fn disable_irqs() {
 pub fn enable_irqs() {
     // sti is a privileged instruction that enables interrupts.
     // This is safe to call in kernel mode.
-    crate::arch::x86_64::sti();
+    crate::arch::sti();
 }
 
 /// Check if interrupts are enabled on the current CPU
 #[inline]
 pub fn irqs_enabled() -> bool {
-    crate::arch::x86_64::interrupts_enabled()
+    crate::arch::interrupts_enabled()
 }
 
 /// Save interrupt flags and disable interrupts
@@ -144,7 +144,7 @@ pub fn irqs_enabled() -> bool {
 /// Returns the previous interrupt state.
 #[inline]
 pub fn save_and_disable_irqs() -> bool {
-    let flags = crate::arch::x86_64::save_flags_and_cli();
+    let flags = crate::arch::save_flags_and_cli();
     (flags & 0x200) != 0
 }
 

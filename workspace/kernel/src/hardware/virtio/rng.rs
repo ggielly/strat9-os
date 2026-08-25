@@ -2,7 +2,7 @@
 // Reference: VirtIO spec v1.2, Section 5.6 (Entropy Device)
 
 use crate::{
-    arch::x86_64::pci::{self, Bar, ProbeCriteria},
+    arch::pci::{self, Bar, ProbeCriteria},
     memory::{allocate_zeroed_frame, phys_to_virt},
 };
 use alloc::vec::Vec;

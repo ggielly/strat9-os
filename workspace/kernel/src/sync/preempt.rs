@@ -24,7 +24,7 @@
 //! preemption depth and each `drop` decrements it. Preemption is re-enabled
 //! only when the depth reaches 0.
 
-use crate::arch::x86_64::percpu;
+use crate::arch::percpu;
 
 /// RAII guard that disables preemption on the current CPU.
 ///

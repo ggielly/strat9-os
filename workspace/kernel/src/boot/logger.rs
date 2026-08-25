@@ -38,7 +38,7 @@ impl log::Log for SerialLogger {
             };
 
             // 1. Serial : always works, no locks needed.
-            crate::arch::x86_64::serial::_print(format_args!(
+            crate::arch::serial::_print(format_args!(
                 "[{}] {}{}\x1b[0m\n",
                 level_str,
                 msg_color,
@@ -49,7 +49,7 @@ impl log::Log for SerialLogger {
             //     via vga_debug_write.  This bypasses VGA_WRITER and works
             //     before the scheduler / status_line_task are running.
             //     Controlled by debug_cfg::VGA_DEBUG_LIVE toggle.
-            if crate::debug_cfg::is_vga_debug_live() && crate::arch::x86_64::vga::is_available() {
+            if crate::debug_cfg::is_vga_debug_live() && crate::arch::vga::is_available() {
                 let mut line_buf = [0u8; 256];
                 let mut lpos = 0usize;
                 use core::fmt::Write;
@@ -78,15 +78,15 @@ impl log::Log for SerialLogger {
                 );
                 if lpos > 0 {
                     if let Ok(s) = core::str::from_utf8(&line_buf[..lpos]) {
-                        crate::arch::x86_64::vga::vga_debug_writeln(s);
+                        crate::arch::vga::vga_debug_writeln(s);
                     }
                 }
             }
 
             // 2. VGA ring buffer : lock-free enqueue.
             //    Controlled by debug_cfg::VGA_DEBUG_BUFFER toggle.
-            if crate::debug_cfg::is_vga_debug_buffer() && crate::arch::x86_64::vga::is_available() {
-                let mut vbuf = [0u8; crate::arch::x86_64::vgabuf::VGABUF_LINE_LEN];
+            if crate::debug_cfg::is_vga_debug_buffer() && crate::arch::vga::is_available() {
+                let mut vbuf = [0u8; crate::arch::vgabuf::VGABUF_LINE_LEN];
                 let mut vpos = 0usize;
                 use core::fmt::Write;
                 struct VgaBufWriter<'a> {
@@ -113,7 +113,7 @@ impl log::Log for SerialLogger {
                     record.args(),
                 );
                 if vpos > 0 {
-                    crate::arch::x86_64::vgabuf::vgabuf_write(&vbuf[..vpos]);
+                    crate::arch::vgabuf::vgabuf_write(&vbuf[..vpos]);
                 }
             }
         }

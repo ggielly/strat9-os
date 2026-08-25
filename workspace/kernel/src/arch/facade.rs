@@ -41,9 +41,9 @@ pub mod x86_backend {
 #[cfg(target_arch = "x86_64")]
 pub use crate::arch::x86_64::{
     apic, boot_timestamp, clac, cli, cpuid, hlt, idt, init_cpu_extensions,
-    interrupts_enabled, io, keyboard, mouse, pci, percpu, pic, ring3_diag,
-    rdtsc, restore_flags, save_flags_and_cli, serial, speaker, smp, stac, sti,
-    syscall, timer, tlb, tss,
+    interrupts_enabled, io, ioapic, keyboard, keyboard_layout, msi, mouse,
+    pci, percpu, pic, ring3_diag, rdtsc, restore_flags, save_flags_and_cli,
+    serial, speaker, smp, stac, sti, syscall, timer, tlb, tss, vga, vgabuf,
 };
 
 /// Maximum number of CPUs supported by the kernel (neutral constant).
@@ -53,3 +53,7 @@ pub use crate::arch::x86_64::{
 /// backend's value.
 #[cfg(target_arch = "x86_64")]
 pub use crate::arch::x86_64::percpu::MAX_CPUS;
+
+#[cfg(target_arch = "x86_64")]
+pub use crate::arch::x86_64::{rdmsr, wrmsr, xgetbv, xsetbv};
+
