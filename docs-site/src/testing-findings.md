@@ -3,7 +3,14 @@
 > Issues découvertes par la suite anti-régression (`test/anti-regression-suite`).
 > Chaque finding est référencé par un test qui le documente/pinne.
 
-## F1 — Build kernel cassé par le nightly non épinglé (bloquant)
+## F1 — Build kernel cassé par le nightly non épinglé (bloquant) — ✅ RÉSOLU
+Épinglé sur `nightly-2026-08-20` (dernier bon vérifié : bisect 08-20 OK /
+08-23 cassé, cause PR rust-lang/rust#160302 mergé le 23/08 à 21:33 UTC,
+commit fb6531d550e0). Le code exige en outre `Step::forward/backward_overflowing`
+(PR #155114, 09/07/2026) ⇒ fenêtre compatible [2026-07-10 .. 2026-08-22].
+Correctif associé : `[profile.dev] opt-level = 0 → 1` car O0 déclenche une
+ICE LLVM distincte (#158532) sur les intrinsèques AVX2. Builds debug,
+release, selftest et gate hôte tous vérifiés verts.
 `framebuffer/x86/avx2.rs` utilise `#[target_feature(enable = "avx2")]`.
 Sur `rustc 1.100.0-nightly`, activer sse/avx sur une cible soft-float
 (`x86_64-unknown-none`) est une **erreur dure** (lint `x86_softfloat_sse`).
@@ -14,30 +21,31 @@ Sur `rustc 1.100.0-nightly`, activer sse/avx sur une cible soft-float
 2. (long terme) Adapter `avx2.rs` : runtime detection + assembly inline
    ou wrapper compilé sans soft-float constraint.
 
-## F2 — `VfsTimestamp::to_filetime` déborde
+## F2 — `VfsTimestamp::to_filetime` déborde — ⏳ à faire
 `(secs + WINDOWS_EPOCH_OFFSET) as u64 * 10_000_000` sans arithmetic checkée :
 panic debug / wrap release au-delà de ~an 60000. Entrée contrôlée par le disque
 ou le réseau (chemins stat) ⇒ à traiter comme entrée hostile.
 **Fix proposé** : `checked_mul` → `FsError::ArithmeticOverflow`.
 
-## F3 — `FsCapabilities::xfs()/btrfs()` : commentaires mensongers
+## F3 — `FsCapabilities::xfs()/btrfs()` : valeurs PiB au lieu de EiB — ✅ RÉSOLU
+XFS = 8 EiB réels ; btrfs clampé à u64::MAX (16 EiB = 2^64). Tests mis à jour.
 Commentaires « 8 EiB »/« 16 EiB », chaînes littérales à 5 facteurs `1024`
 ⇒ valeurs réelles 8 **PiB** / 16 **PiB** (16 EiB ne tient même pas dans u64).
 Décider : corriger les commentaires ou l'arithmétique.
 
-## F4 — `parse_ipv6_literal` sur-accepte le `::`
+## F4 — `parse_ipv6_literal` sur-accepte le `::` — ⏳ à durcir (RFC 4291)
 RFC 4291 interdit `::` quand 8 groupes explicites sont déjà présents ;
 le parseur accepte `1:2:3:4:5:6:7:8::`. Sans danger immédiat (sortie bien
 formée) mais à durcir pour la conformité.
 
-## F5 — `OpenReply` n'implémente pas `KnownLayout`
-`decode_fixed::<OpenReply>()` ne compile pas (zerocopy). Les consommateurs
-parse donc à la main — fragile. **Fix proposé** : ajouter `KnownLayout`
-au derive et un test conformance utilisant `decode_fixed`.
+## F5 — `OpenReply` n'implémente pas `KnownLayout` — ✅ RÉSOLU
+`KnownLayout` dérivé via zerocopy (déjà dépendance) sur toute la surface
+de payloads `repr(C)` + `InlineBlobHeader`. Test de regression roundtrip
+`decode_fixed` ajouté pour chaque struct fixe.
 
-## F6 — `ENOTSUP = 52` n'est pas la valeur Linux
-Linux utilise `EOPNOTSUPP = 95` (= `ENOTSUP` Linux). La valeur 52 casse la
-correspondance 1:1 promise pour musl/relibc. Vérifier ce que renvoie musl.
+## F6 — `ENOTSUP = 52` n'est pas la valeur Linux — ✅ RÉSOLU
+Renommé 52 → 95 (= Linux x86_64) : constante ABI, selftest kernel,
+tests golden, entrée changelog ABI.
 
 ## F7 — Test unitaire préexistant cassé depuis longtemps
 `strate-fs-abstraction/tests/unit_tests.rs` importait `fs_abstraction`
