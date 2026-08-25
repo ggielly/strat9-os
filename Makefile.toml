@@ -288,6 +288,25 @@ ${QEMU} \
     -no-reboot
 ''']
 
+# =============================================================================
+# Legacy custom bootloader (NOT the active boot path - see limine-image)
+# =============================================================================
+
+[tasks.assemble-bootloader]
+description = "LEGACY: assemble the custom BIOS bootloader (build/boot.bin)"
+script_runner = "@shell"
+script = ['''
+bash tools/scripts/assemble-bootloader.sh
+''']
+
+[tasks.boot-disk]
+description = "LEGACY: build a raw disk image with the custom bootloader + kernel at LBA 17"
+dependencies = ["assemble-bootloader", "kernel-release"]
+script_runner = "@shell"
+script = ['''
+bash tools/scripts/create-image.sh
+''']
+
 [tasks.test-boot]
 description = "Boot test: kernel + serial output verification"
 dependencies = ["limine-image"]
