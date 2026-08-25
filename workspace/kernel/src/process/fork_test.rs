@@ -25,7 +25,7 @@ struct UserLaunchCtx {
 
 /// Performs the ring3 test trampoline operation.
 extern "C" fn ring3_test_trampoline(ctx_ptr: u64) -> ! {
-    use crate::arch::x86_64::gdt;
+    use crate::arch::gdt;
 
     let ctx = unsafe { Box::from_raw(ctx_ptr as *mut UserLaunchCtx) };
     let user_rip = ctx.user_rip;

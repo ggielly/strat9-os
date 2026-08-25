@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use super::{CurrentRuntime, SchedClassRq};
-use crate::{arch::x86_64::timer::TIMER_HZ, process::task::Task};
+use crate::{arch::timer::TIMER_HZ, process::task::Task};
 use alloc::sync::Arc;
 use intrusive_collections::{intrusive_adapter, LinkedList, LinkedListLink};
 

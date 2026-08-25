@@ -4,13 +4,13 @@ use core::sync::atomic::{AtomicBool, AtomicU64};
 // One-shot bootstrap nudge: ensure each CPU requests at least one preemption
 // after entering Ring 3. This breaks "first task runs forever" scenarios when
 // class accounting has not yet accumulated enough runtime to trigger resched.
-static FIRST_TICK_FORCE_RESCHED: [AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicBool::new(false) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static FIRST_TICK_FORCE_RESCHED: [AtomicBool; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; crate::arch::percpu::MAX_CPUS];
 
 // Per-CPU local tick counter (incremented every timer tick, independent of
 // the BSP-only global TICK_COUNT). Used for periodic force-resched below.
-static CPU_LOCAL_TICKS: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static CPU_LOCAL_TICKS: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
 
 // Force a reschedule at least every N ticks per CPU, regardless of GLOBAL_SCHED_STATE
 // lock availability. This guarantees kernel tasks (shell, idle) get CPU time
@@ -35,8 +35,8 @@ pub fn timer_tick() {
     );
 
     // Feed TSC low bits into the entropy pool (every tick).
-    crate::entropy::add_entropy(2, crate::arch::x86_64::rdtsc());
-    let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
+    crate::entropy::add_entropy(2, crate::arch::rdtsc());
+    let cpu_idx = crate::arch::percpu::current_cpu_index();
 
     if cpu_is_valid(cpu_idx) {
         CPU_TOTAL_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
@@ -151,7 +151,7 @@ pub fn timer_tick() {
 /// guard goes out of scope, ensuring `free_frames` is never called while the
 /// scheduler lock is held.
 fn check_wake_deadlines(current_time_ns: u64) {
-    let mut ipi_targets = [false; crate::arch::x86_64::percpu::MAX_CPUS];
+    let mut ipi_targets = [false; crate::arch::percpu::MAX_CPUS];
     let my_cpu = current_cpu_index();
 
     // Stack-allocated storage for tasks whose Arc must be dropped outside the
