@@ -37,6 +37,18 @@ const REPLY_MSG_TYPE: u32 = 0x80;
 const STATUS_OK: u32 = 0;
 const FILEFLAG_DIRECTORY: u32 = 1;
 
+/// Fixed reply prologue of a READ reply: `status` (4) + `count` (4).
+const READ_HEADER_SIZE: usize = 8;
+/// Fixed reply prologue of a READDIR reply: `status` (4) + `next_cursor`
+/// (2) + `count` (1) + `size` (1), written at payload offsets 0..8.
+const READDIR_HEADER_SIZE: usize = 8;
+/// Max inline data bytes carried by a READ reply:
+/// full payload minus the `status`/`count` prefix.
+const READ_DATA_CAPACITY: usize = IpcMessage::PAYLOAD_CAPACITY - READ_HEADER_SIZE;
+/// Max bytes usable for readdir entries: full payload minus the fixed
+/// reply prologue (`next_cursor` + `count` + `size`, written at 4..8).
+const READDIR_DATA_CAPACITY: usize = IpcMessage::PAYLOAD_CAPACITY - READDIR_HEADER_SIZE;
+
 // === Path constants ========================================================
 
 /// Driver-specific paths (relative to the driver prefix).
@@ -275,7 +287,11 @@ impl BusSchemeServer {
         };
 
         let content = self.generate_read_content(&handle.kind, offset as usize);
-        let n = content.len().min(40);
+        // Use the full remaining payload capacity (240 - 8 header bytes),
+        // not an arbitrary cap: each wasted byte costs one extra IPC
+        // round-trip per read.
+        let max = READ_DATA_CAPACITY;
+        let n = content.len().min(max);
 
         let mut reply = Self::ok_reply(sender);
         reply.payload[4..8].copy_from_slice(&(n as u32).to_le_bytes());
