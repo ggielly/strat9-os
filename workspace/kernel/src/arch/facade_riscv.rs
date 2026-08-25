@@ -189,8 +189,8 @@ pub mod keyboard {
     pub const KEY_HOME: &str = "\u{1b}[H";
     pub const KEY_END: &str = "\u{1b}[F";
     pub fn init() {}
-    pub fn read_char() -> Option<char> {
-        crate::arch::serial::getc().map(|b| b as char)
+    pub fn read_char() -> Option<u8> {
+        crate::arch::serial::getc()
     }
     pub fn add_to_buffer(_c: char) {}
 }
@@ -267,10 +267,7 @@ pub mod pci_full {
     pub fn probe_all(_crit: ProbeCriteria) -> alloc::vec::Vec<PciDevice> {
         alloc::vec::Vec::new()
     }
-    pub fn all_devices() -> alloc::vec::Vec<PciDevice> {
-        alloc::vec::Vec::new()
-    }
-    pub fn probe_first(_crit: ProbeCriteria) -> Option<(PciAddress, PciDevice)> {
+        pub fn probe_first(_crit: ProbeCriteria) -> Option<(PciAddress, PciDevice)> {
         None
     }
     pub fn read_u32_shim(_addr: PciAddress, _off: u8) -> u32 {
@@ -487,9 +484,7 @@ pub mod ioapic {
     pub fn route_legacy_irq(_gsi: u8, _lapic: u32, _vector: u8, _ovr: &[Option<crate::acpi::madt::InterruptSourceOverride>; 16]) {}
     pub fn mask_legacy_irq(_irq: u8, _ovr: &[Option<crate::acpi::madt::InterruptSourceOverride>; 16]) {}
     pub fn store_madt_overrides(_ovr: &[Option<crate::acpi::madt::InterruptSourceOverride>; 16]) {}
-    pub fn mask_legacy_irq(_irq: u8) {}
-    pub fn route_nic_irq(_irq: u8, _vector: u8) {}
-    pub fn route_irq(_gsi: u32, _vector: u8) {}
+
 }
 
 pub mod timer {

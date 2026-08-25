@@ -132,6 +132,7 @@ pub mod structures {
                 FrameAllocationFailed,
                 ParentEntryHugePage,
                 PageAlreadyMapped(crate::arch::xshim::PhysAddr),
+                _Phantom(core::marker::PhantomData<S>),
             }
                         pub trait Translate2 {
                 fn translate(&self, _a: crate::arch::xshim::VirtAddr) -> Option<crate::arch::xshim::PhysAddr> { None }

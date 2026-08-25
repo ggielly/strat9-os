@@ -53,6 +53,7 @@ pub struct BuddyFrameAllocator;
 // exclusively-owned physical frames.  Exclusive ownership is guaranteed by
 // the buddy's own bitmap + free-list discipline.  Frames allocated with
 // `FramePurpose::PageTable` are always fully zeroed before being returned.
+#[cfg(target_arch = "x86_64")]
 unsafe impl X86FrameAllocator<Size4KiB> for BuddyFrameAllocator {
     fn allocate_frame(&mut self) -> Option<X86PhysFrame<Size4KiB>> {
         // SAFETY: `BuddyFrameAllocator` is only ever called from within
@@ -76,6 +77,15 @@ unsafe impl X86FrameAllocator<Size4KiB> for BuddyFrameAllocator {
         X86PhysFrame::from_start_address(frame.start_address).ok()
     }
 }
+#[cfg(not(target_arch = "x86_64"))]
+impl crate::arch::x86_64::structures::paging::FrameAllocator<crate::arch::xshim::Size4KiB>
+    for BuddyFrameAllocator
+{
+    fn allocate_frame(&mut self) -> Option<crate::arch::xshim::PhysFrame<crate::arch::xshim::Size4KiB>> {
+        None // R2: real Sv48 frame allocation
+    }
+}
+
 
 /// Paging initialization flag.
 static mut PAGING_READY: bool = false;
