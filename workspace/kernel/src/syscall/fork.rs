@@ -50,7 +50,7 @@ pub struct ForkResult {
 fn local_invlpg(vaddr: u64) {
     // Local TLB invalidation is sufficient here: this kernel currently runs
     // one task per user address space (no shared user CR3 across CPUs).
-    crate::arch::x86_64::tlb::local_page(x86_64::VirtAddr::new(vaddr));
+    crate::arch::tlb::local_page(x86_64::VirtAddr::new(vaddr));
 }
 
 #[repr(C)]

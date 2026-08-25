@@ -187,10 +187,10 @@ pub fn create_user_test_task() {
         rcx: USER_CODE_ADDR,
         rax: 0,
         iret_rip: USER_CODE_ADDR,
-        iret_cs: crate::arch::x86_64::gdt::user_code_selector().0 as u64,
+        iret_cs: crate::arch::gdt::user_code_selector().0 as u64,
         iret_rflags: 0x202,
         iret_rsp: USER_STACK_TOP,
-        iret_ss: crate::arch::x86_64::gdt::user_data_selector().0 as u64,
+        iret_ss: crate::arch::gdt::user_data_selector().0 as u64,
     });
 
     crate::process::add_task(task);
@@ -211,7 +211,7 @@ static mut USER_TASK_AS: Option<Arc<AddressSpace>> = None;
 /// 2. Pushes an IRET frame (SS, RSP, RFLAGS, CS, RIP)
 /// 3. Executes IRETQ to jump to Ring 3 code
 extern "C" fn ring3_trampoline() -> ! {
-    use crate::arch::x86_64::gdt;
+    use crate::arch::gdt;
 
     // Switch to user address space
     // SAFETY: The user AS was set up with the kernel half cloned.

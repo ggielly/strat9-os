@@ -521,7 +521,7 @@ fn apply_segment_permissions(
     let (current_cr3, _) = Cr3::read();
     if current_cr3.start_address() == user_as.cr3() {
         let end = page_start + (page_count as u64) * 4096;
-        crate::arch::x86_64::tlb::local_range(VirtAddr::new(page_start), VirtAddr::new(end));
+        crate::arch::tlb::local_range(VirtAddr::new(page_start), VirtAddr::new(end));
     }
 
     Ok(())
@@ -542,7 +542,7 @@ fn read_user_mapped_bytes(
     let mut copied = 0usize;
     // SMAP: temporarily disable supervisor-mode access prevention while
     // reading from user-space pages through the HHDM.
-    crate::arch::x86_64::stac();
+    crate::arch::stac();
     while copied < out.len() {
         let page_off = (vaddr & 0xFFF) as usize;
         let chunk = core::cmp::min(out.len() - copied, 4096 - page_off);
@@ -551,12 +551,12 @@ fn read_user_mapped_bytes(
             .ok_or("Failed to translate mapped user bytes")?;
         let paddr = phys.as_u64();
         if paddr == 0 {
-            crate::arch::x86_64::clac();
+            crate::arch::clac();
             return Err("Translated physical address is null");
         }
         let src = crate::memory::phys_to_virt(paddr) as *const u8;
         if src.is_null() {
-            crate::arch::x86_64::clac();
+            crate::arch::clac();
             return Err("HHDM-mapped source is null");
         }
         // SAFETY: src points to mapped physical memory via HHDM.
@@ -568,7 +568,7 @@ fn read_user_mapped_bytes(
             .checked_add(chunk as u64)
             .ok_or("Virtual address overflow while reading mapped bytes")?;
     }
-    crate::arch::x86_64::clac();
+    crate::arch::clac();
     Ok(())
 }
 
@@ -587,7 +587,7 @@ fn write_user_mapped_bytes(
     let mut written = 0usize;
     // SMAP: temporarily disable supervisor-mode access prevention while
     // writing to user-space pages through the HHDM.
-    crate::arch::x86_64::stac();
+    crate::arch::stac();
     while written < src.len() {
         let page_off = (vaddr & 0xFFF) as usize;
         let chunk = core::cmp::min(src.len() - written, 4096 - page_off);
@@ -596,12 +596,12 @@ fn write_user_mapped_bytes(
             .ok_or("Failed to translate relocation target")?;
         let paddr = phys.as_u64();
         if paddr == 0 {
-            crate::arch::x86_64::clac();
+            crate::arch::clac();
             return Err("Translated physical address is null");
         }
         let dst = crate::memory::phys_to_virt(paddr) as *mut u8;
         if dst.is_null() {
-            crate::arch::x86_64::clac();
+            crate::arch::clac();
             return Err("HHDM-mapped destination is null");
         }
         // SAFETY: destination points to mapped user frame through HHDM.
@@ -613,7 +613,7 @@ fn write_user_mapped_bytes(
             .checked_add(chunk as u64)
             .ok_or("Virtual address overflow while writing mapped bytes")?;
     }
-    crate::arch::x86_64::clac();
+    crate::arch::clac();
     Ok(())
 }
 
@@ -1240,7 +1240,7 @@ fn load_segment(
 /// trampoline safe under SMP: two tasks can run their trampolines concurrently
 /// on different CPUs without any shared mutable state.
 extern "C" fn elf_ring3_trampoline() -> ! {
-    use crate::arch::x86_64::gdt;
+    use crate::arch::gdt;
     use core::sync::atomic::Ordering;
 
     elf_trace!("[trace][elf] ring3_trampoline before current_task");
@@ -1331,11 +1331,11 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     // Verify that the APIC timer is actually running on this CPU before we
     // enter Ring 3 (if it is not, no timer tick = no heartbeat = silent hang).
     unsafe {
-        let lvt = crate::arch::x86_64::apic::read_reg(crate::arch::x86_64::apic::REG_LVT_TIMER);
+        let lvt = crate::arch::apic::read_reg(crate::arch::apic::REG_LVT_TIMER);
         let init_cnt =
-            crate::arch::x86_64::apic::read_reg(crate::arch::x86_64::apic::REG_TIMER_INIT);
+            crate::arch::apic::read_reg(crate::arch::apic::REG_TIMER_INIT);
         let _cur_cnt =
-            crate::arch::x86_64::apic::read_reg(crate::arch::x86_64::apic::REG_TIMER_CURRENT);
+            crate::arch::apic::read_reg(crate::arch::apic::REG_TIMER_CURRENT);
         let _rflags_now: u64;
         core::arch::asm!("pushfq; pop {}", out(reg) _rflags_now, options(nostack));
         elf_trace!(
@@ -1355,7 +1355,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         }
     }
 
-    crate::arch::x86_64::ring3_diag::validate_ring3_state(
+    crate::arch::ring3_diag::validate_ring3_state(
         user_rip,
         user_rsp,
         user_cs as u16,
@@ -2003,10 +2003,10 @@ fn load_elf_task_inner(
         rcx: runtime_entry,
         rax: 0,
         iret_rip: runtime_entry,
-        iret_cs: crate::arch::x86_64::gdt::user_code_selector().0 as u64,
+        iret_cs: crate::arch::gdt::user_code_selector().0 as u64,
         iret_rflags: USER_RFLAGS,
         iret_rsp: boot_sp,
-        iret_ss: crate::arch::x86_64::gdt::user_data_selector().0 as u64,
+        iret_ss: crate::arch::gdt::user_data_selector().0 as u64,
     });
 
     {

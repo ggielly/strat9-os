@@ -8,7 +8,7 @@ pub fn init_scheduler() {
     // Build scheduler state only for CPUs that are actually online. Using the
     // registered per-CPU count here can strand runnable tasks on AP slots that
     // never reached the scheduler gate.
-    let cpu_count = crate::arch::x86_64::smp::cpu_count().max(1);
+    let cpu_count = crate::arch::smp::cpu_count().max(1);
     crate::serial_println!(
         "[trace][sched] init_scheduler enter cpu_count={}",
         cpu_count
@@ -132,7 +132,7 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     //
     // Interrupts are re-enabled by the RFLAGS seed (0x202, IF=1) stored in
     // each task's bootstrap interrupt frame, so no explicit sti() is needed.
-    crate::arch::x86_64::cli();
+    crate::arch::cli();
 
     // APs may arrive here before the BSP has called init_scheduler().
     // Spin-wait (releasing the lock each iteration) until the scheduler
@@ -188,8 +188,8 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     {
         let stack_top =
             first_task.kernel_stack.virt_base.as_u64() + first_task.kernel_stack.size as u64;
-        crate::arch::x86_64::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
-        crate::arch::x86_64::syscall::set_kernel_rsp(stack_top);
+        crate::arch::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
+        crate::arch::syscall::set_kernel_rsp(stack_top);
         crate::serial_force_println!(
             "[trace][sched] schedule_on_cpu stacks set cpu={} rsp0={:#x}",
             cpu_index,
@@ -304,7 +304,7 @@ pub fn finish_interrupt_switch() {
             |budget| budget.checked_sub(1),
         )
         .is_ok();
-    let entry_rsp0 = crate::arch::x86_64::tss::kernel_stack_for(cpu_index)
+    let entry_rsp0 = crate::arch::tss::kernel_stack_for(cpu_index)
         .map(|addr| addr.as_u64())
         .unwrap_or(0);
     if should_trace {
@@ -552,7 +552,7 @@ pub fn maybe_preempt() {
 pub fn maybe_preempt_from_interrupt(
     cpu_index: usize,
     current_frame: &mut crate::syscall::SyscallFrame,
-) -> Option<crate::arch::x86_64::idt::InterruptReturnDecision> {
+) -> Option<crate::arch::idt::InterruptReturnDecision> {
     if cpu_is_valid(cpu_index) {
         RESCHED_IPI_PENDING[cpu_index].store(false, Ordering::Release);
     }
@@ -604,7 +604,7 @@ pub fn maybe_preempt_from_interrupt(
             _task_to_drop = cpu.task_to_drop.take();
             // No context switch: return current task's FPU area for save/restore.
             let current_fpu = current.fpu_state.get() as *mut u8;
-            Some(crate::arch::x86_64::idt::InterruptReturnDecision {
+            Some(crate::arch::idt::InterruptReturnDecision {
                 next_rsp: 0,
                 old_fpu: current_fpu,
                 new_fpu: current_fpu,
@@ -640,7 +640,7 @@ pub fn maybe_preempt_from_interrupt(
                 }
                 // Abort switch: return current task's FPU area for save/restore.
                 let current_fpu = current.fpu_state.get() as *mut u8;
-                return Some(crate::arch::x86_64::idt::InterruptReturnDecision {
+                return Some(crate::arch::idt::InterruptReturnDecision {
                     next_rsp: 0,
                     old_fpu: current_fpu,
                     new_fpu: current_fpu,
@@ -656,13 +656,13 @@ pub fn maybe_preempt_from_interrupt(
                 let stack_top =
                     next.kernel_stack.virt_base.as_u64() + next.kernel_stack.size as u64;
 
-                crate::arch::x86_64::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
-                crate::arch::x86_64::syscall::set_kernel_rsp(stack_top);
+                crate::arch::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
+                crate::arch::syscall::set_kernel_rsp(stack_top);
 
                 let old_fpu = current.fpu_state.get() as *mut u8;
                 let new_fpu = next.fpu_state.get() as *const u8;
 
-                Some(crate::arch::x86_64::idt::InterruptReturnDecision {
+                Some(crate::arch::idt::InterruptReturnDecision {
                     next_rsp,
                     old_fpu,
                     new_fpu,
@@ -713,7 +713,7 @@ pub fn configure_class_table(table: crate::process::sched::SchedClassTable) -> b
         return false;
     }
     let saved_flags = save_flags_and_cli();
-    let mut ipi_targets = [false; crate::arch::x86_64::percpu::MAX_CPUS];
+    let mut ipi_targets = [false; crate::arch::percpu::MAX_CPUS];
     let my_cpu = current_cpu_index();
     let applied = {
         let mut scheduler = GLOBAL_SCHED_STATE.lock();
@@ -810,11 +810,11 @@ pub fn state_snapshot() -> SchedulerStateSnapshot {
             crate::process::sched::SchedClassId::RealTime,
         ],
         blocked_tasks: 0,
-        current_task: [u64::MAX; crate::arch::x86_64::percpu::MAX_CPUS],
-        rq_rt: [0; crate::arch::x86_64::percpu::MAX_CPUS],
-        rq_fair: [0; crate::arch::x86_64::percpu::MAX_CPUS],
-        rq_idle: [0; crate::arch::x86_64::percpu::MAX_CPUS],
-        need_resched: [false; crate::arch::x86_64::percpu::MAX_CPUS],
+        current_task: [u64::MAX; crate::arch::percpu::MAX_CPUS],
+        rq_rt: [0; crate::arch::percpu::MAX_CPUS],
+        rq_fair: [0; crate::arch::percpu::MAX_CPUS],
+        rq_idle: [0; crate::arch::percpu::MAX_CPUS],
+        need_resched: [false; crate::arch::percpu::MAX_CPUS],
     };
 
     let saved_flags = save_flags_and_cli();
@@ -822,7 +822,7 @@ pub fn state_snapshot() -> SchedulerStateSnapshot {
         let scheduler = GLOBAL_SCHED_STATE.lock();
         if let Some(ref sched) = *scheduler {
             use crate::process::sched::SchedClassRq;
-            let cpu_count = active_cpu_count().min(crate::arch::x86_64::percpu::MAX_CPUS);
+            let cpu_count = active_cpu_count().min(crate::arch::percpu::MAX_CPUS);
             out.initialized = true;
             out.boot_phase = if cpu_count > 0 { 2 } else { 1 };
             out.cpu_count = cpu_count;
@@ -851,14 +851,14 @@ pub fn state_snapshot() -> SchedulerStateSnapshot {
 
 /// The main function for the idle task
 pub(super) extern "C" fn idle_task_main() -> ! {
-    let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+    let cpu = crate::arch::percpu::current_cpu_index();
     crate::serial_force_println!("[trace][sched] idle_task_main start cpu={}", cpu);
     loop {
         // Be explicit on SMP: never rely on inherited IF state.
         // If IF=0, HLT can deadlock that CPU forever.
-        crate::arch::x86_64::sti();
+        crate::arch::sti();
 
         // Halt until next interrupt (saves power, timer will wake us)
-        crate::arch::x86_64::hlt();
+        crate::arch::hlt();
     }
 }

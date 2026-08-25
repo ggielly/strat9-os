@@ -116,7 +116,7 @@ pub fn exit_current_task(exit_code: i32) -> ! {
 
     // Safety net - should never reach here
     loop {
-        crate::arch::x86_64::hlt();
+        crate::arch::hlt();
     }
 }
 

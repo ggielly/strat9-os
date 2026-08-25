@@ -41,8 +41,8 @@ pub mod x86_backend {
 #[cfg(target_arch = "x86_64")]
 pub use crate::arch::x86_64::{
     apic, boot_timestamp, clac, cli, cpuid, hlt, idt, init_cpu_extensions,
-    interrupts_enabled, io, keyboard, mouse, pci, percpu, pic, rdtsc,
-    restore_flags, save_flags_and_cli, serial, speaker, smp, stac, sti,
+    interrupts_enabled, io, keyboard, mouse, pci, percpu, pic, ring3_diag,
+    rdtsc, restore_flags, save_flags_and_cli, serial, speaker, smp, stac, sti,
     syscall, timer, tlb, tss,
 };
 

@@ -92,7 +92,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
                         arg1,
                         arg2,
                         frame.rcx,
-                        crate::arch::x86_64::percpu::current_cpu_index()
+                        crate::arch::percpu::current_cpu_index()
                     );
                 }
             }
@@ -348,7 +348,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
     //
     // Cross-CPU signals (rare) are handled on the target's next syscall, or
     // by the explicit `has_pending_signals()` check in blocking syscalls.
-    if crate::arch::x86_64::percpu::test_and_clear_signal_pending_current() {
+    if crate::arch::percpu::test_and_clear_signal_pending_current() {
         crate::process::signal::deliver_pending_signal(frame);
     }
 

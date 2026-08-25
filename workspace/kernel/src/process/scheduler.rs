@@ -79,7 +79,7 @@
 
 use super::task::{Pid, Task, TaskId, TaskPriority, TaskState, Tid};
 use crate::{
-    arch::x86_64::{apic, percpu, restore_flags, save_flags_and_cli, timer, timer::NS_PER_TICK},
+    arch::{apic, percpu, restore_flags, save_flags_and_cli, timer, timer::NS_PER_TICK},
     sync::SpinLock,
 };
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
@@ -93,38 +93,38 @@ use spin::RwLock as SpinRwLock;
 ///
 /// CPU usage over a time window:
 /// `usage = 1 - (delta_idle / delta_total)`.
-static CPU_TOTAL_TICKS: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
-static CPU_IDLE_TICKS: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
-static CPU_RT_RUNTIME_TICKS: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
-static CPU_FAIR_RUNTIME_TICKS: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
-static CPU_SWITCH_COUNT: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
-static CPU_PREEMPT_COUNT: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
-static CPU_STEAL_IN_COUNT: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
-static CPU_STEAL_OUT_COUNT: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
-static CPU_TRY_LOCK_FAIL_COUNT: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
-static RESCHED_IPI_PENDING: [AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicBool::new(false) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static CPU_TOTAL_TICKS: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
+static CPU_IDLE_TICKS: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
+static CPU_RT_RUNTIME_TICKS: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
+static CPU_FAIR_RUNTIME_TICKS: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
+static CPU_SWITCH_COUNT: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
+static CPU_PREEMPT_COUNT: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
+static CPU_STEAL_IN_COUNT: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
+static CPU_STEAL_OUT_COUNT: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
+static CPU_TRY_LOCK_FAIL_COUNT: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
+static RESCHED_IPI_PENDING: [AtomicBool; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; crate::arch::percpu::MAX_CPUS];
 static IPI_SEND_TRACE_BUDGET: AtomicU64 = AtomicU64::new(64);
 /// Lock-free per-CPU hint: request a local preemption as soon as maybe_preempt
 /// can observe scheduler state. Written from IRQ paths without touching
 /// `GLOBAL_SCHED_STATE`, consumed under scheduler lock in `maybe_preempt`.
-static FORCE_RESCHED_HINT: [AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicBool::new(false) }; crate::arch::x86_64::percpu::MAX_CPUS];
-static LAST_STEAL_TICK: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static FORCE_RESCHED_HINT: [AtomicBool; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; crate::arch::percpu::MAX_CPUS];
+static LAST_STEAL_TICK: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
 /// One-shot flag per CPU: set to true after the first preemption is logged.
 /// Prevents flooding the serial port with a preempt trace on every tick.
-pub(crate) static FIRST_PREEMPT_LOGGED: [AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicBool::new(false) }; crate::arch::x86_64::percpu::MAX_CPUS];
+pub(crate) static FIRST_PREEMPT_LOGGED: [AtomicBool; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; crate::arch::percpu::MAX_CPUS];
 
 const STEAL_IMBALANCE_MIN: usize = 2;
 const STEAL_COOLDOWN_TICKS: u64 = 2;
@@ -132,35 +132,35 @@ const STEAL_COOLDOWN_TICKS: u64 = 2;
 /// Performs the active cpu count operation.
 #[inline]
 fn active_cpu_count() -> usize {
-    crate::arch::x86_64::smp::cpu_count()
+    crate::arch::smp::cpu_count()
         .max(1)
-        .min(crate::arch::x86_64::percpu::MAX_CPUS)
+        .min(crate::arch::percpu::MAX_CPUS)
 }
 
 /// Performs the cpu is valid operation.
 #[inline]
 fn cpu_is_valid(cpu: usize) -> bool {
-    cpu < crate::arch::x86_64::percpu::MAX_CPUS
+    cpu < crate::arch::percpu::MAX_CPUS
 }
 
 #[derive(Clone, Copy)]
 pub struct CpuUsageSnapshot {
     pub cpu_count: usize,
-    pub total_ticks: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub idle_ticks: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
+    pub total_ticks: [u64; crate::arch::percpu::MAX_CPUS],
+    pub idle_ticks: [u64; crate::arch::percpu::MAX_CPUS],
 }
 
 #[derive(Clone, Copy)]
 pub struct SchedulerMetricsSnapshot {
     pub cpu_count: usize,
-    pub rt_runtime_ticks: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub fair_runtime_ticks: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub idle_runtime_ticks: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub switch_count: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub preempt_count: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub steal_in_count: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub steal_out_count: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub try_lock_fail_count: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
+    pub rt_runtime_ticks: [u64; crate::arch::percpu::MAX_CPUS],
+    pub fair_runtime_ticks: [u64; crate::arch::percpu::MAX_CPUS],
+    pub idle_runtime_ticks: [u64; crate::arch::percpu::MAX_CPUS],
+    pub switch_count: [u64; crate::arch::percpu::MAX_CPUS],
+    pub preempt_count: [u64; crate::arch::percpu::MAX_CPUS],
+    pub steal_in_count: [u64; crate::arch::percpu::MAX_CPUS],
+    pub steal_out_count: [u64; crate::arch::percpu::MAX_CPUS],
+    pub try_lock_fail_count: [u64; crate::arch::percpu::MAX_CPUS],
 }
 
 #[derive(Clone, Copy)]
@@ -171,18 +171,18 @@ pub struct SchedulerStateSnapshot {
     pub pick_order: [crate::process::sched::SchedClassId; 3],
     pub steal_order: [crate::process::sched::SchedClassId; 2],
     pub blocked_tasks: usize,
-    pub current_task: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub rq_rt: [usize; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub rq_fair: [usize; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub rq_idle: [usize; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub need_resched: [bool; crate::arch::x86_64::percpu::MAX_CPUS],
+    pub current_task: [u64; crate::arch::percpu::MAX_CPUS],
+    pub rq_rt: [usize; crate::arch::percpu::MAX_CPUS],
+    pub rq_fair: [usize; crate::arch::percpu::MAX_CPUS],
+    pub rq_idle: [usize; crate::arch::percpu::MAX_CPUS],
+    pub need_resched: [bool; crate::arch::percpu::MAX_CPUS],
 }
 
 /// Performs the cpu usage snapshot operation.
 pub fn cpu_usage_snapshot() -> CpuUsageSnapshot {
     let cpu_count = active_cpu_count();
-    let mut total_ticks = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
-    let mut idle_ticks = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
+    let mut total_ticks = [0u64; crate::arch::percpu::MAX_CPUS];
+    let mut idle_ticks = [0u64; crate::arch::percpu::MAX_CPUS];
     for i in 0..cpu_count {
         total_ticks[i] = CPU_TOTAL_TICKS[i].load(Ordering::Relaxed);
         idle_ticks[i] = CPU_IDLE_TICKS[i].load(Ordering::Relaxed);
@@ -197,14 +197,14 @@ pub fn cpu_usage_snapshot() -> CpuUsageSnapshot {
 /// Performs the scheduler metrics snapshot operation.
 pub fn scheduler_metrics_snapshot() -> SchedulerMetricsSnapshot {
     let cpu_count = active_cpu_count();
-    let mut rt_runtime_ticks = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
-    let mut fair_runtime_ticks = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
-    let mut idle_runtime_ticks = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
-    let mut switch_count = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
-    let mut preempt_count = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
-    let mut steal_in_count = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
-    let mut steal_out_count = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
-    let mut try_lock_fail_count = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
+    let mut rt_runtime_ticks = [0u64; crate::arch::percpu::MAX_CPUS];
+    let mut fair_runtime_ticks = [0u64; crate::arch::percpu::MAX_CPUS];
+    let mut idle_runtime_ticks = [0u64; crate::arch::percpu::MAX_CPUS];
+    let mut switch_count = [0u64; crate::arch::percpu::MAX_CPUS];
+    let mut preempt_count = [0u64; crate::arch::percpu::MAX_CPUS];
+    let mut steal_in_count = [0u64; crate::arch::percpu::MAX_CPUS];
+    let mut steal_out_count = [0u64; crate::arch::percpu::MAX_CPUS];
+    let mut try_lock_fail_count = [0u64; crate::arch::percpu::MAX_CPUS];
     for i in 0..cpu_count {
         rt_runtime_ticks[i] = CPU_RT_RUNTIME_TICKS[i].load(Ordering::Relaxed);
         fair_runtime_ticks[i] = CPU_FAIR_RUNTIME_TICKS[i].load(Ordering::Relaxed);
@@ -378,7 +378,7 @@ pub enum WaitChildResult {
 
 /// Performs the current cpu index operation.
 fn current_cpu_index() -> usize {
-    crate::arch::x86_64::percpu::current_cpu_index()
+    crate::arch::percpu::current_cpu_index()
 }
 
 struct PerCpuClassRqSet {
@@ -531,8 +531,8 @@ struct SchedulerCpu {
 /// (use `try_lock` when touching a sibling CPU).
 #[allow(dead_code)]
 pub(crate) static LOCAL_SCHEDULERS: [SpinLock<Option<SchedulerCpu>>;
-    crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { SpinLock::new(None) }; crate::arch::x86_64::percpu::MAX_CPUS];
+    crate::arch::percpu::MAX_CPUS] =
+    [const { SpinLock::new(None) }; crate::arch::percpu::MAX_CPUS];
 
 /// Blocked tasks registry : hot path: block/wake.
 ///

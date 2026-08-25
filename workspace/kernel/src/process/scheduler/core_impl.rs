@@ -678,8 +678,8 @@ pub(super) fn yield_cpu_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> Optio
 
     // Update TSS.rsp0 and SYSCALL kernel RSP for the new task.
     let stack_top = next.kernel_stack.virt_base.as_u64() + next.kernel_stack.size as u64;
-    crate::arch::x86_64::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
-    crate::arch::x86_64::syscall::set_kernel_rsp(stack_top);
+    crate::arch::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
+    crate::arch::syscall::set_kernel_rsp(stack_top);
 
     // Switch CR3 if the new task has a different address space.
     // SAFETY: The new task's address space has a valid PML4 with the kernel half mapped.

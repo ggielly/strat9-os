@@ -690,7 +690,7 @@ pub fn send_signal(
     // syscall (or blocking-syscall explicit check).
     if let Some(cur_id) = crate::process::current_task_id() {
         if cur_id == target {
-            crate::arch::x86_64::percpu::set_signal_pending_current();
+            crate::arch::percpu::set_signal_pending_current();
         }
     }
 
