@@ -92,6 +92,9 @@ pub mod structures {
             pub fn iter_mut(&mut self) -> core::slice::IterMut<'_, PageTableEntry> {
                 self.entries.iter_mut()
             }
+            pub fn iter(&self) -> core::slice::Iter<'_, PageTableEntry> {
+                self.entries.iter()
+            }
         }
 
         impl Default for PageTable {
@@ -120,6 +123,7 @@ pub mod structures {
             pub fn flush(self) {
                 // sfence.vma full flush placeholder; per-page flush in R2.
             }
+            pub fn ignore(self) {}
         }
         pub mod mapper {
             pub type TranslateResult = crate::arch::xshim::TranslateResult;
@@ -136,8 +140,64 @@ pub mod structures {
         pub trait FrameAllocator<S> {
             fn allocate_frame(&mut self) -> Option<crate::arch::xshim::PhysFrame<S>>;
         }
+
+        // ---- PageTableEntry accessors (Sv48 PTE layout) ----
+        impl PageTableEntry {
+            pub const fn new() -> Self { PageTableEntry(0) }
+            pub fn set_unused(&mut self) { self.0 = 0; }
+            pub fn set_frame(&mut self, _f: crate::arch::xshim::PhysFrame<Size4KiB>, _flags: crate::arch::xshim::PageTableFlags) {}
+            pub fn flags(&self) -> crate::arch::xshim::PageTableFlags {
+                let mut f = crate::arch::xshim::PageTableFlags::empty();
+                if self.0 & 0x1 != 0 { f |= crate::arch::xshim::PageTableFlags::PRESENT; }
+                if self.0 & 0x2 != 0 { f |= crate::arch::xshim::PageTableFlags::WRITABLE; }
+                if self.0 & 0x4 != 0 { f |= crate::arch::xshim::PageTableFlags::USER_ACCESSIBLE; }
+                if self.0 & 0x8 != 0 { f |= crate::arch::xshim::PageTableFlags::NO_EXECUTE; }
+                if self.0 & 0x80 != 0 { f |= crate::arch::xshim::PageTableFlags::HUGE_PAGE; }
+                if self.0 & 0x10 != 0 { f |= crate::arch::xshim::PageTableFlags::NO_CACHE; }
+                f
+            }
+            pub fn frame(&self) -> crate::arch::xshim::PhysFrame<Size4KiB> {
+                let ppn = (self.0 >> 10) & 0x0000_FFFF_FFFF_FFFF;
+                crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
+                    crate::arch::xshim::PhysAddr::new(ppn << 12),
+                )
+            }
+        }
+        impl Default for PageTableEntry {
+            fn default() -> Self { Self::new() }
+        }
+
+        /// The Mapper surface shared code expects. R2 replaces the bodies
+        /// with a genuine Sv48 walk + sfence.vma.
+        impl<'a> OffsetPageTable<'a> {
+            pub unsafe fn map_to<S: PageSize>(
+                &mut self,
+                _page: Page<S>,
+                _frame: crate::arch::xshim::PhysFrame<S>,
+                _flags: crate::arch::xshim::PageTableFlags,
+                _alloc: &mut dyn FrameAllocator<Size4KiB>,
+            ) -> Result<MapperFlush<S>, ()> {
+                panic!("riscv64 paging not yet implemented (jalon R2)")
+            }
+            pub unsafe fn update_flags<S: PageSize>(
+                &mut self,
+                _page: Page<S>,
+                _flags: crate::arch::xshim::PageTableFlags,
+            ) -> Result<MapperFlush<S>, ()> {
+                panic!("riscv64 paging not yet implemented (jalon R2)")
+            }
+            pub unsafe fn unmap<S: PageSize>(&mut self, _page: Page<S>) -> Result<(), ()> {
+                panic!("riscv64 paging not yet implemented (jalon R2)")
+            }
+        }
         pub trait Translate3 {
             fn translate(&self, _a: crate::arch::xshim::VirtAddr) -> Option<crate::arch::xshim::TranslateResult>;
+            fn translate_addr(&self, a: crate::arch::xshim::VirtAddr) -> Option<crate::arch::xshim::PhysAddr> {
+                self.translate(a).map(|r| match r {
+                    crate::arch::xshim::TranslateResult::Mapped { frame, .. } => frame.start_address(),
+                    _ => crate::arch::xshim::PhysAddr::null(),
+                })
+            }
         }
     }
     pub mod tss {

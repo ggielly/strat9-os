@@ -86,3 +86,6 @@ mod neutral {
 
 #[cfg(not(target_arch = "x86_64"))]
 pub use neutral::*;
+
+/// Address bits within a page-table entry (Sv48: PPN[2..0] + flags).
+pub const PTR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
