@@ -40,6 +40,7 @@ name = "kernel-l2-tests"
 version = "0.0.0"
 dependencies = [
  "crossbeam-queue",
+ "log",
  "num_enum",
  "static_assertions",
  "strat9-abi",
@@ -48,6 +49,12 @@ dependencies = [
  "x86_64",
  "zerocopy",
 ]
+
+[[package]]
+name = "log"
+version = "0.4.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "num_enum"

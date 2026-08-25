@@ -83,6 +83,13 @@ production inchangée.
 | inline kernel récupérés | 13 | lockfree_ring (8), mailbox (3), boot/toml (3*) |
 | `kernel-l2-tests/tests/buddy_allocator.rs` | 6 | buddy réel sur mémoire hôte: alignement par ordre, épuisement→OOM propre, zéro après purpose-alloc, stress 2000 ops avec payload tags, tolérance double-free |
 | `kernel-l2-tests/tests/kernel_sync_namespace.rs` | 10 | FixedQueue FIFO/wraparound/overflow, SpinLock réel, namespace bind/unbind/resolve longest-prefix |
+| `kernel-l2-tests/tests/kernel_channels.rs` | 9 | canal MPMC typé (multi-producteurs, disconnect lifecycle), SyncChan registre + drain-first après destroy |
+
+Total porte CI : **327 tests verts**.
+
+Reste candidat L2 (documenté) : `vfs/scheme.rs` + routeur — bloqué par
+`memory/userslice.rs` qui valide les pointeurs userspace contre les tables
+de pages x86 réelles ; nécessitera une fake de validation de région.
 
 \* comptage approximatif des modules inclus.
 Harnais : crate ombre `workspace/kernel-l2-tests` — modules kernel inclus

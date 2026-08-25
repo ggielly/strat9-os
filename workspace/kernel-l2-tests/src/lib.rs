@@ -66,11 +66,49 @@ pub mod arch {
     }
 }
 
-/// Fake process layer: blocking/waking cannot happen on the host.
+/// Fake process layer: single fake task; blocking is a test failure.
 pub mod process {
+    use core::fmt;
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    /// Mirror of kernel TaskId (u64 newtype).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct TaskId(pub u64);
+
+    impl TaskId {
+        pub fn new() -> Self {
+            static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+            TaskId(NEXT_ID.fetch_add(1, Ordering::SeqCst))
+        }
+        pub fn as_u64(self) -> u64 {
+            self.0
+        }
+        pub fn from_u64(raw: u64) -> Self {
+            TaskId(raw)
+        }
+    }
+
+    impl fmt::Display for TaskId {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+
+    static CURRENT: AtomicU64 = AtomicU64::new(1);
+
+    /// Fake current task: always TaskId(1).
+    pub fn current_task_id() -> Option<TaskId> {
+        Some(TaskId(CURRENT.load(Ordering::Relaxed)))
+    }
+
     /// Stand-in panic: kernel code must never reach this in host tests.
     pub fn block_current_task() {
         panic!("process::block_current_task called on host — test tried to block");
+    }
+
+    /// No-op on the host (nothing to wake); matches kernel bool signature.
+    pub fn wake_task(_id: TaskId) -> bool {
+        false
     }
 }
 
