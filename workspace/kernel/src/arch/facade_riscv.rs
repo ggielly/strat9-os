@@ -247,15 +247,37 @@ pub mod pci_full {
             Self { bus, device, function }
         }
     }
-    pub struct PciDevice;
+    #[derive(Clone, Copy, Debug)]
+    pub struct PciDevice {
+        pub address: PciAddress,
+        pub vendor_id: u16,
+        pub device_id: u16,
+        pub class_code: u8,
+        pub subclass: u8,
+        pub prog_if: u8,
+        pub revision: u8,
+        pub header_type: u8,
+        pub interrupt_line: u8,
+        pub interrupt_pin: u8,
+    }
     pub fn all_devices() -> alloc::vec::Vec<PciAddress> {
         alloc::vec::Vec::new()
     }
     pub fn invalidate_cache() {}
-    pub fn probe_all(_crit: ProbeCriteria) -> alloc::vec::Vec<PciAddress> {
+    pub fn probe_all(_crit: ProbeCriteria) -> alloc::vec::Vec<PciDevice> {
+        alloc::vec::Vec::new()
+    }
+    pub fn all_devices() -> alloc::vec::Vec<PciDevice> {
         alloc::vec::Vec::new()
     }
     pub fn probe_first(_crit: ProbeCriteria) -> Option<(PciAddress, PciDevice)> {
+        None
+    }
+    pub fn read_u32_shim(_addr: PciAddress, _off: u8) -> u32 {
+        0xFFFF_FFFF
+    }
+    pub fn enable_bus_master(_addr: PciAddress) {}
+    pub fn read_bar(_addr: PciAddress, _idx: u8) -> Option<Bar> {
         None
     }
     pub mod vendor {
