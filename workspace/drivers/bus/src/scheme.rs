@@ -22,7 +22,7 @@ use strat9_syscall::{
     data::{
         DT_DIR, DT_REG, IpcMessage, IPC_FILE_FLAG_DIRECTORY, OPCODE_CLOSE, OPCODE_OPEN,
         OPCODE_READ, OPCODE_READDIR, OPCODE_WRITE, PCI_MATCH_DEVICE_ID, PCI_MATCH_VENDOR_ID,
-        PciAddress, PciDeviceInfo, PciProbeCriteria,
+        OpenRequest, PciAddress, PciDeviceInfo, PciProbeCriteria,
     },
     error::{EBADF, EINVAL, EIO, ENOMEM, ENOENT, ENOSYS, ENOTDIR},
 };
@@ -34,9 +34,8 @@ use crate::BusDriver;
 /// handles in a loop without closing them (DoS on the scheme server).
 const MAX_OPEN_HANDLES: usize = 256;
 
-// VFS scheme opcodes (OPCODE_*) are re-exported from strat9-abi via
-// strat9-syscall: the wire contract must have a single source of truth,
-// not per-server copies. Reply type: see `IpcMessage::REPLY_MSG_TYPE`.
+// VFS scheme opcodes and typed request parsers: re-exported from strat9-abi
+// via strat9-syscall (single source of truth for the wire contract).
 const STATUS_OK: u32 = 0;
 
 /// Fixed reply prologue of a READ reply: `status` (4) + `count` (4).
@@ -251,15 +250,15 @@ impl BusSchemeServer {
     // === Open ================================================================
 
     fn handle_open(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
-        let path_len = u16::from_le_bytes([payload[4], payload[5]]) as usize;
-        if path_len > IpcMessage::OPEN_INLINE_CAPACITY {
+        // Typed ABI parse: prefix bounds, path bounds and UTF-8 are all
+        // validated in one place instead of hand-rolled offsets here.
+        let (_flags, raw_path) = match OpenRequest::parse(payload) {
+            Some(parsed) => parsed,
+            None => return Self::err_reply(sender, EINVAL),
+        };
+        if raw_path.len() > IpcMessage::OPEN_INLINE_CAPACITY {
             return Self::err_reply(sender, EINVAL);
         }
-        let path_bytes = &payload[6..6 + path_len];
-        let raw_path = match core::str::from_utf8(path_bytes) {
-            Ok(s) => s,
-            Err(_) => return Self::err_reply(sender, EINVAL),
-        };
         let path = match Self::normalize_path(raw_path) {
             Some(p) => p,
             // `..` escaping the namespace root.

@@ -102,19 +102,51 @@ assert_payload_size!(StatusReply);
 /// Open request.
 ///
 /// Wire layout:
-///   `flags @ 0..4`, `path_hdr @ 4..8` (InlineBlobHeader), `path_data @ 8..`.
+///   `flags @ 0..4`, `path_len @ 4..6`, `path_data @ 6..`.
 ///
-/// The path is variable-length and follows the header at offset 8.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
+/// # Wire-compatibility note
+///
+/// Unlike most variable-length fields, the open path is prefixed by a raw
+/// `u16` length — **not** an [`InlineBlobHeader`] (there is no `kind`
+/// field). This historical layout is kept because every existing client
+/// (kernel VFS, net and bus schemes) encodes it this way. Earlier versions
+/// of this documentation wrongly claimed an `InlineBlobHeader` at 4..8;
+/// that wire format never existed.
+#[repr(C, packed(1))]
+#[derive(Debug, Clone, Copy)]
 pub struct OpenRequest {
     /// Open flags (`O_RDONLY`, `O_WRONLY`, `O_RDWR`, `O_CREAT`, etc.).
     pub flags: u32,
-    /// InlineBlobHeader describing the path that follows.
-    /// `kind` should be `0` for a plain path.
-    pub path_hdr: InlineBlobHeader,
+    /// Length in bytes of the UTF-8 path starting at offset 6.
+    pub path_len: u16,
 }
-assert_payload_size!(OpenRequest);
+static_assertions::assert_eq_size!(OpenRequest, [u8; 6]);
+
+impl OpenRequest {
+    /// Byte offset at which the inline path starts.
+    ///
+    /// NOTE: this struct is `packed(1)` so its size matches the wire
+    /// prefix exactly (no tail padding). Never take references to its
+    /// fields; read them by copy or use [`OpenRequest::parse`], which
+    /// decodes straight from the payload bytes.
+    pub const PATH_OFFSET: usize = 6;
+
+    /// Parse a full OPEN request payload: fixed prefix + inline path.
+    ///
+    /// Returns `(flags, path)`, or `None` when:
+    /// - the fixed prefix is truncated,
+    /// - `path_len` exceeds the remaining payload,
+    /// - the path bytes are not valid UTF-8.
+    pub fn parse(payload: &[u8]) -> Option<(u32, &str)> {
+        if payload.len() < Self::PATH_OFFSET {
+            return None;
+        }
+        let flags = u32::from_le_bytes(payload[0..4].try_into().ok()?);
+        let path_len = u16::from_le_bytes(payload[4..6].try_into().ok()?) as usize;
+        let path = crate::ipc_codec::get_str(payload, Self::PATH_OFFSET, path_len)?;
+        Some((flags, path))
+    }
+}
 
 /// Open reply.
 ///
@@ -188,23 +220,51 @@ assert_payload_size!(ReadReply);
 /// Write request with variable-length inline data.
 ///
 /// Wire layout:
-///   `ino @ 0..8`, `offset @ 8..16`, `data_hdr @ 16..20`, `_pad @ 20..24`,
-///   `data @ 24..`.
+///   `ino @ 0..8`, `offset @ 8..16`, `data_len @ 16..18`, `data @ 18..`.
 ///
-/// The data is variable-length and follows the header at offset 24.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
+/// # Wire-compatibility note
+///
+/// Same as [`OpenRequest`]: a raw `u16` length prefix, **not** an
+/// [`InlineBlobHeader`]. Earlier documentation wrongly claimed an
+/// `InlineBlobHeader` + pad at 16..24 with data at 24; no component ever
+/// encoded that format.
+#[repr(C, packed(1))]
+#[derive(Debug, Clone, Copy)]
 pub struct WriteRequest {
     /// Inode number of the file to write.
     pub ino: u64,
     /// Byte offset in the file to start writing.
     pub offset: u64,
-    /// InlineBlobHeader describing the data that follows.
-    pub data_hdr: InlineBlobHeader,
-    pub _pad: u32,
+    /// Number of data bytes starting at offset 18.
+    pub data_len: u16,
 }
-assert_payload_size!(WriteRequest);
-static_assertions::assert_eq_size!(WriteRequest, [u8; 24]);
+static_assertions::assert_eq_size!(WriteRequest, [u8; 18]);
+
+impl WriteRequest {
+    /// Byte offset at which the inline data starts.
+    ///
+    /// NOTE: `packed(1)` so size matches the wire prefix exactly.
+    /// Read fields by copy only (see [`OpenRequest`]).
+    pub const DATA_OFFSET: usize = 18;
+
+    /// Parse the fixed prefix of a WRITE request payload.
+    /// Returns `None` if the prefix is truncated.
+    pub fn parse_prefix(payload: &[u8]) -> Option<Self> {
+        if payload.len() < Self::DATA_OFFSET {
+            return None;
+        }
+        Some(Self {
+            ino: u64::from_le_bytes(payload[0..8].try_into().ok()?),
+            offset: u64::from_le_bytes(payload[8..16].try_into().ok()?),
+            data_len: u16::from_le_bytes(payload[16..18].try_into().ok()?),
+        })
+    }
+
+    /// Return the inline data following the prefix, bounded by `data_len`.
+    pub fn data<'a>(&self, payload: &'a [u8]) -> Option<&'a [u8]> {
+        crate::ipc_codec::get_bytes(payload, Self::DATA_OFFSET, self.data_len as usize)
+    }
+}
 
 /// Write reply.
 ///
