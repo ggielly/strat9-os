@@ -111,9 +111,38 @@ impl BrcmstbGisb {
         self.big_endian = big_endian;
     }
 
-    /// Performs the add master name operation.
+    /// Replaces the bus-master name table.
+    ///
+    /// Entry `i` names the hardware master whose ID reads back as `i`
+    /// from `arb_err_cap_master`/`arb_bp_cap_master`. Tables are
+    /// generation-specific; they must be supplied by platform code
+    /// (DeviceTree/board support), mirroring Linux's
+    /// `gisb_master_names_*[]` per-SoC tables.
+    pub fn set_master_names<I: IntoIterator<Item = String>>(&mut self, names: I) {
+        self.master_names.clear();
+        self.master_names.extend(names);
+    }
+
+    /// Appends one entry to the master-name table (see [`Self::set_master_names`]).
+    /// Entries are appended **in order**, so this positions the name at the
+    /// next free master-ID slot.
     pub fn add_master_name(&mut self, name: String) {
         self.master_names.push(name);
+    }
+
+    /// Resolves a captured master ID to its human-readable name.
+    ///
+    /// - `None` (generation without a master register) => `"none"`;
+    /// - ID present in the configured table => the platform-provided name;
+    /// - otherwise => `"master<N>"`, still more useful than an empty string.
+    pub fn master_name(&self, master: Option<u32>) -> alloc::string::String {
+        match master {
+            None => alloc::format!("none"),
+            Some(id) => match self.master_names.get(id as usize) {
+                Some(name) => name.clone(),
+                None => alloc::format!("master{}", id),
+            },
+        }
     }
 
     /// Reads gisb.
@@ -144,6 +173,27 @@ impl BrcmstbGisb {
     /// Sets timeout.
     pub fn set_timeout(&self, val: u32) {
         self.write_gisb(self.offsets.arb_timer, val);
+    }
+
+    /// Formats a captured GISB error into a one-line human-readable report,
+    /// e.g. `gisb timeout write addr=0x00000000deadbeef master=ethsw`.
+    /// This is the string platform IRQ handlers should emit in their logs.
+    pub fn format_error(&self, info: &GisbErrorInfo) -> alloc::string::String {
+        let kind = if info.is_timeout {
+            "timeout"
+        } else if info.is_tea {
+            "tea"
+        } else {
+            "error"
+        };
+        let rw = if info.is_write { "write" } else { "read" };
+        alloc::format!(
+            "gisb {} {} addr=0x{:016x} master={}",
+            kind,
+            rw,
+            info.address,
+            self.master_name(info.master)
+        )
     }
 
     /// Handles timeout irq.
