@@ -44,8 +44,26 @@ impl QcomSscBlockBus {
         self.config1_regs.init(config1_base, 0x10);
     }
 
+    /// Ensures every MMIO region (halt, config0, config1) has been mapped
+    /// by platform code before any register access.
+    ///
+    /// Accessing an unmapped [`MmioRegion`] would trip its internal
+    /// assertions (kernel panic); failing early with
+    /// [`BusError::InitFailed`] turns a hard crash into a clean
+    /// driver-registration failure instead.
+    fn ensure_mapped(&self) -> Result<(), BusError> {
+        if self.halt_regs.is_valid() && self.config0_regs.is_valid() && self.config1_regs.is_valid()
+        {
+            Ok(())
+        } else {
+            Err(BusError::InitFailed)
+        }
+    }
+
     /// Performs the bus init operation.
     fn bus_init(&self) -> Result<(), BusError> {
+        self.ensure_mapped()?;
+
         self.config0_regs
             .clear_bits32(0, SSCAON_CONFIG0_CLAMP_EN_OVRD_VAL);
         self.config0_regs
@@ -61,16 +79,25 @@ impl QcomSscBlockBus {
             }
         }
 
-        Ok(())
+        // The AXI bus never reached idle: report it instead of silently
+        // claiming success.
+        Err(BusError::Timeout)
     }
 
     /// Performs the bus deinit operation.
-    fn bus_deinit(&self) {
+    ///
+    /// The safety clamps are always applied, even when the halt handshake
+    /// times out; the timeout is reported through the returned error.
+    fn bus_deinit(&self) -> Result<(), BusError> {
+        self.ensure_mapped()?;
+
         self.halt_regs.write32(AXI_HALTREQ_REG, 1);
 
+        let mut halted = false;
         for _ in 0..MAX_HALT_WAIT {
             let ack = self.halt_regs.read32(AXI_HALTACK_REG);
             if ack != 0 {
+                halted = true;
                 break;
             }
         }
@@ -78,6 +105,12 @@ impl QcomSscBlockBus {
         self.config0_regs
             .set_bits32(0, SSCAON_CONFIG0_CLAMP_EN_OVRD_VAL);
         self.config1_regs.set_bits32(0, SSCAON_CONFIG1_CFG);
+
+        if halted {
+            Ok(())
+        } else {
+            Err(BusError::Timeout)
+        }
     }
 
     /// Performs the add child operation.
@@ -107,9 +140,9 @@ impl BusDriver for QcomSscBlockBus {
 
     /// Performs the shutdown operation.
     fn shutdown(&mut self) -> Result<(), BusError> {
-        self.bus_deinit();
+        let res = self.bus_deinit();
         self.power_state = PowerState::Off;
-        Ok(())
+        res
     }
 
     /// Reads reg.
