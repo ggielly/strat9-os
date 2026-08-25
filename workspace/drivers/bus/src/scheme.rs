@@ -13,6 +13,9 @@
 //! /bus/<driver>/status      -> driver status
 //! /bus/<driver>/error_count -> driver error count
 //! /bus/<driver>/reg/<hex>   -> read/write a driver register
+//! /bus/<driver>/firewall/info       -> firewall type + max entries (STM32 only)
+//! /bus/<driver>/firewall/grant/<id>   -> (write) grant access to peripheral id
+//! /bus/<driver>/firewall/release/<id> -> (write) release peripheral id
 //! /bus/<driver>/<child>     -> child-device info (if the driver reports any)
 //! ```
 
@@ -45,6 +48,10 @@ const DRV_ERROR_COUNT: &str = "error_count";
 const DRV_SUSPEND: &str = "suspend";
 const DRV_RESUME: &str = "resume";
 const DRV_REG_PREFIX: &str = "reg/";
+const DRV_FIREWALL_DIR: &str = "firewall";
+const DRV_FIREWALL_INFO: &str = "firewall/info";
+const FIREWALL_GRANT_PREFIX: &str = "firewall/grant/";
+const FIREWALL_RELEASE_PREFIX: &str = "firewall/release/";
 
 /// Top-level paths.
 const PCI_PREFIX: &str = "pci";
@@ -194,6 +201,14 @@ impl BusSchemeServer {
             if sub.starts_with(DRV_REG_PREFIX) {
                 return Self::parse_reg_offset(sub).is_some();
             }
+            // Firewall capability paths (only when the driver implements it).
+            if sub == DRV_FIREWALL_INFO {
+                return self.drivers[idx].1.as_firewall().is_some();
+            }
+            if sub.starts_with(FIREWALL_GRANT_PREFIX) || sub.starts_with(FIREWALL_RELEASE_PREFIX) {
+                return self.drivers[idx].1.as_firewall().is_some()
+                    && Self::parse_firewall_id(sub).is_some();
+            }
             // Child device check
             if self.drivers[idx].1.children().iter().any(|c| c.name == sub) {
                 return true;
@@ -209,6 +224,19 @@ impl BusSchemeServer {
             return None;
         }
         usize::from_str_radix(reg_str.trim_start_matches("0x"), 16).ok()
+    }
+
+    /// Parses the peripheral id of a `firewall/<grant|release>/<id>` path.
+    fn parse_firewall_id(sub_path: &str) -> Option<u32> {
+        let id_str = sub_path
+            .strip_prefix(FIREWALL_GRANT_PREFIX)
+            .or_else(|| sub_path.strip_prefix(FIREWALL_RELEASE_PREFIX))?;
+        if id_str.is_empty() {
+            return None;
+        }
+        usize::from_str_radix(id_str.trim_start_matches("0x"), 16)
+            .ok()
+            .and_then(|v| u32::try_from(v).ok())
     }
 
     // === Open ================================================================
@@ -406,6 +434,15 @@ impl BusSchemeServer {
                     b"invalid register\n".to_vec()
                 }
             }
+            DRV_FIREWALL_INFO => match driver.as_firewall() {
+                Some(fw) => format!(
+                    "type: {:?}\nmax_entries: {}\n",
+                    fw.firewall_type(),
+                    fw.max_entries()
+                )
+                .into_bytes(),
+                None => b"no firewall capability\n".to_vec(),
+            },
             child_name => {
                 // Child device info
                 if let Some(child) = driver.children().iter().find(|c| c.name == child_name) {
@@ -460,6 +497,30 @@ impl BusSchemeServer {
             } if sub_path == DRV_SUSPEND => {
                 if self.drivers[*driver_idx].1.suspend().is_err() {
                     return Self::err_reply(sender, EIO);
+                }
+            }
+            HandleKind::Driver {
+                driver_idx,
+                sub_path,
+            } if sub_path.starts_with(FIREWALL_GRANT_PREFIX)
+                || sub_path.starts_with(FIREWALL_RELEASE_PREFIX) =>
+            {
+                let grant = sub_path.starts_with(FIREWALL_GRANT_PREFIX);
+                let Some(fw_id) = Self::parse_firewall_id(sub_path) else {
+                    return Self::err_reply(sender, EINVAL);
+                };
+                let Some(fw) = self.drivers[*driver_idx].1.as_firewall() else {
+                    return Self::err_reply(sender, ENOSYS);
+                };
+                let res = if grant {
+                    fw.grant_access(fw_id)
+                } else {
+                    fw.release_access(fw_id)
+                };
+                if res.is_err() {
+                    // InvalidArgument for bad ids, PermissionDenied for
+                    // secure/already-locked peripherals: surface as EINVAL.
+                    return Self::err_reply(sender, EINVAL);
                 }
             }
             HandleKind::Driver {
@@ -547,10 +608,24 @@ impl BusSchemeServer {
                     (3u64, DT_REG, String::from(DRV_SUSPEND)),
                     (4u64, DT_REG, String::from(DRV_RESUME)),
                 ];
+                if driver.as_firewall().is_some() {
+                    e.push((5u64, DT_DIR, String::from(DRV_FIREWALL_DIR)));
+                }
                 for (i, child) in driver.children().iter().enumerate() {
-                    e.push(((i + 5) as u64, DT_REG, child.name.clone()));
+                    e.push(((i + 6) as u64, DT_REG, child.name.clone()));
                 }
                 e
+            }
+            HandleKind::Driver {
+                driver_idx,
+                sub_path,
+            } if sub_path == DRV_FIREWALL_DIR => {
+                let _ = self.drivers[*driver_idx].1.as_firewall();
+                alloc::vec![
+                    (1u64, DT_REG, String::from("info")),
+                    (2u64, DT_DIR, String::from("grant")),
+                    (3u64, DT_DIR, String::from("release")),
+                ]
             }
             _ => return Self::err_reply(sender, ENOTDIR),
         };
@@ -594,6 +669,24 @@ impl BusSchemeServer {
 
     // === Serve ================================================================
 
+    /// Dispatches one request and returns the reply message.
+    ///
+    /// Public so that the scheme contract can be exercised by host-side
+    /// integration tests without a live kernel IPC transport.
+    pub fn dispatch(&mut self, msg_type: u32, sender: u64, payload: &[u8]) -> IpcMessage {
+        let mut payload_buf = [0u8; IpcMessage::PAYLOAD_CAPACITY];
+        let n = payload.len().min(payload_buf.len());
+        payload_buf[..n].copy_from_slice(&payload[..n]);
+        match msg_type {
+            OPCODE_OPEN => self.handle_open(sender, &payload_buf),
+            OPCODE_READ => self.handle_read(sender, &payload_buf),
+            OPCODE_WRITE => self.handle_write(sender, &payload_buf),
+            OPCODE_CLOSE => self.handle_close(sender, &payload_buf),
+            OPCODE_READDIR => self.handle_readdir(sender, &payload_buf),
+            _ => Self::err_reply(sender, ENOSYS),
+        }
+    }
+
     /// Performs the serve operation.
     pub fn serve(&mut self) -> ! {
         loop {
@@ -603,14 +696,7 @@ impl BusSchemeServer {
                 continue;
             }
 
-            let reply = match msg.msg_type {
-                OPCODE_OPEN => self.handle_open(msg.sender, &msg.payload),
-                OPCODE_READ => self.handle_read(msg.sender, &msg.payload),
-                OPCODE_WRITE => self.handle_write(msg.sender, &msg.payload),
-                OPCODE_CLOSE => self.handle_close(msg.sender, &msg.payload),
-                OPCODE_READDIR => self.handle_readdir(msg.sender, &msg.payload),
-                _ => Self::err_reply(msg.sender, ENOSYS),
-            };
+            let reply = self.dispatch(msg.msg_type, msg.sender, &msg.payload);
             let _ = call::ipc_reply(&reply);
         }
     }
