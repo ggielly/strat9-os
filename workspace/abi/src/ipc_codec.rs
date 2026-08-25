@@ -185,6 +185,19 @@ pub fn get_str(payload: &[u8], off: usize, len: usize) -> Option<&str> {
     core::str::from_utf8(bytes).ok()
 }
 
+/// Write a raw `u16` length prefix followed by the bytes at `payload[off..]`
+/// (the common `[len: u16][data...]` framing used by OPEN/CREATE/UNLINK).
+///
+/// Returns `None` if the data does not fit (`> u16::MAX` or out of bounds).
+#[inline]
+pub fn put_u16_len_prefixed(payload: &mut [u8], off: usize, data: &[u8]) -> Option<()> {
+    if data.len() > u16::MAX as usize {
+        return None;
+    }
+    put_u16(payload, off, data.len() as u16)?;
+    put_bytes(payload, off + 2, data)
+}
+
 // ===========================================================================
 // Fixed-size payload helpers
 // ===========================================================================
@@ -192,8 +205,12 @@ pub fn get_str(payload: &[u8], off: usize, len: usize) -> Option<&str> {
 /// Encode a fixed-size `repr(C)` struct as an [`IpcMessage`].
 ///
 /// The body is written directly into `payload[0..size_of::<T>()]`.
-/// Panics in debug if `T` exceeds [`PAYLOAD_CAPACITY`]; in release the write
-/// silently truncates.
+///
+/// # Panics
+///
+/// Panics if `T` exceeds [`PAYLOAD_CAPACITY`]. This is a developer error
+/// (an oversized ABI struct), never an attacker-controlled condition:
+/// failing loudly is preferable to silently emitting a truncated message.
 ///
 /// # Example
 ///
@@ -210,9 +227,12 @@ pub fn get_str(payload: &[u8], off: usize, len: usize) -> Option<&str> {
 pub fn encode_fixed<T: IntoBytes + Immutable>(msg_type: u32, body: &T) -> IpcMessage {
     let mut msg = IpcMessage::new(msg_type);
     let src = body.as_bytes();
-    debug_assert!(src.len() <= PAYLOAD_CAPACITY, "encode_fixed: T too large");
-    let n = src.len().min(PAYLOAD_CAPACITY);
-    msg.payload[..n].copy_from_slice(&src[..n]);
+    assert!(
+        src.len() <= PAYLOAD_CAPACITY,
+        "encode_fixed: struct of {} bytes exceeds payload capacity {PAYLOAD_CAPACITY}",
+        src.len()
+    );
+    msg.payload[..src.len()].copy_from_slice(src);
     msg
 }
 
@@ -297,8 +317,15 @@ impl InlineBlobHeader {
     /// Write `InlineBlobHeader(len, kind)` followed by `data` into
     /// `payload[off..]`.
     ///
-    /// Returns `None` if the header + data do not fit in the payload slice.
+    /// Returns `None` if:
+    /// - `data` is larger than `u16::MAX` bytes (`len` field would truncate), or
+    /// - the header + data do not fit in the payload slice.
     pub fn write(payload: &mut [u8], off: usize, kind: u16, data: &[u8]) -> Option<()> {
+        if data.len() > u16::MAX as usize {
+            // The `len` field is u16: writing more bytes than representable
+            // would silently corrupt the framing.
+            return None;
+        }
         let total = Self::SIZE.checked_add(data.len())?;
         let end = off.checked_add(total)?;
         let buf = payload.get_mut(off..end)?;

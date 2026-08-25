@@ -1245,9 +1245,13 @@ pub fn handle_interrupt() {
                                         };
 
                                         if !buf.is_null() && actual_len > 0 {
-                                            crate::hardware::usb::hid::receive_interrupt_report(
-                                                slot_id, ep_id, buf, actual_len,
-                                            );
+                                            // SAFETY: buf/actual_len describe the
+                                            // transfer buffer filled by the ring.
+                                            unsafe {
+                                                crate::hardware::usb::hid::receive_interrupt_report(
+                                                    slot_id, ep_id, buf, actual_len,
+                                                );
+                                            }
                                         }
 
                                         dev.ep_dequeue[ep] =

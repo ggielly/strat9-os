@@ -22,14 +22,14 @@ use crate::{
 };
 
 impl NetworkStrate {
-    fn insert_open_handle(&mut self, path: &str) -> u64 {
-        let fid = self.alloc_fid();
+    fn insert_open_handle(&mut self, sender: u64, path: &str) -> u64 {
+        let fid = self.new_fid(sender);
         self.open_handles.insert(fid, OpenedFile::new(path));
         fid
     }
 
     fn reply_open_path(&mut self, sender: u64, path: &str, flags: u32) -> IpcMessage {
-        let fid = self.insert_open_handle(path);
+        let fid = self.insert_open_handle(sender, path);
         reply_open(sender, fid, u64::MAX, flags)
     }
 
@@ -47,7 +47,7 @@ impl NetworkStrate {
             return IpcMessage::error_reply(sender, -98);
         }
         let socket = self.sockets.add(socket);
-        let fid = self.insert_open_handle(path);
+        let fid = self.insert_open_handle(sender, path);
         self.tcp_listeners.insert(
             fid,
             TcpListenerState {
@@ -85,7 +85,7 @@ impl NetworkStrate {
             return IpcMessage::error_reply(sender, -111);
         }
 
-        let fid = self.insert_open_handle(path);
+        let fid = self.insert_open_handle(sender, path);
         self.tcp_connections.insert(
             fid,
             TcpConnState {
@@ -110,7 +110,7 @@ impl NetworkStrate {
             return IpcMessage::error_reply(sender, -98);
         };
 
-        let fid = self.insert_open_handle(path);
+        let fid = self.insert_open_handle(sender, path);
         self.udp_connections.insert(
             fid,
             UdpConnState {
@@ -130,7 +130,7 @@ impl NetworkStrate {
 
         match path {
             "" => {
-                let fid = self.insert_open_handle("");
+                let fid = self.insert_open_handle(msg.sender, "");
                 reply_open(msg.sender, fid, u64::MAX, IPC_FILE_FLAG_DIRECTORY)
             }
             "ip" | "address" | "prefix" | "netmask" | "broadcast" | "gateway" | "route"
@@ -217,7 +217,7 @@ impl NetworkStrate {
                 let Ok(socket) = self.create_udp_socket(port) else {
                     return IpcMessage::error_reply(msg.sender, -98);
                 };
-                let fid = self.insert_open_handle(path);
+                let fid = self.insert_open_handle(msg.sender, path);
                 self.udp_bound.insert(
                     fid,
                     UdpBoundState {
@@ -292,6 +292,11 @@ impl NetworkStrate {
     pub(crate) fn handle_read(&mut self, msg: &IpcMessage) -> IpcMessage {
         let (file_id, offset, requested) = read_request(msg);
 
+        // Ownership check: fids are sequential and guessable.
+        if !self.is_owner(file_id, msg.sender) {
+            return IpcMessage::error_reply(msg.sender, -9); // EBADF
+        }
+
         if let Some(listener) = self.tcp_listeners.get(&file_id).copied() {
             return self.handle_tcp_read(msg.sender, listener, requested);
         }
@@ -354,6 +359,11 @@ impl NetworkStrate {
 
     pub(crate) fn handle_write(&mut self, msg: &IpcMessage) -> IpcMessage {
         let file_id = message_file_id(msg);
+
+        // Ownership check: fids are sequential and guessable.
+        if !self.is_owner(file_id, msg.sender) {
+            return IpcMessage::error_reply(msg.sender, -9); // EBADF
+        }
 
         if let Some(listener) = self.tcp_listeners.get(&file_id).copied() {
             return self.handle_tcp_write(msg.sender, listener, msg);
@@ -612,6 +622,13 @@ impl NetworkStrate {
 
     pub(crate) fn handle_close(&mut self, msg: &IpcMessage) -> IpcMessage {
         let file_id = message_file_id(msg);
+
+        // Only the owner may close; also prevents destroying another
+        // process's sockets by guessing its fid.
+        if !self.is_owner(file_id, msg.sender) {
+            return IpcMessage::error_reply(msg.sender, -9); // EBADF
+        }
+        self.forget_handle(file_id);
         self.open_handles.remove(&file_id);
         if let Some(listener) = self.tcp_listeners.remove(&file_id) {
             let _ = self.sockets.remove(listener.socket);

@@ -181,6 +181,7 @@ impl From<crate::ipc::port::IpcError> for SyscallError {
             IpcError::PortNotFound => SyscallError::NotFound,
             IpcError::NotOwner => SyscallError::PermissionDenied,
             IpcError::PortDestroyed => SyscallError::Pipe,
+            IpcError::WouldBlock => SyscallError::Again,
         }
     }
 }

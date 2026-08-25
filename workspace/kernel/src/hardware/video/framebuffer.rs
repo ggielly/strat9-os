@@ -131,14 +131,16 @@ impl Framebuffer {
             while idx < self.canvas.dirty.len {
                 let rect = self.canvas.dirty.rects[idx];
                 if rect.is_valid() {
-                    let _ = gpu.present_from_linear(
-                        self.info.base_virt as *const u8,
-                        self.info.stride,
-                        rect.x0,
-                        rect.y0,
-                        rect.x1.saturating_sub(rect.x0),
-                        rect.y1.saturating_sub(rect.y0),
-                    );
+                    let _ = unsafe {
+                        gpu.present_from_linear(
+                            self.info.base_virt as *const u8,
+                            self.info.stride,
+                            rect.x0,
+                            rect.y0,
+                            rect.x1.saturating_sub(rect.x0),
+                            rect.y1.saturating_sub(rect.y0),
+                        )
+                    };
                 }
                 idx += 1;
             }
@@ -537,7 +539,9 @@ impl Framebuffer {
                 let mut idx = 0;
                 while idx < region_count {
                     let (px, py, pw, ph) = regions[idx];
-                    let _ = gpu.present_from_linear(src, src_stride, px, py, pw, ph);
+                    let _ = unsafe {
+                        gpu.present_from_linear(src, src_stride, px, py, pw, ph)
+                    };
                     idx += 1;
                 }
             }
