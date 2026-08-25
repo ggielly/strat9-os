@@ -32,7 +32,7 @@ use core::{
     mem, ptr,
     sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
 };
-use x86_64::PhysAddr;
+use crate::arch::xshim::PhysAddr;
 
 const PAGE_SIZE: u64 = 4096;
 const DMA_MAX: u64 = 16 * 1024 * 1024;

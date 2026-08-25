@@ -7,7 +7,7 @@
 //! This tests the full SYSCALL/SYSRET pipeline without needing an ELF loader.
 
 use alloc::sync::Arc;
-use x86_64::VirtAddr;
+use crate::arch::xshim::VirtAddr;
 
 use crate::{
     memory::address_space::{AddressSpace, VmaFlags, VmaType},
@@ -221,7 +221,7 @@ extern "C" fn ring3_trampoline() -> ! {
             as_ref.switch_to();
 
             // Diagnostic: verify the code page is mapped before IRETQ
-            let phys = as_ref.translate(x86_64::VirtAddr::new(USER_CODE_ADDR));
+            let phys = as_ref.translate(crate::arch::xshim::VirtAddr::new(USER_CODE_ADDR));
             crate::serial_println!(
                 "[ring3-tramp] CR3={:#x}, translate({:#x})={:?}",
                 as_ref.cr3().as_u64(),

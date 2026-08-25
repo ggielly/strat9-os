@@ -45,7 +45,9 @@ pub mod syscall;
 pub mod trace;
 pub mod vfs;
 
-// Re-export boot::limine::kmain as the main entry point
+// Re-export boot::limine::kmain as the main entry point (x86_64 boot path).
+// On riscv64 the entry point comes from the SBI stub (arch/riscv64 boot).
+#[cfg(target_arch = "x86_64")]
 pub use boot::limine::kmain;
 
 // serial_print! and serial_println! macros are #[macro_export]'ed
@@ -256,6 +258,45 @@ fn register_initfs_module(path: &str, module: Option<(u64, u64)>) {
     }
 }
 
+
+/// Resolve a Limine boot module by helper name.
+///
+/// On x86_64 this dispatches to `boot::limine::<name>()`; on other
+/// architectures (no Limine bootloader) it always returns `None`.
+#[cfg(target_arch = "x86_64")]
+fn boot_limine_module(name: &str) -> Option<(u64, u64)> {
+    match name {
+        "test_syscalls_module" => crate::boot::limine::test_syscalls_module(),
+        "test_mem_module" => crate::boot::limine::test_mem_module(),
+        "test_mem_stressed_module" => crate::boot::limine::test_mem_stressed_module(),
+        "test_mem_region_module" => crate::boot::limine::test_mem_region_module(),
+        "test_mem_region_proc_module" => crate::boot::limine::test_mem_region_proc_module(),
+        "test_exec_module" => crate::boot::limine::test_exec_module(),
+        "test_exec_helper_module" => crate::boot::limine::test_exec_helper_module(),
+        "fs_ext4_module" => crate::boot::limine::fs_ext4_module(),
+        "strate_fs_ramfs_module" => crate::boot::limine::strate_fs_ramfs_module(),
+        "init_module" => crate::boot::limine::init_module(),
+        "console_admin_module" => crate::boot::limine::console_admin_module(),
+        "strate_net_module" => crate::boot::limine::strate_net_module(),
+        "strate_bus_module" => crate::boot::limine::strate_bus_module(),
+        "dhcp_client_module" => crate::boot::limine::dhcp_client_module(),
+        "ping_module" => crate::boot::limine::ping_module(),
+        "telnetd_module" => crate::boot::limine::telnetd_module(),
+        "udp_tool_module" => crate::boot::limine::udp_tool_module(),
+        "strate_wasm_module" => crate::boot::limine::strate_wasm_module(),
+        "hello_wasm_module" => crate::boot::limine::hello_wasm_module(),
+        "wasm_test_toml_module" => crate::boot::limine::wasm_test_toml_module(),
+        "strate_webrtc_module" => crate::boot::limine::strate_webrtc_module(),
+        "web_admin_module" => crate::boot::limine::web_admin_module(),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn boot_limine_module(_name: &str) -> Option<(u64, u64)> {
+    None
+}
+
 /// Performs the register boot initfs modules operation.
 fn register_boot_initfs_modules(initfs_base: u64, initfs_size: u64) {
     let boot_test_pid = if initfs_base != 0 && initfs_size != 0 {
@@ -265,45 +306,45 @@ fn register_boot_initfs_modules(initfs_base: u64, initfs_size: u64) {
     };
     let initfs_modules = [
         ("test_pid", boot_test_pid),
-        ("test_syscalls", crate::boot::limine::test_syscalls_module()),
-        ("test_mem", crate::boot::limine::test_mem_module()),
+        ("test_syscalls", boot_limine_module("test_syscalls_module")),
+        ("test_mem", boot_limine_module("test_mem_module")),
         (
             "test_mem_stressed",
-            crate::boot::limine::test_mem_stressed_module(),
+            boot_limine_module("test_mem_stressed_module"),
         ),
         (
             "test_mem_region",
-            crate::boot::limine::test_mem_region_module(),
+            boot_limine_module("test_mem_region_module"),
         ),
         (
             "test_mem_region_proc",
-            crate::boot::limine::test_mem_region_proc_module(),
+            boot_limine_module("test_mem_region_proc_module"),
         ),
-        ("test_exec", crate::boot::limine::test_exec_module()),
+        ("test_exec", boot_limine_module("test_exec_module")),
         (
             "test_exec_helper",
-            crate::boot::limine::test_exec_helper_module(),
+            boot_limine_module("test_exec_helper_module"),
         ),
-        ("fs-ext4", crate::boot::limine::fs_ext4_module()),
+        ("fs-ext4", boot_limine_module("fs_ext4_module")),
         (
             "strate-fs-ramfs",
-            crate::boot::limine::strate_fs_ramfs_module(),
+            boot_limine_module("strate_fs_ramfs_module"),
         ),
-        ("init", crate::boot::limine::init_module()),
-        ("console-admin", crate::boot::limine::console_admin_module()),
-        ("strate-net", crate::boot::limine::strate_net_module()),
-        ("strate-bus", crate::boot::limine::strate_bus_module()),
-        ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
-        ("bin/ping", crate::boot::limine::ping_module()),
-        ("bin/telnetd", crate::boot::limine::telnetd_module()),
-        ("bin/udp-tool", crate::boot::limine::udp_tool_module()),
-        ("bin/web-admin", crate::boot::limine::web_admin_module()),
-        ("strate-wasm", crate::boot::limine::strate_wasm_module()),
-        ("strate-webrtc", crate::boot::limine::strate_webrtc_module()),
-        ("bin/hello.wasm", crate::boot::limine::hello_wasm_module()),
+        ("init", boot_limine_module("init_module")),
+        ("console-admin", boot_limine_module("console_admin_module")),
+        ("strate-net", boot_limine_module("strate_net_module")),
+        ("strate-bus", boot_limine_module("strate_bus_module")),
+        ("bin/dhcp-client", boot_limine_module("dhcp_client_module")),
+        ("bin/ping", boot_limine_module("ping_module")),
+        ("bin/telnetd", boot_limine_module("telnetd_module")),
+        ("bin/udp-tool", boot_limine_module("udp_tool_module")),
+        ("bin/web-admin", boot_limine_module("web_admin_module")),
+        ("strate-wasm", boot_limine_module("strate_wasm_module")),
+        ("strate-webrtc", boot_limine_module("strate_webrtc_module")),
+        ("bin/hello.wasm", boot_limine_module("hello_wasm_module")),
         (
             "wasm-test.toml",
-            crate::boot::limine::wasm_test_toml_module(),
+            boot_limine_module("wasm_test_toml_module"),
         ),
     ];
     for (path, module) in initfs_modules {
@@ -322,21 +363,21 @@ fn boot_module_slice(base: u64, size: u64) -> &'static [u8] {
 #[cfg(feature = "selftest")]
 fn log_boot_module_magics(stage: &str) {
     let modules = [
-        ("init", crate::boot::limine::init_module()),
-        ("console-admin", crate::boot::limine::console_admin_module()),
-        ("strate-net", crate::boot::limine::strate_net_module()),
-        ("strate-bus", crate::boot::limine::strate_bus_module()),
-        ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
-        ("bin/ping", crate::boot::limine::ping_module()),
-        ("bin/telnetd", crate::boot::limine::telnetd_module()),
-        ("bin/udp-tool", crate::boot::limine::udp_tool_module()),
-        ("bin/web-admin", crate::boot::limine::web_admin_module()),
-        ("strate-wasm", crate::boot::limine::strate_wasm_module()),
-        ("strate-webrtc", crate::boot::limine::strate_webrtc_module()),
-        ("bin/hello.wasm", crate::boot::limine::hello_wasm_module()),
+        ("init", boot_limine_module("init_module")),
+        ("console-admin", boot_limine_module("console_admin_module")),
+        ("strate-net", boot_limine_module("strate_net_module")),
+        ("strate-bus", boot_limine_module("strate_bus_module")),
+        ("bin/dhcp-client", boot_limine_module("dhcp_client_module")),
+        ("bin/ping", boot_limine_module("ping_module")),
+        ("bin/telnetd", boot_limine_module("telnetd_module")),
+        ("bin/udp-tool", boot_limine_module("udp_tool_module")),
+        ("bin/web-admin", boot_limine_module("web_admin_module")),
+        ("strate-wasm", boot_limine_module("strate_wasm_module")),
+        ("strate-webrtc", boot_limine_module("strate_webrtc_module")),
+        ("bin/hello.wasm", boot_limine_module("hello_wasm_module")),
         (
             "wasm-test.toml",
-            crate::boot::limine::wasm_test_toml_module(),
+            boot_limine_module("wasm_test_toml_module"),
         ),
     ];
     for (name, module) in modules {
@@ -537,30 +578,30 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                 None
             },
         ),
-        ("test_syscalls", crate::boot::limine::test_syscalls_module()),
-        ("test_mem", crate::boot::limine::test_mem_module()),
+        ("test_syscalls", boot_limine_module("test_syscalls_module")),
+        ("test_mem", boot_limine_module("test_mem_module")),
         (
             "test_mem_stressed",
-            crate::boot::limine::test_mem_stressed_module(),
+            boot_limine_module("test_mem_stressed_module"),
         ),
-        ("fs-ext4", crate::boot::limine::fs_ext4_module()),
+        ("fs-ext4", boot_limine_module("fs_ext4_module")),
         (
             "strate-fs-ramfs",
-            crate::boot::limine::strate_fs_ramfs_module(),
+            boot_limine_module("strate_fs_ramfs_module"),
         ),
-        ("init", crate::boot::limine::init_module()),
-        ("console-admin", crate::boot::limine::console_admin_module()),
-        ("strate-net", crate::boot::limine::strate_net_module()),
-        ("strate-bus", crate::boot::limine::strate_bus_module()),
-        ("bin/dhcp-client", crate::boot::limine::dhcp_client_module()),
-        ("bin/ping", crate::boot::limine::ping_module()),
-        ("bin/telnetd", crate::boot::limine::telnetd_module()),
-        ("bin/udp-tool", crate::boot::limine::udp_tool_module()),
-        ("strate-wasm", crate::boot::limine::strate_wasm_module()),
-        ("bin/hello.wasm", crate::boot::limine::hello_wasm_module()),
+        ("init", boot_limine_module("init_module")),
+        ("console-admin", boot_limine_module("console_admin_module")),
+        ("strate-net", boot_limine_module("strate_net_module")),
+        ("strate-bus", boot_limine_module("strate_bus_module")),
+        ("bin/dhcp-client", boot_limine_module("dhcp_client_module")),
+        ("bin/ping", boot_limine_module("ping_module")),
+        ("bin/telnetd", boot_limine_module("telnetd_module")),
+        ("bin/udp-tool", boot_limine_module("udp_tool_module")),
+        ("strate-wasm", boot_limine_module("strate_wasm_module")),
+        ("bin/hello.wasm", boot_limine_module("hello_wasm_module")),
         (
             "wasm-test.toml",
-            crate::boot::limine::wasm_test_toml_module(),
+            boot_limine_module("wasm_test_toml_module"),
         ),
     ];
 
@@ -1138,7 +1179,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         // is present but contains an invalid ELF (corrupt / wrong arch).
         let mut init_loaded = false;
 
-        if let Some((base, size)) = crate::boot::limine::init_module() {
+        if let Some((base, size)) = boot_limine_module("init_module") {
             let elf_data = boot_module_slice(base, size);
             let init_caps = [crate::silo::create_silo_admin_capability()];
             match process::elf::load_and_run_elf_with_caps(elf_data, "init", &init_caps) {
@@ -1168,7 +1209,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                 }
             }
         }
-        if let Some((base, size)) = crate::boot::limine::strate_fs_ramfs_module() {
+        if let Some((base, size)) = boot_limine_module("strate_fs_ramfs_module") {
             let ram_data = boot_module_slice(base, size);
             match process::elf::load_elf_task_with_caps(ram_data, "strate-fs-ramfs", &[]) {
                 Ok(task) => {
@@ -1207,7 +1248,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                 Err(e) => serial_println!("[init] Failed to load strate-fs-ramfs component: {}", e),
             }
         }
-        if let Some((base, size)) = crate::boot::limine::fs_ext4_module() {
+        if let Some((base, size)) = boot_limine_module("fs_ext4_module") {
             let ext4_data = boot_module_slice(base, size);
             match process::elf::load_elf_task_with_caps(ext4_data, "strate-fs-ext4", &[]) {
                 Ok(task) => {

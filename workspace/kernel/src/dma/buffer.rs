@@ -1,5 +1,5 @@
 use crate::memory::{self, frame::get_meta, phys_to_virt, PhysFrame};
-use x86_64::PhysAddr;
+use crate::arch::xshim::PhysAddr;
 
 /// A pinned, contiguous DMA buffer.
 ///

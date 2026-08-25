@@ -22,10 +22,10 @@
 //!     left unmapped.  Stack underflows hit it and page-fault.
 //!
 use alloc::{sync::Arc, vec::Vec};
-use x86_64::{
-    structures::paging::{Mapper, Page, Size4KiB},
-    VirtAddr,
-};
+use x86_64::structures::paging::Page;
+use crate::arch::xshim::Size4KiB;
+use x86_64::structures::paging::Mapper;
+use crate::arch::xshim::VirtAddr;
 
 use crate::{
     capability::Capability,
@@ -1918,7 +1918,7 @@ fn load_elf_task_inner(
         interrupt_rsp: core::sync::atomic::AtomicU64::new(0),
         kernel_stack,
         user_stack: Some(crate::process::task::UserStack {
-            virt_base: x86_64::VirtAddr::new(user_stack_base()),
+            virt_base: crate::arch::xshim::VirtAddr::new(user_stack_base()),
             size: USER_STACK_PAGES * 4096,
         }),
         name,

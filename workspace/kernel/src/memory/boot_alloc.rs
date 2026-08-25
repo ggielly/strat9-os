@@ -6,7 +6,7 @@ use crate::{
     serial_println,
     sync::SpinLock,
 };
-use x86_64::PhysAddr;
+use crate::arch::xshim::PhysAddr;
 
 const PAGE_SIZE: u64 = 4096;
 pub const MAX_BOOT_ALLOC_REGIONS: usize = 512;
