@@ -516,3 +516,7 @@ pub mod timer {
 
 /// x86-only CPU extensions — no-op on RISC-V.
 pub fn init_cpu_extensions() {}
+
+// Tagged-pointer constants used by ipc/mailbox.rs (neutral values).
+pub use crate::arch::xshim::PTR_MASK;
+pub const TAG_SHIFT: u8 = 57;
