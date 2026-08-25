@@ -2159,6 +2159,7 @@ fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
     let (
         module_id,
         granted_caps,
+        granted_resources,
         silo_flags,
         previous_state,
         can_start,
@@ -2179,6 +2180,7 @@ fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
         };
         let module_id = silo.module_id;
         let granted_caps = silo.granted_caps.clone();
+        let granted_resources = silo.granted_resources.clone();
         let silo_flags = silo.config.flags;
         let silo_name = silo.name.clone();
         let silo_label = silo.strate_label.clone();
@@ -2188,6 +2190,7 @@ fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
         (
             module_id,
             granted_caps,
+            granted_resources,
             silo_flags,
             previous_state,
             can_start,
@@ -2237,12 +2240,32 @@ fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
                 rollback_loading(previous_state);
                 return Err(SyscallError::PermissionDenied);
             }
-            if let Some(dup) = caps.duplicate(CapId::from_raw(handle)) {
-                out.push(dup);
-            } else {
+            let Some(dup) = caps.duplicate(CapId::from_raw(handle)) else {
+                rollback_loading(previous_state);
+                return Err(SyscallError::PermissionDenied);
+            };
+            // Capability-confusion guard: granted_caps stores raw handle
+            // slots recorded when the silo was configured (possibly by a
+            // different process). Slot numbers are per-process: the starter
+            // could hold an unrelated capability at the same slot. Verify
+            // the duplicated capability actually matches a resource that
+            // was explicitly granted to this silo before seeding it.
+            let authorized = granted_resources.iter().any(|g| {
+                g.resource_type == dup.resource_type && g.resource == dup.resource
+            });
+            if !authorized {
+                log::warn!(
+                    "[silo] start sid={}: cap handle {} does not match any \
+                     granted resource (type={:?}, resource={:#x}) - denied",
+                    silo_id,
+                    handle,
+                    dup.resource_type,
+                    dup.resource
+                );
                 rollback_loading(previous_state);
                 return Err(SyscallError::PermissionDenied);
             }
+            out.push(dup);
         }
         out
     };
