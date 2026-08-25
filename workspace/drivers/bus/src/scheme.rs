@@ -252,7 +252,7 @@ impl BusSchemeServer {
 
     fn handle_open(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let path_len = u16::from_le_bytes([payload[4], payload[5]]) as usize;
-        if path_len > 42 {
+        if path_len > IpcMessage::OPEN_INLINE_CAPACITY {
             return Self::err_reply(sender, EINVAL);
         }
         let path_bytes = &payload[6..6 + path_len];
@@ -487,7 +487,7 @@ impl BusSchemeServer {
             _ => return Self::err_reply(sender, EBADF),
         };
 
-        if len > 30 {
+        if len > IpcMessage::WRITE_INLINE_CAPACITY {
             return Self::err_reply(sender, EINVAL);
         }
 
