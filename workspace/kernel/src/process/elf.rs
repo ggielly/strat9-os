@@ -2071,6 +2071,7 @@ fn load_elf_task_inner(
         }),
         stack_canary: core::sync::atomic::AtomicU64::new(stack_canary),
         stack_canary_addr: core::sync::atomic::AtomicU64::new(stack_top - 8),
+        kernel_stack_user: SyncUnsafeCell::new(None),
         name,
         process: Arc::new(crate::process::process::Process::new(pid, user_as)),
         pending_signals: super::signal::SignalSet::new(),

@@ -244,6 +244,7 @@ pub const DEV_IPCFS: u64 = 7;
 pub const DEV_NETFS: u64 = 8;
 pub const DEV_CHAR_FS: u64 = 9;
 pub const DEV_INPUT: u64 = 10;
+pub const DEV_THREADFS: u64 = 11;
 
 /// Finalize pseudo-filesystem stats with a stable device identity and
 /// synthetic timestamps.

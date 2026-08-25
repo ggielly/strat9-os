@@ -117,12 +117,14 @@ _gdt:
     mov ds, ax
     mov ss, ax
 
-    # Enable PAE + PSE + OSFXSR + OSXMMEXCPT + SMEP + SMAP
-    # OSXSAVE is NOT set here : enabled conditionally in Rust
-    # SMEP (bit 20): prevents kernel from executing user-space pages
-    # SMAP (bit 21): prevents kernel from accessing user-space data pages
+    # Enable PAE + PSE + OSFXSR + OSXMMEXCPT
+    # NOTE: do NOT force SMEP/SMAP (CR4 bits 20/21) here. qemu64 (and many
+    # older hosts) lack them: `mov cr4` then raises #GP and the AP dies
+    # silently (no IDT yet -> triple fault -> "waiting for APs" hang).
+    # Feature-gated bits (OSXSAVE, SMEP, SMAP) are enabled conditionally
+    # in Rust once CPUID detection has run.
     mov eax, cr4
-    or eax, 0x300630
+    or eax, 0x630
     mov cr4, eax
 
     # Enable Long Mode (EFER.LME)

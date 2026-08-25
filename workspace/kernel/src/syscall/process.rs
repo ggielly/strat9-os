@@ -1,177 +1,18 @@
 //! Process and thread management syscalls.
 //!
 //! Implements PID/TID retrieval per the Strat9-OS ABI.
+//!
+//! The thread lifecycle syscalls (`SYS_THREAD_CREATE/JOIN/EXIT`) are thin
+//! wrappers over the internal helpers in [`crate::process::thread_ops`],
+//! shared verbatim with the `/thread` VFS scheme.
 
 use super::{error::SyscallError, SyscallFrame};
 use crate::process::{
-    block_current_task, create_session, current_pgid, current_task_clone, current_task_id,
-    current_tid, get_child_task_id_by_tid, get_parent_pid, get_pgid_by_pid, get_sid_by_pid,
-    get_task_ids_in_tgid, kill_task,
-    scheduler::add_task_with_parent,
-    set_process_group,
-    task::{CpuContext, ExtendedState, KernelStack, SyncUnsafeCell, Task},
-    WaitChildResult,
+    create_session, current_pgid, current_task_clone, current_task_id, current_tid, get_parent_pid,
+    get_pgid_by_pid, get_sid_by_pid, get_task_ids_in_tgid, kill_task, set_process_group,
+    thread_ops,
 };
-use alloc::{boxed::Box, sync::Arc};
-use core::{mem::offset_of, sync::atomic::Ordering};
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct ThreadUserContext {
-    entry: u64,
-    stack_top: u64,
-    arg0: u64,
-    user_cs: u64,
-    user_rflags: u64,
-    user_ss: u64,
-}
-
-const THREAD_OFF_ENTRY: usize = offset_of!(ThreadUserContext, entry);
-const THREAD_OFF_STACK_TOP: usize = offset_of!(ThreadUserContext, stack_top);
-const THREAD_OFF_ARG0: usize = offset_of!(ThreadUserContext, arg0);
-const THREAD_OFF_USER_CS: usize = offset_of!(ThreadUserContext, user_cs);
-const THREAD_OFF_USER_RFLAGS: usize = offset_of!(ThreadUserContext, user_rflags);
-const THREAD_OFF_USER_SS: usize = offset_of!(ThreadUserContext, user_ss);
-
-/// Performs the thread child start operation.
-extern "C" fn thread_child_start(ctx_ptr: u64) -> ! {
-    // SAFETY: `ctx_ptr` is allocated with Box::into_raw in `build_user_thread_task`
-    // and passed as immutable bootstrap data for this task only.
-    let boxed = unsafe { Box::from_raw(ctx_ptr as *mut ThreadUserContext) };
-    let ctx = *boxed;
-    // SAFETY: Assembly routine performs an iretq into userspace with validated context.
-    unsafe { thread_iret_from_ctx(&ctx as *const ThreadUserContext) }
-}
-
-/// Performs the thread iret from ctx operation.
-#[unsafe(naked)]
-unsafe extern "C" fn thread_iret_from_ctx(_ctx: *const ThreadUserContext) -> ! {
-    core::arch::naked_asm!(
-        // Mask IRQs before touching GS. The user RFLAGS frame re-enables IF.
-        "cli",
-        "mov rsi, rdi",
-        // Build iret frame: SS, RSP, RFLAGS, CS, RIP
-        "mov r8, [rsi + {off_user_ss}]",
-        "push r8",
-        "mov r8, [rsi + {off_stack_top}]",
-        "push r8",
-        "mov r8, [rsi + {off_user_rflags}]",
-        "push r8",
-        "mov r8, [rsi + {off_user_cs}]",
-        "push r8",
-        "mov r8, [rsi + {off_entry}]",
-        "push r8",
-        // Argument convention for userspace entry: rdi = arg0
-        "mov rdi, [rsi + {off_arg0}]",
-        // Child thread returns 0 if entry routine ever reads rax.
-        "xor rax, rax",
-        "swapgs",
-        "iretq",
-        off_entry = const THREAD_OFF_ENTRY,
-        off_stack_top = const THREAD_OFF_STACK_TOP,
-        off_arg0 = const THREAD_OFF_ARG0,
-        off_user_cs = const THREAD_OFF_USER_CS,
-        off_user_rflags = const THREAD_OFF_USER_RFLAGS,
-        off_user_ss = const THREAD_OFF_USER_SS,
-    );
-}
-
-/// Performs the build user thread task operation.
-fn build_user_thread_task(
-    parent: &Arc<Task>,
-    bootstrap_ctx: Box<ThreadUserContext>,
-    tls_base: u64,
-) -> Result<Arc<Task>, SyscallError> {
-    let kernel_stack =
-        KernelStack::allocate(Task::DEFAULT_STACK_SIZE).map_err(|_| SyscallError::OutOfMemory)?;
-    let context = CpuContext::new(thread_child_start as *const () as u64, &kernel_stack);
-    let (pid, tid, _) = Task::allocate_process_ids();
-
-    let parent_fpu = unsafe { &*parent.fpu_state.get() };
-    let mut child_fpu = ExtendedState::new();
-    child_fpu.copy_from(parent_fpu);
-    let interrupt_frame = crate::syscall::SyscallFrame {
-        r15: 0,
-        r14: 0,
-        r13: 0,
-        r12: 0,
-        rbp: 0,
-        rbx: 0,
-        r11: bootstrap_ctx.user_rflags,
-        r10: 0,
-        r9: 0,
-        r8: 0,
-        rsi: 0,
-        rdi: bootstrap_ctx.arg0,
-        rdx: 0,
-        rcx: bootstrap_ctx.entry,
-        rax: 0,
-        iret_rip: bootstrap_ctx.entry,
-        iret_cs: bootstrap_ctx.user_cs,
-        iret_rflags: bootstrap_ctx.user_rflags,
-        iret_rsp: bootstrap_ctx.stack_top,
-        iret_ss: bootstrap_ctx.user_ss,
-    };
-
-    let task = Arc::new(Task {
-        id: crate::process::TaskId::new(),
-        pid,
-        tid,
-        tgid: parent.tgid,
-        pgid: core::sync::atomic::AtomicU32::new(parent.pgid.load(Ordering::Relaxed)),
-        sid: core::sync::atomic::AtomicU32::new(parent.sid.load(Ordering::Relaxed)),
-        uid: core::sync::atomic::AtomicU32::new(parent.uid.load(Ordering::Relaxed)),
-        euid: core::sync::atomic::AtomicU32::new(parent.euid.load(Ordering::Relaxed)),
-        gid: core::sync::atomic::AtomicU32::new(parent.gid.load(Ordering::Relaxed)),
-        egid: core::sync::atomic::AtomicU32::new(parent.egid.load(Ordering::Relaxed)),
-        state: core::sync::atomic::AtomicU8::new(crate::process::TaskState::Ready as u8),
-        priority: parent.priority,
-        context: SyncUnsafeCell::new(context),
-        resume_kind: SyncUnsafeCell::new(crate::process::task::ResumeKind::RetFrame),
-        interrupt_rsp: core::sync::atomic::AtomicU64::new(0),
-        kernel_stack,
-        user_stack: None,
-        stack_canary: core::sync::atomic::AtomicU64::new(0),
-        stack_canary_addr: core::sync::atomic::AtomicU64::new(0),
-        name: "user-thread",
-        process: parent.process.clone(),
-        pending_signals: crate::process::signal::SignalSet::new(),
-        blocked_signals: parent.blocked_signals.clone(),
-        irq_signal_delivery_blocked: core::sync::atomic::AtomicBool::new(false),
-        signal_stack: SyncUnsafeCell::new(None),
-        itimers: crate::process::timer::ITimers::new(),
-        wake_pending: core::sync::atomic::AtomicBool::new(false),
-        wake_deadline_ns: core::sync::atomic::AtomicU64::new(0),
-        trampoline_entry: core::sync::atomic::AtomicU64::new(0),
-        trampoline_stack_top: core::sync::atomic::AtomicU64::new(0),
-        trampoline_arg0: core::sync::atomic::AtomicU64::new(0),
-        ticks: core::sync::atomic::AtomicU64::new(0),
-        sched_policy: SyncUnsafeCell::new(parent.sched_policy()),
-        home_cpu: core::sync::atomic::AtomicUsize::new(usize::MAX),
-        vruntime: core::sync::atomic::AtomicU64::new(parent.vruntime()),
-        fair_rq_generation: core::sync::atomic::AtomicU64::new(0),
-        fair_on_rq: core::sync::atomic::AtomicBool::new(false),
-        clear_child_tid: core::sync::atomic::AtomicU64::new(0),
-        robust_list_head: core::sync::atomic::AtomicU64::new(0),
-        robust_list_len: core::sync::atomic::AtomicUsize::new(0),
-        user_fs_base: core::sync::atomic::AtomicU64::new(tls_base),
-        fpu_state: SyncUnsafeCell::new(child_fpu),
-        xcr0_mask: core::sync::atomic::AtomicU64::new(parent.xcr0_mask.load(Ordering::Relaxed)),
-        rt_link: intrusive_collections::LinkedListLink::new(),
-    });
-
-    // CpuContext initial stack layout: r15, r14, r13(arg), r12(entry), rbp, rbx, ret
-    // Seed r13 with bootstrap context pointer for `thread_child_start`.
-    unsafe {
-        let ctx = &mut *task.context.get();
-        let frame = ctx.saved_rsp as *mut u64;
-        *frame.add(2) = Box::into_raw(bootstrap_ctx) as u64;
-    }
-
-    task.seed_interrupt_frame(interrupt_frame);
-
-    Ok(task)
-}
+use core::sync::atomic::Ordering;
 
 /// SYS_GETPID (311): Return current process ID.
 ///
@@ -200,40 +41,15 @@ pub fn sys_thread_create(
     flags: u64,
     tls_base: u64,
 ) -> Result<u64, SyscallError> {
-    const USER_TOP_EXCLUSIVE: u64 = 0x0000_8000_0000_0000;
-
-    if flags != 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
-
-    if entry == 0
-        || stack_top == 0
-        || entry >= USER_TOP_EXCLUSIVE
-        || stack_top >= USER_TOP_EXCLUSIVE
-        || (stack_top & 0x7) != 0
-    // 8-byte alignment (x86_64 entry: 8 mod 16 is valid)
-    {
-        return Err(SyscallError::InvalidArgument);
-    }
-
-    let parent = current_task_clone().ok_or(SyscallError::Fault)?;
-    if parent.is_kernel() {
-        return Err(SyscallError::PermissionDenied);
-    }
-
-    let user_ctx = Box::new(ThreadUserContext {
+    let child = thread_ops::create_user_thread(
+        thread_ops::UserEntryContext::from_frame(frame),
         entry,
         stack_top,
         arg0,
-        user_cs: frame.iret_cs,
-        user_rflags: frame.iret_rflags | (1 << 9),
-        user_ss: frame.iret_ss,
-    });
-
-    let child = build_user_thread_task(&parent, user_ctx, tls_base)?;
-    let tid = child.tid as u64;
-    add_task_with_parent(child, parent.id);
-    Ok(tid)
+        flags,
+        tls_base,
+    )?;
+    Ok(child.tid as u64)
 }
 
 /// SYS_THREAD_JOIN (342): wait for a thread created by the current task.
@@ -243,34 +59,19 @@ pub fn sys_thread_join(tid: u64, status_ptr: u64, flags: u64) -> Result<u64, Sys
     }
 
     let wait_tid = u32::try_from(tid).map_err(|_| SyscallError::InvalidArgument)?;
-    let current = current_task_clone().ok_or(SyscallError::Fault)?;
-    if wait_tid == current.tid {
-        return Err(SyscallError::InvalidArgument);
+    let (joined_tid, status) = thread_ops::join_task(wait_tid)?;
+    if status_ptr != 0 {
+        let out =
+            crate::memory::UserSliceWrite::new(status_ptr, 4).map_err(|_| SyscallError::Fault)?;
+        out.copy_from(&(status as i32).to_ne_bytes());
     }
-
-    let parent_id = current_task_id().ok_or(SyscallError::Fault)?;
-    let child_id = get_child_task_id_by_tid(parent_id, wait_tid).ok_or(SyscallError::NotFound)?;
-
-    loop {
-        match crate::process::try_wait_child(parent_id, Some(child_id)) {
-            WaitChildResult::Reaped { status, .. } => {
-                if status_ptr != 0 {
-                    let out = crate::memory::UserSliceWrite::new(status_ptr, 4)
-                        .map_err(|_| SyscallError::Fault)?;
-                    out.copy_from(&(status as i32).to_ne_bytes());
-                }
-                return Ok(wait_tid as u64);
-            }
-            WaitChildResult::NoChildren => return Err(SyscallError::NotFound),
-            WaitChildResult::StillRunning => block_current_task(),
-        }
-    }
+    Ok(joined_tid as u64)
 }
 
 /// SYS_THREAD_EXIT (343): exit only the current thread.
 pub fn sys_thread_exit(exit_code: u64) -> Result<u64, SyscallError> {
     let code = i32::try_from(exit_code).map_err(|_| SyscallError::InvalidArgument)?;
-    crate::process::scheduler::exit_current_task(code)
+    thread_ops::exit_current_thread(code)
 }
 
 /// SYS_PROC_GETPPID/SYS_GETPPID (309): Return parent process ID.
