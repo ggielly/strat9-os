@@ -16,7 +16,7 @@ use crate::{
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
-use crate::x86_crate_shim::instructions::port::Port;
+use crate::x86_crate_shim::instructions::port::{Port, PortRead, PortWrite};
 
 const UHCI_USBCMD: u16 = 0x00;
 const UHCI_USBSTS: u16 = 0x02;

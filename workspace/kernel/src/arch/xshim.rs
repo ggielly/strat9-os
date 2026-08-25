@@ -89,3 +89,13 @@ pub use neutral::*;
 
 /// Address bits within a page-table entry (Sv48: PPN[2..0] + flags).
 pub const PTR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
+
+/// Translation trait mirroring `x86_64::structures::paging::Translate`
+/// (neutral version; on riscv64 implemented by the Sv48 mapper).
+#[cfg(not(target_arch = "x86_64"))]
+pub trait Translate {
+    fn translate(
+        &self,
+        virt: VirtAddr,
+    ) -> Option<(PhysFrame<Size4KiB>, PageTableFlags)>;
+}

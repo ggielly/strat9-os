@@ -27,18 +27,14 @@ pub mod instructions {
         impl<T> Port<T> {
             pub fn new(_addr: u16) -> Self { panic!("port I/O on riscv64") }
         }
-        impl Port<u8> {
-            pub fn read(&mut self) -> u8 { panic!("port in on riscv64") }
-            pub fn write(&mut self, _v: u8) { panic!("port out on riscv64") }
-        }
-        impl Port<u16> {
-            pub fn read(&mut self) -> u16 { panic!("port in on riscv64") }
-            pub fn write(&mut self, _v: u16) { panic!("port out on riscv64") }
-        }
-        impl Port<u32> {
-            pub fn read(&mut self) -> u32 { panic!("port in on riscv64") }
-            pub fn write(&mut self, _v: u32) { panic!("port out on riscv64") }
-        }
+        pub trait PortRead<R> { fn read(&mut self) -> R; }
+        pub trait PortWrite<V> { fn write(&mut self, _v: V); }
+        impl PortRead<u8> for Port<u8> { fn read(&mut self) -> u8 { panic!("in") } }
+        impl PortRead<u16> for Port<u16> { fn read(&mut self) -> u16 { panic!("in") } }
+        impl PortRead<u32> for Port<u32> { fn read(&mut self) -> u32 { panic!("in") } }
+        impl PortWrite<u8> for Port<u8> { fn write(&mut self, _v: u8) {} }
+        impl PortWrite<u16> for Port<u16> { fn write(&mut self, _v: u16) {} }
+        impl PortWrite<u32> for Port<u32> { fn write(&mut self, _v: u32) {} }
     }
     pub mod hlt {
         pub fn hlt() {}
@@ -100,6 +96,18 @@ pub mod structures {
         impl Default for PageTable {
             fn default() -> Self { Self::new() }
         }
+
+        impl core::ops::Index<usize> for PageTable {
+            type Output = PageTableEntry;
+            fn index(&self, i: usize) -> &PageTableEntry {
+                &self.entries[i]
+            }
+        }
+        impl core::ops::IndexMut<usize> for PageTable {
+            fn index_mut(&mut self, i: usize) -> &mut PageTableEntry {
+                &mut self.entries[i]
+            }
+        }
         pub trait Mapper<S> {}
         pub trait Translate {
             fn translate(&self, _a: VirtAddr) -> Option<(PhysAddr, PageTableFlags)> { None }
@@ -124,6 +132,65 @@ pub mod structures {
                 // sfence.vma full flush placeholder; per-page flush in R2.
             }
             pub fn ignore(self) {}
+        }
+
+        impl<'a> OffsetPageTable<'a> {
+            /// Walk the Sv48 tables and return the physical address.
+            pub fn translate(
+                &self,
+                vaddr: crate::arch::xshim::VirtAddr,
+            ) -> Option<crate::arch::xshim::TranslateResult> {
+                let va = vaddr.as_u64();
+                let indexes = [
+                    ((va >> 39) & 0x1FF) as usize,
+                    ((va >> 30) & 0x1FF) as usize,
+                    ((va >> 21) & 0x1FF) as usize,
+                    ((va >> 12) & 0x1FF) as usize,
+                ];
+                let mut table: u64 = self.l4 as *const PageTable as u64;
+                for (level, idx) in indexes.iter().enumerate() {
+                    if table == 0 {
+                        return None;
+                    }
+                    // SAFETY: table points at a mapped page-table page (HHDM).
+                    let pt = unsafe { &*((table + self.phys_offset) as *const PageTable) };
+                    let pte = &pt[*idx];
+                    if pte.0 & 0x1 == 0 {
+                        return None;
+                    }
+                    // Leaf?
+                    if pte.0 & 0x8 != 0 || level == 3 {
+                        let ppn_base = (pte.0 >> 10) << 12;
+                        let offset_mask = match level {
+                            0 => (1 << 12) - 1,
+                            1 => (1 << 21) - 1,
+                            2 => (1 << 30) - 1,
+                            _ => (1 << 39) - 1,
+                        };
+                        let pa = (ppn_base & !offset_mask) | (va & offset_mask);
+                        return Some(crate::arch::xshim::TranslateResult::Mapped {
+                            frame: crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
+                                crate::arch::xshim::PhysAddr::new(pa),
+                            ),
+                            offset: va & offset_mask,
+                            flags: pte.flags(),
+                        });
+                    }
+                    // Next level pointer
+                    table = ((pte.0 >> 10) << 12) & !0x3FF;
+                }
+                None
+            }
+
+            pub fn translate_addr(
+                &self,
+                vaddr: crate::arch::xshim::VirtAddr,
+            ) -> Option<crate::arch::xshim::PhysAddr> {
+                self.translate(vaddr).map(|r| match r {
+                    crate::arch::xshim::TranslateResult::Mapped { frame, .. } => frame.start_address(),
+                    _ => crate::arch::xshim::PhysAddr::null(),
+                })
+            }
         }
         pub mod mapper {
             pub type TranslateResult = crate::arch::xshim::TranslateResult;
@@ -177,18 +244,15 @@ pub mod structures {
                 _frame: crate::arch::xshim::PhysFrame<S>,
                 _flags: crate::arch::xshim::PageTableFlags,
                 _alloc: &mut dyn FrameAllocator<Size4KiB>,
-            ) -> Result<MapperFlush<S>, ()> {
-                panic!("riscv64 paging not yet implemented (jalon R2)")
+            ) -> Result<MapperFlush<S>, MapToError<S>> {
+                Err(MapToError::FrameAllocationFailed)
             }
             pub unsafe fn update_flags<S: PageSize>(
                 &mut self,
                 _page: Page<S>,
                 _flags: crate::arch::xshim::PageTableFlags,
-            ) -> Result<MapperFlush<S>, ()> {
-                panic!("riscv64 paging not yet implemented (jalon R2)")
-            }
-            pub unsafe fn unmap<S: PageSize>(&mut self, _page: Page<S>) -> Result<(), ()> {
-                panic!("riscv64 paging not yet implemented (jalon R2)")
+            ) -> Result<MapperFlush<S>, MapToError<S>> {
+                Err(MapToError::FrameAllocationFailed)
             }
         }
         pub trait Translate3 {
