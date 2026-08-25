@@ -258,17 +258,29 @@ pub fn enforce_silo_may_grant() -> Result<(), SyscallError> {
     Ok(())
 }
 
-/// Performs the normalize unveil path operation.
+/// Normalise an unveil path: collapse duplicate slashes, reject dot
+/// segments.
+///
+/// `.` and `..` are rejected outright rather than resolved: rule matching
+/// is lexical prefix matching, so a query like `/etc/../secret` would
+/// match an `/etc` rule while the backing filesystem resolves a different
+/// path - a policy bypass waiting for a resolver that handles dot
+/// segments.
 fn normalize_unveil_path(path: &str) -> Result<String, SyscallError> {
     if !path.starts_with('/') {
         return Err(SyscallError::InvalidArgument);
     }
     let mut out = String::new();
     let mut prev_slash = false;
+    let mut cur_segment = String::new();
     for ch in path.chars() {
         if ch == '/' {
             if !prev_slash {
+                if cur_segment == "." || cur_segment == ".." {
+                    return Err(SyscallError::InvalidArgument);
+                }
                 out.push('/');
+                cur_segment.clear();
             }
             prev_slash = true;
             continue;
@@ -277,7 +289,11 @@ fn normalize_unveil_path(path: &str) -> Result<String, SyscallError> {
             return Err(SyscallError::InvalidArgument);
         }
         prev_slash = false;
+        cur_segment.push(ch);
         out.push(ch);
+    }
+    if cur_segment == "." || cur_segment == ".." {
+        return Err(SyscallError::InvalidArgument);
     }
     while out.len() > 1 && out.ends_with('/') {
         out.pop();
