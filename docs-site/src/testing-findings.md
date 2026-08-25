@@ -76,6 +76,13 @@ en userspace. Compilé hors du binaire de test uniquement sous le cfg
 `kernel_l2_host` (posé par `workspace/kernel-l2-tests/.cargo/config.toml`) ;
 production inchangée.
 
+## F11 — La mailbox d'événements N1 est LIFO — ⚠️ épinglé, à arbitrer
+`notify_scheduler`/`poll_scheduler_events` s'appuient sur `IntrusiveMailbox`
+(stack documentée « order is reversed on reception ») : les événements
+arrivent en ordre INVERSE d'émission. Sans gravité pour des événements
+indépendants, mais toute logique future dépendant de l'ordre causal
+(SchedTick avant Wakeup…) héritera de cette inversion. Épinglé AS IMPLEMENTED.
+
 ## Couverture ajoutée (L2 — code kernel réel sur hôte)
 
 | Suite | Tests | Périmètre |
@@ -84,6 +91,9 @@ production inchangée.
 | `kernel-l2-tests/tests/buddy_allocator.rs` | 6 | buddy réel sur mémoire hôte: alignement par ordre, épuisement→OOM propre, zéro après purpose-alloc, stress 2000 ops avec payload tags, tolérance double-free |
 | `kernel-l2-tests/tests/kernel_sync_namespace.rs` | 10 | FixedQueue FIFO/wraparound/overflow, SpinLock réel, namespace bind/unbind/resolve longest-prefix |
 | `kernel-l2-tests/tests/kernel_channels.rs` | 9 | canal MPMC typé (multi-producteurs, disconnect lifecycle), SyncChan registre + drain-first après destroy |
+| `kernel-l2-tests/tests/kernel_n1_semaphores.rs` | 6+2 inline | événements N1 (ordre LIFO épinglé), sémaphores POSIX (comptage, destroy, registre) |
+
+Total porte CI : **335 tests verts**.
 
 Total porte CI : **327 tests verts**.
 

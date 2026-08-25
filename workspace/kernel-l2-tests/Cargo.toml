@@ -11,6 +11,11 @@ license = "GPL-3.0-or-later"
 #
 # See docs-site/src/testing-architecture.md (layer L2).
 
+[lib]
+# Included kernel sources carry doc-examples written against the real kernel
+# crate root; they cannot resolve in the mirror crate.
+doctest = false
+
 [dependencies]
 strat9-abi = { path = "../abi" }
 strat9-syscall = { path = "../components/syscall" }
