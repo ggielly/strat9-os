@@ -28,6 +28,11 @@ use strat9_syscall::{
 
 use crate::BusDriver;
 
+/// Upper bound on simultaneously open handles.
+/// Prevents a single client from exhausting server memory by opening
+/// handles in a loop without closing them (DoS on the scheme server).
+const MAX_OPEN_HANDLES: usize = 256;
+
 const OPCODE_OPEN: u32 = 0x01;
 const OPCODE_READ: u32 = 0x02;
 const OPCODE_WRITE: u32 = 0x03;
@@ -257,6 +262,9 @@ impl BusSchemeServer {
             // Handle id space exhausted.
             None => return Self::err_reply(sender, ENOMEM),
         };
+        if self.handles.len() >= MAX_OPEN_HANDLES {
+            return Self::err_reply(sender, ENOMEM);
+        }
         let is_dir;
         let kind = if path.is_empty() {
             is_dir = true;
