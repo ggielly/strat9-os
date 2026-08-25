@@ -10,28 +10,98 @@ const MAX_POLL_RDY: u32 = 10000;
 
 const COMPATIBLE: &[&str] = &["technologic,ts-nbus"];
 
+/// A single memory-mapped GPIO line of the FPGA GPIO controller that
+/// backs the NBUS bit-banging protocol.
+///
+/// # Register layout
+///
+/// The controller is expected to expose two 32-bit registers relative to
+/// `base`:
+///
+/// - `base + 0x00`: **data** register, bit `offset` drives/reflects the line;
+/// - `base + 0x04`: **direction** register, bit `offset` set = output,
+///   cleared = input.
+///
+/// All accesses are volatile read-modify-write so concurrent lines of the
+/// same controller are preserved.
+///
+/// An unconfigured pin (`base == 0`) reports [`Self::is_configured`] ==
+/// false; transactions that need it are rejected instead of silently
+/// doing nothing.
 pub struct GpioPin {
+    /// Physical base address of the GPIO controller register block.
     pub base: usize,
+    /// Bit index of this line within the controller's 32-bit registers.
     pub offset: u32,
+    /// When true, logical high/low are inverted relative to the electrical level.
     pub active_low: bool,
 }
 
 impl GpioPin {
-    /// Sets high.
-    pub fn set_high(&self) { /* MMIO GPIO set */
+    /// Offset of the data (set/clear via read-modify-write) register.
+    pub const DATA_REG_OFFSET: usize = 0x00;
+    /// Offset of the direction register (bit set = output).
+    pub const DIR_REG_OFFSET: usize = 0x04;
+
+    /// Returns true when this pin points at a real controller (`base != 0`).
+    pub fn is_configured(&self) -> bool {
+        self.base != 0 && self.offset < 32
     }
-    /// Sets low.
-    pub fn set_low(&self) { /* MMIO GPIO clear */
+
+    /// Reads the data register.
+    fn read_data(&self) -> u32 {
+        // SAFETY: callers guarantee `base` is the mapped base of a GPIO
+        // controller register block and `DATA_REG_OFFSET + 4` stays within it.
+        unsafe { core::ptr::read_volatile((self.base + Self::DATA_REG_OFFSET) as *const u32) }
     }
-    /// Returns value.
+
+    /// Writes the data register.
+    fn write_data(&self, val: u32) {
+        // SAFETY: see `read_data`.
+        unsafe { core::ptr::write_volatile((self.base + Self::DATA_REG_OFFSET) as *mut u32, val) }
+    }
+
+    /// Sets or clears bit `offset` of a register via volatile read-modify-write.
+    fn rmw_bit(&self, reg_offset: usize, set: bool) {
+        let addr = (self.base + reg_offset) as *const u32;
+        // SAFETY: see `read_data`; read-modify-write keeps sibling lines intact.
+        let mut val = unsafe { core::ptr::read_volatile(addr) };
+        let mask = 1u32 << self.offset;
+        if set {
+            val |= mask;
+        } else {
+            val &= !mask;
+        }
+        // SAFETY: same mapping, write back the updated word.
+        unsafe { core::ptr::write_volatile(addr as *mut u32, val) };
+    }
+
+    /// Drives the line to its logical-high level.
+    pub fn set_high(&self) {
+        let bit = !self.active_low;
+        self.rmw_bit(Self::DATA_REG_OFFSET, bit);
+    }
+
+    /// Drives the line to its logical-low level.
+    pub fn set_low(&self) {
+        let bit = self.active_low;
+        self.rmw_bit(Self::DATA_REG_OFFSET, bit);
+    }
+
+    /// Samples the current logical level of the line.
     pub fn get_value(&self) -> bool {
-        false
+        let raw = self.read_data() & (1u32 << self.offset) != 0;
+        raw != self.active_low
     }
-    /// Sets direction input.
-    pub fn set_direction_input(&self) { /* configure as input */
+
+    /// Configures the line as input (direction bit cleared).
+    pub fn set_direction_input(&self) {
+        self.rmw_bit(Self::DIR_REG_OFFSET, false);
     }
-    /// Sets direction output.
-    pub fn set_direction_output(&self) { /* configure as output */
+
+    /// Configures the line as output (direction bit set).
+    pub fn set_direction_output(&self) {
+        self.rmw_bit(Self::DIR_REG_OFFSET, true);
     }
 }
 
@@ -44,6 +114,21 @@ pub struct TsNbus {
     rdy: Option<GpioPin>,
     power_state: PowerState,
     children: Vec<BusChild>,
+}
+
+/// Control line of the NBUS protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NbusControlPin {
+    /// Chip select.
+    Csn,
+    /// TX/RX direction selector.
+    TxRx,
+    /// Strobe.
+    Strobe,
+    /// Address latch enable.
+    Ale,
+    /// Ready (input).
+    Rdy,
 }
 
 impl TsNbus {
@@ -59,6 +144,46 @@ impl TsNbus {
             power_state: PowerState::Off,
             children: Vec::new(),
         }
+    }
+
+    /// Wires one of the 8 data lines (`index` 0..8) to a GPIO pin.
+    /// Returns [`BusError::InvalidArgument`] when `index >= 8`.
+    pub fn set_data_pin(&mut self, index: usize, pin: GpioPin) -> Result<(), BusError> {
+        if index >= 8 {
+            return Err(BusError::InvalidArgument);
+        }
+        self.data_pins[index] = Some(pin);
+        Ok(())
+    }
+
+    /// Wires a control line to a GPIO pin.
+    pub fn set_control_pin(&mut self, which: NbusControlPin, pin: GpioPin) {
+        let slot = match which {
+            NbusControlPin::Csn => &mut self.csn,
+            NbusControlPin::TxRx => &mut self.txrx,
+            NbusControlPin::Strobe => &mut self.strobe,
+            NbusControlPin::Ale => &mut self.ale,
+            NbusControlPin::Rdy => &mut self.rdy,
+        };
+        *slot = Some(pin);
+    }
+
+    /// Verifies that every pin required by the bit-banging protocol is
+    /// configured, so transactions fail loudly instead of silently no-op'ing.
+    fn validate_pins(&self) -> Result<(), BusError> {
+        for (i, p) in self.data_pins.iter().enumerate() {
+            match p {
+                Some(p) if p.is_configured() => {}
+                _ => return Err(BusError::InvalidArgument),
+            }
+        }
+        for p in [&self.csn, &self.txrx, &self.strobe, &self.ale, &self.rdy] {
+            match p {
+                Some(p) if p.is_configured() => {}
+                _ => return Err(BusError::InvalidArgument),
+            }
+        }
+        Ok(())
     }
 
     /// Sets data direction.
@@ -247,6 +372,7 @@ impl BusDriver for TsNbus {
 
     /// Performs the init operation.
     fn init(&mut self, _base: usize) -> Result<(), BusError> {
+        self.validate_pins()?;
         self.reset_bus();
         self.power_state = PowerState::On;
         Ok(())
