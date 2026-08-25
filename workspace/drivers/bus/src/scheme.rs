@@ -62,6 +62,13 @@ enum HandleKind {
 
 struct OpenHandle {
     kind: HandleKind,
+    /// PID/TID of the process that opened this handle.
+    ///
+    /// All subsequent operations on the handle must come from the same
+    /// sender; any other sender gets `EBADF`. Without this check, any
+    /// process that guesses a `file_id` could read driver registers or
+    /// write PCI config across processes.
+    owner: u64,
 }
 
 // === Server ================================================================
@@ -246,7 +253,7 @@ impl BusSchemeServer {
             return Self::err_reply(sender, ENOENT);
         };
 
-        self.handles.insert(file_id, OpenHandle { kind });
+        self.handles.insert(file_id, OpenHandle { kind, owner: sender });
 
         let mut reply = Self::ok_reply(sender);
         reply.payload[4..12].copy_from_slice(&file_id.to_le_bytes());
@@ -263,8 +270,8 @@ impl BusSchemeServer {
         let offset = u64::from_le_bytes(payload[8..16].try_into().unwrap());
 
         let handle = match self.handles.get(&file_id) {
-            Some(h) => h,
-            None => return Self::err_reply(sender, EBADF),
+            Some(h) if h.owner == sender => h,
+            _ => return Self::err_reply(sender, EBADF),
         };
 
         let content = self.generate_read_content(&handle.kind, offset as usize);
@@ -428,8 +435,8 @@ impl BusSchemeServer {
         let len = u16::from_le_bytes([payload[16], payload[17]]) as usize;
 
         let kind = match self.handles.get(&file_id) {
-            Some(h) => &h.kind,
-            None => return Self::err_reply(sender, EBADF),
+            Some(h) if h.owner == sender => &h.kind,
+            _ => return Self::err_reply(sender, EBADF),
         };
 
         if len > 30 {
@@ -501,7 +508,11 @@ impl BusSchemeServer {
 
     fn handle_close(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let file_id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
-        if self.handles.remove(&file_id).is_some() {
+        // Only the owner may close its own handle; a foreign close attempt
+        // must not destroy another client's handle.
+        if matches!(self.handles.get(&file_id), Some(h) if h.owner == sender)
+            && self.handles.remove(&file_id).is_some()
+        {
             Self::ok_reply(sender)
         } else {
             Self::err_reply(sender, EBADF)
@@ -513,8 +524,8 @@ impl BusSchemeServer {
     fn handle_readdir(&self, sender: u64, payload: &[u8]) -> IpcMessage {
         let file_id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
         let handle = match self.handles.get(&file_id) {
-            Some(h) => h,
-            None => return Self::err_reply(sender, EBADF),
+            Some(h) if h.owner == sender => h,
+            _ => return Self::err_reply(sender, EBADF),
         };
 
         let entries: Vec<(u64, u8, String)> = match &handle.kind {
