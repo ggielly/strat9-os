@@ -163,7 +163,7 @@ fn read_local_ip<'a>(out: &'a mut [u8; 64]) -> Option<&'a str> {
         return None;
     }
     let ip = core::str::from_utf8(&out[..end]).ok()?;
-    if parse_ipv4_literal(ip) {
+    if parse_ipv4_literal(ip).is_some() {
         Some(ip)
     } else {
         None
