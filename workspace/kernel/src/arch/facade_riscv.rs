@@ -328,6 +328,12 @@ pub mod pci_full {
         pub const INTERRUPT_DISABLE: u16 = 0x400;
     }
     impl PciDevice {
+        pub fn read_config_u8(&self, _off: u8) -> u8 { 0xFF }
+        pub fn read_config_u16(&self, _off: u8) -> u16 { 0xFFFF }
+        pub fn read_config_u32(&self, _off: u8) -> u32 { 0xFFFF_FFFF }
+        pub fn write_config_u8(&self, _off: u8, _v: u8) {}
+        pub fn write_config_u16(&self, _off: u8, _v: u16) {}
+        pub fn write_config_u32(&self, _off: u8, _v: u32) {}
         pub fn read_bar(&self, _idx: u8) -> Option<Bar> {
             None
         }
