@@ -80,6 +80,10 @@ pub(crate) struct NetworkStrate {
     pub(crate) dns_from_dhcp: bool,
     pub(crate) link_local_addr: Ipv6Address,
     pub(crate) open_handles: BTreeMap<u64, OpenedFile>,
+    /// fid -> sender that opened it. See `new_fid` / `is_owner`:
+    /// sequential fids are guessable, so every operation must be checked
+    /// against the opener's identity.
+    pub(crate) handle_owners: BTreeMap<u64, u64>,
     pub(crate) tcp_listeners: BTreeMap<u64, TcpListenerState>,
     pub(crate) tcp_connections: BTreeMap<u64, TcpConnState>,
     pub(crate) udp_bound: BTreeMap<u64, UdpBoundState>,
@@ -135,6 +139,7 @@ impl NetworkStrate {
             dns_from_dhcp: false,
             link_local_addr: link_local,
             open_handles: BTreeMap::new(),
+            handle_owners: BTreeMap::new(),
             tcp_listeners: BTreeMap::new(),
             tcp_connections: BTreeMap::new(),
             udp_bound: BTreeMap::new(),
@@ -285,5 +290,29 @@ impl NetworkStrate {
         let id = self.next_fid;
         self.next_fid += 1;
         id
+    }
+
+    /// Allocate the next fid and record its owner (the sender that opened
+    /// it).
+    ///
+    /// Fids are small sequential integers, trivially guessable: without
+    /// this ownership record, any process could read another process's TCP
+    /// connection, hijack its UDP socket or reconfigure the IP stack by
+    /// issuing operations on a guessed fid.
+    pub(crate) fn new_fid(&mut self, owner: u64) -> u64 {
+        let id = self.alloc_fid();
+        self.handle_owners.insert(id, owner);
+        id
+    }
+
+    /// True when `sender` opened `fid`. Unknown fids belong to nobody:
+    /// every sender gets EBADF for them.
+    pub(crate) fn is_owner(&self, fid: u64, sender: u64) -> bool {
+        self.handle_owners.get(&fid) == Some(&sender)
+    }
+
+    /// Drop the ownership record of a closed fid.
+    pub(crate) fn forget_handle(&mut self, fid: u64) {
+        self.handle_owners.remove(&fid);
     }
 }
