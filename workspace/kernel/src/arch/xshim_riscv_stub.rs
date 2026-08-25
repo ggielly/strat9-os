@@ -23,17 +23,21 @@ pub mod registers {
 }
 pub mod instructions {
     pub mod port {
-        // Typed port handles (riscv has no port I/O; these exist purely so
-        // x86-only driver code typechecks and never runs).
-        pub struct Port8; pub struct Port16; pub struct Port32;
+        // Sealed value trait: which widths a port can transfer.
+        pub trait PortValue: Copy {
+            fn zero() -> Self;
+            fn max() -> Self;
+        }
+        impl PortValue for u8 { fn zero() -> Self { 0xFF } fn max() -> Self { 0xFF } }
+        impl PortValue for u16 { fn zero() -> Self { 0xFFFF } fn max() -> Self { 0xFFFF } }
+        impl PortValue for u32 { fn zero() -> Self { 0xFFFF_FFFF } fn max() -> Self { 0xFFFF_FFFF } }
 
         pub struct Port<T>(core::marker::PhantomData<T>);
-        impl<T> Port<T> {
+        impl<T: PortValue> Port<T> {
             pub fn new(_addr: u16) -> Self { panic!("port I/O on riscv64") }
+            pub fn read(&mut self) -> T { panic!("port in on riscv64") }
+            pub fn write(&mut self, _v: T) {}
         }
-        impl Port<u8> { pub fn read(&mut self) -> u8 { 0xFF } pub fn write(&mut self, _v: u8) {} }
-        impl Port<u16> { pub fn read(&mut self) -> u16 { 0xFFFF } pub fn write(&mut self, _v: u16) {} }
-        impl Port<u32> { pub fn read(&mut self) -> u32 { 0xFFFF_FFFF } pub fn write(&mut self, _v: u32) {} }
     }
     pub mod hlt {
         pub fn hlt() {}
