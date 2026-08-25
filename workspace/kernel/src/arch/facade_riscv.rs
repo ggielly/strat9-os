@@ -17,6 +17,16 @@ pub const MAX_CPUS: usize = 32;
 /// Merged VGA surface for riscv64: backend stubs + canvas.
 pub mod vga {
     pub use crate::arch::riscv64::vga::*;
+    // UI widget types (no-op surface for riscv64 serial console)
+    pub enum DockEdge { Left, Right, Top, Bottom }
+    pub struct UiRect;
+    pub struct UiLabel;
+    pub struct UiPanel;
+    pub struct UiTable;
+    pub struct UiProgressBar;
+    pub struct UiDockLayout;
+    pub struct TerminalWidget;
+
     pub use crate::arch::riscv64::vga_canvas::Canvas;
 }
 

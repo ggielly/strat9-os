@@ -64,52 +64,52 @@ impl Ports {
     /// Performs the read8 operation.
     #[inline]
     fn read8(&self, offset: u16) -> u8 {
-        unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).read() }
+        unsafe { crate::x86_crate_shim::instructions::port::Port::new(self.io_base + offset).read() }
     }
 
     /// Performs the write8 operation.
     #[inline]
     #[allow(dead_code)]
     fn write8(&mut self, offset: u16, value: u8) {
-        unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).write(value) }
+        unsafe { crate::x86_crate_shim::instructions::port::Port::new(self.io_base + offset).write(value) }
     }
 
     /// Performs the read32 operation.
     #[inline]
     fn read32(&self, offset: u16) -> u32 {
-        unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).read() }
+        unsafe { crate::x86_crate_shim::instructions::port::Port::new(self.io_base + offset).read() }
     }
 
     /// Performs the write32 operation.
     #[inline]
     #[allow(dead_code)]
     fn write32(&mut self, offset: u16, value: u32) {
-        unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).write(value) }
+        unsafe { crate::x86_crate_shim::instructions::port::Port::new(self.io_base + offset).write(value) }
     }
 
     /// Writes rap.
     fn write_rap(&mut self, val: u32) {
-        unsafe { x86_64::instructions::port::Port::new(self.io_base + 0x14).write(val) }
+        unsafe { crate::x86_crate_shim::instructions::port::Port::new(self.io_base + 0x14).write(val) }
     }
 
     /// Reads rdp.
     fn read_rdp(&self) -> u32 {
-        unsafe { x86_64::instructions::port::Port::new(self.io_base + 0x10).read() }
+        unsafe { crate::x86_crate_shim::instructions::port::Port::new(self.io_base + 0x10).read() }
     }
 
     /// Writes rdp.
     fn write_rdp(&mut self, val: u32) {
-        unsafe { x86_64::instructions::port::Port::new(self.io_base + 0x10).write(val) }
+        unsafe { crate::x86_crate_shim::instructions::port::Port::new(self.io_base + 0x10).write(val) }
     }
 
     /// Reads bdp.
     fn read_bdp(&self) -> u32 {
-        unsafe { x86_64::instructions::port::Port::new(self.io_base + 0x1C).read() }
+        unsafe { crate::x86_crate_shim::instructions::port::Port::new(self.io_base + 0x1C).read() }
     }
 
     /// Writes bdp.
     fn write_bdp(&mut self, val: u32) {
-        unsafe { x86_64::instructions::port::Port::new(self.io_base + 0x1C).write(val) }
+        unsafe { crate::x86_crate_shim::instructions::port::Port::new(self.io_base + 0x1C).write(val) }
     }
 
     /// Reads csr.
