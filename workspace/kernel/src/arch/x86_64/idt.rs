@@ -1861,7 +1861,6 @@ extern "x86-interrupt" fn lapic_timer_handler(stack_frame: InterruptStackFrame) 
     // to the UART. At 115200 baud each byte takes ~87 µs; a 60-char message is
     // ~5 ms of IRQs-off time : long enough to miss ticks and corrupt scheduling.
     // Keep serial output out of the hot IRQ path; use e9 port (µs-range) instead.
-    unsafe { core::arch::asm!("mov al, '0'; out 0xe9, al", out("al") _) };
     crate::process::scheduler::timer_tick();
     unsafe { core::arch::asm!("mov al, '1'; out 0xe9, al", out("al") _) };
     super::apic::eoi();
@@ -1878,7 +1877,6 @@ extern "x86-interrupt" fn lapic_timer_handler(stack_frame: InterruptStackFrame) 
     // The scheduler will consume the hint on a safe path.
     if (cs & 3) == 3 {
         crate::process::scheduler::request_force_resched_hint(cpu);
-        unsafe { core::arch::asm!("mov al, 'P'; out 0xe9, al", out("al") _) };
     } else {
         crate::process::scheduler::maybe_preempt();
     }
