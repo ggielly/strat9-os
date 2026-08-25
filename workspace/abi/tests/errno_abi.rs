@@ -54,7 +54,7 @@ fn errno_values_match_linux() {
     assert_eq!(errno::ENOSYS, 38);
     assert_eq!(errno::ENOTEMPTY, 39);
     assert_eq!(errno::ELOOP, 40);
-    assert_eq!(errno::ENOTSUP, 52); // NOTE: Linux uses EOPNOTSUPP=95; ENOTSUP=52 is NOT Linux-compatible — see open question
+    assert_eq!(errno::ENOTSUP, 95); // F6 FIXED: now == Linux EOPNOTSUPP (was wrongly 52)
     assert_eq!(errno::EAFNOSUPPORT, 97);
     assert_eq!(errno::EADDRINUSE, 98);
     assert_eq!(errno::ENOBUFS, 105);

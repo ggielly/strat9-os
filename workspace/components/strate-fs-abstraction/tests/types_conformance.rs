@@ -183,21 +183,14 @@ mod capabilities {
     #[test]
     fn fs_profiles_max_sizes_are_pinned() {
         const TIB: u64 = 1 << 40;
-        const PIB: u64 = 1 << 50;
         const EIB: u64 = 1 << 60;
 
         assert_eq!(FsCapabilities::ext4().max_file_size, 16 * TIB);
-        // FINDING (see testing report): capabilities.rs comments claim
-        // "8 EiB" (XFS) and "16 EiB" (btrfs) but the literal chains contain
-        // only FIVE factors of 1024 -> the actual values are 8 PiB and
-        // 16 PiB. Values pinned AS IMPLEMENTED; fix the comments or the
-        // arithmetic together with an explicit decision.
-        assert_eq!(FsCapabilities::xfs().max_file_size, 8 * PIB);
-        assert_eq!(FsCapabilities::btrfs().max_file_size, 16 * PIB);
-        // Sanity: those differ from what the comments promise.
-        assert_ne!(FsCapabilities::xfs().max_file_size, 8 * EIB);
-        // (16 EiB does not even fit in u64 — itself evidence that the
-        // comment, not the code, is wrong.)
+        // F3 FIXED: XFS is now really 8 EiB (was wrongly 8 PiB); btrfs
+        // clamps to u64::MAX because its theoretical 16 EiB (2^64) does
+        // not fit in u64.
+        assert_eq!(FsCapabilities::xfs().max_file_size, 8 * EIB);
+        assert_eq!(FsCapabilities::btrfs().max_file_size, u64::MAX);
         assert_eq!(FsCapabilities::read_only_linux().max_file_size, i64::MAX as u64);
     }
 

@@ -42,7 +42,7 @@
 //! assert_eq!(reply.status, 0); // success
 //! ```
 
-use zerocopy::{FromBytes, Immutable, IntoBytes};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use crate::ipc_codec::InlineBlobHeader;
 
@@ -88,7 +88,7 @@ pub const OPCODE_READDIR: u32 = 0x08;
 /// let err = StatusReply { status: 13 };  // EACCES
 /// ```
 #[repr(C)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct StatusReply {
     /// Status code: 0 = success, non-zero = errno.
     pub status: u32,
@@ -167,7 +167,7 @@ impl OpenRequest {
 /// };
 /// ```
 #[repr(C)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct OpenReply {
     /// Status code: 0 = success.
     pub status: u32,
@@ -188,7 +188,7 @@ static_assertions::assert_eq_size!(OpenReply, [u8; 32]);
 /// Wire layout:
 ///   `ino @ 0..8`, `offset @ 8..16`, `count @ 16..20`, `_pad @ 20..24`.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct ReadRequest {
     /// Inode number of the file to read.
     pub ino: u64,
@@ -208,7 +208,7 @@ static_assertions::assert_eq_size!(ReadRequest, [u8; 24]);
 ///
 /// The `data` field contains `count` bytes of file content.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct ReadReply {
     /// Status code: 0 = success.
     pub status: u32,
@@ -270,7 +270,7 @@ impl WriteRequest {
 ///
 /// Wire layout: `status @ 0..4`, `written @ 4..8`.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct WriteReply {
     /// Status code: 0 = success.
     pub status: u32,
@@ -287,7 +287,7 @@ assert_payload_size!(WriteReply);
 /// The `mode` field specifies permissions (e.g. `0o755` for directories).
 /// The path is variable-length and follows the header at offset 8.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct CreateRequest {
     /// Permission mode (e.g. `0o644` for files, `0o755` for directories).
     pub mode: u32,
@@ -301,7 +301,7 @@ assert_payload_size!(CreateRequest);
 /// Wire layout:
 ///   `status @ 0..4`, `_pad @ 4..8`, `ino @ 8..16`.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct CreateReply {
     /// Status code: 0 = success.
     pub status: u32,
@@ -316,7 +316,7 @@ static_assertions::assert_eq_size!(CreateReply, [u8; 16]);
 ///
 /// Wire layout: `ino @ 0..8`.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct CloseRequest {
     /// Inode number of the file to close.
     pub ino: u64,
@@ -327,7 +327,7 @@ assert_payload_size!(CloseRequest);
 ///
 /// Wire layout: `ino @ 0..8`.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct StatRequest {
     /// Inode number to query.
     pub ino: u64,
@@ -338,7 +338,7 @@ assert_payload_size!(StatRequest);
 ///
 /// Wire layout: `ino @ 0..8`, `offset @ 8..16`, `whence @ 16..20`, `_pad @ 20..24`.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct LseekRequest {
     /// Inode number of the file.
     pub ino: u64,
@@ -356,7 +356,7 @@ static_assertions::assert_eq_size!(LseekRequest, [u8; 24]);
 /// Wire layout:
 ///   `status @ 0..4`, `_pad @ 4..8`, `offset @ 8..16`.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct LseekReply {
     /// Status code: 0 = success.
     pub status: u32,
@@ -380,7 +380,7 @@ static_assertions::assert_eq_size!(LseekReply, [u8; 16]);
 /// For IPv4: 4 bytes of network-order octets.
 /// For IPv6: 16 bytes of network-order octets.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct TcpConnectRequest {
     /// Target port number (host byte order).
     pub port: u16,
@@ -395,7 +395,7 @@ assert_payload_size!(TcpConnectRequest);
 /// Wire layout:
 ///   `status @ 0..4`, `_pad @ 4..8`, `conn_id @ 8..16`.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct TcpConnectReply {
     /// Status code: 0 = success.
     pub status: u32,

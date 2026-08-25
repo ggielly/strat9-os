@@ -23,6 +23,13 @@ See:
 - [syscall numbers](./api/strat9_abi/syscall/index.html)
 - [ABI data structs](./api/strat9_abi/data/index.html)
 
+## Manual entries
+
+- 2026-08-25 **BREAKING-ish**: `ENOTSUP` renumbered 52 → 95 to align with
+  Linux x86_64 (`EOPNOTSUPP`/`ENOTSUP` = 95), guaranteeing 1:1 mapping for
+  musl/relibc shims. Any persisted wire value using 52 must be migrated.
+  Found by the anti-regression suite (testing-findings.md F6).
+
 ## Recent ABI updates (auto-generated)
 
 - 2026-07-17 [`fe68f9a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/fe68f9aacb1b70b8601cbdde1423be75628255d1) fix(vfs,console,scheduler): VFS improvements, console perf, panic backtrace

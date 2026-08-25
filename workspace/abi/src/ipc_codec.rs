@@ -288,7 +288,7 @@ pub fn decode_fixed<T: FromBytes + Immutable + KnownLayout>(msg: &IpcMessage) ->
 /// assert_eq!(hdr.len, 11); // "/etc/passwd".len()
 /// assert_eq!(hdr.kind, 0);
 /// ```
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 #[repr(C)]
 pub struct InlineBlobHeader {
     /// Number of data bytes following this header.
