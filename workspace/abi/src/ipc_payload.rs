@@ -4,6 +4,10 @@
 //! enabling safe zero-cost cast to/from [`IpcMessage`] payloads via
 //! [`encode_fixed`] / [`decode_fixed`].
 //!
+//! This module also defines the shared VFS scheme opcodes (`OPCODE_*`) used
+//! as `msg_type` values on the wire: scheme servers must import them from
+//! here instead of redeclaring local copies.
+//!
 //! # Conventions
 //!
 //! - All sizes are ≤ 48 bytes (the payload capacity).
@@ -48,6 +52,21 @@ macro_rules! assert_payload_size {
         static_assertions::const_assert!(core::mem::size_of::<$ty>() <= 48);
     };
 }
+
+// ===========================================================================
+// VFS scheme protocol : message types and flags
+// ===========================================================================
+
+/// Wire `msg_type` for an open request.
+pub const OPCODE_OPEN: u32 = 0x01;
+/// Wire `msg_type` for a read request.
+pub const OPCODE_READ: u32 = 0x02;
+/// Wire `msg_type` for a write request.
+pub const OPCODE_WRITE: u32 = 0x03;
+/// Wire `msg_type` for a close request.
+pub const OPCODE_CLOSE: u32 = 0x04;
+/// Wire `msg_type` for a readdir request.
+pub const OPCODE_READDIR: u32 = 0x08;
 
 // ===========================================================================
 // Generic status-only reply (used by every scheme)

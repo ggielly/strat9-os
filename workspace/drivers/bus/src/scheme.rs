@@ -20,8 +20,9 @@ use alloc::{boxed::Box, collections::BTreeMap, format, string::String, vec::Vec}
 use strat9_syscall::{
     call,
     data::{
-        DT_DIR, DT_REG, IpcMessage, PCI_MATCH_DEVICE_ID, PCI_MATCH_VENDOR_ID, PciAddress,
-        PciDeviceInfo, PciProbeCriteria,
+        DT_DIR, DT_REG, IpcMessage, IPC_FILE_FLAG_DIRECTORY, OPCODE_CLOSE, OPCODE_OPEN,
+        OPCODE_READ, OPCODE_READDIR, OPCODE_WRITE, PCI_MATCH_DEVICE_ID, PCI_MATCH_VENDOR_ID,
+        PciAddress, PciDeviceInfo, PciProbeCriteria,
     },
     error::{EBADF, EINVAL, EIO, ENOMEM, ENOENT, ENOSYS, ENOTDIR},
 };
@@ -33,14 +34,10 @@ use crate::BusDriver;
 /// handles in a loop without closing them (DoS on the scheme server).
 const MAX_OPEN_HANDLES: usize = 256;
 
-const OPCODE_OPEN: u32 = 0x01;
-const OPCODE_READ: u32 = 0x02;
-const OPCODE_WRITE: u32 = 0x03;
-const OPCODE_CLOSE: u32 = 0x04;
-const OPCODE_READDIR: u32 = 0x08;
-// Reply message type: see `IpcMessage::REPLY_MSG_TYPE` in strat9-abi.
+// VFS scheme opcodes (OPCODE_*) are re-exported from strat9-abi via
+// strat9-syscall: the wire contract must have a single source of truth,
+// not per-server copies. Reply type: see `IpcMessage::REPLY_MSG_TYPE`.
 const STATUS_OK: u32 = 0;
-const FILEFLAG_DIRECTORY: u32 = 1;
 
 /// Fixed reply prologue of a READ reply: `status` (4) + `count` (4).
 const READ_HEADER_SIZE: usize = 8;
@@ -304,8 +301,9 @@ impl BusSchemeServer {
         let mut reply = Self::ok_reply(sender);
         reply.payload[4..12].copy_from_slice(&file_id.to_le_bytes());
         reply.payload[12..20].copy_from_slice(&0u64.to_le_bytes());
-        reply.payload[20..24]
-            .copy_from_slice(&(if is_dir { FILEFLAG_DIRECTORY } else { 0 }).to_le_bytes());
+        reply.payload[20..24].copy_from_slice(
+            &(if is_dir { IPC_FILE_FLAG_DIRECTORY } else { 0 }).to_le_bytes(),
+        );
         reply
     }
 
