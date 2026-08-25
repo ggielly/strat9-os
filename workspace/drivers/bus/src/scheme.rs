@@ -599,7 +599,8 @@ impl BusSchemeServer {
         for (ino, file_type, name) in &entries[cursor..] {
             let name_bytes = name.as_bytes();
             let entry_size = 10 + name_bytes.len();
-            if offset + entry_size > 48 {
+            // Fill the whole payload (entries start at offset 8).
+            if offset + entry_size > IpcMessage::PAYLOAD_CAPACITY {
                 next_cursor = index.min(u16::MAX as usize) as u16;
                 break;
             }
@@ -609,13 +610,15 @@ impl BusSchemeServer {
             let end = offset + 10 + name_bytes.len();
             reply.payload[offset + 10..end].copy_from_slice(name_bytes);
             offset = end;
+            // With a 240-byte payload and >= 10 bytes per entry, count can
+            // never exceed 24: the u8 field cannot overflow.
             count += 1;
             index += 1;
         }
 
         reply.payload[4..6].copy_from_slice(&next_cursor.to_le_bytes());
         reply.payload[6] = count;
-        reply.payload[7] = (offset - 8) as u8;
+        reply.payload[7] = (offset - READDIR_HEADER_SIZE) as u8;
         reply
     }
 
