@@ -825,26 +825,7 @@ impl SiloManager {
 
     /// Maps task.
     fn map_task(&mut self, task_id: TaskId, silo_id: u32) {
-        crate::serial_println!(
-            "[trace][silo] map_task enter tid={} sid={} len={}",
-            task_id.as_u64(),
-            silo_id,
-            self.task_to_silo.len()
-        );
-        let existed = self.task_to_silo.contains_key(&task_id);
-        crate::serial_println!(
-            "[trace][silo] map_task before insert tid={} sid={} existed={}",
-            task_id.as_u64(),
-            silo_id,
-            existed
-        );
         self.task_to_silo.insert(task_id, silo_id);
-        crate::serial_println!(
-            "[trace][silo] map_task after insert tid={} sid={} len={}",
-            task_id.as_u64(),
-            silo_id,
-            self.task_to_silo.len()
-        );
     }
 
     /// Unmaps task.
@@ -1713,37 +1694,14 @@ pub fn kernel_rename_silo_label(selector: &str, new_label: &str) -> Result<u32, 
 
 /// Performs the register boot strate task operation.
 pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, SyscallError> {
-    crate::serial_println!(
-        "[trace][silo] register_boot_strate_task enter tid={} label={}",
-        task_id.as_u64(),
-        label
-    );
     BOOT_REG_IN_PROGRESS.store(true, Ordering::Relaxed);
     let result = (|| -> Result<u32, SyscallError> {
         let sanitized = sanitize_label(label);
         let mgr = SILO_MANAGER.lock();
-        crate::serial_println!(
-            "[trace][silo] register_boot_strate_task lock acquired tid={}",
-            task_id.as_u64()
-        );
-        crate::serial_println!(
-            "[trace][silo] register_boot_strate_task before sid scan tid={}",
-            task_id.as_u64()
-        );
         let mut sid = 1u32;
         while mgr.silos.contains_key(&sid) {
             sid = sid.checked_add(1).ok_or(SyscallError::OutOfMemory)?;
         }
-        crate::serial_println!(
-            "[trace][silo] register_boot_strate_task sid selected tid={} sid={}",
-            task_id.as_u64(),
-            sid
-        );
-        crate::serial_println!(
-            "[trace][silo] register_boot_strate_task before label uniqueness tid={} label={}",
-            task_id.as_u64(),
-            sanitized.as_str()
-        );
         if mgr
             .silos
             .values()
@@ -1794,11 +1752,6 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
         {
             return Err(SyscallError::AlreadyExists);
         }
-        crate::serial_println!(
-            "[trace][silo] register_boot_strate_task before silo insert tid={} sid={}",
-            task_id.as_u64(),
-            id.sid
-        );
         mgr.silos.insert(id.sid, Box::new(silo));
         drop(mgr);
         Ok(id.sid)
