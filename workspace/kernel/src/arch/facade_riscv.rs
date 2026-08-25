@@ -296,6 +296,7 @@ pub mod pci_full {
         pub const MASS_STORAGE: u8 = 0x01;
     }
     pub mod config {
+        use super::PciAddress;
         pub const BAR0: u8 = 0x10;
         pub const COMMAND: u8 = 0x04;
         pub const INTERRUPT_LINE: u8 = 0x3C;

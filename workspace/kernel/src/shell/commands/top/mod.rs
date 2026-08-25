@@ -375,6 +375,7 @@ fn scheduler_runtime_lines(
 }
 
 /// Top command main loop
+#[cfg(target_arch = "x86_64")]
 pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
     if !vga::is_available() {
         shell_println!("Error: 'top' requires a graphical framebuffer console.");
@@ -661,3 +662,11 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
     shell_println!("Top exited.");
     Ok(())
 }
+
+/// Serial-only fallback for `top` on non-x86 targets (R6: full TUI via virtio).
+#[cfg(not(target_arch = "x86_64"))]
+pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
+    shell_println!("top: TUI requires a framebuffer console (not available yet)");
+    Ok(())
+}
+
