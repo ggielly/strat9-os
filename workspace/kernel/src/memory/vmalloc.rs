@@ -62,7 +62,7 @@ use core::{
     ptr,
     sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
 };
-use crate::arch::xshim::{PageTableFlags, PhysFrame as X86PhysFrame};
+use crate::arch::xshim::{PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB};
 use crate::x86_crate_shim::structures::paging::Page;
 use crate::arch::xshim::VirtAddr;
 
@@ -633,7 +633,7 @@ fn ensure_kernel_subtree_ready(token: &IrqDisabledToken) {
     };
 
     let page = Page::containing_address(VirtAddr::new(VMALLOC_VIRT_START));
-    let x86_frame = X86PhysFrame::containing_address(frame.start_address);
+    let x86_frame = X86PhysFrame::<Size4KiB>::containing_address(frame.start_address);
     let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
 
     if map_page_kernel(page, x86_frame, flags).is_ok() {
@@ -825,7 +825,7 @@ pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, 
             let frame = frames.get(i);
             let page_virt = virt_base + (i as u64 * 4096);
             let page = Page::containing_address(VirtAddr::new(page_virt));
-            let x86_frame = X86PhysFrame::containing_address(frame.start_address);
+            let x86_frame = X86PhysFrame::<Size4KiB>::containing_address(frame.start_address);
             if map_page_kernel(page, x86_frame, page_flags).is_err() {
                 for j in 0..i {
                     let pv = virt_base + (j as u64 * 4096);

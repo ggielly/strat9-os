@@ -376,7 +376,7 @@ pub fn kernel_l4_phys() -> PhysAddr {
 pub fn ensure_identity_map(phys_addr: u64) {
     let virt_addr = crate::memory::phys_to_virt(phys_addr);
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt_addr));
-    let frame = X86PhysFrame::containing_address(PhysAddr::new(phys_addr));
+    let frame = X86PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(phys_addr));
 
     if translate(VirtAddr::new(virt_addr)).is_none() {
         log::debug!(
@@ -425,7 +425,7 @@ pub fn ensure_identity_map_range(phys_base: u64, size: u64) {
         // Only map if not already present.
         if mapper.translate_addr(virt).is_none() {
             let page = Page::<Size4KiB>::containing_address(virt);
-            let frame = X86PhysFrame::containing_address(PhysAddr::new(p));
+            let frame = X86PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(p));
             // SAFETY: frame is a valid physical page; mapper uses HHDM offset.
             match unsafe { mapper.map_to(page, frame, flags, &mut allocator) } {
                 Ok(flush) => {
