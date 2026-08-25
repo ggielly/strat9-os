@@ -182,12 +182,12 @@ pub mod mouse_ready_marker {}
 
 pub mod keyboard {
     pub fn inject_hid_scancode(_sc: u8) {}
-    pub const KEY_LEFT: &str = "\x1b[D";
-    pub const KEY_RIGHT: &str = "\x1b[C";
-    pub const KEY_UP: &str = "\x1b[A";
-    pub const KEY_DOWN: &str = "\x1b[B";
-    pub const KEY_HOME: &str = "\u{1b}[H";
-    pub const KEY_END: &str = "\u{1b}[F";
+    pub const KEY_LEFT: u8 = 0x82;
+    pub const KEY_RIGHT: u8 = 0x83;
+    pub const KEY_UP: u8 = 0x80;
+    pub const KEY_DOWN: u8 = 0x81;
+    pub const KEY_HOME: u8 = 0x84;
+    pub const KEY_END: u8 = 0x85;
     pub fn init() {}
     pub fn read_char() -> Option<u8> {
         crate::arch::serial::getc()
@@ -200,7 +200,17 @@ pub mod mouse {
         core::sync::atomic::AtomicBool::new(false);
     pub fn init() -> bool { false }
     pub fn handle_irq() {}
-    pub fn read_event() -> Option<(i32, i32, u8)> { None }
+    pub struct MouseEvent {
+        pub dx: i16,
+        pub dy: i16,
+        pub dz: i8,
+        pub left: bool,
+        pub right: bool,
+        pub middle: bool,
+    }
+    pub fn read_event() -> Option<MouseEvent> {
+        None
+    }
     pub fn mouse_pos() -> (usize, usize) { (0, 0) }
     pub fn update_mouse_cursor(_x: usize, _y: usize) {}
     pub fn push_event_from_hid(_dx: i32, _dy: i32, _buttons: u8) {}
