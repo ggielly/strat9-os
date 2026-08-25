@@ -36,7 +36,7 @@
 //! };
 //! ```
 
-use zerocopy::{FromBytes, IntoBytes};
+use zerocopy::{FromBytes, IntoBytes, Immutable};
 
 /// Magic number for IPC handshake (`"IPC9"` in ASCII).
 ///
@@ -61,7 +61,7 @@ pub const IPC_PROTOCOL_VERSION: u16 = 1;
 /// - `client_abi_major/minor`: client's ABI version
 /// - `nonce`: random value for connection identification (optional)
 /// - `flags`: reserved for future use (must be 0)
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
 #[repr(C)]
 pub struct IpcHandshake {
     /// Magic number (`"IPC9"`).
@@ -131,7 +131,7 @@ impl IpcHandshake {
 /// - `status`: result code (`IPC_HANDSHAKE_OK`, `_VERSION_MISMATCH`, or `_REJECTED`)
 /// - `server_abi_major/minor`: server's ABI version
 /// - `flags`: reserved for future use
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
 #[repr(C)]
 pub struct IpcHandshakeReply {
     /// Echo of the handshake magic.

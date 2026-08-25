@@ -21,16 +21,21 @@ pub const O_APPEND: u32 = 0o002000;
 /// Non-blocking mode
 pub const O_NONBLOCK: u32 = 0o004000;
 /// Don't follow symbolic links
-pub const O_NOFOLLOW: u32 = 0o100000;
+/// F8 FIX (testing-findings.md): was 0o100000, which is O_CLOEXEC on Linux!
+/// Linux x86_64: O_NOFOLLOW = 0o400000.
+pub const O_NOFOLLOW: u32 = 0o400000;
 /// Open directory only
 pub const O_DIRECTORY: u32 = 0o200000;
 /// Don't assign controlling terminal
-pub const O_NOCTTY: u32 = 0o400000;
+/// F8 FIX (found by the golden-value test): was 0o400000 (= O_NOFOLLOW on
+/// Linux!). Linux x86_64: O_NOCTTY = 0o000400.
+pub const O_NOCTTY: u32 = 0o000400;
 /// Synchronized I/O (data + metadata)
 pub const O_SYNC: u32 = 0o4010000;
 /// Synchronized I/O data integrity
-pub const O_DSYNC: u32 = 0o02000000;
-/// Synchronized I/O read operations
-pub const O_RSYNC: u32 = 0o04010000;
+/// F8 FIX: was 0o02000000 = O_CLOEXEC on Linux! Linux x86_64: 0o10000.
+pub const O_DSYNC: u32 = 0o10000;
+/// Synchronized I/O read operations (Linux defines O_RSYNC == O_SYNC on x86_64)
+pub const O_RSYNC: u32 = 0o4010000;
 /// Access mask for read/write mode
 pub const O_ACCMODE: u32 = 0o3;

@@ -4,7 +4,7 @@
 //! file system operations. Both kernel and userspace must agree on the
 //! exact memory layout (size, alignment, field ordering).
 
-use zerocopy::{FromBytes, IntoBytes};
+use zerocopy::{FromBytes, IntoBytes, Immutable, KnownLayout};
 
 // ── IPC Message Constants ───────────────────────────────────────────────────
 
@@ -51,7 +51,7 @@ pub const IPC_FILE_FLAG_CHUNK_WRITE: u32 = 1 << 5;
 /// Bit layout: `[control:3][hardware:3][registry:3]` (LSB = registry).
 ///
 /// Example: `0o777` = full permissions in all groups.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, Immutable)]
 #[repr(transparent)]
 pub struct SiloMode(pub u16);
 
@@ -70,7 +70,7 @@ impl SiloMode {
 /// POSIX-style timestamp: seconds + nanoseconds.
 ///
 /// Used for `SYS_CLOCK_GETTIME`, `SYS_NANOSLEEP`, and file timestamps.
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
 #[repr(C)]
 pub struct TimeSpec {
     /// Seconds since Unix epoch (or relative time for sleep).
@@ -126,7 +126,7 @@ impl TimeSpec {
 // ── Stat (legacy, kept for compat) ─────────────────────────────────────────
 
 /// Legacy stat structure (120 bytes). Prefer [`FileStat`] for new code.
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
 #[repr(C)]
 pub struct Stat {
     pub st_dev: u64,
@@ -150,7 +150,7 @@ pub struct Stat {
 /// Filesystem statistics (for `SYS_STAT` on directories).
 ///
 /// Similar to Linux `struct statfs`.
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
 #[repr(C)]
 pub struct StatVfs {
     /// Preferred file system block size.
@@ -182,7 +182,7 @@ pub struct StatVfs {
 /// Memory mapping descriptor for `SYS_MMAP`.
 ///
 /// Describes a region of virtual memory mapped into a process.
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
 #[repr(C)]
 pub struct Map {
     /// Offset into the backing file (must be page-aligned).
@@ -199,7 +199,7 @@ pub struct Map {
 // ── HandleInfo ──────────────────────────────────────────────────────────────
 
 /// Information about a capability handle (returned by `SYS_HANDLE_INFO`).
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
 #[repr(C)]
 pub struct HandleInfo {
     /// Resource type (file, memory, IPC, etc.).
@@ -213,7 +213,7 @@ pub struct HandleInfo {
 // ── MemoryRegionInfo ────────────────────────────────────────────────────────
 
 /// Information about an exported memory region (returned by `SYS_MEM_REGION_INFO`).
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
 #[repr(C)]
 pub struct MemoryRegionInfo {
     /// Total size of the region in bytes.
@@ -231,7 +231,7 @@ pub struct MemoryRegionInfo {
 ///
 /// Describes the submission and completion queue regions within
 /// a shared memory page used by the async I/O subsystem.
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 #[repr(C)]
 pub struct AsyncRingLayout {
     /// Physical address of the submission queue base.
@@ -265,7 +265,7 @@ pub const PCI_MATCH_SUBCLASS: u32 = 1 << 3;
 pub const PCI_MATCH_PROG_IF: u32 = 1 << 4;
 
 /// PCI device address (bus/device/function).
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
 #[repr(C, align(4))]
 pub struct PciAddress {
     /// PCI bus number (0-255).
@@ -281,7 +281,7 @@ pub struct PciAddress {
 ///
 /// Set `match_flags` to indicate which fields to match. Fields not
 /// flagged are ignored.
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
 #[repr(C)]
 pub struct PciProbeCriteria {
     /// Bitmask of fields to match (see `PCI_MATCH_*` constants).
@@ -300,7 +300,7 @@ pub struct PciProbeCriteria {
 }
 
 /// PCI device information returned by `SYS_PCI_ENUM`.
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
 #[repr(C)]
 pub struct PciDeviceInfo {
     /// PCI bus/device/function address.
@@ -331,7 +331,7 @@ pub struct PciDeviceInfo {
 /// File status information (returned by `SYS_FSTAT`, `SYS_STAT`, `SYS_FSTATAT`).
 ///
 /// Equivalent to POSIX `struct stat` with 64-bit fields.
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
 #[repr(C)]
 pub struct FileStat {
     /// Device ID containing this file.
@@ -399,7 +399,7 @@ impl FileStat {
 ///
 /// Used by IPC ports, channels, and the transport layer.
 /// The header occupies 16 bytes; the payload is 240 bytes.
-#[derive(Clone, Copy, FromBytes, IntoBytes)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, Immutable)]
 #[repr(C, align(64))]
 pub struct IpcMessage {
     /// PID/TID of the sending process.
@@ -522,7 +522,7 @@ pub const DT_SOCK: u8 = 12;
 /// bytes of filename data and a trailing NUL byte.
 ///
 /// Total entry size = 12 + name_len + 1 bytes.
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
 #[repr(C, packed)]
 pub struct DirentHeader {
     /// Inode number of the entry.
