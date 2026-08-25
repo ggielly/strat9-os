@@ -16,12 +16,15 @@ pub mod guardian;
 pub mod preempt;
 #[path = "../../../kernel/src/sync/spinlock.rs"]
 pub mod spinlock;
+#[path = "../../../kernel/src/sync/waitqueue.rs"]
+pub mod waitqueue;
 
 pub use fixed_queue::FixedQueue;
 pub use guardian::{Guardian, IrqDisabled, PreemptDisabled};
 pub use irq::{with_irqs_disabled, IrqDisabledToken};
 pub use irq::irq_probe_token;
 pub use preempt::PreemptGuard;
+pub use waitqueue::{WaitCondition, WaitQueue};
 pub use spinlock::{
     debug_clear_watch_lock_addr, debug_set_trace_buddy_addr, debug_set_trace_lock_addr,
     debug_set_trace_slab_addr, debug_set_watch_lock_addr,

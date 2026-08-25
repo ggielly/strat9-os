@@ -5,6 +5,8 @@ pub mod message;
 pub mod lockfree_ring;
 #[path = "../../../kernel/src/ipc/mailbox.rs"]
 pub mod mailbox;
+#[path = "../../../kernel/src/ipc/channel.rs"]
+pub mod channel;
 
 /// Minimal stand-in for the kernel transport traits used by LockFreeRing.
 /// Signatures mirror kernel/src/ipc/transport.rs closely enough for the
