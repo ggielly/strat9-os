@@ -306,19 +306,17 @@ impl IpcScheme {
 
     /// Build an IPC message for write operation.
     ///
-    /// Returns the message and the number of bytes actually packed.
-    fn build_write_msg(file_id: u64, offset: u64, data: &[u8]) -> (IpcMessage, usize) {
-        // The caller guarantees `data` fits WRITE_INLINE_CAPACITY (chunking
-        // is done above); a None here means that invariant was violated.
-        match WriteRequest::encode(OPCODE_WRITE, file_id, offset, data) {
-            Some((msg, packed)) => (msg, packed),
-            None => {
-                debug_assert!(false, "write chunk exceeded WRITE_INLINE_CAPACITY");
-                let mut msg = IpcMessage::new(OPCODE_WRITE);
-                msg.payload[16..18].copy_from_slice(&0u16.to_le_bytes());
-                (msg, 0)
-            }
-        }
+    /// Returns the message and the number of bytes actually packed, or
+    /// `MessageSize` if `data` exceeds the inline capacity (the caller's
+    /// chunking logic guarantees this never happens; we refuse rather
+    /// than truncate or emit an empty write).
+    fn build_write_msg(
+        file_id: u64,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<(IpcMessage, usize), SyscallError> {
+        WriteRequest::encode(OPCODE_WRITE, file_id, offset, data)
+            .ok_or(SyscallError::MessageSize)
     }
 
     /// Build an IPC message for close operation.
@@ -463,7 +461,7 @@ impl Scheme for IpcScheme {
         while total < buf.len() {
             let request_len = core::cmp::min(buf.len() - total, chunk_size);
             let (msg, packed) =
-                Self::build_write_msg(file_id, current_offset, &buf[total..total + request_len]);
+                Self::build_write_msg(file_id, current_offset, &buf[total..total + request_len])?;
             let reply = self.call(msg)?;
 
             Self::parse_status(&reply)?;
@@ -522,6 +520,7 @@ impl Scheme for IpcScheme {
 
     /// Performs the readdir operation.
     fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
+        const MAX_READDIR_ENTRIES: usize = 8192;
         let mut cursor: u16 = 0;
         let mut entries = Vec::new();
 
@@ -569,6 +568,14 @@ impl Scheme for IpcScheme {
                     name,
                 });
                 offset += 10 + name_len;
+            }
+
+            // The cursor protocol bounds the number of round-trips, but a
+            // buggy or malicious server could keep us accumulating entries
+            // for up to 64K iterations. Cap the total to bound kernel
+            // memory under our trust boundary.
+            if entries.len() > MAX_READDIR_ENTRIES {
+                return Err(SyscallError::IoError);
             }
 
             if next_cursor == u16::MAX {
