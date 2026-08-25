@@ -76,6 +76,7 @@ impl BusDriver for ArmIntegratorLm {
         if !self.syscon_regs.is_valid() {
             return Err(BusError::InitFailed);
         }
+        self.syscon_regs.check_user_offset(offset)?;
         Ok(self.syscon_regs.read32(offset))
     }
 
@@ -84,6 +85,7 @@ impl BusDriver for ArmIntegratorLm {
         if !self.syscon_regs.is_valid() {
             return Err(BusError::InitFailed);
         }
+        self.syscon_regs.check_user_offset(offset)?;
         self.syscon_regs.write32(offset, value);
         Ok(())
     }

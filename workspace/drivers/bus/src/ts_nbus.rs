@@ -261,13 +261,17 @@ impl BusDriver for TsNbus {
 
     /// Reads reg.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
-        let val = self.bus_read(offset as u16)?;
+        // bus_read indexes a u16 register space: reject out-of-range
+        // offsets instead of silently truncating to the low 16 bits.
+        let off = u16::try_from(offset).map_err(|_| BusError::InvalidAddress)?;
+        let val = self.bus_read(off)?;
         Ok(val as u32)
     }
 
     /// Writes reg.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
-        self.bus_write(offset as u16, value as u16)
+        let off = u16::try_from(offset).map_err(|_| BusError::InvalidAddress)?;
+        self.bus_write(off, value as u16)
     }
 
     /// Performs the children operation.

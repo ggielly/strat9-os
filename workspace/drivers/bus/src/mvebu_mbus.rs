@@ -246,6 +246,7 @@ impl BusDriver for MvebuMbus {
         if !self.mbus_regs.is_valid() {
             return Err(BusError::InitFailed);
         }
+        self.mbus_regs.check_user_offset(offset)?;
         Ok(self.mbus_regs.read32(offset))
     }
 
@@ -254,6 +255,7 @@ impl BusDriver for MvebuMbus {
         if !self.mbus_regs.is_valid() {
             return Err(BusError::InitFailed);
         }
+        self.mbus_regs.check_user_offset(offset)?;
         self.mbus_regs.write32(offset, value);
         Ok(())
     }
