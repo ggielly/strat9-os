@@ -26,5 +26,8 @@ x86_64 = "0.15"
 zerocopy = { version = "0.8", features = ["derive"] }
 static_assertions = "1.1"
 log = "0.4"
+spin = "0.10"
+bitflags = "2"
+net-core = { path = "../drivers/nic/net-core" }
 
 [workspace]

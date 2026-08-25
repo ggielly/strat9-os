@@ -83,3 +83,146 @@ pub fn allocate_frames(token: &IrqDisabledToken, order: u8) -> Result<PhysFrame,
 pub fn free_frames(token: &IrqDisabledToken, frame: PhysFrame, order: u8) {
     buddy::free(token, frame, order);
 }
+
+// ---------------------------------------------------------------------------
+// Fake user slices: same surface as kernel/src/memory/userslice.rs, but
+// pointers are raw host addresses (no page-table walk). Tests only ever
+// construct slices over valid leaked buffers, so access is sound.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserSliceError {
+    NullPointer,
+    TooLong,
+    Overflow,
+    KernelAddress,
+    NotMapped,
+    NotWritable,
+}
+
+impl From<UserSliceError> for crate::syscall::error::SyscallError {
+    fn from(e: UserSliceError) -> Self {
+        use crate::syscall::error::SyscallError;
+        match e {
+            UserSliceError::NullPointer
+            | UserSliceError::KernelAddress
+            | UserSliceError::NotMapped
+            | UserSliceError::NotWritable => SyscallError::Fault,
+            UserSliceError::TooLong | UserSliceError::Overflow => SyscallError::InvalidArgument,
+        }
+    }
+}
+
+pub struct UserSliceRead {
+    ptr: u64,
+    len: usize,
+}
+
+impl UserSliceRead {
+    pub fn new(ptr: u64, len: usize) -> Result<Self, UserSliceError> {
+        if len == 0 {
+            return Ok(Self { ptr, len });
+        }
+        if ptr == 0 {
+            return Err(UserSliceError::NullPointer);
+        }
+        ptr.checked_add(len as u64).ok_or(UserSliceError::Overflow)?;
+        Ok(Self { ptr, len })
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// SAFETY-reduced host variant: reads directly from the pointer. Tests
+    /// must only create slices over live allocations.
+    pub fn read_to_vec(&self) -> Vec<u8> {
+        if self.len == 0 {
+            return Vec::new();
+        }
+        unsafe {
+            core::slice::from_raw_parts(self.ptr as *const u8, self.len).to_vec()
+        }
+    }
+
+    pub fn copy_to(&self, dest: &mut [u8]) -> usize {
+        let n = dest.len().min(self.len);
+        unsafe {
+            core::ptr::copy_nonoverlapping(self.ptr as *const u8, dest.as_mut_ptr(), n);
+        }
+        n
+    }
+
+    pub fn read_u8(&self, offset: usize) -> Result<u8, UserSliceError> {
+        if offset >= self.len {
+            return Err(UserSliceError::NotMapped);
+        }
+        Ok(unsafe { *(self.ptr as *const u8).add(offset) })
+    }
+
+    pub fn read_u64(&self, offset: usize) -> Result<u64, UserSliceError> {
+        if offset + 8 > self.len {
+            return Err(UserSliceError::NotMapped);
+        }
+        Ok(unsafe { (self.ptr as *const u64).add(offset / 8).read_unaligned() })
+    }
+
+    pub fn read_val<T: Copy>(&self) -> Result<T, UserSliceError> {
+        if size_of::<T>() > self.len {
+            return Err(UserSliceError::NotMapped);
+        }
+        Ok(unsafe { (self.ptr as *const T).read_unaligned() })
+    }
+
+    pub fn as_ptr(&self) -> u64 {
+        self.ptr
+    }
+}
+
+pub struct UserSliceWrite {
+    ptr: u64,
+    len: usize,
+}
+
+impl UserSliceWrite {
+    pub fn new(ptr: u64, len: usize) -> Result<Self, UserSliceError> {
+        if len == 0 {
+            return Ok(Self { ptr, len });
+        }
+        if ptr == 0 {
+            return Err(UserSliceError::NullPointer);
+        }
+        ptr.checked_add(len as u64).ok_or(UserSliceError::Overflow)?;
+        Ok(Self { ptr, len })
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn copy_from(&self, src: &[u8]) -> usize {
+        let n = src.len().min(self.len);
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr(), self.ptr as *mut u8, n);
+        }
+        n
+    }
+
+    pub fn zero(&self) {
+        unsafe {
+            core::ptr::write_bytes(self.ptr as *mut u8, 0, self.len);
+        }
+    }
+
+    pub fn as_ptr(&self) -> u64 {
+        self.ptr
+    }
+}
