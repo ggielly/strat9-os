@@ -5,8 +5,8 @@
 //!
 //! Provides map/unmap/translate operations on the active page table.
 
-use x86_64::registers::control::Cr3;
-use x86_64::structures::paging::{
+use crate::x86_crate_shim::registers::control::Cr3;
+use crate::x86_crate_shim::structures::paging::{
         FrameAllocator as X86FrameAllocator, Mapper, OffsetPageTable, Page, PageTable,
     Translate,
 };

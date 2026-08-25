@@ -1615,3 +1615,15 @@ pub mod boot_limine_shim {
         None
     }
 }
+
+/// Unified access to the `x86_64` crate surface used by shared code.
+/// On x86_64 this IS the real crate; on riscv64 it is the panicking stub.
+pub mod x86_crate_shim {
+    #[cfg(target_arch = "x86_64")]
+    pub use ::x86_64::*;
+    #[cfg(target_arch = "x86_64")]
+    pub use ::x86_64::{instructions, registers, structures};
+
+    #[cfg(not(target_arch = "x86_64"))]
+    pub use crate::arch::x86_64::*;
+}

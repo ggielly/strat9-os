@@ -423,8 +423,8 @@ pub fn pcid_available() -> bool {
     }
     // 2. Check CR4.PCIDE (bit 17) is actually set (may be masked by hypervisor).
     //    Intel SDM Vol.3A §4.10.4: CR4.PCIDE = 1 enables PCID in CR3.
-    let cr4 = x86_64::registers::control::Cr4::read();
-    cr4.contains(x86_64::registers::control::Cr4Flags::PCID)
+    let cr4 = crate::x86_crate_shim::registers::control::Cr4::read();
+    cr4.contains(crate::x86_crate_shim::registers::control::Cr4Flags::PCID)
 }
 
 /// Select the N3 tier based on actual PCID capability.
@@ -1096,7 +1096,7 @@ fn map_page_in_space(
 ) -> Result<(), &'static str> {
     use crate::arch::xshim::{PageTableFlags, PhysFrame, Size4KiB};;
     use crate::arch::xshim::{PhysAddr, VirtAddr};;
-    use x86_64::structures::paging::{Mapper, Page};
+    use crate::x86_crate_shim::structures::paging::{Mapper, Page};
 
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(target_va));
     let phys_frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(frame_phys));
@@ -1345,7 +1345,7 @@ impl IpcProducer for N3Transport {
         let receiver_task = get_task_by_id(self.receiver_task_id).ok_or(IpcError::Disconnected)?;
 
         // Read current CR3.
-        let (cr3_frame, _) = x86_64::registers::control::Cr3::read();
+        let (cr3_frame, _) = crate::x86_crate_shim::registers::control::Cr3::read();
         let sender_cr3 = cr3_frame.start_address().as_u64();
 
         // Validate receiver's handler RIP.

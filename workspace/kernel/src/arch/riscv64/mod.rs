@@ -24,6 +24,29 @@ pub mod vga {
         pub fn new(_r: u8, _g: u8, _b: u8) -> Self { RgbColor }
     }
     pub fn flush_display() {}
+
+    // Extended surface (transitional: serial-only console, all no-ops)
+    pub fn draw_pixel(_x: i32, _y: i32, _color: u32) {}
+    pub fn draw_line(_x0: i32, _y0: i32, _x1: i32, _y1: i32, _color: u32) {}
+    pub fn draw_rect(_x: i32, _y: i32, _w: i32, _h: i32, _color: u32) {}
+    pub fn draw_text(_s: &str, _x: i32, _y: i32, _color: u32) {}
+    pub fn fill_rect_alpha(_x: i32, _y: i32, _w: i32, _h: i32, _c: u32, _a: u8) {}
+    pub fn framebuffer_info() -> Option<(u64, usize, usize)> {
+        None
+    }
+    pub fn glyph_size() -> (usize, usize) {
+        (8, 16)
+    }
+    pub fn present() {}
+    pub fn set_clip_rect(_x: i32, _y: i32, _w: i32, _h: i32) {}
+    pub fn reset_clip_rect() {}
+    pub fn set_ui_scale(_s: UiScale) {}
+    pub fn ui_draw_panel_widget(_x: i32, _y: i32, _w: i32, _h: i32) {}
+    pub fn double_buffer_mode() -> bool {
+        false
+    }
+    pub fn status_line_task_main() {}
+    pub fn init(_fb: u64, _w: usize, _h: usize, _stride: usize, _bpp: usize) {}
     pub enum UiScale {
         Compact,
         Normal,
@@ -311,4 +334,74 @@ pub mod vga_text {
         }
     }
     pub struct UiTheme;
+}
+
+
+// Transitional extras -------------------------------------------------------
+
+pub mod pic_stub {
+    pub const PIC1_OFFSET: u8 = 0x20;
+    pub const PIC2_OFFSET: u8 = 0x28;
+    pub fn init(_o1: u8, _o2: u8) {}
+    pub fn disable() {}
+    pub fn enable_irq(_irq: u8) {}
+}
+
+pub mod timer_extra {
+    pub fn init_pit(_hz: u32) {}
+    pub fn stop_pit() {}
+    pub fn calibrate_apic_timer() -> u32 {
+        0
+    }
+}
+
+pub mod vga_draw {
+    use super::vga::UiScale;
+    pub fn draw_pixel(_x: i32, _y: i32, _color: u32) {}
+    pub fn draw_line(_x0: i32, _y0: i32, _x1: i32, _y1: i32, _color: u32) {}
+    pub fn draw_rect(_x: i32, _y: i32, _w: i32, _h: i32, _color: u32) {}
+    pub fn draw_text(_s: &str, _x: i32, _y: i32, _color: u32) {}
+    pub fn fill_rect_alpha(_x: i32, _y: i32, _w: i32, _h: i32, _color: u32, _alpha: u8) {}
+    pub fn framebuffer_info() -> Option<(u64, usize, usize)> {
+        None
+    }
+    pub fn glyph_size() -> (usize, usize) {
+        (8, 16)
+    }
+    pub fn present() {}
+    pub fn set_clip_rect(_x: i32, _y: i32, _w: i32, _h: i32) {}
+    pub fn reset_clip_rect() {}
+    pub fn set_ui_scale(_s: UiScale) {}
+    pub fn ui_draw_panel_widget(_x: i32, _y: i32, _w: i32, _h: i32) {}
+    pub fn double_buffer_mode() -> bool {
+        false
+    }
+    pub fn status_line_task_main() {}
+    pub fn init(_fb: u64, _w: usize, _h: usize, _stride: usize, _bpp: usize) {}
+}
+
+pub mod config_consts {
+    pub const STATUS: u8 = 0x06;
+    pub const CAPABILITIES_PTR: u8 = 0x34;
+    pub const IO_SPACE: u16 = 0x1;
+}
+
+// Re-exports used by facade_riscv
+pub use timer_extra as timer_pit;
+pub use vga_draw as vga_surface;
+pub use config_consts as pci_config_consts;
+
+pub use timer_extra as riscv_timer_pit;
+
+// Extended vga surface (wired from facade_riscv)
+pub mod vga_canvas {
+    pub struct Canvas;
+    impl Canvas {
+        pub fn new() -> Option<Self> {
+            None
+        }
+        pub fn fill_rect(&mut self, _x: i32, _y: i32, _w: i32, _h: i32, _color: u32) {}
+        pub fn draw_text(&mut self, _s: &str, _x: i32, _y: i32, _color: u32) {}
+        pub fn draw_line(&mut self, _x0: i32, _y0: i32, _x1: i32, _y1: i32, _c: u32) {}
+    }
 }
