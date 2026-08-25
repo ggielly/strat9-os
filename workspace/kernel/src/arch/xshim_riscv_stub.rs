@@ -31,17 +31,9 @@ pub mod instructions {
         impl<T> Port<T> {
             pub fn new(_addr: u16) -> Self { panic!("port I/O on riscv64") }
         }
-        macro_rules! impl_port_rw {
-            ($t:ty) => {
-                impl Port<$t> {
-                    pub fn read(&mut self) -> $t { panic!("port in on riscv64") }
-                    pub fn write(&mut self, _v: $t) {}
-                }
-            };
-        }
-        impl_port!(u8);
-        impl_port!(u16);
-        impl_port!(u32);
+        impl Port<u8> { pub fn read(&mut self) -> u8 { 0xFF } pub fn write(&mut self, _v: u8) {} }
+        impl Port<u16> { pub fn read(&mut self) -> u16 { 0xFFFF } pub fn write(&mut self, _v: u16) {} }
+        impl Port<u32> { pub fn read(&mut self) -> u32 { 0xFFFF_FFFF } pub fn write(&mut self, _v: u32) {} }
     }
     pub mod hlt {
         pub fn hlt() {}
