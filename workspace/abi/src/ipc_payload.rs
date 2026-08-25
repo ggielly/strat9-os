@@ -10,8 +10,11 @@
 //!
 //! # Conventions
 //!
-//! - All sizes are ≤ 48 bytes (the payload capacity).
-//! - Variable-length path/data fields use an [`InlineBlobHeader`] prefix.
+//! - **Fixed-size structs** are kept ≤ 48 bytes by convention — well under
+//!   `IpcMessage::PAYLOAD_CAPACITY` (240) — so they can be embedded in
+//!   messages that also carry an inline blob.
+//! - Variable-length path/data fields use an [`InlineBlobHeader`] prefix
+//!   and may exploit the full 240-byte payload capacity.
 //! - `status == 0` means success; non-zero is an errno-compatible error code.
 //! - Padding fields are named `_pad` or `_reserved` and must be zero.
 //!
