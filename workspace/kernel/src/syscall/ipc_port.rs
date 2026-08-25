@@ -285,6 +285,7 @@ pub fn sys_ipc_reply(msg_ptr: u64) -> Result<u64, SyscallError> {
     let msg = crate::ipc::message::ipc_message_from_raw(&buf);
 
     let target = crate::process::TaskId::from_u64(msg.sender);
+    let responder = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let mut msg = msg;
     if msg.flags != 0 {
         let sender = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
@@ -302,8 +303,13 @@ pub fn sys_ipc_reply(msg_ptr: u64) -> Result<u64, SyscallError> {
         msg.flags = new_id.as_u64() as u32;
     }
 
-    reply::deliver_reply(target, msg).map_err(|_| SyscallError::BadHandle)?;
-    Ok(0)
+    // Authorization happens inside deliver_reply: only the server the
+    // caller is waiting on (the port owner) may answer its call.
+    match reply::deliver_reply(responder.id, target, msg) {
+        Ok(()) => Ok(0),
+        Err(reply::DeliverError::NoPendingCall) => Err(SyscallError::BadHandle),
+        Err(reply::DeliverError::NotResponder) => Err(SyscallError::PermissionDenied),
+    }
 }
 
 /// SYS_IPC_BIND_PORT: register a port under a namespace path.

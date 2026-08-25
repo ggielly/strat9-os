@@ -175,13 +175,43 @@ pub fn cancel_replies_waiting_on(dead_task: TaskId) {
     }
 }
 
-/// Deliver a reply message to the given task.
+/// Error returned by [`deliver_reply`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliverError {
+    /// The target has no pending call awaiting a reply.
+    NoPendingCall,
+    /// The replying task is not the server the target is waiting on.
+    /// Without this check, any process could forge replies into another
+    /// process's blocked `SYS_IPC_CALL` (reply spoofing).
+    NotResponder,
+}
 
-pub fn deliver_reply(target: TaskId, msg: IpcMessage) -> Result<(), ()> {
+/// Deliver a reply message to the given task.
+///
+/// # Authorization
+///
+/// `responder` must match the `waiting_on` server recorded when the target
+/// issued its call (`SYS_IPC_CALL` records the port owner). Replies from
+/// any other task are rejected with [`DeliverError::NotResponder`] —
+/// otherwise any process able to guess a blocked task id could inject
+/// forged responses into its RPCs.
+pub fn deliver_reply(
+    responder: TaskId,
+    target: TaskId,
+    msg: IpcMessage,
+) -> Result<(), DeliverError> {
     let mut registry = REPLIES.lock();
 
     // Fast path: look up the slot without inserting a new one.
-    let slot = registry.slots.get_mut(&target).ok_or(())?;
+    let slot = registry
+        .slots
+        .get_mut(&target)
+        .ok_or(DeliverError::NoPendingCall)?;
+
+    // Only the awaited server may answer this call.
+    if slot.waiting_on != Some(responder) {
+        return Err(DeliverError::NotResponder);
+    }
 
     match &mut slot.target {
         ReplyTarget::Sync {

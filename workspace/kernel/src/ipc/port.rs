@@ -47,6 +47,8 @@ pub enum IpcError {
     NotOwner,
     #[error("port destroyed")]
     PortDestroyed,
+    #[error("port queue full")]
+    WouldBlock,
 }
 
 /// An IPC port: a bounded message queue with blocking semantics.
@@ -130,7 +132,7 @@ impl Port {
                 self.recv_waitq.wake_one();
                 Ok(())
             }
-            Err(_) => Err(IpcError::PortNotFound), // WouldBlock
+            Err(_) => Err(IpcError::WouldBlock),
         }
     }
 
@@ -267,7 +269,8 @@ pub fn cleanup_ports_for_task(owner: TaskId) {
             let mut err_reply = IpcMessage::new(0x80);
             let epipe: u32 = 32;
             err_reply.payload[0..4].copy_from_slice(&epipe.to_le_bytes());
-            let _ = super::reply::deliver_reply(sender, err_reply);
+            // The dead owner is the awaited responder: authorization passes.
+            let _ = super::reply::deliver_reply(owner, sender, err_reply);
         }
     }
 }
