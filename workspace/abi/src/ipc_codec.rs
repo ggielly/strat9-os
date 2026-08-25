@@ -185,6 +185,19 @@ pub fn get_str(payload: &[u8], off: usize, len: usize) -> Option<&str> {
     core::str::from_utf8(bytes).ok()
 }
 
+/// Write a raw `u16` length prefix followed by the bytes at `payload[off..]`
+/// (the common `[len: u16][data...]` framing used by OPEN/CREATE/UNLINK).
+///
+/// Returns `None` if the data does not fit (`> u16::MAX` or out of bounds).
+#[inline]
+pub fn put_u16_len_prefixed(payload: &mut [u8], off: usize, data: &[u8]) -> Option<()> {
+    if data.len() > u16::MAX as usize {
+        return None;
+    }
+    put_u16(payload, off, data.len() as u16)?;
+    put_bytes(payload, off + 2, data)
+}
+
 // ===========================================================================
 // Fixed-size payload helpers
 // ===========================================================================

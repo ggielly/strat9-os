@@ -27,23 +27,27 @@
 //! # Example
 //!
 //! ```ignore
-//! use strat9_abi::ipc_codec::{encode_fixed, decode_fixed, put_str, InlineBlobHeader};
-//! use strat9_abi::ipc_payload::{OpenRequest, OpenReply};
+//! use strat9_abi::ipc_payload::{OpenRequest, OpenReply, OPCODE_OPEN};
 //!
 //! // Encode an open request with path "/tmp/test"
-//! let mut msg = encode_fixed(0x01, &OpenRequest {
-//!     flags: 0x02,  // WRITE
-//!     path_hdr: InlineBlobHeader { len: 10, kind: 0 },
-//! });
-//! put_str(&mut msg.payload, 8, "/tmp/test").unwrap();
+//! let msg = OpenRequest::encode(OPCODE_OPEN, 0x02, "/tmp/test").unwrap();
 //!
-//! // Decode the reply
-//! let reply: &OpenReply = decode_fixed(&reply_msg).unwrap();
-//! assert_eq!(reply.status, 0); // success
+//! // A server parses the request...
+//! let (flags, path) = OpenRequest::parse(&msg.payload).unwrap();
+//! assert_eq!(path, "/tmp/test");
+//!
+//! // ...and builds a typed reply, which the client parses back.
+//! let reply = OpenReply {
+//!     status: 0,
+//!     file_id: 42,
+//!     size: 1024,
+//!     file_flags: 0x01,
+//! };
 //! ```
 
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
+use crate::data::IpcMessage;
 use crate::ipc_codec::InlineBlobHeader;
 
 // ===========================================================================
@@ -70,6 +74,12 @@ pub const OPCODE_WRITE: u32 = 0x03;
 pub const OPCODE_CLOSE: u32 = 0x04;
 /// Wire `msg_type` for a readdir request.
 pub const OPCODE_READDIR: u32 = 0x08;
+/// Wire `msg_type` for a create-file request.
+pub const OPCODE_CREATE_FILE: u32 = 0x05;
+/// Wire `msg_type` for a create-directory request.
+pub const OPCODE_CREATE_DIR: u32 = 0x06;
+/// Wire `msg_type` for an unlink request.
+pub const OPCODE_UNLINK: u32 = 0x07;
 
 // ===========================================================================
 // Generic status-only reply (used by every scheme)
@@ -151,37 +161,54 @@ impl OpenRequest {
 /// Open reply.
 ///
 /// Wire layout:
-///   `status @ 0..4`, `_pad0 @ 4..8`, `ino @ 8..16`, `size @ 16..24`,
-///   `file_flags @ 24..28`, `_pad1 @ 28..32`.
+///   `status @ 0..4`, `file_id @ 4..12`, `size @ 12..20`, `file_flags @ 20..24`.
 ///
-/// # Example
+/// # Wire-compatibility note
 ///
-/// ```ignore
-/// let reply = OpenReply {
-///     status: 0,
-///     _pad0: 0,
-///     ino: 42,
-///     size: 1024,
-///     file_flags: 0x01, // readable
-///     _pad1: 0,
-/// };
-/// ```
-#[repr(C)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
+/// Earlier documentation wrongly claimed `_pad0 @ 4..8`, `ino @ 8..16`,
+/// `size @ 16..24`, `file_flags @ 24..28` (32 bytes); no server ever
+/// produced that layout. The real layout above is what every scheme
+/// server (net, bus) emits and what the kernel VFS client parses.
+#[repr(C, packed(1))]
+#[derive(Debug, Clone, Copy)]
 pub struct OpenReply {
     /// Status code: 0 = success.
     pub status: u32,
-    pub _pad0: u32,
-    /// Inode number of the opened file.
-    pub ino: u64,
-    /// File size in bytes.
+    /// Handle/id of the opened file.
+    pub file_id: u64,
+    /// File size in bytes (`u64::MAX` = size unknown).
     pub size: u64,
-    /// File flags (device, pipe, append, etc.).
+    /// File flags (device, pipe, chunked read/write, directory...).
     pub file_flags: u32,
-    pub _pad1: u32,
 }
-assert_payload_size!(OpenReply);
-static_assertions::assert_eq_size!(OpenReply, [u8; 32]);
+static_assertions::assert_eq_size!(OpenReply, [u8; 24]);
+
+impl OpenReply {
+    /// Byte at which this struct starts in a reply payload.
+    pub const OFFSET: usize = 0;
+
+    /// Parse an OPEN reply payload.
+    /// Returns `None` if the reply is truncated.
+    pub fn parse(payload: &[u8]) -> Option<Self> {
+        if payload.len() < core::mem::size_of::<Self>() {
+            return None;
+        }
+        Some(Self {
+            status: u32::from_le_bytes(payload[0..4].try_into().ok()?),
+            file_id: u64::from_le_bytes(payload[4..12].try_into().ok()?),
+            size: u64::from_le_bytes(payload[12..20].try_into().ok()?),
+            file_flags: u32::from_le_bytes(payload[20..24].try_into().ok()?),
+        })
+    }
+
+    /// Encode this reply into `payload[0..24]`.
+    pub fn encode_into(&self, payload: &mut [u8]) {
+        payload[0..4].copy_from_slice(&self.status.to_le_bytes());
+        payload[4..12].copy_from_slice(&self.file_id.to_le_bytes());
+        payload[12..20].copy_from_slice(&self.size.to_le_bytes());
+        payload[20..24].copy_from_slice(&self.file_flags.to_le_bytes());
+    }
+}
 
 /// Read request.
 ///
@@ -201,6 +228,35 @@ pub struct ReadRequest {
 assert_payload_size!(ReadRequest);
 static_assertions::assert_eq_size!(ReadRequest, [u8; 24]);
 
+impl ReadRequest {
+    /// Parse a READ request payload. Returns `None` if truncated.
+    pub fn parse(payload: &[u8]) -> Option<Self> {
+        if payload.len() < core::mem::size_of::<Self>() {
+            return None;
+        }
+        Some(Self {
+            ino: u64::from_le_bytes(payload[0..8].try_into().ok()?),
+            offset: u64::from_le_bytes(payload[8..16].try_into().ok()?),
+            count: u32::from_le_bytes(payload[16..20].try_into().ok()?),
+            _pad: 0,
+        })
+    }
+
+    /// Encode a READ request into a fresh [`IpcMessage`].
+    pub fn encode(msg_type: u32, ino: u64, offset: u64, count: u32) -> IpcMessage {
+        let mut msg = IpcMessage::new(msg_type);
+        msg.payload[0..8].copy_from_slice(&ino.to_le_bytes());
+        msg.payload[8..16].copy_from_slice(&offset.to_le_bytes());
+        msg.payload[16..20].copy_from_slice(&count.to_le_bytes());
+        msg
+    }
+
+    /// Number of requested bytes (convenience over `count`).
+    pub fn count_usize(&self) -> usize {
+        self.count as usize
+    }
+}
+
 /// Read reply prefix (variable-length data follows at offset 8).
 ///
 /// Wire layout:
@@ -216,6 +272,28 @@ pub struct ReadReply {
     pub count: u32,
 }
 assert_payload_size!(ReadReply);
+
+impl ReadReply {
+    /// Byte at which inline data starts in a READ reply payload.
+    pub const DATA_OFFSET: usize = 8;
+
+    /// Encode a successful READ reply: prefix + up to
+    /// `IpcMessage::READ_INLINE_CAPACITY` data bytes.
+    /// Returns the message and the number of data bytes packed.
+    pub fn encode_ok(sender: u64, data: &[u8]) -> (IpcMessage, usize) {
+        let mut msg = IpcMessage::new(IpcMessage::REPLY_MSG_TYPE);
+        msg.sender = sender;
+        let n = data.len().min(IpcMessage::READ_INLINE_CAPACITY);
+        let reply = Self {
+            status: 0,
+            count: n as u32,
+        };
+        msg.payload[0..4].copy_from_slice(&reply.status.to_le_bytes());
+        msg.payload[4..8].copy_from_slice(&reply.count.to_le_bytes());
+        msg.payload[8..8 + n].copy_from_slice(&data[..n]);
+        (msg, n)
+    }
+}
 
 /// Write request with variable-length inline data.
 ///
@@ -264,6 +342,23 @@ impl WriteRequest {
     pub fn data<'a>(&self, payload: &'a [u8]) -> Option<&'a [u8]> {
         crate::ipc_codec::get_bytes(payload, Self::DATA_OFFSET, self.data_len as usize)
     }
+
+    /// Encode a WRITE request into a fresh [`IpcMessage`].
+    ///
+    /// Returns `None` if `data` exceeds [`IpcMessage::WRITE_INLINE_CAPACITY`]
+    /// — chunking is the caller's policy, this helper never truncates.
+    /// Otherwise returns the message and the packed length (== `data.len()`).
+    pub fn encode(msg_type: u32, ino: u64, offset: u64, data: &[u8]) -> Option<(IpcMessage, usize)> {
+        if data.len() > IpcMessage::WRITE_INLINE_CAPACITY {
+            return None;
+        }
+        let mut msg = IpcMessage::new(msg_type);
+        msg.payload[0..8].copy_from_slice(&ino.to_le_bytes());
+        msg.payload[8..16].copy_from_slice(&offset.to_le_bytes());
+        msg.payload[16..18].copy_from_slice(&(data.len() as u16).to_le_bytes());
+        msg.payload[18..18 + data.len()].copy_from_slice(data);
+        Some((msg, data.len()))
+    }
 }
 
 /// Write reply.
@@ -279,38 +374,87 @@ pub struct WriteReply {
 }
 assert_payload_size!(WriteReply);
 
+impl WriteReply {
+    /// Encode a successful WRITE reply carrying the written count.
+    pub fn encode_ok(sender: u64, written: usize) -> IpcMessage {
+        let mut msg = IpcMessage::new(IpcMessage::REPLY_MSG_TYPE);
+        msg.sender = sender;
+        let reply = Self {
+            status: 0,
+            written: written as u32,
+        };
+        msg.payload[0..4].copy_from_slice(&reply.status.to_le_bytes());
+        msg.payload[4..8].copy_from_slice(&reply.written.to_le_bytes());
+        msg
+    }
+}
+
 /// Create request (file or directory).
 ///
 /// Wire layout:
-///   `mode @ 0..4`, `path_hdr @ 4..8`, `path_data @ 8..`.
+///   `mode @ 0..4`, `path_len @ 4..6`, `path @ 6..`.
 ///
-/// The `mode` field specifies permissions (e.g. `0o755` for directories).
-/// The path is variable-length and follows the header at offset 8.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
+/// # Wire-compatibility note
+///
+/// Same raw `u16` length prefix as [`OpenRequest`] (no InlineBlobHeader).
+#[repr(C, packed(1))]
+#[derive(Debug, Clone, Copy)]
 pub struct CreateRequest {
     /// Permission mode (e.g. `0o644` for files, `0o755` for directories).
     pub mode: u32,
-    /// InlineBlobHeader describing the path that follows.
-    pub path_hdr: InlineBlobHeader,
+    /// Length in bytes of the UTF-8 path starting at offset 6.
+    pub path_len: u16,
 }
-assert_payload_size!(CreateRequest);
+static_assertions::assert_eq_size!(CreateRequest, [u8; 6]);
+
+impl CreateRequest {
+    /// Byte offset at which the inline path starts.
+    pub const PATH_OFFSET: usize = 6;
+
+    /// Parse a CREATE request payload: `(mode, path)`.
+    pub fn parse(payload: &[u8]) -> Option<(u32, &str)> {
+        if payload.len() < Self::PATH_OFFSET {
+            return None;
+        }
+        let mode = u32::from_le_bytes(payload[0..4].try_into().ok()?);
+        let path_len = u16::from_le_bytes(payload[4..6].try_into().ok()?) as usize;
+        let path = crate::ipc_codec::get_str(payload, Self::PATH_OFFSET, path_len)?;
+        Some((mode, path))
+    }
+
+    /// Encode a CREATE request into a fresh [`IpcMessage`].
+    /// Returns `None` if the path does not fit the inline capacity.
+    pub fn encode(msg_type: u32, mode: u32, path: &str) -> Option<IpcMessage> {
+        if path.len() > IpcMessage::OPEN_INLINE_CAPACITY {
+            return None;
+        }
+        let mut msg = IpcMessage::new(msg_type);
+        msg.payload[0..4].copy_from_slice(&mode.to_le_bytes());
+        msg.payload[4..6].copy_from_slice(&(path.len() as u16).to_le_bytes());
+        msg.payload[6..6 + path.len()].copy_from_slice(path.as_bytes());
+        Some(msg)
+    }
+}
 
 /// Create reply.
 ///
 /// Wire layout:
-///   `status @ 0..4`, `_pad @ 4..8`, `ino @ 8..16`.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable)]
+///   `status @ 0..4`, `ino @ 4..12`.
+///
+/// # Wire-compatibility note
+///
+/// Earlier documentation claimed `_pad @ 4..8`, `ino @ 8..16`; the real
+/// wire packs the inode directly after the status (what the kernel VFS
+/// client parses).
+#[repr(C, packed(1))]
+#[derive(Debug, Clone, Copy)]
 pub struct CreateReply {
     /// Status code: 0 = success.
     pub status: u32,
-    pub _pad: u32,
     /// Inode number of the newly created file/directory.
     pub ino: u64,
 }
-assert_payload_size!(CreateReply);
-static_assertions::assert_eq_size!(CreateReply, [u8; 16]);
+static_assertions::assert_eq_size!(CreateReply, [u8; 12]);
 
 /// Close request.
 ///
