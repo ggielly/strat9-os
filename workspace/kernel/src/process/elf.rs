@@ -11,8 +11,11 @@
 //!
 //! Does not support (or need future fix) :
 //!
-//!   - FIx TODO : allocation heap during ELF loading
-//!     program_headers(elf_data, &header).collect() → Vec<Elf64Phdr>, Vec::new() for interp_phdrs, etc. The kernel uses alloc so it's normal, but allocation errors are not handled (no try_collect, no fallible GlobalAlloc).
+//!   - ~~Fix TODO : allocation heap during ELF loading~~
+//!     PARTIALLY DONE (#67) : program-header vectors and boot-stack argv
+//!     pointers now use `try_reserve_exact`-based fallible collection and
+//!     fail the load with an error instead of aborting. Full rollback of
+//!     already-mapped segments still requires a fallible GlobalAlloc.
 //!
 //!   - ~~Fix TODO : find_free_vma_range : fallback hardcoded 0x1000_0000~~
 //!     DONE : the fallback was removed; a failed search now fails the load
@@ -282,6 +285,32 @@ fn program_headers<'a>(
         // within `data`, and Elf64Phdr is packed (align 1).
         unsafe { core::ptr::read_unaligned(data.as_ptr().add(offset) as *const Elf64Phdr) }
     })
+}
+
+/// Collects an exact-size-hint iterator into a `Vec`, failing cleanly on
+/// allocation failure instead of aborting (issue #67).
+///
+/// The exact reservation means the `push` loop below can never reallocate:
+/// either the whole vector is built, or we return `Err` having allocated
+/// nothing (beyond the failed reservation itself).
+fn try_collect_exact<T, I>(iter: I) -> Result<Vec<T>, &'static str>
+where
+    I: IntoIterator<Item = T>,
+{
+    let iter = iter.into_iter();
+    let (lower, Some(upper)) = iter.size_hint() else {
+        return Err("ELF: iterator has inexact size hint");
+    };
+    if lower != upper {
+        return Err("ELF: iterator has inexact size hint");
+    }
+    let mut v = Vec::new();
+    v.try_reserve_exact(lower)
+        .map_err(|_| "ELF: out of memory while collecting program headers")?;
+    for item in iter {
+        v.push(item);
+    }
+    Ok(v)
 }
 
 /// Parses interp path.
@@ -1665,7 +1694,12 @@ fn setup_boot_user_stack(
     write_user_mapped_bytes(user_as, sp + name.len() as u64, &[0])?;
 
     // Write extra arg strings and record their user-space pointers
-    let mut extra_ptrs: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(extra_args.len());
+    let mut extra_ptrs: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    // Fallible pre-allocation: argv can be large; fail the load instead of
+    // aborting on OOM (issue #67). Exact capacity => pushes never realloc.
+    extra_ptrs
+        .try_reserve_exact(extra_args.len())
+        .map_err(|_| "User stack overflow during boot stack setup")?;
     for &arg in extra_args.iter() {
         let arg_nul_len = (arg.len() + 1) as u64;
         sp -= arg_nul_len;
@@ -1770,7 +1804,7 @@ fn load_elf_task_inner(
     let user_as = Arc::new(AddressSpace::new_user()?);
     crate::e9_println!("[trace][elf] load_elf_task user_as done");
 
-    let phdrs: Vec<Elf64Phdr> = program_headers(elf_data, &header).collect();
+    let phdrs: Vec<Elf64Phdr> = try_collect_exact(program_headers(elf_data, &header))?;
     let interp_path = parse_interp_path(elf_data, &phdrs)?;
     let (load_bias, entry) = compute_load_bias_and_entry(&user_as, &header, &phdrs)?;
     let phdr_vaddr = find_relocated_phdr_vaddr(&header, &phdrs, load_bias)?;
@@ -1819,7 +1853,8 @@ fn load_elf_task_inner(
     if let Some(path) = interp_path {
         let interp_data = read_elf_from_vfs(path)?;
         let interp_header = parse_header(&interp_data)?;
-        let interp_phdrs: Vec<Elf64Phdr> = program_headers(&interp_data, &interp_header).collect();
+        let interp_phdrs: Vec<Elf64Phdr> =
+            try_collect_exact(program_headers(&interp_data, &interp_header))?;
         if parse_interp_path(&interp_data, &interp_phdrs)?.is_some() {
             return Err("Nested PT_INTERP is not supported");
         }
@@ -2111,7 +2146,7 @@ pub fn load_elf_image(
             return Err(e);
         }
     };
-    let phdrs: Vec<Elf64Phdr> = program_headers(elf_data, &header).collect();
+    let phdrs: Vec<Elf64Phdr> = try_collect_exact(program_headers(elf_data, &header))?;
     let interp_path = parse_interp_path(elf_data, &phdrs)?;
     let (load_bias, entry) = compute_load_bias_and_entry(user_as, &header, &phdrs)?;
     let phdr_vaddr = find_relocated_phdr_vaddr(&header, &phdrs, load_bias)?;
@@ -2143,7 +2178,8 @@ pub fn load_elf_image(
     if let Some(path) = interp_path {
         let interp_data = read_elf_from_vfs(path)?;
         let interp_header = parse_header(&interp_data)?;
-        let interp_phdrs: Vec<Elf64Phdr> = program_headers(&interp_data, &interp_header).collect();
+        let interp_phdrs: Vec<Elf64Phdr> =
+            try_collect_exact(program_headers(&interp_data, &interp_header))?;
         if parse_interp_path(&interp_data, &interp_phdrs)?.is_some() {
             return Err("Nested PT_INTERP is not supported");
         }
