@@ -263,6 +263,12 @@ pub mod structures {
             ) -> Result<MapperFlush<S>, MapToError<S>> {
                 Err(MapToError::FrameAllocationFailed)
             }
+            pub unsafe fn unmap<S: PageSize>(
+                &mut self,
+                _page: Page<S>,
+            ) -> Result<(crate::arch::xshim::PhysFrame<S>, MapperFlush<S>), ()> {
+                panic!("riscv64 paging not yet implemented (jalon R2)")
+            }
         }
         pub trait Translate3 {
             fn translate(&self, _a: crate::arch::xshim::VirtAddr) -> Option<crate::arch::xshim::TranslateResult>;
