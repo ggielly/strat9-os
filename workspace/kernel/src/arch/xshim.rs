@@ -47,7 +47,11 @@ mod neutral {
     /// Result of a translation walk.
     #[derive(Clone, Copy, Debug)]
     pub enum TranslateResult {
-        Mapped { frame: PhysFrame<Size4KiB>, flags: PageTableFlags },
+        Mapped {
+            frame: PhysFrame<Size4KiB>,
+            offset: u64,
+            flags: PageTableFlags,
+        },
         NotMapped,
         InvalidFrameAddress(PhysAddr),
     }
