@@ -58,6 +58,9 @@ impl SiloId {
     }
 }
 
+#[cfg(feature = "selftest")]
+pub mod silo_test;
+
 use bitflags::bitflags;
 
 bitflags! {
