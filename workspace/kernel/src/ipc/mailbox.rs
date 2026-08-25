@@ -35,10 +35,13 @@ const TAG_MASK: usize = 0xFFFF_0000_0000_0000;
 #[cfg(target_arch = "x86_64")]
 const PTR_MASK: usize = !TAG_MASK;
 
-#[cfg(not(target_arch = "x86_64"))]
-#[cfg(not(target_arch = "riscv64"))]
-compile_error!("IntrusiveMailbox tagged-pointer requires x86-64 4-level paging. "
-    "See PML5 (TAG_SHIFT=57) or node-index allocator for other architectures.");
+// riscv64 Sv48: tag in the top 16 bits above the 56-bit VA space.
+#[cfg(target_arch = "riscv64")]
+const TAG_SHIFT: usize = 56;
+#[cfg(target_arch = "riscv64")]
+const TAG_MASK: usize = 0xFF00_0000_0000_0000;
+#[cfg(target_arch = "riscv64")]
+const PTR_MASK: usize = !TAG_MASK;
 
 static TAG_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
