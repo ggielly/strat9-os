@@ -162,6 +162,34 @@ impl VirtAddr {
     }
 }
 
+impl core::ops::Add<u64> for VirtAddr {
+    type Output = VirtAddr;
+    fn add(self, rhs: u64) -> VirtAddr {
+        VirtAddr(self.0 + rhs)
+    }
+}
+
+impl core::ops::Sub<u64> for VirtAddr {
+    type Output = VirtAddr;
+    fn sub(self, rhs: u64) -> VirtAddr {
+        VirtAddr(self.0 - rhs)
+    }
+}
+
+impl core::ops::Add<u64> for PhysAddr {
+    type Output = PhysAddr;
+    fn add(self, rhs: u64) -> PhysAddr {
+        PhysAddr(self.0 + rhs)
+    }
+}
+
+impl core::ops::Sub<u64> for PhysAddr {
+    type Output = PhysAddr;
+    fn sub(self, rhs: u64) -> PhysAddr {
+        PhysAddr(self.0 - rhs)
+    }
+}
+
 impl From<u64> for VirtAddr {
     /// Performs the from operation.
     fn from(addr: u64) -> Self {
