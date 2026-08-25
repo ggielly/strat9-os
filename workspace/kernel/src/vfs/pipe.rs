@@ -175,8 +175,13 @@ impl Pipe {
                         break;
                     }
                 }
+                // Transient: buffer full in non-blocking mode — surface EAGAIN.
                 Err(SyscallError::Again) if non_block => return Err(SyscallError::Again),
-                Err(_) => {}
+                // F13 FIX (L2 host harness, testing-findings.md): EPIPE from
+                // a closed read end was silently swallowed by the previous
+                // catch-all arm, spinning the writing task forever at 100%
+                // CPU instead of failing with EPIPE. Propagate it.
+                Err(e) => return Err(e),
             }
         }
         Ok(total)

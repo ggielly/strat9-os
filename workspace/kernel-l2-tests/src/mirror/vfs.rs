@@ -5,6 +5,8 @@ pub mod scheme;
 pub mod file;
 #[path = "../../../kernel/src/vfs/fd.rs"]
 pub mod fd;
+#[path = "../../../kernel/src/vfs/pipe.rs"]
+pub mod pipe;
 /// Shim for kernel/src/vfs/mount.rs (runtime mount table needs full VFS).
 pub mod mount {
     use alloc::sync::Arc;

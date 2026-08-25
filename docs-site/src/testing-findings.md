@@ -90,6 +90,16 @@ strip `/initfs/` avant recherche : clé stockée `/initfs/fs-ext4`, clé cherch�
 `fs-ext4` → raté. Conséquence possible : exec d'initfs via ce chemin cassé.
 Épinglé dans kernel_vfs_scheme.rs ; à confirmer sur le runtime QEMU.
 
+## F13 — Écrire dans un pipe à lecture fermée boucle à l'infini — ✅ CORRIGÉ
+Trouvé par le harnais L2 (le test pendait indéfiniment) :
+`Pipe::write` évalue la condition « read end closed → EPIPE » via
+`wait_until`, mais le bras `Err(_) => {}` du match avalait l'erreur et
+relançait la boucle — spin 100% CPU infini au lieu de retourner `EPIPE`.
+Violation directe du contrat POSIX (SIGPIPE/EPIPE). Fix : propagation de
+l'erreur fatale (`Err(e) => return Err(e)`), seul `Again` reste transitoire.
+Impact production réel : tout processus écrivant dans un pipe dont le
+lecteur est mort (shell pipelines, IPC interne) se figeait.
+
 ## Couverture ajoutée (L2 — code kernel réel sur hôte)
 
 | Suite | Tests | Périmètre |
