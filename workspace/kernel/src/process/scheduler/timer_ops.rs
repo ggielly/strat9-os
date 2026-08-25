@@ -226,7 +226,7 @@ fn check_wake_deadlines(current_time_ns: u64) {
         // Arc<Task> drop and BEFORE send_resched_ipi_to_cpu.
         // --- end critical section ---
     }
-    unsafe { core::arch::asm!("mov al, '2'; out 0xe9, al", out("al") _) };
+    debug_trace_putc(b'2');
 
     // Drop orphaned task Arcs outside the scheduler lock so that
     // KernelStack::drop → free_frames → buddy_alloc.lock() does not race
@@ -267,4 +267,10 @@ pub fn get_all_tasks() -> Option<alloc::vec::Vec<Arc<Task>>> {
     } else {
         None
     }
+}
+
+/// Trace putc routed to the arch serial backend (replaces port 0xE9 debug).
+#[inline]
+pub(crate) fn debug_trace_putc(c: u8) {
+    crate::arch::serial::_print(format_args!("{}", c as char));
 }

@@ -168,7 +168,7 @@ impl<T: ?Sized> SpinLock<T, IrqDisabled> {
                 // Diagnostic only: distinguish "IRQs enabled" from ordinary
                 // lock contention at call sites that intentionally treat both
                 // as a best-effort `None` return in hot paths.
-                unsafe { core::arch::asm!("mov al, 'V'; out 0xe9, al", out("al") _) };
+                debug_trace_putc(b'V');
                 return None;
             }
         };
@@ -349,3 +349,9 @@ impl<'a, T: ?Sized, G: Guardian> Drop for SpinLockGuard<'a, T, G> {
 // The guardian's invariant (e.g. preemption depth, IF flag) is per-CPU.
 // Sending the guard to another CPU would violate it.
 impl<T: ?Sized, G: Guardian> !Send for SpinLockGuard<'_, T, G> {}
+
+/// Trace putc routed to the arch serial backend (replaces port 0xE9 debug).
+#[inline]
+pub(crate) fn debug_trace_putc(c: u8) {
+    crate::arch::serial::_print(format_args!("{}", c as char));
+}

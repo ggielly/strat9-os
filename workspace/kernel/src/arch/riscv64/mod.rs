@@ -16,6 +16,7 @@ pub mod serial;
 
 pub mod vga {
     pub use super::vga_shim::VGA_WRITER;
+    pub use super::vga_text::{TextAlign, TextOptions, UiTheme};
     pub fn is_available() -> bool { false }
     #[allow(non_snake_case)]
     pub struct RgbColor;
@@ -23,6 +24,62 @@ pub mod vga {
         pub fn new(_r: u8, _g: u8, _b: u8) -> Self { RgbColor }
     }
     pub fn flush_display() {}
+    pub enum UiScale {
+        Compact,
+        Normal,
+        Large,
+    }
+    impl UiScale {
+        pub fn as_str(self) -> &'static str {
+            "normal"
+        }
+        pub fn next(self) -> Self {
+            self
+        }
+    }
+    pub fn ui_scale_px(_scale: UiScale) -> u32 {
+        8
+    }
+    pub fn width() -> usize {
+        0
+    }
+    pub fn height() -> usize {
+        0
+    }
+    pub fn screen_size() -> (usize, usize) {
+        (0, 0)
+    }
+    pub fn begin_frame() {}
+    pub fn end_frame() {}
+    pub fn fill_rect(_x: i32, _y: i32, _w: i32, _h: i32, _color: u32) {}
+    pub fn text_rows() -> usize {
+        0
+    }
+    pub fn text_cols() -> usize {
+        0
+    }
+    pub fn set_double_buffer_mode(_b: bool) {}
+    pub fn set_text_cursor(_col: usize, _row: usize) {}
+    pub fn draw_text_cursor(_color: super::vga::RgbColor) {}
+    pub fn hide_text_cursor() {}
+    pub fn write_text(_s: &str) {}
+    pub fn write_char(_c: char) {}
+    pub fn scroll_view_up() {}
+    pub fn scroll_view_down() {}
+    pub fn scroll_to_live() {}
+    pub fn start_selection(_x: usize, _y: usize) {}
+    pub fn update_selection(_x: usize, _y: usize) {}
+    pub fn end_selection() {}
+    pub fn clear_selection() {}
+    pub fn scrollbar_hit_test(_x: usize, _y: usize) -> bool {
+        false
+    }
+    pub fn scrollbar_drag_to(_x: usize, _y: usize) {}
+    pub fn scrollbar_click(_x: usize, _y: usize) {}
+    pub fn update_mouse_cursor(_x: usize, _y: usize) {}
+    pub fn panic_draw_direct(_msg: &str) {}
+    pub fn vga_debug_writeln(_s: &str) {}
+
 }
 
 
@@ -173,9 +230,51 @@ pub fn clac() {}
 
 pub mod cpuid {
     /// Placeholder ISA-feature probe. Real implementation reads the
-    /// `riscv,isa` string from the device tree (jalon R1.4).
+    /// `riscv,isa` device-tree property (jalon R1.4).
     #[derive(Default)]
     pub struct IsaFeatures;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub struct CpuFeature;
+    impl CpuFeature {
+        pub const SMEP: CpuFeature = CpuFeature;
+        pub const SMAP: CpuFeature = CpuFeature;
+    }
+
+    #[derive(Clone, Copy, Default)]
+    pub struct CpuFeatures {
+        bits: u32,
+    }
+    impl CpuFeatures {
+        pub fn contains(self, _f: CpuFeature) -> bool {
+            false
+        }
+    }
+
+    pub fn init() {}
+
+    pub fn host() -> IsaFeatures {
+        IsaFeatures
+    }
+    pub fn host_uses_xsave() -> bool {
+        false
+    }
+    pub fn host_default_xcr0() -> u64 {
+        0
+    }
+    pub fn host_default_xcr0_fast() -> u64 {
+        0
+    }
+    pub fn xsave_size_for_xcr0(_xcr0: u64) -> usize {
+        512
+    }
+    pub fn xcr0_for_features(_f: &CpuFeatures) -> u64 {
+        0
+    }
+    pub fn features_to_flags_string(_f: &IsaFeatures) -> alloc::string::String {
+        alloc::string::String::new()
+    }
+
 }
 
 pub mod speaker {
@@ -183,4 +282,33 @@ pub mod speaker {
     pub fn beep_phase(_n: u8) {}
     pub fn beep_startup() {}
     pub fn beep_panic() {}
+}
+
+pub mod cpuid_x86_shim {
+    // Feature flags referenced by task.rs; all false on RISC-V.
+    #[derive(Clone, Copy)]
+    pub struct CpuFeatures;
+    impl CpuFeatures {
+        pub const SMEP: CpuFeatures = CpuFeatures;
+        pub const SMAP: CpuFeatures = CpuFeatures;
+    }
+}
+
+/// x86-only CPU extensions init — no-op on RISC-V.
+pub fn init_cpu_extensions() {}
+
+// VGA text options (serial-only console: no-ops)
+pub mod vga_text {
+    pub enum TextAlign {
+        Left,
+        Center,
+        Right,
+    }
+    pub struct TextOptions;
+    impl TextOptions {
+        pub fn new() -> Self {
+            TextOptions
+        }
+    }
+    pub struct UiTheme;
 }

@@ -400,22 +400,22 @@ impl PerCpuClassRqSet {
     /// Performs the enqueue operation.
     fn enqueue(&mut self, class: crate::process::sched::SchedClassId, task: Arc<Task>) {
         use crate::process::sched::SchedClassRq;
-        unsafe { core::arch::asm!("mov al, 'q'; out 0xe9, al", out("al") _) };
+        debug_trace_putc(b'q');
         match class {
             crate::process::sched::SchedClassId::Fair => {
-                unsafe { core::arch::asm!("mov al, 'f'; out 0xe9, al", out("al") _) };
+                debug_trace_putc(b'f');
                 self.fair.enqueue(task);
             }
             crate::process::sched::SchedClassId::RealTime => {
-                unsafe { core::arch::asm!("mov al, 'r'; out 0xe9, al", out("al") _) };
+                debug_trace_putc(b'r');
                 self.real_time.enqueue(task);
             }
             crate::process::sched::SchedClassId::Idle => {
-                unsafe { core::arch::asm!("mov al, 'i'; out 0xe9, al", out("al") _) };
+                debug_trace_putc(b'i');
                 self.idle.enqueue(task);
             }
         }
-        unsafe { core::arch::asm!("mov al, 'Q'; out 0xe9, al", out("al") _) };
+        debug_trace_putc(b'Q');
     }
 
     /// Performs the len by class operation.
@@ -656,3 +656,9 @@ mod timer_ops;
 pub use runtime_ops::*;
 pub use task_ops::*;
 pub use timer_ops::*;
+
+/// Trace putc routed to the arch serial backend (replaces port 0xE9 debug).
+#[inline]
+pub(crate) fn debug_trace_putc(c: u8) {
+    crate::arch::serial::_print(format_args!("{}", c as char));
+}

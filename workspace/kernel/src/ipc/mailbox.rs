@@ -36,6 +36,7 @@ const TAG_MASK: usize = 0xFFFF_0000_0000_0000;
 const PTR_MASK: usize = !TAG_MASK;
 
 #[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(target_arch = "riscv64"))]
 compile_error!("IntrusiveMailbox tagged-pointer requires x86-64 4-level paging. "
     "See PML5 (TAG_SHIFT=57) or node-index allocator for other architectures.");
 

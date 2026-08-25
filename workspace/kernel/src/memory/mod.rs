@@ -153,11 +153,11 @@ pub fn release_owned_block(block: PhysBlock<Released>) {
         let order = handle.order;
 
         // 1. on_last_ref : once per block (head frame only).
-        frame::invoke_vtable_on_last_ref(x86_64::PhysAddr::new(frame_phys));
+        frame::invoke_vtable_on_last_ref(crate::arch::xshim::PhysAddr::new(frame_phys));
 
         // 2. on_unmap : once per constituent page.
         for i in 0..(1u64 << order) {
-            let p = x86_64::PhysAddr::new(frame_phys + i * frame::PAGE_SIZE);
+            let p = crate::arch::xshim::PhysAddr::new(frame_phys + i * frame::PAGE_SIZE);
             frame::invoke_vtable_on_unmap(p);
         }
         buddy::free(

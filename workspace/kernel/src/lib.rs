@@ -1519,3 +1519,99 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
 
     true
 }
+
+/// Boot-module lookup shim for non-x86 targets (always empty).
+/// Boot-module lookup shim for non-x86 targets (always empty).
+#[cfg(not(target_arch = "x86_64"))]
+pub mod boot_limine_shim {
+    pub fn kernel_elf_bytes() -> Option<&'static [u8]> {
+        None
+    }
+    pub fn test_syscalls_module() -> Option<(u64, u64)> {
+        None
+    }
+
+    pub fn test_mem_module() -> Option<(u64, u64)> {
+        None
+    }
+
+    pub fn test_mem_stressed_module() -> Option<(u64, u64)> {
+        None
+    }
+
+    pub fn test_mem_region_module() -> Option<(u64, u64)> {
+        None
+    }
+
+    pub fn test_mem_region_proc_module() -> Option<(u64, u64)> {
+        None
+    }
+
+    pub fn test_exec_module() -> Option<(u64, u64)> {
+        None
+    }
+
+    pub fn test_exec_helper_module() -> Option<(u64, u64)> {
+        None
+    }
+
+    pub fn fs_ext4_module() -> Option<(u64, u64)> {
+        None
+    }
+
+    pub fn strate_fs_ramfs_module() -> Option<(u64, u64)> {
+        None
+    }
+
+    pub fn init_module() -> Option<(u64, u64)> {
+        None
+    }
+
+    pub fn console_admin_module() -> Option<(u64, u64)> {
+        None
+    }
+
+    pub fn strate_net_module() -> Option<(u64, u64)> {
+        None
+    }
+
+    pub fn strate_bus_module() -> Option<(u64, u64)> {
+        None
+    }
+
+    pub fn dhcp_client_module() -> Option<(u64, u64)> {
+        None
+    }
+
+    pub fn ping_module() -> Option<(u64, u64)> {
+        None
+    }
+
+    pub fn telnetd_module() -> Option<(u64, u64)> {
+        None
+    }
+
+    pub fn udp_tool_module() -> Option<(u64, u64)> {
+        None
+    }
+
+    pub fn strate_wasm_module() -> Option<(u64, u64)> {
+        None
+    }
+
+    pub fn hello_wasm_module() -> Option<(u64, u64)> {
+        None
+    }
+
+    pub fn wasm_test_toml_module() -> Option<(u64, u64)> {
+        None
+    }
+
+    pub fn strate_webrtc_module() -> Option<(u64, u64)> {
+        None
+    }
+
+    pub fn web_admin_module() -> Option<(u64, u64)> {
+        None
+    }
+}

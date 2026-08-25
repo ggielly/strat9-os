@@ -188,7 +188,7 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     {
         let stack_top =
             first_task.kernel_stack.virt_base.as_u64() + first_task.kernel_stack.size as u64;
-        crate::arch::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
+        crate::arch::tss::set_kernel_stack(crate::arch::xshim::VirtAddr::new(stack_top));
         crate::arch::syscall::set_kernel_rsp(stack_top);
         crate::serial_force_println!(
             "[trace][sched] schedule_on_cpu stacks set cpu={} rsp0={:#x}",
@@ -266,7 +266,7 @@ pub fn finish_switch() {
             }
             spins = spins.saturating_add(1);
             if spins % 1_000_000 == 0 {
-                unsafe { core::arch::asm!("mov al, 'W'; out 0xe9, al", out("al") _) };
+                debug_trace_putc(b'W');
             }
             core::hint::spin_loop();
         };
@@ -585,15 +585,15 @@ pub fn maybe_preempt_from_interrupt(
             return None;
         }
 
-        unsafe { core::arch::asm!("mov al, '1'; out 0xe9, al", out("al") _) };
+        debug_trace_putc(b'1');
         let current = match cpu.current_task.as_ref() {
             Some(t) => t.clone(),
             None => {
-                unsafe { core::arch::asm!("mov al, 'X'; out 0xe9, al", out("al") _) };
+                debug_trace_putc(b'X');
                 return None;
             }
         };
-        unsafe { core::arch::asm!("mov al, '2'; out 0xe9, al", out("al") _) };
+        debug_trace_putc(b'2');
         current.set_resume_kind(crate::process::task::ResumeKind::IretFrame);
         current.set_interrupt_rsp(current_frame_rsp);
 
@@ -621,7 +621,7 @@ pub fn maybe_preempt_from_interrupt(
             }
             let fits = interrupt_frame_fits(&next, next_rsp);
             if next_rsp == 0 || !fits {
-                unsafe { core::arch::asm!("mov al, 'A'; out 0xe9, al", out("al") _) };
+                debug_trace_putc(b'A');
                 let is_idle_fallback = Arc::ptr_eq(&next, &cpu.idle_task);
                 _task_to_drop = cpu.task_to_drop.take();
 
@@ -656,7 +656,7 @@ pub fn maybe_preempt_from_interrupt(
                 let stack_top =
                     next.kernel_stack.virt_base.as_u64() + next.kernel_stack.size as u64;
 
-                crate::arch::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
+                crate::arch::tss::set_kernel_stack(crate::arch::xshim::VirtAddr::new(stack_top));
                 crate::arch::syscall::set_kernel_rsp(stack_top);
 
                 let old_fpu = current.fpu_state.get() as *mut u8;
@@ -861,4 +861,10 @@ pub(super) extern "C" fn idle_task_main() -> ! {
         // Halt until next interrupt (saves power, timer will wake us)
         crate::arch::hlt();
     }
+}
+
+/// Trace putc routed to the arch serial backend (replaces port 0xE9 debug).
+#[inline]
+pub(crate) fn debug_trace_putc(c: u8) {
+    crate::arch::serial::_print(format_args!("{}", c as char));
 }
