@@ -31,8 +31,42 @@ pub mod vga {
     pub fn draw_rect(_x: i32, _y: i32, _w: i32, _h: i32, _color: u32) {}
     pub fn draw_text(_s: &str, _x: i32, _y: i32, _color: u32) {}
     pub fn fill_rect_alpha(_x: i32, _y: i32, _w: i32, _h: i32, _c: u32, _a: u8) {}
-    pub fn framebuffer_info() -> Option<(u64, usize, usize)> {
-        None
+    #[derive(Clone, Copy)]
+    pub struct FramebufferInfo {
+        pub available: bool,
+        pub width: usize,
+        pub height: usize,
+        pub pitch: usize,
+        pub bpp: u16,
+        pub red_size: u8,
+        pub red_shift: u8,
+        pub green_size: u8,
+        pub green_shift: u8,
+        pub blue_size: u8,
+        pub blue_shift: u8,
+        pub text_cols: usize,
+        pub text_rows: usize,
+        pub glyph_w: usize,
+        pub glyph_h: usize,
+    }
+    pub fn framebuffer_info() -> FramebufferInfo {
+        FramebufferInfo {
+            available: false,
+            width: 0,
+            height: 0,
+            pitch: 0,
+            bpp: 0,
+            red_size: 0,
+            red_shift: 0,
+            green_size: 0,
+            green_shift: 0,
+            blue_size: 0,
+            blue_shift: 0,
+            text_cols: 80,
+            text_rows: 25,
+            glyph_w: 8,
+            glyph_h: 16,
+        }
     }
     pub fn glyph_size() -> (usize, usize) {
         (8, 16)
@@ -362,9 +396,6 @@ pub mod vga_draw {
     pub fn draw_rect(_x: i32, _y: i32, _w: i32, _h: i32, _color: u32) {}
     pub fn draw_text(_s: &str, _x: i32, _y: i32, _color: u32) {}
     pub fn fill_rect_alpha(_x: i32, _y: i32, _w: i32, _h: i32, _color: u32, _alpha: u8) {}
-    pub fn framebuffer_info() -> Option<(u64, usize, usize)> {
-        None
-    }
     pub fn glyph_size() -> (usize, usize) {
         (8, 16)
     }
