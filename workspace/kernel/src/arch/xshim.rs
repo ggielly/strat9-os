@@ -18,6 +18,8 @@ pub use x86_64::{
 
 #[cfg(not(target_arch = "x86_64"))]
 mod neutral {
+    pub use crate::ostd::mm::{PhysAddr, VirtAddr};
+
 /// Page granularity markers (4 KiB / 2 MiB).
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub struct Size4KiB;

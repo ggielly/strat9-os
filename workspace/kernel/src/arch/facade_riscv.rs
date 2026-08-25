@@ -51,6 +51,9 @@ pub mod percpu {
     }
     pub fn preempt_disable() {}
     pub fn preempt_enable() {}
+    pub fn is_preemptible() -> bool {
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -96,7 +99,9 @@ pub mod smp {
     pub fn broadcast_panic_halt() {}
 }
 
-pub use pci_full::*;
+pub mod pci {
+    pub use super::pci_full::*;
+}
 
 pub mod gdt {
     // No segment selectors on RISC-V; iret-frame fields become arch-neutral.
@@ -117,6 +122,10 @@ pub mod gdt {
 pub mod tss {
     pub fn init() {}
     pub fn set_kernel_stack(_top: u64) {}
+    pub fn set_kernel_stack_for(_cpu: usize, _top: u64) {}
+    pub fn kernel_stack_for(_cpu: usize) -> Option<crate::ostd::mm::VirtAddr> {
+        None
+    }
 }
 
 pub mod io {
@@ -130,7 +139,25 @@ pub mod io {
     pub fn outb(_port: u16, _val: u8) {
         panic!("port I/O unavailable on riscv64")
     }
+    #[inline]
+    pub fn inw(_port: u16) -> u16 {
+        panic!("port I/O unavailable on riscv64")
+    }
+    #[inline]
+    pub fn outw(_port: u16, _val: u16) {
+        panic!("port I/O unavailable on riscv64")
+    }
+    #[inline]
+    pub fn inl(_port: u16) -> u32 {
+        panic!("port I/O unavailable on riscv64")
+    }
+    #[inline]
+    pub fn outl(_port: u16, _val: u32) {
+        panic!("port I/O unavailable on riscv64")
+    }
 }
+
+pub mod mouse_ready_marker {}
 
 pub mod keyboard {
     pub const KEY_LEFT: &str = "\x1b[D";
@@ -147,6 +174,8 @@ pub mod keyboard {
 }
 
 pub mod mouse {
+    pub static MOUSE_READY: core::sync::atomic::AtomicBool =
+        core::sync::atomic::AtomicBool::new(false);
     pub fn init() -> bool { false }
     pub fn handle_irq() {}
     pub fn read_event() -> Option<(i32, i32, u8)> { None }
@@ -205,17 +234,142 @@ pub mod pci_full {
         alloc::vec::Vec::new()
     }
     pub fn invalidate_cache() {}
-    pub mod vendor { pub const UNKNOWN: u16 = 0; }
-    pub mod device { pub const UNKNOWN: u16 = 0; }
-    pub mod class { pub const UNCLASSIFIED: u8 = 0; }
-    pub mod config {}
+    pub fn probe_all(_crit: ProbeCriteria) -> alloc::vec::Vec<PciAddress> {
+        alloc::vec::Vec::new()
+    }
+    pub fn probe_first(_crit: ProbeCriteria) -> Option<(PciAddress, PciDevice)> {
+        None
+    }
+    pub mod vendor {
+        pub const UNKNOWN: u16 = 0xFFFF;
+        pub const VIRTIO: u16 = 0x1AF4;
+    }
+    pub mod device {
+        pub const UNKNOWN: u16 = 0;
+        pub const VIRTIO_NET: u16 = 0x1000;
+        pub const VIRTIO_BLOCK: u16 = 0x1001;
+    }
+    pub mod class {
+        pub const UNCLASSIFIED: u8 = 0x00;
+        pub const NETWORK: u8 = 0x02;
+        pub const MASS_STORAGE: u8 = 0x01;
+    }
+    pub mod config {
+        pub const BAR0: u8 = 0x10;
+        pub const COMMAND: u8 = 0x04;
+        pub const INTERRUPT_LINE: u8 = 0x3C;
+        pub const INTERRUPT_PIN: u8 = 0x3D;
+        pub fn read_u32(_addr: PciAddress, _off: u8) -> u32 {
+            0xFFFF_FFFF
+        }
+    }
+    pub mod cap_id {
+        pub const MSI: u8 = 0x05;
+        pub const MSIX: u8 = 0x11;
+    }
+    pub mod command {
+        pub const MEMORY_SPACE: u16 = 0x2;
+        pub const BUS_MASTER: u16 = 0x4;
+        pub const INTERRUPT_DISABLE: u16 = 0x400;
+    }
+    pub struct Bar;
+    impl Bar {
+        pub fn phys_addr(&self) -> u64 {
+            0
+        }
+        pub fn size(&self) -> u64 {
+            0
+        }
+    }
+    #[derive(Clone, Copy)]
+    pub struct ProbeCriteria;
+    impl ProbeCriteria {
+        pub fn new() -> Self {
+            ProbeCriteria
+        }
+    }
     pub mod msi_cap {}
     pub mod msix_cap {}
     pub mod msix_ctrl {}
     pub mod msi_ctrl {}
-    pub mod intel_eth {}
-    pub mod net_subclass {}
-    pub mod storage_subclass {}
+    pub mod intel_eth {
+        pub const E1000_82540EM: u16 = 0x100E;
+        pub const E1000_82545EM: u16 = 0x100F;
+    }
+    pub mod net_subclass {
+        pub const ETHERNET: u8 = 0x00;
+    }
+    pub mod storage_subclass {
+        pub const SCSI: u8 = 0x00;
+    }
     pub mod sata_progif {}
     pub const MSI_ADDR_BASE: u32 = 0xFEE0_0000;
+    pub const MSI_ADDR_DEST_SHIFT: u32 = 12;
+}
+
+// stac/clac: SMAP does not exist on RISC-V — no-ops.
+pub fn stac() {}
+pub fn clac() {}
+
+// xsave/xcr0 helpers referenced by task.rs/framebuffer — always false on RISC-V.
+pub mod cpuid_x86 {
+    pub use crate::arch::riscv64::cpuid_x86_shim::CpuFeatures;
+    pub fn host_uses_xsave() -> bool {
+        false
+    }
+    pub fn host_default_xcr0() -> u64 {
+        0
+    }
+    pub fn host_default_xcr0_fast() -> u64 {
+        0
+    }
+    pub fn xsave_size_for_xcr0(_xcr0: u64) -> usize {
+        512
+    }
+}
+
+// pci_full re-exported as `pci` already; add missing submodules used by gfx/shell.
+pub mod msi {
+    pub fn enable(_dev: (), _vec: u8) {}
+}
+pub mod ioapic {
+    pub fn init(_addr: u64, _gsi: u32) {}
+    pub fn mask_legacy_irq(_irq: u8) {}
+    pub fn route_nic_irq(_irq: u8, _vector: u8) {}
+    pub fn route_irq(_gsi: u32, _vector: u8) {}
+}
+pub mod vga_text {
+    pub enum TextAlign {
+        Left,
+        Center,
+        Right,
+    }
+    pub struct TextOptions;
+    impl TextOptions {
+        pub fn new() -> Self {
+            TextOptions
+        }
+        pub fn align(self, _a: TextAlign) -> Self {
+            self
+        }
+    }
+    pub struct UiTheme;
+    impl UiTheme {
+        pub const DEFAULT: UiTheme = UiTheme;
+    }
+}
+
+// io: MMIO-only on RISC-V; port accessors panic (see io stubs above).
+pub mod io2 {
+    pub use super::io::{inb, outb, inw, outw, inl, outl};
+}
+
+pub mod ring3_diag {
+    pub fn validate_ring3_state(_rip: u64, _rsp: u64, _cs: u64) {}
+}
+
+pub mod tss_extra {
+    pub fn kernel_stack_for(_cpu: usize) -> Option<u64> {
+        None
+    }
 }

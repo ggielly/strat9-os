@@ -1253,10 +1253,10 @@ pub(super) fn cmd_test_exec_impl(_args: &[String]) -> Result<(), ShellError> {
     let path = "/initfs/test_exec";
     shell_println!("Launching {} ...", path);
 
-    let boot_bytes = initfs_or_boot_module(path, crate::boot::limine::test_exec_module());
+    let boot_bytes = initfs_or_boot_module(path, crate::boot::limine_shim::test_exec_module());
     let _ = initfs_or_boot_module(
         "/initfs/test_exec_helper",
-        crate::boot::limine::test_exec_helper_module(),
+        crate::boot::limine_shim::test_exec_helper_module(),
     );
 
     if let Some(data) = boot_bytes {
@@ -1277,7 +1277,7 @@ pub(super) fn cmd_test_exec_impl(_args: &[String]) -> Result<(), ShellError> {
         Ok(fd) => fd,
         Err(e) => {
             shell_println!("open failed: {:?}", e);
-            if crate::boot::limine::test_exec_module().is_none() {
+            if crate::boot::limine_shim::test_exec_module().is_none() {
                 shell_println!(
                     "test_exec boot module missing from current image; rebuild the userspace image so /initfs/test_exec is copied"
                 );

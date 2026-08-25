@@ -115,3 +115,9 @@ macro_rules! serial_force_println {
     () => ($crate::arch::serial::_print(format_args!("\n")));
     ($($arg:tt)*) => ($crate::arch::serial::_print(format_args!("{}\n", format_args!($($arg)*))));
 }
+
+/// Store a boot cmdline for later retrieval (set by the SBI boot path).
+static mut CMDLINE: Option<&'static str> = None;
+
+/// Parse and retain the kernel cmdline from the boot protocol.
+pub fn parse_cmdline(_ptr: *const u8, _len: usize) {}

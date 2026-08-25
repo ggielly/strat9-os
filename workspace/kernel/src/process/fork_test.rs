@@ -93,7 +93,7 @@ fn spawn_user_program_task(
     )?;
 
     let code_phys = user_as
-        .translate(x86_64::VirtAddr::new(USER_CODE_ADDR))
+        .translate(crate::arch::x86_64::VirtAddr::new(USER_CODE_ADDR))
         .ok_or("Failed to translate user code page")?;
     let code_virt = crate::memory::phys_to_virt(code_phys.as_u64()) as *mut u8;
     unsafe {
@@ -194,7 +194,7 @@ fn cow_test_refcount_unmap() -> bool {
         return false;
     }
 
-    let phys = match aspace.translate(x86_64::VirtAddr::new(COW_TEST_ADDR)) {
+    let phys = match aspace.translate(crate::arch::x86_64::VirtAddr::new(COW_TEST_ADDR)) {
         Some(p) => p,
         None => {
             crate::serial_println!("[fork-test] cow refcount: translate parent failed");
@@ -289,7 +289,7 @@ fn cow_test_write_fault_copy() -> bool {
         return false;
     }
 
-    let parent_phys = match aspace.translate(x86_64::VirtAddr::new(COW_TEST_ADDR)) {
+    let parent_phys = match aspace.translate(crate::arch::x86_64::VirtAddr::new(COW_TEST_ADDR)) {
         Some(p) => p,
         None => {
             crate::serial_println!("[fork-test] cow fault: translate parent failed");
@@ -313,7 +313,7 @@ fn cow_test_write_fault_copy() -> bool {
         return false;
     }
 
-    let child_phys = match child.translate(x86_64::VirtAddr::new(COW_TEST_ADDR)) {
+    let child_phys = match child.translate(crate::arch::x86_64::VirtAddr::new(COW_TEST_ADDR)) {
         Some(p) => p,
         None => {
             crate::serial_println!("[fork-test] cow fault: translate child failed");
