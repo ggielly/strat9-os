@@ -23,18 +23,25 @@ pub mod registers {
 }
 pub mod instructions {
     pub mod port {
+        // Typed port handles (riscv has no port I/O; these exist purely so
+        // x86-only driver code typechecks and never runs).
+        pub struct Port8; pub struct Port16; pub struct Port32;
+
         pub struct Port<T>(core::marker::PhantomData<T>);
         impl<T> Port<T> {
             pub fn new(_addr: u16) -> Self { panic!("port I/O on riscv64") }
         }
-        pub trait PortRead<R> { fn read(&mut self) -> R; }
-        pub trait PortWrite<V> { fn write(&mut self, _v: V); }
-        impl PortRead<u8> for Port<u8> { fn read(&mut self) -> u8 { panic!("in") } }
-        impl PortRead<u16> for Port<u16> { fn read(&mut self) -> u16 { panic!("in") } }
-        impl PortRead<u32> for Port<u32> { fn read(&mut self) -> u32 { panic!("in") } }
-        impl PortWrite<u8> for Port<u8> { fn write(&mut self, _v: u8) {} }
-        impl PortWrite<u16> for Port<u16> { fn write(&mut self, _v: u16) {} }
-        impl PortWrite<u32> for Port<u32> { fn write(&mut self, _v: u32) {} }
+        macro_rules! impl_port_rw {
+            ($t:ty) => {
+                impl Port<$t> {
+                    pub fn read(&mut self) -> $t { panic!("port in on riscv64") }
+                    pub fn write(&mut self, _v: $t) {}
+                }
+            };
+        }
+        impl_port!(u8);
+        impl_port!(u16);
+        impl_port!(u32);
     }
     pub mod hlt {
         pub fn hlt() {}
