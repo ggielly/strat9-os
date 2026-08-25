@@ -15,3 +15,4 @@
 - [Syscall Layer](syscall.md)
 - [Changelog](changelog.md)
 - [Publishing](publishing.md)
+- [Testing Architecture](testing-architecture.md)
