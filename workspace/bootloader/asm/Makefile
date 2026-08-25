@@ -1,5 +1,12 @@
-# Makefile for CascadeOS Bootloader Assembly
-# Assembles Stage 1 and Stage 2 bootloader
+# Makefile for Strat9-OS Bootloader Assembly
+# NOTE: this standalone flow is legacy and currently broken:
+# - stage1.asm %includes stage2.asm and produces a single flat image
+#   (stage1 + embedded stage2, 17 sectors total), so the "stage1 must be
+#   exactly 512 bytes" assertion below never holds;
+# - stage2.asm cannot be assembled standalone (it references labels from
+#   stage1.asm: print/load/DAPACK/GDT...).
+# The working assembly path is build.rs (cargo build) or
+# tools/scripts/assemble-bootloader.sh, which assemble stage1.asm alone.
 
 # Tools
 NASM = nasm

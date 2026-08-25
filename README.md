@@ -167,7 +167,7 @@ See [HARDWARE.md](HARDWARE.md) for a complete list of supported drivers, tested 
 
 - `workspace/kernel/` : the strat9-os kernel : Bedrock
 - `workspace/components/` : userspace components
-- `workspace/bootloader/` : limine-based bootloader
+- `workspace/bootloader/` : custom multi-stage BIOS bootloader (legacy, kept for reference). The active boot path is the external [Limine](https://github.com/limine-bootloader/limine) bootloader, configured by `limine.conf`
 - `doc/` : specifications and design docs
 - `tools/` : build and helper scripts
 
