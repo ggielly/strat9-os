@@ -810,7 +810,10 @@ fn apply_dynamic_relocations(
     let mut pltrel_kind: Option<u64> = None;
     let mut symtab_addr: Option<u64> = None;
     let mut sym_ent: usize = core::mem::size_of::<Elf64Sym>();
-    let _strtab_addr: Option<u64> = None;
+    // Relocated DT_STRTAB: stored now so future symbol-by-name PLT/GOT
+    // lazy-binding resolution can map Elf64Sym::st_name offsets to strings
+    // (issue #66). Not consumed yet beyond tracing.
+    let mut strtab_addr: Option<u64> = None;
     let mut rela_count_hint: Option<usize> = None;
     let mut relr_addr: Option<u64> = None;
     let mut relr_size: usize = 0;
@@ -852,10 +855,12 @@ fn apply_dynamic_relocations(
             }
             DT_SYMENT => sym_ent = dyn_entry.d_val as usize,
             DT_STRTAB => {
-                let _ = dyn_entry
-                    .d_val
-                    .checked_add(load_bias)
-                    .ok_or("DT_STRTAB relocated address overflow")?;
+                strtab_addr = Some(
+                    dyn_entry
+                        .d_val
+                        .checked_add(load_bias)
+                        .ok_or("DT_STRTAB relocated address overflow")?,
+                );
             }
             DT_RELR => {
                 relr_addr = Some(
@@ -886,6 +891,12 @@ fn apply_dynamic_relocations(
     if pltrel_kind.is_some() && pltrel_kind != Some(DT_RELA as u64) {
         return Err("Only DT_PLTREL=DT_RELA is supported");
     }
+
+    elf_trace!(
+        "[elf] dynamic: symtab={:?} strtab={:?}",
+        symtab_addr,
+        strtab_addr
+    );
 
     let read_sym_entry = |sym_idx: u32| -> Result<Elf64Sym, &'static str> {
         let symtab = symtab_addr.ok_or("Missing DT_SYMTAB for symbol relocations")?;
