@@ -16,3 +16,4 @@
 - [Changelog](changelog.md)
 - [Publishing](publishing.md)
 - [Testing Architecture](testing-architecture.md)
+- [Testing Findings Report](testing-findings.md)
