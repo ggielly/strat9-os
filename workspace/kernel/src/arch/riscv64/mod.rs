@@ -80,7 +80,29 @@ pub mod vga {
         false
     }
     pub fn status_line_task_main() {}
-    pub fn init(_fb: u64, _w: usize, _h: usize, _stride: usize, _bpp: usize) {}
+    #[allow(clippy::too_many_arguments)]
+    pub fn init(
+        fb_addr: u64,
+        width: usize,
+        height: usize,
+        stride: usize,
+        bpp: u16,
+        _red_size: u8,
+        _red_shift: u8,
+        _green_size: u8,
+        _green_shift: u8,
+        _blue_size: u8,
+        _blue_shift: u8,
+    ) {
+        let _ = (fb_addr, width, height, stride, bpp);
+    }
+
+    #[allow(dead_code)]
+    pub extern "C" fn status_line_task_main() -> ! {
+        loop {
+            core::hint::spin_loop();
+        }
+    }
     pub enum UiScale {
         Compact,
         Normal,
@@ -408,7 +430,29 @@ pub mod vga_draw {
         false
     }
     pub fn status_line_task_main() {}
-    pub fn init(_fb: u64, _w: usize, _h: usize, _stride: usize, _bpp: usize) {}
+    #[allow(clippy::too_many_arguments)]
+    pub fn init(
+        fb_addr: u64,
+        width: usize,
+        height: usize,
+        stride: usize,
+        bpp: u16,
+        _red_size: u8,
+        _red_shift: u8,
+        _green_size: u8,
+        _green_shift: u8,
+        _blue_size: u8,
+        _blue_shift: u8,
+    ) {
+        let _ = (fb_addr, width, height, stride, bpp);
+    }
+
+    #[allow(dead_code)]
+    pub extern "C" fn status_line_task_main() -> ! {
+        loop {
+            core::hint::spin_loop();
+        }
+    }
 }
 
 pub mod config_consts {
