@@ -134,6 +134,9 @@ pub fn sys_silo_pledge(mode_val: u64) -> Result<u64, SyscallError> {
     if let Some(silo_id) = mgr.silo_for_task(task.id) {
         if let Ok(silo) = mgr.get_mut(silo_id) {
             silo.mode.pledge(new_mode)?;
+            // Keep the raw ABI view in sync (snapshots and sandbox checks
+            // read config.mode; kernel_pledge_silo does the same).
+            silo.config.mode = mode_val as u16;
 
             mgr.push_event(SiloEvent {
                 silo_id: silo_id as u64,
@@ -2126,6 +2129,11 @@ pub fn sys_silo_config(handle: u64, res_ptr: u64) -> Result<u64, SyscallError> {
     if silo.sandboxed && !requested_mode.registry.is_empty() {
         return Err(SyscallError::PermissionDenied);
     }
+
+    // XCR0 is a kernel-computed derived value: never trust the
+    // user-supplied field (kernel_spawn_strate already derives it).
+    let mut config = config;
+    config.xcr0_mask = compute_silo_xcr0(&config);
 
     silo.config = config;
     silo.mode = requested_mode;
