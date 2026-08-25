@@ -66,6 +66,18 @@ const READ_DATA_CAPACITY: usize = IpcMessage::PAYLOAD_CAPACITY - READ_HEADER_SIZ
 /// reply prologue (`next_cursor` + `count` + `size`, written at 4..8).
 const READDIR_DATA_CAPACITY: usize = IpcMessage::PAYLOAD_CAPACITY - READDIR_HEADER_SIZE;
 
+/// Fixed reply prologue of a READ reply: `status` (4) + `count` (4).
+const READ_HEADER_SIZE: usize = 8;
+/// Fixed reply prologue of a READDIR reply: `status` (4) + `next_cursor`
+/// (2) + `count` (1) + `size` (1), written at payload offsets 0..8.
+const READDIR_HEADER_SIZE: usize = 8;
+/// Max inline data bytes carried by a READ reply:
+/// full payload minus the `status`/`count` prefix.
+const READ_DATA_CAPACITY: usize = IpcMessage::PAYLOAD_CAPACITY - READ_HEADER_SIZE;
+/// Max bytes usable for readdir entries: full payload minus the fixed
+/// reply prologue (`next_cursor` + `count` + `size`, written at 4..8).
+const READDIR_DATA_CAPACITY: usize = IpcMessage::PAYLOAD_CAPACITY - READDIR_HEADER_SIZE;
+
 // === Path constants ========================================================
 
 /// Driver-specific paths (relative to the driver prefix).
