@@ -11,6 +11,26 @@ pub mod channel;
 pub mod n1;
 #[path = "../../../kernel/src/ipc/semaphore.rs"]
 pub mod semaphore;
+#[path = "../../../kernel/src/ipc/port.rs"]
+pub mod port;
+
+/// Shim for kernel/src/ipc/reply.rs (pulls async_io rings — out of scope).
+pub mod reply {
+    use crate::process::TaskId;
+
+    /// Blocking reply wait cannot run on the host single thread.
+    pub fn wait_for_reply(_task_id: TaskId, _port_owner: TaskId) -> ! {
+        panic!("ipc::reply::wait_for_reply called on host — blocking unsupported");
+    }
+
+    /// No-op host stand-in: no pending waiters to cancel.
+    pub fn cancel_replies_waiting_on(_owner: TaskId) {}
+
+    /// No-op host stand-in: nobody is waiting for replies.
+    pub fn deliver_reply(_sender: TaskId, _msg: crate::ipc::message::IpcMessage) -> bool {
+        false
+    }
+}
 
 /// Minimal stand-in for the kernel transport traits used by LockFreeRing.
 /// Signatures mirror kernel/src/ipc/transport.rs closely enough for the

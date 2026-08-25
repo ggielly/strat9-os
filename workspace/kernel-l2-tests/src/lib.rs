@@ -119,6 +119,50 @@ pub mod silo {
     }
 }
 
+// Shims for hardware-bound kernel modules referenced by included sources
+// (`crate::ostd`, `crate::hardware`). Variant sets match the real enums.
+pub mod ostd {
+    pub mod util {
+        #[derive(Debug)]
+        pub enum Error {
+            OutOfMemory,
+            InvalidArgument,
+            NotFound,
+            AlreadyExists,
+            PermissionDenied,
+            Busy,
+            PageFault,
+            ArchError(u8),
+        }
+    }
+    pub mod mm {
+        #[derive(Debug)]
+        pub enum MapError {
+            OutOfBounds,
+            NotOwner,
+            AlreadyMapped,
+            InvalidAddress,
+            OutOfMemory,
+            ArchError(u8),
+        }
+    }
+}
+
+pub mod hardware {
+    pub mod storage {
+        pub mod virtio_block {
+            #[derive(Debug)]
+            pub enum BlockError {
+                IoError,
+                InvalidSector,
+                BufferTooSmall,
+                NotReady,
+            }
+        }
+    }
+}
+
+
 // Kernel serial macros: route to stderr so test output stays visible.
 #[macro_export]
 macro_rules! serial_println {
@@ -155,6 +199,11 @@ pub mod ipc;
 /// `sync::SpinLock` and `syscall_error`.
 #[path = "../../kernel/src/namespace/mod.rs"]
 pub mod namespace;
+
+/// VFS scheme protocol core + router, verbatim (user slices faked at the
+/// memory level so no page-table walk happens on the host).
+#[path = "mirror/vfs.rs"]
+pub mod vfs;
 
 // ===========================================================================
 // Functional stand-ins for hardware-bound kernel modules

@@ -83,6 +83,13 @@ arrivent en ordre INVERSE d'émission. Sans gravité pour des événements
 indépendants, mais toute logique future dépendant de l'ordre causal
 (SchedTick avant Wakeup…) héritera de cette inversion. Épinglé AS IMPLEMENTED.
 
+## F12 — `get_initfs_file_bytes` ne retrouve pas les fichiers enregistrés avec préfixe — ⚠️ à vérifier au runtime
+Le boot enregistre les modules Limine avec leur chemin complet
+(`/initfs/fs-ext4`, cf. log « Registered /initfs/fs-ext4 »), mais le lookup
+strip `/initfs/` avant recherche : clé stockée `/initfs/fs-ext4`, clé cherchée
+`fs-ext4` → raté. Conséquence possible : exec d'initfs via ce chemin cassé.
+Épinglé dans kernel_vfs_scheme.rs ; à confirmer sur le runtime QEMU.
+
 ## Couverture ajoutée (L2 — code kernel réel sur hôte)
 
 | Suite | Tests | Périmètre |
@@ -93,7 +100,12 @@ indépendants, mais toute logique future dépendant de l'ordre causal
 | `kernel-l2-tests/tests/kernel_channels.rs` | 9 | canal MPMC typé (multi-producteurs, disconnect lifecycle), SyncChan registre + drain-first après destroy |
 | `kernel-l2-tests/tests/kernel_n1_semaphores.rs` | 6+2 inline | événements N1 (ordre LIFO épinglé), sémaphores POSIX (comptage, destroy, registre) |
 
-Total porte CI : **335 tests verts**.
+| `kernel-l2-tests/tests/kernel_vfs_scheme.rs` | 7 | finalize_pseudo_stat, registre KernelScheme (/initfs), routeur global de schemes, F12 |
+
+Total porte CI : **342 tests verts**.
+
+Reste candidat L2 : `process/sched_classes` (ordonnanceur), `vfs/fd.rs`,
+et la fake de validation userslice pour les handlers IpcScheme read/write.
 
 Total porte CI : **327 tests verts**.
 
