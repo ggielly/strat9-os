@@ -256,15 +256,15 @@ pub mod structures {
                 _frame: crate::arch::xshim::PhysFrame<S>,
                 _flags: crate::arch::xshim::PageTableFlags,
                 _alloc: &mut dyn FrameAllocator<Size4KiB>,
-            ) -> Result<MapperFlush<S>, structures::paging::mapper::MapToError<S>> {
-                Err(structures::paging::mapper::MapToError::FrameAllocationFailed)
+            ) -> Result<MapperFlush<S>, mapper::MapToError<S>> {
+                Err(mapper::MapToError::FrameAllocationFailed)
             }
             pub unsafe fn update_flags<S: PageSize>(
                 &mut self,
                 _page: Page<S>,
                 _flags: crate::arch::xshim::PageTableFlags,
-            ) -> Result<MapperFlush<S>, structures::paging::mapper::MapToError<S>> {
-                Err(structures::paging::mapper::MapToError::FrameAllocationFailed)
+            ) -> Result<MapperFlush<S>, mapper::MapToError<S>> {
+                Err(mapper::MapToError::FrameAllocationFailed)
             }
             pub unsafe fn unmap<S: PageSize>(
                 &mut self,
