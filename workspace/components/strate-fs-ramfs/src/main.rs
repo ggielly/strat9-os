@@ -9,7 +9,7 @@
 
 extern crate alloc;
 
-use alloc::{format, string::String};
+use alloc::{collections::BTreeMap, format, string::String};
 use core::{alloc::Layout, panic::PanicInfo};
 use linked_list_allocator::LockedHeap;
 use strat9_syscall::{
@@ -64,6 +64,14 @@ use strat9_syscall::data::{
 struct StrateRamServer {
     fs: RamFileSystem,
     alias_label: Option<String>,
+    /// Open sessions: `(sender, ino)` -> open count.
+    ///
+    /// The file id handed to clients is the raw inode number, which is
+    /// trivially guessable. Without this session table, any process could
+    /// read or write any file opened by another process by issuing
+    /// operations on its inode number. Read/write must find a matching
+    /// session; close drops one reference.
+    open_sessions: BTreeMap<(u64, u64), u32>,
 }
 
 impl StrateRamServer {
@@ -72,6 +80,7 @@ impl StrateRamServer {
         Self {
             fs: RamFileSystem::new(),
             alias_label: None,
+            open_sessions: BTreeMap::new(),
         }
     }
 
@@ -253,6 +262,10 @@ impl StrateRamServer {
             return Self::err_reply(sender, Self::fs_status(err));
         }
 
+        // Record the (sender, ino) session so only this sender may operate
+        // on the returned id.
+        *self.open_sessions.entry((sender, info.ino)).or_insert(0) += 1;
+
         let mut reply = Self::ok_reply(sender);
         reply.payload[4..12].copy_from_slice(&info.ino.to_le_bytes());
         reply.payload[12..20].copy_from_slice(&info.size.to_le_bytes());
@@ -271,6 +284,10 @@ impl StrateRamServer {
             Ok(v) => v,
             Err(code) => return Self::err_reply(sender, code),
         };
+        // Session check: the id is a guessable inode number.
+        if !self.open_sessions.contains_key(&(sender, ino)) {
+            return Self::err_reply(sender, EBADF as u32);
+        }
         let offset = match Self::read_u64(payload, 8) {
             Ok(v) => v,
             Err(code) => return Self::err_reply(sender, code),
@@ -337,6 +354,10 @@ impl StrateRamServer {
             Ok(v) => v,
             Err(code) => return Self::err_reply(sender, code),
         };
+        // Session check: the id is a guessable inode number.
+        if !self.open_sessions.contains_key(&(sender, ino)) {
+            return Self::err_reply(sender, EBADF as u32);
+        }
         let offset = match Self::read_u64(payload, 8) {
             Ok(v) => v,
             Err(code) => return Self::err_reply(sender, code),
@@ -372,6 +393,17 @@ impl StrateRamServer {
             Ok(v) => v,
             Err(code) => return Self::err_reply(sender, code),
         };
+
+        // Only a sender with an open session may close; drop one reference.
+        match self.open_sessions.get_mut(&(sender, ino)) {
+            Some(count) => {
+                *count -= 1;
+                if *count == 0 {
+                    self.open_sessions.remove(&(sender, ino));
+                }
+            }
+            None => return Self::err_reply(sender, EBADF as u32),
+        }
 
         match self.fs.unregister_open(ino) {
             Ok(()) => Self::ok_reply(sender),
