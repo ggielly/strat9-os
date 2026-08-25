@@ -73,6 +73,22 @@ enum HandleKind {
     Driver { driver_idx: usize, sub_path: String },
 }
 
+impl Clone for HandleKind {
+    fn clone(&self) -> Self {
+        match self {
+            HandleKind::Root => HandleKind::Root,
+            HandleKind::Pci(p) => HandleKind::Pci(p.clone()),
+            HandleKind::Driver {
+                driver_idx,
+                sub_path,
+            } => HandleKind::Driver {
+                driver_idx: *driver_idx,
+                sub_path: sub_path.clone(),
+            },
+        }
+    }
+}
+
 struct OpenHandle {
     kind: HandleKind,
     /// PID/TID of the process that opened this handle.
@@ -92,6 +108,13 @@ pub struct BusSchemeServer {
     handles: BTreeMap<u64, OpenHandle>,
     next_id: u64,
     pci_cache: Vec<PciDeviceInfo>,
+    /// Rendered `pci/find/<vid>/<did>` results, keyed by (vendor, device).
+    ///
+    /// Each read of a find file used to re-run the `pci_enum` syscall and
+    /// re-render the whole listing; sequential reads of a long result were
+    /// O(reads × devices). The cache is invalidated on every rescan so
+    /// results stay coherent with `pci/inventory`.
+    find_cache: BTreeMap<(u16, u16), Vec<u8>>,
 }
 
 impl BusSchemeServer {
@@ -103,6 +126,7 @@ impl BusSchemeServer {
             handles: BTreeMap::new(),
             next_id: 1,
             pci_cache: Vec::new(),
+            find_cache: BTreeMap::new(),
         }
     }
 
@@ -145,6 +169,9 @@ impl BusSchemeServer {
                 let count = n.min(buf.len());
                 self.pci_cache.clear();
                 self.pci_cache.extend_from_slice(&buf[..count]);
+                // Cached find results are stale as soon as the device
+                // list changes.
+                self.find_cache.clear();
                 Ok(self.pci_cache.len())
             }
             Err(_) => Err(()),
@@ -308,16 +335,21 @@ impl BusSchemeServer {
 
     // === Read ================================================================
 
-    fn handle_read(&self, sender: u64, payload: &[u8]) -> IpcMessage {
+    fn handle_read(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let file_id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
         let offset = u64::from_le_bytes(payload[8..16].try_into().unwrap());
 
-        let handle = match self.handles.get(&file_id) {
-            Some(h) if h.owner == sender => h,
-            _ => return Self::err_reply(sender, EBADF),
+        // Copy the kind out of the map so the borrow is released before
+        // content generation (which may mutate the find cache).
+        let handle_kind = match self.handles.get(&file_id) {
+            Some(h) if h.owner == sender => Some(h.kind.clone()),
+            _ => None,
+        };
+        let Some(kind) = handle_kind else {
+            return Self::err_reply(sender, EBADF);
         };
 
-        let content = self.generate_read_content(&handle.kind, offset as usize);
+        let content = self.generate_read_content(&kind, offset as usize);
         // Use the full remaining payload capacity (240 - 8 header bytes),
         // not an arbitrary cap: each wasted byte costs one extra IPC
         // round-trip per read.
@@ -330,7 +362,7 @@ impl BusSchemeServer {
         reply
     }
 
-    fn generate_read_content(&self, kind: &HandleKind, offset: usize) -> Vec<u8> {
+    fn generate_read_content(&mut self, kind: &HandleKind, offset: usize) -> Vec<u8> {
         let data = match kind {
             HandleKind::Root => {
                 let mut s = format!("drivers registered: {}\n", self.drivers.len());
@@ -357,7 +389,7 @@ impl BusSchemeServer {
         }
     }
 
-    fn read_pci_content(&self, path: &str) -> Vec<u8> {
+    fn read_pci_content(&mut self, path: &str) -> Vec<u8> {
         match path {
             "" | PCI_PREFIX => b"inventory\ncount\nrescan\nfind\ncfg\n".to_vec(),
             "pci/find" => b"usage: /bus/pci/find/<vendor>/<device>\n".to_vec(),
@@ -368,6 +400,12 @@ impl BusSchemeServer {
                 let Some((vendor_id, device_id)) = Self::parse_find_path(path) else {
                     return b"invalid path\n".to_vec();
                 };
+                // Serve repeated/sequential reads from the cache; the
+                // syscall runs once per (vendor, device) until the next
+                // rescan.
+                if let Some(cached) = self.find_cache.get(&(vendor_id, device_id)) {
+                    return cached.clone();
+                }
                 let criteria = PciProbeCriteria {
                     match_flags: PCI_MATCH_VENDOR_ID | PCI_MATCH_DEVICE_ID,
                     vendor_id,
@@ -395,7 +433,7 @@ impl BusSchemeServer {
                     interrupt_pin: 0,
                     _reserved: 0,
                 }; 64];
-                match call::pci_enum(&criteria, &mut matches) {
+                let rendered = match call::pci_enum(&criteria, &mut matches) {
                     Ok(n) => {
                         let mut out = alloc::vec::Vec::new();
                         for d in matches.into_iter().take(n) {
@@ -416,7 +454,13 @@ impl BusSchemeServer {
                         }
                     }
                     Err(_) => b"error\n".to_vec(),
+                };
+                // Cache successful queries only: errors and invalid paths
+                // stay uncached so transient failures are retried.
+                if rendered != b"error\n" {
+                    self.find_cache.insert((vendor_id, device_id), rendered.clone());
                 }
+                rendered
             }
             path if path.starts_with("pci/cfg/") => {
                 let Some((addr, reg, width)) = Self::parse_cfg_path(path) else {
