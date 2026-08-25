@@ -136,6 +136,43 @@ args = [
 description = "Full CI gate: host tests (default + alloc features)"
 dependencies = ["test-host", "test-host-alloc"]
 
+[tasks.qemu-selftest]
+description = "L3/L4: boot kernel with selftests in QEMU, verify serial markers"
+command = "./tools/scripts/qemu-selftest.sh"
+args = ["--timeout", "120"]
+
+# Same component pipeline as limine-image, but embeds the kernel built with
+# --features selftest so the [selftest] serial markers are present.
+[tasks.selftest-image]
+description = "Build an initfs ISO embedding the selftest-enabled kernel"
+dependencies = [
+    "build-musl",
+    "setup-limine",
+    "kernel-test",
+    "strate-ext4-release",
+    "strate-fs-ramfs-release",
+    "strate-init-release",
+    "strate-console-admin-release",
+    "strate-graphical-release",
+    "strate-net-release",
+    "strate-bus-release",
+    "strate-wasm-release",
+    "strate-webrtc-release",
+    "dhcp-client-release",
+    "ping-release",
+    "telnetd-release",
+    "udp-tool-release",
+    "strate-web-admin-release",
+]
+env = { STRAT9_IMAGE_BASENAME = "strat9-os-selftest", STRAT9_INCLUDE_TESTS = "1" }
+script_runner = "@shell"
+script = ["bash tools/scripts/create-limine-image.sh"]
+
+[tasks.qemu-tests]
+description = "Full QEMU gate: build selftest ISO then run the harness"
+dependencies = ["selftest-image"]
+run_task = { name = "qemu-selftest" }
+
 # NOTE: kernel-test is intentionally NOT part of ci-tests yet: the kernel
 # build is currently broken by the unpinned nightly toolchain
 # (`#[target_feature(enable = "avx2")]` now hard-errors on soft-float targets,

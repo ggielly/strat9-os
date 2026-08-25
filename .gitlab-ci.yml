@@ -13,6 +13,21 @@ variables:
     GIT_DEPTH: "0"
     TZ: "Europe/Paris"
 
+# L3/L4 QEMU gate — enable once a runner with qemu-system-x86_64 is available
+# (tag the runner 'qemu'). Validated locally with: cargo make qemu-tests
+qemu-selftest:
+    stage: test
+    tags: [qemu]
+    allow_failure: true   # tighten to blocking once stable
+    timeout: 30 minutes
+    before_script:
+        - rustup default nightly || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env" && rustup default nightly
+        - rustup component add rust-src llvm-tools-preview
+        - rustup target add x86_64-unknown-none
+        - if ! command -v cargo-make &> /dev/null; then cargo install cargo-make; fi
+    script:
+        - cargo make qemu-tests
+
 test-host:
     stage: test
     before_script:
