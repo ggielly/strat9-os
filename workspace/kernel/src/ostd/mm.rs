@@ -69,6 +69,16 @@ impl PhysAddr {
     pub const fn sub(&self, offset: u64) -> Self {
         Self(self.0 - offset)
     }
+
+    /// Converts to a raw mutable pointer
+    pub fn as_mut_ptr<T>(&self) -> *mut T {
+        self.0 as *mut T
+    }
+
+    /// Converts to a raw pointer
+    pub fn as_ptr<T>(&self) -> *const T {
+        self.0 as *const T
+    }
 }
 
 impl From<u64> for PhysAddr {
@@ -139,6 +149,16 @@ impl VirtAddr {
     /// Subtracts an offset from the address
     pub const fn sub(&self, offset: u64) -> Self {
         Self(self.0 - offset)
+    }
+
+    /// Converts to a raw mutable pointer
+    pub fn as_mut_ptr<T>(&self) -> *mut T {
+        self.0 as *mut T
+    }
+
+    /// Converts to a raw pointer
+    pub fn as_ptr<T>(&self) -> *const T {
+        self.0 as *const T
     }
 }
 
