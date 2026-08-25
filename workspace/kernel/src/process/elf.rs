@@ -1885,10 +1885,12 @@ fn load_elf_task_inner(
     }
 
     // Step 4: Map user stack
-    // The stack base is the KASLR-randomized base; its size is configurable
-    // per process (issue #64). A single guard page below the stack is left
-    // unmapped : underflow faults instead of silently corrupting neighbours.
-    let stack_base = user_stack_base();
+    // Per-process ASLR (issue #62): on top of the boot-time KASLR offset, each
+    // image draws its own page-aligned jitter so two processes never share
+    // identical stack addresses. The stack size is configurable per process
+    // (issue #64). A single guard page below the stack is left unmapped :
+    // underflow faults instead of silently corrupting neighbours.
+    let stack_base = crate::kaslr::stack_base_with_jitter(crate::kaslr::draw_stack_jitter());
     let stack_top = crate::kaslr::stack_top_for(stack_base, stack_pages);
     let stack_flags = VmaFlags {
         readable: true,

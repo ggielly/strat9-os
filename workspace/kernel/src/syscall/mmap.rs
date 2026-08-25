@@ -181,7 +181,9 @@ pub fn sys_mmap(
             };
             addr_space
                 .find_free_vma_range(hint, n_pages, page_size)
-                .or_else(|| addr_space.find_free_vma_range(crate::kaslr::mmap_base(), n_pages, page_size))
+                .or_else(|| {
+                    addr_space.find_free_vma_range(crate::kaslr::mmap_base(), n_pages, page_size)
+                })
                 .ok_or(SyscallError::OutOfMemory)?
         };
 
@@ -301,7 +303,9 @@ pub fn sys_mmap(
         // Try the hint first, then fall back to KASLR-randomized base.
         addr_space
             .find_free_vma_range(hint, n_pages, page_size)
-            .or_else(|| addr_space.find_free_vma_range(crate::kaslr::mmap_base(), n_pages, page_size))
+            .or_else(|| {
+                addr_space.find_free_vma_range(crate::kaslr::mmap_base(), n_pages, page_size)
+            })
             .ok_or(SyscallError::OutOfMemory)?
     };
 

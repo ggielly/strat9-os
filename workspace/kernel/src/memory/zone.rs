@@ -434,7 +434,10 @@ impl Zone {
         cached_order0_pages: usize,
     ) -> (usize, usize) {
         if order == 0 {
-            return (self.available_pages().saturating_add(cached_order0_pages), 0);
+            return (
+                self.available_pages().saturating_add(cached_order0_pages),
+                0,
+            );
         }
 
         let total_free = self.available_pages().saturating_add(cached_order0_pages);
