@@ -79,7 +79,6 @@ pub mod vga {
     pub fn double_buffer_mode() -> bool {
         false
     }
-    pub fn status_line_task_main() {}
     #[allow(clippy::too_many_arguments)]
     pub fn init(
         fb_addr: u64,
@@ -447,13 +446,7 @@ pub mod vga_draw {
         let _ = (fb_addr, width, height, stride, bpp);
     }
 
-    #[allow(dead_code)]
-    pub extern "C" fn status_line_task_main() -> ! {
-        loop {
-            core::hint::spin_loop();
-        }
     }
-}
 
 pub mod config_consts {
     pub const STATUS: u8 = 0x06;
