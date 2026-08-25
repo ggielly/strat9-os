@@ -68,7 +68,7 @@ impl Scheme for ConsoleScheme {
             // Boot-mode VGA output: write to the VGA buffer while the display
             // server is not yet active. Once the display server starts, this
             // branch should be gated on a readiness flag (e.g. DISPLAY_SERVER_ACTIVE).
-            if crate::arch::x86_64::vga::is_available() {
+            if crate::arch::vga::is_available() {
                 crate::vga_print!("{}", s);
             }
         } else {

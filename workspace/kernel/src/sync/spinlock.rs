@@ -87,7 +87,7 @@ impl<T: ?Sized, G: Guardian> SpinLock<T, G> {
     pub fn lock(&self) -> SpinLockGuard<'_, T, G> {
         let state = G::enter();
         let mut spins: usize = 0;
-        let this_cpu = crate::arch::x86_64::percpu::current_cpu_index();
+        let this_cpu = crate::arch::percpu::current_cpu_index();
 
         while self
             .locked
@@ -125,7 +125,7 @@ impl<T: ?Sized, G: Guardian> SpinLock<T, G> {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
-            let this_cpu = crate::arch::x86_64::percpu::current_cpu_index();
+            let this_cpu = crate::arch::percpu::current_cpu_index();
             self.owner_cpu.store(this_cpu, Ordering::Relaxed);
             emit_trace_e9(self as *const _ as *const () as usize, 0);
             Some(SpinLockGuard {
@@ -177,7 +177,7 @@ impl<T: ?Sized> SpinLock<T, IrqDisabled> {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
-            let this_cpu = crate::arch::x86_64::percpu::current_cpu_index();
+            let this_cpu = crate::arch::percpu::current_cpu_index();
             self.owner_cpu.store(this_cpu, Ordering::Relaxed);
             emit_trace_e9(self as *const _ as *const () as usize, 0);
             Some(SpinLockGuard {

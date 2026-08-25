@@ -28,7 +28,7 @@ fn pci_class_name(class: u8, subclass: u8) -> &'static str {
 }
 
 pub fn cmd_lspci(_args: &[String]) -> Result<(), ShellError> {
-    let devices = crate::arch::x86_64::pci::all_devices();
+    let devices = crate::arch::pci::all_devices();
     if devices.is_empty() {
         shell_println!("(no PCI devices found)");
         return Ok(());

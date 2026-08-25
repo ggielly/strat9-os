@@ -40,7 +40,7 @@
 #![allow(dead_code)]
 
 use crate::{
-    arch::x86_64::apic,
+    arch::apic,
     memory::{allocate_frame, free_frame, phys_to_virt, AddressSpace},
     process::{current_task_id, get_task_by_id, Task, TaskId},
     sync::{with_irqs_disabled, SpinLock},
@@ -417,7 +417,7 @@ pub fn free_pcid(pcid: u16) {
 /// Check if PCID feature is available on this CPU.
 pub fn pcid_available() -> bool {
     // 1. CPUID check: bit 17 of ECX after CPUID(EAX=1) indicates PCID support.
-    let (_, _, ecx, _) = crate::arch::x86_64::cpuid(1, 0);
+    let (_, _, ecx, _) = crate::arch::cpuid(1, 0);
     if ecx & (1 << 17) == 0 {
         return false;
     }
@@ -650,7 +650,7 @@ fn n3_prepare_migration(
     frame.generation.fetch_add(1, Ordering::Release);
 
     // Record timestamp and owner.
-    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    let tsc = unsafe { crate::arch::rdtsc() };
     frame.tsc_start.store(tsc, Ordering::Release);
     if let Some(tid) = current_task_id() {
         frame.owner_tid.store(tid.as_u64(), Ordering::Release);
@@ -834,8 +834,8 @@ pub unsafe extern "C" fn n3b_migrate_asm(frame: *mut MigrationFrame) {
 
 /// Per-CPU pending migration frame pointer.
 /// Set by the sender before sending the IPI, consumed by the IPI handler.
-static N3_PENDING_MIGRATION: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static N3_PENDING_MIGRATION: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
 
 /// Send a migration-sync IPI to the target CPU.
 fn send_n3_sync_ipi(target_apic_id: u32) {
@@ -959,7 +959,7 @@ pub unsafe extern "C" fn n3_migrate_ipi_entry(rdi: *mut u8) -> ! {
 /// Called from the `extern "x86-interrupt"` stub if the naked entry is not
 /// used. Clears the pending flag and sends EOI.
 pub extern "C" fn n3_migrate_ipi_handler() {
-    let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
+    let cpu_idx = crate::arch::percpu::current_cpu_index();
     N3_PENDING_MIGRATION[cpu_idx].store(0, Ordering::Release);
     apic::eoi();
 }
@@ -1013,7 +1013,7 @@ fn watchdog_unregister(frame_idx: usize) {
 /// its next `send()` attempt (CAS Ready→Active fails if another sender
 /// claimed the frame first).
 pub fn n3_watchdog_tick() {
-    let now = unsafe { core::arch::x86_64::_rdtsc() };
+    let now = unsafe { crate::arch::rdtsc() };
     let mut table = N3_WATCHDOG_TABLE.lock();
 
     for entry in table.iter_mut() {
@@ -1387,10 +1387,10 @@ impl IpcProducer for N3Transport {
         // Inter-core sync if needed.
         // Spec §9.2: the sender must ensure message visibility before sending IPI.
         let target_cpu = receiver_task.home_cpu.load(Ordering::Acquire);
-        let same_core = crate::arch::x86_64::percpu::current_cpu_index() == target_cpu as usize;
+        let same_core = crate::arch::percpu::current_cpu_index() == target_cpu as usize;
 
         if !same_core {
-            if (target_cpu as usize) < crate::arch::x86_64::percpu::MAX_CPUS {
+            if (target_cpu as usize) < crate::arch::percpu::MAX_CPUS {
                 // Ensure all stores (message, frame metadata, state=Active)
                 // are visible before the IPI is sent (spec §9.1).
                 core::sync::atomic::fence(Ordering::Release);
@@ -1402,7 +1402,7 @@ impl IpcProducer for N3Transport {
                 // Send sync IPI. On x86-64, the ICR write is serializing,
                 // which provides an implicit full barrier (spec §9.2).
                 if let Some(target_apic) =
-                    crate::arch::x86_64::percpu::apic_id_by_cpu_index(target_cpu)
+                    crate::arch::percpu::apic_id_by_cpu_index(target_cpu)
                 {
                     send_n3_sync_ipi(target_apic);
                 }

@@ -49,11 +49,11 @@ pub mod vfs;
 pub use boot::limine::kmain;
 
 // serial_print! and serial_println! macros are #[macro_export]'ed
-// from arch::x86_64::serial and available at crate root automatically.
+// from arch::serial and available at crate root automatically.
 
 /// Initialize serial output
 pub fn init_serial() {
-    arch::x86_64::serial::init();
+    arch::serial::init();
 }
 
 /// Initialize the logger (uses serial)
@@ -375,23 +375,23 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // scheduler is ready and the APIC timer is started (Asterinas pattern:
     // interrupts are only enabled once, at the very end of init).
     debug_assert!(
-        !arch::x86_64::interrupts_enabled(),
+        !arch::interrupts_enabled(),
         "interrupts must be disabled at boot entry"
     );
 
     // =============================================
     // Phase 1: serial output (earliest debug output)
     // =============================================
-    arch::x86_64::boot_timestamp::init();
+    arch::boot_timestamp::init();
     crate::e9_println!("B0 kernel_main");
     init_serial();
 
     // Enable boot log prefix (timestamp) by default; can be disabled later if needed.
-    arch::x86_64::serial::set_boot_log_prefix_enabled(true);
+    arch::serial::set_boot_log_prefix_enabled(true);
 
     init_logger();
     boot_milestone!("Kernel entry");
-    arch::x86_64::speaker::beep_phase(1);
+    arch::speaker::beep_phase(1);
 
     // =============================================
     // Phase 1c: IDT (Interrupt Descriptor Table)
@@ -400,22 +400,22 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // during the early memory management and hardware initialization phases.
     crate::e9_println!("B1 pre-IDT");
     serial_println!("[init] IDT (early)...");
-    arch::x86_64::idt::init();
+    arch::idt::init();
     serial_println!("[init] IDT initialized.");
     crate::e9_println!("B2 post-IDT");
     boot_milestone!("IDT initialized");
 
     debug_assert!(
-        !arch::x86_64::interrupts_enabled(),
+        !arch::interrupts_enabled(),
         "interrupts must be disabled after IDT init"
     );
 
     // Detect CPU features (must happen before init_cpu_extensions)
-    crate::arch::x86_64::cpuid::init();
+    crate::arch::cpuid::init();
 
     // Initialize FPU/SSE/XSAVE for the BSP
     crate::e9_println!("B2a pre-cpu-extensions");
-    crate::arch::x86_64::init_cpu_extensions();
+    crate::arch::init_cpu_extensions();
     crate::e9_println!("B2b post-cpu-extensions");
 
     // Seed the kernel entropy pool from RDRAND (if available).
@@ -461,7 +461,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     if args.is_null() {
         serial_println!("[CRIT] No KernelArgs provided. System will hang.");
         loop {
-            arch::x86_64::hlt();
+            arch::hlt();
         }
     }
 
@@ -475,7 +475,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             strat9_abi::boot::STRAT9_BOOT_MAGIC
         );
         loop {
-            arch::x86_64::hlt();
+            arch::hlt();
         }
     }
     if args.abi_version != strat9_abi::boot::STRAT9_BOOT_ABI_VERSION {
@@ -485,14 +485,14 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             strat9_abi::boot::STRAT9_BOOT_ABI_VERSION
         );
         loop {
-            arch::x86_64::hlt();
+            arch::hlt();
         }
     }
 
     // Parse kernel cmdline from Limine (early, for serial console config).
     if args.cmdline_ptr != 0 && args.cmdline_len != 0 {
         // SAFETY: cmdline_ptr is a valid null-terminated C string from Limine bootloader.
-        unsafe { arch::x86_64::serial::parse_cmdline(args.cmdline_ptr, args.cmdline_len) };
+        unsafe { arch::serial::parse_cmdline(args.cmdline_ptr, args.cmdline_len) };
     } else {
         serial_println!("[init] No kernel cmdline provided");
     }
@@ -666,12 +666,12 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     serial_println!("[init] Vmalloc arena ready.");
 
     debug_assert!(
-        !arch::x86_64::interrupts_enabled(),
+        !arch::interrupts_enabled(),
         "interrupts must be disabled after buddy allocator init"
     );
 
     boot_milestone!("Memory manager ready");
-    arch::x86_64::speaker::beep_phase(2);
+    arch::speaker::beep_phase(2);
     log_boot_module_magics("post-buddy");
 
     // =============================================
@@ -706,13 +706,13 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     }
     serial_println!("[init] Paging initialized.");
     boot_milestone!("Paging initialized");
-    arch::x86_64::speaker::beep_phase(3);
+    arch::speaker::beep_phase(3);
 
     // =============================================
     // Phase 3: console output (VGA or serial fallback)
     // =============================================
     serial_println!("[init] Console...");
-    arch::x86_64::vga::init(
+    arch::vga::init(
         args.framebuffer_addr,
         args.framebuffer_width,
         args.framebuffer_height,
@@ -726,7 +726,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         args.framebuffer_blue_mask_shift,
     );
     // Flush any log lines buffered before VGA was available.
-    arch::x86_64::vgabuf::vgabuf_flush_to_framebuffer();
+    arch::vgabuf::vgabuf_flush_to_framebuffer();
     vga_println!("[OK] Paging initialized");
     vga_println!("[OK] Serial port initialized");
     vga_println!("[OK] Memory manager active");
@@ -736,7 +736,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     serial_println!("[init] TSS...");
     vga_println!("[..] Initializing TSS...");
-    arch::x86_64::tss::init();
+    arch::tss::init();
     serial_println!("[init] TSS initialized.");
     vga_println!("[OK] TSS initialized");
 
@@ -745,7 +745,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     serial_println!("[init] GDT...");
     vga_println!("[..] Initializing GDT...");
-    arch::x86_64::gdt::init();
+    arch::gdt::init();
     serial_println!("[init] GDT initialized.");
     vga_println!("[OK] GDT loaded (with TSS)");
 
@@ -754,7 +754,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     serial_println!("[init] SYSCALL/SYSRET...");
     vga_println!("[..] Initializing SYSCALL/SYSRET...");
-    arch::x86_64::syscall::init();
+    arch::syscall::init();
     serial_println!("[init] SYSCALL/SYSRET initialized.");
     vga_println!("[OK] SYSCALL/SYSRET configured");
 
@@ -772,7 +772,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     // Phase 5: IDT (Interrupt Descriptor Table) - ALREADY INITIALIZED EARLY
     // =============================================
-    // arch::x86_64::idt::init();
+    // arch::idt::init();
 
     // =============================================
     // Phase 5b: paging / VMM - (Moved earlier to prevent PF on VGA init)
@@ -787,7 +787,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     memory::address_space::init_kernel_address_space();
     serial_println!("[init] Kernel address space initialized.");
     debug_assert!(
-        !arch::x86_64::interrupts_enabled(),
+        !arch::interrupts_enabled(),
         "interrupts must be disabled after kernel address space init"
     );
     vga_println!("[OK] Kernel address space initialized");
@@ -823,13 +823,13 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         // Fallback: legacy PIC + PIT
         serial_println!("[init] APIC unavailable, falling back to legacy PIC");
         vga_println!("[..] Falling back to legacy PIC...");
-        arch::x86_64::pic::init(
-            arch::x86_64::pic::PIC1_OFFSET,
-            arch::x86_64::pic::PIC2_OFFSET,
+        arch::pic::init(
+            arch::pic::PIC1_OFFSET,
+            arch::pic::PIC2_OFFSET,
         );
-        arch::x86_64::pic::disable();
-        arch::x86_64::pic::enable_irq(0); // Timer
-        arch::x86_64::pic::enable_irq(1); // Keyboard
+        arch::pic::disable();
+        arch::pic::enable_irq(0); // Timer
+        arch::pic::enable_irq(1); // Keyboard
         serial_println!("[init] Legacy PIC initialized.");
         vga_println!("[OK] Legacy PIC initialized (IRQ0: timer, IRQ1: keyboard)");
     } else {
@@ -839,10 +839,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
     // Initialize TLB shootdown system (SMP safety for COW operations).
     if apic_active {
-        arch::x86_64::tlb::init();
+        arch::tlb::init();
         serial_println!("[init] TLB shootdown system initialized.");
         debug_assert!(
-            !arch::x86_64::interrupts_enabled(),
+            !arch::interrupts_enabled(),
             "interrupts must be disabled after TLB init"
         );
     }
@@ -851,13 +851,13 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // Phase 6j: SMP bring-up (AP boot) + per-CPU data
     // ================================================
     if apic_active {
-        let bsp_apic_id = arch::x86_64::apic::lapic_id();
-        arch::x86_64::percpu::init_boot_cpu(bsp_apic_id);
-        arch::x86_64::percpu::init_gs_base(0);
+        let bsp_apic_id = arch::apic::lapic_id();
+        arch::percpu::init_boot_cpu(bsp_apic_id);
+        arch::percpu::init_gs_base(0);
         serial_println!("[init] SMP: booting secondary cores...");
         vga_println!("[..] SMP: starting APs...");
 
-        match arch::x86_64::smp::init() {
+        match arch::smp::init() {
             Ok(count) => {
                 serial_println!("[init] SMP: {} core(s) online", count);
                 vga_println!("[OK] SMP: {} core(s) online", count);
@@ -868,19 +868,19 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             }
         }
     } else {
-        arch::x86_64::percpu::init_boot_cpu(0);
+        arch::percpu::init_boot_cpu(0);
     }
     boot_milestone!("APIC + SMP ready");
-    arch::x86_64::speaker::beep_phase(4);
+    arch::speaker::beep_phase(4);
 
-    arch::x86_64::keyboard::init();
+    arch::keyboard::init();
     serial_println!("[init] PS/2 keyboard controller initialized.");
 
     // =============================================
     // Phase 6k: PS/2 mouse driver
     // =============================================
     if apic_active {
-        let mouse_ok = arch::x86_64::mouse::init();
+        let mouse_ok = arch::mouse::init();
 
         if mouse_ok {
             serial_println!("[init] PS/2 mouse initialized.");
@@ -902,7 +902,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     crate::e9_println!("B8 post-sched");
 
     debug_assert!(
-        !arch::x86_64::interrupts_enabled(),
+        !arch::interrupts_enabled(),
         "interrupts must be disabled after scheduler init"
     );
 
@@ -913,17 +913,17 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // This is the last point where interrupts are guaranteed disabled on BSP.
     if apic_active {
         debug_assert!(
-            !arch::x86_64::interrupts_enabled(),
+            !arch::interrupts_enabled(),
             "interrupts must be disabled before APIC timer start"
         );
         serial_println!("[init] Starting APIC timer on BSP...");
-        arch::x86_64::timer::start_apic_timer_cached();
+        arch::timer::start_apic_timer_cached();
     }
 
     serial_println!("[init] Scheduler initialized.");
     serial_println!("[trace][bsp] after init_scheduler");
     boot_milestone!("Scheduler + timer ready");
-    arch::x86_64::speaker::beep_phase(5);
+    arch::speaker::beep_phase(5);
     vga_println!("[OK] Multitasking enabled");
 
     // =============================================
@@ -986,29 +986,29 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         hardware::init();
         crate::e9_println!("BH post-hardware");
         boot_milestone!("Hardware drivers ready");
-        arch::x86_64::speaker::beep_phase(15);
-        arch::x86_64::speaker::beep_phase(6);
+        arch::speaker::beep_phase(15);
+        arch::speaker::beep_phase(6);
 
         serial_println!("[init] Initializing timers...");
         vga_println!("[..] Initializing HPET and RTC...");
         hardware::timer::init();
         serial_println!("[init] Timers initialized.");
         vga_println!("[OK] HPET/RTC initialized");
-        arch::x86_64::speaker::beep_phase(16); // Timers
+        arch::speaker::beep_phase(16); // Timers
 
         serial_println!("[init] Initializing USB...");
         vga_println!("[..] Looking for USB controllers...");
         hardware::usb::init();
         serial_println!("[init] USB initialized.");
         vga_println!("[OK] USB xHCI/EHCI/UHCI initialized");
-        arch::x86_64::speaker::beep_phase(17); // USB
+        arch::speaker::beep_phase(17); // USB
 
         serial_println!("[init] Initializing VirtIO block...");
         vga_println!("[..] Looking for VirtIO block device...");
         hardware::storage::virtio_block::init();
         serial_println!("[init] VirtIO block initialized.");
         vga_println!("[OK] VirtIO block driver initialized");
-        arch::x86_64::speaker::beep_phase(18); // VirtIO block
+        arch::speaker::beep_phase(18); // VirtIO block
 
         serial_println!("[init] Initializing AHCI...");
         vga_println!("[..] Looking for AHCI SATA controller...");
@@ -1027,42 +1027,42 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         hardware::storage::ahci::init();
         serial_println!("[init] AHCI probe done.");
         vga_println!("[OK] AHCI probe done");
-        arch::x86_64::speaker::beep_phase(19); // AHCI
+        arch::speaker::beep_phase(19); // AHCI
 
         serial_println!("[init] Initializing ATA/IDE...");
         vga_println!("[..] Looking for ATA/IDE devices...");
         hardware::storage::ata_legacy::init();
         serial_println!("[init] ATA/IDE probe done.");
         vga_println!("[OK] ATA/IDE probe done");
-        arch::x86_64::speaker::beep_phase(20); // ATA
+        arch::speaker::beep_phase(20); // ATA
 
         serial_println!("[init] Initializing NVMe...");
         vga_println!("[..] Looking for NVMe controllers...");
         hardware::storage::nvme::init();
         serial_println!("[init] NVMe probe done.");
         vga_println!("[OK] NVMe probe done");
-        arch::x86_64::speaker::beep_phase(21); // NVMe
+        arch::speaker::beep_phase(21); // NVMe
 
         serial_println!("[init] Initializing VirtIO net...");
         vga_println!("[..] Looking for VirtIO net device...");
         hardware::nic::virtio_net::init();
         serial_println!("[init] VirtIO net initialized.");
         vga_println!("[OK] VirtIO net driver initialized");
-        arch::x86_64::speaker::beep_phase(22); // VirtIO net
+        arch::speaker::beep_phase(22); // VirtIO net
 
         serial_println!("[init] Initializing VirtIO RNG...");
         vga_println!("[..] Looking for VirtIO RNG device...");
         crate::hardware::virtio::rng::init();
         serial_println!("[init] VirtIO RNG initialized.");
         vga_println!("[OK] VirtIO RNG driver initialized");
-        arch::x86_64::speaker::beep_phase(23); // VirtIO RNG
+        arch::speaker::beep_phase(23); // VirtIO RNG
 
         serial_println!("[init] Initializing VirtIO Console...");
         vga_println!("[..] Looking for VirtIO Console device...");
         crate::hardware::virtio::console::init();
         serial_println!("[init] VirtIO Console initialized.");
         vga_println!("[OK] VirtIO Console driver initialized");
-        arch::x86_64::speaker::beep_phase(24); // VirtIO Console
+        arch::speaker::beep_phase(24); // VirtIO Console
 
         // VirtIO GPU + framebuffer are initialized in hardware::init()
 
@@ -1278,7 +1278,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             }
         }
         if let Ok(status_task) = process::Task::new_kernel_task_with_stack(
-            arch::x86_64::vga::status_line_task_main,
+            arch::vga::status_line_task_main,
             "status-line",
             process::TaskPriority::Low,
             64 * 1024,
@@ -1295,20 +1295,20 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     }
 
     // Initialize keyboard layout to French by default
-    crate::arch::x86_64::keyboard_layout::set_french_layout();
+    crate::arch::keyboard_layout::set_french_layout();
 
     // =============================================
     // Boot complete : start preemptive multitasking
     // =============================================
     if apic_active {
-        arch::x86_64::smp::open_ap_scheduler_gate();
+        arch::smp::open_ap_scheduler_gate();
     }
     crate::e9_println!("BC pre-schedule");
     boot_milestone!("Boot complete ! Now entering in scheduler");
-    arch::x86_64::speaker::beep_startup();
+    arch::speaker::beep_startup();
     serial_println!("[init] Boot complete. Starting preemptive scheduler...");
     vga_println!("[OK] Starting multitasking (preemptive)");
-    arch::x86_64::serial::set_boot_log_prefix_enabled(false);
+    arch::serial::set_boot_log_prefix_enabled(false);
 
     // Keep interrupts disabled on the init stack. `schedule_on_cpu()` enters
     // the first task with IF=0 and `task_entry_trampoline` executes `sti`
@@ -1324,7 +1324,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 /// Returns `true` if APIC is active, `false` if we should fall back to PIC+PIT.
 /// On failure at any step, logs a warning and returns `false`.
 fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
-    use arch::x86_64::{apic, ioapic, pic, timer};
+    use arch::{apic, ioapic, pic, timer};
     use timer::TIMER_HZ;
 
     // Step 6a: check CPUID for APIC support

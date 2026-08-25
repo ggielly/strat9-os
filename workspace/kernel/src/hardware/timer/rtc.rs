@@ -9,7 +9,7 @@
 
 #![allow(dead_code)]
 
-use crate::arch::x86_64::io::{inb, outb};
+use crate::arch::io::{inb, outb};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 

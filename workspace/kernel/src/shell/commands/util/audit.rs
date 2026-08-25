@@ -12,7 +12,7 @@ pub fn cmd_audit(args: &[String]) -> Result<(), ShellError> {
     };
 
     let entries = crate::audit::recent(count);
-    let hz = crate::arch::x86_64::timer::TIMER_HZ;
+    let hz = crate::arch::timer::TIMER_HZ;
 
     if entries.is_empty() {
         shell_println!("(no audit events)");

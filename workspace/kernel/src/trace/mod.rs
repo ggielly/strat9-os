@@ -9,7 +9,7 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::{arch::x86_64::percpu, process::scheduler, sync::SpinLock};
+use crate::{arch::percpu, process::scheduler, sync::SpinLock};
 
 pub mod category {
     pub const MEM_PF: u64 = 1 << 0;
