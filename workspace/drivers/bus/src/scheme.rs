@@ -23,7 +23,7 @@ use strat9_syscall::{
         DT_DIR, DT_REG, IpcMessage, PCI_MATCH_DEVICE_ID, PCI_MATCH_VENDOR_ID, PciAddress,
         PciDeviceInfo, PciProbeCriteria,
     },
-    error::{EBADF, EINVAL, EIO, ENOENT, ENOSYS, ENOTDIR},
+    error::{EBADF, EINVAL, EIO, ENOMEM, ENOENT, ENOSYS, ENOTDIR},
 };
 
 use crate::BusDriver;
@@ -166,10 +166,15 @@ impl BusSchemeServer {
         reply
     }
 
-    fn alloc_id(&mut self) -> u64 {
+    fn alloc_id(&mut self) -> Option<u64> {
         let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1).max(1);
-        id
+        // Never wrap: reusing ids after u64::MAX could alias handles that
+        // are still open. Fail cleanly instead.
+        if id == u64::MAX {
+            return None;
+        }
+        self.next_id = id + 1;
+        Some(id)
     }
 
     // === Path resolution ===================================================
@@ -247,7 +252,11 @@ impl BusSchemeServer {
             return Self::err_reply(sender, ENOENT);
         }
 
-        let file_id = self.alloc_id();
+        let file_id = match self.alloc_id() {
+            Some(id) => id,
+            // Handle id space exhausted.
+            None => return Self::err_reply(sender, ENOMEM),
+        };
         let is_dir;
         let kind = if path.is_empty() {
             is_dir = true;
