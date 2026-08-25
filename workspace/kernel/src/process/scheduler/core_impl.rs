@@ -225,7 +225,7 @@ impl GlobalSchedState {
         );
         if self.all_tasks.contains_key(&task_id) {
             unsafe {
-                core::arch::asm!("mov al, 'D'; out 0xe9, al", out("al") _);
+                crate::arch::serial::putc(b'D');
             }
             crate::serial_force_println!(
                 "[RACE] insert_all_task_locked: duplicate tid={} all_tasks={}",

@@ -249,7 +249,7 @@ fn emit_trace_e9(lock_addr: usize, tag_offset: u8) {
     for (i, slot) in DEBUG_TRACE_WATCH_ADDRS.iter().enumerate() {
         if slot.load(Ordering::Relaxed) == lock_addr {
             let ch = b'A' + tag_offset + (i as u8);
-            unsafe { core::arch::asm!("out 0xe9, al", in("al") ch) };
+            crate::arch::serial::putc(ch);
         }
     }
 }
@@ -326,7 +326,7 @@ impl<'a, T: ?Sized, G: Guardian> Drop for SpinLockGuard<'a, T, G> {
         for (i, slot) in DEBUG_TRACE_WATCH_ADDRS.iter().enumerate() {
             if slot.load(Ordering::Relaxed) == lock_addr {
                 let ch = b'a' + (i as u8);
-                unsafe { core::arch::asm!("out 0xe9, al", in("al") ch) };
+                crate::arch::serial::putc(ch);
             }
         }
 

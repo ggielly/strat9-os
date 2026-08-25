@@ -230,7 +230,7 @@ extern "C" fn ring3_trampoline() -> ! {
             );
 
             // Also verify via a direct CR3 read + manual walk
-            let (cr3_frame, _) = x86_64::registers::control::Cr3::read();
+            let (cr3_frame, _) = crate::x86_crate_shim::registers::control::Cr3::read();
             let cr3_phys = cr3_frame.start_address().as_u64();
             let hhdm = crate::memory::hhdm_offset();
             crate::serial_println!(

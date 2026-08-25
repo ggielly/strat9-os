@@ -70,8 +70,7 @@ pub mod structures {
                 ParentEntryHugePage,
                 PageAlreadyMapped(crate::arch::xshim::PhysAddr),
             }
-            pub trait MapperAllSizes: Mapper<crate::arch::xshim::Size4KiB> {}
-            pub trait Translate2 {
+                        pub trait Translate2 {
                 fn translate(&self, _a: crate::arch::xshim::VirtAddr) -> Option<crate::arch::xshim::PhysAddr> { None }
             }
         }

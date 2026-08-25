@@ -299,17 +299,16 @@ fn delete_next_char_at_cursor(
 /// parses commands, and executes them.
 pub extern "C" fn shell_main() -> ! {
     // E9 'Q' (0x51) = first instruction, before any lock/serial. Confirms we reached shell.
-    let q: u8 = 0x51;
-    unsafe { core::arch::asm!("out 0xe9, al", in("al") q) }
-    // E9 'S' = shell entered (no serial_force_println here - avoids FORCE_LOCK contention with timer)
-    unsafe { core::arch::asm!("mov al, 0x53; out 0xe9, al") }
+    crate::arch::serial::putc(0x51);
+    // 'S' = shell entered (avoids FORCE_LOCK contention with timer)
+    crate::arch::serial::putc(0x53);
     let registry = CommandRegistry::new();
     commands::util::init_shell_env();
     let mut input_buf = [0u8; 256];
     let mut input_len = 0;
     let mut cursor_pos = 0;
-    // E9 'L' = init complete, entering main loop
-    unsafe { core::arch::asm!("mov al, 0x4C; out 0xe9, al") }
+    // 'L' = init complete, entering main loop
+    crate::arch::serial::putc(0x4C);
 
     // Command history
     let mut history: FixedQueue<String, SHELL_HISTORY_CAPACITY> = FixedQueue::new();

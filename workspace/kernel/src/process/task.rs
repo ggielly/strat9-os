@@ -682,10 +682,8 @@ pub unsafe extern "C" fn task_entry_trampoline() -> ! {
 }
 
 fn task_post_switch_enter(entry: u64, arg0: u64) -> ! {
-    // E9 breadcrumb: 'P' = reached post_switch_enter (no serial lock needed).
-    unsafe {
-        core::arch::asm!("out 0xe9, al", in("al") b'P', options(nomem, nostack));
-    }
+    // breadcrumb: 'P' = reached post_switch_enter (no serial lock needed).
+    crate::arch::serial::putc(b'P');
 
     crate::arch::percpu::mark_tlb_ready_current();
 

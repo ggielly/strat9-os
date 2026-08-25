@@ -58,6 +58,14 @@ const ANSI_VIOLET: &str = "\x1b[35m";
 const TOKEN_BUF_CAP: usize = 64;
 
 /// Signal that the kernel has entered an emergency panic state.
+/// Write one raw byte to COM1 (used by debug breadcrumbs).
+pub fn putc(byte: u8) {
+    // SAFETY: COM1 port writes are always safe in kernel context.
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") byte, options(nomem, nostack));
+    }
+}
+
 pub fn enter_emergency_mode() {
     PANIC_IN_PROGRESS.store(true, Ordering::SeqCst);
 }

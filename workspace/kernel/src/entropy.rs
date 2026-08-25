@@ -31,17 +31,7 @@ static POOL_IDX: AtomicU32 = AtomicU32::new(0);
 pub fn seed_from_rdrand() {
     // RDRAND can hang on some QEMU configurations (especially AMD CPU models).
     // Fall back to TSC as a weak initial seed (better than all-zero pool).
-    let lo: u32;
-    let hi: u32;
-    unsafe {
-        core::arch::asm!(
-            "rdtsc",
-            out("eax") lo,
-            out("edx") hi,
-            options(nostack, nomem),
-        );
-    }
-    let seed = ((hi as u64) << 32 | lo as u64).wrapping_mul(6364136223846793005);
+    let seed = crate::arch::rdtsc().wrapping_mul(6364136223846793005);
     for w in &POOL {
         let old = w.load(Ordering::Relaxed);
         w.store(old ^ seed, Ordering::Relaxed);
