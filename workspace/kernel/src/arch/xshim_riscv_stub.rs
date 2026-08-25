@@ -18,6 +18,12 @@ pub mod registers {
             pub fn read() -> (crate::arch::xshim::PhysFrame<crate::arch::xshim::Size4KiB>, Cr3Flags) {
                 panic!("Cr3::read on riscv64")
             }
+            pub fn write(_frame: crate::arch::xshim::PhysFrame<crate::arch::xshim::Size4KiB>) {
+                panic!("Cr3::write on riscv64")
+            }
+        }
+        impl Cr3Flags {
+            pub const fn empty() -> Cr3Flags { Cr3Flags }
         }
     }
 }
