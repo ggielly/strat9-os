@@ -47,7 +47,7 @@
 //! allocation to prevent deadlock with the buddy allocator.
 
 use crate::{
-    arch::x86_64::tlb::shootdown_range,
+    arch::tlb::shootdown_range,
     memory::{
         frame::PhysFrame,
         paging::{map_page_kernel, unmap_page_kernel},

@@ -227,7 +227,7 @@ pub fn revoke_mapping_cap_id(cap_id: CapId) -> usize {
     }
 
     if revoked != 0 {
-        crate::arch::x86_64::tlb::shootdown_all();
+        crate::arch::tlb::shootdown_all();
     }
 
     revoked

@@ -207,7 +207,7 @@ impl SlabState {
     /// the remaining space into blocks, and prepend the page to `partial_pages[ci]`.
     unsafe fn refill(&mut self, ci: usize, token: &crate::sync::IrqDisabledToken) {
         debug_assert!(
-            !crate::arch::x86_64::interrupts_enabled(),
+            !crate::arch::interrupts_enabled(),
             "refill: IRQs must be disabled (IrqDisabledToken contract)"
         );
         let slab_size = SLAB_SIZES[ci];
@@ -462,8 +462,8 @@ unsafe impl GlobalAlloc for LockedHeap {
             KernelHeapBackend::Slab => {
                 // --- slab path: return block to free list ---
                 let ci = SlabState::class_index_for_layout(layout);
-                let _cpu = crate::arch::x86_64::percpu::current_cpu_index();
-                let _irq_enabled = crate::arch::x86_64::interrupts_enabled();
+                let _cpu = crate::arch::percpu::current_cpu_index();
+                let _irq_enabled = crate::arch::interrupts_enabled();
                 #[cfg(debug_assertions)]
                 if !_irq_enabled {
                     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -660,8 +660,8 @@ pub unsafe fn try_alloc_kernel_heap(layout: Layout) -> Result<*mut u8, KernelHea
             // --- slab path ---
             let ci = SlabState::class_index_for_layout(layout);
             // Race/corruption diagnostic: log alloc when IRQs disabled (rate-limited).
-            let _cpu = crate::arch::x86_64::percpu::current_cpu_index();
-            let _irq_enabled = crate::arch::x86_64::interrupts_enabled();
+            let _cpu = crate::arch::percpu::current_cpu_index();
+            let _irq_enabled = crate::arch::interrupts_enabled();
             #[cfg(debug_assertions)]
             if !_irq_enabled {
                 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -747,8 +747,8 @@ pub unsafe fn dealloc_kernel_heap(ptr: *mut u8, layout: Layout) {
 }
 
 fn log_common_oom_header(layout: Layout, effective: usize) {
-    let cpu = crate::arch::x86_64::percpu::current_cpu_index();
-    let irq_enabled = crate::arch::x86_64::interrupts_enabled();
+    let cpu = crate::arch::percpu::current_cpu_index();
+    let irq_enabled = crate::arch::interrupts_enabled();
     let tid = crate::process::current_task_id()
         .map(|t| t.as_u64())
         .unwrap_or(0);

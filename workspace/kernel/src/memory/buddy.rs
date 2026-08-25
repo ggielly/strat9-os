@@ -42,7 +42,7 @@ const LOCAL_CACHE_CAPACITY: usize = 256;
 const LOCAL_CACHE_REFILL_ORDER: u8 = 4;
 const LOCAL_CACHE_REFILL_FRAMES: usize = 1 << (LOCAL_CACHE_REFILL_ORDER as usize);
 const LOCAL_CACHE_FLUSH_BATCH: usize = 64;
-const LOCAL_CACHE_SLOTS: usize = Migratetype::COUNT * crate::arch::x86_64::percpu::MAX_CPUS;
+const LOCAL_CACHE_SLOTS: usize = Migratetype::COUNT * crate::arch::percpu::MAX_CPUS;
 const LOCAL_CACHED_ZONE_MIGRATETYPE_SLOTS: usize = Migratetype::COUNT * ZoneType::COUNT;
 /// Fragmentation score threshold for triggering compaction-assist.
 ///
@@ -1612,7 +1612,7 @@ impl BuddyAllocator {
             return Err(AllocError::InvalidOrder);
         }
 
-        let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
+        let cpu_idx = crate::arch::percpu::current_cpu_index();
         if ALLOC_IN_PROGRESS[cpu_idx].swap(true, core::sync::atomic::Ordering::Acquire) {
             panic!("Recursive allocation detected on CPU {}!", cpu_idx);
         }
@@ -1645,7 +1645,7 @@ impl BuddyAllocator {
             return Err(AllocError::InvalidOrder);
         }
 
-        let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
+        let cpu_idx = crate::arch::percpu::current_cpu_index();
         if ALLOC_IN_PROGRESS[cpu_idx].swap(true, core::sync::atomic::Ordering::Acquire) {
             panic!("Recursive allocation detected on CPU {}!", cpu_idx);
         }
@@ -1845,8 +1845,8 @@ pub fn debug_buddy_lock_addr() -> usize {
 }
 
 /// Per-CPU flag to detect recursive allocations (deadlocks from logs/interrupts)
-static ALLOC_IN_PROGRESS: [core::sync::atomic::AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { core::sync::atomic::AtomicBool::new(false) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static ALLOC_IN_PROGRESS: [core::sync::atomic::AtomicBool; crate::arch::percpu::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; crate::arch::percpu::MAX_CPUS];
 
 struct LocalFrameCache {
     len: usize,
@@ -2004,7 +2004,7 @@ fn zone_index_for_phys(phys: u64) -> usize {
 
 #[inline]
 fn local_cache_slot(cpu_idx: usize, migratetype: Migratetype) -> usize {
-    migratetype.index() * crate::arch::x86_64::percpu::MAX_CPUS + cpu_idx
+    migratetype.index() * crate::arch::percpu::MAX_CPUS + cpu_idx
 }
 
 #[inline]
@@ -2056,7 +2056,7 @@ fn drain_local_caches_to_global(max_pages: usize, global: &mut OnDemandGlobalLoc
     let mut drained = 0usize;
     let mut batch = [0u64; LOCAL_CACHE_FLUSH_BATCH];
     for migratetype in Migratetype::ALL {
-        for cpu in 0..crate::arch::x86_64::percpu::MAX_CPUS {
+        for cpu in 0..crate::arch::percpu::MAX_CPUS {
             if drained >= max_pages {
                 break;
             }
@@ -2101,7 +2101,7 @@ fn drain_local_caches_for_zone(
     let mut batch = [0u64; LOCAL_CACHE_FLUSH_BATCH];
 
     for migratetype in primary_migratetype.fallback_order() {
-        for cpu in 0..crate::arch::x86_64::percpu::MAX_CPUS {
+        for cpu in 0..crate::arch::percpu::MAX_CPUS {
             if drained >= max_pages {
                 return drained;
             }
@@ -2227,9 +2227,9 @@ fn refill_local_cache(
 }
 
 fn steal_from_other_caches(cpu_idx: usize, migratetype: Migratetype) -> Option<PhysFrame> {
-    let cpu_count = crate::arch::x86_64::percpu::cpu_count()
+    let cpu_count = crate::arch::percpu::cpu_count()
         .max(1)
-        .min(crate::arch::x86_64::percpu::MAX_CPUS);
+        .min(crate::arch::percpu::MAX_CPUS);
 
     for step in 1..cpu_count {
         let peer = (cpu_idx + step) % cpu_count;
@@ -2244,7 +2244,7 @@ fn steal_from_other_caches(cpu_idx: usize, migratetype: Migratetype) -> Option<P
 }
 
 fn alloc_order0_cached(migratetype: Migratetype) -> Result<PhysFrame, AllocError> {
-    let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
+    let cpu_idx = crate::arch::percpu::current_cpu_index();
 
     {
         let mut cache = LOCAL_FRAME_CACHES[local_cache_slot(cpu_idx, migratetype)].lock();
@@ -2293,7 +2293,7 @@ fn free_order0_cached(frame: PhysFrame, migratetype: Migratetype) {
         return;
     }
 
-    let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
+    let cpu_idx = crate::arch::percpu::current_cpu_index();
     let mut spill = [0u64; LOCAL_CACHE_FLUSH_BATCH];
 
     let spill_len = {
@@ -2419,7 +2419,7 @@ impl FrameAllocator for BuddyAllocator {
 
     /// Performs the free operation.
     fn free(&mut self, frame: PhysFrame, order: u8, token: &IrqDisabledToken) {
-        let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
+        let cpu_idx = crate::arch::percpu::current_cpu_index();
         if ALLOC_IN_PROGRESS[cpu_idx].swap(true, core::sync::atomic::Ordering::Acquire) {
             panic!("Recursive deallocation detected on CPU {}!", cpu_idx);
         }

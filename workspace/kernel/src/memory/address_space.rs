@@ -250,7 +250,7 @@ impl AddressSpace {
         // a fresh private L3/L2/L1 hierarchy (no sharing with the kernel's
         // page table subtrees at the LAPIC virtual address).
         {
-            let lapic_phys = crate::arch::x86_64::apic::lapic_phys();
+            let lapic_phys = crate::arch::apic::lapic_phys();
             if lapic_phys != 0 {
                 let lapic_virt = crate::memory::phys_to_virt(lapic_phys);
                 // Only needed when LAPIC is in the low half.
@@ -2044,7 +2044,7 @@ impl AddressSpace {
                 }
             }
             if let Some((range_start, range_end)) = tlb_flush_range {
-                crate::arch::x86_64::tlb::shootdown_range(
+                crate::arch::tlb::shootdown_range(
                     VirtAddr::new(range_start),
                     VirtAddr::new(range_end),
                 );
@@ -2053,7 +2053,7 @@ impl AddressSpace {
         }
 
         if let Some((range_start, range_end)) = tlb_flush_range {
-            crate::arch::x86_64::tlb::shootdown_range(
+            crate::arch::tlb::shootdown_range(
                 VirtAddr::new(range_start),
                 VirtAddr::new(range_end),
             );
