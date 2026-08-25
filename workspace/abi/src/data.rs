@@ -89,10 +89,26 @@ impl TimeSpec {
     }
 
     /// Convert the timestamp to nanoseconds with saturating arithmetic.
+    ///
+    /// Negative components are invalid as durations and clamp to `0`:
+    /// they previously cast into huge `u64` values, turning a
+    /// userspace-supplied negative `nanosleep` into an almost-infinite
+    /// sleep. Callers that must reject invalid durations should use
+    /// [`TimeSpec::checked_to_nanos`] instead.
     pub fn to_nanos(&self) -> u64 {
-        (self.tv_sec as u64)
-            .saturating_mul(1_000_000_000)
-            .saturating_add(self.tv_nsec as u64)
+        let secs = self.tv_sec.max(0) as u64;
+        let nsecs = self.tv_nsec.max(0) as u64;
+        secs.saturating_mul(1_000_000_000).saturating_add(nsecs)
+    }
+
+    /// Convert to nanoseconds, returning `None` when any component is
+    /// negative (instead of silently clamping like [`TimeSpec::to_nanos`]).
+    /// Use this in paths that must surface `EINVAL` on invalid input.
+    pub fn checked_to_nanos(&self) -> Option<u64> {
+        if self.tv_sec < 0 || self.tv_nsec < 0 {
+            return None;
+        }
+        Some(self.to_nanos())
     }
 
     /// Build a timestamp from a nanoseconds value.
