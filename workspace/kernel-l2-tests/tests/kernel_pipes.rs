@@ -111,14 +111,10 @@ fn pipe_drain_survives_writer_close() {
 
 #[test]
 fn pipe_close_reader_makes_write_fail_with_epipe() {
-    eprintln!("[cr] start");
     let p = Pipe::new();
-    eprintln!("[cr] created");
     assert!(p.close_read(), "first close_read must report the transition");
-    eprintln!("[cr] read end closed");
     let r = p.write(b"data", true);
-    eprintln!("[cr] write returned {:?}", r);
-    assert!(matches!(r, Err(SyscallErrorAlias::Pipe)));
+        assert!(matches!(r, Err(SyscallErrorAlias::Pipe)));
 }
 
 // ===========================================================================

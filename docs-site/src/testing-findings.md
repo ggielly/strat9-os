@@ -100,6 +100,25 @@ l'erreur fatale (`Err(e) => return Err(e)`), seul `Again` reste transitoire.
 Impact production réel : tout processus écrivant dans un pipe dont le
 lecteur est mort (shell pipelines, IPC interne) se figeait.
 
+## F14 — Limine v8.7 panique sur les kernels fraîchement construits — 🔍 investigation ouverte
+Constaté en tentant la validation L3/L4 : `Limine PANIC: elf: No higher
+half PHDRs exist` au chargement de `boot():/boot/kernel.elf`, sur NOTRE
+kernel selftest ET sur le kernel release reconstruit le 25/08 15:02.
+Pourtant `readelf -l` montre 4 PT_LOAD en higher-half (0xffffffff8000_0000+),
+entry point compris, ET_EXEC non-relocatable — le check `elf64_get_ranges`
+de Limine v8.7.0 (common/lib/elf.c:646) devrait compter 4 ranges.
+Éléments discriminants :
+- les binaires Limine sont identiques (md5) dans les deux worktrees
+  (clone v8.x-binary @ aad3edd, jan 2025) ;
+- l'ISO construite ce matin depuis le VIEUX kernel (mai) bootait ;
+- le kernel a donc changé, pas Limine → propriété ELF subtile en cause
+  (memsz ~2 Go de .bss par segment ? ordre/alignement des PHDRs ?).
+⚠️ CONTEXTE : le flux de boot est en migration (bootloader perso BIOS
+`workspace/bootloader` + `create-image.sh`, commits UEFI sur d'autres
+branches). À arbitrer : réparer la chaîne Limine (utile pour les selftests
+L3/L4 automatisés) ou basculer le harnais QEMU sur le bootloader perso.
+En attendant, la porte CI L0/L1/L2 (364 tests) ne dépend pas du boot QEMU.
+
 ## Couverture ajoutée (L2 — code kernel réel sur hôte)
 
 | Suite | Tests | Périmètre |
@@ -114,7 +133,9 @@ lecteur est mort (shell pipelines, IPC interne) se figeait.
 
 | `kernel-l2-tests/tests/kernel_vfs_fd.rs` | 13 | OpenFile (offset partagé POSIX, permissions, EOF), FileDescriptorTable (réuse plus bas fd, dup F_DUPFD, cloexec), Nice saturé + AtomicNice |
 
-Total porte CI : **355 tests verts**.
+| `kernel-l2-tests/tests/kernel_pipes.rs` | 9 | pipes kernel: FIFO, wraparound 4096, EOF/EPIPE lifecycle (F13), registre PipeScheme |
+
+Total porte CI : **364 tests verts**.
 
 Reste candidat L2 : classes d'ordonnancement complètes (nécessitent une
 fake AddressSpace), fake userslice pour handlers read/write d'IpcScheme.
