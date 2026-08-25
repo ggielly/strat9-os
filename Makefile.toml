@@ -109,6 +109,41 @@ command = "cargo"
 args = ["fmt", "--all"]
 
 # =============================================================================
+# Anti-regression test tasks (see docs-site/src/testing-architecture.md)
+# =============================================================================
+
+[tasks.test-host]
+description = "Run all host-safe unit tests (L1): ABI, fs-abstraction, parsers"
+command = "cargo"
+args = [
+    "test",
+    "--target", "x86_64-unknown-linux-gnu",
+    "-p", "strat9-abi",
+    "-p", "strate-fs-abstraction",
+]
+
+[tasks.test-host-alloc]
+description = "Host tests with alloc feature (WindowsString, capabilities)"
+command = "cargo"
+args = [
+    "test",
+    "--target", "x86_64-unknown-linux-gnu",
+    "-p", "strat9-abi",
+    "-p", "strate-fs-abstraction", "--features", "strate-fs-abstraction/alloc",
+]
+
+[tasks.ci-tests]
+description = "Full CI gate: host tests (default + alloc features)"
+dependencies = ["test-host", "test-host-alloc"]
+
+# NOTE: kernel-test is intentionally NOT part of ci-tests yet: the kernel
+# build is currently broken by the unpinned nightly toolchain
+# (`#[target_feature(enable = "avx2")]` now hard-errors on soft-float targets,
+# lint x86_softfloat_sse, rustc 1.100.0-nightly).
+# Once rust-toolchain.toml pins a working nightly (or avx2.rs is adapted),
+# re-add "kernel-test" to the dependencies above.
+
+# =============================================================================
 # Image generation
 # =============================================================================
 
