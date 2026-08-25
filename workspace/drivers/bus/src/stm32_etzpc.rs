@@ -101,6 +101,11 @@ impl BusDriver for Stm32Etzpc {
         "stm32-etzpc"
     }
 
+    /// Exposes the firewall capability to the scheme server.
+    fn as_firewall(&self) -> Option<&dyn FirewallController> {
+        Some(self)
+    }
+
     /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] {
         COMPATIBLE
