@@ -374,10 +374,10 @@ pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
 /// or Err if it wasn't a COW fault (real access violation).
 pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<(), &'static str> {
     use crate::memory::paging::BuddyFrameAllocator;
-    use x86_64::structures::paging::Page;
+    use crate::x86_crate_shim::structures::paging::Page;
     use crate::arch::xshim::{PageTableFlags, Size2MiB, Size4KiB};
-    use x86_64::structures::paging::Translate;
-use x86_64::structures::paging::Mapper;
+    use crate::x86_crate_shim::structures::paging::Translate;
+use crate::x86_crate_shim::structures::paging::Mapper;
     use crate::arch::xshim::VirtAddr;
 
     let mapping = address_space

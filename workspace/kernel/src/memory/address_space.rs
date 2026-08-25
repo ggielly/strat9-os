@@ -19,8 +19,8 @@ use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use spin::Once;
-use x86_64::registers::control::{Cr3, Cr3Flags};
-use x86_64::structures::paging::{
+use crate::x86_crate_shim::registers::control::{Cr3, Cr3Flags};
+use crate::x86_crate_shim::structures::paging::{
     mapper::TranslateResult, Mapper, OffsetPageTable, Page, PageTable, Translate,
 };
 use crate::arch::xshim::{PageTableFlags, PhysFrame as X86PhysFrame, Size2MiB, Size4KiB};
@@ -559,7 +559,7 @@ impl AddressSpace {
     ///
     /// If it does, allocates a physical frame and maps it.
     pub fn handle_fault(&self, fault_addr: u64) -> Result<(), &'static str> {
-        use x86_64::structures::paging::mapper::MapToError;
+        use crate::x86_crate_shim::structures::paging::mapper::MapToError;
 
         // 1. Find the VMA covering this address
         let vma = {

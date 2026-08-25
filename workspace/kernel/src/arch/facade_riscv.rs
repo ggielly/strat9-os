@@ -5,12 +5,20 @@
 //! progresses; each is replaced by real code in a later jalon.
 
 pub use super::riscv64::{
-    boot_timestamp, cli, cpuid, hlt, idt, interrupts_enabled, restore_flags,
-    rdtsc, save_flags_and_cli, serial, speaker, sti, timer, vga, vgabuf,
+    boot_timestamp, cli, cpuid, hlt, interrupts_enabled, rdtsc, restore_flags,
+    save_flags_and_cli, serial, speaker, sti, vgabuf,
 };
+
+pub use crate::arch::riscv64::vga_canvas::Canvas;
 
 /// Neutral MAX_CPUS constant for riscv64 (matches x86_64 value).
 pub const MAX_CPUS: usize = 32;
+
+/// Merged VGA surface for riscv64: backend stubs + canvas.
+pub mod vga {
+    pub use crate::arch::riscv64::vga::*;
+    pub use crate::arch::riscv64::vga_canvas::Canvas;
+}
 
 // ---------------------------------------------------------------------------
 // Transitional per-cpu stub. Real implementation via sscratch: jalon R2.5.
@@ -54,6 +62,9 @@ pub mod percpu {
     pub fn is_preemptible() -> bool {
         true
     }
+    pub fn cpu_index_from_gs() -> usize {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -69,7 +80,7 @@ pub mod tlb {
     pub fn shootdown_all() {}
 }
 
-pub mod apic {
+pub mod apic_base {
     pub fn lapic_phys() -> u64 {
         0
     }
@@ -103,7 +114,7 @@ pub mod pci {
     pub use super::pci_full::*;
 }
 
-pub mod gdt {
+pub mod gdt_selectors {
     // No segment selectors on RISC-V; iret-frame fields become arch-neutral.
     pub fn kernel_code_selector() -> u16 {
         0
@@ -160,6 +171,7 @@ pub mod io {
 pub mod mouse_ready_marker {}
 
 pub mod keyboard {
+    pub fn inject_hid_scancode(_sc: u8) {}
     pub const KEY_LEFT: &str = "\x1b[D";
     pub const KEY_RIGHT: &str = "\x1b[C";
     pub const KEY_UP: &str = "\x1b[A";
@@ -181,12 +193,8 @@ pub mod mouse {
     pub fn read_event() -> Option<(i32, i32, u8)> { None }
     pub fn mouse_pos() -> (usize, usize) { (0, 0) }
     pub fn update_mouse_cursor(_x: usize, _y: usize) {}
-}
-
-pub mod pic {
-    pub fn init(_o1: u8, _o2: u8) {}
-    pub fn disable() {}
-    pub fn enable_irq(_irq: u8) {}
+    pub fn push_event_from_hid(_dx: i32, _dy: i32, _buttons: u8) {}
+    pub fn inject_hid_scancode(_sc: u8) {}
 }
 
 pub mod syscall {
@@ -242,12 +250,16 @@ pub mod pci_full {
     }
     pub mod vendor {
         pub const UNKNOWN: u16 = 0xFFFF;
+        pub const INTEL: u16 = 0x8086;
         pub const VIRTIO: u16 = 0x1AF4;
     }
     pub mod device {
         pub const UNKNOWN: u16 = 0;
         pub const VIRTIO_NET: u16 = 0x1000;
         pub const VIRTIO_BLOCK: u16 = 0x1001;
+        pub const VIRTIO_GPU: u16 = 0x1050;
+        pub const VIRTIO_CONSOLE: u16 = 0x1043;
+        pub const VIRTIO_RNG: u16 = 0x1044;
     }
     pub mod class {
         pub const UNCLASSIFIED: u8 = 0x00;
@@ -259,6 +271,8 @@ pub mod pci_full {
         pub const COMMAND: u8 = 0x04;
         pub const INTERRUPT_LINE: u8 = 0x3C;
         pub const INTERRUPT_PIN: u8 = 0x3D;
+        pub const STATUS: u8 = 0x06;
+        pub const CAPABILITIES_PTR: u8 = 0x34;
         pub fn read_u32(_addr: PciAddress, _off: u8) -> u32 {
             0xFFFF_FFFF
         }
@@ -268,6 +282,7 @@ pub mod pci_full {
         pub const MSIX: u8 = 0x11;
     }
     pub mod command {
+        pub const IO_SPACE: u16 = 0x1;
         pub const MEMORY_SPACE: u16 = 0x2;
         pub const BUS_MASTER: u16 = 0x4;
         pub const INTERRUPT_DISABLE: u16 = 0x400;
@@ -289,20 +304,37 @@ pub mod pci_full {
         }
     }
     pub mod msi_cap {}
+
+    pub fn find_virtio_device(_dev_id: u16) -> Option<(PciAddress, PciDevice)> {
+        None
+    }
     pub mod msix_cap {}
     pub mod msix_ctrl {}
     pub mod msi_ctrl {}
     pub mod intel_eth {
         pub const E1000_82540EM: u16 = 0x100E;
         pub const E1000_82545EM: u16 = 0x100F;
+        pub const E1000E_82574L: u16 = 0x10D3;
+        pub const I217_LM: u16 = 0x153A;
+        pub const I219_LM: u16 = 0x156F;
+        pub const I219_V: u16 = 0x1570;
+        pub const I225_LM: u16 = 0x15F2;
+        pub const I225_V: u16 = 0x15F3;
+        pub const I226_LM: u16 = 0x125B;
+        pub const I226_V: u16 = 0x125C;
     }
     pub mod net_subclass {
         pub const ETHERNET: u8 = 0x00;
+        pub const OTHER: u8 = 0x80;
     }
     pub mod storage_subclass {
         pub const SCSI: u8 = 0x00;
+        pub const SATA: u8 = 0x01;
+        pub const NVM: u8 = 0x02;
     }
-    pub mod sata_progif {}
+    pub mod sata_progif {
+        pub const AHCI: u8 = 0x01;
+    }
     pub const MSI_ADDR_BASE: u32 = 0xFEE0_0000;
     pub const MSI_ADDR_DEST_SHIFT: u32 = 12;
 }
@@ -331,12 +363,9 @@ pub mod cpuid_x86 {
 // pci_full re-exported as `pci` already; add missing submodules used by gfx/shell.
 pub mod msi {
     pub fn enable(_dev: (), _vec: u8) {}
-}
-pub mod ioapic {
-    pub fn init(_addr: u64, _gsi: u32) {}
-    pub fn mask_legacy_irq(_irq: u8) {}
-    pub fn route_nic_irq(_irq: u8, _vector: u8) {}
-    pub fn route_irq(_gsi: u32, _vector: u8) {}
+    pub fn probe_and_enable(_addr: crate::arch::pci::PciAddress, _vector: u8) -> bool {
+        false
+    }
 }
 pub mod vga_text {
     pub enum TextAlign {
@@ -373,3 +402,57 @@ pub mod tss_extra {
         None
     }
 }
+
+// Wiring of the transitional stub modules into the neutral surface.
+
+pub mod apic {
+    pub use super::apic_base::*;
+    pub const IPI_N3_MIGRATE_VECTOR: u8 = 0xF0;
+    pub fn init(_addr: u64) {}
+    pub fn eoi() {}
+    pub fn is_present() -> bool {
+        false
+    }
+    pub fn send_ipi_raw(_target: u32, _value: u32) {}
+}
+
+pub mod gdt {
+    pub use super::gdt_selectors::*;
+    pub fn init() {}
+    pub fn init_cpu(_i: usize) {}
+}
+
+pub mod idt {
+    pub use crate::arch::riscv64::idt::*;
+    pub enum InterruptReturnDecision {
+        Return,
+        Reschedule,
+    }
+}
+
+pub mod pic {
+    pub use crate::arch::riscv64::pic_stub::*;
+    pub fn disable_permanently() {}
+}
+
+pub mod ioapic {
+    pub fn init(_addr: u64, _gsi: u32) {}
+    pub fn route_legacy_irq(_irq: u8, _vector: u8) {}
+    pub fn store_madt_overrides() {}
+    pub fn mask_legacy_irq(_irq: u8) {}
+    pub fn route_nic_irq(_irq: u8, _vector: u8) {}
+    pub fn route_irq(_gsi: u32, _vector: u8) {}
+}
+
+pub mod timer {
+    pub use crate::arch::riscv64::timer::*;
+    pub const TIMER_HZ: u64 = 100;
+    pub const NS_PER_TICK: u64 = 1_000_000_000 / TIMER_HZ;
+    pub use crate::arch::riscv64::timer_extra::*;
+    pub fn is_apic_timer_active() -> bool { false }
+    pub fn apic_ticks_per_10ms() -> u32 { 0 }
+    pub fn start_apic_timer_cached() {}
+}
+
+/// x86-only CPU extensions — no-op on RISC-V.
+pub fn init_cpu_extensions() {}

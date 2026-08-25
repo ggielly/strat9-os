@@ -1,5 +1,5 @@
 use core::fmt;
-use x86_64::instructions::port::Port;
+use crate::x86_crate_shim::instructions::port::Port;
 
 pub struct QemuDebug;
 
