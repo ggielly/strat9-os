@@ -1,5 +1,6 @@
 use crate::{BusChild, BusDriver, BusError, PowerState, mmio::MmioRegion};
 use alloc::{string::String, vec::Vec};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 const SYS_MISC: usize = 0x00;
 const SYS_MISC_MASTERSITE: u32 = 1 << 14;
@@ -22,6 +23,24 @@ const SITE_DB2: u32 = 2;
 const SITE_MASTER: u32 = 0xF;
 
 const MAX_POLL_TRIES: u32 = 100;
+
+// === DCC (Device Configuration Clock) ======================================
+
+/// Offset of the DCC control register within the DCC register block.
+const DCC_CTRL_REG: usize = 0x0;
+/// DCC control: enable bit.
+const DCC_CTRL_ENABLE: u32 = 1 << 0;
+/// DCC control: divider field mask (clock = reference / divider).
+const DCC_CTRL_DIV_MASK: u32 = 0xFF << 8;
+
+/// Target config-bus clock (MHz), per the VExpress syscfg specification.
+pub const DCC_TARGET_FREQ_MHZ: u32 = 50;
+/// Motherboard reference clock feeding the DCC (MHz).
+pub const DCC_REF_FREQ_MHZ: u32 = 100;
+
+fn dcc_ctrl_divider(div: u32) -> u32 {
+    ((div.max(1)) << 8) & DCC_CTRL_DIV_MASK
+}
 
 const COMPATIBLE: &[&str] = &["vexpress-syscfg"];
 
@@ -48,6 +67,12 @@ fn cfg_ctrl_device(n: u32) -> u32 {
 
 pub struct VexpressConfig {
     regs: MmioRegion,
+    /// DCC clock-generator register block, mapped separately from the
+    /// syscfg registers (platform-dependent base).
+    dcc_regs: MmioRegion,
+    /// True once the DCC has been programmed; guarded atomically because
+    /// transactions are issued through `&self`.
+    dcc_initialized: AtomicBool,
     master_site: u32,
     power_state: PowerState,
 }
@@ -57,9 +82,39 @@ impl VexpressConfig {
     pub fn new() -> Self {
         Self {
             regs: MmioRegion::new(),
+            dcc_regs: MmioRegion::new(),
+            dcc_initialized: AtomicBool::new(false),
             master_site: SITE_MASTER,
             power_state: PowerState::Off,
         }
+    }
+
+    /// Maps the DCC register block. Must be called before [`Self::init`]
+    /// for config-bus transactions to be allowed (the DCC must run before
+    /// any transaction can succeed, per the VExpress syscfg spec).
+    pub fn init_dcc_regs(&mut self, base: usize) {
+        self.dcc_regs.init(base, 0x10);
+    }
+
+    /// Programs the DCC to run the config bus at
+    /// [`DCC_TARGET_FREQ_MHZ`] from [`DCC_REF_FREQ_MHZ`], exactly once.
+    fn ensure_dcc_ready(&self) -> Result<(), BusError> {
+        if self.dcc_initialized.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if !self.dcc_regs.is_valid() {
+            return Err(BusError::InitFailed);
+        }
+        let div = (DCC_REF_FREQ_MHZ / DCC_TARGET_FREQ_MHZ).max(1);
+        self.dcc_regs
+            .write32(DCC_CTRL_REG, DCC_CTRL_ENABLE | dcc_ctrl_divider(div));
+        // Read-back verification, like the rest of our MMIO drivers.
+        let rb = self.dcc_regs.read32(DCC_CTRL_REG);
+        if rb != (DCC_CTRL_ENABLE | dcc_ctrl_divider(div)) {
+            return Err(BusError::BusFault);
+        }
+        self.dcc_initialized.store(true, Ordering::Release);
+        Ok(())
     }
 
     /// Performs the detect master site operation.
@@ -97,6 +152,8 @@ impl VexpressConfig {
         function: u32,
         device: u32,
     ) -> Result<u32, BusError> {
+        self.ensure_dcc_ready()?;
+
         let command = self.regs.read32(SYS_CFGCTRL);
         if command & SYS_CFGCTRL_START != 0 {
             return Err(BusError::Timeout);
@@ -143,6 +200,8 @@ impl VexpressConfig {
         device: u32,
         data: u32,
     ) -> Result<(), BusError> {
+        self.ensure_dcc_ready()?;
+
         let command = self.regs.read32(SYS_CFGCTRL);
         if command & SYS_CFGCTRL_START != 0 {
             return Err(BusError::Timeout);
