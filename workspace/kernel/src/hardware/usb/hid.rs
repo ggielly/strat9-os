@@ -400,7 +400,10 @@ pub fn enumerate_device(port: usize, slot_id: u8, dev_desc: &[u8; 18]) {
     }
 }
 
-pub fn receive_interrupt_report(slot_id: u8, ep_id: u8, buf: *const u8, len: usize) {
+/// # Safety
+///
+/// - `buf` must point to `len` readable bytes of a valid HID report.
+pub unsafe fn receive_interrupt_report(slot_id: u8, ep_id: u8, buf: *const u8, len: usize) {
     if buf.is_null() || len == 0 {
         return;
     }

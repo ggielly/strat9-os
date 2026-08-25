@@ -24,22 +24,47 @@ use alloc::{boxed::Box, collections::BTreeMap, format, string::String, vec::Vec}
 use strat9_syscall::{
     call,
     data::{
-        DT_DIR, DT_REG, IpcMessage, PCI_MATCH_DEVICE_ID, PCI_MATCH_VENDOR_ID, PciAddress,
-        PciDeviceInfo, PciProbeCriteria,
+        DT_DIR, DT_REG, IpcMessage, IPC_FILE_FLAG_DIRECTORY, OPCODE_CLOSE, OPCODE_OPEN,
+        OPCODE_READ, OPCODE_READDIR, OPCODE_WRITE, PCI_MATCH_DEVICE_ID, PCI_MATCH_VENDOR_ID,
+        OpenRequest, PciAddress, PciDeviceInfo, PciProbeCriteria,
     },
-    error::{EBADF, EINVAL, EIO, ENOENT, ENOSYS, ENOTDIR},
+    error::{EBADF, EINVAL, EIO, ENOMEM, ENOENT, ENOSYS, ENOTDIR},
 };
 
 use crate::BusDriver;
 
-const OPCODE_OPEN: u32 = 0x01;
-const OPCODE_READ: u32 = 0x02;
-const OPCODE_WRITE: u32 = 0x03;
-const OPCODE_CLOSE: u32 = 0x04;
-const OPCODE_READDIR: u32 = 0x08;
-const REPLY_MSG_TYPE: u32 = 0x80;
+/// Upper bound on simultaneously open handles.
+/// Prevents a single client from exhausting server memory by opening
+/// handles in a loop without closing them (DoS on the scheme server).
+const MAX_OPEN_HANDLES: usize = 256;
+
+/// Max simultaneously open handles **per sender**.
+/// Without it, one client could fill the global table and starve all
+/// others out of the scheme server.
+const MAX_HANDLES_PER_SENDER: usize = 64;
+
+/// Upper bound on cached `pci/find` results.
+///
+/// The `(vendor, device)` key space is 2^32: without a cap, a client
+/// reading many distinct find paths would grow the cache unboundedly
+/// (memory-exhaustion DoS on the scheme server).
+const MAX_FIND_CACHE_ENTRIES: usize = 64;
+
+// VFS scheme opcodes and typed request parsers: re-exported from strat9-abi
+// via strat9-syscall (single source of truth for the wire contract).
 const STATUS_OK: u32 = 0;
-const FILEFLAG_DIRECTORY: u32 = 1;
+
+/// Fixed reply prologue of a READ reply: `status` (4) + `count` (4).
+const READ_HEADER_SIZE: usize = 8;
+/// Fixed reply prologue of a READDIR reply: `status` (4) + `next_cursor`
+/// (2) + `count` (1) + `size` (1), written at payload offsets 0..8.
+const READDIR_HEADER_SIZE: usize = 8;
+/// Max inline data bytes carried by a READ reply:
+/// full payload minus the `status`/`count` prefix.
+const READ_DATA_CAPACITY: usize = IpcMessage::PAYLOAD_CAPACITY - READ_HEADER_SIZE;
+/// Max bytes usable for readdir entries: full payload minus the fixed
+/// reply prologue (`next_cursor` + `count` + `size`, written at 4..8).
+const READDIR_DATA_CAPACITY: usize = IpcMessage::PAYLOAD_CAPACITY - READDIR_HEADER_SIZE;
 
 // === Path constants ========================================================
 
@@ -68,8 +93,31 @@ enum HandleKind {
     Driver { driver_idx: usize, sub_path: String },
 }
 
+impl Clone for HandleKind {
+    fn clone(&self) -> Self {
+        match self {
+            HandleKind::Root => HandleKind::Root,
+            HandleKind::Pci(p) => HandleKind::Pci(p.clone()),
+            HandleKind::Driver {
+                driver_idx,
+                sub_path,
+            } => HandleKind::Driver {
+                driver_idx: *driver_idx,
+                sub_path: sub_path.clone(),
+            },
+        }
+    }
+}
+
 struct OpenHandle {
     kind: HandleKind,
+    /// PID/TID of the process that opened this handle.
+    ///
+    /// All subsequent operations on the handle must come from the same
+    /// sender; any other sender gets `EBADF`. Without this check, any
+    /// process that guesses a `file_id` could read driver registers or
+    /// write PCI config across processes.
+    owner: u64,
 }
 
 // === Server ================================================================
@@ -80,17 +128,37 @@ pub struct BusSchemeServer {
     handles: BTreeMap<u64, OpenHandle>,
     next_id: u64,
     pci_cache: Vec<PciDeviceInfo>,
+    /// Rendered `pci/find/<vid>/<did>` results, keyed by (vendor, device).
+    ///
+    /// Each read of a find file used to re-run the `pci_enum` syscall and
+    /// re-render the whole listing; sequential reads of a long result were
+    /// O(reads × devices). The cache is invalidated on every rescan so
+    /// results stay coherent with `pci/inventory`.
+    find_cache: BTreeMap<(u16, u16), Vec<u8>>,
+    /// Driver-name → index into `drivers`, built once at construction.
+    ///
+    /// Path resolution is O(log n) instead of a linear scan over all
+    /// driver names on every open/existence check — significant with the
+    /// 100–1000 drivers this server is expected to host.
+    name_to_idx: BTreeMap<String, usize>,
 }
 
 impl BusSchemeServer {
     /// Creates a new instance.
     pub fn new(drivers: Vec<(String, Box<dyn BusDriver>)>, port_handle: u64) -> Self {
+        let name_to_idx = drivers
+            .iter()
+            .enumerate()
+            .map(|(i, (name, _))| (name.clone(), i))
+            .collect();
         Self {
             drivers,
             port_handle,
             handles: BTreeMap::new(),
             next_id: 1,
             pci_cache: Vec::new(),
+            find_cache: BTreeMap::new(),
+            name_to_idx,
         }
     }
 
@@ -133,6 +201,9 @@ impl BusSchemeServer {
                 let count = n.min(buf.len());
                 self.pci_cache.clear();
                 self.pci_cache.extend_from_slice(&buf[..count]);
+                // Cached find results are stale as soon as the device
+                // list changes.
+                self.find_cache.clear();
                 Ok(self.pci_cache.len())
             }
             Err(_) => Err(()),
@@ -142,36 +213,36 @@ impl BusSchemeServer {
     // === Reply helpers =====================================================
 
     fn ok_reply(sender: u64) -> IpcMessage {
-        let mut reply = IpcMessage::new(REPLY_MSG_TYPE);
-        reply.sender = sender;
-        reply.payload[0..4].copy_from_slice(&STATUS_OK.to_le_bytes());
-        reply
+        IpcMessage::status_reply(sender, STATUS_OK)
     }
 
     fn err_reply(sender: u64, code: usize) -> IpcMessage {
-        let mut reply = IpcMessage::new(REPLY_MSG_TYPE);
-        reply.sender = sender;
-        reply.payload[0..4].copy_from_slice(&(code as u32).to_le_bytes());
-        reply
+        IpcMessage::status_reply(sender, code as u32)
     }
 
-    fn alloc_id(&mut self) -> u64 {
+    fn alloc_id(&mut self) -> Option<u64> {
         let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1).max(1);
-        id
+        // Never wrap: reusing ids after u64::MAX could alias handles that
+        // are still open. Fail cleanly instead.
+        if id == u64::MAX {
+            return None;
+        }
+        self.next_id = id + 1;
+        Some(id)
     }
 
     // === Path resolution ===================================================
 
+    /// Count open handles belonging to `sender`.
+    fn count_handles_of(&self, sender: u64) -> usize {
+        self.handles.values().filter(|h| h.owner == sender).count()
+    }
+
     /// Split a normalised path into a driver index + sub-path, or detect PCI / root.
     fn resolve_driver_path<'a>(&self, path: &'a str) -> Option<(usize, &'a str)> {
         let (first, rest) = path.split_once('/').unwrap_or((path, ""));
-        for (i, (name, _)) in self.drivers.iter().enumerate() {
-            if first == name.as_str() {
-                return Some((i, rest));
-            }
-        }
-        None
+        let idx = *self.name_to_idx.get(first)?;
+        Some((idx, rest))
     }
 
     fn is_pci_path(path: &str) -> bool {
@@ -185,9 +256,18 @@ impl BusSchemeServer {
         if path.is_empty() {
             return true;
         }
-        // PCI paths
+        // PCI paths: strictly validate the sub-path instead of accepting
+        // anything under `pci/` — otherwise opening `/bus/pci/<junk>`
+        // succeeds and burns a handle on a path that can only answer
+        // "unknown".
         if Self::is_pci_path(path) {
-            return true;
+            return match path {
+                PCI_PREFIX | "pci/inventory" | "pci/count" | "pci/rescan" | "pci/find"
+                | "pci/cfg" => true,
+                p if p.starts_with("pci/find/") => BusSchemeServer::parse_find_path(p).is_some(),
+                p if p.starts_with("pci/cfg/") => BusSchemeServer::parse_cfg_path(p).is_some(),
+                _ => false,
+            };
         }
         // Driver paths
         if let Some((idx, sub)) = self.resolve_driver_path(path) {
@@ -200,7 +280,7 @@ impl BusSchemeServer {
                 return true;
             }
             if sub.starts_with(DRV_REG_PREFIX) {
-                return Self::parse_reg_offset(sub).is_some();
+                return BusSchemeServer::parse_reg_offset(sub).is_some();
             }
             // Firewall capability paths (only when the driver implements it).
             if sub == DRV_FIREWALL_INFO {
@@ -221,10 +301,27 @@ impl BusSchemeServer {
 
     fn parse_reg_offset(path: &str) -> Option<usize> {
         let reg_str = path.strip_prefix(DRV_REG_PREFIX)?;
-        if reg_str.is_empty() {
+        BusSchemeServer::parse_hex_usize(reg_str)
+    }
+
+    /// Parse an unsigned hex value, rejecting inputs `from_str_radix`
+    /// would otherwise accept:
+    /// - sign prefixes (`"+1f"`, `"-1f"`),
+    /// - repeated `0x` prefixes (`"0x0x10"`, previously stripped in a loop).
+    fn parse_hex_usize(s: &str) -> Option<usize> {
+        let digits = s.strip_prefix("0x").unwrap_or(s);
+        if digits.is_empty() || digits.starts_with(['+', '-']) {
             return None;
         }
-        usize::from_str_radix(reg_str.trim_start_matches("0x"), 16).ok()
+        usize::from_str_radix(digits, 16).ok()
+    }
+
+    fn parse_hex_u8(s: &str) -> Option<u8> {
+        BusSchemeServer::parse_hex_usize(s)?.try_into().ok()
+    }
+
+    fn parse_hex_u16(s: &str) -> Option<u16> {
+        BusSchemeServer::parse_hex_usize(s)?.try_into().ok()
     }
 
     /// Parses the peripheral id of a `firewall/<grant|release>/<id>` path.
@@ -243,27 +340,42 @@ impl BusSchemeServer {
     // === Open ================================================================
 
     fn handle_open(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
-        let path_len = u16::from_le_bytes([payload[4], payload[5]]) as usize;
-        if path_len > 42 {
+        // Typed ABI parse: prefix bounds, path bounds and UTF-8 are all
+        // validated in one place instead of hand-rolled offsets here.
+        let (_flags, raw_path) = match OpenRequest::parse(payload) {
+            Some(parsed) => parsed,
+            None => return Self::err_reply(sender, EINVAL),
+        };
+        if raw_path.len() > IpcMessage::OPEN_INLINE_CAPACITY {
             return Self::err_reply(sender, EINVAL);
         }
-        let path_bytes = &payload[6..6 + path_len];
-        let raw_path = match core::str::from_utf8(path_bytes) {
-            Ok(s) => s,
-            Err(_) => return Self::err_reply(sender, EINVAL),
+        let path = match BusSchemeServer::normalize_path(raw_path) {
+            Some(p) => p,
+            // `..` escaping the namespace root.
+            None => return Self::err_reply(sender, EINVAL),
         };
-        let path = Self::normalize_path(raw_path);
         if !self.path_exists(&path) {
             return Self::err_reply(sender, ENOENT);
         }
 
-        let file_id = self.alloc_id();
+        let file_id = match self.alloc_id() {
+            Some(id) => id,
+            // Handle id space exhausted.
+            None => return Self::err_reply(sender, ENOMEM),
+        };
+        if self.handles.len() >= MAX_OPEN_HANDLES
+            || self.count_handles_of(sender) >= MAX_HANDLES_PER_SENDER
+        {
+            return Self::err_reply(sender, ENOMEM);
+        }
         let is_dir;
         let kind = if path.is_empty() {
             is_dir = true;
             HandleKind::Root
         } else if Self::is_pci_path(&path) {
-            is_dir = path.is_empty() || path == "pci" || path == "pci/find" || path == "pci/cfg";
+            // `path.is_empty()` is unreachable here: the Root branch above
+            // already handles it.
+            is_dir = path == PCI_PREFIX || path == "pci/find" || path == "pci/cfg";
             HandleKind::Pci(path)
         } else if let Some((idx, sub)) = self.resolve_driver_path(&path) {
             is_dir = sub.is_empty();
@@ -275,29 +387,39 @@ impl BusSchemeServer {
             return Self::err_reply(sender, ENOENT);
         };
 
-        self.handles.insert(file_id, OpenHandle { kind });
+        self.handles.insert(file_id, OpenHandle { kind, owner: sender });
 
         let mut reply = Self::ok_reply(sender);
         reply.payload[4..12].copy_from_slice(&file_id.to_le_bytes());
         reply.payload[12..20].copy_from_slice(&0u64.to_le_bytes());
-        reply.payload[20..24]
-            .copy_from_slice(&(if is_dir { FILEFLAG_DIRECTORY } else { 0 }).to_le_bytes());
+        reply.payload[20..24].copy_from_slice(
+            &(if is_dir { IPC_FILE_FLAG_DIRECTORY } else { 0 }).to_le_bytes(),
+        );
         reply
     }
 
     // === Read ================================================================
 
-    fn handle_read(&self, sender: u64, payload: &[u8]) -> IpcMessage {
+    fn handle_read(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let file_id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
         let offset = u64::from_le_bytes(payload[8..16].try_into().unwrap());
 
-        let handle = match self.handles.get(&file_id) {
-            Some(h) => h,
-            None => return Self::err_reply(sender, EBADF),
+        // Copy the kind out of the map so the borrow is released before
+        // content generation (which may mutate the find cache).
+        let handle_kind = match self.handles.get(&file_id) {
+            Some(h) if h.owner == sender => Some(h.kind.clone()),
+            _ => None,
+        };
+        let Some(kind) = handle_kind else {
+            return Self::err_reply(sender, EBADF);
         };
 
-        let content = self.generate_read_content(&handle.kind, offset as usize);
-        let n = content.len().min(40);
+        let content = self.generate_read_content(&kind, offset as usize);
+        // Use the full remaining payload capacity (240 - 8 header bytes),
+        // not an arbitrary cap: each wasted byte costs one extra IPC
+        // round-trip per read.
+        let max = READ_DATA_CAPACITY;
+        let n = content.len().min(max);
 
         let mut reply = Self::ok_reply(sender);
         reply.payload[4..8].copy_from_slice(&(n as u32).to_le_bytes());
@@ -305,7 +427,7 @@ impl BusSchemeServer {
         reply
     }
 
-    fn generate_read_content(&self, kind: &HandleKind, offset: usize) -> Vec<u8> {
+    fn generate_read_content(&mut self, kind: &HandleKind, offset: usize) -> Vec<u8> {
         let data = match kind {
             HandleKind::Root => {
                 let mut s = format!("drivers registered: {}\n", self.drivers.len());
@@ -332,7 +454,7 @@ impl BusSchemeServer {
         }
     }
 
-    fn read_pci_content(&self, path: &str) -> Vec<u8> {
+    fn read_pci_content(&mut self, path: &str) -> Vec<u8> {
         match path {
             "" | PCI_PREFIX => b"inventory\ncount\nrescan\nfind\ncfg\n".to_vec(),
             "pci/find" => b"usage: /bus/pci/find/<vendor>/<device>\n".to_vec(),
@@ -340,9 +462,15 @@ impl BusSchemeServer {
             "pci/inventory" => self.render_inventory(),
             "pci/count" => format!("{}\n", self.pci_cache.len()).into_bytes(),
             path if path.starts_with("pci/find/") => {
-                let Some((vendor_id, device_id)) = Self::parse_find_path(path) else {
+                let Some((vendor_id, device_id)) = BusSchemeServer::parse_find_path(path) else {
                     return b"invalid path\n".to_vec();
                 };
+                // Serve repeated/sequential reads from the cache; the
+                // syscall runs once per (vendor, device) until the next
+                // rescan.
+                if let Some(cached) = self.find_cache.get(&(vendor_id, device_id)) {
+                    return cached.clone();
+                }
                 let criteria = PciProbeCriteria {
                     match_flags: PCI_MATCH_VENDOR_ID | PCI_MATCH_DEVICE_ID,
                     vendor_id,
@@ -370,7 +498,7 @@ impl BusSchemeServer {
                     interrupt_pin: 0,
                     _reserved: 0,
                 }; 64];
-                match call::pci_enum(&criteria, &mut matches) {
+                let rendered = match call::pci_enum(&criteria, &mut matches) {
                     Ok(n) => {
                         let mut out = alloc::vec::Vec::new();
                         for d in matches.into_iter().take(n) {
@@ -391,10 +519,22 @@ impl BusSchemeServer {
                         }
                     }
                     Err(_) => b"error\n".to_vec(),
+                };
+                // Cache successful queries only: errors and invalid paths
+                // stay uncached so transient failures are retried.
+                if rendered != b"error\n" {
+                    // Bound the cache: evict the smallest key when full.
+                    if self.find_cache.len() >= MAX_FIND_CACHE_ENTRIES {
+                        if let Some(first) = self.find_cache.keys().next().copied() {
+                            self.find_cache.remove(&first);
+                        }
+                    }
+                    self.find_cache.insert((vendor_id, device_id), rendered.clone());
                 }
+                rendered
             }
             path if path.starts_with("pci/cfg/") => {
-                let Some((addr, reg, width)) = Self::parse_cfg_path(path) else {
+                let Some((addr, reg, width)) = BusSchemeServer::parse_cfg_path(path) else {
                     return b"invalid path\n".to_vec();
                 };
                 match call::pci_cfg_read(&addr, reg, width) {
@@ -426,7 +566,7 @@ impl BusSchemeServer {
             }
             DRV_ERROR_COUNT => format!("{}\n", driver.error_count()).into_bytes(),
             s if s.starts_with(DRV_REG_PREFIX) => {
-                if let Some(reg_offset) = Self::parse_reg_offset(s) {
+                if let Some(reg_offset) = BusSchemeServer::parse_reg_offset(s) {
                     match driver.read_reg(reg_offset) {
                         Ok(val) => format!("0x{:08x}\n", val).into_bytes(),
                         Err(_) => b"error\n".to_vec(),
@@ -466,11 +606,11 @@ impl BusSchemeServer {
         let len = u16::from_le_bytes([payload[16], payload[17]]) as usize;
 
         let kind = match self.handles.get(&file_id) {
-            Some(h) => &h.kind,
-            None => return Self::err_reply(sender, EBADF),
+            Some(h) if h.owner == sender => &h.kind,
+            _ => return Self::err_reply(sender, EBADF),
         };
 
-        if len > 30 {
+        if len > IpcMessage::WRITE_INLINE_CAPACITY {
             return Self::err_reply(sender, EINVAL);
         }
 
@@ -481,7 +621,7 @@ impl BusSchemeServer {
                 }
             }
             HandleKind::Pci(path) if path.starts_with("pci/cfg/") => {
-                let Some((addr, reg, width)) = Self::parse_cfg_path(path) else {
+                let Some((addr, reg, width)) = BusSchemeServer::parse_cfg_path(path) else {
                     return Self::err_reply(sender, EINVAL);
                 };
                 if len < 4 {
@@ -536,7 +676,7 @@ impl BusSchemeServer {
                 driver_idx,
                 sub_path,
             } if sub_path.starts_with(DRV_REG_PREFIX) => {
-                let Some(reg_offset) = Self::parse_reg_offset(sub_path) else {
+                let Some(reg_offset) = BusSchemeServer::parse_reg_offset(sub_path) else {
                     return Self::err_reply(sender, EINVAL);
                 };
                 if len < 4 {
@@ -563,7 +703,11 @@ impl BusSchemeServer {
 
     fn handle_close(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let file_id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
-        if self.handles.remove(&file_id).is_some() {
+        // Only the owner may close its own handle; a foreign close attempt
+        // must not destroy another client's handle.
+        if matches!(self.handles.get(&file_id), Some(h) if h.owner == sender)
+            && self.handles.remove(&file_id).is_some()
+        {
             Self::ok_reply(sender)
         } else {
             Self::err_reply(sender, EBADF)
@@ -575,8 +719,8 @@ impl BusSchemeServer {
     fn handle_readdir(&self, sender: u64, payload: &[u8]) -> IpcMessage {
         let file_id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
         let handle = match self.handles.get(&file_id) {
-            Some(h) => h,
-            None => return Self::err_reply(sender, EBADF),
+            Some(h) if h.owner == sender => h,
+            _ => return Self::err_reply(sender, EBADF),
         };
 
         let entries: Vec<(u64, u8, String)> = match &handle.kind {
@@ -648,7 +792,8 @@ impl BusSchemeServer {
         for (ino, file_type, name) in &entries[cursor..] {
             let name_bytes = name.as_bytes();
             let entry_size = 10 + name_bytes.len();
-            if offset + entry_size > 48 {
+            // Fill the whole payload (entries start at offset 8).
+            if offset + entry_size > IpcMessage::PAYLOAD_CAPACITY {
                 next_cursor = index.min(u16::MAX as usize) as u16;
                 break;
             }
@@ -658,13 +803,15 @@ impl BusSchemeServer {
             let end = offset + 10 + name_bytes.len();
             reply.payload[offset + 10..end].copy_from_slice(name_bytes);
             offset = end;
+            // With a 240-byte payload and >= 10 bytes per entry, count can
+            // never exceed 24: the u8 field cannot overflow.
             count += 1;
             index += 1;
         }
 
         reply.payload[4..6].copy_from_slice(&next_cursor.to_le_bytes());
         reply.payload[6] = count;
-        reply.payload[7] = (offset - 8) as u8;
+        reply.payload[7] = (offset - READDIR_HEADER_SIZE) as u8;
         reply
     }
 
@@ -704,28 +851,34 @@ impl BusSchemeServer {
 
     // === Static helpers ========================================================
 
-    fn normalize_path(path: &str) -> String {
-        if path.is_empty() || path == "/" {
-            return String::new();
+    /// Normalise a client-supplied path for the `/bus` namespace:
+    /// - collapses repeated `/`,
+    /// - drops `.` segments,
+    /// - resolves `..` lexically (returns `None` if it escapes the root).
+    ///
+    /// The root is the empty string. Without this, a path such as
+    /// `pci/../<driver>/reg/x` could bypass naive prefix matching if
+    /// sub-tree resolution ever becomes recursive.
+    fn normalize_path(path: &str) -> Option<String> {
+        let mut segments: Vec<&str> = Vec::new();
+        for seg in path.split('/') {
+            match seg {
+                "" | "." => {}
+                ".." => {
+                    segments.pop()?;
+                }
+                s => segments.push(s),
+            }
         }
-        let trimmed = path.trim_matches('/');
-        String::from(trimmed)
-    }
-
-    fn parse_hex_u8(s: &str) -> Option<u8> {
-        u8::from_str_radix(s.trim_start_matches("0x"), 16).ok()
-    }
-
-    fn parse_hex_u16(s: &str) -> Option<u16> {
-        u16::from_str_radix(s.trim_start_matches("0x"), 16).ok()
+        Some(segments.join("/"))
     }
 
     fn parse_pci_bdf(s: &str) -> Option<PciAddress> {
         let (bus_s, rest) = s.split_once(':')?;
         let (dev_s, fun_s) = rest.split_once('.')?;
-        let bus = Self::parse_hex_u8(bus_s)?;
-        let device = Self::parse_hex_u8(dev_s)?;
-        let function = Self::parse_hex_u8(fun_s)?;
+        let bus = BusSchemeServer::parse_hex_u8(bus_s)?;
+        let device = BusSchemeServer::parse_hex_u8(dev_s)?;
+        let function = BusSchemeServer::parse_hex_u8(fun_s)?;
         if device > 31 || function > 7 {
             return None;
         }
@@ -745,8 +898,8 @@ impl BusSchemeServer {
         if parts.next().is_some() {
             return None;
         }
-        let addr = Self::parse_pci_bdf(bdf)?;
-        let offset = Self::parse_hex_u8(off)?;
+        let addr = BusSchemeServer::parse_pci_bdf(bdf)?;
+        let offset = BusSchemeServer::parse_hex_u8(off)?;
         let width = width.parse::<u8>().ok()?;
         if !matches!(width, 1 | 2 | 4) {
             return None;
@@ -756,8 +909,8 @@ impl BusSchemeServer {
 
     fn parse_find_path(path: &str) -> Option<(u16, u16)> {
         let mut parts = path.strip_prefix("pci/find/")?.split('/');
-        let ven = Self::parse_hex_u16(parts.next()?)?;
-        let dev = Self::parse_hex_u16(parts.next()?)?;
+        let ven = BusSchemeServer::parse_hex_u16(parts.next()?)?;
+        let dev = BusSchemeServer::parse_hex_u16(parts.next()?)?;
         if parts.next().is_some() {
             return None;
         }
@@ -784,5 +937,96 @@ impl BusSchemeServer {
             out.extend_from_slice(line.as_bytes());
         }
         out
+    }
+}
+
+// ===========================================================================
+// Tests — pure path/parsing helpers pinned by the security review.
+// Host-runnable: cargo test -p strat9-bus-drivers
+// ===========================================================================
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+
+    // S5 — normalize_path: dot segments, `..` traversal, repeated slashes.
+
+    #[test]
+    fn s5_normalize_collapses_dots_and_slashes() {
+        assert_eq!(BusSchemeServer::normalize_path("pci//find"), Some(String::from("pci/find")));
+        assert_eq!(BusSchemeServer::normalize_path("./status"), Some(String::from("status")));
+        assert_eq!(BusSchemeServer::normalize_path("/"), Some(String::new()));
+        assert_eq!(BusSchemeServer::normalize_path(""), Some(String::new()));
+    }
+
+    #[test]
+    fn s5_normalize_resolves_parent_segments_lexically() {
+        // Before the fix, `..` passed through untouched and could bypass
+        // prefix matching.
+        assert_eq!(
+            BusSchemeServer::normalize_path("pci/../nvme0/status"),
+            Some(String::from("nvme0/status"))
+        );
+        assert_eq!(BusSchemeServer::normalize_path("a/b/../c"), Some(String::from("a/c")));
+    }
+
+    #[test]
+    fn s5_normalize_rejects_root_escaping_traversal() {
+        assert_eq!(BusSchemeServer::normalize_path("../etc/passwd"), None);
+        assert_eq!(BusSchemeServer::normalize_path("pci/../../x"), None);
+    }
+
+    // A4 — hardened hex parsing.
+
+    #[test]
+    fn a4_hex_parsers_reject_sign_and_repeated_prefixes() {
+        assert!(BusSchemeServer::parse_hex_usize("0x10").is_some());
+        assert_eq!(BusSchemeServer::parse_hex_usize("10"), Some(16));
+        // Previously accepted (trim_start_matches looped):
+        assert!(BusSchemeServer::parse_hex_usize("0x0x10").is_none());
+        // Previously accepted (from_str_radix allows '+'):
+        assert!(BusSchemeServer::parse_hex_usize("+1f").is_none());
+        assert!(BusSchemeServer::parse_hex_usize("-1f").is_none());
+        assert!(BusSchemeServer::parse_hex_usize("").is_none());
+        assert!(BusSchemeServer::parse_hex_u8("100").is_none()); // > u8::MAX
+        assert!(BusSchemeServer::parse_hex_u16("10000").is_none()); // > u16::MAX
+    }
+
+    #[test]
+    fn a4_reg_offset_requires_valid_hex() {
+        assert_eq!(BusSchemeServer::parse_reg_offset("reg/0x1c"), Some(28));
+        assert!(BusSchemeServer::parse_reg_offset("reg/").is_none());
+        assert!(BusSchemeServer::parse_reg_offset("reg/+4").is_none());
+    }
+
+    // V3 — strict pci sub-path validation.
+
+    #[test]
+    fn v3_pci_cfg_path_rejects_bad_width_and_bdf() {
+        let (addr, off, w) = BusSchemeServer::parse_cfg_path("pci/cfg/00:1f.2/10/4").unwrap();
+        assert_eq!((addr.device, addr.function), (31, 2));
+        assert_eq!((off, w), (16, 4));
+        // width must be 1, 2 or 4:
+        assert!(BusSchemeServer::parse_cfg_path("pci/cfg/00:1f.2/10/3").is_none());
+        // device > 31 / function > 7 are invalid BDFs:
+        assert!(BusSchemeServer::parse_cfg_path("pci/cfg/00:20.0/10/4").is_none());
+        assert!(BusSchemeServer::parse_cfg_path("pci/cfg/00:01.8/10/4").is_none());
+        // extra segments rejected:
+        assert!(BusSchemeServer::parse_cfg_path("pci/cfg/00:1f.2/10/4/x").is_none());
+    }
+
+    #[test]
+    fn v3_pci_find_path_is_strictly_two_fields() {
+        assert_eq!(BusSchemeServer::parse_find_path("pci/find/8086:100e"), None); // ':' not a separator
+        assert_eq!(BusSchemeServer::parse_find_path("pci/find/8086/100e"), Some((0x8086, 0x100e)));
+        assert!(BusSchemeServer::parse_find_path("pci/find/8086").is_none());
+        assert!(BusSchemeServer::parse_find_path("pci/find/8086/100e/x").is_none());
+    }
+
+    #[test]
+    fn v3_pci_bdf_bounds_device_and_function() {
+        assert!(BusSchemeServer::parse_pci_bdf("ff:1f.7").is_some());
+        assert!(BusSchemeServer::parse_pci_bdf("00:20.0").is_none()); // device 32
+        assert!(BusSchemeServer::parse_pci_bdf("00:00.8").is_none()); // function 8
     }
 }

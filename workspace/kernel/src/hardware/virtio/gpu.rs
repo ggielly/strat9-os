@@ -718,7 +718,7 @@ impl VirtioGpu {
     }
 
     /// Performs the present from linear operation.
-    pub fn present_from_linear(
+    pub unsafe fn present_from_linear(
         &self,
         src: *const u8,
         src_stride: u32,

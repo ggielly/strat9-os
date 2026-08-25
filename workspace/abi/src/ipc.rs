@@ -109,6 +109,15 @@ impl IpcHandshake {
     pub fn is_compatible(&self) -> bool {
         self.is_valid() && self.protocol_version == IPC_PROTOCOL_VERSION
     }
+
+    /// Return true when any reserved field is non-zero.
+    ///
+    /// Reserved fields must be zero on the wire; servers should reject
+    /// such handshakes so that future protocol upgrades cannot smuggle
+    /// new semantics past a validator that ignores them.
+    pub fn has_reserved_bits_set(&self) -> bool {
+        self._reserved != 0 || self.flags != 0
+    }
 }
 
 /// Server reply to a handshake.
@@ -147,7 +156,6 @@ pub const IPC_HANDSHAKE_VERSION_MISMATCH: u16 = 1;
 
 /// Connection rejected by the server (permissions, capacity, etc.).
 pub const IPC_HANDSHAKE_REJECTED: u16 = 2;
-
 impl IpcHandshakeReply {
     /// Build a successful handshake reply for the current ABI version.
     pub const fn ok() -> Self {
@@ -171,6 +179,12 @@ impl IpcHandshakeReply {
             server_abi_minor: crate::ABI_VERSION_MINOR,
             flags: 0,
         }
+    }
+
+    /// Return true when any reserved field is non-zero
+    /// (see [`IpcHandshake::has_reserved_bits_set`]).
+    pub fn has_reserved_bits_set(&self) -> bool {
+        self.flags != 0
     }
 }
 

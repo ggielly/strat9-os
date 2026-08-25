@@ -766,7 +766,7 @@ fn sys_uname(uts_ptr: u64) -> Result<u64, SyscallError> {
     }
 
     let mut uts = [0u8; UTS_TOTAL_LEN];
-    write_field(&mut uts[0 * UTS_FIELD_LEN..1 * UTS_FIELD_LEN], b"Strat9");
+    write_field(&mut uts[..UTS_FIELD_LEN], b"Strat9");
     write_field(&mut uts[1 * UTS_FIELD_LEN..2 * UTS_FIELD_LEN], b"localhost");
     write_field(&mut uts[2 * UTS_FIELD_LEN..3 * UTS_FIELD_LEN], b"0.1.0");
     write_field(&mut uts[3 * UTS_FIELD_LEN..4 * UTS_FIELD_LEN], b"Strat9-OS");

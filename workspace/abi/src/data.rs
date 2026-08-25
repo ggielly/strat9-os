@@ -89,10 +89,29 @@ impl TimeSpec {
     }
 
     /// Convert the timestamp to nanoseconds with saturating arithmetic.
+    ///
+    /// A timestamp with any negative component is invalid as a duration
+    /// and yields `0`: components previously cast individually into `u64`,
+    /// so a userspace-supplied negative `nanosleep` wrapped into a
+    /// near-infinite sleep. Callers that must reject invalid durations
+    /// should use [`TimeSpec::checked_to_nanos`] instead.
     pub fn to_nanos(&self) -> u64 {
-        (self.tv_sec as u64)
-            .saturating_mul(1_000_000_000)
-            .saturating_add(self.tv_nsec as u64)
+        if self.tv_sec < 0 || self.tv_nsec < 0 {
+            return 0;
+        }
+        let secs = self.tv_sec as u64;
+        let nsecs = self.tv_nsec as u64;
+        secs.saturating_mul(1_000_000_000).saturating_add(nsecs)
+    }
+
+    /// Convert to nanoseconds, returning `None` when any component is
+    /// negative (instead of silently clamping like [`TimeSpec::to_nanos`]).
+    /// Use this in paths that must surface `EINVAL` on invalid input.
+    pub fn checked_to_nanos(&self) -> Option<u64> {
+        if self.tv_sec < 0 || self.tv_nsec < 0 {
+            return None;
+        }
+        Some(self.to_nanos())
     }
 
     /// Build a timestamp from a nanoseconds value.
@@ -401,6 +420,10 @@ impl IpcMessage {
     /// Maximum payload bytes.
     pub const PAYLOAD_CAPACITY: usize = IPC_PAYLOAD_CAPACITY;
 
+    /// Message type used by scheme servers for every reply
+    /// (success or errno-style status).
+    pub const REPLY_MSG_TYPE: u32 = 0x80;
+
     /// Usable payload capacity for `OPEN` inline path (240 - 6 bytes overhead).
     pub const OPEN_INLINE_CAPACITY: usize = IPC_PAYLOAD_CAPACITY - 6;
     /// Usable payload capacity for `UNLINK` inline path (240 - 2 bytes overhead).
@@ -428,6 +451,18 @@ impl IpcMessage {
         let mut msg = IpcMessage::new(0x80);
         msg.sender = sender;
         msg.payload[0..4].copy_from_slice(&(status as u32).to_le_bytes());
+        msg
+    }
+
+    /// Build a reply with `msg_type = 0x80` and a `u32` errno-style status
+    /// (`0` = success) in `payload[0..4]`.
+    ///
+    /// Single source of truth for scheme servers, replacing per-server
+    /// `ok_reply`/`err_reply` duplicates.
+    pub fn status_reply(sender: u64, status: u32) -> Self {
+        let mut msg = IpcMessage::new(Self::REPLY_MSG_TYPE);
+        msg.sender = sender;
+        msg.payload[0..4].copy_from_slice(&status.to_le_bytes());
         msg
     }
 }
