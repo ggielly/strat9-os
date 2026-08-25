@@ -291,7 +291,9 @@ impl BusSchemeServer {
             is_dir = true;
             HandleKind::Root
         } else if Self::is_pci_path(&path) {
-            is_dir = path.is_empty() || path == "pci" || path == "pci/find" || path == "pci/cfg";
+            // `path.is_empty()` is unreachable here: the Root branch above
+            // already handles it.
+            is_dir = path == PCI_PREFIX || path == "pci/find" || path == "pci/cfg";
             HandleKind::Pci(path)
         } else if let Some((idx, sub)) = self.resolve_driver_path(&path) {
             is_dir = sub.is_empty();
