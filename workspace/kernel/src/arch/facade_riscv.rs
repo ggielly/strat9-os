@@ -48,7 +48,7 @@ pub mod percpu {
     pub fn get_cpu_count() -> usize {
         1
     }
-    pub fn init_boot_cpu(_hartid: u64) -> usize {
+    pub fn init_boot_cpu(_hartid: u32) -> usize {
         0
     }
     pub fn init_gs_base(_idx: usize) {}
@@ -319,6 +319,13 @@ pub mod pci_full {
         pub const BUS_MASTER: u16 = 0x4;
         pub const INTERRUPT_DISABLE: u16 = 0x400;
     }
+    impl PciDevice {
+        pub fn read_bar(&self, _idx: u8) -> Option<Bar> {
+            None
+        }
+        pub fn enable_bus_master(&self) {}
+    }
+
     pub struct Bar;
     impl Bar {
         pub fn phys_addr(&self) -> u64 {
@@ -328,11 +335,19 @@ pub mod pci_full {
             0
         }
     }
-    #[derive(Clone, Copy)]
-    pub struct ProbeCriteria;
+    #[derive(Clone, Copy, Default)]
+    pub struct ProbeCriteria {
+        pub vendor_id: Option<u16>,
+        pub device_id: Option<u16>,
+        pub class_code: Option<u8>,
+        pub subclass: Option<u8>,
+    }
     impl ProbeCriteria {
         pub fn new() -> Self {
-            ProbeCriteria
+            Self::default()
+        }
+        pub fn any() -> Self {
+            Self::default()
         }
     }
     pub mod msi_cap {}
@@ -468,9 +483,10 @@ pub mod pic {
 }
 
 pub mod ioapic {
-    pub fn init(_addr: u64, _gsi: u32) {}
-    pub fn route_legacy_irq(_irq: u8, _vector: u8) {}
-    pub fn store_madt_overrides() {}
+    pub fn init(_addr: u32, _gsi_base: u32) {}
+    pub fn route_legacy_irq(_gsi: u8, _lapic: u32, _vector: u8, _ovr: &[Option<crate::acpi::madt::InterruptSourceOverride>; 16]) {}
+    pub fn mask_legacy_irq(_irq: u8, _ovr: &[Option<crate::acpi::madt::InterruptSourceOverride>; 16]) {}
+    pub fn store_madt_overrides(_ovr: &[Option<crate::acpi::madt::InterruptSourceOverride>; 16]) {}
     pub fn mask_legacy_irq(_irq: u8) {}
     pub fn route_nic_irq(_irq: u8, _vector: u8) {}
     pub fn route_irq(_gsi: u32, _vector: u8) {}
