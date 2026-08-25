@@ -1,6 +1,10 @@
 //! Mirror of kernel/src/vfs — scheme protocol core + router.
 #[path = "../../../kernel/src/vfs/scheme.rs"]
 pub mod scheme;
+#[path = "../../../kernel/src/vfs/file.rs"]
+pub mod file;
+#[path = "../../../kernel/src/vfs/fd.rs"]
+pub mod fd;
 /// Shim for kernel/src/vfs/mount.rs (runtime mount table needs full VFS).
 pub mod mount {
     use alloc::sync::Arc;

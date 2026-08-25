@@ -102,10 +102,12 @@ strip `/initfs/` avant recherche : clé stockée `/initfs/fs-ext4`, clé cherch�
 
 | `kernel-l2-tests/tests/kernel_vfs_scheme.rs` | 7 | finalize_pseudo_stat, registre KernelScheme (/initfs), routeur global de schemes, F12 |
 
-Total porte CI : **342 tests verts**.
+| `kernel-l2-tests/tests/kernel_vfs_fd.rs` | 13 | OpenFile (offset partagé POSIX, permissions, EOF), FileDescriptorTable (réuse plus bas fd, dup F_DUPFD, cloexec), Nice saturé + AtomicNice |
 
-Reste candidat L2 : `process/sched_classes` (ordonnanceur), `vfs/fd.rs`,
-et la fake de validation userslice pour les handlers IpcScheme read/write.
+Total porte CI : **355 tests verts**.
+
+Reste candidat L2 : classes d'ordonnancement complètes (nécessitent une
+fake AddressSpace), fake userslice pour handlers read/write d'IpcScheme.
 
 Total porte CI : **327 tests verts**.
 

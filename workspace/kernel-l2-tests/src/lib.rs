@@ -200,6 +200,10 @@ pub mod ipc;
 #[path = "../../kernel/src/namespace/mod.rs"]
 pub mod namespace;
 
+/// FAIR-class nice values, verbatim (pure).
+#[path = "../../kernel/src/process/sched_classes/nice.rs"]
+pub mod sched_nice;
+
 /// VFS scheme protocol core + router, verbatim (user slices faked at the
 /// memory level so no page-table walk happens on the host).
 #[path = "mirror/vfs.rs"]
