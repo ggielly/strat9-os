@@ -131,6 +131,8 @@ fn build_user_thread_task(
         interrupt_rsp: core::sync::atomic::AtomicU64::new(0),
         kernel_stack,
         user_stack: None,
+        stack_canary: core::sync::atomic::AtomicU64::new(0),
+        stack_canary_addr: core::sync::atomic::AtomicU64::new(0),
         name: "user-thread",
         process: parent.process.clone(),
         pending_signals: crate::process::signal::SignalSet::new(),

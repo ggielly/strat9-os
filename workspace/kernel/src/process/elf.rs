@@ -1916,6 +1916,14 @@ fn load_elf_task_inner(
         user_stack_guard(),
     );
 
+    // Stack canary (issue #63): a random per-process value occupies the
+    // top word of the stack; all boot data lives strictly below it. The
+    // kernel re-checks it at task exit (Task::verify_user_stack_canary).
+    let mut canary_bytes = [0u8; 8];
+    crate::entropy::fill_random(&mut canary_bytes);
+    let stack_canary = u64::from_le_bytes(canary_bytes) | 1; // never 0
+    write_user_u64(&user_as, stack_top - 8, stack_canary)?;
+
     let boot_sp = setup_boot_user_stack(
         &user_as,
         name,
@@ -1926,7 +1934,7 @@ fn load_elf_task_inner(
         entry,
         interp_base,
         stack_base,
-        stack_top,
+        stack_top - 8, // data must stay below the canary slot
     )?;
 
     // Step 5: Create kernel task : trampoline params are stored inside the task
@@ -1967,6 +1975,8 @@ fn load_elf_task_inner(
             virt_base: x86_64::VirtAddr::new(stack_base),
             size: stack_pages * 4096,
         }),
+        stack_canary: core::sync::atomic::AtomicU64::new(stack_canary),
+        stack_canary_addr: core::sync::atomic::AtomicU64::new(stack_top - 8),
         name,
         process: Arc::new(crate::process::process::Process::new(pid, user_as)),
         pending_signals: super::signal::SignalSet::new(),

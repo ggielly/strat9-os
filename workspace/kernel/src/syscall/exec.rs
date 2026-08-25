@@ -147,6 +147,18 @@ pub fn sys_execve(
         )
         .map_err(|_| SyscallError::OutOfMemory)?;
 
+    // Stack canary (issue #63): random per-image value at the top word.
+    let mut canary_bytes = [0u8; 8];
+    crate::entropy::fill_random(&mut canary_bytes);
+    let stack_canary = u64::from_le_bytes(canary_bytes) | 1; // never 0
+    write_bytes_to_as(&new_as_arc, stack_top - 8, &stack_canary.to_le_bytes())?;
+    current
+        .stack_canary
+        .store(stack_canary, core::sync::atomic::Ordering::Relaxed);
+    current
+        .stack_canary_addr
+        .store(stack_top - 8, core::sync::atomic::Ordering::Relaxed);
+
     let sp = setup_user_stack(
         &new_as_arc,
         argv_ptr,
@@ -154,7 +166,7 @@ pub fn sys_execve(
         &load_info,
         path_str.as_bytes(),
         stack_base,
-        stack_top,
+        stack_top - 8, // data must stay below the canary slot
     )?;
 
     // TLS setup (Variant II) if the ELF has a PT_TLS segment.
