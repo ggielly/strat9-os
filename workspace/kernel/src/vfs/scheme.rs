@@ -21,6 +21,14 @@ pub use strat9_abi::data::{
     IPC_FILE_FLAG_APPEND, IPC_FILE_FLAG_CHUNK_READ, IPC_FILE_FLAG_CHUNK_WRITE,
     IPC_FILE_FLAG_DEVICE, IPC_FILE_FLAG_DIRECTORY, IPC_FILE_FLAG_PIPE,
 };
+use strat9_abi::{
+    ipc_codec::{get_u32, put_u16_len_prefixed},
+    ipc_payload::{
+        CloseRequest, CreateRequest, OpenReply, OpenRequest, ReadReply, ReadRequest, WriteRequest,
+        OPCODE_CLOSE, OPCODE_CREATE_DIR, OPCODE_CREATE_FILE, OPCODE_OPEN, OPCODE_READ,
+        OPCODE_READDIR, OPCODE_UNLINK, OPCODE_WRITE,
+    },
+};
 
 /// A single directory entry returned by readdir.
 #[derive(Debug, Clone)]
@@ -286,56 +294,41 @@ impl IpcScheme {
 
     /// Build an IPC message for open operation.
     fn build_open_msg(path: &str, flags: OpenFlags) -> Result<IpcMessage, SyscallError> {
-        const OPCODE_OPEN: u32 = 0x01;
-        let mut msg = IpcMessage::new(OPCODE_OPEN);
-
-        // Encode: [flags: u32][path_len: u16][path bytes...]
-        if path.len() > IpcMessage::OPEN_INLINE_CAPACITY {
-            return Err(SyscallError::InvalidArgument); // Path too long for inline
-        }
-
-        msg.payload[0..4].copy_from_slice(&flags.bits().to_le_bytes());
-        msg.payload[4..6].copy_from_slice(&(path.len() as u16).to_le_bytes());
-        msg.payload[6..6 + path.len()].copy_from_slice(path.as_bytes());
-        Ok(msg)
+        // Typed encode: bounds-checks the inline path; no hand-rolled offsets.
+        OpenRequest::encode(OPCODE_OPEN, flags.bits(), path).ok_or(SyscallError::InvalidArgument)
+        // path too long for inline
     }
 
     /// Build an IPC message for read operation.
     fn build_read_msg(file_id: u64, offset: u64, count: u32) -> IpcMessage {
-        const OPCODE_READ: u32 = 0x02;
-        let mut msg = IpcMessage::new(OPCODE_READ);
-        msg.payload[0..8].copy_from_slice(&file_id.to_le_bytes());
-        msg.payload[8..16].copy_from_slice(&offset.to_le_bytes());
-        msg.payload[16..20].copy_from_slice(&count.to_le_bytes());
-        msg
+        ReadRequest::encode(OPCODE_READ, file_id, offset, count)
     }
 
     /// Build an IPC message for write operation.
     ///
     /// Returns the message and the number of bytes actually packed.
     fn build_write_msg(file_id: u64, offset: u64, data: &[u8]) -> (IpcMessage, usize) {
-        const OPCODE_WRITE: u32 = 0x03;
-        let mut msg = IpcMessage::new(OPCODE_WRITE);
-        msg.payload[0..8].copy_from_slice(&file_id.to_le_bytes());
-        msg.payload[8..16].copy_from_slice(&offset.to_le_bytes());
-
-        let packed = core::cmp::min(data.len(), IpcMessage::WRITE_INLINE_CAPACITY);
-        msg.payload[16..18].copy_from_slice(&(packed as u16).to_le_bytes());
-        msg.payload[18..18 + packed].copy_from_slice(&data[..packed]);
-        (msg, packed)
+        // The caller guarantees `data` fits WRITE_INLINE_CAPACITY (chunking
+        // is done above); a None here means that invariant was violated.
+        match WriteRequest::encode(OPCODE_WRITE, file_id, offset, data) {
+            Some((msg, packed)) => (msg, packed),
+            None => {
+                debug_assert!(false, "write chunk exceeded WRITE_INLINE_CAPACITY");
+                let mut msg = IpcMessage::new(OPCODE_WRITE);
+                msg.payload[16..18].copy_from_slice(&0u16.to_le_bytes());
+                (msg, 0)
+            }
+        }
     }
 
     /// Build an IPC message for close operation.
     fn build_close_msg(file_id: u64) -> IpcMessage {
-        const OPCODE_CLOSE: u32 = 0x04;
-        let mut msg = IpcMessage::new(OPCODE_CLOSE);
-        msg.payload[0..8].copy_from_slice(&file_id.to_le_bytes());
-        msg
+        CloseRequest::encode(OPCODE_CLOSE, file_id)
     }
 
     /// Performs the build readdir msg operation.
     fn build_readdir_msg(file_id: u64, cursor: u16) -> IpcMessage {
-        const OPCODE_READDIR: u32 = 0x08;
+        // Wire layout: [ino: u64][cursor: u16 @ 8..10].
         let mut msg = IpcMessage::new(OPCODE_READDIR);
         msg.payload[0..8].copy_from_slice(&file_id.to_le_bytes());
         msg.payload[8..10].copy_from_slice(&cursor.to_le_bytes());
@@ -344,16 +337,11 @@ impl IpcScheme {
 
     /// Parses status.
     fn parse_status(reply: &IpcMessage) -> Result<(), SyscallError> {
-        if reply.msg_type != 0x80 {
+        if reply.msg_type != IpcMessage::REPLY_MSG_TYPE {
             return Err(SyscallError::IoError);
         }
 
-        let status = u32::from_le_bytes([
-            reply.payload[0],
-            reply.payload[1],
-            reply.payload[2],
-            reply.payload[3],
-        ]);
+        let status = get_u32(&reply.payload, 0).ok_or(SyscallError::IoError)?;
         if status == 0 {
             return Ok(());
         }
@@ -399,37 +387,14 @@ impl Scheme for IpcScheme {
         let msg = Self::build_open_msg(path, flags)?;
         let reply = self.call(msg)?;
 
-        // Parse reply: [status: u32][file_id: u64][size: u64][flags: u32]
+        // Parse reply via the typed ABI struct:
+        // [status: u32][file_id: u64][size: u64][flags: u32]
         Self::parse_status(&reply)?;
 
-        let file_id = u64::from_le_bytes([
-            reply.payload[4],
-            reply.payload[5],
-            reply.payload[6],
-            reply.payload[7],
-            reply.payload[8],
-            reply.payload[9],
-            reply.payload[10],
-            reply.payload[11],
-        ]);
-
-        let size = u64::from_le_bytes([
-            reply.payload[12],
-            reply.payload[13],
-            reply.payload[14],
-            reply.payload[15],
-            reply.payload[16],
-            reply.payload[17],
-            reply.payload[18],
-            reply.payload[19],
-        ]);
-
-        let file_flags = u32::from_le_bytes([
-            reply.payload[20],
-            reply.payload[21],
-            reply.payload[22],
-            reply.payload[23],
-        ]);
+        let reply = OpenReply::parse(&reply.payload).ok_or(SyscallError::IoError)?;
+        let file_id = reply.file_id;
+        let size = reply.size;
+        let file_flags = reply.file_flags;
         let flags = FileFlags::from_bits_truncate(file_flags);
         self.remember_open_flags(file_id, flags);
 
@@ -459,16 +424,13 @@ impl Scheme for IpcScheme {
 
             Self::parse_status(&reply)?;
 
-            let bytes_read = u32::from_le_bytes([
-                reply.payload[4],
-                reply.payload[5],
-                reply.payload[6],
-                reply.payload[7],
-            ]) as usize;
-
-            let available = core::cmp::min(bytes_read, reply.payload.len() - 8);
+            // READ reply: [status][count u32 @ 4..8][data @ 8..] (ReadReply).
+            let count = get_u32(&reply.payload, 4).ok_or(SyscallError::IoError)? as usize;
+            let available = core::cmp::min(count, reply.payload.len() - ReadReply::DATA_OFFSET);
             let to_copy = core::cmp::min(available, request_len);
-            buf[total..total + to_copy].copy_from_slice(&reply.payload[8..8 + to_copy]);
+            buf[total..total + to_copy].copy_from_slice(
+                &reply.payload[ReadReply::DATA_OFFSET..ReadReply::DATA_OFFSET + to_copy],
+            );
 
             total += to_copy;
             current_offset += to_copy as u64;
@@ -506,12 +468,8 @@ impl Scheme for IpcScheme {
 
             Self::parse_status(&reply)?;
 
-            let bytes_written = u32::from_le_bytes([
-                reply.payload[4],
-                reply.payload[5],
-                reply.payload[6],
-                reply.payload[7],
-            ]) as usize;
+            // WRITE reply: [status][written u32 @ 4..8] (WriteReply).
+            let bytes_written = get_u32(&reply.payload, 4).ok_or(SyscallError::IoError)? as usize;
 
             let chunk_written = bytes_written.min(packed);
             total += chunk_written;
@@ -536,27 +494,25 @@ impl Scheme for IpcScheme {
 
     /// Creates file.
     fn create_file(&self, path: &str, mode: u32) -> Result<OpenResult, SyscallError> {
-        const OPCODE_CREATE_FILE: u32 = 0x05;
         self.handle_create_op(OPCODE_CREATE_FILE, path, mode)
     }
 
     /// Creates directory.
     fn create_directory(&self, path: &str, mode: u32) -> Result<OpenResult, SyscallError> {
-        const OPCODE_CREATE_DIR: u32 = 0x06;
         self.handle_create_op(OPCODE_CREATE_DIR, path, mode)
     }
 
     /// Performs the unlink operation.
     fn unlink(&self, path: &str) -> Result<(), SyscallError> {
-        const OPCODE_UNLINK: u32 = 0x07;
         let mut msg = IpcMessage::new(OPCODE_UNLINK);
 
         if path.len() > IpcMessage::UNLINK_INLINE_CAPACITY {
             return Err(SyscallError::InvalidArgument);
         }
 
-        msg.payload[0..2].copy_from_slice(&(path.len() as u16).to_le_bytes());
-        msg.payload[2..2 + path.len()].copy_from_slice(path.as_bytes());
+        // Wire framing: [path_len: u16][path bytes...] (put_u16_len_prefixed).
+        put_u16_len_prefixed(&mut msg.payload, 0, path.as_bytes())
+            .ok_or(SyscallError::InvalidArgument)?;
 
         let reply = self.call(msg)?;
         Self::parse_status(&reply)?;
@@ -636,30 +592,25 @@ impl IpcScheme {
         path: &str,
         mode: u32,
     ) -> Result<OpenResult, SyscallError> {
-        let mut msg = IpcMessage::new(opcode);
-
-        if path.len() > IpcMessage::OPEN_INLINE_CAPACITY {
-            return Err(SyscallError::InvalidArgument);
-        }
-
-        msg.payload[0..4].copy_from_slice(&mode.to_le_bytes());
-        msg.payload[4..6].copy_from_slice(&(path.len() as u16).to_le_bytes());
-        msg.payload[6..6 + path.len()].copy_from_slice(path.as_bytes());
+        // Typed encode: [mode: u32][path_len: u16][path bytes...]
+        let msg = CreateRequest::encode(opcode, mode, path).ok_or(SyscallError::InvalidArgument)?;
 
         let reply = self.call(msg)?;
 
         Self::parse_status(&reply)?;
 
-        let file_id = u64::from_le_bytes([
-            reply.payload[4],
-            reply.payload[5],
-            reply.payload[6],
-            reply.payload[7],
-            reply.payload[8],
-            reply.payload[9],
-            reply.payload[10],
-            reply.payload[11],
-        ]);
+        // Reply layout: [status: u32][file_id: u64 @ 4..12] (CreateReply).
+        let file_id = {
+            let payload = &reply.payload;
+            if payload.len() < 12 {
+                return Err(SyscallError::IoError);
+            }
+            u64::from_le_bytes(
+                payload[4..12]
+                    .try_into()
+                    .map_err(|_| SyscallError::IoError)?,
+            )
+        };
 
         Ok(OpenResult {
             file_id,

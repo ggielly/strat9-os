@@ -47,8 +47,7 @@
 
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
-use crate::data::IpcMessage;
-use crate::ipc_codec::InlineBlobHeader;
+use crate::{data::IpcMessage, ipc_codec::InlineBlobHeader};
 
 // ===========================================================================
 // Helpers for compile-time size checks
@@ -155,6 +154,19 @@ impl OpenRequest {
         let path_len = u16::from_le_bytes(payload[4..6].try_into().ok()?) as usize;
         let path = crate::ipc_codec::get_str(payload, Self::PATH_OFFSET, path_len)?;
         Some((flags, path))
+    }
+
+    /// Encode an OPEN request into a fresh [`IpcMessage`].
+    /// Returns `None` if the path does not fit the inline capacity.
+    pub fn encode(msg_type: u32, flags: u32, path: &str) -> Option<IpcMessage> {
+        if path.len() > IpcMessage::OPEN_INLINE_CAPACITY {
+            return None;
+        }
+        let mut msg = IpcMessage::new(msg_type);
+        msg.payload[0..4].copy_from_slice(&flags.to_le_bytes());
+        msg.payload[4..6].copy_from_slice(&(path.len() as u16).to_le_bytes());
+        msg.payload[6..6 + path.len()].copy_from_slice(path.as_bytes());
+        Some(msg)
     }
 }
 
@@ -348,7 +360,12 @@ impl WriteRequest {
     /// Returns `None` if `data` exceeds [`IpcMessage::WRITE_INLINE_CAPACITY`]
     /// — chunking is the caller's policy, this helper never truncates.
     /// Otherwise returns the message and the packed length (== `data.len()`).
-    pub fn encode(msg_type: u32, ino: u64, offset: u64, data: &[u8]) -> Option<(IpcMessage, usize)> {
+    pub fn encode(
+        msg_type: u32,
+        ino: u64,
+        offset: u64,
+        data: &[u8],
+    ) -> Option<(IpcMessage, usize)> {
         if data.len() > IpcMessage::WRITE_INLINE_CAPACITY {
             return None;
         }
@@ -466,6 +483,15 @@ pub struct CloseRequest {
     pub ino: u64,
 }
 assert_payload_size!(CloseRequest);
+
+impl CloseRequest {
+    /// Encode a CLOSE request into a fresh [`IpcMessage`].
+    pub fn encode(msg_type: u32, ino: u64) -> IpcMessage {
+        let mut msg = IpcMessage::new(msg_type);
+        msg.payload[0..8].copy_from_slice(&ino.to_le_bytes());
+        msg
+    }
+}
 
 /// Stat request.
 ///
