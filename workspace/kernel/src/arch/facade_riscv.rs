@@ -270,7 +270,7 @@ pub mod pci_full {
         pub interrupt_line: u8,
         pub interrupt_pin: u8,
     }
-    pub fn all_devices() -> alloc::vec::Vec<PciAddress> {
+    pub fn all_devices() -> alloc::vec::Vec<PciDevice> {
         alloc::vec::Vec::new()
     }
     pub fn invalidate_cache() {}
