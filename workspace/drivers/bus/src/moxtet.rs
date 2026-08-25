@@ -44,11 +44,31 @@ impl MoxtetModuleId {
     }
 }
 
+/// A module discovered on the moxtet SPI shift chain.
 pub struct MoxtetModule {
     pub id: MoxtetModuleId,
+    /// Zero-based position of this module on the chain. This is the value
+    /// used to address the module through `BusDriver::read_reg`/
+    /// `write_reg` — see [`Moxtet`] for the addressing scheme.
     pub index: u8,
 }
 
+/// CZ.NIC Turris Omnia moxtet bus driver.
+///
+/// # Register-space semantics (`/bus/moxtet/reg/<idx>`)
+///
+/// The moxtet bus has **no MMIO register file**: it is a software-defined
+/// FPGA bus where modules are enumerated at discovery time over SPI and
+/// addressed by their position on the shift chain. Consequently, the
+/// `offset` argument of [`BusDriver::read_reg`]/[`BusDriver::write_reg`]
+/// (and therefore the `/bus/moxtet/reg/<idx>` scheme paths) is a
+/// **zero-based module index**, *not* a byte/hex MMIO offset:
+///
+/// - `reg/0` reads/writes the TX/RX buffer slot of module 0,
+/// - offsets `>= module_count` are rejected with [`BusError::DeviceNotFound`].
+///
+/// This deviates from MMIO-mapped buses where `reg/<hex>` is a hardware
+/// offset; it is kept for compatibility with the [`BusDriver`] trait API.
 pub struct Moxtet {
     modules: Vec<MoxtetModule>,
     module_count: usize,
@@ -142,12 +162,20 @@ impl BusDriver for Moxtet {
         Ok(())
     }
 
-    /// Reads reg.
+    /// Reads the RX buffer slot of the module at `offset`.
+    ///
+    /// `offset` is a **module index** (0-based position on the shift
+    /// chain), not an MMIO byte offset — see the [`Moxtet`] type docs.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         self.module_read(offset).map(|v| v as u32)
     }
 
-    /// Writes reg.
+    /// Writes the TX buffer slot of the module at `offset`.
+    ///
+    /// `offset` is a **module index** (0-based position on the shift
+    /// chain), not an MMIO byte offset — see the [`Moxtet`] type docs.
+    /// Only the low 8 bits of `value` are significant: each module slot
+    /// is one byte wide in the SPI frame.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {
         self.module_write(offset, value as u8)
     }
