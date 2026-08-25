@@ -115,11 +115,22 @@ pub struct BusSchemeServer {
     /// O(reads × devices). The cache is invalidated on every rescan so
     /// results stay coherent with `pci/inventory`.
     find_cache: BTreeMap<(u16, u16), Vec<u8>>,
+    /// Driver-name → index into `drivers`, built once at construction.
+    ///
+    /// Path resolution is O(log n) instead of a linear scan over all
+    /// driver names on every open/existence check — significant with the
+    /// 100–1000 drivers this server is expected to host.
+    name_to_idx: BTreeMap<String, usize>,
 }
 
 impl BusSchemeServer {
     /// Creates a new instance.
     pub fn new(drivers: Vec<(String, Box<dyn BusDriver>)>, port_handle: u64) -> Self {
+        let name_to_idx = drivers
+            .iter()
+            .enumerate()
+            .map(|(i, (name, _))| (name.clone(), i))
+            .collect();
         Self {
             drivers,
             port_handle,
@@ -127,6 +138,7 @@ impl BusSchemeServer {
             next_id: 1,
             pci_cache: Vec::new(),
             find_cache: BTreeMap::new(),
+            name_to_idx,
         }
     }
 
@@ -204,12 +216,8 @@ impl BusSchemeServer {
     /// Split a normalised path into a driver index + sub-path, or detect PCI / root.
     fn resolve_driver_path<'a>(&self, path: &'a str) -> Option<(usize, &'a str)> {
         let (first, rest) = path.split_once('/').unwrap_or((path, ""));
-        for (i, (name, _)) in self.drivers.iter().enumerate() {
-            if first == name.as_str() {
-                return Some((i, rest));
-            }
-        }
-        None
+        let idx = *self.name_to_idx.get(first)?;
+        Some((idx, rest))
     }
 
     fn is_pci_path(path: &str) -> bool {
