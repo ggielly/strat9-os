@@ -88,7 +88,12 @@ debug = 2
 incremental = true # Faster recompilation
 
 [profile.dev]
-opt-level = 0      # No optimization for faster compilation
+# PINNED-TOOLCHAIN WORKAROUND (see rust-toolchain.toml): at opt-level=0,
+# LLVM ICEs ("Do not know how to split the result of this operator",
+# rust-lang/rust#158532) when legalizing the framebuffer AVX2 intrinsics on
+# the soft-float x86_64-unknown-none target. opt-level=1 avoids the
+# legalization path and keeps builds fast.
+opt-level = 1
 debug = 2          # Full debug information (maximum)
 strip = false      # Keep all symbols
 panic = "abort"    # no_std kernel targets cannot use unwind

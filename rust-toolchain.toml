@@ -1,4 +1,15 @@
 [toolchain]
-channel = "nightly"
+# PINNED (2026-08-25, commit test/anti-regression-suite):
+# The rolling `nightly` channel broke the kernel build on 2026-08-23.
+# Cause: rust-lang/rust PR #160302 "target_features: sse (or at least avx2)
+# is incompatible with soft-float ABI" (merge fb6531d550e0, 2026-08-23
+# 21:33 UTC) turned lint `x86_softfloat_sse` into a hard error. It fires on
+# `#[target_feature(enable = "avx2")]` in workspace/kernel/src/framebuffer/x86/avx2.rs
+# because x86_64-unknown-none is a soft-float target.
+# Bisect: nightly-2026-08-20 = OK, nightly-2026-08-23 = broken.
+# To bump: cargo +nightly-<date> check -p strat9-kernel --target x86_64-unknown-none
+# then update this pin AND the comment date. Track PR #160302 / issue #117938
+# for the eventual sanctioned way to use AVX2 on no_std targets.
+channel = "nightly-2026-08-20"
 components = ["rust-src", "rustc-dev", "llvm-tools"]
 targets = ["x86_64-unknown-none"]
