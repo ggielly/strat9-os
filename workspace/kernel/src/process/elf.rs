@@ -14,8 +14,9 @@
 //!   - FIx TODO : allocation heap during ELF loading
 //!     program_headers(elf_data, &header).collect() → Vec<Elf64Phdr>, Vec::new() for interp_phdrs, etc. The kernel uses alloc so it's normal, but allocation errors are not handled (no try_collect, no fallible GlobalAlloc).
 //!
-//!   - Fix TODO : find_free_vma_range : fallback hardcoded 0x1000_0000
-//!     If PIE_BASE_ADDR (0x1_0000_0000) fails, fallback to 0x1000_0000. This value is arbitrary and could overlap existing mappings if many libraries are loaded.
+//!   - ~~Fix TODO : find_free_vma_range : fallback hardcoded 0x1000_0000~~
+//!     DONE : the fallback was removed; a failed search now fails the load
+//!     with "No virtual range for ET_DYN image".
 //!
 //! Security:
 //!   - User stack has a guard page (user_stack_base() - 4096) that is intentionally
@@ -443,11 +444,11 @@ fn compute_load_bias_and_entry(
         0
     } else {
         let n_pages = (span as usize).div_ceil(4096);
+        // No hardcoded fallback: if the randomized PIE base cannot host the
+        // image (address space full), fail the load loudly instead of
+        // silently colliding with existing mappings (issue #68).
         let load_base = user_as
             .find_free_vma_range(pie_base(), n_pages, VmaPageSize::Small)
-            .or_else(|| {
-                user_as.find_free_vma_range(0x0000_0000_1000_0000, n_pages, VmaPageSize::Small)
-            })
             .ok_or("No virtual range for ET_DYN image")?;
         load_base
             .checked_sub(min_vaddr)
