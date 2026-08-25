@@ -1219,12 +1219,21 @@ impl ModuleRegistry {
 
 static MODULE_REGISTRY: SpinLock<ModuleRegistry> = SpinLock::new(ModuleRegistry::new());
 
-/// Performs the charge task silo memory operation.
+/// Charge memory usage against a task's silo quota (if any).
+///
+/// Uses `try_lock`: callers sit on memory-mapping paths that can execute
+/// while `SILO_MANAGER` is held elsewhere on the same CPU (e.g. a snapshot
+/// helper allocating under the lock). A blocking acquisition there would
+/// self-deadlock the kernel; skipping accounting under contention is the
+/// documented best-effort trade-off (same policy as
+/// [`try_silo_id_for_task`]).
 fn charge_task_silo_memory(task_id: TaskId, bytes: u64) -> Result<(), SyscallError> {
     if bytes == 0 {
         return Ok(());
     }
-    let mut mgr = SILO_MANAGER.lock();
+    let Some(mut mgr) = SILO_MANAGER.try_lock() else {
+        return Ok(());
+    };
     let Some(silo_id) = mgr.silo_for_task(task_id) else {
         return Ok(());
     };
@@ -1240,12 +1249,16 @@ fn charge_task_silo_memory(task_id: TaskId, bytes: u64) -> Result<(), SyscallErr
     Ok(())
 }
 
-/// Performs the release task silo memory operation.
+/// Release memory usage from a task's silo quota (if any).
+///
+/// Best-effort `try_lock`, mirroring [`charge_task_silo_memory`].
 fn release_task_silo_memory(task_id: TaskId, bytes: u64) {
     if bytes == 0 {
         return;
     }
-    let mut mgr = SILO_MANAGER.lock();
+    let Some(mut mgr) = SILO_MANAGER.try_lock() else {
+        return;
+    };
     let Some(silo_id) = mgr.silo_for_task(task_id) else {
         return;
     };
