@@ -266,7 +266,7 @@ pub mod structures {
             ) -> Result<MapperFlush<S>, mapper::MapToError<S>> {
                 Err(mapper::MapToError::FrameAllocationFailed)
             }
-            pub unsafe fn unmap<S: PageSize>(
+            pub fn unmap<S: PageSize>(
                 &mut self,
                 _page: Page<S>,
             ) -> Result<(crate::arch::xshim::PhysFrame<S>, MapperFlush<S>), ()> {
