@@ -234,10 +234,27 @@ impl BusSchemeServer {
 
     fn parse_reg_offset(path: &str) -> Option<usize> {
         let reg_str = path.strip_prefix(DRV_REG_PREFIX)?;
-        if reg_str.is_empty() {
+        Self::parse_hex_usize(reg_str)
+    }
+
+    /// Parse an unsigned hex value, rejecting inputs `from_str_radix`
+    /// would otherwise accept:
+    /// - sign prefixes (`"+1f"`, `"-1f"`),
+    /// - repeated `0x` prefixes (`"0x0x10"`, previously stripped in a loop).
+    fn parse_hex_usize(s: &str) -> Option<usize> {
+        let digits = s.strip_prefix("0x").unwrap_or(s);
+        if digits.is_empty() || digits.starts_with(['+', '-']) {
             return None;
         }
-        usize::from_str_radix(reg_str.trim_start_matches("0x"), 16).ok()
+        usize::from_str_radix(digits, 16).ok()
+    }
+
+    fn parse_hex_u8(s: &str) -> Option<u8> {
+        Self::parse_hex_usize(s)?.try_into().ok()
+    }
+
+    fn parse_hex_u16(s: &str) -> Option<u16> {
+        Self::parse_hex_usize(s)?.try_into().ok()
     }
 
     // === Open ================================================================
@@ -670,14 +687,6 @@ impl BusSchemeServer {
         }
         let trimmed = path.trim_matches('/');
         String::from(trimmed)
-    }
-
-    fn parse_hex_u8(s: &str) -> Option<u8> {
-        u8::from_str_radix(s.trim_start_matches("0x"), 16).ok()
-    }
-
-    fn parse_hex_u16(s: &str) -> Option<u16> {
-        u16::from_str_radix(s.trim_start_matches("0x"), 16).ok()
     }
 
     fn parse_pci_bdf(s: &str) -> Option<PciAddress> {
