@@ -182,6 +182,11 @@ impl BusDriver for Stm32Rifsc {
         "stm32-rifsc"
     }
 
+    /// Exposes the firewall capability to the scheme server.
+    fn as_firewall(&self) -> Option<&dyn FirewallController> {
+        Some(self)
+    }
+
     /// Performs the compatible operation.
     fn compatible(&self) -> &[&str] {
         COMPATIBLE
