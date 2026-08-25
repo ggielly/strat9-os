@@ -104,10 +104,16 @@ pub fn stack_base() -> u64 {
     STACK_BASE + STACK_BASE_OFFSET.load(Ordering::Relaxed)
 }
 
+/// Get the top of a stack of `pages` 4 KiB pages starting at `base`.
+#[inline]
+pub fn stack_top_for(base: u64, pages: usize) -> u64 {
+    base + (pages as u64) * 4096
+}
+
 /// Get the randomized user stack top address.
 #[inline]
 pub fn stack_top() -> u64 {
-    stack_base() + 16 * 4096
+    stack_top_for(stack_base(), crate::process::elf::USER_STACK_PAGES)
 }
 
 /// Get the guard page address below the user stack.

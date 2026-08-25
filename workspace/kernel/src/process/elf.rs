@@ -87,7 +87,17 @@ const R_X86_64_IRELATIVE: u32 = 37;
 pub const USER_ADDR_MAX: u64 = 0x0000_8000_0000_0000;
 
 /// Number of 4 KiB pages for the user stack (16 pages = 64 KiB).
+///
+/// This is the *default*: the loader accepts a per-process stack size via
+/// [`load_and_run_elf_with_stack`] (issue #64).
 pub const USER_STACK_PAGES: usize = 16;
+/// Lower bound on a per-process user stack (4 pages = 16 KiB): the boot
+/// stack layout alone (argv/envp/auxv + guard margins) needs at least one
+/// page, and tiny stacks would fault immediately.
+pub const USER_STACK_MIN_PAGES: usize = 4;
+/// Upper bound on a per-process user stack (2048 pages = 8 MiB), to keep a
+/// buggy or hostile caller from exhausting the user address space / frames.
+pub const USER_STACK_MAX_PAGES: usize = 2048;
 /// Standard user-mode RFLAGS: IF=1, reserved bit 1 set.
 const USER_RFLAGS: u64 = 0x202;
 
@@ -1523,7 +1533,24 @@ pub fn load_and_run_elf_with_args(
     name: &'static str,
     extra_args: &[&str],
 ) -> Result<TaskId, &'static str> {
-    let task = load_elf_task_inner(elf_data, name, extra_args, &[])?;
+    let task = load_elf_task_inner(elf_data, name, extra_args, &[], USER_STACK_PAGES)?;
+    let task_id = task.id;
+    crate::process::add_task(task);
+    Ok(task_id)
+}
+
+/// Load an ELF64 binary with an explicit per-process user stack size.
+///
+/// `stack_pages` is expressed in 4 KiB pages and clamped to
+/// [`USER_STACK_MIN_PAGES`]..=[`USER_STACK_MAX_PAGES`] (issue #64).
+pub fn load_and_run_elf_with_stack(
+    elf_data: &[u8],
+    name: &'static str,
+    extra_args: &[&str],
+    seed_caps: &[Capability],
+    stack_pages: usize,
+) -> Result<TaskId, &'static str> {
+    let task = load_elf_task_inner(elf_data, name, extra_args, seed_caps, stack_pages)?;
     let task_id = task.id;
     crate::process::add_task(task);
     Ok(task_id)
@@ -1535,7 +1562,7 @@ pub fn load_elf_task_with_caps(
     name: &'static str,
     seed_caps: &[Capability],
 ) -> Result<Arc<Task>, &'static str> {
-    load_elf_task_inner(elf_data, name, &[], seed_caps)
+    load_elf_task_inner(elf_data, name, &[], seed_caps, USER_STACK_PAGES)
 }
 
 /// Performs the load and run elf with caps operation.
@@ -1549,10 +1576,13 @@ pub fn load_and_run_elf_with_caps(
         name,
         elf_data.len()
     );
-    let task = load_elf_task_inner(elf_data, name, &[], seed_caps)?;
+    let task = load_elf_task_inner(elf_data, name, &[], seed_caps, USER_STACK_PAGES)?;
     let task_id = task.id;
     let runtime_entry = task
         .trampoline_entry
+        .load(core::sync::atomic::Ordering::Acquire);
+    let boot_stack_top = task
+        .trampoline_stack_top
         .load(core::sync::atomic::Ordering::Acquire);
     crate::e9_println!(
         "[trace][elf] load_and_run_elf add_task begin tid={} entry={:#x}",
@@ -1569,7 +1599,7 @@ pub fn load_and_run_elf_with_caps(
         "[elf] Task '{}' created: entry={:#x}, stack_top={:#x}",
         name,
         runtime_entry,
-        user_stack_top(),
+        boot_stack_top,
     );
 
     Ok(task_id)
@@ -1619,13 +1649,15 @@ fn setup_boot_user_stack(
     phnum: u16,
     program_entry: u64,
     interp_base: Option<u64>,
+    stack_base: u64,
+    stack_top: u64,
 ) -> Result<u64, &'static str> {
-    let mut sp = user_stack_top();
+    let mut sp = stack_top;
 
     // Write argv[0] = program name (null-terminated)
     let name_nul_len = (name.len() + 1) as u64;
     sp -= name_nul_len;
-    if sp < user_stack_base() {
+    if sp < stack_base {
         return Err("User stack overflow during boot stack setup");
     }
     let argv0_ptr = sp;
@@ -1637,7 +1669,7 @@ fn setup_boot_user_stack(
     for &arg in extra_args.iter() {
         let arg_nul_len = (arg.len() + 1) as u64;
         sp -= arg_nul_len;
-        if sp < user_stack_base() {
+        if sp < stack_base {
             return Err("User stack overflow during boot stack setup");
         }
         extra_ptrs.push(sp);
@@ -1647,7 +1679,7 @@ fn setup_boot_user_stack(
 
     sp &= !0xF;
     sp -= 16;
-    if sp < user_stack_base() {
+    if sp < stack_base {
         return Err("User stack overflow during boot stack setup");
     }
     let random_ptr = sp;
@@ -1704,7 +1736,11 @@ fn load_elf_task_inner(
     name: &'static str,
     extra_args: &[&str],
     seed_caps: &[Capability],
+    stack_pages: usize,
 ) -> Result<Arc<Task>, &'static str> {
+    if !(USER_STACK_MIN_PAGES..=USER_STACK_MAX_PAGES).contains(&stack_pages) {
+        return Err("User stack size out of range");
+    }
     crate::e9_println!(
         "[trace][elf] load_elf_task enter name={} size={}",
         name,
@@ -1849,6 +1885,11 @@ fn load_elf_task_inner(
     }
 
     // Step 4: Map user stack
+    // The stack base is the KASLR-randomized base; its size is configurable
+    // per process (issue #64). A single guard page below the stack is left
+    // unmapped : underflow faults instead of silently corrupting neighbours.
+    let stack_base = user_stack_base();
+    let stack_top = crate::kaslr::stack_top_for(stack_base, stack_pages);
     let stack_flags = VmaFlags {
         readable: true,
         writable: true,
@@ -1856,8 +1897,8 @@ fn load_elf_task_inner(
         user_accessible: true,
     };
     user_as.map_region(
-        user_stack_base(),
-        USER_STACK_PAGES,
+        stack_base,
+        stack_pages,
         stack_flags,
         VmaType::Stack,
         VmaPageSize::Small,
@@ -1867,9 +1908,9 @@ fn load_elf_task_inner(
     // is intentionally left unmapped : no VMA, no PTE.
     log::debug!(
         "[elf] User stack: {:#x}..{:#x} ({} pages), guard at {:#x}",
-        user_stack_base(),
-        user_stack_top(),
-        USER_STACK_PAGES,
+        stack_base,
+        stack_top,
+        stack_pages,
         user_stack_guard(),
     );
 
@@ -1882,6 +1923,8 @@ fn load_elf_task_inner(
         header.e_phnum,
         entry,
         interp_base,
+        stack_base,
+        stack_top,
     )?;
 
     // Step 5: Create kernel task : trampoline params are stored inside the task
@@ -1919,8 +1962,8 @@ fn load_elf_task_inner(
         interrupt_rsp: core::sync::atomic::AtomicU64::new(0),
         kernel_stack,
         user_stack: Some(crate::process::task::UserStack {
-            virt_base: x86_64::VirtAddr::new(user_stack_base()),
-            size: USER_STACK_PAGES * 4096,
+            virt_base: x86_64::VirtAddr::new(stack_base),
+            size: stack_pages * 4096,
         }),
         name,
         process: Arc::new(crate::process::process::Process::new(pid, user_as)),
