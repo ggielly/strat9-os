@@ -48,19 +48,78 @@ pub mod structures {
     pub mod paging {
         pub use crate::arch::xshim::{PageTableFlags, PhysFrame, Size2MiB, Size4KiB};
         pub use crate::arch::xshim::{PhysAddr, VirtAddr};
-        pub struct Page<S>(core::marker::PhantomData<S>);
-        impl Page<Size4KiB> {
-            pub fn containing_address(_a: VirtAddr) -> Self { panic!("Page on riscv64") }
+        #[derive(Clone, Copy)]
+        pub struct Page<S: PageSize> {
+            start: VirtAddr,
+            _size: core::marker::PhantomData<S>,
         }
-        pub struct PageTable;
+
+        pub trait PageSize {
+            const SIZE: u64;
+        }
+        impl PageSize for Size4KiB { const SIZE: u64 = 4096; }
+        impl PageSize for Size2MiB { const SIZE: u64 = 2 * 1024 * 1024; }
+
+        impl<S: PageSize> Page<S> {
+            pub fn containing_address(a: VirtAddr) -> Self {
+                Self { start: VirtAddr::new(a.as_u64() & !(S::SIZE - 1)), _size: core::marker::PhantomData }
+            }
+            pub fn start_address(&self) -> VirtAddr {
+                self.start
+            }
+            pub fn from_start_address(a: VirtAddr) -> Result<Self, ()> {
+                Ok(Self { start: a, _size: core::marker::PhantomData })
+            }
+        }
+
+        /// Raw Sv48 PTE (R2 fills in the real walk).
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct PageTableEntry(pub u64);
+        impl PageTableEntry {
+            pub fn is_unused(&self) -> bool { self.0 == 0 }
+        }
+
+        pub struct PageTable {
+            entries: [PageTableEntry; 512],
+        }
+
+        impl PageTable {
+            pub const fn new() -> Self {
+                // SAFETY of zeroed PTEs: all-zero means "not present".
+                Self { entries: [PageTableEntry(0); 512] }
+            }
+            pub fn iter_mut(&mut self) -> core::slice::IterMut<'_, PageTableEntry> {
+                self.entries.iter_mut()
+            }
+        }
+
+        impl Default for PageTable {
+            fn default() -> Self { Self::new() }
+        }
         pub trait Mapper<S> {}
         pub trait Translate {
             fn translate(&self, _a: VirtAddr) -> Option<(PhysAddr, PageTableFlags)> { None }
         }
-        pub struct OffsetPageTable;
+        /// Sv48 page-table mapper over the active root (real impl in R2).
+        pub struct OffsetPageTable<'a> {
+            l4: &'a mut PageTable,
+            phys_offset: u64,
+            _marker: core::marker::PhantomData<&'a ()>,
+        }
+
+        impl<'a> OffsetPageTable<'a> {
+            /// SAFETY: `l4` must point at the active Sv48 root table.
+            pub unsafe fn new(l4: &'a mut PageTable, phys_offset: crate::arch::xshim::VirtAddr) -> Self {
+                Self { l4, phys_offset: phys_offset.as_u64(), _marker: core::marker::PhantomData }
+            }
+        }
+
         pub struct MapperFlush<S>(core::marker::PhantomData<S>);
         impl<S> MapperFlush<S> {
-            pub fn flush(self) {}
+            pub fn flush(self) {
+                // sfence.vma full flush placeholder; per-page flush in R2.
+            }
         }
         pub mod mapper {
             pub type TranslateResult = crate::arch::xshim::TranslateResult;
