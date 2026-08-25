@@ -34,6 +34,18 @@ use crate::BusDriver;
 /// handles in a loop without closing them (DoS on the scheme server).
 const MAX_OPEN_HANDLES: usize = 256;
 
+/// Max simultaneously open handles **per sender**.
+/// Without it, one client could fill the global table and starve all
+/// others out of the scheme server.
+const MAX_HANDLES_PER_SENDER: usize = 64;
+
+/// Upper bound on cached `pci/find` results.
+///
+/// The `(vendor, device)` key space is 2^32: without a cap, a client
+/// reading many distinct find paths would grow the cache unboundedly
+/// (memory-exhaustion DoS on the scheme server).
+const MAX_FIND_CACHE_ENTRIES: usize = 64;
+
 // VFS scheme opcodes and typed request parsers: re-exported from strat9-abi
 // via strat9-syscall (single source of truth for the wire contract).
 const STATUS_OK: u32 = 0;
@@ -213,6 +225,11 @@ impl BusSchemeServer {
 
     // === Path resolution ===================================================
 
+    /// Count open handles belonging to `sender`.
+    fn count_handles_of(&self, sender: u64) -> usize {
+        self.handles.values().filter(|h| h.owner == sender).count()
+    }
+
     /// Split a normalised path into a driver index + sub-path, or detect PCI / root.
     fn resolve_driver_path<'a>(&self, path: &'a str) -> Option<(usize, &'a str)> {
         let (first, rest) = path.split_once('/').unwrap_or((path, ""));
@@ -231,9 +248,18 @@ impl BusSchemeServer {
         if path.is_empty() {
             return true;
         }
-        // PCI paths
+        // PCI paths: strictly validate the sub-path instead of accepting
+        // anything under `pci/` — otherwise opening `/bus/pci/<junk>`
+        // succeeds and burns a handle on a path that can only answer
+        // "unknown".
         if Self::is_pci_path(path) {
-            return true;
+            return match path {
+                PCI_PREFIX | "pci/inventory" | "pci/count" | "pci/rescan" | "pci/find"
+                | "pci/cfg" => true,
+                p if p.starts_with("pci/find/") => Self::parse_find_path(p).is_some(),
+                p if p.starts_with("pci/cfg/") => Self::parse_cfg_path(p).is_some(),
+                _ => false,
+            };
         }
         // Driver paths
         if let Some((idx, sub)) = self.resolve_driver_path(path) {
@@ -308,7 +334,9 @@ impl BusSchemeServer {
             // Handle id space exhausted.
             None => return Self::err_reply(sender, ENOMEM),
         };
-        if self.handles.len() >= MAX_OPEN_HANDLES {
+        if self.handles.len() >= MAX_OPEN_HANDLES
+            || self.count_handles_of(sender) >= MAX_HANDLES_PER_SENDER
+        {
             return Self::err_reply(sender, ENOMEM);
         }
         let is_dir;
@@ -466,6 +494,12 @@ impl BusSchemeServer {
                 // Cache successful queries only: errors and invalid paths
                 // stay uncached so transient failures are retried.
                 if rendered != b"error\n" {
+                    // Bound the cache: evict the smallest key when full.
+                    if self.find_cache.len() >= MAX_FIND_CACHE_ENTRIES {
+                        if let Some(first) = self.find_cache.keys().next().copied() {
+                            self.find_cache.remove(&first);
+                        }
+                    }
                     self.find_cache.insert((vendor_id, device_id), rendered.clone());
                 }
                 rendered
