@@ -18,6 +18,7 @@ pub mod assembly;
 pub mod entry;
 
 /// Limine boot-protocol entry point
+#[cfg(target_arch = "x86_64")]
 pub mod limine;
 
 /// Early serial logger (used throughout the kernel lifetime)

@@ -1094,10 +1094,9 @@ fn map_page_in_space(
     target_va: u64,
     address_space: &AddressSpace,
 ) -> Result<(), &'static str> {
-    use x86_64::{
-        structures::paging::{Mapper, Page, PageTableFlags, PhysFrame, Size4KiB},
-        PhysAddr, VirtAddr,
-    };
+    use crate::arch::xshim::{PageTableFlags, PhysFrame, Size4KiB};;
+    use crate::arch::xshim::{PhysAddr, VirtAddr};;
+    use x86_64::structures::paging::{Mapper, Page};
 
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(target_va));
     let phys_frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(frame_phys));
@@ -1289,7 +1288,7 @@ impl Drop for N3Transport {
 
         // Free the message buffer physical page.
         if self.msg_buf_phys != 0 {
-            let frame = crate::memory::PhysFrame::containing_address(x86_64::PhysAddr::new(
+            let frame = crate::memory::PhysFrame::containing_address(crate::arch::xshim::PhysAddr::new(
                 self.msg_buf_phys,
             ));
             with_irqs_disabled(|token| free_frame(token, frame));
@@ -1297,7 +1296,7 @@ impl Drop for N3Transport {
 
         // Free the handler stack physical page.
         if self.handler_stack_phys != 0 {
-            let frame = crate::memory::PhysFrame::containing_address(x86_64::PhysAddr::new(
+            let frame = crate::memory::PhysFrame::containing_address(crate::arch::xshim::PhysAddr::new(
                 self.handler_stack_phys,
             ));
             with_irqs_disabled(|token| free_frame(token, frame));

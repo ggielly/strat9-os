@@ -9,7 +9,11 @@
 ///
 /// Call this once after `buddy::init_buddy_allocator()` and before VGA init.
 pub fn apply_kernel_config() {
-    let Some((base, size)) = crate::boot::limine::kernel_toml_module() else {
+    #[cfg(target_arch = "x86_64")]
+    let module = crate::boot::limine::kernel_toml_module();
+    #[cfg(not(target_arch = "x86_64"))]
+    let module: Option<(u64, u64)> = None;
+    let Some((base, size)) = module else {
         crate::serial_println!("[config] No kernel.toml module found, using defaults");
         return;
     };

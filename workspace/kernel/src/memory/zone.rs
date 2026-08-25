@@ -1,7 +1,7 @@
 // Memory zone management for buddy allocator
 
 use core::{ptr, slice};
-use x86_64::PhysAddr;
+use crate::arch::xshim::PhysAddr;
 
 /// Memory zone types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

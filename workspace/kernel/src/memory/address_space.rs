@@ -19,14 +19,12 @@ use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use spin::Once;
-use x86_64::{
-    registers::control::{Cr3, Cr3Flags},
-    structures::paging::{
-        mapper::TranslateResult, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags,
-        PhysFrame as X86PhysFrame, Size2MiB, Size4KiB, Translate,
-    },
-    PhysAddr, VirtAddr,
+use x86_64::registers::control::{Cr3, Cr3Flags};
+use x86_64::structures::paging::{
+    mapper::TranslateResult, Mapper, OffsetPageTable, Page, PageTable, Translate,
 };
+use crate::arch::xshim::{PageTableFlags, PhysFrame as X86PhysFrame, Size2MiB, Size4KiB};
+use crate::arch::xshim::{PhysAddr, VirtAddr};
 
 use crate::{
     capability::CapId,
@@ -635,7 +633,7 @@ impl AddressSpace {
                     let page =
                         Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr)).unwrap();
                     let phys_frame =
-                        x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
+                        crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
                             frame.start_address,
                         );
                     match mapper.map_to(page, phys_frame, page_flags, &mut frame_allocator) {
@@ -660,7 +658,7 @@ impl AddressSpace {
                     let page =
                         Page::<Size2MiB>::from_start_address(VirtAddr::new(page_addr)).unwrap();
                     let phys_frame =
-                        x86_64::structures::paging::PhysFrame::<Size2MiB>::containing_address(
+                        crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(
                             frame.start_address,
                         );
                     page_flags |= PageTableFlags::HUGE_PAGE;
@@ -815,11 +813,11 @@ impl AddressSpace {
             // Map the page.
             let map_ok = match page_size {
                 VmaPageSize::Small => {
-                    use x86_64::structures::paging::Size4KiB;
+                    use crate::arch::xshim::Size4KiB;
                     let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
                         .map_err(|_| "Map 4K: invalid page address")?;
                     let phys_frame =
-                        x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
+                        crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
                             frame.start_address,
                         );
                     unsafe {
@@ -830,11 +828,11 @@ impl AddressSpace {
                     }
                 }
                 VmaPageSize::Huge => {
-                    use x86_64::structures::paging::Size2MiB;
+                    use crate::arch::xshim::Size2MiB;
                     let page = Page::<Size2MiB>::from_start_address(VirtAddr::new(page_addr))
                         .map_err(|_| "Map 2M: invalid page address")?;
                     let phys_frame =
-                        x86_64::structures::paging::PhysFrame::<Size2MiB>::containing_address(
+                        crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(
                             frame.start_address,
                         );
                     let mut huge_flags = page_flags;
@@ -865,7 +863,7 @@ impl AddressSpace {
                     let rb_addr = start + (j as u64) * page_bytes;
                     match page_size {
                         VmaPageSize::Small => {
-                            use x86_64::structures::paging::Size4KiB;
+                            use crate::arch::xshim::Size4KiB;
                             let rb_page =
                                 Page::<Size4KiB>::from_start_address(VirtAddr::new(rb_addr))
                                     .map_err(|_| "Rollback: invalid 4K page address")?;
@@ -875,7 +873,7 @@ impl AddressSpace {
                             }
                         }
                         VmaPageSize::Huge => {
-                            use x86_64::structures::paging::Size2MiB;
+                            use crate::arch::xshim::Size2MiB;
                             let rb_page =
                                 Page::<Size2MiB>::from_start_address(VirtAddr::new(rb_addr))
                                     .map_err(|_| "Rollback: invalid 2M page address")?;
@@ -908,7 +906,7 @@ impl AddressSpace {
             {
                 match page_size {
                     VmaPageSize::Small => {
-                        use x86_64::structures::paging::Size4KiB;
+                        use crate::arch::xshim::Size4KiB;
                         let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
                             .map_err(|_| "Rollback: invalid 4K page address")?;
                         if let Ok((_, flush)) = mapper.unmap(page) {
@@ -916,7 +914,7 @@ impl AddressSpace {
                         }
                     }
                     VmaPageSize::Huge => {
-                        use x86_64::structures::paging::Size2MiB;
+                        use crate::arch::xshim::Size2MiB;
                         let page = Page::<Size2MiB>::from_start_address(VirtAddr::new(page_addr))
                             .map_err(|_| "Rollback: invalid 2M page address")?;
                         if let Ok((_, flush)) = mapper.unmap(page) {
@@ -931,7 +929,7 @@ impl AddressSpace {
                     let rb_addr = start + (j as u64) * page_bytes;
                     match page_size {
                         VmaPageSize::Small => {
-                            use x86_64::structures::paging::Size4KiB;
+                            use crate::arch::xshim::Size4KiB;
                             let rb_page =
                                 Page::<Size4KiB>::from_start_address(VirtAddr::new(rb_addr))
                                     .map_err(|_| "Rollback: invalid 4K page address")?;
@@ -941,7 +939,7 @@ impl AddressSpace {
                             }
                         }
                         VmaPageSize::Huge => {
-                            use x86_64::structures::paging::Size2MiB;
+                            use crate::arch::xshim::Size2MiB;
                             let rb_page =
                                 Page::<Size2MiB>::from_start_address(VirtAddr::new(rb_addr))
                                     .map_err(|_| "Rollback: invalid 2M page address")?;
@@ -1221,7 +1219,7 @@ impl AddressSpace {
 
             let _frame_addr = match page_size {
                 VmaPageSize::Small => {
-                    use x86_64::structures::paging::Size4KiB;
+                    use crate::arch::xshim::Size4KiB;
                     let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
                         .map_err(|_| "Failed to unmap: invalid 4K page address")?;
                     let (frame, flush) =
@@ -1230,7 +1228,7 @@ impl AddressSpace {
                     frame.start_address()
                 }
                 VmaPageSize::Huge => {
-                    use x86_64::structures::paging::Size2MiB;
+                    use crate::arch::xshim::Size2MiB;
                     let page = Page::<Size2MiB>::from_start_address(VirtAddr::new(page_addr))
                         .map_err(|_| "Failed to unmap: invalid 2M page address")?;
                     let (frame, flush) =
@@ -1583,7 +1581,7 @@ impl AddressSpace {
 
                 let _frame_addr = match vma.page_size {
                     VmaPageSize::Small => {
-                        use x86_64::structures::paging::Size4KiB;
+                        use crate::arch::xshim::Size4KiB;
                         let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
                             .map_err(|_| "unmap_range: invalid 4K page address")?;
                         let (frame, flush) = mapper
@@ -1593,7 +1591,7 @@ impl AddressSpace {
                         frame.start_address()
                     }
                     VmaPageSize::Huge => {
-                        use x86_64::structures::paging::Size2MiB;
+                        use crate::arch::xshim::Size2MiB;
                         let page = Page::<Size2MiB>::from_start_address(VirtAddr::new(page_addr))
                             .map_err(|_| "unmap_range: invalid 2M page address")?;
                         let (frame, flush) = mapper
@@ -1910,7 +1908,7 @@ impl AddressSpace {
                     let map_res: Result<(), &'static str> = match mapping.page_size {
                         VmaPageSize::Small => {
                             let page = Page::<Size4KiB>::from_start_address(vaddr).unwrap();
-                            let frame = x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(phys_frame_addr);
+                            let frame = crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(phys_frame_addr);
                             child_mapper
                                 .map_to(page, frame, map_flags, &mut frame_allocator)
                                 .map(|f| f.ignore())
@@ -1918,7 +1916,7 @@ impl AddressSpace {
                         }
                         VmaPageSize::Huge => {
                             let page = Page::<Size2MiB>::from_start_address(vaddr).unwrap();
-                            let frame = x86_64::structures::paging::PhysFrame::<Size2MiB>::containing_address(phys_frame_addr);
+                            let frame = crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(phys_frame_addr);
                             child_mapper
                                 .map_to(page, frame, map_flags, &mut frame_allocator)
                                 .map(|f| f.ignore())

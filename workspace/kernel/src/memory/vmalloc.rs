@@ -62,10 +62,9 @@ use core::{
     ptr,
     sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
 };
-use x86_64::{
-    structures::paging::{Page, PageTableFlags, PhysFrame as X86PhysFrame},
-    VirtAddr,
-};
+use crate::arch::xshim::{PageTableFlags, PhysFrame as X86PhysFrame};
+use x86_64::structures::paging::Page;
+use crate::arch::xshim::VirtAddr;
 
 // Arena constants =====================================================
 

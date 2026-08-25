@@ -5,14 +5,13 @@
 //!
 //! Provides map/unmap/translate operations on the active page table.
 
-use x86_64::{
-    registers::control::Cr3,
-    structures::paging::{
+use x86_64::registers::control::Cr3;
+use x86_64::structures::paging::{
         FrameAllocator as X86FrameAllocator, Mapper, OffsetPageTable, Page, PageTable,
-        PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB, Translate,
-    },
-    PhysAddr, VirtAddr,
+    Translate,
 };
+use crate::arch::xshim::{PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB};
+use crate::arch::xshim::{PhysAddr, VirtAddr};
 
 use crate::{
     memory::frame::{FrameAllocOptions, FramePurpose},

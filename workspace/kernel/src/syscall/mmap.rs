@@ -14,7 +14,7 @@ use crate::{
 };
 use core::sync::atomic::Ordering;
 use strat9_abi::data::MemoryRegionInfo as MemoryRegionInfoAbi;
-use x86_64::VirtAddr;
+use crate::arch::xshim::VirtAddr;
 
 // ================================================================================
 // Virtual address layout constants

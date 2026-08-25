@@ -30,10 +30,13 @@ pub fn init() {
         return;
     }
 
+    #[cfg(target_arch = "x86_64")]
     let elf_bytes = match super::limine::kernel_elf_bytes() {
         Some(b) => b,
         None => return,
     };
+    #[cfg(not(target_arch = "x86_64"))]
+    let elf_bytes: &[u8] = &[];
 
     let elf = match xmas_elf::ElfFile::new(elf_bytes) {
         Ok(e) => e,

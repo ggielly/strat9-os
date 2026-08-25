@@ -3,7 +3,7 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 use spin::Mutex;
-use x86_64::VirtAddr;
+use crate::arch::xshim::VirtAddr;
 type PanicHook = fn(&PanicInfo);
 const MAX_PANIC_HOOKS: usize = 8;
 

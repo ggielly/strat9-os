@@ -6,7 +6,7 @@ use crate::memory::AddressSpace;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use intrusive_collections::LinkedListLink;
-use x86_64::{PhysAddr, VirtAddr};
+use crate::arch::xshim::{PhysAddr, VirtAddr};
 
 /// POSIX process ID.
 pub type Pid = u32;

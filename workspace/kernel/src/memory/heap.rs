@@ -20,7 +20,7 @@ use core::{
     ptr,
     sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
 };
-use x86_64::PhysAddr;
+use crate::arch::xshim::PhysAddr;
 
 // ---------------------------------------------------------------------------
 // Slab size classes

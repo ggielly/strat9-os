@@ -26,10 +26,10 @@
 //!     left unmapped.  Stack underflows hit it and page-fault.
 //!
 use alloc::{sync::Arc, vec::Vec};
-use x86_64::{
-    structures::paging::{Mapper, Page, Size4KiB},
-    VirtAddr,
-};
+use x86_64::structures::paging::Page;
+use crate::arch::xshim::Size4KiB;
+use x86_64::structures::paging::Mapper;
+use crate::arch::xshim::VirtAddr;
 
 use crate::{
     capability::Capability,
