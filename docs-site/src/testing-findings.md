@@ -53,6 +53,16 @@ tests golden, entrée changelog ABI.
 renommage. Corrigé — preuve que l'absence de CI de test laisse pourrir
 la couverture silencieusement.
 
+## F8 — Constantes POSIX fausses dans `strat9_syscall::flag` — ✅ RÉSOLU
+Trouvé lors de la passe 2 par la table dorée Linux :
+- `O_NOFOLLOW = 0o100000` → en réalité **O_CLOEXEC** sur Linux ; corrigé à `0o400000` ;
+- `O_NOCTTY = 0o400000` → en réalité **O_NOFOLLOW** sur Linux (!) ; corrigé à `0o000400`,
+  détecté par le test doré lui-même après le premier fix ;
+- `O_DSYNC = 0o02000000` → **O_CLOEXEC** aussi ; corrigé à `0o10000`.
+La traduction `posix_oflags_to_strat9` (crate abi) utilisait ses propres copies
+correctes — mais tout composant consommant ces constantes directement cassait.
+Leçon : les tables dorées attrapent ce que la relecture manuelle rate.
+
 ## Couverture ajoutée (L0/L1)
 
 | Suite | Tests | Périmètre |
@@ -65,6 +75,15 @@ la couverture silencieusement.
 | `abi/tests/ipc_payload_wire.rs` | 12 | wire format schemes VFS |
 | `fs-abstraction/tests/safe_math_edge_cases.rs` | 23 | arith safe exhaustive |
 | `fs-abstraction/tests/types_conformance.rs` | 13+1 | mode bits, FILETIME, caps |
+| `abi/tests/ipc_handshake.rs` | 8 | handshake IPC wire + validation réservés |
+| `abi/tests/data_types.rs` | 9 | SiloMode, DirentHeader, PCI, tailles structs |
+| `syscall/tests/error_and_flags.rs` | 8 | Error↔errno roundtrip, demux RAX, flags Linux |
+| `syscall/tests/dirent_wire.rs` | 10 | getdents packed parsing, SchemeV2, SigAbi |
+| `intel-ethernet/tests/descriptors.rs` | 10 | layouts SDM 16B, anneaux Rx/Tx |
+| `driver-net-proto/tests/wire_protocol.rs` | 3 | opcodes + headers IPC réseau |
+| `alloc-freelist/tests/allocator.rs` | 6 | GlobalAlloc: alignement, réuse, OOM propre |
+
+Porte CI : `cargo make ci-tests` — **162+ tests hôte verts** (stage GitLab `test`).
 
 Porte CI : `cargo make ci-tests` (stage GitLab `test`, job `test-host`).
 

@@ -7,3 +7,6 @@ authors.workspace = true
 
 [dependencies]
 nic-queues = { path = "../nic-queues" }
+
+[dev-dependencies]
+net-core = { path = "../net-core" }

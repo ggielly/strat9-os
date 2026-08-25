@@ -406,6 +406,7 @@ dependencies = [
 name = "intel-ethernet"
 version = "0.1.0"
 dependencies = [
+ "net-core",
  "nic-queues",
 ]
 
