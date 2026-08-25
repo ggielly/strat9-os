@@ -1,4 +1,5 @@
 stages:
+    - test
     - build
     - release
 
@@ -11,6 +12,17 @@ variables:
     GIT_STRATEGY: clone
     GIT_DEPTH: "0"
     TZ: "Europe/Paris"
+
+test-host:
+    stage: test
+    before_script:
+        - rustup default nightly || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env" && rustup default nightly
+        - rustup target add x86_64-unknown-linux-gnu
+        - if ! command -v cargo-make &> /dev/null; then cargo install cargo-make; fi
+    script:
+        # L0/L1 anti-regression gate: ABI conformance + host-safe crates.
+        # Kernel/no_std components are covered by L3 selftests + L4 QEMU jobs.
+        - cargo make ci-tests
 
 build-docs:
     stage: build
