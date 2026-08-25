@@ -297,8 +297,15 @@ impl InlineBlobHeader {
     /// Write `InlineBlobHeader(len, kind)` followed by `data` into
     /// `payload[off..]`.
     ///
-    /// Returns `None` if the header + data do not fit in the payload slice.
+    /// Returns `None` if:
+    /// - `data` is larger than `u16::MAX` bytes (`len` field would truncate), or
+    /// - the header + data do not fit in the payload slice.
     pub fn write(payload: &mut [u8], off: usize, kind: u16, data: &[u8]) -> Option<()> {
+        if data.len() > u16::MAX as usize {
+            // The `len` field is u16: writing more bytes than representable
+            // would silently corrupt the framing.
+            return None;
+        }
         let total = Self::SIZE.checked_add(data.len())?;
         let end = off.checked_add(total)?;
         let buf = payload.get_mut(off..end)?;
