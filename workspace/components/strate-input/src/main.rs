@@ -367,10 +367,11 @@ fn process_scancode(scancode: u8, state: &mut KeyboardState) -> Option<u8> {
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     // Open keyboard device
-    let kbd_fd = match call::open(b"/dev/input/kbd\0", 0 /* O_RDONLY */) {
+    let kbd_fd = match call::open("/dev/input/kbd", 0 /* O_RDONLY */) {
         Ok(fd) => fd,
         Err(e) => {
-            serial_println!("[input-server] failed to open /dev/input/kbd: {:?}", e);
+            let _ = e;
+            log_open_failure("kbd");
             loop {
                 core::hint::spin_loop();
             }
@@ -378,21 +379,18 @@ pub extern "C" fn _start() -> ! {
     };
 
     // Open mouse device
-    let mouse_fd = match call::open(b"/dev/input/mouse\0", 0) {
+    let mouse_fd = match call::open("/dev/input/mouse", 0) {
         Ok(fd) => fd,
         Err(e) => {
-            serial_println!("[input-server] failed to open /dev/input/mouse: {:?}", e);
+            let _ = e;
+            log_open_failure("mouse");
             loop {
                 core::hint::spin_loop();
             }
         }
     };
 
-    serial_println!(
-        "[input-server] started (kbd_fd={}, mouse_fd={})",
-        kbd_fd,
-        mouse_fd
-    );
+    serial_println("[input-server] started");
 
     let mut state = KeyboardState::new();
     let mut kbd_buf = [0u8; 64];
@@ -413,12 +411,21 @@ pub extern "C" fn _start() -> ! {
         let _ = call::read(mouse_fd, &mut mouse_buf);
 
         // Yield to other processes
-        let _ = call::yield_cpu();
+        let _ = call::sched_yield();
     }
 }
 
 fn serial_println(s: &str) {
     let _ = call::write(2, s.as_bytes());
+    let _ = call::write(2, b"\n");
+}
+
+/// Log an open failure to stderr without alloc:
+/// `[input-server] failed to open /dev/input/<dev>`.
+fn log_open_failure(dev: &str) {
+    const PREFIX: &[u8] = b"[input-server] failed to open /dev/input/";
+    let _ = call::write(2, PREFIX);
+    let _ = call::write(2, dev.as_bytes());
     let _ = call::write(2, b"\n");
 }
 
