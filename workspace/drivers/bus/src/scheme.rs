@@ -269,7 +269,11 @@ impl BusSchemeServer {
             Ok(s) => s,
             Err(_) => return Self::err_reply(sender, EINVAL),
         };
-        let path = Self::normalize_path(raw_path);
+        let path = match Self::normalize_path(raw_path) {
+            Some(p) => p,
+            // `..` escaping the namespace root.
+            None => return Self::err_reply(sender, EINVAL),
+        };
         if !self.path_exists(&path) {
             return Self::err_reply(sender, ENOENT);
         }
@@ -681,12 +685,26 @@ impl BusSchemeServer {
 
     // === Static helpers ========================================================
 
-    fn normalize_path(path: &str) -> String {
-        if path.is_empty() || path == "/" {
-            return String::new();
+    /// Normalise a client-supplied path for the `/bus` namespace:
+    /// - collapses repeated `/`,
+    /// - drops `.` segments,
+    /// - resolves `..` lexically (returns `None` if it escapes the root).
+    ///
+    /// The root is the empty string. Without this, a path such as
+    /// `pci/../<driver>/reg/x` could bypass naive prefix matching if
+    /// sub-tree resolution ever becomes recursive.
+    fn normalize_path(path: &str) -> Option<String> {
+        let mut segments: Vec<&str> = Vec::new();
+        for seg in path.split('/') {
+            match seg {
+                "" | "." => {}
+                ".." => {
+                    segments.pop()?;
+                }
+                s => segments.push(s),
+            }
         }
-        let trimmed = path.trim_matches('/');
-        String::from(trimmed)
+        Some(segments.join("/"))
     }
 
     fn parse_pci_bdf(s: &str) -> Option<PciAddress> {
