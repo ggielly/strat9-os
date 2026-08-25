@@ -330,7 +330,11 @@ impl E1000Nic {
             return Err(NetError::NoPacket);
         }
 
-        let len = pkt_len as usize;
+        // pkt_len comes from the DMA descriptor, i.e. from the device.
+        // A buggy or hostile device reporting a length larger than the RX
+        // buffer would make the copy below read past the DMA allocation
+        // (heap info-leak). Clamp to what was actually allocated.
+        let len = (pkt_len as usize).min(RX_BUF_SIZE);
         if buf.len() < len {
             self.recycle_rx_desc(idx);
             return Err(NetError::BufferTooSmall);
