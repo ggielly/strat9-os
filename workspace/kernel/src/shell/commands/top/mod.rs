@@ -2,6 +2,7 @@
 //!
 //! This command keeps Chevron shell as default UX and only uses Ratatui while `top` is running.
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) mod ratatui_backend;
 
 use crate::{arch::vga, shell::ShellError, shell_println};

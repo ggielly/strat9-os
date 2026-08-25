@@ -1,6 +1,8 @@
 //! Shell command registry and entry points
 //!
 
+// VGA-UI dependent command; riscv64 console is serial-only (R6: virtio-gpu).
+#[cfg(target_arch = "x86_64")]
 pub mod gfx;
 pub mod help;
 pub mod hw;
