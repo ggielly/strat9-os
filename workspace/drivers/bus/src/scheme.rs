@@ -13,9 +13,10 @@
 //! /bus/<driver>/status      -> driver status
 //! /bus/<driver>/error_count -> driver error count
 //! /bus/<driver>/reg/<hex>   -> read/write a driver register
-//! /bus/<driver>/firewall/info       -> firewall type + max entries (STM32 only)
-//! /bus/<driver>/firewall/grant/<id>   -> (write) grant access to peripheral id
-//! /bus/<driver>/firewall/release/<id> -> (write) release peripheral id
+//!                              (NOTE: on software-defined buses without a
+//!                              register file, e.g. `moxtet`, `reg/<idx>` is
+//!                              a logical slot index, not an MMIO offset —
+//!                              see `moxtet::Moxtet` docs)
 //! /bus/<driver>/<child>     -> child-device info (if the driver reports any)
 //! ```
 
