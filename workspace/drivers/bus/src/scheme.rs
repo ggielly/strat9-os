@@ -38,7 +38,7 @@ const OPCODE_READ: u32 = 0x02;
 const OPCODE_WRITE: u32 = 0x03;
 const OPCODE_CLOSE: u32 = 0x04;
 const OPCODE_READDIR: u32 = 0x08;
-const REPLY_MSG_TYPE: u32 = 0x80;
+// Reply message type: see `IpcMessage::REPLY_MSG_TYPE` in strat9-abi.
 const STATUS_OK: u32 = 0;
 const FILEFLAG_DIRECTORY: u32 = 1;
 
@@ -158,17 +158,11 @@ impl BusSchemeServer {
     // === Reply helpers =====================================================
 
     fn ok_reply(sender: u64) -> IpcMessage {
-        let mut reply = IpcMessage::new(REPLY_MSG_TYPE);
-        reply.sender = sender;
-        reply.payload[0..4].copy_from_slice(&STATUS_OK.to_le_bytes());
-        reply
+        IpcMessage::status_reply(sender, STATUS_OK)
     }
 
     fn err_reply(sender: u64, code: usize) -> IpcMessage {
-        let mut reply = IpcMessage::new(REPLY_MSG_TYPE);
-        reply.sender = sender;
-        reply.payload[0..4].copy_from_slice(&(code as u32).to_le_bytes());
-        reply
+        IpcMessage::status_reply(sender, code as u32)
     }
 
     fn alloc_id(&mut self) -> Option<u64> {

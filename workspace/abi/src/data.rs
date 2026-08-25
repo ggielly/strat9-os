@@ -401,6 +401,10 @@ impl IpcMessage {
     /// Maximum payload bytes.
     pub const PAYLOAD_CAPACITY: usize = IPC_PAYLOAD_CAPACITY;
 
+    /// Message type used by scheme servers for every reply
+    /// (success or errno-style status).
+    pub const REPLY_MSG_TYPE: u32 = 0x80;
+
     /// Usable payload capacity for `OPEN` inline path (240 - 6 bytes overhead).
     pub const OPEN_INLINE_CAPACITY: usize = IPC_PAYLOAD_CAPACITY - 6;
     /// Usable payload capacity for `UNLINK` inline path (240 - 2 bytes overhead).
@@ -428,6 +432,18 @@ impl IpcMessage {
         let mut msg = IpcMessage::new(0x80);
         msg.sender = sender;
         msg.payload[0..4].copy_from_slice(&(status as u32).to_le_bytes());
+        msg
+    }
+
+    /// Build a reply with `msg_type = 0x80` and a `u32` errno-style status
+    /// (`0` = success) in `payload[0..4]`.
+    ///
+    /// Single source of truth for scheme servers, replacing per-server
+    /// `ok_reply`/`err_reply` duplicates.
+    pub fn status_reply(sender: u64, status: u32) -> Self {
+        let mut msg = IpcMessage::new(Self::REPLY_MSG_TYPE);
+        msg.sender = sender;
+        msg.payload[0..4].copy_from_slice(&status.to_le_bytes());
         msg
     }
 }
