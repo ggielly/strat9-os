@@ -47,7 +47,10 @@ pub fn init_cpu_extensions() {
         // SMEP (20): Supervisor Mode Execution Prevention
         // Prevents the kernel from executing code mapped in user-space pages.
         // Requires CPUID leaf 7, ECX bit 7.
-        if crate::arch::x86_64::cpuid::host().features.contains(cpuid::CpuFeatures::SMEP) {
+        if crate::arch::x86_64::cpuid::host()
+            .features
+            .contains(cpuid::CpuFeatures::SMEP)
+        {
             cr4 |= 1 << 20;
             log::info!("[init] SMEP enabled (CR4 bit 20)");
         }
@@ -56,7 +59,10 @@ pub fn init_cpu_extensions() {
         // Prevents the kernel from reading/writing user-space data pages
         // unless EFLAGS.AC is set (via stac/clac).
         // Requires CPUID leaf 7, ECX bit 20.
-        if crate::arch::x86_64::cpuid::host().features.contains(cpuid::CpuFeatures::SMAP) {
+        if crate::arch::x86_64::cpuid::host()
+            .features
+            .contains(cpuid::CpuFeatures::SMAP)
+        {
             cr4 |= 1 << 21;
             log::info!("[init] SMAP enabled (CR4 bit 21)");
         }

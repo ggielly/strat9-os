@@ -37,6 +37,11 @@ pub fn exit_current_task(exit_code: i32) -> ! {
         // Walk the robust list and mark any held futexes as FUTEX_OWNER_DIED,
         // then wake waiters. Prevents deadlocks when a thread dies holding a mutex.
         crate::syscall::robust_list::cleanup_robust_list(&task);
+
+        // -- user-stack canary check (issue #63) --
+        // The address space is still alive here (it dies with the Process
+        // Arc later), so the top-of-stack word can still be read.
+        task.verify_user_stack_canary();
     }
 
     let cpu_index = current_cpu_index();

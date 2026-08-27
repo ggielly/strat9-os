@@ -226,25 +226,49 @@ fn format_mode(mode: u32) -> alloc::string::String {
     buf[1] = if perms & 0o400 != 0 { b'r' } else { b'-' };
     buf[2] = if perms & 0o200 != 0 { b'w' } else { b'-' };
     buf[3] = if perms & 0o100 != 0 {
-        if perms & 0o4000 != 0 { b's' } else { b'x' }
+        if perms & 0o4000 != 0 {
+            b's'
+        } else {
+            b'x'
+        }
     } else {
-        if perms & 0o4000 != 0 { b'S' } else { b'-' }
+        if perms & 0o4000 != 0 {
+            b'S'
+        } else {
+            b'-'
+        }
     };
     // Group
     buf[4] = if perms & 0o40 != 0 { b'r' } else { b'-' };
     buf[5] = if perms & 0o20 != 0 { b'w' } else { b'-' };
     buf[6] = if perms & 0o10 != 0 {
-        if perms & 0o2000 != 0 { b's' } else { b'x' }
+        if perms & 0o2000 != 0 {
+            b's'
+        } else {
+            b'x'
+        }
     } else {
-        if perms & 0o2000 != 0 { b'S' } else { b'-' }
+        if perms & 0o2000 != 0 {
+            b'S'
+        } else {
+            b'-'
+        }
     };
     // Other
     buf[7] = if perms & 0o4 != 0 { b'r' } else { b'-' };
     buf[8] = if perms & 0o2 != 0 { b'w' } else { b'-' };
     buf[9] = if perms & 0o1 != 0 {
-        if perms & 0o1000 != 0 { b't' } else { b'x' }
+        if perms & 0o1000 != 0 {
+            b't'
+        } else {
+            b'x'
+        }
     } else {
-        if perms & 0o1000 != 0 { b'T' } else { b'-' }
+        if perms & 0o1000 != 0 {
+            b'T'
+        } else {
+            b'-'
+        }
     };
     unsafe { alloc::string::String::from_utf8_unchecked(buf.to_vec()) }
 }
@@ -259,9 +283,18 @@ fn format_mtime(mtime: strat9_abi::data::TimeSpec) -> alloc::string::String {
 
     // Simple day-of-year calculation (no leap year handling — good enough)
     let month_days: &[(u32, &str)] = &[
-        (31, "Jan"), (28, "Feb"), (31, "Mar"), (30, "Apr"),
-        (31, "May"), (30, "Jun"), (31, "Jul"), (31, "Aug"),
-        (30, "Sep"), (31, "Oct"), (30, "Nov"), (31, "Dec"),
+        (31, "Jan"),
+        (28, "Feb"),
+        (31, "Mar"),
+        (30, "Apr"),
+        (31, "May"),
+        (30, "Jun"),
+        (31, "Jul"),
+        (31, "Aug"),
+        (30, "Sep"),
+        (31, "Oct"),
+        (30, "Nov"),
+        (31, "Dec"),
     ];
     let mut day_of_year = (days % 365) as u32;
     let mut month_idx = 0;
@@ -278,7 +311,13 @@ fn format_mtime(mtime: strat9_abi::data::TimeSpec) -> alloc::string::String {
     }
     let month_name = month_days[month_idx].1;
 
-    alloc::format!("{} {:>2} {:02}:{:02}", month_name, day_of_year + 1, hours, mins)
+    alloc::format!(
+        "{} {:>2} {:02}:{:02}",
+        month_name,
+        day_of_year + 1,
+        hours,
+        mins
+    )
 }
 
 // ========== cat ==================================================

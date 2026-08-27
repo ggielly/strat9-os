@@ -656,10 +656,7 @@ pub fn panic_draw_direct(lines: &[&str]) {
                     let offset = row * pitch + col * bytes_per_pixel;
                     core::ptr::write_volatile(fb.add(offset) as *mut u8, fill as u8);
                     core::ptr::write_volatile(fb.add(offset + 1) as *mut u8, (fill >> 8) as u8);
-                    core::ptr::write_volatile(
-                        fb.add(offset + 2) as *mut u8,
-                        (fill >> 16) as u8,
-                    );
+                    core::ptr::write_volatile(fb.add(offset + 2) as *mut u8, (fill >> 16) as u8);
                 }
             }
         } else if bytes_per_pixel == 2 {

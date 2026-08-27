@@ -226,11 +226,7 @@ impl Scheme for IpcControlScheme {
                 }
 
                 let base = addr_space
-                    .find_free_vma_range(
-                        crate::kaslr::mmap_base(),
-                        page_count,
-                        VmaPageSize::Small,
-                    )
+                    .find_free_vma_range(crate::kaslr::mmap_base(), page_count, VmaPageSize::Small)
                     .ok_or(SyscallError::OutOfMemory)?;
                 addr_space
                     .map_shared_frames_with_cap_ids(
