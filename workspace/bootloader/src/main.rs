@@ -9,7 +9,7 @@ use uefi::{
     mem::memory_map::{MemoryMap, MemoryType},
     prelude::*,
     proto::{
-        console::gop::GraphicsOutput,
+        console::gop::{GraphicsOutput, PixelFormat},
         media::file::{File, FileAttribute, FileInfo, FileMode},
     },
     table::cfg::ConfigTableEntry,
@@ -21,10 +21,109 @@ mod paging;
 
 use strat9_abi::boot::{KernelArgs, MemoryKind, MemoryRegion};
 
+/// Maximum allowed kernel ELF file size (64 MiB).
+const MAX_ELF_SIZE: usize = 64 * 1024 * 1024;
+
+/// Bytes per pixel for linear framebuffer (BGRA/RGBA).
+const BYTES_PER_PIXEL: u64 = 4;
+
+/// COM1 base address and LSR offset for serial I/O.
+const COM1_BASE: u16 = 0x3F8;
+const COM1_LSR: u16 = COM1_BASE + 5;
+
+/// Write a single byte to COM1, with timeout.
+/// Returns false if the port is not ready after ~1 ms.
+unsafe fn serial_write_byte(b: u8) -> bool {
+    for _ in 0..16000 {
+        // ~1 ms at ~16 iterations/µs
+        let status: u8;
+        unsafe {
+            core::arch::asm!(
+                "in al, dx",
+                out("al") status,
+                in("dx") COM1_LSR,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        if status & 0x20 != 0 {
+            unsafe {
+                core::arch::asm!(
+                    "out dx, al",
+                    in("al") b,
+                    in("dx") COM1_BASE,
+                    options(nomem, nostack, preserves_flags)
+                );
+            }
+            return true;
+        }
+    }
+    false
+}
+
+/// Write a byte string to COM1 with timeout per byte.
+/// Returns the number of bytes successfully written.
+unsafe fn serial_write(msg: &[u8]) -> usize {
+    let mut ok = 0;
+    for &b in msg {
+        if unsafe { serial_write_byte(b) } {
+            ok += 1;
+        } else {
+            break;
+        }
+    }
+    ok
+}
+
+/// Initialize COM1 at 115200 baud (divisor 1).
+/// Returns true if COM1 appears present (write succeeded).
+unsafe fn init_serial_115200() -> bool {
+    let base = COM1_BASE;
+    unsafe {
+        core::arch::asm!("out dx, al", in("al") 0x00u8, in("dx") base + 1, options(nomem, nostack)); // Disable interrupts
+        core::arch::asm!("out dx, al", in("al") 0x80u8, in("dx") base + 3, options(nomem, nostack)); // Enable DLAB
+        core::arch::asm!("out dx, al", in("al") 0x01u8, in("dx") base + 0, options(nomem, nostack)); // Divisor lo = 1 (115200)
+        core::arch::asm!("out dx, al", in("al") 0x00u8, in("dx") base + 1, options(nomem, nostack)); // Divisor hi = 0
+        core::arch::asm!("out dx, al", in("al") 0x03u8, in("dx") base + 3, options(nomem, nostack)); // 8N1
+        core::arch::asm!("out dx, al", in("al") 0xC7u8, in("dx") base + 2, options(nomem, nostack)); // Enable FIFO
+        core::arch::asm!("out dx, al", in("al") 0x0Bu8, in("dx") base + 4, options(nomem, nostack));
+        // IRQs, RTS/DSR
+    }
+    // Probe: try to write; if LSR never readies, COM1 is absent.
+    unsafe { serial_write_byte(b'.') }
+}
+
+/// Halt forever with interrupts disabled.
+fn halt() -> ! {
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack));
+    }
+    loop {
+        unsafe {
+            core::arch::asm!("hlt", options(nomem, nostack));
+        }
+    }
+}
+
+/// Halt after a serial error message.
+fn halt_msg(com1_present: bool, msg: &[u8]) -> ! {
+    if com1_present {
+        unsafe {
+            serial_write(b"\r\n[FATAL] ");
+            serial_write(msg);
+            serial_write(b"\r\n");
+        }
+    }
+    halt()
+}
+
 #[entry]
 fn efi_main() -> Status {
     uefi::system::with_stdout(|stdout| {
-        let _ = writeln!(stdout, "Strat9-OS bootloader. Version 0.1.0, UEFI mode.");
+        let _ = writeln!(
+            stdout,
+            "Strat9-OS UEFI bootloader. (C) Copyright Guillaume Gielly, 2024-26 - All rights reserved. Version 0.1.0."
+
+        );
     });
 
     // Open filesystem
@@ -37,7 +136,7 @@ fn efi_main() -> Status {
         let _ = writeln!(stdout, "[boot] The filesystem is OK");
     });
 
-    //  kernel file
+    // Read kernel ELF
     let mut file = volume
         .open(
             cstr16!("\\boot\\kernel.elf"),
@@ -54,28 +153,64 @@ fn efi_main() -> Status {
         .expect("Failed to get file info");
     let file_size = file_info.file_size() as usize;
 
+    if file_size == 0 || file_size > MAX_ELF_SIZE {
+        uefi::system::with_stdout(|stdout| {
+            let _ = writeln!(stdout, "[boot] kernel.elf: invalid size {}", file_size);
+        });
+        halt();
+    }
+
     uefi::system::with_stdout(|stdout| {
         let _ = writeln!(stdout, "[boot] kernel.elf: {} bytes", file_size);
     });
 
-    // Read kernel into memory
+    // Read kernel into memory with loop (UEFI may return partial reads)
     let mut buf = alloc::vec![0u8; file_size];
-    file.read(&mut buf).expect("Failed to read kernel");
+    {
+        let mut offset = 0;
+        while offset < file_size {
+            match file.read(&mut buf[offset..]) {
+                Ok(0) => break, // EOF
+                Ok(n) => offset += n,
+                Err(_) => halt(),
+            }
+        }
+        if offset < file_size {
+            uefi::system::with_stdout(|stdout| {
+                let _ = writeln!(
+                    stdout,
+                    "[boot] Short read: got {} of {} bytes",
+                    offset, file_size
+                );
+            });
+            halt();
+        }
+    }
 
     let ptr = buf.as_mut_ptr();
     let len = buf.len();
+    // Prevent drop from freeing the buffer; it's accessed via kernel_data.
     core::mem::forget(buf);
     let kernel_data = unsafe { core::slice::from_raw_parts(ptr, len) };
 
     uefi::system::with_stdout(|stdout| {
-        let _ = writeln!(stdout, "[boot] Kernel loaded OK");
+        let _ = writeln!(stdout, "[boot] Kernel loaded OK, parsing ELF...");
     });
 
-    uefi::system::with_stdout(|stdout| {
-        let _ = writeln!(stdout, "[boot] Parsing kernel ELF file...");
-    });
+    let elf_info = match elf::parse_elf64(kernel_data) {
+        Ok(info) => info,
+        Err(msg) => {
+            uefi::system::with_stdout(|stdout| {
+                let _ = writeln!(stdout, "[boot] ELF parse failed: {}", msg);
+            });
+            halt();
+        }
+    };
 
-    let elf_info = elf::parse_elf64(kernel_data).expect("Failed to parse kernel ELF");
+    // The kernel data buffer is no longer needed after parsing.
+    // Safety: we forget(buf) earlier so this is just a pointer we no longer use.
+    // The memory will be reclaimed after ExitBootServices as Reclaim.
+    let _ = unsafe { core::slice::from_raw_parts(ptr, 0) };
 
     uefi::system::with_stdout(|stdout| {
         let _ = writeln!(
@@ -92,12 +227,12 @@ fn efi_main() -> Status {
         let _ = writeln!(stdout, "[boot] Modules: {}", module_list.len());
     });
 
-    // Step 6: Get framebuffer (optional : may not be available in -nographic mode)
+    // Get framebuffer via GOP (optional; skip non-linear / BltOnly modes)
     let mut fb_phys: u64 = 0;
     let mut fb_width: u32 = 0;
     let mut fb_height: u32 = 0;
     let mut fb_stride: u32 = 0;
-    let mut fb_bpp: u16 = 32;
+    let fb_bpp: u16 = 32;
     let mut fb_red_size: u8 = 8;
     let mut fb_red_shift: u8 = 16;
     let mut fb_green_size: u8 = 8;
@@ -115,11 +250,12 @@ fn efi_main() -> Status {
             Err(_) => break 'gop,
         };
 
+        // Find best mode by pixel area
         let mut best_mode = None;
         let mut best_area: usize = 0;
         for mode in gop.modes() {
             let (w, h) = mode.info().resolution();
-            let area = w * h;
+            let area = w.checked_mul(h).unwrap_or(0);
             if area > best_area {
                 best_area = area;
                 best_mode = Some(mode);
@@ -138,14 +274,21 @@ fn efi_main() -> Status {
         let pixel_format = info.pixel_format();
 
         let mut fb = gop.frame_buffer();
-        fb_phys = fb.as_mut_ptr() as u64;
+        let fb_ptr = fb.as_mut_ptr() as u64;
+
+        // BltOnly modes have no linear framebuffer — skip
+        if fb_ptr == 0 {
+            break 'gop;
+        }
+
+        fb_phys = fb_ptr;
         fb_width = width as u32;
         fb_height = height as u32;
         fb_stride = stride as u32;
 
         let (r_s, r_sh, g_s, g_sh, b_s, b_sh) = match pixel_format {
-            uefi::proto::console::gop::PixelFormat::Rgb => (8, 16, 8, 8, 8, 0),
-            uefi::proto::console::gop::PixelFormat::Bgr => (8, 0, 8, 8, 8, 16),
+            PixelFormat::Rgb => (8, 16, 8, 8, 8, 0),
+            PixelFormat::Bgr => (8, 0, 8, 8, 8, 16),
             _ => (8, 0, 8, 8, 8, 16),
         };
         fb_red_size = r_s;
@@ -156,12 +299,15 @@ fn efi_main() -> Status {
         fb_blue_shift = b_sh;
     }
 
-    // Get ACPI RSDP
+    // Get ACPI RSDP (prefer ACPI2 over ACPI)
     let rsdp_addr = uefi::system::with_config_table(|tables| {
         tables
             .iter()
-            .find(|e| {
-                e.guid == ConfigTableEntry::ACPI2_GUID || e.guid == ConfigTableEntry::ACPI_GUID
+            .find(|e| e.guid == ConfigTableEntry::ACPI2_GUID)
+            .or_else(|| {
+                tables
+                    .iter()
+                    .find(|e| e.guid == ConfigTableEntry::ACPI_GUID)
             })
             .map(|e| e.address as u64)
             .unwrap_or(0)
@@ -227,6 +373,9 @@ fn efi_main() -> Status {
     env_buf[env_len] = 0;
     let env_total_size = env_len + 1;
 
+    // =========================================================
+    // ExitBootServices
+    // =========================================================
     uefi::system::with_stdout(|stdout| {
         let _ = writeln!(stdout, "[boot] ExitBootServices...");
     });
@@ -234,33 +383,23 @@ fn efi_main() -> Status {
     let _mmap = uefi::boot::memory_map(MemoryType::LOADER_DATA).expect("Failed to get memory map");
     let mmap_iter = unsafe { uefi::boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) };
 
-    // Re-initialize serial port after ExitBootServices
+    // Disable interrupts immediately after ExitBootServices to prevent
+    // firmware timer / IDT triple-fault.
     unsafe {
-        // UART 16550 initialization
-        let base: u16 = 0x3F8;
-        core::arch::asm!("out dx, al", in("al") 0x00u8, in("dx") base + 1, options(nomem, nostack)); // Disable interrupts
-        core::arch::asm!("out dx, al", in("al") 0x80u8, in("dx") base + 3, options(nomem, nostack)); // Enable DLAB
-        core::arch::asm!("out dx, al", in("al") 0x03u8, in("dx") base + 0, options(nomem, nostack)); // Set divisor lo (38400 baud)
-        core::arch::asm!("out dx, al", in("al") 0x00u8, in("dx") base + 1, options(nomem, nostack)); // Set divisor hi
-        core::arch::asm!("out dx, al", in("al") 0x03u8, in("dx") base + 3, options(nomem, nostack)); // 8 bits, no parity, one stop
-        core::arch::asm!("out dx, al", in("al") 0xC7u8, in("dx") base + 2, options(nomem, nostack)); // Enable FIFO
-        core::arch::asm!("out dx, al", in("al") 0x0Bu8, in("dx") base + 4, options(nomem, nostack)); // IRQs enabled, RTS/DSR set
+        core::arch::asm!("cli", options(nomem, nostack));
+    }
 
-        // Test output
-        let msg = b"[boot] After ExitBootServices, serial OK\r\n";
-        let lsr: u16 = base + 5;
-        let thr: u16 = base;
-        for &b in msg {
-            loop {
-                let status: u8;
-                core::arch::asm!("in al, dx", out("al") status, in("dx") lsr, options(nomem, nostack));
-                if status & 0x20 != 0 { break; }
-            }
-            core::arch::asm!("out dx, al", in("al") b, in("dx") thr, options(nomem, nostack));
+    // Re-initialize serial at 115200 baud
+    let com1_present = unsafe { init_serial_115200() };
+    if com1_present {
+        unsafe {
+            serial_write(b"[boot] After ExitBootServices, serial OK (115200)\r\n");
         }
     }
 
-    // Step 10: Convert memory map
+    // =========================================================
+    // Memory map conversion
+    // =========================================================
     let mut regions: [MemoryRegion; 512] = [MemoryRegion {
         base: 0,
         size: 0,
@@ -273,7 +412,7 @@ fn efi_main() -> Status {
             break;
         }
         let base = entry.phys_start;
-        let size = entry.page_count * 4096;
+        let size = entry.page_count.checked_mul(4096).unwrap_or(0);
         if size == 0 {
             continue;
         }
@@ -289,20 +428,76 @@ fn efi_main() -> Status {
         region_count += 1;
     }
 
+    if com1_present {
+        unsafe {
+            serial_write(b"[boot] mmap: ");
+            serial_write(decimal_str(region_count as u64));
+            serial_write(b" regions\r\n");
+            for i in 0..region_count.min(8) {
+                let r = regions[i];
+                serial_write(b"  [");
+                serial_write(decimal_str(i as u64));
+                serial_write(b"] base=");
+                serial_write(hex8_str(r.base));
+                serial_write(b" size=");
+                serial_write(hex8_str(r.size));
+                serial_write(b" kind=");
+                serial_write(decimal_str(r.kind.0 as u64));
+                serial_write(b"\r\n");
+            }
+        }
+    }
+    // =========================================================
+    // Allocate boot resources BEFORE copying the memory map
+    // =========================================================
     fn alloc_from_free(
         regions: &mut [MemoryRegion],
         region_count: usize,
         size: u64,
         align: u64,
     ) -> u64 {
+        if align == 0 || size == 0 {
+            return 0;
+        }
         for i in 0..region_count {
             if regions[i].kind == MemoryKind::Free && regions[i].size >= size {
-                let aligned_base = (regions[i].base + align - 1) & !(align - 1);
-                let padding = aligned_base - regions[i].base;
-                let total = size + padding;
+                // Debug output for allocation attempt. Keep it.
+                unsafe {
+                    serial_write(b"[DEBUG] [alloc] region ");
+                    serial_write(decimal_str(i as u64));
+                    serial_write(b" base=");
+                    serial_write(hex8_str(regions[i].base));
+                    serial_write(b" size=");
+                    serial_write(hex8_str(regions[i].size));
+                    serial_write(b" FREE match\r\n");
+                }
+
+                let aligned_base = match regions[i].base.checked_add(align - 1) {
+                    Some(v) => v & !(align - 1),
+                    None => continue,
+                };
+                // Address 0 (the zero page / IVT / BDA) must never be handed out
+                // as an allocation; skip regions that would align down to 0.
+                if aligned_base == 0 {
+                    continue;
+                }
+                let padding = match aligned_base.checked_sub(regions[i].base) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let total = match size.checked_add(padding) {
+                    Some(v) => v,
+                    None => continue,
+                };
                 if regions[i].size >= total {
-                    regions[i].base += total;
-                    regions[i].size -= total;
+                    regions[i].base = match regions[i].base.checked_add(total) {
+                        Some(v) => v,
+                        None => continue,
+                    };
+                    regions[i].size = match regions[i].size.checked_sub(total) {
+                        Some(v) => v,
+                        None => continue,
+                    };
                     return aligned_base;
                 }
             }
@@ -310,42 +505,47 @@ fn efi_main() -> Status {
         0
     }
 
-    let mmap_count = region_count;
-    let mmap_byte_size = (mmap_count as u64) * (core::mem::size_of::<MemoryRegion>() as u64);
-    let mmap_region_size = (mmap_byte_size + 4095) & !4095;
-    let mut mmap_region_base = alloc_from_free(&mut regions, region_count, mmap_region_size, 4096);
-
-    if mmap_region_base != 0 {
-        unsafe {
-            let dst = mmap_region_base as *mut MemoryRegion;
-            core::ptr::copy_nonoverlapping(regions.as_ptr(), dst, mmap_count);
-        }
-    } else {
-        // Use a fixed location below 1MB (0x100000) that's not used by kernel
-        // or page tables. The page table allocator starts at phys_end, so we
-        // must avoid that range.
-        mmap_region_base = 0x90000;
-        unsafe {
-            let dst = mmap_region_base as *mut MemoryRegion;
-            core::ptr::copy_nonoverlapping(regions.as_ptr(), dst, mmap_count);
-        }
-    }
-
+    // 1. Allocate kernel stack
     let stack_size: u64 = 64 * 1024;
     let stack_base = alloc_from_free(&mut regions, region_count, stack_size, 16);
+    if com1_present {
+        unsafe {
+            serial_write(b"[boot] alloc stack: base=");
+            serial_write(hex8_str(stack_base));
+            serial_write(b" size=");
+            serial_write(hex8_str(stack_size));
+            serial_write(b" count=");
+            serial_write(decimal_str(region_count as u64));
+            serial_write(b"\r\n");
+        }
+    }
+    if stack_base == 0 {
+        halt_msg(com1_present, b"Failed to allocate kernel stack");
+    }
 
+    // 2. Allocate memory map region
+    let mmap_count = region_count;
+    let mmap_byte_size = (mmap_count as u64)
+        .checked_mul(core::mem::size_of::<MemoryRegion>() as u64)
+        .unwrap_or(0);
+    let mmap_region_size = mmap_byte_size.checked_add(4095).unwrap_or(0) & !4095;
+    let mmap_region_base = alloc_from_free(&mut regions, region_count, mmap_region_size, 4096);
+    if mmap_region_base == 0 {
+        halt_msg(com1_present, b"Failed to allocate memory map region");
+    }
+
+    // 3. Allocate module table
     let module_table_size = modules::module_table_size(module_list.len());
-    let module_table_size_aligned = (module_table_size + 4095) & !4095;
+    let module_table_size_aligned = module_table_size.checked_add(4095).unwrap_or(0) & !4095;
     let module_table_base =
         alloc_from_free(&mut regions, region_count, module_table_size_aligned, 4096);
-
     if module_table_base != 0 {
         modules::write_module_table(module_list.as_slice(), module_table_base);
     }
 
-    let env_size_aligned = (env_total_size as u64 + 4095) & !4095;
+    // 4. Allocate environment
+    let env_size_aligned = (env_total_size as u64).checked_add(4095).unwrap_or(0) & !4095;
     let env_phys_base = alloc_from_free(&mut regions, region_count, env_size_aligned, 4096);
-
     if env_phys_base != 0 {
         unsafe {
             let dst = env_phys_base as *mut u8;
@@ -353,12 +553,31 @@ fn efi_main() -> Status {
         }
     }
 
-    // Step 11: Build KernelArgs
+    // 5. NOW copy the memory map (includes all allocations above as non-Free)
+    unsafe {
+        let dst = mmap_region_base as *mut MemoryRegion;
+        core::ptr::copy_nonoverlapping(regions.as_ptr(), dst, mmap_count);
+    }
+
+    // =========================================================
+    // Build KernelArgs
+    // =========================================================
+    let kernel_size = elf_info
+        .phys_end
+        .checked_sub(elf_info.segments[0].phys_addr)
+        .unwrap_or_else(|| halt_msg(com1_present, b"kernel_size underflow"));
+
+    // Framebuffer size: stride (pixels/row) × height × bytes per pixel
+    let fb_size_bytes = (fb_stride as u64)
+        .checked_mul(fb_height as u64)
+        .and_then(|v| v.checked_mul(BYTES_PER_PIXEL))
+        .unwrap_or(0);
+
     let args = KernelArgs {
         magic: strat9_abi::boot::STRAT9_BOOT_MAGIC,
         abi_version: strat9_abi::boot::STRAT9_BOOT_ABI_VERSION,
         kernel_base: elf_info.segments[0].phys_addr,
-        kernel_size: elf_info.phys_end - elf_info.segments[0].phys_addr,
+        kernel_size,
         acpi_rsdp_base: rsdp_addr,
         memory_map_base: mmap_region_base,
         memory_map_size: mmap_count as u64 * core::mem::size_of::<MemoryRegion>() as u64,
@@ -389,10 +608,19 @@ fn efi_main() -> Status {
             base
         },
         bss_virt_size: {
+            // BSS virtual size: highest segment end minus the page-aligned end
+            // of all mapped content. The bootloader maps with 4 KiB pages.
             let kernel_virt_base: u64 = 0xFFFF_FFFF_8000_0000;
-            let kernel_size = elf_info.phys_end - elf_info.segments[0].phys_addr;
-            let large_pages = ((kernel_size + 0x1FFFFF) / 0x200000).max(1);
-            let mapped_end = kernel_virt_base + large_pages * 0x200000;
+            let phys_start = elf_info.segments[0].phys_addr;
+            let mapped_phys_end = elf_info.phys_end;
+            // Pages needed = ceil((mapped_phys_end - phys_start) / 4096)
+            let pages = mapped_phys_end
+                .checked_sub(phys_start)
+                .unwrap_or(0)
+                .checked_add(4095)
+                .unwrap_or(0)
+                / 4096;
+            let mapped_virt_end = kernel_virt_base + pages * 4096;
             let bss_base: u64 = {
                 let mut base = kernel_virt_base;
                 for i in 0..elf_info.segment_count {
@@ -402,140 +630,69 @@ fn efi_main() -> Status {
                 }
                 base
             };
-            if mapped_end > bss_base {
-                mapped_end - bss_base
+            if mapped_virt_end > bss_base {
+                mapped_virt_end - bss_base
             } else {
                 0
             }
         },
     };
 
-    // Step 12: Page tables and context switch
-    unsafe {
-        let write_com1 = |s: &[u8]| {
-            let lsr: u16 = 0x3F8 + 5;
-            let thr: u16 = 0x3F8;
-            for &b in s {
-                loop {
-                    let status: u8;
-                    core::arch::asm!("in al, dx", out("al") status, in("dx") lsr, options(nomem, nostack));
-                    if status & 0x20 != 0 {
-                        break;
-                    }
-                }
-                core::arch::asm!("out dx, al", in("al") b, in("dx") thr, options(nomem, nostack));
-            }
-        };
-        write_com1(b"[boot] Creating page tables...\r\n");
+    if com1_present {
+        unsafe {
+            serial_write(b"[boot] Creating page tables...\r\n");
+        }
     }
 
-    // The page tables must map the actual physical memory used by the kernel.
-    // We use phys_end (which includes p_filesz + BSS_MAP_EXTRA) as the size.
-    // The BSS is virtual memory that the kernel will zero at its virtual addresses;
-    // we do NOT need to map 2GB of physical pages for it.
     let pml4_phys = unsafe {
         paging::create_page_tables(
             elf_info.segments[0].phys_addr,
             elf_info.phys_end,
-            elf_info.phys_end - elf_info.segments[0].phys_addr,
+            kernel_size,
             fb_phys,
-            fb_stride as u64 * fb_height as u64,
+            fb_size_bytes,
             env_phys_base,
             env_total_size as u64,
         )
     };
 
-    unsafe {
-        let write_com1 = |s: &[u8]| {
-            let lsr: u16 = 0x3F8 + 5;
-            let thr: u16 = 0x3F8;
-            for &b in s {
-                loop {
-                    let status: u8;
-                    core::arch::asm!("in al, dx", out("al") status, in("dx") lsr, options(nomem, nostack));
-                    if status & 0x20 != 0 {
-                        break;
-                    }
-                }
-                core::arch::asm!("out dx, al", in("al") b, in("dx") thr, options(nomem, nostack));
-            }
-        };
-
-        fn hex_str(val: u64, buf: &mut [u8; 18]) -> &[u8] {
-            const HEX: &[u8; 16] = b"0123456789abcdef";
-            let mut i = 16;
-            let mut v = val;
-            buf[i] = b'\r';
-            buf[17] = b'\n';
-            loop {
-                i -= 1;
-                buf[i] = HEX[(v & 0xf) as usize];
-                v >>= 4;
-                if i == 0 || v == 0 {
-                    break;
-                }
-            }
-            &buf[i..]
+    if com1_present {
+        unsafe {
+            serial_write(b"[boot] Page tables ready.\r\n");
         }
-
-        let mut hexbuf: [u8; 18] = [0; 18];
-        write_com1(b"[boot] context_switch(\r\n");
-        write_com1(b"  pml4=");
-        write_com1(hex_str(pml4_phys, &mut hexbuf));
-        write_com1(b"  stack=");
-        write_com1(hex_str(stack_base + stack_size, &mut hexbuf));
-        write_com1(b"  entry=");
-        write_com1(hex_str(elf_info.entry, &mut hexbuf));
-        write_com1(b"  args=");
-        write_com1(hex_str(&args as *const KernelArgs as u64, &mut hexbuf));
-        write_com1(b")\r\n");
-        write_com1(b"[boot] mmap_base=");
-        write_com1(hex_str(mmap_region_base, &mut hexbuf));
-        write_com1(b" region_count=");
-        write_com1(hex_str(region_count as u64, &mut hexbuf));
-        // Print first region type to verify data
-        let first_kind: u64 = regions[0].kind.0;
-        write_com1(b" first_kind=");
-        write_com1(hex_str(first_kind, &mut hexbuf));
-        write_com1(b"\r\n");
-        write_com1(b"[boot] Jumping to kernel (pause loop)...\r\n");
-
-        // Small delay to let serial flush
-        for _ in 0..100000 {
-            core::arch::asm!("pause", options(nomem, nostack));
-        }
-
-        write_com1(b"[boot] Jumping to kernel (after pause)...\r\n");
     }
 
-    // Pre-set CR4 bits the kernel expects (only safe bits).
+    // Pre-set CR4 bits (SSE mandatory on x86-64).
     unsafe {
         let mut cr4: u64;
         core::arch::asm!("mov {}, cr4", out(reg) cr4);
-        cr4 |= 0x600; // OSFXSR (9) | OSXMMEXCPT (10) — safe on all x86-64
+        cr4 |= 0x600; // OSFXSR (9) | OSXMMEXCPT (10)
         core::arch::asm!("mov cr4, {}", in(reg) cr4);
     }
 
     let args_ptr = &args as *const KernelArgs;
-    unsafe {
-        // Force the compiler to keep pml4_phys in memory (prevent optimization)
-        let pml4_val = core::ptr::read_volatile(&pml4_phys as *const u64);
-        let stack_val = stack_base + stack_size;
-        let entry_val = elf_info.entry;
-        let args_val = args_ptr as u64;
+    if com1_present {
+        unsafe {
+            serial_write(b"[boot] context_switch(\r\n");
+            let mut tmp = [0u8; 18];
+            serial_write(b"  pml4=");
+            serial_write(hex_str(pml4_phys, &mut tmp));
+            serial_write(b"  stack=");
+            serial_write(hex_str(stack_base + stack_size, &mut tmp));
+            serial_write(b"  entry=");
+            serial_write(hex_str(elf_info.entry, &mut tmp));
+            serial_write(b"  args=");
+            serial_write(hex_str(args_ptr as u64, &mut tmp));
+            serial_write(b")\r\n");
+        }
+    }
 
-        // Write '>' to serial to confirm we're about to call context_switch
-        core::arch::asm!(
-            "mov dx, 0x3F8",
-            "mov al, 0x3E",
-            "out dx, al",
-            options(nomem, nostack, preserves_flags)
-        );
+    unsafe {
         paging::context_switch(
-            pml4_val,
-            stack_val,
-            entry_val,
-            args_val,
+            pml4_phys,
+            stack_base + stack_size,
+            elf_info.entry,
+            args_ptr as u64,
         );
     }
 }
@@ -565,4 +722,66 @@ impl<'a> BufWriter<'a> {
 fn buf_str(buf: &mut [u8]) -> BufWriter<'_> {
     buf.fill(0);
     BufWriter { buf, pos: 0 }
+}
+
+/// Format a u64 as lowercase hex into a fixed buffer.
+/// Returns the formatted bytes (without trailing \r\n).
+fn hex_str(val: u64, buf: &mut [u8; 18]) -> &[u8] {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut i = 16;
+    let mut v = val;
+    loop {
+        i -= 1;
+        buf[i] = HEX[(v & 0xf) as usize];
+        v >>= 4;
+        if v == 0 {
+            break;
+        }
+    }
+    &buf[i..]
+}
+
+/// Format a u64 as lowercase hex into a temporary buffer.
+fn hex8_str(val: u64) -> &'static [u8] {
+    static mut OUT: [u8; 18] = [0; 18];
+    unsafe {
+        let i = hex_str_start(val, &mut OUT);
+        &OUT[i..]
+    }
+}
+
+/// Write a u64 as lowercase hex into `buf`, return the starting index of the
+/// written digits (the valid slice is `buf[i..]`).
+fn hex_str_start(val: u64, buf: &mut [u8; 18]) -> usize {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut i = 16;
+    let mut v = val;
+    loop {
+        i -= 1;
+        buf[i] = HEX[(v & 0xf) as usize];
+        v >>= 4;
+        if v == 0 {
+            break;
+        }
+    }
+    i
+}
+
+/// Format a u64 as decimal into a temporary buffer.
+fn decimal_str(val: u64) -> &'static [u8] {
+    static mut OUT: [u8; 21] = [0; 21];
+    unsafe {
+        if val == 0 {
+            OUT[0] = b'0';
+            return &OUT[..1];
+        }
+        let mut v = val;
+        let mut i = 21;
+        while v > 0 {
+            i -= 1;
+            OUT[i] = b'0' + (v % 10) as u8;
+            v /= 10;
+        }
+        &OUT[i..]
+    }
 }
