@@ -32,7 +32,7 @@ use core::{
     ptr,
     sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering},
 };
-use x86_64::PhysAddr;
+use crate::arch::xshim::PhysAddr;
 
 // ==============================================================================
 // FrameAllocOptions  (Asterinas OSTD pattern)

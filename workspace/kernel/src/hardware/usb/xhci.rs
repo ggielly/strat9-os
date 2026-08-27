@@ -1180,7 +1180,7 @@ pub fn init() {
                 XHCI_CONTROLLERS
                     .lock()
                     .push(Arc::new(Mutex::new(controller)));
-                crate::arch::x86_64::idt::register_xhci_irq(irq);
+                crate::arch::idt::register_xhci_irq(irq);
             }
             Err(e) => {
                 log::warn!("xHCI: Failed to initialize controller: {}", e);

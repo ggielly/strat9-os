@@ -5,14 +5,13 @@
 //!
 //! Provides map/unmap/translate operations on the active page table.
 
-use x86_64::{
-    registers::control::Cr3,
-    structures::paging::{
+use crate::x86_crate_shim::registers::control::Cr3;
+use crate::x86_crate_shim::structures::paging::{
         FrameAllocator as X86FrameAllocator, Mapper, OffsetPageTable, Page, PageTable,
-        PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB, Translate,
-    },
-    PhysAddr, VirtAddr,
+    Translate,
 };
+use crate::arch::xshim::{PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB};
+use crate::arch::xshim::{PhysAddr, VirtAddr};
 
 use crate::{
     memory::frame::{FrameAllocOptions, FramePurpose},
@@ -54,6 +53,7 @@ pub struct BuddyFrameAllocator;
 // exclusively-owned physical frames.  Exclusive ownership is guaranteed by
 // the buddy's own bitmap + free-list discipline.  Frames allocated with
 // `FramePurpose::PageTable` are always fully zeroed before being returned.
+#[cfg(target_arch = "x86_64")]
 unsafe impl X86FrameAllocator<Size4KiB> for BuddyFrameAllocator {
     fn allocate_frame(&mut self) -> Option<X86PhysFrame<Size4KiB>> {
         // SAFETY: `BuddyFrameAllocator` is only ever called from within
@@ -77,6 +77,15 @@ unsafe impl X86FrameAllocator<Size4KiB> for BuddyFrameAllocator {
         X86PhysFrame::from_start_address(frame.start_address).ok()
     }
 }
+#[cfg(not(target_arch = "x86_64"))]
+impl crate::arch::x86_64::structures::paging::FrameAllocator<crate::arch::xshim::Size4KiB>
+    for BuddyFrameAllocator
+{
+    fn allocate_frame(&mut self) -> Option<crate::arch::xshim::PhysFrame<crate::arch::xshim::Size4KiB>> {
+        None // R2: real Sv48 frame allocation
+    }
+}
+
 
 /// Paging initialization flag.
 static mut PAGING_READY: bool = false;
@@ -367,7 +376,7 @@ pub fn kernel_l4_phys() -> PhysAddr {
 pub fn ensure_identity_map(phys_addr: u64) {
     let virt_addr = crate::memory::phys_to_virt(phys_addr);
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt_addr));
-    let frame = X86PhysFrame::containing_address(PhysAddr::new(phys_addr));
+    let frame = X86PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(phys_addr));
 
     if translate(VirtAddr::new(virt_addr)).is_none() {
         log::debug!(
@@ -416,7 +425,7 @@ pub fn ensure_identity_map_range(phys_base: u64, size: u64) {
         // Only map if not already present.
         if mapper.translate_addr(virt).is_none() {
             let page = Page::<Size4KiB>::containing_address(virt);
-            let frame = X86PhysFrame::containing_address(PhysAddr::new(p));
+            let frame = X86PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(p));
             // SAFETY: frame is a valid physical page; mapper uses HHDM offset.
             match unsafe { mapper.map_to(page, frame, flags, &mut allocator) } {
                 Ok(flush) => {

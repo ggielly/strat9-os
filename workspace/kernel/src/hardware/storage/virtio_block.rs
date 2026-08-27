@@ -6,7 +6,7 @@
 //! Reference: VirtIO spec v1.2, Section 5.2 (Block Device)
 
 use crate::{
-    arch::x86_64::pci::{self, PciDevice},
+    arch::pci::{self, PciDevice},
     hardware::virtio::{
         common::{VirtioDevice, Virtqueue},
         status,
@@ -495,7 +495,7 @@ pub fn init() {
             *VIRTIO_BLOCK.lock() = Some(Box::new(device));
 
             // Register IRQ handler in IDT
-            crate::arch::x86_64::idt::register_virtio_block_irq(irq_line);
+            crate::arch::idt::register_virtio_block_irq(irq_line);
 
             log::info!("VirtIO-blk: Device initialized on IRQ {}", irq_line);
         }

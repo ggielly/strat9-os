@@ -502,7 +502,7 @@ fn read_string_array(ptr: u64) -> Result<Vec<Vec<u8>>, SyscallError> {
 
 /// Writes bytes to as.
 fn write_bytes_to_as(as_ref: &AddressSpace, vaddr: u64, data: &[u8]) -> Result<(), SyscallError> {
-    use x86_64::VirtAddr;
+    use crate::arch::xshim::VirtAddr;
     let mut written = 0;
     // We assume data is small enough or we loop? Using unsafe pointer arithmetic.
     // The `AddressSpace` methods like `translate` are needed.

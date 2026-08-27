@@ -19,7 +19,7 @@ pub fn cmd_watch(args: &[String]) -> Result<(), ShellError> {
         return Err(ShellError::InvalidArguments);
     }
     let cmd_line = args[1..].join(" ");
-    let hz = crate::arch::x86_64::timer::TIMER_HZ;
+    let hz = crate::arch::timer::TIMER_HZ;
     let interval_ticks = interval_secs * hz;
 
     shell_println!("Every {}s: {}", interval_secs, cmd_line);
@@ -29,7 +29,7 @@ pub fn cmd_watch(args: &[String]) -> Result<(), ShellError> {
         if crate::shell::is_interrupted() {
             break;
         }
-        if let Some(ch) = crate::arch::x86_64::keyboard::read_char() {
+        if let Some(ch) = crate::arch::keyboard::read_char() {
             if ch == 0x03 || ch == b'q' {
                 break;
             }
@@ -42,7 +42,7 @@ pub fn cmd_watch(args: &[String]) -> Result<(), ShellError> {
             if crate::shell::is_interrupted() {
                 return Ok(());
             }
-            if let Some(ch) = crate::arch::x86_64::keyboard::read_char() {
+            if let Some(ch) = crate::arch::keyboard::read_char() {
                 if ch == 0x03 || ch == b'q' {
                     return Ok(());
                 }

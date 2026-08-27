@@ -2,9 +2,10 @@
 //!
 //! This command keeps Chevron shell as default UX and only uses Ratatui while `top` is running.
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) mod ratatui_backend;
 
-use crate::{arch::x86_64::vga, shell::ShellError, shell_println};
+use crate::{arch::vga, shell::ShellError, shell_println};
 use alloc::{format, string::String, vec, vec::Vec};
 use core::sync::atomic::Ordering;
 use ratatui::{
@@ -54,7 +55,7 @@ struct TopSnapshot {
 
 #[derive(Clone, Copy)]
 struct CpuUsageWindow {
-    per_cpu_ratio: [f64; crate::arch::x86_64::percpu::MAX_CPUS],
+    per_cpu_ratio: [f64; crate::arch::percpu::MAX_CPUS],
     avg_ratio: f64,
 }
 
@@ -148,7 +149,7 @@ fn collect_silos_from_proc_scheme() -> Option<(Vec<SiloRowData>, Vec<StrateRowDa
 
 /// Performs the collect snapshot operation.
 fn collect_snapshot() -> TopSnapshot {
-    let cpu_count = crate::arch::x86_64::percpu::cpu_count();
+    let cpu_count = crate::arch::percpu::cpu_count();
     let (total_pages, used_pages) = {
         let guard = crate::memory::buddy::get_allocator().lock();
         guard.as_ref().map(|a| a.page_totals()).unwrap_or((0, 0))
@@ -248,8 +249,8 @@ fn compute_cpu_usage_window(
     prev: &crate::process::CpuUsageSnapshot,
     now: &crate::process::CpuUsageSnapshot,
 ) -> CpuUsageWindow {
-    let cpu_count = now.cpu_count.min(crate::arch::x86_64::percpu::MAX_CPUS);
-    let mut ratios = [0.0f64; crate::arch::x86_64::percpu::MAX_CPUS];
+    let cpu_count = now.cpu_count.min(crate::arch::percpu::MAX_CPUS);
+    let mut ratios = [0.0f64; crate::arch::percpu::MAX_CPUS];
     let mut sum = 0.0;
 
     for i in 0..cpu_count {
@@ -280,7 +281,7 @@ fn compute_scheduler_metrics_window(
     prev: &crate::process::SchedulerMetricsSnapshot,
     now: &crate::process::SchedulerMetricsSnapshot,
 ) -> SchedulerMetricsWindow {
-    let cpu_count = now.cpu_count.min(crate::arch::x86_64::percpu::MAX_CPUS);
+    let cpu_count = now.cpu_count.min(crate::arch::percpu::MAX_CPUS);
     let mut rt_delta = 0u64;
     let mut fair_delta = 0u64;
     let mut idle_delta = 0u64;
@@ -350,7 +351,7 @@ fn scheduler_runtime_lines(
         s.steal_order[0].as_str(),
         s.steal_order[1].as_str()
     );
-    let cpu_count = s.cpu_count.min(crate::arch::x86_64::percpu::MAX_CPUS);
+    let cpu_count = s.cpu_count.min(crate::arch::percpu::MAX_CPUS);
 
     let line3 = if cpu_count == 0 {
         String::from("CPU: n/a")
@@ -374,6 +375,7 @@ fn scheduler_runtime_lines(
 }
 
 /// Top command main loop
+#[cfg(target_arch = "x86_64")]
 pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
     if !vga::is_available() {
         shell_println!("Error: 'top' requires a graphical framebuffer console.");
@@ -397,13 +399,13 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
         let ticks = crate::process::scheduler::ticks();
 
         // Keep input responsive even between render ticks.
-        if let Some(ch) = crate::arch::x86_64::keyboard::read_char() {
+        if let Some(ch) = crate::arch::keyboard::read_char() {
             match ch {
                 b'q' | 0x1B | 0x03 => break,
-                crate::arch::x86_64::keyboard::KEY_UP => {
+                crate::arch::keyboard::KEY_UP => {
                     selected_task = selected_task.saturating_sub(1);
                 }
-                crate::arch::x86_64::keyboard::KEY_DOWN => {
+                crate::arch::keyboard::KEY_DOWN => {
                     selected_task = selected_task.saturating_add(1);
                 }
                 _ => {}
@@ -660,3 +662,11 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
     shell_println!("Top exited.");
     Ok(())
 }
+
+/// Serial-only fallback for `top` on non-x86 targets (R6: full TUI via virtio).
+#[cfg(not(target_arch = "x86_64"))]
+pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
+    shell_println!("top: TUI requires a framebuffer console (not available yet)");
+    Ok(())
+}
+

@@ -6,7 +6,7 @@ use crate::memory::AddressSpace;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use intrusive_collections::LinkedListLink;
-use x86_64::{PhysAddr, VirtAddr};
+use crate::arch::xshim::{PhysAddr, VirtAddr};
 
 /// POSIX process ID.
 pub type Pid = u32;
@@ -142,15 +142,15 @@ impl ExtendedState {
     /// Create a new default state using the host's maximum capabilities.
     pub fn new() -> Self {
         crate::serial_println!("[trace][fpu] ExtendedState::new enter");
-        let (uses_xsave, size, default_xcr0) = if crate::arch::x86_64::cpuid::host_uses_xsave() {
+        let (uses_xsave, size, default_xcr0) = if crate::arch::cpuid::host_uses_xsave() {
             crate::serial_println!("[trace][fpu] ExtendedState::new host_uses_xsave=true");
-            let xcr0 = crate::arch::x86_64::cpuid::host_default_xcr0();
+            let xcr0 = crate::arch::cpuid::host_default_xcr0();
             crate::serial_println!(
                 "[trace][fpu] ExtendedState::new host_default_xcr0={:#x}",
                 xcr0
             );
             let sz =
-                crate::arch::x86_64::cpuid::xsave_size_for_xcr0(xcr0).min(Self::MAX_XSAVE_SIZE);
+                crate::arch::cpuid::xsave_size_for_xcr0(xcr0).min(Self::MAX_XSAVE_SIZE);
             crate::serial_println!("[trace][fpu] ExtendedState::new xsave_size={}", sz);
             (true, sz, xcr0)
         } else {
@@ -178,9 +178,9 @@ impl ExtendedState {
 
     /// Create a state for a specific XCR0 mask (per-silo feature restriction).
     pub fn for_xcr0(xcr0: u64) -> Self {
-        let uses_xsave = crate::arch::x86_64::cpuid::host_uses_xsave();
+        let uses_xsave = crate::arch::cpuid::host_uses_xsave();
         let size = if uses_xsave {
-            crate::arch::x86_64::cpuid::xsave_size_for_xcr0(xcr0).min(Self::MAX_XSAVE_SIZE)
+            crate::arch::cpuid::xsave_size_for_xcr0(xcr0).min(Self::MAX_XSAVE_SIZE)
         } else {
             Self::FXSAVE_SIZE
         };
@@ -216,13 +216,13 @@ impl ExtendedState {
 
 #[inline]
 fn normalized_xcr0(xcr0: u64) -> u64 {
-    if !crate::arch::x86_64::cpuid::host_uses_xsave() {
+    if !crate::arch::cpuid::host_uses_xsave() {
         return 0x3;
     }
 
     // Use the lock-free cache to avoid acquiring the HOST_CPU spinlock
     // with interrupts disabled in the context-switch hot path.
-    let host_xcr0 = crate::arch::x86_64::cpuid::host_default_xcr0_fast();
+    let host_xcr0 = crate::arch::cpuid::host_default_xcr0_fast();
     (xcr0 & host_xcr0).max(0x3)
 }
 
@@ -517,10 +517,10 @@ impl Task {
                 rcx: 0,
                 rax: 0,
                 iret_rip: ret_target,
-                iret_cs: crate::arch::x86_64::gdt::kernel_code_selector().0 as u64,
+                iret_cs: crate::arch::gdt::kernel_code_selector().0 as u64,
                 iret_rflags: rflags,
                 iret_rsp: self.kernel_stack.virt_base.as_u64() + self.kernel_stack.size as u64,
-                iret_ss: crate::arch::x86_64::gdt::kernel_data_selector().0 as u64,
+                iret_ss: crate::arch::gdt::kernel_data_selector().0 as u64,
             }
         };
         self.seed_interrupt_frame(frame);
@@ -733,14 +733,12 @@ pub unsafe extern "C" fn task_entry_trampoline() -> ! {
 }
 
 fn task_post_switch_enter(entry: u64, arg0: u64) -> ! {
-    // E9 breadcrumb: 'P' = reached post_switch_enter (no serial lock needed).
-    unsafe {
-        core::arch::asm!("out 0xe9, al", in("al") b'P', options(nomem, nostack));
-    }
+    // breadcrumb: 'P' = reached post_switch_enter (no serial lock needed).
+    crate::arch::serial::putc(b'P');
 
-    crate::arch::x86_64::percpu::mark_tlb_ready_current();
+    crate::arch::percpu::mark_tlb_ready_current();
 
-    let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+    let cpu = crate::arch::percpu::current_cpu_index();
 
     let is_user_entry = crate::process::scheduler::current_task_clone_try()
         .map(|task| task.trampoline_entry.load(Ordering::Relaxed) != 0)
@@ -769,7 +767,7 @@ fn task_post_switch_enter(entry: u64, arg0: u64) -> ! {
     // First-launch tasks arrive here via the legacy `ret` bootstrap path, which
     // does not restore RFLAGS. Re-enable interrupts now that `finish_switch()`
     // has completed and the task is running on its own stack.
-    crate::arch::x86_64::sti();
+    crate::arch::sti();
 
     // User tasks still transition to Ring 3 via iretq later and will restore
     // their own RFLAGS there.
@@ -1220,7 +1218,7 @@ impl Task {
 /// # Safety
 /// Caller must ensure all pointers in `target` are valid and interrupts are disabled.
 pub(super) unsafe fn do_switch_context(target: &super::scheduler::SwitchTarget) {
-    if crate::arch::x86_64::cpuid::host_uses_xsave() {
+    if crate::arch::cpuid::host_uses_xsave() {
         let old_xcr0 = normalized_xcr0(target.old_xcr0);
         let new_xcr0 = normalized_xcr0(target.new_xcr0);
         switch_context_xsave(
@@ -1279,7 +1277,7 @@ pub(super) unsafe fn do_restore_first_task(
         canary
     );
 
-    if crate::arch::x86_64::cpuid::host_uses_xsave() {
+    if crate::arch::cpuid::host_uses_xsave() {
         restore_first_task_xsave(frame_ptr, fpu_ptr, normalized_xcr0(xcr0));
     } else {
         let _ = xcr0;

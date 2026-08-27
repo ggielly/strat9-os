@@ -1,5 +1,5 @@
 use core::fmt;
-use x86_64::instructions::port::Port;
+use crate::x86_crate_shim::instructions::port::Port;
 
 pub struct QemuDebug;
 
@@ -48,11 +48,11 @@ macro_rules! boot_milestone {
         if !$crate::debug_cfg::is_quiet() {
             $crate::serial_println!(
                 "[boot +{:>6}ms] {}",
-                $crate::arch::x86_64::boot_timestamp::elapsed_ms(),
+                $crate::arch::boot_timestamp::elapsed_ms(),
                 format_args!($($arg)*)
             );
-            if $crate::arch::x86_64::vga::is_available() {
-                let mut vbuf = [0u8; $crate::arch::x86_64::vgabuf::VGABUF_LINE_LEN];
+            if $crate::arch::vga::is_available() {
+                let mut vbuf = [0u8; $crate::arch::vgabuf::VGABUF_LINE_LEN];
                 let mut vpos = 0usize;
                 use core::fmt::Write;
                 struct VgaBufWriter<'a> {
@@ -72,11 +72,11 @@ macro_rules! boot_milestone {
                 let _ = write!(
                     VgaBufWriter { buf: &mut vbuf, pos: &mut vpos },
                     "[boot +{:>6}ms] {}\n",
-                    $crate::arch::x86_64::boot_timestamp::elapsed_ms(),
+                    $crate::arch::boot_timestamp::elapsed_ms(),
                     format_args!($($arg)*)
                 );
                 if vpos > 0 {
-                    $crate::arch::x86_64::vgabuf::vgabuf_write(&vbuf[..vpos]);
+                    $crate::arch::vgabuf::vgabuf_write(&vbuf[..vpos]);
                 }
             }
         }

@@ -8,7 +8,7 @@ use super::{
     register_device, set_nic_device,
 };
 use crate::{
-    arch::x86_64::{ioapic, msi},
+    arch::{ioapic, msi},
     hardware::pci_client as pci,
     serial_println,
 };
@@ -97,7 +97,7 @@ pub fn init() {
                 log::info!("[E1000] {}: MSI active on vector {:#x}", iface, vector);
             }
 
-            crate::arch::x86_64::idt::register_nic_irq(irq);
+            crate::arch::idt::register_nic_irq(irq);
             set_nic_device(dev, irq);
         }
     }

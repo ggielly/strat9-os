@@ -57,7 +57,7 @@ pub mod early_print {
         fn write_str(&mut self, s: &str) -> Result {
             // SAFETY: serial port is initialized early in boot and is a shared resource.
             // We accept potential race conditions during early boot for debug output.
-            crate::arch::x86_64::serial::_print(format_args!("{}", s));
+            crate::arch::serial::_print(format_args!("{}", s));
             Ok(())
         }
     }

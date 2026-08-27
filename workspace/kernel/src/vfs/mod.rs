@@ -676,7 +676,7 @@ pub fn sys_write(fd: u32, buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallErro
                     .ok_or(SyscallError::Fault)?;
                 let chunk = UserSliceRead::new(chunk_addr, to_write)?;
                 let n = chunk.copy_to(&mut kbuf[..to_write]);
-                if crate::arch::x86_64::vga::is_available() {
+                if crate::arch::vga::is_available() {
                     if let Ok(s) = core::str::from_utf8(&kbuf[..n]) {
                         crate::serial_print!("{}", s);
                         crate::vga_print!("{}", s);
@@ -1264,10 +1264,10 @@ pub fn init() {
 
     // /sys/cpu/* : CPU information scheme (Plan9-style)
     {
-        let host = crate::arch::x86_64::cpuid::host();
+        let host = crate::arch::cpuid::host();
         // VFS initializes before SMP/percpu registration is complete.
         // Expose at least 1 CPU (BSP) instead of showing 0.
-        let cpu_count = crate::arch::x86_64::percpu::get_cpu_count().max(1);
+        let cpu_count = crate::arch::percpu::get_cpu_count().max(1);
 
         let count_s = Box::leak(
             alloc::format!("{}\n", cpu_count)
@@ -1293,7 +1293,7 @@ pub fn init() {
         let features_s = Box::leak(
             alloc::format!(
                 "{}\n",
-                crate::arch::x86_64::cpuid::features_to_flags_string(host.features)
+                crate::arch::cpuid::features_to_flags_string(host.features)
             )
             .into_bytes()
             .into_boxed_slice(),

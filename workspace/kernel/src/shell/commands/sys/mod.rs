@@ -49,7 +49,7 @@ use silo_attach::cmd_silo_attach;
 use silo_limit::cmd_silo_limit;
 
 use crate::{
-    arch::x86_64::vga,
+    arch::vga,
     memory,
     process::elf::load_and_run_elf,
     shell::{
@@ -872,9 +872,9 @@ pub(super) fn cmd_clear_impl(_args: &[String]) -> Result<(), ShellError> {
 pub(super) fn cmd_cpuinfo_impl(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("CPU information:");
 
-    if crate::arch::x86_64::apic::is_initialized() {
-        let lapic_id = crate::arch::x86_64::apic::lapic_id();
-        let cpu_count = crate::arch::x86_64::percpu::cpu_count();
+    if crate::arch::apic::is_initialized() {
+        let lapic_id = crate::arch::apic::lapic_id();
+        let cpu_count = crate::arch::percpu::cpu_count();
         shell_println!("  Current LAPIC ID:  {}", lapic_id);
         shell_println!("  CPU count:         {}", cpu_count);
         shell_println!("  APIC:              Active");
@@ -891,10 +891,10 @@ pub(super) fn cmd_cpuinfo_impl(_args: &[String]) -> Result<(), ShellError> {
 pub(super) fn cmd_reboot_impl(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("Rebooting system...");
     unsafe {
-        crate::arch::x86_64::cli();
-        crate::arch::x86_64::io::outb(0x64, 0xFE);
+        crate::arch::cli();
+        crate::arch::io::outb(0x64, 0xFE);
         loop {
-            crate::arch::x86_64::hlt();
+            crate::arch::hlt();
         }
     }
 }
@@ -1253,10 +1253,10 @@ pub(super) fn cmd_test_exec_impl(_args: &[String]) -> Result<(), ShellError> {
     let path = "/initfs/test_exec";
     shell_println!("Launching {} ...", path);
 
-    let boot_bytes = initfs_or_boot_module(path, crate::boot::limine::test_exec_module());
+    let boot_bytes = initfs_or_boot_module(path, crate::boot::limine_shim::test_exec_module());
     let _ = initfs_or_boot_module(
         "/initfs/test_exec_helper",
-        crate::boot::limine::test_exec_helper_module(),
+        crate::boot::limine_shim::test_exec_helper_module(),
     );
 
     if let Some(data) = boot_bytes {
@@ -1277,7 +1277,7 @@ pub(super) fn cmd_test_exec_impl(_args: &[String]) -> Result<(), ShellError> {
         Ok(fd) => fd,
         Err(e) => {
             shell_println!("open failed: {:?}", e);
-            if crate::boot::limine::test_exec_module().is_none() {
+            if crate::boot::limine_shim::test_exec_module().is_none() {
                 shell_println!(
                     "test_exec boot module missing from current image; rebuild the userspace image so /initfs/test_exec is copied"
                 );

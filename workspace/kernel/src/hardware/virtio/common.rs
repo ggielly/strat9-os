@@ -8,7 +8,7 @@
 
 use super::{vring_flags, VirtqDesc};
 use crate::{
-    arch::x86_64::pci::{Bar, PciDevice},
+    arch::pci::{Bar, PciDevice},
     memory::{self, PhysFrame},
 };
 use alloc::vec::Vec;
@@ -390,37 +390,37 @@ impl VirtioDevice {
     /// Read an 8-bit value from a device register
     pub fn read_reg_u8(&self, offset: u16) -> u8 {
         // SAFETY: I/O port access to VirtIO device registers
-        unsafe { crate::arch::x86_64::io::inb(self.io_base + offset) }
+        unsafe { crate::arch::io::inb(self.io_base + offset) }
     }
 
     /// Read a 16-bit value from a device register
     pub fn read_reg_u16(&self, offset: u16) -> u16 {
         // SAFETY: I/O port access to VirtIO device registers
-        unsafe { crate::arch::x86_64::io::inw(self.io_base + offset) }
+        unsafe { crate::arch::io::inw(self.io_base + offset) }
     }
 
     /// Read a 32-bit value from a device register
     pub fn read_reg_u32(&self, offset: u16) -> u32 {
         // SAFETY: I/O port access to VirtIO device registers
-        unsafe { crate::arch::x86_64::io::inl(self.io_base + offset) }
+        unsafe { crate::arch::io::inl(self.io_base + offset) }
     }
 
     /// Write an 8-bit value to a device register
     pub fn write_reg_u8(&self, offset: u16, value: u8) {
         // SAFETY: I/O port access to VirtIO device registers
-        unsafe { crate::arch::x86_64::io::outb(self.io_base + offset, value) }
+        unsafe { crate::arch::io::outb(self.io_base + offset, value) }
     }
 
     /// Write a 16-bit value to a device register
     pub fn write_reg_u16(&self, offset: u16, value: u16) {
         // SAFETY: I/O port access to VirtIO device registers
-        unsafe { crate::arch::x86_64::io::outw(self.io_base + offset, value) }
+        unsafe { crate::arch::io::outw(self.io_base + offset, value) }
     }
 
     /// Write a 32-bit value to a device register
     pub fn write_reg_u32(&self, offset: u16, value: u32) {
         // SAFETY: I/O port access to VirtIO device registers
-        unsafe { crate::arch::x86_64::io::outl(self.io_base + offset, value) }
+        unsafe { crate::arch::io::outl(self.io_base + offset, value) }
     }
 
     /// Read device features

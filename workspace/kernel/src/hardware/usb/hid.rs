@@ -13,7 +13,7 @@
 
 #![allow(dead_code)]
 
-use crate::arch::x86_64::{keyboard, mouse};
+use crate::arch::{keyboard, mouse};
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;

@@ -75,7 +75,7 @@ fn print_table_kv(table: crate::process::sched::SchedClassTable) {
 /// Performs the print metrics kv operation.
 fn print_metrics_kv(m: crate::process::SchedulerMetricsSnapshot) {
     shell_println!("scheduler.cpu_count={}", m.cpu_count);
-    for i in 0..m.cpu_count.min(crate::arch::x86_64::percpu::MAX_CPUS) {
+    for i in 0..m.cpu_count.min(crate::arch::percpu::MAX_CPUS) {
         shell_println!("scheduler.cpu.{}.rt={}", i, m.rt_runtime_ticks[i]);
         shell_println!("scheduler.cpu.{}.fair={}", i, m.fair_runtime_ticks[i]);
         shell_println!("scheduler.cpu.{}.idle={}", i, m.idle_runtime_ticks[i]);
@@ -270,7 +270,7 @@ pub fn cmd_scheduler(args: &[String]) -> Result<(), ShellError> {
                 print_metrics_kv(m);
                 return Ok(());
             }
-            for i in 0..m.cpu_count.min(crate::arch::x86_64::percpu::MAX_CPUS) {
+            for i in 0..m.cpu_count.min(crate::arch::percpu::MAX_CPUS) {
                 shell_println!(
                     "cpu{} rt={} fair={} idle={} sw={} pre={} st+={} st-={} tlm={}",
                     i,
@@ -306,7 +306,7 @@ pub fn cmd_scheduler(args: &[String]) -> Result<(), ShellError> {
                 shell_println!("scheduler.steal.0={}", s.steal_order[0].as_str());
                 shell_println!("scheduler.steal.1={}", s.steal_order[1].as_str());
                 shell_println!("scheduler.blocked={}", s.blocked_tasks);
-                for i in 0..s.cpu_count.min(crate::arch::x86_64::percpu::MAX_CPUS) {
+                for i in 0..s.cpu_count.min(crate::arch::percpu::MAX_CPUS) {
                     shell_println!("scheduler.cpu.{}.current={}", i, s.current_task[i]);
                     shell_println!("scheduler.cpu.{}.rq_rt={}", i, s.rq_rt[i]);
                     shell_println!("scheduler.cpu.{}.rq_fair={}", i, s.rq_fair[i]);
@@ -330,7 +330,7 @@ pub fn cmd_scheduler(args: &[String]) -> Result<(), ShellError> {
                     s.steal_order[0].as_str(),
                     s.steal_order[1].as_str()
                 );
-                for i in 0..s.cpu_count.min(crate::arch::x86_64::percpu::MAX_CPUS) {
+                for i in 0..s.cpu_count.min(crate::arch::percpu::MAX_CPUS) {
                     shell_println!(
                         "  cpu{} current={} rq_rt={} rq_fair={} rq_idle={} need_resched={}",
                         i,

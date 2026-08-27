@@ -987,8 +987,8 @@ fn parse_module_header(data: &[u8]) -> Result<Option<Strat9ModuleHeader>, Syscal
         0
     };
     if req != 0 {
-        let host = crate::arch::x86_64::cpuid::host();
-        let required = crate::arch::x86_64::cpuid::CpuFeatures::from_bits_truncate(req);
+        let host = crate::arch::cpuid::host();
+        let required = crate::arch::cpuid::CpuFeatures::from_bits_truncate(req);
         if !host.features.contains(required) {
             log::warn!(
                 "[cmod] module requires CPU features {:#x} but host has {:#x}",
@@ -1429,7 +1429,7 @@ fn resolve_volume_resource_from_dev_path(dev_path: &str) -> Result<usize, Syscal
 
 /// Compute the effective XCR0 mask for a silo from its allowed CPU features.
 fn compute_silo_xcr0(config: &SiloConfig) -> u64 {
-    use crate::arch::x86_64::cpuid::{xcr0_for_features, CpuFeatures};
+    use crate::arch::cpuid::{xcr0_for_features, CpuFeatures};
     let allowed = CpuFeatures::from_bits_truncate(config.cpu_features_allowed);
     xcr0_for_features(allowed)
 }

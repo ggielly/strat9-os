@@ -36,7 +36,7 @@ const ADMIN_CQE_ERROR: u16 = (0x1 << 14) | (0x1 << 10);
 /// Read the TSC (Time Stamp Counter).
 #[inline]
 fn rdtsc() -> u64 {
-    unsafe { core::arch::x86_64::_rdtsc() }
+    unsafe { crate::arch::rdtsc() }
 }
 
 /// Convert TSC ticks to approximate milliseconds (assumes ~3GHz TSC).
@@ -1167,7 +1167,7 @@ pub fn init() {
                 NVME_CONTROLLERS
                     .lock()
                     .push(Arc::new(Mutex::new(controller)));
-                crate::arch::x86_64::idt::register_nvme_irq(irq);
+                crate::arch::idt::register_nvme_irq(irq);
             }
             Err(e) => {
                 log::warn!("NVMe: Failed to initialize controller: {:?}", e);

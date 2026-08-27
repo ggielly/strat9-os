@@ -58,7 +58,7 @@ impl Guardian for IrqDisabled {
 
     #[inline]
     fn enter() -> GuardianState<Self::Token> {
-        let saved = crate::arch::x86_64::save_flags_and_cli();
+        let saved = crate::arch::save_flags_and_cli();
         // SAFETY: save_flags_and_cli() just cleared IF on this CPU.
         let token = unsafe { IrqDisabledToken::new_unchecked() };
         GuardianState {
@@ -71,7 +71,7 @@ impl Guardian for IrqDisabled {
     #[inline]
     fn exit(state: GuardianState<Self::Token>) {
         if state.restore_flags {
-            crate::arch::x86_64::restore_flags(state.saved_flags);
+            crate::arch::restore_flags(state.saved_flags);
         }
     }
 }

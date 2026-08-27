@@ -121,7 +121,7 @@ pub fn exit_current_task(exit_code: i32) -> ! {
 
     // Safety net - should never reach here
     loop {
-        crate::arch::x86_64::hlt();
+        crate::arch::hlt();
     }
 }
 
@@ -249,7 +249,7 @@ pub fn current_task_clone_spin_debug(trace_label: &str) -> Option<Arc<Task>> {
         if let Some(guard) = LOCAL_SCHEDULERS[cpu_index].try_lock_no_irqsave() {
             break guard.as_ref().and_then(|cpu| {
                 if cpu.current_task.is_none() {
-                    unsafe { core::arch::asm!("mov al, 'N'; out 0xe9, al", out("al") _) };
+                    debug_trace_putc(b'N');
                     return None;
                 }
                 let arc = cpu.current_task.as_ref().unwrap();
@@ -1288,4 +1288,10 @@ pub(crate) fn cleanup_task_resources(task: &Arc<Task>) {
     if !as_ref.is_kernel() && Arc::strong_count(&as_ref) == 1 {
         as_ref.unmap_all_user_regions();
     }
+}
+
+/// Trace putc routed to the arch serial backend (replaces port 0xE9 debug).
+#[inline]
+pub(crate) fn debug_trace_putc(c: u8) {
+    crate::arch::serial::_print(format_args!("{}", c as char));
 }

@@ -9,13 +9,13 @@ use raw_cpuid::CpuId;
 fn kernel_can_use_extended_simd() -> bool {
     #[cfg(target_os = "none")]
     {
-        if !crate::arch::x86_64::cpuid::host_uses_xsave() {
+        if !crate::arch::cpuid::host_uses_xsave() {
             return false;
         }
         // Defensive check: verify AVX is actually enabled in XCR0.
         // If init_cpu_extensions() ever changes which bits it sets,
         // this prevents selecting AVX2/AVX512 routines that would #UD.
-        let xcr0 = crate::arch::x86_64::xgetbv(0);
+        let xcr0 = crate::arch::xgetbv(0);
         (xcr0 & 4) != 0 // XCR0_AVX bit
     }
 

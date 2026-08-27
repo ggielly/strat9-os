@@ -3,7 +3,7 @@
 use alloc::collections::BTreeMap;
 
 use smallvec::SmallVec;
-use x86_64::VirtAddr;
+use crate::arch::xshim::VirtAddr;
 
 use crate::{
     capability::CapId, memory::address_space::VmaPageSize, process::task::Pid, sync::SpinLock,

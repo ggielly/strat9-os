@@ -1,4 +1,4 @@
-use crate::arch::x86_64::vga::{self, RgbColor, TextAlign, TextOptions};
+use crate::arch::vga::{self, RgbColor, TextAlign, TextOptions};
 use core::fmt;
 use ratatui::{
     backend::{Backend, ClearType, WindowSize},

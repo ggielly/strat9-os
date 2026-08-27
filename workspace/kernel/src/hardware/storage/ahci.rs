@@ -751,9 +751,9 @@ pub(crate) fn flush_deferred_async_read_completions(ring_id: u64) -> u32 {
                     let n = completion.len;
 
                     if n >= 128 {
-                        // Fast path for sector-aligned copies : `rep movsb`
-                        // uses a single front-end uop and leverages ERMSB/FSRM hardware on modern x86-64 (Ivy Bridge+ /
-                        // Ice Lake+), outperforming a scalar loop for buffers >= 128 bytes.
+                        // Fast path for sector-aligned copies: rep movsb on
+                        // x86-64 (ERMSB/FSRM), plain copy elsewhere.
+                        #[cfg(target_arch = "x86_64")]
                         unsafe {
                             core::arch::asm!(
                                 "rep movsb",
@@ -763,6 +763,8 @@ pub(crate) fn flush_deferred_async_read_completions(ring_id: u64) -> u32 {
                                 options(nostack),
                             );
                         }
+                        #[cfg(not(target_arch = "x86_64"))]
+                        user_buf.copy_from(unsafe { core::slice::from_raw_parts(src, completion.len) });
                     } else {
                         user_buf
                             .copy_from(unsafe { core::slice::from_raw_parts(src, completion.len) });
@@ -1179,7 +1181,7 @@ pub fn init() {
 
             // Register IRQ handler in the IDT now that the controller is live.
             let irq = AHCI_IRQ_LINE.load(Ordering::Relaxed);
-            crate::arch::x86_64::idt::register_ahci_irq(irq);
+            crate::arch::idt::register_ahci_irq(irq);
         }
         Err(AhciError::NoController) => {
             log::info!("AHCI: no controller found (not a SATA system?)");

@@ -29,7 +29,7 @@ pub(super) fn cmd_silo_attach(args: &[String]) -> Result<(), ShellError> {
     };
 
     loop {
-        if let Some(ch) = crate::arch::x86_64::keyboard::read_char() {
+        if let Some(ch) = crate::arch::keyboard::read_char() {
             if ch == b'q' || ch == 0x03 || ch == 0x1B {
                 break;
             }

@@ -1,4 +1,4 @@
-use crate::arch::x86_64;
+use crate::arch;
 
 /// Typed proof that IRQs are masked on the current CPU.
 ///
@@ -25,7 +25,7 @@ impl IrqDisabledToken {
     /// Check the current interrupt state and return proof if IRQs are already disabled.
     #[inline]
     pub fn verify() -> Option<Self> {
-        if x86_64::interrupts_enabled() {
+        if arch::interrupts_enabled() {
             None
         } else {
             Some(Self(()))
@@ -68,11 +68,11 @@ impl IrqDisabledToken {
 /// Saves and disables IRQs before calling `f`, then restores the previous flag state.
 #[inline]
 pub fn with_irqs_disabled<R>(f: impl FnOnce(&IrqDisabledToken) -> R) -> R {
-    let saved = crate::arch::x86_64::save_flags_and_cli();
+    let saved = crate::arch::save_flags_and_cli();
     // SAFETY: save_flags_and_cli() has just disabled interrupts on this CPU;
     // the token is dropped before restore_flags() re-enables them.
     let token = unsafe { IrqDisabledToken::new_unchecked() };
     let result = f(&token);
-    crate::arch::x86_64::restore_flags(saved);
+    crate::arch::restore_flags(saved);
     result
 }

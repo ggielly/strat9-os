@@ -1,6 +1,8 @@
 //! Shell command registry and entry points
 //!
 
+// VGA-UI dependent command; riscv64 console is serial-only (R6: virtio-gpu).
+#[cfg(target_arch = "x86_64")]
 pub mod gfx;
 pub mod help;
 pub mod hw;
@@ -94,7 +96,9 @@ impl CommandRegistry {
         registry.register("trace", sys::cmd_trace);
 
         // Graphics
+        #[cfg(target_arch = "x86_64")]
         registry.register("gfx", gfx::cmd_gfx);
+        #[cfg(target_arch = "x86_64")]
         registry.register("gfx-demo", gfx::cmd_gfx_demo);
         registry.register("top", top::cmd_top);
         registry.register("timer", timer::cmd_timer);

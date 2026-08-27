@@ -3,7 +3,7 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 use spin::Mutex;
-use x86_64::VirtAddr;
+use crate::arch::xshim::VirtAddr;
 type PanicHook = fn(&PanicInfo);
 const MAX_PANIC_HOOKS: usize = 8;
 
@@ -46,7 +46,7 @@ fn run_panic_hooks(info: &PanicInfo) {
 
 /// Dump CPU/scheduler context to serial.
 fn panic_hook_dump_context(_info: &PanicInfo) {
-    let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+    let cpu = crate::arch::percpu::current_cpu_index();
     let ticks = crate::process::scheduler::ticks();
     let cr3 = crate::memory::paging::active_page_table().as_u64();
     crate::serial_force_println!("panic-hook: cpu={} ticks={} cr3=0x{:x}", cpu, ticks, cr3);
@@ -174,7 +174,7 @@ fn dump_panic_info(info: &PanicInfo) {
     crate::serial_force_println!("");
 
     // CPU state
-    let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+    let cpu = crate::arch::percpu::current_cpu_index();
     let (cr0, cr2, cr3, cr4) = read_cr_regs();
     let rsp = read_rsp();
     let rbp = read_rbp();
@@ -211,7 +211,7 @@ fn dump_panic_info(info: &PanicInfo) {
     crate::serial_force_println!("");
 
     // Uptime
-    let ts = crate::arch::x86_64::boot_timestamp::elapsed_ms();
+    let ts = crate::arch::boot_timestamp::elapsed_ms();
     crate::serial_force_println!("Uptime: {} ms", ts);
 }
 
@@ -234,20 +234,20 @@ pub fn install_default_panic_hooks() {
 /// After all output is delivered, halts the current CPU forever.
 pub fn panic_handler(info: &PanicInfo) -> ! {
     // 1. Emergency serial mode : serial_println! bypasses all locks.
-    crate::arch::x86_64::serial::enter_emergency_mode();
+    crate::arch::serial::enter_emergency_mode();
 
     // 2. Guard against recursive panics.
     if PANIC_IN_PROGRESS.swap(true, Ordering::SeqCst) {
         // SeqCst provides a full barrier; add explicit fence for clarity.
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
         // Double panic: dump as much as we can with stack-only formatting.
-        crate::arch::x86_64::cli();
+        crate::arch::cli();
         crate::serial_force_println!("\n\x1b[31;1m!!! DOUBLE PANIC !!!\x1b[0m");
         if let Some(loc) = info.location() {
             crate::serial_force_println!("panic at {}:{}", loc.file(), loc.line());
         }
         crate::serial_force_println!("Message: {}", info.message());
-        let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+        let cpu = crate::arch::percpu::current_cpu_index();
         let (cr0, cr2, cr3, cr4) = read_cr_regs();
         crate::serial_force_println!(
             "CPU={}  CR0={:#X}  CR2={:#X}  CR3={:#X}  CR4={:#X}",
@@ -260,15 +260,15 @@ pub fn panic_handler(info: &PanicInfo) -> ! {
         crate::serial_force_println!("RSP={:#018X}  RBP={:#018X}", read_rsp(), read_rbp());
         dump_backtrace();
         loop {
-            crate::arch::x86_64::hlt();
+            crate::arch::hlt();
         }
     }
 
     // 3. Disable interrupts so nothing disturbs the dump.
-    crate::arch::x86_64::cli();
+    crate::arch::cli();
 
     // 3b. Panic beep : audible signal before we halt.
-    crate::arch::x86_64::speaker::beep_panic();
+    crate::arch::speaker::beep_panic();
 
     // 4. Dump all debug information directly to serial (heap-free).
     dump_panic_info(info);
@@ -277,7 +277,7 @@ pub fn panic_handler(info: &PanicInfo) -> ! {
     run_panic_hooks(info);
 
     // 6. Stop all other CPUs and wait for them to halt.
-    crate::arch::x86_64::smp::broadcast_panic_halt();
+    crate::arch::smp::broadcast_panic_halt();
     // Brief delay to let other CPUs observe the NMI/halt IPI before we
     // touch shared framebuffer memory.
     for _ in 0..100_000 {
@@ -285,15 +285,15 @@ pub fn panic_handler(info: &PanicInfo) -> ! {
     }
 
     // 7. Flush the VGA circular buffer so any buffered log lines appear.
-    crate::arch::x86_64::vgabuf::vgabuf_flush_all();
+    crate::arch::vgabuf::vgabuf_flush_all();
 
     // 8. Display panic info on framebuffer (best-effort, may use heap for String formatting).
-    if crate::arch::x86_64::vga::is_available() {
-        if let Some(mut writer) = crate::arch::x86_64::vga::VGA_WRITER.try_lock() {
+    if crate::arch::vga::is_available() {
+        if let Some(mut writer) = crate::arch::vga::VGA_WRITER.try_lock() {
             use core::fmt::Write;
             writer.set_rgb_color(
-                crate::arch::x86_64::vga::RgbColor::new(0xFF, 0xE7, 0xA0),
-                crate::arch::x86_64::vga::RgbColor::new(0x3A, 0x1F, 0x00),
+                crate::arch::vga::RgbColor::new(0xFF, 0xE7, 0xA0),
+                crate::arch::vga::RgbColor::new(0x3A, 0x1F, 0x00),
             );
             writer.clear();
             let _ = writeln!(writer, "=== GURU MEDiTATiON :: KERNEL PANiK ===");
@@ -314,12 +314,12 @@ pub fn panic_handler(info: &PanicInfo) -> ! {
             let title = "=== GURU MEDiTATiON :: KERNEL PANiK ===";
             let serial_hint = "See serial output for full backtrace.";
             let str_lines: [&str; 2] = [title, serial_hint];
-            crate::arch::x86_64::vga::panic_draw_direct(&str_lines);
+            crate::arch::vga::panic_draw_direct(&str_lines);
         }
     }
 
     // 9. Halt forever.
     loop {
-        crate::arch::x86_64::hlt();
+        crate::arch::hlt();
     }
 }

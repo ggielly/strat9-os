@@ -59,7 +59,7 @@ fn ntp_query(server_ip: &[u8; 4]) -> Result<(u64, u32), ShellError> {
     }
 
     let start_tick = crate::process::scheduler::ticks();
-    let timeout_ticks = crate::arch::x86_64::timer::TIMER_HZ * 3; // ~3s
+    let timeout_ticks = crate::arch::timer::TIMER_HZ * 3; // ~3s
     let mut resp = [0u8; 64];
 
     loop {

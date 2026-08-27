@@ -225,7 +225,7 @@ impl GlobalSchedState {
         );
         if self.all_tasks.contains_key(&task_id) {
             unsafe {
-                core::arch::asm!("mov al, 'D'; out 0xe9, al", out("al") _);
+                crate::arch::serial::putc(b'D');
             }
             crate::serial_force_println!(
                 "[RACE] insert_all_task_locked: duplicate tid={} all_tasks={}",
@@ -678,8 +678,8 @@ pub(super) fn yield_cpu_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> Optio
 
     // Update TSS.rsp0 and SYSCALL kernel RSP for the new task.
     let stack_top = next.kernel_stack.virt_base.as_u64() + next.kernel_stack.size as u64;
-    crate::arch::x86_64::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
-    crate::arch::x86_64::syscall::set_kernel_rsp(stack_top);
+    crate::arch::tss::set_kernel_stack(crate::arch::xshim::VirtAddr::new(stack_top));
+    crate::arch::syscall::set_kernel_rsp(stack_top);
 
     // Switch CR3 if the new task has a different address space.
     // SAFETY: The new task's address space has a valid PML4 with the kernel half mapped.

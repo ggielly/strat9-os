@@ -39,7 +39,7 @@ use core::{
     mem::offset_of,
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
-use x86_64::structures::paging::mapper::TranslateResult;
+use crate::arch::xshim::TranslateResult;
 /// Result returned by [`sys_fork`].
 pub struct ForkResult {
     pub child_pid: Pid,
@@ -50,7 +50,7 @@ pub struct ForkResult {
 fn local_invlpg(vaddr: u64) {
     // Local TLB invalidation is sufficient here: this kernel currently runs
     // one task per user address space (no shared user CR3 across CPUs).
-    crate::arch::x86_64::tlb::local_page(x86_64::VirtAddr::new(vaddr));
+    crate::arch::tlb::local_page(crate::arch::xshim::VirtAddr::new(vaddr));
 }
 
 #[repr(C)]
@@ -374,10 +374,11 @@ pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
 /// or Err if it wasn't a COW fault (real access violation).
 pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<(), &'static str> {
     use crate::memory::paging::BuddyFrameAllocator;
-    use x86_64::{
-        structures::paging::{Mapper, Page, PageTableFlags, Size2MiB, Size4KiB, Translate},
-        VirtAddr,
-    };
+    use crate::x86_crate_shim::structures::paging::Page;
+    use crate::arch::xshim::{PageTableFlags, Size2MiB, Size4KiB};
+    use crate::x86_crate_shim::structures::paging::Translate;
+use crate::x86_crate_shim::structures::paging::Mapper;
+    use crate::arch::xshim::VirtAddr;
 
     let mapping = address_space
         .effective_mapping_containing(virt_addr)
@@ -479,7 +480,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
             unsafe {
                 mapper.map_to(
                     page,
-                    x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
+                    crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
                         new_frame.start_address,
                     ),
                     new_flags,
@@ -499,7 +500,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
             unsafe {
                 mapper.map_to(
                     huge_page,
-                    x86_64::structures::paging::PhysFrame::<Size2MiB>::containing_address(
+                    crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(
                         new_frame.start_address,
                     ),
                     tracked_flags,
@@ -515,7 +516,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
             VmaPageSize::Small => unsafe {
                 let _ = mapper.map_to(
                     page,
-                    x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
+                    crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
                         phys_frame_addr,
                     ),
                     flags,
@@ -526,7 +527,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
                 let huge_page = Page::<Size2MiB>::containing_address(VirtAddr::new(page_start));
                 let _ = mapper.map_to(
                     huge_page,
-                    x86_64::structures::paging::PhysFrame::<Size2MiB>::containing_address(
+                    crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(
                         phys_frame_addr,
                     ),
                     flags,
@@ -565,7 +566,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
                 let _ = unsafe {
                     mapper.map_to(
                         page,
-                        x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
+                        crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
                             phys_frame_addr,
                         ),
                         flags,
@@ -580,7 +581,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
                 let _ = unsafe {
                     mapper.map_to(
                         huge_page,
-                        x86_64::structures::paging::PhysFrame::<Size2MiB>::containing_address(
+                        crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(
                             phys_frame_addr,
                         ),
                         flags,
