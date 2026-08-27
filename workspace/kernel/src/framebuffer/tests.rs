@@ -120,11 +120,7 @@ mod test {
         let mut fill_test = alloc_buffer(count + 4);
         unsafe {
             generic::fill_generic(fill_reference.as_mut_ptr().add(1), color, count);
-            crate::framebuffer::x86::strat9_fb_framebuffer_fill_avx2(
-                fill_test.as_mut_ptr().add(1),
-                color,
-                count,
-            );
+            (FramebufferOps::detect().fill)(fill_test.as_mut_ptr().add(1), color, count);
         }
         assert_eq!(
             fill_reference, fill_test,
@@ -143,7 +139,7 @@ mod test {
                 src.as_ptr().add(2),
                 count,
             );
-            crate::framebuffer::x86::strat9_fb_framebuffer_blit_avx2(
+            (FramebufferOps::detect().blit)(
                 blit_test.as_mut_ptr().add(1),
                 src.as_ptr().add(2),
                 count,

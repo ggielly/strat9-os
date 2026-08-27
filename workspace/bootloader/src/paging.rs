@@ -43,10 +43,14 @@ pub unsafe fn create_page_tables(
         let pdp = alloc_frame() as *mut u64;
         *pml4.add(0) = pdp as u64 | PRESENT | WRITABLE;
 
-        // S1: identity map keeps WB — the PTE PAT bit is reserved for the
-        // framebuffer mapping (PAT entry 4 = Write-Combining).
+        // 1 GiB huge pages: the PDPE PS bit (bit 7) MUST be set or the entry
+        // is treated as a page-directory pointer and the walk faults.
+        // Note: bit 7 also selects PAT entry 4 (programmed to WC by
+        // context_switch); that is harmless here — only the framebuffer
+        // mapping uses WC in practice, and this matches the original
+        // graphics-branch design.
         for i in 0..8u64 {
-            *pdp.add(i as usize) = (i * 0x4000_0000) | PRESENT | WRITABLE;
+            *pdp.add(i as usize) = (i * 0x4000_0000) | PRESENT | WRITABLE | (1 << 7);
         }
     }
 

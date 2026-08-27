@@ -24,11 +24,11 @@ use alloc::{boxed::Box, collections::BTreeMap, format, string::String, vec::Vec}
 use strat9_syscall::{
     call,
     data::{
-        DT_DIR, DT_REG, IpcMessage, IPC_FILE_FLAG_DIRECTORY, OPCODE_CLOSE, OPCODE_OPEN,
-        OPCODE_READ, OPCODE_READDIR, OPCODE_WRITE, PCI_MATCH_DEVICE_ID, PCI_MATCH_VENDOR_ID,
-        OpenRequest, PciAddress, PciDeviceInfo, PciProbeCriteria,
+        DT_DIR, DT_REG, IPC_FILE_FLAG_DIRECTORY, IpcMessage, OPCODE_CLOSE, OPCODE_OPEN,
+        OPCODE_READ, OPCODE_READDIR, OPCODE_WRITE, OpenRequest, PCI_MATCH_DEVICE_ID,
+        PCI_MATCH_VENDOR_ID, PciAddress, PciDeviceInfo, PciProbeCriteria,
     },
-    error::{EBADF, EINVAL, EIO, ENOMEM, ENOENT, ENOSYS, ENOTDIR},
+    error::{EBADF, EINVAL, EIO, ENOENT, ENOMEM, ENOSYS, ENOTDIR},
 };
 
 use crate::BusDriver;
@@ -53,18 +53,6 @@ const MAX_FIND_CACHE_ENTRIES: usize = 64;
 // VFS scheme opcodes and typed request parsers: re-exported from strat9-abi
 // via strat9-syscall (single source of truth for the wire contract).
 const STATUS_OK: u32 = 0;
-
-/// Fixed reply prologue of a READ reply: `status` (4) + `count` (4).
-const READ_HEADER_SIZE: usize = 8;
-/// Fixed reply prologue of a READDIR reply: `status` (4) + `next_cursor`
-/// (2) + `count` (1) + `size` (1), written at payload offsets 0..8.
-const READDIR_HEADER_SIZE: usize = 8;
-/// Max inline data bytes carried by a READ reply:
-/// full payload minus the `status`/`count` prefix.
-const READ_DATA_CAPACITY: usize = IpcMessage::PAYLOAD_CAPACITY - READ_HEADER_SIZE;
-/// Max bytes usable for readdir entries: full payload minus the fixed
-/// reply prologue (`next_cursor` + `count` + `size`, written at 4..8).
-const READDIR_DATA_CAPACITY: usize = IpcMessage::PAYLOAD_CAPACITY - READDIR_HEADER_SIZE;
 
 /// Fixed reply prologue of a READ reply: `status` (4) + `count` (4).
 const READ_HEADER_SIZE: usize = 8;
@@ -399,14 +387,19 @@ impl BusSchemeServer {
             return Self::err_reply(sender, ENOENT);
         };
 
-        self.handles.insert(file_id, OpenHandle { kind, owner: sender });
+        self.handles.insert(
+            file_id,
+            OpenHandle {
+                kind,
+                owner: sender,
+            },
+        );
 
         let mut reply = Self::ok_reply(sender);
         reply.payload[4..12].copy_from_slice(&file_id.to_le_bytes());
         reply.payload[12..20].copy_from_slice(&0u64.to_le_bytes());
-        reply.payload[20..24].copy_from_slice(
-            &(if is_dir { IPC_FILE_FLAG_DIRECTORY } else { 0 }).to_le_bytes(),
-        );
+        reply.payload[20..24]
+            .copy_from_slice(&(if is_dir { IPC_FILE_FLAG_DIRECTORY } else { 0 }).to_le_bytes());
         reply
     }
 
@@ -541,7 +534,8 @@ impl BusSchemeServer {
                             self.find_cache.remove(&first);
                         }
                     }
-                    self.find_cache.insert((vendor_id, device_id), rendered.clone());
+                    self.find_cache
+                        .insert((vendor_id, device_id), rendered.clone());
                 }
                 rendered
             }
@@ -965,8 +959,14 @@ mod review_tests {
 
     #[test]
     fn s5_normalize_collapses_dots_and_slashes() {
-        assert_eq!(BusSchemeServer::normalize_path("pci//find"), Some(String::from("pci/find")));
-        assert_eq!(BusSchemeServer::normalize_path("./status"), Some(String::from("status")));
+        assert_eq!(
+            BusSchemeServer::normalize_path("pci//find"),
+            Some(String::from("pci/find"))
+        );
+        assert_eq!(
+            BusSchemeServer::normalize_path("./status"),
+            Some(String::from("status"))
+        );
         assert_eq!(BusSchemeServer::normalize_path("/"), Some(String::new()));
         assert_eq!(BusSchemeServer::normalize_path(""), Some(String::new()));
     }
@@ -979,7 +979,10 @@ mod review_tests {
             BusSchemeServer::normalize_path("pci/../nvme0/status"),
             Some(String::from("nvme0/status"))
         );
-        assert_eq!(BusSchemeServer::normalize_path("a/b/../c"), Some(String::from("a/c")));
+        assert_eq!(
+            BusSchemeServer::normalize_path("a/b/../c"),
+            Some(String::from("a/c"))
+        );
     }
 
     #[test]
@@ -1030,7 +1033,10 @@ mod review_tests {
     #[test]
     fn v3_pci_find_path_is_strictly_two_fields() {
         assert_eq!(BusSchemeServer::parse_find_path("pci/find/8086:100e"), None); // ':' not a separator
-        assert_eq!(BusSchemeServer::parse_find_path("pci/find/8086/100e"), Some((0x8086, 0x100e)));
+        assert_eq!(
+            BusSchemeServer::parse_find_path("pci/find/8086/100e"),
+            Some((0x8086, 0x100e))
+        );
         assert!(BusSchemeServer::parse_find_path("pci/find/8086").is_none());
         assert!(BusSchemeServer::parse_find_path("pci/find/8086/100e/x").is_none());
     }
