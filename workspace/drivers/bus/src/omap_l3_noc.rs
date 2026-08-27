@@ -212,6 +212,7 @@ impl BusDriver for OmapL3Noc {
         if self.num_modules == 0 || !self.modules[0].is_valid() {
             return Err(BusError::InitFailed);
         }
+        self.modules[0].check_user_offset(offset)?;
         Ok(self.modules[0].read32(offset))
     }
 
@@ -220,6 +221,7 @@ impl BusDriver for OmapL3Noc {
         if self.num_modules == 0 || !self.modules[0].is_valid() {
             return Err(BusError::InitFailed);
         }
+        self.modules[0].check_user_offset(offset)?;
         self.modules[0].write32(offset, value);
         Ok(())
     }

@@ -585,7 +585,6 @@ pub fn maybe_preempt_from_interrupt(
             return None;
         }
 
-        unsafe { core::arch::asm!("mov al, '1'; out 0xe9, al", out("al") _) };
         let current = match cpu.current_task.as_ref() {
             Some(t) => t.clone(),
             None => {
@@ -593,7 +592,6 @@ pub fn maybe_preempt_from_interrupt(
                 return None;
             }
         };
-        unsafe { core::arch::asm!("mov al, '2'; out 0xe9, al", out("al") _) };
         current.set_resume_kind(crate::process::task::ResumeKind::IretFrame);
         current.set_interrupt_rsp(current_frame_rsp);
 

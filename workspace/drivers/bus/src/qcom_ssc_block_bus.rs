@@ -150,6 +150,7 @@ impl BusDriver for QcomSscBlockBus {
         if !self.halt_regs.is_valid() {
             return Err(BusError::InitFailed);
         }
+        self.halt_regs.check_user_offset(offset)?;
         Ok(self.halt_regs.read32(offset))
     }
 
@@ -158,6 +159,7 @@ impl BusDriver for QcomSscBlockBus {
         if !self.halt_regs.is_valid() {
             return Err(BusError::InitFailed);
         }
+        self.halt_regs.check_user_offset(offset)?;
         self.halt_regs.write32(offset, value);
         Ok(())
     }

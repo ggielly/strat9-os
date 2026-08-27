@@ -297,6 +297,7 @@ impl BusDriver for BrcmstbGisb {
         if !self.regs.is_valid() {
             return Err(BusError::InitFailed);
         }
+    self.regs.check_user_offset(offset)?;
         Ok(self.read_gisb(offset))
     }
 
@@ -305,6 +306,7 @@ impl BusDriver for BrcmstbGisb {
         if !self.regs.is_valid() {
             return Err(BusError::InitFailed);
         }
+        self.regs.check_user_offset(offset)?;
         self.write_gisb(offset, value);
         Ok(())
     }
