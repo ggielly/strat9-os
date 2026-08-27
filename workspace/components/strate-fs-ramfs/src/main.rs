@@ -64,6 +64,11 @@ use strat9_syscall::data::{
 struct StrateRamServer {
     fs: RamFileSystem,
     alias_label: Option<String>,
+    /// True once the kernel's one-time `OPCODE_BOOTSTRAP` has been honoured.
+    /// The alias binding is a bootstrapping step; accepting it from any
+    /// process at any time would let a sender squat or rebind the logical
+    /// mount point.
+    bootstrap_done: bool,
     /// Open sessions: `(sender, ino)` -> open count.
     ///
     /// The file id handed to clients is the raw inode number, which is
@@ -80,6 +85,7 @@ impl StrateRamServer {
         Self {
             fs: RamFileSystem::new(),
             alias_label: None,
+            bootstrap_done: false,
             open_sessions: BTreeMap::new(),
         }
     }
@@ -115,13 +121,18 @@ impl StrateRamServer {
     }
 
     /// Implements bind srv alias.
-    fn bind_srv_alias(&mut self, port: u64, label: &str) {
+    ///
+    /// Returns `true` if the requested label is (or already was) bound.
+    fn bind_srv_alias(&mut self, port: u64, label: &str) -> bool {
         if self.alias_label.as_deref() == Some(label) {
-            return;
+            return true;
         }
         let path = format!("/srv/strate-fs-ramfs/{}", label);
         if call::ipc_bind_port(port as usize, path.as_bytes()).is_ok() {
             self.alias_label = Some(String::from(label));
+            true
+        } else {
+            false
         }
     }
 
@@ -394,19 +405,28 @@ impl StrateRamServer {
             Err(code) => return Self::err_reply(sender, code),
         };
 
-        // Only a sender with an open session may close; drop one reference.
-        match self.open_sessions.get_mut(&(sender, ino)) {
-            Some(count) => {
-                *count -= 1;
-                if *count == 0 {
-                    self.open_sessions.remove(&(sender, ino));
-                }
-            }
-            None => return Self::err_reply(sender, EBADF as u32),
+        // Authorization: only a sender with an open session may close. The
+        // id is a guessable inode number, so without this any process could
+        // drop the internal open-count of a file it never opened.
+        if !self.open_sessions.contains_key(&(sender, ino)) {
+            return Self::err_reply(sender, EBADF as u32);
         }
 
+        // Unregister the internal refcount first; only on success do we drop
+        // the server-side session reference. This keeps `open_sessions` and
+        // RamFileSystem's internal counter from diverging: if the fs refuses
+        // the close (e.g. InodeNotFound), the session is retained so the
+        // mismatch stays observable and retryable.
         match self.fs.unregister_open(ino) {
-            Ok(()) => Self::ok_reply(sender),
+            Ok(()) => {
+                if let Some(count) = self.open_sessions.get_mut(&(sender, ino)) {
+                    *count -= 1;
+                    if *count == 0 {
+                        self.open_sessions.remove(&(sender, ino));
+                    }
+                }
+                Self::ok_reply(sender)
+            }
             Err(FsError::InodeNotFound) => Self::err_reply(sender, EBADF as u32),
             Err(err) => Self::err_reply(sender, Self::fs_status(err)),
         }
@@ -442,6 +462,12 @@ impl StrateRamServer {
             Ok(v) => v,
             Err(code) => return Self::err_reply(sender, code),
         };
+        // Session check: the id is a guessable inode number. Only a sender
+        // that opened the directory may list it; without this, any process
+        // could enumerate any directory by guessing an ino.
+        if !self.open_sessions.contains_key(&(sender, ino)) {
+            return Self::err_reply(sender, EBADF as u32);
+        }
         let cursor = match Self::read_u16(payload, 8) {
             Ok(v) => v as usize,
             Err(code) => return Self::err_reply(sender, code),
@@ -498,6 +524,8 @@ impl StrateRamServer {
         };
         reply.payload[4..6].copy_from_slice(&next_cursor.to_le_bytes());
         reply.payload[6] = count;
+        // Safe as u8: the entries area is capped by the payload capacity
+        // (240 bytes, IPC_PAYLOAD_CAPACITY), so write_pos - 8 <= 232 < 256.
         reply.payload[7] = (write_pos - 8) as u8;
         reply
     }
@@ -512,9 +540,19 @@ impl StrateRamServer {
             }
             let reply = match msg.msg_type {
                 OPCODE_BOOTSTRAP => {
-                    let label = Self::parse_bootstrap_label(&msg.payload);
-                    self.bind_srv_alias(port, &label);
-                    Self::ok_reply(msg.sender)
+                    // One-time bootstrap step driven by the kernel at mount
+                    // time. Refuse any later attempt to rebind the alias.
+                    if self.bootstrap_done {
+                        Self::err_reply(msg.sender, EBADF as u32)
+                    } else {
+                        let label = Self::parse_bootstrap_label(&msg.payload);
+                        if self.bind_srv_alias(port, &label) {
+                            self.bootstrap_done = true;
+                            Self::ok_reply(msg.sender)
+                        } else {
+                            Self::err_reply(msg.sender, EINVAL as u32)
+                        }
+                    }
                 }
                 OPCODE_OPEN => self.handle_open(msg.sender, &msg.payload),
                 OPCODE_READ => self.handle_read(msg.sender, &msg.payload),
@@ -545,7 +583,7 @@ pub extern "C" fn _start() -> ! {
 
     let _ = call::ipc_bind_port(port as usize, b"/ram");
     let mut server = StrateRamServer::new();
-    server.bind_srv_alias(port, "default");
+    let _ = server.bind_srv_alias(port, "default");
 
     server.serve(port)
 }
