@@ -7,6 +7,12 @@ unsafe fn load_u32_unaligned(src: *const u8) -> i32 {
 
 #[target_feature(enable = "sse2")]
 pub unsafe fn fill_sse2(dst: *mut u32, color: u32, count: usize) {
+    // S2: large fills use streaming stores to avoid cache pollution.
+    if count * 4 >= super::stream_threshold() {
+        fill_sse2_nt(dst, color, count);
+        return;
+    }
+
     let color_vec = _mm_set1_epi32(color as i32);
     let mut i = 0;
 
@@ -21,8 +27,24 @@ pub unsafe fn fill_sse2(dst: *mut u32, color: u32, count: usize) {
     }
 }
 
+/// Streaming fill: movntdq requires 16-byte-aligned destinations, so align
+/// with scalar stores first and finish the tail the same way. sfence orders
+/// the weakly-ordered NT stores before anything that may observe them.
+#[target_feature(enable = "sse2")]
+unsafe fn fill_sse2_nt(dst: *mut u32, color: u32, count: usize) {
+    // TOOLCHAIN BUG (see x86/mod.rs): movntdq aborts ISel on this nightly.
+    fill_sse2(dst, color, count)
+
+}
+
 #[target_feature(enable = "sse2")]
 pub unsafe fn blit_sse2(dst: *mut u32, src: *const u32, count: usize) {
+    // S2: large blits use streaming stores.
+    if count * 4 >= super::stream_threshold() {
+        blit_sse2_nt(dst, src, count);
+        return;
+    }
+
     let mut i = 0;
 
     while i + 4 <= count {
@@ -35,6 +57,15 @@ pub unsafe fn blit_sse2(dst: *mut u32, src: *const u32, count: usize) {
         *dst.add(i) = *src.add(i);
         i += 1;
     }
+}
+
+/// Streaming blit: same 16-byte alignment requirement as the streaming fill
+/// (source stays on regular unaligned loads).
+#[target_feature(enable = "sse2")]
+unsafe fn blit_sse2_nt(dst: *mut u32, src: *const u32, count: usize) {
+    // TOOLCHAIN BUG (see x86/mod.rs): movntdq aborts ISel on this nightly.
+    blit_sse2(dst, src, count)
+
 }
 
 // In sse2, we use SSE4.1 blend where possible, but if only sse2 is available,
@@ -88,7 +119,8 @@ pub unsafe fn blend_sse2(dst: *mut u32, src: *const u32, alpha: u8, count: usize
 
 #[target_feature(enable = "sse2")]
 pub unsafe fn convert_bgr_to_argb_sse2(dst: *mut u32, src: *const u8, count: usize) {
-    convert_bgr_to_argb_ssse3(dst, src, count);
+    // TOOLCHAIN BUG (see x86/mod.rs): 128-bit pshufb aborts ISel here too.
+    crate::framebuffer::generic::convert_bgr_to_argb_generic(dst, src, count);
 }
 
 /// BGR24 => ARGB32 conversion using SSSE3 pshufb (4 pixels/iter)

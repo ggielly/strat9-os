@@ -221,6 +221,9 @@ pub struct CanvasBuffer {
     pub last_present_tick: u64,
     /// SIMD-accelerated pixel ops (fill, blit, blend, convert).
     pub ops: FramebufferOps,
+    /// Reusable row buffer for the 24bpp present path (S5): allocated once
+    /// at the largest row seen instead of one Vec per region per present.
+    pub present_row_buf: Option<Vec<u8>>,
 }
 
 unsafe impl Send for CanvasBuffer {}
@@ -335,6 +338,11 @@ impl CanvasBuffer {
     }
 
     /// Write pixel `(x, y)` : to back-buffer if available, else HW.
+    ///
+    /// Pure write (S4): this does NOT touch the dirty set. Marking per pixel
+    /// cost an O(dirty-set) scan on every call and no caller relied on it;
+    /// callers that need present tracking mark rectangles explicitly via
+    /// [`DirtyRectSet::include`] or go through [`Self::fill_rect`].
     pub fn write_pixel(&mut self, x: usize, y: usize, color: u32) {
         if x >= self.width || y >= self.height {
             return;
@@ -342,7 +350,6 @@ impl CanvasBuffer {
         if self.draw_to_back {
             if let Some(buf) = self.back_buffer.as_mut() {
                 buf[y * self.width + x] = color;
-                self.dirty.include(x as u32, y as u32, 1, 1);
                 return;
             }
         }
@@ -462,9 +469,14 @@ impl CanvasBuffer {
                     }
                 }
             } else {
-                // 24bpp fallback: convert row-by-row.
+                // 24bpp fallback: convert row-by-row into a reusable buffer
+                // (S5: no per-region allocation).
                 let row_bytes = rw * 3;
-                let mut row_buf = alloc::vec![0u8; row_bytes];
+                let row_buf = self
+                    .present_row_buf
+                    .get_or_insert_with(|| Vec::with_capacity(row_bytes));
+                row_buf.clear();
+                row_buf.resize(row_bytes, 0);
                 for row in 0..rh {
                     let src_row = (ry + row) * self.width + rx;
                     for x in 0..rw {
@@ -503,15 +515,20 @@ impl CanvasBuffer {
         if !self.present_pending || !self.draw_to_back {
             return;
         }
-        if force || now.saturating_sub(self.last_present_tick) >= PRESENT_MIN_TICKS_CB {
+        if force || now.saturating_sub(self.last_present_tick) >= PRESENT_MIN_TICKS {
             self.last_present_tick = now;
             self.present();
         }
     }
 }
 
-/// Local constant for present throttling (matches VgaWriter's PRESENT_MIN_TICKS).
-const PRESENT_MIN_TICKS_CB: u64 = 1;
+/// Minimum scheduler ticks between two throttled presents, shared by the
+/// VGA console writer and the video driver.
+///
+/// `TIMER_HZ` is 100 (one tick = 10 ms), so 16 ticks ≈ 160 ms of pacing for
+/// redraw-heavy paths. Paths that pace themselves (the userspace compositor,
+/// `Framebuffer::swap_buffers`) do not go through this gate.
+pub const PRESENT_MIN_TICKS: u64 = 16;
 
 impl FramebufferOps {
     pub fn detect() -> Self {

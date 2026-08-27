@@ -33,7 +33,7 @@ pub(crate) struct ClipRect {
 }
 
 // Mouse cursor (X arrow, 12×16) ==================================================================================================================================
-const PRESENT_MIN_TICKS: u64 = 16;
+use crate::framebuffer::PRESENT_MIN_TICKS;
 
 // Selection clipboard ==========================================================================================================================================================================
 const CLIPBOARD_CAP: usize = 8192;
@@ -244,6 +244,7 @@ impl VgaWriter {
             present_pending: false,
             last_present_tick: 0,
             ops: crate::framebuffer::FramebufferOps::detect(),
+            present_row_buf: None,
         });
         self.fmt = fmt;
         self.cols = cols;

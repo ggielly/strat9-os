@@ -37,9 +37,17 @@ use crate::{
 };
 use alloc::{collections::BTreeMap, format, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::RwLock;
+use spin::{Once, RwLock};
 
 const MAX_HANDLES: usize = 64;
+
+/// SIMD pixel-ingest ops for the Screen write path (RGB888 wire format ->
+/// screen format). Detected once on first use; falls back to scalar
+/// implementations when no SIMD extension is available.
+fn fb_ops() -> crate::framebuffer::FramebufferOps {
+    static OPS: Once<crate::framebuffer::FramebufferOps> = Once::new();
+    *OPS.call_once(crate::framebuffer::FramebufferOps::detect)
+}
 
 #[derive(Clone, Debug)]
 enum Handle {
@@ -216,61 +224,77 @@ impl Scheme for DisplayScheme {
             Handle::Root | Handle::Info => Err(SyscallError::PermissionDenied),
             Handle::Screen(_display_id, screen) => {
                 // Write pixel data to offscreen buffer.
-                // Format: [x_lo, x_hi, y_lo, y_hi, r, g, b, r, g, b, ...]
+                //
+                // Wire format v2:
+                //   [x u16le][y u16le][w u16le][r,g,b × w per row, ...]
+                // - `w == 0` means "fill to the right edge" (screen_w - x).
+                // - Rows advance by exactly w pixels per row while pixel
+                //   data remains; a single write can carry h*w pixels.
+                // - Pixels are RGB888 and are converted to the screen
+                //   format on ingest (SIMD-accelerated for 32bpp screens).
+                //
+                // Note: the file offset is currently ignored; callers must
+                // send complete rectangles starting at their (x, y).
                 if buf.len() < 7 {
                     return Err(SyscallError::InvalidArgument);
                 }
-                let x = u16::from_le_bytes([buf[0], buf[1]]) as u32;
-                let y = u16::from_le_bytes([buf[2], buf[3]]) as u32;
-                let pixels = &buf[4..];
+                let x = u16::from_le_bytes([buf[0], buf[1]]) as usize;
+                let y = u16::from_le_bytes([buf[2], buf[3]]) as usize;
+                let req_w = u16::from_le_bytes([buf[4], buf[5]]) as usize;
+                let pixels = &buf[6..];
 
                 let mut scr = screen.write();
                 let bpp = scr.bpp() as usize;
-                let _bpx = bpp / 8;
+                let bpx = bpp / 8;
+                let screen_w = scr.width() as usize;
+                let screen_h = scr.height() as usize;
                 let stride = scr.stride() as usize;
                 let dst = scr.pixels_mut();
 
-                if bpp == 32 {
-                    let mut off = 0;
-                    let mut py = y;
-                    while off + 3 < pixels.len() && py < scr.height() {
-                        let mut px = x;
-                        while off + 3 < pixels.len() && px < scr.width() {
-                            let r = pixels[off];
-                            let g = pixels[off + 1];
-                            let b = pixels[off + 2];
-                            off += 3;
-                            let pixel = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
-                            unsafe {
-                                core::ptr::write_volatile(
-                                    dst.add(py as usize * stride + px as usize * 4) as *mut u32,
-                                    pixel,
-                                );
+                if x >= screen_w || y >= screen_h {
+                    return Err(SyscallError::InvalidArgument);
+                }
+                // Clip the requested width to the right edge (w == 0 => edge).
+                let w = if req_w == 0 {
+                    screen_w - x
+                } else {
+                    req_w.min(screen_w - x)
+                };
+                if w == 0 || pixels.is_empty() {
+                    return Ok(buf.len());
+                }
+
+                // Per-row ingest. Each row consumes exactly w*bpp/8 target
+                // pixels from the stream; the stream ends when exhausted or
+                // when the bottom of the screen is reached.
+                let src_row_bytes = w * 3; // wire format is always RGB888
+                let mut off = 0usize;
+                let mut py = y;
+                while py < screen_h && off + src_row_bytes <= pixels.len() {
+                    let dst_off = py * stride + x * bpx;
+                    unsafe {
+                        if bpp == 32 {
+                            // SIMD RGB888 -> XRGB8888 (pshufb-based, handles
+                            // unaligned edges with a scalar tail). Plain
+                            // stores: the HeapScreen lives in cached RAM,
+                            // volatile would only block vectorization.
+                            (fb_ops().convert)(
+                                dst.add(dst_off) as *mut u32,
+                                pixels.as_ptr().add(off),
+                                w,
+                            );
+                        } else if bpp == 24 {
+                            let ptr = dst.add(dst_off);
+                            for i in 0..src_row_bytes {
+                                *ptr.add(i) = pixels[off + i];
                             }
-                            px += 1;
+                        } else {
+                            // Unsupported screen bpp: drop silently.
+                            return Ok(buf.len());
                         }
-                        py += 1;
                     }
-                } else if bpp == 24 {
-                    let mut off = 0;
-                    let mut py = y;
-                    while off + 2 < pixels.len() && py < scr.height() {
-                        let mut px = x;
-                        while off + 2 < pixels.len() && px < scr.width() {
-                            let r = pixels[off];
-                            let g = pixels[off + 1];
-                            let b = pixels[off + 2];
-                            off += 3;
-                            let ptr = unsafe { dst.add(py as usize * stride + px as usize * 3) };
-                            unsafe {
-                                core::ptr::write_volatile(ptr, r);
-                                core::ptr::write_volatile(ptr.add(1), g);
-                                core::ptr::write_volatile(ptr.add(2), b);
-                            }
-                            px += 1;
-                        }
-                        py += 1;
-                    }
+                    off += src_row_bytes;
+                    py += 1;
                 }
                 Ok(buf.len())
             }

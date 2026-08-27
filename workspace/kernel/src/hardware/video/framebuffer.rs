@@ -1,9 +1,8 @@
-// Note : _mm512_stream_si512 (NT store) is not available for x86_64-unknown-none;
 // Framebuffer abstraction layer
 //
 // Provides a unified framebuffer interface that can use:
-// - UEFI bootloader framebuffer (bootloader-provided)
-// - VirtIO GPU framebuffer (native driver)
+// - UEFI bootloader framebuffer (bootloader-provided, WC-mapped via PAT)
+// - VirtIO GPU framebuffer (native driver, zero-copy backing)
 // - Future/TODO : other GPU drivers (Bochs DRM, etc.)
 //
 // Features:
@@ -11,21 +10,21 @@
 // - Double buffering
 // - Basic 2D drawing primitives
 // - Text rendering support
+// - SIMD pixel ops with streaming stores above the L2-derived threshold
 
 #![allow(dead_code)]
 
 use crate::{
-    framebuffer::{CanvasBuffer, DirtyRectSet, FramebufferOps, MAX_DIRTY_RECTS},
+    framebuffer::{CanvasBuffer, DirtyRectSet, FramebufferOps, MAX_DIRTY_RECTS, PRESENT_MIN_TICKS},
     hardware::virtio::gpu,
     memory::{self, phys_to_virt},
 };
 use core::sync::atomic::{AtomicBool, Ordering};
-use spin::Mutex;
+use spin::{Mutex, Once};
 
 /// Maximum supported resolution
 const MAX_WIDTH: u32 = 3840;
 const MAX_HEIGHT: u32 = 2160;
-const PRESENT_MIN_TICKS: u64 = 1;
 
 /// Framebuffer source
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -98,13 +97,25 @@ pub struct Framebuffer {
     fb_size: usize,
     /// Whether console deferred present is active
     console_defer_present: bool,
+    /// True when the VirtIO backing IS our double buffer (zero-copy present)
+    zero_copy_backing: bool,
 }
 
 unsafe impl Send for Framebuffer {}
 unsafe impl Sync for Framebuffer {}
 
 static FRAMEBUFFER: Mutex<Option<Framebuffer>> = Mutex::new(None);
+/// Lockless snapshot of the display geometry, published once at init.
+///
+/// Getters (`info`/`width`/`height`/`stride`/`source`) read this instead of
+/// taking the framebuffer mutex, so hot paths and frequent queries never
+/// contend with drawing (G4).
+static FB_INFO: Once<FramebufferInfo> = Once::new();
 static FRAMEBUFFER_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+fn publish_info(info: FramebufferInfo) {
+    FB_INFO.call_once(|| info);
+}
 
 impl Framebuffer {
     fn request_present(&mut self) {
@@ -186,10 +197,11 @@ impl Framebuffer {
             back_buffer: None,
             draw_to_back: false,
             dirty: DirtyRectSet::empty(),
-            track_dirty: false,
+            track_dirty: true,
             present_pending: false,
             last_present_tick: 0,
             ops: FramebufferOps::detect(),
+            present_row_buf: None,
         };
 
         let fb = Framebuffer {
@@ -199,9 +211,11 @@ impl Framebuffer {
             use_double_buffer: false,
             fb_size: (stride as usize) * (height as usize),
             console_defer_present: false,
+            zero_copy_backing: false,
         };
 
         *FRAMEBUFFER.lock() = Some(fb);
+        publish_info(info);
         FRAMEBUFFER_INITIALIZED.store(true, Ordering::SeqCst);
 
         log::info!(
@@ -216,8 +230,16 @@ impl Framebuffer {
     }
 
     /// Initialize framebuffer with VirtIO GPU
+    ///
+    /// G3: the double buffer is allocated FIRST and attached as the scanout
+    /// resource backing itself, so draws land directly in what
+    /// TRANSFER_TO_HOST_2D reads — presentation becomes zero-copy.
     pub fn init_virtio_gpu() -> Result<(), &'static str> {
-        let gpu_info = gpu::get_framebuffer_info().ok_or("VirtIO GPU not initialized")?;
+        let gpu = crate::hardware::virtio::gpu::get_gpu().ok_or("VirtIO GPU not initialized")?;
+        let gpu_info = gpu.info();
+        if gpu_info.width == 0 || gpu_info.height == 0 {
+            return Err("Invalid VirtIO GPU dimensions");
+        }
 
         let format = PixelFormat {
             red_mask: 0x00FF0000,
@@ -229,18 +251,9 @@ impl Framebuffer {
             bits_per_pixel: 32,
         };
 
-        let info = FramebufferInfo {
-            base: gpu_info.framebuffer_phys,
-            base_virt: gpu_info.framebuffer_virt as usize,
-            width: gpu_info.width,
-            height: gpu_info.height,
-            stride: gpu_info.stride,
-            format,
-            source: FramebufferSource::VirtioGpu,
-        };
-
-        // Allocate double buffer for VirtIO GPU
-        let db_size = (info.stride as usize) * (info.height as usize);
+        // Allocate double buffer for VirtIO GPU (physically contiguous).
+        let stride = gpu_info.stride;
+        let db_size = (stride as usize) * (gpu_info.height as usize);
         if db_size == 0 {
             return Err("Invalid VirtIO framebuffer size");
         }
@@ -250,15 +263,43 @@ impl Framebuffer {
             memory::allocate_phys_contiguous(token, db_order)
         })
         .map_err(|_| "Failed to allocate double buffer")?;
-        let db_virt = phys_to_virt(db_frame.start_address.as_u64()) as *mut u8;
+        let db_phys = db_frame.start_address.as_u64();
+        let db_virt = phys_to_virt(db_phys) as *mut u8;
         unsafe {
             // SAFETY: `db_virt` is a freshly allocated contiguous buffer of at
             // least `db_size` bytes.
             core::ptr::write_bytes(db_virt, 0, db_size);
         }
 
+        // Attach the double buffer AS the resource backing (zero-copy path).
+        // On failure we fall back to the legacy bounce-buffer behaviour.
+        let zero_copy = match gpu.attach_external_backing(db_phys, db_size) {
+            Ok(()) => {
+                // Push the zeroed buffer to the scanout for a clean start.
+                let _ = gpu.present_scanout_rect(0, 0, gpu_info.width, gpu_info.height);
+                true
+            }
+            Err(e) => {
+                log::warn!(
+                    "[FB] external backing attach failed ({}): using bounce copy",
+                    e
+                );
+                false
+            }
+        };
+
+        let info = FramebufferInfo {
+            base: db_phys,
+            base_virt: db_virt as usize,
+            width: gpu_info.width,
+            height: gpu_info.height,
+            stride: gpu_info.stride,
+            format,
+            source: FramebufferSource::VirtioGpu,
+        };
+
         let canvas = CanvasBuffer {
-            addr: info.base_virt as *mut u8,
+            addr: db_virt,
             width: info.width as usize,
             height: info.height as usize,
             pitch: info.stride as usize,
@@ -266,10 +307,11 @@ impl Framebuffer {
             back_buffer: None,
             draw_to_back: false,
             dirty: DirtyRectSet::empty(),
-            track_dirty: false,
+            track_dirty: true,
             present_pending: false,
             last_present_tick: 0,
             ops: FramebufferOps::detect(),
+            present_row_buf: None,
         };
 
         let fb = Framebuffer {
@@ -277,19 +319,26 @@ impl Framebuffer {
             canvas,
             double_buffer: Some(db_virt),
             use_double_buffer: true,
-            fb_size: (info.stride as usize) * (info.height as usize),
+            fb_size: (stride as usize) * (gpu_info.height as usize),
             console_defer_present: false,
+            zero_copy_backing: zero_copy,
         };
 
         *FRAMEBUFFER.lock() = Some(fb);
+        publish_info(info);
         FRAMEBUFFER_INITIALIZED.store(true, Ordering::SeqCst);
 
         log::info!(
-            "[FB] VirtIO GPU framebuffer: {}x{} @ {}bpp, stride={}",
+            "[FB] VirtIO GPU framebuffer: {}x{} @ {}bpp, stride={} ({})",
             info.width,
             info.height,
             info.format.bits_per_pixel,
-            info.stride
+            info.stride,
+            if zero_copy {
+                "zero-copy backing"
+            } else {
+                "bounce copy"
+            }
         );
 
         Ok(())
@@ -334,10 +383,11 @@ impl Framebuffer {
             back_buffer: None,
             draw_to_back: false,
             dirty: DirtyRectSet::empty(),
-            track_dirty: false,
+            track_dirty: true,
             present_pending: false,
             last_present_tick: 0,
             ops: FramebufferOps::detect(),
+            present_row_buf: None,
         };
 
         *FRAMEBUFFER.lock() = Some(Framebuffer {
@@ -347,7 +397,9 @@ impl Framebuffer {
             use_double_buffer: false,
             fb_size: (pitch as usize) * (height as usize),
             console_defer_present: false,
+            zero_copy_backing: false,
         });
+        publish_info(info);
 
         log::info!(
             "[FB] AMDGPU framebuffer: {}x{} @ {}bpp, {} bytes",
@@ -360,36 +412,24 @@ impl Framebuffer {
         Ok(())
     }
 
-    /// Get framebuffer info
+    /// Get framebuffer info (lockless: reads the init-time snapshot)
     pub fn info() -> Option<FramebufferInfo> {
-        FRAMEBUFFER.lock().as_ref().map(|fb| fb.info)
+        FB_INFO.get().copied()
     }
 
-    /// Get framebuffer width
+    /// Get framebuffer width (lockless)
     pub fn width() -> u32 {
-        FRAMEBUFFER
-            .lock()
-            .as_ref()
-            .map(|fb| fb.info.width)
-            .unwrap_or(0)
+        FB_INFO.get().map(|i| i.width).unwrap_or(0)
     }
 
-    /// Get framebuffer height
+    /// Get framebuffer height (lockless)
     pub fn height() -> u32 {
-        FRAMEBUFFER
-            .lock()
-            .as_ref()
-            .map(|fb| fb.info.height)
-            .unwrap_or(0)
+        FB_INFO.get().map(|i| i.height).unwrap_or(0)
     }
 
-    /// Get stride (bytes per row)
+    /// Get stride in bytes per row (lockless)
     pub fn stride() -> u32 {
-        FRAMEBUFFER
-            .lock()
-            .as_ref()
-            .map(|fb| fb.info.stride)
-            .unwrap_or(0)
+        FB_INFO.get().map(|i| i.stride).unwrap_or(0)
     }
 
     /// Check if framebuffer is initialized
@@ -397,12 +437,11 @@ impl Framebuffer {
         FRAMEBUFFER_INITIALIZED.load(Ordering::Relaxed)
     }
 
-    /// Get framebuffer source
+    /// Get framebuffer source (lockless)
     pub fn source() -> FramebufferSource {
-        FRAMEBUFFER
-            .lock()
-            .as_ref()
-            .map(|fb| fb.info.source)
+        FB_INFO
+            .get()
+            .map(|i| i.source)
             .unwrap_or(FramebufferSource::None)
     }
 
@@ -419,100 +458,129 @@ impl Framebuffer {
 
     /// Set a pixel at (x, y) with RGB color.
     ///
-    /// Does NOT present to screen. Call `swap_buffers()` or `present()`
-    /// after a batch of draw operations.
+    /// Delegates to [`CanvasBuffer::write_pixel`] (S6: single implementation
+    /// of target selection). Takes the framebuffer lock for a single pixel:
+    /// fine for sparse dots, but batched drawing MUST go through
+    /// [`Self::blit_rect`] instead.
     pub fn set_pixel(x: u32, y: u32, r: u8, g: u8, b: u8) {
-        {
-            let mut guard = FRAMEBUFFER.lock();
-            let fb = match guard.as_mut() {
-                Some(f) => f,
-                None => return,
-            };
+        let mut guard = FRAMEBUFFER.lock();
+        let fb = match guard.as_mut() {
+            Some(f) => f,
+            None => return,
+        };
 
-            if x >= fb.info.width || y >= fb.info.height {
-                return;
-            }
-
-            let pixel = ((r as u32) << fb.info.format.red_shift)
-                | ((g as u32) << fb.info.format.green_shift)
-                | ((b as u32) << fb.info.format.blue_shift);
-
-            let offset = if fb.use_double_buffer {
-                fb.double_buffer.unwrap_or(fb.info.base_virt as *mut u8)
-            } else {
-                fb.info.base_virt as *mut u8
-            };
-
-            unsafe {
-                let pixel_ptr = offset.add((y * fb.info.stride + x * 4) as usize);
-                core::ptr::write(pixel_ptr as *mut u32, pixel);
-            }
-
-            fb.canvas.dirty.include(x, y, 1, 1);
-            fb.request_present();
+        if x >= fb.info.width || y >= fb.info.height {
+            return;
         }
+
+        let pixel = ((r as u32) << fb.info.format.red_shift)
+            | ((g as u32) << fb.info.format.green_shift)
+            | ((b as u32) << fb.info.format.blue_shift);
+
+        fb.canvas.write_pixel(x as usize, y as usize, pixel);
+        fb.canvas.dirty.include(x, y, 1, 1);
+        fb.request_present();
     }
 
     /// Fill rectangle with color.
     ///
-    /// Does NOT present to screen. Call `swap_buffers()` or `present()`
-    /// after a batch of draw operations.
+    /// Delegates to [`CanvasBuffer::fill_rect`] (S6: one implementation of
+    /// clipping, SIMD dispatch, target selection and dirty marking). Takes
+    /// the framebuffer lock once for the whole rectangle. Does NOT present;
+    /// call `swap_buffers()` after a batch of draw operations.
     pub fn fill_rect(x: u32, y: u32, width: u32, height: u32, r: u8, g: u8, b: u8) {
         if width == 0 || height == 0 {
             return;
         }
 
-        {
-            let mut guard = FRAMEBUFFER.lock();
-            let fb = match guard.as_mut() {
-                Some(f) => f,
-                None => return,
-            };
+        let mut guard = FRAMEBUFFER.lock();
+        let fb = match guard.as_mut() {
+            Some(f) => f,
+            None => return,
+        };
 
-            if x >= fb.info.width || y >= fb.info.height {
-                return;
-            }
-
-            let max_w = fb.info.width - x;
-            let max_h = fb.info.height - y;
-            let width = width.min(max_w);
-            let height = height.min(max_h);
-            if width == 0 || height == 0 {
-                return;
-            }
-
-            let pixel = ((r as u32) << fb.info.format.red_shift)
-                | ((g as u32) << fb.info.format.green_shift)
-                | ((b as u32) << fb.info.format.blue_shift);
-
-            let offset = if fb.use_double_buffer {
-                fb.double_buffer.unwrap_or(fb.info.base_virt as *mut u8)
-            } else {
-                fb.info.base_virt as *mut u8
-            };
-
-            let stride = fb.info.stride as usize;
-            let stride_pixels = fb.info.stride as usize / 4;
-            let width_pixels = width as usize;
-            if stride_pixels == width_pixels {
-                let first = unsafe { offset.add(y as usize * stride + x as usize * 4) as *mut u32 };
-                unsafe {
-                    (fb.canvas.ops.fill)(first, pixel, width_pixels * height as usize);
-                }
-            } else {
-                for dy in 0..height as usize {
-                    let row_ptr = unsafe {
-                        offset.add((y as usize + dy) * stride + x as usize * 4) as *mut u32
-                    };
-                    unsafe {
-                        (fb.canvas.ops.fill)(row_ptr, pixel, width_pixels);
-                    }
-                }
-            }
-
-            fb.canvas.dirty.include(x, y, width, height);
-            fb.request_present();
+        if x >= fb.info.width || y >= fb.info.height {
+            return;
         }
+
+        let width = width.min(fb.info.width - x);
+        let height = height.min(fb.info.height - y);
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        let pixel = ((r as u32) << fb.info.format.red_shift)
+            | ((g as u32) << fb.info.format.green_shift)
+            | ((b as u32) << fb.info.format.blue_shift);
+
+        fb.canvas.fill_rect(
+            x as usize,
+            y as usize,
+            width as usize,
+            height as usize,
+            pixel,
+        );
+        fb.request_present();
+    }
+
+    /// Blit a packed 32bpp XRGB rectangle into the current draw target
+    /// (double buffer when enabled, else the hardware framebuffer).
+    ///
+    /// This is the batch primitive: the framebuffer lock is taken exactly
+    /// once and a single dirty rectangle is marked, whatever the size.
+    /// `src` holds `h` rows of `w` pixels with a tight row stride of `w*4`
+    /// bytes; the rect is clipped against screen bounds.
+    pub fn blit_rect(src: &[u8], x: u32, y: u32, w: u32, h: u32) {
+        if w == 0 || h == 0 || x >= Self::width() || y >= Self::height() {
+            return;
+        }
+        let needed = w as usize * h as usize * 4;
+        if src.len() < needed {
+            return;
+        }
+
+        let mut guard = FRAMEBUFFER.lock();
+        let fb = match guard.as_mut() {
+            Some(f) => f,
+            None => return,
+        };
+
+        let max_w = fb.info.width - x;
+        let max_h = fb.info.height - y;
+        let w = w.min(max_w);
+        let h = h.min(max_h);
+        if w == 0 || h == 0 {
+            return;
+        }
+
+        let offset = if fb.use_double_buffer {
+            fb.double_buffer.unwrap_or(fb.info.base_virt as *mut u8)
+        } else {
+            fb.info.base_virt as *mut u8
+        };
+
+        let stride = fb.info.stride as usize;
+        let stride_pixels = stride / 4;
+        let src_row_bytes = w as usize * 4;
+        let full_width_contiguous =
+            x == 0 && w as usize == fb.info.width as usize && stride_pixels == w as usize;
+
+        unsafe {
+            if full_width_contiguous {
+                let dst = offset.add(y as usize * stride) as *mut u32;
+                let s = src.as_ptr() as *const u32;
+                (fb.canvas.ops.blit)(dst, s, w as usize * h as usize);
+            } else {
+                for dy in 0..h as usize {
+                    let dst = offset.add((y as usize + dy) * stride + x as usize * 4) as *mut u32;
+                    let s = src.as_ptr().add(dy * src_row_bytes) as *const u32;
+                    (fb.canvas.ops.blit)(dst, s, w as usize);
+                }
+            }
+        }
+
+        fb.canvas.dirty.include(x, y, w, h);
+        fb.request_present();
     }
 
     /// Draw a horizontal line
@@ -535,6 +603,21 @@ impl Framebuffer {
 
     /// Swap buffers (for double buffering)
     pub fn swap_buffers() {
+        enum VirtioPresent {
+            ZeroCopy {
+                x: u32,
+                y: u32,
+                w: u32,
+                h: u32,
+            },
+            BounceCopy {
+                src: *const u8,
+                stride: u32,
+                regions: [(u32, u32, u32, u32); MAX_DIRTY_RECTS],
+                count: usize,
+            },
+        }
+
         let mut virtio_present = None;
         {
             let mut guard = FRAMEBUFFER.lock();
@@ -553,24 +636,54 @@ impl Framebuffer {
             }
 
             if fb.info.source == FramebufferSource::VirtioGpu {
-                let mut regions = [(0u32, 0u32, 0u32, 0u32); MAX_DIRTY_RECTS];
+                // G3: coalesce dirty rects into their bounding box, then
+                // present. With an attached external backing this is a
+                // single TRANSFER+FLUSH pair straight from our draw target
+                // (zero copy); otherwise fall back to the bounce-copy path
+                // per rect.
+                let mut bx0 = u32::MAX;
+                let mut by0 = u32::MAX;
+                let mut bx1 = 0u32;
+                let mut by1 = 0u32;
                 let mut idx = 0;
                 while idx < fb.canvas.dirty.len {
                     let rect = fb.canvas.dirty.rects[idx];
-                    regions[idx] = (
-                        rect.x0,
-                        rect.y0,
-                        rect.x1.saturating_sub(rect.x0),
-                        rect.y1.saturating_sub(rect.y0),
-                    );
+                    if rect.is_valid() {
+                        bx0 = bx0.min(rect.x0);
+                        by0 = by0.min(rect.y0);
+                        bx1 = bx1.max(rect.x1);
+                        by1 = by1.max(rect.y1);
+                    }
                     idx += 1;
                 }
-                virtio_present = Some((
-                    db as *const u8,
-                    fb.info.stride,
-                    regions,
-                    fb.canvas.dirty.len,
-                ));
+
+                virtio_present = if fb.zero_copy_backing && bx1 > bx0 && by1 > by0 {
+                    Some(VirtioPresent::ZeroCopy {
+                        x: bx0,
+                        y: by0,
+                        w: bx1 - bx0,
+                        h: by1 - by0,
+                    })
+                } else {
+                    let mut regions = [(0u32, 0u32, 0u32, 0u32); MAX_DIRTY_RECTS];
+                    let mut idx = 0;
+                    while idx < fb.canvas.dirty.len {
+                        let rect = fb.canvas.dirty.rects[idx];
+                        regions[idx] = (
+                            rect.x0,
+                            rect.y0,
+                            rect.x1.saturating_sub(rect.x0),
+                            rect.y1.saturating_sub(rect.y0),
+                        );
+                        idx += 1;
+                    }
+                    Some(VirtioPresent::BounceCopy {
+                        src: db as *const u8,
+                        stride: fb.info.stride,
+                        regions,
+                        count: fb.canvas.dirty.len,
+                    })
+                };
             } else {
                 let dst = fb.info.base_virt as *mut u32;
                 let src_base = db as *const u32;
@@ -608,17 +721,28 @@ impl Framebuffer {
             fb.canvas.last_present_tick = crate::process::scheduler::ticks();
         }
 
-        if let Some((src, src_stride, regions, region_count)) = virtio_present {
-            if let Some(gpu) = gpu::get_gpu() {
-                let mut idx = 0;
-                while idx < region_count {
-                    let (px, py, pw, ph) = regions[idx];
-                    let _ = unsafe {
-                        gpu.present_from_linear(src, src_stride, px, py, pw, ph)
-                    };
-                    idx += 1;
+        match virtio_present {
+            Some(VirtioPresent::ZeroCopy { x, y, w, h }) => {
+                if let Some(gpu) = gpu::get_gpu() {
+                    let _ = gpu.present_scanout_rect(x, y, w, h);
                 }
             }
+            Some(VirtioPresent::BounceCopy {
+                src,
+                stride,
+                regions,
+                count: region_count,
+            }) => {
+                if let Some(gpu) = gpu::get_gpu() {
+                    let mut idx = 0;
+                    while idx < region_count {
+                        let (px, py, pw, ph) = regions[idx];
+                        let _ = unsafe { gpu.present_from_linear(src, stride, px, py, pw, ph) };
+                        idx += 1;
+                    }
+                }
+            }
+            None => {}
         }
     }
 
