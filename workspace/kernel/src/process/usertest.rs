@@ -84,7 +84,7 @@ pub fn create_user_test_task() {
 
     // Step 4: Write machine code into the code page.
     // We need to write via the HHDM mapping since the user AS isn't active.
-    // Translate user vaddr → phys → HHDM virt for writing.
+    // Translate user vaddr => phys => HHDM virt for writing.
     let code_phys = user_as.translate(VirtAddr::new(USER_CODE_ADDR));
     let code_phys = match code_phys {
         Some(p) => p,
@@ -141,6 +141,7 @@ pub fn create_user_test_task() {
         user_stack: None,
         stack_canary: core::sync::atomic::AtomicU64::new(0),
         stack_canary_addr: core::sync::atomic::AtomicU64::new(0),
+        kernel_stack_user: SyncUnsafeCell::new(None),
 
         name: "test-user-ring3",
         process: alloc::sync::Arc::new(crate::process::process::Process::new(pid, user_as)),

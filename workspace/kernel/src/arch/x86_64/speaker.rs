@@ -113,7 +113,7 @@ fn pit_busy_wait(ms: u32) {
         let count = count.min(0xFFFF) as u16;
 
         unsafe {
-            // Gate LOW → disable counting
+            // Gate LOW => disable counting
             let val = inb(0x61);
             outb(0x61, val & !SPEAKER_GATE_BIT);
 
@@ -122,7 +122,7 @@ fn pit_busy_wait(ms: u32) {
             outb(0x42, (count & 0xFF) as u8);
             outb(0x42, ((count >> 8) & 0xFF) as u8);
 
-            // Gate HIGH → start counting
+            // Gate HIGH => start counting
             outb(0x61, val | SPEAKER_GATE_BIT);
 
             // Poll bit 5 of port 0x61 (T2 output) until it goes HIGH

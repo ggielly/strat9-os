@@ -11,13 +11,13 @@
 //! │  /dev/display/0.0  /dev/display/0.1  ...        │
 //! ├─────────────────────────────────────────────────┤
 //! │              GraphicsAdapter impl               │
-//! │  display_count() → N displays                   │
-//! │  display_size(id) → (w, h)                      │
-//! │  create_framebuffer(w, h) → DisplayScreen       │
+//! │  display_count() => N displays                   │
+//! │  display_size(id) => (w, h)                      │
+//! │  create_framebuffer(w, h) => DisplayScreen       │
 //! │  update_plane(id, screen, damage)               │
 //! ├─────────────────────────────────────────────────┤
 //! │  DisplayScreen (offscreen buffer)               │
-//! │  sync() → copy to onscreen                      │
+//! │  sync() => copy to onscreen                      │
 //! └─────────────────────────────────────────────────┘
 //! ```
 
@@ -107,7 +107,7 @@ pub trait GraphicsAdapter: Send + Sync {
 }
 
 // ============================================================================
-// Concrete implementation: Limine/VirtIO framebuffer adapter
+// Concrete implementation: UEFI bootloader/VirtIO framebuffer adapter
 // ============================================================================
 
 /// A heap-allocated offscreen pixel buffer.
@@ -168,7 +168,7 @@ impl DisplayScreen for HeapScreen {
     }
 }
 
-/// Adapter backed by a single physical framebuffer (Limine or VirtIO).
+/// Adapter backed by a single physical framebuffer (UEFI bootloader or VirtIO).
 pub struct SimpleDisplayAdapter {
     /// Physical framebuffer info.
     fb_virt: usize,

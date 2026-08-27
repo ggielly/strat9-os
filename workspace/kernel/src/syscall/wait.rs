@@ -8,8 +8,8 @@
 //! ```text
 //! loop {
 //!     try_wait_child()       ← O(log n) scan under scheduler lock
-//!     StillRunning → block_current_task()
-//!                             ↑ woken by exit_current_task → wake_task_locked(parent)
+//!     StillRunning => block_current_task()
+//!                             ↑ woken by exit_current_task => wake_task_locked(parent)
 //! }
 //! ```
 //!
@@ -61,9 +61,9 @@ pub const WNOHANG: u32 = 1 << 0;
 /// ```
 ///
 /// The `msg` field follows Plan 9 convention:
-///   - `""` (empty, or first byte = 0)  → process exited normally (code 0)
-///   - `"exit <N>"`                      → process exited with code N ≠ 0
-///   - `"killed"`                        → process was killed by signal
+///   - `""` (empty, or first byte = 0)  => process exited normally (code 0)
+///   - `"exit <N>"`                      => process exited with code N ≠ 0
+///   - `"killed"`                        => process was killed by signal
 #[repr(C)]
 pub struct Waitmsg {
     pub pid: u64,
@@ -210,10 +210,10 @@ pub fn sys_waitpid(pid: i64, status_ptr: u64, options: u32) -> Result<u64, Sysca
     let parent_id = current_task_id().ok_or(SyscallError::Fault)?;
 
     // Build child filter.
-    //   pid > 0  → wait for that specific child
-    //   pid == -1 → wait for any child
-    //   pid == 0  → process-group semantics (not supported)
-    //   pid < -1  → wait for group |pid| (not supported)
+    //   pid > 0  => wait for that specific child
+    //   pid == -1 => wait for any child
+    //   pid == 0  => process-group semantics (not supported)
+    //   pid < -1  => wait for group |pid| (not supported)
     let target: Option<TaskId> = if pid > 0 {
         match get_child_task_id_by_pid(parent_id, pid as u32) {
             Some(t) => Some(t),

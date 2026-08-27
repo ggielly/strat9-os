@@ -71,7 +71,7 @@ fn enable_msi(pci_dev: &PciDevice, vector: u8) -> bool {
     pci_dev.write_config_u16(config::COMMAND, cmd);
 
     log::info!(
-        "MSI: enabled on {:04x}:{:04x} → vector {:#x} ({} addr)",
+        "MSI: enabled on {:04x}:{:04x} => vector {:#x} ({} addr)",
         pci_dev.vendor_id,
         pci_dev.device_id,
         vector,
@@ -176,7 +176,7 @@ fn enable_msix(pci_dev: &PciDevice, vector: u8) -> bool {
     pci_dev.write_config_u16(config::COMMAND, cmd);
 
     log::info!(
-        "MSI-X: enabled on {:04x}:{:04x} → vector {:#x} ({} entries, table BAR{}+{:#x})",
+        "MSI-X: enabled on {:04x}:{:04x} => vector {:#x} ({} entries, table BAR{}+{:#x})",
         pci_dev.vendor_id,
         pci_dev.device_id,
         vector,

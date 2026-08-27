@@ -1,6 +1,6 @@
 // Placeholder 8x16 bitmap font for ASCII 0x20-0x7E
 // Each glyph is 16 bytes (one per row, MSB = leftmost pixel)
-// This is a minimal placeholder — replace with real PSF font data later
+// This is a minimal placeholder : replace with real PSF font data later
 
 [
     [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00], // 0x20 (space)

@@ -160,7 +160,7 @@ fn run_time_suite() -> bool {
     }
     record("ticks counter monotonic", s, &mut passed, &mut total);
 
-    //  7. TimeSpec from_nanos → to_nanos round-trip ================================================================================
+    //  7. TimeSpec from_nanos => to_nanos round-trip ================================================================================
     log_section("7. TIMESPEC ROUND-TRIP");
     use strat9_abi::data::TimeSpec;
     let mut s = true;

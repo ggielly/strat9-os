@@ -85,7 +85,7 @@ const VMALLOC_PAGES: usize = VMALLOC_SIZE / 4096;
 ///
 /// Page 0 (`VMALLOC_VIRT_START`) is permanently mapped by the bootstrap frame
 /// allocated in `ensure_kernel_subtree_ready()`.  Keeping that mapping alive
-/// anchors the intermediate page-table nodes (PDPT → PD → PT) so they are
+/// anchors the intermediate page-table nodes (PDPT => PD => PT) so they are
 /// inherited by every address space cloned after `init()` runs.
 /// The free-extent list therefore starts at page 1.
 const ARENA_START_PAGE: usize = 1;
@@ -195,7 +195,7 @@ struct Vmalloc {
     /// Bootstrap frame permanently mapped at `VMALLOC_VIRT_START` (arena page 0).
     ///
     /// Keeping this mapping live anchors the intermediate page-table nodes
-    /// (PDPT → PD → PT) so they are present in the canonical kernel L4 table
+    /// (PDPT => PD => PT) so they are present in the canonical kernel L4 table
     /// and inherited by every address space created after `init()`.  The frame
     /// must never be freed while the kernel is running.
     bootstrap_frame: Option<PhysFrame>,
@@ -525,7 +525,7 @@ pub struct VmallocAttr {
 /// Capture attribution for the calling task, without holding VMALLOC.
 ///
 /// Must be called **before** acquiring the VMALLOC lock to maintain
-/// the VMALLOC → SILO_MANAGER lock ordering and to avoid deadlocking
+/// the VMALLOC => SILO_MANAGER lock ordering and to avoid deadlocking
 /// if vmalloc is called from within silo or scheduler code.
 ///
 /// Uses `current_task_clone_try()` (non-blocking) so that vmalloc called
@@ -598,7 +598,7 @@ pub struct VmallocDiagSnapshot {
     pub last_failure: Option<VmallocFailureSnapshot>,
 }
 
-/// Pre-allocate the intermediate page-table nodes (PML4 → PDPT → PD) for the
+/// Pre-allocate the intermediate page-table nodes (PML4 => PDPT => PD) for the
 /// vmalloc virtual address range in the **canonical kernel page table**.
 ///
 /// ## Why this is necessary
@@ -640,7 +640,7 @@ fn ensure_kernel_subtree_ready(token: &IrqDisabledToken) {
         // Keep the frame permanently mapped at VMALLOC_VIRT_START (arena page 0).
         //
         // We deliberately do NOT unmap here.  The goal is to keep the intermediate
-        // page-table nodes (PDPT → PD → PT) alive in the canonical kernel L4 so
+        // page-table nodes (PDPT => PD => PT) alive in the canonical kernel L4 so
         // that every address space cloned after this point inherits them.
         //
         // Previously the code did map + immediate unmap, relying on the fact that
@@ -750,7 +750,7 @@ pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, 
     }
 
     // Capture attribution before acquiring VMALLOC to respect lock ordering
-    // (VMALLOC → SILO_MANAGER) and to avoid a re-entrancy deadlock if this
+    // (VMALLOC => SILO_MANAGER) and to avoid a re-entrancy deadlock if this
     // vmalloc call originates from within scheduler or silo code.
     let mut attr = capture_attr(size, Location::caller());
 
@@ -915,7 +915,7 @@ pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) -> bool {
                 let page_start = virt_start + (i as u64 * 4096);
                 let page = Page::containing_address(VirtAddr::new(page_start));
                 // unmap_page_kernel acquires/releases KERNEL_PT_LOCK internally.
-                // Lock order: VMALLOC → KERNEL_PT_LOCK : consistent with vmalloc().
+                // Lock order: VMALLOC => KERNEL_PT_LOCK : consistent with vmalloc().
                 let _ = unmap_page_kernel(page);
             }
 

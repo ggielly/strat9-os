@@ -1,7 +1,7 @@
 //! Video drivers and framebuffer abstraction
 //!
 //! Provides:
-//! - Framebuffer abstraction (Limine or VirtIO GPU)
+//! - Framebuffer abstraction (UEFI bootloader or VirtIO GPU)
 //! - Basic 2D drawing primitives
 //! - Double buffering support
 //! - `/dev/display/` VFS scheme (display.vesa)

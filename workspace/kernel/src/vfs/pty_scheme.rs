@@ -82,7 +82,7 @@ pub struct PtyScheme {
     pairs: SpinLock<BTreeMap<u64, PtyPair>>,
     next_pty: AtomicU64,
     next_fid: AtomicU64,
-    /// Maps file_id → (pty_id, is_master).
+    /// Maps file_id => (pty_id, is_master).
     handles: SpinLock<BTreeMap<u64, (u64, bool)>>,
 }
 

@@ -6,6 +6,7 @@ sysroot/
 *.patch
 *.swp
 *.swo
+*.log
 
 /.vim
 

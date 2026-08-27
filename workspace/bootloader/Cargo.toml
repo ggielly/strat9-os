@@ -2,31 +2,31 @@
 name = "strat9-bootloader"
 version = "0.1.0"
 edition = "2021"
-autobins = false
+license = "GPL-3.0-or-later"
 authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+description = "UEFI bootloader for strat9-os"
 
-# BIOS uses lib target
-[lib]
-name = "bootloader"
-path = "src/lib.rs"
-crate-type = ["rlib"]
-
-# Binary target removed to avoid conflicts - bootloader is library-only
+[[bin]]
+name = "strat9-bootloader"
+path = "src/main.rs"
 
 [dependencies]
+uefi = { version = "0.39", features = ["alloc", "global_allocator", "logger", "panic_handler"] }
+x86_64 = "0.15"
+log = "0.4"
+
+# Re-use the ABI definitions from the kernel
 strat9-abi = { workspace = true }
-bitflags = "2.11.0"
-linked_list_allocator = "0.10.5"
-log = { workspace = true }
-spin = { workspace = true }
-
-# Serial port for debugging
-serial_16550 = { package = "uart_16550", version = "0.4.0" }
-
-[build-dependencies]
-# For building assembly stages
-nasm-rs = "0.3.2"
 
 [features]
 default = []
 serial_debug = []
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = "s"
+strip = true

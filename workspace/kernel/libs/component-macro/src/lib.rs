@@ -49,13 +49,14 @@ impl Parse for InitComponentArgs {
             stage = match ident.to_string().as_str() {
                 "bootstrap" => "Bootstrap",
                 "kthread" => "Kthread",
+                "hardware" => "Hardware",
                 "process" => "Process",
                 other => {
                     return Err(syn::Error::new(
                         ident.span(),
                         format!(
                             "unknown stage '{other}'. \
-                             Expected: bootstrap, kthread, or process"
+                             Expected: bootstrap, kthread, hardware, or process"
                         ),
                     ));
                 }
@@ -144,7 +145,7 @@ fn parse_depends_on(input: ParseStream) -> syn::Result<Vec<String>> {
 ///
 /// | Argument     | Type             | Default     | Description                                   |
 /// |--------------|------------------|-------------|-----------------------------------------------|
-/// | stage        | positional ident | `bootstrap` | `bootstrap`, `kthread`, or `process`          |
+/// | stage        | positional ident | `bootstrap` | `bootstrap`, `kthread`, `hardware`, or `process` |
 /// | `priority`   | integer          | `0`         | Lower = earlier (tiebreaker within topo level)|
 /// | `depends_on` | ident or list    | `[]`        | Functions that must complete before this one  |
 ///

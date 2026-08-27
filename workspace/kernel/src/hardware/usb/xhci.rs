@@ -899,6 +899,21 @@ impl XhciController {
                                     dev.configured = true;
                                 }
                             }
+                            // Update EP0's MaxPacketSize0 to the real value
+                            // SAFETY: slot_id is valid, endpoint context array is mapped
+                            unsafe {
+                                self.write_endpoint_context(
+                                    slot_id,
+                                    1,
+                                    self.device_slots[idx]
+                                        .as_ref()
+                                        .unwrap()
+                                        .ep_transfer_ring_phys[1],
+                                    max_packet0 as u32,
+                                    EP_TYPE_CONTROL,
+                                    0,
+                                );
+                            }
                         }
 
                         crate::hardware::usb::hid::enumerate_device(port, slot_id, &dev_desc);
@@ -1066,7 +1081,11 @@ impl XhciController {
         let mut deq;
         let cycle;
 
-        core::ptr::write_bytes(tr_ring as *mut u8, 0, 4096);
+        for i in 0..3 {
+            core::ptr::write(tr_ring.add(i), Trb {
+                d0: 0, d1: 0, d2: 0, d3: 0,
+            });
+        }
         core::ptr::write(tr_ring.add(XHCI_RING_TRBS - 1), Trb::link(tr_phys, true));
         deq = 0;
         cycle = true;
@@ -1113,8 +1132,17 @@ impl XhciController {
         self.ring_doorbell(slot_id, 1);
 
         let mut transferred = 0;
-        for _ in 0..3 {
+        let mut seen_status = false;
+        for _ in 0..16 {
             let event = self.wait_for_event()?;
+            let event_slot = ((event.d3 >> 24) & 0xFF) as u8;
+            let event_ep = ((event.d2 >> 16) & 0x1F) as u8;
+
+            // Skip events not for our control endpoint
+            if event_slot != slot_id || event_ep != 1 {
+                continue;
+            }
+
             let trb_type = trb_get_type(event.d3);
             let completion = (event.d2 >> 24) & 0xFF;
 
@@ -1135,8 +1163,12 @@ impl XhciController {
                     }
                     transferred = data_len;
                 }
+                seen_status = true;
                 break;
             }
+        }
+        if !seen_status {
+            return Err("Control transfer: status event not received");
         }
 
         self.device_slots[idx].as_mut().unwrap().ep_dequeue[1] = deq;
@@ -1169,18 +1201,20 @@ pub fn init() {
             pci_dev.device_id
         );
 
-        let irq = pci_dev.interrupt_line;
         pci_dev.enable_memory_space();
         pci_dev.enable_bus_master();
+
+        // Try MSI/MSI-X first; fall back to INTx line.
+        let (irq, vector) = crate::arch::x86_64::msi::probe_and_enable(&pci_dev, true);
 
         match unsafe { XhciController::new(pci_dev) } {
             Ok(controller) => {
                 log::info!("[xHCI] Initialized with {} ports", controller.port_count());
-                XHCI_IRQ_LINE.store(irq, Ordering::Relaxed);
+                XHCI_IRQ_LINE.store(vector, Ordering::Relaxed);
                 XHCI_CONTROLLERS
                     .lock()
                     .push(Arc::new(Mutex::new(controller)));
-                crate::arch::idt::register_xhci_irq(irq);
+                crate::arch::x86_64::idt::register_xhci_irq_vector(vector);
             }
             Err(e) => {
                 log::warn!("xHCI: Failed to initialize controller: {}", e);

@@ -1,0 +1,14 @@
+[package]
+name = "rendezlarjan"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+description = "Userspace threading library over the Strat9 /thread VFS scheme"
+
+[dependencies]
+strat9-syscall = { path = "../syscall", features = ["userspace"] }
+
+[features]
+default = []
+std = ["strat9-syscall/std"]

@@ -21,6 +21,17 @@ const CONFIG_DATA: u16 = 0xCFC;
 /// atomic w.r.t. other CPUs. Every config read/write must hold this lock.
 static PCI_IO_LOCK: SpinLock<()> = SpinLock::new(());
 
+/// A mapped ECAM region covering a range of buses.
+struct EcamRegion {
+    start_bus: u8,
+    end_bus: u8,
+    base_virt: usize,
+}
+
+/// Cached ECAM MMIO regions for extended config space access (offsets >= 0x100).
+/// Populated during `scan_ecam_devices()` when an MCFG table is present.
+static ECAM_REGIONS: SpinLock<Vec<EcamRegion>> = SpinLock::new(Vec::new());
+
 // ---------------------------------------------------------------------------
 // ECAM (PCIe Enhanced Configuration Access Mechanism) helpers
 // ---------------------------------------------------------------------------
@@ -30,29 +41,29 @@ static PCI_IO_LOCK: SpinLock<()> = SpinLock::new(());
 /// `ecam_base` is the MMIO base address of the ECAM region.
 /// `bus`, `device`, `function` identify the device; `offset` is the register.
 #[inline]
-unsafe fn ecam_read32(ecam_base: usize, bus: u8, device: u8, function: u8, offset: u8) -> u32 {
+unsafe fn ecam_read32(ecam_base: usize, bus: u8, device: u8, function: u8, offset: u16) -> u32 {
     let addr = ecam_base
         + ((bus as usize) << 20)
         + ((device as usize) << 15)
         + ((function as usize) << 12)
-        + ((offset & 0xFC) as usize);
+        + ((offset as usize) & !0x03);
     core::ptr::read_volatile(addr as *const u32)
 }
 
 /// Write a 32-bit register to an ECAM-mapped PCI config space.
 #[inline]
-unsafe fn ecam_write32(ecam_base: usize, bus: u8, device: u8, function: u8, offset: u8, val: u32) {
+unsafe fn ecam_write32(ecam_base: usize, bus: u8, device: u8, function: u8, offset: u16, val: u32) {
     let addr = ecam_base
         + ((bus as usize) << 20)
         + ((device as usize) << 15)
         + ((function as usize) << 12)
-        + ((offset & 0xFC) as usize);
+        + ((offset as usize) & !0x03);
     core::ptr::write_volatile(addr as *mut u32, val);
 }
 
 /// Read a single byte from ECAM config space.
 #[inline]
-unsafe fn ecam_read8(ecam_base: usize, bus: u8, device: u8, function: u8, offset: u8) -> u8 {
+unsafe fn ecam_read8(ecam_base: usize, bus: u8, device: u8, function: u8, offset: u16) -> u8 {
     let dword = ecam_read32(ecam_base, bus, device, function, offset & !0x03);
     ((dword >> ((offset & 0x3) * 8)) & 0xFF) as u8
 }
@@ -147,6 +158,8 @@ pub mod vendor {
     pub const QEMU: u16 = 0x1234;
     pub const INTEL: u16 = 0x8086;
     pub const AMD: u16 = 0x1022;
+    /// ATI/AMD display controller vendor ID (GPUs, APUs display)
+    pub const AMD_DISPLAY: u16 = 0x1002;
 }
 
 /// PCI Device IDs (VirtIO legacy)
@@ -407,7 +420,10 @@ pub fn walk_ext_capabilities(dev: &PciDevice, cap_ptr: u16) -> Vec<(u16, u16)> {
     let mut offset = cap_ptr;
 
     while offset >= 0x100 && offset < 0xFFF {
-        let dword = dev.read_config_u32((offset & 0xFF) as u8);
+        let dword = match dev.read_config_u32_ext(offset) {
+            Some(v) => v,
+            None => break,
+        };
         let cap_id = (dword & 0xFFFF) as u16;
         let next_ptr = ((dword >> 20) & 0xFFC) as u16; // bits 31:20, aligned to 4
 
@@ -427,14 +443,15 @@ pub fn walk_ext_capabilities(dev: &PciDevice, cap_ptr: u16) -> Vec<(u16, u16)> {
 }
 
 /// Find the PCIe extended capability offset for a given capability ID.
+///
+/// Extended capabilities are always at offsets >= 0x100 in PCIe config space.
+/// Requires ECAM support (MCFG ACPI table) to read.
 pub fn find_ext_capability(dev: &PciDevice, cap_id: u16) -> Option<u16> {
-    // Read PCIe capabilities pointer from header type 0
-    let ext_cap_ptr = dev.read_config_u8(config::CAPABILITIES_PTR) as u16;
-    if ext_cap_ptr < 0x100 {
-        return None; // No PCIe extended capabilities
+    if ECAM_REGIONS.lock().is_empty() {
+        return None; // No ECAM available, cannot read extended config space
     }
 
-    for (found_id, offset) in walk_ext_capabilities(dev, ext_cap_ptr) {
+    for (found_id, offset) in walk_ext_capabilities(dev, 0x100) {
         if found_id == cap_id {
             return Some(offset);
         }
@@ -447,12 +464,11 @@ pub fn find_ext_capability(dev: &PciDevice, cap_id: u16) -> Option<u16> {
 /// Returns `None` if the device doesn't have SR-IOV capability.
 pub fn read_sriov_info(dev: &PciDevice) -> Option<SriovInfo> {
     let cap_offset = find_ext_capability(dev, ext_cap_id::SRIOV)?;
-    let control = dev.read_config_u16(((cap_offset + sriov_cap::CONTROL as u16) & 0xFF) as u8);
-    let status = dev.read_config_u16(((cap_offset + sriov_cap::STATUS as u16) & 0xFF) as u8);
-    let initial_vf =
-        dev.read_config_u16(((cap_offset + sriov_cap::INITIAL_VF as u16) & 0xFF) as u8);
-    let total_vf = dev.read_config_u16(((cap_offset + sriov_cap::TOTAL_VF as u16) & 0xFF) as u8);
-    let num_vf = dev.read_config_u16(((cap_offset + sriov_cap::NUM_VF as u16) & 0xFF) as u8);
+    let control = dev.read_config_u32_ext(cap_offset + sriov_cap::CONTROL as u16)? as u16;
+    let status = dev.read_config_u32_ext(cap_offset + sriov_cap::STATUS as u16)? as u16;
+    let initial_vf = dev.read_config_u32_ext(cap_offset + sriov_cap::INITIAL_VF as u16)? as u16;
+    let total_vf = dev.read_config_u32_ext(cap_offset + sriov_cap::TOTAL_VF as u16)? as u16;
+    let num_vf = dev.read_config_u32_ext(cap_offset + sriov_cap::NUM_VF as u16)? as u16;
 
     Some(SriovInfo {
         cap_offset,
@@ -487,15 +503,11 @@ pub struct SriovInfo {
 /// Read AER (Advanced Error Reporting) capability information.
 pub fn read_aer_info(dev: &PciDevice) -> Option<AerInfo> {
     let cap_offset = find_ext_capability(dev, ext_cap_id::AER)?;
-    let uncerr_status =
-        dev.read_config_u32(((cap_offset + aer_cap::UNCERR_STATUS as u16) & 0xFF) as u8);
-    let uncerr_mask =
-        dev.read_config_u32(((cap_offset + aer_cap::UNCERR_MASK as u16) & 0xFF) as u8);
-    let corerr_status =
-        dev.read_config_u32(((cap_offset + aer_cap::CORERR_STATUS as u16) & 0xFF) as u8);
-    let corerr_mask =
-        dev.read_config_u32(((cap_offset + aer_cap::CORERR_MASK as u16) & 0xFF) as u8);
-    let err_cap = dev.read_config_u32(((cap_offset + aer_cap::ERR_CAP as u16) & 0xFF) as u8);
+    let uncerr_status = dev.read_config_u32_ext(cap_offset + aer_cap::UNCERR_STATUS as u16)?;
+    let uncerr_mask = dev.read_config_u32_ext(cap_offset + aer_cap::UNCERR_MASK as u16)?;
+    let corerr_status = dev.read_config_u32_ext(cap_offset + aer_cap::CORERR_STATUS as u16)?;
+    let corerr_mask = dev.read_config_u32_ext(cap_offset + aer_cap::CORERR_MASK as u16)?;
+    let err_cap = dev.read_config_u32_ext(cap_offset + aer_cap::ERR_CAP as u16)?;
 
     Some(AerInfo {
         cap_offset,
@@ -711,6 +723,29 @@ impl PciDevice {
         }
     }
 
+    /// Read a 32-bit register from extended config space (offset >= 0x100).
+    ///
+    /// Uses ECAM MMIO when available. Returns `None` if ECAM is not mapped.
+    pub fn read_config_u32_ext(&self, offset: u16) -> Option<u32> {
+        let regions = ECAM_REGIONS.lock();
+        let ecam = regions.iter().find_map(|r| {
+            if self.address.bus >= r.start_bus && self.address.bus <= r.end_bus {
+                Some(r.base_virt)
+            } else {
+                None
+            }
+        })?;
+        Some(unsafe {
+            ecam_read32(
+                ecam,
+                self.address.bus,
+                self.address.device,
+                self.address.function,
+                offset,
+            )
+        })
+    }
+
     /// Write to a configuration register (8-bit)
     pub fn write_config_u8(&self, offset: u8, value: u8) {
         let addr = self.address.config_address(offset & !0x03);
@@ -832,11 +867,11 @@ impl PciDevice {
 // Insipired by asterinas OS's PCI scanner:
 //
 //  1. For each (bus, device), probe function 0 first.
-//     If vendor == 0xFFFF → skip all 8 functions (early exit).
+//     If vendor == 0xFFFF => skip all 8 functions (early exit).
 //
 //  2. Read the Header Type from the function-0 dword at offset 0x0C.
 //     Bit 7 (multi-function flag) tells whether functions 1..7 can exist.
-//     If bit 7 is clear → skip functions 1..7 entirely.
+//     If bit 7 is clear => skip functions 1..7 entirely.
 //
 //  3. If header_type & 0x7F == 0x01 (PCI-to-PCI bridge), read the
 //     secondary bus number and enqueue it.  The `seen_buses` bitmap
@@ -920,7 +955,7 @@ impl Iterator for PciScanner {
             // --- Function 0: fast vendor check + early exit ---
             if current_function == 0 {
                 // Single dword read: vendor+device at offset 0x00.
-                // If 0xFFFF → no device at this slot, skip all 8 functions.
+                // If 0xFFFF => no device at this slot, skip all 8 functions.
                 let word00 = raw_config_read(bus, self.device, 0, 0x00);
                 let vendor_id = (word00 & 0xFFFF) as u16;
                 if is_absent_vendor(vendor_id) {
@@ -1199,9 +1234,16 @@ fn scan_ecam_devices() -> Vec<PciDevice> {
 
         // Ensure the ECAM region is identity-mapped
         let region_size =
-            ((end_bus as usize - start_bus as usize + 1) * 256 * 32 * 8 * 4096) as u64;
+            ((end_bus as usize - start_bus as usize + 1) as u64) * (32 * 8 * 4096);
         memory::paging::ensure_identity_map_range(ecam_phys, region_size);
         let ecam_virt = crate::memory::phys_to_virt(ecam_phys) as usize;
+
+        // Cache ECAM region for extended config space reads
+        ECAM_REGIONS.lock().push(EcamRegion {
+            start_bus,
+            end_bus,
+            base_virt: ecam_virt,
+        });
 
         log::info!(
             "[PCI-ECAM] Region seg={} ecam={:#x} buses={}..{} virt={:#x}",

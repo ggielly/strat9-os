@@ -249,7 +249,7 @@ pub unsafe extern "C" fn strat9_syscall_dispatcher(
         LNR_read => raw3(SYS_READ, a1u, a2u, a3u),
         LNR_write => raw3(SYS_WRITE, a1u, a2u, a3u),
         LNR_open => {
-            // Linux open(path, flags, mode) → Strat9 open(path, flags, mode)
+            // Linux open(path, flags, mode) => Strat9 open(path, flags, mode)
             // Convert POSIX O_* flags to Strat9 OpenFlags
             let sf = posix_oflags_to_strat9(a2 as u32);
             raw3(SYS_OPEN, a1u, sf.bits() as usize, a3u)
@@ -346,7 +346,7 @@ pub unsafe extern "C" fn strat9_syscall_dispatcher(
 
         // === Threading =====================================================
         LNR_clone => {
-            // Linux clone(flags, stack, ptid, tls, ctid, func) → Strat9 fork/thread_create
+            // Linux clone(flags, stack, ptid, tls, ctid, func) => Strat9 fork/thread_create
             //
             // Called via musl __syscallN(SYS_clone, ...). The C ABI order is:
             //   a1=flags, a2=stack, a3=ptid, a4=tls, a5=ctid, a6=func

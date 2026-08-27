@@ -160,7 +160,7 @@ impl MvebuMbus {
             }
         }
 
-        let size_field = ((size / 0x10000) - 1);
+        let size_field = size / 0x10000 - 1;
         let ctrl = WIN_CTRL_ENABLE
             | ((target as u32) << WIN_CTRL_TGT_SHIFT) & WIN_CTRL_TGT_MASK
             | ((attr as u32) << WIN_CTRL_ATTR_SHIFT) & WIN_CTRL_ATTR_MASK

@@ -1,5 +1,5 @@
 #!/bin/bash
-# discover-components.sh — Auto-discover workspace binaries and update Makefile.toml + image script.
+# discover-components.sh : Auto-discover workspace binaries and update Makefile.toml + image script.
 #
 # Scans workspace/components/ and workspace/components/netutils/ for crates
 # with binary targets, then:

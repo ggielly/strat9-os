@@ -694,7 +694,7 @@ fn stress_vmalloc_frag() -> StressOutcome {
 
     // Phase 4: verify fragmentation is visible.
     // With `half` regions freed in random order and `allocated - half` still
-    // live, the free space is split into non-contiguous holes →
+    // live, the free space is split into non-contiguous holes =>
     // free_extent_count must exceed the pre-test baseline.
     let mid = match crate::memory::vmalloc::diag_snapshot() {
         Some(s) => s,

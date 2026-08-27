@@ -50,7 +50,7 @@ This project is in active development and not production-ready. The ABI is still
     - Two-stage allocator: buddy allocator for early boot and a dedicated kernel allocator (CoW support, heap/kmalloc/slab)
     - Virtual memory: 4-level paging, HHDM, CR3 switching, page-fault handling (COW, mmap), user/kernel mappings
     - Preemptive multitasking with APIC/x2APIC and per-CPU timers
-    - Limine boot path and bootable ISO
+    - UEFI boot path and bootable ISO
     - Scheduler with priority/round-robin and CPU hotplug support
     - IPC: 3-level transport manager (TypeSafe / LockFree ring / MMU), synchronous ports, capability manager, VFS scheme router
     - ELF loader and Ring-3 execution (userspace silos)
@@ -143,29 +143,19 @@ graph TD
 # Installs exactly the pinned version from rust-toolchain.toml:
 rustup toolchain install
 cargo --version   # run once inside the repo so rustup activates it
-```
-
-To upgrade the pin, bump the date in `rust-toolchain.toml`, then verify the
-whole workspace still builds before committing:
-
-```bash
-cargo +<new-date> check -p strat9-kernel --target x86_64-unknown-none
-cargo +<new-date> check -p strat9-bus-drivers --target x86_64-unknown-none
+rustup component add rust-src llvm-tools-preview
+rustup target add x86_64-unknown-none x86_64-unknown-uefi
 ```
 
 #### Compile the kernel and run it
 
+**UEFI (recommended):**
 ```bash
-cargo make kernel
-cargo make limine-image
-cargo make run-gui-smp or cargo make run-gui (for single CPU test)
+cargo make bootloader-uefi    # Build UEFI bootloader
+cargo make uefi-image         # Create bootable image
+cargo make run-uefi           # Run with OVMF
 ```
 
-or
-
-```bash
-cargo make
-```
 
 ## Hardware support
 
@@ -181,7 +171,8 @@ See [HARDWARE.md](HARDWARE.md) for a complete list of supported drivers, tested 
 
 - `workspace/kernel/` : the strat9-os kernel : Bedrock
 - `workspace/components/` : userspace components
-- `workspace/bootloader/` : custom multi-stage BIOS bootloader (legacy, kept for reference). The active boot path is the external [Limine](https://github.com/limine-bootloader/limine) bootloader, configured by `limine.conf`
+- `workspace/bootloader/` : UEFI bootloader (primary) + archived BIOS bootloader
+- `workspace/abi/` : shared ABI definitions (KernelArgs v2)
 - `doc/` : specifications and design docs
 - `tools/` : build and helper scripts
 

@@ -39,13 +39,15 @@ pub use component_macro::{init_component, parse_components_toml};
 ///
 /// - `Bootstrap` : Early kernel initialization, before SMP.
 /// - `Kthread`   : After SMP enabled, in kernel-thread context.
+/// - `Hardware`  : After scheduler started, device/driver probing.
 /// - `Process`   : After first user process created.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum InitStage {
     Bootstrap = 0,
     Kthread = 1,
-    Process = 2,
+    Hardware = 2,
+    Process = 3,
 }
 
 // ========== Error ==================================================
@@ -161,7 +163,7 @@ impl PartialOrd for ComponentInfo {
 
 // ========== Linker section symbols ========================================
 
-// SAFETY: symbols defined by linker-limine.ld; bracket the `.component_entries`
+// SAFETY: symbols defined by the kernel linker script; bracket the `.component_entries`
 // section.  All objects between them are `ComponentEntry` structs placed by the
 // `#[init_component]` macro.
 #[allow(improper_ctypes)]
@@ -178,7 +180,7 @@ extern "C" {
 ///
 /// 1. Collect every `ComponentEntry` in `.component_entries` that matches the
 ///    requested stage.
-/// 2. Build a directed graph from `depends_on` edges (A→B: A must run first).
+/// 2. Build a directed graph from `depends_on` edges (A=>B: A must run first).
 /// 3. Topological sort with `priority` as the tiebreaker when multiple
 ///    components become ready at the same time (lower number = earlier).
 /// 4. Execute each initializer in the computed order.
@@ -216,7 +218,7 @@ pub fn init_all(stage: InitStage) -> Result<(), ComponentInitError> {
     //  Build dependency graph ==========================================
     let n = components.len();
 
-    // name → index in `components`
+    // name => index in `components`
     let name_to_idx: BTreeMap<&str, usize> = components
         .iter()
         .enumerate()

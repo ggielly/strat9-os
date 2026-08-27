@@ -125,6 +125,17 @@ pub struct ExtendedState {
     pub xcr0_mask: u64,
 }
 
+// XSAVE/XRSTOR #GP on non-64-byte-aligned operands (SDM Vol. 2A, "XSAVE"):
+// the save area MUST stay 64-byte aligned for its whole lifetime. These
+// compile-time assertions pin the layout contract:
+//  - the struct itself is 64B-aligned (`repr(align)`) and `data` is at
+//    offset 0, so any &self.data / self-as-*mut u8 inherits the alignment;
+//  - MAX_XSAVE_SIZE keeps the total struct size a multiple of 64 so arrays
+//    of ExtendedState never break per-element alignment.
+const _: () = assert!(core::mem::align_of::<ExtendedState>() == 64);
+const _: () = assert!(core::mem::offset_of!(ExtendedState, data) == 0);
+const _: () = assert!(core::mem::size_of::<ExtendedState>() % 64 == 0);
+
 impl core::fmt::Debug for ExtendedState {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ExtendedState")
@@ -140,39 +151,27 @@ impl ExtendedState {
     pub const MAX_XSAVE_SIZE: usize = 2688;
 
     /// Create a new default state using the host's maximum capabilities.
+    ///
+    /// Uses the frozen boot-time XSAVE profile (see `cpuid::boot_xsave_profile`)
+    /// so task creation never walks CPUID leaf 0x0D sub-leaves.
     pub fn new() -> Self {
-        crate::serial_println!("[trace][fpu] ExtendedState::new enter");
-        let (uses_xsave, size, default_xcr0) = if crate::arch::cpuid::host_uses_xsave() {
-            crate::serial_println!("[trace][fpu] ExtendedState::new host_uses_xsave=true");
-            let xcr0 = crate::arch::cpuid::host_default_xcr0();
-            crate::serial_println!(
-                "[trace][fpu] ExtendedState::new host_default_xcr0={:#x}",
-                xcr0
-            );
-            let sz =
-                crate::arch::cpuid::xsave_size_for_xcr0(xcr0).min(Self::MAX_XSAVE_SIZE);
-            crate::serial_println!("[trace][fpu] ExtendedState::new xsave_size={}", sz);
-            (true, sz, xcr0)
+        let profile = crate::arch::x86_64::cpuid::boot_xsave_profile();
+        let uses_xsave = profile.xcr0_mask != 0 && crate::arch::x86_64::cpuid::host_uses_xsave();
+        let size = if uses_xsave {
+            // Profile area size is already 64B-rounded and capped by MAX.
+            profile.area_size.min(Self::MAX_XSAVE_SIZE)
         } else {
-            crate::serial_println!("[trace][fpu] ExtendedState::new host_uses_xsave=false");
-            (false, Self::FXSAVE_SIZE, 0x3)
+            Self::FXSAVE_SIZE
         };
+        let default_xcr0 = if uses_xsave { profile.xcr0_mask } else { 0x3 };
 
-        crate::serial_println!(
-            "[trace][fpu] ExtendedState::new build state uses_xsave={} size={} xcr0={:#x}",
-            uses_xsave,
-            size,
-            default_xcr0
-        );
         let mut state = Self {
             data: [0u8; Self::MAX_XSAVE_SIZE],
             size,
             uses_xsave,
             xcr0_mask: default_xcr0,
         };
-        crate::serial_println!("[trace][fpu] ExtendedState::new state allocated");
         state.set_defaults();
-        crate::serial_println!("[trace][fpu] ExtendedState::new defaults set");
         state
     }
 
@@ -268,6 +267,11 @@ pub struct Task {
     pub stack_canary: AtomicU64,
     /// User address of the canary slot (stack_top - 8); 0 = none.
     pub stack_canary_addr: AtomicU64,
+    /// Kernel-owned user thread stack: `(vaddr_base, size_bytes)` in the
+    /// process address space. Set by `/thread/create`; the kernel reclaims
+    /// (munmaps) it when the task dies. `None` for tasks created by other
+    /// paths (fork, exec, raw SYS_THREAD_CREATE).
+    pub kernel_stack_user: SyncUnsafeCell<Option<(u64, u64)>>,
     /// Task name for debugging purposes
     pub name: &'static str,
     /// Capabilities granted to this task
@@ -963,6 +967,7 @@ impl Task {
             user_stack: None,
             stack_canary: AtomicU64::new(0),
             stack_canary_addr: AtomicU64::new(0),
+            kernel_stack_user: SyncUnsafeCell::new(None),
             name,
             process,
             pending_signals: super::signal::SignalSet::new(),
@@ -1038,6 +1043,7 @@ impl Task {
             user_stack: None,
             stack_canary: AtomicU64::new(0),
             stack_canary_addr: AtomicU64::new(0),
+            kernel_stack_user: SyncUnsafeCell::new(None),
             name,
             process: Arc::new(crate::process::process::Process::new(pid, address_space)),
             pending_signals: super::signal::SignalSet::new(),
@@ -1085,6 +1091,21 @@ impl Task {
     /// Returns true if this is a kernel task (shares the kernel address space).
     pub fn is_kernel(&self) -> bool {
         self.process.address_space_arc().is_kernel()
+    }
+
+    /// Record the kernel-owned user stack mapping for this task.
+    ///
+    /// Called by `/thread/create` between task construction and scheduler
+    /// registration, so the mapping is visible before the thread can run.
+    pub fn set_kernel_stack_user(&self, base: u64, size: u64) {
+        unsafe {
+            *self.kernel_stack_user.get() = Some((base, size));
+        }
+    }
+
+    /// Take the kernel-owned user stack mapping (idempotent reclamation hook).
+    pub fn take_kernel_stack_user(&self) -> Option<(u64, u64)> {
+        unsafe { (*self.kernel_stack_user.get()).take() }
     }
 
     /// Allocate POSIX identifiers for a new process leader.
@@ -1218,7 +1239,19 @@ impl Task {
 /// # Safety
 /// Caller must ensure all pointers in `target` are valid and interrupts are disabled.
 pub(super) unsafe fn do_switch_context(target: &super::scheduler::SwitchTarget) {
-    if crate::arch::cpuid::host_uses_xsave() {
+    // XSAVE/XRSTOR #GP on non-64B-aligned operands; FXSAVE/FXRSTOR need 16B.
+    // The naked asm below cannot check this — enforce at the call boundary.
+    debug_assert_eq!(
+        (target.old_fpu_ptr as usize) % 64,
+        0,
+        "old FPU save area misaligned (XSAVE would #GP)"
+    );
+    debug_assert_eq!(
+        (target.new_fpu_ptr as usize) % 64,
+        0,
+        "new FPU save area misaligned (XRSTOR would #GP)"
+    );
+    if crate::arch::x86_64::cpuid::host_uses_xsave() {
         let old_xcr0 = normalized_xcr0(target.old_xcr0);
         let new_xcr0 = normalized_xcr0(target.new_xcr0);
         switch_context_xsave(
@@ -1277,7 +1310,12 @@ pub(super) unsafe fn do_restore_first_task(
         canary
     );
 
-    if crate::arch::cpuid::host_uses_xsave() {
+    if crate::arch::x86_64::cpuid::host_uses_xsave() {
+        debug_assert_eq!(
+            (fpu_ptr as usize) % 64,
+            0,
+            "first-task FPU save area misaligned (XRSTOR would #GP)"
+        );
         restore_first_task_xsave(frame_ptr, fpu_ptr, normalized_xcr0(xcr0));
     } else {
         let _ = xcr0;

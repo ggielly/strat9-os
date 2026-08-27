@@ -11,6 +11,7 @@
 #![allow(dead_code)]
 
 use crate::{
+    arch::x86_64::boot_timestamp,
     hardware::pci_client::{self as pci, Bar, ProbeCriteria},
     memory::{allocate_zeroed_frame, paging, phys_to_virt},
     sync::waitqueue::WaitQueue,
@@ -39,16 +40,24 @@ fn rdtsc() -> u64 {
     unsafe { crate::arch::rdtsc() }
 }
 
-/// Convert TSC ticks to approximate milliseconds (assumes ~3GHz TSC).
-/// For exact calibration, use the kernel's TSC frequency if available.
+/// Return the calibrated TSC frequency in KHz, or a fallback (3 GHz).
+fn tsc_khz() -> u64 {
+    let khz = boot_timestamp::tsc_khz();
+    if khz > 0 {
+        khz
+    } else {
+        3_000_000
+    }
+}
+
+/// Convert TSC ticks to approximate milliseconds using calibrated frequency.
 fn tsc_to_ms(ticks: u64) -> u64 {
-    // Rough: 3GHz TSC → 3_000_000 ticks per ms
-    ticks / 3_000_000
+    ticks / tsc_khz()
 }
 
 /// Get a TSC deadline for `ms` milliseconds from now.
 fn tsc_deadline_ms(ms: u32) -> u64 {
-    rdtsc().wrapping_add((ms as u64) * 3_000_000)
+    rdtsc().wrapping_add((ms as u64) * tsc_khz())
 }
 
 /// Check if a TSC deadline has expired.
@@ -691,7 +700,7 @@ impl NvmeController {
                 data.push(ptr::read_volatile(virt.add(i)));
             }
         }
-        // frame dropped here → physical memory freed
+        // frame dropped here => physical memory freed
         Ok(data)
     }
 
@@ -1143,9 +1152,11 @@ pub fn init() {
             pci_dev.device_id
         );
 
-        let irq = pci_dev.interrupt_line;
         pci_dev.enable_bus_master();
         pci_dev.enable_memory_space();
+
+        // Try MSI/MSI-X first; fall back to INTx line.
+        let (irq, vector) = crate::arch::x86_64::msi::probe_and_enable(&pci_dev, true);
 
         let bar = match pci_dev.read_bar(0) {
             Some(Bar::Memory64 { addr, .. }) => addr,
@@ -1162,12 +1173,17 @@ pub fn init() {
         match unsafe { NvmeController::new(registers, name.clone()) } {
             Ok(mut controller) => {
                 controller.set_irq_line(irq);
-                NVME_IRQ_LINE.store(irq, Ordering::Relaxed);
-                log::info!("NVMe: {} initialized, IRQ={}", name, irq);
+                NVME_IRQ_LINE.store(vector, Ordering::Relaxed);
+                log::info!(
+                    "NVMe: {} initialized, IRQ={} vector={:#x}",
+                    name,
+                    irq,
+                    vector
+                );
                 NVME_CONTROLLERS
                     .lock()
                     .push(Arc::new(Mutex::new(controller)));
-                crate::arch::idt::register_nvme_irq(irq);
+                crate::arch::x86_64::idt::register_nvme_irq_vector(vector);
             }
             Err(e) => {
                 log::warn!("NVMe: Failed to initialize controller: {:?}", e);

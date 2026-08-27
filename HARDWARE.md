@@ -1,16 +1,16 @@
 # Hardware Support
 
-> Last updated: 2026-05-19
+> Last updated: 2026-07-20
 
 ## Tested platforms
 
 Strat9-OS boots and runs successfully on:
 
-| Platform | Type | Notes |
-|---|---|---|
-| **QEMU** | Emulator | Primary dev target, all features validated |
-| **VMware Workstation** | Hypervisor | Production-like virtualisation |
-| **Lenovo ThinkPad X13** | Laptop (x86_64) | Real hardware validation |
+| Platform | Type | Boot | Notes |
+|---|---|---|---|
+| **QEMU** | Emulator | UEFI (OVMF) | Primary dev target, all features validated |
+| **VMware Workstation** | Hypervisor | UEFI | Production-like virtualisation |
+| **Lenovo ThinkPad X13** | Laptop (x86_64) | UEFI | Real hardware validation |
 
 ---
 
@@ -66,7 +66,7 @@ These drivers are compiled into the kernel and have direct hardware access via M
 
 | Driver | Hardware | File | Status |
 |---|---|---|---|
-| Framebuffer | Limine boot protocol | `kernel/src/hardware/video/framebuffer.rs` | ✅ Active |
+| Framebuffer | UEFI bootloader boot protocol | `kernel/src/hardware/video/framebuffer.rs` | ✅ Active |
 | VirtIO GPU | VirtIO GPU Device | `kernel/src/hardware/virtio/gpu.rs` | ✅ Active |
 
 ### VirtIO core

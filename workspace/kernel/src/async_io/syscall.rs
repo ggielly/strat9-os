@@ -30,7 +30,7 @@ fn require_owned_ring_by_id(ring_id: u64) -> Result<Arc<super::ring::Ring>, Sysc
     Ok(ring)
 }
 
-/// SYS_ASYNC_SETUP(entries: u32, flags: u32) → ring_id: u64
+/// SYS_ASYNC_SETUP(entries: u32, flags: u32) => ring_id: u64
 pub fn sys_async_setup(entries: u64, _flags: u64) -> Result<u64, SyscallError> {
     let Some(task) = crate::process::current_task_clone() else {
         return Err(SyscallError::PermissionDenied);
@@ -79,7 +79,7 @@ pub fn sys_async_map(ring_id: u64, out_ptr: u64) -> Result<u64, SyscallError> {
     Ok(mapping.sq_size.saturating_add(mapping.cq_size))
 }
 
-/// SYS_ASYNC_ENTER(ring_id: u64, to_submit: u32, min_complete: u32, flags: u32) → completed: u64
+/// SYS_ASYNC_ENTER(ring_id: u64, to_submit: u32, min_complete: u32, flags: u32) => completed: u64
 pub fn sys_async_enter(
     ring_id: u64,
     to_submit: u64,
@@ -124,14 +124,14 @@ pub fn sys_async_enter(
     Ok(completed as u64)
 }
 
-/// SYS_ASYNC_CANCEL(ring_id: u64, user_data: u64, flags: u32) → result: u64
+/// SYS_ASYNC_CANCEL(ring_id: u64, user_data: u64, flags: u32) => result: u64
 pub fn sys_async_cancel(ring_id: u64, _user_data: u64, _flags: u64) -> Result<u64, SyscallError> {
     let _ = require_owned_ring_by_id(ring_id)?;
 
     Err(SyscallError::NotImplemented)
 }
 
-/// SYS_ASYNC_DESTROY(ring_id: u64, flags: u32) → result: u64
+/// SYS_ASYNC_DESTROY(ring_id: u64, flags: u32) => result: u64
 pub fn sys_async_destroy(ring_id: u64, _flags: u64) -> Result<u64, SyscallError> {
     let _ = require_owned_ring_by_id(ring_id)?;
 

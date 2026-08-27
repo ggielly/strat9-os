@@ -244,6 +244,7 @@ pub const DEV_IPCFS: u64 = 7;
 pub const DEV_NETFS: u64 = 8;
 pub const DEV_CHAR_FS: u64 = 9;
 pub const DEV_INPUT: u64 = 10;
+pub const DEV_THREADFS: u64 = 11;
 
 /// Finalize pseudo-filesystem stats with a stable device identity and
 /// synthetic timestamps.
@@ -632,9 +633,9 @@ impl IpcScheme {
 /// SAFETY: All stored pointers are kernel-static (`'static`) and accessed
 /// only through the scheme trait methods which are `&self` (shared reference).
 pub struct KernelScheme {
-    /// Files indexed by path → (id, base, len).
+    /// Files indexed by path => (id, base, len).
     files: SpinLock<BTreeMap<String, (u64, *const u8, usize)>>,
-    /// Reverse lookup: file_id → path name.
+    /// Reverse lookup: file_id => path name.
     by_id: SpinLock<BTreeMap<u64, String>>,
 }
 

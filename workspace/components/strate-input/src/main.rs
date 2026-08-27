@@ -5,8 +5,8 @@
 //! tables (AZERTY/QWERTY). Distributes processed events to clients.
 //!
 //! Architecture:
-//!   Hardware → PS/2 IRQ → kernel ring buffer → /dev/input/kbd → THIS SERVER
-//!   → layout translation → processed chars → clients (console, shell, apps)
+//!   Hardware => PS/2 IRQ => kernel ring buffer => /dev/input/kbd => THIS SERVER
+//!   => layout translation => processed chars => clients (console, shell, apps)
 //!
 //! This moves keyboard layout logic out of the kernel, following the Haiku
 //! Input Server / Fuchsia Input Reader pattern.
