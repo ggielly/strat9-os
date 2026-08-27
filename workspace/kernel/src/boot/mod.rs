@@ -47,38 +47,22 @@ pub mod config;
 /// Simple TOML parser for kernel boot configuration
 pub mod toml;
 
-/// Boot-module lookup used by shell commands. On x86_64 it dispatches to the
-/// Limine backend; on other architectures it is always empty.
+/// Boot-module lookup used by shell commands. With U-Boot the Limine backend
+/// is gone; modules load from the FAT32 boot partition (Phase 4), so these
+/// are empty stubs until that lands.
 pub mod limine_shim {
-    #[cfg(target_arch = "x86_64")]
-    pub use super::limine::{
-        test_exec_helper_module, test_exec_module, test_mem_module,
-        test_syscalls_module,
-    };
-
-    #[cfg(target_arch = "x86_64")]
-    pub fn kernel_elf_bytes() -> Option<&'static [u8]> {
-        crate::boot::limine::kernel_elf_bytes()
-    }
-
-    /// Non-x86 boot-module stubs (always empty).
-    #[cfg(not(target_arch = "x86_64"))]
     pub fn kernel_elf_bytes() -> Option<&'static [u8]> {
         None
     }
-    #[cfg(not(target_arch = "x86_64"))]
     pub fn test_exec_module() -> Option<(u64, u64)> {
         None
     }
-    #[cfg(not(target_arch = "x86_64"))]
     pub fn test_exec_helper_module() -> Option<(u64, u64)> {
         None
     }
-    #[cfg(not(target_arch = "x86_64"))]
     pub fn test_syscalls_module() -> Option<(u64, u64)> {
         None
     }
-    #[cfg(not(target_arch = "x86_64"))]
     pub fn test_mem_module() -> Option<(u64, u64)> {
         None
     }

@@ -33,6 +33,8 @@ num_enum = { version = "0.7", default-features = false }
 thiserror = { version = "2", default-features = false }
 static_assertions = "1.1"
 xmas-elf = { version = "0.10", default-features = false }
+x86_64 = "0.15"
+raw-cpuid = "11.0.1"
 uart_16550 = "0.4"
 fdt = "0.1"
 strat9-abi = { workspace = true }
