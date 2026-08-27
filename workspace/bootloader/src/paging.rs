@@ -12,13 +12,14 @@ static mut NEXT_FRAME: u64 = 0;
 
 unsafe fn alloc_frame() -> u64 {
     let addr = unsafe { NEXT_FRAME };
-    unsafe { NEXT_FRAME += PAGE_SIZE; }
+    unsafe {
+        NEXT_FRAME += PAGE_SIZE;
+    }
     unsafe {
         core::ptr::write_bytes(addr as *mut u8, 0, PAGE_SIZE as usize);
     }
     addr
 }
-
 
 pub unsafe fn create_page_tables(
     kernel_phys: u64,
@@ -31,7 +32,9 @@ pub unsafe fn create_page_tables(
 ) -> u64 {
     // Start allocator after kernel + large safety margin
     // Need ~8 page tables per 2MB of kernel, kernel is ~13MB = ~52 page tables = ~208KB
-    unsafe { NEXT_FRAME = (kernel_phys_end + 0x40_0000) & !0xFFF; } // +4MB margin
+    unsafe {
+        NEXT_FRAME = (kernel_phys_end + 0x40_0000) & !0xFFF;
+    } // +4MB margin
 
     let pml4 = alloc_frame() as *mut u64;
 
@@ -90,7 +93,9 @@ pub unsafe fn create_page_tables(
             let pages = (_framebuffer_size + PAGE_SIZE - 1) / PAGE_SIZE;
 
             for _page in 0..pages {
-                if pd_idx >= 512 { break; }
+                if pd_idx >= 512 {
+                    break;
+                }
                 let pt = alloc_frame() as *mut u64;
                 let pt_phys = _framebuffer_phys + mapped;
                 // S1: Write-Combining via PTE PAT bit -> IA32_PAT entry 4.
@@ -117,7 +122,9 @@ pub unsafe fn create_page_tables(
             let mut pt_idx: usize = 0;
 
             for page in 0..pages {
-                if pt_idx >= 512 { break; }
+                if pt_idx >= 512 {
+                    break;
+                }
                 let pt = alloc_frame() as *mut u64;
                 let pt_phys = _env_phys + page * PAGE_SIZE;
                 *pt.add(0) = pt_phys | PRESENT | WRITABLE;

@@ -15,9 +15,7 @@
 #![allow(dead_code)]
 
 use crate::{
-    framebuffer::{
-        CanvasBuffer, DirtyRectSet, FramebufferOps, MAX_DIRTY_RECTS, PRESENT_MIN_TICKS,
-    },
+    framebuffer::{CanvasBuffer, DirtyRectSet, FramebufferOps, MAX_DIRTY_RECTS, PRESENT_MIN_TICKS},
     hardware::virtio::gpu,
     memory::{self, phys_to_virt},
 };
@@ -282,7 +280,10 @@ impl Framebuffer {
                 true
             }
             Err(e) => {
-                log::warn!("[FB] external backing attach failed ({}): using bounce copy", e);
+                log::warn!(
+                    "[FB] external backing attach failed ({}): using bounce copy",
+                    e
+                );
                 false
             }
         };
@@ -333,7 +334,11 @@ impl Framebuffer {
             info.height,
             info.format.bits_per_pixel,
             info.stride,
-            if zero_copy { "zero-copy backing" } else { "bounce copy" }
+            if zero_copy {
+                "zero-copy backing"
+            } else {
+                "bounce copy"
+            }
         );
 
         Ok(())
@@ -508,8 +513,13 @@ impl Framebuffer {
             | ((g as u32) << fb.info.format.green_shift)
             | ((b as u32) << fb.info.format.blue_shift);
 
-        fb.canvas
-            .fill_rect(x as usize, y as usize, width as usize, height as usize, pixel);
+        fb.canvas.fill_rect(
+            x as usize,
+            y as usize,
+            width as usize,
+            height as usize,
+            pixel,
+        );
         fb.request_present();
     }
 
@@ -594,7 +604,12 @@ impl Framebuffer {
     /// Swap buffers (for double buffering)
     pub fn swap_buffers() {
         enum VirtioPresent {
-            ZeroCopy { x: u32, y: u32, w: u32, h: u32 },
+            ZeroCopy {
+                x: u32,
+                y: u32,
+                w: u32,
+                h: u32,
+            },
             BounceCopy {
                 src: *const u8,
                 stride: u32,
