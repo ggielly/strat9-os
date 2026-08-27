@@ -11,11 +11,15 @@
 //!
 //! Does not support (or need future fix) :
 //!
-//!   - FIx TODO : allocation heap during ELF loading
-//!     program_headers(elf_data, &header).collect() → Vec<Elf64Phdr>, Vec::new() for interp_phdrs, etc. The kernel uses alloc so it's normal, but allocation errors are not handled (no try_collect, no fallible GlobalAlloc).
+//!   - ~~Fix TODO : allocation heap during ELF loading~~
+//!     PARTIALLY DONE (#67) : program-header vectors and boot-stack argv
+//!     pointers now use `try_reserve_exact`-based fallible collection and
+//!     fail the load with an error instead of aborting. Full rollback of
+//!     already-mapped segments still requires a fallible GlobalAlloc.
 //!
-//!   - Fix TODO : find_free_vma_range : fallback hardcoded 0x1000_0000
-//!     If PIE_BASE_ADDR (0x1_0000_0000) fails, fallback to 0x1000_0000. This value is arbitrary and could overlap existing mappings if many libraries are loaded.
+//!   - ~~Fix TODO : find_free_vma_range : fallback hardcoded 0x1000_0000~~
+//!     DONE : the fallback was removed; a failed search now fails the load
+//!     with "No virtual range for ET_DYN image".
 //!
 //! Security:
 //!   - User stack has a guard page (user_stack_base() - 4096) that is intentionally
@@ -86,7 +90,17 @@ const R_X86_64_IRELATIVE: u32 = 37;
 pub const USER_ADDR_MAX: u64 = 0x0000_8000_0000_0000;
 
 /// Number of 4 KiB pages for the user stack (16 pages = 64 KiB).
+///
+/// This is the *default*: the loader accepts a per-process stack size via
+/// [`load_and_run_elf_with_stack`] (issue #64).
 pub const USER_STACK_PAGES: usize = 16;
+/// Lower bound on a per-process user stack (4 pages = 16 KiB): the boot
+/// stack layout alone (argv/envp/auxv + guard margins) needs at least one
+/// page, and tiny stacks would fault immediately.
+pub const USER_STACK_MIN_PAGES: usize = 4;
+/// Upper bound on a per-process user stack (2048 pages = 8 MiB), to keep a
+/// buggy or hostile caller from exhausting the user address space / frames.
+pub const USER_STACK_MAX_PAGES: usize = 2048;
 /// Standard user-mode RFLAGS: IF=1, reserved bit 1 set.
 const USER_RFLAGS: u64 = 0x202;
 
@@ -273,6 +287,32 @@ fn program_headers<'a>(
     })
 }
 
+/// Collects an exact-size-hint iterator into a `Vec`, failing cleanly on
+/// allocation failure instead of aborting (issue #67).
+///
+/// The exact reservation means the `push` loop below can never reallocate:
+/// either the whole vector is built, or we return `Err` having allocated
+/// nothing (beyond the failed reservation itself).
+fn try_collect_exact<T, I>(iter: I) -> Result<Vec<T>, &'static str>
+where
+    I: IntoIterator<Item = T>,
+{
+    let iter = iter.into_iter();
+    let (lower, Some(upper)) = iter.size_hint() else {
+        return Err("ELF: iterator has inexact size hint");
+    };
+    if lower != upper {
+        return Err("ELF: iterator has inexact size hint");
+    }
+    let mut v = Vec::new();
+    v.try_reserve_exact(lower)
+        .map_err(|_| "ELF: out of memory while collecting program headers")?;
+    for item in iter {
+        v.push(item);
+    }
+    Ok(v)
+}
+
 /// Parses interp path.
 fn parse_interp_path<'a>(
     elf_data: &'a [u8],
@@ -443,11 +483,11 @@ fn compute_load_bias_and_entry(
         0
     } else {
         let n_pages = (span as usize).div_ceil(4096);
+        // No hardcoded fallback: if the randomized PIE base cannot host the
+        // image (address space full), fail the load loudly instead of
+        // silently colliding with existing mappings (issue #68).
         let load_base = user_as
             .find_free_vma_range(pie_base(), n_pages, VmaPageSize::Small)
-            .or_else(|| {
-                user_as.find_free_vma_range(0x0000_0000_1000_0000, n_pages, VmaPageSize::Small)
-            })
             .ok_or("No virtual range for ET_DYN image")?;
         load_base
             .checked_sub(min_vaddr)
@@ -770,7 +810,10 @@ fn apply_dynamic_relocations(
     let mut pltrel_kind: Option<u64> = None;
     let mut symtab_addr: Option<u64> = None;
     let mut sym_ent: usize = core::mem::size_of::<Elf64Sym>();
-    let _strtab_addr: Option<u64> = None;
+    // Relocated DT_STRTAB: stored now so future symbol-by-name PLT/GOT
+    // lazy-binding resolution can map Elf64Sym::st_name offsets to strings
+    // (issue #66). Not consumed yet beyond tracing.
+    let mut strtab_addr: Option<u64> = None;
     let mut rela_count_hint: Option<usize> = None;
     let mut relr_addr: Option<u64> = None;
     let mut relr_size: usize = 0;
@@ -812,10 +855,12 @@ fn apply_dynamic_relocations(
             }
             DT_SYMENT => sym_ent = dyn_entry.d_val as usize,
             DT_STRTAB => {
-                let _ = dyn_entry
-                    .d_val
-                    .checked_add(load_bias)
-                    .ok_or("DT_STRTAB relocated address overflow")?;
+                strtab_addr = Some(
+                    dyn_entry
+                        .d_val
+                        .checked_add(load_bias)
+                        .ok_or("DT_STRTAB relocated address overflow")?,
+                );
             }
             DT_RELR => {
                 relr_addr = Some(
@@ -846,6 +891,12 @@ fn apply_dynamic_relocations(
     if pltrel_kind.is_some() && pltrel_kind != Some(DT_RELA as u64) {
         return Err("Only DT_PLTREL=DT_RELA is supported");
     }
+
+    elf_trace!(
+        "[elf] dynamic: symtab={:?} strtab={:?}",
+        symtab_addr,
+        strtab_addr
+    );
 
     let read_sym_entry = |sym_idx: u32| -> Result<Elf64Sym, &'static str> {
         let symtab = symtab_addr.ok_or("Missing DT_SYMTAB for symbol relocations")?;
@@ -1522,7 +1573,24 @@ pub fn load_and_run_elf_with_args(
     name: &'static str,
     extra_args: &[&str],
 ) -> Result<TaskId, &'static str> {
-    let task = load_elf_task_inner(elf_data, name, extra_args, &[])?;
+    let task = load_elf_task_inner(elf_data, name, extra_args, &[], USER_STACK_PAGES)?;
+    let task_id = task.id;
+    crate::process::add_task(task);
+    Ok(task_id)
+}
+
+/// Load an ELF64 binary with an explicit per-process user stack size.
+///
+/// `stack_pages` is expressed in 4 KiB pages and clamped to
+/// [`USER_STACK_MIN_PAGES`]..=[`USER_STACK_MAX_PAGES`] (issue #64).
+pub fn load_and_run_elf_with_stack(
+    elf_data: &[u8],
+    name: &'static str,
+    extra_args: &[&str],
+    seed_caps: &[Capability],
+    stack_pages: usize,
+) -> Result<TaskId, &'static str> {
+    let task = load_elf_task_inner(elf_data, name, extra_args, seed_caps, stack_pages)?;
     let task_id = task.id;
     crate::process::add_task(task);
     Ok(task_id)
@@ -1534,7 +1602,7 @@ pub fn load_elf_task_with_caps(
     name: &'static str,
     seed_caps: &[Capability],
 ) -> Result<Arc<Task>, &'static str> {
-    load_elf_task_inner(elf_data, name, &[], seed_caps)
+    load_elf_task_inner(elf_data, name, &[], seed_caps, USER_STACK_PAGES)
 }
 
 /// Performs the load and run elf with caps operation.
@@ -1548,10 +1616,13 @@ pub fn load_and_run_elf_with_caps(
         name,
         elf_data.len()
     );
-    let task = load_elf_task_inner(elf_data, name, &[], seed_caps)?;
+    let task = load_elf_task_inner(elf_data, name, &[], seed_caps, USER_STACK_PAGES)?;
     let task_id = task.id;
     let runtime_entry = task
         .trampoline_entry
+        .load(core::sync::atomic::Ordering::Acquire);
+    let boot_stack_top = task
+        .trampoline_stack_top
         .load(core::sync::atomic::Ordering::Acquire);
     crate::e9_println!(
         "[trace][elf] load_and_run_elf add_task begin tid={} entry={:#x}",
@@ -1568,7 +1639,7 @@ pub fn load_and_run_elf_with_caps(
         "[elf] Task '{}' created: entry={:#x}, stack_top={:#x}",
         name,
         runtime_entry,
-        user_stack_top(),
+        boot_stack_top,
     );
 
     Ok(task_id)
@@ -1618,13 +1689,15 @@ fn setup_boot_user_stack(
     phnum: u16,
     program_entry: u64,
     interp_base: Option<u64>,
+    stack_base: u64,
+    stack_top: u64,
 ) -> Result<u64, &'static str> {
-    let mut sp = user_stack_top();
+    let mut sp = stack_top;
 
     // Write argv[0] = program name (null-terminated)
     let name_nul_len = (name.len() + 1) as u64;
     sp -= name_nul_len;
-    if sp < user_stack_base() {
+    if sp < stack_base {
         return Err("User stack overflow during boot stack setup");
     }
     let argv0_ptr = sp;
@@ -1632,11 +1705,16 @@ fn setup_boot_user_stack(
     write_user_mapped_bytes(user_as, sp + name.len() as u64, &[0])?;
 
     // Write extra arg strings and record their user-space pointers
-    let mut extra_ptrs: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(extra_args.len());
+    let mut extra_ptrs: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    // Fallible pre-allocation: argv can be large; fail the load instead of
+    // aborting on OOM (issue #67). Exact capacity => pushes never realloc.
+    extra_ptrs
+        .try_reserve_exact(extra_args.len())
+        .map_err(|_| "User stack overflow during boot stack setup")?;
     for &arg in extra_args.iter() {
         let arg_nul_len = (arg.len() + 1) as u64;
         sp -= arg_nul_len;
-        if sp < user_stack_base() {
+        if sp < stack_base {
             return Err("User stack overflow during boot stack setup");
         }
         extra_ptrs.push(sp);
@@ -1646,7 +1724,7 @@ fn setup_boot_user_stack(
 
     sp &= !0xF;
     sp -= 16;
-    if sp < user_stack_base() {
+    if sp < stack_base {
         return Err("User stack overflow during boot stack setup");
     }
     let random_ptr = sp;
@@ -1703,7 +1781,11 @@ fn load_elf_task_inner(
     name: &'static str,
     extra_args: &[&str],
     seed_caps: &[Capability],
+    stack_pages: usize,
 ) -> Result<Arc<Task>, &'static str> {
+    if !(USER_STACK_MIN_PAGES..=USER_STACK_MAX_PAGES).contains(&stack_pages) {
+        return Err("User stack size out of range");
+    }
     crate::e9_println!(
         "[trace][elf] load_elf_task enter name={} size={}",
         name,
@@ -1733,7 +1815,7 @@ fn load_elf_task_inner(
     let user_as = Arc::new(AddressSpace::new_user()?);
     crate::e9_println!("[trace][elf] load_elf_task user_as done");
 
-    let phdrs: Vec<Elf64Phdr> = program_headers(elf_data, &header).collect();
+    let phdrs: Vec<Elf64Phdr> = try_collect_exact(program_headers(elf_data, &header))?;
     let interp_path = parse_interp_path(elf_data, &phdrs)?;
     let (load_bias, entry) = compute_load_bias_and_entry(&user_as, &header, &phdrs)?;
     let phdr_vaddr = find_relocated_phdr_vaddr(&header, &phdrs, load_bias)?;
@@ -1782,7 +1864,8 @@ fn load_elf_task_inner(
     if let Some(path) = interp_path {
         let interp_data = read_elf_from_vfs(path)?;
         let interp_header = parse_header(&interp_data)?;
-        let interp_phdrs: Vec<Elf64Phdr> = program_headers(&interp_data, &interp_header).collect();
+        let interp_phdrs: Vec<Elf64Phdr> =
+            try_collect_exact(program_headers(&interp_data, &interp_header))?;
         if parse_interp_path(&interp_data, &interp_phdrs)?.is_some() {
             return Err("Nested PT_INTERP is not supported");
         }
@@ -1848,6 +1931,13 @@ fn load_elf_task_inner(
     }
 
     // Step 4: Map user stack
+    // Per-process ASLR (issue #62): on top of the boot-time KASLR offset, each
+    // image draws its own page-aligned jitter so two processes never share
+    // identical stack addresses. The stack size is configurable per process
+    // (issue #64). A single guard page below the stack is left unmapped :
+    // underflow faults instead of silently corrupting neighbours.
+    let stack_base = crate::kaslr::stack_base_with_jitter(crate::kaslr::draw_stack_jitter());
+    let stack_top = crate::kaslr::stack_top_for(stack_base, stack_pages);
     let stack_flags = VmaFlags {
         readable: true,
         writable: true,
@@ -1855,8 +1945,8 @@ fn load_elf_task_inner(
         user_accessible: true,
     };
     user_as.map_region(
-        user_stack_base(),
-        USER_STACK_PAGES,
+        stack_base,
+        stack_pages,
         stack_flags,
         VmaType::Stack,
         VmaPageSize::Small,
@@ -1866,11 +1956,19 @@ fn load_elf_task_inner(
     // is intentionally left unmapped : no VMA, no PTE.
     log::debug!(
         "[elf] User stack: {:#x}..{:#x} ({} pages), guard at {:#x}",
-        user_stack_base(),
-        user_stack_top(),
-        USER_STACK_PAGES,
+        stack_base,
+        stack_top,
+        stack_pages,
         user_stack_guard(),
     );
+
+    // Stack canary (issue #63): a random per-process value occupies the
+    // top word of the stack; all boot data lives strictly below it. The
+    // kernel re-checks it at task exit (Task::verify_user_stack_canary).
+    let mut canary_bytes = [0u8; 8];
+    crate::entropy::fill_random(&mut canary_bytes);
+    let stack_canary = u64::from_le_bytes(canary_bytes) | 1; // never 0
+    write_user_u64(&user_as, stack_top - 8, stack_canary)?;
 
     let boot_sp = setup_boot_user_stack(
         &user_as,
@@ -1881,6 +1979,8 @@ fn load_elf_task_inner(
         header.e_phnum,
         entry,
         interp_base,
+        stack_base,
+        stack_top - 8, // data must stay below the canary slot
     )?;
 
     // Step 5: Create kernel task : trampoline params are stored inside the task
@@ -1918,9 +2018,11 @@ fn load_elf_task_inner(
         interrupt_rsp: core::sync::atomic::AtomicU64::new(0),
         kernel_stack,
         user_stack: Some(crate::process::task::UserStack {
-            virt_base: x86_64::VirtAddr::new(user_stack_base()),
-            size: USER_STACK_PAGES * 4096,
+            virt_base: x86_64::VirtAddr::new(stack_base),
+            size: stack_pages * 4096,
         }),
+        stack_canary: core::sync::atomic::AtomicU64::new(stack_canary),
+        stack_canary_addr: core::sync::atomic::AtomicU64::new(stack_top - 8),
         name,
         process: Arc::new(crate::process::process::Process::new(pid, user_as)),
         pending_signals: super::signal::SignalSet::new(),
@@ -2055,7 +2157,7 @@ pub fn load_elf_image(
             return Err(e);
         }
     };
-    let phdrs: Vec<Elf64Phdr> = program_headers(elf_data, &header).collect();
+    let phdrs: Vec<Elf64Phdr> = try_collect_exact(program_headers(elf_data, &header))?;
     let interp_path = parse_interp_path(elf_data, &phdrs)?;
     let (load_bias, entry) = compute_load_bias_and_entry(user_as, &header, &phdrs)?;
     let phdr_vaddr = find_relocated_phdr_vaddr(&header, &phdrs, load_bias)?;
@@ -2087,7 +2189,8 @@ pub fn load_elf_image(
     if let Some(path) = interp_path {
         let interp_data = read_elf_from_vfs(path)?;
         let interp_header = parse_header(&interp_data)?;
-        let interp_phdrs: Vec<Elf64Phdr> = program_headers(&interp_data, &interp_header).collect();
+        let interp_phdrs: Vec<Elf64Phdr> =
+            try_collect_exact(program_headers(&interp_data, &interp_header))?;
         if parse_interp_path(&interp_data, &interp_phdrs)?.is_some() {
             return Err("Nested PT_INTERP is not supported");
         }

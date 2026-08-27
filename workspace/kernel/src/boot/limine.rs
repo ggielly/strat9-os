@@ -3,9 +3,9 @@
 //! This module handles the kernel entry from the Limine bootloader.
 //! Limine loads us directly in 64-bit long mode with paging enabled.
 
-use limine::module::InternalModule;
-use limine::request::*;
-use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
+use limine::{
+    module::InternalModule, request::*, BaseRevision, RequestsEndMarker, RequestsStartMarker,
+};
 
 use crate::serial_println;
 
@@ -117,10 +117,12 @@ static INIT_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/init",
 static CONSOLE_ADMIN_MODULE: SyncModule =
     SyncModule(InternalModule::new(c"/initfs/console-admin", c"", 0));
 /// Internal module: request Limine to load /initfs/strate-net (network silo)
-static STRATE_NET_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/strate-net", c"", 0));
+static STRATE_NET_MODULE: SyncModule =
+    SyncModule(InternalModule::new(c"/initfs/strate-net", c"", 0));
 
 /// Internal module: request Limine to load /initfs/strate-bus (bus silo)
-static STRATE_BUS_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/strate-bus", c"", 0));
+static STRATE_BUS_MODULE: SyncModule =
+    SyncModule(InternalModule::new(c"/initfs/strate-bus", c"", 0));
 
 /// Internal module: request Limine to load /initfs/bin/dhcp-client (DHCP monitor)
 static DHCP_CLIENT_MODULE: SyncModule =
@@ -133,13 +135,16 @@ static PING_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/bin/pi
 static TELNETD_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/bin/telnetd", c"", 0));
 
 /// Internal module: request Limine to load /initfs/bin/udp-tool (UDP scheme utility)
-static UDP_TOOL_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/bin/udp-tool", c"", 0));
+static UDP_TOOL_MODULE: SyncModule =
+    SyncModule(InternalModule::new(c"/initfs/bin/udp-tool", c"", 0));
 
 /// Internal module: request Limine to load /initfs/bin/web-admin (web admin utility)
-static WEB_ADMIN_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/bin/web-admin", c"", 0));
+static WEB_ADMIN_MODULE: SyncModule =
+    SyncModule(InternalModule::new(c"/initfs/bin/web-admin", c"", 0));
 
 /// Internal module: request Limine to load /initfs/strate-wasm (WASM runtime)
-static STRATE_WASM_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/strate-wasm", c"", 0));
+static STRATE_WASM_MODULE: SyncModule =
+    SyncModule(InternalModule::new(c"/initfs/strate-wasm", c"", 0));
 
 /// Internal module: request Limine to load /initfs/strate-webrtc (WebRTC-native graphics runtime)
 static STRATE_WEBRTC_MODULE: SyncModule =
@@ -154,7 +159,8 @@ static WASM_TEST_TOML_MODULE: SyncModule =
     SyncModule(InternalModule::new(c"/initfs/wasm-test.toml", c"", 0));
 
 /// Internal module: request Limine to load /initfs/kernel.toml (kernel configuration)
-static KERNEL_TOML_MODULE: SyncModule = SyncModule(InternalModule::new(c"/initfs/kernel.toml", c"", 0));
+static KERNEL_TOML_MODULE: SyncModule =
+    SyncModule(InternalModule::new(c"/initfs/kernel.toml", c"", 0));
 
 /// Saved kernel.toml physical address and size (set during module resolution).
 static mut KERNEL_TOML_DATA: Option<(u64, u64)> = None;

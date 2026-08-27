@@ -263,6 +263,11 @@ pub struct Task {
     pub kernel_stack: KernelStack,
     /// User stack for this task (if applicable)
     pub user_stack: Option<UserStack>,
+    /// Random per-process canary written at the top word of the user stack
+    /// (issue #63). 0 = no canary (kernel tasks, threads without user stack).
+    pub stack_canary: AtomicU64,
+    /// User address of the canary slot (stack_top - 8); 0 = none.
+    pub stack_canary_addr: AtomicU64,
     /// Task name for debugging purposes
     pub name: &'static str,
     /// Capabilities granted to this task
@@ -342,6 +347,51 @@ pub struct Task {
 unsafe impl Sync for Task {}
 
 impl Task {
+    /// Re-checks the user-stack canary written by the ELF loader / execve
+    /// (issue #63).
+    ///
+    /// Called on task exit while the address space is still alive. A mismatch
+    /// means something wrote past the top of the boot stack area (classic
+    /// stack-smashing direction for the initial frames) : we log a security
+    /// warning rather than panicking, to keep false positives from turning
+    /// into a denial of service.
+    pub fn verify_user_stack_canary(&self) {
+        let canary = self.stack_canary.load(Ordering::Relaxed);
+        let addr = self.stack_canary_addr.load(Ordering::Relaxed);
+        if canary == 0 || addr == 0 {
+            return; // no canary (kernel tasks, threads, ...)
+        }
+        let as_ref = self.process.address_space_arc();
+        let Some(phys) = as_ref.translate(x86_64::VirtAddr::new(addr)) else {
+            log::warn!(
+                "[security] tid={} stack canary slot {:#x} unmapped at exit",
+                self.id.as_u64(),
+                addr
+            );
+            return;
+        };
+        // SAFETY: `translate()` proved the page is mapped in this address
+        // space; HHDM makes it readable from the kernel. Unaligned u64 read:
+        // the slot was placed 8 bytes below a page-aligned top.
+        let observed = unsafe {
+            core::ptr::read_volatile(crate::memory::phys_to_virt(phys.as_u64()) as *const u64)
+        };
+        if observed != canary {
+            log::warn!(
+                "[security] tid={} USER STACK CANARY SMASHED: expected={:#x} found={:#x} at {:#x}",
+                self.id.as_u64(),
+                canary,
+                observed,
+                addr
+            );
+            crate::serial_println!(
+                "[security] tid={} USER STACK CANARY SMASHED at {:#x}",
+                self.id.as_u64(),
+                addr
+            );
+        }
+    }
+
     /// Leave this much headroom above the synthetic `SyscallFrame`.
     ///
     /// The raw IRQ switch path does `mov rsp, next_rsp` and then `call
@@ -543,6 +593,7 @@ impl Task {
 /// Only stores the saved RSP. All callee-saved registers (rbx, rbp, r12-r15)
 /// are pushed onto the task's kernel stack by `switch_context()`.
 #[repr(C)]
+
 pub struct CpuContext {
     /// Saved stack pointer (points into the task's kernel stack)
     pub saved_rsp: u64,
@@ -912,6 +963,8 @@ impl Task {
             interrupt_rsp: AtomicU64::new(0),
             kernel_stack,
             user_stack: None,
+            stack_canary: AtomicU64::new(0),
+            stack_canary_addr: AtomicU64::new(0),
             name,
             process,
             pending_signals: super::signal::SignalSet::new(),
@@ -985,6 +1038,8 @@ impl Task {
             interrupt_rsp: AtomicU64::new(0),
             kernel_stack,
             user_stack: None,
+            stack_canary: AtomicU64::new(0),
+            stack_canary_addr: AtomicU64::new(0),
             name,
             process: Arc::new(crate::process::process::Process::new(pid, address_space)),
             pending_signals: super::signal::SignalSet::new(),

@@ -133,9 +133,13 @@ pub fn sys_execve(
         executable: false,
         user_accessible: true,
     };
+    // Per-process stack ASLR (issue #62): draw this image's own jitter and
+    // use it consistently for both the mapping and the initial SP.
+    let stack_base = crate::kaslr::stack_base_with_jitter(crate::kaslr::draw_stack_jitter());
+    let stack_top = crate::kaslr::stack_top_for(stack_base, USER_STACK_PAGES);
     new_as_arc
         .map_region(
-            crate::kaslr::stack_base(),
+            stack_base,
             USER_STACK_PAGES,
             stack_flags,
             VmaType::Stack,
@@ -143,12 +147,26 @@ pub fn sys_execve(
         )
         .map_err(|_| SyscallError::OutOfMemory)?;
 
+    // Stack canary (issue #63): random per-image value at the top word.
+    let mut canary_bytes = [0u8; 8];
+    crate::entropy::fill_random(&mut canary_bytes);
+    let stack_canary = u64::from_le_bytes(canary_bytes) | 1; // never 0
+    write_bytes_to_as(&new_as_arc, stack_top - 8, &stack_canary.to_le_bytes())?;
+    current
+        .stack_canary
+        .store(stack_canary, core::sync::atomic::Ordering::Relaxed);
+    current
+        .stack_canary_addr
+        .store(stack_top - 8, core::sync::atomic::Ordering::Relaxed);
+
     let sp = setup_user_stack(
         &new_as_arc,
         argv_ptr,
         envp_ptr,
         &load_info,
         path_str.as_bytes(),
+        stack_base,
+        stack_top - 8, // data must stay below the canary slot
     )?;
 
     // TLS setup (Variant II) if the ELF has a PT_TLS segment.
@@ -233,10 +251,10 @@ pub fn sys_execve(
         .process
         .brk
         .store(0, core::sync::atomic::Ordering::Relaxed);
-    current
-        .process
-        .mmap_hint
-        .store(crate::kaslr::mmap_base(), core::sync::atomic::Ordering::Relaxed);
+    current.process.mmap_hint.store(
+        crate::kaslr::mmap_base(),
+        core::sync::atomic::Ordering::Relaxed,
+    );
     // Set FS.base MSR for the new image TLS (or 0 if no PT_TLS).
     unsafe {
         let lo = new_fs_base as u32;
@@ -289,11 +307,13 @@ fn setup_user_stack(
     envp_ptr: u64,
     elf_info: &LoadedElfInfo,
     exec_path: &[u8],
+    stack_base: u64,
+    stack_top: u64,
 ) -> Result<u64, SyscallError> {
     let args = read_string_array(argv_ptr)?;
     let envs = read_string_array(envp_ptr)?;
 
-    let mut sp = crate::kaslr::stack_top();
+    let mut sp = stack_top;
     let mut str_ptrs: Vec<u64> = Vec::with_capacity(args.len()); // stores pointers to arguments
     let mut env_ptrs: Vec<u64> = Vec::with_capacity(envs.len()); // stores pointers to env vars
 
@@ -305,7 +325,12 @@ fn setup_user_stack(
     // Push ENV strings
     for env in envs.iter().rev() {
         let len = (env.len() + 1) as u64;
-        sp -= len;
+        sp = sp
+            .checked_sub(len)
+            .ok_or(SyscallError::ArgumentListTooLong)?;
+        if sp < stack_base {
+            return Err(SyscallError::ArgumentListTooLong);
+        }
         write_bytes_to_as(new_as, sp, env)?;
         write_bytes_to_as(new_as, sp + env.len() as u64, &[0])?;
         env_ptrs.push(sp);
@@ -318,7 +343,12 @@ fn setup_user_stack(
     // Push ARG strings
     for arg in args.iter().rev() {
         let len = (arg.len() + 1) as u64;
-        sp -= len;
+        sp = sp
+            .checked_sub(len)
+            .ok_or(SyscallError::ArgumentListTooLong)?;
+        if sp < stack_base {
+            return Err(SyscallError::ArgumentListTooLong);
+        }
         write_bytes_to_as(new_as, sp, arg)?;
         write_bytes_to_as(new_as, sp + arg.len() as u64, &[0])?;
         str_ptrs.push(sp);

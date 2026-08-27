@@ -2,8 +2,7 @@
 //!
 //! Each process has its own FD table mapping integers (0, 1, 2...) to open files.
 
-use super::file::OpenFile;
-use super::scheme::OpenFlags;
+use super::{file::OpenFile, scheme::OpenFlags};
 use crate::syscall::error::SyscallError;
 use alloc::{sync::Arc, vec::Vec};
 
@@ -137,7 +136,11 @@ impl FileDescriptorTable {
 
     /// Replace the open flags on an fd (for fcntl F_SETFL).
     /// Creates a new OpenFile with updated flags, preserving scheme/file_id/etc.
-    pub fn replace_open_flags(&mut self, fd: u32, new_flags: OpenFlags) -> Result<(), SyscallError> {
+    pub fn replace_open_flags(
+        &mut self,
+        fd: u32,
+        new_flags: OpenFlags,
+    ) -> Result<(), SyscallError> {
         let fd_usize = fd as usize;
         if fd_usize >= self.fds.len() {
             return Err(SyscallError::BadHandle);

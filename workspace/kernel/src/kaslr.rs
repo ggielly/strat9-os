@@ -104,10 +104,38 @@ pub fn stack_base() -> u64 {
     STACK_BASE + STACK_BASE_OFFSET.load(Ordering::Relaxed)
 }
 
+/// Draw a fresh per-image stack jitter: a page-aligned offset in
+/// `0..=255` pages (0..~1 MiB).
+///
+/// The boot-time [`STACK_BASE_OFFSET`] randomizes the stack *region* once
+/// per boot; this adds per-process entropy on top so two processes do not
+/// share identical stack addresses (issue #62).
+pub fn draw_stack_jitter() -> u64 {
+    let mut buf = [0u8; 1];
+    crate::entropy::fill_random(&mut buf);
+    (buf[0] as u64) << 12
+}
+
+/// Stack base for a specific process, adding its own jitter on top of the
+/// boot-randomized base. Use with [`draw_stack_jitter`].
+#[inline]
+pub fn stack_base_with_jitter(jitter: u64) -> u64 {
+    // Saturate instead of overflowing: the base sits at 0x7FFF_F000_0000
+    // and USER_ADDR_MAX is 0x8000_0000_0000, so even a full 1 MiB jitter
+    // plus an 8 MiB stack stays far below the limit.
+    stack_base().saturating_add(jitter & !0xFFF)
+}
+
+/// Get the top of a stack of `pages` 4 KiB pages starting at `base`.
+#[inline]
+pub fn stack_top_for(base: u64, pages: usize) -> u64 {
+    base + (pages as u64) * 4096
+}
+
 /// Get the randomized user stack top address.
 #[inline]
 pub fn stack_top() -> u64 {
-    stack_base() + 16 * 4096
+    stack_top_for(stack_base(), crate::process::elf::USER_STACK_PAGES)
 }
 
 /// Get the guard page address below the user stack.
