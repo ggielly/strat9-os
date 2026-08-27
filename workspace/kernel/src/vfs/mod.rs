@@ -13,9 +13,9 @@
 //!      ↓
 //! VFS::open() : path resolution
 //!      ↓
-//! MountTable::resolve() → ("/net" → IpcScheme, "tcp/0")
+//! MountTable::resolve() => ("/net" => IpcScheme, "tcp/0")
 //!      ↓
-//! IpcScheme::open("tcp/0") → IPC message to network stack
+//! IpcScheme::open("tcp/0") => IPC message to network stack
 //!      ↓
 //! OpenFile created with scheme reference + file_id
 //!      ↓
@@ -37,6 +37,7 @@ pub mod pty_scheme;
 pub mod ramfs_scheme;
 pub mod scheme;
 pub mod scheme_router;
+pub mod threads_scheme;
 
 use crate::{process::current_task_clone, sync::SpinLock, syscall::error::SyscallError};
 use alloc::{boxed::Box, string::String, sync::Arc};
@@ -295,7 +296,7 @@ pub fn close(fd: u32) -> Result<(), SyscallError> {
     let fd_table = unsafe { &mut *task.process.fd_table.get() };
     let _file = fd_table.remove(fd)?;
     Ok(())
-    // _file (Arc<OpenFile>) is dropped here; if refcount → 0, Drop fires → scheme.close()
+    // _file (Arc<OpenFile>) is dropped here; if refcount => 0, Drop fires => scheme.close()
 }
 
 /// Seek within a file.
@@ -375,7 +376,7 @@ pub fn create_background_stdin() -> Arc<OpenFile> {
     let pipe_scheme = get_pipe_scheme();
     let (base_id, pipe) = pipe_scheme.create_pipe();
 
-    // Close write end now (refcount → 0 → write_closed = true).
+    // Close write end now (refcount => 0 => write_closed = true).
     // Subsequent reads on the read end will return EOF immediately.
     pipe.close_write();
 
@@ -843,7 +844,7 @@ fn read_user_path(path_ptr: u64, path_len: u64) -> Result<alloc::string::String,
 
 /// Resolve a userspace path to an absolute path and enforce silo policy.
 ///
-/// Combines: read_user_path → resolve against CWD → silo enforce.
+/// Combines: read_user_path => resolve against CWD => silo enforce.
 /// Used by most syscall handlers to avoid duplicating this 4-line pattern.
 fn resolve_for_syscall(
     path_ptr: u64,
@@ -1301,14 +1302,14 @@ pub fn init() {
         kernel_scheme.register("cpu/features", features_s.as_ptr(), features_s.len());
 
         let xcr0_s = Box::leak(
-            alloc::format!("{:#x}\n", host.max_xcr0)
+            alloc::format!("{:#x}\n", host.supported_xcr0)
                 .into_bytes()
                 .into_boxed_slice(),
         );
         kernel_scheme.register("cpu/xcr0", xcr0_s.as_ptr(), xcr0_s.len());
 
         let xsave_s = Box::leak(
-            alloc::format!("{}\n", host.xsave_size)
+            alloc::format!("{}\n", host.xsave_size_current)
                 .into_bytes()
                 .into_boxed_slice(),
         );
@@ -1336,6 +1337,14 @@ pub fn init() {
         log::error!("[VFS] Failed to mount /proc: {:?}", e);
     } else {
         log::info!("[VFS] Mounted /proc (procfs)");
+    }
+
+    // Mount /thread : Plan 9 style thread control files (ThreadsScheme)
+    let threads = Arc::new(threads_scheme::ThreadsScheme::new());
+    if let Err(e) = mount::mount("/thread", threads) {
+        log::error!("[VFS] Failed to mount /thread: {:?}", e);
+    } else {
+        log::info!("[VFS] Mounted /thread (threads scheme)");
     }
 
     let ipc_scheme = Arc::new(ipcfs::IpcControlScheme::new());

@@ -32,7 +32,7 @@ use crate::{
 use alloc::{boxed::Box, vec::Vec};
 use core::{
     ptr,
-    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering},
+    sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, Ordering},
 };
 
 pub use super::virtio_block::{BlockDevice, BlockError, SECTOR_SIZE};
@@ -938,8 +938,8 @@ impl AhciController {
         pci_dev.enable_bus_master();
         pci_dev.enable_memory_space();
 
-        // Read PCI interrupt line before we need it later
-        let irq_line = pci_dev.read_config_u8(pci::config::INTERRUPT_LINE);
+        // Try MSI/MSI-X first; fall back to INTx line.
+        let (_irq_line, irq_vector) = crate::arch::x86_64::msi::probe_and_enable(&pci_dev, true);
 
         // BAR5 = ABAR (AHCI Base Memory Register)
         let abar_phys = pci_dev.read_bar_raw(5).ok_or(AhciError::BadAbar)?;
@@ -1073,14 +1073,14 @@ impl AhciController {
         // Store the ABAR virtual address and IRQ line in statics so the
         // interrupt handler can reach them without going through the controller lock.
         AHCI_ABAR_VIRT.store(abar_virt, Ordering::Relaxed);
-        AHCI_IRQ_LINE.store(irq_line, Ordering::Relaxed);
+        AHCI_IRQ_LINE.store(irq_vector, Ordering::Relaxed);
 
         // Enable global HBA interrupts (GHC.IE)
         // SAFETY: MMIO write : all port interrupts already enabled above
         let ghc = rd32(abar_virt, HBA_GHC);
         wr32(abar_virt, HBA_GHC, ghc | GHC_IE);
 
-        log::info!("AHCI: global interrupts enabled (IRQ line {})", irq_line);
+        log::info!("AHCI: global interrupts enabled (vector {:#x})", irq_vector);
 
         Ok(AhciController { abar_virt, ports })
     }
@@ -1121,6 +1121,7 @@ mod tests {
         let controller = AhciController {
             abar_virt: 0,
             ports: vec![fake_port(2), fake_port(5), fake_port(7)],
+            dma_pool: None,
         };
 
         assert_eq!(controller.port_by_num(5).map(|port| port.port_num), Some(5));
@@ -1151,10 +1152,47 @@ impl BlockDevice for AhciController {
         if buf.len() < SECTOR_SIZE {
             return Err(BlockError::BufferTooSmall);
         }
-        // submit_cmd needs &mut [u8]; copy to a mutable staging buffer
-        let mut tmp = [0u8; SECTOR_SIZE];
-        tmp.copy_from_slice(&buf[..SECTOR_SIZE]);
-        submit_cmd(port, sector, 1, &mut tmp, true, ATA_WRITE_DMA_EXT)
+        // submit_cmd copies the data into a DMA buffer before issuing the
+        // command, so the const-to-mut cast is safe (the buffer is never
+        // written from the CPU side during a write request).
+        let buf_mut = buf.as_ptr() as *mut u8;
+        let buf_slice = unsafe { core::slice::from_raw_parts_mut(buf_mut, buf.len()) };
+        submit_cmd(port, sector, 1, buf_slice, true, ATA_WRITE_DMA_EXT)
+            .map_err(|_| BlockError::IoError)
+    }
+
+    /// Read multiple sectors in a single ATA command.
+    ///
+    /// AHCI `submit_cmd` already accepts a `count: u16` parameter;
+    /// this override uses it directly instead of looping per sector.
+    fn read_sectors(&self, sector: u64, count: u16, buf: &mut [u8]) -> Result<(), BlockError> {
+        let port = self.first_port().ok_or(BlockError::NotReady)?;
+        let nbytes = (count as usize) * SECTOR_SIZE;
+        if sector.saturating_add(count as u64) > port.sector_count {
+            return Err(BlockError::InvalidSector);
+        }
+        if buf.len() < nbytes {
+            return Err(BlockError::BufferTooSmall);
+        }
+        submit_cmd(port, sector, count, buf, false, ATA_READ_DMA_EXT)
+            .map_err(|_| BlockError::IoError)
+    }
+
+    /// Write multiple sectors in a single ATA command.
+    fn write_sectors(&self, sector: u64, count: u16, buf: &[u8]) -> Result<(), BlockError> {
+        let port = self.first_port().ok_or(BlockError::NotReady)?;
+        let nbytes = (count as usize) * SECTOR_SIZE;
+        if sector.saturating_add(count as u64) > port.sector_count {
+            return Err(BlockError::InvalidSector);
+        }
+        if buf.len() < nbytes {
+            return Err(BlockError::BufferTooSmall);
+        }
+        // submit_cmd copies the data into a DMA buffer before issuing the
+        // command, so the const-to-mut cast is safe.
+        let buf_mut = buf.as_ptr() as *mut u8;
+        let buf_slice = unsafe { core::slice::from_raw_parts_mut(buf_mut, buf.len()) };
+        submit_cmd(port, sector, count, buf_slice, true, ATA_WRITE_DMA_EXT)
             .map_err(|_| BlockError::IoError)
     }
 
@@ -1166,7 +1204,9 @@ impl BlockDevice for AhciController {
 
 // ========== Global singleton + public API ============================================================================================================================================
 
-static AHCI: SpinLock<Option<Box<AhciController>>> = SpinLock::new(None);
+/// Leaked-Box pointer to the AHCI controller (valid for 'static).
+static AHCI_PTR: core::sync::atomic::AtomicPtr<AhciController> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
 /// Scan the PCI bus for an AHCI controller and initialise it.
 ///
@@ -1176,12 +1216,13 @@ pub fn init() {
 
     match unsafe { AhciController::init() } {
         Ok(ctrl) => {
-            *AHCI.lock() = Some(Box::new(ctrl));
+            let leaked: &'static mut AhciController = Box::leak(Box::new(ctrl));
+            AHCI_PTR.store(leaked as *mut AhciController, Ordering::Release);
             log::info!("AHCI: controller ready");
 
             // Register IRQ handler in the IDT now that the controller is live.
-            let irq = AHCI_IRQ_LINE.load(Ordering::Relaxed);
-            crate::arch::idt::register_ahci_irq(irq);
+            let vector = AHCI_IRQ_LINE.load(Ordering::Relaxed);
+            crate::arch::x86_64::idt::register_ahci_irq(vector);
         }
         Err(AhciError::NoController) => {
             log::info!("AHCI: no controller found (not a SATA system?)");
@@ -1194,12 +1235,11 @@ pub fn init() {
 
 /// Return a reference to the first usable AHCI controller, if any.
 pub fn get_device() -> Option<&'static AhciController> {
-    // SAFETY: the global Option is only ever set during init and never cleared
-    unsafe {
-        let lock = AHCI.lock();
-        lock.as_ref().map(|b| {
-            let ptr = b.as_ref() as *const AhciController;
-            &*ptr
-        })
+    let ptr = AHCI_PTR.load(Ordering::Acquire);
+    if ptr.is_null() {
+        None
+    } else {
+        // SAFETY: ptr was obtained from Box::leak, valid for 'static.
+        Some(unsafe { &*ptr })
     }
 }

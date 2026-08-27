@@ -139,7 +139,7 @@ fn dfs(
     on_stack: &mut std::collections::HashSet<String>,
 ) -> bool {
     if on_stack.contains(node) {
-        return true; // back edge → cycle
+        return true; // back edge => cycle
     }
     if visited.contains(node) {
         return false; // already fully explored

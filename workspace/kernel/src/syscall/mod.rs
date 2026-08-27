@@ -51,7 +51,7 @@ pub use time::{sys_clock_gettime, sys_nanosleep};
 /// so first push = highest address, last push = lowest = RSP).
 #[repr(C)]
 pub struct SyscallFrame {
-    // Pushed last → at lowest address (RSP points here)
+    // Pushed last => at lowest address (RSP points here)
     pub r15: u64,
     pub r14: u64,
     pub r13: u64,
@@ -68,7 +68,7 @@ pub struct SyscallFrame {
     pub rcx: u64, // user RIP
     pub rax: u64, // syscall number / return value
 
-    // IRET frame follows (pushed first → highest address)
+    // IRET frame follows (pushed first => highest address)
     pub iret_rip: u64,
     pub iret_cs: u64,
     pub iret_rflags: u64,

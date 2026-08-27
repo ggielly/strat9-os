@@ -1,17 +1,16 @@
 //! Strat9-OS kernel entry point
 //!
-//! Legacy entry point for custom bootloader compatibility.
-//! The actual kernel_main implementation is in lib.rs.
+//! Kernel entry point.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
-use strat9_kernel::boot::entry::KernelArgs;
-
-/// Legacy kernel entry point - forwards to lib.rs implementation
+/// Kernel entry point
+///
+/// Convention: rdi = DTB physical address
 #[no_mangle]
-pub unsafe extern "C" fn kernel_main(args: *const KernelArgs) -> ! {
-    strat9_kernel::kernel_main(args)
+pub unsafe extern "C" fn kernel_main(dtb_ptr: u64) -> ! {
+    strat9_kernel::boot::dtb_boot::kmain(dtb_ptr)
 }

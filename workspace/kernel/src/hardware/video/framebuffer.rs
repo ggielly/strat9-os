@@ -2,7 +2,7 @@
 // Framebuffer abstraction layer
 //
 // Provides a unified framebuffer interface that can use:
-// - Limine framebuffer (bootloader-provided)
+// - UEFI bootloader framebuffer (bootloader-provided)
 // - VirtIO GPU framebuffer (native driver)
 // - Future/TODO : other GPU drivers (Bochs DRM, etc.)
 //
@@ -30,8 +30,9 @@ const PRESENT_MIN_TICKS: u64 = 1;
 /// Framebuffer source
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FramebufferSource {
-    Limine,
+    Bootloader,
     VirtioGpu,
+    AmdGpu,
     None,
 }
 
@@ -93,6 +94,10 @@ pub struct Framebuffer {
     double_buffer: Option<*mut u8>,
     /// Whether the raw double buffer should be used
     use_double_buffer: bool,
+    /// Total framebuffer size in bytes
+    fb_size: usize,
+    /// Whether console deferred present is active
+    console_defer_present: bool,
 }
 
 unsafe impl Send for Framebuffer {}
@@ -148,8 +153,8 @@ impl Framebuffer {
         self.canvas.dirty.clear();
     }
 
-    /// Initialize framebuffer with Limine-provided buffer
-    pub fn init_limine(
+    /// Initialize framebuffer with bootloader-provided buffer
+    pub fn init_bootloader(
         addr: u64,
         width: u32,
         height: u32,
@@ -169,7 +174,7 @@ impl Framebuffer {
             height,
             stride,
             format,
-            source: FramebufferSource::Limine,
+            source: FramebufferSource::Bootloader,
         };
 
         let canvas = CanvasBuffer {
@@ -192,13 +197,15 @@ impl Framebuffer {
             canvas,
             double_buffer: None,
             use_double_buffer: false,
+            fb_size: (stride as usize) * (height as usize),
+            console_defer_present: false,
         };
 
         *FRAMEBUFFER.lock() = Some(fb);
         FRAMEBUFFER_INITIALIZED.store(true, Ordering::SeqCst);
 
         log::info!(
-            "[FB] Limine framebuffer: {}x{} @ {}bpp, stride={}",
+            "[FB] Bootloader framebuffer: {}x{} @ {}bpp, stride={}",
             width,
             height,
             format.bits_per_pixel,
@@ -270,6 +277,8 @@ impl Framebuffer {
             canvas,
             double_buffer: Some(db_virt),
             use_double_buffer: true,
+            fb_size: (info.stride as usize) * (info.height as usize),
+            console_defer_present: false,
         };
 
         *FRAMEBUFFER.lock() = Some(fb);
@@ -277,6 +286,71 @@ impl Framebuffer {
 
         log::info!(
             "[FB] VirtIO GPU framebuffer: {}x{} @ {}bpp, stride={}",
+            info.width,
+            info.height,
+            info.format.bits_per_pixel,
+            info.stride
+        );
+
+        Ok(())
+    }
+
+    /// Initialize framebuffer with AMDGPU
+    pub fn init_amd_gpu() -> Result<(), &'static str> {
+        let gpu_guard = crate::hardware::amdgpu::get_gpu().ok_or("AMDGPU not available")?;
+        let gpu = gpu_guard.as_ref().ok_or("AMDGPU not initialized")?;
+
+        let (phys, width, height, pitch) = gpu.framebuffer_info();
+
+        let format = PixelFormat {
+            red_mask: 0x00FF0000,
+            red_shift: 16,
+            green_mask: 0x0000FF00,
+            green_shift: 8,
+            blue_mask: 0x000000FF,
+            blue_shift: 0,
+            bits_per_pixel: 32,
+        };
+
+        let hhdm = crate::memory::hhdm_offset();
+        let base_virt = (phys as u64 + hhdm) as usize;
+
+        let info = FramebufferInfo {
+            base: phys as u64,
+            base_virt,
+            width,
+            height,
+            stride: pitch,
+            format,
+            source: FramebufferSource::AmdGpu,
+        };
+
+        let canvas = CanvasBuffer {
+            addr: base_virt as *mut u8,
+            width: width as usize,
+            height: height as usize,
+            pitch: pitch as usize,
+            bpp: 32,
+            back_buffer: None,
+            draw_to_back: false,
+            dirty: DirtyRectSet::empty(),
+            track_dirty: false,
+            present_pending: false,
+            last_present_tick: 0,
+            ops: FramebufferOps::detect(),
+        };
+
+        *FRAMEBUFFER.lock() = Some(Framebuffer {
+            info,
+            canvas,
+            double_buffer: None,
+            use_double_buffer: false,
+            fb_size: (pitch as usize) * (height as usize),
+            console_defer_present: false,
+        });
+
+        log::info!(
+            "[FB] AMDGPU framebuffer: {}x{} @ {}bpp, {} bytes",
             info.width,
             info.height,
             info.format.bits_per_pixel,
@@ -572,10 +646,18 @@ pub fn init() {
         }
     }
 
-    // VirtIO GPU not available, Limine framebuffer is already set up in boot
-    // The Limine framebuffer is initialized in boot/limine.rs
+    // Try AMDGPU (real hardware)
+    if !Framebuffer::is_available() && crate::hardware::amdgpu::is_available() {
+        if let Err(e) = Framebuffer::init_amd_gpu() {
+            log::warn!("[FB] AMDGPU init failed: {}", e);
+        } else {
+            log::info!("[FB] Using AMDGPU framebuffer");
+        }
+    }
+
+    // VirtIO GPU and AMDGPU not available, UEFI bootloader framebuffer is already set up in boot
     if Framebuffer::is_available() {
-        log::info!("[FB] Using Limine framebuffer");
+        log::info!("[FB] Using UEFI bootloader framebuffer");
     } else {
         log::warn!("[FB] No framebuffer available");
     }

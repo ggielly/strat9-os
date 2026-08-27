@@ -42,6 +42,12 @@ pub fn exit_current_task(exit_code: i32) -> ! {
         // The address space is still alive here (it dies with the Process
         // Arc later), so the top-of-stack word can still be read.
         task.verify_user_stack_canary();
+
+        // -- kernel-owned user stack (/thread/create) --
+        // Reclaim the user stack the kernel allocated for this thread. Done
+        // while still the running task so the address space is current on
+        // this CPU; idempotent with the cleanup_task_resources path.
+        crate::process::thread_ops::reclaim_kernel_user_stack(&task);
     }
 
     let cpu_index = current_cpu_index();
@@ -1267,6 +1273,10 @@ pub fn flush_deferred_silo_cleanups() {
 pub(crate) fn cleanup_task_resources(task: &Arc<Task>) {
     crate::ipc::port::cleanup_ports_for_task(task.id);
     queue_silo_cleanup(task.id);
+
+    // Kernel-owned user stack (/thread/create): reclaim if not already done
+    // by exit_current_task. take()-based, so this is a cheap no-op otherwise.
+    crate::process::thread_ops::reclaim_kernel_user_stack(task);
 
     // SAFETY: strong_count is racy (a concurrent get_task_by_id may temporarily
     // hold an extra Arc ref). Worst case: cleanup is deferred until the last ref

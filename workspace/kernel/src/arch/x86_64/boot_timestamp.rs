@@ -26,7 +26,7 @@ pub fn init() {
 /// `tsc_delta`          : TSC ticks measured over that interval.
 ///
 /// Example: if the APIC timer calibration measured 10 ms (10_000_000 ns)
-/// and `tsc_delta` = 20_000_000 cycles  →  TSC runs at 2 GHz.
+/// and `tsc_delta` = 20_000_000 cycles  =>  TSC runs at 2 GHz.
 pub fn calibrate(known_interval_ns: u64, tsc_delta: u64) {
     if known_interval_ns == 0 || tsc_delta == 0 {
         return;

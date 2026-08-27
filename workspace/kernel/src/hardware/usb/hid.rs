@@ -96,7 +96,11 @@ impl HidKeyboard {
     }
 
     pub fn read_event(&mut self) -> Option<KeyEvent> {
-        self.event_queue.pop()
+        if self.event_queue.is_empty() {
+            None
+        } else {
+            Some(self.event_queue.remove(0))
+        }
     }
 
     pub fn process_report(&mut self, report: &[u8]) {
@@ -141,7 +145,7 @@ impl HidKeyboard {
     }
 
     pub fn drain_into_unified(&mut self) {
-        while let Some(ev) = self.event_queue.pop() {
+        for ev in self.event_queue.drain(..) {
             keyboard::inject_hid_scancode(ev.keycode, ev.pressed);
         }
     }
@@ -185,7 +189,11 @@ impl HidMouse {
     }
 
     pub fn read_event(&mut self) -> Option<MouseEvent> {
-        self.event_queue.pop()
+        if self.event_queue.is_empty() {
+            None
+        } else {
+            Some(self.event_queue.remove(0))
+        }
     }
 
     pub fn process_report(&mut self, report: &[u8]) {
@@ -230,7 +238,7 @@ impl HidMouse {
     }
 
     pub fn drain_into_unified(&mut self) {
-        while let Some(ev) = self.event_queue.pop() {
+        for ev in self.event_queue.drain(..) {
             let left = ev.buttons & 0x01 != 0;
             let right = ev.buttons & 0x02 != 0;
             let middle = ev.buttons & 0x04 != 0;

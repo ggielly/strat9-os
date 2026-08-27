@@ -4,6 +4,7 @@
 //! for component trait, PCI enumeration, and driver categories.
 
 pub mod ec;
+pub mod amdgpu;
 pub mod nic;
 pub mod pci_client;
 pub mod storage;
@@ -28,7 +29,9 @@ pub fn init() {
     usb::init();
     crate::arch::speaker::beep_phase(12); // USB
     virtio::gpu::init();
-    crate::arch::speaker::beep_phase(13); // VirtIO GPU
+    crate::arch::x86_64::speaker::beep_phase(13); // VirtIO GPU
+    amdgpu::init();
+    crate::arch::x86_64::speaker::beep_phase(14); // AMDGPU
     video::framebuffer::init();
-    crate::arch::speaker::beep_phase(14); // Framebuffer
+    crate::arch::x86_64::speaker::beep_phase(15); // Framebuffer
 }

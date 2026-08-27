@@ -84,6 +84,9 @@ impl CommandRegistry {
         registry.register("silo", sys::cmd_silo);
         registry.register("silos", sys::cmd_silos);
 
+        // Crypto
+        registry.register("crypto", sys::cmd_crypto);
+
         // Network
         registry.register("ping", net::cmd_ping);
         registry.register("ifconfig", net::cmd_ifconfig);

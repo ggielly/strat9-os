@@ -477,8 +477,9 @@ impl Scheme for BlkDevScheme {
 
 /// Read `buf.len()` bytes from the block device starting at byte `offset`.
 ///
-/// Handles unaligned starts and ends by reading the affected sectors into a
-/// 512-byte stack buffer and copying only the requested range.
+/// For aligned multi-sector ranges, uses the bulk `read_sectors` method to
+/// submit a single I/O command.  Partial starts/ends fall back to per-sector
+/// reads with a 512-byte bounce buffer.
 fn sector_read<D: BlockDevice>(dev: &D, offset: u64, buf: &mut [u8]) -> Result<usize, BlockError> {
     let total = buf.len();
     if total == 0 {
@@ -490,23 +491,35 @@ fn sector_read<D: BlockDevice>(dev: &D, offset: u64, buf: &mut [u8]) -> Result<u
         return Ok(0); // EOF
     }
 
+    let end = (offset + total as u64).min(disk_size);
     let mut buf_pos: usize = 0;
     let mut byte_off: u64 = offset;
-    // Clamp to disk boundary
-    let end = (offset + total as u64).min(disk_size);
 
     while byte_off < end {
         let sector = byte_off / SECTOR_SIZE as u64;
         let sector_off = (byte_off % SECTOR_SIZE as u64) as usize;
-        let available = (SECTOR_SIZE - sector_off).min((end - byte_off) as usize);
+        let remaining = (end - byte_off) as usize;
 
-        let mut tmp = [0u8; SECTOR_SIZE];
-        dev.read_sector(sector, &mut tmp)?;
+        // If this is a full-sector-aligned chunk of 2+ sectors, use the bulk path.
+        if sector_off == 0 && remaining >= SECTOR_SIZE * 2 {
+            let count = (remaining / SECTOR_SIZE).min(u16::MAX as usize) as u16;
+            let nbytes = (count as usize) * SECTOR_SIZE;
+            dev.read_sectors(sector, count, &mut buf[buf_pos..buf_pos + nbytes])?;
+            buf_pos += nbytes;
+            byte_off += nbytes as u64;
+        } else {
+            // Partial or single-sector: fall back to the 512-byte bounce path.
+            let available = (SECTOR_SIZE - sector_off).min(remaining);
 
-        buf[buf_pos..buf_pos + available].copy_from_slice(&tmp[sector_off..sector_off + available]);
+            let mut tmp = [0u8; SECTOR_SIZE];
+            dev.read_sector(sector, &mut tmp)?;
 
-        buf_pos += available;
-        byte_off += available as u64;
+            buf[buf_pos..buf_pos + available]
+                .copy_from_slice(&tmp[sector_off..sector_off + available]);
+
+            buf_pos += available;
+            byte_off += available as u64;
+        }
     }
 
     Ok(buf_pos)
@@ -514,8 +527,8 @@ fn sector_read<D: BlockDevice>(dev: &D, offset: u64, buf: &mut [u8]) -> Result<u
 
 /// Write `data` bytes to the block device starting at byte `offset`.
 ///
-/// For partial-sector writes the affected sector is first read, patched in
-/// memory, then written back (read-modify-write).
+/// For aligned multi-sector ranges, uses the bulk `write_sectors` method.
+/// Partial-sector writes fall back to read-modify-write.
 fn sector_write<D: BlockDevice>(dev: &D, offset: u64, data: &[u8]) -> Result<usize, BlockError> {
     let total = data.len();
     if total == 0 {
@@ -537,18 +550,27 @@ fn sector_write<D: BlockDevice>(dev: &D, offset: u64, data: &[u8]) -> Result<usi
         let remaining = (end - byte_off) as usize;
         let to_write = (SECTOR_SIZE - sector_off).min(remaining);
 
-        // Read-modify-write for partial sectors; full-sector writes skip the read
-        let mut tmp = [0u8; SECTOR_SIZE];
-        if sector_off != 0 || to_write != SECTOR_SIZE {
-            dev.read_sector(sector, &mut tmp)?;
+        // Bulk path: full-sector-aligned chunk of 2+ sectors.
+        if sector_off == 0 && to_write >= SECTOR_SIZE * 2 {
+            let count = (to_write / SECTOR_SIZE).min(u16::MAX as usize) as u16;
+            let nbytes = (count as usize) * SECTOR_SIZE;
+            dev.write_sectors(sector, count, &data[data_pos..data_pos + nbytes])?;
+            data_pos += nbytes;
+            byte_off += nbytes as u64;
+        } else {
+            // Partial / single-sector: read-modify-write with a 512-byte bounce.
+            let mut tmp = [0u8; SECTOR_SIZE];
+            if sector_off != 0 || to_write != SECTOR_SIZE {
+                dev.read_sector(sector, &mut tmp)?;
+            }
+
+            tmp[sector_off..sector_off + to_write]
+                .copy_from_slice(&data[data_pos..data_pos + to_write]);
+            dev.write_sector(sector, &tmp)?;
+
+            data_pos += to_write;
+            byte_off += to_write as u64;
         }
-
-        tmp[sector_off..sector_off + to_write]
-            .copy_from_slice(&data[data_pos..data_pos + to_write]);
-        dev.write_sector(sector, &tmp)?;
-
-        data_pos += to_write;
-        byte_off += to_write as u64;
     }
 
     Ok(data_pos)

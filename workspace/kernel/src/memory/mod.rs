@@ -26,7 +26,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Once;
 
 /// Higher Half Direct Map offset.
-/// Set by Limine entry (non-zero) or left at 0 for BIOS/identity-mapped boot.
+/// Set by UEFI bootloader entry (non-zero) or left at 0 for BIOS/identity-mapped boot.
 /// All physical-to-virtual conversions must add this offset.
 static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
 
@@ -362,7 +362,7 @@ pub fn free_kernel_stack_frames(token: &IrqDisabledToken, frame: PhysFrame, orde
 ///
 /// This is the standard allocation path for all kernel-internal frames.  It
 /// uses `FrameAllocOptions::new()` (zeroed = true, purpose = KernelData) and
-/// performs the UNUSED → 0 → 1 refcount CAS (Asterinas OSTD pattern).
+/// performs the UNUSED => 0 => 1 refcount CAS (Asterinas OSTD pattern).
 ///
 /// For page-table node allocation use `BuddyFrameAllocator` (via paging.rs)
 /// or `FrameAllocOptions::new().purpose(FramePurpose::PageTable).allocate()`.

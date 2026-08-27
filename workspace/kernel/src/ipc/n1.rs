@@ -149,7 +149,7 @@ pub fn init() {
 // ---------------------------------------------------------------------------
 
 n1_safe! {
-    /// Send an N1 event to the NIC → Scheduler mailbox.
+    /// Send an N1 event to the NIC => Scheduler mailbox.
     /// Uses only safe Rust: `IntrusiveMailbox` push(), no raw pointers.
     /// Logs a warning if the push fails (heap allocation failure).
     #[inline(always)] // N1 path
@@ -161,7 +161,7 @@ n1_safe! {
 }
 
 n1_safe! {
-    /// Send an N1 event to the Scheduler → NIC mailbox.
+    /// Send an N1 event to the Scheduler => NIC mailbox.
     /// Logs a warning if the push fails (heap allocation failure).
     #[inline(always)] // N1 path
     pub fn notify_nic_driver(event: N1Event) {
@@ -172,7 +172,7 @@ n1_safe! {
 }
 
 n1_safe! {
-    /// Poll the NIC → Scheduler mailbox for pending events.
+    /// Poll the NIC => Scheduler mailbox for pending events.
     /// Returns `None` if empty.
     #[inline(always)] // N1 path
     pub fn poll_scheduler_events() -> Option<N1Event> {
@@ -184,7 +184,7 @@ n1_safe! {
 }
 
 n1_safe! {
-    /// Poll the Scheduler → NIC mailbox for pending flow-control hints.
+    /// Poll the Scheduler => NIC mailbox for pending flow-control hints.
     #[inline(always)] // N1 path
     pub fn poll_nic_events() -> Option<N1Event> {
         match SCHED_NIC_MAILBOX.pop() {

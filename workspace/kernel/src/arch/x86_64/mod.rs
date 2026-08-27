@@ -84,8 +84,18 @@ pub fn init_cpu_extensions() {
     }
 }
 
-/// Read an Extended Control Register (XGETBV).
+/// Whether CR4.OSXSAVE is currently enabled on this CPU.
+///
+/// AVX/AVX-512 are only *usable* when the kernel has enabled the state
+/// (XSAVE in CR4 + XCR0 bits); CPUID alone only reports hardware capability.
+pub fn cpuid_osxsave_enabled() -> bool {
+    let cr4: u64;
+    unsafe { asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack)) };
+    cr4 & (1 << 18) != 0
+}
+
 #[inline]
+/// Read an Extended Control Register (XGETBV).
 pub fn xgetbv(xcr: u32) -> u64 {
     let eax: u32;
     let edx: u32;

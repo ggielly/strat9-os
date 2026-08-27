@@ -359,7 +359,7 @@ fn run_vfs_ops_suite() -> bool {
     }
     record("mkdir + getdents + rmdir", s, &mut passed, &mut total);
 
-    //  8. mkdir existing → EEXIST ============================================================================================================================================
+    //  8. mkdir existing => EEXIST ============================================================================================================================================
     log_section("8. MKDIR EXISTING");
     let subdir2 = format!("{}/dup_dir", base);
     let mut s = true;
@@ -743,8 +743,8 @@ fn run_vfs_ops_suite() -> bool {
     }
     record("pipe create + write + read", s, &mut passed, &mut total);
 
-    //  18. write to closed read-end pipe → read returns 0 after close ==========
-    log_section("18. PIPE WRITE-END CLOSE → EOF");
+    //  18. write to closed read-end pipe => read returns 0 after close ==========
+    log_section("18. PIPE WRITE-END CLOSE => EOF");
     let mut s = true;
     match vfs::pipe() {
         Ok((rfd, wfd)) => {
@@ -782,7 +782,7 @@ fn run_vfs_ops_suite() -> bool {
             s = false;
         }
     }
-    record("pipe write-end close → EOF", s, &mut passed, &mut total);
+    record("pipe write-end close => EOF", s, &mut passed, &mut total);
 
     //  19. read empty file returns 0 ==================================================================================================================================
     log_section("19. READ EMPTY FILE");

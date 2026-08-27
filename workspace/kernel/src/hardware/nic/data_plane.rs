@@ -26,9 +26,9 @@ use crate::ipc::lockfree_ring::{LockFreeRing, RingError};
 
 /// A pair of RX/TX rings for one RSS queue.
 pub struct RingPair {
-    /// Inbound packets (NIC → strate-net).
+    /// Inbound packets (NIC => strate-net).
     pub rx: Arc<LockFreeRing>,
-    /// Outbound packets (strate-net → NIC).
+    /// Outbound packets (strate-net => NIC).
     pub tx: Arc<LockFreeRing>,
 }
 

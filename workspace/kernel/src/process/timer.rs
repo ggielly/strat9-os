@@ -80,8 +80,16 @@ impl TimeVal {
         }
     }
 
-    /// Convert to nanoseconds
+    /// Convert to nanoseconds.
+    ///
+    /// Negative fields are clamped to 0 per POSIX: a negative `it_value`
+    /// disarms the timer, and a negative `it_interval` is an error.
+    /// Returning 0 for either component ensures the caller sees "disarmed"
+    /// rather than a wrapped-to-huge u64.
     pub fn to_nanos(&self) -> u64 {
+        if self.tv_sec < 0 || self.tv_usec < 0 {
+            return 0;
+        }
         (self.tv_sec as u64)
             .saturating_mul(1_000_000_000)
             .saturating_add((self.tv_usec as u64).saturating_mul(1_000))

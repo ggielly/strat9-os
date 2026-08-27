@@ -52,7 +52,7 @@ pub mod irq {
 ///   - `IA32_KERNEL_GS_BASE` = kernel per-CPU pointer
 /// When an interrupt fires from Ring 3, the CPU does NOT automatically call
 /// swapgs.  The first `gs:[0]` access (e.g. in `current_cpu_index`) would
-/// dereference virtual address 0 → page fault → double fault → triple fault.
+/// dereference virtual address 0 => page fault => double fault => triple fault.
 ///
 /// # Safety
 /// Must be constructed **before** any `gs:[…]` access in the handler.
@@ -99,10 +99,10 @@ impl Drop for SwapGsGuard {
 ///
 /// Cost: ~20-30 cycles for the `rdmsr` : acceptable in exception paths
 /// (not used for high-frequency IRQ handlers where IF=0 prevents
-/// firing in the swapgs→iretq window).
+/// firing in the swapgs=>iretq window).
 #[inline(always)]
 fn needs_swapgs(cs: u16) -> bool {
-    // Fast path: Ring 3 → always need swapgs.
+    // Fast path: Ring 3 => always need swapgs.
     if (cs & 3) == 3 {
         return true;
     }
@@ -430,19 +430,24 @@ fn unlock_idt_storage() {
 }
 
 pub fn init() {
+    crate::e9_println!("IDT lock start");
     lock_idt_storage();
+    crate::e9_println!("IDT locked, setting handlers");
     unsafe {
         let idt = &raw mut IDT_STORAGE;
 
         // CPU exceptions
+        crate::e9_println!("IDT BP");
         (*idt)
             .breakpoint
             .set_handler_fn(breakpoint_handler)
             .set_code_selector(KERNEL_CODE_SELECTOR);
+        crate::e9_println!("IDT PF");
         (*idt)
             .page_fault
             .set_handler_fn(page_fault_handler)
             .set_code_selector(KERNEL_CODE_SELECTOR);
+        crate::e9_println!("IDT GP");
         (*idt)
             .general_protection_fault
             .set_handler_fn(general_protection_fault_handler)
@@ -459,6 +464,7 @@ pub fn init() {
             .invalid_opcode
             .set_handler_fn(invalid_opcode_handler)
             .set_code_selector(KERNEL_CODE_SELECTOR);
+        crate::e9_println!("IDT DF");
         (*idt)
             .double_fault
             .set_handler_fn(double_fault_handler)
@@ -493,7 +499,7 @@ pub fn init() {
             .set_handler_fn(tlb_shootdown_handler)
             .set_code_selector(KERNEL_CODE_SELECTOR);
 
-        // N3 MMU migration sync IPI (vector 0xF1) — naked handler
+        // N3 MMU migration sync IPI (vector 0xF1) : naked handler
         // for full sender context restore via iretq.
         idt_ref[super::apic::IPI_N3_MIGRATE_VECTOR as u8]
             .set_handler_addr(VirtAddr::from_ptr(
@@ -501,11 +507,15 @@ pub fn init() {
             ))
             .set_code_selector(KERNEL_CODE_SELECTOR);
 
+        crate::e9_println!("IDT pre-load");
         (*idt).load_unsafe();
+        crate::e9_println!("IDT loaded");
     }
+    crate::e9_println!("IDT unlock");
     unlock_idt_storage();
+    crate::e9_println!("IDT unlocked");
 
-    log::debug!("IDT initialized with {} entries", 256);
+    crate::e9_println!("IDT done");
 }
 
 pub fn load() {
@@ -550,6 +560,22 @@ pub fn register_ahci_irq(irq: u8) {
     }
     unlock_idt_storage();
     log::info!("AHCI IRQ {} registered on vector {:#x}", irq, vector);
+}
+
+/// Register the NVMe storage controller IRQ handler for a specific vector.
+///
+/// Used when MSI/MSI-X is active — the vector comes directly from
+/// `msi::probe_and_enable()` instead of being derived from the IRQ line.
+pub fn register_nvme_irq_vector(vector: u8) {
+    lock_idt_storage();
+    unsafe {
+        let idt = &raw mut IDT_STORAGE;
+        (&mut *idt)[vector]
+            .set_handler_fn(nvme_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR);
+        unlock_idt_storage();
+    }
+    log::info!("NVMe IRQ vector {:#x} registered", vector);
 }
 
 /// Register the NVMe storage controller IRQ handler.
@@ -602,6 +628,20 @@ pub fn register_virtio_block_irq(irq: u8) {
 /// Register the xHCI USB controller IRQ handler.
 ///
 /// Called after xHCI initialization once the PCI interrupt line is known.
+/// Register the xHCI interrupt handler for a specific vector (MSI/MSI-X).
+pub fn register_xhci_irq_vector(vector: u8) {
+    lock_idt_storage();
+    unsafe {
+        let idt = &raw mut IDT_STORAGE;
+        (&mut *idt)[vector]
+            .set_handler_fn(xhci_handler)
+            .set_code_selector(KERNEL_CODE_SELECTOR);
+        (*idt).load_unsafe();
+    }
+    unlock_idt_storage();
+    log::info!("xHCI IRQ vector {:#x} registered", vector);
+}
+
 pub fn register_xhci_irq(irq: u8) {
     let vector = if irq < 16 {
         super::pic::PIC1_OFFSET + irq
@@ -679,7 +719,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
 }
 
 extern "x86-interrupt" fn non_maskable_interrupt_handler(stack_frame: InterruptStackFrame) {
-    // NMI can fire at any point : including the swapgs→iretq window.
+    // NMI can fire at any point : including the swapgs=>iretq window.
     // Use rdmsr to safely restore kernel GS if needed.
     let _gs = SwapGsGuard::new(needs_swapgs(stack_frame.code_segment.0));
     if crate::boot::panic::panic_in_progress() {
@@ -709,12 +749,12 @@ extern "x86-interrupt" fn page_fault_handler(
     let is_user = (cs & 3) == 3;
     // SAFETY: must be before any gs:[...] access – GS may point to user memory
     // if the fault fired from Ring 3 (after swapgs in elf_ring3_trampoline),
-    // OR during the swapgs→iretq window (CS=Ring0 but GS=user).
+    // OR during the swapgs=>iretq window (CS=Ring0 but GS=user).
     // needs_swapgs() uses rdmsr to catch both cases.
     let swapgs_needed = needs_swapgs(cs);
     let _gs = SwapGsGuard::new(swapgs_needed);
 
-    // Detect the swapgs→iretq window: CS=Ring0 but GS was user (0).
+    // Detect the swapgs=>iretq window: CS=Ring0 but GS was user (0).
     if swapgs_needed && !is_user {
         let fault_addr = x86_64::registers::control::Cr2::read()
             .as_ref()
@@ -1367,10 +1407,10 @@ fn dump_page_fault_full(
         // (translate_via_raw_pt) to prevent recursive page faults if the
         // process's Arc<AddressSpace> is partially initialized or corrupted.
         //
-        // Chain: &t.process → Arc<Process> data ptr (Arc::as_ptr)
-        //      → (*process).address_space.get() → *mut Arc<AddressSpace>
-        //      → Arc::as_ptr(arc_as) → *const AddressSpace
-        //      → (*addr_space).cr3_phys
+        // Chain: &t.process => Arc<Process> data ptr (Arc::as_ptr)
+        //      => (*process).address_space.get() => *mut Arc<AddressSpace>
+        //      => Arc::as_ptr(arc_as) => *const AddressSpace
+        //      => (*addr_space).cr3_phys
         //
         // Each step uses translate_via_raw_pt to verify the pointer is mapped
         // before dereferencing, using the hardware CR3 (cr3_phys) which always
@@ -1664,12 +1704,12 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 ) {
     let cs = stack_frame.code_segment.0;
     let is_user = (cs & 3) == 3;
-    // Use rdmsr-based check: catches the swapgs→iretq window where
+    // Use rdmsr-based check: catches the swapgs=>iretq window where
     // CS=Ring0 but GS=user (0).
     // Without this, #GP from a bad iretq would escalate to double fault => triple fault.
     let swapgs_needed = needs_swapgs(cs);
     let _gs = SwapGsGuard::new(swapgs_needed);
-    // Detect the swapgs→iretq window case: CS says Ring 0 but GS was user.
+    // Detect the swapgs=>iretq window case: CS says Ring 0 but GS was user.
     if swapgs_needed && !is_user {
         crate::serial_force_println!(
             "\x1b[31;1m[GPF]\x1b[0m SWAPGS-WINDOW: CS={:#x} (Ring0) but GS was user! rip={:#x} err={:#x} rsp={:#x}",
@@ -1992,8 +2032,8 @@ extern "x86-interrupt" fn xhci_handler(_stack_frame: InterruptStackFrame) {
 /// future NAPI-style poll can be driven from here).
 extern "x86-interrupt" fn nic_handler(stack_frame: InterruptStackFrame) {
     // SAFETY: SwapGsGuard restores kernel GS if we interrupted Ring 3.
-    // Without this guard, SpinLock::lock → current_cpu_index() reads gs:[0]
-    // and #PF if GS is still set to the user value (swapgs→iretq window).
+    // Without this guard, SpinLock::lock => current_cpu_index() reads gs:[0]
+    // and #PF if GS is still set to the user value (swapgs=>iretq window).
     let _gs = SwapGsGuard::new((stack_frame.code_segment.0 & 3) == 3);
 
     crate::hardware::nic::handle_interrupt();

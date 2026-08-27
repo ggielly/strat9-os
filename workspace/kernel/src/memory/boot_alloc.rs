@@ -53,7 +53,11 @@ impl BootAllocator {
     }
 
     pub fn init(&mut self, regions: &[MemoryRegion]) {
-        self.reset();
+        crate::e9_println!("BI init");
+        if self.len != 0 {
+            self.reset();
+        }
+        crate::e9_println!("BI reset");
 
         for region in regions {
             if !matches!(region.kind, MemoryKind::Free | MemoryKind::Reclaim) {
@@ -68,8 +72,10 @@ impl BootAllocator {
 
             self.push_region(BootRegion { start, end });
         }
+        crate::e9_println!("BI push");
 
         self.normalize_regions();
+        crate::e9_println!("BI norm1");
 
         for (base, size) in protected_ranges_snapshot().into_iter().flatten() {
             if size == 0 {
@@ -82,7 +88,9 @@ impl BootAllocator {
         }
 
         self.normalize_regions();
+        crate::e9_println!("BI norm2 pre");
         self.rebuild_accessible_limit();
+        crate::e9_println!("BI done");
     }
 
     pub fn alloc(&mut self, size: usize, align: usize) -> PhysAddr {
@@ -305,6 +313,7 @@ impl BootAllocator {
     }
 
     fn normalize_regions(&mut self) {
+        crate::e9_println!("NR begin");
         if self.len <= 1 {
             self.rebuild_accessible_limit();
             return;
@@ -404,7 +413,12 @@ static PROTECTED_RANGES: SpinLock<[Option<(u64, u64)>; MAX_PROTECTED_RANGES]> =
     SpinLock::new([None; MAX_PROTECTED_RANGES]);
 
 pub fn init_boot_allocator(regions: &[MemoryRegion]) {
-    BOOT_ALLOCATOR.lock().init(regions);
+    crate::e9_println!("IBA enter");
+    let mut guard = BOOT_ALLOCATOR.lock();
+    crate::e9_println!("IBA locked");
+    guard.init(regions);
+    crate::e9_println!("IBA init done");
+    drop(guard);
 }
 
 pub fn get_boot_allocator() -> &'static SpinLock<BootAllocator> {

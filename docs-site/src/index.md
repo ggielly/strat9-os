@@ -34,7 +34,7 @@ cargo make run-gui-smp
 | [Architecture Overview](./architecture.md) | Kernel subsystems, design principles, and data flow diagrams |
 | [Silo System](./silo.md) | Process isolation, resource limits, pledge/unveil, module loading |
 | [Memory Management](./memory-model.md) | Buddy allocator, slab heap, COW, page tables, vmalloc |
-| [Boot Sequence](./boot-sequence.md) | BIOS → bootloader → Limine → kernel init flow |
+| [Boot Sequence](./boot-sequence.md) | BIOS → bootloader → UEFI bootloader → kernel init flow |
 | [IPC Mechanisms](./ipc-mechanisms.md) | Channels, shared rings, semaphores, futexes |
 | [IPC Transport Architecture](./architecture-ipc-access-levels.md) | 3-level hybrid IPC model (TypeSafe / LockFree / MMU) |
 | [Driver Model](./driver-model.md) | Component trait, PCI, NIC, storage, USB drivers |

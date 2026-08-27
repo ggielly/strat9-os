@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 use crate::{
+    arch::x86_64::io::{inw, outw},
     hardware::pci_client::{self as pci, Bar, ProbeCriteria},
     memory::{allocate_zeroed_frame, phys_to_virt},
 };
@@ -51,6 +52,11 @@ const TD_TOKEN_ACTIVE: u32 = 1 << 23;
 const TD_TOKEN_IOC: u32 = 1 << 24;
 const TD_TOKEN_LS: u32 = 1 << 26;
 const TD_TOKEN_ERRCNT_SHIFT: u32 = 27;
+const TD_TOKEN_TOGGLE: u32 = 1 << 19;
+const TD_TOKEN_MAXPKT_SHIFT: u32 = 16;
+const TD_TOKEN_MAXPKT_MASK: u32 = 0x7FF << 16;
+const TD_TOKEN_DEVADDR_SHIFT: u32 = 9;
+const TD_TOKEN_ENDPT_SHIFT: u32 = 6;
 
 const TD_LINK_PTR_MASK: u32 = 0xFFFFFFF0;
 const TD_LINK_VF: u32 = 1 << 0;
@@ -227,6 +233,327 @@ impl UhciController {
         }
         self.ports[port].low_speed
     }
+
+    /// Reset a port and wait for enable.
+    unsafe fn reset_port(&self, port: usize) -> bool {
+        let mut portsc = self.read_portsc(port);
+        if portsc & PORTSC_CCS == 0 {
+            return false;
+        }
+
+        // Port reset
+        self.write_portsc(port, portsc | PORTSC_PR);
+        for _ in 0..10_000u32 {
+            core::hint::spin_loop();
+        }
+        self.write_portsc(port, self.read_portsc(port) & !PORTSC_PR);
+        for _ in 0..10_000u32 {
+            core::hint::spin_loop();
+        }
+
+        // Wait for port enable
+        for _ in 0..100_000u32 {
+            portsc = self.read_portsc(port);
+            if portsc & PORTSC_PE != 0 {
+                return true;
+            }
+            if portsc & PORTSC_CCS == 0 {
+                return false;
+            }
+            core::hint::spin_loop();
+        }
+        false
+    }
+
+    /// Execute a USB control transfer via a frame list slot.
+    ///
+    /// Temporarily replaces a frame list entry with our QH, waits for
+    /// completion, then restores the original entry.
+    unsafe fn ctrl_transfer(
+        &self,
+        port: usize,
+        setup_data: &[u8; 8],
+        data_buf: Option<&mut [u8]>,
+        data_len: usize,
+        device_addr: u8,
+        max_packet: u32,
+        low_speed: bool,
+    ) -> Result<usize, &'static str> {
+        // Allocate QH
+        let qh_frame = allocate_zeroed_frame().ok_or("UHCI: QH alloc failed")?;
+        let qh_phys = qh_frame.start_address.as_u64();
+        let qh_virt = phys_to_virt(qh_phys) as *mut UhciQH;
+
+        // Allocate setup TD
+        let td_setup_frame = allocate_zeroed_frame().ok_or("UHCI: TD alloc failed")?;
+        let td_setup_phys = td_setup_frame.start_address.as_u64();
+        let td_setup_virt = phys_to_virt(td_setup_phys) as *mut UhciTD;
+
+        // Allocate setup buffer
+        let setup_buf_frame = allocate_zeroed_frame().ok_or("UHCI: setup buf alloc failed")?;
+        let setup_buf_phys = setup_buf_frame.start_address.as_u64();
+        let setup_buf_virt = phys_to_virt(setup_buf_phys) as *mut u8;
+        core::ptr::copy_nonoverlapping(setup_data.as_ptr(), setup_buf_virt, 8);
+
+        let dir_in = (setup_data[0] & 0x80) != 0;
+        let has_data = data_buf.is_some();
+
+        // UHCI TD token layout (32-bit, spec §7.1.3):
+        //   31:29 = reserved
+        //   28:27 = error count
+        //   26    = low-speed device
+        //   25    = reserved
+        //   24    = IOC
+        //   23    = Active
+        //   22:20 = reserved
+        //   19    = Data Toggle
+        //   18:16 = total bytes (bits 10:0 of count, max 0x7FF=2047)
+        //   15    = reserved
+        //   14:9  = device address
+        //   8:6   = endpoint
+        //   5:0   = PID code
+
+        // ctrl_status field: Active + Error Count + Low Speed
+        let ctrl_base = TD_TOKEN_ACTIVE
+            | (3u32 << TD_TOKEN_ERRCNT_SHIFT)
+            | (if low_speed { TD_TOKEN_LS } else { 0 });
+
+        // token field: IOC + Data Toggle + Bytes + DevAddr + EndPt + PID
+        // Setup TD: PID=0x2D (SETUP), 8 bytes, DATA0 (toggle=0)
+        let setup_token = (8u32 << TD_TOKEN_MAXPKT_SHIFT)
+            | ((device_addr as u32 & 0x7F) << TD_TOKEN_DEVADDR_SHIFT)
+            | (0u32 << TD_TOKEN_ENDPT_SHIFT)
+            | 0x2Du32;                                     // PID = SETUP
+        (*td_setup_virt).link_ptr = 0;
+        (*td_setup_virt).ctrl_status = ctrl_base;
+        (*td_setup_virt).token = setup_token;
+        (*td_setup_virt).buffer = setup_buf_phys as u32;
+
+        // Allocate status TD (always needed)
+        let td_status_frame =
+            allocate_zeroed_frame().ok_or("UHCI: status TD alloc failed")?;
+        let td_status_phys = td_status_frame.start_address.as_u64();
+        let td_status_virt = phys_to_virt(td_status_phys) as *mut UhciTD;
+
+        if has_data && data_len > 0 {
+            // Allocate data buffer
+            let data_buf_frame =
+                allocate_zeroed_frame().ok_or("UHCI: data buf alloc failed")?;
+            let data_buf_phys_addr = data_buf_frame.start_address.as_u64();
+            let data_buf_virt_addr = phys_to_virt(data_buf_phys_addr) as *mut u8;
+
+            if !dir_in {
+                if let Some(ref buf) = data_buf {
+                    core::ptr::copy_nonoverlapping(buf.as_ptr(), data_buf_virt_addr, data_len);
+                }
+            }
+
+            // Data TD: toggle=1 (DATA1), PID IN/OUT
+            let td_data_frame =
+                allocate_zeroed_frame().ok_or("UHCI: data TD alloc failed")?;
+            let td_data_phys = td_data_frame.start_address.as_u64();
+            let td_data_virt = phys_to_virt(td_data_phys) as *mut UhciTD;
+
+            let data_pid: u32 = if dir_in { 0x69 } else { 0xE1 };
+            let data_token = TD_TOKEN_TOGGLE
+                | (((data_len as u32) & 0x7FF) << TD_TOKEN_MAXPKT_SHIFT)
+                | ((device_addr as u32 & 0x7F) << TD_TOKEN_DEVADDR_SHIFT)
+                | (0u32 << TD_TOKEN_ENDPT_SHIFT)
+                | data_pid;
+            (*td_data_virt).link_ptr = 0;
+            (*td_data_virt).ctrl_status = ctrl_base;
+            (*td_data_virt).token = data_token;
+            (*td_data_virt).buffer = data_buf_phys_addr as u32;
+
+            // Status TD: toggle=0, 0 bytes, IOC=1, PID opposite direction
+            let status_pid: u32 = if dir_in { 0xE1 } else { 0x69 };
+            let status_token = TD_TOKEN_IOC
+                | (0u32 << TD_TOKEN_MAXPKT_SHIFT)
+                | ((device_addr as u32 & 0x7F) << TD_TOKEN_DEVADDR_SHIFT)
+                | (0u32 << TD_TOKEN_ENDPT_SHIFT)
+                | status_pid;
+            (*td_status_virt).link_ptr = 0;
+            (*td_status_virt).ctrl_status = ctrl_base;
+            (*td_status_virt).token = status_token;
+            (*td_status_virt).buffer = 0;
+
+            // Chain TDs
+            (*td_setup_virt).link_ptr = (td_data_phys as u32) | TD_LINK_VF;
+            (*td_data_virt).link_ptr = (td_status_phys as u32) | TD_LINK_VF;
+        } else {
+            // Status-only TD: toggle=1, 0 bytes, IOC=1
+            let status_token = TD_TOKEN_IOC | TD_TOKEN_TOGGLE
+                | (0u32 << TD_TOKEN_MAXPKT_SHIFT)
+                | ((device_addr as u32 & 0x7F) << TD_TOKEN_DEVADDR_SHIFT)
+                | (0u32 << TD_TOKEN_ENDPT_SHIFT)
+                | 0x69u32;                                  // PID = IN
+            (*td_status_virt).link_ptr = 0;
+            (*td_status_virt).ctrl_status = ctrl_base;
+            (*td_status_virt).token = status_token;
+            (*td_status_virt).buffer = 0;
+
+            (*td_setup_virt).link_ptr = (td_status_phys as u32) | TD_LINK_VF;
+        }
+
+        // Set up QH
+        (*qh_virt).head_link = 0x0000_0002; // terminate
+        (*qh_virt).element_link = td_setup_phys as u32;
+
+        // Compute status TD physical address for completion polling
+        let status_td_phys = if has_data && data_len > 0 {
+            td_setup_phys + 64 // setup(32) + data(32) + status(32) at +64
+        } else {
+            td_setup_phys + 32 // setup(32) + status(32) at +32
+        };
+
+        // Point current frame to QH
+        let frame_idx = unsafe { inw(self.io_base + UHCI_FRNUM) } as usize % 1024;
+        let old_frame = core::ptr::read_volatile(self.frame_list.add(frame_idx));
+        core::ptr::write_volatile(
+            self.frame_list.add(frame_idx),
+            (qh_phys as u32 & 0xFFFFFFFE) | TD_LINK_QH,
+        );
+
+        // Wait for completion: poll the status TD
+        let status_td_virt = phys_to_virt(status_td_phys) as *const UhciTD;
+        let mut transferred = 0;
+        for _ in 0..1_000_000u32 {
+            let token = core::ptr::read_volatile(core::ptr::addr_of!((*status_td_virt).token));
+            if token & TD_TOKEN_ACTIVE == 0 {
+                if dir_in && has_data && data_len > 0 {
+                    if let Some(buf) = data_buf {
+                        // Data is in the data TD's buffer (setup + 32 bytes)
+                        let data_td_virt =
+                            phys_to_virt(td_setup_phys + 32) as *const UhciTD;
+                        let data_buf_ptr =
+                            phys_to_virt((*data_td_virt).buffer as u64) as *const u8;
+                        core::ptr::copy_nonoverlapping(data_buf_ptr, buf.as_mut_ptr(), data_len);
+                        transferred = data_len;
+                    }
+                }
+                break;
+            }
+            core::hint::spin_loop();
+        }
+
+        // Restore frame list
+        core::ptr::write_volatile(self.frame_list.add(frame_idx), old_frame);
+
+        Ok(transferred)
+    }
+
+    /// Enumerate connected ports and hand off HID devices.
+    fn enumerate_all_ports(&self) {
+        let mut usb_address: u8 = 1;
+
+        for port in 0..self.max_ports {
+            let portsc = unsafe { self.read_portsc(port) };
+            if portsc & PORTSC_CCS == 0 {
+                continue;
+            }
+
+            log::info!("[UHCI] Port {} connected, resetting...", port);
+
+            if !unsafe { self.reset_port(port) } {
+                log::warn!("[UHCI] Port {} reset failed", port);
+                continue;
+            }
+
+            let low_speed = unsafe { self.is_low_speed(port) };
+            let max_packet: u32 = if low_speed { 8 } else { 64 };
+            log::info!(
+                "[UHCI] Port {} low_speed={} max_pkt={}",
+                port,
+                low_speed,
+                max_packet
+            );
+
+            // Set address
+            let addr = usb_address;
+            let ctrl_dev_addr = [0x00u8, 0x05, addr, 0x00, 0x00, 0x00, 0x00, 0x00];
+            if unsafe {
+                self.ctrl_transfer(
+                    port,
+                    &ctrl_dev_addr,
+                    None,
+                    0,
+                    0,
+                    max_packet,
+                    low_speed,
+                )
+            }
+            .is_err()
+            {
+                log::warn!("[UHCI] Port {} set address failed", port);
+                continue;
+            }
+
+            // Get descriptor (8 bytes) to learn max_packet0
+            let get_desc_8 = [0x80u8, 0x06, 0x00, 0x01, 0x00, 0x00, 8, 0x00];
+            let mut desc8 = [0u8; 8];
+            if unsafe {
+                self.ctrl_transfer(
+                    port,
+                    &get_desc_8,
+                    Some(&mut desc8),
+                    8,
+                    addr,
+                    max_packet,
+                    low_speed,
+                )
+            }
+            .is_err()
+            {
+                log::warn!("[UHCI] Port {} get desc (8) failed", addr);
+                usb_address += 1;
+                continue;
+            }
+
+            let vid = u16::from_le_bytes([desc8[2], desc8[3]]);
+            let pid = u16::from_le_bytes([desc8[4], desc8[5]]);
+            let max_pkt0 = desc8[7] as u16;
+            log::info!(
+                "[UHCI] Port {} device VID={:04x} PID={:04x} max_pkt0={}",
+                port,
+                vid,
+                pid,
+                max_pkt0
+            );
+
+            // Get full 18-byte device descriptor
+            let get_desc_18 = [0x80u8, 0x06, 0x00, 0x01, 0x00, 0x00, 18, 0x00];
+            let mut dev_desc = [0u8; 18];
+            let _ = unsafe {
+                self.ctrl_transfer(
+                    port,
+                    &get_desc_18,
+                    Some(&mut dev_desc),
+                    18,
+                    addr,
+                    max_pkt0 as u32,
+                    low_speed,
+                )
+            };
+
+            // Set configuration (value=1)
+            let set_config = [0x00u8, 0x09, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00];
+            let _ = unsafe {
+                self.ctrl_transfer(
+                    port,
+                    &set_config,
+                    None,
+                    0,
+                    addr,
+                    max_pkt0 as u32,
+                    low_speed,
+                )
+            };
+
+            crate::hardware::usb::hid::enumerate_device(port, addr as u8, &dev_desc);
+
+            usb_address += 1;
+        }
+    }
 }
 
 static UHCI_CONTROLLERS: Mutex<Vec<Arc<UhciController>>> = Mutex::new(Vec::new());
@@ -257,6 +584,7 @@ pub fn init() {
         match unsafe { UhciController::new(pci_dev) } {
             Ok(controller) => {
                 log::info!("[UHCI] Initialized with {} ports", controller.port_count());
+                controller.enumerate_all_ports();
                 UHCI_CONTROLLERS.lock().push(controller);
             }
             Err(e) => {

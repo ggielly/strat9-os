@@ -13,6 +13,8 @@ pub enum SyscallError {
     PermissionDenied = -1,
     #[error("No such file or directory")]
     NotFound = -2,
+    #[error("No such process")]
+    NoSuchProcess = -3,
     #[error("Interrupted system call")]
     Interrupted = -4,
     #[error("Input/output error")]
@@ -89,6 +91,7 @@ impl SyscallError {
         match self {
             SyscallError::PermissionDenied => "EPERM",
             SyscallError::NotFound => "ENOENT",
+            SyscallError::NoSuchProcess => "ESRCH",
             SyscallError::Interrupted => "EINTR",
             SyscallError::IoError => "EIO",
             SyscallError::ArgumentListTooLong => "E2BIG",

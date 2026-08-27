@@ -59,6 +59,8 @@ const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
 const PT_TLS: u32 = 7;
+const PT_GNU_STACK: u32 = 0x6474_e551;
+const PT_GNU_RELRO: u32 = 0x6474_e552;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
 const PF_R: u32 = 4;
@@ -137,6 +139,7 @@ pub struct LoadedElfInfo {
     pub tls_filesz: u64,
     pub tls_memsz: u64,
     pub tls_align: u64,
+    pub stack_exec: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -674,6 +677,14 @@ fn write_user_u64(user_as: &AddressSpace, vaddr: u64, value: u64) -> Result<(), 
 /// The resolver is located at `resolver_vaddr` in the user address space.
 /// All RELATIVE relocations for this binary must have been applied first so
 /// that the resolver's own calls/addresses are correct.
+///
+/// # Security note
+///
+/// IFUNC resolvers execute as ordinary user-space functions, but this helper
+/// calls them from Ring 0 via HHDM.  A malicious or corrupted resolver can
+/// read/write kernel memory and escalate privileges.  This is acceptable for
+/// a single-address-space kernel that loads only trusted binaries, but must
+/// NOT be used if untrusted ELF images are ever loaded.
 fn call_ifunc_resolver(user_as: &AddressSpace, resolver_vaddr: u64) -> Result<u64, &'static str> {
     if resolver_vaddr >= USER_ADDR_MAX {
         return Err("IFUNC resolver address outside user space");
@@ -682,10 +693,16 @@ fn call_ifunc_resolver(user_as: &AddressSpace, resolver_vaddr: u64) -> Result<u6
         .translate(VirtAddr::new(resolver_vaddr))
         .ok_or("IFUNC resolver page not mapped")?;
     let hhdm_ptr = crate::memory::phys_to_virt(phys.as_u64());
+    log::warn!(
+        "[elf] IFUNC resolver at {:#x} executing in Ring 0 — security risk if binary is untrusted",
+        resolver_vaddr
+    );
     // SAFETY: hhdm_ptr points to a user page containing executable code.
     // The resolver is a simple function that returns a u64; it must not
     // access kernel state.  All RELATIVE relocations for this binary have
     // already been applied, so the resolver's own target addresses are valid.
+    //
+    // WARNING: this executes user code in Ring 0.  Safe only for trusted binaries.
     let resolver: extern "C" fn() -> u64 = unsafe { core::mem::transmute(hhdm_ptr as *const ()) };
     Ok(resolver())
 }
@@ -1073,9 +1090,9 @@ fn apply_dynamic_relocations(
                 return Err("Relocation value out of range");
             }
             let val_u64 = value as u64;
-            // Read back before write for diagnosis
+            #[cfg(debug_assertions)]
             if applied < 5 {
-                let r_addend_copy = rela.r_addend; // copy packed field to local
+                let r_addend_copy = rela.r_addend;
                 let mut before = [0u8; 8];
                 let _ = read_user_mapped_bytes(user_as, target, &mut before);
                 let before_val = u64::from_le_bytes(before);
@@ -1089,7 +1106,7 @@ fn apply_dynamic_relocations(
                 );
             }
             write_user_mapped_bytes(user_as, target, &val_u64.to_le_bytes())?;
-            // Read back after write for diagnosis
+            #[cfg(debug_assertions)]
             if applied < 5 {
                 let mut after = [0u8; 8];
                 let _ = read_user_mapped_bytes(user_as, target, &mut after);
@@ -1100,7 +1117,7 @@ fn apply_dynamic_relocations(
                     val_u64
                 );
             }
-            // Catch any relocation that writes a kernel-range address into user space.
+            #[cfg(debug_assertions)]
             if val_u64 >= 0xffff_8000_0000_0000 {
                 let r_addend_copy = rela.r_addend;
                 crate::e9_println!(
@@ -1114,6 +1131,7 @@ fn apply_dynamic_relocations(
     };
 
     let mut total_applied = 0usize;
+    #[cfg(debug_assertions)]
     crate::e9_println!(
         "[reloc] apply_dynamic_relocations: bias={:#x} rela_addr={:?} rela_size={} rela_count={:?}",
         load_bias,
@@ -1122,12 +1140,13 @@ fn apply_dynamic_relocations(
         rela_count_hint
     );
     if let Some(rela_base) = rela_addr {
-        total_applied += apply_rela_table(rela_base, rela_size, rela_count_hint)?;
+        let _ = total_applied += apply_rela_table(rela_base, rela_size, rela_count_hint)?;
     }
     if let Some(jmprel_base) = jmprel_addr {
-        total_applied += apply_rela_table(jmprel_base, jmprel_size, None)?;
+        let _ = total_applied += apply_rela_table(jmprel_base, jmprel_size, None)?;
     }
 
+    #[cfg(debug_assertions)]
     if total_applied > 0 {
         crate::e9_println!(
             "[reloc] applied {} RELA relocations (bias={:#x})",
@@ -1852,6 +1871,30 @@ fn load_elf_task_inner(
         apply_dynamic_relocations(&user_as, &phdrs, header.e_type, load_bias)?;
     }
 
+    // PT_GNU_RELRO: mark the RELRO range read-only after relocations.
+    if let Some(relro) = phdrs.iter().find(|ph| ph.p_type == PT_GNU_RELRO) {
+        if relro.p_memsz > 0 {
+            let relro_start = relro.p_vaddr.wrapping_add(load_bias) & !0xFFF;
+            let relro_end =
+                (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz + 0xFFF) & !0xFFF;
+            if relro_end > relro_start && relro_end <= USER_ADDR_MAX {
+                let ro_flags = VmaFlags {
+                    readable: true,
+                    writable: false,
+                    executable: false,
+                    user_accessible: true,
+                };
+                let relro_pages = ((relro_end - relro_start) / 4096) as usize;
+                apply_segment_permissions(&user_as, relro_start, relro_pages, ro_flags)?;
+                log::debug!(
+                    "[elf] PT_GNU_RELRO: {:#x}..{:#x} made read-only",
+                    relro_start,
+                    relro_end
+                );
+            }
+        }
+    }
+
     crate::e9_println!(
         "[trace][elf] load_elf_task segments_done count={} has_interp={}",
         load_count,
@@ -1938,10 +1981,15 @@ fn load_elf_task_inner(
     // underflow faults instead of silently corrupting neighbours.
     let stack_base = crate::kaslr::stack_base_with_jitter(crate::kaslr::draw_stack_jitter());
     let stack_top = crate::kaslr::stack_top_for(stack_base, stack_pages);
+    // PT_GNU_STACK with PF_X means the stack should be executable (legacy ABI).
+    // Without PT_GNU_STACK or without PF_X, the stack is NX (modern default).
+    let stack_exec = phdrs
+        .iter()
+        .any(|ph| ph.p_type == PT_GNU_STACK && (ph.p_flags & PF_X) != 0);
     let stack_flags = VmaFlags {
         readable: true,
         writable: true,
-        executable: false,
+        executable: stack_exec,
         user_accessible: true,
     };
     user_as.map_region(
@@ -2023,6 +2071,7 @@ fn load_elf_task_inner(
         }),
         stack_canary: core::sync::atomic::AtomicU64::new(stack_canary),
         stack_canary_addr: core::sync::atomic::AtomicU64::new(stack_top - 8),
+        kernel_stack_user: SyncUnsafeCell::new(None),
         name,
         process: Arc::new(crate::process::process::Process::new(pid, user_as)),
         pending_signals: super::signal::SignalSet::new(),
@@ -2171,6 +2220,30 @@ pub fn load_elf_image(
         apply_dynamic_relocations(user_as, &phdrs, header.e_type, load_bias)?;
     }
 
+    // PT_GNU_RELRO: mark the RELRO range read-only after relocations.
+    if let Some(relro) = phdrs.iter().find(|ph| ph.p_type == PT_GNU_RELRO) {
+        if relro.p_memsz > 0 {
+            let relro_start = relro.p_vaddr.wrapping_add(load_bias) & !0xFFF;
+            let relro_end =
+                (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz + 0xFFF) & !0xFFF;
+            if relro_end > relro_start && relro_end <= USER_ADDR_MAX {
+                let ro_flags = VmaFlags {
+                    readable: true,
+                    writable: false,
+                    executable: false,
+                    user_accessible: true,
+                };
+                let relro_pages = ((relro_end - relro_start) / 4096) as usize;
+                apply_segment_permissions(user_as, relro_start, relro_pages, ro_flags)?;
+                log::debug!(
+                    "[elf] PT_GNU_RELRO: {:#x}..{:#x} made read-only",
+                    relro_start,
+                    relro_end
+                );
+            }
+        }
+    }
+
     let (tls_vaddr, tls_filesz, tls_memsz, tls_align) =
         if let Some(tls) = phdrs.iter().find(|ph| ph.p_type == PT_TLS) {
             let align = core::cmp::max(tls.p_align, 1).next_power_of_two();
@@ -2207,6 +2280,10 @@ pub fn load_elf_image(
         interp_base = Some(interp_min_vaddr.saturating_add(interp_bias));
     }
 
+    let stack_exec = phdrs
+        .iter()
+        .any(|ph| ph.p_type == PT_GNU_STACK && (ph.p_flags & PF_X) != 0);
+
     Ok(LoadedElfInfo {
         runtime_entry,
         program_entry: entry,
@@ -2218,6 +2295,7 @@ pub fn load_elf_image(
         tls_filesz,
         tls_memsz,
         tls_align,
+        stack_exec,
     })
 }
 

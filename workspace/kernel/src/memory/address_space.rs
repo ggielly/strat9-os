@@ -235,7 +235,7 @@ impl AddressSpace {
 
         // ---------- LAPIC low-half mapping (HHDM=0 workaround) ----------
         //
-        // When Limine provides a non-zero HHDM offset the LAPIC is mapped in
+        // When the bootloader provides a non-zero HHDM offset the LAPIC is mapped in
         // PML4[256..512] (kernel half) and is already shared above.
         //
         // When HHDM=0 the LAPIC is identity-mapped at its physical address
@@ -721,7 +721,7 @@ impl AddressSpace {
         // Initialize COW refcount.
         //
         // Order-0 frames come from FrameAllocOptions which stamps refcount=1
-        // via CAS(REFCOUNT_UNUSED → 1) : the frame is already "sole owner".
+        // via CAS(REFCOUNT_UNUSED => 1) : the frame is already "sole owner".
         // Huge pages (order > 0) are raw-allocated with REFCOUNT_UNUSED still
         // in the metadata; initialise explicitly to 1 here.
         //

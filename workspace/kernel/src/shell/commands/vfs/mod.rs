@@ -83,9 +83,9 @@ fn normalize_path(path: &str) -> String {
 
 /// Resolve `path` relative to the shell CWD.
 ///
-/// - Empty or `""` → current directory.
-/// - Starts with `/` → treated as absolute (normalized).
-/// - Otherwise → joined with CWD and normalized.
+/// - Empty or `""` => current directory.
+/// - Starts with `/` => treated as absolute (normalized).
+/// - Otherwise => joined with CWD and normalized.
 pub fn resolve_shell_path(path: &str) -> String {
     if path.is_empty() {
         return get_cwd();
@@ -281,7 +281,7 @@ fn format_mtime(mtime: strat9_abi::data::TimeSpec) -> alloc::string::String {
     let hours = rem / 3600;
     let mins = (rem % 3600) / 60;
 
-    // Simple day-of-year calculation (no leap year handling — good enough)
+    // Simple day-of-year calculation (no leap year handling : good enough)
     let month_days: &[(u32, &str)] = &[
         (31, "Jan"),
         (28, "Feb"),

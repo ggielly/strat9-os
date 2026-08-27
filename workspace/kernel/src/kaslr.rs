@@ -38,27 +38,22 @@ pub fn init() {
         return;
     }
 
-    // We need 10 bytes total: 8 for mmap, 1 for stack, 1 for PIE.
-    // fill_random writes exactly buf.len() bytes.
-    let mut buf = [0u8; 10];
-    crate::entropy::fill_random(&mut buf);
-
-    let r0 = u64::from_le_bytes([
-        buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
-    ]);
-    // Use low byte for stack offset (1 byte = 0..255 pages = 0..1 MiB)
-    let r1 = buf[8];
-    // Use low byte for PIE offset (1 byte = 0..15 pages * 2 MiB = 0..30 MiB)
-    let r2 = buf[9];
+    // Use RDTSC for KASLR seed (avoids entropy pool hang during early boot)
+    let (lo, hi): (u32, u32);
+    unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nostack, nomem)); }
+    let seed = ((hi as u64) << 32) | lo as u64;
+    let r0 = seed.wrapping_mul(6364136223846793005);
+    let r1 = (seed >> 32) as u8;
+    let r2 = (seed >> 40) as u8;
 
     // Mmap base offset: 0 .. 256 MiB, aligned to 4 KiB.
     // Use bitmask instead of modulo to avoid modulo bias.
     let mmap_off = (r0 & 0x0FFF_FFFF) & !0xFFF;
     MMAP_BASE_OFFSET.store(mmap_off, Ordering::Relaxed);
 
-    // Stack base offset: 0 .. 255 pages = 0 ~ 1 MiB, aligned to 4 KiB.
-    // 1 byte gives 255 possible positions : enough to defeat fixed-address attacks.
-    let stack_off = (r1 as u64) & !0xFFF;
+    // Stack base offset: 0 .. 255 pages = 0 ~ 1 MiB.
+    // r1 is a byte (0..255); multiply by page size for byte offset.
+    let stack_off = (r1 as u64) * 4096;
     STACK_BASE_OFFSET.store(stack_off, Ordering::Relaxed);
 
     // PIE base offset: 0 .. 15 * 2 MiB = 0 ~ 30 MiB, aligned to 2 MiB.
@@ -68,7 +63,7 @@ pub fn init() {
 
     INITIALIZED.store(true, Ordering::Release);
 
-    log::info!(
+    crate::serial_println!(
         "[KASLR] mmap_base_off={:#x} stack_off={:#x} pie_off={:#x}",
         mmap_off,
         stack_off,

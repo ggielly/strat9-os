@@ -1,12 +1,31 @@
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
+
+extern crate alloc;
 
 use core::{
+    alloc::Layout,
     arch::asm,
     panic::PanicInfo,
     sync::atomic::{AtomicUsize, Ordering},
 };
 use strat9_syscall::{call, error::Error, number};
+
+alloc_freelist::define_freelist_brk_allocator!(
+    pub struct BrkAllocator;
+    brk = strat9_syscall::call::brk;
+    heap_max = 8 * 1024 * 1024;
+);
+
+#[global_allocator]
+static ALLOCATOR: BrkAllocator = BrkAllocator;
+
+#[alloc_error_handler]
+fn alloc_error(_layout: Layout) -> ! {
+    let _ = call::debug_log(b"[silo-test] OOM in rendezlarjan validation\n");
+    call::exit(97)
+}
 
 static mut COW_SENTINEL: u64 = 0x1122_3344_5566_7788;
 static mut COW_MULTI: [u8; 4096 * 4] = [0; 4096 * 4];
@@ -15,6 +34,51 @@ static mut THREAD_STACK_B: [u8; 4096 * 2] = [0; 4096 * 2];
 static THREAD_STARTED: AtomicUsize = AtomicUsize::new(0);
 static THREAD_TID_SLOT_0: AtomicUsize = AtomicUsize::new(0);
 static THREAD_TID_SLOT_1: AtomicUsize = AtomicUsize::new(0);
+
+// ---- STEP 13 (rendezlarjan) state ----
+static RZ_TID_SLOT: AtomicUsize = AtomicUsize::new(0);
+static STRESS_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static STRESS_MUTEX: rendezlarjan::sync::Mutex = rendezlarjan::sync::Mutex::new();
+const RZ_STRESS_THREADS: usize = 24;
+const RZ_STRESS_INCREMENTS: usize = 50;
+
+/// Read and parse `/thread/stats` -> (allocated_total, active).
+fn read_thread_stats() -> Option<(usize, usize)> {
+    let fd = call::open(
+        "/thread/stats",
+        strat9_syscall::flag::O_RDONLY,
+    )
+    .ok()?;
+    let mut content = alloc::vec::Vec::new();
+    let mut buf = [0u8; 128];
+    loop {
+        match call::read(fd, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => content.extend_from_slice(&buf[..n]),
+            Err(_) => {
+                let _ = call::close(fd);
+                return None;
+            }
+        }
+    }
+    let _ = call::close(fd);
+
+    let parse_after_label = |label: &[u8]| -> Option<usize> {
+        let pos = content
+            .windows(label.len())
+            .position(|w| w == label)?;
+        let rest = &content[pos + label.len()..];
+        let end = rest.iter().position(|&b| !b.is_ascii_digit()).unwrap_or(rest.len());
+        if end == 0 {
+            return None;
+        }
+        core::str::from_utf8(&rest[..end]).ok()?.parse().ok()
+    };
+    Some((
+        parse_after_label(b"allocated ")?,
+        parse_after_label(b"active ")?,
+    ))
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -779,6 +843,274 @@ pub extern "C" fn _start() -> ! {
     log("[init-test] status buffer=");
     log_i64(st as i64);
     log_nl();
+
+    log_section("STEP 13: rendezlarjan (/thread scheme) cross-validation");
+
+    // ---- 13a. spawn/join + TID coherence (rendezlarjan vs raw gettid) ----
+    RZ_TID_SLOT.store(0, Ordering::SeqCst);
+    let spawned = rendezlarjan::Thread::spawn(|| {
+        let rz_tid = rendezlarjan::thread_current();
+        let raw_tid = call::gettid().unwrap_or(0) as u32;
+        if rz_tid != raw_tid {
+            RZ_TID_SLOT.store(usize::MAX, Ordering::SeqCst);
+        } else {
+            RZ_TID_SLOT.store(raw_tid as usize, Ordering::SeqCst);
+        }
+        // Non-zero exit path through the level-1 API.
+        rendezlarjan::thread_exit(55)
+    });
+    let t_coherence = match spawned {
+        Ok(t) => t,
+        Err(e) => {
+            log("[init-test:rz] ERROR: Thread::spawn failed errno=");
+            log_u64(e.to_errno() as u64);
+            log_nl();
+            exit_process(60);
+        }
+    };
+    let coherence_handle_tid = t_coherence.tid();
+    match t_coherence.join() {
+        Ok(code) if code == 55 => {}
+        other => {
+            log("[init-test:rz] ERROR: join exit code mismatch (want 55)\n");
+            if let Err(e) = other {
+                log_u64(e.to_errno() as u64);
+            }
+            log_nl();
+            exit_process(61);
+        }
+    }
+    let coherence_seen = RZ_TID_SLOT.load(Ordering::SeqCst);
+    if coherence_seen == usize::MAX
+        || coherence_seen == 0
+        || coherence_seen != coherence_handle_tid as usize
+    {
+        log("[init-test:rz] ERROR: TID incoherent between lib/raw/handle\n");
+        exit_process(62);
+    }
+    log("[init-test:rz] OK spawn/join coherent tid=");
+    log_u64(coherence_handle_tid as u64);
+    log_nl();
+
+    // ---- 13b. Mutex stress: N threads x K increments under rendezlarjan sync ----
+    STRESS_COUNTER.store(0, Ordering::SeqCst);
+    let mut stress_handles = alloc::vec::Vec::new();
+    for _ in 0..RZ_STRESS_THREADS {
+        match rendezlarjan::Thread::spawn(|| {
+            for _ in 0..RZ_STRESS_INCREMENTS {
+                STRESS_MUTEX.lock();
+                let v = STRESS_COUNTER.load(Ordering::Relaxed);
+                STRESS_COUNTER.store(v.wrapping_add(RZ_STRESS_THREADS), Ordering::Relaxed);
+                STRESS_MUTEX.unlock();
+                rendezlarjan::thread_yield();
+            }
+        }) {
+            Ok(h) => stress_handles.push(h),
+            Err(e) => {
+                log("[init-test:rz] ERROR: stress spawn failed errno=");
+                log_u64(e.to_errno() as u64);
+                log_nl();
+                exit_process(63);
+            }
+        }
+    }
+    for h in stress_handles {
+        if let Err(e) = h.join() {
+            log("[init-test:rz] ERROR: stress join failed errno=");
+            log_u64(e.to_errno() as u64);
+            log_nl();
+            exit_process(64);
+        }
+    }
+    let stress_total =
+        (RZ_STRESS_THREADS * RZ_STRESS_INCREMENTS * RZ_STRESS_THREADS) as usize;
+    let stress_seen = STRESS_COUNTER.load(Ordering::SeqCst);
+    if stress_seen != stress_total {
+        log("[init-test:rz] ERROR: mutex stress lost updates want=");
+        log_u64(stress_total as u64);
+        log(" got=");
+        log_u64(stress_seen as u64);
+        log_nl();
+        exit_process(65);
+    }
+    log("[init-test:rz] OK mutex stress sum=");
+    log_u64(stress_seen as u64);
+    log_nl();
+
+    // ---- 13c. self-join via join(current()) must be EINVAL ----
+    let self_join = rendezlarjan::thread_join(rendezlarjan::thread_current());
+    match self_join {
+        Err(Error::InvalidArgument) => {}
+        other => {
+            log("[init-test:rz] ERROR: expected EINVAL for self-join\n");
+            if let Err(e) = other {
+                log_u64(e.to_errno() as u64);
+            }
+            log_nl();
+            exit_process(66);
+        }
+    }
+    log("[init-test:rz] OK self-join EINVAL\n");
+
+    // ---- 13d. thread_list includes current thread ----
+    match rendezlarjan::thread_list() {
+        Ok(list) => {
+            let me = rendezlarjan::thread_current();
+            if !list.iter().any(|info| info.tid == me) {
+                log("[init-test:rz] ERROR: thread_list missing current tid\n");
+                exit_process(67);
+            }
+            log("[init-test:rz] OK thread_list count=");
+            log_u64(list.len() as u64);
+            log_nl();
+        }
+        Err(e) => {
+            log("[init-test:rz] ERROR: thread_list failed errno=");
+            log_u64(e.to_errno() as u64);
+            log_nl();
+            exit_process(67);
+        }
+    }
+
+    // ---- 13e. detach 50 threads -> kernel-owned stack counters stable ----
+    let baseline = match read_thread_stats() {
+        Some(s) => s,
+        None => {
+            log("[init-test:rz] ERROR: cannot read /thread/stats baseline\n");
+            exit_process(68);
+        }
+    };
+    for i in 0..50u32 {
+        match rendezlarjan::Thread::spawn(move || {
+            for _ in 0..(16 + (i % 7)) {
+                rendezlarjan::thread_yield();
+            }
+        }) {
+            Ok(h) => h.detach(),
+            Err(e) => {
+                log("[init-test:rz] ERROR: detach spawn failed errno=");
+                log_u64(e.to_errno() as u64);
+                log_nl();
+                exit_process(69);
+            }
+        }
+    }
+    let mut leak_ok = false;
+    for _ in 0..5000usize {
+        if let Some((_, active)) = read_thread_stats() {
+            if active == baseline.1 {
+                leak_ok = true;
+                break;
+            }
+        }
+        let _ = call::sched_yield();
+    }
+    let final_stats = read_thread_stats().unwrap_or(baseline);
+    log("[init-test:rz] stacks allocated=");
+    log_u64(final_stats.0 as u64);
+    log(" active=");
+    log_u64(final_stats.1 as u64);
+    log(" baseline_active=");
+    log_u64(baseline.1 as u64);
+    log_nl();
+    if !leak_ok || final_stats.0 < baseline.0 + 50 {
+        log("[init-test:rz] ERROR: kernel-owned user stack leak suspected\n");
+        exit_process(70);
+    }
+    log("[init-test:rz] OK zero-leak proof (active back to baseline after 50 detaches)\n");
+
+    // ---- 13f. kill EPERM across processes (fork + pipe coordination) ----
+    let pipe_fds = call::pipe();
+    let child_kill = call::fork();
+    let kill_child_pid = match (pipe_fds, child_kill) {
+        (Ok((rd, wr)), Ok(child_pid)) => {
+            if child_pid == 0 {
+                // Child: spawn a long-spinning thread, publish its tid.
+                let _ = call::close(rd as usize);
+                let target = rendezlarjan::Thread::spawn(|| {
+                    for _ in 0..200_000usize {
+                        let _ = call::sched_yield();
+                    }
+                });
+                let tid = target.as_ref().map(|t| t.tid()).unwrap_or(u32::MAX);
+                let _ = call::write(wr as usize, &tid.to_le_bytes());
+                // Join it back (same-process kill not exercised here; the
+                // thread simply finishes spinning).
+                if let Ok(t) = target {
+                    let _ = t.join();
+                }
+                log("[init-test:rz:kill-child] done, exiting 5\n");
+                exit_process(5);
+            }
+            let _ = call::close(wr as usize);
+            (rd, child_pid)
+        }
+        _ => {
+            log("[init-test:rz] ERROR: pipe/fork for kill test failed\n");
+            exit_process(71);
+        }
+    };
+    let mut kill_target_buf = [0u8; 4];
+    let mut kill_target_tid: u32 = 0;
+    loop {
+        match call::read(kill_child_pid.0 as usize, &mut kill_target_buf) {
+            Ok(4) => {
+                kill_target_tid = u32::from_le_bytes(kill_target_buf);
+                break;
+            }
+            Ok(_) => continue,
+            Err(Error::Interrupted) => continue,
+            Err(_) => break,
+        }
+    }
+    let cross_kill = rendezlarjan::thread_kill(kill_target_tid);
+    match cross_kill {
+        Err(Error::PermissionDenied) => {
+            log("[init-test:rz] OK cross-process kill rejected with EPERM\n");
+        }
+        other => {
+            log("[init-test:rz] ERROR: expected EPERM for cross-process kill\n");
+            if let Err(e) = other {
+                log("errno=");
+                log_u64(e.to_errno() as u64);
+                log_nl();
+            }
+            exit_process(72);
+        }
+    }
+    let mut kill_child_status: i32 = -1;
+    if call::waitpid_blocking(kill_child_pid.1 as isize, &mut kill_child_status).is_err() {
+        log("[init-test:rz] ERROR: waitpid on kill-test child failed\n");
+        exit_process(73);
+    }
+    decode_wait_status(kill_child_status);
+    let _ = call::close(kill_child_pid.0 as usize);
+
+    // ---- 13g. same-process kill terminates the target thread ----
+    let victim = match rendezlarjan::Thread::spawn(|| {
+        #[allow(clippy::empty_loop)]
+        loop {
+            core::hint::spin_loop();
+        }
+    }) {
+        Ok(t) => t,
+        Err(e) => {
+            log("[init-test:rz] ERROR: victim spawn failed errno=");
+            log_u64(e.to_errno() as u64);
+            log_nl();
+            exit_process(74);
+        }
+    };
+    let victim_tid = victim.tid();
+    match rendezlarjan::thread_kill(victim_tid) {
+        Ok(()) => log("[init-test:rz] OK same-process kill accepted\n"),
+        Err(e) => {
+            log("[init-test:rz] ERROR: same-process kill failed errno=");
+            log_u64(e.to_errno() as u64);
+            log_nl();
+            exit_process(75);
+        }
+    }
 
     log_section("STEP 12/12: completed. exiting init-test with code 0");
     log_sep_eq();

@@ -291,6 +291,20 @@ impl PciDevice {
         let _ = cfg_write(self.address, offset, 4, value);
     }
 
+    /// Reads config u32 from extended config space (offset >= 0x100).
+    pub fn read_config_u32_ext(&self, offset: u16) -> Option<u32> {
+        if let Some(bytes) = open_read_all(&format!(
+            "/bus/pci/cfg/{:02x}:{:02x}.{:x}/{:02x}/{}",
+            self.address.bus, self.address.device, self.address.function, offset, 4
+        )) {
+            let text = core::str::from_utf8(&bytes).ok()?.trim();
+            let hex = text.strip_prefix("0x")?;
+            return u32::from_str_radix(hex, 16).ok();
+        }
+        let dev = arch_dev_handle(self.address);
+        dev.read_config_u32_ext(offset)
+    }
+
     /// Walk the PCI capability linked-list and return the config-space offset
     /// of the capability identified by `cap_id`, or `None` if not found.
     ///

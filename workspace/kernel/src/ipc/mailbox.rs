@@ -121,7 +121,7 @@ impl NodePool {
                 data: IpcMessage::new(0),
             };
             let ptr = Box::into_raw(Box::new(msg)) as usize;
-            // Lock-free push onto pool head (no tag needed — pool is IRQ-safe
+            // Lock-free push onto pool head (no tag needed : pool is IRQ-safe
             // and the tag in the mailbox head already provides ABA protection).
             loop {
                 let current = self.head.load(Ordering::Relaxed);
@@ -286,7 +286,7 @@ impl IntrusiveMailbox {
                 // gets a valid owned reference; the memory stays valid
                 // because the pool holds a separate reference.
                 // When the caller drops this Box, it frees the heap
-                // allocation (which is fine — a pool node was pushed
+                // allocation (which is fine : a pool node was pushed
                 // back to the pool, and the Box frees a redundant copy).
                 //
                 // This is a deliberate trade-off: pool nodes are recycled

@@ -30,6 +30,7 @@ use spin::RwLock as SpinRwLock;
 static NET_HDR_SIZE: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(mem::size_of::<VirtioNetHeader>());
 const RX_FRAME_TRACK_CAPACITY: usize = 128;
+const TX_FRAME_TRACK_CAPACITY: usize = 128;
 
 /// VirtIO net device features
 pub mod features {
@@ -82,7 +83,8 @@ pub struct VirtioNetDevice {
     rx_queue: SpinLock<Virtqueue>,
     tx_queue: SpinLock<Virtqueue>,
     mac_address: [u8; 6],
-    pub rx_frames: SpinLock<FixedQueue<(PhysFrame, u8), RX_FRAME_TRACK_CAPACITY>>, // Track allocated RX frames
+    pub rx_frames: SpinLock<FixedQueue<(PhysFrame, u8), RX_FRAME_TRACK_CAPACITY>>,
+    tx_frames: SpinLock<FixedQueue<(PhysFrame, u8), TX_FRAME_TRACK_CAPACITY>>,
 }
 
 // Send and Sync are safe because we use SpinLocks
@@ -175,6 +177,7 @@ impl VirtioNetDevice {
             tx_queue: SpinLock::new(tx_queue),
             mac_address,
             rx_frames: SpinLock::new(FixedQueue::new()),
+            tx_frames: SpinLock::new(FixedQueue::new()),
         };
 
         // Fill RX queue with buffers
@@ -270,12 +273,6 @@ impl NetworkDevice for VirtioNetDevice {
 
         // Check if there's a used buffer
         if !rx_queue.has_used() {
-            let (dev_idx, drv_idx) = rx_queue.used_indices();
-            log::info!(
-                "[vtnet] rx: no used buf (used.idx={}, last_used={})",
-                dev_idx,
-                drv_idx,
-            );
             return Err(NetError::NoPacket);
         }
 
@@ -300,32 +297,12 @@ impl NetworkDevice for VirtioNetDevice {
         let header = unsafe { ptr::read(header_ptr) };
         let packet_len = (len as usize).saturating_sub(hdr_size);
 
-        // Dump first 16 bytes of packet payload for diagnostics
-        let mut dump = [0u8; 16];
-        if packet_len >= 16 {
-            unsafe {
-                ptr::copy_nonoverlapping(data_ptr, dump.as_mut_ptr(), 16);
-            }
-        }
-        log::info!(
-            "[vtnet] rx: token={} len={} hdr={} pkt={} flags={} num_buf={}",
+        log::trace!(
+            "[vtnet] rx: token={} len={} pkt={} flags={}",
             token,
             len,
-            hdr_size,
             packet_len,
             header.flags,
-            header.num_buffers,
-        );
-        log::info!(
-            "[vtnet] rx: pkt[0..16] = {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} ...",
-            dump[0],
-            dump[1],
-            dump[2],
-            dump[3],
-            dump[4],
-            dump[5],
-            dump[6],
-            dump[7],
         );
 
         if buf.len() < packet_len {
@@ -388,7 +365,19 @@ impl NetworkDevice for VirtioNetDevice {
 
         // Submit to TX queue
         let mut tx_queue = self.tx_queue.lock();
-        let _ = tx_queue
+
+        // Reclaim completed TX buffers before submitting.
+        // The used ring is FIFO so draining here frees exactly the frames
+        // that were pushed earlier in the same order.
+        while let Some((_token, _len)) = tx_queue.get_used() {
+            if let Some((_frame, order)) = self.tx_frames.lock().pop_front() {
+                crate::sync::with_irqs_disabled(|token| {
+                    memory::free_phys_contiguous(token, _frame, order);
+                });
+            }
+        }
+
+        let head = tx_queue
             .add_buffer(&[(buf_addr, buf_size as u32, false)]) // Device Readable
             .map_err(|_| {
                 // Free buffer if queue is full
@@ -398,18 +387,22 @@ impl NetworkDevice for VirtioNetDevice {
                 NetError::TxQueueFull
             })?;
 
-        log::info!("[vtnet] tx: submit {} bytes @ {:#x}", buf_size, buf_addr,);
+        if let Err(_) = self.tx_frames.lock().push_back((buf_frame, buf_order)) {
+            // Tracking queue full : free the frame we just submitted
+            // (the descriptor is already in the available ring but the
+            // device hasn't seen it yet; get_used will reclaim it later
+            // and we won't be able to free it.  This is a safety net.)
+            crate::sync::with_irqs_disabled(|token| {
+                memory::free_phys_contiguous(token, buf_frame, buf_order);
+            });
+        }
+
+        log::trace!("[vtnet] tx: submit {} bytes @ {:#x}", buf_size, buf_addr);
 
         if tx_queue.should_notify() {
             self.device.notify_queue(1);
         }
         drop(tx_queue);
-
-        // Non-blocking: return immediately without waiting for TX completion.
-        // The device will DMA the packet from the buffer and signal completion
-        // via the used ring. The buffer is intentionally leaked for now to keep
-        // the transmit path simple and non-blocking.
-        // TODO: track pending TX buffers and free them after device completion.
 
         Ok(())
     }

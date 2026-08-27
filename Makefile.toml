@@ -17,11 +17,6 @@ STRAT9_UPLINK_IFACE = "eth0"
 # Build Tasks - Bootloader & Toolchain
 # =============================================================================
 
-[tasks.setup-limine]
-description = "Download and setup Limine bootloader"
-command = "bash"
-args = ["tools/scripts/setup-limine.sh"]
-
 [tasks.setup-musl]
 description = "Clone/update external musl"
 script_runner = "@shell"
@@ -108,7 +103,6 @@ description = "Format all code"
 command = "cargo"
 args = ["fmt", "--all"]
 
-# =============================================================================
 # Anti-regression test tasks (see docs-site/src/testing-architecture.md)
 # =============================================================================
 
@@ -196,11 +190,15 @@ run_task = { name = "qemu-selftest" }
 # Image generation
 # =============================================================================
 
-[tasks.limine-image]
-description = "Create bootable ISO/IMG with Limine + kernel (debug)"
+# NOTE: U-Boot image is legacy. Use UEFI instead:
+#   cargo make uefi-image
+#   cargo make run-uefi
+
+[tasks.uboot-image]
+description = "[LEGACY] Create bootable disk image with U-Boot + kernel (debug)"
 dependencies = [
     "build-musl",
-    "setup-limine",
+    "setup-uboot",
     "kernel",
     "strate-ext4-release",
     "strate-fs-ramfs-release",
@@ -220,14 +218,14 @@ dependencies = [
 env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_INCLUDE_TESTS = "0" }
 script_runner = "@shell"
 script = ['''
-bash tools/scripts/create-limine-image.sh
+bash tools/scripts/create-uboot-image.sh
 ''']
 
-[tasks.limine-image-release]
-description = "Create bootable ISO/IMG with Limine + kernel (release)"
+[tasks.uboot-image-release]
+description = "[LEGACY] Create bootable disk image with U-Boot + kernel (release)"
 dependencies = [
     "build-musl",
-    "setup-limine",
+    "setup-uboot",
     "kernel-release",
     "strate-ext4-release",
     "strate-fs-ramfs-release",
@@ -247,7 +245,7 @@ dependencies = [
 env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_PROFILE = "release", STRAT9_INCLUDE_TESTS = "0" }
 script_runner = "@shell"
 script = ['''
-bash tools/scripts/create-limine-image.sh
+bash tools/scripts/create-uboot-image.sh
 ''']
 
 # =============================================================================
@@ -256,7 +254,7 @@ bash tools/scripts/create-limine-image.sh
 
 [tasks.run-gui-smp-release]
 description = "Run kernel SMP release with GUI"
-dependencies = ["limine-image-release"]
+dependencies = ["uefi-image-release"]
 script_runner = "@shell"
 script = ['''
 ${QEMU} \
@@ -264,10 +262,11 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -cdrom build/strat9-os.iso \
-    -drive file=qemu-stuff/disk.img,format=raw \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
+    -drive file=build/strat9-os-uefi.img,format=raw \
     -device virtio-gpu-gl \
-    -display sdl,gl=on \
+    -display gtk,gl=on \
     -device usb-ehci \
     -device usb-kbd \
     -device usb-tablet \
@@ -280,7 +279,7 @@ ${QEMU} \
 
 [tasks.run-gui-smp-dev-opt]
 description = "Run kernel SMP dev-opt with GUI"
-dependencies = ["limine-image"]
+dependencies = ["uefi-image"]
 script_runner = "@shell"
 script = ['''
 ${QEMU} \
@@ -288,10 +287,11 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -cdrom build/strat9-os.iso \
-    -drive file=qemu-stuff/disk.img,format=raw \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
+    -drive file=build/strat9-os-uefi.img,format=raw \
     -device virtio-gpu-gl \
-    -display sdl,gl=on \
+    -display gtk,gl=on \
     -device usb-ehci \
     -device usb-kbd \
     -device usb-tablet \
@@ -304,7 +304,7 @@ ${QEMU} \
 
 [tasks.run-debug]
 description = "Run kernel debug (no GUI, serial only)"
-dependencies = ["limine-image"]
+dependencies = ["uefi-image"]
 script_runner = "@shell"
 script = ['''
 ${QEMU} \
@@ -312,15 +312,16 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -cdrom build/strat9-os.iso \
-    -drive file=qemu-stuff/disk.img,format=raw \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
+    -drive file=build/strat9-os-uefi.img,format=raw \
     -nographic \
     -no-reboot
 ''']
 
 [tasks.run-debug-headless]
 description = "Run kernel debug headless (no display)"
-dependencies = ["limine-image"]
+dependencies = ["uefi-image"]
 script_runner = "@shell"
 script = ['''
 ${QEMU} \
@@ -328,8 +329,9 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -cdrom build/strat9-os.iso \
-    -drive file=qemu-stuff/disk.img,format=raw \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
+    -drive file=build/strat9-os-uefi.img,format=raw \
     -display none \
     -serial stdio \
     -no-reboot
@@ -337,7 +339,7 @@ ${QEMU} \
 
 [tasks.run-debug-net]
 description = "Run kernel debug with networking (e1000 NAT)"
-dependencies = ["limine-image"]
+dependencies = ["uefi-image"]
 script_runner = "@shell"
 script = ['''
 ${QEMU} \
@@ -345,8 +347,9 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -cdrom build/strat9-os.iso \
-    -drive file=qemu-stuff/disk.img,format=raw \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
+    -drive file=build/strat9-os-uefi.img,format=raw \
     -device e1000,netdev=net0 \
     -netdev user,id=net0,hostfwd=tcp::2222-:22 \
     -nographic \
@@ -355,7 +358,7 @@ ${QEMU} \
 
 [tasks.run-debug-net-headless]
 description = "Run kernel debug with networking headless"
-dependencies = ["limine-image"]
+dependencies = ["uefi-image"]
 script_runner = "@shell"
 script = ['''
 ${QEMU} \
@@ -363,8 +366,9 @@ ${QEMU} \
     -cpu qemu64 \
     -smp 4 \
     -m 2G \
-    -cdrom build/strat9-os.iso \
-    -drive file=qemu-stuff/disk.img,format=raw \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
+    -drive file=build/strat9-os-uefi.img,format=raw \
     -device e1000,netdev=net0 \
     -netdev user,id=net0,hostfwd=tcp::2222-:22 \
     -display none \
@@ -393,7 +397,7 @@ bash tools/scripts/create-image.sh
 
 [tasks.test-boot]
 description = "Boot test: kernel + serial output verification"
-dependencies = ["limine-image"]
+dependencies = ["uefi-image"]
 script_runner = "@shell"
 script = ['''
 timeout 30 ${QEMU} \
@@ -401,9 +405,119 @@ timeout 30 ${QEMU} \
     -cpu qemu64 \
     -smp 1 \
     -m 1G \
-    -cdrom build/strat9-os.iso \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
+    -drive file=build/strat9-os-uefi.img,format=raw \
     -nographic \
     -no-reboot 2>&1 | head -50
+''']
+
+# =============================================================================
+# UEFI Bootloader Tasks
+# =============================================================================
+
+[tasks.bootloader-uefi]
+description = "Build UEFI bootloader"
+command = "cargo"
+args = ["build", "--target", "x86_64-unknown-uefi", "-p", "strat9-bootloader"]
+
+[tasks.bootloader-uefi-release]
+description = "Build UEFI bootloader (release)"
+command = "cargo"
+args = ["build", "--target", "x86_64-unknown-uefi", "-p", "strat9-bootloader", "--release"]
+
+[tasks.uefi-image]
+description = "Create UEFI bootable image"
+dependencies = [
+    "bootloader-uefi",
+    "kernel",
+    "strate-ext4-release",
+    "strate-fs-ramfs-release",
+    "strate-init-release",
+    "strate-console-admin-release",
+    "strate-graphical-release",
+    "strate-net-release",
+    "strate-bus-release",
+    "strate-wasm-release",
+    "strate-webrtc-release",
+    "dhcp-client-release",
+    "ping-release",
+    "telnetd-release",
+    "udp-tool-release",
+    "strate-web-admin-release",
+]
+env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_PROFILE = "debug" }
+script_runner = "@shell"
+script = ['''
+bash tools/scripts/create-uefi-image.sh
+''']
+
+[tasks.uefi-image-release]
+description = "Create UEFI bootable image (release)"
+dependencies = [
+    "bootloader-uefi-release",
+    "kernel-release",
+    "strate-ext4-release",
+    "strate-fs-ramfs-release",
+    "strate-init-release",
+    "strate-console-admin-release",
+    "strate-graphical-release",
+    "strate-net-release",
+    "strate-bus-release",
+    "strate-wasm-release",
+    "strate-webrtc-release",
+    "dhcp-client-release",
+    "ping-release",
+    "telnetd-release",
+    "udp-tool-release",
+    "strate-web-admin-release",
+]
+env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_PROFILE = "release" }
+script_runner = "@shell"
+script = ['''
+bash tools/scripts/create-uefi-image.sh
+''']
+
+[tasks.run-uefi]
+description = "Run with OVMF UEFI firmware"
+dependencies = ["uefi-image"]
+script_runner = "@shell"
+script = ['''
+${QEMU} \
+    -machine q35 \
+    -cpu qemu64 \
+    -smp 4 \
+    -m 2G \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/usr/share/OVMF/OVMF_VARS_4M.fd \
+    -drive file=build/strat9-os-uefi.img,format=raw \
+    -serial mon:stdio \
+    -no-reboot
+''']
+
+[tasks.run-uefi-gui]
+description = "Run UEFI with GUI (OVMF + display)"
+dependencies = ["uefi-image"]
+script_runner = "@shell"
+script = ['''
+${QEMU} \
+    -machine q35 \
+    -cpu qemu64 \
+    -smp 4 \
+    -m 2G \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/usr/share/OVMF/OVMF_VARS_4M.fd \
+    -drive file=build/strat9-os-uefi.img,format=raw \
+    -device virtio-gpu-gl \
+    -display sdl,gl=on \
+    -device usb-ehci \
+    -device usb-kbd \
+    -device usb-tablet \
+    -device qemu-xhci \
+    -device virtio-net-pci,netdev=net0 \
+    -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+    -serial mon:stdio \
+    -no-reboot
 ''']
 
 # =============================================================================
@@ -578,48 +692,48 @@ args = ["build", "--release", "--target", "x86_64-pc-windows-gnu"]
 
 [tasks.run-wingui]
 description = "Run with Windows GUI (debug)"
-dependencies = ["limine-image"]
+dependencies = ["uefi-image"]
 command = "cargo"
 args = ["run", "--release", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows"]
 
 [tasks.run-wingui-smp]
 description = "Run with Windows GUI SMP (debug)"
-dependencies = ["limine-image"]
+dependencies = ["uefi-image"]
 command = "cargo"
 args = ["run", "--release", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows", "--", "--smp"]
 
 [tasks.run-wingui-release]
 description = "Run with Windows GUI (release)"
-dependencies = ["limine-image-release"]
+dependencies = ["uefi-image-release"]
 command = "cargo"
 args = ["run", "--release", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows"]
 
 [tasks.run-wingui-smp-release]
 description = "Run with Windows GUI SMP (release)"
-dependencies = ["limine-image-release"]
+dependencies = ["uefi-image-release"]
 command = "cargo"
 args = ["run", "--release", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows", "--", "--smp"]
 
 [tasks.run-wingui-dev-opt]
 description = "Run with Windows GUI (dev-opt)"
-dependencies = ["limine-image"]
+dependencies = ["uefi-image"]
 command = "cargo"
 args = ["run", "--profile", "dev-opt", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows"]
 
 [tasks.run-wingui-smp-dev-opt]
 description = "Run with Windows GUI SMP (dev-opt)"
-dependencies = ["limine-image"]
+dependencies = ["uefi-image"]
 command = "cargo"
 args = ["run", "--profile", "dev-opt", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows", "--", "--smp"]
 
 [tasks.run-wingui-test]
 description = "Run Windows GUI test"
-dependencies = ["limine-image"]
+dependencies = ["uefi-image"]
 command = "cargo"
 args = ["run", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows", "--", "--test"]
 
 [tasks.run-wingui-test-release]
 description = "Run Windows GUI test (release)"
-dependencies = ["limine-image-release"]
+dependencies = ["uefi-image-release"]
 command = "cargo"
 args = ["run", "--release", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows", "--", "--test"]

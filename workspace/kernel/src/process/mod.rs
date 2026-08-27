@@ -19,6 +19,7 @@ pub mod errno_test;
 pub mod fork_test;
 #[cfg(feature = "selftest")]
 pub mod futex_test;
+pub mod kthread;
 #[cfg(feature = "selftest")]
 pub mod mmap_test;
 #[cfg(feature = "selftest")]
@@ -37,6 +38,7 @@ pub mod selftest;
 pub mod signal;
 pub mod task;
 pub mod test;
+pub mod thread_ops;
 #[cfg(feature = "selftest")]
 pub mod time_test;
 pub mod timer;

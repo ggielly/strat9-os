@@ -245,7 +245,7 @@ pub fn init() {
     SERIAL1.lock().init();
 }
 
-/// Parse kernel cmdline from Limine boot arguments.
+/// Parse kernel cmdline from UEFI bootloader boot arguments.
 ///
 /// `ptr` is a pointer to a null-terminated C string provided by the bootloader.
 /// `len` is the length of the cmdline string (including the null terminator).
@@ -342,13 +342,17 @@ pub fn _print(args: fmt::Arguments) {
     }
 
     // Normal mode: Use try_lock to avoid deadlock in interrupt handlers.
+    crate::e9_println!("_print enter");
     if let Some(mut port) = SERIAL1.try_lock() {
+        crate::e9_println!("_print locked");
         let mut prefix_writer = BootPrefixWriter::new(&mut *port);
         let mut writer = AnsiStylingWriter::new(&mut prefix_writer);
         let _ = writer.write_fmt(args);
+        crate::e9_println!("_print written");
         let _ = writer.finish();
         prefix_writer.finish();
     }
+    crate::e9_println!("_print exit");
 }
 
 /// Print to serial port bypassing the shared mutex.

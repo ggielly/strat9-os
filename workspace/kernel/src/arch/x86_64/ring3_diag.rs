@@ -6,7 +6,7 @@
 //!
 //! 1. **GDT** – CS/SS descriptors have DPL=3, P=1 and the code segment has L=1
 //!    (64‑bit).
-//! 2. **Paging** – every level (PML4 → PDPT → PD → PT) for `target_rip` and
+//! 2. **Paging** – every level (PML4 => PDPT => PD => PT) for `target_rip` and
 //!    `target_rsp` has the `USER_ACCESSIBLE` flag.
 //! 3. **Alignment** – `target_rsp` is 16‑byte aligned (System V ABI requirement).
 //! 4. **TSS** – a TSS is loaded (`TR ≠ 0`) and `rsp0` points into kernel space
@@ -74,7 +74,7 @@ fn desc_long_mode(raw: u64) -> bool {
 const PHYS_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
 /// Checks that `vaddr` is mapped and USER_ACCESSIBLE at every level of the
-/// page hierarchy (PML4 → PDPT → PD → PT).
+/// page hierarchy (PML4 => PDPT => PD => PT).
 ///
 /// Returns `Ok(())` if all levels have `PRESENT | USER_ACCESSIBLE` set.
 /// Otherwise returns `Err(&str)` naming the problematic level.
@@ -204,7 +204,7 @@ pub fn validate_ring3_state(target_rip: u64, target_rsp: u64, cs: u16, ss: u16) 
         gdt_limit,
     );
 
-    // Conversion selector → index in the qword table (RPL = bits [1:0],
+    // Conversion selector => index in the qword table (RPL = bits [1:0],
     // TI = bit 2 ; the byte index is in bits [15:3]).
     let cs_byte_offset = (cs & !0x7) as usize; // align to 8 bytes by masking RPL+TI
     let ss_byte_offset = (ss & !0x7) as usize;
@@ -417,7 +417,7 @@ pub fn validate_ring3_state(target_rip: u64, target_rsp: u64, cs: u16, ss: u16) 
         panic!(
             "[validate_ring3] TR=0 : no TSS loaded (instruction `ltr` never executed). \
              Without a TSS, the CPU cannot recover the kernel stack during an exception \
-             from Ring 3 → immediate Triple Fault. Call gdt::init() before this trampoline.",
+             from Ring 3 => immediate Triple Fault. Call gdt::init() before this trampoline.",
         );
     }
 
@@ -520,7 +520,7 @@ pub fn validate_ring3_state(target_rip: u64, target_rsp: u64, cs: u16, ss: u16) 
     // ====================================================
     crate::serial_force_println!(
         "[validate_ring3] === ALL RING 3 PREREQUISiTES VALIDATED === \
-         RIP={:#x} RSP={:#x} CS={:#x} SS={:#x} → iretq",
+         RIP={:#x} RSP={:#x} CS={:#x} SS={:#x} => iretq",
         target_rip,
         target_rsp,
         cs,
