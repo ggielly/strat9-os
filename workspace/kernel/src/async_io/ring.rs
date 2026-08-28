@@ -328,6 +328,12 @@ pub fn destroy_ring(id: u64) -> Result<(), RingError> {
         ring.destroy();
         ring.wq.wake_all();
         crate::hardware::storage::ahci::discard_deferred_async_read_completions(id);
+        let _ = memory::revoke_mapping_cap_id(ring.sq_mapping_cap_id);
+        let _ = memory::revoke_mapping_cap_id(ring.cq_mapping_cap_id);
+        crate::sync::with_irqs_disabled(|t| {
+            memory::free_phys_contiguous(t, ring.sq_frame, ring.sq_order);
+            memory::free_phys_contiguous(t, ring.cq_frame, ring.cq_order);
+        });
         Ok(())
     } else {
         Err(RingError::NotFound)
