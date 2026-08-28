@@ -9,6 +9,7 @@ use alloc::string::String;
 use bitflags::bitflags;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+
 bitflags! {
     /// Logical internal bitmap.
     ///
@@ -182,11 +183,14 @@ pub fn init() {
     let default_xcr0 = default_xcr0_for(&info);
     // Freeze the boot-time save profile: area size for the kernel's chosen
     // mask, rounded up to the 64-byte instruction-alignment granularity.
-    let profile_size = if info.features.contains(CpuFeatures::XSAVE) {
-        xsave_size_for_xcr0(default_xcr0).div_ceil(64) * 64
-    } else {
-        512
-    };
+    //
+    // NOTE: compute the size from the *local* `info`, not via the global
+    // cache (`xsave_size_for_xcr0`/`host_uses_xsave`). Those consult
+    // `INITIALIZED`, which is only published below — so during `init()` they
+    // always fall back to 512 bytes even when AVX/AVX-512 is present, leaving
+    // the XSAVE area too small and corrupting state on the first AVX context
+    // switch.
+    let profile_size = xsave_size_for_info(&info, default_xcr0).div_ceil(64) * 64;
     PROFILE_XCR0.store(default_xcr0, Ordering::Release);
     PROFILE_AREA_SIZE.store(profile_size, Ordering::Release);
 
@@ -233,10 +237,11 @@ fn detect() -> CpuInfo {
 
     //  Leaf 0x01: main feature bits
     let (eax1, _ebx1, ecx1, edx1) = if max_leaf >= 1 {
-        cpuid(1, 0)
+            cpuid(1, 0)
     } else {
         (0, 0, 0, 0)
     };
+    crate::e9_println!("detect: leaf1 done");
 
     let stepping = (eax1 & 0xF) as u8;
     let base_family = (eax1 >> 8) & 0xF;
@@ -465,6 +470,35 @@ impl CpuInfo {
 pub fn xcr0_for_features(_features: CpuFeatures) -> u64 {
     let h = host();
     default_xcr0_for(&h)
+}
+
+/// Compute the XSAVE area size needed for a given XCR0 mask directly from a
+/// `CpuInfo`, without consulting the global cache (`host_uses_xsave`/`host`).
+/// This is what `init()` must use, because the cache is not yet published when
+/// `init()` runs — otherwise AVX/AVX-512 would be given a 512-byte area.
+fn xsave_size_for_info(info: &CpuInfo, xcr0: u64) -> usize {
+    if !info.features.contains(CpuFeatures::XSAVE) {
+        return 512;
+    }
+    if xcr0 == info.supported_xcr0 {
+        return info.xsave_size_max;
+    }
+    let mut size = 576usize; // legacy area (512) + xsave header (64)
+    for comp in 2..63 {
+        if xcr0 & (1u64 << comp) == 0 {
+            continue;
+        }
+        let (eax, ebx, _ecx, edx) = super::cpuid(0x0D, comp);
+        // ECX bit 0: component managed via XCR0 (0) or IA32_XSS (1).
+        // Skip supervisor states — not saved by a user-space XCR0 mask.
+        if edx & 1 != 0 {
+            continue;
+        }
+        let comp_size = eax as usize;
+        let comp_offset = ebx as usize;
+        size = size.max(comp_offset + comp_size);
+    }
+    size.min(info.xsave_size_max)
 }
 
 /// Compute the XSAVE area size needed for a given XCR0 mask.
