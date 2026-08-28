@@ -242,7 +242,24 @@ impl<W: fmt::Write> fmt::Write for BootPrefixWriter<'_, W> {
 
 /// Initialize the serial port
 pub fn init() {
-    SERIAL1.lock().init();
+    // Configure COM1 as 8N1 @ 115200 in polled mode (no FIFO, no IRQs).
+    //
+    // We avoid `uart_16550::SerialPort::init()` here: its default setup enables
+    // the FIFO and the RX interrupt (IER=1 + MCR OUT2), which on QEMU leaves
+    // `LineStsFlags::OUTPUT_EMPTY` (THRE) never asserted, so every `send`
+    // spins forever in `retry_until_ok!`. Polled 8N1 matches the bootloader's
+    // working configuration and keeps THRE polling functional.
+    const COM1: u16 = 0x3F8;
+    let outb = |port: u16, val: u8| unsafe {
+        core::arch::asm!("out dx, al", in("dx") port, in("al") val, options(nomem, nostack));
+    };
+    outb(COM1 + 1, 0x00); // IER  = 0 : disable interrupts
+    outb(COM1 + 3, 0x80); // LCR  = DLAB
+    outb(COM1 + 0, 0x01); // DLL  = 1 -> 115200 baud
+    outb(COM1 + 1, 0x00); // DLM  = 0
+    outb(COM1 + 3, 0x03); // LCR  = 8N1, DLAB=0
+    outb(COM1 + 2, 0x00); // FCR  = 0 : no FIFO
+    outb(COM1 + 4, 0x03); // MCR  = DTR+RTS (no OUT2 => no IRQ to CPU)
 }
 
 /// Parse kernel cmdline from UEFI bootloader boot arguments.

@@ -197,7 +197,8 @@ ls -lh "$BUILD_DIR"/*.img "$BUILD_DIR"/*.iso "$BUILD_DIR"/*.efi 2>/dev/null | wh
     echo "      $line"
 done
 echo ""
-echo "--------------------------------------------"
+echo "============================================"
+
 echo "  Launch with: cargo make run-uefi"
 echo "============================================"
 echo ""

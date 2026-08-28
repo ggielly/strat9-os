@@ -427,26 +427,6 @@ fn efi_main() -> Status {
         regions[region_count] = MemoryRegion { base, size, kind };
         region_count += 1;
     }
-
-    if com1_present {
-        unsafe {
-            serial_write(b"[boot] mmap: ");
-            serial_write(decimal_str(region_count as u64));
-            serial_write(b" regions\r\n");
-            for i in 0..region_count.min(8) {
-                let r = regions[i];
-                serial_write(b"  [");
-                serial_write(decimal_str(i as u64));
-                serial_write(b"] base=");
-                serial_write(hex8_str(r.base));
-                serial_write(b" size=");
-                serial_write(hex8_str(r.size));
-                serial_write(b" kind=");
-                serial_write(decimal_str(r.kind.0 as u64));
-                serial_write(b"\r\n");
-            }
-        }
-    }
     // =========================================================
     // Allocate boot resources BEFORE copying the memory map
     // =========================================================
@@ -461,17 +441,6 @@ fn efi_main() -> Status {
         }
         for i in 0..region_count {
             if regions[i].kind == MemoryKind::Free && regions[i].size >= size {
-                // Debug output for allocation attempt. Keep it.
-                unsafe {
-                    serial_write(b"[DEBUG] [alloc] region ");
-                    serial_write(decimal_str(i as u64));
-                    serial_write(b" base=");
-                    serial_write(hex8_str(regions[i].base));
-                    serial_write(b" size=");
-                    serial_write(hex8_str(regions[i].size));
-                    serial_write(b" FREE match\r\n");
-                }
-
                 let aligned_base = match regions[i].base.checked_add(align - 1) {
                     Some(v) => v & !(align - 1),
                     None => continue,
@@ -508,17 +477,6 @@ fn efi_main() -> Status {
     // 1. Allocate kernel stack
     let stack_size: u64 = 64 * 1024;
     let stack_base = alloc_from_free(&mut regions, region_count, stack_size, 16);
-    if com1_present {
-        unsafe {
-            serial_write(b"[boot] alloc stack: base=");
-            serial_write(hex8_str(stack_base));
-            serial_write(b" size=");
-            serial_write(hex8_str(stack_size));
-            serial_write(b" count=");
-            serial_write(decimal_str(region_count as u64));
-            serial_write(b"\r\n");
-        }
-    }
     if stack_base == 0 {
         halt_msg(com1_present, b"Failed to allocate kernel stack");
     }
@@ -741,47 +699,3 @@ fn hex_str(val: u64, buf: &mut [u8; 18]) -> &[u8] {
     &buf[i..]
 }
 
-/// Format a u64 as lowercase hex into a temporary buffer.
-fn hex8_str(val: u64) -> &'static [u8] {
-    static mut OUT: [u8; 18] = [0; 18];
-    unsafe {
-        let i = hex_str_start(val, &mut OUT);
-        &OUT[i..]
-    }
-}
-
-/// Write a u64 as lowercase hex into `buf`, return the starting index of the
-/// written digits (the valid slice is `buf[i..]`).
-fn hex_str_start(val: u64, buf: &mut [u8; 18]) -> usize {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut i = 16;
-    let mut v = val;
-    loop {
-        i -= 1;
-        buf[i] = HEX[(v & 0xf) as usize];
-        v >>= 4;
-        if v == 0 {
-            break;
-        }
-    }
-    i
-}
-
-/// Format a u64 as decimal into a temporary buffer.
-fn decimal_str(val: u64) -> &'static [u8] {
-    static mut OUT: [u8; 21] = [0; 21];
-    unsafe {
-        if val == 0 {
-            OUT[0] = b'0';
-            return &OUT[..1];
-        }
-        let mut v = val;
-        let mut i = 21;
-        while v > 0 {
-            i -= 1;
-            OUT[i] = b'0' + (v % 10) as u8;
-            v /= 10;
-        }
-        &OUT[i..]
-    }
-}

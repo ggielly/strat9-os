@@ -24,7 +24,7 @@ use core::{
 };
 use x86_64::{
     instructions::{
-        segmentation::{Segment, CS, DS, SS},
+        segmentation::{Segment, CS, DS, SS, ES, FS},
         tables::load_tss,
     },
     structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector},
@@ -72,6 +72,12 @@ pub fn init_cpu(cpu_index: usize) {
         cpu_index,
         crate::arch::x86_64::percpu::MAX_CPUS,
     );
+    // Idempotent: the GDT is stored per-CPU and the TSS Busy bit is set by
+    // `load_tss`. Re-running `init_cpu` for an already-initialized index would
+    // reload a TSS descriptor that's already Busy and #GP. Bail out early.
+    if SELECTORS_INIT[cpu_index].load(Ordering::Acquire) {
+        return;
+    }
     // SAFETY: Called during init (BSP) or AP bring-up before interrupts are enabled on that CPU.
     unsafe {
         let gdt = &mut *GDT[cpu_index].as_mut_ptr();
@@ -83,15 +89,11 @@ pub fn init_cpu(cpu_index: usize) {
         let kernel_data = gdt.append(Descriptor::kernel_data_segment());
 
         // Index 3: User Code 32-bit dummy (0x18)
-        // SYSRET requires this slot to exist. We create a 32-bit code segment
-        // with DPL=3 that is never actually used for execution.
-        // Descriptor bits: Present | DPL=3 | Code segment | Readable | 32-bit
-        let user_code32_bits: u64 = (1 << 47)       // Present
-            | (3 << 45)                               // DPL = 3
-            | (1 << 44)                               // S = 1 (code/data)
-            | (1 << 43)                               // Executable
-            | (1 << 41)                               // Readable
-            | (1 << 54); // D = 1 (32-bit default)
+        // SYSRET requires this slot to exist and to be a *flat 4 GiB* 32-bit
+        // code segment (G=1, limit 0xFFFFF, Accessed=1, L=0, D=1, DPL=3).
+        // A zero-limit/non-flat entry would #GP on the first SYSRETQ or on a
+        // explicit `mov CS, 0x1B` load.
+        let user_code32_bits: u64 = 0x00CF_FA00_0000_FFFF;
         let user_code32 = gdt.append(Descriptor::UserSegment(user_code32_bits));
 
         // Index 4: User Data (0x20)
@@ -108,6 +110,15 @@ pub fn init_cpu(cpu_index: usize) {
         CS::set_reg(kernel_code);
         DS::set_reg(kernel_data);
         SS::set_reg(kernel_data);
+        // `load_unsafe` does not touch ES/FS/GS; they still reference the
+        // firmware/UEFI GDT. In long mode their bases are taken from MSRs
+        // (FS/GS) or forced to 0 (ES/DS/SS), so a stale *selector* is benign,
+        // but reload ES/FS to a known kernel data selector to avoid any
+        // descriptor-dependent access (#GP on the first ES-relative string op).
+        // GS keeps its per-CPU base (IA32_GS_BASE); only the selector is
+        // refreshed — the base is MSR-controlled and must not be clobbered.
+        ES::set_reg(kernel_data);
+        FS::set_reg(kernel_data);
 
         // Load TSS into task register
         load_tss(tss_sel);
@@ -170,6 +181,12 @@ pub fn star_msr_value() -> u64 {
 
 /// Performs the selectors for operation.
 fn selectors_for(cpu_index: usize) -> Selectors {
+    assert!(
+        cpu_index < crate::arch::x86_64::percpu::MAX_CPUS,
+        "GDT selectors_for: cpu_index {} >= MAX_CPUS {}",
+        cpu_index,
+        crate::arch::x86_64::percpu::MAX_CPUS,
+    );
     if !SELECTORS_INIT[cpu_index].load(Ordering::Acquire) {
         panic!("GDT selectors for CPU{} not initialized", cpu_index);
     }

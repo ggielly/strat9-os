@@ -753,6 +753,26 @@ extern "x86-interrupt" fn page_fault_handler(
     // needs_swapgs() uses rdmsr to catch both cases.
     let swapgs_needed = needs_swapgs(cs);
     let _gs = SwapGsGuard::new(swapgs_needed);
+    {
+        let thr: u16 = 0x3F8;
+        let lsr: u16 = 0x3F8 + 5;
+        for &b in b"[PF]" {
+            let mut s: u8 = 0;
+            let mut i = 0u32;
+            loop {
+                unsafe {
+                    core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
+                }
+                if s & 0x20 != 0 || i > 500000 {
+                    break;
+                }
+                i += 1;
+            }
+            unsafe {
+                core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
+            }
+        }
+    }
 
     // Detect the swapgs=>iretq window: CS=Ring0 but GS was user (0).
     if swapgs_needed && !is_user {
@@ -1709,6 +1729,26 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     // Without this, #GP from a bad iretq would escalate to double fault => triple fault.
     let swapgs_needed = needs_swapgs(cs);
     let _gs = SwapGsGuard::new(swapgs_needed);
+    {
+        let thr: u16 = 0x3F8;
+        let lsr: u16 = 0x3F8 + 5;
+        for &b in b"[GP]" {
+            let mut s: u8 = 0;
+            let mut i = 0u32;
+            loop {
+                unsafe {
+                    core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
+                }
+                if s & 0x20 != 0 || i > 500000 {
+                    break;
+                }
+                i += 1;
+            }
+            unsafe {
+                core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
+            }
+        }
+    }
     // Detect the swapgs=>iretq window case: CS says Ring 0 but GS was user.
     if swapgs_needed && !is_user {
         crate::serial_force_println!(
@@ -1785,6 +1825,27 @@ extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) -> ! {
+    // RAW serial marker: confirm a double fault fired, bypassing serial_println.
+    {
+        let thr: u16 = 0x3F8;
+        let lsr: u16 = 0x3F8 + 5;
+        for &b in b"[DF]" {
+            let mut s: u8 = 0;
+            let mut i = 0u32;
+            loop {
+                unsafe {
+                    core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
+                }
+                if s & 0x20 != 0 || i > 500000 {
+                    break;
+                }
+                i += 1;
+            }
+            unsafe {
+                core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
+            }
+        }
+    }
     // Best-effort swapgs: if GS currently points at user space (address 0)
     // we need to swap to kernel GS so that any code below that touches
     // `gs:[0]` (e.g. via `current_cpu_index`) does not page-fault again.

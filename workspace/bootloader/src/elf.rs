@@ -18,7 +18,6 @@ const BSS_MAP_EXTRA: u64 = 64 * 1024 * 1024; // 64 MiB
 pub struct Segment {
     pub phys_addr: u64,
     pub virt_addr: u64,
-    pub file_offset: u64,
     pub mem_size: u64,
     pub file_size: u64,
     pub flags: u32,
@@ -76,7 +75,6 @@ pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
         segments: [Segment {
             phys_addr: 0,
             virt_addr: 0,
-            file_offset: 0,
             mem_size: 0,
             file_size: 0,
             flags: 0,
@@ -206,7 +204,6 @@ pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
         info.segments[info.segment_count] = Segment {
             phys_addr,
             virt_addr: p_vaddr,
-            file_offset: p_offset,
             mem_size: mapped_memsz,
             file_size: p_filesz,
             flags: p_flags,

@@ -13,8 +13,6 @@ const CPUID_NX: u32 = 1 << 0;
 const CPUID_PAT: u32 = 1 << 1;
 const CPUID_1G_PAGES: u32 = 1 << 2;
 
-pub const PHYS_OFFSET: u64 = 0;
-
 /// Bump allocator for page table frames
 static mut NEXT_FRAME: u64 = 0;
 
