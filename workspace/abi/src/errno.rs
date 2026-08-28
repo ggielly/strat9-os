@@ -85,7 +85,11 @@ pub const ENOTEMPTY: usize = 39;
 pub const ELOOP: usize = 40;
 
 /// Not supported (operation not supported by this filesystem/device).
-pub const ENOTSUP: usize = 52;
+///
+/// Aligned with Linux x86_64 where `ENOTSUP == EOPNOTSUPP == 95`, so that
+/// musl/relibc shims map 1:1. (Was wrongly 52 until 2026-08 — see
+/// docs-site/src/testing-findings.md F6.)
+pub const ENOTSUP: usize = 95;
 
 /// Address family not supported (socket type not available).
 pub const EAFNOSUPPORT: usize = 97;

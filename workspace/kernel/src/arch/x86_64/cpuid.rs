@@ -9,41 +9,6 @@ use alloc::string::String;
 use bitflags::bitflags;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-#[inline(never)]
-fn raw_trace(s: &str) {
-    let thr: u16 = 0x3F8;
-    let lsr: u16 = 0x3F8 + 5;
-    for &b in s.as_bytes() {
-        let mut i = 0u32;
-        loop {
-            let mut s: u8 = 0;
-            unsafe {
-                core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
-            }
-            if s & 0x20 != 0 || i > 200000 {
-                break;
-            }
-            i += 1;
-        }
-        unsafe {
-            core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
-        }
-    }
-    let mut i = 0u32;
-    loop {
-        let mut s: u8 = 0;
-        unsafe {
-            core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
-        }
-        if s & 0x20 != 0 || i > 200000 {
-            break;
-        }
-        i += 1;
-    }
-    unsafe {
-        core::arch::asm!("out dx, al", in("dx") thr, in("al") b'\n', options(nomem, nostack, preserves_flags));
-    }
-}
 
 bitflags! {
     /// Logical internal bitmap.
@@ -257,31 +222,25 @@ fn detect() -> CpuInfo {
     let cpuid = super::cpuid;
 
     //  Vendor (leaf 0): keep the raw 12-byte id, then classify.
-    raw_trace("dt:0");
     let (max_leaf, ebx0, ecx0, edx0) = cpuid(0, 0);
-    raw_trace("dt:1");
     let mut vendor_id = [0u8; 12];
     vendor_id[0..4].copy_from_slice(&ebx0.to_le_bytes());
     vendor_id[4..8].copy_from_slice(&edx0.to_le_bytes());
     vendor_id[8..12].copy_from_slice(&ecx0.to_le_bytes());
-    raw_trace("dt:1b");
     let vendor = match (ebx0, edx0, ecx0) {
         (0x756E_6547, 0x4965_6E69, 0x6C65_746E) => CpuVendor::Intel,
         (0x6874_7541, 0x6974_6E65, 0x444D_4163) => CpuVendor::Amd,
         _ => CpuVendor::Unknown,
     };
-    raw_trace("dt:2");
 
     let mut features = CpuFeatures::empty();
 
     //  Leaf 0x01: main feature bits
     let (eax1, _ebx1, ecx1, edx1) = if max_leaf >= 1 {
-        raw_trace("dt:3a");
-        cpuid(1, 0)
+            cpuid(1, 0)
     } else {
         (0, 0, 0, 0)
     };
-    raw_trace("dt:3b");
     crate::e9_println!("detect: leaf1 done");
 
     let stepping = (eax1 & 0xF) as u8;
