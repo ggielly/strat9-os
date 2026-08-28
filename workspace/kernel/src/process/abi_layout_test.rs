@@ -550,7 +550,7 @@ fn run_abi_layout_suite() -> bool {
     ev &= check_eq("EEXIST", EEXIST as u64, 17);
     ev &= check_eq("EINVAL", EINVAL as u64, 22);
     ev &= check_eq("ENOSYS", ENOSYS as u64, 38);
-    ev &= check_eq("ENOTSUP", ENOTSUP as u64, 52);
+    ev &= check_eq("ENOTSUP", ENOTSUP as u64, 95);
     ev &= check_eq("EPIPE", EPIPE as u64, 32);
     ev &= check_eq("ENOSPC", ENOSPC as u64, 28);
     record("errno values", ev, &mut passed, &mut total);

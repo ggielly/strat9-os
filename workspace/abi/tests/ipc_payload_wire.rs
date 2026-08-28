@@ -135,10 +135,14 @@ fn open_reply_layout_offsets() {
     assert_eq!(&b[16..24], &0x1000u64.to_le_bytes()); // size @16
     assert_eq!(&b[24..28], &3u32.to_le_bytes());   // file_flags @24
 
-    // FINDING (see testing report): OpenReply derives FromBytes but NOT
-    // KnownLayout, so `decode_fixed::<OpenReply>` cannot compile today.
-    // Consumers must currently hand-parse the payload — pinned here via
-    // the raw-byte asserts above.
+    // F5 FIXED: OpenReply now derives KnownLayout — decode_fixed works for
+    // the whole payload surface (no more hand-parsing).
+    let msg = strat9_abi::ipc_codec::encode_fixed(0x80, &reply);
+    let back: &OpenReply = strat9_abi::ipc_codec::decode_fixed(&msg).unwrap();
+    assert_eq!(back.status, 0);
+    assert_eq!(back.ino, 42);
+    assert_eq!(back.size, 0x1000);
+    assert_eq!(back.file_flags, 3);
 }
 
 #[test]
@@ -186,7 +190,39 @@ fn lseek_whence_values_documented() {
     const SEEK_END: u32 = 2;
     for w in [SEEK_SET, SEEK_CUR, SEEK_END] {
         let req = LseekRequest { ino: 1, offset: -8, whence: w, _pad: 0 };
-        assert_eq!(req.whence, w);
+        assert_eq!({ req.whence }, w);
         assert!(req.offset < 0); // negative offsets are legal for SEEK_CUR/END
     }
+}
+
+// ===========================================================================
+// F5 regression guard: decode_fixed must work for EVERY fixed-size reply
+// ===========================================================================
+
+#[test]
+fn decode_fixed_works_for_all_fixed_payload_structs() {
+    use strat9_abi::ipc_codec::decode_fixed;
+
+    macro_rules! roundtrip {
+        ($ty:ty, $val:expr) => {{
+            let v: $ty = $val;
+            let msg = strat9_abi::ipc_codec::encode_fixed(0x80, &v);
+            let back: &$ty = decode_fixed(&msg).unwrap_or_else(|| {
+                panic!(concat!(stringify!($ty), ": decode_fixed failed"))
+            });
+            let orig_bytes = v.as_bytes();
+            assert_eq!(back.as_bytes(), orig_bytes, concat!(stringify!($ty), " wire mismatch"));
+        }};
+    }
+
+    roundtrip!(StatusReply, StatusReply { status: 22 });
+    roundtrip!(OpenReply, OpenReply { status: 0, _pad0: 0, ino: 9, size: 64, file_flags: 1, _pad1: 0 });
+    roundtrip!(ReadReply, ReadReply { status: 0, count: 10 });
+    roundtrip!(WriteReply, WriteReply { status: 0, written: 10 });
+    roundtrip!(CreateReply, CreateReply { status: 0, _pad: 0, ino: 5 });
+    roundtrip!(LseekReply, LseekReply { status: 0, _pad: 0, offset: 4096 });
+    roundtrip!(TcpConnectReply, TcpConnectReply { status: 0, _pad: 0, conn_id: 7 });
+    roundtrip!(CloseRequest, CloseRequest { ino: 3 });
+    roundtrip!(StatRequest, StatRequest { ino: 3 });
+    roundtrip!(ReadRequest, ReadRequest { ino: 3, offset: 8, count: 128, _pad: 0 });
 }

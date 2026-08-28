@@ -59,6 +59,9 @@ pub struct FsCapabilities {
 }
 
 impl FsCapabilities {
+    /// Exbibyte constant (2^60) for max_file_size declarations.
+    const EIB: u64 = 1 << 60;
+
     /// Create capabilities for a typical read-only Linux filesystem.
     pub const fn read_only_linux() -> Self {
         Self {
@@ -97,7 +100,9 @@ impl FsCapabilities {
             supports_symlinks: true,
             supports_hardlinks: true,
             supports_sparse_files: true,
-            max_file_size: 8 * 1024 * 1024 * 1024 * 1024 * 1024, // 8 EiB
+            // XFS max file size: 8 EiB on 64-bit systems (was wrongly
+            // computed as 8 PiB — the literal chain had only five 1024s).
+            max_file_size: 8 * Self::EIB,
             supports_xattr: true,
             supports_acl: true,
             supports_nanoseconds: true,
@@ -135,7 +140,10 @@ impl FsCapabilities {
             supports_symlinks: true,
             supports_hardlinks: true,
             supports_sparse_files: true,
-            max_file_size: 16 * 1024 * 1024 * 1024 * 1024 * 1024, // 16 EiB
+            // btrfs theoretical max file size is 16 EiB, which does NOT fit
+            // in u64 (2^64). Clamp to u64::MAX like other metadata that
+            // saturates; callers treat it as "unbounded".
+            max_file_size: u64::MAX,
             supports_xattr: true,
             supports_acl: true,
             supports_nanoseconds: true,
