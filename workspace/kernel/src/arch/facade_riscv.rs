@@ -511,6 +511,7 @@ pub mod pic {
 
 pub mod ioapic {
     pub fn init(_addr: u32, _gsi_base: u32) {}
+    pub fn route_nic_irq(_irq: u8, _vector: u8) {}
     pub fn route_legacy_irq(_gsi: u8, _lapic: u32, _vector: u8, _ovr: &[Option<crate::acpi::madt::InterruptSourceOverride>; 16]) {}
     pub fn mask_legacy_irq(_irq: u8, _ovr: &[Option<crate::acpi::madt::InterruptSourceOverride>; 16]) {}
     pub fn store_madt_overrides(_ovr: &[Option<crate::acpi::madt::InterruptSourceOverride>; 16]) {}
@@ -526,3 +527,6 @@ pub mod timer {
     pub fn apic_ticks_per_10ms() -> u32 { 0 }
     pub fn start_apic_timer_cached() {}
 }
+
+/// x86-only CPU extensions — no-op on RISC-V.
+pub fn init_cpu_extensions() {}

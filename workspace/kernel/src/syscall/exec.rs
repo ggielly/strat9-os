@@ -238,6 +238,7 @@ pub fn sys_execve(
         .mmap_hint
         .store(crate::kaslr::mmap_base(), core::sync::atomic::Ordering::Relaxed);
     // Set FS.base MSR for the new image TLS (or 0 if no PT_TLS).
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         let lo = new_fs_base as u32;
         let hi = (new_fs_base >> 32) as u32;
@@ -249,6 +250,8 @@ pub fn sys_execve(
             options(nostack, preserves_flags),
         );
     }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = new_fs_base; // riscv64: TLS base lives in tp (set at context switch, R3)
 
     let old_as = current.process.replace_address_space(new_as_arc.clone());
 
