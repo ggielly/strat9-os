@@ -60,5 +60,14 @@ pub fn set_vga_debug_buffer(enabled: bool) {
 }
 
 // ---------------------------------------------------------------------------
+// Serial output
+// ---------------------------------------------------------------------------
+
+/// Master switch to enable/disable serial port output. When `false`,
+/// `serial_print!` / `serial_println!` become no-ops and `init_serial()`
+/// is skipped. The serial module is still compiled but produces no output.
+pub const SERIAL_ENABLED: bool = false;
+
+// ---------------------------------------------------------------------------
 // Future debug flags : TODO
 // ---------------------------------------------------------------------------

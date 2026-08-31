@@ -55,7 +55,9 @@ pub use boot::dtb_boot::kmain;
 
 /// Initialize serial output
 pub fn init_serial() {
-    arch::serial::init();
+    if crate::debug_cfg::SERIAL_ENABLED {
+        arch::serial::init();
+    }
 }
 
 /// Initialize the logger (uses serial)
@@ -378,8 +380,8 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         }
     }
 
-    // init_serial() — restore
-    init_serial();
+    // init_serial() — temporarily disabled: #UD during uart_16550 init
+    //init_serial();
 
     // Enable boot log prefix (timestamp) by default; can be disabled later if needed.
     arch::serial::set_boot_log_prefix_enabled(true);
@@ -416,40 +418,40 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         !arch::interrupts_enabled(),
         "interrupts must be disabled after IDT init"
     );
-    crate::e9_println!("B4 assert-passed");
+    e9_mark!(b'4');
 
     // Detect CPU features (must happen before init_cpu_extensions)
-    crate::e9_println!("B4a pre-cpuid");
+    e9_mark!(b'a');
     crate::arch::x86_64::cpuid::init();
-    crate::e9_println!("B4b post-cpuid");
+    e9_mark!(b'b');
 
     // Initialize FPU/SSE/XSAVE for the BSP
-    crate::e9_println!("B4c pre-cpu-ext");
+    e9_mark!(b'c');
     crate::arch::x86_64::init_cpu_extensions();
-    crate::e9_println!("B2b post-cpu-extensions");
+    e9_mark!(b'd');
 
     // Seed the kernel entropy pool from RDRAND (if available).
-    crate::e9_println!("B2c pre-entropy");
+    e9_mark!(b'e');
     crate::entropy::seed_from_rdrand();
-    crate::e9_println!("B2d post-entropy");
+    e9_mark!(b'f');
 
     // Initialize KASLR offsets (requires entropy pool to be seeded).
-    crate::e9_println!("B2d1 pre-kaslr");
+    e9_mark!(b'g');
     crate::kaslr::init();
-    crate::e9_println!("B2d2 post-kaslr");
+    e9_mark!(b'h');
 
     // Initialize crypto subsystem (trusted keys for module verification).
-    crate::e9_println!("B2d3 pre-crypto");
+    e9_mark!(b'i');
     crate::crypto::init();
-    crate::e9_println!("B2d4 post-crypto");
+    e9_mark!(b'j');
 
     // Puts default panic hooks early to ensure
     //we get useful info on any panics during init.
-    crate::e9_println!("B2e1 pre-panic-hooks");
+    e9_mark!(b'k');
     boot::panic::install_default_panic_hooks();
-    crate::e9_println!("B2e2 post-panic-hooks");
+    e9_mark!(b'l');
     boot::symbols::init();
-    crate::e9_println!("B2f post-panic-hooks");
+    e9_mark!(b'm');
 
     // Nice logo :D
     serial_println!();

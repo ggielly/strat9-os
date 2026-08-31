@@ -160,8 +160,9 @@ pub fn boot_xsave_profile() -> XsaveProfile {
 
 /// Detect and cache CPU information. Must be called once at BSP boot.
 pub fn init() {
+    crate::e9_mark!(b'X');
     let info = detect();
-    crate::e9_println!("CPUID detect done");
+    crate::e9_mark!(b'Y');
     crate::serial_println!(
         "[CPUID] {} {} (family={} model={} stepping={})",
         info.vendor_string(),
@@ -194,7 +195,9 @@ pub fn init() {
     PROFILE_XCR0.store(default_xcr0, Ordering::Release);
     PROFILE_AREA_SIZE.store(profile_size, Ordering::Release);
 
+    crate::e9_mark!(b'J');
     *HOST_CPU.lock() = Some(info);
+    crate::e9_mark!(b'K');
     HOST_DEFAULT_XCR0_CACHE.store(default_xcr0, Ordering::Release);
     INITIALIZED.store(true, Ordering::Release);
     crate::e9_println!("CPUID init done");
@@ -221,8 +224,10 @@ pub fn host_uses_xsave() -> bool {
 fn detect() -> CpuInfo {
     let cpuid = super::cpuid;
 
+    crate::e9_mark!(b'D');
     //  Vendor (leaf 0): keep the raw 12-byte id, then classify.
     let (max_leaf, ebx0, ecx0, edx0) = cpuid(0, 0);
+    crate::e9_mark!(b'E');
     let mut vendor_id = [0u8; 12];
     vendor_id[0..4].copy_from_slice(&ebx0.to_le_bytes());
     vendor_id[4..8].copy_from_slice(&edx0.to_le_bytes());
@@ -236,12 +241,16 @@ fn detect() -> CpuInfo {
     let mut features = CpuFeatures::empty();
 
     //  Leaf 0x01: main feature bits
+    crate::e9_mark!(b'1');
     let (eax1, _ebx1, ecx1, edx1) = if max_leaf >= 1 {
             cpuid(1, 0)
     } else {
         (0, 0, 0, 0)
     };
+    crate::e9_mark!(b'2');
+    crate::e9_mark!(b'd');
     crate::e9_println!("detect: leaf1 done");
+    crate::e9_mark!(b'e');
 
     let stepping = (eax1 & 0xF) as u8;
     let base_family = (eax1 >> 8) & 0xF;
@@ -315,8 +324,10 @@ fn detect() -> CpuInfo {
     }
 
     //  Leaf 0x07: extended features
+    crate::e9_mark!(b'3');
     if max_leaf >= 7 {
         let (_eax7, ebx7, _ecx7, _edx7) = cpuid(7, 0);
+        crate::e9_mark!(b'5');
         if ebx7 & (1 << 5) != 0 {
             features |= CpuFeatures::AVX2;
         }
@@ -350,11 +361,15 @@ fn detect() -> CpuInfo {
     // every supported component were enabled — the correct upper bound for
     // synthetic masks. Supervisor states (managed via IA32_XSS, not XCR0)
     // are filtered out so `supported_xcr0` stays a true XCR0 bitmap.
+    crate::e9_mark!(b'F');
     let mut supported_xcr0 = XCR0_X87 | XCR0_SSE;
     let mut xsave_size_current = 512usize;
     let mut xsave_size_max = 512usize;
+    crate::e9_mark!(b'G');
     if features.contains(CpuFeatures::XSAVE) && max_leaf >= 0x0D {
+        crate::e9_mark!(b'H');
         let (eax_d, ebx_d, ecx_d, edx_d) = cpuid(0x0D, 0);
+        crate::e9_mark!(b'I');
         let raw = ((edx_d as u64) << 32) | eax_d as u64;
         // Bits set in EDX above bit 2 (or any unknown upper bits) may be
         // XSS-managed supervisor states; keep only the architecturally

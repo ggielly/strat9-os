@@ -25,6 +25,7 @@ use strat9_abi::boot::{KernelArgs, MemoryKind, MemoryRegion};
 fn efi_main() -> Status {
     uefi::system::with_stdout(|stdout| {
         let _ = writeln!(stdout, "Strat9-OS bootloader. Version 0.1.0, UEFI mode.");
+        let _ = writeln!(stdout, "Copyright (C) 2026 Guillaume Gielly. All rights reserved.");
     });
 
     // Open filesystem

@@ -13,6 +13,16 @@ use x86_64::{
     VirtAddr,
 };
 
+/// Kernel code segment selector for IDT entries.
+///
+/// At IDT init time the kernel runs under the UEFI firmware's GDT (CS=0x38),
+/// but we intentionally use the **kernel's** selector (0x08) so that once
+/// `gdt::init()` loads the real GDT the IDT entries are immediately valid.
+///
+/// Before `gdt::init()`, any exception will triple-fault because CS=0x08
+/// references a non-existent descriptor in the UEFI GDT.  That is acceptable:
+/// there should be no exceptions before the kernel GDT is live (the only
+/// known early #UD from `init_serial` / `uart_16550` is already disabled).
 const KERNEL_CODE_SELECTOR: SegmentSelector = SegmentSelector(0x08);
 
 #[repr(C, packed)]
