@@ -357,5 +357,7 @@ pub fn send_ipi_raw(target_apic_id: u32, icr_low: u32) {
 /// # Safety
 /// APIC must be initialized (`APIC_INITIALIZED == true`).
 pub fn send_resched_ipi(target_apic_id: u32) {
-    send_ipi_raw(target_apic_id, IPI_RESCHED_VECTOR as u32 | (1 << 14));
+    // Fixed delivery, edge-triggered, physical destination, no shorthand.
+    // Level bit = 0 (reserved for Fixed mode per Intel SDM Vol. 3A Table 10-1).
+    send_ipi_raw(target_apic_id, IPI_RESCHED_VECTOR as u32);
 }

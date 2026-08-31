@@ -330,7 +330,9 @@ pub fn broadcast_panic_halt() {
     if !apic::is_initialized() {
         return;
     }
-    let icr_low = (0b11 << 18) | (0b100 << 8) | (1 << 14);
+    // SMI delivery mode (0b100 << 8), all-excluding-self shorthand (0b11 << 18).
+    // Level bit = 0 (reserved for SMI mode per Intel SDM Vol. 3A Table 10-1).
+    let icr_low = (0b11 << 18) | (0b100 << 8);
     apic::send_ipi_raw(0, icr_low);
 }
 
