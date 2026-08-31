@@ -190,6 +190,11 @@ pub struct InterruptReturnDecision {
     pub new_fpu: *const u8,
 }
 
+const _: () = {
+    assert!(core::mem::size_of::<InterruptReturnDecision>() == 24);
+    assert!(core::mem::align_of::<InterruptReturnDecision>() == 8);
+};
+
 /// Raw Local APIC timer interrupt entry.
 ///
 /// Saves registers in exactly the same order as `SyscallFrame`, calls the Rust
@@ -312,7 +317,13 @@ unsafe extern "C" fn resched_ipi_entry() -> ! {
         "add rsp, 32",
         "test rax, rax",
         "jz 3f",
-        "ud2",
+        // Non-fatal diagnostic: next_rsp != 0 in reschedule IPI path.
+        // Phase 1 contract: resched_ipi_hint only, no context switch.
+        "push rax",
+        "mov al, 0x21",   /* '!' : unexpected switch decision */
+        "out 0xe9, al",
+        "pop rax",
+        "jmp 3f",
         "3:",
         "pop r15",
         "pop r14",
@@ -376,6 +387,7 @@ extern "C" fn lapic_timer_inner(
     InterruptReturnDecision::default()
 }
 
+#[inline(never)]
 extern "C" fn resched_ipi_inner(
     frame: &mut crate::syscall::SyscallFrame,
 ) -> InterruptReturnDecision {

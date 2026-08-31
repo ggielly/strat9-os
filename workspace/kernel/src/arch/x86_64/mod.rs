@@ -72,14 +72,24 @@ pub fn init_cpu_extensions() {
         let mut cr0: u64;
         asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack));
         cr0 &= !(1 << 2); // clear EM
-        cr0 |= 1 << 1; // set MP
+        cr0 |= (1 << 1) | (1 << 5); // set MP + NE
         asm!("mov cr0, {}", in(reg) cr0, options(nomem, nostack));
 
         asm!("fninit", options(nomem, nostack));
 
         if cpuid::host_uses_xsave() {
             let xcr0 = cpuid::host_default_xcr0();
-            xsetbv(0, xcr0);
+            // Validate: requested XCR0 must be a subset of hardware support.
+            // On APs, HOST_CPU contains the BSP's feature set; mask to be safe.
+            let supported = cpuid::host().supported_xcr0;
+            debug_assert_eq!(
+                xcr0 & !supported,
+                0,
+                "XCR0 {:#x} has bits outside hardware support {:#x}",
+                xcr0,
+                supported
+            );
+            xsetbv(0, xcr0 & supported);
         }
     }
 }
@@ -260,6 +270,7 @@ pub fn cpuid(leaf: u32, sub_leaf: u32) -> (u32, u32, u32, u32) {
             inout("ecx") sub_leaf => ecx,
             ebx_out = out(reg) ebx,
             out("edx") edx,
+            options(nostack, preserves_flags),
         );
     }
     (eax, ebx, ecx, edx)
@@ -270,12 +281,21 @@ pub fn cpuid(leaf: u32, sub_leaf: u32) -> (u32, u32, u32, u32) {
 /// Returns the number of CPU cycles since reset. Available from the
 /// very first instruction : use this as the sole timing source during
 /// early boot (before APIC/PIT timers are configured).
+///
+/// LFENCE is emitted before RDTSC to ensure all prior instructions
+/// have completed (RDTSC is non-serializing).
 #[inline]
 pub fn rdtsc() -> u64 {
     let eax: u32;
     let edx: u32;
     unsafe {
-        asm!("rdtsc", out("eax") eax, out("edx") edx, options(nomem, nostack));
+        asm!(
+            "lfence",
+            "rdtsc",
+            out("eax") eax,
+            out("edx") edx,
+            options(nomem, nostack),
+        );
     }
     ((edx as u64) << 32) | eax as u64
 }

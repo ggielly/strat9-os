@@ -397,9 +397,13 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // CS selector (0x08) is valid when the first exception fires.
     // Without a valid GDT entry, the IDT handler triple-faults.
 
+    e9_mark!(b'T');
     arch::tss::init();
+    e9_mark!(b'G');
     arch::gdt::init();
+    e9_mark!(b'I');
     arch::x86_64::idt::init();
+    e9_mark!(b'i');
     //serial_println!("[init] IDT initialized.");
     //crate::e9_println!("B2 post-IDT");
     //boot_milestone!("IDT initialized");

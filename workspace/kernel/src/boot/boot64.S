@@ -24,6 +24,7 @@ _start:
 
                               # Setup                                                                         bootstrap stack
                               leaq                                                                           boot_stack_top(%rip), %rsp
+                              andq                                                                           $-16, %rsp
 
                               # E9: 'C' after stack setup
                               mov                                                                            $0xE9, %dx
@@ -48,6 +49,11 @@ _start:
 
                               # Call                                                                          Rust entry point
                               call                                                                           kmain
+
+                              # E9: '2' if kmain returned (should never happen)
+                              mov                                                                           $0xE9, %dx
+                              mov                                                                           $'2', %al
+                              out                                                                           %al, %dx
 
 .halt_loop:
                               cli

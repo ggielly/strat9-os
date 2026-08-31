@@ -71,19 +71,19 @@ pub fn kernel_elf_bytes() -> Option<&'static [u8]> {
     Some(unsafe { core::slice::from_raw_parts(base as *const u8, size) })
 }
 
-/// Enable SSE (OSFXSR, OSXMMEXCPT) in CR4.
+/// Enable SSE (OSFXSR, OSXMMEXCPT) and FPU (NE) in CR0/CR4.
 #[inline(always)]
 unsafe fn enable_cpu_features() {
+    let mut cr0: u64;
+    core::arch::asm!("mov {}, cr0", out(reg) cr0);
+    cr0 &= !(1 << 2); // Clear EM (bit 2)
+    cr0 |= (1 << 1) | (1 << 5); // Set MP (bit 1) + NE (bit 5)
+    core::arch::asm!("mov cr0, {}", in(reg) cr0, options(nomem, nostack));
+
     let mut cr4: u64;
     core::arch::asm!("mov {}, cr4", out(reg) cr4);
     cr4 |= 0x600; // OSFXSR (9) | OSXMMEXCPT (10)
-    core::arch::asm!("mov cr4, {}", in(reg) cr4);
-
-    let mut cr0: u64;
-    core::arch::asm!("mov {}, cr0", out(reg) cr0);
-    cr0 &= !4; // Clear EM (bit 2)
-    cr0 |= 2;  // Set MP (bit 1)
-    core::arch::asm!("mov cr0, {}", in(reg) cr0);
+    core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack));
 }
 
 /// Kernel entry point called by the bootloader or PVH boot.

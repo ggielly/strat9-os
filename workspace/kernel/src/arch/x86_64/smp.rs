@@ -39,6 +39,9 @@ static SYNC_BARRIER: AtomicUsize = AtomicUsize::new(0);
 static BARRIER_TARGET: AtomicUsize = AtomicUsize::new(0);
 /// Gate used by BSP to release APs into scheduler/timer start.
 static AP_SCHED_GATE_OPEN: AtomicBool = AtomicBool::new(false);
+/// AP ACK: set to apic_id by each AP at start of smp_main(), BSP waits for it.
+/// Sentinel usize::MAX means "no ACK yet" (avoids collision with APIC ID 0).
+static AP_REACHED_RUST: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 // ---------------------------------------------------------------------------
 // Trampoline: 16-bit => 32-bit => 64-bit mode switch.
@@ -151,8 +154,12 @@ _gdt:
     # Load kernel stack pointer
     mov rsp, [SMP_VAR_ADDR + 8]
 
-    # Clear RFLAGS
-    push 0
+    # Clear RFLAGS.IF only, preserve architectural default state.
+    # pushfq reads RFLAGS; AND clears IF (bit 9); popfq restores.
+    pushfq
+    pop rax
+    btr rax, 9             # IF = 0
+    push rax
     popfq
 
     # Jump to smp_main (Rust)
@@ -464,11 +471,14 @@ pub fn init() -> Result<usize, &'static str> {
         first_stack_top,
     );
 
-    // Send INIT + single SIPI to each AP (Redox-OS style, no broadcast INIT).
-    crate::serial_println!("[smp] init: sending INIT+SIPI to {} APs", targets.len(),);
+    // Send INIT + single SIPI to each AP, one at a time.
+    // Critical: each AP must consume the trampoline RSP before we overwrite
+    // it for the next AP. We wait for AP_REACHED_RUST ack after each SIPI.
+    crate::serial_println!("[smp] init: sending INIT+SIPI to {} APs (sequential)", targets.len(),);
     for apic_id in &targets {
-        // Each AP needs its own stack. Re-write the data area stack pointer
-        // before each SIPI so the AP picks up the correct stack.
+        AP_REACHED_RUST.store(usize::MAX, Ordering::Release);
+
+        // Write this AP's stack pointer into the trampoline data area.
         if let Some(stack_top) = stack_tops.get(*apic_id as usize) {
             let tramp_len = (smp_trampoline_end as *const u8 as usize)
                 .saturating_sub(smp_trampoline as *const u8 as usize);
@@ -478,7 +488,25 @@ pub fn init() -> Result<usize, &'static str> {
                 core::ptr::write_volatile(data.add(tramp_len / 8 + 1), *stack_top);
             }
         }
+
         send_init_sipi(*apic_id);
+
+        // Wait for this AP to reach Rust and consume the stack pointer
+        // before we modify the slot for the next AP.
+        let mut spin: u64 = 0;
+        const ACK_TIMEOUT: u64 = 500_000_000;
+        while AP_REACHED_RUST.load(Ordering::Acquire) != *apic_id as usize && spin < ACK_TIMEOUT {
+            core::hint::spin_loop();
+            spin = spin.saturating_add(1);
+        }
+        if spin >= ACK_TIMEOUT {
+            crate::serial_println!(
+                "[smp] init: WARNING AP {} did not ACK within timeout",
+                apic_id
+            );
+        } else {
+            crate::serial_println!("[smp] init: AP {} ACKed (rust reached)", apic_id);
+        }
     }
 
     // Wait for APs to come online (they increment BOOTED_CORES in smp_main).
@@ -532,26 +560,36 @@ pub fn init() -> Result<usize, &'static str> {
 /// and jumps here. All virtual addresses are valid at this point.
 #[unsafe(no_mangle)]
 pub extern "C" fn smp_main() -> ! {
-    // Early serial output : use raw port 0x3F8 directly since the AP
-    // hasn't initialized the serial mutex yet.
+    // Read APIC ID first — needed to find our per-CPU state.
+    // Use raw port output since serial mutex isn't initialized yet.
+    let apic_id: u32;
     {
         use core::fmt::Write;
         let mut port = unsafe { uart_16550::SerialPort::new(0x3F8) };
         port.init();
         let _ = port.write_fmt(format_args!("[smp][ap] entered smp_main\n"));
+        // CPUID leaf 1 EBX[31:24] = initial APIC ID.
+        // rbx is LLVM-reserved, so save/restore it manually.
+        let apic_id_raw: u32;
+        unsafe {
+            core::arch::asm!(
+                "push rbx",
+                "cpuid",
+                "mov {val:e}, ebx",
+                "pop rbx",
+                val = out(reg) apic_id_raw,
+                in("eax") 1u32,
+                out("ecx") _,
+                out("edx") _,
+            );
+        }
+        apic_id = apic_id_raw >> 24;
+        let _ = port.write_fmt(format_args!("[smp][ap] cpuid apic_id={}\n", apic_id));
     }
 
-    idt::load();
-
-    // Re-initialize Local APIC for this core.
-    apic::init_ap();
-
-    let apic_id = apic::lapic_id();
-    {
-        use core::fmt::Write;
-        let mut port = unsafe { uart_16550::SerialPort::new(0x3F8) };
-        let _ = port.write_fmt(format_args!("[smp][ap] apic_id={}\n", apic_id));
-    }
+    // Signal BSP that this AP has reached Rust and consumed the trampoline RSP.
+    // Must happen immediately — before any per-CPU init that might fail.
+    AP_REACHED_RUST.store(apic_id as usize, Ordering::Release);
 
     let cpu_index = match percpu::cpu_index_by_apic(apic_id) {
         Some(idx) => idx,
@@ -570,20 +608,46 @@ pub extern "C" fn smp_main() -> ! {
         }
     };
 
-    // Initialize per-CPU GS base.
+    // ── Phase 1: per-CPU invariants (before any interrupt can fire) ──
+    // Order matters: GS base must be set before any percpu access,
+    // GDT before IDT (CS selector must be valid), TSS before any
+    // ring-0 → ring-3 transition.
+
     crate::arch::x86_64::percpu::init_gs_base(cpu_index);
 
-    // Initialize per-CPU TSS/GDT.
     crate::arch::x86_64::tss::init_cpu(cpu_index);
     crate::arch::x86_64::gdt::init_cpu(cpu_index);
 
     crate::arch::x86_64::syscall::init();
     crate::arch::x86_64::init_cpu_extensions();
 
+    // Verify XCR0 was programmed correctly on this AP.
+    if crate::arch::x86_64::cpuid::host_uses_xsave() {
+        let expected = crate::arch::x86_64::cpuid::host_default_xcr0_fast();
+        let actual = crate::arch::x86_64::xgetbv(0);
+        if actual != expected {
+            use core::fmt::Write;
+            let mut port = unsafe { uart_16550::SerialPort::new(0x3F8) };
+            let _ = port.write_fmt(format_args!(
+                "[smp][ap] WARNING: XCR0 mismatch! expected={:#x} actual={:#x}\n",
+                expected, actual
+            ));
+        }
+    }
+
     if let Some(stack_top) = percpu::kernel_stack_top(cpu_index) {
         crate::arch::x86_64::tss::set_kernel_stack_for(cpu_index, x86_64::VirtAddr::new(stack_top));
     }
 
+    // ── Phase 2: interrupt infrastructure ──
+    // IDT is loaded LAST after all per-CPU state is established.
+    // This prevents any exception/IPI from firing with incomplete state.
+    idt::load();
+
+    // Re-initialize Local APIC for this core.
+    apic::init_ap();
+
+    // ── Phase 3: signal online ──
     let _ = percpu::mark_online_by_apic(apic_id);
     BOOTED_CORES.fetch_add(1, Ordering::Release);
 
