@@ -708,6 +708,11 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
 }
 
 /// Performs the invalid opcode handler operation.
+///
+/// SAFETY: This handler uses ONLY raw asm for diagnostic output (no
+/// `log::error!`, no `e9_println!`, no `Port::write`). The `Port::write`
+/// path from the x86_64 crate can trigger re-entrant `#UD` in exception
+/// context, causing an infinite fault loop. Raw `out 0xe9, al` is safe.
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
     let cs = stack_frame.code_segment.0;
     let is_user = (cs & 3) == 3;
@@ -724,8 +729,16 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
             return;
         }
     }
-    log::error!("EXCEPTION: INVALID OPCODE\n{:#?}", stack_frame);
-    panic!("Invalid opcode");
+    // Emit raw e9 marker so we can confirm the handler fires.
+    // Do NOT call log::error!, e9_println!, or any function that uses
+    // Port::write — they cause re-entrant #UD in exception context.
+    crate::e9_mark!(b'#');
+    crate::e9_mark!(b'U');
+    crate::e9_mark!(b'D');
+    // Halt forever.
+    loop {
+        crate::arch::hlt();
+    }
 }
 
 extern "x86-interrupt" fn non_maskable_interrupt_handler(stack_frame: InterruptStackFrame) {

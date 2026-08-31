@@ -392,38 +392,20 @@ pub fn _print_force(args: fmt::Arguments) {
 #[macro_export]
 macro_rules! serial_print {
     ($($arg:tt)*) => {
-        if $crate::debug_cfg::SERIAL_ENABLED {
-            $crate::arch::x86_64::serial::_print(format_args!($($arg)*))
-        }
+        $crate::arch::x86_64::serial::_print(format_args!($($arg)*))
     };
 }
 
 /// Print to serial port with newline
 #[macro_export]
 macro_rules! serial_println {
-    () => {
-        if $crate::debug_cfg::SERIAL_ENABLED {
-            $crate::serial_print!("\n")
-        }
-    };
-    ($($arg:tt)*) => {
-        if $crate::debug_cfg::SERIAL_ENABLED {
-            $crate::serial_print!("{}\n", format_args!($($arg)*))
-        }
-    };
+    () => ($crate::serial_print!("\n"));
+    ($($arg:tt)*) => ($crate::serial_print!("{}\n", format_args!($($arg)*)));
 }
 
 /// Print to serial port with newline, bypassing the shared mutex.
 #[macro_export]
 macro_rules! serial_force_println {
-    () => {
-        if $crate::debug_cfg::SERIAL_ENABLED {
-            $crate::arch::x86_64::serial::_print_force(format_args!("\n"))
-        }
-    };
-    ($($arg:tt)*) => {
-        if $crate::debug_cfg::SERIAL_ENABLED {
-            $crate::arch::x86_64::serial::_print_force(format_args!("{}\n", format_args!($($arg)*)))
-        }
-    };
+    () => ($crate::arch::x86_64::serial::_print_force(format_args!("\n")));
+    ($($arg:tt)*) => ($crate::arch::x86_64::serial::_print_force(format_args!("{}\n", format_args!($($arg)*))));
 }

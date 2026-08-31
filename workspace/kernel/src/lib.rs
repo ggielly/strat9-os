@@ -391,12 +391,14 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     //arch::x86_64::speaker::beep_phase(1);
 
     // =============================================
-    // Phase 1c: IDT (Interrupt Descriptor Table)
+    // Phase 1c: TSS + GDT + IDT
     // =============================================
-    // We initialize the IDT as early as possible to catch any exceptions
-    // during the early memory management and hardware initialization phases.
-    //crate::e9_println!("B1 pre-IDT");
-    //serial_println!("[init] IDT (early)...");
+    // TSS and GDT must be loaded before the IDT so that the kernel's
+    // CS selector (0x08) is valid when the first exception fires.
+    // Without a valid GDT entry, the IDT handler triple-faults.
+
+    arch::tss::init();
+    arch::gdt::init();
     arch::x86_64::idt::init();
     //serial_println!("[init] IDT initialized.");
     //crate::e9_println!("B2 post-IDT");
@@ -771,22 +773,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     vga_println!("[OK] Memory manager active");
 
     // =============================================
-    // Phase 4a : TSS (Task State Segment)
+    // Phase 4a : TSS + GDT (already initialized in Phase 1c)
     // =============================================
-    serial_println!("[init] TSS...");
-    vga_println!("[..] Initializing TSS...");
-    arch::tss::init();
-    serial_println!("[init] TSS initialized.");
-    vga_println!("[OK] TSS initialized");
-
-    // =============================================
-    // Phase 4b : GDT (global Descriptor Table)
-    // =============================================
-    serial_println!("[init] GDT...");
-    vga_println!("[..] Initializing GDT...");
-    arch::gdt::init();
-    serial_println!("[init] GDT initialized.");
-    vga_println!("[OK] GDT loaded (with TSS)");
+    serial_println!("[init] TSS+GDT already initialized.");
 
     // =============================================
     // Phase 4c: SYSCALL/SYSRET MSR configuration

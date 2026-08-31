@@ -200,7 +200,7 @@ pub fn init() {
     crate::e9_mark!(b'K');
     HOST_DEFAULT_XCR0_CACHE.store(default_xcr0, Ordering::Release);
     INITIALIZED.store(true, Ordering::Release);
-    crate::e9_println!("CPUID init done");
+    crate::e9_mark!(b'i');
 }
 
 /// Return a clone of the cached host CPU info. Panics if `init()` not called.
@@ -249,7 +249,7 @@ fn detect() -> CpuInfo {
     };
     crate::e9_mark!(b'2');
     crate::e9_mark!(b'd');
-    crate::e9_println!("detect: leaf1 done");
+    crate::e9_mark!(b'f');
     crate::e9_mark!(b'e');
 
     let stepping = (eax1 & 0xF) as u8;
