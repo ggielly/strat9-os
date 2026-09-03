@@ -229,15 +229,33 @@ fn detect() -> CpuInfo {
     //  Vendor (leaf 0): keep the raw 12-byte id, then classify.
     let (max_leaf, ebx0, ecx0, edx0) = cpuid(0, 0);
     crate::e9_mark!(b'E');
+    crate::e9_mark!(b'a');
     let mut vendor_id = [0u8; 12];
-    vendor_id[0..4].copy_from_slice(&ebx0.to_le_bytes());
-    vendor_id[4..8].copy_from_slice(&edx0.to_le_bytes());
-    vendor_id[8..12].copy_from_slice(&ecx0.to_le_bytes());
+    crate::e9_mark!(b'b');
+    let b = ebx0.to_le_bytes();
+    vendor_id[0] = b[0];
+    vendor_id[1] = b[1];
+    vendor_id[2] = b[2];
+    vendor_id[3] = b[3];
+    crate::e9_mark!(b'c');
+    let d = edx0.to_le_bytes();
+    vendor_id[4] = d[0];
+    vendor_id[5] = d[1];
+    vendor_id[6] = d[2];
+    vendor_id[7] = d[3];
+    crate::e9_mark!(b'd');
+    let c = ecx0.to_le_bytes();
+    vendor_id[8] = c[0];
+    vendor_id[9] = c[1];
+    vendor_id[10] = c[2];
+    vendor_id[11] = c[3];
+    crate::e9_mark!(b'e');
     let vendor = match (ebx0, edx0, ecx0) {
         (0x756E_6547, 0x4965_6E69, 0x6C65_746E) => CpuVendor::Intel,
         (0x6874_7541, 0x6974_6E65, 0x444D_4163) => CpuVendor::Amd,
         _ => CpuVendor::Unknown,
     };
+    crate::e9_mark!(b'f');
 
     let mut features = CpuFeatures::empty();
 
@@ -370,18 +388,10 @@ fn detect() -> CpuInfo {
     let mut xsave_size_current = 512usize;
     let mut xsave_size_max = 512usize;
     crate::e9_mark!(b'G');
-    if features.contains(CpuFeatures::XSAVE) && max_leaf >= 0x0D {
-        crate::e9_mark!(b'H');
-        let (eax_d, ebx_d, ecx_d, edx_d) = cpuid(0x0D, 0);
-        crate::e9_mark!(b'I');
-        let raw = ((edx_d as u64) << 32) | eax_d as u64;
-        // Keep the full hardware-reported XCR0 bitmap.  The kernel
-        // applies its own policy mask in default_xcr0_for() rather than
-        // hiding capability bits from the rest of the codebase.
-        supported_xcr0 = raw;
-        xsave_size_current = ebx_d as usize;
-        xsave_size_max = ecx_d as usize;
-    }
+    // Skip XCR0 detection for now — causes #UD at identity-mapped RIP.
+    crate::e9_mark!(b'g');
+    crate::e9_mark!(b'h');
+    crate::e9_mark!(b'H');
 
     //  Leaf 0x80000001: extended features (AMD-V, NX, 1G pages)
     let (max_ext, _, _, _) = cpuid(0x8000_0000, 0);

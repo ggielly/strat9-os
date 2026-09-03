@@ -332,6 +332,11 @@ pub fn get_cmdline() -> &'static str {
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
 
+    // Gate all serial output at the function body level.
+    if !crate::debug_cfg::SERIAL_ENABLED {
+        return;
+    }
+
     // Check if we are in emergency panic mode.
     if PANIC_IN_PROGRESS.load(Ordering::Relaxed) {
         // SAFETY: In emergency mode, we bypass the mutex to ensure output.
@@ -368,6 +373,11 @@ pub fn _print(args: fmt::Arguments) {
 #[doc(hidden)]
 pub fn _print_force(args: fmt::Arguments) {
     use core::fmt::Write;
+
+    // Gate all serial output at the function body level.
+    if !crate::debug_cfg::SERIAL_ENABLED {
+        return;
+    }
 
     // Check if we are in emergency panic mode.
     if PANIC_IN_PROGRESS.load(Ordering::Relaxed) {

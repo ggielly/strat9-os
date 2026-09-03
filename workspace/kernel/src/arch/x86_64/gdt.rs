@@ -122,16 +122,10 @@ pub fn init_cpu(cpu_index: usize) {
         });
         SELECTORS_INIT[cpu_index].store(true, Ordering::Release);
 
-        log::info!(
-            "GDT[CPU{}] loaded: CS={:#x} DS/SS={:#x} user32={:#x} user_data={:#x} user64={:#x} TSS={:#x}",
-            cpu_index,
-            kernel_code.0,
-            kernel_data.0,
-            user_code32.0,
-            user_data.0,
-            user_code64.0,
-            tss_sel.0,
-        );
+        // Raw e9 output — e9_println! with format_args hangs before IDT is loaded.
+        for &b in b"GDT init OK\n" {
+            unsafe { core::arch::asm!("out 0xe9, al", in("al") b, options(nomem, nostack)); }
+        }
     }
 }
 

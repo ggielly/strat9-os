@@ -68,14 +68,10 @@ pub fn init_cpu(cpu_index: usize) {
         TSS_INIT[cpu_index].store(true, Ordering::Release);
 
         let ist_addr = VirtAddr::from_ptr(stack_ptr);
-        log::info!(
-            "TSS[CPU{}] initialized: IST[{}] stack @ {:#x}..{:#x} ({} KB)",
-            cpu_index,
-            DOUBLE_FAULT_IST_INDEX,
-            ist_addr.as_u64(),
-            ist_addr.as_u64() + IST_STACK_SIZE as u64,
-            IST_STACK_SIZE / 1024,
-        );
+        // Raw e9 output — format_args! + Port write hangs before IDT is loaded.
+        for &b in b"TSS init OK\n" {
+            unsafe { core::arch::asm!("out 0xe9, al", in("al") b, options(nomem, nostack)); }
+        }
     }
 }
 

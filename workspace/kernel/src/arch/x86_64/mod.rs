@@ -253,8 +253,8 @@ pub fn wrmsr(msr: u32, val: u64) {
 
 /// Execute CPUID instruction.
 ///
-/// rbx is reserved by LLVM, so we save/restore it manually.
-#[inline]
+/// Damn, rbx is reserved by LLVM, so we save/restore it manually.
+#[inline(never)]
 pub fn cpuid(leaf: u32, sub_leaf: u32) -> (u32, u32, u32, u32) {
     let eax: u32;
     let ebx: u32;
@@ -268,7 +268,7 @@ pub fn cpuid(leaf: u32, sub_leaf: u32) -> (u32, u32, u32, u32) {
             "pop rbx",
             inout("eax") leaf => eax,
             inout("ecx") sub_leaf => ecx,
-            ebx_out = out(reg) ebx,
+            ebx_out = out("r11") ebx,
             out("edx") edx,
             options(nostack, preserves_flags),
         );

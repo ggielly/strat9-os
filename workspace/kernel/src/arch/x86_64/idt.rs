@@ -133,9 +133,19 @@ fn needs_swapgs(cs: u16) -> bool {
     gs_base < 0xFFFF_8000_0000_0000
 }
 
-/// Static IDT storage (must be 'static for load())
-static mut IDT_STORAGE: InterruptDescriptorTable = InterruptDescriptorTable::new();
-static IDT_STORAGE_LOCK: AtomicBool = AtomicBool::new(false);
+/// Combined IDT storage + lock in a single struct to prevent memory corruption.
+/// The `static mut InterruptDescriptorTable` initialization was corrupting
+/// the adjacent `AtomicBool` lock.
+#[repr(C)]
+struct IdtStorage {
+    lock: AtomicBool,
+    idt: InterruptDescriptorTable,
+}
+
+static mut IDT_STORAGEWrapper: IdtStorage = IdtStorage {
+    lock: AtomicBool::new(false),
+    idt: InterruptDescriptorTable::new(),
+};
 static USER_PF_TRACE_BUDGET: AtomicU32 = AtomicU32::new(64);
 static RESCHED_IPI_TRACE_BUDGET: AtomicU32 = AtomicU32::new(32);
 
@@ -438,7 +448,9 @@ extern "C" fn resched_ipi_inner(
 
 #[inline]
 fn lock_idt_storage() {
-    while IDT_STORAGE_LOCK
+    // SAFETY: Only the lock field of the static mut is accessed, which is
+    // an AtomicBool — concurrent access is safe by design.
+    while unsafe { &IDT_STORAGEWrapper.lock }
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
@@ -448,15 +460,14 @@ fn lock_idt_storage() {
 
 #[inline]
 fn unlock_idt_storage() {
-    IDT_STORAGE_LOCK.store(false, Ordering::Release);
+    // SAFETY: Only the lock field of the static mut is accessed.
+    unsafe { &IDT_STORAGEWrapper.lock }.store(false, Ordering::Release);
 }
 
 pub fn init() {
-    crate::e9_println!("IDT lock start");
     lock_idt_storage();
-    crate::e9_println!("IDT locked, setting handlers");
     unsafe {
-        let idt = &raw mut IDT_STORAGE;
+        let idt = &raw mut IDT_STORAGEWrapper.idt;
 
         // CPU exceptions
         crate::e9_println!("IDT BP");
@@ -543,7 +554,7 @@ pub fn init() {
 pub fn load() {
     lock_idt_storage();
     unsafe {
-        let idt = &raw const IDT_STORAGE;
+        let idt = &raw const IDT_STORAGEWrapper.idt;
         (*idt).load_unsafe();
     }
     unlock_idt_storage();
@@ -553,7 +564,7 @@ pub fn load() {
 pub fn register_lapic_timer_vector(vector: u8) {
     lock_idt_storage();
     unsafe {
-        let idt = &raw mut IDT_STORAGE;
+        let idt = &raw mut IDT_STORAGEWrapper.idt;
         (&mut *idt)[vector]
             .set_handler_addr(VirtAddr::from_ptr(lapic_timer_entry as *const ()))
             .set_code_selector(KERNEL_CODE_SELECTOR);
@@ -574,7 +585,7 @@ pub fn register_ahci_irq(irq: u8) {
 
     lock_idt_storage();
     unsafe {
-        let idt = &raw mut IDT_STORAGE;
+        let idt = &raw mut IDT_STORAGEWrapper.idt;
         (&mut *idt)[vector]
             .set_handler_fn(ahci_handler)
             .set_code_selector(KERNEL_CODE_SELECTOR);
@@ -591,7 +602,7 @@ pub fn register_ahci_irq(irq: u8) {
 pub fn register_nvme_irq_vector(vector: u8) {
     lock_idt_storage();
     unsafe {
-        let idt = &raw mut IDT_STORAGE;
+        let idt = &raw mut IDT_STORAGEWrapper.idt;
         (&mut *idt)[vector]
             .set_handler_fn(nvme_handler)
             .set_code_selector(KERNEL_CODE_SELECTOR);
@@ -612,7 +623,7 @@ pub fn register_nvme_irq(irq: u8) {
 
     lock_idt_storage();
     unsafe {
-        let idt = &raw mut IDT_STORAGE;
+        let idt = &raw mut IDT_STORAGEWrapper.idt;
         (&mut *idt)[vector]
             .set_handler_fn(nvme_handler)
             .set_code_selector(KERNEL_CODE_SELECTOR);
@@ -637,7 +648,7 @@ pub fn register_virtio_block_irq(irq: u8) {
 
     lock_idt_storage();
     unsafe {
-        let idt = &raw mut IDT_STORAGE;
+        let idt = &raw mut IDT_STORAGEWrapper.idt;
         (&mut *idt)[vector]
             .set_handler_fn(virtio_block_handler)
             .set_code_selector(KERNEL_CODE_SELECTOR);
@@ -654,7 +665,7 @@ pub fn register_virtio_block_irq(irq: u8) {
 pub fn register_xhci_irq_vector(vector: u8) {
     lock_idt_storage();
     unsafe {
-        let idt = &raw mut IDT_STORAGE;
+        let idt = &raw mut IDT_STORAGEWrapper.idt;
         (&mut *idt)[vector]
             .set_handler_fn(xhci_handler)
             .set_code_selector(KERNEL_CODE_SELECTOR);
@@ -673,7 +684,7 @@ pub fn register_xhci_irq(irq: u8) {
 
     lock_idt_storage();
     unsafe {
-        let idt = &raw mut IDT_STORAGE;
+        let idt = &raw mut IDT_STORAGEWrapper.idt;
         (&mut *idt)[vector]
             .set_handler_fn(xhci_handler)
             .set_code_selector(KERNEL_CODE_SELECTOR);
@@ -699,7 +710,7 @@ pub fn register_nic_irq(irq: u8) {
 
     lock_idt_storage();
     unsafe {
-        let idt = &raw mut IDT_STORAGE;
+        let idt = &raw mut IDT_STORAGEWrapper.idt;
         (&mut *idt)[vector]
             .set_handler_fn(nic_handler)
             .set_code_selector(KERNEL_CODE_SELECTOR);
@@ -747,6 +758,11 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
     crate::e9_mark!(b'#');
     crate::e9_mark!(b'U');
     crate::e9_mark!(b'D');
+    // Emit the faulting RIP as raw bytes (little-endian u64) for diagnosis.
+    let rip = stack_frame.instruction_pointer.as_u64();
+    for &b in rip.to_le_bytes().iter() {
+        unsafe { core::arch::asm!("out 0xe9, al", in("al") b, options(nomem, nostack)); }
+    }
     // Halt forever.
     loop {
         crate::arch::hlt();

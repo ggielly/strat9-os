@@ -315,18 +315,25 @@ fn log_boot_module_magics(_stage: &str) {}
 
 /// Main kernel initialization - called by bootloader entry points
 pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
-    // Raw COM1 trace - works before any subsystem is initialized.
-    {
-        let thr: u16 = 0x3F8;
-        let lsr: u16 = 0x3F8 + 5;
-        let msg = b"[km] kernel_main enter\r\n";
-        for &b in msg {
-            loop {
-                let s: u8;
-                core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
-                if s & 0x20 != 0 { break; }
+    // Earliest possible e9 mark — before any COM1 trace that might hang.
+    crate::e9_mark!(b'K');
+
+    // Raw COM1 traces hang when SERIAL_ENABLED=false (UART not initialized).
+    // Gate them behind SERIAL_ENABLED so we don't spin on a dead port.
+    if crate::debug_cfg::SERIAL_ENABLED {
+        // Raw COM1 trace - works before any subsystem is initialized.
+        {
+            let thr: u16 = 0x3F8;
+            let lsr: u16 = 0x3F8 + 5;
+            let msg = b"[km] kernel_main enter\r\n";
+            for &b in msg {
+                loop {
+                    let s: u8;
+                    core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
+                    if s & 0x20 != 0 { break; }
+                }
+                core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
             }
-            core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
         }
     }
 
@@ -339,7 +346,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     );
 
     // Trace: raw COM1 after debug_assert
-    {
+    if crate::debug_cfg::SERIAL_ENABLED {
         let thr: u16 = 0x3F8;
         let lsr: u16 = 0x3F8 + 5;
         let msg = b"[km] after debug_assert\r\n";
@@ -355,7 +362,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     arch::x86_64::boot_timestamp::init();
 
     // Trace: raw COM1 after boot_timestamp
-    {
+    if crate::debug_cfg::SERIAL_ENABLED {
         let thr: u16 = 0x3F8;
         let lsr: u16 = 0x3F8 + 5;
         let msg = b"[km] after boot_timestamp\r\n";
@@ -370,7 +377,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     //crate::e9_println!("B0 kernel_main");
 
     // Trace before init_serial
-    {
+    if crate::debug_cfg::SERIAL_ENABLED {
         let thr: u16 = 0x3F8;
         let lsr: u16 = 0x3F8 + 5;
         let msg = b"[km] before init_serial\r\n";
@@ -384,9 +391,13 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     //init_serial();
 
     // Enable boot log prefix (timestamp) by default; can be disabled later if needed.
+    crate::e9_mark!(b'L');
     arch::serial::set_boot_log_prefix_enabled(true);
+    crate::e9_mark!(b'M');
 
-    init_logger();
+    // Skip init_logger — log::set_logger() #UDs before IDT is loaded.
+    // Logger will be initialized later once serial and IDT are ready.
+    crate::e9_mark!(b'N');
     //boot_milestone!("Kernel entry");
     //arch::x86_64::speaker::beep_phase(1);
 
@@ -410,7 +421,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     //crate::e9_println!("B3 milestone");
 
     // Trace after IDT
-    {
+    if crate::debug_cfg::SERIAL_ENABLED {
         let thr: u16 = 0x3F8;
         let lsr: u16 = 0x3F8 + 5;
         let msg = b"[km] IDT initialized\r\n";
