@@ -1,4 +1,14 @@
+use core::sync::atomic::{AtomicBool, Ordering};
 use log::{Level, LevelFilter, Metadata, Record};
+
+/// Gate for format_args-heavy logging paths.
+///
+/// During early boot, `format_args!` involving nested `fmt::Arguments`
+/// (e.g. `record.args()` inside another `format_args!`) can resolve to
+/// identity-mapped function pointers and #UD.  This flag is set to `true`
+/// after `init_cpu_extensions()` enables CR4.OSXSAVE + XCR0, at which
+/// point all formatting is safe.
+static EXTENSIONS_READY: AtomicBool = AtomicBool::new(false);
 
 /// Simple serial port logger
 struct SerialLogger;
@@ -24,6 +34,11 @@ impl log::Log for SerialLogger {
     /// making deadlocks structurally impossible.
     fn log(&self, record: &Record) {
         crate::e9_println!("LOG enter");
+        // Gate: skip format_args-heavy paths until SSE/XSAVE are initialized.
+        // The e9_println above is safe (plain string literal only).
+        if !EXTENSIONS_READY.load(Ordering::Acquire) {
+            return;
+        }
         if self.enabled(record.metadata()) {
             // In quiet mode, skip all log output entirely.
             if crate::debug_cfg::is_quiet() {
@@ -129,4 +144,16 @@ pub fn init() {
     log::set_logger(&LOGGER)
         .map(|()| log::set_max_level(LevelFilter::Trace))
         .expect("Failed to set logger");
+}
+
+/// Mark SSE/XSAVE extensions as ready.
+///
+/// Called once from `kernel_main` after `init_cpu_extensions()` has set
+/// CR4.OSXSAVE and XCR0.  Until this is called, all `log::info!` / etc.
+/// fire the `e9_println!("LOG enter")` marker but skip the format_args-heavy
+/// formatting paths that can #UD on early boot.
+pub fn set_extensions_ready() {
+    crate::e9_mark!(b'Z');
+    EXTENSIONS_READY.store(true, Ordering::Release);
+    crate::e9_mark!(b'z');
 }

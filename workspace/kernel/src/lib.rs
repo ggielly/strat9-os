@@ -395,8 +395,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     arch::serial::set_boot_log_prefix_enabled(true);
     crate::e9_mark!(b'M');
 
-    // Skip init_logger — log::set_logger() #UDs before IDT is loaded.
-    // Logger will be initialized later once serial and IDT are ready.
+    init_logger();
     crate::e9_mark!(b'N');
     //boot_milestone!("Kernel entry");
     //arch::x86_64::speaker::beep_phase(1);
@@ -446,6 +445,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     e9_mark!(b'c');
     crate::arch::x86_64::init_cpu_extensions();
     e9_mark!(b'd');
+
+    // Enable format_args-heavy logging paths now that SSE/XSAVE are initialized.
+    boot::logger::set_extensions_ready();
 
     // Seed the kernel entropy pool from RDRAND (if available).
     e9_mark!(b'e');

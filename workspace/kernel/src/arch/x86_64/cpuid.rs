@@ -388,13 +388,26 @@ fn detect() -> CpuInfo {
     let mut xsave_size_current = 512usize;
     let mut xsave_size_max = 512usize;
     crate::e9_mark!(b'G');
-    // Skip XCR0 detection for now — causes #UD at identity-mapped RIP.
+    let xsave_check = features.contains(CpuFeatures::XSAVE);
     crate::e9_mark!(b'g');
+    let leaf0d_check = max_leaf >= 0x0D;
     crate::e9_mark!(b'h');
-    crate::e9_mark!(b'H');
+    if xsave_check && leaf0d_check {
+        crate::e9_mark!(b'H');
+        let (eax_d, ebx_d, ecx_d, edx_d) = cpuid(0x0D, 0);
+        crate::e9_mark!(b'I');
+        let raw = ((edx_d as u64) << 32) | eax_d as u64;
+        supported_xcr0 = raw;
+        xsave_size_current = ebx_d as usize;
+        xsave_size_max = ecx_d as usize;
+    } else {
+        crate::e9_mark!(b'H');
+    }
 
     //  Leaf 0x80000001: extended features (AMD-V, NX, 1G pages)
+    crate::e9_mark!(b'J');
     let (max_ext, _, _, _) = cpuid(0x8000_0000, 0);
+    crate::e9_mark!(b'K');
     if max_ext >= 0x8000_0001 {
         let (_eax_e, _ebx_e, ecx_e, edx_e) = cpuid(0x8000_0001, 0);
         if edx_e & (1 << 20) != 0 {
@@ -413,6 +426,7 @@ fn detect() -> CpuInfo {
             features |= CpuFeatures::SVM;
         }
     }
+    crate::e9_mark!(b'L');
 
     //  Leaves 0x80000002-0x80000004: brand string
     let mut model_name = [0u8; 48];
@@ -421,10 +435,26 @@ fn detect() -> CpuInfo {
         for (i, leaf) in (0x8000_0002u32..=0x8000_0004).enumerate() {
             let (a, b, c, d) = cpuid(leaf, 0);
             let offset = i * 16;
-            model_name[offset..offset + 4].copy_from_slice(&a.to_le_bytes());
-            model_name[offset + 4..offset + 8].copy_from_slice(&b.to_le_bytes());
-            model_name[offset + 8..offset + 12].copy_from_slice(&c.to_le_bytes());
-            model_name[offset + 12..offset + 16].copy_from_slice(&d.to_le_bytes());
+            let ab = a.to_le_bytes();
+            model_name[offset] = ab[0];
+            model_name[offset + 1] = ab[1];
+            model_name[offset + 2] = ab[2];
+            model_name[offset + 3] = ab[3];
+            let bb = b.to_le_bytes();
+            model_name[offset + 4] = bb[0];
+            model_name[offset + 5] = bb[1];
+            model_name[offset + 6] = bb[2];
+            model_name[offset + 7] = bb[3];
+            let cb = c.to_le_bytes();
+            model_name[offset + 8] = cb[0];
+            model_name[offset + 9] = cb[1];
+            model_name[offset + 10] = cb[2];
+            model_name[offset + 11] = cb[3];
+            let db = d.to_le_bytes();
+            model_name[offset + 12] = db[0];
+            model_name[offset + 13] = db[1];
+            model_name[offset + 14] = db[2];
+            model_name[offset + 15] = db[3];
         }
         model_name_len = model_name
             .iter()

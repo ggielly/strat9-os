@@ -264,11 +264,11 @@ pub fn cpuid(leaf: u32, sub_leaf: u32) -> (u32, u32, u32, u32) {
         asm!(
             "push rbx",
             "cpuid",
-            "mov {ebx_out:e}, ebx",
+            "mov r11d, ebx",
             "pop rbx",
             inout("eax") leaf => eax,
             inout("ecx") sub_leaf => ecx,
-            ebx_out = out("r11") ebx,
+            out("r11") ebx,
             out("edx") edx,
             options(nostack, preserves_flags),
         );
