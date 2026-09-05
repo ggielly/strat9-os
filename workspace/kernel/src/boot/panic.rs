@@ -18,13 +18,17 @@ pub fn panic_in_progress() -> bool {
 
 /// Register a function to be called during a panic (serial-only hooks).
 pub fn register_panic_hook(hook: PanicHook) -> bool {
+    crate::e9_mark!(b'P');
     let mut hooks = PANIC_HOOKS.lock();
+    crate::e9_mark!(b'p');
     for slot in hooks.iter_mut() {
         if slot.is_none() {
             *slot = Some(hook);
+            crate::e9_mark!(b'q');
             return true;
         }
     }
+    crate::e9_mark!(b'r');
     false
 }
 
@@ -221,7 +225,9 @@ fn dump_panic_info(info: &PanicInfo) {
 
 /// Install the default panic hooks (serial context + backtrace dumps).
 pub fn install_default_panic_hooks() {
+    crate::e9_mark!(b'O');
     let _ = register_panic_hook(panic_hook_dump_context);
+    crate::e9_mark!(b'o');
 }
 
 /// Main kernel panic handler.

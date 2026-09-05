@@ -9,15 +9,26 @@
 _start:
                               cli
 
+                              # Save kernel args pointer (rdi = 1st arg in System V ABI)
+                              # Must happen BEFORE BSS zero which clobbers rdi.
+                              movq                                                                           %rdi, %r15
+
                               # E9: 'A' at start
                               mov                                                                            $0xE9, %dx
                               mov                                                                            $'A', %al
                               out                                                                            %al, %dx
 
-                              # Save                                                                          kernel args pointer (rdi = 1st arg in System V ABI)
-                              movq                                                                           %rdi, %r15
+                              # Zero BSS before anything else.
+                              # __bss_start/__bss_end are linker symbols covering the
+                              # entire .bss section (including statics like Mutex locks).
+                              lea                                                                     __bss_start(%rip), %rdi
+                              lea                                                                     __bss_end(%rip), %rcx
+                              sub                                                                     %rdi, %rcx
+                              shr                                                                     $3, %rcx           # /8 for qwords
+                              xor                                                                     %rax, %rax
+                              rep                                                                     stosq
 
-                              # E9: 'B' after save
+                              # E9: 'B' after BSS clear
                               mov                                                                            $0xE9, %dx
                               mov                                                                            $'B', %al
                               out                                                                            %al, %dx
@@ -79,12 +90,8 @@ entry:                        # should not return; if it does, halt
                               jmp                                                                            .-1
 
 # Bootstrap stack - placed at end of BSS in linker script (last .bss section).
-.section                      .bss.stack, "aw", @nobits
+.section                      .bss.stack,                                                                    "aw", @nobits
 .align                        16
-.global                       __bss_start
-__bss_start:
 boot_stack_bottom:
                               .skip                                                                          65536           # 64 KB bootstrap stack
 boot_stack_top:
-.global                       __bss_end
-__bss_end:

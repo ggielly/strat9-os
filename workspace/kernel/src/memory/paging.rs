@@ -339,17 +339,20 @@ pub fn is_hhdm_range_mapped_now(phys_base: u64, size: u64) -> bool {
     let start = phys_base & !0xFFF;
     let end = phys_base.saturating_add(size).saturating_add(0xFFF) & !0xFFF;
 
+    crate::e9_mark!(b'*');
     let mut phys = start;
     while phys < end {
         let virt = VirtAddr::new(crate::memory::phys_to_virt(phys));
-        let Some(mapped) = translate_via_active_page_tables(virt) else {
-            return false;
+        let mapped = match translate_via_active_page_tables(virt) {
+            Some(m) => m,
+            None => return false,
         };
         if mapped.as_u64() != phys {
             return false;
         }
         phys = phys.saturating_add(4096);
     }
+    crate::e9_mark!(b'+');
     true
 }
 

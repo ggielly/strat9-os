@@ -473,6 +473,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     e9_mark!(b'm');
 
     // Nice logo :D
+    // Disabled: serial_println with format_args creates nested Arguments requiring
+    // Display trait vtable pointers that resolve to identity-mapped addresses → #UD.
+    // TODO: replace with direct e9_mark! traces or fix the format_args vtable relocation.
+    /*
     serial_println!();
     serial_println!();
     serial_println!(r"          __                 __   ________                         ");
@@ -495,25 +499,32 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     serial_println!("  See the GNU General Public License for more details.");
     serial_println!("=======================================================================================================");
     serial_println!();
+    */
 
     // Validate arguments
+    e9_mark!(b'V');
     if args.is_null() {
         serial_println!("[CRIT] No KernelArgs provided. System will hang.");
         loop {
             arch::hlt();
         }
     }
+    e9_mark!(b'v');
 
     let args = &*args;
+    e9_mark!(b'W');
     serial_println!("[init] KernelArgs at {:p}", args);
+    e9_mark!(b'w');
 
     // Store boot args globally so components can access them.
     // SAFETY: written once here, read-only thereafter.
     unsafe { BOOT_ARGS = Some(args) };
+    e9_mark!(b'X');
 
     // SAFETY: KernelArgs is packed; read fields via addr_of! to avoid unaligned references.
     let magic = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.magic)) };
     let abi_version = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.abi_version)) };
+    e9_mark!(b'x');
 
     if magic != strat9_abi::boot::STRAT9_BOOT_MAGIC {
         serial_println!(
@@ -535,18 +546,13 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             arch::hlt();
         }
     }
+    e9_mark!(b'Y');
 
     // Parse kernel cmdline (early, for serial console config).
-    if args.cmdline_ptr != 0 && args.cmdline_len != 0 {
-        let cmdline = args.cmdline_str();
-        if !cmdline.is_empty() {
-            serial_println!("[init] cmdline: '{}'", cmdline);
-        }
-        // SAFETY: cmdline_ptr is a valid null-terminated C string from the bootloader.
-        unsafe { arch::x86_64::serial::parse_cmdline(args.cmdline_ptr, args.cmdline_len) };
-    } else {
-        serial_println!("[init] No kernel cmdline provided");
-    }
+    // SAFETY: cmdline_ptr is a valid null-terminated C string from the bootloader.
+    // NOTE: inlined strip_suffix caused #UD (Pattern trait function pointer at identity-mapped
+    // address 0x12002). Skip cmdline parsing for now.
+    e9_mark!(b'z');
 
     // Le's go !
     //

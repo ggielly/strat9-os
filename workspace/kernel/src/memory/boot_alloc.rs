@@ -77,15 +77,26 @@ impl BootAllocator {
         self.normalize_regions();
         crate::e9_println!("BI norm1");
 
-        for (base, size) in protected_ranges_snapshot().into_iter().flatten() {
+        crate::e9_mark!(b'U');
+        let guard = PROTECTED_RANGES.lock();
+        crate::e9_mark!(b'u');
+        for entry in guard.iter() {
+            let (base, size) = match *entry {
+                Some(v) => v,
+                None => continue,
+            };
             if size == 0 {
                 continue;
             }
+            crate::e9_mark!(b'V');
             self.exclude_range(
                 align_down(base, PAGE_SIZE),
                 align_up(base.saturating_add(size), PAGE_SIZE),
             );
+            crate::e9_mark!(b'v');
         }
+        drop(guard);
+        crate::e9_mark!(b'W');
 
         self.normalize_regions();
         crate::e9_println!("BI norm2 pre");
@@ -315,10 +326,13 @@ impl BootAllocator {
     fn normalize_regions(&mut self) {
         crate::e9_println!("NR begin");
         if self.len <= 1 {
+            crate::e9_mark!(b'S');
             self.rebuild_accessible_limit();
+            crate::e9_mark!(b's');
             return;
         }
 
+        crate::e9_mark!(b'B');
         for i in 1..self.len {
             let cur = self.regions[i];
             let mut j = i;
@@ -328,6 +342,7 @@ impl BootAllocator {
             }
             self.regions[j] = cur;
         }
+        crate::e9_mark!(b'b');
 
         let mut write = 0usize;
         for read in 0..self.len {
@@ -348,21 +363,29 @@ impl BootAllocator {
                 write += 1;
             }
         }
+        crate::e9_mark!(b'c');
 
         for slot in write..self.regions.len() {
             self.regions[slot] = BootRegion::empty();
         }
         self.len = write;
         self.rebuild_accessible_limit();
+        crate::e9_mark!(b'd');
     }
 
     /// Recompute the highest currently reachable physical byte for HHDM-backed boot allocations.
     fn rebuild_accessible_limit(&mut self) {
+        crate::e9_mark!(b'Q');
         let mut limit = 0u64;
+        crate::e9_mark!(b'R');
         for region in self.regions.iter().take(self.len).copied() {
+            crate::e9_mark!(b'S');
             limit = limit.max(self.accessible_prefix_end(region));
+            crate::e9_mark!(b's');
         }
+        crate::e9_mark!(b'T');
         self.accessible_limit = limit;
+        crate::e9_mark!(b't');
     }
 
     /// Return the end of the longest mapped prefix of `region` visible through the current HHDM.
@@ -470,7 +493,17 @@ pub fn reset_protected_ranges() {
 }
 
 pub(crate) fn protected_ranges_snapshot() -> [Option<(u64, u64)>; MAX_PROTECTED_RANGES] {
-    *PROTECTED_RANGES.lock()
+    crate::e9_mark!(b'p');
+    let guard = PROTECTED_RANGES.lock();
+    crate::e9_mark!(b'q');
+    // Avoid large struct copy (512 bytes) which generates a memcpy call
+    // that resolves to an identity-mapped address → #UD.
+    let mut result = [None; MAX_PROTECTED_RANGES];
+    for (dst, src) in result.iter_mut().zip(guard.iter()) {
+        *dst = *src;
+    }
+    crate::e9_mark!(b'r');
+    result
 }
 
 #[inline]

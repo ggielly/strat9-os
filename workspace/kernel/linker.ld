@@ -29,9 +29,11 @@ SECTIONS
     /* Uninitialized data (zero-filled) */
     .bss : ALIGN(4K)
     {
+        __bss_start = .;
         *(.bss .bss.*)
         *(COMMON)
         *(.bss.stack)
+        __bss_end = .;
     } :bss
 
     /* Section header string table - NOT in a PT_LOAD PHDR.
