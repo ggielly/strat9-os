@@ -141,9 +141,15 @@ impl log::Log for SerialLogger {
 
 /// Initialize the logger
 pub fn init() {
+    crate::e9_mark!(b'{');
     log::set_logger(&LOGGER)
-        .map(|()| log::set_max_level(LevelFilter::Trace))
+        .map(|()| {
+            crate::e9_mark!(b'|');
+            log::set_max_level(LevelFilter::Trace);
+            crate::e9_mark!(b'}');
+        })
         .expect("Failed to set logger");
+    crate::e9_mark!(b'~');
 }
 
 /// Mark SSE/XSAVE extensions as ready.
