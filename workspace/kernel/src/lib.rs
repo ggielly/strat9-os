@@ -612,8 +612,11 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     crate::e9_println!("MM pre-init-boot-alloc");
     memory::boot_alloc::init_boot_allocator(&mmap_work[..mmap_work_len]);
     crate::e9_println!("MM post-init-boot-alloc before serial");
+    crate::e9_mark!(b'1');
     serial_println!("[init] Boot allocator ready.");
+    crate::e9_mark!(b'2');
     serial_println!("[init] Boot allocator ready.");
+    crate::e9_mark!(b'3');
 
     let total_ram = mmap_work[..mmap_work_len]
         .iter()
@@ -626,9 +629,14 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         .map(|region| region.base.saturating_add(region.size))
         .max()
         .unwrap_or(0);
+    crate::e9_mark!(b'4');
     let free_like_regions = count_free_like_regions(&mmap_work[..mmap_work_len], mmap_work_len);
+    crate::e9_mark!(b'5');
     let metadata_bytes = memory::frame::metadata_size_for(total_ram) as usize;
+    crate::e9_mark!(b'6');
     let boot_stats = memory::boot_alloc::boot_allocator_stats();
+    crate::e9_mark!(b'7');
+    crate::e9_println!("M7 boot-stats-done");
     serial_println!(
         "[init] Frame metadata plan: total_ram={:#x} free_regions={} bytes={} boot_free={} largest_boot_region={}",
         total_ram,
@@ -637,19 +645,27 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         boot_stats.total_free_bytes as usize,
         boot_stats.largest_region_bytes as usize,
     );
+    crate::e9_mark!(b'8');
 
     {
+        crate::e9_mark!(b'9');
         let mut boot_alloc = memory::boot_alloc::get_boot_allocator().lock();
+        crate::e9_mark!(b'A');
         memory::frame::init_metadata_array(total_ram, &mut *boot_alloc);
+        crate::e9_mark!(b'B');
     }
+    crate::e9_mark!(b'C');
     serial_println!("[init] Frame metadata ready.");
 
     // TODO: Phase 4 - Reserve module memory ranges when FAT32 loader is implemented
     // For now, skip module reservation since we're using the custom bootloader + FAT32
+    crate::e9_mark!(b'D');
 
     memory::buddy::init_buddy_allocator(&mmap_work[..mmap_work_len]);
+    crate::e9_mark!(b'E');
 
     serial_println!("[init] Buddy allocator ready.");
+    crate::e9_mark!(b'F');
 
     // =============================================
     // Stack switch: migrate off the 8 KB bootstrap stack

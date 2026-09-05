@@ -753,15 +753,41 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
         }
     }
     // Emit raw e9 marker so we can confirm the handler fires.
-    // Do NOT call log::error!, e9_println!, or any function that uses
-    // Port::write — they cause re-entrant #UD in exception context.
     crate::e9_mark!(b'#');
     crate::e9_mark!(b'U');
     crate::e9_mark!(b'D');
     // Emit the faulting RIP as raw bytes (little-endian u64) for diagnosis.
-    let rip = stack_frame.instruction_pointer.as_u64();
-    for &b in rip.to_le_bytes().iter() {
-        unsafe { core::arch::asm!("out 0xe9, al", in("al") b, options(nomem, nostack)); }
+    // Use ONLY inline asm — no Rust function calls, no format_args, no
+    // to_le_bytes() — to avoid identity-mapped function pointer issues.
+    let rip: u64 = stack_frame.instruction_pointer.as_u64();
+    unsafe {
+        core::arch::asm!(
+            "out 0xe9, al",
+            "shr rcx, 8",
+            "mov al, cl",
+            "out 0xe9, al",
+            "shr rcx, 8",
+            "mov al, cl",
+            "out 0xe9, al",
+            "shr rcx, 8",
+            "mov al, cl",
+            "out 0xe9, al",
+            "shr rcx, 8",
+            "mov al, cl",
+            "out 0xe9, al",
+            "shr rcx, 8",
+            "mov al, cl",
+            "out 0xe9, al",
+            "shr rcx, 8",
+            "mov al, cl",
+            "out 0xe9, al",
+            "shr rcx, 8",
+            "mov al, cl",
+            "out 0xe9, al",
+            inout("rcx") rip => _,
+            in("al") rip as u8,
+            options(nostack, nomem),
+        );
     }
     // Halt forever.
     loop {

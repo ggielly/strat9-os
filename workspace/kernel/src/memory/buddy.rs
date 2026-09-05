@@ -114,59 +114,21 @@ impl BuddyAllocator {
 
     /// Performs the init operation.
     pub fn init(&mut self, memory_regions: &[MemoryRegion]) {
+        crate::e9_mark!(b'b');
         #[cfg(debug_assertions)]
         debug_assert!(
             hhdm_offset() != u64::MAX,
             "HHDM offset sanity check failed unexpectedly"
         );
+        crate::e9_mark!(b'1');
 
-        serial_println!(
-            "Buddy allocator: initializing with {} memory regions",
-            memory_regions.len()
-        );
-
-        // Dump memory regions for diagnostic (compare QEMU vs VMware maps)
-        for (i, region) in memory_regions.iter().enumerate() {
-            let kind_str = match region.kind {
-                crate::boot::entry::MemoryKind::Free => "FREE",
-                crate::boot::entry::MemoryKind::Reclaim => "RECLAIM",
-                crate::boot::entry::MemoryKind::Reserved => "RESERVED",
-                crate::boot::entry::MemoryKind::Null => "NULL",
-                _ => "UNKNOWN",
-            };
-            serial_println!(
-                "  [buddy] MMAP[{:2}]: phys={:#018x}..{:#018x} size={:#x} ({})",
-                i,
-                region.base,
-                region.base.saturating_add(region.size),
-                region.size,
-                kind_str
-            );
-        }
-
-        for (_protected_base, _protected_size) in
-            Self::protected_module_ranges().into_iter().flatten()
-        {
-            buddy_dbg!(
-                "  Protected module range: phys=0x{:x}..0x{:x}",
-                Self::align_down(_protected_base, PAGE_SIZE),
-                Self::align_up(_protected_base.saturating_add(_protected_size), PAGE_SIZE)
-            );
-        }
+        // Skip serial output during buddy init to avoid format_args function pointer issues.
+        crate::e9_mark!(b'2');
 
         // Pass 1: compute per-zone address span (base + span_pages)
+        crate::e9_mark!(b'3');
         self.pass_count(memory_regions);
-
-        // Diagnostic: log span info for each zone (helps diagnose VMware memory map issues)
-        for zone in &self.zones {
-            serial_println!(
-                "  [buddy] Zone {:?}: base={:#x} span={} pages ({} MB span)",
-                zone.zone_type,
-                zone.base.as_u64(),
-                zone.span_pages,
-                (zone.span_pages * 4096) / (1024 * 1024)
-            );
-        }
+        crate::e9_mark!(b'4');
 
         // Pass 2: reserve per-zone bitmap pools using an upper bound derived
         // from the boot allocator's current free extents.
@@ -176,7 +138,9 @@ impl BuddyAllocator {
             kind: MemoryKind::Reserved,
         }; boot_alloc::MAX_BOOT_ALLOC_REGIONS];
         let candidate_len = boot_alloc::snapshot_free_regions(&mut candidates);
+        crate::e9_mark!(b'5');
         self.pass_reserve_bitmap_pools(&candidates[..candidate_len]);
+        crate::e9_mark!(b'6');
 
         ///////////
         // Pass 3: reserve exact segment storage from the remaining accessible
@@ -197,54 +161,29 @@ impl BuddyAllocator {
         }; boot_alloc::MAX_BOOT_ALLOC_REGIONS];
 
         let remaining_len = boot_alloc::snapshot_free_regions(&mut remaining);
+        crate::e9_mark!(b'7');
         self.pass_reserve_segment_storage(&remaining[..remaining_len]);
+        crate::e9_mark!(b'8');
 
         // Re-snapshot: segment-storage pages are now consumed from the boot
         // allocator and must not appear in any buddy segment.
         let remaining_len = boot_alloc::snapshot_free_regions(&mut remaining);
 
+        crate::e9_mark!(b'9');
         self.pass_build_segments(&remaining[..remaining_len]);
+        crate::e9_mark!(b'a');
         self.pass_finalize_zone_accounting();
+        crate::e9_mark!(b'b');
         self.pass_setup_segment_bitmaps();
+        crate::e9_mark!(b'c');
         self.pass_populate();
+        crate::e9_mark!(b'd');
 
         // Seal the boot allocator: all its remaining free regions are now managed
         // by buddy.  Any later boot_alloc::alloc_stack() call would otherwise
         // double-allocate pages that buddy already tracks in its free lists.
         boot_alloc::seal();
-
-        for zone in &self.zones {
-            let hole_pages = zone.span_pages.saturating_sub(zone.page_count);
-            let efficiency = if zone.span_pages > 0 {
-                (zone.page_count * 100) / zone.span_pages
-            } else {
-                0
-            };
-            serial_println!(
-                "  [buddy] Zone {:?}: segments={}/{} managed={} present={} reserved={} span={} holes={} min/low/high={}/{}/{} reserve={} ({}% utilized, {} MB managed)",
-                zone.zone_type,
-                zone.segment_count,
-                zone.segment_capacity,
-                zone.page_count,
-                zone.present_pages,
-                zone.reserved_pages,
-                zone.span_pages,
-                hole_pages,
-                zone.watermark_min,
-                zone.watermark_low,
-                zone.watermark_high,
-                zone.lowmem_reserve_pages,
-                efficiency,
-                (zone.page_count * 4096) / (1024 * 1024)
-            );
-            if zone.span_pages > 0 && efficiency < 70 {
-                serial_println!(
-                    "  [buddy] WARNING: Zone {:?} has large holes ({}% wasted). This may indicate VMware memory fragmentation.",
-                    zone.zone_type,
-                    100 - efficiency
-                );
-            }
-        }
+        crate::e9_mark!(b'e');
     }
 
     /// Performs the pass count operation.
@@ -333,6 +272,7 @@ impl BuddyAllocator {
     /// Reserve per-zone bitmap pools using a segmentation-safe upper bound.
     fn pass_reserve_bitmap_pools(&mut self, memory_regions: &[MemoryRegion]) {
         for zi in 0..ZoneType::COUNT {
+            crate::e9_mark!(b'P');
             let managed_pages = memory_regions
                 .iter()
                 .filter_map(|region| Self::zone_intersection_aligned(region, zi))
@@ -343,8 +283,10 @@ impl BuddyAllocator {
 
             if reserved_bytes == 0 {
                 self.bitmap_pool[zi] = (0, 0);
+                crate::e9_mark!(b'Z');
                 continue;
             }
+            crate::e9_mark!(b'A');
 
             let pool_start = boot_alloc::alloc_bytes_accessible(needed_bytes, PAGE_SIZE as usize)
                 .unwrap_or_else(|| {
@@ -354,24 +296,21 @@ impl BuddyAllocator {
                     )
                 })
                 .as_u64();
+            crate::e9_mark!(b'B');
             let pool_end = pool_start.saturating_add(reserved_bytes);
             self.bitmap_pool[zi] = (pool_start, pool_end);
-            buddy_dbg!(
-                "  Zone {:?}: bitmap pool phys=0x{:x}..0x{:x} ({} bytes)",
-                self.zones[zi].zone_type,
-                pool_start,
-                pool_end,
-                needed_bytes
-            );
 
             // Zero stolen pages to initialize all bitmaps to 0.
-            unsafe {
-                core::ptr::write_bytes(
-                    phys_to_virt(pool_start) as *mut u8,
-                    0,
-                    (pool_end - pool_start) as usize,
-                );
+            // Use a byte loop to avoid memset function pointer issues.
+            let dst = phys_to_virt(pool_start) as *mut u8;
+            let count = (pool_end - pool_start) as usize;
+            crate::e9_mark!(b'C');
+            for i in 0..count {
+                unsafe {
+                    core::ptr::write_volatile(dst.add(i), 0);
+                }
             }
+            crate::e9_mark!(b'D');
         }
     }
 
@@ -2140,6 +2079,7 @@ fn drain_local_caches_for_zone(
 
 /// Initializes buddy allocator.
 pub fn init_buddy_allocator(memory_regions: &[MemoryRegion]) {
+    crate::e9_mark!(b'B');
     for cache in &LOCAL_FRAME_CACHES {
         cache.lock().clear();
     }
@@ -2150,9 +2090,11 @@ pub fn init_buddy_allocator(memory_regions: &[MemoryRegion]) {
     for zone_cached in &LOCAL_CACHED_ZONE_MIGRATETYPE_FRAMES {
         zone_cached.store(0, AtomicOrdering::Relaxed);
     }
+    crate::e9_mark!(b'b');
 
     {
         let mut guard = BUDDY_ALLOCATOR.lock();
+        crate::e9_mark!(b'L');
         *guard = Some(BuddyAllocator::new());
         guard.with_mut_and_token(|slot, _token| {
             if let Some(allocator) = slot.as_mut() {
@@ -2162,6 +2104,7 @@ pub fn init_buddy_allocator(memory_regions: &[MemoryRegion]) {
     }
     // Race/corruption diagnostic: register buddy lock for E9 LOCK-A/LOCK-R traces.
     crate::sync::debug_set_trace_buddy_addr(debug_buddy_lock_addr());
+    crate::e9_mark!(b'F');
 }
 
 /// Returns allocator.
