@@ -1,9 +1,9 @@
+use crate::arch::xshim::VirtAddr;
 use core::{
     panic::PanicInfo,
     sync::atomic::{AtomicBool, Ordering},
 };
 use spin::Mutex;
-use crate::arch::xshim::VirtAddr;
 type PanicHook = fn(&PanicInfo);
 const MAX_PANIC_HOOKS: usize = 8;
 
@@ -143,13 +143,7 @@ fn dump_backtrace() {
             if offset == 0 {
                 crate::serial_println!("  #{:02}: RIP=0x{:016X}  {}", i, ret, name);
             } else {
-                crate::serial_println!(
-                    "  #{:02}: RIP=0x{:016X}  {}+0x{:x}",
-                    i,
-                    ret,
-                    name,
-                    offset
-                );
+                crate::serial_println!("  #{:02}: RIP=0x{:016X}  {}+0x{:x}", i, ret, name, offset);
             }
         } else {
             crate::serial_println!("  #{:02}: RIP=0x{:016X}", i, ret);

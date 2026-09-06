@@ -467,7 +467,7 @@ fn efi_main() -> Status {
         acpi_rsdp_base: rsdp_addr,
         memory_map_base: mmap_region_base,
         memory_map_size: mmap_count as u64 * core::mem::size_of::<MemoryRegion>() as u64,
-        framebuffer_addr: paging::FRAMEBUFFER_BASE,
+        framebuffer_addr: fb_phys,
         framebuffer_width: fb_width,
         framebuffer_height: fb_height,
         framebuffer_stride: fb_stride,
