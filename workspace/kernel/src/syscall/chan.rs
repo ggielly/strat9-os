@@ -23,8 +23,9 @@ pub fn sys_chan_create(capacity: u64) -> Result<u64, SyscallError> {
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &mut *task.process.capabilities.get() };
-    let cap_id = caps.insert(crate::capability::Capability {
-        id: crate::capability::CapId::new(),
+    let cap_id = crate::capability::CapId::new();
+    let chan_cap = crate::capability::Capability {
+        id: cap_id,
         permissions: crate::capability::CapPermissions {
             read: true,
             write: true,
@@ -34,18 +35,29 @@ pub fn sys_chan_create(capacity: u64) -> Result<u64, SyscallError> {
         },
         resource_type: ResourceType::Channel,
         resource: chan_id.as_u64() as usize,
-    });
+        // Badge defaults to capability ID; receivers see this in msg.sender.
+        // When this capability is granted/delegated, the granter can supply
+        // a custom badge so the receiver can distinguish individual clients.
+        badge: cap_id.as_u64(),
+    };
+    let handle = caps.insert(chan_cap);
 
     log::debug!(
         "syscall: CHAN_CREATE(cap={}) => chan={} handle={}",
         cap,
         chan_id,
-        cap_id.as_u64()
+        handle.as_u64()
     );
-    Ok(cap_id.as_u64())
+    Ok(handle.as_u64())
 }
 
 /// SYS_CHAN_SEND (221): send one `IpcMessage` to a channel, blocking if full.
+///
+/// **P1 fix**: The kernel now injects `cap.badge` into `msg.sender` instead
+/// of the raw task ID.  This follows the capability-endpoint model (seL4):
+/// the receiver sees only the badge of the delegation chain, never the
+/// sender's global identity.  A sender cannot forge the badge because the
+/// kernel overwrites `msg.sender` after reading the message from user-space.
 pub fn sys_chan_send(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
 
@@ -59,8 +71,6 @@ pub fn sys_chan_send(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
     }
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    msg.sender = task.id.as_u64();
-
     let caps = unsafe { &*task.process.capabilities.get() };
     let cap = caps
         .get(CapId::from_raw(handle))
@@ -69,6 +79,11 @@ pub fn sys_chan_send(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
         return Err(SyscallError::PermissionDenied);
     }
     let chan_id = ChanId::from_u64(cap.resource as u64);
+
+    // Inject the capability badge — the receiver sees this in msg.sender,
+    // not the sender's global task ID.  The badge is set at capability
+    // creation time (defaults to cap_id) and can be overridden via grant.
+    msg.sender = cap.badge;
 
     let chan = channel::get_channel(chan_id).ok_or(SyscallError::BadHandle)?;
     chan.send(msg).map_err(SyscallError::from)?;

@@ -127,6 +127,17 @@ pub struct Capability {
     pub permissions: CapPermissions,
     /// Reference to the actual resource (opaque to prevent direct access)
     pub resource: usize, // Actually a pointer to the resource, cast to usize
+    /// Opaque badge injected by the kernel at send time.
+    ///
+    /// For channel capabilities this is the identity presented to receivers
+    /// in `IpcMessage::sender`.  The sender cannot forge it: the kernel
+    /// overwrites `sender` with `cap.badge` on every `SYS_CHAN_SEND`.
+    ///
+    /// Defaults to `id.as_u64()`.  When a capability is granted (delegated)
+    /// via `SYS_CHAN_GRANT`, the granter may supply a custom badge so the
+    /// receiver can distinguish individual clients without learning their
+    /// global task IDs.
+    pub badge: u64,
 }
 
 /// Table of capabilities for a process
@@ -259,16 +270,44 @@ impl CapabilityTable {
         }
     }
 
-    /// Duplicate a capability (grant permission required)
+    /// Duplicate a capability (grant permission required).
+    ///
+    /// The new capability inherits the same badge as the original.
+    /// Use [`duplicate_with_badge`] when delegating to assign a custom badge
+    /// that identifies the delegation chain to the receiver.
     pub fn duplicate(&mut self, id: CapId) -> Option<Capability> {
         if let Some(cap) = self.capabilities.get(&id) {
             if cap.permissions.grant {
-                // Create a new capability with the same properties
                 Some(Capability {
                     id: CapId::new(),
                     resource_type: cap.resource_type,
                     permissions: cap.permissions,
                     resource: cap.resource,
+                    badge: cap.badge,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Duplicate a capability with a custom badge (grant permission required).
+    ///
+    /// Used by `SYS_CHAN_GRANT` to delegate a channel endpoint while giving
+    /// the receiver a badge the receiver can use to distinguish senders.
+    /// The `new_badge` value is injected by the kernel — the sender cannot
+    /// override it at send time.
+    pub fn duplicate_with_badge(&mut self, id: CapId, new_badge: u64) -> Option<Capability> {
+        if let Some(cap) = self.capabilities.get(&id) {
+            if cap.permissions.grant {
+                Some(Capability {
+                    id: CapId::new(),
+                    resource_type: cap.resource_type,
+                    permissions: cap.permissions,
+                    resource: cap.resource,
+                    badge: new_badge,
                 })
             } else {
                 None
@@ -308,8 +347,10 @@ impl CapabilityManager {
         resource: usize,
         permissions: CapPermissions,
     ) -> Capability {
+        let id = CapId::new();
         let cap = Capability {
-            id: CapId::new(),
+            badge: id.as_u64(),
+            id,
             resource_type,
             permissions,
             resource,

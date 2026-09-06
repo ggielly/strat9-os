@@ -311,8 +311,37 @@ impl XhciController {
     pub unsafe fn new(pci_dev: pci::PciDevice) -> Result<Self, &'static str> {
         let bar = match pci_dev.read_bar(0) {
             Some(Bar::Memory64 { addr, .. }) => addr,
-            _ => return Err("Invalid BAR"),
+            Some(Bar::Memory32 { addr, .. }) => addr as u64,
+            _ => {
+                unsafe {
+                    // 'z' + 'B' = BAR invalid
+                    core::arch::asm!("out 0xe9, al", in("al") b'z', options(nomem, nostack));
+                    core::arch::asm!("out 0xe9, al", in("al") b'B', options(nomem, nostack));
+                    core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                }
+                return Err("Invalid BAR");
+            }
         };
+        unsafe {
+            core::arch::asm!("out 0xe9, al", in("al") b'z', options(nomem, nostack));
+            core::arch::asm!("out 0xe9, al", in("al") b'b', options(nomem, nostack));
+            let hex = b"0123456789abcdef";
+            let a = bar;
+            for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
+                let nib = hex[((a >> sh) & 0xF) as usize];
+                core::arch::asm!("out 0xe9, al", in("al") nib, options(nomem, nostack));
+            }
+            // Dump the PCI location + raw BAR0 value: bdf raw
+            let bdf = pci_dev.address;
+            core::arch::asm!("out 0xe9, al", in("al") b'@', options(nomem, nostack));
+            let raw = pci_dev.read_bar_raw(0).unwrap_or(0xFFFF_FFFF);
+            for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
+                let nib = hex[((raw >> sh) & 0xF) as usize];
+                core::arch::asm!("out 0xe9, al", in("al") nib, options(nomem, nostack));
+            }
+            let _ = bdf;
+            core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+        }
         paging::ensure_identity_map_range(bar, XHCI_MMIO_SIZE as u64);
 
         let mmio_base = phys_to_virt(bar) as usize;
@@ -853,6 +882,12 @@ impl XhciController {
     }
 
     fn enumerate_all_ports(&mut self) {
+        unsafe {
+            core::arch::asm!("out 0xe9, al", in("al") b'x', options(nomem, nostack));
+            core::arch::asm!("out 0xe9, al", in("al") b"0123456789abcdef"[((self.max_ports >> 4) & 0xF) as usize], options(nomem, nostack));
+            core::arch::asm!("out 0xe9, al", in("al") b"0123456789abcdef"[(self.max_ports & 0xF) as usize], options(nomem, nostack));
+            core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+        }
         let mut usb_address: u8 = 1;
 
         for port in 0..self.max_ports {
@@ -864,18 +899,36 @@ impl XhciController {
             unsafe {
                 core::arch::asm!("out 0xe9, al", in("al") b'e', options(nomem, nostack));
                 core::arch::asm!("out 0xe9, al", in("al") (b'0' + port as u8), options(nomem, nostack));
+                let psc = portsc;
+                for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
+                    let nib = b"0123456789abcdef"[((psc >> sh) & 0xF) as usize];
+                    core::arch::asm!("out 0xe9, al", in("al") nib, options(nomem, nostack));
+                }
+                core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
             }
 
-            log::info!("[xHCI] Port {} connected, resetting...", port);
+            // NOTE: log::info! (formatted) hung the enumeration path in some
+            // builds (known format_args vtable issue) — keep it OUT of the
+            // hot enumeration loop; E9 marks carry the trace instead.
 
             if !unsafe { self.reset_port(port) } {
                 unsafe {
                     core::arch::asm!("out 0xe9, al", in("al") b'z', options(nomem, nostack));
                     core::arch::asm!("out 0xe9, al", in("al") b'4', options(nomem, nostack));
+                    let portsc = self.read_portsc(port);
+                    core::arch::asm!("out 0xe9, al", in("al") b"0123456789abcdef"[((portsc >> 28) & 0xF) as usize], options(nomem, nostack));
+                    core::arch::asm!("out 0xe9, al", in("al") b"0123456789abcdef"[((portsc >> 24) & 0xF) as usize], options(nomem, nostack));
+                    core::arch::asm!("out 0xe9, al", in("al") b"0123456789abcdef"[((portsc >> 4) & 0xF) as usize], options(nomem, nostack));
+                    core::arch::asm!("out 0xe9, al", in("al") b"0123456789abcdef"[(portsc & 0xF) as usize], options(nomem, nostack));
                     core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
                 }
                 log::warn!("[xHCI] Port {} reset failed", port);
                 continue;
+            }
+            unsafe {
+                core::arch::asm!("out 0xe9, al", in("al") b'z', options(nomem, nostack));
+                core::arch::asm!("out 0xe9, al", in("al") b'R', options(nomem, nostack));
+                core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
             }
             unsafe {
                 core::arch::asm!("out 0xe9, al", in("al") b'R', options(nomem, nostack));

@@ -545,6 +545,7 @@ pub fn sys_mem_region_export(addr: u64) -> Result<u64, SyscallError> {
             revoke: true,
         },
         resource: resource_id as usize,
+        badge: handle_cap.as_u64(),
     };
     let cap_id = unsafe { (&mut *task.process.capabilities.get()).insert(cap) };
     Ok(cap_id.as_u64())

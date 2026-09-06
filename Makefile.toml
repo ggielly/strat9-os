@@ -265,7 +265,7 @@ ${QEMU} \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
     -drive file=build/strat9-os-uefi.img,format=raw \
-    -device virtio-gpu-gl \
+    -device virtio-gpu-gl,xres=1280,yres=720 \
     -display gtk,gl=on \
     -device usb-ehci \
     -device usb-kbd \
@@ -290,7 +290,7 @@ ${QEMU} \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
     -drive file=build/strat9-os-uefi.img,format=raw \
-    -device virtio-gpu-gl \
+    -device virtio-gpu-gl,xres=1280,yres=720 \
     -display gtk,gl=on \
     -device usb-ehci \
     -device usb-kbd \
@@ -478,6 +478,24 @@ script = ['''
 bash tools/scripts/create-uefi-image.sh
 ''']
 
+[tasks.iso-uefi]
+description = "Create UEFI-bootable ISO with own loader (no Limine)"
+dependencies = ["uefi-image"]
+env = { STRAT9_IMAGE_BASENAME = "strat9-os" }
+script_runner = "@shell"
+script = ['''
+bash tools/scripts/create-iso-uefi.sh
+''']
+
+[tasks.iso-uefi-release]
+description = "Create UEFI-bootable ISO with own loader, release (no Limine)"
+dependencies = ["uefi-image-release"]
+env = { STRAT9_IMAGE_BASENAME = "strat9-os" }
+script_runner = "@shell"
+script = ['''
+bash tools/scripts/create-iso-uefi.sh
+''']
+
 [tasks.run-uefi]
 description = "Run with OVMF UEFI firmware"
 dependencies = ["uefi-image"]
@@ -508,7 +526,7 @@ ${QEMU} \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive if=pflash,format=raw,file=/usr/share/OVMF/OVMF_VARS_4M.fd \
     -drive file=build/strat9-os-uefi.img,format=raw \
-    -device virtio-gpu-gl \
+    -device virtio-gpu-gl,xres=1280,yres=720 \
     -display sdl,gl=on \
     -device usb-ehci \
     -device usb-kbd \
