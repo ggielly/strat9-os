@@ -254,7 +254,7 @@ bash tools/scripts/create-uboot-image.sh
 
 [tasks.run-gui-smp-release]
 description = "Run kernel SMP release with GUI"
-dependencies = ["uefi-image-release"]
+dependencies = ["uefi-image-release", "iso-uefi-release"]
 script_runner = "@shell"
 script = ['''
 ${QEMU} \

@@ -1920,11 +1920,12 @@ extern "x86-interrupt" fn legacy_timer_handler(stack_frame: InterruptStackFrame)
         return;
     }
 
-    // FORCE OUTPUT for heartbeat (every 100 ticks to avoid flooding,
-    // plus first 10 ticks to confirm timer fires after Ring-3 entry)
+    // NOTE: serial_force_println! (formatted format_args!) can hang this IRQ
+    // handler (known vtable issue) — a hung timer handler kills all
+    // preemption. The tick counter itself is the trace: E9 raw pulses only.
     let ticks = crate::process::scheduler::ticks();
-    if ticks < 10 || ticks % 100 == 0 {
-        crate::serial_force_println!("[heartbeat] PIC timer tick={}", ticks);
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b't', options(nomem, nostack));
     }
 
     // Increment tick counter
@@ -1942,16 +1943,19 @@ extern "x86-interrupt" fn legacy_timer_handler(stack_frame: InterruptStackFrame)
     // Mirror the LAPIC timer policy: do not run maybe_preempt() directly
     // from a Ring-3-origin timer IRQ. The extern "x86-interrupt" frame
     // must unwind via iretq; switching away from it can corrupt the
-    // interrupt return state. Post a resched hint instead.
+    // interrupt return state.
+    //
+    // A posted hint is NOT enough: a Ring-3 task that spins without making
+    // syscalls never consumes it (the hint is only taken in maybe_preempt,
+    // called from syscall paths and kernel-side preemption), so nothing
+    // else on this CPU ever schedules again. Send a SELF resched IPI
+    // instead: the IPI handler has its own full context-save frame and can
+    // run the scheduler safely, then iretq back to whatever was running.
     let cpl = stack_frame.code_segment.0 & 3;
     if cpl == 3 {
-        let cpu = crate::arch::x86_64::percpu::current_cpu_index();
-        crate::process::scheduler::request_force_resched_hint(cpu);
+        crate::arch::x86_64::apic::self_ipi_resched();
     } else {
         crate::process::scheduler::maybe_preempt();
-    }
-    if ticks < 10 {
-        crate::serial_force_println!("[heartbeat] PIC timer tick={} preempt_done", ticks);
     }
 }
 
@@ -1964,14 +1968,9 @@ extern "x86-interrupt" fn lapic_timer_handler(stack_frame: InterruptStackFrame) 
     let ticks = crate::process::scheduler::ticks();
     // Trace first 10 ticks per CPU unconditionally to confirm timer fires
     // after Ring-3 entry, then one-per-100 heartbeat to avoid flooding.
-    if ticks < 10 || ticks % 100 == 0 {
-        crate::serial_force_println!(
-            "[heartbeat] APIC timer tick={} cpu={} cs={:#x} rip={:#x}",
-            ticks,
-            cpu,
-            cs,
-            stack_frame.instruction_pointer.as_u64()
-        );
+    unsafe {
+        // Raw pulse only — formatted prints hang the IRQ handler.
+        core::arch::asm!("out 0xe9, al", in("al") b'T', options(nomem, nostack));
     }
 
     // serial_force_println holds FORCE_LOCK (IRQ-disabled spinlock) while writing

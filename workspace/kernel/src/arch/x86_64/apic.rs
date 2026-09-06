@@ -361,3 +361,16 @@ pub fn send_resched_ipi(target_apic_id: u32) {
     // Level bit = 0 (reserved for Fixed mode per Intel SDM Vol. 3A Table 10-1).
     send_ipi_raw(target_apic_id, IPI_RESCHED_VECTOR as u32);
 }
+
+/// Send the reschedule IPI to the CURRENT CPU.
+///
+/// Used by timer IRQ handlers that must not switch context from inside an
+/// `extern "x86-interrupt"` frame (Ring-3-origin timer ticks): the IPI
+/// handler owns its own full context-save frame, so the preemption is done
+/// there instead, and the timer frame simply unwinds with iretq.
+pub fn self_ipi_resched() {
+    if !is_initialized() {
+        return;
+    }
+    send_resched_ipi(lapic_id());
+}
