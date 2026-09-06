@@ -1158,7 +1158,8 @@ impl XhciController {
         data_len: usize,
     ) -> Result<usize, &'static str> {
         unsafe {
-            core::arch::asm!("out 0xe9, al", in("al") b'V', options(nomem, nostack));
+            // TEMP DEBUG: distinct marker (was 'V', collided with boot_alloc).
+            core::arch::asm!("out 0xe9, al", in("al") b'U', options(nomem, nostack));
         }
         let idx = slot_id as usize;
         if idx >= self.device_slots.len() || self.device_slots[idx].is_none() {

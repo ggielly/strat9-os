@@ -114,6 +114,10 @@ impl BootAllocator {
     }
 
     pub fn try_alloc(&mut self, size: usize, align: usize) -> Option<PhysAddr> {
+        if crate::debug_cfg::is_quiet() {
+            // TEMP DEBUG: 'b' pulse per try_alloc (throttled by caller loops anyway).
+            unsafe { core::arch::asm!("out 0xe9, al", in("al") b'b', options(nomem, nostack)) };
+        }
         if size == 0 {
             return Some(PhysAddr::new(0));
         }
@@ -150,6 +154,9 @@ impl BootAllocator {
     }
 
     pub fn try_alloc_accessible(&mut self, size: usize, align: usize) -> Option<PhysAddr> {
+        if crate::debug_cfg::is_quiet() {
+            unsafe { core::arch::asm!("out 0xe9, al", in("al") b'a', options(nomem, nostack)) };
+        }
         if size == 0 {
             return Some(PhysAddr::new(0));
         }
