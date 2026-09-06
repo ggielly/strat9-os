@@ -54,6 +54,12 @@ impl<D: RxDescriptor> RxRing<D> {
         self.tail
     }
 
+    /// Performs the desc operation.
+    pub fn desc(&self, idx: usize) -> &D {
+        // SAFETY: `idx % count` is in bounds and `descs` points to `count` valid descriptors.
+        unsafe { &*self.descs.add(idx % self.count) }
+    }
+
     /// Performs the desc mut operation.
     pub fn desc_mut(&mut self, idx: usize) -> &mut D {
         // SAFETY: `new` guarantees `descs` points to `count` valid descriptors.

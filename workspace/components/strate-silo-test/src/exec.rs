@@ -320,9 +320,8 @@ fn test_exit_group_kills_siblings() {
 
 #[cfg(not(test))]
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    log_err("[test_exec] panic\n");
-    call::exit(200)
+fn panic(info: &PanicInfo) -> ! {
+    call::handle_panic("test-exec", info)
 }
 
 #[no_mangle]

@@ -13,17 +13,20 @@ pub mod keyboard;
 pub mod keyboard_layout;
 pub mod keyboard_us;
 pub mod mouse;
+pub mod msi;
 pub mod pci;
 pub mod percpu;
 pub mod pic;
 pub mod ring3_diag;
 pub mod serial;
 pub mod smp;
+pub mod speaker;
 pub mod syscall;
 pub mod timer;
 pub mod tlb;
 pub mod tss;
 pub mod vga;
+pub mod vgabuf;
 pub mod x2apic;
 
 use core::arch::asm;
@@ -37,9 +40,33 @@ pub fn init_cpu_extensions() {
         cr4 |= (1 << 9) | (1 << 10);
 
         if cpuid::host_uses_xsave() {
-            // OSXSAVE (18) — required before xsetbv/xgetbv
+            // OSXSAVE (18) : required before xsetbv/xgetbv
             cr4 |= 1 << 18;
         }
+
+        // SMEP (20): Supervisor Mode Execution Prevention
+        // Prevents the kernel from executing code mapped in user-space pages.
+        // Requires CPUID leaf 7, ECX bit 7.
+        if crate::arch::x86_64::cpuid::host()
+            .features
+            .contains(cpuid::CpuFeatures::SMEP)
+        {
+            cr4 |= 1 << 20;
+            log::info!("[init] SMEP enabled (CR4 bit 20)");
+        }
+
+        // SMAP (21): Supervisor Mode Access Prevention
+        // Prevents the kernel from reading/writing user-space data pages
+        // unless EFLAGS.AC is set (via stac/clac).
+        // Requires CPUID leaf 7, ECX bit 20.
+        if crate::arch::x86_64::cpuid::host()
+            .features
+            .contains(cpuid::CpuFeatures::SMAP)
+        {
+            cr4 |= 1 << 21;
+            log::info!("[init] SMAP enabled (CR4 bit 21)");
+        }
+
         asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack));
 
         let mut cr0: u64;
@@ -57,8 +84,18 @@ pub fn init_cpu_extensions() {
     }
 }
 
-/// Read an Extended Control Register (XGETBV).
+/// Whether CR4.OSXSAVE is currently enabled on this CPU.
+///
+/// AVX/AVX-512 are only *usable* when the kernel has enabled the state
+/// (XSAVE in CR4 + XCR0 bits); CPUID alone only reports hardware capability.
+pub fn cpuid_osxsave_enabled() -> bool {
+    let cr4: u64;
+    unsafe { asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack)) };
+    cr4 & (1 << 18) != 0
+}
+
 #[inline]
+/// Read an Extended Control Register (XGETBV).
 pub fn xgetbv(xcr: u32) -> u64 {
     let eax: u32;
     let edx: u32;
@@ -110,6 +147,27 @@ pub fn cli() {
 pub fn sti() {
     unsafe {
         asm!("sti", options(nomem, nostack));
+    }
+}
+
+/// Set AC flag in RFLAGS to temporarily disable SMAP.
+///
+/// Must be paired with `clac()` after the user-memory access is complete.
+/// Only needed when CR4.SMAP is set.
+#[inline]
+pub fn stac() {
+    unsafe {
+        asm!("stac", options(nomem, nostack, preserves_flags));
+    }
+}
+
+/// Clear AC flag in RFLAGS to re-enable SMAP protection.
+///
+/// Paired with `stac()`.
+#[inline]
+pub fn clac() {
+    unsafe {
+        asm!("clac", options(nomem, nostack, preserves_flags));
     }
 }
 
@@ -210,7 +268,7 @@ pub fn cpuid(leaf: u32, sub_leaf: u32) -> (u32, u32, u32, u32) {
 /// Read the Time Stamp Counter (TSC).
 ///
 /// Returns the number of CPU cycles since reset. Available from the
-/// very first instruction — use this as the sole timing source during
+/// very first instruction : use this as the sole timing source during
 /// early boot (before APIC/PIT timers are configured).
 #[inline]
 pub fn rdtsc() -> u64 {

@@ -63,8 +63,19 @@ pub struct MadtIntSrcOverride {
     pub flags: u16,
 }
 
+/// MADT Local APIC Address Override (Type 5)
+/// Replaces the 32-bit address in the MADT header with a 64-bit address.
+#[derive(Copy, Clone, Debug, FromBytes)]
+#[repr(C, packed)]
+pub struct MadtLocalApicOverride {
+    _header: EntryRecord,
+    pub _reserved: u16,
+    pub phys_addr: u64,
+    pub flags: u32,
+}
+
 pub struct MadtInfo {
-    pub local_apic_address: u32,
+    pub local_apic_address: u64,
     pub flags: u32,
     pub local_apics: [Option<LocalApicEntry>; 32],
     pub local_apic_count: usize,
@@ -147,7 +158,7 @@ pub fn parse_madt() -> Option<MadtInfo> {
     }
 
     let mut info = MadtInfo {
-        local_apic_address: madt.local_apic_phys_addr,
+        local_apic_address: madt.local_apic_phys_addr as u64,
         flags: madt.flags,
         local_apics: [None; 32],
         local_apic_count: 0,
@@ -175,12 +186,23 @@ pub fn parse_madt() -> Option<MadtInfo> {
             0 => {
                 if info.local_apic_count < info.local_apics.len() {
                     let entry = unsafe { &*(offset as *const MadtLocalApic) };
-                    info.local_apics[info.local_apic_count] = Some(LocalApicEntry {
-                        processor: entry.processor,
-                        apic_id: entry.apic_id,
-                        flags: entry.flags,
-                    });
-                    info.local_apic_count += 1;
+                    // MADT flags bit 0: 1 = enabled, 0 = disabled (usable).
+                    // Skip disabled APICs to avoid sending INIT+SIPI to a
+                    // processor that will never respond (hangs on real hardware).
+                    if entry.flags & 1 == 0 {
+                        log::info!(
+                            "MADT: skipping disabled Local APIC id={} processor={}",
+                            entry.apic_id,
+                            entry.processor,
+                        );
+                    } else {
+                        info.local_apics[info.local_apic_count] = Some(LocalApicEntry {
+                            processor: entry.processor,
+                            apic_id: entry.apic_id,
+                            flags: entry.flags,
+                        });
+                        info.local_apic_count += 1;
+                    }
                 }
             }
             1 => {
@@ -204,6 +226,19 @@ pub fn parse_madt() -> Option<MadtInfo> {
                         flags: entry.flags,
                     });
                     info.override_count += 1;
+                }
+            }
+            5 => {
+                let entry = unsafe { &*(offset as *const MadtLocalApicOverride) };
+                let lapic_override_addr = unsafe {
+                    core::ptr::read_unaligned(core::ptr::addr_of!((*entry).phys_addr))
+                };
+                if entry.flags & 1 != 0 {
+                    log::info!(
+                        "MADT: Local APIC address override 0x{:X}",
+                        lapic_override_addr
+                    );
+                    info.local_apic_address = lapic_override_addr;
                 }
             }
             _ => {}

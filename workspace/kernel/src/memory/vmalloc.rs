@@ -2,7 +2,7 @@
 //!
 //! Provides virtually contiguous allocations backed by individually allocated
 //! physical pages. Unlike the buddy allocator, `vmalloc` does **not** require
-//! physically contiguous memory — it maps each page individually into a
+//! physically contiguous memory : it maps each page individually into a
 //! dedicated kernel virtual memory arena.
 //!
 //! ## Arena layout
@@ -47,7 +47,7 @@
 //! allocation to prevent deadlock with the buddy allocator.
 
 use crate::{
-    arch::x86_64::tlb::shootdown_range,
+    arch::tlb::shootdown_range,
     memory::{
         frame::PhysFrame,
         paging::{map_page_kernel, unmap_page_kernel},
@@ -62,15 +62,14 @@ use core::{
     ptr,
     sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
 };
-use x86_64::{
-    structures::paging::{Page, PageTableFlags, PhysFrame as X86PhysFrame},
-    VirtAddr,
-};
+use crate::arch::xshim::{PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB};
+use crate::x86_crate_shim::structures::paging::Page;
+use crate::arch::xshim::VirtAddr;
 
 // Arena constants =====================================================
 
 /// Base virtual address of the vmalloc arena.
-/// Placed at 0xffffc000_0000_0000 — well above the HHDM direct map.
+/// Placed at 0xffffc000_0000_0000 : well above the HHDM direct map.
 pub const VMALLOC_VIRT_START: u64 = 0xffff_c000_0000_0000;
 
 /// Total size of the vmalloc arena: 1 GiB.
@@ -86,7 +85,7 @@ const VMALLOC_PAGES: usize = VMALLOC_SIZE / 4096;
 ///
 /// Page 0 (`VMALLOC_VIRT_START`) is permanently mapped by the bootstrap frame
 /// allocated in `ensure_kernel_subtree_ready()`.  Keeping that mapping alive
-/// anchors the intermediate page-table nodes (PDPT → PD → PT) so they are
+/// anchors the intermediate page-table nodes (PDPT => PD => PT) so they are
 /// inherited by every address space cloned after `init()` runs.
 /// The free-extent list therefore starts at page 1.
 const ARENA_START_PAGE: usize = 1;
@@ -139,7 +138,7 @@ impl FrameList {
 }
 
 // SAFETY: `FrameList` owns a contiguous region of physical memory allocated
-// from the buddy allocator. The raw pointer is never aliased — access is
+// from the buddy allocator. The raw pointer is never aliased : access is
 // exclusively mediated through `get`/`set`. Transferring ownership across
 // threads is safe because the backing storage frame and all frames stored
 // within are plain physical addresses that travel with the struct.
@@ -196,7 +195,7 @@ struct Vmalloc {
     /// Bootstrap frame permanently mapped at `VMALLOC_VIRT_START` (arena page 0).
     ///
     /// Keeping this mapping live anchors the intermediate page-table nodes
-    /// (PDPT → PD → PT) so they are present in the canonical kernel L4 table
+    /// (PDPT => PD => PT) so they are present in the canonical kernel L4 table
     /// and inherited by every address space created after `init()`.  The frame
     /// must never be freed while the kernel is running.
     bootstrap_frame: Option<PhysFrame>,
@@ -246,7 +245,7 @@ impl Vmalloc {
         // Compile-time guarantee that at least one node fits in a page.
         const _: () = assert!(
             core::mem::size_of::<VmallocNode>() < 4096,
-            "VmallocNode exceeds one page — refill_node_pool logic must be revised"
+            "VmallocNode exceeds one page : refill_node_pool logic must be revised"
         );
         let nodes_per_page = 4096 / size_of::<VmallocNode>();
 
@@ -287,12 +286,12 @@ impl Vmalloc {
 
     unsafe fn release_node(&mut self, node: *mut VmallocNode) {
         // Releasing a node that still holds a FrameList would silently drop the
-        // physical frames without freeing them — an unrecoverable leak / potential
+        // physical frames without freeing them : an unrecoverable leak / potential
         // double-free if the frames are later re-allocated.  Free nodes must
         // always have `frames == None` before being returned to the pool.
         debug_assert!(
             (*node).frames.is_none(),
-            "release_node: node at {:p} still has live frames (start_page={}) — \
+            "release_node: node at {:p} still has live frames (start_page={}) : \
              caller must take() frames before releasing",
             node,
             (*node).start_page,
@@ -526,7 +525,7 @@ pub struct VmallocAttr {
 /// Capture attribution for the calling task, without holding VMALLOC.
 ///
 /// Must be called **before** acquiring the VMALLOC lock to maintain
-/// the VMALLOC → SILO_MANAGER lock ordering and to avoid deadlocking
+/// the VMALLOC => SILO_MANAGER lock ordering and to avoid deadlocking
 /// if vmalloc is called from within silo or scheduler code.
 ///
 /// Uses `current_task_clone_try()` (non-blocking) so that vmalloc called
@@ -599,7 +598,7 @@ pub struct VmallocDiagSnapshot {
     pub last_failure: Option<VmallocFailureSnapshot>,
 }
 
-/// Pre-allocate the intermediate page-table nodes (PML4 → PDPT → PD) for the
+/// Pre-allocate the intermediate page-table nodes (PML4 => PDPT => PD) for the
 /// vmalloc virtual address range in the **canonical kernel page table**.
 ///
 /// ## Why this is necessary
@@ -634,14 +633,14 @@ fn ensure_kernel_subtree_ready(token: &IrqDisabledToken) {
     };
 
     let page = Page::containing_address(VirtAddr::new(VMALLOC_VIRT_START));
-    let x86_frame = X86PhysFrame::containing_address(frame.start_address);
+    let x86_frame = X86PhysFrame::<Size4KiB>::containing_address(frame.start_address);
     let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
 
     if map_page_kernel(page, x86_frame, flags).is_ok() {
         // Keep the frame permanently mapped at VMALLOC_VIRT_START (arena page 0).
         //
         // We deliberately do NOT unmap here.  The goal is to keep the intermediate
-        // page-table nodes (PDPT → PD → PT) alive in the canonical kernel L4 so
+        // page-table nodes (PDPT => PD => PT) alive in the canonical kernel L4 so
         // that every address space cloned after this point inherits them.
         //
         // Previously the code did map + immediate unmap, relying on the fact that
@@ -654,7 +653,7 @@ fn ensure_kernel_subtree_ready(token: &IrqDisabledToken) {
         guard.bootstrap_frame = Some(frame);
         guard.subtree_ready = true;
     } else {
-        // Mapping failed — free the frame; the arena will be unusable.
+        // Mapping failed : free the frame; the arena will be unusable.
         crate::memory::free_frame(token, frame);
         serial_println!("[vmalloc] bootstrap: failed to map bootstrap page");
     }
@@ -682,7 +681,7 @@ pub fn init() {
         let mut guard = VMALLOC.lock();
         if let Err(e) = unsafe { guard.ensure_arena_ready(token) } {
             serial_println!(
-                "[vmalloc] init: ensure_arena_ready failed ({:?}) — vmalloc will retry on first use",
+                "[vmalloc] init: ensure_arena_ready failed ({:?}) : vmalloc will retry on first use",
                 e
             );
         }
@@ -737,7 +736,7 @@ pub fn diag_snapshot() -> Option<VmallocDiagSnapshot> {
 #[track_caller]
 pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, VmallocError> {
     if size == 0 {
-        // Pure policy reject — no allocation attempted, no per-call context
+        // Pure policy reject : no allocation attempted, no per-call context
         // worth recording. VMALLOC_POLICY_REJECT_COUNT captures the count.
         VMALLOC_POLICY_REJECT_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
         return Err(VmallocError::ZeroSize);
@@ -751,13 +750,13 @@ pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, 
     }
 
     // Capture attribution before acquiring VMALLOC to respect lock ordering
-    // (VMALLOC → SILO_MANAGER) and to avoid a re-entrancy deadlock if this
+    // (VMALLOC => SILO_MANAGER) and to avoid a re-entrancy deadlock if this
     // vmalloc call originates from within scheduler or silo code.
     let mut attr = capture_attr(size, Location::caller());
 
     ensure_init();
 
-    let pages = (size + 4095) / 4096;
+    let pages = size.saturating_add(4095) / 4096;
     let page_flags =
         PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
 
@@ -826,7 +825,7 @@ pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, 
             let frame = frames.get(i);
             let page_virt = virt_base + (i as u64 * 4096);
             let page = Page::containing_address(VirtAddr::new(page_virt));
-            let x86_frame = X86PhysFrame::containing_address(frame.start_address);
+            let x86_frame = X86PhysFrame::<Size4KiB>::containing_address(frame.start_address);
             if map_page_kernel(page, x86_frame, page_flags).is_err() {
                 for j in 0..i {
                     let pv = virt_base + (j as u64 * 4096);
@@ -885,7 +884,7 @@ pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, 
 ///
 /// Returns `true` if a region was released (`free(NULL)` counts as success).
 /// Returns `false` if the pointer was non-null but did not denote a live
-/// vmalloc mapping in the arena (nothing freed — caller may be leaking).
+/// vmalloc mapping in the arena (nothing freed : caller may be leaking).
 pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) -> bool {
     if ptr.is_null() {
         return true;
@@ -896,7 +895,7 @@ pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) -> bool {
         return false;
     }
 
-    // Phase 1 — unmap and collect under VMALLOC lock.
+    // Phase 1 : unmap and collect under VMALLOC lock.
     let (frames, range_start, range_end) = {
         let mut guard = VMALLOC.lock();
         let vm = &mut *guard;
@@ -916,7 +915,7 @@ pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) -> bool {
                 let page_start = virt_start + (i as u64 * 4096);
                 let page = Page::containing_address(VirtAddr::new(page_start));
                 // unmap_page_kernel acquires/releases KERNEL_PT_LOCK internally.
-                // Lock order: VMALLOC → KERNEL_PT_LOCK — consistent with vmalloc().
+                // Lock order: VMALLOC => KERNEL_PT_LOCK : consistent with vmalloc().
                 let _ = unmap_page_kernel(page);
             }
 
@@ -928,13 +927,13 @@ pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) -> bool {
             vm.insert_free_node_merge(node);
             (frames, range_start, range_end)
         }
-    }; // Phase 1 end — VMALLOC lock released here.
+    }; // Phase 1 end : VMALLOC lock released here.
 
-    // Phase 2 — TLB shootdown with no lock held.
+    // Phase 2 : TLB shootdown with no lock held.
     // All remote CPUs can freely enter vmalloc/vfree while processing the IPI.
     shootdown_range(range_start, range_end);
 
-    // Phase 3 — return physical frames to the buddy allocator.
+    // Phase 3 : return physical frames to the buddy allocator.
     for i in 0..frames.len {
         crate::memory::free_frame(token, frames.get(i));
     }
@@ -1134,7 +1133,7 @@ pub fn dump_diagnostics() {
             last.error
         );
     }
-    // Print live allocations when any are present — useful for routine health checks.
+    // Print live allocations when any are present : useful for routine health checks.
     if vm.alloc_count > 0 {
         drop(guard); // release VMALLOC before re-acquiring inside dump_live_allocations
         dump_live_allocations();

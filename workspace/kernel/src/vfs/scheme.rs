@@ -1,10 +1,11 @@
-//! Scheme abstraction - backends for VFS operations.
+//! Scheme abstraction : backends for VFS operations.
 //!
 //! Schemes provide the actual implementation for file operations.
 //! Examples: IPC-based schemes (ext4, network), kernel schemes (devfs, procfs).
 
 use crate::{
     ipc::{message::IpcMessage, port::PortId},
+    memory::{UserSliceRead, UserSliceWrite},
     sync::SpinLock,
     syscall::error::SyscallError,
 };
@@ -17,6 +18,16 @@ use alloc::{
 
 pub use strat9_abi::data::{
     FileStat, DT_BLK, DT_CHR, DT_DIR, DT_FIFO, DT_LNK, DT_REG, DT_SOCK, DT_UNKNOWN,
+    IPC_FILE_FLAG_APPEND, IPC_FILE_FLAG_CHUNK_READ, IPC_FILE_FLAG_CHUNK_WRITE,
+    IPC_FILE_FLAG_DEVICE, IPC_FILE_FLAG_DIRECTORY, IPC_FILE_FLAG_PIPE,
+};
+use strat9_abi::{
+    ipc_codec::{get_u32, put_u16_len_prefixed},
+    ipc_payload::{
+        CloseRequest, CreateRequest, OpenReply, OpenRequest, ReadReply, ReadRequest, WriteRequest,
+        OPCODE_CLOSE, OPCODE_CREATE_DIR, OPCODE_CREATE_FILE, OPCODE_OPEN, OPCODE_READ,
+        OPCODE_READDIR, OPCODE_UNLINK, OPCODE_WRITE,
+    },
 };
 
 /// A single directory entry returned by readdir.
@@ -42,10 +53,12 @@ bitflags::bitflags! {
     /// Flags describing a file's properties.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct FileFlags: u32 {
-        const DIRECTORY = 1 << 0;
-        const DEVICE    = 1 << 1;
-        const PIPE      = 1 << 2;
-        const APPEND    = 1 << 3;
+        const DIRECTORY   = IPC_FILE_FLAG_DIRECTORY;
+        const DEVICE      = IPC_FILE_FLAG_DEVICE;
+        const PIPE        = IPC_FILE_FLAG_PIPE;
+        const APPEND      = IPC_FILE_FLAG_APPEND;
+        const CHUNK_READ  = IPC_FILE_FLAG_CHUNK_READ;
+        const CHUNK_WRITE = IPC_FILE_FLAG_CHUNK_WRITE;
     }
 }
 
@@ -65,6 +78,57 @@ pub trait Scheme: Send + Sync {
     /// Write bytes to an open file.
     fn write(&self, file_id: u64, offset: u64, buf: &[u8]) -> Result<usize, SyscallError>;
 
+    /// Submit a read against a userspace buffer for async I/O.
+    ///
+    /// The default implementation performs the read synchronously and copies
+    /// the result back into the validated userspace slice before returning a
+    /// completed result.
+    fn async_read(
+        &self,
+        file_id: u64,
+        offset: u64,
+        user_buf_vaddr: u64,
+        len: usize,
+        _ring_id: u64,
+        _user_data: u64,
+    ) -> Result<AsyncSubmitResult, SyscallError> {
+        // Guard against userspace-controlled sizes causing kernel OOM.
+        // Schemes that need larger transfers must override async_read.
+        const MAX_SYNC_FALLBACK_LEN: usize = 4 * 1024 * 1024; // 4 MiB
+        if len > MAX_SYNC_FALLBACK_LEN {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let user_buf = UserSliceWrite::new(user_buf_vaddr, len)?;
+        let mut kernel_buf = alloc::vec![0u8; len];
+        let n = self.read(file_id, offset, &mut kernel_buf)?;
+        user_buf.copy_from(&kernel_buf[..n]);
+        Ok(AsyncSubmitResult::Completed(n as i32))
+    }
+
+    /// Submit a write sourced from a userspace buffer for async I/O.
+    ///
+    /// The default implementation validates and copies the user buffer, then
+    /// performs the write synchronously before returning a completed result.
+    fn async_write(
+        &self,
+        file_id: u64,
+        offset: u64,
+        user_buf_vaddr: u64,
+        len: usize,
+        _ring_id: u64,
+        _user_data: u64,
+    ) -> Result<AsyncSubmitResult, SyscallError> {
+        // Guard against userspace-controlled sizes causing kernel OOM.
+        const MAX_SYNC_FALLBACK_LEN: usize = 4 * 1024 * 1024; // 4 MiB
+        if len > MAX_SYNC_FALLBACK_LEN {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let user_buf = UserSliceRead::new(user_buf_vaddr, len)?;
+        let kernel_buf = user_buf.read_to_vec();
+        let n = self.write(file_id, offset, &kernel_buf)?;
+        Ok(AsyncSubmitResult::Completed(n as i32))
+    }
+
     /// Close an open file.
     fn close(&self, file_id: u64) -> Result<(), SyscallError>;
 
@@ -77,6 +141,14 @@ pub trait Scheme: Send + Sync {
     /// Truncate/resize a file (if supported).
     fn truncate(&self, file_id: u64, new_size: u64) -> Result<(), SyscallError> {
         let _ = (file_id, new_size);
+        Err(SyscallError::NotImplemented)
+    }
+
+    /// Truncate a file by path (avoids open/close round-trip).
+    ///
+    /// Default implementation returns NotImplemented, causing the caller
+    /// to fall back to open+truncate+close.
+    fn truncate_by_path(&self, _path: &str, _new_size: u64) -> Result<(), SyscallError> {
         Err(SyscallError::NotImplemented)
     }
 
@@ -156,6 +228,12 @@ pub trait Scheme: Send + Sync {
 /// Type-erased Scheme reference.
 pub type DynScheme = Arc<dyn Scheme>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsyncSubmitResult {
+    Completed(i32),
+    InFlight,
+}
+
 pub const DEV_RAMFS: u64 = 1;
 pub const DEV_SYSFS: u64 = 2;
 pub const DEV_PROCFS: u64 = 3;
@@ -164,6 +242,9 @@ pub const DEV_CONSOLE: u64 = 5;
 pub const DEV_PIPEFS: u64 = 6;
 pub const DEV_IPCFS: u64 = 7;
 pub const DEV_NETFS: u64 = 8;
+pub const DEV_CHAR_FS: u64 = 9;
+pub const DEV_INPUT: u64 = 10;
+pub const DEV_THREADFS: u64 = 11;
 
 /// Finalize pseudo-filesystem stats with a stable device identity and
 /// synthetic timestamps.
@@ -184,67 +265,69 @@ pub fn finalize_pseudo_stat(mut st: FileStat, st_dev: u64, st_rdev: u64) -> File
 /// IPC-based scheme: forwards operations to a userspace server via IPC.
 pub struct IpcScheme {
     port_id: PortId,
+    open_file_flags: SpinLock<BTreeMap<u64, FileFlags>>,
 }
 
 impl IpcScheme {
     /// Creates a new instance.
     pub fn new(port_id: PortId) -> Self {
-        IpcScheme { port_id }
+        IpcScheme {
+            port_id,
+            open_file_flags: SpinLock::new(BTreeMap::new()),
+        }
+    }
+
+    fn remember_open_flags(&self, file_id: u64, flags: FileFlags) {
+        self.open_file_flags.lock().insert(file_id, flags);
+    }
+
+    fn take_open_flags(&self, file_id: u64) {
+        self.open_file_flags.lock().remove(&file_id);
+    }
+
+    fn open_flags_for(&self, file_id: u64) -> FileFlags {
+        self.open_file_flags
+            .lock()
+            .get(&file_id)
+            .copied()
+            .unwrap_or_else(FileFlags::empty)
     }
 
     /// Build an IPC message for open operation.
     fn build_open_msg(path: &str, flags: OpenFlags) -> Result<IpcMessage, SyscallError> {
-        const OPCODE_OPEN: u32 = 0x01;
-        let mut msg = IpcMessage::new(OPCODE_OPEN);
-
-        // Encode: [flags: u32][path_len: u16][path bytes...]
-        if path.len() > 42 {
-            return Err(SyscallError::InvalidArgument); // Path too long for inline
-        }
-
-        msg.payload[0..4].copy_from_slice(&flags.bits().to_le_bytes());
-        msg.payload[4..6].copy_from_slice(&(path.len() as u16).to_le_bytes());
-        msg.payload[6..6 + path.len()].copy_from_slice(path.as_bytes());
-        Ok(msg)
+        // Typed encode: bounds-checks the inline path; no hand-rolled offsets.
+        OpenRequest::encode(OPCODE_OPEN, flags.bits(), path).ok_or(SyscallError::InvalidArgument)
+        // path too long for inline
     }
 
     /// Build an IPC message for read operation.
     fn build_read_msg(file_id: u64, offset: u64, count: u32) -> IpcMessage {
-        const OPCODE_READ: u32 = 0x02;
-        let mut msg = IpcMessage::new(OPCODE_READ);
-        msg.payload[0..8].copy_from_slice(&file_id.to_le_bytes());
-        msg.payload[8..16].copy_from_slice(&offset.to_le_bytes());
-        msg.payload[16..20].copy_from_slice(&count.to_le_bytes());
-        msg
+        ReadRequest::encode(OPCODE_READ, file_id, offset, count)
     }
 
     /// Build an IPC message for write operation.
     ///
-    /// Returns the message and the number of bytes actually packed.
-    fn build_write_msg(file_id: u64, offset: u64, data: &[u8]) -> (IpcMessage, usize) {
-        const OPCODE_WRITE: u32 = 0x03;
-        let mut msg = IpcMessage::new(OPCODE_WRITE);
-        msg.payload[0..8].copy_from_slice(&file_id.to_le_bytes());
-        msg.payload[8..16].copy_from_slice(&offset.to_le_bytes());
-
-        // payload[18..48] leaves 30 bytes for data.
-        let packed = core::cmp::min(data.len(), 30);
-        msg.payload[16..18].copy_from_slice(&(packed as u16).to_le_bytes());
-        msg.payload[18..18 + packed].copy_from_slice(&data[..packed]);
-        (msg, packed)
+    /// Returns the message and the number of bytes actually packed, or
+    /// `MessageSize` if `data` exceeds the inline capacity (the caller's
+    /// chunking logic guarantees this never happens; we refuse rather
+    /// than truncate or emit an empty write).
+    fn build_write_msg(
+        file_id: u64,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<(IpcMessage, usize), SyscallError> {
+        WriteRequest::encode(OPCODE_WRITE, file_id, offset, data)
+            .ok_or(SyscallError::MessageSize)
     }
 
     /// Build an IPC message for close operation.
     fn build_close_msg(file_id: u64) -> IpcMessage {
-        const OPCODE_CLOSE: u32 = 0x04;
-        let mut msg = IpcMessage::new(OPCODE_CLOSE);
-        msg.payload[0..8].copy_from_slice(&file_id.to_le_bytes());
-        msg
+        CloseRequest::encode(OPCODE_CLOSE, file_id)
     }
 
     /// Performs the build readdir msg operation.
     fn build_readdir_msg(file_id: u64, cursor: u16) -> IpcMessage {
-        const OPCODE_READDIR: u32 = 0x08;
+        // Wire layout: [ino: u64][cursor: u16 @ 8..10].
         let mut msg = IpcMessage::new(OPCODE_READDIR);
         msg.payload[0..8].copy_from_slice(&file_id.to_le_bytes());
         msg.payload[8..10].copy_from_slice(&cursor.to_le_bytes());
@@ -253,16 +336,11 @@ impl IpcScheme {
 
     /// Parses status.
     fn parse_status(reply: &IpcMessage) -> Result<(), SyscallError> {
-        if reply.msg_type != 0x80 {
+        if reply.msg_type != IpcMessage::REPLY_MSG_TYPE {
             return Err(SyscallError::IoError);
         }
 
-        let status = u32::from_le_bytes([
-            reply.payload[0],
-            reply.payload[1],
-            reply.payload[2],
-            reply.payload[3],
-        ]);
+        let status = get_u32(&reply.payload, 0).ok_or(SyscallError::IoError)?;
         if status == 0 {
             return Ok(());
         }
@@ -308,119 +386,132 @@ impl Scheme for IpcScheme {
         let msg = Self::build_open_msg(path, flags)?;
         let reply = self.call(msg)?;
 
-        // Parse reply: [status: u32][file_id: u64][size: u64][flags: u32]
+        // Parse reply via the typed ABI struct:
+        // [status: u32][file_id: u64][size: u64][flags: u32]
         Self::parse_status(&reply)?;
 
-        let file_id = u64::from_le_bytes([
-            reply.payload[4],
-            reply.payload[5],
-            reply.payload[6],
-            reply.payload[7],
-            reply.payload[8],
-            reply.payload[9],
-            reply.payload[10],
-            reply.payload[11],
-        ]);
-
-        let size = u64::from_le_bytes([
-            reply.payload[12],
-            reply.payload[13],
-            reply.payload[14],
-            reply.payload[15],
-            reply.payload[16],
-            reply.payload[17],
-            reply.payload[18],
-            reply.payload[19],
-        ]);
-
-        let file_flags = u32::from_le_bytes([
-            reply.payload[20],
-            reply.payload[21],
-            reply.payload[22],
-            reply.payload[23],
-        ]);
+        let reply = OpenReply::parse(&reply.payload).ok_or(SyscallError::IoError)?;
+        let file_id = reply.file_id;
+        let size = reply.size;
+        let file_flags = reply.file_flags;
+        let flags = FileFlags::from_bits_truncate(file_flags);
+        self.remember_open_flags(file_id, flags);
 
         Ok(OpenResult {
             file_id,
             size: if size == u64::MAX { None } else { Some(size) },
-            flags: FileFlags::from_bits_truncate(file_flags),
+            flags,
         })
     }
 
     /// Performs the read operation.
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
-        let msg = Self::build_read_msg(file_id, offset, buf.len() as u32);
-        let reply = self.call(msg)?;
+        let flags = self.open_flags_for(file_id);
+        let chunked = flags.contains(FileFlags::CHUNK_READ);
+        let chunk_size = if chunked {
+            IpcMessage::READ_INLINE_CAPACITY
+        } else {
+            buf.len()
+        };
 
-        // Parse reply: [status: u32][bytes_read: u32][data...]
-        Self::parse_status(&reply)?;
+        let mut total = 0usize;
+        let mut current_offset = offset;
+        while total < buf.len() {
+            let request_len = core::cmp::min(buf.len() - total, chunk_size);
+            let msg = Self::build_read_msg(file_id, current_offset, request_len as u32);
+            let reply = self.call(msg)?;
 
-        let bytes_read = u32::from_le_bytes([
-            reply.payload[4],
-            reply.payload[5],
-            reply.payload[6],
-            reply.payload[7],
-        ]) as usize;
+            Self::parse_status(&reply)?;
 
-        let available = core::cmp::min(bytes_read, reply.payload.len() - 8);
-        let to_copy = core::cmp::min(available, buf.len());
-        buf[..to_copy].copy_from_slice(&reply.payload[8..8 + to_copy]);
+            // READ reply: [status][count u32 @ 4..8][data @ 8..] (ReadReply).
+            let count = get_u32(&reply.payload, 4).ok_or(SyscallError::IoError)? as usize;
+            let available = core::cmp::min(count, reply.payload.len() - ReadReply::DATA_OFFSET);
+            let to_copy = core::cmp::min(available, request_len);
+            buf[total..total + to_copy].copy_from_slice(
+                &reply.payload[ReadReply::DATA_OFFSET..ReadReply::DATA_OFFSET + to_copy],
+            );
 
-        Ok(to_copy)
+            total += to_copy;
+            current_offset += to_copy as u64;
+
+            if !chunked || to_copy < request_len {
+                break;
+            }
+        }
+
+        Ok(total)
     }
 
     /// Performs the write operation.
     fn write(&self, file_id: u64, offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
-        let (msg, packed) = Self::build_write_msg(file_id, offset, buf);
-        let reply = self.call(msg)?;
+        let flags = self.open_flags_for(file_id);
+        let chunked = flags.contains(FileFlags::CHUNK_WRITE);
+        // Non-chunked handles (control endpoints, datagrams) must fit in one IPC
+        // message; chunked handles (streams, files) can split across multiple calls.
+        if !chunked && buf.len() > IpcMessage::WRITE_INLINE_CAPACITY {
+            return Err(SyscallError::MessageSize);
+        }
+        let chunk_size = if chunked {
+            IpcMessage::WRITE_INLINE_CAPACITY
+        } else {
+            buf.len()
+        };
 
-        // Parse reply: [status: u32][bytes_written: u32]
-        Self::parse_status(&reply)?;
+        let mut total = 0usize;
+        let mut current_offset = offset;
+        while total < buf.len() {
+            let request_len = core::cmp::min(buf.len() - total, chunk_size);
+            let (msg, packed) =
+                Self::build_write_msg(file_id, current_offset, &buf[total..total + request_len])?;
+            let reply = self.call(msg)?;
 
-        let bytes_written = u32::from_le_bytes([
-            reply.payload[4],
-            reply.payload[5],
-            reply.payload[6],
-            reply.payload[7],
-        ]) as usize;
+            Self::parse_status(&reply)?;
 
-        // Never report more bytes than we actually sent.
-        Ok(bytes_written.min(packed))
+            // WRITE reply: [status][written u32 @ 4..8] (WriteReply).
+            let bytes_written = get_u32(&reply.payload, 4).ok_or(SyscallError::IoError)? as usize;
+
+            let chunk_written = bytes_written.min(packed);
+            total += chunk_written;
+            current_offset += chunk_written as u64;
+
+            if !chunked || chunk_written < packed {
+                break;
+            }
+        }
+
+        Ok(total)
     }
 
     /// Performs the close operation.
     fn close(&self, file_id: u64) -> Result<(), SyscallError> {
         let msg = Self::build_close_msg(file_id);
         let reply = self.call(msg)?;
-
         Self::parse_status(&reply)?;
-
+        self.take_open_flags(file_id);
         Ok(())
     }
 
     /// Creates file.
     fn create_file(&self, path: &str, mode: u32) -> Result<OpenResult, SyscallError> {
-        const OPCODE_CREATE_FILE: u32 = 0x05;
         self.handle_create_op(OPCODE_CREATE_FILE, path, mode)
     }
 
     /// Creates directory.
     fn create_directory(&self, path: &str, mode: u32) -> Result<OpenResult, SyscallError> {
-        const OPCODE_CREATE_DIR: u32 = 0x06;
         self.handle_create_op(OPCODE_CREATE_DIR, path, mode)
     }
 
     /// Performs the unlink operation.
     fn unlink(&self, path: &str) -> Result<(), SyscallError> {
-        const OPCODE_UNLINK: u32 = 0x07;
         let mut msg = IpcMessage::new(OPCODE_UNLINK);
 
-        if path.len() > 42 {
+        if path.len() > IpcMessage::UNLINK_INLINE_CAPACITY {
             return Err(SyscallError::InvalidArgument);
         }
 
-        msg.payload[0..2].copy_from_slice(&(path.len() as u16).to_le_bytes());
-        msg.payload[2..2 + path.len()].copy_from_slice(path.as_bytes());
+        // Wire framing: [path_len: u16][path bytes...] (put_u16_len_prefixed).
+        put_u16_len_prefixed(&mut msg.payload, 0, path.as_bytes())
+            .ok_or(SyscallError::InvalidArgument)?;
 
         let reply = self.call(msg)?;
         Self::parse_status(&reply)?;
@@ -430,6 +521,7 @@ impl Scheme for IpcScheme {
 
     /// Performs the readdir operation.
     fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
+        const MAX_READDIR_ENTRIES: usize = 8192;
         let mut cursor: u16 = 0;
         let mut entries = Vec::new();
 
@@ -479,6 +571,14 @@ impl Scheme for IpcScheme {
                 offset += 10 + name_len;
             }
 
+            // The cursor protocol bounds the number of round-trips, but a
+            // buggy or malicious server could keep us accumulating entries
+            // for up to 64K iterations. Cap the total to bound kernel
+            // memory under our trust boundary.
+            if entries.len() > MAX_READDIR_ENTRIES {
+                return Err(SyscallError::IoError);
+            }
+
             if next_cursor == u16::MAX {
                 break;
             }
@@ -500,30 +600,25 @@ impl IpcScheme {
         path: &str,
         mode: u32,
     ) -> Result<OpenResult, SyscallError> {
-        let mut msg = IpcMessage::new(opcode);
-
-        if path.len() > 40 {
-            return Err(SyscallError::InvalidArgument);
-        }
-
-        msg.payload[0..4].copy_from_slice(&mode.to_le_bytes());
-        msg.payload[4..6].copy_from_slice(&(path.len() as u16).to_le_bytes());
-        msg.payload[6..6 + path.len()].copy_from_slice(path.as_bytes());
+        // Typed encode: [mode: u32][path_len: u16][path bytes...]
+        let msg = CreateRequest::encode(opcode, mode, path).ok_or(SyscallError::InvalidArgument)?;
 
         let reply = self.call(msg)?;
 
         Self::parse_status(&reply)?;
 
-        let file_id = u64::from_le_bytes([
-            reply.payload[4],
-            reply.payload[5],
-            reply.payload[6],
-            reply.payload[7],
-            reply.payload[8],
-            reply.payload[9],
-            reply.payload[10],
-            reply.payload[11],
-        ]);
+        // Reply layout: [status: u32][file_id: u64 @ 4..12] (CreateReply).
+        let file_id = {
+            let payload = &reply.payload;
+            if payload.len() < 12 {
+                return Err(SyscallError::IoError);
+            }
+            u64::from_le_bytes(
+                payload[4..12]
+                    .try_into()
+                    .map_err(|_| SyscallError::IoError)?,
+            )
+        };
 
         Ok(OpenResult {
             file_id,
@@ -534,21 +629,20 @@ impl IpcScheme {
 }
 
 /// Kernel-backed scheme: serves files from kernel memory (read-only).
+///
+/// SAFETY: All stored pointers are kernel-static (`'static`) and accessed
+/// only through the scheme trait methods which are `&self` (shared reference).
 pub struct KernelScheme {
-    files: SpinLock<BTreeMap<String, KernelFile>>,
+    /// Files indexed by path => (id, base, len).
+    files: SpinLock<BTreeMap<String, (u64, *const u8, usize)>>,
+    /// Reverse lookup: file_id => path name.
     by_id: SpinLock<BTreeMap<u64, String>>,
 }
 
-#[derive(Clone)]
-struct KernelFile {
-    id: u64,
-    base: *const u8,
-    len: usize,
-}
-
-// SAFETY: KernelFile only stores kernel-static pointers
-unsafe impl Send for KernelFile {}
-unsafe impl Sync for KernelFile {}
+// SAFETY: KernelScheme only stores kernel-static pointers that are valid
+// for the entire kernel lifetime. No mutable access through raw pointers.
+unsafe impl Send for KernelScheme {}
+unsafe impl Sync for KernelScheme {}
 
 impl KernelScheme {
     /// Creates a new instance.
@@ -565,22 +659,23 @@ impl KernelScheme {
         let id = NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         self.files
             .lock()
-            .insert(String::from(path), KernelFile { id, base, len });
+            .insert(String::from(path), (id, base, len));
         self.by_id.lock().insert(id, String::from(path));
     }
 
-    /// Returns by id.
-    fn get_by_id(&self, file_id: u64) -> Option<KernelFile> {
+    /// Returns (id, base, len) for a given file_id.
+    fn get_by_id(&self, file_id: u64) -> Option<(u64, *const u8, usize)> {
         let name = self.by_id.lock().get(&file_id)?.clone();
-        self.files.lock().get(&name).cloned()
+        let entry = self.files.lock().get(&name).cloned()?;
+        Some(entry)
     }
 
     /// Returns the bytes of a registered static kernel file.
     pub fn lookup_bytes(&self, path: &str) -> Option<&'static [u8]> {
-        let file = self.files.lock().get(path).cloned()?;
+        let (_, base, len) = self.files.lock().get(path).cloned()?;
         // SAFETY: initfs files are bootloader-provided mappings kept alive for
         // the full kernel lifetime.
-        Some(unsafe { core::slice::from_raw_parts(file.base, file.len) })
+        Some(unsafe { core::slice::from_raw_parts(base, len) })
     }
 }
 
@@ -596,10 +691,10 @@ impl Scheme for KernelScheme {
         }
 
         let files = self.files.lock();
-        let file = files.get(path).ok_or(SyscallError::BadHandle)?;
+        let (id, _, len) = files.get(path).ok_or(SyscallError::BadHandle)?;
         Ok(OpenResult {
-            file_id: file.id,
-            size: Some(file.len as u64),
+            file_id: *id,
+            size: Some(*len as u64),
             flags: FileFlags::empty(),
         })
     }
@@ -626,18 +721,18 @@ impl Scheme for KernelScheme {
             return Ok(to_copy);
         }
 
-        let file = self.get_by_id(file_id).ok_or(SyscallError::BadHandle)?;
+        let (_, base, len) = self.get_by_id(file_id).ok_or(SyscallError::BadHandle)?;
 
-        if offset >= file.len as u64 {
+        if offset >= len as u64 {
             return Ok(0);
         }
 
-        let remaining = file.len - offset as usize;
+        let remaining = len - offset as usize;
         let to_copy = core::cmp::min(remaining, buf.len());
 
         // SAFETY: file.base is a kernel-static pointer, bounds checked above
         unsafe {
-            let src = file.base.add(offset as usize);
+            let src = base.add(offset as usize);
             core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), to_copy);
         }
 
@@ -656,8 +751,8 @@ impl Scheme for KernelScheme {
 
     /// Performs the size operation.
     fn size(&self, file_id: u64) -> Result<u64, SyscallError> {
-        let file = self.get_by_id(file_id).ok_or(SyscallError::BadHandle)?;
-        Ok(file.len as u64)
+        let (_, _, len) = self.get_by_id(file_id).ok_or(SyscallError::BadHandle)?;
+        Ok(len as u64)
     }
 
     /// Performs the stat operation.
@@ -677,15 +772,15 @@ impl Scheme for KernelScheme {
                 0,
             ));
         }
-        let file = self.get_by_id(file_id).ok_or(SyscallError::BadHandle)?;
+        let (_, _, len) = self.get_by_id(file_id).ok_or(SyscallError::BadHandle)?;
         Ok(finalize_pseudo_stat(
             FileStat {
                 st_ino: file_id,
                 st_mode: 0o100444,
                 st_nlink: 1,
-                st_size: file.len as u64,
+                st_size: len as u64,
                 st_blksize: 512,
-                st_blocks: ((file.len as u64) + 511) / 512,
+                st_blocks: ((len as u64) + 511) / 512,
                 ..FileStat::zeroed()
             },
             DEV_SYSFS,
@@ -700,9 +795,9 @@ impl Scheme for KernelScheme {
         }
         let files = self.files.lock();
         let mut entries = Vec::new();
-        for (name, kf) in files.iter() {
+        for (name, (id, _, _)) in files.iter() {
             entries.push(DirEntry {
-                ino: kf.id,
+                ino: *id,
                 file_type: DT_REG,
                 name: name.clone(),
             });

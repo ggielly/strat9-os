@@ -1,5 +1,8 @@
 //! Capability-based Security System
 //!
+//! See also: [Architecture Overview](https://strat9-os.org/strat9-os-docs/architecture.html)
+//! for the security model and data flow diagrams.
+//!
 //! Implements a capability-based security model for Strat9-OS.
 //! All kernel resources are accessed through unforgeable tokens (capabilities).
 
@@ -62,6 +65,8 @@ pub enum ResourceType {
     Keyboard,
     Volume,
     Namespace,
+    /// IPC transport endpoint (N1/N2/N3).
+    IpcTransport,
 }
 
 /// Permissions associated with a capability
@@ -278,7 +283,12 @@ impl CapabilityTable {
 pub struct CapabilityManager {
     /// All capabilities in the system
     all_capabilities: SpinLock<BTreeMap<CapId, Capability>>,
-    /// Per-resource refcounts for O(1) capability counting (no full-table scan)
+    /// Per-resource refcounts for O(1) capability counting (no full-table scan).
+    ///
+    /// Each `register_capability` increments the counter; each `revoke_capability`
+    /// decrements it. `resource_capability_count` is O(1) : it reads the atomic
+    /// directly instead of scanning `all_capabilities`.  The lock is only held
+    /// for the brief insert/remove + atomic update, never for a full-map scan.
     resource_refcounts: SpinLock<BTreeMap<ResourceKey, AtomicUsize>>,
 }
 
@@ -331,7 +341,7 @@ impl CapabilityManager {
     }
 
     /// Count remaining capabilities that still reference the same resource.
-    /// O(1) lookup via per-resource refcount — no full-table scan.
+    /// O(1) lookup via per-resource refcount : no full-table scan.
     pub fn resource_capability_count(&self, resource_type: ResourceType, resource: usize) -> usize {
         let key = ResourceKey(resource_type, resource);
         self.resource_refcounts
@@ -418,6 +428,12 @@ pub fn release_capability(cap: &Capability, owner_task: Option<TaskId>) {
         ResourceType::MemoryRegion => {
             let _ =
                 crate::memory::memory_region_registry().release_handle(cap.resource as u64, cap.id);
+        }
+        ResourceType::IpcTransport => {
+            if remaining_caps == 0 {
+                let tid = crate::ipc::transport::TransportId::from_u64(cap.resource as u64);
+                let _ = crate::syscall::transport::TRANSPORT_MANAGER.close(tid);
+            }
         }
         _ => {}
     }

@@ -160,7 +160,7 @@ impl MvebuMbus {
             }
         }
 
-        let size_field = ((size / 0x10000) - 1) as u32;
+        let size_field = size / 0x10000 - 1;
         let ctrl = WIN_CTRL_ENABLE
             | ((target as u32) << WIN_CTRL_TGT_SHIFT) & WIN_CTRL_TGT_MASK
             | ((attr as u32) << WIN_CTRL_ATTR_SHIFT) & WIN_CTRL_ATTR_MASK
@@ -246,6 +246,7 @@ impl BusDriver for MvebuMbus {
         if !self.mbus_regs.is_valid() {
             return Err(BusError::InitFailed);
         }
+        self.mbus_regs.check_user_offset(offset)?;
         Ok(self.mbus_regs.read32(offset))
     }
 
@@ -254,6 +255,7 @@ impl BusDriver for MvebuMbus {
         if !self.mbus_regs.is_valid() {
             return Err(BusError::InitFailed);
         }
+        self.mbus_regs.check_user_offset(offset)?;
         self.mbus_regs.write32(offset, value);
         Ok(())
     }

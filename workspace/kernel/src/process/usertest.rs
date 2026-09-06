@@ -7,7 +7,7 @@
 //! This tests the full SYSCALL/SYSRET pipeline without needing an ELF loader.
 
 use alloc::sync::Arc;
-use x86_64::VirtAddr;
+use crate::arch::xshim::VirtAddr;
 
 use crate::{
     memory::address_space::{AddressSpace, VmaFlags, VmaType},
@@ -84,7 +84,7 @@ pub fn create_user_test_task() {
 
     // Step 4: Write machine code into the code page.
     // We need to write via the HHDM mapping since the user AS isn't active.
-    // Translate user vaddr → phys → HHDM virt for writing.
+    // Translate user vaddr => phys => HHDM virt for writing.
     let code_phys = user_as.translate(VirtAddr::new(USER_CODE_ADDR));
     let code_phys = match code_phys {
         Some(p) => p,
@@ -139,6 +139,9 @@ pub fn create_user_test_task() {
         interrupt_rsp: core::sync::atomic::AtomicU64::new(0),
         kernel_stack,
         user_stack: None,
+        stack_canary: core::sync::atomic::AtomicU64::new(0),
+        stack_canary_addr: core::sync::atomic::AtomicU64::new(0),
+        kernel_stack_user: SyncUnsafeCell::new(None),
 
         name: "test-user-ring3",
         process: alloc::sync::Arc::new(crate::process::process::Process::new(pid, user_as)),
@@ -162,6 +165,8 @@ pub fn create_user_test_task() {
         fair_rq_generation: core::sync::atomic::AtomicU64::new(0),
         fair_on_rq: core::sync::atomic::AtomicBool::new(false),
         clear_child_tid: core::sync::atomic::AtomicU64::new(0),
+        robust_list_head: core::sync::atomic::AtomicU64::new(0),
+        robust_list_len: core::sync::atomic::AtomicUsize::new(0),
         user_fs_base: core::sync::atomic::AtomicU64::new(0),
         fpu_state: crate::process::task::SyncUnsafeCell::new(fpu_state),
         xcr0_mask: core::sync::atomic::AtomicU64::new(xcr0_mask),
@@ -185,10 +190,10 @@ pub fn create_user_test_task() {
         rcx: USER_CODE_ADDR,
         rax: 0,
         iret_rip: USER_CODE_ADDR,
-        iret_cs: crate::arch::x86_64::gdt::user_code_selector().0 as u64,
+        iret_cs: crate::arch::gdt::user_code_selector().0 as u64,
         iret_rflags: 0x202,
         iret_rsp: USER_STACK_TOP,
-        iret_ss: crate::arch::x86_64::gdt::user_data_selector().0 as u64,
+        iret_ss: crate::arch::gdt::user_data_selector().0 as u64,
     });
 
     crate::process::add_task(task);
@@ -209,7 +214,7 @@ static mut USER_TASK_AS: Option<Arc<AddressSpace>> = None;
 /// 2. Pushes an IRET frame (SS, RSP, RFLAGS, CS, RIP)
 /// 3. Executes IRETQ to jump to Ring 3 code
 extern "C" fn ring3_trampoline() -> ! {
-    use crate::arch::x86_64::gdt;
+    use crate::arch::gdt;
 
     // Switch to user address space
     // SAFETY: The user AS was set up with the kernel half cloned.
@@ -219,7 +224,7 @@ extern "C" fn ring3_trampoline() -> ! {
             as_ref.switch_to();
 
             // Diagnostic: verify the code page is mapped before IRETQ
-            let phys = as_ref.translate(x86_64::VirtAddr::new(USER_CODE_ADDR));
+            let phys = as_ref.translate(crate::arch::xshim::VirtAddr::new(USER_CODE_ADDR));
             crate::serial_println!(
                 "[ring3-tramp] CR3={:#x}, translate({:#x})={:?}",
                 as_ref.cr3().as_u64(),
@@ -228,7 +233,7 @@ extern "C" fn ring3_trampoline() -> ! {
             );
 
             // Also verify via a direct CR3 read + manual walk
-            let (cr3_frame, _) = x86_64::registers::control::Cr3::read();
+            let (cr3_frame, _) = crate::x86_crate_shim::registers::control::Cr3::read();
             let cr3_phys = cr3_frame.start_address().as_u64();
             let hhdm = crate::memory::hhdm_offset();
             crate::serial_println!(

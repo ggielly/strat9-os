@@ -58,6 +58,14 @@ const ANSI_VIOLET: &str = "\x1b[35m";
 const TOKEN_BUF_CAP: usize = 64;
 
 /// Signal that the kernel has entered an emergency panic state.
+/// Write one raw byte to COM1 (used by debug breadcrumbs).
+pub fn putc(byte: u8) {
+    // SAFETY: COM1 port writes are always safe in kernel context.
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") byte, options(nomem, nostack));
+    }
+}
+
 pub fn enter_emergency_mode() {
     PANIC_IN_PROGRESS.store(true, Ordering::SeqCst);
 }
@@ -237,7 +245,7 @@ pub fn init() {
     SERIAL1.lock().init();
 }
 
-/// Parse kernel cmdline from Limine boot arguments.
+/// Parse kernel cmdline from UEFI bootloader boot arguments.
 ///
 /// `ptr` is a pointer to a null-terminated C string provided by the bootloader.
 /// `len` is the length of the cmdline string (including the null terminator).
@@ -323,21 +331,28 @@ pub fn _print(args: fmt::Arguments) {
     // Check if we are in emergency panic mode.
     if PANIC_IN_PROGRESS.load(Ordering::Relaxed) {
         // SAFETY: In emergency mode, we bypass the mutex to ensure output.
-        // We re-initialize a local SerialPort instance pointing to the same IO port.
         let mut port = unsafe { SerialPort::new(0x3F8) };
-        // We don't use AnsiStylingWriter here to minimize risk of further panics/complex logic.
         let _ = port.write_fmt(args);
         return;
     }
 
+    // In quiet mode, suppress all normal serial output.
+    if crate::debug_cfg::is_quiet() {
+        return;
+    }
+
     // Normal mode: Use try_lock to avoid deadlock in interrupt handlers.
+    crate::e9_println!("_print enter");
     if let Some(mut port) = SERIAL1.try_lock() {
+        crate::e9_println!("_print locked");
         let mut prefix_writer = BootPrefixWriter::new(&mut *port);
         let mut writer = AnsiStylingWriter::new(&mut prefix_writer);
         let _ = writer.write_fmt(args);
+        crate::e9_println!("_print written");
         let _ = writer.finish();
         prefix_writer.finish();
     }
+    crate::e9_println!("_print exit");
 }
 
 /// Print to serial port bypassing the shared mutex.

@@ -15,6 +15,17 @@ use super::{
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static CONSOLE: SpinLock<Option<Arc<ConsoleScheme>>> = SpinLock::new(None);
 
+/// Kernel console scheme : thin redirect to serial/VGA.
+///
+/// Architecture:
+/// - Writes always go to serial (for debug / early boot).
+/// - Before the display server starts, writes also go to VGA (boot mode).
+/// - Once the display server is active, VGA writes are skipped because
+///   the display server owns the framebuffer. Full redirect-to-display-server
+///   logic will be added when the console silo is integrated.
+///
+/// `VgaWriter` remains boot-only; the display server takes over the
+/// framebuffer at userspace startup.
 pub struct ConsoleScheme;
 
 impl ConsoleScheme {
@@ -36,25 +47,28 @@ impl Scheme for ConsoleScheme {
     }
 
     /// Performs the read operation.
-    fn read(&self, _file_id: u64, _offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
-        let mut count = 0;
-        for slot in buf.iter_mut() {
-            match crate::arch::x86_64::keyboard::read_char() {
-                Some(ch) => {
-                    *slot = ch;
-                    count += 1;
-                }
-                None => break,
-            }
-        }
-        Ok(count)
+    ///
+    /// The console scheme is write-only (output to serial/VGA).
+    /// Keyboard input must come from `/dev/input/kbd` via `InputScheme`.
+    /// Reading from the keyboard buffer here would compete with the userspace
+    /// console (strate-console) and silently steal keystrokes.
+    fn read(&self, _file_id: u64, _offset: u64, _buf: &mut [u8]) -> Result<usize, SyscallError> {
+        Err(SyscallError::Again)
     }
 
     /// Performs the write operation.
+    ///
+    /// Boot mode: serial + VGA (when VGA hardware is present).
+    /// Runtime mode: serial only : the display server owns the framebuffer.
+    /// TODO: skip VGA writes once the display server signals readiness.
     fn write(&self, _file_id: u64, _offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
         if let Ok(s) = core::str::from_utf8(buf) {
+            // Always write to serial (debug / crash output).
             crate::serial_print!("{}", s);
-            if crate::arch::x86_64::vga::is_available() {
+            // Boot-mode VGA output: write to the VGA buffer while the display
+            // server is not yet active. Once the display server starts, this
+            // branch should be gated on a readiness flag (e.g. DISPLAY_SERVER_ACTIVE).
+            if crate::arch::vga::is_available() {
                 crate::vga_print!("{}", s);
             }
         } else {
@@ -102,8 +116,11 @@ pub fn setup_stdio(fd_table: &mut FileDescriptorTable) {
         None => return,
     };
 
-    // fd 0 — stdin (read)
-    let r0 = scheme.open("console", OpenFlags::READ).unwrap();
+    // fd 0 : stdin (read)
+    let r0 = match scheme.open("console", OpenFlags::READ) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
     let stdin = Arc::new(OpenFile::new(
         scheme.clone(),
         r0.file_id,
@@ -114,8 +131,11 @@ pub fn setup_stdio(fd_table: &mut FileDescriptorTable) {
     ));
     fd_table.insert_at(0, stdin);
 
-    // fd 1 — stdout (write)
-    let r1 = scheme.open("console", OpenFlags::WRITE).unwrap();
+    // fd 1 : stdout (write)
+    let r1 = match scheme.open("console", OpenFlags::WRITE) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
     let stdout = Arc::new(OpenFile::new(
         scheme.clone(),
         r1.file_id,
@@ -126,8 +146,11 @@ pub fn setup_stdio(fd_table: &mut FileDescriptorTable) {
     ));
     fd_table.insert_at(1, stdout);
 
-    // fd 2 — stderr (write)
-    let r2 = scheme.open("console", OpenFlags::WRITE).unwrap();
+    // fd 2 : stderr (write)
+    let r2 = match scheme.open("console", OpenFlags::WRITE) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
     let stderr = Arc::new(OpenFile::new(
         scheme,
         r2.file_id,

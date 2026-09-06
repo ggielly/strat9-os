@@ -82,6 +82,9 @@ pub const IPI_RESCHED_VECTOR: u8 = 0xE0;
 /// Vector used for TLB shootdown IPIs.
 pub const IPI_TLB_SHOOTDOWN_VECTOR: u8 = 0xF0;
 
+/// Vector used for N3 MMU migration synchronization IPIs.
+pub const IPI_N3_MIGRATE_VECTOR: u8 = 0xF1;
+
 /// Check if APIC is present via CPUID
 pub fn is_present() -> bool {
     let (_eax, _ebx, _ecx, edx) = super::cpuid(1, 0);
@@ -215,7 +218,7 @@ pub unsafe fn write_reg(offset: u32, value: u32) {
 ///
 /// `madt_lapic_addr` is the LAPIC base physical address from the MADT.
 /// We use the MSR value as authoritative but log if it differs from MADT.
-pub fn init(madt_lapic_addr: u32) {
+pub fn init(madt_lapic_addr: u64) {
     // Read the APIC base MSR to get the actual physical address
     let apic_base_msr = super::rdmsr(IA32_APIC_BASE_MSR);
     let apic_phys = apic_base_msr & APIC_BASE_ADDR_MASK;
@@ -334,10 +337,11 @@ pub fn eoi() {
 /// `icr_low` must contain delivery mode/vector/flags in xAPIC layout.
 pub fn send_ipi_raw(target_apic_id: u32, icr_low: u32) {
     unsafe {
-        write_reg(REG_ESR, 0);
         if APIC_X2_MODE.load(Ordering::Relaxed) {
+            // x2APIC: single MSR write, synchronous (CPU blocks until dispatched).
             super::wrmsr(0x830, ((target_apic_id as u64) << 32) | icr_low as u64);
         } else {
+            // xAPIC: two-step MMIO write (destination high, then command low).
             write_reg(REG_ICR_HIGH, target_apic_id << 24);
             write_reg(REG_ICR_LOW, icr_low);
         }
@@ -347,7 +351,7 @@ pub fn send_ipi_raw(target_apic_id: u32, icr_low: u32) {
 /// Send a "reschedule now" IPI to the CPU identified by `target_apic_id`.
 ///
 /// Uses Fixed delivery mode (vector `IPI_RESCHED_VECTOR`), physical destination.
-/// This is fire-and-forget — no delivery status wait is needed for reschedule
+/// This is fire-and-forget : no delivery status wait is needed for reschedule
 /// IPIs because a missed IPI only delays preemption by at most one timer tick.
 ///
 /// # Safety

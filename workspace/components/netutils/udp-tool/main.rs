@@ -13,6 +13,7 @@
 extern crate alloc;
 
 use core::{alloc::Layout, fmt::Write, panic::PanicInfo};
+use strat9_abi::ip::parse_ipv4_literal;
 use strat9_syscall::{call, data::TimeSpec, number};
 
 alloc_freelist::define_freelist_allocator!(pub struct BumpAllocator; heap_size = 96 * 1024;);
@@ -28,21 +29,7 @@ fn alloc_error(_layout: Layout) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    log("[udp-tool] PANIC: ");
-    let mut buf = [0u8; 256];
-    let n = {
-        let mut w = BufWriter {
-            buf: &mut buf,
-            pos: 0,
-        };
-        let _ = write!(w, "{}", info.message());
-        w.pos
-    };
-    if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-        log(s);
-    }
-    log("\n");
-    call::exit(255)
+    call::handle_panic("udp-tool", info)
 }
 
 struct BufWriter<'a> {
@@ -87,7 +74,7 @@ fn clock_ns() -> u64 {
 
 fn open_rw(path: &str) -> Result<usize, i32> {
     call::openat(0, path, 0x2, 0)
-        .map(|fd| fd as usize)
+        .map(|fd| fd)
         .map_err(|e| e.to_errno() as i32)
 }
 
@@ -95,41 +82,9 @@ fn read_text(path: &str, out: &mut [u8]) -> usize {
     let Ok(fd) = call::openat(0, path, 0x0, 0) else {
         return 0;
     };
-    let n = call::read(fd as usize, out).unwrap_or(0);
-    let _ = call::close(fd as usize);
+    let n = call::read(fd, out).unwrap_or(0);
+    let _ = call::close(fd);
     n
-}
-
-fn parse_ipv4_literal(s: &str) -> Option<[u8; 4]> {
-    let mut octets = [0u8; 4];
-    let mut idx = 0usize;
-    let mut val: u16 = 0;
-    let mut has_digit = false;
-
-    for &b in s.as_bytes() {
-        if b == b'.' {
-            if !has_digit || idx >= 3 || val > 255 {
-                return None;
-            }
-            octets[idx] = val as u8;
-            idx += 1;
-            val = 0;
-            has_digit = false;
-            continue;
-        }
-        if !b.is_ascii_digit() {
-            return None;
-        }
-        val = val * 10 + (b - b'0') as u16;
-        has_digit = true;
-    }
-
-    if !has_digit || idx != 3 || val > 255 {
-        return None;
-    }
-
-    octets[3] = val as u8;
-    Some(octets)
 }
 
 fn parse_first_ipv4_line(path: &str, buf: &mut [u8; 128]) -> Option<[u8; 4]> {

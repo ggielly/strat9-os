@@ -5,7 +5,7 @@ use crate::{
     memory::{AddressSpace, UserSliceRead, VmaFlags, VmaPageSize, VmaType},
     process::{
         current_task_clone,
-        elf::{load_elf_image, LoadedElfInfo, USER_STACK_BASE, USER_STACK_PAGES, USER_STACK_TOP},
+        elf::{load_elf_image, LoadedElfInfo, USER_STACK_PAGES},
         get_task_ids_in_tgid,
     },
     syscall::{error::SyscallError, SyscallFrame},
@@ -105,10 +105,12 @@ pub fn sys_execve(
     let path_str =
         core::str::from_utf8(&path_buf[..len]).map_err(|_| SyscallError::InvalidArgument)?;
 
-    let owned_elf_data = read_exec_image(path_str)?;
+    let exec_path = vfs::resolve_and_check_path_for_current_task(path_str, true, false, true)?;
+
+    let owned_elf_data = read_exec_image(&exec_path)?;
     let elf_data = owned_elf_data
         .as_deref()
-        .or_else(|| crate::vfs::get_initfs_file_bytes(path_str))
+        .or_else(|| crate::vfs::get_initfs_file_bytes(&exec_path))
         .ok_or(SyscallError::NotFound)?;
 
     if elf_data.len() < 4 {
@@ -119,8 +121,11 @@ pub fn sys_execve(
     let new_as_arc = alloc::sync::Arc::new(new_as);
     new_as_arc.set_owner_pid(current.pid);
 
-    let load_info =
-        load_elf_image(elf_data, &new_as_arc).map_err(|_| SyscallError::ExecFormatError)?;
+    let load_info = match load_elf_image(elf_data, &new_as_arc) {
+        Ok(info) => info,
+        Err("PT_INTERP execute denied") => return Err(SyscallError::PermissionDenied),
+        Err(_) => return Err(SyscallError::ExecFormatError),
+    };
 
     let stack_flags = VmaFlags {
         readable: true,
@@ -128,9 +133,13 @@ pub fn sys_execve(
         executable: false,
         user_accessible: true,
     };
+    // Per-process stack ASLR (issue #62): draw this image's own jitter and
+    // use it consistently for both the mapping and the initial SP.
+    let stack_base = crate::kaslr::stack_base_with_jitter(crate::kaslr::draw_stack_jitter());
+    let stack_top = crate::kaslr::stack_top_for(stack_base, USER_STACK_PAGES);
     new_as_arc
         .map_region(
-            USER_STACK_BASE,
+            stack_base,
             USER_STACK_PAGES,
             stack_flags,
             VmaType::Stack,
@@ -138,12 +147,26 @@ pub fn sys_execve(
         )
         .map_err(|_| SyscallError::OutOfMemory)?;
 
+    // Stack canary (issue #63): random per-image value at the top word.
+    let mut canary_bytes = [0u8; 8];
+    crate::entropy::fill_random(&mut canary_bytes);
+    let stack_canary = u64::from_le_bytes(canary_bytes) | 1; // never 0
+    write_bytes_to_as(&new_as_arc, stack_top - 8, &stack_canary.to_le_bytes())?;
+    current
+        .stack_canary
+        .store(stack_canary, core::sync::atomic::Ordering::Relaxed);
+    current
+        .stack_canary_addr
+        .store(stack_top - 8, core::sync::atomic::Ordering::Relaxed);
+
     let sp = setup_user_stack(
         &new_as_arc,
         argv_ptr,
         envp_ptr,
         &load_info,
         path_str.as_bytes(),
+        stack_base,
+        stack_top - 8, // data must stay below the canary slot
     )?;
 
     // TLS setup (Variant II) if the ELF has a PT_TLS segment.
@@ -228,10 +251,10 @@ pub fn sys_execve(
         .process
         .brk
         .store(0, core::sync::atomic::Ordering::Relaxed);
-    current
-        .process
-        .mmap_hint
-        .store(0x0000_0000_6000_0000, core::sync::atomic::Ordering::Relaxed);
+    current.process.mmap_hint.store(
+        crate::kaslr::mmap_base(),
+        core::sync::atomic::Ordering::Relaxed,
+    );
     // Set FS.base MSR for the new image TLS (or 0 if no PT_TLS).
     unsafe {
         let lo = new_fs_base as u32;
@@ -284,11 +307,13 @@ fn setup_user_stack(
     envp_ptr: u64,
     elf_info: &LoadedElfInfo,
     exec_path: &[u8],
+    stack_base: u64,
+    stack_top: u64,
 ) -> Result<u64, SyscallError> {
     let args = read_string_array(argv_ptr)?;
     let envs = read_string_array(envp_ptr)?;
 
-    let mut sp = USER_STACK_TOP;
+    let mut sp = stack_top;
     let mut str_ptrs: Vec<u64> = Vec::with_capacity(args.len()); // stores pointers to arguments
     let mut env_ptrs: Vec<u64> = Vec::with_capacity(envs.len()); // stores pointers to env vars
 
@@ -300,7 +325,12 @@ fn setup_user_stack(
     // Push ENV strings
     for env in envs.iter().rev() {
         let len = (env.len() + 1) as u64;
-        sp -= len;
+        sp = sp
+            .checked_sub(len)
+            .ok_or(SyscallError::ArgumentListTooLong)?;
+        if sp < stack_base {
+            return Err(SyscallError::ArgumentListTooLong);
+        }
         write_bytes_to_as(new_as, sp, env)?;
         write_bytes_to_as(new_as, sp + env.len() as u64, &[0])?;
         env_ptrs.push(sp);
@@ -313,7 +343,12 @@ fn setup_user_stack(
     // Push ARG strings
     for arg in args.iter().rev() {
         let len = (arg.len() + 1) as u64;
-        sp -= len;
+        sp = sp
+            .checked_sub(len)
+            .ok_or(SyscallError::ArgumentListTooLong)?;
+        if sp < stack_base {
+            return Err(SyscallError::ArgumentListTooLong);
+        }
         write_bytes_to_as(new_as, sp, arg)?;
         write_bytes_to_as(new_as, sp + arg.len() as u64, &[0])?;
         str_ptrs.push(sp);
@@ -356,6 +391,15 @@ fn setup_user_stack(
     if execfn_ptr != 0 {
         auxv.push((AT_EXECFN, execfn_ptr));
     }
+
+    // Reserve padding above auxv so the final entry RSP still points at argc
+    // while satisfying the SysV x86_64 16-byte alignment requirement.
+    let stack_words = 1u64
+        + (str_ptrs.len() as u64 + 1)
+        + (env_ptrs.len() as u64 + 1)
+        + ((auxv.len() as u64 + 1) * 2);
+    let align_pad = (0u64.wrapping_sub(stack_words * size_ptr)) & 0xF;
+    sp -= align_pad;
 
     // AT_NULL terminator.
     sp -= size_ptr;
@@ -400,6 +444,8 @@ fn setup_user_stack(
     // Push ARGC
     sp -= size_ptr;
     write_u64_to_as(new_as, sp, args.len() as u64)?;
+
+    debug_assert_eq!(sp & 0xF, 0);
 
     Ok(sp)
 }
@@ -456,7 +502,7 @@ fn read_string_array(ptr: u64) -> Result<Vec<Vec<u8>>, SyscallError> {
 
 /// Writes bytes to as.
 fn write_bytes_to_as(as_ref: &AddressSpace, vaddr: u64, data: &[u8]) -> Result<(), SyscallError> {
-    use x86_64::VirtAddr;
+    use crate::arch::xshim::VirtAddr;
     let mut written = 0;
     // We assume data is small enough or we loop? Using unsafe pointer arithmetic.
     // The `AddressSpace` methods like `translate` are needed.
@@ -474,7 +520,7 @@ fn write_bytes_to_as(as_ref: &AddressSpace, vaddr: u64, data: &[u8]) -> Result<(
         let chunk_size = core::cmp::min(data.len() - written, 4096 - page_offset);
 
         // translate might fail if page not mapped.
-        // `USER_STACK_BASE`..`USER_STACK_TOP` is mapped.
+        // `stack_base()`..`stack_top()` is mapped.
         let phys = as_ref
             .translate(VirtAddr::new(curr_vaddr))
             .ok_or(SyscallError::Fault)?;
@@ -496,16 +542,7 @@ fn write_u64_to_as(as_ref: &AddressSpace, vaddr: u64, val: u64) -> Result<(), Sy
 
 /// Performs the generate aux random seed operation.
 fn generate_aux_random_seed() -> [u8; 16] {
-    use x86_64::registers::control::Cr3;
-    let mut s = [0u8; 16];
-    let t = crate::process::scheduler::ticks();
-    let (cr3, _) = Cr3::read();
-    let x = t
-        ^ (cr3
-            .start_address()
-            .as_u64()
-            .wrapping_mul(0x9e37_79b9_7f4a_7c15));
-    s[..8].copy_from_slice(&x.to_le_bytes());
-    s[8..].copy_from_slice(&(x.rotate_left(17) ^ 0xa076_1d64_78bd_642f).to_le_bytes());
-    s
+    let mut seed = [0u8; 16];
+    crate::entropy::fill_random(&mut seed);
+    seed
 }

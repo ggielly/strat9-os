@@ -1,6 +1,6 @@
 # ABI Support Matrix
 
-Status of relibc platform APIs on `x86_64-unknown-strat9`.
+Status of musl platform APIs on `x86_64-unknown-strat9`.
 
 Legend: **OK** = implemented, **Stub** = returns ENOSYS, **Partial** = limited.
 
@@ -57,7 +57,7 @@ Legend: **OK** = implemented, **Stub** = returns ENOSYS, **Partial** = limited.
 | uname | OK | Via SYS_PROC_UNAME |
 | getuid / geteuid / getgid / getegid | Partial | Returns 0 (no UID model) |
 | mprotect / mlock / munlock | Stub | ENOSYS |
-| getrandom | Stub | ENOSYS |
+| getrandom | OK | Via SYS_GETRANDOM (601), supports GRND_NONBLOCK |
 
 ## Signals
 

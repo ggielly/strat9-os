@@ -1,4 +1,4 @@
-//! IPC Port — a kernel-managed message queue with blocking send/recv.
+//! IPC Port : a kernel-managed message queue with blocking send/recv.
 //!
 //! Each port has a bounded FIFO queue of `IpcMessage`s. Senders block if
 //! the queue is full; receivers block if it's empty. The scheduler's
@@ -47,6 +47,8 @@ pub enum IpcError {
     NotOwner,
     #[error("port destroyed")]
     PortDestroyed,
+    #[error("port queue full")]
+    WouldBlock,
 }
 
 /// An IPC port: a bounded message queue with blocking semantics.
@@ -118,6 +120,20 @@ impl Port {
             self.send_waitq.wake_one();
         }
         result
+    }
+
+    /// Try to send a message to this port without blocking.
+    ///
+    /// Returns `Ok(())` if the message was queued,
+    /// or `Err(WouldBlock)` if the queue is full.
+    pub fn try_send(&self, msg: IpcMessage) -> Result<(), IpcError> {
+        match self.queue.push(msg) {
+            Ok(()) => {
+                self.recv_waitq.wake_one();
+                Ok(())
+            }
+            Err(_) => Err(IpcError::WouldBlock),
+        }
     }
 
     /// Try to receive a message from this port without blocking.
@@ -253,7 +269,8 @@ pub fn cleanup_ports_for_task(owner: TaskId) {
             let mut err_reply = IpcMessage::new(0x80);
             let epipe: u32 = 32;
             err_reply.payload[0..4].copy_from_slice(&epipe.to_le_bytes());
-            let _ = super::reply::deliver_reply(sender, err_reply);
+            // The dead owner is the awaited responder: authorization passes.
+            let _ = super::reply::deliver_reply(owner, sender, err_reply);
         }
     }
 }

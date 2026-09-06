@@ -9,8 +9,8 @@
 //! task and performs a context switch. Interrupts are disabled while the
 //! scheduler lock is held to prevent deadlock on single-core systems:
 //!
-//! - `yield_task()`: CLI → lock → pick next → TSS/CR3 → unlock → switch_context → restore IF
-//! - Timer handler: CPU already cleared IF → lock → pick next → TSS/CR3 → unlock → switch_context
+//! - `yield_task()`: CLI => lock => pick next => TSS/CR3 => unlock => switch_context => restore IF
+//! - Timer handler: CPU already cleared IF => lock => pick next => TSS/CR3 => unlock => switch_context
 //!
 //! Each task has its own 16KB kernel stack. Callee-saved registers are
 //! pushed/popped by `switch_context()`. `CpuContext` only stores `saved_rsp`.
@@ -79,7 +79,7 @@
 
 use super::task::{Pid, Task, TaskId, TaskPriority, TaskState, Tid};
 use crate::{
-    arch::x86_64::{apic, percpu, restore_flags, save_flags_and_cli, timer, timer::NS_PER_TICK},
+    arch::{apic, percpu, restore_flags, save_flags_and_cli, timer, timer::NS_PER_TICK},
     sync::SpinLock,
 };
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
@@ -93,38 +93,38 @@ use spin::RwLock as SpinRwLock;
 ///
 /// CPU usage over a time window:
 /// `usage = 1 - (delta_idle / delta_total)`.
-static CPU_TOTAL_TICKS: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
-static CPU_IDLE_TICKS: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
-static CPU_RT_RUNTIME_TICKS: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
-static CPU_FAIR_RUNTIME_TICKS: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
-static CPU_SWITCH_COUNT: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
-static CPU_PREEMPT_COUNT: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
-static CPU_STEAL_IN_COUNT: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
-static CPU_STEAL_OUT_COUNT: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
-static CPU_TRY_LOCK_FAIL_COUNT: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
-static RESCHED_IPI_PENDING: [AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicBool::new(false) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static CPU_TOTAL_TICKS: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
+static CPU_IDLE_TICKS: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
+static CPU_RT_RUNTIME_TICKS: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
+static CPU_FAIR_RUNTIME_TICKS: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
+static CPU_SWITCH_COUNT: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
+static CPU_PREEMPT_COUNT: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
+static CPU_STEAL_IN_COUNT: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
+static CPU_STEAL_OUT_COUNT: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
+static CPU_TRY_LOCK_FAIL_COUNT: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
+static RESCHED_IPI_PENDING: [AtomicBool; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; crate::arch::percpu::MAX_CPUS];
 static IPI_SEND_TRACE_BUDGET: AtomicU64 = AtomicU64::new(64);
 /// Lock-free per-CPU hint: request a local preemption as soon as maybe_preempt
 /// can observe scheduler state. Written from IRQ paths without touching
 /// `GLOBAL_SCHED_STATE`, consumed under scheduler lock in `maybe_preempt`.
-static FORCE_RESCHED_HINT: [AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicBool::new(false) }; crate::arch::x86_64::percpu::MAX_CPUS];
-static LAST_STEAL_TICK: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static FORCE_RESCHED_HINT: [AtomicBool; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; crate::arch::percpu::MAX_CPUS];
+static LAST_STEAL_TICK: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
 /// One-shot flag per CPU: set to true after the first preemption is logged.
 /// Prevents flooding the serial port with a preempt trace on every tick.
-pub(crate) static FIRST_PREEMPT_LOGGED: [AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicBool::new(false) }; crate::arch::x86_64::percpu::MAX_CPUS];
+pub(crate) static FIRST_PREEMPT_LOGGED: [AtomicBool; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; crate::arch::percpu::MAX_CPUS];
 
 const STEAL_IMBALANCE_MIN: usize = 2;
 const STEAL_COOLDOWN_TICKS: u64 = 2;
@@ -132,35 +132,35 @@ const STEAL_COOLDOWN_TICKS: u64 = 2;
 /// Performs the active cpu count operation.
 #[inline]
 fn active_cpu_count() -> usize {
-    crate::arch::x86_64::smp::cpu_count()
+    crate::arch::smp::cpu_count()
         .max(1)
-        .min(crate::arch::x86_64::percpu::MAX_CPUS)
+        .min(crate::arch::percpu::MAX_CPUS)
 }
 
 /// Performs the cpu is valid operation.
 #[inline]
 fn cpu_is_valid(cpu: usize) -> bool {
-    cpu < crate::arch::x86_64::percpu::MAX_CPUS
+    cpu < crate::arch::percpu::MAX_CPUS
 }
 
 #[derive(Clone, Copy)]
 pub struct CpuUsageSnapshot {
     pub cpu_count: usize,
-    pub total_ticks: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub idle_ticks: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
+    pub total_ticks: [u64; crate::arch::percpu::MAX_CPUS],
+    pub idle_ticks: [u64; crate::arch::percpu::MAX_CPUS],
 }
 
 #[derive(Clone, Copy)]
 pub struct SchedulerMetricsSnapshot {
     pub cpu_count: usize,
-    pub rt_runtime_ticks: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub fair_runtime_ticks: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub idle_runtime_ticks: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub switch_count: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub preempt_count: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub steal_in_count: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub steal_out_count: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub try_lock_fail_count: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
+    pub rt_runtime_ticks: [u64; crate::arch::percpu::MAX_CPUS],
+    pub fair_runtime_ticks: [u64; crate::arch::percpu::MAX_CPUS],
+    pub idle_runtime_ticks: [u64; crate::arch::percpu::MAX_CPUS],
+    pub switch_count: [u64; crate::arch::percpu::MAX_CPUS],
+    pub preempt_count: [u64; crate::arch::percpu::MAX_CPUS],
+    pub steal_in_count: [u64; crate::arch::percpu::MAX_CPUS],
+    pub steal_out_count: [u64; crate::arch::percpu::MAX_CPUS],
+    pub try_lock_fail_count: [u64; crate::arch::percpu::MAX_CPUS],
 }
 
 #[derive(Clone, Copy)]
@@ -171,18 +171,18 @@ pub struct SchedulerStateSnapshot {
     pub pick_order: [crate::process::sched::SchedClassId; 3],
     pub steal_order: [crate::process::sched::SchedClassId; 2],
     pub blocked_tasks: usize,
-    pub current_task: [u64; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub rq_rt: [usize; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub rq_fair: [usize; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub rq_idle: [usize; crate::arch::x86_64::percpu::MAX_CPUS],
-    pub need_resched: [bool; crate::arch::x86_64::percpu::MAX_CPUS],
+    pub current_task: [u64; crate::arch::percpu::MAX_CPUS],
+    pub rq_rt: [usize; crate::arch::percpu::MAX_CPUS],
+    pub rq_fair: [usize; crate::arch::percpu::MAX_CPUS],
+    pub rq_idle: [usize; crate::arch::percpu::MAX_CPUS],
+    pub need_resched: [bool; crate::arch::percpu::MAX_CPUS],
 }
 
 /// Performs the cpu usage snapshot operation.
 pub fn cpu_usage_snapshot() -> CpuUsageSnapshot {
     let cpu_count = active_cpu_count();
-    let mut total_ticks = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
-    let mut idle_ticks = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
+    let mut total_ticks = [0u64; crate::arch::percpu::MAX_CPUS];
+    let mut idle_ticks = [0u64; crate::arch::percpu::MAX_CPUS];
     for i in 0..cpu_count {
         total_ticks[i] = CPU_TOTAL_TICKS[i].load(Ordering::Relaxed);
         idle_ticks[i] = CPU_IDLE_TICKS[i].load(Ordering::Relaxed);
@@ -197,14 +197,14 @@ pub fn cpu_usage_snapshot() -> CpuUsageSnapshot {
 /// Performs the scheduler metrics snapshot operation.
 pub fn scheduler_metrics_snapshot() -> SchedulerMetricsSnapshot {
     let cpu_count = active_cpu_count();
-    let mut rt_runtime_ticks = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
-    let mut fair_runtime_ticks = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
-    let mut idle_runtime_ticks = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
-    let mut switch_count = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
-    let mut preempt_count = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
-    let mut steal_in_count = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
-    let mut steal_out_count = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
-    let mut try_lock_fail_count = [0u64; crate::arch::x86_64::percpu::MAX_CPUS];
+    let mut rt_runtime_ticks = [0u64; crate::arch::percpu::MAX_CPUS];
+    let mut fair_runtime_ticks = [0u64; crate::arch::percpu::MAX_CPUS];
+    let mut idle_runtime_ticks = [0u64; crate::arch::percpu::MAX_CPUS];
+    let mut switch_count = [0u64; crate::arch::percpu::MAX_CPUS];
+    let mut preempt_count = [0u64; crate::arch::percpu::MAX_CPUS];
+    let mut steal_in_count = [0u64; crate::arch::percpu::MAX_CPUS];
+    let mut steal_out_count = [0u64; crate::arch::percpu::MAX_CPUS];
+    let mut try_lock_fail_count = [0u64; crate::arch::percpu::MAX_CPUS];
     for i in 0..cpu_count {
         rt_runtime_ticks[i] = CPU_RT_RUNTIME_TICKS[i].load(Ordering::Relaxed);
         fair_runtime_ticks[i] = CPU_FAIR_RUNTIME_TICKS[i].load(Ordering::Relaxed);
@@ -257,7 +257,7 @@ pub fn note_try_lock_fail() {
     note_try_lock_fail_on_cpu(current_cpu_index());
 }
 
-// ─── Cross-CPU IPI helpers ────────────────────────────────────────────────────
+// ========== Cross-CPU IPI helpers ===============================================
 
 /// Send a reschedule IPI to `cpu_index`.
 /// No-op if APIC is not initialized, or if `cpu_index` is the current CPU
@@ -271,7 +271,7 @@ fn send_resched_ipi_to_cpu(cpu_index: usize) {
     }
     let my_cpu = current_cpu_index();
     let should_trace = IPI_SEND_TRACE_BUDGET
-        .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |budget| {
+        .try_update(Ordering::AcqRel, Ordering::Relaxed, |budget| {
             budget.checked_sub(1)
         })
         .is_ok();
@@ -322,7 +322,7 @@ pub(crate) fn take_force_resched_hint(cpu: usize) -> bool {
     }
 }
 
-/// Global scheduler state — cold path: fork, exit, wake, block.
+/// Global scheduler state : cold path: fork, exit, wake, block.
 ///
 /// Lock order: acquire `GLOBAL_SCHED_STATE` before `LOCAL_SCHEDULERS[n]`
 /// when both are needed. Never hold a LOCAL lock and then block-acquire GLOBAL.
@@ -378,7 +378,7 @@ pub enum WaitChildResult {
 
 /// Performs the current cpu index operation.
 fn current_cpu_index() -> usize {
-    crate::arch::x86_64::percpu::current_cpu_index()
+    crate::arch::percpu::current_cpu_index()
 }
 
 struct PerCpuClassRqSet {
@@ -400,22 +400,11 @@ impl PerCpuClassRqSet {
     /// Performs the enqueue operation.
     fn enqueue(&mut self, class: crate::process::sched::SchedClassId, task: Arc<Task>) {
         use crate::process::sched::SchedClassRq;
-        unsafe { core::arch::asm!("mov al, 'q'; out 0xe9, al", out("al") _) };
         match class {
-            crate::process::sched::SchedClassId::Fair => {
-                unsafe { core::arch::asm!("mov al, 'f'; out 0xe9, al", out("al") _) };
-                self.fair.enqueue(task);
-            }
-            crate::process::sched::SchedClassId::RealTime => {
-                unsafe { core::arch::asm!("mov al, 'r'; out 0xe9, al", out("al") _) };
-                self.real_time.enqueue(task);
-            }
-            crate::process::sched::SchedClassId::Idle => {
-                unsafe { core::arch::asm!("mov al, 'i'; out 0xe9, al", out("al") _) };
-                self.idle.enqueue(task);
-            }
+            crate::process::sched::SchedClassId::Fair => self.fair.enqueue(task),
+            crate::process::sched::SchedClassId::RealTime => self.real_time.enqueue(task),
+            crate::process::sched::SchedClassId::Idle => self.idle.enqueue(task),
         }
-        unsafe { core::arch::asm!("mov al, 'Q'; out 0xe9, al", out("al") _) };
     }
 
     /// Performs the len by class operation.
@@ -525,16 +514,16 @@ struct SchedulerCpu {
     class_table: crate::process::sched::SchedClassTable,
 }
 
-/// Per-CPU local scheduler locks — hot path: timer tick, preemption, yield.
+/// Per-CPU local scheduler locks : hot path: timer tick, preemption, yield.
 ///
 /// Lock order: LOCAL before nothing; never hold two LOCAL locks simultaneously
 /// (use `try_lock` when touching a sibling CPU).
 #[allow(dead_code)]
 pub(crate) static LOCAL_SCHEDULERS: [SpinLock<Option<SchedulerCpu>>;
-    crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { SpinLock::new(None) }; crate::arch::x86_64::percpu::MAX_CPUS];
+    crate::arch::percpu::MAX_CPUS] =
+    [const { SpinLock::new(None) }; crate::arch::percpu::MAX_CPUS];
 
-/// Blocked tasks registry — hot path: block/wake.
+/// Blocked tasks registry : hot path: block/wake.
 ///
 /// This lock is **independent** of `GLOBAL_SCHED_STATE`. The block and wake
 /// paths acquire only this lock + the target CPU's `LOCAL_SCHEDULERS[cpu]`
@@ -544,7 +533,7 @@ pub(crate) static LOCAL_SCHEDULERS: [SpinLock<Option<SchedulerCpu>>;
 pub(crate) static BLOCKED_TASKS: SpinLock<BTreeMap<TaskId, Arc<Task>>> =
     SpinLock::new(BTreeMap::new());
 
-/// Identity maps — cold path: PID/TID lookups, process groups, sessions, parent/child.
+/// Identity maps : cold path: PID/TID lookups, process groups, sessions, parent/child.
 ///
 /// Separate from `GLOBAL_SCHED_STATE` so that identity lookups (getpid, getpgid,
 /// setpgid, etc.) never contend with fork/exit/zombie management.
@@ -555,7 +544,7 @@ pub(crate) static BLOCKED_TASKS: SpinLock<BTreeMap<TaskId, Arc<Task>>> =
 /// acquire the exclusive write lock.
 ///
 /// Lock order: SCHED_IDENTITY before LOCAL (never the reverse).
-/// SCHED_IDENTITY and BLOCKED_TASKS are independent — never hold both.
+/// SCHED_IDENTITY and BLOCKED_TASKS are independent : never hold both.
 pub(crate) static SCHED_IDENTITY: SpinRwLock<SchedIdentity> = SpinRwLock::new(SchedIdentity::new());
 
 /// Identity maps for the scheduler: PID/TID routing, process groups,
@@ -599,7 +588,7 @@ impl SchedIdentity {
     }
 }
 
-/// Global task registry — cold path: fork, exit, all_tasks scan.
+/// Global task registry : cold path: fork, exit, all_tasks scan.
 ///
 /// Lock order: acquire GLOBAL_SCHED_STATE before LOCAL when both are needed.
 /// Per-CPU runqueues and current-task tracking live in `LOCAL_SCHEDULERS`.
@@ -611,12 +600,6 @@ impl SchedIdentity {
 pub struct GlobalSchedState {
     /// All tasks in the system (for lookup by TaskId)
     pub(crate) all_tasks: BTreeMap<TaskId, Arc<Task>>,
-    /// Flat task snapshot used by IRQ-safe scans such as `tick_all_timers`.
-    ///
-    /// Unlike `BTreeMap::iter()`, iterating a contiguous `Vec<Arc<Task>>` avoids
-    /// tree-walk pointer chasing in hard-IRQ context. The authoritative storage
-    /// remains `all_tasks`; this mirror is updated under the same scheduler lock.
-    pub(crate) all_tasks_scan: Vec<Arc<Task>>,
     /// Map TaskId -> CPU index (for wake/resume routing)
     task_cpu: BTreeMap<TaskId, usize>,
     /// Deadline -> task ids map for sleeping tasks (ordered wakeups).
@@ -633,10 +616,7 @@ pub struct GlobalSchedState {
 
 /// Performs the validate task context operation.
 fn validate_task_context(task: &Arc<Task>) -> Result<(), &'static str> {
-    let ptr = Arc::as_ptr(task);
-    if ptr.is_null() {
-        return Err("null Task pointer in Arc");
-    }
+    // `task` is a Rust &Arc<Task> : the inner pointer is always valid.
     let saved_rsp = unsafe { (*task.context.get()).saved_rsp };
     let stack_base = task.kernel_stack.virt_base.as_u64();
     let stack_top = stack_base.saturating_add(task.kernel_stack.size as u64);

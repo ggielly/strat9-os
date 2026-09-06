@@ -10,7 +10,10 @@ mod uptime;
 mod watch;
 mod whoami;
 
-use crate::{shell::ShellError, shell_println, vfs};
+use crate::{
+    shell::{is_interrupted, ShellError},
+    shell_println, vfs,
+};
 use alloc::string::String;
 
 pub use audit::cmd_audit;
@@ -28,7 +31,7 @@ pub use whoami::cmd_whoami;
 
 pub(super) fn cmd_uptime_impl(_args: &[String]) -> Result<(), ShellError> {
     let ticks = crate::process::scheduler::ticks();
-    let hz = crate::arch::x86_64::timer::TIMER_HZ;
+    let hz = crate::arch::timer::TIMER_HZ;
     let total_secs = ticks / hz;
     let hours = total_secs / 3600;
     let minutes = (total_secs % 3600) / 60;
@@ -51,7 +54,7 @@ pub(super) fn cmd_uptime_impl(_args: &[String]) -> Result<(), ShellError> {
     );
 
     // Perf counters (TSC-based)
-    let tsc_khz = crate::arch::x86_64::boot_timestamp::tsc_khz();
+    let tsc_khz = crate::arch::boot_timestamp::tsc_khz();
     let stats = crate::process::scheduler::perf_counters::snapshot();
     shell_println!(
         "perf: {}",
@@ -145,7 +148,7 @@ pub(super) fn cmd_dmesg_impl(args: &[String]) -> Result<(), ShellError> {
     } else {
         0
     };
-    let hz = crate::arch::x86_64::timer::TIMER_HZ;
+    let hz = crate::arch::timer::TIMER_HZ;
 
     if entries.is_empty() {
         shell_println!("(kernel log empty)");
@@ -227,6 +230,10 @@ pub(super) fn cmd_grep_impl(args: &[String]) -> Result<(), ShellError> {
     let text = core::str::from_utf8(&data).unwrap_or("");
     let mut found = 0u32;
     for line in text.split('\n') {
+        if is_interrupted() {
+            shell_println!("(grep cancelled after {} matches)", found);
+            return Ok(());
+        }
         if line.contains(pattern) {
             shell_println!("{}", line);
             found += 1;

@@ -23,3 +23,5 @@ path = "src/exec_helper.rs"
 
 [dependencies]
 strat9-syscall = { path = "../syscall", features = ["userspace"] }
+rendezlarjan = { path = "../rendezlarjan" }
+alloc-freelist = { path = "../alloc-freelist" }

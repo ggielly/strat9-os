@@ -532,10 +532,8 @@ fn test_handles(ctx: &mut Ctx) {
 }
 
 #[panic_handler]
-/// Implements panic.
-fn panic(_info: &PanicInfo) -> ! {
-    log_err("[test_syscalls] PANIC\n");
-    call::exit(250)
+fn panic(info: &PanicInfo) -> ! {
+    call::handle_panic("test-syscalls", info)
 }
 
 #[no_mangle]

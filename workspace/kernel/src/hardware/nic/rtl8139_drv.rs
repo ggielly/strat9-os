@@ -55,38 +55,38 @@ impl Ports {
     /// Performs the read8 operation.
     #[inline]
     fn read8(&self, offset: u16) -> u8 {
-        unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).read() }
+        unsafe { crate::x86_crate_shim::instructions::port::Port::new(self.io_base + offset).read() }
     }
 
     /// Performs the write8 operation.
     #[inline]
     fn write8(&mut self, offset: u16, value: u8) {
-        unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).write(value) }
+        unsafe { crate::x86_crate_shim::instructions::port::Port::new(self.io_base + offset).write(value) }
     }
 
     /// Performs the read16 operation.
     #[inline]
     #[allow(dead_code)]
     fn read16(&self, offset: u16) -> u16 {
-        unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).read() }
+        unsafe { crate::x86_crate_shim::instructions::port::Port::new(self.io_base + offset).read() }
     }
 
     /// Performs the write16 operation.
     #[inline]
     fn write16(&mut self, offset: u16, value: u16) {
-        unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).write(value) }
+        unsafe { crate::x86_crate_shim::instructions::port::Port::new(self.io_base + offset).write(value) }
     }
 
     /// Performs the read32 operation.
     #[inline]
     fn read32(&self, offset: u16) -> u32 {
-        unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).read() }
+        unsafe { crate::x86_crate_shim::instructions::port::Port::new(self.io_base + offset).read() }
     }
 
     /// Performs the write32 operation.
     #[inline]
     fn write32(&mut self, offset: u16, value: u32) {
-        unsafe { x86_64::instructions::port::Port::new(self.io_base + offset).write(value) }
+        unsafe { crate::x86_crate_shim::instructions::port::Port::new(self.io_base + offset).write(value) }
     }
 
     /// Performs the mac operation.

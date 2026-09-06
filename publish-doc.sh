@@ -112,19 +112,19 @@ else
 fi
 
 if [[ "${NO_VHOST_UPLOAD}" -eq 0 ]]; then
-  echo "==> Déploiement vers ${VHOST_SSH_ALIAS}:${VHOST_REMOTE_PATH}"
+  echo "==> Deploying to ${VHOST_SSH_ALIAS}:${VHOST_REMOTE_PATH}"
   if ! ssh -q -o BatchMode=yes -o ConnectTimeout=5 "${VHOST_SSH_ALIAS}" exit 2>/dev/null; then
-    echo "Warning: impossible de joindre '${VHOST_SSH_ALIAS}' — déploiement vhost ignoré." >&2
+    echo "Warning: unable to join '${VHOST_SSH_ALIAS}' : vhost deployment skipped." >&2
   else
     ssh "${VHOST_SSH_ALIAS}" "mkdir -p '${VHOST_REMOTE_PATH}'"
     rsync -az --delete --checksum \
       -e ssh \
       "build/docs-site/" \
       "${VHOST_SSH_ALIAS}:${VHOST_REMOTE_PATH}/"
-    echo "==> Documentation déployée sur ${VHOST_SSH_ALIAS}:${VHOST_REMOTE_PATH}"
+    echo "==> Documentation deployed to ${VHOST_SSH_ALIAS}:${VHOST_REMOTE_PATH}"
   fi
 else
-  echo "==> Déploiement vhost ignoré (--no-vhost-upload)"
+  echo "==> Vhost deployment skipped (--no-vhost-upload)"
 fi
 
 echo "Done."

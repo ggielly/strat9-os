@@ -80,8 +80,16 @@ impl TimeVal {
         }
     }
 
-    /// Convert to nanoseconds
+    /// Convert to nanoseconds.
+    ///
+    /// Negative fields are clamped to 0 per POSIX: a negative `it_value`
+    /// disarms the timer, and a negative `it_interval` is an error.
+    /// Returning 0 for either component ensures the caller sees "disarmed"
+    /// rather than a wrapped-to-huge u64.
     pub fn to_nanos(&self) -> u64 {
+        if self.tv_sec < 0 || self.tv_usec < 0 {
+            return 0;
+        }
         (self.tv_sec as u64)
             .saturating_mul(1_000_000_000)
             .saturating_add((self.tv_usec as u64).saturating_mul(1_000))
@@ -239,36 +247,27 @@ impl ITimers {
 pub fn tick_all_timers(current_time_ns: u64) {
     use crate::process::{scheduler::GLOBAL_SCHED_STATE, signal::Signal};
 
-    unsafe { core::arch::asm!("mov al, '1'; out 0xe9, al", out("al") _) };
     // IRQ context contract: timer handlers run with IF=0 already.
     // Use no-irqsave variant to avoid any extra RFLAGS save/restore in hot path.
     let mut scheduler = match GLOBAL_SCHED_STATE.try_lock_no_irqsave() {
         Some(guard) => {
-            unsafe { core::arch::asm!("mov al, '2'; out 0xe9, al", out("al") _) };
             guard
         }
         None => {
-            unsafe { core::arch::asm!("mov al, 'C'; out 0xe9, al", out("al") _) };
             return;
         }
     };
-    unsafe { core::arch::asm!("mov al, '3'; out 0xe9, al", out("al") _) };
     scheduler.with_mut_and_token(|slot, _token| {
-        unsafe { core::arch::asm!("mov al, 'w'; out 0xe9, al", out("al") _) };
         let Some(sched) = slot.as_ref() else {
-            unsafe { core::arch::asm!("mov al, 'N'; out 0xe9, al", out("al") _) };
             return;
         };
-        unsafe { core::arch::asm!("mov al, '4'; out 0xe9, al", out("al") _) };
-        let n_tasks = sched.all_tasks_scan.len();
+        let n_tasks = sched.all_tasks.len();
         if n_tasks == 0 {
-            unsafe { core::arch::asm!("mov al, '0'; out 0xe9, al", out("al") _) };
             return;
         }
         let mut task_n: usize = 0;
-        for task in sched.all_tasks_scan.iter() {
+        for task in sched.all_tasks.values() {
             unsafe {
-                core::arch::asm!("mov al, '5'; out 0xe9, al", out("al") _);
             }
             for which in [ITimerWhich::Real, ITimerWhich::Virtual, ITimerWhich::Prof] {
                 if task.itimers.get(which).check_expired(current_time_ns) {
@@ -282,12 +281,9 @@ pub fn tick_all_timers(current_time_ns: u64) {
             // BTreeMap is corrupt. Bail out rather than spinning forever.
             if task_n > n_tasks.saturating_add(1) {
                 unsafe {
-                    core::arch::asm!("mov al, 'X'; out 0xe9, al", out("al") _);
                 }
                 break;
             }
         }
-        unsafe { core::arch::asm!("mov al, '6'; out 0xe9, al", out("al") _) };
     });
-    unsafe { core::arch::asm!("mov al, '7'; out 0xe9, al", out("al") _) };
 }

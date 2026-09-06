@@ -171,6 +171,9 @@ extern "C" fn selftest_orchestrator() -> ! {
     crate::process::time_test::create_time_test_task();
     let _ = wait_task_exit("time-test", 15_000);
 
+    crate::silo::silo_test::create_silo_test_task();
+    let _ = wait_task_exit("silo-test", 8_000);
+
     crate::process::pipe_test::create_pipe_test_task();
     let _ = wait_task_exit("pipe-test", 3_000);
 

@@ -86,44 +86,65 @@ impl Pipe {
     }
 
     /// Read from the pipe. Returns 0 on EOF (write end closed + empty).
-    pub fn read(&self, buf: &mut [u8]) -> Result<usize, SyscallError> {
-        let result = self.readers.wait_until(|| {
-            let mut inner = self.inner.lock();
-
-            if inner.available_read() > 0 {
-                let to_read = core::cmp::min(buf.len(), inner.available_read());
-                for i in 0..to_read {
-                    buf[i] = inner.buf[inner.read_pos];
-                    inner.read_pos = (inner.read_pos + 1) % PIPE_BUF_SIZE;
+    /// If `non_block` is true and no data is available, returns EAGAIN.
+    pub fn read(&self, buf: &mut [u8], non_block: bool) -> Result<usize, SyscallError> {
+        loop {
+            // Phase 1: try to consume data without blocking.
+            {
+                let mut inner = self.inner.lock();
+                if inner.available_read() > 0 {
+                    let to_read = core::cmp::min(buf.len(), inner.available_read());
+                    for i in 0..to_read {
+                        buf[i] = inner.buf[inner.read_pos];
+                        inner.read_pos = (inner.read_pos + 1) % PIPE_BUF_SIZE;
+                    }
+                    inner.len -= to_read;
+                    self.writers.wake_one();
+                    return Ok(to_read);
                 }
-                inner.len -= to_read;
-                return Some(Ok(to_read));
+                if inner.write_closed {
+                    return Ok(0); // EOF
+                }
+                if non_block {
+                    return Err(SyscallError::Again);
+                }
             }
 
-            if inner.write_closed {
-                return Some(Ok(0)); // EOF
-            }
+            // Phase 2: wait for data or close.
+            let result = self.readers.wait_until(|| {
+                let inner = self.inner.lock();
+                if inner.available_read() > 0 {
+                    return Some(true);
+                }
+                if inner.write_closed {
+                    return Some(false);
+                }
+                None
+            });
 
-            None // block
-        });
-        self.writers.wake_one();
-        result
+            match result {
+                true => continue,
+                false => return Ok(0),
+            }
+        }
     }
 
     /// Write to the pipe. Returns EPIPE if read end is closed.
-    pub fn write(&self, buf: &[u8]) -> Result<usize, SyscallError> {
+    /// If `non_block` is true and buffer is full, returns EAGAIN.
+    pub fn write(&self, buf: &[u8], non_block: bool) -> Result<usize, SyscallError> {
         if buf.is_empty() {
             return Ok(0);
         }
 
         let mut total = 0;
         while total < buf.len() {
+            let non_block = non_block;
             let wrote_some = self.writers.wait_until(|| {
                 let mut inner = self.inner.lock();
 
                 if inner.read_closed {
                     if total > 0 {
-                        return Some(Ok(0)); // return what we have
+                        return Some(Ok(0));
                     }
                     return Some(Err(SyscallError::Pipe));
                 }
@@ -133,22 +154,36 @@ impl Pipe {
                     for i in 0..to_write {
                         let wp = inner.write_pos;
                         inner.buf[wp] = buf[total + i];
-                        inner.write_pos = (wp + 1) % PIPE_BUF_SIZE;
+                        inner.write_pos = (inner.write_pos + 1) % PIPE_BUF_SIZE;
                     }
                     inner.len += to_write;
-                    return Some(Ok(to_write));
+                    total += to_write;
+                    self.readers.wake_one();
+                    return Some(Ok(0));
                 }
 
-                None // block
-            });
-            self.readers.wake_one();
-            let n = wrote_some?;
-            if n == 0 {
-                break; // read_closed mid-write, return partial
-            }
-            total += n;
-        }
+                if non_block {
+                    return Some(Err(SyscallError::Again));
+                }
 
+                None
+            });
+
+            match wrote_some {
+                Ok(_) => {
+                    if total >= buf.len() {
+                        break;
+                    }
+                }
+                // Transient: buffer full in non-blocking mode — surface EAGAIN.
+                Err(SyscallError::Again) if non_block => return Err(SyscallError::Again),
+                // F13 FIX (L2 host harness, testing-findings.md): EPIPE from
+                // a closed read end was silently swallowed by the previous
+                // catch-all arm, spinning the writing task forever at 100%
+                // CPU instead of failing with EPIPE. Propagate it.
+                Err(e) => return Err(e),
+            }
+        }
         Ok(total)
     }
 
@@ -214,6 +249,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 /// Each pipe gets two file_ids: even = read end, odd = write end.
 pub struct PipeScheme {
     pipes: SpinLock<BTreeMap<u64, Arc<Pipe>>>,
+    /// Per-fd open flags (for O_NONBLOCK).
+    flags: SpinLock<BTreeMap<u64, OpenFlags>>,
 }
 
 static NEXT_PIPE_ID: AtomicU64 = AtomicU64::new(2); // Start at 2 (even numbers)
@@ -223,6 +260,7 @@ impl PipeScheme {
     pub fn new() -> Self {
         PipeScheme {
             pipes: SpinLock::new(BTreeMap::new()),
+            flags: SpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -232,6 +270,11 @@ impl PipeScheme {
         let pipe = Pipe::new();
         self.pipes.lock().insert(base_id, pipe.clone());
         (base_id, pipe)
+    }
+
+    /// Store open flags for a pipe fd.
+    pub fn set_flags(&self, file_id: u64, flags: OpenFlags) {
+        self.flags.lock().insert(file_id, flags);
     }
 
     /// Returns pipe.
@@ -262,7 +305,13 @@ impl Scheme for PipeScheme {
             return Err(SyscallError::PermissionDenied);
         }
         let pipe = self.get_pipe(file_id)?;
-        pipe.read(buf)
+        let non_block = self
+            .flags
+            .lock()
+            .get(&file_id)
+            .map(|f| f.contains(OpenFlags::NONBLOCK))
+            .unwrap_or(false);
+        pipe.read(buf, non_block)
     }
 
     /// Performs the write operation.
@@ -271,7 +320,13 @@ impl Scheme for PipeScheme {
             return Err(SyscallError::PermissionDenied);
         }
         let pipe = self.get_pipe(file_id)?;
-        pipe.write(buf)
+        let non_block = self
+            .flags
+            .lock()
+            .get(&file_id)
+            .map(|f| f.contains(OpenFlags::NONBLOCK))
+            .unwrap_or(false);
+        pipe.write(buf, non_block)
     }
 
     /// Performs the close operation.

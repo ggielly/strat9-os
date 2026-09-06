@@ -1,5 +1,8 @@
 //! Process and Task Management
 //!
+//! See also: [Architecture Overview](https://strat9-os.org/strat9-os-docs/architecture.html)
+//! for scheduler design and process lifecycle diagrams.
+//!
 //! Implements the core structures for process management in Strat9-OS:
 //! - Task structure with state management
 //! - Process abstraction
@@ -16,6 +19,7 @@ pub mod errno_test;
 pub mod fork_test;
 #[cfg(feature = "selftest")]
 pub mod futex_test;
+pub mod kthread;
 #[cfg(feature = "selftest")]
 pub mod mmap_test;
 #[cfg(feature = "selftest")]
@@ -34,6 +38,7 @@ pub mod selftest;
 pub mod signal;
 pub mod task;
 pub mod test;
+pub mod thread_ops;
 #[cfg(feature = "selftest")]
 pub mod time_test;
 pub mod timer;

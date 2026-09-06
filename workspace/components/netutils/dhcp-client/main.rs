@@ -33,25 +33,8 @@ fn alloc_error(_layout: Layout) -> ! {
 }
 
 #[panic_handler]
-/// Implements panic.
 fn panic(info: &PanicInfo) -> ! {
-    log("[dhcp-client] PANIC: ");
-    let msg = info.message();
-    let mut buf = [0u8; 256];
-    use core::fmt::Write;
-    let mut cursor = BufWriter {
-        buf: &mut buf,
-        pos: 0,
-    };
-    let _ = write!(cursor, "{}", msg);
-    let written = cursor.pos;
-    if written > 0 {
-        if let Ok(s) = core::str::from_utf8(&buf[..written]) {
-            log(s);
-        }
-    }
-    log("\n");
-    call::exit(255)
+    call::handle_panic("dhcp-client", info)
 }
 
 // ---------------------------------------------------------------------------
@@ -81,7 +64,7 @@ impl core::fmt::Write for BufWriter<'_> {
 
 /// Read a scheme file and return how many bytes were read into `buf`.
 fn scheme_read(path: &str, buf: &mut [u8]) -> Result<usize, ()> {
-    let fd = call::openat(0, path, 0x1, 0).map_err(|_| ())?; // O_READ
+    let fd = call::openat(-100_i64 as usize, path, 0x1, 0).map_err(|_| ())?; // O_READ
     let n = call::read(fd as usize, buf).map_err(|_| {
         let _ = call::close(fd as usize);
     })?;
@@ -115,7 +98,7 @@ fn cidr_to_netmask(prefix_str: &str) -> Option<[u8; 20]> {
 
     let mut prefix: u16 = 0;
     for &b in s.as_bytes() {
-        if b < b'0' || b > b'9' {
+        if !(b'0'..=b'9').contains(&b) {
             return None;
         }
         prefix = prefix.checked_mul(10)?.checked_add((b - b'0') as u16)?;

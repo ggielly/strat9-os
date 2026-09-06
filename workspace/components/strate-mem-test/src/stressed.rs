@@ -222,10 +222,8 @@ fn stage_churn_loops() {
 }
 
 #[panic_handler]
-/// Implements panic.
-fn panic(_info: &PanicInfo) -> ! {
-    log_err("[test_mem_stressed] PANIC\n");
-    call::exit(250)
+fn panic(info: &PanicInfo) -> ! {
+    call::handle_panic("mem-stressed", info)
 }
 
 #[no_mangle]

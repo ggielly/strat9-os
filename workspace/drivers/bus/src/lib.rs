@@ -8,6 +8,7 @@ extern crate alloc;
 
 pub mod mmio;
 pub mod probe;
+pub mod registry; // The list of bus drivers is here
 pub mod scheme;
 
 pub mod arm_cci;
@@ -77,7 +78,26 @@ pub trait BusDriver: Send + Sync {
     /// Performs the name operation.
     fn name(&self) -> &str;
     /// Performs the compatible operation.
-    fn compatible(&self) -> &[&str];
+    fn compatible(&self) -> &[&str] {
+        &[]
+    }
+    /// Returns the optional [`FirewallController`] capability, if any.
+    ///
+    /// Drivers managing hardware isolation (STM32 ETZPC/RIFSC) override
+    /// this to return `Some(self)`, which makes the scheme server publish
+    /// the `/bus/<driver>/firewall/...` paths. The default returns `None`:
+    /// no firewall capability.
+    fn as_firewall(&self) -> Option<&dyn stm32_firewall::FirewallController> {
+        None
+    }
+    /// Returns `true` if the driver believes the hardware is present.
+    ///
+    /// The default returns `true` (assume present : let `init()` decide).
+    /// Override to `false` for software-backed buses (GPIO, SPI, …) that
+    /// cannot auto-detect their hardware without platform configuration.
+    fn probe(&self) -> bool {
+        true
+    }
     /// Performs the init operation.
     fn init(&mut self, base: usize) -> Result<(), BusError>;
     /// Performs the shutdown operation.

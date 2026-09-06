@@ -1,10 +1,11 @@
 //! Domain-specific syscall wrappers for the network strate.
+use strat9_syscall::syscall1;
 
 pub use strat9_syscall::{
     call,
     data::TimeSpec,
     error::{self, Error},
-    number, syscall0, syscall2,
+    number, syscall2,
 };
 
 pub type Result<T> = error::Result<T>;
@@ -26,7 +27,14 @@ pub fn net_info(info_type: u64, buf: &mut [u8]) -> Result<usize> {
 
 /// Implements clock gettime ns.
 pub fn clock_gettime_ns() -> Result<u64> {
-    unsafe { syscall0(number::SYS_CLOCK_GETTIME).map(|v| v as u64) }
+    let mut ts = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    call::clock_gettime(1 /* CLOCK_MONOTONIC */, &mut ts)?;
+    Ok((ts.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(ts.tv_nsec as u64))
 }
 
 /// Implements nanosleep.
@@ -50,6 +58,13 @@ pub fn ipc_try_recv(port: u64, msg: &mut crate::IpcMessage) -> Result<()> {
 }
 
 /// Implements debug log.
+/// Register this task as the strate-net networking silo.
+/// Called once during startup so the NIC IRQ handler can wake us.
+pub fn net_register() -> Result<()> {
+    unsafe { syscall1(strat9_abi::syscall::SYS_NET_REGISTER, 0)? };
+    Ok(())
+}
+
 pub fn debug_log(msg: &str) {
     let _ = call::debug_log(msg.as_bytes());
 }

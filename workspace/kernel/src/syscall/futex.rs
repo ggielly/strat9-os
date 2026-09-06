@@ -116,7 +116,7 @@ impl FutexBucket {
     /// re-acquires `queue.waiters` internally to re-verify emptiness.
     /// Therefore the lock order on this path is:
     ///
-    ///   `bucket_lock` → `queue.waiters`
+    ///   `bucket_lock` => `queue.waiters`
     ///
     /// **Invariant:** no code path may hold `queue.waiters` while trying to
     /// acquire any `bucket_lock`.  Violating this would cause an ABBA
@@ -317,8 +317,8 @@ fn do_requeue(
 /// would require acquiring `waiters` under `bucket`, violating the intended
 /// ordering of acquiring bucket before waiters):
 ///
-///   Phase 1 — check under `waiters`: fast exit if non-empty.
-///   Phase 2 — remove under `bucket_lock`: `remove_if_empty` re-verifies
+///   Phase 1 : check under `waiters`: fast exit if non-empty.
+///   Phase 2 : remove under `bucket_lock`: `remove_if_empty` re-verifies
 ///              emptiness while already holding the bucket lock.  A new
 ///              waiter that enqueued between the two phases will be visible
 ///              in that re-check and will block the removal.

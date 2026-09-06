@@ -1,0 +1,279 @@
+<!DOCTYPE HTML>
+<html lang="en" class="coal sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Changelog - Strat9 OS documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Architecture guide, ABI reference, and syscall documentation for Strat9 OS.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="src/theme/custom.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "coal";
+            const default_dark_theme = "coal";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('coal')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Strat9 OS documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://git.strat9-os.org/strat9-os/" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://git.strat9-os.org/strat9-os/edit/main/docs-site/src/changelog.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="changelog"><a class="header" href="#changelog">Changelog</a></h1>
+<!-- AUTO-CHANGELOG:START -->
+<h2 id="project-stats"><a class="header" href="#project-stats">Project stats</a></h2>
+<ul>
+<li><strong>Total commits:</strong> <code>555</code></li>
+<li><strong>Latest tag:</strong> <code>0.1.0</code></li>
+<li><strong>Repository:</strong> <a href="https://git.strat9-os.org/strat9-os/strat9-os">git.strat9-os.org</a></li>
+</ul>
+<h2 id="recent-commits-auto-generated"><a class="header" href="#recent-commits-auto-generated">Recent commits (auto-generated)</a></h2>
+<ul>
+<li>2026-07-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/1a72181f479278893775d6a3b19126f4b24b5999"><code>1a72181</code></a> docs: update published documentation</li>
+<li>2026-07-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0e0766a34c3b95f8e4de1d84f4cf4912da91ee4f"><code>0e0766a</code></a> docs: update published documentation</li>
+<li>2026-07-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f94c369709b3200794bfad047d09249a928a5ff3"><code>f94c369</code></a> Merge branch 'feat/vt100-console' into 'main'</li>
+<li>2026-07-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/057447f5d091361dbc59cce83cde1ea8fb6e6713"><code>057447f</code></a> feat(console): replace custom ANSI parser with vte crate</li>
+<li>2026-07-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5d53b0fba04bd9c2bd1b58366fafce327c821eb6"><code>5d53b0f</code></a> Merge branch 'improve-vfs-all' into 'main'</li>
+<li>2026-07-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/fe68f9aacb1b70b8601cbdde1423be75628255d1"><code>fe68f9a</code></a> fix(vfs,console,scheduler): VFS improvements, console perf, panic backtrace</li>
+<li>2026-07-15 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/425c2cd18dc1e6f065be037f4d087474356e426e"><code>425c2cd</code></a> docs: update published documentation</li>
+<li>2026-07-15 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3612d4a43fcad2f260491ad1b4534da937e880f4"><code>3612d4a</code></a> docs: update published documentation</li>
+<li>2026-07-15 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/545e1b805bfd73eda9bc894ce1a161f3883aeb2d"><code>545e1b8</code></a> Merge branch 'fix/console-performance' into 'main'</li>
+<li>2026-07-15 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/44e4aa70d7a7300c943048683ac54b6a534f57cc"><code>44e4aa7</code></a> perf(console): optimize rendering pipeline</li>
+<li>2026-07-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c3a9ecb885529735cb459e8600d99e8e90d9836c"><code>c3a9ecb</code></a> Merge branch 'feat/heapless-vec-deque' into 'main'</li>
+<li>2026-07-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3a5eb69d9b3041f89c205e184b4afe15c07ee44d"><code>3a5eb69</code></a> feat(silo): replace Vec with heapless::Vec for bounded fields</li>
+<li>2026-07-09 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c85c70f3b4f397ff9ace27674bfdfab7c077f649"><code>c85c70f</code></a> Merge branch 'feature/ipc-access-levels' into 'main'</li>
+<li>2026-07-09 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ab22b0d9b010dd704cf6044580b4f310c5748524"><code>ab22b0d</code></a> feat: 3-level IPC transport, N3 MMU thread migration, graphical silo, NIC/E1000 fixes</li>
+<li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/848baaf594c7a9fbd7f951c3959790dc26c1383e"><code>848baaf</code></a> Merge branch 'feat/input-to-userspace' into 'main'</li>
+<li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5a3d69c4e10c4cfc67976a837751ce50292f9032"><code>5a3d69c</code></a> feat: migrate input system to userspace</li>
+<li>2026-06-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/1b9890594097a56a13f632ecb9f2a2a6b0e9f431"><code>1b98905</code></a> Merge branch 'test/smp-hardware-debug' into 'main'</li>
+<li>2026-06-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3fea3f3776edefa7bdc7c3a8d930c8d17b0939a6"><code>3fea3f3</code></a> SMP hardware debug, NVMe fixes, VGA refactor, telnetd hardening, docs</li>
+<li>2026-06-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f1bccb9b69f332a96f4c0ac10ab0c044a04be7ab"><code>f1bccb9</code></a> Merge branch 'fix/typed-irq-guard-allocator' into 'main'</li>
+<li>2026-06-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b1d7c358a1801b315982f1006ce450f780dc7df8"><code>b1d7c35</code></a> buddy: use PreemptDisabled guardian on per-CPU frame caches (#37)</li>
+<li>2026-06-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/1ca93d17252e513bed1d9578c261a0ba8d030c90"><code>1ca93d1</code></a> Merge branch 'fix/tech-debt-allocation-under-lock' into 'main'</li>
+<li>2026-06-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/78e18cef10191488be24adf2947c4096a88be0d1"><code>78e18ce</code></a> Tech debt: allocation-under-lock and global-lock patterns (#50)</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6455a231010938a3206c432bf84130c4d9326ddb"><code>6455a23</code></a> Merge branch 'fix/irq-token-encapsulation' into 'main'</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/cb4ce4d2fc6869b6f3ff240d59952be9d047064d"><code>cb4ce4d</code></a> Refactor: document IrqDisabledToken creation paths and encapsulation</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/bdec79dfa835ba9f9b2915c3a1fd434b7daec466"><code>bdec79d</code></a> Merge branch 'fix/arc-strong-count-wording' into 'main'</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c642da4bae59c007004e80f06dc7abd3f054ed01"><code>c642da4</code></a> Fix: refine Arc::strong_count diagnostic wording to heuristic</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f85e757a39660e95067a6a3f8310ae775b19ffdf"><code>f85e757</code></a> Merge branch 'feat/spinlock-multi-watch-debug' into 'main'</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3fec849cd4aef9b8b1b917344ea11297a5a9471f"><code>3fec849</code></a> Feat: replace single-lock trace with fixed-size multi-watch array</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/84db9df7dbd8160db96ad93fc416d2096d6a4dbd"><code>84db9df</code></a> Merge branch 'fix/slab-refill-irq-assert' into 'main'</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/021fb49513575d6c91483f7305b4f134076d1adb"><code>021fb49</code></a> Fix: add debug_assert IRQ-disabled invariant on slab refill</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/8ebf658edd54dba1d69fd515198b76788f0f739e"><code>8ebf658</code></a> Merge branch 'fix/heap-page-count-overflow' into 'main'</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d1f7eef22a2ce71ca753ac2c0e11fba7df62a4b1"><code>d1f7eef</code></a> Fix: use saturating arithmetic for vmalloc page count rounding</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/99d4ede878e85408952ae691a41fa40145b821fd"><code>99d4ede</code></a> Merge branch 'fix/reparent-children-deterministic' into 'main'</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/dcc239c792628f5ae2c1ed3357c55e0172e65d7c"><code>dcc239c</code></a> Fix: make orphan reparenting deterministic by dropping links when PID 1 absent</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d2722ee2af35c545006188a1d004b579650f9339"><code>d2722ee</code></a> Merge branch 'fix/legacy-pic-timer-parity' into 'main'</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e53a4b674d88bffe77a81521fbe476f5797af2fb"><code>e53a4b6</code></a> Fix: mirror LAPIC timer Ring-3 preemption policy in legacy PIC handler</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/257b69411c2c15f9b388329b5497c3c7c530de05"><code>257b694</code></a> Merge branch 'fix/buddy-free-to-zone-logging' into 'main'</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/18b103720b654282b020cbf63ee9c09917ca095e"><code>18b1037</code></a> Fix: escalate free_to_zone protected-overlap to panic matching alloc side</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/28bbc90b4a9e528914efa61cba1fff73a7cbf877"><code>28bbc90</code></a> Merge branch 'fix/keyboard-lost-key-counter' into 'main'</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b19d6bf3afabca492f1762ec3310f8f72822c4f3"><code>b19d6bf</code></a> Fix keyboard driver: shared state, US extended keys, numpad, lost-key counter</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93302a553542304b3c4905a5d0d882809e29dd3d"><code>93302a5</code></a> docs: update published documentation</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b2edb49813f4470257879a5e3cc85c9efc9b26c6"><code>b2edb49</code></a> Merge branch 'enhance-network-tools' into 'main'</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e4ab1a96c3579117defffe0f5b32cf7cac853129"><code>e4ab1a9</code></a> Enhance network stack, NIC drivers, USB/NVMe subsystems, and thermal management</li>
+<li>2026-06-03 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5ee7f8d0aba0e76fbde35051e8aae2dc647a9cc9"><code>5ee7f8d</code></a> Merge branch 'fix-some-mistake-in-network-stack' into 'main'</li>
+<li>2026-06-03 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0c40058547bd9b7ef07a837b1153577879510994"><code>0c40058</code></a> Refactor the network stack and add dual-stack userspace tooling</li>
+<li>2026-05-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/aeade5ef5fcfdddef2caa43da6af361a5102c7cd"><code>aeade5e</code></a> Code cleanup</li>
+<li>2026-05-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/86c810e4e63e5fb29ae2a9a5785fe19db9e96c67"><code>86c810e</code></a> Raüs silo sshd</li>
+<li>2026-05-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/40d4d46574896664983ba2fe05dfd7ca1c0f1b94"><code>40d4d46</code></a> Merge branch 'IPC-refactor' into 'main'</li>
+<li>2026-05-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b2bbcc0bdd8c836ad396a1f32afd590b0c7236a8"><code>b2bbcc0</code></a> Improve and fix IPC</li>
+<li>2026-05-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b7c3e271d8644570a5a0b7bdabb80ef8c3f524f7"><code>b7c3e27</code></a> Merge branch 'hunt-memory-corruption' into 'main'</li>
+</ul>
+<!-- AUTO-CHANGELOG:END -->
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="syscall.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="publishing.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="syscall.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="publishing.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="src/theme/mermaid-init.js"></script>
+
+
+    </div>
+    </body>
+</html>

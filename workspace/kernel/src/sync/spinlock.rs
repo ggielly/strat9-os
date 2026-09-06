@@ -3,9 +3,9 @@
 //! # Choosing a guardian
 //!
 //! ```text
-//! SpinLock<T>                  →  SpinLock<T, IrqDisabled>   (default)
-//! SpinLock<T, IrqDisabled>     →  saves RFLAGS + clears IF (equiv. spin_lock_irqsave)
-//! SpinLock<T, PreemptDisabled> →  disables preemption only, IRQs untouched
+//! SpinLock<T>                  =>  SpinLock<T, IrqDisabled>   (default)
+//! SpinLock<T, IrqDisabled>     =>  saves RFLAGS + clears IF (equiv. spin_lock_irqsave)
+//! SpinLock<T, PreemptDisabled> =>  disables preemption only, IRQs untouched
 //! ```
 //!
 //! **Use `IrqDisabled` (the default) for**:
@@ -17,12 +17,12 @@
 //!   (scheduler run-queues, per-CPU frame caches, statistics counters …)
 //!
 //! All call sites that use `SpinLock<T>` without a type argument continue to
-//! compile unchanged — `IrqDisabled` is the default guardian.
+//! compile unchanged : `IrqDisabled` is the default guardian.
 //!
 //! # Debug helpers
 //!
 //! `debug_set_watch_lock_addr` / `debug_clear_watch_lock_addr` emit a serial
-//! trace on every `drop` of a specific lock instance — useful when hunting
+//! trace on every `drop` of a specific lock instance : useful when hunting
 //! deadlocks.
 
 use super::{
@@ -87,7 +87,7 @@ impl<T: ?Sized, G: Guardian> SpinLock<T, G> {
     pub fn lock(&self) -> SpinLockGuard<'_, T, G> {
         let state = G::enter();
         let mut spins: usize = 0;
-        let this_cpu = crate::arch::x86_64::percpu::current_cpu_index();
+        let this_cpu = crate::arch::percpu::current_cpu_index();
 
         while self
             .locked
@@ -109,19 +109,7 @@ impl<T: ?Sized, G: Guardian> SpinLock<T, G> {
         }
         self.owner_cpu.store(this_cpu, Ordering::Relaxed);
         // Race/corruption diagnostic: E9 trace when watched locks are acquired.
-        let self_addr = self as *const _ as *const () as usize;
-        let trace_addr = DEBUG_TRACE_LOCK_ADDR.load(Ordering::Relaxed);
-        if trace_addr != usize::MAX && trace_addr == self_addr {
-            unsafe { core::arch::asm!("mov al, 'A'; out 0xe9, al", out("al") _) };
-        }
-        let buddy_addr = DEBUG_TRACE_BUDDY_ADDR.load(Ordering::Relaxed);
-        if buddy_addr != usize::MAX && buddy_addr == self_addr {
-            unsafe { core::arch::asm!("mov al, 'B'; out 0xe9, al", out("al") _) };
-        }
-        let slab_addr = DEBUG_TRACE_SLAB_ADDR.load(Ordering::Relaxed);
-        if slab_addr != usize::MAX && slab_addr == self_addr {
-            unsafe { core::arch::asm!("mov al, 'S'; out 0xe9, al", out("al") _) };
-        }
+        emit_trace_e9(self as *const _ as *const () as usize, 0);
 
         SpinLockGuard {
             lock: self,
@@ -137,21 +125,9 @@ impl<T: ?Sized, G: Guardian> SpinLock<T, G> {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
-            let this_cpu = crate::arch::x86_64::percpu::current_cpu_index();
+            let this_cpu = crate::arch::percpu::current_cpu_index();
             self.owner_cpu.store(this_cpu, Ordering::Relaxed);
-            let trace_addr = DEBUG_TRACE_LOCK_ADDR.load(Ordering::Relaxed);
-            let self_addr = self as *const _ as *const () as usize;
-            if trace_addr != usize::MAX && trace_addr == self_addr {
-                unsafe { core::arch::asm!("mov al, 'A'; out 0xe9, al", out("al") _) };
-            }
-            let buddy_addr = DEBUG_TRACE_BUDDY_ADDR.load(Ordering::Relaxed);
-            if buddy_addr != usize::MAX && buddy_addr == self_addr {
-                unsafe { core::arch::asm!("mov al, 'B'; out 0xe9, al", out("al") _) };
-            }
-            let slab_addr = DEBUG_TRACE_SLAB_ADDR.load(Ordering::Relaxed);
-            if slab_addr != usize::MAX && slab_addr == self_addr {
-                unsafe { core::arch::asm!("mov al, 'S'; out 0xe9, al", out("al") _) };
-            }
+            emit_trace_e9(self as *const _ as *const () as usize, 0);
             Some(SpinLockGuard {
                 lock: self,
                 state: ManuallyDrop::new(state),
@@ -192,7 +168,11 @@ impl<T: ?Sized> SpinLock<T, IrqDisabled> {
                 // Diagnostic only: distinguish "IRQs enabled" from ordinary
                 // lock contention at call sites that intentionally treat both
                 // as a best-effort `None` return in hot paths.
+                // F10: ring-0 port I/O compiled out under kernel_l2_host.
+                #[cfg(not(kernel_l2_host))]
                 unsafe { core::arch::asm!("mov al, 'V'; out 0xe9, al", out("al") _) };
+                #[cfg(kernel_l2_host)]
+                let _ = 0u8;
                 return None;
             }
         };
@@ -201,21 +181,9 @@ impl<T: ?Sized> SpinLock<T, IrqDisabled> {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
-            let this_cpu = crate::arch::x86_64::percpu::current_cpu_index();
+            let this_cpu = crate::arch::percpu::current_cpu_index();
             self.owner_cpu.store(this_cpu, Ordering::Relaxed);
-            let self_addr = self as *const _ as *const () as usize;
-            let trace_addr = DEBUG_TRACE_LOCK_ADDR.load(Ordering::Relaxed);
-            if trace_addr != usize::MAX && trace_addr == self_addr {
-                unsafe { core::arch::asm!("mov al, 'A'; out 0xe9, al", out("al") _) };
-            }
-            let buddy_addr = DEBUG_TRACE_BUDDY_ADDR.load(Ordering::Relaxed);
-            if buddy_addr != usize::MAX && buddy_addr == self_addr {
-                unsafe { core::arch::asm!("mov al, 'B'; out 0xe9, al", out("al") _) };
-            }
-            let slab_addr = DEBUG_TRACE_SLAB_ADDR.load(Ordering::Relaxed);
-            if slab_addr != usize::MAX && slab_addr == self_addr {
-                unsafe { core::arch::asm!("mov al, 'S'; out 0xe9, al", out("al") _) };
-            }
+            emit_trace_e9(self as *const _ as *const () as usize, 0);
             Some(SpinLockGuard {
                 lock: self,
                 state: ManuallyDrop::new(GuardianState {
@@ -230,39 +198,71 @@ impl<T: ?Sized> SpinLock<T, IrqDisabled> {
     }
 }
 
-// =========================== Debug helpers
+// =========================== Debug helpers ====================================
 
 /// Register a lock address to trace on every drop (serial console output).
 pub fn debug_set_watch_lock_addr(addr: usize) {
     DEBUG_WATCH_LOCK_ADDR.store(addr, Ordering::Relaxed);
 }
 
-/// Address of the scheduler lock for E9 trace on drop (race/corruption diagnostic).
-/// Set by scheduler init. When a SpinLock at this addr is dropped, we emit LOCK-R.
-static DEBUG_TRACE_LOCK_ADDR: AtomicUsize = AtomicUsize::new(usize::MAX);
-/// Address of the buddy lock for E9 trace (lock ordering diagnostic).
-static DEBUG_TRACE_BUDDY_ADDR: AtomicUsize = AtomicUsize::new(usize::MAX);
-/// Address of the slab lock for E9 trace.
-static DEBUG_TRACE_SLAB_ADDR: AtomicUsize = AtomicUsize::new(usize::MAX);
-
-/// Register a lock address for E9 trace on drop (e.g. scheduler lock).
-pub fn debug_set_trace_lock_addr(addr: usize) {
-    DEBUG_TRACE_LOCK_ADDR.store(addr, Ordering::Relaxed);
-}
-
-/// Register buddy lock address for E9 trace (lock ordering vs scheduler).
-pub fn debug_set_trace_buddy_addr(addr: usize) {
-    DEBUG_TRACE_BUDDY_ADDR.store(addr, Ordering::Relaxed);
-}
-
-/// Register slab lock address for E9 trace.
-pub fn debug_set_trace_slab_addr(addr: usize) {
-    DEBUG_TRACE_SLAB_ADDR.store(addr, Ordering::Relaxed);
-}
-
 /// Clear the watched lock address.
 pub fn debug_clear_watch_lock_addr() {
     DEBUG_WATCH_LOCK_ADDR.store(usize::MAX, Ordering::Relaxed);
+}
+
+/// Maximum number of locks that can be traced simultaneously via E9 port.
+const DEBUG_TRACE_WATCH_SLOTS: usize = 8;
+
+/// Fixed-size array of watched lock addresses for E9 trace.
+/// Each slot emits a unique ASCII tag ('A'..'H') on acquire/release.
+static DEBUG_TRACE_WATCH_ADDRS: [AtomicUsize; DEBUG_TRACE_WATCH_SLOTS] =
+    [const { AtomicUsize::new(usize::MAX) }; DEBUG_TRACE_WATCH_SLOTS];
+
+/// Register a lock address for E9 trace. Returns the slot index (0..7),
+/// or `None` if all slots are in use.
+pub fn debug_set_trace_lock_addr(addr: usize) -> Option<usize> {
+    for (i, slot) in DEBUG_TRACE_WATCH_ADDRS.iter().enumerate() {
+        if slot.load(Ordering::Relaxed) == usize::MAX {
+            slot.store(addr, Ordering::Relaxed);
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Clear a specific trace slot by index.
+pub fn debug_clear_trace_slot(index: usize) {
+    if index < DEBUG_TRACE_WATCH_SLOTS {
+        DEBUG_TRACE_WATCH_ADDRS[index].store(usize::MAX, Ordering::Relaxed);
+    }
+}
+
+/// Legacy alias: register the first available trace slot.
+pub fn debug_set_trace_buddy_addr(addr: usize) {
+    let _ = debug_set_trace_lock_addr(addr);
+}
+
+/// Legacy alias: register the first available trace slot.
+pub fn debug_set_trace_slab_addr(addr: usize) {
+    let _ = debug_set_trace_lock_addr(addr);
+}
+
+/// Emit an E9 byte for each matching trace slot (acquire = uppercase, release = lowercase).
+#[inline]
+fn emit_trace_e9(lock_addr: usize, tag_offset: u8) {
+    for (i, slot) in DEBUG_TRACE_WATCH_ADDRS.iter().enumerate() {
+        if slot.load(Ordering::Relaxed) == lock_addr {
+            let ch = b'A' + tag_offset + (i as u8);
+            // L2 host harness (testing-findings.md F10): `out 0xe9` is ring-0
+            // port I/O; executing it from userspace faults with SIGSEGV.
+            // Compiled out only under the kernel-l2-tests harness cfg;
+            // production behavior is unchanged.
+            #[cfg(not(kernel_l2_host))]
+            unsafe { core::arch::asm!("out 0xe9, al", in("al") ch) };
+            #[cfg(kernel_l2_host)]
+            let _ = ch;
+        }
+    }
 }
 
 // =========================== SpinLockGuard ====================================
@@ -333,15 +333,16 @@ impl<'a, T: ?Sized, G: Guardian> Drop for SpinLockGuard<'a, T, G> {
             crate::serial_force_println!("[trace][spin] drop unlocked lock={:#x}", lock_addr);
         }
         // Race/corruption diagnostic: E9 trace when watched locks are released.
-        let trace_addr = DEBUG_TRACE_LOCK_ADDR.load(Ordering::Relaxed);
-        if trace_addr != usize::MAX && trace_addr == lock_addr {
-            let cpu = crate::arch::x86_64::percpu::current_cpu_index();
-            unsafe { core::arch::asm!("mov al, 'a'; out 0xe9, al", out("al") _) };
-        }
-        let buddy_addr = DEBUG_TRACE_BUDDY_ADDR.load(Ordering::Relaxed);
-        if buddy_addr != usize::MAX && buddy_addr == lock_addr {
-            let cpu = crate::arch::x86_64::percpu::current_cpu_index();
-            unsafe { core::arch::asm!("mov al, 'b'; out 0xe9, al", out("al") _) };
+        // Use lowercase tags to distinguish release from acquire.
+        for (i, slot) in DEBUG_TRACE_WATCH_ADDRS.iter().enumerate() {
+            if slot.load(Ordering::Relaxed) == lock_addr {
+                let ch = b'a' + (i as u8);
+                // F10: see acquire-side note above.
+                #[cfg(not(kernel_l2_host))]
+                unsafe { core::arch::asm!("out 0xe9, al", in("al") ch) };
+                #[cfg(kernel_l2_host)]
+                let _ = ch;
+            }
         }
 
         // SAFETY: `state` is valid and initialised. We move it out of its

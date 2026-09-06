@@ -164,7 +164,7 @@ pub fn loaded_tss_info() -> Option<LoadedTssInfo> {
     })
 }
 
-/// Update TSS.rsp0 — the kernel stack pointer used when transitioning
+/// Update TSS.rsp0 : the kernel stack pointer used when transitioning
 /// from Ring 3 to Ring 0 on interrupt/syscall.
 ///
 /// Called on every context switch to point to the new task's kernel stack top.

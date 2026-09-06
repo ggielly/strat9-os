@@ -6,15 +6,19 @@ rustflags = [
     "-C",
     "link-arg=-Lworkspace/kernel",
     "-C",
-    "link-arg=-Tworkspace/kernel/linker-limine.ld",
+    "link-arg=-Tworkspace/kernel/linker.ld",
     "-C",
     "link-arg=-no-pie",
     "-C",
     "link-arg=-z",
     "-C",
     "link-arg=nostart-stop-gc",
+    # N3 send() captures sender_rip via [rbp + 8]; frame pointers mandatory.
     "-C",
-    "relocation-model=static",
-    "-C",
-    "code-model=kernel",
+    "force-frame-pointers=yes",
+    # TODO: re-enable if ed25519-dalek is restored
+    # "--cfg",
+    # "curve25519_dalek_backend=\"fiat\"",
+    # "--cfg",
+    # "curve25519_dalek_bits=\"32\"",
 ]

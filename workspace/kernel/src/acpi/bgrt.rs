@@ -2,6 +2,8 @@
 //! Provides information about the boot logo/image.
 //!
 //! Reference: ACPI spec 5.0+
+//! Source : https://uefi.org/sites/default/files/resources/ACPI_5_1_Errata_B.PDF
+//!
 
 use super::sdt::Sdt;
 use zerocopy::FromBytes;

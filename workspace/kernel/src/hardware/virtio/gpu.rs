@@ -2,11 +2,12 @@
 // Reference: VirtIO spec v1.2, Section 5.4 (GPU Device)
 
 use crate::{
-    arch::x86_64::pci::{self, Bar, ProbeCriteria},
+    arch::pci::{self, Bar, ProbeCriteria},
     memory::{self, allocate_zeroed_frame, phys_to_virt, PhysFrame},
 };
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
+use endian_num::Le;
 use spin::{Mutex, Once};
 
 const VIRTIO_RING_SIZE: usize = 64;
@@ -14,13 +15,30 @@ const PAGE_SIZE: usize = 4096;
 const VIRTQ_PAYLOAD_ORDER: u8 = 6;
 const FLUSH_OPS_THRESHOLD: u32 = 64;
 
+const VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING: u32 = 0x0105;
+
+/// Backing-store state for the scanout resource.
+///
+/// Held behind a Mutex so a physically-contiguous buffer allocated after
+/// device init (the video driver's double buffer) can be attached as the
+/// resource backing itself, making presentation zero-copy: draw targets
+/// become what TRANSFER_TO_HOST_2D reads, no bounce copy needed.
+struct BackingState {
+    /// HHDM-mapped segments covering the backing store, in offset order.
+    segments: Vec<FramebufferSegment>,
+    /// Total backing size in bytes.
+    size: usize,
+    /// True when the backing is an externally provided contiguous buffer
+    /// (`attach_external_backing`) rather than driver-scattered pages.
+    external: bool,
+}
+
 pub struct VirtioGpu {
     ctrl_queue: Mutex<Virtqueue>,
     _cursor_queue: Mutex<Option<Virtqueue>>,
     info: GpuInfo,
     _framebuffer_pages: Vec<PhysFrame>,
-    framebuffer_segments: Vec<FramebufferSegment>,
-    framebuffer_size: usize,
+    backing: Mutex<BackingState>,
     dirty: Mutex<DirtyRect>,
 }
 
@@ -108,31 +126,31 @@ impl DirtyRect {
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct VirtqDesc {
-    addr: u64,
-    len: u32,
-    flags: u16,
-    next: u16,
+    addr: Le<u64>,
+    len: Le<u32>,
+    flags: Le<u16>,
+    next: Le<u16>,
 }
 
 #[repr(C)]
 struct VirtqAvail {
-    flags: u16,
-    idx: u16,
-    ring: [u16; VIRTIO_RING_SIZE],
+    flags: Le<u16>,
+    idx: Le<u16>,
+    ring: [Le<u16>; VIRTIO_RING_SIZE],
 }
 
 #[repr(C)]
 struct VirtqUsed {
-    flags: u16,
-    idx: u16,
+    flags: Le<u16>,
+    idx: Le<u16>,
     ring: [VirtqUsedElem; VIRTIO_RING_SIZE],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct VirtqUsedElem {
-    id: u32,
-    len: u32,
+    id: Le<u32>,
+    len: Le<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -225,9 +243,16 @@ struct CmdResourceAttachBacking {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct CmdResourceDetachBacking {
+    hdr: CtrlHeader,
+    resource_id: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct MemEntry {
-    addr: u64,
-    length: u32,
+    addr: Le<u64>,
+    length: Le<u32>,
     _padding: u32,
 }
 
@@ -306,8 +331,11 @@ impl VirtioGpu {
                 framebuffer_virt: core::ptr::null_mut(),
             },
             _framebuffer_pages: Vec::new(),
-            framebuffer_segments: Vec::new(),
-            framebuffer_size: 0,
+            backing: Mutex::new(BackingState {
+                segments: Vec::new(),
+                size: 0,
+                external: false,
+            }),
             dirty: Mutex::new(DirtyRect::empty()),
         };
 
@@ -333,8 +361,8 @@ impl VirtioGpu {
             let phys = frame.start_address.as_u64();
             pages.push(frame);
             entries.push(MemEntry {
-                addr: phys,
-                length: PAGE_SIZE as u32,
+                addr: Le::<u64>::from_ne(phys),
+                length: Le::<u32>::from_ne(PAGE_SIZE as u32),
                 _padding: 0,
             });
             segments.push(FramebufferSegment {
@@ -346,7 +374,7 @@ impl VirtioGpu {
         if let Some(last) = entries.last_mut() {
             let rem = framebuffer_size % PAGE_SIZE;
             if rem != 0 {
-                last.length = rem as u32;
+                last.length = Le::<u32>::from_ne(rem as u32);
             }
         }
         if let Some(last) = segments.last_mut() {
@@ -356,14 +384,18 @@ impl VirtioGpu {
             }
         }
 
-        self.info.framebuffer_phys = entries.first().map(|e| e.addr).unwrap_or(0);
+        self.info.framebuffer_phys = entries.first().map(|e| e.addr.to_ne()).unwrap_or(0);
         self.info.framebuffer_virt = segments
             .first()
             .map(|s| s.virt)
             .unwrap_or(core::ptr::null_mut());
-        self.framebuffer_size = framebuffer_size;
+        // Keep the page guards alive for as long as this backing is used.
         self._framebuffer_pages = pages;
-        self.framebuffer_segments = segments;
+        *self.backing.lock() = BackingState {
+            segments,
+            size: framebuffer_size,
+            external: false,
+        };
 
         let resource_id = 1;
         self.resource_create_2d(resource_id, self.info.width, self.info.height)?;
@@ -402,9 +434,18 @@ impl VirtioGpu {
         }
 
         if resp.enabled != 0 {
-            self.info.width = resp.rect.width;
-            self.info.height = resp.rect.height;
-            self.info.stride = resp.rect.width * 4;
+            // Clamp to sane limits to prevent buddy exhaustion if the GPU
+            // returns garbage dimensions.
+            const MAX_WIDTH: u32 = 3840;
+            const MAX_HEIGHT: u32 = 2160;
+            let w = resp.rect.width.min(MAX_WIDTH);
+            let h = resp.rect.height.min(MAX_HEIGHT);
+            if w == 0 || h == 0 {
+                return Err("GET_DISPLAY_INFO: zero dimensions");
+            }
+            self.info.width = w;
+            self.info.height = h;
+            self.info.stride = w * 4;
         }
 
         Ok(())
@@ -610,29 +651,29 @@ impl VirtioGpu {
             }
 
             let head_desc = &mut *ctrl_queue.desc.add(head_idx as usize);
-            head_desc.addr = ctrl_queue.cmd_phys;
-            head_desc.len = cmd_size as u32;
-            head_desc.flags = VIRTQ_DESC_F_NEXT;
-            head_desc.next = middle_idx.unwrap_or(resp_idx);
+            head_desc.addr = Le::<u64>::from_ne(ctrl_queue.cmd_phys);
+            head_desc.len = Le::<u32>::from_ne(cmd_size as u32);
+            head_desc.flags = Le::<u16>::from_ne(VIRTQ_DESC_F_NEXT);
+            head_desc.next = Le::<u16>::from_ne(middle_idx.unwrap_or(resp_idx));
 
             if let Some(mid) = middle_idx {
                 let data_desc = &mut *ctrl_queue.desc.add(mid as usize);
-                data_desc.addr = ctrl_queue.payload_phys;
-                data_desc.len = payload_len as u32;
-                data_desc.flags = VIRTQ_DESC_F_NEXT;
-                data_desc.next = resp_idx;
+                data_desc.addr = Le::<u64>::from_ne(ctrl_queue.payload_phys);
+                data_desc.len = Le::<u32>::from_ne(payload_len as u32);
+                data_desc.flags = Le::<u16>::from_ne(VIRTQ_DESC_F_NEXT);
+                data_desc.next = Le::<u16>::from_ne(resp_idx);
             }
 
             let resp_desc = &mut *ctrl_queue.desc.add(resp_idx as usize);
-            resp_desc.addr = ctrl_queue.resp_phys;
-            resp_desc.len = resp_size as u32;
-            resp_desc.flags = VIRTQ_DESC_F_WRITE;
-            resp_desc.next = 0;
+            resp_desc.addr = Le::<u64>::from_ne(ctrl_queue.resp_phys);
+            resp_desc.len = Le::<u32>::from_ne(resp_size as u32);
+            resp_desc.flags = Le::<u16>::from_ne(VIRTQ_DESC_F_WRITE);
+            resp_desc.next = Le::<u16>::from_ne(0u16);
 
             let avail = &mut *ctrl_queue.avail;
-            let ring_idx = (avail.idx as usize) % (ctrl_queue.queue_size as usize);
-            avail.ring[ring_idx] = head_idx;
-            avail.idx = avail.idx.wrapping_add(1);
+            let ring_idx = (avail.idx.to_ne() as usize) % (ctrl_queue.queue_size as usize);
+            avail.ring[ring_idx] = Le::<u16>::from_ne(head_idx);
+            avail.idx = Le::<u16>::from_ne(avail.idx.to_ne().wrapping_add(1));
         }
 
         unsafe {
@@ -643,12 +684,12 @@ impl VirtioGpu {
         loop {
             unsafe {
                 let used = &*ctrl_queue.used;
-                if ctrl_queue.last_used_idx != used.idx {
+                if ctrl_queue.last_used_idx != used.idx.to_ne() {
                     let idx =
                         (ctrl_queue.last_used_idx as usize) % (ctrl_queue.queue_size as usize);
                     let elem = used.ring[idx];
                     ctrl_queue.last_used_idx = ctrl_queue.last_used_idx.wrapping_add(1);
-                    if elem.id as u16 == head_idx {
+                    if elem.id.to_ne() as u16 == head_idx {
                         break;
                     }
                 }
@@ -674,41 +715,127 @@ impl VirtioGpu {
     }
 
     /// Performs the copy to backing operation.
+    ///
+    /// Walks backing segments by cumulative offset (works both for the
+    /// legacy page-granular layout and for a single contiguous external
+    /// backing).
     fn copy_to_backing(
         &self,
         mut src: *const u8,
         mut dst_offset: usize,
         mut len: usize,
     ) -> Result<(), &'static str> {
+        let st = self.backing.lock();
         let end = dst_offset.checked_add(len).ok_or("Copy overflow")?;
-        if end > self.framebuffer_size {
+        if end > st.size {
             return Err("Copy out of bounds");
         }
-        while len > 0 {
-            let seg_idx = dst_offset / PAGE_SIZE;
-            let seg_off = dst_offset % PAGE_SIZE;
-            let seg = self
-                .framebuffer_segments
-                .get(seg_idx)
-                .ok_or("Segment out of bounds")?;
-            if seg_off >= seg.len {
-                return Err("Segment offset out of bounds");
+        let mut seg_start = 0usize;
+        for seg in st.segments.iter().take(st.segments.len()) {
+            let seg_end = seg_start.saturating_add(seg.len);
+            if dst_offset < seg_end && len > 0 {
+                let seg_off = dst_offset - seg_start;
+                let chunk = core::cmp::min(len, seg.len - seg_off);
+                unsafe {
+                    core::ptr::copy_nonoverlapping(src, seg.virt.add(seg_off), chunk);
+                    src = src.add(chunk);
+                }
+                dst_offset += chunk;
+                len -= chunk;
             }
-            let chunk = core::cmp::min(len, seg.len - seg_off);
-            unsafe {
-                core::ptr::copy_nonoverlapping(src, seg.virt.add(seg_off), chunk);
+            seg_start = seg_end;
+            if len == 0 {
+                break;
             }
-            unsafe {
-                src = src.add(chunk);
-            }
-            dst_offset += chunk;
-            len -= chunk;
+        }
+        if len != 0 {
+            return Err("Copy out of bounds");
         }
         Ok(())
     }
 
+    /// Attach an externally-owned, physically contiguous buffer as the
+    /// scanout resource backing.
+    ///
+    /// After a successful attach, draw targets writing into `[phys,
+    /// phys+len)` are directly what TRANSFER_TO_HOST_2D reads, so
+    /// [`Self::present_scanout_rect`] becomes zero-copy. The caller keeps
+    /// ownership of the memory (it must outlive the device or re-attach).
+    pub fn attach_external_backing(&self, phys: u64, len: usize) -> Result<(), &'static str> {
+        if phys == 0 || len == 0 || phys % PAGE_SIZE as u64 != 0 || len > u32::MAX as usize {
+            return Err("Invalid external backing parameters");
+        }
+
+        // Best-effort detach of the current backing; ignore failures (the
+        // resource may not have one attached yet in some implementations).
+        let det = CmdResourceDetachBacking {
+            hdr: CtrlHeader {
+                cmd_and_flags: VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING,
+                fence_id: 0,
+                ctx_id: 0,
+                _padding: 0,
+            },
+            resource_id: 1,
+        };
+        let _ : Result<CtrlHeader, &'static str> =
+            self.send_command::<CmdResourceDetachBacking, CtrlHeader>(&det);
+
+        let entry = MemEntry {
+            addr: Le::<u64>::from_ne(phys),
+            length: Le::<u32>::from_ne(len as u32),
+            _padding: 0,
+        };
+        self.resource_attach_backing(1, &[entry])?;
+
+        let mut st = self.backing.lock();
+        *st = BackingState {
+            segments: vec![FramebufferSegment {
+                virt: phys_to_virt(phys) as *mut u8,
+                len,
+            }],
+            size: len,
+            external: true,
+        };
+
+        log::info!(
+            "VirtIO GPU: external backing attached at {:#x} ({} bytes), zero-copy present enabled",
+            phys,
+            len
+        );
+        Ok(())
+    }
+
+    /// Whether an externally-provided contiguous backing is attached.
+    pub fn using_external_backing(&self) -> bool {
+        self.backing.lock().external
+    }
+
+    /// Zero-copy presentation: TRANSFER_TO_HOST_2D + RESOURCE_FLUSH for the
+    /// given rectangle, reading straight from the attached backing.
+    pub fn present_scanout_rect(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), &'static str> {
+        if !self.using_external_backing() {
+            return Err("No external backing attached");
+        }
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+        if x >= self.info.width || y >= self.info.height {
+            return Ok(());
+        }
+        let width = width.min(self.info.width - x);
+        let height = height.min(self.info.height - y);
+        self.transfer_to_host_2d(1, x, y, width, height)?;
+        self.resource_flush(1, x, y, width, height)
+    }
+
     /// Performs the present from linear operation.
-    pub fn present_from_linear(
+    pub unsafe fn present_from_linear(
         &self,
         src: *const u8,
         src_stride: u32,

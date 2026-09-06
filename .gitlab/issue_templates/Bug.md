@@ -14,9 +14,9 @@ labels: bug
 
 ## Steps to reproduce
 
-1. 
-2. 
-3. 
+1.
+2.
+3.
 
 ## Context
 
@@ -46,7 +46,7 @@ labels: bug
 
 ## Severity
 
-- [ ] Critical — systematic panic, memory corruption, security issue
-- [ ] High — broken feature, regression
-- [ ] Medium — incorrect behaviour with a workaround
-- [ ] Low — cosmetic, missing log
+- [ ] Critical : systematic panic, memory corruption, security issue
+- [ ] High : broken feature, regression
+- [ ] Medium : incorrect behaviour with a workaround
+- [ ] Low : cosmetic, missing log

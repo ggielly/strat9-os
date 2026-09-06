@@ -6,6 +6,7 @@ sysroot/
 *.patch
 *.swp
 *.swo
+*.log
 
 /.vim
 
@@ -16,6 +17,19 @@ build/
 CLAUDE.md
 .cursor
 .qwen
+.github/
+.agents/
+.rtk/
+.claude/
+.gemini/
+graphify-out/
+.cocoindex_code/
+.roo/
+.windsurf/
+.opencode/
+.kilo/
+.mimocode/
 
-#Ignore vscode AI rules
-.github\instructions\codacy.instructions.md
+opencode.json
+GEMINI.md
+AGENTS.md

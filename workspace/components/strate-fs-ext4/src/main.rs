@@ -48,8 +48,8 @@ const REPLY_MSG_TYPE: u32 = 0x80;
 const STATUS_OK: u32 = 0;
 const INITIAL_BIND_PATH: &[u8] = b"/srv/strate-fs-ext4/default";
 
-const MAX_OPEN_PATH: usize = 42;
-const MAX_WRITE_DATA: usize = 30;
+const MAX_OPEN_PATH: usize = IpcMessage::OPEN_INLINE_CAPACITY;
+const MAX_WRITE_DATA: usize = IpcMessage::WRITE_INLINE_CAPACITY;
 
 struct BootstrapInfo {
     handle: u64,
@@ -155,12 +155,12 @@ impl Ext4Strate {
         ]))
     }
 
-    fn parse_path<'a>(
-        payload: &'a [u8],
+    fn parse_path(
+        payload: &[u8],
         len_offset: usize,
         data_offset: usize,
         max_len: usize,
-    ) -> core::result::Result<&'a str, u32> {
+    ) -> core::result::Result<&str, u32> {
         let path_len = Self::read_u16(payload, len_offset)? as usize;
         if path_len > max_len {
             return Err(EINVAL as u32);
@@ -342,7 +342,7 @@ fn discover_volume_handle_local() -> Option<u64> {
 impl BlockDevice for VolumeBlockDevice {
     /// Reads offset.
     fn read_offset(&self, offset: usize) -> core::result::Result<Vec<u8>, BlockDeviceError> {
-        if offset % SECTOR_SIZE != 0 {
+        if !offset.is_multiple_of(SECTOR_SIZE) {
             return Err(BlockDeviceError::InvalidOffset);
         }
         let sector = (offset / SECTOR_SIZE) as u64;
@@ -361,7 +361,7 @@ impl BlockDevice for VolumeBlockDevice {
         offset: usize,
         data: &[u8],
     ) -> core::result::Result<(), BlockDeviceError> {
-        if offset % SECTOR_SIZE != 0 || data.len() % SECTOR_SIZE != 0 {
+        if !offset.is_multiple_of(SECTOR_SIZE) || !data.len().is_multiple_of(SECTOR_SIZE) {
             return Err(BlockDeviceError::InvalidOffset);
         }
         let sector = (offset / SECTOR_SIZE) as u64;
@@ -490,7 +490,7 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
     let mut attempts: u64 = 0;
     loop {
         attempts = attempts.wrapping_add(1);
-        if attempts <= 4 || attempts % 16 == 0 {
+        if attempts <= 4 || attempts.is_multiple_of(16) {
             let msg = format!(
                 "[fs-ext4] Mount loop attempt={} handle={} label={}\n",
                 attempts, volume_handle, bootstrap_label
@@ -508,7 +508,7 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
             Err(err) => {
                 log_sys_err("volume probe failed", err);
                 // If we started without bootstrap capability, wait for a fresh handle periodically.
-                if bootstrap_handle == 0 && attempts % 8 == 0 {
+                if bootstrap_handle == 0 && attempts.is_multiple_of(8) {
                     debug_log("[fs-ext4] Waiting for refreshed bootstrap handle...\n");
                     let info = wait_for_bootstrap(port_handle);
                     volume_handle = info.handle;
@@ -572,8 +572,6 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
 }
 
 #[panic_handler]
-/// Implements panic.
-fn panic(_info: &PanicInfo) -> ! {
-    debug_log("[fs-ext4] PANIC!\n");
-    exit(255);
+fn panic(info: &PanicInfo) -> ! {
+    strat9_syscall::call::handle_panic("fs-ext4", info)
 }

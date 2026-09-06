@@ -1,59 +1,60 @@
-/* Strat9-OS Kernel Linker Script */
-/* x86_64 higher-half kernel with Limine boot protocol support */
+/* Strat9-OS Kernel linker script */
+/* x86_64 higher-half kernel */
 
-ENTRY(kmain)
+OUTPUT_FORMAT(elf64-x86-64)
+ENTRY(_start)
+
+PHDRS
+{
+    text   PT_LOAD;
+    rodata PT_LOAD;
+    data   PT_LOAD;
+    bss    PT_LOAD;
+}
 
 SECTIONS
 {
-    /* Kernel loaded at 1 MiB by bootloader */
-    . = 1M;
+    /* Kernel loaded at -2GB (0xFFFFFFFF80000000) by default */
+    . = 0xFFFFFFFF80000000;
 
-    /* Limine requests (must be in writable section) */
-    .requests : ALIGN(8)
-    {
-        KEEP(*(.requests_start_marker))
-        KEEP(*(.requests))
-        KEEP(*(.requests_end_marker))
-    }
+    /* Read-only code */
+    .text : ALIGN(4K) { *(.boot.text) *(.text .text.*) } :text
 
-    /* 64-bit boot code */
-    .boot.text : ALIGN(4K)
-    {
-        *(.boot.text)
-    }
-
-    /* 64-bit kernel code */
-    .text : ALIGN(4K)
-    {
-        *(.text .text.*)
-    }
-
-    /* Read-only data (GDT, strings, etc.) */
-    .rodata : ALIGN(4K)
-    {
-        *(.rodata .rodata.*)
-    }
+    /* Read-only data */
+    .rodata : ALIGN(4K) { *(.rodata .rodata.*) } :rodata
 
     /* Initialized data */
-    .data : ALIGN(4K)
-    {
-        *(.data .data.*)
-    }
+    .data : ALIGN(4K) { *(.data .data.*) __start_component_entries = .; KEEP(*(.component_entries)) __stop_component_entries = .; } :data
 
     /* Uninitialized data (zero-filled) */
     .bss : ALIGN(4K)
     {
-        __bss_start = .;
         *(.bss .bss.*)
         *(COMMON)
-        __bss_end = .;
-    }
+        *(.bss.stack)
+    } :bss
+
+    /* Section header string table - NOT in a PT_LOAD PHDR.
+     * Placing PROGBITS (.shstrtab) in the :bss PHDR inflates p_filesz
+     * to ~2 GB because lld covers the entire segment range. */
+    .shstrtab : { *(.shstrtab) }
 
     /* Discard unneeded sections */
     /DISCARD/ :
     {
         *(.eh_frame)
+        *(.eh_frame_hdr)
         *(.note .note.*)
-        *(.multiboot_header)
+        *(.comment)
+        *(.got)
+        *(.got.*)
+        *(.plt)
+        *(.plt.*)
+        *(.debug*)
+        *(.zdebug*)
+        *(.ARM.exidx)
+        *(.ARM.extab)
+        *(.symtab)
+        *(.strtab)
     }
 }

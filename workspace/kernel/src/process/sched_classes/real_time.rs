@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use super::{CurrentRuntime, SchedClassRq};
-use crate::{arch::x86_64::timer::TIMER_HZ, process::task::Task};
+use crate::{arch::timer::TIMER_HZ, process::task::Task};
 use alloc::sync::Arc;
 use intrusive_collections::{intrusive_adapter, LinkedList, LinkedListLink};
 
@@ -170,7 +170,7 @@ impl SchedClassRq for RealTimeClassRq {
                 if self.queues[i].is_empty() {
                     self.clear_bit(i as u8);
                 }
-                // task_id is unique — stop scanning once found.
+                // task_id is unique : stop scanning once found.
                 return true;
             }
             bits &= !(1u128 << i);

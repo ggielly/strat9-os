@@ -29,12 +29,11 @@ pub(super) fn create_cpu_scheduler(cpu_idx: usize) -> SchedulerCpu {
 }
 
 impl GlobalSchedState {
-    /// Create a new global scheduler state (no per-CPU runqueues — those live in LOCAL_SCHEDULERS).
+    /// Create a new global scheduler state (no per-CPU runqueues : those live in LOCAL_SCHEDULERS).
     pub fn new() -> Self {
         crate::serial_println!("[trace][sched] GlobalSchedState::new enter");
         GlobalSchedState {
             all_tasks: BTreeMap::new(),
-            all_tasks_scan: Vec::new(),
             task_cpu: BTreeMap::new(),
             wake_deadlines: BTreeMap::new(),
             wake_deadline_of: BTreeMap::new(),
@@ -226,84 +225,23 @@ impl GlobalSchedState {
         );
         if self.all_tasks.contains_key(&task_id) {
             unsafe {
-                core::arch::asm!("mov al, 'D'; out 0xe9, al", out("al") _);
+                crate::arch::serial::putc(b'D');
             }
             crate::serial_force_println!(
-                "[RACE] insert_all_task_locked: duplicate tid={} all_tasks={} all_tasks_scan={}",
+                "[RACE] insert_all_task_locked: duplicate tid={} all_tasks={}",
                 task_id.as_u64(),
                 self.all_tasks.len(),
-                self.all_tasks_scan.len()
             );
             panic!(
                 "scheduler corruption: duplicate insert_all_task_locked tid={}",
                 task_id.as_u64()
             );
         }
-        self.all_tasks.insert(task_id, task.clone());
-        self.all_tasks_scan.push(task);
-        // Race/corruption diagnostic: all_tasks and all_tasks_scan must stay in sync.
-        let bt_len = self.all_tasks.len();
-        let scan_len = self.all_tasks_scan.len();
-        if bt_len != scan_len {
-            unsafe {
-                core::arch::asm!("mov al, 'X'; out 0xe9, al", out("al") _);
-            }
-            crate::serial_force_println!(
-                "[RACE] insert_all_task_locked: all_tasks={} != all_tasks_scan={} tid={}",
-                bt_len,
-                scan_len,
-                task_id.as_u64()
-            );
-            panic!(
-                "scheduler corruption: insert_all_task_locked len mismatch all_tasks={} all_tasks_scan={} tid={}",
-                bt_len,
-                scan_len,
-                task_id.as_u64()
-            );
-        }
+        self.all_tasks.insert(task_id, task);
     }
 
     pub(super) fn remove_all_task_locked(&mut self, task_id: TaskId) -> Option<Arc<Task>> {
-        let removed = self.all_tasks.remove(&task_id);
-        if removed.is_some() {
-            if let Some(idx) = self
-                .all_tasks_scan
-                .iter()
-                .position(|task| task.id == task_id)
-            {
-                self.all_tasks_scan.swap_remove(idx);
-            } else {
-                unsafe { core::arch::asm!("mov al, 'Z'; out 0xe9, al", out("al") _) };
-                crate::serial_force_println!(
-                    "[RACE] remove_all_task_locked: tid={} in all_tasks but NOT in all_tasks_scan",
-                    task_id.as_u64()
-                );
-                panic!(
-                    "scheduler corruption: remove_all_task_locked missing scan entry tid={}",
-                    task_id.as_u64()
-                );
-            }
-        }
-        let bt_len = self.all_tasks.len();
-        let scan_len = self.all_tasks_scan.len();
-        if bt_len != scan_len {
-            unsafe {
-                core::arch::asm!("mov al, 'X'; out 0xe9, al", out("al") _);
-            }
-            crate::serial_force_println!(
-                "[RACE] remove_all_task_locked: all_tasks={} != all_tasks_scan={} tid={}",
-                bt_len,
-                scan_len,
-                task_id.as_u64()
-            );
-            panic!(
-                "scheduler corruption: remove_all_task_locked len mismatch all_tasks={} all_tasks_scan={} tid={}",
-                bt_len,
-                scan_len,
-                task_id.as_u64()
-            );
-        }
-        removed
+        self.all_tasks.remove(&task_id)
     }
 
     /// Performs the clear task wake deadline locked operation.
@@ -335,10 +273,51 @@ impl GlobalSchedState {
     /// `ipi_cpu` after releasing the scheduler lock.
     ///
     /// NOTE: `blocked_tasks` lives in the separate `BLOCKED_TASKS` lock.
-    /// This method now only handles the fallback path (task not yet blocked,
-    /// set `wake_pending`). The primary wake path is in `wake_task()`.
+    /// This method handles waking the task directly if it is already in `BLOCKED_TASKS`,
+    /// or setting `wake_pending` as a fallback if the task is still transitioning to Blocked.
     pub fn wake_task_locked(&mut self, id: TaskId) -> (bool, Option<usize>) {
         self.clear_task_wake_deadline_locked(id);
+
+        // Check if the task is already in BLOCKED_TASKS first to wake it directly.
+        let mut woken = false;
+        let mut ipi_cpu = None;
+        {
+            let mut blocked = super::BLOCKED_TASKS.lock();
+            if let Some(task) = blocked.remove(&id) {
+                task.set_state(TaskState::Ready);
+                let home = task.home_cpu.load(core::sync::atomic::Ordering::Relaxed);
+                let cpu_index = if home != usize::MAX { home } else { 0 };
+
+                let class = {
+                    use crate::process::sched::SchedClassId;
+                    match task.sched_policy() {
+                        crate::process::sched::SchedPolicy::RealTimeRR { .. }
+                        | crate::process::sched::SchedPolicy::RealTimeFifo { .. } => {
+                            SchedClassId::RealTime
+                        }
+                        crate::process::sched::SchedPolicy::Fair(_) => SchedClassId::Fair,
+                        crate::process::sched::SchedPolicy::Idle => SchedClassId::Idle,
+                    }
+                };
+
+                if let Some(ref mut local_cpu) = *super::LOCAL_SCHEDULERS[cpu_index].lock() {
+                    local_cpu.class_rqs.enqueue(class, task.clone());
+                    local_cpu.need_resched = true;
+                }
+
+                ipi_cpu = if cpu_index != current_cpu_index() {
+                    Some(cpu_index)
+                } else {
+                    None
+                };
+                woken = true;
+            }
+        }
+
+        if woken {
+            return (true, ipi_cpu);
+        }
+
         // Fallback: task is not yet in BLOCKED_TASKS (still transitioning to
         // Blocked). Set wake_pending so block_current_task will skip blocking.
         if let Some(task) = self.all_tasks.get(&id) {
@@ -383,7 +362,7 @@ impl GlobalSchedState {
             return WaitChildResult::NoChildren;
         }
 
-        // Find the zombie child — re-check children under SCHED_IDENTITY.
+        // Find the zombie child : re-check children under SCHED_IDENTITY.
         let zombie = {
             let identity = SCHED_IDENTITY.read();
             let children = match identity.children_of.get(&parent) {
@@ -520,16 +499,16 @@ impl GlobalSchedState {
 // lock.  The one exception is `steal_task_local`, which does a **non-blocking**
 // `GLOBAL_SCHED_STATE.try_lock_no_irqsave()` to update `task_cpu` after a successful
 // steal.  This is an intentional lock-order inversion (LOCAL held, then GLOBAL
-// attempted) that is safe because the try-lock never blocks — if GLOBAL_SCHED_STATE is
+// attempted) that is safe because the try-lock never blocks : if GLOBAL_SCHED_STATE is
 // contended, we simply skip stealing.
 //
-// Lock order for steal: own LOCAL held → try_lock GLOBAL → try_lock sibling
+// Lock order for steal: own LOCAL held => try_lock GLOBAL => try_lock sibling
 // LOCALs.  Never blocking-wait, so no deadlock possible.
 
 /// Steal a task from the busiest sibling CPU using per-CPU LOCAL locks.
 ///
 /// Called with `cpu` borrowed from `LOCAL_SCHEDULERS[cpu_index]` (our own
-/// LOCAL lock already held). Uses `try_lock_no_irqsave` on sibling entries —
+/// LOCAL lock already held). Uses `try_lock_no_irqsave` on sibling entries :
 /// if a sibling or the global scheduler state is contended, we skip stealing
 /// rather than waiting.
 pub(super) fn steal_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> Option<Arc<Task>> {
@@ -610,19 +589,19 @@ pub(super) fn pick_next_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> 
             TaskState::Running => {
                 task.set_state(TaskState::Ready);
                 if !Arc::ptr_eq(&task, &cpu.idle_task) {
-                    // Defer re-queue to finish_switch (not yet safe to enqueue —
+                    // Defer re-queue to finish_switch (not yet safe to enqueue :
                     // another CPU could steal it before our context is saved).
                     cpu.task_to_requeue = Some(task);
                 }
             }
             TaskState::Dead => {
                 // Global maps already cleaned by exit_current_task / kill_task.
-                // Defer the Arc drop so KernelStack::drop → buddy_alloc runs
+                // Defer the Arc drop so KernelStack::drop => buddy_alloc runs
                 // outside any lock.
                 cpu.task_to_drop = Some(task);
             }
             TaskState::Blocked | TaskState::Ready => {
-                // Blocked: moved to blocked_tasks by block_current_task — do nothing.
+                // Blocked: moved to blocked_tasks by block_current_task : do nothing.
                 // Ready: shouldn't normally occur for current_task; safe to ignore.
             }
         }
@@ -669,7 +648,7 @@ pub(super) fn yield_cpu_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> Optio
         let stk_top = stk_base + next.kernel_stack.size as u64;
         crate::serial_println!(
             "[sched-local] WARN: invalid ctx task='{}' id={} cpu={}: {} \
-             rsp={:#x} stack=[{:#x}..{:#x}] — restoring current",
+             rsp={:#x} stack=[{:#x}..{:#x}] : restoring current",
             next.name,
             next.id.as_u64(),
             cpu_index,
@@ -699,8 +678,8 @@ pub(super) fn yield_cpu_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> Optio
 
     // Update TSS.rsp0 and SYSCALL kernel RSP for the new task.
     let stack_top = next.kernel_stack.virt_base.as_u64() + next.kernel_stack.size as u64;
-    crate::arch::x86_64::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
-    crate::arch::x86_64::syscall::set_kernel_rsp(stack_top);
+    crate::arch::tss::set_kernel_stack(crate::arch::xshim::VirtAddr::new(stack_top));
+    crate::arch::syscall::set_kernel_rsp(stack_top);
 
     // Switch CR3 if the new task has a different address space.
     // SAFETY: The new task's address space has a valid PML4 with the kernel half mapped.

@@ -10,7 +10,7 @@ use x86_64::instructions::port::Port;
 /// Kernel timer frequency in Hz.
 ///
 /// All tick-to-time conversions must use this constant.
-/// 100 Hz → 10 ms per tick, good balance between latency and overhead.
+/// 100 Hz => 10 ms per tick, good balance between latency and overhead.
 pub const TIMER_HZ: u64 = 100;
 
 /// Nanoseconds per timer tick (derived from TIMER_HZ).
@@ -54,11 +54,11 @@ pub fn init_pit(frequency_hz: u32) {
 
     // Send command byte to configure PIT channel 0.
     // 0x34 = 0b00_11_010_0:
-    //   Bits [7:6] = 00  → Channel 0
-    //   Bits [5:4] = 11  → Access mode: lobyte then hibyte
-    //   Bits [3:1] = 010 → Mode 2 (Rate Generator): one IRQ per divisor clocks,
+    //   Bits [7:6] = 00  => Channel 0
+    //   Bits [5:4] = 11  => Access mode: lobyte then hibyte
+    //   Bits [3:1] = 010 => Mode 2 (Rate Generator): one IRQ per divisor clocks,
     //                      automatic reload, correct for periodic IRQ generation.
-    //   Bit  [0]   = 0   → Binary counting
+    //   Bit  [0]   = 0   => Binary counting
     //
     // Mode 2 (Rate Generator) is preferred over Mode 3 (Square Wave, 0x36):
     // Mode 3 halves the effective frequency when routed through IOAPIC because it
@@ -133,8 +133,16 @@ pub fn calibrate_apic_timer() -> u32 {
     };
     let saved_flags = super::save_flags_and_cli();
 
+    // Try CPUID leaf 0x15 for TSC frequency first (Linux primary method).
+    // This avoids relying on PIT channel 2 gate logic which is fragile
+    // on some emulators and hardware.
+    if let Some(tsc_khz) = super::cpuid::tsc_frequency_khz() {
+        log::info!("TSC frequency from CPUID 0x15: {} KHz", tsc_khz);
+        super::boot_timestamp::calibrate_khz(tsc_khz);
+    }
+
     // ========================================================================
-    // DEBUG: Verbose logging for timer calibration
+    // DEBUG: verbose logging for timer calibration
     // ========================================================================
     log::info!("========================================");
     log::info!("APIC TIMER CALIBRATION (verbose debug)");
@@ -162,18 +170,18 @@ pub fn calibrate_apic_timer() -> u32 {
     log::info!("APIC timer divide set to 16 (0x03)");
 
     // ========================================================================
-    // CRITICAL TIMING SECTION — no log messages between gate-up and poll end
+    // CRITICAL TIMING SECTION : no log messages between gate-up and poll end
     // ========================================================================
     // The PIT channel 2 gate must be LOW while programming the counter.
     // In mode 0, counting starts as soon as the count is loaded AND gate is
     // HIGH. If gate is already HIGH when we load the count, the 10 ms window
-    // begins before we can start the APIC timer → measurement is wrong.
+    // begins before we can start the APIC timer => measurement is wrong.
     //
     // Correct sequence:
-    //   1. Gate LOW  — prevent counting while we program the PIT
+    //   1. Gate LOW  : prevent counting while we program the PIT
     //   2. Program PIT channel 2 (mode 0, one-shot, count = PIT_10MS_COUNT)
     //   3. Set APIC timer initial count to 0xFFFF_FFFF
-    //   4. Gate HIGH — PIT starts counting NOW, APIC is already counting
+    //   4. Gate HIGH : PIT starts counting NOW, APIC is already counting
     //   5. Poll bit 5 of port 0x61 until PIT output goes HIGH (10 ms elapsed)
     //   6. Read APIC timer current count
     // ========================================================================
@@ -208,14 +216,14 @@ pub fn calibrate_apic_timer() -> u32 {
 
     // Step 3: Set APIC timer initial count to maximum
     // SAFETY: APIC is initialized
-    // NOTE: No log::info! between APIC write and PIT gate — the APIC timer
+    // NOTE: No log::info! between APIC write and PIT gate : the APIC timer
     // starts counting immediately, so any delay here inflates the calibrated
     // value and skews the resulting periodic frequency.
     unsafe {
         apic::write_reg(apic::REG_TIMER_INIT, 0xFFFF_FFFF);
     }
 
-    // Step 4: Enable PIT channel 2 gate — starts PIT counting
+    // Step 4: Enable PIT channel 2 gate : starts PIT counting
     // APIC timer is already counting from step 3, so the measurement
     // window begins precisely here.  NO LOG MESSAGES until poll completes.
     let tsc_start = super::rdtsc();
@@ -231,7 +239,7 @@ pub fn calibrate_apic_timer() -> u32 {
         // SAFETY: reading port 0x61 is safe
         let status = unsafe { inb(0x61) };
         if status & 0x20 != 0 {
-            break; // PIT output went high — 10ms elapsed
+            break; // PIT output went high : 10ms elapsed
         }
         iterations += 1;
         if iterations >= MAX_POLL_ITERATIONS {
@@ -250,7 +258,7 @@ pub fn calibrate_apic_timer() -> u32 {
     }
     let tsc_delta = super::rdtsc().wrapping_sub(tsc_start);
 
-    // Step 6: Read APIC timer current count — end of critical section
+    // Step 6: Read APIC timer current count : end of critical section
     // SAFETY: APIC is initialized
     let current = unsafe { apic::read_reg(apic::REG_TIMER_CURRENT) };
     let elapsed = 0xFFFF_FFFFu32.wrapping_sub(current);
@@ -263,7 +271,7 @@ pub fn calibrate_apic_timer() -> u32 {
     }
 
     // ========================================================================
-    // END CRITICAL TIMING SECTION — safe to log again
+    // END CRITICAL TIMING SECTION : safe to log again
     // ========================================================================
     log::info!("PIT poll completed after {} iterations", iterations);
     log::info!("APIC timer current count: 0x{:08X}", current);
@@ -279,8 +287,8 @@ pub fn calibrate_apic_timer() -> u32 {
 
     // Check for suspicious values
     // With div=16, ticks_10ms = APIC_bus_freq / 16 / 100.
-    // QEMU default APIC frequency is ~1 GHz → ~625,000 ticks/10ms.
-    // Real hardware with a 200 MHz bus → ~125,000 ticks/10ms.
+    // QEMU default APIC frequency is ~1 GHz => ~625,000 ticks/10ms.
+    // Real hardware with a 200 MHz bus => ~125,000 ticks/10ms.
     // Use wide bounds to support both real hardware and emulators.
     const MIN_EXPECTED_TICKS: u32 = 1_000; // extremely slow / throttled
     const MAX_EXPECTED_TICKS: u32 = 5_000_000; // very fast host or low divider

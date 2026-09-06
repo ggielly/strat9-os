@@ -8,14 +8,14 @@
 
 use super::{vring_flags, VirtqDesc};
 use crate::{
-    arch::x86_64::pci::{Bar, PciDevice},
+    arch::pci::{Bar, PciDevice},
     memory::{self, PhysFrame},
 };
-use alloc::vec::Vec;
 use core::{
     ptr::{read_volatile, write_volatile},
     sync::atomic::{fence, AtomicU16, Ordering},
 };
+use endian_num::Le;
 
 /// VirtIO device features
 pub mod features {
@@ -93,8 +93,12 @@ pub struct Virtqueue {
     /// Virtual address of used ring entries
     used_ring_ptr: *mut VirtqUsedElem,
 
-    /// Free descriptor list (indices of free descriptors)
-    free_descriptors: Vec<u16>,
+    /// Head of the free-descriptor linked list (stored in desc[i].next).
+    /// When queue_size ≤ INLINE_FREE_SIZE we use the inline array instead,
+    /// keeping the hot path entirely in-stack / in-struct (no Vec overhead).
+    first_free: u16,
+    /// Number of free descriptors.
+    free_count: u16,
 
     /// Last seen used index
     last_used_idx: u16,
@@ -126,8 +130,12 @@ impl Virtqueue {
         let desc_size = queue_size as usize * core::mem::size_of::<VirtqDesc>();
         let avail_size = 6 + queue_size as usize * 2;
         let used_size = 6 + queue_size as usize * core::mem::size_of::<VirtqUsedElem>();
-        let avail_offset = desc_size;
-        let used_offset = Self::align_up(avail_offset + avail_size, 4096);
+        // Legacy virtio layout (Section 2.5.1): the device derives ring offsets
+        // from the descriptor-table PFN using PAGE_ALIGN.  The driver MUST
+        // match that same alignment or device and driver will read/write
+        // different memory locations.
+        let avail_offset = Self::align_up(desc_size, 4096); // PAGE_ALIGN(desc_size)
+        let used_offset = Self::align_up(avail_offset + avail_size, 4096); // PAGE_ALIGN(avail_end)
         let total_size = used_offset + used_size;
 
         // Critical: legacy QUEUE_PFN describes one contiguous vring region.
@@ -143,7 +151,7 @@ impl Virtqueue {
         let used_phys = ring_phys + used_offset as u64;
 
         // SAFETY: we just allocated these frames; convert phys => virt via HHDM
-        // With Limine HHDM, all physical memory is already mapped, so we can
+        // With UEFI bootloader HHDM, all physical memory is already mapped, so we can
         // directly use phys_to_virt without additional page table modifications.
         // DO NOT call ensure_identity_map here - it can corrupt active page tables!
 
@@ -161,11 +169,16 @@ impl Virtqueue {
         // SAFETY: we allocated these pages and they're mapped via HHDM
         core::ptr::write_bytes(desc_ptr as *mut u8, 0, total_size);
 
-        // Initialize free descriptor list
-        let mut free_descriptors = Vec::with_capacity(queue_size as usize);
-        for i in (0..queue_size).rev() {
-            free_descriptors.push(i);
+        // Initialize free-descriptor linked list through desc[i].next.
+        // Descriptor i points to i+1; the last has flags=0 and next=0.
+        for i in 0..queue_size - 1 {
+            let desc = &mut *desc_ptr.add(i as usize);
+            desc.next = Le::<u16>::from_ne(i + 1);
         }
+        // last descriptor does not chain further
+        let last_desc = &mut *desc_ptr.add((queue_size - 1) as usize);
+        last_desc.next = Le::<u16>::from_ne(0);
+        last_desc.flags = Le::<u16>::from_ne(0);
 
         Ok(Self {
             queue_size,
@@ -178,7 +191,8 @@ impl Virtqueue {
             avail_ring_ptr,
             used_ptr,
             used_ring_ptr,
-            free_descriptors,
+            first_free: 0,
+            free_count: queue_size,
             last_used_idx: 0,
             next_avail_idx: 0,
         })
@@ -199,31 +213,44 @@ impl Virtqueue {
         self.used_area
     }
 
-    /// Get the queue size
-    pub fn size(&self) -> u16 {
-        self.queue_size
+    /// Get the queue size (number of descriptors)
+    pub fn queue_size(&self) -> usize {
+        self.queue_size as usize
     }
 
-    /// Allocate a descriptor chain
+    /// Allocate a descriptor from the free list.
     ///
-    /// Returns the head descriptor index
+    /// Returns the head descriptor index, or `None` if none are free.
     pub fn alloc_descriptor(&mut self) -> Option<u16> {
-        self.free_descriptors.pop()
+        if self.free_count == 0 {
+            return None;
+        }
+        let idx = self.first_free;
+        // SAFETY: idx is a valid free descriptor (free_count > 0).
+        let desc = unsafe { &*self.desc_ptr.add(idx as usize) };
+        self.first_free = desc.next.to_ne(); // chain to next free
+        self.free_count -= 1;
+        Some(idx)
     }
 
-    /// Free a descriptor chain
+    /// Free a descriptor chain back into the free list.
     ///
-    /// Walks the chain following NEXT flags and frees all descriptors
+    /// Walks the chain via NEXT flags and re-links each descriptor
+    /// at the head of the free list.
     pub fn free_descriptor(&mut self, head: u16) {
         let mut current = head;
 
         loop {
-            // SAFETY: current is a valid descriptor index
+            // SAFETY: current is a valid descriptor index (belongs to this queue).
             let desc = unsafe { &*self.desc_ptr.add(current as usize) };
-            let has_next = desc.flags & vring_flags::NEXT != 0;
-            let next = desc.next;
+            let has_next = desc.flags.to_ne() & vring_flags::NEXT != 0;
+            let next = desc.next.to_ne();
 
-            self.free_descriptors.push(current);
+            // Re-link this descriptor at the head of the free list.
+            let desc_mut = unsafe { &mut *self.desc_ptr.add(current as usize) };
+            desc_mut.next = Le::<u16>::from_ne(self.first_free);
+            self.first_free = current;
+            self.free_count += 1;
 
             if !has_next {
                 break;
@@ -243,7 +270,7 @@ impl Virtqueue {
             return Err("Empty buffer list");
         }
 
-        if buffers.len() > self.free_descriptors.len() {
+        if (buffers.len() as u16) > self.free_count {
             return Err("Not enough free descriptors");
         }
 
@@ -256,14 +283,14 @@ impl Virtqueue {
 
             // SAFETY: current is a valid index regulated by alloc_descriptor
             let desc = unsafe { &mut *self.desc_ptr.add(current as usize) };
-            desc.addr = addr;
-            desc.len = len;
-            desc.flags = if write { vring_flags::WRITE } else { 0 };
+            desc.addr = Le::<u64>::from_ne(addr);
+            desc.len = Le::<u32>::from_ne(len);
+            desc.flags = Le::<u16>::from_ne(if write { vring_flags::WRITE } else { 0 });
 
             if !is_last {
                 let next = self.alloc_descriptor().ok_or("No free descriptors")?;
-                desc.flags |= vring_flags::NEXT;
-                desc.next = next;
+                desc.flags = Le::<u16>::from_ne(desc.flags.to_ne() | vring_flags::NEXT);
+                desc.next = Le::<u16>::from_ne(next);
                 current = next;
             }
         }
@@ -308,6 +335,22 @@ impl Virtqueue {
         (used_idx, self.last_used_idx)
     }
 
+    /// Peek at the next used buffer without consuming it.
+    ///
+    /// Returns (descriptor_index, length_written) but does NOT advance
+    /// `last_used_idx` or free descriptors.  The caller must call
+    /// `get_used` afterwards to actually consume the entry.
+    /// Returns `None` if the used ring is empty.
+    pub fn peek_used(&self) -> Option<(u16, u32)> {
+        let used_idx = unsafe { (*self.used_ptr).idx.load(Ordering::Acquire) };
+        if self.last_used_idx == used_idx {
+            return None;
+        }
+        let ring_idx = (self.last_used_idx % self.queue_size) as usize;
+        let elem = unsafe { read_volatile(self.used_ring_ptr.add(ring_idx)) };
+        Some((elem.id as u16, elem.len))
+    }
+
     /// Get the next used buffer
     ///
     /// Returns (descriptor_index, length_written)
@@ -326,22 +369,21 @@ impl Virtqueue {
 
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
 
-        // We do NOT free the descriptor here immediately, because the caller might need to read the data.
-        // But in the current design, the caller is responsible for freeing.
-        // Wait, the previous implementation freed it here.
-        // Let's stick to the previous pattern: free the chain, return the Head ID.
-        // The implementation assumes the caller is done with the *descriptors*,
-        // but the data is in the buffers pointed to by the descriptors.
         self.free_descriptor(elem.id as u16);
 
         Some((elem.id as u16, elem.len))
     }
 
     /// Notify the device (should write to queue_notify register)
+    ///
+    /// When `VIRTIO_F_RING_EVENT_IDX` is negotiated, the device sets the
+    /// `VRING_USED_F_NO_NOTIFY` flag in the used ring to suppress
+    /// driver notifications.  Without event_idx we always notify.
     pub fn should_notify(&self) -> bool {
-        // Simple implementation: always notify
-        // Improved: Check VIRTQ_USED_F_NO_NOTIFY flag if we implemented negotiation
-        true
+        // SAFETY: used_ptr points to the valid used ring header.
+        let used_flags = unsafe { (*self.used_ptr).flags.load(Ordering::Acquire) };
+        // VRING_USED_F_NO_NOTIFY = 1
+        (used_flags & 1) == 0
     }
 }
 
@@ -380,37 +422,37 @@ impl VirtioDevice {
     /// Read an 8-bit value from a device register
     pub fn read_reg_u8(&self, offset: u16) -> u8 {
         // SAFETY: I/O port access to VirtIO device registers
-        unsafe { crate::arch::x86_64::io::inb(self.io_base + offset) }
+        unsafe { crate::arch::io::inb(self.io_base + offset) }
     }
 
     /// Read a 16-bit value from a device register
     pub fn read_reg_u16(&self, offset: u16) -> u16 {
         // SAFETY: I/O port access to VirtIO device registers
-        unsafe { crate::arch::x86_64::io::inw(self.io_base + offset) }
+        unsafe { crate::arch::io::inw(self.io_base + offset) }
     }
 
     /// Read a 32-bit value from a device register
     pub fn read_reg_u32(&self, offset: u16) -> u32 {
         // SAFETY: I/O port access to VirtIO device registers
-        unsafe { crate::arch::x86_64::io::inl(self.io_base + offset) }
+        unsafe { crate::arch::io::inl(self.io_base + offset) }
     }
 
     /// Write an 8-bit value to a device register
     pub fn write_reg_u8(&self, offset: u16, value: u8) {
         // SAFETY: I/O port access to VirtIO device registers
-        unsafe { crate::arch::x86_64::io::outb(self.io_base + offset, value) }
+        unsafe { crate::arch::io::outb(self.io_base + offset, value) }
     }
 
     /// Write a 16-bit value to a device register
     pub fn write_reg_u16(&self, offset: u16, value: u16) {
         // SAFETY: I/O port access to VirtIO device registers
-        unsafe { crate::arch::x86_64::io::outw(self.io_base + offset, value) }
+        unsafe { crate::arch::io::outw(self.io_base + offset, value) }
     }
 
     /// Write a 32-bit value to a device register
     pub fn write_reg_u32(&self, offset: u16, value: u32) {
         // SAFETY: I/O port access to VirtIO device registers
-        unsafe { crate::arch::x86_64::io::outl(self.io_base + offset, value) }
+        unsafe { crate::arch::io::outl(self.io_base + offset, value) }
     }
 
     /// Read device features
@@ -460,9 +502,27 @@ impl VirtioDevice {
         // Select queue
         self.write_reg_u16(14, queue_index); // VIRTIO_PCI_QUEUE_SEL
 
+        // Read max queue size; warn if our size exceeds it
+        let max = self.read_reg_u16(12); // VIRTIO_PCI_QUEUE_NUM
+        if max != 0 && (queue.queue_size() as u16) > max {
+            log::warn!(
+                "virtio: queue {} size {} > device max {}",
+                queue_index,
+                queue.queue_size(),
+                max,
+            );
+        }
+
         // Set queue addresses (page-aligned physical addresses >> 12)
         let desc_pfn = (queue.desc_area() >> 12) as u32;
         self.write_reg_u32(8, desc_pfn); // VIRTIO_PCI_QUEUE_PFN
+
+        log::info!(
+            "virtio: queue {} set up (size={}, pfn={:#x})",
+            queue_index,
+            queue.queue_size(),
+            desc_pfn,
+        );
     }
 
     /// Read the queue size exposed by the selected legacy PCI queue.
@@ -473,6 +533,8 @@ impl VirtioDevice {
 
     /// Notify a queue
     pub fn notify_queue(&self, queue_index: u16) {
-        self.write_reg_u16(16, queue_index); // VIRTIO_PCI_QUEUE_NOTIFY
+        // Write as 32-bit: some QEMU/config combos ignore 16-bit writes
+        // to the QueueNotify register.
+        self.write_reg_u32(16, queue_index as u32); // VIRTIO_PCI_QUEUE_NOTIFY
     }
 }

@@ -37,7 +37,7 @@ pub use touch::cmd_touch;
 pub use umount::cmd_umount;
 pub use write::cmd_write;
 
-// ─── Shell CWD ───────────────────────────────────────────────────────────────
+// ========== Shell CWD ==============================
 
 /// Current working directory for the chevron shell.
 ///
@@ -83,9 +83,9 @@ fn normalize_path(path: &str) -> String {
 
 /// Resolve `path` relative to the shell CWD.
 ///
-/// - Empty or `""` → current directory.
-/// - Starts with `/` → treated as absolute (normalized).
-/// - Otherwise → joined with CWD and normalized.
+/// - Empty or `""` => current directory.
+/// - Starts with `/` => treated as absolute (normalized).
+/// - Otherwise => joined with CWD and normalized.
 pub fn resolve_shell_path(path: &str) -> String {
     if path.is_empty() {
         return get_cwd();
@@ -102,7 +102,7 @@ pub fn resolve_shell_path(path: &str) -> String {
     normalize_path(&combined)
 }
 
-// ─── cd ──────────────────────────────────────────────────────────────────────
+// ========== cd ============================================================
 
 /// Change the shell working directory.
 pub(super) fn cmd_cd_impl(args: &[String]) -> Result<(), ShellError> {
@@ -126,18 +126,19 @@ pub(super) fn cmd_cd_impl(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-// ─── ls ──────────────────────────────────────────────────────────────────────
+// ========== ls ============================================================
 
 /// List directory contents or mount points.
 pub(super) fn cmd_ls_impl(args: &[String]) -> Result<(), ShellError> {
-    let path = if args.is_empty() {
-        resolve_shell_path("")
-    } else {
-        resolve_shell_path(&args[0])
-    };
+    let long = args.iter().any(|a| a == "-l");
+    let path = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|a| resolve_shell_path(a))
+        .unwrap_or_else(|| resolve_shell_path(""));
 
     // Root special-case: show mount points (until overlays are implemented).
-    if path == "/" {
+    if path == "/" && !long {
         shell_println!("Mount points:");
         for m in vfs::list_mounts() {
             shell_println!("  {}", m);
@@ -147,11 +148,39 @@ pub(super) fn cmd_ls_impl(args: &[String]) -> Result<(), ShellError> {
 
     match vfs::open(&path, OpenFlags::READ | OpenFlags::DIRECTORY) {
         Ok(fd) => {
-            // Prefer getdents (scheme-neutral, works with ramfs, devfs, procfs…)
             match vfs::getdents(fd) {
                 Ok(entries) => {
                     if entries.is_empty() {
                         shell_println!("(empty)");
+                    } else if long {
+                        for e in &entries {
+                            let full_path = if path.ends_with('/') {
+                                alloc::format!("{}{}", path, e.name)
+                            } else {
+                                alloc::format!("{}/{}", path, e.name)
+                            };
+                            let suffix = if e.file_type == DT_DIR { "/" } else { "" };
+                            match vfs::stat_path(&full_path) {
+                                Ok(st) => {
+                                    let mode_str = format_mode(st.st_mode);
+                                    shell_println!(
+                                        "{} {:>3} {:>4} {:>4} {:>8} {} {}{}",
+                                        mode_str,
+                                        st.st_nlink,
+                                        st.st_uid,
+                                        st.st_gid,
+                                        st.st_size,
+                                        format_mtime(st.st_mtime),
+                                        e.name,
+                                        suffix
+                                    );
+                                }
+                                Err(_) => {
+                                    let type_char = if e.file_type == DT_DIR { 'd' } else { '-' };
+                                    shell_println!("  {}{}", type_char, e.name);
+                                }
+                            }
+                        }
                     } else {
                         for e in &entries {
                             let type_char = if e.file_type == DT_DIR { 'd' } else { '-' };
@@ -160,7 +189,6 @@ pub(super) fn cmd_ls_impl(args: &[String]) -> Result<(), ShellError> {
                     }
                 }
                 Err(_) => {
-                    // Fallback for schemes that implement read-as-listing.
                     let mut buf = [0u8; 4096];
                     match vfs::read(fd, &mut buf) {
                         Ok(n) if n > 0 => {
@@ -179,7 +207,120 @@ pub(super) fn cmd_ls_impl(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-// ─── cat ─────────────────────────────────────────────────────────────────────
+/// Format st_mode into a 10-char permission string like `drwxr-xr-x`.
+fn format_mode(mode: u32) -> alloc::string::String {
+    let ft = mode & 0o170000;
+    let type_char = match ft {
+        0o040000 => 'd',
+        0o120000 => 'l',
+        0o060000 => 'b',
+        0o020000 => 'c',
+        0o010000 => 'p',
+        0o140000 => 's',
+        _ => '-',
+    };
+    let perms = mode & 0o7777;
+    let mut buf = [0u8; 10];
+    buf[0] = type_char as u8;
+    // Owner
+    buf[1] = if perms & 0o400 != 0 { b'r' } else { b'-' };
+    buf[2] = if perms & 0o200 != 0 { b'w' } else { b'-' };
+    buf[3] = if perms & 0o100 != 0 {
+        if perms & 0o4000 != 0 {
+            b's'
+        } else {
+            b'x'
+        }
+    } else {
+        if perms & 0o4000 != 0 {
+            b'S'
+        } else {
+            b'-'
+        }
+    };
+    // Group
+    buf[4] = if perms & 0o40 != 0 { b'r' } else { b'-' };
+    buf[5] = if perms & 0o20 != 0 { b'w' } else { b'-' };
+    buf[6] = if perms & 0o10 != 0 {
+        if perms & 0o2000 != 0 {
+            b's'
+        } else {
+            b'x'
+        }
+    } else {
+        if perms & 0o2000 != 0 {
+            b'S'
+        } else {
+            b'-'
+        }
+    };
+    // Other
+    buf[7] = if perms & 0o4 != 0 { b'r' } else { b'-' };
+    buf[8] = if perms & 0o2 != 0 { b'w' } else { b'-' };
+    buf[9] = if perms & 0o1 != 0 {
+        if perms & 0o1000 != 0 {
+            b't'
+        } else {
+            b'x'
+        }
+    } else {
+        if perms & 0o1000 != 0 {
+            b'T'
+        } else {
+            b'-'
+        }
+    };
+    unsafe { alloc::string::String::from_utf8_unchecked(buf.to_vec()) }
+}
+
+/// Format mtime (seconds since epoch) into `Mon DD HH:MM`.
+fn format_mtime(mtime: strat9_abi::data::TimeSpec) -> alloc::string::String {
+    let secs = mtime.tv_sec as u64;
+    let days = secs / 86400;
+    let rem = secs % 86400;
+    let hours = rem / 3600;
+    let mins = (rem % 3600) / 60;
+
+    // Simple day-of-year calculation (no leap year handling : good enough)
+    let month_days: &[(u32, &str)] = &[
+        (31, "Jan"),
+        (28, "Feb"),
+        (31, "Mar"),
+        (30, "Apr"),
+        (31, "May"),
+        (30, "Jun"),
+        (31, "Jul"),
+        (31, "Aug"),
+        (30, "Sep"),
+        (31, "Oct"),
+        (30, "Nov"),
+        (31, "Dec"),
+    ];
+    let mut day_of_year = (days % 365) as u32;
+    let mut month_idx = 0;
+    for &(days_in_month, _) in month_days {
+        if day_of_year < days_in_month {
+            break;
+        }
+        day_of_year -= days_in_month;
+        month_idx += 1;
+    }
+    if month_idx >= 12 {
+        month_idx = 11;
+        day_of_year = 30;
+    }
+    let month_name = month_days[month_idx].1;
+
+    alloc::format!(
+        "{} {:>2} {:02}:{:02}",
+        month_name,
+        day_of_year + 1,
+        hours,
+        mins
+    )
+}
+
+// ========== cat ==================================================
 
 /// Display file contents.
 /// Display file contents or piped input.
@@ -228,7 +369,7 @@ pub(super) fn cmd_cat_impl(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-// ─── scheme ──────────────────────────────────────────────────────────────────
+// ========== scheme ========================================
 
 /// List registered schemes.
 pub(super) fn cmd_scheme_impl(args: &[String]) -> Result<(), ShellError> {
@@ -239,7 +380,7 @@ pub(super) fn cmd_scheme_impl(args: &[String]) -> Result<(), ShellError> {
 
     shell_println!("Registered schemes:");
     shell_println!("{:<14} {}", "Name", "Type");
-    shell_println!("────────────────────────────────────");
+    shell_println!("======================================================");
     for scheme in vfs::list_schemes() {
         shell_println!("  {:<12} Kernel/IPC", scheme);
     }
@@ -300,7 +441,7 @@ pub(super) fn cmd_umount_impl(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-// ─── mkdir ───────────────────────────────────────────────────────────────────
+// ========== mkdir ==================================================
 
 /// Create a new directory.
 pub(super) fn cmd_mkdir_impl(args: &[String]) -> Result<(), ShellError> {
@@ -316,7 +457,7 @@ pub(super) fn cmd_mkdir_impl(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-// ─── touch ───────────────────────────────────────────────────────────────────
+// ========== touch ==================================================
 
 /// Create a new empty file.
 pub(super) fn cmd_touch_impl(args: &[String]) -> Result<(), ShellError> {
@@ -332,7 +473,7 @@ pub(super) fn cmd_touch_impl(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-// ─── rm ──────────────────────────────────────────────────────────────────────
+// ========== rm ============================================================
 
 /// Remove a file or directory.
 pub(super) fn cmd_rm_impl(args: &[String]) -> Result<(), ShellError> {
@@ -348,7 +489,7 @@ pub(super) fn cmd_rm_impl(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-// ─── write ───────────────────────────────────────────────────────────────────
+// ========== write ==================================================
 
 pub(super) fn cmd_write_impl(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
@@ -371,7 +512,7 @@ pub(super) fn cmd_write_impl(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-// ─── stat ───────────────────────────────────────────────────────────────────
+// ========== stat ==================================================
 
 pub(super) fn cmd_stat_impl(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() {
@@ -402,7 +543,7 @@ pub(super) fn cmd_stat_impl(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-// ─── cp ─────────────────────────────────────────────────────────────────────
+// ========== cp ==================================================
 
 pub(super) fn cmd_cp_impl(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
@@ -442,7 +583,7 @@ pub(super) fn cmd_cp_impl(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-// ─── mv ─────────────────────────────────────────────────────────────────────
+// ========== mv ==================================================
 
 pub(super) fn cmd_mv_impl(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
@@ -474,12 +615,12 @@ pub(super) fn cmd_mv_impl(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-// ─── df ─────────────────────────────────────────────────────────────────────
+// ========== df ==================================================
 
 pub(super) fn cmd_df_impl(_args: &[String]) -> Result<(), ShellError> {
     let mounts = vfs::list_mounts();
     shell_println!("{:<20} {}", "Mount", "Status");
-    shell_println!("────────────────────────────────────────");
+    shell_println!("=======================================================================================================");
     for m in &mounts {
         let status = if vfs::open(m, OpenFlags::READ | OpenFlags::DIRECTORY)
             .map(|fd| {

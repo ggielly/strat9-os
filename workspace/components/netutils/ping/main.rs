@@ -1,12 +1,12 @@
-//! ping – ICMP echo utility for strat9-os
+//! ping : ICMP echo utility for strat9-os
 //!
 //! Sends ICMP echo requests by writing to `/net/ping/<target_ip>` and reads
 //! replies from the same scheme path.  The actual ICMP socket is driven by
 //! the `strate-net` silo via smoltcp; this tool is a thin userspace wrapper.
 //!
-//! Usage:  ping <ipv4-address> [-c count]
+//! Usage:  ping [-6] [-c count] [ip|hostname] [count]
 //!
-//! All I/O is done through Plan 9–style schemes – no BSD sockets.
+//! All I/O is done through Plan 9–style schemes (no BSD sockets).
 
 #![no_std]
 #![no_main]
@@ -15,11 +15,14 @@
 extern crate alloc;
 
 use core::{alloc::Layout, fmt::Write, panic::PanicInfo};
+use strat9_abi::ip::{
+    is_ipv4_literal_candidate, is_ipv6_literal_candidate, parse_ipv4_literal, parse_ipv6_literal,
+};
 use strat9_syscall::{call, data::TimeSpec, number};
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Minimal bump allocator
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 alloc_freelist::define_freelist_allocator!(pub struct BumpAllocator; heap_size = 64 * 1024;);
 
@@ -34,29 +37,13 @@ fn alloc_error(_layout: Layout) -> ! {
 }
 
 #[panic_handler]
-/// Implements panic.
 fn panic(info: &PanicInfo) -> ! {
-    log("[ping] PANIC: ");
-    let msg = info.message();
-    let mut buf = [0u8; 256];
-    let mut cursor = BufWriter {
-        buf: &mut buf,
-        pos: 0,
-    };
-    let _ = write!(cursor, "{}", msg);
-    let written = cursor.pos;
-    if written > 0 {
-        if let Ok(s) = core::str::from_utf8(&buf[..written]) {
-            log(s);
-        }
-    }
-    log("\n");
-    call::exit(255)
+    call::handle_panic("ping", info)
 }
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Helpers
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 /// Implements log.
 fn log(msg: &str) {
@@ -118,58 +105,99 @@ fn sleep_ms(ms: u64) {
     };
 }
 
-/// Read a scheme file, return bytes read.
-fn scheme_read(path: &str, buf: &mut [u8]) -> Result<usize, ()> {
-    let fd = call::openat(0, path, 0x1, 0).map_err(|_| ())?; // O_READ
-    let n = call::read(fd as usize, buf).map_err(|_| {
-        let _ = call::close(fd as usize);
-    })?;
-    let _ = call::close(fd as usize);
-    Ok(n)
+/// Open a scheme file, return fd.
+fn scheme_open(path: &str) -> Result<usize, ()> {
+    call::openat(0, path, 0x3, 0).map(|fd| fd).map_err(|_| ())
 }
 
-/// Write to a scheme file, return bytes written.
-fn scheme_write(path: &str, data: &[u8]) -> Result<usize, ()> {
-    let fd = call::openat(0, path, 0x2, 0).map_err(|_| ())?; // O_WRITE
-    let n = call::write(fd as usize, data).map_err(|_| {
-        let _ = call::close(fd as usize);
-    })?;
-    let _ = call::close(fd as usize);
-    Ok(n)
+/// Write to an open scheme fd, return bytes written.
+fn scheme_write_fd(fd: usize, data: &[u8]) -> Result<usize, ()> {
+    call::write(fd, data).map_err(|_| ())
 }
 
-/// Parses ipv4 literal.
-fn parse_ipv4_literal(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    if bytes.is_empty() {
-        return false;
-    }
-    let mut dots = 0usize;
-    let mut val: u16 = 0;
-    let mut has_digit = false;
-    for &b in bytes {
-        if b == b'.' {
-            if !has_digit || val > 255 || dots >= 3 {
-                return false;
-            }
-            dots += 1;
-            val = 0;
-            has_digit = false;
-            continue;
-        }
-        if !b.is_ascii_digit() {
-            return false;
-        }
-        val = val * 10 + (b - b'0') as u16;
-        has_digit = true;
-    }
-    has_digit && val <= 255 && dots == 3
+/// Read from an open scheme fd, return bytes read.
+fn scheme_read_fd(fd: usize, buf: &mut [u8]) -> Result<usize, ()> {
+    call::read(fd, buf).map_err(|_| ())
 }
 
-fn resolve_target<'a>(target: &'a str, resolved_buf: &'a mut [u8; 64]) -> Option<&'a str> {
-    if parse_ipv4_literal(target) {
-        return Some(target);
+/// Close a scheme fd.
+fn scheme_close(fd: usize) {
+    let _ = call::close(fd);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AddressFamily {
+    Ipv4,
+    Ipv6,
+}
+
+struct ResolvedTarget<'a> {
+    addr: &'a str,
+    family: AddressFamily,
+}
+
+enum ResolveError {
+    InvalidLiteral(AddressFamily),
+    ResolveFailed,
+    FamilyMismatch {
+        requested: AddressFamily,
+        actual: AddressFamily,
+    },
+}
+
+fn family_flag(family: AddressFamily) -> &'static str {
+    match family {
+        AddressFamily::Ipv4 => "-4",
+        AddressFamily::Ipv6 => "-6",
     }
+}
+
+fn family_name(family: AddressFamily) -> &'static str {
+    match family {
+        AddressFamily::Ipv4 => "IPv4",
+        AddressFamily::Ipv6 => "IPv6",
+    }
+}
+
+fn apply_family_constraint(
+    requested: Option<AddressFamily>,
+    actual: AddressFamily,
+) -> Result<(), ResolveError> {
+    match requested {
+        Some(expected) if expected != actual => Err(ResolveError::FamilyMismatch {
+            requested: expected,
+            actual,
+        }),
+        _ => Ok(()),
+    }
+}
+
+fn resolve_target<'a>(
+    target: &'a str,
+    requested_family: Option<AddressFamily>,
+    resolved_buf: &'a mut [u8; 64],
+) -> Result<ResolvedTarget<'a>, ResolveError> {
+    if parse_ipv4_literal(target).is_some() {
+        apply_family_constraint(requested_family, AddressFamily::Ipv4)?;
+        return Ok(ResolvedTarget {
+            addr: target,
+            family: AddressFamily::Ipv4,
+        });
+    }
+    if parse_ipv6_literal(target).is_some() {
+        apply_family_constraint(requested_family, AddressFamily::Ipv6)?;
+        return Ok(ResolvedTarget {
+            addr: target,
+            family: AddressFamily::Ipv6,
+        });
+    }
+    if is_ipv4_literal_candidate(target) {
+        return Err(ResolveError::InvalidLiteral(AddressFamily::Ipv4));
+    }
+    if is_ipv6_literal_candidate(target) {
+        return Err(ResolveError::InvalidLiteral(AddressFamily::Ipv6));
+    }
+
     let mut path_buf = [0u8; 128];
     let path_len = {
         let mut pw = BufWriter {
@@ -179,74 +207,230 @@ fn resolve_target<'a>(target: &'a str, resolved_buf: &'a mut [u8; 64]) -> Option
         let _ = write!(pw, "/net/resolve/{}", target);
         pw.pos
     };
-    let path = core::str::from_utf8(&path_buf[..path_len]).ok()?;
-    let n = scheme_read(path, resolved_buf).ok()?;
+    let path =
+        core::str::from_utf8(&path_buf[..path_len]).map_err(|_| ResolveError::ResolveFailed)?;
+    let n = scheme_open(path)
+        .and_then(|fd| {
+            let r = scheme_read_fd(fd, resolved_buf);
+            scheme_close(fd);
+            r
+        })
+        .map_err(|_| ResolveError::ResolveFailed)?;
     if n == 0 {
-        return None;
+        return Err(ResolveError::ResolveFailed);
     }
     let end = resolved_buf[..n]
         .iter()
         .position(|&b| b == b'\n')
         .unwrap_or(n);
     if end == 0 {
-        return None;
+        return Err(ResolveError::ResolveFailed);
     }
-    let resolved = core::str::from_utf8(&resolved_buf[..end]).ok()?;
-    if parse_ipv4_literal(resolved) {
-        Some(resolved)
+    let resolved =
+        core::str::from_utf8(&resolved_buf[..end]).map_err(|_| ResolveError::ResolveFailed)?;
+    if parse_ipv4_literal(resolved).is_some() {
+        apply_family_constraint(requested_family, AddressFamily::Ipv4)?;
+        Ok(ResolvedTarget {
+            addr: resolved,
+            family: AddressFamily::Ipv4,
+        })
+    } else if parse_ipv6_literal(resolved).is_some() {
+        apply_family_constraint(requested_family, AddressFamily::Ipv6)?;
+        Ok(ResolvedTarget {
+            addr: resolved,
+            family: AddressFamily::Ipv6,
+        })
     } else {
-        None
+        Err(ResolveError::ResolveFailed)
     }
 }
 
-// ---------------------------------------------------------------------------
-//  Minimal argument parsing (no clap – we are no_std)
-// ---------------------------------------------------------------------------
+fn print_usage() {
+    log("Usage: ping [-6] [-c count] [target] [count]\n");
+    log("       ping -h | --help\n");
+    log("Options:\n");
+    log("  -6           Require IPv6\n");
+    log("  -c <count>   Send count requests (default: 4)\n");
+    log("  -h, --help   Show this help\n");
+}
+
+fn copy_target(dst: &mut [u8; 64], value: &str) -> usize {
+    let len = value.len().min(dst.len() - 1);
+    dst[..len].copy_from_slice(&value.as_bytes()[..len]);
+    len
+}
+
+fn read_default_target(family: Option<AddressFamily>, target: &mut [u8; 64]) -> Option<usize> {
+    let mut gateway_buf = [0u8; 64];
+    let path = if family == Some(AddressFamily::Ipv6) {
+        "/net/ip6/gateway"
+    } else {
+        "/net/gateway"
+    };
+    let n = scheme_open(path)
+        .and_then(|fd| {
+            let r = scheme_read_fd(fd, &mut gateway_buf);
+            scheme_close(fd);
+            r
+        })
+        .ok()?;
+    if n == 0 {
+        return None;
+    }
+
+    let end = gateway_buf[..n]
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(n);
+    if end == 0 {
+        return None;
+    }
+
+    let gateway = &gateway_buf[..end];
+    if gateway == b"0.0.0.0" || gateway == b"::" {
+        return None;
+    }
+
+    let gateway_str = core::str::from_utf8(gateway).ok()?;
+    Some(copy_target(target, gateway_str))
+}
+
+// ===========================================================================
+//  Minimal argument parsing
+// ===========================================================================
 
 struct PingArgs {
     target: [u8; 64],
     target_len: usize,
     count: u32,
+    family: Option<AddressFamily>,
 }
 
-/// Parses args.
-fn parse_args() -> PingArgs {
-    // In strat9-os, command-line args are not yet available via /proc or argc/argv.
-    // For now, we hard-code a sensible default.  When the init passes arguments
-    // through a scheme, this can be extended.
-    //
-    // Target: the gateway (read from /net/gateway), or fallback 10.0.2.2 (QEMU default)
-    let mut target = [0u8; 64];
-    let target_len;
+/// Convert a null-terminated C string pointer to a `&'static str`.
+///
+/// # Safety
+/// `ptr` must point to a valid null-terminated byte sequence that remains
+/// valid for the lifetime of the process (true for argv pointers on the
+/// initial user stack).
+unsafe fn cstr_to_str(ptr: *const u8) -> &'static str {
+    let mut len = 0usize;
+    while *ptr.add(len) != 0 {
+        len += 1;
+    }
+    core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr, len))
+}
 
-    let mut gw_buf = [0u8; 64];
-    if let Ok(n) = scheme_read("/net/gateway", &mut gw_buf) {
-        if n > 0 && !gw_buf.starts_with(b"0.0.0.0") {
-            // Trim trailing newline
-            let end = gw_buf[..n].iter().position(|&b| b == b'\n').unwrap_or(n);
-            target[..end].copy_from_slice(&gw_buf[..end]);
-            target_len = end;
-        } else {
-            let default = b"10.0.2.2";
-            target[..default.len()].copy_from_slice(default);
-            target_len = default.len();
+/// Parse an ASCII decimal string into a `u32`.
+fn str_to_u32(s: &str) -> Option<u32> {
+    if s.is_empty() {
+        return None;
+    }
+    let mut val: u32 = 0;
+    for &b in s.as_bytes() {
+        if !b.is_ascii_digit() {
+            return None;
         }
-    } else {
-        let default = b"10.0.2.2";
-        target[..default.len()].copy_from_slice(default);
-        target_len = default.len();
+        val = val.checked_mul(10)?.checked_add((b - b'0') as u32)?;
+    }
+    Some(val)
+}
+
+/// Build `PingArgs` from the SysV initial user stack.
+///
+/// Supported forms:
+/// - `ping <target> [count]`
+/// - `ping -c <count> [target]`
+/// - `ping -6 ...`
+/// - `ping -h|--help`
+fn parse_args_from_stack(argc: usize, argv: *const *const u8) -> PingArgs {
+    let mut target = [0u8; 64];
+    let mut target_len = 0usize;
+    let mut count = 4u32;
+    let mut family: Option<AddressFamily> = None;
+    let mut positional_count_set = false;
+
+    let mut i = 1usize;
+    while i < argc {
+        let arg = unsafe { cstr_to_str(*argv.add(i)) };
+        match arg {
+            "-h" | "--help" => {
+                print_usage();
+                call::exit(0);
+            }
+            "-6" => {
+                family = Some(AddressFamily::Ipv6);
+            }
+            "-c" => {
+                i += 1;
+                if i >= argc {
+                    log("ping: missing value for -c\n");
+                    print_usage();
+                    call::exit(1);
+                }
+                let count_arg = unsafe { cstr_to_str(*argv.add(i)) };
+                let Some(parsed) = str_to_u32(count_arg) else {
+                    log("ping: invalid count: ");
+                    log(count_arg);
+                    log("\n");
+                    call::exit(1);
+                };
+                count = parsed;
+            }
+            _ if arg.starts_with('-') => {
+                log("ping: unknown option: ");
+                log(arg);
+                log("\n");
+                print_usage();
+                call::exit(1);
+            }
+            _ if target_len == 0 => {
+                target_len = copy_target(&mut target, arg);
+            }
+            _ if !positional_count_set => {
+                let Some(parsed) = str_to_u32(arg) else {
+                    log("ping: unexpected argument: ");
+                    log(arg);
+                    log("\n");
+                    print_usage();
+                    call::exit(1);
+                };
+                count = parsed;
+                positional_count_set = true;
+            }
+            _ => {
+                log("ping: unexpected argument: ");
+                log(arg);
+                log("\n");
+                print_usage();
+                call::exit(1);
+            }
+        }
+
+        i += 1;
+    }
+
+    if target_len == 0 {
+        target_len = match read_default_target(family, &mut target) {
+            Some(len) => len,
+            None => {
+                log("ping: no target specified and no default gateway configured\n");
+                print_usage();
+                call::exit(1);
+            }
+        };
     }
 
     PingArgs {
         target,
         target_len,
-        count: 4,
+        count,
+        family,
     }
 }
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Ping implementation
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 /// ICMP echo request/reply payload passed through the `/net/ping/<ip>` scheme.
 ///
@@ -259,43 +443,93 @@ struct PingRequest {
     payload: [u8; 40],
 }
 
-#[repr(C)]
-struct PingReply {
-    seq: u16,
-    rtt_us: u64,
+/// Entry point: captures the initial RSP (= SysV stack pointer) and calls
+/// `start_impl`. Using a naked function guarantees that no prologue has
+/// modified RSP before we pass it as `rdi`.
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _start() -> ! {
+    // At entry via iretq: RSP = boot_sp from the ELF loader.
+    // SysV layout: [RSP] = argc, [RSP+8] = argv[0] ptr, ...
+    core::arch::naked_asm!(
+        "mov rdi, rsp",   // pass initial stack pointer as first arg
+        "call {f}",
+        "ud2",
+        f = sym start_impl,
+    );
 }
 
-#[unsafe(no_mangle)]
-/// Implements start.
-pub extern "C" fn _start() -> ! {
-    let args = parse_args();
+/// Main program logic; called from the naked `_start` trampoline.
+///
+/// `initial_sp` is the SysV stack pointer captured before any prologue code
+/// has run, so `*initial_sp` == argc and `*(initial_sp + 1)` == argv[0].
+extern "C" fn start_impl(initial_sp: *const u64) -> ! {
+    let argc = unsafe { *initial_sp } as usize;
+    let argv = unsafe { initial_sp.add(1) as *const *const u8 };
+    let args = parse_args_from_stack(argc, argv);
     let raw_target = unsafe { core::str::from_utf8_unchecked(&args.target[..args.target_len]) };
     let mut resolved_buf = [0u8; 64];
-    let target = match resolve_target(raw_target, &mut resolved_buf) {
-        Some(ip) => ip,
-        None => {
-            log("ping: cannot resolve target ");
+    let target = match resolve_target(raw_target, args.family, &mut resolved_buf) {
+        Ok(target) => target,
+        Err(ResolveError::InvalidLiteral(family)) => {
+            log("ping: invalid ");
+            log(family_name(family));
+            log(" address: ");
             log(raw_target);
             log("\n");
-            call::exit(2);
+            call::exit(1);
+        }
+        Err(ResolveError::ResolveFailed) => {
+            log("ping: cannot resolve host: ");
+            log(raw_target);
+            log("\n");
+            call::exit(1);
+        }
+        Err(ResolveError::FamilyMismatch { requested, actual }) => {
+            log("ping: ");
+            log(family_flag(requested));
+            log(" requires an ");
+            log(family_name(requested));
+            log(" target, but got ");
+            log(family_name(actual));
+            log("\n");
+            call::exit(1);
         }
     };
 
     log("PING ");
-    log(target);
-    log(" - ");
+    log(target.addr);
+    log(", sending ");
     log_u32(args.count);
-    log(" packets\n");
+    log(" ICMP now\n");
 
-    // Build the scheme path: /net/ping/<ip>
+    // Build the scheme path: /net/ping/<ip> or /net/ping6/<ip>
     let mut path_buf = [0u8; 128];
     let mut pw = BufWriter {
         buf: &mut path_buf,
         pos: 0,
     };
-    let _ = write!(pw, "/net/ping/{}", target);
+    let scheme_name = match target.family {
+        AddressFamily::Ipv4 => "ping",
+        AddressFamily::Ipv6 => "ping6",
+    };
+    let _ = write!(pw, "/net/{}/{}", scheme_name, target.addr);
     let path_len = pw.pos;
     let path = unsafe { core::str::from_utf8_unchecked(&path_buf[..path_len]) };
+
+    // Open the scheme fd once and reuse for all pings (avoids open/close per packet).
+    let fd = match scheme_open(path) {
+        Ok(fd) => fd,
+        Err(()) => {
+            log("ping: cannot open ");
+            log(path);
+            log("\n");
+            call::exit(1);
+        }
+    };
+
+    const PING_TIMEOUT_MS: u64 = 5_000;
+    const POLL_INTERVAL_MS: u64 = 100;
 
     let mut sent: u32 = 0;
     let mut received: u32 = 0;
@@ -318,57 +552,83 @@ pub extern "C" fn _start() -> ! {
             )
         };
 
-        // Send
-        if scheme_write(path, req_bytes).is_err() {
-            log("  Request timeout (write failed)\n");
+        let mut wrote = false;
+        let write_deadline_ns = clock_ns().saturating_add(PING_TIMEOUT_MS * 1_000_000);
+        while clock_ns() < write_deadline_ns {
+            log("[pt] wr ");
+            if scheme_write_fd(fd, req_bytes).is_ok() {
+                wrote = true;
+                log("ok\n");
+                break;
+            }
+            log(".");
+            // NOTE: do NOT read-drain here : with a persistent FD, a drain
+            // would consume replies from previously sent pings, losing them.
+            sleep_ms(POLL_INTERVAL_MS);
+        }
+
+        if !wrote {
+            log("  Request timeout (write failed): seq=");
+            log_u32(seq);
+            log("\n");
             sent += 1;
-            sleep_ms(1000);
             continue;
         }
         sent += 1;
 
-        // Wait a bit then read reply
-        sleep_ms(100);
-        let mut reply_buf = [0u8; 64];
-        match scheme_read(path, &mut reply_buf) {
-            Ok(n) if n >= 10 => {
-                let rtt_us = u64::from_le_bytes([
-                    reply_buf[2],
-                    reply_buf[3],
-                    reply_buf[4],
-                    reply_buf[5],
-                    reply_buf[6],
-                    reply_buf[7],
-                    reply_buf[8],
-                    reply_buf[9],
-                ]);
-                let rtt_ms = rtt_us / 1000;
-                let rtt_frac = (rtt_us % 1000) / 100;
+        log("[pt] rd ");
+        let mut got_reply = false;
+        let read_deadline_ns = clock_ns().saturating_add(PING_TIMEOUT_MS * 1_000_000);
+        while clock_ns() < read_deadline_ns {
+            let mut reply_buf = [0u8; 64];
+            match scheme_read_fd(fd, &mut reply_buf) {
+                Ok(n) if n >= 10 => {
+                    log("rep\n");
+                    // Use the RTT computed by strate-net (accurate ICMP-level timing),
+                    // not a local timestamp which would include IPC overhead.
+                    let reply_seq = u16::from_le_bytes([reply_buf[0], reply_buf[1]]);
+                    let rtt_us =
+                        u64::from_le_bytes(reply_buf[2..10].try_into().unwrap_or([0u8; 8]));
+                    let rtt_ms = rtt_us / 1000;
+                    let rtt_frac = (rtt_us % 1000) / 100;
 
-                log("  Reply from ");
-                log(target);
-                log(": seq=");
-                log_u32(seq);
-                log(" time=");
-                log_u32(rtt_ms as u32);
-                log(".");
-                log_u32(rtt_frac as u32);
-                log("ms\n");
+                    log("  Reply from ");
+                    log(target.addr);
+                    log(": seq=");
+                    log_u32(reply_seq as u32);
+                    log(" time=");
+                    log_u32(rtt_ms as u32);
+                    log(".");
+                    log_u32(rtt_frac as u32);
+                    log("ms\n");
 
-                received += 1;
-                total_rtt_us += rtt_us;
-                if rtt_us < min_rtt_us {
-                    min_rtt_us = rtt_us;
+                    received += 1;
+                    total_rtt_us += rtt_us;
+                    if rtt_us < min_rtt_us {
+                        min_rtt_us = rtt_us;
+                    }
+                    if rtt_us > max_rtt_us {
+                        max_rtt_us = rtt_us;
+                    }
+                    got_reply = true;
+                    break;
                 }
-                if rtt_us > max_rtt_us {
-                    max_rtt_us = rtt_us;
+                Ok(0) => {
+                    log(".");
+                    sleep_ms(POLL_INTERVAL_MS);
+                }
+                _ => {
+                    log("x");
+                    sleep_ms(POLL_INTERVAL_MS);
                 }
             }
-            _ => {
-                log("  Request timeout: seq=");
-                log_u32(seq);
-                log("\n");
-            }
+        }
+
+        if !got_reply {
+            log("[pt] rto\n");
+            log("  Request timeout: seq=");
+            log_u32(seq);
+            log("\n");
         }
 
         if seq + 1 < args.count {
@@ -378,7 +638,7 @@ pub extern "C" fn _start() -> ! {
 
     // Statistics
     log("\n--- ");
-    log(target);
+    log(target.addr);
     log(" ping statistics ---\n");
     log_u32(sent);
     log(" packets transmitted, ");
@@ -403,5 +663,6 @@ pub extern "C" fn _start() -> ! {
         log(" ms\n");
     }
 
+    scheme_close(fd);
     call::exit(0)
 }

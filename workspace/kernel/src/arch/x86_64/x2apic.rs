@@ -29,7 +29,7 @@ impl X2Apic {
             return None;
         }
         // SAFETY: rdmsr is a privileged Ring-0 instruction, valid here.
-        let base = unsafe { rdmsr(IA32_APIC_BASE_MSR) };
+        let base = rdmsr(IA32_APIC_BASE_MSR);
         if base & (APIC_BASE_EN | APIC_BASE_EXTD) == (APIC_BASE_EN | APIC_BASE_EXTD) {
             Some(Self { _private: () })
         } else {
@@ -44,61 +44,58 @@ impl X2Apic {
 
     pub fn enable(&self) {
         // SAFETY: wrmsr/rdmsr are Ring-0 privileged instructions, valid here.
-        unsafe {
-            let base = rdmsr(IA32_APIC_BASE_MSR);
-            let already_extd = base & APIC_BASE_EXTD != 0;
 
-            if !already_extd {
-                if base & APIC_BASE_EN == 0 {
-                    wrmsr(IA32_APIC_BASE_MSR, base | APIC_BASE_EN);
-                }
-                wrmsr(IA32_APIC_BASE_MSR, base | APIC_BASE_EN | APIC_BASE_EXTD);
+        let base = rdmsr(IA32_APIC_BASE_MSR);
+        let already_extd = base & APIC_BASE_EXTD != 0;
+
+        if !already_extd {
+            if base & APIC_BASE_EN == 0 {
+                wrmsr(IA32_APIC_BASE_MSR, base | APIC_BASE_EN);
             }
-
-            let base_after = rdmsr(IA32_APIC_BASE_MSR);
-            if base_after & (APIC_BASE_EN | APIC_BASE_EXTD) != (APIC_BASE_EN | APIC_BASE_EXTD) {
-                return;
-            }
-
-            let svr: u64 = (1 << 8) | 0xFF;
-            wrmsr(IA32_X2APIC_SIVR, svr);
+            wrmsr(IA32_APIC_BASE_MSR, base | APIC_BASE_EN | APIC_BASE_EXTD);
         }
+
+        let base_after = rdmsr(IA32_APIC_BASE_MSR);
+        if base_after & (APIC_BASE_EN | APIC_BASE_EXTD) != (APIC_BASE_EN | APIC_BASE_EXTD) {
+            return;
+        }
+
+        let svr: u64 = (1 << 8) | 0xFF;
+        wrmsr(IA32_X2APIC_SIVR, svr);
     }
 
     pub fn id(&self) -> u32 {
         // SAFETY: x2APIC MSR reads are valid after enable().
-        unsafe { rdmsr(IA32_X2APIC_APICID) as u32 }
+        rdmsr(IA32_X2APIC_APICID) as u32
     }
 
     pub fn version(&self) -> u32 {
         // SAFETY: x2APIC MSR reads are valid after enable().
-        unsafe { rdmsr(IA32_X2APIC_VERSION) as u32 }
+        rdmsr(IA32_X2APIC_VERSION) as u32
     }
 
     pub fn eoi(&self) {
         // SAFETY: x2APIC MSR writes are valid after enable().
-        unsafe { wrmsr(IA32_X2APIC_EOI, 0) };
+        wrmsr(IA32_X2APIC_EOI, 0);
     }
 
     pub fn send_ipi(&self, target_id: u32, vector: u8) {
         // SAFETY: x2APIC ICR write is valid after enable(). ICR is a single
         // 64-bit MSR write in x2APIC: bits[63:32]=destination, bits[31:0]=command.
-        unsafe {
-            wrmsr(IA32_X2APIC_ESR, 0);
-            let icr = ((target_id as u64) << 32) | (vector as u64) | (1 << 14);
-            wrmsr(IA32_X2APIC_ICR, icr);
-        }
+
+        wrmsr(IA32_X2APIC_ESR, 0);
+        let icr = ((target_id as u64) << 32) | (vector as u64) | (1 << 14);
+        wrmsr(IA32_X2APIC_ICR, icr);
     }
 
     pub fn configure_timer(&self, initial_count: u32, vector: u8, periodic: bool) {
         // SAFETY: x2APIC timer MSR writes are valid after enable().
-        unsafe {
-            let mut lvt = vector as u64;
-            if periodic {
-                lvt |= 1 << 17;
-            }
-            wrmsr(IA32_X2APIC_LVT_TIMER, lvt);
-            wrmsr(IA32_X2APIC_TIMER_INIT, initial_count as u64);
+
+        let mut lvt = vector as u64;
+        if periodic {
+            lvt |= 1 << 17;
         }
+        wrmsr(IA32_X2APIC_LVT_TIMER, lvt);
+        wrmsr(IA32_X2APIC_TIMER_INIT, initial_count as u64);
     }
 }

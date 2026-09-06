@@ -1,6 +1,7 @@
 //! System management commands
 mod clear;
 mod cpuinfo;
+mod crypto;
 mod frame_meta;
 mod health;
 mod heap;
@@ -25,6 +26,7 @@ mod version;
 mod wasm_run;
 pub use clear::cmd_clear;
 pub use cpuinfo::cmd_cpuinfo;
+pub use crypto::cmd_crypto;
 pub use frame_meta::cmd_frame_meta;
 pub use health::cmd_health;
 pub use heap::cmd_heap;
@@ -49,7 +51,7 @@ use silo_attach::cmd_silo_attach;
 use silo_limit::cmd_silo_limit;
 
 use crate::{
-    arch::x86_64::vga,
+    arch::vga,
     memory,
     process::elf::load_and_run_elf,
     shell::{
@@ -78,6 +80,16 @@ sid = 42
 [[silos.strates]]
 name = "console-admin"
 binary = "/initfs/console-admin"
+type = "elf"
+
+[[silos]]
+name = "bus"
+family = "DRV"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "strate-bus"
+binary = "/initfs/strate-bus"
 type = "elf"
 
 [[silos]]
@@ -111,13 +123,18 @@ binary = "/initfs/bin/telnetd"
 type = "elf"
 
 [[silos]]
-name = "ssh"
+name = "web-admin"
 family = "NET"
 mode = "076"
 sid = 42
+graphics_enabled = true
+graphics_mode = "webrtc-native"
+graphics_max_sessions = 1
+graphics_session_ttl_sec = 1800
+graphics_turn_policy = "auto"
 [[silos.strates]]
-name = "sshd"
-binary = "/initfs/bin/sshd"
+name = "web-admin"
+binary = "/initfs/bin/web-admin"
 type = "elf"
 
 [[silos]]
@@ -349,6 +366,66 @@ fn load_managed_silos_with_source() -> (Vec<ManagedSiloDef>, &'static str) {
             "embedded-default",
         ),
     }
+}
+
+fn family_uses_system_sid(family: &str) -> bool {
+    matches!(family, "SYS" | "DRV" | "NET" | "FS")
+}
+
+fn compute_managed_runtime_sids(managed: &[ManagedSiloDef]) -> Vec<(String, u32)> {
+    let mut ordered = managed.to_vec();
+    ordered.sort_by_key(|s| if s.name == "bus" { 0u8 } else { 1u8 });
+
+    let mut next_sys_sid = 100u32;
+    let mut next_usr_sid = 1000u32;
+    let mut mappings = Vec::new();
+
+    for silo in ordered {
+        let sid = if silo.sid == 42 {
+            if family_uses_system_sid(&silo.family) {
+                let id = next_sys_sid;
+                next_sys_sid += 1;
+                id
+            } else {
+                let id = next_usr_sid;
+                next_usr_sid += 1;
+                id
+            }
+        } else {
+            silo.sid
+        };
+        mappings.push((silo.name, sid));
+    }
+
+    mappings
+}
+
+fn managed_name_for_runtime_sid(
+    managed_runtime_sids: &[(String, u32)],
+    sid: u32,
+) -> Option<String> {
+    managed_runtime_sids
+        .iter()
+        .find(|(_, mapped_sid)| *mapped_sid == sid)
+        .map(|(name, _)| name.clone())
+}
+
+fn normalize_silo_selector(selector: &str, managed_runtime_sids: &[(String, u32)]) -> String {
+    if selector.parse::<u32>().is_ok() {
+        return String::from(selector);
+    }
+
+    managed_runtime_sids
+        .iter()
+        .find(|(name, _)| name == selector)
+        .map(|(_, sid)| alloc::format!("{}", sid))
+        .unwrap_or_else(|| String::from(selector))
+}
+
+fn normalize_current_silo_selector(selector: &str) -> String {
+    let (managed, _) = load_managed_silos_with_source();
+    let managed_runtime_sids = compute_managed_runtime_sids(&managed);
+    normalize_silo_selector(selector, &managed_runtime_sids)
 }
 
 /// Performs the push unique operation.
@@ -797,9 +874,9 @@ pub(super) fn cmd_clear_impl(_args: &[String]) -> Result<(), ShellError> {
 pub(super) fn cmd_cpuinfo_impl(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("CPU information:");
 
-    if crate::arch::x86_64::apic::is_initialized() {
-        let lapic_id = crate::arch::x86_64::apic::lapic_id();
-        let cpu_count = crate::arch::x86_64::percpu::cpu_count();
+    if crate::arch::apic::is_initialized() {
+        let lapic_id = crate::arch::apic::lapic_id();
+        let cpu_count = crate::arch::percpu::cpu_count();
         shell_println!("  Current LAPIC ID:  {}", lapic_id);
         shell_println!("  CPU count:         {}", cpu_count);
         shell_println!("  APIC:              Active");
@@ -816,10 +893,10 @@ pub(super) fn cmd_cpuinfo_impl(_args: &[String]) -> Result<(), ShellError> {
 pub(super) fn cmd_reboot_impl(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("Rebooting system...");
     unsafe {
-        crate::arch::x86_64::cli();
-        crate::arch::x86_64::io::outb(0x64, 0xFE);
+        crate::arch::cli();
+        crate::arch::io::outb(0x64, 0xFE);
         loop {
-            crate::arch::x86_64::hlt();
+            crate::arch::hlt();
         }
     }
 }
@@ -962,8 +1039,7 @@ pub(super) fn cmd_test_pid_impl(_args: &[String]) -> Result<(), ShellError> {
     let _ = vfs::close(fd);
 
     shell_println!("ELF size: {} bytes", data.len());
-    shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
-    match load_and_run_elf(&data, "init") {
+    match load_and_run_elf(&data, "test_pid") {
         Ok(task_id) => {
             shell_println!("test_pid started (task id={})", task_id);
             Ok(())
@@ -999,8 +1075,7 @@ pub(super) fn cmd_test_syscalls_impl(_args: &[String]) -> Result<(), ShellError>
     let _ = vfs::close(fd);
 
     shell_println!("ELF size: {} bytes", data.len());
-    shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
-    match load_and_run_elf(&data, "init") {
+    match load_and_run_elf(&data, "test_syscalls") {
         Ok(task_id) => {
             shell_println!("test_syscalls started (task id={})", task_id);
             Ok(())
@@ -1036,8 +1111,7 @@ pub(super) fn cmd_test_mem_impl(_args: &[String]) -> Result<(), ShellError> {
     let _ = vfs::close(fd);
 
     shell_println!("ELF size: {} bytes", data.len());
-    shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
-    match load_and_run_elf(&data, "init") {
+    match load_and_run_elf(&data, "test_mem") {
         Ok(task_id) => {
             shell_println!("test_mem started (task id={})", task_id);
             Ok(())
@@ -1073,8 +1147,7 @@ pub(super) fn cmd_test_mem_stressed_impl(_args: &[String]) -> Result<(), ShellEr
     let _ = vfs::close(fd);
 
     shell_println!("ELF size: {} bytes", data.len());
-    shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
-    match load_and_run_elf(&data, "init") {
+    match load_and_run_elf(&data, "test_mem_stressed") {
         Ok(task_id) => {
             shell_println!("test_mem_stressed started (task id={})", task_id);
             Ok(())
@@ -1110,8 +1183,7 @@ pub(super) fn cmd_test_mem_region_impl(_args: &[String]) -> Result<(), ShellErro
     let _ = vfs::close(fd);
 
     shell_println!("ELF size: {} bytes", data.len());
-    shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
-    match load_and_run_elf(&data, "init") {
+    match load_and_run_elf(&data, "test_mem_region") {
         Ok(task_id) => {
             shell_println!("test_mem_region started (task id={})", task_id);
             Ok(())
@@ -1147,8 +1219,7 @@ pub(super) fn cmd_test_mem_region_proc_impl(_args: &[String]) -> Result<(), Shel
     let _ = vfs::close(fd);
 
     shell_println!("ELF size: {} bytes", data.len());
-    shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
-    match load_and_run_elf(&data, "init") {
+    match load_and_run_elf(&data, "test_mem_region_proc") {
         Ok(task_id) => {
             shell_println!("test_mem_region_proc started (task id={})", task_id);
             Ok(())
@@ -1184,16 +1255,13 @@ pub(super) fn cmd_test_exec_impl(_args: &[String]) -> Result<(), ShellError> {
     let path = "/initfs/test_exec";
     shell_println!("Launching {} ...", path);
 
-    let boot_bytes = initfs_or_boot_module(path, crate::boot::limine::test_exec_module());
-    let _ = initfs_or_boot_module(
-        "/initfs/test_exec_helper",
-        crate::boot::limine::test_exec_helper_module(),
-    );
+    // Modules are loaded from the FAT32 boot partition
+    // TODO: Phase 4 - Implement FAT32 module loading
+    let boot_bytes = vfs::get_initfs_file_bytes(path);
 
     if let Some(data) = boot_bytes {
         shell_println!("ELF size: {} bytes", data.len());
-        shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
-        return match load_and_run_elf(data, "init") {
+        return match load_and_run_elf(data, "test_exec") {
             Ok(task_id) => {
                 shell_println!("test_exec started (task id={})", task_id);
                 Ok(())
@@ -1209,11 +1277,9 @@ pub(super) fn cmd_test_exec_impl(_args: &[String]) -> Result<(), ShellError> {
         Ok(fd) => fd,
         Err(e) => {
             shell_println!("open failed: {:?}", e);
-            if crate::boot::limine::test_exec_module().is_none() {
-                shell_println!(
-                    "test_exec boot module missing from current image; rebuild the userspace image so /initfs/test_exec is copied"
-                );
-            }
+            shell_println!(
+                "test_exec not found; ensure it's in the FAT32 boot partition"
+            );
             return Err(ShellError::ExecutionFailed);
         }
     };
@@ -1229,8 +1295,7 @@ pub(super) fn cmd_test_exec_impl(_args: &[String]) -> Result<(), ShellError> {
     let _ = vfs::close(fd);
 
     shell_println!("ELF size: {} bytes", data.len());
-    shell_println!("Launching with task name 'init' to inherit bootstrap console/admin caps");
-    match load_and_run_elf(&data, "init") {
+    match load_and_run_elf(&data, "test_exec") {
         Ok(task_id) => {
             shell_println!("test_exec started (task id={})", task_id);
             Ok(())
@@ -1256,6 +1321,7 @@ fn cmd_silo_list(args: &[String]) -> Result<(), ShellError> {
     }
 
     let (managed, managed_source) = load_managed_silos_with_source();
+    let managed_runtime_sids = compute_managed_runtime_sids(&managed);
     let mut silos = silo::list_silos_snapshot();
     silos.sort_by_key(|s| s.id);
 
@@ -1270,7 +1336,11 @@ fn cmd_silo_list(args: &[String]) -> Result<(), ShellError> {
             }
         }
         config_rows.push(ConfigListRow {
-            sid: m.sid,
+            sid: managed_runtime_sids
+                .iter()
+                .find(|(name, _)| *name == m.name)
+                .map(|(_, sid)| *sid)
+                .unwrap_or(m.sid),
             name: m.name.clone(),
             family: m.family.clone(),
             mode: m.mode.clone(),
@@ -1279,10 +1349,15 @@ fn cmd_silo_list(args: &[String]) -> Result<(), ShellError> {
     }
 
     for s in silos.iter() {
+        let display_name = managed_name_for_runtime_sid(&managed_runtime_sids, s.id)
+            .unwrap_or_else(|| s.name.clone());
         let label = s.strate_label.clone().unwrap_or_else(|| String::from("-"));
         let mut strates = Vec::new();
         for m in &managed {
-            if m.name == s.name || m.sid == s.id {
+            if managed_runtime_sids
+                .iter()
+                .any(|(name, sid)| *sid == s.id && *name == m.name)
+            {
                 for st in &m.strates {
                     if !st.name.is_empty() {
                         push_unique(&mut strates, &st.name);
@@ -1303,7 +1378,7 @@ fn cmd_silo_list(args: &[String]) -> Result<(), ShellError> {
         };
         rows.push(SiloListRow {
             sid: s.id,
-            name: s.name.clone(),
+            name: display_name,
             state: alloc::format!("{:?}", s.state),
             tasks: s.task_count,
             memory: mem_cell,
@@ -1330,7 +1405,7 @@ fn cmd_silo_list(args: &[String]) -> Result<(), ShellError> {
         "Label",
         "Strates"
     );
-    shell_println!("────────────────────────────────────────────────────────────────────────────────────────────────────────────");
+    shell_println!("====================================================================================================================================================================================");
     for r in rows {
         shell_println!(
             "{:<6} {:<12} {:<10} {:<7} {:<18} {:<6o} {:<12} {}",
@@ -1438,14 +1513,14 @@ fn cmd_strate_list(_args: &[String]) -> Result<(), ShellError> {
 
     shell_println!("Runtime:");
     shell_println!("{:<20} {:<24} {}", "Strate", "BelongsTo", "Status");
-    shell_println!("────────────────────────────────────────────────────────────");
+    shell_println!("====================");
     for r in runtime_rows {
         shell_println!("{:<20} {:<24} {}", r.strate, r.belongs_to, r.status);
     }
     shell_println!("");
     shell_println!("Config ({}):", managed_source);
     shell_println!("{:<20} {}", "Strate", "BelongsTo");
-    shell_println!("────────────────────────────────────────────────────────────");
+    shell_println!("====================");
     for r in config_rows {
         shell_println!("{:<20} {}", r.strate, r.belongs_to);
     }
@@ -1786,11 +1861,11 @@ fn cmd_strate_config(args: &[String]) -> Result<(), ShellError> {
 /// Performs the cmd strate start operation.
 fn cmd_strate_start(args: &[String]) -> Result<(), ShellError> {
     if args.len() != 2 {
-        shell_println!("Usage: strate start <id|label>");
+        shell_println!("Usage: strate start <id|label|name>");
         return Err(ShellError::InvalidArguments);
     }
-    let selector = args[1].as_str();
-    match silo::kernel_start_silo(selector) {
+    let selector = normalize_current_silo_selector(args[1].as_str());
+    match silo::kernel_start_silo(selector.as_str()) {
         Ok(sid) => {
             shell_println!("strate start: ok (sid={})", sid);
             print_strate_state_for_sid(sid);
@@ -1806,15 +1881,15 @@ fn cmd_strate_start(args: &[String]) -> Result<(), ShellError> {
 /// Performs the cmd strate lifecycle operation.
 fn cmd_strate_lifecycle(args: &[String]) -> Result<(), ShellError> {
     if args.len() != 2 {
-        shell_println!("Usage: strate start|stop|kill|destroy <id|label>");
+        shell_println!("Usage: strate start|stop|kill|destroy <id|label|name>");
         return Err(ShellError::InvalidArguments);
     }
-    let selector = args[1].as_str();
+    let selector = normalize_current_silo_selector(args[1].as_str());
     let action = args[0].as_str();
     let result = match action {
-        "stop" => silo::kernel_stop_silo(selector, false),
-        "kill" => silo::kernel_stop_silo(selector, true),
-        "destroy" => silo::kernel_destroy_silo(selector),
+        "stop" => silo::kernel_stop_silo(selector.as_str(), false),
+        "kill" => silo::kernel_stop_silo(selector.as_str(), true),
+        "destroy" => silo::kernel_destroy_silo(selector.as_str()),
         _ => unreachable!(),
     };
     match result {
@@ -1835,12 +1910,12 @@ fn cmd_strate_lifecycle(args: &[String]) -> Result<(), ShellError> {
 /// Performs the cmd strate rename operation.
 fn cmd_strate_rename(args: &[String]) -> Result<(), ShellError> {
     if args.len() != 3 {
-        shell_println!("Usage: strate rename <id|label> <new_label>");
+        shell_println!("Usage: strate rename <id|label|name> <new_label>");
         return Err(ShellError::InvalidArguments);
     }
-    let selector = args[1].as_str();
+    let selector = normalize_current_silo_selector(args[1].as_str());
     let new_label = args[2].as_str();
-    match silo::kernel_rename_silo_label(selector, new_label) {
+    match silo::kernel_rename_silo_label(selector.as_str(), new_label) {
         Ok(sid) => {
             shell_println!("strate rename: ok (sid={}, new_label={})", sid, new_label);
             Ok(())
@@ -1892,14 +1967,13 @@ pub(super) fn cmd_strate_impl(args: &[String]) -> Result<(), ShellError> {
 // ============================================================================
 // silo info / suspend / resume / events / pledge / unveil / sandbox / top / logs
 // ============================================================================
-
 fn cmd_silo_info(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: silo info <id|label>");
+        shell_println!("Usage: silo info <id|label|name>");
         return Err(ShellError::InvalidArguments);
     }
-    let selector = args[1].as_str();
-    let detail = silo::silo_detail_snapshot(selector).map_err(|e| {
+    let selector = normalize_current_silo_selector(args[1].as_str());
+    let detail = silo::silo_detail_snapshot(selector.as_str()).map_err(|e| {
         shell_println!("silo info: {:?}", e);
         ShellError::ExecutionFailed
     })?;
@@ -1984,10 +2058,11 @@ fn cmd_silo_info(args: &[String]) -> Result<(), ShellError> {
 
 fn cmd_silo_suspend(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: silo suspend <id|label>");
+        shell_println!("Usage: silo suspend <id|label|name>");
         return Err(ShellError::InvalidArguments);
     }
-    match silo::kernel_suspend_silo(args[1].as_str()) {
+    let selector = normalize_current_silo_selector(args[1].as_str());
+    match silo::kernel_suspend_silo(selector.as_str()) {
         Ok(sid) => {
             shell_println!("silo suspend: ok (sid={})", sid);
             Ok(())
@@ -2001,10 +2076,11 @@ fn cmd_silo_suspend(args: &[String]) -> Result<(), ShellError> {
 
 fn cmd_silo_resume(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: silo resume <id|label>");
+        shell_println!("Usage: silo resume <id|label|name>");
         return Err(ShellError::InvalidArguments);
     }
-    match silo::kernel_resume_silo(args[1].as_str()) {
+    let selector = normalize_current_silo_selector(args[1].as_str());
+    match silo::kernel_resume_silo(selector.as_str()) {
         Ok(sid) => {
             shell_println!("silo resume: ok (sid={})", sid);
             Ok(())
@@ -2029,7 +2105,8 @@ fn event_kind_str(kind: silo::SiloEventKind) -> &'static str {
 
 fn cmd_silo_events(args: &[String]) -> Result<(), ShellError> {
     let events = if args.len() >= 2 {
-        silo::list_events_for_silo(args[1].as_str()).map_err(|e| {
+        let selector = normalize_current_silo_selector(args[1].as_str());
+        silo::list_events_for_silo(selector.as_str()).map_err(|e| {
             shell_println!("silo events: {:?}", e);
             ShellError::ExecutionFailed
         })?
@@ -2050,7 +2127,7 @@ fn cmd_silo_events(args: &[String]) -> Result<(), ShellError> {
         "Data1",
         "Tick"
     );
-    shell_println!("────────────────────────────────────────────────────────");
+    shell_println!("==========");
     for ev in &events {
         shell_println!(
             "{:<8} {:<10} {:#010x}   {:#010x}   {}",
@@ -2066,14 +2143,15 @@ fn cmd_silo_events(args: &[String]) -> Result<(), ShellError> {
 
 fn cmd_silo_pledge(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 3 {
-        shell_println!("Usage: silo pledge <id|label> <octal_mode>");
+        shell_println!("Usage: silo pledge <id|label|name> <octal_mode>");
         return Err(ShellError::InvalidArguments);
     }
     let mode_val = u16::from_str_radix(args[2].as_str(), 8).map_err(|_| {
         shell_println!("silo pledge: invalid octal mode '{}'", args[2]);
         ShellError::InvalidArguments
     })?;
-    match silo::kernel_pledge_silo(args[1].as_str(), mode_val) {
+    let selector = normalize_current_silo_selector(args[1].as_str());
+    match silo::kernel_pledge_silo(selector.as_str(), mode_val) {
         Ok((old, new)) => {
             shell_println!("silo pledge: {:03o} -> {:03o}", old, new);
             Ok(())
@@ -2087,13 +2165,13 @@ fn cmd_silo_pledge(args: &[String]) -> Result<(), ShellError> {
 
 fn cmd_silo_unveil(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 4 {
-        shell_println!("Usage: silo unveil <id|label> <path> <rwx>");
+        shell_println!("Usage: silo unveil <id|label|name> <path> <rwx>");
         return Err(ShellError::InvalidArguments);
     }
-    let selector = args[1].as_str();
+    let selector = normalize_current_silo_selector(args[1].as_str());
     let path = args[2].as_str();
     let rights = args[3].as_str();
-    match silo::kernel_unveil_silo(selector, path, rights) {
+    match silo::kernel_unveil_silo(selector.as_str(), path, rights) {
         Ok(sid) => {
             shell_println!(
                 "silo unveil: ok (sid={}, path={}, rights={})",
@@ -2112,10 +2190,11 @@ fn cmd_silo_unveil(args: &[String]) -> Result<(), ShellError> {
 
 fn cmd_silo_sandbox(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: silo sandbox <id|label>");
+        shell_println!("Usage: silo sandbox <id|label|name>");
         return Err(ShellError::InvalidArguments);
     }
-    match silo::kernel_sandbox_silo(args[1].as_str()) {
+    let selector = normalize_current_silo_selector(args[1].as_str());
+    match silo::kernel_sandbox_silo(selector.as_str()) {
         Ok(sid) => {
             shell_println!("silo sandbox: ok (sid={})", sid);
             Ok(())
@@ -2162,7 +2241,7 @@ fn cmd_silo_top(_args: &[String]) -> Result<(), ShellError> {
         "Memory",
         "Mode"
     );
-    shell_println!("────────────────────────────────────────────────────────────────");
+    shell_println!("========================================");
     for s in &silos {
         let (mv, mu) = format_bytes(s.mem_usage_bytes as usize);
         let mem_str = alloc::format!("{} {}", mv, mu);
@@ -2181,10 +2260,11 @@ fn cmd_silo_top(_args: &[String]) -> Result<(), ShellError> {
 
 fn cmd_silo_logs(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: silo logs <id|label>");
+        shell_println!("Usage: silo logs <id|label|name>");
         return Err(ShellError::InvalidArguments);
     }
-    let events = silo::list_events_for_silo(args[1].as_str()).map_err(|e| {
+    let selector = normalize_current_silo_selector(args[1].as_str());
+    let events = silo::list_events_for_silo(selector.as_str()).map_err(|e| {
         shell_println!("silo logs: {:?}", e);
         ShellError::ExecutionFailed
     })?;
@@ -2220,6 +2300,10 @@ pub(super) fn cmd_wasm_run_impl(args: &[String]) -> Result<(), ShellError> {
 
     let mut selected_service_path: Option<String> = None;
     for _ in 0..100 {
+        if crate::shell::is_interrupted() {
+            shell_println!("wasm-run: cancelled");
+            return Err(ShellError::ExecutionFailed);
+        }
         if vfs::stat_path(&default_service_path).is_ok() {
             selected_service_path = Some(default_service_path.clone());
             break;
@@ -2286,7 +2370,7 @@ pub(super) fn cmd_wasm_run_impl(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-/// `health` — system health diagnostic (boot graph, strates, IPC, VFS mounts).
+/// `health` : system health diagnostic (boot graph, strates, IPC, VFS mounts).
 pub(super) fn cmd_health_impl(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("=== Strat9 Health Report ===\n");
 

@@ -2,7 +2,7 @@
 //!
 //! Provides shell commands for debugging and verifying timer accuracy.
 
-use crate::{arch::x86_64::timer::TIMER_HZ, shell::ShellError, shell_println};
+use crate::{arch::timer::TIMER_HZ, shell::ShellError, shell_println};
 use alloc::string::String;
 
 /// Timer debug command
@@ -23,11 +23,11 @@ pub fn cmd_timer(args: &[String]) -> Result<(), ShellError> {
             Ok(())
         }
         "info" => {
-            shell_println!("=== Timer Information ===");
+            shell_println!("=== Timer information ===");
             shell_println!("Scheduler ticks: {}", crate::process::scheduler::ticks());
 
-            if crate::arch::x86_64::timer::is_apic_timer_active() {
-                let ticks_per_10ms = crate::arch::x86_64::timer::apic_ticks_per_10ms();
+            if crate::arch::timer::is_apic_timer_active() {
+                let ticks_per_10ms = crate::arch::timer::apic_ticks_per_10ms();
                 shell_println!("Timer mode: APIC");
                 shell_println!("Ticks per 10ms: {}", ticks_per_10ms);
                 shell_println!(
@@ -51,8 +51,8 @@ pub fn cmd_timer(args: &[String]) -> Result<(), ShellError> {
 /// Performs the print usage operation.
 fn print_usage() {
     shell_println!("Timer debug commands:");
-    shell_println!("  timer test            - Disabled (unstable debug path removed)");
-    shell_println!("  timer info            - Show timer configuration");
+    shell_println!("  timer test          - Disabled (unstable debug path removed)");
+    shell_println!("  timer info          - Show timer configuration");
     shell_println!("");
     shell_println!("Examples:");
     shell_println!("  timer test          - Shows disabled message");

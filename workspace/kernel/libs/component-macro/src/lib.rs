@@ -49,13 +49,14 @@ impl Parse for InitComponentArgs {
             stage = match ident.to_string().as_str() {
                 "bootstrap" => "Bootstrap",
                 "kthread" => "Kthread",
+                "hardware" => "Hardware",
                 "process" => "Process",
                 other => {
                     return Err(syn::Error::new(
                         ident.span(),
                         format!(
                             "unknown stage '{other}'. \
-                             Expected: bootstrap, kthread, or process"
+                             Expected: bootstrap, kthread, hardware, or process"
                         ),
                     ));
                 }
@@ -144,7 +145,7 @@ fn parse_depends_on(input: ParseStream) -> syn::Result<Vec<String>> {
 ///
 /// | Argument     | Type             | Default     | Description                                   |
 /// |--------------|------------------|-------------|-----------------------------------------------|
-/// | stage        | positional ident | `bootstrap` | `bootstrap`, `kthread`, or `process`          |
+/// | stage        | positional ident | `bootstrap` | `bootstrap`, `kthread`, `hardware`, or `process` |
 /// | `priority`   | integer          | `0`         | Lower = earlier (tiebreaker within topo level)|
 /// | `depends_on` | ident or list    | `[]`        | Functions that must complete before this one  |
 ///
@@ -180,7 +181,7 @@ pub fn init_component(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let stage = Ident::new(&component_args.stage, Span::call_site());
     let priority = component_args.priority;
-    let depends_on = &component_args.depends_on; // Vec<String> — quoted as &[str_lit, ...]
+    let depends_on = &component_args.depends_on; // Vec<String> : quoted as &[str_lit, ...]
 
     // Static name: guaranteed unique within a crate via function name.
     let static_name = quote::format_ident!("__COMPONENT_ENTRY_{}", function_name);
@@ -205,7 +206,7 @@ pub fn init_component(args: TokenStream, input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-// ─── parse_components_toml! ──────────────────────────────────────────────────
+// ========== parse_components_toml ===============================================
 
 /// Emit compile-time dependency metadata parsed from `Components.toml`.
 ///
@@ -268,9 +269,11 @@ pub fn parse_components_toml(_input: TokenStream) -> TokenStream {
     })
 }
 
-// ─── Internal TOML parser ────────────────────────────────────────────────────
+// ========== Internal TOML parser ==========================================================
 
 /// Minimal parser for the Components.toml format used by Strat9-OS.
+///
+/// TODO : improve !
 ///
 /// Handles lines of the form (one component per line):
 /// ```toml

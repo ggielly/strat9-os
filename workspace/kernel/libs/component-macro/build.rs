@@ -112,7 +112,7 @@ fn validate_components_toml(path: &std::path::Path) {
 
     if warnings == 0 {
         println!(
-            "cargo:warning=Components.toml: OK — {} component(s) validated",
+            "cargo:warning=Components.toml: OK : {} component(s) validated",
             graph.len()
         );
     }
@@ -139,7 +139,7 @@ fn dfs(
     on_stack: &mut std::collections::HashSet<String>,
 ) -> bool {
     if on_stack.contains(node) {
-        return true; // back edge → cycle
+        return true; // back edge => cycle
     }
     if visited.contains(node) {
         return false; // already fully explored

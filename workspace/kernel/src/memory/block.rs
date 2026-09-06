@@ -1,7 +1,7 @@
 //! Block-oriented physical memory handles.
 
 use core::marker::PhantomData;
-use x86_64::PhysAddr;
+use crate::arch::xshim::PhysAddr;
 
 use crate::memory::{frame::PAGE_SIZE, zone::MAX_ORDER};
 

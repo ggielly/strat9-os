@@ -32,6 +32,22 @@ pub fn exit_current_task(exit_code: i32) -> ! {
                 let _ = crate::syscall::futex::sys_futex_wake(tidptr, u32::MAX);
             }
         }
+
+        // -- robust_list (clean up held mutexes) --
+        // Walk the robust list and mark any held futexes as FUTEX_OWNER_DIED,
+        // then wake waiters. Prevents deadlocks when a thread dies holding a mutex.
+        crate::syscall::robust_list::cleanup_robust_list(&task);
+
+        // -- user-stack canary check (issue #63) --
+        // The address space is still alive here (it dies with the Process
+        // Arc later), so the top-of-stack word can still be read.
+        task.verify_user_stack_canary();
+
+        // -- kernel-owned user stack (/thread/create) --
+        // Reclaim the user stack the kernel allocated for this thread. Done
+        // while still the running task so the address space is current on
+        // this CPU; idempotent with the cleanup_task_resources path.
+        crate::process::thread_ops::reclaim_kernel_user_stack(&task);
     }
 
     let cpu_index = current_cpu_index();
@@ -103,7 +119,7 @@ pub fn exit_current_task(exit_code: i32) -> ! {
     }
 
     // Yield to pick the next task. Since we're Dead, we won't come back.
-    // Use yield_dead_task() which bypasses the PreemptGuard check — the task
+    // Use yield_dead_task() which bypasses the PreemptGuard check : the task
     // is already marked Dead and will never run again, so the guard is irrelevant.
     // Using yield_task() here would silently return if a PreemptGuard is active,
     // leaving the dead task spinning in the hlt() loop below.
@@ -111,7 +127,7 @@ pub fn exit_current_task(exit_code: i32) -> ! {
 
     // Safety net - should never reach here
     loop {
-        crate::arch::x86_64::hlt();
+        crate::arch::hlt();
     }
 }
 
@@ -171,11 +187,13 @@ pub fn current_task_clone() -> Option<Arc<Task>> {
     let task = LOCAL_SCHEDULERS[cpu_index].lock().as_ref().and_then(|cpu| {
         let arc = cpu.current_task.as_ref()?;
         let strong = Arc::strong_count(arc);
-        // Heuristic only: keep the warning, but do not mutate scheduler state here.
+        // Heuristic only: strong_count can move concurrently, so this is a
+        // diagnostic signal for suspicious scheduler state, not a formal
+        // corruption proof. Keep the warning but do not mutate scheduler state.
         if strong == 0 || strong > (isize::MAX as usize) / 2 {
             let ptr = Arc::as_ptr(arc) as *const u8;
             crate::serial_println!(
-                "[sched] CORRUPT Arc refcount! cpu={} strong={:#x} ptr={:p} caller={}:{}",
+                "[sched] suspicious Arc refcount (heuristic): cpu={} strong={:#x} ptr={:p} caller={}:{}",
                 cpu_index,
                 strong,
                 ptr,
@@ -204,11 +222,13 @@ pub fn current_task_clone_try() -> Option<Arc<Task>> {
             guard.as_ref().and_then(|cpu| {
                 let arc = cpu.current_task.as_ref()?;
                 let strong = Arc::strong_count(arc);
-                // Heuristic only: keep the warning, but do not mutate scheduler state here.
+                // Heuristic only: strong_count can move concurrently, so this is a
+                // diagnostic signal for suspicious scheduler state, not a formal
+                // corruption proof.
                 if strong == 0 || strong > (isize::MAX as usize) / 2 {
                     let ptr = Arc::as_ptr(arc) as *const u8;
                     crate::serial_println!(
-                        "[sched] CORRUPT Arc refcount! cpu={} strong={:#x} ptr={:p} caller={}:{}",
+                        "[sched] suspicious Arc refcount (heuristic): cpu={} strong={:#x} ptr={:p} caller={}:{}",
                         cpu_index,
                         strong,
                         ptr,
@@ -235,7 +255,7 @@ pub fn current_task_clone_spin_debug(trace_label: &str) -> Option<Arc<Task>> {
         if let Some(guard) = LOCAL_SCHEDULERS[cpu_index].try_lock_no_irqsave() {
             break guard.as_ref().and_then(|cpu| {
                 if cpu.current_task.is_none() {
-                    unsafe { core::arch::asm!("mov al, 'N'; out 0xe9, al", out("al") _) };
+                    debug_trace_putc(b'N');
                     return None;
                 }
                 let arc = cpu.current_task.as_ref().unwrap();
@@ -424,102 +444,84 @@ pub fn set_process_group(
 
     let saved_flags = save_flags_and_cli();
     let result = (|| -> Result<Pid, SyscallError> {
-        // Step 1: Get task references from GLOBAL_SCHED_STATE.
-        let (requester_task, target_id, target_task, desired_pgid, _group_leader_sid) = {
-            let scheduler = GLOBAL_SCHED_STATE.lock();
-            let sched = scheduler.as_ref().ok_or(SyscallError::Fault)?;
+        let scheduler = GLOBAL_SCHED_STATE.lock();
+        let sched = scheduler.as_ref().ok_or(SyscallError::Fault)?;
 
-            let requester_task = sched
-                .all_tasks
+        let requester_task = sched
+            .all_tasks
+            .get(&requester)
+            .cloned()
+            .ok_or(SyscallError::Fault)?;
+        let requester_sid = requester_task.sid.load(Ordering::Relaxed);
+
+        let target_id = match target_pid {
+            None => requester,
+            Some(pid) => SCHED_IDENTITY
+                .read()
+                .pid_to_task
+                .get(&pid)
+                .copied()
+                .ok_or(SyscallError::NotFound)?,
+        };
+
+        if target_id != requester {
+            let is_child = SCHED_IDENTITY
+                .read()
+                .children_of
                 .get(&requester)
-                .cloned()
-                .ok_or(SyscallError::Fault)?;
-            let requester_sid = requester_task.sid.load(Ordering::Relaxed);
-
-            let target_id = match target_pid {
-                None => requester,
-                Some(pid) => SCHED_IDENTITY
-                    .read()
-                    .pid_to_task
-                    .get(&pid)
-                    .copied()
-                    .ok_or(SyscallError::NotFound)?,
-            };
-
-            if target_id != requester {
-                let is_child = SCHED_IDENTITY
-                    .read()
-                    .children_of
-                    .get(&requester)
-                    .map(|children| children.iter().any(|child| *child == target_id))
-                    .unwrap_or(false);
-                if !is_child {
-                    return Err(SyscallError::PermissionDenied);
-                }
+                .map(|children| children.iter().any(|child| *child == target_id))
+                .unwrap_or(false);
+            if !is_child {
+                return Err(SyscallError::PermissionDenied);
             }
+        }
 
-            let target_task = sched
-                .all_tasks
-                .get(&target_id)
-                .cloned()
+        let target_task = sched
+            .all_tasks
+            .get(&target_id)
+            .cloned()
+            .ok_or(SyscallError::NotFound)?;
+        let target_pid_value = target_task.pid;
+        let target_sid = target_task.sid.load(Ordering::Relaxed);
+
+        if target_sid != requester_sid {
+            return Err(SyscallError::PermissionDenied);
+        }
+
+        if target_pid_value == target_sid {
+            return Err(SyscallError::PermissionDenied);
+        }
+
+        let desired_pgid = new_pgid.unwrap_or(target_pid_value);
+        if desired_pgid != target_pid_value {
+            let group_leader_tid = SCHED_IDENTITY
+                .read()
+                .pid_to_task
+                .get(&desired_pgid)
+                .copied()
                 .ok_or(SyscallError::NotFound)?;
-            let target_pid_value = target_task.pid;
-            let target_sid = target_task.sid.load(Ordering::Relaxed);
-
-            if target_sid != requester_sid {
+            let group_leader = sched
+                .all_tasks
+                .get(&group_leader_tid)
+                .ok_or(SyscallError::NotFound)?;
+            if group_leader.sid.load(Ordering::Relaxed) != target_sid {
                 return Err(SyscallError::PermissionDenied);
             }
+        }
 
-            if target_pid_value == target_sid {
-                return Err(SyscallError::PermissionDenied);
-            }
-
-            let desired_pgid = new_pgid.unwrap_or(target_pid_value);
-            let group_leader_sid = if desired_pgid != target_pid_value {
-                let group_leader_tid = SCHED_IDENTITY
-                    .read()
-                    .pid_to_task
-                    .get(&desired_pgid)
-                    .copied()
-                    .ok_or(SyscallError::NotFound)?;
-                let group_leader = sched
-                    .all_tasks
-                    .get(&group_leader_tid)
-                    .ok_or(SyscallError::NotFound)?;
-                if group_leader.sid.load(Ordering::Relaxed) != target_sid {
-                    return Err(SyscallError::PermissionDenied);
-                }
-                group_leader.sid.load(Ordering::Relaxed)
-            } else {
-                0
-            };
-            Ok::<_, SyscallError>((
-                requester_task,
-                target_id,
-                target_task,
-                desired_pgid,
-                group_leader_sid,
-            ))
-        }?;
-
-        // Step 2: Mutate identity maps under SCHED_IDENTITY lock.
+        // Mutate identity maps under SCHED_IDENTITY lock while still holding GLOBAL_SCHED_STATE.
         let old_pgid = target_task.pgid.load(Ordering::Relaxed);
-        target_task
-            .pgid
-            .store(new_pgid.unwrap_or(target_task.pid), Ordering::Relaxed);
+        let actual_new_pgid = new_pgid.unwrap_or(target_task.pid);
+        target_task.pgid.store(actual_new_pgid, Ordering::Relaxed);
         {
             let mut identity = SCHED_IDENTITY.write();
             GlobalSchedState::member_remove(&mut identity.pgid_members, old_pgid, target_id);
-            GlobalSchedState::member_add(
-                &mut identity.pgid_members,
-                new_pgid.unwrap_or(target_task.pid),
-                target_id,
-            );
+            GlobalSchedState::member_add(&mut identity.pgid_members, actual_new_pgid, target_id);
             identity
                 .pid_to_pgid
-                .insert(target_task.pid, new_pgid.unwrap_or(target_task.pid));
+                .insert(target_task.pid, actual_new_pgid);
         }
-        Ok(new_pgid.unwrap_or(target_task.pid))
+        Ok(actual_new_pgid)
     })();
     restore_flags(saved_flags);
     result
@@ -531,16 +533,14 @@ pub fn create_session(requester: TaskId) -> Result<Pid, crate::syscall::error::S
 
     let saved_flags = save_flags_and_cli();
     let result = (|| -> Result<Pid, SyscallError> {
-        // Get task reference from GLOBAL_SCHED_STATE.
-        let requester_task = {
-            let scheduler = GLOBAL_SCHED_STATE.lock();
-            let sched = scheduler.as_ref().ok_or(SyscallError::Fault)?;
-            sched
-                .all_tasks
-                .get(&requester)
-                .cloned()
-                .ok_or(SyscallError::Fault)?
-        };
+        let scheduler = GLOBAL_SCHED_STATE.lock();
+        let sched = scheduler.as_ref().ok_or(SyscallError::Fault)?;
+        let requester_task = sched
+            .all_tasks
+            .get(&requester)
+            .cloned()
+            .ok_or(SyscallError::Fault)?;
+
         let pid = requester_task.pid;
         if requester_task.pgid.load(Ordering::Relaxed) == pid {
             return Err(SyscallError::PermissionDenied);
@@ -745,7 +745,6 @@ pub fn wake_task(id: TaskId) -> bool {
 
     // --- Primary path: task is in BLOCKED_TASKS ---
     // Acquire only BLOCKED_TASKS + LOCAL[target_cpu]. No GLOBAL_SCHED_STATE.
-    let mut task_to_enqueue: Option<Arc<Task>> = None;
     let mut ipi_cpu: Option<usize> = None;
     let mut woken = false;
 
@@ -780,7 +779,6 @@ pub fn wake_task(id: TaskId) -> bool {
                 None
             };
             woken = true;
-            task_to_enqueue = None; // task is enqueued, no deferred drop needed
         }
     } // BLOCKED_TASKS lock released
 
@@ -792,13 +790,16 @@ pub fn wake_task(id: TaskId) -> bool {
         return true;
     }
 
-    // --- Fallback path: task not yet in BLOCKED_TASKS ---
+    // === Fallback path: task not yet in BLOCKED_TASKS =================================
     // Set wake_pending so block_current_task skips blocking.
     {
         let mut scheduler = GLOBAL_SCHED_STATE.lock();
         if let Some(ref mut sched) = *scheduler {
-            let (fallback_woken, _) = sched.wake_task_locked(id);
+            let (fallback_woken, fallback_ipi) = sched.wake_task_locked(id);
             woken = fallback_woken;
+            if ipi_cpu.is_none() {
+                ipi_cpu = fallback_ipi;
+            }
         }
     }
 
@@ -1181,6 +1182,18 @@ fn finalize_forced_death(
 }
 
 /// Performs the reparent children operation.
+/// Reparent children of a dying task to PID 1 (init), or drop parent links
+/// if PID 1 is not available.
+///
+/// # Orphan policy
+///
+/// - **PID 1 exists:** Orphans are reparented to init, which is responsible
+///   for reaping them. This matches standard Unix semantics.
+/// - **PID 1 does not exist:** Parent links are dropped entirely. Orphans
+///   become parentless : they continue running but cannot be `wait()`-ed on.
+///   This avoids the nondeterministic fallback of adopting an arbitrary task
+///   (which might be short-lived or unsuitable for reaping).
+/// - **PID 1 is the dying task:** Same as above : parent links are dropped.
 fn reparent_children(
     sched: &mut GlobalSchedState,
     identity: &mut SchedIdentity,
@@ -1190,23 +1203,25 @@ fn reparent_children(
         Some(c) => c,
         None => return None,
     };
-    let init_id = identity
-        .pid_to_task
-        .get(&1)
-        .copied()
-        .or_else(|| sched.all_tasks.keys().next().copied());
+
+    // Preferred reaper: PID 1 (standard init process).
+    let init_id = identity.pid_to_task.get(&1).copied();
+
     let Some(init_id) = init_id else {
+        // No PID 1: drop parent links. Orphans become parentless.
         for child in &children {
             identity.parent_of.remove(child);
         }
         return None;
     };
     if init_id == dying {
+        // PID 1 is dying : cannot reparent to self. Drop parent links.
         for child in &children {
             identity.parent_of.remove(child);
         }
         return None;
     }
+
     let mut has_zombie = false;
     let init_children = identity.children_of.entry(init_id).or_default();
     for child in children {
@@ -1259,6 +1274,10 @@ pub(crate) fn cleanup_task_resources(task: &Arc<Task>) {
     crate::ipc::port::cleanup_ports_for_task(task.id);
     queue_silo_cleanup(task.id);
 
+    // Kernel-owned user stack (/thread/create): reclaim if not already done
+    // by exit_current_task. take()-based, so this is a cheap no-op otherwise.
+    crate::process::thread_ops::reclaim_kernel_user_stack(task);
+
     // SAFETY: strong_count is racy (a concurrent get_task_by_id may temporarily
     // hold an extra Arc ref). Worst case: cleanup is deferred until the last ref
     // drops elsewhere - no resource leak, just delayed release.
@@ -1279,4 +1298,10 @@ pub(crate) fn cleanup_task_resources(task: &Arc<Task>) {
     if !as_ref.is_kernel() && Arc::strong_count(&as_ref) == 1 {
         as_ref.unmap_all_user_regions();
     }
+}
+
+/// Trace putc routed to the arch serial backend (replaces port 0xE9 debug).
+#[inline]
+pub(crate) fn debug_trace_putc(c: u8) {
+    crate::arch::serial::_print(format_args!("{}", c as char));
 }

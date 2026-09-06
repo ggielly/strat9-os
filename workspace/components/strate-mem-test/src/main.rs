@@ -244,10 +244,8 @@ fn churn_many_small_ops() {
 }
 
 #[panic_handler]
-/// Implements panic.
-fn panic(_info: &PanicInfo) -> ! {
-    log_err("[test_mem] PANIC\n");
-    call::exit(200)
+fn panic(info: &PanicInfo) -> ! {
+    call::handle_panic("test-mem", info)
 }
 
 #[no_mangle]

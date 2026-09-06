@@ -49,7 +49,7 @@ impl PerfScope {
     #[inline]
     pub fn new(accumulator: &'static AtomicU64, counter: &'static AtomicU64) -> Self {
         Self {
-            start: crate::arch::x86_64::rdtsc(),
+            start: crate::arch::rdtsc(),
             accumulator,
             counter,
         }
@@ -59,7 +59,7 @@ impl PerfScope {
 impl Drop for PerfScope {
     #[inline]
     fn drop(&mut self) {
-        let elapsed = crate::arch::x86_64::rdtsc().wrapping_sub(self.start);
+        let elapsed = crate::arch::rdtsc().wrapping_sub(self.start);
         self.accumulator.fetch_add(elapsed, Ordering::Relaxed);
         self.counter.fetch_add(1, Ordering::Relaxed);
     }

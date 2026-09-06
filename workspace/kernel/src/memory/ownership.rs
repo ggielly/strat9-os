@@ -290,7 +290,7 @@ impl OwnershipTable {
     }
 
     /// Returns the live handle whose base physical address matches `base`, if any.
-    pub fn handle_for_base(&self, base: x86_64::PhysAddr) -> Option<BlockHandle> {
+    pub fn handle_for_base(&self, base: crate::arch::xshim::PhysAddr) -> Option<BlockHandle> {
         self.entries
             .lock()
             .keys()
@@ -299,7 +299,7 @@ impl OwnershipTable {
     }
 
     /// Returns the live handle whose block currently contains `phys`, if any.
-    pub fn handle_containing(&self, phys: x86_64::PhysAddr) -> Option<BlockHandle> {
+    pub fn handle_containing(&self, phys: crate::arch::xshim::PhysAddr) -> Option<BlockHandle> {
         self.entries.lock().keys().find_map(|handle| {
             let start = handle.base.as_u64();
             let end = start.checked_add(handle.size_bytes())?;

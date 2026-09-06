@@ -1,0 +1,21 @@
+{
+  "llvm-target": "riscv64-unknown-strat9",
+  "data-layout": "e-m:e-p:64:64-i64:64-i128:128-n64:64-S128",
+  "arch": "riscv64",
+  "target-endian": "little",
+  "target-pointer-width": 64,
+  "target-c-int-width": 32,
+  "os": "strat9",
+  "env": "",
+  "executables": true,
+  "linker-flavor": "ld.lld",
+  "linker": "rust-lld",
+  "panic-strategy": "abort",
+  "cpu": "generic-rv64",
+  "features": "+m,+a,+c,+f,+d",
+  "code-model": "medium",
+  "relocation-model": "static",
+  "max-atomic-width": 64,
+  "position-independent-executables": false,
+  "relro-level": "off"
+}

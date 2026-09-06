@@ -6,7 +6,7 @@ use crate::memory::AddressSpace;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use intrusive_collections::LinkedListLink;
-use x86_64::{PhysAddr, VirtAddr};
+use crate::arch::xshim::{PhysAddr, VirtAddr};
 
 /// POSIX process ID.
 pub type Pid = u32;
@@ -29,7 +29,7 @@ fn next_tid() -> Tid {
 
 /// Unique identifier for a task
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TaskId(u64);
+pub struct TaskId(pub u64);
 
 impl TaskId {
     /// Generate a new unique task ID
@@ -125,6 +125,17 @@ pub struct ExtendedState {
     pub xcr0_mask: u64,
 }
 
+// XSAVE/XRSTOR #GP on non-64-byte-aligned operands (SDM Vol. 2A, "XSAVE"):
+// the save area MUST stay 64-byte aligned for its whole lifetime. These
+// compile-time assertions pin the layout contract:
+//  - the struct itself is 64B-aligned (`repr(align)`) and `data` is at
+//    offset 0, so any &self.data / self-as-*mut u8 inherits the alignment;
+//  - MAX_XSAVE_SIZE keeps the total struct size a multiple of 64 so arrays
+//    of ExtendedState never break per-element alignment.
+const _: () = assert!(core::mem::align_of::<ExtendedState>() == 64);
+const _: () = assert!(core::mem::offset_of!(ExtendedState, data) == 0);
+const _: () = assert!(core::mem::size_of::<ExtendedState>() % 64 == 0);
+
 impl core::fmt::Debug for ExtendedState {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ExtendedState")
@@ -140,47 +151,35 @@ impl ExtendedState {
     pub const MAX_XSAVE_SIZE: usize = 2688;
 
     /// Create a new default state using the host's maximum capabilities.
+    ///
+    /// Uses the frozen boot-time XSAVE profile (see `cpuid::boot_xsave_profile`)
+    /// so task creation never walks CPUID leaf 0x0D sub-leaves.
     pub fn new() -> Self {
-        crate::serial_println!("[trace][fpu] ExtendedState::new enter");
-        let (uses_xsave, size, default_xcr0) = if crate::arch::x86_64::cpuid::host_uses_xsave() {
-            crate::serial_println!("[trace][fpu] ExtendedState::new host_uses_xsave=true");
-            let xcr0 = crate::arch::x86_64::cpuid::host_default_xcr0();
-            crate::serial_println!(
-                "[trace][fpu] ExtendedState::new host_default_xcr0={:#x}",
-                xcr0
-            );
-            let sz =
-                crate::arch::x86_64::cpuid::xsave_size_for_xcr0(xcr0).min(Self::MAX_XSAVE_SIZE);
-            crate::serial_println!("[trace][fpu] ExtendedState::new xsave_size={}", sz);
-            (true, sz, xcr0)
+        let profile = crate::arch::x86_64::cpuid::boot_xsave_profile();
+        let uses_xsave = profile.xcr0_mask != 0 && crate::arch::x86_64::cpuid::host_uses_xsave();
+        let size = if uses_xsave {
+            // Profile area size is already 64B-rounded and capped by MAX.
+            profile.area_size.min(Self::MAX_XSAVE_SIZE)
         } else {
-            crate::serial_println!("[trace][fpu] ExtendedState::new host_uses_xsave=false");
-            (false, Self::FXSAVE_SIZE, 0x3)
+            Self::FXSAVE_SIZE
         };
+        let default_xcr0 = if uses_xsave { profile.xcr0_mask } else { 0x3 };
 
-        crate::serial_println!(
-            "[trace][fpu] ExtendedState::new build state uses_xsave={} size={} xcr0={:#x}",
-            uses_xsave,
-            size,
-            default_xcr0
-        );
         let mut state = Self {
             data: [0u8; Self::MAX_XSAVE_SIZE],
             size,
             uses_xsave,
             xcr0_mask: default_xcr0,
         };
-        crate::serial_println!("[trace][fpu] ExtendedState::new state allocated");
         state.set_defaults();
-        crate::serial_println!("[trace][fpu] ExtendedState::new defaults set");
         state
     }
 
     /// Create a state for a specific XCR0 mask (per-silo feature restriction).
     pub fn for_xcr0(xcr0: u64) -> Self {
-        let uses_xsave = crate::arch::x86_64::cpuid::host_uses_xsave();
+        let uses_xsave = crate::arch::cpuid::host_uses_xsave();
         let size = if uses_xsave {
-            crate::arch::x86_64::cpuid::xsave_size_for_xcr0(xcr0).min(Self::MAX_XSAVE_SIZE)
+            crate::arch::cpuid::xsave_size_for_xcr0(xcr0).min(Self::MAX_XSAVE_SIZE)
         } else {
             Self::FXSAVE_SIZE
         };
@@ -196,10 +195,13 @@ impl ExtendedState {
     }
 
     fn set_defaults(&mut self) {
-        // x87 FCW = 0x037F
+        // Set x87 FCW = 0x037F and MXCSR = 0x1F80 directly in the buffer.
+        // These match the x87/SSE INIT values, so even though the XSAVE
+        // header's XSTATE_BV field (bytes 512-519) remains 0, the first
+        // XRSTOR will restore the same values from INIT defaults.
+        // This is correct and safe by design.
         self.data[0] = 0x7F;
         self.data[1] = 0x03;
-        // MXCSR = 0x1F80
         self.data[24] = 0x80;
         self.data[25] = 0x1F;
     }
@@ -209,6 +211,18 @@ impl ExtendedState {
         let len = other.size.min(self.size);
         self.data[..len].copy_from_slice(&other.data[..len]);
     }
+}
+
+#[inline]
+fn normalized_xcr0(xcr0: u64) -> u64 {
+    if !crate::arch::cpuid::host_uses_xsave() {
+        return 0x3;
+    }
+
+    // Use the lock-free cache to avoid acquiring the HOST_CPU spinlock
+    // with interrupts disabled in the context-switch hot path.
+    let host_xcr0 = crate::arch::cpuid::host_default_xcr0_fast();
+    (xcr0 & host_xcr0).max(0x3)
 }
 
 /// Represents a single task/thread in the system
@@ -248,6 +262,16 @@ pub struct Task {
     pub kernel_stack: KernelStack,
     /// User stack for this task (if applicable)
     pub user_stack: Option<UserStack>,
+    /// Random per-process canary written at the top word of the user stack
+    /// (issue #63). 0 = no canary (kernel tasks, threads without user stack).
+    pub stack_canary: AtomicU64,
+    /// User address of the canary slot (stack_top - 8); 0 = none.
+    pub stack_canary_addr: AtomicU64,
+    /// Kernel-owned user thread stack: `(vaddr_base, size_bytes)` in the
+    /// process address space. Set by `/thread/create`; the kernel reclaims
+    /// (munmaps) it when the task dies. `None` for tasks created by other
+    /// paths (fork, exec, raw SYS_THREAD_CREATE).
+    pub kernel_stack_user: SyncUnsafeCell<Option<(u64, u64)>>,
     /// Task name for debugging purposes
     pub name: &'static str,
     /// Capabilities granted to this task
@@ -268,7 +292,7 @@ pub struct Task {
     pub itimers: super::timer::ITimers,
     /// Pending wakeup flag: set by `wake_task()` when the task is not yet
     /// in `blocked_tasks` (it is still transitioning to Blocked state).
-    /// Checked by `block_current_task()` — if set, the task skips blocking
+    /// Checked by `block_current_task()` : if set, the task skips blocking
     /// and continues execution, preventing a lost-wakeup race.
     pub wake_pending: AtomicBool,
     /// Sleep deadline in nanoseconds (monotonic). If non-zero, the task
@@ -300,6 +324,11 @@ pub struct Task {
     /// TID address for futex-based thread join (set_tid_address).
     /// The kernel writes 0 here when the thread exits, then futex_wake.
     pub clear_child_tid: AtomicU64,
+    /// Robust list head pointer (set by set_robust_list).
+    /// Points to a userspace robust_list_head used for dead-thread mutex cleanup.
+    pub robust_list_head: AtomicU64,
+    /// Length of the robust list head structure (as passed to set_robust_list).
+    pub robust_list_len: AtomicUsize,
     /// Current working directory (POSIX, inherited by children).
     /// File creation mask (inherited by children, NOT reset by exec).
     /// User-space FS.base (TLS on x86_64, set via arch_prctl ARCH_SET_FS).
@@ -322,6 +351,51 @@ pub struct Task {
 unsafe impl Sync for Task {}
 
 impl Task {
+    /// Re-checks the user-stack canary written by the ELF loader / execve
+    /// (issue #63).
+    ///
+    /// Called on task exit while the address space is still alive. A mismatch
+    /// means something wrote past the top of the boot stack area (classic
+    /// stack-smashing direction for the initial frames) : we log a security
+    /// warning rather than panicking, to keep false positives from turning
+    /// into a denial of service.
+    pub fn verify_user_stack_canary(&self) {
+        let canary = self.stack_canary.load(Ordering::Relaxed);
+        let addr = self.stack_canary_addr.load(Ordering::Relaxed);
+        if canary == 0 || addr == 0 {
+            return; // no canary (kernel tasks, threads, ...)
+        }
+        let as_ref = self.process.address_space_arc();
+        let Some(phys) = as_ref.translate(x86_64::VirtAddr::new(addr)) else {
+            log::warn!(
+                "[security] tid={} stack canary slot {:#x} unmapped at exit",
+                self.id.as_u64(),
+                addr
+            );
+            return;
+        };
+        // SAFETY: `translate()` proved the page is mapped in this address
+        // space; HHDM makes it readable from the kernel. Unaligned u64 read:
+        // the slot was placed 8 bytes below a page-aligned top.
+        let observed = unsafe {
+            core::ptr::read_volatile(crate::memory::phys_to_virt(phys.as_u64()) as *const u64)
+        };
+        if observed != canary {
+            log::warn!(
+                "[security] tid={} USER STACK CANARY SMASHED: expected={:#x} found={:#x} at {:#x}",
+                self.id.as_u64(),
+                canary,
+                observed,
+                addr
+            );
+            crate::serial_println!(
+                "[security] tid={} USER STACK CANARY SMASHED at {:#x}",
+                self.id.as_u64(),
+                addr
+            );
+        }
+    }
+
     /// Leave this much headroom above the synthetic `SyscallFrame`.
     ///
     /// The raw IRQ switch path does `mov rsp, next_rsp` and then `call
@@ -447,10 +521,10 @@ impl Task {
                 rcx: 0,
                 rax: 0,
                 iret_rip: ret_target,
-                iret_cs: crate::arch::x86_64::gdt::kernel_code_selector().0 as u64,
+                iret_cs: crate::arch::gdt::kernel_code_selector().0 as u64,
                 iret_rflags: rflags,
                 iret_rsp: self.kernel_stack.virt_base.as_u64() + self.kernel_stack.size as u64,
-                iret_ss: crate::arch::x86_64::gdt::kernel_data_selector().0 as u64,
+                iret_ss: crate::arch::gdt::kernel_data_selector().0 as u64,
             }
         };
         self.seed_interrupt_frame(frame);
@@ -523,6 +597,7 @@ impl Task {
 /// Only stores the saved RSP. All callee-saved registers (rbx, rbp, r12-r15)
 /// are pushed onto the task's kernel stack by `switch_context()`.
 #[repr(C)]
+
 pub struct CpuContext {
     /// Saved stack pointer (points into the task's kernel stack)
     pub saved_rsp: u64,
@@ -662,14 +737,12 @@ pub unsafe extern "C" fn task_entry_trampoline() -> ! {
 }
 
 fn task_post_switch_enter(entry: u64, arg0: u64) -> ! {
-    // E9 breadcrumb: 'P' = reached post_switch_enter (no serial lock needed).
-    unsafe {
-        core::arch::asm!("out 0xe9, al", in("al") b'P', options(nomem, nostack));
-    }
+    // breadcrumb: 'P' = reached post_switch_enter (no serial lock needed).
+    crate::arch::serial::putc(b'P');
 
-    crate::arch::x86_64::percpu::mark_tlb_ready_current();
+    crate::arch::percpu::mark_tlb_ready_current();
 
-    let cpu = crate::arch::x86_64::percpu::current_cpu_index();
+    let cpu = crate::arch::percpu::current_cpu_index();
 
     let is_user_entry = crate::process::scheduler::current_task_clone_try()
         .map(|task| task.trampoline_entry.load(Ordering::Relaxed) != 0)
@@ -685,12 +758,20 @@ fn task_post_switch_enter(entry: u64, arg0: u64) -> ! {
             is_user_entry,
             entry
         );
+        if is_user_entry {
+            crate::serial_println!(
+                "[trace][task] post_switch_enter cpu={} tid={} entry={:#x}",
+                cpu,
+                task.id.as_u64(),
+                entry
+            );
+        }
     }
 
     // First-launch tasks arrive here via the legacy `ret` bootstrap path, which
     // does not restore RFLAGS. Re-enable interrupts now that `finish_switch()`
     // has completed and the task is running on its own stack.
-    crate::arch::x86_64::sti();
+    crate::arch::sti();
 
     // User tasks still transition to Ring 3 via iretq later and will restore
     // their own RFLAGS there.
@@ -884,6 +965,9 @@ impl Task {
             interrupt_rsp: AtomicU64::new(0),
             kernel_stack,
             user_stack: None,
+            stack_canary: AtomicU64::new(0),
+            stack_canary_addr: AtomicU64::new(0),
+            kernel_stack_user: SyncUnsafeCell::new(None),
             name,
             process,
             pending_signals: super::signal::SignalSet::new(),
@@ -903,6 +987,8 @@ impl Task {
             fair_rq_generation: AtomicU64::new(0),
             fair_on_rq: AtomicBool::new(false),
             clear_child_tid: AtomicU64::new(0),
+            robust_list_head: AtomicU64::new(0),
+            robust_list_len: AtomicUsize::new(0),
             user_fs_base: AtomicU64::new(0),
             fpu_state: SyncUnsafeCell::new(fpu_state),
             xcr0_mask: AtomicU64::new(xcr0_mask),
@@ -955,6 +1041,9 @@ impl Task {
             interrupt_rsp: AtomicU64::new(0),
             kernel_stack,
             user_stack: None,
+            stack_canary: AtomicU64::new(0),
+            stack_canary_addr: AtomicU64::new(0),
+            kernel_stack_user: SyncUnsafeCell::new(None),
             name,
             process: Arc::new(crate::process::process::Process::new(pid, address_space)),
             pending_signals: super::signal::SignalSet::new(),
@@ -974,6 +1063,8 @@ impl Task {
             fair_rq_generation: AtomicU64::new(0),
             fair_on_rq: AtomicBool::new(false),
             clear_child_tid: AtomicU64::new(0),
+            robust_list_head: AtomicU64::new(0),
+            robust_list_len: AtomicUsize::new(0),
             user_fs_base: AtomicU64::new(0),
             fpu_state: SyncUnsafeCell::new(fpu_state),
             xcr0_mask: AtomicU64::new(xcr0_mask),
@@ -1000,6 +1091,21 @@ impl Task {
     /// Returns true if this is a kernel task (shares the kernel address space).
     pub fn is_kernel(&self) -> bool {
         self.process.address_space_arc().is_kernel()
+    }
+
+    /// Record the kernel-owned user stack mapping for this task.
+    ///
+    /// Called by `/thread/create` between task construction and scheduler
+    /// registration, so the mapping is visible before the thread can run.
+    pub fn set_kernel_stack_user(&self, base: u64, size: u64) {
+        unsafe {
+            *self.kernel_stack_user.get() = Some((base, size));
+        }
+    }
+
+    /// Take the kernel-owned user stack mapping (idempotent reclamation hook).
+    pub fn take_kernel_stack_user(&self) -> Option<(u64, u64)> {
+        unsafe { (*self.kernel_stack_user.get()).take() }
     }
 
     /// Allocate POSIX identifiers for a new process leader.
@@ -1059,7 +1165,7 @@ impl Task {
         // never read the uninitialized data itself, so this is sound.
         let task_box: alloc::boxed::Box<core::mem::MaybeUninit<Task>> =
             alloc::boxed::Box::new_uninit();
-        // Cast to *const Task — we never read Task data, only compute field addresses.
+        // Cast to *const Task : we never read Task data, only compute field addresses.
         let task_ptr = task_box.as_ptr() as *const Task;
         let base = task_ptr as u64;
         // SAFETY: We only take addresses via addr_of!, no uninitialized reads.
@@ -1133,24 +1239,37 @@ impl Task {
 /// # Safety
 /// Caller must ensure all pointers in `target` are valid and interrupts are disabled.
 pub(super) unsafe fn do_switch_context(target: &super::scheduler::SwitchTarget) {
-    // Temporary safety mode: force legacy FXSAVE/FXRSTOR path.
-    // This avoids XSAVE/XRSTOR state-size mismatches that can corrupt task memory.
-    //
-    // TODO : re-enable XSAVE only after the kernel has a proven-stable end-to-end path
-    // for:
-    //     (1) xsave area sizing/allocation,
-    //     (2) XCR0 transitions per task,
-    //     (3) save/restore across scheduler, syscall, and interrupt returns.
-    //
-    // Until then old_xcr0/new_xcr0 stay intentionally unused in this path.
-    let _ = target.old_xcr0;
-    let _ = target.new_xcr0;
-    switch_context_fxsave(
-        target.old_rsp_ptr,
-        target.new_rsp_ptr,
-        target.old_fpu_ptr,
-        target.new_fpu_ptr,
+    // XSAVE/XRSTOR #GP on non-64B-aligned operands; FXSAVE/FXRSTOR need 16B.
+    // The naked asm below cannot check this — enforce at the call boundary.
+    debug_assert_eq!(
+        (target.old_fpu_ptr as usize) % 64,
+        0,
+        "old FPU save area misaligned (XSAVE would #GP)"
     );
+    debug_assert_eq!(
+        (target.new_fpu_ptr as usize) % 64,
+        0,
+        "new FPU save area misaligned (XRSTOR would #GP)"
+    );
+    if crate::arch::x86_64::cpuid::host_uses_xsave() {
+        let old_xcr0 = normalized_xcr0(target.old_xcr0);
+        let new_xcr0 = normalized_xcr0(target.new_xcr0);
+        switch_context_xsave(
+            target.old_rsp_ptr,
+            target.new_rsp_ptr,
+            target.old_fpu_ptr,
+            target.new_fpu_ptr,
+            new_xcr0,
+            old_xcr0,
+        );
+    } else {
+        switch_context_fxsave(
+            target.old_rsp_ptr,
+            target.new_rsp_ptr,
+            target.old_fpu_ptr,
+            target.new_fpu_ptr,
+        );
+    }
 }
 
 /// First-task restore dispatcher. Like `do_switch_context` but without
@@ -1191,11 +1310,20 @@ pub(super) unsafe fn do_restore_first_task(
         canary
     );
 
-    let _ = xcr0;
-    restore_first_task_fxsave(frame_ptr, fpu_ptr);
+    if crate::arch::x86_64::cpuid::host_uses_xsave() {
+        debug_assert_eq!(
+            (fpu_ptr as usize) % 64,
+            0,
+            "first-task FPU save area misaligned (XRSTOR would #GP)"
+        );
+        restore_first_task_xsave(frame_ptr, fpu_ptr, normalized_xcr0(xcr0));
+    } else {
+        let _ = xcr0;
+        restore_first_task_fxsave(frame_ptr, fpu_ptr);
+    }
 }
 
-// ── FXSAVE path (legacy, no XSAVE support) ──
+//  FXSAVE path (legacy, no XSAVE support)
 
 /// rdi=old_rsp, rsi=new_rsp, rdx=old_fpu, rcx=new_fpu
 #[unsafe(naked)]
@@ -1246,7 +1374,7 @@ unsafe extern "C" fn restore_first_task_fxsave(_rsp_ptr: *const u64, _fpu_ptr: *
     );
 }
 
-// ── XSAVE path (with XCR0 switching per-silo) ──
+//  XSAVE path (with XCR0 switching per-silo)
 
 /// rdi=old_rsp, rsi=new_rsp, rdx=old_fpu, rcx=new_fpu, r8=new_xcr0, r9=old_xcr0
 #[unsafe(naked)]
@@ -1269,6 +1397,7 @@ unsafe extern "C" fn switch_context_xsave(
         "jnz 11f",
         "mov r9, 3",
         "11:",
+        "mov r8, r9", // Store normalized old_xcr0 in r8 before it is modified
         "mov eax, r9d",
         "shr r9, 32",
         "mov edx, r9d",
@@ -1287,6 +1416,8 @@ unsafe extern "C" fn switch_context_xsave(
         "pop r12",
         "pop rbp",
         "pop rbx",
+        "cmp r11, r8", // Check if new_xcr0 == old_xcr0
+        "je 20f",      // Skip xsetbv if they are equal
         "push rcx",
         "mov ecx, 0",
         "mov eax, r11d",
@@ -1295,6 +1426,7 @@ unsafe extern "C" fn switch_context_xsave(
         "mov edx, r8d",
         "xsetbv",
         "pop rcx",
+        "20:",
         "mov eax, r11d",
         "mov r8, r11",
         "shr r8, 32",

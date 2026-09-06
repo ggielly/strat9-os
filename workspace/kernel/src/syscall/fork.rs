@@ -39,7 +39,7 @@ use core::{
     mem::offset_of,
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
-use x86_64::structures::paging::mapper::TranslateResult;
+use crate::arch::xshim::TranslateResult;
 /// Result returned by [`sys_fork`].
 pub struct ForkResult {
     pub child_pid: Pid,
@@ -50,7 +50,7 @@ pub struct ForkResult {
 fn local_invlpg(vaddr: u64) {
     // Local TLB invalidation is sufficient here: this kernel currently runs
     // one task per user address space (no shared user CR3 across CPUs).
-    crate::arch::x86_64::tlb::local_page(x86_64::VirtAddr::new(vaddr));
+    crate::arch::tlb::local_page(crate::arch::xshim::VirtAddr::new(vaddr));
 }
 
 #[repr(C)]
@@ -223,6 +223,9 @@ fn build_child_task(
         interrupt_rsp: AtomicU64::new(0),
         kernel_stack,
         user_stack: None,
+        stack_canary: core::sync::atomic::AtomicU64::new(0),
+        stack_canary_addr: core::sync::atomic::AtomicU64::new(0),
+        kernel_stack_user: SyncUnsafeCell::new(None),
 
         name: "fork-child",
         process: alloc::sync::Arc::new(crate::process::process::Process {
@@ -279,8 +282,10 @@ fn build_child_task(
         vruntime: AtomicU64::new(parent.vruntime()),
         fair_rq_generation: AtomicU64::new(0),
         fair_on_rq: AtomicBool::new(false),
-        // POSIX: clear_child_tid is NOT inherited — child starts with 0.
+        // POSIX: clear_child_tid is NOT inherited : child starts with 0.
         clear_child_tid: AtomicU64::new(0),
+        robust_list_head: AtomicU64::new(0),
+        robust_list_len: AtomicUsize::new(0),
         // POSIX: cwd IS inherited.
         // POSIX: umask IS inherited.
         // FS.base: child starts with 0 (its own TLS not yet set up).
@@ -370,10 +375,11 @@ pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
 /// or Err if it wasn't a COW fault (real access violation).
 pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<(), &'static str> {
     use crate::memory::paging::BuddyFrameAllocator;
-    use x86_64::{
-        structures::paging::{Mapper, Page, PageTableFlags, Size2MiB, Size4KiB, Translate},
-        VirtAddr,
-    };
+    use crate::x86_crate_shim::structures::paging::Page;
+    use crate::arch::xshim::{PageTableFlags, Size2MiB, Size4KiB};
+    use crate::x86_crate_shim::structures::paging::Translate;
+use crate::x86_crate_shim::structures::paging::Mapper;
+    use crate::arch::xshim::VirtAddr;
 
     let mapping = address_space
         .effective_mapping_containing(virt_addr)
@@ -475,7 +481,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
             unsafe {
                 mapper.map_to(
                     page,
-                    x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
+                    crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
                         new_frame.start_address,
                     ),
                     new_flags,
@@ -495,7 +501,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
             unsafe {
                 mapper.map_to(
                     huge_page,
-                    x86_64::structures::paging::PhysFrame::<Size2MiB>::containing_address(
+                    crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(
                         new_frame.start_address,
                     ),
                     tracked_flags,
@@ -511,7 +517,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
             VmaPageSize::Small => unsafe {
                 let _ = mapper.map_to(
                     page,
-                    x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
+                    crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
                         phys_frame_addr,
                     ),
                     flags,
@@ -522,7 +528,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
                 let huge_page = Page::<Size2MiB>::containing_address(VirtAddr::new(page_start));
                 let _ = mapper.map_to(
                     huge_page,
-                    x86_64::structures::paging::PhysFrame::<Size2MiB>::containing_address(
+                    crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(
                         phys_frame_addr,
                     ),
                     flags,
@@ -542,7 +548,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
 
     // The new private frame is the sole owner; set refcount=1 directly.
     // BuddyFrameAllocator returns a raw frame (refcount still REFCOUNT_UNUSED).
-    // frame_inc_ref would wrap REFCOUNT_UNUSED to 0 — use set_refcount instead.
+    // frame_inc_ref would wrap REFCOUNT_UNUSED to 0 : use set_refcount instead.
     crate::memory::cow::handle_init_ref(new_handle);
 
     if address_space
@@ -561,7 +567,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
                 let _ = unsafe {
                     mapper.map_to(
                         page,
-                        x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
+                        crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
                             phys_frame_addr,
                         ),
                         flags,
@@ -576,7 +582,7 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
                 let _ = unsafe {
                     mapper.map_to(
                         huge_page,
-                        x86_64::structures::paging::PhysFrame::<Size2MiB>::containing_address(
+                        crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(
                             phys_frame_addr,
                         ),
                         flags,

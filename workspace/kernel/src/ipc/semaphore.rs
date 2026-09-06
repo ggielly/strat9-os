@@ -93,7 +93,8 @@ impl PosixSemaphore {
         }
         loop {
             let cur = self.count.load(Ordering::Acquire);
-            if cur >= i32::MAX {
+            // `>=` on i32 reduces to `==`; the explicit form avoids overflow.
+            if cur == i32::MAX {
                 return Err(SemaphoreError::InvalidValue);
             }
             if self

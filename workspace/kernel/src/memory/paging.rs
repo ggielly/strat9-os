@@ -1,18 +1,17 @@
 //! Virtual Memory Management (Paging) for Strat9-OS
 //!
 //! Uses the `x86_64` crate's `OffsetPageTable` which is designed for the HHDM
-//! (Higher Half Direct Map) pattern : exactly what Limine provides.
+//! (Higher Half Direct Map) pattern : exactly what the UEFI bootloader provides.
 //!
 //! Provides map/unmap/translate operations on the active page table.
 
-use x86_64::{
-    registers::control::Cr3,
-    structures::paging::{
+use crate::x86_crate_shim::registers::control::Cr3;
+use crate::x86_crate_shim::structures::paging::{
         FrameAllocator as X86FrameAllocator, Mapper, OffsetPageTable, Page, PageTable,
-        PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB, Translate,
-    },
-    PhysAddr, VirtAddr,
+    Translate,
 };
+use crate::arch::xshim::{PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB};
+use crate::arch::xshim::{PhysAddr, VirtAddr};
 
 use crate::{
     memory::frame::{FrameAllocOptions, FramePurpose},
@@ -31,7 +30,7 @@ use crate::{
 /// If a newly allocated page-table frame contains stale bytes (left behind by
 /// the slab allocator or a previous allocation), any non-zero entry is decoded
 /// as a valid PTE pointing to an arbitrary physical address.  The first fetch
-/// from such an address becomes the new RIP after the Ring 3 transition —
+/// from such an address becomes the new RIP after the Ring 3 transition :
 /// explaining why RIP is non-deterministic across boots.
 ///
 /// `BuddyFrameAllocator` enforces zeroing via `FrameAllocOptions::new()
@@ -39,7 +38,7 @@ use crate::{
 ///
 ///  1. Calls the buddy allocator for a raw order-0 frame.
 ///  2. CAS-claims the frame via the [`MetaSlot`](crate::memory::MetaSlot) refcount field
-///     (`REFCOUNT_UNUSED` → `1`).
+///     (`REFCOUNT_UNUSED` => `1`).
 ///  3. Zeros the 4 KiB with a single `ptr::write_bytes` through the HHDM.
 ///  4. Sets purpose flags on the [`MetaSlot`](crate::memory::MetaSlot) with `Release` ordering.
 ///  5. Stores `refcount = 1` with `Release` ordering so any future reader
@@ -54,6 +53,7 @@ pub struct BuddyFrameAllocator;
 // exclusively-owned physical frames.  Exclusive ownership is guaranteed by
 // the buddy's own bitmap + free-list discipline.  Frames allocated with
 // `FramePurpose::PageTable` are always fully zeroed before being returned.
+#[cfg(target_arch = "x86_64")]
 unsafe impl X86FrameAllocator<Size4KiB> for BuddyFrameAllocator {
     fn allocate_frame(&mut self) -> Option<X86PhysFrame<Size4KiB>> {
         // SAFETY: `BuddyFrameAllocator` is only ever called from within
@@ -77,6 +77,15 @@ unsafe impl X86FrameAllocator<Size4KiB> for BuddyFrameAllocator {
         X86PhysFrame::from_start_address(frame.start_address).ok()
     }
 }
+#[cfg(not(target_arch = "x86_64"))]
+impl crate::arch::x86_64::structures::paging::FrameAllocator<crate::arch::xshim::Size4KiB>
+    for BuddyFrameAllocator
+{
+    fn allocate_frame(&mut self) -> Option<crate::arch::xshim::PhysFrame<crate::arch::xshim::Size4KiB>> {
+        None // R2: real Sv48 frame allocation
+    }
+}
+
 
 /// Paging initialization flag.
 static mut PAGING_READY: bool = false;
@@ -110,7 +119,7 @@ pub fn init(hhdm_offset: u64) {
 
     // SAFETY: called once during single-threaded init. The HHDM offset correctly
     // maps all physical RAM to virtual addresses. CR3 points to a valid page table
-    // set up by Limine.
+    // set up by the bootloader.
     unsafe {
         let kcr3 = &raw mut KERNEL_CR3;
         *kcr3 = level_4_frame.start_address();
@@ -132,11 +141,11 @@ pub fn init(hhdm_offset: u64) {
 /// higher-half direct map. Should be called after paging::init.
 /// Fix for VMWare Workstation which doesn't identity-map all RAM by default, causing
 /// the kernel to crash when it tries to access unmapped RAM (e.g. for the buddy allocator's
-/// metadata array). Limine's initial map only covers the first 1GB of RAM, which is not enough
+/// metadata array). The bootloader's initial map only covers the first 1GB of RAM, which is not enough
 /// for our 2GB test VM. This function lazily maps any missing RAM regions on
 /// demand using `ensure_identity_map_range()`, which checks if the region is already mapped
 /// before mapping it. This allows the kernel to boot successfully on VMWare Workstation without
-/// requiring changes to the bootloader or Limine configuration.
+/// requiring changes to the bootloader configuration.
 ///
 pub fn map_all_ram(memory_regions: &[crate::boot::entry::MemoryRegion]) {
     use crate::boot::entry::MemoryKind;
@@ -352,7 +361,7 @@ pub fn active_page_table() -> PhysAddr {
 
 /// Return the physical address of the kernel's level-4 page table.
 ///
-/// This is the CR3 value captured at init time — used by `AddressSpace::new_user()`
+/// This is the CR3 value captured at init time : used by `AddressSpace::new_user()`
 /// to clone kernel mappings (PML4 entries 256..512) into new address spaces.
 pub fn kernel_l4_phys() -> PhysAddr {
     // SAFETY: Written once during single-threaded init, read-only after that.
@@ -367,7 +376,7 @@ pub fn kernel_l4_phys() -> PhysAddr {
 pub fn ensure_identity_map(phys_addr: u64) {
     let virt_addr = crate::memory::phys_to_virt(phys_addr);
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt_addr));
-    let frame = X86PhysFrame::containing_address(PhysAddr::new(phys_addr));
+    let frame = X86PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(phys_addr));
 
     if translate(VirtAddr::new(virt_addr)).is_none() {
         log::debug!(
@@ -416,7 +425,7 @@ pub fn ensure_identity_map_range(phys_base: u64, size: u64) {
         // Only map if not already present.
         if mapper.translate_addr(virt).is_none() {
             let page = Page::<Size4KiB>::containing_address(virt);
-            let frame = X86PhysFrame::containing_address(PhysAddr::new(p));
+            let frame = X86PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(p));
             // SAFETY: frame is a valid physical page; mapper uses HHDM offset.
             match unsafe { mapper.map_to(page, frame, flags, &mut allocator) } {
                 Ok(flush) => {

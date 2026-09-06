@@ -1,12 +1,12 @@
-use alloc::{format, string::String, vec::Vec};
-
-pub use crate::arch::x86_64::pci::{
-    class, command, config, device, intel_eth, net_subclass, sata_progif, storage_subclass, vendor,
+pub use crate::arch::pci::{
+    cap_id, class, command, config, device, intel_eth, msi_cap, msi_ctrl, msix_cap, msix_ctrl,
+    net_subclass, sata_progif, storage_subclass, vendor, MSI_ADDR_BASE, MSI_ADDR_DEST_SHIFT,
 };
 use crate::{
-    arch::x86_64::pci as arch_pci,
+    arch::pci as arch_pci,
     vfs::{self, OpenFlags},
 };
+use alloc::{format, string::String, vec::Vec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bar {
@@ -289,6 +289,51 @@ impl PciDevice {
     /// Writes config u32.
     pub fn write_config_u32(&self, offset: u8, value: u32) {
         let _ = cfg_write(self.address, offset, 4, value);
+    }
+
+    /// Reads config u32 from extended config space (offset >= 0x100).
+    pub fn read_config_u32_ext(&self, offset: u16) -> Option<u32> {
+        if let Some(bytes) = open_read_all(&format!(
+            "/bus/pci/cfg/{:02x}:{:02x}.{:x}/{:02x}/{}",
+            self.address.bus, self.address.device, self.address.function, offset, 4
+        )) {
+            let text = core::str::from_utf8(&bytes).ok()?.trim();
+            let hex = text.strip_prefix("0x")?;
+            return u32::from_str_radix(hex, 16).ok();
+        }
+        let dev = arch_dev_handle(self.address);
+        dev.read_config_u32_ext(offset)
+    }
+
+    /// Walk the PCI capability linked-list and return the config-space offset
+    /// of the capability identified by `cap_id`, or `None` if not found.
+    ///
+    /// The capability pointer is at offset 0x34 (CAPABILITIES_PTR).  Each
+    /// capability header is [cap_id: u8, next_ptr: u8].
+    pub fn find_capability(&self, id: u8) -> Option<u8> {
+        let status = self.read_config_u16(config::STATUS);
+        if status & (1 << 4) == 0 {
+            return None; // Capabilities list not supported
+        }
+        let mut ptr = self.read_config_u8(config::CAPABILITIES_PTR);
+        ptr &= 0xFC; // bits 0-1 are reserved
+        while ptr != 0 {
+            if self.read_config_u8(ptr) == id {
+                return Some(ptr);
+            }
+            ptr = self.read_config_u8(ptr + 1) & 0xFC;
+        }
+        None
+    }
+
+    /// Returns the config-space offset of the MSI capability, if present.
+    pub fn msi_cap_offset(&self) -> Option<u8> {
+        self.find_capability(cap_id::MSI)
+    }
+
+    /// Returns the config-space offset of the MSI-X capability, if present.
+    pub fn msix_cap_offset(&self) -> Option<u8> {
+        self.find_capability(cap_id::MSIX)
     }
 
     /// Reads bar.

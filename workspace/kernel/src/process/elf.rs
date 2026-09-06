@@ -7,12 +7,29 @@
 //!   - ET_EXEC
 //!   - ET_DYN (PIE/static-PIE)
 //!   - ELF64 little-endian x86_64 binaries.
-
+//!
+//!
+//! Does not support (or need future fix) :
+//!
+//!   - ~~Fix TODO : allocation heap during ELF loading~~
+//!     PARTIALLY DONE (#67) : program-header vectors and boot-stack argv
+//!     pointers now use `try_reserve_exact`-based fallible collection and
+//!     fail the load with an error instead of aborting. Full rollback of
+//!     already-mapped segments still requires a fallible GlobalAlloc.
+//!
+//!   - ~~Fix TODO : find_free_vma_range : fallback hardcoded 0x1000_0000~~
+//!     DONE : the fallback was removed; a failed search now fails the load
+//!     with "No virtual range for ET_DYN image".
+//!
+//! Security:
+//!   - User stack has a guard page (user_stack_base() - 4096) that is intentionally
+//!     left unmapped.  Stack underflows hit it and page-fault.
+//!
 use alloc::{sync::Arc, vec::Vec};
-use x86_64::{
-    structures::paging::{Mapper, Page, Size4KiB},
-    VirtAddr,
-};
+use crate::x86_crate_shim::structures::paging::Page;
+use crate::arch::xshim::Size4KiB;
+use crate::x86_crate_shim::structures::paging::Mapper;
+use crate::arch::xshim::VirtAddr;
 
 use crate::{
     capability::Capability,
@@ -23,21 +40,27 @@ use crate::{
     },
 };
 
+macro_rules! elf_trace {
+    ($($arg:tt)*) => {
+        #[cfg(debug_assertions)] {
+            crate::e9_println!($($arg)*);
+            crate::serial_println!($($arg)*);
+        }
+    };
+}
+
 // ---------------------------------------------------------------------------
-// ELF64 constants
+// ELF64 constants (relocation & dynamic tags : not covered by xmas-elf)
 // ---------------------------------------------------------------------------
 
-const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
-const ELFCLASS64: u8 = 2;
-const ELFDATA2LSB: u8 = 1;
 const ET_EXEC: u16 = 2;
 const ET_DYN: u16 = 3;
-const EV_CURRENT: u32 = 1;
-const EM_X86_64: u16 = 62;
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
 const PT_TLS: u32 = 7;
+const PT_GNU_STACK: u32 = 0x6474_e551;
+const PT_GNU_RELRO: u32 = 0x6474_e552;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
 const PF_R: u32 = 4;
@@ -61,19 +84,47 @@ const R_X86_64_COPY: u32 = 5;
 const R_X86_64_GLOB_DAT: u32 = 6;
 const R_X86_64_JUMP_SLOT: u32 = 7;
 const R_X86_64_TPOFF64: u32 = 18;
+const R_X86_64_DTPMOD64: u32 = 16;
+const R_X86_64_DTPOFF64: u32 = 17;
 const R_X86_64_IRELATIVE: u32 = 37;
 
 /// Maximum virtual address we accept for user-space mappings.
 pub const USER_ADDR_MAX: u64 = 0x0000_8000_0000_0000;
-/// Preferred base when placing ET_DYN (PIE) images.
-const PIE_BASE_ADDR: u64 = 0x0000_0001_0000_0000;
 
-/// User stack location (below the non-canonical gap).
-pub const USER_STACK_BASE: u64 = 0x0000_7FFF_F000_0000;
 /// Number of 4 KiB pages for the user stack (16 pages = 64 KiB).
+///
+/// This is the *default*: the loader accepts a per-process stack size via
+/// [`load_and_run_elf_with_stack`] (issue #64).
 pub const USER_STACK_PAGES: usize = 16;
-/// Top of the user stack (stack grows down).
-pub const USER_STACK_TOP: u64 = USER_STACK_BASE + (USER_STACK_PAGES as u64) * 4096;
+/// Lower bound on a per-process user stack (4 pages = 16 KiB): the boot
+/// stack layout alone (argv/envp/auxv + guard margins) needs at least one
+/// page, and tiny stacks would fault immediately.
+pub const USER_STACK_MIN_PAGES: usize = 4;
+/// Upper bound on a per-process user stack (2048 pages = 8 MiB), to keep a
+/// buggy or hostile caller from exhausting the user address space / frames.
+pub const USER_STACK_MAX_PAGES: usize = 2048;
+/// Standard user-mode RFLAGS: IF=1, reserved bit 1 set.
+const USER_RFLAGS: u64 = 0x202;
+
+/// Get the randomized user stack base address.
+fn user_stack_base() -> u64 {
+    crate::kaslr::stack_base()
+}
+
+/// Get the randomized user stack top address.
+fn user_stack_top() -> u64 {
+    crate::kaslr::stack_top()
+}
+
+/// Get the guard page address below the user stack.
+fn user_stack_guard() -> u64 {
+    crate::kaslr::stack_guard()
+}
+
+/// Get the randomized PIE base address for ELF loading.
+fn pie_base() -> u64 {
+    crate::kaslr::pie_base()
+}
 
 /// Result of loading an ELF image into an address space.
 #[derive(Debug, Clone, Copy)]
@@ -88,33 +139,24 @@ pub struct LoadedElfInfo {
     pub tls_filesz: u64,
     pub tls_memsz: u64,
     pub tls_align: u64,
+    pub stack_exec: bool,
 }
 
 // ---------------------------------------------------------------------------
-// ELF64 header structures
+// ELF64 structures for kernel-internal use
 // ---------------------------------------------------------------------------
 
-/// ELF64 file header (64 bytes).
-#[repr(C, packed)]
+/// Parsed ELF64 file header (copy-friendly, no borrows).
 #[derive(Debug, Clone, Copy)]
 struct Elf64Header {
-    e_ident: [u8; 16],
     e_type: u16,
-    e_machine: u16,
-    e_version: u32,
     e_entry: u64,
     e_phoff: u64,
-    e_shoff: u64,
-    e_flags: u32,
-    e_ehsize: u16,
     e_phentsize: u16,
     e_phnum: u16,
-    e_shentsize: u16,
-    e_shnum: u16,
-    e_shstrndx: u16,
 }
 
-/// ELF64 program header (56 bytes).
+/// Parsed ELF64 program header (copy-friendly, packed for raw byte reading).
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 struct Elf64Phdr {
@@ -155,71 +197,80 @@ struct Elf64Sym {
 }
 
 // ---------------------------------------------------------------------------
-// Parsing
+// Parsing (uses xmas-elf for header validation)
 // ---------------------------------------------------------------------------
 
 /// Parse and validate the ELF64 file header from raw bytes.
+///
+/// Uses `xmas-elf` for magic/class/machine/version validation, then copies
+/// the fields we need into a local `Copy` struct.
 fn parse_header(data: &[u8]) -> Result<Elf64Header, &'static str> {
-    if data.len() < core::mem::size_of::<Elf64Header>() {
-        return Err("ELF data too small for header");
+    let elf = xmas_elf::ElfFile::new(data).map_err(|e| {
+        crate::serial_println!("[elf] xmas_elf::ElfFile::new failed: {:?}", e);
+        "Invalid ELF header"
+    })?;
+
+    let hdr = elf.header.pt2;
+
+    // Reject non-x86_64 binaries early.
+    let machine = hdr.machine().as_machine();
+    if machine != xmas_elf::header::Machine::X86_64 {
+        crate::serial_println!(
+            "[elf] Rejecting binary: machine={:?} (expected X86_64)",
+            machine
+        );
+        return Err("Not an x86_64 ELF binary");
     }
 
-    // SAFETY: data is large enough and Elf64Header is repr(C, packed) with no
-    // alignment requirements beyond 1.
-    let header: Elf64Header =
-        unsafe { core::ptr::read_unaligned(data.as_ptr() as *const Elf64Header) };
-
-    // Validate magic
-    if header.e_ident[0..4] != ELF_MAGIC {
-        return Err("Bad ELF magic");
-    }
-
-    // Class: 64-bit
-    if header.e_ident[4] != ELFCLASS64 {
-        return Err("Not ELF64");
-    }
-
-    // Data: little-endian
-    if header.e_ident[5] != ELFDATA2LSB {
-        return Err("Not little-endian ELF");
-    }
-
-    // Machine: x86_64
-    if header.e_machine != EM_X86_64 {
-        return Err("Not x86_64 ELF");
-    }
-
-    // Type: executable or shared object (PIE/static PIE executable image)
-    if header.e_type != ET_EXEC && header.e_type != ET_DYN {
+    // Type: executable or shared object (PIE/static PIE)
+    let e_type = hdr.type_().0;
+    if e_type != ET_EXEC && e_type != ET_DYN {
+        crate::serial_println!(
+            "[elf] Rejecting binary: e_type={} (expected ET_EXEC={} or ET_DYN={})",
+            e_type,
+            ET_EXEC,
+            ET_DYN
+        );
         return Err("Unsupported ELF type (expected ET_EXEC or ET_DYN)");
     }
 
-    // ELF version
-    if header.e_version != EV_CURRENT {
-        return Err("Unsupported ELF version");
-    }
-
+    let e_entry = hdr.entry_point();
     // Entry point must be canonical user space (for ET_DYN this is relative and
-    // validated again after relocation). ET_EXEC must be non-zero.
-    if header.e_entry >= USER_ADDR_MAX {
+    // validated again after relocation). ET_EXEC with e_entry=0 is handled later.
+    if e_entry >= USER_ADDR_MAX {
         return Err("Entry point outside user address range");
     }
-    // Some toolchains/images can emit ET_EXEC with e_entry=0.
-    // We handle this case later by deriving a fallback entry from PT_LOAD|PF_X.
 
-    // Sanity check program headers
-    if header.e_phentsize as usize != core::mem::size_of::<Elf64Phdr>() {
+    let e_phentsize = hdr.ph_entry_size();
+    let e_phoff = hdr.ph_offset();
+    let e_phnum = hdr.ph_count();
+
+    // Sanity check program headers.
+    // Compare against our packed Elf64Phdr (56 bytes = standard ELF64), not
+    // xmas_elf::ProgramHeader which may have padding due to #[repr(C)].
+    if e_phentsize as usize != core::mem::size_of::<Elf64Phdr>() {
+        crate::serial_println!(
+            "[elf] Rejecting binary: e_phentsize={} expected={}",
+            e_phentsize,
+            core::mem::size_of::<Elf64Phdr>()
+        );
         return Err("Unexpected phentsize");
     }
 
-    let ph_end = (header.e_phoff as usize)
-        .checked_add((header.e_phnum as usize) * (header.e_phentsize as usize))
+    let ph_end = (e_phoff as usize)
+        .checked_add((e_phnum as usize) * (e_phentsize as usize))
         .ok_or("Program header table overflows")?;
     if ph_end > data.len() {
         return Err("Program headers extend past file");
     }
 
-    Ok(header)
+    Ok(Elf64Header {
+        e_type,
+        e_entry,
+        e_phoff,
+        e_phentsize,
+        e_phnum,
+    })
 }
 
 /// Iterate over program headers in the ELF.
@@ -237,6 +288,32 @@ fn program_headers<'a>(
         // within `data`, and Elf64Phdr is packed (align 1).
         unsafe { core::ptr::read_unaligned(data.as_ptr().add(offset) as *const Elf64Phdr) }
     })
+}
+
+/// Collects an exact-size-hint iterator into a `Vec`, failing cleanly on
+/// allocation failure instead of aborting (issue #67).
+///
+/// The exact reservation means the `push` loop below can never reallocate:
+/// either the whole vector is built, or we return `Err` having allocated
+/// nothing (beyond the failed reservation itself).
+fn try_collect_exact<T, I>(iter: I) -> Result<Vec<T>, &'static str>
+where
+    I: IntoIterator<Item = T>,
+{
+    let iter = iter.into_iter();
+    let (lower, Some(upper)) = iter.size_hint() else {
+        return Err("ELF: iterator has inexact size hint");
+    };
+    if lower != upper {
+        return Err("ELF: iterator has inexact size hint");
+    }
+    let mut v = Vec::new();
+    v.try_reserve_exact(lower)
+        .map_err(|_| "ELF: out of memory while collecting program headers")?;
+    for item in iter {
+        v.push(item);
+    }
+    Ok(v)
 }
 
 /// Parses interp path.
@@ -304,21 +381,42 @@ fn find_relocated_phdr_vaddr(
 /// Reads elf from vfs.
 fn read_elf_from_vfs(path: &str) -> Result<Vec<u8>, &'static str> {
     const MAX_ELF_SIZE: usize = 64 * 1024 * 1024;
-    let fd =
-        crate::vfs::open(path, crate::vfs::OpenFlags::READ).map_err(|_| "PT_INTERP open failed")?;
+    let resolved_path =
+        crate::vfs::resolve_and_check_path_for_current_task(path, true, false, true)
+            .map_err(|_| "PT_INTERP execute denied")?;
+    let fd = crate::vfs::open(&resolved_path, crate::vfs::OpenFlags::READ)
+        .map_err(|_| "PT_INTERP open failed")?;
     let mut out = Vec::new();
     let mut buf = [0u8; 4096];
+
+    // Read the first chunk to validate ELF magic before loading the whole file.
+    let n = match crate::vfs::read(fd, &mut buf) {
+        Ok(0) => {
+            let _ = crate::vfs::close(fd);
+            return Err("PT_INTERP file is empty");
+        }
+        Ok(n) => n,
+        Err(_) => {
+            let _ = crate::vfs::close(fd);
+            return Err("PT_INTERP read failed");
+        }
+    };
+    if n < 4 || buf[..4] != [0x7F, b'E', b'L', b'F'] {
+        let _ = crate::vfs::close(fd);
+        return Err("PT_INTERP file is not an ELF");
+    }
+    out.extend_from_slice(&buf[..n]);
+
+    // Continue reading the rest of the file.
     loop {
         let n = match crate::vfs::read(fd, &mut buf) {
+            Ok(0) => break,
             Ok(n) => n,
             Err(_) => {
                 let _ = crate::vfs::close(fd);
                 return Err("PT_INTERP read failed");
             }
         };
-        if n == 0 {
-            break;
-        }
         if out.len().saturating_add(n) > MAX_ELF_SIZE {
             let _ = crate::vfs::close(fd);
             return Err("PT_INTERP file too large");
@@ -326,9 +424,6 @@ fn read_elf_from_vfs(path: &str) -> Result<Vec<u8>, &'static str> {
         out.extend_from_slice(&buf[..n]);
     }
     let _ = crate::vfs::close(fd);
-    if out.is_empty() {
-        return Err("PT_INTERP file is empty");
-    }
     Ok(out)
 }
 
@@ -391,11 +486,11 @@ fn compute_load_bias_and_entry(
         0
     } else {
         let n_pages = (span as usize).div_ceil(4096);
+        // No hardcoded fallback: if the randomized PIE base cannot host the
+        // image (address space full), fail the load loudly instead of
+        // silently colliding with existing mappings (issue #68).
         let load_base = user_as
-            .find_free_vma_range(PIE_BASE_ADDR, n_pages, VmaPageSize::Small)
-            .or_else(|| {
-                user_as.find_free_vma_range(0x0000_0000_1000_0000, n_pages, VmaPageSize::Small)
-            })
+            .find_free_vma_range(pie_base(), n_pages, VmaPageSize::Small)
             .ok_or("No virtual range for ET_DYN image")?;
         load_base
             .checked_sub(min_vaddr)
@@ -441,7 +536,7 @@ fn apply_segment_permissions(
     page_count: usize,
     flags: VmaFlags,
 ) -> Result<(), &'static str> {
-    use x86_64::registers::control::Cr3;
+    use crate::x86_crate_shim::registers::control::Cr3;
 
     let pte_flags = flags.to_page_flags();
     // SAFETY: loader owns this AddressSpace during image construction.
@@ -469,7 +564,7 @@ fn apply_segment_permissions(
     let (current_cr3, _) = Cr3::read();
     if current_cr3.start_address() == user_as.cr3() {
         let end = page_start + (page_count as u64) * 4096;
-        crate::arch::x86_64::tlb::local_range(VirtAddr::new(page_start), VirtAddr::new(end));
+        crate::arch::tlb::local_range(VirtAddr::new(page_start), VirtAddr::new(end));
     }
 
     Ok(())
@@ -488,20 +583,35 @@ fn read_user_mapped_bytes(
         return Err("Read range outside user space");
     }
     let mut copied = 0usize;
+    // SMAP: temporarily disable supervisor-mode access prevention while
+    // reading from user-space pages through the HHDM.
+    crate::arch::stac();
     while copied < out.len() {
         let page_off = (vaddr & 0xFFF) as usize;
         let chunk = core::cmp::min(out.len() - copied, 4096 - page_off);
         let phys = user_as
             .translate(VirtAddr::new(vaddr))
             .ok_or("Failed to translate mapped user bytes")?;
-        let src = crate::memory::phys_to_virt(phys.as_u64()) as *const u8;
+        let paddr = phys.as_u64();
+        if paddr == 0 {
+            crate::arch::clac();
+            return Err("Translated physical address is null");
+        }
+        let src = crate::memory::phys_to_virt(paddr) as *const u8;
+        if src.is_null() {
+            crate::arch::clac();
+            return Err("HHDM-mapped source is null");
+        }
         // SAFETY: src points to mapped physical memory via HHDM.
+        // The address was just validated non-null, and the translate()
+        // call guarantees the virtual address is backed by a valid frame.
         unsafe { core::ptr::copy_nonoverlapping(src, out.as_mut_ptr().add(copied), chunk) };
         copied += chunk;
         vaddr = vaddr
             .checked_add(chunk as u64)
             .ok_or("Virtual address overflow while reading mapped bytes")?;
     }
+    crate::arch::clac();
     Ok(())
 }
 
@@ -518,20 +628,35 @@ fn write_user_mapped_bytes(
         return Err("Write range outside user space");
     }
     let mut written = 0usize;
+    // SMAP: temporarily disable supervisor-mode access prevention while
+    // writing to user-space pages through the HHDM.
+    crate::arch::stac();
     while written < src.len() {
         let page_off = (vaddr & 0xFFF) as usize;
         let chunk = core::cmp::min(src.len() - written, 4096 - page_off);
         let phys = user_as
             .translate(VirtAddr::new(vaddr))
             .ok_or("Failed to translate relocation target")?;
-        let dst = crate::memory::phys_to_virt(phys.as_u64()) as *mut u8;
+        let paddr = phys.as_u64();
+        if paddr == 0 {
+            crate::arch::clac();
+            return Err("Translated physical address is null");
+        }
+        let dst = crate::memory::phys_to_virt(paddr) as *mut u8;
+        if dst.is_null() {
+            crate::arch::clac();
+            return Err("HHDM-mapped destination is null");
+        }
         // SAFETY: destination points to mapped user frame through HHDM.
+        // The address was just validated non-null, and the translate()
+        // call guarantees the virtual address is backed by a valid frame.
         unsafe { core::ptr::copy_nonoverlapping(src.as_ptr().add(written), dst, chunk) };
         written += chunk;
         vaddr = vaddr
             .checked_add(chunk as u64)
             .ok_or("Virtual address overflow while writing mapped bytes")?;
     }
+    crate::arch::clac();
     Ok(())
 }
 
@@ -545,6 +670,41 @@ fn read_user_u64(user_as: &AddressSpace, vaddr: u64) -> Result<u64, &'static str
 /// Writes user u64.
 fn write_user_u64(user_as: &AddressSpace, vaddr: u64, value: u64) -> Result<(), &'static str> {
     write_user_mapped_bytes(user_as, vaddr, &value.to_le_bytes())
+}
+
+/// Calls a user-space IFUNC resolver function and returns its result.
+///
+/// The resolver is located at `resolver_vaddr` in the user address space.
+/// All RELATIVE relocations for this binary must have been applied first so
+/// that the resolver's own calls/addresses are correct.
+///
+/// # Security note
+///
+/// IFUNC resolvers execute as ordinary user-space functions, but this helper
+/// calls them from Ring 0 via HHDM.  A malicious or corrupted resolver can
+/// read/write kernel memory and escalate privileges.  This is acceptable for
+/// a single-address-space kernel that loads only trusted binaries, but must
+/// NOT be used if untrusted ELF images are ever loaded.
+fn call_ifunc_resolver(user_as: &AddressSpace, resolver_vaddr: u64) -> Result<u64, &'static str> {
+    if resolver_vaddr >= USER_ADDR_MAX {
+        return Err("IFUNC resolver address outside user space");
+    }
+    let phys = user_as
+        .translate(VirtAddr::new(resolver_vaddr))
+        .ok_or("IFUNC resolver page not mapped")?;
+    let hhdm_ptr = crate::memory::phys_to_virt(phys.as_u64());
+    log::warn!(
+        "[elf] IFUNC resolver at {:#x} executing in Ring 0 — security risk if binary is untrusted",
+        resolver_vaddr
+    );
+    // SAFETY: hhdm_ptr points to a user page containing executable code.
+    // The resolver is a simple function that returns a u64; it must not
+    // access kernel state.  All RELATIVE relocations for this binary have
+    // already been applied, so the resolver's own target addresses are valid.
+    //
+    // WARNING: this executes user code in Ring 0.  Safe only for trusted binaries.
+    let resolver: extern "C" fn() -> u64 = unsafe { core::mem::transmute(hhdm_ptr as *const ()) };
+    Ok(resolver())
 }
 
 /// Performs the apply relr relocations operation.
@@ -594,6 +754,9 @@ fn apply_relr_relocations(
                 .ok_or("DT_RELR where pointer overflow")?;
             applied += 1;
         } else {
+            if where_addr == 0 {
+                return Err("DT_RELR bitmap entry before initial address entry");
+            }
             let mut bitmap = entry >> 1;
             for bit in 0..63u64 {
                 if (bitmap & 1) != 0 {
@@ -618,7 +781,7 @@ fn apply_relr_relocations(
                 }
             }
             where_addr = where_addr
-                .checked_add(63 * 8)
+                .checked_add(64 * 8)
                 .ok_or("DT_RELR where advance overflow")?;
         }
     }
@@ -648,7 +811,13 @@ fn apply_dynamic_relocations(
         .p_vaddr
         .checked_add(load_bias)
         .ok_or("PT_DYNAMIC relocated address overflow")?;
-    let dyn_count = (dynamic_ph.p_filesz as usize) / core::mem::size_of::<Elf64Dyn>();
+    let dyn_file_size = dynamic_ph.p_filesz as usize;
+    let dyn_count = dyn_file_size / core::mem::size_of::<Elf64Dyn>();
+    // Read the entire .dynamic section at once to avoid O(n) page-table walks.
+    let mut dyn_buf = alloc::vec![0u8; dyn_file_size];
+    read_user_mapped_bytes(user_as, dyn_addr, &mut dyn_buf)?;
+    let dyn_slice: &[Elf64Dyn] =
+        unsafe { core::slice::from_raw_parts(dyn_buf.as_ptr() as *const Elf64Dyn, dyn_count) };
 
     let mut rela_addr: Option<u64> = None;
     let mut rela_size: usize = 0;
@@ -658,20 +827,17 @@ fn apply_dynamic_relocations(
     let mut pltrel_kind: Option<u64> = None;
     let mut symtab_addr: Option<u64> = None;
     let mut sym_ent: usize = core::mem::size_of::<Elf64Sym>();
-    let _strtab_addr: Option<u64> = None;
+    // Relocated DT_STRTAB: stored now so future symbol-by-name PLT/GOT
+    // lazy-binding resolution can map Elf64Sym::st_name offsets to strings
+    // (issue #66). Not consumed yet beyond tracing.
+    let mut strtab_addr: Option<u64> = None;
     let mut rela_count_hint: Option<usize> = None;
     let mut relr_addr: Option<u64> = None;
     let mut relr_size: usize = 0;
     let mut relr_ent: usize = 0;
 
     for i in 0..dyn_count {
-        let entry_addr = dyn_addr
-            .checked_add((i * core::mem::size_of::<Elf64Dyn>()) as u64)
-            .ok_or("PT_DYNAMIC walk overflow")?;
-        let mut raw = [0u8; core::mem::size_of::<Elf64Dyn>()];
-        read_user_mapped_bytes(user_as, entry_addr, &mut raw)?;
-        // SAFETY: raw has exact size of Elf64Dyn; read_unaligned handles packing.
-        let dyn_entry = unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const Elf64Dyn) };
+        let dyn_entry = &dyn_slice[i];
 
         match dyn_entry.d_tag {
             DT_NULL => break,
@@ -706,10 +872,12 @@ fn apply_dynamic_relocations(
             }
             DT_SYMENT => sym_ent = dyn_entry.d_val as usize,
             DT_STRTAB => {
-                let _ = dyn_entry
-                    .d_val
-                    .checked_add(load_bias)
-                    .ok_or("DT_STRTAB relocated address overflow")?;
+                strtab_addr = Some(
+                    dyn_entry
+                        .d_val
+                        .checked_add(load_bias)
+                        .ok_or("DT_STRTAB relocated address overflow")?,
+                );
             }
             DT_RELR => {
                 relr_addr = Some(
@@ -741,6 +909,12 @@ fn apply_dynamic_relocations(
         return Err("Only DT_PLTREL=DT_RELA is supported");
     }
 
+    elf_trace!(
+        "[elf] dynamic: symtab={:?} strtab={:?}",
+        symtab_addr,
+        strtab_addr
+    );
+
     let read_sym_entry = |sym_idx: u32| -> Result<Elf64Sym, &'static str> {
         let symtab = symtab_addr.ok_or("Missing DT_SYMTAB for symbol relocations")?;
         let sym_addr = symtab
@@ -751,34 +925,44 @@ fn apply_dynamic_relocations(
         Ok(unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const Elf64Sym) })
     };
 
-    let resolve_symbol = |sym_idx: u32| -> Result<u64, &'static str> {
-        if sym_idx == 0 {
-            return Ok(0);
-        }
-        let sym = read_sym_entry(sym_idx)?;
-        if sym.st_shndx == 0 {
-            return Err("Undefined symbol relocation not supported");
-        }
-        sym.st_value
-            .checked_add(load_bias)
-            .ok_or("Symbol value relocation overflow")
-    };
+    let resolve_sym =
+        |sym_idx: u32, with_bias: bool, check_def: bool| -> Result<u64, &'static str> {
+            if sym_idx == 0 {
+                return Ok(0);
+            }
+            let sym = read_sym_entry(sym_idx)?;
+            if check_def && sym.st_shndx == 0 {
+                return Err("Undefined symbol relocation not supported");
+            }
+            if with_bias {
+                sym.st_value
+                    .checked_add(load_bias)
+                    .ok_or("Symbol value relocation overflow")
+            } else {
+                Ok(sym.st_value)
+            }
+        };
 
-    let resolve_symbol_raw = |sym_idx: u32| -> Result<u64, &'static str> {
-        if sym_idx == 0 {
-            return Ok(0);
-        }
-        let sym = read_sym_entry(sym_idx)?;
-        Ok(sym.st_value)
-    };
-
-    let resolve_symbol_size = |sym_idx: u32| -> Result<u64, &'static str> {
+    let resolve_size = |sym_idx: u32| -> Result<u64, &'static str> {
         if sym_idx == 0 {
             return Ok(0);
         }
         let sym = read_sym_entry(sym_idx)?;
         Ok(sym.st_size)
     };
+
+    // Variant II TLS: tp = tls_base + aligned_memsz.  We need the aligned
+    // memsz for TPOFF64/DTPOFF64 calculations.
+    let tls_aligned_memsz: i128 = phdrs
+        .iter()
+        .find(|ph| ph.p_type == PT_TLS)
+        .map(|tls| {
+            let memsz = tls.p_memsz;
+            let align = tls.p_align.max(1);
+            let aligned = (memsz + align - 1) & !(align - 1);
+            aligned as i128
+        })
+        .unwrap_or(0);
 
     let apply_rela_table = |table_base: u64,
                             table_size: usize,
@@ -787,9 +971,15 @@ fn apply_dynamic_relocations(
         if table_size == 0 {
             return Ok(0);
         }
-        let mut count = table_size / rela_ent;
+        // Use the table size as the authoritative entry count.  DT_RELACOUNT is
+        // a *hint* from the linker that may undercount; honouring it with min()
+        // silently drops valid relocations.  We only validate the hint as a
+        // sanity bound (if provided).
+        let count = table_size / rela_ent;
         if let Some(hint) = count_hint {
-            count = core::cmp::min(count, hint);
+            if hint > count {
+                return Err("DT_RELACOUNT exceeds actual RELA table size");
+            }
         }
         let mut applied = 0usize;
         for i in 0..count {
@@ -821,29 +1011,27 @@ fn apply_dynamic_relocations(
                         .ok_or("Relocation value overflow")?
                 }
                 R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT | R_X86_64_64 => {
-                    let sym_val = resolve_symbol(r_sym)? as i128;
+                    let sym_val = resolve_sym(r_sym, true, true)? as i128;
                     sym_val
                         .checked_add(rela.r_addend as i128)
                         .ok_or("Relocation value overflow")?
                 }
                 R_X86_64_COPY => {
-                    let sym_val = resolve_symbol(r_sym)?;
+                    let sym_val = resolve_sym(r_sym, true, true)?;
                     if sym_val == 0 {
                         continue;
                     }
-                    let sym_sz = resolve_symbol_size(r_sym)?;
+                    let sym_sz = resolve_size(r_sym)?;
                     if sym_sz > 0 && sym_val < USER_ADDR_MAX {
                         let mut tmp = [0u8; 256];
-                        let mut off = 0usize;
-                        while off < sym_sz as usize {
-                            let chunk = core::cmp::min(256, sym_sz as usize - off);
-                            read_user_mapped_bytes(
-                                user_as,
-                                sym_val + off as u64,
-                                &mut tmp[..chunk],
-                            )?;
-                            write_user_mapped_bytes(user_as, target + off as u64, &tmp[..chunk])?;
-                            off += chunk;
+                        let mut off = 0u64;
+                        while off < sym_sz {
+                            let chunk = core::cmp::min(256, (sym_sz - off) as usize);
+                            let src = sym_val.checked_add(off).ok_or("COPY source overflow")?;
+                            let dst = target.checked_add(off).ok_or("COPY target overflow")?;
+                            read_user_mapped_bytes(user_as, src, &mut tmp[..chunk])?;
+                            write_user_mapped_bytes(user_as, dst, &tmp[..chunk])?;
+                            off += chunk as u64;
                         }
                     }
                     applied += 1;
@@ -851,17 +1039,48 @@ fn apply_dynamic_relocations(
                 }
                 R_X86_64_TPOFF64 => {
                     let sym_val = if r_sym != 0 {
-                        resolve_symbol_raw(r_sym)? as i128
+                        resolve_sym(r_sym, false, false)? as i128
+                    } else {
+                        0i128
+                    };
+                    // Variant II: tp = tls_base + aligned_memsz, so offset from tp is
+                    // (sym.st_value - aligned_memsz + r_addend).  Use i128 to avoid
+                    // underflow when sym_val < aligned_memsz.
+                    sym_val
+                        .checked_sub(tls_aligned_memsz)
+                        .and_then(|v| v.checked_add(rela.r_addend as i128))
+                        .ok_or("TPOFF64 value overflow")?
+                }
+                R_X86_64_DTPMOD64 => {
+                    // For single-binary loading (no dynamic linker), the module ID is always 1.
+                    1i128
+                }
+                R_X86_64_DTPOFF64 => {
+                    // DTV-relative offset: same as TPOFF64 for single-binary loading.
+                    let sym_val = if r_sym != 0 {
+                        resolve_sym(r_sym, false, false)? as i128
                     } else {
                         0i128
                     };
                     sym_val
-                        .checked_add(rela.r_addend as i128)
-                        .ok_or("TPOFF64 value overflow")?
+                        .checked_sub(tls_aligned_memsz)
+                        .and_then(|v| v.checked_add(rela.r_addend as i128))
+                        .ok_or("DTPOFF64 value overflow")?
                 }
-                R_X86_64_IRELATIVE => (load_bias as i128)
-                    .checked_add(rela.r_addend as i128)
-                    .ok_or("IRELATIVE value overflow")?,
+                R_X86_64_IRELATIVE => {
+                    // IRELATIVE: the target is a resolver function that must be
+                    // *called* to obtain the final value.  All RELATIVE
+                    // relocations for this binary have already been applied, so
+                    // the resolver's own addresses are correct.
+                    let resolver_vaddr = (load_bias as i128)
+                        .checked_add(rela.r_addend as i128)
+                        .ok_or("IRELATIVE resolver address overflow")?;
+                    if resolver_vaddr < 0 || resolver_vaddr as u64 >= USER_ADDR_MAX {
+                        return Err("IRELATIVE resolver outside user space");
+                    }
+                    let resolved = call_ifunc_resolver(user_as, resolver_vaddr as u64)?;
+                    resolved as i128
+                }
                 _ => {
                     log::warn!("[elf] Unsupported relocation type {}", r_type);
                     continue;
@@ -871,9 +1090,9 @@ fn apply_dynamic_relocations(
                 return Err("Relocation value out of range");
             }
             let val_u64 = value as u64;
-            // Read back before write for diagnosis
+            #[cfg(debug_assertions)]
             if applied < 5 {
-                let r_addend_copy = rela.r_addend; // copy packed field to local
+                let r_addend_copy = rela.r_addend;
                 let mut before = [0u8; 8];
                 let _ = read_user_mapped_bytes(user_as, target, &mut before);
                 let before_val = u64::from_le_bytes(before);
@@ -887,7 +1106,7 @@ fn apply_dynamic_relocations(
                 );
             }
             write_user_mapped_bytes(user_as, target, &val_u64.to_le_bytes())?;
-            // Read back after write for diagnosis
+            #[cfg(debug_assertions)]
             if applied < 5 {
                 let mut after = [0u8; 8];
                 let _ = read_user_mapped_bytes(user_as, target, &mut after);
@@ -898,7 +1117,7 @@ fn apply_dynamic_relocations(
                     val_u64
                 );
             }
-            // Catch any relocation that writes a kernel-range address into user space.
+            #[cfg(debug_assertions)]
             if val_u64 >= 0xffff_8000_0000_0000 {
                 let r_addend_copy = rela.r_addend;
                 crate::e9_println!(
@@ -912,6 +1131,7 @@ fn apply_dynamic_relocations(
     };
 
     let mut total_applied = 0usize;
+    #[cfg(debug_assertions)]
     crate::e9_println!(
         "[reloc] apply_dynamic_relocations: bias={:#x} rela_addr={:?} rela_size={} rela_count={:?}",
         load_bias,
@@ -920,12 +1140,13 @@ fn apply_dynamic_relocations(
         rela_count_hint
     );
     if let Some(rela_base) = rela_addr {
-        total_applied += apply_rela_table(rela_base, rela_size, rela_count_hint)?;
+        let _ = total_applied += apply_rela_table(rela_base, rela_size, rela_count_hint)?;
     }
     if let Some(jmprel_base) = jmprel_addr {
-        total_applied += apply_rela_table(jmprel_base, jmprel_size, None)?;
+        let _ = total_applied += apply_rela_table(jmprel_base, jmprel_size, None)?;
     }
 
+    #[cfg(debug_assertions)]
     if total_applied > 0 {
         crate::e9_println!(
             "[reloc] applied {} RELA relocations (bias={:#x})",
@@ -1025,29 +1246,38 @@ fn load_segment(
     )?;
 
     // Copy file data into the mapped pages.
-    // We translate each page through the user AS to find its physical frame,
-    // then access it via HHDM to write.
+    // Batch-translate all pages at once to avoid page-table walks per-chunk.
     if filesz > 0 {
         let src = &elf_data[offset as usize..file_end];
         let mut copied = 0usize;
 
+        // Collect physical addresses for all pages in the range.
+        let n_vaddrs = ((page_end - page_start) / 4096) as usize;
+        let mut phys_pages = alloc::vec::Vec::with_capacity(n_vaddrs);
+        for i in 0..n_vaddrs {
+            let vaddr = page_start + (i as u64) * 4096;
+            let phys = user_as
+                .translate(VirtAddr::new(vaddr))
+                .ok_or("Failed to translate user page after mapping")?;
+            phys_pages.push(phys);
+        }
+
         while copied < src.len() {
             let dst_vaddr = vaddr + copied as u64;
+            let page_idx = ((dst_vaddr - page_start) / 4096) as usize;
             let page_offset = (dst_vaddr & 0xFFF) as usize;
             let chunk = core::cmp::min(src.len() - copied, 4096 - page_offset);
 
-            // Translate user virtual address → physical → HHDM virtual
-            let phys = user_as
-                .translate(VirtAddr::new(dst_vaddr))
-                .ok_or("Failed to translate user page after mapping")?;
+            let phys = phys_pages[page_idx];
             let hhdm_ptr = crate::memory::phys_to_virt(phys.as_u64()) as *mut u8;
-
             // SAFETY: hhdm_ptr points to a freshly mapped, zeroed frame via HHDM.
-            // The source slice is validated above.
             unsafe {
-                core::ptr::copy_nonoverlapping(src.as_ptr().add(copied), hhdm_ptr, chunk);
+                core::ptr::copy_nonoverlapping(
+                    src.as_ptr().add(copied),
+                    hhdm_ptr.add(page_offset),
+                    chunk,
+                );
             }
-
             copied += chunk;
         }
     }
@@ -1080,13 +1310,19 @@ fn load_segment(
 /// trampoline safe under SMP: two tasks can run their trampolines concurrently
 /// on different CPUs without any shared mutable state.
 extern "C" fn elf_ring3_trampoline() -> ! {
-    use crate::arch::x86_64::gdt;
+    use crate::arch::gdt;
     use core::sync::atomic::Ordering;
 
-    crate::e9_println!("[trace][elf] ring3_trampoline before current_task");
-    let task = crate::process::scheduler::current_task_clone_spin_debug("ring3_trampoline")
-        .expect("elf_ring3_trampoline: no current task");
-    crate::e9_println!(
+    elf_trace!("[trace][elf] ring3_trampoline before current_task");
+    let Some(task) = crate::process::scheduler::current_task_clone_spin_debug("ring3_trampoline")
+    else {
+        crate::e9_println!("[elf] ring3_trampoline: no current task, aborting");
+        crate::serial_println!("[elf] ring3_trampoline: no current task, aborting");
+        loop {
+            crate::x86_crate_shim::instructions::hlt();
+        }
+    };
+    elf_trace!(
         "[trace][elf] ring3_trampoline enter tid={} name={}",
         task.id.as_u64(),
         task.name
@@ -1096,7 +1332,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     let user_rip = task.trampoline_entry.load(Ordering::Acquire);
     let user_rsp = task.trampoline_stack_top.load(Ordering::Acquire);
     let user_arg0 = task.trampoline_arg0.load(Ordering::Acquire);
-    crate::e9_println!(
+    elf_trace!(
         "[trace][elf] ring3_trampoline args tid={} rip={:#x} rsp={:#x} arg0={:#x}",
         task.id.as_u64(),
         user_rip,
@@ -1108,6 +1344,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     // This is the last kernel-owned moment before user execution begins.
     // If values here are wrong, the bug is in load/relocation, not in
     // something that happens after this point.
+    #[cfg(debug_assertions)]
     {
         // SAFETY: Kernel still holds the boot/kernel CR3. HHDM is valid.
         unsafe {
@@ -1118,7 +1355,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
                 if let Some(phys) = as_ref.translate(VirtAddr::new(vaddr)) {
                     let ptr = crate::memory::phys_to_virt(phys.as_u64()) as *const u64;
                     let val = core::ptr::read_unaligned(ptr);
-                    crate::e9_println!(
+                    elf_trace!(
                         "[trampoline-got] tid={} name={} GOT[{:#x}]=phys={:#x} val={:#x}",
                         task.id.as_u64(),
                         task_name,
@@ -1127,7 +1364,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
                         val
                     );
                 } else {
-                    crate::e9_println!(
+                    elf_trace!(
                         "[trampoline-got] tid={} name={} GOT[{:#x}]=<not mapped>",
                         task.id.as_u64(),
                         task_name,
@@ -1144,15 +1381,15 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         let as_ref = task.process.address_space_arc();
         as_ref.switch_to();
     }
-    crate::e9_println!(
+    elf_trace!(
         "[trace][elf] ring3_trampoline switch_to done tid={}",
         task.id.as_u64()
     );
 
     let user_cs = gdt::user_code_selector().0 as u64;
     let user_ss = gdt::user_data_selector().0 as u64;
-    let user_rflags: u64 = 0x202; // IF=1, reserved bit 1 = 1
-    crate::e9_println!(
+    let user_rflags: u64 = USER_RFLAGS;
+    elf_trace!(
         "[trace][elf] ring3_trampoline iret tid={} cs={:#x} ss={:#x} rflags={:#x}",
         task.id.as_u64(),
         user_cs,
@@ -1164,40 +1401,38 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     // Verify that the APIC timer is actually running on this CPU before we
     // enter Ring 3 (if it is not, no timer tick = no heartbeat = silent hang).
     unsafe {
-        let lvt = crate::arch::x86_64::apic::read_reg(crate::arch::x86_64::apic::REG_LVT_TIMER);
+        let lvt = crate::arch::apic::read_reg(crate::arch::apic::REG_LVT_TIMER);
         let init_cnt =
-            crate::arch::x86_64::apic::read_reg(crate::arch::x86_64::apic::REG_TIMER_INIT);
-        let cur_cnt =
-            crate::arch::x86_64::apic::read_reg(crate::arch::x86_64::apic::REG_TIMER_CURRENT);
-        let rflags_now: u64;
-        core::arch::asm!("pushfq; pop {}", out(reg) rflags_now, options(nostack));
-        crate::e9_println!(
+            crate::arch::apic::read_reg(crate::arch::apic::REG_TIMER_INIT);
+        let _cur_cnt =
+            crate::arch::apic::read_reg(crate::arch::apic::REG_TIMER_CURRENT);
+        let _rflags_now: u64;
+        core::arch::asm!("pushfq; pop {}", out(reg) _rflags_now, options(nostack));
+        elf_trace!(
             "[trace][elf] pre-iret LAPIC: LVT={:#x} init={} cur={} IF={}",
             lvt,
             init_cnt,
-            cur_cnt,
-            (rflags_now >> 9) & 1
+            _cur_cnt,
+            (_rflags_now >> 9) & 1
         );
         if lvt & (1 << 16) != 0 {
-            crate::e9_println!(
-                "[trace][elf] WARNING: LAPIC timer is MASKED (bit 16 set) — no ticks will fire!"
+            elf_trace!(
+                "[trace][elf] WARNING: LAPIC timer is MASKED (bit 16 set) : no ticks will fire!"
             );
         }
         if init_cnt == 0 {
-            crate::e9_println!(
-                "[trace][elf] WARNING: LAPIC timer init_count=0 — timer not started!"
-            );
+            elf_trace!("[trace][elf] WARNING: LAPIC timer init_count=0 : timer not started!");
         }
     }
 
-    crate::arch::x86_64::ring3_diag::validate_ring3_state(
+    crate::arch::ring3_diag::validate_ring3_state(
         user_rip,
         user_rsp,
         user_cs as u16,
         user_ss as u16,
     );
 
-    crate::e9_println!(
+    elf_trace!(
         "[elf] PRE-IRETQ tid={} rip={:#x} rsp={:#x} rflags={:#x}",
         task.id.as_u64(),
         user_rip,
@@ -1205,10 +1440,10 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         user_rflags
     );
 
-    // Probe E9 Rust : validate_ring3_state passé, on entre dans l'asm.
-    // Si '0' est visible mais pas '1', le compilateur a inséré du code entre
-    // les deux qui a planté (peu probable, mais élimine cette hypothèse).
-    crate::e9_println!(
+    // E9 probe: validate_ring3_state passed, entering asm block.
+    // If '0' is visible but not '1', the compiler inserted code between
+    // the two that crashed (unlikely, but this rules it out).
+    elf_trace!(
         "E9[0] pre-asm rip={:#x} rsp={:#x} cs={:#x} ss={:#x}",
         user_rip,
         user_rsp,
@@ -1222,24 +1457,11 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     // `swapgs ; iretq`. Otherwise a timer IRQ can land after `swapgs` but
     // before `iretq`, with `CS=0x8` and `GS=user`, and the first `gs:[..]`
     // access in the handler faults in the swapgs->iretq window.
-    //
-    // ── E9-hack probes ────────────────────────────────────────────────────
-    // Each `out 0xe9, al` writes an ASCII character to QEMU's E9 port
-    // (visible with `-debugcon stdio` or `-debugcon file:e9.log`).
-    // The push/pop rax around each probe protects registers allocated by the
-    // compiler for the `in(reg)` constraints; the net effect on RSP is zero.
-    //
-    //   '1' (0x31): start of the asm block, input registers in place
-    //   '2' (0x32): iretq frame fully on stack (5 words)
-    //   '3' (0x33): RDI loaded with arg0, just before SWAPGS
-    //   '4' (0x34): SWAPGS done — if CPU crashes on iretq the last char is '4'
-    //
-    // If output stops at:
-    //   '1' → RSP/alignment problem before any pushes
-    //   '2' → a push faulted (kernel mapping broken?)
-    //   '3' → bug in arg0 value or in RDI
-    //   '4' → iretq is indeed triple-faulting (GDT/paging/TSS issue)
-    //   nothing → E9 port not enabled in QEMU (add `-debugcon stdio`)
+
+    // Each `out 0xe9, al` writes an ASCII character to QEMU's E9 port.
+    // Debug builds include probes 1-4 for diagnosing IRETQ failures;
+    // release builds omit them to avoid port I/O overhead.
+    #[cfg(debug_assertions)]
     unsafe {
         core::arch::asm!(
             // Close the IRQ window before touching GS. `iretq` restores IF=1
@@ -1247,56 +1469,93 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             // interrupts enabled.
             "cli",
 
-            // ── Probe 1 : entrée dans le bloc asm ─────────────────────────
-            // Les registres d'entrée sont déjà alloués par le compilateur ;
-            // push/pop rax les laisse intacts.
+            //  Probe 1: entering the asm block
             "push rax",
             "mov al, 0x31",     // '1'
             "out 0xe9, al",
             "pop rax",
 
-            // ── Construction de la frame iretq ────────────────────────────
-            // Ordre requis par IRETQ (dépilé dans l'ordre inverse) :
+            //  Build the iretq frame
+            // Order required by IRETQ (popped in reverse order):
             //   [RSP+32] SS
             //   [RSP+24] user RSP
             //   [RSP+16] RFLAGS
             //   [RSP+8]  CS
-            //   [RSP+0]  RIP  ← RSP ici après les 5 push
+            //   [RSP+0]  RIP  <--- RSP here after the 5 pushes
             "push {ss}",
             "push {rsp_val}",
             "push {rflags}",
             "push {cs}",
             "push {rip}",
 
-            // ── Probe 2 : frame iretq complète ────────────────────────────
+            //  Probe 2: frame iretq complete
             "push rax",
             "mov al, 0x32",     // '2'
             "out 0xe9, al",
             "pop rax",
 
-            // ── Chargement de arg0 dans RDI ───────────────────────────────
+            //  Pre-fault the user code page
+            // Touch the first byte at user_rip to trigger a demand page fault
+            // while GS is still the kernel per-CPU block. Without this, the
+            // iretq instruction itself can fault in the SWAPGS->Ring3 window,
+            // producing a SWAPGS-WINDOW page fault (CS=Ring0 but GS=user).
+            "mov rax, {rip}",
+            "movzx rax, byte ptr [rax]",
+
+            //  Load arg0 into RDI
             "mov rdi, {arg0}",
 
-            // ── Probe 3 : RDI chargé, juste avant SWAPGS ─────────────────
+            //  Probe 3: RDI loaded, just before SWAPGS
             "push rax",
             "mov al, 0x33",     // '3'
             "out 0xe9, al",
             "pop rax",
 
-            // ── SWAPGS : GS.base kernel ↔ GS.base user ───────────────────
-            // Après cette instruction, GS pointe vers le bloc per-thread user.
-            // Le push/pop ci-dessous ne touche pas GS, il est sûr.
+            //  SWAPGS: GS.base kernel <-> GS.base user
             "swapgs",
 
-            // ── Probe 4 : SWAPGS réussi, IRETQ imminent ──────────────────
-            // Si le double-fault survient sur iretq, '4' sera le DERNIER
-            // caractère visible dans la console E9.
+            //  Probe 4: SWAPGS succeeded, IRETQ imminent
             "push rax",
             "mov al, 0x34",     // '4'
             "out 0xe9, al",
             "pop rax",
 
-            // ── IRETQ : point de non-retour ───────────────────────────────
+            //  IRETQ: point of no return
+            "iretq",
+
+            ss      = in(reg) user_ss,
+            rsp_val = in(reg) user_rsp,
+            rflags  = in(reg) user_rflags,
+            cs      = in(reg) user_cs,
+            rip     = in(reg) user_rip,
+            arg0    = in(reg) user_arg0,
+            options(noreturn),
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    unsafe {
+        core::arch::asm!(
+            "cli",
+
+            //  Build the iretq frame
+            "push {ss}",
+            "push {rsp_val}",
+            "push {rflags}",
+            "push {cs}",
+            "push {rip}",
+
+            //  Pre-fault the user code page
+            "mov rax, {rip}",
+            "movzx rax, byte ptr [rax]",
+
+            //  Load arg0 into RDI
+            "mov rdi, {arg0}",
+
+            //  SWAPGS: GS.base kernel <-> GS.base user
+            "swapgs",
+
+            //  IRETQ: point of no return
             "iretq",
 
             ss      = in(reg) user_ss,
@@ -1313,17 +1572,56 @@ extern "C" fn elf_ring3_trampoline() -> ! {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
-
 /// Load an ELF64 binary and schedule it as a Ring 3 user task.
 ///
 /// # Arguments
-/// * `elf_data` - Raw ELF file bytes (must remain valid until load completes).
-/// * `name` - Name for the task (debugging purposes).
+/// * `elf_data` : raw ELF file bytes (must remain valid until load completes).
+/// * `name` : name for the task (debugging purposes).
 ///
 /// # Returns
 /// `Ok(())` on success, `Err` with a static error message on failure.
 pub fn load_and_run_elf(elf_data: &[u8], name: &'static str) -> Result<TaskId, &'static str> {
     load_and_run_elf_with_caps(elf_data, name, &[])
+}
+
+/// Load an ELF64 binary with command-line arguments and schedule it as a Ring 3 task.
+///
+/// `extra_args` maps to `argv[1..]`; `argv[0]` is always `name`.
+pub fn load_and_run_elf_with_args(
+    elf_data: &[u8],
+    name: &'static str,
+    extra_args: &[&str],
+) -> Result<TaskId, &'static str> {
+    let task = load_elf_task_inner(elf_data, name, extra_args, &[], USER_STACK_PAGES)?;
+    let task_id = task.id;
+    crate::process::add_task(task);
+    Ok(task_id)
+}
+
+/// Load an ELF64 binary with an explicit per-process user stack size.
+///
+/// `stack_pages` is expressed in 4 KiB pages and clamped to
+/// [`USER_STACK_MIN_PAGES`]..=[`USER_STACK_MAX_PAGES`] (issue #64).
+pub fn load_and_run_elf_with_stack(
+    elf_data: &[u8],
+    name: &'static str,
+    extra_args: &[&str],
+    seed_caps: &[Capability],
+    stack_pages: usize,
+) -> Result<TaskId, &'static str> {
+    let task = load_elf_task_inner(elf_data, name, extra_args, seed_caps, stack_pages)?;
+    let task_id = task.id;
+    crate::process::add_task(task);
+    Ok(task_id)
+}
+
+/// Thin public wrapper that keeps the existing API stable.
+pub fn load_elf_task_with_caps(
+    elf_data: &[u8],
+    name: &'static str,
+    seed_caps: &[Capability],
+) -> Result<Arc<Task>, &'static str> {
+    load_elf_task_inner(elf_data, name, &[], seed_caps, USER_STACK_PAGES)
 }
 
 /// Performs the load and run elf with caps operation.
@@ -1337,10 +1635,13 @@ pub fn load_and_run_elf_with_caps(
         name,
         elf_data.len()
     );
-    let task = load_elf_task_with_caps(elf_data, name, seed_caps)?;
+    let task = load_elf_task_inner(elf_data, name, &[], seed_caps, USER_STACK_PAGES)?;
     let task_id = task.id;
     let runtime_entry = task
         .trampoline_entry
+        .load(core::sync::atomic::Ordering::Acquire);
+    let boot_stack_top = task
+        .trampoline_stack_top
         .load(core::sync::atomic::Ordering::Acquire);
     crate::e9_println!(
         "[trace][elf] load_and_run_elf add_task begin tid={} entry={:#x}",
@@ -1357,7 +1658,7 @@ pub fn load_and_run_elf_with_caps(
         "[elf] Task '{}' created: entry={:#x}, stack_top={:#x}",
         name,
         runtime_entry,
-        USER_STACK_TOP,
+        boot_stack_top,
     );
 
     Ok(task_id)
@@ -1371,6 +1672,12 @@ const AT_BASE: u64 = 7;
 const AT_ENTRY: u64 = 9;
 const AT_RANDOM: u64 = 25;
 
+fn generate_aux_random_seed() -> [u8; 16] {
+    let mut seed = [0u8; 16];
+    crate::entropy::fill_random(&mut seed);
+    seed
+}
+
 /// Performs the push auxv operation.
 fn push_auxv(user_as: &AddressSpace, sp: &mut u64, tag: u64, val: u64) -> Result<(), &'static str> {
     *sp -= 8;
@@ -1381,31 +1688,75 @@ fn push_auxv(user_as: &AddressSpace, sp: &mut u64, tag: u64, val: u64) -> Result
 }
 
 /// Performs the setup boot user stack operation.
+/// Sets up the initial user-space stack for a freshly loaded ELF task.
+///
+/// Stack layout (low addr at bottom = first word read by `_start`):
+/// ```
+/// [sp+0]             argc
+/// [sp+8]             argv[0] ptr  (program name)
+/// [sp+8*(2..=argc)]  argv[1..] ptrs  (extra_args)
+/// [sp+8*(argc+1)]    NULL  (argv terminator)
+/// [sp+8*(argc+2)]    NULL  (envp terminator)
+/// ...                auxv pairs
+/// ```
 fn setup_boot_user_stack(
     user_as: &AddressSpace,
     name: &str,
+    extra_args: &[&str],
     phdr_vaddr: u64,
     phent: u16,
     phnum: u16,
     program_entry: u64,
     interp_base: Option<u64>,
+    stack_base: u64,
+    stack_top: u64,
 ) -> Result<u64, &'static str> {
-    let mut sp = USER_STACK_TOP;
+    let mut sp = stack_top;
 
+    // Write argv[0] = program name (null-terminated)
     let name_nul_len = (name.len() + 1) as u64;
     sp -= name_nul_len;
+    if sp < stack_base {
+        return Err("User stack overflow during boot stack setup");
+    }
     let argv0_ptr = sp;
     write_user_mapped_bytes(user_as, sp, name.as_bytes())?;
     write_user_mapped_bytes(user_as, sp + name.len() as u64, &[0])?;
 
-    sp -= 16;
-    let random_ptr = sp;
-    write_user_mapped_bytes(user_as, sp, &[0x42u8; 16])?;
+    // Write extra arg strings and record their user-space pointers
+    let mut extra_ptrs: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    // Fallible pre-allocation: argv can be large; fail the load instead of
+    // aborting on OOM (issue #67). Exact capacity => pushes never realloc.
+    extra_ptrs
+        .try_reserve_exact(extra_args.len())
+        .map_err(|_| "User stack overflow during boot stack setup")?;
+    for &arg in extra_args.iter() {
+        let arg_nul_len = (arg.len() + 1) as u64;
+        sp -= arg_nul_len;
+        if sp < stack_base {
+            return Err("User stack overflow during boot stack setup");
+        }
+        extra_ptrs.push(sp);
+        write_user_mapped_bytes(user_as, sp, arg.as_bytes())?;
+        write_user_mapped_bytes(user_as, sp + arg.len() as u64, &[0])?;
+    }
 
     sp &= !0xF;
+    sp -= 16;
+    if sp < stack_base {
+        return Err("User stack overflow during boot stack setup");
+    }
+    let random_ptr = sp;
+    let random_seed = generate_aux_random_seed();
+    write_user_mapped_bytes(user_as, sp, &random_seed)?;
+    let auxv_pairs = if interp_base.is_some() { 8u64 } else { 7u64 };
+    // argc(1) + argv[0..=N](1+N) + argv_NULL(1) + envp_NULL(1) + auxv(pairs*2)
+    let stack_words = 4u64 + extra_args.len() as u64 + auxv_pairs * 2;
+    let align_pad = (0u64.wrapping_sub(stack_words * 8)) & 0xF;
+    sp -= align_pad;
 
-    // AT_NULL
-    push_auxv(user_as, &mut sp, 0, 0)?;
+    // Auxv (written high-to-low since push_auxv decrements sp)
+    push_auxv(user_as, &mut sp, 0, 0)?; // AT_NULL
     push_auxv(user_as, &mut sp, AT_RANDOM, random_ptr)?;
     push_auxv(user_as, &mut sp, AT_ENTRY, program_entry)?;
     if let Some(base) = interp_base {
@@ -1419,26 +1770,41 @@ fn setup_boot_user_stack(
     // envp NULL terminator
     sp -= 8;
     write_user_u64(user_as, sp, 0)?;
-    // argv[0], argv NULL terminator
+
+    // argv NULL terminator
     sp -= 8;
     write_user_u64(user_as, sp, 0)?;
+
+    // Extra argv pointers in reverse (last arg highest in stack, first arg lowest)
+    for &ptr in extra_ptrs.iter().rev() {
+        sp -= 8;
+        write_user_u64(user_as, sp, ptr)?;
+    }
+
+    // argv[0] = program name
     sp -= 8;
     write_user_u64(user_as, sp, argv0_ptr)?;
-    // argc
-    sp -= 8;
-    write_user_u64(user_as, sp, 1)?;
 
-    // System V ABI: %rsp % 16 == 0 at process entry
-    sp &= !0xF;
+    // argc = 1 (name) + extra_args
+    sp -= 8;
+    write_user_u64(user_as, sp, 1u64 + extra_args.len() as u64)?;
+
+    debug_assert_eq!(sp & 0xF, 0);
     Ok(sp)
 }
 
-/// Performs the load elf task with caps operation.
-pub fn load_elf_task_with_caps(
+/// Internal ELF task builder used by all public loading APIs.
+/// `extra_args` are written to the user stack as argv[1..] after the program name.
+fn load_elf_task_inner(
     elf_data: &[u8],
     name: &'static str,
+    extra_args: &[&str],
     seed_caps: &[Capability],
+    stack_pages: usize,
 ) -> Result<Arc<Task>, &'static str> {
+    if !(USER_STACK_MIN_PAGES..=USER_STACK_MAX_PAGES).contains(&stack_pages) {
+        return Err("User stack size out of range");
+    }
     crate::e9_println!(
         "[trace][elf] load_elf_task enter name={} size={}",
         name,
@@ -1448,7 +1814,13 @@ pub fn load_elf_task_with_caps(
 
     // Step 1: Parse and validate ELF header
     crate::e9_println!("[trace][elf] load_elf_task parse_header begin");
-    let header = parse_header(elf_data)?;
+    let header = match parse_header(elf_data) {
+        Ok(h) => h,
+        Err(e) => {
+            crate::serial_println!("[elf] parse_header FAILED for '{}': {}", name, e);
+            return Err(e);
+        }
+    };
     crate::e9_println!(
         "[trace][elf] load_elf_task parse_header ok type={}",
         if header.e_type == ET_DYN {
@@ -1462,7 +1834,7 @@ pub fn load_elf_task_with_caps(
     let user_as = Arc::new(AddressSpace::new_user()?);
     crate::e9_println!("[trace][elf] load_elf_task user_as done");
 
-    let phdrs: Vec<Elf64Phdr> = program_headers(elf_data, &header).collect();
+    let phdrs: Vec<Elf64Phdr> = try_collect_exact(program_headers(elf_data, &header))?;
     let interp_path = parse_interp_path(elf_data, &phdrs)?;
     let (load_bias, entry) = compute_load_bias_and_entry(&user_as, &header, &phdrs)?;
     let phdr_vaddr = find_relocated_phdr_vaddr(&header, &phdrs, load_bias)?;
@@ -1499,23 +1871,26 @@ pub fn load_elf_task_with_caps(
         apply_dynamic_relocations(&user_as, &phdrs, header.e_type, load_bias)?;
     }
 
-    // Diagnostic: read back key GOT entries after relocation to verify they were applied.
-    for test_offset in [0x12920u64, 0x12928u64, 0x12930u64] {
-        let vaddr = load_bias.wrapping_add(test_offset);
-        if vaddr < USER_ADDR_MAX {
-            if let Some(phys) = user_as.translate(VirtAddr::new(vaddr)) {
-                let ptr = crate::memory::phys_to_virt(phys.as_u64()) as *const u64;
-                // SAFETY: HHDM access to a mapped user page, owned exclusively during ELF loading.
-                let val = unsafe { core::ptr::read_unaligned(ptr) };
-                crate::e9_println!(
-                    "[reloc-check] GOT[{:#x}]=phys={:#x} val={:#x} ({})",
-                    vaddr,
-                    phys.as_u64(),
-                    val,
-                    name
+    // PT_GNU_RELRO: mark the RELRO range read-only after relocations.
+    if let Some(relro) = phdrs.iter().find(|ph| ph.p_type == PT_GNU_RELRO) {
+        if relro.p_memsz > 0 {
+            let relro_start = relro.p_vaddr.wrapping_add(load_bias) & !0xFFF;
+            let relro_end =
+                (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz + 0xFFF) & !0xFFF;
+            if relro_end > relro_start && relro_end <= USER_ADDR_MAX {
+                let ro_flags = VmaFlags {
+                    readable: true,
+                    writable: false,
+                    executable: false,
+                    user_accessible: true,
+                };
+                let relro_pages = ((relro_end - relro_start) / 4096) as usize;
+                apply_segment_permissions(&user_as, relro_start, relro_pages, ro_flags)?;
+                log::debug!(
+                    "[elf] PT_GNU_RELRO: {:#x}..{:#x} made read-only",
+                    relro_start,
+                    relro_end
                 );
-            } else {
-                crate::e9_println!("[reloc-check] GOT[{:#x}] = <not mapped> ({})", vaddr, name);
             }
         }
     }
@@ -1532,7 +1907,8 @@ pub fn load_elf_task_with_caps(
     if let Some(path) = interp_path {
         let interp_data = read_elf_from_vfs(path)?;
         let interp_header = parse_header(&interp_data)?;
-        let interp_phdrs: Vec<Elf64Phdr> = program_headers(&interp_data, &interp_header).collect();
+        let interp_phdrs: Vec<Elf64Phdr> =
+            try_collect_exact(program_headers(&interp_data, &interp_header))?;
         if parse_interp_path(&interp_data, &interp_phdrs)?.is_some() {
             return Err("Nested PT_INTERP is not supported");
         }
@@ -1584,10 +1960,13 @@ pub fn load_elf_task_with_caps(
         )?;
         if tls_filesz > 0 {
             let src_off = tls.p_offset as usize;
-            let src_end = src_off + tls_filesz as usize;
-            if src_end <= elf_data.len() {
-                write_user_mapped_bytes(&user_as, tls_base, &elf_data[src_off..src_end])?;
+            let src_end = src_off
+                .checked_add(tls_filesz as usize)
+                .ok_or("PT_TLS offset+filesz overflows")?;
+            if src_end > elf_data.len() {
+                return Err("PT_TLS file data extends past ELF");
             }
+            write_user_mapped_bytes(&user_as, tls_base, &elf_data[src_off..src_end])?;
         }
         let tp = tls_base + aligned_memsz;
         write_user_u64(&user_as, tp, tp)?;
@@ -1595,37 +1974,64 @@ pub fn load_elf_task_with_caps(
     }
 
     // Step 4: Map user stack
+    // Per-process ASLR (issue #62): on top of the boot-time KASLR offset, each
+    // image draws its own page-aligned jitter so two processes never share
+    // identical stack addresses. The stack size is configurable per process
+    // (issue #64). A single guard page below the stack is left unmapped :
+    // underflow faults instead of silently corrupting neighbours.
+    let stack_base = crate::kaslr::stack_base_with_jitter(crate::kaslr::draw_stack_jitter());
+    let stack_top = crate::kaslr::stack_top_for(stack_base, stack_pages);
+    // PT_GNU_STACK with PF_X means the stack should be executable (legacy ABI).
+    // Without PT_GNU_STACK or without PF_X, the stack is NX (modern default).
+    let stack_exec = phdrs
+        .iter()
+        .any(|ph| ph.p_type == PT_GNU_STACK && (ph.p_flags & PF_X) != 0);
     let stack_flags = VmaFlags {
         readable: true,
         writable: true,
-        executable: false,
+        executable: stack_exec,
         user_accessible: true,
     };
     user_as.map_region(
-        USER_STACK_BASE,
-        USER_STACK_PAGES,
+        stack_base,
+        stack_pages,
         stack_flags,
         VmaType::Stack,
         VmaPageSize::Small,
     )?;
+    // Guard page: a single unmapped page below the stack.  Any stack
+    // underflow (push past the bottom) hits this and faults.  The page
+    // is intentionally left unmapped : no VMA, no PTE.
     log::debug!(
-        "[elf] User stack: {:#x}..{:#x} ({} pages)",
-        USER_STACK_BASE,
-        USER_STACK_TOP,
-        USER_STACK_PAGES,
+        "[elf] User stack: {:#x}..{:#x} ({} pages), guard at {:#x}",
+        stack_base,
+        stack_top,
+        stack_pages,
+        user_stack_guard(),
     );
+
+    // Stack canary (issue #63): a random per-process value occupies the
+    // top word of the stack; all boot data lives strictly below it. The
+    // kernel re-checks it at task exit (Task::verify_user_stack_canary).
+    let mut canary_bytes = [0u8; 8];
+    crate::entropy::fill_random(&mut canary_bytes);
+    let stack_canary = u64::from_le_bytes(canary_bytes) | 1; // never 0
+    write_user_u64(&user_as, stack_top - 8, stack_canary)?;
 
     let boot_sp = setup_boot_user_stack(
         &user_as,
         name,
+        extra_args,
         phdr_vaddr,
         header.e_phentsize,
         header.e_phnum,
         entry,
         interp_base,
+        stack_base,
+        stack_top - 8, // data must stay below the canary slot
     )?;
 
-    // Step 5: Create kernel task — trampoline params are stored inside the task
+    // Step 5: Create kernel task : trampoline params are stored inside the task
     // itself so that concurrent SMP execution of multiple trampolines is safe.
     crate::e9_println!(
         "[trace][elf] load_elf_task kstack_begin size={}",
@@ -1659,7 +2065,13 @@ pub fn load_elf_task_with_caps(
         resume_kind: SyncUnsafeCell::new(ResumeKind::RetFrame),
         interrupt_rsp: core::sync::atomic::AtomicU64::new(0),
         kernel_stack,
-        user_stack: None,
+        user_stack: Some(crate::process::task::UserStack {
+            virt_base: x86_64::VirtAddr::new(stack_base),
+            size: stack_pages * 4096,
+        }),
+        stack_canary: core::sync::atomic::AtomicU64::new(stack_canary),
+        stack_canary_addr: core::sync::atomic::AtomicU64::new(stack_top - 8),
+        kernel_stack_user: SyncUnsafeCell::new(None),
         name,
         process: Arc::new(crate::process::process::Process::new(pid, user_as)),
         pending_signals: super::signal::SignalSet::new(),
@@ -1681,6 +2093,8 @@ pub fn load_elf_task_with_caps(
         fair_rq_generation: core::sync::atomic::AtomicU64::new(0),
         fair_on_rq: core::sync::atomic::AtomicBool::new(false),
         clear_child_tid: core::sync::atomic::AtomicU64::new(0),
+        robust_list_head: core::sync::atomic::AtomicU64::new(0),
+        robust_list_len: core::sync::atomic::AtomicUsize::new(0),
         user_fs_base: core::sync::atomic::AtomicU64::new(user_fs_base_val),
         fpu_state: crate::process::task::SyncUnsafeCell::new(fpu_state),
         xcr0_mask: core::sync::atomic::AtomicU64::new(xcr0_mask),
@@ -1728,7 +2142,7 @@ pub fn load_elf_task_with_caps(
         r12: 0,
         rbp: 0,
         rbx: 0,
-        r11: 0x202,
+        r11: USER_RFLAGS,
         r10: 0,
         r9: 0,
         r8: 0,
@@ -1740,20 +2154,11 @@ pub fn load_elf_task_with_caps(
         rcx: runtime_entry,
         rax: 0,
         iret_rip: runtime_entry,
-        iret_cs: crate::arch::x86_64::gdt::user_code_selector().0 as u64,
-        iret_rflags: 0x202,
+        iret_cs: crate::arch::gdt::user_code_selector().0 as u64,
+        iret_rflags: USER_RFLAGS,
         iret_rsp: boot_sp,
-        iret_ss: crate::arch::x86_64::gdt::user_data_selector().0 as u64,
+        iret_ss: crate::arch::gdt::user_data_selector().0 as u64,
     });
-
-    // Bootstrapping: grant Silo Admin capability to the initial userspace task.
-    if name == "init"
-        || name == "silo-admin"
-        || name.starts_with("strate-admin:")
-        || name.contains("/strate-admin-")
-    {
-        let _ = crate::silo::grant_silo_admin_to_task(&task);
-    }
 
     {
         let arc_data_ptr = alloc::sync::Arc::as_ptr(&task) as usize;
@@ -1794,8 +2199,14 @@ pub fn load_elf_image(
     elf_data: &[u8],
     user_as: &AddressSpace,
 ) -> Result<LoadedElfInfo, &'static str> {
-    let header = parse_header(elf_data)?;
-    let phdrs: Vec<Elf64Phdr> = program_headers(elf_data, &header).collect();
+    let header = match parse_header(elf_data) {
+        Ok(h) => h,
+        Err(e) => {
+            crate::serial_println!("[elf] load_elf_image parse_header FAILED: {}", e);
+            return Err(e);
+        }
+    };
+    let phdrs: Vec<Elf64Phdr> = try_collect_exact(program_headers(elf_data, &header))?;
     let interp_path = parse_interp_path(elf_data, &phdrs)?;
     let (load_bias, entry) = compute_load_bias_and_entry(user_as, &header, &phdrs)?;
     let phdr_vaddr = find_relocated_phdr_vaddr(&header, &phdrs, load_bias)?;
@@ -1807,6 +2218,30 @@ pub fn load_elf_image(
     }
     if interp_path.is_none() {
         apply_dynamic_relocations(user_as, &phdrs, header.e_type, load_bias)?;
+    }
+
+    // PT_GNU_RELRO: mark the RELRO range read-only after relocations.
+    if let Some(relro) = phdrs.iter().find(|ph| ph.p_type == PT_GNU_RELRO) {
+        if relro.p_memsz > 0 {
+            let relro_start = relro.p_vaddr.wrapping_add(load_bias) & !0xFFF;
+            let relro_end =
+                (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz + 0xFFF) & !0xFFF;
+            if relro_end > relro_start && relro_end <= USER_ADDR_MAX {
+                let ro_flags = VmaFlags {
+                    readable: true,
+                    writable: false,
+                    executable: false,
+                    user_accessible: true,
+                };
+                let relro_pages = ((relro_end - relro_start) / 4096) as usize;
+                apply_segment_permissions(user_as, relro_start, relro_pages, ro_flags)?;
+                log::debug!(
+                    "[elf] PT_GNU_RELRO: {:#x}..{:#x} made read-only",
+                    relro_start,
+                    relro_end
+                );
+            }
+        }
     }
 
     let (tls_vaddr, tls_filesz, tls_memsz, tls_align) =
@@ -1827,7 +2262,8 @@ pub fn load_elf_image(
     if let Some(path) = interp_path {
         let interp_data = read_elf_from_vfs(path)?;
         let interp_header = parse_header(&interp_data)?;
-        let interp_phdrs: Vec<Elf64Phdr> = program_headers(&interp_data, &interp_header).collect();
+        let interp_phdrs: Vec<Elf64Phdr> =
+            try_collect_exact(program_headers(&interp_data, &interp_header))?;
         if parse_interp_path(&interp_data, &interp_phdrs)?.is_some() {
             return Err("Nested PT_INTERP is not supported");
         }
@@ -1844,6 +2280,10 @@ pub fn load_elf_image(
         interp_base = Some(interp_min_vaddr.saturating_add(interp_bias));
     }
 
+    let stack_exec = phdrs
+        .iter()
+        .any(|ph| ph.p_type == PT_GNU_STACK && (ph.p_flags & PF_X) != 0);
+
     Ok(LoadedElfInfo {
         runtime_entry,
         program_entry: entry,
@@ -1855,6 +2295,7 @@ pub fn load_elf_image(
         tls_filesz,
         tls_memsz,
         tls_align,
+        stack_exec,
     })
 }
 

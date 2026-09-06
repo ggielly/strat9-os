@@ -5,7 +5,7 @@ use alloc::string::String;
 /// List all tasks
 pub fn cmd_ps(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("PID    Name              State      Priority");
-    shell_println!("────────────────────────────────────────────────");
+    shell_println!("================================================================================================================================================================");
 
     if let Some(tasks) = crate::process::get_all_tasks() {
         for task in tasks {

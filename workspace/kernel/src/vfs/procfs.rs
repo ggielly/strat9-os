@@ -96,7 +96,7 @@ impl ProcScheme {
             "status" => Ok(ProcEntry::File(self.get_process_status(task))),
             "cmdline" => Ok(ProcEntry::File(format!(
                 "{}\n",
-                crate::arch::x86_64::serial::get_cmdline()
+                crate::arch::serial::get_cmdline()
             ))),
             _ => Err(SyscallError::NotFound),
         }
@@ -105,12 +105,12 @@ impl ProcScheme {
     /// Generate /proc/cpuinfo content from actual CPUID data.
     fn get_cpuinfo(&self) -> String {
         let mut output = String::new();
-        let cpu_count = crate::arch::x86_64::percpu::get_cpu_count();
-        let host = crate::arch::x86_64::cpuid::host();
-        let flags = crate::arch::x86_64::cpuid::features_to_flags_string(host.features);
+        let cpu_count = crate::arch::percpu::get_cpu_count();
+        let host = crate::arch::cpuid::host();
+        let flags = crate::arch::cpuid::features_to_flags_string(host.features);
         let has_fpu = host
             .features
-            .contains(crate::arch::x86_64::cpuid::CpuFeatures::FPU);
+            .contains(crate::arch::cpuid::CpuFeatures::FPU);
 
         for i in 0..cpu_count {
             let _ = writeln!(output, "processor\t: {}", i);
@@ -359,7 +359,7 @@ impl Scheme for ProcScheme {
             // Process directory listing (self dir or /proc/<pid>)
             String::from("status\ncmdline\n")
         } else {
-            // File content — distinguish by kind (high 32 bits) for process files,
+            // File content : distinguish by kind (high 32 bits) for process files,
             // or by the literal file_id for well-known fixed files.
             match (kind, file_id) {
                 (0, 10) => self.get_cpuinfo(),

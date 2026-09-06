@@ -1,0 +1,181 @@
+/* Strat9 OS : custom mdBook overrides (coal theme) */
+
+/* ===== Root variables ===== */
+:root {
+  --strat9-accent: #58a6ff;
+  --strat9-accent-hover: #79b8ff;
+  --strat9-border: #30363d;
+  --strat9-code-bg: #161b22;
+  --strat9-sidebar-bg: #0d1117;
+  --strat9-content-bg: #0d1117;
+}
+
+/* ===== Sidebar ===== */
+.sidebar {
+  background-color: var(--strat9-sidebar-bg);
+  border-right: 1px solid var(--strat9-border);
+}
+
+.sidebar .chapter li a {
+  color: #c9d1d9;
+  transition: color 0.15s;
+}
+
+.sidebar .chapter li a:hover {
+  color: var(--strat9-accent);
+}
+
+.sidebar .chapter li.active>a {
+  color: var(--strat9-accent);
+  border-right: 3px solid var(--strat9-accent);
+  background: rgba(88, 166, 255, 0.06);
+}
+
+/* ===== Content area ===== */
+.content {
+  background-color: var(--strat9-content-bg);
+}
+
+main h1 {
+  border-bottom: 2px solid var(--strat9-accent);
+  padding-bottom: 0.3em;
+}
+
+main h2 {
+  border-bottom: 1px solid var(--strat9-border);
+  padding-bottom: 0.2em;
+  margin-top: 2em;
+}
+
+/* ===== Links ===== */
+main a {
+  color: var(--strat9-accent);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.15s;
+}
+
+main a:hover {
+  color: var(--strat9-accent-hover);
+  border-bottom-color: var(--strat9-accent-hover);
+}
+
+/* ===== Code blocks ===== */
+code {
+  background-color: var(--strat9-code-bg);
+  border-radius: 4px;
+  padding: 0.15em 0.4em;
+  font-size: 0.88em;
+}
+
+pre code {
+  background: none;
+  padding: 0;
+  font-size: 0.92em;
+}
+
+pre {
+  background-color: var(--strat9-code-bg);
+  border: 1px solid var(--strat9-border);
+  border-radius: 6px;
+  padding: 1em;
+  overflow-x: auto;
+}
+
+/* ===== Tables ===== */
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1em 0;
+}
+
+th,
+td {
+  border: 1px solid var(--strat9-border);
+  padding: 0.5em 0.75em;
+  text-align: left;
+}
+
+th {
+  background-color: rgba(88, 166, 255, 0.08);
+  font-weight: 600;
+}
+
+tr:hover {
+  background-color: rgba(88, 166, 255, 0.04);
+}
+
+/* ===== Badges / inline labels ===== */
+.badge {
+  display: inline-block;
+  padding: 0.2em 0.6em;
+  font-size: 0.78em;
+  font-weight: 600;
+  border-radius: 12px;
+  vertical-align: middle;
+}
+
+.badge-version {
+  background-color: rgba(88, 166, 255, 0.15);
+  color: var(--strat9-accent);
+}
+
+.badge-stable {
+  background-color: rgba(63, 185, 80, 0.15);
+  color: #3fb950;
+}
+
+.badge-experimental {
+  background-color: rgba(210, 153, 34, 0.15);
+  color: #d29922;
+}
+
+/* ===== API index cards (for index.html) ===== */
+.api-card {
+  border: 1px solid var(--strat9-border);
+  border-radius: 8px;
+  padding: 1.2em;
+  margin-bottom: 1em;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.api-card:hover {
+  border-color: var(--strat9-accent);
+  box-shadow: 0 2px 8px rgba(88, 166, 255, 0.1);
+}
+
+.api-card h3 {
+  margin-top: 0;
+}
+
+.api-card .description {
+  color: #8b949e;
+  font-size: 0.92em;
+}
+
+/* ===== Footer ===== */
+footer {
+  border-top: 1px solid var(--strat9-border);
+  padding-top: 1em;
+  margin-top: 2em;
+  color: #8b949e;
+  font-size: 0.85em;
+}
+
+/* ===== Responsive ===== */
+@media (max-width: 768px) {
+  .sidebar {
+    position: fixed;
+    z-index: 100;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+  }
+
+  .sidebar.open {
+    transform: translateX(0);
+  }
+
+  .content {
+    margin-left: 0;
+  }
+}

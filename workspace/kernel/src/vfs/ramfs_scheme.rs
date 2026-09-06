@@ -1,4 +1,4 @@
-//! In-kernel RAM filesystem — mounts on `/` to provide a writable root.
+//! In-kernel RAM filesystem : mounts on `/` to provide a writable root.
 //!
 //! ## Design
 //!
@@ -7,7 +7,7 @@
 //! contention is negligible.
 //!
 //! Inodes are stored in a flat `BTreeMap<u64, RamInode>` keyed by inode number.
-//! Directories hold a `BTreeMap<String, u64>` of `(name → ino)` children.
+//! Directories hold a `BTreeMap<String, u64>` of `(name => ino)` children.
 //! Files hold their content in a heap-allocated `Vec<u8>`.
 //!
 //! Inode 1 is always the root directory (`/`).
@@ -31,12 +31,12 @@ use crate::{
     },
 };
 
-// ─── Inode numbering ─────────────────────────────────────────────────────────
+// ========== Inode numbering ==========
 
 const INO_ROOT: u64 = 1;
 const INO_FIRST: u64 = 2;
 
-// ─── Inode types ─────────────────────────────────────────────────────────────
+// ========== Inode types ==============================
 
 enum RamKind {
     File { data: Vec<u8> },
@@ -74,7 +74,7 @@ impl RamInode {
     }
 }
 
-// ─── Filesystem state ────────────────────────────────────────────────────────
+// ========== Filesystem state ==========
 
 struct RamState {
     inodes: BTreeMap<u64, RamInode>,
@@ -216,7 +216,7 @@ impl RamState {
     }
 }
 
-// ─── RamfsScheme ─────────────────────────────────────────────────────────────
+// ========== RamfsScheme ==============================
 
 /// Kernel-resident RAM filesystem implementing the `Scheme` trait.
 pub struct RamfsScheme {
@@ -279,7 +279,7 @@ impl RamfsScheme {
 }
 
 impl Scheme for RamfsScheme {
-    // ── open ─────────────────────────────────────────────────────────────────
+    //  open ========================================
 
     /// Performs the open operation.
     fn open(&self, path: &str, flags: OpenFlags) -> Result<OpenResult, SyscallError> {
@@ -290,8 +290,11 @@ impl Scheme for RamfsScheme {
             let now = RamState::now_ns();
 
             if let Some(ino) = st.lookup(path) {
-                // Entry already exists — succeed (POSIX O_CREAT without O_EXCL).
-                let inode = st.inodes.get_mut(&ino).unwrap();
+                // Entry already exists : succeed (POSIX O_CREAT without O_EXCL).
+                let inode = st
+                    .inodes
+                    .get_mut(&ino)
+                    .ok_or(SyscallError::IoError)?;
                 if inode.is_dir() {
                     inode.atime_ns = now;
                     return Ok(OpenResult {
@@ -355,7 +358,10 @@ impl Scheme for RamfsScheme {
         let mut st = self.state.lock();
         let now = RamState::now_ns();
         let ino = st.lookup(path).ok_or(SyscallError::NotFound)?;
-        let inode = st.inodes.get_mut(&ino).unwrap();
+        let inode = st
+            .inodes
+            .get_mut(&ino)
+            .ok_or(SyscallError::IoError)?;
         inode.atime_ns = now;
 
         if inode.is_dir() {
@@ -373,7 +379,7 @@ impl Scheme for RamfsScheme {
         }
     }
 
-    // ── read ─────────────────────────────────────────────────────────────────
+    //  read ========================================
 
     /// Performs the read operation.
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
@@ -396,7 +402,7 @@ impl Scheme for RamfsScheme {
         }
     }
 
-    // ── write ────────────────────────────────────────────────────────────────
+    //  write ========================================
 
     /// Performs the write operation.
     fn write(&self, file_id: u64, offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
@@ -419,14 +425,14 @@ impl Scheme for RamfsScheme {
         }
     }
 
-    // ── close ────────────────────────────────────────────────────────────────
+    //  close ========================================
 
     /// Performs the close operation.
     fn close(&self, _file_id: u64) -> Result<(), SyscallError> {
-        Ok(()) // stateless — nothing to clean up
+        Ok(()) // stateless : nothing to clean up
     }
 
-    // ── size ─────────────────────────────────────────────────────────────────
+    //  size ========================================
 
     /// Performs the size operation.
     fn size(&self, file_id: u64) -> Result<u64, SyscallError> {
@@ -435,7 +441,7 @@ impl Scheme for RamfsScheme {
         Ok(inode.byte_size())
     }
 
-    // ── truncate ─────────────────────────────────────────────────────────────
+    //  truncate ==============================
 
     /// Performs the truncate operation.
     fn truncate(&self, file_id: u64, new_size: u64) -> Result<(), SyscallError> {
@@ -453,7 +459,7 @@ impl Scheme for RamfsScheme {
         }
     }
 
-    // ── create_file ──────────────────────────────────────────────────────────
+    //  create_file ====================
 
     /// Creates file.
     fn create_file(&self, path: &str, mode: u32) -> Result<OpenResult, SyscallError> {
@@ -503,7 +509,7 @@ impl Scheme for RamfsScheme {
         })
     }
 
-    // ── create_directory ─────────────────────────────────────────────────────
+    //  create_directory ==========================================================================================================================================================================
 
     /// Creates directory.
     fn create_directory(&self, path: &str, mode: u32) -> Result<OpenResult, SyscallError> {
@@ -514,7 +520,7 @@ impl Scheme for RamfsScheme {
 
         // Idempotent: return Ok if it already exists as a directory.
         if let Some(ino) = st.lookup(path) {
-            let inode = st.inodes.get(&ino).unwrap();
+            let inode = st.inodes.get(&ino).ok_or(SyscallError::IoError)?;
             if inode.is_dir() {
                 return Ok(OpenResult {
                     file_id: ino,
@@ -563,7 +569,7 @@ impl Scheme for RamfsScheme {
         })
     }
 
-    // ── unlink ───────────────────────────────────────────────────────────────
+    //  unlink ==============================
 
     /// Performs the unlink operation.
     fn unlink(&self, path: &str) -> Result<(), SyscallError> {
@@ -606,7 +612,7 @@ impl Scheme for RamfsScheme {
         Ok(())
     }
 
-    // ── stat ─────────────────────────────────────────────────────────────────
+    //  stat ========================================
 
     /// Performs the stat operation.
     fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
@@ -639,7 +645,7 @@ impl Scheme for RamfsScheme {
         })
     }
 
-    // ── readdir ──────────────────────────────────────────────────────────────
+    //  readdir ==============================
 
     /// Performs the readdir operation.
     fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
@@ -678,7 +684,7 @@ impl Scheme for RamfsScheme {
         Ok(entries)
     }
 
-    // ── rename ──────────────────────────────────────────────────────────────
+    //  rename ==============================
 
     /// Performs the rename operation.
     fn rename(&self, old_path: &str, new_path: &str) -> Result<(), SyscallError> {
@@ -745,7 +751,7 @@ impl Scheme for RamfsScheme {
         Ok(())
     }
 
-    // ── chmod ───────────────────────────────────────────────────────────────
+    //  chmod ==============================
 
     /// Performs the chmod operation.
     fn chmod(&self, path: &str, mode: u32) -> Result<(), SyscallError> {
@@ -760,7 +766,7 @@ impl Scheme for RamfsScheme {
         Ok(())
     }
 
-    // ── fchmod ──────────────────────────────────────────────────────────────
+    //  fchmod ==============================
 
     /// Performs the fchmod operation.
     fn fchmod(&self, file_id: u64, mode: u32) -> Result<(), SyscallError> {
@@ -773,7 +779,7 @@ impl Scheme for RamfsScheme {
         Ok(())
     }
 
-    // ── link ────────────────────────────────────────────────────────────────
+    //  link ========================================
 
     /// Performs the link operation.
     fn link(&self, old_path: &str, new_path: &str) -> Result<(), SyscallError> {
@@ -805,7 +811,7 @@ impl Scheme for RamfsScheme {
         Ok(())
     }
 
-    // ── symlink ─────────────────────────────────────────────────────────────
+    //  symlink ==============================
 
     /// Performs the symlink operation.
     fn symlink(&self, target: &str, link_path: &str) -> Result<(), SyscallError> {
@@ -849,7 +855,7 @@ impl Scheme for RamfsScheme {
         Ok(())
     }
 
-    // ── readlink ────────────────────────────────────────────────────────────
+    //  readlink ====================
 
     /// Performs the readlink operation.
     fn readlink(&self, path: &str) -> Result<String, SyscallError> {

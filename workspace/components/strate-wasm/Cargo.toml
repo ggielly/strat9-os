@@ -2,10 +2,12 @@
 name = "strate-wasm"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
 
 [dependencies]
 # WebAssembly runtime for no_std (alloc is implicit when std is disabled)
-wasmi = { version = "0.36", default-features = false }
+wasmi = { version = "1.1.0", default-features = false }
 
 # Modern and fast no_std allocator
 talc = { version = "4.4", default-features = false, features = ["allocator"] }

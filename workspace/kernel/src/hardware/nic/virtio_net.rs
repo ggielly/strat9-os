@@ -5,9 +5,10 @@
 //! this driver plugs into the unified `/dev/net/` scheme.
 //!
 //! Reference: VirtIO spec v1.2, Section 5.1 (Network Device)
+//! https://docs.oasis-open.org/virtio/virtio/v1.4/cs01/virtio-v1.4-cs01.html#x1-2700001
 
 use crate::{
-    arch::x86_64::pci::{self, PciDevice},
+    arch::pci::{self, PciDevice},
     hardware::{
         nic as net,
         virtio::{
@@ -19,13 +20,17 @@ use crate::{
     sync::{FixedQueue, SpinLock},
 };
 use alloc::sync::Arc;
-use core::{mem, ptr};
+use core::{mem, ptr, sync::atomic::Ordering};
+use endian_num::Le;
 use net_core::{NetError, NetworkDevice};
 use spin::RwLock as SpinRwLock;
 
-/// VirtIO net header size
-const NET_HDR_SIZE: usize = mem::size_of::<VirtioNetHeader>();
+/// VirtIO net header size (12 bytes with MRG_RXBUF, 10 bytes without).
+/// Determined at runtime during feature negotiation.
+static NET_HDR_SIZE: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(mem::size_of::<VirtioNetHeader>());
 const RX_FRAME_TRACK_CAPACITY: usize = 128;
+const TX_FRAME_TRACK_CAPACITY: usize = 128;
 
 /// VirtIO net device features
 pub mod features {
@@ -57,16 +62,19 @@ pub mod net_status {
 }
 
 /// VirtIO net header (prepended to every packet)
+///
+/// Fields are little-endian as mandated by the VirtIO spec
+/// https://docs.oasis-open.org/virtio/virtio/v1.4/virtio-v1.4.html#x1-2810006
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct VirtioNetHeader {
     pub flags: u8,
     pub gso_type: u8,
-    pub hdr_len: u16,
-    pub gso_size: u16,
-    pub csum_start: u16,
-    pub csum_offset: u16,
-    pub num_buffers: u16,
+    pub hdr_len: Le<u16>,
+    pub gso_size: Le<u16>,
+    pub csum_start: Le<u16>,
+    pub csum_offset: Le<u16>,
+    pub num_buffers: Le<u16>,
 }
 
 /// VirtIO Network Device driver
@@ -75,7 +83,8 @@ pub struct VirtioNetDevice {
     rx_queue: SpinLock<Virtqueue>,
     tx_queue: SpinLock<Virtqueue>,
     mac_address: [u8; 6],
-    pub rx_frames: SpinLock<FixedQueue<(PhysFrame, u8), RX_FRAME_TRACK_CAPACITY>>, // Track allocated RX frames
+    pub rx_frames: SpinLock<FixedQueue<(PhysFrame, u8), RX_FRAME_TRACK_CAPACITY>>,
+    tx_frames: SpinLock<FixedQueue<(PhysFrame, u8), TX_FRAME_TRACK_CAPACITY>>,
 }
 
 // Send and Sync are safe because we use SpinLocks
@@ -100,18 +109,36 @@ impl VirtioNetDevice {
         device.add_status(status::DRIVER as u8);
 
         // Read and negotiate features
-        let _device_features = device.read_device_features();
-
-        // Request MAC address feature
-        let guest_features = features::VIRTIO_NET_F_MAC | features::VIRTIO_NET_F_STATUS;
+        let device_features = device.read_device_features();
+        let needed = features::VIRTIO_NET_F_MAC | features::VIRTIO_NET_F_STATUS;
+        // VIRTIO_NET_F_MRG_RXBUF: requested so the device uses the 12-byte
+        // virtio_net_hdr_v1 layout (with num_buffers) that matches our
+        // VirtioNetHeader struct. Without it the legacy 10-byte header would
+        // shift every packet by 2 bytes, corrupting all data.
+        let desired = needed | features::VIRTIO_NET_F_MRG_RXBUF;
+        if device_features & needed != needed {
+            return Err("Device lacks mandatory MAC/STATUS features");
+        }
+        let guest_features = device_features & desired;
         device.write_guest_features(guest_features);
 
         // Features OK
         device.add_status(status::FEATURES_OK as u8);
 
-        // Verify features OK
+        // Double-check that FEATURES_OK stuck
         if device.get_status() & (status::FEATURES_OK as u8) == 0 {
-            return Err("Device doesn't support our feature set");
+            return Err("Device rejected our feature set");
+        }
+
+        // Read back negotiated features to determine actual header size.
+        // With VIRTIO_NET_F_MRG_RXBUF the header is 12 bytes (virtio_net_hdr_v1);
+        // without it the legacy 10-byte header (virtio_net_hdr) is used.
+        let negotiated = device.read_device_features();
+        if negotiated & features::VIRTIO_NET_F_MRG_RXBUF != 0 {
+            NET_HDR_SIZE.store(mem::size_of::<VirtioNetHeader>(), Ordering::Release);
+        } else {
+            // Legacy 10-byte header: num_buffers field is absent.
+            NET_HDR_SIZE.store(10, Ordering::Release);
         }
 
         // Create virtqueues
@@ -150,6 +177,7 @@ impl VirtioNetDevice {
             tx_queue: SpinLock::new(tx_queue),
             mac_address,
             rx_frames: SpinLock::new(FixedQueue::new()),
+            tx_frames: SpinLock::new(FixedQueue::new()),
         };
 
         // Fill RX queue with buffers
@@ -174,7 +202,7 @@ impl VirtioNetDevice {
 
         for _ in 0..(target_filled - current_filled) {
             // Allocate buffer for header + MTU
-            let buf_size = NET_HDR_SIZE + net::MTU;
+            let buf_size = NET_HDR_SIZE.load(Ordering::Relaxed) + net::MTU;
             let buf_pages = (buf_size + 4095) / 4096;
             let buf_order = buf_pages.next_power_of_two().trailing_zeros() as u8;
 
@@ -248,6 +276,7 @@ impl NetworkDevice for VirtioNetDevice {
             return Err(NetError::NoPacket);
         }
 
+        let hdr_size = NET_HDR_SIZE.load(Ordering::Relaxed);
         let (token, len) = rx_queue.get_used().ok_or(NetError::NoPacket)?;
 
         let _desc_index = token as usize;
@@ -262,14 +291,19 @@ impl NetworkDevice for VirtioNetDevice {
         let buf_addr = frame.start_address.as_u64();
         let virt_addr = crate::memory::phys_to_virt(buf_addr);
 
-        // Check if token matches what we expect?
-        // We can't easily without reading the descriptor.
-
         let header_ptr = virt_addr as *const VirtioNetHeader;
-        let data_ptr = (virt_addr + NET_HDR_SIZE as u64) as *const u8;
+        let data_ptr = (virt_addr + hdr_size as u64) as *const u8;
 
-        let _header = unsafe { ptr::read(header_ptr) };
-        let packet_len = (len as usize).saturating_sub(NET_HDR_SIZE);
+        let header = unsafe { ptr::read(header_ptr) };
+        let packet_len = (len as usize).saturating_sub(hdr_size);
+
+        log::trace!(
+            "[vtnet] rx: token={} len={} pkt={} flags={}",
+            token,
+            len,
+            packet_len,
+            header.flags,
+        );
 
         if buf.len() < packet_len {
             // Buffer too small, packet lost
@@ -308,7 +342,7 @@ impl NetworkDevice for VirtioNetDevice {
         }
 
         // Allocate TX buffer (header + data)
-        let buf_size = NET_HDR_SIZE + buf.len();
+        let buf_size = NET_HDR_SIZE.load(Ordering::Relaxed) + buf.len();
         let buf_pages = (buf_size + 4095) / 4096;
         let buf_order = buf_pages.next_power_of_two().trailing_zeros() as u8;
 
@@ -321,7 +355,7 @@ impl NetworkDevice for VirtioNetDevice {
         let virt_addr = crate::memory::phys_to_virt(buf_addr);
 
         let header_ptr = virt_addr as *mut VirtioNetHeader;
-        let data_ptr = (virt_addr + NET_HDR_SIZE as u64) as *mut u8;
+        let data_ptr = (virt_addr + NET_HDR_SIZE.load(Ordering::Relaxed) as u64) as *mut u8;
 
         // Write header
         unsafe {
@@ -331,40 +365,44 @@ impl NetworkDevice for VirtioNetDevice {
 
         // Submit to TX queue
         let mut tx_queue = self.tx_queue.lock();
-        let token = tx_queue
+
+        // Reclaim completed TX buffers before submitting.
+        // The used ring is FIFO so draining here frees exactly the frames
+        // that were pushed earlier in the same order.
+        while let Some((_token, _len)) = tx_queue.get_used() {
+            if let Some((_frame, order)) = self.tx_frames.lock().pop_front() {
+                crate::sync::with_irqs_disabled(|token| {
+                    memory::free_phys_contiguous(token, _frame, order);
+                });
+            }
+        }
+
+        let head = tx_queue
             .add_buffer(&[(buf_addr, buf_size as u32, false)]) // Device Readable
             .map_err(|_| {
-                // Free buffer if failed
+                // Free buffer if queue is full
                 crate::sync::with_irqs_disabled(|token| {
                     memory::free_phys_contiguous(token, buf_frame, buf_order);
                 });
                 NetError::TxQueueFull
             })?;
 
+        if let Err(_) = self.tx_frames.lock().push_back((buf_frame, buf_order)) {
+            // Tracking queue full : free the frame we just submitted
+            // (the descriptor is already in the available ring but the
+            // device hasn't seen it yet; get_used will reclaim it later
+            // and we won't be able to free it.  This is a safety net.)
+            crate::sync::with_irqs_disabled(|token| {
+                memory::free_phys_contiguous(token, buf_frame, buf_order);
+            });
+        }
+
+        log::trace!("[vtnet] tx: submit {} bytes @ {:#x}", buf_size, buf_addr);
+
         if tx_queue.should_notify() {
             self.device.notify_queue(1);
         }
         drop(tx_queue);
-
-        // Wait for completion (simple spin for now)
-        loop {
-            let mut tx_queue = self.tx_queue.lock();
-            if tx_queue.has_used() {
-                if let Some((used_token, _)) = tx_queue.get_used() {
-                    // Assuming correct order for now or just waiting for *any* completion which matches ours
-                    if used_token == token {
-                        break;
-                    }
-                }
-            }
-            drop(tx_queue);
-            core::hint::spin_loop();
-        }
-
-        // Free TX buffer
-        crate::sync::with_irqs_disabled(|token| {
-            memory::free_phys_contiguous(token, buf_frame, buf_order);
-        });
 
         Ok(())
     }

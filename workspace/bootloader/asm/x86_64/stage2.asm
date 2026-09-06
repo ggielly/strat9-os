@@ -227,7 +227,7 @@ s2_pm32_entry:
     ; ----- Setup KernelArgs at 0x60000 -----
     ; First: create a minimal memory map at 0x60100
     ; MemoryRegion { base: u64, size: u64, kind: u64 }
-    ; Entry 0: Free memory from 2MB to 254MB
+    ; Entry 0: Free memory from 2MiB to 256MiB (base=2MiB, size=254MiB)
     mov dword [0x60100], 0x00200000      ; base low = 2MB
     mov dword [0x60104], 0               ; base high
     mov dword [0x60108], 0x0FE00000      ; size low = 254MB
@@ -235,8 +235,10 @@ s2_pm32_entry:
     mov dword [0x60110], 1               ; kind = Free
     mov dword [0x60114], 0               ; kind high
 
-    ; KernelArgs struct at 0x60000 (repr(C, packed(8)))
-    ; Zero-fill first 144 bytes (struct size) to clear padding + trailing fields
+    ; KernelArgs struct at 0x60000 (repr(C), see workspace/abi/src/boot.rs)
+    ; The struct is 160 bytes; only the first 144 bytes are zero-filled here,
+    ; so cmdline_ptr/cmdline_len (offsets 0x90-0x9F) keep whatever was in the
+    ; kernel load buffer at 0x60000.
     mov edi, 0x60000
     mov ecx, 36                          ; 144 / 4 = 36 dwords
     xor eax, eax

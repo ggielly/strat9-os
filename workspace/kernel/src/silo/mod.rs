@@ -4,7 +4,7 @@
 //! to create and manage silos. Policy lives in userspace (silo admin).
 
 use crate::{
-    capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
+    capability::{get_capability_manager, CapId, CapPermissions, Capability, ResourceType},
     hardware::storage::{ahci, virtio_block},
     ipc::port::{self, PortId},
     memory::{UserSliceRead, UserSliceWrite},
@@ -20,6 +20,7 @@ use alloc::{
     vec::Vec,
 };
 use core::sync::atomic::{AtomicU64, Ordering};
+use heapless::Vec as HVec;
 
 // ============================================================================
 // Public ABI structs (repr(C) for syscall boundary)
@@ -56,6 +57,9 @@ impl SiloId {
         self.sid as u64
     }
 }
+
+#[cfg(feature = "selftest")]
+pub mod silo_test;
 
 use bitflags::bitflags;
 
@@ -133,6 +137,9 @@ pub fn sys_silo_pledge(mode_val: u64) -> Result<u64, SyscallError> {
     if let Some(silo_id) = mgr.silo_for_task(task.id) {
         if let Ok(silo) = mgr.get_mut(silo_id) {
             silo.mode.pledge(new_mode)?;
+            // Keep the raw ABI view in sync (snapshots and sandbox checks
+            // read config.mode; kernel_pledge_silo does the same).
+            silo.config.mode = mode_val as u16;
 
             mgr.push_event(SiloEvent {
                 silo_id: silo_id as u64,
@@ -184,7 +191,8 @@ pub fn sys_silo_unveil(
     if silo.unveil_rules.len() >= MAX_UNVEIL_RULES {
         return Err(SyscallError::QueueFull);
     }
-    silo.unveil_rules.push(UnveilRule { path, rights });
+    // Pre-validated: len() < MAX_UNVEIL_RULES, push cannot fail.
+    let _ = silo.unveil_rules.push(UnveilRule { path, rights });
     Ok(0)
 }
 
@@ -201,6 +209,38 @@ pub fn sys_silo_enter_sandbox() -> Result<u64, SyscallError> {
     silo.mode.registry = RegistryMode::empty();
     silo.config.mode =
         ((silo.mode.control.bits() as u16) << 6) | ((silo.mode.hardware.bits() as u16) << 3);
+    Ok(0)
+}
+
+/// Sets the `strate_label` of a silo identified by handle.
+///
+/// Requires silo-admin capability. The label must be non-empty, at most 31
+/// bytes, and contain ONLY ASCII alphanumeric characters, `-`, `_`, or `.`.
+pub fn sys_silo_rename(handle: u64, label_ptr: u64, label_len: u64) -> Result<u64, SyscallError> {
+    require_silo_admin()?;
+    const MAX_LABEL: usize = 31;
+    let len = label_len as usize;
+    if len == 0 || len > MAX_LABEL {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let user_slice = UserSliceRead::new(label_ptr, len)?;
+    let raw = user_slice.read_to_vec();
+    let label = core::str::from_utf8(&raw).map_err(|_| SyscallError::InvalidArgument)?;
+    if !is_valid_label(label) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let silo_id = resolve_silo_handle(handle, CapPermissions::read_write())?;
+    let mut mgr = SILO_MANAGER.lock();
+    // Reject if another silo already owns this label.
+    if mgr
+        .silos
+        .values()
+        .any(|s| s.id.sid != silo_id && s.strate_label.as_deref() == Some(label))
+    {
+        return Err(SyscallError::AlreadyExists);
+    }
+    let silo = mgr.get_mut(silo_id)?;
+    silo.strate_label = Some(String::from(label));
     Ok(0)
 }
 
@@ -221,17 +261,29 @@ pub fn enforce_silo_may_grant() -> Result<(), SyscallError> {
     Ok(())
 }
 
-/// Performs the normalize unveil path operation.
+/// Normalise an unveil path: collapse duplicate slashes, reject dot
+/// segments.
+///
+/// `.` and `..` are rejected outright rather than resolved: rule matching
+/// is lexical prefix matching, so a query like `/etc/../secret` would
+/// match an `/etc` rule while the backing filesystem resolves a different
+/// path - a policy bypass waiting for a resolver that handles dot
+/// segments.
 fn normalize_unveil_path(path: &str) -> Result<String, SyscallError> {
     if !path.starts_with('/') {
         return Err(SyscallError::InvalidArgument);
     }
     let mut out = String::new();
     let mut prev_slash = false;
+    let mut cur_segment = String::new();
     for ch in path.chars() {
         if ch == '/' {
             if !prev_slash {
+                if cur_segment == "." || cur_segment == ".." {
+                    return Err(SyscallError::InvalidArgument);
+                }
                 out.push('/');
+                cur_segment.clear();
             }
             prev_slash = true;
             continue;
@@ -240,7 +292,11 @@ fn normalize_unveil_path(path: &str) -> Result<String, SyscallError> {
             return Err(SyscallError::InvalidArgument);
         }
         prev_slash = false;
+        cur_segment.push(ch);
         out.push(ch);
+    }
+    if cur_segment == "." || cur_segment == ".." {
+        return Err(SyscallError::InvalidArgument);
     }
     while out.len() > 1 && out.ends_with('/') {
         out.pop();
@@ -585,10 +641,10 @@ struct Silo {
     mem_usage_bytes: u64,
     flags: u32,
     module_id: Option<u64>,
-    tasks: Vec<TaskId>,
-    granted_caps: Vec<u64>,
-    granted_resources: Vec<GrantedResource>,
-    unveil_rules: Vec<UnveilRule>,
+    tasks: HVec<TaskId, 64>,
+    granted_caps: HVec<u64, 64>,
+    granted_resources: HVec<GrantedResource, 32>,
+    unveil_rules: HVec<UnveilRule, 128>,
     sandboxed: bool,
     event_seq: u64,
     /// Ring buffer capturing debug output for `silo attach`.
@@ -731,10 +787,10 @@ impl SiloManager {
             mem_usage_bytes: 0,
             flags: config.flags as u32,
             module_id: None,
-            tasks: Vec::new(),
-            granted_caps: Vec::new(),
-            granted_resources: Vec::new(),
-            unveil_rules: Vec::new(),
+            tasks: HVec::new(),
+            granted_caps: HVec::new(),
+            granted_resources: HVec::new(),
+            unveil_rules: HVec::new(),
             sandboxed: false,
             event_seq: 0,
             output_buf: None,
@@ -772,26 +828,7 @@ impl SiloManager {
 
     /// Maps task.
     fn map_task(&mut self, task_id: TaskId, silo_id: u32) {
-        crate::serial_println!(
-            "[trace][silo] map_task enter tid={} sid={} len={}",
-            task_id.as_u64(),
-            silo_id,
-            self.task_to_silo.len()
-        );
-        let existed = self.task_to_silo.contains_key(&task_id);
-        crate::serial_println!(
-            "[trace][silo] map_task before insert tid={} sid={} existed={}",
-            task_id.as_u64(),
-            silo_id,
-            existed
-        );
         self.task_to_silo.insert(task_id, silo_id);
-        crate::serial_println!(
-            "[trace][silo] map_task after insert tid={} sid={} len={}",
-            task_id.as_u64(),
-            silo_id,
-            self.task_to_silo.len()
-        );
     }
 
     /// Unmaps task.
@@ -950,8 +987,8 @@ fn parse_module_header(data: &[u8]) -> Result<Option<Strat9ModuleHeader>, Syscal
         0
     };
     if req != 0 {
-        let host = crate::arch::x86_64::cpuid::host();
-        let required = crate::arch::x86_64::cpuid::CpuFeatures::from_bits_truncate(req);
+        let host = crate::arch::cpuid::host();
+        let required = crate::arch::cpuid::CpuFeatures::from_bits_truncate(req);
         if !host.features.contains(required) {
             log::warn!(
                 "[cmod] module requires CPU features {:#x} but host has {:#x}",
@@ -1002,12 +1039,44 @@ fn parse_module_header(data: &[u8]) -> Result<Option<Strat9ModuleHeader>, Syscal
         return Err(SyscallError::InvalidArgument);
     }
 
-    // Flags/signature checks (verification is TODO).
+    // Flags/signature checks (Ed25519 cryptographic verification).
+    //
+    // Security: the signed payload is code+data ONLY (after the header).
+    // The header (containing key_id and signature) is NOT signed. This
+    // prevents an attacker from embedding a known key_id to trick the
+    // kernel into looking up a legitimate key while verifying a bad sig.
     if header.flags & MODULE_FLAG_SIGNED != 0 {
-        let sig_nonzero = header.signature.iter().any(|b| *b != 0);
-        let key_nonzero = header.key_id.iter().any(|b| *b != 0);
-        if !sig_nonzero || !key_nonzero {
-            return Err(SyscallError::PermissionDenied);
+        // Compute offsets from the packed struct layout : never hardcode.
+        let key_id_offset = core::mem::offset_of!(Strat9ModuleHeader, key_id);
+        let sig_offset = core::mem::offset_of!(Strat9ModuleHeader, signature);
+        let header_size = core::mem::size_of::<Strat9ModuleHeader>();
+
+        // Payload = everything after the header (code + data sections).
+        // This is what was actually signed.
+        let payload = if data.len() > header_size {
+            &data[header_size..]
+        } else {
+            return Err(SyscallError::InvalidArgument);
+        };
+
+        let result = crate::crypto::verify_cmod_signature(data, key_id_offset, sig_offset, payload);
+
+        match result {
+            crate::crypto::VerifyResult::Valid => {
+                log::info!("[cmod] Ed25519 signature verified");
+            }
+            crate::crypto::VerifyResult::Unsigned => {
+                log::warn!("[cmod] MODULE_FLAG_SIGNED set but signature is zero");
+                return Err(SyscallError::PermissionDenied);
+            }
+            crate::crypto::VerifyResult::KeyNotFound => {
+                log::warn!("[cmod] no trusted key for id {:02x?}", header.key_id);
+                return Err(SyscallError::PermissionDenied);
+            }
+            crate::crypto::VerifyResult::InvalidSignature => {
+                log::warn!("[cmod] Ed25519 verification FAILED");
+                return Err(SyscallError::PermissionDenied);
+            }
         }
     }
     if header.flags & MODULE_FLAG_KERNEL != 0 {
@@ -1185,12 +1254,21 @@ impl ModuleRegistry {
 
 static MODULE_REGISTRY: SpinLock<ModuleRegistry> = SpinLock::new(ModuleRegistry::new());
 
-/// Performs the charge task silo memory operation.
+/// Charge memory usage against a task's silo quota (if any).
+///
+/// Uses `try_lock`: callers sit on memory-mapping paths that can execute
+/// while `SILO_MANAGER` is held elsewhere on the same CPU (e.g. a snapshot
+/// helper allocating under the lock). A blocking acquisition there would
+/// self-deadlock the kernel; skipping accounting under contention is the
+/// documented best-effort trade-off (same policy as
+/// [`try_silo_id_for_task`]).
 fn charge_task_silo_memory(task_id: TaskId, bytes: u64) -> Result<(), SyscallError> {
     if bytes == 0 {
         return Ok(());
     }
-    let mut mgr = SILO_MANAGER.lock();
+    let Some(mut mgr) = SILO_MANAGER.try_lock() else {
+        return Ok(());
+    };
     let Some(silo_id) = mgr.silo_for_task(task_id) else {
         return Ok(());
     };
@@ -1206,12 +1284,16 @@ fn charge_task_silo_memory(task_id: TaskId, bytes: u64) -> Result<(), SyscallErr
     Ok(())
 }
 
-/// Performs the release task silo memory operation.
+/// Release memory usage from a task's silo quota (if any).
+///
+/// Best-effort `try_lock`, mirroring [`charge_task_silo_memory`].
 fn release_task_silo_memory(task_id: TaskId, bytes: u64) {
     if bytes == 0 {
         return;
     }
-    let mut mgr = SILO_MANAGER.lock();
+    let Some(mut mgr) = SILO_MANAGER.try_lock() else {
+        return;
+    };
     let Some(silo_id) = mgr.silo_for_task(task_id) else {
         return;
     };
@@ -1379,7 +1461,7 @@ fn resolve_volume_resource_from_dev_path(dev_path: &str) -> Result<usize, Syscal
 
 /// Compute the effective XCR0 mask for a silo from its allowed CPU features.
 fn compute_silo_xcr0(config: &SiloConfig) -> u64 {
-    use crate::arch::x86_64::cpuid::{xcr0_for_features, CpuFeatures};
+    use crate::arch::cpuid::{xcr0_for_features, CpuFeatures};
     let allowed = CpuFeatures::from_bits_truncate(config.cpu_features_allowed);
     xcr0_for_features(allowed)
 }
@@ -1436,10 +1518,10 @@ pub fn kernel_spawn_strate(
             mem_usage_bytes: 0,
             flags: 0,
             module_id: Some(module_id),
-            tasks: Vec::new(),
-            granted_caps: Vec::new(),
-            granted_resources: Vec::new(),
-            unveil_rules: Vec::new(),
+            tasks: HVec::new(),
+            granted_caps: HVec::new(),
+            granted_resources: HVec::new(),
+            unveil_rules: HVec::new(),
             sandboxed: false,
             event_seq: 0,
             output_buf: None,
@@ -1456,6 +1538,7 @@ pub fn kernel_spawn_strate(
     };
 
     let mut seed_caps = Vec::new();
+    seed_caps.push(create_silo_admin_capability());
     if let Some(path) = dev_path {
         let resource = resolve_volume_resource_from_dev_path(path)?;
         let cap = get_capability_manager().create_capability(
@@ -1489,7 +1572,12 @@ pub fn kernel_spawn_strate(
     let mut mgr = SILO_MANAGER.lock();
     {
         let silo = mgr.get_mut(silo_id)?;
-        silo.tasks.push(task_id);
+        if let Err(task) = silo.tasks.push(task_id) {
+            log::error!(
+                "[silo] tasks full (capacity=64), task {} not registered",
+                task.0
+            );
+        }
         silo.state = SiloState::Running;
         let fpu_xcr0 = unsafe { (*task.fpu_state.get()).xcr0_mask };
         let effective_xcr0 = (silo.config.xcr0_mask & fpu_xcr0).max(0x3);
@@ -1534,7 +1622,7 @@ pub fn kernel_stop_silo(selector: &str, force_kill: bool) -> Result<u32, Syscall
     let (silo_id, tasks) = {
         let mut mgr = SILO_MANAGER.lock();
         let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
-        let mut tasks = Vec::new();
+        let mut tasks = HVec::<TaskId, 64>::new();
         {
             let silo = mgr.get_mut(silo_id)?;
             match silo.state {
@@ -1584,7 +1672,7 @@ pub fn kernel_start_silo(selector: &str) -> Result<u32, SyscallError> {
         let mgr = SILO_MANAGER.lock();
         resolve_selector_to_silo_id(selector, &mgr)?
     };
-    start_silo_by_id(silo_id)?;
+    let _ = start_silo_by_id(silo_id)?;
     Ok(silo_id)
 }
 
@@ -1641,37 +1729,14 @@ pub fn kernel_rename_silo_label(selector: &str, new_label: &str) -> Result<u32, 
 
 /// Performs the register boot strate task operation.
 pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, SyscallError> {
-    crate::serial_println!(
-        "[trace][silo] register_boot_strate_task enter tid={} label={}",
-        task_id.as_u64(),
-        label
-    );
     BOOT_REG_IN_PROGRESS.store(true, Ordering::Relaxed);
     let result = (|| -> Result<u32, SyscallError> {
         let sanitized = sanitize_label(label);
         let mgr = SILO_MANAGER.lock();
-        crate::serial_println!(
-            "[trace][silo] register_boot_strate_task lock acquired tid={}",
-            task_id.as_u64()
-        );
-        crate::serial_println!(
-            "[trace][silo] register_boot_strate_task before sid scan tid={}",
-            task_id.as_u64()
-        );
         let mut sid = 1u32;
         while mgr.silos.contains_key(&sid) {
             sid = sid.checked_add(1).ok_or(SyscallError::OutOfMemory)?;
         }
-        crate::serial_println!(
-            "[trace][silo] register_boot_strate_task sid selected tid={} sid={}",
-            task_id.as_u64(),
-            sid
-        );
-        crate::serial_println!(
-            "[trace][silo] register_boot_strate_task before label uniqueness tid={} label={}",
-            task_id.as_u64(),
-            sanitized.as_str()
-        );
         if mgr
             .silos
             .values()
@@ -1698,10 +1763,14 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
             mem_usage_bytes: 0,
             flags: 0,
             module_id: None,
-            tasks: alloc::vec![task_id],
-            granted_caps: Vec::new(),
-            granted_resources: Vec::new(),
-            unveil_rules: Vec::new(),
+            tasks: {
+                let mut v = HVec::new();
+                let _ = v.push(task_id);
+                v
+            },
+            granted_caps: HVec::new(),
+            granted_resources: HVec::new(),
+            unveil_rules: HVec::new(),
             sandboxed: false,
             event_seq: 0,
             output_buf: None,
@@ -1718,11 +1787,6 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
         {
             return Err(SyscallError::AlreadyExists);
         }
-        crate::serial_println!(
-            "[trace][silo] register_boot_strate_task before silo insert tid={} sid={}",
-            task_id.as_u64(),
-            id.sid
-        );
         mgr.silos.insert(id.sid, Box::new(silo));
         drop(mgr);
         Ok(id.sid)
@@ -1762,12 +1826,16 @@ fn resolve_module_handle(handle: u64, required: CapPermissions) -> Result<u64, S
 /// Grant the Silo Admin capability to a task (bootstrapping).
 ///
 /// This should be called only for the initial admin task (e.g. "init").
-pub fn grant_silo_admin_to_task(task: &alloc::sync::Arc<Task>) -> CapId {
-    let cap = get_capability_manager().create_capability(
+pub fn create_silo_admin_capability() -> Capability {
+    get_capability_manager().create_capability(
         ResourceType::Silo,
         SILO_ADMIN_RESOURCE,
         CapPermissions::all(),
-    );
+    )
+}
+
+pub fn grant_silo_admin_to_task(task: &alloc::sync::Arc<Task>) -> CapId {
+    let cap = create_silo_admin_capability();
     // SAFETY: Bootstrapping. Caller must ensure exclusive access.
     unsafe { (&mut *task.process.capabilities.get()).insert(cap) }
 }
@@ -2017,8 +2085,8 @@ pub fn sys_silo_config(handle: u64, res_ptr: u64) -> Result<u64, SyscallError> {
     config.validate()?;
     let family = decode_family(config.family)?;
 
-    let mut granted_caps = Vec::new();
-    let mut granted_resources = Vec::new();
+    let mut granted_caps = HVec::<u64, 64>::new();
+    let mut granted_resources = HVec::<GrantedResource, 32>::new();
     if config.caps_len > 0 {
         let caps_list = read_caps_list(config.caps_ptr, config.caps_len)?;
         let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
@@ -2035,7 +2103,12 @@ pub fn sys_silo_config(handle: u64, res_ptr: u64) -> Result<u64, SyscallError> {
                 return Err(SyscallError::InvalidArgument);
             }
             if !granted_caps.contains(&cap_handle) {
-                granted_caps.push(cap_handle);
+                if let Err(cap) = granted_caps.push(cap_handle) {
+                    log::warn!(
+                        "[silo] granted_caps full (capacity=64), cap {} dropped",
+                        cap
+                    );
+                }
             }
             add_or_merge_granted_resource(
                 &mut granted_resources,
@@ -2060,6 +2133,11 @@ pub fn sys_silo_config(handle: u64, res_ptr: u64) -> Result<u64, SyscallError> {
     if silo.sandboxed && !requested_mode.registry.is_empty() {
         return Err(SyscallError::PermissionDenied);
     }
+
+    // XCR0 is a kernel-computed derived value: never trust the
+    // user-supplied field (kernel_spawn_strate already derives it).
+    let mut config = config;
+    config.xcr0_mask = compute_silo_xcr0(&config);
 
     silo.config = config;
     silo.mode = requested_mode;
@@ -2102,10 +2180,11 @@ pub fn sys_silo_attach_module(handle: u64, module_handle: u64) -> Result<u64, Sy
 }
 
 /// Starts silo by id.
-fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
+fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
     let (
         module_id,
         granted_caps,
+        granted_resources,
         silo_flags,
         previous_state,
         can_start,
@@ -2126,6 +2205,7 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
         };
         let module_id = silo.module_id;
         let granted_caps = silo.granted_caps.clone();
+        let granted_resources = silo.granted_resources.clone();
         let silo_flags = silo.config.flags;
         let silo_name = silo.name.clone();
         let silo_label = silo.strate_label.clone();
@@ -2135,6 +2215,7 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
         (
             module_id,
             granted_caps,
+            granted_resources,
             silo_flags,
             previous_state,
             can_start,
@@ -2168,7 +2249,7 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
         }
     };
 
-    let seed_caps = {
+    let mut seed_caps = {
         let task = match current_task_clone() {
             Some(t) => t,
             None => {
@@ -2184,15 +2265,38 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
                 rollback_loading(previous_state);
                 return Err(SyscallError::PermissionDenied);
             }
-            if let Some(dup) = caps.duplicate(CapId::from_raw(handle)) {
-                out.push(dup);
-            } else {
+            let Some(dup) = caps.duplicate(CapId::from_raw(handle)) else {
+                rollback_loading(previous_state);
+                return Err(SyscallError::PermissionDenied);
+            };
+            // Capability-confusion guard: granted_caps stores raw handle
+            // slots recorded when the silo was configured (possibly by a
+            // different process). Slot numbers are per-process: the starter
+            // could hold an unrelated capability at the same slot. Verify
+            // the duplicated capability actually matches a resource that
+            // was explicitly granted to this silo before seeding it.
+            let authorized = granted_resources.iter().any(|g| {
+                g.resource_type == dup.resource_type && g.resource == dup.resource
+            });
+            if !authorized {
+                log::warn!(
+                    "[silo] start sid={}: cap handle {} does not match any \
+                     granted resource (type={:?}, resource={:#x}) - denied",
+                    silo_id,
+                    handle,
+                    dup.resource_type,
+                    dup.resource
+                );
                 rollback_loading(previous_state);
                 return Err(SyscallError::PermissionDenied);
             }
+            out.push(dup);
         }
         out
     };
+    if silo_flags & SILO_FLAG_ADMIN != 0 {
+        seed_caps.push(create_silo_admin_capability());
+    }
 
     let display = silo_label.unwrap_or(silo_name);
     let task_name_owned = if silo_flags & SILO_FLAG_ADMIN != 0 {
@@ -2236,6 +2340,7 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
         }
     };
     let task_id = task.id;
+    let task_pid = task.pid;
 
     // Give the silo an EOF stdin so that any read(0, …) returns 0 immediately
     // instead of EBADF (which can cause busy-loops) or blocking on the
@@ -2252,7 +2357,12 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
                 return Err(e);
             }
         };
-        silo.tasks.push(task_id);
+        if let Err(task) = silo.tasks.push(task_id) {
+            log::error!(
+                "[silo] tasks full (capacity=64), task {} not registered",
+                task.0
+            );
+        }
         silo.state = SiloState::Running;
         let fpu_xcr0 = unsafe { (*task.fpu_state.get()).xcr0_mask };
         let effective_xcr0 = (silo.config.xcr0_mask & fpu_xcr0).max(0x3);
@@ -2269,7 +2379,7 @@ fn start_silo_by_id(silo_id: u32) -> Result<(), SyscallError> {
     });
     drop(mgr);
     crate::process::add_task(task);
-    Ok(())
+    Ok(task_pid as u64)
 }
 
 /// Performs the sys silo start operation.
@@ -2283,8 +2393,7 @@ pub fn sys_silo_start(handle: u64) -> Result<u64, SyscallError> {
         revoke: false,
     };
     let silo_id = resolve_silo_handle(handle, required)?;
-    start_silo_by_id(silo_id)?;
-    Ok(0)
+    start_silo_by_id(silo_id)
 }
 
 /// Best-effort cleanup hook called by the scheduler when a task terminates.
@@ -2332,7 +2441,7 @@ fn stop_or_kill_silo_by_id(
     silo_id: u32,
     force_kill: bool,
     require_running: bool,
-) -> Result<Vec<TaskId>, SyscallError> {
+) -> Result<HVec<TaskId, 64>, SyscallError> {
     let mut mgr = SILO_MANAGER.lock();
     let tasks = {
         let silo = mgr.get_mut(silo_id)?;
@@ -2350,7 +2459,7 @@ fn stop_or_kill_silo_by_id(
                     tasks
                 }
                 _ if require_running => return Err(SyscallError::InvalidArgument),
-                _ => Vec::new(),
+                _ => HVec::new(),
             }
         }
     };
@@ -2502,14 +2611,16 @@ fn permissions_subset(requested: CapPermissions, allowed: CapPermissions) -> boo
 }
 
 /// Performs the add or merge granted resource operation.
-fn add_or_merge_granted_resource(list: &mut Vec<GrantedResource>, grant: GrantedResource) {
+fn add_or_merge_granted_resource(list: &mut HVec<GrantedResource, 32>, grant: GrantedResource) {
     for existing in list.iter_mut() {
         if existing.resource_type == grant.resource_type && existing.resource == grant.resource {
             existing.permissions = merge_permissions(existing.permissions, grant.permissions);
             return;
         }
     }
-    list.push(grant);
+    if list.push(grant).is_err() {
+        log::warn!("[silo] granted_resources full (capacity=32), resource dropped");
+    }
 }
 
 /// Performs the register current task granted resource operation.
@@ -2663,7 +2774,7 @@ pub fn sys_silo_suspend(handle: u64) -> Result<u64, SyscallError> {
 
     // Lock is released before suspend_task (which takes the scheduler lock)
     // to avoid lock-ordering deadlock. Tasks added between the two locks
-    // won't be suspended — acceptable best-effort trade-off.
+    // won't be suspended : acceptable best-effort trade-off.
     let tasks = {
         let mut mgr = SILO_MANAGER.lock();
         let silo = mgr.get_mut(silo_id)?;
@@ -2734,7 +2845,7 @@ pub fn sys_silo_resume(handle: u64) -> Result<u64, SyscallError> {
 }
 
 // ============================================================================
-// Kernel-side CLI helpers (no capability gate — shell runs in Ring 0)
+// Kernel-side CLI helpers (no capability gate : shell runs in Ring 0)
 // ============================================================================
 
 pub fn kernel_suspend_silo(selector: &str) -> Result<u32, SyscallError> {
@@ -2906,10 +3017,16 @@ pub fn kernel_unveil_silo(
     if let Some(rule) = silo.unveil_rules.iter_mut().find(|r| r.path == path) {
         rule.rights = rights;
     } else {
-        silo.unveil_rules.push(UnveilRule {
-            path: String::from(path),
-            rights,
-        });
+        if silo
+            .unveil_rules
+            .push(UnveilRule {
+                path: String::from(path),
+                rights,
+            })
+            .is_err()
+        {
+            log::warn!("[silo] unveil_rules full (capacity=128), rule dropped");
+        }
     }
     Ok(silo_id)
 }
@@ -3122,7 +3239,7 @@ pub fn handle_user_fault(
                 return;
             }
         };
-        let mut tasks = Vec::new();
+        let mut tasks = HVec::<TaskId, 64>::new();
         {
             if let Ok(silo) = mgr.get_mut(silo_id) {
                 silo.state = SiloState::Crashed;

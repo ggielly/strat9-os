@@ -4,7 +4,7 @@
 //! frame metadata implementation. The dedicated head/sub-frame layout is
 //! introduced in a later migration step.
 
-use x86_64::PhysAddr;
+use crate::arch::xshim::PhysAddr;
 
 use crate::memory::{block::BlockHandle, frame, ownership_table};
 

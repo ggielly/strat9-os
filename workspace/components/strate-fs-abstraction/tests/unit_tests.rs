@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod fs_abstraction_tests {
-    use fs_abstraction::FsError;
+    use strate_fs_abstraction::FsError;
 
     #[test]
     /// Implements test fs error types.

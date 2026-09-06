@@ -8,9 +8,9 @@ This document details the hybrid approach combining **SID Hierarchy**, **Octal P
 
 ### Container Model: Silos and Strates
 
-A **Silo** is the security container — it owns a unique SID, an Octal Mode, a Family, and a CSpace of Capabilities. It is the unit of isolation, exactly like a FreeBSD Jail or an Erlang node.
+A **Silo** is the security container : it owns a unique SID, an Octal Mode, a Family, and a CSpace of Capabilities. It is the unit of isolation, exactly like a FreeBSD Jail or an Erlang node.
 
-A **Strate** is a lightweight process running *inside* a Silo. A Silo contains one or more Strates. The user decides which Strates compose a Silo — it is their responsibility.
+A **Strate** is a lightweight process running *inside* a Silo. A Silo contains one or more Strates. The user decides which Strates compose a Silo : it is their responsibility.
 
 ```
 Silo (security boundary)
@@ -20,7 +20,7 @@ Silo (security boundary)
       └── strate-wasm-jit       ← direct communication, no kernel hop
 ```
 
-**Intra-silo communication** is direct (shared memory, message channels) — no kernel IPC, no coloration label, no capability check. Strates within the same Silo share the same SID and capabilities. This is a deliberate performance and usability choice, following the Erlang node model: *the node is the trust boundary, not the process*.
+**Intra-silo communication** is direct (shared memory, message channels) : no kernel IPC, no coloration label, no capability check. Strates within the same Silo share the same SID and capabilities. This is a deliberate performance and usability choice, following the Erlang node model: *the node is the trust boundary, not the process*.
 
 **Inter-silo communication** always goes through the kernel IPC path with full label stamping, capability validation, and audit.
 
@@ -53,9 +53,9 @@ Silo IDs are assigned based on their role and trust level. This simplifies ident
 
 ### Key Rules
 
-*   **SID < 10:** Can send administrative commands to any other silo.
-*   **SID 10-999:** Can perform hardware-related operations if permitted by Octal Mode.
-*   **SID 1000+:** Strictly sandboxed; requires explicit capabilities for any interaction.
+* **SID < 10:** Can send administrative commands to any other silo.
+* **SID 10-999:** Can perform hardware-related operations if permitted by Octal Mode.
+* **SID 1000+:** Strictly sandboxed; requires explicit capabilities for any interaction.
 
 ### Rust Representation
 
@@ -98,26 +98,26 @@ impl SiloId {
 
 Each silo is assigned a three-digit octal mode `[C][H][R]` that defines its behavioral profile.
 
-### Digit 1: Control (C) — Silo Management
+### Digit 1: Control (C) : Silo Management
 
-*   `4` (List): Permission to query the state of other silos (`strate ls`).
-*   `2` (Stop): Permission to stop or kill other silos (`strate stop`).
-*   `1` (Spawn): Permission to create new silos (`strate spawn`).
-*   *Example: `7` (Orchestrator), `0` (Isolated Application).*
+* `4` (List): Permission to query the state of other silos (`strate ls`).
+* `2` (Stop): Permission to stop or kill other silos (`strate stop`).
+* `1` (Spawn): Permission to create new silos (`strate spawn`).
+* *Example: `7` (Orchestrator), `0` (Isolated Application).*
 
-### Digit 2: Hardware (H) — Bedrock Access
+### Digit 2: Hardware (H) : Bedrock Access
 
-*   `4` (Interrupt): Permission to register IRQ handlers.
-*   `2` (I/O): Permission to access I/O ports or MMIO ranges.
-*   `1` (DMA): Permission to perform direct physical memory access.
-*   *Example: `6` (Standard Driver), `0` (Pure Software).*
+* `4` (Interrupt): Permission to register IRQ handlers.
+* `2` (I/O): Permission to access I/O ports or MMIO ranges.
+* `1` (DMA): Permission to perform direct physical memory access.
+* *Example: `6` (Standard Driver), `0` (Pure Software).*
 
-### Digit 3: Registry (R) — Plan 9 Namespace (`/srv`)
+### Digit 3: Registry (R) : Plan 9 Namespace (`/srv`)
 
-*   `4` (Lookup): Permission to browse the service registry.
-*   `2` (Bind): Permission to register a service port in `/srv`.
-*   `1` (Proxy): Permission to act as an IPC interceptor/middleware.
-*   *Example: `6` (Standard Service), `4` (Consumer Only).*
+* `4` (Lookup): Permission to browse the service registry.
+* `2` (Bind): Permission to register a service port in `/srv`.
+* `1` (Proxy): Permission to act as an IPC interceptor/middleware.
+* *Example: `6` (Standard Service), `4` (Consumer Only).*
 
 ### Rust Representation
 
@@ -125,32 +125,32 @@ Each silo is assigned a three-digit octal mode `[C][H][R]` that defines its beha
 use bitflags::bitflags;
 
 bitflags! {
-    /// Control digit — Silo management permissions.
+    /// Control digit : Silo management permissions.
     #[repr(transparent)]
     pub struct ControlMode: u8 {
-        const LIST  = 0b100; // 4 — query other silos
-        const STOP  = 0b010; // 2 — stop/kill other silos
-        const SPAWN = 0b001; // 1 — create new silos
+        const LIST  = 0b100; // 4 : query other silos
+        const STOP  = 0b010; // 2 : stop/kill other silos
+        const SPAWN = 0b001; // 1 : create new silos
     }
 }
 
 bitflags! {
-    /// Hardware digit — Bedrock (Ring 0) access permissions.
+    /// Hardware digit : Bedrock (Ring 0) access permissions.
     #[repr(transparent)]
     pub struct HardwareMode: u8 {
-        const INTERRUPT = 0b100; // 4 — register IRQ handlers
-        const IO        = 0b010; // 2 — I/O ports or MMIO
-        const DMA       = 0b001; // 1 — direct physical memory access
+        const INTERRUPT = 0b100; // 4 : register IRQ handlers
+        const IO        = 0b010; // 2 : I/O ports or MMIO
+        const DMA       = 0b001; // 1 : direct physical memory access
     }
 }
 
 bitflags! {
-    /// Registry digit — Plan 9 namespace (`/srv`) permissions.
+    /// Registry digit : Plan 9 namespace (`/srv`) permissions.
     #[repr(transparent)]
     pub struct RegistryMode: u8 {
-        const LOOKUP = 0b100; // 4 — browse service registry
-        const BIND   = 0b010; // 2 — register a service port
-        const PROXY  = 0b001; // 1 — IPC interceptor/middleware
+        const LOOKUP = 0b100; // 4 : browse service registry
+        const BIND   = 0b010; // 2 : register a service port
+        const PROXY  = 0b001; // 1 : IPC interceptor/middleware
     }
 }
 
@@ -208,7 +208,7 @@ pub struct IpcLabel {
     pub compartment: u32,
 }
 
-/// Strate family tag — identifies the functional domain.
+/// Strate family tag : identifies the functional domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum StrateFamily {
@@ -236,17 +236,18 @@ The label's `tier` field maps to the legacy color names:
 ### 4.3 Label Assignment Mechanism
 
 When `sys_ipc_send` is called, the kernel:
-1.  Identifies the `sender_sid` and its `OctalMode`.
-2.  Constructs the `IpcLabel` from the sender's SID tier, family, and compartment.
-3.  Stamps the label into the message header (immutable).
-4.  The receiver checks the label to apply its policy.
+
+1. Identifies the `sender_sid` and its `OctalMode`.
+2. Constructs the `IpcLabel` from the sender's SID tier, family, and compartment.
+3. Stamps the label into the message header (immutable).
+4. The receiver checks the label to apply its policy.
 
 ### 4.4 IPC Flow Rules (Biba Integrity Model Inspired)
 
 Inspired by the **Biba Integrity Model** (*no read down, no write up* in terms of trust) adapted for message-passing integrity:
 
-*   A **USER** silo cannot send directly to a **DRV** silo — it must go through an intermediary (VFS, Net stack). The higher-privilege system does not blindly trust or accept inputs from lower levels without a designated intermediary doing the validation.
-*   The `allowed_ipc` field in Family Profiles (see Section 7) restricts which families can communicate.
+* A **USER** silo cannot send directly to a **DRV** silo : it must go through an intermediary (VFS, Net stack). The higher-privilege system does not blindly trust or accept inputs from lower levels without a designated intermediary doing the validation.
+* The `allowed_ipc` field in Family Profiles (see Section 7) restricts which families can communicate.
 
 ```rust
 impl IpcLabel {
@@ -371,7 +372,7 @@ pub enum CapError {
 // The kernel's CSpace tracks: Read|Write|Grant, Badge=100
 
 // The FS silo delegates a read-only view to a user backup tool (SID=1010).
-// This is rights attenuation — the tool gets strictly fewer rights.
+// This is rights attenuation : the tool gets strictly fewer rights.
 let backup_cap_index = cap_manager.sys_cap_grant(
     1010,
     5, // Index of the FS silo's disk0 capability
@@ -399,7 +400,7 @@ The kernel **refuses** `sys_cap_grant` if the target's mode ceiling does not inc
 
 ## 6. Pledge & Unveil (OpenBSD-style)
 
-Inspired by **OpenBSD** `pledge(2)` (2015) and `unveil(2)` (2018): a silo can **irrevocably reduce** its own privileges at runtime. This enables the *privilege separation* pattern — a silo starts with broad rights for initialization, then self-restricts.
+Inspired by **OpenBSD** `pledge(2)` (2015) and `unveil(2)` (2018): a silo can **irrevocably reduce** its own privileges at runtime. This enables the *privilege separation* pattern : a silo starts with broad rights for initialization, then self-restricts.
 
 ### 6.1 Syscalls
 
@@ -459,14 +460,14 @@ fn loader_main() {
     let pages = map_pages(binary);
     let new_silo = spawn_silo(pages);
 
-    // Phase 2: Work is done — self-restrict like OpenBSD sshd does after fork
+    // Phase 2: Work is done : self-restrict like OpenBSD sshd does after fork
     sys_silo_pledge(OctalMode::from_octal(0o004)).unwrap();
     // Now the loader can only do registry lookups.
     // It cannot spawn, stop, or access hardware ever again.
 
     // Phase 3: Optionally enter full sandbox
     sys_silo_enter_sandbox().unwrap();
-    // Now it cannot even do registry lookups — only use existing handles.
+    // Now it cannot even do registry lookups : only use existing handles.
 }
 ```
 
@@ -474,21 +475,21 @@ fn loader_main() {
 
 ## 7. Strate Family Profiles (Jails/Zones)
 
-Inspired by **FreeBSD Jails** (1999) and **Solaris Zones** (2004), families are no longer just descriptive labels — they are **profiles with policy enforcement**, applied in two distinct layers.
+Inspired by **FreeBSD Jails** (1999) and **Solaris Zones** (2004), families are no longer just descriptive labels : they are **profiles with policy enforcement**, applied in two distinct layers.
 
 ### Enforcement Architecture
 
-Following **Liedtke's Principle** (L4, 1995) — *"a concept is only tolerated in the µ-kernel if moving it outside would prevent the required functionality"* — enforcement is split:
+Following **Liedtke's Principle** (L4, 1995) : *"a concept is only tolerated in the µ-kernel if moving it outside would prevent the required functionality"* : enforcement is split:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Kernel (TCB) — Absolute invariants, mechanism only         │
+│  Kernel (TCB) : Absolute invariants, mechanism only         │
 │  • User-tier silo (SID ≥ 1000) + HardwareMode ≠ 0 → PANIC  │
 │  • A silo cannot self-escalate via pledge                   │
 │  • sys_cap_grant cannot exceed the granter's own rights     │
 │  These rules cannot be overridden by anyone, including init │
 ├─────────────────────────────────────────────────────────────┤
-│  strate-init — Family policy, configurable                  │
+│  strate-init : Family policy, configurable                  │
 │  • Reads silo.toml + FAMILY_PROFILES at boot                │
 │  • Refuses to spawn a DRV silo with mode=777                │
 │  • Refuses to spawn a WASM silo with H≠0                   │
@@ -504,7 +505,7 @@ Following **Liedtke's Principle** (L4, 1995) — *"a concept is only tolerated i
 
 ```rust
 /// A family profile, used by `strate-init` to validate silo spawning at boot.
-/// The kernel itself has no knowledge of these profiles — they are policy,
+/// The kernel itself has no knowledge of these profiles : they are policy,
 /// not mechanism. Adding a new family (e.g. ENCLAVE) requires no kernel change.
 ///
 /// Inspired by:
@@ -517,7 +518,7 @@ pub struct FamilyProfile {
     pub family: StrateFamily,
     /// Minimum required mode (the silo must have at least these bits).
     pub min_mode: OctalMode,
-    /// Maximum allowed mode (ceiling — silo cannot exceed these bits).
+    /// Maximum allowed mode (ceiling : silo cannot exceed these bits).
     pub max_mode: OctalMode,
     /// Which families this silo can send IPC messages to.
     pub allowed_ipc: &'static [StrateFamily],
@@ -542,9 +543,9 @@ pub enum Priority {
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub enum RestartPolicy {
-    /// Never restart — user apps.
+    /// Never restart : user apps.
     Never   = 0,
-    /// Restart on crash — critical drivers and FS.
+    /// Restart on crash : critical drivers and FS.
     Always  = 1,
     /// Restart up to N times, then mark as failed.
     Limited { max_restarts: u8 } = 2,
@@ -585,7 +586,7 @@ pub const FAMILY_PROFILES: &[FamilyProfile] = &[
     FamilyProfile {
         family: StrateFamily::WASM,
         min_mode: OctalMode::from_octal(0o004),  // Registry lookup minimum
-        max_mode: OctalMode::from_octal(0o006),  // Software only — no hardware
+        max_mode: OctalMode::from_octal(0o006),  // Software only : no hardware
         allowed_ipc: &[StrateFamily::FS, StrateFamily::NET, StrateFamily::SYS],
         max_memory: 16 * 1024 * 1024,            // 16 MB
         priority: Priority::Normal,
@@ -605,12 +606,12 @@ pub const FAMILY_PROFILES: &[FamilyProfile] = &[
 
 ### 7.3 `strate-init` Policy Validation
 
-This code runs in **`strate-init` userspace**, not in the kernel. It reads `silo.toml` and applies family profiles before calling `sys_silo_spawn`. A violation causes a boot panic — the system refuses to start in an inconsistent state, analogous to how Solaris's `zoneadmd` refuses to launch a misconfigured zone.
+This code runs in **`strate-init` userspace**, not in the kernel. It reads `silo.toml` and applies family profiles before calling `sys_silo_spawn`. A violation causes a boot panic : the system refuses to start in an inconsistent state, analogous to how Solaris's `zoneadmd` refuses to launch a misconfigured zone.
 
 ```rust
 /// Run inside strate-init. Validates a silo's mode against its family
 /// profile BEFORE calling sys_silo_spawn. A violation aborts the boot.
-/// This is policy, not mechanism — extendable without touching the kernel.
+/// This is policy, not mechanism : extendable without touching the kernel.
 pub fn init_validate_silo_policy(
     name: &str,
     mode: &OctalMode,
@@ -646,7 +647,7 @@ pub enum RegistrationError<'a> {
 
 ### 7.4 Kernel Absolute Invariants (TCB)
 
-These checks live in the kernel and are enforced on **every `sys_silo_spawn` call**, regardless of who calls it — even `strate-init` (SID=1) cannot bypass them. They require only tier knowledge, no family semantics.
+These checks live in the kernel and are enforced on **every `sys_silo_spawn` call**, regardless of who calls it : even `strate-init` (SID=1) cannot bypass them. They require only tier knowledge, no family semantics.
 
 ```rust
 /// Kernel-side invariant checks, executed inside sys_silo_spawn.
@@ -801,7 +802,7 @@ impl AuditRingBuffer {
 
 ## 9. Configuration (`silo.toml`)
 
-The `silo.toml` file defines silos and their strates. A silo declares its security boundary (SID, mode, family). Each `[[silos.strates]]` entry is an executable that runs inside that silo. Strates within the same silo share its SID, capabilities, and mode — they are implicitly trusted by each other.
+The `silo.toml` file defines silos and their strates. A silo declares its security boundary (SID, mode, family). Each `[[silos.strates]]` entry is an executable that runs inside that silo. Strates within the same silo share its SID, capabilities, and mode : they are implicitly trusted by each other.
 
 `strate-init` validates family profiles at boot before calling `sys_silo_spawn`. A violation is a hard panic.
 
@@ -810,7 +811,7 @@ The `silo.toml` file defines silos and their strates. A silo declares its securi
 
 [[silos]]
 name = "silo-init"
-sid = 1                 # Critical range — MUST be < 10
+sid = 1                 # Critical range : MUST be < 10
 family = "SYS"
 mode = 0o777            # Full control, full hardware, full registry
 
@@ -820,10 +821,10 @@ mode = 0o777            # Full control, full hardware, full registry
 
 [[silos]]
 name = "silo-audit"
-sid = 3                 # Critical range — MUST be < 10, IPC label RED
+sid = 3                 # Critical range : MUST be < 10, IPC label RED
 family = "SYS"
 mode = 0o706            # Control: full + Registry: Lookup+Bind (for /srv/audit)
-                        # NOTE: mode 0o700 would be wrong — R=0 prevents binding /srv/audit
+                        # NOTE: mode 0o700 would be wrong : R=0 prevents binding /srv/audit
 
   [[silos.strates]]
   name = "strate-audit"
@@ -860,7 +861,7 @@ sid = 20                # System range
 family = "WASM"
 mode = 0o006            # No control, no hardware, Lookup+Bind
 
-  # Multiple strates inside the same silo — implicit trust, direct communication.
+  # Multiple strates inside the same silo : implicit trust, direct communication.
   # Strate-wasm-runtime and strate-wasm-jit share SID=20, mode=006, and capabilities.
   [[silos.strates]]
   name = "strate-wasm-runtime"
@@ -920,7 +921,7 @@ $ strate audit --tail 5
  10284600     1005  IpcSend         200  Success
  10284610     1005  IpcSend         100  Denied     # USR->DRV blocked by family profile
  10284700      200  CapGrant       1005  Success
- 10284710     1005  Pledge           —   Success    # mode 004 -> 000
+ 10284710     1005  Pledge           :   Success    # mode 004 -> 000
 ```
 
 ---
@@ -929,12 +930,12 @@ $ strate audit --tail 5
 
 | Layer | Mechanism | Inspiration | Enforcement |
 | :--- | :--- | :--- | :--- |
-| **Silo/Strate Container** | Silo = security boundary, Strates = lightweight processes inside (implicit trust) | **Erlang** nodes, **FreeBSD Jails** | User responsibility (v1.0) — Kernel in v2.0 hardened mode |
-| **Identity (SID)** | Tier-based hierarchy | Classic UNIX UID ranges | Kernel — assigned at spawn |
-| **Behavior (Mode)** | Three-digit octal `[C][H][R]` | UNIX `chmod` | Kernel — checked on every syscall |
-| **Tier Invariants** | Absolute tier × mode rules (User cannot hold H or C) | **Liedtke's Principle** (L4) | Kernel — enforced on every `sys_silo_spawn` |
-| **Family (Profile)** | Policy: min/max mode, IPC topology, memory | **FreeBSD Jails**, **Solaris Zones**, **MINIX 3** | `strate-init` — boot-time, hard panic on violation |
-| **Capabilities** | Handle-based, attenuated, revocable | **seL4** CSpace, **Capsicum** | Kernel — CSpace per silo |
-| **IPC Label** | Structured (tier + family + compartment) | **Solaris Trusted Extensions**, **Biba Integrity Model** | Kernel — stamped on inter-silo send only |
-| **Pledge/Unveil** | Irrevocable self-restriction | **OpenBSD** pledge/unveil | Kernel — monotonic reduction |
-| **Audit** | Ring buffer + consumer silo | **Solaris BSM**, **FreeBSD auditd** | Kernel — every inter-silo security event |
+| **Silo/Strate Container** | Silo = security boundary, Strates = lightweight processes inside (implicit trust) | **Erlang** nodes, **FreeBSD Jails** | User responsibility (v1.0) : Kernel in v2.0 hardened mode |
+| **Identity (SID)** | Tier-based hierarchy | Classic UNIX UID ranges | Kernel : assigned at spawn |
+| **Behavior (Mode)** | Three-digit octal `[C][H][R]` | UNIX `chmod` | Kernel : checked on every syscall |
+| **Tier Invariants** | Absolute tier × mode rules (User cannot hold H or C) | **Liedtke's Principle** (L4) | Kernel : enforced on every `sys_silo_spawn` |
+| **Family (Profile)** | Policy: min/max mode, IPC topology, memory | **FreeBSD Jails**, **Solaris Zones**, **MINIX 3** | `strate-init` : boot-time, hard panic on violation |
+| **Capabilities** | Handle-based, attenuated, revocable | **seL4** CSpace, **Capsicum** | Kernel : CSpace per silo |
+| **IPC Label** | Structured (tier + family + compartment) | **Solaris Trusted Extensions**, **Biba Integrity Model** | Kernel : stamped on inter-silo send only |
+| **Pledge/Unveil** | Irrevocable self-restriction | **OpenBSD** pledge/unveil | Kernel : monotonic reduction |
+| **Audit** | Ring buffer + consumer silo | **Solaris BSM**, **FreeBSD auditd** | Kernel : every inter-silo security event |

@@ -19,17 +19,24 @@ crossbeam-queue = { version = "0.3.12", default-features = false, features = [
     "alloc",
 ] }
 smallvec = { version = "1.13", default-features = false }
-intrusive-collections = { version = "0.9", default-features = false, features = ["alloc"] }
+
+heapless = { version = "0.9", default-features = false }
+intrusive-collections = { version = "0.9", default-features = false, features = [
+    "alloc",
+] }
 spin = { workspace = true }
 bitflags = { workspace = true }
 log = { workspace = true }
 zerocopy = { workspace = true }
+endian-num = { workspace = true }
 num_enum = { version = "0.7", default-features = false }
 thiserror = { version = "2", default-features = false }
 static_assertions = "1.1"
+xmas-elf = { version = "0.10", default-features = false }
 x86_64 = "0.15"
+raw-cpuid = "11.0.1"
 uart_16550 = "0.4"
-limine = "0.5.0"
+fdt = "0.1"
 strat9-abi = { workspace = true }
 ####
 # strat9 components
@@ -41,6 +48,17 @@ intel-ethernet = { path = "../drivers/nic/intel-ethernet" }
 e1000 = { path = "../drivers/nic/e1000" }
 driver-net-proto = { path = "../drivers/nic/driver-net-proto" }
 ratatui = { version = "0.30.0", default-features = false }
+
+# Cryptography: Ed25519 signature verification for CMOD modules
+# TODO: re-enable once LLVM backend crash is fixed
+#ed25519-dalek = { version = "2", default-features = false, features = [
+#    "alloc",
+#] }
+#sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
+#
+
+
 ###
 [build-dependencies]
 cc = "1.0"
+nasm-rs = "0.3.2"

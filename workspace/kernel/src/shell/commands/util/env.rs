@@ -43,7 +43,7 @@ pub fn cmd_env(_args: &[String]) -> Result<(), ShellError> {
     }
 
     let ticks = crate::process::scheduler::ticks();
-    let hz = crate::arch::x86_64::timer::TIMER_HZ;
+    let hz = crate::arch::timer::TIMER_HZ;
     shell_println!("UPTIME_SECS={}", ticks / hz);
     shell_println!("SILO_COUNT={}", crate::silo::list_silos_snapshot().len());
     shell_println!("MOUNT_COUNT={}", vfs::list_mounts().len());

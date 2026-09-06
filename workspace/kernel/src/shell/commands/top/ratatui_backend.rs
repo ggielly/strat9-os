@@ -1,4 +1,4 @@
-use crate::arch::x86_64::vga::{self, RgbColor, TextAlign, TextOptions};
+use crate::arch::vga::{self, RgbColor, TextAlign, TextOptions};
 use core::fmt;
 use ratatui::{
     backend::{Backend, ClearType, WindowSize},
@@ -120,6 +120,7 @@ impl Strat9RatatuiBackend {
 
     /// Performs the draw cell operation.
     fn draw_cell(&self, x: u16, y: u16, cell: &Cell) {
+        #[allow(deprecated)]
         if cell.skip {
             return;
         }

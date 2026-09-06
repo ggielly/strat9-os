@@ -1,41 +1,82 @@
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::Ordering;
 
 pub struct MmioRegion {
-    base: AtomicUsize,
+    base: usize,
     size: usize,
 }
 
 impl MmioRegion {
     /// Creates a new instance.
     pub const fn new() -> Self {
-        Self {
-            base: AtomicUsize::new(0),
-            size: 0,
-        }
+        Self { base: 0, size: 0 }
     }
 
     /// Performs the init operation.
     pub fn init(&mut self, base: usize, size: usize) {
-        self.base.store(base, Ordering::Release);
+        self.base = base;
         self.size = size;
     }
 
     /// Performs the base operation.
     pub fn base(&self) -> usize {
-        self.base.load(Ordering::Acquire)
+        self.base
     }
 
     /// Returns whether valid.
     pub fn is_valid(&self) -> bool {
-        self.base() != 0
+        self.base != 0
+    }
+
+    /// Bounds + alignment check for a would-be access of `width` bytes at
+    /// `offset`, without performing it.
+    ///
+    /// Drivers exposing user-controllable offsets (e.g. `/bus/<drv>/reg/<hex>`)
+    /// must call this before touching MMIO so an out-of-range request fails
+    /// with a clean error instead of tripping the panic backstop in
+    /// [`Self::checked_addr`] and taking the kernel down.
+    pub fn contains(&self, offset: usize, width: usize) -> bool {
+        if width == 0 {
+            return false;
+        }
+        match offset.checked_add(width) {
+            Some(end) => self.base != 0 && end <= self.size && offset % width == 0,
+            None => false,
+        }
+    }
+    /// Validate a caller-supplied 32-bit register offset (bounds + natural
+    /// alignment), mapping failures to [`BusError::InvalidAddress`] instead
+    /// of tripping the panic backstop inside the accessors.
+    pub fn check_user_offset(&self, offset: usize) -> Result<(), crate::BusError> {
+        if self.contains(offset, core::mem::size_of::<u32>()) {
+            Ok(())
+        } else {
+            Err(crate::BusError::InvalidAddress)
+        }
     }
 
     /// Performs the checked addr operation.
+    ///
+    /// Enforces region bounds AND natural alignment for the access width:
+    /// `read_volatile`/`write_volatile` on a misaligned pointer is UB on
+    /// several supported architectures (strict-alignment ARM/MIPS), not
+    /// just a slow access.
     fn checked_addr(&self, offset: usize, width: usize) -> usize {
         let base = self.base();
-        assert!(base != 0);
+        assert!(base != 0, "mmio access on uninitialized MmioRegion");
         let end = offset.checked_add(width).expect("mmio offset overflow");
-        assert!(end <= self.size);
+        assert!(
+            end <= self.size,
+            "mmio access out of bounds (offset={:#x}, width={}, size={:#x})",
+            offset,
+            width,
+            self.size
+        );
+        assert!(
+            offset % width == 0,
+            "misaligned mmio access (offset={:#x}, width={})",
+            offset,
+            width
+        );
         base.checked_add(offset).expect("mmio address overflow")
     }
 
@@ -119,8 +160,15 @@ impl MmioRegion {
     }
 
     /// Writes field32.
+    ///
+    /// `value` is masked to the field width *before* shifting so that a
+    /// caller passing an unshifted field value can never trigger a shift
+    /// overflow (`value` may be up to u32::MAX when `shift > 0`). Bits of
+    /// `value` outside the field width are ignored by contract.
     pub fn write_field32(&self, offset: usize, mask: u32, shift: u32, value: u32) {
-        self.modify32(offset, mask, (value << shift) & mask);
+        let width_mask = mask >> shift;
+        let field = ((value & width_mask) << shift) & mask;
+        self.modify32(offset, mask, field);
     }
 }
 

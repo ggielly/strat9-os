@@ -28,7 +28,7 @@ fn pci_class_name(class: u8, subclass: u8) -> &'static str {
 }
 
 pub fn cmd_lspci(_args: &[String]) -> Result<(), ShellError> {
-    let devices = crate::arch::x86_64::pci::all_devices();
+    let devices = crate::arch::pci::all_devices();
     if devices.is_empty() {
         shell_println!("(no PCI devices found)");
         return Ok(());
@@ -41,7 +41,7 @@ pub fn cmd_lspci(_args: &[String]) -> Result<(), ShellError> {
         "Class",
         "Type"
     );
-    shell_println!("──────────────────────────────────────────────────────");
+    shell_println!("====================================================================================================================================================================================");
     for dev in &devices {
         let addr = dev.address;
         shell_println!(
@@ -68,7 +68,7 @@ pub fn cmd_lsns(_args: &[String]) -> Result<(), ShellError> {
     }
 
     shell_println!("{:<8} {}", "Port", "Path");
-    shell_println!("────────────────────────────────────────");
+    shell_println!("==================================================================================================================================");
     for (path, port_id) in &bindings {
         shell_println!("{:<8} {}", port_id, path);
     }

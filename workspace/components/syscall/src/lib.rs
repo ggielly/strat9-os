@@ -42,9 +42,9 @@ pub const CLOCK_MONOTONIC: u32 = 1;
 
 // High-level call functions are defined inline below (after syscall0..6).
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Syscall raw invocation functions (x86_64 syscall ABI)
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Instead of a deeply-nested macro (which recent Rust nightlies have trouble
 // parsing), each function is written out explicitly. There are only 7 variants
 // (0..6 arguments) so the duplication is negligible and much more readable.
@@ -492,7 +492,7 @@ pub mod call {
     /// ```
     pub fn open<T: AsRef<str>>(path: T, posix_flags: u32) -> error::Result<usize> {
         let strat9_flags = flag::posix_oflags_to_strat9(posix_flags);
-        openat(0, path, strat9_flags.bits() as usize, 0)
+        openat(-100_i64 as usize, path, strat9_flags.bits() as usize, 0)
     }
 
     /// Open a file at a specific path with filter
@@ -664,7 +664,7 @@ pub mod call {
     /// `pid` supports POSIX values (`-1` = any child).
     /// `status` receives encoded wait status (same layout as Linux waitpid).
     ///
-    /// Prefer [`waitpid_blocking`] for blocking waits — it automatically
+    /// Prefer [`waitpid_blocking`] for blocking waits : it automatically
     /// retries on `EINTR`.
     pub fn waitpid(pid: isize, status: Option<&mut i32>, options: usize) -> error::Result<usize> {
         let status_ptr = status.map_or(0usize, |s| s as *mut i32 as usize);
@@ -763,9 +763,9 @@ pub mod call {
         Err(error::Error::NotSupported)
     }
 
-    // -----------------------------------------------------------------------
+    // ===========================================================================
     // Handle management (block 0-99)
-    // -----------------------------------------------------------------------
+    // ===========================================================================
 
     /// Close a capability handle.
     pub fn handle_close(handle: usize) -> error::Result<usize> {
@@ -803,9 +803,9 @@ pub mod call {
         }
     }
 
-    // -----------------------------------------------------------------------
+    // ===========================================================================
     // Memory management (block 100-199)
-    // -----------------------------------------------------------------------
+    // ===========================================================================
 
     /// Adjust the program break (heap boundary).
     ///
@@ -860,9 +860,9 @@ pub mod call {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // IPC — Ports (block 200-211)
-    // -----------------------------------------------------------------------
+    // ===========================================================================
+    // IPC : Ports (block 200-211)
+    // ===========================================================================
 
     /// Create a new IPC port.
     ///
@@ -975,9 +975,9 @@ pub mod call {
         unsafe { syscall2(number::SYS_IPC_RING_MAP, ring_handle, out_ptr) }
     }
 
-    // -----------------------------------------------------------------------
-    // IPC — Channels (block 220-224)
-    // -----------------------------------------------------------------------
+    // ===========================================================================
+    // IPC : Channels (block 220-224)
+    // ===========================================================================
 
     /// Create a typed MPMC sync-channel.
     ///
@@ -1078,9 +1078,9 @@ pub mod call {
         }
     }
 
-    // -----------------------------------------------------------------------
+    // ===========================================================================
     // Signals (block 320-332)
-    // -----------------------------------------------------------------------
+    // ===========================================================================
 
     /// Send a signal to a process.
     pub fn kill(pid: isize, signal: u32) -> error::Result<usize> {
@@ -1159,9 +1159,9 @@ pub mod call {
         }
     }
 
-    // -----------------------------------------------------------------------
+    // ========================================================================
     // Network (block 410-412)
-    // -----------------------------------------------------------------------
+    // ========================================================================
 
     /// Receive a network packet into `buf`.
     ///
@@ -1182,9 +1182,9 @@ pub mod call {
         unsafe { syscall2(number::SYS_NET_INFO, info_type, buf_ptr) }
     }
 
-    // -----------------------------------------------------------------------
+    // ========================================================================
     // Volumes / block devices (block 420-422)
-    // -----------------------------------------------------------------------
+    // ========================================================================
 
     /// Read sectors from a volume.
     ///
@@ -1216,18 +1216,42 @@ pub mod call {
         unsafe { syscall1(number::SYS_VOLUME_INFO, handle) }
     }
 
-    // -----------------------------------------------------------------------
+    // ========================================================================
     // Debug (block 600)
-    // -----------------------------------------------------------------------
+    // ========================================================================
 
     /// Write a debug log message to the kernel serial console.
     pub fn debug_log(msg: &[u8]) -> error::Result<usize> {
         unsafe { syscall2(number::SYS_DEBUG_LOG, msg.as_ptr() as usize, msg.len()) }
     }
 
-    // -----------------------------------------------------------------------
+    /// Fill a buffer with random bytes from the kernel entropy pool.
+    ///
+    /// # Arguments
+    /// * `buf`   - Mutable byte buffer to fill
+    /// * `flags` - GRND_NONBLOCK (1) to return EAGAIN if pool not ready,
+    ///             GRND_RANDOM (2) for /dev/random quality (same pool)
+    ///
+    /// # Returns
+    /// * Number of bytes written on success
+    /// * `Err(Error::Again)` if GRND_NONBLOCK and entropy not yet ready
+    pub const GRND_NONBLOCK: u32 = 1;
+    pub const GRND_RANDOM: u32 = 2;
+
+    pub fn getrandom(buf: &mut [u8], flags: u32) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_GETRANDOM,
+                buf.as_ptr() as usize,
+                buf.len(),
+                flags as usize,
+            )
+        }
+    }
+
+    // ========================================================================
     // Module management (block 700-703)
-    // -----------------------------------------------------------------------
+    // ========================================================================
 
     /// Load a kernel module by name.
     ///
@@ -1254,9 +1278,9 @@ pub mod call {
         unsafe { syscall2(number::SYS_MODULE_QUERY, module_id, buf_ptr) }
     }
 
-    // -----------------------------------------------------------------------
+    // ========================================================================
     // Silo management (block 800-808)
-    // -----------------------------------------------------------------------
+    // ========================================================================
 
     /// Create a new silo (isolated execution environment).
     ///
@@ -1330,13 +1354,143 @@ pub mod call {
         unsafe { syscall0(number::SYS_SILO_ENTER_SANDBOX) }
     }
 
-    // -----------------------------------------------------------------------
+    /// Rename a silo by its handle
+    /// Sert a silo label here
+    pub fn silo_rename(silo_id: usize, label_ptr: usize, label_len: usize) -> error::Result<usize> {
+        unsafe { syscall3(number::SYS_SILO_RENAME, silo_id, label_ptr, label_len) }
+    }
+
+    // ========================================================================
     // ABI introspection (block 900)
-    // -----------------------------------------------------------------------
+    // ========================================================================
 
     /// Query the kernel ABI version. Returns (major << 16) | minor.
     pub fn abi_version() -> error::Result<(u16, u16)> {
         let raw = unsafe { syscall0(number::SYS_ABI_VERSION) }?;
         Ok(((raw >> 16) as u16, raw as u16))
+    }
+
+    // ========================================================================
+    // Async I/O ring buffer (block 250-254)
+    // ========================================================================
+
+    /// Create an async I/O ring with `entries` slots (power of 2, min 2, max 256).
+    /// Returns a ring id on success.
+    pub fn async_setup(entries: u32) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_ASYNC_SETUP, entries as usize) }
+    }
+
+    /// Map an async ring's SQ/CQ pages into the process address space.
+    ///
+    /// `ring_id`: id from [`async_setup`].
+    /// `out_ptr`: writes an [`strat9_abi::data::AsyncRingLayout`] here.
+    pub fn async_map(ring_id: usize, out_ptr: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_ASYNC_MAP, ring_id, out_ptr) }
+    }
+
+    /// Submit SQEs and/or drain completions.
+    ///
+    /// Submits up to `to_submit` pending SQEs, then waits for at least
+    /// `min_complete` CQEs. Returns the number of completions drained.
+    pub fn async_enter(ring_id: usize, to_submit: u32, min_complete: u32) -> error::Result<usize> {
+        unsafe {
+            syscall4(
+                number::SYS_ASYNC_ENTER,
+                ring_id,
+                to_submit as usize,
+                min_complete as usize,
+                0, // flags
+            )
+        }
+    }
+
+    /// Destroy an async ring and free its pages.
+    pub fn async_destroy(ring_id: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_ASYNC_DESTROY, ring_id) }
+    }
+
+    /// Cancel an in-flight operation by `user_data`.
+    pub fn async_cancel(ring_id: usize, user_data: u64) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_ASYNC_CANCEL, ring_id, user_data as usize) }
+    }
+
+    // ========================================================================
+    // Shared userspace panic handler
+    //
+    // Called from the `#[panic_handler]` of every component binary.  Formats
+    // the panic message, location, and backtrace-like context using a stack
+    // buffer, then writes it via `debug_log` and terminates via `exit`.
+    //
+    // This eliminates 22+ near-identical panic handlers and ensures every
+    // component panic produces consistent, maximally informative output.
+    // ========================================================================
+
+    /// Write a string to the kernel log via inline syscall.
+    /// Used when the normal `debug_log` path may not be safe (panic context).
+    fn raw_debug_log(msg: &[u8]) {
+        unsafe {
+            let _ = syscall2(number::SYS_DEBUG_LOG, msg.as_ptr() as usize, msg.len());
+        }
+    }
+
+    /// Handle a component panic: format the info, log it, then exit.
+    ///
+    /// `component` is a short name like `"strate-net"` or `"fs-ext4"`.
+    /// `info` is the standard `PanicInfo` from the `#[panic_handler]`.
+    ///
+    /// Uses a stack-allocated buffer + `core::fmt::Write` so no heap
+    /// allocation is needed.  Falls back even if locks or the heap are
+    /// corrupted.
+    pub fn handle_panic(component: &str, info: &core::panic::PanicInfo) -> ! {
+        // Stack-allocated writer backed by a 1 KB buffer.
+        struct BufWriter<'a> {
+            buf: &'a mut [u8],
+            pos: usize,
+        }
+        impl core::fmt::Write for BufWriter<'_> {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                let bytes = s.as_bytes();
+                let remaining = self.buf.len().saturating_sub(self.pos);
+                if bytes.len() > remaining {
+                    // Flush before we overflow.
+                    let flush_end = self.pos;
+                    raw_debug_log(&self.buf[..flush_end]);
+                    self.pos = 0;
+                }
+                let chunk = &bytes[..bytes.len().min(self.buf.len().saturating_sub(self.pos))];
+                self.buf[self.pos..self.pos + chunk.len()].copy_from_slice(chunk);
+                self.pos += chunk.len();
+                Ok(())
+            }
+        }
+        impl BufWriter<'_> {
+            fn flush(&mut self) {
+                if self.pos > 0 {
+                    raw_debug_log(&self.buf[..self.pos]);
+                    self.pos = 0;
+                }
+            }
+        }
+
+        let mut storage = [0u8; 1024];
+        let mut w = BufWriter {
+            buf: &mut storage,
+            pos: 0,
+        };
+
+        // Use core::fmt::Write so we can format PanicInfo::message()
+        // (which returns &core::fmt::Arguments) without alloc.
+        use core::fmt::Write;
+
+        let _ = write!(w, "[{}] PANIC", component);
+        if let Some(loc) = info.location() {
+            let _ = write!(w, " at {}:{}:{}", loc.file(), loc.line(), loc.column());
+        }
+        let _ = write!(w, "\n  {}", info.message());
+        let _ = writeln!(w);
+        w.flush();
+
+        // --- Terminate ---
+        exit(255)
     }
 }

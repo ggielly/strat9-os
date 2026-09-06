@@ -53,7 +53,7 @@ fn test_fault_maps_and_refcount() -> bool {
     if aspace.handle_fault(DP_ADDR_A).is_err() {
         return false;
     }
-    let phys = match aspace.translate(x86_64::VirtAddr::new(DP_ADDR_A)) {
+    let phys = match aspace.translate(crate::arch::x86_64::VirtAddr::new(DP_ADDR_A)) {
         Some(p) => p,
         None => return false,
     };
@@ -77,7 +77,7 @@ fn test_fault_maps_and_refcount() -> bool {
         return false;
     }
     // After the last unmap the frame is returned to the buddy allocator, which
-    // stamps REFCOUNT_UNUSED (u32::MAX) — the free-list sentinel. Reading 0
+    // stamps REFCOUNT_UNUSED (u32::MAX) : the free-list sentinel. Reading 0
     // here would indicate the old pre-sentinel behaviour.
     crate::memory::cow::frame_get_refcount(frame) == crate::memory::frame::REFCOUNT_UNUSED
 }
@@ -109,7 +109,7 @@ fn test_repeat_fault_same_page_no_leak() -> bool {
         crate::serial_println!("[dp-test] t2: fault-1 failed");
         return false;
     }
-    let phys1 = match aspace.translate(x86_64::VirtAddr::new(DP_ADDR_B)) {
+    let phys1 = match aspace.translate(crate::arch::x86_64::VirtAddr::new(DP_ADDR_B)) {
         Some(p) => p,
         None => return false,
     };
@@ -119,7 +119,7 @@ fn test_repeat_fault_same_page_no_leak() -> bool {
         crate::serial_println!("[dp-test] t2: fault-2 failed");
         return false;
     }
-    let phys2 = match aspace.translate(x86_64::VirtAddr::new(DP_ADDR_B)) {
+    let phys2 = match aspace.translate(crate::arch::x86_64::VirtAddr::new(DP_ADDR_B)) {
         Some(p) => p,
         None => return false,
     };

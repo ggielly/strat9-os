@@ -93,6 +93,10 @@ impl MipsCdmm {
             .devices
             .get(dev_index)
             .ok_or(BusError::DeviceNotFound)?;
+        // Validate the composed address before touching MMIO: `offset` is
+        // caller-supplied and drb_offset + offset could otherwise trip the
+        // panic backstop in MmioRegion.
+        self.regs.check_user_offset(dev.drb_offset + offset)?;
         Ok(self.regs.read32(dev.drb_offset + offset))
     }
 
@@ -107,6 +111,7 @@ impl MipsCdmm {
             .devices
             .get(dev_index)
             .ok_or(BusError::DeviceNotFound)?;
+        self.regs.check_user_offset(dev.drb_offset + offset)?;
         self.regs.write32(dev.drb_offset + offset, val);
         Ok(())
     }
@@ -142,6 +147,7 @@ impl BusDriver for MipsCdmm {
         if !self.regs.is_valid() {
             return Err(BusError::InitFailed);
         }
+    self.regs.check_user_offset(offset)?;
         Ok(self.regs.read32(offset))
     }
 
@@ -150,6 +156,7 @@ impl BusDriver for MipsCdmm {
         if !self.regs.is_valid() {
             return Err(BusError::InitFailed);
         }
+        self.regs.check_user_offset(offset)?;
         self.regs.write32(offset, value);
         Ok(())
     }

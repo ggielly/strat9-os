@@ -11,11 +11,16 @@
 //! - WAET (VM optimization hints)
 //! - BGRT (boot graphics)
 //! - SLIT (NUMA distances)
+//!
+//! TODO : take a look at the v6 :
+//! https://uefi.org/sites/default/files/resources/ACPI_Spec_6.6.pdf
+//! https://uefi.org/specs/ACPI/6.6/
 
 pub mod bgrt;
 pub mod dmar;
 pub mod fadt;
 pub mod hpet;
+pub mod ivrs;
 pub mod madt;
 pub mod mcfg;
 pub mod rsdt;
@@ -34,7 +39,7 @@ static RSDP_VADDR: AtomicU64 = AtomicU64::new(0);
 /// RSDP revision (0 = ACPI 1.0, 2+ = ACPI 2.0+)
 static RSDP_REVISION: AtomicU64 = AtomicU64::new(0);
 
-/// RSDP (Root System Descriptor Pointer) — ACPI 1.0
+/// RSDP (Root System Descriptor Pointer) : ACPI 1.0
 #[repr(C, packed)]
 struct Rsdp {
     signature: [u8; 8],
@@ -44,7 +49,7 @@ struct Rsdp {
     rsdt_address: u32,
 }
 
-/// RSDP extended — ACPI 2.0+
+/// RSDP extended : ACPI 2.0+
 #[repr(C, packed)]
 struct Rsdp2 {
     base: Rsdp,
@@ -87,6 +92,11 @@ pub fn rsdp_address() -> u64 {
 /// Get BGRT table (boot graphics)
 pub fn get_bgrt() -> Option<&'static bgrt::Bgrt> {
     bgrt::Bgrt::get()
+}
+
+/// Get IVRS table (AMD IOMMU)
+pub fn get_ivrs() -> Option<ivrs::Ivrs> {
+    ivrs::Ivrs::get()
 }
 
 /// Get SLIT table (NUMA distances)

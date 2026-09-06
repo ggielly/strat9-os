@@ -13,6 +13,8 @@ pub enum SyscallError {
     PermissionDenied = -1,
     #[error("No such file or directory")]
     NotFound = -2,
+    #[error("No such process")]
+    NoSuchProcess = -3,
     #[error("Interrupted system call")]
     Interrupted = -4,
     #[error("Input/output error")]
@@ -57,6 +59,8 @@ pub enum SyscallError {
     NotEmpty = -39,
     #[error("Not supported")]
     NotSupported = -52,
+    #[error("Message too long")]
+    MessageSize = -90,
     #[error("No buffer space available")]
     QueueFull = -105,
     #[error("Connection timed out")]
@@ -87,6 +91,7 @@ impl SyscallError {
         match self {
             SyscallError::PermissionDenied => "EPERM",
             SyscallError::NotFound => "ENOENT",
+            SyscallError::NoSuchProcess => "ESRCH",
             SyscallError::Interrupted => "EINTR",
             SyscallError::IoError => "EIO",
             SyscallError::ArgumentListTooLong => "E2BIG",
@@ -109,13 +114,14 @@ impl SyscallError {
             SyscallError::NotImplemented => "ENOSYS",
             SyscallError::NotEmpty => "ENOTEMPTY",
             SyscallError::NotSupported => "ENOTSUP",
+            SyscallError::MessageSize => "EMSGSIZE",
             SyscallError::QueueFull => "ENOBUFS",
             SyscallError::TimedOut => "ETIMEDOUT",
         }
     }
 }
 
-// ── From impls for kernel-internal error types ──────────────────────────────
+//  From impls for kernel-internal error types ====================================================================================================
 
 impl From<core::str::Utf8Error> for SyscallError {
     /// Performs the from operation.
@@ -178,6 +184,7 @@ impl From<crate::ipc::port::IpcError> for SyscallError {
             IpcError::PortNotFound => SyscallError::NotFound,
             IpcError::NotOwner => SyscallError::PermissionDenied,
             IpcError::PortDestroyed => SyscallError::Pipe,
+            IpcError::WouldBlock => SyscallError::Again,
         }
     }
 }

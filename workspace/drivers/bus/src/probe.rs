@@ -44,13 +44,17 @@ fn zero_buf(buf: &mut [u64]) {
     buf.fill(0);
 }
 
-/// Performs the run mmio probe operation.
-pub fn run_mmio_probe() -> ProbeResult {
-    run_mmio_probe_with_mode(ProbeMode::Full)
+/// Self-test of the `MmioRegion` abstraction (not a real hardware probe).
+///
+/// Allocates a heap buffer and exercises the MMIO wrapper methods
+/// (read/write lifecycle, boundary checks, bit manipulation).
+/// Useful for validating the abstraction before running in a silo.
+pub fn run_mmio_self_test() -> ProbeResult {
+    run_mmio_self_test_with_mode(ProbeMode::Full)
 }
 
-/// Performs the run mmio probe with mode operation.
-pub fn run_mmio_probe_with_mode(mode: ProbeMode) -> ProbeResult {
+/// Self-test of the `MmioRegion` abstraction with a given probe mode.
+pub fn run_mmio_self_test_with_mode(mode: ProbeMode) -> ProbeResult {
     let mut r = ProbeResult::new();
     let mut buf = vec![0u64; REGION_WORDS];
     let base = buf.as_mut_ptr() as usize;

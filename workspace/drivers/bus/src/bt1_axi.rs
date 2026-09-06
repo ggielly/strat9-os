@@ -103,6 +103,7 @@ impl BusDriver for Bt1Axi {
         if !self.qos_regs.is_valid() {
             return Err(BusError::InitFailed);
         }
+        self.qos_regs.check_user_offset(offset)?;
         Ok(self.qos_regs.read32(offset))
     }
 
@@ -111,6 +112,7 @@ impl BusDriver for Bt1Axi {
         if !self.qos_regs.is_valid() {
             return Err(BusError::InitFailed);
         }
+        self.qos_regs.check_user_offset(offset)?;
         self.qos_regs.write32(offset, value);
         Ok(())
     }

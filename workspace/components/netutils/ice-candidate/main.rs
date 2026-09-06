@@ -6,6 +6,7 @@ extern crate alloc;
 
 use alloc::format;
 use core::{alloc::Layout, fmt::Write, panic::PanicInfo};
+use strat9_abi::ip::parse_ipv4_literal;
 use strat9_syscall::{call, data::TimeSpec, number};
 
 /// Default STUN host used when /net/stun-config is absent or unreadable.
@@ -35,36 +36,7 @@ fn alloc_error(_layout: Layout) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    let _ = call::write(1, b"[ice-candidate] PANIC: ");
-    let mut buf = [0u8; 192];
-    let mut w = BufWriter {
-        buf: &mut buf,
-        pos: 0,
-    };
-    let _ = write!(w, "{}", info.message());
-    let len = w.pos;
-    drop(w); // release mutable borrow before reusing `buf`
-    if len > 0 {
-        let _ = call::write(1, &buf[..len]);
-    }
-    let _ = call::write(1, b"\n");
-    call::exit(255)
-}
-
-struct BufWriter<'a> {
-    buf: &'a mut [u8],
-    pos: usize,
-}
-
-impl core::fmt::Write for BufWriter<'_> {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let bytes = s.as_bytes();
-        let avail = self.buf.len().saturating_sub(self.pos);
-        let n = bytes.len().min(avail);
-        self.buf[self.pos..self.pos + n].copy_from_slice(&bytes[..n]);
-        self.pos += n;
-        Ok(())
-    }
+    call::handle_panic("ice-candidate", info)
 }
 
 fn log(msg: &str) {
@@ -94,35 +66,8 @@ fn scheme_open(path: &str, flags: usize) -> Result<usize, ()> {
     call::openat(0, path, flags, 0).map_err(|_| ())
 }
 
-fn parse_ipv4_literal(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    if bytes.is_empty() {
-        return false;
-    }
-    let mut dots = 0usize;
-    let mut val: u16 = 0;
-    let mut has_digit = false;
-    for &b in bytes {
-        if b == b'.' {
-            if !has_digit || val > 255 || dots >= 3 {
-                return false;
-            }
-            dots += 1;
-            val = 0;
-            has_digit = false;
-            continue;
-        }
-        if !b.is_ascii_digit() {
-            return false;
-        }
-        val = val * 10 + (b - b'0') as u16;
-        has_digit = true;
-    }
-    has_digit && val <= 255 && dots == 3
-}
-
 fn resolve_target<'a>(target: &'a str, resolved_buf: &'a mut [u8; 64]) -> Option<&'a str> {
-    if parse_ipv4_literal(target) {
+    if parse_ipv4_literal(target).is_some() {
         return Some(target);
     }
     let path = format!("/net/resolve/{}", target);
@@ -138,7 +83,7 @@ fn resolve_target<'a>(target: &'a str, resolved_buf: &'a mut [u8; 64]) -> Option
         return None;
     }
     let resolved = core::str::from_utf8(&resolved_buf[..end]).ok()?;
-    if parse_ipv4_literal(resolved) {
+    if parse_ipv4_literal(resolved).is_some() {
         Some(resolved)
     } else {
         None
@@ -165,8 +110,8 @@ fn parse_u16_decimal(s: &[u8]) -> Option<u16> {
 /// Read STUN configuration from /net/stun-config.
 ///
 /// Accepted formats (newline-terminated):
-///   host          — uses DEFAULT_STUN_PORT
-///   host:port     — overrides both host and port
+///   host          : uses DEFAULT_STUN_PORT
+///   host:port     : overrides both host and port
 ///
 /// On any parse or I/O error the defaults are returned unchanged.
 fn read_stun_config<'a>(host_buf: &'a mut [u8; 253], port_out: &mut u16) -> &'a str {
@@ -218,7 +163,7 @@ fn read_local_ip<'a>(out: &'a mut [u8; 64]) -> Option<&'a str> {
         return None;
     }
     let ip = core::str::from_utf8(&out[..end]).ok()?;
-    if parse_ipv4_literal(ip) {
+    if parse_ipv4_literal(ip).is_some() {
         Some(ip)
     } else {
         None

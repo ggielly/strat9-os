@@ -4,13 +4,13 @@ use core::sync::atomic::{AtomicBool, AtomicU64};
 // One-shot bootstrap nudge: ensure each CPU requests at least one preemption
 // after entering Ring 3. This breaks "first task runs forever" scenarios when
 // class accounting has not yet accumulated enough runtime to trigger resched.
-static FIRST_TICK_FORCE_RESCHED: [AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicBool::new(false) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static FIRST_TICK_FORCE_RESCHED: [AtomicBool; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; crate::arch::percpu::MAX_CPUS];
 
 // Per-CPU local tick counter (incremented every timer tick, independent of
 // the BSP-only global TICK_COUNT). Used for periodic force-resched below.
-static CPU_LOCAL_TICKS: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
+static CPU_LOCAL_TICKS: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
 
 // Force a reschedule at least every N ticks per CPU, regardless of GLOBAL_SCHED_STATE
 // lock availability. This guarantees kernel tasks (shell, idle) get CPU time
@@ -33,7 +33,10 @@ pub fn timer_tick() {
         &super::perf_counters::IRQ_TIMER_TSC,
         &super::perf_counters::IRQ_TIMER_COUNT,
     );
-    let cpu_idx = crate::arch::x86_64::percpu::current_cpu_index();
+
+    // Feed TSC low bits into the entropy pool (every tick).
+    crate::entropy::add_entropy(2, crate::arch::rdtsc());
+    let cpu_idx = crate::arch::percpu::current_cpu_index();
 
     if cpu_is_valid(cpu_idx) {
         CPU_TOTAL_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
@@ -76,43 +79,57 @@ pub fn timer_tick() {
         let current_time_ns = tick * NS_PER_TICK;
         crate::process::timer::tick_all_timers(current_time_ns);
         check_wake_deadlines(current_time_ns);
+
+        if tick % 200 == 0 {
+            crate::hardware::thermal::poll();
+        }
     }
 
     // Per-task accounting on this CPU : uses LOCAL lock only (no global GLOBAL_SCHED_STATE).
     // This ensures timer ticks are never dropped due to another CPU holding GLOBAL_SCHED_STATE.
+    //
+    // Retry up to 3 times (back-to-back) if the LOCAL lock is contended.
+    // The lock holder is either the previous tick (short critical section) or
+    // a context switch (also short). Three retries cover >99.9% of cases
+    // without spinning long in IRQ context.
     if cpu_is_valid(cpu_idx) {
-        if let Some(mut guard) = LOCAL_SCHEDULERS[cpu_idx].try_lock_no_irqsave() {
-            if let Some(ref mut cpu) = *guard {
-                let should_resched = if let Some(ref current_task) = cpu.current_task {
-                    let class = cpu.class_table.class_for_task(current_task);
-                    match class {
-                        crate::process::sched::SchedClassId::RealTime => {
-                            CPU_RT_RUNTIME_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
+        const TICK_LOCK_RETRIES: usize = 3;
+        for attempt in 0..TICK_LOCK_RETRIES {
+            if let Some(mut guard) = LOCAL_SCHEDULERS[cpu_idx].try_lock_no_irqsave() {
+                if let Some(ref mut cpu) = *guard {
+                    let should_resched = if let Some(ref current_task) = cpu.current_task {
+                        let class = cpu.class_table.class_for_task(current_task);
+                        match class {
+                            crate::process::sched::SchedClassId::RealTime => {
+                                CPU_RT_RUNTIME_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
+                            }
+                            crate::process::sched::SchedClassId::Fair => {
+                                CPU_FAIR_RUNTIME_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
+                            }
+                            crate::process::sched::SchedClassId::Idle => {
+                                CPU_IDLE_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
+                            }
                         }
-                        crate::process::sched::SchedClassId::Fair => {
-                            CPU_FAIR_RUNTIME_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
-                        }
-                        crate::process::sched::SchedClassId::Idle => {
-                            CPU_IDLE_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
-                        }
+                        current_task.ticks.fetch_add(1, Ordering::Relaxed);
+                        cpu.current_runtime.update();
+                        cpu.class_rqs.update_current(
+                            &cpu.current_runtime,
+                            current_task,
+                            false,
+                            &cpu.class_table,
+                        )
+                    } else {
+                        false
+                    };
+                    if should_resched {
+                        cpu.need_resched = true;
                     }
-                    current_task.ticks.fetch_add(1, Ordering::Relaxed);
-                    cpu.current_runtime.update();
-                    cpu.class_rqs.update_current(
-                        &cpu.current_runtime,
-                        current_task,
-                        false,
-                        &cpu.class_table,
-                    )
-                } else {
-                    false
-                };
-                if should_resched {
-                    cpu.need_resched = true;
                 }
+                break;
             }
-        } else {
-            note_try_lock_fail_on_cpu(cpu_idx);
+            if attempt == TICK_LOCK_RETRIES - 1 {
+                note_try_lock_fail_on_cpu(cpu_idx);
+            }
         }
     }
 }
@@ -127,14 +144,14 @@ pub fn timer_tick() {
 /// The `BLOCKED_TASKS` lock is held **only** during the scan + re-enqueue phase.
 /// The lock is explicitly dropped before sending IPIs (which may acquire
 /// per-CPU data) and before any `Arc<Task>` drop (which reaches
-/// `KernelStack::drop → free_frames → buddy_alloc.lock()`).
+/// `KernelStack::drop => free_frames => buddy_alloc.lock()`).
 ///
 /// To guarantee this, every `Arc<Task>` removed from `blocked_tasks` is
 /// moved into the `deferred_drops` array. Those Arcs are dropped after the
 /// guard goes out of scope, ensuring `free_frames` is never called while the
 /// scheduler lock is held.
 fn check_wake_deadlines(current_time_ns: u64) {
-    let mut ipi_targets = [false; crate::arch::x86_64::percpu::MAX_CPUS];
+    let mut ipi_targets = [false; crate::arch::percpu::MAX_CPUS];
     let my_cpu = current_cpu_index();
 
     // Stack-allocated storage for tasks whose Arc must be dropped outside the
@@ -199,20 +216,18 @@ fn check_wake_deadlines(current_time_ns: u64) {
                         drop_count += 1;
                     }
                     // If deferred_drops is full the task Arc is dropped here,
-                    // still under the lock — but that case means we already
+                    // still under the lock : but that case means we already
                     // have 128 orphaned tasks with no valid CPU, which is a
                     // bug elsewhere; emit a trace and accept the latency hit.
                 }
             }
         }
-        // `blocked` guard drops here — BLOCKED_TASKS lock released BEFORE any
+        // `blocked` guard drops here : BLOCKED_TASKS lock released BEFORE any
         // Arc<Task> drop and BEFORE send_resched_ipi_to_cpu.
         // --- end critical section ---
     }
-    unsafe { core::arch::asm!("mov al, '2'; out 0xe9, al", out("al") _) };
-
     // Drop orphaned task Arcs outside the scheduler lock so that
-    // KernelStack::drop → free_frames → buddy_alloc.lock() does not race
+    // KernelStack::drop => free_frames => buddy_alloc.lock() does not race
     // with any other GLOBAL_SCHED_STATE lock acquisition on this or another CPU.
     for slot in deferred_drops[..drop_count].iter_mut() {
         drop(slot.take());

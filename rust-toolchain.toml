@@ -1,4 +1,16 @@
 [toolchain]
-channel = "nightly"
+# Pinned nightly (do not use the floating `nightly` channel).
+#
+# Why: the kernel depends on the `x86_64` crate (0.15.x), whose
+# `Step` trait impls (`forward_overflowing` / `backward_overflowing`)
+# were removed from recent nightlies, and newer LLVM backends reject
+# this target's `sse` feature toggling. nightly-2026-07-20 is the last
+# verified-good toolchain for both `cargo check`/`build` of the kernel
+# and its dependency tree.
+#
+# To upgrade: bump this date, then run
+#   cargo +<new-date> check --workspace --targets x86_64-unknown-none
+# and confirm the kernel and all drivers build before committing.
+channel = "nightly-2026-07-20"
 components = ["rust-src", "rustc-dev", "llvm-tools"]
 targets = ["x86_64-unknown-none"]

@@ -1,0 +1,93 @@
+# Strat9-OS minimal U-Boot config for x86_64 QEMU
+# Based on qemu-x86_64_defconfig, stripped to essentials
+
+CONFIG_TARGET_QEMU_X86_64=y
+
+# Boot
+CONFIG_BOOTM=y
+CONFIG_CMD_BOOTM=y
+CONFIG_CMD_BOOTEFI=y
+CONFIG_CMD_ELF=y
+CONFIG_CMD_RUN=y
+CONFIG_CMD_SOURCE=y
+
+# Filesystem (for loading kernel and modules)
+CONFIG_FS_FAT=y
+CONFIG_FS_EXT4=y
+CONFIG_CMD_FAT=y
+CONFIG_CMD_EXT4=y
+CONFIG_CMD_LS=y
+CONFIG_CMD_LOAD=y
+CONFIG_CMD_CAT=y
+
+# Serial console
+CONFIG_SERIAL=y
+CONFIG_DM_SERIAL=y
+CONFIG_SYS_NS16550=y
+CONFIG_SYS_NS16550_PORT_MAPPED=y
+
+# Basic hardware
+CONFIG_TIMER=y
+CONFIG_CMD_TIMER=y
+CONFIG_CMD_DATE=y
+
+# Environment
+CONFIG_ENV_IS_NOWHERE=y
+CONFIG_ENV_IS_IN_FAT=y
+CONFIG_ENV_FAT_INTERFACE="virtio"
+CONFIG_ENV_FAT_DEVICE_AND_PART="0:1"
+CONFIG_ENV_FAT_FILE="uboot.env"
+CONFIG_FAT_WRITE=y
+
+# Disable unnecessary features
+# CONFIG_NET is not set
+# CONFIG_SCSI is not set
+# CONFIG_USB is not set
+# CONFIG_CMD_BMP is not set
+# CONFIG_CMD_PXE is not set
+# CONFIG_CMD_NFS is not set
+# CONFIG_CMD_DHCP is not set
+# CONFIG_CMD_TFTP is not set
+# CONFIG_CMD_PING is not set
+# CONFIG_CMD_BDI is not set
+# CONFIG_CMD_BMIPS is not set
+# CONFIG_CMD_CLONE is not set
+# CONFIG_CMD_FDT is not set
+# CONFIG_CMD_I2C is not set
+# CONFIG_CMD_IO is not set
+# CONFIG_CMD_IRQ is not set
+# CONFIG_CMD_LED is not set
+# CONFIG_CMD_MEMINFO is not set
+# CONFIG_CMD_MMC is not set
+# CONFIG_CMD_PCI is not set
+# CONFIG_CMD_PCMCIA is not set
+# CONFIG_CMD_reginfo is not set
+# CONFIG_CMD_SATA is not set
+# CONFIG_CMD_SCSI is not set
+# CONFIG_CMD_SPI is not set
+# CONFIG_CMD_STRINGS is not set
+# CONFIG_CMD_TERMINAL is not set
+# CONFIG_CMD_TRACE is not set
+# CONFIG_CMD_UNZIP is not set
+# CONFIG_CMD_UUID is not set
+# CONFIG_CMD_UBI is not set
+# CONFIG_CMD_UBIFS is not set
+# CONFIG_CMD_UNIVERSE is not set
+# CONFIG_CMD_USB is not set
+# CONFIG_CMD_VIDCONSOLE is not set
+# CONFIG_CMD_KASLRSEED is not set
+# CONFIG_CMD_TPM is not set
+# CONFIG_CMD_RNG is not set
+# CONFIG_CMD_HASH is not set
+# CONFIG_CMD_BLOB is not set
+# CONFIG_CMD_SETEXPR is not set
+# CONFIG_CMD_SETENV is not set
+# CONFIG_CMD_UNSETENV is not set
+# CONFIG_CMD_EXPORTENV is not set
+# CONFIG_CMD_IMPORTENV is not set
+# CONFIG_CMD_ENV is not set
+# CONFIG_CMD_LOG is not set
+# CONFIG_CMD_VIRT is not set
+# CONFIG_CMD_RESTE is not set
+# CONFIG_EFI_LOADER is not set
+# CONFIG_EFI_LOADER_HII is not set

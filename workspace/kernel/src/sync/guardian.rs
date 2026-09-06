@@ -1,4 +1,4 @@
-//! Lock guardian trait — determines the guard behaviour of [`SpinLock`].
+//! Lock guardian trait : determines the guard behaviour of [`SpinLock`].
 //!
 //! Two built-in implementations are provided:
 //!
@@ -15,7 +15,7 @@
 
 use super::{IrqDisabledToken, PreemptGuard};
 
-// ─── Sealed trait ─────────────────────────────────────────────────────────────
+// ========== Sealed trait ==============================
 
 mod private {
     pub trait Sealed {}
@@ -43,7 +43,7 @@ pub struct GuardianState<Token> {
     pub(crate) restore_flags: bool,
 }
 
-// ─── IrqDisabled ─────────────────────────────────────────────────────────────
+// ========== IrqDisabled ==============================
 
 /// Guardian that saves RFLAGS and disables IRQs before the lock is acquired.
 ///
@@ -58,7 +58,7 @@ impl Guardian for IrqDisabled {
 
     #[inline]
     fn enter() -> GuardianState<Self::Token> {
-        let saved = crate::arch::x86_64::save_flags_and_cli();
+        let saved = crate::arch::save_flags_and_cli();
         // SAFETY: save_flags_and_cli() just cleared IF on this CPU.
         let token = unsafe { IrqDisabledToken::new_unchecked() };
         GuardianState {
@@ -71,12 +71,12 @@ impl Guardian for IrqDisabled {
     #[inline]
     fn exit(state: GuardianState<Self::Token>) {
         if state.restore_flags {
-            crate::arch::x86_64::restore_flags(state.saved_flags);
+            crate::arch::restore_flags(state.saved_flags);
         }
     }
 }
 
-// ─── PreemptDisabled ─────────────────────────────────────────────────────────
+// ========== PreemptDisabled ==========
 
 /// Guardian that only disables preemption, leaving IRQs untouched.
 ///
