@@ -143,17 +143,17 @@ description = "Full CI gate: host tests (default + alloc) + kernel L2 mirror"
 dependencies = ["test-host", "test-host-alloc", "test-kernel-l2"]
 
 [tasks.qemu-selftest]
-description = "L3/L4: boot kernel with selftests in QEMU, verify serial markers"
+description = "L3/L4: boot selftest UEFI ISO in QEMU (ephemeral), verify serial markers"
 command = "./tools/scripts/qemu-selftest.sh"
-args = ["--timeout", "120"]
+args = ["--timeout", "180"]
 
-# Same component pipeline as limine-image, but embeds the kernel built with
-# --features selftest so the [selftest] serial markers are present.
+# UEFI variant of uefi-image embedding the kernel built with --features
+# selftest so the [selftest] serial markers are present. No Limine involved:
+# own strat9-bootloader.efi + /boot/kernel.elf + /boot/initfs/*.
 [tasks.selftest-image]
-description = "Build an initfs ISO embedding the selftest-enabled kernel"
+description = "Build UEFI disk image embedding the selftest-enabled kernel (no Limine)"
 dependencies = [
-    "build-musl",
-    "setup-limine",
+    "bootloader-uefi",
     "kernel-test",
     "strate-ext4-release",
     "strate-fs-ramfs-release",
@@ -170,21 +170,28 @@ dependencies = [
     "udp-tool-release",
     "strate-web-admin-release",
 ]
-env = { STRAT9_IMAGE_BASENAME = "strat9-os-selftest", STRAT9_INCLUDE_TESTS = "1" }
+env = { STRAT9_IMAGE_BASENAME = "strat9-os-selftest", STRAT9_PROFILE = "debug", STRAT9_INCLUDE_TESTS = "1" }
 script_runner = "@shell"
-script = ["bash tools/scripts/create-limine-image.sh"]
+script = ["bash tools/scripts/create-uefi-image.sh"]
+
+[tasks.selftest-iso-uefi]
+description = "Build UEFI-bootable selftest ISO with own loader (no Limine)"
+dependencies = ["selftest-image"]
+env = { STRAT9_IMAGE_BASENAME = "strat9-os-selftest", STRAT9_PROFILE = "debug", STRAT9_INCLUDE_TESTS = "1" }
+script_runner = "@shell"
+script = ["bash tools/scripts/create-iso-uefi.sh"]
 
 [tasks.qemu-tests]
-description = "Full QEMU gate: build selftest ISO then run the harness"
-dependencies = ["selftest-image"]
+description = "Full QEMU gate: build selftest UEFI ISO then run the harness"
+dependencies = ["selftest-iso-uefi"]
 run_task = { name = "qemu-selftest" }
 
-# NOTE: kernel-test is intentionally NOT part of ci-tests yet: the kernel
-# build is currently broken by the unpinned nightly toolchain
-# (`#[target_feature(enable = "avx2")]` now hard-errors on soft-float targets,
-# lint x86_softfloat_sse, rustc 1.100.0-nightly).
-# Once rust-toolchain.toml pins a working nightly (or avx2.rs is adapted),
-# re-add "kernel-test" to the dependencies above.
+# NOTE: kernel-test is intentionally NOT part of ci-tests yet.
+# rust-toolchain.toml now pins nightly-2026-07-20 (last verified-good for the
+# kernel + x86_64 crate 0.15.x). Re-add "kernel-test" to ci-tests only after
+# `cargo make kernel-test` is confirmed green on that pinned toolchain; the
+# selftest kernel is meanwhile covered by the qemu-selftest job (option A:
+# strat9-builder VM on Proxmox, ephemeral QEMU per pipeline).
 
 # =============================================================================
 # Image generation
@@ -269,7 +276,7 @@ ${QEMU} \
     -display gtk,gl=on \
     -device virtio-net-pci,netdev=net0 \
     -netdev user,id=net0,hostfwd=tcp::2222-:22 \
-    -serial mon:stdio \
+    -serial stdio \
     -no-reboot
 ''']
 
