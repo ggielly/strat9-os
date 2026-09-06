@@ -164,8 +164,17 @@ pub fn sti() {
 ///
 /// Must be paired with `clac()` after the user-memory access is complete.
 /// Only needed when CR4.SMAP is set.
+///
+/// #CPUID guard: QEMU TCG raises #UD on CLAC/STAC when the CPU model does
+/// not advertise CPUID.(7,0):EBX.SMAP (e.g. plain `-cpu qemu64`), even
+/// though real Ivy Bridge+ CPUs execute them unconditionally. Gate both
+/// instructions on the detected feature so kernels built with SMAP-aware
+/// user accessors boot on any CPU model.
 #[inline]
 pub fn stac() {
+    if !cpu_has_smap() {
+        return;
+    }
     unsafe {
         asm!("stac", options(nomem, nostack, preserves_flags));
     }
@@ -176,9 +185,21 @@ pub fn stac() {
 /// Paired with `stac()`.
 #[inline]
 pub fn clac() {
+    if !cpu_has_smap() {
+        return;
+    }
     unsafe {
         asm!("clac", options(nomem, nostack, preserves_flags));
     }
+}
+
+/// Whether CPUID.(7,0):EBX.SMAP is available. Cached on first use; the
+/// `cpu()` call is cheap (single Relaxed load) once `cpuid::init()` ran.
+#[inline]
+fn cpu_has_smap() -> bool {
+    crate::arch::x86_64::cpuid::host()
+        .features
+        .contains(crate::arch::x86_64::cpuid::CpuFeatures::SMAP)
 }
 
 /// Check if interrupts are enabled

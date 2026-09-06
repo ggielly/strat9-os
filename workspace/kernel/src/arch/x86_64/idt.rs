@@ -2001,6 +2001,11 @@ extern "x86-interrupt" fn lapic_timer_handler(stack_frame: InterruptStackFrame) 
 
 /// PS/2 Mouse IRQ12 handler.
 extern "x86-interrupt" fn mouse_handler(_stack_frame: InterruptStackFrame) {
+    // TEMP DEBUG: mouse IRQ pulse on E9.
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'M', options(nomem, nostack));
+        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+    }
     crate::arch::x86_64::mouse::handle_irq();
     // PS/2 mouse IRQ12 is intentionally kept on the remapped legacy PIC path.
     // Even when LAPIC/IOAPIC are active for timer/IPI traffic, this source must
@@ -2011,6 +2016,12 @@ extern "x86-interrupt" fn mouse_handler(_stack_frame: InterruptStackFrame) {
 /// Performs the keyboard handler operation.
 extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
     let raw = unsafe { super::io::inb(0x60) };
+    // TEMP DEBUG: echo every scancode byte on the E9 port.
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'K', options(nomem, nostack));
+        core::arch::asm!("out 0xe9, al", in("al") raw, options(nomem, nostack));
+        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+    }
 
     // Feed scancode + TSC low bits into the entropy pool.
     crate::entropy::add_entropy(1, (raw as u64) ^ super::rdtsc());
