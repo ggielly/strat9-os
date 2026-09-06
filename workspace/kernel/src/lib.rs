@@ -587,6 +587,43 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         serial_println!("[init] First region: base={:#x} size={:#x} kind={:?}",
             first.base, first.size, first.kind);
     }
+    // DEBUG: dump regions 0..6 on the E9 port (raw, no format_args).
+    {
+        let mut i = 0usize;
+        while i < regions.len().min(16) {
+            let r = &regions[i];
+            // kind: 0=Null 1=Free 2=Reclaim 3=Reserved
+            let k = (r.kind.0 as u8) + b'0';
+            let base = r.base;
+            let size = r.size;
+            unsafe {
+                core::arch::asm!(
+                    "out 0xe9, al",
+                    in("al") b'R', options(nomem, nostack)
+                );
+                // base nibbles (low 5 bytes enough)
+                let mut shift = 0i32;
+                while shift < 40 {
+                    let nib = ((base >> shift) & 0xF) as u8;
+                    let c = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+                    core::arch::asm!("out 0xe9, al", in("al") c, options(nomem, nostack));
+                    shift += 4;
+                }
+                core::arch::asm!("out 0xe9, al", in("al") b'/', options(nomem, nostack));
+                shift = 0;
+                while shift < 40 {
+                    let nib = ((size >> shift) & 0xF) as u8;
+                    let c = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+                    core::arch::asm!("out 0xe9, al", in("al") c, options(nomem, nostack));
+                    shift += 4;
+                }
+                core::arch::asm!("out 0xe9, al", in("al") b'/', options(nomem, nostack));
+                core::arch::asm!("out 0xe9, al", in("al") k, options(nomem, nostack));
+                core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+            }
+            i += 1;
+        }
+    }
     crate::e9_println!("MM regions");
     // Safety: single-threaded boot, no concurrent access
     let mmap_work = unsafe { &mut *core::ptr::addr_of_mut!(MMAP_WORK) };

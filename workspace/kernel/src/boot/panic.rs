@@ -239,6 +239,9 @@ pub fn install_default_panic_hooks() {
 ///
 /// After all output is delivered, halts the current CPU forever.
 pub fn panic_handler(info: &PanicInfo) -> ! {
+    // Visible even when the kernel serial path is not initialized yet.
+    crate::e9_println!("[panic] {}", info.message());
+    crate::e9_println!("[panic] at {:?}", info.location());
     // 1. Emergency serial mode : serial_println! bypasses all locks.
     crate::arch::serial::enter_emergency_mode();
 

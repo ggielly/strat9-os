@@ -142,7 +142,10 @@ fn efi_main() -> Status {
         fb_phys = fb.as_mut_ptr() as u64;
         fb_width = width as u32;
         fb_height = height as u32;
-        fb_stride = stride as u32;
+        // uefi's stride() returns PIXELS per scan line; the strat9 ABI
+        // expects BYTES (see vga writer: y * pitch + x * bpp_bytes).
+        let stride_bytes = (stride as u64) * ((fb_bpp as u64 + 7) / 8);
+        fb_stride = stride_bytes as u32;
 
         let (r_s, r_sh, g_s, g_sh, b_s, b_sh) = match pixel_format {
             uefi::proto::console::gop::PixelFormat::Rgb => (8, 16, 8, 8, 8, 0),
@@ -286,8 +289,42 @@ fn efi_main() -> Status {
             _ => MemoryKind::Reserved,
         };
 
-        regions[region_count] = MemoryRegion { base, size, kind };
-        region_count += 1;
+        // Split Free regions around the loaded kernel image: without this,
+        // the kernel image (code, .bss, bootstrap stack) sits inside a Free
+        // region and the kernel's boot/buddy allocators hand its own memory
+        // back to itself — self-corruption, wild jumps (#UD mid-instruction).
+        // Limine used to do this for us; it's the bootloader's job now.
+        let mut cursor = base;
+        let end = base + size;
+        let image_start = elf_info.segments[0].phys_addr;
+        let image_end = elf_info.phys_end;
+        if kind == MemoryKind::Free && cursor < image_end && end > image_start {
+            // Emit [cursor, image_start) if non-empty
+            if cursor < image_start {
+                if region_count < 512 {
+                    regions[region_count] =
+                        MemoryRegion { base: cursor, size: image_start - cursor, kind };
+                    region_count += 1;
+                }
+            }
+            // Emit [image_start, image_end) as Reserved
+            let rs = image_start.max(cursor);
+            let re = image_end.min(end);
+            if rs < re && region_count < 512 {
+                regions[region_count] =
+                    MemoryRegion { base: rs, size: re - rs, kind: MemoryKind::Reserved };
+                region_count += 1;
+            }
+            cursor = image_end.max(cursor);
+            // Emit remainder [cursor, end) if non-empty
+            if cursor < end && region_count < 512 {
+                regions[region_count] = MemoryRegion { base: cursor, size: end - cursor, kind };
+                region_count += 1;
+            }
+        } else if region_count < 512 {
+            regions[region_count] = MemoryRegion { base, size, kind };
+            region_count += 1;
+        }
     }
 
     fn alloc_from_free(
@@ -347,6 +384,73 @@ fn efi_main() -> Status {
     let env_size_aligned = (env_total_size as u64 + 4095) & !4095;
     let env_phys_base = alloc_from_free(&mut regions, region_count, env_size_aligned, 4096);
 
+    // The four carve-outs above (mmap copy, kernel stack, module table, env)
+    // were taken from Free regions. Mark those slices Reserved so the kernel
+    // does not hand them out again through its boot/buddy allocators.
+    {
+        let mut protect = |start: u64, size: u64| {
+            if start == 0 || size == 0 {
+                return;
+            }
+            let s = start & !0xFFF;
+            let e = (start + size + 0xFFF) & !0xFFF;
+            // Scan by index: carving appends pieces to the end of `regions`,
+            // which would invalidate a mutating iterator.
+            let mut i = 0usize;
+            let mut scan_len = region_count;
+            while i < scan_len {
+                let (r_base, r_end) = (regions[i].base, regions[i].base + regions[i].size);
+                if regions[i].kind != MemoryKind::Free || s >= r_end || e <= r_base {
+                    i += 1;
+                    continue;
+                }
+                let cs = s.max(r_base);
+                let ce = e.min(r_end);
+                let left = (cs - r_base, r_base);
+                let right = (r_end - ce, ce);
+                regions[i].base = cs;
+                regions[i].size = ce - cs;
+                regions[i].kind = MemoryKind::Reserved;
+                if right.0 > 0 && region_count < 512 {
+                    regions[region_count] =
+                        MemoryRegion { base: right.1, size: right.0, kind: MemoryKind::Free };
+                    region_count += 1;
+                }
+                if left.0 > 0 && region_count < 512 {
+                    regions[region_count] =
+                        MemoryRegion { base: left.1, size: left.0, kind: MemoryKind::Free };
+                    region_count += 1;
+                }
+                // Newly appended Free pieces may still intersect [s, e) —
+                // extend the scan to cover them, but they are disjoint from
+                // [s,e) by construction, so we can just continue forward.
+                scan_len = region_count;
+                i += 1;
+            }
+        };
+        if mmap_region_base != 0x90000 && mmap_region_base != 0 {
+            protect(mmap_region_base, mmap_region_size);
+        }
+        protect(stack_base, stack_size);
+        protect(module_table_base, module_table_size_aligned);
+        protect(env_phys_base, env_size_aligned);
+        // The bootloader's own page tables (built after the kernel image + a
+        // 4 MiB margin) must never be handed out by the kernel's allocators:
+        // the kernel runs ON these tables. Zeroing an allocation over them
+        // destroys the active CR3 → instruction-fetch #PF.
+        let (pt_start, pt_end) = unsafe { paging::page_table_area() };
+        if pt_start != 0 && pt_end > pt_start {
+            protect(pt_start, pt_end - pt_start);
+        }
+        // Re-copy the final map into its (still valid) slot.
+        if mmap_region_base != 0 && mmap_region_base != 0x90000 {
+            unsafe {
+                let dst = mmap_region_base as *mut MemoryRegion;
+                core::ptr::copy_nonoverlapping(regions.as_ptr(), dst, region_count);
+            }
+        }
+    }
+
     if env_phys_base != 0 {
         unsafe {
             let dst = env_phys_base as *mut u8;
@@ -374,7 +478,7 @@ fn efi_main() -> Status {
         framebuffer_green_mask_shift: fb_green_shift,
         framebuffer_blue_mask_size: fb_blue_size,
         framebuffer_blue_mask_shift: fb_blue_shift,
-        hhdm_offset: 0,
+        hhdm_offset: paging::HHDM_OFFSET,
         cmdline_ptr: env_phys_base,
         cmdline_len: env_total_size as u64,
         modules_base: module_table_base,
@@ -445,6 +549,56 @@ fn efi_main() -> Status {
             env_total_size as u64,
         )
     };
+
+    // NOW the page-table area is known (created above). Mark it Reserved in
+    // the map the kernel will read, and refresh the map copy the kernel
+    // consumes (mmap_region_base was allocated/carved before the tables
+    // existed, so the earlier protect pass could not cover them).
+    //
+    // NOTE: carve from Free AND Reclaim regions — the kernel treats Reclaim
+    // as allocatable (its buddy/boot allocators filter Free|Reclaim), and the
+    // PT frames here usually sit inside a big Reclaim extent (UEFI loader
+    // memory above the kernel image).
+    unsafe {
+        let (pt_start, pt_end) = paging::page_table_area();
+        if pt_start != 0 && pt_end > pt_start && mmap_region_base != 0 {
+            let mut i = 0usize;
+            let mut scan = region_count;
+            while i < scan {
+                let kind = regions[i].kind;
+                if kind != MemoryKind::Free && kind != MemoryKind::Reclaim {
+                    i += 1;
+                    continue;
+                }
+                let r_base = regions[i].base;
+                let r_end = r_base + regions[i].size;
+                if pt_start >= r_end || pt_end <= r_base {
+                    i += 1;
+                    continue;
+                }
+                // Split [r_base, r_end) into up to 3 parts around [pt_start, pt_end).
+                let left = (r_base, pt_start.min(r_end) - r_base);
+                let right = (pt_end.max(r_base), r_end - pt_end.max(r_base));
+                regions[i].base = pt_start.max(r_base);
+                regions[i].size = pt_end.min(r_end) - regions[i].base;
+                regions[i].kind = MemoryKind::Reserved;
+                if right.1 > 0 && region_count < 512 {
+                    regions[region_count] =
+                        MemoryRegion { base: right.0, size: right.1, kind };
+                    region_count += 1;
+                }
+                if left.1 > 0 && region_count < 512 {
+                    regions[region_count] =
+                        MemoryRegion { base: left.0, size: left.1, kind };
+                    region_count += 1;
+                }
+                scan = region_count;
+                i += 1;
+            }
+            let dst = mmap_region_base as *mut MemoryRegion;
+            core::ptr::copy_nonoverlapping(regions.as_ptr(), dst, region_count);
+        }
+    }
 
     unsafe {
         let write_com1 = |s: &[u8]| {

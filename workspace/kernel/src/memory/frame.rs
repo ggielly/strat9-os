@@ -715,12 +715,81 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
         return;
     }
 
-    // Skip the actual metadata allocation for now to advance boot.
-    // TODO: fix identity-mapped function pointer issue and re-enable.
-    crate::e9_mark!(b'Z');
-    crate::e9_mark!(b'a');
-    crate::e9_mark!(b'c');
-    crate::e9_mark!(b'd');
+    // Allocate the real metadata array from the boot allocator.
+    //
+    // This used to be stubbed because the vtable function pointers landed at
+    // identity-mapped addresses (#UD when called from the higher-half). The
+    // array itself only stores DATA (vtable bits = 0 → DEFAULT vtable
+    // resolved statically), so identity mapping of the array is safe: with
+    // hhdm_offset == 0, phys_to_virt(phys) == phys, which the active page
+    // tables map via the bootloader's identity map for all RAM.
+    // Function-pointer vtables (non-zero bits) remain FORBIDDEN until the
+    // identity-vtable issue is fixed — enforced by keeping vtable = 0 on all
+    // slots (MetaSlot::new) and by reset_with_free_list_meta.
+    let bytes = frame_count * FRAME_META_SIZE as u64;
+    let phys = match boot_alloc.try_alloc(bytes as usize, 64) {
+        Some(p) => p.as_u64(),
+        None => {
+            // Cannot back the metadata: keep it disabled (get_meta_slot will
+            // panic with a clear message rather than corrupt memory).
+            crate::serial_force_println!(
+                "[frame] metadata alloc failed: need {} bytes",
+                bytes
+            );
+            METADATA_BASE_VIRT.store(0, Ordering::Release);
+            METADATA_FRAME_COUNT.store(0, Ordering::Release);
+            return;
+        }
+    };
+    let virt = crate::memory::phys_to_virt(phys);
+    crate::e9_mark!(b'w');
+    // DEBUG: phys/virt of the array (LSB-first nibbles after 'P').
+    unsafe {
+        let mut shift = 0i32;
+        core::arch::asm!("out 0xe9, al", in("al") b'P', options(nomem, nostack));
+        while shift < 64 {
+            let nib = ((phys >> shift) & 0xF) as u8;
+            let c = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+            core::arch::asm!("out 0xe9, al", in("al") c, options(nomem, nostack));
+            shift += 4;
+        }
+        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+    }
+    // Zero the array so every slot starts as DEFAULT vtable / empty links.
+    // Chunked + E9-progress: a silent hang here (bad backing region, wrong
+    // mapping) would otherwise be invisible.
+    unsafe {
+        let dst = virt as *mut u8;
+        let chunk = 0x10_0000usize; // 1 MiB
+        let mut done = 0usize;
+        while done < bytes as usize {
+            let n = (bytes as usize - done).min(chunk);
+            core::ptr::write_bytes(dst.add(done), 0, n);
+            done += n;
+            crate::e9_mark!(b'.');
+        }
+    }
+    crate::e9_mark!(b'v');
+    // DEBUG: report where the array landed (raw E9, R=addr marker).
+    unsafe {
+        let mut shift = 0i32;
+        core::arch::asm!("out 0xe9, al", in("al") b'@', options(nomem, nostack));
+        while shift < 64 {
+            let nib = ((virt >> shift) & 0xF) as u8;
+            let c = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+            core::arch::asm!("out 0xe9, al", in("al") c, options(nomem, nostack));
+            shift += 4;
+        }
+        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+    }
+    METADATA_BASE_VIRT.store(virt, Ordering::Release);
+    METADATA_FRAME_COUNT.store(frame_count, Ordering::Release);
+    crate::serial_force_println!(
+        "[frame] metadata array @ {:#x} ({} frames, {} bytes)",
+        virt,
+        frame_count,
+        bytes
+    );
 }
 
 /// Get the [`MetaSlot`] for a given physical frame (same as [`get_meta_slot`]).

@@ -5,15 +5,47 @@ const PAGE_SIZE: u64 = 0x1000;
 const PRESENT: u64 = 1;
 const WRITABLE: u64 = 1 << 1;
 
+/// Higher-half direct map of physical RAM (HHDM). Must match the value
+/// passed to the kernel in `KernelArgs::hhdm_offset` — the kernel does
+/// phys_to_virt(phys) = phys + hhdm_offset for ALL physical memory access.
+///
+/// PML4[510] window (0xFFFFFF0000000000..0xFFFFFF7FFFFFFFFF, 512 GB):
+/// distinct from PML4[511] (kernel image slot), PML4[445] (framebuffer)
+/// and PML4[381] (environment). The kernel image lives at
+/// 0xFFFFFFFF80000000 = PML4[511].PDP[510] — using 0xFFFFFFFF80000000 as
+/// the HHDM offset would collide with the kernel-image mapping.
+pub const HHDM_OFFSET: u64 = 0xFFFF_FF00_0000_0000;
+/// Upper bound of RAM covered by the HHDM (and identity) map.
+const HHDM_COVER_GB: u64 = 8;
+/// 2 MiB huge-page size used for the HHDM map.
+const HUGE_PAGE: u64 = 0x20_0000;
+
 pub const PHYS_OFFSET: u64 = 0;
 
 /// Bump allocator for page table frames
 static mut NEXT_FRAME: u64 = 0;
+/// Start of the page-table area (set by `create_page_tables`), for map reservation.
+static mut PT_AREA_START: u64 = 0;
+/// End of the page-table area (last allocated frame + 1 page).
+static mut PT_AREA_END: u64 = 0;
+
+/// Physical range [start, end) occupied by the bootloader's page tables,
+/// for the memory-map reservation in `efi_main`.
+pub unsafe fn page_table_area() -> (u64, u64) {
+    (
+        core::ptr::addr_of!(PT_AREA_START).read(),
+        core::ptr::addr_of!(PT_AREA_END).read(),
+    )
+}
 
 unsafe fn alloc_frame() -> u64 {
     let addr = unsafe { NEXT_FRAME };
+    if unsafe { PT_AREA_START } == 0 {
+        unsafe { PT_AREA_START = addr };
+    }
     unsafe {
         NEXT_FRAME += PAGE_SIZE;
+        PT_AREA_END = NEXT_FRAME;
     }
     unsafe {
         core::ptr::write_bytes(addr as *mut u8, 0, PAGE_SIZE as usize);
@@ -51,6 +83,34 @@ pub unsafe fn create_page_tables(
         // graphics-branch design.
         for i in 0..8u64 {
             *pdp.add(i as usize) = (i * 0x4000_0000) | PRESENT | WRITABLE | (1 << 7);
+        }
+
+        // HHDM: same physical RAM mapped at HHDM_OFFSET (PML4[256]).
+        // The kernel computes every physical-memory access as phys +
+        // hhdm_offset, so ALL RAM must be reachable through this window —
+        // not just the kernel image. 2 MiB huge pages (PS bit on PDE).
+        let hhdm_pml4_idx = ((HHDM_OFFSET >> 39) & 0x1FF) as usize; // 256
+        let hhdm_pdp = alloc_frame() as *mut u64;
+        *pml4.add(hhdm_pml4_idx) = hhdm_pdp as u64 | PRESENT | WRITABLE;
+
+        let mut huge_idx: usize = 0;
+        'hhdm: for gb in 0..HHDM_COVER_GB {
+            let pd = alloc_frame() as *mut u64;
+            *hhdm_pdp.add(gb as usize) = pd as u64 | PRESENT | WRITABLE;
+            for i in 0..512u64 {
+                if huge_idx >= (HHDM_COVER_GB * 512) as usize {
+                    break 'hhdm;
+                }
+                let phys = (gb * 0x4000_0000) + i * HUGE_PAGE;
+                // NOTE: PS bit (1<<7) selects a 2MiB page AND PAT entry 4.
+                // context_switch reprograms PAT entry 4 to Write-Combining
+                // for the framebuffer — HHDM pages must stay WB, so the PAT
+                // bit must be cleared here despite the huge page. On PDEs,
+                // PS(bit7)=1 alone makes it a huge page; the PAT bit lives
+                // in bit 12 (PCD position) for PDE entries. Bit 7 = PS only.
+                *pd.add(i as usize) = phys | PRESENT | WRITABLE | (1 << 7);
+                huge_idx += 1;
+            }
         }
     }
 
