@@ -540,7 +540,7 @@ impl AddressSpace {
             .checked_mul(page_bytes)
             .ok_or("Region length overflow")?;
         let end = start.checked_add(len).ok_or("Region end overflow")?;
-        const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
+        const USER_SPACE_END: u64 = crate::memory::userslice::USER_SPACE_END;
         if end > USER_SPACE_END {
             return Err("Region out of user-space range");
         }
@@ -807,7 +807,7 @@ impl AddressSpace {
             .checked_mul(page_bytes)
             .ok_or("Region length overflow")?;
         let end = start.checked_add(len).ok_or("Region end overflow")?;
-        const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
+        const USER_SPACE_END: u64 = crate::memory::userslice::USER_SPACE_END;
         if end > USER_SPACE_END {
             return Err("Region out of user-space range");
         }
@@ -1073,7 +1073,7 @@ impl AddressSpace {
             .checked_mul(page_bytes)
             .ok_or("Shared region length overflow")?;
         let end = start.checked_add(len).ok_or("Shared region end overflow")?;
-        const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
+        const USER_SPACE_END: u64 = crate::memory::userslice::USER_SPACE_END;
         if end > USER_SPACE_END {
             return Err("Shared region out of user-space range");
         }
@@ -1340,7 +1340,7 @@ impl AddressSpace {
         }
         let page_bytes = page_size.bytes();
         let length = (n_pages as u64).checked_mul(page_bytes)?;
-        let upper_limit: u64 = 0x0000_8000_0000_0000; // USER_SPACE_END
+        let upper_limit: u64 = crate::memory::userslice::USER_SPACE_END;
 
         // Round hint up to a page boundary
         let mut candidate = (hint.saturating_add(page_bytes - 1)) & !(page_bytes - 1);

@@ -89,7 +89,6 @@ const R_X86_64_DTPOFF64: u32 = 17;
 const R_X86_64_IRELATIVE: u32 = 37;
 
 /// Maximum virtual address we accept for user-space mappings.
-/// Upper bound of the user virtual address range.
 ///
 /// Strat9 userspace components are statically linked (no-pie) at ET_EXEC
 /// 0xFFFFFFFF80000000 — the higher-half window. Each user AddressSpace owns
@@ -97,7 +96,7 @@ const R_X86_64_IRELATIVE: u32 = 37;
 /// the kernel-image slot removed, so processes can use the full canonical
 /// higher-half range without touching kernel pages. The guard therefore only
 /// rejects non-canonical addresses.
-pub const USER_ADDR_MAX: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+pub const USER_ADDR_MAX: u64 = crate::memory::userslice::USER_SPACE_END;
 
 /// Number of 4 KiB pages for the user stack (16 pages = 64 KiB).
 ///
@@ -1687,7 +1686,9 @@ const AT_RANDOM: u64 = 25;
 
 fn generate_aux_random_seed() -> [u8; 16] {
     let mut seed = [0u8; 16];
+    crate::e9_mark!(b'1');
     crate::entropy::fill_random(&mut seed);
+    crate::e9_mark!(b'2');
     seed
 }
 
@@ -2031,9 +2032,13 @@ fn load_elf_task_inner(
     // top word of the stack; all boot data lives strictly below it. The
     // kernel re-checks it at task exit (Task::verify_user_stack_canary).
     let mut canary_bytes = [0u8; 8];
+    crate::e9_mark!(b'3');
     crate::entropy::fill_random(&mut canary_bytes);
+    crate::e9_mark!(b'4');
     let stack_canary = u64::from_le_bytes(canary_bytes) | 1; // never 0
+    crate::e9_mark!(b'5');
     write_user_u64(&user_as, stack_top - 8, stack_canary)?;
+    crate::e9_mark!(b'6');
 
     let boot_sp = setup_boot_user_stack(
         &user_as,

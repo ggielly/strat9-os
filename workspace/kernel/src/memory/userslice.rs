@@ -29,7 +29,15 @@ use crate::arch::xshim::{PageTableFlags, Translate, VirtAddr};
 /// On x86_64 with 4-level paging, canonical user addresses are
 /// `0x0000_0000_0000_0000 ..= 0x0000_7FFF_FFFF_FFFF`.
 /// Anything at or above this boundary is kernel space.
-const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
+/// Upper bound (exclusive semantics at use sites) of the user virtual range.
+///
+/// Strat9 userspace is statically linked in the higher-half window
+/// (0xFFFFFFFF80000000, same convention as the kernel image). Each process
+/// gets a PRIVATE copy of the PML4[511] PDP with the kernel-image slot
+/// removed (see address_space::new_user), so user mappings can span the full
+/// canonical range; kernel isolation comes from U/S page bits and the private
+/// window, not from an address split.
+pub const USER_SPACE_END: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 
 /// Maximum length allowed for a single UserSlice (16 MiB).
 ///

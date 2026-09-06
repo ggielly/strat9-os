@@ -27,7 +27,7 @@ pub const BRK_BASE: u64 = 0x0000_0000_2000_0000; // 512 MiB
 pub const MMAP_BASE: u64 = 0x0000_0000_6000_0000; // 1.5 GiB
 
 /// Exclusive upper bound of the canonical user-space address range.
-const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
+const USER_SPACE_END: u64 = crate::memory::userslice::USER_SPACE_END;
 
 // ================================================================================
 // PROT flags (arg3 of mmap)

@@ -315,7 +315,7 @@ fn build_user_thread_task(
 // Public helpers (shared by dispatcher syscalls and the /thread scheme)
 // ============================================================================
 
-const USER_TOP_EXCLUSIVE: u64 = 0x0000_8000_0000_0000;
+const USER_TOP_EXCLUSIVE: u64 = crate::memory::userslice::USER_SPACE_END;
 
 /// Core of `SYS_THREAD_CREATE` and `/thread/create`.
 ///
