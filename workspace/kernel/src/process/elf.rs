@@ -89,7 +89,15 @@ const R_X86_64_DTPOFF64: u32 = 17;
 const R_X86_64_IRELATIVE: u32 = 37;
 
 /// Maximum virtual address we accept for user-space mappings.
-pub const USER_ADDR_MAX: u64 = 0x0000_8000_0000_0000;
+/// Upper bound of the user virtual address range.
+///
+/// Strat9 userspace components are statically linked (no-pie) at ET_EXEC
+/// 0xFFFFFFFF80000000 — the higher-half window. Each user AddressSpace owns
+/// a private copy of the PML4[511] PDP (see address_space::new_user), with
+/// the kernel-image slot removed, so processes can use the full canonical
+/// higher-half range without touching kernel pages. The guard therefore only
+/// rejects non-canonical addresses.
+pub const USER_ADDR_MAX: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 
 /// Number of 4 KiB pages for the user stack (16 pages = 64 KiB).
 ///
@@ -375,7 +383,12 @@ fn find_relocated_phdr_vaddr(
             return Ok(vaddr);
         }
     }
-    Err("Program headers are not covered by a PT_LOAD segment")
+    // Static (-no-pie) binaries place the program header array before the
+    // first PT_LOAD (classic layout: e_phoff=64, LOADs start at 0x1000), so
+    // it is legitimately not covered by any segment. AT_PHDR is optional per
+    // the ABI: report 0 and let push_auxv skip it rather than failing the
+    // whole load for a statically-linked image.
+    Ok(0)
 }
 
 /// Reads elf from vfs.
@@ -1765,7 +1778,11 @@ fn setup_boot_user_stack(
     push_auxv(user_as, &mut sp, AT_PAGESZ, 4096)?;
     push_auxv(user_as, &mut sp, AT_PHNUM, phnum as u64)?;
     push_auxv(user_as, &mut sp, AT_PHENT, phent as u64)?;
-    push_auxv(user_as, &mut sp, AT_PHDR, phdr_vaddr)?;
+    // AT_PHDR is optional: 0 means "not mapped" (static binaries with the
+    // program header array outside any PT_LOAD).
+    if phdr_vaddr != 0 {
+        push_auxv(user_as, &mut sp, AT_PHDR, phdr_vaddr)?;
+    }
 
     // envp NULL terminator
     sp -= 8;

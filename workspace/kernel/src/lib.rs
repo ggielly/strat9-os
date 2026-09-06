@@ -1191,23 +1191,54 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             }
         }
 
-        // Try to load init from modules if not already loaded
+        // Try to load init from modules if not already loaded.
+        // The initfs payload may be named "init" or "strate-init".
         if !init_loaded {
+            // E9: report the module names so init-chain progress is visible
+            // even when the formatted serial path is unavailable.
             for module in args.modules() {
-                if module.name_str() == "init" {
+                let raw = module.name_str();
+                unsafe {
+                    core::arch::asm!("out 0xe9, al", in("al") b'N', options(nomem, nostack));
+                    for b in raw.as_bytes() {
+                        core::arch::asm!("out 0xe9, al", in("al") *b, options(nomem, nostack));
+                    }
+                    core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                }
+                let name = raw;
+                if name == "init" || name == "strate-init" {
                     let base_virt = memory::phys_to_virt(module.base);
                     let elf_data = unsafe {
                         core::slice::from_raw_parts(base_virt as *const u8, module.size as usize)
                     };
+                    // E9: ELF magic check before handing to the loader.
+                    unsafe {
+                        let magic_ok = elf_data.len() >= 4
+                            && elf_data[0] == 0x7F
+                            && elf_data[1] == b'E'
+                            && elf_data[2] == b'L'
+                            && elf_data[3] == b'F';
+                        core::arch::asm!("out 0xe9, al", in("al") b'!', options(nomem, nostack));
+                        core::arch::asm!("out 0xe9, al", in("al") if magic_ok { b'Y' } else { b'N' }, options(nomem, nostack));
+                        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                    }
                     let init_caps = [crate::silo::create_silo_admin_capability()];
                     match process::elf::load_and_run_elf_with_caps(elf_data, "init", &init_caps) {
                         Ok(task_id) => {
                             init_task_id = Some(task_id);
+                            crate::e9_mark!(b'I');
                             serial_println!(
                                 "[init] ELF loaded as task 'init' (from module table)."
                             );
                         }
                         Err(e) => {
+                            // E9: report failure code letter.
+                            let code = e.as_bytes().first().copied().unwrap_or(b'?');
+                            unsafe {
+                                core::arch::asm!("out 0xe9, al", in("al") b'X', options(nomem, nostack));
+                                core::arch::asm!("out 0xe9, al", in("al") code, options(nomem, nostack));
+                                core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                            }
                             serial_println!("[init] Failed to load init ELF: {}", e);
                         }
                     }

@@ -2,6 +2,15 @@ use alloc::vec::Vec;
 use uefi::prelude::*;
 use uefi::proto::media::file::{File, FileAttribute, FileInfo, FileMode};
 
+/// E9 failure marker: '<letter>?' (bootloader-side diagnostics).
+fn e9_fail(c: u8) {
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") c, options(nomem, nostack));
+        core::arch::asm!("out 0xe9, al", in("al") b'?', options(nomem, nostack));
+        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+    }
+}
+
 pub struct LoadedModule {
     pub name: [u8; 64],
     pub base: u64,
@@ -49,42 +58,83 @@ pub fn write_module_table(modules: &[LoadedModule], base: u64) {
     }
 }
 
-pub fn load_modules(image_handle: Handle) -> Vec<LoadedModule> {
+pub fn load_modules(
+    volume: &mut uefi::proto::media::file::Directory,
+) -> Vec<LoadedModule> {
     let mut modules = Vec::new();
 
-    let mut fs = match uefi::boot::get_image_file_system(image_handle) {
-        Ok(fs) => fs,
-        Err(_) => return modules,
+    // Enumerate \boot\initfs dynamically: the module set is whatever the
+    // build dropped on the ESP, so a hardcoded name list can only go stale.
+    let mut dir_path = [0u16; 64];
+    let dir_len = format_path(&mut dir_path, "");
+    let mut dir = match volume.open(
+        unsafe { uefi::CStr16::from_u16_with_nul_unchecked(&dir_path[..=dir_len]) },
+        FileMode::Read,
+        FileAttribute::empty(),
+    ) {
+        Ok(d) => d.into_type().ok(),
+        Err(_) => {
+            e9_fail(b'D');
+            None
+        }
+    };
+    let mut dir = match dir {
+        Some(uefi::proto::media::file::FileType::Dir(d)) => d,
+        _ => {
+            e9_fail(b'O');
+            return modules;
+        }
     };
 
-    let mut volume = match fs.open_volume() {
-        Ok(v) => v,
-        Err(_) => return modules,
-    };
+    let mut names: Vec<alloc::string::String> = Vec::new();
+    {
+        // 1 KiB covers typical entries (name + FileInfo layout). Entries with
+        // very long names would need more; we retry once with 4 KiB.
+        let mut buf: Vec<u8> = alloc::vec![0u8; 1024];
+        loop {
+            match dir.read_entry(&mut buf) {
+                Ok(Some(info)) => {
+                    if info.attribute().contains(FileAttribute::DIRECTORY) {
+                        continue;
+                    }
+                    // ESP file names are ASCII here; decode u16 chars as bytes.
+                    let mut s = alloc::string::String::new();
+                    for ch in info.file_name().to_u16_slice() {
+                        if *ch >= 0x20 && *ch < 0x7F {
+                            s.push(*ch as u8 as char);
+                        }
+                    }
+                    names.push(s);
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    // uefi::Error data = Some(required buffer size) on overflow.
+                    if let Some(needed) = e.data() {
+                        if *needed <= 4096 && *needed > buf.len() {
+                            buf = alloc::vec![0u8; *needed];
+                            let _ = dir.reset_entry_readout();
+                            continue;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    dir.close();
+    // Boot log: how many initfs entries were enumerated (raw E9, 'M#n').
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'M', options(nomem, nostack));
+        let count = names.len();
+        let tens = if count >= 10 { b'0' + (count / 10) as u8 } else { b' ' };
+        core::arch::asm!("out 0xe9, al", in("al") tens, options(nomem, nostack));
+        core::arch::asm!("out 0xe9, al", in("al") b'0' + (count % 10) as u8, options(nomem, nostack));
+        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+    }
 
-    let filenames: &[&str] = &[
-        "init",
-        "console-admin",
-        "strate-net",
-        "strate-bus",
-        "strate-fs-ext4",
-        "strate-fs-ramfs",
-        "strate-wasm",
-        "strate-webrtc",
-        "display-server",
-        "dhcp-client",
-        "ping",
-        "telnetd",
-        "udp-tool",
-        "web-admin",
-        "test_pid",
-        "test_syscalls",
-        "test_mem",
-    ];
-
-    for &filename in filenames {
+    for filename in names {
         let mut path_buf = [0u16; 64];
-        let path_len = format_path(&mut path_buf, filename);
+        let path_len = format_path(&mut path_buf, &filename);
 
         let file = match volume.open(
             unsafe { uefi::CStr16::from_u16_with_nul_unchecked(&path_buf[..=path_len]) },
@@ -125,7 +175,11 @@ pub fn load_modules(image_handle: Handle) -> Vec<LoadedModule> {
         let base = buf.as_ptr() as u64;
         core::mem::forget(buf);
 
-        modules.push(LoadedModule { name, base, size: file_size as u64 });
+        modules.push(LoadedModule {
+            name,
+            base,
+            size: file_size as u64,
+        });
     }
 
     modules

@@ -87,7 +87,7 @@ fn efi_main() -> Status {
     });
 
     // Load modules
-    let module_list = modules::load_modules(image_handle);
+    let module_list = modules::load_modules(&mut volume);
 
     uefi::system::with_stdout(|stdout| {
         let _ = writeln!(stdout, "[boot] Modules: {}", module_list.len());
