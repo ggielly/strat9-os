@@ -375,6 +375,20 @@ impl BootAllocator {
 
     /// Recompute the highest currently reachable physical byte for HHDM-backed boot allocations.
     fn rebuild_accessible_limit(&mut self) {
+        // TEMP DEBUG: count rebuild calls; pulse a hex digit every 65536.
+        REBUILD_CALL_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let n = REBUILD_CALL_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+        if n % 65536 == 0 {
+            unsafe {
+                let hex = b"0123456789abcdef";
+                core::arch::asm!("out 0xe9, al", in("al") b'$', options(nomem, nostack));
+                for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
+                    let nib = hex[((n >> sh) & 0xF) as usize];
+                    core::arch::asm!("out 0xe9, al", in("al") nib, options(nomem, nostack));
+                }
+                core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+            }
+        }
         crate::e9_mark!(b'Q');
         let mut limit = 0u64;
         crate::e9_mark!(b'R');
@@ -432,6 +446,7 @@ impl BootAllocator {
 }
 
 static BOOT_ALLOCATOR: SpinLock<BootAllocator> = SpinLock::new(BootAllocator::new());
+static REBUILD_CALL_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 static PROTECTED_RANGES: SpinLock<[Option<(u64, u64)>; MAX_PROTECTED_RANGES]> =
     SpinLock::new([None; MAX_PROTECTED_RANGES]);
 

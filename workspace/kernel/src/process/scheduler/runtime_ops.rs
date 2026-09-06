@@ -666,6 +666,17 @@ pub fn maybe_preempt_from_interrupt(
                 let old_fpu = current.fpu_state.get() as *mut u8;
                 let new_fpu = next.fpu_state.get() as *const u8;
 
+                // TEMP DEBUG: pulse the picked task id + stack top.
+                unsafe {
+                    let hex = b"0123456789abcdef";
+                    core::arch::asm!("out 0xe9, al", in("al") b'@', options(nomem, nostack));
+                    let tid = next.id.as_u64();
+                    for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
+                        let nib = hex[((tid >> sh) & 0xF) as usize];
+                        core::arch::asm!("out 0xe9, al", in("al") nib, options(nomem, nostack));
+                    }
+                    core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                }
                 Some(crate::arch::idt::InterruptReturnDecision {
                     next_rsp,
                     old_fpu,
