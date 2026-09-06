@@ -232,57 +232,14 @@ impl AddressSpace {
                 new_l4[i] = kernel_l4[i].clone();
             }
 
-            // ---------- Private kernel-image window for user processes ----------
-            //
-            // Strat9 userspace components are statically linked (-no-pie,
-            // relocation-model=static, code-model=kernel) at ET_EXEC
-            // 0xFFFFFFFF80000000 — the same window as the kernel image. The
-            // cloned PML4[511] entry above SHARES the kernel's PDP/L2/L1
-            // subtrees, so mapping the binary's PT_LOADs at its linked base
-            // would overwrite the kernel's own image pages globally.
-            //
-            // Fix: give every user AddressSpace a PRIVATE copy of the
-            // PML4[511] PDP, with the kernel-image PDP slot (PDP[510],
-            // 0xFFFFFFFF80000000..1GB) re-zeroed. The process then has a
-            // clean window at its linked base; other higher-half mappings
-            // (HHDM at PML4[510], LAPIC, ...) stay shared.
-            //
-            // The kernel itself never relies on these shared subtrees while a
-            // user CR3 is active: ring-0 entry restores the kernel CR3 first.
-            {
-                const KERN_IMG_PDP_IDX: usize = 510; // 0xFFFFFFFF80000000 >> 30 & 0x1FF
-                let kernel_pdp_phys =
-                    (kernel_l4[511].addr().as_u64() & !0xFFF) as u64;
-                if kernel_pdp_phys != 0 {
-                    // Allocate a fresh PDP page for the user space.
-                    let pdp_frame = crate::sync::with_irqs_disabled(|token| {
-                        crate::memory::allocate_frame(token)
-                    })
-                    .map_err(|_| "Failed to allocate user PDP frame")?
-                    .start_address;
-                    let pdp_virt =
-                        VirtAddr::new(crate::memory::phys_to_virt(pdp_frame.as_u64()));
-                    let kernel_pdp_virt =
-                        VirtAddr::new(crate::memory::phys_to_virt(kernel_pdp_phys));
-                    core::ptr::write_bytes(pdp_virt.as_mut_ptr::<u8>(), 0, 4096);
-                    // SAFETY: both are page-aligned HHDM-mapped page tables.
-                    let src = unsafe { &*(kernel_pdp_virt.as_ptr::<PageTable>()) };
-                    let dst = unsafe { &mut *(pdp_virt.as_mut_ptr::<PageTable>()) };
-                    for j in 0..512 {
-                        // Copy every kernel PDP slot EXCEPT the kernel image
-                        // window; zero it so the process can claim the base.
-                        if j == KERN_IMG_PDP_IDX {
-                            continue;
-                        }
-                        dst[j] = src[j].clone();
-                    }
-                    use crate::x86_crate_shim::structures::paging::page_table::PageTableEntry;
-                    new_l4[511].set_addr(
-                        PhysAddr::new(pdp_frame.as_u64()),
-                        kernel_l4[511].flags(),
-                    );
-                }
-            }
+            // NOTE: the kernel image stays SHARED (PML4[511] subtree) — the
+            // kernel must remain executable while a user CR3 is active (the
+            // scheduler, syscall entry and IRQ paths run in kernel mode under
+            // the user page tables). Isolation comes from the U/S page bits:
+            // kernel pages are supervisor-only, so CPL3 code cannot touch
+            // them. User binaries are linked in the LOW half (0x400000, see
+            // workspace/components/user-linker.ld), so there is no address
+            // conflict with the kernel image window.
         }
 
         // ---------- LAPIC low-half mapping (HHDM=0 workaround) ----------

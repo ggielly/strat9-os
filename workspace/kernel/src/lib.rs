@@ -1267,6 +1267,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                 serial_println!("[init] Granted volume capability to init");
             }
         }
+        crate::e9_mark!(b'W');
 
         match process::Task::new_kernel_task_with_stack(
             shell::shell_main,
@@ -1276,12 +1277,14 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         ) {
             Ok(shell_task) => {
                 process::add_task(shell_task);
+                crate::e9_mark!(b'w');
                 serial_println!("[init] Chevron shell ready.");
             }
             Err(e) => {
                 serial_println!("[WARN] Failed to create shell task: {}", e);
             }
         }
+        crate::e9_mark!(b'Y');
         if let Ok(status_task) = process::Task::new_kernel_task_with_stack(
             arch::vga::status_line_task_main,
             "status-line",
@@ -1289,6 +1292,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             64 * 1024,
         ) {
             process::add_task(status_task);
+            crate::e9_mark!(b'y');
             // Switch from live VGA debug output to buffered vgabuf path.
             // The status_line_task will flush vgabuf to the framebuffer.
             crate::debug_cfg::set_vga_debug_live(false);
@@ -1301,6 +1305,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
     // Initialize keyboard layout to French by default
     crate::arch::keyboard_layout::set_french_layout();
+    crate::e9_mark!(b'F');
 
     // =============================================
     // Boot complete : start preemptive multitasking
@@ -1308,7 +1313,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     if apic_active {
         arch::smp::open_ap_scheduler_gate();
     }
+    crate::e9_mark!(b'G');
     crate::e9_println!("BC pre-schedule");
+    crate::e9_mark!(b'H');
     boot_milestone!("Boot complete ! Now entering in scheduler");
     arch::speaker::beep_startup();
     serial_println!("[init] Boot complete. Starting preemptive scheduler...");

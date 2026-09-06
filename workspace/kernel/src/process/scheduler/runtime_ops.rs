@@ -119,6 +119,11 @@ pub fn schedule() -> ! {
 /// Performs the schedule on cpu operation.
 pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     crate::e9_println!("BD-ENTER cpu={}", cpu_index);
+    // TEMP DEBUG raw pulse: BD-ENTER via raw marks too (formatted E9 may be silent).
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'B', options(nomem, nostack));
+        core::arch::asm!("out 0xe9, al", in("al") b'D', options(nomem, nostack));
+    }
     // Disable interrupts for the entire critical section.
     //
     // On the BSP, IF may be 1 (interrupts were enabled in Phase 9).
@@ -151,7 +156,13 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
             } else {
                 0
             };
+            unsafe {
+                core::arch::asm!("out 0xe9, al", in("al") b'M', options(nomem, nostack));
+            }
             let mut local = LOCAL_SCHEDULERS[idx].lock();
+            unsafe {
+                core::arch::asm!("out 0xe9, al", in("al") b'N', options(nomem, nostack));
+            }
             if let Some(ref mut cpu) = *local {
                 break super::core_impl::pick_next_task_local(cpu, idx);
             }
@@ -172,17 +183,16 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
         }
         core::hint::spin_loop();
     }; // Lock is released here before jumping to first task
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'R', options(nomem, nostack));
+    }
     super::task_ops::flush_deferred_silo_cleanups();
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'r', options(nomem, nostack));
+    }
 
-    crate::serial_force_println!(
-        "[trace][sched] schedule_on_cpu first_task cpu={} tid={} name={} rsp={:#x} kstack=[{:#x}..{:#x}]",
-        cpu_index,
-        first_task.id.as_u64(),
-        first_task.name,
-        unsafe { (*first_task.context.get()).saved_rsp },
-        first_task.kernel_stack.virt_base.as_u64(),
-        first_task.kernel_stack.virt_base.as_u64() + first_task.kernel_stack.size as u64,
-    );
+    // NOTE: serial_force_println! (formatted format_args!) hangs in this kernel build
+    // (known vtable issue). Raw E9 marks only in the scheduler hot path.
 
     // Set TSS.rsp0 and SYSCALL kernel RSP for the first task
     {
@@ -190,6 +200,9 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
             first_task.kernel_stack.virt_base.as_u64() + first_task.kernel_stack.size as u64;
         crate::arch::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
         crate::arch::syscall::set_kernel_rsp(stack_top);
+        unsafe {
+            core::arch::asm!("out 0xe9, al", in("al") b'S', options(nomem, nostack));
+        }
         crate::serial_force_println!(
             "[trace][sched] schedule_on_cpu stacks set cpu={} rsp0={:#x}",
             cpu_index,
@@ -199,6 +212,9 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
 
     // Switch to the first task's address space (no-op for kernel tasks)
     // SAFETY: The first task's address space is valid (kernel AS at boot).
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'U', options(nomem, nostack));
+    }
     if let Err(e) = validate_task_context(&first_task) {
         panic!(
             "scheduler: invalid first task '{}' (id={:?}): {}",
@@ -213,27 +229,17 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     unsafe {
         first_task.process.address_space_arc().switch_to();
     }
-    crate::serial_force_println!(
-        "[trace][sched] schedule_on_cpu switch_to done cpu={} tid={}",
-        cpu_index,
-        first_task.id.as_u64()
-    );
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'K', options(nomem, nostack));
+    }
+
 
     // Jump to the first task (never returns)
     // SAFETY: The context was set up by CpuContext::new with a valid stack frame.
     // Interrupts are disabled; the trampoline's `sti` re-enables them.
-    crate::serial_force_println!(
-        "[trace][sched] schedule_on_cpu restore_first_task cpu={} tid={}",
-        cpu_index,
-        first_task.id.as_u64()
-    );
-    crate::serial_force_println!(
-        "[trace][sched] schedule_on_cpu calling do_restore_first_task cpu={} tid={} rsp={:#x}",
-        cpu_index,
-        first_task.id.as_u64(),
-        unsafe { (*first_task.context.get()).saved_rsp }
-    );
+
     unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'L', options(nomem, nostack));
         // Pass the stack frame pointer (saved_rsp points TO the frame, not the context struct)
         let frame_ptr = (*first_task.context.get()).saved_rsp as *const u64;
         crate::process::task::do_restore_first_task(

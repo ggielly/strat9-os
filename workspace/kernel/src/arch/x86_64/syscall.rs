@@ -80,7 +80,7 @@ pub fn init() {
 unsafe extern "C" fn syscall_entry() {
     core::arch::naked_asm!(
         // TEMP DEBUG: pulse 0x89 on E9 for every syscall (before swapgs).
-        "mov al, 89h", "out 0xe9, al",
+        "mov al, 0x89", "out 0xe9, al",
         // Swap GS to kernel base (per-CPU)
         "swapgs",
 

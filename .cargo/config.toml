@@ -1,20 +1,12 @@
-[target.x86_64-unknown-none]
-rustflags = [
-    "-C",
-    "link-arg=-Lworkspace/kernel",
-    "-C",
-    "link-arg=-Tworkspace/kernel/linker.ld",
-    "-C",
-    "link-arg=-no-pie",
-    "-C",
-    "link-arg=-z",
-    "-C",
-    "link-arg=nostart-stop-gc",
-    "-C",
-    "relocation-model=static",
-    "-C",
-    "code-model=kernel",
-    # N3 send() captures sender_rip via [rbp + 8]; frame pointers mandatory.
-    "-C",
-    "force-frame-pointers=yes",
-]
+# Root-level Cargo config.
+#
+# IMPORTANT: no [target.*] rustflags here. The kernel and the userspace
+# components need DIFFERENT linker scripts, and rustflags from nested
+# configs CONCATENATE with this one (they do not replace it), so a shared
+# -T flag here would be applied twice and lld would merge both linker
+# scripts (observed: "output file too large" when the kernel inherited the
+# components' script).
+#
+# Layout:
+#   - Kernel:      workspace/kernel/.cargo/config.toml      -> kernel/linker.ld
+#   - Components:  workspace/components/.cargo/config.toml  -> components/user-linker.ld (0x400000)
