@@ -39,6 +39,7 @@
 
 pub mod channel;
 pub mod lifecycle;
+pub mod quota;
 pub mod lockfree_ring;
 pub mod mailbox;
 pub mod message;
@@ -55,6 +56,7 @@ pub use channel::{
     channel, create_channel, destroy_channel, get_channel, ChanId, ChannelError, Receiver, Sender,
     SyncChan,
 };
+pub use quota::{IpcQuota, QuotaExceeded};
 pub use lifecycle::{MultiHandleDestroyError, MultiHandleResource};
 pub use lockfree_ring::LockFreeRing;
 pub use mailbox::IntrusiveMailbox;

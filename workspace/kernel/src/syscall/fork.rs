@@ -263,6 +263,7 @@ fn build_child_task(
                     .umask
                     .load(core::sync::atomic::Ordering::Relaxed),
             ),
+            ipc_quota: crate::ipc::quota::IpcQuota::new(),
         }),
         // POSIX: pending signals are NOT inherited by the child.
         pending_signals: SignalSet::new(),

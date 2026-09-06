@@ -338,6 +338,8 @@ pub fn channel<T: Send>(capacity: usize) -> (Sender<T>, Receiver<T>) {
 /// receive.  Destruction is explicit (via [`SyncChan::destroy`]), triggered
 /// when the last userspace handle is closed.
 pub struct SyncChan {
+    /// Original capacity used to allocate the queue.
+    capacity: usize,
     /// Bounded message queue.
     queue: ArrayQueue<IpcMessage>,
     /// Tasks blocked because the queue is full.
@@ -352,11 +354,17 @@ impl SyncChan {
     /// Creates a new instance.
     fn new(capacity: usize) -> Self {
         SyncChan {
+            capacity,
             queue: ArrayQueue::new(capacity.max(1)),
             send_waitq: WaitQueue::new(),
             recv_waitq: WaitQueue::new(),
             destroyed: AtomicBool::new(false),
         }
+    }
+
+    /// Returns the original capacity used to create this channel.
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 
     /// Send a message, blocking until space is available.

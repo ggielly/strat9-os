@@ -19,9 +19,17 @@ const MSG_SIZE: usize = core::mem::size_of::<IpcMessage>();
 /// SYS_CHAN_CREATE (220): create a bounded sync-channel.
 pub fn sys_chan_create(capacity: u64) -> Result<u64, SyscallError> {
     let cap = capacity.clamp(1, 1024) as usize;
-    let chan_id = channel::create_channel(cap);
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+
+    // Reserve quota before creating the channel.
+    task.process.ipc_quota.try_reserve(cap)
+        .map_err(|_| SyscallError::OutOfMemory)?;
+
+    let chan_id = match channel::create_channel(cap) {
+        id => id,
+    };
+
     let caps = unsafe { &mut *task.process.capabilities.get() };
     let cap_id = crate::capability::CapId::new();
     let chan_cap = crate::capability::Capability {
@@ -175,10 +183,18 @@ pub fn sys_chan_close(handle: u64) -> Result<u64, SyscallError> {
     let chan_id = ChanId::from_u64(cap.resource as u64);
     let has_revoke = cap.permissions.revoke;
 
+    // Look up the channel to get its capacity for quota release.
+    let capacity = channel::get_channel(chan_id)
+        .map(|c| c.capacity())
+        .unwrap_or(0);
+
     let cap = caps
         .remove(CapId::from_raw(handle))
         .ok_or(SyscallError::BadHandle)?;
     debug_assert_eq!(cap.resource_type, ResourceType::Channel);
+
+    // Release per-process IPC quota for this handle.
+    task.process.ipc_quota.release(capacity);
 
     if has_revoke {
         // Full release: decrement global refcount and destroy channel if
