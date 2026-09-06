@@ -384,15 +384,30 @@ extern "C" fn lapic_timer_inner(
         crate::process::signal::deliver_pending_signal_on_interrupt_return(frame);
     }
 
-    // Temporarily keep timer IRQs side-effect free with respect to stack
-    // switching. The raw `iretq`-based resume path is not yet correct for all
-    // contexts:
-    // - Ring 3 resumes can return with a shifted IRET frame under SMP load.
-    // - Ring 0 resumes are fundamentally different because same-CPL `iretq`
-    //   does not restore RSP/SS, so synthetic `SyscallFrame` resumes of kernel
-    //   tasks can continue with a bogus stack pointer and RIP=0.
-    // Keep only the reschedule hint here and let tasks switch on safer paths
-    // (blocking syscalls, explicit yields, future validated return path).
+    // Ring-3 preemption: a user task that spins without making syscalls
+    // never consumes a posted hint, so the CPU would spin forever and the
+    // shell would never be scheduled again. Run the full pick/switch from
+    // this raw naked timer stub via maybe_preempt_from_interrupt: it saves
+    // the outgoing task's frame pointer, picks the next task, seeds a
+    // kernel interrupt frame for first-launch tasks, and returns an
+    // iretq-compatible decision that the naked epilogue applies
+    // (fxsave -> rsp pivot -> fxrstor -> finish_interrupt_switch -> iretq).
+    //
+    // Ring-3-origin ticks take this path unconditionally. The interrupted
+    // Ring-3 frame is iretq-restorable by construction (the CPU pushed a
+    // clean IRET frame at entry, and SwapGsGuard restored kernel GS).
+    // Ring-0-origin ticks (interrupted kernel code) keep the hint path:
+    // resuming synthetic kernel frames from here is still not validated
+    // (same-CPL iretq does not restore RSP/SS).
+    if from_ring3 {
+        if let Some(decision) =
+            crate::process::scheduler::maybe_preempt_from_interrupt(cpu, frame)
+        {
+            if decision.next_rsp != 0 {
+                return decision;
+            }
+        }
+    }
     crate::process::scheduler::request_force_resched_hint(cpu);
     InterruptReturnDecision::default()
 }
