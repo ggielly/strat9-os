@@ -263,6 +263,12 @@ pub fn init() {
 
 pub fn enumerate_device(port: usize, slot_id: u8, dev_desc: &[u8; 18]) {
     let dev_class = dev_desc[4];
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'h', options(nomem, nostack));
+        core::arch::asm!("out 0xe9, al", in("al") dev_class, options(nomem, nostack));
+        core::arch::asm!("out 0xe9, al", in("al") dev_desc[6], options(nomem, nostack));
+        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+    }
 
     if dev_class == 0x03 {
         let protocol = dev_desc[6];
@@ -323,8 +329,14 @@ pub fn enumerate_device(port: usize, slot_id: u8, dev_desc: &[u8; 18]) {
                                 if (ep_addr & 0x80) != 0 {
                                     let ep_num = ep_addr & 0x0F;
                                     let ep_type = 7;
+                                    unsafe {
+                                        core::arch::asm!("out 0xe9, al", in("al") b'K', options(nomem, nostack));
+                                        core::arch::asm!("out 0xe9, al", in("al") b'b', options(nomem, nostack));
+                                        core::arch::asm!("out 0xe9, al", in("al") b'0'+b_interface_protocol, options(nomem, nostack));
+                                        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                                    }
 
-                                    controller
+                                    let setup_ok = controller
                                         .setup_endpoint(
                                             slot_id,
                                             ep_num,
@@ -333,12 +345,22 @@ pub fn enumerate_device(port: usize, slot_id: u8, dev_desc: &[u8; 18]) {
                                             ep_interval as u32,
                                             0,
                                         )
-                                        .ok();
+                                        .is_ok();
+                                    unsafe {
+                                        core::arch::asm!("out 0xe9, al", in("al") b'K', options(nomem, nostack));
+                                        core::arch::asm!("out 0xe9, al", in("al") if setup_ok { b's' } else { b'S' }, options(nomem, nostack));
+                                        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                                    }
 
                                     let buf_size = ep_max_packet as usize;
-                                    if let Ok((_buf_virt, _buf_phys)) =
-                                        controller.alloc_interrupt_buffer(slot_id, ep_num, buf_size)
-                                    {
+                                    let alloc_res =
+                                        controller.alloc_interrupt_buffer(slot_id, ep_num, buf_size);
+                                    unsafe {
+                                        core::arch::asm!("out 0xe9, al", in("al") b'K', options(nomem, nostack));
+                                        core::arch::asm!("out 0xe9, al", in("al") if alloc_res.is_ok() { b'a' } else { b'A' }, options(nomem, nostack));
+                                        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                                    }
+                                    if let Ok((_buf_virt, _buf_phys)) = alloc_res {
                                         if b_interface_protocol == 1 {
                                             let mut keyboard = HidKeyboard::new(
                                                 port,
@@ -358,6 +380,10 @@ pub fn enumerate_device(port: usize, slot_id: u8, dev_desc: &[u8; 18]) {
                                                 ep_interval
                                             );
                                             KEYBOARDS.lock().push(Arc::new(Mutex::new(keyboard)));
+                                            unsafe {
+                                                core::arch::asm!("out 0xe9, al", in("al") b'B', options(nomem, nostack));
+                                                core::arch::asm!("out 0xe9, al", in("al") b'!', options(nomem, nostack));
+                                            }
 
                                             controller
                                                 .submit_interrupt_transfer(slot_id, ep_num)
@@ -381,6 +407,10 @@ pub fn enumerate_device(port: usize, slot_id: u8, dev_desc: &[u8; 18]) {
                                                 ep_interval
                                             );
                                             MICE.lock().push(Arc::new(Mutex::new(mouse_dev)));
+                                            unsafe {
+                                                core::arch::asm!("out 0xe9, al", in("al") b'M', options(nomem, nostack));
+                                                core::arch::asm!("out 0xe9, al", in("al") b'!', options(nomem, nostack));
+                                            }
 
                                             controller
                                                 .submit_interrupt_transfer(slot_id, ep_num)

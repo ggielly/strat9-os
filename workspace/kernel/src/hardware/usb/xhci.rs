@@ -772,6 +772,12 @@ impl XhciController {
             let event = self.wait_for_event()?;
             let completion = (event.d2 >> 24) & 0xFF;
             if completion != 1 {
+                unsafe {
+                    core::arch::asm!("out 0xe9, al", in("al") b'z', options(nomem, nostack));
+                    core::arch::asm!("out 0xe9, al", in("al") b'3', options(nomem, nostack));
+                    core::arch::asm!("out 0xe9, al", in("al") (b'0' + (completion & 0xF) as u8), options(nomem, nostack));
+                    core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                }
                 log::warn!(
                     "[xHCI] Address Device failed: slot={} completion={}",
                     slot_id,
@@ -855,12 +861,24 @@ impl XhciController {
             if !connected {
                 continue;
             }
+            unsafe {
+                core::arch::asm!("out 0xe9, al", in("al") b'e', options(nomem, nostack));
+                core::arch::asm!("out 0xe9, al", in("al") (b'0' + port as u8), options(nomem, nostack));
+            }
 
             log::info!("[xHCI] Port {} connected, resetting...", port);
 
             if !unsafe { self.reset_port(port) } {
+                unsafe {
+                    core::arch::asm!("out 0xe9, al", in("al") b'z', options(nomem, nostack));
+                    core::arch::asm!("out 0xe9, al", in("al") b'4', options(nomem, nostack));
+                    core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                }
                 log::warn!("[xHCI] Port {} reset failed", port);
                 continue;
+            }
+            unsafe {
+                core::arch::asm!("out 0xe9, al", in("al") b'R', options(nomem, nostack));
             }
 
             let speed = unsafe { ((self.read_portsc(port) >> PORTSC_SPEED_SHIFT) & 0xF) as u8 };
@@ -868,14 +886,34 @@ impl XhciController {
 
             match self.enable_slot() {
                 Ok(slot_id) => {
+                    unsafe {
+                        core::arch::asm!("out 0xe9, al", in("al") b'S', options(nomem, nostack));
+                    }
                     if self.set_address(slot_id, usb_address).is_err() {
                         log::warn!("[xHCI] Port {} address failed", port);
                         continue;
                     }
                     usb_address += 1;
+                    unsafe {
+                        core::arch::asm!("out 0xe9, al", in("al") b'A', options(nomem, nostack));
+                    }
 
                     let mut dev_desc = [0u8; 18];
                     if self.get_device_descriptor(slot_id, &mut dev_desc).is_ok() {
+                        // TEMP DEBUG: dump the 18-byte descriptor as hex + a leading 'G'.
+                        unsafe {
+                            core::arch::asm!("out 0xe9, al", in("al") b'G', options(nomem, nostack));
+                            let mut k = 0;
+                            while k < 18 {
+                                let b = dev_desc[k];
+                                let hi = b"0123456789abcdef"[(b >> 4) as usize];
+                                let lo = b"0123456789abcdef"[(b & 0xF) as usize];
+                                core::arch::asm!("out 0xe9, al", in("al") hi, options(nomem, nostack));
+                                core::arch::asm!("out 0xe9, al", in("al") lo, options(nomem, nostack));
+                                k += 1;
+                            }
+                            core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                        }
                         let vid = u16::from_le_bytes([dev_desc[2], dev_desc[3]]);
                         let pid = u16::from_le_bytes([dev_desc[4], dev_desc[5]]);
                         let dev_class = dev_desc[4];
@@ -1066,8 +1104,15 @@ impl XhciController {
         data_buf: Option<&mut [u8]>,
         data_len: usize,
     ) -> Result<usize, &'static str> {
+        unsafe {
+            core::arch::asm!("out 0xe9, al", in("al") b'V', options(nomem, nostack));
+        }
         let idx = slot_id as usize;
         if idx >= self.device_slots.len() || self.device_slots[idx].is_none() {
+            unsafe {
+                core::arch::asm!("out 0xe9, al", in("al") b'1', options(nomem, nostack));
+                core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+            }
             return Err("Invalid slot for control transfer");
         }
 
@@ -1075,20 +1120,35 @@ impl XhciController {
         let tr_ring = dev.ep_transfer_rings[1];
         let tr_phys = dev.ep_transfer_ring_phys[1];
         if tr_ring.is_null() {
+            unsafe {
+                core::arch::asm!("out 0xe9, al", in("al") b'2', options(nomem, nostack));
+                core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+            }
             return Err("No transfer ring for EP0");
         }
 
         let mut deq;
-        let cycle;
+        // The controller toggles its expected cycle bit every time it wraps
+        // through the LINK TRB. Reusing TRB slots 0..2 with the same cycle
+        // bit as the previous transfer makes the controller ignore them
+        // (cycle mismatch -> "Event timeout"). Toggle the saved cycle bit
+        // instead of resetting it to `true` every time.
+        let cycle = !dev.ep_cycle[1];
+        let deq_start = dev.ep_dequeue[1] as usize;
 
+        // Zero exactly the TRBs this transfer will use, starting from the
+        // controller's current dequeue position, and refresh the LINK TRB
+        // with the toggled cycle so the controller wraps correctly.
         for i in 0..3 {
-            core::ptr::write(tr_ring.add(i), Trb {
+            core::ptr::write_volatile(tr_ring.add((deq_start + i) % XHCI_RING_TRBS), Trb {
                 d0: 0, d1: 0, d2: 0, d3: 0,
             });
         }
-        core::ptr::write(tr_ring.add(XHCI_RING_TRBS - 1), Trb::link(tr_phys, true));
-        deq = 0;
-        cycle = true;
+        core::ptr::write_volatile(
+            tr_ring.add(XHCI_RING_TRBS - 1),
+            Trb::link(tr_phys, cycle),
+        );
+        deq = deq_start;
 
         let setup_phys = self.ctrl_transfer_buf_phys;
         let setup_virt = self.ctrl_transfer_buf;
@@ -1130,11 +1190,24 @@ impl XhciController {
 
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         self.ring_doorbell(slot_id, 1);
+        unsafe {
+            core::arch::asm!("out 0xe9, al", in("al") b'C', options(nomem, nostack));
+        }
 
         let mut transferred = 0;
         let mut seen_status = false;
         for _ in 0..16 {
-            let event = self.wait_for_event()?;
+            let event = match self.wait_for_event() {
+                Ok(e) => e,
+                Err(e) => {
+                    unsafe {
+                        core::arch::asm!("out 0xe9, al", in("al") b'X', options(nomem, nostack));
+                        core::arch::asm!("out 0xe9, al", in("al") e.as_bytes()[0], options(nomem, nostack));
+                        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                    }
+                    return Err(e);
+                }
+            };
             let event_slot = ((event.d3 >> 24) & 0xFF) as u8;
             let event_ep = ((event.d2 >> 16) & 0x1F) as u8;
 
@@ -1147,6 +1220,11 @@ impl XhciController {
             let completion = (event.d2 >> 24) & 0xFF;
 
             if completion != 1 {
+                unsafe {
+                    core::arch::asm!("out 0xe9, al", in("al") b'E', options(nomem, nostack));
+                    core::arch::asm!("out 0xe9, al", in("al") (b'0' + (completion & 0xF) as u8), options(nomem, nostack));
+                    core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                }
                 log::warn!(
                     "[xHCI] ctrl_transfer event error: type={} completion={}",
                     trb_type,
@@ -1238,6 +1316,9 @@ pub fn is_available() -> bool {
 }
 
 pub fn handle_interrupt() {
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'i', options(nomem, nostack));
+    }
     if let Some(controller_arc) = get_controller(0) {
         let mut controller = controller_arc.lock();
         unsafe {

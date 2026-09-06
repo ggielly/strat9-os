@@ -444,6 +444,9 @@ impl UhciController {
 
     /// Enumerate connected ports and hand off HID devices.
     fn enumerate_all_ports(&self) {
+        unsafe {
+            core::arch::asm!("out 0xe9, al", in("al") b'W', options(nomem, nostack));
+        }
         let mut usb_address: u8 = 1;
 
         for port in 0..self.max_ports {
@@ -571,6 +574,11 @@ pub fn init() {
         prog_if: Some(0x00),
     });
 
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'q', options(nomem, nostack));
+        core::arch::asm!("out 0xe9, al", in("al") (b'0' + candidates.len() as u8), options(nomem, nostack));
+        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+    }
     for pci_dev in candidates.into_iter() {
         log::info!(
             "UHCI: Found controller at {:?} (VEN:{:04x} DEV:{:04x})",
@@ -584,6 +592,11 @@ pub fn init() {
         match unsafe { UhciController::new(pci_dev) } {
             Ok(controller) => {
                 log::info!("[UHCI] Initialized with {} ports", controller.port_count());
+                unsafe {
+                    core::arch::asm!("out 0xe9, al", in("al") b'Q', options(nomem, nostack));
+                    core::arch::asm!("out 0xe9, al", in("al") (b'0' + controller.port_count() as u8), options(nomem, nostack));
+                    core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                }
                 controller.enumerate_all_ports();
                 UHCI_CONTROLLERS.lock().push(controller);
             }

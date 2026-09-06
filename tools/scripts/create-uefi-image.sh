@@ -15,9 +15,10 @@ IMAGE_FILE="$BUILD_DIR/${IMAGE_BASENAME}-uefi.img"
 BOOTLOADER_EFI="target/x86_64-unknown-uefi/${PROFILE}/strat9-bootloader.efi"
 KERNEL_ELF="target/x86_64-unknown-none/${PROFILE}/kernel"
 
-echo ""
-echo "=== Creating UEFI bootable image ==="
+echo "============================================"
+echo "Creating UEFI bootable image"
 echo "Profile: ${PROFILE}"
+echo "============================================"
 echo ""
 
 # Check prerequisites
@@ -28,8 +29,8 @@ if [ ! -f "$BOOTLOADER_EFI" ]; then
 fi
 
 if [ ! -f "$KERNEL_ELF" ]; then
-    echo "ERROR: Kernel not found at $KERNEL_ELF"
-    echo "  Build with: cargo make kernel"
+    echo "ERROR : kernel not found at $KERNEL_ELF"
+    echo "  Build with : cargo make kernel"
     exit 1
 fi
 
@@ -111,11 +112,11 @@ echo ""
 # OVMF requires a GPT-formatted disk with an EFI System Partition (ESP).
 # The ESP must be FAT32 and contain /efi/boot/bootx64.efi.
 
-IMAGE_SIZE_MB=128
+IMAGE_SIZE_MB=512
 SECTOR_SIZE=512
 
-# ESP size: 64MB
-ESP_SIZE_MB=64
+# ESP size: 256MB (the initfs payload alone is ~110MB with strate-wasm)
+ESP_SIZE_MB=256
 
 if command -v parted >/dev/null 2>&1 && command -v mtools >/dev/null 2>&1; then
     echo "  Creating GPT + ESP image with parted + mtools..."
@@ -168,7 +169,7 @@ fi
 
 echo ""
 echo "============================================"
-echo "  UEFI Image created!"
+echo "  UEFI image created!"
 echo "============================================"
 echo ""
 echo "  Bootloader : $BOOTLOADER_EFI ($bootloader_size bytes)"
@@ -197,7 +198,7 @@ ls -lh "$BUILD_DIR"/*.img "$BUILD_DIR"/*.iso "$BUILD_DIR"/*.efi 2>/dev/null | wh
     echo "      $line"
 done
 echo ""
-echo "--------------------------------------------"
+echo "============================================"
 echo "  Launch with: cargo make run-uefi"
 echo "============================================"
 echo ""

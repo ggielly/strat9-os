@@ -77,6 +77,7 @@ pub fn sys_chan_send(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
 }
 
 /// SYS_CHAN_RECV (222): receive one `IpcMessage`, blocking if empty.
+
 pub fn sys_chan_recv(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
 
@@ -90,14 +91,19 @@ pub fn sys_chan_recv(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
     }
     let chan_id = ChanId::from_u64(cap.resource as u64);
 
+    // Validate the destination buffer BEFORE consuming the message.
+    // If the pointer is invalid, we return EFAULT without touching the queue.
+    let user_slice = UserSliceWrite::new(msg_ptr, MSG_SIZE).map_err(SyscallError::from)?;
+
     let chan = channel::get_channel(chan_id).ok_or(SyscallError::BadHandle)?;
     let msg = chan.recv().map_err(SyscallError::from)?;
 
-    let user_slice = UserSliceWrite::new(msg_ptr, MSG_SIZE).map_err(SyscallError::from)?;
     let n = user_slice.copy_from(unsafe {
         core::slice::from_raw_parts(&msg as *const IpcMessage as *const u8, MSG_SIZE)
     });
     if n != MSG_SIZE {
+        // Defensive: should not happen after buffer validation, but the
+        // message has already been consumed
         return Err(SyscallError::Fault);
     }
 
@@ -105,6 +111,9 @@ pub fn sys_chan_recv(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
 }
 
 /// SYS_CHAN_TRY_RECV (223): non-blocking receive.
+///
+/// **P0 fix**: Same as `sys_chan_recv` : validate the user destination buffer
+/// before consuming the message from the queue.
 pub fn sys_chan_try_recv(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
 
@@ -118,10 +127,11 @@ pub fn sys_chan_try_recv(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError>
     }
     let chan_id = ChanId::from_u64(cap.resource as u64);
 
+    let user_slice = UserSliceWrite::new(msg_ptr, MSG_SIZE).map_err(SyscallError::from)?;
+
     let chan = channel::get_channel(chan_id).ok_or(SyscallError::BadHandle)?;
     match chan.try_recv() {
         Ok(msg) => {
-            let user_slice = UserSliceWrite::new(msg_ptr, MSG_SIZE).map_err(SyscallError::from)?;
             let n = user_slice.copy_from(unsafe {
                 core::slice::from_raw_parts(&msg as *const IpcMessage as *const u8, MSG_SIZE)
             });
@@ -134,7 +144,8 @@ pub fn sys_chan_try_recv(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError>
     }
 }
 
-/// SYS_CHAN_CLOSE (224): destroy a channel and wake all waiters.
+/// SYS_CHAN_CLOSE (224): close a channel handle.
+
 pub fn sys_chan_close(handle: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
 
@@ -147,11 +158,23 @@ pub fn sys_chan_close(handle: u64) -> Result<u64, SyscallError> {
         return Err(SyscallError::BadHandle);
     }
     let chan_id = ChanId::from_u64(cap.resource as u64);
+    let has_revoke = cap.permissions.revoke;
+
     let cap = caps
         .remove(CapId::from_raw(handle))
         .ok_or(SyscallError::BadHandle)?;
     debug_assert_eq!(cap.resource_type, ResourceType::Channel);
-    crate::capability::release_capability(&cap, Some(task.id));
+
+    if has_revoke {
+        // Full release: decrement global refcount and destroy channel if
+        // this was the last capability referencing it.
+        crate::capability::release_capability(&cap, Some(task.id));
+    } else {
+        // Local-only close: decrement the global refcount without triggering
+        // channel destruction.  The channel stays alive until all other
+        // capabilities (held by other processes) are also dropped.
+        crate::capability::get_capability_manager().revoke_capability(cap.id);
+    }
 
     log::debug!("syscall: CHAN_CLOSE(handle={}) => chan={}", handle, chan_id);
     Ok(0)
