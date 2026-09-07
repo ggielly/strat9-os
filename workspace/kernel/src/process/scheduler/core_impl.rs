@@ -146,63 +146,33 @@ impl GlobalSchedState {
             cpu_index
         );
         task.set_state(TaskState::Ready);
-        crate::serial_println!(
-            "[trace][sched] add_task_on_cpu state ready tid={}",
-            task_id.as_u64()
-        );
 
-        crate::serial_println!(
-            "[trace][sched] add_task_on_cpu before clone tid={} all_tasks_len={}",
-            task_id.as_u64(),
-            self.all_tasks.len()
-        );
-        let task_clone = task.clone();
-        crate::serial_println!(
-            "[trace][sched] add_task_on_cpu before all_tasks.insert tid={}",
-            task_id.as_u64()
-        );
-        self.insert_all_task_locked(task_id, task_clone);
-        crate::serial_println!(
-            "[trace][sched] add_task_on_cpu all_tasks inserted tid={}",
-            task_id.as_u64()
-        );
+        self.insert_all_task_locked(task_id, task.clone());
         self.task_cpu.insert(task_id, cpu_index);
         task.home_cpu
             .store(cpu_index, core::sync::atomic::Ordering::Relaxed);
-        crate::serial_println!(
-            "[trace][sched] add_task_on_cpu task_cpu inserted tid={}",
-            task_id.as_u64()
-        );
+
+        // Lock order: IDENTITY write (rank 2). Caller holds GLOBAL (rank 1).
+        lockdep_acquire(LockRank::IdentityW, None);
         {
             let mut identity = SCHED_IDENTITY.write();
             identity.pid_to_task.insert(task.pid, task_id);
-            crate::serial_println!(
-                "[trace][sched] add_task_on_cpu pid map inserted tid={}",
-                task_id.as_u64()
-            );
             identity.tid_to_task.insert(task.tid, task_id);
-            crate::serial_println!(
-                "[trace][sched] add_task_on_cpu tid map inserted tid={}",
-                task_id.as_u64()
-            );
             Self::register_identity_locked(&mut identity, &task);
-            crate::serial_println!(
-                "[trace][sched] add_task_on_cpu identity registered tid={}",
-                task_id.as_u64()
-            );
         }
+        lockdep_release(LockRank::IdentityW);
+
+        // Lock order: LOCAL (rank 4). Caller holds GLOBAL (rank 1).
+        lockdep_acquire(LockRank::Local, Some(cpu_index));
         {
             let class = self.class_table.class_for_task(&task);
             if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_index].lock() {
                 local_cpu.class_rqs.enqueue(class, task);
                 local_cpu.need_resched = true;
-                crate::serial_println!(
-                    "[trace][sched] add_task_on_cpu enqueued tid={} cpu={}",
-                    task_id.as_u64(),
-                    cpu_index
-                );
             }
         }
+        lockdep_release(LockRank::Local);
+
         sched_trace(format_args!(
             "enqueue task={} cpu={}",
             task_id.as_u64(),
@@ -278,10 +248,11 @@ impl GlobalSchedState {
     pub fn wake_task_locked(&mut self, id: TaskId) -> (bool, Option<usize>) {
         self.clear_task_wake_deadline_locked(id);
 
-        // Check if the task is already in BLOCKED_TASKS first to wake it directly.
+        // Lock order: BLOCKED (rank 3) → LOCAL (rank 4). Caller holds GLOBAL (rank 1).
         let mut woken = false;
         let mut ipi_cpu = None;
         {
+            lockdep_acquire(LockRank::Blocked, None);
             let mut blocked = super::BLOCKED_TASKS.lock();
             if let Some(task) = blocked.remove(&id) {
                 task.set_state(TaskState::Ready);
@@ -300,10 +271,12 @@ impl GlobalSchedState {
                     }
                 };
 
+                lockdep_acquire(LockRank::Local, Some(cpu_index));
                 if let Some(ref mut local_cpu) = *super::LOCAL_SCHEDULERS[cpu_index].lock() {
                     local_cpu.class_rqs.enqueue(class, task.clone());
                     local_cpu.need_resched = true;
                 }
+                lockdep_release(LockRank::Local);
 
                 ipi_cpu = if cpu_index != current_cpu_index() {
                     Some(cpu_index)
@@ -312,14 +285,16 @@ impl GlobalSchedState {
                 };
                 woken = true;
             }
+            lockdep_release(LockRank::Blocked);
+            drop(blocked);
         }
 
         if woken {
             return (true, ipi_cpu);
         }
 
-        // Fallback: task is not yet in BLOCKED_TASKS (still transitioning to
-        // Blocked). Set wake_pending so block_current_task will skip blocking.
+        // Fallback: task not yet in BLOCKED_TASKS (still transitioning to
+        // Blocked). Set wake_pending so block_current_task skips blocking.
         if let Some(task) = self.all_tasks.get(&id) {
             task.wake_pending
                 .store(true, core::sync::atomic::Ordering::Release);

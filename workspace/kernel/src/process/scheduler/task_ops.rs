@@ -858,6 +858,15 @@ pub fn clear_task_wake_deadline(id: TaskId) -> bool {
 /// - If the task is the *current* task on *another* CPU, an IPI is sent to
 ///   trigger preemption on that CPU. The task will not be re-queued at the
 ///   next tick because its state is Blocked.
+///
+/// ## Lock order
+///
+/// Canonical: BLOCKED (rank 3) → LOCAL (rank 4).
+/// First path (current task): re-acquires LOCAL only for yield_cpu_local,
+/// after BLOCKED has been released.
+/// Ready-queue path: acquires LOCAL to remove, releases it, then acquires
+/// BLOCKED to insert — this is safe because LOCAL is fully released before
+/// BLOCKED is acquired (no nesting).
 pub fn suspend_task(id: TaskId) -> bool {
     let saved_flags = save_flags_and_cli();
 
@@ -868,33 +877,37 @@ pub fn suspend_task(id: TaskId) -> bool {
     let my_cpu = current_cpu_index();
     let n = active_cpu_count();
 
-    // Check if the task is the current task on any CPU.
+    // Path 1: Check if the task is the current task on any CPU.
+    // Lock order: LOCAL (read-only probe) → release → BLOCKED → LOCAL (yield).
+    // The first LOCAL is acquired and released before BLOCKED; no nesting.
     for ci in 0..n {
+        lockdep_acquire(LockRank::Local, Some(ci));
         let task_id_on_cpu = LOCAL_SCHEDULERS[ci]
             .lock()
             .as_ref()
             .and_then(|cpu| cpu.current_task.as_ref().map(|t| (t.id, t.clone())));
+        lockdep_release(LockRank::Local);
         if let Some((tid, current)) = task_id_on_cpu {
             if tid == id {
                 current.set_state(TaskState::Blocked);
                 current
                     .home_cpu
                     .store(ci, core::sync::atomic::Ordering::Relaxed);
-                super::BLOCKED_TASKS
-                    .lock()
-                    .insert(current.id, current.clone());
+                // Insert into BLOCKED_TASKS (rank 3).
+                lockdep_acquire(LockRank::Blocked, None);
+                super::BLOCKED_TASKS.lock().insert(current.id, current.clone());
+                lockdep_release(LockRank::Blocked);
                 suspended = true;
                 if ci == my_cpu {
-                    // Re-acquire LOCAL to yield.  The gap between the
-                    // probe above and this lock is safe because IRQs
-                    // are disabled (save_flags_and_cli), so no timer
-                    // tick can preempt us or mutate current_task.
+                    // Re-acquire LOCAL (rank 4) to yield. Safe because IRQs
+                    // are disabled and BLOCKED is released.
+                    lockdep_acquire(LockRank::Local, Some(ci));
                     let mut local = LOCAL_SCHEDULERS[ci].lock();
                     if let Some(ref mut cpu) = *local {
                         switch_target = super::core_impl::yield_cpu_local(cpu, ci);
                     }
+                    lockdep_release(LockRank::Local);
                 } else {
-                    // Cross-CPU: IPI will make the remote CPU preempt.
                     ipi_to_cpu = Some(ci);
                 }
                 break;
@@ -902,9 +915,12 @@ pub fn suspend_task(id: TaskId) -> bool {
         }
     }
 
-    // Remove from ready queues (task was not running anywhere).
+    // Path 2: Remove from ready queues (task was not running anywhere).
+    // Lock order: LOCAL (remove from queue) → release → BLOCKED (insert).
+    // No nesting: LOCAL is fully released before BLOCKED is acquired.
     if !suspended {
         for ci in 0..n {
+            lockdep_acquire(LockRank::Local, Some(ci));
             let removed = {
                 let mut local = LOCAL_SCHEDULERS[ci].lock();
                 if let Some(ref mut cpu) = *local {
@@ -913,12 +929,15 @@ pub fn suspend_task(id: TaskId) -> bool {
                     false
                 }
             };
+            lockdep_release(LockRank::Local);
             if removed {
                 if let Some(task) = get_task_by_id(id) {
                     task.set_state(TaskState::Blocked);
                     task.home_cpu
                         .store(ci, core::sync::atomic::Ordering::Relaxed);
+                    lockdep_acquire(LockRank::Blocked, None);
                     super::BLOCKED_TASKS.lock().insert(task.id, task.clone());
+                    lockdep_release(LockRank::Blocked);
                 }
                 suspended = true;
                 break;
@@ -927,8 +946,12 @@ pub fn suspend_task(id: TaskId) -> bool {
     }
 
     // Already blocked.
-    if !suspended && super::BLOCKED_TASKS.lock().contains_key(&id) {
-        suspended = true;
+    if !suspended {
+        lockdep_acquire(LockRank::Blocked, None);
+        if super::BLOCKED_TASKS.lock().contains_key(&id) {
+            suspended = true;
+        }
+        lockdep_release(LockRank::Blocked);
     }
 
     if let Some(ref target) = switch_target {
@@ -949,12 +972,19 @@ pub fn suspend_task(id: TaskId) -> bool {
 /// Resume a previously suspended task by ID.
 ///
 /// Moves the task from blocked to ready queue and marks it Ready.
+///
+/// ## Lock order
+///
+/// BLOCKED (rank 3) → release → LOCAL (rank 4).  No nesting:
+/// BLOCKED is fully released before LOCAL is acquired.
 pub fn resume_task(id: TaskId) -> bool {
     let saved_flags = save_flags_and_cli();
     let mut ipi_to_cpu: Option<usize> = None;
 
     let mut task_to_enqueue: Option<Arc<Task>> = None;
     {
+        // Lock order: BLOCKED (rank 3).
+        lockdep_acquire(LockRank::Blocked, None);
         let mut blocked = super::BLOCKED_TASKS.lock();
         if let Some(task) = blocked.remove(&id) {
             task.set_state(TaskState::Ready);
@@ -973,16 +1003,25 @@ pub fn resume_task(id: TaskId) -> bool {
                 }
             };
 
+            // Release BLOCKED before acquiring LOCAL.
+            lockdep_release(LockRank::Blocked);
+            drop(blocked);
+
+            // Lock order: LOCAL (rank 4).
+            lockdep_acquire(LockRank::Local, Some(cpu_index));
             if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_index].lock() {
                 local_cpu.class_rqs.enqueue(class, task.clone());
                 local_cpu.need_resched = true;
             }
+            lockdep_release(LockRank::Local);
 
             if cpu_index != current_cpu_index() {
                 ipi_to_cpu = Some(cpu_index);
             }
-            drop(blocked);
             task_to_enqueue = Some(task);
+        } else {
+            lockdep_release(LockRank::Blocked);
+            drop(blocked);
         }
     }
 
