@@ -154,18 +154,19 @@ fn check_wake_deadlines(current_time_ns: u64) {
     let mut ipi_targets = [false; crate::arch::percpu::MAX_CPUS];
     let my_cpu = current_cpu_index();
 
-    // Stack-allocated storage for tasks whose Arc must be dropped outside the
-    // scheduler lock. Sized to the same batch limit used for the scan so that
-    // we never need a heap allocation here.
     const BATCH: usize = 128;
     let mut deferred_drops: [Option<Arc<Task>>; BATCH] = [const { None }; BATCH];
     let mut drop_count = 0usize;
 
     {
-        // --- begin critical section (BLOCKED_TASKS lock held) ---
+        // Lock order: BLOCKED (rank 3) -> LOCAL (rank 4).
+        lockdep_acquire(LockRank::Blocked, None);
         let mut blocked = match super::BLOCKED_TASKS.try_lock_no_irqsave() {
             Some(guard) => guard,
-            None => return,
+            None => {
+                lockdep_release(LockRank::Blocked);
+                return;
+            }
         };
 
         let mut to_wake = [TaskId::from_u64(0); BATCH];
@@ -199,32 +200,24 @@ fn check_wake_deadlines(current_time_ns: u64) {
                         crate::process::sched::SchedPolicy::Idle => SchedClassId::Idle,
                     }
                 };
+                lockdep_acquire(LockRank::Local, Some(cpu));
                 if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu].lock() {
-                    // `enqueue` moves the Arc into the run-queue, so no
-                    // drop occurs here; the Arc is alive in class_rqs.
                     local_cpu.class_rqs.enqueue(class, blocked_task);
                     local_cpu.need_resched = true;
                     if cpu != my_cpu && cpu_is_valid(cpu) {
                         ipi_targets[cpu] = true;
                     }
                 } else {
-                    // No valid CPU slot: stash for drop outside the lock.
-                    // This is the only path where an Arc<Task> can be the
-                    // last reference and trigger KernelStack::drop.
                     if drop_count < BATCH {
                         deferred_drops[drop_count] = Some(blocked_task);
                         drop_count += 1;
                     }
-                    // If deferred_drops is full the task Arc is dropped here,
-                    // still under the lock : but that case means we already
-                    // have 128 orphaned tasks with no valid CPU, which is a
-                    // bug elsewhere; emit a trace and accept the latency hit.
                 }
+                lockdep_release(LockRank::Local);
             }
         }
-        // `blocked` guard drops here : BLOCKED_TASKS lock released BEFORE any
-        // Arc<Task> drop and BEFORE send_resched_ipi_to_cpu.
-        // --- end critical section ---
+        lockdep_release(LockRank::Blocked);
+        drop(blocked);
     }
     // Drop orphaned task Arcs outside the scheduler lock so that
     // KernelStack::drop => free_frames => buddy_alloc.lock() does not race

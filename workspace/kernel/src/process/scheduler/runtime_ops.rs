@@ -264,7 +264,7 @@ pub fn finish_switch() {
     let cpu_index = current_cpu_index();
     let mut task_to_drop = None;
     {
-        // Use LOCAL lock : no spinning on GLOBAL_SCHED_STATE needed.
+        // Lock order: LOCAL only (rank 4).
         let mut spins = 0usize;
         let mut guard = loop {
             if let Some(g) = LOCAL_SCHEDULERS[cpu_index].try_lock_no_irqsave() {
@@ -277,7 +277,6 @@ pub fn finish_switch() {
             core::hint::spin_loop();
         };
         if let Some(ref mut cpu) = *guard {
-            // Activate the address space for the current task on this CPU.
             if let Some(ref task) = cpu.current_task {
                 unsafe { task.process.address_space_arc().switch_to() };
             }
@@ -286,6 +285,12 @@ pub fn finish_switch() {
     }
 
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+    // Debug invariant check after every context switch completes.
+    // Uses try_lock to avoid blocking; validates that task containers
+    // are consistent (no task in two places, no orphaned zombies, etc.).
+    super::validate_scheduler_invariants();
+
     super::task_ops::flush_deferred_silo_cleanups();
     drop(task_to_drop);
 }
@@ -571,18 +576,23 @@ pub fn maybe_preempt_from_interrupt(
     let current_frame_rsp = current_frame as *mut crate::syscall::SyscallFrame as u64;
     let mut _task_to_drop: Option<Arc<Task>> = None;
 
+    // Lock order: LOCAL only (rank 4). No GLOBAL, BLOCKED, or IDENTITY.
+    lockdep_acquire(LockRank::Local, Some(cpu_index));
     let decision = {
-        // Use per-CPU LOCAL lock : not blocked by cold-path global operations.
         let mut guard = match LOCAL_SCHEDULERS[cpu_index].try_lock_no_irqsave() {
             Some(g) => g,
             None => {
+                lockdep_release(LockRank::Local);
                 note_try_lock_fail_on_cpu(cpu_index);
                 return None;
             }
         };
         let cpu = match guard.as_mut() {
             Some(c) => c,
-            None => return None,
+            None => {
+                lockdep_release(LockRank::Local);
+                return None;
+            }
         };
 
         if take_force_resched_hint(cpu_index) {
@@ -704,7 +714,9 @@ pub fn maybe_preempt_from_interrupt(
                 })
             }
         }
-    }; // LOCAL lock released here
+    };
+    lockdep_release(LockRank::Local);
+    // LOCAL lock released here
 
     if decision.is_some() && cpu_is_valid(cpu_index) {
         CPU_PREEMPT_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);

@@ -554,6 +554,42 @@ fn sched_trace(args: core::fmt::Arguments<'_>) {
 }
 
 /// Information needed to perform a context switch after releasing the lock.
+///
+/// # Safety invariants
+///
+/// `SwitchTarget` contains raw pointers into `Arc<Task>` objects.  All five
+/// invariants below must hold at the moment `do_switch_context` / `switch_context`
+/// reads them.  They are established by `yield_cpu_local` under the LOCAL lock
+/// and consumed before any other CPU can observe the pointed-to memory.
+///
+/// 1. **`old_rsp_ptr`** points to `(*source.context.get()).saved_rsp`.
+///    The `source` Arc<Task> is kept alive by `cpu.current_task` or
+///    `cpu.task_to_requeue` for the duration of the switch; no migration,
+///    reap, or exit can invalidate it while the lock is held.
+///
+/// 2. **`new_rsp_ptr`** points to `(*target.context.get()).saved_rsp`.
+///    Same lifetime guarantee as above: `target` is in `cpu.current_task`.
+///
+/// 3. **`old_fpu_ptr` / `new_fpu_ptr`** point into the FPU state areas of
+///    the source / target tasks respectively.  These areas sit inside the
+///    kernel stack and are valid as long as the owning `Arc<Task>` is alive.
+///    FPU state is never modified concurrently: the switch context owns it
+///    exclusively between the save and restore.
+///
+/// 4. **`old_xcr0` / `new_xcr0`** are the XCR0 masks of source and target,
+///    read atomically from `task.xcr0_mask`.  They are only consumed by the
+///    switch assembly which toggles XCR0 around xsave/xrstor.
+///
+/// 5. **Lifetime**: `SwitchTarget` must not outlive the LOCAL lock that
+///    protected its construction.  It is consumed by `do_switch_context`
+///    immediately after the lock is released, before any allocation, IPI,
+///    or scheduler operation.
+///
+/// # Debug checks
+///
+/// Under `cfg(debug_assertions)`, `prepare_switch_target` validates that
+/// `old_rsp` / `new_rsp` fall within their respective kernel stacks before
+/// returning this struct.
 pub(super) struct SwitchTarget {
     pub(super) old_rsp_ptr: *mut u64,
     pub(super) new_rsp_ptr: *const u64,
@@ -563,9 +599,11 @@ pub(super) struct SwitchTarget {
     pub(super) new_xcr0: u64,
 }
 
-// SAFETY: The pointers in SwitchTarget point into Arc<Task> objects
-// that are kept alive by the scheduler. The scheduler lock ensures
-// exclusive access when computing these pointers.
+// SAFETY: SwitchTarget is only constructed under LOCAL lock on the owning CPU
+// and consumed by do_switch_context before any other CPU can observe the
+// pointed-to memory.  The Arc<Task> objects are kept alive by current_task /
+// task_to_requeue for the full duration.  No concurrent modification of the
+// pointed-to context or FPU state occurs between construction and consumption.
 unsafe impl Send for SwitchTarget {}
 
 /// Result of a non-blocking wait on child exit.
@@ -862,8 +900,8 @@ fn validate_task_context(task: &Arc<Task>) -> Result<(), &'static str> {
 
 /// Validate scheduler-wide invariants in debug builds.
 ///
-/// Must be called with `GLOBAL_SCHED_STATE` held.  Iterates all CPUs and
-/// checks that every task appears in exactly one scheduling location.
+/// Uses `try_lock` everywhere so it can be called from `finish_switch` without
+/// blocking.  Silently skips if any lock is contended.
 ///
 /// Panics with a diagnostic message on the first invariant violation.
 #[cfg(debug_assertions)]
@@ -875,7 +913,10 @@ pub(crate) fn validate_scheduler_invariants() {
 
     // 1. Each CPU has at most one current_task; no task is current on two CPUs.
     for cpu_idx in 0..n {
-        let guard = LOCAL_SCHEDULERS[cpu_idx].lock();
+        let guard = match LOCAL_SCHEDULERS[cpu_idx].try_lock() {
+            Some(g) => g,
+            None => return, // Lock contended, skip validation.
+        };
         if let Some(ref cpu) = *guard {
             if let Some(ref current) = cpu.current_task {
                 let tid = current.id;
@@ -890,10 +931,12 @@ pub(crate) fn validate_scheduler_invariants() {
         }
     }
 
-    // 2. task_cpu consistency: for Running/Ready tasks, task_cpu must be within range.
-    //    Dead tasks may linger in all_tasks briefly; Blocked tasks should not be here.
+    // 2. task_cpu consistency + zombie isolation.
     {
-        let sched_guard = GLOBAL_SCHED_STATE.lock();
+        let sched_guard = match GLOBAL_SCHED_STATE.try_lock() {
+            Some(g) => g,
+            None => return,
+        };
         if let Some(ref sched) = *sched_guard {
             for (tid, &cpu_idx) in sched.task_cpu.iter() {
                 let state = sched.all_tasks.get(tid).map(|t| t.get_state());
@@ -905,14 +948,9 @@ pub(crate) fn validate_scheduler_invariants() {
                             tid.as_u64(), cpu_idx, n
                         );
                     }
-                    Some(TaskState::Blocked) => {
-                        // task_cpu for Blocked is allowed (set during block for wake routing).
-                    }
-                    Some(TaskState::Dead) => {}
-                    None => {}
+                    _ => {}
                 }
             }
-            // 3. Zombies must not be in a run queue.
             for (tid, _) in sched.zombies.iter() {
                 assert!(
                     !seen_current.contains(tid),

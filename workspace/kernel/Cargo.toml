@@ -12,11 +12,15 @@ path = "src/main.rs"
 [features]
 default = []
 selftest = []
-# Enables the runtime safety check in `apply_segment_permissions` that
+
+# 2026-09-07
+# Enable the runtime safety check in `apply_segment_permissions` that
 # refuses to relax permissions on an AddressSpace already active on a
-# remote CPU (RELRO TLB-race hardening, audit 2026-09-07).
+# remote CPU (RELRO TLB-race hardening.
 elf_loader_assert_remote_active = []
-# Enables the IFUNC resolver VMA check (debug-only) in `call_ifunc_resolver`
+
+# 2026-09-07
+# Enable the IFUNC resolver VMA check (debug-only) in `call_ifunc_resolver`
 # that rejects resolvers planted in writable/non-executable pages.
 ifunc_resolver_vma_check = []
 
