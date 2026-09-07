@@ -3,7 +3,7 @@
 //! Zero-copy design: keys, section names and unescaped string values borrow
 //! directly from the source buffer (`Cow::Borrowed`); only values requiring
 //! escape-sequence expansion allocate. Entries are stored in one flat,
-//! sorted `Vec` (binary-search lookups) instead of nested maps — the config
+//! sorted `Vec` (binary-search lookups) instead of nested maps : the config
 //! is parsed once at boot and read-only afterwards.
 //!
 //! # Lifetime contract

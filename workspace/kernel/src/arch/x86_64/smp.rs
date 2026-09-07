@@ -560,7 +560,7 @@ pub fn init() -> Result<usize, &'static str> {
 /// and jumps here. All virtual addresses are valid at this point.
 #[unsafe(no_mangle)]
 pub extern "C" fn smp_main() -> ! {
-    // Read APIC ID first — needed to find our per-CPU state.
+    // Read APIC ID first : needed to find our per-CPU state.
     // Use raw port output since serial mutex isn't initialized yet.
     let apic_id: u32;
     {
@@ -588,7 +588,7 @@ pub extern "C" fn smp_main() -> ! {
     }
 
     // Signal BSP that this AP has reached Rust and consumed the trampoline RSP.
-    // Must happen immediately — before any per-CPU init that might fail.
+    // Must happen immediately : before any per-CPU init that might fail.
     AP_REACHED_RUST.store(apic_id as usize, Ordering::Release);
 
     let cpu_index = match percpu::cpu_index_by_apic(apic_id) {

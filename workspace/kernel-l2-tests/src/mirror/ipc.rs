@@ -1,4 +1,4 @@
-//! Mirror of kernel/src/ipc — pure modules only.
+//! Mirror of kernel/src/ipc : pure modules only.
 #[path = "../../../kernel/src/ipc/message.rs"]
 pub mod message;
 #[path = "../../../kernel/src/ipc/lockfree_ring.rs"]
@@ -14,13 +14,13 @@ pub mod semaphore;
 #[path = "../../../kernel/src/ipc/port.rs"]
 pub mod port;
 
-/// Shim for kernel/src/ipc/reply.rs (pulls async_io rings — out of scope).
+/// Shim for kernel/src/ipc/reply.rs (pulls async_io rings : out of scope).
 pub mod reply {
     use crate::process::TaskId;
 
     /// Blocking reply wait cannot run on the host single thread.
     pub fn wait_for_reply(_task_id: TaskId, _port_owner: TaskId) -> ! {
-        panic!("ipc::reply::wait_for_reply called on host — blocking unsupported");
+        panic!("ipc::reply::wait_for_reply called on host : blocking unsupported");
     }
 
     /// No-op host stand-in: no pending waiters to cancel.
@@ -66,7 +66,7 @@ pub mod transport {
         BufferTooSmall,
     }
 
-    /// Core trait — metadata only, exactly like kernel/src/ipc/transport.rs.
+    /// Core trait : metadata only, exactly like kernel/src/ipc/transport.rs.
     pub trait IpcTransport: Send + Sync {
         fn level(&self) -> TransportLevel;
         fn capabilities(&self) -> TransportCapabilities;

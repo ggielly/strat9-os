@@ -400,11 +400,11 @@ pub mod pci_full {
     pub const MSI_ADDR_DEST_SHIFT: u32 = 12;
 }
 
-// stac/clac: SMAP does not exist on RISC-V — no-ops.
+// stac/clac: SMAP does not exist on RISC-V : no-ops.
 pub fn stac() {}
 pub fn clac() {}
 
-// xsave/xcr0 helpers referenced by task.rs/framebuffer — always false on RISC-V.
+// xsave/xcr0 helpers referenced by task.rs/framebuffer : always false on RISC-V.
 pub mod cpuid_x86 {
     pub use crate::arch::riscv64::cpuid_x86_shim::CpuFeatures;
     pub fn host_uses_xsave() -> bool {

@@ -1,4 +1,4 @@
-//! L1 — `safe_math`: exhaustive edge cases.
+//! L1 : `safe_math`: exhaustive edge cases.
 //!
 //! These helpers guard every filesystem driver against arithmetic overflow
 //! (a classic kernel-attack vector: malicious sizes/offsets from disk or

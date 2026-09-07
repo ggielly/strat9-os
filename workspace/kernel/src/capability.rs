@@ -297,7 +297,7 @@ impl CapabilityTable {
     ///
     /// Used by `SYS_CHAN_GRANT` to delegate a channel endpoint while giving
     /// the receiver a badge the receiver can use to distinguish senders.
-    /// The `new_badge` value is injected by the kernel — the sender cannot
+    /// The `new_badge` value is injected by the kernel : the sender cannot
     /// override it at send time.
     pub fn duplicate_with_badge(&mut self, id: CapId, new_badge: u64) -> Option<Capability> {
         if let Some(cap) = self.capabilities.get(&id) {

@@ -404,6 +404,25 @@ extern "C" fn lapic_timer_inner(
             crate::process::scheduler::maybe_preempt_from_interrupt(cpu, frame)
         {
             if decision.next_rsp != 0 {
+                // TEMP DEBUG: dump the resume iret frame (rip/rsp) before switching.
+                unsafe {
+                    let base = decision.next_rsp;
+                    let iret_rip = *(base as *const u64).add(15);   // after 15 GPRs
+                    let iret_rsp = *(base as *const u64).add(18);   // rip,cs,rflags,rsp
+                    let hex = b"0123456789abcdef";
+                    core::arch::asm!("out 0xe9, al", in("al") b'@', options(nomem, nostack));
+                    core::arch::asm!("out 0xe9, al", in("al") b'R', options(nomem, nostack));
+                    for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
+                        let nib = hex[((iret_rip >> sh) & 0xF) as usize];
+                        core::arch::asm!("out 0xe9, al", in("al") nib, options(nomem, nostack));
+                    }
+                    core::arch::asm!("out 0xe9, al", in("al") b'/', options(nomem, nostack));
+                    for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
+                        let nib = hex[((iret_rsp >> sh) & 0xF) as usize];
+                        core::arch::asm!("out 0xe9, al", in("al") nib, options(nomem, nostack));
+                    }
+                    core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                }
                 return decision;
             }
         }
@@ -464,7 +483,7 @@ extern "C" fn resched_ipi_inner(
 #[inline]
 fn lock_idt_storage() {
     // SAFETY: Only the lock field of the static mut is accessed, which is
-    // an AtomicBool — concurrent access is safe by design.
+    // an AtomicBool : concurrent access is safe by design.
     while unsafe { &IDT_STORAGEWrapper.lock }
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
@@ -612,7 +631,7 @@ pub fn register_ahci_irq(irq: u8) {
 
 /// Register the NVMe storage controller IRQ handler for a specific vector.
 ///
-/// Used when MSI/MSI-X is active — the vector comes directly from
+/// Used when MSI/MSI-X is active : the vector comes directly from
 /// `msi::probe_and_enable()` instead of being derived from the IRQ line.
 pub fn register_nvme_irq_vector(vector: u8) {
     lock_idt_storage();
@@ -772,8 +791,8 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
     crate::e9_mark!(b'U');
     crate::e9_mark!(b'D');
     // Emit the faulting RIP as raw bytes (little-endian u64) for diagnosis.
-    // Use ONLY inline asm — no Rust function calls, no format_args, no
-    // to_le_bytes() — to avoid identity-mapped function pointer issues.
+    // Use ONLY inline asm : no Rust function calls, no format_args, no
+    // to_le_bytes() : to avoid identity-mapped function pointer issues.
     let rip: u64 = stack_frame.instruction_pointer.as_u64();
     unsafe {
         core::arch::asm!(
@@ -1936,7 +1955,7 @@ extern "x86-interrupt" fn legacy_timer_handler(stack_frame: InterruptStackFrame)
     }
 
     // NOTE: serial_force_println! (formatted format_args!) can hang this IRQ
-    // handler (known vtable issue) — a hung timer handler kills all
+    // handler (known vtable issue) : a hung timer handler kills all
     // preemption. The tick counter itself is the trace: E9 raw pulses only.
     let ticks = crate::process::scheduler::ticks();
     unsafe {
@@ -1984,7 +2003,7 @@ extern "x86-interrupt" fn lapic_timer_handler(stack_frame: InterruptStackFrame) 
     // Trace first 10 ticks per CPU unconditionally to confirm timer fires
     // after Ring-3 entry, then one-per-100 heartbeat to avoid flooding.
     unsafe {
-        // Raw pulse only — formatted prints hang the IRQ handler.
+        // Raw pulse only : formatted prints hang the IRQ handler.
         core::arch::asm!("out 0xe9, al", in("al") b'T', options(nomem, nostack));
     }
 

@@ -233,7 +233,7 @@ impl Framebuffer {
     ///
     /// G3: the double buffer is allocated FIRST and attached as the scanout
     /// resource backing itself, so draws land directly in what
-    /// TRANSFER_TO_HOST_2D reads — presentation becomes zero-copy.
+    /// TRANSFER_TO_HOST_2D reads : presentation becomes zero-copy.
     pub fn init_virtio_gpu() -> Result<(), &'static str> {
         let gpu = crate::hardware::virtio::gpu::get_gpu().ok_or("VirtIO GPU not initialized")?;
         let gpu_info = gpu.info();

@@ -31,7 +31,7 @@ pub struct IpcQuota {
     pub channels: AtomicU32,
     /// Sum of `capacity` across all channels created by this process.
     pub queue_slots: AtomicU64,
-    /// `queue_slots * size_of::<IpcMessage>()` — total bytes that could be
+    /// `queue_slots * size_of::<IpcMessage>()` : total bytes that could be
     /// buffered across all channels.
     pub buffered_bytes: AtomicU64,
 }
@@ -71,7 +71,7 @@ impl IpcQuota {
             return Err(QuotaExceeded);
         }
 
-        // All checks passed — commit the reservation atomically.
+        // All checks passed : commit the reservation atomically.
         self.channels.store(new_channels, Ordering::Release);
         self.queue_slots.store(new_slots, Ordering::Release);
         self.buffered_bytes.store(new_bytes, Ordering::Release);
@@ -82,7 +82,7 @@ impl IpcQuota {
     ///
     /// Must be called exactly once for every successful `try_reserve`.
     /// Passing a `capacity` that was never reserved will underflow the
-    /// counters — the caller must ensure correctness.
+    /// counters : the caller must ensure correctness.
     pub fn release(&self, capacity: usize) {
         let _ = self.channels.fetch_sub(1, Ordering::AcqRel);
 

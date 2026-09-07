@@ -1,10 +1,10 @@
 //! In-flight silo manager tests (selftest feature).
 //!
 //! Two families, each assertion traced to the review commit it pins:
-//! 1. **Pure-function suite** — pledge monotonicity, config validation,
+//! 1. **Pure-function suite** : pledge monotonicity, config validation,
 //!    unveil normalisation (dot-segment rejection), path-rule boundaries,
 //!    tier derivation, fault packing, labels, output ring buffer.
-//! 2. **Lifecycle e2e** — spawn/duplicate-label/rename/stop/rename/
+//! 2. **Lifecycle e2e** : spawn/duplicate-label/rename/stop/rename/
 //!    destroy through the public `kernel_*` API, plus quota adjustment
 //!    and pledge escalation rejection.
 

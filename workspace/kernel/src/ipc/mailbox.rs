@@ -13,7 +13,7 @@
 //! lock-free push/pop.  See [`tag_ptr`] and [`untag_ptr`].
 
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// Default number of pre-allocated node slots in the freelist.
 /// Chosen to cover the maximum expected number of in-flight N1 messages.
@@ -101,15 +101,23 @@ pub struct MailboxMessage {
 /// Nodes are recycled: after `pop()`, the node is returned to the pool
 /// instead of freed; on `push()`, the pool is checked first before
 /// allocating a fresh node.
+///
+/// ABA protection: the head pointer is tagged with a monotonic generation
+/// counter to prevent the ABA problem on concurrent pop/push cycles.
 #[derive(Debug)]
 struct NodePool {
-    head: AtomicUsize,
+    head: AtomicU64,
 }
+
+/// Mask for the pointer portion of a tagged pool pointer.
+const POOL_PTR_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+/// Shift for the generation counter in a tagged pool pointer.
+const POOL_GEN_SHIFT: u64 = 48;
 
 impl NodePool {
     const fn new() -> Self {
         NodePool {
-            head: AtomicUsize::new(0),
+            head: AtomicU64::new(0),
         }
     }
 
@@ -120,59 +128,44 @@ impl NodePool {
                 next: AtomicUsize::new(0),
                 data: IpcMessage::new(0),
             };
-            let ptr = Box::into_raw(Box::new(msg)) as usize;
-            // Lock-free push onto pool head (no tag needed : pool is IRQ-safe
-            // and the tag in the mailbox head already provides ABA protection).
-            loop {
-                let current = self.head.load(Ordering::Relaxed);
-                unsafe {
-                    (*(ptr as *mut MailboxMessage))
-                        .next
-                        .store(current, Ordering::Relaxed);
-                }
-                if self
-                    .head
-                    .compare_exchange_weak(current, ptr, Ordering::Release, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    break;
-                }
-            }
+            let ptr = Box::into_raw(Box::new(msg)) as u64;
+            self.push_raw(ptr as *mut MailboxMessage);
         }
     }
 
-    /// Try to pop a node from the pool (lock-free).
+    /// Try to pop a node from the pool (lock-free, ABA-safe).
     fn try_pop_raw(&self) -> Option<*mut MailboxMessage> {
         loop {
-            let current = self.head.load(Ordering::Acquire);
-            if current == 0 {
+            let tagged = self.head.load(Ordering::Acquire);
+            let ptr = (tagged & POOL_PTR_MASK) as *mut MailboxMessage;
+            if ptr.is_null() {
                 return None;
             }
-            let next = unsafe {
-                (*(current as *mut MailboxMessage))
-                    .next
-                    .load(Ordering::Relaxed)
-            };
+            let gen = tagged >> POOL_GEN_SHIFT;
+            let next = unsafe { (*ptr).next.load(Ordering::Relaxed) } as u64;
+            let new_tagged = (next & POOL_PTR_MASK) | ((gen + 1) << POOL_GEN_SHIFT);
             if self
                 .head
-                .compare_exchange_weak(current, next, Ordering::Acquire, Ordering::Relaxed)
+                .compare_exchange_weak(tagged, new_tagged, Ordering::Acquire, Ordering::Relaxed)
                 .is_ok()
             {
-                return Some(current as *mut MailboxMessage);
+                return Some(ptr);
             }
         }
     }
 
-    /// Push a raw node pointer back into the pool (lock-free).
+    /// Push a raw node pointer back into the pool (lock-free, ABA-safe).
     fn push_raw(&self, ptr: *mut MailboxMessage) {
         loop {
-            let current = self.head.load(Ordering::Relaxed);
+            let tagged = self.head.load(Ordering::Relaxed);
+            let gen = tagged >> POOL_GEN_SHIFT;
             unsafe {
-                (*ptr).next.store(current, Ordering::Relaxed);
+                (*ptr).next.store((tagged & POOL_PTR_MASK) as usize, Ordering::Relaxed);
             }
+            let new_tagged = (ptr as u64 & POOL_PTR_MASK) | ((gen + 1) << POOL_GEN_SHIFT);
             if self
                 .head
-                .compare_exchange_weak(current, ptr as usize, Ordering::Release, Ordering::Relaxed)
+                .compare_exchange_weak(tagged, new_tagged, Ordering::Release, Ordering::Relaxed)
                 .is_ok()
             {
                 return;
@@ -255,9 +248,10 @@ impl IntrusiveMailbox {
 
     /// Pop a message from the mailbox (LIFO : from head).
     ///
-    /// Returns the node to the pre-allocated pool instead of freeing it,
-    /// which keeps the pool warm for the next IRQ-context push.
-    pub fn pop(&self) -> Option<alloc::boxed::Box<MailboxMessage>> {
+    /// Copies the message data out of the intrusive node, then returns the
+    /// node to the pre-allocated pool.  The caller receives an owned
+    /// `IpcMessage` value : no pointers into recycled memory.
+    pub fn pop(&self) -> Option<IpcMessage> {
         loop {
             let current = self.head.load(Ordering::Acquire);
             if current & PTR_MASK == 0 {
@@ -271,28 +265,13 @@ impl IntrusiveMailbox {
                 .compare_exchange_weak(current, new_tagged, Ordering::Acquire, Ordering::Relaxed)
                 .is_ok()
             {
-                // Return the node to the pool instead of dropping it.
-                // This keeps the pool warm for the next push in IRQ context.
+                // P0 fix: copy the message out BEFORE recycling the node.
+                // This eliminates the UAF: the caller gets an owned value,
+                // not a pointer into pool-managed memory.
+                let msg = unsafe { (*current_ptr).data };
+                // Return the node to the pool for reuse.
                 self.pool.push_raw(current_ptr);
-                // The caller gets a Box that they can use, but we've already
-                // recycled the node.  We return the node anyway so the caller
-                // can read the data; the memory remains valid because the pool
-                // only reuses nodes after the caller drops the Box.
-                //
-                // SAFETY: current_ptr points to a valid MailboxMessage that
-                // was previously heap-allocated or pool-allocated.  We
-                // transferred ownership to the pool above, but the caller
-                // expects ownership.  We reconstruct a Box so the caller
-                // gets a valid owned reference; the memory stays valid
-                // because the pool holds a separate reference.
-                // When the caller drops this Box, it frees the heap
-                // allocation (which is fine : a pool node was pushed
-                // back to the pool, and the Box frees a redundant copy).
-                //
-                // This is a deliberate trade-off: pool nodes are recycled
-                // via push_raw, and the returned Box is always a separate
-                // heap allocation (the one the caller originally pushed).
-                return Some(unsafe { Box::from_raw(current_ptr) });
+                return Some(msg);
             }
         }
     }
@@ -354,9 +333,9 @@ impl IpcProducer for IntrusiveMailbox {
 impl IpcConsumer for IntrusiveMailbox {
     fn recv(&self, buf: &mut [u8]) -> Result<usize, IpcError> {
         match self.pop() {
-            Some(node) => {
-                let len = node.data.payload.len().min(buf.len());
-                buf[..len].copy_from_slice(&node.data.payload[..len]);
+            Some(msg) => {
+                let len = msg.payload.len().min(buf.len());
+                buf[..len].copy_from_slice(&msg.payload[..len]);
                 Ok(len)
             }
             None => Err(IpcError::WouldBlock),
@@ -384,8 +363,8 @@ mod tests {
     fn push_pop_single() {
         let mb = IntrusiveMailbox::new();
         mb.push(b"hello").unwrap();
-        let node = mb.pop().unwrap();
-        assert_eq!(&node.data.payload[..5], b"hello");
+        let msg = mb.pop().unwrap();
+        assert_eq!(&msg.payload[..5], b"hello");
     }
 
     #[test]
@@ -394,10 +373,10 @@ mod tests {
         mb.push(b"first").unwrap();
         mb.push(b"second").unwrap();
         // LIFO: second popped first
-        let node2 = mb.pop().unwrap();
-        assert_eq!(&node2.data.payload[..6], b"second");
-        let node1 = mb.pop().unwrap();
-        assert_eq!(&node1.data.payload[..5], b"first");
+        let msg2 = mb.pop().unwrap();
+        assert_eq!(&msg2.payload[..6], b"second");
+        let msg1 = mb.pop().unwrap();
+        assert_eq!(&msg1.payload[..5], b"first");
     }
 
     #[test]

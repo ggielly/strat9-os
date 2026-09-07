@@ -282,7 +282,7 @@ pub fn restore_flags(flags: u64) {
     }
 }
 
-/// Read the `time` CSR (rdtime equivalent) — cycle counter.
+/// Read the `time` CSR (rdtime equivalent) : cycle counter.
 /// On QEMU virt this increments at a fixed frequency (~10 MHz via CLINT),
 /// usable as an early monotonic timestamp source.
 #[inline]
@@ -372,7 +372,7 @@ pub mod cpuid_x86_shim {
     }
 }
 
-/// x86-only CPU extensions init — no-op on RISC-V.
+/// x86-only CPU extensions init : no-op on RISC-V.
 pub fn init_cpu_extensions() {}
 
 // VGA text options (serial-only console: no-ops)

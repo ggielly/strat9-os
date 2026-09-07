@@ -908,7 +908,7 @@ impl XhciController {
             }
 
             // NOTE: log::info! (formatted) hung the enumeration path in some
-            // builds (known format_args vtable issue) — keep it OUT of the
+            // builds (known format_args vtable issue) : keep it OUT of the
             // hot enumeration loop; E9 marks carry the trace instead.
 
             if !unsafe { self.reset_port(port) } {

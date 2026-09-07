@@ -2,7 +2,7 @@
 //!
 //! This module handles the kernel entry from the bootloader or PVH stub.
 //! The bootloader passes a pointer to a [`strat9_abi::boot::KernelArgs`] structure.
-//! PVH boot passes null — a minimal KernelArgs is built internally.
+//! PVH boot passes null : a minimal KernelArgs is built internally.
 //!
 //! # Boot flow
 //!
@@ -125,7 +125,7 @@ pub unsafe extern "C" fn kmain(args_ptr: u64) -> ! {
         );
     }
 
-    // Step 3: Obtain KernelArgs — either from the bootloader pointer or
+    // Step 3: Obtain KernelArgs : either from the bootloader pointer or
     //         build a minimal set for PVH.
     //
     // NOTE: We use raw COM1 port I/O for ALL output here. The global

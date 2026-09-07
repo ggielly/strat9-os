@@ -1,4 +1,4 @@
-//! ThreadsScheme — Plan 9 style `/thread` control files.
+//! ThreadsScheme : Plan 9 style `/thread` control files.
 //!
 //! Exposes the userspace thread API as filesystem operations. All lifecycle
 //! work is forwarded to [`crate::process::thread_ops`], the exact same

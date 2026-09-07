@@ -1,4 +1,4 @@
-//! L1 — errno ABI convention tests.
+//! L1 : errno ABI convention tests.
 //!
 //! Syscalls return `usize` in RAX:
 //! - success: any non-negative value,
@@ -65,12 +65,36 @@ fn errno_values_match_linux() {
 #[test]
 fn all_errno_values_fit_detection_window() {
     const ALL: &[usize] = &[
-        errno::EPERM, errno::ENOENT, errno::ESRCH, errno::EINTR, errno::EIO, errno::E2BIG,
-        errno::ENOEXEC, errno::EBADF, errno::ECHILD, errno::EAGAIN, errno::ENOMEM,
-        errno::EACCES, errno::EFAULT, errno::EEXIST, errno::ENOTDIR, errno::EISDIR,
-        errno::EINVAL, errno::ENOTTY, errno::ENOSPC, errno::EPIPE, errno::ERANGE,
-        errno::ENAMETOOLONG, errno::ENOSYS, errno::ENOTEMPTY, errno::ELOOP, errno::ENOTSUP,
-        errno::EAFNOSUPPORT, errno::EADDRINUSE, errno::ENOBUFS, errno::ETIMEDOUT,
+        errno::EPERM,
+        errno::ENOENT,
+        errno::ESRCH,
+        errno::EINTR,
+        errno::EIO,
+        errno::E2BIG,
+        errno::ENOEXEC,
+        errno::EBADF,
+        errno::ECHILD,
+        errno::EAGAIN,
+        errno::ENOMEM,
+        errno::EACCES,
+        errno::EFAULT,
+        errno::EEXIST,
+        errno::ENOTDIR,
+        errno::EISDIR,
+        errno::EINVAL,
+        errno::ENOTTY,
+        errno::ENOSPC,
+        errno::EPIPE,
+        errno::ERANGE,
+        errno::ENAMETOOLONG,
+        errno::ENOSYS,
+        errno::ENOTEMPTY,
+        errno::ELOOP,
+        errno::ENOTSUP,
+        errno::EAFNOSUPPORT,
+        errno::EADDRINUSE,
+        errno::ENOBUFS,
+        errno::ETIMEDOUT,
         errno::ECONNREFUSED,
     ];
     for &e in ALL {
@@ -95,10 +119,10 @@ fn success_results_are_not_mistaken_for_errors() {
     for &ok in &[
         0usize,
         1,
-        3,          // fd
-        4096,       // page size read
-        0x7FFF_FFFF,// INT_MAX
-        0xFFFF_F000,// exactly at threshold: still "success" per doc (`>` not `>=`)
+        3,           // fd
+        4096,        // page size read
+        0x7FFF_FFFF, // INT_MAX
+        0xFFFF_F000, // exactly at threshold: still "success" per doc (`>` not `>=`)
     ] {
         assert!(
             from_syscall_result(ok).is_none(),

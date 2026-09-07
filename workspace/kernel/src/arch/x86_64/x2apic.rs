@@ -33,9 +33,9 @@ const IA32_X2APIC_TIMER_DIV: u32 = 0x83E;
 //   [0:7]   Vector
 //   [8:10]  Delivery Mode
 //   [11]    Destination Mode (0=physical, 1=logical)
-//   [12]    Delivery Status (read-only in x2APIC — write is ignored)
+//   [12]    Delivery Status (read-only in x2APIC : write is ignored)
 //   [13]    Reserved
-//   [14]    Level (0=de-assert, 1=assert — only meaningful for INIT/ExtINT)
+//   [14]    Level (0=de-assert, 1=assert : only meaningful for INIT/ExtINT)
 //   [15]    Trigger Mode (0=edge, 1=level)
 //   [16:17] Reserved
 //   [18:19] Destination Shorthand

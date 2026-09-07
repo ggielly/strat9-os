@@ -1,5 +1,6 @@
 stages:
     - test
+    - test-qemu
     - build
     - release
 
@@ -13,27 +14,55 @@ variables:
     GIT_DEPTH: "0"
     TZ: "Europe/Paris"
 
-# L3/L4 QEMU gate — enable once a runner with qemu-system-x86_64 is available
-# (tag the runner 'qemu'). Validated locally with: cargo make qemu-tests
-qemu-selftest:
-    stage: test
-    tags: [qemu]
-    allow_failure: true   # tighten to blocking once stable
+# L3/L4 QEMU gate — option A: strat9-builder VM on Proxmox
+# (https://192.168.1.235:8006), shell runner tagged [qemu,kvm,proxmox].
+# Each pipeline boots an EPHEMERAL QEMU process (trap-cleaned), no Limine:
+# UEFI ISO with own strat9-bootloader.efi (cargo make selftest-iso-uefi).
+# Provision the VM once: tools/ci/proxmox-make-builder.sh (on PVE host),
+# then tools/ci/builder-provision.sh (inside the VM).
+# Validated locally with: cargo make qemu-tests
+build-selftest-iso:
+    stage: test-qemu
+    tags: [qemu, kvm, proxmox]
     timeout: 30 minutes
     before_script:
-        - rustup default nightly || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env" && rustup default nightly
-        - rustup component add rust-src llvm-tools-preview
-        - rustup target add x86_64-unknown-none
-        - if ! command -v cargo-make &> /dev/null; then cargo install cargo-make; fi
+        - source "$HOME/.cargo/env" 2>/dev/null || true
+        - rustup show active-toolchain || rustup toolchain install nightly-2026-07-20 --component rust-src llvm-tools
+        - rustup target add x86_64-unknown-none x86_64-unknown-uefi 2>/dev/null || true
+        - if ! command -v cargo-make &> /dev/null && ! cargo make --version &> /dev/null; then cargo install cargo-make; fi
     script:
-        - cargo make qemu-tests
+        - bash tools/ci/build-selftest-iso.sh
+    artifacts:
+        paths:
+            - build/strat9-os-selftest-uefi.iso
+            - build/strat9-os-selftest-uefi.iso.sha256
+        expire_in: 2 week
+
+qemu-proxmox:
+    stage: test-qemu
+    tags: [qemu, kvm, proxmox]
+    needs: [build-selftest-iso]
+    allow_failure: true   # tighten to blocking once green for 2 weeks straight
+    timeout: 30 minutes
+    before_script:
+        - source "$HOME/.cargo/env" 2>/dev/null || true
+        - command -v qemu-system-x86_64 || { echo "qemu-system-x86_64 missing — re-run tools/ci/builder-provision.sh"; exit 2; }
+        - ls /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/edk2-ovmf/x64/OVMF_CODE*.fd 2>/dev/null || { echo "OVMF missing — re-run tools/ci/builder-provision.sh"; exit 2; }
+    script:
+        - ./tools/scripts/qemu-selftest.sh --iso build/strat9-os-selftest-uefi.iso --timeout 180
+    artifacts:
+        paths:
+            - build/qemu-selftest.log
+        when: always
+        expire_in: 2 week
 
 test-host:
     stage: test
     before_script:
-        - rustup default nightly || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env" && rustup default nightly
-        - rustup target add x86_64-unknown-linux-gnu
-        - if ! command -v cargo-make &> /dev/null; then cargo install cargo-make; fi
+        - source "$HOME/.cargo/env" 2>/dev/null || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env"
+        - rustup show active-toolchain || rustup toolchain install nightly-2026-07-20 --component rust-src llvm-tools
+        - rustup target add x86_64-unknown-linux-gnu 2>/dev/null || true
+        - if ! command -v cargo-make &> /dev/null && ! cargo make --version &> /dev/null; then cargo install cargo-make; fi
     script:
         # L0/L1 anti-regression gate: ABI conformance + host-safe crates.
         # Kernel/no_std components are covered by L3 selftests + L4 QEMU jobs.

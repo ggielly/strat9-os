@@ -1,4 +1,4 @@
-//! L1 — network driver silo protocol: opcodes + IPC header layout.
+//! L1 : network driver silo protocol: opcodes + IPC header layout.
 
 use driver_net_proto::{opcodes, NetIpcHeader, NetIpcReply};
 

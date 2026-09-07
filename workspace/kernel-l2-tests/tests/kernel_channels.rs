@@ -1,4 +1,4 @@
-//! L2 — Typed MPMC channel + SyncChan (verbatim kernel code).
+//! L2 : Typed MPMC channel + SyncChan (verbatim kernel code).
 //!
 //! Blocking paths (`send`/`recv` on full/empty) cannot run single-threaded,
 //! so the suite covers the non-blocking surface exhaustively plus the
@@ -6,9 +6,7 @@
 //! bugs historically live. If a test accidentally blocks, the fake
 //! `process::block_current_task` panics loudly.
 
-use kernel_l2_tests::ipc::channel::{
-    channel, create_channel, ChannelError, SyncChan,
-};
+use kernel_l2_tests::ipc::channel::{channel, create_channel, ChannelError, SyncChan};
 use strat9_abi::data::IpcMessage;
 
 // ===========================================================================
@@ -144,7 +142,7 @@ fn sync_chan_destroy_rejects_further_traffic() {
 
 #[test]
 fn sync_chan_registry_create_and_lookup() {
-    // create_channel registers in the global ChanId table — exercises the
+    // create_channel registers in the global ChanId table : exercises the
     // registry path used by SYS_CHAN_* syscalls.
     let id = create_channel(8);
     // A fresh id must be usable; destroying twice must be tolerated.

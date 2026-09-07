@@ -10,8 +10,8 @@
 //!
 //! # Conventions
 //!
-//! - **Fixed-size structs** are kept ≤ 48 bytes by convention — well under
-//!   `IpcMessage::PAYLOAD_CAPACITY` (240) — so they can be embedded in
+//! - **Fixed-size structs** are kept ≤ 48 bytes by convention : well under
+//!   `IpcMessage::PAYLOAD_CAPACITY` (240) : so they can be embedded in
 //!   messages that also carry an inline blob.
 //! - Variable-length path/data fields use an [`InlineBlobHeader`] prefix
 //!   and may exploit the full 240-byte payload capacity.
@@ -116,7 +116,7 @@ assert_payload_size!(StatusReply);
 /// # Wire-compatibility note
 ///
 /// Unlike most variable-length fields, the open path is prefixed by a raw
-/// `u16` length — **not** an [`InlineBlobHeader`] (there is no `kind`
+/// `u16` length : **not** an [`InlineBlobHeader`] (there is no `kind`
 /// field). This historical layout is kept because every existing client
 /// (kernel VFS, net and bus schemes) encodes it this way. Earlier versions
 /// of this documentation wrongly claimed an `InlineBlobHeader` at 4..8;
@@ -358,7 +358,7 @@ impl WriteRequest {
     /// Encode a WRITE request into a fresh [`IpcMessage`].
     ///
     /// Returns `None` if `data` exceeds [`IpcMessage::WRITE_INLINE_CAPACITY`]
-    /// — chunking is the caller's policy, this helper never truncates.
+    /// : chunking is the caller's policy, this helper never truncates.
     /// Otherwise returns the message and the packed length (== `data.len()`).
     pub fn encode(
         msg_type: u32,

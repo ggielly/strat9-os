@@ -1,4 +1,4 @@
-//! L1 — `strat9_syscall::error`: typed errno surface conformance.
+//! L1 : `strat9_syscall::error`: typed errno surface conformance.
 //!
 //! `Error` is the userspace-facing enum mirroring `strat9_abi::errno` via
 //! num_enum. Roundtrips, demux of raw RAX values and symbolic names are
@@ -137,7 +137,7 @@ mod posix_flag_constants {
 
     #[test]
     fn linux_x86_64_values_are_pinned() {
-        // From linux asm-generic/fcntl.h — these MUST stay bit-identical
+        // From linux asm-generic/fcntl.h : these MUST stay bit-identical
         // or every POSIX binary breaks in new creative ways (see F8).
         assert_eq!(O_ACCMODE, 0o3);
         assert_eq!(O_RDONLY, 0o0);

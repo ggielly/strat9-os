@@ -1,4 +1,4 @@
-//! L2 — N1 TypeSafe events + POSIX-style semaphores (verbatim kernel code).
+//! L2 : N1 TypeSafe events + POSIX-style semaphores (verbatim kernel code).
 //!
 //! Semaphore blocking paths (`wait` on a zero count) would block forever
 //! single-threaded; the suite pins `try_wait`, `post`, lifecycle and the
@@ -78,7 +78,7 @@ fn semaphore_post_above_zero_stays_bounded() {
     sem.post().expect("post on positive count is legal");
     let c = sem.count();
     // Kernel policy pinned here: post increments even above initial value
-    // (no maximum clamp) — matches POSIX unnamed semaphores.
+    // (no maximum clamp) : matches POSIX unnamed semaphores.
     assert!(c >= 1 && c <= 2, "unexpected count {} after post", c);
 }
 

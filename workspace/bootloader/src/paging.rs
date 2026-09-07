@@ -6,13 +6,13 @@ const PRESENT: u64 = 1;
 const WRITABLE: u64 = 1 << 1;
 
 /// Higher-half direct map of physical RAM (HHDM). Must match the value
-/// passed to the kernel in `KernelArgs::hhdm_offset` — the kernel does
+/// passed to the kernel in `KernelArgs::hhdm_offset` : the kernel does
 /// phys_to_virt(phys) = phys + hhdm_offset for ALL physical memory access.
 ///
 /// PML4[510] window (0xFFFFFF0000000000..0xFFFFFF7FFFFFFFFF, 512 GB):
 /// distinct from PML4[511] (kernel image slot), PML4[445] (framebuffer)
 /// and PML4[381] (environment). The kernel image lives at
-/// 0xFFFFFFFF80000000 = PML4[511].PDP[510] — using 0xFFFFFFFF80000000 as
+/// 0xFFFFFFFF80000000 = PML4[511].PDP[510] : using 0xFFFFFFFF80000000 as
 /// the HHDM offset would collide with the kernel-image mapping.
 pub const HHDM_OFFSET: u64 = 0xFFFF_FF00_0000_0000;
 /// Upper bound of RAM covered by the HHDM (and identity) map.
@@ -78,7 +78,7 @@ pub unsafe fn create_page_tables(
         // 1 GiB huge pages: the PDPE PS bit (bit 7) MUST be set or the entry
         // is treated as a page-directory pointer and the walk faults.
         // Note: bit 7 also selects PAT entry 4 (programmed to WC by
-        // context_switch); that is harmless here — only the framebuffer
+        // context_switch); that is harmless here : only the framebuffer
         // mapping uses WC in practice, and this matches the original
         // graphics-branch design.
         for i in 0..8u64 {
@@ -104,7 +104,7 @@ pub unsafe fn create_page_tables(
                 let phys = (gb * 0x4000_0000) + i * HUGE_PAGE;
                 // NOTE: PS bit (1<<7) selects a 2MiB page AND PAT entry 4.
                 // context_switch reprograms PAT entry 4 to Write-Combining
-                // for the framebuffer — HHDM pages must stay WB, so the PAT
+                // for the framebuffer : HHDM pages must stay WB, so the PAT
                 // bit must be cleared here despite the huge page. On PDEs,
                 // PS(bit7)=1 alone makes it a huge page; the PAT bit lives
                 // in bit 12 (PCD position) for PDE entries. Bit 7 = PS only.

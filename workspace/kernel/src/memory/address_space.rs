@@ -232,7 +232,7 @@ impl AddressSpace {
                 new_l4[i] = kernel_l4[i].clone();
             }
 
-            // NOTE: the kernel image stays SHARED (PML4[511] subtree) — the
+            // NOTE: the kernel image stays SHARED (PML4[511] subtree) : the
             // kernel must remain executable while a user CR3 is active (the
             // scheduler, syscall entry and IRQ paths run in kernel mode under
             // the user page tables). Isolation comes from the U/S page bits:
@@ -1254,15 +1254,19 @@ impl AddressSpace {
         // Remove from VMA tracking.
         self.regions.lock().remove(&start);
 
+        let end = start + (page_count as u64) * page_bytes;
+
+        // P0 fix: inter-CPU TLB shootdown after unmapping.
+        crate::arch::tlb::shootdown_range(VirtAddr::new(start), VirtAddr::new(end));
+
         log::trace!(
             "Unmapped region: {:#x}..{:#x} ({} pages, size={:?})",
             start,
-            start + (page_count as u64) * page_bytes,
+            end,
             page_count,
             page_size
         );
 
-        let end = start + (page_count as u64) * page_bytes;
         crate::trace_mem!(
             crate::trace::category::MEM_UNMAP,
             crate::trace::TraceKind::MemUnmap,
@@ -1515,6 +1519,12 @@ impl AddressSpace {
             cursor = range_end;
         }
 
+        // P0 fix: inter-CPU TLB shootdown after all PTE flag changes.
+        // Other CPUs may still hold stale RW translations in their TLB.
+        if touched {
+            crate::arch::tlb::shootdown_range(VirtAddr::new(addr), VirtAddr::new(end));
+        }
+
         if !touched {
             return Err("protect_range: no mapped region in range");
         }
@@ -1650,6 +1660,10 @@ impl AddressSpace {
                 }
             }
         }
+
+        // P0 fix: inter-CPU TLB shootdown after unmapping.
+        // Other CPUs may still have stale translations for the unmapped pages.
+        crate::arch::tlb::shootdown_range(VirtAddr::new(addr), VirtAddr::new(end));
 
         crate::silo::release_current_task_memory(released_bytes);
         Ok(())

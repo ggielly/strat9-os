@@ -49,7 +49,7 @@ pub struct MoxtetModule {
     pub id: MoxtetModuleId,
     /// Zero-based position of this module on the chain. This is the value
     /// used to address the module through `BusDriver::read_reg`/
-    /// `write_reg` — see [`Moxtet`] for the addressing scheme.
+    /// `write_reg` : see [`Moxtet`] for the addressing scheme.
     pub index: u8,
 }
 
@@ -165,7 +165,7 @@ impl BusDriver for Moxtet {
     /// Reads the RX buffer slot of the module at `offset`.
     ///
     /// `offset` is a **module index** (0-based position on the shift
-    /// chain), not an MMIO byte offset — see the [`Moxtet`] type docs.
+    /// chain), not an MMIO byte offset : see the [`Moxtet`] type docs.
     fn read_reg(&self, offset: usize) -> Result<u32, BusError> {
         self.module_read(offset).map(|v| v as u32)
     }
@@ -173,7 +173,7 @@ impl BusDriver for Moxtet {
     /// Writes the TX buffer slot of the module at `offset`.
     ///
     /// `offset` is a **module index** (0-based position on the shift
-    /// chain), not an MMIO byte offset — see the [`Moxtet`] type docs.
+    /// chain), not an MMIO byte offset : see the [`Moxtet`] type docs.
     /// Only the low 8 bits of `value` are significant: each module slot
     /// is one byte wide in the SPI frame.
     fn write_reg(&mut self, offset: usize, value: u32) -> Result<(), BusError> {

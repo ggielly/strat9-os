@@ -16,7 +16,7 @@ bitflags! {
     /// Bit positions do NOT match raw CPUID register positions: flags coming
     /// from different leaves/sub-registers are reallocated into one `u64`
     /// space (SMEP/SMAP are deliberately relocated high to avoid collisions).
-    /// Only compare through the named constants — never raw bit positions.
+    /// Only compare through the named constants : never raw bit positions.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct CpuFeatures: u64 {
         //  Leaf 0x01 ECX
@@ -188,7 +188,7 @@ pub fn init() {
     //
     // NOTE: compute the size from the *local* `info`, not via the global
     // cache (`xsave_size_for_xcr0`/`host_uses_xsave`). Those consult
-    // `INITIALIZED`, which is only published below — so during `init()` they
+    // `INITIALIZED`, which is only published below : so during `init()` they
     // always fall back to 512 bytes even when AVX/AVX-512 is present, leaving
     // the XSAVE area too small and corrupting state on the first AVX context
     // switch.
@@ -380,7 +380,7 @@ fn detect() -> CpuInfo {
     // CPUID.(0D,0):EDX:EAX = bitmap of components supported by the CPU
     // (XCR0 candidates). EBX = size of the save area for the components
     // currently enabled in XCR0 (OS-chosen, not a constant). ECX = size if
-    // every supported component were enabled — the correct upper bound for
+    // every supported component were enabled : the correct upper bound for
     // synthetic masks. Supervisor states (managed via IA32_XSS, not XCR0)
     // are filtered out so `supported_xcr0` stays a true XCR0 bitmap.
     crate::e9_mark!(b'F');
@@ -513,7 +513,7 @@ impl CpuInfo {
     /// Whether AVX may actually be executed: the hardware announces it AND
     /// the kernel enabled the required states (CR4.OSXSAVE via XSAVE +
     /// XCR0 bits 0|1|2). Never gate code paths on `features.contains(AVX)`
-    /// alone — that only reflects CPUID, not what the OS programmed.
+    /// alone : that only reflects CPUID, not what the OS programmed.
     pub fn avx_usable(&self) -> bool {
         const REQUIRED: u64 = XCR0_X87 | XCR0_SSE | XCR0_AVX;
         self.features.contains(
@@ -556,7 +556,7 @@ pub fn xcr0_for_features(_features: CpuFeatures) -> u64 {
 /// Compute the XSAVE area size needed for a given XCR0 mask directly from a
 /// `CpuInfo`, without consulting the global cache (`host_uses_xsave`/`host`).
 /// This is what `init()` must use, because the cache is not yet published when
-/// `init()` runs — otherwise AVX/AVX-512 would be given a 512-byte area.
+/// `init()` runs : otherwise AVX/AVX-512 would be given a 512-byte area.
 fn xsave_size_for_info(info: &CpuInfo, xcr0: u64) -> usize {
     if !info.features.contains(CpuFeatures::XSAVE) {
         return 512;
@@ -564,7 +564,7 @@ fn xsave_size_for_info(info: &CpuInfo, xcr0: u64) -> usize {
     // Clamp to what the CPU actually supports; ignore unknown bits.
     let xcr0 = xcr0 & info.supported_xcr0;
     if xcr0 == info.supported_xcr0 {
-        // Fast path: requesting all components — use the ECX upper-bound.
+        // Fast path: requesting all components : use the ECX upper-bound.
         return info.xsave_size_max.max(576);
     }
     let mut size = 576usize; // legacy area (512) + xsave header (64)
@@ -574,7 +574,7 @@ fn xsave_size_for_info(info: &CpuInfo, xcr0: u64) -> usize {
         }
         let (eax, ebx, ecx, _edx) = super::cpuid(0x0D, comp);
         // ECX bit 0: component managed via XCR0 (0) or IA32_XSS (1).
-        // Skip supervisor states — not saved by a user-space XCR0 mask.
+        // Skip supervisor states : not saved by a user-space XCR0 mask.
         if ecx & 1 != 0 {
             continue;
         }
@@ -601,7 +601,7 @@ pub fn xsave_size_for_xcr0(xcr0: u64) -> usize {
     // Enumerate each enabled XCR0 component via CPUID leaf 0xD sub-leaves.
     // Sub-leaf n returns offset (EBX) and size (EAX) for component n.
     // The total save area is max(offset + size) across all enabled components.
-    // NOTE: this walks CPUID per component — do not call from context-switch
+    // NOTE: this walks CPUID per component : do not call from context-switch
     // or task-creation hot paths; precompute profiles instead.
     // The ceiling is xsave_size_max (CPUID.0D.0:ECX), valid for any mask;
     // EBX would only be valid for the XCR0 currently programmed.
@@ -612,7 +612,7 @@ pub fn xsave_size_for_xcr0(xcr0: u64) -> usize {
         }
         let (eax, ebx, ecx, _edx) = super::cpuid(0x0D, comp);
         // ECX bit 0: component managed via XCR0 (0) or IA32_XSS (1).
-        // Skip supervisor states — they are not saved by XSAVE/XRSTOR
+        // Skip supervisor states : they are not saved by XSAVE/XRSTOR
         // with a user-space XCR0 mask.
         if ecx & 1 != 0 {
             continue;

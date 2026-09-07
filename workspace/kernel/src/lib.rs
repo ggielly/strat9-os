@@ -315,7 +315,7 @@ fn log_boot_module_magics(_stage: &str) {}
 
 /// Main kernel initialization - called by bootloader entry points
 pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
-    // Earliest possible e9 mark — before any COM1 trace that might hang.
+    // Earliest possible e9 mark : before any COM1 trace that might hang.
     crate::e9_mark!(b'K');
 
     // Raw COM1 traces hang when SERIAL_ENABLED=false (UART not initialized).
@@ -372,7 +372,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         }
     }
 
-    // Skip e9_println! — it uses format_args! which may crash before
+    // Skip e9_println! : it uses format_args! which may crash before
     // the full kernel is initialized. Use raw COM1 trace instead.
     //crate::e9_println!("B0 kernel_main");
 
@@ -387,7 +387,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         }
     }
 
-    // init_serial() — temporarily disabled: #UD during uart_16550 init
+    // init_serial() : temporarily disabled: #UD during uart_16550 init
     //init_serial();
 
     // Enable boot log prefix (timestamp) by default; can be disabled later if needed.

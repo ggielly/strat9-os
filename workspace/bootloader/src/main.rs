@@ -25,7 +25,10 @@ use strat9_abi::boot::{KernelArgs, MemoryKind, MemoryRegion};
 fn efi_main() -> Status {
     uefi::system::with_stdout(|stdout| {
         let _ = writeln!(stdout, "Strat9-OS bootloader. Version 0.1.0, UEFI mode.");
-        let _ = writeln!(stdout, "Copyright (C) 2026 Guillaume Gielly. All rights reserved.");
+        let _ = writeln!(
+            stdout,
+            "Copyright (C) 2026 Guillaume Gielly. All rights reserved."
+        );
     });
 
     // Open filesystem
@@ -258,7 +261,9 @@ fn efi_main() -> Status {
             loop {
                 let status: u8;
                 core::arch::asm!("in al, dx", out("al") status, in("dx") lsr, options(nomem, nostack));
-                if status & 0x20 != 0 { break; }
+                if status & 0x20 != 0 {
+                    break;
+                }
             }
             core::arch::asm!("out dx, al", in("al") b, in("dx") thr, options(nomem, nostack));
         }
@@ -292,7 +297,7 @@ fn efi_main() -> Status {
         // Split Free regions around the loaded kernel image: without this,
         // the kernel image (code, .bss, bootstrap stack) sits inside a Free
         // region and the kernel's boot/buddy allocators hand its own memory
-        // back to itself — self-corruption, wild jumps (#UD mid-instruction).
+        // back to itself : self-corruption, wild jumps (#UD mid-instruction).
         // Limine used to do this for us; it's the bootloader's job now.
         let mut cursor = base;
         let end = base + size;
@@ -302,8 +307,11 @@ fn efi_main() -> Status {
             // Emit [cursor, image_start) if non-empty
             if cursor < image_start {
                 if region_count < 512 {
-                    regions[region_count] =
-                        MemoryRegion { base: cursor, size: image_start - cursor, kind };
+                    regions[region_count] = MemoryRegion {
+                        base: cursor,
+                        size: image_start - cursor,
+                        kind,
+                    };
                     region_count += 1;
                 }
             }
@@ -311,14 +319,21 @@ fn efi_main() -> Status {
             let rs = image_start.max(cursor);
             let re = image_end.min(end);
             if rs < re && region_count < 512 {
-                regions[region_count] =
-                    MemoryRegion { base: rs, size: re - rs, kind: MemoryKind::Reserved };
+                regions[region_count] = MemoryRegion {
+                    base: rs,
+                    size: re - rs,
+                    kind: MemoryKind::Reserved,
+                };
                 region_count += 1;
             }
             cursor = image_end.max(cursor);
             // Emit remainder [cursor, end) if non-empty
             if cursor < end && region_count < 512 {
-                regions[region_count] = MemoryRegion { base: cursor, size: end - cursor, kind };
+                regions[region_count] = MemoryRegion {
+                    base: cursor,
+                    size: end - cursor,
+                    kind,
+                };
                 region_count += 1;
             }
         } else if region_count < 512 {
@@ -412,13 +427,19 @@ fn efi_main() -> Status {
                 regions[i].size = ce - cs;
                 regions[i].kind = MemoryKind::Reserved;
                 if right.0 > 0 && region_count < 512 {
-                    regions[region_count] =
-                        MemoryRegion { base: right.1, size: right.0, kind: MemoryKind::Free };
+                    regions[region_count] = MemoryRegion {
+                        base: right.1,
+                        size: right.0,
+                        kind: MemoryKind::Free,
+                    };
                     region_count += 1;
                 }
                 if left.0 > 0 && region_count < 512 {
-                    regions[region_count] =
-                        MemoryRegion { base: left.1, size: left.0, kind: MemoryKind::Free };
+                    regions[region_count] = MemoryRegion {
+                        base: left.1,
+                        size: left.0,
+                        kind: MemoryKind::Free,
+                    };
                     region_count += 1;
                 }
                 // Newly appended Free pieces may still intersect [s, e) —
@@ -555,7 +576,7 @@ fn efi_main() -> Status {
     // consumes (mmap_region_base was allocated/carved before the tables
     // existed, so the earlier protect pass could not cover them).
     //
-    // NOTE: carve from Free AND Reclaim regions — the kernel treats Reclaim
+    // NOTE: carve from Free AND Reclaim regions : the kernel treats Reclaim
     // as allocatable (its buddy/boot allocators filter Free|Reclaim), and the
     // PT frames here usually sit inside a big Reclaim extent (UEFI loader
     // memory above the kernel image).
@@ -583,13 +604,19 @@ fn efi_main() -> Status {
                 regions[i].size = pt_end.min(r_end) - regions[i].base;
                 regions[i].kind = MemoryKind::Reserved;
                 if right.1 > 0 && region_count < 512 {
-                    regions[region_count] =
-                        MemoryRegion { base: right.0, size: right.1, kind };
+                    regions[region_count] = MemoryRegion {
+                        base: right.0,
+                        size: right.1,
+                        kind,
+                    };
                     region_count += 1;
                 }
                 if left.1 > 0 && region_count < 512 {
-                    regions[region_count] =
-                        MemoryRegion { base: left.0, size: left.1, kind };
+                    regions[region_count] = MemoryRegion {
+                        base: left.0,
+                        size: left.1,
+                        kind,
+                    };
                     region_count += 1;
                 }
                 scan = region_count;
@@ -667,7 +694,7 @@ fn efi_main() -> Status {
     unsafe {
         let mut cr4: u64;
         core::arch::asm!("mov {}, cr4", out(reg) cr4);
-        cr4 |= 0x600; // OSFXSR (9) | OSXMMEXCPT (10) — safe on all x86-64
+        cr4 |= 0x600; // OSFXSR (9) | OSXMMEXCPT (10) : safe on all x86-64
         core::arch::asm!("mov cr4, {}", in(reg) cr4);
     }
 
@@ -686,12 +713,7 @@ fn efi_main() -> Status {
             "out dx, al",
             options(nomem, nostack, preserves_flags)
         );
-        paging::context_switch(
-            pml4_val,
-            stack_val,
-            entry_val,
-            args_val,
-        );
+        paging::context_switch(pml4_val, stack_val, entry_val, args_val);
     }
 }
 

@@ -1,4 +1,4 @@
-//! L1 — VFS types conformance: mode bits, FILETIME conversions, capabilities.
+//! L1 : VFS types conformance: mode bits, FILETIME conversions, capabilities.
 //!
 //! `VfsFileType` maps Unix mode bits ↔ internal enum; `VfsTimestamp`
 //! converts Unix epoch ↔ Windows FILETIME. Both conversions cross an ABI

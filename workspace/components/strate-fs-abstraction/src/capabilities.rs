@@ -101,7 +101,7 @@ impl FsCapabilities {
             supports_hardlinks: true,
             supports_sparse_files: true,
             // XFS max file size: 8 EiB on 64-bit systems (was wrongly
-            // computed as 8 PiB — the literal chain had only five 1024s).
+            // computed as 8 PiB : the literal chain had only five 1024s).
             max_file_size: 8 * Self::EIB,
             supports_xattr: true,
             supports_acl: true,

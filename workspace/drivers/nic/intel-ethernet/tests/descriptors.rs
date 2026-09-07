@@ -1,8 +1,8 @@
-//! L1 — Intel 8254x descriptor layouts + generic ring logic (nic-queues).
+//! L1 : Intel 8254x descriptor layouts + generic ring logic (nic-queues).
 //!
 //! Descriptor byte layouts are pinned against the Intel 8254x SDM
 //! (§3.2.3 RX legacy, §3.3.3 TX legacy): the hardware reads these bytes
-//! directly — any padding/offset drift breaks DMA silently.
+//! directly : any padding/offset drift breaks DMA silently.
 
 use intel_ethernet::regs::*;
 use intel_ethernet::rx_errors;

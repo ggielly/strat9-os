@@ -19,11 +19,23 @@ use crate::{
 /// SYS_IPC_CREATE_PORT: create an IPC port bound to the current task.
 pub fn sys_ipc_create_port(_flags: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+
+    // P1 fix: enforce per-process IPC quota.
+    task.process.ipc_quota.try_reserve(1)
+        .map_err(|_| SyscallError::OutOfMemory)?;
+
     let port_id = port::create_port(task.id);
     let cap = get_capability_manager().create_capability(
         ResourceType::IpcPort,
         port_id.as_u64() as usize,
-        CapPermissions::all(),
+        // P1 fix: least-privilege permissions (no execute, no grant, no revoke).
+        CapPermissions {
+            read: true,
+            write: true,
+            execute: false,
+            grant: false,
+            revoke: false,
+        },
     );
     let cap_id = unsafe { (&mut *task.process.capabilities.get()).insert(cap) };
     Ok(cap_id.as_u64())
@@ -54,8 +66,8 @@ pub fn sys_ipc_send(port_handle: u64, msg_ptr: u64) -> Result<u64, SyscallError>
     user.copy_to(&mut buf);
     let mut msg = crate::ipc::message::ipc_message_from_raw(&buf);
 
-    // Stamp identity
-    msg.sender = task.id.as_u64();
+    // P1 fix: inject capability badge instead of raw task ID.
+    msg.sender = cap.badge;
 
     if msg.flags == 0 {
         if let Some((sid, _label, _mem_used, _mem_min, _mem_max)) =
@@ -100,6 +112,10 @@ pub fn sys_ipc_recv(port_handle: u64, msg_ptr: u64) -> Result<u64, SyscallError>
         return Err(SyscallError::BadHandle);
     }
 
+    // P0 fix: validate user buffer BEFORE consuming the message.
+    const MSG_SIZE: usize = core::mem::size_of::<IpcMessage>();
+    let user = UserSliceWrite::new(msg_ptr, MSG_SIZE)?;
+
     let port_id = PortId::from_u64(cap.resource as u64);
     let port_obj = port::get_port(port_id).ok_or(SyscallError::BadHandle)?;
     let mut msg = port_obj.recv().map_err(SyscallError::from)?;
@@ -122,10 +138,8 @@ pub fn sys_ipc_recv(port_handle: u64, msg_ptr: u64) -> Result<u64, SyscallError>
         msg.flags = new_id.as_u64() as u32;
     }
 
-    const MSG_SIZE: usize = core::mem::size_of::<IpcMessage>();
     let mut buf = [0u8; MSG_SIZE];
     crate::ipc::message::ipc_message_to_raw(&msg, &mut buf);
-    let user = UserSliceWrite::new(msg_ptr, MSG_SIZE)?;
     user.copy_from(&buf);
     Ok(0)
 }
@@ -148,6 +162,10 @@ pub fn sys_ipc_try_recv(port_handle: u64, msg_ptr: u64) -> Result<u64, SyscallEr
     if cap.resource_type != ResourceType::IpcPort {
         return Err(SyscallError::BadHandle);
     }
+
+    // P0 fix: validate user buffer BEFORE consuming the message.
+    const MSG_SIZE: usize = core::mem::size_of::<IpcMessage>();
+    let user = UserSliceWrite::new(msg_ptr, MSG_SIZE)?;
 
     let port_id = PortId::from_u64(cap.resource as u64);
     let port_obj = port::get_port(port_id).ok_or(SyscallError::BadHandle)?;
@@ -176,10 +194,8 @@ pub fn sys_ipc_try_recv(port_handle: u64, msg_ptr: u64) -> Result<u64, SyscallEr
         msg.flags = new_id.as_u64() as u32;
     }
 
-    const MSG_SIZE: usize = core::mem::size_of::<IpcMessage>();
     let mut buf = [0u8; MSG_SIZE];
     crate::ipc::message::ipc_message_to_raw(&msg, &mut buf);
-    let user = UserSliceWrite::new(msg_ptr, MSG_SIZE)?;
     user.copy_from(&buf);
     Ok(0)
 }
@@ -239,11 +255,15 @@ pub fn sys_ipc_call(port_handle: u64, msg_ptr: u64) -> Result<u64, SyscallError>
     }
 
     const MSG_SIZE: usize = core::mem::size_of::<IpcMessage>();
+
+    // P0 fix: validate reply buffer BEFORE sending the request and blocking.
+    let reply_user = UserSliceWrite::new(msg_ptr, MSG_SIZE)?;
+
     let user = UserSliceRead::new(msg_ptr, MSG_SIZE)?;
     let mut buf = [0u8; MSG_SIZE];
     user.copy_to(&mut buf);
     let mut msg = crate::ipc::message::ipc_message_from_raw(&buf);
-    msg.sender = task.id.as_u64();
+    msg.sender = cap.badge;
     if msg.flags != 0 {
         let transfer_required = CapPermissions {
             read: false,
@@ -268,8 +288,7 @@ pub fn sys_ipc_call(port_handle: u64, msg_ptr: u64) -> Result<u64, SyscallError>
     let reply_msg = reply::wait_for_reply(task.id, port_owner);
     let mut out_buf = [0u8; MSG_SIZE];
     crate::ipc::message::ipc_message_to_raw(&reply_msg, &mut out_buf);
-    let user = UserSliceWrite::new(msg_ptr, MSG_SIZE)?;
-    user.copy_from(&out_buf);
+    reply_user.copy_from(&out_buf);
     Ok(0)
 }
 
@@ -287,6 +306,16 @@ pub fn sys_ipc_reply(msg_ptr: u64) -> Result<u64, SyscallError> {
     let target = crate::process::TaskId::from_u64(msg.sender);
     let responder = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let mut msg = msg;
+
+    // P1 fix: authorization BEFORE handle transfer.
+    // Check that the responder is actually the server the caller is waiting on.
+    match reply::check_authorization(responder.id, target) {
+        Ok(()) => {}
+        Err(reply::DeliverError::NoPendingCall) => return Err(SyscallError::BadHandle),
+        Err(reply::DeliverError::NotResponder) => return Err(SyscallError::PermissionDenied),
+    }
+
+    // Handle transfer (only after authorization succeeds).
     if msg.flags != 0 {
         let sender = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
         let sender_caps = unsafe { &mut *sender.process.capabilities.get() };
@@ -303,13 +332,12 @@ pub fn sys_ipc_reply(msg_ptr: u64) -> Result<u64, SyscallError> {
         msg.flags = new_id.as_u64() as u32;
     }
 
-    // Authorization happens inside deliver_reply: only the server the
-    // caller is waiting on (the port owner) may answer its call.
-    match reply::deliver_reply(responder.id, target, msg) {
-        Ok(()) => Ok(0),
-        Err(reply::DeliverError::NoPendingCall) => Err(SyscallError::BadHandle),
-        Err(reply::DeliverError::NotResponder) => Err(SyscallError::PermissionDenied),
-    }
+    reply::deliver_reply(responder.id, target, msg)
+        .map_err(|e| match e {
+            reply::DeliverError::NoPendingCall => SyscallError::BadHandle,
+            reply::DeliverError::NotResponder => SyscallError::PermissionDenied,
+        })?;
+    Ok(0)
 }
 
 /// SYS_IPC_BIND_PORT: register a port under a namespace path.

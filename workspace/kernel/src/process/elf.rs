@@ -91,7 +91,7 @@ const R_X86_64_IRELATIVE: u32 = 37;
 /// Maximum virtual address we accept for user-space mappings.
 ///
 /// Strat9 userspace components are statically linked (no-pie) at ET_EXEC
-/// 0xFFFFFFFF80000000 — the higher-half window. Each user AddressSpace owns
+/// 0xFFFFFFFF80000000 : the higher-half window. Each user AddressSpace owns
 /// a private copy of the PML4[511] PDP (see address_space::new_user), with
 /// the kernel-image slot removed, so processes can use the full canonical
 /// higher-half range without touching kernel pages. The guard therefore only
@@ -706,7 +706,7 @@ fn call_ifunc_resolver(user_as: &AddressSpace, resolver_vaddr: u64) -> Result<u6
         .ok_or("IFUNC resolver page not mapped")?;
     let hhdm_ptr = crate::memory::phys_to_virt(phys.as_u64());
     log::warn!(
-        "[elf] IFUNC resolver at {:#x} executing in Ring 0 — security risk if binary is untrusted",
+        "[elf] IFUNC resolver at {:#x} executing in Ring 0 : security risk if binary is untrusted",
         resolver_vaddr
     );
     // SAFETY: hhdm_ptr points to a user page containing executable code.

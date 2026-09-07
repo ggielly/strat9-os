@@ -724,7 +724,7 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
     // hhdm_offset == 0, phys_to_virt(phys) == phys, which the active page
     // tables map via the bootloader's identity map for all RAM.
     // Function-pointer vtables (non-zero bits) remain FORBIDDEN until the
-    // identity-vtable issue is fixed — enforced by keeping vtable = 0 on all
+    // identity-vtable issue is fixed : enforced by keeping vtable = 0 on all
     // slots (MetaSlot::new) and by reset_with_free_list_meta.
     let bytes = frame_count * FRAME_META_SIZE as u64;
     let phys = match boot_alloc.try_alloc(bytes as usize, 64) {

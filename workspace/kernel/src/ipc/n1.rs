@@ -177,7 +177,7 @@ n1_safe! {
     #[inline(always)] // N1 path
     pub fn poll_scheduler_events() -> Option<N1Event> {
         match NIC_SCHED_MAILBOX.pop() {
-            Some(msg) => N1Event::decode(&msg.data.payload),
+            Some(msg) => N1Event::decode(&msg.payload),
             None => None,
         }
     }
@@ -188,7 +188,7 @@ n1_safe! {
     #[inline(always)] // N1 path
     pub fn poll_nic_events() -> Option<N1Event> {
         match SCHED_NIC_MAILBOX.pop() {
-            Some(msg) => N1Event::decode(&msg.data.payload),
+            Some(msg) => N1Event::decode(&msg.payload),
             None => None,
         }
     }

@@ -24,6 +24,73 @@ use crate::syscall::error::SyscallError;
 use alloc::vec::Vec;
 use crate::arch::xshim::{PageTableFlags, Translate, VirtAddr};
 
+// ===========================================================================
+// UserPod : marker trait for types safe to read/write via UserSlice
+// ===========================================================================
+
+/// Marker trait for types whose every bit pattern is valid (POD / plain old data).
+///
+/// This is an **unsafe** trait: implementors must guarantee that every possible
+/// bit pattern of the type is a valid value.  This prevents reading into bools,
+/// enums with invalid discriminants, references, pointers, or other non-POD types.
+///
+/// # Implementors
+///
+/// Only implement this for types where *all* bit patterns are valid:
+/// primitive integer types, `#[repr(C)]` structs of `UserPod` fields, etc.
+/// Never implement for `bool`, `char`, enums, references, or pointers.
+pub unsafe trait UserPod: Copy + 'static {}
+
+unsafe impl UserPod for u8 {}
+unsafe impl UserPod for u16 {}
+unsafe impl UserPod for u32 {}
+unsafe impl UserPod for u64 {}
+unsafe impl UserPod for i8 {}
+unsafe impl UserPod for i16 {}
+unsafe impl UserPod for i32 {}
+unsafe impl UserPod for i64 {}
+unsafe impl UserPod for usize {}
+unsafe impl UserPod for isize {}
+
+// ===========================================================================
+// UserAccessGuard : RAII guard for SMAP/AC stac/clac
+// ===========================================================================
+
+/// RAII guard that disables Supervisor Mode Access Prevention (SMAP) on
+/// creation and re-enables it on drop.  Ensures AC is restored on all
+/// code paths including panics and early returns.
+///
+/// # Usage
+///
+/// ```ignore
+/// let _guard = UserAccessGuard::new();
+/// // ... access user memory safely ...
+/// // AC is re-enabled when _guard is dropped.
+/// ```
+pub struct UserAccessGuard {
+    _private: (),
+}
+
+impl UserAccessGuard {
+    /// Disable SMAP (set AC flag) and return a guard that will re-enable it on drop.
+    #[inline]
+    pub fn new() -> Self {
+        crate::arch::stac();
+        UserAccessGuard { _private: () }
+    }
+}
+
+impl Drop for UserAccessGuard {
+    #[inline]
+    fn drop(&mut self) {
+        crate::arch::clac();
+    }
+}
+
+// UserAccessGuard is per-CPU state and must not be sent across threads.
+impl !Send for UserAccessGuard {}
+impl !Sync for UserAccessGuard {}
+
 /// End of user-accessible virtual address space.
 ///
 /// On x86_64 with 4-level paging, canonical user addresses are
@@ -235,13 +302,12 @@ impl UserSliceRead {
         }
 
         let mut buf = alloc::vec![0u8; self.len];
-        // SMAP: temporarily disable supervisor-mode access prevention.
-        crate::arch::stac();
+        let _guard = UserAccessGuard::new();
         // SAFETY: We validated that [ptr, ptr+len) is mapped and user-readable.
+        // UserAccessGuard ensures SMAP is disabled for the duration.
         unsafe {
             core::ptr::copy_nonoverlapping(self.ptr as *const u8, buf.as_mut_ptr(), self.len);
         }
-        crate::arch::clac();
         buf
     }
 
@@ -254,14 +320,12 @@ impl UserSliceRead {
             return 0;
         }
 
-        // SMAP: temporarily disable supervisor-mode access prevention.
-        crate::arch::stac();
+        let _guard = UserAccessGuard::new();
         // SAFETY: We validated that [ptr, ptr+n) is mapped and user-readable.
         // n <= self.len, so we stay within the validated region.
         unsafe {
             core::ptr::copy_nonoverlapping(self.ptr as *const u8, dest.as_mut_ptr(), n);
         }
-        crate::arch::clac();
         n
     }
 
@@ -270,11 +334,9 @@ impl UserSliceRead {
         if offset >= self.len {
             return Err(UserSliceError::InvalidSize);
         }
-        // SMAP: temporarily disable supervisor-mode access prevention.
-        crate::arch::stac();
+        let _guard = UserAccessGuard::new();
         // SAFETY: We validated that [ptr, ptr+len) is mapped and user-readable.
         let val = unsafe { core::ptr::read_unaligned((self.ptr + offset as u64) as *const u8) };
-        crate::arch::clac();
         Ok(val)
     }
 
@@ -283,29 +345,25 @@ impl UserSliceRead {
         if offset + 8 > self.len {
             return Err(UserSliceError::InvalidSize);
         }
-        // SMAP: temporarily disable supervisor-mode access prevention.
-        crate::arch::stac();
+        let _guard = UserAccessGuard::new();
         // SAFETY: We validated that [ptr, ptr+len) is mapped and user-readable.
         let val = unsafe { core::ptr::read_unaligned((self.ptr + offset as u64) as *const u64) };
-        crate::arch::clac();
         Ok(val)
     }
 
     /// Read a value of type T from the user slice.
     ///
-    /// # Safety
-    /// The caller must ensure that T is Pod (plain old data) and that the
-    /// slice is at least size_of::<T>() bytes.
-    pub fn read_val<T: Copy>(&self) -> Result<T, UserSliceError> {
+    /// T must implement `UserPod` (sealed trait for types where every bit
+    /// pattern is valid). This prevents reading into bools, enums with
+    /// invalid discriminants, references, or other non-POD types.
+    pub fn read_val<T: UserPod>(&self) -> Result<T, UserSliceError> {
         if self.len < core::mem::size_of::<T>() {
             return Err(UserSliceError::InvalidSize);
         }
-        // SMAP: temporarily disable supervisor-mode access prevention.
-        crate::arch::stac();
+        let _guard = UserAccessGuard::new();
         // SAFETY: We validated that [ptr, ptr+len) is mapped and user-readable.
-        // T is Copy, so we can safely read it.
+        // T: UserPod guarantees all bit patterns are valid.
         let val = unsafe { core::ptr::read_unaligned(self.ptr as *const T) };
-        crate::arch::clac();
         Ok(val)
     }
 
@@ -359,14 +417,12 @@ impl UserSliceWrite {
             return 0;
         }
 
-        // SMAP: temporarily disable supervisor-mode access prevention.
-        crate::arch::stac();
+        let _guard = UserAccessGuard::new();
         // SAFETY: We validated that [ptr, ptr+n) is mapped and user-writable.
         // n <= self.len, so we stay within the validated region.
         unsafe {
             core::ptr::copy_nonoverlapping(src.as_ptr(), self.ptr as *mut u8, n);
         }
-        crate::arch::clac();
         n
     }
 
@@ -376,13 +432,11 @@ impl UserSliceWrite {
             return;
         }
 
-        // SMAP: temporarily disable supervisor-mode access prevention.
-        crate::arch::stac();
+        let _guard = UserAccessGuard::new();
         // SAFETY: We validated that [ptr, ptr+len) is mapped and user-writable.
         unsafe {
             core::ptr::write_bytes(self.ptr as *mut u8, 0, self.len);
         }
-        crate::arch::clac();
     }
 
     /// Get the raw pointer (for logging/debugging only).
@@ -427,13 +481,11 @@ impl UserSliceReadWrite {
         if n == 0 {
             return 0;
         }
-        // SMAP: temporarily disable supervisor-mode access prevention.
-        crate::arch::stac();
+        let _guard = UserAccessGuard::new();
         // SAFETY: Validated as writable (which implies readable on x86_64).
         unsafe {
             core::ptr::copy_nonoverlapping(self.ptr as *const u8, dest.as_mut_ptr(), n);
         }
-        crate::arch::clac();
         n
     }
 
@@ -443,33 +495,28 @@ impl UserSliceReadWrite {
         if n == 0 {
             return 0;
         }
-        // SMAP: temporarily disable supervisor-mode access prevention.
-        crate::arch::stac();
+        let _guard = UserAccessGuard::new();
         // SAFETY: Validated as writable.
         unsafe {
             core::ptr::copy_nonoverlapping(src.as_ptr(), self.ptr as *mut u8, n);
         }
-        crate::arch::clac();
         n
     }
 
     /// Write a value of type T to the user slice.
     ///
-    /// # Safety
-    /// The caller must ensure that T is Pod (plain old data) and that the
-    /// slice is at least size_of::<T>() bytes.
-    pub fn write_val<T: Copy>(&self, val: &T) -> Result<(), UserSliceError> {
+    /// T must implement `UserPod` (sealed trait for types where every bit
+    /// pattern is valid). This prevents writing non-POD types to user memory.
+    pub fn write_val<T: UserPod>(&self, val: &T) -> Result<(), UserSliceError> {
         if self.len < core::mem::size_of::<T>() {
             return Err(UserSliceError::InvalidSize);
         }
-        // SMAP: temporarily disable supervisor-mode access prevention.
-        crate::arch::stac();
+        let _guard = UserAccessGuard::new();
         // SAFETY: We validated that [ptr, ptr+len) is mapped and user-writable.
-        // T is Copy, so we can safely write it.
+        // T: UserPod guarantees all bit patterns are valid.
         unsafe {
             core::ptr::write_unaligned(self.ptr as *mut T, *val);
         }
-        crate::arch::clac();
         Ok(())
     }
 

@@ -16,6 +16,10 @@ use crate::{
 
 const MSG_SIZE: usize = core::mem::size_of::<IpcMessage>();
 
+// ABI contract: userspace hardcodes MSG_SIZE = 256.  If IpcMessage's size
+// changes, this assertion forces a deliberate review of the userspace ABI.
+const _: () = assert!(MSG_SIZE == 256, "IpcMessage size changed : update userspace ABI");
+
 /// SYS_CHAN_CREATE (220): create a bounded sync-channel.
 pub fn sys_chan_create(capacity: u64) -> Result<u64, SyscallError> {
     let cap = capacity.clamp(1, 1024) as usize;
@@ -88,7 +92,7 @@ pub fn sys_chan_send(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
     }
     let chan_id = ChanId::from_u64(cap.resource as u64);
 
-    // Inject the capability badge — the receiver sees this in msg.sender,
+    // Inject the capability badge : the receiver sees this in msg.sender,
     // not the sender's global task ID.  The badge is set at capability
     // creation time (defaults to cap_id) and can be overridden via grant.
     msg.sender = cap.badge;

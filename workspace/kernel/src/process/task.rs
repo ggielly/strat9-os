@@ -523,7 +523,16 @@ impl Task {
                 iret_rip: ret_target,
                 iret_cs: crate::arch::gdt::kernel_code_selector().0 as u64,
                 iret_rflags: rflags,
-                iret_rsp: self.kernel_stack.virt_base.as_u64() + self.kernel_stack.size as u64,
+                // Resume the task at the stack pointer it would have had after
+                // the legacy `ret`-based switch consumed its 7-word frame
+                // (6 callee-saved + return target). For a never-launched task
+                // this equals stack_top (the fake frame sits exactly there);
+                // for an already-launched task it equals the RSP captured by
+                // switch_context_fxsave at its last switch, which is where the
+                // interrupted code expects to resume. Using stack_top here
+                // instead desynchronizes the resumed task and derails it into
+                // unrelated kernel code (observed as the boot_alloc V-storm).
+                iret_rsp: saved_rsp_val + 7 * 8,
                 iret_ss: crate::arch::gdt::kernel_data_selector().0 as u64,
             }
         };
@@ -1240,7 +1249,7 @@ impl Task {
 /// Caller must ensure all pointers in `target` are valid and interrupts are disabled.
 pub(super) unsafe fn do_switch_context(target: &super::scheduler::SwitchTarget) {
     // XSAVE/XRSTOR #GP on non-64B-aligned operands; FXSAVE/FXRSTOR need 16B.
-    // The naked asm below cannot check this — enforce at the call boundary.
+    // The naked asm below cannot check this : enforce at the call boundary.
     debug_assert_eq!(
         (target.old_fpu_ptr as usize) % 64,
         0,

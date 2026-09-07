@@ -1,12 +1,12 @@
-//! rendezlarjan — userspace threading for Strat9-OS.
+//! rendezlarjan : userspace threading for Strat9-OS.
 //!
 //! "Tout est fichier": every operation maps to a file under `/thread`, the
 //! Plan 9 style scheme exported by the kernel. This crate layers ergonomic
 //! Rust APIs on top of the raw file protocol:
 //!
-//! - [`thread`] — level 1: one function per control file.
-//! - [`Thread`]/[`Builder`] — level 2: closure-based `spawn`/`join`/`detach`.
-//! - [`sync`] — futex-based Mutex/RwLock/Condvar/Barrier/Once/Semaphore.
+//! - [`thread`] : level 1: one function per control file.
+//! - [`Thread`]/[`Builder`] : level 2: closure-based `spawn`/`join`/`detach`.
+//! - [`sync`] : futex-based Mutex/RwLock/Condvar/Barrier/Once/Semaphore.
 //!
 //! The library is `no_std` + `alloc`; the consumer provides the global
 //! allocator (required only by level 2 and `thread_list`).

@@ -52,6 +52,7 @@ pub fn sys_sem_create(initial: u64) -> Result<u64, SyscallError> {
         semaphore::SemaphoreError::WouldBlock => SyscallError::Again,
         semaphore::SemaphoreError::Destroyed => SyscallError::Pipe,
         semaphore::SemaphoreError::NotFound => SyscallError::NotFound,
+        semaphore::SemaphoreError::Interrupted => SyscallError::Interrupted,
     })?;
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
@@ -79,6 +80,7 @@ pub fn sys_sem_wait(handle: u64) -> Result<u64, SyscallError> {
         .map_err(|e| match e {
             semaphore::SemaphoreError::WouldBlock => SyscallError::Again,
             semaphore::SemaphoreError::Destroyed => SyscallError::Pipe,
+            semaphore::SemaphoreError::Interrupted => SyscallError::Interrupted,
             _ => SyscallError::IoError,
         })?;
     Ok(0)

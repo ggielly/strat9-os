@@ -1,4 +1,4 @@
-//! L1 — `alloc-freelist`: bump+free-list allocator behaviour.
+//! L1 : `alloc-freelist`: bump+free-list allocator behaviour.
 //!
 //! The macro generates a static `GlobalAlloc` over a fixed-size heap array,
 //! used by every userspace component. Tests exercise the real allocator

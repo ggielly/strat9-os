@@ -45,7 +45,9 @@ const SLAB_SIZES: [usize; 26] = [
 ];
 const NUM_SLABS: usize = SLAB_SIZES.len();
 /// Allocations with effective size above this threshold bypass the slab.
-const MAX_SLAB_SIZE: usize = 2048;
+/// Maximum payload size that can be served from the slab allocator.
+/// Must account for REDZONE_TAIL: the actual slab class must be >= payload + redzone.
+const MAX_SLAB_SIZE: usize = SLAB_SIZES[NUM_SLABS - 1] - REDZONE_TAIL;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KernelHeapBackend {
@@ -116,6 +118,10 @@ const HEAP_POISON_ENABLED: bool = true;
 const POISON_BYTE: u8 = 0xDE;
 /// Canary word placed at the last 4 bytes of each slab block.
 const SLAB_CANARY: u32 = 0xDEAD_BEEF;
+/// Bytes reserved at the end of every slab block for the canary + padding.
+/// The user-visible allocation size is `slab_size - REDZONE_TAIL`, ensuring
+/// writes to the full user area cannot overwrite the canary.
+const REDZONE_TAIL: usize = 8;
 
 // ---------------------------------------------------------------------------
 // Slab page header : embedded at byte 0 of every buddy page used by a class.
@@ -196,7 +202,9 @@ impl SlabState {
     #[inline]
     fn class_index_for_layout(layout: Layout) -> usize {
         for (i, &s) in SLAB_SIZES.iter().enumerate() {
-            if layout.size() <= s && layout.align() <= slab_class_alignment(i) {
+            // P0 fix: require REDZONE_TAIL bytes beyond the user payload so the
+            // canary (at offset s-4) is always outside the user's writable area.
+            if layout.size() + REDZONE_TAIL <= s && layout.align() <= slab_class_alignment(i) {
                 return i;
             }
         }

@@ -234,6 +234,16 @@ pub const N3_SHARED_FRAME_VA: u64 = 0xFFFF_C000_0000_1000;
 /// Must be distinct from N3_SHARED_FRAME_VA to avoid page table conflicts.
 pub const N3_SHARED_MSG_BUF_VA: u64 = 0xFFFF_C000_0000_2000;
 
+/// Return safe kernel-mode rflags for N3 context switching.
+///
+/// Bit 1 (reserved) must always be 1.  Bit 9 (IF) is set to keep interrupts
+/// enabled in the kernel handler.  All other bits are cleared to avoid
+/// restoring user-modified flags (TF, AC, etc.) into kernel context.
+fn safe_kernel_rflags() -> u64 {
+    // Bit 1 = reserved (must be 1), Bit 9 = IF (interrupts enabled)
+    (1 << 1) | (1 << 9)
+}
+
 /// Size of the per-N3Transport handler stack (1 page).
 /// After CR3 switch, the ASM primitive loads RSP from `dst_ctx.rsp` which
 /// points to this stack with the handler address as the return address.
@@ -596,6 +606,9 @@ fn n3_prepare_migration(
     frame.src_ctx.cr3_pcid = sender_cr3;
     frame.src_ctx.rsp = sender_rsp;
     frame.src_ctx.rip = sender_rip;
+    // P0 fix: initialize rflags with safe kernel defaults.
+    // A zero rflags would clear IF (interrupts) and other critical bits.
+    frame.src_ctx.rflags = safe_kernel_rflags();
 
     // Prepare receiver context.
     let recv_handler = receiver_task.trampoline_entry.load(Ordering::Acquire);
@@ -608,6 +621,8 @@ fn n3_prepare_migration(
 
     frame.dst_ctx.rip = recv_handler;
     frame.dst_ctx.cr3_pcid = recv_cr3;
+    // P0 fix: destination context also gets safe kernel rflags.
+    frame.dst_ctx.rflags = safe_kernel_rflags();
 
     // CRITICAL: The destination kernel stack must contain the handler address
     // as the return address for the `ret` instruction after CR3 switch.
@@ -1142,6 +1157,29 @@ fn map_msg_buf_in_both_spaces(
     Ok(())
 }
 
+/// Unmap a single page from an address space and shoot down TLB on all CPUs.
+fn unmap_page_in_space(target_va: u64, address_space: &AddressSpace) {
+    use crate::arch::xshim::{Size4KiB, VirtAddr};
+    use crate::x86_crate_shim::structures::paging::{Mapper, Page};
+
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(target_va));
+    let mut mapper = unsafe { address_space.mapper() };
+
+    if let Ok((_frame, flush)) = mapper.unmap(page) {
+        flush.flush();
+    }
+    // Inter-CPU TLB shootdown for the unmapped page.
+    crate::arch::tlb::shootdown_range(VirtAddr::new(target_va), VirtAddr::new(target_va + 0x1000));
+}
+
+/// Unmap the MigrationFrame and message buffer from both address spaces.
+fn unmap_from_both_spaces(sender_as: &AddressSpace, receiver_as: &AddressSpace) {
+    unmap_page_in_space(N3_SHARED_FRAME_VA, sender_as);
+    unmap_page_in_space(N3_SHARED_FRAME_VA, receiver_as);
+    unmap_page_in_space(N3_SHARED_MSG_BUF_VA, sender_as);
+    unmap_page_in_space(N3_SHARED_MSG_BUF_VA, receiver_as);
+}
+
 // ============================================================================
 // N3Transport
 // ============================================================================
@@ -1216,6 +1254,9 @@ impl N3Transport {
         // Map the message buffer in both address spaces at N3_SHARED_MSG_BUF_VA.
         if map_msg_buf_in_both_spaces(msg_buf_phys, &sender_as, &receiver_as).is_err() {
             log::error!("N3: failed to map message buffer");
+            // P1 fix: unmap the frame that was already mapped in both spaces.
+            unmap_page_in_space(N3_SHARED_FRAME_VA, &sender_as);
+            unmap_page_in_space(N3_SHARED_FRAME_VA, &receiver_as);
             free_frame_slot(frame_idx);
             with_irqs_disabled(|token| free_frame(token, msg_buf_frame));
             return Err(IpcError::TransportFailed);
@@ -1284,27 +1325,36 @@ impl core::fmt::Debug for N3Transport {
 impl Drop for N3Transport {
     fn drop(&mut self) {
         watchdog_unregister(self.frame_idx);
+
+        // P0 fix: unmap shared pages from both address spaces BEFORE freeing
+        // the physical frames. This prevents use-after-free when the frames
+        // are reallocated to another process or structure.
+        if let (Some(sender), Some(receiver)) = (
+            get_task_by_id(self.sender_task_id),
+            get_task_by_id(self.receiver_task_id),
+        ) {
+            let sender_as = sender.process.address_space_arc();
+            let receiver_as = receiver.process.address_space_arc();
+            unmap_from_both_spaces(&sender_as, &receiver_as);
+        }
+
         free_frame_slot(self.frame_idx);
 
         // Free the message buffer physical page.
         if self.msg_buf_phys != 0 {
-            let frame = crate::memory::PhysFrame::containing_address(crate::arch::xshim::PhysAddr::new(
-                self.msg_buf_phys,
-            ));
+            let frame = crate::memory::PhysFrame::containing_address(
+                crate::arch::xshim::PhysAddr::new(self.msg_buf_phys),
+            );
             with_irqs_disabled(|token| free_frame(token, frame));
         }
 
         // Free the handler stack physical page.
         if self.handler_stack_phys != 0 {
-            let frame = crate::memory::PhysFrame::containing_address(crate::arch::xshim::PhysAddr::new(
-                self.handler_stack_phys,
-            ));
+            let frame = crate::memory::PhysFrame::containing_address(
+                crate::arch::xshim::PhysAddr::new(self.handler_stack_phys),
+            );
             with_irqs_disabled(|token| free_frame(token, frame));
         }
-
-        // NOTE: PTE invalidation (TLB shootdown) for the unmapped pages
-        // is TODO. The stale PTEs will be reclaimed when the address space
-        // is destroyed. For a prototype, this is acceptable.
     }
 }
 
