@@ -536,6 +536,18 @@ impl Task {
                 iret_ss: crate::arch::gdt::kernel_data_selector().0 as u64,
             }
         };
+        // TEMP DEBUG: pulse the seeded frame's r12 (entry) for tracing.
+        unsafe {
+            let hex = b"0123456789abcdef";
+            core::arch::asm!("out 0xe9, al", in("al") b'@', options(nomem, nostack));
+            core::arch::asm!("out 0xe9, al", in("al") b'E', options(nomem, nostack));
+            let v = frame.r12;
+            for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
+                let nib = hex[((v >> sh) & 0xF) as usize];
+                core::arch::asm!("out 0xe9, al", in("al") nib, options(nomem, nostack));
+            }
+            core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+        }
         self.seed_interrupt_frame(frame);
     }
 

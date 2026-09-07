@@ -399,23 +399,24 @@ pub fn yield_task() {
         &super::perf_counters::SCHED_YIELD_COUNT,
     );
 
-    // Save RFLAGS and disable interrupts to prevent timer from
-    // trying to lock the scheduler while we hold it
     let saved_flags = save_flags_and_cli();
     let cpu_index = current_cpu_index();
 
+    // Lock order: LOCAL only (rank 4).
     let switch_target = {
+        lockdep_acquire(LockRank::Local, Some(cpu_index));
         let mut local = LOCAL_SCHEDULERS[cpu_index].lock();
-        if let Some(ref mut cpu) = *local {
+        let target = if let Some(ref mut cpu) = *local {
             super::core_impl::yield_cpu_local(cpu, cpu_index)
         } else {
             None
-        }
+        };
+        lockdep_release(LockRank::Local);
+        target
     }; // Lock released here, before the actual context switch
 
     if let Some(ref target) = switch_target {
-        // SAFETY: Pointers are valid (they point into Arc<Task> contexts
-        // kept alive by the scheduler). Interrupts are disabled.
+        // SAFETY: no scheduler locks held, interrupts disabled.
         unsafe {
             crate::process::task::do_switch_context(target);
         }
@@ -494,24 +495,29 @@ pub fn maybe_preempt() {
         return;
     }
 
-    // Use the per-CPU LOCAL lock : never blocked by another CPU's cold-path
-    // operations (fork, exit, wake) that hold GLOBAL_SCHED_STATE.
+    // Lock order: LOCAL only (rank 4). No GLOBAL, BLOCKED, or IDENTITY.
     let switch_target = {
+        lockdep_acquire(LockRank::Local, Some(cpu_index));
         let mut guard = match LOCAL_SCHEDULERS[cpu_index].try_lock_no_irqsave() {
             Some(g) => g,
             None => {
+                lockdep_release(LockRank::Local);
                 note_try_lock_fail_on_cpu(cpu_index);
                 return;
             }
         };
         let cpu = match guard.as_mut() {
             Some(c) => c,
-            None => return,
+            None => {
+                lockdep_release(LockRank::Local);
+                return;
+            }
         };
         if take_force_resched_hint(cpu_index) {
             cpu.need_resched = true;
         }
         if cpu.current_task.is_none() || !cpu.need_resched {
+            lockdep_release(LockRank::Local);
             return;
         }
         if let Some(current) = cpu.current_task.as_ref() {
@@ -523,24 +529,19 @@ pub fn maybe_preempt() {
             ));
         }
         cpu.need_resched = false;
-        super::core_impl::yield_cpu_local(cpu, cpu_index)
+        let target = super::core_impl::yield_cpu_local(cpu, cpu_index);
+        lockdep_release(LockRank::Local);
+        target
     }; // LOCAL lock released here
 
     if let Some(ref target) = switch_target {
         if cpu_is_valid(cpu_index) {
-            // One-shot per-CPU: trace the very first real preemption.
-            // NOTE: do NOT acquire GLOBAL_SCHED_STATE here : we are between the lock
-            // release (end of the block above) and do_switch_context. A
-            // nested try_lock in this window re-enters the guardian (CLI +
-            // CAS) on a CPU that is about to switch stacks, producing a
-            // spurious second "locked_raw=true" observation in finish_switch
-            // diagnostics and, if the lock happens to be free, a redundant
-            // owner_cpu store on the wrong context.
             if !FIRST_PREEMPT_LOGGED[cpu_index].swap(true, Ordering::Relaxed) {
                 let _preempt_n = CPU_PREEMPT_COUNT[cpu_index].load(Ordering::Relaxed);
             }
             CPU_PREEMPT_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
         }
+        // SAFETY: no scheduler locks held, no allocation, no IPI.
         unsafe {
             crate::process::task::do_switch_context(target);
         }
@@ -616,12 +617,31 @@ pub fn maybe_preempt_from_interrupt(
         } else {
             let mut next_rsp = next.interrupt_rsp();
             if next.resume_kind() == crate::process::task::ResumeKind::RetFrame {
-                // All tasks (kernel and ELF user tasks) start their first execution
-                // in Ring 0 via the task_entry_trampoline. We must seed a kernel
-                // interrupt frame so that the interrupt return path (iretq) can
-                // safely jump to the trampoline.
-                next.seed_kernel_interrupt_frame_from_context();
-                next_rsp = next.interrupt_rsp();
+                // TEMP: do NOT seed synthetic frames from the IRQ path yet.
+                // Resuming a synthetic frame from the raw timer stub derails the
+                // resumed task (observed: it re-runs boot_alloc init/validate code
+                // in a tight IRQs-off loop, starving the timer). Leave first-launch
+                // tasks to the legacy ret-based scheduler path; only tasks with a
+                // REAL iret frame (previously preempted from Ring 3) switch here.
+                unsafe { core::arch::asm!("mov al, 'S'; out 0xe9, al", out("al") _) };
+                cpu.need_resched = false;
+                _task_to_drop = cpu.task_to_drop.take();
+                if let Some(prev) = cpu.task_to_requeue.take() {
+                    prev.set_state(TaskState::Running);
+                    cpu.current_task = Some(prev);
+                } else {
+                    current.set_state(TaskState::Running);
+                    cpu.current_task = Some(current.clone());
+                }
+                next.set_state(TaskState::Ready);
+                let class = cpu.class_table.class_for_task(&next);
+                cpu.class_rqs.enqueue(class, next);
+                let current_fpu = current.fpu_state.get() as *mut u8;
+                return Some(crate::arch::idt::InterruptReturnDecision {
+                    next_rsp: 0,
+                    old_fpu: current_fpu,
+                    new_fpu: current_fpu,
+                });
             }
             let fits = interrupt_frame_fits(&next, next_rsp);
             if next_rsp == 0 || !fits {

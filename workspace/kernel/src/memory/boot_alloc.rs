@@ -53,6 +53,22 @@ impl BootAllocator {
     }
 
     pub fn init(&mut self, regions: &[MemoryRegion]) {
+        // TEMP DEBUG: count init() calls - the post-switch V-storm may be this
+        // function being re-entered by a corrupted resume.
+        {
+            static INIT_CALLS: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let n = INIT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+            unsafe {
+                let hex = b"0123456789abcdef";
+                core::arch::asm!("out 0xe9, al", in("al") b'I', options(nomem, nostack));
+                for sh in [12usize, 8, 4, 0] {
+                    let nib = hex[((n >> sh) & 0xF) as usize];
+                    core::arch::asm!("out 0xe9, al", in("al") nib, options(nomem, nostack));
+                }
+                core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+            }
+        }
         crate::e9_println!("BI init");
         if self.len != 0 {
             self.reset();

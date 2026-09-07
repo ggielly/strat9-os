@@ -1296,6 +1296,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             // Switch from live VGA debug output to buffered vgabuf path.
             // The status_line_task will flush vgabuf to the framebuffer.
             crate::debug_cfg::set_vga_debug_live(false);
+            // TEMP DEBUG: silence the status-line refresh loop entirely (it
+            // was suspected of driving the post-switch V-storm).
+            crate::debug_cfg::set_quiet(true);
         }
     }
     #[cfg(feature = "selftest")]

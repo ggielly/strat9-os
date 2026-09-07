@@ -55,29 +55,34 @@ pub fn exit_current_task(exit_code: i32) -> ! {
     let mut ipi_to_cpu: Option<usize> = None;
     {
         let saved_flags = save_flags_and_cli();
+        // Lock order: GLOBAL (rank 1) -> IDENTITY write (rank 2).
+        lockdep_acquire(LockRank::Global, None);
         let mut scheduler = GLOBAL_SCHED_STATE.lock();
         let current = {
+            lockdep_acquire(LockRank::Local, Some(cpu_index));
             let local = LOCAL_SCHEDULERS[cpu_index].lock();
-            local.as_ref().and_then(|cpu| cpu.current_task.clone())
+            let task = local.as_ref().and_then(|cpu| cpu.current_task.clone());
+            lockdep_release(LockRank::Local);
+            drop(local);
+            task
         };
         if let Some(ref mut sched) = *scheduler {
             if let Some(current) = current {
                 let current_id = current.id;
                 let current_pid = current.pid;
                 let parent = {
+                    lockdep_acquire(LockRank::IdentityR, None);
                     let identity = SCHED_IDENTITY.read();
-                    identity.parent_of.get(&current_id).copied()
+                    let p = identity.parent_of.get(&current_id).copied();
+                    lockdep_release(LockRank::IdentityR);
+                    drop(identity);
+                    p
                 };
                 let _ = sched.clear_task_wake_deadline_locked(current_id);
                 current.set_state(TaskState::Dead);
-                // Do NOT call cleanup_task_resources or all_tasks.remove() here!
-                // The task is still in current_task[cpu_index], and an interrupt
-                // could access it. Instead, mark it Dead and let pick_next_task
-                // handle the cleanup when it moves the task to task_to_drop.
-                // We only remove task_cpu and identity mappings to prevent
-                // lookups while the task is dying.
                 sched.task_cpu.remove(&current_id);
                 {
+                    lockdep_acquire(LockRank::IdentityW, None);
                     let mut identity = SCHED_IDENTITY.write();
                     GlobalSchedState::unregister_identity_locked(
                         &mut identity,
@@ -86,12 +91,17 @@ pub fn exit_current_task(exit_code: i32) -> ! {
                         current.tid,
                     );
                     identity.parent_of.remove(&current_id);
+                    lockdep_release(LockRank::IdentityW);
+                    drop(identity);
                 }
 
-                ipi_to_cpu = {
+                {
+                    lockdep_acquire(LockRank::IdentityW, None);
                     let mut identity = SCHED_IDENTITY.write();
-                    reparent_children(sched, &mut identity, current_id)
-                };
+                    ipi_to_cpu = reparent_children(sched, &mut identity, current_id);
+                    lockdep_release(LockRank::IdentityW);
+                    drop(identity);
+                }
 
                 if parent.is_some() {
                     sched.zombies.insert(current_id, (exit_code, current_pid));
@@ -105,6 +115,7 @@ pub fn exit_current_task(exit_code: i32) -> ! {
                 }
             }
         }
+        lockdep_release(LockRank::Global);
         drop(scheduler);
         restore_flags(saved_flags);
     }
@@ -679,10 +690,10 @@ pub fn block_current_task() {
     let cpu_index = current_cpu_index();
 
     let switch_target = {
-        // Hold BLOCKED_TASKS and LOCAL together through the state transition
-        // and task selection so a concurrent wake cannot observe the task as
-        // blocked, requeue it, and race with us tearing down current_task.
+        // Lock order: BLOCKED (rank 3) -> LOCAL (rank 4).
+        lockdep_acquire(LockRank::Blocked, None);
         let mut blocked = super::BLOCKED_TASKS.lock();
+        lockdep_acquire(LockRank::Local, Some(cpu_index));
         let mut local = LOCAL_SCHEDULERS[cpu_index].lock();
         let out = if let Some(ref mut cpu) = *local {
             if let Some(ref current) = cpu.current_task {
@@ -707,12 +718,15 @@ pub fn block_current_task() {
         } else {
             None
         };
+        lockdep_release(LockRank::Local);
         drop(local);
+        lockdep_release(LockRank::Blocked);
         drop(blocked);
         out
     }; // Locks released
 
     if let Some(ref target) = switch_target {
+        // SAFETY: no scheduler locks held, no allocation, no IPI.
         unsafe {
             crate::process::task::do_switch_context(target);
         }
@@ -744,18 +758,18 @@ pub fn wake_task(id: TaskId) -> bool {
     let saved_flags = save_flags_and_cli();
 
     // --- Primary path: task is in BLOCKED_TASKS ---
-    // Acquire only BLOCKED_TASKS + LOCAL[target_cpu]. No GLOBAL_SCHED_STATE.
+    // Lock order: BLOCKED (rank 3) -> LOCAL (rank 4).
     let mut ipi_cpu: Option<usize> = None;
     let mut woken = false;
 
     {
+        lockdep_acquire(LockRank::Blocked, None);
         let mut blocked = super::BLOCKED_TASKS.lock();
         if let Some(task) = blocked.remove(&id) {
             task.set_state(TaskState::Ready);
             let home = task.home_cpu.load(core::sync::atomic::Ordering::Relaxed);
             let cpu_index = if home != usize::MAX { home } else { 0 };
 
-            // Compute the scheduling class for this task (done without GLOBAL).
             let class = {
                 use crate::process::sched::SchedClassId;
                 match task.sched_policy() {
@@ -768,10 +782,12 @@ pub fn wake_task(id: TaskId) -> bool {
                 }
             };
 
+            lockdep_acquire(LockRank::Local, Some(cpu_index));
             if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_index].lock() {
                 local_cpu.class_rqs.enqueue(class, task.clone());
                 local_cpu.need_resched = true;
             }
+            lockdep_release(LockRank::Local);
 
             ipi_cpu = if cpu_index != current_cpu_index() {
                 Some(cpu_index)
@@ -780,6 +796,8 @@ pub fn wake_task(id: TaskId) -> bool {
             };
             woken = true;
         }
+        lockdep_release(LockRank::Blocked);
+        drop(blocked);
     } // BLOCKED_TASKS lock released
 
     if woken {
@@ -791,8 +809,9 @@ pub fn wake_task(id: TaskId) -> bool {
     }
 
     // === Fallback path: task not yet in BLOCKED_TASKS =================================
-    // Set wake_pending so block_current_task skips blocking.
+    // Lock order: GLOBAL (rank 1) -> BLOCKED (rank 3) -> LOCAL (rank 4).
     {
+        lockdep_acquire(LockRank::Global, None);
         let mut scheduler = GLOBAL_SCHED_STATE.lock();
         if let Some(ref mut sched) = *scheduler {
             let (fallback_woken, fallback_ipi) = sched.wake_task_locked(id);
@@ -801,6 +820,7 @@ pub fn wake_task(id: TaskId) -> bool {
                 ipi_cpu = fallback_ipi;
             }
         }
+        lockdep_release(LockRank::Global);
     }
 
     if let Some(ci) = ipi_cpu {

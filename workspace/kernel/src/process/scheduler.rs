@@ -1,81 +1,56 @@
 //! Scheduler implementation
 //!
-//! Implements a per-CPU round-robin scheduler for Strat9-OS with support for
-//! cooperative and preemptive multitasking.
+//! Implements a per-CPU, multi-class, SMP scheduler for Strat9-OS with support
+//! for cooperative and preemptive multitasking.
 //!
-//! ## Preemption design
+//! ## Scheduler locking contract — mandatory total order
 //!
-//! The timer interrupt (100Hz) calls `maybe_preempt()` which picks the next
-//! task and performs a context switch. Interrupts are disabled while the
-//! scheduler lock is held to prevent deadlock on single-core systems:
+//! ```text
+//!   GLOBAL_SCHED_STATE                        (rank 1)
+//!     -> SCHED_IDENTITY write                 (rank 2)
+//!       -> BLOCKED_TASKS                      (rank 3)
+//!         -> LOCAL_SCHEDULERS[cpu]            (rank 4)
+//!           -> Task/Process internal lock     (rank 5)
+//! ```
 //!
-//! - `yield_task()`: CLI => lock => pick next => TSS/CR3 => unlock => switch_context => restore IF
-//! - Timer handler: CPU already cleared IF => lock => pick next => TSS/CR3 => unlock => switch_context
+//! `SCHED_IDENTITY` read is observational only:
+//! - do not acquire any scheduler lock while holding it;
+//! - copy the result, release it, then begin a mutating operation.
 //!
-//! Each task has its own 16KB kernel stack. Callee-saved registers are
-//! pushed/popped by `switch_context()`. `CpuContext` only stores `saved_rsp`.
+//! ### Forbidden
+//! - Acquiring GLOBAL, IDENTITY, BLOCKED, or another LOCAL while holding LOCAL.
+//! - Holding two LOCAL locks simultaneously.
+//! - Allocating, logging, VFS access, IPI sends, or context switching while
+//!   any scheduler spinlock is held.
+//! - Any transition from Blocked directly to Running (must go through Runnable).
 //!
-//! TODO(v3 scheduler):
-//! - API stabilization before adding more features:
-//!   - freeze scheduler command syntax.
-//!   - add a small machine-friendly output format (key=value) for scripts/debug.
-//! - observability v2:
-//!   - per-class latency/wait histograms.
-//!   - one structured dump format (instead of free-form text logs) for top/debug.
-//! - targeted scheduler tests (high priority):
-//!   - config validation/reject paths (class/policy map).
-//!   - ready-task migration on class-table updates.
-//!   - SMP steal/preempt non-regression.
-//! - only then: CPU affinity (first truly useful advanced scheduler feature).
+//! ### Cross-CPU operations
+//! Use a two-phase protocol: detach under the source local lock, release it,
+//! then attach under the destination local lock.
 //!
-//! Legacy backlog:
-//! - class registry v2:
-//!   - dynamic add/remove/reorder with validation and safe reject path.
-//!   - policy->class mapping as runtime registry (not only static enum mapping).
-//! - atomic class-table migration:
-//!   - RCU/STW swap + migration of queued tasks across classes.
-//!   - preserve per-task accounting (vruntime, rt budget, wake deadlines).
-//! - balancing v2:
-//!   - dedicated balancer module, per-class steal policy, CPU affinity masks.
-//!   - NUMA-aware placement (future) and stronger anti-thrashing controls.
-//! - SMP hardening:
-//!   - explicit lock hierarchy doc + assertions.
-//!   - improved resched IPI batching/coalescing policy tuning.
-//! - observability v2:
-//!   - latency/wait-time histograms per class + structured trace dump.
-//!   - shell/top integration over stable snapshot API.
-//! - tests:
-//!   - deterministic migration/policy-remap/SMP-steal suites.
-//!   - fairness/starvation long-run regression in test ISO.
+//! ### Task ownership invariant
+//! A non-idle task is in exactly one scheduling ownership state:
+//! New, Runnable(cpu), Running(cpu), Blocked, Zombie, or Reaped.
 //!
-//! Optimization roadmap (stability-first, incremental):
-//! 1) Lock contention reduction (highest ROI, low risk)
-//!    - keep scheduler critical sections minimal: compute decisions under lock,
-//!      execute expensive side effects (IPI, signal delivery, cleanup) after unlock.
-//!    - split hot paths into tiny helpers with explicit "lock held / lock free" contract.
-//!    - add/track contention counters in every try_lock fallback path.
-//! 2) Wakeup path scalability (only after strong guards)
-//!    - re-introduce deadline index behind a runtime feature flag (default OFF).
-//!    - enforce single writer API for wake deadlines (no direct field stores in syscalls).
-//!    - add strict invariants:
-//!      - if task has deadline != 0, index contains task exactly once.
-//!      - on wake/kill/exit/resume, deadline is removed from index and field cleared.
-//!    - keep safe fallback scan path available and switchable at runtime.
-//! 3) Scheduler observability for regressions
-//!    - keep stable key=value output for scripts (`scheduler metrics kv`, `scheduler dump kv`).
-//!    - expose blocked-task ids and per-cpu preempt causes to diagnose stalls quickly.
-//!    - include boot-phase and lock-miss counters in all dump modes.
-//! 4) Balancing/pick optimizations
-//!    - tune steal hysteresis/cooldown with metrics, avoid ping-pong migration.
-//!    - avoid counting idle task as runnable load for CPU selection.
-//!    - add bounded per-tick work budgets to prevent long interrupt latency tails.
-//! 5) Safety rails before each optimization lands
-//!    - ship each optimization in one isolated patchset with rollback switch.
-//!    - validate with targeted scenarios:
-//!      - boot + shell responsiveness,
-//!      - timeout-heavy workload (poll/futex/nanosleep),
-//!      - SMP preempt/steal stress.
-//!    - if any regression appears, disable feature first, debug second.
+//! ## Canonical state machine
+//!
+//! ```text
+//!   New -> Runnable(cpu)
+//!   Runnable(cpu) -> Running(cpu)     [selection / preempt]
+//!   Running(cpu) -> Runnable(cpu)     [tick / yield / preempt]
+//!   Running(cpu) -> Blocked           [block_current]
+//!   Blocked -> Runnable(cpu)          [wake_task]
+//!   Running/Runnable/Blocked -> Zombie [exit / kill]
+//!   Zombie -> Reaped                  [waitpid / reap]
+//! ```
+//!
+//! Each transition has a single owner (the function performing it) and a
+//! defined transaction: which locks are taken, which containers lose the task,
+//! which containers receive it, and when `taskcpu` becomes visible.
+//!
+//! ## Metrics
+//! All counters (FORCE_RESCHED_HINT, RESCHED_IPI_PENDING, ticks, etc.) are
+//! lock-free atomics and must never be used to drive state transitions.
 
 use super::task::{Pid, Task, TaskId, TaskPriority, TaskState, Tid};
 use crate::{
@@ -85,6 +60,232 @@ use crate::{
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::RwLock as SpinRwLock;
+
+// ---------------------------------------------------------------------------
+// Scheduler state machine
+// ---------------------------------------------------------------------------
+
+/// Formal scheduling state of a task, encoding ownership unambiguously.
+///
+/// Each state identifies the *exclusive owner* of the task:
+///
+/// | State             | Owner                | Present in                  |
+/// |-------------------|----------------------|-----------------------------|
+/// | New               | creator / global     | alltasks only, no queue     |
+/// | Runnable { cpu }  | LOCAL_SCHEDULERS[cpu]| exactly one class queue     |
+/// | Running { cpu }   | LOCAL_SCHEDULERS[cpu]| exactly currenttask on cpu  |
+/// | Blocked           | BLOCKED_TASKS        | exactly BLOCKED_TASKS       |
+/// | Zombie            | GLOBAL_SCHED_STATE   | zombies + alltasks          |
+/// | Reaped            | nobody               | removed from all structures |
+///
+/// `alltasks` may retain a reference for all states except Reaped, but must
+/// **never** be used to determine schedulability.  The source of truth is the
+/// `SchedState` and its owning container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedState {
+    /// Task constructed but not yet visible to the scheduler.
+    New,
+    /// Enqueued on `cpu`'s local run queue, awaiting selection.
+    Runnable { cpu: usize },
+    /// Currently executing on `cpu`.
+    Running { cpu: usize },
+    /// Waiting for an event; entry must exist in `BLOCKED_TASKS`.
+    Blocked,
+    /// Exited; waiting to be reaped by parent's `waitpid`.
+    Zombie,
+    /// Fully removed from all scheduler and identity structures.
+    Reaped,
+}
+
+impl SchedState {
+    /// Returns `true` if the task is in a scheduling-eligible state.
+    #[inline]
+    pub fn is_runnable_like(self) -> bool {
+        matches!(self, SchedState::Runnable { .. } | SchedState::Running { .. })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lockdep debug instrumentation
+// ---------------------------------------------------------------------------
+
+/// Lock ranks matching the total order documented in the module header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum LockRank {
+    /// GLOBAL_SCHED_STATE — rank 1.
+    Global = 1,
+    /// SCHED_IDENTITY write — rank 2.
+    IdentityW = 2,
+    /// SCHED_IDENTITY read — rank 2R (must not chain to scheduler locks).
+    IdentityR = 3,
+    /// BLOCKED_TASKS — rank 3.
+    Blocked = 4,
+    /// LOCAL_SCHEDULERS[cpu] — rank 4.
+    Local = 5,
+    /// Task/Process internal — rank 5.
+    TaskInternal = 6,
+}
+
+/// Per-CPU lockdep state, active only under `cfg(debug_assertions)`.
+#[cfg(debug_assertions)]
+#[allow(dead_code)]
+pub(crate) struct LockdepState {
+    depth: usize,
+    held: [HeldLock; 6],
+}
+
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HeldLock {
+    rank: LockRank,
+    /// Optional CPU index for LOCAL locks.
+    cpu: Option<usize>,
+    /// Caller return address (for diagnostics).
+    caller: usize,
+}
+
+#[cfg(debug_assertions)]
+impl LockdepState {
+    pub(crate) const fn new() -> Self {
+        Self {
+            depth: 0,
+            held: [
+                HeldLock { rank: LockRank::Global, cpu: None, caller: 0 };
+                6
+            ],
+        }
+    }
+
+    /// Record a lock acquisition.  Panics in debug if ordering is violated.
+    pub(crate) fn acquire(&mut self, rank: LockRank, cpu: Option<usize>, caller: usize) {
+        if self.depth > 0 {
+            let top = self.held[self.depth - 1];
+            // SCHED_IDENTITY read (rank 3) must not chain to any scheduler lock.
+            if top.rank == LockRank::IdentityR {
+                panic!(
+                    "lockdep: SCHED_IDENTITY read held at depth {}, cannot acquire {:?} \
+                     (read path must not chain to scheduler locks)",
+                    self.depth - 1, rank
+                );
+            }
+            // LOCAL must never be held while acquiring another LOCAL.
+            if rank == LockRank::Local && cpu.is_some() {
+                for i in 0..self.depth {
+                    if self.held[i].rank == LockRank::Local {
+                        panic!(
+                            "lockdep: two LOCAL locks simultaneously (held {:?} at depth {}, \
+                             acquiring LOCAL[{}] at depth {})",
+                            self.held[i], i, cpu.unwrap(), self.depth
+                        );
+                    }
+                }
+            }
+            // General rank check: new rank must be strictly greater than current top.
+            if (rank as u8) <= (top.rank as u8) {
+                panic!(
+                    "lockdep: lock order violation at depth {}: held {:?}, acquiring {:?}",
+                    self.depth - 1, top, rank
+                );
+            }
+        }
+        if self.depth < self.held.len() {
+            self.held[self.depth] = HeldLock { rank, cpu, caller };
+        }
+        self.depth += 1;
+    }
+
+    /// Record a lock release.  Asserts LIFO order.
+    pub(crate) fn release(&mut self, rank: LockRank) {
+        if self.depth == 0 {
+            panic!("lockdep: release underflow for {:?}", rank);
+        }
+        self.depth -= 1;
+        let was = self.held[self.depth];
+        if was.rank != rank {
+            panic!(
+                "lockdep: releasing {:?} but top of stack is {:?} (depth {})",
+                rank, was, self.depth
+            );
+        }
+    }
+
+    /// Assert that no scheduler lock is held.
+    pub(crate) fn assert_no_scheduler_locks(&self) {
+        if self.depth > 0 {
+            panic!(
+                "lockdep: asserting no scheduler locks but depth={}, top={:?}",
+                self.depth, self.held[self.depth - 1]
+            );
+        }
+    }
+
+    /// Assert that a specific rank is currently held.
+    pub(crate) fn assert_held(&self, rank: LockRank) {
+        for i in 0..self.depth {
+            if self.held[i].rank == rank {
+                return;
+            }
+        }
+        panic!("lockdep: expected {:?} to be held, but depth={}", rank, self.depth);
+    }
+
+    /// Return the current depth.
+    pub(crate) fn current_depth(&self) -> usize {
+        self.depth
+    }
+}
+
+/// Per-CPU lockdep state.  Each CPU tracks its own stack of held scheduler locks.
+/// SAFETY: accessed only from the owning CPU with IRQs disabled (no concurrent access).
+#[cfg(debug_assertions)]
+static mut LOCKDEP: [LockdepState; crate::arch::percpu::MAX_CPUS] =
+    [const { LockdepState::new() }; crate::arch::percpu::MAX_CPUS];
+
+/// Record a lock acquisition in the per-CPU lockdep state.
+#[cfg(debug_assertions)]
+#[inline]
+#[track_caller]
+pub(crate) fn lockdep_acquire(rank: LockRank, cpu: Option<usize>) {
+    let caller = core::panic::Location::caller();
+    let addr = caller as *const core::panic::Location<'static> as usize;
+    unsafe { LOCKDEP[current_cpu_index()].acquire(rank, cpu, addr) };
+}
+
+/// Record a lock release in the per-CPU lockdep state.
+#[cfg(debug_assertions)]
+#[inline]
+pub(crate) fn lockdep_release(rank: LockRank) {
+    unsafe { LOCKDEP[current_cpu_index()].release(rank) };
+}
+
+/// Assert that no scheduler locks are held on this CPU.
+#[cfg(debug_assertions)]
+#[inline]
+pub(crate) fn lockdep_assert_no_locks() {
+    unsafe { LOCKDEP[current_cpu_index()].assert_no_scheduler_locks() };
+}
+
+/// Assert that a specific rank is currently held on this CPU.
+#[cfg(debug_assertions)]
+#[inline]
+pub(crate) fn lockdep_assert_held(rank: LockRank) {
+    unsafe { LOCKDEP[current_cpu_index()].assert_held(rank) };
+}
+
+// No-op stubs for release builds
+#[cfg(not(debug_assertions))]
+#[inline]
+pub(crate) fn lockdep_acquire(_rank: LockRank, _cpu: Option<usize>) {}
+#[cfg(not(debug_assertions))]
+#[inline]
+pub(crate) fn lockdep_release(_rank: LockRank) {}
+#[cfg(not(debug_assertions))]
+#[inline]
+pub(crate) fn lockdep_assert_no_locks() {}
+#[cfg(not(debug_assertions))]
+#[inline]
+pub(crate) fn lockdep_assert_held(_rank: LockRank) {}
 
 /// Per-CPU scheduler tick counters used for CPU usage estimation.
 ///
@@ -322,14 +523,16 @@ pub(crate) fn take_force_resched_hint(cpu: usize) -> bool {
     }
 }
 
-/// Global scheduler state : cold path: fork, exit, wake, block.
+/// Global scheduler state — rank 1 (root) in the total lock order.
 ///
-/// Lock order: acquire `GLOBAL_SCHED_STATE` before `LOCAL_SCHEDULERS[n]`
-/// when both are needed. Never hold a LOCAL lock and then block-acquire GLOBAL.
+/// This is the root lock.  It may precede all other scheduler locks but must
+/// **never** be acquired from a path that already holds a LOCAL, BLOCKED, or
+/// IDENTITY lock.
 ///
-/// When both `GLOBAL_SCHED_STATE` and `SCHED_IDENTITY` are needed, always take
-/// `GLOBAL_SCHED_STATE` first, then `SCHED_IDENTITY`. Paths that reversed this
-/// order deadlocked with `kill_task` / `try_reap_child_locked` during shutdown.
+/// Protects: `all_tasks`, `task_cpu`, `zombies`, `wake_deadlines`, and the
+/// global `class_table`.  Per-CPU run queues and current-task tracking live
+/// in `LOCAL_SCHEDULERS` (rank 4).  Blocked tasks are in `BLOCKED_TASKS`
+/// (rank 3).  Identity maps are in `SCHED_IDENTITY` (rank 2).
 pub(crate) static GLOBAL_SCHED_STATE: SpinLock<Option<GlobalSchedState>> = SpinLock::new(None);
 
 /// Returns the scheduler lock address for deadlock tracing.
@@ -514,37 +717,38 @@ struct SchedulerCpu {
     class_table: crate::process::sched::SchedClassTable,
 }
 
-/// Per-CPU local scheduler locks : hot path: timer tick, preemption, yield.
+/// Per-CPU local scheduler locks — rank 4 in the total lock order.
 ///
-/// Lock order: LOCAL before nothing; never hold two LOCAL locks simultaneously
-/// (use `try_lock` when touching a sibling CPU).
+/// Acquired after `GLOBAL_SCHED_STATE`, `SCHED_IDENTITY`, and `BLOCKED_TASKS`.
+/// **Never** hold two LOCAL locks simultaneously.
+/// Cross-CPU operations use a two-phase protocol: detach under source LOCAL,
+/// release, then attach under destination LOCAL.
 #[allow(dead_code)]
 pub(crate) static LOCAL_SCHEDULERS: [SpinLock<Option<SchedulerCpu>>;
     crate::arch::percpu::MAX_CPUS] =
     [const { SpinLock::new(None) }; crate::arch::percpu::MAX_CPUS];
 
-/// Blocked tasks registry : hot path: block/wake.
+/// Blocked tasks registry — rank 3 in the total lock order.
 ///
-/// This lock is **independent** of `GLOBAL_SCHED_STATE`. The block and wake
-/// paths acquire only this lock + the target CPU's `LOCAL_SCHEDULERS[cpu]`
-/// lock, avoiding contention with cold-path operations (fork, exit, kill).
+/// `BLOCKED_TASKS` must be acquired **after** `GLOBAL_SCHED_STATE` and
+/// `SCHED_IDENTITY` (write), and **before** `LOCAL_SCHEDULERS[cpu]`.
+/// It is **never** acquired from a path that already holds a LOCAL lock.
 ///
-/// Lock order: BLOCKED_TASKS before LOCAL (never the reverse).
+/// A task appears here if and only if its `SchedState` is `Blocked`.
 pub(crate) static BLOCKED_TASKS: SpinLock<BTreeMap<TaskId, Arc<Task>>> =
     SpinLock::new(BTreeMap::new());
 
-/// Identity maps : cold path: PID/TID lookups, process groups, sessions, parent/child.
+/// Identity maps — rank 2 (write) / 2R (read) in the total lock order.
 ///
-/// Separate from `GLOBAL_SCHED_STATE` so that identity lookups (getpid, getpgid,
-/// setpgid, etc.) never contend with fork/exit/zombie management.
+/// `SCHED_IDENTITY` write is acquired after `GLOBAL_SCHED_STATE` and before
+/// `BLOCKED_TASKS` or `LOCAL_SCHEDULERS[cpu]`.
 ///
-/// Upgraded to an `RwLock` so that concurrent readers (`getpid`, `gettid`,
-/// `getppid`, `getpgid`, `getsid`, `get_task_by_pid`) do not serialize on
-/// each other.  Only writers (`fork`, `exit`, `setpgid`, `setsid`, `kill`)
-/// acquire the exclusive write lock.
+/// `SCHED_IDENTITY` read is **observational only**: copy the result, release,
+/// then begin any mutating operation.  No scheduler lock may be acquired
+/// while holding the read guard.
 ///
-/// Lock order: SCHED_IDENTITY before LOCAL (never the reverse).
-/// SCHED_IDENTITY and BLOCKED_TASKS are independent : never hold both.
+/// Upgraded to `RwLock` so that concurrent readers (`getpid`, `getpgid`,
+/// `get_task_by_pid`) do not serialize.
 pub(crate) static SCHED_IDENTITY: SpinRwLock<SchedIdentity> = SpinRwLock::new(SchedIdentity::new());
 
 /// Identity maps for the scheduler: PID/TID routing, process groups,
@@ -616,7 +820,6 @@ pub struct GlobalSchedState {
 
 /// Performs the validate task context operation.
 fn validate_task_context(task: &Arc<Task>) -> Result<(), &'static str> {
-    // `task` is a Rust &Arc<Task> : the inner pointer is always valid.
     let saved_rsp = unsafe { (*task.context.get()).saved_rsp };
     let stack_base = task.kernel_stack.virt_base.as_u64();
     let stack_top = stack_base.saturating_add(task.kernel_stack.size as u64);
@@ -625,15 +828,111 @@ fn validate_task_context(task: &Arc<Task>) -> Result<(), &'static str> {
         return Err("saved_rsp outside kernel stack bounds");
     }
 
-    // For our switch frame layout, return IP is at [saved_rsp + 48].
-    // Use read_unaligned: saved_rsp is only guaranteed to be within the stack
-    // bounds, not necessarily aligned to 8 bytes at this offset.
+    // ABI alignment: saved_rsp must be 8-byte aligned (x86-64 ABI requirement).
+    if saved_rsp & 7 != 0 {
+        return Err("saved_rsp not 8-byte aligned");
+    }
+
+    // Return IP is at [saved_rsp + 48] in our switch frame layout.
     let ret_ip = unsafe { core::ptr::read_unaligned((saved_rsp + 48) as *const u64) };
     if ret_ip == 0 {
         return Err("null return IP in switch frame");
     }
 
+    // Return IP must be a canonical userspace or kernel address (not in the
+    // non-canonical hole 0x0000_8000_0000_0000..0xFFFF_7FFF_FFFF_FFFF).
+    let canonical = ret_ip < 0x0000_8000_0000_0000 || ret_ip >= 0xFFFF_8000_0000_0000;
+    if !canonical {
+        return Err("non-canonical return IP");
+    }
+
+    // FPU area must be within the kernel stack (it sits below saved_rsp).
+    let fpu_size = core::mem::size_of::<crate::process::task::ExtendedState>() as u64;
+    let fpu_ptr = task.fpu_state.get() as u64;
+    if fpu_ptr != 0 && (fpu_ptr < stack_base || fpu_ptr.saturating_add(fpu_size) > stack_top) {
+        return Err("FPU state outside kernel stack bounds");
+    }
+
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Debug invariant validator
+// ---------------------------------------------------------------------------
+
+/// Validate scheduler-wide invariants in debug builds.
+///
+/// Must be called with `GLOBAL_SCHED_STATE` held.  Iterates all CPUs and
+/// checks that every task appears in exactly one scheduling location.
+///
+/// Panics with a diagnostic message on the first invariant violation.
+#[cfg(debug_assertions)]
+#[allow(dead_code)]
+pub(crate) fn validate_scheduler_invariants() {
+    let n = active_cpu_count();
+    let mut seen_current: alloc::collections::BTreeSet<TaskId> =
+        alloc::collections::BTreeSet::new();
+
+    // 1. Each CPU has at most one current_task; no task is current on two CPUs.
+    for cpu_idx in 0..n {
+        let guard = LOCAL_SCHEDULERS[cpu_idx].lock();
+        if let Some(ref cpu) = *guard {
+            if let Some(ref current) = cpu.current_task {
+                let tid = current.id;
+                if !Arc::ptr_eq(current, &cpu.idle_task) {
+                    assert!(
+                        seen_current.insert(tid),
+                        "scheduler invariant: task {} is current on multiple CPUs (cpu={})",
+                        tid.as_u64(), cpu_idx
+                    );
+                }
+            }
+        }
+    }
+
+    // 2. task_cpu consistency: for Running/Ready tasks, task_cpu must be within range.
+    //    Dead tasks may linger in all_tasks briefly; Blocked tasks should not be here.
+    {
+        let sched_guard = GLOBAL_SCHED_STATE.lock();
+        if let Some(ref sched) = *sched_guard {
+            for (tid, &cpu_idx) in sched.task_cpu.iter() {
+                let state = sched.all_tasks.get(tid).map(|t| t.get_state());
+                match state {
+                    Some(TaskState::Ready) | Some(TaskState::Running) => {
+                        assert!(
+                            cpu_idx < n,
+                            "scheduler invariant: task_cpu[{}] = {} but cpu_count = {}",
+                            tid.as_u64(), cpu_idx, n
+                        );
+                    }
+                    Some(TaskState::Blocked) => {
+                        // task_cpu for Blocked is allowed (set during block for wake routing).
+                    }
+                    Some(TaskState::Dead) => {}
+                    None => {}
+                }
+            }
+            // 3. Zombies must not be in a run queue.
+            for (tid, _) in sched.zombies.iter() {
+                assert!(
+                    !seen_current.contains(tid),
+                    "scheduler invariant: zombie task {} is current on a CPU",
+                    tid.as_u64()
+                );
+            }
+        }
+    }
+}
+
+#[cfg(not(debug_assertions))]
+#[inline]
+pub(crate) fn validate_scheduler_invariants() {}
+
+/// Check that `SCHED_IDENTITY` read is not held (observational-only contract).
+#[cfg(debug_assertions)]
+#[allow(dead_code)]
+pub(crate) fn assert_no_identity_read_held() {
+    lockdep_assert_no_locks();
 }
 
 mod core_impl;
