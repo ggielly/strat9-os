@@ -387,23 +387,19 @@ impl GlobalSchedState {
 
     /// Select the least-loaded CPU for a newly created task.
     ///
-    /// Uses **blocking** `LOCAL_SCHEDULERS[i].lock()` for each CPU while
-    /// `GLOBAL_SCHED_STATE` is already held by the caller.  This is safe because the
-    /// hot-path only ever does `try_lock_no_irqsave` on `GLOBAL_SCHED_STATE` (so it
-    /// cannot deadlock with us), but it may briefly stall behind a timer tick
-    /// that holds a LOCAL lock.  The stall is bounded by one tick period.
+    /// Called with `GLOBAL_SCHED_STATE` held.  Acquires each LOCAL sequentially.
+    /// Lock order: GLOBAL (held) → LOCAL[cpu] (rank 4).  Never two LOCALs simultaneously.
     fn select_cpu_for_task(&self) -> usize {
-        // Early boot: before the first real task is running, keep all new tasks
-        // on the BSP. Spreading init/shell/status across CPUs at this point can
-        // strand boot-critical work on AP scheduler instances that have not yet
-        // entered their steady-state scheduling loop.
         let n = active_cpu_count();
         let all_idle = (0..n).all(|i| {
-            LOCAL_SCHEDULERS[i]
+            lockdep_acquire(LockRank::Local, Some(i));
+            let result = LOCAL_SCHEDULERS[i]
                 .lock()
                 .as_ref()
                 .map(|cpu| cpu.current_task.is_none())
-                .unwrap_or(true)
+                .unwrap_or(true);
+            lockdep_release(LockRank::Local);
+            result
         });
         if all_idle {
             crate::serial_println!("[trace][sched] select_cpu_for_task early-boot best=0");
@@ -412,6 +408,7 @@ impl GlobalSchedState {
         let mut best = 0usize;
         let mut best_load = usize::MAX;
         for idx in 0..n {
+            lockdep_acquire(LockRank::Local, Some(idx));
             let load = {
                 let guard = LOCAL_SCHEDULERS[idx].lock();
                 if let Some(ref cpu) = *guard {
@@ -428,6 +425,7 @@ impl GlobalSchedState {
                     0
                 }
             };
+            lockdep_release(LockRank::Local);
             if load < best_load {
                 best = idx;
                 best_load = load;
@@ -441,7 +439,10 @@ impl GlobalSchedState {
         best
     }
 
-    /// Performs the migrate ready tasks for new class table operation.
+    /// Migrate all ready tasks to match the current class table.
+    ///
+    /// Called with `GLOBAL_SCHED_STATE` held.  Acquires each `LOCAL_SCHEDULERS[cpu]`
+    /// sequentially (never two at once).  Lock order: GLOBAL (held) → LOCAL[cpu] (rank 4).
     pub fn migrate_ready_tasks_for_new_class_table(&mut self) {
         let mut ready: Vec<(TaskId, Arc<Task>, usize)> = Vec::new();
         for (id, task) in self.all_tasks.iter() {
@@ -454,8 +455,10 @@ impl GlobalSchedState {
         }
 
         for (id, task, cpu_idx) in ready {
+            lockdep_acquire(LockRank::Local, Some(cpu_idx));
             let mut guard = LOCAL_SCHEDULERS[cpu_idx].lock();
             let Some(ref mut cpu) = *guard else {
+                lockdep_release(LockRank::Local);
                 continue;
             };
             if cpu.class_rqs.remove(id) {
@@ -463,6 +466,7 @@ impl GlobalSchedState {
                 cpu.class_rqs.enqueue(class, task);
                 cpu.need_resched = true;
             }
+            lockdep_release(LockRank::Local);
         }
     }
 }

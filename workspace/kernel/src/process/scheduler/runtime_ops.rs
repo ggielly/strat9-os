@@ -755,6 +755,20 @@ pub fn class_table() -> crate::process::sched::SchedClassTable {
 }
 
 /// Configure scheduler class pick/steal order at runtime.
+///
+/// ## Lock order
+///
+/// GLOBAL (rank 1) → LOCAL[cpu] (rank 4), sequentially for each CPU.
+/// No BLOCKED or IDENTITY locks needed.  IPIs are sent after all locks
+/// are released.
+///
+/// ## Contention note
+///
+/// GLOBAL is held while iterating all LOCALs.  This blocks cold-path
+/// operations (fork, exit, wake) on other CPUs for the duration.
+/// Acceptable since class table reconfiguration is infrequent.  Hot-path
+/// `try_lock` on GLOBAL (e.g., `steal_task_local`) will skip rather than
+/// block.
 pub fn configure_class_table(table: crate::process::sched::SchedClassTable) -> bool {
     if !table.validate() {
         return false;
@@ -762,19 +776,22 @@ pub fn configure_class_table(table: crate::process::sched::SchedClassTable) -> b
     let saved_flags = save_flags_and_cli();
     let mut ipi_targets = [false; crate::arch::percpu::MAX_CPUS];
     let my_cpu = current_cpu_index();
+
+    // Lock order: GLOBAL (rank 1) → LOCAL[cpu] (rank 4), sequentially.
+    lockdep_acquire(LockRank::Global, None);
     let applied = {
         let mut scheduler = GLOBAL_SCHED_STATE.lock();
         if let Some(ref mut sched) = *scheduler {
             let prev = sched.class_table;
             sched.class_table = table;
             let n = active_cpu_count();
-            // Propagate the new class table to every LOCAL and set need_resched
-            // in a single pass to avoid locking each LOCAL multiple times.
             for cpu_idx in 0..n {
+                lockdep_acquire(LockRank::Local, Some(cpu_idx));
                 if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_idx].lock() {
                     local_cpu.class_table = table;
                     local_cpu.need_resched = true;
                 }
+                lockdep_release(LockRank::Local);
                 if cpu_idx != my_cpu && cpu_is_valid(cpu_idx) {
                     ipi_targets[cpu_idx] = true;
                 }
@@ -786,8 +803,10 @@ pub fn configure_class_table(table: crate::process::sched::SchedClassTable) -> b
         } else {
             false
         }
-    };
+    }; // GLOBAL released here
+    lockdep_release(LockRank::Global);
     restore_flags(saved_flags);
+    // IPIs sent after all locks released — never under a scheduler lock.
     for (cpu, send) in ipi_targets.iter().copied().enumerate() {
         if send {
             send_resched_ipi_to_cpu(cpu);
