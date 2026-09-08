@@ -2275,6 +2275,10 @@ fn load_elf_task_inner(
         fpu_state: crate::process::task::SyncUnsafeCell::new(fpu_state),
         xcr0_mask: core::sync::atomic::AtomicU64::new(xcr0_mask),
         rt_link: intrusive_collections::LinkedListLink::new(),
+        rt_budget_remaining: core::sync::atomic::AtomicU64::new(0),
+        rt_budget_period_start: core::sync::atomic::AtomicU64::new(0),
+        rt_degraded: core::sync::atomic::AtomicBool::new(false),
+        fair_wait_ticks: core::sync::atomic::AtomicU64::new(0),
     });
 
     crate::e9_println!(

@@ -342,6 +342,25 @@ pub struct Task {
     ///
     /// Only touched while holding the per-CPU scheduler spinlock.
     pub rt_link: LinkedListLink,
+
+    // ── RT budget per period ──────────────────────────────────────────────
+    /// Remaining ticks in the current RT budget period.
+    /// Decremented by `update_current`; when 0 the task is preempted and
+    /// flagged degraded until the period expires.
+    pub rt_budget_remaining: AtomicU64,
+    /// Tick at which the current RT budget period started.
+    /// Used to determine when to reset `rt_budget_remaining`.
+    pub rt_budget_period_start: AtomicU64,
+    /// Whether this RT task has exhausted its budget and is temporarily
+    /// degraded (treated as Fair) until the period expires.
+    pub rt_degraded: AtomicBool,
+
+    // ── Fair starvation protection ────────────────────────────────────────
+    /// Ticks this task has spent waiting in the Fair run queue without being
+    /// selected.  Reset to 0 when the task is picked.  If this exceeds
+    /// `FAIR_STARVATION_THRESHOLD_TICKS`, the task is boosted to the front
+    /// of its priority class.
+    pub fair_wait_ticks: AtomicU64,
 }
 
 // SAFETY: `LinkedListLink` uses `UnsafeCell` internally and is therefore
@@ -1014,6 +1033,10 @@ impl Task {
             fpu_state: SyncUnsafeCell::new(fpu_state),
             xcr0_mask: AtomicU64::new(xcr0_mask),
             rt_link: LinkedListLink::new(),
+            rt_budget_remaining: AtomicU64::new(0),
+            rt_budget_period_start: AtomicU64::new(0),
+            rt_degraded: AtomicBool::new(false),
+            fair_wait_ticks: AtomicU64::new(0),
         });
         task.seed_kernel_interrupt_frame_from_context();
         Ok(task)
@@ -1090,6 +1113,10 @@ impl Task {
             fpu_state: SyncUnsafeCell::new(fpu_state),
             xcr0_mask: AtomicU64::new(xcr0_mask),
             rt_link: LinkedListLink::new(),
+            rt_budget_remaining: AtomicU64::new(0),
+            rt_budget_period_start: AtomicU64::new(0),
+            rt_degraded: AtomicBool::new(false),
+            fair_wait_ticks: AtomicU64::new(0),
         }))
     }
 

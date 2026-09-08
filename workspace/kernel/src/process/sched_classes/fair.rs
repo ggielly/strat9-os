@@ -3,6 +3,7 @@
 use super::{CurrentRuntime, SchedClassRq};
 use crate::process::task::Task;
 use alloc::{collections::BTreeMap, sync::Arc};
+use core::sync::atomic::Ordering;
 
 const WEIGHT_0: u64 = 1024;
 
@@ -10,12 +11,15 @@ const WEIGHT_0: u64 = 1024;
 ///
 /// At TIMER_HZ=100 (10 ms/tick):
 ///   BASE_SLICE_TICKS = 1 -> 1 tick = 10 ms per task (matches `quantum_ms: 10`)
-///
-/// Previously this was mistakenly 10, giving 10 ticks = 100 ms slices and
-/// effectively disabling preemption for lightly loaded workloads.
-///
-/// Derivation: target_ms = 10 ms, tick_ms = 1000 / TIMER_HZ = 10 ms -> 1 tick.
 const BASE_SLICE_TICKS: u64 = 1;
+
+/// Fair starvation threshold in ticks.
+///
+/// A Fair task that has waited this many ticks without being selected is
+/// boosted to the front of its vruntime position.  At TIMER_HZ=100:
+/// 100 ticks = 1 second.  This prevents indefinite starvation when RT
+/// tasks consume most of the CPU.
+const FAIR_STARVATION_THRESHOLD_TICKS: u64 = 100;
 
 /// Performs the nice to weight operation.
 pub const fn nice_to_weight(nice: super::nice::Nice) -> u64 {
@@ -134,8 +138,6 @@ impl SchedClassRq for FairClassRq {
         if let super::SchedPolicy::Fair(nice) = task.sched_policy() {
             let task_id = task.id.as_u64();
 
-            // Guard against double-enqueue: `by_id` is the authoritative
-            // membership record.  This should not occur in normal operation.
             if self.by_id.contains_key(&task_id) {
                 return;
             }
@@ -146,9 +148,9 @@ impl SchedClassRq for FairClassRq {
                 vruntime = self.min_vruntime;
             }
             task.set_vruntime(vruntime);
-            // Keep the task-side `fair_on_rq` flag consistent with external
-            // observers.  The generation return value is unused in this design.
             task.fair_prepare_enqueue();
+            // Reset starvation counter: task just arrived, hasn't waited yet.
+            task.fair_wait_ticks.store(0, Ordering::Relaxed);
 
             let key = (vruntime, task_id);
             self.entities.insert(key, (task, weight));
@@ -163,13 +165,37 @@ impl SchedClassRq for FairClassRq {
         self.runnable_count
     }
 
-    /// Picks the next task to run: the one with the smallest vruntime.
+    /// Picks the next task to run: the one with the smallest vruntime,
+    /// unless a starved task exists (waited > threshold), in which case
+    /// the starved task is boosted ahead.
     ///
-    /// O(log n), allocation-free.
+    /// O(n) starvation scan + O(log n) normal pick.  The scan is bounded
+    /// by the number of Fair tasks (typically small).
     fn pick_next(&mut self) -> Option<Arc<Task>> {
-        let ((_, task_id), (task, weight)) = self.entities.pop_first()?;
-        self.by_id.remove(&task_id);
+        // Check for starved tasks: any task with fair_wait_ticks >= threshold
+        // is boosted ahead of normal vruntime ordering.
+        let mut starved_key: Option<(u64, u64)> = None;
+        let mut starved_wait: u64 = 0;
+        for (&key, (task, _)) in self.entities.iter() {
+            let wait = task.fair_wait_ticks.load(Ordering::Relaxed);
+            if wait >= FAIR_STARVATION_THRESHOLD_TICKS && wait > starved_wait {
+                starved_key = Some(key);
+                starved_wait = wait;
+            }
+        }
+
+        let key = if let Some(sk) = starved_key {
+            sk
+        } else {
+            // Normal path: pick minimum vruntime.
+            let (&k, _) = self.entities.iter().next()?;
+            k
+        };
+
+        let (task, weight) = self.entities.remove(&key)?;
+        self.by_id.remove(&key.1);
         task.fair_mark_dequeued();
+        task.fair_wait_ticks.store(0, Ordering::Relaxed);
         self.total_weight = self.total_weight.saturating_sub(weight);
         self.runnable_count = self.runnable_count.saturating_sub(1);
         Some(task)
@@ -227,14 +253,21 @@ impl SchedClassRq for FairClassRq {
             self.runnable_count = self.runnable_count.saturating_sub(1);
             true
         } else {
-            // `by_id` and `entities` are kept in sync on every mutation path;
-            // reaching here indicates a bug in this module.
             debug_assert!(
                 false,
                 "FairClassRq: by_id/entities out of sync for task {:?}",
                 task_id
             );
             false
+        }
+    }
+
+    /// Increment `fair_wait_ticks` for every queued task.  Called once per
+    /// timer tick from the LOCAL lock handler.
+    fn tick_update_wait(&mut self) {
+        for ((_, task_id), (task, _)) in self.entities.iter() {
+            let _ = task_id; // suppress unused warning
+            task.fair_wait_ticks.fetch_add(1, Ordering::Relaxed);
         }
     }
 }

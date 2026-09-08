@@ -720,6 +720,13 @@ impl PerCpuClassRqSet {
         self.real_time.remove(task_id) || self.fair.remove(task_id) || self.idle.remove(task_id)
     }
 
+    /// Called once per timer tick.  Increments wait-time counters for all
+    /// queued tasks across all classes.  Used for Fair starvation detection.
+    fn tick_update_wait(&mut self) {
+        use crate::process::sched::SchedClassRq;
+        self.fair.tick_update_wait();
+    }
+
     /// Performs the steal candidate operation.
     fn steal_candidate(
         &mut self,

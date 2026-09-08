@@ -121,6 +121,8 @@ pub fn timer_tick() {
                     } else {
                         false
                     };
+                    // Increment Fair starvation counters for all queued tasks.
+                    cpu.class_rqs.tick_update_wait();
                     if should_resched {
                         cpu.need_resched = true;
                     }

@@ -299,6 +299,10 @@ fn build_child_task(
         },
         xcr0_mask: AtomicU64::new(parent.xcr0_mask.load(core::sync::atomic::Ordering::Relaxed)),
         rt_link: intrusive_collections::LinkedListLink::new(),
+        rt_budget_remaining: AtomicU64::new(parent.rt_budget_remaining.load(core::sync::atomic::Ordering::Relaxed)),
+        rt_budget_period_start: AtomicU64::new(parent.rt_budget_period_start.load(core::sync::atomic::Ordering::Relaxed)),
+        rt_degraded: AtomicBool::new(parent.rt_degraded.load(core::sync::atomic::Ordering::Relaxed)),
+        fair_wait_ticks: AtomicU64::new(0),
     });
 
     // CpuContext initial stack layout: r15, r14, r13(arg), r12(entry), rbp, rbx, ret
