@@ -981,6 +981,7 @@ pub(crate) fn assert_no_identity_read_held() {
 }
 
 mod core_impl;
+pub mod deferred_work;
 pub mod perf_counters;
 mod runtime_ops;
 mod task_ops;
@@ -989,3 +990,9 @@ mod timer_ops;
 pub use runtime_ops::*;
 pub use task_ops::*;
 pub use timer_ops::*;
+
+// Re-export deferred work module for metrics and raise functions.
+pub use deferred_work::{
+    DeferredWork, DeferredWorkMetrics, has_pending, metrics_snapshot as deferred_work_metrics,
+    process_deferred_work, raise_deferred_work, raise_tick_deferred_work, reset_metrics as reset_deferred_work_metrics,
+};

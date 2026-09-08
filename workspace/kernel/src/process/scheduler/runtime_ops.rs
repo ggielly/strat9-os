@@ -286,6 +286,12 @@ pub fn finish_switch() {
 
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
+    // Process deferred work raised by the timer interrupt.
+    // This is a safe point: we're on the new task's kernel stack with no
+    // scheduler locks held. Deferred work items (interval timers, wake
+    // deadlines, per-task accounting) acquire locks internally via try_lock.
+    super::deferred_work::process_deferred_work();
+
     // Debug invariant check after every context switch completes.
     // Uses try_lock to avoid blocking; validates that task containers
     // are consistent (no task in two places, no orphaned zombies, etc.).
@@ -385,6 +391,13 @@ pub fn finish_interrupt_switch() {
         }
         core::hint::spin_loop();
     }
+
+    // Process deferred work raised by the timer interrupt.
+    // Safe point: we're on the new task's kernel stack with no scheduler
+    // locks held. This handles interval timers, wake deadlines, and
+    // per-task accounting that were deferred from the hardirq handler.
+    super::deferred_work::process_deferred_work();
+
     let _ = task_to_drop;
 }
 
@@ -425,6 +438,7 @@ pub fn yield_task() {
         unsafe {
             crate::process::task::do_switch_context(target);
         }
+        // finish_switch() processes deferred work internally.
         finish_switch();
     }
 
@@ -920,6 +934,11 @@ pub(super) extern "C" fn idle_task_main() -> ! {
     let cpu = crate::arch::percpu::current_cpu_index();
     crate::serial_force_println!("[trace][sched] idle_task_main start cpu={}", cpu);
     loop {
+        // Process any deferred work before halting. This ensures that
+        // timer ticks raised during interrupt context get processed even
+        // when the CPU has no other runnable tasks.
+        super::deferred_work::process_deferred_work();
+
         // Be explicit on SMP: never rely on inherited IF state.
         // If IF=0, HLT can deadlock that CPU forever.
         crate::arch::sti();
