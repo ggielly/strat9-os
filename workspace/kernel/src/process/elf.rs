@@ -2265,6 +2265,8 @@ fn load_elf_task_inner(
             TaskPriority::Normal,
         )),
         home_cpu: core::sync::atomic::AtomicUsize::new(usize::MAX),
+        last_cpu: core::sync::atomic::AtomicUsize::new(usize::MAX),
+        affinity_mask: core::sync::atomic::AtomicU64::new(0),
         vruntime: core::sync::atomic::AtomicU64::new(0),
         fair_rq_generation: core::sync::atomic::AtomicU64::new(0),
         fair_on_rq: core::sync::atomic::AtomicBool::new(false),

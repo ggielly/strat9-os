@@ -1,4 +1,4 @@
-use super::{runtime_ops::finish_switch, *};
+use super::{runtime_ops::finish_switch, active_cpu_count, *};
 use crate::{memory::UserSliceWrite, sync::FixedQueue};
 
 const PENDING_SILO_CLEANUPS_CAPACITY: usize = 256;
@@ -767,8 +767,35 @@ pub fn wake_task(id: TaskId) -> bool {
         let mut blocked = super::BLOCKED_TASKS.lock();
         if let Some(task) = blocked.remove(&id) {
             task.set_state(TaskState::Ready);
+
+            // --- CPU placement: prefer last_cpu, then home_cpu ---
+            let last = task.last_cpu.load(core::sync::atomic::Ordering::Relaxed);
             let home = task.home_cpu.load(core::sync::atomic::Ordering::Relaxed);
-            let cpu_index = if home != usize::MAX { home } else { 0 };
+            let n = crate::arch::smp::cpu_count().max(1).min(crate::arch::percpu::MAX_CPUS);
+
+            let cpu_index = if last < n {
+                let last_ok = {
+                    lockdep_acquire(LockRank::Local, Some(last));
+                    let ok = LOCAL_SCHEDULERS[last]
+                        .lock()
+                        .as_ref()
+                        .map(|c| c.class_rqs.runnable_len() <= 2)
+                        .unwrap_or(false);
+                    lockdep_release(LockRank::Local);
+                    ok
+                };
+                if last_ok {
+                    last
+                } else if home < n {
+                    home
+                } else {
+                    0
+                }
+            } else if home < n {
+                home
+            } else {
+                0
+            };
 
             let class = {
                 use crate::process::sched::SchedClassId;
@@ -988,8 +1015,29 @@ pub fn resume_task(id: TaskId) -> bool {
         let mut blocked = super::BLOCKED_TASKS.lock();
         if let Some(task) = blocked.remove(&id) {
             task.set_state(TaskState::Ready);
+
+            // --- CPU placement: prefer last_cpu, then home_cpu ---
+            let last = task.last_cpu.load(core::sync::atomic::Ordering::Relaxed);
             let home = task.home_cpu.load(core::sync::atomic::Ordering::Relaxed);
-            let cpu_index = if home != usize::MAX { home } else { 0 };
+            let n = crate::arch::smp::cpu_count().max(1).min(crate::arch::percpu::MAX_CPUS);
+            let cpu_index = if last < n {
+                let last_ok = LOCAL_SCHEDULERS[last]
+                    .lock()
+                    .as_ref()
+                    .map(|c| c.class_rqs.runnable_len() <= 2)
+                    .unwrap_or(false);
+                if last_ok {
+                    last
+                } else if home < n {
+                    home
+                } else {
+                    0
+                }
+            } else if home < n {
+                home
+            } else {
+                0
+            };
 
             let class = {
                 use crate::process::sched::SchedClassId;

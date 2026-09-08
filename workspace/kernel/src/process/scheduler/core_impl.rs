@@ -120,14 +120,14 @@ impl GlobalSchedState {
 
     /// Add a task to the scheduler
     pub fn add_task(&mut self, task: Arc<Task>) -> Option<usize> {
-        let cpu_index = self.select_cpu_for_task();
+        let cpu_index = self.select_cpu_for_task(&task);
         self.add_task_on_cpu(task, cpu_index)
     }
 
     /// Performs the add task with parent operation.
     pub fn add_task_with_parent(&mut self, task: Arc<Task>, parent: TaskId) -> Option<usize> {
         let child = task.id;
-        let cpu_index = self.select_cpu_for_task();
+        let cpu_index = self.select_cpu_for_task(&task);
         let ipi = self.add_task_on_cpu(task, cpu_index);
         {
             let mut identity = SCHED_IDENTITY.write();
@@ -256,8 +256,36 @@ impl GlobalSchedState {
             let mut blocked = super::BLOCKED_TASKS.lock();
             if let Some(task) = blocked.remove(&id) {
                 task.set_state(TaskState::Ready);
-                let home = task.home_cpu.load(core::sync::atomic::Ordering::Relaxed);
-                let cpu_index = if home != usize::MAX { home } else { 0 };
+
+                // --- CPU placement: prefer last_cpu (cache warmth), then home_cpu ---
+                let last = task.last_cpu.load(Ordering::Relaxed);
+                let home = task.home_cpu.load(Ordering::Relaxed);
+                let n = active_cpu_count();
+
+                // Try last_cpu first: valid, online, and reasonably loaded.
+                let cpu_index = if last < n {
+                    let last_ok = {
+                        lockdep_acquire(LockRank::Local, Some(last));
+                        let ok = LOCAL_SCHEDULERS[last]
+                            .lock()
+                            .as_ref()
+                            .map(|c| c.class_rqs.runnable_len() <= 2)
+                            .unwrap_or(false);
+                        lockdep_release(LockRank::Local);
+                        ok
+                    };
+                    if last_ok {
+                        last
+                    } else if home < n {
+                        home
+                    } else {
+                        0
+                    }
+                } else if home < n {
+                    home
+                } else {
+                    0
+                };
 
                 let class = {
                     use crate::process::sched::SchedClassId;
@@ -389,7 +417,14 @@ impl GlobalSchedState {
     ///
     /// Called with `GLOBAL_SCHED_STATE` held.  Acquires each LOCAL sequentially.
     /// Lock order: GLOBAL (held) → LOCAL[cpu] (rank 4).  Never two LOCALs simultaneously.
-    fn select_cpu_for_task(&self) -> usize {
+    ///
+    /// Placement strategy:
+    /// 1. Early boot (all idle): CPU 0.
+    /// 2. Soft affinity: prefer CPUs in the task's `affinity_mask` (from silo config).
+    ///    Tie-break with `last_cpu` (cache warmth).  If no affinity-eligible CPU
+    ///    has strictly lower load, fall back to unrestricted search.
+    /// 3. Unrestricted: pick the globally least-loaded CPU.
+    fn select_cpu_for_task(&self, task: &Task) -> usize {
         let n = active_cpu_count();
         let all_idle = (0..n).all(|i| {
             lockdep_acquire(LockRank::Local, Some(i));
@@ -405,6 +440,79 @@ impl GlobalSchedState {
             crate::serial_println!("[trace][sched] select_cpu_for_task early-boot best=0");
             return 0;
         }
+
+        let affinity = task.affinity_mask.load(Ordering::Relaxed);
+        let last = task.last_cpu.load(Ordering::Relaxed);
+        let has_affinity = affinity != 0;
+
+        // Pass 1: find least-loaded CPU among affinity-eligible CPUs.
+        let mut best_aff = None;
+        let mut best_aff_load = usize::MAX;
+        let mut best_aff_last = None; // best among those matching last_cpu
+        let mut best_aff_last_load = usize::MAX;
+
+        for idx in 0..n {
+            let eligible = if has_affinity {
+                (affinity & (1u64 << idx)) != 0
+            } else {
+                true
+            };
+            if !eligible {
+                continue;
+            }
+            lockdep_acquire(LockRank::Local, Some(idx));
+            let load = {
+                let guard = LOCAL_SCHEDULERS[idx].lock();
+                if let Some(ref cpu) = *guard {
+                    let mut l = cpu.class_rqs.runnable_len();
+                    if let Some(current) = cpu.current_task.as_ref() {
+                        if self.class_table.class_for_task(current)
+                            != crate::process::sched::SchedClassId::Idle
+                        {
+                            l += 1;
+                        }
+                    }
+                    l
+                } else {
+                    0
+                }
+            };
+            lockdep_release(LockRank::Local);
+
+            if load < best_aff_load {
+                best_aff = Some(idx);
+                best_aff_load = load;
+            }
+            // Prefer last_cpu when loads are equal (cache warmth).
+            if idx == last && load <= best_aff_last_load {
+                best_aff_last = Some(idx);
+                best_aff_last_load = load;
+            }
+        }
+
+        // If we have an affinity-eligible candidate, prefer it.
+        // Use last_cpu tie-breaker when loads are equal.
+        if let Some(aff_cpu) = best_aff {
+            // If last_cpu is also eligible and has equal or lower load, prefer it.
+            if let Some(lc) = best_aff_last {
+                if best_aff_last_load <= best_aff_load {
+                    crate::serial_println!(
+                        "[trace][sched] select_cpu_for_task affinity+last_cpu cpu={} load={}",
+                        lc,
+                        best_aff_last_load
+                    );
+                    return lc;
+                }
+            }
+            crate::serial_println!(
+                "[trace][sched] select_cpu_for_task affinity cpu={} load={}",
+                aff_cpu,
+                best_aff_load
+            );
+            return aff_cpu;
+        }
+
+        // Pass 2 (fallback): unrestricted least-loaded.
         let mut best = 0usize;
         let mut best_load = usize::MAX;
         for idx in 0..n {
@@ -432,7 +540,7 @@ impl GlobalSchedState {
             }
         }
         crate::serial_println!(
-            "[trace][sched] select_cpu_for_task best={} load={}",
+            "[trace][sched] select_cpu_for_task fallback best={} load={}",
             best,
             best_load
         );
@@ -535,6 +643,16 @@ pub(super) fn steal_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> Opti
                 return None;
             }
             if let Some(task) = sib.class_rqs.steal_candidate(&sib.class_table) {
+                // Soft affinity check: skip if the stealing CPU is not in the
+                // task's affinity mask.  Re-enqueue on the source to avoid
+                // dropping the task.
+                let affinity = task.affinity_mask.load(Ordering::Relaxed);
+                if affinity != 0 && (affinity & (1u64 << cpu_index)) == 0 {
+                    // Re-enqueue on source CPU.
+                    let class = sib.class_table.class_for_task(&task);
+                    sib.class_rqs.enqueue(class, task);
+                    return None;
+                }
                 sched.task_cpu.insert(task.id, cpu_index);
                 task.home_cpu
                     .store(cpu_index, core::sync::atomic::Ordering::Relaxed);
@@ -611,6 +729,7 @@ pub(super) fn pick_next_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> 
     };
 
     next.set_state(TaskState::Running);
+    next.last_cpu.store(cpu_index, Ordering::Relaxed);
     cpu.current_task = Some(next.clone());
     cpu.current_runtime = crate::process::sched::CurrentRuntime::new();
     next

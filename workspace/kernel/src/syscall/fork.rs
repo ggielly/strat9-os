@@ -280,6 +280,8 @@ fn build_child_task(
         ticks: AtomicU64::new(0),
         sched_policy: SyncUnsafeCell::new(parent.sched_policy()),
         home_cpu: AtomicUsize::new(usize::MAX),
+        last_cpu: AtomicUsize::new(usize::MAX),
+        affinity_mask: AtomicU64::new(0),
         vruntime: AtomicU64::new(parent.vruntime()),
         fair_rq_generation: AtomicU64::new(0),
         fair_on_rq: AtomicBool::new(false),

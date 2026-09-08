@@ -189,8 +189,29 @@ fn check_wake_deadlines(current_time_ns: u64) {
             if let Some(blocked_task) = blocked.remove(&id) {
                 blocked_task.wake_deadline_ns.store(0, Ordering::Relaxed);
                 blocked_task.set_state(TaskState::Ready);
+
+                // --- CPU placement: prefer last_cpu, then home_cpu ---
+                let last = blocked_task.last_cpu.load(Ordering::Relaxed);
                 let home = blocked_task.home_cpu.load(Ordering::Relaxed);
-                let cpu = if home != usize::MAX { home } else { 0 };
+                let n = active_cpu_count();
+                let cpu = if last < n {
+                    let last_ok = LOCAL_SCHEDULERS[last]
+                        .lock()
+                        .as_ref()
+                        .map(|c| c.class_rqs.runnable_len() <= 2)
+                        .unwrap_or(false);
+                    if last_ok {
+                        last
+                    } else if home < n {
+                        home
+                    } else {
+                        0
+                    }
+                } else if home < n {
+                    home
+                } else {
+                    0
+                };
                 let class = {
                     use crate::process::sched::SchedClassId;
                     match blocked_task.sched_policy() {

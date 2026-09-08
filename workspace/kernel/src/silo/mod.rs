@@ -1583,6 +1583,12 @@ pub fn kernel_spawn_strate(
         let effective_xcr0 = (silo.config.xcr0_mask & fpu_xcr0).max(0x3);
         task.xcr0_mask
             .store(effective_xcr0, core::sync::atomic::Ordering::Relaxed);
+        // Propagate silo CPU affinity to task for scheduler placement.
+        let affinity = silo.config.cpu_affinity_mask;
+        if affinity != 0 {
+            task.affinity_mask
+                .store(affinity, core::sync::atomic::Ordering::Relaxed);
+        }
     }
     mgr.map_task(task_id, silo_id);
     mgr.push_event(SiloEvent {
@@ -2368,6 +2374,12 @@ fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
         let effective_xcr0 = (silo.config.xcr0_mask & fpu_xcr0).max(0x3);
         task.xcr0_mask
             .store(effective_xcr0, core::sync::atomic::Ordering::Relaxed);
+        // Propagate silo CPU affinity to task for scheduler placement.
+        let affinity = silo.config.cpu_affinity_mask;
+        if affinity != 0 {
+            task.affinity_mask
+                .store(affinity, core::sync::atomic::Ordering::Relaxed);
+        }
     }
     mgr.map_task(task_id, silo_id);
     mgr.push_event(SiloEvent {
