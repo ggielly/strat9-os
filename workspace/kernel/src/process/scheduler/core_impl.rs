@@ -603,10 +603,27 @@ pub(super) fn steal_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> Opti
     if now_tick < LAST_STEAL_TICK[cpu_index].load(Ordering::Relaxed) + STEAL_COOLDOWN_TICKS {
         return None;
     }
+    lockdep_assert_held(LockRank::Local);
 
     // Best-effort only: if a cold path is holding the global scheduler, skip
     // stealing instead of blocking the hot path.
-    let mut scheduler = GLOBAL_SCHED_STATE.try_lock_no_irqsave()?;
+    let mut scheduler = match GLOBAL_SCHED_STATE.try_lock_no_irqsave() {
+        Some(g) => g,
+        None => return None,
+    };
+    lockdep_acquire(LockRank::Global, None);
+    let result = steal_task_inner(&mut scheduler, cpu, cpu_index, now_tick);
+    lockdep_release(LockRank::Global);
+    result
+}
+
+/// Inner implementation of steal, separated for clean lockdep release.
+fn steal_task_inner(
+    scheduler: &mut Option<GlobalSchedState>,
+    cpu: &mut SchedulerCpu,
+    cpu_index: usize,
+    now_tick: u64,
+) -> Option<Arc<Task>> {
     let sched = scheduler.as_mut()?;
 
     let n = active_cpu_count();
@@ -713,19 +730,23 @@ pub(super) fn pick_next_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> 
             core::arch::asm!("out 0xe9, al", in("al") b'J', options(nomem, nostack));
         }
         next
-    } else if {
-        unsafe {
-            core::arch::asm!("out 0xe9, al", in("al") b'Q', options(nomem, nostack));
-        }
-        false
-    } {
-        unreachable!()
     } else {
+        // Step 3: local queues empty — try work-stealing before idle.
         unsafe {
-            core::arch::asm!("out 0xe9, al", in("al") b'j', options(nomem, nostack));
+            core::arch::asm!("out 0xe9, al", in("al") b'S', options(nomem, nostack));
         }
-        // Step 4: idle fallback.
-        cpu.idle_task.clone()
+        if let Some(stolen) = steal_task_local(cpu, cpu_index) {
+            unsafe {
+                core::arch::asm!("out 0xe9, al", in("al") b's', options(nomem, nostack));
+            }
+            stolen
+        } else {
+            unsafe {
+                core::arch::asm!("out 0xe9, al", in("al") b'j', options(nomem, nostack));
+            }
+            // Step 4: idle fallback.
+            cpu.idle_task.clone()
+        }
     };
 
     next.set_state(TaskState::Running);
