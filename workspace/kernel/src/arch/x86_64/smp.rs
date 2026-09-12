@@ -114,7 +114,12 @@ _gdt:
     mov eax, cr0
     or eax, 1
     mov cr0, eax
-    ljmp 24, SMP_PM_ADDR             # => code32 segment
+    # Far JMP ptr16:16 (EA iw iw). LLVM's Intel-syntax `ljmp` rejects
+    # this forward expression; data directives resolve it after layout.
+    # The trampoline lives entirely in 0x8000..0x8fff, so IP fits in u16.
+    .byte 0xea
+    .word SMP_PM_ADDR
+    .word 24                        # => code32 segment
 
 .align 32
 .code32
@@ -168,7 +173,11 @@ smp_trampoline_32:
     or eax, 0x80010002               # PG + WP + MP
     mov cr0, eax
 
-    ljmp 8, SMP_LONG_ADDR            # => code64 segment
+    # Far JMP ptr16:32 (EA id iw), decoded while CS is still 32-bit.
+    # Keep the destination symbolic when the preceding stub changes size.
+    .byte 0xea
+    .long SMP_LONG_ADDR
+    .word 8                         # => code64 segment
 
 .align 32
 .code64
