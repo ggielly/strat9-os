@@ -362,6 +362,8 @@ pub struct SchedulerMetricsSnapshot {
     pub steal_in_count: [u64; crate::arch::percpu::MAX_CPUS],
     pub steal_out_count: [u64; crate::arch::percpu::MAX_CPUS],
     pub try_lock_fail_count: [u64; crate::arch::percpu::MAX_CPUS],
+    pub deferred_work_raised: [u32; crate::arch::percpu::MAX_CPUS],
+    pub deferred_work_processed: [u32; crate::arch::percpu::MAX_CPUS],
 }
 
 #[derive(Clone, Copy)]
@@ -377,6 +379,8 @@ pub struct SchedulerStateSnapshot {
     pub rq_fair: [usize; crate::arch::percpu::MAX_CPUS],
     pub rq_idle: [usize; crate::arch::percpu::MAX_CPUS],
     pub need_resched: [bool; crate::arch::percpu::MAX_CPUS],
+    pub deferred_work_raised: [u32; crate::arch::percpu::MAX_CPUS],
+    pub deferred_work_processed: [u32; crate::arch::percpu::MAX_CPUS],
 }
 
 /// Performs the cpu usage snapshot operation.
@@ -398,6 +402,7 @@ pub fn cpu_usage_snapshot() -> CpuUsageSnapshot {
 /// Performs the scheduler metrics snapshot operation.
 pub fn scheduler_metrics_snapshot() -> SchedulerMetricsSnapshot {
     let cpu_count = active_cpu_count();
+    let dw = deferred_work::metrics_snapshot();
     let mut rt_runtime_ticks = [0u64; crate::arch::percpu::MAX_CPUS];
     let mut fair_runtime_ticks = [0u64; crate::arch::percpu::MAX_CPUS];
     let mut idle_runtime_ticks = [0u64; crate::arch::percpu::MAX_CPUS];
@@ -426,6 +431,8 @@ pub fn scheduler_metrics_snapshot() -> SchedulerMetricsSnapshot {
         steal_in_count,
         steal_out_count,
         try_lock_fail_count,
+        deferred_work_raised: dw.raised,
+        deferred_work_processed: dw.processed,
     }
 }
 
@@ -442,6 +449,7 @@ pub fn reset_scheduler_metrics() {
         CPU_STEAL_OUT_COUNT[i].store(0, Ordering::Relaxed);
         CPU_TRY_LOCK_FAIL_COUNT[i].store(0, Ordering::Relaxed);
     }
+    deferred_work::reset_metrics();
 }
 
 /// Performs the note try lock fail on cpu operation.

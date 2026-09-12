@@ -68,6 +68,8 @@ struct SchedulerMetricsWindow {
     preempt_delta: u64,
     steal_in_delta: u64,
     steal_out_delta: u64,
+    deferred_raised_delta: u32,
+    deferred_processed_delta: u32,
 }
 
 fn collect_silos_from_proc_scheme() -> Option<(Vec<SiloRowData>, Vec<StrateRowData>)> {
@@ -289,6 +291,8 @@ fn compute_scheduler_metrics_window(
     let mut preempt_delta = 0u64;
     let mut steal_in_delta = 0u64;
     let mut steal_out_delta = 0u64;
+    let mut deferred_raised_delta = 0u32;
+    let mut deferred_processed_delta = 0u32;
     for i in 0..cpu_count {
         rt_delta = rt_delta
             .saturating_add(now.rt_runtime_ticks[i].saturating_sub(prev.rt_runtime_ticks[i]));
@@ -304,6 +308,13 @@ fn compute_scheduler_metrics_window(
             .saturating_add(now.steal_in_count[i].saturating_sub(prev.steal_in_count[i]));
         steal_out_delta = steal_out_delta
             .saturating_add(now.steal_out_count[i].saturating_sub(prev.steal_out_count[i]));
+        deferred_raised_delta = deferred_raised_delta.saturating_add(
+            now.deferred_work_raised[i].saturating_sub(prev.deferred_work_raised[i]),
+        );
+        deferred_processed_delta = deferred_processed_delta.saturating_add(
+            now.deferred_work_processed[i]
+                .saturating_sub(prev.deferred_work_processed[i]),
+        );
     }
     let total = rt_delta
         .saturating_add(fair_delta)
@@ -323,6 +334,8 @@ fn compute_scheduler_metrics_window(
         preempt_delta,
         steal_in_delta,
         steal_out_delta,
+        deferred_raised_delta,
+        deferred_processed_delta,
     }
 }
 
@@ -330,7 +343,7 @@ fn compute_scheduler_metrics_window(
 fn scheduler_runtime_lines(
     s: &crate::process::SchedulerStateSnapshot,
     w: &SchedulerMetricsWindow,
-) -> (String, String, String) {
+) -> (String, String, String, String) {
     let line1 = format!(
         "Win: RT {:>3}% | FAIR {:>3}% | IDLE {:>3}% | sw {} | pre {} | st+ {} | st- {}",
         (w.rt_ratio * 100.0) as u16,
@@ -371,7 +384,14 @@ fn scheduler_runtime_lines(
             format!("CPU: {} | {}", c0, c1)
         }
     };
-    (line1, line2, line3)
+    let line4 = format!(
+        "DWork: raised={} processed={} (window +{}/+{})",
+        s.deferred_work_raised.iter().copied().sum::<u32>(),
+        s.deferred_work_processed.iter().copied().sum::<u32>(),
+        w.deferred_raised_delta,
+        w.deferred_processed_delta,
+    );
+    (line1, line2, line3, line4)
 }
 
 /// Top command main loop
@@ -471,7 +491,7 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
                     .constraints([
                         Constraint::Length(2),
                         Constraint::Length(3),
-                        Constraint::Length(5),
+                        Constraint::Length(6),
                         Constraint::Length(6),
                         Constraint::Min(8),
                         Constraint::Length(1),
@@ -496,11 +516,11 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
                 .block(Block::default().borders(Borders::BOTTOM).title("Stats"));
                 frame.render_widget(stats_line, vertical[1]);
 
-                let (sched_line1, sched_line2, sched_line3) =
+                let (sched_line1, sched_line2, sched_line3, sched_line4) =
                     scheduler_runtime_lines(&snapshot.scheduler, &sched_window);
                 let sched_line = Paragraph::new(format!(
-                    "{}\n{}\n{}",
-                    sched_line1, sched_line2, sched_line3
+                    "{}\n{}\n{}\n{}",
+                    sched_line1, sched_line2, sched_line3, sched_line4
                 ))
                 .style(primary_text)
                 .block(Block::default().borders(Borders::BOTTOM).title("Scheduler"));

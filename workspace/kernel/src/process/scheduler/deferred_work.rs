@@ -132,6 +132,12 @@ pub fn process_deferred_work() -> bool {
         return false;
     }
 
+    // Only measure actual work processing, not the fast-path no-op.
+    let _perf = super::perf_counters::PerfScope::new(
+        &super::perf_counters::DEFERRED_WORK_TSC,
+        &super::perf_counters::DEFERRED_WORK_COUNT,
+    );
+
     // Prevent re-entrance (e.g., if a work item triggers a reschedule
     // that re-enters this path).
     if work_cpu.processing.swap(true, Ordering::AcqRel) {

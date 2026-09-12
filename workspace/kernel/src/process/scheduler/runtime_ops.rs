@@ -871,11 +871,26 @@ pub fn log_state(label: &str) {
         }
     }
     drop(scheduler);
+
+    // Deferred work metrics (lock-free, read after GLOBAL_SCHED_STATE is released).
+    let dw = super::deferred_work::metrics_snapshot();
+    let n = active_cpu_count();
+    for cpu_id in 0..n {
+        log::info!(
+            "[sched][state] label={} cpu={} dwork_raised={} dwork_processed={}",
+            label,
+            cpu_id,
+            dw.raised[cpu_id],
+            dw.processed[cpu_id],
+        );
+    }
+
     restore_flags(saved_flags);
 }
 
 /// Structured scheduler state snapshot for shell/top/debug tooling.
 pub fn state_snapshot() -> SchedulerStateSnapshot {
+    let dw = super::deferred_work::metrics_snapshot();
     let mut out = SchedulerStateSnapshot {
         initialized: false,
         boot_phase: 0,
@@ -895,6 +910,8 @@ pub fn state_snapshot() -> SchedulerStateSnapshot {
         rq_fair: [0; crate::arch::percpu::MAX_CPUS],
         rq_idle: [0; crate::arch::percpu::MAX_CPUS],
         need_resched: [false; crate::arch::percpu::MAX_CPUS],
+        deferred_work_raised: dw.raised,
+        deferred_work_processed: dw.processed,
     };
 
     let saved_flags = save_flags_and_cli();
