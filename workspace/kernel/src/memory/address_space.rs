@@ -567,6 +567,8 @@ impl AddressSpace {
     /// Handle a page fault by checking if the address falls within a reserved VMA.
     ///
     /// If it does, allocates a physical frame and maps it.
+    /// Only call this for non-present faults; existing mappings are accepted
+    /// for concurrent demand faults, without changing their permissions.
     pub fn handle_fault(&self, fault_addr: u64) -> Result<(), &'static str> {
         use crate::x86_crate_shim::structures::paging::mapper::MapToError;
 

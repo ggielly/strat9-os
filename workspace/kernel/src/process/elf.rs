@@ -2032,8 +2032,10 @@ fn load_elf_task_inner(
     if let Some(relro) = phdrs.iter().find(|ph| ph.p_type == PT_GNU_RELRO) {
         if relro.p_memsz > 0 {
             let relro_start = relro.p_vaddr.wrapping_add(load_bias) & !0xFFF;
+            // A partial trailing page may contain writable data outside RELRO.
+            // Protect only through the last complete page, never round up.
             let relro_end =
-                (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz + 0xFFF) & !0xFFF;
+                (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz) & !0xFFF;
             if relro_end > relro_start && relro_end <= USER_ADDR_MAX {
                 let ro_flags = VmaFlags {
                     readable: true,
@@ -2422,8 +2424,10 @@ pub fn load_elf_image(
     if let Some(relro) = phdrs.iter().find(|ph| ph.p_type == PT_GNU_RELRO) {
         if relro.p_memsz > 0 {
             let relro_start = relro.p_vaddr.wrapping_add(load_bias) & !0xFFF;
+            // A partial trailing page may contain writable data outside RELRO.
+            // Protect only through the last complete page, never round up.
             let relro_end =
-                (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz + 0xFFF) & !0xFFF;
+                (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz) & !0xFFF;
             if relro_end > relro_start && relro_end <= USER_ADDR_MAX {
                 let ro_flags = VmaFlags {
                     readable: true,

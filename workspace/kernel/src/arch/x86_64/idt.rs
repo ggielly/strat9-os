@@ -1010,7 +1010,16 @@ extern "x86-interrupt" fn page_fault_handler(
                     );
                 }
 
-                match address_space.handle_fault(vaddr.as_u64()) {
+                // Demand paging only resolves missing pages. A present page
+                // with forbidden access must not take handle_fault's
+                // already-mapped success path and retry forever. COW was
+                // attempted above for recoverable write-protection faults.
+                let resolution = if error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) {
+                    Err("Unresolved user page protection violation")
+                } else {
+                    address_space.handle_fault(vaddr.as_u64())
+                };
+                match resolution {
                     Ok(()) => {
                         if do_pf_trace {
                             crate::serial_force_println!(
@@ -1035,6 +1044,15 @@ extern "x86-interrupt" fn page_fault_handler(
                             vaddr.as_u64()
                         );
                         dump_user_pf_context(&address_space, rip, user_rsp);
+                        // Show the actual permissions at the faulting address,
+                        // including restrictive intermediate page-table entries.
+                        let (active_cr3, _) = x86_64::registers::control::Cr3::read();
+                        crate::serial_force_println!(
+                            "[pagefault] fault mapping: active_cr3={:#x} task_cr3={:#x}",
+                            active_cr3.start_address().as_u64(),
+                            address_space.cr3().as_u64()
+                        );
+                        dump_page_table_walk(vaddr.as_u64(), active_cr3.start_address().as_u64());
                     }
                 }
             }
