@@ -69,6 +69,19 @@ pub fn detect() -> Result<CpuFeatures, &'static str> {
         core::arch::asm!("rdmsr", in("ecx") 0xC0000080u32, out("eax") low, out("edx") high,
             options(nomem, nostack, preserves_flags));
         validate_paging_mode(cr0, cr4, ((high as u64) << 32) | low as u64)?;
+        let pat_low: u32;
+        let pat_high: u32;
+        core::arch::asm!("rdmsr", in("ecx") 0x277u32, out("eax") pat_low, out("edx") pat_high,
+            options(nomem, nostack, preserves_flags));
+        validate_pat(((pat_high as u64) << 32) | pat_low as u64)?;
         Ok(features)
     }
+}
+
+/// Keep firmware PAT unchanged. These two selectors are also required on APs.
+pub fn validate_pat(pat: u64) -> Result<(), &'static str> {
+    if pat & 0xFF != 6 || (pat >> 24) & 0xFF != 0 {
+        return Err("PAT requires entry 0 = WB and entry 3 = UC");
+    }
+    Ok(())
 }

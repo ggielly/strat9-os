@@ -4,8 +4,12 @@
 mod boot_plan;
 #[path = "../../bootloader/src/cpu.rs"]
 mod cpu;
+#[path = "../../bootloader/src/elf.rs"]
+mod elf;
 #[path = "../../bootloader/src/memory_map.rs"]
 mod memory_map;
+#[path = "../../bootloader/src/page_tables.rs"]
+mod page_tables;
 #[path = "../../bootloader/src/paging.rs"]
 mod paging;
 
@@ -148,10 +152,47 @@ fn maximum_supported_layout_has_a_bounded_page_table_budget() {
         size: MAX_DIRECT_MAP,
     })
     .unwrap();
-    let pages = paging::page_table_pages(GIB, 0, 0, plan).unwrap();
-    // PML4, two PDPTs and 1024 PDs for identity/HHDM, then the kernel's
-    // PDPT + PD and 512 PTs. No allocation depends on 1 GiB page support.
-    assert_eq!(pages, 1541);
+    let mut kernel = elf::Elf64Info {
+        entry: elf::KERNEL_VIRT_BASE,
+        segments: [elf::Segment {
+            phys_addr: 0,
+            virt_addr: 0,
+            mem_size: 0,
+            file_size: 0,
+            file_offset: 0,
+            flags: 0,
+        }; 16],
+        segment_count: 1,
+        phys_base: 0x20_0000,
+        phys_end: 0x20_0000 + GIB,
+    };
+    kernel.segments[0] = elf::Segment {
+        phys_addr: kernel.phys_base,
+        virt_addr: elf::KERNEL_VIRT_BASE,
+        mem_size: GIB,
+        file_size: PAGE_SIZE,
+        file_offset: PAGE_SIZE,
+        flags: 5,
+    };
+    let wb = [PhysicalRange {
+        base: 0,
+        size: MAX_DIRECT_MAP,
+    }];
+    let mapping = page_tables::MappingPlan {
+        direct_map: plan,
+        kernel: &kernel,
+        loader_image: PhysicalRange {
+            base: 2 * GIB,
+            size: PAGE_SIZE,
+        },
+        write_back: &wb,
+        framebuffer: PhysicalRange { base: 0, size: 0 },
+        environment: PhysicalRange { base: 0, size: 0 },
+    };
+    let pages = mapping.table_pages().unwrap();
+    // Base topology (1541), 512 kernel PTs per physical alias, low memory
+    // PT in each alias, and one additional identity PT for the EFI image.
+    assert_eq!(pages, 2568);
     let area = PhysicalRange {
         base: PAGE_SIZE,
         size: page_allocation_size(pages * PAGE_SIZE).unwrap(),
@@ -161,5 +202,24 @@ fn maximum_supported_layout_has_a_bounded_page_table_budget() {
         assert!(cursor.next_frame().is_ok());
     }
     assert!(cursor.next_frame().is_err());
-    assert!(paging::page_table_pages(GIB + PAGE_SIZE, 0, 0, plan).is_err());
+    let oversized_kernel = elf::Elf64Info {
+        entry: kernel.entry,
+        segments: kernel.segments,
+        segment_count: kernel.segment_count,
+        phys_base: kernel.phys_base,
+        phys_end: kernel.phys_end + PAGE_SIZE,
+    };
+    let oversized = page_tables::MappingPlan {
+        kernel: &oversized_kernel,
+        ..mapping
+    };
+    assert!(oversized.table_pages().is_err());
+}
+
+#[test]
+fn pat_selectors_are_verified_without_reprogramming_other_entries() {
+    assert!(cpu::validate_pat(0x0007_0406_0007_0406).is_ok());
+    assert!(cpu::validate_pat(0x0101_0101_0000_0006).is_ok());
+    assert!(cpu::validate_pat(0x0007_0406_0107_0406).is_err());
+    assert!(cpu::validate_pat(0x0007_0406_0007_0400).is_err());
 }

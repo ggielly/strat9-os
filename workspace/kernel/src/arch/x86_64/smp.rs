@@ -57,8 +57,8 @@ static AP_REACHED_RUST: AtomicUsize = AtomicUsize::new(usize::MAX);
 //   0x8010:  _gdt_table  (32 bytes: null, code64, data, code32)
 //   0x8030:  _gdt        (GDTR: limit=31, base=0x8010)
 //   0x8040:  real-mode setup (xor ax,ax; lgdt; enter PM)
-//   0x8060:  32-bit code (enable PAE + LME + paging)
-//   0x80C0:  64-bit code (load stack, jump to smp_main)
+//   SMP_PM_ADDR:   32-bit code (PAT check, PAE + NXE + LME + paging)
+//   SMP_LONG_ADDR: 64-bit code (load stack, jump to smp_main)
 //
 // CRITICAL: The GDT table and descriptor MUST occupy these exact offsets.
 // The `lgdt [0x8030]` instruction reads physical 0x8030 which contains the
@@ -78,6 +78,8 @@ global_asm!(
 .global smp_trampoline_end
 
 .set SMP_VAR_ADDR, 0x8000 + (smp_trampoline_end - smp_trampoline)
+.set SMP_PM_ADDR, 0x8000 + (smp_trampoline_32 - smp_trampoline)
+.set SMP_LONG_ADDR, 0x8000 + (smp_trampoline_64 - smp_trampoline)
 
 smp_trampoline:
     cli
@@ -92,9 +94,9 @@ smp_trampoline:
 .align 16
 _gdt_table:
     .long 0, 0                       # null  (selector 0)
-    .long 0x0000ffff, 0x00af9a00     # code64 (selector 8):  64-bit ring-0
-    .long 0x0000ffff, 0x00cf9200     # data   (selector 16): ring-0 rw
-    .long 0x0000ffff, 0x00cf9a00     # code32 (selector 24): 32-bit ring-0
+    .long 0x0000ffff, 0x00af9b00     # code64, accessed (identity page is RX)
+    .long 0x0000ffff, 0x00cf9300     # data, accessed
+    .long 0x0000ffff, 0x00cf9b00     # code32, accessed
 _gdt:
     .word _gdt - _gdt_table - 1      # limit = 31 (4 entries × 8 - 1)
     .long 0x8010                     # base  = 0x8010
@@ -112,13 +114,32 @@ _gdt:
     mov eax, cr0
     or eax, 1
     mov cr0, eax
-    ljmp 24, 0x8060                  # => code32 segment
+    ljmp 24, SMP_PM_ADDR             # => code32 segment
 
 .align 32
 .code32
+smp_trampoline_32:
     mov ax, 16
     mov ds, ax
     mov ss, ax
+
+    # INIT does not reset PAT. Check the selectors used by BSP's new tables
+    # before enabling paging; stop this AP explicitly if firmware disagrees.
+    mov ecx, 0x277
+    rdmsr
+    and eax, 0xff0000ff
+    cmp eax, 6                       # PAT[0] = WB, PAT[3] = UC
+    je 3f
+    mov al, 0x50                     # E9: P (PAT mismatch)
+    out 0xe9, al
+2:  hlt
+    jmp 2b
+3:
+    mov eax, cr0
+    or eax, 0x40000000              # CD = 1
+    and eax, 0xdfffffff             # NW = 0
+    mov cr0, eax
+    wbinvd
 
     # Enable PAE + PSE + OSFXSR + OSXMMEXCPT
     # NOTE: do NOT force SMEP/SMAP (CR4 bits 20/21) here. qemu64 (and many
@@ -134,7 +155,7 @@ _gdt:
     mov ecx, 0xc0000080
     xor edx, edx
     rdmsr
-    or eax, 0x901                    # LME + SCE
+    or eax, 0x901                    # NXE + LME + SCE
     wrmsr
 
     # Load kernel PML4 from data area
@@ -143,14 +164,15 @@ _gdt:
 
     # Enable paging (activates long mode)
     mov eax, cr0
-    and eax, 0xFFFFFFFB              # Clear EM
+    and eax, 0x9FFFFFF3              # Clear CD/NW/EM/TS
     or eax, 0x80010002               # PG + WP + MP
     mov cr0, eax
 
-    ljmp 8, 0x80c0                   # => code64 segment
+    ljmp 8, SMP_LONG_ADDR            # => code64 segment
 
 .align 32
 .code64
+smp_trampoline_64:
     # Load kernel stack pointer
     mov rsp, [SMP_VAR_ADDR + 8]
 
@@ -189,31 +211,27 @@ fn udelay(us: u32) {
 
 /// Identity-map the trampoline physical pages so the AP can execute the
 /// trampoline code in real mode / protected mode before paging is enabled.
-fn ensure_identity_mapping(phys_start: u64, length: usize) {
+fn ensure_identity_mapping(phys_start: u64, length: usize) -> Result<(), &'static str> {
     let start = phys_start & !0xFFFu64;
     let end = (phys_start + length as u64 + 0xFFF) & !0xFFFu64;
-    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+    let flags = PageTableFlags::PRESENT;
 
     let mut addr = start;
     while addr < end {
         let virt = VirtAddr::new(addr);
         if let Some(mapped) = crate::memory::paging::translate(virt) {
             if mapped.as_u64() != addr {
-                log::warn!(
-                    "SMP: identity map collision at {:#x} -> {:#x}",
-                    addr,
-                    mapped.as_u64()
-                );
+                return Err("SMP: trampoline identity map collision");
             }
+            crate::memory::paging::set_trampoline_execution(addr, true)?;
         } else {
             let page = Page::<Size4KiB>::containing_address(virt);
             let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(addr));
-            if let Err(e) = crate::memory::paging::map_page(page, frame, flags) {
-                log::error!("SMP: failed to identity map {:#x}: {}", addr, e);
-            }
+            crate::memory::paging::map_page(page, frame, flags)?;
         }
         addr += 0x1000;
     }
+    Ok(())
 }
 
 /// Copy the trampoline to physical address 0x8000 and write the data area.
@@ -228,11 +246,14 @@ fn ensure_identity_mapping(phys_start: u64, length: usize) {
 /// memory type is determined by MTRRs. If MTRRs mark the region as UC, or
 /// if platform firmware does not guarantee cache coherency, the AP would
 /// read stale data from RAM without this flush.
-fn copy_trampoline(cr3_phys: u64, stack_top_virt: u64) {
+fn copy_trampoline(cr3_phys: u64, stack_top_virt: u64) -> Result<(), &'static str> {
     let tramp_len = (smp_trampoline_end as *const u8 as usize)
         .saturating_sub(smp_trampoline as *const u8 as usize);
 
-    ensure_identity_mapping(TRAMPOLINE_PHYS_ADDR, tramp_len + 16);
+    if tramp_len + 16 > 4096 {
+        return Err("SMP: trampoline exceeds its reserved page");
+    }
+    ensure_identity_mapping(TRAMPOLINE_PHYS_ADDR, tramp_len + 16)?;
 
     let tramp_virt = memory::phys_to_virt(TRAMPOLINE_PHYS_ADDR) as *mut u8;
 
@@ -249,6 +270,7 @@ fn copy_trampoline(cr3_phys: u64, stack_top_virt: u64) {
         core::arch::asm!("sfence");
         core::arch::asm!("wbinvd");
     }
+    Ok(())
 }
 
 /// Wait for ICR delivery to complete.
@@ -349,6 +371,14 @@ fn rendezvous_barrier() {
     SYNC_BARRIER.fetch_add(1, Ordering::AcqRel);
     while SYNC_BARRIER.load(Ordering::Acquire) < expected {
         core::hint::spin_loop();
+    }
+    // BSP may have revoked the trampoline before publishing BARRIER_TARGET.
+    // Each AP drops its formerly executable translation before normal work.
+    unsafe {
+        core::arch::asm!(
+            "invlpg [{}]", in(reg) TRAMPOLINE_PHYS_ADDR,
+            options(nostack, preserves_flags),
+        );
     }
 }
 
@@ -463,7 +493,7 @@ pub fn init() -> Result<usize, &'static str> {
         .and_then(|id| stack_tops.get(*id as usize))
         .copied()
         .unwrap_or(0);
-    copy_trampoline(cr3_phys, first_stack_top);
+    copy_trampoline(cr3_phys, first_stack_top)?;
     crate::serial_println!(
         "[smp] init: trampoline at {:#x}, cr3={:#x}, stack={:#x}",
         TRAMPOLINE_PHYS_ADDR,
@@ -546,6 +576,16 @@ pub fn init() -> Result<usize, &'static str> {
     }
 
     log::info!("SMP: {} cores online (expected {})", online, expected);
+
+    if online == expected {
+        if let Err(error) =
+            crate::memory::paging::set_trampoline_execution(TRAMPOLINE_PHYS_ADDR, false)
+        {
+            // A legacy boot path can provide a huge identity leaf. Never revoke
+            // execution of unrelated addresses when retiring the trampoline.
+            log::warn!("SMP: cannot retire trampoline execution: {}", error);
+        }
+    }
 
     // Publish barrier target so APs can proceed.
     BARRIER_TARGET.store(online, Ordering::Release);

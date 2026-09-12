@@ -157,7 +157,11 @@ pub fn map_all_ram(memory_regions: &[crate::boot::entry::MemoryRegion]) {
                 region.base,
                 region.base + region.size
             );
-            ensure_identity_map_range(region.base, region.size);
+            ensure_hhdm_range(
+                region.base,
+                region.size,
+                PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
+            );
         }
     }
 }
@@ -387,8 +391,7 @@ pub fn ensure_identity_map(phys_addr: u64) {
             phys_addr,
             virt_addr
         );
-        // Map as Present | Writable (generic safe default for MMIO/BIOS)
-        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+        let flags = uncached_hhdm_flags();
         if let Err(e) = map_page(page, frame, flags) {
             log::error!("Failed to identity map {:#x}: {}", phys_addr, e);
         }
@@ -400,6 +403,22 @@ pub fn ensure_identity_map(phys_addr: u64) {
 /// Builds a single `OffsetPageTable` for the entire range instead of
 /// one per page, and emits a single summary log instead of per-page noise.
 pub fn ensure_identity_map_range(phys_base: u64, size: u64) {
+    ensure_hhdm_range(phys_base, size, uncached_hhdm_flags());
+}
+
+fn uncached_hhdm_flags() -> PageTableFlags {
+    let flags = PageTableFlags::PRESENT
+        | PageTableFlags::WRITABLE
+        | PageTableFlags::NO_EXECUTE
+        | PageTableFlags::NO_CACHE;
+    #[cfg(target_arch = "x86_64")]
+    let flags = flags | PageTableFlags::WRITE_THROUGH; // PAT[3] = UC, not UC-.
+    flags
+}
+
+// Existing mappings retain their cache policy and ELF protections. Only the
+// RAM-map caller requests WB; missing MMIO/firmware pages use UC and NX.
+fn ensure_hhdm_range(phys_base: u64, size: u64, flags: PageTableFlags) {
     if size == 0 || !is_initialized() {
         return;
     }
@@ -419,7 +438,6 @@ pub fn ensure_identity_map_range(phys_base: u64, size: u64) {
     let l4_table = unsafe { &mut *level_4_virt.as_mut_ptr::<PageTable>() };
     let mut mapper = unsafe { OffsetPageTable::new(l4_table, phys_offset) };
     let mut allocator = BuddyFrameAllocator;
-    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
 
     let mut mapped_count: u64 = 0;
     let mut p = start;
@@ -451,4 +469,91 @@ pub fn ensure_identity_map_range(phys_base: u64, size: u64) {
             end,
         );
     }
+}
+
+/// Revoke the loader's temporary identity RX pages before starting allocators.
+///
+/// # Safety
+/// BSP-only, interrupts disabled, before AP startup. CR3 must be the Strat9
+/// UEFI loader's tables and the HHDM must already be set. The kernel runs in its
+/// separate higher-half mapping. There are no global leaves in these tables.
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn retire_uefi_identity_code() {
+    const ADDRESS: u64 = 0x000F_FFFF_FFFF_F000;
+    const NX: u64 = 1 << 63;
+    unsafe fn retire(table_phys: u64, level: u8) {
+        let table = crate::memory::phys_to_virt(table_phys) as *mut u64;
+        for index in 0..512 {
+            let slot = unsafe { table.add(index) };
+            let entry = unsafe { slot.read_volatile() };
+            if entry & 1 == 0 {
+                continue;
+            }
+            if level == 1 || entry & (1 << 7) != 0 {
+                if entry & NX == 0 {
+                    unsafe { slot.write_volatile(entry | NX | 2) };
+                }
+            } else {
+                unsafe { retire(entry & ADDRESS, level - 1) };
+            }
+        }
+    }
+    let cr3: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags))
+    };
+    let root = crate::memory::phys_to_virt(cr3 & ADDRESS) as *const u64;
+    let identity = unsafe { root.read_volatile() };
+    if identity & 1 != 0 {
+        unsafe { retire(identity & ADDRESS, 3) };
+    }
+    unsafe { core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack, preserves_flags)) };
+}
+
+/// Change execution of just the existing 4 KiB identity trampoline page,
+/// preserving its cache selector. BSP enables it before SIPI and retires it
+/// after every AP has left it. APs invalidate their TLB at the boot barrier.
+#[cfg(target_arch = "x86_64")]
+pub fn set_trampoline_execution(physical: u64, executable: bool) -> Result<(), &'static str> {
+    if physical != 0x8000 {
+        return Err("unexpected AP trampoline page");
+    }
+    let _guard = KERNEL_PT_LOCK.lock();
+    let (frame, _) = Cr3::read();
+    let mut table = frame.start_address().as_u64();
+    const ADDRESS: u64 = 0x000F_FFFF_FFFF_F000;
+    for shift in [39, 30, 21, 12] {
+        let slot = (crate::memory::phys_to_virt(table) as *mut u64)
+            .wrapping_add(((physical >> shift) & 511) as usize);
+        let entry = unsafe { slot.read_volatile() };
+        if entry & 1 == 0 {
+            return Err("missing AP identity page");
+        }
+        if shift != 12 && entry & (1 << 7) != 0 {
+            // Legacy loaders may supply an already executable huge identity
+            // mapping. Do not silently make a whole NX huge page executable.
+            return if executable && entry & (1 << 63) == 0 {
+                Ok(())
+            } else {
+                Err("AP identity mapping requires a 4 KiB leaf")
+            };
+        }
+        if shift == 12 {
+            if entry & ADDRESS != physical {
+                return Err("AP identity mapping collision");
+            }
+            unsafe {
+                let updated = if executable {
+                    entry & !((1 << 63) | 2)
+                } else {
+                    entry | (1 << 63)
+                }; // Retired trampoline stays read-only.
+                slot.write_volatile(updated);
+                core::arch::asm!("invlpg [{}]", in(reg) physical, options(nostack, preserves_flags));
+            }
+            return Ok(());
+        }
+        table = entry & ADDRESS;
+    }
+    Err("invalid AP identity mapping")
 }

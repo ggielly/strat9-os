@@ -99,6 +99,9 @@ pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
         if flags & !7 != 0 {
             return Err("unsupported ELF segment flags");
         }
+        if flags & 3 == 3 {
+            return Err("writable executable ELF segment is unsupported");
+        }
         if align > 1 && (!align.is_power_of_two() || virt_addr % align != file_offset % align) {
             return Err("invalid ELF segment alignment");
         }
@@ -110,6 +113,12 @@ pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
             .ok_or("ELF virtual range overflow")?;
         if virt_addr < previous_virt_end {
             return Err("ELF load segments overlap or are out of order");
+        }
+        if info.segment_count != 0
+            && virt_addr / PAGE_SIZE == (previous_virt_end - 1) / PAGE_SIZE
+            && flags != info.segments[info.segment_count - 1].flags
+        {
+            return Err("ELF segments with different permissions share a page");
         }
         if virt_end > KERNEL_VIRT_BASE + MAX_KERNEL_IMAGE_SIZE {
             return Err("ELF exceeds the supported kernel virtual window");

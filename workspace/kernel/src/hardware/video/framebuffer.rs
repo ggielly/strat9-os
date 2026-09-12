@@ -1,7 +1,7 @@
 // Framebuffer abstraction layer
 //
 // Provides a unified framebuffer interface that can use:
-// - UEFI bootloader framebuffer (bootloader-provided, WC-mapped via PAT)
+// - UEFI bootloader framebuffer (bootloader-provided, UC on every boot alias)
 // - VirtIO GPU framebuffer (native driver, zero-copy backing)
 // - Future/TODO : other GPU drivers (Bochs DRM, etc.)
 //

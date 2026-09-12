@@ -6,10 +6,10 @@ extern crate alloc;
 use core::fmt::Write;
 
 use uefi::{
-    mem::memory_map::{MemoryDescriptor, MemoryMap, MemoryType},
+    mem::memory_map::{MemoryAttribute, MemoryDescriptor, MemoryMap, MemoryType},
     prelude::*,
     proto::{
-        console::gop::GraphicsOutput,
+        console::gop::{GraphicsOutput, ModeInfo, PixelFormat},
         loaded_image::LoadedImage,
         media::file::{File, FileAttribute, FileInfo, FileMode},
     },
@@ -19,10 +19,12 @@ use uefi::{
 mod boot_plan;
 mod cpu;
 mod elf;
+mod graphics;
 mod memory;
 mod memory_map;
 mod module_name;
 mod modules;
+mod page_tables;
 mod paging;
 
 use boot_plan::DirectMapPlan;
@@ -160,72 +162,13 @@ fn boot_kernel() -> BootResult<()> {
         let _ = writeln!(stdout, "[boot] Modules: {}", module_list.len());
     });
 
-    // Step 6: Get framebuffer (optional : may not be available in -nographic mode)
-    let mut fb_phys: u64 = 0;
-    let mut fb_width: u32 = 0;
-    let mut fb_height: u32 = 0;
-    let mut fb_stride: u32 = 0;
-    let mut fb_bpp: u16 = 32;
-    let mut fb_red_size: u8 = 8;
-    let mut fb_red_shift: u8 = 16;
-    let mut fb_green_size: u8 = 8;
-    let mut fb_green_shift: u8 = 8;
-    let mut fb_blue_size: u8 = 8;
-    let mut fb_blue_shift: u8 = 0;
-
-    'gop: {
-        let gop_handle = match uefi::boot::get_handle_for_protocol::<GraphicsOutput>() {
-            Ok(h) => h,
-            Err(_) => break 'gop,
-        };
-        let mut gop = match uefi::boot::open_protocol_exclusive::<GraphicsOutput>(gop_handle) {
-            Ok(g) => g,
-            Err(_) => break 'gop,
-        };
-
-        let mut best_mode = None;
-        let mut best_area: usize = 0;
-        for mode in gop.modes() {
-            let (w, h) = mode.info().resolution();
-            let area = w * h;
-            if area > best_area {
-                best_area = area;
-                best_mode = Some(mode);
-            }
-        }
-
-        if let Some(mode) = best_mode {
-            if gop.set_mode(&mode).is_err() {
-                break 'gop;
-            }
-        }
-
-        let info = gop.current_mode_info();
-        let (width, height) = info.resolution();
-        let stride = info.stride();
-        let pixel_format = info.pixel_format();
-
-        let mut fb = gop.frame_buffer();
-        fb_phys = fb.as_mut_ptr() as u64;
-        fb_width = width as u32;
-        fb_height = height as u32;
-        // uefi's stride() returns PIXELS per scan line; the strat9 ABI
-        // expects BYTES (see vga writer: y * pitch + x * bpp_bytes).
-        let stride_bytes = (stride as u64) * ((fb_bpp as u64 + 7) / 8);
-        fb_stride = stride_bytes as u32;
-
-        let (r_s, r_sh, g_s, g_sh, b_s, b_sh) = match pixel_format {
-            uefi::proto::console::gop::PixelFormat::Rgb => (8, 16, 8, 8, 8, 0),
-            uefi::proto::console::gop::PixelFormat::Bgr => (8, 0, 8, 8, 8, 16),
-            _ => (8, 0, 8, 8, 8, 16),
-        };
-        fb_red_size = r_s;
-        fb_red_shift = r_sh;
-        fb_green_size = g_s;
-        fb_green_shift = g_sh;
-        fb_blue_size = b_s;
-        fb_blue_shift = b_sh;
-    }
+    let framebuffer = select_framebuffer();
+    let fb_phys = framebuffer.physical;
+    let fb_width = framebuffer.width;
+    let fb_height = framebuffer.height;
+    let fb_stride = framebuffer.stride;
+    let fb_bpp = if fb_phys == 0 { 0 } else { 32 };
+    let fb_mask_size = if fb_phys == 0 { 0 } else { 8 };
 
     // Get ACPI RSDP
     let rsdp_addr = uefi::system::with_config_table(|tables| {
@@ -256,6 +199,7 @@ fn boot_kernel() -> BootResult<()> {
             "loader=strat9-bootloader-uefi\n",
         );
         env_write(&mut env_buf, &mut env_len, "loader.version=0.1.0\n");
+        env_write(&mut env_buf, &mut env_len, "loader.paging=wx-uc-v1\n");
 
         let mut tmp = [0u8; 32];
 
@@ -264,7 +208,12 @@ fn boot_kernel() -> BootResult<()> {
         env_write(&mut env_buf, &mut env_len, w.as_str());
 
         let mut w = buf_str(&mut tmp);
-        let _ = write!(w, "fb.virt=0x{:x}\n", paging::FRAMEBUFFER_BASE);
+        let fb_virt = if fb_phys == 0 {
+            0
+        } else {
+            paging::FRAMEBUFFER_BASE + (fb_phys & (PAGE_SIZE - 1))
+        };
+        let _ = write!(w, "fb.virt=0x{:x}\n", fb_virt);
         env_write(&mut env_buf, &mut env_len, w.as_str());
 
         let mut w = buf_str(&mut tmp);
@@ -323,15 +272,27 @@ fn boot_kernel() -> BootResult<()> {
         "kernel memory map pages",
     )?;
     let mmap_region_base = map_storage.base;
-    let framebuffer_size = (fb_stride as u64)
-        .checked_mul(fb_height as u64)
-        .ok_or_else(|| BootError::invalid("framebuffer size overflow"))?;
+    let framebuffer_aperture = framebuffer.aperture().map_err(BootError::invalid)?;
     let mut direct_map = DirectMapPlan::new(cpu_features.physical_limit(), loader_image)
         .map_err(BootError::invalid)?;
     let planning_map = uefi::boot::memory_map(MemoryType::LOADER_DATA)
         .map_err(|error| BootError::firmware("direct map planning", error.status()))?;
+    let mut write_back = alloc::vec::Vec::<PhysicalRange>::new();
     for entry in planning_map.entries() {
         let region = firmware_region(entry).map_err(BootError::invalid)?;
+        if region.size == 0 {
+            continue;
+        }
+        let range = PhysicalRange {
+            base: region.base,
+            size: region.size,
+        };
+        if firmware_write_back(entry) {
+            write_back
+                .try_reserve(1)
+                .map_err(|_| BootError::out_of_resources("cache map planning"))?;
+            write_back.push(range);
+        }
         if needs_direct_mapping(entry.ty) {
             direct_map
                 .include(PhysicalRange {
@@ -342,42 +303,60 @@ fn boot_kernel() -> BootResult<()> {
         }
     }
     drop(planning_map);
-    if fb_phys != 0 && framebuffer_size != 0 {
+    write_back.sort_unstable_by_key(|range| range.base);
+    let mut merged = 0;
+    for index in 0..write_back.len() {
+        let range = write_back[index];
+        if merged != 0 && write_back[merged - 1].end().map_err(BootError::invalid)? == range.base {
+            write_back[merged - 1].size += range.size;
+        } else {
+            write_back[merged] = range;
+            merged += 1;
+        }
+    }
+    write_back.truncate(merged);
+    if framebuffer_aperture.size != 0 {
         direct_map
-            .include(PhysicalRange {
-                base: fb_phys,
-                size: framebuffer_size,
-            })
+            .include(framebuffer_aperture)
             .map_err(BootError::invalid)?;
     }
     uefi::system::with_stdout(|stdout| {
         let _ = writeln!(
             stdout,
-            "[boot] Initial identity/HHDM: {} GiB, 2 MiB pages",
+            "[boot] Initial identity/HHDM: {} GiB, 4 KiB/2 MiB pages, NX, video UC",
             direct_map.end() / boot_plan::GIB
         );
     });
-    let table_pages = paging::page_table_pages(
-        elf_info.image_size(),
-        framebuffer_size,
-        env_total_size as u64,
+    let mapping_plan = page_tables::MappingPlan {
         direct_map,
-    )
-    .map_err(BootError::invalid)?;
+        kernel: &elf_info,
+        loader_image,
+        write_back: &write_back,
+        framebuffer: framebuffer_aperture,
+        environment,
+    };
+    let table_pages = mapping_plan.table_pages().map_err(BootError::invalid)?;
     let table_area = boot_memory.allocate(table_pages * PAGE_SIZE, "page-table arena")?;
-    let pml4_phys = unsafe {
-        paging::create_page_tables(
-            elf_info.phys_base,
-            elf_info.image_size(),
-            fb_phys,
-            framebuffer_size,
-            env_phys_base,
-            env_total_size as u64,
-            table_area,
-            direct_map,
-        )
+    let pml4_phys = unsafe { paging::create_page_tables(table_area, &mapping_plan) }
+        .map_err(BootError::invalid)?;
+
+    // GOP may use stolen RAM: exclude its whole aperture from the allocator,
+    // without making BootMemory responsible for freeing firmware-owned pages.
+    let mut reservations = alloc::vec::Vec::new();
+    reservations
+        .try_reserve_exact(boot_memory.reservations().len() + 1)
+        .map_err(|_| BootError::out_of_resources("handoff reservations"))?;
+    reservations.extend_from_slice(boot_memory.reservations());
+    if framebuffer_aperture.size != 0 {
+        if reservations
+            .iter()
+            .any(|range| page_tables::overlaps(*range, framebuffer_aperture))
+        {
+            return Err(BootError::invalid("framebuffer overlaps boot allocations"));
+        }
+        reservations.push(framebuffer_aperture);
+        reservations.sort_unstable_by_key(|range| range.base);
     }
-    .map_err(BootError::invalid)?;
 
     drop(volume);
     drop(fs);
@@ -385,13 +364,8 @@ fn boot_kernel() -> BootResult<()> {
     // its own final map; conversion is repeated below with the same bounded buffer.
     let preview = uefi::boot::memory_map(MemoryType::LOADER_DATA)
         .map_err(|error| BootError::firmware("memory map preflight", error.status()))?;
-    convert_memory_map(
-        &preview,
-        boot_memory.reservations(),
-        map_storage,
-        direct_map,
-    )
-    .map_err(BootError::invalid)?;
+    convert_memory_map(&preview, &reservations, map_storage, &mapping_plan)
+        .map_err(BootError::invalid)?;
     drop(preview);
 
     uefi::system::with_stdout(|stdout| {
@@ -406,13 +380,8 @@ fn boot_kernel() -> BootResult<()> {
 
     // No allocations, firmware calls or recoverable returns after this point.
     // Split around the exact owned pages, including every module payload.
-    let region_count = convert_memory_map(
-        &mmap_iter,
-        boot_memory.reservations(),
-        map_storage,
-        direct_map,
-    )
-    .unwrap_or_else(|reason| halt_after_boot_services(reason));
+    let region_count = convert_memory_map(&mmap_iter, &reservations, map_storage, &mapping_plan)
+        .unwrap_or_else(|reason| halt_after_boot_services(reason));
 
     // Re-initialize serial port after ExitBootServices
     unsafe {
@@ -457,12 +426,12 @@ fn boot_kernel() -> BootResult<()> {
         framebuffer_height: fb_height,
         framebuffer_stride: fb_stride,
         framebuffer_bpp: fb_bpp,
-        framebuffer_red_mask_size: fb_red_size,
-        framebuffer_red_mask_shift: fb_red_shift,
-        framebuffer_green_mask_size: fb_green_size,
-        framebuffer_green_mask_shift: fb_green_shift,
-        framebuffer_blue_mask_size: fb_blue_size,
-        framebuffer_blue_mask_shift: fb_blue_shift,
+        framebuffer_red_mask_size: fb_mask_size,
+        framebuffer_red_mask_shift: framebuffer.red_shift,
+        framebuffer_green_mask_size: fb_mask_size,
+        framebuffer_green_mask_shift: if fb_phys == 0 { 0 } else { 8 },
+        framebuffer_blue_mask_size: fb_mask_size,
+        framebuffer_blue_mask_shift: framebuffer.blue_shift,
         hhdm_offset: paging::HHDM_OFFSET,
         cmdline_ptr: env_phys_base,
         cmdline_len: env_total_size as u64,
@@ -586,7 +555,7 @@ fn convert_memory_map(
     map: &impl MemoryMap,
     reservations: &[PhysicalRange],
     storage: PhysicalRange,
-    direct_map: DirectMapPlan,
+    plan: &page_tables::MappingPlan<'_>,
 ) -> Result<usize, &'static str> {
     let required = (MAX_MEMORY_REGIONS * core::mem::size_of::<MemoryRegion>()) as u64;
     if storage.base == 0 || storage.base % PAGE_SIZE != 0 || storage.size < required {
@@ -601,12 +570,21 @@ fn convert_memory_map(
     for entry in map.entries() {
         let region = firmware_region(entry)?;
         if needs_direct_mapping(entry.ty)
-            && !direct_map.covers(PhysicalRange {
+            && !plan.direct_map.covers(PhysicalRange {
                 base: region.base,
                 size: region.size,
             })
         {
             return Err("final firmware map exceeds the prepared HHDM");
+        }
+        if !plan.agrees_with_firmware(
+            PhysicalRange {
+                base: region.base,
+                size: region.size,
+            },
+            firmware_write_back(entry),
+        ) {
+            return Err("final firmware map changed prepared cache attributes");
         }
         builder.push(region)?;
     }
@@ -646,11 +624,86 @@ fn firmware_region(entry: &MemoryDescriptor) -> Result<MemoryRegion, &'static st
         | MemoryType::LOADER_DATA => MemoryKind::Reclaim,
         _ => MemoryKind::Reserved,
     };
+    entry
+        .phys_start
+        .checked_add(size)
+        .ok_or("firmware physical range overflow")?;
+    if entry.phys_start % PAGE_SIZE != 0 {
+        return Err("unaligned firmware memory descriptor");
+    }
+    if size != 0
+        && (kind == MemoryKind::Free || kind == MemoryKind::Reclaim)
+        && !firmware_write_back(entry)
+    {
+        return Err("allocatable firmware RAM does not support WB caching");
+    }
     Ok(MemoryRegion {
         base: entry.phys_start,
         size,
         kind,
     })
+}
+
+fn firmware_write_back(entry: &MemoryDescriptor) -> bool {
+    needs_direct_mapping(entry.ty) && entry.att.contains(MemoryAttribute::WRITE_BACK)
+}
+
+fn gop_geometry(info: &ModeInfo) -> Option<graphics::Framebuffer> {
+    let rgb = match info.pixel_format() {
+        PixelFormat::Rgb => true,
+        PixelFormat::Bgr => false,
+        // Bitmask has no universal 32-bit pixel size. Reject it explicitly.
+        PixelFormat::Bitmask | PixelFormat::BltOnly => return None,
+    };
+    let (width, height) = info.resolution();
+    graphics::Framebuffer::geometry(width, height, info.stride(), rgb)
+}
+
+fn current_framebuffer(gop: &mut GraphicsOutput) -> Option<graphics::Framebuffer> {
+    let geometry = gop_geometry(&gop.current_mode_info())?;
+    // frame_buffer() panics for BltOnly, so validate format before calling it.
+    let mut buffer = gop.frame_buffer();
+    geometry.with_aperture(buffer.as_mut_ptr() as u64, buffer.size() as u64)
+}
+
+fn select_framebuffer() -> graphics::Framebuffer {
+    let selected = (|| {
+        let handle = uefi::boot::get_handle_for_protocol::<GraphicsOutput>().ok()?;
+        let mut gop = uefi::boot::open_protocol_exclusive::<GraphicsOutput>(handle).ok()?;
+        let mut modes = alloc::vec::Vec::new();
+        let mut allocation_failed = false;
+        for mode in gop.modes() {
+            if let Some(geometry) = gop_geometry(mode.info()) {
+                if modes.try_reserve(1).is_err() {
+                    allocation_failed = true;
+                    break;
+                }
+                modes.push((u64::from(geometry.width) * u64::from(geometry.height), mode));
+            }
+        }
+        if allocation_failed {
+            return current_framebuffer(&mut gop);
+        }
+        modes.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        for (_, mode) in modes {
+            // On SetMode failure, a compatible current mode is still usable.
+            // A successful SetMode must also pass the live aperture checks.
+            let _ = gop.set_mode(&mode);
+            if let Some(framebuffer) = current_framebuffer(&mut gop) {
+                return Some(framebuffer);
+            }
+        }
+        current_framebuffer(&mut gop)
+    })();
+    if selected.is_none() {
+        uefi::system::with_stdout(|stdout| {
+            let _ = writeln!(
+                stdout,
+                "[boot] No usable RGB/BGR framebuffer; serial console only"
+            );
+        });
+    }
+    selected.unwrap_or_default()
 }
 
 /// Fatal errors after ExitBootServices must not unwind, return to UEFI, use its

@@ -264,6 +264,35 @@ fn parsing_never_dereferences_physical_addresses() {
 }
 
 #[test]
+fn writable_executable_kernel_segment_is_rejected() {
+    let mut file = kernel_file();
+    file[68..72].copy_from_slice(&7u32.to_le_bytes());
+    assert_eq!(
+        elf::parse_elf64(&file).unwrap_err(),
+        "writable executable ELF segment is unsupported"
+    );
+}
+
+#[test]
+fn different_segment_permissions_cannot_share_a_physical_page() {
+    let mut file = kernel_file();
+    let second = 64 + 56;
+    file[second + 4..second + 8].copy_from_slice(&6u32.to_le_bytes());
+    file[second + 8..second + 16].copy_from_slice(&4608u64.to_le_bytes());
+    for offset in [16, 24] {
+        file[second + offset..second + offset + 8]
+            .copy_from_slice(&(VIRTUAL_BASE + 512).to_le_bytes());
+    }
+    assert_eq!(
+        elf::parse_elf64(&file).unwrap_err(),
+        "ELF segments with different permissions share a page"
+    );
+    // The same byte geometry is valid when both segments have identical rights.
+    file[second + 4..second + 8].copy_from_slice(&5u32.to_le_bytes());
+    assert!(elf::parse_elf64(&file).is_ok());
+}
+
+#[test]
 fn kernel_load_rebases_only_physical_addresses_and_respects_guards() {
     let file = kernel_file();
     let mut plan = elf::parse_elf64(&file).unwrap();

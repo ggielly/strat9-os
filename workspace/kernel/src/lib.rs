@@ -547,6 +547,12 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     let hhdm = args.hhdm_offset;
     memory::set_hhdm_offset(hhdm);
+    #[cfg(target_arch = "x86_64")]
+    if args.env_get("loader.paging") == Some("wx-uc-v1") {
+        // No low EFI instruction is needed now. Revoke its executable alias
+        // before reclaiming loader pages for stacks, heaps or page tables.
+        unsafe { memory::paging::retire_uefi_identity_code() };
+    }
     serial_println!("[init] HHDM offset: 0x{:x}", hhdm);
 
     let memory_map_base =
