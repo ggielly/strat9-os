@@ -79,8 +79,8 @@ pub fn init() {
 #[unsafe(naked)]
 unsafe extern "C" fn syscall_entry() {
     core::arch::naked_asm!(
-        // TEMP DEBUG: pulse 0x89 on E9 for every syscall (before swapgs).
-        "mov al, 0x89", "out 0xe9, al",
+        // Preserve RAX (syscall number) and argument registers until saved below.
+        // In particular, writing a debug marker to AL corrupts the syscall number.
         // Swap GS to kernel base (per-CPU)
         "swapgs",
 
