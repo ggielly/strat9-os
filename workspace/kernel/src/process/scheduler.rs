@@ -899,11 +899,12 @@ fn validate_task_context(task: &Arc<Task>) -> Result<(), &'static str> {
         return Err("non-canonical return IP");
     }
 
-    // FPU area must be within the kernel stack (it sits below saved_rsp).
-    let fpu_size = core::mem::size_of::<crate::process::task::ExtendedState>() as u64;
-    let fpu_ptr = task.fpu_state.get() as u64;
-    if fpu_ptr != 0 && (fpu_ptr < stack_base || fpu_ptr.saturating_add(fpu_size) > stack_top) {
-        return Err("FPU state outside kernel stack bounds");
+    // ExtendedState is embedded in the Arc-owned Task, not in kernel_stack.
+    // The owning Arc keeps the save area alive across the context switch.
+    // Check the alignment required by XSAVE/XRSTOR (also sufficient for FXSAVE).
+    let fpu_ptr = task.fpu_state.get() as usize;
+    if fpu_ptr % core::mem::align_of::<crate::process::task::ExtendedState>() != 0 {
+        return Err("FPU state not aligned for context restore");
     }
 
     Ok(())
