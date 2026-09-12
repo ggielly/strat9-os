@@ -1,97 +1,112 @@
-#                             strat9                                                                         boot stub : U-Boot / PVH entry point (x86_64)
-#
-# Minimal: CLI, stack setup,  BSS                                                                            clear, jump to Rust.
-#                             All                                                                            CPU feature setup (SSE, OSXSAVE, etc.) is done in Rust.
-
-.section                      .boot.text,                                                                    "ax"
+# x86-64 kernel entry. RDI holds the physical KernelArgs pointer.
+# The loader maps the complete PT_LOAD memory extents, including pure BSS.
+# IF stays clear until the kernel's normal interrupt initialization is complete.
+.section .boot.text, "ax"
 .code64
-.global                       _start
+.global _start
 _start:
-                              cli
+    cli
+    cld
+    movq %rdi, %r15
+    xorq %rbp, %rbp
 
-                              # Save kernel args pointer (rdi = 1st arg in System V ABI)
-                              # Must happen BEFORE BSS zero which clobbers rdi.
-                              movq                                                                           %rdi, %r15
+    # All early vectors halt locally. No allocation, formatting, firmware call,
+    # TSS or IST is needed. The full GDT/TSS/IDT replace these during kernel_main.
+    # Prepare the IDT before changing the GDT to keep their replacement adjacent.
+    leaq early_fault_halt(%rip), %rax
+    leaq early_idt(%rip), %rdi
+    movl $256, %ecx
+.Lfill_idt:
+    movw %ax, 0(%rdi)
+    movw $0x08, 2(%rdi)
+    movb $0, 4(%rdi)
+    movb $0x8e, 5(%rdi)
+    movq %rax, %rdx
+    shrq $16, %rdx
+    movw %dx, 6(%rdi)
+    shrq $16, %rdx
+    movl %edx, 8(%rdi)
+    movl $0, 12(%rdi)
+    addq $16, %rdi
+    loop .Lfill_idt
 
-                              # E9: 'A' at start
-                              mov                                                                            $0xE9, %dx
-                              mov                                                                            $'A', %al
-                              out                                                                            %al, %dx
+    # A private early GDT removes the dependency on firmware selectors. Use the
+    # loader's mapped transition stack until the BSS/bootstrap stack is cleared.
+    lgdt early_gdt_ptr(%rip)
+    lidt early_idt_ptr(%rip)
+    pushq $0x08
+    leaq .Lkernel_cs(%rip), %rax
+    pushq %rax
+    lretq
+.Lkernel_cs:
+    movw $0x10, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %ss
 
-                              # Zero BSS before anything else.
-                              # __bss_start/__bss_end are linker symbols covering the
-                              # entire .bss section (including statics like Mutex locks).
-                              lea                                                                     __bss_start(%rip), %rdi
-                              lea                                                                     __bss_end(%rip), %rcx
-                              sub                                                                     %rdi, %rcx
-                              shr                                                                     $3, %rcx           # /8 for qwords
-                              xor                                                                     %rax, %rax
-                              rep                                                                     stosq
+    movw $0xe9, %dx
+    movb $'A', %al
+    outb %al, %dx
 
-                              # E9: 'B' after BSS clear
-                              mov                                                                            $0xE9, %dx
-                              mov                                                                            $'B', %al
-                              out                                                                            %al, %dx
+    # Clear every byte, including a final non-qword tail. The active stack and
+    # early IDT are outside BSS, so neither is erased by this loop.
+    leaq __bss_start(%rip), %rdi
+    leaq __bss_end(%rip), %rcx
+    subq %rdi, %rcx
+    xorl %eax, %eax
+    rep stosb
 
-                              # Setup                                                                         bootstrap stack
-                              leaq                                                                           boot_stack_top(%rip), %rsp
-                              andq                                                                           $-16, %rsp
+    movw $0xe9, %dx
+    movb $'B', %al
+    outb %al, %dx
+    leaq boot_stack_top(%rip), %rsp
+    andq $-16, %rsp
+    movq %r15, %rdi
+    movb $'C', %al
+    outb %al, %dx
+    call kmain
 
-                              # E9: 'C' after stack setup
-                              mov                                                                            $0xE9, %dx
-                              mov                                                                            $'C', %al
-                              out                                                                            %al, %dx
+early_fault_halt:
+    cli
+    movw $0xe9, %dx
+    movb $'!', %al
+    outb %al, %dx
+.Lhalt:
+    hlt
+    jmp .Lhalt
 
-                              # NOTE: BSS clear skipped -- page tables don't cover the
-                              # full .bss.stack range, and the stack doesn't need zeroing.
+# Accessed bits are preset, so loading a selector never needs to write the GDT.
+.balign 8
+early_gdt:
+    .quad 0
+    .quad 0x00af9b000000ffff
+    .quad 0x00cf93000000ffff
+early_gdt_end:
+early_gdt_ptr:
+    .word early_gdt_end - early_gdt - 1
+    .quad early_gdt
+early_idt_ptr:
+    .word 256 * 16 - 1
+    .quad early_idt
 
-                              # E9: 'D' after (skipped) BSS clear
-                              mov                                                                            $0xE9, %dx
-                              mov                                                                            $'D', %al
-                              out                                                                            %al, %dx
-
-                              # Restore                                                                       kernel args pointer to rdi
-                              movq                                                                           %r15, %rdi
-
-                              # E9: '1' right before call kmain
-                              mov                                                                            $0xE9, %dx
-                              mov                                                                            $'1', %al
-                              out                                                                            %al, %dx
-
-                              # Call                                                                          Rust entry point
-                              call                                                                           kmain
-
-                              # E9: '2' if kmain returned (should never happen)
-                              mov                                                                           $0xE9, %dx
-                              mov                                                                           $'2', %al
-                              out                                                                           %al, %dx
-
-.halt_loop:
-                              cli
-                              hlt
-                              jmp                                                                            .halt_loop
-
-#                             ---------------------------------------------------------------------------
-#                             Stack                                                                          switch trampoline
-#
-#                             void                                                                           switch_stack(uint64_t                                         ;
-#
-#                             Switches                                                                       RSP to `new_rsp`, then calls `entry` with no arguments.
-#                             Used                                                                           to migrate off the bootstrap stack once a proper stack is allocated.
-#                             ---------------------------------------------------------------------------
-.global                       switch_stack
+# Caller supplies a mapped stack and a noreturn SysV entry.
+.global switch_stack
 switch_stack:
-                              movq                                                                           %rdi, %rsp      # new_rsp
-                              andq                                                                           $~0xf, %rsp     # align to 16 bytes (SysV ABI requirement)
-                              callq                                                                          *%rsi           # call entry (address in rsi)
-entry:                        # should not return; if it does, halt
-                              cli
-                              hlt
-                              jmp                                                                            .-1
+    movq %rdi, %rsp
+    andq $-16, %rsp
+    xorq %rbp, %rbp
+    cld
+    callq *%rsi
+    jmp early_fault_halt
 
-# Bootstrap stack - placed at end of BSS in linker script (last .bss section).
-.section                      .bss.stack,                                                                    "aw", @nobits
-.align                        16
+# PROGBITS, deliberately outside BSS: early exceptions can use it during clearing.
+.section .data.boot_idt, "aw", @progbits
+.balign 16
+early_idt:
+    .zero 256 * 16
+
+.section .bss.stack, "aw", @nobits
+.balign 16
 boot_stack_bottom:
-                              .skip                                                                          65536           # 64 KB bootstrap stack
+    .skip 65536
 boot_stack_top:

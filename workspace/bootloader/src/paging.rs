@@ -1,4 +1,8 @@
-use crate::memory_map::{page_allocation_size, PageFrameCursor, PhysicalRange};
+pub use crate::boot_plan::INITIAL_ALLOCATION_LIMIT as INITIAL_PHYS_LIMIT;
+use crate::{
+    boot_plan::{DirectMapPlan, GIB},
+    memory_map::{page_allocation_size, PageFrameCursor, PhysicalRange},
+};
 
 pub const FRAMEBUFFER_BASE: u64 = 0xFFFF_DEAD_0000_0000;
 pub const ENVIRONMENT_BASE: u64 = 0xFFFF_BEEF_0000_0000;
@@ -17,9 +21,6 @@ const WRITABLE: u64 = 1 << 1;
 /// 0xFFFFFFFF80000000 = PML4[511].PDP[510] : using 0xFFFFFFFF80000000 as
 /// the HHDM offset would collide with the kernel-image mapping.
 pub const HHDM_OFFSET: u64 = 0xFFFF_FF00_0000_0000;
-/// Upper bound of RAM covered by the HHDM (and identity) map.
-const HHDM_COVER_GB: u64 = 8;
-pub const INITIAL_PHYS_LIMIT: u64 = HHDM_COVER_GB * 1024 * 1024 * 1024;
 /// 2 MiB huge-page size used for the HHDM map.
 const HUGE_PAGE: u64 = 0x20_0000;
 
@@ -31,12 +32,13 @@ pub fn page_table_pages(
     kernel_size: u64,
     framebuffer_size: u64,
     env_size: u64,
+    direct_map: DirectMapPlan,
 ) -> Result<u64, &'static str> {
     let kernel_pages = page_allocation_size(kernel_size)? / PAGE_SIZE;
     if kernel_pages > 512 * 512 {
         return Err("kernel exceeds the supported page-directory window");
     }
-    let mut pages = 5 + HHDM_COVER_GB + (kernel_pages + 511) / 512;
+    let mut pages = 5 + 2 * (direct_map.end() / GIB) + (kernel_pages + 511) / 512;
     for size in [framebuffer_size, env_size] {
         if size != 0 {
             pages += 2 + (page_allocation_size(size)? / PAGE_SIZE).min(512);
@@ -55,11 +57,18 @@ pub unsafe fn create_page_tables(
     _env_phys: u64,
     _env_size: u64,
     table_area: PhysicalRange,
+    direct_map: DirectMapPlan,
 ) -> Result<u64, &'static str> {
-    let required_pages = page_table_pages(kernel_size, _framebuffer_size, _env_size)?;
+    let required_pages = page_table_pages(kernel_size, _framebuffer_size, _env_size, direct_map)?;
     if table_area.size < required_pages * PAGE_SIZE
         || table_area.end()? > INITIAL_PHYS_LIMIT
+        || !direct_map.covers(table_area)
+        || kernel_phys == 0
         || kernel_phys % PAGE_SIZE != 0
+        || !direct_map.covers(PhysicalRange {
+            base: kernel_phys,
+            size: page_allocation_size(kernel_size)?,
+        })
     {
         return Err("invalid page-table allocation");
     }
@@ -73,46 +82,21 @@ pub unsafe fn create_page_tables(
 
     let pml4 = alloc_frame()? as *mut u64;
 
-    // Identity map: 0..8GB using 1GB huge pages
+    // Identical coverage for identity and HHDM, using baseline 2 MiB leaves.
+    // No PDPTE is a 1 GiB leaf. PS is bit 7; the huge-page PAT bit is bit 12.
+    // Cover all allocatable firmware RAM and the complete EFI image, even above
+    // 8 GiB, so the instructions after the CR3 write remain executable.
     unsafe {
-        let pdp = alloc_frame()? as *mut u64;
-        *pml4.add(0) = pdp as u64 | PRESENT | WRITABLE;
-
-        // 1 GiB huge pages: the PDPE PS bit (bit 7) MUST be set or the entry
-        // is treated as a page-directory pointer and the walk faults.
-        // Note: bit 7 also selects PAT entry 4 (programmed to WC by
-        // context_switch); that is harmless here : only the framebuffer
-        // mapping uses WC in practice, and this matches the original
-        // graphics-branch design.
-        for i in 0..8u64 {
-            *pdp.add(i as usize) = (i * 0x4000_0000) | PRESENT | WRITABLE | (1 << 7);
-        }
-
-        // HHDM: same physical RAM mapped at HHDM_OFFSET (PML4[256]).
-        // The kernel computes every physical-memory access as phys +
-        // hhdm_offset, so ALL RAM must be reachable through this window —
-        // not just the kernel image. 2 MiB huge pages (PS bit on PDE).
-        let hhdm_pml4_idx = ((HHDM_OFFSET >> 39) & 0x1FF) as usize; // 256
-        let hhdm_pdp = alloc_frame()? as *mut u64;
-        *pml4.add(hhdm_pml4_idx) = hhdm_pdp as u64 | PRESENT | WRITABLE;
-
-        let mut huge_idx: usize = 0;
-        'hhdm: for gb in 0..HHDM_COVER_GB {
-            let pd = alloc_frame()? as *mut u64;
-            *hhdm_pdp.add(gb as usize) = pd as u64 | PRESENT | WRITABLE;
-            for i in 0..512u64 {
-                if huge_idx >= (HHDM_COVER_GB * 512) as usize {
-                    break 'hhdm;
+        for slot in [0, ((HHDM_OFFSET >> 39) & 0x1FF) as usize] {
+            let pdp = alloc_frame()? as *mut u64;
+            *pml4.add(slot) = pdp as u64 | PRESENT | WRITABLE;
+            for gb in 0..direct_map.end() / GIB {
+                let pd = alloc_frame()? as *mut u64;
+                *pdp.add(gb as usize) = pd as u64 | PRESENT | WRITABLE;
+                for index in 0..512u64 {
+                    let physical = gb * GIB + index * HUGE_PAGE;
+                    *pd.add(index as usize) = physical | PRESENT | WRITABLE | (1 << 7);
                 }
-                let phys = (gb * 0x4000_0000) + i * HUGE_PAGE;
-                // NOTE: PS bit (1<<7) selects a 2MiB page AND PAT entry 4.
-                // context_switch reprograms PAT entry 4 to Write-Combining
-                // for the framebuffer : HHDM pages must stay WB, so the PAT
-                // bit must be cleared here despite the huge page. On PDEs,
-                // PS(bit7)=1 alone makes it a huge page; the PAT bit lives
-                // in bit 12 (PCD position) for PDE entries. Bit 7 = PS only.
-                *pd.add(i as usize) = phys | PRESENT | WRITABLE | (1 << 7);
-                huge_idx += 1;
             }
         }
     }
@@ -205,9 +189,14 @@ pub unsafe fn create_page_tables(
     Ok(pml4 as u64)
 }
 
+/// Enter with validated CPU features and a mapped EFI image. There are no stack
+/// accesses or calls after CR3 changes; the last jump enters the kernel stub.
+#[inline(never)]
 pub unsafe fn context_switch(pml4_phys: u64, stack_top: u64, entry: u64, args: u64) -> ! {
     unsafe {
         core::arch::asm!(
+            "cli",
+            "cld",
             // Force each input into a distinct register that does NOT overlap
             // with our destination scratch registers (rbx, r8, r9, r10).
             // Using in("reg") ties the operand to a specific register; the
@@ -217,6 +206,23 @@ pub unsafe fn context_switch(pml4_phys: u64, stack_top: u64, entry: u64, args: u
             "mov r9,  rcx",
             "mov r10, rsi",
             "xor rbp, rbp",
+            // Clear EM/TS, set MP/NE/WP; paging and protected mode stay enabled.
+            "mov rax, cr0",
+            "and rax, -13",
+            "or rax, 0x10022",
+            "mov cr0, rax",
+            // Select PCID zero before disabling PCIDE, and invalidate inherited
+            // global translations by clearing PGE. LA57/CET were rejected earlier.
+            "mov rax, cr4",
+            "bt rax, 17",
+            "jnc 2f",
+            "mov rdx, cr3",
+            "and rdx, -4096",
+            "mov cr3, rdx",
+            "2:",
+            "and rax, -131201", // ~(PCIDE | PGE)
+            "or rax, 0x600", // OSFXSR | OSXMMEXCPT
+            "mov cr4, rax",
             // Enable IA32_EFER.NXE (bit 11) so NX page bits are enforced.
             "mov ecx, 0xC0000080",          // IA32_EFER
             "rdmsr",
@@ -232,10 +238,10 @@ pub unsafe fn context_switch(pml4_phys: u64, stack_top: u64, entry: u64, args: u
             "or edx, 0x00000001",
             "wrmsr",
             // Now use the scratch registers (safe from rdmsr/wrmsr clobbers).
-            "mov cr3, rbx",
             "mov rsp, r8",
             "and rsp, -16",
             "mov rdi, r10",
+            "mov cr3, rbx",
             "jmp r9",
             in("rax") pml4_phys,
             in("rdx") stack_top,

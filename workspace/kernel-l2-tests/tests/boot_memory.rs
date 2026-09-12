@@ -177,13 +177,18 @@ fn allocation_rounding_rejects_zero_and_overflow() {
 const VIRTUAL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
 
 fn kernel_file() -> Vec<u8> {
-    let mut file = vec![0; 516];
+    let mut file = vec![0; 8196];
     file[..6].copy_from_slice(&[0x7F, b'E', b'L', b'F', 2, 1]);
+    file[6] = 1;
+    file[16..18].copy_from_slice(&2u16.to_le_bytes());
+    file[18..20].copy_from_slice(&62u16.to_le_bytes());
+    file[20..24].copy_from_slice(&1u32.to_le_bytes());
     file[0x18..0x20].copy_from_slice(&VIRTUAL_BASE.to_le_bytes());
     file[0x20..0x28].copy_from_slice(&64u64.to_le_bytes());
     file[0x36..0x38].copy_from_slice(&56u16.to_le_bytes());
+    file[52..54].copy_from_slice(&64u16.to_le_bytes());
     file[0x38..0x3A].copy_from_slice(&2u16.to_le_bytes());
-    for (index, offset, displacement) in [(0, 256u64, 0), (1, 512u64, 3 * PAGE_SIZE)] {
+    for (index, offset, displacement) in [(0, 4096u64, 0), (1, 8192u64, 3 * PAGE_SIZE)] {
         let header = 64 + index * 56;
         file[header..header + 4].copy_from_slice(&1u32.to_le_bytes());
         file[header + 4..header + 8].copy_from_slice(&5u32.to_le_bytes());
@@ -193,12 +198,13 @@ fn kernel_file() -> Vec<u8> {
             (24, VIRTUAL_BASE + displacement),
             (32, 4),
             (40, 4),
+            (48, PAGE_SIZE),
         ] {
             file[header + field..header + field + 8].copy_from_slice(&value.to_le_bytes());
         }
     }
-    file[256..260].copy_from_slice(b"TEXT");
-    file[512..516].copy_from_slice(b"DATA");
+    file[4096..4100].copy_from_slice(b"TEXT");
+    file[8192..8196].copy_from_slice(b"DATA");
     file
 }
 
@@ -284,7 +290,7 @@ fn invalid_last_segment_causes_no_partial_kernel_copy() {
     let file = kernel_file();
     let mut plan = elf::parse_elf64(&file).unwrap();
     let image = ImageBuffer::new(plan.image_size(), 0xA5);
-    assert!(unsafe { plan.load_into(&file[..513], image.destination()) }.is_err());
+    assert!(unsafe { plan.load_into(&file[..8193], image.destination()) }.is_err());
     assert!(image.bytes().iter().all(|&b| b == 0xA5));
     assert_eq!(plan.phys_base, 0x10_0000);
     image.assert_guards();
@@ -395,4 +401,130 @@ fn converting_a_smaller_final_map_does_not_publish_stale_preview_entries() {
     assert_eq!(visible.len(), 1);
     assert_eq!(visible[0].size, 16 * PAGE_SIZE);
     assert_eq!(visible[0].kind, MemoryKind::Free);
+}
+
+fn set_segment_field(file: &mut [u8], index: usize, field: usize, value: u64) {
+    let offset = 64 + index * 56 + field;
+    file[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+#[test]
+fn pure_bss_larger_than_eight_mib_is_allocated_and_cleared_through_its_last_byte() {
+    let mut file = kernel_file();
+    file[56..58].copy_from_slice(&3u16.to_le_bytes());
+    let header = 64 + 2 * 56;
+    file[header..header + 4].copy_from_slice(&1u32.to_le_bytes());
+    file[header + 4..header + 8].copy_from_slice(&6u32.to_le_bytes());
+    let bss_size = 12 * 1024 * 1024 + 3;
+    for (field, value) in [
+        (8, 0x10000), // No file bytes: an offset beyond EOF is valid.
+        (16, VIRTUAL_BASE + 4 * PAGE_SIZE),
+        (24, VIRTUAL_BASE + 4 * PAGE_SIZE),
+        (32, 0),
+        (40, bss_size),
+        (48, PAGE_SIZE),
+    ] {
+        set_segment_field(&mut file, 2, field, value);
+    }
+    let mut plan = elf::parse_elf64(&file).unwrap();
+    assert_eq!(plan.segment_count, 3);
+    assert_eq!(plan.image_size(), 4 * PAGE_SIZE + bss_size);
+    assert_eq!(plan.bss_range(), (VIRTUAL_BASE + 4 * PAGE_SIZE, bss_size));
+    let image = ImageBuffer::new(plan.image_size(), 0xA5);
+    unsafe { plan.load_into(&file, image.destination()) }.unwrap();
+    assert_eq!(&image.bytes()[..4], b"TEXT");
+    assert_eq!(
+        &image.bytes()[3 * PAGE_SIZE as usize..3 * PAGE_SIZE as usize + 4],
+        b"DATA"
+    );
+    assert!(image.bytes()[4 * PAGE_SIZE as usize..]
+        .iter()
+        .all(|&byte| byte == 0));
+    image.assert_guards();
+}
+
+#[test]
+fn mixed_file_and_zero_fill_segment_clears_its_exact_tail() {
+    let mut file = kernel_file();
+    set_segment_field(&mut file, 1, 40, PAGE_SIZE + 3);
+    let mut plan = elf::parse_elf64(&file).unwrap();
+    assert_eq!(
+        plan.bss_range(),
+        (VIRTUAL_BASE + 3 * PAGE_SIZE + 4, PAGE_SIZE - 1)
+    );
+    let image = ImageBuffer::new(plan.image_size(), 0xA5);
+    unsafe { plan.load_into(&file, image.destination()) }.unwrap();
+    assert!(image.bytes()[3 * PAGE_SIZE as usize + 4..]
+        .iter()
+        .all(|&byte| byte == 0));
+    image.assert_guards();
+}
+
+#[test]
+fn unsupported_elf_headers_are_rejected() {
+    for (offset, bytes) in [
+        (4, vec![1]),
+        (5, vec![2]),
+        (6, vec![0]),
+        (16, 3u16.to_le_bytes().to_vec()),
+        (18, 3u16.to_le_bytes().to_vec()),
+        (20, 0u32.to_le_bytes().to_vec()),
+        (52, 63u16.to_le_bytes().to_vec()),
+        (54, 55u16.to_le_bytes().to_vec()),
+        (56, 0u16.to_le_bytes().to_vec()),
+        (56, 17u16.to_le_bytes().to_vec()),
+        (32, (u64::MAX - 55).to_le_bytes().to_vec()),
+    ] {
+        let mut file = kernel_file();
+        file[offset..offset + bytes.len()].copy_from_slice(&bytes);
+        assert!(elf::parse_elf64(&file).is_err(), "header field at {offset}");
+    }
+}
+
+#[test]
+fn invalid_segment_geometry_is_rejected_before_loading() {
+    for (field, value) in [
+        (32, 5),                            // filesz > memsz
+        (40, u64::MAX),                     // end overflow
+        (40, elf::MAX_KERNEL_IMAGE_SIZE),   // exceeds supported virtual window
+        (48, 3),                            // not power of two
+        (8, 8193),                          // file and virtual alignment disagree
+        (16, VIRTUAL_BASE),                 // overlaps the first segment
+        (24, VIRTUAL_BASE + 5 * PAGE_SIZE), // incompatible physical layout
+    ] {
+        let mut file = kernel_file();
+        set_segment_field(&mut file, 1, field, value);
+        assert!(
+            elf::parse_elf64(&file).is_err(),
+            "segment field {field}, value {value}"
+        );
+    }
+}
+
+#[test]
+fn entry_must_be_backed_by_file_bytes_in_an_executable_segment() {
+    for entry in [
+        0,
+        VIRTUAL_BASE - 1,
+        VIRTUAL_BASE + 4,
+        VIRTUAL_BASE + PAGE_SIZE,
+    ] {
+        let mut file = kernel_file();
+        // A zero-fill tail is not a valid entry, even with PF_X on that segment.
+        set_segment_field(&mut file, 0, 40, 8);
+        file[24..32].copy_from_slice(&entry.to_le_bytes());
+        assert!(elf::parse_elf64(&file).is_err());
+    }
+    let mut file = kernel_file();
+    file[68..72].copy_from_slice(&6u32.to_le_bytes());
+    assert!(elf::parse_elf64(&file).is_err());
+}
+
+#[test]
+fn dynamically_linked_or_tls_kernels_are_refused() {
+    for program_type in [2u32, 3, 5, 7] {
+        let mut file = kernel_file();
+        file[120..124].copy_from_slice(&program_type.to_le_bytes());
+        assert!(elf::parse_elf64(&file).is_err());
+    }
 }

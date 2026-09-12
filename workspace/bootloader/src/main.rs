@@ -6,21 +6,25 @@ extern crate alloc;
 use core::fmt::Write;
 
 use uefi::{
-    mem::memory_map::{MemoryMap, MemoryType},
+    mem::memory_map::{MemoryDescriptor, MemoryMap, MemoryType},
     prelude::*,
     proto::{
         console::gop::GraphicsOutput,
+        loaded_image::LoadedImage,
         media::file::{File, FileAttribute, FileInfo, FileMode},
     },
     table::cfg::ConfigTableEntry,
 };
 
+mod boot_plan;
+mod cpu;
 mod elf;
 mod memory;
 mod memory_map;
 mod modules;
 mod paging;
 
+use boot_plan::DirectMapPlan;
 use memory::{BootError, BootMemory, BootResult};
 use memory_map::{MemoryMapBuilder, PhysicalRange, MAX_MEMORY_REGIONS, PAGE_SIZE};
 use strat9_abi::boot::{KernelArgs, MemoryKind, MemoryRegion};
@@ -54,8 +58,27 @@ fn boot_kernel() -> BootResult<()> {
         );
     });
 
-    // Open filesystem
+    // Check the CPU and locate every byte of the EFI transition image.
+    let cpu_features = cpu::detect().map_err(BootError::invalid)?;
     let image_handle = uefi::boot::image_handle();
+    let loader_image = {
+        let image = uefi::boot::open_protocol_exclusive::<LoadedImage>(image_handle)
+            .map_err(|error| BootError::firmware("loaded EFI image", error.status()))?;
+        let (base, size) = image.info();
+        PhysicalRange {
+            base: base as u64,
+            size,
+        }
+    };
+    let transition = paging::context_switch as *const () as u64;
+    if transition < loader_image.base
+        || transition >= loader_image.end().map_err(BootError::invalid)?
+    {
+        return Err(BootError::invalid(
+            "transition code is outside the loaded EFI image",
+        ));
+    }
+    // Open filesystem.
     let mut fs = uefi::boot::get_image_file_system(image_handle)
         .map_err(|error| BootError::firmware("open boot filesystem", error.status()))?;
     let mut volume = (*fs)
@@ -302,10 +325,42 @@ fn boot_kernel() -> BootResult<()> {
     let framebuffer_size = (fb_stride as u64)
         .checked_mul(fb_height as u64)
         .ok_or_else(|| BootError::invalid("framebuffer size overflow"))?;
+    let mut direct_map = DirectMapPlan::new(cpu_features.physical_limit(), loader_image)
+        .map_err(BootError::invalid)?;
+    let planning_map = uefi::boot::memory_map(MemoryType::LOADER_DATA)
+        .map_err(|error| BootError::firmware("direct map planning", error.status()))?;
+    for entry in planning_map.entries() {
+        let region = firmware_region(entry).map_err(BootError::invalid)?;
+        if needs_direct_mapping(entry.ty) {
+            direct_map
+                .include(PhysicalRange {
+                    base: region.base,
+                    size: region.size,
+                })
+                .map_err(BootError::invalid)?;
+        }
+    }
+    drop(planning_map);
+    if fb_phys != 0 && framebuffer_size != 0 {
+        direct_map
+            .include(PhysicalRange {
+                base: fb_phys,
+                size: framebuffer_size,
+            })
+            .map_err(BootError::invalid)?;
+    }
+    uefi::system::with_stdout(|stdout| {
+        let _ = writeln!(
+            stdout,
+            "[boot] Initial identity/HHDM: {} GiB, 2 MiB pages",
+            direct_map.end() / boot_plan::GIB
+        );
+    });
     let table_pages = paging::page_table_pages(
         elf_info.image_size(),
         framebuffer_size,
         env_total_size as u64,
+        direct_map,
     )
     .map_err(BootError::invalid)?;
     let table_area = boot_memory.allocate(table_pages * PAGE_SIZE, "page-table arena")?;
@@ -318,6 +373,7 @@ fn boot_kernel() -> BootResult<()> {
             env_phys_base,
             env_total_size as u64,
             table_area,
+            direct_map,
         )
     }
     .map_err(BootError::invalid)?;
@@ -328,8 +384,13 @@ fn boot_kernel() -> BootResult<()> {
     // its own final map; conversion is repeated below with the same bounded buffer.
     let preview = uefi::boot::memory_map(MemoryType::LOADER_DATA)
         .map_err(|error| BootError::firmware("memory map preflight", error.status()))?;
-    convert_memory_map(&preview, boot_memory.reservations(), map_storage)
-        .map_err(BootError::invalid)?;
+    convert_memory_map(
+        &preview,
+        boot_memory.reservations(),
+        map_storage,
+        direct_map,
+    )
+    .map_err(BootError::invalid)?;
     drop(preview);
 
     uefi::system::with_stdout(|stdout| {
@@ -338,11 +399,19 @@ fn boot_kernel() -> BootResult<()> {
 
     boot_memory.retain_for_handoff();
     let mmap_iter = unsafe { uefi::boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) };
+    // No firmware calls follow: stop maskable interrupts and normalize DF before
+    // touching the execution environment. This asm is also a compiler memory barrier.
+    unsafe { core::arch::asm!("cli", "cld", options(nostack)) };
 
     // No allocations, firmware calls or recoverable returns after this point.
     // Split around the exact owned pages, including every module payload.
-    let region_count = convert_memory_map(&mmap_iter, boot_memory.reservations(), map_storage)
-        .unwrap_or_else(|reason| halt_after_boot_services(reason));
+    let region_count = convert_memory_map(
+        &mmap_iter,
+        boot_memory.reservations(),
+        map_storage,
+        direct_map,
+    )
+    .unwrap_or_else(|reason| halt_after_boot_services(reason));
 
     // Re-initialize serial port after ExitBootServices
     unsafe {
@@ -373,6 +442,7 @@ fn boot_kernel() -> BootResult<()> {
     }
 
     // Step 11: Build KernelArgs
+    let (bss_virt_base, bss_virt_size) = elf_info.bss_range();
     let args = KernelArgs {
         magic: strat9_abi::boot::STRAT9_BOOT_MAGIC,
         abi_version: strat9_abi::boot::STRAT9_BOOT_ABI_VERSION,
@@ -397,36 +467,8 @@ fn boot_kernel() -> BootResult<()> {
         cmdline_len: env_total_size as u64,
         modules_base: module_table_base,
         modules_size: module_table_size,
-        bss_virt_base: {
-            let kernel_virt_base: u64 = 0xFFFF_FFFF_8000_0000;
-            let mut base = kernel_virt_base;
-            for i in 0..elf_info.segment_count {
-                if elf_info.segments[i].virt_addr > base {
-                    base = elf_info.segments[i].virt_addr;
-                }
-            }
-            base
-        },
-        bss_virt_size: {
-            let kernel_virt_base: u64 = 0xFFFF_FFFF_8000_0000;
-            let kernel_size = elf_info.phys_end - elf_info.phys_base;
-            let large_pages = ((kernel_size + 0x1FFFFF) / 0x200000).max(1);
-            let mapped_end = kernel_virt_base + large_pages * 0x200000;
-            let bss_base: u64 = {
-                let mut base = kernel_virt_base;
-                for i in 0..elf_info.segment_count {
-                    if elf_info.segments[i].virt_addr > base {
-                        base = elf_info.segments[i].virt_addr;
-                    }
-                }
-                base
-            };
-            if mapped_end > bss_base {
-                mapped_end - bss_base
-            } else {
-                0
-            }
-        },
+        bss_virt_base,
+        bss_virt_size,
     };
 
     // The handoff itself lives in reserved pages, not on the firmware stack.
@@ -496,29 +538,18 @@ fn boot_kernel() -> BootResult<()> {
         write_com1(b"[boot] Jumping to kernel (after pause)...\r\n");
     }
 
-    // Pre-set CR4 bits the kernel expects (only safe bits).
     unsafe {
-        let mut cr4: u64;
-        core::arch::asm!("mov {}, cr4", out(reg) cr4);
-        cr4 |= 0x600; // OSFXSR (9) | OSXMMEXCPT (10) : safe on all x86-64
-        core::arch::asm!("mov cr4, {}", in(reg) cr4);
-    }
-
-    unsafe {
-        // Force the compiler to keep pml4_phys in memory (prevent optimization)
-        let pml4_val = core::ptr::read_volatile(&pml4_phys as *const u64);
-        let stack_val = stack_base + stack_size;
-        let entry_val = elf_info.entry;
-        let args_val = args_ptr as u64;
-
-        // Write '>' to serial to confirm we're about to call context_switch
+        // Every register used by this returning asm block is an explicit input.
         core::arch::asm!(
-            "mov dx, 0x3F8",
-            "mov al, 0x3E",
-            "out dx, al",
-            options(nomem, nostack, preserves_flags)
+            "out dx, al", in("dx") 0x3F8u16, in("al") b'>',
+            options(nomem, nostack, preserves_flags),
         );
-        paging::context_switch(pml4_val, stack_val, entry_val, args_val);
+        paging::context_switch(
+            pml4_phys,
+            stack_base + stack_size,
+            elf_info.entry,
+            args_ptr as u64,
+        );
     }
 }
 
@@ -554,6 +585,7 @@ fn convert_memory_map(
     map: &impl MemoryMap,
     reservations: &[PhysicalRange],
     storage: PhysicalRange,
+    direct_map: DirectMapPlan,
 ) -> Result<usize, &'static str> {
     let required = (MAX_MEMORY_REGIONS * core::mem::size_of::<MemoryRegion>()) as u64;
     if storage.base == 0 || storage.base % PAGE_SIZE != 0 || storage.size < required {
@@ -566,28 +598,58 @@ fn convert_memory_map(
     };
     let mut builder = MemoryMapBuilder::new(output, reservations)?;
     for entry in map.entries() {
-        let size = entry
-            .page_count
-            .checked_mul(PAGE_SIZE)
-            .ok_or("firmware memory descriptor size overflow")?;
-        let kind = match entry.ty {
-            MemoryType::CONVENTIONAL => MemoryKind::Free,
-            MemoryType::BOOT_SERVICES_CODE
-            | MemoryType::BOOT_SERVICES_DATA
-            | MemoryType::LOADER_CODE
-            | MemoryType::LOADER_DATA => MemoryKind::Reclaim,
-            _ => MemoryKind::Reserved,
-        };
-        builder.push(MemoryRegion {
-            base: entry.phys_start,
-            size,
-            kind,
-        })?;
+        let region = firmware_region(entry)?;
+        if needs_direct_mapping(entry.ty)
+            && !direct_map.covers(PhysicalRange {
+                base: region.base,
+                size: region.size,
+            })
+        {
+            return Err("final firmware map exceeds the prepared HHDM");
+        }
+        builder.push(region)?;
     }
     if builder.len() == 0 {
         return Err("empty firmware memory map");
     }
     Ok(builder.len())
+}
+
+fn needs_direct_mapping(ty: MemoryType) -> bool {
+    // Include firmware-owned RAM holding ACPI/configuration tables as well as
+    // allocatable RAM. Mapping these ranges does not make them reclaimable.
+    matches!(
+        ty,
+        MemoryType::CONVENTIONAL
+            | MemoryType::BOOT_SERVICES_CODE
+            | MemoryType::BOOT_SERVICES_DATA
+            | MemoryType::LOADER_CODE
+            | MemoryType::LOADER_DATA
+            | MemoryType::RUNTIME_SERVICES_CODE
+            | MemoryType::RUNTIME_SERVICES_DATA
+            | MemoryType::ACPI_RECLAIM
+            | MemoryType::ACPI_NON_VOLATILE
+    )
+}
+
+fn firmware_region(entry: &MemoryDescriptor) -> Result<MemoryRegion, &'static str> {
+    let size = entry
+        .page_count
+        .checked_mul(PAGE_SIZE)
+        .ok_or("firmware memory descriptor size overflow")?;
+    let kind = match entry.ty {
+        MemoryType::CONVENTIONAL => MemoryKind::Free,
+        MemoryType::BOOT_SERVICES_CODE
+        | MemoryType::BOOT_SERVICES_DATA
+        | MemoryType::LOADER_CODE
+        | MemoryType::LOADER_DATA => MemoryKind::Reclaim,
+        _ => MemoryKind::Reserved,
+    };
+    Ok(MemoryRegion {
+        base: entry.phys_start,
+        size,
+        kind,
+    })
 }
 
 /// Fatal errors after ExitBootServices must not unwind, return to UEFI, use its

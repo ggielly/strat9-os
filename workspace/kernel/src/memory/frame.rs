@@ -727,7 +727,9 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
     // identity-vtable issue is fixed : enforced by keeping vtable = 0 on all
     // slots (MetaSlot::new) and by reset_with_free_list_meta.
     let bytes = frame_count * FRAME_META_SIZE as u64;
-    let phys = match boot_alloc.try_alloc(bytes as usize, 64) {
+    // Metadata is written immediately, before map_all_ram can extend the HHDM.
+    // Verify actual reachability even when entered through another boot path.
+    let phys = match boot_alloc.try_alloc_accessible(bytes as usize, 64) {
         Some(p) => p.as_u64(),
         None => {
             // Cannot back the metadata: keep it disabled (get_meta_slot will
