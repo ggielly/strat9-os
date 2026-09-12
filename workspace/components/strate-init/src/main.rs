@@ -308,7 +308,7 @@ fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
             graphics_turn_policy: String::from("auto"),
             strates: alloc::vec![StrateDef {
                 name: String::from("strate-net"),
-                binary: String::from("/initfs/strate-net"),
+                binary: String::from("/initfs/strate-net-silo"),
                 stype: String::from("elf"),
                 target: String::from("default"),
             }],
@@ -331,7 +331,7 @@ fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
             graphics_turn_policy: String::from("auto"),
             strates: alloc::vec![StrateDef {
                 name: String::from("dhcp-client"),
-                binary: String::from("/initfs/bin/dhcp-client"),
+                binary: String::from("/initfs/dhcp-client"),
                 stype: String::from("elf"),
                 target: String::from("default"),
             }],
@@ -799,86 +799,8 @@ fn boot_silos(mut silos: Vec<SiloDef>) {
     }
 }
 
-const DEFAULT_SILO_TOML: &str = r#"
-[[silos]]
-name = "console-admin"
-family = "SYS"
-mode = "700"
-sid = 42
-[[silos.strates]]
-name = "console-admin"
-binary = "/initfs/console-admin"
-type = "elf"
-
-[[silos]]
-name = "bus"
-family = "DRV"
-mode = "076"
-sid = 42
-[[silos.strates]]
-name = "strate-bus"
-binary = "/initfs/strate-bus"
-type = "elf"
-probe_mode = "full"
-
-[[silos]]
-name = "network"
-family = "NET"
-mode = "076"
-sid = 42
-name = "strate-net"
-binary = "/initfs/strate-net"
-type = "elf"
-
-[[silos]]
-name = "dhcp-client"
-family = "NET"
-mode = "076"
-sid = 42
-
-[[silos.strates]]
-name = "dhcp-client"
-binary = "/initfs/bin/dhcp-client"
-type = "elf"
-
-[[silos]]
-name = "telnet"
-family = "NET"
-mode = "076"
-sid = 42
-
-[[silos.strates]]
-name = "telnetd"
-binary = "/initfs/bin/telnetd"
-type = "elf"
-
-[[silos]]
-name = "web-admin"
-family = "NET"
-mode = "076"
-sid = 42
-graphics_enabled = true
-graphics_mode = "webrtc-native"
-graphics_max_sessions = 1
-graphics_session_ttl_sec = 1800
-graphics_turn_policy = "auto"
-
-[[silos.strates]]
-name = "web-admin"
-binary = "/initfs/bin/web-admin"
-type = "elf"
-
-[[silos]]
-name = "graphics-webrtc"
-family = "NET"
-mode = "076"
-sid = 42
-
-[[silos.strates]]
-name = "strate-webrtc"
-binary = "/initfs/strate-webrtc"
-type = "elf"
-"#;
+// Keep the fallback identical to the configuration shipped in the UEFI image.
+const DEFAULT_SILO_TOML: &str = include_str!("../../../assets/boot/silo.toml");
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StrateHealth {

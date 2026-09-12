@@ -244,6 +244,8 @@ class ProducerTests(FixtureTest):
         (self.payload / "efi/boot/BOOTX64.EFI").write_bytes(b"old loader")
         (self.payload / "boot/kernel.elf").write_bytes(b"old kernel")
         (self.payload / "boot/initfs/strate-init").write_bytes(b"\x7fELF\x02\x01old init")
+        (self.payload / "boot/initfs/silo.toml").write_bytes(
+            (REPO / "workspace/assets/boot/silo.toml").read_bytes())
         (self.payload / "modules.manifest").write_text("base strate-init producer\n")
         (self.payload / "include-tests").write_text("0\n")
         for child, content in [("x86_64-unknown-uefi/debug/strat9-bootloader.efi", b"new loader"),
@@ -305,6 +307,8 @@ class ProducerTests(FixtureTest):
         self.assertIn("unit s mkpart ESP fat32 2048s 526335s", trace)
         self.assertIn("--esp-start 2048 --esp-sectors 524288", trace)
         self.assertEqual((self.payload / "boot/kernel.elf").read_bytes(), b"new kernel")
+        self.assertEqual((self.payload / "boot/initfs/silo.toml").read_bytes(),
+                         (REPO / "workspace/assets/boot/silo.toml").read_bytes())
         self.assertNotEqual(self.disk.read_bytes(), b"previous disk")
         self.assertFalse(list(self.build.glob(".uefi-work.*")))
 
@@ -314,6 +318,12 @@ class ProducerTests(FixtureTest):
         self.assertNotEqual(self.iso.read_bytes(), b"previous iso")
         self.assertEqual(self.disk.read_bytes(), b"previous disk")
         self.assertFalse(list(self.build.glob(".uefi-work.*")))
+
+    def test_iso_rejects_payload_without_silo_config(self):
+        (self.payload / "boot/initfs/silo.toml").unlink()
+        result = self.run_producer(iso=True)
+        self.assert_preserved(result)
+        self.assertIn("silo configuration", result.stderr)
 
 
 if __name__ == "__main__":

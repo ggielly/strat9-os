@@ -41,6 +41,9 @@ strat9_start_image_work() {
 
 strat9_check_payload() {
     local root="$1"
+    [[ -s "$root/boot/initfs/silo.toml" ]] || {
+        echo "ERROR: missing or empty silo configuration in $root" >&2; return 1;
+    }
     [[ -s "$root/efi/boot/BOOTX64.EFI" && -s "$root/boot/kernel.elf" ]] || {
         echo "ERROR: missing or empty EFI loader/kernel in $root" >&2; return 1;
     }
@@ -61,6 +64,7 @@ strat9_fill_and_check_fat() {
     mcopy -i "$fat" -s ::/boot "$readback/"
     cmp -- "$root/efi/boot/BOOTX64.EFI" "$readback/efi/boot/BOOTX64.EFI"
     cmp -- "$root/boot/kernel.elf" "$readback/boot/kernel.elf"
+    cmp -- "$root/boot/initfs/silo.toml" "$readback/boot/initfs/silo.toml"
     for name in "${STRAT9_MODULE_NAMES[@]}"; do
         cmp -- "$root/boot/initfs/$name" "$readback/boot/initfs/$name"
     done

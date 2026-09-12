@@ -15,6 +15,7 @@ MODULE_MANIFEST="${STRAT9_MODULE_MANIFEST:-tools/uefi-modules.manifest}"
 MODULE_TARGET_DIR="target/x86_64-unknown-none/$MODULE_PROFILE"
 BOOTLOADER_EFI="target/x86_64-unknown-uefi/$PROFILE/strat9-bootloader.efi"
 KERNEL_ELF="target/x86_64-unknown-none/$PROFILE/kernel"
+SILO_CONFIG="$SCRIPT_DIR/../../workspace/assets/boot/silo.toml"
 
 strat9_image_name "$IMAGE_BASENAME"
 case "$PROFILE:$MODULE_PROFILE" in
@@ -27,6 +28,9 @@ strat9_require_tools parted mkfs.fat fsck.fat mcopy python3 dd cp mv cmp mkdir m
     echo "ERROR: missing or empty loader/kernel for profile $PROFILE" >&2; exit 1;
 }
 strat9_validate_module_sources "$MODULE_TARGET_DIR" "$MODULE_MANIFEST" "$INCLUDE_TESTS"
+[[ -s "$SILO_CONFIG" ]] || {
+    echo "ERROR: missing or empty silo configuration: $SILO_CONFIG" >&2; exit 1;
+}
 
 strat9_start_image_work
 IMAGE_FILE="$BUILD_DIR/$IMAGE_BASENAME-uefi.img"
@@ -43,6 +47,7 @@ cp -- "$KERNEL_ELF" "$ROOT/boot/kernel.elf"
 cp -- "$MODULE_MANIFEST" "$ROOT/modules.manifest"
 printf '%s\n' "$INCLUDE_TESTS" > "$ROOT/include-tests"
 strat9_copy_modules "$MODULE_TARGET_DIR" "$ROOT/boot/initfs"
+cp -- "$SILO_CONFIG" "$ROOT/boot/initfs/silo.toml"
 strat9_check_payload "$ROOT"
 
 SECTOR_SIZE=512
