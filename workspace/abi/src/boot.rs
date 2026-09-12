@@ -334,11 +334,39 @@ pub struct ModuleEntry {
 }
 
 impl ModuleEntry {
+    /// Validate a portable, single-component initfs name without normalization.
+    pub fn checked_name(&self) -> Result<&str, &'static str> {
+        let len = self
+            .name
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or("module name is not NUL-terminated")?;
+        validate_module_name(&self.name[..len])
+    }
+
     /// Module name as a string slice.
     pub fn name_str(&self) -> &str {
         let len = self.name.iter().position(|&b| b == 0).unwrap_or(63);
         core::str::from_utf8(&self.name[..len]).unwrap_or("")
     }
+}
+
+/// Names shared by the ESP producer, loader and initfs consumer: 1..=63 ASCII
+/// letters/digits, '.', '_' or '-'. Reject path components and FAT-ambiguous dots.
+pub fn validate_module_name(name: &[u8]) -> Result<&str, &'static str> {
+    if name.is_empty() || name.len() > 63 {
+        return Err("module name must contain 1 to 63 bytes");
+    }
+    if name == b"."
+        || name == b".."
+        || name.last() == Some(&b'.')
+        || !name
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(*b, b'.' | b'_' | b'-'))
+    {
+        return Err("module name must be a portable ASCII filename");
+    }
+    core::str::from_utf8(name).map_err(|_| "module name is not ASCII")
 }
 
 /// Memory region descriptor for the bootloader memory map.

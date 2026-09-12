@@ -11,13 +11,24 @@ set -e
 BUILD_DIR="build"
 IMAGE_BASENAME="${STRAT9_IMAGE_BASENAME:-strat9-os}"
 PROFILE="${STRAT9_PROFILE:-debug}"
+MODULE_PROFILE="${STRAT9_MODULE_PROFILE:-release}"
+INCLUDE_TESTS="${STRAT9_INCLUDE_TESTS:-0}"
+MODULE_MANIFEST="${STRAT9_MODULE_MANIFEST:-tools/uefi-modules.manifest}"
+MODULE_TARGET_DIR="target/x86_64-unknown-none/${MODULE_PROFILE}"
+# The cargo-make module producers use release independently of kernel/loader.
+case "$PROFILE:$MODULE_PROFILE" in
+    debug:debug|debug:release|release:debug|release:release) ;;
+    *) echo "ERROR: kernel/loader and module profiles must be debug or release" >&2; exit 1 ;;
+esac
+source "$(dirname "${BASH_SOURCE[0]}")/uefi-modules.sh"
 IMAGE_FILE="$BUILD_DIR/${IMAGE_BASENAME}-uefi.img"
 BOOTLOADER_EFI="target/x86_64-unknown-uefi/${PROFILE}/strat9-bootloader.efi"
 KERNEL_ELF="target/x86_64-unknown-none/${PROFILE}/kernel"
 
 echo "============================================"
 echo "Creating UEFI bootable image"
-echo "Profile: ${PROFILE}"
+echo "Kernel/loader profile: ${PROFILE}"
+echo "Module profile: ${MODULE_PROFILE}; include tests: ${INCLUDE_TESTS}"
 echo "============================================"
 echo ""
 
@@ -40,6 +51,9 @@ echo "  Components:"
 echo "    Bootloader EFI: $bootloader_size bytes"
 echo "    Kernel ELF    : $kernel_size bytes"
 
+# Validate the complete manifest before removing staging or touching an image.
+strat9_validate_module_sources "$MODULE_TARGET_DIR" "$MODULE_MANIFEST" "$INCLUDE_TESTS"
+
 # Create the disk image directory structure
 ISO_ROOT="$BUILD_DIR/uefi_iso_root"
 rm -rf "$ISO_ROOT"
@@ -54,55 +68,8 @@ echo "  [OK] Copied bootloader to /efi/boot/bootx64.efi"
 cp "$KERNEL_ELF" "$ISO_ROOT/boot/kernel.elf"
 echo "  [OK] Copied kernel to /boot/kernel.elf"
 
-# Copy userspace modules
-MODULES=(
-    "strate-init"
-    "console-admin"
-    "strate-net-silo"
-    "strate-bus"
-    "fs-ext4-strate"
-    "strate-fs-ramfs"
-    "strate-wasm"
-    "strate-webrtc"
-    "display-server"
-    "dhcp-client"
-    "ping"
-    "telnetd"
-    "udp-tool"
-    "web-admin"
-    "test_pid"
-    "test_syscalls"
-    "test_mem"
-)
-
-TARGET_DIR="target/x86_64-unknown-none/${PROFILE}"
-for mod in "${MODULES[@]}"; do
-    src="$TARGET_DIR/$mod"
-    if [ -f "$src" ]; then
-        cp "$src" "$ISO_ROOT/boot/initfs/$mod"
-        echo "  [OK] Module: $mod"
-    else
-        echo "  [WARN] Module not found: $mod"
-    fi
-done
-
-# Auto-discover remaining ELF binaries
-if [ -d "$TARGET_DIR" ]; then
-    for elf in "$TARGET_DIR"/*; do
-        [ -f "$elf" ] || continue
-        name=$(basename "$elf")
-        case "$name" in
-            kernel|*.d|*.rlib|*.rmeta|*.o|lib*|deps|strat9-bootloader) continue ;;
-        esac
-        if [ -f "$ISO_ROOT/boot/initfs/$name" ]; then
-            continue
-        fi
-        if file "$elf" 2>/dev/null | grep -q "ELF"; then
-            cp "$elf" "$ISO_ROOT/boot/initfs/$name"
-            echo "  [OK] Auto-copied: $name"
-        fi
-    done
-fi
+# Copy only the validated manifest, using the profile that built the modules.
+strat9_copy_modules "$MODULE_TARGET_DIR" "$ISO_ROOT/boot/initfs"
 
 echo ""
 

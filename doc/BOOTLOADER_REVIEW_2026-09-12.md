@@ -25,7 +25,11 @@ Le [lot ordre 2](C:/src/strat9-os/doc/BOOTLOADER_HANDOFF_FIXES_2026-09-12.md) co
 | 5 | Corriger GOP, mappings et protections | R15 à R19 |
 | 6 | Rendre les images et leur validation fiables | R22 à R26 |
 
+Le [lot ordre 3](C:/src/strat9-os/doc/BOOTLOADER_ELF_TRANSITION_FIXES_2026-09-12.md) implémente ensuite R09 à R14 : chargement ELF/BSS, prérequis CPU, couverture mémoire et transition vers le noyau. Quatorze tests supplémentaires sont préparés, sans compilation ni exécution. La note précise les limites de la fenêtre physique et des tables d'exceptions provisoires.
+
 **Constats détaillés**
+
+Le [lot ordre 4](C:/src/strat9-os/doc/BOOTLOADER_INITFS_FIXES_2026-09-12.md) implémente R06, R21 et R27 : conversion physique/HHDM unique, profils cohérents et manifeste de modules, noms et erreurs de fichiers explicitement contrôlés. Sept tests de préparation sur fichiers simulés passent ; neuf tests Rust sont ajoutés sans compilation ni exécution. Les constats ci-dessous restent ceux de la révision initiale.
 
 **R01 — [P1] Le noyau est écrit en mémoire physique sans réservation UEFI.**
 

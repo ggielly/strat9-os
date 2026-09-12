@@ -238,17 +238,13 @@ fn panic_handler(info: &PanicInfo) -> ! {
     boot::panic::panic_handler(info)
 }
 
-/// Performs the register initfs module operation.
-fn register_initfs_module(path: &str, module: Option<(u64, u64)>) {
-    let Some((base, size)) = module else {
-        return;
-    };
-    if base == 0 || size == 0 {
-        return;
-    }
-
-    let base_virt = memory::phys_to_virt(base) as *const u8;
-    let len = size as usize;
+/// Register a validated physical module with exactly one HHDM conversion.
+fn register_initfs_module(module: &strat9_abi::boot::ModuleEntry) {
+    let view = boot::modules::InitfsModule::from_physical(module, memory::hhdm_offset())
+        .unwrap_or_else(|error| panic!("Invalid initfs module: {}", error));
+    let path = view.name;
+    let base_virt = view.virtual_base as *const u8;
+    let len = view.len;
     #[cfg(feature = "selftest")]
     {
         // Only peek small header bytes for debugging; no heap allocations.
@@ -261,20 +257,20 @@ fn register_initfs_module(path: &str, module: Option<(u64, u64)>) {
                 data[1],
                 data[2],
                 data[3],
-                size
+                len
             );
         }
     }
 
     // Register the bootloader-provided module directly; keep it read-only.
     if let Err(e) = vfs::register_initfs_file(path, base_virt, len) {
-        serial_println!("[init] Failed to register /initfs/{}: {:?}", path, e);
+        panic!("Failed to register /initfs/{}: {:?}", path, e);
     } else {
-        serial_println!("[init] Registered /initfs/{} ({} bytes)", path, size);
+        serial_println!("[init] Registered /initfs/{} ({} bytes)", path, len);
     }
 }
 
-/// Register modules from the bootloader module table (ABI v2).
+/// Register modules from the validated bootloader module table.
 ///
 /// Each module has a name, physical base address, and size.
 /// The kernel maps them into the VFS at /initfs/<name>.
@@ -286,16 +282,7 @@ fn register_boot_modules(modules: &[strat9_abi::boot::ModuleEntry]) {
 
     serial_println!("[init] Bootloader provided {} modules:", modules.len());
     for module in modules {
-        let name = module.name_str();
-        let base_virt = memory::phys_to_virt(module.base);
-        let size = module.size;
-
-        if size == 0 {
-            continue;
-        }
-
-        // Register the module in the VFS at /initfs/<name>
-        register_initfs_module(name, Some((base_virt, size)));
+        register_initfs_module(module);
     }
 }
 
@@ -589,6 +576,8 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     }
     let boot_modules = unsafe { args.modules() }
         .unwrap_or_else(|error| panic!("Invalid boot module table: {}", error));
+    boot::modules::validate_modules(boot_modules, hhdm)
+        .unwrap_or_else(|error| panic!("Invalid boot modules: {}", error));
     serial_println!("[init] Memory regions count: {}", regions.len());
     if let Some(first) = regions.first() {
         serial_println!("[init] First region: base={:#x} size={:#x} kind={:?}",
@@ -1175,19 +1164,27 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         serial_println!("[init] Storage verification skipped (boot path)");
         vga_println!("[..] Storage verification skipped at boot");
 
-        // Launch the init process from FAT32 boot partition.
-        // TODO: Phase 4 - Implement FAT32 module loading
+        // Launch init through the VFS populated from the boot module table.
         let mut init_loaded = false;
 
-        // For now, try to load from VFS if available
-        if let Ok(fd) = vfs::open("/initfs/init", vfs::OpenFlags::READ) {
-            if let Ok(data) = vfs::read_all(fd) {
+        for init_path in ["/initfs/init", "/initfs/strate-init"] {
+            if let Ok(fd) = vfs::open(init_path, vfs::OpenFlags::READ) {
+                let data = vfs::read_all(fd);
+                let _ = vfs::close(fd);
+                let data = match data {
+                    Ok(data) => data,
+                    Err(error) => {
+                        serial_println!("[init] Failed to read {}: {:?}", init_path, error);
+                        continue;
+                    }
+                };
                 let init_caps = [crate::silo::create_silo_admin_capability()];
                 match process::elf::load_and_run_elf_with_caps(&data, "init", &init_caps) {
                     Ok(task_id) => {
                         init_task_id = Some(task_id);
                         init_loaded = true;
-                        serial_println!("[init] ELF '/initfs/init' loaded as task 'init'.");
+                        serial_println!("[init] ELF '{}' loaded as task 'init'.", init_path);
+                        break;
                     }
                     Err(e) => {
                         serial_println!("[init] Failed to load init ELF: {}", e);
@@ -1212,9 +1209,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                 }
                 let name = raw;
                 if name == "init" || name == "strate-init" {
-                    let base_virt = memory::phys_to_virt(module.base);
+                    let view = boot::modules::InitfsModule::from_physical(module, hhdm)
+                        .unwrap_or_else(|error| panic!("Invalid init module: {}", error));
                     let elf_data = unsafe {
-                        core::slice::from_raw_parts(base_virt as *const u8, module.size as usize)
+                        core::slice::from_raw_parts(view.virtual_base as *const u8, view.len)
                     };
                     // E9: ELF magic check before handing to the loader.
                     unsafe {
@@ -1251,8 +1249,6 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                 }
             }
         }
-        // TODO: Phase 4 - Load all modules from FAT32 boot partition
-        serial_println!("[init] FAT32 module loader pending (Phase 4)");
         if let (Some(task_id), Some(device)) =
             (init_task_id, hardware::storage::virtio_block::get_device())
         {

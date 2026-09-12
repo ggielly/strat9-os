@@ -17,6 +17,9 @@ pub mod assembly;
 /// KernelArgs structures shared between bootloader and kernel
 pub mod entry;
 
+/// Physical boot-module validation and initfs address conversion.
+pub mod modules;
+
 /// Boot-protocol entry point (DTB/PVH)
 pub mod dtb_boot;
 

@@ -1,23 +1,48 @@
 use alloc::vec::Vec;
+use core::fmt::Write;
 use uefi::{
     prelude::*,
-    proto::media::file::{File, FileAttribute, FileInfo, FileMode},
+    proto::media::file::{Directory, File, FileAttribute, FileInfo, FileMode, FileType},
+    CStr16,
 };
 
 use crate::{
     memory::{BootError, BootMemory, BootResult},
     memory_map::PhysicalRange,
+    module_name::ModuleFileName,
 };
 pub use strat9_abi::boot::ModuleEntry as LoadedModule;
 use strat9_abi::boot::{ModuleTable, MAX_BOOT_MODULES, MODULE_TABLE_SIZE};
 
-/// E9 failure marker: '<letter>?' (bootloader-side diagnostics).
-fn e9_fail(c: u8) {
-    unsafe {
-        core::arch::asm!("out 0xe9, al", in("al") c, options(nomem, nostack));
-        core::arch::asm!("out 0xe9, al", in("al") b'?', options(nomem, nostack));
-        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+// FileInfo requires 8-byte alignment; a Vec<u8> or [u8; N] does not promise it.
+// 4 KiB covers the FAT filename limit. Larger firmware entries fail explicitly.
+#[repr(align(8))]
+struct InfoBuffer([u8; 4096]);
+
+struct E9;
+impl core::fmt::Write for E9 {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        for byte in text.bytes() {
+            unsafe { core::arch::asm!("out 0xe9, al", in("al") byte, options(nomem, nostack)) };
+        }
+        Ok(())
     }
+}
+
+fn module_error(name: &CStr16, error: BootError) -> BootError {
+    uefi::system::with_stdout(|stdout| {
+        let _ = writeln!(
+            stdout,
+            "[boot] initfs '{}': {} ({:?})",
+            name, error.operation, error.status
+        );
+    });
+    let _ = writeln!(
+        E9,
+        "[boot] initfs '{}': {} ({:?})",
+        name, error.operation, error.status
+    );
+    error
 }
 
 pub fn module_table_size() -> u64 {
@@ -41,169 +66,169 @@ pub unsafe fn write_module_table(
 }
 
 pub fn load_modules(
-    volume: &mut uefi::proto::media::file::Directory,
+    volume: &mut Directory,
     memory: &mut BootMemory,
 ) -> BootResult<Vec<LoadedModule>> {
-    let mut modules = Vec::new();
-
-    // Enumerate \boot\initfs dynamically: the module set is whatever the
-    // build dropped on the ESP, so a hardcoded name list can only go stale.
-    let mut dir_path = [0u16; 64];
-    let dir_len = format_path(&mut dir_path, "");
-    let dir = match volume.open(
-        unsafe { uefi::CStr16::from_u16_with_nul_unchecked(&dir_path[..=dir_len]) },
-        FileMode::Read,
-        FileAttribute::empty(),
-    ) {
-        Ok(d) => d.into_type().ok(),
-        Err(_) => {
-            e9_fail(b'D');
-            None
-        }
-    };
-    let mut dir = match dir {
-        Some(uefi::proto::media::file::FileType::Dir(d)) => d,
+    let directory_path = cstr16!("\\boot\\initfs");
+    let handle = volume
+        .open(directory_path, FileMode::Read, FileAttribute::empty())
+        .map_err(|e| {
+            module_error(
+                directory_path,
+                BootError::firmware("open module directory", e.status()),
+            )
+        })?;
+    let mut dir = match handle.into_type().map_err(|e| {
+        module_error(
+            directory_path,
+            BootError::firmware("inspect module directory", e.status()),
+        )
+    })? {
+        FileType::Dir(dir) => dir,
         _ => {
-            e9_fail(b'O');
-            return Ok(modules);
+            return Err(module_error(
+                directory_path,
+                BootError::invalid("initfs is not a directory"),
+            ))
         }
     };
 
-    let mut names: Vec<alloc::string::String> = Vec::new();
-    {
-        // 1 KiB covers typical entries (name + FileInfo layout). Entries with
-        // very long names would need more; we retry once with 4 KiB.
-        let mut buf: Vec<u8> = Vec::new();
-        buf.try_reserve_exact(1024)
-            .map_err(|_| BootError::out_of_resources("module directory buffer"))?;
-        buf.resize(1024, 0);
-        loop {
-            match dir.read_entry(&mut buf) {
-                Ok(Some(info)) => {
-                    if info.attribute().contains(FileAttribute::DIRECTORY) {
-                        continue;
-                    }
-                    // ESP file names are ASCII here; decode u16 chars as bytes.
-                    let mut s = alloc::string::String::new();
-                    s.try_reserve(info.file_name().to_u16_slice().len())
-                        .map_err(|_| BootError::out_of_resources("module filename"))?;
-                    for ch in info.file_name().to_u16_slice() {
-                        if *ch >= 0x20 && *ch < 0x7F {
-                            s.push(*ch as u8 as char);
-                        }
-                    }
-                    if names.len() == MAX_BOOT_MODULES {
-                        return Err(BootError::invalid("too many boot modules (maximum 64)"));
-                    }
-                    names
-                        .try_reserve(1)
-                        .map_err(|_| BootError::out_of_resources("module filename list"))?;
-                    names.push(s);
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    // uefi::Error data = Some(required buffer size) on overflow.
-                    if let Some(needed) = e.data() {
-                        if *needed <= 4096 && *needed > buf.len() {
-                            buf.try_reserve_exact(*needed - buf.len()).map_err(|_| {
-                                BootError::out_of_resources("module directory buffer")
-                            })?;
-                            buf.resize(*needed, 0);
-                            continue;
-                        }
-                    }
-                    break;
-                }
+    let mut names: Vec<ModuleFileName> = Vec::new();
+    let mut entry_buffer = InfoBuffer([0; 4096]);
+    loop {
+        let info = match dir.read_entry(&mut entry_buffer.0) {
+            Ok(Some(info)) => info,
+            Ok(None) => break,
+            Err(e) => {
+                return Err(module_error(
+                    directory_path,
+                    BootError::firmware("enumerate module directory", e.status()),
+                ))
             }
-        }
-    }
-    dir.close();
-    // Boot log: how many initfs entries were enumerated (raw E9, 'M#n').
-    unsafe {
-        core::arch::asm!("out 0xe9, al", in("al") b'M', options(nomem, nostack));
-        let count = names.len();
-        let tens = if count >= 10 {
-            b'0' + (count / 10) as u8
-        } else {
-            b' '
         };
-        core::arch::asm!("out 0xe9, al", in("al") tens, options(nomem, nostack));
-        core::arch::asm!("out 0xe9, al", in("al") b'0' + (count % 10) as u8, options(nomem, nostack));
-        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
-    }
-
-    modules
-        .try_reserve_exact(names.len())
-        .map_err(|_| BootError::out_of_resources("loaded module list"))?;
-    for filename in names {
-        let mut path_buf = [0u16; 64];
-        let path_len = format_path(&mut path_buf, &filename);
-
-        let file = match volume.open(
-            unsafe { uefi::CStr16::from_u16_with_nul_unchecked(&path_buf[..=path_len]) },
-            FileMode::Read,
-            FileAttribute::empty(),
-        ) {
-            Ok(f) => f,
-            Err(_) => continue,
-        };
-
-        let mut file = match file.into_regular_file() {
-            Some(f) => f,
-            None => continue,
-        };
-
-        let mut info_buf = [0u8; 512];
-        let file_size = match file.get_info::<FileInfo>(&mut info_buf) {
-            Ok(info) => info.file_size() as usize,
-            Err(_) => continue,
-        };
-
-        if file_size == 0 {
+        if info.attribute().contains(FileAttribute::DIRECTORY) {
+            // This ABI represents a flat directory; subdirectories are not modules.
+            if info.file_name() != cstr16!(".") && info.file_name() != cstr16!("..") {
+                let _ = writeln!(
+                    E9,
+                    "[boot] initfs: skipping subdirectory '{}'",
+                    info.file_name()
+                );
+            }
             continue;
         }
-
-        let allocation = memory.allocate(file_size as u64, "module payload pages")?;
-        // SAFETY: memory owns this zeroed page allocation exclusively. Only the
-        // file's actual byte count is exposed to the read, not page padding.
-        let buf = unsafe { core::slice::from_raw_parts_mut(allocation.base as *mut u8, file_size) };
-        let read = file
-            .read(buf)
-            .map_err(|error| BootError::firmware("read module payload", error.status()))?;
-        if read != file_size {
-            return Err(BootError::invalid(
-                "module payload ended before its advertised size",
+        let filename = ModuleFileName::new(info.file_name().to_u16_slice())
+            .map_err(|reason| module_error(info.file_name(), BootError::invalid(reason)))?;
+        if names
+            .iter()
+            .any(|previous| previous.as_str().eq_ignore_ascii_case(filename.as_str()))
+        {
+            return Err(module_error(
+                info.file_name(),
+                BootError::invalid("duplicate module filename"),
             ));
         }
-
-        let mut name = [0u8; 64];
-        let name_bytes = filename.as_bytes();
-        let copy_len = name_bytes.len().min(63);
-        name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
-
-        modules.push(LoadedModule {
-            name,
-            base: allocation.base,
-            size: file_size as u64,
-        });
-    }
-
-    Ok(modules)
-}
-
-fn format_path(buf: &mut [u16; 64], filename: &str) -> usize {
-    let mut i = 0;
-    for &b in b"\\boot\\initfs\\" {
-        buf[i] = b as u16;
-        i += 1;
-    }
-    for &b in filename.as_bytes() {
-        if i >= 63 {
-            break;
+        if names.len() == MAX_BOOT_MODULES {
+            return Err(module_error(
+                info.file_name(),
+                BootError::invalid("too many boot modules (maximum 64)"),
+            ));
         }
-        buf[i] = b as u16;
-        i += 1;
+        names.try_reserve(1).map_err(|_| {
+            module_error(
+                info.file_name(),
+                BootError::out_of_resources("module filename list"),
+            )
+        })?;
+        names.push(filename);
     }
-    buf[i] = 0;
-    i
+    dir.close();
+    names.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
+    if !names
+        .iter()
+        .any(|name| matches!(name.as_str(), "init" | "strate-init"))
+    {
+        return Err(module_error(
+            directory_path,
+            BootError::invalid("required init or strate-init module is missing"),
+        ));
+    }
+    let _ = writeln!(E9, "[boot] initfs: {} files enumerated", names.len());
+
+    let mut modules = Vec::new();
+    modules.try_reserve_exact(names.len()).map_err(|_| {
+        module_error(
+            directory_path,
+            BootError::out_of_resources("loaded module list"),
+        )
+    })?;
+    let mut info_buffer = InfoBuffer([0; 4096]);
+    for filename in names {
+        // The validated path contains the original UCS-2 units and one NUL.
+        let path = CStr16::from_u16_with_nul(filename.path())
+            .map_err(|_| module_error(directory_path, BootError::invalid("invalid module path")))?;
+        let handle = volume
+            .open(path, FileMode::Read, FileAttribute::empty())
+            .map_err(|e| module_error(path, BootError::firmware("open module", e.status())))?;
+        let mut file = match handle.into_type().map_err(|e| {
+            module_error(path, BootError::firmware("inspect module type", e.status()))
+        })? {
+            FileType::Regular(file) => file,
+            _ => {
+                return Err(module_error(
+                    path,
+                    BootError::invalid("module is not a regular file"),
+                ))
+            }
+        };
+        let size = file
+            .get_info::<FileInfo>(&mut info_buffer.0)
+            .map_err(|e| module_error(path, BootError::firmware("module metadata", e.status())))?
+            .file_size();
+        if size > isize::MAX as u64 {
+            return Err(module_error(
+                path,
+                BootError::invalid("module exceeds addressable size"),
+            ));
+        }
+        let file_size = usize::try_from(size)
+            .map_err(|_| module_error(path, BootError::invalid("module size overflow")))?;
+        if size == 0 && matches!(filename.as_str(), "init" | "strate-init") {
+            return Err(module_error(
+                path,
+                BootError::invalid("init executable is empty"),
+            ));
+        }
+        // Empty config/data files still get a valid owned pointer and a VFS entry.
+        let allocation = memory
+            .allocate(size.max(1), "module payload pages")
+            .map_err(|e| module_error(path, e))?;
+        if file_size != 0 {
+            // SAFETY: the owned allocation covers the exact file extent. Read does
+            // not expose page padding, and no module is published on partial data.
+            let buf =
+                unsafe { core::slice::from_raw_parts_mut(allocation.base as *mut u8, file_size) };
+            let read = file.read(buf).map_err(|e| {
+                module_error(path, BootError::firmware("read module payload", e.status()))
+            })?;
+            if read != file_size {
+                return Err(module_error(
+                    path,
+                    BootError::invalid("module payload ended before its advertised size"),
+                ));
+            }
+        }
+        modules.push(LoadedModule {
+            name: filename.abi_name(),
+            base: allocation.base,
+            size,
+        });
+        let _ = writeln!(
+            E9,
+            "[boot] initfs: loaded '{}' ({} bytes)",
+            filename.as_str(),
+            size
+        );
+    }
+    Ok(modules)
 }

@@ -169,8 +169,10 @@ dependencies = [
     "telnetd-release",
     "udp-tool-release",
     "strate-web-admin-release",
+    "strate-silo-test-release",
+    "strate-mem-test-release",
 ]
-env = { STRAT9_IMAGE_BASENAME = "strat9-os-selftest", STRAT9_PROFILE = "debug", STRAT9_INCLUDE_TESTS = "1" }
+env = { STRAT9_IMAGE_BASENAME = "strat9-os-selftest", STRAT9_PROFILE = "debug", STRAT9_MODULE_PROFILE = "release", STRAT9_INCLUDE_TESTS = "1" }
 script_runner = "@shell"
 script = ["bash tools/scripts/create-uefi-image.sh"]
 
@@ -456,7 +458,7 @@ dependencies = [
     "udp-tool-release",
     "strate-web-admin-release",
 ]
-env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_PROFILE = "debug" }
+env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_PROFILE = "debug", STRAT9_MODULE_PROFILE = "release", STRAT9_INCLUDE_TESTS = "0" }
 script_runner = "@shell"
 script = ['''
 bash tools/scripts/create-uefi-image.sh
@@ -482,7 +484,7 @@ dependencies = [
     "udp-tool-release",
     "strate-web-admin-release",
 ]
-env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_PROFILE = "release" }
+env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_PROFILE = "release", STRAT9_MODULE_PROFILE = "release", STRAT9_INCLUDE_TESTS = "0" }
 script_runner = "@shell"
 script = ['''
 bash tools/scripts/create-uefi-image.sh

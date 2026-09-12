@@ -21,6 +21,7 @@ mod cpu;
 mod elf;
 mod memory;
 mod memory_map;
+mod module_name;
 mod modules;
 mod paging;
 
