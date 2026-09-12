@@ -15,6 +15,14 @@ pub struct Framebuffer {
 }
 
 impl Framebuffer {
+    /// Prefer 1600x1200, then the largest mode within that console size.
+    /// If firmware only offers larger modes, try the smallest one first.
+    pub fn console_mode_rank(self) -> (bool, u64) {
+        let area = u64::from(self.width) * u64::from(self.height);
+        let oversized = self.width > 1600 || self.height > 1200;
+        (oversized, if oversized { area } else { u64::MAX - area })
+    }
+
     pub fn geometry(width: usize, height: usize, stride: usize, rgb: bool) -> Option<Self> {
         if width == 0 || height == 0 || stride < width {
             return None;

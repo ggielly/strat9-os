@@ -26,6 +26,20 @@ const ADDRESS: u64 = 0x000F_FFFF_FFFF_F000;
 const ARENA: u64 = 0x2000_0000;
 const EMPTY: PhysicalRange = PhysicalRange { base: 0, size: 0 };
 const WB: [PhysicalRange; 1] = [PhysicalRange { base: 0, size: GIB }];
+
+#[test]
+fn console_modes_prefer_readable_resolution_with_firmware_fallbacks() {
+    let mut modes = [
+        (3840, 2160), (800, 600), (1920, 1080), (1600, 1200), (1280, 1024),
+    ];
+    modes.sort_by_key(|&(w, h)| {
+        Framebuffer::geometry(w, h, w, false).unwrap().console_mode_rank()
+    });
+    assert_eq!(
+        modes,
+        [(1600, 1200), (1280, 1024), (800, 600), (1920, 1080), (3840, 2160)]
+    );
+}
 const LOADER: PhysicalRange = PhysicalRange {
     base: 0x100_0000,
     size: 3 * PAGE_SIZE,

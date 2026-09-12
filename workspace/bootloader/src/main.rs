@@ -678,17 +678,18 @@ fn select_framebuffer() -> graphics::Framebuffer {
                     allocation_failed = true;
                     break;
                 }
-                modes.push((u64::from(geometry.width) * u64::from(geometry.height), mode));
+                modes.push((geometry.console_mode_rank(), mode));
             }
         }
         if allocation_failed {
             return current_framebuffer(&mut gop);
         }
-        modes.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        modes.sort_unstable_by_key(|entry| entry.0);
         for (_, mode) in modes {
-            // On SetMode failure, a compatible current mode is still usable.
-            // A successful SetMode must also pass the live aperture checks.
-            let _ = gop.set_mode(&mode);
+            // Try the next preferred mode if firmware rejects this one.
+            if gop.set_mode(&mode).is_err() {
+                continue;
+            }
             if let Some(framebuffer) = current_framebuffer(&mut gop) {
                 return Some(framebuffer);
             }

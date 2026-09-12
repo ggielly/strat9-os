@@ -310,7 +310,6 @@ ${QEMU} \
     -device virtio-gpu-gl,xres=1280,yres=720 \
     -display gtk,gl=on \
     -device usb-ehci \
-    -device usb-kbd \
     -device usb-tablet \
     -device qemu-xhci \
     -device virtio-net-pci,netdev=net0 \
@@ -546,7 +545,6 @@ ${QEMU} \
     -device virtio-gpu-gl,xres=1280,yres=720 \
     -display sdl,gl=on \
     -device usb-ehci \
-    -device usb-kbd \
     -device usb-tablet \
     -device qemu-xhci \
     -device virtio-net-pci,netdev=net0 \
