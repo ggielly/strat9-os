@@ -282,7 +282,7 @@ fn boot_kernel() -> BootResult<()> {
     let module_table = boot_memory.allocate(module_table_size, "module table pages")?;
     let module_table_base = module_table.base;
     // SAFETY: the page allocation covers the complete fixed-capacity table.
-    unsafe { modules::write_module_table(module_list.as_slice(), module_table_base) }?;
+    unsafe { modules::write_module_table(module_list.as_slice(), module_table) }?;
     drop(module_list);
 
     let environment = boot_memory.allocate(env_total_size as u64, "environment pages")?;

@@ -76,7 +76,7 @@ pub fn init_components(stage: component::InitStage) -> Result<(), component::Com
 use core::panic::PanicInfo;
 
 const PAGE_SIZE: u64 = 4096;
-const MAX_BOOT_MMAP_REGIONS_WORK: usize = 1024;
+const MAX_BOOT_MMAP_REGIONS_WORK: usize = strat9_abi::boot::MAX_BOOT_MEMORY_REGIONS;
 
 /// Static working buffer for the boot memory map (off stack to avoid overflow).
 static mut MMAP_WORK: [boot::entry::MemoryRegion; MAX_BOOT_MMAP_REGIONS_WORK] =
@@ -278,8 +278,7 @@ fn register_initfs_module(path: &str, module: Option<(u64, u64)>) {
 ///
 /// Each module has a name, physical base address, and size.
 /// The kernel maps them into the VFS at /initfs/<name>.
-fn register_boot_modules(args: &boot::entry::KernelArgs) {
-    let modules = args.modules();
+fn register_boot_modules(modules: &[strat9_abi::boot::ModuleEntry]) {
     if modules.is_empty() {
         serial_println!("[init] No modules provided by bootloader");
         return;
@@ -581,7 +580,15 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     crate::e9_println!("MM pre-regions");
     serial_println!("[init] Memory manager...");
     serial_println!("[init] Memory map: 0x{:x} ({} bytes)", memory_map_base, memory_map_size);
-    let regions = args.memory_regions();
+    // SAFETY: the loader keeps these handoff buffers reserved and identity-mapped.
+    // Reject malformed extents/counts before any physical allocator consumes them.
+    let regions = unsafe { args.memory_regions() }
+        .unwrap_or_else(|error| panic!("Invalid boot memory map: {}", error));
+    if regions.is_empty() {
+        panic!("Boot memory map is empty");
+    }
+    let boot_modules = unsafe { args.modules() }
+        .unwrap_or_else(|error| panic!("Invalid boot module table: {}", error));
     serial_println!("[init] Memory regions count: {}", regions.len());
     if let Some(first) = regions.first() {
         serial_println!("[init] First region: base={:#x} size={:#x} kind={:?}",
@@ -628,11 +635,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // Safety: single-threaded boot, no concurrent access
     let mmap_work = unsafe { &mut *core::ptr::addr_of_mut!(MMAP_WORK) };
     crate::e9_println!("MM work array");
-    let mmap_work_len = core::cmp::min(regions.len(), mmap_work.len());
+    let mmap_work_len = regions.len();
     crate::e9_println!("MM len calc");
-    for (dst, src) in mmap_work.iter_mut().zip(regions.iter()).take(mmap_work_len) {
-        *dst = *src;
-    }
+    mmap_work[..mmap_work_len].copy_from_slice(regions);
     crate::e9_println!("MM copy done");
 
     // Modules are loaded from the FAT32 boot partition.
@@ -902,7 +907,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
     serial_println!("[init] VFS initialized.");
     vga_println!("[OK] VFS initialized");
-    register_boot_modules(args);
+    register_boot_modules(boot_modules);
 
     log_boot_module_magics("post-cow");
 
@@ -1196,7 +1201,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         if !init_loaded {
             // E9: report the module names so init-chain progress is visible
             // even when the formatted serial path is unavailable.
-            for module in args.modules() {
+            for module in boot_modules {
                 let raw = module.name_str();
                 unsafe {
                     core::arch::asm!("out 0xe9, al", in("al") b'N', options(nomem, nostack));

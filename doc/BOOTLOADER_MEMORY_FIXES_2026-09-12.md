@@ -21,6 +21,8 @@ Le registre conserve les allocations jusqu'au transfert au noyau. Les tampons te
 
 R03 et R04 ont été traités dans ce lot : réserver une table trop petite aurait conservé une écriture hors allocation malgré R01/R02. La table fixe entière est désormais allouée (`5128` octets, soit deux pages), même sans module. Le loader refuse plus de 64 modules avant l'écriture et vérifie ce nombre dans le constructeur de table. Des assertions statiques comparent sa disposition à celle de l'ABI.
 
+Précision du suivi : ces corrections de R04 portaient sur le producteur. La validation de `count` et `modules_size` par le lecteur côté noyau restait à compléter. Elle est ajoutée dans le [lot ordre 2](C:/src/strat9-os/doc/BOOTLOADER_HANDOFF_FIXES_2026-09-12.md), qui mutualise également le format et ajoute les tests de limites.
+
 R07 et R08 ont également été traités : les découpages tardifs de descripteurs ont été remplacés par une conversion unique qui soustrait les réservations par intersection. Elle accepte les réservations traversant plusieurs descripteurs, conserve les plages hors réservations, contrôle les débordements arithmétiques et vérifie chaque insertion. Les descripteurs adjacents de même type sont fusionnés quand leur ordre le permet.
 
 Le tampon transmis contient au maximum 1024 descripteurs, capacité actuelle du tableau de travail du noyau. La conversion est vérifiée une première fois avant `ExitBootServices`, puis répétée sur la carte finale dans le même tampon. La taille publiée correspond au nombre effectivement produit. Un dépassement provoque une erreur explicite, jamais une troncature ou une écriture au-delà du tampon.

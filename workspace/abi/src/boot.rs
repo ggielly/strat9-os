@@ -39,7 +39,7 @@
 //!     assert_eq!(args.abi_version, STRAT9_BOOT_ABI_VERSION);
 //!
 //!     // Memory map
-//!     for region in args.memory_regions() {
+//!     for region in unsafe { args.memory_regions() }.expect("invalid boot memory map") {
 //!         match region.kind {
 //!             MemoryKind::Free => { /* add to buddy allocator */ }
 //!             _ => {}
@@ -55,7 +55,7 @@
 //!     }
 //!
 //!     // Modules
-//!     for module in args.modules() {
+//!     for module in unsafe { args.modules() }.expect("invalid boot module table") {
 //!         // module.name_str(), module.base, module.size
 //!     }
 //! }
@@ -68,6 +68,13 @@ pub const STRAT9_BOOT_ABI_VERSION: u32 = 4;
 
 /// Magic number validating the boot handoff (`"ST9B"` in ASCII).
 pub const STRAT9_BOOT_MAGIC: u32 = 0x5354_3942; // "ST9B"
+
+/// Capacity of the fixed module table shared by the loader and kernel.
+pub const MAX_BOOT_MODULES: usize = 64;
+/// Maximum number of descriptors accepted by the kernel's boot-map work buffer.
+pub const MAX_BOOT_MEMORY_REGIONS: usize = 1024;
+pub const MODULE_TABLE_SIZE: usize = core::mem::size_of::<ModuleTable>();
+const MODULE_TABLE_HEADER_SIZE: usize = core::mem::offset_of!(ModuleTable, entries);
 
 /// Bootloader-to-kernel handoff structure (ABI v2, 136 bytes).
 ///
@@ -146,14 +153,31 @@ pub struct KernelArgs {
 const _: () = assert!(core::mem::size_of::<KernelArgs>() == 132);
 
 impl KernelArgs {
-    /// Iterator over the memory regions described by this boot handoff.
-    pub fn memory_regions(&self) -> &[MemoryRegion] {
-        if self.memory_map_base == 0 || self.memory_map_size == 0 {
-            return &[];
+    /// Read the memory map, rejecting malformed lengths instead of truncating.
+    ///
+    /// # Safety
+    /// Any range that passes the numeric checks must be readable through the
+    /// current identity mapping, initialized and immutable for the returned
+    /// slice's lifetime. These checks cannot establish physical memory ownership.
+    pub unsafe fn memory_regions(&self) -> Result<&[MemoryRegion], &'static str> {
+        if self.memory_map_base == 0 && self.memory_map_size == 0 {
+            return Ok(&[]);
         }
-        let count = self.memory_map_size as usize / core::mem::size_of::<MemoryRegion>();
+        let size = checked_handoff_range(
+            self.memory_map_base,
+            self.memory_map_size,
+            core::mem::align_of::<MemoryRegion>(),
+        )?;
+        let entry_size = core::mem::size_of::<MemoryRegion>();
+        if size % entry_size != 0 {
+            return Err("memory map contains a partial descriptor");
+        }
+        let count = size / entry_size;
+        if count > MAX_BOOT_MEMORY_REGIONS {
+            return Err("memory map exceeds kernel capacity");
+        }
         let ptr = self.memory_map_base as *const MemoryRegion;
-        unsafe { core::slice::from_raw_parts(ptr, count) }
+        Ok(unsafe { core::slice::from_raw_parts(ptr, count) })
     }
 
     /// Environment string as bytes (null-terminated key=value pairs).
@@ -192,16 +216,45 @@ impl KernelArgs {
         None
     }
 
-    /// Iterator over the loaded modules.
-    pub fn modules(&self) -> &[ModuleEntry] {
-        if self.modules_base == 0 || self.modules_size == 0 {
-            return &[];
+    /// Read the fixed-capacity module table after checking its advertised extent.
+    ///
+    /// # Safety
+    /// If the numeric extent checks succeed, the first MODULE_TABLE_SIZE bytes
+    /// must be readable through the current identity mapping, initialized and
+    /// immutable for the returned slice's lifetime. Module payloads are not read.
+    pub unsafe fn modules(&self) -> Result<&[ModuleEntry], &'static str> {
+        if self.modules_base == 0 && self.modules_size == 0 {
+            return Ok(&[]);
         }
-        let table = self.modules_base as *const ModuleTable;
-        let count = unsafe { (*table).count } as usize;
-        let ptr = unsafe { (*table).entries.as_ptr() };
-        unsafe { core::slice::from_raw_parts(ptr, count) }
+        let size = checked_handoff_range(
+            self.modules_base,
+            self.modules_size,
+            core::mem::align_of::<ModuleTable>(),
+        )?;
+        if size < MODULE_TABLE_SIZE {
+            return Err("truncated fixed module table");
+        }
+        // Do not manufacture a reference to a table until its extent is checked.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(self.modules_base as *const u8, MODULE_TABLE_SIZE)
+        };
+        ModuleTable::read_from(bytes)
     }
+}
+
+/// Pure metadata validation, performed before dereferencing a handoff address.
+fn checked_handoff_range(base: u64, size: u64, align: usize) -> Result<usize, &'static str> {
+    if base == 0 || size == 0 {
+        return Err("inconsistent empty handoff range");
+    }
+    let end = base.checked_add(size).ok_or("handoff address overflow")?;
+    if base % align as u64 != 0 {
+        return Err("unaligned handoff range");
+    }
+    if end > usize::MAX as u64 || size > isize::MAX as u64 {
+        return Err("handoff range exceeds addressable size");
+    }
+    Ok(size as usize)
 }
 
 /// Module table header + entries.
@@ -211,11 +264,66 @@ impl KernelArgs {
 #[repr(C)]
 pub struct ModuleTable {
     pub count: u32,
-    pub entries: [ModuleEntry; 64],
+    pub entries: [ModuleEntry; MAX_BOOT_MODULES],
+}
+
+impl ModuleTable {
+    /// Write the complete fixed table. All checks precede the first write.
+    /// Bytes beyond MODULE_TABLE_SIZE, including allocation padding, are untouched.
+    pub fn write_into(storage: &mut [u8], modules: &[ModuleEntry]) -> Result<(), &'static str> {
+        if modules.len() > MAX_BOOT_MODULES {
+            return Err("too many boot modules (maximum 64)");
+        }
+        if storage.len() < MODULE_TABLE_SIZE {
+            return Err("module table allocation too small");
+        }
+        if storage.as_ptr() as usize % core::mem::align_of::<Self>() != 0 {
+            return Err("unaligned module table allocation");
+        }
+        storage[..MODULE_TABLE_SIZE].fill(0);
+        // SAFETY: extent/alignment are checked, all fields accept zero, and the
+        // mutable byte slice supplies exclusive ownership for this borrow.
+        let table = unsafe { &mut *storage.as_mut_ptr().cast::<Self>() };
+        table.entries[..modules.len()].copy_from_slice(modules);
+        table.count = modules.len() as u32;
+        Ok(())
+    }
+
+    /// Validate the fixed table before forming a slice of initialized entries.
+    /// A shortened header-plus-count representation is not this ABI's format.
+    pub fn read_from(storage: &[u8]) -> Result<&[ModuleEntry], &'static str> {
+        if storage.len() < MODULE_TABLE_SIZE {
+            return Err("truncated fixed module table");
+        }
+        if storage.as_ptr() as usize % core::mem::align_of::<Self>() != 0 {
+            return Err("unaligned module table");
+        }
+        let count = u32::from_ne_bytes([storage[0], storage[1], storage[2], storage[3]]) as usize;
+        if count > MAX_BOOT_MODULES {
+            return Err("module count exceeds table capacity");
+        }
+        let end = count
+            .checked_mul(core::mem::size_of::<ModuleEntry>())
+            .and_then(|size| MODULE_TABLE_HEADER_SIZE.checked_add(size))
+            .ok_or("module table length overflow")?;
+        if end > storage.len() {
+            return Err("module entries exceed advertised table size");
+        }
+        // SAFETY: storage covers the fixed table, has the required alignment,
+        // ModuleEntry contains only integers, and the checked slice stays inside it.
+        let entries = unsafe {
+            storage
+                .as_ptr()
+                .add(MODULE_TABLE_HEADER_SIZE)
+                .cast::<ModuleEntry>()
+        };
+        Ok(unsafe { core::slice::from_raw_parts(entries, count) })
+    }
 }
 
 /// A single loaded module (userspace binary or config file).
 #[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ModuleEntry {
     /// Module name (null-terminated, max 63 chars).
     pub name: [u8; 64],
@@ -262,3 +370,5 @@ static_assertions::assert_eq_size!(MemoryRegion, [u8; 24]);
 static_assertions::const_assert_eq!(core::mem::align_of::<MemoryRegion>(), 8);
 static_assertions::assert_eq_size!(MemoryKind, [u8; 8]);
 static_assertions::assert_eq_size!(ModuleEntry, [u8; 80]);
+static_assertions::assert_eq_size!(ModuleTable, [u8; 5128]);
+static_assertions::const_assert_eq!(MODULE_TABLE_HEADER_SIZE, 8);

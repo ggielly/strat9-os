@@ -4,9 +4,12 @@ use uefi::{
     proto::media::file::{File, FileAttribute, FileInfo, FileMode},
 };
 
-use crate::memory::{BootError, BootMemory, BootResult};
-
-pub const MAX_MODULES: usize = 64;
+use crate::{
+    memory::{BootError, BootMemory, BootResult},
+    memory_map::PhysicalRange,
+};
+pub use strat9_abi::boot::ModuleEntry as LoadedModule;
+use strat9_abi::boot::{ModuleTable, MAX_BOOT_MODULES, MODULE_TABLE_SIZE};
 
 /// E9 failure marker: '<letter>?' (bootloader-side diagnostics).
 fn e9_fail(c: u8) {
@@ -17,71 +20,24 @@ fn e9_fail(c: u8) {
     }
 }
 
-pub struct LoadedModule {
-    pub name: [u8; 64],
-    pub base: u64,
-    pub size: u64,
-}
-
-#[repr(C)]
-pub struct ModuleTable {
-    pub count: u32,
-    _pad: u32,
-    pub entries: [ModuleEntry; MAX_MODULES],
-}
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct ModuleEntry {
-    pub name: [u8; 64],
-    pub base: u64,
-    pub size: u64,
-}
-
-// Keep the loader's explicitly padded representation identical to the ABI.
-const _: () = {
-    assert!(
-        core::mem::size_of::<ModuleTable>()
-            == core::mem::size_of::<strat9_abi::boot::ModuleTable>()
-    );
-    assert!(
-        core::mem::size_of::<ModuleEntry>()
-            == core::mem::size_of::<strat9_abi::boot::ModuleEntry>()
-    );
-    assert!(
-        core::mem::offset_of!(ModuleTable, entries)
-            == core::mem::offset_of!(strat9_abi::boot::ModuleTable, entries)
-    );
-};
-
 pub fn module_table_size() -> u64 {
-    // write_module_table initializes all entries, including unused ones.
-    core::mem::size_of::<ModuleTable>() as u64
+    MODULE_TABLE_SIZE as u64
 }
 
 /// # Safety
-/// `base` must point to an exclusively owned, writable allocation of at least
-/// `module_table_size()` bytes, aligned for ModuleTable and disjoint from modules.
-pub unsafe fn write_module_table(modules: &[LoadedModule], base: u64) -> BootResult<()> {
-    if modules.len() > MAX_MODULES {
-        return Err(BootError::invalid("too many boot modules (maximum 64)"));
+/// `storage` must describe exclusively owned writable pages, disjoint from modules.
+pub unsafe fn write_module_table(
+    modules: &[LoadedModule],
+    storage: PhysicalRange,
+) -> BootResult<()> {
+    if storage.base == 0 || storage.size < MODULE_TABLE_SIZE as u64 {
+        return Err(BootError::invalid("module table allocation too small"));
     }
-    unsafe {
-        let table = &mut *(base as *mut ModuleTable);
-        table.count = modules.len() as u32;
-        table._pad = 0;
-        table.entries = [ModuleEntry {
-            name: [0u8; 64],
-            base: 0,
-            size: 0,
-        }; MAX_MODULES];
-        for (i, m) in modules.iter().enumerate() {
-            table.entries[i].name = m.name;
-            table.entries[i].base = m.base;
-            table.entries[i].size = m.size;
-        }
-    }
-    Ok(())
+    storage.end().map_err(BootError::invalid)?;
+    // SAFETY: the allocation has been checked before creating even a byte slice.
+    let bytes =
+        unsafe { core::slice::from_raw_parts_mut(storage.base as *mut u8, MODULE_TABLE_SIZE) };
+    ModuleTable::write_into(bytes, modules).map_err(BootError::invalid)
 }
 
 pub fn load_modules(
@@ -136,7 +92,7 @@ pub fn load_modules(
                             s.push(*ch as u8 as char);
                         }
                     }
-                    if names.len() == MAX_MODULES {
+                    if names.len() == MAX_BOOT_MODULES {
                         return Err(BootError::invalid("too many boot modules (maximum 64)"));
                     }
                     names

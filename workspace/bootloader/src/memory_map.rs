@@ -3,8 +3,7 @@
 use strat9_abi::boot::{MemoryKind, MemoryRegion};
 
 pub const PAGE_SIZE: u64 = 4096;
-// The kernel's MMAP_WORK currently accepts at most 1024 descriptors.
-pub const MAX_MEMORY_REGIONS: usize = 1024;
+pub use strat9_abi::boot::MAX_BOOT_MEMORY_REGIONS as MAX_MEMORY_REGIONS;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PhysicalRange {

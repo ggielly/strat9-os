@@ -306,3 +306,93 @@ fn overflowing_file_range_is_rejected_during_planning() {
     file[64 + 8..64 + 16].copy_from_slice(&u64::MAX.to_le_bytes());
     assert!(elf::parse_elf64(&file).is_err());
 }
+
+#[test]
+fn page_tables_spanning_two_firmware_descriptors_keep_both_remainders() {
+    // R07: [0x1000,0x3000) intersects tables [0x2000,0x4000).
+    let output = convert(
+        &[
+            region(1, 2, MemoryKind::Free),
+            region(3, 2, MemoryKind::Reclaim),
+        ],
+        &[reservation(2, 2)],
+    );
+    let actual: Vec<_> = output.iter().map(|r| (r.base, r.size, r.kind)).collect();
+    assert_eq!(
+        actual,
+        vec![
+            (0x1000, 0x1000, MemoryKind::Free),
+            (0x2000, 0x2000, MemoryKind::Reserved),
+            (0x4000, 0x1000, MemoryKind::Reclaim),
+        ]
+    );
+}
+
+#[test]
+fn final_split_is_visible_to_the_kernel_across_a_page_boundary() {
+    // R08: 170 descriptors fit in 4096 bytes; 172 require 4128 bytes.
+    let mut storage = [EMPTY; memory_map::MAX_MEMORY_REGIONS];
+    let owned = [reservation(1001, 1)];
+    let final_count = {
+        let mut builder = MemoryMapBuilder::new(&mut storage, &owned).unwrap();
+        for index in 0..169 {
+            builder
+                .push(region(index * 2 + 1, 1, MemoryKind::Reserved))
+                .unwrap();
+        }
+        builder.push(region(1000, 3, MemoryKind::Free)).unwrap();
+        builder.len()
+    };
+    assert_eq!(final_count, 172);
+    let mut args: strat9_abi::boot::KernelArgs = unsafe { core::mem::zeroed() };
+    args.memory_map_base = storage.as_ptr() as u64;
+    args.memory_map_size = (final_count * core::mem::size_of::<MemoryRegion>()) as u64;
+    let visible = unsafe { args.memory_regions() }.unwrap();
+    assert_eq!(visible.len(), 172);
+    assert_eq!(visible[171].base, 1002 * PAGE_SIZE);
+    assert_eq!(visible[171].kind, MemoryKind::Free);
+}
+
+#[test]
+fn final_split_refuses_a_one_page_map_without_overwriting_the_guard() {
+    let sentinel = region(0xFFFF, 1, MemoryKind::Reserved);
+    let mut storage = [sentinel; 171];
+    let owned = [reservation(1001, 1)];
+    {
+        let mut builder = MemoryMapBuilder::new(&mut storage[..170], &owned).unwrap();
+        for index in 0..169 {
+            builder
+                .push(region(index * 2 + 1, 1, MemoryKind::Reserved))
+                .unwrap();
+        }
+        assert!(builder.push(region(1000, 3, MemoryKind::Free)).is_err());
+    }
+    assert_eq!(storage[170].base, sentinel.base);
+    assert_eq!(storage[170].size, sentinel.size);
+    assert_eq!(storage[170].kind, sentinel.kind);
+}
+
+#[test]
+fn converting_a_smaller_final_map_does_not_publish_stale_preview_entries() {
+    let mut storage = [EMPTY; 8];
+    {
+        let mut preview = MemoryMapBuilder::new(&mut storage, &[]).unwrap();
+        for index in 0..8 {
+            preview
+                .push(region(index * 2 + 1, 1, MemoryKind::Reserved))
+                .unwrap();
+        }
+    }
+    let final_count = {
+        let mut final_map = MemoryMapBuilder::new(&mut storage, &[]).unwrap();
+        final_map.push(region(1, 16, MemoryKind::Free)).unwrap();
+        final_map.len()
+    };
+    let mut args: strat9_abi::boot::KernelArgs = unsafe { core::mem::zeroed() };
+    args.memory_map_base = storage.as_ptr() as u64;
+    args.memory_map_size = (final_count * core::mem::size_of::<MemoryRegion>()) as u64;
+    let visible = unsafe { args.memory_regions() }.unwrap();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].size, 16 * PAGE_SIZE);
+    assert_eq!(visible[0].kind, MemoryKind::Free);
+}

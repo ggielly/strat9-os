@@ -14,6 +14,8 @@ Les constats portent sur l'état complet de la branche, y compris les défauts a
 
 **Ordre conseillé des corrections**
 
+Le [lot ordre 2](C:/src/strat9-os/doc/BOOTLOADER_HANDOFF_FIXES_2026-09-12.md) complète désormais R03/R04/R07/R08 : format partagé, validation du lecteur noyau et tests ciblés. Le lot ordre 1 avait déjà corrigé la production de ces structures ; son contrôle côté noyau pour R04 était encore incomplet. Les tests restent non exécutés, conformément à la consigne de ne pas compiler.
+
 | Ordre | Domaine | Constats |
 | --- | --- | --- |
 | 1 | Réserver la mémoire avant de l'écrire ; préserver les objets vivants | R01, R02, R05, R20 |
