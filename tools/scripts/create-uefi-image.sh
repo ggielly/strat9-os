@@ -1,171 +1,86 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Build a GPT disk containing one 256 MiB FAT32 EFI System Partition.
+# No compilation: consume and validate the selected build artifacts.
+set -euo pipefail
 
-# Script to create a UEFI-bootable disk image for strat9-os
-# Creates a FAT32 image containing:
-#   /efi/boot/bootx64.efi  - the UEFI bootloader
-#   /boot/kernel.elf        - the kernel ELF
-#   /boot/initfs/*          - userspace modules
-
-set -e
-
-BUILD_DIR="build"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/uefi-modules.sh"
+source "$SCRIPT_DIR/uefi-image-common.sh"
+BUILD_DIR="${STRAT9_BUILD_DIR:-build}"
 IMAGE_BASENAME="${STRAT9_IMAGE_BASENAME:-strat9-os}"
 PROFILE="${STRAT9_PROFILE:-debug}"
 MODULE_PROFILE="${STRAT9_MODULE_PROFILE:-release}"
 INCLUDE_TESTS="${STRAT9_INCLUDE_TESTS:-0}"
 MODULE_MANIFEST="${STRAT9_MODULE_MANIFEST:-tools/uefi-modules.manifest}"
-MODULE_TARGET_DIR="target/x86_64-unknown-none/${MODULE_PROFILE}"
-# The cargo-make module producers use release independently of kernel/loader.
+MODULE_TARGET_DIR="target/x86_64-unknown-none/$MODULE_PROFILE"
+BOOTLOADER_EFI="target/x86_64-unknown-uefi/$PROFILE/strat9-bootloader.efi"
+KERNEL_ELF="target/x86_64-unknown-none/$PROFILE/kernel"
+
+strat9_image_name "$IMAGE_BASENAME"
 case "$PROFILE:$MODULE_PROFILE" in
     debug:debug|debug:release|release:debug|release:release) ;;
-    *) echo "ERROR: kernel/loader and module profiles must be debug or release" >&2; exit 1 ;;
+    *) echo "ERROR: profiles must be debug or release" >&2; exit 1 ;;
 esac
-source "$(dirname "${BASH_SOURCE[0]}")/uefi-modules.sh"
-IMAGE_FILE="$BUILD_DIR/${IMAGE_BASENAME}-uefi.img"
-BOOTLOADER_EFI="target/x86_64-unknown-uefi/${PROFILE}/strat9-bootloader.efi"
-KERNEL_ELF="target/x86_64-unknown-none/${PROFILE}/kernel"
-
-echo "============================================"
-echo "Creating UEFI bootable image"
-echo "Kernel/loader profile: ${PROFILE}"
-echo "Module profile: ${MODULE_PROFILE}; include tests: ${INCLUDE_TESTS}"
-echo "============================================"
-echo ""
-
-# Check prerequisites
-if [ ! -f "$BOOTLOADER_EFI" ]; then
-    echo "ERROR: UEFI bootloader not found at $BOOTLOADER_EFI"
-    echo "  Build with: cargo make bootloader-uefi"
-    exit 1
-fi
-
-if [ ! -f "$KERNEL_ELF" ]; then
-    echo "ERROR : kernel not found at $KERNEL_ELF"
-    echo "  Build with : cargo make kernel"
-    exit 1
-fi
-
-bootloader_size=$(stat -c%s "$BOOTLOADER_EFI")
-kernel_size=$(stat -c%s "$KERNEL_ELF")
-echo "  Components:"
-echo "    Bootloader EFI: $bootloader_size bytes"
-echo "    Kernel ELF    : $kernel_size bytes"
-
-# Validate the complete manifest before removing staging or touching an image.
+# Check the actual executables used, before touching staging or existing images.
+strat9_require_tools parted mkfs.fat fsck.fat mcopy python3 dd cp mv cmp mkdir mktemp rm stat od cat
+[[ -s "$BOOTLOADER_EFI" && -s "$KERNEL_ELF" ]] || {
+    echo "ERROR: missing or empty loader/kernel for profile $PROFILE" >&2; exit 1;
+}
 strat9_validate_module_sources "$MODULE_TARGET_DIR" "$MODULE_MANIFEST" "$INCLUDE_TESTS"
 
-# Create the disk image directory structure
-ISO_ROOT="$BUILD_DIR/uefi_iso_root"
-rm -rf "$ISO_ROOT"
-mkdir -p "$ISO_ROOT/efi/boot"
-mkdir -p "$ISO_ROOT/boot/initfs"
+strat9_start_image_work
+IMAGE_FILE="$BUILD_DIR/$IMAGE_BASENAME-uefi.img"
+PAYLOAD_DIR="$BUILD_DIR/$IMAGE_BASENAME-uefi-root"
+ROOT="$IMAGE_WORK/payload"
+DISK="$IMAGE_WORK/disk.img"
+ESP="$IMAGE_WORK/esp.img"
+[[ ! -d "$IMAGE_FILE" && ! -L "$PAYLOAD_DIR" ]] || {
+    echo "ERROR: invalid image/staging destination" >&2; exit 1;
+}
+mkdir -p "$ROOT/efi/boot" "$ROOT/boot/initfs"
+cp -- "$BOOTLOADER_EFI" "$ROOT/efi/boot/BOOTX64.EFI"
+cp -- "$KERNEL_ELF" "$ROOT/boot/kernel.elf"
+cp -- "$MODULE_MANIFEST" "$ROOT/modules.manifest"
+printf '%s\n' "$INCLUDE_TESTS" > "$ROOT/include-tests"
+strat9_copy_modules "$MODULE_TARGET_DIR" "$ROOT/boot/initfs"
+strat9_check_payload "$ROOT"
 
-# Copy bootloader
-cp "$BOOTLOADER_EFI" "$ISO_ROOT/efi/boot/BOOTX64.EFI"
-echo "  [OK] Copied bootloader to /efi/boot/bootx64.efi"
-
-# Copy kernel
-cp "$KERNEL_ELF" "$ISO_ROOT/boot/kernel.elf"
-echo "  [OK] Copied kernel to /boot/kernel.elf"
-
-# Copy only the validated manifest, using the profile that built the modules.
-strat9_copy_modules "$MODULE_TARGET_DIR" "$ISO_ROOT/boot/initfs"
-
-echo ""
-
-# ========================================================================
-# Create GPT + EFI System Partition image
-# ========================================================================
-# OVMF requires a GPT-formatted disk with an EFI System Partition (ESP).
-# The ESP must be FAT32 and contain /efi/boot/bootx64.efi.
-
-IMAGE_SIZE_MB=512
 SECTOR_SIZE=512
+DISK_SECTORS=$((512 * 1024 * 1024 / SECTOR_SIZE))
+ESP_START=2048
+ESP_SECTORS=$((256 * 1024 * 1024 / SECTOR_SIZE))
+ESP_END=$((ESP_START + ESP_SECTORS - 1)) # Inclusive GPT end: 526335.
+dd if=/dev/zero of="$DISK" bs="$SECTOR_SIZE" count=0 seek="$DISK_SECTORS" status=none
+parted -s "$DISK" mklabel gpt
+parted -s "$DISK" unit s mkpart ESP fat32 "${ESP_START}s" "${ESP_END}s"
+parted -s "$DISK" set 1 esp on
+dd if=/dev/zero of="$ESP" bs="$SECTOR_SIZE" count=0 seek="$ESP_SECTORS" status=none
+strat9_fill_and_check_fat "$ESP" "$ROOT" "$ESP_START" "$IMAGE_WORK/readback"
+dd if="$ESP" of="$DISK" bs=1M seek=1 conv=notrunc status=none
+python3 "$SCRIPT_DIR/validate-uefi-image.py" disk "$DISK" \
+    --esp-start "$ESP_START" --esp-sectors "$ESP_SECTORS"
 
-# ESP size: 256MB (the initfs payload alone is ~110MB with strate-wasm)
-ESP_SIZE_MB=256
-
-if command -v parted >/dev/null 2>&1 && command -v mtools >/dev/null 2>&1; then
-    echo "  Creating GPT + ESP image with parted + mtools..."
-
-    # Create empty image (128MB to have room for GPT headers)
-    dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=$IMAGE_SIZE_MB 2>/dev/null
-
-    # Create GPT partition table and EFI System Partition
-    parted -s "$IMAGE_FILE" mklabel gpt
-    parted -s "$IMAGE_FILE" mkpart primary fat32 1MiB ${ESP_SIZE_MB}MiB
-    parted -s "$IMAGE_FILE" set 1 esp on
-
-    # Calculate offset (1MiB = 2048 sectors)
-    ESP_START_SECTOR=2048
-    ESP_SIZE_SECTORS=$((ESP_SIZE_MB * 1024 * 1024 / SECTOR_SIZE))
-
-    # Create a temporary FAT32 image for the ESP
-    ESP_IMG="$BUILD_DIR/esp.img"
-    dd if=/dev/zero of="$ESP_IMG" bs=512 count=$ESP_SIZE_SECTORS 2>/dev/null
-    mkfs.fat -F 32 -n "EFI" "$ESP_IMG" 2>/dev/null
-
-    # Copy files into the ESP
-    mcopy -i "$ESP_IMG" -s "$ISO_ROOT/efi" "::/efi"
-    mcopy -i "$ESP_IMG" -s "$ISO_ROOT/boot" "::/boot"
-
-    # Write the ESP into the disk image at the partition offset
-    dd if="$ESP_IMG" of="$IMAGE_FILE" bs=512 seek=$ESP_START_SECTOR conv=notrunc 2>/dev/null
-    rm -f "$ESP_IMG"
-
-    echo "  [OK] Created GPT image with EFI System Partition"
-
-elif command -v mtools >/dev/null 2>&1; then
-    echo "  Creating FAT32 image with mtools (no GPT - may not boot with OVMF)..."
-
-    dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=$IMAGE_SIZE_MB 2>/dev/null
-    mkfs.fat -F 32 -n "STRAT9" "$IMAGE_FILE" 2>/dev/null
-
-    mcopy -i "$IMAGE_FILE" -s "$ISO_ROOT/efi" "::/efi"
-    mcopy -i "$IMAGE_FILE" -s "$ISO_ROOT/boot" "::/boot"
-
-    echo "  [OK] Created FAT32 image (install parted for GPT support)"
-    echo "  [WARN] Without GPT, OVMF may not find the bootloader"
-
-else
-    echo "  WARNING: Neither parted nor mtools found"
-    echo "  Creating simple flat image..."
-    dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=$IMAGE_SIZE_MB 2>/dev/null
-    echo "  [INFO] For UEFI support, install: sudo apt install parted mtools"
-fi
-
-echo ""
-echo "============================================"
-echo "  UEFI image created!"
-echo "============================================"
-echo ""
-echo "  Bootloader : $BOOTLOADER_EFI ($bootloader_size bytes)"
-echo "  Kernel     : $KERNEL_ELF ($kernel_size bytes)"
-echo "  Modules    : $(ls -1 "$ISO_ROOT/boot/initfs/" 2>/dev/null | wc -l) file(s)"
-echo ""
-echo "  Image file:"
-echo "    Path     : $IMAGE_FILE"
-if [ -f "$IMAGE_FILE" ]; then
-    img_size=$(stat -c%s "$IMAGE_FILE" 2>/dev/null || stat -f%z "$IMAGE_FILE" 2>/dev/null)
-    img_kb=$((img_size / 1024))
-    img_mb=$((img_kb / 1024))
-    echo "    Size     : $img_size bytes ($img_kb KB, ~${img_mb} MB)"
-    echo "    Type     : $(file -b "$IMAGE_FILE" 2>/dev/null | head -c 80)"
-    if command -v parted >/dev/null 2>&1; then
-        echo "    Partitions:"
-        parted -s "$IMAGE_FILE" print 2>/dev/null | grep -E "^ [0-9]" | while read -r line; do
-            echo "      $line"
-        done
+# Keep staging specific to this image name. Roll it back if final publication
+# fails; the old disk remains intact until the final same-filesystem rename.
+publish_cleanup() {
+    local result=$?
+    # The disk rename is the commit point, including if a signal arrives just
+    # after mv. Infer progress from paths instead of interruptible shell flags.
+    if [[ -e "$DISK" ]]; then
+        if [[ ! -e "$ROOT" && -e "$PAYLOAD_DIR" ]]; then
+            mv -T -- "$PAYLOAD_DIR" "$IMAGE_WORK/unpublished-payload" || return 1
+        fi
+        if [[ -e "$IMAGE_WORK/previous-payload" ]]; then
+            # Keep the backup in IMAGE_WORK if restoration fails.
+            mv -T -- "$IMAGE_WORK/previous-payload" "$PAYLOAD_DIR" || return 1
+        fi
     fi
-fi
-echo ""
-echo "  All build artifacts:"
-echo "    build/"
-ls -lh "$BUILD_DIR"/*.img "$BUILD_DIR"/*.iso "$BUILD_DIR"/*.efi 2>/dev/null | while read -r line; do
-    echo "      $line"
-done
-echo ""
-echo "============================================"
-echo "  Launch with: cargo make run-uefi"
-echo "============================================"
-echo ""
+    strat9_clean_image_work
+    return "$result"
+}
+trap publish_cleanup EXIT
+if [[ -e "$PAYLOAD_DIR" ]]; then mv -T -- "$PAYLOAD_DIR" "$IMAGE_WORK/previous-payload"; fi
+mv -T -- "$ROOT" "$PAYLOAD_DIR"
+mv -fT -- "$DISK" "$IMAGE_FILE"
+echo "[OK] UEFI image created and validated: $IMAGE_FILE ($(stat -c%s "$IMAGE_FILE") bytes)"
+echo "     ESP: sectors $ESP_START..$ESP_END ($ESP_SECTORS sectors); modules: ${#STRAT9_MODULE_NAMES[@]}"

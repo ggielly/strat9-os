@@ -1,76 +1,46 @@
-#!/bin/bash
-# Create a UEFI-bootable ISO using our own strat9-bootloader.efi (no Limine).
-# The ISO embeds a FAT EFI boot image (El Torito) containing:
-#   /efi/boot/bootx64.efi - our UEFI loader
-#   /boot/kernel.elf      - the kernel ELF
-#   /boot/initfs/*        - userspace modules
-# Requires: mtools (mcopy), dosfstools (mkfs.fat), xorriso.
-# Expects build/uefi_iso_root already populated (run create-uefi-image.sh first
-# or depend on the uefi-image cargo-make task).
+#!/usr/bin/env bash
+# Build and validate an El Torito UEFI ISO from the matching image's staging.
+set -euo pipefail
 
-set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/uefi-modules.sh"
+source "$SCRIPT_DIR/uefi-image-common.sh"
+BUILD_DIR="${STRAT9_BUILD_DIR:-build}"
+IMAGE_BASENAME="${STRAT9_IMAGE_BASENAME:-strat9-os}"
+strat9_image_name "$IMAGE_BASENAME"
+strat9_require_tools mcopy mkfs.fat fsck.fat xorriso python3 dd du cut cp mv cmp mkdir mktemp rm cat od stat
+ESP_SRC="$BUILD_DIR/$IMAGE_BASENAME-uefi-root"
+strat9_check_payload "$ESP_SRC"
 
-BUILD_DIR="build"
-ESP_SRC="$BUILD_DIR/uefi_iso_root"
-EFIBOOT_IMG="$BUILD_DIR/efiboot.img"
-ISO_STAGING="$BUILD_DIR/iso_uefi_root"
-ISO_BASENAME="${STRAT9_IMAGE_BASENAME:-strat9-os}"
-ISO_FILE="$BUILD_DIR/${ISO_BASENAME}-uefi.iso"
-
-echo ""
-echo "=== Creating UEFI-bootable ISO (own loader, no Limine) ==="
-echo ""
-
-if [ ! -f "$ESP_SRC/efi/boot/BOOTX64.EFI" ]; then
-    echo "ERROR: UEFI loader not found at $ESP_SRC/efi/boot/BOOTX64.EFI"
-    echo "  Build with: cargo make uefi-image (or uefi-image-release)"
-    exit 1
-fi
-if [ ! -f "$ESP_SRC/boot/kernel.elf" ]; then
-    echo "ERROR: kernel not found at $ESP_SRC/boot/kernel.elf"
-    echo "  Build with: cargo make uefi-image (or uefi-image-release)"
-    exit 1
-fi
-
-for tool in mcopy mkfs.fat xorriso; do
-    if ! command -v "$tool" >/dev/null 2>&1; then
-        echo "ERROR: required tool '$tool' not found"
-        exit 1
-    fi
-done
-
-# Size the FAT EFI boot image from the actual payload plus headroom.
-payload_mb=$(du -sm "$ESP_SRC" | cut -f1)
-EFIBOOT_MB=$((payload_mb + 16))
-[ "$EFIBOOT_MB" -lt 32 ] && EFIBOOT_MB=32
-echo "  Payload     : ~${payload_mb} MB -> efiboot.img ${EFIBOOT_MB} MB"
-
-SECTORS=$((EFIBOOT_MB * 1024 * 1024 / 512))
-rm -f "$EFIBOOT_IMG"
-dd if=/dev/zero of="$EFIBOOT_IMG" bs=512 count=$SECTORS 2>/dev/null
-mkfs.fat -F 32 -n "EFIBOOT" "$EFIBOOT_IMG" 2>/dev/null
-
-mcopy -i "$EFIBOOT_IMG" -s "$ESP_SRC/efi" "::/efi"
-mcopy -i "$EFIBOOT_IMG" -s "$ESP_SRC/boot" "::/boot"
-echo "  [OK] EFI boot image: $EFIBOOT_IMG"
-
-# ISO staging holds only the EFI boot image (the loader reads
-# kernel + initfs from this FAT image once booted).
-rm -rf "$ISO_STAGING"
+strat9_start_image_work
+ESP_SRC="$BUILD_DIR/$IMAGE_BASENAME-uefi-root"
+ISO_FILE="$BUILD_DIR/$IMAGE_BASENAME-uefi.iso"
+[[ ! -d "$ISO_FILE" ]] || { echo "ERROR: ISO destination is a directory" >&2; exit 1; }
+ISO_STAGING="$IMAGE_WORK/iso-root"
 mkdir -p "$ISO_STAGING"
-cp "$EFIBOOT_IMG" "$ISO_STAGING/efiboot.img"
+EFIBOOT_IMG="$ISO_STAGING/efiboot.img"
+# At least 64 MiB and one sector per cluster: stay above FAT32's minimum
+# cluster count even for a tiny payload. Include space for FATs and directories.
+payload_mb=$(du --apparent-size -sm "$ESP_SRC" | cut -f1)
+EFIBOOT_MB=$((payload_mb + payload_mb / 16 + 16))
+if (( EFIBOOT_MB < 64 )); then EFIBOOT_MB=64; fi
+dd if=/dev/zero of="$EFIBOOT_IMG" bs=1M count=0 seek="$EFIBOOT_MB" status=none
+strat9_fill_and_check_fat "$EFIBOOT_IMG" "$ESP_SRC" 0 "$IMAGE_WORK/readback"
+python3 "$SCRIPT_DIR/validate-uefi-image.py" fat "$EFIBOOT_IMG"
 
-rm -f "$ISO_FILE"
-xorriso -as mkisofs \
-    -o "$ISO_FILE" \
-    --efi-boot efiboot.img \
-    -efi-boot-part \
-    --efi-boot-image \
-    --protective-msdos-label \
-    "$ISO_STAGING" 2>&1 | tail -5
-
-echo ""
-echo "  [OK] UEFI ISO: $ISO_FILE"
-ls -lh "$ISO_FILE"
-file "$ISO_FILE" | head -c 200
-echo ""
+ISO_TMP="$IMAGE_WORK/output.iso"
+# No pipeline can hide the producer's status. xorriso aborts on FAILURE.
+xorriso -abort_on FAILURE -as mkisofs \
+    -R -o "$ISO_TMP" --efi-boot efiboot.img -efi-boot-part \
+    --efi-boot-image --protective-msdos-label "$ISO_STAGING"
+[[ -s "$ISO_TMP" ]] || { echo "ERROR: xorriso produced no ISO" >&2; exit 1; }
+# Reopen the output, require a UEFI no-emulation boot entry, and compare the
+# embedded FAT payload byte-for-byte with the one validated above.
+xorriso -abort_on FAILURE -indev "$ISO_TMP" -report_el_torito plain \
+    > "$IMAGE_WORK/el-torito.txt" 2>&1
+python3 "$SCRIPT_DIR/validate-uefi-iso-report.py" "$IMAGE_WORK/el-torito.txt"
+xorriso -abort_on FAILURE -osirrox on -indev "$ISO_TMP" \
+    -extract /efiboot.img "$IMAGE_WORK/extracted-efiboot.img"
+cmp -- "$EFIBOOT_IMG" "$IMAGE_WORK/extracted-efiboot.img"
+mv -fT -- "$ISO_TMP" "$ISO_FILE"
+echo "[OK] UEFI ISO created and validated: $ISO_FILE ($(stat -c%s "$ISO_FILE") bytes)"

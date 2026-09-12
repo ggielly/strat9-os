@@ -139,8 +139,13 @@ command = "cargo"
 args = ["test", "--target", "x86_64-unknown-linux-gnu"]
 
 [tasks.ci-tests]
-description = "Full CI gate: host tests (default + alloc) + kernel L2 mirror"
-dependencies = ["test-host", "test-host-alloc", "test-kernel-l2"]
+description = "Full CI gate: host tests, kernel L2 mirror and UEFI tooling regressions"
+dependencies = ["test-host", "test-host-alloc", "test-kernel-l2", "test-uefi-tools"]
+
+[tasks.test-uefi-tools]
+description = "UEFI geometry, packaging failures and serial harness (synthetic fixtures, no builds/QEMU)"
+command = "python3"
+args = ["-B", "-m", "unittest", "discover", "-s", "tools/scripts/tests", "-p", "test_*.py", "-v"]
 
 [tasks.qemu-selftest]
 description = "L3/L4: boot selftest UEFI ISO in QEMU (ephemeral), verify serial markers"

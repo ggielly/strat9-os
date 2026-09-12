@@ -31,6 +31,8 @@ Le [lot ordre 3](C:/src/strat9-os/doc/BOOTLOADER_ELF_TRANSITION_FIXES_2026-09-12
 
 Le [lot ordre 5](C:/src/strat9-os/doc/BOOTLOADER_GRAPHICS_FIXES_2026-09-12.md) implémente R15 à R19 : sélection GOP et couleurs, fenêtres contiguës, permissions ELF sur les alias, politique UC du framebuffer et adaptation de la transition/SMP. Douze nouveaux tests Rust sont préparés sans compilation ni exécution. La note précise les limites et la validation matérielle restant à effectuer.
 
+Le [lot ordre 6](C:/src/strat9-os/doc/BOOTLOADER_IMAGE_VALIDATION_FIXES_2026-09-12.md) implémente R22 à R26 : bornes GPT/FAT cohérentes, création d'images qui échoue explicitement, publication après validation, verdict complet et contrôlé du harnais, et sélection UEFI indépendante du conteneur. Trente-quatre tests Python/Bash passent avec des fichiers et des outils simulés, sans compilation, création d'image de production ni lancement de QEMU. La note distingue cette validation du contrôle restant avec les outils et firmwares réels.
+
 Le [lot ordre 4](C:/src/strat9-os/doc/BOOTLOADER_INITFS_FIXES_2026-09-12.md) implémente R06, R21 et R27 : conversion physique/HHDM unique, profils cohérents et manifeste de modules, noms et erreurs de fichiers explicitement contrôlés. Sept tests de préparation sur fichiers simulés passent ; neuf tests Rust sont ajoutés sans compilation ni exécution. Les constats ci-dessous restent ceux de la révision initiale.
 
 **R01 — [P1] Le noyau est écrit en mémoire physique sans réservation UEFI.**

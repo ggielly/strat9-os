@@ -46,7 +46,7 @@ pacman -Syu --noconfirm --needed \
     qemu-system-x86 edk2-ovmf \
     parted mtools dosfstools libisoburn \
     base-devel pkgconf git curl ca-certificates \
-    openssl socat file
+    openssl socat file python
 
 echo "==> [2/4] KVM + OVMF sanity checks"
 if [[ -e /dev/kvm ]]; then

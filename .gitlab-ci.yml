@@ -15,7 +15,7 @@ variables:
     TZ: "Europe/Paris"
 
 # L3/L4 QEMU gate — option A: strat9-builder VM on Proxmox
-# (https://192.168.1.235:8006), shell runner tagged [qemu,kvm,proxmox].
+# shell runner tagged [qemu,kvm,proxmox].
 # Each pipeline boots an EPHEMERAL QEMU process (trap-cleaned), no Limine:
 # UEFI ISO with own strat9-bootloader.efi (cargo make selftest-iso-uefi).
 # Provision the VM once: tools/ci/proxmox-make-builder.sh (on PVE host),
@@ -47,12 +47,13 @@ qemu-proxmox:
     before_script:
         - source "$HOME/.cargo/env" 2>/dev/null || true
         - command -v qemu-system-x86_64 || { echo "qemu-system-x86_64 missing — re-run tools/ci/builder-provision.sh"; exit 2; }
-        - ls /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/edk2-ovmf/x64/OVMF_CODE*.fd 2>/dev/null || { echo "OVMF missing — re-run tools/ci/builder-provision.sh"; exit 2; }
+        # The harness checks a matching OVMF CODE/VARS pair for this distro.
     script:
         - ./tools/scripts/qemu-selftest.sh --iso build/strat9-os-selftest-uefi.iso --timeout 180
     artifacts:
         paths:
             - build/qemu-selftest.log
+            - build/qemu-selftest.log.qemu
         when: always
         expire_in: 2 week
 
