@@ -16,13 +16,36 @@ use uefi::{
 };
 
 mod elf;
+mod memory;
+mod memory_map;
 mod modules;
 mod paging;
 
+use memory::{BootError, BootMemory, BootResult};
+use memory_map::{MemoryMapBuilder, PhysicalRange, MAX_MEMORY_REGIONS, PAGE_SIZE};
 use strat9_abi::boot::{KernelArgs, MemoryKind, MemoryRegion};
 
 #[entry]
 fn efi_main() -> Status {
+    match boot_kernel() {
+        Ok(()) => Status::SUCCESS,
+        Err(error) => {
+            uefi::system::with_stdout(|stdout| {
+                let _ = writeln!(
+                    stdout,
+                    "[boot] ERROR: {}: {:?}",
+                    error.operation, error.status
+                );
+            });
+            error.status
+        }
+    }
+}
+
+fn boot_kernel() -> BootResult<()> {
+    // Own permanent allocations before opening other resources, so an error
+    // return closes files and drops temporary buffers before freeing their pages.
+    let mut boot_memory = BootMemory::new();
     uefi::system::with_stdout(|stdout| {
         let _ = writeln!(stdout, "Strat9-OS bootloader. Version 0.1.0, UEFI mode.");
         let _ = writeln!(
@@ -33,9 +56,11 @@ fn efi_main() -> Status {
 
     // Open filesystem
     let image_handle = uefi::boot::image_handle();
-    let mut fs =
-        uefi::boot::get_image_file_system(image_handle).expect("Failed to get file system");
-    let mut volume = (*fs).open_volume().expect("Failed to open volume");
+    let mut fs = uefi::boot::get_image_file_system(image_handle)
+        .map_err(|error| BootError::firmware("open boot filesystem", error.status()))?;
+    let mut volume = (*fs)
+        .open_volume()
+        .map_err(|error| BootError::firmware("open boot volume", error.status()))?;
 
     uefi::system::with_stdout(|stdout| {
         let _ = writeln!(stdout, "[boot] The filesystem is OK");
@@ -48,14 +73,14 @@ fn efi_main() -> Status {
             FileMode::Read,
             FileAttribute::empty(),
         )
-        .expect("Failed to open kernel.elf")
+        .map_err(|error| BootError::firmware("open kernel.elf", error.status()))?
         .into_regular_file()
-        .expect("kernel.elf is not a regular file");
+        .ok_or_else(|| BootError::invalid("kernel.elf is not a regular file"))?;
 
     let mut file_info_buf = [0u8; 512];
     let file_info = file
         .get_info::<FileInfo>(&mut file_info_buf)
-        .expect("Failed to get file info");
+        .map_err(|error| BootError::firmware("kernel file information", error.status()))?;
     let file_size = file_info.file_size() as usize;
 
     uefi::system::with_stdout(|stdout| {
@@ -63,13 +88,19 @@ fn efi_main() -> Status {
     });
 
     // Read kernel into memory
-    let mut buf = alloc::vec![0u8; file_size];
-    file.read(&mut buf).expect("Failed to read kernel");
-
-    let ptr = buf.as_mut_ptr();
-    let len = buf.len();
-    core::mem::forget(buf);
-    let kernel_data = unsafe { core::slice::from_raw_parts(ptr, len) };
+    let mut buf = alloc::vec::Vec::new();
+    buf.try_reserve_exact(file_size)
+        .map_err(|_| BootError::out_of_resources("kernel file buffer"))?;
+    buf.resize(file_size, 0u8);
+    let read = file
+        .read(&mut buf)
+        .map_err(|error| BootError::firmware("read kernel.elf", error.status()))?;
+    if read != file_size {
+        return Err(BootError::invalid(
+            "kernel.elf ended before its advertised size",
+        ));
+    }
+    drop(file);
 
     uefi::system::with_stdout(|stdout| {
         let _ = writeln!(stdout, "[boot] Kernel loaded OK");
@@ -79,7 +110,16 @@ fn efi_main() -> Status {
         let _ = writeln!(stdout, "[boot] Parsing kernel ELF file...");
     });
 
-    let elf_info = elf::parse_elf64(kernel_data).expect("Failed to parse kernel ELF");
+    let mut elf_info = elf::parse_elf64(&buf).map_err(BootError::invalid)?;
+    let kernel_allocation = boot_memory.allocate_preferred(
+        elf_info.phys_base,
+        elf_info.image_size(),
+        "kernel image pages",
+    )?;
+    // SAFETY: UEFI reserved this whole image before any segment is written.
+    // The source Vec is a separate, still-live UEFI allocation.
+    unsafe { elf_info.load_into(&buf, kernel_allocation) }.map_err(BootError::invalid)?;
+    drop(buf);
 
     uefi::system::with_stdout(|stdout| {
         let _ = writeln!(
@@ -90,7 +130,7 @@ fn efi_main() -> Status {
     });
 
     // Load modules
-    let module_list = modules::load_modules(&mut volume);
+    let module_list = modules::load_modules(&mut volume, &mut boot_memory)?;
 
     uefi::system::with_stdout(|stdout| {
         let _ = writeln!(stdout, "[boot] Modules: {}", module_list.len());
@@ -234,12 +274,75 @@ fn efi_main() -> Status {
     env_buf[env_len] = 0;
     let env_total_size = env_len + 1;
 
+    // Allocate every object that must survive the firmware before leaving UEFI.
+    let stack_size: u64 = 64 * 1024;
+    let stack = boot_memory.allocate(stack_size, "kernel transition stack")?;
+    let stack_base = stack.base;
+    let module_table_size = modules::module_table_size();
+    let module_table = boot_memory.allocate(module_table_size, "module table pages")?;
+    let module_table_base = module_table.base;
+    // SAFETY: the page allocation covers the complete fixed-capacity table.
+    unsafe { modules::write_module_table(module_list.as_slice(), module_table_base) }?;
+    drop(module_list);
+
+    let environment = boot_memory.allocate(env_total_size as u64, "environment pages")?;
+    let env_phys_base = environment.base;
+    unsafe {
+        core::ptr::copy_nonoverlapping(env_buf.as_ptr(), env_phys_base as *mut u8, env_total_size);
+    }
+    let args_storage = boot_memory.allocate(
+        core::mem::size_of::<KernelArgs>() as u64,
+        "kernel arguments page",
+    )?;
+    let map_storage = boot_memory.allocate(
+        (MAX_MEMORY_REGIONS * core::mem::size_of::<MemoryRegion>()) as u64,
+        "kernel memory map pages",
+    )?;
+    let mmap_region_base = map_storage.base;
+    let framebuffer_size = (fb_stride as u64)
+        .checked_mul(fb_height as u64)
+        .ok_or_else(|| BootError::invalid("framebuffer size overflow"))?;
+    let table_pages = paging::page_table_pages(
+        elf_info.image_size(),
+        framebuffer_size,
+        env_total_size as u64,
+    )
+    .map_err(BootError::invalid)?;
+    let table_area = boot_memory.allocate(table_pages * PAGE_SIZE, "page-table arena")?;
+    let pml4_phys = unsafe {
+        paging::create_page_tables(
+            elf_info.phys_base,
+            elf_info.image_size(),
+            fb_phys,
+            framebuffer_size,
+            env_phys_base,
+            env_total_size as u64,
+            table_area,
+        )
+    }
+    .map_err(BootError::invalid)?;
+
+    drop(volume);
+    drop(fs);
+    // Preflight with all permanent reservations present. ExitBootServices obtains
+    // its own final map; conversion is repeated below with the same bounded buffer.
+    let preview = uefi::boot::memory_map(MemoryType::LOADER_DATA)
+        .map_err(|error| BootError::firmware("memory map preflight", error.status()))?;
+    convert_memory_map(&preview, boot_memory.reservations(), map_storage)
+        .map_err(BootError::invalid)?;
+    drop(preview);
+
     uefi::system::with_stdout(|stdout| {
         let _ = writeln!(stdout, "[boot] ExitBootServices...");
     });
 
-    let _mmap = uefi::boot::memory_map(MemoryType::LOADER_DATA).expect("Failed to get memory map");
+    boot_memory.retain_for_handoff();
     let mmap_iter = unsafe { uefi::boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) };
+
+    // No allocations, firmware calls or recoverable returns after this point.
+    // Split around the exact owned pages, including every module payload.
+    let region_count = convert_memory_map(&mmap_iter, boot_memory.reservations(), map_storage)
+        .unwrap_or_else(|reason| halt_after_boot_services(reason));
 
     // Re-initialize serial port after ExitBootServices
     unsafe {
@@ -269,225 +372,15 @@ fn efi_main() -> Status {
         }
     }
 
-    // Step 10: Convert memory map
-    let mut regions: [MemoryRegion; 512] = [MemoryRegion {
-        base: 0,
-        size: 0,
-        kind: MemoryKind::Null,
-    }; 512];
-    let mut region_count: usize = 0;
-
-    for entry in mmap_iter.entries() {
-        if region_count >= 512 {
-            break;
-        }
-        let base = entry.phys_start;
-        let size = entry.page_count * 4096;
-        if size == 0 {
-            continue;
-        }
-
-        let kind = match entry.ty {
-            MemoryType::CONVENTIONAL => MemoryKind::Free,
-            MemoryType::BOOT_SERVICES_CODE | MemoryType::BOOT_SERVICES_DATA => MemoryKind::Reclaim,
-            MemoryType::LOADER_CODE | MemoryType::LOADER_DATA => MemoryKind::Reclaim,
-            _ => MemoryKind::Reserved,
-        };
-
-        // Split Free regions around the loaded kernel image: without this,
-        // the kernel image (code, .bss, bootstrap stack) sits inside a Free
-        // region and the kernel's boot/buddy allocators hand its own memory
-        // back to itself : self-corruption, wild jumps (#UD mid-instruction).
-        // Limine used to do this for us; it's the bootloader's job now.
-        let mut cursor = base;
-        let end = base + size;
-        let image_start = elf_info.segments[0].phys_addr;
-        let image_end = elf_info.phys_end;
-        if kind == MemoryKind::Free && cursor < image_end && end > image_start {
-            // Emit [cursor, image_start) if non-empty
-            if cursor < image_start {
-                if region_count < 512 {
-                    regions[region_count] = MemoryRegion {
-                        base: cursor,
-                        size: image_start - cursor,
-                        kind,
-                    };
-                    region_count += 1;
-                }
-            }
-            // Emit [image_start, image_end) as Reserved
-            let rs = image_start.max(cursor);
-            let re = image_end.min(end);
-            if rs < re && region_count < 512 {
-                regions[region_count] = MemoryRegion {
-                    base: rs,
-                    size: re - rs,
-                    kind: MemoryKind::Reserved,
-                };
-                region_count += 1;
-            }
-            cursor = image_end.max(cursor);
-            // Emit remainder [cursor, end) if non-empty
-            if cursor < end && region_count < 512 {
-                regions[region_count] = MemoryRegion {
-                    base: cursor,
-                    size: end - cursor,
-                    kind,
-                };
-                region_count += 1;
-            }
-        } else if region_count < 512 {
-            regions[region_count] = MemoryRegion { base, size, kind };
-            region_count += 1;
-        }
-    }
-
-    fn alloc_from_free(
-        regions: &mut [MemoryRegion],
-        region_count: usize,
-        size: u64,
-        align: u64,
-    ) -> u64 {
-        for i in 0..region_count {
-            if regions[i].kind == MemoryKind::Free && regions[i].size >= size {
-                let aligned_base = (regions[i].base + align - 1) & !(align - 1);
-                let padding = aligned_base - regions[i].base;
-                let total = size + padding;
-                if regions[i].size >= total {
-                    regions[i].base += total;
-                    regions[i].size -= total;
-                    return aligned_base;
-                }
-            }
-        }
-        0
-    }
-
-    let mmap_count = region_count;
-    let mmap_byte_size = (mmap_count as u64) * (core::mem::size_of::<MemoryRegion>() as u64);
-    let mmap_region_size = (mmap_byte_size + 4095) & !4095;
-    let mut mmap_region_base = alloc_from_free(&mut regions, region_count, mmap_region_size, 4096);
-
-    if mmap_region_base != 0 {
-        unsafe {
-            let dst = mmap_region_base as *mut MemoryRegion;
-            core::ptr::copy_nonoverlapping(regions.as_ptr(), dst, mmap_count);
-        }
-    } else {
-        // Use a fixed location below 1MB (0x100000) that's not used by kernel
-        // or page tables. The page table allocator starts at phys_end, so we
-        // must avoid that range.
-        mmap_region_base = 0x90000;
-        unsafe {
-            let dst = mmap_region_base as *mut MemoryRegion;
-            core::ptr::copy_nonoverlapping(regions.as_ptr(), dst, mmap_count);
-        }
-    }
-
-    let stack_size: u64 = 64 * 1024;
-    let stack_base = alloc_from_free(&mut regions, region_count, stack_size, 16);
-
-    let module_table_size = modules::module_table_size(module_list.len());
-    let module_table_size_aligned = (module_table_size + 4095) & !4095;
-    let module_table_base =
-        alloc_from_free(&mut regions, region_count, module_table_size_aligned, 4096);
-
-    if module_table_base != 0 {
-        modules::write_module_table(module_list.as_slice(), module_table_base);
-    }
-
-    let env_size_aligned = (env_total_size as u64 + 4095) & !4095;
-    let env_phys_base = alloc_from_free(&mut regions, region_count, env_size_aligned, 4096);
-
-    // The four carve-outs above (mmap copy, kernel stack, module table, env)
-    // were taken from Free regions. Mark those slices Reserved so the kernel
-    // does not hand them out again through its boot/buddy allocators.
-    {
-        let mut protect = |start: u64, size: u64| {
-            if start == 0 || size == 0 {
-                return;
-            }
-            let s = start & !0xFFF;
-            let e = (start + size + 0xFFF) & !0xFFF;
-            // Scan by index: carving appends pieces to the end of `regions`,
-            // which would invalidate a mutating iterator.
-            let mut i = 0usize;
-            let mut scan_len = region_count;
-            while i < scan_len {
-                let (r_base, r_end) = (regions[i].base, regions[i].base + regions[i].size);
-                if regions[i].kind != MemoryKind::Free || s >= r_end || e <= r_base {
-                    i += 1;
-                    continue;
-                }
-                let cs = s.max(r_base);
-                let ce = e.min(r_end);
-                let left = (cs - r_base, r_base);
-                let right = (r_end - ce, ce);
-                regions[i].base = cs;
-                regions[i].size = ce - cs;
-                regions[i].kind = MemoryKind::Reserved;
-                if right.0 > 0 && region_count < 512 {
-                    regions[region_count] = MemoryRegion {
-                        base: right.1,
-                        size: right.0,
-                        kind: MemoryKind::Free,
-                    };
-                    region_count += 1;
-                }
-                if left.0 > 0 && region_count < 512 {
-                    regions[region_count] = MemoryRegion {
-                        base: left.1,
-                        size: left.0,
-                        kind: MemoryKind::Free,
-                    };
-                    region_count += 1;
-                }
-                // Newly appended Free pieces may still intersect [s, e) —
-                // extend the scan to cover them, but they are disjoint from
-                // [s,e) by construction, so we can just continue forward.
-                scan_len = region_count;
-                i += 1;
-            }
-        };
-        if mmap_region_base != 0x90000 && mmap_region_base != 0 {
-            protect(mmap_region_base, mmap_region_size);
-        }
-        protect(stack_base, stack_size);
-        protect(module_table_base, module_table_size_aligned);
-        protect(env_phys_base, env_size_aligned);
-        // The bootloader's own page tables (built after the kernel image + a
-        // 4 MiB margin) must never be handed out by the kernel's allocators:
-        // the kernel runs ON these tables. Zeroing an allocation over them
-        // destroys the active CR3 → instruction-fetch #PF.
-        let (pt_start, pt_end) = unsafe { paging::page_table_area() };
-        if pt_start != 0 && pt_end > pt_start {
-            protect(pt_start, pt_end - pt_start);
-        }
-        // Re-copy the final map into its (still valid) slot.
-        if mmap_region_base != 0 && mmap_region_base != 0x90000 {
-            unsafe {
-                let dst = mmap_region_base as *mut MemoryRegion;
-                core::ptr::copy_nonoverlapping(regions.as_ptr(), dst, region_count);
-            }
-        }
-    }
-
-    if env_phys_base != 0 {
-        unsafe {
-            let dst = env_phys_base as *mut u8;
-            core::ptr::copy_nonoverlapping(env_buf.as_ptr(), dst, env_total_size);
-        }
-    }
-
     // Step 11: Build KernelArgs
     let args = KernelArgs {
         magic: strat9_abi::boot::STRAT9_BOOT_MAGIC,
         abi_version: strat9_abi::boot::STRAT9_BOOT_ABI_VERSION,
-        kernel_base: elf_info.segments[0].phys_addr,
-        kernel_size: elf_info.phys_end - elf_info.segments[0].phys_addr,
+        kernel_base: elf_info.phys_base,
+        kernel_size: elf_info.phys_end - elf_info.phys_base,
         acpi_rsdp_base: rsdp_addr,
         memory_map_base: mmap_region_base,
-        memory_map_size: mmap_count as u64 * core::mem::size_of::<MemoryRegion>() as u64,
+        memory_map_size: region_count as u64 * core::mem::size_of::<MemoryRegion>() as u64,
         framebuffer_addr: fb_phys,
         framebuffer_width: fb_width,
         framebuffer_height: fb_height,
@@ -516,7 +409,7 @@ fn efi_main() -> Status {
         },
         bss_virt_size: {
             let kernel_virt_base: u64 = 0xFFFF_FFFF_8000_0000;
-            let kernel_size = elf_info.phys_end - elf_info.segments[0].phys_addr;
+            let kernel_size = elf_info.phys_end - elf_info.phys_base;
             let large_pages = ((kernel_size + 0x1FFFFF) / 0x200000).max(1);
             let mapped_end = kernel_virt_base + large_pages * 0x200000;
             let bss_base: u64 = {
@@ -536,96 +429,9 @@ fn efi_main() -> Status {
         },
     };
 
-    // Step 12: Page tables and context switch
-    unsafe {
-        let write_com1 = |s: &[u8]| {
-            let lsr: u16 = 0x3F8 + 5;
-            let thr: u16 = 0x3F8;
-            for &b in s {
-                loop {
-                    let status: u8;
-                    core::arch::asm!("in al, dx", out("al") status, in("dx") lsr, options(nomem, nostack));
-                    if status & 0x20 != 0 {
-                        break;
-                    }
-                }
-                core::arch::asm!("out dx, al", in("al") b, in("dx") thr, options(nomem, nostack));
-            }
-        };
-        write_com1(b"[boot] Creating page tables...\r\n");
-    }
-
-    // The page tables must map the actual physical memory used by the kernel.
-    // We use phys_end (which includes p_filesz + BSS_MAP_EXTRA) as the size.
-    // The BSS is virtual memory that the kernel will zero at its virtual addresses;
-    // we do NOT need to map 2GB of physical pages for it.
-    let pml4_phys = unsafe {
-        paging::create_page_tables(
-            elf_info.segments[0].phys_addr,
-            elf_info.phys_end,
-            elf_info.phys_end - elf_info.segments[0].phys_addr,
-            fb_phys,
-            fb_stride as u64 * fb_height as u64,
-            env_phys_base,
-            env_total_size as u64,
-        )
-    };
-
-    // NOW the page-table area is known (created above). Mark it Reserved in
-    // the map the kernel will read, and refresh the map copy the kernel
-    // consumes (mmap_region_base was allocated/carved before the tables
-    // existed, so the earlier protect pass could not cover them).
-    //
-    // NOTE: carve from Free AND Reclaim regions : the kernel treats Reclaim
-    // as allocatable (its buddy/boot allocators filter Free|Reclaim), and the
-    // PT frames here usually sit inside a big Reclaim extent (UEFI loader
-    // memory above the kernel image).
-    unsafe {
-        let (pt_start, pt_end) = paging::page_table_area();
-        if pt_start != 0 && pt_end > pt_start && mmap_region_base != 0 {
-            let mut i = 0usize;
-            let mut scan = region_count;
-            while i < scan {
-                let kind = regions[i].kind;
-                if kind != MemoryKind::Free && kind != MemoryKind::Reclaim {
-                    i += 1;
-                    continue;
-                }
-                let r_base = regions[i].base;
-                let r_end = r_base + regions[i].size;
-                if pt_start >= r_end || pt_end <= r_base {
-                    i += 1;
-                    continue;
-                }
-                // Split [r_base, r_end) into up to 3 parts around [pt_start, pt_end).
-                let left = (r_base, pt_start.min(r_end) - r_base);
-                let right = (pt_end.max(r_base), r_end - pt_end.max(r_base));
-                regions[i].base = pt_start.max(r_base);
-                regions[i].size = pt_end.min(r_end) - regions[i].base;
-                regions[i].kind = MemoryKind::Reserved;
-                if right.1 > 0 && region_count < 512 {
-                    regions[region_count] = MemoryRegion {
-                        base: right.0,
-                        size: right.1,
-                        kind,
-                    };
-                    region_count += 1;
-                }
-                if left.1 > 0 && region_count < 512 {
-                    regions[region_count] = MemoryRegion {
-                        base: left.0,
-                        size: left.1,
-                        kind,
-                    };
-                    region_count += 1;
-                }
-                scan = region_count;
-                i += 1;
-            }
-            let dst = mmap_region_base as *mut MemoryRegion;
-            core::ptr::copy_nonoverlapping(regions.as_ptr(), dst, region_count);
-        }
-    }
+    // The handoff itself lives in reserved pages, not on the firmware stack.
+    let args_ptr = args_storage.base as *mut KernelArgs;
+    unsafe { args_ptr.write(args) };
 
     unsafe {
         let write_com1 = |s: &[u8]| {
@@ -669,14 +475,14 @@ fn efi_main() -> Status {
         write_com1(b"  entry=");
         write_com1(hex_str(elf_info.entry, &mut hexbuf));
         write_com1(b"  args=");
-        write_com1(hex_str(&args as *const KernelArgs as u64, &mut hexbuf));
+        write_com1(hex_str(args_ptr as u64, &mut hexbuf));
         write_com1(b")\r\n");
         write_com1(b"[boot] mmap_base=");
         write_com1(hex_str(mmap_region_base, &mut hexbuf));
         write_com1(b" region_count=");
         write_com1(hex_str(region_count as u64, &mut hexbuf));
         // Print first region type to verify data
-        let first_kind: u64 = regions[0].kind.0;
+        let first_kind = (*(mmap_region_base as *const MemoryRegion)).kind.0;
         write_com1(b" first_kind=");
         write_com1(hex_str(first_kind, &mut hexbuf));
         write_com1(b"\r\n");
@@ -698,7 +504,6 @@ fn efi_main() -> Status {
         core::arch::asm!("mov cr4, {}", in(reg) cr4);
     }
 
-    let args_ptr = &args as *const KernelArgs;
     unsafe {
         // Force the compiler to keep pml4_phys in memory (prevent optimization)
         let pml4_val = core::ptr::read_volatile(&pml4_phys as *const u64);
@@ -742,4 +547,76 @@ impl<'a> BufWriter<'a> {
 fn buf_str(buf: &mut [u8]) -> BufWriter<'_> {
     buf.fill(0);
     BufWriter { buf, pos: 0 }
+}
+
+/// Convert directly into a preallocated, permanently reserved handoff buffer.
+fn convert_memory_map(
+    map: &impl MemoryMap,
+    reservations: &[PhysicalRange],
+    storage: PhysicalRange,
+) -> Result<usize, &'static str> {
+    let required = (MAX_MEMORY_REGIONS * core::mem::size_of::<MemoryRegion>()) as u64;
+    if storage.base == 0 || storage.base % PAGE_SIZE != 0 || storage.size < required {
+        return Err("invalid memory map allocation");
+    }
+    // SAFETY: callers supply BootMemory's exclusively owned zeroed map allocation.
+    // MemoryRegion consists entirely of integer fields, so zero is a valid value.
+    let output = unsafe {
+        core::slice::from_raw_parts_mut(storage.base as *mut MemoryRegion, MAX_MEMORY_REGIONS)
+    };
+    let mut builder = MemoryMapBuilder::new(output, reservations)?;
+    for entry in map.entries() {
+        let size = entry
+            .page_count
+            .checked_mul(PAGE_SIZE)
+            .ok_or("firmware memory descriptor size overflow")?;
+        let kind = match entry.ty {
+            MemoryType::CONVENTIONAL => MemoryKind::Free,
+            MemoryType::BOOT_SERVICES_CODE
+            | MemoryType::BOOT_SERVICES_DATA
+            | MemoryType::LOADER_CODE
+            | MemoryType::LOADER_DATA => MemoryKind::Reclaim,
+            _ => MemoryKind::Reserved,
+        };
+        builder.push(MemoryRegion {
+            base: entry.phys_start,
+            size,
+            kind,
+        })?;
+    }
+    if builder.len() == 0 {
+        return Err("empty firmware memory map");
+    }
+    Ok(builder.len())
+}
+
+/// Fatal errors after ExitBootServices must not unwind, return to UEFI, use its
+/// allocator, or wait forever for a serial port that may not exist.
+fn halt_after_boot_services(reason: &str) -> ! {
+    unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
+    let parts: [&[u8]; 3] = [b"[boot] FATAL: ", reason.as_bytes(), b"\r\n"];
+    for part in parts {
+        for &byte in part {
+            unsafe {
+                core::arch::asm!("out 0xe9, al", in("al") byte, options(nomem, nostack));
+                for _ in 0..10_000 {
+                    let status: u8;
+                    core::arch::asm!(
+                        "in al, dx", in("dx") 0x3FDu16, out("al") status,
+                        options(nomem, nostack),
+                    );
+                    if status & 0x20 != 0 {
+                        core::arch::asm!(
+                            "out dx, al", in("dx") 0x3F8u16, in("al") byte,
+                            options(nomem, nostack),
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    loop {
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+    }
 }
