@@ -90,6 +90,14 @@ impl DirtyRect {
     pub fn overlaps(self, other: DirtyRect) -> bool {
         self.x0 < other.x1 && self.x1 > other.x0 && self.y0 < other.y1 && self.y1 > other.y0
     }
+
+    /// Coalesce adjacent glyphs/rows without covering extra clean pixels.
+    fn adjacent(self, other: DirtyRect) -> bool {
+        (self.y0 == other.y0 && self.y1 == other.y1
+            && (self.x1 == other.x0 || other.x1 == self.x0))
+            || (self.x0 == other.x0 && self.x1 == other.x1
+                && (self.y1 == other.y0 || other.y1 == self.y0))
+    }
 }
 
 pub const MAX_DIRTY_RECTS: usize = 8;
@@ -126,7 +134,7 @@ impl DirtyRectSet {
                 idx += 1;
                 continue;
             }
-            if cur.overlaps(next) {
+            if cur.overlaps(next) || cur.adjacent(next) {
                 next.include(cur.x0, cur.y0, cur.width(), cur.height());
                 self.rects[idx] = self.rects[self.len - 1];
                 self.len -= 1;
@@ -242,11 +250,13 @@ impl CanvasBuffer {
         // Sync current HW content into back-buffer.
         if self.bpp == 32 {
             unsafe {
-                core::ptr::copy_nonoverlapping(
-                    self.addr as *const u8,
-                    buf.as_mut_ptr() as *mut u8,
-                    total * 4,
-                );
+                for y in 0..self.height {
+                    core::ptr::copy_nonoverlapping(
+                        self.addr.add(y * self.pitch),
+                        buf.as_mut_ptr().add(y * self.width) as *mut u8,
+                        self.width * 4,
+                    );
+                }
             }
         } else {
             for y in 0..self.height {
@@ -446,7 +456,7 @@ impl CanvasBuffer {
 
             // Fast path: row stride matches, blit contiguous block.
             if self.bpp == 32 {
-                if self.width == stride_pixels_u32 {
+                if self.width == stride_pixels_u32 && rx == 0 && rw == self.width {
                     let off = ry * self.width + rx;
                     let dst_off = ry * pitch + rx * 4;
                     unsafe {
@@ -525,10 +535,10 @@ impl CanvasBuffer {
 /// Minimum scheduler ticks between two throttled presents, shared by the
 /// VGA console writer and the video driver.
 ///
-/// `TIMER_HZ` is 100 (one tick = 10 ms), so 16 ticks ≈ 160 ms of pacing for
-/// redraw-heavy paths. Paths that pace themselves (the userspace compositor,
+/// `TIMER_HZ` is 100 (one tick = 10 ms): two ticks permit 50 FPS and bound
+/// throttling latency to 20 ms. Paths that pace themselves (the userspace compositor,
 /// `Framebuffer::swap_buffers`) do not go through this gate.
-pub const PRESENT_MIN_TICKS: u64 = 16;
+pub const PRESENT_MIN_TICKS: u64 = 2;
 
 impl FramebufferOps {
     pub fn detect() -> Self {

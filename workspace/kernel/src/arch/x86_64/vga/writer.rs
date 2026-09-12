@@ -523,7 +523,16 @@ impl VgaWriter {
 
     /// Performs the present operation.
     pub fn present(&mut self) {
+        self.present_inner(false);
+    }
+
+    fn present_inner(&mut self, force: bool) {
         if !self.enabled {
+            return;
+        }
+
+        if self.can().track_dirty && self.can().dirty.len == 0 {
+            self.canm().present_pending = false;
             return;
         }
 
@@ -531,7 +540,8 @@ impl VgaWriter {
         // Debug output calls present() very frequently; the human eye
         // cannot see >60 FPS, and each present() copies the full dirty region.
         let now = crate::process::scheduler::ticks();
-        if now.saturating_sub(self.canm().last_present_tick) < PRESENT_MIN_TICKS {
+        if !force && now != 0
+            && now.saturating_sub(self.can().last_present_tick) < PRESENT_MIN_TICKS {
             self.canm().present_pending = true;
             return;
         }
@@ -596,11 +606,22 @@ impl VgaWriter {
 
             if bpp == 32 {
                 let row_bytes = region.w * 4;
-                for y in region.y..(region.y + region.h) {
-                    let src = unsafe { buf_ptr.add(y * fb_width + region.x) as *const u8 };
-                    let dst_off = y * pitch + region.x * 4;
+                if region.x == 0 && region.w == fb_width && pitch == row_bytes {
+                    // Full-width scroll damage is contiguous in both buffers.
                     unsafe {
-                        core::ptr::copy_nonoverlapping(src, fb_addr.add(dst_off), row_bytes);
+                        core::ptr::copy_nonoverlapping(
+                            buf_ptr.add(region.y * fb_width) as *const u8,
+                            fb_addr.add(region.y * pitch),
+                            row_bytes * region.h,
+                        );
+                    }
+                } else {
+                    for y in region.y..(region.y + region.h) {
+                        let src = unsafe { buf_ptr.add(y * fb_width + region.x) as *const u8 };
+                        let dst_off = y * pitch + region.x * 4;
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(src, fb_addr.add(dst_off), row_bytes);
+                        }
                     }
                 }
             } else {
@@ -692,7 +713,7 @@ impl VgaWriter {
         }
         let now = crate::process::scheduler::ticks();
         if force || now.saturating_sub(self.canm().last_present_tick) >= PRESENT_MIN_TICKS {
-            self.present();
+            self.present_inner(force);
         }
     }
 
@@ -1927,11 +1948,13 @@ impl VgaWriter {
                 if self.enabled && !canvas.addr.is_null() {
                     if self.fmt.bpp == 32 {
                         unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                canvas.addr as *const u8,
-                                buf.as_mut_ptr() as *mut u8,
-                                total * 4,
-                            );
+                            for y in 0..canvas.height {
+                                core::ptr::copy_nonoverlapping(
+                                    canvas.addr.add(y * canvas.pitch),
+                                    buf.as_mut_ptr().add(y * canvas.width) as *mut u8,
+                                    canvas.width * 4,
+                                );
+                            }
                         }
                     } else {
                         for y in 0..canvas.height {
@@ -1958,7 +1981,8 @@ impl VgaWriter {
             let canvas = self.canm();
             canvas.draw_to_back = true;
             canvas.track_dirty = true;
-            canvas.dirty.clear();
+            // Damage belongs to the pending frame, not this text fragment.
+            // Keep it until present() has actually copied it to hardware.
         }
         (prev_draw_to_back, prev_track_dirty)
     }
@@ -1969,15 +1993,12 @@ impl VgaWriter {
             if !self.console_defer_present {
                 self.request_present();
                 let now = crate::process::scheduler::ticks();
-                let force_present = self.canm().last_present_tick == 0 || now == 0;
+                let force_present = !prev_draw_to_back || !prev_track_dirty || now == 0;
                 self.present_if_due(force_present);
             }
             let canvas = self.canm();
             canvas.draw_to_back = prev_draw_to_back;
             canvas.track_dirty = prev_track_dirty;
-            if !prev_track_dirty {
-                canvas.dirty.clear();
-            }
         }
     }
 
@@ -2333,6 +2354,9 @@ impl VgaWriter {
             let ch = b as char;
             self.write_char(ch);
             i += 1;
+        }
+        if self.draw_to_back_buffer() && self.can().dirty.len != 0 {
+            self.canm().present_pending = true;
         }
     }
 
