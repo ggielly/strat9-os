@@ -1,6 +1,6 @@
 //! Fixed-storage log queue. Safe publication under SMP and bounded overflow.
 use core::sync::atomic::{AtomicUsize, Ordering};
-use heapless::mpmc::MpMcQueue;
+use heapless::mpmc::Queue;
 
 pub const CAPACITY: usize = 512;
 pub const LINE_LEN: usize = 256;
@@ -18,14 +18,17 @@ impl Line {
 }
 
 pub struct LogQueue {
-    queue: MpMcQueue<Line, CAPACITY>,
+    queue: Queue<Line, CAPACITY>,
     written: AtomicUsize,
     dropped: AtomicUsize,
 }
 
 impl LogQueue {
+    // This lossy log sink permits transient enqueue failures and retries
+    // dequeue on the next display tick, as required by heapless::mpmc.
+    #[expect(deprecated, reason = "log drops and delayed dequeue are supported")]
     pub const fn new() -> Self {
-        Self { queue: MpMcQueue::new(), written: AtomicUsize::new(0), dropped: AtomicUsize::new(0) }
+        Self { queue: Queue::new(), written: AtomicUsize::new(0), dropped: AtomicUsize::new(0) }
     }
 
     pub fn push(&self, bytes: &[u8]) {
