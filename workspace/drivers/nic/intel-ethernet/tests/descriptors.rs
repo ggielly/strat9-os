@@ -4,11 +4,7 @@
 //! (§3.2.3 RX legacy, §3.3.3 TX legacy): the hardware reads these bytes
 //! directly : any padding/offset drift breaks DMA silently.
 
-use intel_ethernet::regs::*;
-use intel_ethernet::rx_errors;
-use intel_ethernet::rx_status;
-use intel_ethernet::tx_status;
-use intel_ethernet::{LegacyRxDesc, LegacyTxDesc};
+use intel_ethernet::{regs::*, rx_errors, rx_status, tx_status, LegacyRxDesc, LegacyTxDesc};
 use nic_queues::{RxDescriptor, RxRing, TxDescriptor};
 
 // ===========================================================================

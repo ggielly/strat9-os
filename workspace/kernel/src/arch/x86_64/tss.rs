@@ -70,7 +70,9 @@ pub fn init_cpu(cpu_index: usize) {
         let ist_addr = VirtAddr::from_ptr(stack_ptr);
         // Raw e9 output : format_args! + Port write hangs before IDT is loaded.
         for &b in b"TSS init OK\n" {
-            unsafe { core::arch::asm!("out 0xe9, al", in("al") b, options(nomem, nostack)); }
+            unsafe {
+                core::arch::asm!("out 0xe9, al", in("al") b, options(nomem, nostack));
+            }
         }
     }
 }

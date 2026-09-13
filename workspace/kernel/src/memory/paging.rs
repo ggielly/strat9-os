@@ -5,13 +5,16 @@
 //!
 //! Provides map/unmap/translate operations on the active page table.
 
-use crate::x86_crate_shim::registers::control::Cr3;
-use crate::x86_crate_shim::structures::paging::{
-        FrameAllocator as X86FrameAllocator, Mapper, OffsetPageTable, Page, PageTable,
-    Translate,
+use crate::{
+    arch::xshim::{PageTableFlags, PhysAddr, PhysFrame as X86PhysFrame, Size4KiB, VirtAddr},
+    x86_crate_shim::{
+        registers::control::Cr3,
+        structures::paging::{
+            FrameAllocator as X86FrameAllocator, Mapper, OffsetPageTable, Page, PageTable,
+            Translate,
+        },
+    },
 };
-use crate::arch::xshim::{PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB};
-use crate::arch::xshim::{PhysAddr, VirtAddr};
 
 use crate::{
     memory::frame::{FrameAllocOptions, FramePurpose},
@@ -81,11 +84,12 @@ unsafe impl X86FrameAllocator<Size4KiB> for BuddyFrameAllocator {
 impl crate::arch::x86_64::structures::paging::FrameAllocator<crate::arch::xshim::Size4KiB>
     for BuddyFrameAllocator
 {
-    fn allocate_frame(&mut self) -> Option<crate::arch::xshim::PhysFrame<crate::arch::xshim::Size4KiB>> {
+    fn allocate_frame(
+        &mut self,
+    ) -> Option<crate::arch::xshim::PhysFrame<crate::arch::xshim::Size4KiB>> {
         None // R2: real Sv48 frame allocation
     }
 }
-
 
 /// Paging initialization flag.
 static mut PAGING_READY: bool = false;

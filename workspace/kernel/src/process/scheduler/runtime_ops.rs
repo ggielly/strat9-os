@@ -233,7 +233,6 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
         core::arch::asm!("out 0xe9, al", in("al") b'K', options(nomem, nostack));
     }
 
-
     // Jump to the first task (never returns)
     // SAFETY: The context was set up by CpuContext::new with a valid stack frame.
     // Interrupts are disabled; the trampoline's `sti` re-enables them.

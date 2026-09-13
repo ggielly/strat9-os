@@ -4,7 +4,7 @@
 //! file system operations. Both kernel and userspace must agree on the
 //! exact memory layout (size, alignment, field ordering).
 
-use zerocopy::{FromBytes, IntoBytes, Immutable, KnownLayout};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 // ── IPC Message Constants ───────────────────────────────────────────────────
 

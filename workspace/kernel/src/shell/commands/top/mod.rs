@@ -312,8 +312,7 @@ fn compute_scheduler_metrics_window(
             now.deferred_work_raised[i].saturating_sub(prev.deferred_work_raised[i]),
         );
         deferred_processed_delta = deferred_processed_delta.saturating_add(
-            now.deferred_work_processed[i]
-                .saturating_sub(prev.deferred_work_processed[i]),
+            now.deferred_work_processed[i].saturating_sub(prev.deferred_work_processed[i]),
         );
     }
     let total = rt_delta
@@ -689,4 +688,3 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
     shell_println!("top: TUI requires a framebuffer console (not available yet)");
     Ok(())
 }
-

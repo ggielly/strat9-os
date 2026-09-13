@@ -21,7 +21,9 @@ pub fn sys_ipc_create_port(_flags: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
 
     // P1 fix: enforce per-process IPC quota.
-    task.process.ipc_quota.try_reserve(1)
+    task.process
+        .ipc_quota
+        .try_reserve(1)
         .map_err(|_| SyscallError::OutOfMemory)?;
 
     let port_id = port::create_port(task.id);
@@ -332,11 +334,10 @@ pub fn sys_ipc_reply(msg_ptr: u64) -> Result<u64, SyscallError> {
         msg.flags = new_id.as_u64() as u32;
     }
 
-    reply::deliver_reply(responder.id, target, msg)
-        .map_err(|e| match e {
-            reply::DeliverError::NoPendingCall => SyscallError::BadHandle,
-            reply::DeliverError::NotResponder => SyscallError::PermissionDenied,
-        })?;
+    reply::deliver_reply(responder.id, target, msg).map_err(|e| match e {
+        reply::DeliverError::NoPendingCall => SyscallError::BadHandle,
+        reply::DeliverError::NotResponder => SyscallError::PermissionDenied,
+    })?;
     Ok(0)
 }
 

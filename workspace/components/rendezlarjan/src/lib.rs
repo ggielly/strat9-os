@@ -23,5 +23,7 @@ extern crate alloc;
 pub mod sync;
 pub mod thread;
 
-pub use thread::{thread_create, thread_current, thread_exit, thread_join, thread_kill,
-                 thread_list, thread_yield, Builder, Thread, ThreadInfo};
+pub use thread::{
+    thread_create, thread_current, thread_exit, thread_join, thread_kill, thread_list,
+    thread_yield, Builder, Thread, ThreadInfo,
+};

@@ -133,8 +133,7 @@ impl RealTimeClassRq {
     fn reset_budget(task: &Task, now: u64) {
         task.rt_budget_remaining
             .store(RT_BUDGET_TICKS, Ordering::Relaxed);
-        task.rt_budget_period_start
-            .store(now, Ordering::Relaxed);
+        task.rt_budget_period_start.store(now, Ordering::Relaxed);
         task.rt_degraded.store(false, Ordering::Relaxed);
     }
 

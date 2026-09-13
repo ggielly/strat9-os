@@ -1,10 +1,12 @@
 //! Level 1: one function per `/thread` control file.
 
-use alloc::boxed::Box;
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{boxed::Box, string::String, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
-use strat9_syscall::{call, error::{Error, Result}, flag};
+use strat9_syscall::{
+    call,
+    error::{Error, Result},
+    flag,
+};
 
 const THREAD_DIR: &str = "/thread";
 
@@ -333,7 +335,11 @@ pub fn thread_list() -> Result<Vec<ThreadInfo>> {
         match b {
             b'0'..=b'9' => {
                 let v = cur.unwrap_or(0);
-                cur = Some(v.checked_mul(10).and_then(|x| x.checked_add((b - b'0') as u32)).unwrap_or(u32::MAX));
+                cur = Some(
+                    v.checked_mul(10)
+                        .and_then(|x| x.checked_add((b - b'0') as u32))
+                        .unwrap_or(u32::MAX),
+                );
             }
             b'\n' | b' ' | b'\r' | b'\t' => {
                 if let Some(v) = cur.take() {

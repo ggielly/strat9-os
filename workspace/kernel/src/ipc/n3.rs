@@ -1109,8 +1109,8 @@ fn map_page_in_space(
     target_va: u64,
     address_space: &AddressSpace,
 ) -> Result<(), &'static str> {
-    use crate::arch::xshim::{PageTableFlags, PhysFrame, Size4KiB};;
-    use crate::arch::xshim::{PhysAddr, VirtAddr};;
+    use crate::arch::xshim::{PageTableFlags, PhysFrame, Size4KiB};
+    use crate::arch::xshim::{PhysAddr, VirtAddr};
     use crate::x86_crate_shim::structures::paging::{Mapper, Page};
 
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(target_va));
@@ -1159,8 +1159,10 @@ fn map_msg_buf_in_both_spaces(
 
 /// Unmap a single page from an address space and shoot down TLB on all CPUs.
 fn unmap_page_in_space(target_va: u64, address_space: &AddressSpace) {
-    use crate::arch::xshim::{Size4KiB, VirtAddr};
-    use crate::x86_crate_shim::structures::paging::{Mapper, Page};
+    use crate::{
+        arch::xshim::{Size4KiB, VirtAddr},
+        x86_crate_shim::structures::paging::{Mapper, Page},
+    };
 
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(target_va));
     let mut mapper = unsafe { address_space.mapper() };
@@ -1450,9 +1452,7 @@ impl IpcProducer for N3Transport {
 
                 // Send sync IPI. On x86-64, the ICR write is serializing,
                 // which provides an implicit full barrier (spec §9.2).
-                if let Some(target_apic) =
-                    crate::arch::percpu::apic_id_by_cpu_index(target_cpu)
-                {
+                if let Some(target_apic) = crate::arch::percpu::apic_id_by_cpu_index(target_cpu) {
                     send_n3_sync_ipi(target_apic);
                 }
             }

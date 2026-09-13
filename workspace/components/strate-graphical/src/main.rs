@@ -870,9 +870,7 @@ pub extern "C" fn _start() -> ! {
     log("[display-server] step 7: initial composite...");
     srv.composite();
     present_full(dfd as u32, dmg_fd as u32, &srv.buf, &mut packet_scratch);
-    prev_frame.copy_from_slice(unsafe {
-        core::slice::from_raw_parts(srv.buf.ptr, fb_sz)
-    });
+    prev_frame.copy_from_slice(unsafe { core::slice::from_raw_parts(srv.buf.ptr, fb_sz) });
     log("[display-server]   initial frame presented");
 
     log("[display-server] === entering main loop ===");
@@ -944,8 +942,13 @@ pub extern "C" fn _start() -> ! {
 
         let bpp_bytes = (srv.buf.bpp / 8) as usize;
         let cur = unsafe { core::slice::from_raw_parts(srv.buf.ptr, fb_sz) };
-        match damage_bbox(&prev_frame, cur, srv.buf.stride as usize, srv.buf.h as usize, bpp_bytes)
-        {
+        match damage_bbox(
+            &prev_frame,
+            cur,
+            srv.buf.stride as usize,
+            srv.buf.h as usize,
+            bpp_bytes,
+        ) {
             None => {}
             Some((x, y, w, h)) => {
                 let sent = present_rect(
@@ -959,13 +962,7 @@ pub extern "C" fn _start() -> ! {
                     h,
                 );
                 if sent {
-                    sync_prev_rect(
-                        &mut prev_frame,
-                        cur,
-                        srv.buf.stride as usize,
-                        y,
-                        h,
-                    );
+                    sync_prev_rect(&mut prev_frame, cur, srv.buf.stride as usize, y, h);
                 }
             }
         }

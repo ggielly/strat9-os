@@ -2,11 +2,13 @@
 //!
 //! Defines the Task structure and related types for the Strat9-OS scheduler.
 
-use crate::memory::AddressSpace;
+use crate::{
+    arch::xshim::{PhysAddr, VirtAddr},
+    memory::AddressSpace,
+};
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use intrusive_collections::LinkedListLink;
-use crate::arch::xshim::{PhysAddr, VirtAddr};
 
 /// POSIX process ID.
 pub type Pid = u32;

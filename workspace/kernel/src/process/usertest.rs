@@ -6,8 +6,8 @@
 //!
 //! This tests the full SYSCALL/SYSRET pipeline without needing an ELF loader.
 
-use alloc::sync::Arc;
 use crate::arch::xshim::VirtAddr;
+use alloc::sync::Arc;
 
 use crate::{
     memory::address_space::{AddressSpace, VmaFlags, VmaType},

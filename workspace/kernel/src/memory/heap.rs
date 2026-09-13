@@ -14,13 +14,12 @@
 // Those helpers can hit a CPU-local cache (no global buddy lock) or fall back
 // to the global buddy lock as needed.
 
-use crate::{memory, sync::SpinLock};
+use crate::{arch::xshim::PhysAddr, memory, sync::SpinLock};
 use core::{
     alloc::{GlobalAlloc, Layout},
     ptr,
     sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
 };
-use crate::arch::xshim::PhysAddr;
 
 // ---------------------------------------------------------------------------
 // Slab size classes

@@ -124,7 +124,9 @@ pub fn init_cpu(cpu_index: usize) {
 
         // Raw e9 output : e9_println! with format_args hangs before IDT is loaded.
         for &b in b"GDT init OK\n" {
-            unsafe { core::arch::asm!("out 0xe9, al", in("al") b, options(nomem, nostack)); }
+            unsafe {
+                core::arch::asm!("out 0xe9, al", in("al") b, options(nomem, nostack));
+            }
         }
     }
 }

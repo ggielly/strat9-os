@@ -8,13 +8,13 @@
 //!  - [`sys_mprotect`] – change page permissions (SYS_MPROTECT = 104)
 
 use crate::{
+    arch::xshim::VirtAddr,
     memory::address_space::{VmaFlags, VmaType},
     process::current_task_clone,
     syscall::error::SyscallError,
 };
 use core::sync::atomic::Ordering;
 use strat9_abi::data::MemoryRegionInfo as MemoryRegionInfoAbi;
-use crate::arch::xshim::VirtAddr;
 
 // ================================================================================
 // Virtual address layout constants

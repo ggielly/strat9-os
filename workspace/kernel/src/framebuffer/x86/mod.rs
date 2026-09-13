@@ -15,8 +15,6 @@ use crate::framebuffer::{generic, FramebufferOps};
 pub mod sse2;
 
 pub fn detect_and_init_ops() -> FramebufferOps {
-
-
     let cpuid = raw_cpuid::CpuId::new();
 
     let has_sse41 = cpuid

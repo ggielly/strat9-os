@@ -20,9 +20,11 @@
 //! let n = user_buf.copy_to(&mut kernel_buf)?;
 //! ```
 
-use crate::syscall::error::SyscallError;
+use crate::{
+    arch::xshim::{PageTableFlags, Translate, VirtAddr},
+    syscall::error::SyscallError,
+};
 use alloc::vec::Vec;
-use crate::arch::xshim::{PageTableFlags, Translate, VirtAddr};
 
 // ===========================================================================
 // UserPod : marker trait for types safe to read/write via UserSlice
@@ -199,9 +201,10 @@ fn check_pages_mapped(
     len: usize,
     required_flags: PageTableFlags,
 ) -> Result<(), UserSliceError> {
-    use crate::x86_crate_shim::registers::control::Cr3;
-    use crate::x86_crate_shim::structures::paging::OffsetPageTable;
-    use crate::x86_crate_shim::structures::paging::PageTable;
+    use crate::x86_crate_shim::{
+        registers::control::Cr3,
+        structures::paging::{OffsetPageTable, PageTable},
+    };
 
     let hhdm = crate::memory::hhdm_offset();
     let phys_offset = VirtAddr::new(hhdm);

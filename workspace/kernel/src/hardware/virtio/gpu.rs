@@ -778,7 +778,7 @@ impl VirtioGpu {
             },
             resource_id: 1,
         };
-        let _ : Result<CtrlHeader, &'static str> =
+        let _: Result<CtrlHeader, &'static str> =
             self.send_command::<CmdResourceDetachBacking, CtrlHeader>(&det);
 
         let entry = MemEntry {

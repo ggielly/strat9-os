@@ -25,11 +25,11 @@
 //!   - User stack has a guard page (user_stack_base() - 4096) that is intentionally
 //!     left unmapped.  Stack underflows hit it and page-fault.
 //!
+use crate::{
+    arch::xshim::{Size4KiB, VirtAddr},
+    x86_crate_shim::structures::paging::{Mapper, Page},
+};
 use alloc::{sync::Arc, vec::Vec};
-use crate::x86_crate_shim::structures::paging::Page;
-use crate::arch::xshim::Size4KiB;
-use crate::x86_crate_shim::structures::paging::Mapper;
-use crate::arch::xshim::VirtAddr;
 
 use crate::{
     capability::Capability,
@@ -710,7 +710,9 @@ fn read_user_mapped_bytes(
         // SAFETY: src points to mapped physical memory via HHDM.
         // The address was just validated non-null, and the translate()
         // call guarantees the virtual address is backed by a valid frame.
-        unsafe { core::ptr::copy_nonoverlapping(src.add(page_off), out.as_mut_ptr().add(copied), chunk) };
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.add(page_off), out.as_mut_ptr().add(copied), chunk)
+        };
         copied += chunk;
         vaddr = vaddr
             .checked_add(chunk as u64)
@@ -769,7 +771,9 @@ fn write_user_mapped_bytes(
         // SAFETY: destination points to mapped user frame through HHDM.
         // The address was just validated non-null, and the translate()
         // call guarantees the virtual address is backed by a valid frame.
-        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr().add(written), dst.add(page_off), chunk) };
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr().add(written), dst.add(page_off), chunk)
+        };
         written += chunk;
         vaddr = vaddr
             .checked_add(chunk as u64)
@@ -1553,10 +1557,8 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     // enter Ring 3 (if it is not, no timer tick = no heartbeat = silent hang).
     unsafe {
         let lvt = crate::arch::apic::read_reg(crate::arch::apic::REG_LVT_TIMER);
-        let init_cnt =
-            crate::arch::apic::read_reg(crate::arch::apic::REG_TIMER_INIT);
-        let _cur_cnt =
-            crate::arch::apic::read_reg(crate::arch::apic::REG_TIMER_CURRENT);
+        let init_cnt = crate::arch::apic::read_reg(crate::arch::apic::REG_TIMER_INIT);
+        let _cur_cnt = crate::arch::apic::read_reg(crate::arch::apic::REG_TIMER_CURRENT);
         let _rflags_now: u64;
         core::arch::asm!("pushfq; pop {}", out(reg) _rflags_now, options(nostack));
         elf_trace!(
@@ -2034,8 +2036,7 @@ fn load_elf_task_inner(
             let relro_start = relro.p_vaddr.wrapping_add(load_bias) & !0xFFF;
             // A partial trailing page may contain writable data outside RELRO.
             // Protect only through the last complete page, never round up.
-            let relro_end =
-                (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz) & !0xFFF;
+            let relro_end = (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz) & !0xFFF;
             if relro_end > relro_start && relro_end <= USER_ADDR_MAX {
                 let ro_flags = VmaFlags {
                     readable: true,
@@ -2426,8 +2427,7 @@ pub fn load_elf_image(
             let relro_start = relro.p_vaddr.wrapping_add(load_bias) & !0xFFF;
             // A partial trailing page may contain writable data outside RELRO.
             // Protect only through the last complete page, never round up.
-            let relro_end =
-                (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz) & !0xFFF;
+            let relro_end = (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz) & !0xFFF;
             if relro_end > relro_start && relro_end <= USER_ADDR_MAX {
                 let ro_flags = VmaFlags {
                     readable: true,

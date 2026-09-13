@@ -142,7 +142,7 @@ impl BusDriver for Sun50iDe2 {
         if !self.regs.is_valid() {
             return Err(BusError::InitFailed);
         }
-    self.regs.check_user_offset(offset)?;
+        self.regs.check_user_offset(offset)?;
         Ok(self.regs.read32(offset))
     }
 

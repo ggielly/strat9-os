@@ -46,7 +46,8 @@ pub enum DeferredWork {
 
 impl DeferredWork {
     /// All work items combined.
-    const ALL: u32 = Self::IntervalTimers as u32 | Self::WakeDeadlines as u32 | Self::PerTaskAccounting as u32;
+    const ALL: u32 =
+        Self::IntervalTimers as u32 | Self::WakeDeadlines as u32 | Self::PerTaskAccounting as u32;
 }
 
 /// Per-CPU deferred work state.
@@ -93,8 +94,12 @@ pub fn raise_deferred_work(work: DeferredWork) {
     if cpu >= crate::arch::percpu::MAX_CPUS {
         return;
     }
-    DEFERRED_WORK[cpu].pending.fetch_or(work as u32, Ordering::Release);
-    DEFERRED_WORK[cpu].raised_count.fetch_add(1, Ordering::Relaxed);
+    DEFERRED_WORK[cpu]
+        .pending
+        .fetch_or(work as u32, Ordering::Release);
+    DEFERRED_WORK[cpu]
+        .raised_count
+        .fetch_add(1, Ordering::Relaxed);
 }
 
 /// Raise all tick-related deferred work items for the current CPU.

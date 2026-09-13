@@ -1874,8 +1874,8 @@ pub fn sys_module_load(fd_or_ptr: u64, len: u64) -> Result<u64, SyscallError> {
             let user = UserSliceRead::new(fd_or_ptr, len)?;
             if matches!(user.read_u8(0), Ok(b'/')) {
                 let path_buf = user.read_to_vec();
-                let path = core::str::from_utf8(&path_buf)
-                    .map_err(|_| SyscallError::InvalidArgument)?;
+                let path =
+                    core::str::from_utf8(&path_buf).map_err(|_| SyscallError::InvalidArgument)?;
                 let data = crate::vfs::get_initfs_file_bytes(path).ok_or_else(|| {
                     log::warn!("module_load: initfs path not found: '{}'", path);
                     SyscallError::NotFound
@@ -2291,9 +2291,9 @@ fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
             // could hold an unrelated capability at the same slot. Verify
             // the duplicated capability actually matches a resource that
             // was explicitly granted to this silo before seeding it.
-            let authorized = granted_resources.iter().any(|g| {
-                g.resource_type == dup.resource_type && g.resource == dup.resource
-            });
+            let authorized = granted_resources
+                .iter()
+                .any(|g| g.resource_type == dup.resource_type && g.resource == dup.resource);
             if !authorized {
                 log::warn!(
                     "[silo] start sid={}: cap handle {} does not match any \

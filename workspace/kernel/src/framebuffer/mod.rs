@@ -93,9 +93,9 @@ impl DirtyRect {
 
     /// Coalesce adjacent glyphs/rows without covering extra clean pixels.
     fn adjacent(self, other: DirtyRect) -> bool {
-        (self.y0 == other.y0 && self.y1 == other.y1
-            && (self.x1 == other.x0 || other.x1 == self.x0))
-            || (self.x0 == other.x0 && self.x1 == other.x1
+        (self.y0 == other.y0 && self.y1 == other.y1 && (self.x1 == other.x0 || other.x1 == self.x0))
+            || (self.x0 == other.x0
+                && self.x1 == other.x1
                 && (self.y1 == other.y0 || other.y1 == self.y0))
     }
 }

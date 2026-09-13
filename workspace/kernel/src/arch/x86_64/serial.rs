@@ -242,11 +242,17 @@ impl<W: fmt::Write> fmt::Write for BootPrefixWriter<'_, W> {
 
 /// Initialize the serial port
 pub fn init() {
-    unsafe { core::arch::asm!("out 0xe9, al", in("al") b'x', options(nomem, nostack)); }
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'x', options(nomem, nostack));
+    }
     SERIAL1.lock();
-    unsafe { core::arch::asm!("out 0xe9, al", in("al") b'y', options(nomem, nostack)); }
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'y', options(nomem, nostack));
+    }
     SERIAL1.lock().init();
-    unsafe { core::arch::asm!("out 0xe9, al", in("al") b'z', options(nomem, nostack)); }
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'z', options(nomem, nostack));
+    }
 }
 
 /// Parse kernel cmdline from UEFI bootloader boot arguments.

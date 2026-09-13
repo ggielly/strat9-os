@@ -30,7 +30,10 @@ fn net_ipc_header_layout() {
 
 #[test]
 fn net_ipc_reply_layout() {
-    let r = NetIpcReply { status: 0, payload_len: 42 };
+    let r = NetIpcReply {
+        status: 0,
+        payload_len: 42,
+    };
     assert_eq!(core::mem::size_of::<NetIpcReply>(), 8);
     let base = &r as *const _ as usize;
     assert_eq!(&r.status as *const _ as usize - base, 0);

@@ -316,8 +316,7 @@ impl IpcScheme {
         offset: u64,
         data: &[u8],
     ) -> Result<(IpcMessage, usize), SyscallError> {
-        WriteRequest::encode(OPCODE_WRITE, file_id, offset, data)
-            .ok_or(SyscallError::MessageSize)
+        WriteRequest::encode(OPCODE_WRITE, file_id, offset, data).ok_or(SyscallError::MessageSize)
     }
 
     /// Build an IPC message for close operation.

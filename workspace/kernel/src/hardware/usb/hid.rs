@@ -353,8 +353,8 @@ pub fn enumerate_device(port: usize, slot_id: u8, dev_desc: &[u8; 18]) {
                                     }
 
                                     let buf_size = ep_max_packet as usize;
-                                    let alloc_res =
-                                        controller.alloc_interrupt_buffer(slot_id, ep_num, buf_size);
+                                    let alloc_res = controller
+                                        .alloc_interrupt_buffer(slot_id, ep_num, buf_size);
                                     unsafe {
                                         core::arch::asm!("out 0xe9, al", in("al") b'K', options(nomem, nostack));
                                         core::arch::asm!("out 0xe9, al", in("al") if alloc_res.is_ok() { b'a' } else { b'A' }, options(nomem, nostack));

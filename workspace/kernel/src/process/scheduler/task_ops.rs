@@ -1,4 +1,4 @@
-use super::{runtime_ops::finish_switch, active_cpu_count, *};
+use super::{active_cpu_count, runtime_ops::finish_switch, *};
 use crate::{memory::UserSliceWrite, sync::FixedQueue};
 
 const PENDING_SILO_CLEANUPS_CAPACITY: usize = 256;
@@ -771,7 +771,9 @@ pub fn wake_task(id: TaskId) -> bool {
             // --- CPU placement: prefer last_cpu, then home_cpu ---
             let last = task.last_cpu.load(core::sync::atomic::Ordering::Relaxed);
             let home = task.home_cpu.load(core::sync::atomic::Ordering::Relaxed);
-            let n = crate::arch::smp::cpu_count().max(1).min(crate::arch::percpu::MAX_CPUS);
+            let n = crate::arch::smp::cpu_count()
+                .max(1)
+                .min(crate::arch::percpu::MAX_CPUS);
 
             let cpu_index = if last < n {
                 let last_ok = {
@@ -922,7 +924,9 @@ pub fn suspend_task(id: TaskId) -> bool {
                     .store(ci, core::sync::atomic::Ordering::Relaxed);
                 // Insert into BLOCKED_TASKS (rank 3).
                 lockdep_acquire(LockRank::Blocked, None);
-                super::BLOCKED_TASKS.lock().insert(current.id, current.clone());
+                super::BLOCKED_TASKS
+                    .lock()
+                    .insert(current.id, current.clone());
                 lockdep_release(LockRank::Blocked);
                 suspended = true;
                 if ci == my_cpu {
@@ -1019,7 +1023,9 @@ pub fn resume_task(id: TaskId) -> bool {
             // --- CPU placement: prefer last_cpu, then home_cpu ---
             let last = task.last_cpu.load(core::sync::atomic::Ordering::Relaxed);
             let home = task.home_cpu.load(core::sync::atomic::Ordering::Relaxed);
-            let n = crate::arch::smp::cpu_count().max(1).min(crate::arch::percpu::MAX_CPUS);
+            let n = crate::arch::smp::cpu_count()
+                .max(1)
+                .min(crate::arch::percpu::MAX_CPUS);
             let cpu_index = if last < n {
                 let last_ok = LOCAL_SCHEDULERS[last]
                     .lock()
@@ -1144,7 +1150,10 @@ pub fn kill_task(id: TaskId) -> bool {
                     lockdep_acquire(LockRank::IdentityW, None);
                     let mut identity = SCHED_IDENTITY.write();
                     GlobalSchedState::unregister_identity_locked(
-                        &mut identity, id, task_pid, current.tid,
+                        &mut identity,
+                        id,
+                        task_pid,
+                        current.tid,
                     );
                     identity.parent_of.remove(&current.id);
                     lockdep_release(LockRank::IdentityW);
@@ -1219,7 +1228,10 @@ pub fn kill_task(id: TaskId) -> bool {
                             lockdep_acquire(LockRank::IdentityW, None);
                             let mut identity = SCHED_IDENTITY.write();
                             GlobalSchedState::unregister_identity_locked(
-                                &mut identity, id, task_pid, task.tid,
+                                &mut identity,
+                                id,
+                                task_pid,
+                                task.tid,
                             );
                             lockdep_release(LockRank::IdentityW);
                             drop(identity);
@@ -1250,7 +1262,10 @@ pub fn kill_task(id: TaskId) -> bool {
                         lockdep_acquire(LockRank::IdentityW, None);
                         let mut identity = SCHED_IDENTITY.write();
                         GlobalSchedState::unregister_identity_locked(
-                            &mut identity, id, task_pid, task.tid,
+                            &mut identity,
+                            id,
+                            task_pid,
+                            task.tid,
                         );
                         lockdep_release(LockRank::IdentityW);
                         drop(identity);

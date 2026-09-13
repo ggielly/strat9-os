@@ -34,26 +34,25 @@ fn main() {
         let mut assembly = nasm_rs::Build::new();
         // nasm-rs otherwise selects MSVC's lib.exe from the HOST platform,
         // which cannot archive the ELF objects of x86_64-unknown-none.
-        assembly.archiver_is_msvc(
-            env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() == "msvc",
-        );
+        assembly.archiver_is_msvc(env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() == "msvc");
         for file in [
-                &format!("{asm_dir}/fill_avx2.asm"),
-                &format!("{asm_dir}/blit_avx2.asm"),
-            ] {
+            &format!("{asm_dir}/fill_avx2.asm"),
+            &format!("{asm_dir}/blit_avx2.asm"),
+        ] {
             assembly.file(file);
         }
         for flag in [
-                &format!("-I{asm_dir}/"),
-                &format!("-f{out_format}"),
-                "-DARCH_X86_64=1",
-                "-g",
-                "-F",
-                "dwarf",
-            ] {
+            &format!("-I{asm_dir}/"),
+            &format!("-f{out_format}"),
+            "-DARCH_X86_64=1",
+            "-g",
+            "-F",
+            "dwarf",
+        ] {
             assembly.flag(flag);
         }
-        assembly.compile("libframebuffer_asm.a")
+        assembly
+            .compile("libframebuffer_asm.a")
             .expect("NASM assembly of framebuffer routines failed");
 
         println!("cargo:rustc-link-lib=static=framebuffer_asm");

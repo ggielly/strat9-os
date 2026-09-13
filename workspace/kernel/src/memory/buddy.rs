@@ -11,6 +11,7 @@
 // CAS(REFCOUNT_UNUSED => 1) that catches double-free / free-list corruption
 // immediately rather than silently aliasing memory.
 
+use crate::arch::xshim::PhysAddr;
 #[allow(unused_imports)]
 use crate::{
     boot::entry::{MemoryKind, MemoryRegion},
@@ -32,7 +33,6 @@ use core::{
     mem, ptr,
     sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
 };
-use crate::arch::xshim::PhysAddr;
 
 const PAGE_SIZE: u64 = 4096;
 const DMA_MAX: u64 = 16 * 1024 * 1024;

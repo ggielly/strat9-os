@@ -5,8 +5,7 @@
 //! (single-threaded here; the CAS lock is exercised implicitly).
 
 use alloc_freelist::define_freelist_allocator;
-use core::alloc::GlobalAlloc;
-use core::alloc::Layout;
+use core::alloc::{GlobalAlloc, Layout};
 
 #[global_allocator]
 static ALLOC: TestAlloc = TestAlloc;

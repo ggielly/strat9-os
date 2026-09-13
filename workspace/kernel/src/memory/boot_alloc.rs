@@ -1,12 +1,12 @@
 //! Allocateur physique de boot pour les structures permanentes du noyau.
 
 use crate::{
+    arch::xshim::PhysAddr,
     boot::entry::{MemoryKind, MemoryRegion},
     memory::phys_to_virt,
     serial_println,
     sync::SpinLock,
 };
-use crate::arch::xshim::PhysAddr;
 
 const PAGE_SIZE: u64 = 4096;
 pub const MAX_BOOT_ALLOC_REGIONS: usize = 512;
@@ -469,7 +469,8 @@ impl BootAllocator {
 }
 
 static BOOT_ALLOCATOR: SpinLock<BootAllocator> = SpinLock::new(BootAllocator::new());
-static REBUILD_CALL_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static REBUILD_CALL_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 static PROTECTED_RANGES: SpinLock<[Option<(u64, u64)>; MAX_PROTECTED_RANGES]> =
     SpinLock::new([None; MAX_PROTECTED_RANGES]);
 

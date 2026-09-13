@@ -5,10 +5,12 @@
 //! straight from filesystem silos : the iterator must never panic and never
 //! read out of bounds.
 
-use strat9_syscall::dirent::{Dirent, DirentIter};
-use strat9_syscall::schemev2::SchemeV2;
-use strat9_syscall::sigabi::SigAbi;
 use strat9_abi::data::DirentHeader;
+use strat9_syscall::{
+    dirent::{Dirent, DirentIter},
+    schemev2::SchemeV2,
+    sigabi::SigAbi,
+};
 
 // ===========================================================================
 // Dirent construction

@@ -39,13 +39,13 @@
 
 pub mod channel;
 pub mod lifecycle;
-pub mod quota;
 pub mod lockfree_ring;
 pub mod mailbox;
 pub mod message;
 pub mod n1;
 pub mod n3;
 pub mod port;
+pub mod quota;
 pub mod reply;
 pub mod semaphore;
 pub mod shared_ring;
@@ -56,7 +56,6 @@ pub use channel::{
     channel, create_channel, destroy_channel, get_channel, ChanId, ChannelError, Receiver, Sender,
     SyncChan,
 };
-pub use quota::{IpcQuota, QuotaExceeded};
 pub use lifecycle::{MultiHandleDestroyError, MultiHandleResource};
 pub use lockfree_ring::LockFreeRing;
 pub use mailbox::IntrusiveMailbox;
@@ -66,6 +65,7 @@ pub use n3::{
     N3Transport, N3_SHARED_FRAME_VA,
 };
 pub use port::{create_port, destroy_port, get_port, IpcError, Port, PortId};
+pub use quota::{IpcQuota, QuotaExceeded};
 pub use semaphore::{
     create_semaphore, destroy_semaphore, get_semaphore, PosixSemaphore, SemId, SemaphoreError,
 };

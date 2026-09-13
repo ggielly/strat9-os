@@ -101,7 +101,10 @@ impl SchedState {
     /// Returns `true` if the task is in a scheduling-eligible state.
     #[inline]
     pub fn is_runnable_like(self) -> bool {
-        matches!(self, SchedState::Runnable { .. } | SchedState::Running { .. })
+        matches!(
+            self,
+            SchedState::Runnable { .. } | SchedState::Running { .. }
+        )
     }
 }
 
@@ -150,10 +153,11 @@ impl LockdepState {
     pub(crate) const fn new() -> Self {
         Self {
             depth: 0,
-            held: [
-                HeldLock { rank: LockRank::Global, cpu: None, caller: 0 };
-                6
-            ],
+            held: [HeldLock {
+                rank: LockRank::Global,
+                cpu: None,
+                caller: 0,
+            }; 6],
         }
     }
 
@@ -166,7 +170,8 @@ impl LockdepState {
                 panic!(
                     "lockdep: SCHED_IDENTITY read held at depth {}, cannot acquire {:?} \
                      (read path must not chain to scheduler locks)",
-                    self.depth - 1, rank
+                    self.depth - 1,
+                    rank
                 );
             }
             // LOCAL must never be held while acquiring another LOCAL.
@@ -176,7 +181,10 @@ impl LockdepState {
                         panic!(
                             "lockdep: two LOCAL locks simultaneously (held {:?} at depth {}, \
                              acquiring LOCAL[{}] at depth {})",
-                            self.held[i], i, cpu.unwrap(), self.depth
+                            self.held[i],
+                            i,
+                            cpu.unwrap(),
+                            self.depth
                         );
                     }
                 }
@@ -185,7 +193,9 @@ impl LockdepState {
             if (rank as u8) <= (top.rank as u8) {
                 panic!(
                     "lockdep: lock order violation at depth {}: held {:?}, acquiring {:?}",
-                    self.depth - 1, top, rank
+                    self.depth - 1,
+                    top,
+                    rank
                 );
             }
         }
@@ -215,7 +225,8 @@ impl LockdepState {
         if self.depth > 0 {
             panic!(
                 "lockdep: asserting no scheduler locks but depth={}, top={:?}",
-                self.depth, self.held[self.depth - 1]
+                self.depth,
+                self.held[self.depth - 1]
             );
         }
     }
@@ -227,7 +238,10 @@ impl LockdepState {
                 return;
             }
         }
-        panic!("lockdep: expected {:?} to be held, but depth={}", rank, self.depth);
+        panic!(
+            "lockdep: expected {:?} to be held, but depth={}",
+            rank, self.depth
+        );
     }
 
     /// Return the current depth.
@@ -778,8 +792,7 @@ struct SchedulerCpu {
 /// release, then attach under destination LOCAL.
 #[allow(dead_code)]
 pub(crate) static LOCAL_SCHEDULERS: [SpinLock<Option<SchedulerCpu>>;
-    crate::arch::percpu::MAX_CPUS] =
-    [const { SpinLock::new(None) }; crate::arch::percpu::MAX_CPUS];
+    crate::arch::percpu::MAX_CPUS] = [const { SpinLock::new(None) }; crate::arch::percpu::MAX_CPUS];
 
 /// Blocked tasks registry — rank 3 in the total lock order.
 ///
@@ -940,7 +953,8 @@ pub(crate) fn validate_scheduler_invariants() {
                     assert!(
                         seen_current.insert(tid),
                         "scheduler invariant: task {} is current on multiple CPUs (cpu={})",
-                        tid.as_u64(), cpu_idx
+                        tid.as_u64(),
+                        cpu_idx
                     );
                 }
             }
@@ -961,7 +975,9 @@ pub(crate) fn validate_scheduler_invariants() {
                         assert!(
                             cpu_idx < n,
                             "scheduler invariant: task_cpu[{}] = {} but cpu_count = {}",
-                            tid.as_u64(), cpu_idx, n
+                            tid.as_u64(),
+                            cpu_idx,
+                            n
                         );
                     }
                     _ => {}
@@ -1002,6 +1018,7 @@ pub use timer_ops::*;
 
 // Re-export deferred work module for metrics and raise functions.
 pub use deferred_work::{
-    DeferredWork, DeferredWorkMetrics, has_pending, metrics_snapshot as deferred_work_metrics,
-    process_deferred_work, raise_deferred_work, raise_tick_deferred_work, reset_metrics as reset_deferred_work_metrics,
+    has_pending, metrics_snapshot as deferred_work_metrics, process_deferred_work,
+    raise_deferred_work, raise_tick_deferred_work, reset_metrics as reset_deferred_work_metrics,
+    DeferredWork, DeferredWorkMetrics,
 };

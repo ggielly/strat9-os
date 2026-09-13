@@ -513,7 +513,10 @@ pub fn init() -> Result<usize, &'static str> {
     // Send INIT + single SIPI to each AP, one at a time.
     // Critical: each AP must consume the trampoline RSP before we overwrite
     // it for the next AP. We wait for AP_REACHED_RUST ack after each SIPI.
-    crate::serial_println!("[smp] init: sending INIT+SIPI to {} APs (sequential)", targets.len(),);
+    crate::serial_println!(
+        "[smp] init: sending INIT+SIPI to {} APs (sequential)",
+        targets.len(),
+    );
     for apic_id in &targets {
         AP_REACHED_RUST.store(usize::MAX, Ordering::Release);
 

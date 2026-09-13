@@ -51,21 +51,30 @@ impl IpcQuota {
     /// Returns `Ok(())` if the reservation fits within the process quota,
     /// `Err(QuotaExceeded)` otherwise.  On failure **nothing** is modified.
     pub fn try_reserve(&self, capacity: usize) -> Result<(), QuotaExceeded> {
-        let new_channels = self.channels.load(Ordering::Relaxed).checked_add(1)
+        let new_channels = self
+            .channels
+            .load(Ordering::Relaxed)
+            .checked_add(1)
             .ok_or(QuotaExceeded)?;
         if new_channels > MAX_CHANNELS_PER_PROCESS {
             return Err(QuotaExceeded);
         }
 
         let slots = capacity as u64;
-        let new_slots = self.queue_slots.load(Ordering::Relaxed).checked_add(slots)
+        let new_slots = self
+            .queue_slots
+            .load(Ordering::Relaxed)
+            .checked_add(slots)
             .ok_or(QuotaExceeded)?;
         if new_slots > MAX_QUEUE_SLOTS_PER_PROCESS {
             return Err(QuotaExceeded);
         }
 
         let bytes = slots * core::mem::size_of::<crate::ipc::message::IpcMessage>() as u64;
-        let new_bytes = self.buffered_bytes.load(Ordering::Relaxed).checked_add(bytes)
+        let new_bytes = self
+            .buffered_bytes
+            .load(Ordering::Relaxed)
+            .checked_add(bytes)
             .ok_or(QuotaExceeded)?;
         if new_bytes > MAX_BUFFERED_BYTES_PER_PROCESS {
             return Err(QuotaExceeded);

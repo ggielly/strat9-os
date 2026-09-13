@@ -26,13 +26,12 @@
 //! - **Cache order-0** : `buddy::alloc(0)` peut servir depuis le cache local ; le chemin
 //!   [`FrameAllocOptions::allocate`] applique quand même le CAS + epoch sur la même frame.
 
-use crate::{memory::boot_alloc::BootAllocator, sync::IrqDisabledToken};
+use crate::{arch::xshim::PhysAddr, memory::boot_alloc::BootAllocator, sync::IrqDisabledToken};
 use core::{
     mem::{self, offset_of},
     ptr,
     sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering},
 };
-use crate::arch::xshim::PhysAddr;
 
 // ==============================================================================
 // FrameAllocOptions  (Asterinas OSTD pattern)
@@ -734,10 +733,7 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
         None => {
             // Cannot back the metadata: keep it disabled (get_meta_slot will
             // panic with a clear message rather than corrupt memory).
-            crate::serial_force_println!(
-                "[frame] metadata alloc failed: need {} bytes",
-                bytes
-            );
+            crate::serial_force_println!("[frame] metadata alloc failed: need {} bytes", bytes);
             METADATA_BASE_VIRT.store(0, Ordering::Release);
             METADATA_FRAME_COUNT.store(0, Ordering::Release);
             return;
@@ -751,7 +747,11 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
         core::arch::asm!("out 0xe9, al", in("al") b'P', options(nomem, nostack));
         while shift < 64 {
             let nib = ((phys >> shift) & 0xF) as u8;
-            let c = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+            let c = if nib < 10 {
+                b'0' + nib
+            } else {
+                b'a' + nib - 10
+            };
             core::arch::asm!("out 0xe9, al", in("al") c, options(nomem, nostack));
             shift += 4;
         }
@@ -778,7 +778,11 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
         core::arch::asm!("out 0xe9, al", in("al") b'@', options(nomem, nostack));
         while shift < 64 {
             let nib = ((virt >> shift) & 0xF) as u8;
-            let c = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+            let c = if nib < 10 {
+                b'0' + nib
+            } else {
+                b'a' + nib - 10
+            };
             core::arch::asm!("out 0xe9, al", in("al") c, options(nomem, nostack));
             shift += 4;
         }

@@ -12,9 +12,14 @@ pub struct Line {
 }
 
 impl Line {
-    pub const EMPTY: Self = Self { bytes: [0; LINE_LEN], len: 0 };
+    pub const EMPTY: Self = Self {
+        bytes: [0; LINE_LEN],
+        len: 0,
+    };
 
-    pub fn as_bytes(&self) -> &[u8] { &self.bytes[..self.len] }
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
 }
 
 pub struct LogQueue {
@@ -28,11 +33,17 @@ impl LogQueue {
     // dequeue on the next display tick, as required by heapless::mpmc.
     #[expect(deprecated, reason = "log drops and delayed dequeue are supported")]
     pub const fn new() -> Self {
-        Self { queue: Queue::new(), written: AtomicUsize::new(0), dropped: AtomicUsize::new(0) }
+        Self {
+            queue: Queue::new(),
+            written: AtomicUsize::new(0),
+            dropped: AtomicUsize::new(0),
+        }
     }
 
     pub fn push(&self, bytes: &[u8]) {
-        if bytes.is_empty() { return; }
+        if bytes.is_empty() {
+            return;
+        }
         let mut line = Line::EMPTY;
         line.len = bytes.len().min(LINE_LEN - 1);
         line.bytes[..line.len].copy_from_slice(&bytes[..line.len]);
@@ -43,7 +54,13 @@ impl LogQueue {
         }
     }
 
-    pub fn pop(&self) -> Option<Line> { self.queue.dequeue() }
-    pub fn written(&self) -> usize { self.written.load(Ordering::Relaxed) }
-    pub fn dropped(&self) -> usize { self.dropped.load(Ordering::Relaxed) }
+    pub fn pop(&self) -> Option<Line> {
+        self.queue.dequeue()
+    }
+    pub fn written(&self) -> usize {
+        self.written.load(Ordering::Relaxed)
+    }
+    pub fn dropped(&self) -> usize {
+        self.dropped.load(Ordering::Relaxed)
+    }
 }

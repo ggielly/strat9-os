@@ -24,6 +24,7 @@
 //!
 
 use crate::{
+    arch::xshim::TranslateResult,
     memory::{resolve_handle, AddressSpace, EffectiveMapping, VmaPageSize},
     process::{
         current_task_clone,
@@ -39,7 +40,6 @@ use core::{
     mem::offset_of,
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
-use crate::arch::xshim::TranslateResult;
 /// Result returned by [`sys_fork`].
 pub struct ForkResult {
     pub child_pid: Pid,
@@ -301,9 +301,21 @@ fn build_child_task(
         },
         xcr0_mask: AtomicU64::new(parent.xcr0_mask.load(core::sync::atomic::Ordering::Relaxed)),
         rt_link: intrusive_collections::LinkedListLink::new(),
-        rt_budget_remaining: AtomicU64::new(parent.rt_budget_remaining.load(core::sync::atomic::Ordering::Relaxed)),
-        rt_budget_period_start: AtomicU64::new(parent.rt_budget_period_start.load(core::sync::atomic::Ordering::Relaxed)),
-        rt_degraded: AtomicBool::new(parent.rt_degraded.load(core::sync::atomic::Ordering::Relaxed)),
+        rt_budget_remaining: AtomicU64::new(
+            parent
+                .rt_budget_remaining
+                .load(core::sync::atomic::Ordering::Relaxed),
+        ),
+        rt_budget_period_start: AtomicU64::new(
+            parent
+                .rt_budget_period_start
+                .load(core::sync::atomic::Ordering::Relaxed),
+        ),
+        rt_degraded: AtomicBool::new(
+            parent
+                .rt_degraded
+                .load(core::sync::atomic::Ordering::Relaxed),
+        ),
         fair_wait_ticks: AtomicU64::new(0),
     });
 
@@ -381,12 +393,11 @@ pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
 /// Returns Ok(()) if the fault was successfully handled (COW resolution),
 /// or Err if it wasn't a COW fault (real access violation).
 pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<(), &'static str> {
-    use crate::memory::paging::BuddyFrameAllocator;
-    use crate::x86_crate_shim::structures::paging::Page;
-    use crate::arch::xshim::{PageTableFlags, Size2MiB, Size4KiB};
-    use crate::x86_crate_shim::structures::paging::Translate;
-use crate::x86_crate_shim::structures::paging::Mapper;
-    use crate::arch::xshim::VirtAddr;
+    use crate::{
+        arch::xshim::{PageTableFlags, Size2MiB, Size4KiB, VirtAddr},
+        memory::paging::BuddyFrameAllocator,
+        x86_crate_shim::structures::paging::{Mapper, Page, Translate},
+    };
 
     let mapping = address_space
         .effective_mapping_containing(virt_addr)
@@ -524,9 +535,7 @@ use crate::x86_crate_shim::structures::paging::Mapper;
             VmaPageSize::Small => unsafe {
                 let _ = mapper.map_to(
                     page,
-                    crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
-                        phys_frame_addr,
-                    ),
+                    crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(phys_frame_addr),
                     flags,
                     &mut frame_allocator,
                 );
@@ -535,9 +544,7 @@ use crate::x86_crate_shim::structures::paging::Mapper;
                 let huge_page = Page::<Size2MiB>::containing_address(VirtAddr::new(page_start));
                 let _ = mapper.map_to(
                     huge_page,
-                    crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(
-                        phys_frame_addr,
-                    ),
+                    crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(phys_frame_addr),
                     flags,
                     &mut frame_allocator,
                 );

@@ -5,9 +5,7 @@
 //! network). Existing in-crate tests cover the happy path; this file
 //! systematically covers boundaries, overflow, and endianness.
 
-use strate_fs_abstraction::safe_math::*;
-use strate_fs_abstraction::FsError;
-use strate_fs_abstraction::CheckedOps;
+use strate_fs_abstraction::{safe_math::*, CheckedOps, FsError};
 
 #[test]
 fn div_ceil_exact_and_inexact() {
@@ -16,7 +14,7 @@ fn div_ceil_exact_and_inexact() {
     assert_eq!(div_ceil(0, 5), Ok(0));
     assert_eq!(div_ceil(1, 1), Ok(1));
     assert_eq!(div_ceil(u64::MAX - 1, 2), Ok(u64::MAX / 2)); // even value: exact
-    // The naive (a+b-1)/b would overflow here; the implementation must not.
+                                                             // The naive (a+b-1)/b would overflow here; the implementation must not.
     assert_eq!(div_ceil(u64::MAX, 1), Ok(u64::MAX));
     assert_eq!(div_ceil(u64::MAX, u64::MAX), Ok(1));
     // Division by zero is an error, not a panic.
@@ -116,10 +114,7 @@ macro_rules! checked_ops_suite {
                 let zero: $t = 0;
                 let one: $t = 1;
                 assert_eq!(five.checked_sub_safe(five), Ok(zero));
-                assert_eq!(
-                    zero.checked_sub_safe(one),
-                    Err(FsError::ArithmeticOverflow)
-                );
+                assert_eq!(zero.checked_sub_safe(one), Err(FsError::ArithmeticOverflow));
             }
 
             #[test]
@@ -127,7 +122,10 @@ macro_rules! checked_ops_suite {
                 let bits = core::mem::size_of::<$t>() as u32 * 8;
                 let one: $t = 1;
                 assert_eq!(one.checked_shl_safe(bits), Err(FsError::ArithmeticOverflow));
-                assert_eq!(one.checked_shl_safe(bits + 1), Err(FsError::ArithmeticOverflow));
+                assert_eq!(
+                    one.checked_shl_safe(bits + 1),
+                    Err(FsError::ArithmeticOverflow)
+                );
                 assert_eq!(one.checked_shl_safe(bits - 1), Ok(one << (bits - 1)));
             }
 
@@ -138,8 +136,14 @@ macro_rules! checked_ops_suite {
                 let msb_only = <$t>::MAX / 2 + 1; // only MSB set
                 let three: $t = 3;
                 let zero: $t = 0;
-                assert_eq!(msb_only.checked_shl_safe(1), Err(FsError::ArithmeticOverflow));
-                assert_eq!(three.checked_shl_safe(bits - 1), Err(FsError::ArithmeticOverflow));
+                assert_eq!(
+                    msb_only.checked_shl_safe(1),
+                    Err(FsError::ArithmeticOverflow)
+                );
+                assert_eq!(
+                    three.checked_shl_safe(bits - 1),
+                    Err(FsError::ArithmeticOverflow)
+                );
                 // Zero shifts through anything.
                 assert_eq!(zero.checked_shl_safe(bits - 1), Ok(zero));
             }

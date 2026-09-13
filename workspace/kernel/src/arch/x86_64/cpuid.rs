@@ -9,7 +9,6 @@ use alloc::string::String;
 use bitflags::bitflags;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-
 bitflags! {
     /// Logical internal bitmap.
     ///
@@ -262,7 +261,7 @@ fn detect() -> CpuInfo {
     //  Leaf 0x01: main feature bits
     crate::e9_mark!(b'1');
     let (eax1, _ebx1, ecx1, edx1) = if max_leaf >= 1 {
-            cpuid(1, 0)
+        cpuid(1, 0)
     } else {
         (0, 0, 0, 0)
     };
@@ -484,8 +483,7 @@ fn detect() -> CpuInfo {
 fn default_xcr0_for(info: &CpuInfo) -> u64 {
     const SSE_BASE: u64 = XCR0_X87 | XCR0_SSE;
     const AVX_STATE: u64 = SSE_BASE | XCR0_AVX;
-    const AVX512_STATE: u64 =
-        AVX_STATE | XCR0_OPMASK | XCR0_ZMM_HI256 | XCR0_HI16_ZMM;
+    const AVX512_STATE: u64 = AVX_STATE | XCR0_OPMASK | XCR0_ZMM_HI256 | XCR0_HI16_ZMM;
 
     if !info.features.contains(CpuFeatures::XSAVE) {
         return SSE_BASE;
@@ -494,15 +492,11 @@ fn default_xcr0_for(info: &CpuInfo) -> u64 {
     let available = info.supported_xcr0;
     let mut wanted = SSE_BASE;
 
-    if info.features.contains(CpuFeatures::AVX)
-        && (available & AVX_STATE) == AVX_STATE
-    {
+    if info.features.contains(CpuFeatures::AVX) && (available & AVX_STATE) == AVX_STATE {
         wanted = AVX_STATE;
     }
 
-    if info.features.contains(CpuFeatures::AVX512F)
-        && (available & AVX512_STATE) == AVX512_STATE
-    {
+    if info.features.contains(CpuFeatures::AVX512F) && (available & AVX512_STATE) == AVX512_STATE {
         wanted = AVX512_STATE;
     }
 
@@ -516,11 +510,9 @@ impl CpuInfo {
     /// alone : that only reflects CPUID, not what the OS programmed.
     pub fn avx_usable(&self) -> bool {
         const REQUIRED: u64 = XCR0_X87 | XCR0_SSE | XCR0_AVX;
-        self.features.contains(
-            CpuFeatures::AVX
-                | CpuFeatures::XSAVE
-                | CpuFeatures::OSXSAVE,
-        ) && (self.supported_xcr0 & REQUIRED) == REQUIRED
+        self.features
+            .contains(CpuFeatures::AVX | CpuFeatures::XSAVE | CpuFeatures::OSXSAVE)
+            && (self.supported_xcr0 & REQUIRED) == REQUIRED
             && crate::arch::x86_64::cpuid_osxsave_enabled()
             && host_default_xcr0() & XCR0_AVX != 0
     }
@@ -532,10 +524,7 @@ impl CpuInfo {
         const REQUIRED: u64 =
             XCR0_X87 | XCR0_SSE | XCR0_AVX | XCR0_OPMASK | XCR0_ZMM_HI256 | XCR0_HI16_ZMM;
         self.features.contains(
-            CpuFeatures::AVX512F
-                | CpuFeatures::AVX
-                | CpuFeatures::XSAVE
-                | CpuFeatures::OSXSAVE,
+            CpuFeatures::AVX512F | CpuFeatures::AVX | CpuFeatures::XSAVE | CpuFeatures::OSXSAVE,
         ) && (self.supported_xcr0 & REQUIRED) == REQUIRED
             && crate::arch::x86_64::cpuid_osxsave_enabled()
             && host_default_xcr0() & REQUIRED == REQUIRED

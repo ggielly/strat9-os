@@ -1194,14 +1194,17 @@ impl XhciController {
         // controller's current dequeue position, and refresh the LINK TRB
         // with the toggled cycle so the controller wraps correctly.
         for i in 0..3 {
-            core::ptr::write_volatile(tr_ring.add((deq_start + i) % XHCI_RING_TRBS), Trb {
-                d0: 0, d1: 0, d2: 0, d3: 0,
-            });
+            core::ptr::write_volatile(
+                tr_ring.add((deq_start + i) % XHCI_RING_TRBS),
+                Trb {
+                    d0: 0,
+                    d1: 0,
+                    d2: 0,
+                    d3: 0,
+                },
+            );
         }
-        core::ptr::write_volatile(
-            tr_ring.add(XHCI_RING_TRBS - 1),
-            Trb::link(tr_phys, cycle),
-        );
+        core::ptr::write_volatile(tr_ring.add(XHCI_RING_TRBS - 1), Trb::link(tr_phys, cycle));
         deq = deq_start;
 
         let setup_phys = self.ctrl_transfer_buf_phys;

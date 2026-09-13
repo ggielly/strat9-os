@@ -316,7 +316,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                 loop {
                     let s: u8;
                     core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
-                    if s & 0x20 != 0 { break; }
+                    if s & 0x20 != 0 {
+                        break;
+                    }
                 }
                 core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
             }
@@ -337,7 +339,13 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         let lsr: u16 = 0x3F8 + 5;
         let msg = b"[km] after debug_assert\r\n";
         for &b in msg {
-            loop { let s: u8; core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags)); if s & 0x20 != 0 { break; } }
+            loop {
+                let s: u8;
+                core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
+                if s & 0x20 != 0 {
+                    break;
+                }
+            }
             core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
         }
     }
@@ -353,7 +361,13 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         let lsr: u16 = 0x3F8 + 5;
         let msg = b"[km] after boot_timestamp\r\n";
         for &b in msg {
-            loop { let s: u8; core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags)); if s & 0x20 != 0 { break; } }
+            loop {
+                let s: u8;
+                core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
+                if s & 0x20 != 0 {
+                    break;
+                }
+            }
             core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
         }
     }
@@ -368,7 +382,13 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         let lsr: u16 = 0x3F8 + 5;
         let msg = b"[km] before init_serial\r\n";
         for &b in msg {
-            loop { let s: u8; core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags)); if s & 0x20 != 0 { break; } }
+            loop {
+                let s: u8;
+                core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
+                if s & 0x20 != 0 {
+                    break;
+                }
+            }
             core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
         }
     }
@@ -411,7 +431,13 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         let lsr: u16 = 0x3F8 + 5;
         let msg = b"[km] IDT initialized\r\n";
         for &b in msg {
-            loop { let s: u8; core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags)); if s & 0x20 != 0 { break; } }
+            loop {
+                let s: u8;
+                core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
+                if s & 0x20 != 0 {
+                    break;
+                }
+            }
             core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
         }
     }
@@ -572,7 +598,11 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     crate::e9_println!("MM pre-regions");
     serial_println!("[init] Memory manager...");
-    serial_println!("[init] Memory map: 0x{:x} ({} bytes)", memory_map_base, memory_map_size);
+    serial_println!(
+        "[init] Memory map: 0x{:x} ({} bytes)",
+        memory_map_base,
+        memory_map_size
+    );
     // SAFETY: the loader keeps these handoff buffers reserved and identity-mapped.
     // Reject malformed extents/counts before any physical allocator consumes them.
     let regions = unsafe { args.memory_regions() }
@@ -586,8 +616,12 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         .unwrap_or_else(|error| panic!("Invalid boot modules: {}", error));
     serial_println!("[init] Memory regions count: {}", regions.len());
     if let Some(first) = regions.first() {
-        serial_println!("[init] First region: base={:#x} size={:#x} kind={:?}",
-            first.base, first.size, first.kind);
+        serial_println!(
+            "[init] First region: base={:#x} size={:#x} kind={:?}",
+            first.base,
+            first.size,
+            first.kind
+        );
     }
     // DEBUG: dump regions 0..6 on the E9 port (raw, no format_args).
     {
@@ -607,7 +641,11 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                 let mut shift = 0i32;
                 while shift < 40 {
                     let nib = ((base >> shift) & 0xF) as u8;
-                    let c = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+                    let c = if nib < 10 {
+                        b'0' + nib
+                    } else {
+                        b'a' + nib - 10
+                    };
                     core::arch::asm!("out 0xe9, al", in("al") c, options(nomem, nostack));
                     shift += 4;
                 }
@@ -615,7 +653,11 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                 shift = 0;
                 while shift < 40 {
                     let nib = ((size >> shift) & 0xF) as u8;
-                    let c = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+                    let c = if nib < 10 {
+                        b'0' + nib
+                    } else {
+                        b'a' + nib - 10
+                    };
                     core::arch::asm!("out 0xe9, al", in("al") c, options(nomem, nostack));
                     shift += 4;
                 }
@@ -922,10 +964,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         // Fallback: legacy PIC + PIT
         serial_println!("[init] APIC unavailable, falling back to legacy PIC");
         vga_println!("[..] Falling back to legacy PIC...");
-        arch::pic::init(
-            arch::pic::PIC1_OFFSET,
-            arch::pic::PIC2_OFFSET,
-        );
+        arch::pic::init(arch::pic::PIC1_OFFSET, arch::pic::PIC2_OFFSET);
         arch::pic::disable();
         arch::pic::enable_irq(0); // Timer
         arch::pic::enable_irq(1); // Keyboard

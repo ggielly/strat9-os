@@ -540,8 +540,10 @@ impl VgaWriter {
         // Debug output calls present() very frequently; the human eye
         // cannot see >60 FPS, and each present() copies the full dirty region.
         let now = crate::process::scheduler::ticks();
-        if !force && now != 0
-            && now.saturating_sub(self.can().last_present_tick) < PRESENT_MIN_TICKS {
+        if !force
+            && now != 0
+            && now.saturating_sub(self.can().last_present_tick) < PRESENT_MIN_TICKS
+        {
             self.canm().present_pending = true;
             return;
         }

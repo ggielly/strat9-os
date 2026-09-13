@@ -18,7 +18,10 @@ const MSG_SIZE: usize = core::mem::size_of::<IpcMessage>();
 
 // ABI contract: userspace hardcodes MSG_SIZE = 256.  If IpcMessage's size
 // changes, this assertion forces a deliberate review of the userspace ABI.
-const _: () = assert!(MSG_SIZE == 256, "IpcMessage size changed : update userspace ABI");
+const _: () = assert!(
+    MSG_SIZE == 256,
+    "IpcMessage size changed : update userspace ABI"
+);
 
 /// SYS_CHAN_CREATE (220): create a bounded sync-channel.
 pub fn sys_chan_create(capacity: u64) -> Result<u64, SyscallError> {
@@ -27,7 +30,9 @@ pub fn sys_chan_create(capacity: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
 
     // Reserve quota before creating the channel.
-    task.process.ipc_quota.try_reserve(cap)
+    task.process
+        .ipc_quota
+        .try_reserve(cap)
         .map_err(|_| SyscallError::OutOfMemory)?;
 
     let chan_id = match channel::create_channel(cap) {

@@ -18,13 +18,18 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use spin::Once;
-use crate::x86_crate_shim::registers::control::{Cr3, Cr3Flags};
-use crate::x86_crate_shim::structures::paging::{
-    mapper::TranslateResult, Mapper, OffsetPageTable, Page, PageTable, Translate,
+use crate::{
+    arch::xshim::{
+        PageTableFlags, PhysAddr, PhysFrame as X86PhysFrame, Size2MiB, Size4KiB, VirtAddr,
+    },
+    x86_crate_shim::{
+        registers::control::{Cr3, Cr3Flags},
+        structures::paging::{
+            mapper::TranslateResult, Mapper, OffsetPageTable, Page, PageTable, Translate,
+        },
+    },
 };
-use crate::arch::xshim::{PageTableFlags, PhysFrame as X86PhysFrame, Size2MiB, Size4KiB};
-use crate::arch::xshim::{PhysAddr, VirtAddr};
+use spin::Once;
 
 use crate::{
     capability::CapId,
@@ -643,10 +648,9 @@ impl AddressSpace {
                 VmaPageSize::Small => {
                     let page =
                         Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr)).unwrap();
-                    let phys_frame =
-                        crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
-                            frame.start_address,
-                        );
+                    let phys_frame = crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
+                        frame.start_address,
+                    );
                     match mapper.map_to(page, phys_frame, page_flags, &mut frame_allocator) {
                         Ok(flush) => {
                             flush.flush();
@@ -668,10 +672,9 @@ impl AddressSpace {
                 VmaPageSize::Huge => {
                     let page =
                         Page::<Size2MiB>::from_start_address(VirtAddr::new(page_addr)).unwrap();
-                    let phys_frame =
-                        crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(
-                            frame.start_address,
-                        );
+                    let phys_frame = crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(
+                        frame.start_address,
+                    );
                     page_flags |= PageTableFlags::HUGE_PAGE;
                     match mapper.map_to(page, phys_frame, page_flags, &mut frame_allocator) {
                         Ok(flush) => {
@@ -827,10 +830,9 @@ impl AddressSpace {
                     use crate::arch::xshim::Size4KiB;
                     let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
                         .map_err(|_| "Map 4K: invalid page address")?;
-                    let phys_frame =
-                        crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
-                            frame.start_address,
-                        );
+                    let phys_frame = crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
+                        frame.start_address,
+                    );
                     unsafe {
                         mapper
                             .map_to(page, phys_frame, page_flags, &mut frame_allocator)
@@ -842,10 +844,9 @@ impl AddressSpace {
                     use crate::arch::xshim::Size2MiB;
                     let page = Page::<Size2MiB>::from_start_address(VirtAddr::new(page_addr))
                         .map_err(|_| "Map 2M: invalid page address")?;
-                    let phys_frame =
-                        crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(
-                            frame.start_address,
-                        );
+                    let phys_frame = crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(
+                        frame.start_address,
+                    );
                     let mut huge_flags = page_flags;
                     huge_flags |= PageTableFlags::HUGE_PAGE;
                     unsafe {
@@ -1933,7 +1934,10 @@ impl AddressSpace {
                     let map_res: Result<(), &'static str> = match mapping.page_size {
                         VmaPageSize::Small => {
                             let page = Page::<Size4KiB>::from_start_address(vaddr).unwrap();
-                            let frame = crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(phys_frame_addr);
+                            let frame =
+                                crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
+                                    phys_frame_addr,
+                                );
                             child_mapper
                                 .map_to(page, frame, map_flags, &mut frame_allocator)
                                 .map(|f| f.ignore())
@@ -1941,7 +1945,10 @@ impl AddressSpace {
                         }
                         VmaPageSize::Huge => {
                             let page = Page::<Size2MiB>::from_start_address(vaddr).unwrap();
-                            let frame = crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(phys_frame_addr);
+                            let frame =
+                                crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(
+                                    phys_frame_addr,
+                                );
                             child_mapper
                                 .map_to(page, frame, map_flags, &mut frame_allocator)
                                 .map(|f| f.ignore())
@@ -2076,10 +2083,7 @@ impl AddressSpace {
         }
 
         if let Some((range_start, range_end)) = tlb_flush_range {
-            crate::arch::tlb::shootdown_range(
-                VirtAddr::new(range_start),
-                VirtAddr::new(range_end),
-            );
+            crate::arch::tlb::shootdown_range(VirtAddr::new(range_start), VirtAddr::new(range_end));
         }
         Ok(child)
     }

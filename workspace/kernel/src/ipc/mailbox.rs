@@ -160,7 +160,9 @@ impl NodePool {
             let tagged = self.head.load(Ordering::Relaxed);
             let gen = tagged >> POOL_GEN_SHIFT;
             unsafe {
-                (*ptr).next.store((tagged & POOL_PTR_MASK) as usize, Ordering::Relaxed);
+                (*ptr)
+                    .next
+                    .store((tagged & POOL_PTR_MASK) as usize, Ordering::Relaxed);
             }
             let new_tagged = (ptr as u64 & POOL_PTR_MASK) | ((gen + 1) << POOL_GEN_SHIFT);
             if self

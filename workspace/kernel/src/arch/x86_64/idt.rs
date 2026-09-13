@@ -400,15 +400,14 @@ extern "C" fn lapic_timer_inner(
     // resuming synthetic kernel frames from here is still not validated
     // (same-CPL iretq does not restore RSP/SS).
     if from_ring3 {
-        if let Some(decision) =
-            crate::process::scheduler::maybe_preempt_from_interrupt(cpu, frame)
+        if let Some(decision) = crate::process::scheduler::maybe_preempt_from_interrupt(cpu, frame)
         {
             if decision.next_rsp != 0 {
                 // TEMP DEBUG: dump the resume iret frame (rip/rsp) before switching.
                 unsafe {
                     let base = decision.next_rsp;
-                    let iret_rip = *(base as *const u64).add(15);   // after 15 GPRs
-                    let iret_rsp = *(base as *const u64).add(18);   // rip,cs,rflags,rsp
+                    let iret_rip = *(base as *const u64).add(15); // after 15 GPRs
+                    let iret_rsp = *(base as *const u64).add(18); // rip,cs,rflags,rsp
                     let hex = b"0123456789abcdef";
                     core::arch::asm!("out 0xe9, al", in("al") b'@', options(nomem, nostack));
                     core::arch::asm!("out 0xe9, al", in("al") b'R', options(nomem, nostack));

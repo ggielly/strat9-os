@@ -220,7 +220,13 @@ impl X2Apic {
     ///
     /// Programs the divide configuration, LVT entry, and initial count in the
     /// correct order (SDM requires: DIV → LVT → INIT_COUNT).
-    pub fn configure_timer(&self, initial_count: u32, vector: u8, periodic: bool, divide: TimerDivide) {
+    pub fn configure_timer(
+        &self,
+        initial_count: u32,
+        vector: u8,
+        periodic: bool,
+        divide: TimerDivide,
+    ) {
         let mut lvt = vector as u64;
         if periodic {
             lvt |= 1 << 17;
