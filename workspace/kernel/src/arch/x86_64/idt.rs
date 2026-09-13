@@ -13,6 +13,16 @@ use x86_64::{
     VirtAddr,
 };
 
+/// Kernel code segment selector for IDT entries.
+///
+/// At IDT init time the kernel runs under the UEFI firmware's GDT (CS=0x38),
+/// but we intentionally use the **kernel's** selector (0x08) so that once
+/// `gdt::init()` loads the real GDT the IDT entries are immediately valid.
+///
+/// Before `gdt::init()`, any exception will triple-fault because CS=0x08
+/// references a non-existent descriptor in the UEFI GDT.  That is acceptable:
+/// there should be no exceptions before the kernel GDT is live (the only
+/// known early #UD from `init_serial` / `uart_16550` is already disabled).
 const KERNEL_CODE_SELECTOR: SegmentSelector = SegmentSelector(0x08);
 
 #[repr(C, packed)]
@@ -123,9 +133,19 @@ fn needs_swapgs(cs: u16) -> bool {
     gs_base < 0xFFFF_8000_0000_0000
 }
 
-/// Static IDT storage (must be 'static for load())
-static mut IDT_STORAGE: InterruptDescriptorTable = InterruptDescriptorTable::new();
-static IDT_STORAGE_LOCK: AtomicBool = AtomicBool::new(false);
+/// Combined IDT storage + lock in a single struct to prevent memory corruption.
+/// The `static mut InterruptDescriptorTable` initialization was corrupting
+/// the adjacent `AtomicBool` lock.
+#[repr(C)]
+struct IdtStorage {
+    lock: AtomicBool,
+    idt: InterruptDescriptorTable,
+}
+
+static mut IDT_STORAGEWrapper: IdtStorage = IdtStorage {
+    lock: AtomicBool::new(false),
+    idt: InterruptDescriptorTable::new(),
+};
 static USER_PF_TRACE_BUDGET: AtomicU32 = AtomicU32::new(64);
 static RESCHED_IPI_TRACE_BUDGET: AtomicU32 = AtomicU32::new(32);
 
@@ -179,6 +199,11 @@ pub struct InterruptReturnDecision {
     pub old_fpu: *mut u8,
     pub new_fpu: *const u8,
 }
+
+const _: () = {
+    assert!(core::mem::size_of::<InterruptReturnDecision>() == 24);
+    assert!(core::mem::align_of::<InterruptReturnDecision>() == 8);
+};
 
 /// Raw Local APIC timer interrupt entry.
 ///
@@ -302,7 +327,13 @@ unsafe extern "C" fn resched_ipi_entry() -> ! {
         "add rsp, 32",
         "test rax, rax",
         "jz 3f",
-        "ud2",
+        // Non-fatal diagnostic: next_rsp != 0 in reschedule IPI path.
+        // Phase 1 contract: resched_ipi_hint only, no context switch.
+        "push rax",
+        "mov al, 0x21",   /* '!' : unexpected switch decision */
+        "out 0xe9, al",
+        "pop rax",
+        "jmp 3f",
         "3:",
         "pop r15",
         "pop r14",
@@ -353,19 +384,53 @@ extern "C" fn lapic_timer_inner(
         crate::process::signal::deliver_pending_signal_on_interrupt_return(frame);
     }
 
-    // Temporarily keep timer IRQs side-effect free with respect to stack
-    // switching. The raw `iretq`-based resume path is not yet correct for all
-    // contexts:
-    // - Ring 3 resumes can return with a shifted IRET frame under SMP load.
-    // - Ring 0 resumes are fundamentally different because same-CPL `iretq`
-    //   does not restore RSP/SS, so synthetic `SyscallFrame` resumes of kernel
-    //   tasks can continue with a bogus stack pointer and RIP=0.
-    // Keep only the reschedule hint here and let tasks switch on safer paths
-    // (blocking syscalls, explicit yields, future validated return path).
+    // Ring-3 preemption: a user task that spins without making syscalls
+    // never consumes a posted hint, so the CPU would spin forever and the
+    // shell would never be scheduled again. Run the full pick/switch from
+    // this raw naked timer stub via maybe_preempt_from_interrupt: it saves
+    // the outgoing task's frame pointer, picks the next task, seeds a
+    // kernel interrupt frame for first-launch tasks, and returns an
+    // iretq-compatible decision that the naked epilogue applies
+    // (fxsave -> rsp pivot -> fxrstor -> finish_interrupt_switch -> iretq).
+    //
+    // Ring-3-origin ticks take this path unconditionally. The interrupted
+    // Ring-3 frame is iretq-restorable by construction (the CPU pushed a
+    // clean IRET frame at entry, and SwapGsGuard restored kernel GS).
+    // Ring-0-origin ticks (interrupted kernel code) keep the hint path:
+    // resuming synthetic kernel frames from here is still not validated
+    // (same-CPL iretq does not restore RSP/SS).
+    if from_ring3 {
+        if let Some(decision) = crate::process::scheduler::maybe_preempt_from_interrupt(cpu, frame)
+        {
+            if decision.next_rsp != 0 {
+                // TEMP DEBUG: dump the resume iret frame (rip/rsp) before switching.
+                unsafe {
+                    let base = decision.next_rsp;
+                    let iret_rip = *(base as *const u64).add(15); // after 15 GPRs
+                    let iret_rsp = *(base as *const u64).add(18); // rip,cs,rflags,rsp
+                    let hex = b"0123456789abcdef";
+                    core::arch::asm!("out 0xe9, al", in("al") b'@', options(nomem, nostack));
+                    core::arch::asm!("out 0xe9, al", in("al") b'R', options(nomem, nostack));
+                    for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
+                        let nib = hex[((iret_rip >> sh) & 0xF) as usize];
+                        core::arch::asm!("out 0xe9, al", in("al") nib, options(nomem, nostack));
+                    }
+                    core::arch::asm!("out 0xe9, al", in("al") b'/', options(nomem, nostack));
+                    for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
+                        let nib = hex[((iret_rsp >> sh) & 0xF) as usize];
+                        core::arch::asm!("out 0xe9, al", in("al") nib, options(nomem, nostack));
+                    }
+                    core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                }
+                return decision;
+            }
+        }
+    }
     crate::process::scheduler::request_force_resched_hint(cpu);
     InterruptReturnDecision::default()
 }
 
+#[inline(never)]
 extern "C" fn resched_ipi_inner(
     frame: &mut crate::syscall::SyscallFrame,
 ) -> InterruptReturnDecision {
@@ -416,7 +481,9 @@ extern "C" fn resched_ipi_inner(
 
 #[inline]
 fn lock_idt_storage() {
-    while IDT_STORAGE_LOCK
+    // SAFETY: Only the lock field of the static mut is accessed, which is
+    // an AtomicBool : concurrent access is safe by design.
+    while unsafe { &IDT_STORAGEWrapper.lock }
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
@@ -426,15 +493,14 @@ fn lock_idt_storage() {
 
 #[inline]
 fn unlock_idt_storage() {
-    IDT_STORAGE_LOCK.store(false, Ordering::Release);
+    // SAFETY: Only the lock field of the static mut is accessed.
+    unsafe { &IDT_STORAGEWrapper.lock }.store(false, Ordering::Release);
 }
 
 pub fn init() {
-    crate::e9_println!("IDT lock start");
     lock_idt_storage();
-    crate::e9_println!("IDT locked, setting handlers");
     unsafe {
-        let idt = &raw mut IDT_STORAGE;
+        let idt = &raw mut IDT_STORAGEWrapper.idt;
 
         // CPU exceptions
         crate::e9_println!("IDT BP");
@@ -521,7 +587,7 @@ pub fn init() {
 pub fn load() {
     lock_idt_storage();
     unsafe {
-        let idt = &raw const IDT_STORAGE;
+        let idt = &raw const IDT_STORAGEWrapper.idt;
         (*idt).load_unsafe();
     }
     unlock_idt_storage();
@@ -531,7 +597,7 @@ pub fn load() {
 pub fn register_lapic_timer_vector(vector: u8) {
     lock_idt_storage();
     unsafe {
-        let idt = &raw mut IDT_STORAGE;
+        let idt = &raw mut IDT_STORAGEWrapper.idt;
         (&mut *idt)[vector]
             .set_handler_addr(VirtAddr::from_ptr(lapic_timer_entry as *const ()))
             .set_code_selector(KERNEL_CODE_SELECTOR);
@@ -552,7 +618,7 @@ pub fn register_ahci_irq(irq: u8) {
 
     lock_idt_storage();
     unsafe {
-        let idt = &raw mut IDT_STORAGE;
+        let idt = &raw mut IDT_STORAGEWrapper.idt;
         (&mut *idt)[vector]
             .set_handler_fn(ahci_handler)
             .set_code_selector(KERNEL_CODE_SELECTOR);
@@ -564,12 +630,12 @@ pub fn register_ahci_irq(irq: u8) {
 
 /// Register the NVMe storage controller IRQ handler for a specific vector.
 ///
-/// Used when MSI/MSI-X is active — the vector comes directly from
+/// Used when MSI/MSI-X is active : the vector comes directly from
 /// `msi::probe_and_enable()` instead of being derived from the IRQ line.
 pub fn register_nvme_irq_vector(vector: u8) {
     lock_idt_storage();
     unsafe {
-        let idt = &raw mut IDT_STORAGE;
+        let idt = &raw mut IDT_STORAGEWrapper.idt;
         (&mut *idt)[vector]
             .set_handler_fn(nvme_handler)
             .set_code_selector(KERNEL_CODE_SELECTOR);
@@ -590,7 +656,7 @@ pub fn register_nvme_irq(irq: u8) {
 
     lock_idt_storage();
     unsafe {
-        let idt = &raw mut IDT_STORAGE;
+        let idt = &raw mut IDT_STORAGEWrapper.idt;
         (&mut *idt)[vector]
             .set_handler_fn(nvme_handler)
             .set_code_selector(KERNEL_CODE_SELECTOR);
@@ -615,7 +681,7 @@ pub fn register_virtio_block_irq(irq: u8) {
 
     lock_idt_storage();
     unsafe {
-        let idt = &raw mut IDT_STORAGE;
+        let idt = &raw mut IDT_STORAGEWrapper.idt;
         (&mut *idt)[vector]
             .set_handler_fn(virtio_block_handler)
             .set_code_selector(KERNEL_CODE_SELECTOR);
@@ -632,7 +698,7 @@ pub fn register_virtio_block_irq(irq: u8) {
 pub fn register_xhci_irq_vector(vector: u8) {
     lock_idt_storage();
     unsafe {
-        let idt = &raw mut IDT_STORAGE;
+        let idt = &raw mut IDT_STORAGEWrapper.idt;
         (&mut *idt)[vector]
             .set_handler_fn(xhci_handler)
             .set_code_selector(KERNEL_CODE_SELECTOR);
@@ -651,7 +717,7 @@ pub fn register_xhci_irq(irq: u8) {
 
     lock_idt_storage();
     unsafe {
-        let idt = &raw mut IDT_STORAGE;
+        let idt = &raw mut IDT_STORAGEWrapper.idt;
         (&mut *idt)[vector]
             .set_handler_fn(xhci_handler)
             .set_code_selector(KERNEL_CODE_SELECTOR);
@@ -677,7 +743,7 @@ pub fn register_nic_irq(irq: u8) {
 
     lock_idt_storage();
     unsafe {
-        let idt = &raw mut IDT_STORAGE;
+        let idt = &raw mut IDT_STORAGEWrapper.idt;
         (&mut *idt)[vector]
             .set_handler_fn(nic_handler)
             .set_code_selector(KERNEL_CODE_SELECTOR);
@@ -698,6 +764,11 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
 }
 
 /// Performs the invalid opcode handler operation.
+///
+/// SAFETY: This handler uses ONLY raw asm for diagnostic output (no
+/// `log::error!`, no `e9_println!`, no `Port::write`). The `Port::write`
+/// path from the x86_64 crate can trigger re-entrant `#UD` in exception
+/// context, causing an infinite fault loop. Raw `out 0xe9, al` is safe.
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
     let cs = stack_frame.code_segment.0;
     let is_user = (cs & 3) == 3;
@@ -714,8 +785,47 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
             return;
         }
     }
-    log::error!("EXCEPTION: INVALID OPCODE\n{:#?}", stack_frame);
-    panic!("Invalid opcode");
+    // Emit raw e9 marker so we can confirm the handler fires.
+    crate::e9_mark!(b'#');
+    crate::e9_mark!(b'U');
+    crate::e9_mark!(b'D');
+    // Emit the faulting RIP as raw bytes (little-endian u64) for diagnosis.
+    // Use ONLY inline asm : no Rust function calls, no format_args, no
+    // to_le_bytes() : to avoid identity-mapped function pointer issues.
+    let rip: u64 = stack_frame.instruction_pointer.as_u64();
+    unsafe {
+        core::arch::asm!(
+            "out 0xe9, al",
+            "shr rcx, 8",
+            "mov al, cl",
+            "out 0xe9, al",
+            "shr rcx, 8",
+            "mov al, cl",
+            "out 0xe9, al",
+            "shr rcx, 8",
+            "mov al, cl",
+            "out 0xe9, al",
+            "shr rcx, 8",
+            "mov al, cl",
+            "out 0xe9, al",
+            "shr rcx, 8",
+            "mov al, cl",
+            "out 0xe9, al",
+            "shr rcx, 8",
+            "mov al, cl",
+            "out 0xe9, al",
+            "shr rcx, 8",
+            "mov al, cl",
+            "out 0xe9, al",
+            inout("rcx") rip => _,
+            in("al") rip as u8,
+            options(nostack, nomem),
+        );
+    }
+    // Halt forever.
+    loop {
+        crate::arch::hlt();
+    }
 }
 
 extern "x86-interrupt" fn non_maskable_interrupt_handler(stack_frame: InterruptStackFrame) {
@@ -899,7 +1009,16 @@ extern "x86-interrupt" fn page_fault_handler(
                     );
                 }
 
-                match address_space.handle_fault(vaddr.as_u64()) {
+                // Demand paging only resolves missing pages. A present page
+                // with forbidden access must not take handle_fault's
+                // already-mapped success path and retry forever. COW was
+                // attempted above for recoverable write-protection faults.
+                let resolution = if error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) {
+                    Err("Unresolved user page protection violation")
+                } else {
+                    address_space.handle_fault(vaddr.as_u64())
+                };
+                match resolution {
                     Ok(()) => {
                         if do_pf_trace {
                             crate::serial_force_println!(
@@ -924,6 +1043,15 @@ extern "x86-interrupt" fn page_fault_handler(
                             vaddr.as_u64()
                         );
                         dump_user_pf_context(&address_space, rip, user_rsp);
+                        // Show the actual permissions at the faulting address,
+                        // including restrictive intermediate page-table entries.
+                        let (active_cr3, _) = x86_64::registers::control::Cr3::read();
+                        crate::serial_force_println!(
+                            "[pagefault] fault mapping: active_cr3={:#x} task_cr3={:#x}",
+                            active_cr3.start_address().as_u64(),
+                            address_space.cr3().as_u64()
+                        );
+                        dump_page_table_walk(vaddr.as_u64(), active_cr3.start_address().as_u64());
                     }
                 }
             }
@@ -1843,11 +1971,12 @@ extern "x86-interrupt" fn legacy_timer_handler(stack_frame: InterruptStackFrame)
         return;
     }
 
-    // FORCE OUTPUT for heartbeat (every 100 ticks to avoid flooding,
-    // plus first 10 ticks to confirm timer fires after Ring-3 entry)
+    // NOTE: serial_force_println! (formatted format_args!) can hang this IRQ
+    // handler (known vtable issue) : a hung timer handler kills all
+    // preemption. The tick counter itself is the trace: E9 raw pulses only.
     let ticks = crate::process::scheduler::ticks();
-    if ticks < 10 || ticks % 100 == 0 {
-        crate::serial_force_println!("[heartbeat] PIC timer tick={}", ticks);
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b't', options(nomem, nostack));
     }
 
     // Increment tick counter
@@ -1865,16 +1994,19 @@ extern "x86-interrupt" fn legacy_timer_handler(stack_frame: InterruptStackFrame)
     // Mirror the LAPIC timer policy: do not run maybe_preempt() directly
     // from a Ring-3-origin timer IRQ. The extern "x86-interrupt" frame
     // must unwind via iretq; switching away from it can corrupt the
-    // interrupt return state. Post a resched hint instead.
+    // interrupt return state.
+    //
+    // A posted hint is NOT enough: a Ring-3 task that spins without making
+    // syscalls never consumes it (the hint is only taken in maybe_preempt,
+    // called from syscall paths and kernel-side preemption), so nothing
+    // else on this CPU ever schedules again. Send a SELF resched IPI
+    // instead: the IPI handler has its own full context-save frame and can
+    // run the scheduler safely, then iretq back to whatever was running.
     let cpl = stack_frame.code_segment.0 & 3;
     if cpl == 3 {
-        let cpu = crate::arch::x86_64::percpu::current_cpu_index();
-        crate::process::scheduler::request_force_resched_hint(cpu);
+        crate::arch::x86_64::apic::self_ipi_resched();
     } else {
         crate::process::scheduler::maybe_preempt();
-    }
-    if ticks < 10 {
-        crate::serial_force_println!("[heartbeat] PIC timer tick={} preempt_done", ticks);
     }
 }
 
@@ -1887,14 +2019,9 @@ extern "x86-interrupt" fn lapic_timer_handler(stack_frame: InterruptStackFrame) 
     let ticks = crate::process::scheduler::ticks();
     // Trace first 10 ticks per CPU unconditionally to confirm timer fires
     // after Ring-3 entry, then one-per-100 heartbeat to avoid flooding.
-    if ticks < 10 || ticks % 100 == 0 {
-        crate::serial_force_println!(
-            "[heartbeat] APIC timer tick={} cpu={} cs={:#x} rip={:#x}",
-            ticks,
-            cpu,
-            cs,
-            stack_frame.instruction_pointer.as_u64()
-        );
+    unsafe {
+        // Raw pulse only : formatted prints hang the IRQ handler.
+        core::arch::asm!("out 0xe9, al", in("al") b'T', options(nomem, nostack));
     }
 
     // serial_force_println holds FORCE_LOCK (IRQ-disabled spinlock) while writing
@@ -1924,6 +2051,11 @@ extern "x86-interrupt" fn lapic_timer_handler(stack_frame: InterruptStackFrame) 
 
 /// PS/2 Mouse IRQ12 handler.
 extern "x86-interrupt" fn mouse_handler(_stack_frame: InterruptStackFrame) {
+    // TEMP DEBUG: mouse IRQ pulse on E9.
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'M', options(nomem, nostack));
+        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+    }
     crate::arch::x86_64::mouse::handle_irq();
     // PS/2 mouse IRQ12 is intentionally kept on the remapped legacy PIC path.
     // Even when LAPIC/IOAPIC are active for timer/IPI traffic, this source must
@@ -1934,6 +2066,12 @@ extern "x86-interrupt" fn mouse_handler(_stack_frame: InterruptStackFrame) {
 /// Performs the keyboard handler operation.
 extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
     let raw = unsafe { super::io::inb(0x60) };
+    // TEMP DEBUG: echo every scancode byte on the E9 port.
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'K', options(nomem, nostack));
+        core::arch::asm!("out 0xe9, al", in("al") raw, options(nomem, nostack));
+        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+    }
 
     // Feed scancode + TSC low bits into the entropy pool.
     crate::entropy::add_entropy(1, (raw as u64) ^ super::rdtsc());

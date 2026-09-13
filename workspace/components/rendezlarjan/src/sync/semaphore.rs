@@ -4,7 +4,7 @@
 //! value-change protocol makes lost wakeups impossible (a concurrent `post()`
 //! between the load and the park fails the futex compare immediately).
 
-use super::{futex_wake, futex_wait};
+use super::{futex_wait, futex_wake};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Counting semaphore.

@@ -1,10 +1,12 @@
-//! L2 — kernel sync primitives (FixedQueue, SpinLock) + namespace table.
+//! L2 : kernel sync primitives (FixedQueue, SpinLock) + namespace table.
 //!
 //! All code under test is the verbatim kernel source included by the
 //! mirror; only IRQ gating is faked (single-threaded host).
 
-use kernel_l2_tests::namespace;
-use kernel_l2_tests::sync::{FixedQueue, SpinLock};
+use kernel_l2_tests::{
+    namespace,
+    sync::{FixedQueue, SpinLock},
+};
 
 // ===========================================================================
 // FixedQueue: bounded ring with Result-preserving push
@@ -51,7 +53,10 @@ fn fixed_queue_wraparound_after_pops() {
     q.push_back(100).unwrap();
     q.push_back(101).unwrap();
     assert!(q.is_full());
-    assert_eq!((&[2, 3, 100, 101].iter().collect::<Vec<_>>()[..]), &q.iter().collect::<Vec<_>>());
+    assert_eq!(
+        (&[2, 3, 100, 101].iter().collect::<Vec<_>>()[..]),
+        &q.iter().collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -120,7 +125,10 @@ fn namespace_unbind_removes_binding() {
 #[test]
 fn namespace_rejects_invalid_paths() {
     assert!(namespace::bind("", 1).is_err(), "empty path accepted");
-    assert!(namespace::bind("relative", 1).is_err(), "relative path accepted");
+    assert!(
+        namespace::bind("relative", 1).is_err(),
+        "relative path accepted"
+    );
 }
 
 #[test]

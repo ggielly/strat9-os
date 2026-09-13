@@ -70,68 +70,26 @@ pub fn timer_tick() {
         request_force_resched_hint(cpu_idx);
     }
 
-    // BSP-only secondary bookkeeping: interval timers and sleep wakeups.
-    // NS_PER_TICK = 1_000_000_000 / TIMER_HZ (10_000_000 ns at 100 Hz).
-    // Both helpers acquire the scheduler lock internally via try_lock and
-    // skip silently when contended - no probe needed.
+    // Deferred tick processing: raise work items for processing at safe points
+    // (finish_switch, finish_interrupt_switch, idle loop). This moves heavy
+    // lock-acquiring work out of hardirq context, reducing IRQ latency.
+    //
+    // What remains in hardirq (lock-free only):
+    //   - Counter increments (lock-free atomics)
+    //   - FORCE_RESCHED_HINT (lock-free)
+    //   - Force-resched hint every 5 ticks
     if cpu_idx == 0 {
         let tick = TICK_COUNT.load(Ordering::Relaxed);
-        let current_time_ns = tick * NS_PER_TICK;
-        crate::process::timer::tick_all_timers(current_time_ns);
-        check_wake_deadlines(current_time_ns);
-
         if tick % 200 == 0 {
             crate::hardware::thermal::poll();
         }
     }
 
-    // Per-task accounting on this CPU : uses LOCAL lock only (no global GLOBAL_SCHED_STATE).
-    // This ensures timer ticks are never dropped due to another CPU holding GLOBAL_SCHED_STATE.
-    //
-    // Retry up to 3 times (back-to-back) if the LOCAL lock is contended.
-    // The lock holder is either the previous tick (short critical section) or
-    // a context switch (also short). Three retries cover >99.9% of cases
-    // without spinning long in IRQ context.
-    if cpu_is_valid(cpu_idx) {
-        const TICK_LOCK_RETRIES: usize = 3;
-        for attempt in 0..TICK_LOCK_RETRIES {
-            if let Some(mut guard) = LOCAL_SCHEDULERS[cpu_idx].try_lock_no_irqsave() {
-                if let Some(ref mut cpu) = *guard {
-                    let should_resched = if let Some(ref current_task) = cpu.current_task {
-                        let class = cpu.class_table.class_for_task(current_task);
-                        match class {
-                            crate::process::sched::SchedClassId::RealTime => {
-                                CPU_RT_RUNTIME_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
-                            }
-                            crate::process::sched::SchedClassId::Fair => {
-                                CPU_FAIR_RUNTIME_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
-                            }
-                            crate::process::sched::SchedClassId::Idle => {
-                                CPU_IDLE_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                        current_task.ticks.fetch_add(1, Ordering::Relaxed);
-                        cpu.current_runtime.update();
-                        cpu.class_rqs.update_current(
-                            &cpu.current_runtime,
-                            current_task,
-                            false,
-                            &cpu.class_table,
-                        )
-                    } else {
-                        false
-                    };
-                    if should_resched {
-                        cpu.need_resched = true;
-                    }
-                }
-                break;
-            }
-            if attempt == TICK_LOCK_RETRIES - 1 {
-                note_try_lock_fail_on_cpu(cpu_idx);
-            }
-        }
-    }
+    // Raise deferred work for all tick processing.
+    // Timer processing (interval timers, wake deadlines) was previously done
+    // inline on the BSP. Now ALL CPUs raise their own deferred work, and the
+    // processing happens at safe points on each CPU independently.
+    super::deferred_work::raise_tick_deferred_work();
 }
 
 /// Check wake deadlines for all tasks and wake up those whose sleep has expired.
@@ -150,22 +108,23 @@ pub fn timer_tick() {
 /// moved into the `deferred_drops` array. Those Arcs are dropped after the
 /// guard goes out of scope, ensuring `free_frames` is never called while the
 /// scheduler lock is held.
-fn check_wake_deadlines(current_time_ns: u64) {
+pub(super) fn check_wake_deadlines(current_time_ns: u64) {
     let mut ipi_targets = [false; crate::arch::percpu::MAX_CPUS];
     let my_cpu = current_cpu_index();
 
-    // Stack-allocated storage for tasks whose Arc must be dropped outside the
-    // scheduler lock. Sized to the same batch limit used for the scan so that
-    // we never need a heap allocation here.
     const BATCH: usize = 128;
     let mut deferred_drops: [Option<Arc<Task>>; BATCH] = [const { None }; BATCH];
     let mut drop_count = 0usize;
 
     {
-        // --- begin critical section (BLOCKED_TASKS lock held) ---
+        // Lock order: BLOCKED (rank 3) -> LOCAL (rank 4).
+        lockdep_acquire(LockRank::Blocked, None);
         let mut blocked = match super::BLOCKED_TASKS.try_lock_no_irqsave() {
             Some(guard) => guard,
-            None => return,
+            None => {
+                lockdep_release(LockRank::Blocked);
+                return;
+            }
         };
 
         let mut to_wake = [TaskId::from_u64(0); BATCH];
@@ -186,8 +145,36 @@ fn check_wake_deadlines(current_time_ns: u64) {
             if let Some(blocked_task) = blocked.remove(&id) {
                 blocked_task.wake_deadline_ns.store(0, Ordering::Relaxed);
                 blocked_task.set_state(TaskState::Ready);
+
+                // --- CPU placement: prefer last_cpu, then home_cpu ---
+                let last = blocked_task.last_cpu.load(Ordering::Relaxed);
                 let home = blocked_task.home_cpu.load(Ordering::Relaxed);
-                let cpu = if home != usize::MAX { home } else { 0 };
+                let n = active_cpu_count();
+                let cpu = if last < n {
+                    // Use try_lock to avoid blocking in IRQ context.
+                    let last_ok = LOCAL_SCHEDULERS[last]
+                        .try_lock_no_irqsave()
+                        .and_then(|guard| {
+                            let ok = guard
+                                .as_ref()
+                                .map(|c| c.class_rqs.runnable_len() <= 2)
+                                .unwrap_or(false);
+                            drop(guard);
+                            Some(ok)
+                        })
+                        .unwrap_or(false);
+                    if last_ok {
+                        last
+                    } else if home < n {
+                        home
+                    } else {
+                        0
+                    }
+                } else if home < n {
+                    home
+                } else {
+                    0
+                };
                 let class = {
                     use crate::process::sched::SchedClassId;
                     match blocked_task.sched_policy() {
@@ -199,32 +186,39 @@ fn check_wake_deadlines(current_time_ns: u64) {
                         crate::process::sched::SchedPolicy::Idle => SchedClassId::Idle,
                     }
                 };
-                if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu].lock() {
-                    // `enqueue` moves the Arc into the run-queue, so no
-                    // drop occurs here; the Arc is alive in class_rqs.
-                    local_cpu.class_rqs.enqueue(class, blocked_task);
-                    local_cpu.need_resched = true;
-                    if cpu != my_cpu && cpu_is_valid(cpu) {
-                        ipi_targets[cpu] = true;
+                // Use try_lock to avoid blocking in IRQ context. If the target
+                // CPU's LOCAL lock is contended, re-insert the task into
+                // BLOCKED_TASKS so it will be retried on the next tick.
+                match LOCAL_SCHEDULERS[cpu].try_lock_no_irqsave() {
+                    Some(mut guard) => {
+                        lockdep_acquire(LockRank::Local, Some(cpu));
+                        if let Some(ref mut local_cpu) = *guard {
+                            local_cpu.class_rqs.enqueue(class, blocked_task);
+                            local_cpu.need_resched = true;
+                            if cpu != my_cpu && cpu_is_valid(cpu) {
+                                ipi_targets[cpu] = true;
+                            }
+                        } else {
+                            // CPU slot not initialized — drop the task.
+                            if drop_count < BATCH {
+                                deferred_drops[drop_count] = Some(blocked_task);
+                                drop_count += 1;
+                            }
+                        }
+                        lockdep_release(LockRank::Local);
+                        drop(guard);
                     }
-                } else {
-                    // No valid CPU slot: stash for drop outside the lock.
-                    // This is the only path where an Arc<Task> can be the
-                    // last reference and trigger KernelStack::drop.
-                    if drop_count < BATCH {
-                        deferred_drops[drop_count] = Some(blocked_task);
-                        drop_count += 1;
+                    None => {
+                        // LOCAL lock contended — re-insert into BLOCKED_TASKS
+                        // so the next tick retries this wake.
+                        blocked_task.set_state(TaskState::Blocked);
+                        blocked.insert(id, blocked_task);
                     }
-                    // If deferred_drops is full the task Arc is dropped here,
-                    // still under the lock : but that case means we already
-                    // have 128 orphaned tasks with no valid CPU, which is a
-                    // bug elsewhere; emit a trace and accept the latency hit.
                 }
             }
         }
-        // `blocked` guard drops here : BLOCKED_TASKS lock released BEFORE any
-        // Arc<Task> drop and BEFORE send_resched_ipi_to_cpu.
-        // --- end critical section ---
+        lockdep_release(LockRank::Blocked);
+        drop(blocked);
     }
     // Drop orphaned task Arcs outside the scheduler lock so that
     // KernelStack::drop => free_frames => buddy_alloc.lock() does not race

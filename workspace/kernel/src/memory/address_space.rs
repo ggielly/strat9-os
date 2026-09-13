@@ -18,13 +18,18 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use spin::Once;
-use crate::x86_crate_shim::registers::control::{Cr3, Cr3Flags};
-use crate::x86_crate_shim::structures::paging::{
-    mapper::TranslateResult, Mapper, OffsetPageTable, Page, PageTable, Translate,
+use crate::{
+    arch::xshim::{
+        PageTableFlags, PhysAddr, PhysFrame as X86PhysFrame, Size2MiB, Size4KiB, VirtAddr,
+    },
+    x86_crate_shim::{
+        registers::control::{Cr3, Cr3Flags},
+        structures::paging::{
+            mapper::TranslateResult, Mapper, OffsetPageTable, Page, PageTable, Translate,
+        },
+    },
 };
-use crate::arch::xshim::{PageTableFlags, PhysFrame as X86PhysFrame, Size2MiB, Size4KiB};
-use crate::arch::xshim::{PhysAddr, VirtAddr};
+use spin::Once;
 
 use crate::{
     capability::CapId,
@@ -231,6 +236,15 @@ impl AddressSpace {
             for i in 256..512 {
                 new_l4[i] = kernel_l4[i].clone();
             }
+
+            // NOTE: the kernel image stays SHARED (PML4[511] subtree) : the
+            // kernel must remain executable while a user CR3 is active (the
+            // scheduler, syscall entry and IRQ paths run in kernel mode under
+            // the user page tables). Isolation comes from the U/S page bits:
+            // kernel pages are supervisor-only, so CPL3 code cannot touch
+            // them. User binaries are linked in the LOW half (0x400000, see
+            // workspace/components/user-linker.ld), so there is no address
+            // conflict with the kernel image window.
         }
 
         // ---------- LAPIC low-half mapping (HHDM=0 workaround) ----------
@@ -488,7 +502,7 @@ impl AddressSpace {
             .checked_mul(page_bytes)
             .ok_or("Region length overflow")?;
         let end = start.checked_add(len).ok_or("Region end overflow")?;
-        const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
+        const USER_SPACE_END: u64 = crate::memory::userslice::USER_SPACE_END;
         if end > USER_SPACE_END {
             return Err("Region out of user-space range");
         }
@@ -558,6 +572,8 @@ impl AddressSpace {
     /// Handle a page fault by checking if the address falls within a reserved VMA.
     ///
     /// If it does, allocates a physical frame and maps it.
+    /// Only call this for non-present faults; existing mappings are accepted
+    /// for concurrent demand faults, without changing their permissions.
     pub fn handle_fault(&self, fault_addr: u64) -> Result<(), &'static str> {
         use crate::x86_crate_shim::structures::paging::mapper::MapToError;
 
@@ -632,10 +648,9 @@ impl AddressSpace {
                 VmaPageSize::Small => {
                     let page =
                         Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr)).unwrap();
-                    let phys_frame =
-                        crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
-                            frame.start_address,
-                        );
+                    let phys_frame = crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
+                        frame.start_address,
+                    );
                     match mapper.map_to(page, phys_frame, page_flags, &mut frame_allocator) {
                         Ok(flush) => {
                             flush.flush();
@@ -657,10 +672,9 @@ impl AddressSpace {
                 VmaPageSize::Huge => {
                     let page =
                         Page::<Size2MiB>::from_start_address(VirtAddr::new(page_addr)).unwrap();
-                    let phys_frame =
-                        crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(
-                            frame.start_address,
-                        );
+                    let phys_frame = crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(
+                        frame.start_address,
+                    );
                     page_flags |= PageTableFlags::HUGE_PAGE;
                     match mapper.map_to(page, phys_frame, page_flags, &mut frame_allocator) {
                         Ok(flush) => {
@@ -755,7 +769,7 @@ impl AddressSpace {
             .checked_mul(page_bytes)
             .ok_or("Region length overflow")?;
         let end = start.checked_add(len).ok_or("Region end overflow")?;
-        const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
+        const USER_SPACE_END: u64 = crate::memory::userslice::USER_SPACE_END;
         if end > USER_SPACE_END {
             return Err("Region out of user-space range");
         }
@@ -816,10 +830,9 @@ impl AddressSpace {
                     use crate::arch::xshim::Size4KiB;
                     let page = Page::<Size4KiB>::from_start_address(VirtAddr::new(page_addr))
                         .map_err(|_| "Map 4K: invalid page address")?;
-                    let phys_frame =
-                        crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
-                            frame.start_address,
-                        );
+                    let phys_frame = crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
+                        frame.start_address,
+                    );
                     unsafe {
                         mapper
                             .map_to(page, phys_frame, page_flags, &mut frame_allocator)
@@ -831,10 +844,9 @@ impl AddressSpace {
                     use crate::arch::xshim::Size2MiB;
                     let page = Page::<Size2MiB>::from_start_address(VirtAddr::new(page_addr))
                         .map_err(|_| "Map 2M: invalid page address")?;
-                    let phys_frame =
-                        crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(
-                            frame.start_address,
-                        );
+                    let phys_frame = crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(
+                        frame.start_address,
+                    );
                     let mut huge_flags = page_flags;
                     huge_flags |= PageTableFlags::HUGE_PAGE;
                     unsafe {
@@ -1021,7 +1033,7 @@ impl AddressSpace {
             .checked_mul(page_bytes)
             .ok_or("Shared region length overflow")?;
         let end = start.checked_add(len).ok_or("Shared region end overflow")?;
-        const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
+        const USER_SPACE_END: u64 = crate::memory::userslice::USER_SPACE_END;
         if end > USER_SPACE_END {
             return Err("Shared region out of user-space range");
         }
@@ -1245,15 +1257,19 @@ impl AddressSpace {
         // Remove from VMA tracking.
         self.regions.lock().remove(&start);
 
+        let end = start + (page_count as u64) * page_bytes;
+
+        // P0 fix: inter-CPU TLB shootdown after unmapping.
+        crate::arch::tlb::shootdown_range(VirtAddr::new(start), VirtAddr::new(end));
+
         log::trace!(
             "Unmapped region: {:#x}..{:#x} ({} pages, size={:?})",
             start,
-            start + (page_count as u64) * page_bytes,
+            end,
             page_count,
             page_size
         );
 
-        let end = start + (page_count as u64) * page_bytes;
         crate::trace_mem!(
             crate::trace::category::MEM_UNMAP,
             crate::trace::TraceKind::MemUnmap,
@@ -1288,7 +1304,7 @@ impl AddressSpace {
         }
         let page_bytes = page_size.bytes();
         let length = (n_pages as u64).checked_mul(page_bytes)?;
-        let upper_limit: u64 = 0x0000_8000_0000_0000; // USER_SPACE_END
+        let upper_limit: u64 = crate::memory::userslice::USER_SPACE_END;
 
         // Round hint up to a page boundary
         let mut candidate = (hint.saturating_add(page_bytes - 1)) & !(page_bytes - 1);
@@ -1506,6 +1522,12 @@ impl AddressSpace {
             cursor = range_end;
         }
 
+        // P0 fix: inter-CPU TLB shootdown after all PTE flag changes.
+        // Other CPUs may still hold stale RW translations in their TLB.
+        if touched {
+            crate::arch::tlb::shootdown_range(VirtAddr::new(addr), VirtAddr::new(end));
+        }
+
         if !touched {
             return Err("protect_range: no mapped region in range");
         }
@@ -1641,6 +1663,10 @@ impl AddressSpace {
                 }
             }
         }
+
+        // P0 fix: inter-CPU TLB shootdown after unmapping.
+        // Other CPUs may still have stale translations for the unmapped pages.
+        crate::arch::tlb::shootdown_range(VirtAddr::new(addr), VirtAddr::new(end));
 
         crate::silo::release_current_task_memory(released_bytes);
         Ok(())
@@ -1908,7 +1934,10 @@ impl AddressSpace {
                     let map_res: Result<(), &'static str> = match mapping.page_size {
                         VmaPageSize::Small => {
                             let page = Page::<Size4KiB>::from_start_address(vaddr).unwrap();
-                            let frame = crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(phys_frame_addr);
+                            let frame =
+                                crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
+                                    phys_frame_addr,
+                                );
                             child_mapper
                                 .map_to(page, frame, map_flags, &mut frame_allocator)
                                 .map(|f| f.ignore())
@@ -1916,7 +1945,10 @@ impl AddressSpace {
                         }
                         VmaPageSize::Huge => {
                             let page = Page::<Size2MiB>::from_start_address(vaddr).unwrap();
-                            let frame = crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(phys_frame_addr);
+                            let frame =
+                                crate::arch::xshim::PhysFrame::<Size2MiB>::containing_address(
+                                    phys_frame_addr,
+                                );
                             child_mapper
                                 .map_to(page, frame, map_flags, &mut frame_allocator)
                                 .map(|f| f.ignore())
@@ -2051,10 +2083,7 @@ impl AddressSpace {
         }
 
         if let Some((range_start, range_end)) = tlb_flush_range {
-            crate::arch::tlb::shootdown_range(
-                VirtAddr::new(range_start),
-                VirtAddr::new(range_end),
-            );
+            crate::arch::tlb::shootdown_range(VirtAddr::new(range_start), VirtAddr::new(range_end));
         }
         Ok(child)
     }

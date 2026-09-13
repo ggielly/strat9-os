@@ -4,7 +4,7 @@
 //! mutex*; any `notify_*` after that point bumps the counter, so the futex
 //! wait immediately returns and the recheck loop observes the predicate.
 
-use super::{futex_wait, futex_wake_all, futex_wake};
+use super::{futex_wait, futex_wake, futex_wake_all};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Condition variable paired with a [`Mutex`](super::Mutex).

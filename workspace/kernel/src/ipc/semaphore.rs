@@ -26,6 +26,8 @@ pub enum SemaphoreError {
     InvalidValue,
     #[error("semaphore not found")]
     NotFound,
+    #[error("interrupted by signal")]
+    Interrupted,
 }
 
 pub struct PosixSemaphore {
@@ -47,6 +49,10 @@ impl PosixSemaphore {
     /// Performs the wait operation.
     pub fn wait(&self) -> Result<(), SemaphoreError> {
         self.waitq.wait_until(|| {
+            // P2 fix: check for pending signals to avoid livelock.
+            if crate::process::signal::has_pending_signals() {
+                return Some(Err(SemaphoreError::Interrupted));
+            }
             if self.destroyed.load(Ordering::Acquire) {
                 return Some(Err(SemaphoreError::Destroyed));
             }

@@ -13,7 +13,7 @@ static FONT_8X16: [[u8; 16]; 95] = include!("font_data.rs");
 
 pub struct Renderer {
     fb_fd: usize,
-    /// /dev/display/damage — present commands ("present" / "x,y,w,h").
+    /// /dev/display/damage : present commands ("present" / "x,y,w,h").
     dmg_fd: usize,
     _fb_width: usize,
     _fb_height: usize,

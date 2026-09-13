@@ -1,12 +1,14 @@
-//! L1 — IPC payload codec: bounds, roundtrips, and corruption resistance.
+//! L1 : IPC payload codec: bounds, roundtrips, and corruption resistance.
 //!
 //! The codec is the only sanctioned way to pack data into the 240-byte
 //! `IpcMessage` payload. Every helper is bounds-checked via `Option`;
 //! these tests verify that NO input can panic and that valid roundtrips
 //! are exact.
 
-use strat9_abi::data::{IpcMessage, TimeSpec};
-use strat9_abi::ipc_codec::*;
+use strat9_abi::{
+    data::{IpcMessage, TimeSpec},
+    ipc_codec::*,
+};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 // ===========================================================================
@@ -103,7 +105,12 @@ struct TestReq {
 
 #[test]
 fn fixed_roundtrip_preserves_fields_and_header() {
-    let req = TestReq { b: 0x1234_5678_9ABC_DEF0, a: 0xDEAD_BEEF, c: 0xCAFE, _pad: [0; 2] };
+    let req = TestReq {
+        b: 0x1234_5678_9ABC_DEF0,
+        a: 0xDEAD_BEEF,
+        c: 0xCAFE,
+        _pad: [0; 2],
+    };
     let msg = encode_fixed(0x77, &req);
     assert_eq!(msg.msg_type, 0x77);
     assert_eq!(msg.sender, 0);
@@ -115,7 +122,16 @@ fn fixed_roundtrip_preserves_fields_and_header() {
 
 #[test]
 fn fixed_reply_sets_sender() {
-    let msg = encode_fixed_reply(0xABCD_EF01, 0x80, &TestReq { b: 2, a: 1, c: 3, _pad: [0; 2] });
+    let msg = encode_fixed_reply(
+        0xABCD_EF01,
+        0x80,
+        &TestReq {
+            b: 2,
+            a: 1,
+            c: 3,
+            _pad: [0; 2],
+        },
+    );
     assert_eq!(msg.sender, 0xABCD_EF01);
     assert_eq!(msg.msg_type, 0x80);
 }
@@ -138,7 +154,11 @@ fn decode_of_zeroed_payload_is_safe_for_frombytes_structs() {
 #[test]
 fn inline_blob_roundtrip() {
     let mut buf = [0u8; 64];
-    for (kind, data) in [(0u16, &b"/etc/passwd"[..]), (1, b"\x00\x01\xff"), (0xFFFF, b"x")] {
+    for (kind, data) in [
+        (0u16, &b"/etc/passwd"[..]),
+        (1, b"\x00\x01\xff"),
+        (0xFFFF, b"x"),
+    ] {
         assert!(InlineBlobHeader::write(&mut buf, 4, kind, data).is_some());
         let hdr = InlineBlobHeader::parse(&buf, 4).unwrap();
         assert_eq!(hdr.len as usize, data.len());
@@ -204,7 +224,10 @@ fn status_reply_success_and_error() {
     assert_eq!(ok.payload[0..4], [0, 0, 0, 0]);
 
     let err = IpcMessage::status_reply(1, strat9_abi::errno::EINVAL as u32);
-    assert_eq!(err.payload[0..4], (strat9_abi::errno::EINVAL as u32).to_le_bytes());
+    assert_eq!(
+        err.payload[0..4],
+        (strat9_abi::errno::EINVAL as u32).to_le_bytes()
+    );
 }
 
 #[test]
@@ -218,13 +241,44 @@ fn timespec_saturating_conversions() {
     assert_eq!((ts.tv_sec, ts.tv_nsec), (1, 500_000_000));
 
     // Negative components clamp to 0 (documented security fix)
-    assert_eq!(TimeSpec { tv_sec: -5, tv_nsec: 0 }.to_nanos(), 0);
-    assert_eq!(TimeSpec { tv_sec: -5, tv_nsec: -5 }.to_nanos(), 0);
+    assert_eq!(
+        TimeSpec {
+            tv_sec: -5,
+            tv_nsec: 0
+        }
+        .to_nanos(),
+        0
+    );
+    assert_eq!(
+        TimeSpec {
+            tv_sec: -5,
+            tv_nsec: -5
+        }
+        .to_nanos(),
+        0
+    );
     // ...and are rejected by the checked variant
-    assert_eq!(TimeSpec { tv_sec: -1, tv_nsec: 5 }.checked_to_nanos(), None);
-    assert_eq!(TimeSpec { tv_sec: 1, tv_nsec: -5 }.checked_to_nanos(), None);
+    assert_eq!(
+        TimeSpec {
+            tv_sec: -1,
+            tv_nsec: 5
+        }
+        .checked_to_nanos(),
+        None
+    );
+    assert_eq!(
+        TimeSpec {
+            tv_sec: 1,
+            tv_nsec: -5
+        }
+        .checked_to_nanos(),
+        None
+    );
 
     // Saturation instead of overflow
-    let huge = TimeSpec { tv_sec: i64::MAX, tv_nsec: 999_999_999 };
+    let huge = TimeSpec {
+        tv_sec: i64::MAX,
+        tv_nsec: 999_999_999,
+    };
     assert_eq!(huge.to_nanos(), u64::MAX);
 }

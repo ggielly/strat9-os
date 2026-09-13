@@ -1,19 +1,21 @@
 //! In-flight silo manager tests (selftest feature).
 //!
 //! Two families, each assertion traced to the review commit it pins:
-//! 1. **Pure-function suite** — pledge monotonicity, config validation,
+//! 1. **Pure-function suite** : pledge monotonicity, config validation,
 //!    unveil normalisation (dot-segment rejection), path-rule boundaries,
 //!    tier derivation, fault packing, labels, output ring buffer.
-//! 2. **Lifecycle e2e** — spawn/duplicate-label/rename/stop/rename/
+//! 2. **Lifecycle e2e** : spawn/duplicate-label/rename/stop/rename/
 //!    destroy through the public `kernel_*` API, plus quota adjustment
 //!    and pledge escalation rejection.
 
 use super::{
-    normalize_unveil_path, path_rule_matches, pack_fault, sanitize_label, is_valid_label,
-    extract_strate_label, OctalMode, SiloConfig, SiloFaultReason, SiloId, SiloOutputBuf, SiloTier,
+    extract_strate_label, is_valid_label, normalize_unveil_path, pack_fault, path_rule_matches,
+    sanitize_label, OctalMode, SiloConfig, SiloFaultReason, SiloId, SiloOutputBuf, SiloTier,
 };
-use crate::process::{add_task, Task, TaskPriority};
-use crate::syscall::error::SyscallError;
+use crate::{
+    process::{add_task, Task, TaskPriority},
+    syscall::error::SyscallError,
+};
 
 fn check(label: &str, ok: bool, passed: &mut usize, total: &mut usize) {
     *total += 1;
@@ -33,15 +35,35 @@ fn run_pure_suite() -> bool {
     let mut total = 0usize;
 
     // --- SiloId tiers -----------------------------------------------------
-    check("tier critical 1..=9", SiloId::new(1).tier == SiloTier::Critical, &mut passed, &mut total);
-    check("tier system 10..=999", SiloId::new(500).tier == SiloTier::System, &mut passed, &mut total);
-    check("tier user >=1000", SiloId::new(1000).tier == SiloTier::User, &mut passed, &mut total);
+    check(
+        "tier critical 1..=9",
+        SiloId::new(1).tier == SiloTier::Critical,
+        &mut passed,
+        &mut total,
+    );
+    check(
+        "tier system 10..=999",
+        SiloId::new(500).tier == SiloTier::System,
+        &mut passed,
+        &mut total,
+    );
+    check(
+        "tier user >=1000",
+        SiloId::new(1000).tier == SiloTier::User,
+        &mut passed,
+        &mut total,
+    );
 
     // --- OctalMode pledge monotonicity ------------------------------------
     let full = OctalMode::from_octal(0o777);
     let mut m = full;
     // Subset re-pledge is allowed (review: pledge is monotonic decreasing).
-    check("pledge subset ok", m.pledge(OctalMode::from_octal(0o040)).is_ok(), &mut passed, &mut total);
+    check(
+        "pledge subset ok",
+        m.pledge(OctalMode::from_octal(0o040)).is_ok(),
+        &mut passed,
+        &mut total,
+    );
     // Escalation is rejected.
     check(
         "pledge escalation denied",
@@ -59,36 +81,76 @@ fn run_pure_suite() -> bool {
 
     // --- SiloConfig::validate --------------------------------------------
     let mut cfg = SiloConfig::default();
-    check("default config valid", cfg.validate().is_ok(), &mut passed, &mut total);
+    check(
+        "default config valid",
+        cfg.validate().is_ok(),
+        &mut passed,
+        &mut total,
+    );
 
     cfg.mem_min = 100;
     cfg.mem_max = 50;
-    check("mem_min > mem_max rejected", cfg.validate().is_err(), &mut passed, &mut total);
+    check(
+        "mem_min > mem_max rejected",
+        cfg.validate().is_err(),
+        &mut passed,
+        &mut total,
+    );
 
     let mut cfg = SiloConfig::default();
     cfg.cpu_quota_us = 1000;
-    check("quota without period rejected", cfg.validate().is_err(), &mut passed, &mut total);
+    check(
+        "quota without period rejected",
+        cfg.validate().is_err(),
+        &mut passed,
+        &mut total,
+    );
 
     let mut cfg = SiloConfig::default();
     cfg.caps_len = (super::MAX_SILO_CAPS + 1) as u64;
-    check("caps_len over MAX_SILO_CAPS rejected", cfg.validate().is_err(), &mut passed, &mut total);
+    check(
+        "caps_len over MAX_SILO_CAPS rejected",
+        cfg.validate().is_err(),
+        &mut passed,
+        &mut total,
+    );
 
     let mut cfg = SiloConfig::default();
     cfg.flags = super::SILO_FLAG_WEBRTC_NATIVE;
-    check("webrtc-native without graphics rejected", cfg.validate().is_err(), &mut passed, &mut total);
+    check(
+        "webrtc-native without graphics rejected",
+        cfg.validate().is_err(),
+        &mut passed,
+        &mut total,
+    );
 
     let mut cfg = SiloConfig::default();
     cfg.flags = super::SILO_FLAG_GRAPHICS;
-    check("graphics without sessions/ttl rejected", cfg.validate().is_err(), &mut passed, &mut total);
+    check(
+        "graphics without sessions/ttl rejected",
+        cfg.validate().is_err(),
+        &mut passed,
+        &mut total,
+    );
 
     let mut cfg = SiloConfig::default();
     cfg.flags = super::SILO_FLAG_GRAPHICS;
     cfg.graphics_max_sessions = 2;
     cfg.graphics_session_ttl_sec = 60;
-    check("graphics with sessions+ttl ok", cfg.validate().is_ok(), &mut passed, &mut total);
+    check(
+        "graphics with sessions+ttl ok",
+        cfg.validate().is_ok(),
+        &mut passed,
+        &mut total,
+    );
 
     // --- normalize_unveil_path (review SILO-4: dot segments rejected) -----
-    check("unveil collapse //", normalize_unveil_path("//etc//passwd").is_ok(), &mut passed, &mut total);
+    check(
+        "unveil collapse //",
+        normalize_unveil_path("//etc//passwd").is_ok(),
+        &mut passed,
+        &mut total,
+    );
     check(
         "unveil reject . segment",
         normalize_unveil_path("/etc/./passwd").is_err(),
@@ -107,22 +169,62 @@ fn run_pure_suite() -> bool {
         &mut passed,
         &mut total,
     );
-    check("unveil reject relative", normalize_unveil_path("etc/passwd").is_err(), &mut passed, &mut total);
+    check(
+        "unveil reject relative",
+        normalize_unveil_path("etc/passwd").is_err(),
+        &mut passed,
+        &mut total,
+    );
     match normalize_unveil_path("/etc/passwd") {
-        Ok(p) => check("unveil clean path preserved", p == "/etc/passwd", &mut passed, &mut total),
-        Err(_) => check("unveil clean path preserved", false, &mut passed, &mut total),
+        Ok(p) => check(
+            "unveil clean path preserved",
+            p == "/etc/passwd",
+            &mut passed,
+            &mut total,
+        ),
+        Err(_) => check(
+            "unveil clean path preserved",
+            false,
+            &mut passed,
+            &mut total,
+        ),
     }
 
     // --- path_rule_matches boundary semantics -----------------------------
-    check("rule / matches all", path_rule_matches("/", "/anything"), &mut passed, &mut total);
-    check("exact match", path_rule_matches("/etc", "/etc"), &mut passed, &mut total);
-    check("prefix on boundary", path_rule_matches("/etc", "/etc/passwd"), &mut passed, &mut total);
+    check(
+        "rule / matches all",
+        path_rule_matches("/", "/anything"),
+        &mut passed,
+        &mut total,
+    );
+    check(
+        "exact match",
+        path_rule_matches("/etc", "/etc"),
+        &mut passed,
+        &mut total,
+    );
+    check(
+        "prefix on boundary",
+        path_rule_matches("/etc", "/etc/passwd"),
+        &mut passed,
+        &mut total,
+    );
     // No sibling-prefix leakage: /etc must not match /etcetera.
-    check("no sibling prefix leak", !path_rule_matches("/etc", "/etcetera"), &mut passed, &mut total);
+    check(
+        "no sibling prefix leak",
+        !path_rule_matches("/etc", "/etcetera"),
+        &mut passed,
+        &mut total,
+    );
 
     // --- pack_fault encoding ----------------------------------------------
     let packed = pack_fault(SiloFaultReason::PageFault, 0x1234);
-    check("pack_fault reason low bits", packed & 0xFFFF == 1, &mut passed, &mut total);
+    check(
+        "pack_fault reason low bits",
+        packed & 0xFFFF == 1,
+        &mut passed,
+        &mut total,
+    );
     check(
         "pack_fault subcode shifted",
         packed >> super::FAULT_SUBCODE_SHIFT == 0x1234,
@@ -131,12 +233,42 @@ fn run_pure_suite() -> bool {
     );
 
     // --- labels -----------------------------------------------------------
-    check("valid label", is_valid_label("net-a_1.0"), &mut passed, &mut total);
-    check("label rejects slash", !is_valid_label("a/b"), &mut passed, &mut total);
-    check("label rejects empty", !is_valid_label(""), &mut passed, &mut total);
-    check("label rejects 32 chars", !is_valid_label(&"x".repeat(32)), &mut passed, &mut total);
-    check("sanitize maps bad chars", sanitize_label("ab/cd") == "ab_cd", &mut passed, &mut total);
-    check("sanitize truncates 31", sanitize_label(&"y".repeat(40)).len() == 31, &mut passed, &mut total);
+    check(
+        "valid label",
+        is_valid_label("net-a_1.0"),
+        &mut passed,
+        &mut total,
+    );
+    check(
+        "label rejects slash",
+        !is_valid_label("a/b"),
+        &mut passed,
+        &mut total,
+    );
+    check(
+        "label rejects empty",
+        !is_valid_label(""),
+        &mut passed,
+        &mut total,
+    );
+    check(
+        "label rejects 32 chars",
+        !is_valid_label(&"x".repeat(32)),
+        &mut passed,
+        &mut total,
+    );
+    check(
+        "sanitize maps bad chars",
+        sanitize_label("ab/cd") == "ab_cd",
+        &mut passed,
+        &mut total,
+    );
+    check(
+        "sanitize truncates 31",
+        sanitize_label(&"y".repeat(40)).len() == 31,
+        &mut passed,
+        &mut total,
+    );
     check(
         "extract label from /srv path",
         extract_strate_label("/srv/strate-fs-ramfs/alpha/data").as_deref() == Some("alpha"),
@@ -153,15 +285,30 @@ fn run_pure_suite() -> bool {
     // --- SiloOutputBuf ring behaviour --------------------------------------
     let mut buf = SiloOutputBuf::new();
     buf.push(b"hello");
-    check("output drain returns data", buf.drain() == b"hello", &mut passed, &mut total);
-    check("output drain empties", buf.drain().is_empty(), &mut passed, &mut total);
+    check(
+        "output drain returns data",
+        buf.drain() == b"hello",
+        &mut passed,
+        &mut total,
+    );
+    check(
+        "output drain empties",
+        buf.drain().is_empty(),
+        &mut passed,
+        &mut total,
+    );
     // Wraparound: push more than capacity, only the tail survives.
     let mut ring = SiloOutputBuf::new();
     for i in 0..(super::SILO_OUTPUT_CAPACITY + 16) {
         ring.push(&[b'a' + (i % 26) as u8]);
     }
     let drained = ring.drain();
-    check("output wrap keeps capacity", drained.len() == super::SILO_OUTPUT_CAPACITY, &mut passed, &mut total);
+    check(
+        "output wrap keeps capacity",
+        drained.len() == super::SILO_OUTPUT_CAPACITY,
+        &mut passed,
+        &mut total,
+    );
 
     let ok = passed == total && total > 0;
     crate::serial_println!(

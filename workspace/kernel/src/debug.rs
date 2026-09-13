@@ -1,5 +1,14 @@
-use core::fmt;
 use crate::x86_crate_shim::instructions::port::Port;
+use core::fmt;
+
+/// Raw e9 debugcon marker: writes a single byte to port 0xe9 using inline asm.
+/// This works even when the Port type from x86_64 crate doesn't.
+#[macro_export]
+macro_rules! e9_mark {
+    ($byte:expr) => {
+        unsafe { core::arch::asm!("out 0xe9, al", in("al") $byte, options(nomem, nostack)); }
+    };
+}
 
 pub struct QemuDebug;
 

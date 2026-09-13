@@ -2,11 +2,13 @@
 //!
 //! Defines the Task structure and related types for the Strat9-OS scheduler.
 
-use crate::memory::AddressSpace;
+use crate::{
+    arch::xshim::{PhysAddr, VirtAddr},
+    memory::AddressSpace,
+};
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use intrusive_collections::LinkedListLink;
-use crate::arch::xshim::{PhysAddr, VirtAddr};
 
 /// POSIX process ID.
 pub type Pid = u32;
@@ -315,6 +317,16 @@ pub struct Task {
     /// or explicitly assigned. Used by `wake_task()` to route to the correct
     /// per-CPU runqueue without acquiring `GLOBAL_SCHED_STATE`.
     pub home_cpu: AtomicUsize,
+    /// Last CPU this task ran on. Updated on every pick-next. Used by the
+    /// scheduler to prefer cache-warm placement when waking tasks.
+    pub last_cpu: AtomicUsize,
+    /// Soft CPU affinity bitmask. Bit N set = CPU N is allowed.
+    /// 0 means "no restriction" (all CPUs allowed).
+    /// Derived from the task's silo `cpu_affinity_mask` at creation time,
+    /// or set via `sched_setaffinity` syscall. The scheduler *prefers*
+    /// CPUs in this mask but does not hard-restrict (falls back to any
+    /// CPU if no affinity-eligible CPU has capacity).
+    pub affinity_mask: AtomicU64,
     /// Virtual runtime for CFS
     pub vruntime: AtomicU64,
     /// Monotonic token identifying the currently valid FAIR runqueue entry.
@@ -342,6 +354,25 @@ pub struct Task {
     ///
     /// Only touched while holding the per-CPU scheduler spinlock.
     pub rt_link: LinkedListLink,
+
+    // ── RT budget per period ──────────────────────────────────────────────
+    /// Remaining ticks in the current RT budget period.
+    /// Decremented by `update_current`; when 0 the task is preempted and
+    /// flagged degraded until the period expires.
+    pub rt_budget_remaining: AtomicU64,
+    /// Tick at which the current RT budget period started.
+    /// Used to determine when to reset `rt_budget_remaining`.
+    pub rt_budget_period_start: AtomicU64,
+    /// Whether this RT task has exhausted its budget and is temporarily
+    /// degraded (treated as Fair) until the period expires.
+    pub rt_degraded: AtomicBool,
+
+    // ── Fair starvation protection ────────────────────────────────────────
+    /// Ticks this task has spent waiting in the Fair run queue without being
+    /// selected.  Reset to 0 when the task is picked.  If this exceeds
+    /// `FAIR_STARVATION_THRESHOLD_TICKS`, the task is boosted to the front
+    /// of its priority class.
+    pub fair_wait_ticks: AtomicU64,
 }
 
 // SAFETY: `LinkedListLink` uses `UnsafeCell` internally and is therefore
@@ -523,10 +554,31 @@ impl Task {
                 iret_rip: ret_target,
                 iret_cs: crate::arch::gdt::kernel_code_selector().0 as u64,
                 iret_rflags: rflags,
-                iret_rsp: self.kernel_stack.virt_base.as_u64() + self.kernel_stack.size as u64,
+                // Resume the task at the stack pointer it would have had after
+                // the legacy `ret`-based switch consumed its 7-word frame
+                // (6 callee-saved + return target). For a never-launched task
+                // this equals stack_top (the fake frame sits exactly there);
+                // for an already-launched task it equals the RSP captured by
+                // switch_context_fxsave at its last switch, which is where the
+                // interrupted code expects to resume. Using stack_top here
+                // instead desynchronizes the resumed task and derails it into
+                // unrelated kernel code (observed as the boot_alloc V-storm).
+                iret_rsp: saved_rsp_val + 7 * 8,
                 iret_ss: crate::arch::gdt::kernel_data_selector().0 as u64,
             }
         };
+        // TEMP DEBUG: pulse the seeded frame's r12 (entry) for tracing.
+        unsafe {
+            let hex = b"0123456789abcdef";
+            core::arch::asm!("out 0xe9, al", in("al") b'@', options(nomem, nostack));
+            core::arch::asm!("out 0xe9, al", in("al") b'E', options(nomem, nostack));
+            let v = frame.r12;
+            for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
+                let nib = hex[((v >> sh) & 0xF) as usize];
+                core::arch::asm!("out 0xe9, al", in("al") nib, options(nomem, nostack));
+            }
+            core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+        }
         self.seed_interrupt_frame(frame);
     }
 
@@ -983,6 +1035,8 @@ impl Task {
             ticks: AtomicU64::new(0),
             sched_policy: SyncUnsafeCell::new(Self::default_sched_policy(priority)),
             home_cpu: AtomicUsize::new(usize::MAX),
+            last_cpu: AtomicUsize::new(usize::MAX),
+            affinity_mask: AtomicU64::new(0),
             vruntime: AtomicU64::new(0),
             fair_rq_generation: AtomicU64::new(0),
             fair_on_rq: AtomicBool::new(false),
@@ -993,6 +1047,10 @@ impl Task {
             fpu_state: SyncUnsafeCell::new(fpu_state),
             xcr0_mask: AtomicU64::new(xcr0_mask),
             rt_link: LinkedListLink::new(),
+            rt_budget_remaining: AtomicU64::new(0),
+            rt_budget_period_start: AtomicU64::new(0),
+            rt_degraded: AtomicBool::new(false),
+            fair_wait_ticks: AtomicU64::new(0),
         });
         task.seed_kernel_interrupt_frame_from_context();
         Ok(task)
@@ -1059,6 +1117,8 @@ impl Task {
             ticks: AtomicU64::new(0),
             sched_policy: SyncUnsafeCell::new(Self::default_sched_policy(priority)),
             home_cpu: AtomicUsize::new(usize::MAX),
+            last_cpu: AtomicUsize::new(usize::MAX),
+            affinity_mask: AtomicU64::new(0),
             vruntime: AtomicU64::new(0),
             fair_rq_generation: AtomicU64::new(0),
             fair_on_rq: AtomicBool::new(false),
@@ -1069,6 +1129,10 @@ impl Task {
             fpu_state: SyncUnsafeCell::new(fpu_state),
             xcr0_mask: AtomicU64::new(xcr0_mask),
             rt_link: LinkedListLink::new(),
+            rt_budget_remaining: AtomicU64::new(0),
+            rt_budget_period_start: AtomicU64::new(0),
+            rt_degraded: AtomicBool::new(false),
+            fair_wait_ticks: AtomicU64::new(0),
         }))
     }
 
@@ -1240,7 +1304,7 @@ impl Task {
 /// Caller must ensure all pointers in `target` are valid and interrupts are disabled.
 pub(super) unsafe fn do_switch_context(target: &super::scheduler::SwitchTarget) {
     // XSAVE/XRSTOR #GP on non-64B-aligned operands; FXSAVE/FXRSTOR need 16B.
-    // The naked asm below cannot check this — enforce at the call boundary.
+    // The naked asm below cannot check this : enforce at the call boundary.
     debug_assert_eq!(
         (target.old_fpu_ptr as usize) % 64,
         0,

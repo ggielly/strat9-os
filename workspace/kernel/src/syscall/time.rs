@@ -10,6 +10,11 @@ use crate::{
 
 pub use strat9_abi::data::TimeSpec;
 
+// SAFETY: TimeSpec is a #[repr(C)] struct with two i64 fields : all bit
+// patterns are valid.  Implementing the sealed UserPod trait here allows
+// read_val::<TimeSpec>() / write_val(&TimeSpec) in UserSlice.
+unsafe impl crate::memory::userslice::UserPod for TimeSpec {}
+
 /// Clock IDs for clock_gettime (POSIX-compatible subset)
 pub const CLOCK_MONOTONIC: u32 = 1;
 pub const CLOCK_REALTIME: u32 = 0;

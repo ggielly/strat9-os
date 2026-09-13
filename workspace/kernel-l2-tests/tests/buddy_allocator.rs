@@ -1,4 +1,4 @@
-//! L2 — Buddy allocator deep tests (real kernel code, real host memory).
+//! L2 : Buddy allocator deep tests (real kernel code, real host memory).
 //!
 //! Strategy: the mirror maps `phys_to_virt` through a REAL host arena
 //! (HHDM offset = arena_host − fake_phys_base), so the buddy allocator
@@ -15,10 +15,10 @@
 
 use std::alloc::{alloc_zeroed, Layout};
 
-use kernel_l2_tests::memory::boot_alloc;
-use kernel_l2_tests::memory::frame;
-use kernel_l2_tests::memory::{self, buddy, phys_to_virt, set_hhdm_offset, AllocError};
-use kernel_l2_tests::sync::IrqDisabledToken;
+use kernel_l2_tests::{
+    memory::{self, boot_alloc, buddy, frame, phys_to_virt, set_hhdm_offset, AllocError},
+    sync::IrqDisabledToken,
+};
 use strat9_abi::boot::{MemoryKind, MemoryRegion};
 
 /// Global serialization: the buddy allocator is a kernel static.
@@ -46,7 +46,11 @@ impl BuddyEnv {
         set_hhdm_offset((arena_ptr as u64).wrapping_sub(PHYS_BASE));
 
         // Kernel boot flow with the GLOBAL boot allocator.
-        let regions = [MemoryRegion { base: PHYS_BASE, size: span, kind: MemoryKind::Free }];
+        let regions = [MemoryRegion {
+            base: PHYS_BASE,
+            size: span,
+            kind: MemoryKind::Free,
+        }];
         {
             let mut boot = boot_alloc::get_boot_allocator().lock();
             boot.init(&regions);
@@ -54,7 +58,11 @@ impl BuddyEnv {
         }
         kernel_l2_tests::memory::buddy::init_buddy_allocator(&regions);
 
-        BuddyEnv { token: IrqDisabledToken::for_test(), arena_ptr, arena_size }
+        BuddyEnv {
+            token: IrqDisabledToken::for_test(),
+            arena_ptr,
+            arena_size,
+        }
     }
 }
 
@@ -119,7 +127,10 @@ fn exhaustion_returns_oom_cleanly() {
                 break;
             }
         }
-        assert!(frames.len() <= 16384, "allocated more pages than the region holds");
+        assert!(
+            frames.len() <= 16384,
+            "allocated more pages than the region holds"
+        );
     }
     assert!(!frames.is_empty(), "no pages allocated before OOM");
 
@@ -211,7 +222,11 @@ fn double_free_does_not_break_subsequent_allocations() {
     for _ in 0..64 {
         if let Ok(g) = buddy::alloc(t, 0) {
             let addr = g.start_address.as_u64();
-            assert!(!live.contains(&addr), "frame {} handed out while live", addr);
+            assert!(
+                !live.contains(&addr),
+                "frame {} handed out while live",
+                addr
+            );
             live.push(addr);
         }
     }

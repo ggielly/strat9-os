@@ -46,12 +46,19 @@ const STATUS_CONNECTED: u8 = 0;
 const STATUS_SENDER_GONE: u8 = 1;
 const STATUS_RECEIVER_GONE: u8 = 2;
 
+// P2 fix: use bitset so sender/receiver closure can happen concurrently
+// without overwriting each other's state.
+const SENDERS_CLOSED: u8 = 1 << 0;
+const RECEIVERS_CLOSED: u8 = 1 << 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ChannelError {
     #[error("would block")]
     WouldBlock,
     #[error("channel disconnected")]
     Disconnected,
+    #[error("interrupted by signal")]
+    Interrupted,
 }
 
 // ================================================================================
@@ -90,13 +97,13 @@ impl<T: Send> ChannelInner<T> {
     /// Returns whether sender gone.
     #[inline]
     fn is_sender_gone(&self) -> bool {
-        self.status.load(Ordering::Acquire) == STATUS_SENDER_GONE
+        self.status.load(Ordering::Acquire) & SENDERS_CLOSED != 0
     }
 
     /// Returns whether receiver gone.
     #[inline]
     fn is_receiver_gone(&self) -> bool {
-        self.status.load(Ordering::Acquire) == STATUS_RECEIVER_GONE
+        self.status.load(Ordering::Acquire) & RECEIVERS_CLOSED != 0
     }
 }
 
@@ -141,6 +148,11 @@ impl<T: Send> Sender<T> {
         let mut pending = Some(msg);
 
         let result = self.inner.send_waitq.wait_until(|| {
+            // P2 fix: check for pending signals to avoid livelock.
+            if crate::process::signal::has_pending_signals() {
+                pending.take();
+                return Some(Err(ChannelError::Interrupted));
+            }
             // Receiver gone: discard message and report disconnect.
             if self.inner.is_receiver_gone() {
                 pending.take();
@@ -257,6 +269,10 @@ impl<T: Send> Receiver<T> {
             if let Some(msg) = msg_opt {
                 return Some(Ok(msg));
             }
+            // P2 fix: check for pending signals to avoid livelock.
+            if crate::process::signal::has_pending_signals() {
+                return Some(Err(ChannelError::Interrupted));
+            }
             // Buffer empty: check for disconnect.
             if self.inner.is_sender_gone() {
                 return Some(Err(ChannelError::Disconnected));
@@ -338,6 +354,8 @@ pub fn channel<T: Send>(capacity: usize) -> (Sender<T>, Receiver<T>) {
 /// receive.  Destruction is explicit (via [`SyncChan::destroy`]), triggered
 /// when the last userspace handle is closed.
 pub struct SyncChan {
+    /// Original capacity used to allocate the queue.
+    capacity: usize,
     /// Bounded message queue.
     queue: ArrayQueue<IpcMessage>,
     /// Tasks blocked because the queue is full.
@@ -352,11 +370,17 @@ impl SyncChan {
     /// Creates a new instance.
     fn new(capacity: usize) -> Self {
         SyncChan {
+            capacity,
             queue: ArrayQueue::new(capacity.max(1)),
             send_waitq: WaitQueue::new(),
             recv_waitq: WaitQueue::new(),
             destroyed: AtomicBool::new(false),
         }
+    }
+
+    /// Returns the original capacity used to create this channel.
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 
     /// Send a message, blocking until space is available.
@@ -367,6 +391,11 @@ impl SyncChan {
         let mut pending = Some(msg);
 
         let result = self.send_waitq.wait_until(|| {
+            // P2 fix: check for pending signals to avoid livelock.
+            if crate::process::signal::has_pending_signals() {
+                pending.take();
+                return Some(Err(ChannelError::Interrupted));
+            }
             if self.destroyed.load(Ordering::Acquire) {
                 pending.take();
                 return Some(Err(ChannelError::Disconnected));
@@ -415,6 +444,10 @@ impl SyncChan {
             let msg_opt = self.queue.pop();
             if let Some(msg) = msg_opt {
                 return Some(Ok(msg));
+            }
+            // P2 fix: check for pending signals to avoid livelock.
+            if crate::process::signal::has_pending_signals() {
+                return Some(Err(ChannelError::Interrupted));
             }
             if self.destroyed.load(Ordering::Acquire) {
                 return Some(Err(ChannelError::Disconnected));

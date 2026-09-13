@@ -49,6 +49,8 @@ pub enum IpcError {
     PortDestroyed,
     #[error("port queue full")]
     WouldBlock,
+    #[error("interrupted by signal")]
+    Interrupted,
 }
 
 /// An IPC port: a bounded message queue with blocking semantics.
@@ -87,6 +89,10 @@ impl Port {
     /// the sender is blocked.
     pub fn send(&self, msg: IpcMessage) -> Result<(), IpcError> {
         let result = self.send_waitq.wait_until(|| {
+            // P2 fix: check for pending signals to avoid livelock.
+            if crate::process::signal::has_pending_signals() {
+                return Some(Err(IpcError::Interrupted));
+            }
             if self.destroyed.load(Ordering::Acquire) {
                 return Some(Err(IpcError::PortDestroyed));
             }
@@ -110,6 +116,10 @@ impl Port {
         let result = self.recv_waitq.wait_until(|| {
             if let Some(msg) = self.queue.pop() {
                 return Some(Ok(msg));
+            }
+            // P2 fix: check for pending signals to avoid livelock.
+            if crate::process::signal::has_pending_signals() {
+                return Some(Err(IpcError::Interrupted));
             }
             if self.destroyed.load(Ordering::Acquire) {
                 return Some(Err(IpcError::PortDestroyed));
