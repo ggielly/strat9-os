@@ -1,0 +1,15 @@
+[package]
+name = "framebuffer-perf"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+raw-cpuid = "11.6"
+heapless = { version = "0.9", default-features = false, features = ["mpmc_large"] }
+
+[[bin]]
+name = "framebuffer-perf"
+path = "src/main.rs"

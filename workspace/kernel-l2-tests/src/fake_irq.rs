@@ -29,7 +29,7 @@ impl IrqDisabledToken {
     }
 }
 
-/// Runs `f` with a dummy token — semantically "interrupts disabled" because
+/// Runs `f` with a dummy token : semantically "interrupts disabled" because
 /// each host test is single-threaded.
 #[inline]
 pub fn with_irqs_disabled<R>(f: impl FnOnce(&IrqDisabledToken) -> R) -> R {

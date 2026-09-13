@@ -15,13 +15,19 @@ pub mod serial;
 // ---------------------------------------------------------------------------
 
 pub mod vga {
-    pub use super::vga_shim::VGA_WRITER;
-    pub use super::vga_text::{TextAlign, TextOptions, UiTheme};
-    pub fn is_available() -> bool { false }
+    pub use super::{
+        vga_shim::VGA_WRITER,
+        vga_text::{TextAlign, TextOptions, UiTheme},
+    };
+    pub fn is_available() -> bool {
+        false
+    }
     #[allow(non_snake_case)]
     pub struct RgbColor;
     impl RgbColor {
-        pub fn new(_r: u8, _g: u8, _b: u8) -> Self { RgbColor }
+        pub fn new(_r: u8, _g: u8, _b: u8) -> Self {
+            RgbColor
+        }
     }
     pub fn flush_display() {}
 
@@ -157,9 +163,7 @@ pub mod vga {
     pub fn update_mouse_cursor(_x: usize, _y: usize) {}
     pub fn panic_draw_direct(_msg: &str) {}
     pub fn vga_debug_writeln(_s: &str) {}
-
 }
-
 
 pub mod vga_shim {
     // Minimal writer that discards output: on riscv64 the console is serial-only.
@@ -185,9 +189,15 @@ pub mod vgabuf {
 pub mod boot_timestamp {
     static mut TSC_KHZ: u64 = 10_000; // QEMU virt timebase ~10 MHz
     pub fn init() {}
-    pub fn tsc_khz() -> u64 { unsafe { core::ptr::addr_of!(TSC_KHZ).read() } }
-    pub fn elapsed_ms() -> u64 { super::rdtsc() / 10_000 }
-    pub fn elapsed_us() -> u64 { super::rdtsc() / 10 }
+    pub fn tsc_khz() -> u64 {
+        unsafe { core::ptr::addr_of!(TSC_KHZ).read() }
+    }
+    pub fn elapsed_ms() -> u64 {
+        super::rdtsc() / 10_000
+    }
+    pub fn elapsed_us() -> u64 {
+        super::rdtsc() / 10
+    }
 }
 
 pub mod idt {
@@ -203,11 +213,14 @@ pub mod idt {
 pub mod timer {
     pub const TIMER_HZ: u64 = 100;
     pub const NS_PER_TICK: u64 = 1_000_000_000 / TIMER_HZ;
-    pub fn is_apic_timer_active() -> bool { false }
-    pub fn apic_ticks_per_10ms() -> u32 { 0 }
+    pub fn is_apic_timer_active() -> bool {
+        false
+    }
+    pub fn apic_ticks_per_10ms() -> u32 {
+        0
+    }
     pub fn start_apic_timer_cached() {}
 }
-
 
 use core::arch::asm;
 
@@ -220,23 +233,13 @@ pub fn hlt() {
 /// Disable interrupts (clear SIE in sstatus).
 #[inline]
 pub fn cli() {
-    unsafe {
-        asm!(
-            "csrci sstatus, 0x2",
-            options(nomem, nostack)
-        )
-    }
+    unsafe { asm!("csrci sstatus, 0x2", options(nomem, nostack)) }
 }
 
 /// Enable interrupts (set SIE in sstatus).
 #[inline]
 pub fn sti() {
-    unsafe {
-        asm!(
-            "csrsi sstatus, 0x2",
-            options(nomem, nostack)
-        )
-    }
+    unsafe { asm!("csrsi sstatus, 0x2", options(nomem, nostack)) }
 }
 
 /// Check if interrupts (SIE) are enabled.
@@ -282,7 +285,7 @@ pub fn restore_flags(flags: u64) {
     }
 }
 
-/// Read the `time` CSR (rdtime equivalent) — cycle counter.
+/// Read the `time` CSR (rdtime equivalent) : cycle counter.
 /// On QEMU virt this increments at a fixed frequency (~10 MHz via CLINT),
 /// usable as an early monotonic timestamp source.
 #[inline]
@@ -352,7 +355,6 @@ pub mod cpuid {
     pub fn features_to_flags_string(_f: &IsaFeatures) -> alloc::string::String {
         alloc::string::String::new()
     }
-
 }
 
 pub mod speaker {
@@ -372,7 +374,7 @@ pub mod cpuid_x86_shim {
     }
 }
 
-/// x86-only CPU extensions init — no-op on RISC-V.
+/// x86-only CPU extensions init : no-op on RISC-V.
 pub fn init_cpu_extensions() {}
 
 // VGA text options (serial-only console: no-ops)
@@ -390,7 +392,6 @@ pub mod vga_text {
     }
     pub struct UiTheme;
 }
-
 
 // Transitional extras -------------------------------------------------------
 
@@ -445,8 +446,7 @@ pub mod vga_draw {
     ) {
         let _ = (fb_addr, width, height, stride, bpp);
     }
-
-    }
+}
 
 pub mod config_consts {
     pub const STATUS: u8 = 0x06;
@@ -455,9 +455,9 @@ pub mod config_consts {
 }
 
 // Re-exports used by facade_riscv
+pub use config_consts as pci_config_consts;
 pub use timer_extra as timer_pit;
 pub use vga_draw as vga_surface;
-pub use config_consts as pci_config_consts;
 
 pub use timer_extra as riscv_timer_pit;
 

@@ -1,4 +1,4 @@
-//! Mirror of kernel/src/vfs — scheme protocol core + router.
+//! Mirror of kernel/src/vfs : scheme protocol core + router.
 #[path = "../../../kernel/src/vfs/scheme.rs"]
 pub mod scheme;
 #[path = "../../../kernel/src/vfs/file.rs"]

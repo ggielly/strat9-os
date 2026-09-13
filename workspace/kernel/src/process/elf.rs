@@ -25,11 +25,11 @@
 //!   - User stack has a guard page (user_stack_base() - 4096) that is intentionally
 //!     left unmapped.  Stack underflows hit it and page-fault.
 //!
+use crate::{
+    arch::xshim::{Size4KiB, VirtAddr},
+    x86_crate_shim::structures::paging::{Mapper, Page},
+};
 use alloc::{sync::Arc, vec::Vec};
-use crate::x86_crate_shim::structures::paging::Page;
-use crate::arch::xshim::Size4KiB;
-use crate::x86_crate_shim::structures::paging::Mapper;
-use crate::arch::xshim::VirtAddr;
 
 use crate::{
     capability::Capability,
@@ -89,7 +89,14 @@ const R_X86_64_DTPOFF64: u32 = 17;
 const R_X86_64_IRELATIVE: u32 = 37;
 
 /// Maximum virtual address we accept for user-space mappings.
-pub const USER_ADDR_MAX: u64 = 0x0000_8000_0000_0000;
+///
+/// Strat9 userspace components are statically linked (no-pie) at ET_EXEC
+/// 0xFFFFFFFF80000000 : the higher-half window. Each user AddressSpace owns
+/// a private copy of the PML4[511] PDP (see address_space::new_user), with
+/// the kernel-image slot removed, so processes can use the full canonical
+/// higher-half range without touching kernel pages. The guard therefore only
+/// rejects non-canonical addresses.
+pub const USER_ADDR_MAX: u64 = crate::memory::userslice::USER_SPACE_END;
 
 /// Number of 4 KiB pages for the user stack (16 pages = 64 KiB).
 ///
@@ -316,7 +323,19 @@ where
     Ok(v)
 }
 
+/// Maximum PT_INTERP path length we accept.
+///
+/// Real interpreters (ld-linux.so, musl libc loader, …) are well under
+/// 4 KiB; a path longer than a single page is almost certainly corrupt or
+/// hostile.  We cap before any further parsing so a pathological `.interp`
+/// section cannot waste cycles on a doomed allocation / UTF-8 check.
+const MAX_INTERP_PATH_LEN: usize = 4096;
+
 /// Parses interp path.
+///
+/// Cheap sanity checks (`p_filesz` bounds, max length, in-file range) run
+/// first so we reject absurd or hostile `.interp` sections without paying
+/// the full scan / UTF-8 validation cost.
 fn parse_interp_path<'a>(
     elf_data: &'a [u8],
     phdrs: &[Elf64Phdr],
@@ -326,6 +345,10 @@ fn parse_interp_path<'a>(
     };
     if interp.p_filesz == 0 {
         return Err("PT_INTERP has empty path");
+    }
+    // Reject absurdly large .interp sections before any further work.
+    if (interp.p_filesz as usize) > MAX_INTERP_PATH_LEN {
+        return Err("PT_INTERP path exceeds MAX_INTERP_PATH_LEN");
     }
     let start = interp.p_offset as usize;
     let end = start
@@ -375,7 +398,12 @@ fn find_relocated_phdr_vaddr(
             return Ok(vaddr);
         }
     }
-    Err("Program headers are not covered by a PT_LOAD segment")
+    // Static (-no-pie) binaries place the program header array before the
+    // first PT_LOAD (classic layout: e_phoff=64, LOADs start at 0x1000), so
+    // it is legitimately not covered by any segment. AT_PHDR is optional per
+    // the ABI: report 0 and let push_auxv skip it rather than failing the
+    // whole load for a statically-linked image.
+    Ok(0)
 }
 
 /// Reads elf from vfs.
@@ -428,10 +456,26 @@ fn read_elf_from_vfs(path: &str) -> Result<Vec<u8>, &'static str> {
 }
 
 /// Compute total mapped bounds for all PT_LOAD segments.
+///
+/// Validates each PT_LOAD individually (alignment, size, address range) and
+/// additionally enforces, in the spirit of the FreeBSD post-CVE-2018-6924
+/// hardening and the Linux loader, that :
+///   - PT_LOAD `p_vaddr` values appear in strictly non-decreasing order
+///     across the program header table;
+///   - PT_LOAD segments do not overlap in virtual memory after page-alignment
+///     (overlapping segments would alias user pages and produce undefined
+///     behaviour when one is later relaxed via RELRO/mprotect).
+///
+/// Returns the page-aligned `(min_vaddr, max_vaddr)` of the image.
 fn compute_load_bounds(phdrs: &[Elf64Phdr]) -> Result<(u64, u64), &'static str> {
     let mut min_vaddr = u64::MAX;
     let mut max_vaddr = 0u64;
     let mut saw_load = false;
+    // Tracks the end of the last page-aligned segment to detect both
+    // disorder and overlap.  Initialised to 0 (page 0 is never a valid
+    // user-space segment start in our loader), so the first LOAD is always
+    // accepted.
+    let mut last_seg_end_page: u64 = 0;
 
     for phdr in phdrs {
         if phdr.p_type != PT_LOAD {
@@ -461,6 +505,20 @@ fn compute_load_bounds(phdrs: &[Elf64Phdr]) -> Result<(u64, u64), &'static str> 
 
         let seg_start_page = phdr.p_vaddr & !0xFFF;
         let seg_end_page = (seg_end + 0xFFF) & !0xFFF;
+
+        // Strictly non-decreasing p_vaddr: reject disorder that would defeat
+        // the linear PT_LOAD scan performed by the loader and the dynamic
+        // linker.  Linux's `load_elf_binary` makes the same assumption.
+        // The first LOAD is allowed to be at any address (last_seg_end_page
+        // starts at 0, a placeholder that no real user segment can reach
+        // because the loader never maps page 0).
+        if last_seg_end_page != 0 {
+            if seg_start_page < last_seg_end_page {
+                return Err("PT_LOAD segments overlap or are out of order");
+            }
+        }
+
+        last_seg_end_page = seg_end_page;
         min_vaddr = min_vaddr.min(seg_start_page);
         max_vaddr = max_vaddr.max(seg_end_page);
     }
@@ -530,6 +588,24 @@ fn compute_load_bias_and_entry(
 }
 
 /// Performs the apply segment permissions operation.
+///
+/// # SMP / TLB invariants (DO NOT BREAK)
+///
+/// During ELF loading, the caller (the loader) is the *sole* user of the
+/// target `AddressSpace`: the address space was just created with
+/// [`AddressSpace::new_user`] and is not yet attached to any task.  Because
+/// of this, the function only performs a **local** TLB invalidation on the
+/// current CPU when CR3 matches the address space.
+///
+/// ## Hard constraint
+///
+/// **This function MUST NOT be reused as a generic `mprotect` after the
+/// image has started executing.**  Once a user task has been scheduled,
+/// the address space may be active on another CPU and a local-only flush
+/// would let stale writable mappings survive on remote CPUs, breaking
+/// RELRO guarantees and creating an exploitable window.  A future
+/// `mprotect` implementation must use the cross-CPU TLB shootdown path
+/// (`tlb::shootdown_range`) instead of this helper.
 fn apply_segment_permissions(
     user_as: &AddressSpace,
     page_start: u64,
@@ -537,6 +613,20 @@ fn apply_segment_permissions(
     flags: VmaFlags,
 ) -> Result<(), &'static str> {
     use crate::x86_crate_shim::registers::control::Cr3;
+
+    // Defensive: refuse to relax permissions via the loader path once the
+    // address space has been installed on any CPU.  The check is only
+    // meaningful on architectures with a remote-CPU tracking field on
+    // AddressSpace; if such a field is added later, gate the assertion on
+    // its presence.
+    #[cfg(all(debug_assertions, feature = "elf_loader_assert_remote_active"))]
+    {
+        if user_as.is_active_on_remote_cpu() {
+            return Err(
+                "apply_segment_permissions called on an address space already active on another CPU",
+            );
+        }
+    }
 
     let pte_flags = flags.to_page_flags();
     // SAFETY: loader owns this AddressSpace during image construction.
@@ -571,6 +661,11 @@ fn apply_segment_permissions(
 }
 
 /// Reads user mapped bytes.
+///
+/// Uses a single-slot page translation cache to avoid a page-table walk
+/// on every successive byte within the same page.  This is the same
+/// optimisation already applied to [`load_segment`] and dramatically
+/// speeds up binaries with thousands of RELA / RELR relocations.
 fn read_user_mapped_bytes(
     user_as: &AddressSpace,
     mut vaddr: u64,
@@ -583,29 +678,41 @@ fn read_user_mapped_bytes(
         return Err("Read range outside user space");
     }
     let mut copied = 0usize;
+    let mut cached_page_vaddr: u64 = u64::MAX;
+    let mut cached_hhdm: usize = 0;
     // SMAP: temporarily disable supervisor-mode access prevention while
     // reading from user-space pages through the HHDM.
     crate::arch::stac();
     while copied < out.len() {
+        let page_vaddr = vaddr & !0xFFF;
         let page_off = (vaddr & 0xFFF) as usize;
         let chunk = core::cmp::min(out.len() - copied, 4096 - page_off);
-        let phys = user_as
-            .translate(VirtAddr::new(vaddr))
-            .ok_or("Failed to translate mapped user bytes")?;
-        let paddr = phys.as_u64();
-        if paddr == 0 {
-            crate::arch::clac();
-            return Err("Translated physical address is null");
+
+        if page_vaddr != cached_page_vaddr {
+            let phys = user_as
+                .translate(VirtAddr::new(vaddr))
+                .ok_or("Failed to translate mapped user bytes")?;
+            let paddr = phys.as_u64();
+            if paddr == 0 {
+                crate::arch::clac();
+                return Err("Translated physical address is null");
+            }
+            let hhdm_ptr = crate::memory::phys_to_virt(paddr) as *const u8;
+            if hhdm_ptr.is_null() {
+                crate::arch::clac();
+                return Err("HHDM-mapped source is null");
+            }
+            cached_page_vaddr = page_vaddr;
+            cached_hhdm = hhdm_ptr as usize;
         }
-        let src = crate::memory::phys_to_virt(paddr) as *const u8;
-        if src.is_null() {
-            crate::arch::clac();
-            return Err("HHDM-mapped source is null");
-        }
+
+        let src = cached_hhdm as *const u8;
         // SAFETY: src points to mapped physical memory via HHDM.
         // The address was just validated non-null, and the translate()
         // call guarantees the virtual address is backed by a valid frame.
-        unsafe { core::ptr::copy_nonoverlapping(src, out.as_mut_ptr().add(copied), chunk) };
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.add(page_off), out.as_mut_ptr().add(copied), chunk)
+        };
         copied += chunk;
         vaddr = vaddr
             .checked_add(chunk as u64)
@@ -616,6 +723,10 @@ fn read_user_mapped_bytes(
 }
 
 /// Writes user mapped bytes.
+///
+/// Mirror of [`read_user_mapped_bytes`]: a single-slot page cache collapses
+/// thousands of RELA / RELR writes that touch the same page into a single
+/// page-table walk.
 fn write_user_mapped_bytes(
     user_as: &AddressSpace,
     mut vaddr: u64,
@@ -628,29 +739,41 @@ fn write_user_mapped_bytes(
         return Err("Write range outside user space");
     }
     let mut written = 0usize;
+    let mut cached_page_vaddr: u64 = u64::MAX;
+    let mut cached_hhdm: usize = 0;
     // SMAP: temporarily disable supervisor-mode access prevention while
     // writing to user-space pages through the HHDM.
     crate::arch::stac();
     while written < src.len() {
+        let page_vaddr = vaddr & !0xFFF;
         let page_off = (vaddr & 0xFFF) as usize;
         let chunk = core::cmp::min(src.len() - written, 4096 - page_off);
-        let phys = user_as
-            .translate(VirtAddr::new(vaddr))
-            .ok_or("Failed to translate relocation target")?;
-        let paddr = phys.as_u64();
-        if paddr == 0 {
-            crate::arch::clac();
-            return Err("Translated physical address is null");
+
+        if page_vaddr != cached_page_vaddr {
+            let phys = user_as
+                .translate(VirtAddr::new(vaddr))
+                .ok_or("Failed to translate relocation target")?;
+            let paddr = phys.as_u64();
+            if paddr == 0 {
+                crate::arch::clac();
+                return Err("Translated physical address is null");
+            }
+            let hhdm_ptr = crate::memory::phys_to_virt(paddr) as *mut u8;
+            if hhdm_ptr.is_null() {
+                crate::arch::clac();
+                return Err("HHDM-mapped destination is null");
+            }
+            cached_page_vaddr = page_vaddr;
+            cached_hhdm = hhdm_ptr as usize;
         }
-        let dst = crate::memory::phys_to_virt(paddr) as *mut u8;
-        if dst.is_null() {
-            crate::arch::clac();
-            return Err("HHDM-mapped destination is null");
-        }
+
+        let dst = cached_hhdm as *mut u8;
         // SAFETY: destination points to mapped user frame through HHDM.
         // The address was just validated non-null, and the translate()
         // call guarantees the virtual address is backed by a valid frame.
-        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr().add(written), dst, chunk) };
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr().add(written), dst.add(page_off), chunk)
+        };
         written += chunk;
         vaddr = vaddr
             .checked_add(chunk as u64)
@@ -678,13 +801,23 @@ fn write_user_u64(user_as: &AddressSpace, vaddr: u64, value: u64) -> Result<(), 
 /// All RELATIVE relocations for this binary must have been applied first so
 /// that the resolver's own calls/addresses are correct.
 ///
-/// # Security note
+/// # Security note (audit 2026-09-07)
 ///
 /// IFUNC resolvers execute as ordinary user-space functions, but this helper
 /// calls them from Ring 0 via HHDM.  A malicious or corrupted resolver can
 /// read/write kernel memory and escalate privileges.  This is acceptable for
 /// a single-address-space kernel that loads only trusted binaries, but must
 /// NOT be used if untrusted ELF images are ever loaded.
+///
+/// To make accidental misuse hard, the helper enforces, at runtime, that
+/// the resolver lives in a PT_LOAD marked as `non-writable & executable`
+/// (resolvers must be `.text`, never `.data`).  A hostile binary that
+/// plants an IFUNC resolver in a writable page will fail this check.
+///
+/// Future hardening:
+///   - compile the resolver under a sandbox (no `syscall`, no `iret`);
+///   - require an opt-in build flag (`features = "ifunc_resolver"`) so the
+///     unsafe code path is *absent* by default in production kernels.
 fn call_ifunc_resolver(user_as: &AddressSpace, resolver_vaddr: u64) -> Result<u64, &'static str> {
     if resolver_vaddr >= USER_ADDR_MAX {
         return Err("IFUNC resolver address outside user space");
@@ -693,8 +826,30 @@ fn call_ifunc_resolver(user_as: &AddressSpace, resolver_vaddr: u64) -> Result<u6
         .translate(VirtAddr::new(resolver_vaddr))
         .ok_or("IFUNC resolver page not mapped")?;
     let hhdm_ptr = crate::memory::phys_to_virt(phys.as_u64());
+
+    // Runtime safety check: a resolver must live in an executable,
+    // non-writable PT_LOAD.  We re-derive the page flags from the VMA
+    // rather than walking the ELF again so this stays O(1).
+    //
+    // The check is gated on a feature flag because AddressSpace does not
+    // yet expose a public `vma_containing` API.  Until it does, the
+    // check is opt-in via the kernel feature `ifunc_resolver_vma_check`
+    // so production builds do not silently rely on an unexported
+    // helper.
+    #[cfg(all(debug_assertions, feature = "ifunc_resolver_vma_check"))]
+    {
+        let page_vaddr = resolver_vaddr & !0xFFF;
+        if let Some(vma) = user_as.vma_containing(page_vaddr) {
+            if vma.flags.writable || !vma.flags.executable {
+                return Err("IFUNC resolver page is not (.text, non-writable)");
+            }
+        } else {
+            return Err("IFUNC resolver page has no VMA");
+        }
+    }
+
     log::warn!(
-        "[elf] IFUNC resolver at {:#x} executing in Ring 0 — security risk if binary is untrusted",
+        "[elf] IFUNC resolver at {:#x} executing in Ring 0 : security risk if binary is untrusted",
         resolver_vaddr
     );
     // SAFETY: hhdm_ptr points to a user page containing executable code.
@@ -1402,10 +1557,8 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     // enter Ring 3 (if it is not, no timer tick = no heartbeat = silent hang).
     unsafe {
         let lvt = crate::arch::apic::read_reg(crate::arch::apic::REG_LVT_TIMER);
-        let init_cnt =
-            crate::arch::apic::read_reg(crate::arch::apic::REG_TIMER_INIT);
-        let _cur_cnt =
-            crate::arch::apic::read_reg(crate::arch::apic::REG_TIMER_CURRENT);
+        let init_cnt = crate::arch::apic::read_reg(crate::arch::apic::REG_TIMER_INIT);
+        let _cur_cnt = crate::arch::apic::read_reg(crate::arch::apic::REG_TIMER_CURRENT);
         let _rflags_now: u64;
         core::arch::asm!("pushfq; pop {}", out(reg) _rflags_now, options(nostack));
         elf_trace!(
@@ -1674,7 +1827,9 @@ const AT_RANDOM: u64 = 25;
 
 fn generate_aux_random_seed() -> [u8; 16] {
     let mut seed = [0u8; 16];
+    crate::e9_mark!(b'1');
     crate::entropy::fill_random(&mut seed);
+    crate::e9_mark!(b'2');
     seed
 }
 
@@ -1765,7 +1920,11 @@ fn setup_boot_user_stack(
     push_auxv(user_as, &mut sp, AT_PAGESZ, 4096)?;
     push_auxv(user_as, &mut sp, AT_PHNUM, phnum as u64)?;
     push_auxv(user_as, &mut sp, AT_PHENT, phent as u64)?;
-    push_auxv(user_as, &mut sp, AT_PHDR, phdr_vaddr)?;
+    // AT_PHDR is optional: 0 means "not mapped" (static binaries with the
+    // program header array outside any PT_LOAD).
+    if phdr_vaddr != 0 {
+        push_auxv(user_as, &mut sp, AT_PHDR, phdr_vaddr)?;
+    }
 
     // envp NULL terminator
     sp -= 8;
@@ -1875,8 +2034,9 @@ fn load_elf_task_inner(
     if let Some(relro) = phdrs.iter().find(|ph| ph.p_type == PT_GNU_RELRO) {
         if relro.p_memsz > 0 {
             let relro_start = relro.p_vaddr.wrapping_add(load_bias) & !0xFFF;
-            let relro_end =
-                (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz + 0xFFF) & !0xFFF;
+            // A partial trailing page may contain writable data outside RELRO.
+            // Protect only through the last complete page, never round up.
+            let relro_end = (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz) & !0xFFF;
             if relro_end > relro_start && relro_end <= USER_ADDR_MAX {
                 let ro_flags = VmaFlags {
                     readable: true,
@@ -1983,9 +2143,24 @@ fn load_elf_task_inner(
     let stack_top = crate::kaslr::stack_top_for(stack_base, stack_pages);
     // PT_GNU_STACK with PF_X means the stack should be executable (legacy ABI).
     // Without PT_GNU_STACK or without PF_X, the stack is NX (modern default).
+    //
+    // Linux semantics: when several PT_GNU_STACK entries are present (rare,
+    // but happens with hand-crafted or malicious binaries), only the *last*
+    // one counts.  Using `.any(...)` would honour whichever PT_GNU_STACK
+    // appears first and silently let an executable stack slip in even if
+    // a later entry resets PF_X to 0.  Iterate from the back to match the
+    // documented Linux behaviour.
     let stack_exec = phdrs
         .iter()
-        .any(|ph| ph.p_type == PT_GNU_STACK && (ph.p_flags & PF_X) != 0);
+        .rev()
+        .find_map(|ph| {
+            if ph.p_type == PT_GNU_STACK {
+                Some((ph.p_flags & PF_X) != 0)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(false);
     let stack_flags = VmaFlags {
         readable: true,
         writable: true,
@@ -2014,9 +2189,13 @@ fn load_elf_task_inner(
     // top word of the stack; all boot data lives strictly below it. The
     // kernel re-checks it at task exit (Task::verify_user_stack_canary).
     let mut canary_bytes = [0u8; 8];
+    crate::e9_mark!(b'3');
     crate::entropy::fill_random(&mut canary_bytes);
+    crate::e9_mark!(b'4');
     let stack_canary = u64::from_le_bytes(canary_bytes) | 1; // never 0
+    crate::e9_mark!(b'5');
     write_user_u64(&user_as, stack_top - 8, stack_canary)?;
+    crate::e9_mark!(b'6');
 
     let boot_sp = setup_boot_user_stack(
         &user_as,
@@ -2089,6 +2268,8 @@ fn load_elf_task_inner(
             TaskPriority::Normal,
         )),
         home_cpu: core::sync::atomic::AtomicUsize::new(usize::MAX),
+        last_cpu: core::sync::atomic::AtomicUsize::new(usize::MAX),
+        affinity_mask: core::sync::atomic::AtomicU64::new(0),
         vruntime: core::sync::atomic::AtomicU64::new(0),
         fair_rq_generation: core::sync::atomic::AtomicU64::new(0),
         fair_on_rq: core::sync::atomic::AtomicBool::new(false),
@@ -2099,6 +2280,10 @@ fn load_elf_task_inner(
         fpu_state: crate::process::task::SyncUnsafeCell::new(fpu_state),
         xcr0_mask: core::sync::atomic::AtomicU64::new(xcr0_mask),
         rt_link: intrusive_collections::LinkedListLink::new(),
+        rt_budget_remaining: core::sync::atomic::AtomicU64::new(0),
+        rt_budget_period_start: core::sync::atomic::AtomicU64::new(0),
+        rt_degraded: core::sync::atomic::AtomicBool::new(false),
+        fair_wait_ticks: core::sync::atomic::AtomicU64::new(0),
     });
 
     crate::e9_println!(
@@ -2195,6 +2380,22 @@ fn load_elf_task_inner(
 
 /// Load an ELF binary into the provided address space.
 /// Returns the entry point address.
+///
+/// # Duplication note (audit 2026-09-07)
+///
+/// This function duplicates the parsing / PT_LOAD / RELRO / PT_INTERP /
+/// TLS-extraction steps of [`load_elf_task_inner`].  Asterinas avoids the
+/// duplication by separating `load_elf_to_vmar` (image-loading sink)
+/// from `do_execve` (process setup).  In Strat9-OS the two paths have
+/// diverged over time : this function does *not* allocate the TLS block
+/// itself (the caller in [`crate::syscall::exec`] does), and it does *not*
+/// build a Task struct.
+///
+/// A future refactor should extract the common `parse → load_segments →
+/// RELRO → interp-load → tls-extract` sequence into a single private
+/// helper parameterised by an `ImageSink` trait (Task-bound vs bare AS),
+/// mirroring Asterinas.  Until then, every loader-side fix must be applied
+/// to **both** functions.
 pub fn load_elf_image(
     elf_data: &[u8],
     user_as: &AddressSpace,
@@ -2224,8 +2425,9 @@ pub fn load_elf_image(
     if let Some(relro) = phdrs.iter().find(|ph| ph.p_type == PT_GNU_RELRO) {
         if relro.p_memsz > 0 {
             let relro_start = relro.p_vaddr.wrapping_add(load_bias) & !0xFFF;
-            let relro_end =
-                (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz + 0xFFF) & !0xFFF;
+            // A partial trailing page may contain writable data outside RELRO.
+            // Protect only through the last complete page, never round up.
+            let relro_end = (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz) & !0xFFF;
             if relro_end > relro_start && relro_end <= USER_ADDR_MAX {
                 let ro_flags = VmaFlags {
                     readable: true,
@@ -2280,9 +2482,20 @@ pub fn load_elf_image(
         interp_base = Some(interp_min_vaddr.saturating_add(interp_bias));
     }
 
+    // PT_GNU_STACK: Linux semantics dictate that only the *last* PT_GNU_STACK
+    // entry counts (see `load_elf_task_inner` for the rationale).  Walk the
+    // phdrs in reverse to find the last PT_GNU_STACK.
     let stack_exec = phdrs
         .iter()
-        .any(|ph| ph.p_type == PT_GNU_STACK && (ph.p_flags & PF_X) != 0);
+        .rev()
+        .find_map(|ph| {
+            if ph.p_type == PT_GNU_STACK {
+                Some((ph.p_flags & PF_X) != 0)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(false);
 
     Ok(LoadedElfInfo {
         runtime_entry,

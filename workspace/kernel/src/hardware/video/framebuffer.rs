@@ -1,7 +1,7 @@
 // Framebuffer abstraction layer
 //
 // Provides a unified framebuffer interface that can use:
-// - UEFI bootloader framebuffer (bootloader-provided, WC-mapped via PAT)
+// - UEFI bootloader framebuffer (bootloader-provided, UC on every boot alias)
 // - VirtIO GPU framebuffer (native driver, zero-copy backing)
 // - Future/TODO : other GPU drivers (Bochs DRM, etc.)
 //
@@ -233,7 +233,7 @@ impl Framebuffer {
     ///
     /// G3: the double buffer is allocated FIRST and attached as the scanout
     /// resource backing itself, so draws land directly in what
-    /// TRANSFER_TO_HOST_2D reads — presentation becomes zero-copy.
+    /// TRANSFER_TO_HOST_2D reads : presentation becomes zero-copy.
     pub fn init_virtio_gpu() -> Result<(), &'static str> {
         let gpu = crate::hardware::virtio::gpu::get_gpu().ok_or("VirtIO GPU not initialized")?;
         let gpu_info = gpu.info();

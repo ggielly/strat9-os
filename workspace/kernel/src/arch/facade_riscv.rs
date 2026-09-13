@@ -5,8 +5,8 @@
 //! progresses; each is replaced by real code in a later jalon.
 
 pub use super::riscv64::{
-    boot_timestamp, cli, cpuid, hlt, interrupts_enabled, rdtsc, restore_flags,
-    save_flags_and_cli, serial, speaker, sti, vgabuf,
+    boot_timestamp, cli, cpuid, hlt, interrupts_enabled, rdtsc, restore_flags, save_flags_and_cli,
+    serial, speaker, sti, vgabuf,
 };
 
 pub use crate::arch::riscv64::vga_canvas::Canvas;
@@ -18,7 +18,12 @@ pub const MAX_CPUS: usize = 32;
 pub mod vga {
     pub use crate::arch::riscv64::vga::*;
     // UI widget types (no-op surface for riscv64 serial console)
-    pub enum DockEdge { Left, Right, Top, Bottom }
+    pub enum DockEdge {
+        Left,
+        Right,
+        Top,
+        Bottom,
+    }
     pub struct UiRect;
     pub struct UiLabel;
     pub struct UiPanel;
@@ -62,10 +67,18 @@ pub mod percpu {
         false
     }
     pub fn apic_id_by_cpu_index(index: usize) -> Option<u32> {
-        if index == 0 { Some(0) } else { None }
+        if index == 0 {
+            Some(0)
+        } else {
+            None
+        }
     }
     pub fn cpu_index_by_apic(apic_id: u32) -> Option<usize> {
-        if apic_id == 0 { Some(0) } else { None }
+        if apic_id == 0 {
+            Some(0)
+        } else {
+            None
+        }
     }
     pub fn preempt_disable() {}
     pub fn preempt_enable() {}
@@ -198,7 +211,9 @@ pub mod keyboard {
 pub mod mouse {
     pub static MOUSE_READY: core::sync::atomic::AtomicBool =
         core::sync::atomic::AtomicBool::new(false);
-    pub fn init() -> bool { false }
+    pub fn init() -> bool {
+        false
+    }
     pub fn handle_irq() {}
     pub struct MouseEvent {
         pub dx: i16,
@@ -211,7 +226,9 @@ pub mod mouse {
     pub fn read_event() -> Option<MouseEvent> {
         None
     }
-    pub fn mouse_pos() -> (usize, usize) { (0, 0) }
+    pub fn mouse_pos() -> (usize, usize) {
+        (0, 0)
+    }
     pub fn update_mouse_cursor(_x: usize, _y: usize) {}
     pub fn push_event_from_hid(_dx: i32, _dy: i32, _buttons: u8) {}
     pub fn inject_hid_scancode(_sc: u8) {}
@@ -254,7 +271,11 @@ pub mod pci_full {
     }
     impl PciAddress {
         pub const fn new(bus: u8, device: u8, function: u8) -> Self {
-            Self { bus, device, function }
+            Self {
+                bus,
+                device,
+                function,
+            }
         }
     }
     #[derive(Clone, Copy, Debug)]
@@ -277,7 +298,7 @@ pub mod pci_full {
     pub fn probe_all(_crit: ProbeCriteria) -> alloc::vec::Vec<PciDevice> {
         alloc::vec::Vec::new()
     }
-        pub fn probe_first(_crit: ProbeCriteria) -> Option<(PciAddress, PciDevice)> {
+    pub fn probe_first(_crit: ProbeCriteria) -> Option<(PciAddress, PciDevice)> {
         None
     }
     pub fn read_u32_shim(_addr: PciAddress, _off: u8) -> u32 {
@@ -328,9 +349,15 @@ pub mod pci_full {
         pub const INTERRUPT_DISABLE: u16 = 0x400;
     }
     impl PciDevice {
-        pub fn read_config_u8(&self, _off: u8) -> u8 { 0xFF }
-        pub fn read_config_u16(&self, _off: u8) -> u16 { 0xFFFF }
-        pub fn read_config_u32(&self, _off: u8) -> u32 { 0xFFFF_FFFF }
+        pub fn read_config_u8(&self, _off: u8) -> u8 {
+            0xFF
+        }
+        pub fn read_config_u16(&self, _off: u8) -> u16 {
+            0xFFFF
+        }
+        pub fn read_config_u32(&self, _off: u8) -> u32 {
+            0xFFFF_FFFF
+        }
         pub fn write_config_u8(&self, _off: u8, _v: u8) {}
         pub fn write_config_u16(&self, _off: u8, _v: u16) {}
         pub fn write_config_u32(&self, _off: u8, _v: u32) {}
@@ -400,11 +427,11 @@ pub mod pci_full {
     pub const MSI_ADDR_DEST_SHIFT: u32 = 12;
 }
 
-// stac/clac: SMAP does not exist on RISC-V — no-ops.
+// stac/clac: SMAP does not exist on RISC-V : no-ops.
 pub fn stac() {}
 pub fn clac() {}
 
-// xsave/xcr0 helpers referenced by task.rs/framebuffer — always false on RISC-V.
+// xsave/xcr0 helpers referenced by task.rs/framebuffer : always false on RISC-V.
 pub mod cpuid_x86 {
     pub use crate::arch::riscv64::cpuid_x86_shim::CpuFeatures;
     pub fn host_uses_xsave() -> bool {
@@ -451,7 +478,7 @@ pub mod vga_text {
 
 // io: MMIO-only on RISC-V; port accessors panic (see io stubs above).
 pub mod io2 {
-    pub use super::io::{inb, outb, inw, outw, inl, outl};
+    pub use super::io::{inb, inl, inw, outb, outl, outw};
 }
 
 pub mod ring3_diag {
@@ -495,7 +522,6 @@ pub mod gdt {
     }
 }
 
-
 pub mod idt {
     pub use crate::arch::riscv64::idt::*;
     pub enum InterruptReturnDecision {
@@ -511,10 +537,19 @@ pub mod pic {
 
 pub mod ioapic {
     pub fn init(_addr: u32, _gsi_base: u32) {}
-    pub fn route_legacy_irq(_gsi: u8, _lapic: u32, _vector: u8, _ovr: &[Option<crate::acpi::madt::InterruptSourceOverride>; 16]) {}
-    pub fn mask_legacy_irq(_irq: u8, _ovr: &[Option<crate::acpi::madt::InterruptSourceOverride>; 16]) {}
+    pub fn route_legacy_irq(
+        _gsi: u8,
+        _lapic: u32,
+        _vector: u8,
+        _ovr: &[Option<crate::acpi::madt::InterruptSourceOverride>; 16],
+    ) {
+    }
+    pub fn mask_legacy_irq(
+        _irq: u8,
+        _ovr: &[Option<crate::acpi::madt::InterruptSourceOverride>; 16],
+    ) {
+    }
     pub fn store_madt_overrides(_ovr: &[Option<crate::acpi::madt::InterruptSourceOverride>; 16]) {}
-
 }
 
 pub mod timer {
@@ -522,7 +557,11 @@ pub mod timer {
     pub const TIMER_HZ: u64 = 100;
     pub const NS_PER_TICK: u64 = 1_000_000_000 / TIMER_HZ;
     pub use crate::arch::riscv64::timer_extra::*;
-    pub fn is_apic_timer_active() -> bool { false }
-    pub fn apic_ticks_per_10ms() -> u32 { 0 }
+    pub fn is_apic_timer_active() -> bool {
+        false
+    }
+    pub fn apic_ticks_per_10ms() -> u32 {
+        0
+    }
     pub fn start_apic_timer_cached() {}
 }

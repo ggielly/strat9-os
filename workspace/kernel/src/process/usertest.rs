@@ -6,8 +6,8 @@
 //!
 //! This tests the full SYSCALL/SYSRET pipeline without needing an ELF loader.
 
-use alloc::sync::Arc;
 use crate::arch::xshim::VirtAddr;
+use alloc::sync::Arc;
 
 use crate::{
     memory::address_space::{AddressSpace, VmaFlags, VmaType},
@@ -161,6 +161,8 @@ pub fn create_user_test_task() {
             TaskPriority::Normal,
         )),
         home_cpu: core::sync::atomic::AtomicUsize::new(usize::MAX),
+        last_cpu: core::sync::atomic::AtomicUsize::new(usize::MAX),
+        affinity_mask: core::sync::atomic::AtomicU64::new(0),
         vruntime: core::sync::atomic::AtomicU64::new(0),
         fair_rq_generation: core::sync::atomic::AtomicU64::new(0),
         fair_on_rq: core::sync::atomic::AtomicBool::new(false),
@@ -171,6 +173,10 @@ pub fn create_user_test_task() {
         fpu_state: crate::process::task::SyncUnsafeCell::new(fpu_state),
         xcr0_mask: core::sync::atomic::AtomicU64::new(xcr0_mask),
         rt_link: intrusive_collections::LinkedListLink::new(),
+        rt_budget_remaining: core::sync::atomic::AtomicU64::new(0),
+        rt_budget_period_start: core::sync::atomic::AtomicU64::new(0),
+        rt_degraded: core::sync::atomic::AtomicBool::new(false),
+        fair_wait_ticks: core::sync::atomic::AtomicU64::new(0),
     });
 
     task.seed_interrupt_frame(crate::syscall::SyscallFrame {

@@ -9,14 +9,13 @@ use alloc::string::String;
 use bitflags::bitflags;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-
 bitflags! {
     /// Logical internal bitmap.
     ///
     /// Bit positions do NOT match raw CPUID register positions: flags coming
     /// from different leaves/sub-registers are reallocated into one `u64`
     /// space (SMEP/SMAP are deliberately relocated high to avoid collisions).
-    /// Only compare through the named constants — never raw bit positions.
+    /// Only compare through the named constants : never raw bit positions.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct CpuFeatures: u64 {
         //  Leaf 0x01 ECX
@@ -28,7 +27,8 @@ bitflags! {
         const POPCNT    = 1 << 5;
         const AES_NI    = 1 << 6;
         const XSAVE     = 1 << 7;
-        const AVX       = 1 << 8;
+        const OSXSAVE   = 1 << 8;
+        const AVX       = 1 << 12;
         const F16C      = 1 << 9;
         const VMX       = 1 << 10;
         const X2APIC    = 1 << 11;
@@ -92,7 +92,7 @@ pub struct CpuInfo {
     /// XSAVE area size (bytes) required if every supported component were
     /// enabled (CPUID.(0D,0):ECX). Upper bound for synthetic XCR0 masks.
     pub xsave_size_max: usize,
-    pub family: u8,
+    pub family: u16,
     pub model: u8,
     pub stepping: u8,
     pub model_name: [u8; 48],
@@ -160,8 +160,9 @@ pub fn boot_xsave_profile() -> XsaveProfile {
 
 /// Detect and cache CPU information. Must be called once at BSP boot.
 pub fn init() {
+    crate::e9_mark!(b'X');
     let info = detect();
-    crate::e9_println!("CPUID detect done");
+    crate::e9_mark!(b'Y');
     crate::serial_println!(
         "[CPUID] {} {} (family={} model={} stepping={})",
         info.vendor_string(),
@@ -186,7 +187,7 @@ pub fn init() {
     //
     // NOTE: compute the size from the *local* `info`, not via the global
     // cache (`xsave_size_for_xcr0`/`host_uses_xsave`). Those consult
-    // `INITIALIZED`, which is only published below — so during `init()` they
+    // `INITIALIZED`, which is only published below : so during `init()` they
     // always fall back to 512 bytes even when AVX/AVX-512 is present, leaving
     // the XSAVE area too small and corrupting state on the first AVX context
     // switch.
@@ -194,10 +195,12 @@ pub fn init() {
     PROFILE_XCR0.store(default_xcr0, Ordering::Release);
     PROFILE_AREA_SIZE.store(profile_size, Ordering::Release);
 
+    crate::e9_mark!(b'J');
     *HOST_CPU.lock() = Some(info);
+    crate::e9_mark!(b'K');
     HOST_DEFAULT_XCR0_CACHE.store(default_xcr0, Ordering::Release);
     INITIALIZED.store(true, Ordering::Release);
-    crate::e9_println!("CPUID init done");
+    crate::e9_mark!(b'i');
 }
 
 /// Return a clone of the cached host CPU info. Panics if `init()` not called.
@@ -221,27 +224,51 @@ pub fn host_uses_xsave() -> bool {
 fn detect() -> CpuInfo {
     let cpuid = super::cpuid;
 
+    crate::e9_mark!(b'D');
     //  Vendor (leaf 0): keep the raw 12-byte id, then classify.
     let (max_leaf, ebx0, ecx0, edx0) = cpuid(0, 0);
+    crate::e9_mark!(b'E');
+    crate::e9_mark!(b'a');
     let mut vendor_id = [0u8; 12];
-    vendor_id[0..4].copy_from_slice(&ebx0.to_le_bytes());
-    vendor_id[4..8].copy_from_slice(&edx0.to_le_bytes());
-    vendor_id[8..12].copy_from_slice(&ecx0.to_le_bytes());
+    crate::e9_mark!(b'b');
+    let b = ebx0.to_le_bytes();
+    vendor_id[0] = b[0];
+    vendor_id[1] = b[1];
+    vendor_id[2] = b[2];
+    vendor_id[3] = b[3];
+    crate::e9_mark!(b'c');
+    let d = edx0.to_le_bytes();
+    vendor_id[4] = d[0];
+    vendor_id[5] = d[1];
+    vendor_id[6] = d[2];
+    vendor_id[7] = d[3];
+    crate::e9_mark!(b'd');
+    let c = ecx0.to_le_bytes();
+    vendor_id[8] = c[0];
+    vendor_id[9] = c[1];
+    vendor_id[10] = c[2];
+    vendor_id[11] = c[3];
+    crate::e9_mark!(b'e');
     let vendor = match (ebx0, edx0, ecx0) {
         (0x756E_6547, 0x4965_6E69, 0x6C65_746E) => CpuVendor::Intel,
         (0x6874_7541, 0x6974_6E65, 0x444D_4163) => CpuVendor::Amd,
         _ => CpuVendor::Unknown,
     };
+    crate::e9_mark!(b'f');
 
     let mut features = CpuFeatures::empty();
 
     //  Leaf 0x01: main feature bits
+    crate::e9_mark!(b'1');
     let (eax1, _ebx1, ecx1, edx1) = if max_leaf >= 1 {
-            cpuid(1, 0)
+        cpuid(1, 0)
     } else {
         (0, 0, 0, 0)
     };
-    crate::e9_println!("detect: leaf1 done");
+    crate::e9_mark!(b'2');
+    crate::e9_mark!(b'd');
+    crate::e9_mark!(b'f');
+    crate::e9_mark!(b'e');
 
     let stepping = (eax1 & 0xF) as u8;
     let base_family = (eax1 >> 8) & 0xF;
@@ -256,7 +283,7 @@ fn detect() -> CpuInfo {
     if base_family == 15 {
         family_full += ext_family as u16;
     }
-    let family = family_full as u8;
+    let family = family_full;
 
     if ecx1 & (1 << 0) != 0 {
         features |= CpuFeatures::SSE3;
@@ -281,6 +308,9 @@ fn detect() -> CpuInfo {
     }
     if ecx1 & (1 << 26) != 0 {
         features |= CpuFeatures::XSAVE;
+    }
+    if ecx1 & (1 << 27) != 0 {
+        features |= CpuFeatures::OSXSAVE;
     }
     if ecx1 & (1 << 28) != 0 {
         features |= CpuFeatures::AVX;
@@ -315,8 +345,10 @@ fn detect() -> CpuInfo {
     }
 
     //  Leaf 0x07: extended features
+    crate::e9_mark!(b'3');
     if max_leaf >= 7 {
         let (_eax7, ebx7, _ecx7, _edx7) = cpuid(7, 0);
+        crate::e9_mark!(b'5');
         if ebx7 & (1 << 5) != 0 {
             features |= CpuFeatures::AVX2;
         }
@@ -347,26 +379,34 @@ fn detect() -> CpuInfo {
     // CPUID.(0D,0):EDX:EAX = bitmap of components supported by the CPU
     // (XCR0 candidates). EBX = size of the save area for the components
     // currently enabled in XCR0 (OS-chosen, not a constant). ECX = size if
-    // every supported component were enabled — the correct upper bound for
+    // every supported component were enabled : the correct upper bound for
     // synthetic masks. Supervisor states (managed via IA32_XSS, not XCR0)
     // are filtered out so `supported_xcr0` stays a true XCR0 bitmap.
+    crate::e9_mark!(b'F');
     let mut supported_xcr0 = XCR0_X87 | XCR0_SSE;
     let mut xsave_size_current = 512usize;
     let mut xsave_size_max = 512usize;
-    if features.contains(CpuFeatures::XSAVE) && max_leaf >= 0x0D {
+    crate::e9_mark!(b'G');
+    let xsave_check = features.contains(CpuFeatures::XSAVE);
+    crate::e9_mark!(b'g');
+    let leaf0d_check = max_leaf >= 0x0D;
+    crate::e9_mark!(b'h');
+    if xsave_check && leaf0d_check {
+        crate::e9_mark!(b'H');
         let (eax_d, ebx_d, ecx_d, edx_d) = cpuid(0x0D, 0);
+        crate::e9_mark!(b'I');
         let raw = ((edx_d as u64) << 32) | eax_d as u64;
-        // Bits set in EDX above bit 2 (or any unknown upper bits) may be
-        // XSS-managed supervisor states; keep only the architecturally
-        // user-state bits we know how to reason about.
-        const XCR0_KNOWN_MASK: u64 = 0x0000_0000_0000_01FF;
-        supported_xcr0 = raw & XCR0_KNOWN_MASK;
+        supported_xcr0 = raw;
         xsave_size_current = ebx_d as usize;
         xsave_size_max = ecx_d as usize;
+    } else {
+        crate::e9_mark!(b'H');
     }
 
     //  Leaf 0x80000001: extended features (AMD-V, NX, 1G pages)
+    crate::e9_mark!(b'J');
     let (max_ext, _, _, _) = cpuid(0x8000_0000, 0);
+    crate::e9_mark!(b'K');
     if max_ext >= 0x8000_0001 {
         let (_eax_e, _ebx_e, ecx_e, edx_e) = cpuid(0x8000_0001, 0);
         if edx_e & (1 << 20) != 0 {
@@ -385,6 +425,7 @@ fn detect() -> CpuInfo {
             features |= CpuFeatures::SVM;
         }
     }
+    crate::e9_mark!(b'L');
 
     //  Leaves 0x80000002-0x80000004: brand string
     let mut model_name = [0u8; 48];
@@ -393,10 +434,26 @@ fn detect() -> CpuInfo {
         for (i, leaf) in (0x8000_0002u32..=0x8000_0004).enumerate() {
             let (a, b, c, d) = cpuid(leaf, 0);
             let offset = i * 16;
-            model_name[offset..offset + 4].copy_from_slice(&a.to_le_bytes());
-            model_name[offset + 4..offset + 8].copy_from_slice(&b.to_le_bytes());
-            model_name[offset + 8..offset + 12].copy_from_slice(&c.to_le_bytes());
-            model_name[offset + 12..offset + 16].copy_from_slice(&d.to_le_bytes());
+            let ab = a.to_le_bytes();
+            model_name[offset] = ab[0];
+            model_name[offset + 1] = ab[1];
+            model_name[offset + 2] = ab[2];
+            model_name[offset + 3] = ab[3];
+            let bb = b.to_le_bytes();
+            model_name[offset + 4] = bb[0];
+            model_name[offset + 5] = bb[1];
+            model_name[offset + 6] = bb[2];
+            model_name[offset + 7] = bb[3];
+            let cb = c.to_le_bytes();
+            model_name[offset + 8] = cb[0];
+            model_name[offset + 9] = cb[1];
+            model_name[offset + 10] = cb[2];
+            model_name[offset + 11] = cb[3];
+            let db = d.to_le_bytes();
+            model_name[offset + 12] = db[0];
+            model_name[offset + 13] = db[1];
+            model_name[offset + 14] = db[2];
+            model_name[offset + 15] = db[3];
         }
         model_name_len = model_name
             .iter()
@@ -421,29 +478,41 @@ fn detect() -> CpuInfo {
 
 /// Pure helper: the XCR0 mask this kernel would enable for `info`
 /// (x87 + SSE always, plus AVX / AVX-512 states when the CPU announces
-/// them). Shared by `init()` (pre-lock computation) and `host()`.
+/// them AND the hardware supports the required XCR0 bits).
+/// Shared by `init()` (pre-lock computation) and `host()`.
 fn default_xcr0_for(info: &CpuInfo) -> u64 {
-    let mut xcr0 = XCR0_X87 | XCR0_SSE;
-    if info.features.contains(CpuFeatures::AVX) {
-        xcr0 |= XCR0_AVX;
+    const SSE_BASE: u64 = XCR0_X87 | XCR0_SSE;
+    const AVX_STATE: u64 = SSE_BASE | XCR0_AVX;
+    const AVX512_STATE: u64 = AVX_STATE | XCR0_OPMASK | XCR0_ZMM_HI256 | XCR0_HI16_ZMM;
+
+    if !info.features.contains(CpuFeatures::XSAVE) {
+        return SSE_BASE;
     }
-    if info.features.contains(CpuFeatures::AVX512F) {
-        xcr0 |= XCR0_OPMASK | XCR0_ZMM_HI256 | XCR0_HI16_ZMM;
+
+    let available = info.supported_xcr0;
+    let mut wanted = SSE_BASE;
+
+    if info.features.contains(CpuFeatures::AVX) && (available & AVX_STATE) == AVX_STATE {
+        wanted = AVX_STATE;
     }
-    // Clamp to host-supported components.
-    xcr0 & info.supported_xcr0
+
+    if info.features.contains(CpuFeatures::AVX512F) && (available & AVX512_STATE) == AVX512_STATE {
+        wanted = AVX512_STATE;
+    }
+
+    wanted
 }
 
 impl CpuInfo {
     /// Whether AVX may actually be executed: the hardware announces it AND
     /// the kernel enabled the required states (CR4.OSXSAVE via XSAVE +
     /// XCR0 bits 0|1|2). Never gate code paths on `features.contains(AVX)`
-    /// alone — that only reflects CPUID, not what the OS programmed.
+    /// alone : that only reflects CPUID, not what the OS programmed.
     pub fn avx_usable(&self) -> bool {
+        const REQUIRED: u64 = XCR0_X87 | XCR0_SSE | XCR0_AVX;
         self.features
-            .contains(CpuFeatures::AVX | CpuFeatures::XSAVE)
-            && (self.supported_xcr0 & (XCR0_X87 | XCR0_SSE | XCR0_AVX))
-                == (XCR0_X87 | XCR0_SSE | XCR0_AVX)
+            .contains(CpuFeatures::AVX | CpuFeatures::XSAVE | CpuFeatures::OSXSAVE)
+            && (self.supported_xcr0 & REQUIRED) == REQUIRED
             && crate::arch::x86_64::cpuid_osxsave_enabled()
             && host_default_xcr0() & XCR0_AVX != 0
     }
@@ -454,8 +523,9 @@ impl CpuInfo {
     pub fn avx512_usable(&self) -> bool {
         const REQUIRED: u64 =
             XCR0_X87 | XCR0_SSE | XCR0_AVX | XCR0_OPMASK | XCR0_ZMM_HI256 | XCR0_HI16_ZMM;
-        self.features.contains(CpuFeatures::AVX512F)
-            && (self.supported_xcr0 & REQUIRED) == REQUIRED
+        self.features.contains(
+            CpuFeatures::AVX512F | CpuFeatures::AVX | CpuFeatures::XSAVE | CpuFeatures::OSXSAVE,
+        ) && (self.supported_xcr0 & REQUIRED) == REQUIRED
             && crate::arch::x86_64::cpuid_osxsave_enabled()
             && host_default_xcr0() & REQUIRED == REQUIRED
     }
@@ -475,30 +545,35 @@ pub fn xcr0_for_features(_features: CpuFeatures) -> u64 {
 /// Compute the XSAVE area size needed for a given XCR0 mask directly from a
 /// `CpuInfo`, without consulting the global cache (`host_uses_xsave`/`host`).
 /// This is what `init()` must use, because the cache is not yet published when
-/// `init()` runs — otherwise AVX/AVX-512 would be given a 512-byte area.
+/// `init()` runs : otherwise AVX/AVX-512 would be given a 512-byte area.
 fn xsave_size_for_info(info: &CpuInfo, xcr0: u64) -> usize {
     if !info.features.contains(CpuFeatures::XSAVE) {
         return 512;
     }
+    // Clamp to what the CPU actually supports; ignore unknown bits.
+    let xcr0 = xcr0 & info.supported_xcr0;
     if xcr0 == info.supported_xcr0 {
-        return info.xsave_size_max;
+        // Fast path: requesting all components : use the ECX upper-bound.
+        return info.xsave_size_max.max(576);
     }
     let mut size = 576usize; // legacy area (512) + xsave header (64)
-    for comp in 2..63 {
+    for comp in 2..64 {
         if xcr0 & (1u64 << comp) == 0 {
             continue;
         }
-        let (eax, ebx, _ecx, edx) = super::cpuid(0x0D, comp);
+        let (eax, ebx, ecx, _edx) = super::cpuid(0x0D, comp);
         // ECX bit 0: component managed via XCR0 (0) or IA32_XSS (1).
-        // Skip supervisor states — not saved by a user-space XCR0 mask.
-        if edx & 1 != 0 {
+        // Skip supervisor states : not saved by a user-space XCR0 mask.
+        if ecx & 1 != 0 {
             continue;
         }
         let comp_size = eax as usize;
         let comp_offset = ebx as usize;
-        size = size.max(comp_offset + comp_size);
+        if comp_size != 0 {
+            size = size.max(comp_offset.saturating_add(comp_size));
+        }
     }
-    size.min(info.xsave_size_max)
+    size.min(info.xsave_size_max).max(576)
 }
 
 /// Compute the XSAVE area size needed for a given XCR0 mask.
@@ -515,27 +590,29 @@ pub fn xsave_size_for_xcr0(xcr0: u64) -> usize {
     // Enumerate each enabled XCR0 component via CPUID leaf 0xD sub-leaves.
     // Sub-leaf n returns offset (EBX) and size (EAX) for component n.
     // The total save area is max(offset + size) across all enabled components.
-    // NOTE: this walks CPUID per component — do not call from context-switch
+    // NOTE: this walks CPUID per component : do not call from context-switch
     // or task-creation hot paths; precompute profiles instead.
     // The ceiling is xsave_size_max (CPUID.0D.0:ECX), valid for any mask;
     // EBX would only be valid for the XCR0 currently programmed.
     let mut size = 576usize; // legacy area (512) + xsave header (64)
-    for comp in 2..63 {
+    for comp in 2..64 {
         if xcr0 & (1u64 << comp) == 0 {
             continue;
         }
         let (eax, ebx, ecx, _edx) = super::cpuid(0x0D, comp);
         // ECX bit 0: component managed via XCR0 (0) or IA32_XSS (1).
-        // Skip supervisor states — they are not saved by XSAVE/XRSTOR
+        // Skip supervisor states : they are not saved by XSAVE/XRSTOR
         // with a user-space XCR0 mask.
         if ecx & 1 != 0 {
             continue;
         }
         let comp_size = eax as usize;
         let comp_offset = ebx as usize;
-        size = size.max(comp_offset + comp_size);
+        if comp_size != 0 {
+            size = size.max(comp_offset.saturating_add(comp_size));
+        }
     }
-    size.min(h.xsave_size_max)
+    size.min(h.xsave_size_max).max(576)
 }
 
 /// Return the host's default XCR0 mask from the lock-free cache, falling back
@@ -571,8 +648,12 @@ pub fn tsc_frequency_khz() -> Option<u64> {
         let denom = eax as u64;
         let num = ebx as u64;
         if denom != 0 {
-            // TSC freq = core_crystal_hz * num / denom
-            return Some(core_crystal_hz * num / denom / 1_000);
+            // TSC freq = core_crystal_hz * num / denom / 1_000
+            // Use checked arithmetic to avoid silent overflow.
+            return core_crystal_hz
+                .checked_mul(num)?
+                .checked_div(denom)?
+                .checked_div(1_000);
         }
     }
     None
@@ -606,6 +687,7 @@ pub fn features_to_flags_string(f: CpuFeatures) -> String {
         (CpuFeatures::POPCNT, "popcnt"),
         (CpuFeatures::AES_NI, "aes"),
         (CpuFeatures::XSAVE, "xsave"),
+        (CpuFeatures::OSXSAVE, "osxsave"),
         (CpuFeatures::AVX, "avx"),
         (CpuFeatures::F16C, "f16c"),
         (CpuFeatures::FMA, "fma"),

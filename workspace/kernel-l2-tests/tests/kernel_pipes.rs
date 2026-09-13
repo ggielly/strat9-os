@@ -1,4 +1,4 @@
-//! L2 — Kernel pipes (verbatim code): FIFO semantics, EOF, EPIPE, EAGAIN,
+//! L2 : Kernel pipes (verbatim code): FIFO semantics, EOF, EPIPE, EAGAIN,
 //! ring wraparound, and the PipeScheme registry.
 //!
 //! Blocking paths are avoided (single-threaded host); non-blocking variants
@@ -7,9 +7,11 @@
 
 use std::sync::Arc;
 
-use kernel_l2_tests::sync::SpinLock;
-use kernel_l2_tests::syscall::error::SyscallError as SyscallErrorAlias;
-use kernel_l2_tests::vfs::pipe::{Pipe, PipeScheme};
+use kernel_l2_tests::{
+    sync::SpinLock,
+    syscall::error::SyscallError as SyscallErrorAlias,
+    vfs::pipe::{Pipe, PipeScheme},
+};
 
 // ===========================================================================
 // Basic data plane
@@ -65,7 +67,7 @@ fn pipe_ring_positions_wrap_modulo_4096() {
     let p = Pipe::new();
     const PIPE_BUF_SIZE: usize = 4096;
 
-    // Fill completely, drain completely — twice — to force both positions
+    // Fill completely, drain completely : twice : to force both positions
     // through the modulo boundary.
     let chunk = vec![0xA7u8; 1024];
     for _ in 0..4 {
@@ -112,9 +114,12 @@ fn pipe_drain_survives_writer_close() {
 #[test]
 fn pipe_close_reader_makes_write_fail_with_epipe() {
     let p = Pipe::new();
-    assert!(p.close_read(), "first close_read must report the transition");
+    assert!(
+        p.close_read(),
+        "first close_read must report the transition"
+    );
     let r = p.write(b"data", true);
-        assert!(matches!(r, Err(SyscallErrorAlias::Pipe)));
+    assert!(matches!(r, Err(SyscallErrorAlias::Pipe)));
 }
 
 // ===========================================================================

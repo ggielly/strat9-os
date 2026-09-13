@@ -1,17 +1,16 @@
-//! L2 — VFS scheme protocol core + router (verbatim kernel code).
+//! L2 : VFS scheme protocol core + router (verbatim kernel code).
 //!
 //! `IpcScheme` blocking request/reply paths are excluded (they hit the
-//! host-panic reply shim); everything else — pseudo-stat finalization,
+//! host-panic reply shim); everything else : pseudo-stat finalization,
 //! the KernelScheme static-file registry, and the global scheme router —
 //! is exercised for real.
 
-use std::sync::Arc;
 use kernel_l2_tests::vfs::{
     get_initfs_file_bytes, get_scheme, list_schemes, register_initfs_file, register_scheme,
     scheme::{finalize_pseudo_stat, FileFlags, FileStat, KernelScheme},
 };
-use strat9_abi::data::TimeSpec;
-use strat9_abi::flag::OpenFlags;
+use std::sync::Arc;
+use strat9_abi::{data::TimeSpec, flag::OpenFlags};
 
 // ===========================================================================
 // finalize_pseudo_stat
@@ -30,26 +29,48 @@ fn finalize_pseudo_stat_fills_device_and_timestamps() {
         st_size: 1234,
         st_blksize: 4096,
         st_blocks: 8,
-        st_atime: TimeSpec { tv_sec: 0, tv_nsec: 0 },
-        st_mtime: TimeSpec { tv_sec: 0, tv_nsec: 0 },
-        st_ctime: TimeSpec { tv_sec: 0, tv_nsec: 0 },
+        st_atime: TimeSpec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
+        st_mtime: TimeSpec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
+        st_ctime: TimeSpec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
     };
     let out = finalize_pseudo_stat(st, 123, 456);
     assert_eq!(out.st_dev, 123);
     assert_eq!(out.st_rdev, 456);
     // Timestamps stamped "now" (host-real clock): sane window check.
-    let now_floor = 1_600_000_000u64; // Sept 2020 — anything earlier is a bug
+    let now_floor = 1_600_000_000u64; // Sept 2020 : anything earlier is a bug
     for ts in [out.st_atime, out.st_mtime, out.st_ctime] {
-        assert!(ts.tv_sec as u64 >= now_floor, "timestamp not stamped: {:?}", ts);
+        assert!(
+            ts.tv_sec as u64 >= now_floor,
+            "timestamp not stamped: {:?}",
+            ts
+        );
     }
 }
 
 #[test]
 fn file_flags_map_to_ipc_file_flag_bits() {
-    assert_eq!(FileFlags::DIRECTORY.bits(), strat9_abi::data::IPC_FILE_FLAG_DIRECTORY);
-    assert_eq!(FileFlags::DEVICE.bits(), strat9_abi::data::IPC_FILE_FLAG_DEVICE);
+    assert_eq!(
+        FileFlags::DIRECTORY.bits(),
+        strat9_abi::data::IPC_FILE_FLAG_DIRECTORY
+    );
+    assert_eq!(
+        FileFlags::DEVICE.bits(),
+        strat9_abi::data::IPC_FILE_FLAG_DEVICE
+    );
     assert_eq!(FileFlags::PIPE.bits(), strat9_abi::data::IPC_FILE_FLAG_PIPE);
-    assert_eq!(FileFlags::APPEND.bits(), strat9_abi::data::IPC_FILE_FLAG_APPEND);
+    assert_eq!(
+        FileFlags::APPEND.bits(),
+        strat9_abi::data::IPC_FILE_FLAG_APPEND
+    );
 }
 
 #[test]
@@ -82,11 +103,17 @@ fn router_register_get_unregister_roundtrip() {
     let name = "probe-scheme-router";
     let ks: Arc<KernelScheme> = Arc::new(KernelScheme::new());
     register_scheme(name, ks.clone()).expect("register");
-    assert!(get_scheme(name).is_some(), "scheme must resolve after register");
+    assert!(
+        get_scheme(name).is_some(),
+        "scheme must resolve after register"
+    );
     assert!(list_schemes().iter().any(|s| s == name));
 
     // Duplicate registration must be rejected (registry invariant).
-    assert!(register_scheme(name, ks.clone()).is_err(), "duplicate register must fail");
+    assert!(
+        register_scheme(name, ks.clone()).is_err(),
+        "duplicate register must fail"
+    );
     assert!(get_scheme(name).is_some());
 }
 
@@ -112,7 +139,7 @@ fn initfs_builtin_flow_register_and_lookup() {
     assert_eq!(get_initfs_file_bytes("/initfs/probe.bin"), Some(PAYLOAD));
 
     // FINDING F12 (testing-findings.md): keys registered WITH the "/initfs/"
-    // prefix are unreachable via get_initfs_file_bytes — the strip produces
+    // prefix are unreachable via get_initfs_file_bytes : the strip produces
     // a different key than the one stored. Kernel boot (lib.rs) registers
     // Limine module paths that DO carry the "/initfs/" prefix
     // ("Registered /initfs/fs-ext4"), suggesting initfs exec may never find
@@ -120,6 +147,8 @@ fn initfs_builtin_flow_register_and_lookup() {
     static FULL_PATH: &[u8] = &[9, 9];
     register_initfs_file("/full/path.bin", FULL_PATH.as_ptr(), FULL_PATH.len())
         .expect("register with absolute key");
-    assert!(get_initfs_file_bytes("/full/path.bin").is_none(),
-        "F12: absolute-key registration should be reported unreachable");
+    assert!(
+        get_initfs_file_bytes("/full/path.bin").is_none(),
+        "F12: absolute-key registration should be reported unreachable"
+    );
 }

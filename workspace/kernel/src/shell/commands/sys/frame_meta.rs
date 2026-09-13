@@ -1,8 +1,7 @@
 //! Inspect per-frame metadata (issue #38).
 
-use crate::{memory, shell::ShellError, shell_println};
+use crate::{arch::xshim::PhysAddr, memory, shell::ShellError, shell_println};
 use alloc::string::String;
-use crate::arch::xshim::PhysAddr;
 
 /// `frame-meta <phys_hex>` : print generation, guard bits, and vtable bits for one physical frame.
 pub fn cmd_frame_meta(args: &[String]) -> Result<(), ShellError> {

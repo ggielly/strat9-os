@@ -1,10 +1,12 @@
 //! Level 1: one function per `/thread` control file.
 
-use alloc::boxed::Box;
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{boxed::Box, string::String, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
-use strat9_syscall::{call, error::{Error, Result}, flag};
+use strat9_syscall::{
+    call,
+    error::{Error, Result},
+    flag,
+};
 
 const THREAD_DIR: &str = "/thread";
 
@@ -45,7 +47,7 @@ fn open_thread(name: &str, posix_flags: u32) -> Result<usize> {
 /// - `tls`: FS.base for TLS (0 = none).
 ///
 /// Returns the new thread's TID. The kernel reclaims the stack when the
-/// thread exits — joining is optional (`detach` costs nothing).
+/// thread exits : joining is optional (`detach` costs nothing).
 pub fn thread_create(entry: usize, stack_size: usize, arg: usize, tls: usize) -> Result<u32> {
     #[repr(C)]
     struct Request {
@@ -223,7 +225,7 @@ impl Default for Builder {
 /// A handle to a spawned thread.
 ///
 /// Dropping the handle **detaches** the thread: because stacks are
-/// kernel-owned, detachment requires no cleanup at all — the kernel reclaims
+/// kernel-owned, detachment requires no cleanup at all : the kernel reclaims
 /// the stack at exit. Call [`Thread::join`] to obtain the exit code instead.
 #[derive(Debug)]
 pub struct Thread {
@@ -269,7 +271,7 @@ impl Thread {
 
     /// Detach the thread: let it run to completion without joining.
     ///
-    /// Free by design — the kernel owns the stack and reclaims it at exit.
+    /// Free by design : the kernel owns the stack and reclaims it at exit.
     pub fn detach(mut self) {
         self.joined = true;
     }
@@ -333,7 +335,11 @@ pub fn thread_list() -> Result<Vec<ThreadInfo>> {
         match b {
             b'0'..=b'9' => {
                 let v = cur.unwrap_or(0);
-                cur = Some(v.checked_mul(10).and_then(|x| x.checked_add((b - b'0') as u32)).unwrap_or(u32::MAX));
+                cur = Some(
+                    v.checked_mul(10)
+                        .and_then(|x| x.checked_add((b - b'0') as u32))
+                        .unwrap_or(u32::MAX),
+                );
             }
             b'\n' | b' ' | b'\r' | b'\t' => {
                 if let Some(v) = cur.take() {

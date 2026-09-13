@@ -335,7 +335,9 @@ unsafe fn flush_tlb_all() {
 
 /// Send TLB IPI.
 fn send_tlb_ipi(target_apic_id: u32) {
-    let icr_low = crate::arch::x86_64::apic::IPI_TLB_SHOOTDOWN_VECTOR as u32 | (1 << 14);
+    // Fixed delivery, edge-triggered, physical destination.
+    // Level bit = 0 (reserved for Fixed mode per Intel SDM Vol. 3A Table 10-1).
+    let icr_low = crate::arch::x86_64::apic::IPI_TLB_SHOOTDOWN_VECTOR as u32;
     crate::arch::x86_64::apic::send_ipi_raw(target_apic_id, icr_low);
 }
 

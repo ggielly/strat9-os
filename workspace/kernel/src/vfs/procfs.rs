@@ -108,9 +108,7 @@ impl ProcScheme {
         let cpu_count = crate::arch::percpu::get_cpu_count();
         let host = crate::arch::cpuid::host();
         let flags = crate::arch::cpuid::features_to_flags_string(host.features);
-        let has_fpu = host
-            .features
-            .contains(crate::arch::cpuid::CpuFeatures::FPU);
+        let has_fpu = host.features.contains(crate::arch::cpuid::CpuFeatures::FPU);
 
         for i in 0..cpu_count {
             let _ = writeln!(output, "processor\t: {}", i);

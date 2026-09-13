@@ -20,7 +20,7 @@ fn wait_task_exit(name: &'static str, timeout_ticks: u64) -> bool {
             return true;
         }
         if ticks().saturating_sub(start) > timeout_ticks {
-            crate::serial_println!("[selftest] timeout waiting '{}'", name);
+            crate::serial_println!("[selftest] FAIL: timeout waiting '{}'", name);
             return false;
         }
         crate::process::yield_task();
@@ -199,6 +199,6 @@ pub fn create_selftest_tasks() {
         TaskPriority::High,
     ) {
         Ok(task) => add_task(task),
-        Err(_) => crate::serial_println!("[selftest] failed to create orchestrator task"),
+        Err(_) => crate::serial_println!("[selftest] FAIL: failed to create orchestrator task"),
     }
 }
