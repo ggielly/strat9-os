@@ -163,13 +163,13 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="boot-sequence"><a class="header" href="#boot-sequence">Boot Sequence</a></h1>
-<p>Strat9 OS boots on x86_64 via the Limine boot protocol. The boot flow transitions from 16-bit real mode through protected mode to 64-bit long mode before jumping into Rust.</p>
+<p>Strat9 OS boots on x86_64 via the UEFI bootloader. The boot flow transitions from 16-bit real mode through protected mode to 64-bit long mode before jumping into Rust.</p>
 <hr />
 <h2 id="boot-flow"><a class="header" href="#boot-flow">Boot flow</a></h2>
 <pre><code class="language-mermaid">flowchart TD
     A[BIOS/UEFI] --&gt; B[MBR / Stage 1]
     B --&gt; C[Stage 2]
-    C --&gt; D[Limine Protocol]
+    C --&gt; D[UEFI Bootloader]
     D --&gt; E[kstart - Assembly]
     E --&gt; F[start - Rust init]
     F --&gt; G[main.rs - Kernel main]
@@ -199,8 +199,8 @@
 <li>Jump to 64-bit code</li>
 </ol>
 <hr />
-<h2 id="limine-handoff"><a class="header" href="#limine-handoff">Limine handoff</a></h2>
-<p>The kernel is loaded by the Limine bootloader protocol. Limine provides:</p>
+<h2 id="uefi-bootloader-handoff"><a class="header" href="#uefi-bootloader-handoff">UEFI bootloader handoff</a></h2>
+<p>The kernel is loaded by the UEFI bootloader. The bootloader provides:</p>
 <ul>
 <li>Memory map (E820 equivalent)</li>
 <li>HHDM (Higher Half Direct Map) base address</li>
@@ -227,7 +227,7 @@
 </ol>
 <hr />
 <h2 id="kernel-init--start-rust"><a class="header" href="#kernel-init--start-rust">Kernel init : <code>start()</code> (Rust)</a></h2>
-<p>Located in <code>boot/limine.rs</code> → <code>main.rs</code>:</p>
+<p>Located in <code>boot/boot.rs</code> → <code>main.rs</code>:</p>
 <pre><code class="language-mermaid">flowchart TD
     A[serial::init] --&gt; B[gdt::init_bsp]
     B --&gt; C[idt::init_bsp]
