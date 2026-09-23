@@ -4,12 +4,14 @@
 
 ## Project stats
 
-- **Total commits:** `658`
+- **Total commits:** `660`
 - **Latest tag:** `0.1.0`
 - **Repository:** [git.strat9-os.org](https://git.strat9-os.org/strat9-os/strat9-os)
 
 ## Recent commits (auto-generated)
 
+- 2026-09-23 [`dec6766`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/dec676674d7c935126b8eea77b8bde72979727ff) Merge branch 'ELF-tuning-and-fix' into 'main'
+- 2026-09-23 [`e724272`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e724272e9bb7d4ddadb3f3a5cdcdcbf3c95e582e) Fix : unify logging to log::*, reject null ET_EXEC entry, warn on zero-size COPY relocs
 - 2026-09-14 [`4c008c5`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4c008c5cc3702bc915374b90a13518fec9268a9a) docs: update published documentation
 - 2026-09-13 [`981429b`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/981429b03d580bf5e7dd51a7003628f176683285) Merge branch 'fix/UEFI-bootloader' into 'main'
 - 2026-09-13 [`3898c50`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3898c5074c07d2b5bdbd13b505a51ccfe92a0e30) feat(bootloader, kernel, abi): homemade strat9 UEFI bootloader : rewrite with scheduler and memory hardening
@@ -58,7 +60,5 @@
 - 2026-08-25 [`e96df8f`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e96df8f0d54c6156f4be44509d3306033cbb08f1) refactor(arch): gate VGA-UI commands behind x86_64, complete riscv framebuffer_info stub
 - 2026-08-25 [`c587b62`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c587b6234fa5462576dc232ccea8535386feae10) refactor(arch): route debug breadcrumbs + ahci rep movsb through per-arch paths
 - 2026-08-25 [`88c5283`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/88c52834c3a0af3c6f01f14f3d7364f32a862281) refactor(arch): unify x86_64 crate access via x86_crate_shim, complete riscv stubs
-- 2026-08-25 [`8e10fe3`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/8e10fe3e0fb6514fe03a0a5a142b03621f913af0) refactor(arch): replace port-0xE9 debug putc with arch-routed serial
-- 2026-08-25 [`c8ca94c`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c8ca94c43ffb700129b00ddf661e45637515d6fc) refactor(arch): route shared code through arch::xshim, gate limine/x86 deps
 
 <!-- AUTO-CHANGELOG:END -->
