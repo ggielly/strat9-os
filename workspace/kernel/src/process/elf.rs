@@ -213,7 +213,7 @@ struct Elf64Sym {
 /// the fields we need into a local `Copy` struct.
 fn parse_header(data: &[u8]) -> Result<Elf64Header, &'static str> {
     let elf = xmas_elf::ElfFile::new(data).map_err(|e| {
-        crate::serial_println!("[elf] xmas_elf::ElfFile::new failed: {:?}", e);
+        log::error!("[elf] xmas_elf::ElfFile::new failed: {:?}", e);
         "Invalid ELF header"
     })?;
 
@@ -222,7 +222,7 @@ fn parse_header(data: &[u8]) -> Result<Elf64Header, &'static str> {
     // Reject non-x86_64 binaries early.
     let machine = hdr.machine().as_machine();
     if machine != xmas_elf::header::Machine::X86_64 {
-        crate::serial_println!(
+        log::error!(
             "[elf] Rejecting binary: machine={:?} (expected X86_64)",
             machine
         );
@@ -232,7 +232,7 @@ fn parse_header(data: &[u8]) -> Result<Elf64Header, &'static str> {
     // Type: executable or shared object (PIE/static PIE)
     let e_type = hdr.type_().0;
     if e_type != ET_EXEC && e_type != ET_DYN {
-        crate::serial_println!(
+        log::error!(
             "[elf] Rejecting binary: e_type={} (expected ET_EXEC={} or ET_DYN={})",
             e_type,
             ET_EXEC,
@@ -256,7 +256,7 @@ fn parse_header(data: &[u8]) -> Result<Elf64Header, &'static str> {
     // Compare against our packed Elf64Phdr (56 bytes = standard ELF64), not
     // xmas_elf::ProgramHeader which may have padding due to #[repr(C)].
     if e_phentsize as usize != core::mem::size_of::<Elf64Phdr>() {
-        crate::serial_println!(
+        log::error!(
             "[elf] Rejecting binary: e_phentsize={} expected={}",
             e_phentsize,
             core::mem::size_of::<Elf64Phdr>()
@@ -562,20 +562,11 @@ fn compute_load_bias_and_entry(
         return Err("Relocated PT_LOAD range exceeds user space");
     }
 
-    let entry_raw = if header.e_type == ET_EXEC && header.e_entry == 0 {
-        let fallback = phdrs
-            .iter()
-            .find(|ph| ph.p_type == PT_LOAD && ph.p_memsz != 0 && (ph.p_flags & PF_X) != 0)
-            .map(|ph| ph.p_vaddr)
-            .ok_or("ET_EXEC has null entry and no executable PT_LOAD")?;
-        log::warn!(
-            "[elf] ET_EXEC has null entry, using fallback executable segment vaddr={:#x}",
-            fallback
-        );
-        fallback
-    } else {
-        header.e_entry
-    };
+    if header.e_type == ET_EXEC && header.e_entry == 0 {
+        return Err("ET_EXEC has null entry point");
+    }
+
+    let entry_raw = header.e_entry;
 
     let relocated_entry = entry_raw
         .checked_add(load_bias)
@@ -1177,6 +1168,9 @@ fn apply_dynamic_relocations(
                         continue;
                     }
                     let sym_sz = resolve_size(r_sym)?;
+                    if sym_sz == 0 {
+                        log::warn!("[elf] R_X86_64_COPY with zero st_size for symbol {}", r_sym);
+                    }
                     if sym_sz > 0 && sym_val < USER_ADDR_MAX {
                         let mut tmp = [0u8; 256];
                         let mut off = 0u64;
@@ -1251,7 +1245,7 @@ fn apply_dynamic_relocations(
                 let mut before = [0u8; 8];
                 let _ = read_user_mapped_bytes(user_as, target, &mut before);
                 let before_val = u64::from_le_bytes(before);
-                crate::e9_println!(
+                log::trace!(
                     "[reloc] [{i}] r_type={} target={:#x} r_addend={:#x} value={:#x} before={:#x}",
                     r_type,
                     target,
@@ -1266,7 +1260,7 @@ fn apply_dynamic_relocations(
                 let mut after = [0u8; 8];
                 let _ = read_user_mapped_bytes(user_as, target, &mut after);
                 let after_val = u64::from_le_bytes(after);
-                crate::e9_println!(
+                log::trace!(
                     "[reloc] [{i}] after_write={:#x} (expected={:#x})",
                     after_val,
                     val_u64
@@ -1275,7 +1269,7 @@ fn apply_dynamic_relocations(
             #[cfg(debug_assertions)]
             if val_u64 >= 0xffff_8000_0000_0000 {
                 let r_addend_copy = rela.r_addend;
-                crate::e9_println!(
+                log::trace!(
                     "[reloc-KERNEL-ADDR] [{i}] r_type={} target={:#x} r_addend={:#x} val={:#x} bias={:#x}",
                     r_type, target, r_addend_copy, val_u64, load_bias
                 );
@@ -1287,7 +1281,7 @@ fn apply_dynamic_relocations(
 
     let mut total_applied = 0usize;
     #[cfg(debug_assertions)]
-    crate::e9_println!(
+    log::trace!(
         "[reloc] apply_dynamic_relocations: bias={:#x} rela_addr={:?} rela_size={} rela_count={:?}",
         load_bias,
         rela_addr,
@@ -1303,7 +1297,7 @@ fn apply_dynamic_relocations(
 
     #[cfg(debug_assertions)]
     if total_applied > 0 {
-        crate::e9_println!(
+        log::trace!(
             "[reloc] applied {} RELA relocations (bias={:#x})",
             total_applied,
             load_bias
@@ -1471,8 +1465,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     elf_trace!("[trace][elf] ring3_trampoline before current_task");
     let Some(task) = crate::process::scheduler::current_task_clone_spin_debug("ring3_trampoline")
     else {
-        crate::e9_println!("[elf] ring3_trampoline: no current task, aborting");
-        crate::serial_println!("[elf] ring3_trampoline: no current task, aborting");
+        log::error!("[elf] ring3_trampoline: no current task, aborting");
         loop {
             crate::x86_crate_shim::instructions::hlt();
         }
@@ -1783,7 +1776,7 @@ pub fn load_and_run_elf_with_caps(
     name: &'static str,
     seed_caps: &[Capability],
 ) -> Result<TaskId, &'static str> {
-    crate::e9_println!(
+    log::trace!(
         "[trace][elf] load_and_run_elf enter name={} size={}",
         name,
         elf_data.len()
@@ -1796,13 +1789,13 @@ pub fn load_and_run_elf_with_caps(
     let boot_stack_top = task
         .trampoline_stack_top
         .load(core::sync::atomic::Ordering::Acquire);
-    crate::e9_println!(
+    log::trace!(
         "[trace][elf] load_and_run_elf add_task begin tid={} entry={:#x}",
         task_id.as_u64(),
         runtime_entry
     );
     crate::process::add_task(task);
-    crate::e9_println!(
+    log::trace!(
         "[trace][elf] load_and_run_elf add_task done tid={}",
         task_id.as_u64()
     );
@@ -1964,7 +1957,7 @@ fn load_elf_task_inner(
     if !(USER_STACK_MIN_PAGES..=USER_STACK_MAX_PAGES).contains(&stack_pages) {
         return Err("User stack size out of range");
     }
-    crate::e9_println!(
+    log::trace!(
         "[trace][elf] load_elf_task enter name={} size={}",
         name,
         elf_data.len()
@@ -1972,15 +1965,15 @@ fn load_elf_task_inner(
     log::info!("[elf] Loading ELF '{}'...", name);
 
     // Step 1: Parse and validate ELF header
-    crate::e9_println!("[trace][elf] load_elf_task parse_header begin");
+    log::trace!("[trace][elf] load_elf_task parse_header begin");
     let header = match parse_header(elf_data) {
         Ok(h) => h,
         Err(e) => {
-            crate::serial_println!("[elf] parse_header FAILED for '{}': {}", name, e);
+            log::error!("[elf] parse_header FAILED for '{}': {}", name, e);
             return Err(e);
         }
     };
-    crate::e9_println!(
+    log::trace!(
         "[trace][elf] load_elf_task parse_header ok type={}",
         if header.e_type == ET_DYN {
             "ET_DYN"
@@ -1989,9 +1982,9 @@ fn load_elf_task_inner(
         }
     );
     // Step 2: Create user address space
-    crate::e9_println!("[trace][elf] load_elf_task user_as begin");
+    log::trace!("[trace][elf] load_elf_task user_as begin");
     let user_as = Arc::new(AddressSpace::new_user()?);
-    crate::e9_println!("[trace][elf] load_elf_task user_as done");
+    log::trace!("[trace][elf] load_elf_task user_as done");
 
     let phdrs: Vec<Elf64Phdr> = try_collect_exact(program_headers(elf_data, &header))?;
     let interp_path = parse_interp_path(elf_data, &phdrs)?;
@@ -1999,7 +1992,7 @@ fn load_elf_task_inner(
     let phdr_vaddr = find_relocated_phdr_vaddr(&header, &phdrs, load_bias)?;
 
     let phnum = header.e_phnum;
-    crate::e9_println!(
+    log::trace!(
         "[trace][elf] load_elf_task layout entry={:#x} bias={:#x} phdrs={}",
         entry,
         load_bias,
@@ -2055,7 +2048,7 @@ fn load_elf_task_inner(
         }
     }
 
-    crate::e9_println!(
+    log::trace!(
         "[trace][elf] load_elf_task segments_done count={} has_interp={}",
         load_count,
         interp_path.is_some()
@@ -2212,12 +2205,12 @@ fn load_elf_task_inner(
 
     // Step 5: Create kernel task : trampoline params are stored inside the task
     // itself so that concurrent SMP execution of multiple trampolines is safe.
-    crate::e9_println!(
+    log::trace!(
         "[trace][elf] load_elf_task kstack_begin size={}",
         Task::DEFAULT_STACK_SIZE
     );
     let kernel_stack = KernelStack::allocate(Task::DEFAULT_STACK_SIZE)?;
-    crate::e9_println!(
+    log::trace!(
         "[trace][elf] load_elf_task kstack_done virt={:#x} top={:#x}",
         kernel_stack.virt_base.as_u64(),
         kernel_stack.virt_base.as_u64() + kernel_stack.size as u64
@@ -2286,7 +2279,7 @@ fn load_elf_task_inner(
         fair_wait_ticks: core::sync::atomic::AtomicU64::new(0),
     });
 
-    crate::e9_println!(
+    log::trace!(
         "[trace][elf] load_elf_task task_built tid={} pid={} entry={:#x} sp={:#x}",
         task.id.as_u64(),
         task.pid,
@@ -2403,7 +2396,7 @@ pub fn load_elf_image(
     let header = match parse_header(elf_data) {
         Ok(h) => h,
         Err(e) => {
-            crate::serial_println!("[elf] load_elf_image parse_header FAILED: {}", e);
+            log::error!("[elf] load_elf_image parse_header FAILED: {}", e);
             return Err(e);
         }
     };
