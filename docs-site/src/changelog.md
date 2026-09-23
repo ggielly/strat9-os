@@ -4,12 +4,13 @@
 
 ## Project stats
 
-- **Total commits:** `657`
+- **Total commits:** `658`
 - **Latest tag:** `0.1.0`
 - **Repository:** [git.strat9-os.org](https://git.strat9-os.org/strat9-os/strat9-os)
 
 ## Recent commits (auto-generated)
 
+- 2026-09-14 [`4c008c5`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4c008c5cc3702bc915374b90a13518fec9268a9a) docs: update published documentation
 - 2026-09-13 [`981429b`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/981429b03d580bf5e7dd51a7003628f176683285) Merge branch 'fix/UEFI-bootloader' into 'main'
 - 2026-09-13 [`3898c50`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3898c5074c07d2b5bdbd13b505a51ccfe92a0e30) feat(bootloader, kernel, abi): homemade strat9 UEFI bootloader : rewrite with scheduler and memory hardening
 - 2026-08-28 [`228eaa5`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/228eaa541a22686b510eab7224464c74012f7c29) fix: regenerate corrupted Cargo.lock (stray merge conflict markers from rebase)
@@ -59,6 +60,5 @@
 - 2026-08-25 [`88c5283`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/88c52834c3a0af3c6f01f14f3d7364f32a862281) refactor(arch): unify x86_64 crate access via x86_crate_shim, complete riscv stubs
 - 2026-08-25 [`8e10fe3`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/8e10fe3e0fb6514fe03a0a5a142b03621f913af0) refactor(arch): replace port-0xE9 debug putc with arch-routed serial
 - 2026-08-25 [`c8ca94c`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c8ca94c43ffb700129b00ddf661e45637515d6fc) refactor(arch): route shared code through arch::xshim, gate limine/x86 deps
-- 2026-08-25 [`885cd4d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/885cd4dd46189f4ba7bf2d7cc39b32d4ab8c3ca3) refactor(arch): migrate remaining call-sites to arch facade
 
 <!-- AUTO-CHANGELOG:END -->
