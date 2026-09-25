@@ -26,13 +26,15 @@
 //! - **Cache order-0** : `buddy::alloc(0)` peut servir depuis le cache local ; le chemin
 //!   [`FrameAllocOptions::allocate`] applique quand même le CAS + epoch sur la même frame.
 
-use crate::{memory::boot_alloc::BootAllocator, sync::IrqDisabledToken};
+use crate::{arch::xshim::PhysAddr, memory::boot_alloc::BootAllocator, sync::IrqDisabledToken};
+#[cfg(target_arch = "riscv64")]
+use core::mem::MaybeUninit;
+#[cfg(not(target_arch = "riscv64"))]
+use core::ptr;
 use core::{
     mem::{self, offset_of},
-    ptr,
     sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering},
 };
-use crate::arch::xshim::PhysAddr;
 
 // ==============================================================================
 // FrameAllocOptions  (Asterinas OSTD pattern)
@@ -249,7 +251,9 @@ impl FrameAllocOptions {
         // `PAGE_SIZE` bytes.  The buddy allocator guarantees we have exclusive
         // ownership of these bytes for the duration of this function.
         if self.zeroed && !crate::memory::physical_access::zero_frame(frame.start_address) {
-            panic!("frame allocator: allocated physical frame {phys:#x} is not currently accessible");
+            panic!(
+                "frame allocator: allocated physical frame {phys:#x} is not currently accessible"
+            );
         }
 
         // Step 3 : stamp purpose flags with `Release` ordering.
@@ -700,6 +704,12 @@ pub const fn metadata_size_for(ram_size: u64) -> u64 {
 static METADATA_BASE_VIRT: AtomicU64 = AtomicU64::new(0);
 static METADATA_FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(target_arch = "riscv64")]
+const MAX_RISCV_METADATA_FRAMES: usize = 1 << 20;
+#[cfg(target_arch = "riscv64")]
+static mut RISCV_METADATA: [MaybeUninit<MetaSlot>; MAX_RISCV_METADATA_FRAMES] =
+    [const { MaybeUninit::uninit() }; MAX_RISCV_METADATA_FRAMES];
+
 /// Initialize the global metadata array for all physical frames.
 pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
     let frame_count = (total_ram / PAGE_SIZE) + if total_ram % PAGE_SIZE == 0 { 0 } else { 1 };
@@ -709,27 +719,52 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
         return;
     }
 
-    let bytes = metadata_size_for(total_ram) as usize;
-    let phys = boot_alloc
-        .try_alloc_accessible(bytes, FRAME_META_ALIGN)
-        .unwrap_or_else(|| {
-            panic!(
-                "frame metadata: boot allocator could not reserve {} bytes (align {}) for {} frames : out of early boot memory",
-                bytes, FRAME_META_ALIGN, frame_count
-            )
-        });
-    let virt = crate::memory::phys_to_virt(phys.as_u64()) as *mut MetaSlot;
-
-    for idx in 0..frame_count as usize {
-        // SAFETY: le bloc a été réservé par le boot allocator avec un alignement
-        // compatible `MetaSlot` et une taille suffisante pour tout le tableau.
-        unsafe {
-            ptr::write(virt.add(idx), MetaSlot::new());
-        }
+    #[cfg(target_arch = "riscv64")]
+    {
+        let _ = boot_alloc;
+        assert!(
+            (frame_count as usize) <= MAX_RISCV_METADATA_FRAMES,
+            "RISC-V metadata capacity exceeded: {} frames > {}",
+            frame_count,
+            MAX_RISCV_METADATA_FRAMES
+        );
+        METADATA_FRAME_COUNT.store(frame_count as u64, Ordering::Release);
+        METADATA_BASE_VIRT.store(
+            core::ptr::addr_of_mut!(RISCV_METADATA) as usize as u64,
+            Ordering::Release,
+        );
+        return;
     }
 
-    METADATA_FRAME_COUNT.store(frame_count, Ordering::Release);
-    METADATA_BASE_VIRT.store(virt as u64, Ordering::Release);
+    #[cfg(not(target_arch = "riscv64"))]
+    {
+        let bytes = metadata_size_for(total_ram) as usize;
+        let phys = boot_alloc
+            .try_alloc_accessible(bytes, FRAME_META_ALIGN)
+            .unwrap_or_else(|| {
+                panic!(
+                    "frame metadata: boot allocator could not reserve {} bytes (align {}) for {} frames : out of early boot memory",
+                    bytes, FRAME_META_ALIGN, frame_count
+                )
+            });
+        let virt = crate::memory::phys_to_virt(phys.as_u64()) as *mut MetaSlot;
+
+        unsafe {
+            ptr::write_bytes(virt.cast::<u8>(), 0, bytes);
+            for idx in 0..frame_count as usize {
+                let slot = &mut *virt.add(idx);
+                slot.free_link
+                    .next
+                    .store(FRAME_META_LINK_NONE, Ordering::Relaxed);
+                slot.free_link
+                    .prev
+                    .store(FRAME_META_LINK_NONE, Ordering::Relaxed);
+            }
+        }
+
+        METADATA_FRAME_COUNT.store(frame_count, Ordering::Release);
+        METADATA_BASE_VIRT.store(virt as u64, Ordering::Release);
+    }
 }
 
 /// Get the [`MetaSlot`] for a given physical frame (same as [`get_meta_slot`]).
@@ -907,7 +942,13 @@ mod tests {
 
     #[test]
     fn local_cache_flag_is_separate_from_allocated_and_free_states() {
-        assert_ne!(frame_flags::LOCAL_CACHED & frame_flags::FREE, frame_flags::FREE);
-        assert_ne!(frame_flags::LOCAL_CACHED & frame_flags::ALLOCATED, frame_flags::ALLOCATED);
+        assert_ne!(
+            frame_flags::LOCAL_CACHED & frame_flags::FREE,
+            frame_flags::FREE
+        );
+        assert_ne!(
+            frame_flags::LOCAL_CACHED & frame_flags::ALLOCATED,
+            frame_flags::ALLOCATED
+        );
     }
 }

@@ -1,11 +1,11 @@
 //! Allocateur physique de boot pour les structures permanentes du noyau.
 
 use crate::{
+    arch::xshim::PhysAddr,
     boot::entry::{MemoryKind, MemoryRegion},
     serial_println,
     sync::SpinLock,
 };
-use crate::arch::xshim::PhysAddr;
 
 const PAGE_SIZE: u64 = 4096;
 pub const MAX_BOOT_ALLOC_REGIONS: usize = 512;
@@ -20,7 +20,11 @@ struct BootRegion {
 
 impl BootRegion {
     const fn empty() -> Self {
-        Self { start: 0, end: 0, kind: MemoryKind::Null }
+        Self {
+            start: 0,
+            end: 0,
+            kind: MemoryKind::Null,
+        }
     }
 
     #[inline]
@@ -63,7 +67,19 @@ impl BootAllocator {
                 continue;
             }
 
-            self.push_region(BootRegion { start, end, kind: region.kind });
+            self.push_region(BootRegion {
+                start,
+                end,
+                kind: region.kind,
+            });
+        }
+
+        for region in regions {
+            if matches!(region.kind, MemoryKind::Reserved) {
+                let start = align_down(region.base, PAGE_SIZE);
+                let end = align_up(region.base.saturating_add(region.size), PAGE_SIZE);
+                self.exclude_range(start, end);
+            }
         }
 
         self.normalize_regions();
@@ -452,36 +468,67 @@ mod tests {
     #[test]
     fn normalize_keeps_free_and_reclaim_separate() {
         let mut allocator = BootAllocator::new();
-        allocator.push_region(BootRegion { start: 0x1000, end: 0x5000, kind: MemoryKind::Free });
-        allocator.push_region(BootRegion { start: 0x5000, end: 0x9000, kind: MemoryKind::Reclaim });
+        allocator.push_region(BootRegion {
+            start: 0x1000,
+            end: 0x5000,
+            kind: MemoryKind::Free,
+        });
+        allocator.push_region(BootRegion {
+            start: 0x5000,
+            end: 0x9000,
+            kind: MemoryKind::Reclaim,
+        });
         allocator.normalize_regions();
 
         assert_eq!(allocator.len, 2);
         assert_eq!(allocator.regions[0].kind, MemoryKind::Free);
         assert_eq!(allocator.regions[1].kind, MemoryKind::Reclaim);
-        assert_eq!((allocator.regions[0].start, allocator.regions[0].end), (0x1000, 0x5000));
-        assert_eq!((allocator.regions[1].start, allocator.regions[1].end), (0x5000, 0x9000));
+        assert_eq!(
+            (allocator.regions[0].start, allocator.regions[0].end),
+            (0x1000, 0x5000)
+        );
+        assert_eq!(
+            (allocator.regions[1].start, allocator.regions[1].end),
+            (0x5000, 0x9000)
+        );
     }
 
     #[test]
     fn normalize_merges_adjacent_same_kind() {
         let mut allocator = BootAllocator::new();
-        allocator.push_region(BootRegion { start: 0x3000, end: 0x5000, kind: MemoryKind::Free });
-        allocator.push_region(BootRegion { start: 0x1000, end: 0x3000, kind: MemoryKind::Free });
+        allocator.push_region(BootRegion {
+            start: 0x3000,
+            end: 0x5000,
+            kind: MemoryKind::Free,
+        });
+        allocator.push_region(BootRegion {
+            start: 0x1000,
+            end: 0x3000,
+            kind: MemoryKind::Free,
+        });
         allocator.normalize_regions();
 
         assert_eq!(allocator.len, 1);
-        assert_eq!((allocator.regions[0].start, allocator.regions[0].end), (0x1000, 0x5000));
+        assert_eq!(
+            (allocator.regions[0].start, allocator.regions[0].end),
+            (0x1000, 0x5000)
+        );
     }
 
     #[test]
     fn split_preserves_region_kind() {
         let mut allocator = BootAllocator::new();
-        allocator.push_region(BootRegion { start: 0x1000, end: 0x9000, kind: MemoryKind::Reclaim });
+        allocator.push_region(BootRegion {
+            start: 0x1000,
+            end: 0x9000,
+            kind: MemoryKind::Reclaim,
+        });
         allocator.consume_region(0, 0x3000, 0x5000);
 
         assert_eq!(allocator.len, 2);
-        assert!(allocator.regions[..allocator.len].iter().all(|region| region.kind == MemoryKind::Reclaim));
+        assert!(allocator.regions[..allocator.len]
+            .iter()
+            .all(|region| region.kind == MemoryKind::Reclaim));
     }
 
     #[test]

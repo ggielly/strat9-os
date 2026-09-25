@@ -4,6 +4,8 @@
 //! Items marked "transitional stub" exist only so the riscv64 build
 //! progresses; each is replaced by real code in a later jalon.
 
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 pub use super::riscv64::{
     boot_timestamp, cli, cpuid, hlt, interrupts_enabled, rdtsc, restore_flags,
     save_flags_and_cli, serial, speaker, sti, vgabuf,
@@ -13,6 +15,7 @@ pub use crate::arch::riscv64::vga_canvas::Canvas;
 
 /// Neutral MAX_CPUS constant for riscv64 (matches x86_64 value).
 pub const MAX_CPUS: usize = 32;
+static PREEMPT_DEPTH: AtomicUsize = AtomicUsize::new(0);
 
 /// Merged VGA surface for riscv64: backend stubs + canvas.
 pub mod vga {
@@ -78,13 +81,14 @@ pub mod percpu {
         panic!("APIC identifiers are unavailable on RISC-V")
     }
     pub fn preempt_disable() {
-        panic!("RISC-V preemption control is not implemented")
+        super::PREEMPT_DEPTH.fetch_add(1, super::Ordering::AcqRel);
     }
     pub fn preempt_enable() {
-        panic!("RISC-V preemption control is not implemented")
+        let previous = super::PREEMPT_DEPTH.fetch_sub(1, super::Ordering::AcqRel);
+        assert!(previous > 0, "RISC-V preemption underflow");
     }
     pub fn is_preemptible() -> bool {
-        panic!("RISC-V preemption state is not implemented")
+        super::PREEMPT_DEPTH.load(super::Ordering::Acquire) == 0
     }
     pub fn cpu_index_from_gs() -> Option<usize> {
         Some(current_cpu_index())

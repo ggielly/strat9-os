@@ -1,5 +1,10 @@
 use core::{ptr, slice};
 
+use crate::{
+    boot::entry::{MemoryKind, MemoryRegion},
+    memory::boot_alloc::{MAX_BOOT_ALLOC_REGIONS, MAX_PROTECTED_RANGES},
+};
+
 pub const FDT_MAGIC: u32 = 0xd00d_feed;
 const FDT_HEADER_SIZE: usize = 40;
 const FDT_MIN_VERSION: u32 = 16;
@@ -590,6 +595,58 @@ fn validate_range(
     Ok(())
 }
 
+fn initialize_memory_allocator(
+    dtb: *const u8,
+    dtb_len: usize,
+    regions: &[RiscvMemoryRegion],
+    count: usize,
+) {
+    let mut boot_regions = [MemoryRegion {
+        base: 0,
+        size: 0,
+        kind: MemoryKind::Null,
+    }; MAX_BOOT_ALLOC_REGIONS];
+    for index in 0..count {
+        boot_regions[index] = regions[index].as_boot_region();
+    }
+
+    let mut protected = [None; MAX_PROTECTED_RANGES];
+    protected[0] = Some((dtb as u64, dtb_len as u64));
+    crate::memory::boot_alloc::set_protected_ranges(&protected);
+    super::serial::_print(format_args!("[strat9] initializing boot allocator\r\n"));
+    crate::memory::boot_alloc::init_boot_allocator(&boot_regions[..count]);
+    super::serial::_print(format_args!("[strat9] boot allocator ready\r\n"));
+
+    let total_ram = boot_regions[..count]
+        .iter()
+        .filter(|region| matches!(region.kind, MemoryKind::Free | MemoryKind::Reclaim))
+        .map(|region| region.base.saturating_add(region.size))
+        .max()
+        .unwrap_or(0);
+    {
+        let mut boot_allocator = crate::memory::boot_alloc::get_boot_allocator().lock();
+        crate::memory::frame::init_metadata_array(total_ram, &mut boot_allocator);
+    }
+    super::serial::_print(format_args!("[strat9] frame metadata ready\r\n"));
+    crate::memory::buddy::init_buddy_allocator(&boot_regions[..count]);
+    super::serial::_print(format_args!("[strat9] buddy allocator ready\r\n"));
+
+    if let Some(token) = crate::sync::IrqDisabledToken::verify() {
+        match crate::memory::buddy::alloc(&token, 0) {
+            Ok(frame) => {
+                let address = frame.start_address.as_u64();
+                crate::memory::buddy::free(&token, frame, 0);
+                super::serial::_print(format_args!(
+                    "[strat9] buddy alloc/free ok: {address:#x}\r\n"
+                ));
+            }
+            Err(error) => {
+                super::serial::_print(format_args!("[strat9] buddy alloc failed: {:?}\r\n", error))
+            }
+        }
+    }
+}
+
 fn park() -> ! {
     loop {
         core::hint::spin_loop();
@@ -619,10 +676,13 @@ pub unsafe extern "C" fn riscv_boot_entry(hart_id: usize, dtb: *const u8) -> ! {
             let mut regions = [RiscvMemoryRegion::EMPTY; MAX_DTB_MEMORY_REGIONS];
             match info.memory_regions(&mut regions) {
                 Ok(count) => match RiscvBootInfo::validate_memory_regions(&regions[..count]) {
-                    Ok(()) => super::serial::_print(format_args!(
-                        "[strat9] memory: {} valid regions\r\n",
-                        count
-                    )),
+                    Ok(()) => {
+                        super::serial::_print(format_args!(
+                            "[strat9] memory: {} valid regions\r\n",
+                            count
+                        ));
+                        initialize_memory_allocator(dtb, info.dtb_len(), &regions, count);
+                    }
                     Err(error) => super::serial::_print(format_args!(
                         "[strat9] memory map rejected: {:?}\r\n",
                         error
