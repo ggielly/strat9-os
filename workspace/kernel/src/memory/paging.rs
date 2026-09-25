@@ -7,15 +7,16 @@
 
 use crate::arch::paging_compat::registers::control::Cr3;
 use crate::arch::paging_compat::structures::paging::{
-    FrameAllocator as X86FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, Translate,
+    FrameAllocator as X86FrameAllocator, OffsetPageTable, Page, PageTable,
 };
+#[cfg(target_arch = "x86_64")]
+use crate::arch::paging_compat::structures::paging::{Mapper, Translate};
 use crate::arch::xshim::{PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB};
 use crate::arch::xshim::{PhysAddr, VirtAddr};
 
-use crate::{
-    memory::frame::{FrameAllocOptions, FramePurpose},
-    sync::SpinLock,
-};
+use crate::sync::SpinLock;
+#[cfg(target_arch = "x86_64")]
+use crate::memory::frame::{FrameAllocOptions, FramePurpose};
 
 /// Wrapper around the buddy allocator implementing the x86_64 crate's `FrameAllocator` trait.
 ///

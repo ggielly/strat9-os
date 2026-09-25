@@ -21,8 +21,10 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use spin::Once;
 use crate::arch::paging_compat::registers::control::{Cr3, Cr3Flags};
 use crate::arch::paging_compat::structures::paging::{
-    mapper::TranslateResult, Mapper, OffsetPageTable, Page, PageTable, Translate,
+    mapper::TranslateResult, OffsetPageTable, Page, PageTable,
 };
+#[cfg(target_arch = "x86_64")]
+use crate::arch::paging_compat::structures::paging::{Mapper, Translate};
 use crate::arch::xshim::{PageTableFlags, PhysFrame as X86PhysFrame, Size2MiB, Size4KiB};
 use crate::arch::xshim::{PhysAddr, VirtAddr};
 

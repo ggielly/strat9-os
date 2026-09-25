@@ -22,7 +22,9 @@
 
 use crate::syscall::error::SyscallError;
 use alloc::vec::Vec;
-use crate::arch::xshim::{PageTableFlags, Translate, VirtAddr};
+use crate::arch::xshim::{PageTableFlags, VirtAddr};
+#[cfg(target_arch = "x86_64")]
+use crate::arch::xshim::Translate;
 
 /// End of user-accessible virtual address space.
 ///

@@ -3,6 +3,7 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 use spin::Mutex;
+#[cfg(target_arch = "x86_64")]
 use crate::arch::xshim::VirtAddr;
 type PanicHook = fn(&PanicInfo);
 const MAX_PANIC_HOOKS: usize = 8;
@@ -171,11 +172,6 @@ fn read_rbp() -> u64 {
 #[inline(always)]
 fn read_rsp() -> u64 {
     0
-}
-
-#[cfg(target_arch = "riscv64")]
-fn addr_readable(_addr: u64) -> bool {
-    false
 }
 
 #[cfg(target_arch = "riscv64")]

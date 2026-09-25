@@ -1114,7 +1114,9 @@ fn map_page_in_space(
     address_space: &AddressSpace,
 ) -> Result<(), &'static str> {
     use crate::arch::xshim::{PageTableFlags, PhysAddr, PhysFrame, Size4KiB, VirtAddr};
-    use crate::arch::paging_compat::structures::paging::{Mapper, Page};
+    use crate::arch::paging_compat::structures::paging::Page;
+    #[cfg(target_arch = "x86_64")]
+    use crate::arch::paging_compat::structures::paging::Mapper;
 
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(target_va));
     let phys_frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(frame_phys));

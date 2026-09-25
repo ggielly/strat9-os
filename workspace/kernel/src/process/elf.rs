@@ -24,6 +24,7 @@
 use alloc::{sync::Arc, vec::Vec};
 use crate::arch::paging_compat::structures::paging::Page;
 use crate::arch::xshim::Size4KiB;
+#[cfg(target_arch = "x86_64")]
 use crate::arch::paging_compat::structures::paging::Mapper;
 use crate::arch::xshim::VirtAddr;
 

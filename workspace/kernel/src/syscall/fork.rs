@@ -386,8 +386,8 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
     use crate::memory::paging::BuddyFrameAllocator;
     use crate::arch::paging_compat::structures::paging::Page;
     use crate::arch::xshim::{PageTableFlags, Size2MiB, Size4KiB};
-    use crate::arch::paging_compat::structures::paging::Translate;
-    use crate::arch::paging_compat::structures::paging::Mapper;
+    #[cfg(target_arch = "x86_64")]
+    use crate::arch::paging_compat::structures::paging::{Mapper, Translate};
     use crate::arch::xshim::VirtAddr;
 
     let mapping = address_space
