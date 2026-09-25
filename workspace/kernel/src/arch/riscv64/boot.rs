@@ -947,6 +947,7 @@ pub unsafe extern "C" fn riscv_boot_entry(hart_id: usize, dtb: *const u8) -> ! {
     }
 
     super::serial::init();
+    super::trap::init();
     super::serial::_print(format_args!("\r\n[strat9] RISC-V OpenSBI entry\r\n"));
     super::serial::_print(format_args!(
         "[strat9] hart={} dtb=0x{:x}\r\n",

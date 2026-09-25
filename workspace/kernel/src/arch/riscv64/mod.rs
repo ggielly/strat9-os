@@ -10,6 +10,7 @@
 pub mod boot;
 pub mod paging;
 pub mod serial;
+pub mod trap;
 
 // ---------------------------------------------------------------------------
 // Transitional stubs (x86-only subsystems). Each is scheduled to become a
