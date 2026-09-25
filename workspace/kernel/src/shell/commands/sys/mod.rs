@@ -51,13 +51,15 @@ use silo_limit::cmd_silo_limit;
 use crate::shell::commands::top::Strat9RatatuiBackend;
 
 use crate::{
-    arch::vga,
     memory,
     process::elf::load_and_run_elf,
     shell::{output::{clear_screen, format_bytes}, ShellError},
     shell_println, silo, vfs,
 };
 use alloc::{string::String, vec::Vec};
+#[cfg(target_arch = "x86_64")]
+use crate::arch::vga;
+#[cfg(target_arch = "x86_64")]
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},

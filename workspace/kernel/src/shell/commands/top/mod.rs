@@ -5,9 +5,13 @@
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod ratatui_backend;
 
-use crate::{arch::vga, shell::ShellError, shell_println};
+use crate::shell::ShellError;
+use crate::shell_println;
+#[cfg(target_arch = "x86_64")]
+use crate::arch::vga;
 use alloc::{format, string::String, vec, vec::Vec};
 use core::sync::atomic::Ordering;
+#[cfg(target_arch = "x86_64")]
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
