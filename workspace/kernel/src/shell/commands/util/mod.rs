@@ -55,18 +55,15 @@ pub(super) fn cmd_uptime_impl(_args: &[String]) -> Result<(), ShellError> {
     let ticks = crate::process::scheduler::ticks();
     let hz = crate::arch::timer::TIMER_HZ.max(1);
 
-    // Neither count has an allocation-free accessor: `get_all_tasks` clones an
-    // `Arc` per task into a fresh `Vec`, `list_silos_snapshot` deep-clones every
-    // silo (name + label). `scheduler::task_count` / `silo::silo_count` are what
-    // this wants; until they exist these are the only sources.
-    //
-    // `get_all_tasks` is `try_lock`-based, so `None` means "scheduler lock was
-    // contended", *not* "no tasks". Reporting that as `0 tasks` was a lie.
-    let tasks = match crate::process::get_all_tasks() {
-        Some(all) => alloc::format!("{}", all.len()),
+    // `task_count` / `silo_count` answer this without the per-task `Arc` clone
+    // and the per-silo name+label clone that the snapshot getters perform.
+    // `task_count` is `try_lock`-based, so `None` means "scheduler lock was
+    // contended", *not* "no tasks": reporting that as `0 tasks` would be a lie.
+    let tasks = match crate::process::task_count() {
+        Some(n) => alloc::format!("{}", n),
         None => String::from("?"),
     };
-    let silos = crate::silo::list_silos_snapshot().len();
+    let silos = crate::silo::silo_count();
 
     shell_println!(
         "up {}  ({} ticks @ {} Hz)  {} tasks, {} silos",
@@ -92,88 +89,13 @@ pub(super) fn cmd_uptime_impl(_args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-static KLOG: crate::sync::SpinLock<KernelLogBuffer> =
-    crate::sync::SpinLock::new(KernelLogBuffer::new());
-
-const KLOG_CAPACITY: usize = 256;
-
-struct KernelLogBuffer {
-    entries: [KlogEntry; KLOG_CAPACITY],
-    head: usize,
-    count: usize,
-}
-
-#[derive(Clone, Copy)]
-struct KlogEntry {
-    tick: u64,
-    len: u8,
-    data: [u8; 120],
-}
-
-impl KlogEntry {
-    const fn empty() -> Self {
-        Self {
-            tick: 0,
-            len: 0,
-            data: [0; 120],
-        }
-    }
-}
-
-impl KernelLogBuffer {
-    const fn new() -> Self {
-        Self {
-            entries: [KlogEntry::empty(); KLOG_CAPACITY],
-            head: 0,
-            count: 0,
-        }
-    }
-
-    fn push(&mut self, msg: &str) {
-        let tick = crate::process::scheduler::ticks();
-        let bytes = msg.as_bytes();
-        let copy_len = core::cmp::min(bytes.len(), 120);
-        let idx = (self.head + self.count) % KLOG_CAPACITY;
-        if self.count < KLOG_CAPACITY {
-            self.count += 1;
-        } else {
-            self.head = (self.head + 1) % KLOG_CAPACITY;
-        }
-        self.entries[idx].tick = tick;
-        self.entries[idx].len = copy_len as u8;
-        self.entries[idx].data[..copy_len].copy_from_slice(&bytes[..copy_len]);
-    }
-
-    fn iter(&self) -> impl Iterator<Item = &KlogEntry> {
-        let h = self.head;
-        let c = self.count;
-        (0..c).map(move |i| &self.entries[(h + i) % KLOG_CAPACITY])
-    }
-
-    fn is_empty(&self) -> bool {
-        self.count == 0
-    }
-
-    fn len(&self) -> usize {
-        self.count
-    }
-
-    /// Yields the `n` newest entries, oldest first.
-    ///
-    /// `dmesg` only ever shows the tail of the ring. Materialising the whole
-    /// 256-entry buffer into a `Vec<&KlogEntry>` and then slicing off the front
-    /// allocated the entire log per invocation, including the ~200 entries the
-    /// user asked not to see.
-    fn iter_tail(&self, n: usize) -> impl Iterator<Item = &KlogEntry> {
-        let skip = self.count.saturating_sub(n);
-        self.iter().skip(skip)
-    }
-}
-
-pub fn klog_write(msg: &str) {
-    KLOG.lock().push(msg);
-}
-
+/// Shows the kernel's diagnostic history.
+///
+/// The kernel has no separate ring log: `klog_write` was the only writer of the
+/// `dmesg` ring and had no callers at all, so this command could only ever
+/// print "(kernel log empty)". The audit log is the structured history the
+/// kernel actually keeps, so that is what this reports. Free text still goes
+/// straight to the serial console via `serial_println!`.
 pub(super) fn cmd_dmesg_impl(args: &[String]) -> Result<(), ShellError> {
     let limit = match args.first() {
         None => DEFAULT_DMESG_LINES,
@@ -188,23 +110,37 @@ pub(super) fn cmd_dmesg_impl(args: &[String]) -> Result<(), ShellError> {
         },
     };
 
-    let log = KLOG.lock();
-
-    if log.is_empty() {
-        shell_println!("(kernel log empty)");
+    let entries = crate::audit::recent(limit);
+    if entries.is_empty() {
+        shell_println!("(no kernel events recorded)");
         return Ok(());
     }
 
-    let total = log.len();
-    let shown = limit.min(total);
-    if shown < total {
-        shell_println!("(last {} of {} entries)", shown, total);
+    let total = crate::audit::total_count();
+    if total > entries.len() as u64 {
+        shell_println!("(last {} of {} events)", entries.len(), total);
     }
-
-    for entry in log.iter_tail(shown) {
-        let (secs, cs) = crate::shell::output::format_ticks(entry.tick);
-        let text = core::str::from_utf8(&entry.data[..entry.len as usize]).unwrap_or("???");
-        shell_println!("[{:>6}.{:02}] {}", secs, cs, text);
+    shell_println!(
+        "{:>6} {:>8} {:>5} {:>5} {:<9} {}",
+        "SEQ",
+        "TIME",
+        "PID",
+        "SID",
+        "CATEGORY",
+        "MESSAGE"
+    );
+    for e in &entries {
+        let (secs, cs) = crate::shell::output::format_ticks(e.tick);
+        shell_println!(
+            "{:>6} {:>5}.{:02} {:>5} {:>5} {:<9} {}",
+            e.seq,
+            secs,
+            cs,
+            e.pid,
+            e.silo_id,
+            e.category.as_str(),
+            e.message
+        );
     }
     Ok(())
 }

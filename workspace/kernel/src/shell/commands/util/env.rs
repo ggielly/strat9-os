@@ -158,8 +158,8 @@ pub fn cmd_env(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("{}", COMPUTED_HEADER);
     let ticks = crate::process::scheduler::ticks();
     shell_println!("UPTIME_SECS={}", ticks / crate::arch::timer::TIMER_HZ);
-    shell_println!("SILO_COUNT={}", crate::silo::list_silos_snapshot().len());
-    shell_println!("MOUNT_COUNT={}", vfs::list_mounts().len());
+    shell_println!("SILO_COUNT={}", crate::silo::silo_count());
+    shell_println!("MOUNT_COUNT={}", vfs::mount_count());
     Ok(())
 }
 

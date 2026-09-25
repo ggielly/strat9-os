@@ -50,22 +50,17 @@ pub(crate) fn format_pci_address(bus: u8, device: u8, function: u8) -> String {
 
 /// Human-readable PCI class, from the kernel's own decoder.
 ///
-/// The table lives in the x86_64 PCI backend, so that is where the lookup is
-/// available. The RISC-V facade has no equivalent yet and its `all_devices()`
-/// traps anyway, so that target falls back to the raw class/subclass pair
-/// rather than to a second, drifting copy of the table.
-#[cfg(target_arch = "x86_64")]
+/// Class label for one PCI device, or the raw codes when the target cannot
+/// decode them.
+///
+/// The lookup lives in the arch facade, so this is one code path on every
+/// target: the RISC-V facade reports `None` until ECAM enumeration lands (R5),
+/// and the raw pair is shown rather than a second, drifting copy of the table.
 fn pci_class_label(class: u8, subclass: u8) -> String {
     match crate::arch::pci::class_name(class, subclass) {
         Some(name) => String::from(name),
         None => format!("Unknown ({:02x}:{:02x})", class, subclass),
     }
-}
-
-/// RISC-V fallback for [`pci_class_label`]: no PCI class table in the facade.
-#[cfg(target_arch = "riscv64")]
-fn pci_class_label(class: u8, subclass: u8) -> String {
-    format!("Unknown ({:02x}:{:02x})", class, subclass)
 }
 
 pub fn cmd_lspci(args: &[String]) -> Result<(), ShellError> {

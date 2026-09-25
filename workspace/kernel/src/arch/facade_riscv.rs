@@ -321,7 +321,16 @@ pub mod pci_full {
     pub fn all_devices() -> alloc::vec::Vec<PciDevice> {
         panic!("RISC-V PCI ECAM enumeration is not implemented (R5)")
     }
-    pub fn invalidate_cache() { panic!("RISC-V PCI ECAM is not implemented (R5)") }
+    /// PCI class names are not decoded on this target yet.
+    ///
+    /// Present so the facade is complete and callers such as `lspci` need no
+    /// per-target branch: they report the raw class codes instead of guessing.
+    pub fn class_name(_class: u8, _subclass: u8) -> Option<&'static str> {
+        None
+    }
+    pub fn invalidate_cache() {
+        panic!("RISC-V PCI ECAM is not implemented (R5)")
+    }
     pub fn probe_all(_crit: ProbeCriteria) -> alloc::vec::Vec<PciDevice> {
         panic!("RISC-V PCI ECAM probing is not implemented (R5)")
     }

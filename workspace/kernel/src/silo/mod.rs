@@ -1374,6 +1374,15 @@ pub fn list_silos_snapshot() -> Vec<SiloSnapshot> {
         .collect()
 }
 
+/// Number of registered silos.
+///
+/// `list_silos_snapshot` clones a name and a label per silo, which is the right
+/// cost for a listing but not for the `env` counter, which wants a length.
+pub fn silo_count() -> usize {
+    let mgr = SILO_MANAGER.lock();
+    mgr.silos.len()
+}
+
 /// State of a single silo, without cloning the whole registry.
 ///
 /// `list_silos_snapshot` is the right tool for listings, but a caller that
