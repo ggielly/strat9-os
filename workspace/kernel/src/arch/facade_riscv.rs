@@ -134,7 +134,11 @@ pub mod smp {
         Err("RISC-V SMP bring-up is not implemented (R6)")
     }
     pub fn open_ap_scheduler_gate() { panic!("RISC-V SMP bring-up is not implemented (R6)") }
-    pub fn broadcast_panic_halt() { panic!("RISC-V panic broadcast is not implemented (R6)") }
+    pub fn broadcast_panic_halt() -> ! {
+        loop {
+            crate::arch::riscv64::hlt();
+        }
+    }
 }
 
 pub mod pci {

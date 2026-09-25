@@ -16,11 +16,7 @@ pub fn phys_to_virt_checked(phys: u64) -> Option<u64> {
     }
     #[cfg(target_arch = "riscv64")]
     {
-        if crate::memory::paging::is_initialized() {
-            None
-        } else {
-            Some(phys)
-        }
+        Some(phys)
     }
 }
 
@@ -37,12 +33,9 @@ pub fn range_accessible(phys: u64, size: u64) -> bool {
     }
 }
 
-/// RISC-V early boot uses the OpenSBI identity mapping until paging is enabled.
+/// RISC-V keeps an identity mapping for the RAM covered by the boot mapper.
 #[inline]
 pub fn identity_range_accessible(phys: u64, size: u64) -> bool {
-    if crate::memory::paging::is_initialized() {
-        return false;
-    }
     phys.checked_add(size).is_some()
 }
 

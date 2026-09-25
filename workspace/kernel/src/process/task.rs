@@ -119,6 +119,7 @@ impl<T> SyncUnsafeCell<T> {
 ///
 /// When XSAVE is available, uses `xsave`/`xrstor` with a variable-size area.
 /// Falls back to `fxsave`/`fxrstor` (512 bytes) on older CPUs.
+#[cfg(target_arch = "x86_64")]
 #[repr(C, align(64))]
 pub struct ExtendedState {
     pub data: [u8; Self::MAX_XSAVE_SIZE],
@@ -127,6 +128,7 @@ pub struct ExtendedState {
     pub xcr0_mask: u64,
 }
 
+#[cfg(target_arch = "x86_64")]
 impl core::fmt::Debug for ExtendedState {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ExtendedState")
@@ -137,6 +139,7 @@ impl core::fmt::Debug for ExtendedState {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 impl ExtendedState {
     pub const FXSAVE_SIZE: usize = 512;
     pub const MAX_XSAVE_SIZE: usize = 2688;
@@ -213,6 +216,45 @@ impl ExtendedState {
         let len = other.size.min(self.size);
         self.data[..len].copy_from_slice(&other.data[..len]);
     }
+}
+
+#[cfg(target_arch = "riscv64")]
+#[repr(C, align(64))]
+pub struct ExtendedState {
+    pub size: usize,
+    pub uses_xsave: bool,
+    pub xcr0_mask: u64,
+}
+
+#[cfg(target_arch = "riscv64")]
+impl core::fmt::Debug for ExtendedState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ExtendedState")
+            .field("size", &self.size)
+            .field("uses_xsave", &self.uses_xsave)
+            .field("xcr0_mask", &self.xcr0_mask)
+            .finish()
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+impl ExtendedState {
+    pub const FXSAVE_SIZE: usize = 0;
+    pub const MAX_XSAVE_SIZE: usize = 0;
+
+    pub fn new() -> Self {
+        Self {
+            size: 0,
+            uses_xsave: false,
+            xcr0_mask: 0,
+        }
+    }
+
+    pub fn for_xcr0(_xcr0: u64) -> Self {
+        Self::new()
+    }
+
+    pub fn copy_from(&mut self, _other: &ExtendedState) {}
 }
 
 #[inline]

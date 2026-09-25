@@ -1525,7 +1525,15 @@ fn initialize_memory_allocator(
                 "[strat9] SBI timer unavailable: DTB timebase-frequency missing\r\n"
             )),
         }
+        scheduler_smoke_init();
     }
+}
+
+fn scheduler_smoke_init() {
+    unsafe { crate::memory::address_space::init_kernel_address_space() };
+    let _ = crate::memory::kernel_address_space();
+    crate::process::init_scheduler();
+    super::serial::_print(format_args!("[strat9] scheduler init ok\r\n"));
 }
 
 fn park() -> ! {

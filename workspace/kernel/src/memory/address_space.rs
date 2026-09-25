@@ -19,6 +19,7 @@ use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use spin::Once;
+#[cfg(target_arch = "x86_64")]
 use crate::arch::paging_compat::registers::control::Cr3;
 #[cfg(target_arch = "x86_64")]
 use crate::arch::paging_compat::registers::control::Cr3Flags;
@@ -184,8 +185,12 @@ impl AddressSpace {
     /// # Safety
     /// Must be called exactly once, during single-threaded init, after paging is initialized.
     pub unsafe fn new_kernel() -> Self {
-        let (level_4_frame, _flags) = Cr3::read();
-        let cr3_phys = level_4_frame.start_address();
+        #[cfg(target_arch = "x86_64")]
+        let cr3_phys = Cr3::read().0.start_address();
+        #[cfg(target_arch = "riscv64")]
+        let cr3_phys = crate::arch::xshim::PhysAddr::new(
+            crate::arch::riscv64::paging::root_physical_address(),
+        );
         let l4_table_virt = VirtAddr::new(crate::memory::phys_to_virt(cr3_phys.as_u64()));
 
         log::info!(

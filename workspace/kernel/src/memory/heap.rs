@@ -14,13 +14,12 @@
 // Those helpers can hit a CPU-local cache (no global buddy lock) or fall back
 // to the global buddy lock as needed.
 
-use crate::{memory, sync::SpinLock};
+use crate::{arch::xshim::PhysAddr, memory, sync::SpinLock};
 use core::{
     alloc::{GlobalAlloc, Layout},
     ptr,
     sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
 };
-use crate::arch::xshim::PhysAddr;
 
 // ---------------------------------------------------------------------------
 // Slab size classes
@@ -39,12 +38,20 @@ use crate::arch::xshim::PhysAddr;
 /// |64 to 256 B  | ~1.25×    | ≤ 64 B    |
 /// |256 to 2048 B| 1.25×     | ≤ 512 B   |
 
+#[cfg(target_arch = "riscv64")]
+const SLAB_SIZES: [usize; 29] = [
+    8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896,
+    1024, 1280, 1536, 1792, 2048, 2560, 3072, 3584,
+];
+#[cfg(not(target_arch = "riscv64"))]
 const SLAB_SIZES: [usize; 26] = [
     8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896,
     1024, 1280, 1536, 1792, 2048,
 ];
 const NUM_SLABS: usize = SLAB_SIZES.len();
-/// Allocations with effective size above this threshold bypass the slab.
+#[cfg(target_arch = "riscv64")]
+const MAX_SLAB_SIZE: usize = 3584;
+#[cfg(not(target_arch = "riscv64"))]
 const MAX_SLAB_SIZE: usize = 2048;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
