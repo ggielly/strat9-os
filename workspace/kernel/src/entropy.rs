@@ -139,6 +139,7 @@ fn extract_block() -> [u8; 8] {
 
 /// BUG TODO : RDRAND helper (used during boot seeding).
 // hang during boot on some QEMU configurations if RDRAND is unavailable
+#[cfg(target_arch = "x86_64")]
 fn rdrand64() -> Option<u64> {
     #[cfg(target_arch = "x86_64")]
     {

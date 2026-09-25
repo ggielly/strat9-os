@@ -1687,15 +1687,18 @@ impl AddressSpace {
             return; // Already active : skip to avoid TLB flush.
         }
 
+        let frame = X86PhysFrame::<Size4KiB>::from_start_address(self.cr3_phys)
+            .expect("CR3 address not aligned");
+        crate::e9_println!("C");
+        #[cfg(target_arch = "x86_64")]
         // SAFETY: cr3_phys points to a valid, 4KiB-aligned PML4 table with
         // the kernel half correctly populated.
         unsafe {
-            let frame = X86PhysFrame::<Size4KiB>::from_start_address(self.cr3_phys)
-                .expect("CR3 address not aligned");
-            crate::e9_println!("C");
             Cr3::write(frame, Cr3Flags::empty());
-            crate::e9_println!("c");
         }
+        #[cfg(target_arch = "riscv64")]
+        Cr3::write(frame, Cr3Flags::empty());
+        crate::e9_println!("c");
     }
 
     /// Whether this is the kernel address space.

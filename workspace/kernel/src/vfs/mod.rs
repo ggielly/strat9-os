@@ -1319,7 +1319,7 @@ pub fn init() {
     #[cfg(target_arch = "riscv64")]
     {
         let cpu_count = crate::arch::percpu::get_cpu_count().max(1);
-        let mut register_cpu_value = |path: &str, value: &str| {
+        let register_cpu_value = |path: &str, value: &str| {
             let bytes = Box::leak(alloc::format!("{}\n", value).into_bytes().into_boxed_slice());
             kernel_scheme.register(path, bytes.as_ptr(), bytes.len());
         };

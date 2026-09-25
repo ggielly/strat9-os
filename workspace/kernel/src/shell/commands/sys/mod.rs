@@ -910,7 +910,16 @@ pub(super) fn cmd_cpuinfo_impl(_args: &[String]) -> Result<(), ShellError> {
 /// Reboot the system.
 pub(super) fn cmd_reboot_impl(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("Rebooting system...");
+    #[cfg(target_arch = "x86_64")]
     unsafe {
+        crate::arch::cli();
+        crate::arch::io::outb(0x64, 0xFE);
+        loop {
+            crate::arch::hlt();
+        }
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
         crate::arch::cli();
         crate::arch::io::outb(0x64, 0xFE);
         loop {
