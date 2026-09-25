@@ -12,6 +12,7 @@ const FDT_MAX_VERSION: u32 = 17;
 const MAX_DTB_SIZE: usize = 16 * 1024 * 1024;
 pub const MAX_DTB_MEMORY_REGIONS: usize = 128;
 pub const MAX_DTB_PLATFORM_REGIONS: usize = 64;
+pub const MAX_DTB_VIRTIO_MMIO_DEVICES: usize = 32;
 const MAX_FDT_DEPTH: usize = 32;
 const FDT_BEGIN_NODE: u32 = 1;
 const FDT_END_NODE: u32 = 2;
@@ -96,6 +97,21 @@ pub struct RiscvMemoryRegion {
 pub struct RiscvPlatformRegion {
     pub base: u64,
     pub size: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RiscvVirtioMmioDevice {
+    pub base: u64,
+    pub size: u64,
+    pub interrupt: Option<u32>,
+}
+
+impl RiscvVirtioMmioDevice {
+    pub const EMPTY: Self = Self {
+        base: 0,
+        size: 0,
+        interrupt: None,
+    };
 }
 
 impl RiscvPlatformRegion {
@@ -740,6 +756,185 @@ impl RiscvBootInfo {
         None
     }
 
+    pub fn virtio_mmio_devices(
+        &self,
+        out: &mut [RiscvVirtioMmioDevice],
+    ) -> Result<usize, DtbError> {
+        let data = self.bytes();
+        let struct_end = self.struct_offset.checked_add(self.struct_len).ok_or(
+            DtbError::MalformedStructure {
+                offset: self.struct_offset,
+                token: 0,
+            },
+        )?;
+        let mut cursor = self.struct_offset;
+        let mut depth = 0usize;
+        let mut device_nodes = [false; MAX_FDT_DEPTH];
+        let mut address_cells = [0u32; MAX_FDT_DEPTH];
+        let mut size_cells = [0u32; MAX_FDT_DEPTH];
+        let mut reg_offsets = [0usize; MAX_FDT_DEPTH];
+        let mut reg_lens = [0usize; MAX_FDT_DEPTH];
+        let mut reg_address_cells = [0u32; MAX_FDT_DEPTH];
+        let mut reg_size_cells = [0u32; MAX_FDT_DEPTH];
+        let mut interrupt_offsets = [0usize; MAX_FDT_DEPTH];
+        let mut interrupt_lens = [0usize; MAX_FDT_DEPTH];
+        let mut count = 0usize;
+        let mut ended = false;
+
+        while cursor < struct_end {
+            let token = read_be_u32_slice(data, cursor, struct_end)?;
+            cursor += 4;
+            match token {
+                FDT_BEGIN_NODE => {
+                    if depth >= MAX_FDT_DEPTH {
+                        return Err(DtbError::MalformedStructure {
+                            offset: cursor - 4,
+                            token,
+                        });
+                    }
+                    let name_start = cursor;
+                    let name_end = data[name_start..struct_end]
+                        .iter()
+                        .position(|byte| *byte == 0)
+                        .map(|offset| name_start + offset)
+                        .ok_or(DtbError::MalformedProperty { offset: name_start })?;
+                    let name = core::str::from_utf8(&data[name_start..name_end])
+                        .map_err(|_| DtbError::MalformedProperty { offset: name_start })?;
+                    device_nodes[depth] = name == "virtio_mmio" || name.starts_with("virtio_mmio@");
+                    address_cells[depth] = if depth == 0 {
+                        0
+                    } else {
+                        address_cells[depth - 1]
+                    };
+                    size_cells[depth] = if depth == 0 { 0 } else { size_cells[depth - 1] };
+                    reg_offsets[depth] = 0;
+                    reg_lens[depth] = 0;
+                    reg_address_cells[depth] = 0;
+                    reg_size_cells[depth] = 0;
+                    interrupt_offsets[depth] = 0;
+                    interrupt_lens[depth] = 0;
+                    depth += 1;
+                    cursor = align4(name_end + 1);
+                }
+                FDT_END_NODE => {
+                    if depth == 0 {
+                        return Err(DtbError::MalformedStructure {
+                            offset: cursor - 4,
+                            token,
+                        });
+                    }
+                    let node_index = depth - 1;
+                    if device_nodes[node_index] && reg_lens[node_index] != 0 {
+                        let mut region = [RiscvPlatformRegion::EMPTY; 1];
+                        let mut region_count = 0usize;
+                        parse_platform_reg(
+                            data,
+                            reg_offsets[node_index],
+                            reg_offsets[node_index] + reg_lens[node_index],
+                            reg_address_cells[node_index],
+                            reg_size_cells[node_index],
+                            &mut region,
+                            &mut region_count,
+                        )?;
+                        if region_count != 0 {
+                            if count >= out.len() {
+                                return Err(DtbError::TooManyMemoryRegions);
+                            }
+                            let interrupt = if interrupt_lens[node_index] >= 4 {
+                                Some(read_be_u32_slice(
+                                    data,
+                                    interrupt_offsets[node_index],
+                                    interrupt_offsets[node_index] + 4,
+                                )?)
+                            } else {
+                                None
+                            };
+                            out[count] = RiscvVirtioMmioDevice {
+                                base: region[0].base,
+                                size: region[0].size,
+                                interrupt,
+                            };
+                            count += 1;
+                        }
+                    }
+                    depth -= 1;
+                }
+                FDT_PROP => {
+                    if depth == 0 {
+                        return Err(DtbError::MalformedStructure {
+                            offset: cursor - 4,
+                            token,
+                        });
+                    }
+                    let value_len = read_be_u32_slice(data, cursor, struct_end)? as usize;
+                    let name_offset = read_be_u32_slice(data, cursor + 4, struct_end)? as usize;
+                    cursor += 8;
+                    let value_start = cursor;
+                    let value_end =
+                        value_start
+                            .checked_add(value_len)
+                            .ok_or(DtbError::MalformedProperty {
+                                offset: value_start,
+                            })?;
+                    if value_end > struct_end {
+                        return Err(DtbError::MalformedProperty {
+                            offset: value_start,
+                        });
+                    }
+                    let property =
+                        string_at(data, self.strings_offset, self.strings_len, name_offset)?;
+                    match property {
+                        "#address-cells" => {
+                            address_cells[depth - 1] =
+                                read_cell_property(data, value_start, value_len, property)?;
+                        }
+                        "#size-cells" => {
+                            size_cells[depth - 1] =
+                                read_cell_property(data, value_start, value_len, property)?;
+                        }
+                        "reg" if device_nodes[depth - 1] => {
+                            reg_offsets[depth - 1] = value_start;
+                            reg_lens[depth - 1] = value_len;
+                            reg_address_cells[depth - 1] = address_cells[depth - 1];
+                            reg_size_cells[depth - 1] = size_cells[depth - 1];
+                        }
+                        "interrupts" if device_nodes[depth - 1] => {
+                            interrupt_offsets[depth - 1] = value_start;
+                            interrupt_lens[depth - 1] = value_len;
+                        }
+                        _ => {}
+                    }
+                    cursor = align4(value_end);
+                }
+                FDT_NOP => {}
+                FDT_END => {
+                    if depth != 0 {
+                        return Err(DtbError::MalformedStructure {
+                            offset: cursor - 4,
+                            token,
+                        });
+                    }
+                    ended = true;
+                    break;
+                }
+                _ => {
+                    return Err(DtbError::MalformedStructure {
+                        offset: cursor - 4,
+                        token,
+                    });
+                }
+            }
+        }
+
+        if !ended {
+            return Err(DtbError::MalformedStructure {
+                offset: struct_end,
+                token: 0,
+            });
+        }
+        Ok(count)
+    }
+
     pub fn plic_base(&self) -> Option<u64> {
         let data = self.bytes();
         let struct_end = self.struct_offset.checked_add(self.struct_len)?;
@@ -1287,6 +1482,28 @@ fn initialize_memory_allocator(
                 "[strat9] PCI ECAM unavailable: DTB node missing\r\n"
             )),
         }
+        let mut virtio_devices = [RiscvVirtioMmioDevice::EMPTY; MAX_DTB_VIRTIO_MMIO_DEVICES];
+        let virtio_device_count = match info.virtio_mmio_devices(&mut virtio_devices) {
+            Ok(count) => count,
+            Err(error) => {
+                super::serial::_print(format_args!(
+                    "[strat9] VirtIO-MMIO discovery failed: {:?}\r\n",
+                    error
+                ));
+                0
+            }
+        };
+        let mut virtio_transports =
+            [super::virtio_mmio::MmioDeviceInfo::EMPTY; MAX_DTB_VIRTIO_MMIO_DEVICES];
+        let virtio_transport_count = super::virtio_mmio::discover(
+            &virtio_devices[..virtio_device_count],
+            &mut virtio_transports,
+        );
+        super::serial::_print(format_args!(
+            "[strat9] VirtIO-MMIO ready: nodes={} devices={}\r\n",
+            virtio_device_count, virtio_transport_count
+        ));
+
         match info.timebase_frequency() {
             Some(frequency) => {
                 match super::timer::init(frequency, info.has_isa_extension("sstc")) {

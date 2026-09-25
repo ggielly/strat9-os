@@ -13,6 +13,7 @@ pub mod pci;
 pub mod plic;
 pub mod serial;
 pub mod trap;
+pub mod virtio_mmio;
 
 // ---------------------------------------------------------------------------
 // Transitional stubs (x86-only subsystems). Each is scheduled to become a
