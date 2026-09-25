@@ -174,7 +174,7 @@ Le build release observé le 2026-09-25 échoue avec 99 erreurs et 29 avertissem
 
 ## Décisions à prendre avant implémentation
 
-- **Mode de pages :** confirmer Sv39 ou Sv48 au regard du CPU QEMU retenu, de la cible LLVM/Rust et des besoins d’espace virtuel.
+- **Mode de pages :** Sv39 est retenu pour l’étape QEMU `virt` (512 Mio, 39 bits virtuels, 3 niveaux) ; Sv48 reste à réévaluer pour les cibles avec un espace virtuel plus large. Les tables Sv39 sont construites au boot, mais `satp` n’est pas encore activé tant que les plages MMIO du DTB ne sont pas mappées.
 - **Boot ABI :** choisir extension versionnée ou contrat d’entrée RISC-V distinct ; documenter le producteur et le consommateur du DTB ainsi que sa durée de vie.
 - **SBI :** fixer la version minimale et les extensions d’extension SBI nécessaires pour timer et démarrage secondaire ; définir le comportement lorsque le firmware ne les expose pas.
 - **État flottant :** fixer les extensions réellement activées et la politique de sauvegarde/restauration pour les tâches.
@@ -183,7 +183,7 @@ Le build release observé le 2026-09-25 échoue avec 99 erreurs et 29 avertissem
 
 ## Prochain incrément recommandé
 
-Le contrat d'entrée OpenSBI et la première validation du DTB sont maintenant matérialisés. La suite doit rester conditionnée par ce document : choisir explicitement Sv39 ou Sv48, puis implémenter la découverte de la mémoire et le mapper natif à partir du DTB avant d'activer les traps, le timer ou l'espace utilisateur. Les pilotes PCI et VirtIO-MMIO restent des étapes ultérieures.
+Le contrat d'entrée OpenSBI, la découverte DTB et l’initialisation buddy sont matérialisés. Sv39 est choisi pour QEMU `virt` et les tables sont construites sans activer `satp` ; l’étape suivante est de découvrir et mapper les plages MMIO du DTB, puis d’activer la pagination avant d’installer les traps.
 
 ## Références du dépôt
 

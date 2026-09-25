@@ -631,6 +631,25 @@ fn initialize_memory_allocator(
     crate::memory::buddy::init_buddy_allocator(&boot_regions[..count]);
     super::serial::_print(format_args!("[strat9] buddy allocator ready\r\n"));
 
+    let mut mapper = super::paging::Sv39Mapper::new();
+    let mut mapped_pages = 0usize;
+    for region in &boot_regions[..count] {
+        if matches!(region.kind, MemoryKind::Free | MemoryKind::Reclaim) {
+            match mapper.map_ram(region.base, region.size) {
+                Ok(pages) => mapped_pages += pages,
+                Err(error) => super::serial::_print(format_args!(
+                    "[strat9] Sv39 map failed for {:#x}: {:?}\r\n",
+                    region.base, error
+                )),
+            }
+        }
+    }
+    super::serial::_print(format_args!(
+        "[strat9] Sv39 tables ready: root={:#x} mapped={} pages (paging disabled)\r\n",
+        mapper.root_physical_address(),
+        mapped_pages
+    ));
+
     if let Some(token) = crate::sync::IrqDisabledToken::verify() {
         match crate::memory::buddy::alloc(&token, 0) {
             Ok(frame) => {

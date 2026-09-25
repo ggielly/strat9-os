@@ -8,6 +8,7 @@
 //! incrementally as call-sites are migrated.
 
 pub mod boot;
+pub mod paging;
 pub mod serial;
 
 // ---------------------------------------------------------------------------
