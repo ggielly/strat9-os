@@ -531,8 +531,7 @@ pub(crate) struct SchedulerCpu {
 /// (use `try_lock` when touching a sibling CPU).
 #[allow(dead_code)]
 pub(crate) static LOCAL_SCHEDULERS: [SpinLock<Option<SchedulerCpu>>;
-    crate::arch::percpu::MAX_CPUS] =
-    [const { SpinLock::new(None) }; crate::arch::percpu::MAX_CPUS];
+    crate::arch::percpu::MAX_CPUS] = [const { SpinLock::new(None) }; crate::arch::percpu::MAX_CPUS];
 
 /// Blocked tasks registry : hot path: block/wake.
 ///
@@ -632,14 +631,19 @@ fn validate_task_context(task: &Arc<Task>) -> Result<(), &'static str> {
     let stack_base = task.kernel_stack.virt_base.as_u64();
     let stack_top = stack_base.saturating_add(task.kernel_stack.size as u64);
 
-    if saved_rsp < stack_base || saved_rsp.saturating_add(56) > stack_top {
+    #[cfg(target_arch = "x86_64")]
+    let frame_size = 56u64;
+    #[cfg(target_arch = "riscv64")]
+    let frame_size = 32u64;
+    if saved_rsp < stack_base || saved_rsp.saturating_add(frame_size) > stack_top {
         return Err("saved_rsp outside kernel stack bounds");
     }
 
-    // For our switch frame layout, return IP is at [saved_rsp + 48].
-    // Use read_unaligned: saved_rsp is only guaranteed to be within the stack
-    // bounds, not necessarily aligned to 8 bytes at this offset.
-    let ret_ip = unsafe { core::ptr::read_unaligned((saved_rsp + 48) as *const u64) };
+    #[cfg(target_arch = "x86_64")]
+    let ret_offset = 48u64;
+    #[cfg(target_arch = "riscv64")]
+    let ret_offset = 16u64;
+    let ret_ip = unsafe { core::ptr::read_unaligned((saved_rsp + ret_offset) as *const u64) };
     if ret_ip == 0 {
         return Err("null return IP in switch frame");
     }

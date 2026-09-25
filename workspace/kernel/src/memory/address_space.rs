@@ -19,7 +19,9 @@ use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use spin::Once;
-use crate::arch::paging_compat::registers::control::{Cr3, Cr3Flags};
+use crate::arch::paging_compat::registers::control::Cr3;
+#[cfg(target_arch = "x86_64")]
+use crate::arch::paging_compat::registers::control::Cr3Flags;
 use crate::arch::paging_compat::structures::paging::{
     mapper::TranslateResult, OffsetPageTable, Page, PageTable,
 };
@@ -1681,6 +1683,7 @@ impl AddressSpace {
     /// # Safety
     /// The caller must ensure this address space's page tables are valid and
     /// that the kernel half is correctly mapped.
+    #[cfg(target_arch = "x86_64")]
     pub unsafe fn switch_to(&self) {
         let (current_frame, _) = Cr3::read();
         if current_frame.start_address() == self.cr3_phys {
@@ -1690,15 +1693,20 @@ impl AddressSpace {
         let frame = X86PhysFrame::<Size4KiB>::from_start_address(self.cr3_phys)
             .expect("CR3 address not aligned");
         crate::e9_println!("C");
-        #[cfg(target_arch = "x86_64")]
         // SAFETY: cr3_phys points to a valid, 4KiB-aligned PML4 table with
         // the kernel half correctly populated.
         unsafe {
             Cr3::write(frame, Cr3Flags::empty());
         }
-        #[cfg(target_arch = "riscv64")]
-        Cr3::write(frame, Cr3Flags::empty());
         crate::e9_println!("c");
+    }
+
+    #[cfg(target_arch = "riscv64")]
+    pub unsafe fn switch_to(&self) {
+        if self.is_kernel {
+            return;
+        }
+        panic!("RISC-V per-process address spaces are not implemented")
     }
 
     /// Whether this is the kernel address space.

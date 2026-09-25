@@ -159,10 +159,15 @@ pub mod gdt_selectors {
 
 pub mod tss {
     pub fn init() { panic!("RISC-V kernel stack setup via sscratch is not implemented (R2.5)") }
-    pub fn set_kernel_stack(_top: crate::arch::xshim::VirtAddr) { panic!("RISC-V kernel stack setup via sscratch is not implemented (R2.5)") }
-    pub fn set_kernel_stack_for(_cpu: usize, _top: crate::arch::xshim::VirtAddr) { panic!("RISC-V kernel stack setup via sscratch is not implemented (R2.5)") }
-    pub fn kernel_stack_for(_cpu: usize) -> Option<crate::ostd::mm::VirtAddr> {
-        panic!("RISC-V kernel stack lookup via sscratch is not implemented (R2.5)")
+    pub fn set_kernel_stack(top: crate::arch::xshim::VirtAddr) {
+        crate::arch::riscv64::percpu::set_kernel_rsp_current(top.as_u64());
+    }
+    pub fn set_kernel_stack_for(cpu: usize, top: crate::arch::xshim::VirtAddr) {
+        crate::arch::riscv64::percpu::set_kernel_rsp_for_cpu(cpu, top.as_u64());
+    }
+    pub fn kernel_stack_for(cpu: usize) -> Option<crate::ostd::mm::VirtAddr> {
+        crate::arch::riscv64::percpu::kernel_rsp_for_cpu(cpu)
+            .map(crate::arch::xshim::VirtAddr::new)
     }
 }
 
@@ -249,8 +254,10 @@ pub mod mouse {
 }
 
 pub mod syscall {
-    pub fn init() { panic!("RISC-V ecall entry is not implemented (R3.1)") }
-    pub fn set_kernel_rsp(_rsp: u64) { panic!("RISC-V kernel stack setup is not implemented (R3.1)") }
+    pub fn init() {}
+    pub fn set_kernel_rsp(rsp: u64) {
+        crate::arch::riscv64::percpu::set_kernel_rsp_current(rsp);
+    }
 }
 
 pub mod keyboard_layout {

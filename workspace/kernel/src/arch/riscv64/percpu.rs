@@ -90,6 +90,17 @@ pub fn kernel_rsp_current() -> Option<u64> {
     (rsp != 0).then_some(rsp)
 }
 
+pub fn set_kernel_rsp_for_cpu(cpu_index: usize, rsp: u64) {
+    if let Some(slot) = PERCPU.get(cpu_index) {
+        slot.kernel_rsp.store(rsp, Ordering::Release);
+    }
+}
+
+pub fn kernel_rsp_for_cpu(cpu_index: usize) -> Option<u64> {
+    let rsp = PERCPU.get(cpu_index)?.kernel_rsp.load(Ordering::Acquire);
+    (rsp != 0).then_some(rsp)
+}
+
 pub fn mark_tlb_ready_current() {
     let index = current_cpu_index();
     PERCPU[index].tlb_ready.store(1, Ordering::Release);

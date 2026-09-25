@@ -9,3 +9,6 @@ core::arch::global_asm!(include_str!("boot64r.S"));
 
 #[cfg(target_arch = "riscv64")]
 core::arch::global_asm!(include_str!("trap64.S"));
+
+#[cfg(target_arch = "riscv64")]
+core::arch::global_asm!(include_str!("switch64.S"));

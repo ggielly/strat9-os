@@ -2,11 +2,13 @@
 //!
 //! Defines the Task structure and related types for the Strat9-OS scheduler.
 
-use crate::memory::AddressSpace;
+use crate::{
+    arch::xshim::{PhysAddr, VirtAddr},
+    memory::AddressSpace,
+};
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use intrusive_collections::LinkedListLink;
-use crate::arch::xshim::{PhysAddr, VirtAddr};
 
 /// POSIX process ID.
 pub type Pid = u32;
@@ -149,8 +151,7 @@ impl ExtendedState {
                 "[trace][fpu] ExtendedState::new host_default_xcr0={:#x}",
                 xcr0
             );
-            let sz =
-                crate::arch::cpuid::xsave_size_for_xcr0(xcr0).min(Self::MAX_XSAVE_SIZE);
+            let sz = crate::arch::cpuid::xsave_size_for_xcr0(xcr0).min(Self::MAX_XSAVE_SIZE);
             crate::serial_println!("[trace][fpu] ExtendedState::new xsave_size={}", sz);
             (true, sz, xcr0)
         } else {
@@ -570,6 +571,7 @@ impl CpuContext {
     ///   0  (rbx)
     ///   <- saved_rsp points here
     /// ```
+    #[cfg(target_arch = "x86_64")]
     pub fn new(entry_point: u64, kernel_stack: &KernelStack) -> Self {
         let stack_top = kernel_stack.virt_base.as_u64() + kernel_stack.size as u64;
 
@@ -658,6 +660,29 @@ impl CpuContext {
     }
 }
 
+#[cfg(target_arch = "riscv64")]
+impl CpuContext {
+    pub fn new(entry_point: u64, kernel_stack: &KernelStack) -> Self {
+        let stack_top = kernel_stack.virt_base.as_u64() + kernel_stack.size as u64;
+        const STACK_CANARY: u64 = 0xDEADBEEFCAFEBABE;
+        let canary_addr = stack_top - 8;
+        let initial_rsp = (canary_addr - 32) & !15;
+
+        unsafe {
+            let stack = initial_rsp as *mut u64;
+            *stack.add(0) = 0;
+            *stack.add(1) = 0;
+            *stack.add(2) = task_entry_trampoline as *const () as u64;
+            *stack.add(3) = entry_point;
+            *(canary_addr as *mut u64) = STACK_CANARY;
+        }
+
+        CpuContext {
+            saved_rsp: initial_rsp,
+        }
+    }
+}
+
 /// Trampoline for newly created tasks.
 ///
 /// When a new task is first scheduled, `switch_context()` pops the fake
@@ -683,8 +708,20 @@ pub unsafe extern "C" fn task_entry_trampoline() -> ! {
 }
 
 #[cfg(target_arch = "riscv64")]
+extern "C" {
+    fn riscv_switch_context(old_rsp_ptr: *mut u64, new_rsp_ptr: *const u64);
+    fn riscv_restore_first_context(frame_ptr: *const u64) -> !;
+}
+
+#[cfg(target_arch = "riscv64")]
 pub unsafe extern "C" fn task_entry_trampoline() -> ! {
-    panic!("RISC-V task context switching is not implemented")
+    let entry: u64;
+    core::arch::asm!("mv {0}, a0", out(reg) entry, options(nomem, nostack));
+    crate::process::scheduler::finish_switch();
+    crate::arch::percpu::mark_tlb_ready_current();
+    crate::arch::sti();
+    let entry_fn: extern "C" fn(u64) -> ! = unsafe { core::mem::transmute(entry as usize) };
+    entry_fn(0)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -943,6 +980,7 @@ impl Task {
             xcr0_mask: AtomicU64::new(xcr0_mask),
             rt_link: LinkedListLink::new(),
         });
+        #[cfg(target_arch = "x86_64")]
         task.seed_kernel_interrupt_frame_from_context();
         Ok(task)
     }
@@ -1201,33 +1239,31 @@ pub(super) unsafe fn do_restore_first_task(
     fpu_ptr: *const u8,
     xcr0: u64,
 ) -> ! {
-    // Debug: verify frame pointer
-    crate::serial_force_println!(
-        "[task] do_restore_first_task frame_ptr={:#x} fpu_ptr={:#x}",
-        frame_ptr as u64,
-        fpu_ptr as u64
-    );
-
-    // Verify the stack frame contains expected values
-    crate::serial_force_println!(
-        "[task] do_restore_first_task stack frame: r15={:#x} r14={:#x} r13={:#x} r12={:#x} rbp={:#x} rbx={:#x} ret={:#x}",
-        *frame_ptr.add(0),
-        *frame_ptr.add(1),
-        *frame_ptr.add(2),
-        *frame_ptr.add(3),
-        *frame_ptr.add(4),
-        *frame_ptr.add(5),
-        *frame_ptr.add(6)
-    );
-
-    // Verify canary immediately above the fake frame (frame is 7 words long).
-    let canary_addr = frame_ptr as u64 + 56;
-    let canary = *(canary_addr as *const u64);
-    crate::serial_force_println!(
-        "[task] do_restore_first_task canary at {:#x} = {:#x} (expected 0xdeadbeefcafebabe)",
-        canary_addr,
-        canary
-    );
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::serial_force_println!(
+            "[task] do_restore_first_task frame_ptr={:#x} fpu_ptr={:#x}",
+            frame_ptr as u64,
+            fpu_ptr as u64
+        );
+        crate::serial_force_println!(
+            "[task] do_restore_first_task stack frame: r15={:#x} r14={:#x} r13={:#x} r12={:#x} rbp={:#x} rbx={:#x} ret={:#x}",
+            *frame_ptr.add(0),
+            *frame_ptr.add(1),
+            *frame_ptr.add(2),
+            *frame_ptr.add(3),
+            *frame_ptr.add(4),
+            *frame_ptr.add(5),
+            *frame_ptr.add(6)
+        );
+        let canary_addr = frame_ptr as u64 + 56;
+        let canary = *(canary_addr as *const u64);
+        crate::serial_force_println!(
+            "[task] do_restore_first_task canary at {:#x} = {:#x} (expected 0xdeadbeefcafebabe)",
+            canary_addr,
+            canary
+        );
+    }
 
     if crate::arch::cpuid::host_uses_xsave() {
         restore_first_task_xsave(frame_ptr, fpu_ptr, normalized_xcr0(xcr0));
@@ -1242,38 +1278,34 @@ pub(super) unsafe fn do_restore_first_task(
 /// rdi=old_rsp, rsi=new_rsp, rdx=old_fpu, rcx=new_fpu
 #[cfg(target_arch = "riscv64")]
 unsafe fn switch_context_fxsave(
-    _old_rsp_ptr: *mut u64,
-    _new_rsp_ptr: *const u64,
+    old_rsp_ptr: *mut u64,
+    new_rsp_ptr: *const u64,
     _old_fpu_ptr: *mut u8,
     _new_fpu_ptr: *const u8,
 ) {
-    panic!("RISC-V context switching is not implemented")
+    riscv_switch_context(old_rsp_ptr, new_rsp_ptr);
 }
 
 #[cfg(target_arch = "riscv64")]
-unsafe fn restore_first_task_fxsave(_rsp_ptr: *const u64, _fpu_ptr: *const u8) -> ! {
-    panic!("RISC-V context switching is not implemented")
+unsafe fn restore_first_task_fxsave(rsp_ptr: *const u64, _fpu_ptr: *const u8) -> ! {
+    riscv_restore_first_context(rsp_ptr)
 }
 
 #[cfg(target_arch = "riscv64")]
 unsafe fn switch_context_xsave(
-    _old_rsp_ptr: *mut u64,
-    _new_rsp_ptr: *const u64,
+    old_rsp_ptr: *mut u64,
+    new_rsp_ptr: *const u64,
     _old_fpu_ptr: *mut u8,
     _new_fpu_ptr: *const u8,
     _new_xcr0: u64,
     _old_xcr0: u64,
 ) {
-    panic!("RISC-V context switching is not implemented")
+    riscv_switch_context(old_rsp_ptr, new_rsp_ptr);
 }
 
 #[cfg(target_arch = "riscv64")]
-unsafe fn restore_first_task_xsave(
-    _rsp_ptr: *const u64,
-    _fpu_ptr: *const u8,
-    _xcr0: u64,
-) -> ! {
-    panic!("RISC-V context switching is not implemented")
+unsafe fn restore_first_task_xsave(rsp_ptr: *const u64, _fpu_ptr: *const u8, _xcr0: u64) -> ! {
+    riscv_restore_first_context(rsp_ptr)
 }
 
 #[cfg(target_arch = "x86_64")]
