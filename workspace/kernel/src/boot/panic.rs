@@ -300,11 +300,6 @@ pub fn panic_handler(info: &PanicInfo) -> ! {
 
     // 6. Stop all other CPUs and wait for them to halt.
     crate::arch::smp::broadcast_panic_halt();
-    // Brief delay to let other CPUs observe the NMI/halt IPI before we
-    // touch shared framebuffer memory.
-    for _ in 0..100_000 {
-        core::hint::spin_loop();
-    }
 
     // 7. Flush the VGA circular buffer so any buffered log lines appear.
     crate::arch::vgabuf::vgabuf_flush_all();

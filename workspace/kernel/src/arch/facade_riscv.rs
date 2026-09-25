@@ -586,7 +586,6 @@ pub mod timer {
     pub use crate::arch::riscv64::timer_extra::*;
     pub fn is_apic_timer_active() -> bool { false }
     pub fn apic_ticks_per_10ms() -> u32 { 0 }
-    pub fn start_apic_timer_cached() { panic!("RISC-V timer backend is not initialized (R2.2)") }
 }
 
 /// x86-only CPU extensions — no-op on RISC-V.
