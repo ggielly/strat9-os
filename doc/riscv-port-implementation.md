@@ -20,7 +20,7 @@ Le port doit d’abord atteindre un démarrage déterministe sur un seul hart, u
 | Boot ABI | `workspace/abi/src/boot.rs` définit `STRAT9_BOOT_ABI_VERSION = 1` et un `KernelArgs` de 160 octets avec des champs ACPI. | Le DTB ne peut pas être ajouté silencieusement à cette structure : tout changement doit être versionné et coordonné avec le chargeur. |
 | Mémoire virtuelle | `arch/xshim_riscv_stub.rs` contient une traduction Sv48 partielle et des opérations PTE, mais ne fournit pas encore un mapper RISC‑V complet. Le mapper Sv39 de `arch/riscv64/paging.rs` mappe la RAM et les 16 plages MMIO du DTB, puis active `satp`. | Le chemin physique direct et les traps restent à brancher sur ce mapper. |
 | Interruptions et temps | Le trap handler S‑mode direct gère le timer et les interrupts externes ; le PLIC est découvert via le DTB, et le timer S‑mode utilise `stimecmp`/`SBI` à 100 Hz. | Le routage des sources matérielles et le scheduler restent à réaliser. |
-| Périphériques | Le DTB fournit PLIC, PCI ECAM et les plages MMIO ; l’accès configuration ECAM, le scan borné du bus 0 et la découverte des nœuds VirtIO‑MMIO sont implémentés. L’état par hart est stocké via `sscratch` pour préparer P3. | Aucun device VirtIO n’est fourni par la ligne QEMU actuelle et aucun driver de transport n’est encore branché. |
+| Périphériques | Le DTB fournit PLIC, PCI ECAM et les plages MMIO ; l’accès configuration ECAM, le scan borné du bus 0, la découverte des nœuds VirtIO‑MMIO et la négociation reset/ACK/features v1‑v2 sont implémentés. La ligne QEMU attache `virtio-rng-device`. | Le vring et le driver RNG ne sont pas encore branchés. |
 | Exécution | Pas de contexte RISC-V, transition utilisateur, syscall `ecall` ou gestionnaire de traps complet. | Le noyau ne peut pas encore exécuter les charges de travail attendues. |
 | Validation | Les tâches RISC-V de build et d’exécution existent dans `Makefile.toml` et `Makefile.riscv`. | Les critères de démarrage complet restent à valider après implémentation de la mémoire et des traps. |
 
@@ -183,7 +183,7 @@ Le build release observé le 2026-09-25 échoue avec 99 erreurs et 29 avertissem
 
 ## Prochain incrément recommandé
 
-Le contrat d'entrée OpenSBI, la découverte DTB, l’initialisation buddy, Sv39, le trap handler S‑mode, le PLIC, le timer à 100 Hz avec tick scheduler, le scan PCI ECAM, la découverte des nœuds VirtIO‑MMIO, l’état d’un hart via `sscratch`, le frame/context switch RISC‑V avec auto-test A→B→A, l’accès physique identité, la protection de l’image kernel, l’initialisation du scheduler et un premier round-trip de task noyau cooperative sont matérialisés. L’étape suivante est la préemption par timer depuis le trap handler, puis un device VirtIO‑MMIO.
+Le contrat d'entrée OpenSBI, la découverte DTB, l’initialisation buddy, Sv39, le trap handler S‑mode, le PLIC, le timer à 100 Hz avec tick scheduler, le scan PCI ECAM, la découverte des nœuds VirtIO‑MMIO, la négociation reset/ACK/features v1‑v2, l’état d’un hart via `sscratch`, le frame/context switch RISC‑V avec auto-test A→B→A, l’accès physique identité, la protection de l’image kernel, l’initialisation du scheduler et un premier round-trip de task noyau cooperative sont matérialisés. L’étape suivante est le vring et le driver RNG VirtIO‑MMIO, puis la préemption par timer depuis le trap handler.
 
 ## Références du dépôt
 

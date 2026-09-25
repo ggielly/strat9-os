@@ -1519,9 +1519,19 @@ fn initialize_memory_allocator(
             &virtio_devices[..virtio_device_count],
             &mut virtio_transports,
         );
+        let mut virtio_ready = 0usize;
+        for info in &virtio_transports[..virtio_transport_count] {
+            match super::virtio_mmio::initialize(info) {
+                Ok(()) => virtio_ready += 1,
+                Err(error) => super::serial::_print(format_args!(
+                    "[strat9] VirtIO device init failed (id={}): {}\r\n",
+                    info.device_id, error
+                )),
+            }
+        }
         super::serial::_print(format_args!(
-            "[strat9] VirtIO-MMIO ready: nodes={} devices={}\r\n",
-            virtio_device_count, virtio_transport_count
+            "[strat9] VirtIO-MMIO ready: nodes={} devices={} initialized={}\r\n",
+            virtio_device_count, virtio_transport_count, virtio_ready
         ));
 
         match info.timebase_frequency() {

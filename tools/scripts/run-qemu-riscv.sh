@@ -32,6 +32,7 @@ QEMU_CMD=(
     -m "$MEMORY"
     -bios "$BIOS"
     -kernel "$KERNEL_ELF"
+    -device virtio-rng-device
     -serial stdio
     -display none
     -no-reboot
