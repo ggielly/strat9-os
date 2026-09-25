@@ -6,9 +6,9 @@ use super::*;
 ///
 /// Displays output from `sys_debug_log` calls made by tasks in the silo.
 /// Press Ctrl+C or 'q' to detach.
-pub(super) fn cmd_silo_attach(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_silo_attach(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: silo attach <id|label|name>");
+        shell_println!("Usage: {} attach <id|label|name>", cmd.name());
         return Err(ShellError::InvalidArguments);
     }
     let selector = normalize_current_silo_selector(args[1].as_str());
@@ -23,7 +23,7 @@ pub(super) fn cmd_silo_attach(args: &[String]) -> Result<(), ShellError> {
             detail.base.id
         }
         Err(e) => {
-            shell_println!("silo attach: {:?}", e);
+            shell_println!("{} attach: {:?}", cmd.name(), e);
             return Err(ShellError::ExecutionFailed);
         }
     };
@@ -47,7 +47,7 @@ pub(super) fn cmd_silo_attach(args: &[String]) -> Result<(), ShellError> {
             // The silo went away mid-attach: say so instead of spinning
             // silently on a failing drain.
             Err(e) => {
-                shell_println!("\nsilo attach: silo {} is gone ({:?})", sid, e);
+                shell_println!("\n{} attach: silo {} is gone ({:?})", cmd.name(), sid, e);
                 return Err(ShellError::ExecutionFailed);
             }
         }

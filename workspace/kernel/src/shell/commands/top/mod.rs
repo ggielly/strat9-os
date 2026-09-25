@@ -614,7 +614,7 @@ fn render_serial(view: &TopView, selected: usize) {
             "{:>5} {:<18} {:<8} {:<5} {:>10}{}",
             task.pid,
             task.name,
-            task_state_label(task.state),
+            crate::shell::output::task_state_str(task.state),
             format!("{:?}", task.priority),
             task.ticks,
             if i == selected { "  <" } else { "" }
@@ -651,16 +651,6 @@ fn render_serial(view: &TopView, selected: usize) {
         for strate in &s.strates {
             shell_println!("{:<14} {}", strate.name, strate.silos);
         }
-    }
-}
-
-/// Shared task state label, so both presenters render the same words.
-fn task_state_label(state: crate::process::TaskState) -> &'static str {
-    match state {
-        crate::process::TaskState::Ready => "Ready",
-        crate::process::TaskState::Running => "Running",
-        crate::process::TaskState::Blocked => "Blocked",
-        crate::process::TaskState::Dead => "Dead",
     }
 }
 

@@ -164,3 +164,14 @@ pub fn human_bytes_or_unlimited(bytes: u64) -> String {
         human_bytes(bytes)
     }
 }
+
+/// Task state label, so `ps`, `top` and every listing spell a state the same
+/// way instead of each mapping the enum to its own `Debug` spelling.
+pub fn task_state_str(state: crate::process::TaskState) -> &'static str {
+    match state {
+        crate::process::TaskState::Ready => "Ready",
+        crate::process::TaskState::Running => "Running",
+        crate::process::TaskState::Blocked => "Blocked",
+        crate::process::TaskState::Dead => "Dead",
+    }
+}

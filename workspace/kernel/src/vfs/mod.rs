@@ -105,6 +105,47 @@ pub fn resolve_and_check_path_for_current_task(
     Ok(abs)
 }
 
+/// Current working directory of the calling task.
+///
+/// In-kernel counterpart of the `getcwd` syscall, for callers that already live
+/// in the kernel and therefore have no user buffer to write into.
+pub fn current_dir() -> Result<String, SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    Ok(unsafe { (&*task.process.cwd.get()).clone() })
+}
+
+/// Change the current working directory of the calling task.
+///
+/// In-kernel counterpart of the `chdir` syscall: `path` is resolved against the
+/// current directory, then checked to be an existing directory.
+pub fn set_current_dir(path: &str) -> Result<(), SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let cwd = unsafe { (&*task.process.cwd.get()).clone() };
+    let abs = resolve_path(path, &cwd);
+
+    let (scheme, rel) = mount::resolve(&abs)?;
+    let res = scheme.open(&rel, OpenFlags::READ | OpenFlags::DIRECTORY)?;
+    let _ = scheme.close(res.file_id);
+
+    unsafe { *task.process.cwd.get() = abs };
+    Ok(())
+}
+
+/// Resolve `path` (absolute or relative) against the calling task's directory.
+///
+/// This is the single path-collapsing implementation of the kernel. The shell
+/// resolves paths with it instead of keeping a second working directory and a
+/// private copy of the normalisation rules, which is how the two used to drift
+/// apart.
+///
+/// No policy is enforced here: the operation the caller performs next (open,
+/// mkdir, unlink, ...) applies its own.
+pub fn resolve_path_for_current_task(path: &str) -> Result<String, SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let cwd = unsafe { (&*task.process.cwd.get()).clone() };
+    Ok(resolve_path(path, &cwd))
+}
+
 /// Open a file relative to a directory FD.
 ///
 /// - If `dir_fd == AT_FDCWD`, resolve against the process CWD (equivalent to `open()`).

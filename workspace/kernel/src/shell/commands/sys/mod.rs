@@ -67,8 +67,25 @@ use ratatui::{
     Terminal,
 };
 
-const STRATE_USAGE: &str = "Usage: strate <list|spawn|start|stop|kill|destroy|rename|config|info|suspend|resume|events|pledge|unveil|sandbox|limit|attach|top|logs> ...";
-const SILO_USAGE: &str = "Usage: silo <list|spawn|start|stop|kill|destroy|rename|config|info|suspend|resume|events|pledge|unveil|sandbox|limit|attach|top|logs> ...";
+/// Top-level command a subcommand was reached through.
+///
+/// `silo <x>` and `strate <x>` share one implementation, so messages and usage
+/// have to name the command the user actually typed: `strate pledge` used to
+/// answer "silo pledge: ..." because the literal was baked into the function.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Cmd {
+    Silo,
+    Strate,
+}
+
+impl Cmd {
+    fn name(self) -> &'static str {
+        match self {
+            Cmd::Silo => "silo",
+            Cmd::Strate => "strate",
+        }
+    }
+}
 const DEFAULT_MANAGED_SILO_TOML: &str = r#"
 [[silos]]
 name = "console-admin"
@@ -237,7 +254,7 @@ fn parse_silo_toml(data: &str) -> Vec<ManagedSiloDef> {
                 match section {
                     Section::Silo => match key {
                         "name" => s.name = String::from(val),
-                        "sid" => s.sid = val.parse().unwrap_or(42),
+                        "sid" => s.sid = val.parse().unwrap_or(CONFIG_SID_PLACEHOLDER),
                         "family" => s.family = String::from(val),
                         "mode" => s.mode = String::from(val),
                         "cpu_features" => s.cpu_features = String::from(val),
@@ -339,10 +356,16 @@ fn render_silo_toml(silos: &[ManagedSiloDef]) -> String {
     out
 }
 
+/// Boot config path, and the label reported when it is the effective source.
+const CONFIG_PATH: &str = "/initfs/silo.toml";
+/// Source label when the effective config is the embedded fallback.
+const CONFIG_SOURCE_EMBEDDED: &str = "embedded-default";
+/// Config `sid` value meaning "let userspace allocate the runtime id".
+const CONFIG_SID_PLACEHOLDER: u32 = 42;
+
 /// Reads silo toml from initfs.
 fn read_silo_toml_from_initfs() -> Result<String, ShellError> {
-    let path = "/initfs/silo.toml";
-    match vfs::open(path, vfs::OpenFlags::READ) {
+    match vfs::open(CONFIG_PATH, vfs::OpenFlags::READ) {
         Ok(fd) => {
             let data = vfs::read_all(fd).map_err(|_| ShellError::ExecutionFailed)?;
             let _ = vfs::close(fd);
@@ -354,27 +377,36 @@ fn read_silo_toml_from_initfs() -> Result<String, ShellError> {
     }
 }
 
-/// Performs the load managed silos with source operation.
+/// Loads the effective managed-silo config and names the source it came from.
+///
+/// Single entry point for every command that reports or edits the config
+/// (`list`, `config show`, `config add`, `config remove`, selector resolution),
+/// so they cannot disagree about what the config is.
 fn load_managed_silos_with_source() -> (Vec<ManagedSiloDef>, &'static str) {
-    match read_silo_toml_from_initfs() {
-        Ok(text) => {
-            let parsed = parse_silo_toml(&text);
-            if parsed.is_empty() {
-                (
-                    parse_silo_toml(DEFAULT_MANAGED_SILO_TOML),
-                    "embedded-default",
-                )
-            } else {
-                (parsed, "/initfs/silo.toml")
-            }
-        }
-        Err(_) => (
+    let parsed = read_silo_toml_from_initfs().map(|text| parse_silo_toml(&text));
+    match parsed {
+        Ok(silos) if !silos.is_empty() => (silos, CONFIG_PATH),
+        _ => (
             parse_silo_toml(DEFAULT_MANAGED_SILO_TOML),
-            "embedded-default",
+            CONFIG_SOURCE_EMBEDDED,
         ),
     }
 }
 
+/// Families the kernel accepts, from `silo::StrateFamily`.
+///
+/// The config stores the family as a string, so an unknown value used to be
+/// written straight into the boot config and only failed much later, when
+/// userspace tried to resolve it.
+const CONFIG_FAMILIES: &[&str] = &["SYS", "DRV", "FS", "NET", "WASM", "USR"];
+
+/// Strate binary types the boot config understands.
+const CONFIG_STRATE_TYPES: &[&str] = &["elf", "wasm"];
+
+/// True when a family is allocated from the system sid range.
+///
+/// Mirrors `strate-init`'s allocator: the two must agree or the shell points
+/// commands at the wrong silo.
 fn family_uses_system_sid(family: &str) -> bool {
     matches!(family, "SYS" | "DRV" | "NET" | "FS")
 }
@@ -390,7 +422,7 @@ fn compute_managed_runtime_sids(managed: &[ManagedSiloDef]) -> Vec<(String, u32)
     let mut mappings = Vec::with_capacity(ordered.len());
 
     for silo in ordered {
-        let sid = if silo.sid == 42 {
+        let sid = if silo.sid == CONFIG_SID_PLACEHOLDER {
             if family_uses_system_sid(&silo.family) {
                 let id = next_sys_sid;
                 next_sys_sid += 1;
@@ -937,9 +969,8 @@ fn render_strate_table_ratatui(
 
 /// Writes silo toml to initfs.
 fn write_silo_toml_to_initfs(text: &str) -> Result<(), ShellError> {
-    let path = "/initfs/silo.toml";
     let fd = vfs::open(
-        path,
+        CONFIG_PATH,
         vfs::OpenFlags::WRITE | vfs::OpenFlags::CREATE | vfs::OpenFlags::TRUNCATE,
     )
     .map_err(|_| ShellError::ExecutionFailed)?;
@@ -965,65 +996,79 @@ fn print_strate_state_for_sid(sid: u32) {
     }
 }
 
-fn print_strate_usage() {
-    shell_println!("{}", STRATE_USAGE);
-    shell_println!("  strate list");
-    shell_println!("  strate spawn <path|type> [--label <l>] [--dev <p>] [--type elf|wasm]");
-    shell_println!("  strate start <id|label>");
-    shell_println!("  strate stop|kill|destroy <id|label>");
-    shell_println!("  strate rename <id|label> <new_label>");
-    shell_println!("  strate config show|add|remove ...");
-    shell_println!("  strate info <id|label>");
-    shell_println!("  strate suspend|resume <id|label>");
-    shell_println!("  strate events [id|label]");
-    shell_println!("  strate pledge <id|label> <octal_mode>");
-    shell_println!("  strate unveil <id|label> <path> <rwx>");
-    shell_println!("  strate sandbox <id|label>");
-    shell_println!("  strate top [--sort mem|tasks]");
-    shell_println!("  strate logs <id|label>");
-}
+/// Subcommands shared by `silo` and `strate`: verb group, then its arguments.
+const SHARED_SUBCOMMANDS: &[(&str, &str)] = &[
+    ("list", "[--gui]"),
+    (
+        "spawn",
+        "<path|strate-name> [--label <l>] [--dev <p>] [--type elf|wasm]",
+    ),
+    ("start", "<id|label|name>"),
+    ("stop|kill|destroy", "<id|label|name>"),
+    ("rename", "<id|label|name> <new_label>"),
+    (
+        "config",
+        "show [silo] | add <silo> <name> <binary> [opts] | remove <silo> <name>",
+    ),
+    ("info", "<id|label|name>"),
+    ("suspend|resume", "<id|label|name>"),
+    ("events", "[id|label|name]"),
+    ("pledge", "<id|label|name> <octal_mode>"),
+    ("unveil", "<id|label|name> <path> <rwx>"),
+    ("sandbox", "<id|label|name>"),
+    (
+        "limit",
+        "<id|label|name> <mem_max|mem_min|max_tasks|cpu_shares> <value>",
+    ),
+    ("attach", "<id|label|name>"),
+    ("top", "[--sort mem|tasks]"),
+    ("logs", "<id|label|name>"),
+];
 
-fn print_silo_usage() {
-    shell_println!("{}", SILO_USAGE);
-    shell_println!("  silo list [--gui]");
-    shell_println!("  silo spawn <path|type> [--label <l>] [--dev <p>] [--type elf|wasm]");
-    shell_println!("  silo start <id|label>");
-    shell_println!("  silo stop|kill|destroy <id|label>");
-    shell_println!("  silo rename <id|label> <new_label>");
-    shell_println!("  silo config show|add|remove ...");
-    shell_println!("  silo info <id|label>");
-    shell_println!("  silo suspend|resume <id|label>");
-    shell_println!("  silo events [id|label]");
-    shell_println!("  silo pledge <id|label> <octal_mode>");
-    shell_println!("  silo unveil <id|label> <path> <rwx>");
-    shell_println!("  silo sandbox <id|label>");
-    shell_println!("  silo limit <id|label> <mem_max|mem_min|max_tasks|cpu_shares> <value>");
-    shell_println!("  silo attach <id|label>");
-    shell_println!("  silo top [--sort mem|tasks]");
-    shell_println!("  silo logs <id|label>");
+/// Usage for `silo` and `strate`.
+///
+/// Both expose the same subcommand set, so the list lives in one place: the two
+/// former `*_USAGE` constants were byte-identical, and `print_strate_usage` had
+/// drifted by omitting `limit` and `attach` even though both were dispatched.
+fn print_cmd_usage(cmd: Cmd) {
+    let name = cmd.name();
+    let mut verbs: Vec<&str> = Vec::with_capacity(SHARED_SUBCOMMANDS.len());
+    for (group, _) in SHARED_SUBCOMMANDS {
+        verbs.extend(group.split('|'));
+    }
+    shell_println!("Usage: {} <{}> ...", name, verbs.join("|"));
+    for (group, shape) in SHARED_SUBCOMMANDS {
+        if shape.is_empty() {
+            shell_println!("  {} {}", name, group);
+        } else {
+            shell_println!("  {} {} {}", name, group, shape);
+        }
+    }
 }
 
 pub(super) fn cmd_silo_impl(args: &[String]) -> Result<(), ShellError> {
     if args.is_empty() {
-        print_silo_usage();
+        print_cmd_usage(Cmd::Silo);
         return Err(ShellError::InvalidArguments);
     }
     match args[0].as_str() {
-        "list" => cmd_silo_list(args),
-        "info" => cmd_silo_info(args),
-        "suspend" => cmd_silo_suspend(args),
-        "resume" => cmd_silo_resume(args),
-        "events" => cmd_silo_events(args),
-        "pledge" => cmd_silo_pledge(args),
-        "unveil" => cmd_silo_unveil(args),
-        "sandbox" => cmd_silo_sandbox(args),
-        "limit" => cmd_silo_limit(args),
-        "attach" => cmd_silo_attach(args),
-        "top" => cmd_silo_top(args),
-        "logs" => cmd_silo_logs(args),
-        "spawn" | "start" | "stop" | "kill" | "destroy" | "rename" | "config" => cmd_strate(args),
+        "list" => cmd_silo_list(args, Cmd::Silo),
+        "info" => cmd_silo_info(args, Cmd::Silo),
+        "suspend" => cmd_silo_suspend(args, Cmd::Silo),
+        "resume" => cmd_silo_resume(args, Cmd::Silo),
+        "events" => cmd_silo_events(args, Cmd::Silo),
+        "pledge" => cmd_silo_pledge(args, Cmd::Silo),
+        "unveil" => cmd_silo_unveil(args, Cmd::Silo),
+        "sandbox" => cmd_silo_sandbox(args, Cmd::Silo),
+        "limit" => cmd_silo_limit(args, Cmd::Silo),
+        "attach" => cmd_silo_attach(args, Cmd::Silo),
+        "top" => cmd_silo_top(args, Cmd::Silo),
+        "logs" => cmd_silo_logs(args, Cmd::Silo),
+        "spawn" | "start" | "stop" | "kill" | "destroy" | "rename" | "config" => {
+            cmd_strate_impl(args, Cmd::Silo)
+        }
         _ => {
-            print_silo_usage();
+            print_cmd_usage(Cmd::Silo);
             Err(ShellError::InvalidArguments)
         }
     }
@@ -1034,7 +1079,7 @@ pub(super) fn cmd_silo_impl(args: &[String]) -> Result<(), ShellError> {
 /// Args are forwarded as-is (`cmd_silo_list` skips the command word), so
 /// `silos --gui` works and no argument vector is rebuilt.
 pub(super) fn cmd_silos_impl(args: &[String]) -> Result<(), ShellError> {
-    cmd_silo_list(args)
+    cmd_silo_list(args, Cmd::Silo)
 }
 
 /// Display kernel version
@@ -1531,13 +1576,13 @@ fn build_config_rows(
 }
 
 /// Performs the cmd silo list operation.
-fn cmd_silo_list(args: &[String]) -> Result<(), ShellError> {
+fn cmd_silo_list(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
     let mut want_gui = false;
     for arg in args.iter().skip(1) {
         match arg.as_str() {
             "--gui" => want_gui = true,
             _ => {
-                shell_println!("Usage: silo list [--gui]");
+                shell_println!("Usage: {} list [--gui]", cmd.name());
                 return Err(ShellError::InvalidArguments);
             }
         }
@@ -1581,7 +1626,7 @@ fn cmd_silo_list(args: &[String]) -> Result<(), ShellError> {
         if render_silo_table_ratatui(&rows, &config_rows, managed_source).unwrap_or(false) {
             return Ok(());
         }
-        shell_println!("silo list: GUI unavailable, fallback console");
+        shell_println!("{} list: GUI unavailable, fallback console", cmd.name());
     }
 
     // Console presenter. The column widths live in one place so the header and
@@ -1668,13 +1713,13 @@ fn group_strate(entries: &mut Vec<StrateEntry>, name: &str, owner: &str) {
 }
 
 /// Performs the cmd strate list operation.
-fn cmd_strate_list(args: &[String]) -> Result<(), ShellError> {
+fn cmd_strate_list(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
     let mut want_gui = false;
     for arg in args.iter().skip(1) {
         match arg.as_str() {
             "--gui" => want_gui = true,
             _ => {
-                shell_println!("Usage: strate list [--gui]");
+                shell_println!("Usage: {} list [--gui]", cmd.name());
                 return Err(ShellError::InvalidArguments);
             }
         }
@@ -1743,7 +1788,7 @@ fn cmd_strate_list(args: &[String]) -> Result<(), ShellError> {
         {
             return Ok(());
         }
-        shell_println!("strate list: GUI unavailable, fallback console");
+        shell_println!("{} list: GUI unavailable, fallback console", cmd.name());
     }
 
     shell_println!("Runtime:");
@@ -1762,10 +1807,49 @@ fn cmd_strate_list(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-fn cmd_strate_spawn(args: &[String]) -> Result<(), ShellError> {
+/// Resolves a `spawn` target to a binary path.
+///
+/// The boot config already records where every strate's binary lives, so it is
+/// consulted first: the old hardcoded table assumed `/initfs/bin/<name>`, which
+/// is wrong for the strates shipped at the root of the initfs
+/// (`/initfs/console-admin`, `/initfs/strate-bus`, `/initfs/strate-net`,
+/// `/initfs/strate-webrtc`) and made `strate spawn <name>` fail on them.
+///
+/// Explicit paths and the two filesystem shorthands keep working unchanged.
+fn resolve_spawn_path(target: &str) -> String {
+    if target.starts_with('/') {
+        return String::from(target);
+    }
+    match target {
+        "strate-fs-ext4" => return String::from("/initfs/fs-ext4"),
+        "ramfs" | "strate-fs-ramfs" => return String::from("/initfs/strate-fs-ramfs"),
+        _ => {}
+    }
+    // Config lookup: a strate declared under any silo.
+    if let Some(found) = config_binary_for_strate(target) {
+        return found;
+    }
+    let mut fallback = String::from("/initfs/bin/");
+    fallback.push_str(target);
+    fallback
+}
+
+/// Binary path the boot config declares for a strate name.
+fn config_binary_for_strate(strate_name: &str) -> Option<String> {
+    let (managed, _) = load_managed_silos_with_source();
+    managed
+        .iter()
+        .flat_map(|s| s.strates.iter())
+        .find(|st| st.name == strate_name)
+        .filter(|st| !st.binary.is_empty())
+        .map(|st| String::from(st.binary.as_str()))
+}
+
+fn cmd_strate_spawn(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
     if args.len() < 2 {
         shell_println!(
-            "Usage: strate spawn <path|type> [--label <l>] [--dev <p>] [--type elf|wasm]"
+            "Usage: {} spawn <path|strate-name> [--label <l>] [--dev <p>] [--type elf|wasm]",
+            cmd.name()
         );
         return Err(ShellError::InvalidArguments);
     }
@@ -1773,12 +1857,13 @@ fn cmd_strate_spawn(args: &[String]) -> Result<(), ShellError> {
 
     let mut label: Option<&str> = None;
     let mut dev: Option<&str> = None;
-    let mut spawn_type: Option<&str> = None;
+    let mut spawn_wasm = false;
     let mut i = 2usize;
     while i < args.len() {
         match args[i].as_str() {
             "--label" => {
                 if i + 1 >= args.len() {
+                    shell_println!("{} spawn: --label needs a value", cmd.name());
                     return Err(ShellError::InvalidArguments);
                 }
                 label = Some(args[i + 1].as_str());
@@ -1786,6 +1871,7 @@ fn cmd_strate_spawn(args: &[String]) -> Result<(), ShellError> {
             }
             "--dev" => {
                 if i + 1 >= args.len() {
+                    shell_println!("{} spawn: --dev needs a value", cmd.name());
                     return Err(ShellError::InvalidArguments);
                 }
                 dev = Some(args[i + 1].as_str());
@@ -1793,53 +1879,45 @@ fn cmd_strate_spawn(args: &[String]) -> Result<(), ShellError> {
             }
             "--type" => {
                 if i + 1 >= args.len() {
-                    shell_println!("strate spawn: --type needs a value (elf|wasm)");
+                    shell_println!("{} spawn: --type needs a value (elf|wasm)", cmd.name());
                     return Err(ShellError::InvalidArguments);
                 }
                 let value = args[i + 1].as_str();
                 // A typo used to be accepted silently and treated as `elf`.
                 if value != "elf" && value != "wasm" {
                     shell_println!(
-                        "strate spawn: unknown type '{}' (expected elf or wasm)",
+                        "{} spawn: unknown type '{}' (expected elf or wasm)",
+                        cmd.name(),
                         value
                     );
                     return Err(ShellError::InvalidArguments);
                 }
-                spawn_type = Some(value);
+                spawn_wasm = value == "wasm";
                 i += 2;
             }
             _ => {
-                shell_println!("strate spawn: unknown option '{}'", args[i]);
+                shell_println!("{} spawn: unknown option '{}'", cmd.name(), args[i]);
                 return Err(ShellError::InvalidArguments);
             }
         }
     }
 
-    let module_path: String = match target {
-        "strate-fs-ext4" => String::from("/initfs/fs-ext4"),
-        "ramfs" | "strate-fs-ramfs" => String::from("/initfs/strate-fs-ramfs"),
-        path if path.starts_with('/') => String::from(path),
-        name => {
-            let mut p = String::from("/initfs/bin/");
-            p.push_str(name);
-            p
-        }
-    };
-
-    if spawn_type == Some("wasm") {
-        shell_println!("strate spawn: delegating wasm to wasm-run...");
+    if spawn_wasm {
+        shell_println!("{} spawn: delegating wasm to wasm-run...", cmd.name());
         return cmd_wasm_run(&[String::from(target)]);
     }
 
+    let module_path = resolve_spawn_path(target);
+
     let fd = vfs::open(&module_path, vfs::OpenFlags::READ).map_err(|_| {
-        shell_println!("strate spawn: cannot open '{}'", module_path);
+        shell_println!("{} spawn: cannot open '{}'", cmd.name(), module_path);
         ShellError::ExecutionFailed
     })?;
     let data = match vfs::read_all(fd) {
         Ok(d) => d,
         Err(_) => {
             let _ = vfs::close(fd);
-            shell_println!("strate spawn: cannot read '{}'", module_path);
+            shell_println!("{} spawn: cannot read '{}'", cmd.name(), module_path);
             return Err(ShellError::ExecutionFailed);
         }
     };
@@ -1848,7 +1926,8 @@ fn cmd_strate_spawn(args: &[String]) -> Result<(), ShellError> {
     match silo::kernel_spawn_strate(&data, label, dev) {
         Ok(sid) => {
             shell_println!(
-                "strate spawn: started (sid={}, path={}, label={})",
+                "{} spawn: started (sid={}, path={}, label={})",
+                cmd.name(),
                 sid,
                 module_path,
                 label.unwrap_or("-")
@@ -1856,71 +1935,122 @@ fn cmd_strate_spawn(args: &[String]) -> Result<(), ShellError> {
             Ok(())
         }
         Err(e) => {
-            shell_println!("strate spawn failed: {:?}", e);
+            shell_println!("{} spawn failed: {:?}", cmd.name(), e);
             Err(ShellError::ExecutionFailed)
         }
     }
 }
 
-/// Performs the cmd strate config show operation.
-fn cmd_strate_config_show(args: &[String]) -> Result<(), ShellError> {
-    let existing = read_silo_toml_from_initfs()?;
-    let silos = parse_silo_toml(&existing);
-    if silos.is_empty() {
-        shell_println!("strate config show: /initfs/silo.toml empty or missing");
-        return Ok(());
-    }
-
-    if args.len() == 3 {
-        let name = args[2].as_str();
-        let Some(s) = silos.iter().find(|s| s.name == name) else {
-            shell_println!("strate config show: silo '{}' not found", name);
-            return Err(ShellError::ExecutionFailed);
-        };
-        shell_println!(
-            "silo '{}' sid={} family={} mode={} strates={}",
-            s.name,
-            s.sid,
-            s.family,
-            s.mode,
-            s.strates.len()
-        );
-        for st in &s.strates {
-            shell_println!(
-                "  - {}: binary={} type={} target={}",
-                st.name,
-                st.binary,
-                st.stype,
-                st.target
-            );
+/// Prints the config fields the shell models for one silo.
+fn print_config_silo(s: &ManagedSiloDef, runtime_sid: Option<u32>) {
+    // `sid` in the config is a placeholder (42) for the silos that let userspace
+    // allocate the runtime id, so show the mapped value and flag the raw one.
+    match runtime_sid {
+        Some(sid) if s.sid == CONFIG_SID_PLACEHOLDER => {
+            shell_println!("silo '{}' sid={} (auto)", s.name, sid)
         }
+        _ => shell_println!("silo '{}' sid={}", s.name, s.sid),
+    }
+    shell_println!(
+        "  family={} mode={} cpu_features={}",
+        s.family,
+        s.mode,
+        if s.cpu_features.is_empty() {
+            "-"
+        } else {
+            s.cpu_features.as_str()
+        }
+    );
+    if s.graphics_enabled {
+        shell_println!(
+            "  graphics: mode={} ro={} max_sessions={} ttl={}s turn={}",
+            if s.graphics_mode.is_empty() {
+                "webrtc-native"
+            } else {
+                s.graphics_mode.as_str()
+            },
+            s.graphics_read_only,
+            s.graphics_max_sessions,
+            s.graphics_session_ttl_sec,
+            s.graphics_turn_policy
+        );
+    }
+    shell_println!("  strates={}", s.strates.len());
+    for st in &s.strates {
+        shell_println!(
+            "  - {}: binary={} type={} target={}",
+            st.name,
+            st.binary,
+            st.stype,
+            st.target
+        );
+        // Read by strate-bus at boot: worth showing so a config rewrite that
+        // would drop it is visible.
+        if !st.probe_mode.is_empty() {
+            shell_println!("      probe_mode={}", st.probe_mode);
+        }
+    }
+}
+
+/// Performs the cmd strate config show operation.
+///
+/// `strate config show [silo]`. Uses the effective config, the same source
+/// `strate list` and `silo list` report, so the two views cannot disagree.
+fn cmd_strate_config_show(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
+    let (silos, source) = load_managed_silos_with_source();
+    if silos.is_empty() {
+        shell_println!("{} config show: no managed silo config", cmd.name());
         return Ok(());
     }
+    let managed_runtime_sids = compute_managed_runtime_sids(&silos);
 
-    for s in &silos {
-        shell_println!(
-            "silo '{}' sid={} family={} mode={} strates={}",
-            s.name,
-            s.sid,
-            s.family,
-            s.mode,
-            s.strates.len()
-        );
+    // args is [cmd, "config", "show", (silo)]. The old `args.len() == 3` test
+    // read args[2] -- the literal "show" -- so the single-silo form never ran
+    // and a bare `config show` always failed with "silo 'show' not found".
+    match args.get(3) {
+        Some(name) => {
+            let Some(s) = silos.iter().find(|s| s.name == name.as_str()) else {
+                shell_println!("{} config show: silo '{}' not found", cmd.name(), name);
+                return Err(ShellError::ExecutionFailed);
+            };
+            print_config_silo(s, managed_sid_for(&managed_runtime_sids, &s.name));
+        }
+        None => {
+            shell_println!("Config ({}):", source);
+            for s in &silos {
+                let runtime_sid = managed_sid_for(&managed_runtime_sids, &s.name);
+                match runtime_sid {
+                    Some(sid) if s.sid == CONFIG_SID_PLACEHOLDER => {
+                        shell_println!("  '{}' sid={} (auto)", s.name, sid)
+                    }
+                    _ => shell_println!("  '{}' sid={}", s.name, s.sid),
+                }
+                shell_println!(
+                    "      family={} mode={} strates={}",
+                    s.family,
+                    s.mode,
+                    s.strates.len()
+                );
+            }
+        }
     }
     Ok(())
 }
 
 /// Performs the cmd strate config add operation.
-fn cmd_strate_config_add(args: &[String]) -> Result<(), ShellError> {
+fn cmd_strate_config_add(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
     if args.len() < 5 {
-        shell_println!("Usage: strate config add <silo> <name> <binary> [--type <t>] [--target <x>] [--family <F>] [--mode <ooo>] [--sid <n>]");
+        shell_println!(
+            "Usage: {} config add <silo> <name> <binary> [--type <t>] [--target <x>] [--family <F>] [--mode <ooo>] [--sid <n>]",
+            cmd.name()
+        );
         return Err(ShellError::InvalidArguments);
     }
     let silo_name = args[2].as_str();
     let strate_name = args[3].as_str();
     let binary = args[4].as_str();
     if silo_name.is_empty() || strate_name.is_empty() || binary.is_empty() {
-        shell_println!("strate config add: invalid empty argument");
+        shell_println!("{} config add: invalid empty argument", cmd.name());
         return Err(ShellError::InvalidArguments);
     }
 
@@ -1934,15 +2064,25 @@ fn cmd_strate_config_add(args: &[String]) -> Result<(), ShellError> {
         match args[i].as_str() {
             "--type" => {
                 if i + 1 >= args.len() {
-                    shell_println!("strate config add: missing value for --type");
+                    shell_println!("{} config add: missing value for --type", cmd.name());
                     return Err(ShellError::InvalidArguments);
                 }
-                stype = args[i + 1].clone();
+                let value = args[i + 1].as_str();
+                if !CONFIG_STRATE_TYPES.contains(&value) {
+                    shell_println!(
+                        "{} config add: unknown type '{}' (expected one of {})",
+                        cmd.name(),
+                        value,
+                        CONFIG_STRATE_TYPES.join("|")
+                    );
+                    return Err(ShellError::InvalidArguments);
+                }
+                stype = String::from(value);
                 i += 2;
             }
             "--target" => {
                 if i + 1 >= args.len() {
-                    shell_println!("strate config add: missing value for --target");
+                    shell_println!("{} config add: missing value for --target", cmd.name());
                     return Err(ShellError::InvalidArguments);
                 }
                 target = args[i + 1].clone();
@@ -1950,15 +2090,25 @@ fn cmd_strate_config_add(args: &[String]) -> Result<(), ShellError> {
             }
             "--family" => {
                 if i + 1 >= args.len() {
-                    shell_println!("strate config add: missing value for --family");
+                    shell_println!("{} config add: missing value for --family", cmd.name());
                     return Err(ShellError::InvalidArguments);
                 }
-                family = Some(args[i + 1].clone());
+                let value = args[i + 1].as_str();
+                if !CONFIG_FAMILIES.contains(&value) {
+                    shell_println!(
+                        "{} config add: unknown family '{}' (expected one of {})",
+                        cmd.name(),
+                        value,
+                        CONFIG_FAMILIES.join("|")
+                    );
+                    return Err(ShellError::InvalidArguments);
+                }
+                family = Some(String::from(value));
                 i += 2;
             }
             "--mode" => {
                 if i + 1 >= args.len() {
-                    shell_println!("strate config add: missing value for --mode");
+                    shell_println!("{} config add: missing value for --mode", cmd.name());
                     return Err(ShellError::InvalidArguments);
                 }
                 mode = Some(args[i + 1].clone());
@@ -1966,31 +2116,34 @@ fn cmd_strate_config_add(args: &[String]) -> Result<(), ShellError> {
             }
             "--sid" => {
                 if i + 1 >= args.len() {
-                    shell_println!("strate config add: missing value for --sid");
+                    shell_println!("{} config add: missing value for --sid", cmd.name());
                     return Err(ShellError::InvalidArguments);
                 }
                 sid = args[i + 1].parse::<u32>().ok();
                 if sid.is_none() {
-                    shell_println!("strate config add: invalid --sid");
+                    shell_println!("{} config add: invalid --sid", cmd.name());
                     return Err(ShellError::InvalidArguments);
                 }
                 i += 2;
             }
             other => {
-                shell_println!("strate config add: unknown option '{}'", other);
+                shell_println!("{} config add: unknown option '{}'", cmd.name(), other);
                 return Err(ShellError::InvalidArguments);
             }
         }
     }
 
-    let existing = read_silo_toml_from_initfs()?;
-    let mut silos = parse_silo_toml(&existing);
+    // Read the *effective* config, not just the raw file: with no
+    // /initfs/silo.toml the shell falls back to the embedded defaults, and
+    // writing back only the added silo would silently drop those defaults from
+    // the next boot.
+    let (mut silos, source) = load_managed_silos_with_source();
     let idx = match silos.iter().position(|s| s.name == silo_name) {
         Some(p) => p,
         None => {
             silos.push(ManagedSiloDef {
                 name: String::from(silo_name),
-                sid: sid.unwrap_or(42),
+                sid: sid.unwrap_or(CONFIG_SID_PLACEHOLDER),
                 family: family.clone().unwrap_or_else(|| String::from("USR")),
                 mode: mode.clone().unwrap_or_else(|| String::from("000")),
                 cpu_features: String::new(),
@@ -2037,7 +2190,10 @@ fn cmd_strate_config_add(args: &[String]) -> Result<(), ShellError> {
     let rendered = render_silo_toml(&silos);
     write_silo_toml_to_initfs(&rendered)?;
     shell_println!(
-        "strate config add: wrote /initfs/silo.toml (silo='{}', strate='{}')",
+        "{} config add: wrote {} from {} (silo='{}', strate='{}')",
+        cmd.name(),
+        CONFIG_PATH,
+        source,
         silo_name,
         strate_name
     );
@@ -2045,18 +2201,33 @@ fn cmd_strate_config_add(args: &[String]) -> Result<(), ShellError> {
 }
 
 /// Performs the cmd strate config remove operation.
-fn cmd_strate_config_remove(args: &[String]) -> Result<(), ShellError> {
+fn cmd_strate_config_remove(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
     if args.len() != 4 {
-        shell_println!("Usage: strate config remove <silo> <name>");
+        shell_println!("Usage: {} config remove <silo> <name>", cmd.name());
         return Err(ShellError::InvalidArguments);
     }
     let silo_name = args[2].as_str();
     let strate_name = args[3].as_str();
-    let existing = read_silo_toml_from_initfs()?;
-    let mut silos = parse_silo_toml(&existing);
+
+    // Removing from the embedded fallback would mean materializing it as a boot
+    // config just to delete one entry from it, changing what boots next time.
+    let (mut silos, source) = load_managed_silos_with_source();
+    if source == CONFIG_SOURCE_EMBEDDED {
+        shell_println!(
+            "{} config remove: no {} on this device (effective config is {}), nothing to update",
+            cmd.name(),
+            CONFIG_PATH,
+            source
+        );
+        return Err(ShellError::ExecutionFailed);
+    }
 
     let Some(silo_idx) = silos.iter().position(|s| s.name == silo_name) else {
-        shell_println!("strate config remove: silo '{}' not found", silo_name);
+        shell_println!(
+            "{} config remove: silo '{}' not found",
+            cmd.name(),
+            silo_name
+        );
         return Err(ShellError::ExecutionFailed);
     };
     let Some(strate_idx) = silos[silo_idx]
@@ -2065,7 +2236,8 @@ fn cmd_strate_config_remove(args: &[String]) -> Result<(), ShellError> {
         .position(|st| st.name == strate_name)
     else {
         shell_println!(
-            "strate config remove: strate '{}' not found in silo '{}'",
+            "{} config remove: strate '{}' not found in silo '{}'",
+            cmd.name(),
             strate_name,
             silo_name
         );
@@ -2080,7 +2252,9 @@ fn cmd_strate_config_remove(args: &[String]) -> Result<(), ShellError> {
     let rendered = render_silo_toml(&silos);
     write_silo_toml_to_initfs(&rendered)?;
     shell_println!(
-        "strate config remove: updated /initfs/silo.toml (silo='{}', strate='{}')",
+        "{} config remove: updated {} (silo='{}', strate='{}')",
+        cmd.name(),
+        CONFIG_PATH,
         silo_name,
         strate_name
     );
@@ -2088,46 +2262,49 @@ fn cmd_strate_config_remove(args: &[String]) -> Result<(), ShellError> {
 }
 
 /// Performs the cmd strate config operation.
-fn cmd_strate_config(args: &[String]) -> Result<(), ShellError> {
+fn cmd_strate_config(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: strate config <show|add|remove> ...");
+        shell_println!("Usage: {} config <show|add|remove> ...", cmd.name());
         return Err(ShellError::InvalidArguments);
     }
     match args[1].as_str() {
-        "show" => cmd_strate_config_show(args),
-        "add" => cmd_strate_config_add(args),
-        "remove" => cmd_strate_config_remove(args),
+        "show" => cmd_strate_config_show(args, cmd),
+        "add" => cmd_strate_config_add(args, cmd),
+        "remove" => cmd_strate_config_remove(args, cmd),
         _ => {
-            shell_println!("Usage: strate config <show|add|remove> ...");
+            shell_println!("Usage: {} config <show|add|remove> ...", cmd.name());
             Err(ShellError::InvalidArguments)
         }
     }
 }
 
 /// Performs the cmd strate start operation.
-fn cmd_strate_start(args: &[String]) -> Result<(), ShellError> {
+fn cmd_strate_start(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
     if args.len() != 2 {
-        shell_println!("Usage: strate start <id|label|name>");
+        shell_println!("Usage: {} start <id|label|name>", cmd.name());
         return Err(ShellError::InvalidArguments);
     }
     let selector = normalize_current_silo_selector(args[1].as_str());
     match silo::kernel_start_silo(selector.as_str()) {
         Ok(sid) => {
-            shell_println!("strate start: ok (sid={})", sid);
+            shell_println!("{} start: ok (sid={})", cmd.name(), sid);
             print_strate_state_for_sid(sid);
             Ok(())
         }
         Err(e) => {
-            shell_println!("strate start failed: {:?}", e);
+            shell_println!("{} start failed: {:?}", cmd.name(), e);
             Err(ShellError::ExecutionFailed)
         }
     }
 }
 
 /// Performs the cmd strate lifecycle operation.
-fn cmd_strate_lifecycle(args: &[String]) -> Result<(), ShellError> {
+fn cmd_strate_lifecycle(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
     if args.len() != 2 {
-        shell_println!("Usage: strate start|stop|kill|destroy <id|label|name>");
+        shell_println!(
+            "Usage: {} start|stop|kill|destroy <id|label|name>",
+            cmd.name()
+        );
         return Err(ShellError::InvalidArguments);
     }
     let selector = normalize_current_silo_selector(args[1].as_str());
@@ -2138,77 +2315,83 @@ fn cmd_strate_lifecycle(args: &[String]) -> Result<(), ShellError> {
         "destroy" => silo::kernel_destroy_silo(selector.as_str()),
         // A shell must never panic: report instead.
         _ => {
-            shell_println!("Usage: strate stop|kill|destroy <id|label|name>");
+            shell_println!("Usage: {} stop|kill|destroy <id|label|name>", cmd.name());
             return Err(ShellError::InvalidArguments);
         }
     };
     match result {
         Ok(sid) => {
-            shell_println!("strate {}: ok (sid={})", action, sid);
+            shell_println!("{} {}: ok (sid={})", cmd.name(), action, sid);
             if action == "stop" {
                 print_strate_state_for_sid(sid);
             }
             Ok(())
         }
         Err(e) => {
-            shell_println!("strate {} failed: {:?}", action, e);
+            shell_println!("{} {} failed: {:?}", cmd.name(), action, e);
             Err(ShellError::ExecutionFailed)
         }
     }
 }
 
 /// Performs the cmd strate rename operation.
-fn cmd_strate_rename(args: &[String]) -> Result<(), ShellError> {
+fn cmd_strate_rename(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
     if args.len() != 3 {
-        shell_println!("Usage: strate rename <id|label|name> <new_label>");
+        shell_println!("Usage: {} rename <id|label|name> <new_label>", cmd.name());
         return Err(ShellError::InvalidArguments);
     }
     let selector = normalize_current_silo_selector(args[1].as_str());
     let new_label = args[2].as_str();
     match silo::kernel_rename_silo_label(selector.as_str(), new_label) {
         Ok(sid) => {
-            shell_println!("strate rename: ok (sid={}, new_label={})", sid, new_label);
+            shell_println!(
+                "{} rename: ok (sid={}, new_label={})",
+                cmd.name(),
+                sid,
+                new_label
+            );
             Ok(())
         }
         Err(e) => {
             if matches!(e, crate::syscall::error::SyscallError::InvalidArgument) {
                 shell_println!(
-                    "strate rename failed: strate is running or not in a renamable state (stop it first)"
+                    "{} rename failed: strate is running or not in a renamable state (stop it first)",
+                    cmd.name()
                 );
             } else {
-                shell_println!("strate rename failed: {:?}", e);
+                shell_println!("{} rename failed: {:?}", cmd.name(), e);
             }
             Err(ShellError::ExecutionFailed)
         }
     }
 }
 
-pub(super) fn cmd_strate_impl(args: &[String]) -> Result<(), ShellError> {
+pub(super) fn cmd_strate_impl(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
     if args.is_empty() {
-        print_strate_usage();
+        print_cmd_usage(cmd);
         return Err(ShellError::InvalidArguments);
     }
 
     match args[0].as_str() {
-        "list" => cmd_strate_list(args),
-        "spawn" => cmd_strate_spawn(args),
-        "config" => cmd_strate_config(args),
-        "start" => cmd_strate_start(args),
-        "stop" | "kill" | "destroy" => cmd_strate_lifecycle(args),
-        "rename" => cmd_strate_rename(args),
-        "info" => cmd_silo_info(args),
-        "suspend" => cmd_silo_suspend(args),
-        "resume" => cmd_silo_resume(args),
-        "events" => cmd_silo_events(args),
-        "pledge" => cmd_silo_pledge(args),
-        "unveil" => cmd_silo_unveil(args),
-        "sandbox" => cmd_silo_sandbox(args),
-        "limit" => cmd_silo_limit(args),
-        "attach" => cmd_silo_attach(args),
-        "top" => cmd_silo_top(args),
-        "logs" => cmd_silo_logs(args),
+        "list" => cmd_strate_list(args, cmd),
+        "spawn" => cmd_strate_spawn(args, cmd),
+        "config" => cmd_strate_config(args, cmd),
+        "start" => cmd_strate_start(args, cmd),
+        "stop" | "kill" | "destroy" => cmd_strate_lifecycle(args, cmd),
+        "rename" => cmd_strate_rename(args, cmd),
+        "info" => cmd_silo_info(args, cmd),
+        "suspend" => cmd_silo_suspend(args, cmd),
+        "resume" => cmd_silo_resume(args, cmd),
+        "events" => cmd_silo_events(args, cmd),
+        "pledge" => cmd_silo_pledge(args, cmd),
+        "unveil" => cmd_silo_unveil(args, cmd),
+        "sandbox" => cmd_silo_sandbox(args, cmd),
+        "limit" => cmd_silo_limit(args, cmd),
+        "attach" => cmd_silo_attach(args, cmd),
+        "top" => cmd_silo_top(args, cmd),
+        "logs" => cmd_silo_logs(args, cmd),
         _ => {
-            print_strate_usage();
+            print_cmd_usage(cmd);
             Err(ShellError::InvalidArguments)
         }
     }
@@ -2217,14 +2400,14 @@ pub(super) fn cmd_strate_impl(args: &[String]) -> Result<(), ShellError> {
 // ============================================================================
 // silo info / suspend / resume / events / pledge / unveil / sandbox / top / logs
 // ============================================================================
-fn cmd_silo_info(args: &[String]) -> Result<(), ShellError> {
+fn cmd_silo_info(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: silo info <id|label|name>");
+        shell_println!("Usage: {} info <id|label|name>", cmd.name());
         return Err(ShellError::InvalidArguments);
     }
     let selector = normalize_current_silo_selector(args[1].as_str());
     let detail = silo::silo_detail_snapshot(selector.as_str()).map_err(|e| {
-        shell_println!("silo info: {:?}", e);
+        shell_println!("{} info: {:?}", cmd.name(), e);
         ShellError::ExecutionFailed
     })?;
     let b = &detail.base;
@@ -2284,37 +2467,37 @@ fn cmd_silo_info(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-fn cmd_silo_suspend(args: &[String]) -> Result<(), ShellError> {
+fn cmd_silo_suspend(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: silo suspend <id|label|name>");
+        shell_println!("Usage: {} suspend <id|label|name>", cmd.name());
         return Err(ShellError::InvalidArguments);
     }
     let selector = normalize_current_silo_selector(args[1].as_str());
     match silo::kernel_suspend_silo(selector.as_str()) {
         Ok(sid) => {
-            shell_println!("silo suspend: ok (sid={})", sid);
+            shell_println!("{} suspend: ok (sid={})", cmd.name(), sid);
             Ok(())
         }
         Err(e) => {
-            shell_println!("silo suspend failed: {:?}", e);
+            shell_println!("{} suspend failed: {:?}", cmd.name(), e);
             Err(ShellError::ExecutionFailed)
         }
     }
 }
 
-fn cmd_silo_resume(args: &[String]) -> Result<(), ShellError> {
+fn cmd_silo_resume(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: silo resume <id|label|name>");
+        shell_println!("Usage: {} resume <id|label|name>", cmd.name());
         return Err(ShellError::InvalidArguments);
     }
     let selector = normalize_current_silo_selector(args[1].as_str());
     match silo::kernel_resume_silo(selector.as_str()) {
         Ok(sid) => {
-            shell_println!("silo resume: ok (sid={})", sid);
+            shell_println!("{} resume: ok (sid={})", cmd.name(), sid);
             Ok(())
         }
         Err(e) => {
-            shell_println!("silo resume failed: {:?}", e);
+            shell_println!("{} resume failed: {:?}", cmd.name(), e);
             Err(ShellError::ExecutionFailed)
         }
     }
@@ -2331,11 +2514,11 @@ fn event_kind_str(kind: silo::SiloEventKind) -> &'static str {
     }
 }
 
-fn cmd_silo_events(args: &[String]) -> Result<(), ShellError> {
+fn cmd_silo_events(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
     let events = if args.len() >= 2 {
         let selector = normalize_current_silo_selector(args[1].as_str());
         silo::list_events_for_silo(selector.as_str()).map_err(|e| {
-            shell_println!("silo events: {:?}", e);
+            shell_println!("{} events: {:?}", cmd.name(), e);
             ShellError::ExecutionFailed
         })?
     } else {
@@ -2369,9 +2552,9 @@ fn cmd_silo_events(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-fn cmd_silo_pledge(args: &[String]) -> Result<(), ShellError> {
+fn cmd_silo_pledge(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
     if args.len() < 3 {
-        shell_println!("Usage: silo pledge <id|label|name> <octal_mode>");
+        shell_println!("Usage: {} pledge <id|label|name> <octal_mode>", cmd.name());
         return Err(ShellError::InvalidArguments);
     }
     // `strate-init` accepts both `700` and `0o700`; accept both here too.
@@ -2383,26 +2566,26 @@ fn cmd_silo_pledge(args: &[String]) -> Result<(), ShellError> {
     let mode_val = match u16::from_str_radix(mode_digits, 8) {
         Ok(m) if m <= 0o777 => m,
         _ => {
-            shell_println!("silo pledge: invalid octal mode '{}'", mode_text);
+            shell_println!("{} pledge: invalid octal mode '{}'", cmd.name(), mode_text);
             return Err(ShellError::InvalidArguments);
         }
     };
     let selector = normalize_current_silo_selector(args[1].as_str());
     match silo::kernel_pledge_silo(selector.as_str(), mode_val) {
         Ok((old, new)) => {
-            shell_println!("silo pledge: {:03o} -> {:03o}", old, new);
+            shell_println!("{} pledge: {:03o} -> {:03o}", cmd.name(), old, new);
             Ok(())
         }
         Err(e) => {
-            shell_println!("silo pledge failed: {:?}", e);
+            shell_println!("{} pledge failed: {:?}", cmd.name(), e);
             Err(ShellError::ExecutionFailed)
         }
     }
 }
 
-fn cmd_silo_unveil(args: &[String]) -> Result<(), ShellError> {
+fn cmd_silo_unveil(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
     if args.len() < 4 {
-        shell_println!("Usage: silo unveil <id|label|name> <path> <rwx>");
+        shell_println!("Usage: {} unveil <id|label|name> <path> <rwx>", cmd.name());
         return Err(ShellError::InvalidArguments);
     }
     let selector = normalize_current_silo_selector(args[1].as_str());
@@ -2411,7 +2594,8 @@ fn cmd_silo_unveil(args: &[String]) -> Result<(), ShellError> {
     match silo::kernel_unveil_silo(selector.as_str(), path, rights) {
         Ok(sid) => {
             shell_println!(
-                "silo unveil: ok (sid={}, path={}, rights={})",
+                "{} unveil: ok (sid={}, path={}, rights={})",
+                cmd.name(),
                 sid,
                 path,
                 rights
@@ -2419,31 +2603,31 @@ fn cmd_silo_unveil(args: &[String]) -> Result<(), ShellError> {
             Ok(())
         }
         Err(e) => {
-            shell_println!("silo unveil failed: {:?}", e);
+            shell_println!("{} unveil failed: {:?}", cmd.name(), e);
             Err(ShellError::ExecutionFailed)
         }
     }
 }
 
-fn cmd_silo_sandbox(args: &[String]) -> Result<(), ShellError> {
+fn cmd_silo_sandbox(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: silo sandbox <id|label|name>");
+        shell_println!("Usage: {} sandbox <id|label|name>", cmd.name());
         return Err(ShellError::InvalidArguments);
     }
     let selector = normalize_current_silo_selector(args[1].as_str());
     match silo::kernel_sandbox_silo(selector.as_str()) {
         Ok(sid) => {
-            shell_println!("silo sandbox: ok (sid={})", sid);
+            shell_println!("{} sandbox: ok (sid={})", cmd.name(), sid);
             Ok(())
         }
         Err(e) => {
-            shell_println!("silo sandbox failed: {:?}", e);
+            shell_println!("{} sandbox failed: {:?}", cmd.name(), e);
             Err(ShellError::ExecutionFailed)
         }
     }
 }
 
-fn cmd_silo_top(args: &[String]) -> Result<(), ShellError> {
+fn cmd_silo_top(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
     // `--sort` is optional but its value is validated: a typo used to fall back
     // to the default order with no diagnostic at all.
     let sort_by_mem = match args.get(1) {
@@ -2452,7 +2636,7 @@ fn cmd_silo_top(args: &[String]) -> Result<(), ShellError> {
             Some(value) if value == "mem" => true,
             Some(value) if value == "tasks" => false,
             Some(value) => {
-                shell_println!("silo top: unknown sort key '{}'", value);
+                shell_println!("{} top: unknown sort key '{}'", cmd.name(), value);
                 shell_println!("Usage: silo top [--sort mem|tasks]");
                 return Err(ShellError::InvalidArguments);
             }
@@ -2462,13 +2646,13 @@ fn cmd_silo_top(args: &[String]) -> Result<(), ShellError> {
             }
         },
         Some(other) => {
-            shell_println!("silo top: unexpected argument '{}'", other);
+            shell_println!("{} top: unexpected argument '{}'", cmd.name(), other);
             shell_println!("Usage: silo top [--sort mem|tasks]");
             return Err(ShellError::InvalidArguments);
         }
     };
     if let Some(extra) = args.get(3) {
-        shell_println!("silo top: unexpected argument '{}'", extra);
+        shell_println!("{} top: unexpected argument '{}'", cmd.name(), extra);
         shell_println!("Usage: silo top [--sort mem|tasks]");
         return Err(ShellError::InvalidArguments);
     }
@@ -2519,14 +2703,14 @@ fn cmd_silo_top(args: &[String]) -> Result<(), ShellError> {
     Ok(())
 }
 
-fn cmd_silo_logs(args: &[String]) -> Result<(), ShellError> {
+fn cmd_silo_logs(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: silo logs <id|label|name>");
+        shell_println!("Usage: {} logs <id|label|name>", cmd.name());
         return Err(ShellError::InvalidArguments);
     }
     let selector = normalize_current_silo_selector(args[1].as_str());
     let events = silo::list_events_for_silo(selector.as_str()).map_err(|e| {
-        shell_println!("silo logs: {:?}", e);
+        shell_println!("{} logs: {:?}", cmd.name(), e);
         ShellError::ExecutionFailed
     })?;
     if events.is_empty() {
@@ -2549,7 +2733,7 @@ fn cmd_silo_logs(args: &[String]) -> Result<(), ShellError> {
 }
 
 pub(super) fn cmd_wasm_run_impl(args: &[String]) -> Result<(), ShellError> {
-    if args.len() < 1 {
+    if args.is_empty() {
         shell_println!("Usage: wasm-run <path>");
         return Err(ShellError::InvalidArguments);
     }

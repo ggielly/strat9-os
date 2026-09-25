@@ -6,7 +6,7 @@
 
 use super::{
     cpu_spread_line, format_uptime, memory_bytes, memory_label, memory_ratio, scheduler_lines,
-    silo_memory_label, silo_state_label, task_state_label, Strat9RatatuiBackend, TopView,
+    silo_memory_label, silo_state_label, Strat9RatatuiBackend, TopView,
 };
 use crate::{arch::vga, shell::ShellError, shell_println};
 use alloc::{format, string::String, vec, vec::Vec};
@@ -307,7 +307,7 @@ fn render_tables(
             Row::new(vec![
                 Cell::from(format!("{}", task.pid)),
                 Cell::from(task.name),
-                Cell::from(task_state_label(task.state)),
+                Cell::from(crate::shell::output::task_state_str(task.state)),
                 Cell::from(format!("{:?}", task.priority)),
                 Cell::from(format!("{}", task.ticks)),
             ])
