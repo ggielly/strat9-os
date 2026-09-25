@@ -5,6 +5,10 @@ use crate::{
     memory::boot_alloc::{MAX_BOOT_ALLOC_REGIONS, MAX_PROTECTED_RANGES},
 };
 
+extern "C" {
+    fn riscv_context_self_test();
+}
+
 pub const FDT_MAGIC: u32 = 0xd00d_feed;
 const FDT_HEADER_SIZE: usize = 40;
 const FDT_MIN_VERSION: u32 = 16;
@@ -1542,6 +1546,8 @@ pub unsafe extern "C" fn riscv_boot_entry(hart_id: usize, dtb: *const u8) -> ! {
         "[strat9] percpu ready: {}\r\n",
         super::percpu::current_cpu_index()
     ));
+    unsafe { riscv_context_self_test() };
+    super::serial::_print(format_args!("[strat9] context switch ok\r\n"));
     super::trap::init();
     super::serial::_print(format_args!("\r\n[strat9] RISC-V OpenSBI entry\r\n"));
     super::serial::_print(format_args!(
