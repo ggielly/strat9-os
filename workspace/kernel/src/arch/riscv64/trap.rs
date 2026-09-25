@@ -40,6 +40,8 @@ pub(crate) struct TrapFrame {
     padding: usize,
 }
 
+const _: () = assert!(core::mem::size_of::<TrapFrame>() == 288);
+
 extern "C" {
     fn riscv_trap_entry();
 }

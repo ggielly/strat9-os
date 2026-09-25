@@ -4,6 +4,7 @@ ENTRY(_start)
 SECTIONS
 {
     . = 0x80200000;
+    __kernel_start = .;
     . = ALIGN(0x800);
     __global_pointer$ = . + 0x800;
 

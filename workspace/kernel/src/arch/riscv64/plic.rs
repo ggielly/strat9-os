@@ -1,8 +1,8 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 const PLIC_PRIORITY_BASE: u64 = 0x0010_0000;
-const PLIC_ENABLE_BASE: u64 = 0x0c00_1000;
-const PLIC_CLAIM_BASE: u64 = 0x0c00_2000;
+const PLIC_ENABLE_BASE: u64 = 0x0c00_0000;
+const PLIC_CLAIM_BASE: u64 = 0x0c20_0000;
 const PLIC_CONTEXT_STRIDE: u64 = 0x1000;
 const SIE_SEIE: usize = 1 << 9;
 
@@ -31,17 +31,19 @@ pub fn enable_source(irq: u32, priority: u32) {
     }
     let enable_address =
         base + PLIC_ENABLE_BASE + CONTEXT.load(Ordering::Acquire) * PLIC_CONTEXT_STRIDE;
-    let value = 1u32 << (irq % 32);
+    let value = unsafe { core::ptr::read_volatile(enable_address as *const u32) };
     unsafe {
-        core::ptr::write_volatile(enable_address as *mut u32, value);
+        core::ptr::write_volatile(enable_address as *mut u32, value | (1u32 << (irq % 32)));
     }
 }
 
 pub fn handle_interrupt() {
-    let Some(irq) = claim() else {
-        return;
-    };
-    complete(irq);
+    for _ in 0..16 {
+        let Some(irq) = claim() else {
+            return;
+        };
+        complete(irq);
+    }
 }
 
 fn claim() -> Option<u32> {

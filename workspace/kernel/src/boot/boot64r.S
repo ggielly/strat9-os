@@ -34,4 +34,12 @@ _start:
 riscv_kernel_stack_top:
     .dword __kernel_stack_top
 
+.globl riscv_kernel_start
+riscv_kernel_start:
+    .dword __kernel_start
+
+.globl riscv_kernel_end
+riscv_kernel_end:
+    .dword __kernel_end
+
 .section .note.GNU-stack, "", @progbits

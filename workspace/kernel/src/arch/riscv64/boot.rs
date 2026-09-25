@@ -7,6 +7,8 @@ use crate::{
 
 extern "C" {
     fn riscv_context_self_test();
+    static riscv_kernel_start: u8;
+    static riscv_kernel_end: u8;
 }
 
 pub const FDT_MAGIC: u32 = 0xd00d_feed;
@@ -1365,9 +1367,22 @@ fn initialize_memory_allocator(
     for index in 0..count {
         boot_regions[index] = regions[index].as_boot_region();
     }
+    let mut ram_start = u64::MAX;
+    let mut ram_end = 0u64;
+    for region in &boot_regions[..count] {
+        if matches!(region.kind, MemoryKind::Free | MemoryKind::Reclaim) {
+            ram_start = ram_start.min(region.base);
+            ram_end = ram_end.max(region.base.saturating_add(region.size));
+        }
+    }
+    crate::memory::physical_access::set_riscv_ram_range(ram_start, ram_end);
 
     let mut protected = [None; MAX_PROTECTED_RANGES];
     protected[0] = Some((dtb as u64, info.dtb_len() as u64));
+    let kernel_start =
+        unsafe { ptr::read_volatile(ptr::addr_of!(riscv_kernel_start) as *const u64) };
+    let kernel_end = unsafe { ptr::read_volatile(ptr::addr_of!(riscv_kernel_end) as *const u64) };
+    protected[1] = Some((kernel_start, kernel_end.saturating_sub(kernel_start)));
     crate::memory::boot_alloc::set_protected_ranges(&protected);
     super::serial::_print(format_args!("[strat9] initializing boot allocator\r\n"));
     crate::memory::boot_alloc::init_boot_allocator(&boot_regions[..count]);
