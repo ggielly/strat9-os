@@ -15,6 +15,12 @@ pub use crate::arch::riscv64::vga_canvas::Canvas;
 
 /// Neutral MAX_CPUS constant for riscv64 (matches x86_64 value).
 pub const MAX_CPUS: usize = 32;
+
+/// Name of the architecture the kernel was built for.
+///
+/// Mirrors the x86_64 facade constant so neutral code can report the target
+/// without a `cfg`.
+pub const ARCH_NAME: &str = "riscv64";
 static PREEMPT_DEPTH: AtomicUsize = AtomicUsize::new(0);
 
 /// Merged VGA surface for riscv64: backend stubs + canvas.

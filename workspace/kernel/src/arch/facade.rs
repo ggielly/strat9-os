@@ -20,7 +20,6 @@ pub mod backend {
         cli, hlt, interrupts_enabled, restore_flags, save_flags_and_cli, sti,
     };
 }
-
 #[cfg(target_arch = "riscv64")]
 pub mod backend {
     pub use super::riscv64::{cpuid, rdtsc, serial, speaker};
@@ -44,6 +43,13 @@ pub use backend::{cli, hlt, interrupts_enabled, restore_flags, save_flags_and_cl
 
 /// Monotonic early-boot counter (TSC on x86_64, `rdtime` on riscv64).
 pub use backend::rdtsc;
+
+/// Name of the architecture the kernel was built for.
+///
+/// Single source of truth for the `ARCH` environment variable and for any other
+/// place that needs to name the target: the shell used to hardcode
+/// `x86_64`, which was simply wrong on the riscv64 build.
+pub const ARCH_NAME: &str = "x86_64";
 
 /// CPU feature discovery (CPUID vs device-tree ISA string).
 pub use backend::cpuid;

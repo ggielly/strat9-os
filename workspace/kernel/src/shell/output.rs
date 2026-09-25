@@ -175,3 +175,61 @@ pub fn task_state_str(state: crate::process::TaskState) -> &'static str {
         crate::process::TaskState::Dead => "Dead",
     }
 }
+
+/// Splits a tick count into whole seconds and hundredths, using the kernel
+/// timer frequency.
+///
+/// Single definition shared by every command that timestamps an event
+/// (`dmesg`, `audit`, `silo logs`, `silo events`): each used to hardcode its own
+/// divisor, and `silo logs` was stuck on 100 Hz while the kernel may run at
+/// another rate.
+pub fn format_ticks(ticks: u64) -> (u64, u32) {
+    let hz = crate::arch::timer::TIMER_HZ.max(1);
+    (ticks / hz, ((ticks % hz) * 100 / hz) as u32)
+}
+
+/// Formats a duration in seconds as `HH:MM:SS`.
+pub fn format_uptime(total_secs: u64) -> String {
+    alloc::format!(
+        "{:02}:{:02}:{:02}",
+        total_secs / 3600,
+        (total_secs % 3600) / 60,
+        total_secs % 60
+    )
+}
+
+/// Formats a Unix timestamp as `Mon DD HH:MM`.
+///
+/// The civil-date arithmetic lives in the kernel's RTC module, so leap years are
+/// handled once instead of by each caller.
+pub fn format_epoch_time(unix_secs: u64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let dt = crate::hardware::timer::rtc::RtcDateTime::from_timestamp(unix_secs);
+    let month = MONTHS
+        .get((dt.month as usize).saturating_sub(1))
+        .copied()
+        .unwrap_or("???");
+    alloc::format!(
+        "{} {:>2} {:02}:{:02}",
+        month,
+        dt.day,
+        dt.hour,
+        dt.minute
+    )
+}
+
+/// Formats a Unix timestamp as a full `YYYY-MM-DD HH:MM:SS UTC` stamp.
+pub fn format_epoch_stamp(unix_secs: u64) -> String {
+    let dt = crate::hardware::timer::rtc::RtcDateTime::from_timestamp(unix_secs);
+    alloc::format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+        dt.year,
+        dt.month,
+        dt.day,
+        dt.hour,
+        dt.minute,
+        dt.second
+    )
+}

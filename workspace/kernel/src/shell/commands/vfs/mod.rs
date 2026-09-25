@@ -142,23 +142,6 @@ fn format_mode(mode: u32) -> String {
     out
 }
 
-/// Format mtime (seconds since epoch) into `Mon DD HH:MM`.
-///
-/// The civil-date arithmetic lives in the kernel's RTC module; the shell used
-/// to redo it here with a 365-day year and a fixed 28-day February, which put
-/// every timestamp from March onwards one day off and drifted further each year.
-fn format_mtime(mtime: strat9_abi::data::TimeSpec) -> String {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let dt = crate::hardware::timer::rtc::RtcDateTime::from_timestamp(mtime.tv_sec as u64);
-    let month = MONTHS
-        .get((dt.month as usize).saturating_sub(1))
-        .copied()
-        .unwrap_or("???");
-    alloc::format!("{} {:>2} {:02}:{:02}", month, dt.day, dt.hour, dt.minute)
-}
-
 /// List directory contents or mount points.
 pub(super) fn cmd_ls_impl(args: &[String]) -> Result<(), ShellError> {
     let long = args.iter().any(|a| a == "-l");
@@ -204,7 +187,7 @@ pub(super) fn cmd_ls_impl(args: &[String]) -> Result<(), ShellError> {
                             st.st_uid,
                             st.st_gid,
                             st.st_size,
-                            format_mtime(st.st_mtime),
+                            crate::shell::output::format_epoch_time(st.st_mtime.tv_sec as u64),
                             e.name,
                             if e.file_type == DT_DIR { "/" } else { "" }
                         ),
@@ -622,7 +605,7 @@ pub(super) fn cmd_stat_impl(args: &[String]) -> Result<(), ShellError> {
             shell_println!("  Inode: {}", st.st_ino);
             shell_println!("  Uid:   {}", st.st_uid);
             shell_println!("  Gid:   {}", st.st_gid);
-            shell_println!("  Mtime: {}", format_mtime(st.st_mtime));
+            shell_println!("  Mtime: {}", crate::shell::output::format_epoch_time(st.st_mtime.tv_sec as u64));
             Ok(())
         }
         Err(e) => {
