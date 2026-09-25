@@ -44,7 +44,7 @@ L'entrée RISC-V est indépendante de `KernelArgs` version 1. Le noyau est lié 
 
 `boot/boot64r.S` installe la pile, désactive les interruptions superviseur, initialise `gp`, efface `.bss`, parke les harts non principaux et appelle `arch::riscv64::boot::riscv_boot_entry`. Le chemin Rust conserve le pointeur et la taille du DTB dans `RiscvBootInfo` après validation de sa signature, de sa taille, de sa version, des plages de sa structure et de sa table de réservations mémoire. Un DTB absent ou invalide est signalé sur la console puis le hart principal est arrêté proprement.
 
-Cette première étape ne construit pas encore la carte mémoire et ne doit pas être considérée comme un démarrage système complet. L'initialisation physique, le traps, le timer et l'espace utilisateur dépendent des phases P2 et suivantes. `KernelArgs` version 1 reste inchangé ; le DTB ne doit pas y être ajouté implicitement.
+Cette première étape valide le DTB, découvre les régions RAM et affiche le nombre de régions mémoire, mais ne doit pas être considérée comme un démarrage système complet. L'initialisation physique, les traps, le timer et l'espace utilisateur dépendent des phases P2 et suivantes. `KernelArgs` version 1 reste inchangé ; le DTB ne doit pas y être ajouté implicitement.
 
 `RiscvBootInfo::memory_regions` fournit maintenant un parseur FDT minimal, sans allocation : il parcourt les nœuds `memory@...` et `/reserved-memory`, hérite des `#address-cells`/`#size-cells`, extrait les propriétés `reg` et vérifie les débordements, les tailles nulles et les chevauchements par catégorie. La carte n'est pas encore remise à l'allocateur physique ; cette étape et le mapper natif restent les prochaines parties de P2.
 

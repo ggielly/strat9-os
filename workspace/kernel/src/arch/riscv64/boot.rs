@@ -207,21 +207,17 @@ impl RiscvBootInfo {
                         });
                     }
 
-                    let name_len = read_be_u32_slice(data, cursor, struct_end)? as usize;
-                    cursor += 4;
                     let name_start = cursor;
-                    let name_end =
-                        name_start
-                            .checked_add(name_len)
-                            .ok_or(DtbError::MalformedStructure {
-                                offset: name_start,
-                                token,
-                            })?;
-                    if name_len == 0 || name_end > struct_end || data[name_end - 1] != 0 {
+                    if name_start >= struct_end {
                         return Err(DtbError::MalformedProperty { offset: name_start });
                     }
+                    let name_end = data[name_start..struct_end]
+                        .iter()
+                        .position(|byte| *byte == 0)
+                        .map(|offset| name_start + offset)
+                        .ok_or(DtbError::MalformedProperty { offset: name_start })?;
 
-                    let name = core::str::from_utf8(&data[name_start..name_end - 1])
+                    let name = core::str::from_utf8(&data[name_start..name_end])
                         .map_err(|_| DtbError::MalformedProperty { offset: name_start })?;
                     memory_nodes[depth] = name == "memory" || name.starts_with("memory@");
                     reserved_nodes[depth] =
@@ -235,7 +231,7 @@ impl RiscvBootInfo {
                     reg_offsets[depth] = 0;
                     reg_lens[depth] = 0;
                     depth += 1;
-                    cursor = align4(name_end);
+                    cursor = align4(name_end + 1);
                 }
                 FDT_END_NODE => {
                     if depth == 0 {
