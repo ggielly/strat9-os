@@ -30,4 +30,8 @@ _start:
 
 .size _start, .-_start
 
+.globl riscv_kernel_stack_top
+riscv_kernel_stack_top:
+    .dword __kernel_stack_top
+
 .section .note.GNU-stack, "", @progbits

@@ -40,10 +40,10 @@ pub mod percpu {
     pub use super::MAX_CPUS;
 
     pub fn current_cpu_index() -> usize {
-        0
+        crate::arch::riscv64::percpu::current_cpu_index()
     }
     pub fn current_cpu_index_fast() -> usize {
-        0
+        crate::arch::riscv64::percpu::current_cpu_index_fast()
     }
     pub fn cpu_count() -> usize {
         1
@@ -52,26 +52,25 @@ pub mod percpu {
         1
     }
     pub fn init_boot_cpu(hartid: u32) -> usize {
-        assert_eq!(hartid, 0, "RISC-V facade currently supports only hart 0");
-        0
+        crate::arch::riscv64::percpu::init_boot_cpu(hartid)
     }
-    pub fn init_gs_base(_idx: usize) {
-        panic!("GS base is unavailable on RISC-V; initialize per-hart state via sscratch")
+    pub fn init_gs_base(idx: usize) {
+        crate::arch::riscv64::percpu::init_gs_base(idx);
     }
-    pub fn set_kernel_rsp_current(_rsp: u64) {
-        panic!("RISC-V kernel stack setup is not implemented (R2.5)")
+    pub fn set_kernel_rsp_current(rsp: u64) {
+        crate::arch::riscv64::percpu::set_kernel_rsp_current(rsp);
     }
     pub fn mark_tlb_ready_current() {
-        panic!("RISC-V TLB readiness tracking is not implemented (R2.5)")
+        crate::arch::riscv64::percpu::mark_tlb_ready_current();
     }
-    pub fn tlb_ready(_index: usize) -> bool {
-        panic!("RISC-V TLB readiness tracking is not implemented (R2.5)")
+    pub fn tlb_ready(index: usize) -> bool {
+        crate::arch::riscv64::percpu::tlb_ready(index)
     }
     pub fn set_signal_pending_current() {
-        panic!("RISC-V per-CPU signal state is not implemented")
+        crate::arch::riscv64::percpu::set_signal_pending_current();
     }
     pub fn test_and_clear_signal_pending_current() -> bool {
-        panic!("RISC-V per-CPU signal state is not implemented")
+        crate::arch::riscv64::percpu::test_and_clear_signal_pending_current()
     }
     pub fn apic_id_by_cpu_index(index: usize) -> Option<u32> {
         let _ = index;
@@ -91,7 +90,7 @@ pub mod percpu {
         super::PREEMPT_DEPTH.load(super::Ordering::Acquire) == 0
     }
     pub fn cpu_index_from_gs() -> Option<usize> {
-        Some(current_cpu_index())
+        Some(crate::arch::riscv64::percpu::current_cpu_index())
     }
 }
 

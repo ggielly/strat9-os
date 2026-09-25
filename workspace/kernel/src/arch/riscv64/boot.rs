@@ -1536,6 +1536,7 @@ pub unsafe extern "C" fn riscv_boot_entry(hart_id: usize, dtb: *const u8) -> ! {
         park();
     }
 
+    super::percpu::init_boot_cpu(hart_id as u32);
     super::serial::init();
     super::trap::init();
     super::serial::_print(format_args!("\r\n[strat9] RISC-V OpenSBI entry\r\n"));
