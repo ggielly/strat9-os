@@ -63,6 +63,10 @@ pub(crate) extern "C" fn riscv_trap_handler(frame: *mut TrapFrame) {
         super::timer::handle_interrupt();
         return;
     }
+    if is_interrupt && code == 9 {
+        super::plic::handle_interrupt();
+        return;
+    }
 
     super::serial::_print(format_args!(
         "[strat9] trap scause={:#x} sepc={:#x} stval={:#x} sstatus={:#x}\r\n",
