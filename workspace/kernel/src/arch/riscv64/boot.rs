@@ -1545,11 +1545,25 @@ fn initialize_memory_allocator(
     }
 }
 
-fn scheduler_smoke_init() {
+extern "C" fn riscv_task_probe() -> ! {
+    super::serial::_print(format_args!("[strat9] task start\r\n"));
+    crate::process::yield_task();
+    super::serial::_print(format_args!("[strat9] task resumed\r\n"));
+    park();
+}
+
+fn scheduler_smoke_init() -> ! {
     unsafe { crate::memory::address_space::init_kernel_address_space() };
     let _ = crate::memory::kernel_address_space();
     crate::process::init_scheduler();
-    super::serial::_print(format_args!("[strat9] scheduler init ok\r\n"));
+    let task = crate::process::Task::new_kernel_task(
+        riscv_task_probe,
+        "riscv-probe",
+        crate::process::task::TaskPriority::Normal,
+    )
+    .expect("failed to create RISC-V probe task");
+    crate::process::add_task(task);
+    crate::process::schedule();
 }
 
 fn park() -> ! {

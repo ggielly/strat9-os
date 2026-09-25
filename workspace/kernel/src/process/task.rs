@@ -1325,7 +1325,8 @@ unsafe fn switch_context_fxsave(
     _old_fpu_ptr: *mut u8,
     _new_fpu_ptr: *const u8,
 ) {
-    riscv_switch_context(old_rsp_ptr, new_rsp_ptr);
+    let new_frame = *new_rsp_ptr;
+    riscv_switch_context(old_rsp_ptr, new_frame as *const u64);
 }
 
 #[cfg(target_arch = "riscv64")]
@@ -1342,7 +1343,8 @@ unsafe fn switch_context_xsave(
     _new_xcr0: u64,
     _old_xcr0: u64,
 ) {
-    riscv_switch_context(old_rsp_ptr, new_rsp_ptr);
+    let new_frame = *new_rsp_ptr;
+    riscv_switch_context(old_rsp_ptr, new_frame as *const u64);
 }
 
 #[cfg(target_arch = "riscv64")]

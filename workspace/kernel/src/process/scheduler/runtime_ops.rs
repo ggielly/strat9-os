@@ -864,6 +864,8 @@ pub(super) extern "C" fn idle_task_main() -> ! {
 
         // Halt until next interrupt (saves power, timer will wake us)
         crate::arch::hlt();
+        #[cfg(target_arch = "riscv64")]
+        crate::process::yield_task();
     }
 }
 
