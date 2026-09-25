@@ -514,6 +514,128 @@ impl RiscvBootInfo {
         Ok(count)
     }
 
+    pub fn timebase_frequency(&self) -> Option<u64> {
+        let data = self.bytes();
+        let struct_end = self.struct_offset.checked_add(self.struct_len)?;
+        let mut cursor = self.struct_offset;
+        while cursor < struct_end {
+            let token = read_be_u32_slice(data, cursor, struct_end).ok()?;
+            cursor += 4;
+            match token {
+                FDT_BEGIN_NODE => {
+                    let name_start = cursor;
+                    if name_start >= struct_end {
+                        return None;
+                    }
+                    let name_end = data[name_start..struct_end]
+                        .iter()
+                        .position(|byte| *byte == 0)?
+                        + name_start;
+                    cursor = align4(name_end + 1);
+                }
+                FDT_END_NODE | FDT_NOP => {}
+                FDT_PROP => {
+                    let value_len = read_be_u32_slice(data, cursor, struct_end).ok()? as usize;
+                    let name_offset =
+                        read_be_u32_slice(data, cursor + 4, struct_end).ok()? as usize;
+                    cursor += 8;
+                    let value_start = cursor;
+                    let value_end = value_start.checked_add(value_len)?;
+                    if value_end > struct_end {
+                        return None;
+                    }
+                    if string_at(data, self.strings_offset, self.strings_len, name_offset).ok()?
+                        == "timebase-frequency"
+                    {
+                        return match value_len {
+                            4 => Some(read_be_u32_slice(data, value_start, value_end).ok()? as u64),
+                            8 => {
+                                let high =
+                                    read_be_u32_slice(data, value_start, value_end).ok()? as u64;
+                                let low = read_be_u32_slice(data, value_start + 4, value_end)
+                                    .ok()? as u64;
+                                Some((high << 32) | low)
+                            }
+                            _ => None,
+                        };
+                    }
+                    cursor = align4(value_end);
+                }
+                FDT_END => break,
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    pub fn has_isa_extension(&self, extension: &str) -> bool {
+        let data = self.bytes();
+        let Some(struct_end) = self.struct_offset.checked_add(self.struct_len) else {
+            return false;
+        };
+        let mut cursor = self.struct_offset;
+        while cursor < struct_end {
+            let Ok(token) = read_be_u32_slice(data, cursor, struct_end) else {
+                return false;
+            };
+            cursor += 4;
+            match token {
+                FDT_BEGIN_NODE => {
+                    let Some(name_end) = data[cursor.min(struct_end)..struct_end]
+                        .iter()
+                        .position(|byte| *byte == 0)
+                        .map(|offset| cursor + offset)
+                    else {
+                        return false;
+                    };
+                    cursor = align4(name_end + 1);
+                }
+                FDT_END_NODE | FDT_NOP => {}
+                FDT_PROP => {
+                    let Ok(value_len) = read_be_u32_slice(data, cursor, struct_end) else {
+                        return false;
+                    };
+                    let Ok(name_offset) = read_be_u32_slice(data, cursor + 4, struct_end) else {
+                        return false;
+                    };
+                    let value_len = value_len as usize;
+                    let name_offset = name_offset as usize;
+                    cursor += 8;
+                    let Some(value_end) = cursor.checked_add(value_len) else {
+                        return false;
+                    };
+                    if value_end > struct_end {
+                        return false;
+                    }
+                    let Ok(property) =
+                        string_at(data, self.strings_offset, self.strings_len, name_offset)
+                    else {
+                        cursor = align4(value_end);
+                        continue;
+                    };
+                    if property == "riscv,isa" || property == "riscv,isa-extensions" {
+                        if let Ok(text) = core::str::from_utf8(&data[cursor..value_end]) {
+                            if text
+                                .split(|character: char| {
+                                    character == ','
+                                        || character == '_'
+                                        || character.is_ascii_whitespace()
+                                })
+                                .any(|token| token == extension)
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                    cursor = align4(value_end);
+                }
+                FDT_END => break,
+                _ => return false,
+            }
+        }
+        false
+    }
+
     pub fn validate_memory_regions(regions: &[RiscvMemoryRegion]) -> Result<(), DtbError> {
         for (index, region) in regions.iter().enumerate() {
             if region.size == 0 {
@@ -931,12 +1053,29 @@ fn initialize_memory_allocator(
             crate::memory::paging::mark_riscv_paging_active();
         }
         super::serial::_print(format_args!("[strat9] Sv39 paging active\r\n"));
+        match info.timebase_frequency() {
+            Some(frequency) => {
+                match super::timer::init(frequency, info.has_isa_extension("sstc")) {
+                    Ok(frequency) => super::serial::_print(format_args!(
+                        "[strat9] SBI timer ready: {} Hz\r\n",
+                        frequency
+                    )),
+                    Err(error) => super::serial::_print(format_args!(
+                        "[strat9] SBI timer unavailable: {}\r\n",
+                        error
+                    )),
+                }
+            }
+            None => super::serial::_print(format_args!(
+                "[strat9] SBI timer unavailable: DTB timebase-frequency missing\r\n"
+            )),
+        }
     }
 }
 
 fn park() -> ! {
     loop {
-        core::hint::spin_loop();
+        super::hlt();
     }
 }
 

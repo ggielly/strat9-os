@@ -19,7 +19,7 @@ Le port doit d’abord atteindre un démarrage déterministe sur un seul hart, u
 | Entrée et boot | Le contrat OpenSBI, l'entrée `_start`, le linker RISC-V, le DTB, le buddy et Sv39 sont activés au boot ; le chemin s'arrête après activation paginée. | Traps, timer et espace utilisateur restent à installer. |
 | Boot ABI | `workspace/abi/src/boot.rs` définit `STRAT9_BOOT_ABI_VERSION = 1` et un `KernelArgs` de 160 octets avec des champs ACPI. | Le DTB ne peut pas être ajouté silencieusement à cette structure : tout changement doit être versionné et coordonné avec le chargeur. |
 | Mémoire virtuelle | `arch/xshim_riscv_stub.rs` contient une traduction Sv48 partielle et des opérations PTE, mais ne fournit pas encore un mapper RISC‑V complet. Le mapper Sv39 de `arch/riscv64/paging.rs` mappe la RAM et les 16 plages MMIO du DTB, puis active `satp`. | Le chemin physique direct et les traps restent à brancher sur ce mapper. |
-| Interruptions et temps | Le trap handler S‑mode direct sauvegarde GPR/CSR, diagnostique via série et parke sur exception. Le timer SBI n’est pas encore activé. | Brancher le timer SBI et le routage d’interruptions après validation du trap frame. |
+| Interruptions et temps | Le trap handler S‑mode direct sauvegarde GPR/CSR et gère les interrupts. Le timer S‑mode utilise `stimecmp` lorsque le DTB annonce `sstc`, avec repli SBI, à 100 Hz. | Le routage des interrupts externes et le scheduler restent à réaliser. |
 | Périphériques | La console série RISC-V est amorcée ; le modèle de pilote reste défini par `doc/HARDWARE.md` et `docs-site/src/driver-model.md`. | Pas de découverte DTB ni de pilote VirtIO-MMIO complet établi. |
 | Exécution | Pas de contexte RISC-V, transition utilisateur, syscall `ecall` ou gestionnaire de traps complet. | Le noyau ne peut pas encore exécuter les charges de travail attendues. |
 | Validation | Les tâches RISC-V de build et d’exécution existent dans `Makefile.toml` et `Makefile.riscv`. | Les critères de démarrage complet restent à valider après implémentation de la mémoire et des traps. |
@@ -183,7 +183,7 @@ Le build release observé le 2026-09-25 échoue avec 99 erreurs et 29 avertissem
 
 ## Prochain incrément recommandé
 
-Le contrat d'entrée OpenSBI, la découverte DTB, l’initialisation buddy, Sv39 et le trap handler S‑mode sont matérialisés. Les 16 plages MMIO découvertes dans le DTB sont mappées avant l’activation de `satp`. L’étape suivante est le timer SBI, puis le routage des interrupts et l’espace utilisateur.
+Le contrat d'entrée OpenSBI, la découverte DTB, l’initialisation buddy, Sv39, le trap handler S‑mode et le timer à 100 Hz sont matérialisés. Les 16 plages MMIO découvertes dans le DTB sont mappées avant l’activation de `satp`. L’étape suivante est le routage PLIC/interruptions, puis l’espace utilisateur.
 
 ## Références du dépôt
 

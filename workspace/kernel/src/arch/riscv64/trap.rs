@@ -55,12 +55,20 @@ pub fn init() {
 }
 
 #[no_mangle]
-pub(crate) extern "C" fn riscv_trap_handler(frame: *mut TrapFrame) -> ! {
+pub(crate) extern "C" fn riscv_trap_handler(frame: *mut TrapFrame) {
     let frame = unsafe { &*frame };
+    let is_interrupt = frame.scause & (1usize << 63) != 0;
+    let code = frame.scause & 0x7f;
+    if is_interrupt && code == 5 {
+        super::timer::handle_interrupt();
+        return;
+    }
+
     super::serial::_print(format_args!(
         "[strat9] trap scause={:#x} sepc={:#x} stval={:#x} sstatus={:#x}\r\n",
         frame.scause, frame.sepc, frame.stval, frame.sstatus
     ));
+    super::cli();
     loop {
         unsafe {
             asm!("wfi", options(nomem, nostack));

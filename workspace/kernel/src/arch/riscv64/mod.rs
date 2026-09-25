@@ -203,13 +203,8 @@ pub mod idt {
     pub fn register_nic_irq(_irq: u8) { panic!("RISC-V interrupt routing is not implemented (R2.1)") }
 }
 
-pub mod timer {
-    pub const TIMER_HZ: u64 = 100;
-    pub const NS_PER_TICK: u64 = 1_000_000_000 / TIMER_HZ;
-    pub fn is_apic_timer_active() -> bool { false }
-    pub fn apic_ticks_per_10ms() -> u32 { 0 }
-    pub fn start_apic_timer_cached() { panic!("RISC-V timer backend is not initialized (R2.2)") }
-}
+pub mod sbi;
+pub mod timer;
 
 
 use core::arch::asm;
