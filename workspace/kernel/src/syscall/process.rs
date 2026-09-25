@@ -34,6 +34,7 @@ const THREAD_OFF_USER_RFLAGS: usize = offset_of!(ThreadUserContext, user_rflags)
 const THREAD_OFF_USER_SS: usize = offset_of!(ThreadUserContext, user_ss);
 
 /// Performs the thread child start operation.
+#[cfg(target_arch = "x86_64")]
 extern "C" fn thread_child_start(ctx_ptr: u64) -> ! {
     // SAFETY: `ctx_ptr` is allocated with Box::into_raw in `build_user_thread_task`
     // and passed as immutable bootstrap data for this task only.
@@ -44,6 +45,7 @@ extern "C" fn thread_child_start(ctx_ptr: u64) -> ! {
 }
 
 /// Performs the thread iret from ctx operation.
+#[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 unsafe extern "C" fn thread_iret_from_ctx(_ctx: *const ThreadUserContext) -> ! {
     core::arch::naked_asm!(
@@ -74,6 +76,16 @@ unsafe extern "C" fn thread_iret_from_ctx(_ctx: *const ThreadUserContext) -> ! {
         off_user_rflags = const THREAD_OFF_USER_RFLAGS,
         off_user_ss = const THREAD_OFF_USER_SS,
     );
+}
+
+#[cfg(target_arch = "riscv64")]
+extern "C" fn thread_child_start(_ctx_ptr: u64) -> ! {
+    panic!("RISC-V user threads are not implemented")
+}
+
+#[cfg(target_arch = "riscv64")]
+unsafe extern "C" fn thread_iret_from_ctx(_ctx: *const ThreadUserContext) -> ! {
+    panic!("RISC-V user threads are not implemented")
 }
 
 /// Performs the build user thread task operation.

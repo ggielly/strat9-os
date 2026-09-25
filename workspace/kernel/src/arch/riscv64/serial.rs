@@ -120,4 +120,4 @@ macro_rules! serial_force_println {
 static mut CMDLINE: Option<&'static str> = None;
 
 /// Parse and retain the kernel cmdline from the boot protocol.
-pub fn parse_cmdline(_ptr: *const u8, _len: usize) {}
+pub fn parse_cmdline(_ptr: u64, _len: u64) {}

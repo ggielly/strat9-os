@@ -392,7 +392,7 @@ fn read_be_u32_slice(data: &[u8], offset: usize, limit: usize) -> Result<u32, Dt
     if end > limit || end > data.len() {
         return Err(DtbError::MalformedProperty { offset });
     }
-    Ok(u32::from_be([
+    Ok(u32::from_be_bytes([
         data[offset],
         data[offset + 1],
         data[offset + 2],

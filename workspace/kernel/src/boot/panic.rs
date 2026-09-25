@@ -78,6 +78,7 @@ fn panic_hook_dump_context(_info: &PanicInfo) {
 // Register / stack helpers
 // -----------------------------------------------------------------------
 
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn read_rbp() -> u64 {
     let rbp: u64;
@@ -87,6 +88,7 @@ fn read_rbp() -> u64 {
     rbp
 }
 
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn read_rsp() -> u64 {
     let rsp: u64;
@@ -96,11 +98,13 @@ fn read_rsp() -> u64 {
     rsp
 }
 
+#[cfg(target_arch = "x86_64")]
 fn addr_readable(addr: u64) -> bool {
     crate::memory::paging::translate(VirtAddr::new(addr)).is_some()
 }
 
 /// Read CR0, CR2, CR3, CR4 into the provided mutable references.
+#[cfg(target_arch = "x86_64")]
 fn read_cr_regs() -> (u64, u64, u64, u64) {
     let cr0: u64;
     let cr2: u64;
@@ -116,6 +120,7 @@ fn read_cr_regs() -> (u64, u64, u64, u64) {
 }
 
 /// Dump backtrace via frame-pointer unwinding, printing directly to serial.
+#[cfg(target_arch = "x86_64")]
 fn dump_backtrace() {
     crate::serial_force_println!("RSP=0x{:016X} RBP=0x{:016X}", read_rsp(), read_rbp());
     crate::serial_force_println!("Backtrace (frame-pointer):");
@@ -154,6 +159,33 @@ fn dump_backtrace() {
         }
         rbp = prev;
     }
+}
+
+#[cfg(target_arch = "riscv64")]
+#[inline(always)]
+fn read_rbp() -> u64 {
+    0
+}
+
+#[cfg(target_arch = "riscv64")]
+#[inline(always)]
+fn read_rsp() -> u64 {
+    0
+}
+
+#[cfg(target_arch = "riscv64")]
+fn addr_readable(_addr: u64) -> bool {
+    false
+}
+
+#[cfg(target_arch = "riscv64")]
+fn read_cr_regs() -> (u64, u64, u64, u64) {
+    (0, 0, 0, 0)
+}
+
+#[cfg(target_arch = "riscv64")]
+fn dump_backtrace() {
+    crate::serial_force_println!("RISC-V frame-pointer backtrace is not implemented");
 }
 
 /// Collect comprehensive debug info and print directly to serial (heap-safe).

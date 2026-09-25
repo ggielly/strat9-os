@@ -195,7 +195,7 @@ pub mod io {
 pub mod mouse_ready_marker {}
 
 pub mod keyboard {
-    pub fn inject_hid_scancode(_sc: u8) {
+    pub fn inject_hid_scancode(_sc: u8, _pressed: bool) {
         panic!("RISC-V HID keyboard input is not implemented")
     }
     pub const KEY_LEFT: u8 = 0x82;
@@ -229,10 +229,18 @@ pub mod mouse {
     pub fn read_event() -> Option<MouseEvent> {
         None
     }
-    pub fn mouse_pos() -> (usize, usize) { (0, 0) }
-    pub fn update_mouse_cursor(_x: usize, _y: usize) {}
-    pub fn push_event_from_hid(_dx: i32, _dy: i32, _buttons: u8) {}
-    pub fn inject_hid_scancode(_sc: u8) {
+    pub fn mouse_pos() -> (i32, i32) { (0, 0) }
+    pub fn update_mouse_cursor(_x: i32, _y: i32) {}
+    pub fn push_event_from_hid(
+        _dx: i16,
+        _dy: i16,
+        _dz: i8,
+        _left: bool,
+        _right: bool,
+        _middle: bool,
+    ) {
+    }
+    pub fn inject_hid_scancode(_sc: u8, _pressed: bool) {
         panic!("RISC-V HID mouse input is not implemented")
     }
 }
@@ -266,7 +274,7 @@ macro_rules! vga_println {
 
 // Extended PCI surface used by hardware/pci_client.rs. Real ECAM driver: R5.
 pub mod pci_full {
-    #[derive(Clone, Copy, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct PciAddress {
         pub bus: u8,
         pub device: u8,
@@ -297,7 +305,7 @@ pub mod pci_full {
     pub fn probe_all(_crit: ProbeCriteria) -> alloc::vec::Vec<PciDevice> {
         panic!("RISC-V PCI ECAM probing is not implemented (R5)")
     }
-        pub fn probe_first(_crit: ProbeCriteria) -> Option<(PciAddress, PciDevice)> {
+    pub fn probe_first(_crit: ProbeCriteria) -> Option<PciDevice> {
         panic!("RISC-V PCI ECAM probing is not implemented (R5)")
     }
     pub fn read_u32_shim(_addr: PciAddress, _off: u8) -> u32 {
@@ -358,9 +366,15 @@ pub mod pci_full {
             panic!("RISC-V PCI BAR access is not implemented (R5)")
         }
         pub fn enable_bus_master(&self) { panic!("RISC-V PCI config access is not implemented (R5)") }
+        pub fn enable_io_space(&self) { panic!("RISC-V PCI config access is not implemented (R5)") }
     }
 
-    pub struct Bar;
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Bar {
+        Io { port: u16 },
+        Memory32 { addr: u32, prefetchable: bool },
+        Memory64 { addr: u64, prefetchable: bool },
+    }
     impl Bar {
         pub fn phys_addr(&self) -> u64 {
             panic!("RISC-V PCI BAR access is not implemented (R5)")
@@ -387,7 +401,7 @@ pub mod pci_full {
     }
     pub mod msi_cap {}
 
-    pub fn find_virtio_device(_dev_id: u16) -> Option<(PciAddress, PciDevice)> {
+    pub fn find_virtio_device(_dev_id: u16) -> Option<PciDevice> {
         panic!("RISC-V VirtIO discovery is not implemented (R5)")
     }
     pub mod msix_cap {}
@@ -445,8 +459,11 @@ pub mod cpuid_x86 {
 // pci_full re-exported as `pci` already; add missing submodules used by gfx/shell.
 pub mod msi {
     pub fn enable(_dev: (), _vec: u8) { panic!("PCI MSI is not implemented on RISC-V (R5)") }
-    pub fn probe_and_enable(_addr: crate::arch::pci::PciAddress, _vector: u8) -> bool {
-        false
+    pub fn probe_and_enable(
+        _pci_dev: &crate::hardware::pci_client::PciDevice,
+        _prefer_msix: bool,
+    ) -> (u8, u8) {
+        panic!("PCI MSI is not implemented on RISC-V (R5)")
     }
 }
 pub mod vga_text {
@@ -476,7 +493,7 @@ pub mod io2 {
 }
 
 pub mod ring3_diag {
-    pub fn validate_ring3_state(_rip: u64, _rsp: u64, _cs: u64) {
+    pub fn validate_ring3_state(_rip: u64, _rsp: u64, _cs: u16, _ss: u16) {
         panic!("RISC-V user-return validation is not implemented (R3)")
     }
 }
@@ -492,7 +509,7 @@ pub mod tss_extra {
 pub mod apic {
     pub use super::apic_base::*;
     pub const IPI_N3_MIGRATE_VECTOR: u8 = 0xF0;
-    pub fn init(_addr: u64) { panic!("Local APIC is unavailable on RISC-V") }
+    pub fn init(_addr: u32) { panic!("Local APIC is unavailable on RISC-V") }
     pub fn eoi() { panic!("Local APIC EOI is unavailable on RISC-V") }
     pub fn is_present() -> bool {
         false

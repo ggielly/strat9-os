@@ -764,6 +764,12 @@ fn shared_msg_write(msg_buf: *mut u8, msg: &[u8]) -> Result<u16, IpcError> {
 /// 3. Restores destination context from `frame.dst_ctx`
 /// 4. Sets `frame.state = Ready`, increments `generation`
 /// 5. Returns via `ret` (pops RIP from restored `dst_ctx.rsp`)
+#[cfg(target_arch = "riscv64")]
+pub unsafe extern "C" fn n3b_migrate_asm(_frame: *mut MigrationFrame) {
+    panic!("RISC-V N3 migration is not implemented")
+}
+
+#[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 pub unsafe extern "C" fn n3b_migrate_asm(frame: *mut MigrationFrame) {
     core::arch::naked_asm!(
@@ -863,6 +869,12 @@ fn send_n3_sync_ipi(target_apic_id: u32) {
 /// # Safety
 /// Registered as a naked IDT entry. On entry: SS, RSP, RFLAGS, CS, RIP pushed
 /// by hardware. `rdi` points at the InterruptStackFrame (set by IDT dispatch).
+#[cfg(target_arch = "riscv64")]
+pub unsafe extern "C" fn n3_migrate_ipi_entry(_rdi: *mut u8) -> ! {
+    panic!("RISC-V N3 migration is not implemented")
+}
+
+#[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 pub unsafe extern "C" fn n3_migrate_ipi_entry(rdi: *mut u8) -> ! {
     core::arch::naked_asm!(
@@ -1344,6 +1356,7 @@ impl IpcTransport for N3Transport {
 }
 
 impl IpcProducer for N3Transport {
+    #[cfg(target_arch = "x86_64")]
     fn send(&self, msg: &[u8]) -> Result<(), IpcError> {
         // SAFETY: CAS state machine (Ready→Active) provides logical exclusivity.
         // The &mut is scoped to this function; after CAS, only the ASM primitive
@@ -1424,6 +1437,11 @@ impl IpcProducer for N3Transport {
         }
 
         Ok(())
+    }
+
+    #[cfg(target_arch = "riscv64")]
+    fn send(&self, _msg: &[u8]) -> Result<(), IpcError> {
+        Err(IpcError::TransportFailed)
     }
 
     fn try_send(&self, msg: &[u8]) -> Result<(), IpcError> {

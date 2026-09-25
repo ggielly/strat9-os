@@ -1688,8 +1688,8 @@ impl AddressSpace {
         // SAFETY: cr3_phys points to a valid, 4KiB-aligned PML4 table with
         // the kernel half correctly populated.
         unsafe {
-            let frame =
-                X86PhysFrame::from_start_address(self.cr3_phys).expect("CR3 address not aligned");
+            let frame = X86PhysFrame::<Size4KiB>::from_start_address(self.cr3_phys)
+                .expect("CR3 address not aligned");
             crate::e9_println!("C");
             Cr3::write(frame, Cr3Flags::empty());
             crate::e9_println!("c");

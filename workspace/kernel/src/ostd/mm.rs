@@ -606,6 +606,7 @@ impl core::fmt::Debug for Vmar {
 /// TLB flush operation for SMP systems
 ///
 /// Flushes TLB entries on all CPUs that may have cached the given virtual address.
+#[cfg(target_arch = "x86_64")]
 pub fn tlb_flush_virt_addr(vaddr: VirtAddr) {
     // SAFETY: invlpg is a privileged instruction that invalidates a TLB entry.
     // This is safe to call in kernel mode.
@@ -621,6 +622,7 @@ pub fn tlb_flush_virt_addr(vaddr: VirtAddr) {
 /// Flushes the entire TLB on the current CPU
 ///
 /// This is more expensive than `tlb_flush_virt_addr` and should be used sparingly.
+#[cfg(target_arch = "x86_64")]
 pub fn tlb_flush_all() {
     // SAFETY: writing to CR3 with the same value flushes the TLB (except global pages).
     // This is safe to call in kernel mode.
@@ -636,5 +638,19 @@ pub fn tlb_flush_all() {
             in(reg) cr3,
             options(nostack)
         );
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+pub fn tlb_flush_virt_addr(_vaddr: VirtAddr) {
+    unsafe {
+        core::arch::asm!("sfence.vma", options(nostack, preserves_flags));
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+pub fn tlb_flush_all() {
+    unsafe {
+        core::arch::asm!("sfence.vma", options(nostack, preserves_flags));
     }
 }

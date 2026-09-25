@@ -98,6 +98,7 @@ const OFF_USER_RSP: usize = offset_of!(ForkUserContext, user_rsp);
 const OFF_USER_SS: usize = offset_of!(ForkUserContext, user_ss);
 
 /// Child bootstrap: restore user register snapshot and enter Ring 3.
+#[cfg(target_arch = "x86_64")]
 extern "C" fn fork_child_start(ctx_ptr: u64) -> ! {
     let boxed = unsafe { Box::from_raw(ctx_ptr as *mut ForkUserContext) };
     let ctx = *boxed;
@@ -105,6 +106,7 @@ extern "C" fn fork_child_start(ctx_ptr: u64) -> ! {
 }
 
 /// Performs the fork iret from ctx operation.
+#[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 unsafe extern "C" fn fork_iret_from_ctx(_ctx: *const ForkUserContext) -> ! {
     core::arch::naked_asm!(
@@ -163,6 +165,16 @@ unsafe extern "C" fn fork_iret_from_ctx(_ctx: *const ForkUserContext) -> ! {
         off_user_rsp = const OFF_USER_RSP,
         off_user_ss = const OFF_USER_SS,
     );
+}
+
+#[cfg(target_arch = "riscv64")]
+extern "C" fn fork_child_start(_ctx_ptr: u64) -> ! {
+    panic!("RISC-V fork is not implemented")
+}
+
+#[cfg(target_arch = "riscv64")]
+unsafe extern "C" fn fork_iret_from_ctx(_ctx: *const ForkUserContext) -> ! {
+    panic!("RISC-V fork is not implemented")
 }
 
 /// Performs the build child task operation.

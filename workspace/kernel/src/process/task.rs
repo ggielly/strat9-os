@@ -663,6 +663,7 @@ impl CpuContext {
 /// When a new task is first scheduled, `switch_context()` pops the fake
 /// callee-saved registers and `ret`s here, then tail-jumps into the actual
 /// post-switch entry helper.
+#[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 pub unsafe extern "C" fn task_entry_trampoline() -> ! {
     core::arch::naked_asm!(
@@ -679,6 +680,11 @@ pub unsafe extern "C" fn task_entry_trampoline() -> ! {
         finish_switch = sym crate::process::scheduler::finish_switch,
         post_switch_enter = sym task_post_switch_enter,
     );
+}
+
+#[cfg(target_arch = "riscv64")]
+pub unsafe extern "C" fn task_entry_trampoline() -> ! {
+    panic!("RISC-V task context switching is not implemented")
 }
 
 fn task_post_switch_enter(entry: u64, arg0: u64) -> ! {
@@ -1233,6 +1239,43 @@ pub(super) unsafe fn do_restore_first_task(
 //  FXSAVE path (legacy, no XSAVE support)
 
 /// rdi=old_rsp, rsi=new_rsp, rdx=old_fpu, rcx=new_fpu
+#[cfg(target_arch = "riscv64")]
+unsafe fn switch_context_fxsave(
+    _old_rsp_ptr: *mut u64,
+    _new_rsp_ptr: *const u64,
+    _old_fpu_ptr: *mut u8,
+    _new_fpu_ptr: *const u8,
+) {
+    panic!("RISC-V context switching is not implemented")
+}
+
+#[cfg(target_arch = "riscv64")]
+unsafe fn restore_first_task_fxsave(_rsp_ptr: *const u64, _fpu_ptr: *const u8) -> ! {
+    panic!("RISC-V context switching is not implemented")
+}
+
+#[cfg(target_arch = "riscv64")]
+unsafe fn switch_context_xsave(
+    _old_rsp_ptr: *mut u64,
+    _new_rsp_ptr: *const u64,
+    _old_fpu_ptr: *mut u8,
+    _new_fpu_ptr: *const u8,
+    _new_xcr0: u64,
+    _old_xcr0: u64,
+) {
+    panic!("RISC-V context switching is not implemented")
+}
+
+#[cfg(target_arch = "riscv64")]
+unsafe fn restore_first_task_xsave(
+    _rsp_ptr: *const u64,
+    _fpu_ptr: *const u8,
+    _xcr0: u64,
+) -> ! {
+    panic!("RISC-V context switching is not implemented")
+}
+
+#[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 unsafe extern "C" fn switch_context_fxsave(
     _old_rsp_ptr: *mut u64,
@@ -1262,6 +1305,7 @@ unsafe extern "C" fn switch_context_fxsave(
 }
 
 /// rdi=frame_ptr, rsi=fpu_ptr
+#[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 unsafe extern "C" fn restore_first_task_fxsave(_rsp_ptr: *const u64, _fpu_ptr: *const u8) -> ! {
     // Debug: output pointers before restore (will be last serial output)
@@ -1284,6 +1328,7 @@ unsafe extern "C" fn restore_first_task_fxsave(_rsp_ptr: *const u64, _fpu_ptr: *
 //  XSAVE path (with XCR0 switching per-silo)
 
 /// rdi=old_rsp, rsi=new_rsp, rdx=old_fpu, rcx=new_fpu, r8=new_xcr0, r9=old_xcr0
+#[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 unsafe extern "C" fn switch_context_xsave(
     _old_rsp_ptr: *mut u64,
@@ -1344,6 +1389,7 @@ unsafe extern "C" fn switch_context_xsave(
 }
 
 /// rdi=frame_ptr, rsi=fpu_ptr, rdx=xcr0
+#[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 unsafe extern "C" fn restore_first_task_xsave(
     _rsp_ptr: *const u64,

@@ -83,9 +83,9 @@ pub mod vga {
     #[allow(clippy::too_many_arguments)]
     pub fn init(
         fb_addr: u64,
-        width: usize,
-        height: usize,
-        stride: usize,
+        width: u32,
+        height: u32,
+        stride: u32,
         bpp: u16,
         _red_size: u8,
         _red_shift: u8,
@@ -143,8 +143,8 @@ pub mod vga {
     pub fn hide_text_cursor() {}
     pub fn write_text(_s: &str) {}
     pub fn write_char(_c: char) {}
-    pub fn scroll_view_up() {}
-    pub fn scroll_view_down() {}
+    pub fn scroll_view_up(_lines: usize) {}
+    pub fn scroll_view_down(_lines: usize) {}
     pub fn scroll_to_live() {}
     pub fn start_selection(_x: usize, _y: usize) {}
     pub fn update_selection(_x: usize, _y: usize) {}
@@ -153,9 +153,9 @@ pub mod vga {
     pub fn scrollbar_hit_test(_x: usize, _y: usize) -> bool {
         false
     }
-    pub fn scrollbar_drag_to(_x: usize, _y: usize) {}
+    pub fn scrollbar_drag_to(_y: usize) {}
     pub fn scrollbar_click(_x: usize, _y: usize) {}
-    pub fn update_mouse_cursor(_x: usize, _y: usize) {}
+    pub fn update_mouse_cursor(_x: i32, _y: i32) {}
     pub fn panic_draw_direct(_lines: &[&str]) {}
     pub fn vga_debug_writeln(_s: &str) {}
 
