@@ -175,7 +175,6 @@ dependencies = ["kernel-riscv"]
 script_runner = "@shell"
 script = ['''
 KERNEL_ELF="target/${KERNEL_TARGET_RISCV}/release/kernel" \
-DISK_IMAGE="qemu-stuff/disk.img" \
 QEMU_LOG="build/riscv/qemu.log" \
 QEMU="${QEMU_RISCV}" \
 bash tools/scripts/run-qemu-riscv.sh
@@ -188,7 +187,6 @@ dependencies = ["kernel-riscv"]
 script_runner = "@shell"
 script = ['''
 KERNEL_ELF="target/${KERNEL_TARGET_RISCV}/release/kernel" \
-DISK_IMAGE="qemu-stuff/disk.img" \
 QEMU_LOG="build/riscv/qemu-debug.log" \
 QEMU="${QEMU_RISCV}" \
 bash tools/scripts/run-qemu-riscv.sh -S -s

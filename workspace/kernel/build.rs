@@ -15,6 +15,7 @@ fn main() {
     // Re-run build script if linker script changes
     println!("cargo:rerun-if-changed=linker.ld");
     println!("cargo:rerun-if-changed=linker-limine.ld");
+    println!("cargo:rerun-if-changed=linker-riscv.ld");
 
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     if target_arch == "x86_64" {

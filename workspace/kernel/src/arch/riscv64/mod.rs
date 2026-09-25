@@ -7,6 +7,7 @@
 //! during early boot (jalon R1 of the port plan). Modules are added
 //! incrementally as call-sites are migrated.
 
+pub mod boot;
 pub mod serial;
 
 // ---------------------------------------------------------------------------

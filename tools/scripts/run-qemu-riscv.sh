@@ -6,7 +6,6 @@ ROOT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 QEMU_BIN="${QEMU:-qemu-system-riscv64}"
 TARGET="${TARGET:-riscv64imac-unknown-none-elf}"
 KERNEL_ELF="${KERNEL_ELF:-$ROOT_DIR/target/$TARGET/release/kernel}"
-DISK_IMAGE="${DISK_IMAGE:-$ROOT_DIR/qemu-stuff/disk.img}"
 QEMU_LOG="${QEMU_LOG:-$ROOT_DIR/build/qemu-riscv.log}"
 BIOS="${BIOS:-default}"
 SMP="${SMP:-1}"
@@ -23,11 +22,6 @@ if [ ! -f "$KERNEL_ELF" ]; then
     exit 1
 fi
 
-if [ ! -f "$DISK_IMAGE" ]; then
-    printf 'Disk image not found: %s\n' "$DISK_IMAGE" >&2
-    exit 1
-fi
-
 mkdir -p "$(dirname -- "$QEMU_LOG")"
 
 QEMU_CMD=(
@@ -38,8 +32,6 @@ QEMU_CMD=(
     -m "$MEMORY"
     -bios "$BIOS"
     -kernel "$KERNEL_ELF"
-    -drive "file=$DISK_IMAGE,if=none,id=drv0,format=raw"
-    -device virtio-blk-device,drive=drv0
     -serial stdio
     -display none
     -no-reboot

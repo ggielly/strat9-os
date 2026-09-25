@@ -12,17 +12,17 @@ Le port doit d’abord atteindre un démarrage déterministe sur un seul hart, u
 
 | Domaine | État actuel | Conséquence |
 |---|---|---|
-| Cible et tâches | `targets/riscv64-strat9.json`, la cible dans `rust-toolchain.toml`, `Makefile.riscv` et `tools/scripts/run-qemu-riscv.sh` existent. | Le parcours de build/QEMU est amorcé, mais le bootloader est TODO et le démarrage du noyau n’est pas validé ; ne pas le confondre avec un boot RISC-V opérationnel. |
+| Cible et tâches | `targets/riscv64-strat9.json`, la cible dans `rust-toolchain.toml`, `Makefile.riscv` et `tools/scripts/run-qemu-riscv.sh` existent. | Le parcours de build/QEMU est amorcé ; le noyau doit être chargé directement par OpenSBI, fourni par QEMU, et le démarrage complet n’est pas encore validé ; ne pas le confondre avec un boot RISC-V opérationnel. |
 | Façade d’architecture | `workspace/kernel/src/arch/facade_riscv.rs` et les types neutres de `arch::xshim` existent. | L’abstraction est amorcée, mais des chemins partagés et la compatibilité de pagination restent à assainir. |
 | Compatibilité x86 | Plusieurs interfaces sans équivalent RISC-V échouent maintenant explicitement plutôt que de simuler un succès. | Conserver ce comportement jusqu’à l’existence d’une implémentation réelle. |
 | Capacités CPU | Les sorties RISC-V `/proc/cpuinfo` et `/sys/cpu/*` indiquent que vendor, modèle et ISA ne sont pas encore découverts ; le filtrage des fonctionnalités de composants reste x86-only. | Ajouter la découverte ISA via DTB avant d’annoncer des capacités RISC-V ou d’accepter un format de composant RISC-V. |
-| Entrée et boot | Aucun chemin complet OpenSBI → entrée noyau → initialisation du noyau n’est établi. | Aucun démarrage RISC-V reproductible n’est démontré. |
+| Entrée et boot | Le contrat OpenSBI, l'entrée `_start`, le linker RISC-V et la validation minimale du DTB sont présents ; le chemin d'entrée s'arrête après validation. | Le démarrage kernel complet et la découverte des ressources ne sont pas encore validés. |
 | Boot ABI | `workspace/abi/src/boot.rs` définit `STRAT9_BOOT_ABI_VERSION = 1` et un `KernelArgs` de 160 octets avec des champs ACPI. | Le DTB ne peut pas être ajouté silencieusement à cette structure : tout changement doit être versionné et coordonné avec le chargeur. |
-| Mémoire virtuelle | `arch/xshim_riscv_stub.rs` contient une traduction Sv48 partielle et des opérations PTE, mais ne fournit pas encore un mapper RISC-V intégré au démarrage. | Ne pas considérer ces chemins de compatibilité comme un sous-système de pagination complet. |
+| Mémoire virtuelle | `arch/xshim_riscv_stub.rs` contient une traduction Sv48 partielle et des opérations PTE, mais ne fournit pas encore un mapper RISC-V intégré au démarrage. Le parseur FDT extrait les régions RAM et réservées, sans alimenter l’allocateur. | Ne pas considérer ces chemins de compatibilité comme un sous-système de pagination complet. |
 | Interruptions et temps | Les interfaces héritées IDT/PIC/PIT/APIC échouent explicitement côté RISC-V. | Trap vector, timer SBI et contrôleur d’interruptions RISC-V restent à réaliser. |
 | Périphériques | La console série RISC-V est amorcée ; le modèle de pilote reste défini par `doc/HARDWARE.md` et `docs-site/src/driver-model.md`. | Pas de découverte DTB ni de pilote VirtIO-MMIO complet établi. |
 | Exécution | Pas de contexte RISC-V, transition utilisateur, syscall `ecall` ou gestionnaire de traps complet. | Le noyau ne peut pas encore exécuter les charges de travail attendues. |
-| Validation | Les tâches de build/exécution du `Makefile.toml` restent centrées sur x86_64. | Ajouter des tâches RISC-V et des critères de démarrage dans une phase ultérieure. |
+| Validation | Les tâches RISC-V de build et d’exécution existent dans `Makefile.toml` et `Makefile.riscv`. | Les critères de démarrage complet restent à valider après implémentation de la mémoire et des traps. |
 
 Les éléments ci-dessus sont un état de travail, pas une liste exhaustive de capacités. Toute fonctionnalité ne figurant pas explicitement comme implémentée doit être considérée comme absente ou non validée.
 
@@ -34,6 +34,19 @@ Les éléments ci-dessus sont un état de travail, pas une liste exhaustive de c
 4. **L’ABI syscall reste stable.** `doc/NATIVE_SYSCALLS.md` définit les numéros et la sémantique existants, avec une convention d’appel x86_64. RISC-V doit fournir son adaptateur d’architecture autour de `ecall` sans modifier implicitement les numéros ou la sémantique. Toute évolution incompatible exige une version explicite.
 5. **Le DTB décrit la plateforme réellement démarrée.** Parser les nœuds nécessaires et valider les adresses, tailles, interruptions et transports. QEMU `virt` peut exposer UART, PLIC, timer fourni par SBI et périphériques VirtIO-MMIO ; leur présence et leurs paramètres doivent venir du DTB.
 6. **Le modèle de mémoire doit correspondre au matériel et au compilateur.** Choisir Sv39 ou Sv48 explicitement, vérifier le mode pris en charge et utiliser le même choix dans le boot, le mapper, les allocateurs et les tests d’intégration futurs. Ne pas déduire qu’un mode est disponible du seul nom de la cible Rust.
+
+## Contrat d'entrée OpenSBI
+
+L'entrée RISC-V est indépendante de `KernelArgs` version 1. Le noyau est lié à `0x80200000` et reçoit les registres suivants au transfert OpenSBI :
+
+- `a0` : identifiant du hart ;
+- `a1` : adresse physique du DTB au format FDT, avec des champs big-endian.
+
+`boot/boot64r.S` installe la pile, désactive les interruptions superviseur, initialise `gp`, efface `.bss`, parke les harts non principaux et appelle `arch::riscv64::boot::riscv_boot_entry`. Le chemin Rust conserve le pointeur et la taille du DTB dans `RiscvBootInfo` après validation de sa signature, de sa taille, de sa version, des plages de sa structure et de sa table de réservations mémoire. Un DTB absent ou invalide est signalé sur la console puis le hart principal est arrêté proprement.
+
+Cette première étape ne construit pas encore la carte mémoire et ne doit pas être considérée comme un démarrage système complet. L'initialisation physique, le traps, le timer et l'espace utilisateur dépendent des phases P2 et suivantes. `KernelArgs` version 1 reste inchangé ; le DTB ne doit pas y être ajouté implicitement.
+
+`RiscvBootInfo::memory_regions` fournit maintenant un parseur FDT minimal, sans allocation : il parcourt les nœuds `memory@...` et `/reserved-memory`, hérite des `#address-cells`/`#size-cells`, extrait les propriétés `reg` et vérifie les débordements, les tailles nulles et les chevauchements par catégorie. La carte n'est pas encore remise à l'allocateur physique ; cette étape et le mapper natif restent les prochaines parties de P2.
 
 ## Feuille de route
 
@@ -170,7 +183,7 @@ Le build release observé le 2026-09-25 échoue avec 99 erreurs et 29 avertissem
 
 ## Prochain incrément recommandé
 
-Commencer par **P0.1 à P0.4**, puis traiter **P1.1 et P1.2** avant de créer le parcours QEMU. Le point de blocage majeur n’est pas l’ajout d’un pilote : c’est l’absence d’un contrat de démarrage RISC-V explicite et compatible avec le boot ABI existant. Les phases P2 et suivantes dépendent de ce contrat.
+Le contrat d'entrée OpenSBI et la première validation du DTB sont maintenant matérialisés. La suite doit rester conditionnée par ce document : choisir explicitement Sv39 ou Sv48, puis implémenter la découverte de la mémoire et le mapper natif à partir du DTB avant d'activer les traps, le timer ou l'espace utilisateur. Les pilotes PCI et VirtIO-MMIO restent des étapes ultérieures.
 
 ## Références du dépôt
 

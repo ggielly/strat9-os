@@ -8,7 +8,6 @@ KERNEL_DIR ?= workspace/kernel
 BUILD_DIR ?= build/riscv
 KERNEL_ELF ?= $(abspath target/$(TARGET)/release/kernel)
 QEMU_LOG ?= $(abspath $(BUILD_DIR)/qemu.log)
-DISK_IMAGE ?= $(abspath qemu-stuff/disk.img)
 QEMU_SCRIPT ?= $(abspath tools/scripts/run-qemu-riscv.sh)
 BUILD_STD_FLAGS := -Z build-std=core,alloc,compiler_builtins -Z build-std-features=compiler-builtins-mem
 QEMU_ARGS ?=
@@ -22,8 +21,8 @@ kernel:
 	@echo "Kernel built successfully: $(KERNEL_ELF)"
 
 bootloader:
-	@echo "Building bootloader..."
-	@echo "TODO: Implement RISC-V bootloader build"
+	@echo "RISC-V boot uses the OpenSBI firmware provided by QEMU."
+	@echo "No standalone bootloader artifact is required for this port."
 
 clean:
 	$(CARGO) clean
@@ -31,7 +30,7 @@ clean:
 
 run: kernel
 	@echo "Launching QEMU for RISC-V..."
-	KERNEL_ELF="$(KERNEL_ELF)" DISK_IMAGE="$(DISK_IMAGE)" QEMU_LOG="$(QEMU_LOG)" QEMU="$(QEMU)" "$(QEMU_SCRIPT)" $(QEMU_ARGS)
+	KERNEL_ELF="$(KERNEL_ELF)" QEMU_LOG="$(QEMU_LOG)" QEMU="$(QEMU)" "$(QEMU_SCRIPT)" $(QEMU_ARGS)
 
 check:
 	cd $(KERNEL_DIR) && $(CARGO) check $(BUILD_STD_FLAGS) --target $(TARGET)
