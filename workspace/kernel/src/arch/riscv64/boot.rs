@@ -642,6 +642,104 @@ impl RiscvBootInfo {
         false
     }
 
+    pub fn pci_base(&self) -> Option<u64> {
+        let data = self.bytes();
+        let struct_end = self.struct_offset.checked_add(self.struct_len)?;
+        let mut cursor = self.struct_offset;
+        let mut depth = 0usize;
+        let mut pci_nodes = [false; MAX_FDT_DEPTH];
+        let mut address_cells = [0u32; MAX_FDT_DEPTH];
+        let mut size_cells = [0u32; MAX_FDT_DEPTH];
+        let mut reg_offsets = [0usize; MAX_FDT_DEPTH];
+        let mut reg_lens = [0usize; MAX_FDT_DEPTH];
+        let mut reg_address_cells = [0u32; MAX_FDT_DEPTH];
+        let mut reg_size_cells = [0u32; MAX_FDT_DEPTH];
+        while cursor < struct_end {
+            let token = read_be_u32_slice(data, cursor, struct_end).ok()?;
+            cursor += 4;
+            match token {
+                FDT_BEGIN_NODE => {
+                    let name_start = cursor;
+                    let name_end = data[name_start..struct_end]
+                        .iter()
+                        .position(|byte| *byte == 0)?
+                        + name_start;
+                    let name = core::str::from_utf8(&data[name_start..name_end]).ok()?;
+                    pci_nodes[depth] = name == "pci" || name.starts_with("pci@");
+                    address_cells[depth] = if depth == 0 {
+                        0
+                    } else {
+                        address_cells[depth - 1]
+                    };
+                    size_cells[depth] = if depth == 0 { 0 } else { size_cells[depth - 1] };
+                    reg_offsets[depth] = 0;
+                    reg_lens[depth] = 0;
+                    reg_address_cells[depth] = 0;
+                    reg_size_cells[depth] = 0;
+                    depth += 1;
+                    cursor = align4(name_end + 1);
+                }
+                FDT_END_NODE => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    let node_index = depth - 1;
+                    if pci_nodes[node_index] && reg_lens[node_index] != 0 {
+                        let mut regions = [RiscvPlatformRegion::EMPTY; 1];
+                        let mut count = 0usize;
+                        parse_platform_reg(
+                            data,
+                            reg_offsets[node_index],
+                            reg_offsets[node_index] + reg_lens[node_index],
+                            reg_address_cells[node_index],
+                            reg_size_cells[node_index],
+                            &mut regions,
+                            &mut count,
+                        )
+                        .ok()?;
+                        return regions.first().map(|region| region.base);
+                    }
+                    depth -= 1;
+                }
+                FDT_PROP => {
+                    let value_len = read_be_u32_slice(data, cursor, struct_end).ok()? as usize;
+                    let name_offset =
+                        read_be_u32_slice(data, cursor + 4, struct_end).ok()? as usize;
+                    cursor += 8;
+                    let value_start = cursor;
+                    let value_end = value_start.checked_add(value_len)?;
+                    if value_end > struct_end {
+                        return None;
+                    }
+                    let property =
+                        string_at(data, self.strings_offset, self.strings_len, name_offset).ok()?;
+                    match property {
+                        "#address-cells" => {
+                            address_cells[depth - 1] =
+                                read_cell_property(data, value_start, value_len, property).ok()?;
+                        }
+                        "#size-cells" => {
+                            size_cells[depth - 1] =
+                                read_cell_property(data, value_start, value_len, property).ok()?;
+                        }
+                        "reg" if pci_nodes[depth - 1] => {
+                            reg_offsets[depth - 1] = value_start;
+                            reg_lens[depth - 1] = value_len;
+                            reg_address_cells[depth - 1] = address_cells[depth - 1];
+                            reg_size_cells[depth - 1] = size_cells[depth - 1];
+                        }
+                        _ => {}
+                    }
+                    cursor = align4(value_end);
+                }
+                FDT_NOP => {}
+                FDT_END => break,
+                _ => return None,
+            }
+        }
+        None
+    }
+
     pub fn plic_base(&self) -> Option<u64> {
         let data = self.bytes();
         let struct_end = self.struct_offset.checked_add(self.struct_len)?;
@@ -1168,6 +1266,25 @@ fn initialize_memory_allocator(
             },
             None => super::serial::_print(format_args!(
                 "[strat9] PLIC unavailable: DTB node missing\r\n"
+            )),
+        }
+        match info.pci_base() {
+            Some(base) => match super::pci::init(base) {
+                Ok(()) => {
+                    let mut devices = [super::pci::PciDeviceInfo::EMPTY; 32];
+                    let count = super::pci::enumerate(&mut devices);
+                    super::serial::_print(format_args!(
+                        "[strat9] PCI ECAM ready: {:#x} devices={}\r\n",
+                        base, count
+                    ));
+                }
+                Err(error) => super::serial::_print(format_args!(
+                    "[strat9] PCI ECAM unavailable: {}\r\n",
+                    error
+                )),
+            },
+            None => super::serial::_print(format_args!(
+                "[strat9] PCI ECAM unavailable: DTB node missing\r\n"
             )),
         }
         match info.timebase_frequency() {

@@ -9,6 +9,7 @@
 
 pub mod boot;
 pub mod paging;
+pub mod pci;
 pub mod plic;
 pub mod serial;
 pub mod trap;

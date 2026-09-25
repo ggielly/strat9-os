@@ -20,7 +20,7 @@ Le port doit d’abord atteindre un démarrage déterministe sur un seul hart, u
 | Boot ABI | `workspace/abi/src/boot.rs` définit `STRAT9_BOOT_ABI_VERSION = 1` et un `KernelArgs` de 160 octets avec des champs ACPI. | Le DTB ne peut pas être ajouté silencieusement à cette structure : tout changement doit être versionné et coordonné avec le chargeur. |
 | Mémoire virtuelle | `arch/xshim_riscv_stub.rs` contient une traduction Sv48 partielle et des opérations PTE, mais ne fournit pas encore un mapper RISC‑V complet. Le mapper Sv39 de `arch/riscv64/paging.rs` mappe la RAM et les 16 plages MMIO du DTB, puis active `satp`. | Le chemin physique direct et les traps restent à brancher sur ce mapper. |
 | Interruptions et temps | Le trap handler S‑mode direct gère le timer et les interrupts externes ; le PLIC est découvert via le DTB, et le timer S‑mode utilise `stimecmp`/`SBI` à 100 Hz. | Le routage des sources matérielles et le scheduler restent à réaliser. |
-| Périphériques | La console série RISC-V est amorcée ; le modèle de pilote reste défini par `doc/HARDWARE.md` et `docs-site/src/driver-model.md`. | Pas de découverte DTB ni de pilote VirtIO-MMIO complet établi. |
+| Périphériques | Le DTB fournit PLIC, PCI ECAM et les plages MMIO ; l’accès configuration ECAM et un scan borné du bus 0 sont implémentés. | Aucun driver PCI/VirtIO n’est encore branché ; VirtIO-MMIO reste le prochain jalon. |
 | Exécution | Pas de contexte RISC-V, transition utilisateur, syscall `ecall` ou gestionnaire de traps complet. | Le noyau ne peut pas encore exécuter les charges de travail attendues. |
 | Validation | Les tâches RISC-V de build et d’exécution existent dans `Makefile.toml` et `Makefile.riscv`. | Les critères de démarrage complet restent à valider après implémentation de la mémoire et des traps. |
 
@@ -183,7 +183,7 @@ Le build release observé le 2026-09-25 échoue avec 99 erreurs et 29 avertissem
 
 ## Prochain incrément recommandé
 
-Le contrat d'entrée OpenSBI, la découverte DTB, l’initialisation buddy, Sv39, le trap handler S‑mode, le PLIC et le timer à 100 Hz sont matérialisés. Les 16 plages MMIO découvertes dans le DTB sont mappées avant l’activation de `satp`. L’étape suivante est le routage des sources PCI, puis l’espace utilisateur.
+Le contrat d'entrée OpenSBI, la découverte DTB, l’initialisation buddy, Sv39, le trap handler S‑mode, le PLIC, le timer à 100 Hz et le scan PCI ECAM sont matérialisés. Les 16 plages MMIO découvertes dans le DTB sont mappées avant l’activation de `satp`. L’étape suivante est le transport VirtIO-MMIO et un premier périphérique, puis l’espace utilisateur.
 
 ## Références du dépôt
 
