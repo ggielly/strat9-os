@@ -2,7 +2,6 @@
 
 use crate::{
     boot::entry::{MemoryKind, MemoryRegion},
-    memory::phys_to_virt,
     serial_println,
     sync::SpinLock,
 };
@@ -16,11 +15,12 @@ pub const MAX_PROTECTED_RANGES: usize = 32;
 struct BootRegion {
     start: u64,
     end: u64,
+    kind: MemoryKind,
 }
 
 impl BootRegion {
     const fn empty() -> Self {
-        Self { start: 0, end: 0 }
+        Self { start: 0, end: 0, kind: MemoryKind::Null }
     }
 
     #[inline]
@@ -32,7 +32,6 @@ impl BootRegion {
 pub struct BootAllocator {
     regions: [BootRegion; MAX_BOOT_ALLOC_REGIONS],
     len: usize,
-    accessible_limit: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -40,7 +39,6 @@ pub struct BootAllocStats {
     pub region_count: usize,
     pub total_free_bytes: u64,
     pub largest_region_bytes: u64,
-    pub accessible_limit: u64,
 }
 
 impl BootAllocator {
@@ -48,7 +46,6 @@ impl BootAllocator {
         Self {
             regions: [BootRegion::empty(); MAX_BOOT_ALLOC_REGIONS],
             len: 0,
-            accessible_limit: 0,
         }
     }
 
@@ -66,7 +63,7 @@ impl BootAllocator {
                 continue;
             }
 
-            self.push_region(BootRegion { start, end });
+            self.push_region(BootRegion { start, end, kind: region.kind });
         }
 
         self.normalize_regions();
@@ -82,7 +79,6 @@ impl BootAllocator {
         }
 
         self.normalize_regions();
-        self.rebuild_accessible_limit();
     }
 
     pub fn alloc(&mut self, size: usize, align: usize) -> PhysAddr {
@@ -150,11 +146,7 @@ impl BootAllocator {
                 continue;
             }
 
-            if self.accessible_limit != 0 && alloc_end > self.accessible_limit {
-                continue;
-            }
-
-            if !crate::memory::paging::is_hhdm_range_mapped_now(alloc_start, size) {
+            if !physical_range_accessible_now(alloc_start, size) {
                 continue;
             }
 
@@ -164,13 +156,12 @@ impl BootAllocator {
 
         let stats = self.stats();
         serial_println!(
-            "[boot_alloc] try_alloc_accessible failed: requested={} aligned={} largest_region={} regions={} total_free={} accessible_limit={:#x}",
+            "[boot_alloc] try_alloc_accessible failed: requested={} aligned={} largest_region={} regions={} total_free={}",
             size as usize,
             align as usize,
             stats.largest_region_bytes as usize,
             stats.region_count,
             stats.total_free_bytes as usize
-            ,stats.accessible_limit
         );
         None
     }
@@ -181,7 +172,7 @@ impl BootAllocator {
             *dst = MemoryRegion {
                 base: region.start,
                 size: region.end.saturating_sub(region.start),
-                kind: MemoryKind::Free,
+                kind: region.kind,
             };
         }
         count
@@ -190,7 +181,6 @@ impl BootAllocator {
     fn reset(&mut self) {
         self.regions = [BootRegion::empty(); MAX_BOOT_ALLOC_REGIONS];
         self.len = 0;
-        self.accessible_limit = 0;
     }
 
     fn push_region(&mut self, region: BootRegion) {
@@ -234,6 +224,7 @@ impl BootAllocator {
             let right = BootRegion {
                 start: exclude_end,
                 end: region.end,
+                kind: region.kind,
             };
             self.regions[idx].end = exclude_start;
             if self.len < self.regions.len() {
@@ -250,25 +241,23 @@ impl BootAllocator {
 
         if alloc_start <= region.start && alloc_end >= region.end {
             self.remove_region(idx);
-            self.rebuild_accessible_limit();
             return;
         }
 
         if alloc_start <= region.start {
             self.regions[idx].start = alloc_end;
-            self.rebuild_accessible_limit();
             return;
         }
 
         if alloc_end >= region.end {
             self.regions[idx].end = alloc_start;
-            self.rebuild_accessible_limit();
             return;
         }
 
         let right = BootRegion {
             start: alloc_end,
             end: region.end,
+            kind: region.kind,
         };
         self.regions[idx].end = alloc_start;
         if self.len < self.regions.len() {
@@ -276,7 +265,6 @@ impl BootAllocator {
         }
 
         self.normalize_regions();
-        self.rebuild_accessible_limit();
     }
 
     fn insert_region(&mut self, idx: usize, region: BootRegion) {
@@ -306,7 +294,6 @@ impl BootAllocator {
 
     fn normalize_regions(&mut self) {
         if self.len <= 1 {
-            self.rebuild_accessible_limit();
             return;
         }
 
@@ -333,7 +320,12 @@ impl BootAllocator {
             }
             let prev = self.regions[write - 1];
             if cur.start <= prev.end {
-                self.regions[write - 1].end = prev.end.max(cur.end);
+                if prev.kind == cur.kind {
+                    self.regions[write - 1].end = prev.end.max(cur.end);
+                } else {
+                    self.regions[write] = cur;
+                    write += 1;
+                }
             } else {
                 self.regions[write] = cur;
                 write += 1;
@@ -344,44 +336,9 @@ impl BootAllocator {
             self.regions[slot] = BootRegion::empty();
         }
         self.len = write;
-        self.rebuild_accessible_limit();
     }
 
     /// Recompute the highest currently reachable physical byte for HHDM-backed boot allocations.
-    fn rebuild_accessible_limit(&mut self) {
-        let mut limit = 0u64;
-        for region in self.regions.iter().take(self.len).copied() {
-            limit = limit.max(self.accessible_prefix_end(region));
-        }
-        self.accessible_limit = limit;
-    }
-
-    /// Return the end of the longest mapped prefix of `region` visible through the current HHDM.
-    fn accessible_prefix_end(&self, region: BootRegion) -> u64 {
-        if region.is_empty() {
-            return 0;
-        }
-
-        let total_pages = ((region.end - region.start) / PAGE_SIZE) as usize;
-        if total_pages == 0 {
-            return 0;
-        }
-
-        let mut low = 0usize;
-        let mut high = total_pages;
-        while low < high {
-            let mid = (low + high).div_ceil(2);
-            let size = mid as u64 * PAGE_SIZE;
-            if crate::memory::paging::is_hhdm_range_mapped_now(region.start, size) {
-                low = mid;
-            } else {
-                high = mid - 1;
-            }
-        }
-
-        region.start + low as u64 * PAGE_SIZE
-    }
-
     pub fn stats(&self) -> BootAllocStats {
         let mut total = 0u64;
         let mut largest = 0u64;
@@ -394,7 +351,6 @@ impl BootAllocator {
             region_count: self.len,
             total_free_bytes: total,
             largest_region_bytes: largest,
-            accessible_limit: self.accessible_limit,
         }
     }
 }
@@ -438,9 +394,14 @@ pub fn seal() {
 }
 
 pub fn alloc_stack(size: usize) -> Option<u64> {
-    let phys = alloc_bytes(size, PAGE_SIZE as usize)?;
+    let phys = alloc_bytes_accessible(size, PAGE_SIZE as usize)?;
     let span = align_up(size as u64, PAGE_SIZE);
-    Some(phys_to_virt(phys.as_u64()).saturating_add(span))
+    Some(crate::memory::physical_access::phys_to_virt_checked(phys.as_u64())?.saturating_add(span))
+}
+
+#[inline]
+fn physical_range_accessible_now(base: u64, size: u64) -> bool {
+    crate::memory::physical_access::range_accessible(base, size)
 }
 
 pub fn set_protected_ranges(ranges: &[Option<(u64, u64)>]) {
@@ -482,4 +443,51 @@ const fn align_up(value: u64, align: u64) -> u64 {
 #[inline]
 const fn align_down(value: u64, align: u64) -> u64 {
     value & !(align - 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_keeps_free_and_reclaim_separate() {
+        let mut allocator = BootAllocator::new();
+        allocator.push_region(BootRegion { start: 0x1000, end: 0x5000, kind: MemoryKind::Free });
+        allocator.push_region(BootRegion { start: 0x5000, end: 0x9000, kind: MemoryKind::Reclaim });
+        allocator.normalize_regions();
+
+        assert_eq!(allocator.len, 2);
+        assert_eq!(allocator.regions[0].kind, MemoryKind::Free);
+        assert_eq!(allocator.regions[1].kind, MemoryKind::Reclaim);
+        assert_eq!((allocator.regions[0].start, allocator.regions[0].end), (0x1000, 0x5000));
+        assert_eq!((allocator.regions[1].start, allocator.regions[1].end), (0x5000, 0x9000));
+    }
+
+    #[test]
+    fn normalize_merges_adjacent_same_kind() {
+        let mut allocator = BootAllocator::new();
+        allocator.push_region(BootRegion { start: 0x3000, end: 0x5000, kind: MemoryKind::Free });
+        allocator.push_region(BootRegion { start: 0x1000, end: 0x3000, kind: MemoryKind::Free });
+        allocator.normalize_regions();
+
+        assert_eq!(allocator.len, 1);
+        assert_eq!((allocator.regions[0].start, allocator.regions[0].end), (0x1000, 0x5000));
+    }
+
+    #[test]
+    fn split_preserves_region_kind() {
+        let mut allocator = BootAllocator::new();
+        allocator.push_region(BootRegion { start: 0x1000, end: 0x9000, kind: MemoryKind::Reclaim });
+        allocator.consume_region(0, 0x3000, 0x5000);
+
+        assert_eq!(allocator.len, 2);
+        assert!(allocator.regions[..allocator.len].iter().all(|region| region.kind == MemoryKind::Reclaim));
+    }
+
+    #[test]
+    fn align_up_and_down_cover_aligned_and_unaligned_values() {
+        assert_eq!(align_up(0x1000, PAGE_SIZE), 0x1000);
+        assert_eq!(align_up(0x1001, PAGE_SIZE), 0x2000);
+        assert_eq!(align_down(0x1fff, PAGE_SIZE), 0x1000);
+    }
 }

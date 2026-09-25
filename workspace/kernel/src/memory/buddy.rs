@@ -168,18 +168,7 @@ impl BuddyAllocator {
             );
         }
 
-        // Pass 2: reserve per-zone bitmap pools using an upper bound derived
-        // from the boot allocator's current free extents.
-        let mut candidates = [MemoryRegion {
-            base: 0,
-            size: 0,
-            kind: MemoryKind::Reserved,
-        }; boot_alloc::MAX_BOOT_ALLOC_REGIONS];
-        let candidate_len = boot_alloc::snapshot_free_regions(&mut candidates);
-        self.pass_reserve_bitmap_pools(&candidates[..candidate_len]);
-
-        ///////////
-        // Pass 3: reserve exact segment storage from the remaining accessible
+        // Pass 2: reserve exact segment storage from the remaining accessible
         // boot memory and then build the final segmented buddy layout from the boot
         // allocator's remaining free ranges after bitmap and segment-storage
         // reservations.
@@ -204,6 +193,7 @@ impl BuddyAllocator {
         let remaining_len = boot_alloc::snapshot_free_regions(&mut remaining);
 
         self.pass_build_segments(&remaining[..remaining_len]);
+        self.pass_reserve_bitmap_pools_for_segments();
         self.pass_finalize_zone_accounting();
         self.pass_setup_segment_bitmaps();
         self.pass_populate();
@@ -330,15 +320,13 @@ impl BuddyAllocator {
         }
     }
 
-    /// Reserve per-zone bitmap pools using a segmentation-safe upper bound.
-    fn pass_reserve_bitmap_pools(&mut self, memory_regions: &[MemoryRegion]) {
+    /// Reserve per-zone bitmap pools from the exact post-reservation segments.
+    fn pass_reserve_bitmap_pools_for_segments(&mut self) {
         for zi in 0..ZoneType::COUNT {
-            let managed_pages = memory_regions
-                .iter()
-                .filter_map(|region| Self::zone_intersection_aligned(region, zi))
-                .map(|(start, end)| ((end - start) / PAGE_SIZE) as usize)
+            let zone = &self.zones[zi];
+            let needed_bytes = zone.segments().iter().take(zone.segment_count)
+                .map(|segment| Self::bitmap_bytes_for_span(segment.page_count))
                 .sum::<usize>();
-            let needed_bytes = Self::bitmap_bytes_upper_bound_for_pages(managed_pages);
             let reserved_bytes = Self::align_up(needed_bytes as u64, PAGE_SIZE);
 
             if reserved_bytes == 0 {
@@ -346,10 +334,10 @@ impl BuddyAllocator {
                 continue;
             }
 
-            let pool_start = boot_alloc::alloc_bytes_accessible(needed_bytes, PAGE_SIZE as usize)
+            let pool_start = boot_alloc::alloc_bytes_accessible(reserved_bytes as usize, PAGE_SIZE as usize)
                 .unwrap_or_else(|| {
                     panic!(
-                        "Buddy allocator: unable to reserve {} bytes for zone {:?} bitmaps",
+                    "Buddy allocator: unable to reserve {} bytes for zone {:?} bitmaps",
                         needed_bytes, self.zones[zi].zone_type
                     )
                 })
@@ -365,13 +353,7 @@ impl BuddyAllocator {
             );
 
             // Zero stolen pages to initialize all bitmaps to 0.
-            unsafe {
-                core::ptr::write_bytes(
-                    phys_to_virt(pool_start) as *mut u8,
-                    0,
-                    (pool_end - pool_start) as usize,
-                );
-            }
+            unsafe { core::ptr::write_bytes(phys_to_virt(pool_start) as *mut u8, 0, reserved_bytes as usize); }
         }
     }
 
@@ -717,15 +699,15 @@ impl BuddyAllocator {
                 let mut split_order = cur_order;
                 while split_order > order {
                     split_order -= 1;
+                    let buddy_phys = frame_phys + ((1u64 << split_order) * PAGE_SIZE);
+                    let buddy_migratetype =
+                        Self::pageblock_migratetype(segment, buddy_phys, donor_migratetype);
                     Self::retag_pageblock_range(
                         segment,
                         frame_phys,
                         split_order,
                         requested_migratetype,
                     );
-                    let buddy_phys = frame_phys + ((1u64 << split_order) * PAGE_SIZE);
-                    let buddy_migratetype =
-                        Self::pageblock_migratetype(segment, buddy_phys, donor_migratetype);
                     Self::mark_block_free(buddy_phys, split_order, buddy_migratetype);
                     Self::free_list_push(segment, buddy_phys, split_order, buddy_migratetype);
                     let _ = Self::toggle_pair(segment, frame_phys, split_order);
@@ -1244,38 +1226,10 @@ impl BuddyAllocator {
         bytes
     }
 
-    /// Upper bound for bitmap storage over any segmentation of `page_count` pages.
-    ///
-    /// For a single contiguous span of `s` pages, the buddy bitmap uses
-    /// approximately `s` bits total across all orders (each order contributes
-    /// `s / 2^(order+1)` pair bits, summing to ~`s`). We add a per-segment
-    /// overhead to account for small segments where the bound is less tight.
-    /// The factor of 2 provides safety margin for edge cases (segmentation,
-    /// alignment, debug bitmaps).
-    fn bitmap_bytes_upper_bound_for_pages(page_count: usize) -> usize {
-        // Buddy bitmaps: ~1 bit per page across all orders (sum of s/2^(k+1) ≈ s)
-        // Factor of 2 for safety margin and segmentation overhead
-        #[allow(unused_mut)]
-        let mut bits = page_count.saturating_mul(2);
-        #[cfg(debug_assertions)]
-        {
-            // Debug alloc bitmap: 1 bit per page
-            bits = bits.saturating_add(page_count);
-        }
-        Self::bits_to_bytes(bits)
-            .saturating_add(Self::pageblock_tag_bytes_upper_bound_for_pages(page_count))
-    }
-
     /// Exact byte count required for pageblock migratetype tags over one contiguous span.
     #[inline]
     fn pageblock_tag_bytes_for_span(span_pages: usize) -> usize {
         span_pages.div_ceil(PAGEBLOCK_PAGES)
-    }
-
-    /// Safe upper bound for pageblock-tag storage across any segmentation of `page_count` pages.
-    #[inline]
-    fn pageblock_tag_bytes_upper_bound_for_pages(page_count: usize) -> usize {
-        page_count
     }
 
     /// Performs the align up operation.
@@ -1409,10 +1363,16 @@ impl BuddyAllocator {
     fn can_merge_with_buddy(phys: u64, order: u8, migratetype: Migratetype) -> bool {
         let meta = get_meta(PhysAddr::new(phys));
         let flags = meta.get_flags();
-        flags & frame_flags::FREE != 0
-            && meta.get_order() == order
-            && Self::migratetype_from_flags(flags) == migratetype
+        Self::buddy_flags_allow_merge(flags, meta.get_order(), order, migratetype)
             && !crate::memory::frame::block_phys_has_poison_guard(phys, order)
+    }
+
+    #[inline]
+    fn buddy_flags_allow_merge(flags: u32, actual_order: u8, order: u8, migratetype: Migratetype) -> bool {
+        flags & frame_flags::FREE != 0
+            && flags & frame_flags::LOCAL_CACHED == 0
+            && actual_order == order
+            && Self::migratetype_from_flags(flags) == migratetype
     }
 
     /// Decode the block migratetype stored in frame metadata flags.
@@ -1686,6 +1646,15 @@ impl BuddyAllocator {
             frame_phys,
             order,
             Self::free_flags_for(migratetype),
+            crate::memory::frame::REFCOUNT_UNUSED,
+        );
+    }
+
+    fn mark_block_local_cached(frame_phys: u64, migratetype: Migratetype) {
+        Self::set_block_meta(
+            frame_phys,
+            0,
+            Self::free_flags_for(migratetype) | frame_flags::LOCAL_CACHED,
             crate::memory::frame::REFCOUNT_UNUSED,
         );
     }
@@ -2207,7 +2176,7 @@ fn refill_local_cache(
             }
             // Pages parked in the local cache are logically free and must
             // therefore carry the free-list sentinel invariant.
-            BuddyAllocator::mark_block_free(phys, 0, migratetype);
+            BuddyAllocator::mark_block_local_cached(phys, migratetype);
             if cache.push(frame).is_ok() {
                 local_cached_inc_phys(phys, migratetype);
             } else {
@@ -2299,7 +2268,7 @@ fn free_order0_cached(frame: PhysFrame, migratetype: Migratetype) {
         if cache.push(frame).is_ok() {
             // Mark free only on the success path: the incoming frame transitions
             // from "caller-allocated" to "cache sentinel" (REFCOUNT_UNUSED).
-            BuddyAllocator::mark_block_free(frame.start_address.as_u64(), 0, migratetype);
+            BuddyAllocator::mark_block_local_cached(frame.start_address.as_u64(), migratetype);
             local_cached_inc_phys(frame.start_address.as_u64(), migratetype);
             return;
         }
@@ -2311,7 +2280,7 @@ fn free_order0_cached(frame: PhysFrame, migratetype: Migratetype) {
         }
 
         if cache.push(frame).is_ok() {
-            BuddyAllocator::mark_block_free(frame.start_address.as_u64(), 0, migratetype);
+            BuddyAllocator::mark_block_local_cached(frame.start_address.as_u64(), migratetype);
             local_cached_inc_phys(frame.start_address.as_u64(), migratetype);
         } else {
             // Still full after spilling : the incoming frame joins the spill batch.
@@ -2824,4 +2793,26 @@ pub fn compaction_threshold() -> usize {
     COMPACTION_FRAGMENTATION_THRESHOLD.load(AtomicOrdering::Relaxed)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    #[test]
+    fn local_cached_frames_are_not_coalescible() {
+        let flags = frame_flags::FREE | frame_flags::LOCAL_CACHED;
+        assert!(BuddyAllocator::buddy_flags_allow_merge(flags, 0, 0, Migratetype::Unmovable) == false);
+        assert!(BuddyAllocator::buddy_flags_allow_merge(frame_flags::FREE, 0, 0, Migratetype::Unmovable));
+    }
+
+    #[test]
+    fn bitmap_pool_exact_size_covers_many_small_segments() {
+        let sizes = [1usize, 1, 3, 7, 16, 257];
+        let total: usize = sizes.iter().map(|&pages| BuddyAllocator::bitmap_bytes_for_span(pages)).sum();
+        let mut independently_summed = 0usize;
+        for pages in sizes {
+            independently_summed += BuddyAllocator::bitmap_bytes_for_span(pages);
+        }
+        assert_eq!(total, independently_summed);
+        assert!(total >= sizes.iter().sum::<usize>() / 8);
+    }
+}

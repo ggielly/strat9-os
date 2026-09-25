@@ -248,14 +248,8 @@ impl FrameAllocOptions {
         // SAFETY: `phys_to_virt(phys)` is a valid HHDM address covering exactly
         // `PAGE_SIZE` bytes.  The buddy allocator guarantees we have exclusive
         // ownership of these bytes for the duration of this function.
-        if self.zeroed {
-            unsafe {
-                ptr::write_bytes(
-                    crate::memory::phys_to_virt(phys) as *mut u8,
-                    0,
-                    PAGE_SIZE as usize,
-                );
-            }
+        if self.zeroed && !crate::memory::physical_access::zero_frame(frame.start_address) {
+            panic!("frame allocator: allocated physical frame {phys:#x} is not currently accessible");
         }
 
         // Step 3 : stamp purpose flags with `Release` ordering.
@@ -321,6 +315,8 @@ pub mod frame_flags {
     pub const USER: u32 = 1 << 11;
     /// The frame is poisoned and must not be recycled as-is.
     pub const POISONED: u32 = 1 << 12;
+    /// Frame is parked in a per-CPU cache and is not on a buddy free list.
+    pub const LOCAL_CACHED: u32 = 1 << 15;
     /// The frame belongs to a movable page class.
     pub const MOVABLE: u32 = 1 << 13;
     /// Frame eligible for copy-on-write.
@@ -520,7 +516,7 @@ impl MetaSlot {
     #[inline]
     pub fn mark_poisoned(&self) {
         self.fetch_or_guard(meta_guard::POISONED);
-        self.set_flags(self.get_flags() | frame_flags::POISONED);
+        self.or_flags(frame_flags::POISONED);
     }
 
     /// `(generation, guard_bits, vtable_bits)` for serial / shell diagnostics.
@@ -614,7 +610,7 @@ impl MetaSlot {
 
     #[inline]
     pub fn dec_ref(&self) -> u32 {
-        self.refcount.fetch_sub(1, Ordering::Release)
+        self.refcount.fetch_sub(1, Ordering::AcqRel)
     }
 
     #[inline]
@@ -889,5 +885,29 @@ pub trait FrameAllocator {
     /// Allocate a single frame (convenience method)
     fn alloc_frame(&mut self, token: &IrqDisabledToken) -> Result<PhysFrame, AllocError> {
         self.alloc(0, token)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn poison_flag_update_preserves_existing_flags() {
+        let meta = MetaSlot::new();
+        meta.set_flags(frame_flags::KERNEL | frame_flags::ALLOCATED);
+        meta.mark_poisoned();
+
+        assert_eq!(
+            meta.get_flags(),
+            frame_flags::KERNEL | frame_flags::ALLOCATED | frame_flags::POISONED
+        );
+        assert!(meta.is_guard_poisoned());
+    }
+
+    #[test]
+    fn local_cache_flag_is_separate_from_allocated_and_free_states() {
+        assert_ne!(frame_flags::LOCAL_CACHED & frame_flags::FREE, frame_flags::FREE);
+        assert_ne!(frame_flags::LOCAL_CACHED & frame_flags::ALLOCATED, frame_flags::ALLOCATED);
     }
 }
