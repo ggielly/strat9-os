@@ -70,6 +70,16 @@ mod neutral {
     }
     
     impl PhysFrame<Size4KiB> {
+        pub fn from_start_address(addr: PhysAddr) -> Result<Self, ()> {
+            if !addr.is_aligned(SIZE_4KIB) {
+                return Err(());
+            }
+            Ok(Self {
+                start: addr,
+                _size: core::marker::PhantomData,
+            })
+        }
+
         pub fn containing_address(addr: PhysAddr) -> Self {
             Self {
                 start: PhysAddr::new(addr.as_u64() & !0xFFF),
@@ -79,6 +89,16 @@ mod neutral {
     }
     
     impl PhysFrame<Size2MiB> {
+        pub fn from_start_address(addr: PhysAddr) -> Result<Self, ()> {
+            if !addr.is_aligned(SIZE_2MIB) {
+                return Err(());
+            }
+            Ok(Self {
+                start: addr,
+                _size: core::marker::PhantomData,
+            })
+        }
+
         pub fn containing_address(addr: PhysAddr) -> Self {
             Self {
                 start: PhysAddr::new(addr.as_u64() & !(SIZE_2MIB - 1)),

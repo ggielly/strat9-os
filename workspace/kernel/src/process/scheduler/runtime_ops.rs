@@ -549,6 +549,7 @@ pub fn maybe_preempt() {
 /// stack. This lets us save the outgoing task immediately, select the next
 /// runnable task under the scheduler lock, and return an `iretq`-compatible
 /// frame pointer for the raw timer stub.
+#[cfg(target_arch = "x86_64")]
 pub fn maybe_preempt_from_interrupt(
     cpu_index: usize,
     current_frame: &mut crate::syscall::SyscallFrame,

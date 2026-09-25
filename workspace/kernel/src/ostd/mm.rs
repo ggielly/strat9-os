@@ -15,7 +15,7 @@ extern crate alloc;
 use core::{marker::PhantomData, ops::Range};
 
 /// Physical address type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, core::hash::Hash)]
 #[repr(transparent)]
 pub struct PhysAddr(u64);
 
@@ -180,6 +180,12 @@ impl core::ops::Add<u64> for PhysAddr {
     type Output = PhysAddr;
     fn add(self, rhs: u64) -> PhysAddr {
         PhysAddr(self.0 + rhs)
+    }
+}
+
+impl core::ops::AddAssign<u64> for PhysAddr {
+    fn add_assign(&mut self, rhs: u64) {
+        self.0 += rhs;
     }
 }
 

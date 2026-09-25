@@ -86,8 +86,8 @@ pub mod percpu {
     pub fn is_preemptible() -> bool {
         panic!("RISC-V preemption state is not implemented")
     }
-    pub fn cpu_index_from_gs() -> usize {
-        panic!("GS-based CPU lookup is unavailable on RISC-V")
+    pub fn cpu_index_from_gs() -> Option<usize> {
+        Some(current_cpu_index())
     }
 }
 
@@ -98,9 +98,9 @@ pub mod percpu {
 
 pub mod tlb {
     pub fn init() { panic!("RISC-V TLB operations are not implemented (R2.3)") }
-    pub fn local_page(_vaddr: u64) { panic!("RISC-V TLB operations are not implemented (R2.3)") }
-    pub fn local_range(_start: u64, _end: u64) { panic!("RISC-V TLB operations are not implemented (R2.3)") }
-    pub fn shootdown_range(_start: u64, _end: u64) { panic!("RISC-V TLB shootdown is not implemented (R6)") }
+    pub fn local_page(_vaddr: crate::arch::xshim::VirtAddr) { panic!("RISC-V TLB operations are not implemented (R2.3)") }
+    pub fn local_range(_start: crate::arch::xshim::VirtAddr, _end: crate::arch::xshim::VirtAddr) { panic!("RISC-V TLB operations are not implemented (R2.3)") }
+    pub fn shootdown_range(_start: crate::arch::xshim::VirtAddr, _end: crate::arch::xshim::VirtAddr) { panic!("RISC-V TLB shootdown is not implemented (R6)") }
     pub fn shootdown_all() { panic!("RISC-V TLB shootdown is not implemented (R6)") }
 }
 
@@ -156,8 +156,8 @@ pub mod gdt_selectors {
 
 pub mod tss {
     pub fn init() { panic!("RISC-V kernel stack setup via sscratch is not implemented (R2.5)") }
-    pub fn set_kernel_stack(_top: u64) { panic!("RISC-V kernel stack setup via sscratch is not implemented (R2.5)") }
-    pub fn set_kernel_stack_for(_cpu: usize, _top: u64) { panic!("RISC-V kernel stack setup via sscratch is not implemented (R2.5)") }
+    pub fn set_kernel_stack(_top: crate::arch::xshim::VirtAddr) { panic!("RISC-V kernel stack setup via sscratch is not implemented (R2.5)") }
+    pub fn set_kernel_stack_for(_cpu: usize, _top: crate::arch::xshim::VirtAddr) { panic!("RISC-V kernel stack setup via sscratch is not implemented (R2.5)") }
     pub fn kernel_stack_for(_cpu: usize) -> Option<crate::ostd::mm::VirtAddr> {
         panic!("RISC-V kernel stack lookup via sscratch is not implemented (R2.5)")
     }
@@ -375,6 +375,7 @@ pub mod pci_full {
         pub device_id: Option<u16>,
         pub class_code: Option<u8>,
         pub subclass: Option<u8>,
+        pub prog_if: Option<u8>,
     }
     impl ProbeCriteria {
         pub fn new() -> Self {

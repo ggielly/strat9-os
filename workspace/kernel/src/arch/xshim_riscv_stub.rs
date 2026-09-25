@@ -122,9 +122,8 @@ pub mod structures {
         }
         pub trait Mapper<S> {}
         pub trait Translate {
-            fn translate(&self, _a: VirtAddr) -> Option<(PhysAddr, PageTableFlags)> {
-                panic!("RISC-V compatibility Translate trait is not implemented")
-            }
+            fn translate(&self, _a: VirtAddr) -> crate::arch::xshim::TranslateResult;
+            fn translate_addr(&self, _a: VirtAddr) -> Option<PhysAddr>;
         }
         /// Sv48 page-table mapper over the active root (real impl in R2).
         pub struct OffsetPageTable<'a> {
@@ -153,7 +152,7 @@ pub mod structures {
             pub fn translate(
                 &self,
                 vaddr: crate::arch::xshim::VirtAddr,
-            ) -> Option<crate::arch::xshim::TranslateResult> {
+            ) -> crate::arch::xshim::TranslateResult {
                 let va = vaddr.as_u64();
                 let indexes = [
                     ((va >> 39) & 0x1FF) as usize,
@@ -164,13 +163,13 @@ pub mod structures {
                 let mut table = self.l4 as *const PageTable;
                 for (level, idx) in indexes.iter().enumerate() {
                     if table.is_null() {
-                        return None;
+                        return crate::arch::xshim::TranslateResult::NotMapped;
                     }
                     // SAFETY: the root is already mapped; child table PPNs are converted through the HHDM.
                     let pt = unsafe { &*table };
                     let pte = &pt[*idx];
                     if pte.0 & 0x1 == 0 {
-                        return None;
+                        return crate::arch::xshim::TranslateResult::NotMapped;
                     }
                     // Leaf?
                     if pte.0 & 0xE != 0 {
@@ -186,32 +185,41 @@ pub mod structures {
                         if level < 3 {
                             flags |= crate::arch::xshim::PageTableFlags::HUGE_PAGE;
                         }
-                        return Some(crate::arch::xshim::TranslateResult::Mapped {
+                        return crate::arch::xshim::TranslateResult::Mapped {
                             frame: crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
                                 crate::arch::xshim::PhysAddr::new(pa),
                             ),
                             offset: va & 0xFFF,
                             flags,
-                        });
+                        };
                     }
                     // Next level pointer
                     let child_phys = ((pte.0 >> 10) & 0x0000_0FFF_FFFF_FFFF) << 12;
                     table = (child_phys + self.phys_offset) as *const PageTable;
                 }
-                None
+                crate::arch::xshim::TranslateResult::NotMapped
             }
 
             pub fn translate_addr(
                 &self,
                 vaddr: crate::arch::xshim::VirtAddr,
             ) -> Option<crate::arch::xshim::PhysAddr> {
-                self.translate(vaddr).and_then(|r| match r {
+                match self.translate(vaddr) {
                     crate::arch::xshim::TranslateResult::Mapped { frame, offset, .. } => {
                         Some(frame.start_address() + offset)
                     }
                     crate::arch::xshim::TranslateResult::NotMapped
                     | crate::arch::xshim::TranslateResult::InvalidFrameAddress(_) => None,
-                })
+                }
+            }
+        }
+        impl Translate for OffsetPageTable<'_> {
+            fn translate(&self, vaddr: VirtAddr) -> crate::arch::xshim::TranslateResult {
+                OffsetPageTable::translate(self, vaddr)
+            }
+
+            fn translate_addr(&self, vaddr: VirtAddr) -> Option<PhysAddr> {
+                OffsetPageTable::translate_addr(self, vaddr)
             }
         }
         pub mod mapper {
@@ -254,11 +262,14 @@ pub mod structures {
                 if self.0 & 0x8 == 0 { f |= crate::arch::xshim::PageTableFlags::NO_EXECUTE; }
                 f
             }
-            pub fn frame(&self) -> crate::arch::xshim::PhysFrame<Size4KiB> {
+            pub fn frame(&self) -> Result<crate::arch::xshim::PhysFrame<Size4KiB>, ()> {
+                if self.0 & 0x1 == 0 {
+                    return Err(());
+                }
                 let ppn = (self.0 >> 10) & 0x0000_0FFF_FFFF_FFFF;
-                crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
+                Ok(crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
                     crate::arch::xshim::PhysAddr::new(ppn << 12),
-                )
+                ))
             }
         }
         impl Default for PageTableEntry {

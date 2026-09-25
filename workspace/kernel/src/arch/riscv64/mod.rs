@@ -127,7 +127,7 @@ pub mod vga {
     pub fn screen_size() -> (usize, usize) {
         (0, 0)
     }
-    pub fn begin_frame() {}
+    pub fn begin_frame() -> bool { false }
     pub fn end_frame() {}
     pub fn fill_rect(_x: i32, _y: i32, _w: i32, _h: i32, _color: u32) {}
     pub fn text_rows() -> usize {
@@ -155,7 +155,7 @@ pub mod vga {
     pub fn scrollbar_drag_to(_x: usize, _y: usize) {}
     pub fn scrollbar_click(_x: usize, _y: usize) {}
     pub fn update_mouse_cursor(_x: usize, _y: usize) {}
-    pub fn panic_draw_direct(_msg: &str) {}
+    pub fn panic_draw_direct(_lines: &[&str]) {}
     pub fn vga_debug_writeln(_s: &str) {}
 
 }
@@ -171,6 +171,7 @@ pub mod vga_shim {
     }
     impl VgaWriterShim {
         pub fn clear(&mut self) {}
+        pub fn set_rgb_color(&mut self, _fg: super::vga::RgbColor, _bg: super::vga::RgbColor) {}
     }
     pub static VGA_WRITER: spin::Mutex<VgaWriterShim> = spin::Mutex::new(VgaWriterShim);
 }

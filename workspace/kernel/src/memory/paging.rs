@@ -86,7 +86,7 @@ impl X86FrameAllocator<Size4KiB> for BuddyFrameAllocator {
 static mut PAGING_READY: bool = false;
 
 /// Physical address of the kernel's level-4 page table (set at init, never changes).
-static mut KERNEL_CR3: PhysAddr = PhysAddr::new_truncate(0);
+static mut KERNEL_CR3: PhysAddr = PhysAddr::new(0);
 
 /// Serializes mutations of the canonical kernel page tables.
 ///

@@ -772,32 +772,26 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     vga_println!("[OK] Serial port initialized");
     vga_println!("[OK] Memory manager active");
 
-    // =============================================
-    // Phase 4a : TSS (Task State Segment)
-    // =============================================
-    serial_println!("[init] TSS...");
-    vga_println!("[..] Initializing TSS...");
-    arch::tss::init();
-    serial_println!("[init] TSS initialized.");
-    vga_println!("[OK] TSS initialized");
+    #[cfg(target_arch = "x86_64")]
+    {
+        serial_println!("[init] TSS...");
+        vga_println!("[..] Initializing TSS...");
+        arch::tss::init();
+        serial_println!("[init] TSS initialized.");
+        vga_println!("[OK] TSS initialized");
 
-    // =============================================
-    // Phase 4b : GDT (global Descriptor Table)
-    // =============================================
-    serial_println!("[init] GDT...");
-    vga_println!("[..] Initializing GDT...");
-    arch::gdt::init();
-    serial_println!("[init] GDT initialized.");
-    vga_println!("[OK] GDT loaded (with TSS)");
+        serial_println!("[init] GDT...");
+        vga_println!("[..] Initializing GDT...");
+        arch::gdt::init();
+        serial_println!("[init] GDT initialized.");
+        vga_println!("[OK] GDT loaded (with TSS)");
 
-    // =============================================
-    // Phase 4c: SYSCALL/SYSRET MSR configuration
-    // =============================================
-    serial_println!("[init] SYSCALL/SYSRET...");
-    vga_println!("[..] Initializing SYSCALL/SYSRET...");
-    arch::syscall::init();
-    serial_println!("[init] SYSCALL/SYSRET initialized.");
-    vga_println!("[OK] SYSCALL/SYSRET configured");
+        serial_println!("[init] SYSCALL/SYSRET...");
+        vga_println!("[..] Initializing SYSCALL/SYSRET...");
+        arch::syscall::init();
+        serial_println!("[init] SYSCALL/SYSRET initialized.");
+        vga_println!("[OK] SYSCALL/SYSRET configured");
+    }
 
     // =============================================
     // Phase 4d: component system - Bootstrap stage
@@ -1070,12 +1064,15 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         vga_println!("[OK] AHCI probe done");
         arch::speaker::beep_phase(19); // AHCI
 
-        serial_println!("[init] Initializing ATA/IDE...");
-        vga_println!("[..] Looking for ATA/IDE devices...");
-        hardware::storage::ata_legacy::init();
-        serial_println!("[init] ATA/IDE probe done.");
-        vga_println!("[OK] ATA/IDE probe done");
-        arch::speaker::beep_phase(20); // ATA
+        #[cfg(target_arch = "x86_64")]
+        {
+            serial_println!("[init] Initializing ATA/IDE...");
+            vga_println!("[..] Looking for ATA/IDE devices...");
+            hardware::storage::ata_legacy::init();
+            serial_println!("[init] ATA/IDE probe done.");
+            vga_println!("[OK] ATA/IDE probe done");
+            arch::speaker::beep_phase(20);
+        }
 
         serial_println!("[init] Initializing NVMe...");
         vga_println!("[..] Looking for NVMe controllers...");

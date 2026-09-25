@@ -973,16 +973,23 @@ fn parse_module_header(data: &[u8]) -> Result<Option<Strat9ModuleHeader>, Syscal
     if header.version != 1 && header.version != 2 {
         return Err(SyscallError::InvalidArgument);
     }
+    #[cfg(target_arch = "riscv64")]
+    if header.cpu_arch == 0 {
+        return Err(SyscallError::NotSupported);
+    }
     if header.cpu_arch != 0 {
         return Err(SyscallError::InvalidArgument);
     }
 
+    #[cfg(target_arch = "x86_64")]
     let version = unsafe { core::ptr::addr_of!(header.version).read_unaligned() };
+    #[cfg(target_arch = "x86_64")]
     let req = if version >= 2 {
         unsafe { core::ptr::addr_of!(header.cpu_features_required).read_unaligned() }
     } else {
         0
     };
+    #[cfg(target_arch = "x86_64")]
     if req != 0 {
         let host = crate::arch::cpuid::host();
         let required = crate::arch::cpuid::CpuFeatures::from_bits_truncate(req);
@@ -1413,9 +1420,18 @@ fn resolve_volume_resource_from_dev_path(dev_path: &str) -> Result<usize, Syscal
 
 /// Compute the effective XCR0 mask for a silo from its allowed CPU features.
 fn compute_silo_xcr0(config: &SiloConfig) -> u64 {
-    use crate::arch::cpuid::{xcr0_for_features, CpuFeatures};
-    let allowed = CpuFeatures::from_bits_truncate(config.cpu_features_allowed);
-    xcr0_for_features(allowed)
+    #[cfg(target_arch = "x86_64")]
+    {
+        use crate::arch::cpuid::{xcr0_for_features, CpuFeatures};
+        let allowed = CpuFeatures::from_bits_truncate(config.cpu_features_allowed);
+        xcr0_for_features(allowed)
+    }
+
+    #[cfg(target_arch = "riscv64")]
+    {
+        let _ = config;
+        0
+    }
 }
 
 /// Performs the kernel spawn strate operation.

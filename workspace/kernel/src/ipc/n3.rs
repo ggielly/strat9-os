@@ -416,15 +416,22 @@ pub fn free_pcid(pcid: u16) {
 
 /// Check if PCID feature is available on this CPU.
 pub fn pcid_available() -> bool {
-    // 1. CPUID check: bit 17 of ECX after CPUID(EAX=1) indicates PCID support.
-    let (_, _, ecx, _) = crate::arch::cpuid(1, 0);
-    if ecx & (1 << 17) == 0 {
+    #[cfg(not(target_arch = "x86_64"))]
+    {
         return false;
     }
-    // 2. Check CR4.PCIDE (bit 17) is actually set (may be masked by hypervisor).
-    //    Intel SDM Vol.3A §4.10.4: CR4.PCIDE = 1 enables PCID in CR3.
-    let cr4 = crate::arch::paging_compat::registers::control::Cr4::read();
-    cr4.contains(crate::arch::paging_compat::registers::control::Cr4Flags::PCID)
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        // CPUID leaf 1 ECX bit 17 reports PCID support.
+        let (_, _, ecx, _) = crate::arch::cpuid(1, 0);
+        if ecx & (1 << 17) == 0 {
+            return false;
+        }
+        // CR4.PCIDE must also be enabled before CR3 may carry a PCID.
+        let cr4 = crate::arch::paging_compat::registers::control::Cr4::read();
+        cr4.contains(crate::arch::paging_compat::registers::control::Cr4Flags::PCID)
+    }
 }
 
 /// Select the N3 tier based on actual PCID capability.
@@ -1188,6 +1195,11 @@ impl N3Transport {
     /// Allocates a MigrationFrame and a shared message buffer, maps them
     /// in both address spaces, and registers the endpoint with the watchdog.
     pub fn new(sender_task_id: TaskId, receiver_task_id: TaskId) -> Result<Self, IpcError> {
+        if !cfg!(target_arch = "x86_64") {
+            log::warn!("N3 MMU migration is unavailable on this architecture");
+            return Err(IpcError::TransportFailed);
+        }
+
         let (frame_idx, _frame_ptr) = alloc_frame_slot().ok_or(IpcError::TransportFailed)?;
 
         let frame_phys = frame_pool_phys_addr(frame_idx);

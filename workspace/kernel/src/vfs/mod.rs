@@ -1263,6 +1263,7 @@ pub fn init() {
     kernel_scheme.register("pci/count", pci_count.as_ptr(), pci_count.len());
 
     // /sys/cpu/* : CPU information scheme (Plan9-style)
+    #[cfg(target_arch = "x86_64")]
     {
         let host = crate::arch::cpuid::host();
         // VFS initializes before SMP/percpu registration is complete.
@@ -1313,6 +1314,22 @@ pub fn init() {
                 .into_boxed_slice(),
         );
         kernel_scheme.register("cpu/xsave_size", xsave_s.as_ptr(), xsave_s.len());
+    }
+
+    #[cfg(target_arch = "riscv64")]
+    {
+        let cpu_count = crate::arch::percpu::get_cpu_count().max(1);
+        let mut register_cpu_value = |path: &str, value: &str| {
+            let bytes = Box::leak(alloc::format!("{}\n", value).into_bytes().into_boxed_slice());
+            kernel_scheme.register(path, bytes.as_ptr(), bytes.len());
+        };
+
+        register_cpu_value("cpu/count", &alloc::format!("{}", cpu_count));
+        register_cpu_value("cpu/vendor", "not discovered");
+        register_cpu_value("cpu/model", "not discovered");
+        register_cpu_value("cpu/features", "not discovered (DTB support pending)");
+        register_cpu_value("cpu/xcr0", "not applicable");
+        register_cpu_value("cpu/xsave_size", "not applicable");
     }
 
     let kernel_scheme = Arc::new(kernel_scheme);
