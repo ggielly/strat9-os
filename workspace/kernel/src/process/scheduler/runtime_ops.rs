@@ -31,13 +31,15 @@ pub fn init_scheduler() {
     *scheduler = Some(new_sched);
     drop(scheduler); // Release the lock
 
-    // Only initialize legacy PIT if APIC timer is not active
+    #[cfg(target_arch = "x86_64")]
     if !timer::is_apic_timer_active() {
-        timer::init_pit(100); // 100Hz = 10ms interval for quantum
+        timer::init_pit(100);
         log::info!("Scheduler: using legacy PIT timer (100Hz)");
     } else {
         log::info!("Scheduler: using APIC timer (100Hz)");
     }
+    #[cfg(target_arch = "riscv64")]
+    log::info!("Scheduler: using S-mode timer (100Hz)");
     crate::serial_println!("[trace][sched] init_scheduler exit");
 }
 

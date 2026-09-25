@@ -54,10 +54,8 @@ pub fn handle_interrupt() {
         .saturating_add(interval);
     NEXT_DEADLINE.store(next, Ordering::Release);
     program_deadline(next);
-    let tick = TICKS.fetch_add(1, Ordering::AcqRel) + 1;
-    if tick % 100 == 1 {
-        super::serial::_print(format_args!("[strat9] timer tick {}\r\n", tick));
-    }
+    crate::process::scheduler::timer_tick();
+    TICKS.fetch_add(1, Ordering::AcqRel);
 }
 
 pub fn ticks() -> u64 {

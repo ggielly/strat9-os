@@ -79,12 +79,14 @@
 
 use super::task::{Pid, Task, TaskId, TaskPriority, TaskState, Tid};
 use crate::{
-    arch::{apic, percpu, restore_flags, save_flags_and_cli, timer, timer::NS_PER_TICK},
+    arch::{apic, percpu, restore_flags, save_flags_and_cli, timer::NS_PER_TICK},
     sync::SpinLock,
 };
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::RwLock as SpinRwLock;
+#[cfg(target_arch = "x86_64")]
+use crate::arch::timer;
 
 /// Per-CPU scheduler tick counters used for CPU usage estimation.
 ///

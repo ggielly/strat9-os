@@ -183,7 +183,7 @@ Le build release observé le 2026-09-25 échoue avec 99 erreurs et 29 avertissem
 
 ## Prochain incrément recommandé
 
-Le contrat d'entrée OpenSBI, la découverte DTB, l’initialisation buddy, Sv39, le trap handler S‑mode, le PLIC, le timer à 100 Hz, le scan PCI ECAM, la découverte des nœuds VirtIO‑MMIO, l’état d’un hart via `sscratch` et le frame/context switch RISC‑V minimal avec auto-test au boot sont matérialisés. Les 16 plages MMIO découvertes dans le DTB sont mappées avant l’activation de `satp`. L’étape suivante est l’intégration de ce contexte dans le scheduler, puis un device VirtIO‑MMIO.
+Le contrat d'entrée OpenSBI, la découverte DTB, l’initialisation buddy, Sv39, le trap handler S‑mode, le PLIC, le timer à 100 Hz avec tick scheduler, le scan PCI ECAM, la découverte des nœuds VirtIO‑MMIO, l’état d’un hart via `sscratch` et le frame/context switch RISC‑V minimal avec auto-test au boot sont matérialisés. Les 16 plages MMIO découvertes dans le DTB sont mappées avant l’activation de `satp`. L’étape suivante est l’initialisation du scheduler et de ses tasks, puis un device VirtIO‑MMIO.
 
 ## Références du dépôt
 
