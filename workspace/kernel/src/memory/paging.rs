@@ -101,6 +101,13 @@ pub fn is_initialized() -> bool {
     unsafe { *(&raw const PAGING_READY) }
 }
 
+#[cfg(target_arch = "riscv64")]
+pub fn mark_riscv_paging_active() {
+    unsafe {
+        *(&raw mut PAGING_READY) = true;
+    }
+}
+
 /// Initialize the paging subsystem.
 ///
 /// Reads the active CR3 (level-4 page table) and creates an `OffsetPageTable`

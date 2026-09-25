@@ -16,9 +16,9 @@ Le port doit d’abord atteindre un démarrage déterministe sur un seul hart, u
 | Façade d’architecture | `workspace/kernel/src/arch/facade_riscv.rs` et les types neutres de `arch::xshim` existent. | L’abstraction est amorcée, mais des chemins partagés et la compatibilité de pagination restent à assainir. |
 | Compatibilité x86 | Plusieurs interfaces sans équivalent RISC-V échouent maintenant explicitement plutôt que de simuler un succès. | Conserver ce comportement jusqu’à l’existence d’une implémentation réelle. |
 | Capacités CPU | Les sorties RISC-V `/proc/cpuinfo` et `/sys/cpu/*` indiquent que vendor, modèle et ISA ne sont pas encore découverts ; le filtrage des fonctionnalités de composants reste x86-only. | Ajouter la découverte ISA via DTB avant d’annoncer des capacités RISC-V ou d’accepter un format de composant RISC-V. |
-| Entrée et boot | Le contrat OpenSBI, l'entrée `_start`, le linker RISC-V et la validation minimale du DTB sont présents ; le chemin d'entrée s'arrête après validation. | Le démarrage kernel complet et la découverte des ressources ne sont pas encore validés. |
+| Entrée et boot | Le contrat OpenSBI, l'entrée `_start`, le linker RISC-V, le DTB, le buddy et Sv39 sont activés au boot ; le chemin s'arrête après activation paginée. | Traps, timer et espace utilisateur restent à installer. |
 | Boot ABI | `workspace/abi/src/boot.rs` définit `STRAT9_BOOT_ABI_VERSION = 1` et un `KernelArgs` de 160 octets avec des champs ACPI. | Le DTB ne peut pas être ajouté silencieusement à cette structure : tout changement doit être versionné et coordonné avec le chargeur. |
-| Mémoire virtuelle | `arch/xshim_riscv_stub.rs` contient une traduction Sv48 partielle et des opérations PTE, mais ne fournit pas encore un mapper RISC-V intégré au démarrage. Le parseur FDT extrait les régions RAM et réservées, et le buddy s’initialise via l’identité physique OpenSBI. | L’accès est encore sans pagination ; le mapper Sv39/Sv48 et les traps restent à implémenter. |
+| Mémoire virtuelle | `arch/xshim_riscv_stub.rs` contient une traduction Sv48 partielle et des opérations PTE, mais ne fournit pas encore un mapper RISC‑V complet. Le mapper Sv39 de `arch/riscv64/paging.rs` mappe la RAM et les 16 plages MMIO du DTB, puis active `satp`. | Le chemin physique direct et les traps restent à brancher sur ce mapper. |
 | Interruptions et temps | Les interfaces héritées IDT/PIC/PIT/APIC échouent explicitement côté RISC-V. | Trap vector, timer SBI et contrôleur d’interruptions RISC-V restent à réaliser. |
 | Périphériques | La console série RISC-V est amorcée ; le modèle de pilote reste défini par `doc/HARDWARE.md` et `docs-site/src/driver-model.md`. | Pas de découverte DTB ni de pilote VirtIO-MMIO complet établi. |
 | Exécution | Pas de contexte RISC-V, transition utilisateur, syscall `ecall` ou gestionnaire de traps complet. | Le noyau ne peut pas encore exécuter les charges de travail attendues. |
@@ -174,7 +174,7 @@ Le build release observé le 2026-09-25 échoue avec 99 erreurs et 29 avertissem
 
 ## Décisions à prendre avant implémentation
 
-- **Mode de pages :** Sv39 est retenu pour l’étape QEMU `virt` (512 Mio, 39 bits virtuels, 3 niveaux) ; Sv48 reste à réévaluer pour les cibles avec un espace virtuel plus large. Les tables Sv39 sont construites au boot, mais `satp` n’est pas encore activé tant que les plages MMIO du DTB ne sont pas mappées.
+- **Mode de pages :** Sv39 est retenu pour l’étape QEMU `virt` (512 Mio, 39 bits virtuels, 3 niveaux) ; Sv48 reste à réévaluer pour les cibles avec un espace virtuel plus large. Les tables Sv39 et les plages MMIO découvertes dans le DTB sont construites au boot, puis `satp` est activé après le handoff buddy.
 - **Boot ABI :** choisir extension versionnée ou contrat d’entrée RISC-V distinct ; documenter le producteur et le consommateur du DTB ainsi que sa durée de vie.
 - **SBI :** fixer la version minimale et les extensions d’extension SBI nécessaires pour timer et démarrage secondaire ; définir le comportement lorsque le firmware ne les expose pas.
 - **État flottant :** fixer les extensions réellement activées et la politique de sauvegarde/restauration pour les tâches.
@@ -183,7 +183,7 @@ Le build release observé le 2026-09-25 échoue avec 99 erreurs et 29 avertissem
 
 ## Prochain incrément recommandé
 
-Le contrat d'entrée OpenSBI, la découverte DTB et l’initialisation buddy sont matérialisés. Sv39 est choisi pour QEMU `virt` et les tables sont construites sans activer `satp` ; l’étape suivante est de découvrir et mapper les plages MMIO du DTB, puis d’activer la pagination avant d’installer les traps.
+Le contrat d'entrée OpenSBI, la découverte DTB, l’initialisation buddy et Sv39 sont matérialisés. Les 16 plages MMIO découvertes dans le DTB sont mappées avant l’activation de `satp`. L’étape suivante est d’installer `stvec`/le trap frame, puis le timer SBI et les accès mémoire physique via le futur mapper de kernel.
 
 ## Références du dépôt
 

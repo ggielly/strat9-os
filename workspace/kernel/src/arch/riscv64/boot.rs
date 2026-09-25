@@ -11,6 +11,7 @@ const FDT_MIN_VERSION: u32 = 16;
 const FDT_MAX_VERSION: u32 = 17;
 const MAX_DTB_SIZE: usize = 16 * 1024 * 1024;
 pub const MAX_DTB_MEMORY_REGIONS: usize = 128;
+pub const MAX_DTB_PLATFORM_REGIONS: usize = 64;
 const MAX_FDT_DEPTH: usize = 32;
 const FDT_BEGIN_NODE: u32 = 1;
 const FDT_END_NODE: u32 = 2;
@@ -55,6 +56,7 @@ pub enum DtbError {
     },
     NoMemoryRegions,
     NoRamRegions,
+    NoPlatformRegions,
     TooManyMemoryRegions,
     ZeroSizedMemoryRegion {
         index: usize,
@@ -88,6 +90,16 @@ pub struct RiscvMemoryRegion {
     pub base: u64,
     pub size: u64,
     pub kind: RiscvMemoryRegionKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RiscvPlatformRegion {
+    pub base: u64,
+    pub size: u64,
+}
+
+impl RiscvPlatformRegion {
+    pub const EMPTY: Self = Self { base: 0, size: 0 };
 }
 
 impl RiscvMemoryRegion {
@@ -347,6 +359,161 @@ impl RiscvBootInfo {
         Ok(count)
     }
 
+    pub fn platform_regions(&self, out: &mut [RiscvPlatformRegion]) -> Result<usize, DtbError> {
+        let data = self.bytes();
+        let struct_end = self.struct_offset.checked_add(self.struct_len).ok_or(
+            DtbError::MalformedStructure {
+                offset: self.struct_offset,
+                token: 0,
+            },
+        )?;
+        let mut cursor = self.struct_offset;
+        let mut depth = 0usize;
+        let mut skip_nodes = [false; MAX_FDT_DEPTH];
+        let mut address_cells = [0u32; MAX_FDT_DEPTH];
+        let mut size_cells = [0u32; MAX_FDT_DEPTH];
+        let mut reg_offsets = [0usize; MAX_FDT_DEPTH];
+        let mut reg_lens = [0usize; MAX_FDT_DEPTH];
+        let mut count = 0usize;
+        let mut ended = false;
+
+        while cursor < struct_end {
+            let token = read_be_u32_slice(data, cursor, struct_end)?;
+            cursor += 4;
+
+            match token {
+                FDT_BEGIN_NODE => {
+                    if depth >= MAX_FDT_DEPTH {
+                        return Err(DtbError::MalformedStructure {
+                            offset: cursor - 4,
+                            token,
+                        });
+                    }
+                    let name_start = cursor;
+                    if name_start >= struct_end {
+                        return Err(DtbError::MalformedProperty { offset: name_start });
+                    }
+                    let name_end = data[name_start..struct_end]
+                        .iter()
+                        .position(|byte| *byte == 0)
+                        .map(|offset| name_start + offset)
+                        .ok_or(DtbError::MalformedProperty { offset: name_start })?;
+                    let name = core::str::from_utf8(&data[name_start..name_end])
+                        .map_err(|_| DtbError::MalformedProperty { offset: name_start })?;
+                    let parent_skipped = depth > 0 && skip_nodes[depth - 1];
+                    skip_nodes[depth] = parent_skipped
+                        || name == "memory"
+                        || name.starts_with("memory@")
+                        || name == "reserved-memory"
+                        || name == "cpus"
+                        || name.starts_with("cpu@")
+                        || name.starts_with("cluster")
+                        || name == "pmu";
+                    address_cells[depth] = if depth == 0 {
+                        0
+                    } else {
+                        address_cells[depth - 1]
+                    };
+                    size_cells[depth] = if depth == 0 { 0 } else { size_cells[depth - 1] };
+                    reg_offsets[depth] = 0;
+                    reg_lens[depth] = 0;
+                    depth += 1;
+                    cursor = align4(name_end + 1);
+                }
+                FDT_END_NODE => {
+                    if depth == 0 {
+                        return Err(DtbError::MalformedStructure {
+                            offset: cursor - 4,
+                            token,
+                        });
+                    }
+                    let node_index = depth - 1;
+                    if !skip_nodes[node_index] && reg_lens[node_index] != 0 {
+                        parse_platform_reg(
+                            data,
+                            reg_offsets[node_index],
+                            reg_offsets[node_index] + reg_lens[node_index],
+                            address_cells[node_index],
+                            size_cells[node_index],
+                            out,
+                            &mut count,
+                        )?;
+                    }
+                    depth -= 1;
+                }
+                FDT_PROP => {
+                    if depth == 0 {
+                        return Err(DtbError::MalformedStructure {
+                            offset: cursor - 4,
+                            token,
+                        });
+                    }
+                    let value_len = read_be_u32_slice(data, cursor, struct_end)? as usize;
+                    let name_offset = read_be_u32_slice(data, cursor + 4, struct_end)? as usize;
+                    cursor += 8;
+                    let value_start = cursor;
+                    let value_end =
+                        value_start
+                            .checked_add(value_len)
+                            .ok_or(DtbError::MalformedProperty {
+                                offset: value_start,
+                            })?;
+                    if value_end > struct_end {
+                        return Err(DtbError::MalformedProperty {
+                            offset: value_start,
+                        });
+                    }
+                    let property =
+                        string_at(data, self.strings_offset, self.strings_len, name_offset)?;
+                    match property {
+                        "#address-cells" => {
+                            address_cells[depth - 1] =
+                                read_cell_property(data, value_start, value_len, property)?;
+                        }
+                        "#size-cells" => {
+                            size_cells[depth - 1] =
+                                read_cell_property(data, value_start, value_len, property)?;
+                        }
+                        "reg" if !skip_nodes[depth - 1] => {
+                            reg_offsets[depth - 1] = value_start;
+                            reg_lens[depth - 1] = value_len;
+                        }
+                        _ => {}
+                    }
+                    cursor = align4(value_end);
+                }
+                FDT_NOP => {}
+                FDT_END => {
+                    if depth != 0 {
+                        return Err(DtbError::MalformedStructure {
+                            offset: cursor - 4,
+                            token,
+                        });
+                    }
+                    ended = true;
+                    break;
+                }
+                _ => {
+                    return Err(DtbError::MalformedStructure {
+                        offset: cursor - 4,
+                        token,
+                    });
+                }
+            }
+        }
+
+        if !ended {
+            return Err(DtbError::MalformedStructure {
+                offset: struct_end,
+                token: 0,
+            });
+        }
+        if count == 0 {
+            return Err(DtbError::NoPlatformRegions);
+        }
+        Ok(count)
+    }
+
     pub fn validate_memory_regions(regions: &[RiscvMemoryRegion]) -> Result<(), DtbError> {
         for (index, region) in regions.iter().enumerate() {
             if region.size == 0 {
@@ -459,7 +626,7 @@ fn read_cells(
     limit: usize,
     property: &'static str,
 ) -> Result<u64, DtbError> {
-    if cells == 0 || cells > 2 {
+    if cells == 0 || cells > 3 {
         return Err(DtbError::UnsupportedCellCount {
             property,
             value: cells,
@@ -521,6 +688,72 @@ fn parse_reg(
             return Err(DtbError::TooManyMemoryRegions);
         }
         out[*count] = RiscvMemoryRegion { base, size, kind };
+        *count += 1;
+        entry_offset += entry_size;
+    }
+    Ok(())
+}
+
+fn parse_platform_reg(
+    data: &[u8],
+    value_start: usize,
+    value_end: usize,
+    address_cells: u32,
+    size_cells: u32,
+    out: &mut [RiscvPlatformRegion],
+    count: &mut usize,
+) -> Result<(), DtbError> {
+    if address_cells == 0 || size_cells == 0 {
+        return Ok(());
+    }
+    if address_cells > 3 || size_cells > 3 {
+        return Err(DtbError::UnsupportedCellCount {
+            property: "reg",
+            value: address_cells.max(size_cells),
+        });
+    }
+    let value_len = value_end - value_start;
+    if value_len == 0 {
+        return Ok(());
+    }
+    let mut effective_size_cells = size_cells;
+    let mut entry_size = (address_cells + effective_size_cells) as usize * 4;
+    if value_len % entry_size != 0
+        && address_cells == 3
+        && value_len == ((address_cells + 1) * 4) as usize
+    {
+        effective_size_cells = 1;
+        entry_size = (address_cells + effective_size_cells) as usize * 4;
+    }
+    if value_len % entry_size != 0 {
+        return Err(DtbError::MalformedProperty {
+            offset: value_start,
+        });
+    }
+
+    let mut entry_offset = value_start;
+    while entry_offset < value_end {
+        let base = read_cells(data, entry_offset, address_cells, value_end, "reg")?;
+        let size = read_cells(
+            data,
+            entry_offset + address_cells as usize * 4,
+            effective_size_cells,
+            value_end,
+            "reg",
+        )?;
+        if size == 0 {
+            return Err(DtbError::ZeroSizedMemoryRegion { index: *count });
+        }
+        if base.checked_add(size).is_none() {
+            return Err(DtbError::InvalidMemoryReservation {
+                address: base,
+                size,
+            });
+        }
+        if *count >= out.len() {
+            return Err(DtbError::TooManyMemoryRegions);
+        }
+        out[*count] = RiscvPlatformRegion { base, size };
         *count += 1;
         entry_offset += entry_size;
     }
@@ -596,8 +829,8 @@ fn validate_range(
 }
 
 fn initialize_memory_allocator(
+    info: &RiscvBootInfo,
     dtb: *const u8,
-    dtb_len: usize,
     regions: &[RiscvMemoryRegion],
     count: usize,
 ) {
@@ -611,7 +844,7 @@ fn initialize_memory_allocator(
     }
 
     let mut protected = [None; MAX_PROTECTED_RANGES];
-    protected[0] = Some((dtb as u64, dtb_len as u64));
+    protected[0] = Some((dtb as u64, info.dtb_len() as u64));
     crate::memory::boot_alloc::set_protected_ranges(&protected);
     super::serial::_print(format_args!("[strat9] initializing boot allocator\r\n"));
     crate::memory::boot_alloc::init_boot_allocator(&boot_regions[..count]);
@@ -645,9 +878,35 @@ fn initialize_memory_allocator(
         }
     }
     super::serial::_print(format_args!(
-        "[strat9] Sv39 tables ready: root={:#x} mapped={} pages (paging disabled)\r\n",
+        "[strat9] Sv39 tables ready: root={:#x} mapped={} pages\r\n",
         mapper.root_physical_address(),
         mapped_pages
+    ));
+
+    let mut platform_regions = [RiscvPlatformRegion::EMPTY; MAX_DTB_PLATFORM_REGIONS];
+    let platform_count = match info.platform_regions(&mut platform_regions) {
+        Ok(count) => count,
+        Err(error) => {
+            super::serial::_print(format_args!(
+                "[strat9] platform discovery failed: {:?}\r\n",
+                error
+            ));
+            0
+        }
+    };
+    let mut platform_ok = platform_count != 0;
+    for region in &platform_regions[..platform_count] {
+        if let Err(error) = mapper.map_mmio(region.base, region.size) {
+            super::serial::_print(format_args!(
+                "[strat9] Sv39 MMIO map failed for {:#x}: {:?}\r\n",
+                region.base, error
+            ));
+            platform_ok = false;
+        }
+    }
+    super::serial::_print(format_args!(
+        "[strat9] platform regions: {}\r\n",
+        platform_count
     ));
 
     if let Some(token) = crate::sync::IrqDisabledToken::verify() {
@@ -663,6 +922,15 @@ fn initialize_memory_allocator(
                 super::serial::_print(format_args!("[strat9] buddy alloc failed: {:?}\r\n", error))
             }
         }
+    }
+
+    if platform_ok {
+        super::serial::_print(format_args!("[strat9] activating Sv39\r\n"));
+        unsafe {
+            mapper.activate();
+            crate::memory::paging::mark_riscv_paging_active();
+        }
+        super::serial::_print(format_args!("[strat9] Sv39 paging active\r\n"));
     }
 }
 
@@ -700,7 +968,7 @@ pub unsafe extern "C" fn riscv_boot_entry(hart_id: usize, dtb: *const u8) -> ! {
                             "[strat9] memory: {} valid regions\r\n",
                             count
                         ));
-                        initialize_memory_allocator(dtb, info.dtb_len(), &regions, count);
+                        initialize_memory_allocator(&info, dtb, &regions, count);
                     }
                     Err(error) => super::serial::_print(format_args!(
                         "[strat9] memory map rejected: {:?}\r\n",
