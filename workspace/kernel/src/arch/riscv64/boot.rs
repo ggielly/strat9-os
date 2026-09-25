@@ -9,6 +9,7 @@ extern "C" {
     fn riscv_context_self_test();
     static riscv_kernel_start: u8;
     static riscv_kernel_end: u8;
+    static riscv_test_flag: u8;
 }
 
 pub const FDT_MAGIC: u32 = 0xd00d_feed;
@@ -1569,7 +1570,13 @@ pub unsafe extern "C" fn riscv_boot_entry(hart_id: usize, dtb: *const u8) -> ! {
         "[strat9] percpu ready: {}\r\n",
         super::percpu::current_cpu_index()
     ));
-    unsafe { riscv_context_self_test() };
+    unsafe {
+        riscv_context_self_test();
+        let flag = ptr::read_volatile(ptr::addr_of!(riscv_test_flag));
+        if flag != 1 {
+            panic!("RISC-V context self-test failed");
+        }
+    }
     super::serial::_print(format_args!("[strat9] context switch ok\r\n"));
     super::trap::init();
     super::serial::_print(format_args!("\r\n[strat9] RISC-V OpenSBI entry\r\n"));

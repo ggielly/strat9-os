@@ -183,7 +183,7 @@ Le build release observé le 2026-09-25 échoue avec 99 erreurs et 29 avertissem
 
 ## Prochain incrément recommandé
 
-Le contrat d'entrée OpenSBI, la découverte DTB, l’initialisation buddy, Sv39, le trap handler S‑mode, le PLIC, le timer à 100 Hz avec tick scheduler, le scan PCI ECAM, la découverte des nœuds VirtIO‑MMIO, l’état d’un hart via `sscratch`, le frame/context switch RISC‑V avec auto-test, l’accès physique identité et l’initialisation du scheduler/idle task sont matérialisés. `schedule()` n’est pas encore lancé. L’étape suivante est le premier task/context switch coopératif, puis un device VirtIO‑MMIO.
+Le contrat d'entrée OpenSBI, la découverte DTB, l’initialisation buddy, Sv39, le trap handler S‑mode, le PLIC, le timer à 100 Hz avec tick scheduler, le scan PCI ECAM, la découverte des nœuds VirtIO‑MMIO, l’état d’un hart via `sscratch`, le frame/context switch RISC‑V avec auto-test A→B→A, l’accès physique identité, la protection de l’image kernel et l’initialisation du scheduler/idle task sont matérialisés. `schedule()` n’est pas encore lancé. L’étape suivante est le premier task/context switch coopératif, puis un device VirtIO‑MMIO.
 
 ## Références du dépôt
 

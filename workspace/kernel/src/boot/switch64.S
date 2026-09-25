@@ -42,6 +42,7 @@ riscv_test_saved_a0: .skip 8
 riscv_test_saved_s0: .skip 8
 riscv_test_saved_s1: .skip 8
 riscv_test_saved_b: .skip 8
+.globl riscv_test_flag
 riscv_test_flag: .skip 8
 
 .text
@@ -62,14 +63,14 @@ riscv_context_self_test:
     la t0, riscv_test_frame_a
     sd zero, 0(t0)
     sd zero, 8(t0)
-    la t1, riscv_context_test_finish
+    la t1, riscv_context_test_stage_b
     sd t1, 16(t0)
     sd zero, 24(t0)
 
     la t0, riscv_test_frame_b
     sd zero, 0(t0)
     sd zero, 8(t0)
-    la t1, riscv_context_test_stage_b
+    la t1, riscv_context_test_finish
     sd t1, 16(t0)
     sd zero, 24(t0)
 
@@ -81,7 +82,7 @@ riscv_context_test_stage_b:
     la t0, riscv_test_saved_b
     sd sp, 0(t0)
     la a0, riscv_test_saved_b
-    la a1, riscv_test_frame_a
+    la a1, riscv_test_frame_b
     call riscv_switch_context
 .Ltest_park:
     wfi

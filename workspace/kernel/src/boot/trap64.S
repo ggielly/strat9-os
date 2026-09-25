@@ -83,6 +83,12 @@ riscv_trap_entry:
 
     ld t0, 248(sp)
     ld t1, 256(sp)
+    li t2, 0x20
+    and t2, t0, t2
+    srli t2, t2, 4
+    li t3, -3
+    and t0, t0, t3
+    or t0, t0, t2
     csrw sstatus, t0
     csrw sepc, t1
     ld x5, 32(sp)
