@@ -456,6 +456,7 @@ pub fn yield_dead_task() {
     restore_flags(saved_flags);
 }
 
+#[cfg(target_arch = "x86_64")]
 #[inline]
 fn interrupt_frame_fits(task: &Arc<Task>, rsp: u64) -> bool {
     let stack_base = task.kernel_stack.virt_base.as_u64();

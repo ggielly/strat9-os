@@ -328,6 +328,9 @@ pub mod cpuid {
         pub fn contains(self, _f: CpuFeature) -> bool {
             false
         }
+        pub fn bits(self) -> u32 {
+            self.bits
+        }
     }
 
     pub fn init() {}

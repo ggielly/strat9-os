@@ -559,6 +559,7 @@ pub mod ioapic {
 }
 
 pub mod timer {
+    #[allow(unused_imports)]
     pub use crate::arch::riscv64::timer::*;
     pub const TIMER_HZ: u64 = 100;
     pub const NS_PER_TICK: u64 = 1_000_000_000 / TIMER_HZ;

@@ -13,7 +13,9 @@ use crate::process::{
     WaitChildResult,
 };
 use alloc::{boxed::Box, sync::Arc};
-use core::{mem::offset_of, sync::atomic::Ordering};
+#[cfg(target_arch = "x86_64")]
+use core::mem::offset_of;
+use core::sync::atomic::Ordering;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -26,11 +28,17 @@ struct ThreadUserContext {
     user_ss: u64,
 }
 
+#[cfg(target_arch = "x86_64")]
 const THREAD_OFF_ENTRY: usize = offset_of!(ThreadUserContext, entry);
+#[cfg(target_arch = "x86_64")]
 const THREAD_OFF_STACK_TOP: usize = offset_of!(ThreadUserContext, stack_top);
+#[cfg(target_arch = "x86_64")]
 const THREAD_OFF_ARG0: usize = offset_of!(ThreadUserContext, arg0);
+#[cfg(target_arch = "x86_64")]
 const THREAD_OFF_USER_CS: usize = offset_of!(ThreadUserContext, user_cs);
+#[cfg(target_arch = "x86_64")]
 const THREAD_OFF_USER_RFLAGS: usize = offset_of!(ThreadUserContext, user_rflags);
+#[cfg(target_arch = "x86_64")]
 const THREAD_OFF_USER_SS: usize = offset_of!(ThreadUserContext, user_ss);
 
 /// Performs the thread child start operation.
@@ -80,11 +88,6 @@ unsafe extern "C" fn thread_iret_from_ctx(_ctx: *const ThreadUserContext) -> ! {
 
 #[cfg(target_arch = "riscv64")]
 extern "C" fn thread_child_start(_ctx_ptr: u64) -> ! {
-    panic!("RISC-V user threads are not implemented")
-}
-
-#[cfg(target_arch = "riscv64")]
-unsafe extern "C" fn thread_iret_from_ctx(_ctx: *const ThreadUserContext) -> ! {
     panic!("RISC-V user threads are not implemented")
 }
 

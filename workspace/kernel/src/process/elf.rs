@@ -37,6 +37,7 @@ use crate::{
     },
 };
 
+#[cfg(target_arch = "x86_64")]
 macro_rules! elf_trace {
     ($($arg:tt)*) => {
         #[cfg(debug_assertions)] {

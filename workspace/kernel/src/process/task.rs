@@ -687,6 +687,7 @@ pub unsafe extern "C" fn task_entry_trampoline() -> ! {
     panic!("RISC-V task context switching is not implemented")
 }
 
+#[cfg(target_arch = "x86_64")]
 fn task_post_switch_enter(entry: u64, arg0: u64) -> ! {
     // breadcrumb: 'P' = reached post_switch_enter (no serial lock needed).
     crate::arch::serial::putc(b'P');
