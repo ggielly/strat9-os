@@ -7,6 +7,8 @@ mod echo;
 mod env;
 mod grep;
 mod ntpdate;
+#[cfg(feature = "selftest")]
+mod selftest;
 mod uptime;
 mod watch;
 mod whoami;
@@ -27,6 +29,8 @@ pub use env::{
 };
 pub use grep::cmd_grep;
 pub use ntpdate::cmd_ntpdate;
+#[cfg(feature = "selftest")]
+pub use selftest::create_shell_util_test_task;
 pub use uptime::cmd_uptime;
 pub use watch::cmd_watch;
 pub use whoami::cmd_whoami;
