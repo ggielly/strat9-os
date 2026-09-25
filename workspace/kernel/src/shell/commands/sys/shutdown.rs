@@ -31,11 +31,21 @@ pub fn cmd_shutdown(_args: &[String]) -> Result<(), ShellError> {
     }
 
     shell_println!("[shutdown] Powering off...");
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         crate::arch::cli();
         // QEMU/Bochs ACPI shutdown
         crate::arch::io::outw(0x604, 0x2000);
         // Fallback: older QEMU
+        crate::arch::io::outw(0xB004, 0x2000);
+        loop {
+            crate::arch::hlt();
+        }
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        crate::arch::cli();
+        crate::arch::io::outw(0x604, 0x2000);
         crate::arch::io::outw(0xB004, 0x2000);
         loop {
             crate::arch::hlt();
