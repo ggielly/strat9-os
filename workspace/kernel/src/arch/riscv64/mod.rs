@@ -191,13 +191,12 @@ pub mod boot_timestamp {
 }
 
 pub mod idt {
-    // Trap handling arrives with jalon R2.1 (stvec).
-    pub fn init() {}
-    pub fn register_ahci_irq(_irq: u8) {}
-    pub fn register_nvme_irq(_irq: u8) {}
-    pub fn register_virtio_block_irq(_irq: u8) {}
-    pub fn register_xhci_irq(_irq: u8) {}
-    pub fn register_nic_irq(_irq: u8) {}
+    pub fn init() { panic!("RISC-V trap handling is not implemented (R2.1)") }
+    pub fn register_ahci_irq(_irq: u8) { panic!("RISC-V interrupt routing is not implemented (R2.1)") }
+    pub fn register_nvme_irq(_irq: u8) { panic!("RISC-V interrupt routing is not implemented (R2.1)") }
+    pub fn register_virtio_block_irq(_irq: u8) { panic!("RISC-V interrupt routing is not implemented (R2.1)") }
+    pub fn register_xhci_irq(_irq: u8) { panic!("RISC-V interrupt routing is not implemented (R2.1)") }
+    pub fn register_nic_irq(_irq: u8) { panic!("RISC-V interrupt routing is not implemented (R2.1)") }
 }
 
 pub mod timer {
@@ -205,7 +204,7 @@ pub mod timer {
     pub const NS_PER_TICK: u64 = 1_000_000_000 / TIMER_HZ;
     pub fn is_apic_timer_active() -> bool { false }
     pub fn apic_ticks_per_10ms() -> u32 { 0 }
-    pub fn start_apic_timer_cached() {}
+    pub fn start_apic_timer_cached() { panic!("RISC-V timer backend is not initialized (R2.2)") }
 }
 
 
@@ -397,16 +396,16 @@ pub mod vga_text {
 pub mod pic_stub {
     pub const PIC1_OFFSET: u8 = 0x20;
     pub const PIC2_OFFSET: u8 = 0x28;
-    pub fn init(_o1: u8, _o2: u8) {}
-    pub fn disable() {}
-    pub fn enable_irq(_irq: u8) {}
+    pub fn init(_o1: u8, _o2: u8) { panic!("8259 PIC is unavailable on RISC-V") }
+    pub fn disable() { panic!("8259 PIC is unavailable on RISC-V") }
+    pub fn enable_irq(_irq: u8) { panic!("8259 PIC is unavailable on RISC-V") }
 }
 
 pub mod timer_extra {
-    pub fn init_pit(_hz: u32) {}
-    pub fn stop_pit() {}
+    pub fn init_pit(_hz: u32) { panic!("8254 PIT is unavailable on RISC-V") }
+    pub fn stop_pit() { panic!("8254 PIT is unavailable on RISC-V") }
     pub fn calibrate_apic_timer() -> u32 {
-        0
+        panic!("APIC timer is unavailable on RISC-V")
     }
 }
 

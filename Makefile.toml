@@ -5,13 +5,27 @@ skip_core_tasks = true
 [env]
 CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
 KERNEL_TARGET = "x86_64-unknown-none"
+KERNEL_TARGET_RISCV = "riscv64imac-unknown-none-elf"
 BUILD_DIR = "build"
 QEMU = "qemu-system-x86_64"
+QEMU_RISCV = "qemu-system-riscv64"
 GDB = "gdb"
 QEMU_GDB_PORT = "1234"
 STRAT9_PROFILE = "debug"
 STRAT9_TAP_IFACE = "strat9tap0"
 STRAT9_UPLINK_IFACE = "eth0"
+
+[tasks.help]
+description = "List available tasks; pass a filter, e.g. cargo make help riscv"
+script_runner = "@shell"
+script = ['''
+filter="${@}"
+if [ -n "$filter" ]; then
+    cargo make --loglevel off --list-all-steps --output-format short-description 2>/dev/null | grep -i -- "$filter" || true
+else
+    cargo make --loglevel off --list-all-steps --output-format short-description 2>/dev/null
+fi
+''']
 
 # =============================================================================
 # Build Tasks - Bootloader & Toolchain
@@ -107,6 +121,85 @@ args = ["clippy", "--target", "${KERNEL_TARGET}"]
 description = "Format all code"
 command = "cargo"
 args = ["fmt", "--all"]
+
+[tasks.kernel-riscv]
+description = "Build the Strat9 kernel for RISC-V (release profile)"
+category = "RISC-V"
+cwd = "workspace/kernel"
+command = "cargo"
+args = [
+    "build",
+    "--release",
+    "-Z",
+    "build-std=core,alloc,compiler_builtins",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+    "--target",
+    "${KERNEL_TARGET_RISCV}",
+]
+
+[tasks.check-riscv]
+description = "Check the Strat9 kernel for RISC-V"
+category = "RISC-V"
+cwd = "workspace/kernel"
+command = "cargo"
+args = [
+    "check",
+    "-Z",
+    "build-std=core,alloc,compiler_builtins",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+    "--target",
+    "${KERNEL_TARGET_RISCV}",
+]
+
+[tasks.clippy-riscv]
+description = "Run clippy on the Strat9 kernel for RISC-V"
+category = "RISC-V"
+cwd = "workspace/kernel"
+command = "cargo"
+args = [
+    "clippy",
+    "-Z",
+    "build-std=core,alloc,compiler_builtins",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+    "--target",
+    "${KERNEL_TARGET_RISCV}",
+]
+
+[tasks.run-riscv]
+description = "Build and run the Strat9 RISC-V kernel in QEMU virt"
+category = "RISC-V"
+dependencies = ["kernel-riscv"]
+script_runner = "@shell"
+script = ['''
+KERNEL_ELF="target/${KERNEL_TARGET_RISCV}/release/kernel" \
+DISK_IMAGE="qemu-stuff/disk.img" \
+QEMU_LOG="build/riscv/qemu.log" \
+QEMU="${QEMU_RISCV}" \
+bash tools/scripts/run-qemu-riscv.sh
+''']
+
+[tasks.run-riscv-debug]
+description = "Build and start the Strat9 RISC-V kernel paused under GDB"
+category = "RISC-V"
+dependencies = ["kernel-riscv"]
+script_runner = "@shell"
+script = ['''
+KERNEL_ELF="target/${KERNEL_TARGET_RISCV}/release/kernel" \
+DISK_IMAGE="qemu-stuff/disk.img" \
+QEMU_LOG="build/riscv/qemu-debug.log" \
+QEMU="${QEMU_RISCV}" \
+bash tools/scripts/run-qemu-riscv.sh -S -s
+''']
+
+[tasks.doc-riscv]
+description = "Build the Strat9 RISC-V kernel documentation"
+category = "RISC-V"
+cwd = "workspace/kernel"
+command = "cargo"
+args = ["doc", "--target", "${KERNEL_TARGET_RISCV}", "--no-deps"]
 
 # =============================================================================
 # Image generation

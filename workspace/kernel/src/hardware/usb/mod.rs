@@ -8,6 +8,7 @@
 
 pub mod ehci;
 pub mod hid;
+#[cfg(target_arch = "x86_64")]
 pub mod uhci;
 pub mod xhci;
 
@@ -25,6 +26,7 @@ pub fn init() {
     ehci::init();
 
     // UHCI (USB 1.1) - for legacy devices
+    #[cfg(target_arch = "x86_64")]
     uhci::init();
 
     // Initialize HID drivers after controllers are ready
@@ -32,7 +34,12 @@ pub fn init() {
 
     let total_controllers = (if xhci::is_available() { 1 } else { 0 })
         + (if ehci::is_available() { 1 } else { 0 })
-        + (if uhci::is_available() { 1 } else { 0 });
+        + {
+            #[cfg(target_arch = "x86_64")]
+            { if uhci::is_available() { 1 } else { 0 } }
+            #[cfg(not(target_arch = "x86_64"))]
+            { 0 }
+        };
 
     log::info!("[USB] Total USB controllers: {}", total_controllers);
 }

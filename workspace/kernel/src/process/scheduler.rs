@@ -505,7 +505,7 @@ impl PerCpuClassRqSet {
 }
 
 /// Per-CPU scheduler state
-struct SchedulerCpu {
+pub(crate) struct SchedulerCpu {
     /// Multi-class priority queues
     class_rqs: PerCpuClassRqSet,
     /// Currently running task

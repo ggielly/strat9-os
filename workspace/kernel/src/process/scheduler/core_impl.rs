@@ -224,9 +224,7 @@ impl GlobalSchedState {
             task_id.as_u64()
         );
         if self.all_tasks.contains_key(&task_id) {
-            unsafe {
-                crate::arch::serial::putc(b'D');
-            }
+            crate::arch::serial::putc(b'D');
             crate::serial_force_println!(
                 "[RACE] insert_all_task_locked: duplicate tid={} all_tasks={}",
                 task_id.as_u64(),

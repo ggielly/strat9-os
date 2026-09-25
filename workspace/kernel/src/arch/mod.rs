@@ -34,3 +34,18 @@ pub use x86_64_stub as x86_64;
 /// on x86_64 it re-exports the real crate types, elsewhere it provides
 /// neutral equivalents.
 pub mod xshim;
+
+/// Transitional compatibility surface for x86 paging APIs used by shared
+/// memory code while the architecture paging HAL is being implemented.
+pub mod paging_compat {
+    #[cfg(target_arch = "x86_64")]
+    pub use ::x86_64::{registers, structures};
+
+    #[cfg(target_arch = "riscv64")]
+    pub use crate::arch::x86_64_stub::{registers, structures};
+}
+
+#[cfg(target_arch = "x86_64")]
+pub mod legacy_port {
+    pub use ::x86_64::instructions::port::Port;
+}

@@ -36,7 +36,7 @@ const ADMIN_CQE_ERROR: u16 = (0x1 << 14) | (0x1 << 10);
 /// Read the TSC (Time Stamp Counter).
 #[inline]
 fn rdtsc() -> u64 {
-    unsafe { crate::arch::rdtsc() }
+    crate::arch::rdtsc()
 }
 
 /// Convert TSC ticks to approximate milliseconds (assumes ~3GHz TSC).
@@ -209,7 +209,7 @@ struct Registers {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum NvmeError {
+pub enum NvmeError {
     ControllerFatal,
     Timeout,
     InvalidNamespace,

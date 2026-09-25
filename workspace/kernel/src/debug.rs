@@ -1,16 +1,15 @@
 use core::fmt;
-use crate::x86_crate_shim::instructions::port::Port;
 
 pub struct QemuDebug;
 
 impl fmt::Write for QemuDebug {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        let mut port = Port::new(0xe9);
+        #[cfg(target_arch = "x86_64")]
         for &byte in s.as_bytes() {
-            unsafe {
-                port.write(byte);
-            }
+            unsafe { crate::arch::io::outb(0xe9, byte) };
         }
+        #[cfg(target_arch = "riscv64")]
+        crate::arch::serial::_print(format_args!("{}", s));
         Ok(())
     }
 }

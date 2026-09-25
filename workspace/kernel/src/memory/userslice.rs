@@ -124,9 +124,9 @@ fn check_pages_mapped(
     len: usize,
     required_flags: PageTableFlags,
 ) -> Result<(), UserSliceError> {
-    use crate::x86_crate_shim::registers::control::Cr3;
-    use crate::x86_crate_shim::structures::paging::OffsetPageTable;
-    use crate::x86_crate_shim::structures::paging::PageTable;
+    use crate::arch::paging_compat::registers::control::Cr3;
+    use crate::arch::paging_compat::structures::paging::OffsetPageTable;
+    use crate::arch::paging_compat::structures::paging::PageTable;
 
     let hhdm = crate::memory::hhdm_offset();
     let phys_offset = VirtAddr::new(hhdm);

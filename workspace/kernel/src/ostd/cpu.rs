@@ -43,9 +43,9 @@ impl CpuId {
     /// It requires that per-CPU data has been initialized for this CPU.
     #[inline]
     pub fn current_racy() -> Self {
-        // This is safe if per-CPU data has been set up via
-        // arch::x86_64::percpu::init_gs_base(). The "racy" suffix indicates
-        // that no additional synchronization is performed.
+        // This is safe when per-CPU data has been initialized through the
+        // architecture facade. The "racy" suffix indicates that no additional
+        // synchronization is performed.
         let cpu_index = crate::arch::percpu::current_cpu_index();
         Self::new(cpu_index)
     }

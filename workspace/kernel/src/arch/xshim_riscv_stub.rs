@@ -45,11 +45,11 @@ pub mod instructions {
         impl<T: PortValue> Port<T> {
             pub fn new(_addr: u16) -> Self { panic!("port I/O on riscv64") }
             pub fn read(&mut self) -> T { panic!("port in on riscv64") }
-            pub fn write(&mut self, _v: T) {}
+            pub fn write(&mut self, _v: T) { panic!("port I/O on riscv64") }
         }
     }
     pub mod hlt {
-        pub fn hlt() {}
+        pub fn hlt() { crate::arch::riscv64::hlt() }
     }
 }
 pub mod structures {
@@ -122,7 +122,9 @@ pub mod structures {
         }
         pub trait Mapper<S> {}
         pub trait Translate {
-            fn translate(&self, _a: VirtAddr) -> Option<(PhysAddr, PageTableFlags)> { None }
+            fn translate(&self, _a: VirtAddr) -> Option<(PhysAddr, PageTableFlags)> {
+                panic!("RISC-V compatibility Translate trait is not implemented")
+            }
         }
         /// Sv48 page-table mapper over the active root (real impl in R2).
         pub struct OffsetPageTable<'a> {
@@ -141,7 +143,7 @@ pub mod structures {
         pub struct MapperFlush<S>(core::marker::PhantomData<S>);
         impl<S> MapperFlush<S> {
             pub fn flush(self) {
-                // sfence.vma full flush placeholder; per-page flush in R2.
+                unsafe { core::arch::asm!("sfence.vma", options(nostack)) }
             }
             pub fn ignore(self) {}
         }
@@ -159,37 +161,42 @@ pub mod structures {
                     ((va >> 21) & 0x1FF) as usize,
                     ((va >> 12) & 0x1FF) as usize,
                 ];
-                let mut table: u64 = self.l4 as *const PageTable as u64;
+                let mut table = self.l4 as *const PageTable;
                 for (level, idx) in indexes.iter().enumerate() {
-                    if table == 0 {
+                    if table.is_null() {
                         return None;
                     }
-                    // SAFETY: table points at a mapped page-table page (HHDM).
-                    let pt = unsafe { &*((table + self.phys_offset) as *const PageTable) };
+                    // SAFETY: the root is already mapped; child table PPNs are converted through the HHDM.
+                    let pt = unsafe { &*table };
                     let pte = &pt[*idx];
                     if pte.0 & 0x1 == 0 {
                         return None;
                     }
                     // Leaf?
-                    if pte.0 & 0x8 != 0 || level == 3 {
-                        let ppn_base = (pte.0 >> 10) << 12;
+                    if pte.0 & 0xE != 0 {
+                        let ppn_base = ((pte.0 >> 10) & 0x0000_0FFF_FFFF_FFFF) << 12;
                         let offset_mask = match level {
-                            0 => (1 << 12) - 1,
-                            1 => (1 << 21) - 1,
-                            2 => (1 << 30) - 1,
-                            _ => (1 << 39) - 1,
+                            0 => (1 << 39) - 1,
+                            1 => (1 << 30) - 1,
+                            2 => (1 << 21) - 1,
+                            _ => (1 << 12) - 1,
                         };
                         let pa = (ppn_base & !offset_mask) | (va & offset_mask);
+                        let mut flags = pte.flags();
+                        if level < 3 {
+                            flags |= crate::arch::xshim::PageTableFlags::HUGE_PAGE;
+                        }
                         return Some(crate::arch::xshim::TranslateResult::Mapped {
                             frame: crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
                                 crate::arch::xshim::PhysAddr::new(pa),
                             ),
-                            offset: va & offset_mask,
-                            flags: pte.flags(),
+                            offset: va & 0xFFF,
+                            flags,
                         });
                     }
                     // Next level pointer
-                    table = ((pte.0 >> 10) << 12) & !0x3FF;
+                    let child_phys = ((pte.0 >> 10) & 0x0000_0FFF_FFFF_FFFF) << 12;
+                    table = (child_phys + self.phys_offset) as *const PageTable;
                 }
                 None
             }
@@ -198,9 +205,12 @@ pub mod structures {
                 &self,
                 vaddr: crate::arch::xshim::VirtAddr,
             ) -> Option<crate::arch::xshim::PhysAddr> {
-                self.translate(vaddr).map(|r| match r {
-                    crate::arch::xshim::TranslateResult::Mapped { frame, .. } => frame.start_address(),
-                    _ => crate::arch::xshim::PhysAddr::null(),
+                self.translate(vaddr).and_then(|r| match r {
+                    crate::arch::xshim::TranslateResult::Mapped { frame, offset, .. } => {
+                        Some(frame.start_address() + offset)
+                    }
+                    crate::arch::xshim::TranslateResult::NotMapped
+                    | crate::arch::xshim::TranslateResult::InvalidFrameAddress(_) => None,
                 })
             }
         }
@@ -209,6 +219,7 @@ pub mod structures {
             #[derive(Debug, Clone, Copy)]
             pub enum MapToError<S> {
                 FrameAllocationFailed,
+                Unsupported,
                 ParentEntryHugePage,
                 PageAlreadyMapped(crate::arch::xshim::PhysAddr),
                 _Phantom(core::marker::PhantomData<S>),
@@ -225,19 +236,26 @@ pub mod structures {
         impl PageTableEntry {
             pub const fn new() -> Self { PageTableEntry(0) }
             pub fn set_unused(&mut self) { self.0 = 0; }
-            pub fn set_frame(&mut self, _f: crate::arch::xshim::PhysFrame<Size4KiB>, _flags: crate::arch::xshim::PageTableFlags) {}
+            pub fn set_frame(&mut self, frame: crate::arch::xshim::PhysFrame<Size4KiB>, flags: crate::arch::xshim::PageTableFlags) {
+                let mut pte = (frame.start_address().as_u64() >> 12) << 10;
+                if flags.contains(crate::arch::xshim::PageTableFlags::PRESENT) { pte |= 1; }
+                if flags.contains(crate::arch::xshim::PageTableFlags::PRESENT) { pte |= 1 << 1; }
+                if flags.contains(crate::arch::xshim::PageTableFlags::WRITABLE) { pte |= 1 << 2 | 1 << 7; }
+                if !flags.contains(crate::arch::xshim::PageTableFlags::NO_EXECUTE) { pte |= 1 << 3; }
+                if flags.contains(crate::arch::xshim::PageTableFlags::USER_ACCESSIBLE) { pte |= 1 << 4; }
+                if flags.contains(crate::arch::xshim::PageTableFlags::PRESENT) { pte |= 1 << 6; }
+                self.0 = pte;
+            }
             pub fn flags(&self) -> crate::arch::xshim::PageTableFlags {
                 let mut f = crate::arch::xshim::PageTableFlags::empty();
                 if self.0 & 0x1 != 0 { f |= crate::arch::xshim::PageTableFlags::PRESENT; }
-                if self.0 & 0x2 != 0 { f |= crate::arch::xshim::PageTableFlags::WRITABLE; }
-                if self.0 & 0x4 != 0 { f |= crate::arch::xshim::PageTableFlags::USER_ACCESSIBLE; }
-                if self.0 & 0x8 != 0 { f |= crate::arch::xshim::PageTableFlags::NO_EXECUTE; }
-                if self.0 & 0x80 != 0 { f |= crate::arch::xshim::PageTableFlags::HUGE_PAGE; }
-                if self.0 & 0x10 != 0 { f |= crate::arch::xshim::PageTableFlags::NO_CACHE; }
+                if self.0 & 0x4 != 0 { f |= crate::arch::xshim::PageTableFlags::WRITABLE; }
+                if self.0 & 0x10 != 0 { f |= crate::arch::xshim::PageTableFlags::USER_ACCESSIBLE; }
+                if self.0 & 0x8 == 0 { f |= crate::arch::xshim::PageTableFlags::NO_EXECUTE; }
                 f
             }
             pub fn frame(&self) -> crate::arch::xshim::PhysFrame<Size4KiB> {
-                let ppn = (self.0 >> 10) & 0x0000_FFFF_FFFF_FFFF;
+                let ppn = (self.0 >> 10) & 0x0000_0FFF_FFFF_FFFF;
                 crate::arch::xshim::PhysFrame::<Size4KiB>::containing_address(
                     crate::arch::xshim::PhysAddr::new(ppn << 12),
                 )
@@ -257,14 +275,14 @@ pub mod structures {
                 _flags: crate::arch::xshim::PageTableFlags,
                 _alloc: &mut dyn FrameAllocator<Size4KiB>,
             ) -> Result<MapperFlush<S>, mapper::MapToError<S>> {
-                Err(mapper::MapToError::FrameAllocationFailed)
+                Err(mapper::MapToError::Unsupported)
             }
             pub unsafe fn update_flags<S: PageSize>(
                 &mut self,
                 _page: Page<S>,
                 _flags: crate::arch::xshim::PageTableFlags,
             ) -> Result<MapperFlush<S>, mapper::MapToError<S>> {
-                Err(mapper::MapToError::FrameAllocationFailed)
+                Err(mapper::MapToError::Unsupported)
             }
             pub fn unmap<S: PageSize>(
                 &mut self,

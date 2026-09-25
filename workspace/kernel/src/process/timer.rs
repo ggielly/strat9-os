@@ -267,9 +267,7 @@ pub fn tick_all_timers(current_time_ns: u64) {
         }
         let mut task_n: usize = 0;
         for task in sched.all_tasks.values() {
-            unsafe {
-                crate::arch::serial::putc(b'5');
-            }
+            crate::arch::serial::putc(b'5');
             for which in [ITimerWhich::Real, ITimerWhich::Virtual, ITimerWhich::Prof] {
                 if task.itimers.get(which).check_expired(current_time_ns) {
                     if let Some(sig) = Signal::from_u32(which.signal()) {
@@ -281,9 +279,7 @@ pub fn tick_all_timers(current_time_ns: u64) {
             // Safety-fence: if task_n somehow exceeds the known map length, the
             // BTreeMap is corrupt. Bail out rather than spinning forever.
             if task_n > n_tasks.saturating_add(1) {
-                unsafe {
-                    crate::arch::serial::putc(b'X');
-                }
+                crate::arch::serial::putc(b'X');
                 break;
             }
         }

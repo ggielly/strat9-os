@@ -22,9 +22,9 @@
 //!     left unmapped.  Stack underflows hit it and page-fault.
 //!
 use alloc::{sync::Arc, vec::Vec};
-use crate::x86_crate_shim::structures::paging::Page;
+use crate::arch::paging_compat::structures::paging::Page;
 use crate::arch::xshim::Size4KiB;
-use crate::x86_crate_shim::structures::paging::Mapper;
+use crate::arch::paging_compat::structures::paging::Mapper;
 use crate::arch::xshim::VirtAddr;
 
 use crate::{
@@ -493,7 +493,7 @@ fn apply_segment_permissions(
     page_count: usize,
     flags: VmaFlags,
 ) -> Result<(), &'static str> {
-    use crate::x86_crate_shim::registers::control::Cr3;
+    use crate::arch::paging_compat::registers::control::Cr3;
 
     let pte_flags = flags.to_page_flags();
     // SAFETY: loader owns this AddressSpace during image construction.
@@ -1249,7 +1249,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
         crate::e9_println!("[elf] ring3_trampoline: no current task, aborting");
         crate::serial_println!("[elf] ring3_trampoline: no current task, aborting");
         loop {
-            crate::x86_crate_shim::instructions::hlt();
+            crate::arch::hlt();
         }
     };
     elf_trace!(
