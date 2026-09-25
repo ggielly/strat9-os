@@ -1,61 +1,109 @@
-//! Top command with Ratatui no_std backend.
+//! `top` — Strat9 system monitor.
 //!
-//! This command keeps Chevron shell as default UX and only uses Ratatui while `top` is running.
+//! Data collection is architecture independent: one [`TopSnapshot`] is built
+//! from the kernel's own snapshot APIs (scheduler counters, task list, silo
+//! registry, buddy allocator) and handed to a presenter.
+//!
+//! - x86_64 with a framebuffer: a Ratatui TUI ([`tui`]) that owns the screen
+//!   while it runs, double buffered, and restores the console on exit.
+//! - otherwise: a serial text view built from the same [`TopSnapshot`], so the
+//!   data stays reachable on targets without VGA (see R6: virtio console TUI).
+//!
+//! The shell stays the default UX: Ratatui is only alive while `top` runs.
 
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod ratatui_backend;
+#[cfg(target_arch = "x86_64")]
+mod tui;
 
-use crate::shell::ShellError;
-use crate::shell_println;
-#[cfg(target_arch = "x86_64")]
-use crate::arch::vga;
-use alloc::{format, string::String, vec, vec::Vec};
-use core::sync::atomic::Ordering;
-#[cfg(target_arch = "x86_64")]
-use ratatui::{
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table, TableState},
-    Terminal,
-};
 #[cfg(target_arch = "x86_64")]
 pub(crate) use ratatui_backend::Strat9RatatuiBackend;
 
-const TOP_REFRESH_TICKS: u64 = 10; // 100ms at 100Hz
-const MAX_CPU_GAUGES: usize = 8;
+use crate::shell::ShellError;
+#[cfg(not(target_arch = "x86_64"))]
+use crate::shell_println;
+use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
+use core::sync::atomic::Ordering;
+
+/// Target UI refresh rate in Hz. The tick period is derived from the kernel
+/// timer frequency so the cadence stays constant on any `TIMER_HZ`.
+const REFRESH_HZ: u64 = 10;
+
+/// Tick period between two refreshes, never below one tick.
+const fn refresh_ticks() -> u64 {
+    let ticks = crate::arch::timer::TIMER_HZ / REFRESH_HZ;
+    if ticks == 0 {
+        1
+    } else {
+        ticks
+    }
+}
+
+const REFRESH_TICKS: u64 = refresh_ticks();
+
+/// Maximum number of keystrokes consumed per loop iteration. Input is drained
+/// in a bounded batch so a key flood cannot starve rendering.
+const MAX_KEYS_PER_ROUND: usize = 32;
+/// Assumed width for the serial presenter.
+#[cfg(not(target_arch = "x86_64"))]
+const SERIAL_COLS: usize = 80;
+/// Separator width when joining silo names in the strate table.
+const STRATE_JOIN: &str = ", ";
 
 #[derive(Clone)]
 struct TaskRowData {
-    pid: String,
-    name: String,
-    state: &'static str,
-    priority: String,
+    pid: crate::process::Pid,
+    name: &'static str,
+    state: crate::process::TaskState,
+    priority: crate::process::TaskPriority,
     ticks: u64,
 }
 
 #[derive(Clone)]
 struct SiloRowData {
-    sid: String,
+    sid: u32,
     name: String,
-    state: String,
-    tasks: String,
-    label: String,
+    /// Strate this silo belongs to: its declared label, or its own name when
+    /// no label was declared.
+    strate: String,
+    state: crate::silo::SiloState,
+    tasks: usize,
+    mem_used: u64,
+    /// `0` means the silo declared no upper bound.
+    mem_max: u64,
 }
 
-#[derive(Clone)]
 struct StrateRowData {
     name: String,
     silos: String,
 }
 
 struct TopSnapshot {
-    cpu_count: usize,
     total_pages: usize,
     used_pages: usize,
     tasks: Vec<TaskRowData>,
     silos: Vec<SiloRowData>,
     strates: Vec<StrateRowData>,
     scheduler: crate::process::SchedulerStateSnapshot,
+}
+
+impl TopSnapshot {
+    /// Number of CPUs the scheduler accounts for, clamped to the per-CPU
+    /// counter arrays. Single source of truth: the scheduler's own count, so
+    /// the gauges, the usage window and the state lines always agree.
+    fn cpu_count(&self) -> usize {
+        self.scheduler.cpu_count.min(crate::arch::percpu::MAX_CPUS)
+    }
+}
+
+/// One refresh worth of data: a fresh snapshot plus the deltas against the
+/// previous one. Every presenter consumes this, so the TUI and the serial view
+/// can never drift apart.
+struct TopView {
+    snapshot: TopSnapshot,
+    cpu: CpuUsageWindow,
+    sched: SchedulerMetricsWindow,
+    uptime_secs: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -73,88 +121,56 @@ struct SchedulerMetricsWindow {
     preempt_delta: u64,
     steal_in_delta: u64,
     steal_out_delta: u64,
+    try_lock_fail_delta: u64,
 }
 
-fn collect_silos_from_proc_scheme() -> Option<(Vec<SiloRowData>, Vec<StrateRowData>)> {
-    let fd = crate::vfs::open("/proc/silos", crate::vfs::OpenFlags::READ).ok()?;
-    let bytes = match crate::vfs::read_all(fd) {
-        Ok(b) => b,
-        Err(_) => {
-            let _ = crate::vfs::close(fd);
-            return None;
-        }
-    };
-    let _ = crate::vfs::close(fd);
-    let body = core::str::from_utf8(&bytes).ok()?;
+/// Collects silos and their strate grouping straight from the silo registry.
+///
+/// The shell lives inside the kernel, so there is no reason to serialize the
+/// registry to `/proc/silos` and parse it back: `list_silos_snapshot` is the
+/// structured equivalent of that file, without the fd churn, the per-chunk
+/// regeneration of the procfs text, or the positional field parsing.
+fn collect_silos() -> (Vec<SiloRowData>, Vec<StrateRowData>) {
+    let mut registry = crate::silo::list_silos_snapshot();
+    registry.sort_by_key(|s| s.id);
 
-    let mut silos = Vec::new();
-    let mut strate_index: Vec<(String, Vec<String>)> = Vec::new();
-    for (line_idx, line) in body.lines().enumerate() {
-        if line_idx == 0 || line.is_empty() {
-            continue;
-        }
-        let mut fields = line.split('\t');
-        let sid = fields.next()?;
-        let state = fields.next()?;
-        let tasks = fields.next()?;
-        let _mem_used = fields.next()?;
-        let _mem_min = fields.next()?;
-        let _mem_max = fields.next()?;
-        let _gfx_flags = fields.next()?;
-        let _gfx_sessions = fields.next()?;
-        let _gfx_ttl = fields.next()?;
-        let label = fields.next()?;
-        let name = fields.next()?;
+    let mut silos = Vec::with_capacity(registry.len());
+    // BTreeMap keeps the strate list sorted by name without a second pass.
+    let mut by_strate: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
-        let strate_name = if label != "-" && !label.is_empty() {
-            String::from(label)
-        } else {
-            String::from(name)
-        };
-        if let Some((_, belongs)) = strate_index
-            .iter_mut()
-            .find(|(entry_name, _)| *entry_name == strate_name)
-        {
-            if !belongs.iter().any(|x| x == name) {
-                belongs.push(String::from(name));
-            }
-        } else {
-            strate_index.push((strate_name, vec![String::from(name)]));
-        }
+    for s in registry {
+        // An empty label means "no strate declared": the silo then belongs to
+        // the strate that shares its name (same convention as `/proc/silos`,
+        // which renders a missing label as `-`).
+        let strate = s.strate_label.as_deref().unwrap_or(&s.name);
+        by_strate
+            .entry(String::from(strate))
+            .or_default()
+            .push(s.name.clone());
 
         silos.push(SiloRowData {
-            sid: String::from(sid),
-            name: String::from(name),
-            state: String::from(state),
-            tasks: String::from(tasks),
-            label: String::from(label),
+            sid: s.id,
+            strate: String::from(strate),
+            name: s.name,
+            state: s.state,
+            tasks: s.task_count,
+            mem_used: s.mem_usage_bytes,
+            mem_max: s.mem_max_bytes,
         });
     }
 
-    silos.sort_by_key(|s| s.sid.parse::<u32>().unwrap_or(u32::MAX));
-    strate_index.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut strates = Vec::with_capacity(strate_index.len());
-    for (name, belongs) in strate_index {
-        let mut silos_csv = String::new();
-        for (i, silo_name) in belongs.iter().enumerate() {
-            if i != 0 {
-                silos_csv.push_str(", ");
-            }
-            silos_csv.push_str(silo_name);
-        }
-        strates.push(StrateRowData {
+    let strates = by_strate
+        .into_iter()
+        .map(|(name, silos)| StrateRowData {
             name,
-            silos: silos_csv,
-        });
-    }
+            silos: silos.join(STRATE_JOIN),
+        })
+        .collect();
 
-    Some((silos, strates))
+    (silos, strates)
 }
 
-/// Performs the collect snapshot operation.
 fn collect_snapshot() -> TopSnapshot {
-    let cpu_count = crate::arch::percpu::cpu_count();
     let (total_pages, used_pages) = {
         let guard = crate::memory::buddy::get_allocator().lock();
         guard.as_ref().map(|a| a.page_totals()).unwrap_or((0, 0))
@@ -162,84 +178,24 @@ fn collect_snapshot() -> TopSnapshot {
 
     let mut tasks = Vec::new();
     if let Some(all_tasks) = crate::process::get_all_tasks() {
+        tasks.reserve(all_tasks.len());
         for task in all_tasks {
-            let state = task.get_state();
-            let state_str = match state {
-                crate::process::TaskState::Ready => "Ready",
-                crate::process::TaskState::Running => "Running",
-                crate::process::TaskState::Blocked => "Blocked",
-                crate::process::TaskState::Dead => "Dead",
-            };
             tasks.push(TaskRowData {
-                pid: format!("{}", task.pid),
-                name: String::from(task.name),
-                state: state_str,
-                priority: format!("{:?}", task.priority),
+                pid: task.pid,
+                name: task.name,
+                state: task.get_state(),
+                priority: task.priority,
                 ticks: task.ticks.load(Ordering::Relaxed),
             });
         }
     }
 
     // Top-like behavior: most CPU-consumed tasks first.
-    tasks.sort_by(|a, b| b.ticks.cmp(&a.ticks));
+    tasks.sort_by_key(|task| core::cmp::Reverse(task.ticks));
 
-    let (silos, strates) = collect_silos_from_proc_scheme().unwrap_or_else(|| {
-        let mut silos = Vec::new();
-        let mut strate_index: Vec<(String, Vec<String>)> = Vec::new();
-        let mut silo_snapshots = crate::silo::list_silos_snapshot();
-        silo_snapshots.sort_by_key(|s| s.id);
-
-        for s in silo_snapshots {
-            let label = s.strate_label.unwrap_or_default();
-            let strate_name = if !label.is_empty() {
-                label.clone()
-            } else {
-                s.name.clone()
-            };
-            if let Some((_, belongs)) = strate_index
-                .iter_mut()
-                .find(|(name, _)| *name == strate_name)
-            {
-                if !belongs.iter().any(|x| x == &s.name) {
-                    belongs.push(s.name.clone());
-                }
-            } else {
-                strate_index.push((strate_name, vec![s.name.clone()]));
-            }
-            silos.push(SiloRowData {
-                sid: format!("{}", s.id),
-                name: s.name,
-                state: format!("{:?}", s.state),
-                tasks: format!("{}", s.task_count),
-                label: if label.is_empty() {
-                    String::from("-")
-                } else {
-                    label
-                },
-            });
-        }
-
-        strate_index.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut strates = Vec::with_capacity(strate_index.len());
-        for (name, belongs) in strate_index {
-            let mut silos_csv = String::new();
-            for (i, silo_name) in belongs.iter().enumerate() {
-                if i != 0 {
-                    silos_csv.push_str(", ");
-                }
-                silos_csv.push_str(silo_name);
-            }
-            strates.push(StrateRowData {
-                name,
-                silos: silos_csv,
-            });
-        }
-
-        (silos, strates)
-    });
+    let (silos, strates) = collect_silos();
 
     TopSnapshot {
-        cpu_count,
         total_pages,
         used_pages,
         tasks,
@@ -249,16 +205,17 @@ fn collect_snapshot() -> TopSnapshot {
     }
 }
 
-/// Performs the compute cpu usage window operation.
+/// Turns consecutive counter samples into a per-CPU busy ratio window.
 fn compute_cpu_usage_window(
     prev: &crate::process::CpuUsageSnapshot,
     now: &crate::process::CpuUsageSnapshot,
+    cpus: usize,
 ) -> CpuUsageWindow {
-    let cpu_count = now.cpu_count.min(crate::arch::percpu::MAX_CPUS);
+    let cpus = cpus.min(now.cpu_count).min(crate::arch::percpu::MAX_CPUS);
     let mut ratios = [0.0f64; crate::arch::percpu::MAX_CPUS];
     let mut sum = 0.0;
 
-    for i in 0..cpu_count {
+    for (i, slot) in ratios.iter_mut().enumerate().take(cpus) {
         let delta_total = now.total_ticks[i].saturating_sub(prev.total_ticks[i]);
         let delta_idle = now.idle_ticks[i].saturating_sub(prev.idle_ticks[i]);
         let ratio = if delta_total == 0 {
@@ -267,26 +224,27 @@ fn compute_cpu_usage_window(
             let busy = delta_total.saturating_sub(delta_idle);
             (busy as f64 / delta_total as f64).clamp(0.0, 1.0)
         };
-        ratios[i] = ratio;
+        *slot = ratio;
         sum += ratio;
     }
 
     CpuUsageWindow {
         per_cpu_ratio: ratios,
-        avg_ratio: if cpu_count == 0 {
+        avg_ratio: if cpus == 0 {
             0.0
         } else {
-            (sum / cpu_count as f64).clamp(0.0, 1.0)
+            (sum / cpus as f64).clamp(0.0, 1.0)
         },
     }
 }
 
-/// Performs the compute scheduler metrics window operation.
+/// Aggregates the per-CPU scheduler counters into a single window.
 fn compute_scheduler_metrics_window(
     prev: &crate::process::SchedulerMetricsSnapshot,
     now: &crate::process::SchedulerMetricsSnapshot,
+    cpus: usize,
 ) -> SchedulerMetricsWindow {
-    let cpu_count = now.cpu_count.min(crate::arch::percpu::MAX_CPUS);
+    let cpus = cpus.min(now.cpu_count).min(crate::arch::percpu::MAX_CPUS);
     let mut rt_delta = 0u64;
     let mut fair_delta = 0u64;
     let mut idle_delta = 0u64;
@@ -294,7 +252,8 @@ fn compute_scheduler_metrics_window(
     let mut preempt_delta = 0u64;
     let mut steal_in_delta = 0u64;
     let mut steal_out_delta = 0u64;
-    for i in 0..cpu_count {
+    let mut try_lock_fail_delta = 0u64;
+    for i in 0..cpus {
         rt_delta = rt_delta
             .saturating_add(now.rt_runtime_ticks[i].saturating_sub(prev.rt_runtime_ticks[i]));
         fair_delta = fair_delta
@@ -309,6 +268,8 @@ fn compute_scheduler_metrics_window(
             .saturating_add(now.steal_in_count[i].saturating_sub(prev.steal_in_count[i]));
         steal_out_delta = steal_out_delta
             .saturating_add(now.steal_out_count[i].saturating_sub(prev.steal_out_count[i]));
+        try_lock_fail_delta = try_lock_fail_delta
+            .saturating_add(now.try_lock_fail_count[i].saturating_sub(prev.try_lock_fail_count[i]));
     }
     let total = rt_delta
         .saturating_add(fair_delta)
@@ -328,350 +289,393 @@ fn compute_scheduler_metrics_window(
         preempt_delta,
         steal_in_delta,
         steal_out_delta,
+        try_lock_fail_delta,
     }
 }
 
-/// Performs the scheduler runtime lines operation.
-fn scheduler_runtime_lines(
-    s: &crate::process::SchedulerStateSnapshot,
-    w: &SchedulerMetricsWindow,
-) -> (String, String, String) {
-    let line1 = format!(
-        "Win: RT {:>3}% | FAIR {:>3}% | IDLE {:>3}% | sw {} | pre {} | st+ {} | st- {}",
+/// Runtime distribution and context-switch counters for the elapsed window.
+fn scheduler_window_line(w: &SchedulerMetricsWindow) -> String {
+    format!(
+        "Win: RT {:>3}% | FAIR {:>3}% | IDLE {:>3}% | sw {} | pre {} | st+ {} | st- {} | tlm {}",
         (w.rt_ratio * 100.0) as u16,
         (w.fair_ratio * 100.0) as u16,
         (w.idle_ratio * 100.0) as u16,
         w.switch_delta,
         w.preempt_delta,
         w.steal_in_delta,
-        w.steal_out_delta
-    );
-    let line2 = format!(
-        "Cfg: init={} blocked={} pick=[{},{},{}] steal=[{},{}]",
+        w.steal_out_delta,
+        w.try_lock_fail_delta
+    )
+}
+
+/// Static scheduler configuration: boot phase, class orders, blocked tasks.
+fn scheduler_config_line(s: &crate::process::SchedulerStateSnapshot) -> String {
+    format!(
+        "Cfg: init={} phase={} blocked={} pick=[{},{},{}] steal=[{},{}]",
         s.initialized,
+        s.boot_phase,
         s.blocked_tasks,
         s.pick_order[0].as_str(),
         s.pick_order[1].as_str(),
         s.pick_order[2].as_str(),
         s.steal_order[0].as_str(),
         s.steal_order[1].as_str()
-    );
-    let cpu_count = s.cpu_count.min(crate::arch::percpu::MAX_CPUS);
-
-    let line3 = if cpu_count == 0 {
-        String::from("CPU: n/a")
-    } else {
-        let c0 = format!(
-            "cpu0 cur={} rq={}/{}/{} nr={}",
-            s.current_task[0], s.rq_rt[0], s.rq_fair[0], s.rq_idle[0], s.need_resched[0]
-        );
-
-        if cpu_count == 1 {
-            format!("CPU: {}", c0)
-        } else {
-            let c1 = format!(
-                "cpu1 cur={} rq={}/{}/{} nr={}",
-                s.current_task[1], s.rq_rt[1], s.rq_fair[1], s.rq_idle[1], s.need_resched[1]
-            );
-            format!("CPU: {} | {}", c0, c1)
-        }
-    };
-    (line1, line2, line3)
+    )
 }
 
-/// Top command main loop
-#[cfg(target_arch = "x86_64")]
-pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
-    if !vga::is_available() {
-        shell_println!("Error: 'top' requires a graphical framebuffer console.");
-        return Ok(());
+/// One entry per CPU: current task and the three run-queue depths.
+fn scheduler_cpu_entry(s: &crate::process::SchedulerStateSnapshot, cpu: usize) -> String {
+    format!(
+        "cpu{} cur={} rq={}/{}/{} nr={}",
+        cpu,
+        s.current_task[cpu],
+        s.rq_rt[cpu],
+        s.rq_fair[cpu],
+        s.rq_idle[cpu],
+        if s.need_resched[cpu] { 1 } else { 0 }
+    )
+}
+
+/// Packs the per-CPU entries into lines that fit `width` columns.
+fn scheduler_cpu_lines(
+    s: &crate::process::SchedulerStateSnapshot,
+    cpus: usize,
+    width: usize,
+) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for cpu in 0..cpus {
+        let entry = scheduler_cpu_entry(s, cpu);
+        if !current.is_empty() && current.chars().count() + 3 + entry.chars().count() > width {
+            lines.push(core::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push_str(" | ");
+        }
+        current.push_str(&entry);
+    }
+    if !current.is_empty() {
+        lines.push(current);
     }
 
-    // Switch to double buffering for flicker-free updates.
-    let was_db = vga::double_buffer_mode();
-    vga::set_double_buffer_mode(true);
-    let backend = Strat9RatatuiBackend::new().map_err(|_| ShellError::ExecutionFailed)?;
-    let mut terminal = Terminal::new(backend).map_err(|_| ShellError::ExecutionFailed)?;
-    terminal.clear().map_err(|_| ShellError::ExecutionFailed)?;
+    lines
+}
 
-    let mut last_refresh_tick = crate::process::scheduler::ticks();
-    let boot_tick = last_refresh_tick;
-    let mut prev_cpu_sample = crate::process::cpu_usage_snapshot();
-    let mut prev_sched_sample = crate::process::scheduler_metrics_snapshot();
-    let mut selected_task: usize = 0;
+/// The full scheduler block: runtime window, configuration, then CPU detail.
+fn scheduler_lines(view: &TopView, width: usize) -> Vec<String> {
+    let mut lines = scheduler_cpu_lines(&view.snapshot.scheduler, view.snapshot.cpu_count(), width);
+    lines.insert(0, scheduler_config_line(&view.snapshot.scheduler));
+    lines.insert(0, scheduler_window_line(&view.sched));
+    lines
+}
+
+/// Memory ratio used by both presenters; 0 when the allocator is not up yet.
+fn memory_ratio(snapshot: &TopSnapshot) -> f64 {
+    if snapshot.total_pages == 0 {
+        0.0
+    } else {
+        (snapshot.used_pages as f64 / snapshot.total_pages as f64).clamp(0.0, 1.0)
+    }
+}
+
+/// Buddy page counters converted to bytes.
+fn memory_bytes(snapshot: &TopSnapshot) -> (u64, u64) {
+    let page = crate::memory::frame::PAGE_SIZE;
+    (
+        (snapshot.used_pages as u64).saturating_mul(page),
+        (snapshot.total_pages as u64).saturating_mul(page),
+    )
+}
+
+/// One line summarizing the per-CPU ratios: how many are shown, and the
+/// spread between the least and the most loaded of them.
+fn cpu_spread_line(view: &TopView, shown: usize) -> String {
+    let count = shown.min(view.snapshot.cpu_count());
+    if count == 0 {
+        return String::from("CPU: n/a");
+    }
+    let mut min = f64::MAX;
+    let mut max = 0.0f64;
+    let mut sum = 0.0;
+    for i in 0..count {
+        let ratio = view.cpu.per_cpu_ratio[i];
+        min = min.min(ratio);
+        max = max.max(ratio);
+        sum += ratio;
+    }
+    let avg = sum / count as f64;
+    format!(
+        "CPU: {} shown | min {:>3}% | avg {:>3}% | max {:>3}%",
+        count,
+        (min * 100.0) as u16,
+        (avg * 100.0) as u16,
+        (max * 100.0) as u16
+    )
+}
+
+/// Per-CPU busy ratios, packed into lines that fit `width` columns.
+///
+/// Only the serial presenter needs this: the TUI has a gauge per CPU.
+#[cfg(not(target_arch = "x86_64"))]
+fn cpu_usage_lines(view: &TopView, width: usize) -> Vec<String> {
+    let cpus = view.snapshot.cpu_count();
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for cpu in 0..cpus {
+        let entry = format!(
+            "cpu{} {:>3}%",
+            cpu,
+            (view.cpu.per_cpu_ratio[cpu] * 100.0) as u16
+        );
+        if !current.is_empty() && current.chars().count() + 1 + entry.chars().count() > width {
+            lines.push(core::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(&entry);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// `used/total` memory in human readable units.
+fn memory_label(snapshot: &TopSnapshot) -> String {
+    let (used, total) = memory_bytes(snapshot);
+    format!(
+        "{}/{}",
+        crate::shell::output::human_bytes(used),
+        crate::shell::output::human_bytes(total)
+    )
+}
+
+/// Human readable silo memory budget, `mem_max == 0` meaning unlimited.
+fn silo_memory_label(mem_max: u64) -> String {
+    crate::shell::output::human_bytes_or_unlimited(mem_max)
+}
+
+/// System uptime, formatted the same way as the `uptime` command.
+fn format_uptime(total_secs: u64) -> String {
+    format!(
+        "{:02}:{:02}:{:02}",
+        total_secs / 3600,
+        (total_secs % 3600) / 60,
+        total_secs % 60
+    )
+}
+
+/// Collects one view: a fresh snapshot plus the deltas since the last sample.
+fn collect_view(
+    prev_cpu: &mut crate::process::CpuUsageSnapshot,
+    prev_sched: &mut crate::process::SchedulerMetricsSnapshot,
+) -> TopView {
+    let snapshot = collect_snapshot();
+    let cpus = snapshot.cpu_count();
+
+    let cpu_sample = crate::process::cpu_usage_snapshot();
+    let cpu = compute_cpu_usage_window(prev_cpu, &cpu_sample, cpus);
+    *prev_cpu = cpu_sample;
+
+    let sched_sample = crate::process::scheduler_metrics_snapshot();
+    let sched = compute_scheduler_metrics_window(prev_sched, &sched_sample, cpus);
+    *prev_sched = sched_sample;
+
+    let uptime_secs = crate::process::scheduler::ticks() / crate::arch::timer::TIMER_HZ;
+
+    TopView {
+        snapshot,
+        cpu,
+        sched,
+        uptime_secs,
+    }
+}
+
+/// Drains pending keystrokes, bounded so a key flood cannot starve rendering.
+///
+/// Returns `true` when the user asked to leave.
+fn poll_input(selected: &mut usize) -> bool {
+    if crate::shell::is_interrupted() {
+        return true;
+    }
+    for _ in 0..MAX_KEYS_PER_ROUND {
+        let Some(ch) = crate::arch::keyboard::read_char() else {
+            return false;
+        };
+        match ch {
+            b'q' | 0x1B | 0x03 => return true,
+            crate::arch::keyboard::KEY_UP => *selected = selected.saturating_sub(1),
+            crate::arch::keyboard::KEY_DOWN => *selected = selected.saturating_add(1),
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Refresh loop shared by every presenter: input is polled on every pass so it
+/// stays responsive between two frames, and a view is sampled every
+/// `REFRESH_TICKS` ticks and handed to `present`.
+fn run_presenter(
+    mut present: impl FnMut(&TopView, usize) -> Result<(), ShellError>,
+) -> Result<(), ShellError> {
+    let mut prev_cpu = crate::process::cpu_usage_snapshot();
+    let mut prev_sched = crate::process::scheduler_metrics_snapshot();
+    let mut last_refresh = crate::process::scheduler::ticks();
+    let mut selected = 0usize;
 
     loop {
-        let ticks = crate::process::scheduler::ticks();
-
-        // Keep input responsive even between render ticks.
-        if let Some(ch) = crate::arch::keyboard::read_char() {
-            match ch {
-                b'q' | 0x1B | 0x03 => break,
-                crate::arch::keyboard::KEY_UP => {
-                    selected_task = selected_task.saturating_sub(1);
-                }
-                crate::arch::keyboard::KEY_DOWN => {
-                    selected_task = selected_task.saturating_add(1);
-                }
-                _ => {}
-            }
+        if poll_input(&mut selected) {
+            break;
         }
 
-        // Refresh every 100ms with a 100Hz timer.
-        if ticks.saturating_sub(last_refresh_tick) < TOP_REFRESH_TICKS {
+        let ticks = crate::process::scheduler::ticks();
+        if ticks.saturating_sub(last_refresh) < REFRESH_TICKS {
             crate::process::yield_task();
             continue;
         }
-        last_refresh_tick = ticks;
-        let snapshot = collect_snapshot();
-        let cpu_sample = crate::process::cpu_usage_snapshot();
-        let cpu_window = compute_cpu_usage_window(&prev_cpu_sample, &cpu_sample);
-        prev_cpu_sample = cpu_sample;
-        let sched_sample = crate::process::scheduler_metrics_snapshot();
-        let sched_window = compute_scheduler_metrics_window(&prev_sched_sample, &sched_sample);
-        prev_sched_sample = sched_sample;
-        let mem_ratio = if snapshot.total_pages > 0 {
-            (snapshot.used_pages as f64) / (snapshot.total_pages as f64)
-        } else {
-            0.0
-        };
+        last_refresh = ticks;
 
-        let rows: Vec<Row> = snapshot
-            .tasks
-            .iter()
-            .map(|task| {
-                Row::new(vec![
-                    Cell::from(task.pid.as_str()),
-                    Cell::from(task.name.as_str()),
-                    Cell::from(task.state),
-                    Cell::from(task.priority.as_str()),
-                    Cell::from(format!("{}", task.ticks)),
-                ])
-            })
-            .collect();
-        let row_count = rows.len();
-        if row_count == 0 {
-            selected_task = 0;
-        } else if selected_task >= row_count {
-            selected_task = row_count - 1;
-        }
-        let mut table_state = TableState::default();
-        if row_count > 0 {
-            table_state.select(Some(selected_task));
-        }
-
-        let uptime_secs = ticks.saturating_sub(boot_tick) / 100;
-
-        let frame_started = vga::begin_frame();
-        terminal
-            .draw(|frame| {
-                let title_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
-                let primary_text = Style::default().fg(Color::White);
-                let muted_text = Style::default().fg(Color::Gray);
-                let header_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
-
-                let area = frame.area();
-                let vertical = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(2),
-                        Constraint::Length(3),
-                        Constraint::Length(5),
-                        Constraint::Length(6),
-                        Constraint::Min(8),
-                        Constraint::Length(1),
-                    ])
-                    .split(area);
-
-                let title = Paragraph::new("Strat9 system monitor")
-                    .style(title_style)
-                    .block(Block::default().borders(Borders::BOTTOM).title("Top"));
-                frame.render_widget(title, vertical[0]);
-
-                let stats_line = Paragraph::new(format!(
-                    "CPUs: {} | Tasks: {} | Silos: {} | Strates: {} | CPU(avg): {:>3}% | Uptime: {}s",
-                    snapshot.cpu_count,
-                    snapshot.tasks.len(),
-                    snapshot.silos.len(),
-                    snapshot.strates.len(),
-                    (cpu_window.avg_ratio * 100.0) as u16,
-                    uptime_secs
-                ))
-                .style(primary_text)
-                .block(Block::default().borders(Borders::BOTTOM).title("Stats"));
-                frame.render_widget(stats_line, vertical[1]);
-
-                let (sched_line1, sched_line2, sched_line3) =
-                    scheduler_runtime_lines(&snapshot.scheduler, &sched_window);
-                let sched_line = Paragraph::new(format!(
-                    "{}\n{}\n{}",
-                    sched_line1, sched_line2, sched_line3
-                ))
-                .style(primary_text)
-                .block(Block::default().borders(Borders::BOTTOM).title("Scheduler"));
-                frame.render_widget(sched_line, vertical[2]);
-
-                let cpu_split = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .split(vertical[3]);
-
-                let mem_gauge = Gauge::default()
-                    .block(
-                        Block::default()
-                            .borders(Borders::TOP | Borders::BOTTOM)
-                            .title(format!(
-                                "Memory {} / {} pages",
-                                snapshot.used_pages, snapshot.total_pages
-                            )),
-                    )
-                    .gauge_style(Style::default().fg(Color::Blue))
-                    .use_unicode(false)
-                    .ratio(mem_ratio.clamp(0.0, 1.0))
-                    .label(format!("{:.1}%", mem_ratio * 100.0));
-                frame.render_widget(mem_gauge, cpu_split[0]);
-
-                let cpu_gauge_count = snapshot.cpu_count.min(MAX_CPU_GAUGES);
-                if cpu_gauge_count > 0 {
-                    let mut constraints = Vec::with_capacity(cpu_gauge_count);
-                    for _ in 0..cpu_gauge_count {
-                        constraints.push(Constraint::Length(1));
-                    }
-                    let cpu_rows = Layout::default()
-                        .direction(Direction::Vertical)
-                        .constraints(constraints)
-                        .split(cpu_split[1]);
-
-                    for i in 0..cpu_gauge_count {
-                        let ratio = cpu_window.per_cpu_ratio[i];
-                        let gauge = Gauge::default()
-                            .block(Block::default().title(format!("CPU{}", i)).borders(Borders::NONE))
-                            .gauge_style(Style::default().fg(Color::Green))
-                            .use_unicode(false)
-                            .ratio(ratio)
-                            .label(format!("{:>3}%", (ratio * 100.0) as u16));
-                        frame.render_widget(gauge, cpu_rows[i]);
-                    }
-                }
-
-                let main_split = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(64), Constraint::Percentage(36)])
-                    .split(vertical[4]);
-
-                let task_table = Table::new(
-                    rows.iter().cloned(),
-                    [
-                        Constraint::Length(5),  // PID
-                        Constraint::Min(18),    // Name (takes remaining width)
-                        Constraint::Length(9),  // State
-                        Constraint::Length(8),  // Prio
-                        Constraint::Length(10), // Ticks
-                    ],
-                )
-                .header(
-                    Row::new(vec!["PID", "Name", "State", "Prio", "Ticks"]).style(header_style),
-                )
-                .column_spacing(1)
-                .style(primary_text)
-                .row_highlight_style(
-                    Style::default()
-                        .bg(Color::White)
-                        .fg(Color::Black)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .block(
-                    Block::default()
-                        .borders(Borders::TOP)
-                        .title("Tasks (sorted by ticks)"),
-                );
-                frame.render_stateful_widget(task_table, main_split[0], &mut table_state);
-
-                let right_split = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
-                    .split(main_split[1]);
-
-                let silo_rows: Vec<Row> = snapshot
-                    .silos
-                    .iter()
-                    .map(|s| {
-                        Row::new(vec![
-                            Cell::from(s.sid.as_str()),
-                            Cell::from(s.name.as_str()),
-                            Cell::from(s.state.as_str()),
-                            Cell::from(s.tasks.as_str()),
-                            Cell::from(s.label.as_str()),
-                        ])
-                    })
-                    .collect();
-                let silo_table = Table::new(
-                    silo_rows,
-                    [
-                        Constraint::Length(5),
-                        Constraint::Length(10),
-                        Constraint::Length(8),
-                        Constraint::Length(5),
-                        Constraint::Min(8),
-                    ],
-                )
-                .header(
-                    Row::new(vec!["SID", "Name", "State", "T", "Label"]).style(
-                        Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
-                    ),
-                )
-                .column_spacing(1)
-                .style(primary_text)
-                .block(Block::default().borders(Borders::TOP).title("Silos"));
-                frame.render_widget(silo_table, right_split[0]);
-
-                let strate_rows: Vec<Row> = snapshot
-                    .strates
-                    .iter()
-                    .map(|s| Row::new(vec![Cell::from(s.name.as_str()), Cell::from(s.silos.as_str())]))
-                    .collect();
-                let strate_table = Table::new(
-                    strate_rows,
-                    [Constraint::Length(12), Constraint::Min(10)],
-                )
-                .header(
-                    Row::new(vec!["Strate", "BelongsTo"]).style(
-                        Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
-                    ),
-                )
-                .column_spacing(1)
-                .style(primary_text)
-                .block(Block::default().borders(Borders::TOP).title("Strates"));
-                frame.render_widget(strate_table, right_split[1]);
-
-                let footer = Paragraph::new("[Up/Down] Select process | [q|Esc] Exit")
-                    .style(muted_text)
-                    .block(Block::default().borders(Borders::TOP));
-                frame.render_widget(footer, vertical[5]);
-            })
-            .map_err(|_| ShellError::ExecutionFailed)?;
-
-        if frame_started {
-            vga::end_frame();
-        } else {
-            vga::present();
-        }
+        let view = collect_view(&mut prev_cpu, &mut prev_sched);
+        // The task list is resorted every frame, so the selection is only
+        // meaningful once clamped to the rows that actually exist.
+        selected = selected.min(view.snapshot.tasks.len().saturating_sub(1));
+        present(&view, selected)?;
 
         crate::process::yield_task();
     }
 
-    // Clean exit.
-    vga::set_double_buffer_mode(was_db);
-    crate::shell::output::clear_screen();
-    vga::set_text_cursor(0, 0);
-    shell_println!("Top exited.");
     Ok(())
 }
 
-/// Serial-only fallback for `top` on non-x86 targets (R6: full TUI via virtio).
+/// `top` main entry point.
+pub fn cmd_top(_args: &[String]) -> Result<(), ShellError> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        tui::run()
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        run_serial()
+    }
+}
+
+/// Serial presenter for targets without a framebuffer console (R6: the virtio
+/// console will get a TUI; until then the same view is printed as text).
 #[cfg(not(target_arch = "x86_64"))]
-pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
-    shell_println!("top: TUI requires a framebuffer console (not available yet)");
-    Ok(())
+fn run_serial() -> Result<(), ShellError> {
+    shell_println!("top: framebuffer console unavailable, streaming to serial (q to quit)");
+    run_presenter(|view, selected| {
+        render_serial(view, selected);
+        Ok(())
+    })
 }
 
+/// Renders one serial frame.
+#[cfg(not(target_arch = "x86_64"))]
+fn render_serial(view: &TopView, selected: usize) {
+    let s = &view.snapshot;
+    let ratio = memory_ratio(s);
+
+    shell_println!(
+        "== Strat9 top | cpus {} | tasks {} | silos {} | strates {} | cpu(avg) {:>3}% | up {} ==",
+        s.cpu_count(),
+        s.tasks.len(),
+        s.silos.len(),
+        s.strates.len(),
+        (view.cpu.avg_ratio * 100.0) as u16,
+        format_uptime(view.uptime_secs)
+    );
+    shell_println!(
+        "Mem: {} ({:.1}%) | {}",
+        memory_label(s),
+        ratio * 100.0,
+        cpu_spread_line(view, s.cpu_count())
+    );
+    for line in cpu_usage_lines(view, SERIAL_COLS) {
+        shell_println!("{}", line);
+    }
+    for line in scheduler_lines(view, SERIAL_COLS) {
+        shell_println!("{}", line);
+    }
+
+    shell_println!(
+        "{:>5} {:<18} {:<8} {:<5} {:>10}",
+        "PID",
+        "NAME",
+        "STATE",
+        "PRIO",
+        "TICKS"
+    );
+    for (i, task) in s.tasks.iter().enumerate() {
+        shell_println!(
+            "{:>5} {:<18} {:<8} {:<5} {:>10}{}",
+            task.pid,
+            task.name,
+            task_state_label(task.state),
+            format!("{:?}", task.priority),
+            task.ticks,
+            if i == selected { "  <" } else { "" }
+        );
+    }
+
+    if !s.silos.is_empty() {
+        shell_println!(
+            "{:>4} {:<12} {:<9} {:>4} {:>8} {:<10} {}",
+            "SID",
+            "NAME",
+            "STATE",
+            "T",
+            "MEM",
+            "MAX",
+            "STRATE"
+        );
+        for silo in &s.silos {
+            shell_println!(
+                "{:>4} {:<12} {:<9} {:>4} {:>8} {:<10} {}",
+                silo.sid,
+                silo.name,
+                silo_state_label(silo.state),
+                silo.tasks,
+                crate::shell::output::human_bytes(silo.mem_used),
+                silo_memory_label(silo.mem_max),
+                silo.strate
+            );
+        }
+    }
+
+    if !s.strates.is_empty() {
+        shell_println!("{:<14} {}", "STRATE", "BELONGS TO");
+        for strate in &s.strates {
+            shell_println!("{:<14} {}", strate.name, strate.silos);
+        }
+    }
+}
+
+/// Shared task state label, so both presenters render the same words.
+fn task_state_label(state: crate::process::TaskState) -> &'static str {
+    match state {
+        crate::process::TaskState::Ready => "Ready",
+        crate::process::TaskState::Running => "Running",
+        crate::process::TaskState::Blocked => "Blocked",
+        crate::process::TaskState::Dead => "Dead",
+    }
+}
+
+/// Shared silo state label, so both presenters render the same words.
+fn silo_state_label(state: crate::silo::SiloState) -> &'static str {
+    match state {
+        crate::silo::SiloState::Created => "Created",
+        crate::silo::SiloState::Loading => "Loading",
+        crate::silo::SiloState::Ready => "Ready",
+        crate::silo::SiloState::Running => "Running",
+        crate::silo::SiloState::Paused => "Paused",
+        crate::silo::SiloState::Stopping => "Stopping",
+        crate::silo::SiloState::Stopped => "Stopped",
+        crate::silo::SiloState::Crashed => "Crashed",
+        crate::silo::SiloState::Zombie => "Zombie",
+        crate::silo::SiloState::Destroyed => "Destroyed",
+    }
+}

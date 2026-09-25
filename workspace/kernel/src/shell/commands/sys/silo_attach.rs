@@ -28,20 +28,28 @@ pub(super) fn cmd_silo_attach(args: &[String]) -> Result<(), ShellError> {
         }
     };
 
-    loop {
+    // The id is already resolved: drain it directly instead of formatting it
+    // back into a selector string on every pass of this loop.
+    while !crate::shell::is_interrupted() {
         if let Some(ch) = crate::arch::keyboard::read_char() {
             if ch == b'q' || ch == 0x03 || ch == 0x1B {
                 break;
             }
         }
 
-        match silo::silo_output_drain(&alloc::format!("{}", sid)) {
+        match silo::silo_output_drain_by_id(sid) {
             Ok(data) if !data.is_empty() => {
                 if let Ok(s) = core::str::from_utf8(&data) {
                     crate::shell_print!("{}", s);
                 }
             }
-            _ => {}
+            Ok(_) => {}
+            // The silo went away mid-attach: say so instead of spinning
+            // silently on a failing drain.
+            Err(e) => {
+                shell_println!("\nsilo attach: silo {} is gone ({:?})", sid, e);
+                return Err(ShellError::ExecutionFailed);
+            }
         }
 
         crate::process::yield_task();

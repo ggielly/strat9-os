@@ -11,7 +11,8 @@ pub fn cmd_shutdown(_args: &[String]) -> Result<(), ShellError> {
 
     for s in &silos {
         shell_println!("  stopping silo {} ({})", s.id, s.name);
-        let _ = crate::silo::kernel_suspend_silo(&alloc::format!("{}", s.id));
+        // The id is already known: no need to format it back into a selector.
+        let _ = crate::silo::kernel_suspend_silo_by_id(s.id);
     }
 
     shell_println!("[shutdown] Killing remaining tasks...");

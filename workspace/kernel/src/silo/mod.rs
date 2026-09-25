@@ -1374,6 +1374,15 @@ pub fn list_silos_snapshot() -> Vec<SiloSnapshot> {
         .collect()
 }
 
+/// State of a single silo, without cloning the whole registry.
+///
+/// `list_silos_snapshot` is the right tool for listings, but a caller that
+/// only needs one silo's state should not pay for a deep clone of every silo.
+pub fn silo_state_by_id(silo_id: u32) -> Option<SiloState> {
+    let mgr = SILO_MANAGER.lock();
+    mgr.get(silo_id).ok().map(|s| s.state)
+}
+
 /// Return silo identity + memory accounting for a task, if the task belongs to a silo.
 ///
 /// Tuple layout:
@@ -2817,15 +2826,26 @@ pub fn sys_silo_resume(handle: u64) -> Result<u64, SyscallError> {
 // ============================================================================
 
 pub fn kernel_suspend_silo(selector: &str) -> Result<u32, SyscallError> {
-    let (silo_id, tasks) = {
+    let silo_id = {
+        let mgr = SILO_MANAGER.lock();
+        resolve_selector_to_silo_id(selector, &mgr)?
+    };
+    kernel_suspend_silo_by_id(silo_id)
+}
+
+/// Suspend a silo whose id is already known.
+///
+/// Callers holding a `SiloSnapshot` (shutdown walking the registry, for
+/// instance) use this instead of formatting the id back into a selector
+/// string just to have it re-parsed here.
+pub fn kernel_suspend_silo_by_id(silo_id: u32) -> Result<u32, SyscallError> {
+    let tasks = {
         let mut mgr = SILO_MANAGER.lock();
-        let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
         let silo = mgr.get_mut(silo_id)?;
         match silo.state {
             SiloState::Running => {
                 silo.state = SiloState::Paused;
-                let t = silo.tasks.clone();
-                (silo_id, t)
+                silo.tasks.clone()
             }
             _ => return Err(SyscallError::InvalidArgument),
         }
@@ -3033,6 +3053,20 @@ pub fn silo_output_write(silo_id: u32, data: &[u8]) {
 pub fn silo_output_drain(selector: &str) -> Result<Vec<u8>, SyscallError> {
     let mut mgr = SILO_MANAGER.lock();
     let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
+    drain_output_by_id(&mut mgr, silo_id)
+}
+
+/// Drain the output buffer of a known runtime silo id.
+///
+/// Callers that already resolved the id (a long-lived attach loop, for
+/// instance) use this instead of formatting the id back into a selector
+/// string on every iteration just to have it re-parsed here.
+pub fn silo_output_drain_by_id(silo_id: u32) -> Result<Vec<u8>, SyscallError> {
+    let mut mgr = SILO_MANAGER.lock();
+    drain_output_by_id(&mut mgr, silo_id)
+}
+
+fn drain_output_by_id(mgr: &mut SiloManager, silo_id: u32) -> Result<Vec<u8>, SyscallError> {
     let silo = mgr.get_mut(silo_id)?;
     let mut buf = match silo.output_buf.take() {
         Some(buf) => buf,

@@ -17,7 +17,7 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("");
     shell_println!("-- Process --");
     shell_println!("  ps                - List all tasks");
-    shell_println!("  top               - Graphical task manager (interactive)");
+    shell_println!("  top               - System monitor (TUI, or serial without VGA)");
     shell_println!("  kill <pid>        - Terminate a task by PID");
     shell_println!("  whoami            - Show current silo identity");
 

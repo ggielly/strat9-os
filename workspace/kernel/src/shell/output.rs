@@ -5,7 +5,7 @@
 //! redirection (`>`, `>>`) in the Chevron shell.
 
 use crate::sync::SpinLock;
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 // SpinLock over Option<Vec<u8>>: shell-only path, never called from IRQ context
 // or the allocator hot path.  Heap growth under this lock is acceptable.
@@ -144,5 +144,23 @@ pub fn format_bytes(bytes: usize) -> (usize, &'static str) {
         (bytes / KB, "KB")
     } else {
         (bytes, "B")
+    }
+}
+
+/// Format a byte count as a ready-to-print string, e.g. `12MB`.
+///
+/// Single definition shared by every command that reports sizes (`top`, `silo
+/// list`, `silo info`, ...) so they cannot drift apart.
+pub fn human_bytes(bytes: u64) -> String {
+    let (value, unit) = format_bytes(bytes as usize);
+    alloc::format!("{}{}", value, unit)
+}
+
+/// Format a memory budget, `0` meaning "no upper bound declared".
+pub fn human_bytes_or_unlimited(bytes: u64) -> String {
+    if bytes == 0 {
+        String::from("unlimited")
+    } else {
+        human_bytes(bytes)
     }
 }

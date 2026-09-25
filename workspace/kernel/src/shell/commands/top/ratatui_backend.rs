@@ -1,4 +1,15 @@
-use crate::arch::vga::{self, RgbColor, TextAlign, TextOptions};
+//! Ratatui [`Backend`] on top of the Strat9 VGA framebuffer writer.
+//!
+//! Drawing is done cell by cell, so the backend resolves the console geometry
+//! once per frame and holds the writer lock for the whole frame: going through
+//! the `vga::fill_rect` / `vga::draw_text` free functions instead would take
+//! and drop the writer lock several times per cell.
+//!
+//! Presentation is *not* owned here. Both callers (the `top` loop and the
+//! one-shot `--gui` tables) bracket their frame with `vga::begin_frame()` and
+//! `vga::end_frame()`, so [`Backend::flush`] stays a no-op.
+
+use crate::arch::vga::{self, RgbColor, TextAlign, TextOptions, VgaWriter};
 use core::fmt;
 use ratatui::{
     backend::{Backend, ClearType, WindowSize},
@@ -6,6 +17,9 @@ use ratatui::{
     layout::{Position, Size},
     style::Color,
 };
+
+/// Caret color used when the TUI asks for a visible cursor.
+const CURSOR_COLOR: RgbColor = RgbColor::new(0x4F, 0xB3, 0xB3);
 
 #[derive(Debug, Clone, Copy)]
 pub enum BackendError {
@@ -23,9 +37,33 @@ impl fmt::Display for BackendError {
 
 impl core::error::Error for BackendError {}
 
+/// Console geometry, resolved once per frame instead of once per cell.
+#[derive(Clone, Copy, Default)]
+struct Geometry {
+    cols: usize,
+    rows: usize,
+    glyph_w: usize,
+    glyph_h: usize,
+}
+
+impl Geometry {
+    fn resolve() -> Self {
+        let (glyph_w, glyph_h) = vga::glyph_size();
+        Self {
+            cols: vga::text_cols(),
+            rows: vga::text_rows(),
+            glyph_w,
+            glyph_h,
+        }
+    }
+
+    fn is_usable(&self) -> bool {
+        self.glyph_w > 0 && self.glyph_h > 0 && self.cols > 0 && self.rows > 0
+    }
+}
+
 pub struct Strat9RatatuiBackend {
     cursor: Position,
-    cursor_visible: bool,
 }
 
 impl Strat9RatatuiBackend {
@@ -36,7 +74,6 @@ impl Strat9RatatuiBackend {
         }
         Ok(Self {
             cursor: Position { x: 0, y: 0 },
-            cursor_visible: false,
         })
     }
 
@@ -61,33 +98,7 @@ impl Strat9RatatuiBackend {
             Color::LightCyan => RgbColor::new(0x55, 0xFF, 0xFF),
             Color::White => RgbColor::new(0xFF, 0xFF, 0xFF),
             Color::Rgb(r, g, b) => RgbColor::new(r, g, b),
-            Color::Indexed(idx) => {
-                // ANSI 16-color fallback + grayscale for higher indices.
-                let basic = match idx & 0x0F {
-                    0 => RgbColor::new(0x00, 0x00, 0x00),
-                    1 => RgbColor::new(0x80, 0x00, 0x00),
-                    2 => RgbColor::new(0x00, 0x80, 0x00),
-                    3 => RgbColor::new(0x80, 0x80, 0x00),
-                    4 => RgbColor::new(0x00, 0x00, 0x80),
-                    5 => RgbColor::new(0x80, 0x00, 0x80),
-                    6 => RgbColor::new(0x00, 0x80, 0x80),
-                    7 => RgbColor::new(0xAA, 0xAA, 0xAA),
-                    8 => RgbColor::new(0x55, 0x55, 0x55),
-                    9 => RgbColor::new(0xFF, 0x55, 0x55),
-                    10 => RgbColor::new(0x55, 0xFF, 0x55),
-                    11 => RgbColor::new(0xFF, 0xFF, 0x55),
-                    12 => RgbColor::new(0x55, 0x55, 0xFF),
-                    13 => RgbColor::new(0xFF, 0x55, 0xFF),
-                    14 => RgbColor::new(0x55, 0xFF, 0xFF),
-                    _ => RgbColor::new(0xFF, 0xFF, 0xFF),
-                };
-                if idx < 16 {
-                    basic
-                } else {
-                    let g = idx;
-                    RgbColor::new(g, g, g)
-                }
-            }
+            Color::Indexed(idx) => Self::map_indexed(idx),
         }
     }
 
@@ -100,7 +111,37 @@ impl Strat9RatatuiBackend {
         }
     }
 
+    /// Maps the 256-color palette onto the framebuffer: the ANSI 16 colors for
+    /// the first entries, a gray ramp above them.
+    fn map_indexed(idx: u8) -> RgbColor {
+        const ANSI_16: [RgbColor; 16] = [
+            RgbColor::new(0x00, 0x00, 0x00),
+            RgbColor::new(0x80, 0x00, 0x00),
+            RgbColor::new(0x00, 0x80, 0x00),
+            RgbColor::new(0x80, 0x80, 0x00),
+            RgbColor::new(0x00, 0x00, 0x80),
+            RgbColor::new(0x80, 0x00, 0x80),
+            RgbColor::new(0x00, 0x80, 0x80),
+            RgbColor::new(0xAA, 0xAA, 0xAA),
+            RgbColor::new(0x55, 0x55, 0x55),
+            RgbColor::new(0xFF, 0x55, 0x55),
+            RgbColor::new(0x55, 0xFF, 0x55),
+            RgbColor::new(0xFF, 0xFF, 0x55),
+            RgbColor::new(0x55, 0x55, 0xFF),
+            RgbColor::new(0xFF, 0x55, 0xFF),
+            RgbColor::new(0x55, 0xFF, 0xFF),
+            RgbColor::new(0xFF, 0xFF, 0xFF),
+        ];
+        match ANSI_16.get(idx as usize) {
+            Some(color) => *color,
+            None => RgbColor::new(idx, idx, idx),
+        }
+    }
+
     /// Performs the normalize symbol operation.
+    ///
+    /// The console font is ASCII only, so box drawing and block glyphs are
+    /// downgraded to their closest printable equivalent.
     fn normalize_symbol(symbol: &str) -> char {
         let ch = symbol.chars().next().unwrap_or(' ');
         match ch {
@@ -112,48 +153,43 @@ impl Strat9RatatuiBackend {
             '█' | '▇' | '▆' | '▅' | '▄' | '▃' | '▂' | '▁' | '░' | '▒' | '▓' => {
                 '#'
             }
-            // Keep printable ASCII and Latin-1 letters/numbers as-is.
+            // Keep printable ASCII as-is.
             c if c.is_ascii_graphic() || c == ' ' => c,
             _ => '?',
         }
     }
 
-    /// Performs the draw cell operation.
-    fn draw_cell(&self, x: u16, y: u16, cell: &Cell) {
-        #[allow(deprecated)]
-        if cell.skip {
-            return;
-        }
-        let cols = vga::text_cols();
-        let rows = vga::text_rows();
-        if x as usize >= cols || y as usize >= rows {
+    /// Draws one cell, with the writer already borrowed for the whole frame.
+    fn draw_cell(writer: &mut VgaWriter, geo: Geometry, x: u16, y: u16, cell: &Cell) {
+        if x as usize >= geo.cols || y as usize >= geo.rows {
             return;
         }
 
-        let (gw, gh) = vga::glyph_size();
-        if gw == 0 || gh == 0 {
-            return;
-        }
-        let px = x as usize * gw;
-        let py = y as usize * gh;
+        let px = x as usize * geo.glyph_w;
+        let py = y as usize * geo.glyph_h;
         let bg = Self::map_bg_color(cell.bg);
         let fg = Self::map_fg_color(cell.fg);
 
-        vga::fill_rect(px, py, gw, gh, bg);
+        writer.fill_rect(px, py, geo.glyph_w, geo.glyph_h, bg);
 
-        let symbol = cell.symbol();
+        #[allow(deprecated)]
+        let symbol = if cell.skip { " " } else { cell.symbol() };
         let ch = Self::normalize_symbol(symbol);
         if ch != ' ' {
             let mut one = [0u8; 4];
             let text = ch.encode_utf8(&mut one);
-            let opts = TextOptions {
-                fg,
-                bg,
-                align: TextAlign::Left,
-                wrap: false,
-                max_width: Some(gw),
-            };
-            let _ = vga::draw_text(px, py, text, opts);
+            let _ = writer.draw_text(
+                px,
+                py,
+                text,
+                TextOptions {
+                    fg,
+                    bg,
+                    align: TextAlign::Left,
+                    wrap: false,
+                    max_width: Some(geo.glyph_w),
+                },
+            );
         }
     }
 }
@@ -166,24 +202,29 @@ impl Backend for Strat9RatatuiBackend {
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
-        if !vga::is_available() {
+        let geo = Geometry::resolve();
+        if !geo.is_usable() {
             return Err(BackendError::FramebufferUnavailable);
         }
-        for (x, y, cell) in content {
-            self.draw_cell(x, y, cell);
-        }
-        Ok(())
+        vga::with_writer(|writer| {
+            for (x, y, cell) in content {
+                Self::draw_cell(writer, geo, x, y, cell);
+            }
+        })
+        .ok_or(BackendError::FramebufferUnavailable)
     }
 
     /// Performs the hide cursor operation.
     fn hide_cursor(&mut self) -> Result<(), Self::Error> {
-        self.cursor_visible = false;
+        // The caret is a framebuffer overlay re-drawn on every present: it has
+        // to be hidden on the VGA side, not just tracked here.
+        vga::hide_text_cursor();
         Ok(())
     }
 
     /// Performs the show cursor operation.
     fn show_cursor(&mut self) -> Result<(), Self::Error> {
-        self.cursor_visible = true;
+        vga::draw_text_cursor(CURSOR_COLOR);
         Ok(())
     }
 
@@ -202,19 +243,41 @@ impl Backend for Strat9RatatuiBackend {
 
     /// Performs the clear operation.
     fn clear(&mut self) -> Result<(), Self::Error> {
-        if !vga::is_available() {
-            return Err(BackendError::FramebufferUnavailable);
-        }
         vga::fill_rect(0, 0, vga::width(), vga::height(), RgbColor::BLACK);
         Ok(())
     }
 
     /// Performs the clear region operation.
+    ///
+    /// Regions are expressed in character cells, so the clear honors the
+    /// console geometry instead of blanking the whole screen.
     fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Self::Error> {
-        match clear_type {
-            ClearType::All => self.clear(),
-            _ => self.clear(),
+        let geo = Geometry::resolve();
+        if !geo.is_usable() {
+            return Err(BackendError::FramebufferUnavailable);
         }
+        let cx = (self.cursor.x as usize).min(geo.cols - 1);
+        let cy = (self.cursor.y as usize).min(geo.rows - 1);
+
+        // (first column, first row, column count, row count), in cells.
+        let (x, y, w, h) = match clear_type {
+            ClearType::All => return self.clear(),
+            ClearType::AfterCursor => (cx, cy, geo.cols - cx, geo.rows - cy),
+            ClearType::BeforeCursor => (0, 0, cx + 1, cy + 1),
+            ClearType::CurrentLine => (0, cy, geo.cols, 1),
+            ClearType::UntilNewLine => (cx, cy, geo.cols - cx, 1),
+        };
+        if w == 0 || h == 0 {
+            return Ok(());
+        }
+        vga::fill_rect(
+            x * geo.glyph_w,
+            y * geo.glyph_h,
+            w * geo.glyph_w,
+            h * geo.glyph_h,
+            RgbColor::BLACK,
+        );
+        Ok(())
     }
 
     /// Performs the size operation.
@@ -237,10 +300,10 @@ impl Backend for Strat9RatatuiBackend {
     }
 
     /// Performs the flush operation.
+    ///
+    /// No-op by design: the caller brackets the frame with `vga::begin_frame()`
+    /// and `vga::end_frame()` / `vga::present()`.
     fn flush(&mut self) -> Result<(), Self::Error> {
-        if !vga::is_available() {
-            return Err(BackendError::FramebufferUnavailable);
-        }
         Ok(())
     }
 }

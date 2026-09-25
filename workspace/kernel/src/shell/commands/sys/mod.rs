@@ -45,20 +45,20 @@ pub use trace::cmd_trace;
 pub use version::cmd_version;
 pub use wasm_run::cmd_wasm_run;
 
-use silo_attach::cmd_silo_attach;
-use silo_limit::cmd_silo_limit;
 #[cfg(target_arch = "x86_64")]
 use crate::shell::commands::top::Strat9RatatuiBackend;
+use silo_attach::cmd_silo_attach;
+use silo_limit::cmd_silo_limit;
 
+#[cfg(target_arch = "x86_64")]
+use crate::arch::vga;
 use crate::{
     memory,
     process::elf::load_and_run_elf,
-    shell::{output::{clear_screen, format_bytes}, ShellError},
+    shell::{output::clear_screen, ShellError},
     shell_println, silo, vfs,
 };
 use alloc::{string::String, vec::Vec};
-#[cfg(target_arch = "x86_64")]
-use crate::arch::vga;
 #[cfg(target_arch = "x86_64")]
 use ratatui::{
     layout::{Constraint, Direction, Layout},
@@ -152,6 +152,10 @@ struct ManagedStrateDef {
     binary: String,
     stype: String,
     target: String,
+    /// Extra key read by `strate-bus` out of the boot config. The shell never
+    /// interprets it, but it must survive the parse/emit round-trip: dropping
+    /// it would silently reset the bus probe mode on `silo config add`.
+    probe_mode: String,
 }
 
 #[derive(Clone)]
@@ -185,6 +189,7 @@ fn parse_silo_toml(data: &str) -> Vec<ManagedSiloDef> {
             binary: String::new(),
             stype: String::from("elf"),
             target: String::from("default"),
+            probe_mode: String::new(),
         });
     }
 
@@ -262,6 +267,7 @@ fn parse_silo_toml(data: &str) -> Vec<ManagedSiloDef> {
                                 "binary" => st.binary = String::from(val),
                                 "type" => st.stype = String::from(val),
                                 "target_strate" => st.target = String::from(val),
+                                "probe_mode" => st.probe_mode = String::from(val),
                                 _ => {}
                             }
                         }
@@ -325,6 +331,9 @@ fn render_silo_toml(silos: &[ManagedSiloDef]) -> String {
             let _ = writeln!(out, "binary = \"{}\"", st.binary);
             let _ = writeln!(out, "type = \"{}\"", st.stype);
             let _ = writeln!(out, "target_strate = \"{}\"", st.target);
+            if !st.probe_mode.is_empty() {
+                let _ = writeln!(out, "probe_mode = \"{}\"", st.probe_mode);
+            }
         }
     }
     out
@@ -371,12 +380,14 @@ fn family_uses_system_sid(family: &str) -> bool {
 }
 
 fn compute_managed_runtime_sids(managed: &[ManagedSiloDef]) -> Vec<(String, u32)> {
-    let mut ordered = managed.to_vec();
+    // Sort references, not clones: the deep clone of the whole config model
+    // (every String and every Vec) is pure waste for a read-only pass.
+    let mut ordered: Vec<&ManagedSiloDef> = managed.iter().collect();
     ordered.sort_by_key(|s| if s.name == "bus" { 0u8 } else { 1u8 });
 
     let mut next_sys_sid = 100u32;
     let mut next_usr_sid = 1000u32;
-    let mut mappings = Vec::new();
+    let mut mappings = Vec::with_capacity(ordered.len());
 
     for silo in ordered {
         let sid = if silo.sid == 42 {
@@ -392,7 +403,7 @@ fn compute_managed_runtime_sids(managed: &[ManagedSiloDef]) -> Vec<(String, u32)
         } else {
             silo.sid
         };
-        mappings.push((silo.name, sid));
+        mappings.push((silo.name.clone(), sid));
     }
 
     mappings
@@ -408,6 +419,46 @@ fn managed_name_for_runtime_sid(
         .map(|(name, _)| name.clone())
 }
 
+/// Runtime sid a config entry was allocated, if the allocator assigned one.
+fn managed_sid_for(managed_runtime_sids: &[(String, u32)], name: &str) -> Option<u32> {
+    managed_runtime_sids
+        .iter()
+        .find(|(mapped_name, _)| mapped_name == name)
+        .map(|(_, sid)| *sid)
+}
+
+/// Config entry that owns a runtime silo, resolved through the name→sid map.
+///
+/// This is the single rule used by `silo list`, `strate list` and `silo info`:
+/// matching a runtime silo by config *name* instead would silently pick the
+/// wrong entry, since userspace allocates the runtime sid.
+fn managed_def_for_runtime_sid<'a>(
+    managed: &'a [ManagedSiloDef],
+    managed_runtime_sids: &[(String, u32)],
+    sid: u32,
+) -> Option<&'a ManagedSiloDef> {
+    let name = managed_name_for_runtime_sid(managed_runtime_sids, sid)?;
+    managed.iter().find(|m| m.name == name)
+}
+
+/// Strates declared by the config entry that owns a runtime silo.
+fn config_strates_for_sid(
+    managed: &[ManagedSiloDef],
+    managed_runtime_sids: &[(String, u32)],
+    sid: u32,
+) -> Vec<String> {
+    let Some(def) = managed_def_for_runtime_sid(managed, managed_runtime_sids, sid) else {
+        return Vec::new();
+    };
+    let mut strates = Vec::with_capacity(def.strates.len());
+    for st in &def.strates {
+        if !st.name.is_empty() {
+            push_unique(&mut strates, &st.name);
+        }
+    }
+    strates
+}
+
 fn normalize_silo_selector(selector: &str, managed_runtime_sids: &[(String, u32)]) -> String {
     if selector.parse::<u32>().is_ok() {
         return String::from(selector);
@@ -420,7 +471,20 @@ fn normalize_silo_selector(selector: &str, managed_runtime_sids: &[(String, u32)
         .unwrap_or_else(|| String::from(selector))
 }
 
+/// Maps a user-typed selector onto something the kernel can resolve.
+///
+/// A numeric selector is already a runtime sid: pass it straight through
+/// without reading and re-parsing the boot config. Only a name needs the
+/// config→runtime-sid map, because the kernel does not know the config names.
+///
+/// Note the config map is a shell-side *guess* at the ids userspace allocated
+/// at boot (`compute_managed_runtime_sids` mirrors `strate-init`'s allocator);
+/// anything not numeric is also handed to the kernel, which resolves by id or
+/// by `strate_label`.
 fn normalize_current_silo_selector(selector: &str) -> String {
+    if selector.parse::<u32>().is_ok() {
+        return String::from(selector);
+    }
     let (managed, _) = load_managed_silos_with_source();
     let managed_runtime_sids = compute_managed_runtime_sids(&managed);
     normalize_silo_selector(selector, &managed_runtime_sids)
@@ -448,21 +512,98 @@ fn join_csv(values: &[String]) -> String {
     out
 }
 
+/// `used / max` memory cell, `mem_max == 0` meaning "no upper bound".
+fn memory_cell(mem_used: u64, mem_max: u64) -> String {
+    alloc::format!(
+        "{} / {}",
+        crate::shell::output::human_bytes(mem_used),
+        crate::shell::output::human_bytes_or_unlimited(mem_max)
+    )
+}
+
+/// Silo state label, so every command spells a state the same way.
+fn silo_state_str(state: silo::SiloState) -> &'static str {
+    match state {
+        silo::SiloState::Created => "Created",
+        silo::SiloState::Loading => "Loading",
+        silo::SiloState::Ready => "Ready",
+        silo::SiloState::Running => "Running",
+        silo::SiloState::Paused => "Paused",
+        silo::SiloState::Stopping => "Stopping",
+        silo::SiloState::Stopped => "Stopped",
+        silo::SiloState::Crashed => "Crashed",
+        silo::SiloState::Zombie => "Zombie",
+        silo::SiloState::Destroyed => "Destroyed",
+    }
+}
+
+/// Silo tier label.
+fn silo_tier_str(tier: silo::SiloTier) -> &'static str {
+    match tier {
+        silo::SiloTier::Critical => "Critical",
+        silo::SiloTier::System => "System",
+        silo::SiloTier::User => "User",
+    }
+}
+
+/// Strate family label.
+fn strate_family_str(family: silo::StrateFamily) -> &'static str {
+    match family {
+        silo::StrateFamily::SYS => "SYS",
+        silo::StrateFamily::DRV => "DRV",
+        silo::StrateFamily::FS => "FS",
+        silo::StrateFamily::NET => "NET",
+        silo::StrateFamily::WASM => "WASM",
+        silo::StrateFamily::USR => "USR",
+    }
+}
+
+/// Graphics mode decoded from the silo flag bitmask, using the kernel's own
+/// flag names instead of hardcoded shifts.
+fn graphics_mode_str(graphics_flags: u64) -> &'static str {
+    if graphics_flags & silo::SILO_FLAG_WEBRTC_NATIVE != 0 {
+        "webrtc-native"
+    } else if graphics_flags & silo::SILO_FLAG_GRAPHICS != 0 {
+        "graphics-raw"
+    } else {
+        "disabled"
+    }
+}
+
+fn flag_str(set: bool) -> &'static str {
+    if set {
+        "true"
+    } else {
+        "false"
+    }
+}
+
+/// Row of the runtime silo table.
+///
+/// Holds raw `Copy` values and defers every formatting to the presenter, so
+/// switching presenter costs no `format!` per row per field.
 struct SiloListRow {
     sid: u32,
     name: String,
-    state: String,
+    state: silo::SiloState,
     tasks: usize,
-    memory: String,
+    mem_used: u64,
+    /// `0` means the silo declared no upper bound.
+    mem_max: u64,
     mode: u16,
-    label: String,
-    strates: String,
+    /// Declared strate label, `None` when the silo has none.
+    label: Option<String>,
+    /// Strates this silo runs, from the boot config.
+    strates: Vec<String>,
+    /// Set when the kernel reports a label that the boot config does not know
+    /// about, so the row is rendered as incomplete instead of silently blank.
+    kernel_only_strate: bool,
 }
 
 struct RuntimeStrateRow {
     strate: String,
     belongs_to: String,
-    status: String,
+    status: &'static str,
 }
 
 struct ConfigStrateRow {
@@ -475,7 +616,23 @@ struct ConfigListRow {
     name: String,
     family: String,
     mode: String,
-    strates: String,
+    cpu_features: String,
+    strates: Vec<String>,
+}
+
+/// The strates of a silo as they will be displayed, or `None` when the silo
+/// has none at all (used to pick the "incomplete" colour).
+fn silo_strates_cell(row: &SiloListRow) -> String {
+    if !row.strates.is_empty() {
+        return join_csv(&row.strates);
+    }
+    if row.kernel_only_strate {
+        return match row.label.as_deref() {
+            Some(label) => alloc::format!("{} (kernel)", label),
+            None => String::from("-"),
+        };
+    }
+    String::from("-")
 }
 
 /// Performs the render silo table ratatui operation.
@@ -496,21 +653,22 @@ fn render_silo_table_ratatui(
     let runtime_table_rows: Vec<Row> = runtime_rows
         .iter()
         .map(|r| {
-            let mut style = Style::default().fg(Color::White);
-            if r.strates == "-" {
-                style = style.fg(Color::LightRed);
+            let strates = silo_strates_cell(r);
+            // Red: the silo has no strate the boot config knows about.
+            let style = if r.strates.is_empty() {
+                Style::default().fg(Color::LightRed)
             } else {
-                style = style.fg(Color::LightGreen);
-            }
+                Style::default().fg(Color::LightGreen)
+            };
             Row::new(alloc::vec![
                 Cell::from(alloc::format!("{}", r.sid)),
                 Cell::from(r.name.as_str()),
-                Cell::from(r.state.as_str()),
+                Cell::from(silo_state_str(r.state)),
                 Cell::from(alloc::format!("{}", r.tasks)),
-                Cell::from(r.memory.as_str()),
+                Cell::from(memory_cell(r.mem_used, r.mem_max)),
                 Cell::from(alloc::format!("{:o}", r.mode)),
-                Cell::from(r.label.as_str()),
-                Cell::from(r.strates.as_str()),
+                Cell::from(r.label.as_deref().unwrap_or("-")),
+                Cell::from(strates),
             ])
             .style(style)
         })
@@ -523,7 +681,8 @@ fn render_silo_table_ratatui(
                 Cell::from(r.name.as_str()),
                 Cell::from(r.family.as_str()),
                 Cell::from(r.mode.as_str()),
-                Cell::from(r.strates.as_str()),
+                Cell::from(r.cpu_features.as_str()),
+                Cell::from(join_csv(&r.strates)),
             ])
             .style(Style::default().fg(Color::LightCyan))
         })
@@ -594,6 +753,7 @@ fn render_silo_table_ratatui(
                 Constraint::Length(14),
                 Constraint::Length(8),
                 Constraint::Length(8),
+                Constraint::Length(11),
                 Constraint::Min(20),
             ];
             let config_table = Table::new(config_table_rows, config_widths)
@@ -603,6 +763,7 @@ fn render_silo_table_ratatui(
                         Cell::from("Name"),
                         Cell::from("Family"),
                         Cell::from("Mode"),
+                        Cell::from("CPU feats"),
                         Cell::from("Strates"),
                     ])
                     .style(
@@ -627,6 +788,8 @@ fn render_silo_table_ratatui(
         .map_err(|_| ShellError::ExecutionFailed)?;
     if frame_started {
         vga::end_frame();
+    } else {
+        vga::present();
     }
     Ok(true)
 }
@@ -666,7 +829,7 @@ fn render_strate_table_ratatui(
             Row::new(alloc::vec![
                 Cell::from(r.strate.as_str()),
                 Cell::from(r.belongs_to.as_str()),
-                Cell::from(r.status.as_str()),
+                Cell::from(r.status),
             ])
             .style(style)
         })
@@ -757,6 +920,8 @@ fn render_strate_table_ratatui(
         .map_err(|_| ShellError::ExecutionFailed)?;
     if frame_started {
         vga::end_frame();
+    } else {
+        vga::present();
     }
     Ok(true)
 }
@@ -794,13 +959,9 @@ fn write_silo_toml_to_initfs(text: &str) -> Result<(), ShellError> {
 
 /// Performs the print strate state for sid operation.
 fn print_strate_state_for_sid(sid: u32) {
-    if let Some(s) = silo::list_silos_snapshot()
-        .into_iter()
-        .find(|s| s.id == sid)
-    {
-        shell_println!("state: {:?}", s.state);
-    } else {
-        shell_println!("state: <unknown>");
+    match silo::silo_state_by_id(sid) {
+        Some(state) => shell_println!("state: {}", silo_state_str(state)),
+        None => shell_println!("state: <unknown>"),
     }
 }
 
@@ -868,10 +1029,12 @@ pub(super) fn cmd_silo_impl(args: &[String]) -> Result<(), ShellError> {
     }
 }
 
-/// Performs the cmd silos operation.
-pub(super) fn cmd_silos_impl(_args: &[String]) -> Result<(), ShellError> {
-    let args = [String::from("list")];
-    cmd_silo(&args)
+/// `silos` is an alias for `silo list`.
+///
+/// Args are forwarded as-is (`cmd_silo_list` skips the command word), so
+/// `silos --gui` works and no argument vector is rebuilt.
+pub(super) fn cmd_silos_impl(args: &[String]) -> Result<(), ShellError> {
+    cmd_silo_list(args)
 }
 
 /// Display kernel version
@@ -1338,6 +1501,35 @@ pub(super) fn cmd_test_exec_impl(_args: &[String]) -> Result<(), ShellError> {
     }
 }
 
+/// Builds the config table (one row per `[[silos]]` entry of the boot config).
+fn build_config_rows(
+    managed: &[ManagedSiloDef],
+    managed_runtime_sids: &[(String, u32)],
+) -> Vec<ConfigListRow> {
+    let mut config_rows = Vec::with_capacity(managed.len());
+    for m in managed {
+        let mut strates = Vec::new();
+        for st in &m.strates {
+            if !st.name.is_empty() {
+                push_unique(&mut strates, &st.name);
+            }
+        }
+        config_rows.push(ConfigListRow {
+            sid: managed_sid_for(managed_runtime_sids, &m.name).unwrap_or(m.sid),
+            name: m.name.clone(),
+            family: m.family.clone(),
+            mode: m.mode.clone(),
+            cpu_features: if m.cpu_features.is_empty() {
+                String::from("-")
+            } else {
+                m.cpu_features.clone()
+            },
+            strates,
+        });
+    }
+    config_rows
+}
+
 /// Performs the cmd silo list operation.
 fn cmd_silo_list(args: &[String]) -> Result<(), ShellError> {
     let mut want_gui = false;
@@ -1353,71 +1545,38 @@ fn cmd_silo_list(args: &[String]) -> Result<(), ShellError> {
 
     let (managed, managed_source) = load_managed_silos_with_source();
     let managed_runtime_sids = compute_managed_runtime_sids(&managed);
+
+    // The config table is only worth building for a renderer that shows it.
+    let config_rows = if want_gui {
+        build_config_rows(&managed, &managed_runtime_sids)
+    } else {
+        Vec::new()
+    };
+
     let mut silos = silo::list_silos_snapshot();
     silos.sort_by_key(|s| s.id);
 
-    let mut rows: Vec<SiloListRow> = Vec::new();
-    let mut config_rows: Vec<ConfigListRow> = Vec::new();
-
-    for m in &managed {
-        let mut strates = Vec::new();
-        for st in &m.strates {
-            if !st.name.is_empty() {
-                push_unique(&mut strates, &st.name);
-            }
-        }
-        config_rows.push(ConfigListRow {
-            sid: managed_runtime_sids
-                .iter()
-                .find(|(name, _)| *name == m.name)
-                .map(|(_, sid)| *sid)
-                .unwrap_or(m.sid),
-            name: m.name.clone(),
-            family: m.family.clone(),
-            mode: m.mode.clone(),
-            strates: join_csv(&strates),
-        });
-    }
-
+    let mut rows: Vec<SiloListRow> = Vec::with_capacity(silos.len());
     for s in silos.iter() {
         let display_name = managed_name_for_runtime_sid(&managed_runtime_sids, s.id)
             .unwrap_or_else(|| s.name.clone());
-        let label = s.strate_label.clone().unwrap_or_else(|| String::from("-"));
-        let mut strates = Vec::new();
-        for m in &managed {
-            if managed_runtime_sids
-                .iter()
-                .any(|(name, sid)| *sid == s.id && *name == m.name)
-            {
-                for st in &m.strates {
-                    if !st.name.is_empty() {
-                        push_unique(&mut strates, &st.name);
-                    }
-                }
-            }
-        }
-        if strates.is_empty() && label != "-" {
-            strates.push(alloc::format!("{} (kernel)", label));
-        }
-        let strates_cell = join_csv(&strates);
-        let (used_val, used_unit) = format_bytes(s.mem_usage_bytes as usize);
-        let mem_cell = if s.mem_max_bytes == 0 {
-            alloc::format!("{} {} / unlimited", used_val, used_unit)
-        } else {
-            let (max_val, max_unit) = format_bytes(s.mem_max_bytes as usize);
-            alloc::format!("{} {} / {} {}", used_val, used_unit, max_val, max_unit)
-        };
+        // Strates come from the boot config entry this runtime silo maps to.
+        let strates = config_strates_for_sid(&managed, &managed_runtime_sids, s.id);
+        let kernel_only_strate = strates.is_empty() && s.strate_label.is_some();
         rows.push(SiloListRow {
             sid: s.id,
             name: display_name,
-            state: alloc::format!("{:?}", s.state),
+            state: s.state,
             tasks: s.task_count,
-            memory: mem_cell,
+            mem_used: s.mem_usage_bytes,
+            mem_max: s.mem_max_bytes,
             mode: s.mode,
-            label,
-            strates: strates_cell,
+            label: s.strate_label.clone(),
+            strates,
+            kernel_only_strate,
         });
     }
+
     if want_gui {
         if render_silo_table_ratatui(&rows, &config_rows, managed_source).unwrap_or(false) {
             return Ok(());
@@ -1425,6 +1584,9 @@ fn cmd_silo_list(args: &[String]) -> Result<(), ShellError> {
         shell_println!("silo list: GUI unavailable, fallback console");
     }
 
+    // Console presenter. The column widths live in one place so the header and
+    // the rows can never disagree.
+    const COLS: [usize; 8] = [6, 14, 10, 7, 18, 6, 12, 20];
     shell_println!(
         "{:<6} {:<14} {:<10} {:<7} {:<18} {:<6} {:<12} {}",
         "SID",
@@ -1436,82 +1598,123 @@ fn cmd_silo_list(args: &[String]) -> Result<(), ShellError> {
         "Label",
         "Strates"
     );
-    shell_println!("====================================================================================================================================================================================");
-    for r in rows {
+    shell_println!("{}", "-".repeat(COLS.iter().sum::<usize>()));
+    for r in &rows {
         shell_println!(
-            "{:<6} {:<12} {:<10} {:<7} {:<18} {:<6o} {:<12} {}",
+            "{:<6} {:<14} {:<10} {:<7} {:<18} {:<6o} {:<12} {}",
             r.sid,
             r.name,
-            r.state,
+            silo_state_str(r.state),
             r.tasks,
-            r.memory,
+            memory_cell(r.mem_used, r.mem_max),
             r.mode,
-            r.label,
-            r.strates
+            r.label.as_deref().unwrap_or("-"),
+            silo_strates_cell(r)
         );
+    }
+
+    // The config table used to be reachable only through the graphical view;
+    // print it on every target so the two tables can be compared anywhere.
+    if !config_rows.is_empty() {
+        shell_println!("");
+        shell_println!("Config ({}):", managed_source);
+        shell_println!(
+            "{:<6} {:<14} {:<6} {:<6} {:<11} {}",
+            "SID",
+            "Name",
+            "Family",
+            "Mode",
+            "CPU feats",
+            "Strates"
+        );
+        shell_println!("{}", "-".repeat(63));
+        for r in &config_rows {
+            shell_println!(
+                "{:<6} {:<14} {:<6} {:<6} {:<11} {}",
+                r.sid,
+                r.name,
+                r.family,
+                r.mode,
+                r.cpu_features,
+                join_csv(&r.strates)
+            );
+        }
     }
     Ok(())
 }
 
+/// One strate and the silos that run it.
+struct StrateEntry {
+    name: String,
+    belongs_to: Vec<String>,
+}
+
+impl StrateEntry {
+    fn add_owner(&mut self, silo_name: &str) {
+        push_unique(&mut self.belongs_to, silo_name);
+    }
+}
+
+/// Groups a strate name under `entries`, creating it on first sight.
+fn group_strate(entries: &mut Vec<StrateEntry>, name: &str, owner: &str) {
+    if let Some(e) = entries.iter_mut().find(|e| e.name == name) {
+        e.add_owner(owner);
+    } else {
+        entries.push(StrateEntry {
+            name: String::from(name),
+            belongs_to: alloc::vec![String::from(owner)],
+        });
+    }
+}
+
 /// Performs the cmd strate list operation.
-fn cmd_strate_list(_args: &[String]) -> Result<(), ShellError> {
-    struct StrateEntry {
-        name: String,
-        belongs_to: Vec<String>,
+fn cmd_strate_list(args: &[String]) -> Result<(), ShellError> {
+    let mut want_gui = false;
+    for arg in args.iter().skip(1) {
+        match arg.as_str() {
+            "--gui" => want_gui = true,
+            _ => {
+                shell_println!("Usage: strate list [--gui]");
+                return Err(ShellError::InvalidArguments);
+            }
+        }
     }
 
     let (managed, managed_source) = load_managed_silos_with_source();
-    let mut entries: Vec<StrateEntry> = Vec::new();
+    let managed_runtime_sids = compute_managed_runtime_sids(&managed);
 
+    // Strates declared in the boot config.
+    let mut entries: Vec<StrateEntry> = Vec::new();
     for s in &managed {
         for st in &s.strates {
-            if st.name.is_empty() {
-                continue;
-            }
-            if let Some(e) = entries.iter_mut().find(|e| e.name == st.name) {
-                push_unique(&mut e.belongs_to, &s.name);
-            } else {
-                entries.push(StrateEntry {
-                    name: st.name.clone(),
-                    belongs_to: alloc::vec![s.name.clone()],
-                });
+            if !st.name.is_empty() {
+                group_strate(&mut entries, &st.name, &s.name);
             }
         }
     }
-
-    let mut runtime_entries: Vec<StrateEntry> = Vec::new();
-    for runtime in silo::list_silos_snapshot() {
-        let mut names: Vec<String> = Vec::new();
-        for m in &managed {
-            if m.name == runtime.name || m.sid == runtime.id {
-                for st in &m.strates {
-                    if !st.name.is_empty() {
-                        push_unique(&mut names, &st.name);
-                    }
-                }
-            }
-        }
-        if names.is_empty() {
-            if let Some(label) = runtime.strate_label {
-                names.push(label);
-            } else {
-                continue;
-            }
-        }
-
-        for name in names {
-            if let Some(e) = runtime_entries.iter_mut().find(|e| e.name == name) {
-                push_unique(&mut e.belongs_to, &runtime.name);
-            } else {
-                runtime_entries.push(StrateEntry {
-                    name,
-                    belongs_to: alloc::vec![runtime.name.clone()],
-                });
-            }
-        }
-    }
-
     entries.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // Strates actually running. A runtime silo is matched to its config entry
+    // through the name->sid map, the same rule `silo list` uses; falling back
+    // to the kernel label keeps silos that the config does not describe.
+    let mut runtime_entries: Vec<StrateEntry> = Vec::new();
+    let mut runtime = silo::list_silos_snapshot();
+    runtime.sort_by_key(|s| s.id);
+    for snapshot in &runtime {
+        let names = config_strates_for_sid(&managed, &managed_runtime_sids, snapshot.id);
+        if names.is_empty() {
+            match snapshot.strate_label.as_deref() {
+                Some(label) if !label.is_empty() => {
+                    group_strate(&mut runtime_entries, label, &snapshot.name)
+                }
+                _ => continue,
+            }
+            continue;
+        }
+        for name in names {
+            group_strate(&mut runtime_entries, &name, &snapshot.name);
+        }
+    }
     runtime_entries.sort_by(|a, b| a.name.cmp(&b.name));
 
     let config_rows: Vec<ConfigStrateRow> = entries
@@ -1524,35 +1727,36 @@ fn cmd_strate_list(_args: &[String]) -> Result<(), ShellError> {
 
     let runtime_rows: Vec<RuntimeStrateRow> = runtime_entries
         .iter()
-        .map(|e| {
-            let in_cfg = entries.iter().any(|cfg| cfg.name == e.name);
-            RuntimeStrateRow {
-                strate: e.name.clone(),
-                belongs_to: join_csv(&e.belongs_to),
-                status: if in_cfg {
-                    String::from("config+runtime")
-                } else {
-                    String::from("runtime-only")
-                },
-            }
+        .map(|e| RuntimeStrateRow {
+            strate: e.name.clone(),
+            belongs_to: join_csv(&e.belongs_to),
+            status: if entries.iter().any(|cfg| cfg.name == e.name) {
+                "config+runtime"
+            } else {
+                "runtime-only"
+            },
         })
         .collect();
 
-    if render_strate_table_ratatui(&runtime_rows, &config_rows, managed_source).unwrap_or(false) {
-        return Ok(());
+    if want_gui {
+        if render_strate_table_ratatui(&runtime_rows, &config_rows, managed_source).unwrap_or(false)
+        {
+            return Ok(());
+        }
+        shell_println!("strate list: GUI unavailable, fallback console");
     }
 
     shell_println!("Runtime:");
     shell_println!("{:<20} {:<24} {}", "Strate", "BelongsTo", "Status");
-    shell_println!("====================");
-    for r in runtime_rows {
+    shell_println!("{}", "-".repeat(51));
+    for r in &runtime_rows {
         shell_println!("{:<20} {:<24} {}", r.strate, r.belongs_to, r.status);
     }
     shell_println!("");
     shell_println!("Config ({}):", managed_source);
     shell_println!("{:<20} {}", "Strate", "BelongsTo");
-    shell_println!("====================");
-    for r in config_rows {
+    shell_println!("{}", "-".repeat(44));
+    for r in &config_rows {
         shell_println!("{:<20} {}", r.strate, r.belongs_to);
     }
     Ok(())
@@ -1589,9 +1793,19 @@ fn cmd_strate_spawn(args: &[String]) -> Result<(), ShellError> {
             }
             "--type" => {
                 if i + 1 >= args.len() {
+                    shell_println!("strate spawn: --type needs a value (elf|wasm)");
                     return Err(ShellError::InvalidArguments);
                 }
-                spawn_type = Some(args[i + 1].as_str());
+                let value = args[i + 1].as_str();
+                // A typo used to be accepted silently and treated as `elf`.
+                if value != "elf" && value != "wasm" {
+                    shell_println!(
+                        "strate spawn: unknown type '{}' (expected elf or wasm)",
+                        value
+                    );
+                    return Err(ShellError::InvalidArguments);
+                }
+                spawn_type = Some(value);
                 i += 2;
             }
             _ => {
@@ -1816,6 +2030,7 @@ fn cmd_strate_config_add(args: &[String]) -> Result<(), ShellError> {
             binary: String::from(binary),
             stype,
             target,
+            probe_mode: String::new(),
         });
     }
 
@@ -1921,7 +2136,11 @@ fn cmd_strate_lifecycle(args: &[String]) -> Result<(), ShellError> {
         "stop" => silo::kernel_stop_silo(selector.as_str(), false),
         "kill" => silo::kernel_stop_silo(selector.as_str(), true),
         "destroy" => silo::kernel_destroy_silo(selector.as_str()),
-        _ => unreachable!(),
+        // A shell must never panic: report instead.
+        _ => {
+            shell_println!("Usage: strate stop|kill|destroy <id|label|name>");
+            return Err(ShellError::InvalidArguments);
+        }
     };
     match result {
         Ok(sid) => {
@@ -2009,31 +2228,21 @@ fn cmd_silo_info(args: &[String]) -> Result<(), ShellError> {
         ShellError::ExecutionFailed
     })?;
     let b = &detail.base;
-    let (used_v, used_u) = format_bytes(b.mem_usage_bytes as usize);
-    let (min_v, min_u) = format_bytes(b.mem_min_bytes as usize);
-    let mem_max = if b.mem_max_bytes == 0 {
-        String::from("unlimited")
-    } else {
-        let (v, u) = format_bytes(b.mem_max_bytes as usize);
-        alloc::format!("{} {}", v, u)
-    };
 
     shell_println!("SID:        {}", b.id);
     shell_println!("Name:       {}", b.name);
     shell_println!("Label:      {}", b.strate_label.as_deref().unwrap_or("-"));
-    shell_println!("Tier:       {:?}", b.tier);
-    shell_println!("State:      {:?}", b.state);
-    shell_println!("Family:     {:?}", detail.family);
+    shell_println!("Tier:       {}", silo_tier_str(b.tier));
+    shell_println!("State:      {}", silo_state_str(b.state));
+    shell_println!("Family:     {}", strate_family_str(detail.family));
     shell_println!("Mode:       {:03o}", b.mode);
     shell_println!("Sandboxed:  {}", detail.sandboxed);
     shell_println!("Tasks:      {}", b.task_count);
     shell_println!(
-        "Memory:     {} {} / {} {} / {}",
-        used_v,
-        used_u,
-        min_v,
-        min_u,
-        mem_max
+        "Memory:     {} / {} / {}",
+        crate::shell::output::human_bytes(b.mem_usage_bytes),
+        crate::shell::output::human_bytes(b.mem_min_bytes),
+        crate::shell::output::human_bytes_or_unlimited(b.mem_max_bytes),
     );
     shell_println!("CPU shares: {}", detail.cpu_shares);
     shell_println!("CPU mask:   {:#x}", detail.cpu_affinity_mask);
@@ -2041,34 +2250,22 @@ fn cmd_silo_info(args: &[String]) -> Result<(), ShellError> {
     shell_println!("CPU allow:  {:#x}", detail.cpu_features_allowed);
     shell_println!("XCR0 mask:  {:#x}", detail.xcr0_mask);
     shell_println!("GFX flags:  {:#x}", detail.graphics_flags);
-    shell_println!(
-        "GFX mode:   {}",
-        if (detail.graphics_flags & (1 << 2)) != 0 {
-            "webrtc-native"
-        } else if (detail.graphics_flags & (1 << 1)) != 0 {
-            "graphics-raw"
-        } else {
-            "disabled"
-        }
-    );
+    shell_println!("GFX mode:   {}", graphics_mode_str(detail.graphics_flags));
     shell_println!(
         "GFX ro:     {}",
-        if (detail.graphics_flags & (1 << 3)) != 0 {
-            "true"
-        } else {
-            "false"
-        }
+        flag_str(detail.graphics_flags & silo::SILO_FLAG_GRAPHICS_READ_ONLY != 0)
+    );
+    shell_println!(
+        "GFX turn:   {}",
+        flag_str(detail.graphics_flags & silo::SILO_FLAG_WEBRTC_TURN_FORCE != 0)
     );
     shell_println!("GFX sess:   {}", detail.graphics_max_sessions);
     shell_println!("GFX ttl:    {} sec", detail.graphics_session_ttl_sec);
-    shell_println!(
-        "Max tasks:  {}",
-        if detail.max_tasks == 0 {
-            String::from("unlimited")
-        } else {
-            alloc::format!("{}", detail.max_tasks)
-        }
-    );
+    if detail.max_tasks == 0 {
+        shell_println!("Max tasks:  unlimited");
+    } else {
+        shell_println!("Max tasks:  {}", detail.max_tasks);
+    }
     shell_println!("Caps:       {} granted", detail.granted_caps_count);
 
     if !detail.task_ids.is_empty() {
@@ -2158,7 +2355,7 @@ fn cmd_silo_events(args: &[String]) -> Result<(), ShellError> {
         "Data1",
         "Tick"
     );
-    shell_println!("==========");
+    shell_println!("{}", "-".repeat(50));
     for ev in &events {
         shell_println!(
             "{:<8} {:<10} {:#010x}   {:#010x}   {}",
@@ -2177,10 +2374,19 @@ fn cmd_silo_pledge(args: &[String]) -> Result<(), ShellError> {
         shell_println!("Usage: silo pledge <id|label|name> <octal_mode>");
         return Err(ShellError::InvalidArguments);
     }
-    let mode_val = u16::from_str_radix(args[2].as_str(), 8).map_err(|_| {
-        shell_println!("silo pledge: invalid octal mode '{}'", args[2]);
-        ShellError::InvalidArguments
-    })?;
+    // `strate-init` accepts both `700` and `0o700`; accept both here too.
+    let mode_text = args[2].as_str();
+    let mode_digits = mode_text
+        .strip_prefix("0o")
+        .or_else(|| mode_text.strip_prefix("0O"))
+        .unwrap_or(mode_text);
+    let mode_val = match u16::from_str_radix(mode_digits, 8) {
+        Ok(m) if m <= 0o777 => m,
+        _ => {
+            shell_println!("silo pledge: invalid octal mode '{}'", mode_text);
+            return Err(ShellError::InvalidArguments);
+        }
+    };
     let selector = normalize_current_silo_selector(args[1].as_str());
     match silo::kernel_pledge_silo(selector.as_str(), mode_val) {
         Ok((old, new)) => {
@@ -2237,12 +2443,39 @@ fn cmd_silo_sandbox(args: &[String]) -> Result<(), ShellError> {
     }
 }
 
-fn cmd_silo_top(_args: &[String]) -> Result<(), ShellError> {
-    let mut silos = silo::list_silos_snapshot();
+fn cmd_silo_top(args: &[String]) -> Result<(), ShellError> {
+    // `--sort` is optional but its value is validated: a typo used to fall back
+    // to the default order with no diagnostic at all.
+    let sort_by_mem = match args.get(1) {
+        None => false,
+        Some(flag) if flag == "--sort" => match args.get(2) {
+            Some(value) if value == "mem" => true,
+            Some(value) if value == "tasks" => false,
+            Some(value) => {
+                shell_println!("silo top: unknown sort key '{}'", value);
+                shell_println!("Usage: silo top [--sort mem|tasks]");
+                return Err(ShellError::InvalidArguments);
+            }
+            None => {
+                shell_println!("Usage: silo top [--sort mem|tasks]");
+                return Err(ShellError::InvalidArguments);
+            }
+        },
+        Some(other) => {
+            shell_println!("silo top: unexpected argument '{}'", other);
+            shell_println!("Usage: silo top [--sort mem|tasks]");
+            return Err(ShellError::InvalidArguments);
+        }
+    };
+    if let Some(extra) = args.get(3) {
+        shell_println!("silo top: unexpected argument '{}'", extra);
+        shell_println!("Usage: silo top [--sort mem|tasks]");
+        return Err(ShellError::InvalidArguments);
+    }
 
-    let sort_by_mem = _args.len() >= 3 && _args[1] == "--sort" && _args[2] == "mem";
+    let mut silos = silo::list_silos_snapshot();
     if sort_by_mem {
-        silos.sort_by(|a, b| b.mem_usage_bytes.cmp(&a.mem_usage_bytes));
+        silos.sort_by_key(|s| core::cmp::Reverse(s.mem_usage_bytes));
     } else {
         silos.sort_by(|a, b| {
             b.task_count
@@ -2253,16 +2486,15 @@ fn cmd_silo_top(_args: &[String]) -> Result<(), ShellError> {
 
     let total_tasks: usize = silos.iter().map(|s| s.task_count).sum();
     let total_mem: u64 = silos.iter().map(|s| s.mem_usage_bytes).sum();
-    let (tm_v, tm_u) = format_bytes(total_mem as usize);
 
     shell_println!(
-        "Silos: {}   Tasks: {}   Memory: {} {}",
+        "Silos: {}   Tasks: {}   Memory: {}",
         silos.len(),
         total_tasks,
-        tm_v,
-        tm_u
+        crate::shell::output::human_bytes(total_mem)
     );
     shell_println!("");
+    const COLS: [usize; 6] = [6, 14, 10, 7, 16, 6];
     shell_println!(
         "{:<6} {:<14} {:<10} {:<7} {:<16} {:<6}",
         "SID",
@@ -2272,17 +2504,15 @@ fn cmd_silo_top(_args: &[String]) -> Result<(), ShellError> {
         "Memory",
         "Mode"
     );
-    shell_println!("========================================");
+    shell_println!("{}", "-".repeat(COLS.iter().sum::<usize>()));
     for s in &silos {
-        let (mv, mu) = format_bytes(s.mem_usage_bytes as usize);
-        let mem_str = alloc::format!("{} {}", mv, mu);
         shell_println!(
             "{:<6} {:<14} {:<10} {:<7} {:<16} {:03o}",
             s.id,
             s.name,
-            alloc::format!("{:?}", s.state),
+            silo_state_str(s.state),
             s.task_count,
-            mem_str,
+            crate::shell::output::human_bytes(s.mem_usage_bytes),
             s.mode
         );
     }
@@ -2303,9 +2533,10 @@ fn cmd_silo_logs(args: &[String]) -> Result<(), ShellError> {
         shell_println!("(no log entries for this silo)");
         return Ok(());
     }
+    let hz = crate::arch::timer::TIMER_HZ;
     for ev in &events {
-        let tick_s = ev.tick / 100;
-        let tick_cs = ev.tick % 100;
+        let tick_s = ev.tick / hz;
+        let tick_cs = (ev.tick % hz) * 100 / hz;
         shell_println!(
             "[{:>6}.{:02}] sid={} {}",
             tick_s,
@@ -2427,10 +2658,10 @@ pub(super) fn cmd_health_impl(_args: &[String]) -> Result<(), ShellError> {
     } else {
         for info in &silo_list {
             shell_println!(
-                "  SID={} name={} state={:?} tasks={}",
+                "  SID={} name={} state={} tasks={}",
                 info.id,
                 info.name,
-                info.state,
+                silo_state_str(info.state),
                 info.task_count
             );
         }
