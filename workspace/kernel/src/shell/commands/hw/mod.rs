@@ -1,33 +1,79 @@
 //! Hardware and IPC namespace commands: lspci, lsns
 use crate::{shell::ShellError, shell_println};
-use alloc::string::String;
+use alloc::{format, string::String};
 
-fn pci_class_name(class: u8, subclass: u8) -> &'static str {
-    match (class, subclass) {
-        (0x01, 0x00) => "SCSI",
-        (0x01, 0x01) => "IDE",
-        (0x01, 0x06) => "SATA",
-        (0x01, 0x08) => "NVMe",
-        (0x01, _) => "Storage",
-        (0x02, 0x00) => "Ethernet",
-        (0x02, _) => "Network",
-        (0x03, 0x00) => "VGA",
-        (0x03, _) => "Display",
-        (0x04, _) => "Multimedia",
-        (0x05, _) => "Memory",
-        (0x06, 0x00) => "Host bridge",
-        (0x06, 0x01) => "ISA bridge",
-        (0x06, 0x04) => "PCI bridge",
-        (0x06, _) => "Bridge",
-        (0x07, _) => "Serial",
-        (0x08, _) => "System",
-        (0x0C, 0x03) => "USB",
-        (0x0C, _) => "Serial bus",
-        _ => "Other",
+/// Column widths for the `lspci` table.
+///
+/// The header, the rows and the rule all read these, so they cannot drift
+/// apart. The trailing `Type` column holds a class name of variable length and
+/// is therefore not listed.
+const LSPCI_COLS: [usize; 3] = [12, 11, 10];
+
+/// Column widths for the `lsns` table; the `Path` tail is variable width.
+///
+/// Port ids are handed out by a monotonic counter, so 8 digits is generous: a
+/// wider id only makes the row overhang the rule, it cannot corrupt the layout.
+const LSNS_COLS: [usize; 1] = [8];
+
+/// A horizontal rule exactly as wide as the fixed columns of a table.
+pub(crate) fn separator(widths: &[usize]) -> String {
+    "=".repeat(widths.iter().sum())
+}
+
+/// Lay `cells` out in columns of `widths`, separated by a single space.
+///
+/// Cells beyond `widths` are appended unpadded: a table's last column holds a
+/// variable-width value (a class name, a path) which must not be truncated.
+pub(crate) fn pad_row(widths: &[usize], cells: &[&str]) -> String {
+    let mut row = String::new();
+    for (i, cell) in cells.iter().enumerate() {
+        if i > 0 {
+            row.push(' ');
+        }
+        match widths.get(i) {
+            Some(&width) => {
+                row.push_str(cell);
+                for _ in cell.chars().count()..width {
+                    row.push(' ');
+                }
+            }
+            None => row.push_str(cell),
+        }
+    }
+    row
+}
+
+/// PCI slot address as `bus:device.function`, all fields hex, e.g. `00:1f.2`.
+pub(crate) fn format_pci_address(bus: u8, device: u8, function: u8) -> String {
+    format!("{:02x}:{:02x}.{}", bus, device, function)
+}
+
+/// Human-readable PCI class, from the kernel's own decoder.
+///
+/// The table lives in the x86_64 PCI backend, so that is where the lookup is
+/// available. The RISC-V facade has no equivalent yet and its `all_devices()`
+/// traps anyway, so that target falls back to the raw class/subclass pair
+/// rather than to a second, drifting copy of the table.
+#[cfg(target_arch = "x86_64")]
+fn pci_class_label(class: u8, subclass: u8) -> String {
+    match crate::arch::pci::class_name(class, subclass) {
+        Some(name) => String::from(name),
+        None => format!("Unknown ({:02x}:{:02x})", class, subclass),
     }
 }
 
-pub fn cmd_lspci(_args: &[String]) -> Result<(), ShellError> {
+/// RISC-V fallback for [`pci_class_label`]: no PCI class table in the facade.
+#[cfg(target_arch = "riscv64")]
+fn pci_class_label(class: u8, subclass: u8) -> String {
+    format!("Unknown ({:02x}:{:02x})", class, subclass)
+}
+
+pub fn cmd_lspci(args: &[String]) -> Result<(), ShellError> {
+    if let Some(unknown) = args.iter().find(|a| a.starts_with('-')) {
+        shell_println!("lspci: unknown option '{}'", unknown);
+        return Err(ShellError::InvalidArguments);
+    }
+
     let devices = crate::arch::pci::all_devices();
     if devices.is_empty() {
         shell_println!("(no PCI devices found)");
@@ -35,43 +81,51 @@ pub fn cmd_lspci(_args: &[String]) -> Result<(), ShellError> {
     }
 
     shell_println!(
-        "{:<12} {:<11} {:<12} {}",
-        "Address",
-        "Vendor:Dev",
-        "Class",
-        "Type"
+        "{}",
+        pad_row(&LSPCI_COLS, &["Address", "Vendor:Dev", "Class", "Type"])
     );
-    shell_println!("====================================================================================================================================================================================");
+    shell_println!("{}", separator(&LSPCI_COLS));
     for dev in &devices {
-        let addr = dev.address;
+        let address = format_pci_address(dev.address.bus, dev.address.device, dev.address.function);
+        let ids = format!("{:04x}:{:04x}", dev.vendor_id, dev.device_id);
+        let class = format!("{:02x}:{:02x}", dev.class_code, dev.subclass);
         shell_println!(
-            "{:02x}:{:02x}.{:<5} {:04x}:{:04x}   {:02x}:{:02x}       {}",
-            addr.bus,
-            addr.device,
-            addr.function,
-            dev.vendor_id,
-            dev.device_id,
-            dev.class_code,
-            dev.subclass,
-            pci_class_name(dev.class_code, dev.subclass)
+            "{}",
+            pad_row(
+                &LSPCI_COLS,
+                &[
+                    &address,
+                    &ids,
+                    &class,
+                    &pci_class_label(dev.class_code, dev.subclass),
+                ],
+            )
         );
     }
+    shell_println!("");
     shell_println!("{} device(s)", devices.len());
     Ok(())
 }
 
-pub fn cmd_lsns(_args: &[String]) -> Result<(), ShellError> {
+pub fn cmd_lsns(args: &[String]) -> Result<(), ShellError> {
+    if let Some(unknown) = args.iter().find(|a| a.starts_with('-')) {
+        shell_println!("lsns: unknown option '{}'", unknown);
+        return Err(ShellError::InvalidArguments);
+    }
+
     let bindings = crate::namespace::list_all_bindings();
     if bindings.is_empty() {
         shell_println!("(no IPC namespace bindings)");
         return Ok(());
     }
 
-    shell_println!("{:<8} {}", "Port", "Path");
-    shell_println!("==================================================================================================================================");
+    shell_println!("{}", pad_row(&LSNS_COLS, &["Port", "Path"]));
+    shell_println!("{}", separator(&LSNS_COLS));
     for (path, port_id) in &bindings {
-        shell_println!("{:<8} {}", port_id, path);
+        let port = format!("{}", port_id);
+        shell_println!("{}", pad_row(&LSNS_COLS, &[&port, path]));
     }
+    shell_println!("");
     shell_println!("{} binding(s)", bindings.len());
     Ok(())
 }

@@ -1,18 +1,31 @@
 use super::*;
 use alloc::string::String;
 
+/// Default number of audit entries to show when no count is given.
+const DEFAULT_AUDIT_ENTRIES: usize = 30;
+
 /// Display recent audit log entries.
 ///
 /// Usage: `audit [count]`  (default: last 30 entries)
+///
+/// Exits `Ok(())` on success; a malformed or zero count is `InvalidArguments`,
+/// so `$?` distinguishes "the user typed nonsense" from a real failure.
 pub fn cmd_audit(args: &[String]) -> Result<(), ShellError> {
-    let count: usize = if !args.is_empty() {
-        args[0].parse().unwrap_or(30)
-    } else {
-        30
+    let count = match args.first() {
+        None => DEFAULT_AUDIT_ENTRIES,
+        Some(arg) => match super::parse_count(arg) {
+            Some(n) if n > 0 => n,
+            // `audit 0` used to fall through to `recent(0)`, which returns an
+            // empty vector, so the command printed "(no audit events)" even when
+            // the log was full. `audit abc` silently became 30.
+            _ => {
+                shell_println!("audit: invalid count '{}' (want a positive number)", arg);
+                return Err(ShellError::InvalidArguments);
+            }
+        },
     };
 
     let entries = crate::audit::recent(count);
-    let hz = crate::arch::timer::TIMER_HZ;
 
     if entries.is_empty() {
         shell_println!("(no audit events)");
@@ -29,15 +42,7 @@ pub fn cmd_audit(args: &[String]) -> Result<(), ShellError> {
         "MESSAGE"
     );
     for e in &entries {
-        let secs = e.tick / hz;
-        let cs = (e.tick % hz) * 100 / hz;
-        let cat = match e.category {
-            crate::audit::AuditCategory::Silo => "silo",
-            crate::audit::AuditCategory::Capability => "cap",
-            crate::audit::AuditCategory::Syscall => "syscall",
-            crate::audit::AuditCategory::Process => "process",
-            crate::audit::AuditCategory::Security => "security",
-        };
+        let (secs, cs) = crate::shell::output::format_ticks(e.tick);
         shell_println!(
             "{:>6} {:>5}.{:02} {:>5} {:>5} {:>10} {}",
             e.seq,
@@ -45,7 +50,7 @@ pub fn cmd_audit(args: &[String]) -> Result<(), ShellError> {
             cs,
             e.pid,
             e.silo_id,
-            cat,
+            e.category.as_str(),
             e.message
         );
     }
