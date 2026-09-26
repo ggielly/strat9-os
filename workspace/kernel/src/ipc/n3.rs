@@ -416,6 +416,8 @@ pub fn free_pcid(pcid: u16) {
 
 /// Check if PCID feature is available on this CPU.
 pub fn pcid_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
     // 1. CPUID check: bit 17 of ECX after CPUID(EAX=1) indicates PCID support.
     let (_, _, ecx, _) = crate::arch::cpuid(1, 0);
     if ecx & (1 << 17) == 0 {
@@ -425,6 +427,11 @@ pub fn pcid_available() -> bool {
     //    Intel SDM Vol.3A §4.10.4: CR4.PCIDE = 1 enables PCID in CR3.
     let cr4 = crate::x86_crate_shim::registers::control::Cr4::read();
     cr4.contains(crate::x86_crate_shim::registers::control::Cr4Flags::PCID)
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        false
+    }
 }
 
 /// Select the N3 tier based on actual PCID capability.
@@ -757,12 +764,6 @@ fn shared_msg_write(msg_buf: *mut u8, msg: &[u8]) -> Result<u16, IpcError> {
 /// 3. Restores destination context from `frame.dst_ctx`
 /// 4. Sets `frame.state = Ready`, increments `generation`
 /// 5. Returns via `ret` (pops RIP from restored `dst_ctx.rsp`)
-#[cfg(target_arch = "riscv64")]
-pub unsafe extern "C" fn n3b_migrate_asm(_frame: *mut MigrationFrame) {
-    panic!("RISC-V N3 migration is not implemented")
-}
-
-#[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 pub unsafe extern "C" fn n3b_migrate_asm(frame: *mut MigrationFrame) {
     core::arch::naked_asm!(
@@ -862,12 +863,6 @@ fn send_n3_sync_ipi(target_apic_id: u32) {
 /// # Safety
 /// Registered as a naked IDT entry. On entry: SS, RSP, RFLAGS, CS, RIP pushed
 /// by hardware. `rdi` points at the InterruptStackFrame (set by IDT dispatch).
-#[cfg(target_arch = "riscv64")]
-pub unsafe extern "C" fn n3_migrate_ipi_entry(_rdi: *mut u8) -> ! {
-    panic!("RISC-V N3 migration is not implemented")
-}
-
-#[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 pub unsafe extern "C" fn n3_migrate_ipi_entry(rdi: *mut u8) -> ! {
     core::arch::naked_asm!(
@@ -1201,11 +1196,6 @@ impl N3Transport {
     /// Allocates a MigrationFrame and a shared message buffer, maps them
     /// in both address spaces, and registers the endpoint with the watchdog.
     pub fn new(sender_task_id: TaskId, receiver_task_id: TaskId) -> Result<Self, IpcError> {
-        if !cfg!(target_arch = "x86_64") {
-            log::warn!("N3 MMU migration is unavailable on this architecture");
-            return Err(IpcError::TransportFailed);
-        }
-
         let (frame_idx, _frame_ptr) = alloc_frame_slot().ok_or(IpcError::TransportFailed)?;
 
         let frame_phys = frame_pool_phys_addr(frame_idx);
@@ -1350,7 +1340,6 @@ impl IpcTransport for N3Transport {
 }
 
 impl IpcProducer for N3Transport {
-    #[cfg(target_arch = "x86_64")]
     fn send(&self, msg: &[u8]) -> Result<(), IpcError> {
         // SAFETY: CAS state machine (Ready=>Active) provides logical exclusivity.
         // The &mut is scoped to this function; after CAS, only the ASM primitive
@@ -1433,11 +1422,6 @@ impl IpcProducer for N3Transport {
         }
 
         Ok(())
-    }
-
-    #[cfg(target_arch = "riscv64")]
-    fn send(&self, _msg: &[u8]) -> Result<(), IpcError> {
-        Err(IpcError::TransportFailed)
     }
 
     fn try_send(&self, msg: &[u8]) -> Result<(), IpcError> {

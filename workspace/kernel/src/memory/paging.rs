@@ -13,9 +13,10 @@ use crate::x86_crate_shim::structures::paging::{
 use crate::arch::xshim::{PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB};
 use crate::arch::xshim::{PhysAddr, VirtAddr};
 
-use crate::sync::SpinLock;
-#[cfg(target_arch = "x86_64")]
-use crate::memory::frame::{FrameAllocOptions, FramePurpose};
+use crate::{
+    memory::frame::{FrameAllocOptions, FramePurpose},
+    sync::SpinLock,
+};
 
 /// Wrapper around the buddy allocator implementing the x86_64 crate's `FrameAllocator` trait.
 ///
@@ -90,7 +91,7 @@ impl crate::arch::x86_64::structures::paging::FrameAllocator<crate::arch::xshim:
 static mut PAGING_READY: bool = false;
 
 /// Physical address of the kernel's level-4 page table (set at init, never changes).
-static mut KERNEL_CR3: PhysAddr = PhysAddr::new(0);
+static mut KERNEL_CR3: PhysAddr = PhysAddr::new_truncate(0);
 
 /// Serializes mutations of the canonical kernel page tables.
 ///
@@ -102,13 +103,6 @@ static KERNEL_PT_LOCK: SpinLock<()> = SpinLock::new(());
 /// Returns whether initialized.
 pub fn is_initialized() -> bool {
     unsafe { *(&raw const PAGING_READY) }
-}
-
-#[cfg(target_arch = "riscv64")]
-pub fn mark_riscv_paging_active() {
-    unsafe {
-        *(&raw mut PAGING_READY) = true;
-    }
 }
 
 /// Initialize the paging subsystem.

@@ -366,7 +366,7 @@ impl Task {
             return; // no canary (kernel tasks, threads, ...)
         }
         let as_ref = self.process.address_space_arc();
-        let Some(phys) = as_ref.translate(x86_64::VirtAddr::new(addr)) else {
+        let Some(phys) = as_ref.translate(crate::arch::xshim::VirtAddr::new(addr)) else {
             log::warn!(
                 "[security] tid={} stack canary slot {:#x} unmapped at exit",
                 self.id.as_u64(),

@@ -47,11 +47,10 @@
 //! allocation to prevent deadlock with the buddy allocator.
 
 use crate::{
-    arch::tlb::shootdown_range,
     memory::{
         frame::PhysFrame,
         paging::{map_page_kernel, unmap_page_kernel},
-        phys_to_virt,
+        phys_to_virt, shootdown_range,
     },
     serial_println,
     sync::{IrqDisabledToken, SpinLock},
@@ -931,7 +930,7 @@ pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) -> bool {
 
     // Phase 2 : TLB shootdown with no lock held.
     // All remote CPUs can freely enter vmalloc/vfree while processing the IPI.
-    shootdown_range(range_start, range_end);
+    shootdown_range(range_start.as_u64(), range_end.as_u64());
 
     // Phase 3 : return physical frames to the buddy allocator.
     for i in 0..frames.len {

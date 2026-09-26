@@ -14,6 +14,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table, TableState},
     Terminal,
 };
+#[cfg(target_arch = "x86_64")]
 pub(crate) use ratatui_backend::Strat9RatatuiBackend;
 
 const TOP_REFRESH_TICKS: u64 = 10; // 100ms at 100Hz
@@ -669,4 +670,3 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
     shell_println!("top: TUI requires a framebuffer console (not available yet)");
     Ok(())
 }
-

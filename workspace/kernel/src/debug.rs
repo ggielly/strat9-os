@@ -5,12 +5,12 @@ pub struct QemuDebug;
 
 impl fmt::Write for QemuDebug {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        #[cfg(target_arch = "x86_64")]
+        let mut port = Port::new(0xe9);
         for &byte in s.as_bytes() {
-            unsafe { crate::arch::io::outb(0xe9, byte) };
+            unsafe {
+                port.write(byte);
+            }
         }
-        #[cfg(target_arch = "riscv64")]
-        crate::arch::serial::_print(format_args!("{}", s));
         Ok(())
     }
 }

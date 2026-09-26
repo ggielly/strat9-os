@@ -53,6 +53,27 @@ pub fn virt_to_phys(virt: u64) -> u64 {
     virt.wrapping_sub(HHDM_OFFSET.load(Ordering::Relaxed))
 }
 
+/// Invalidate a local translation-cache entry through the architecture ABI.
+#[inline]
+pub fn invalidate_local_page(vaddr: u64) {
+    #[cfg(target_arch = "x86_64")]
+    crate::arch::tlb::local_page(crate::arch::xshim::VirtAddr::new(vaddr));
+    #[cfg(target_arch = "riscv64")]
+    crate::arch::tlb::local_page(crate::arch::xshim::VirtAddr::new(vaddr));
+}
+
+/// Invalidate a virtual-address range on all CPUs through the architecture ABI.
+#[inline]
+pub fn shootdown_range(start: u64, end: u64) {
+    #[cfg(target_arch = "x86_64")]
+    crate::arch::tlb::shootdown_range(
+        crate::arch::xshim::VirtAddr::new(start),
+        crate::arch::xshim::VirtAddr::new(end),
+    );
+    #[cfg(target_arch = "riscv64")]
+    crate::arch::tlb::shootdown_range(start, end);
+}
+
 /// Initialize the memory management subsystem
 pub fn init_memory_manager(memory_regions: &[MemoryRegion]) {
     buddy::init_buddy_allocator(memory_regions);

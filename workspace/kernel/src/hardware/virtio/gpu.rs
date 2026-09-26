@@ -2,7 +2,7 @@
 // Reference: VirtIO spec v1.2, Section 5.4 (GPU Device)
 
 use crate::{
-    arch::pci::{self, Bar, ProbeCriteria},
+    hardware::pci_client::{self as pci, Bar, ProbeCriteria},
     memory::{self, allocate_zeroed_frame, phys_to_virt, PhysFrame},
 };
 use alloc::{sync::Arc, vec, vec::Vec};

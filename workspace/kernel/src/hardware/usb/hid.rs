@@ -146,7 +146,12 @@ impl HidKeyboard {
 
     pub fn drain_into_unified(&mut self) {
         for ev in self.event_queue.drain(..) {
+            #[cfg(target_arch = "x86_64")]
             keyboard::inject_hid_scancode(ev.keycode, ev.pressed);
+            #[cfg(not(target_arch = "x86_64"))]
+            if ev.pressed {
+                keyboard::inject_hid_scancode(ev.keycode);
+            }
         }
     }
 }
@@ -242,7 +247,10 @@ impl HidMouse {
             let left = ev.buttons & 0x01 != 0;
             let right = ev.buttons & 0x02 != 0;
             let middle = ev.buttons & 0x04 != 0;
+            #[cfg(target_arch = "x86_64")]
             mouse::push_event_from_hid(ev.dx as i16, ev.dy as i16, ev.dz, left, right, middle);
+            #[cfg(not(target_arch = "x86_64"))]
+            mouse::push_event_from_hid(ev.dx as i32, ev.dy as i32, ev.buttons);
         }
     }
 }

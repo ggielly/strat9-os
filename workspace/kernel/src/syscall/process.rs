@@ -223,19 +223,13 @@ pub fn sys_exit_group(exit_code: u64) -> Result<u64, SyscallError> {
 // ========== Architecture-specific ==========================================================================================================================================================================
 
 /// x86_64 arch_prctl operation codes (Linux-compatible).
-#[cfg(target_arch = "x86_64")]
 const ARCH_SET_GS: u64 = 0x1001;
-#[cfg(target_arch = "x86_64")]
 const ARCH_SET_FS: u64 = 0x1002;
-#[cfg(target_arch = "x86_64")]
 const ARCH_GET_FS: u64 = 0x1003;
-#[cfg(target_arch = "x86_64")]
 const ARCH_GET_GS: u64 = 0x1004;
 
 /// MSR addresses for FS/GS base.
-#[cfg(target_arch = "x86_64")]
 const MSR_FS_BASE: u32 = 0xC000_0100;
-#[cfg(target_arch = "x86_64")]
 const MSR_GS_BASE: u32 = 0xC000_0101;
 
 /// SYS_ARCH_PRCTL (350): Architecture-specific process settings.
@@ -278,7 +272,8 @@ pub fn sys_arch_prctl(code: u64, addr: u64) -> Result<u64, SyscallError> {
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+/// Segment-base controls are x86-specific and have no RISC-V equivalent.
+#[cfg(target_arch = "riscv64")]
 pub fn sys_arch_prctl(_code: u64, _addr: u64) -> Result<u64, SyscallError> {
     Err(SyscallError::NotSupported)
 }

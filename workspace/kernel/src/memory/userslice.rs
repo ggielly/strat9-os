@@ -151,7 +151,11 @@ fn check_pages_mapped(
 
         // Use the x86_64 crate's full translate to get the mapped frame + flags.
         use crate::arch::xshim::TranslateResult;
-        match mapper.translate(vaddr) {
+        #[cfg(target_arch = "riscv64")]
+        let translated = mapper.translate(vaddr).unwrap_or(TranslateResult::NotMapped);
+        #[cfg(target_arch = "x86_64")]
+        let translated = mapper.translate(vaddr);
+        match translated {
             TranslateResult::Mapped { flags, .. } => {
                 // Check that the mapping has all required flags
                 if !flags.contains(required_flags) {

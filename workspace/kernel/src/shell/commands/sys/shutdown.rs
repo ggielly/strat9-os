@@ -11,8 +11,7 @@ pub fn cmd_shutdown(_args: &[String]) -> Result<(), ShellError> {
 
     for s in &silos {
         shell_println!("  stopping silo {} ({})", s.id, s.name);
-        // The id is already known: no need to format it back into a selector.
-        let _ = crate::silo::kernel_suspend_silo_by_id(s.id);
+        let _ = crate::silo::kernel_suspend_silo(&alloc::format!("{}", s.id));
     }
 
     shell_println!("[shutdown] Killing remaining tasks...");
@@ -32,7 +31,6 @@ pub fn cmd_shutdown(_args: &[String]) -> Result<(), ShellError> {
     }
 
     shell_println!("[shutdown] Powering off...");
-    #[cfg(target_arch = "x86_64")]
     unsafe {
         crate::arch::cli();
         // QEMU/Bochs ACPI shutdown

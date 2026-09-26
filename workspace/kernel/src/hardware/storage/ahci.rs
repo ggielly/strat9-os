@@ -747,7 +747,6 @@ pub(crate) fn flush_deferred_async_read_completions(ring_id: u64) -> u32 {
                     */
 
                     let src = completion.dma_buf.virt_addr() as *const u8;
-                    #[cfg(target_arch = "x86_64")]
                     let dst = user_buf.as_ptr() as *mut u8;
                     let n = completion.len;
 
@@ -940,7 +939,10 @@ impl AhciController {
         pci_dev.enable_memory_space();
 
         // Try MSI/MSI-X first; fall back to INTx line.
+        #[cfg(target_arch = "x86_64")]
         let (_irq_line, irq_vector) = crate::arch::x86_64::msi::probe_and_enable(&pci_dev, true);
+        #[cfg(target_arch = "riscv64")]
+        let irq_vector = 0;
 
         // BAR5 = ABAR (AHCI Base Memory Register)
         let abar_phys = pci_dev.read_bar_raw(5).ok_or(AhciError::BadAbar)?;
@@ -1223,6 +1225,7 @@ pub fn init() {
 
             // Register IRQ handler in the IDT now that the controller is live.
             let vector = AHCI_IRQ_LINE.load(Ordering::Relaxed);
+            #[cfg(target_arch = "x86_64")]
             crate::arch::x86_64::idt::register_ahci_irq(vector);
         }
         Err(AhciError::NoController) => {

@@ -1467,7 +1467,6 @@ fn initialize_memory_allocator(
         super::serial::_print(format_args!("[strat9] activating Sv39\r\n"));
         unsafe {
             mapper.activate();
-            crate::memory::paging::mark_riscv_paging_active();
         }
         super::serial::_print(format_args!("[strat9] Sv39 paging active\r\n"));
         match info.plic_base() {

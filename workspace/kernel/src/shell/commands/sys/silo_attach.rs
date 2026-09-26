@@ -6,9 +6,9 @@ use super::*;
 ///
 /// Displays output from `sys_debug_log` calls made by tasks in the silo.
 /// Press Ctrl+C or 'q' to detach.
-pub(super) fn cmd_silo_attach(args: &[String], cmd: Cmd) -> Result<(), ShellError> {
+pub(super) fn cmd_silo_attach(args: &[String]) -> Result<(), ShellError> {
     if args.len() < 2 {
-        shell_println!("Usage: {} attach <id|label|name>", cmd.name());
+        shell_println!("Usage: silo attach <id|label|name>");
         return Err(ShellError::InvalidArguments);
     }
     let selector = normalize_current_silo_selector(args[1].as_str());
@@ -23,7 +23,7 @@ pub(super) fn cmd_silo_attach(args: &[String], cmd: Cmd) -> Result<(), ShellErro
             detail.base.id
         }
         Err(e) => {
-            shell_println!("{} attach: {:?}", cmd.name(), e);
+            shell_println!("silo attach: {:?}", e);
             return Err(ShellError::ExecutionFailed);
         }
     };
@@ -35,19 +35,13 @@ pub(super) fn cmd_silo_attach(args: &[String], cmd: Cmd) -> Result<(), ShellErro
             }
         }
 
-        match silo::silo_output_drain_by_id(sid) {
+        match silo::silo_output_drain(&alloc::format!("{}", sid)) {
             Ok(data) if !data.is_empty() => {
                 if let Ok(s) = core::str::from_utf8(&data) {
                     crate::shell_print!("{}", s);
                 }
             }
-            Ok(_) => {}
-            // The silo went away mid-attach: say so instead of spinning
-            // silently on a failing drain.
-            Err(e) => {
-                shell_println!("\n{} attach: silo {} is gone ({:?})", cmd.name(), sid, e);
-                return Err(ShellError::ExecutionFailed);
-            }
+            _ => {}
         }
 
         crate::process::yield_task();

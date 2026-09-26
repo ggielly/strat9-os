@@ -976,23 +976,16 @@ fn parse_module_header(data: &[u8]) -> Result<Option<Strat9ModuleHeader>, Syscal
     if header.version != 1 && header.version != 2 {
         return Err(SyscallError::InvalidArgument);
     }
-    #[cfg(target_arch = "riscv64")]
-    if header.cpu_arch == 0 {
-        return Err(SyscallError::NotSupported);
-    }
     if header.cpu_arch != 0 {
         return Err(SyscallError::InvalidArgument);
     }
 
-    #[cfg(target_arch = "x86_64")]
     let version = unsafe { core::ptr::addr_of!(header.version).read_unaligned() };
-    #[cfg(target_arch = "x86_64")]
     let req = if version >= 2 {
         unsafe { core::ptr::addr_of!(header.cpu_features_required).read_unaligned() }
     } else {
         0
     };
-    #[cfg(target_arch = "x86_64")]
     if req != 0 {
         let host = crate::arch::cpuid::host();
         let required = crate::arch::cpuid::CpuFeatures::from_bits_truncate(req);
@@ -1420,24 +1413,6 @@ pub fn list_silos_snapshot() -> Vec<SiloSnapshot> {
             graphics_session_ttl_sec: s.config.graphics_session_ttl_sec,
         })
         .collect()
-}
-
-/// Number of registered silos.
-///
-/// `list_silos_snapshot` clones a name and a label per silo, which is the right
-/// cost for a listing but not for the `env` counter, which wants a length.
-pub fn silo_count() -> usize {
-    let mgr = SILO_MANAGER.lock();
-    mgr.silos.len()
-}
-
-/// State of a single silo, without cloning the whole registry.
-///
-/// `list_silos_snapshot` is the right tool for listings, but a caller that
-/// only needs one silo's state should not pay for a deep clone of every silo.
-pub fn silo_state_by_id(silo_id: u32) -> Option<SiloState> {
-    let mgr = SILO_MANAGER.lock();
-    mgr.get(silo_id).ok().map(|s| s.state)
 }
 
 /// Return silo identity + memory accounting for a task, if the task belongs to a silo.
@@ -2874,26 +2849,15 @@ pub fn sys_silo_resume(handle: u64) -> Result<u64, SyscallError> {
 // ============================================================================
 
 pub fn kernel_suspend_silo(selector: &str) -> Result<u32, SyscallError> {
-    let silo_id = {
-        let mgr = SILO_MANAGER.lock();
-        resolve_selector_to_silo_id(selector, &mgr)?
-    };
-    kernel_suspend_silo_by_id(silo_id)
-}
-
-/// Suspend a silo whose id is already known.
-///
-/// Callers holding a `SiloSnapshot` (shutdown walking the registry, for
-/// instance) use this instead of formatting the id back into a selector
-/// string just to have it re-parsed here.
-pub fn kernel_suspend_silo_by_id(silo_id: u32) -> Result<u32, SyscallError> {
-    let tasks = {
+    let (silo_id, tasks) = {
         let mut mgr = SILO_MANAGER.lock();
+        let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
         let silo = mgr.get_mut(silo_id)?;
         match silo.state {
             SiloState::Running => {
                 silo.state = SiloState::Paused;
-                silo.tasks.clone()
+                let t = silo.tasks.clone();
+                (silo_id, t)
             }
             _ => return Err(SyscallError::InvalidArgument),
         }
@@ -3101,20 +3065,6 @@ pub fn silo_output_write(silo_id: u32, data: &[u8]) {
 pub fn silo_output_drain(selector: &str) -> Result<Vec<u8>, SyscallError> {
     let mut mgr = SILO_MANAGER.lock();
     let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
-    drain_output_by_id(&mut mgr, silo_id)
-}
-
-/// Drain the output buffer of a known runtime silo id.
-///
-/// Callers that already resolved the id (a long-lived attach loop, for
-/// instance) use this instead of formatting the id back into a selector
-/// string on every iteration just to have it re-parsed here.
-pub fn silo_output_drain_by_id(silo_id: u32) -> Result<Vec<u8>, SyscallError> {
-    let mut mgr = SILO_MANAGER.lock();
-    drain_output_by_id(&mut mgr, silo_id)
-}
-
-fn drain_output_by_id(mgr: &mut SiloManager, silo_id: u32) -> Result<Vec<u8>, SyscallError> {
     let silo = mgr.get_mut(silo_id)?;
     let mut buf = match silo.output_buf.take() {
         Some(buf) => buf,

@@ -50,7 +50,7 @@ pub struct ForkResult {
 fn local_invlpg(vaddr: u64) {
     // Local TLB invalidation is sufficient here: this kernel currently runs
     // one task per user address space (no shared user CR3 across CPUs).
-    crate::arch::tlb::local_page(crate::arch::xshim::VirtAddr::new(vaddr));
+    crate::memory::invalidate_local_page(vaddr);
 }
 
 #[repr(C)]
@@ -77,47 +77,27 @@ struct ForkUserContext {
     user_ss: u64,
 }
 
-#[cfg(target_arch = "x86_64")]
 const OFF_R15: usize = offset_of!(ForkUserContext, r15);
-#[cfg(target_arch = "x86_64")]
 const OFF_R14: usize = offset_of!(ForkUserContext, r14);
-#[cfg(target_arch = "x86_64")]
 const OFF_R13: usize = offset_of!(ForkUserContext, r13);
-#[cfg(target_arch = "x86_64")]
 const OFF_R12: usize = offset_of!(ForkUserContext, r12);
-#[cfg(target_arch = "x86_64")]
 const OFF_RBP: usize = offset_of!(ForkUserContext, rbp);
-#[cfg(target_arch = "x86_64")]
 const OFF_RBX: usize = offset_of!(ForkUserContext, rbx);
-#[cfg(target_arch = "x86_64")]
 const OFF_R11: usize = offset_of!(ForkUserContext, r11);
-#[cfg(target_arch = "x86_64")]
 const OFF_R10: usize = offset_of!(ForkUserContext, r10);
-#[cfg(target_arch = "x86_64")]
 const OFF_R9: usize = offset_of!(ForkUserContext, r9);
-#[cfg(target_arch = "x86_64")]
 const OFF_R8: usize = offset_of!(ForkUserContext, r8);
-#[cfg(target_arch = "x86_64")]
 const OFF_RSI: usize = offset_of!(ForkUserContext, rsi);
-#[cfg(target_arch = "x86_64")]
 const OFF_RDI: usize = offset_of!(ForkUserContext, rdi);
-#[cfg(target_arch = "x86_64")]
 const OFF_RDX: usize = offset_of!(ForkUserContext, rdx);
-#[cfg(target_arch = "x86_64")]
 const OFF_RCX: usize = offset_of!(ForkUserContext, rcx);
-#[cfg(target_arch = "x86_64")]
 const OFF_USER_RIP: usize = offset_of!(ForkUserContext, user_rip);
-#[cfg(target_arch = "x86_64")]
 const OFF_USER_CS: usize = offset_of!(ForkUserContext, user_cs);
-#[cfg(target_arch = "x86_64")]
 const OFF_USER_RFLAGS: usize = offset_of!(ForkUserContext, user_rflags);
-#[cfg(target_arch = "x86_64")]
 const OFF_USER_RSP: usize = offset_of!(ForkUserContext, user_rsp);
-#[cfg(target_arch = "x86_64")]
 const OFF_USER_SS: usize = offset_of!(ForkUserContext, user_ss);
 
 /// Child bootstrap: restore user register snapshot and enter Ring 3.
-#[cfg(target_arch = "x86_64")]
 extern "C" fn fork_child_start(ctx_ptr: u64) -> ! {
     let boxed = unsafe { Box::from_raw(ctx_ptr as *mut ForkUserContext) };
     let ctx = *boxed;
@@ -125,7 +105,6 @@ extern "C" fn fork_child_start(ctx_ptr: u64) -> ! {
 }
 
 /// Performs the fork iret from ctx operation.
-#[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 unsafe extern "C" fn fork_iret_from_ctx(_ctx: *const ForkUserContext) -> ! {
     core::arch::naked_asm!(
@@ -184,11 +163,6 @@ unsafe extern "C" fn fork_iret_from_ctx(_ctx: *const ForkUserContext) -> ! {
         off_user_rsp = const OFF_USER_RSP,
         off_user_ss = const OFF_USER_SS,
     );
-}
-
-#[cfg(target_arch = "riscv64")]
-extern "C" fn fork_child_start(_ctx_ptr: u64) -> ! {
-    panic!("RISC-V fork is not implemented")
 }
 
 /// Performs the build child task operation.
@@ -417,7 +391,13 @@ use crate::x86_crate_shim::structures::paging::Mapper;
     let mut mapper = unsafe { address_space.mapper() };
 
     // Check if page is mapped and has COW flag.
-    let (phys_frame_addr, flags) = match mapper.translate(VirtAddr::new(page_start)) {
+    #[cfg(target_arch = "riscv64")]
+    let translated = mapper
+        .translate(VirtAddr::new(page_start))
+        .unwrap_or(TranslateResult::NotMapped);
+    #[cfg(target_arch = "x86_64")]
+    let translated = mapper.translate(VirtAddr::new(page_start));
+    let (phys_frame_addr, flags) = match translated {
         TranslateResult::Mapped {
             frame,
             offset: _,

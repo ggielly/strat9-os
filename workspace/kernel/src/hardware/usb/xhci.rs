@@ -1205,7 +1205,10 @@ pub fn init() {
         pci_dev.enable_bus_master();
 
         // Try MSI/MSI-X first; fall back to INTx line.
-        let (irq, vector) = crate::arch::x86_64::msi::probe_and_enable(&pci_dev, true);
+        #[cfg(target_arch = "x86_64")]
+        let (_irq, vector) = crate::arch::x86_64::msi::probe_and_enable(&pci_dev, true);
+        #[cfg(target_arch = "riscv64")]
+        let vector = 0;
 
         match unsafe { XhciController::new(pci_dev) } {
             Ok(controller) => {
@@ -1214,6 +1217,7 @@ pub fn init() {
                 XHCI_CONTROLLERS
                     .lock()
                     .push(Arc::new(Mutex::new(controller)));
+                #[cfg(target_arch = "x86_64")]
                 crate::arch::x86_64::idt::register_xhci_irq_vector(vector);
             }
             Err(e) => {

@@ -11,7 +11,7 @@
 #![allow(dead_code)]
 
 use crate::{
-    arch::x86_64::boot_timestamp,
+    arch::boot_timestamp as boot_timestamp,
     hardware::pci_client::{self as pci, Bar, ProbeCriteria},
     memory::{allocate_zeroed_frame, paging, phys_to_virt},
     sync::waitqueue::WaitQueue,
@@ -218,7 +218,7 @@ struct Registers {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum NvmeError {
+enum NvmeError {
     ControllerFatal,
     Timeout,
     InvalidNamespace,
@@ -1156,7 +1156,10 @@ pub fn init() {
         pci_dev.enable_memory_space();
 
         // Try MSI/MSI-X first; fall back to INTx line.
+        #[cfg(target_arch = "x86_64")]
         let (irq, vector) = crate::arch::x86_64::msi::probe_and_enable(&pci_dev, true);
+        #[cfg(target_arch = "riscv64")]
+        let (irq, vector) = (0, 0);
 
         let bar = match pci_dev.read_bar(0) {
             Some(Bar::Memory64 { addr, .. }) => addr,
@@ -1183,6 +1186,7 @@ pub fn init() {
                 NVME_CONTROLLERS
                     .lock()
                     .push(Arc::new(Mutex::new(controller)));
+                #[cfg(target_arch = "x86_64")]
                 crate::arch::x86_64::idt::register_nvme_irq_vector(vector);
             }
             Err(e) => {

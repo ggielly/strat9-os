@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
-use crate::arch::x86_64::pci;
+use crate::hardware::pci_client as pci;
 use crate::memory::{allocate_zeroed_frame, PhysFrame};
 
 /// ATI/AMD display controller vendor ID.

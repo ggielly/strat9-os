@@ -240,7 +240,14 @@ pub fn snapshot_all(limit_per_cpu: usize) -> Vec<TraceEvent> {
 /// Performs the current cpu operation.
 #[inline]
 fn current_cpu() -> usize {
-    percpu::cpu_index_from_gs().unwrap_or(0)
+    #[cfg(target_arch = "x86_64")]
+    {
+        percpu::cpu_index_from_gs().unwrap_or(0)
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        percpu::current_cpu_index()
+    }
 }
 
 /// Performs the record operation.

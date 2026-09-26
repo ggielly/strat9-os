@@ -54,13 +54,11 @@ use crate::{
     arch::vga,
     memory,
     process::elf::load_and_run_elf,
-    shell::{
-        commands::top::Strat9RatatuiBackend,
-        output::{clear_screen, format_bytes},
-        ShellError,
-    },
+    shell::{output::{clear_screen, format_bytes}, ShellError},
     shell_println, silo, vfs,
 };
+#[cfg(target_arch = "x86_64")]
+use crate::shell::commands::top::Strat9RatatuiBackend;
 use alloc::{string::String, vec::Vec};
 use ratatui::{
     layout::{Constraint, Direction, Layout},
@@ -481,6 +479,7 @@ struct ConfigListRow {
 }
 
 /// Performs the render silo table ratatui operation.
+#[cfg(target_arch = "x86_64")]
 fn render_silo_table_ratatui(
     runtime_rows: &[SiloListRow],
     config_rows: &[ConfigListRow],
@@ -632,7 +631,17 @@ fn render_silo_table_ratatui(
     Ok(true)
 }
 
+#[cfg(target_arch = "riscv64")]
+fn render_silo_table_ratatui(
+    _runtime_rows: &[SiloListRow],
+    _config_rows: &[ConfigListRow],
+    _config_source: &str,
+) -> Result<bool, ShellError> {
+    Ok(false)
+}
+
 /// Performs the render strate table ratatui operation.
+#[cfg(target_arch = "x86_64")]
 fn render_strate_table_ratatui(
     runtime_rows: &[RuntimeStrateRow],
     config_rows: &[ConfigStrateRow],
@@ -750,6 +759,15 @@ fn render_strate_table_ratatui(
         vga::end_frame();
     }
     Ok(true)
+}
+
+#[cfg(target_arch = "riscv64")]
+fn render_strate_table_ratatui(
+    _runtime_rows: &[RuntimeStrateRow],
+    _config_rows: &[ConfigStrateRow],
+    _config_source: &str,
+) -> Result<bool, ShellError> {
+    Ok(false)
 }
 
 /// Writes silo toml to initfs.

@@ -9,10 +9,12 @@
 
 pub mod boot;
 pub mod paging;
-pub mod percpu;
 pub mod pci;
+pub mod percpu;
 pub mod plic;
+pub mod sbi;
 pub mod serial;
+pub mod timer;
 pub mod trap;
 pub mod virtio_mmio;
 
@@ -199,17 +201,16 @@ pub mod boot_timestamp {
 }
 
 pub mod idt {
-    pub fn init() { panic!("RISC-V trap handling is not implemented (R2.1)") }
-    pub fn register_ahci_irq(_irq: u8) { panic!("RISC-V interrupt routing is not implemented (R2.1)") }
-    pub fn register_nvme_irq(_irq: u8) { panic!("RISC-V interrupt routing is not implemented (R2.1)") }
-    pub fn register_virtio_block_irq(_irq: u8) { panic!("RISC-V interrupt routing is not implemented (R2.1)") }
-    pub fn register_xhci_irq(_irq: u8) { panic!("RISC-V interrupt routing is not implemented (R2.1)") }
-    pub fn register_nic_irq(_irq: u8) { panic!("RISC-V interrupt routing is not implemented (R2.1)") }
+    // Trap handling arrives with jalon R2.1 (stvec).
+    pub fn init() {}
+    pub fn register_ahci_irq(_irq: u8) {}
+    pub fn register_nvme_irq(_irq: u8) {}
+    pub fn register_nvme_irq_vector(_irq: u8) {}
+    pub fn register_virtio_block_irq(_irq: u8) {}
+    pub fn register_xhci_irq(_irq: u8) {}
+    pub fn register_xhci_irq_vector(_irq: u8) {}
+    pub fn register_nic_irq(_irq: u8) {}
 }
-
-pub mod sbi;
-pub mod timer;
-
 
 use core::arch::asm;
 
@@ -312,32 +313,43 @@ pub mod cpuid {
     /// Placeholder ISA-feature probe. Real implementation reads the
     /// `riscv,isa` device-tree property (jalon R1.4).
     #[derive(Default)]
-    pub struct IsaFeatures;
+    pub struct IsaFeatures {
+        pub features: CpuFeatures,
+    }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
-    pub struct CpuFeature;
+    pub struct CpuFeature(pub u32);
     impl CpuFeature {
-        pub const SMEP: CpuFeature = CpuFeature;
-        pub const SMAP: CpuFeature = CpuFeature;
+        pub const SMEP: CpuFeature = CpuFeature(1 << 0);
+        pub const SMAP: CpuFeature = CpuFeature(1 << 1);
     }
 
-    #[derive(Clone, Copy, Default)]
+    #[derive(Clone, Copy, Default, Debug)]
     pub struct CpuFeatures {
-        bits: u32,
+        bits: u64,
     }
+    #[derive(Clone, Copy)]
+    pub struct XsaveProfile {
+        pub xcr0_mask: u64,
+        pub area_size: usize,
+    }
+    pub trait FeatureMask { fn mask(&self) -> u64; }
+    impl FeatureMask for CpuFeature { fn mask(&self) -> u64 { self.0 as u64 } }
+    impl FeatureMask for CpuFeatures { fn mask(&self) -> u64 { self.bits } }
     impl CpuFeatures {
-        pub fn contains(self, _f: CpuFeature) -> bool {
-            false
-        }
-        pub fn bits(self) -> u32 {
-            self.bits
+        pub const SMEP: Self = Self { bits: CpuFeature::SMEP.0 as u64 };
+        pub const SMAP: Self = Self { bits: CpuFeature::SMAP.0 as u64 };
+        pub const fn from_bits_truncate(bits: u64) -> Self { Self { bits } }
+        pub const fn bits(self) -> u64 { self.bits }
+        pub fn contains<T: FeatureMask>(self, other: T) -> bool {
+            self.bits & other.mask() == other.mask()
         }
     }
 
     pub fn init() {}
 
     pub fn host() -> IsaFeatures {
-        IsaFeatures
+        IsaFeatures { features: CpuFeatures::default() }
     }
     pub fn host_uses_xsave() -> bool {
         false
@@ -351,8 +363,11 @@ pub mod cpuid {
     pub fn xsave_size_for_xcr0(_xcr0: u64) -> usize {
         512
     }
-    pub fn xcr0_for_features(_f: &CpuFeatures) -> u64 {
+    pub fn xcr0_for_features(_f: CpuFeatures) -> u64 {
         0
+    }
+    pub fn boot_xsave_profile() -> XsaveProfile {
+        XsaveProfile { xcr0_mask: 0, area_size: 512 }
     }
     pub fn features_to_flags_string(_f: &IsaFeatures) -> alloc::string::String {
         alloc::string::String::new()
@@ -402,16 +417,16 @@ pub mod vga_text {
 pub mod pic_stub {
     pub const PIC1_OFFSET: u8 = 0x20;
     pub const PIC2_OFFSET: u8 = 0x28;
-    pub fn init(_o1: u8, _o2: u8) { panic!("8259 PIC is unavailable on RISC-V") }
-    pub fn disable() { panic!("8259 PIC is unavailable on RISC-V") }
-    pub fn enable_irq(_irq: u8) { panic!("8259 PIC is unavailable on RISC-V") }
+    pub fn init(_o1: u8, _o2: u8) {}
+    pub fn disable() {}
+    pub fn enable_irq(_irq: u8) {}
 }
 
 pub mod timer_extra {
-    pub fn init_pit(_hz: u32) { panic!("8254 PIT is unavailable on RISC-V") }
-    pub fn stop_pit() { panic!("8254 PIT is unavailable on RISC-V") }
+    pub fn init_pit(_hz: u32) {}
+    pub fn stop_pit() {}
     pub fn calibrate_apic_timer() -> u32 {
-        panic!("APIC timer is unavailable on RISC-V")
+        0
     }
 }
 
@@ -437,9 +452,9 @@ pub mod vga_draw {
     #[allow(clippy::too_many_arguments)]
     pub fn init(
         fb_addr: u64,
-        width: usize,
-        height: usize,
-        stride: usize,
+        width: u32,
+        height: u32,
+        stride: u32,
         bpp: u16,
         _red_size: u8,
         _red_shift: u8,

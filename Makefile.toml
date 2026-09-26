@@ -5,27 +5,13 @@ skip_core_tasks = true
 [env]
 CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
 KERNEL_TARGET = "x86_64-unknown-none"
-KERNEL_TARGET_RISCV = "riscv64imac-unknown-none-elf"
 BUILD_DIR = "build"
 QEMU = "qemu-system-x86_64"
-QEMU_RISCV = "qemu-system-riscv64"
 GDB = "gdb"
 QEMU_GDB_PORT = "1234"
 STRAT9_PROFILE = "debug"
 STRAT9_TAP_IFACE = "strat9tap0"
 STRAT9_UPLINK_IFACE = "eth0"
-
-[tasks.help]
-description = "List available tasks; pass a filter, e.g. cargo make help riscv"
-script_runner = "@shell"
-script = ['''
-filter="${@}"
-if [ -n "$filter" ]; then
-    cargo make --loglevel off --list-all-steps --output-format short-description 2>/dev/null | grep -i -- "$filter" || true
-else
-    cargo make --loglevel off --list-all-steps --output-format short-description 2>/dev/null
-fi
-''']
 
 # =============================================================================
 # Build Tasks - Bootloader & Toolchain

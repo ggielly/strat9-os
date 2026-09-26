@@ -29,9 +29,9 @@ pub fn init() {
     usb::init();
     crate::arch::speaker::beep_phase(12); // USB
     virtio::gpu::init();
-    crate::arch::x86_64::speaker::beep_phase(13); // VirtIO GPU
+    crate::arch::speaker::beep_phase(13); // VirtIO GPU
     amdgpu::init();
-    crate::arch::x86_64::speaker::beep_phase(14); // AMDGPU
+    crate::arch::speaker::beep_phase(14); // AMDGPU
     video::framebuffer::init();
-    crate::arch::x86_64::speaker::beep_phase(15); // Framebuffer
+    crate::arch::speaker::beep_phase(15); // Framebuffer
 }

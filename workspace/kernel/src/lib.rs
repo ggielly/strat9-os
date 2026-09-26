@@ -10,7 +10,7 @@
 
 #![no_std]
 #![no_main]
-#![cfg_attr(target_arch = "x86_64", feature(abi_x86_interrupt))]
+#![feature(abi_x86_interrupt)]
 #![feature(alloc_error_handler)]
 #![feature(negative_impls)]
 
@@ -314,6 +314,7 @@ fn log_boot_module_magics(_stage: &str) {}
 /// Main kernel initialization - called by bootloader entry points
 pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // Raw COM1 trace - works before any subsystem is initialized.
+    #[cfg(target_arch = "x86_64")]
     {
         let thr: u16 = 0x3F8;
         let lsr: u16 = 0x3F8 + 5;
@@ -337,6 +338,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     );
 
     // Trace: raw COM1 after debug_assert
+    #[cfg(target_arch = "x86_64")]
     {
         let thr: u16 = 0x3F8;
         let lsr: u16 = 0x3F8 + 5;
@@ -353,6 +355,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     arch::x86_64::boot_timestamp::init();
 
     // Trace: raw COM1 after boot_timestamp
+    #[cfg(target_arch = "x86_64")]
     {
         let thr: u16 = 0x3F8;
         let lsr: u16 = 0x3F8 + 5;
@@ -368,6 +371,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     //crate::e9_println!("B0 kernel_main");
 
     // Trace before init_serial
+    #[cfg(target_arch = "x86_64")]
     {
         let thr: u16 = 0x3F8;
         let lsr: u16 = 0x3F8 + 5;
@@ -402,6 +406,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     //crate::e9_println!("B3 milestone");
 
     // Trace after IDT
+    #[cfg(target_arch = "x86_64")]
     {
         let thr: u16 = 0x3F8;
         let lsr: u16 = 0x3F8 + 5;

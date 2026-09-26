@@ -24,6 +24,7 @@ use crate::boot::fdt;
 /// Very early serial output using raw COM1 port I/O.
 /// Safe to call before any kernel subsystem is initialized.
 #[inline(always)]
+#[cfg(target_arch = "x86_64")]
 unsafe fn early_print(s: &[u8]) {
     let thr: u16 = 0x3F8;
     let lsr: u16 = 0x3F8 + 5;
@@ -38,6 +39,7 @@ unsafe fn early_print(s: &[u8]) {
 }
 
 /// Write a u64 as hex to COM1 (no alloc, no fmt traits).
+#[cfg(target_arch = "x86_64")]
 unsafe fn early_print_hex(mut val: u64) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     if val == 0 {
@@ -73,6 +75,7 @@ pub fn kernel_elf_bytes() -> Option<&'static [u8]> {
 
 /// Enable SSE (OSFXSR, OSXMMEXCPT) in CR4.
 #[inline(always)]
+#[cfg(target_arch = "x86_64")]
 unsafe fn enable_cpu_features() {
     let mut cr4: u64;
     core::arch::asm!("mov {}, cr4", out(reg) cr4);
@@ -95,6 +98,7 @@ unsafe fn enable_cpu_features() {
 /// read (or built) here. The real kernel init and stack switch happen
 /// in `crate::kernel_main` after the buddy allocator is ready.
 #[no_mangle]
+#[cfg(target_arch = "x86_64")]
 #[allow(static_mut_refs)]
 pub unsafe extern "C" fn kmain(args_ptr: u64) -> ! {
     // Step 1: Very early serial output - before anything else.
@@ -117,6 +121,7 @@ pub unsafe extern "C" fn kmain(args_ptr: u64) -> ! {
     enable_cpu_features();
 
     // Step 3: Serial port with crate
+    #[cfg(target_arch = "x86_64")]
     {
         let mut early_port = uart_16550::SerialPort::new(0x3F8);
         let _ = core::fmt::Write::write_str(
@@ -196,8 +201,17 @@ pub unsafe extern "C" fn kmain(args_ptr: u64) -> ! {
     crate::kernel_main(&args as *const _);
 }
 
+/// Compatibility entry used by the Rust wrapper on RISC-V. The real SBI
+/// entry passes both hart id and DTB pointer directly to `riscv_boot_entry`.
+#[no_mangle]
+#[cfg(target_arch = "riscv64")]
+pub unsafe extern "C" fn kmain(dtb_ptr: u64) -> ! {
+    crate::arch::riscv64::boot::riscv_boot_entry(0, dtb_ptr as *const u8)
+}
+
 /// Halt the CPU forever.
 #[inline(always)]
+#[cfg(target_arch = "x86_64")]
 fn hlt_loop() -> ! {
     loop {
         unsafe {
@@ -207,6 +221,7 @@ fn hlt_loop() -> ! {
 }
 
 /// Build minimal KernelArgs for PVH boot (no DTB).
+#[cfg(target_arch = "x86_64")]
 fn build_minimal_args() -> super::entry::KernelArgs {
     super::entry::KernelArgs {
         magic: strat9_abi::boot::STRAT9_BOOT_MAGIC,

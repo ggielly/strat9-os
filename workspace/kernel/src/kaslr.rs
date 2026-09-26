@@ -38,10 +38,8 @@ pub fn init() {
         return;
     }
 
-    // Use RDTSC for KASLR seed (avoids entropy pool hang during early boot)
-    let (lo, hi): (u32, u32);
-    unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nostack, nomem)); }
-    let seed = ((hi as u64) << 32) | lo as u64;
+    // Use the architecture's monotonic counter for KASLR seeding.
+    let seed = crate::arch::rdtsc();
     let r0 = seed.wrapping_mul(6364136223846793005);
     let r1 = (seed >> 32) as u8;
     let r2 = (seed >> 40) as u8;
