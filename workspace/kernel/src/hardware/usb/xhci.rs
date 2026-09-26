@@ -315,32 +315,32 @@ impl XhciController {
             _ => {
                 unsafe {
                     // 'z' + 'B' = BAR invalid
-                    core::arch::asm!("out 0xe9, al", in("al") b'z', options(nomem, nostack));
-                    core::arch::asm!("out 0xe9, al", in("al") b'B', options(nomem, nostack));
-                    core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                    crate::e9_mark!(b'z');
+                    crate::e9_mark!(b'B');
+                    crate::e9_mark!(b'\n');
                 }
                 return Err("Invalid BAR");
             }
         };
         unsafe {
-            core::arch::asm!("out 0xe9, al", in("al") b'z', options(nomem, nostack));
-            core::arch::asm!("out 0xe9, al", in("al") b'b', options(nomem, nostack));
+            crate::e9_mark!(b'z');
+            crate::e9_mark!(b'b');
             let hex = b"0123456789abcdef";
             let a = bar;
             for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
                 let nib = hex[((a >> sh) & 0xF) as usize];
-                core::arch::asm!("out 0xe9, al", in("al") nib, options(nomem, nostack));
+                crate::e9_mark!(nib);
             }
             // Dump the PCI location + raw BAR0 value: bdf raw
             let bdf = pci_dev.address;
-            core::arch::asm!("out 0xe9, al", in("al") b'@', options(nomem, nostack));
+            crate::e9_mark!(b'@');
             let raw = pci_dev.read_bar_raw(0).unwrap_or(0xFFFF_FFFF);
             for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
                 let nib = hex[((raw >> sh) & 0xF) as usize];
-                core::arch::asm!("out 0xe9, al", in("al") nib, options(nomem, nostack));
+                crate::e9_mark!(nib);
             }
             let _ = bdf;
-            core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+            crate::e9_mark!(b'\n');
         }
         paging::ensure_identity_map_range(bar, XHCI_MMIO_SIZE as u64);
 
@@ -802,10 +802,10 @@ impl XhciController {
             let completion = (event.d2 >> 24) & 0xFF;
             if completion != 1 {
                 unsafe {
-                    core::arch::asm!("out 0xe9, al", in("al") b'z', options(nomem, nostack));
-                    core::arch::asm!("out 0xe9, al", in("al") b'3', options(nomem, nostack));
-                    core::arch::asm!("out 0xe9, al", in("al") (b'0' + (completion & 0xF) as u8), options(nomem, nostack));
-                    core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                    crate::e9_mark!(b'z');
+                    crate::e9_mark!(b'3');
+                    crate::e9_mark!((b'0' + (completion & 0xF) as u8));
+                    crate::e9_mark!(b'\n');
                 }
                 log::warn!(
                     "[xHCI] Address Device failed: slot={} completion={}",
@@ -883,10 +883,10 @@ impl XhciController {
 
     fn enumerate_all_ports(&mut self) {
         unsafe {
-            core::arch::asm!("out 0xe9, al", in("al") b'x', options(nomem, nostack));
-            core::arch::asm!("out 0xe9, al", in("al") b"0123456789abcdef"[((self.max_ports >> 4) & 0xF) as usize], options(nomem, nostack));
-            core::arch::asm!("out 0xe9, al", in("al") b"0123456789abcdef"[(self.max_ports & 0xF) as usize], options(nomem, nostack));
-            core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+            crate::e9_mark!(b'x');
+            crate::e9_mark!(b"0123456789abcdef"[((self.max_ports >> 4) & 0xF) as usize]);
+            crate::e9_mark!(b"0123456789abcdef"[(self.max_ports & 0xF) as usize]);
+            crate::e9_mark!(b'\n');
         }
         let mut usb_address: u8 = 1;
 
@@ -897,14 +897,14 @@ impl XhciController {
                 continue;
             }
             unsafe {
-                core::arch::asm!("out 0xe9, al", in("al") b'e', options(nomem, nostack));
-                core::arch::asm!("out 0xe9, al", in("al") (b'0' + port as u8), options(nomem, nostack));
+                crate::e9_mark!(b'e');
+                crate::e9_mark!((b'0' + port as u8));
                 let psc = portsc;
                 for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
                     let nib = b"0123456789abcdef"[((psc >> sh) & 0xF) as usize];
-                    core::arch::asm!("out 0xe9, al", in("al") nib, options(nomem, nostack));
+                    crate::e9_mark!(nib);
                 }
-                core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                crate::e9_mark!(b'\n');
             }
 
             // NOTE: log::info! (formatted) hung the enumeration path in some
@@ -913,25 +913,25 @@ impl XhciController {
 
             if !unsafe { self.reset_port(port) } {
                 unsafe {
-                    core::arch::asm!("out 0xe9, al", in("al") b'z', options(nomem, nostack));
-                    core::arch::asm!("out 0xe9, al", in("al") b'4', options(nomem, nostack));
+                    crate::e9_mark!(b'z');
+                    crate::e9_mark!(b'4');
                     let portsc = self.read_portsc(port);
-                    core::arch::asm!("out 0xe9, al", in("al") b"0123456789abcdef"[((portsc >> 28) & 0xF) as usize], options(nomem, nostack));
-                    core::arch::asm!("out 0xe9, al", in("al") b"0123456789abcdef"[((portsc >> 24) & 0xF) as usize], options(nomem, nostack));
-                    core::arch::asm!("out 0xe9, al", in("al") b"0123456789abcdef"[((portsc >> 4) & 0xF) as usize], options(nomem, nostack));
-                    core::arch::asm!("out 0xe9, al", in("al") b"0123456789abcdef"[(portsc & 0xF) as usize], options(nomem, nostack));
-                    core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                    crate::e9_mark!(b"0123456789abcdef"[((portsc >> 28) & 0xF) as usize]);
+                    crate::e9_mark!(b"0123456789abcdef"[((portsc >> 24) & 0xF) as usize]);
+                    crate::e9_mark!(b"0123456789abcdef"[((portsc >> 4) & 0xF) as usize]);
+                    crate::e9_mark!(b"0123456789abcdef"[(portsc & 0xF) as usize]);
+                    crate::e9_mark!(b'\n');
                 }
                 log::warn!("[xHCI] Port {} reset failed", port);
                 continue;
             }
             unsafe {
-                core::arch::asm!("out 0xe9, al", in("al") b'z', options(nomem, nostack));
-                core::arch::asm!("out 0xe9, al", in("al") b'R', options(nomem, nostack));
-                core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                crate::e9_mark!(b'z');
+                crate::e9_mark!(b'R');
+                crate::e9_mark!(b'\n');
             }
             unsafe {
-                core::arch::asm!("out 0xe9, al", in("al") b'R', options(nomem, nostack));
+                crate::e9_mark!(b'R');
             }
 
             let speed = unsafe { ((self.read_portsc(port) >> PORTSC_SPEED_SHIFT) & 0xF) as u8 };
@@ -940,7 +940,7 @@ impl XhciController {
             match self.enable_slot() {
                 Ok(slot_id) => {
                     unsafe {
-                        core::arch::asm!("out 0xe9, al", in("al") b'S', options(nomem, nostack));
+                        crate::e9_mark!(b'S');
                     }
                     if self.set_address(slot_id, usb_address).is_err() {
                         log::warn!("[xHCI] Port {} address failed", port);
@@ -948,24 +948,24 @@ impl XhciController {
                     }
                     usb_address += 1;
                     unsafe {
-                        core::arch::asm!("out 0xe9, al", in("al") b'A', options(nomem, nostack));
+                        crate::e9_mark!(b'A');
                     }
 
                     let mut dev_desc = [0u8; 18];
                     if self.get_device_descriptor(slot_id, &mut dev_desc).is_ok() {
                         // TEMP DEBUG: dump the 18-byte descriptor as hex + a leading 'G'.
                         unsafe {
-                            core::arch::asm!("out 0xe9, al", in("al") b'G', options(nomem, nostack));
+                            crate::e9_mark!(b'G');
                             let mut k = 0;
                             while k < 18 {
                                 let b = dev_desc[k];
                                 let hi = b"0123456789abcdef"[(b >> 4) as usize];
                                 let lo = b"0123456789abcdef"[(b & 0xF) as usize];
-                                core::arch::asm!("out 0xe9, al", in("al") hi, options(nomem, nostack));
-                                core::arch::asm!("out 0xe9, al", in("al") lo, options(nomem, nostack));
+                                crate::e9_mark!(hi);
+                                crate::e9_mark!(lo);
                                 k += 1;
                             }
-                            core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                            crate::e9_mark!(b'\n');
                         }
                         let vid = u16::from_le_bytes([dev_desc[2], dev_desc[3]]);
                         let pid = u16::from_le_bytes([dev_desc[4], dev_desc[5]]);
@@ -1159,13 +1159,13 @@ impl XhciController {
     ) -> Result<usize, &'static str> {
         unsafe {
             // TEMP DEBUG: distinct marker (was 'V', collided with boot_alloc).
-            core::arch::asm!("out 0xe9, al", in("al") b'U', options(nomem, nostack));
+            crate::e9_mark!(b'U');
         }
         let idx = slot_id as usize;
         if idx >= self.device_slots.len() || self.device_slots[idx].is_none() {
             unsafe {
-                core::arch::asm!("out 0xe9, al", in("al") b'1', options(nomem, nostack));
-                core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                crate::e9_mark!(b'1');
+                crate::e9_mark!(b'\n');
             }
             return Err("Invalid slot for control transfer");
         }
@@ -1175,8 +1175,8 @@ impl XhciController {
         let tr_phys = dev.ep_transfer_ring_phys[1];
         if tr_ring.is_null() {
             unsafe {
-                core::arch::asm!("out 0xe9, al", in("al") b'2', options(nomem, nostack));
-                core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                crate::e9_mark!(b'2');
+                crate::e9_mark!(b'\n');
             }
             return Err("No transfer ring for EP0");
         }
@@ -1248,7 +1248,7 @@ impl XhciController {
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         self.ring_doorbell(slot_id, 1);
         unsafe {
-            core::arch::asm!("out 0xe9, al", in("al") b'C', options(nomem, nostack));
+            crate::e9_mark!(b'C');
         }
 
         let mut transferred = 0;
@@ -1258,9 +1258,9 @@ impl XhciController {
                 Ok(e) => e,
                 Err(e) => {
                     unsafe {
-                        core::arch::asm!("out 0xe9, al", in("al") b'X', options(nomem, nostack));
-                        core::arch::asm!("out 0xe9, al", in("al") e.as_bytes()[0], options(nomem, nostack));
-                        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                        crate::e9_mark!(b'X');
+                        crate::e9_mark!(e.as_bytes()[0]);
+                        crate::e9_mark!(b'\n');
                     }
                     return Err(e);
                 }
@@ -1278,9 +1278,9 @@ impl XhciController {
 
             if completion != 1 {
                 unsafe {
-                    core::arch::asm!("out 0xe9, al", in("al") b'E', options(nomem, nostack));
-                    core::arch::asm!("out 0xe9, al", in("al") (b'0' + (completion & 0xF) as u8), options(nomem, nostack));
-                    core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                    crate::e9_mark!(b'E');
+                    crate::e9_mark!((b'0' + (completion & 0xF) as u8));
+                    crate::e9_mark!(b'\n');
                 }
                 log::warn!(
                     "[xHCI] ctrl_transfer event error: type={} completion={}",
@@ -1340,7 +1340,10 @@ pub fn init() {
         pci_dev.enable_bus_master();
 
         // Try MSI/MSI-X first; fall back to INTx line.
-        let (irq, vector) = crate::arch::x86_64::msi::probe_and_enable(&pci_dev, true);
+        #[cfg(target_arch = "x86_64")]
+        let (_irq, vector) = crate::arch::x86_64::msi::probe_and_enable(&pci_dev, true);
+        #[cfg(target_arch = "riscv64")]
+        let vector = 0;
 
         match unsafe { XhciController::new(pci_dev) } {
             Ok(controller) => {
@@ -1349,6 +1352,7 @@ pub fn init() {
                 XHCI_CONTROLLERS
                     .lock()
                     .push(Arc::new(Mutex::new(controller)));
+                #[cfg(target_arch = "x86_64")]
                 crate::arch::x86_64::idt::register_xhci_irq_vector(vector);
             }
             Err(e) => {
@@ -1374,7 +1378,7 @@ pub fn is_available() -> bool {
 
 pub fn handle_interrupt() {
     unsafe {
-        core::arch::asm!("out 0xe9, al", in("al") b'i', options(nomem, nostack));
+        crate::e9_mark!(b'i');
     }
     if let Some(controller_arc) = get_controller(0) {
         let mut controller = controller_arc.lock();

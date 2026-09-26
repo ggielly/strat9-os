@@ -940,7 +940,10 @@ impl AhciController {
         pci_dev.enable_memory_space();
 
         // Try MSI/MSI-X first; fall back to INTx line.
+        #[cfg(target_arch = "x86_64")]
         let (_irq_line, irq_vector) = crate::arch::x86_64::msi::probe_and_enable(&pci_dev, true);
+        #[cfg(target_arch = "riscv64")]
+        let irq_vector = 0;
 
         // BAR5 = ABAR (AHCI Base Memory Register)
         let abar_phys = pci_dev.read_bar_raw(5).ok_or(AhciError::BadAbar)?;
@@ -1223,6 +1226,7 @@ pub fn init() {
 
             // Register IRQ handler in the IDT now that the controller is live.
             let vector = AHCI_IRQ_LINE.load(Ordering::Relaxed);
+            #[cfg(target_arch = "x86_64")]
             crate::arch::x86_64::idt::register_ahci_irq(vector);
         }
         Err(AhciError::NoController) => {

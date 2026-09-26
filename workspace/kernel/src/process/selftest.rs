@@ -180,6 +180,12 @@ extern "C" fn selftest_orchestrator() -> ! {
     crate::process::errno_test::create_errno_test_task();
     let _ = wait_task_exit("errno-test", 3_000);
 
+    //  Pure logic behind the shell tool and utility commands: the argument
+    //  parsers, the grep line splitter, the NTP reply validator, the
+    //  environment grammar and the shared output formatters.
+    crate::shell::commands::util::create_shell_util_test_task();
+    let _ = wait_task_exit("shell-util-test", 3_000);
+
     let strate_ok = run_strate_lifecycle_e2e();
     if strate_ok {
         crate::serial_println!("[selftest][strate] PASS");

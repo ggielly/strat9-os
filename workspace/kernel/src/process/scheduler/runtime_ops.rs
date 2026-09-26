@@ -121,8 +121,8 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     crate::e9_println!("BD-ENTER cpu={}", cpu_index);
     // TEMP DEBUG raw pulse: BD-ENTER via raw marks too (formatted E9 may be silent).
     unsafe {
-        core::arch::asm!("out 0xe9, al", in("al") b'B', options(nomem, nostack));
-        core::arch::asm!("out 0xe9, al", in("al") b'D', options(nomem, nostack));
+        crate::e9_mark!(b'B');
+        crate::e9_mark!(b'D');
     }
     // Disable interrupts for the entire critical section.
     //
@@ -157,11 +157,11 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
                 0
             };
             unsafe {
-                core::arch::asm!("out 0xe9, al", in("al") b'M', options(nomem, nostack));
+                crate::e9_mark!(b'M');
             }
             let mut local = LOCAL_SCHEDULERS[idx].lock();
             unsafe {
-                core::arch::asm!("out 0xe9, al", in("al") b'N', options(nomem, nostack));
+                crate::e9_mark!(b'N');
             }
             if let Some(ref mut cpu) = *local {
                 break super::core_impl::pick_next_task_local(cpu, idx);
@@ -184,11 +184,11 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
         core::hint::spin_loop();
     }; // Lock is released here before jumping to first task
     unsafe {
-        core::arch::asm!("out 0xe9, al", in("al") b'R', options(nomem, nostack));
+        crate::e9_mark!(b'R');
     }
     super::task_ops::flush_deferred_silo_cleanups();
     unsafe {
-        core::arch::asm!("out 0xe9, al", in("al") b'r', options(nomem, nostack));
+        crate::e9_mark!(b'r');
     }
 
     // NOTE: serial_force_println! (formatted format_args!) hangs in this kernel build
@@ -198,10 +198,10 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     {
         let stack_top =
             first_task.kernel_stack.virt_base.as_u64() + first_task.kernel_stack.size as u64;
-        crate::arch::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
+        crate::arch::tss::set_kernel_stack(crate::arch::xshim::VirtAddr::new(stack_top));
         crate::arch::syscall::set_kernel_rsp(stack_top);
         unsafe {
-            core::arch::asm!("out 0xe9, al", in("al") b'S', options(nomem, nostack));
+            crate::e9_mark!(b'S');
         }
         crate::serial_force_println!(
             "[trace][sched] schedule_on_cpu stacks set cpu={} rsp0={:#x}",
@@ -213,7 +213,7 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     // Switch to the first task's address space (no-op for kernel tasks)
     // SAFETY: The first task's address space is valid (kernel AS at boot).
     unsafe {
-        core::arch::asm!("out 0xe9, al", in("al") b'U', options(nomem, nostack));
+        crate::e9_mark!(b'U');
     }
     if let Err(e) = validate_task_context(&first_task) {
         panic!(
@@ -230,7 +230,7 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
         first_task.process.address_space_arc().switch_to();
     }
     unsafe {
-        core::arch::asm!("out 0xe9, al", in("al") b'K', options(nomem, nostack));
+        crate::e9_mark!(b'K');
     }
 
     // Jump to the first task (never returns)
@@ -238,7 +238,7 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     // Interrupts are disabled; the trampoline's `sti` re-enables them.
 
     unsafe {
-        core::arch::asm!("out 0xe9, al", in("al") b'L', options(nomem, nostack));
+        crate::e9_mark!(b'L');
         // Pass the stack frame pointer (saved_rsp points TO the frame, not the context struct)
         let frame_ptr = (*first_task.context.get()).saved_rsp as *const u64;
         crate::process::task::do_restore_first_task(
@@ -271,7 +271,8 @@ pub fn finish_switch() {
             }
             spins = spins.saturating_add(1);
             if spins % 1_000_000 == 0 {
-                unsafe { core::arch::asm!("mov al, 'W'; out 0xe9, al", out("al") _) };
+                #[cfg(target_arch = "x86_64")]
+                crate::e9_mark!(b'W');
             }
             core::hint::spin_loop();
         };
@@ -618,7 +619,8 @@ pub fn maybe_preempt_from_interrupt(
         let current = match cpu.current_task.as_ref() {
             Some(t) => t.clone(),
             None => {
-                unsafe { core::arch::asm!("mov al, 'X'; out 0xe9, al", out("al") _) };
+                #[cfg(target_arch = "x86_64")]
+                crate::e9_mark!(b'X');
                 return None;
             }
         };
@@ -646,7 +648,7 @@ pub fn maybe_preempt_from_interrupt(
                 // in a tight IRQs-off loop, starving the timer). Leave first-launch
                 // tasks to the legacy ret-based scheduler path; only tasks with a
                 // REAL iret frame (previously preempted from Ring 3) switch here.
-                unsafe { core::arch::asm!("mov al, 'S'; out 0xe9, al", out("al") _) };
+                crate::e9_mark!(b'S');
                 cpu.need_resched = false;
                 _task_to_drop = cpu.task_to_drop.take();
                 if let Some(prev) = cpu.task_to_requeue.take() {
@@ -668,7 +670,8 @@ pub fn maybe_preempt_from_interrupt(
             }
             let fits = interrupt_frame_fits(&next, next_rsp);
             if next_rsp == 0 || !fits {
-                unsafe { core::arch::asm!("mov al, 'A'; out 0xe9, al", out("al") _) };
+                #[cfg(target_arch = "x86_64")]
+                crate::e9_mark!(b'A');
                 let is_idle_fallback = Arc::ptr_eq(&next, &cpu.idle_task);
                 _task_to_drop = cpu.task_to_drop.take();
 
@@ -703,7 +706,7 @@ pub fn maybe_preempt_from_interrupt(
                 let stack_top =
                     next.kernel_stack.virt_base.as_u64() + next.kernel_stack.size as u64;
 
-                crate::arch::tss::set_kernel_stack(x86_64::VirtAddr::new(stack_top));
+                crate::arch::tss::set_kernel_stack(crate::arch::xshim::VirtAddr::new(stack_top));
                 crate::arch::syscall::set_kernel_rsp(stack_top);
 
                 let old_fpu = current.fpu_state.get() as *mut u8;
@@ -712,13 +715,13 @@ pub fn maybe_preempt_from_interrupt(
                 // TEMP DEBUG: pulse the picked task id + stack top.
                 unsafe {
                     let hex = b"0123456789abcdef";
-                    core::arch::asm!("out 0xe9, al", in("al") b'@', options(nomem, nostack));
+                    crate::e9_mark!(b'@');
                     let tid = next.id.as_u64();
                     for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
                         let nib = hex[((tid >> sh) & 0xF) as usize];
-                        core::arch::asm!("out 0xe9, al", in("al") nib, options(nomem, nostack));
+                        crate::e9_mark!(nib);
                     }
-                    core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                    crate::e9_mark!(b'\n');
                 }
                 Some(crate::arch::idt::InterruptReturnDecision {
                     next_rsp,

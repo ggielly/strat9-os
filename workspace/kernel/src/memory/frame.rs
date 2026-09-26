@@ -744,7 +744,7 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
     // DEBUG: phys/virt of the array (LSB-first nibbles after 'P').
     unsafe {
         let mut shift = 0i32;
-        core::arch::asm!("out 0xe9, al", in("al") b'P', options(nomem, nostack));
+        crate::e9_mark!(b'P');
         while shift < 64 {
             let nib = ((phys >> shift) & 0xF) as u8;
             let c = if nib < 10 {
@@ -752,10 +752,10 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
             } else {
                 b'a' + nib - 10
             };
-            core::arch::asm!("out 0xe9, al", in("al") c, options(nomem, nostack));
+            crate::e9_mark!(c);
             shift += 4;
         }
-        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+        crate::e9_mark!(b'\n');
     }
     // Zero the array so every slot starts as DEFAULT vtable / empty links.
     // Chunked + E9-progress: a silent hang here (bad backing region, wrong
@@ -775,7 +775,7 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
     // DEBUG: report where the array landed (raw E9, R=addr marker).
     unsafe {
         let mut shift = 0i32;
-        core::arch::asm!("out 0xe9, al", in("al") b'@', options(nomem, nostack));
+        crate::e9_mark!(b'@');
         while shift < 64 {
             let nib = ((virt >> shift) & 0xF) as u8;
             let c = if nib < 10 {
@@ -783,10 +783,10 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
             } else {
                 b'a' + nib - 10
             };
-            core::arch::asm!("out 0xe9, al", in("al") c, options(nomem, nostack));
+            crate::e9_mark!(c);
             shift += 4;
         }
-        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+        crate::e9_mark!(b'\n');
     }
     METADATA_BASE_VIRT.store(virt, Ordering::Release);
     METADATA_FRAME_COUNT.store(frame_count, Ordering::Release);

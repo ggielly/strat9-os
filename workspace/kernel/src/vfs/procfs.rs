@@ -103,6 +103,7 @@ impl ProcScheme {
     }
 
     /// Generate /proc/cpuinfo content from actual CPUID data.
+    #[cfg(target_arch = "x86_64")]
     fn get_cpuinfo(&self) -> String {
         let mut output = String::new();
         let cpu_count = crate::arch::percpu::get_cpu_count();
@@ -139,6 +140,20 @@ impl ProcScheme {
             let _ = writeln!(output, "address sizes\t: 40 bits physical, 48 bits virtual");
             let _ = writeln!(output, "power management:\n");
             let _ = writeln!(output, "");
+        }
+
+        output
+    }
+
+    #[cfg(target_arch = "riscv64")]
+    fn get_cpuinfo(&self) -> String {
+        let mut output = String::new();
+        let cpu_count = crate::arch::percpu::get_cpu_count();
+
+        for index in 0..cpu_count {
+            let _ = writeln!(output, "processor\t: {}", index);
+            let _ = writeln!(output, "architecture\t: riscv64");
+            let _ = writeln!(output, "isa\t\t: not discovered (DTB support pending)");
         }
 
         output

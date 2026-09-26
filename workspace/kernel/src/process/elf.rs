@@ -645,7 +645,10 @@ fn apply_segment_permissions(
     let (current_cr3, _) = Cr3::read();
     if current_cr3.start_address() == user_as.cr3() {
         let end = page_start + (page_count as u64) * 4096;
-        crate::arch::tlb::local_range(VirtAddr::new(page_start), VirtAddr::new(end));
+        crate::arch::tlb::local_range(
+            crate::arch::xshim::VirtAddr::new(page_start),
+            crate::arch::xshim::VirtAddr::new(end),
+        );
     }
 
     Ok(())
@@ -2238,7 +2241,7 @@ fn load_elf_task_inner(
         interrupt_rsp: core::sync::atomic::AtomicU64::new(0),
         kernel_stack,
         user_stack: Some(crate::process::task::UserStack {
-            virt_base: x86_64::VirtAddr::new(stack_base),
+            virt_base: crate::arch::xshim::VirtAddr::new(stack_base),
             size: stack_pages * 4096,
         }),
         stack_canary: core::sync::atomic::AtomicU64::new(stack_canary),

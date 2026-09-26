@@ -723,26 +723,26 @@ pub(super) fn pick_next_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> 
 
     // Step 2: pick from local class_rqs.
     unsafe {
-        core::arch::asm!("out 0xe9, al", in("al") b'O', options(nomem, nostack));
+        crate::e9_mark!(b'O');
     }
     let next = if let Some(next) = cpu.class_rqs.pick_next(&cpu.class_table) {
         unsafe {
-            core::arch::asm!("out 0xe9, al", in("al") b'J', options(nomem, nostack));
+            crate::e9_mark!(b'J');
         }
         next
     } else {
         // Step 3: local queues empty — try work-stealing before idle.
         unsafe {
-            core::arch::asm!("out 0xe9, al", in("al") b'S', options(nomem, nostack));
+            crate::e9_mark!(b'S');
         }
         if let Some(stolen) = steal_task_local(cpu, cpu_index) {
             unsafe {
-                core::arch::asm!("out 0xe9, al", in("al") b's', options(nomem, nostack));
+                crate::e9_mark!(b's');
             }
             stolen
         } else {
             unsafe {
-                core::arch::asm!("out 0xe9, al", in("al") b'j', options(nomem, nostack));
+                crate::e9_mark!(b'j');
             }
             // Step 4: idle fallback.
             cpu.idle_task.clone()

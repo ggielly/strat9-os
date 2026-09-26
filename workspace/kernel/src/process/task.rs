@@ -397,7 +397,7 @@ impl Task {
             return; // no canary (kernel tasks, threads, ...)
         }
         let as_ref = self.process.address_space_arc();
-        let Some(phys) = as_ref.translate(x86_64::VirtAddr::new(addr)) else {
+        let Some(phys) = as_ref.translate(crate::arch::xshim::VirtAddr::new(addr)) else {
             log::warn!(
                 "[security] tid={} stack canary slot {:#x} unmapped at exit",
                 self.id.as_u64(),
@@ -570,14 +570,14 @@ impl Task {
         // TEMP DEBUG: pulse the seeded frame's r12 (entry) for tracing.
         unsafe {
             let hex = b"0123456789abcdef";
-            core::arch::asm!("out 0xe9, al", in("al") b'@', options(nomem, nostack));
-            core::arch::asm!("out 0xe9, al", in("al") b'E', options(nomem, nostack));
+            crate::e9_mark!(b'@');
+            crate::e9_mark!(b'E');
             let v = frame.r12;
             for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
                 let nib = hex[((v >> sh) & 0xF) as usize];
-                core::arch::asm!("out 0xe9, al", in("al") nib, options(nomem, nostack));
+                crate::e9_mark!(nib);
             }
-            core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+            crate::e9_mark!(b'\n');
         }
         self.seed_interrupt_frame(frame);
     }

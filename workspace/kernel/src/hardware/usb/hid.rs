@@ -146,7 +146,12 @@ impl HidKeyboard {
 
     pub fn drain_into_unified(&mut self) {
         for ev in self.event_queue.drain(..) {
+            #[cfg(target_arch = "x86_64")]
             keyboard::inject_hid_scancode(ev.keycode, ev.pressed);
+            #[cfg(not(target_arch = "x86_64"))]
+            if ev.pressed {
+                keyboard::inject_hid_scancode(ev.keycode);
+            }
         }
     }
 }
@@ -242,7 +247,10 @@ impl HidMouse {
             let left = ev.buttons & 0x01 != 0;
             let right = ev.buttons & 0x02 != 0;
             let middle = ev.buttons & 0x04 != 0;
+            #[cfg(target_arch = "x86_64")]
             mouse::push_event_from_hid(ev.dx as i16, ev.dy as i16, ev.dz, left, right, middle);
+            #[cfg(not(target_arch = "x86_64"))]
+            mouse::push_event_from_hid(ev.dx as i32, ev.dy as i32, ev.buttons);
         }
     }
 }
@@ -264,10 +272,10 @@ pub fn init() {
 pub fn enumerate_device(port: usize, slot_id: u8, dev_desc: &[u8; 18]) {
     let dev_class = dev_desc[4];
     unsafe {
-        core::arch::asm!("out 0xe9, al", in("al") b'h', options(nomem, nostack));
-        core::arch::asm!("out 0xe9, al", in("al") dev_class, options(nomem, nostack));
-        core::arch::asm!("out 0xe9, al", in("al") dev_desc[6], options(nomem, nostack));
-        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+        crate::e9_mark!(b'h');
+        crate::e9_mark!(dev_class);
+        crate::e9_mark!(dev_desc[6]);
+        crate::e9_mark!(b'\n');
     }
 
     if dev_class == 0x03 {
@@ -330,10 +338,10 @@ pub fn enumerate_device(port: usize, slot_id: u8, dev_desc: &[u8; 18]) {
                                     let ep_num = ep_addr & 0x0F;
                                     let ep_type = 7;
                                     unsafe {
-                                        core::arch::asm!("out 0xe9, al", in("al") b'K', options(nomem, nostack));
-                                        core::arch::asm!("out 0xe9, al", in("al") b'b', options(nomem, nostack));
-                                        core::arch::asm!("out 0xe9, al", in("al") b'0'+b_interface_protocol, options(nomem, nostack));
-                                        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                                        crate::e9_mark!(b'K');
+                                        crate::e9_mark!(b'b');
+                                        crate::e9_mark!(b'0'+b_interface_protocol);
+                                        crate::e9_mark!(b'\n');
                                     }
 
                                     let setup_ok = controller
@@ -347,18 +355,18 @@ pub fn enumerate_device(port: usize, slot_id: u8, dev_desc: &[u8; 18]) {
                                         )
                                         .is_ok();
                                     unsafe {
-                                        core::arch::asm!("out 0xe9, al", in("al") b'K', options(nomem, nostack));
-                                        core::arch::asm!("out 0xe9, al", in("al") if setup_ok { b's' } else { b'S' }, options(nomem, nostack));
-                                        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                                        crate::e9_mark!(b'K');
+                                        crate::e9_mark!(if setup_ok { b's' } else { b'S' });
+                                        crate::e9_mark!(b'\n');
                                     }
 
                                     let buf_size = ep_max_packet as usize;
                                     let alloc_res = controller
                                         .alloc_interrupt_buffer(slot_id, ep_num, buf_size);
                                     unsafe {
-                                        core::arch::asm!("out 0xe9, al", in("al") b'K', options(nomem, nostack));
-                                        core::arch::asm!("out 0xe9, al", in("al") if alloc_res.is_ok() { b'a' } else { b'A' }, options(nomem, nostack));
-                                        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                                        crate::e9_mark!(b'K');
+                                        crate::e9_mark!(if alloc_res.is_ok() { b'a' } else { b'A' });
+                                        crate::e9_mark!(b'\n');
                                     }
                                     if let Ok((_buf_virt, _buf_phys)) = alloc_res {
                                         if b_interface_protocol == 1 {
@@ -381,8 +389,8 @@ pub fn enumerate_device(port: usize, slot_id: u8, dev_desc: &[u8; 18]) {
                                             );
                                             KEYBOARDS.lock().push(Arc::new(Mutex::new(keyboard)));
                                             unsafe {
-                                                core::arch::asm!("out 0xe9, al", in("al") b'B', options(nomem, nostack));
-                                                core::arch::asm!("out 0xe9, al", in("al") b'!', options(nomem, nostack));
+                                                crate::e9_mark!(b'B');
+                                                crate::e9_mark!(b'!');
                                             }
 
                                             controller
@@ -408,8 +416,8 @@ pub fn enumerate_device(port: usize, slot_id: u8, dev_desc: &[u8; 18]) {
                                             );
                                             MICE.lock().push(Arc::new(Mutex::new(mouse_dev)));
                                             unsafe {
-                                                core::arch::asm!("out 0xe9, al", in("al") b'M', options(nomem, nostack));
-                                                core::arch::asm!("out 0xe9, al", in("al") b'!', options(nomem, nostack));
+                                                crate::e9_mark!(b'M');
+                                                crate::e9_mark!(b'!');
                                             }
 
                                             controller

@@ -6,7 +6,16 @@ use core::fmt;
 #[macro_export]
 macro_rules! e9_mark {
     ($byte:expr) => {
-        unsafe { core::arch::asm!("out 0xe9, al", in("al") $byte, options(nomem, nostack)); }
+        {
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                core::arch::asm!("out 0xe9, al", in("al") $byte, options(nomem, nostack));
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                let _ = $byte;
+            }
+        }
     };
 }
 

@@ -301,14 +301,14 @@ fn log_boot_module_magics(_stage: &str) {}
 
 /// Main kernel initialization - called by bootloader entry points
 pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
-    // Earliest possible e9 mark : before any COM1 trace that might hang.
-    crate::e9_mark!(b'K');
+    #[cfg(target_arch = "x86_64")]
+    {
+        // Earliest possible e9 mark : before any COM1 trace that might hang.
+        crate::e9_mark!(b'K');
 
-    // Raw COM1 traces hang when SERIAL_ENABLED=false (UART not initialized).
-    // Gate them behind SERIAL_ENABLED so we don't spin on a dead port.
-    if crate::debug_cfg::SERIAL_ENABLED {
-        // Raw COM1 trace - works before any subsystem is initialized.
-        {
+        // Raw COM1 traces hang when SERIAL_ENABLED=false (UART not initialized).
+        // Gate them behind SERIAL_ENABLED so we don't spin on a dead port.
+        if crate::debug_cfg::SERIAL_ENABLED {
             let thr: u16 = 0x3F8;
             let lsr: u16 = 0x3F8 + 5;
             let msg = b"[km] kernel_main enter\r\n";
@@ -334,6 +334,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     );
 
     // Trace: raw COM1 after debug_assert
+    #[cfg(target_arch = "x86_64")]
     if crate::debug_cfg::SERIAL_ENABLED {
         let thr: u16 = 0x3F8;
         let lsr: u16 = 0x3F8 + 5;
@@ -356,6 +357,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     arch::x86_64::boot_timestamp::init();
 
     // Trace: raw COM1 after boot_timestamp
+    #[cfg(target_arch = "x86_64")]
     if crate::debug_cfg::SERIAL_ENABLED {
         let thr: u16 = 0x3F8;
         let lsr: u16 = 0x3F8 + 5;
@@ -377,6 +379,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     //crate::e9_println!("B0 kernel_main");
 
     // Trace before init_serial
+    #[cfg(target_arch = "x86_64")]
     if crate::debug_cfg::SERIAL_ENABLED {
         let thr: u16 = 0x3F8;
         let lsr: u16 = 0x3F8 + 5;
@@ -426,6 +429,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     //crate::e9_println!("B3 milestone");
 
     // Trace after IDT
+    #[cfg(target_arch = "x86_64")]
     if crate::debug_cfg::SERIAL_ENABLED {
         let thr: u16 = 0x3F8;
         let lsr: u16 = 0x3F8 + 5;
@@ -633,10 +637,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             let base = r.base;
             let size = r.size;
             unsafe {
-                core::arch::asm!(
-                    "out 0xe9, al",
-                    in("al") b'R', options(nomem, nostack)
-                );
+                crate::e9_mark!(b'R');
                 // base nibbles (low 5 bytes enough)
                 let mut shift = 0i32;
                 while shift < 40 {
@@ -646,10 +647,10 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                     } else {
                         b'a' + nib - 10
                     };
-                    core::arch::asm!("out 0xe9, al", in("al") c, options(nomem, nostack));
+                    crate::e9_mark!(c);
                     shift += 4;
                 }
-                core::arch::asm!("out 0xe9, al", in("al") b'/', options(nomem, nostack));
+                crate::e9_mark!(b'/');
                 shift = 0;
                 while shift < 40 {
                     let nib = ((size >> shift) & 0xF) as u8;
@@ -658,12 +659,12 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                     } else {
                         b'a' + nib - 10
                     };
-                    core::arch::asm!("out 0xe9, al", in("al") c, options(nomem, nostack));
+                    crate::e9_mark!(c);
                     shift += 4;
                 }
-                core::arch::asm!("out 0xe9, al", in("al") b'/', options(nomem, nostack));
-                core::arch::asm!("out 0xe9, al", in("al") k, options(nomem, nostack));
-                core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                crate::e9_mark!(b'/');
+                crate::e9_mark!(k);
+                crate::e9_mark!(b'\n');
             }
             i += 1;
         }
@@ -1246,11 +1247,11 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             for module in boot_modules {
                 let raw = module.name_str();
                 unsafe {
-                    core::arch::asm!("out 0xe9, al", in("al") b'N', options(nomem, nostack));
+                    crate::e9_mark!(b'N');
                     for b in raw.as_bytes() {
-                        core::arch::asm!("out 0xe9, al", in("al") *b, options(nomem, nostack));
+                        crate::e9_mark!(*b);
                     }
-                    core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                    crate::e9_mark!(b'\n');
                 }
                 let name = raw;
                 if name == "init" || name == "strate-init" {
@@ -1266,9 +1267,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                             && elf_data[1] == b'E'
                             && elf_data[2] == b'L'
                             && elf_data[3] == b'F';
-                        core::arch::asm!("out 0xe9, al", in("al") b'!', options(nomem, nostack));
-                        core::arch::asm!("out 0xe9, al", in("al") if magic_ok { b'Y' } else { b'N' }, options(nomem, nostack));
-                        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                        crate::e9_mark!(b'!');
+                        crate::e9_mark!(if magic_ok { b'Y' } else { b'N' });
+                        crate::e9_mark!(b'\n');
                     }
                     let init_caps = [crate::silo::create_silo_admin_capability()];
                     match process::elf::load_and_run_elf_with_caps(elf_data, "init", &init_caps) {
@@ -1283,9 +1284,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                             // E9: report failure code letter.
                             let code = e.as_bytes().first().copied().unwrap_or(b'?');
                             unsafe {
-                                core::arch::asm!("out 0xe9, al", in("al") b'X', options(nomem, nostack));
-                                core::arch::asm!("out 0xe9, al", in("al") code, options(nomem, nostack));
-                                core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+                                crate::e9_mark!(b'X');
+                                crate::e9_mark!(code);
+                                crate::e9_mark!(b'\n');
                             }
                             serial_println!("[init] Failed to load init ELF: {}", e);
                         }

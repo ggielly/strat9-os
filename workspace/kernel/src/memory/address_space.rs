@@ -179,6 +179,31 @@ pub struct AddressSpace {
 unsafe impl Send for AddressSpace {}
 unsafe impl Sync for AddressSpace {}
 
+#[cfg(target_arch = "riscv64")]
+type KernelPageTableEntry = crate::x86_crate_shim::structures::paging::PageTableEntry;
+#[cfg(target_arch = "x86_64")]
+type KernelPageTableEntry = crate::x86_crate_shim::structures::paging::page_table::PageTableEntry;
+
+#[cfg(target_arch = "riscv64")]
+fn translate_result(mapper: &OffsetPageTable<'_>, vaddr: VirtAddr) -> TranslateResult {
+    mapper.translate(vaddr).unwrap_or(TranslateResult::NotMapped)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn translate_result(mapper: &OffsetPageTable<'_>, vaddr: VirtAddr) -> TranslateResult {
+    mapper.translate(vaddr)
+}
+
+#[cfg(target_arch = "riscv64")]
+fn page_table_entry_frame(entry: &KernelPageTableEntry) -> Result<X86PhysFrame<Size4KiB>, ()> {
+    Ok(entry.frame())
+}
+
+#[cfg(target_arch = "x86_64")]
+fn page_table_entry_frame(entry: &KernelPageTableEntry) -> Result<X86PhysFrame<Size4KiB>, ()> {
+    entry.frame().map_err(|_| ())
+}
+
 impl AddressSpace {
     /// Create the kernel address space by wrapping the current (boot) CR3.
     ///
@@ -1683,7 +1708,7 @@ impl AddressSpace {
     pub fn translate_to_handle(&self, vaddr: VirtAddr) -> Option<(BlockHandle, PageTableFlags)> {
         // SAFETY: Read-only access to the page tables.
         let mapper = unsafe { self.mapper() };
-        let translated = mapper.translate(vaddr);
+        let translated = translate_result(&mapper, vaddr);
         match translated {
             TranslateResult::Mapped { frame, flags, .. } => {
                 Some((resolve_handle(frame.start_address()), flags))
@@ -1714,8 +1739,8 @@ impl AddressSpace {
         // SAFETY: cr3_phys points to a valid, 4KiB-aligned PML4 table with
         // the kernel half correctly populated.
         unsafe {
-            let frame =
-                X86PhysFrame::from_start_address(self.cr3_phys).expect("CR3 address not aligned");
+            assert!(self.cr3_phys.is_aligned(4096u64), "CR3 address not aligned");
+            let frame = X86PhysFrame::<Size4KiB>::containing_address(self.cr3_phys);
             crate::e9_println!("C");
             Cr3::write(frame, Cr3Flags::empty());
             crate::e9_println!("c");
@@ -2074,16 +2099,13 @@ impl AddressSpace {
                 }
             }
             if let Some((range_start, range_end)) = tlb_flush_range {
-                crate::arch::tlb::shootdown_range(
-                    VirtAddr::new(range_start),
-                    VirtAddr::new(range_end),
-                );
+                crate::memory::shootdown_range(range_start, range_end);
             }
             return Err(e);
         }
 
         if let Some((range_start, range_end)) = tlb_flush_range {
-            crate::arch::tlb::shootdown_range(VirtAddr::new(range_start), VirtAddr::new(range_end));
+            crate::memory::shootdown_range(range_start, range_end);
         }
         Ok(child)
     }
@@ -2101,7 +2123,7 @@ impl AddressSpace {
             if !l4[i].flags().contains(PageTableFlags::PRESENT) {
                 continue;
             }
-            let l3_frame = match l4[i].frame() {
+            let l3_frame = match page_table_entry_frame(&l4[i]) {
                 Ok(f) => f,
                 Err(_) => {
                     l4[i].set_unused();
@@ -2198,7 +2220,7 @@ fn free_l2_table(frame: X86PhysFrame<Size4KiB>) {
             entry.set_unused();
             continue;
         }
-        if let Ok(l1_frame) = entry.frame() {
+        if let Ok(l1_frame) = page_table_entry_frame(entry) {
             free_l1_table(l1_frame);
         }
         entry.set_unused();
@@ -2219,7 +2241,7 @@ fn free_l3_table(frame: X86PhysFrame<Size4KiB>) {
             entry.set_unused();
             continue;
         }
-        if let Ok(l2_frame) = entry.frame() {
+        if let Ok(l2_frame) = page_table_entry_frame(entry) {
             free_l2_table(l2_frame);
         }
         entry.set_unused();

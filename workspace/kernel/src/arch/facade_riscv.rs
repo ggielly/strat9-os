@@ -97,9 +97,13 @@ pub mod percpu {
 
 pub mod tlb {
     pub fn init() {}
-    pub fn local_page(_vaddr: u64) {}
-    pub fn local_range(_start: u64, _end: u64) {}
-    pub fn shootdown_range(_start: u64, _end: u64) {}
+    pub fn local_page(_vaddr: crate::arch::xshim::VirtAddr) {}
+    pub fn local_range(_start: crate::arch::xshim::VirtAddr, _end: crate::arch::xshim::VirtAddr) {}
+    pub fn shootdown_range(
+        _start: crate::arch::xshim::VirtAddr,
+        _end: crate::arch::xshim::VirtAddr,
+    ) {
+    }
     pub fn shootdown_all() {}
 }
 
@@ -155,8 +159,8 @@ pub mod gdt_selectors {
 
 pub mod tss {
     pub fn init() {}
-    pub fn set_kernel_stack(_top: u64) {}
-    pub fn set_kernel_stack_for(_cpu: usize, _top: u64) {}
+    pub fn set_kernel_stack(_top: crate::arch::xshim::VirtAddr) {}
+    pub fn set_kernel_stack_for(_cpu: usize, _top: crate::arch::xshim::VirtAddr) {}
     pub fn kernel_stack_for(_cpu: usize) -> Option<crate::ostd::mm::VirtAddr> {
         None
     }
@@ -226,7 +230,7 @@ pub mod mouse {
     pub fn read_event() -> Option<MouseEvent> {
         None
     }
-    pub fn mouse_pos() -> (usize, usize) {
+    pub fn mouse_pos() -> (i32, i32) {
         (0, 0)
     }
     pub fn update_mouse_cursor(_x: usize, _y: usize) {}
@@ -268,6 +272,11 @@ pub mod pci_full {
         pub bus: u8,
         pub device: u8,
         pub function: u8,
+    }
+    impl core::fmt::Debug for PciAddress {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "{}.{}.{}", self.bus, self.device, self.function)
+        }
     }
     impl PciAddress {
         pub const fn new(bus: u8, device: u8, function: u8) -> Self {
@@ -382,6 +391,7 @@ pub mod pci_full {
         pub device_id: Option<u16>,
         pub class_code: Option<u8>,
         pub subclass: Option<u8>,
+        pub prog_if: Option<u8>,
     }
     impl ProbeCriteria {
         pub fn new() -> Self {
@@ -482,7 +492,7 @@ pub mod io2 {
 }
 
 pub mod ring3_diag {
-    pub fn validate_ring3_state(_rip: u64, _rsp: u64, _cs: u64) {}
+    pub fn validate_ring3_state(_rip: u64, _rsp: u64, _cs: u16, _ss: u16) {}
 }
 
 pub mod tss_extra {
@@ -520,13 +530,15 @@ pub mod gdt {
     pub const fn user_data_selector() -> SegmentSelector {
         SegmentSelector(0)
     }
+    pub fn init() {}
 }
 
 pub mod idt {
     pub use crate::arch::riscv64::idt::*;
-    pub enum InterruptReturnDecision {
-        Return,
-        Reschedule,
+    pub struct InterruptReturnDecision {
+        pub next_rsp: u64,
+        pub old_fpu: *mut u8,
+        pub new_fpu: *const u8,
     }
 }
 
@@ -550,6 +562,7 @@ pub mod ioapic {
     ) {
     }
     pub fn store_madt_overrides(_ovr: &[Option<crate::acpi::madt::InterruptSourceOverride>; 16]) {}
+    pub fn route_nic_irq(_irq: u8, _vector: u8) {}
 }
 
 pub mod timer {

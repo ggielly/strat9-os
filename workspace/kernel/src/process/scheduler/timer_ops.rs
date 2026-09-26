@@ -260,3 +260,16 @@ pub fn get_all_tasks() -> Option<alloc::vec::Vec<Arc<Task>>> {
         None
     }
 }
+
+/// Return the number of registered tasks, without cloning the task list.
+///
+/// This is intended for lightweight shell and status reporting. It blocks
+/// until the registry lock is available, matching the scheduler's other
+/// cold-path queries.
+pub fn task_count() -> usize {
+    let scheduler = GLOBAL_SCHED_STATE.lock();
+    scheduler
+        .as_ref()
+        .map(|sched| sched.all_tasks.len())
+        .unwrap_or(0)
+}

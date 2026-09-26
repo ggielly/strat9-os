@@ -50,7 +50,7 @@ pub struct ForkResult {
 fn local_invlpg(vaddr: u64) {
     // Local TLB invalidation is sufficient here: this kernel currently runs
     // one task per user address space (no shared user CR3 across CPUs).
-    crate::arch::tlb::local_page(crate::arch::xshim::VirtAddr::new(vaddr));
+    crate::memory::invalidate_local_page(vaddr);
 }
 
 #[repr(C)]
@@ -409,7 +409,13 @@ pub fn handle_cow_fault(virt_addr: u64, address_space: &AddressSpace) -> Result<
     let mut mapper = unsafe { address_space.mapper() };
 
     // Check if page is mapped and has COW flag.
-    let (phys_frame_addr, flags) = match mapper.translate(VirtAddr::new(page_start)) {
+    #[cfg(target_arch = "riscv64")]
+    let translated = mapper
+        .translate(VirtAddr::new(page_start))
+        .unwrap_or(TranslateResult::NotMapped);
+    #[cfg(target_arch = "x86_64")]
+    let translated = mapper.translate(VirtAddr::new(page_start));
+    let (phys_frame_addr, flags) = match translated {
         TranslateResult::Mapped {
             frame,
             offset: _,

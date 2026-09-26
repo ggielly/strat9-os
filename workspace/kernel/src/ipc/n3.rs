@@ -426,6 +426,8 @@ pub fn free_pcid(pcid: u16) {
 
 /// Check if PCID feature is available on this CPU.
 pub fn pcid_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
     // 1. CPUID check: bit 17 of ECX after CPUID(EAX=1) indicates PCID support.
     let (_, _, ecx, _) = crate::arch::cpuid(1, 0);
     if ecx & (1 << 17) == 0 {
@@ -435,6 +437,11 @@ pub fn pcid_available() -> bool {
     //    Intel SDM Vol.3A §4.10.4: CR4.PCIDE = 1 enables PCID in CR3.
     let cr4 = crate::x86_crate_shim::registers::control::Cr4::read();
     cr4.contains(crate::x86_crate_shim::registers::control::Cr4Flags::PCID)
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        false
+    }
 }
 
 /// Select the N3 tier based on actual PCID capability.

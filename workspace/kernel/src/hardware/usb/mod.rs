@@ -8,6 +8,7 @@
 
 pub mod ehci;
 pub mod hid;
+#[cfg(target_arch = "x86_64")]
 pub mod uhci;
 pub mod xhci;
 
@@ -32,6 +33,7 @@ pub fn init() {
     crate::e9_mark!(b'E');
 
     // UHCI (USB 1.1) - for legacy devices
+    #[cfg(target_arch = "x86_64")]
     uhci::init();
     crate::e9_mark!(b'U');
 
@@ -39,21 +41,31 @@ pub fn init() {
     hid::init();
     crate::e9_mark!(b'H');
 
+    #[cfg(target_arch = "x86_64")]
+    let uhci_available = uhci::is_available();
+    #[cfg(not(target_arch = "x86_64"))]
+    let uhci_available = false;
+
     for (avail, mark) in [
         (xhci::is_available(), b'1'),
         (ehci::is_available(), b'2'),
-        (uhci::is_available(), b'3'),
+        (uhci_available, b'3'),
         (crate::hardware::usb::hid::is_available(), b'4'),
     ] {
         let c = if avail { mark } else { mark - 1 }; // '0'..'3' when absent
         unsafe {
-            core::arch::asm!("out 0xe9, al", in("al") c, options(nomem, nostack));
+            crate::e9_mark!(c);
         }
     }
 
     let total_controllers = (if xhci::is_available() { 1 } else { 0 })
         + (if ehci::is_available() { 1 } else { 0 })
-        + (if uhci::is_available() { 1 } else { 0 });
+        + {
+            #[cfg(target_arch = "x86_64")]
+            { if uhci::is_available() { 1 } else { 0 } }
+            #[cfg(not(target_arch = "x86_64"))]
+            { 0 }
+        };
 
     log::info!("[USB] Total USB controllers: {}", total_controllers);
 }

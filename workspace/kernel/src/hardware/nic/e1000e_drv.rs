@@ -73,14 +73,23 @@ pub fn init() {
             // --- Wire up NIC interrupt: MSI-X => MSI => INTx fallback ---
             // e1000e supports both MSI and MSI-X; prefer MSI-X for future
             // multi-queue support.
+            #[cfg(target_arch = "x86_64")]
             let (irq, vector) = msi::probe_and_enable(&probe.pci_dev, true);
+            #[cfg(target_arch = "riscv64")]
+            let (irq, vector) = (0, 0);
 
+            #[cfg(target_arch = "riscv64")]
+            {
+                let _ = (irq, vector);
+                set_nic_device(dev, 0);
+            }
+            #[cfg(target_arch = "x86_64")]
             if irq == 0 || irq == 0xFF {
                 log::warn!(
                     "[E1000e] {}: no valid IRQ line, running in polling mode",
                     iface
                 );
-            } else {
+            } else if cfg!(target_arch = "x86_64") {
                 let cmd = probe.pci_dev.read_config_u16(pci::config::COMMAND);
                 let msi_active = (cmd & pci::command::INTERRUPT_DISABLE) != 0;
 
