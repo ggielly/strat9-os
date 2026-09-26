@@ -1948,205 +1948,110 @@ fn setup_boot_user_stack(
     Ok(sp)
 }
 
-/// Internal ELF task builder used by all public loading APIs.
-/// `extra_args` are written to the user stack as argv[1..] after the program name.
-fn load_elf_task_inner(
-    elf_data: &[u8],
-    name: &'static str,
-    extra_args: &[&str],
-    seed_caps: &[Capability],
-    stack_pages: usize,
-) -> Result<Arc<Task>, &'static str> {
-    if !(USER_STACK_MIN_PAGES..=USER_STACK_MAX_PAGES).contains(&stack_pages) {
-        return Err("User stack size out of range");
+/// Human-readable name of an ELF `e_type`, for log messages.
+fn elf_type_name(e_type: u16) -> &'static str {
+    if e_type == ET_DYN {
+        "ET_DYN"
+    } else {
+        "ET_EXEC"
     }
-    log::trace!(
-        "[trace][elf] load_elf_task enter name={} size={}",
-        name,
-        elf_data.len()
-    );
-    log::info!("[elf] Loading ELF '{}'...", name);
+}
 
-    // Step 1: Parse and validate ELF header
-    log::trace!("[trace][elf] load_elf_task parse_header begin");
-    let header = match parse_header(elf_data) {
-        Ok(h) => h,
-        Err(e) => {
-            log::error!("[elf] parse_header FAILED for '{}': {}", name, e);
-            return Err(e);
-        }
-    };
-    log::trace!(
-        "[trace][elf] load_elf_task parse_header ok type={}",
-        if header.e_type == ET_DYN {
-            "ET_DYN"
-        } else {
-            "ET_EXEC"
-        }
-    );
-    // Step 2: Create user address space
-    log::trace!("[trace][elf] load_elf_task user_as begin");
-    let user_as = Arc::new(AddressSpace::new_user()?);
-    log::trace!("[trace][elf] load_elf_task user_as done");
-
-    let phdrs: Vec<Elf64Phdr> = try_collect_exact(program_headers(elf_data, &header))?;
-    let interp_path = parse_interp_path(elf_data, &phdrs)?;
-    let (load_bias, entry) = compute_load_bias_and_entry(&user_as, &header, &phdrs)?;
-    let phdr_vaddr = find_relocated_phdr_vaddr(&header, &phdrs, load_bias)?;
-
-    let phnum = header.e_phnum;
-    log::trace!(
-        "[trace][elf] load_elf_task layout entry={:#x} bias={:#x} phdrs={}",
-        entry,
-        load_bias,
-        phnum
-    );
-    log::info!(
-        "[elf] ELF '{}': type={}, entry={:#x}, bias={:#x}, {} program headers",
-        name,
-        if header.e_type == ET_DYN {
-            "ET_DYN"
-        } else {
-            "ET_EXEC"
-        },
-        entry,
-        load_bias,
-        phnum,
-    );
-
-    // Step 3: Load all PT_LOAD segments
-    let mut load_count = 0u32;
+/// Map every `PT_LOAD` segment with a non-zero `p_memsz` into `user_as`.
+/// Returns the number of segments mapped.
+fn load_pt_load_segments(
+    user_as: &AddressSpace,
+    elf_data: &[u8],
+    phdrs: &[Elf64Phdr],
+    load_bias: u64,
+) -> Result<u32, &'static str> {
+    let mut count = 0u32;
     for phdr in phdrs.iter() {
         if phdr.p_type == PT_LOAD && phdr.p_memsz != 0 {
-            load_segment(&user_as, elf_data, phdr, load_bias)?;
-            load_count += 1;
+            load_segment(user_as, elf_data, phdr, load_bias)?;
+            count += 1;
         }
     }
-    if interp_path.is_none() {
-        apply_dynamic_relocations(&user_as, &phdrs, header.e_type, load_bias)?;
-    }
+    Ok(count)
+}
 
-    // PT_GNU_RELRO: mark the RELRO range read-only after relocations.
-    if let Some(relro) = phdrs.iter().find(|ph| ph.p_type == PT_GNU_RELRO) {
-        if relro.p_memsz > 0 {
-            let relro_start = relro.p_vaddr.wrapping_add(load_bias) & !0xFFF;
-            // A partial trailing page may contain writable data outside RELRO.
-            // Protect only through the last complete page, never round up.
-            let relro_end = (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz) & !0xFFF;
-            if relro_end > relro_start && relro_end <= USER_ADDR_MAX {
-                let ro_flags = VmaFlags {
-                    readable: true,
-                    writable: false,
-                    executable: false,
-                    user_accessible: true,
-                };
-                let relro_pages = ((relro_end - relro_start) / 4096) as usize;
-                apply_segment_permissions(&user_as, relro_start, relro_pages, ro_flags)?;
-                log::debug!(
-                    "[elf] PT_GNU_RELRO: {:#x}..{:#x} made read-only",
-                    relro_start,
-                    relro_end
-                );
-            }
-        }
+/// Mark the `PT_GNU_RELRO` range read-only, once relocations are applied.
+fn apply_relro(
+    user_as: &AddressSpace,
+    phdrs: &[Elf64Phdr],
+    load_bias: u64,
+) -> Result<(), &'static str> {
+    let Some(relro) = phdrs.iter().find(|ph| ph.p_type == PT_GNU_RELRO) else {
+        return Ok(());
+    };
+    if relro.p_memsz == 0 {
+        return Ok(());
     }
-
-    log::trace!(
-        "[trace][elf] load_elf_task segments_done count={} has_interp={}",
-        load_count,
-        interp_path.is_some()
+    let relro_start = relro.p_vaddr.wrapping_add(load_bias) & !0xFFF;
+    // A partial trailing page may contain writable data outside RELRO.
+    // Protect only through the last complete page, never round up.
+    let relro_end = (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz) & !0xFFF;
+    if relro_end <= relro_start || relro_end > USER_ADDR_MAX {
+        return Ok(());
+    }
+    let ro_flags = VmaFlags {
+        readable: true,
+        writable: false,
+        executable: false,
+        user_accessible: true,
+    };
+    let relro_pages = ((relro_end - relro_start) / 4096) as usize;
+    apply_segment_permissions(user_as, relro_start, relro_pages, ro_flags)?;
+    log::debug!(
+        "[elf] PT_GNU_RELRO: {:#x}..{:#x} made read-only",
+        relro_start,
+        relro_end
     );
-    log::info!("[elf] Loaded {} PT_LOAD segment(s)", load_count);
+    Ok(())
+}
 
-    let mut runtime_entry = entry;
-    let mut interp_base: Option<u64> = None;
-    if let Some(path) = interp_path {
-        let interp_data = read_elf_from_vfs(path)?;
-        let interp_header = parse_header(&interp_data)?;
-        let interp_phdrs: Vec<Elf64Phdr> =
-            try_collect_exact(program_headers(&interp_data, &interp_header))?;
-        if parse_interp_path(&interp_data, &interp_phdrs)?.is_some() {
-            return Err("Nested PT_INTERP is not supported");
-        }
-        let (interp_bias, interp_entry) =
-            compute_load_bias_and_entry(&user_as, &interp_header, &interp_phdrs)?;
-        let (interp_min_vaddr, _) = compute_load_bounds(&interp_phdrs)?;
-        let mut interp_load_count = 0u32;
-        for phdr in interp_phdrs.iter() {
-            if phdr.p_type == PT_LOAD && phdr.p_memsz != 0 {
-                load_segment(&user_as, &interp_data, phdr, interp_bias)?;
-                interp_load_count += 1;
-            }
-        }
-        apply_dynamic_relocations(&user_as, &interp_phdrs, interp_header.e_type, interp_bias)?;
-        runtime_entry = interp_entry;
-        interp_base = Some(interp_min_vaddr.saturating_add(interp_bias));
-        log::info!(
-            "[elf] PT_INTERP '{}' loaded: {} PT_LOAD, entry={:#x}",
-            path,
-            interp_load_count,
-            runtime_entry
-        );
+/// A `PT_INTERP` dynamic loader that has been mapped into the address space.
+struct InterpreterImage {
+    /// Relocated entry point of the interpreter.
+    entry: u64,
+    /// Relocated load base, published to the image as `AT_BASE`.
+    base: u64,
+    /// Number of `PT_LOAD` segments mapped from the interpreter.
+    load_count: u32,
+}
+
+/// Read, map and relocate the `PT_INTERP` dynamic loader named `path`.
+fn load_interpreter(user_as: &AddressSpace, path: &str) -> Result<InterpreterImage, &'static str> {
+    let interp_data = read_elf_from_vfs(path)?;
+    let interp_header = parse_header(&interp_data)?;
+    let interp_phdrs: Vec<Elf64Phdr> =
+        try_collect_exact(program_headers(&interp_data, &interp_header))?;
+    if parse_interp_path(&interp_data, &interp_phdrs)?.is_some() {
+        return Err("Nested PT_INTERP is not supported");
     }
+    let (interp_bias, interp_entry) =
+        compute_load_bias_and_entry(user_as, &interp_header, &interp_phdrs)?;
+    let (interp_min_vaddr, _) = compute_load_bounds(&interp_phdrs)?;
+    let load_count = load_pt_load_segments(user_as, &interp_data, &interp_phdrs, interp_bias)?;
+    apply_dynamic_relocations(user_as, &interp_phdrs, interp_header.e_type, interp_bias)?;
+    Ok(InterpreterImage {
+        entry: interp_entry,
+        base: interp_min_vaddr.saturating_add(interp_bias),
+        load_count,
+    })
+}
 
-    // TLS setup (Variant II: data at negative offsets from FS:0)
-    let mut user_fs_base_val = 0u64;
-    if let Some(tls) = phdrs.iter().find(|p| p.p_type == PT_TLS) {
-        let tls_memsz = tls.p_memsz;
-        let tls_filesz = tls.p_filesz;
-        let tls_align = core::cmp::max(tls.p_align, 8).next_power_of_two();
-        let aligned_memsz = (tls_memsz + tls_align - 1) & !(tls_align - 1);
-        let total_size = aligned_memsz + 8;
-        let n_tls_pages = ((total_size + 4095) / 4096) as usize;
-        let tls_flags = VmaFlags {
-            readable: true,
-            writable: true,
-            executable: false,
-            user_accessible: true,
-        };
-        let tls_base = user_as
-            .find_free_vma_range(0x7FFF_E000_0000, n_tls_pages, VmaPageSize::Small)
-            .ok_or("No space for TLS block")?;
-        user_as.map_region(
-            tls_base,
-            n_tls_pages,
-            tls_flags,
-            VmaType::Anonymous,
-            VmaPageSize::Small,
-        )?;
-        if tls_filesz > 0 {
-            let src_off = tls.p_offset as usize;
-            let src_end = src_off
-                .checked_add(tls_filesz as usize)
-                .ok_or("PT_TLS offset+filesz overflows")?;
-            if src_end > elf_data.len() {
-                return Err("PT_TLS file data extends past ELF");
-            }
-            write_user_mapped_bytes(&user_as, tls_base, &elf_data[src_off..src_end])?;
-        }
-        let tp = tls_base + aligned_memsz;
-        write_user_u64(&user_as, tp, tp)?;
-        user_fs_base_val = tp;
-    }
-
-    // Step 4: Map user stack
-    // Per-process ASLR (issue #62): on top of the boot-time KASLR offset, each
-    // image draws its own page-aligned jitter so two processes never share
-    // identical stack addresses. The stack size is configurable per process
-    // (issue #64). A single guard page below the stack is left unmapped :
-    // underflow faults instead of silently corrupting neighbours.
-    let stack_base = crate::kaslr::stack_base_with_jitter(crate::kaslr::draw_stack_jitter());
-    let stack_top = crate::kaslr::stack_top_for(stack_base, stack_pages);
-    // PT_GNU_STACK with PF_X means the stack should be executable (legacy ABI).
-    // Without PT_GNU_STACK or without PF_X, the stack is NX (modern default).
-    //
-    // Linux semantics: when several PT_GNU_STACK entries are present (rare,
-    // but happens with hand-crafted or malicious binaries), only the *last*
-    // one counts.  Using `.any(...)` would honour whichever PT_GNU_STACK
-    // appears first and silently let an executable stack slip in even if
-    // a later entry resets PF_X to 0.  Iterate from the back to match the
-    // documented Linux behaviour.
-    let stack_exec = phdrs
+/// Whether the image requests an executable stack via `PT_GNU_STACK`.
+///
+/// Linux semantics: when several `PT_GNU_STACK` entries are present (rare,
+/// but happens with hand-crafted or malicious binaries), only the *last*
+/// one counts.  Using `.any(...)` would honour whichever PT_GNU_STACK
+/// appears first and silently let an executable stack slip in even if
+/// a later entry resets PF_X to 0.  Iterate from the back to match the
+/// documented Linux behaviour.  Without PT_GNU_STACK, or without PF_X,
+/// the stack is NX (modern default).
+fn stack_is_executable(phdrs: &[Elf64Phdr]) -> bool {
+    phdrs
         .iter()
         .rev()
         .find_map(|ph| {
@@ -2156,11 +2061,83 @@ fn load_elf_task_inner(
                 None
             }
         })
-        .unwrap_or(false);
+        .unwrap_or(false)
+}
+
+/// Allocate and populate the Variant II TLS block (data at negative offsets
+/// from `FS:0`).  Returns the thread pointer to install in `FS_BASE`, or 0
+/// when the image carries no `PT_TLS` segment.
+fn setup_tls_block(
+    user_as: &AddressSpace,
+    elf_data: &[u8],
+    phdrs: &[Elf64Phdr],
+) -> Result<u64, &'static str> {
+    let Some(tls) = phdrs.iter().find(|p| p.p_type == PT_TLS) else {
+        return Ok(0);
+    };
+    let tls_align = core::cmp::max(tls.p_align, 8).next_power_of_two();
+    let aligned_memsz = (tls.p_memsz + tls_align - 1) & !(tls_align - 1);
+    let total_size = aligned_memsz + 8;
+    let n_tls_pages = ((total_size + 4095) / 4096) as usize;
+    let tls_flags = VmaFlags {
+        readable: true,
+        writable: true,
+        executable: false,
+        user_accessible: true,
+    };
+    let tls_base = user_as
+        .find_free_vma_range(0x7FFF_E000_0000, n_tls_pages, VmaPageSize::Small)
+        .ok_or("No space for TLS block")?;
+    user_as.map_region(
+        tls_base,
+        n_tls_pages,
+        tls_flags,
+        VmaType::Anonymous,
+        VmaPageSize::Small,
+    )?;
+    if tls.p_filesz > 0 {
+        let src_off = tls.p_offset as usize;
+        let src_end = src_off
+            .checked_add(tls.p_filesz as usize)
+            .ok_or("PT_TLS offset+filesz overflows")?;
+        if src_end > elf_data.len() {
+            return Err("PT_TLS file data extends past ELF");
+        }
+        write_user_mapped_bytes(user_as, tls_base, &elf_data[src_off..src_end])?;
+    }
+    let tp = tls_base + aligned_memsz;
+    write_user_u64(user_as, tp, tp)?;
+    Ok(tp)
+}
+
+/// The mapped user stack together with its canary slot.
+struct UserStackLayout {
+    /// First mapped page of the stack.
+    base: u64,
+    /// One past the last mapped byte of the stack.
+    top: u64,
+    /// Per-process random canary stored in the top word of the stack.
+    canary: u64,
+}
+
+/// Map the user stack, its guard page and its canary.
+///
+/// Per-process ASLR (issue #62): on top of the boot-time KASLR offset, each
+/// image draws its own page-aligned jitter so two processes never share
+/// identical stack addresses.  The stack size is configurable per process
+/// (issue #64).  A single guard page below the stack is left unmapped :
+/// underflow faults instead of silently corrupting neighbours.
+fn map_user_stack(
+    user_as: &AddressSpace,
+    phdrs: &[Elf64Phdr],
+    stack_pages: usize,
+) -> Result<UserStackLayout, &'static str> {
+    let stack_base = crate::kaslr::stack_base_with_jitter(crate::kaslr::draw_stack_jitter());
+    let stack_top = crate::kaslr::stack_top_for(stack_base, stack_pages);
     let stack_flags = VmaFlags {
         readable: true,
         writable: true,
-        executable: stack_exec,
+        executable: stack_is_executable(phdrs),
         user_accessible: true,
     };
     user_as.map_region(
@@ -2190,24 +2167,48 @@ fn load_elf_task_inner(
     crate::e9_mark!(b'4');
     let stack_canary = u64::from_le_bytes(canary_bytes) | 1; // never 0
     crate::e9_mark!(b'5');
-    write_user_u64(&user_as, stack_top - 8, stack_canary)?;
+    write_user_u64(user_as, stack_top - 8, stack_canary)?;
     crate::e9_mark!(b'6');
 
-    let boot_sp = setup_boot_user_stack(
-        &user_as,
-        name,
-        extra_args,
-        phdr_vaddr,
-        header.e_phentsize,
-        header.e_phnum,
-        entry,
-        interp_base,
-        stack_base,
-        stack_top - 8, // data must stay below the canary slot
-    )?;
+    Ok(UserStackLayout {
+        base: stack_base,
+        top: stack_top,
+        canary: stack_canary,
+    })
+}
 
-    // Step 5: Create kernel task : trampoline params are stored inside the task
-    // itself so that concurrent SMP execution of multiple trampolines is safe.
+/// Everything [`build_ring3_task`] needs to assemble the kernel-side task.
+struct Ring3TaskParams<'a> {
+    name: &'static str,
+    user_as: Arc<AddressSpace>,
+    seed_caps: &'a [Capability],
+    stack: UserStackLayout,
+    stack_pages: usize,
+    /// Relocated entry point: the interpreter's when present, else the image's.
+    runtime_entry: u64,
+    /// Initial `RSP` handed to Ring 3, below the canary slot.
+    boot_sp: u64,
+    /// Thread pointer for `FS_BASE`, 0 when the image has no `PT_TLS`.
+    user_fs_base: u64,
+}
+
+/// Build the kernel task that trampolines into Ring 3, seed its capabilities
+/// and stdio, and prime the initial interrupt frame.
+///
+/// Trampoline params are stored inside the task itself so that concurrent SMP
+/// execution of multiple trampolines is safe.
+fn build_ring3_task(params: Ring3TaskParams<'_>) -> Result<Arc<Task>, &'static str> {
+    let Ring3TaskParams {
+        name,
+        user_as,
+        seed_caps,
+        stack,
+        stack_pages,
+        runtime_entry,
+        boot_sp,
+        user_fs_base,
+    } = params;
+
     log::trace!(
         "[trace][elf] load_elf_task kstack_begin size={}",
         Task::DEFAULT_STACK_SIZE
@@ -2241,11 +2242,11 @@ fn load_elf_task_inner(
         interrupt_rsp: core::sync::atomic::AtomicU64::new(0),
         kernel_stack,
         user_stack: Some(crate::process::task::UserStack {
-            virt_base: crate::arch::xshim::VirtAddr::new(stack_base),
+            virt_base: VirtAddr::new(stack.base),
             size: stack_pages * 4096,
         }),
-        stack_canary: core::sync::atomic::AtomicU64::new(stack_canary),
-        stack_canary_addr: core::sync::atomic::AtomicU64::new(stack_top - 8),
+        stack_canary: core::sync::atomic::AtomicU64::new(stack.canary),
+        stack_canary_addr: core::sync::atomic::AtomicU64::new(stack.top - 8),
         kernel_stack_user: SyncUnsafeCell::new(None),
         name,
         process: Arc::new(crate::process::process::Process::new(pid, user_as)),
@@ -2272,7 +2273,7 @@ fn load_elf_task_inner(
         clear_child_tid: core::sync::atomic::AtomicU64::new(0),
         robust_list_head: core::sync::atomic::AtomicU64::new(0),
         robust_list_len: core::sync::atomic::AtomicUsize::new(0),
-        user_fs_base: core::sync::atomic::AtomicU64::new(user_fs_base_val),
+        user_fs_base: core::sync::atomic::AtomicU64::new(user_fs_base),
         fpu_state: crate::process::task::SyncUnsafeCell::new(fpu_state),
         xcr0_mask: core::sync::atomic::AtomicU64::new(xcr0_mask),
         rt_link: intrusive_collections::LinkedListLink::new(),
@@ -2342,11 +2343,11 @@ fn load_elf_task_inner(
     });
 
     {
-        let arc_data_ptr = alloc::sync::Arc::as_ptr(&task) as usize;
+        let arc_data_ptr = Arc::as_ptr(&task) as usize;
         let fpu_ptr = task.fpu_state.get() as usize;
         if let Some(cur) = crate::process::scheduler::current_task_clone() {
-            let cur_data_ptr = alloc::sync::Arc::as_ptr(&cur) as usize;
-            let cur_strong = alloc::sync::Arc::strong_count(&cur);
+            let cur_data_ptr = Arc::as_ptr(&cur) as usize;
+            let cur_strong = Arc::strong_count(&cur);
             log::info!(
                 "[elf] Task '{}' prepared: entry={:#x}, stack_top={:#x} \
                  new_arc={:#x} new_fpu={:#x} cur_arc={:#x} cur_strong={}",
@@ -2374,24 +2375,143 @@ fn load_elf_task_inner(
     Ok(task)
 }
 
+/// Internal ELF task builder used by all public loading APIs.
+/// `extra_args` are written to the user stack as argv[1..] after the program name.
+fn load_elf_task_inner(
+    elf_data: &[u8],
+    name: &'static str,
+    extra_args: &[&str],
+    seed_caps: &[Capability],
+    stack_pages: usize,
+) -> Result<Arc<Task>, &'static str> {
+    if !(USER_STACK_MIN_PAGES..=USER_STACK_MAX_PAGES).contains(&stack_pages) {
+        return Err("User stack size out of range");
+    }
+    log::trace!(
+        "[trace][elf] load_elf_task enter name={} size={}",
+        name,
+        elf_data.len()
+    );
+    log::info!("[elf] Loading ELF '{}'...", name);
+
+    // Step 1: Parse and validate ELF header
+    log::trace!("[trace][elf] load_elf_task parse_header begin");
+    let header = match parse_header(elf_data) {
+        Ok(h) => h,
+        Err(e) => {
+            log::error!("[elf] parse_header FAILED for '{}': {}", name, e);
+            return Err(e);
+        }
+    };
+    log::trace!(
+        "[trace][elf] load_elf_task parse_header ok type={}",
+        elf_type_name(header.e_type)
+    );
+    // Step 2: Create user address space
+    log::trace!("[trace][elf] load_elf_task user_as begin");
+    let user_as = Arc::new(AddressSpace::new_user()?);
+    log::trace!("[trace][elf] load_elf_task user_as done");
+
+    let phdrs: Vec<Elf64Phdr> = try_collect_exact(program_headers(elf_data, &header))?;
+    let interp_path = parse_interp_path(elf_data, &phdrs)?;
+    let (load_bias, entry) = compute_load_bias_and_entry(&user_as, &header, &phdrs)?;
+    let phdr_vaddr = find_relocated_phdr_vaddr(&header, &phdrs, load_bias)?;
+
+    let phnum = header.e_phnum;
+    log::trace!(
+        "[trace][elf] load_elf_task layout entry={:#x} bias={:#x} phdrs={}",
+        entry,
+        load_bias,
+        phnum
+    );
+    log::info!(
+        "[elf] ELF '{}': type={}, entry={:#x}, bias={:#x}, {} program headers",
+        name,
+        elf_type_name(header.e_type),
+        entry,
+        load_bias,
+        phnum,
+    );
+
+    // Step 3: Load all PT_LOAD segments
+    let load_count = load_pt_load_segments(&user_as, elf_data, &phdrs, load_bias)?;
+    if interp_path.is_none() {
+        apply_dynamic_relocations(&user_as, &phdrs, header.e_type, load_bias)?;
+    }
+    apply_relro(&user_as, &phdrs, load_bias)?;
+
+    log::trace!(
+        "[trace][elf] load_elf_task segments_done count={} has_interp={}",
+        load_count,
+        interp_path.is_some()
+    );
+    log::info!("[elf] Loaded {} PT_LOAD segment(s)", load_count);
+
+    let mut runtime_entry = entry;
+    let mut interp_base: Option<u64> = None;
+    if let Some(path) = interp_path {
+        let interp = load_interpreter(&user_as, path)?;
+        runtime_entry = interp.entry;
+        interp_base = Some(interp.base);
+        log::info!(
+            "[elf] PT_INTERP '{}' loaded: {} PT_LOAD, entry={:#x}",
+            path,
+            interp.load_count,
+            runtime_entry
+        );
+    }
+
+    // TLS setup (Variant II: data at negative offsets from FS:0)
+    let user_fs_base_val = setup_tls_block(&user_as, elf_data, &phdrs)?;
+
+    // Step 4: Map user stack
+    let stack = map_user_stack(&user_as, &phdrs, stack_pages)?;
+
+    let boot_sp = setup_boot_user_stack(
+        &user_as,
+        name,
+        extra_args,
+        phdr_vaddr,
+        header.e_phentsize,
+        header.e_phnum,
+        entry,
+        interp_base,
+        stack.base,
+        stack.top - 8, // data must stay below the canary slot
+    )?;
+
+    // Step 5: Create kernel task
+    build_ring3_task(Ring3TaskParams {
+        name,
+        user_as,
+        seed_caps,
+        stack,
+        stack_pages,
+        runtime_entry,
+        boot_sp,
+        user_fs_base: user_fs_base_val,
+    })
+}
+
 /// Load an ELF binary into the provided address space.
 /// Returns the entry point address.
 ///
-/// # Duplication note (audit 2026-09-07)
+/// # Duplication note (audit 2026-09-07, revisited in #65)
 ///
-/// This function duplicates the parsing / PT_LOAD / RELRO / PT_INTERP /
-/// TLS-extraction steps of [`load_elf_task_inner`].  Asterinas avoids the
-/// duplication by separating `load_elf_to_vmar` (image-loading sink)
-/// from `do_execve` (process setup).  In Strat9-OS the two paths have
-/// diverged over time : this function does *not* allocate the TLS block
-/// itself (the caller in [`crate::syscall::exec`] does), and it does *not*
-/// build a Task struct.
+/// This function used to duplicate the parsing / PT_LOAD / RELRO / PT_INTERP
+/// steps of [`load_elf_task_inner`].  Asterinas avoids the duplication by
+/// separating `load_elf_to_vmar` (image-loading sink) from `do_execve`
+/// (process setup).  In Strat9-OS the two paths have diverged over time :
+/// this function does *not* allocate the TLS block itself (the caller in
+/// [`crate::syscall::exec`] does), and it does *not* build a Task struct.
 ///
-/// A future refactor should extract the common `parse → load_segments →
-/// RELRO → interp-load → tls-extract` sequence into a single private
-/// helper parameterised by an `ImageSink` trait (Task-bound vs bare AS),
-/// mirroring Asterinas.  Until then, every loader-side fix must be applied
-/// to **both** functions.
+/// The shared image-loading steps now live in single-purpose helpers used by
+/// both paths — [`load_pt_load_segments`], [`apply_relro`],
+/// [`load_interpreter`] and [`stack_is_executable`] — so a loader-side fix
+/// only has to be made once.  The remaining divergence is the TLS block:
+/// `load_elf_task_inner` allocates it via [`setup_tls_block`] while this
+/// function only reports the segment's geometry through
+/// [`LoadedElfInfo`], leaving the allocation to its caller.
 pub fn load_elf_image(
     elf_data: &[u8],
     user_as: &AddressSpace,
@@ -2408,39 +2528,11 @@ pub fn load_elf_image(
     let (load_bias, entry) = compute_load_bias_and_entry(user_as, &header, &phdrs)?;
     let phdr_vaddr = find_relocated_phdr_vaddr(&header, &phdrs, load_bias)?;
 
-    for phdr in phdrs.iter() {
-        if phdr.p_type == PT_LOAD && phdr.p_memsz != 0 {
-            load_segment(user_as, elf_data, phdr, load_bias)?;
-        }
-    }
+    load_pt_load_segments(user_as, elf_data, &phdrs, load_bias)?;
     if interp_path.is_none() {
         apply_dynamic_relocations(user_as, &phdrs, header.e_type, load_bias)?;
     }
-
-    // PT_GNU_RELRO: mark the RELRO range read-only after relocations.
-    if let Some(relro) = phdrs.iter().find(|ph| ph.p_type == PT_GNU_RELRO) {
-        if relro.p_memsz > 0 {
-            let relro_start = relro.p_vaddr.wrapping_add(load_bias) & !0xFFF;
-            // A partial trailing page may contain writable data outside RELRO.
-            // Protect only through the last complete page, never round up.
-            let relro_end = (relro.p_vaddr.wrapping_add(load_bias) + relro.p_memsz) & !0xFFF;
-            if relro_end > relro_start && relro_end <= USER_ADDR_MAX {
-                let ro_flags = VmaFlags {
-                    readable: true,
-                    writable: false,
-                    executable: false,
-                    user_accessible: true,
-                };
-                let relro_pages = ((relro_end - relro_start) / 4096) as usize;
-                apply_segment_permissions(user_as, relro_start, relro_pages, ro_flags)?;
-                log::debug!(
-                    "[elf] PT_GNU_RELRO: {:#x}..{:#x} made read-only",
-                    relro_start,
-                    relro_end
-                );
-            }
-        }
-    }
+    apply_relro(user_as, &phdrs, load_bias)?;
 
     let (tls_vaddr, tls_filesz, tls_memsz, tls_align) =
         if let Some(tls) = phdrs.iter().find(|ph| ph.p_type == PT_TLS) {
@@ -2458,40 +2550,10 @@ pub fn load_elf_image(
     let mut runtime_entry = entry;
     let mut interp_base = None;
     if let Some(path) = interp_path {
-        let interp_data = read_elf_from_vfs(path)?;
-        let interp_header = parse_header(&interp_data)?;
-        let interp_phdrs: Vec<Elf64Phdr> =
-            try_collect_exact(program_headers(&interp_data, &interp_header))?;
-        if parse_interp_path(&interp_data, &interp_phdrs)?.is_some() {
-            return Err("Nested PT_INTERP is not supported");
-        }
-        let (interp_bias, interp_entry) =
-            compute_load_bias_and_entry(user_as, &interp_header, &interp_phdrs)?;
-        let (interp_min_vaddr, _) = compute_load_bounds(&interp_phdrs)?;
-        for phdr in interp_phdrs.iter() {
-            if phdr.p_type == PT_LOAD && phdr.p_memsz != 0 {
-                load_segment(user_as, &interp_data, phdr, interp_bias)?;
-            }
-        }
-        apply_dynamic_relocations(user_as, &interp_phdrs, interp_header.e_type, interp_bias)?;
-        runtime_entry = interp_entry;
-        interp_base = Some(interp_min_vaddr.saturating_add(interp_bias));
+        let interp = load_interpreter(user_as, path)?;
+        runtime_entry = interp.entry;
+        interp_base = Some(interp.base);
     }
-
-    // PT_GNU_STACK: Linux semantics dictate that only the *last* PT_GNU_STACK
-    // entry counts (see `load_elf_task_inner` for the rationale).  Walk the
-    // phdrs in reverse to find the last PT_GNU_STACK.
-    let stack_exec = phdrs
-        .iter()
-        .rev()
-        .find_map(|ph| {
-            if ph.p_type == PT_GNU_STACK {
-                Some((ph.p_flags & PF_X) != 0)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(false);
 
     Ok(LoadedElfInfo {
         runtime_entry,
@@ -2504,7 +2566,7 @@ pub fn load_elf_image(
         tls_filesz,
         tls_memsz,
         tls_align,
-        stack_exec,
+        stack_exec: stack_is_executable(&phdrs),
     })
 }
 
