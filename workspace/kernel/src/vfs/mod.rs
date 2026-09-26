@@ -46,7 +46,7 @@ use core::fmt::Write;
 pub use blkdev_scheme::BlkDevScheme;
 pub use fd::{FileDescriptorTable, STDERR, STDIN, STDOUT};
 pub use file::OpenFile;
-pub use mount::{list_mounts, mount, resolve, unmount, Namespace};
+pub use mount::{list_mounts, mount, mount_count, resolve, unmount, Namespace};
 pub use pipe::PipeScheme;
 pub use procfs::ProcScheme;
 pub use ramfs_scheme::RamfsScheme;
@@ -104,6 +104,47 @@ pub fn resolve_and_check_path_for_current_task(
     let abs = resolve_path(path, &cwd);
     crate::silo::enforce_path_for_current_task(&abs, want_read, want_write, want_execute)?;
     Ok(abs)
+}
+
+/// Current working directory of the calling task.
+///
+/// In-kernel counterpart of the `getcwd` syscall, for callers that already live
+/// in the kernel and therefore have no user buffer to write into.
+pub fn current_dir() -> Result<String, SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    Ok(unsafe { (&*task.process.cwd.get()).clone() })
+}
+
+/// Change the current working directory of the calling task.
+///
+/// In-kernel counterpart of the `chdir` syscall: `path` is resolved against the
+/// current directory, then checked to be an existing directory.
+pub fn set_current_dir(path: &str) -> Result<(), SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let cwd = unsafe { (&*task.process.cwd.get()).clone() };
+    let abs = resolve_path(path, &cwd);
+
+    let (scheme, rel) = mount::resolve(&abs)?;
+    let res = scheme.open(&rel, OpenFlags::READ | OpenFlags::DIRECTORY)?;
+    let _ = scheme.close(res.file_id);
+
+    unsafe { *task.process.cwd.get() = abs };
+    Ok(())
+}
+
+/// Resolve `path` (absolute or relative) against the calling task's directory.
+///
+/// This is the single path-collapsing implementation of the kernel. The shell
+/// resolves paths with it instead of keeping a second working directory and a
+/// private copy of the normalisation rules, which is how the two used to drift
+/// apart.
+///
+/// No policy is enforced here: the operation the caller performs next (open,
+/// mkdir, unlink, ...) applies its own.
+pub fn resolve_path_for_current_task(path: &str) -> Result<String, SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let cwd = unsafe { (&*task.process.cwd.get()).clone() };
+    Ok(resolve_path(path, &cwd))
 }
 
 /// Open a file relative to a directory FD.
@@ -1264,6 +1305,7 @@ pub fn init() {
     kernel_scheme.register("pci/count", pci_count.as_ptr(), pci_count.len());
 
     // /sys/cpu/* : CPU information scheme (Plan9-style)
+    #[cfg(target_arch = "x86_64")]
     {
         let host = crate::arch::cpuid::host();
         // VFS initializes before SMP/percpu registration is complete.
@@ -1314,6 +1356,22 @@ pub fn init() {
                 .into_boxed_slice(),
         );
         kernel_scheme.register("cpu/xsave_size", xsave_s.as_ptr(), xsave_s.len());
+    }
+
+    #[cfg(target_arch = "riscv64")]
+    {
+        let cpu_count = crate::arch::percpu::get_cpu_count().max(1);
+        let register_cpu_value = |path: &str, value: &str| {
+            let bytes = Box::leak(alloc::format!("{}\n", value).into_bytes().into_boxed_slice());
+            kernel_scheme.register(path, bytes.as_ptr(), bytes.len());
+        };
+
+        register_cpu_value("cpu/count", &alloc::format!("{}", cpu_count));
+        register_cpu_value("cpu/vendor", "not discovered");
+        register_cpu_value("cpu/model", "not discovered");
+        register_cpu_value("cpu/features", "not discovered (DTB support pending)");
+        register_cpu_value("cpu/xcr0", "not applicable");
+        register_cpu_value("cpu/xsave_size", "not applicable");
     }
 
     let kernel_scheme = Arc::new(kernel_scheme);

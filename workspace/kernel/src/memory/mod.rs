@@ -13,6 +13,7 @@ pub mod frame;
 pub mod heap;
 pub mod mapping_index;
 pub mod ownership;
+pub mod physical_access;
 pub mod paging;
 pub mod region_cap;
 pub mod userslice;

@@ -40,6 +40,7 @@ use crate::{
     },
 };
 
+#[cfg(target_arch = "x86_64")]
 macro_rules! elf_trace {
     ($($arg:tt)*) => {
         #[cfg(debug_assertions)] {
@@ -1309,6 +1310,7 @@ fn load_segment(
 /// *current task* so that each ELF task carries its own copy.  This makes the
 /// trampoline safe under SMP: two tasks can run their trampolines concurrently
 /// on different CPUs without any shared mutable state.
+#[cfg(target_arch = "x86_64")]
 extern "C" fn elf_ring3_trampoline() -> ! {
     use crate::arch::gdt;
     use core::sync::atomic::Ordering;
@@ -1567,6 +1569,11 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             options(noreturn),
         );
     }
+}
+
+#[cfg(target_arch = "riscv64")]
+extern "C" fn elf_ring3_trampoline() -> ! {
+    panic!("RISC-V ELF user trampoline is not implemented")
 }
 
 // ---------------------------------------------------------------------------

@@ -4,12 +4,45 @@
 
 ## Project stats
 
-- **Total commits:** `555`
+- **Total commits:** `588`
 - **Latest tag:** `0.1.0`
 - **Repository:** [git.strat9-os.org](https://git.strat9-os.org/strat9-os/strat9-os)
 
 ## Recent commits (auto-generated)
 
+- 2026-08-26 [`b4f818a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b4f818ae6873260ad7abc0170a60faa88c894344) ok
+- 2026-08-26 [`31e8021`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/31e80214156e2b02e9ac57a1a25a3941d8c90b6f) fix(arch,riscv64): dedupe duplicated stub modules in facade_riscv
+- 2026-08-26 [`e9b9ce4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e9b9ce4c3fafe1256d2e8cb2b9a2f27ba9ead1c2) fix(arch,riscv64): SegmentSelector newtype for gdt stub, safe unmap on stub mapper
+- 2026-08-26 [`baa2c29`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/baa2c29b167c3cdc59a0855ff103e064ff27b9b1) feat(ostd): Add/Sub<u64> operator impls for neutral PhysAddr/VirtAddr
+- 2026-08-26 [`7aa40ea`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7aa40ea586f6cce38b0c3a208b302cc2787d03b8) fix(arch,riscv64): mapper::MapToError path fix inside OffsetPageTable impl
+- 2026-08-26 [`27908f6`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/27908f66793d66d515536da16bee4c82eac6f493) feat(arch,riscv64): working Sv48 translate walker in stub mapper
+- 2026-08-26 [`010af6a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/010af6a243144d99d2e901c013ba397e9510bc88) feat(ipc,riscv64): Sv48 tagged-pointer layout for IntrusiveMailbox
+- 2026-08-26 [`94d757f`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/94d757f5a7cb333d7ab75bf4dc242927f1c12c7d) feat(arch,riscv64): PciDevice config-space accessors (stubbed, R5 wires ECAM)
+- 2026-08-26 [`deb59a1`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/deb59a1a7fbfc4a037a9b25f4985940d6013503b) fix(arch,riscv64): MouseEvent struct + u8 KEY_* scancode parity with x86
+- 2026-08-26 [`04a24c5`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/04a24c5ba31f35bd5f9149bba97e1c3a2430d7a2) fix(arch,riscv64): restore unmap (tuple PhysFrame+MapperFlush) on stub mapper
+- 2026-08-26 [`faee718`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/faee718841f67d6b62fe6e52a5d2df3a6b7d433d) fix(arch,riscv64): unmap returns PhysFrame, Cr3::write/Cr3Flags::empty stubs
+- 2026-08-26 [`4c30841`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4c308415c18f787aa296551a72d4ae89a1e79362) fix(arch,riscv64): sealed PortValue trait for port stub (kills E0034)
+- 2026-08-26 [`3e08494`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3e084942d8cc3c82d0dda733bb01e172c2863e19) fix(arch,riscv64): port stub typed read/write impls, drop stale traits
+- 2026-08-26 [`e151bad`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e151bad94e8e3c544b1cf6a29a17ab2e020a4f05) fix(arch): annotate ambiguous PhysFrame::containing_address call-sites
+- 2026-08-26 [`a619064`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a61906487d45ac13cd61216b619bed706b9a2c64) refactor(arch): Port trait-based reads, gate top TUI behind x86_64
+- 2026-08-25 [`4d9897a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4d9897a6cfbca56dc240136871a2a247598b007f) fix(arch,riscv64): dedupe stubs, align keyboard read_char, FrameAllocator cfg
+- 2026-08-25 [`319f260`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/319f2609402726db83a35e33335f984a9ef64e46) fix(arch,riscv64): align stub signatures with x86 call-sites
+- 2026-08-25 [`95f89d1`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/95f89d11913372bdcc54297f6cba670459646510) feat(arch,riscv64): full PciDevice struct + PCI surface stubs
+- 2026-08-25 [`870e7fb`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/870e7fb25db2f6d55e2c1c74ce82ae1b181a9188) feat(arch,riscv64): Mapper trait surface on Sv48 skeleton
+- 2026-08-25 [`26755c2`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/26755c276f885d12c95bc83a565b5531660172bd) feat(arch,riscv64): real Sv48 scaffolding in x86_64-stub, ostd pointer helpers
+- 2026-08-25 [`acc11a1`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/acc11a180b757f852686002e8aad757160712b26) refactor(arch): gate VGA-UI commands behind x86_64, complete riscv framebuffer_info stub
+- 2026-08-25 [`1c60a70`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/1c60a700597ef17e5804a31d2ff866bf2fe6a633) refactor(arch): route debug breadcrumbs + ahci rep movsb through per-arch paths
+- 2026-08-25 [`dc616fa`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/dc616fa7be6e693a96330d3cff49dbaac0880ef8) refactor(arch): unify x86_64 crate access via x86_crate_shim, complete riscv stubs
+- 2026-08-25 [`d1ca15c`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d1ca15c99789e52364094988fff27aacdbb5dc06) refactor(arch): replace port-0xE9 debug putc with arch-routed serial
+- 2026-08-25 [`f926367`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f926367f65dd2ae622412ec1ccc71b4dee486a2a) refactor(arch): route shared code through arch::xshim, gate limine/x86 deps
+- 2026-08-25 [`e98ed5e`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e98ed5e0bf15554f370a10798137cdcd8b1a3cbd) refactor(arch): migrate remaining call-sites to arch facade
+- 2026-08-25 [`9e75f89`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9e75f89596da79618fcd1133953aba556b3c4392) refactor(arch): migrate process/ and syscall/ call-sites to arch facade
+- 2026-08-25 [`6108b74`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6108b74039edf06964faa7770a642bfd795c7a3f) refactor(arch): introduce arch facade, migrate sync/ostd/memory call-sites
+- 2026-08-25 [`1e2edef`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/1e2edefa984ced2436346ee020657db5120b4291) ci: retry pipeline (rustup download flake)
+- 2026-08-25 [`9297cfe`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9297cfe52d9ada4b55db1f3f0783dd10b49b4af2) build: pin Rust toolchain to nightly-2026-07-20
+- 2026-07-18 [`bbb6107`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/bbb610798d13e2d0992532f639e33c1811dccec5) Merge branch 'improve-buddy-allocator' into 'main'
+- 2026-07-18 [`abb7dd7`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/abb7dd7e60991de111632e72ae8658adccdf8697) feat(buddy): harden, optimize, and add kernel.toml configuration
+- 2026-07-17 [`5832b19`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5832b19921a8b3d7e59ec9de6391de6f391f1921) docs: update published documentation
 - 2026-07-17 [`1a72181`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/1a72181f479278893775d6a3b19126f4b24b5999) docs: update published documentation
 - 2026-07-17 [`0e0766a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0e0766a34c3b95f8e4de1d84f4cf4912da91ee4f) docs: update published documentation
 - 2026-07-17 [`f94c369`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f94c369709b3200794bfad047d09249a928a5ff3) Merge branch 'feat/vt100-console' into 'main'
@@ -27,38 +60,5 @@
 - 2026-06-25 [`848baaf`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/848baaf594c7a9fbd7f951c3959790dc26c1383e) Merge branch 'feat/input-to-userspace' into 'main'
 - 2026-06-25 [`5a3d69c`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5a3d69c4e10c4cfc67976a837751ce50292f9032) feat: migrate input system to userspace
 - 2026-06-24 [`1b98905`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/1b9890594097a56a13f632ecb9f2a2a6b0e9f431) Merge branch 'test/smp-hardware-debug' into 'main'
-- 2026-06-24 [`3fea3f3`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3fea3f3776edefa7bdc7c3a8d930c8d17b0939a6) SMP hardware debug, NVMe fixes, VGA refactor, telnetd hardening, docs
-- 2026-06-17 [`f1bccb9`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f1bccb9b69f332a96f4c0ac10ab0c044a04be7ab) Merge branch 'fix/typed-irq-guard-allocator' into 'main'
-- 2026-06-17 [`b1d7c35`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b1d7c358a1801b315982f1006ce450f780dc7df8) buddy: use PreemptDisabled guardian on per-CPU frame caches (#37)
-- 2026-06-17 [`1ca93d1`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/1ca93d17252e513bed1d9578c261a0ba8d030c90) Merge branch 'fix/tech-debt-allocation-under-lock' into 'main'
-- 2026-06-17 [`78e18ce`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/78e18cef10191488be24adf2947c4096a88be0d1) Tech debt: allocation-under-lock and global-lock patterns (#50)
-- 2026-06-16 [`6455a23`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6455a231010938a3206c432bf84130c4d9326ddb) Merge branch 'fix/irq-token-encapsulation' into 'main'
-- 2026-06-16 [`cb4ce4d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/cb4ce4d2fc6869b6f3ff240d59952be9d047064d) Refactor: document IrqDisabledToken creation paths and encapsulation
-- 2026-06-16 [`bdec79d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/bdec79dfa835ba9f9b2915c3a1fd434b7daec466) Merge branch 'fix/arc-strong-count-wording' into 'main'
-- 2026-06-16 [`c642da4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c642da4bae59c007004e80f06dc7abd3f054ed01) Fix: refine Arc::strong_count diagnostic wording to heuristic
-- 2026-06-16 [`f85e757`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f85e757a39660e95067a6a3f8310ae775b19ffdf) Merge branch 'feat/spinlock-multi-watch-debug' into 'main'
-- 2026-06-16 [`3fec849`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3fec849cd4aef9b8b1b917344ea11297a5a9471f) Feat: replace single-lock trace with fixed-size multi-watch array
-- 2026-06-16 [`84db9df`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/84db9df7dbd8160db96ad93fc416d2096d6a4dbd) Merge branch 'fix/slab-refill-irq-assert' into 'main'
-- 2026-06-16 [`021fb49`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/021fb49513575d6c91483f7305b4f134076d1adb) Fix: add debug_assert IRQ-disabled invariant on slab refill
-- 2026-06-16 [`8ebf658`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/8ebf658edd54dba1d69fd515198b76788f0f739e) Merge branch 'fix/heap-page-count-overflow' into 'main'
-- 2026-06-16 [`d1f7eef`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d1f7eef22a2ce71ca753ac2c0e11fba7df62a4b1) Fix: use saturating arithmetic for vmalloc page count rounding
-- 2026-06-16 [`99d4ede`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/99d4ede878e85408952ae691a41fa40145b821fd) Merge branch 'fix/reparent-children-deterministic' into 'main'
-- 2026-06-16 [`dcc239c`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/dcc239c792628f5ae2c1ed3357c55e0172e65d7c) Fix: make orphan reparenting deterministic by dropping links when PID 1 absent
-- 2026-06-16 [`d2722ee`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d2722ee2af35c545006188a1d004b579650f9339) Merge branch 'fix/legacy-pic-timer-parity' into 'main'
-- 2026-06-16 [`e53a4b6`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e53a4b674d88bffe77a81521fbe476f5797af2fb) Fix: mirror LAPIC timer Ring-3 preemption policy in legacy PIC handler
-- 2026-06-16 [`257b694`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/257b69411c2c15f9b388329b5497c3c7c530de05) Merge branch 'fix/buddy-free-to-zone-logging' into 'main'
-- 2026-06-16 [`18b1037`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/18b103720b654282b020cbf63ee9c09917ca095e) Fix: escalate free_to_zone protected-overlap to panic matching alloc side
-- 2026-06-16 [`28bbc90`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/28bbc90b4a9e528914efa61cba1fff73a7cbf877) Merge branch 'fix/keyboard-lost-key-counter' into 'main'
-- 2026-06-16 [`b19d6bf`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b19d6bf3afabca492f1762ec3310f8f72822c4f3) Fix keyboard driver: shared state, US extended keys, numpad, lost-key counter
-- 2026-06-16 [`93302a5`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93302a553542304b3c4905a5d0d882809e29dd3d) docs: update published documentation
-- 2026-06-16 [`b2edb49`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b2edb49813f4470257879a5e3cc85c9efc9b26c6) Merge branch 'enhance-network-tools' into 'main'
-- 2026-06-16 [`e4ab1a9`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e4ab1a96c3579117defffe0f5b32cf7cac853129) Enhance network stack, NIC drivers, USB/NVMe subsystems, and thermal management
-- 2026-06-03 [`5ee7f8d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5ee7f8d0aba0e76fbde35051e8aae2dc647a9cc9) Merge branch 'fix-some-mistake-in-network-stack' into 'main'
-- 2026-06-03 [`0c40058`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0c40058547bd9b7ef07a837b1153577879510994) Refactor the network stack and add dual-stack userspace tooling
-- 2026-05-24 [`aeade5e`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/aeade5ef5fcfdddef2caa43da6af361a5102c7cd) Code cleanup
-- 2026-05-24 [`86c810e`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/86c810e4e63e5fb29ae2a9a5785fe19db9e96c67) Raüs silo sshd
-- 2026-05-24 [`40d4d46`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/40d4d46574896664983ba2fe05dfd7ca1c0f1b94) Merge branch 'IPC-refactor' into 'main'
-- 2026-05-24 [`b2bbcc0`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b2bbcc0bdd8c836ad396a1f32afd590b0c7236a8) Improve and fix IPC
-- 2026-05-23 [`b7c3e27`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b7c3e271d8644570a5a0b7bdabb80ef8c3f524f7) Merge branch 'hunt-memory-corruption' into 'main'
 
 <!-- AUTO-CHANGELOG:END -->

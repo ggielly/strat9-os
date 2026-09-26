@@ -213,6 +213,7 @@ static mut USER_TASK_AS: Option<Arc<AddressSpace>> = None;
 /// 1. Switches CR3 to the user address space
 /// 2. Pushes an IRET frame (SS, RSP, RFLAGS, CS, RIP)
 /// 3. Executes IRETQ to jump to Ring 3 code
+#[cfg(target_arch = "x86_64")]
 extern "C" fn ring3_trampoline() -> ! {
     use crate::arch::gdt;
 
@@ -288,6 +289,11 @@ extern "C" fn ring3_trampoline() -> ! {
             options(noreturn),
         );
     }
+}
+
+#[cfg(target_arch = "riscv64")]
+extern "C" fn ring3_trampoline() -> ! {
+    panic!("RISC-V user-mode test trampoline is not implemented")
 }
 
 /// Write the user-mode test program into the code page.

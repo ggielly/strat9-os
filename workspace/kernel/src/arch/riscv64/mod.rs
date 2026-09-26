@@ -7,7 +7,14 @@
 //! during early boot (jalon R1 of the port plan). Modules are added
 //! incrementally as call-sites are migrated.
 
+pub mod boot;
+pub mod paging;
+pub mod percpu;
+pub mod pci;
+pub mod plic;
 pub mod serial;
+pub mod trap;
+pub mod virtio_mmio;
 
 // ---------------------------------------------------------------------------
 // Transitional stubs (x86-only subsystems). Each is scheduled to become a
@@ -82,9 +89,9 @@ pub mod vga {
     #[allow(clippy::too_many_arguments)]
     pub fn init(
         fb_addr: u64,
-        width: usize,
-        height: usize,
-        stride: usize,
+        width: u32,
+        height: u32,
+        stride: u32,
         bpp: u16,
         _red_size: u8,
         _red_shift: u8,
@@ -127,7 +134,7 @@ pub mod vga {
     pub fn screen_size() -> (usize, usize) {
         (0, 0)
     }
-    pub fn begin_frame() {}
+    pub fn begin_frame() -> bool { false }
     pub fn end_frame() {}
     pub fn fill_rect(_x: i32, _y: i32, _w: i32, _h: i32, _color: u32) {}
     pub fn text_rows() -> usize {
@@ -142,8 +149,8 @@ pub mod vga {
     pub fn hide_text_cursor() {}
     pub fn write_text(_s: &str) {}
     pub fn write_char(_c: char) {}
-    pub fn scroll_view_up() {}
-    pub fn scroll_view_down() {}
+    pub fn scroll_view_up(_lines: usize) {}
+    pub fn scroll_view_down(_lines: usize) {}
     pub fn scroll_to_live() {}
     pub fn start_selection(_x: usize, _y: usize) {}
     pub fn update_selection(_x: usize, _y: usize) {}
@@ -152,10 +159,10 @@ pub mod vga {
     pub fn scrollbar_hit_test(_x: usize, _y: usize) -> bool {
         false
     }
-    pub fn scrollbar_drag_to(_x: usize, _y: usize) {}
+    pub fn scrollbar_drag_to(_y: usize) {}
     pub fn scrollbar_click(_x: usize, _y: usize) {}
-    pub fn update_mouse_cursor(_x: usize, _y: usize) {}
-    pub fn panic_draw_direct(_msg: &str) {}
+    pub fn update_mouse_cursor(_x: i32, _y: i32) {}
+    pub fn panic_draw_direct(_lines: &[&str]) {}
     pub fn vga_debug_writeln(_s: &str) {}
 
 }
@@ -171,6 +178,7 @@ pub mod vga_shim {
     }
     impl VgaWriterShim {
         pub fn clear(&mut self) {}
+        pub fn set_rgb_color(&mut self, _fg: super::vga::RgbColor, _bg: super::vga::RgbColor) {}
     }
     pub static VGA_WRITER: spin::Mutex<VgaWriterShim> = spin::Mutex::new(VgaWriterShim);
 }
@@ -191,22 +199,16 @@ pub mod boot_timestamp {
 }
 
 pub mod idt {
-    // Trap handling arrives with jalon R2.1 (stvec).
-    pub fn init() {}
-    pub fn register_ahci_irq(_irq: u8) {}
-    pub fn register_nvme_irq(_irq: u8) {}
-    pub fn register_virtio_block_irq(_irq: u8) {}
-    pub fn register_xhci_irq(_irq: u8) {}
-    pub fn register_nic_irq(_irq: u8) {}
+    pub fn init() { panic!("RISC-V trap handling is not implemented (R2.1)") }
+    pub fn register_ahci_irq(_irq: u8) { panic!("RISC-V interrupt routing is not implemented (R2.1)") }
+    pub fn register_nvme_irq(_irq: u8) { panic!("RISC-V interrupt routing is not implemented (R2.1)") }
+    pub fn register_virtio_block_irq(_irq: u8) { panic!("RISC-V interrupt routing is not implemented (R2.1)") }
+    pub fn register_xhci_irq(_irq: u8) { panic!("RISC-V interrupt routing is not implemented (R2.1)") }
+    pub fn register_nic_irq(_irq: u8) { panic!("RISC-V interrupt routing is not implemented (R2.1)") }
 }
 
-pub mod timer {
-    pub const TIMER_HZ: u64 = 100;
-    pub const NS_PER_TICK: u64 = 1_000_000_000 / TIMER_HZ;
-    pub fn is_apic_timer_active() -> bool { false }
-    pub fn apic_ticks_per_10ms() -> u32 { 0 }
-    pub fn start_apic_timer_cached() {}
-}
+pub mod sbi;
+pub mod timer;
 
 
 use core::arch::asm;
@@ -327,6 +329,9 @@ pub mod cpuid {
         pub fn contains(self, _f: CpuFeature) -> bool {
             false
         }
+        pub fn bits(self) -> u32 {
+            self.bits
+        }
     }
 
     pub fn init() {}
@@ -397,16 +402,16 @@ pub mod vga_text {
 pub mod pic_stub {
     pub const PIC1_OFFSET: u8 = 0x20;
     pub const PIC2_OFFSET: u8 = 0x28;
-    pub fn init(_o1: u8, _o2: u8) {}
-    pub fn disable() {}
-    pub fn enable_irq(_irq: u8) {}
+    pub fn init(_o1: u8, _o2: u8) { panic!("8259 PIC is unavailable on RISC-V") }
+    pub fn disable() { panic!("8259 PIC is unavailable on RISC-V") }
+    pub fn enable_irq(_irq: u8) { panic!("8259 PIC is unavailable on RISC-V") }
 }
 
 pub mod timer_extra {
-    pub fn init_pit(_hz: u32) {}
-    pub fn stop_pit() {}
+    pub fn init_pit(_hz: u32) { panic!("8254 PIT is unavailable on RISC-V") }
+    pub fn stop_pit() { panic!("8254 PIT is unavailable on RISC-V") }
     pub fn calibrate_apic_timer() -> u32 {
-        0
+        panic!("APIC timer is unavailable on RISC-V")
     }
 }
 

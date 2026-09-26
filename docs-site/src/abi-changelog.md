@@ -25,6 +25,10 @@ See:
 
 ## Recent ABI updates (auto-generated)
 
+- 2026-08-25 [`dc616fa`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/dc616fa7be6e693a96330d3cff49dbaac0880ef8) refactor(arch): unify x86_64 crate access via x86_crate_shim, complete riscv stubs
+- 2026-08-25 [`f926367`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f926367f65dd2ae622412ec1ccc71b4dee486a2a) refactor(arch): route shared code through arch::xshim, gate limine/x86 deps
+- 2026-08-25 [`9e75f89`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9e75f89596da79618fcd1133953aba556b3c4392) refactor(arch): migrate process/ and syscall/ call-sites to arch facade
+- 2026-07-18 [`abb7dd7`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/abb7dd7e60991de111632e72ae8658adccdf8697) feat(buddy): harden, optimize, and add kernel.toml configuration
 - 2026-07-17 [`fe68f9a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/fe68f9aacb1b70b8601cbdde1423be75628255d1) fix(vfs,console,scheduler): VFS improvements, console perf, panic backtrace
 - 2026-07-14 [`3a5eb69`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3a5eb69d9b3041f89c205e184b4afe15c07ee44d) feat(silo): replace Vec with heapless::Vec for bounded fields
 - 2026-07-09 [`ab22b0d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ab22b0d9b010dd704cf6044580b4f310c5748524) feat: 3-level IPC transport, N3 MMU thread migration, graphical silo, NIC/E1000 fixes
@@ -51,10 +55,6 @@ See:
 - 2026-04-06 [`309a9c1`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/309a9c1bb5e9938b0b6b5826d27f8977414ca63e) refactor: runtime allocation, scheduler lock decoupling, FixedQueue, and VGA improvements
 - 2026-03-26 [`a9a6cd6`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a9a6cd68b3dbce1e3ecacea313dd598b92312002) Implement block-oriented memory management and ownership tracking
 - 2026-03-23 [`ec8ee9f`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ec8ee9f88ec5a4cade0c7e5f8433c56605ce888a) refactor(memory): update reference counting logic for COW frames
-- 2026-03-23 [`aaa89e0`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/aaa89e0ee568eb24908817c20ec50bf4fd3cd282) Refactor: Decouple per-CPU scheduler state and logic from the global scheduler instance by moving `SchedulerCpu` to local CPU storage.
-- 2026-03-21 [`c3f93c6`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c3f93c628fd8be78fd9cc29fbf21692aaacbf494) feat: Implement TSC-based boot timing and milestones, along with an analysis...
-- 2026-03-17 [`eb7818d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/eb7818d13ba67b1b3f718d6161f71eee0d123595) feat: Implement static module loading from initfs paths and increase module blob size limit.
-- 2026-03-17 [`acfdbbd`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/acfdbbd126584bcd47355873c93c5584c67877c2) feat: Refine E9 debug output, add TSS inspection, and log syscall and kernel stack changes.
 
 <!-- AUTO-ABI-CHANGELOG:END -->
 

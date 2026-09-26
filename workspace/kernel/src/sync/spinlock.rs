@@ -364,3 +364,9 @@ impl<'a, T: ?Sized, G: Guardian> Drop for SpinLockGuard<'a, T, G> {
 // The guardian's invariant (e.g. preemption depth, IF flag) is per-CPU.
 // Sending the guard to another CPU would violate it.
 impl<T: ?Sized, G: Guardian> !Send for SpinLockGuard<'_, T, G> {}
+
+/// Trace putc routed to the arch serial backend (replaces port 0xE9 debug).
+#[inline]
+pub(crate) fn debug_trace_putc(c: u8) {
+    crate::arch::serial::_print(format_args!("{}", c as char));
+}

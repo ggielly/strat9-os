@@ -747,6 +747,7 @@ pub(crate) fn flush_deferred_async_read_completions(ring_id: u64) -> u32 {
                     */
 
                     let src = completion.dma_buf.virt_addr() as *const u8;
+                    #[cfg(target_arch = "x86_64")]
                     let dst = user_buf.as_ptr() as *mut u8;
                     let n = completion.len;
 

@@ -4,6 +4,8 @@
 //! Items marked "transitional stub" exist only so the riscv64 build
 //! progresses; each is replaced by real code in a later jalon.
 
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 pub use super::riscv64::{
     boot_timestamp, cli, cpuid, hlt, interrupts_enabled, rdtsc, restore_flags,
     save_flags_and_cli, serial, speaker, sti, vgabuf,
@@ -13,6 +15,13 @@ pub use crate::arch::riscv64::vga_canvas::Canvas;
 
 /// Neutral MAX_CPUS constant for riscv64 (matches x86_64 value).
 pub const MAX_CPUS: usize = 32;
+
+/// Name of the architecture the kernel was built for.
+///
+/// Mirrors the x86_64 facade constant so neutral code can report the target
+/// without a `cfg`.
+pub const ARCH_NAME: &str = "riscv64";
+static PREEMPT_DEPTH: AtomicUsize = AtomicUsize::new(0);
 
 /// Merged VGA surface for riscv64: backend stubs + canvas.
 pub mod vga {
@@ -37,10 +46,10 @@ pub mod percpu {
     pub use super::MAX_CPUS;
 
     pub fn current_cpu_index() -> usize {
-        0
+        crate::arch::riscv64::percpu::current_cpu_index()
     }
     pub fn current_cpu_index_fast() -> usize {
-        0
+        crate::arch::riscv64::percpu::current_cpu_index_fast()
     }
     pub fn cpu_count() -> usize {
         1
@@ -48,32 +57,46 @@ pub mod percpu {
     pub fn get_cpu_count() -> usize {
         1
     }
-    pub fn init_boot_cpu(_hartid: u32) -> usize {
-        0
+    pub fn init_boot_cpu(hartid: u32) -> usize {
+        crate::arch::riscv64::percpu::init_boot_cpu(hartid)
     }
-    pub fn init_gs_base(_idx: usize) {}
-    pub fn set_kernel_rsp_current(_rsp: u64) {}
-    pub fn mark_tlb_ready_current() {}
-    pub fn tlb_ready(_index: usize) -> bool {
-        true
+    pub fn init_gs_base(idx: usize) {
+        crate::arch::riscv64::percpu::init_gs_base(idx);
     }
-    pub fn set_signal_pending_current() {}
+    pub fn set_kernel_rsp_current(rsp: u64) {
+        crate::arch::riscv64::percpu::set_kernel_rsp_current(rsp);
+    }
+    pub fn mark_tlb_ready_current() {
+        crate::arch::riscv64::percpu::mark_tlb_ready_current();
+    }
+    pub fn tlb_ready(index: usize) -> bool {
+        crate::arch::riscv64::percpu::tlb_ready(index)
+    }
+    pub fn set_signal_pending_current() {
+        crate::arch::riscv64::percpu::set_signal_pending_current();
+    }
     pub fn test_and_clear_signal_pending_current() -> bool {
-        false
+        crate::arch::riscv64::percpu::test_and_clear_signal_pending_current()
     }
     pub fn apic_id_by_cpu_index(index: usize) -> Option<u32> {
-        if index == 0 { Some(0) } else { None }
+        let _ = index;
+        panic!("APIC identifiers are unavailable on RISC-V")
     }
-    pub fn cpu_index_by_apic(apic_id: u32) -> Option<usize> {
-        if apic_id == 0 { Some(0) } else { None }
+    pub fn cpu_index_by_apic(_apic_id: u32) -> Option<usize> {
+        panic!("APIC identifiers are unavailable on RISC-V")
     }
-    pub fn preempt_disable() {}
-    pub fn preempt_enable() {}
+    pub fn preempt_disable() {
+        super::PREEMPT_DEPTH.fetch_add(1, super::Ordering::AcqRel);
+    }
+    pub fn preempt_enable() {
+        let previous = super::PREEMPT_DEPTH.fetch_sub(1, super::Ordering::AcqRel);
+        assert!(previous > 0, "RISC-V preemption underflow");
+    }
     pub fn is_preemptible() -> bool {
-        true
+        super::PREEMPT_DEPTH.load(super::Ordering::Acquire) == 0
     }
-    pub fn cpu_index_from_gs() -> usize {
-        0
+    pub fn cpu_index_from_gs() -> Option<usize> {
+        Some(crate::arch::riscv64::percpu::current_cpu_index())
     }
 }
 
@@ -83,29 +106,29 @@ pub mod percpu {
 // ---------------------------------------------------------------------------
 
 pub mod tlb {
-    pub fn init() {}
-    pub fn local_page(_vaddr: u64) {}
-    pub fn local_range(_start: u64, _end: u64) {}
-    pub fn shootdown_range(_start: u64, _end: u64) {}
-    pub fn shootdown_all() {}
+    pub fn init() { panic!("RISC-V TLB operations are not implemented (R2.3)") }
+    pub fn local_page(_vaddr: crate::arch::xshim::VirtAddr) { panic!("RISC-V TLB operations are not implemented (R2.3)") }
+    pub fn local_range(_start: crate::arch::xshim::VirtAddr, _end: crate::arch::xshim::VirtAddr) { panic!("RISC-V TLB operations are not implemented (R2.3)") }
+    pub fn shootdown_range(_start: crate::arch::xshim::VirtAddr, _end: crate::arch::xshim::VirtAddr) { panic!("RISC-V TLB shootdown is not implemented (R6)") }
+    pub fn shootdown_all() { panic!("RISC-V TLB shootdown is not implemented (R6)") }
 }
 
 pub mod apic_base {
     pub fn lapic_phys() -> u64 {
-        0
+        panic!("Local APIC is unavailable on RISC-V")
     }
     pub fn lapic_id() -> u32 {
-        0
+        panic!("Local APIC is unavailable on RISC-V")
     }
     pub fn is_initialized() -> bool {
         false
     }
-    pub fn send_resched_ipi(_target: u32) {}
+    pub fn send_resched_ipi(_target: u32) { panic!("RISC-V reschedule IPI is not implemented (R6)") }
     pub const REG_LVT_TIMER: u32 = 0x320;
     pub const REG_TIMER_INIT: u32 = 0x380;
     pub const REG_TIMER_CURRENT: u32 = 0x390;
     pub fn read_reg(_reg: u32) -> u32 {
-        0
+        panic!("Local APIC registers are unavailable on RISC-V")
     }
 }
 
@@ -114,10 +137,14 @@ pub mod smp {
         1
     }
     pub fn init() -> Result<usize, &'static str> {
-        Ok(1)
+        Err("RISC-V SMP bring-up is not implemented (R6)")
     }
-    pub fn open_ap_scheduler_gate() {}
-    pub fn broadcast_panic_halt() {}
+    pub fn open_ap_scheduler_gate() { panic!("RISC-V SMP bring-up is not implemented (R6)") }
+    pub fn broadcast_panic_halt() -> ! {
+        loop {
+            crate::arch::riscv64::hlt();
+        }
+    }
 }
 
 pub mod pci {
@@ -127,25 +154,30 @@ pub mod pci {
 pub mod gdt_selectors {
     // No segment selectors on RISC-V; iret-frame fields become arch-neutral.
     pub fn kernel_code_selector() -> u16 {
-        0
+        panic!("RISC-V has no GDT code selectors")
     }
     pub fn kernel_data_selector() -> u16 {
-        0
+        panic!("RISC-V has no GDT data selectors")
     }
     pub fn user_code_selector() -> u16 {
-        0
+        panic!("RISC-V has no GDT code selectors")
     }
     pub fn user_data_selector() -> u16 {
-        0
+        panic!("RISC-V has no GDT data selectors")
     }
 }
 
 pub mod tss {
-    pub fn init() {}
-    pub fn set_kernel_stack(_top: u64) {}
-    pub fn set_kernel_stack_for(_cpu: usize, _top: u64) {}
-    pub fn kernel_stack_for(_cpu: usize) -> Option<crate::ostd::mm::VirtAddr> {
-        None
+    pub fn init() { panic!("RISC-V kernel stack setup via sscratch is not implemented (R2.5)") }
+    pub fn set_kernel_stack(top: crate::arch::xshim::VirtAddr) {
+        crate::arch::riscv64::percpu::set_kernel_rsp_current(top.as_u64());
+    }
+    pub fn set_kernel_stack_for(cpu: usize, top: crate::arch::xshim::VirtAddr) {
+        crate::arch::riscv64::percpu::set_kernel_rsp_for_cpu(cpu, top.as_u64());
+    }
+    pub fn kernel_stack_for(cpu: usize) -> Option<crate::ostd::mm::VirtAddr> {
+        crate::arch::riscv64::percpu::kernel_rsp_for_cpu(cpu)
+            .map(crate::arch::xshim::VirtAddr::new)
     }
 }
 
@@ -181,7 +213,9 @@ pub mod io {
 pub mod mouse_ready_marker {}
 
 pub mod keyboard {
-    pub fn inject_hid_scancode(_sc: u8) {}
+    pub fn inject_hid_scancode(_sc: u8, _pressed: bool) {
+        panic!("RISC-V HID keyboard input is not implemented")
+    }
     pub const KEY_LEFT: u8 = 0x82;
     pub const KEY_RIGHT: u8 = 0x83;
     pub const KEY_UP: u8 = 0x80;
@@ -192,7 +226,9 @@ pub mod keyboard {
     pub fn read_char() -> Option<u8> {
         crate::arch::serial::getc()
     }
-    pub fn add_to_buffer(_c: char) {}
+    pub fn add_to_buffer(_c: char) {
+        panic!("RISC-V hardware keyboard buffering is not implemented")
+    }
 }
 
 pub mod mouse {
@@ -211,15 +247,27 @@ pub mod mouse {
     pub fn read_event() -> Option<MouseEvent> {
         None
     }
-    pub fn mouse_pos() -> (usize, usize) { (0, 0) }
-    pub fn update_mouse_cursor(_x: usize, _y: usize) {}
-    pub fn push_event_from_hid(_dx: i32, _dy: i32, _buttons: u8) {}
-    pub fn inject_hid_scancode(_sc: u8) {}
+    pub fn mouse_pos() -> (i32, i32) { (0, 0) }
+    pub fn update_mouse_cursor(_x: i32, _y: i32) {}
+    pub fn push_event_from_hid(
+        _dx: i16,
+        _dy: i16,
+        _dz: i8,
+        _left: bool,
+        _right: bool,
+        _middle: bool,
+    ) {
+    }
+    pub fn inject_hid_scancode(_sc: u8, _pressed: bool) {
+        panic!("RISC-V HID mouse input is not implemented")
+    }
 }
 
 pub mod syscall {
     pub fn init() {}
-    pub fn set_kernel_rsp(_rsp: u64) {}
+    pub fn set_kernel_rsp(rsp: u64) {
+        crate::arch::riscv64::percpu::set_kernel_rsp_current(rsp);
+    }
 }
 
 pub mod keyboard_layout {
@@ -246,7 +294,7 @@ macro_rules! vga_println {
 
 // Extended PCI surface used by hardware/pci_client.rs. Real ECAM driver: R5.
 pub mod pci_full {
-    #[derive(Clone, Copy, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct PciAddress {
         pub bus: u8,
         pub device: u8,
@@ -271,21 +319,30 @@ pub mod pci_full {
         pub interrupt_pin: u8,
     }
     pub fn all_devices() -> alloc::vec::Vec<PciDevice> {
-        alloc::vec::Vec::new()
+        panic!("RISC-V PCI ECAM enumeration is not implemented (R5)")
     }
-    pub fn invalidate_cache() {}
-    pub fn probe_all(_crit: ProbeCriteria) -> alloc::vec::Vec<PciDevice> {
-        alloc::vec::Vec::new()
-    }
-        pub fn probe_first(_crit: ProbeCriteria) -> Option<(PciAddress, PciDevice)> {
+    /// PCI class names are not decoded on this target yet.
+    ///
+    /// Present so the facade is complete and callers such as `lspci` need no
+    /// per-target branch: they report the raw class codes instead of guessing.
+    pub fn class_name(_class: u8, _subclass: u8) -> Option<&'static str> {
         None
+    }
+    pub fn invalidate_cache() {
+        panic!("RISC-V PCI ECAM is not implemented (R5)")
+    }
+    pub fn probe_all(_crit: ProbeCriteria) -> alloc::vec::Vec<PciDevice> {
+        panic!("RISC-V PCI ECAM probing is not implemented (R5)")
+    }
+    pub fn probe_first(_crit: ProbeCriteria) -> Option<PciDevice> {
+        panic!("RISC-V PCI ECAM probing is not implemented (R5)")
     }
     pub fn read_u32_shim(_addr: PciAddress, _off: u8) -> u32 {
-        0xFFFF_FFFF
+        panic!("RISC-V PCI config access is not implemented (R5)")
     }
-    pub fn enable_bus_master(_addr: PciAddress) {}
+    pub fn enable_bus_master(_addr: PciAddress) { panic!("RISC-V PCI config access is not implemented (R5)") }
     pub fn read_bar(_addr: PciAddress, _idx: u8) -> Option<Bar> {
-        None
+        panic!("RISC-V PCI BAR access is not implemented (R5)")
     }
     pub mod vendor {
         pub const UNKNOWN: u16 = 0xFFFF;
@@ -314,7 +371,7 @@ pub mod pci_full {
         pub const STATUS: u8 = 0x06;
         pub const CAPABILITIES_PTR: u8 = 0x34;
         pub fn read_u32(_addr: PciAddress, _off: u8) -> u32 {
-            0xFFFF_FFFF
+            panic!("RISC-V PCI config access is not implemented (R5)")
         }
     }
     pub mod cap_id {
@@ -328,25 +385,31 @@ pub mod pci_full {
         pub const INTERRUPT_DISABLE: u16 = 0x400;
     }
     impl PciDevice {
-        pub fn read_config_u8(&self, _off: u8) -> u8 { 0xFF }
-        pub fn read_config_u16(&self, _off: u8) -> u16 { 0xFFFF }
-        pub fn read_config_u32(&self, _off: u8) -> u32 { 0xFFFF_FFFF }
-        pub fn write_config_u8(&self, _off: u8, _v: u8) {}
-        pub fn write_config_u16(&self, _off: u8, _v: u16) {}
-        pub fn write_config_u32(&self, _off: u8, _v: u32) {}
+        pub fn read_config_u8(&self, _off: u8) -> u8 { panic!("RISC-V PCI config access is not implemented (R5)") }
+        pub fn read_config_u16(&self, _off: u8) -> u16 { panic!("RISC-V PCI config access is not implemented (R5)") }
+        pub fn read_config_u32(&self, _off: u8) -> u32 { panic!("RISC-V PCI config access is not implemented (R5)") }
+        pub fn write_config_u8(&self, _off: u8, _v: u8) { panic!("RISC-V PCI config access is not implemented (R5)") }
+        pub fn write_config_u16(&self, _off: u8, _v: u16) { panic!("RISC-V PCI config access is not implemented (R5)") }
+        pub fn write_config_u32(&self, _off: u8, _v: u32) { panic!("RISC-V PCI config access is not implemented (R5)") }
         pub fn read_bar(&self, _idx: u8) -> Option<Bar> {
-            None
+            panic!("RISC-V PCI BAR access is not implemented (R5)")
         }
-        pub fn enable_bus_master(&self) {}
+        pub fn enable_bus_master(&self) { panic!("RISC-V PCI config access is not implemented (R5)") }
+        pub fn enable_io_space(&self) { panic!("RISC-V PCI config access is not implemented (R5)") }
     }
 
-    pub struct Bar;
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Bar {
+        Io { port: u16 },
+        Memory32 { addr: u32, prefetchable: bool },
+        Memory64 { addr: u64, prefetchable: bool },
+    }
     impl Bar {
         pub fn phys_addr(&self) -> u64 {
-            0
+            panic!("RISC-V PCI BAR access is not implemented (R5)")
         }
         pub fn size(&self) -> u64 {
-            0
+            panic!("RISC-V PCI BAR access is not implemented (R5)")
         }
     }
     #[derive(Clone, Copy, Default)]
@@ -355,6 +418,7 @@ pub mod pci_full {
         pub device_id: Option<u16>,
         pub class_code: Option<u8>,
         pub subclass: Option<u8>,
+        pub prog_if: Option<u8>,
     }
     impl ProbeCriteria {
         pub fn new() -> Self {
@@ -366,8 +430,8 @@ pub mod pci_full {
     }
     pub mod msi_cap {}
 
-    pub fn find_virtio_device(_dev_id: u16) -> Option<(PciAddress, PciDevice)> {
-        None
+    pub fn find_virtio_device(_dev_id: u16) -> Option<PciDevice> {
+        panic!("RISC-V VirtIO discovery is not implemented (R5)")
     }
     pub mod msix_cap {}
     pub mod msix_ctrl {}
@@ -423,9 +487,12 @@ pub mod cpuid_x86 {
 
 // pci_full re-exported as `pci` already; add missing submodules used by gfx/shell.
 pub mod msi {
-    pub fn enable(_dev: (), _vec: u8) {}
-    pub fn probe_and_enable(_addr: crate::arch::pci::PciAddress, _vector: u8) -> bool {
-        false
+    pub fn enable(_dev: (), _vec: u8) { panic!("PCI MSI is not implemented on RISC-V (R5)") }
+    pub fn probe_and_enable(
+        _pci_dev: &crate::hardware::pci_client::PciDevice,
+        _prefer_msix: bool,
+    ) -> (u8, u8) {
+        panic!("PCI MSI is not implemented on RISC-V (R5)")
     }
 }
 pub mod vga_text {
@@ -455,12 +522,14 @@ pub mod io2 {
 }
 
 pub mod ring3_diag {
-    pub fn validate_ring3_state(_rip: u64, _rsp: u64, _cs: u64) {}
+    pub fn validate_ring3_state(_rip: u64, _rsp: u64, _cs: u16, _ss: u16) {
+        panic!("RISC-V user-return validation is not implemented (R3)")
+    }
 }
 
 pub mod tss_extra {
     pub fn kernel_stack_for(_cpu: usize) -> Option<u64> {
-        None
+        panic!("RISC-V kernel stack lookup via sscratch is not implemented (R2.5)")
     }
 }
 
@@ -469,12 +538,12 @@ pub mod tss_extra {
 pub mod apic {
     pub use super::apic_base::*;
     pub const IPI_N3_MIGRATE_VECTOR: u8 = 0xF0;
-    pub fn init(_addr: u64) {}
-    pub fn eoi() {}
+    pub fn init(_addr: u32) { panic!("Local APIC is unavailable on RISC-V") }
+    pub fn eoi() { panic!("Local APIC EOI is unavailable on RISC-V") }
     pub fn is_present() -> bool {
         false
     }
-    pub fn send_ipi_raw(_target: u32, _value: u32) {}
+    pub fn send_ipi_raw(_target: u32, _value: u32) { panic!("RISC-V IPI support is not implemented (R6)") }
 }
 
 pub mod gdt {
@@ -482,16 +551,16 @@ pub mod gdt {
     #[derive(Clone, Copy)]
     pub struct SegmentSelector(pub u16);
     pub const fn kernel_code_selector() -> SegmentSelector {
-        SegmentSelector(0)
+        panic!("RISC-V has no GDT code selectors")
     }
     pub const fn kernel_data_selector() -> SegmentSelector {
-        SegmentSelector(0)
+        panic!("RISC-V has no GDT data selectors")
     }
     pub const fn user_code_selector() -> SegmentSelector {
-        SegmentSelector(0)
+        panic!("RISC-V has no GDT code selectors")
     }
     pub const fn user_data_selector() -> SegmentSelector {
-        SegmentSelector(0)
+        panic!("RISC-V has no GDT data selectors")
     }
 }
 
@@ -506,23 +575,27 @@ pub mod idt {
 
 pub mod pic {
     pub use crate::arch::riscv64::pic_stub::*;
-    pub fn disable_permanently() {}
+    pub fn disable_permanently() { panic!("8259 PIC is unavailable on RISC-V") }
 }
 
 pub mod ioapic {
-    pub fn init(_addr: u32, _gsi_base: u32) {}
-    pub fn route_legacy_irq(_gsi: u8, _lapic: u32, _vector: u8, _ovr: &[Option<crate::acpi::madt::InterruptSourceOverride>; 16]) {}
-    pub fn mask_legacy_irq(_irq: u8, _ovr: &[Option<crate::acpi::madt::InterruptSourceOverride>; 16]) {}
-    pub fn store_madt_overrides(_ovr: &[Option<crate::acpi::madt::InterruptSourceOverride>; 16]) {}
+    pub fn init(_addr: u32, _gsi_base: u32) { panic!("IOAPIC is unavailable on RISC-V") }
+    pub fn route_nic_irq(_irq: u8, _vector: u8) { panic!("RISC-V PLIC routing is not implemented (R2.1)") }
+    pub fn route_legacy_irq(_gsi: u8, _lapic: u32, _vector: u8, _ovr: &[Option<crate::acpi::madt::InterruptSourceOverride>; 16]) { panic!("RISC-V PLIC routing is not implemented (R2.1)") }
+    pub fn mask_legacy_irq(_irq: u8, _ovr: &[Option<crate::acpi::madt::InterruptSourceOverride>; 16]) { panic!("RISC-V PLIC routing is not implemented (R2.1)") }
+    pub fn store_madt_overrides(_ovr: &[Option<crate::acpi::madt::InterruptSourceOverride>; 16]) { panic!("RISC-V interrupt routing is not implemented (R2.1)") }
 
 }
 
 pub mod timer {
+    #[allow(unused_imports)]
     pub use crate::arch::riscv64::timer::*;
     pub const TIMER_HZ: u64 = 100;
     pub const NS_PER_TICK: u64 = 1_000_000_000 / TIMER_HZ;
     pub use crate::arch::riscv64::timer_extra::*;
     pub fn is_apic_timer_active() -> bool { false }
     pub fn apic_ticks_per_10ms() -> u32 { 0 }
-    pub fn start_apic_timer_cached() {}
 }
+
+/// x86-only CPU extensions — no-op on RISC-V.
+pub fn init_cpu_extensions() {}

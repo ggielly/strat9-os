@@ -100,7 +100,11 @@ fn device_name(vendor: u16, device: u16) -> Option<&'static str> {
 }
 
 /// Human-readable PCI class name.
-fn class_name(class: u8, subclass: u8) -> Option<&'static str> {
+///
+/// Public so the `lspci` shell command reports the same names the kernel
+/// decodes: it used to carry its own 20-arm table of the same class codes, in a
+/// different order and with different spellings.
+pub fn class_name(class: u8, subclass: u8) -> Option<&'static str> {
     match (class, subclass) {
         (0x00, 0x00) => Some("Legacy Device"),
         (0x00, 0x01) => Some("VGA-Compatible Device"),

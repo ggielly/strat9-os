@@ -218,7 +218,7 @@ struct Registers {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum NvmeError {
+pub enum NvmeError {
     ControllerFatal,
     Timeout,
     InvalidNamespace,

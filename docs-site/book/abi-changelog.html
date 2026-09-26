@@ -37,11 +37,23 @@
             const path_to_root = "";
             const default_light_theme = "coal";
             const default_dark_theme = "coal";
+            window.path_to_searchindex_js = "searchindex.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc.js"></script>
     </head>
     <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
     <div id="body-container">
         <!-- Work around some values being stored in localStorage wrapped in quotes -->
         <script>
@@ -82,10 +94,13 @@
                 sidebar = sidebar || 'visible';
             } else {
                 sidebar = 'hidden';
+                sidebar_toggle.checked = false;
             }
-            sidebar_toggle.checked = sidebar === 'visible';
-            html.classList.remove('sidebar-visible');
-            html.classList.add("sidebar-" + sidebar);
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
         </script>
 
         <nav id="sidebar" class="sidebar" aria-label="Table of contents">
@@ -119,7 +134,7 @@
                             <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
                             <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
                         </ul>
-                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
                             <i class="fa fa-search"></i>
                         </button>
                     </div>
@@ -133,7 +148,7 @@
                         <a href="https://git.strat9-os.org/strat9-os/" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="https://git.strat9-os.org/strat9-os/edit/main/docs-site/src/abi-changelog.md" title="Suggest an edit" aria-label="Suggest an edit">
+                        <a href="https://git.strat9-os.org/strat9-os/edit/main/docs-site/src/abi-changelog.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -142,7 +157,12 @@
 
                 <div id="search-wrapper" class="hidden">
                     <form id="searchbar-outer" class="searchbar-outer">
-                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
                     </form>
                     <div id="searchresults-outer" class="searchresults-outer hidden">
                         <div id="searchresults-header" class="searchresults-header"></div>
@@ -186,6 +206,10 @@
 </ul>
 <h2 id="recent-abi-updates-auto-generated"><a class="header" href="#recent-abi-updates-auto-generated">Recent ABI updates (auto-generated)</a></h2>
 <ul>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/dc616fa7be6e693a96330d3cff49dbaac0880ef8"><code>dc616fa</code></a> refactor(arch): unify x86_64 crate access via x86_crate_shim, complete riscv stubs</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f926367f65dd2ae622412ec1ccc71b4dee486a2a"><code>f926367</code></a> refactor(arch): route shared code through arch::xshim, gate limine/x86 deps</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9e75f89596da79618fcd1133953aba556b3c4392"><code>9e75f89</code></a> refactor(arch): migrate process/ and syscall/ call-sites to arch facade</li>
+<li>2026-07-18 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/abb7dd7e60991de111632e72ae8658adccdf8697"><code>abb7dd7</code></a> feat(buddy): harden, optimize, and add kernel.toml configuration</li>
 <li>2026-07-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/fe68f9aacb1b70b8601cbdde1423be75628255d1"><code>fe68f9a</code></a> fix(vfs,console,scheduler): VFS improvements, console perf, panic backtrace</li>
 <li>2026-07-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3a5eb69d9b3041f89c205e184b4afe15c07ee44d"><code>3a5eb69</code></a> feat(silo): replace Vec with heapless::Vec for bounded fields</li>
 <li>2026-07-09 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ab22b0d9b010dd704cf6044580b4f310c5748524"><code>ab22b0d</code></a> feat: 3-level IPC transport, N3 MMU thread migration, graphical silo, NIC/E1000 fixes</li>
@@ -212,10 +236,6 @@
 <li>2026-04-06 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/309a9c1bb5e9938b0b6b5826d27f8977414ca63e"><code>309a9c1</code></a> refactor: runtime allocation, scheduler lock decoupling, FixedQueue, and VGA improvements</li>
 <li>2026-03-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a9a6cd68b3dbce1e3ecacea313dd598b92312002"><code>a9a6cd6</code></a> Implement block-oriented memory management and ownership tracking</li>
 <li>2026-03-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ec8ee9f88ec5a4cade0c7e5f8433c56605ce888a"><code>ec8ee9f</code></a> refactor(memory): update reference counting logic for COW frames</li>
-<li>2026-03-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/aaa89e0ee568eb24908817c20ec50bf4fd3cd282"><code>aaa89e0</code></a> Refactor: Decouple per-CPU scheduler state and logic from the global scheduler instance by moving <code>SchedulerCpu</code> to local CPU storage.</li>
-<li>2026-03-21 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c3f93c628fd8be78fd9cc29fbf21692aaacbf494"><code>c3f93c6</code></a> feat: Implement TSC-based boot timing and milestones, along with an analysis...</li>
-<li>2026-03-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/eb7818d13ba67b1b3f718d6161f71eee0d123595"><code>eb7818d</code></a> feat: Implement static module loading from initfs paths and increase module blob size limit.</li>
-<li>2026-03-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/acfdbbd126584bcd47355873c93c5584c67877c2"><code>acfdbbd</code></a> feat: Refine E9 debug output, add TSS inspection, and log syscall and kernel stack changes.</li>
 </ul>
 <!-- AUTO-ABI-CHANGELOG:END -->
 <h2 id="changelog-entries"><a class="header" href="#changelog-entries">Changelog entries</a></h2>
@@ -287,6 +307,7 @@
 
         <!-- Custom JS scripts -->
         <script src="src/theme/mermaid-init.js"></script>
+
 
 
     </div>

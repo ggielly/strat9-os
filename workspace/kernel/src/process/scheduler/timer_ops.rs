@@ -266,3 +266,26 @@ pub fn get_all_tasks() -> Option<alloc::vec::Vec<Arc<Task>>> {
         None
     }
 }
+
+/// Number of registered tasks, or `None` when the scheduler lock is contended.
+///
+/// `get_all_tasks` clones an `Arc` per task, which is the right cost for a
+/// listing but wasteful for the `uptime` and `env` counters, which only want a
+/// length. The tri-state is the same as `get_all_tasks`: `None` means the lock
+/// was contended, not that there are no tasks.
+pub fn task_count() -> Option<usize> {
+    let scheduler = match GLOBAL_SCHED_STATE.try_lock() {
+        Some(guard) => guard,
+        None => {
+            note_try_lock_fail();
+            return None;
+        }
+    };
+    scheduler.as_ref().map(|sched| sched.all_tasks.len())
+}
+
+/// Trace putc routed to the arch serial backend (replaces port 0xE9 debug).
+#[inline]
+pub(crate) fn debug_trace_putc(c: u8) {
+    crate::arch::serial::_print(format_args!("{}", c as char));
+}

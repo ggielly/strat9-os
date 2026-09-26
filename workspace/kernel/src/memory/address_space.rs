@@ -180,8 +180,12 @@ impl AddressSpace {
     /// # Safety
     /// Must be called exactly once, during single-threaded init, after paging is initialized.
     pub unsafe fn new_kernel() -> Self {
-        let (level_4_frame, _flags) = Cr3::read();
-        let cr3_phys = level_4_frame.start_address();
+        #[cfg(target_arch = "x86_64")]
+        let cr3_phys = Cr3::read().0.start_address();
+        #[cfg(target_arch = "riscv64")]
+        let cr3_phys = crate::arch::xshim::PhysAddr::new(
+            crate::arch::riscv64::paging::root_physical_address(),
+        );
         let l4_table_virt = VirtAddr::new(crate::memory::phys_to_virt(cr3_phys.as_u64()));
 
         log::info!(
@@ -1679,21 +1683,30 @@ impl AddressSpace {
     /// # Safety
     /// The caller must ensure this address space's page tables are valid and
     /// that the kernel half is correctly mapped.
+    #[cfg(target_arch = "x86_64")]
     pub unsafe fn switch_to(&self) {
         let (current_frame, _) = Cr3::read();
         if current_frame.start_address() == self.cr3_phys {
             return; // Already active : skip to avoid TLB flush.
         }
 
+        let frame = X86PhysFrame::<Size4KiB>::from_start_address(self.cr3_phys)
+            .expect("CR3 address not aligned");
+        crate::e9_println!("C");
         // SAFETY: cr3_phys points to a valid, 4KiB-aligned PML4 table with
         // the kernel half correctly populated.
         unsafe {
-            let frame =
-                X86PhysFrame::from_start_address(self.cr3_phys).expect("CR3 address not aligned");
-            crate::e9_println!("C");
             Cr3::write(frame, Cr3Flags::empty());
-            crate::e9_println!("c");
         }
+        crate::e9_println!("c");
+    }
+
+    #[cfg(target_arch = "riscv64")]
+    pub unsafe fn switch_to(&self) {
+        if self.is_kernel {
+            return;
+        }
+        panic!("RISC-V per-process address spaces are not implemented")
     }
 
     /// Whether this is the kernel address space.

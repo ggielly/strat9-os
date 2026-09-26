@@ -102,6 +102,16 @@ impl MountTable {
     pub fn list(&self) -> Vec<String> {
         self.mounts.iter().map(|m| m.prefix.clone()).collect()
     }
+
+    /// Number of mounted prefixes.
+    pub fn len(&self) -> usize {
+        self.mounts.len()
+    }
+
+    /// True when nothing is mounted.
+    pub fn is_empty(&self) -> bool {
+        self.mounts.is_empty()
+    }
 }
 
 static GLOBAL_MOUNTS: Lazy<RwLock<MountTable>> = Lazy::new(|| RwLock::new(MountTable::new()));
@@ -124,6 +134,14 @@ pub fn resolve(path: &str) -> Result<(DynScheme, String), SyscallError> {
 /// List all global mount points.
 pub fn list_mounts() -> Vec<String> {
     GLOBAL_MOUNTS.read().list()
+}
+
+/// Number of mounted prefixes.
+///
+/// `list_mounts` clones every prefix into a fresh `Vec`, which is the right cost
+/// for a listing but wasteful for a counter such as the `env` computed value.
+pub fn mount_count() -> usize {
+    GLOBAL_MOUNTS.read().len()
 }
 
 // ============================================================================

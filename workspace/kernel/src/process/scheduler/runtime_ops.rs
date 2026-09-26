@@ -31,13 +31,15 @@ pub fn init_scheduler() {
     *scheduler = Some(new_sched);
     drop(scheduler); // Release the lock
 
-    // Only initialize legacy PIT if APIC timer is not active
+    #[cfg(target_arch = "x86_64")]
     if !timer::is_apic_timer_active() {
-        timer::init_pit(100); // 100Hz = 10ms interval for quantum
+        timer::init_pit(100);
         log::info!("Scheduler: using legacy PIT timer (100Hz)");
     } else {
         log::info!("Scheduler: using APIC timer (100Hz)");
     }
+    #[cfg(target_arch = "riscv64")]
+    log::info!("Scheduler: using S-mode timer (100Hz)");
     crate::serial_println!("[trace][sched] init_scheduler exit");
 }
 
@@ -266,7 +268,7 @@ pub fn finish_switch() {
             }
             spins = spins.saturating_add(1);
             if spins % 1_000_000 == 0 {
-                unsafe { core::arch::asm!("mov al, 'W'; out 0xe9, al", out("al") _) };
+                debug_trace_putc(b'W');
             }
             core::hint::spin_loop();
         };
@@ -456,6 +458,7 @@ pub fn yield_dead_task() {
     restore_flags(saved_flags);
 }
 
+#[cfg(target_arch = "x86_64")]
 #[inline]
 fn interrupt_frame_fits(task: &Arc<Task>, rsp: u64) -> bool {
     let stack_base = task.kernel_stack.virt_base.as_u64();
@@ -549,6 +552,7 @@ pub fn maybe_preempt() {
 /// stack. This lets us save the outgoing task immediately, select the next
 /// runnable task under the scheduler lock, and return an `iretq`-compatible
 /// frame pointer for the raw timer stub.
+#[cfg(target_arch = "x86_64")]
 pub fn maybe_preempt_from_interrupt(
     cpu_index: usize,
     current_frame: &mut crate::syscall::SyscallFrame,
@@ -588,7 +592,7 @@ pub fn maybe_preempt_from_interrupt(
         let current = match cpu.current_task.as_ref() {
             Some(t) => t.clone(),
             None => {
-                unsafe { core::arch::asm!("mov al, 'X'; out 0xe9, al", out("al") _) };
+                debug_trace_putc(b'X');
                 return None;
             }
         };
@@ -619,7 +623,7 @@ pub fn maybe_preempt_from_interrupt(
             }
             let fits = interrupt_frame_fits(&next, next_rsp);
             if next_rsp == 0 || !fits {
-                unsafe { core::arch::asm!("mov al, 'A'; out 0xe9, al", out("al") _) };
+                debug_trace_putc(b'A');
                 let is_idle_fallback = Arc::ptr_eq(&next, &cpu.idle_task);
                 _task_to_drop = cpu.task_to_drop.take();
 
@@ -859,4 +863,10 @@ pub(super) extern "C" fn idle_task_main() -> ! {
         // Halt until next interrupt (saves power, timer will wake us)
         crate::arch::hlt();
     }
+}
+
+/// Trace putc routed to the arch serial backend (replaces port 0xE9 debug).
+#[inline]
+pub(crate) fn debug_trace_putc(c: u8) {
+    crate::arch::serial::_print(format_args!("{}", c as char));
 }
