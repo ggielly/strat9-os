@@ -1,4 +1,4 @@
-//! Mirror of kernel/src/memory — the allocator core, verbatim.
+//! Mirror of kernel/src/memory : the allocator core, verbatim.
 //!
 //! Included modules: `boot_alloc`, `zone`, `frame`, `buddy`.
 //! Faked at this level: HHDM translation (fixed offset), everything

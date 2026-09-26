@@ -3,8 +3,8 @@
 //! See also: [Driver Model Guide](https://strat9-os.org/strat9-os-docs/driver-model.html)
 //! for component trait, PCI enumeration, and driver categories.
 
-pub mod ec;
 pub mod amdgpu;
+pub mod ec;
 pub mod nic;
 pub mod pci_client;
 pub mod storage;

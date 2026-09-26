@@ -321,9 +321,9 @@ impl EhciController {
         qh_virt.add(0).write_volatile(0x0000_0002); // horizontal: terminate
         qh_virt.add(1).write_volatile(
             (device_addr as u32 & 0x7F)            // bits 6:0 = device address
-            | ((max_packet & 0x7FF) << 16),        // bits 26:16 = max packet size
+            | ((max_packet & 0x7FF) << 16), // bits 26:16 = max packet size
         );
-        qh_virt.add(2).write_volatile(0);          // endpoint capabilities
+        qh_virt.add(2).write_volatile(0); // endpoint capabilities
         qh_virt.add(3).write_volatile(td_phys as u32); // current TD
         qh_virt.add(4).write_volatile(td_phys as u32); // next TD
 
@@ -351,7 +351,7 @@ impl EhciController {
             | ((8u32 & 0x7FFF) << 16)               // Total bytes = 8
             | (0u32 << 25)                          // IOC = 0
             | (3u32 << 26)                          // CERR = 3
-            | (0x2Du32);                            // PID = SETUP
+            | (0x2Du32); // PID = SETUP
         td_virt.add(0).write_volatile(0x0000_0002); // next: terminate
         td_virt.add(1).write_volatile(0x0000_0002); // alt next: terminate
         td_virt.add(2).write_volatile(setup_token);
@@ -375,7 +375,7 @@ impl EhciController {
                 | (((data_len as u32) & 0x7FFF) << 16) // Total bytes
                 | (0u32 << 25)                      // IOC = 0
                 | (3u32 << 26)                      // CERR = 3
-                | data_pid;                         // PID = IN/OUT
+                | data_pid; // PID = IN/OUT
             let data_td_virt = (td_virt as *mut u8).add(0x20) as *mut u32;
             data_td_virt.add(0).write_volatile(0x0000_0002);
             data_td_virt.add(1).write_volatile(0x0000_0002);
@@ -388,7 +388,7 @@ impl EhciController {
                 | (0u32 << 16)                      // Total bytes = 0
                 | (1u32 << 25)                      // IOC = 1
                 | (3u32 << 26)                      // CERR = 3
-                | (0u32);                           // PID = OUT (for IN transfer status)
+                | (0u32); // PID = OUT (for IN transfer status)
             let status_td_virt = (td_virt as *mut u8).add(0x40) as *mut u32;
             status_td_virt.add(0).write_volatile(0x0000_0002);
             status_td_virt.add(1).write_volatile(0x0000_0002);
@@ -405,7 +405,7 @@ impl EhciController {
                 | (0u32 << 16)
                 | (1u32 << 25)                      // IOC = 1
                 | (3u32 << 26)
-                | (0x69u32);                        // PID = IN (for OUT transfer status)
+                | (0x69u32); // PID = IN (for OUT transfer status)
             let status_td_virt = (td_virt as *mut u8).add(0x20) as *mut u32;
             status_td_virt.add(0).write_volatile(0x0000_0002);
             status_td_virt.add(1).write_volatile(0x0000_0002);
@@ -420,10 +420,7 @@ impl EhciController {
         let old_head = core::ptr::read_volatile(async_head);
         qh_virt.add(0).write_volatile(old_head & 0xFFFFFFE0 | 0x02);
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        core::ptr::write_volatile(
-            async_head,
-            (qh_phys as u32 & 0xFFFFFFE0) | 0x02,
-        );
+        core::ptr::write_volatile(async_head, (qh_phys as u32 & 0xFFFFFFE0) | 0x02);
 
         // Enable async schedule
         let cmd = core::ptr::addr_of!((*self.op_regs).usbcmd);
@@ -486,7 +483,12 @@ impl EhciController {
 
             let speed = unsafe { ((self.read_portsc(port) >> PORTSC_SPEED_SHIFT) & 0x03) as u8 };
             let max_packet: u32 = if speed as u32 == SPEED_HIGH { 64 } else { 8 };
-            log::info!("[EHCI] Port {} speed={} max_pkt={}", port, speed, max_packet);
+            log::info!(
+                "[EHCI] Port {} speed={} max_pkt={}",
+                port,
+                speed,
+                max_packet
+            );
 
             // Phase 1: SET_ADDRESS at address 0 (default)
             let addr = usb_address;
@@ -524,28 +526,15 @@ impl EhciController {
             let mut desc18 = [0u8; 18];
             let get_desc_18 = [0x80u8, 0x06, 0x00, 0x01, 0x00, 0x00, 18, 0x00];
             let _ = unsafe {
-                self.ctrl_transfer(
-                    port,
-                    &get_desc_18,
-                    Some(&mut desc18),
-                    18,
-                    addr,
-                    max_pkt0,
-                )
+                self.ctrl_transfer(port, &get_desc_18, Some(&mut desc18), 18, addr, max_pkt0)
             };
 
             let dev_class = desc18[4];
-            log::info!(
-                "[EHCI] Port {} class={:02x}",
-                port,
-                dev_class
-            );
+            log::info!("[EHCI] Port {} class={:02x}", port, dev_class);
 
             // Phase 4: SET_CONFIGURATION (value=1)
             let set_config = [0x00u8, 0x09, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00];
-            let _ = unsafe {
-                self.ctrl_transfer(port, &set_config, None, 0, addr, max_pkt0)
-            };
+            let _ = unsafe { self.ctrl_transfer(port, &set_config, None, 0, addr, max_pkt0) };
 
             // Phase 5: Hand off to HID driver
             crate::hardware::usb::hid::enumerate_device(port, addr, &desc18);

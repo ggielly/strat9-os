@@ -37,23 +37,11 @@
             const path_to_root = "";
             const default_light_theme = "coal";
             const default_dark_theme = "coal";
-            window.path_to_searchindex_js = "searchindex.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc.js"></script>
     </head>
     <body>
-    <div id="mdbook-help-container">
-        <div id="mdbook-help-popup">
-            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
-            <div>
-                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
-                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
-                <p>Press <kbd>?</kbd> to show this help</p>
-                <p>Press <kbd>Esc</kbd> to hide this help</p>
-            </div>
-        </div>
-    </div>
     <div id="body-container">
         <!-- Work around some values being stored in localStorage wrapped in quotes -->
         <script>
@@ -94,13 +82,10 @@
                 sidebar = sidebar || 'visible';
             } else {
                 sidebar = 'hidden';
-                sidebar_toggle.checked = false;
             }
-            if (sidebar === 'visible') {
-                sidebar_toggle.checked = true;
-            } else {
-                html.classList.remove('sidebar-visible');
-            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
         </script>
 
         <nav id="sidebar" class="sidebar" aria-label="Table of contents">
@@ -134,7 +119,7 @@
                             <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
                             <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
                         </ul>
-                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
                             <i class="fa fa-search"></i>
                         </button>
                     </div>
@@ -148,7 +133,7 @@
                         <a href="https://git.strat9-os.org/strat9-os/" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="https://git.strat9-os.org/strat9-os/edit/main/docs-site/src/abi-changelog.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                        <a href="https://git.strat9-os.org/strat9-os/edit/main/docs-site/src/abi-changelog.md" title="Suggest an edit" aria-label="Suggest an edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -157,12 +142,7 @@
 
                 <div id="search-wrapper" class="hidden">
                     <form id="searchbar-outer" class="searchbar-outer">
-                        <div class="search-wrapper">
-                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
-                            <div class="spinner-wrapper">
-                                <i class="fa fa-spinner fa-spin"></i>
-                            </div>
-                        </div>
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
                     </form>
                     <div id="searchresults-outer" class="searchresults-outer hidden">
                         <div id="searchresults-header" class="searchresults-header"></div>
@@ -206,9 +186,17 @@
 </ul>
 <h2 id="recent-abi-updates-auto-generated"><a class="header" href="#recent-abi-updates-auto-generated">Recent ABI updates (auto-generated)</a></h2>
 <ul>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/dc616fa7be6e693a96330d3cff49dbaac0880ef8"><code>dc616fa</code></a> refactor(arch): unify x86_64 crate access via x86_crate_shim, complete riscv stubs</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f926367f65dd2ae622412ec1ccc71b4dee486a2a"><code>f926367</code></a> refactor(arch): route shared code through arch::xshim, gate limine/x86 deps</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9e75f89596da79618fcd1133953aba556b3c4392"><code>9e75f89</code></a> refactor(arch): migrate process/ and syscall/ call-sites to arch facade</li>
+<li>2026-09-13 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3898c5074c07d2b5bdbd13b505a51ccfe92a0e30"><code>3898c50</code></a> feat(bootloader, kernel, abi): homemade strat9 UEFI bootloader : rewrite with scheduler and memory hardening</li>
+<li>2026-08-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c03feb24811b210174712aa7be5a9e097e32a80d"><code>c03feb2</code></a> fix(abi): ENOTSUP 52→95, XFS EiB constant fix, decode_fixed roundtrip tests</li>
+<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3ca6d7c6e61014fe2ad305f22e5bf75c0bdaeebd"><code>3ca6d7c</code></a> feat: Add U-Boot setup script and boot protocol implementation</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/88c52834c3a0af3c6f01f14f3d7364f32a862281"><code>88c5283</code></a> refactor(arch): unify x86_64 crate access via x86_crate_shim, complete riscv stubs</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c8ca94c43ffb700129b00ddf661e45637515d6fc"><code>c8ca94c</code></a> refactor(arch): route shared code through arch::xshim, gate limine/x86 deps</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f3366e1db5be83bea4a1f71e16be6bcc442fbce9"><code>f3366e1</code></a> refactor(arch): migrate process/ and syscall/ call-sites to arch facade</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4399b5f5229b096596f6fe221f5509014a258c88"><code>4399b5f</code></a> test: pass 2 over full codebase — syscall, ABI data/handshake, NIC drivers, allocator</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/88feb023653dd6b3b919a743829575707f63fc24"><code>88feb02</code></a> test(abi): exhaustive L0/L1 anti-regression suite</li>
+<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/09216d7c556d521ef4e05528753ca02c70950e72"><code>09216d7</code></a> Merge branch 'fix/elf-loader-hardening' into 'main'</li>
+<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/2bad5b9b8ae1a351c26ddcc69a78488a5d659dfe"><code>2bad5b9</code></a> feat(elf): loader hardening (#62 #63 #64 #67 #68, groundwork #66)</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6ca7fef90feacf3fe163cf6c5be7ba833c460e02"><code>6ca7fef</code></a> fix(ipc): security hardening, perf fixes and typed wire-format layer</li>
 <li>2026-07-18 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/abb7dd7e60991de111632e72ae8658adccdf8697"><code>abb7dd7</code></a> feat(buddy): harden, optimize, and add kernel.toml configuration</li>
 <li>2026-07-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/fe68f9aacb1b70b8601cbdde1423be75628255d1"><code>fe68f9a</code></a> fix(vfs,console,scheduler): VFS improvements, console perf, panic backtrace</li>
 <li>2026-07-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3a5eb69d9b3041f89c205e184b4afe15c07ee44d"><code>3a5eb69</code></a> feat(silo): replace Vec with heapless::Vec for bounded fields</li>
@@ -221,21 +209,13 @@
 <li>2026-05-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b2bbcc0bdd8c836ad396a1f32afd590b0c7236a8"><code>b2bbcc0</code></a> Improve and fix IPC</li>
 <li>2026-05-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/db23b5365e1ee201e8928c2a87ac2d449e876552"><code>db23b53</code></a> Fix major memory leak and remove sshd silo</li>
 <li>2026-05-19 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93c8927544e95bb8847495f1044913f9f9ff05b0"><code>93c8927</code></a> async: implement and optimize async I/O completion handling</li>
-<li>2026-05-18 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb"><code>7c5efb4</code></a> async: io_uring-like async I/O : ring, dispatch, AHCI bridge (Phases 1-4)</li>
+<li>2026-05-18 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb"><code>7c5efb4</code></a> async: io_uring-like async I/O — ring, dispatch, AHCI bridge (Phases 1-4)</li>
 <li>2026-05-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/cc4944a2c78236c41fce4b8f1054e119fc2bcd8e"><code>cc4944a</code></a> Refactor and clean up code in various modules</li>
 <li>2026-05-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ecc416df41e29c26f6839ee15cffbc7a7dd41f05"><code>ecc416d</code></a> refactor: strate-init refactoring, ELF/VFS/signal hardening, TSC calibration fix</li>
 <li>2026-05-08 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f070d41c31fb505fef36603ee7cbc0c6648944b3"><code>f070d41</code></a> Add kernel entropy pool with interrupt-driven collection</li>
 <li>2026-05-08 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9dedb9f19215cd1ad7f4d65d88fe84e4832bfc7c"><code>9dedb9f</code></a> Implement robust list support (set_robust_list/get_robust_list)</li>
 <li>2026-05-08 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d2e90a2ffc1886bc3e72b6d2d10e4dd99c156d5a"><code>d2e90a2</code></a> Bridge clone() thread creation via SYS_THREAD_CREATE, add faccessat routing</li>
 <li>2026-05-08 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/dabcad2d5250a317a12ec3b41048a9dfe3d6019c"><code>dabcad2</code></a> Add sys_access(), sys_faccessat(), and SYS_GETRANDOM() in syscall dispatcher</li>
-<li>2026-05-08 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/946f200860b2db8971b15b0829b987cb5282fd78"><code>946f200</code></a> Add missing call for clock_nanosleep and update the calling manager</li>
-<li>2026-05-06 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/117863ea4c6cb1ab65bf240da800c838e4ad8572"><code>117863e</code></a> Enhance network and silo management functionality</li>
-<li>2026-04-12 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6963e28b120c8f86bd08c0c6c6c722058693d945"><code>6963e28</code></a> fix: reduce scheduler contention and harden early boot memory init</li>
-<li>2026-04-12 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f3647c11469c7c728746e3947aecc5d5b067b2fb"><code>f3647c1</code></a> feat(memory): production-grade allocator architecture (#49)</li>
-<li>2026-04-06 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a941264b051e54b64e96a4f72375cd2b6d533b56"><code>a941264</code></a> feat: capability-based CWD, *at syscalls, and O_RESOLVE_BENEATH sandboxing</li>
-<li>2026-04-06 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/309a9c1bb5e9938b0b6b5826d27f8977414ca63e"><code>309a9c1</code></a> refactor: runtime allocation, scheduler lock decoupling, FixedQueue, and VGA improvements</li>
-<li>2026-03-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a9a6cd68b3dbce1e3ecacea313dd598b92312002"><code>a9a6cd6</code></a> Implement block-oriented memory management and ownership tracking</li>
-<li>2026-03-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ec8ee9f88ec5a4cade0c7e5f8433c56605ce888a"><code>ec8ee9f</code></a> refactor(memory): update reference counting logic for COW frames</li>
 </ul>
 <!-- AUTO-ABI-CHANGELOG:END -->
 <h2 id="changelog-entries"><a class="header" href="#changelog-entries">Changelog entries</a></h2>
@@ -307,7 +287,6 @@
 
         <!-- Custom JS scripts -->
         <script src="src/theme/mermaid-init.js"></script>
-
 
 
     </div>

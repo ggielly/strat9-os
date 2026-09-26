@@ -120,14 +120,14 @@ impl GlobalSchedState {
 
     /// Add a task to the scheduler
     pub fn add_task(&mut self, task: Arc<Task>) -> Option<usize> {
-        let cpu_index = self.select_cpu_for_task();
+        let cpu_index = self.select_cpu_for_task(&task);
         self.add_task_on_cpu(task, cpu_index)
     }
 
     /// Performs the add task with parent operation.
     pub fn add_task_with_parent(&mut self, task: Arc<Task>, parent: TaskId) -> Option<usize> {
         let child = task.id;
-        let cpu_index = self.select_cpu_for_task();
+        let cpu_index = self.select_cpu_for_task(&task);
         let ipi = self.add_task_on_cpu(task, cpu_index);
         {
             let mut identity = SCHED_IDENTITY.write();
@@ -146,63 +146,33 @@ impl GlobalSchedState {
             cpu_index
         );
         task.set_state(TaskState::Ready);
-        crate::serial_println!(
-            "[trace][sched] add_task_on_cpu state ready tid={}",
-            task_id.as_u64()
-        );
 
-        crate::serial_println!(
-            "[trace][sched] add_task_on_cpu before clone tid={} all_tasks_len={}",
-            task_id.as_u64(),
-            self.all_tasks.len()
-        );
-        let task_clone = task.clone();
-        crate::serial_println!(
-            "[trace][sched] add_task_on_cpu before all_tasks.insert tid={}",
-            task_id.as_u64()
-        );
-        self.insert_all_task_locked(task_id, task_clone);
-        crate::serial_println!(
-            "[trace][sched] add_task_on_cpu all_tasks inserted tid={}",
-            task_id.as_u64()
-        );
+        self.insert_all_task_locked(task_id, task.clone());
         self.task_cpu.insert(task_id, cpu_index);
         task.home_cpu
             .store(cpu_index, core::sync::atomic::Ordering::Relaxed);
-        crate::serial_println!(
-            "[trace][sched] add_task_on_cpu task_cpu inserted tid={}",
-            task_id.as_u64()
-        );
+
+        // Lock order: IDENTITY write (rank 2). Caller holds GLOBAL (rank 1).
+        lockdep_acquire(LockRank::IdentityW, None);
         {
             let mut identity = SCHED_IDENTITY.write();
             identity.pid_to_task.insert(task.pid, task_id);
-            crate::serial_println!(
-                "[trace][sched] add_task_on_cpu pid map inserted tid={}",
-                task_id.as_u64()
-            );
             identity.tid_to_task.insert(task.tid, task_id);
-            crate::serial_println!(
-                "[trace][sched] add_task_on_cpu tid map inserted tid={}",
-                task_id.as_u64()
-            );
             Self::register_identity_locked(&mut identity, &task);
-            crate::serial_println!(
-                "[trace][sched] add_task_on_cpu identity registered tid={}",
-                task_id.as_u64()
-            );
         }
+        lockdep_release(LockRank::IdentityW);
+
+        // Lock order: LOCAL (rank 4). Caller holds GLOBAL (rank 1).
+        lockdep_acquire(LockRank::Local, Some(cpu_index));
         {
             let class = self.class_table.class_for_task(&task);
             if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_index].lock() {
                 local_cpu.class_rqs.enqueue(class, task);
                 local_cpu.need_resched = true;
-                crate::serial_println!(
-                    "[trace][sched] add_task_on_cpu enqueued tid={} cpu={}",
-                    task_id.as_u64(),
-                    cpu_index
-                );
             }
         }
+        lockdep_release(LockRank::Local);
+
         sched_trace(format_args!(
             "enqueue task={} cpu={}",
             task_id.as_u64(),
@@ -278,15 +248,44 @@ impl GlobalSchedState {
     pub fn wake_task_locked(&mut self, id: TaskId) -> (bool, Option<usize>) {
         self.clear_task_wake_deadline_locked(id);
 
-        // Check if the task is already in BLOCKED_TASKS first to wake it directly.
+        // Lock order: BLOCKED (rank 3) → LOCAL (rank 4). Caller holds GLOBAL (rank 1).
         let mut woken = false;
         let mut ipi_cpu = None;
         {
+            lockdep_acquire(LockRank::Blocked, None);
             let mut blocked = super::BLOCKED_TASKS.lock();
             if let Some(task) = blocked.remove(&id) {
                 task.set_state(TaskState::Ready);
-                let home = task.home_cpu.load(core::sync::atomic::Ordering::Relaxed);
-                let cpu_index = if home != usize::MAX { home } else { 0 };
+
+                // --- CPU placement: prefer last_cpu (cache warmth), then home_cpu ---
+                let last = task.last_cpu.load(Ordering::Relaxed);
+                let home = task.home_cpu.load(Ordering::Relaxed);
+                let n = active_cpu_count();
+
+                // Try last_cpu first: valid, online, and reasonably loaded.
+                let cpu_index = if last < n {
+                    let last_ok = {
+                        lockdep_acquire(LockRank::Local, Some(last));
+                        let ok = LOCAL_SCHEDULERS[last]
+                            .lock()
+                            .as_ref()
+                            .map(|c| c.class_rqs.runnable_len() <= 2)
+                            .unwrap_or(false);
+                        lockdep_release(LockRank::Local);
+                        ok
+                    };
+                    if last_ok {
+                        last
+                    } else if home < n {
+                        home
+                    } else {
+                        0
+                    }
+                } else if home < n {
+                    home
+                } else {
+                    0
+                };
 
                 let class = {
                     use crate::process::sched::SchedClassId;
@@ -300,10 +299,12 @@ impl GlobalSchedState {
                     }
                 };
 
+                lockdep_acquire(LockRank::Local, Some(cpu_index));
                 if let Some(ref mut local_cpu) = *super::LOCAL_SCHEDULERS[cpu_index].lock() {
                     local_cpu.class_rqs.enqueue(class, task.clone());
                     local_cpu.need_resched = true;
                 }
+                lockdep_release(LockRank::Local);
 
                 ipi_cpu = if cpu_index != current_cpu_index() {
                     Some(cpu_index)
@@ -312,14 +313,16 @@ impl GlobalSchedState {
                 };
                 woken = true;
             }
+            lockdep_release(LockRank::Blocked);
+            drop(blocked);
         }
 
         if woken {
             return (true, ipi_cpu);
         }
 
-        // Fallback: task is not yet in BLOCKED_TASKS (still transitioning to
-        // Blocked). Set wake_pending so block_current_task will skip blocking.
+        // Fallback: task not yet in BLOCKED_TASKS (still transitioning to
+        // Blocked). Set wake_pending so block_current_task skips blocking.
         if let Some(task) = self.all_tasks.get(&id) {
             task.wake_pending
                 .store(true, core::sync::atomic::Ordering::Release);
@@ -412,31 +415,52 @@ impl GlobalSchedState {
 
     /// Select the least-loaded CPU for a newly created task.
     ///
-    /// Uses **blocking** `LOCAL_SCHEDULERS[i].lock()` for each CPU while
-    /// `GLOBAL_SCHED_STATE` is already held by the caller.  This is safe because the
-    /// hot-path only ever does `try_lock_no_irqsave` on `GLOBAL_SCHED_STATE` (so it
-    /// cannot deadlock with us), but it may briefly stall behind a timer tick
-    /// that holds a LOCAL lock.  The stall is bounded by one tick period.
-    fn select_cpu_for_task(&self) -> usize {
-        // Early boot: before the first real task is running, keep all new tasks
-        // on the BSP. Spreading init/shell/status across CPUs at this point can
-        // strand boot-critical work on AP scheduler instances that have not yet
-        // entered their steady-state scheduling loop.
+    /// Called with `GLOBAL_SCHED_STATE` held.  Acquires each LOCAL sequentially.
+    /// Lock order: GLOBAL (held) → LOCAL[cpu] (rank 4).  Never two LOCALs simultaneously.
+    ///
+    /// Placement strategy:
+    /// 1. Early boot (all idle): CPU 0.
+    /// 2. Soft affinity: prefer CPUs in the task's `affinity_mask` (from silo config).
+    ///    Tie-break with `last_cpu` (cache warmth).  If no affinity-eligible CPU
+    ///    has strictly lower load, fall back to unrestricted search.
+    /// 3. Unrestricted: pick the globally least-loaded CPU.
+    fn select_cpu_for_task(&self, task: &Task) -> usize {
         let n = active_cpu_count();
         let all_idle = (0..n).all(|i| {
-            LOCAL_SCHEDULERS[i]
+            lockdep_acquire(LockRank::Local, Some(i));
+            let result = LOCAL_SCHEDULERS[i]
                 .lock()
                 .as_ref()
                 .map(|cpu| cpu.current_task.is_none())
-                .unwrap_or(true)
+                .unwrap_or(true);
+            lockdep_release(LockRank::Local);
+            result
         });
         if all_idle {
             crate::serial_println!("[trace][sched] select_cpu_for_task early-boot best=0");
             return 0;
         }
-        let mut best = 0usize;
-        let mut best_load = usize::MAX;
+
+        let affinity = task.affinity_mask.load(Ordering::Relaxed);
+        let last = task.last_cpu.load(Ordering::Relaxed);
+        let has_affinity = affinity != 0;
+
+        // Pass 1: find least-loaded CPU among affinity-eligible CPUs.
+        let mut best_aff = None;
+        let mut best_aff_load = usize::MAX;
+        let mut best_aff_last = None; // best among those matching last_cpu
+        let mut best_aff_last_load = usize::MAX;
+
         for idx in 0..n {
+            let eligible = if has_affinity {
+                (affinity & (1u64 << idx)) != 0
+            } else {
+                true
+            };
+            if !eligible {
+                continue;
+            }
+            lockdep_acquire(LockRank::Local, Some(idx));
             let load = {
                 let guard = LOCAL_SCHEDULERS[idx].lock();
                 if let Some(ref cpu) = *guard {
@@ -453,20 +477,80 @@ impl GlobalSchedState {
                     0
                 }
             };
+            lockdep_release(LockRank::Local);
+
+            if load < best_aff_load {
+                best_aff = Some(idx);
+                best_aff_load = load;
+            }
+            // Prefer last_cpu when loads are equal (cache warmth).
+            if idx == last && load <= best_aff_last_load {
+                best_aff_last = Some(idx);
+                best_aff_last_load = load;
+            }
+        }
+
+        // If we have an affinity-eligible candidate, prefer it.
+        // Use last_cpu tie-breaker when loads are equal.
+        if let Some(aff_cpu) = best_aff {
+            // If last_cpu is also eligible and has equal or lower load, prefer it.
+            if let Some(lc) = best_aff_last {
+                if best_aff_last_load <= best_aff_load {
+                    crate::serial_println!(
+                        "[trace][sched] select_cpu_for_task affinity+last_cpu cpu={} load={}",
+                        lc,
+                        best_aff_last_load
+                    );
+                    return lc;
+                }
+            }
+            crate::serial_println!(
+                "[trace][sched] select_cpu_for_task affinity cpu={} load={}",
+                aff_cpu,
+                best_aff_load
+            );
+            return aff_cpu;
+        }
+
+        // Pass 2 (fallback): unrestricted least-loaded.
+        let mut best = 0usize;
+        let mut best_load = usize::MAX;
+        for idx in 0..n {
+            lockdep_acquire(LockRank::Local, Some(idx));
+            let load = {
+                let guard = LOCAL_SCHEDULERS[idx].lock();
+                if let Some(ref cpu) = *guard {
+                    let mut l = cpu.class_rqs.runnable_len();
+                    if let Some(current) = cpu.current_task.as_ref() {
+                        if self.class_table.class_for_task(current)
+                            != crate::process::sched::SchedClassId::Idle
+                        {
+                            l += 1;
+                        }
+                    }
+                    l
+                } else {
+                    0
+                }
+            };
+            lockdep_release(LockRank::Local);
             if load < best_load {
                 best = idx;
                 best_load = load;
             }
         }
         crate::serial_println!(
-            "[trace][sched] select_cpu_for_task best={} load={}",
+            "[trace][sched] select_cpu_for_task fallback best={} load={}",
             best,
             best_load
         );
         best
     }
 
-    /// Performs the migrate ready tasks for new class table operation.
+    /// Migrate all ready tasks to match the current class table.
+    ///
+    /// Called with `GLOBAL_SCHED_STATE` held.  Acquires each `LOCAL_SCHEDULERS[cpu]`
+    /// sequentially (never two at once).  Lock order: GLOBAL (held) → LOCAL[cpu] (rank 4).
     pub fn migrate_ready_tasks_for_new_class_table(&mut self) {
         let mut ready: Vec<(TaskId, Arc<Task>, usize)> = Vec::new();
         for (id, task) in self.all_tasks.iter() {
@@ -479,8 +563,10 @@ impl GlobalSchedState {
         }
 
         for (id, task, cpu_idx) in ready {
+            lockdep_acquire(LockRank::Local, Some(cpu_idx));
             let mut guard = LOCAL_SCHEDULERS[cpu_idx].lock();
             let Some(ref mut cpu) = *guard else {
+                lockdep_release(LockRank::Local);
                 continue;
             };
             if cpu.class_rqs.remove(id) {
@@ -488,6 +574,7 @@ impl GlobalSchedState {
                 cpu.class_rqs.enqueue(class, task);
                 cpu.need_resched = true;
             }
+            lockdep_release(LockRank::Local);
         }
     }
 }
@@ -516,10 +603,27 @@ pub(super) fn steal_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> Opti
     if now_tick < LAST_STEAL_TICK[cpu_index].load(Ordering::Relaxed) + STEAL_COOLDOWN_TICKS {
         return None;
     }
+    lockdep_assert_held(LockRank::Local);
 
     // Best-effort only: if a cold path is holding the global scheduler, skip
     // stealing instead of blocking the hot path.
-    let mut scheduler = GLOBAL_SCHED_STATE.try_lock_no_irqsave()?;
+    let mut scheduler = match GLOBAL_SCHED_STATE.try_lock_no_irqsave() {
+        Some(g) => g,
+        None => return None,
+    };
+    lockdep_acquire(LockRank::Global, None);
+    let result = steal_task_inner(&mut scheduler, cpu, cpu_index, now_tick);
+    lockdep_release(LockRank::Global);
+    result
+}
+
+/// Inner implementation of steal, separated for clean lockdep release.
+fn steal_task_inner(
+    scheduler: &mut Option<GlobalSchedState>,
+    cpu: &mut SchedulerCpu,
+    cpu_index: usize,
+    now_tick: u64,
+) -> Option<Arc<Task>> {
     let sched = scheduler.as_mut()?;
 
     let n = active_cpu_count();
@@ -556,6 +660,16 @@ pub(super) fn steal_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> Opti
                 return None;
             }
             if let Some(task) = sib.class_rqs.steal_candidate(&sib.class_table) {
+                // Soft affinity check: skip if the stealing CPU is not in the
+                // task's affinity mask.  Re-enqueue on the source to avoid
+                // dropping the task.
+                let affinity = task.affinity_mask.load(Ordering::Relaxed);
+                if affinity != 0 && (affinity & (1u64 << cpu_index)) == 0 {
+                    // Re-enqueue on source CPU.
+                    let class = sib.class_table.class_for_task(&task);
+                    sib.class_rqs.enqueue(class, task);
+                    return None;
+                }
                 sched.task_cpu.insert(task.id, cpu_index);
                 task.home_cpu
                     .store(cpu_index, core::sync::atomic::Ordering::Relaxed);
@@ -608,17 +722,35 @@ pub(super) fn pick_next_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> 
     }
 
     // Step 2: pick from local class_rqs.
+    unsafe {
+        crate::e9_mark!(b'O');
+    }
     let next = if let Some(next) = cpu.class_rqs.pick_next(&cpu.class_table) {
+        unsafe {
+            crate::e9_mark!(b'J');
+        }
         next
-    } else if let Some(stolen) = steal_task_local(cpu, cpu_index) {
-        // Step 3: try work-stealing from a sibling CPU.
-        stolen
     } else {
-        // Step 4: idle fallback.
-        cpu.idle_task.clone()
+        // Step 3: local queues empty — try work-stealing before idle.
+        unsafe {
+            crate::e9_mark!(b'S');
+        }
+        if let Some(stolen) = steal_task_local(cpu, cpu_index) {
+            unsafe {
+                crate::e9_mark!(b's');
+            }
+            stolen
+        } else {
+            unsafe {
+                crate::e9_mark!(b'j');
+            }
+            // Step 4: idle fallback.
+            cpu.idle_task.clone()
+        }
     };
 
     next.set_state(TaskState::Running);
+    next.last_cpu.store(cpu_index, Ordering::Relaxed);
     cpu.current_task = Some(next.clone());
     cpu.current_runtime = crate::process::sched::CurrentRuntime::new();
     next

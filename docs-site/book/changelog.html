@@ -37,23 +37,11 @@
             const path_to_root = "";
             const default_light_theme = "coal";
             const default_dark_theme = "coal";
-            window.path_to_searchindex_js = "searchindex.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc.js"></script>
     </head>
     <body>
-    <div id="mdbook-help-container">
-        <div id="mdbook-help-popup">
-            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
-            <div>
-                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
-                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
-                <p>Press <kbd>?</kbd> to show this help</p>
-                <p>Press <kbd>Esc</kbd> to hide this help</p>
-            </div>
-        </div>
-    </div>
     <div id="body-container">
         <!-- Work around some values being stored in localStorage wrapped in quotes -->
         <script>
@@ -94,13 +82,10 @@
                 sidebar = sidebar || 'visible';
             } else {
                 sidebar = 'hidden';
-                sidebar_toggle.checked = false;
             }
-            if (sidebar === 'visible') {
-                sidebar_toggle.checked = true;
-            } else {
-                html.classList.remove('sidebar-visible');
-            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
         </script>
 
         <nav id="sidebar" class="sidebar" aria-label="Table of contents">
@@ -134,7 +119,7 @@
                             <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
                             <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
                         </ul>
-                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
                             <i class="fa fa-search"></i>
                         </button>
                     </div>
@@ -148,7 +133,7 @@
                         <a href="https://git.strat9-os.org/strat9-os/" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="https://git.strat9-os.org/strat9-os/edit/main/docs-site/src/changelog.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                        <a href="https://git.strat9-os.org/strat9-os/edit/main/docs-site/src/changelog.md" title="Suggest an edit" aria-label="Suggest an edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -157,12 +142,7 @@
 
                 <div id="search-wrapper" class="hidden">
                     <form id="searchbar-outer" class="searchbar-outer">
-                        <div class="search-wrapper">
-                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
-                            <div class="spinner-wrapper">
-                                <i class="fa fa-spinner fa-spin"></i>
-                            </div>
-                        </div>
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
                     </form>
                     <div id="searchresults-outer" class="searchresults-outer hidden">
                         <div id="searchresults-header" class="searchresults-header"></div>
@@ -186,62 +166,62 @@
 <!-- AUTO-CHANGELOG:START -->
 <h2 id="project-stats"><a class="header" href="#project-stats">Project stats</a></h2>
 <ul>
-<li><strong>Total commits:</strong> <code>588</code></li>
+<li><strong>Total commits:</strong> <code>660</code></li>
 <li><strong>Latest tag:</strong> <code>0.1.0</code></li>
 <li><strong>Repository:</strong> <a href="https://git.strat9-os.org/strat9-os/strat9-os">git.strat9-os.org</a></li>
 </ul>
 <h2 id="recent-commits-auto-generated"><a class="header" href="#recent-commits-auto-generated">Recent commits (auto-generated)</a></h2>
 <ul>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b4f818ae6873260ad7abc0170a60faa88c894344"><code>b4f818a</code></a> ok</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/31e80214156e2b02e9ac57a1a25a3941d8c90b6f"><code>31e8021</code></a> fix(arch,riscv64): dedupe duplicated stub modules in facade_riscv</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e9b9ce4c3fafe1256d2e8cb2b9a2f27ba9ead1c2"><code>e9b9ce4</code></a> fix(arch,riscv64): SegmentSelector newtype for gdt stub, safe unmap on stub mapper</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/baa2c29b167c3cdc59a0855ff103e064ff27b9b1"><code>baa2c29</code></a> feat(ostd): Add/Sub<u64> operator impls for neutral PhysAddr/VirtAddr</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7aa40ea586f6cce38b0c3a208b302cc2787d03b8"><code>7aa40ea</code></a> fix(arch,riscv64): mapper::MapToError path fix inside OffsetPageTable impl</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/27908f66793d66d515536da16bee4c82eac6f493"><code>27908f6</code></a> feat(arch,riscv64): working Sv48 translate walker in stub mapper</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/010af6a243144d99d2e901c013ba397e9510bc88"><code>010af6a</code></a> feat(ipc,riscv64): Sv48 tagged-pointer layout for IntrusiveMailbox</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/94d757f5a7cb333d7ab75bf4dc242927f1c12c7d"><code>94d757f</code></a> feat(arch,riscv64): PciDevice config-space accessors (stubbed, R5 wires ECAM)</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/deb59a1a7fbfc4a037a9b25f4985940d6013503b"><code>deb59a1</code></a> fix(arch,riscv64): MouseEvent struct + u8 KEY_* scancode parity with x86</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/04a24c5ba31f35bd5f9149bba97e1c3a2430d7a2"><code>04a24c5</code></a> fix(arch,riscv64): restore unmap (tuple PhysFrame+MapperFlush) on stub mapper</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/faee718841f67d6b62fe6e52a5d2df3a6b7d433d"><code>faee718</code></a> fix(arch,riscv64): unmap returns PhysFrame, Cr3::write/Cr3Flags::empty stubs</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4c308415c18f787aa296551a72d4ae89a1e79362"><code>4c30841</code></a> fix(arch,riscv64): sealed PortValue trait for port stub (kills E0034)</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3e084942d8cc3c82d0dda733bb01e172c2863e19"><code>3e08494</code></a> fix(arch,riscv64): port stub typed read/write impls, drop stale traits</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e151bad94e8e3c544b1cf6a29a17ab2e020a4f05"><code>e151bad</code></a> fix(arch): annotate ambiguous PhysFrame::containing_address call-sites</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a61906487d45ac13cd61216b619bed706b9a2c64"><code>a619064</code></a> refactor(arch): Port trait-based reads, gate top TUI behind x86_64</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4d9897a6cfbca56dc240136871a2a247598b007f"><code>4d9897a</code></a> fix(arch,riscv64): dedupe stubs, align keyboard read_char, FrameAllocator cfg</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/319f2609402726db83a35e33335f984a9ef64e46"><code>319f260</code></a> fix(arch,riscv64): align stub signatures with x86 call-sites</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/95f89d11913372bdcc54297f6cba670459646510"><code>95f89d1</code></a> feat(arch,riscv64): full PciDevice struct + PCI surface stubs</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/870e7fb25db2f6d55e2c1c74ce82ae1b181a9188"><code>870e7fb</code></a> feat(arch,riscv64): Mapper trait surface on Sv48 skeleton</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/26755c276f885d12c95bc83a565b5531660172bd"><code>26755c2</code></a> feat(arch,riscv64): real Sv48 scaffolding in x86_64-stub, ostd pointer helpers</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/acc11a180b757f852686002e8aad757160712b26"><code>acc11a1</code></a> refactor(arch): gate VGA-UI commands behind x86_64, complete riscv framebuffer_info stub</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/1c60a700597ef17e5804a31d2ff866bf2fe6a633"><code>1c60a70</code></a> refactor(arch): route debug breadcrumbs + ahci rep movsb through per-arch paths</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/dc616fa7be6e693a96330d3cff49dbaac0880ef8"><code>dc616fa</code></a> refactor(arch): unify x86_64 crate access via x86_crate_shim, complete riscv stubs</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d1ca15c99789e52364094988fff27aacdbb5dc06"><code>d1ca15c</code></a> refactor(arch): replace port-0xE9 debug putc with arch-routed serial</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f926367f65dd2ae622412ec1ccc71b4dee486a2a"><code>f926367</code></a> refactor(arch): route shared code through arch::xshim, gate limine/x86 deps</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e98ed5e0bf15554f370a10798137cdcd8b1a3cbd"><code>e98ed5e</code></a> refactor(arch): migrate remaining call-sites to arch facade</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9e75f89596da79618fcd1133953aba556b3c4392"><code>9e75f89</code></a> refactor(arch): migrate process/ and syscall/ call-sites to arch facade</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6108b74039edf06964faa7770a642bfd795c7a3f"><code>6108b74</code></a> refactor(arch): introduce arch facade, migrate sync/ostd/memory call-sites</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/1e2edefa984ced2436346ee020657db5120b4291"><code>1e2edef</code></a> ci: retry pipeline (rustup download flake)</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9297cfe52d9ada4b55db1f3f0783dd10b49b4af2"><code>9297cfe</code></a> build: pin Rust toolchain to nightly-2026-07-20</li>
-<li>2026-07-18 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/bbb610798d13e2d0992532f639e33c1811dccec5"><code>bbb6107</code></a> Merge branch 'improve-buddy-allocator' into 'main'</li>
-<li>2026-07-18 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/abb7dd7e60991de111632e72ae8658adccdf8697"><code>abb7dd7</code></a> feat(buddy): harden, optimize, and add kernel.toml configuration</li>
-<li>2026-07-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5832b19921a8b3d7e59ec9de6391de6f391f1921"><code>5832b19</code></a> docs: update published documentation</li>
-<li>2026-07-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/1a72181f479278893775d6a3b19126f4b24b5999"><code>1a72181</code></a> docs: update published documentation</li>
-<li>2026-07-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0e0766a34c3b95f8e4de1d84f4cf4912da91ee4f"><code>0e0766a</code></a> docs: update published documentation</li>
-<li>2026-07-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f94c369709b3200794bfad047d09249a928a5ff3"><code>f94c369</code></a> Merge branch 'feat/vt100-console' into 'main'</li>
-<li>2026-07-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/057447f5d091361dbc59cce83cde1ea8fb6e6713"><code>057447f</code></a> feat(console): replace custom ANSI parser with vte crate</li>
-<li>2026-07-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5d53b0fba04bd9c2bd1b58366fafce327c821eb6"><code>5d53b0f</code></a> Merge branch 'improve-vfs-all' into 'main'</li>
-<li>2026-07-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/fe68f9aacb1b70b8601cbdde1423be75628255d1"><code>fe68f9a</code></a> fix(vfs,console,scheduler): VFS improvements, console perf, panic backtrace</li>
-<li>2026-07-15 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/425c2cd18dc1e6f065be037f4d087474356e426e"><code>425c2cd</code></a> docs: update published documentation</li>
-<li>2026-07-15 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3612d4a43fcad2f260491ad1b4534da937e880f4"><code>3612d4a</code></a> docs: update published documentation</li>
-<li>2026-07-15 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/545e1b805bfd73eda9bc894ce1a161f3883aeb2d"><code>545e1b8</code></a> Merge branch 'fix/console-performance' into 'main'</li>
-<li>2026-07-15 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/44e4aa70d7a7300c943048683ac54b6a534f57cc"><code>44e4aa7</code></a> perf(console): optimize rendering pipeline</li>
-<li>2026-07-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c3a9ecb885529735cb459e8600d99e8e90d9836c"><code>c3a9ecb</code></a> Merge branch 'feat/heapless-vec-deque' into 'main'</li>
-<li>2026-07-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3a5eb69d9b3041f89c205e184b4afe15c07ee44d"><code>3a5eb69</code></a> feat(silo): replace Vec with heapless::Vec for bounded fields</li>
-<li>2026-07-09 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c85c70f3b4f397ff9ace27674bfdfab7c077f649"><code>c85c70f</code></a> Merge branch 'feature/ipc-access-levels' into 'main'</li>
-<li>2026-07-09 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ab22b0d9b010dd704cf6044580b4f310c5748524"><code>ab22b0d</code></a> feat: 3-level IPC transport, N3 MMU thread migration, graphical silo, NIC/E1000 fixes</li>
-<li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/848baaf594c7a9fbd7f951c3959790dc26c1383e"><code>848baaf</code></a> Merge branch 'feat/input-to-userspace' into 'main'</li>
-<li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5a3d69c4e10c4cfc67976a837751ce50292f9032"><code>5a3d69c</code></a> feat: migrate input system to userspace</li>
-<li>2026-06-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/1b9890594097a56a13f632ecb9f2a2a6b0e9f431"><code>1b98905</code></a> Merge branch 'test/smp-hardware-debug' into 'main'</li>
+<li>2026-09-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/dec676674d7c935126b8eea77b8bde72979727ff"><code>dec6766</code></a> Merge branch 'ELF-tuning-and-fix' into 'main'</li>
+<li>2026-09-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e724272e9bb7d4ddadb3f3a5cdcdcbf3c95e582e"><code>e724272</code></a> Fix : unify logging to log::*, reject null ET_EXEC entry, warn on zero-size COPY relocs</li>
+<li>2026-09-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4c008c5cc3702bc915374b90a13518fec9268a9a"><code>4c008c5</code></a> docs: update published documentation</li>
+<li>2026-09-13 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/981429b03d580bf5e7dd51a7003628f176683285"><code>981429b</code></a> Merge branch 'fix/UEFI-bootloader' into 'main'</li>
+<li>2026-09-13 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3898c5074c07d2b5bdbd13b505a51ccfe92a0e30"><code>3898c50</code></a> feat(bootloader, kernel, abi): homemade strat9 UEFI bootloader : rewrite with scheduler and memory hardening</li>
+<li>2026-08-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/228eaa541a22686b510eab7224464c74012f7c29"><code>228eaa5</code></a> fix: regenerate corrupted Cargo.lock (stray merge conflict markers from rebase)</li>
+<li>2026-08-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93dd0e5fbfea6eba551f12df3a03cdf86655d90a"><code>93dd0e5</code></a> kernel: integrate cpuid.rs leaf1 detection diagnostics from ramfs-hardening WIP</li>
+<li>2026-08-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4eb5b3d734ec46eab7861f08485c9ce017bf5cd8"><code>4eb5b3d</code></a> Merge branch 'enhance-async-implementation' into 'main'</li>
+<li>2026-08-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/00d83d71214282e5fd47d942446593aad18d3739"><code>00d83d7</code></a> feat(kernel): async I/O overhaul : userspace ring mapping, deferred completions, Scheme trait redesign</li>
+<li>2026-08-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6738421e2e93a7dcc9b3030f4c2b257b6280051b"><code>6738421</code></a> Merge branch 'fix/errno-and-capabilities' into 'main'</li>
+<li>2026-08-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c03feb24811b210174712aa7be5a9e097e32a80d"><code>c03feb2</code></a> fix(abi): ENOTSUP 52→95, XFS EiB constant fix, decode_fixed roundtrip tests</li>
+<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/50a807df4a2e2be5ca9ef7c803f0a5df34113d72"><code>50a807d</code></a> fix(framebuffer): update fill and blit operations to use dynamic detection</li>
+<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7807362668fc98f2aa5dbea312f3e50662cf5553"><code>7807362</code></a> Merge branch 'feat/graphics-performance' into 'main'</li>
+<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7ed9263109ac3fba8d14cda9ece0b7772f76a0e1"><code>7ed9263</code></a> style: apply rustfmt to paging.rs and framebuffer.rs</li>
+<li>2026-08-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/aaf0fb632687a87130464df0eb67a7bca1ef2cfb"><code>aaf0fb6</code></a> fix(kernel): work around nightly LLVM ISel abort on pshufb/movntdq</li>
+<li>2026-08-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7087cffae28c256938700560f1bb00eefb5eb3ad"><code>7087cff</code></a> refactor(graphics): CanvasBuffer hygiene - S4/S5/S6 partial</li>
+<li>2026-08-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0e0d5fe7b198864e3763aa46f9c3c7cc2b8c54a4"><code>0e0d5fe</code></a> perf(graphics): streaming stores for large fills/blits (S2)</li>
+<li>2026-08-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4aec188c3e8206f5a02db4e7a15b7d6e180a6871"><code>4aec188</code></a> perf(graphics): Write-Combining framebuffer via dedicated PAT entry; unified present throttling</li>
+<li>2026-08-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6b3ceccd7ffbeb179c2952050f706c749f6fde7a"><code>6b3cecc</code></a> perf(graphics): batched blit API and lockless framebuffer info getters</li>
+<li>2026-08-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/75af9adef3742b94e66b89c546a3260d90e491db"><code>75af9ad</code></a> perf(graphics): zero-copy VirtIO GPU presentation with coalesced damage</li>
+<li>2026-08-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/706577f3e4ca9d85728fa1cd85f760a9bb641909"><code>706577f</code></a> perf(graphics): SIMD pixel ingest + explicit-width wire protocol for /dev/display</li>
+<li>2026-08-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d4f597d9d086c4450aaf3500d27c2b821a73a4cd"><code>d4f597d</code></a> perf(graphics): event-driven compositor with partial damage present</li>
+<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/067772e9315b102d784ddfd8ca3f7b4f6c648c48"><code>067772e</code></a> Merge branch 'feat/Replace-Limine-bootloader-with-U-Boot-for-multi-architecture-support' into 'main'</li>
+<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3ca6d7c6e61014fe2ad305f22e5bf75c0bdaeebd"><code>3ca6d7c</code></a> feat: Add U-Boot setup script and boot protocol implementation</li>
+<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/df64d6d703fdf2ff0071f1ab8ced90647153f19f"><code>df64d6d</code></a> Merge branch 'fixing-the-network-again' into 'main'</li>
+<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/eccb4d178eabb9eb3070ec09f179556b292c1d4c"><code>eccb4d1</code></a> fix(net): ICMP reply handling + wasmi upgrade + clippy fixes</li>
+<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/25cc18bd5fcf4c13196353f7d58949f8592b1288"><code>25cc18b</code></a> Merge branch 'feat/hal-arch-facade' into 'main'</li>
+<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e725386af47ca1033326c74873b4691e9cd7f78e"><code>e725386</code></a> ok</li>
+<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7262385fd627431898a1423a0721dca8075719cc"><code>7262385</code></a> fix(arch,riscv64): dedupe duplicated stub modules in facade_riscv</li>
+<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/892cb03ff1ff04707db577bd2c14f72ba3211d6b"><code>892cb03</code></a> fix(arch,riscv64): SegmentSelector newtype for gdt stub, safe unmap on stub mapper</li>
+<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/580b86f94a889f23df94e69dbcf3d1df442a3ffb"><code>580b86f</code></a> feat(ostd): Add/Sub<u64> operator impls for neutral PhysAddr/VirtAddr</li>
+<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4260fbc8627daa57cd2f853c2a5e540480e8322a"><code>4260fbc</code></a> fix(arch,riscv64): mapper::MapToError path fix inside OffsetPageTable impl</li>
+<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/60b50c68fe4d3144d2781b91a268e04aa0ab16db"><code>60b50c6</code></a> feat(arch,riscv64): working Sv48 translate walker in stub mapper</li>
+<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/529715a7ad45ae0c5e96429fa0eb047bdd10c749"><code>529715a</code></a> feat(ipc,riscv64): Sv48 tagged-pointer layout for IntrusiveMailbox</li>
+<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c0863955d190741a9ae1f0472d822cbaecd04cef"><code>c086395</code></a> feat(arch,riscv64): PciDevice config-space accessors (stubbed, R5 wires ECAM)</li>
+<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a7903794e027df236e63a2eae06b333b8e19c765"><code>a790379</code></a> fix(arch,riscv64): MouseEvent struct + u8 KEY_* scancode parity with x86</li>
+<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3e447a2f866e0bc7b175c486d47bcf22aae3efa7"><code>3e447a2</code></a> fix(arch,riscv64): restore unmap (tuple PhysFrame+MapperFlush) on stub mapper</li>
+<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/bf02f8866041b9a89a423ac46981862e36635797"><code>bf02f88</code></a> fix(arch,riscv64): unmap returns PhysFrame, Cr3::write/Cr3Flags::empty stubs</li>
+<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/dc404b5b3ad1688134828ddb2673cab16e75e894"><code>dc404b5</code></a> fix(arch,riscv64): sealed PortValue trait for port stub (kills E0034)</li>
+<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6d3f7723f47e783074ca6f955db5547f3d99ce3a"><code>6d3f772</code></a> fix(arch,riscv64): port stub typed read/write impls, drop stale traits</li>
+<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c9dbfb0e086b59d2bd003ce623fb17863ccb62fa"><code>c9dbfb0</code></a> fix(arch): annotate ambiguous PhysFrame::containing_address call-sites</li>
+<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/8731a5069e8c39860b905406a96e33f22f41f956"><code>8731a50</code></a> refactor(arch): Port trait-based reads, gate top TUI behind x86_64</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/1da8196961cc7851832f7b4efcdf235e27619ec4"><code>1da8196</code></a> fix(arch,riscv64): dedupe stubs, align keyboard read_char, FrameAllocator cfg</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/daf86f567c28b137fad449eebd753b7ec9af24d3"><code>daf86f5</code></a> fix(arch,riscv64): align stub signatures with x86 call-sites</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/922d42965ec6257e63cabb2f5fb28171d7986b64"><code>922d429</code></a> feat(arch,riscv64): full PciDevice struct + PCI surface stubs</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/acba1cf298b64a068b40a3c0811a43a4f9576e45"><code>acba1cf</code></a> feat(arch,riscv64): Mapper trait surface on Sv48 skeleton</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/62d200e60f23891c170aafd4f734374f910f3774"><code>62d200e</code></a> feat(arch,riscv64): real Sv48 scaffolding in x86_64-stub, ostd pointer helpers</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e96df8f0d54c6156f4be44509d3306033cbb08f1"><code>e96df8f</code></a> refactor(arch): gate VGA-UI commands behind x86_64, complete riscv framebuffer_info stub</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c587b6234fa5462576dc232ccea8535386feae10"><code>c587b62</code></a> refactor(arch): route debug breadcrumbs + ahci rep movsb through per-arch paths</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/88c52834c3a0af3c6f01f14f3d7364f32a862281"><code>88c5283</code></a> refactor(arch): unify x86_64 crate access via x86_crate_shim, complete riscv stubs</li>
 </ul>
 <!-- AUTO-CHANGELOG:END -->
 
@@ -292,7 +272,6 @@
 
         <!-- Custom JS scripts -->
         <script src="src/theme/mermaid-init.js"></script>
-
 
 
     </div>

@@ -119,6 +119,11 @@ pub fn schedule() -> ! {
 /// Performs the schedule on cpu operation.
 pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     crate::e9_println!("BD-ENTER cpu={}", cpu_index);
+    // TEMP DEBUG raw pulse: BD-ENTER via raw marks too (formatted E9 may be silent).
+    unsafe {
+        crate::e9_mark!(b'B');
+        crate::e9_mark!(b'D');
+    }
     // Disable interrupts for the entire critical section.
     //
     // On the BSP, IF may be 1 (interrupts were enabled in Phase 9).
@@ -151,7 +156,13 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
             } else {
                 0
             };
+            unsafe {
+                crate::e9_mark!(b'M');
+            }
             let mut local = LOCAL_SCHEDULERS[idx].lock();
+            unsafe {
+                crate::e9_mark!(b'N');
+            }
             if let Some(ref mut cpu) = *local {
                 break super::core_impl::pick_next_task_local(cpu, idx);
             }
@@ -172,17 +183,16 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
         }
         core::hint::spin_loop();
     }; // Lock is released here before jumping to first task
+    unsafe {
+        crate::e9_mark!(b'R');
+    }
     super::task_ops::flush_deferred_silo_cleanups();
+    unsafe {
+        crate::e9_mark!(b'r');
+    }
 
-    crate::serial_force_println!(
-        "[trace][sched] schedule_on_cpu first_task cpu={} tid={} name={} rsp={:#x} kstack=[{:#x}..{:#x}]",
-        cpu_index,
-        first_task.id.as_u64(),
-        first_task.name,
-        unsafe { (*first_task.context.get()).saved_rsp },
-        first_task.kernel_stack.virt_base.as_u64(),
-        first_task.kernel_stack.virt_base.as_u64() + first_task.kernel_stack.size as u64,
-    );
+    // NOTE: serial_force_println! (formatted format_args!) hangs in this kernel build
+    // (known vtable issue). Raw E9 marks only in the scheduler hot path.
 
     // Set TSS.rsp0 and SYSCALL kernel RSP for the first task
     {
@@ -190,6 +200,9 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
             first_task.kernel_stack.virt_base.as_u64() + first_task.kernel_stack.size as u64;
         crate::arch::tss::set_kernel_stack(crate::arch::xshim::VirtAddr::new(stack_top));
         crate::arch::syscall::set_kernel_rsp(stack_top);
+        unsafe {
+            crate::e9_mark!(b'S');
+        }
         crate::serial_force_println!(
             "[trace][sched] schedule_on_cpu stacks set cpu={} rsp0={:#x}",
             cpu_index,
@@ -199,6 +212,9 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
 
     // Switch to the first task's address space (no-op for kernel tasks)
     // SAFETY: The first task's address space is valid (kernel AS at boot).
+    unsafe {
+        crate::e9_mark!(b'U');
+    }
     if let Err(e) = validate_task_context(&first_task) {
         panic!(
             "scheduler: invalid first task '{}' (id={:?}): {}",
@@ -213,27 +229,16 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     unsafe {
         first_task.process.address_space_arc().switch_to();
     }
-    crate::serial_force_println!(
-        "[trace][sched] schedule_on_cpu switch_to done cpu={} tid={}",
-        cpu_index,
-        first_task.id.as_u64()
-    );
+    unsafe {
+        crate::e9_mark!(b'K');
+    }
 
     // Jump to the first task (never returns)
     // SAFETY: The context was set up by CpuContext::new with a valid stack frame.
     // Interrupts are disabled; the trampoline's `sti` re-enables them.
-    crate::serial_force_println!(
-        "[trace][sched] schedule_on_cpu restore_first_task cpu={} tid={}",
-        cpu_index,
-        first_task.id.as_u64()
-    );
-    crate::serial_force_println!(
-        "[trace][sched] schedule_on_cpu calling do_restore_first_task cpu={} tid={} rsp={:#x}",
-        cpu_index,
-        first_task.id.as_u64(),
-        unsafe { (*first_task.context.get()).saved_rsp }
-    );
+
     unsafe {
+        crate::e9_mark!(b'L');
         // Pass the stack frame pointer (saved_rsp points TO the frame, not the context struct)
         let frame_ptr = (*first_task.context.get()).saved_rsp as *const u64;
         crate::process::task::do_restore_first_task(
@@ -258,7 +263,7 @@ pub fn finish_switch() {
     let cpu_index = current_cpu_index();
     let mut task_to_drop = None;
     {
-        // Use LOCAL lock : no spinning on GLOBAL_SCHED_STATE needed.
+        // Lock order: LOCAL only (rank 4).
         let mut spins = 0usize;
         let mut guard = loop {
             if let Some(g) = LOCAL_SCHEDULERS[cpu_index].try_lock_no_irqsave() {
@@ -267,12 +272,11 @@ pub fn finish_switch() {
             spins = spins.saturating_add(1);
             if spins % 1_000_000 == 0 {
                 #[cfg(target_arch = "x86_64")]
-                unsafe { core::arch::asm!("mov al, 'W'; out 0xe9, al", out("al") _) };
+                crate::e9_mark!(b'W');
             }
             core::hint::spin_loop();
         };
         if let Some(ref mut cpu) = *guard {
-            // Activate the address space for the current task on this CPU.
             if let Some(ref task) = cpu.current_task {
                 unsafe { task.process.address_space_arc().switch_to() };
             }
@@ -281,6 +285,18 @@ pub fn finish_switch() {
     }
 
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+    // Process deferred work raised by the timer interrupt.
+    // This is a safe point: we're on the new task's kernel stack with no
+    // scheduler locks held. Deferred work items (interval timers, wake
+    // deadlines, per-task accounting) acquire locks internally via try_lock.
+    super::deferred_work::process_deferred_work();
+
+    // Debug invariant check after every context switch completes.
+    // Uses try_lock to avoid blocking; validates that task containers
+    // are consistent (no task in two places, no orphaned zombies, etc.).
+    super::validate_scheduler_invariants();
+
     super::task_ops::flush_deferred_silo_cleanups();
     drop(task_to_drop);
 }
@@ -375,6 +391,13 @@ pub fn finish_interrupt_switch() {
         }
         core::hint::spin_loop();
     }
+
+    // Process deferred work raised by the timer interrupt.
+    // Safe point: we're on the new task's kernel stack with no scheduler
+    // locks held. This handles interval timers, wake deadlines, and
+    // per-task accounting that were deferred from the hardirq handler.
+    super::deferred_work::process_deferred_work();
+
     let _ = task_to_drop;
 }
 
@@ -394,26 +417,28 @@ pub fn yield_task() {
         &super::perf_counters::SCHED_YIELD_COUNT,
     );
 
-    // Save RFLAGS and disable interrupts to prevent timer from
-    // trying to lock the scheduler while we hold it
     let saved_flags = save_flags_and_cli();
     let cpu_index = current_cpu_index();
 
+    // Lock order: LOCAL only (rank 4).
     let switch_target = {
+        lockdep_acquire(LockRank::Local, Some(cpu_index));
         let mut local = LOCAL_SCHEDULERS[cpu_index].lock();
-        if let Some(ref mut cpu) = *local {
+        let target = if let Some(ref mut cpu) = *local {
             super::core_impl::yield_cpu_local(cpu, cpu_index)
         } else {
             None
-        }
+        };
+        lockdep_release(LockRank::Local);
+        target
     }; // Lock released here, before the actual context switch
 
     if let Some(ref target) = switch_target {
-        // SAFETY: Pointers are valid (they point into Arc<Task> contexts
-        // kept alive by the scheduler). Interrupts are disabled.
+        // SAFETY: no scheduler locks held, interrupts disabled.
         unsafe {
             crate::process::task::do_switch_context(target);
         }
+        // finish_switch() processes deferred work internally.
         finish_switch();
     }
 
@@ -489,24 +514,29 @@ pub fn maybe_preempt() {
         return;
     }
 
-    // Use the per-CPU LOCAL lock : never blocked by another CPU's cold-path
-    // operations (fork, exit, wake) that hold GLOBAL_SCHED_STATE.
+    // Lock order: LOCAL only (rank 4). No GLOBAL, BLOCKED, or IDENTITY.
     let switch_target = {
+        lockdep_acquire(LockRank::Local, Some(cpu_index));
         let mut guard = match LOCAL_SCHEDULERS[cpu_index].try_lock_no_irqsave() {
             Some(g) => g,
             None => {
+                lockdep_release(LockRank::Local);
                 note_try_lock_fail_on_cpu(cpu_index);
                 return;
             }
         };
         let cpu = match guard.as_mut() {
             Some(c) => c,
-            None => return,
+            None => {
+                lockdep_release(LockRank::Local);
+                return;
+            }
         };
         if take_force_resched_hint(cpu_index) {
             cpu.need_resched = true;
         }
         if cpu.current_task.is_none() || !cpu.need_resched {
+            lockdep_release(LockRank::Local);
             return;
         }
         if let Some(current) = cpu.current_task.as_ref() {
@@ -518,24 +548,19 @@ pub fn maybe_preempt() {
             ));
         }
         cpu.need_resched = false;
-        super::core_impl::yield_cpu_local(cpu, cpu_index)
+        let target = super::core_impl::yield_cpu_local(cpu, cpu_index);
+        lockdep_release(LockRank::Local);
+        target
     }; // LOCAL lock released here
 
     if let Some(ref target) = switch_target {
         if cpu_is_valid(cpu_index) {
-            // One-shot per-CPU: trace the very first real preemption.
-            // NOTE: do NOT acquire GLOBAL_SCHED_STATE here : we are between the lock
-            // release (end of the block above) and do_switch_context. A
-            // nested try_lock in this window re-enters the guardian (CLI +
-            // CAS) on a CPU that is about to switch stacks, producing a
-            // spurious second "locked_raw=true" observation in finish_switch
-            // diagnostics and, if the lock happens to be free, a redundant
-            // owner_cpu store on the wrong context.
             if !FIRST_PREEMPT_LOGGED[cpu_index].swap(true, Ordering::Relaxed) {
                 let _preempt_n = CPU_PREEMPT_COUNT[cpu_index].load(Ordering::Relaxed);
             }
             CPU_PREEMPT_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
         }
+        // SAFETY: no scheduler locks held, no allocation, no IPI.
         unsafe {
             crate::process::task::do_switch_context(target);
         }
@@ -565,18 +590,23 @@ pub fn maybe_preempt_from_interrupt(
     let current_frame_rsp = current_frame as *mut crate::syscall::SyscallFrame as u64;
     let mut _task_to_drop: Option<Arc<Task>> = None;
 
+    // Lock order: LOCAL only (rank 4). No GLOBAL, BLOCKED, or IDENTITY.
+    lockdep_acquire(LockRank::Local, Some(cpu_index));
     let decision = {
-        // Use per-CPU LOCAL lock : not blocked by cold-path global operations.
         let mut guard = match LOCAL_SCHEDULERS[cpu_index].try_lock_no_irqsave() {
             Some(g) => g,
             None => {
+                lockdep_release(LockRank::Local);
                 note_try_lock_fail_on_cpu(cpu_index);
                 return None;
             }
         };
         let cpu = match guard.as_mut() {
             Some(c) => c,
-            None => return None,
+            None => {
+                lockdep_release(LockRank::Local);
+                return None;
+            }
         };
 
         if take_force_resched_hint(cpu_index) {
@@ -590,7 +620,7 @@ pub fn maybe_preempt_from_interrupt(
             Some(t) => t.clone(),
             None => {
                 #[cfg(target_arch = "x86_64")]
-                unsafe { core::arch::asm!("mov al, 'X'; out 0xe9, al", out("al") _) };
+                crate::e9_mark!(b'X');
                 return None;
             }
         };
@@ -612,17 +642,36 @@ pub fn maybe_preempt_from_interrupt(
         } else {
             let mut next_rsp = next.interrupt_rsp();
             if next.resume_kind() == crate::process::task::ResumeKind::RetFrame {
-                // All tasks (kernel and ELF user tasks) start their first execution
-                // in Ring 0 via the task_entry_trampoline. We must seed a kernel
-                // interrupt frame so that the interrupt return path (iretq) can
-                // safely jump to the trampoline.
-                next.seed_kernel_interrupt_frame_from_context();
-                next_rsp = next.interrupt_rsp();
+                // TEMP: do NOT seed synthetic frames from the IRQ path yet.
+                // Resuming a synthetic frame from the raw timer stub derails the
+                // resumed task (observed: it re-runs boot_alloc init/validate code
+                // in a tight IRQs-off loop, starving the timer). Leave first-launch
+                // tasks to the legacy ret-based scheduler path; only tasks with a
+                // REAL iret frame (previously preempted from Ring 3) switch here.
+                crate::e9_mark!(b'S');
+                cpu.need_resched = false;
+                _task_to_drop = cpu.task_to_drop.take();
+                if let Some(prev) = cpu.task_to_requeue.take() {
+                    prev.set_state(TaskState::Running);
+                    cpu.current_task = Some(prev);
+                } else {
+                    current.set_state(TaskState::Running);
+                    cpu.current_task = Some(current.clone());
+                }
+                next.set_state(TaskState::Ready);
+                let class = cpu.class_table.class_for_task(&next);
+                cpu.class_rqs.enqueue(class, next);
+                let current_fpu = current.fpu_state.get() as *mut u8;
+                return Some(crate::arch::idt::InterruptReturnDecision {
+                    next_rsp: 0,
+                    old_fpu: current_fpu,
+                    new_fpu: current_fpu,
+                });
             }
             let fits = interrupt_frame_fits(&next, next_rsp);
             if next_rsp == 0 || !fits {
                 #[cfg(target_arch = "x86_64")]
-                unsafe { core::arch::asm!("mov al, 'A'; out 0xe9, al", out("al") _) };
+                crate::e9_mark!(b'A');
                 let is_idle_fallback = Arc::ptr_eq(&next, &cpu.idle_task);
                 _task_to_drop = cpu.task_to_drop.take();
 
@@ -663,6 +712,17 @@ pub fn maybe_preempt_from_interrupt(
                 let old_fpu = current.fpu_state.get() as *mut u8;
                 let new_fpu = next.fpu_state.get() as *const u8;
 
+                // TEMP DEBUG: pulse the picked task id + stack top.
+                unsafe {
+                    let hex = b"0123456789abcdef";
+                    crate::e9_mark!(b'@');
+                    let tid = next.id.as_u64();
+                    for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
+                        let nib = hex[((tid >> sh) & 0xF) as usize];
+                        crate::e9_mark!(nib);
+                    }
+                    crate::e9_mark!(b'\n');
+                }
                 Some(crate::arch::idt::InterruptReturnDecision {
                     next_rsp,
                     old_fpu,
@@ -670,7 +730,9 @@ pub fn maybe_preempt_from_interrupt(
                 })
             }
         }
-    }; // LOCAL lock released here
+    };
+    lockdep_release(LockRank::Local);
+    // LOCAL lock released here
 
     if decision.is_some() && cpu_is_valid(cpu_index) {
         CPU_PREEMPT_COUNT[cpu_index].fetch_add(1, Ordering::Relaxed);
@@ -709,6 +771,20 @@ pub fn class_table() -> crate::process::sched::SchedClassTable {
 }
 
 /// Configure scheduler class pick/steal order at runtime.
+///
+/// ## Lock order
+///
+/// GLOBAL (rank 1) → LOCAL[cpu] (rank 4), sequentially for each CPU.
+/// No BLOCKED or IDENTITY locks needed.  IPIs are sent after all locks
+/// are released.
+///
+/// ## Contention note
+///
+/// GLOBAL is held while iterating all LOCALs.  This blocks cold-path
+/// operations (fork, exit, wake) on other CPUs for the duration.
+/// Acceptable since class table reconfiguration is infrequent.  Hot-path
+/// `try_lock` on GLOBAL (e.g., `steal_task_local`) will skip rather than
+/// block.
 pub fn configure_class_table(table: crate::process::sched::SchedClassTable) -> bool {
     if !table.validate() {
         return false;
@@ -716,19 +792,22 @@ pub fn configure_class_table(table: crate::process::sched::SchedClassTable) -> b
     let saved_flags = save_flags_and_cli();
     let mut ipi_targets = [false; crate::arch::percpu::MAX_CPUS];
     let my_cpu = current_cpu_index();
+
+    // Lock order: GLOBAL (rank 1) → LOCAL[cpu] (rank 4), sequentially.
+    lockdep_acquire(LockRank::Global, None);
     let applied = {
         let mut scheduler = GLOBAL_SCHED_STATE.lock();
         if let Some(ref mut sched) = *scheduler {
             let prev = sched.class_table;
             sched.class_table = table;
             let n = active_cpu_count();
-            // Propagate the new class table to every LOCAL and set need_resched
-            // in a single pass to avoid locking each LOCAL multiple times.
             for cpu_idx in 0..n {
+                lockdep_acquire(LockRank::Local, Some(cpu_idx));
                 if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_idx].lock() {
                     local_cpu.class_table = table;
                     local_cpu.need_resched = true;
                 }
+                lockdep_release(LockRank::Local);
                 if cpu_idx != my_cpu && cpu_is_valid(cpu_idx) {
                     ipi_targets[cpu_idx] = true;
                 }
@@ -740,8 +819,10 @@ pub fn configure_class_table(table: crate::process::sched::SchedClassTable) -> b
         } else {
             false
         }
-    };
+    }; // GLOBAL released here
+    lockdep_release(LockRank::Global);
     restore_flags(saved_flags);
+    // IPIs sent after all locks released — never under a scheduler lock.
     for (cpu, send) in ipi_targets.iter().copied().enumerate() {
         if send {
             send_resched_ipi_to_cpu(cpu);
@@ -792,11 +873,26 @@ pub fn log_state(label: &str) {
         }
     }
     drop(scheduler);
+
+    // Deferred work metrics (lock-free, read after GLOBAL_SCHED_STATE is released).
+    let dw = super::deferred_work::metrics_snapshot();
+    let n = active_cpu_count();
+    for cpu_id in 0..n {
+        log::info!(
+            "[sched][state] label={} cpu={} dwork_raised={} dwork_processed={}",
+            label,
+            cpu_id,
+            dw.raised[cpu_id],
+            dw.processed[cpu_id],
+        );
+    }
+
     restore_flags(saved_flags);
 }
 
 /// Structured scheduler state snapshot for shell/top/debug tooling.
 pub fn state_snapshot() -> SchedulerStateSnapshot {
+    let dw = super::deferred_work::metrics_snapshot();
     let mut out = SchedulerStateSnapshot {
         initialized: false,
         boot_phase: 0,
@@ -816,6 +912,8 @@ pub fn state_snapshot() -> SchedulerStateSnapshot {
         rq_fair: [0; crate::arch::percpu::MAX_CPUS],
         rq_idle: [0; crate::arch::percpu::MAX_CPUS],
         need_resched: [false; crate::arch::percpu::MAX_CPUS],
+        deferred_work_raised: dw.raised,
+        deferred_work_processed: dw.processed,
     };
 
     let saved_flags = save_flags_and_cli();
@@ -855,6 +953,11 @@ pub(super) extern "C" fn idle_task_main() -> ! {
     let cpu = crate::arch::percpu::current_cpu_index();
     crate::serial_force_println!("[trace][sched] idle_task_main start cpu={}", cpu);
     loop {
+        // Process any deferred work before halting. This ensures that
+        // timer ticks raised during interrupt context get processed even
+        // when the CPU has no other runnable tasks.
+        super::deferred_work::process_deferred_work();
+
         // Be explicit on SMP: never rely on inherited IF state.
         // If IF=0, HLT can deadlock that CPU forever.
         crate::arch::sti();

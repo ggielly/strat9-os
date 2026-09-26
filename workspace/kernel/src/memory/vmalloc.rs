@@ -47,6 +47,9 @@
 //! allocation to prevent deadlock with the buddy allocator.
 
 use crate::{
+    arch::{
+        xshim::{PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB, VirtAddr},
+    },
     memory::{
         frame::PhysFrame,
         paging::{map_page_kernel, unmap_page_kernel},
@@ -54,6 +57,7 @@ use crate::{
     },
     serial_println,
     sync::{IrqDisabledToken, SpinLock},
+    x86_crate_shim::structures::paging::Page,
 };
 use core::{
     mem::size_of,
@@ -61,9 +65,6 @@ use core::{
     ptr,
     sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
 };
-use crate::arch::xshim::{PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB};
-use crate::x86_crate_shim::structures::paging::Page;
-use crate::arch::xshim::VirtAddr;
 
 // Arena constants =====================================================
 

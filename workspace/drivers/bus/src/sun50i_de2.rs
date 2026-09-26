@@ -7,7 +7,7 @@ const COMPATIBLE: &[&str] = &["allwinner,sun50i-a64-de2"];
 /// Display Engine 2 must own to operate.
 ///
 /// The exact register layout differs across sunxi SoC generations; platform
-/// code (board support / DeviceTree) supplies it explicitly — mirroring the
+/// code (board support / DeviceTree) supplies it explicitly : mirroring the
 /// `sunxi_sram_claim()` DT-driven flow in Linux (`drivers/soc/sunxi/sunxi_sram.c`).
 #[derive(Debug, Clone, Copy)]
 pub struct SramConfig {
@@ -142,7 +142,7 @@ impl BusDriver for Sun50iDe2 {
         if !self.regs.is_valid() {
             return Err(BusError::InitFailed);
         }
-    self.regs.check_user_offset(offset)?;
+        self.regs.check_user_offset(offset)?;
         Ok(self.regs.read32(offset))
     }
 

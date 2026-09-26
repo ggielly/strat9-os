@@ -291,10 +291,7 @@ impl Scheme for RamfsScheme {
 
             if let Some(ino) = st.lookup(path) {
                 // Entry already exists : succeed (POSIX O_CREAT without O_EXCL).
-                let inode = st
-                    .inodes
-                    .get_mut(&ino)
-                    .ok_or(SyscallError::IoError)?;
+                let inode = st.inodes.get_mut(&ino).ok_or(SyscallError::IoError)?;
                 if inode.is_dir() {
                     inode.atime_ns = now;
                     return Ok(OpenResult {
@@ -358,10 +355,7 @@ impl Scheme for RamfsScheme {
         let mut st = self.state.lock();
         let now = RamState::now_ns();
         let ino = st.lookup(path).ok_or(SyscallError::NotFound)?;
-        let inode = st
-            .inodes
-            .get_mut(&ino)
-            .ok_or(SyscallError::IoError)?;
+        let inode = st.inodes.get_mut(&ino).ok_or(SyscallError::IoError)?;
         inode.atime_ns = now;
 
         if inode.is_dir() {

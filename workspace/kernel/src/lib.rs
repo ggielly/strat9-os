@@ -55,7 +55,9 @@ pub use boot::dtb_boot::kmain;
 
 /// Initialize serial output
 pub fn init_serial() {
-    arch::serial::init();
+    if crate::debug_cfg::SERIAL_ENABLED {
+        arch::serial::init();
+    }
 }
 
 /// Initialize the logger (uses serial)
@@ -74,7 +76,7 @@ pub fn init_components(stage: component::InitStage) -> Result<(), component::Com
 use core::panic::PanicInfo;
 
 const PAGE_SIZE: u64 = 4096;
-const MAX_BOOT_MMAP_REGIONS_WORK: usize = 1024;
+const MAX_BOOT_MMAP_REGIONS_WORK: usize = strat9_abi::boot::MAX_BOOT_MEMORY_REGIONS;
 
 /// Static working buffer for the boot memory map (off stack to avoid overflow).
 static mut MMAP_WORK: [boot::entry::MemoryRegion; MAX_BOOT_MMAP_REGIONS_WORK] =
@@ -236,17 +238,13 @@ fn panic_handler(info: &PanicInfo) -> ! {
     boot::panic::panic_handler(info)
 }
 
-/// Performs the register initfs module operation.
-fn register_initfs_module(path: &str, module: Option<(u64, u64)>) {
-    let Some((base, size)) = module else {
-        return;
-    };
-    if base == 0 || size == 0 {
-        return;
-    }
-
-    let base_virt = memory::phys_to_virt(base) as *const u8;
-    let len = size as usize;
+/// Register a validated physical module with exactly one HHDM conversion.
+fn register_initfs_module(module: &strat9_abi::boot::ModuleEntry) {
+    let view = boot::modules::InitfsModule::from_physical(module, memory::hhdm_offset())
+        .unwrap_or_else(|error| panic!("Invalid initfs module: {}", error));
+    let path = view.name;
+    let base_virt = view.virtual_base as *const u8;
+    let len = view.len;
     #[cfg(feature = "selftest")]
     {
         // Only peek small header bytes for debugging; no heap allocations.
@@ -259,25 +257,24 @@ fn register_initfs_module(path: &str, module: Option<(u64, u64)>) {
                 data[1],
                 data[2],
                 data[3],
-                size
+                len
             );
         }
     }
 
     // Register the bootloader-provided module directly; keep it read-only.
     if let Err(e) = vfs::register_initfs_file(path, base_virt, len) {
-        serial_println!("[init] Failed to register /initfs/{}: {:?}", path, e);
+        panic!("Failed to register /initfs/{}: {:?}", path, e);
     } else {
-        serial_println!("[init] Registered /initfs/{} ({} bytes)", path, size);
+        serial_println!("[init] Registered /initfs/{} ({} bytes)", path, len);
     }
 }
 
-/// Register modules from the bootloader module table (ABI v2).
+/// Register modules from the validated bootloader module table.
 ///
 /// Each module has a name, physical base address, and size.
 /// The kernel maps them into the VFS at /initfs/<name>.
-fn register_boot_modules(args: &boot::entry::KernelArgs) {
-    let modules = args.modules();
+fn register_boot_modules(modules: &[strat9_abi::boot::ModuleEntry]) {
     if modules.is_empty() {
         serial_println!("[init] No modules provided by bootloader");
         return;
@@ -285,16 +282,7 @@ fn register_boot_modules(args: &boot::entry::KernelArgs) {
 
     serial_println!("[init] Bootloader provided {} modules:", modules.len());
     for module in modules {
-        let name = module.name_str();
-        let base_virt = memory::phys_to_virt(module.base);
-        let size = module.size;
-
-        if size == 0 {
-            continue;
-        }
-
-        // Register the module in the VFS at /initfs/<name>
-        register_initfs_module(name, Some((base_virt, size)));
+        register_initfs_module(module);
     }
 }
 
@@ -313,19 +301,27 @@ fn log_boot_module_magics(_stage: &str) {}
 
 /// Main kernel initialization - called by bootloader entry points
 pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
-    // Raw COM1 trace - works before any subsystem is initialized.
     #[cfg(target_arch = "x86_64")]
     {
-        let thr: u16 = 0x3F8;
-        let lsr: u16 = 0x3F8 + 5;
-        let msg = b"[km] kernel_main enter\r\n";
-        for &b in msg {
-            loop {
-                let s: u8;
-                core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
-                if s & 0x20 != 0 { break; }
+        // Earliest possible e9 mark : before any COM1 trace that might hang.
+        crate::e9_mark!(b'K');
+
+        // Raw COM1 traces hang when SERIAL_ENABLED=false (UART not initialized).
+        // Gate them behind SERIAL_ENABLED so we don't spin on a dead port.
+        if crate::debug_cfg::SERIAL_ENABLED {
+            let thr: u16 = 0x3F8;
+            let lsr: u16 = 0x3F8 + 5;
+            let msg = b"[km] kernel_main enter\r\n";
+            for &b in msg {
+                loop {
+                    let s: u8;
+                    core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
+                    if s & 0x20 != 0 {
+                        break;
+                    }
+                }
+                core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
             }
-            core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
         }
     }
 
@@ -339,12 +335,18 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
     // Trace: raw COM1 after debug_assert
     #[cfg(target_arch = "x86_64")]
-    {
+    if crate::debug_cfg::SERIAL_ENABLED {
         let thr: u16 = 0x3F8;
         let lsr: u16 = 0x3F8 + 5;
         let msg = b"[km] after debug_assert\r\n";
         for &b in msg {
-            loop { let s: u8; core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags)); if s & 0x20 != 0 { break; } }
+            loop {
+                let s: u8;
+                core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
+                if s & 0x20 != 0 {
+                    break;
+                }
+            }
             core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
         }
     }
@@ -356,50 +358,71 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
     // Trace: raw COM1 after boot_timestamp
     #[cfg(target_arch = "x86_64")]
-    {
+    if crate::debug_cfg::SERIAL_ENABLED {
         let thr: u16 = 0x3F8;
         let lsr: u16 = 0x3F8 + 5;
         let msg = b"[km] after boot_timestamp\r\n";
         for &b in msg {
-            loop { let s: u8; core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags)); if s & 0x20 != 0 { break; } }
+            loop {
+                let s: u8;
+                core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
+                if s & 0x20 != 0 {
+                    break;
+                }
+            }
             core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
         }
     }
 
-    // Skip e9_println! — it uses format_args! which may crash before
+    // Skip e9_println! : it uses format_args! which may crash before
     // the full kernel is initialized. Use raw COM1 trace instead.
     //crate::e9_println!("B0 kernel_main");
 
     // Trace before init_serial
     #[cfg(target_arch = "x86_64")]
-    {
+    if crate::debug_cfg::SERIAL_ENABLED {
         let thr: u16 = 0x3F8;
         let lsr: u16 = 0x3F8 + 5;
         let msg = b"[km] before init_serial\r\n";
         for &b in msg {
-            loop { let s: u8; core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags)); if s & 0x20 != 0 { break; } }
+            loop {
+                let s: u8;
+                core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
+                if s & 0x20 != 0 {
+                    break;
+                }
+            }
             core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
         }
     }
 
-    // init_serial() — restore
-    init_serial();
+    // init_serial() : temporarily disabled: #UD during uart_16550 init
+    //init_serial();
 
     // Enable boot log prefix (timestamp) by default; can be disabled later if needed.
+    crate::e9_mark!(b'L');
     arch::serial::set_boot_log_prefix_enabled(true);
+    crate::e9_mark!(b'M');
 
     init_logger();
+    crate::e9_mark!(b'N');
     //boot_milestone!("Kernel entry");
     //arch::x86_64::speaker::beep_phase(1);
 
     // =============================================
-    // Phase 1c: IDT (Interrupt Descriptor Table)
+    // Phase 1c: TSS + GDT + IDT
     // =============================================
-    // We initialize the IDT as early as possible to catch any exceptions
-    // during the early memory management and hardware initialization phases.
-    //crate::e9_println!("B1 pre-IDT");
-    //serial_println!("[init] IDT (early)...");
+    // TSS and GDT must be loaded before the IDT so that the kernel's
+    // CS selector (0x08) is valid when the first exception fires.
+    // Without a valid GDT entry, the IDT handler triple-faults.
+
+    e9_mark!(b'T');
+    arch::tss::init();
+    e9_mark!(b'G');
+    arch::gdt::init();
+    e9_mark!(b'I');
     arch::x86_64::idt::init();
+    e9_mark!(b'i');
     //serial_println!("[init] IDT initialized.");
     //crate::e9_println!("B2 post-IDT");
     //boot_milestone!("IDT initialized");
@@ -407,12 +430,18 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
     // Trace after IDT
     #[cfg(target_arch = "x86_64")]
-    {
+    if crate::debug_cfg::SERIAL_ENABLED {
         let thr: u16 = 0x3F8;
         let lsr: u16 = 0x3F8 + 5;
         let msg = b"[km] IDT initialized\r\n";
         for &b in msg {
-            loop { let s: u8; core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags)); if s & 0x20 != 0 { break; } }
+            loop {
+                let s: u8;
+                core::arch::asm!("in al, dx", out("al") s, in("dx") lsr, options(nomem, nostack, preserves_flags));
+                if s & 0x20 != 0 {
+                    break;
+                }
+            }
             core::arch::asm!("out dx, al", in("dx") thr, in("al") b, options(nomem, nostack, preserves_flags));
         }
     }
@@ -421,42 +450,49 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         !arch::interrupts_enabled(),
         "interrupts must be disabled after IDT init"
     );
-    crate::e9_println!("B4 assert-passed");
+    e9_mark!(b'4');
 
     // Detect CPU features (must happen before init_cpu_extensions)
-    crate::e9_println!("B4a pre-cpuid");
+    e9_mark!(b'a');
     crate::arch::x86_64::cpuid::init();
-    crate::e9_println!("B4b post-cpuid");
+    e9_mark!(b'b');
 
     // Initialize FPU/SSE/XSAVE for the BSP
-    crate::e9_println!("B4c pre-cpu-ext");
+    e9_mark!(b'c');
     crate::arch::x86_64::init_cpu_extensions();
-    crate::e9_println!("B2b post-cpu-extensions");
+    e9_mark!(b'd');
+
+    // Enable format_args-heavy logging paths now that SSE/XSAVE are initialized.
+    boot::logger::set_extensions_ready();
 
     // Seed the kernel entropy pool from RDRAND (if available).
-    crate::e9_println!("B2c pre-entropy");
+    e9_mark!(b'e');
     crate::entropy::seed_from_rdrand();
-    crate::e9_println!("B2d post-entropy");
+    e9_mark!(b'f');
 
     // Initialize KASLR offsets (requires entropy pool to be seeded).
-    crate::e9_println!("B2d1 pre-kaslr");
+    e9_mark!(b'g');
     crate::kaslr::init();
-    crate::e9_println!("B2d2 post-kaslr");
+    e9_mark!(b'h');
 
     // Initialize crypto subsystem (trusted keys for module verification).
-    crate::e9_println!("B2d3 pre-crypto");
+    e9_mark!(b'i');
     crate::crypto::init();
-    crate::e9_println!("B2d4 post-crypto");
+    e9_mark!(b'j');
 
     // Puts default panic hooks early to ensure
     //we get useful info on any panics during init.
-    crate::e9_println!("B2e1 pre-panic-hooks");
+    e9_mark!(b'k');
     boot::panic::install_default_panic_hooks();
-    crate::e9_println!("B2e2 post-panic-hooks");
+    e9_mark!(b'l');
     boot::symbols::init();
-    crate::e9_println!("B2f post-panic-hooks");
+    e9_mark!(b'm');
 
     // Nice logo :D
+    // Disabled: serial_println with format_args creates nested Arguments requiring
+    // Display trait vtable pointers that resolve to identity-mapped addresses → #UD.
+    // TODO: replace with direct e9_mark! traces or fix the format_args vtable relocation.
+    /*
     serial_println!();
     serial_println!();
     serial_println!(r"          __                 __   ________                         ");
@@ -479,25 +515,32 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     serial_println!("  See the GNU General Public License for more details.");
     serial_println!("=======================================================================================================");
     serial_println!();
+    */
 
     // Validate arguments
+    e9_mark!(b'V');
     if args.is_null() {
         serial_println!("[CRIT] No KernelArgs provided. System will hang.");
         loop {
             arch::hlt();
         }
     }
+    e9_mark!(b'v');
 
     let args = &*args;
+    e9_mark!(b'W');
     serial_println!("[init] KernelArgs at {:p}", args);
+    e9_mark!(b'w');
 
     // Store boot args globally so components can access them.
     // SAFETY: written once here, read-only thereafter.
     unsafe { BOOT_ARGS = Some(args) };
+    e9_mark!(b'X');
 
     // SAFETY: KernelArgs is packed; read fields via addr_of! to avoid unaligned references.
     let magic = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.magic)) };
     let abi_version = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.abi_version)) };
+    e9_mark!(b'x');
 
     if magic != strat9_abi::boot::STRAT9_BOOT_MAGIC {
         serial_println!(
@@ -519,18 +562,13 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             arch::hlt();
         }
     }
+    e9_mark!(b'Y');
 
     // Parse kernel cmdline (early, for serial console config).
-    if args.cmdline_ptr != 0 && args.cmdline_len != 0 {
-        let cmdline = args.cmdline_str();
-        if !cmdline.is_empty() {
-            serial_println!("[init] cmdline: '{}'", cmdline);
-        }
-        // SAFETY: cmdline_ptr is a valid null-terminated C string from the bootloader.
-        unsafe { arch::x86_64::serial::parse_cmdline(args.cmdline_ptr, args.cmdline_len) };
-    } else {
-        serial_println!("[init] No kernel cmdline provided");
-    }
+    // SAFETY: cmdline_ptr is a valid null-terminated C string from the bootloader.
+    // NOTE: inlined strip_suffix caused #UD (Pattern trait function pointer at identity-mapped
+    // address 0x12002). Skip cmdline parsing for now.
+    e9_mark!(b'z');
 
     // Le's go !
     //
@@ -539,6 +577,12 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     let hhdm = args.hhdm_offset;
     memory::set_hhdm_offset(hhdm);
+    #[cfg(target_arch = "x86_64")]
+    if args.env_get("loader.paging") == Some("wx-uc-v1") {
+        // No low EFI instruction is needed now. Revoke its executable alias
+        // before reclaiming loader pages for stacks, heaps or page tables.
+        unsafe { memory::paging::retire_uefi_identity_code() };
+    }
     serial_println!("[init] HHDM offset: 0x{:x}", hhdm);
 
     let memory_map_base =
@@ -558,22 +602,80 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     crate::e9_println!("MM pre-regions");
     serial_println!("[init] Memory manager...");
-    serial_println!("[init] Memory map: 0x{:x} ({} bytes)", memory_map_base, memory_map_size);
-    let regions = args.memory_regions();
+    serial_println!(
+        "[init] Memory map: 0x{:x} ({} bytes)",
+        memory_map_base,
+        memory_map_size
+    );
+    // SAFETY: the loader keeps these handoff buffers reserved and identity-mapped.
+    // Reject malformed extents/counts before any physical allocator consumes them.
+    let regions = unsafe { args.memory_regions() }
+        .unwrap_or_else(|error| panic!("Invalid boot memory map: {}", error));
+    if regions.is_empty() {
+        panic!("Boot memory map is empty");
+    }
+    let boot_modules = unsafe { args.modules() }
+        .unwrap_or_else(|error| panic!("Invalid boot module table: {}", error));
+    boot::modules::validate_modules(boot_modules, hhdm)
+        .unwrap_or_else(|error| panic!("Invalid boot modules: {}", error));
     serial_println!("[init] Memory regions count: {}", regions.len());
     if let Some(first) = regions.first() {
-        serial_println!("[init] First region: base={:#x} size={:#x} kind={:?}",
-            first.base, first.size, first.kind);
+        serial_println!(
+            "[init] First region: base={:#x} size={:#x} kind={:?}",
+            first.base,
+            first.size,
+            first.kind
+        );
+    }
+    // DEBUG: dump regions 0..6 on the E9 port (raw, no format_args).
+    {
+        let mut i = 0usize;
+        while i < regions.len().min(16) {
+            let r = &regions[i];
+            // kind: 0=Null 1=Free 2=Reclaim 3=Reserved
+            let k = (r.kind.0 as u8) + b'0';
+            let base = r.base;
+            let size = r.size;
+            unsafe {
+                crate::e9_mark!(b'R');
+                // base nibbles (low 5 bytes enough)
+                let mut shift = 0i32;
+                while shift < 40 {
+                    let nib = ((base >> shift) & 0xF) as u8;
+                    let c = if nib < 10 {
+                        b'0' + nib
+                    } else {
+                        b'a' + nib - 10
+                    };
+                    crate::e9_mark!(c);
+                    shift += 4;
+                }
+                crate::e9_mark!(b'/');
+                shift = 0;
+                while shift < 40 {
+                    let nib = ((size >> shift) & 0xF) as u8;
+                    let c = if nib < 10 {
+                        b'0' + nib
+                    } else {
+                        b'a' + nib - 10
+                    };
+                    crate::e9_mark!(c);
+                    shift += 4;
+                }
+                crate::e9_mark!(b'/');
+                crate::e9_mark!(k);
+                crate::e9_mark!(b'\n');
+            }
+            i += 1;
+        }
     }
     crate::e9_println!("MM regions");
     // Safety: single-threaded boot, no concurrent access
     let mmap_work = unsafe { &mut *core::ptr::addr_of_mut!(MMAP_WORK) };
     crate::e9_println!("MM work array");
-    let mmap_work_len = core::cmp::min(regions.len(), mmap_work.len());
+    let mmap_work_len = regions.len();
     crate::e9_println!("MM len calc");
-    for (dst, src) in mmap_work.iter_mut().zip(regions.iter()).take(mmap_work_len) {
-        *dst = *src;
-    }
+    mmap_work[..mmap_work_len].copy_from_slice(regions);
     crate::e9_println!("MM copy done");
 
     // Modules are loaded from the FAT32 boot partition.
@@ -590,8 +692,11 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     crate::e9_println!("MM pre-init-boot-alloc");
     memory::boot_alloc::init_boot_allocator(&mmap_work[..mmap_work_len]);
     crate::e9_println!("MM post-init-boot-alloc before serial");
+    crate::e9_mark!(b'1');
     serial_println!("[init] Boot allocator ready.");
+    crate::e9_mark!(b'2');
     serial_println!("[init] Boot allocator ready.");
+    crate::e9_mark!(b'3');
 
     let total_ram = mmap_work[..mmap_work_len]
         .iter()
@@ -604,9 +709,14 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         .map(|region| region.base.saturating_add(region.size))
         .max()
         .unwrap_or(0);
+    crate::e9_mark!(b'4');
     let free_like_regions = count_free_like_regions(&mmap_work[..mmap_work_len], mmap_work_len);
+    crate::e9_mark!(b'5');
     let metadata_bytes = memory::frame::metadata_size_for(total_ram) as usize;
+    crate::e9_mark!(b'6');
     let boot_stats = memory::boot_alloc::boot_allocator_stats();
+    crate::e9_mark!(b'7');
+    crate::e9_println!("M7 boot-stats-done");
     serial_println!(
         "[init] Frame metadata plan: total_ram={:#x} free_regions={} bytes={} boot_free={} largest_boot_region={}",
         total_ram,
@@ -615,19 +725,27 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         boot_stats.total_free_bytes as usize,
         boot_stats.largest_region_bytes as usize,
     );
+    crate::e9_mark!(b'8');
 
     {
+        crate::e9_mark!(b'9');
         let mut boot_alloc = memory::boot_alloc::get_boot_allocator().lock();
+        crate::e9_mark!(b'A');
         memory::frame::init_metadata_array(total_ram, &mut *boot_alloc);
+        crate::e9_mark!(b'B');
     }
+    crate::e9_mark!(b'C');
     serial_println!("[init] Frame metadata ready.");
 
     // TODO: Phase 4 - Reserve module memory ranges when FAT32 loader is implemented
     // For now, skip module reservation since we're using the custom bootloader + FAT32
+    crate::e9_mark!(b'D');
 
     memory::buddy::init_buddy_allocator(&mmap_work[..mmap_work_len]);
+    crate::e9_mark!(b'E');
 
     serial_println!("[init] Buddy allocator ready.");
+    crate::e9_mark!(b'F');
 
     // =============================================
     // Stack switch: migrate off the 8 KB bootstrap stack
@@ -774,22 +892,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     vga_println!("[OK] Memory manager active");
 
     // =============================================
-    // Phase 4a : TSS (Task State Segment)
+    // Phase 4a : TSS + GDT (already initialized in Phase 1c)
     // =============================================
-    serial_println!("[init] TSS...");
-    vga_println!("[..] Initializing TSS...");
-    arch::tss::init();
-    serial_println!("[init] TSS initialized.");
-    vga_println!("[OK] TSS initialized");
-
-    // =============================================
-    // Phase 4b : GDT (global Descriptor Table)
-    // =============================================
-    serial_println!("[init] GDT...");
-    vga_println!("[..] Initializing GDT...");
-    arch::gdt::init();
-    serial_println!("[init] GDT initialized.");
-    vga_println!("[OK] GDT loaded (with TSS)");
+    serial_println!("[init] TSS+GDT already initialized.");
 
     // =============================================
     // Phase 4c: SYSCALL/SYSRET MSR configuration
@@ -840,7 +945,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
     serial_println!("[init] VFS initialized.");
     vga_println!("[OK] VFS initialized");
-    register_boot_modules(args);
+    register_boot_modules(boot_modules);
 
     log_boot_module_magics("post-cow");
 
@@ -860,10 +965,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         // Fallback: legacy PIC + PIT
         serial_println!("[init] APIC unavailable, falling back to legacy PIC");
         vga_println!("[..] Falling back to legacy PIC...");
-        arch::pic::init(
-            arch::pic::PIC1_OFFSET,
-            arch::pic::PIC2_OFFSET,
-        );
+        arch::pic::init(arch::pic::PIC1_OFFSET, arch::pic::PIC2_OFFSET);
         arch::pic::disable();
         arch::pic::enable_irq(0); // Timer
         arch::pic::enable_irq(1); // Keyboard
@@ -1108,19 +1210,27 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         serial_println!("[init] Storage verification skipped (boot path)");
         vga_println!("[..] Storage verification skipped at boot");
 
-        // Launch the init process from FAT32 boot partition.
-        // TODO: Phase 4 - Implement FAT32 module loading
+        // Launch init through the VFS populated from the boot module table.
         let mut init_loaded = false;
 
-        // For now, try to load from VFS if available
-        if let Ok(fd) = vfs::open("/initfs/init", vfs::OpenFlags::READ) {
-            if let Ok(data) = vfs::read_all(fd) {
+        for init_path in ["/initfs/init", "/initfs/strate-init"] {
+            if let Ok(fd) = vfs::open(init_path, vfs::OpenFlags::READ) {
+                let data = vfs::read_all(fd);
+                let _ = vfs::close(fd);
+                let data = match data {
+                    Ok(data) => data,
+                    Err(error) => {
+                        serial_println!("[init] Failed to read {}: {:?}", init_path, error);
+                        continue;
+                    }
+                };
                 let init_caps = [crate::silo::create_silo_admin_capability()];
                 match process::elf::load_and_run_elf_with_caps(&data, "init", &init_caps) {
                     Ok(task_id) => {
                         init_task_id = Some(task_id);
                         init_loaded = true;
-                        serial_println!("[init] ELF '/initfs/init' loaded as task 'init'.");
+                        serial_println!("[init] ELF '{}' loaded as task 'init'.", init_path);
+                        break;
                     }
                     Err(e) => {
                         serial_println!("[init] Failed to load init ELF: {}", e);
@@ -1129,23 +1239,55 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             }
         }
 
-        // Try to load init from modules if not already loaded
+        // Try to load init from modules if not already loaded.
+        // The initfs payload may be named "init" or "strate-init".
         if !init_loaded {
-            for module in args.modules() {
-                if module.name_str() == "init" {
-                    let base_virt = memory::phys_to_virt(module.base);
+            // E9: report the module names so init-chain progress is visible
+            // even when the formatted serial path is unavailable.
+            for module in boot_modules {
+                let raw = module.name_str();
+                unsafe {
+                    crate::e9_mark!(b'N');
+                    for b in raw.as_bytes() {
+                        crate::e9_mark!(*b);
+                    }
+                    crate::e9_mark!(b'\n');
+                }
+                let name = raw;
+                if name == "init" || name == "strate-init" {
+                    let view = boot::modules::InitfsModule::from_physical(module, hhdm)
+                        .unwrap_or_else(|error| panic!("Invalid init module: {}", error));
                     let elf_data = unsafe {
-                        core::slice::from_raw_parts(base_virt as *const u8, module.size as usize)
+                        core::slice::from_raw_parts(view.virtual_base as *const u8, view.len)
                     };
+                    // E9: ELF magic check before handing to the loader.
+                    unsafe {
+                        let magic_ok = elf_data.len() >= 4
+                            && elf_data[0] == 0x7F
+                            && elf_data[1] == b'E'
+                            && elf_data[2] == b'L'
+                            && elf_data[3] == b'F';
+                        crate::e9_mark!(b'!');
+                        crate::e9_mark!(if magic_ok { b'Y' } else { b'N' });
+                        crate::e9_mark!(b'\n');
+                    }
                     let init_caps = [crate::silo::create_silo_admin_capability()];
                     match process::elf::load_and_run_elf_with_caps(elf_data, "init", &init_caps) {
                         Ok(task_id) => {
                             init_task_id = Some(task_id);
+                            crate::e9_mark!(b'I');
                             serial_println!(
                                 "[init] ELF loaded as task 'init' (from module table)."
                             );
                         }
                         Err(e) => {
+                            // E9: report failure code letter.
+                            let code = e.as_bytes().first().copied().unwrap_or(b'?');
+                            unsafe {
+                                crate::e9_mark!(b'X');
+                                crate::e9_mark!(code);
+                                crate::e9_mark!(b'\n');
+                            }
                             serial_println!("[init] Failed to load init ELF: {}", e);
                         }
                     }
@@ -1153,8 +1295,6 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                 }
             }
         }
-        // TODO: Phase 4 - Load all modules from FAT32 boot partition
-        serial_println!("[init] FAT32 module loader pending (Phase 4)");
         if let (Some(task_id), Some(device)) =
             (init_task_id, hardware::storage::virtio_block::get_device())
         {
@@ -1174,6 +1314,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                 serial_println!("[init] Granted volume capability to init");
             }
         }
+        crate::e9_mark!(b'W');
 
         match process::Task::new_kernel_task_with_stack(
             shell::shell_main,
@@ -1183,12 +1324,14 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         ) {
             Ok(shell_task) => {
                 process::add_task(shell_task);
+                crate::e9_mark!(b'w');
                 serial_println!("[init] Chevron shell ready.");
             }
             Err(e) => {
                 serial_println!("[WARN] Failed to create shell task: {}", e);
             }
         }
+        crate::e9_mark!(b'Y');
         if let Ok(status_task) = process::Task::new_kernel_task_with_stack(
             arch::vga::status_line_task_main,
             "status-line",
@@ -1196,6 +1339,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             64 * 1024,
         ) {
             process::add_task(status_task);
+            crate::e9_mark!(b'y');
             // Switch from live VGA debug output to buffered vgabuf path.
             // The status_line_task will flush vgabuf to the framebuffer.
             crate::debug_cfg::set_vga_debug_live(false);
@@ -1208,6 +1352,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
     // Initialize keyboard layout to French by default
     crate::arch::keyboard_layout::set_french_layout();
+    crate::e9_mark!(b'F');
 
     // =============================================
     // Boot complete : start preemptive multitasking
@@ -1215,7 +1360,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     if apic_active {
         arch::smp::open_ap_scheduler_gate();
     }
+    crate::e9_mark!(b'G');
     crate::e9_println!("BC pre-schedule");
+    crate::e9_mark!(b'H');
     boot_milestone!("Boot complete ! Now entering in scheduler");
     arch::speaker::beep_startup();
     serial_println!("[init] Boot complete. Starting preemptive scheduler...");

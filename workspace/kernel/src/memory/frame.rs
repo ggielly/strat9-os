@@ -26,13 +26,12 @@
 //! - **Cache order-0** : `buddy::alloc(0)` peut servir depuis le cache local ; le chemin
 //!   [`FrameAllocOptions::allocate`] applique quand même le CAS + epoch sur la même frame.
 
-use crate::{memory::boot_alloc::BootAllocator, sync::IrqDisabledToken};
+use crate::{arch::xshim::PhysAddr, memory::boot_alloc::BootAllocator, sync::IrqDisabledToken};
 use core::{
     mem::{self, offset_of},
     ptr,
     sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering},
 };
-use crate::arch::xshim::PhysAddr;
 
 // ==============================================================================
 // FrameAllocOptions  (Asterinas OSTD pattern)
@@ -706,34 +705,97 @@ static METADATA_FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Initialize the global metadata array for all physical frames.
 pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
+    crate::e9_mark!(b'X');
     let frame_count = (total_ram / PAGE_SIZE) + if total_ram % PAGE_SIZE == 0 { 0 } else { 1 };
+    crate::e9_mark!(b'Y');
     if frame_count == 0 {
         METADATA_BASE_VIRT.store(0, Ordering::Release);
         METADATA_FRAME_COUNT.store(0, Ordering::Release);
         return;
     }
 
-    let bytes = metadata_size_for(total_ram) as usize;
-    let phys = boot_alloc
-        .try_alloc_accessible(bytes, FRAME_META_ALIGN)
-        .unwrap_or_else(|| {
-            panic!(
-                "frame metadata: boot allocator could not reserve {} bytes (align {}) for {} frames : out of early boot memory",
-                bytes, FRAME_META_ALIGN, frame_count
-            )
-        });
-    let virt = crate::memory::phys_to_virt(phys.as_u64()) as *mut MetaSlot;
-
-    for idx in 0..frame_count as usize {
-        // SAFETY: le bloc a été réservé par le boot allocator avec un alignement
-        // compatible `MetaSlot` et une taille suffisante pour tout le tableau.
-        unsafe {
-            ptr::write(virt.add(idx), MetaSlot::new());
+    // Allocate the real metadata array from the boot allocator.
+    //
+    // This used to be stubbed because the vtable function pointers landed at
+    // identity-mapped addresses (#UD when called from the higher-half). The
+    // array itself only stores DATA (vtable bits = 0 → DEFAULT vtable
+    // resolved statically), so identity mapping of the array is safe: with
+    // hhdm_offset == 0, phys_to_virt(phys) == phys, which the active page
+    // tables map via the bootloader's identity map for all RAM.
+    // Function-pointer vtables (non-zero bits) remain FORBIDDEN until the
+    // identity-vtable issue is fixed : enforced by keeping vtable = 0 on all
+    // slots (MetaSlot::new) and by reset_with_free_list_meta.
+    let bytes = frame_count * FRAME_META_SIZE as u64;
+    // Metadata is written immediately, before map_all_ram can extend the HHDM.
+    // Verify actual reachability even when entered through another boot path.
+    let phys = match boot_alloc.try_alloc_accessible(bytes as usize, 64) {
+        Some(p) => p.as_u64(),
+        None => {
+            // Cannot back the metadata: keep it disabled (get_meta_slot will
+            // panic with a clear message rather than corrupt memory).
+            crate::serial_force_println!("[frame] metadata alloc failed: need {} bytes", bytes);
+            METADATA_BASE_VIRT.store(0, Ordering::Release);
+            METADATA_FRAME_COUNT.store(0, Ordering::Release);
+            return;
+        }
+    };
+    let virt = crate::memory::phys_to_virt(phys);
+    crate::e9_mark!(b'w');
+    // DEBUG: phys/virt of the array (LSB-first nibbles after 'P').
+    unsafe {
+        let mut shift = 0i32;
+        crate::e9_mark!(b'P');
+        while shift < 64 {
+            let nib = ((phys >> shift) & 0xF) as u8;
+            let c = if nib < 10 {
+                b'0' + nib
+            } else {
+                b'a' + nib - 10
+            };
+            crate::e9_mark!(c);
+            shift += 4;
+        }
+        crate::e9_mark!(b'\n');
+    }
+    // Zero the array so every slot starts as DEFAULT vtable / empty links.
+    // Chunked + E9-progress: a silent hang here (bad backing region, wrong
+    // mapping) would otherwise be invisible.
+    unsafe {
+        let dst = virt as *mut u8;
+        let chunk = 0x10_0000usize; // 1 MiB
+        let mut done = 0usize;
+        while done < bytes as usize {
+            let n = (bytes as usize - done).min(chunk);
+            core::ptr::write_bytes(dst.add(done), 0, n);
+            done += n;
+            crate::e9_mark!(b'.');
         }
     }
-
+    crate::e9_mark!(b'v');
+    // DEBUG: report where the array landed (raw E9, R=addr marker).
+    unsafe {
+        let mut shift = 0i32;
+        crate::e9_mark!(b'@');
+        while shift < 64 {
+            let nib = ((virt >> shift) & 0xF) as u8;
+            let c = if nib < 10 {
+                b'0' + nib
+            } else {
+                b'a' + nib - 10
+            };
+            crate::e9_mark!(c);
+            shift += 4;
+        }
+        crate::e9_mark!(b'\n');
+    }
+    METADATA_BASE_VIRT.store(virt, Ordering::Release);
     METADATA_FRAME_COUNT.store(frame_count, Ordering::Release);
-    METADATA_BASE_VIRT.store(virt as u64, Ordering::Release);
+    crate::serial_force_println!(
+        "[frame] metadata array @ {:#x} ({} frames, {} bytes)",
+        virt,
+        frame_count,
+        bytes
+    );
 }
 
 /// Get the [`MetaSlot`] for a given physical frame (same as [`get_meta_slot`]).

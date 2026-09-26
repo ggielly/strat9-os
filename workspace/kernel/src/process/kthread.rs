@@ -45,7 +45,7 @@ pub fn spawn<F: FnOnce() + Send + 'static>(name: &str, f: F) -> Result<TaskId, &
     // `Task::new_kernel_task_with_stack` declares `extern "C" fn() -> !`, while
     // the scheduler bootstrap (`task_entry_trampoline` -> `task_post_switch_enter`)
     // always invokes the entry with one register argument (RDI = r13 slot).
-    // Transmute here so our trampoline can receive the closure pointer — this
+    // Transmute here so our trampoline can receive the closure pointer : this
     // mirrors the transmute performed by `task_post_switch_enter` itself.
     let entry: extern "C" fn() -> ! =
         unsafe { core::mem::transmute(kthread_trampoline as *const ()) };

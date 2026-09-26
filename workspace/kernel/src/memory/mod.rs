@@ -71,7 +71,10 @@ pub fn shootdown_range(start: u64, end: u64) {
         crate::arch::xshim::VirtAddr::new(end),
     );
     #[cfg(target_arch = "riscv64")]
-    crate::arch::tlb::shootdown_range(start, end);
+    crate::arch::tlb::shootdown_range(
+        crate::arch::xshim::VirtAddr::new(start),
+        crate::arch::xshim::VirtAddr::new(end),
+    );
 }
 
 /// Initialize the memory management subsystem

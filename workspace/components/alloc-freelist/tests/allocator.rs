@@ -1,12 +1,11 @@
-//! L1 — `alloc-freelist`: bump+free-list allocator behaviour.
+//! L1 : `alloc-freelist`: bump+free-list allocator behaviour.
 //!
 //! The macro generates a static `GlobalAlloc` over a fixed-size heap array,
 //! used by every userspace component. Tests exercise the real allocator
 //! (single-threaded here; the CAS lock is exercised implicitly).
 
 use alloc_freelist::define_freelist_allocator;
-use core::alloc::GlobalAlloc;
-use core::alloc::Layout;
+use core::alloc::{GlobalAlloc, Layout};
 
 #[global_allocator]
 static ALLOC: TestAlloc = TestAlloc;

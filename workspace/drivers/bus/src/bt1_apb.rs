@@ -128,7 +128,7 @@ impl BusDriver for Bt1Apb {
         if !self.regs.is_valid() {
             return Err(BusError::InitFailed);
         }
-    self.regs.check_user_offset(offset)?;
+        self.regs.check_user_offset(offset)?;
         Ok(self.regs.read32(offset))
     }
 

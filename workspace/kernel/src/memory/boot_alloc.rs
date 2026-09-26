@@ -1,12 +1,12 @@
 //! Allocateur physique de boot pour les structures permanentes du noyau.
 
 use crate::{
+    arch::xshim::PhysAddr,
     boot::entry::{MemoryKind, MemoryRegion},
     memory::phys_to_virt,
     serial_println,
     sync::SpinLock,
 };
-use crate::arch::xshim::PhysAddr;
 
 const PAGE_SIZE: u64 = 4096;
 pub const MAX_BOOT_ALLOC_REGIONS: usize = 512;
@@ -53,6 +53,22 @@ impl BootAllocator {
     }
 
     pub fn init(&mut self, regions: &[MemoryRegion]) {
+        // TEMP DEBUG: count init() calls - the post-switch V-storm may be this
+        // function being re-entered by a corrupted resume.
+        {
+            static INIT_CALLS: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let n = INIT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+            unsafe {
+                let hex = b"0123456789abcdef";
+                crate::e9_mark!(b'I');
+                for sh in [12usize, 8, 4, 0] {
+                    let nib = hex[((n >> sh) & 0xF) as usize];
+                    crate::e9_mark!(nib);
+                }
+                crate::e9_mark!(b'\n');
+            }
+        }
         crate::e9_println!("BI init");
         if self.len != 0 {
             self.reset();
@@ -77,15 +93,26 @@ impl BootAllocator {
         self.normalize_regions();
         crate::e9_println!("BI norm1");
 
-        for (base, size) in protected_ranges_snapshot().into_iter().flatten() {
+        crate::e9_mark!(b'U');
+        let guard = PROTECTED_RANGES.lock();
+        crate::e9_mark!(b'u');
+        for entry in guard.iter() {
+            let (base, size) = match *entry {
+                Some(v) => v,
+                None => continue,
+            };
             if size == 0 {
                 continue;
             }
+            crate::e9_mark!(b'V');
             self.exclude_range(
                 align_down(base, PAGE_SIZE),
                 align_up(base.saturating_add(size), PAGE_SIZE),
             );
+            crate::e9_mark!(b'v');
         }
+        drop(guard);
+        crate::e9_mark!(b'W');
 
         self.normalize_regions();
         crate::e9_println!("BI norm2 pre");
@@ -103,6 +130,10 @@ impl BootAllocator {
     }
 
     pub fn try_alloc(&mut self, size: usize, align: usize) -> Option<PhysAddr> {
+        if crate::debug_cfg::is_quiet() {
+            // TEMP DEBUG: 'b' pulse per try_alloc (throttled by caller loops anyway).
+            unsafe { crate::e9_mark!(b'b') };
+        }
         if size == 0 {
             return Some(PhysAddr::new(0));
         }
@@ -139,6 +170,9 @@ impl BootAllocator {
     }
 
     pub fn try_alloc_accessible(&mut self, size: usize, align: usize) -> Option<PhysAddr> {
+        if crate::debug_cfg::is_quiet() {
+            unsafe { crate::e9_mark!(b'a') };
+        }
         if size == 0 {
             return Some(PhysAddr::new(0));
         }
@@ -315,10 +349,13 @@ impl BootAllocator {
     fn normalize_regions(&mut self) {
         crate::e9_println!("NR begin");
         if self.len <= 1 {
+            crate::e9_mark!(b'S');
             self.rebuild_accessible_limit();
+            crate::e9_mark!(b's');
             return;
         }
 
+        crate::e9_mark!(b'B');
         for i in 1..self.len {
             let cur = self.regions[i];
             let mut j = i;
@@ -328,6 +365,7 @@ impl BootAllocator {
             }
             self.regions[j] = cur;
         }
+        crate::e9_mark!(b'b');
 
         let mut write = 0usize;
         for read in 0..self.len {
@@ -348,21 +386,43 @@ impl BootAllocator {
                 write += 1;
             }
         }
+        crate::e9_mark!(b'c');
 
         for slot in write..self.regions.len() {
             self.regions[slot] = BootRegion::empty();
         }
         self.len = write;
         self.rebuild_accessible_limit();
+        crate::e9_mark!(b'd');
     }
 
     /// Recompute the highest currently reachable physical byte for HHDM-backed boot allocations.
     fn rebuild_accessible_limit(&mut self) {
-        let mut limit = 0u64;
-        for region in self.regions.iter().take(self.len).copied() {
-            limit = limit.max(self.accessible_prefix_end(region));
+        // TEMP DEBUG: count rebuild calls; pulse a hex digit every 65536.
+        REBUILD_CALL_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let n = REBUILD_CALL_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+        if n % 65536 == 0 {
+            unsafe {
+                let hex = b"0123456789abcdef";
+                crate::e9_mark!(b'$');
+                for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
+                    let nib = hex[((n >> sh) & 0xF) as usize];
+                    crate::e9_mark!(nib);
+                }
+                crate::e9_mark!(b'\n');
+            }
         }
+        crate::e9_mark!(b'Q');
+        let mut limit = 0u64;
+        crate::e9_mark!(b'R');
+        for region in self.regions.iter().take(self.len).copied() {
+            crate::e9_mark!(b'S');
+            limit = limit.max(self.accessible_prefix_end(region));
+            crate::e9_mark!(b's');
+        }
+        crate::e9_mark!(b'T');
         self.accessible_limit = limit;
+        crate::e9_mark!(b't');
     }
 
     /// Return the end of the longest mapped prefix of `region` visible through the current HHDM.
@@ -409,6 +469,8 @@ impl BootAllocator {
 }
 
 static BOOT_ALLOCATOR: SpinLock<BootAllocator> = SpinLock::new(BootAllocator::new());
+static REBUILD_CALL_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 static PROTECTED_RANGES: SpinLock<[Option<(u64, u64)>; MAX_PROTECTED_RANGES]> =
     SpinLock::new([None; MAX_PROTECTED_RANGES]);
 
@@ -470,7 +532,17 @@ pub fn reset_protected_ranges() {
 }
 
 pub(crate) fn protected_ranges_snapshot() -> [Option<(u64, u64)>; MAX_PROTECTED_RANGES] {
-    *PROTECTED_RANGES.lock()
+    crate::e9_mark!(b'p');
+    let guard = PROTECTED_RANGES.lock();
+    crate::e9_mark!(b'q');
+    // Avoid large struct copy (512 bytes) which generates a memcpy call
+    // that resolves to an identity-mapped address → #UD.
+    let mut result = [None; MAX_PROTECTED_RANGES];
+    for (dst, src) in result.iter_mut().zip(guard.iter()) {
+        *dst = *src;
+    }
+    crate::e9_mark!(b'r');
+    result
 }
 
 #[inline]

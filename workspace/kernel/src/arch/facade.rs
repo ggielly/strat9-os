@@ -15,17 +15,17 @@
 /// The active backend, as `crate::arch::backend::*`.
 #[cfg(target_arch = "x86_64")]
 pub mod backend {
-    pub use crate::arch::x86_64::{cpuid, percpu, rdtsc, serial, speaker};
     pub use crate::arch::x86_64::{
-        cli, hlt, interrupts_enabled, restore_flags, save_flags_and_cli, sti,
+        cli, cpuid, hlt, interrupts_enabled, percpu, rdtsc, restore_flags, save_flags_and_cli,
+        serial, speaker, sti,
     };
 }
 
 #[cfg(target_arch = "riscv64")]
 pub mod backend {
-    pub use super::riscv64::{cpuid, rdtsc, serial, speaker};
     pub use super::riscv64::{
-        cli, hlt, interrupts_enabled, restore_flags, save_flags_and_cli, sti,
+        cli, cpuid, hlt, interrupts_enabled, rdtsc, restore_flags, save_flags_and_cli, serial,
+        speaker, sti,
     };
 }
 
@@ -64,13 +64,11 @@ pub use backend::speaker;
 pub use crate::arch::x86_64::percpu::MAX_CPUS;
 
 #[cfg(target_arch = "riscv64")]
-pub use crate::arch::riscv64::{
-    boot_timestamp, idt, timer, vga, vgabuf,
-};
+pub use crate::arch::riscv64::{boot_timestamp, idt, timer, vga, vgabuf};
 
 #[cfg(target_arch = "x86_64")]
 pub use crate::arch::x86_64::{
-    apic, boot_timestamp, clac, gdt, idt, init_cpu_extensions, io, ioapic,
-    keyboard, keyboard_layout, msi, mouse, pci, pic, ring3_diag, rdmsr, smp,
-    stac, syscall, timer, tlb, tss, vga, vgabuf, wrmsr, xgetbv, xsetbv,
+    apic, boot_timestamp, clac, gdt, idt, init_cpu_extensions, io, ioapic, keyboard,
+    keyboard_layout, mouse, msi, pci, pic, rdmsr, ring3_diag, smp, stac, syscall, timer, tlb, tss,
+    vga, vgabuf, wrmsr, xgetbv, xsetbv,
 };

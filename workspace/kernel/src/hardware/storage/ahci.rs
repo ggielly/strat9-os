@@ -764,7 +764,8 @@ pub(crate) fn flush_deferred_async_read_completions(ring_id: u64) -> u32 {
                             );
                         }
                         #[cfg(not(target_arch = "x86_64"))]
-                        user_buf.copy_from(unsafe { core::slice::from_raw_parts(src, completion.len) });
+                        user_buf
+                            .copy_from(unsafe { core::slice::from_raw_parts(src, completion.len) });
                     } else {
                         user_buf
                             .copy_from(unsafe { core::slice::from_raw_parts(src, completion.len) });
