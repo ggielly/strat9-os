@@ -42,12 +42,16 @@ pub enum DeferredWork {
     WakeDeadlines = 1 << 1,
     /// Per-task Fair class accounting (runnable_len, tick_update_wait).
     PerTaskAccounting = 1 << 2,
+    /// NIC watchdog / IRQ-less N2 service (safe outside hardirq).
+    NicPoll = 1 << 3,
 }
 
 impl DeferredWork {
     /// All work items combined.
-    const ALL: u32 =
-        Self::IntervalTimers as u32 | Self::WakeDeadlines as u32 | Self::PerTaskAccounting as u32;
+    const ALL: u32 = Self::IntervalTimers as u32
+        | Self::WakeDeadlines as u32
+        | Self::PerTaskAccounting as u32
+        | Self::NicPoll as u32;
 }
 
 /// Per-CPU deferred work state.
@@ -110,6 +114,7 @@ pub fn raise_tick_deferred_work() {
     raise_deferred_work(DeferredWork::IntervalTimers);
     raise_deferred_work(DeferredWork::WakeDeadlines);
     raise_deferred_work(DeferredWork::PerTaskAccounting);
+    raise_deferred_work(DeferredWork::NicPoll);
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +176,11 @@ pub fn process_deferred_work() -> bool {
 
     if pending & DeferredWork::PerTaskAccounting as u32 != 0 {
         process_per_task_accounting();
+    }
+
+    if pending & DeferredWork::NicPoll as u32 != 0 {
+        // Safe here: deferred work runs outside the hardirq swapgs window.
+        crate::hardware::nic::poll_all();
     }
 
     work_cpu.processing.store(false, Ordering::Release);

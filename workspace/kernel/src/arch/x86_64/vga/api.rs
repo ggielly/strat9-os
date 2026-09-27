@@ -431,8 +431,9 @@ pub fn end_frame() {
         return;
     }
     let mut writer = VGA_WRITER.lock();
-    writer.present();
-    writer.disable_double_buffer(false);
+    // Finish the frame before leaving buffered mode; a throttled present must
+    // not discard its damage when double buffering is disabled.
+    writer.disable_double_buffer(true);
 }
 
 /// Performs the present operation.
@@ -847,8 +848,8 @@ pub fn set_console_defer_present(defer: bool) {
     VGA_WRITER.lock().console_defer_present = defer;
 }
 
-/// Flush: draw scrollbar + present to screen.
-/// Call after a batch of writes to display everything at once.
+/// Request console rasterization and presentation at the next eligible tick.
+/// The console-render task also services the final fragment when output stops.
 pub fn flush_display() {
     if !is_available() {
         return;

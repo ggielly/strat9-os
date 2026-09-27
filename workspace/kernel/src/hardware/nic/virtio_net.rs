@@ -417,13 +417,48 @@ impl NetworkDevice for VirtioNetDevice {
         let status = self.read_link_status();
         status & net_status::VIRTIO_NET_S_LINK_UP != 0
     }
+
+    /// Ack the PCI/virtio ISR so the IRQ line can fire again.
+    /// RX/TX ring draining is done by `nic::handle_interrupt()`.
+    fn handle_interrupt(&self) {
+        if self.device.read_isr_status() == 0 {
+            return;
+        }
+        self.device.ack_interrupt();
+    }
+
+    /// Reclaim completed TX buffers and top up RX when polled without IRQ.
+    fn poll(&self) {
+        loop {
+            let used = {
+                let mut tx_queue = self.tx_queue.lock();
+                tx_queue.get_used()
+            };
+            let Some((_token, _len)) = used else {
+                break;
+            };
+            if let Some((_frame, order)) = self.tx_frames.lock().pop_front() {
+                crate::sync::with_irqs_disabled(|token| {
+                    memory::free_phys_contiguous(token, _frame, order);
+                });
+            }
+        }
+        let _ = self.refill_rx_queue();
+    }
 }
 
 /// Global VirtIO network device
 static VIRTIO_NET: SpinRwLock<Option<Arc<VirtioNetDevice>>> = SpinRwLock::new(None);
 
 /// Initialize VirtIO network device and register it in the global net registry.
+///
+/// Idempotent: `hardware::init()` and the component `nic_init` both call this;
+/// a second probe would reset the same PCI device and corrupt the first handle.
 pub fn init() {
+    if VIRTIO_NET.read().is_some() {
+        return;
+    }
+
     log::info!("VirtIO-net: Scanning for devices...");
 
     // Prefer strict class-based probe (network/ethernet), with fallback to
@@ -444,11 +479,63 @@ pub fn init() {
         }
     };
 
+    // Enable MSI-X => MSI => INTx before the device value is moved into
+    // VirtioNetDevice::new(). Without this the N2 data plane never sees
+    // RX/TX and DHCP can never complete.
+    // msi::probe_and_enable takes hardware::pci_client::PciDevice (same as e1000).
+    let client_dev = crate::hardware::pci_client::PciDevice {
+        address: crate::hardware::pci_client::PciAddress::new(
+            pci_dev.address.bus,
+            pci_dev.address.device,
+            pci_dev.address.function,
+        ),
+        vendor_id: pci_dev.vendor_id,
+        device_id: pci_dev.device_id,
+        class_code: pci_dev.class_code,
+        subclass: pci_dev.subclass,
+        prog_if: pci_dev.prog_if,
+        revision: pci_dev.revision,
+        header_type: pci_dev.header_type,
+        interrupt_line: pci_dev.interrupt_line,
+        interrupt_pin: pci_dev.interrupt_pin,
+    };
+    let (irq, vector) = crate::arch::msi::probe_and_enable(&client_dev, true);
+    let msi_active =
+        (client_dev.read_config_u16(pci::config::COMMAND) & pci::command::INTERRUPT_DISABLE) != 0;
+
     match unsafe { VirtioNetDevice::new(pci_dev) } {
         Ok(device) => {
             let arc = Arc::new(device);
             *VIRTIO_NET.write() = Some(arc.clone());
-            net::register_device(arc);
+            let iface = net::register_device(arc.clone());
+
+            if msi_active {
+                // MSI delivers to the vector programmed by probe_and_enable.
+                // When interrupt_line is 0/0xFF that vector is still valid (≥ 0x20).
+                crate::arch::idt::register_nic_irq(vector);
+                let irq_for_eoi = if irq != 0 && irq != 0xFF { irq } else { vector };
+                net::set_nic_device(arc, irq_for_eoi);
+                log::info!(
+                    "[VirtIO-net] {}: MSI/MSI-X active on vector {:#x}",
+                    iface,
+                    vector
+                );
+            } else if irq == 0 || irq == 0xFF {
+                log::warn!(
+                    "[VirtIO-net] {}: no valid IRQ line, running in polling mode",
+                    iface
+                );
+            } else {
+                crate::arch::ioapic::route_nic_irq(irq, vector);
+                log::info!(
+                    "[VirtIO-net] {}: INTx IRQ {} => vector {:#x}",
+                    iface,
+                    irq,
+                    vector
+                );
+                crate::arch::idt::register_nic_irq(irq);
+                net::set_nic_device(arc, irq);
+            }
         }
         Err(e) => {
             log::error!("VirtIO-net: Failed to initialize device: {}", e);

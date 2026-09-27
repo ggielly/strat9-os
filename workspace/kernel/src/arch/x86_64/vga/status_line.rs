@@ -455,8 +455,11 @@ pub extern "C" fn status_line_task_main() -> ! {
         // In quiet mode, skip all rendering and heartbeat output.
         if !crate::debug_cfg::is_quiet() && tick != last_tick {
             last_tick = tick;
+            // Fallback if creation of the dedicated console task failed.
+            if !crate::arch::x86_64::vgabuf::console_task_active() {
+                crate::arch::x86_64::vgabuf::vgabuf_flush_to_framebuffer();
+            }
             maybe_refresh_system_status_line(UiTheme::OCEAN_STATUS);
-            crate::arch::x86_64::vgabuf::vgabuf_flush_to_framebuffer();
         }
         diag_counter += 1;
         if !crate::debug_cfg::is_quiet() && diag_counter % 5000 == 0 {

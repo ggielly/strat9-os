@@ -3,7 +3,14 @@
 
 #[path = "vga/log_queue.rs"]
 mod log_queue;
+use core::sync::atomic::{AtomicBool, Ordering};
 use log_queue::{Line, LogQueue};
+
+static CONSOLE_TASK_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn console_task_active() -> bool {
+    CONSOLE_TASK_ACTIVE.load(Ordering::Acquire)
+}
 
 pub const VGABUF_CAPACITY: usize = log_queue::CAPACITY;
 pub const VGABUF_LINE_LEN: usize = log_queue::LINE_LEN;
@@ -101,5 +108,21 @@ fn vgabuf_flush_all_direct() {
     }
     if count > 0 {
         crate::arch::x86_64::vga::panic_draw_direct(&lines[..count]);
+    }
+}
+
+/// One render opportunity per timer tick, independent of commands/status I/O.
+pub extern "C" fn console_task_main() -> ! {
+    CONSOLE_TASK_ACTIVE.store(true, Ordering::Release);
+    let mut last_tick = u64::MAX;
+    loop {
+        let tick = crate::process::scheduler::ticks();
+        if tick != last_tick {
+            last_tick = tick;
+            if !crate::debug_cfg::is_quiet() {
+                vgabuf_flush_to_framebuffer();
+            }
+        }
+        crate::process::yield_task();
     }
 }

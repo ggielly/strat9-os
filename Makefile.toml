@@ -271,7 +271,14 @@ description = "Run kernel SMP release with GUI"
 dependencies = ["uefi-image-release", "iso-uefi-release"]
 script_runner = "@shell"
 script = ['''
+# Prefer hardware virtualization when this user can access KVM.
+# Keep an explicit software fallback for hosts without it.
+qemu_accel=tcg
+if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+    qemu_accel=kvm
+fi
 ${QEMU} \
+    -accel "$qemu_accel" \
     -machine q35 \
     -cpu qemu64 \
     -smp 4 \

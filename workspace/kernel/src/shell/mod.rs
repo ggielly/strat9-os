@@ -8,7 +8,11 @@
 //- plus tard seulement, gestion graphemes/combinaisons complexes.
 
 pub mod commands;
+#[cfg(target_arch = "x86_64")]
+mod mouse;
 pub mod output;
+#[cfg(target_arch = "x86_64")]
+pub use mouse::mouse_task_main;
 pub mod parser;
 pub mod scripting;
 
@@ -318,18 +322,6 @@ pub extern "C" fn shell_main() -> ! {
     let mut utf8_pending_len = 0usize;
     let mut in_escape_seq = false;
 
-    // Mouse state
-    let mut prev_left = false;
-    let mut selecting = false;
-    let mut scrollbar_dragging = false;
-    let mut last_scrollbar_drag_tick = 0u64;
-    let mut pending_scrollbar_drag_y: Option<usize> = None;
-    let mut pending_selection_pos: Option<(usize, usize)> = None;
-    let mut pending_mouse_cursor: Option<(i32, i32)> = None;
-    let mut pending_scroll_delta: i32 = 0;
-    let mut mouse_x: i32 = 0;
-    let mut mouse_y: i32 = 0;
-
     // Display welcome message using ASCII for robust terminal rendering.
     shell_println!("");
     shell_println!("+--------------------------------------------------------------+");
@@ -342,12 +334,6 @@ pub extern "C" fn shell_main() -> ! {
 
     let mut last_blink_tick = 0;
     let mut cursor_visible = false;
-
-    // Cap per-loop mouse work to avoid starving timer ticks when dragging.
-    const MAX_MOUSE_EVENTS_PER_TURN: usize = 16;
-    const SCROLLBAR_DRAG_MIN_TICKS: u64 = 1;
-    const MOUSE_RENDER_MIN_TICKS: u64 = 1;
-    let mut last_mouse_render_tick = 0u64;
 
     loop {
         // Handle cursor blinking (graphics only)
@@ -367,22 +353,7 @@ pub extern "C" fn shell_main() -> ! {
             }
         }
 
-        // Poll USB HID and drain events into unified keyboard/mouse buffers.
-        if crate::hardware::usb::hid::is_available() {
-            crate::hardware::usb::hid::poll_all();
-        }
-
-        // Read from keyboard buffer
-        // TEMP DEBUG: 'S' pulse each shell-loop iteration, 'R' when a char arrives.
-        unsafe {
-            core::arch::asm!("out 0xe9, al", in("al") b'S', options(nomem, nostack));
-        }
         if let Some(ch) = crate::arch::keyboard::read_char() {
-            unsafe {
-                core::arch::asm!("out 0xe9, al", in("al") b'R', options(nomem, nostack));
-                core::arch::asm!("out 0xe9, al", in("al") ch, options(nomem, nostack));
-                core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
-            }
             // Any keypress returns the view to live output.
             if crate::arch::vga::is_available() {
                 crate::arch::vga::scroll_to_live();
@@ -604,152 +575,8 @@ pub extern "C" fn shell_main() -> ! {
             // Reset blink state on input
             last_blink_tick = ticks / 50;
             cursor_visible = true;
-        } else {
-            if crate::arch::mouse::MOUSE_READY.load(core::sync::atomic::Ordering::Relaxed) {
-                let mut scroll_delta: i32 = 0;
-                let mut left_pressed = false;
-                let mut left_released = false;
-                let mut left_held = false;
-                let mut had_events = false;
-
-                let mut mouse_events_seen = 0usize;
-                while let Some(ev) = crate::arch::mouse::read_event() {
-                    had_events = true;
-                    scroll_delta += ev.dz as i32;
-                    if ev.left && !prev_left {
-                        left_pressed = true;
-                    }
-                    if !ev.left && prev_left {
-                        left_released = true;
-                    }
-                    if ev.left && prev_left {
-                        left_held = true;
-                    }
-                    prev_left = ev.left;
-                    mouse_events_seen += 1;
-                    if mouse_events_seen >= MAX_MOUSE_EVENTS_PER_TURN {
-                        // Prevent monopolizing the CPU under heavy mouse input
-                        // (e.g. rapid drag on scrollbar). Remaining events are
-                        // processed on next loop iteration after yield_task().
-                        break;
-                    }
-                }
-
-                // Under heavy mouse input, give the scheduler a chance to run
-                // other tasks (including timer tick handlers driving UI).
-                if mouse_events_seen >= MAX_MOUSE_EVENTS_PER_TURN {
-                    crate::process::scheduler::yield_task();
-                }
-
-                let has_pending_visual = pending_scroll_delta != 0
-                    || pending_scrollbar_drag_y.is_some()
-                    || pending_selection_pos.is_some()
-                    || pending_mouse_cursor.is_some();
-
-                if had_events || left_held || has_pending_visual {
-                    let (new_mx, new_my) = crate::arch::mouse::mouse_pos();
-                    let moved = new_mx != mouse_x || new_my != mouse_y;
-                    mouse_x = new_mx;
-                    mouse_y = new_my;
-                    if had_events {
-                        pending_scroll_delta += scroll_delta;
-                    }
-
-                    if crate::arch::vga::is_available() {
-                        if left_pressed {
-                            let (mx, my) = (new_mx as usize, new_my as usize);
-                            if crate::arch::vga::scrollbar_hit_test(mx, my) {
-                                crate::arch::vga::scrollbar_click(mx, my);
-                                crate::arch::vga::clear_selection();
-                                selecting = false;
-                                scrollbar_dragging = true;
-                                pending_scrollbar_drag_y = None;
-                            } else {
-                                crate::arch::vga::start_selection(mx, my);
-                                selecting = true;
-                                scrollbar_dragging = false;
-                                pending_selection_pos = None;
-                            }
-                            last_mouse_render_tick = ticks;
-                        } else if left_held && scrollbar_dragging && moved {
-                            pending_scrollbar_drag_y = Some(new_my as usize);
-                        } else if left_held && selecting && moved {
-                            pending_selection_pos = Some((new_mx as usize, new_my as usize));
-                        } else if left_released {
-                            if selecting {
-                                crate::arch::vga::end_selection();
-                                selecting = false;
-                                pending_selection_pos = None;
-                            }
-                            if scrollbar_dragging {
-                                if let Some(py) = pending_scrollbar_drag_y.take() {
-                                    crate::arch::vga::scrollbar_drag_to(py);
-                                }
-                            }
-                            scrollbar_dragging = false;
-                            last_mouse_render_tick = ticks;
-                        }
-
-                        if moved {
-                            pending_mouse_cursor = Some((new_mx, new_my));
-                        }
-
-                        let render_due =
-                            ticks.saturating_sub(last_mouse_render_tick) >= MOUSE_RENDER_MIN_TICKS;
-                        let drag_due = ticks.saturating_sub(last_scrollbar_drag_tick)
-                            >= SCROLLBAR_DRAG_MIN_TICKS;
-                        let has_pending_visual = pending_scroll_delta != 0
-                            || pending_scrollbar_drag_y.is_some()
-                            || pending_selection_pos.is_some()
-                            || pending_mouse_cursor.is_some();
-                        if has_pending_visual && (render_due || left_pressed || left_released) {
-                            let mut rendered = false;
-
-                            // Inverted wheel: wheel up (dz>0) -> scroll down (history forward)
-                            if pending_scroll_delta > 0 {
-                                crate::arch::vga::scroll_view_down(
-                                    (pending_scroll_delta as usize) * 3,
-                                );
-                                pending_scroll_delta = 0;
-                                rendered = true;
-                            } else if pending_scroll_delta < 0 {
-                                crate::arch::vga::scroll_view_up(
-                                    ((-pending_scroll_delta) as usize) * 3,
-                                );
-                                pending_scroll_delta = 0;
-                                rendered = true;
-                            }
-
-                            if drag_due {
-                                if selecting {
-                                    if let Some((sx, sy)) = pending_selection_pos.take() {
-                                        crate::arch::vga::update_selection(sx, sy);
-                                        rendered = true;
-                                    }
-                                }
-                                if scrollbar_dragging {
-                                    if let Some(py) = pending_scrollbar_drag_y.take() {
-                                        crate::arch::vga::scrollbar_drag_to(py);
-                                        last_scrollbar_drag_tick = ticks;
-                                        rendered = true;
-                                    }
-                                }
-                            }
-
-                            if let Some((cx, cy)) = pending_mouse_cursor.take() {
-                                crate::arch::vga::update_mouse_cursor(cx, cy);
-                                rendered = true;
-                            }
-
-                            if rendered {
-                                last_mouse_render_tick = ticks;
-                            }
-                        }
-                    }
-                }
-            }
-            crate::process::yield_task();
         }
+        crate::process::yield_task();
     }
 }
 

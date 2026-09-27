@@ -535,10 +535,10 @@ impl CanvasBuffer {
 /// Minimum scheduler ticks between two throttled presents, shared by the
 /// VGA console writer and the video driver.
 ///
-/// `TIMER_HZ` is 100 (one tick = 10 ms): two ticks permit 50 FPS and bound
-/// throttling latency to 20 ms. Paths that pace themselves (the userspace compositor,
-/// `Framebuffer::swap_buffers`) do not go through this gate.
-pub const PRESENT_MIN_TICKS: u64 = 2;
+/// `TIMER_HZ` is 100 (one tick = 10 ms): allow one present per tick so
+/// pending console work is eligible within 10 ms. Paths that pace themselves
+/// (the userspace compositor, `Framebuffer::swap_buffers`) bypass this gate.
+pub const PRESENT_MIN_TICKS: u64 = 1;
 
 impl FramebufferOps {
     pub fn detect() -> Self {

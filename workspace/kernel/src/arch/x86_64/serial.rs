@@ -8,6 +8,108 @@ use uart_16550::SerialPort;
 /// Global serial port instance
 static SERIAL1: Mutex<SerialPort> = Mutex::new(unsafe { SerialPort::new(0x3F8) });
 
+// Normal runtime output is bounded and asynchronous. Boot/panic keep their
+// synchronous path; a slow or disconnected UART must not stall the console.
+const TX_CHUNK_LEN: usize = 256;
+const TX_QUEUE_LEN: usize = 256;
+#[derive(Clone, Copy)]
+struct TxChunk {
+    bytes: [u8; TX_CHUNK_LEN],
+    len: usize,
+}
+impl TxChunk {
+    const EMPTY: Self = Self {
+        bytes: [0; TX_CHUNK_LEN],
+        len: 0,
+    };
+}
+#[expect(
+    deprecated,
+    reason = "bounded diagnostics allow drops and delayed dequeue"
+)]
+static TX_QUEUE: heapless::mpmc::Queue<TxChunk, TX_QUEUE_LEN> = heapless::mpmc::Queue::new();
+static ASYNC_OUTPUT: AtomicBool = AtomicBool::new(false);
+static TX_FORMAT: Mutex<()> = Mutex::new(());
+static TX_DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+struct QueuedWriter {
+    chunk: TxChunk,
+}
+impl QueuedWriter {
+    fn flush(&mut self) -> fmt::Result {
+        if self.chunk.len != 0 {
+            let chunk = core::mem::replace(&mut self.chunk, TxChunk::EMPTY);
+            if TX_QUEUE.enqueue(chunk).is_err() {
+                TX_DROPPED.fetch_add(1, Ordering::Relaxed);
+                return Err(fmt::Error);
+            }
+        }
+        Ok(())
+    }
+    fn byte(&mut self, byte: u8) -> fmt::Result {
+        self.chunk.bytes[self.chunk.len] = byte;
+        self.chunk.len += 1;
+        if self.chunk.len == TX_CHUNK_LEN {
+            self.flush()?;
+        }
+        Ok(())
+    }
+}
+impl fmt::Write for QueuedWriter {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        for byte in text.bytes() {
+            // Match uart_16550::SerialPort::send's terminal translation.
+            match byte {
+                b'\n' => {
+                    self.byte(b'\r')?;
+                    self.byte(b'\n')?;
+                }
+                8 | 127 => {
+                    self.byte(8)?;
+                    self.byte(b' ')?;
+                    self.byte(8)?;
+                }
+                byte => self.byte(byte)?,
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Number of runtime output chunks/format attempts dropped under saturation.
+pub fn dropped_output() -> usize {
+    TX_DROPPED.load(Ordering::Relaxed)
+}
+
+/// Drain bounded bursts without waiting for the UART or yielding under its lock.
+pub extern "C" fn serial_task_main() -> ! {
+    let mut chunk = TxChunk::EMPTY;
+    let mut offset = 0;
+    ASYNC_OUTPUT.store(true, Ordering::Release);
+    loop {
+        if !PANIC_IN_PROGRESS.load(Ordering::Relaxed) {
+            if let Some(mut port) = SERIAL1.try_lock() {
+                for _ in 0..TX_CHUNK_LEN {
+                    if offset == chunk.len {
+                        match TX_QUEUE.dequeue() {
+                            Some(next) => {
+                                chunk = next;
+                                offset = 0;
+                            }
+                            None => break,
+                        }
+                    }
+                    if port.try_send_raw(chunk.bytes[offset]).is_err() {
+                        break;
+                    }
+                    offset += 1;
+                }
+            }
+        }
+        crate::process::yield_task();
+    }
+}
+
 /// Fixed-size buffer for kernel cmdline (up to 2KB).
 /// SAFETY: Written once during early boot (single-threaded, IRQs disabled),
 /// then read-only. Safe for concurrent reads after initialization.
@@ -356,18 +458,32 @@ pub fn _print(args: fmt::Arguments) {
         return;
     }
 
-    // Normal mode: Use try_lock to avoid deadlock in interrupt handlers.
-    crate::e9_println!("_print enter");
+    if ASYNC_OUTPUT.load(Ordering::Acquire) {
+        // Nonblocking even if interrupted while another formatter is active.
+        let Some(_format_guard) = TX_FORMAT.try_lock() else {
+            TX_DROPPED.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        let mut queued = QueuedWriter {
+            chunk: TxChunk::EMPTY,
+        };
+        let mut prefix_writer = BootPrefixWriter::new(&mut queued);
+        let mut writer = AnsiStylingWriter::new(&mut prefix_writer);
+        let _ = writer.write_fmt(args);
+        let _ = writer.finish();
+        prefix_writer.finish();
+        let _ = queued.flush();
+        return;
+    }
+
+    // Early boot: no worker exists yet. Never block acquiring the port lock.
     if let Some(mut port) = SERIAL1.try_lock() {
-        crate::e9_println!("_print locked");
         let mut prefix_writer = BootPrefixWriter::new(&mut *port);
         let mut writer = AnsiStylingWriter::new(&mut prefix_writer);
         let _ = writer.write_fmt(args);
-        crate::e9_println!("_print written");
         let _ = writer.finish();
         prefix_writer.finish();
     }
-    crate::e9_println!("_print exit");
 }
 
 /// Print to serial port bypassing the shared mutex.

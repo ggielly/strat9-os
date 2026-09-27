@@ -24,18 +24,16 @@ impl log::Log for SerialLogger {
     /// Performs the log operation.
     ///
     /// Architecture (FreeBSD vt(4) / Linux nbcon pattern):
-    ///   1. Always write to serial (fast, always works).
+    ///   1. Queue serial output at runtime (synchronous during early boot).
     ///   2. Enqueue a plain-text copy into the lock-free `vgabuf` ring buffer.
     ///      No lock is acquired here : safe from any context (IRQ, panic).
-    ///   3. The `status_line_task` drains `vgabuf` to the framebuffer
+    ///   3. The `console-render` task drains `vgabuf` to the framebuffer
     ///      asynchronously via `vgabuf_flush_to_framebuffer()`.
     ///
     /// This decouples the hot logging path from framebuffer rendering,
     /// making deadlocks structurally impossible.
     fn log(&self, record: &Record) {
-        crate::e9_println!("LOG enter");
         // Gate: skip format_args-heavy paths until SSE/XSAVE are initialized.
-        // The e9_println above is safe (plain string literal only).
         if !EXTENSIONS_READY.load(Ordering::Acquire) {
             return;
         }
@@ -53,7 +51,7 @@ impl log::Log for SerialLogger {
                 Level::Trace => ("\x1b[90mTRACE\x1b[0m", "\x1b[90m"),
             };
 
-            // 1. Serial : always works, no locks needed.
+            // 1. Serial: bounded, nonblocking enqueue once its worker is running.
             crate::arch::serial::_print(format_args!(
                 "[{}] {}{}\x1b[0m\n",
                 level_str,

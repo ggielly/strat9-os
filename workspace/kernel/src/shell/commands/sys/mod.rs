@@ -99,7 +99,7 @@ mode = "076"
 sid = 42
 [[silos.strates]]
 name = "strate-net"
-binary = "/initfs/strate-net"
+binary = "/initfs/strate-net-silo"
 type = "elf"
 
 [[silos]]
@@ -109,7 +109,7 @@ mode = "076"
 sid = 42
 [[silos.strates]]
 name = "dhcp-client"
-binary = "/initfs/bin/dhcp-client"
+binary = "/initfs/dhcp-client"
 type = "elf"
 
 [[silos]]

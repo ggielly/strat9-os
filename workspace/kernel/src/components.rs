@@ -169,9 +169,14 @@ fn storage_init() -> Result<(), ComponentInitError> {
 }
 
 /// Network drivers (VirtIO net, E1000).
+///
+/// Real probe already ran in `pci_init` → `hardware::init()` → `nic::init()`.
+/// This stage only confirms the registry is populated.
 #[component::init_component(hardware, priority = 1, depends_on = pci_init)]
 fn nic_init() -> Result<(), ComponentInitError> {
-    crate::hardware::nic::virtio_net::init();
+    if crate::hardware::nic::list_interfaces().is_empty() {
+        crate::hardware::nic::virtio_net::init();
+    }
     log::info!("[component] Network drivers initialized");
     Ok(())
 }
