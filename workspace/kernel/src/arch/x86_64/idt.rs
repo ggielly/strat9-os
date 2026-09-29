@@ -1871,12 +1871,27 @@ extern "x86-interrupt" fn general_protection_fault_handler(
             return;
         }
     }
+    let rip = stack_frame.instruction_pointer.as_u64();
     crate::serial_force_println!(
-        "\x1b[31;1m[GPF]\x1b[0m KERNEL rip={:#x} err={:#x} cs={:#x} rsp={:#x}",
-        stack_frame.instruction_pointer.as_u64(),
+        "\x1b[31;1m[GPF]\x1b[0m KERNEL rip={:#018x} err={:#06x} cs={:#06x} ss={:#06x} rflags={:#018x} rsp={:#018x}",
+        rip,
         error_code,
         stack_frame.code_segment.0,
+        stack_frame.stack_segment.0,
+        stack_frame.cpu_flags.bits(),
         stack_frame.stack_pointer.as_u64()
+    );
+    if let Some((name, offset)) = crate::boot::symbols::lookup(rip) {
+        crate::serial_force_println!("[GPF] symbol={}+{:#x}", name, offset);
+    } else {
+        crate::serial_force_println!("[GPF] symbol unavailable (ELF symbol table not loaded or RIP not covered)");
+    }
+    crate::serial_force_println!(
+        "[GPF] error-code: EXT={} IDT={} TI={} selector-index={}",
+        error_code & 1,
+        (error_code >> 1) & 1,
+        (error_code >> 2) & 1,
+        error_code >> 3
     );
     panic!("General protection fault");
 }

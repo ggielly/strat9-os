@@ -16,7 +16,7 @@ path = "src/main.rs"
 # EDK2 has set gBS = NULL, so a panic on the handoff path faults and kills
 # QEMU. This crate installs its own firmware-free panic handler and uses only
 # the 0x3F8/0xE9 ports, which are valid at any boot stage.
-uefi = { version = "0.39", features = ["alloc", "global_allocator"] }
+uefi = { version = "0.41", features = ["alloc", "global_allocator"] }
 x86_64 = "0.15"
 log = "0.4"
 

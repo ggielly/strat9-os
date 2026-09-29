@@ -12,7 +12,7 @@ use crate::{
     hardware::{
         nic as net,
         virtio::{
-            common::{VirtioDevice, Virtqueue},
+            common::{reg, VirtioDevice, Virtqueue},
             status,
         },
     },
@@ -20,15 +20,11 @@ use crate::{
     sync::{FixedQueue, SpinLock},
 };
 use alloc::sync::Arc;
-use core::{mem, ptr, sync::atomic::Ordering};
+use core::{mem, ptr};
 use endian_num::Le;
 use net_core::{NetError, NetworkDevice};
 use spin::RwLock as SpinRwLock;
 
-/// VirtIO net header size (12 bytes with MRG_RXBUF, 10 bytes without).
-/// Determined at runtime during feature negotiation.
-static NET_HDR_SIZE: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(mem::size_of::<VirtioNetHeader>());
 const RX_FRAME_TRACK_CAPACITY: usize = 128;
 const TX_FRAME_TRACK_CAPACITY: usize = 128;
 
@@ -83,6 +79,13 @@ pub struct VirtioNetDevice {
     rx_queue: SpinLock<Virtqueue>,
     tx_queue: SpinLock<Virtqueue>,
     mac_address: [u8; 6],
+    /// Size in bytes of the per-packet `virtio_net_hdr` this device was
+    /// configured with: 12 with `MRG_RXBUF`, 10 without.
+    ///
+    /// Per-device rather than a process-wide static. Two NICs may negotiate
+    /// different feature sets, and a shared value would mis-size every header
+    /// of whichever device initialised last.
+    hdr_size: usize,
     pub rx_frames: SpinLock<FixedQueue<(PhysFrame, u8), RX_FRAME_TRACK_CAPACITY>>,
     tx_frames: SpinLock<FixedQueue<(PhysFrame, u8), TX_FRAME_TRACK_CAPACITY>>,
 }
@@ -91,6 +94,23 @@ pub struct VirtioNetDevice {
 unsafe impl Send for VirtioNetDevice {}
 unsafe impl Sync for VirtioNetDevice {}
 
+/// VirtIO net device-specific configuration layout (spec 5.1.1).
+mod cfg {
+    /// `struct virtio_net_hdr` starts here; the MAC address occupies 6 bytes.
+    pub const MAC: u16 = 0;
+    /// Device link status, a `u16`. Only `VIRTIO_NET_S_LINK_UP` (bit 0) and
+    /// `VIRTIO_NET_S_ANNOUNCE` (bit 1) are defined, so a real device reads
+    /// back 0..=3 here. That makes it a cheap validity check on the
+    /// device-config base — far stronger than validating the MAC alone.
+    pub const LINK_STATUS: u16 = 6;
+}
+
+/// Offsets to try for the start of the device-specific configuration inside
+/// BAR0. [`reg::CONFIG_OFF`] is the spec value; the shifted entries cover
+/// hypervisors that leave a few reserved bytes between the common config and
+/// the device config.
+const CFG_OFFSET_CANDIDATES: [u16; 3] = [reg::CONFIG_OFF, 0x18, 0x1C];
+
 /// Read 6 bytes at `offset` in the device-config window and accept them only
 /// if they look like a unicast MAC (not an all-ones/all-zeros unmapped read).
 fn read_plausible_mac(device: &VirtioDevice, offset: u16, out: &mut [u8; 6]) -> bool {
@@ -98,6 +118,39 @@ fn read_plausible_mac(device: &VirtioDevice, offset: u16, out: &mut [u8; 6]) -> 
         out[i] = device.read_reg_u8(offset + i as u16);
     }
     *out != [0xFF; 6] && *out != [0x00; 6] && (out[0] & 0x01) == 0
+}
+
+/// Locate the device-specific configuration window inside BAR0.
+///
+/// The spec fixes it at [`reg::CONFIG_OFF`], but some QEMU configurations
+/// expose it a few bytes later — the symptom is a window that reads back
+/// all-`0xFF` where the MAC should be.
+///
+/// A candidate is accepted only when **both** the MAC looks like a unicast
+/// address **and** the link-status field at `+6` reads within its two defined
+/// bits. Requiring both makes a false positive on a misaligned window very
+/// unlikely: at the wrong base the two fields overlap, and the `0xFF` fill of
+/// an unmapped region already fails the MAC test.
+///
+/// Returns the offset and the MAC read at that offset.
+fn probe_cfg_offset(device: &VirtioDevice) -> Option<(u16, [u8; 6])> {
+    for &candidate in &CFG_OFFSET_CANDIDATES {
+        let mut mac = [0u8; 6];
+        if !read_plausible_mac(device, candidate, &mut mac) {
+            continue;
+        }
+        let link = device.read_reg_u16(candidate + cfg::LINK_STATUS);
+        if link & !0x3 != 0 {
+            log::debug!(
+                "virtio-net: rejecting cfg offset {:#x}: link status {:#06x} sets undefined bits",
+                candidate,
+                link
+            );
+            continue;
+        }
+        return Some((candidate, mac));
+    }
+    None
 }
 
 impl VirtioNetDevice {
@@ -139,16 +192,17 @@ impl VirtioNetDevice {
             return Err("Device rejected our feature set");
         }
 
-        // Read back negotiated features to determine actual header size.
-        // With VIRTIO_NET_F_MRG_RXBUF the header is 12 bytes (virtio_net_hdr_v1);
-        // without it the legacy 10-byte header (virtio_net_hdr) is used.
-        let negotiated = device.read_device_features();
-        if negotiated & features::VIRTIO_NET_F_MRG_RXBUF != 0 {
-            NET_HDR_SIZE.store(mem::size_of::<VirtioNetHeader>(), Ordering::Release);
+        // Header size follows from what we *negotiated*, i.e. the intersection
+        // we just wrote. Re-reading HOST_FEATURES here would return the
+        // device's full feature set, not the agreed subset, so a device that
+        // offers MRG_RXBUF but whose negotiated set did not include it would
+        // still be mis-sized.
+        let hdr_size = if guest_features & features::VIRTIO_NET_F_MRG_RXBUF != 0 {
+            mem::size_of::<VirtioNetHeader>()
         } else {
-            // Legacy 10-byte header: num_buffers field is absent.
-            NET_HDR_SIZE.store(10, Ordering::Release);
-        }
+            // Legacy 10-byte header: the num_buffers field is absent.
+            10
+        };
 
         // Create virtqueues
         // Queue 0: RX (receive)
@@ -160,11 +214,12 @@ impl VirtioNetDevice {
         device.setup_queue(0, &rx_queue);
         device.setup_queue(1, &tx_queue);
 
-        // Diagnostics: the legacy device-config window starts at io_base+0x14.
-        // An unmapped window reads back 0xFF, which is how a wrong BAR0
-        // shows up as a corrupted MAC.
+        // Locate the device-specific configuration window before touching it.
+        // Diagnostic first: the legacy config window starts at io_base+0x14 and
+        // an unmapped window reads back 0xFF, which is how a wrong BAR0 shows
+        // up as a corrupted MAC.
         log::info!(
-            "VirtIO-net: io_base={:#06x} raw[0x14..0x1c]={:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} link={:#06x}",
+            "VirtIO-net: io_base={:#06x} raw[0x14..0x1c]={:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
             device.io_base,
             device.read_reg_u8(0x14),
             device.read_reg_u8(0x15),
@@ -174,40 +229,42 @@ impl VirtioNetDevice {
             device.read_reg_u8(0x19),
             device.read_reg_u8(0x1a),
             device.read_reg_u8(0x1b),
-            device.read_reg_u16(0x1a),
         );
 
-        // Read MAC address from device config space.
-        //
-        // Legacy layout puts MAC at io_base+0x14, but a transitional device
-        // with a shifted decode window returns 0xFF there while the real MAC
-        // sits 4 bytes later. Probe both and keep the first plausible one.
-        let mut mac_address = [0u8; 6];
-        let mut mac_offset = 0x14u16;
-        if !read_plausible_mac(&device, 0x14, &mut mac_address) {
-            if read_plausible_mac(&device, 0x18, &mut mac_address) {
-                mac_offset = 0x18;
-                log::warn!(
-                    "VirtIO-net: MAC at io_base+0x18 (window shifted by 4) - transitional layout"
-                );
-                device.io_base = device.io_base.wrapping_add(4);
-            } else {
+        let (cfg_offset, mac_address) = match probe_cfg_offset(&device) {
+            Some(found) => {
+                if found.0 != reg::CONFIG_OFF {
+                    log::warn!(
+                        "VirtIO-net: device config at io_base+{:#x} instead of the spec's {:#x} - \
+                         hypervisor uses a shifted config window",
+                        found.0,
+                        reg::CONFIG_OFF
+                    );
+                }
+                device.set_cfg_offset(found.0);
+                found
+            }
+            None => {
                 log::error!(
-                    "VirtIO-net: MAC unreadable at io_base+0x14 and +0x18 (all 0xFF/0x00)"
+                    "VirtIO-net: no plausible MAC at io_base+{:#x}/{:#x}/{:#x} - config window unreadable",
+                    CFG_OFFSET_CANDIDATES[0],
+                    CFG_OFFSET_CANDIDATES[1],
+                    CFG_OFFSET_CANDIDATES[2],
                 );
                 return Err("device config window unreadable (MAC)");
             }
-        }
+        };
 
         log::info!(
-            "VirtIO-net: MAC address: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} (offset {:#x})",
+            "VirtIO-net: MAC address: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} (cfg offset {:#x}, hdr {:#x}B)",
             mac_address[0],
             mac_address[1],
             mac_address[2],
             mac_address[3],
             mac_address[4],
             mac_address[5],
-            mac_offset
+            cfg_offset,
+            hdr_size,
         );
 
         // Driver ready: only now does the device start reporting link state.
@@ -215,8 +272,8 @@ impl VirtioNetDevice {
 
         log::info!(
             "VirtIO-net: post-DRIVER_OK link status={:#06x} up={}",
-            device.read_reg_u16(0x1a),
-            device.read_reg_u16(0x1a) & net_status::VIRTIO_NET_S_LINK_UP as u16 != 0
+            device.read_cfg_u16(cfg::LINK_STATUS),
+            device.read_cfg_u16(cfg::LINK_STATUS) & net_status::VIRTIO_NET_S_LINK_UP as u16 != 0
         );
 
         let net_device = Self {
@@ -224,6 +281,7 @@ impl VirtioNetDevice {
             rx_queue: SpinLock::new(rx_queue),
             tx_queue: SpinLock::new(tx_queue),
             mac_address,
+            hdr_size,
             rx_frames: SpinLock::new(FixedQueue::new()),
             tx_frames: SpinLock::new(FixedQueue::new()),
         };
@@ -250,7 +308,7 @@ impl VirtioNetDevice {
 
         for _ in 0..(target_filled - current_filled) {
             // Allocate buffer for header + MTU
-            let buf_size = NET_HDR_SIZE.load(Ordering::Relaxed) + net::MTU;
+            let buf_size = self.hdr_size + net::MTU;
             let buf_pages = (buf_size + 4095) / 4096;
             let buf_order = buf_pages.next_power_of_two().trailing_zeros() as u8;
 
@@ -302,10 +360,14 @@ impl VirtioNetDevice {
         Ok(())
     }
 
-    /// Read link status from device
-    fn read_link_status(&self) -> u16 {
-        // Status is at offset 6 in device-specific config (offset 20 + 6 = 26)
-        self.device.read_reg_u16(26)
+    /// Read the device link status.
+    ///
+    /// Read through the device-config window so the probed offset applies
+    /// uniformly: a hardcoded `io_base + 26` is only correct on whichever
+    /// branch of the offset probe happened to match, and silently returns
+    /// MAC bytes on the other.
+    pub fn read_link_status(&self) -> u16 {
+        self.device.read_cfg_u16(cfg::LINK_STATUS)
     }
 }
 
@@ -338,7 +400,7 @@ impl NetworkDevice for VirtioNetDevice {
             }
         };
 
-        let hdr_size = NET_HDR_SIZE.load(Ordering::Relaxed);
+        let hdr_size = self.hdr_size;
         let (token, len) = match rx_queue.get_used() {
             Some(v) => v,
             None => {
@@ -406,7 +468,7 @@ impl NetworkDevice for VirtioNetDevice {
         }
 
         // Allocate TX buffer (header + data)
-        let buf_size = NET_HDR_SIZE.load(Ordering::Relaxed) + buf.len();
+        let buf_size = self.hdr_size + buf.len();
         let buf_pages = (buf_size + 4095) / 4096;
         let buf_order = buf_pages.next_power_of_two().trailing_zeros() as u8;
 
@@ -419,7 +481,7 @@ impl NetworkDevice for VirtioNetDevice {
         let virt_addr = crate::memory::phys_to_virt(buf_addr);
 
         let header_ptr = virt_addr as *mut VirtioNetHeader;
-        let data_ptr = (virt_addr + NET_HDR_SIZE.load(Ordering::Relaxed) as u64) as *mut u8;
+        let data_ptr = (virt_addr + self.hdr_size as u64) as *mut u8;
 
         // Write header
         unsafe {
