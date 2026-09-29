@@ -91,13 +91,22 @@ pub struct VirtioNetDevice {
 unsafe impl Send for VirtioNetDevice {}
 unsafe impl Sync for VirtioNetDevice {}
 
+/// Read 6 bytes at `offset` in the device-config window and accept them only
+/// if they look like a unicast MAC (not an all-ones/all-zeros unmapped read).
+fn read_plausible_mac(device: &VirtioDevice, offset: u16, out: &mut [u8; 6]) -> bool {
+    for i in 0..6 {
+        out[i] = device.read_reg_u8(offset + i as u16);
+    }
+    *out != [0xFF; 6] && *out != [0x00; 6] && (out[0] & 0x01) == 0
+}
+
 impl VirtioNetDevice {
     /// Initialize a VirtIO network device from a PCI device
     pub unsafe fn new(pci_dev: PciDevice) -> Result<Self, &'static str> {
         log::info!("VirtIO-net: Initializing device at {:?}", pci_dev.address);
 
         // Create VirtIO device
-        let device = VirtioDevice::new(pci_dev)?;
+        let mut device = VirtioDevice::new(pci_dev)?;
 
         // Reset device
         device.reset();
@@ -151,25 +160,64 @@ impl VirtioNetDevice {
         device.setup_queue(0, &rx_queue);
         device.setup_queue(1, &tx_queue);
 
-        // Read MAC address from device config space
-        // For legacy devices, MAC is at offset 20 + 0
+        // Diagnostics: the legacy device-config window starts at io_base+0x14.
+        // An unmapped window reads back 0xFF, which is how a wrong BAR0
+        // shows up as a corrupted MAC.
+        log::info!(
+            "VirtIO-net: io_base={:#06x} raw[0x14..0x1c]={:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} link={:#06x}",
+            device.io_base,
+            device.read_reg_u8(0x14),
+            device.read_reg_u8(0x15),
+            device.read_reg_u8(0x16),
+            device.read_reg_u8(0x17),
+            device.read_reg_u8(0x18),
+            device.read_reg_u8(0x19),
+            device.read_reg_u8(0x1a),
+            device.read_reg_u8(0x1b),
+            device.read_reg_u16(0x1a),
+        );
+
+        // Read MAC address from device config space.
+        //
+        // Legacy layout puts MAC at io_base+0x14, but a transitional device
+        // with a shifted decode window returns 0xFF there while the real MAC
+        // sits 4 bytes later. Probe both and keep the first plausible one.
         let mut mac_address = [0u8; 6];
-        for i in 0..6 {
-            mac_address[i] = device.read_reg_u8(20 + i as u16);
+        let mut mac_offset = 0x14u16;
+        if !read_plausible_mac(&device, 0x14, &mut mac_address) {
+            if read_plausible_mac(&device, 0x18, &mut mac_address) {
+                mac_offset = 0x18;
+                log::warn!(
+                    "VirtIO-net: MAC at io_base+0x18 (window shifted by 4) - transitional layout"
+                );
+                device.io_base = device.io_base.wrapping_add(4);
+            } else {
+                log::error!(
+                    "VirtIO-net: MAC unreadable at io_base+0x14 and +0x18 (all 0xFF/0x00)"
+                );
+                return Err("device config window unreadable (MAC)");
+            }
         }
 
         log::info!(
-            "VirtIO-net: MAC address: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            "VirtIO-net: MAC address: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} (offset {:#x})",
             mac_address[0],
             mac_address[1],
             mac_address[2],
             mac_address[3],
             mac_address[4],
-            mac_address[5]
+            mac_address[5],
+            mac_offset
         );
 
-        // Driver ready
+        // Driver ready: only now does the device start reporting link state.
         device.add_status(status::DRIVER_OK as u8);
+
+        log::info!(
+            "VirtIO-net: post-DRIVER_OK link status={:#06x} up={}",
+            device.read_reg_u16(0x1a),
+            device.read_reg_u16(0x1a) & net_status::VIRTIO_NET_S_LINK_UP as u16 != 0
+        );
 
         let net_device = Self {
             device,
@@ -276,17 +324,33 @@ impl NetworkDevice for VirtioNetDevice {
             return Err(NetError::NoPacket);
         }
 
+        // Claim the backing frame BEFORE consuming the used entry: the used
+        // ring and rx_frames are two parallel FIFOs, so the n-th consumed
+        // descriptor owns the n-th frame. Consuming first would free a
+        // descriptor with no buffer to match it.
+        let (frame, order) = match self.rx_frames.lock().pop_front() {
+            Some(f) => f,
+            None => {
+                // Descriptors are still queued but no buffer tracks them:
+                // do not consume the used entry, or the rings desynchronise.
+                log::warn!("[vtnet] rx: used entry without tracking frame");
+                return Err(NetError::NotReady);
+            }
+        };
+
         let hdr_size = NET_HDR_SIZE.load(Ordering::Relaxed);
-        let (token, len) = rx_queue.get_used().ok_or(NetError::NoPacket)?;
+        let (token, len) = match rx_queue.get_used() {
+            Some(v) => v,
+            None => {
+                crate::sync::with_irqs_disabled(|t| {
+                    memory::free_phys_contiguous(t, frame, order);
+                });
+                return Err(NetError::NoPacket);
+            }
+        };
 
         let _desc_index = token as usize;
         let _desc_table = rx_queue.desc_area(); // Physical address
-
-        let (frame, order) = self
-            .rx_frames
-            .lock()
-            .pop_front()
-            .ok_or(NetError::NotReady)?;
 
         let buf_addr = frame.start_address.as_u64();
         let virt_addr = crate::memory::phys_to_virt(buf_addr);
@@ -503,11 +567,47 @@ pub fn init() {
     let msi_active =
         (client_dev.read_config_u16(pci::config::COMMAND) & pci::command::INTERRUPT_DISABLE) != 0;
 
-    match unsafe { VirtioNetDevice::new(pci_dev) } {
-        Ok(device) => {
+    // Retry once like the e1000 driver: a stale INTERRUPT_DISABLE or a
+    // missing bus-master bit from firmware makes the first attempt read back
+    // an unmapped device-config window.
+    let mut device = None;
+    for attempt in 1..=2u32 {
+        match unsafe { VirtioNetDevice::new(pci_dev) } {
+            Ok(dev) => {
+                log::info!("VirtIO-net: init ok on attempt {}", attempt);
+                device = Some(dev);
+                break;
+            }
+            Err(e) => {
+                log::warn!("VirtIO-net: init attempt {} failed: {}", attempt, e);
+                if attempt == 1 {
+                    let mut cmd = client_dev.read_config_u16(pci::config::COMMAND);
+                    cmd |= pci::command::BUS_MASTER | pci::command::IO_SPACE;
+                    cmd &= !pci::command::INTERRUPT_DISABLE;
+                    client_dev.write_config_u16(pci::config::COMMAND, cmd);
+                    log::info!(
+                        "VirtIO-net: reprogrammed PCI COMMAND={:#06x} (bus_master|io_space, intx enabled)",
+                        cmd
+                    );
+                }
+            }
+        }
+    }
+
+    match device {
+        Some(device) => {
             let arc = Arc::new(device);
             *VIRTIO_NET.write() = Some(arc.clone());
             let iface = net::register_device(arc.clone());
+
+            // link_up() reads device config on every call, so the value
+            // logged here reflects the post-negotiation state.
+            log::info!(
+                "[VirtIO-net] {}: link_up={} status_raw={:#06x}",
+                iface,
+                arc.link_up(),
+                arc.read_link_status()
+            );
 
             if msi_active {
                 // MSI delivers to the vector programmed by probe_and_enable.
@@ -537,8 +637,8 @@ pub fn init() {
                 net::set_nic_device(arc, irq);
             }
         }
-        Err(e) => {
-            log::error!("VirtIO-net: Failed to initialize device: {}", e);
+        None => {
+            log::error!("VirtIO-net: failed to initialize device after retries");
         }
     }
 }

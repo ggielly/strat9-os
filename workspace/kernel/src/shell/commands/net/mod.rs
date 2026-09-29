@@ -188,15 +188,47 @@ pub(super) fn cmd_ifconfig_impl(args: &[String]) -> Result<(), ShellError> {
     let dns = read_file("/net/dns");
     let dhcp = read_file("/net/dhcp");
 
-    shell_println!("em0:");
-    shell_println!("  inet     {}", ip);
-    shell_println!("  inet6    {}", ip6);
-    shell_println!("  dhcp     {}", dhcp);
-    shell_println!("  gateway  {}", gw);
-    shell_println!("  gateway6 {}", gw6);
-    shell_println!("  route    {}", route);
-    shell_println!("  routes   {}", routes);
-    shell_println!("  dns      {}", dns);
+    // Link state and media come from the kernel NIC registry, not /net: the
+    // scheme is served by the strate-net silo and is absent until it binds.
+    let ifaces = crate::hardware::nic::list_interfaces();
+    if ifaces.is_empty() {
+        shell_println!("(no network interface registered)");
+    }
+
+    for name in &ifaces {
+        let (link, media, mac, driver) = match crate::hardware::nic::get_device(name) {
+            Some(dev) => {
+                let m = dev.mac_address();
+                (
+                    if dev.link_up() { "up" } else { "down" },
+                    dev.media().as_str(),
+                    alloc::format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                                   m[0], m[1], m[2], m[3], m[4], m[5]),
+                    String::from(dev.name()),
+                )
+            }
+            None => (
+                "unknown",
+                "other",
+                String::from("(unavailable)"),
+                String::from("unknown"),
+            ),
+        };
+
+        shell_println!("{}:", name);
+        shell_println!("  driver   {}", driver);
+        shell_println!("  media    {}", media);
+        shell_println!("  link     {}", link);
+        shell_println!("  hwaddr   {}", mac);
+        shell_println!("  inet     {}", ip);
+        shell_println!("  inet6    {}", ip6);
+        shell_println!("  dhcp     {}", dhcp);
+        shell_println!("  gateway  {}", gw);
+        shell_println!("  gateway6 {}", gw6);
+        shell_println!("  route    {}", route);
+        shell_println!("  routes   {}", routes);
+        shell_println!("  dns      {}", dns);
+    }
 
     Ok(())
 }

@@ -290,9 +290,17 @@ ${QEMU} \
     -display gtk,gl=on \
     -device virtio-net-pci,netdev=net0 \
     -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+    -device e1000,netdev=net1 \
+    -netdev user,id=net1,hostfwd=tcp::2323-:23 \
     -serial stdio \
     -no-reboot
 ''']
+
+# NOTE (dual NIC): net0 is virtio-net-pci (emulated vtnet0), net1 is Intel
+# E1000 (emulated em0). Both are user-mode NAT backends so DHCP works on
+# each independently. Only one can answer at a time: get_default_device()
+# returns the first registered NIC, and the probe order in nic::init() is
+# e1000e -> igc -> e1000 -> ... -> virtio, so em0 is selected.
 
 # NOTE (keyboard): -device usb-kbd/-device usb-tablet/-device usb-ehci/-device qemu-xhci were
 # REMOVED here. QEMU routes GTK input to the first attached keyboard device; with a USB keyboard

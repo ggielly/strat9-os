@@ -9,6 +9,30 @@
 
 use crate::{arch::x86_64::pci::*, hardware::pci_client::PciDevice};
 
+/// First vector handed out to MSI/MSI-X capable devices.
+///
+/// 0x30-0x3F stay reserved for the legacy PIC remap, 0xE0/0xF0/0xF1 for the
+/// kernel IPIs. Devices must not derive their vector from
+/// `interrupt_line`: several PCI functions share one INTx pin, so GPU and NIC
+/// on the same line would be programmed on the same vector and one device's
+/// interrupts would be dispatched to the other's handler.
+const MSI_VECTOR_BASE: u8 = 0x40;
+const MSI_VECTOR_END: u8 = 0xD0;
+
+static NEXT_MSI_VECTOR: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(MSI_VECTOR_BASE);
+
+/// Reserve the next free MSI/MSI-X vector.
+fn alloc_msi_vector() -> u8 {
+    NEXT_MSI_VECTOR
+        .fetch_update(core::sync::atomic::Ordering::Relaxed,
+                      core::sync::atomic::Ordering::Relaxed,
+                      |v| {
+                          if v + 1 >= MSI_VECTOR_END { None } else { Some(v + 1) }
+                      })
+        .unwrap_or(MSI_VECTOR_BASE)
+}
+
 /// Try to enable MSI on `pci_dev` with `vector`.
 ///
 /// Returns `true` on success, `false` if MSI is not supported or
@@ -201,13 +225,9 @@ fn enable_msix(pci_dev: &PciDevice, vector: u8) -> bool {
 /// is cosmetic).
 pub fn probe_and_enable(pci_dev: &PciDevice, prefer_msix: bool) -> (u8, u8) {
     let irq_line = pci_dev.interrupt_line;
-    let vector = if irq_line < 16 && irq_line != 0 && irq_line != 0xFF {
-        0x20 + irq_line
-    } else if irq_line != 0 && irq_line != 0xFF {
-        irq_line
-    } else {
-        0x20 // fallback vector
-    };
+    // Never derive the vector from interrupt_line : INTx pins are shared, so
+    // two devices on the same line would land on one IDT entry.
+    let vector = alloc_msi_vector();
 
     // 1. Try MSI-X first (if preferred and available).
     if prefer_msix && enable_msix(pci_dev, vector) {
@@ -219,12 +239,13 @@ pub fn probe_and_enable(pci_dev: &PciDevice, prefer_msix: bool) -> (u8, u8) {
         return (irq_line, vector);
     }
 
-    // 3. Fall back to INTx : caller must route via I/O APIC.
+    // 3. Fall back to INTx : caller must route via I/O APIC. The vector was
+    // not programmed on the device, so the caller derives its own.
     log::info!(
         "MSI/MSI-X unavailable on {:04x}:{:04x}, falling back to INTx IRQ {}",
         pci_dev.vendor_id,
         pci_dev.device_id,
         irq_line,
     );
-    (irq_line, vector)
+    (irq_line, if irq_line < 16 { 0x20 + irq_line } else { irq_line })
 }
