@@ -11,8 +11,19 @@ pub mod hid;
 pub mod uhci;
 pub mod xhci;
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
+/// `hardware::init()` and the component graph both run the hardware stage.
+static INITIALIZED: AtomicBool = AtomicBool::new(false);
+
 /// Performs the init operation.
+///
+/// Idempotent: the component `usb_init` runs after `hardware::init()` has
+/// already enumerated every controller.
 pub fn init() {
+    if INITIALIZED.swap(true, Ordering::AcqRel) {
+        return;
+    }
     // Initialize controllers in order: xHCI first (USB 3.0), then EHCI (USB 2.0), then UHCI (USB 1.1)
     // This ensures we use the fastest available controller for each device
 

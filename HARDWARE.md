@@ -1,6 +1,6 @@
 # Hardware Support
 
-> Last updated: 2026-07-20
+> Last updated: 2026-09-29
 
 ## Tested platforms
 
@@ -22,7 +22,7 @@ These drivers are compiled into the kernel and have direct hardware access via M
 
 | Driver | File | Status | Notes |
 |---|---|---|---|
-| PCI enumeration | `kernel/src/arch/x86_64/pci/` | ✅ Active | Class/probe, BAR mapping, bus master, MSI |
+| PCI enumeration | `kernel/src/arch/x86_64/pci.rs` | ✅ Active | Class/probe, BAR mapping, bus master, MSI |
 | PCI client API | `kernel/src/hardware/pci_client.rs` | ✅ Active | Wraps raw PCI for kernel drivers |
 
 ### Network (kernel-resident NIC adapters)
@@ -110,6 +110,7 @@ All bus drivers are in `workspace/drivers/bus/`. They are probed at silo startup
 | **qcom-ebi2** | `qcom,msm8660-ebi2`, `qcom,apq8060-ebi2` | `qcom_ebi2.rs` | 187 | ⚪ Qualcomm only |
 | **qcom-ssc-block-bus** | `qcom,ssc-block-bus` | `qcom_ssc_block_bus.rs` | 136 | ⚪ Qualcomm only |
 | **stm32-etzpc** | `st,stm32-etzpc` | `stm32_etzpc.rs` | 144 | ⚪ STM32 only |
+| **stm32-firewall** | `st,stm32-firewall-shell` | `stm32_firewall.rs` | 32 | ⚪ STM32 only |
 | **stm32-rifsc** | `st,stm32mp25-rifsc`, `st,stm32mp21-rifsc` | `stm32_rifsc.rs` | 225 | ⚪ STM32 only |
 | **sun50i-de2** | `allwinner,sun50i-a64-de2` | `sun50i_de2.rs` | 88 | ⚪ Allwinner only |
 | **sunxi-rsb** | `allwinner,sun8i-a23-rsb` | `sunxi_rsb.rs` | 260 | ⚪ Allwinner only |

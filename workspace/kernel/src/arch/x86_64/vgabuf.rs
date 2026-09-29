@@ -123,6 +123,8 @@ pub extern "C" fn console_task_main() -> ! {
                 vgabuf_flush_to_framebuffer();
             }
         }
-        crate::process::yield_task();
+        // Rendering is tick-paced; sleep so this worker does not spin between
+        // frames and compete with interactive tasks.
+        crate::process::sleep_current_task_ticks(1);
     }
 }

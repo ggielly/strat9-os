@@ -27,6 +27,81 @@ mod modules;
 mod page_tables;
 mod paging;
 
+static COM1_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Panic handler that never touches UEFI firmware services.
+///
+/// `uefi`'s built-in handler (feature `panic_handler`) prints through the
+/// Output protocol, which dereferences the Boot Services table. EDK2 sets
+/// `gBS = NULL` during `ExitBootServices`, so a panic raised on the handoff
+/// path jumps into unmapped memory and takes QEMU down with it. It also spins
+/// 300 M times before giving up, which is the "very slow" stall.
+///
+/// COM1 (0x3F8) and the QEMU debug port (0xE9) are plain I/O ports: valid
+/// before, during and after ExitBootServices.
+#[panic_handler]
+fn panic_handler(info: &core::panic::PanicInfo) -> ! {
+    unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
+
+    // The debug port needs no handshake, so it still works if the UART is
+    // wedged or was never initialised on this boot path.
+    for &b in b"[boot] PANIC: " {
+        unsafe { core::arch::asm!("out 0xe9, al", in("al") b, options(nomem, nostack)) };
+    }
+    let _ = write!(PanicPort, "{info}");
+    for &b in b"\r\n[boot] HALTED\r\n" {
+        unsafe { core::arch::asm!("out 0xe9, al", in("al") b, options(nomem, nostack)) };
+    }
+
+    // Avoid polling an uninitialized UART: the debug-port copy above is
+    // available throughout the handoff and is the authoritative panic log.
+    if COM1_READY.load(core::sync::atomic::Ordering::Acquire) {
+        unsafe { write_com1(b"[boot] PANIC: ") };
+        let mut copy = [0u8; 256];
+        let mut n = 0usize;
+        {
+            let mut sink = CharSink(&mut copy, &mut n);
+            let _ = write!(sink, "{info}");
+        }
+        let message_len = n.min(copy.len() - 2);
+        copy[message_len] = b'\r';
+        copy[message_len + 1] = b'\n';
+        unsafe { write_com1(&copy[..message_len + 2]) };
+    }
+
+    loop {
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+    }
+}
+
+/// `core::fmt::Write` sink that mirrors each byte to the QEMU debug port.
+struct PanicPort;
+
+impl Write for PanicPort {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        for &b in s.as_bytes() {
+            unsafe { core::arch::asm!("out 0xe9, al", in("al") b, options(nomem, nostack)) };
+        }
+        Ok(())
+    }
+}
+
+/// `core::fmt::Write` sink that copies formatted bytes into a fixed buffer.
+struct CharSink<'a>(&'a mut [u8], &'a mut usize);
+
+impl Write for CharSink<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        for &b in s.as_bytes() {
+            if *self.1 >= self.0.len() {
+                return Ok(());
+            }
+            self.0[*self.1] = b;
+            *self.1 += 1;
+        }
+        Ok(())
+    }
+}
+
 use boot_plan::DirectMapPlan;
 use memory::{BootError, BootMemory, BootResult};
 use memory_map::{MemoryMapBuilder, PhysicalRange, MAX_MEMORY_REGIONS, PAGE_SIZE};
@@ -50,6 +125,7 @@ fn efi_main() -> Status {
 }
 
 fn boot_kernel() -> BootResult<()> {
+    let mut boot_timer = BootTimer::new();
     // Own permanent allocations before opening other resources, so an error
     // return closes files and drops temporary buffers before freeing their pages.
     let mut boot_memory = BootMemory::new();
@@ -60,9 +136,12 @@ fn boot_kernel() -> BootResult<()> {
             "Copyright (C) 2026 Guillaume Gielly. All rights reserved."
         );
     });
+    boot_timer.announce_tsc();
+    boot_timer.mark_uefi("start");
 
     // Check the CPU and locate every byte of the EFI transition image.
     let cpu_features = cpu::detect().map_err(BootError::invalid)?;
+    boot_timer.mark_uefi("CPU features detected");
     let image_handle = uefi::boot::image_handle();
     let loader_image = {
         let image = uefi::boot::open_protocol_exclusive::<LoadedImage>(image_handle)
@@ -137,6 +216,7 @@ fn boot_kernel() -> BootResult<()> {
     });
 
     let mut elf_info = elf::parse_elf64(&buf).map_err(BootError::invalid)?;
+    boot_timer.mark_uefi("kernel ELF parsed");
     let kernel_allocation = boot_memory.allocate_preferred(
         elf_info.phys_base,
         elf_info.image_size(),
@@ -157,6 +237,7 @@ fn boot_kernel() -> BootResult<()> {
 
     // Load modules
     let module_list = modules::load_modules(&mut volume, &mut boot_memory)?;
+    boot_timer.mark_uefi("modules loaded");
 
     uefi::system::with_stdout(|stdout| {
         let _ = writeln!(stdout, "[boot] Modules: {}", module_list.len());
@@ -277,6 +358,7 @@ fn boot_kernel() -> BootResult<()> {
         .map_err(BootError::invalid)?;
     let planning_map = uefi::boot::memory_map(MemoryType::LOADER_DATA)
         .map_err(|error| BootError::firmware("direct map planning", error.status()))?;
+    boot_timer.mark_uefi("planning memory map acquired");
     let mut write_back = alloc::vec::Vec::<PhysicalRange>::new();
     for entry in planning_map.entries() {
         let region = firmware_region(entry).map_err(BootError::invalid)?;
@@ -303,6 +385,7 @@ fn boot_kernel() -> BootResult<()> {
         }
     }
     drop(planning_map);
+    boot_timer.mark_uefi("planning memory map processed");
     write_back.sort_unstable_by_key(|range| range.base);
     let mut merged = 0;
     for index in 0..write_back.len() {
@@ -339,6 +422,7 @@ fn boot_kernel() -> BootResult<()> {
     let table_area = boot_memory.allocate(table_pages * PAGE_SIZE, "page-table arena")?;
     let pml4_phys = unsafe { paging::create_page_tables(table_area, &mapping_plan) }
         .map_err(BootError::invalid)?;
+    boot_timer.mark_uefi("page tables built");
 
     // GOP may use stolen RAM: exclude its whole aperture from the allocator,
     // without making BootMemory responsible for freeing firmware-owned pages.
@@ -355,8 +439,10 @@ fn boot_kernel() -> BootResult<()> {
             return Err(BootError::invalid("framebuffer overlaps boot allocations"));
         }
         reservations.push(framebuffer_aperture);
-        reservations.sort_unstable_by_key(|range| range.base);
     }
+    // MemoryMapBuilder walks reservations in ascending address order and may
+    // stop at the first range beyond the current firmware descriptor.
+    reservations.sort_unstable_by_key(|range| range.base);
 
     drop(volume);
     drop(fs);
@@ -364,9 +450,11 @@ fn boot_kernel() -> BootResult<()> {
     // its own final map; conversion is repeated below with the same bounded buffer.
     let preview = uefi::boot::memory_map(MemoryType::LOADER_DATA)
         .map_err(|error| BootError::firmware("memory map preflight", error.status()))?;
+    boot_timer.mark_uefi("preflight memory map acquired");
     convert_memory_map(&preview, &reservations, map_storage, &mapping_plan)
         .map_err(BootError::invalid)?;
     drop(preview);
+    boot_timer.mark_uefi("preflight memory map converted");
 
     uefi::system::with_stdout(|stdout| {
         let _ = writeln!(stdout, "[boot] ExitBootServices...");
@@ -374,14 +462,16 @@ fn boot_kernel() -> BootResult<()> {
 
     boot_memory.retain_for_handoff();
     let mmap_iter = unsafe { uefi::boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) };
-    // No firmware calls follow: stop maskable interrupts and normalize DF before
-    // touching the execution environment. This asm is also a compiler memory barrier.
+    // Do this immediately after firmware exit, before even diagnostic I/O.
     unsafe { core::arch::asm!("cli", "cld", options(nostack)) };
+    // COM1 is not reconfigured yet; emit through QEMU's non-blocking debug port.
+    boot_timer.mark_e9("ExitBootServices returned");
 
     // No allocations, firmware calls or recoverable returns after this point.
     // Split around the exact owned pages, including every module payload.
     let region_count = convert_memory_map(&mmap_iter, &reservations, map_storage, &mapping_plan)
         .unwrap_or_else(|reason| halt_after_boot_services(reason));
+    boot_timer.mark_e9("final memory map converted");
 
     // Re-initialize serial port after ExitBootServices
     unsafe {
@@ -395,21 +485,10 @@ fn boot_kernel() -> BootResult<()> {
         core::arch::asm!("out dx, al", in("al") 0xC7u8, in("dx") base + 2, options(nomem, nostack)); // Enable FIFO
         core::arch::asm!("out dx, al", in("al") 0x0Bu8, in("dx") base + 4, options(nomem, nostack)); // IRQs enabled, RTS/DSR set
 
-        // Test output
-        let msg = b"[boot] After ExitBootServices, serial OK\r\n";
-        let lsr: u16 = base + 5;
-        let thr: u16 = base;
-        for &b in msg {
-            loop {
-                let status: u8;
-                core::arch::asm!("in al, dx", out("al") status, in("dx") lsr, options(nomem, nostack));
-                if status & 0x20 != 0 {
-                    break;
-                }
-            }
-            core::arch::asm!("out dx, al", in("al") b, in("dx") thr, options(nomem, nostack));
-        }
+        write_com1(b"[boot] After ExitBootServices, serial OK\r\n");
     }
+    COM1_READY.store(true, core::sync::atomic::Ordering::Release);
+    boot_timer.mark_com1("serial initialized");
 
     // Step 11: Build KernelArgs
     let (bss_virt_base, bss_virt_size) = elf_info.bss_range();
@@ -446,21 +525,6 @@ fn boot_kernel() -> BootResult<()> {
     unsafe { args_ptr.write(args) };
 
     unsafe {
-        let write_com1 = |s: &[u8]| {
-            let lsr: u16 = 0x3F8 + 5;
-            let thr: u16 = 0x3F8;
-            for &b in s {
-                loop {
-                    let status: u8;
-                    core::arch::asm!("in al, dx", out("al") status, in("dx") lsr, options(nomem, nostack));
-                    if status & 0x20 != 0 {
-                        break;
-                    }
-                }
-                core::arch::asm!("out dx, al", in("al") b, in("dx") thr, options(nomem, nostack));
-            }
-        };
-
         fn hex_str(val: u64, buf: &mut [u8; 18]) -> &[u8] {
             const HEX: &[u8; 16] = b"0123456789abcdef";
             let mut i = 16;
@@ -504,6 +568,7 @@ fn boot_kernel() -> BootResult<()> {
         for _ in 0..100000 {
             core::arch::asm!("pause", options(nomem, nostack));
         }
+        boot_timer.mark_com1("handoff pause complete");
 
         write_com1(b"[boot] Jumping to kernel (after pause)...\r\n");
     }
@@ -520,6 +585,132 @@ fn boot_kernel() -> BootResult<()> {
             elf_info.entry,
             args_ptr as u64,
         );
+    }
+}
+
+/// Reports elapsed wall time between boot milestones.
+///
+/// The TSC scale comes from CPUID, so the millisecond figures are comparable
+/// across machines. A CPU that reports no frequency keeps raw tick counts
+/// rather than printing a duration derived from a guessed scale.
+struct BootTimer {
+    started: u64,
+    previous: u64,
+    /// TSC frequency in kHz; 0 means unknown.
+    khz: u64,
+}
+
+impl BootTimer {
+    fn new() -> Self {
+        let now = read_tsc();
+        Self {
+            started: now,
+            previous: now,
+            khz: cpu::tsc_frequency_khz().unwrap_or(0),
+        }
+    }
+
+    /// State the TSC scale once, so the timings that follow can be trusted or
+    /// explicitly discounted.
+    fn announce_tsc(&self) {
+        uefi::system::with_stdout(|stdout| {
+            if self.khz > 0 {
+                let _ = writeln!(
+                    stdout,
+                    "[boot] TSC: {}.{:03} MHz",
+                    self.khz / 1_000,
+                    self.khz % 1_000
+                );
+            } else {
+                let _ =
+                    writeln!(stdout, "[boot] TSC: frequency unknown, timings stay in ticks");
+            }
+        });
+    }
+
+    fn mark_uefi(&mut self, stage: &str) {
+        let now = read_tsc();
+        let mut line = [0u8; 128];
+        let len = format_timing_line(
+            &mut line,
+            now - self.started,
+            now - self.previous,
+            stage,
+            self.khz,
+        );
+        uefi::system::with_stdout(|stdout| {
+            let _ =
+                stdout.write_str(core::str::from_utf8(&line[..len]).unwrap_or("[boot] timing\n"));
+        });
+        // Exclude the cost of printing this marker from the next stage.
+        self.previous = read_tsc();
+    }
+
+    fn mark_e9(&mut self, stage: &str) {
+        let now = read_tsc();
+        let mut line = [0u8; 128];
+        let len = format_timing_line(
+            &mut line,
+            now - self.started,
+            now - self.previous,
+            stage,
+            self.khz,
+        );
+        unsafe { write_e9(&line[..len]) };
+        self.previous = read_tsc();
+    }
+
+    fn mark_com1(&mut self, stage: &str) {
+        let now = read_tsc();
+        let mut line = [0u8; 128];
+        let len = format_timing_line(
+            &mut line,
+            now - self.started,
+            now - self.previous,
+            stage,
+            self.khz,
+        );
+        unsafe { write_com1(&line[..len]) };
+        // Do not charge serial output time to the next measured operation.
+        self.previous = read_tsc();
+    }
+}
+
+fn format_timing_line(
+    line: &mut [u8; 128],
+    total: u64,
+    delta: u64,
+    stage: &str,
+    khz: u64,
+) -> usize {
+    let mut writer = BufWriter { buf: line, pos: 0 };
+    if khz > 0 {
+        // A kHz scale cancels the milliseconds factor exactly: ms = ticks / kHz.
+        // Splitting first keeps the fractional part from losing precision.
+        let _ = writeln!(
+            writer,
+            "[boot +{}.{:03} ms, +{}.{:03} ms] {}\r\n",
+            total / khz,
+            (total % khz) * 1_000 / khz,
+            delta / khz,
+            (delta % khz) * 1_000 / khz,
+            stage
+        );
+    } else {
+        let _ = writeln!(writer, "[boot +{} ticks, +{}] {}\r\n", total, delta, stage);
+    }
+    let len = writer.pos;
+    drop(writer);
+    len
+}
+
+fn read_tsc() -> u64 {
+    cpu::rdtsc()
+}
+
+unsafe fn write_e9(bytes: &[u8]) {
+    for &byte in bytes {
+        core::arch::asm!("out 0xe9, al", in("al") byte, options(nomem, nostack));
     }
 }
 
@@ -709,30 +900,75 @@ fn select_framebuffer() -> graphics::Framebuffer {
 
 /// Fatal errors after ExitBootServices must not unwind, return to UEFI, use its
 /// allocator, or wait forever for a serial port that may not exist.
+/// Write a byte to COM1, bounding the transmit-ready wait.
+///
+/// The status poll used to be an unbounded `loop`. If the emulated UART
+/// never reports THR-empty — which happens when the port has not finished
+/// being reprogrammed after `ExitBootServices`, or when QEMU tears the
+/// device down — the bootloader hangs here forever with no way to report it.
+/// Dropping the byte after a bounded wait keeps the handoff moving.
+unsafe fn write_com1_byte(byte: u8) {
+    const LSR: u16 = 0x3F8 + 5;
+    const THR: u16 = 0x3F8;
+    const TX_READY: u8 = 0x20;
+    const MAX_SPIN: usize = 50_000;
+
+    for _ in 0..MAX_SPIN {
+        let status: u8;
+        core::arch::asm!("in al, dx", out("al") status, in("dx") LSR, options(nomem, nostack));
+        if status & TX_READY != 0 {
+            core::arch::asm!("out dx, al", in("al") byte, in("dx") THR, options(nomem, nostack));
+            return;
+        }
+        core::hint::spin_loop();
+    }
+    // Best effort: emit anyway rather than lose the byte.
+    core::arch::asm!("out dx, al", in("al") byte, in("dx") THR, options(nomem, nostack));
+}
+
+/// Write a whole slice to COM1.
+unsafe fn write_com1(bytes: &[u8]) {
+    for &b in bytes {
+        write_com1_byte(b);
+    }
+}
+
 fn halt_after_boot_services(reason: &str) -> ! {
     unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
-    let parts: [&[u8]; 3] = [b"[boot] FATAL: ", reason.as_bytes(), b"\r\n"];
-    for part in parts {
-        for &byte in part {
-            unsafe {
-                core::arch::asm!("out 0xe9, al", in("al") byte, options(nomem, nostack));
-                for _ in 0..10_000 {
-                    let status: u8;
-                    core::arch::asm!(
-                        "in al, dx", in("dx") 0x3FDu16, out("al") status,
-                        options(nomem, nostack),
-                    );
-                    if status & 0x20 != 0 {
-                        core::arch::asm!(
-                            "out dx, al", in("dx") 0x3F8u16, in("al") byte,
-                            options(nomem, nostack),
-                        );
-                        break;
-                    }
-                }
-            }
+    // Debug port first: the firmware is gone but the 0xE9 hack still works
+    // under QEMU and does not depend on the UART being responsive.
+    let mut line = [0u8; 128];
+    let prefix = b"[boot] FATAL: ";
+    let mut n = 0usize;
+    while n < prefix.len() && n < line.len() {
+        line[n] = prefix[n];
+        n += 1;
+    }
+    for &b in reason.as_bytes() {
+        if n < line.len() - 2 {
+            line[n] = b;
+            n += 1;
         }
     }
+    while n < line.len() - 2 {
+        line[n] = b' ';
+        n += 1;
+    }
+    line[n] = b'\r';
+    line[n + 1] = b'\n';
+    n += 2;
+    for &b in &line[..n] {
+        unsafe { core::arch::asm!("out 0xe9, al", in("al") b, options(nomem, nostack)) };
+    }
+    // Same message on COM1, with a bounded wait so a wedged UART cannot
+    // hide the failure behind an infinite spin.
+    let mut com = [0u8; 128];
+    let mut m = 0usize;
+    while m < n {
+        com[m] = line[m];
+        m += 1;
+    }
+    unsafe { write_com1(&com[..m]) };
     loop {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
     }

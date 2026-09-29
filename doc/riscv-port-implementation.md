@@ -4,6 +4,33 @@
 > Périmètre : portage du kernel Bedrock + Silos vers `riscv64` sur QEMU `virt`,
 > avec refactor préalable de la couche arch (`cfg(arch)` + traits communs).
 > Source des estimations : audit ligne par ligne du dépôt (2 agents d'audit + revue manuelle).
+>
+> ---
+>
+> **Mise à jour 2026-09-29 — certains tickets sont déjà livrés.** La proposition ci-dessous
+> date du 2026-08-25 ; depuis, R0.1, R1.1 et R1.3 sont en grande partie faits.
+>
+> | Ticket | État réel |
+> |--------|-----------|
+> | **R0.1** façade `arch::` | ✅ Fait. `kernel/src/arch/mod.rs` est maintenant découpé par `cfg(target_arch)` avec `facade.rs` (74 l.) et `facade_riscv.rs` (567 l.), plus `arch/xshim.rs` (102 l.) pour les types d'adresses neutres et `arch/xshim_riscv_stub.rs` (296 l.) qui expose une surface `x86_64` qui panique à l'exécution |
+> | **R1.1** target JSON | ✅ Fait. `targets/riscv64-strat9.json` existe déjà et correspond à la spec §2.2 : `llvm-target: riscv64-unknown-strat9`, `features: "+m,+a,+c,+f,+d"`, `max-atomic-width: 64`, `code-model: medium`, `relocation-model: static`, `panic-strategy: abort` |
+> | **R1.3** série MMIO | ✅ Fait. `kernel/src/arch/riscv64/serial.rs` (123 l.) |
+> | **R1.2** stub boot S-mode + linker | ⏳ Partiel. `kernel/src/arch/riscv64/mod.rs` contient des stubs no-op (vga, vgabuf, idt, timer, cpuid, speaker, pic) mais **`linker-riscv.ld` n'existe pas** (seuls `linker.ld` et `linker-pvh.ld` sont présents) |
+> | **R3.4** `ecall` userspace | ❌ Non commencé. `workspace/components/syscall/src/arch/` ne contient que `x86_64.rs` |
+> | **R1.6** tâches cargo-make `run-riscv` | ❌ N'existe pas. `rust-toolchain.toml:16` est toujours `targets = ["x86_64-unknown-none"]` |
+>
+> **Chiffres de mesure périmés** (snapshots du 2026-08-25) : « `arch/x86_64/`, 28 fichiers /
+> ~10 600 lignes » — le répertoire compte maintenant 30 entrées, `fonts/` et `vga/` inclus ;
+> « crate x86_64 dans ~112 fichiers » ; « 115 asm!/32 fichiers » ; « 531 occurrences de
+> `arch::x86_64` hors `arch/` ». R0 a depuis réduit ce dernier compte.
+>
+> La ligne 61 du tableau « Build » (« `targets/*.json` x86 uniquement ») est donc
+> **fausse** : il existe désormais deux familles de targets JSON, x86_64 et riscv64.
+>
+> **Toujours exact** : `SYS_ARCH_PRCTL` (350) ; `utsname.machine = "x86_64"` ; le fait
+> que rien ne compile encore le backend riscv64 — `workspace/kernel/Cargo.toml:47` déclare
+> `x86_64 = "0.15"` de façon inconditionnelle, et `kernel/.cargo/config.toml` ne définit
+> de drapeaux que pour `x86_64-unknown-none`. Le port reste estimé à ~3-4 mois-homme.
 
 ---
 

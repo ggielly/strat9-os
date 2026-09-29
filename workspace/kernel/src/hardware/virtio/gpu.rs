@@ -3,7 +3,7 @@
 
 use crate::{
     arch::pci::{self, Bar, ProbeCriteria},
-    memory::{self, allocate_zeroed_frame, phys_to_virt, PhysFrame},
+    memory::{self, paging, allocate_zeroed_frame, phys_to_virt, PhysFrame},
 };
 use alloc::{sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -44,7 +44,8 @@ pub struct VirtioGpu {
 
 struct VirtioDevice {
     mmio: usize,
-    queue_notify_addr: usize,
+    /// `notify_off_multiplier` from the device-specific config.
+    notify_mult: usize,
 }
 
 struct Virtqueue {
@@ -284,41 +285,100 @@ struct CmdTransferToHost2d {
     _padding: u32,
 }
 
+// ── Modern virtio-pci common configuration layout ─────────────────────────
+// Reference: virtio 1.2, §2.3 "Common configuration structure".
+//
+//   0x00 device_feature_select (u32)  0x04 device_feature (u32)
+//   0x08 driver_feature_select (u32)  0x0C driver_feature (u32)
+//   0x10 msix_config (u16)            0x12 num_queues (u16)
+//   0x14 device_status (u8)           0x15 config_generation (u8)
+//   0x16 queue_select (u16)           0x18 queue_size (u16)
+//   0x1A queue_msix_vector (u16)      0x1C queue_enable (u16)
+//   0x1E queue_notify_off (u16)
+//   0x20 queue_desc (u64)             0x28 queue_avail (u64)
+//   0x30 queue_used (u64)
+//   0x38 device-specific config (notify_off_multiplier is its first field)
+const VIRTIO_PCI_DEV_FEAT_SEL: usize = 0x00;
+const VIRTIO_PCI_DEV_FEAT: usize = 0x04;
+const VIRTIO_PCI_DRV_FEAT_SEL: usize = 0x08;
+const VIRTIO_PCI_DRV_FEAT: usize = 0x0C;
+const VIRTIO_PCI_NUM_QUEUES: usize = 0x12;
+const VIRTIO_PCI_STATUS: usize = 0x14;
+const VIRTIO_PCI_QUEUE_SEL: usize = 0x16;
+const VIRTIO_PCI_QUEUE_SIZE: usize = 0x18;
+const VIRTIO_PCI_QUEUE_MSIX: usize = 0x1A;
+const VIRTIO_PCI_QUEUE_ENABLE: usize = 0x1C;
+const VIRTIO_PCI_QUEUE_NOTIFY_OFF: usize = 0x1E;
+const VIRTIO_PCI_QUEUE_DESC: usize = 0x20;
+const VIRTIO_PCI_QUEUE_AVAIL: usize = 0x28;
+const VIRTIO_PCI_QUEUE_USED: usize = 0x30;
+const VIRTIO_PCI_DEV_CONFIG: usize = 0x38;
+const VIRTIO_PCI_NOTIFY_BASE: usize = 0x50;
+/// Bounded spin while waiting for the device to acknowledge a reset.
+const RESET_POLL_LIMIT: usize = 100_000;
+
 impl VirtioGpu {
     /// Creates a new instance.
     pub unsafe fn new(pci_dev: pci::PciDevice) -> Result<Self, &'static str> {
-        let bar = match pci_dev.read_bar(0) {
-            Some(Bar::Memory64 { addr, .. }) => addr,
-            _ => return Err("Invalid BAR"),
-        };
+        // q35 exposes virtio-gpu-pci as a transitional device: BAR0 may hold
+        // the legacy I/O window while the modern MMIO registers sit on
+        // another BAR. Accept whichever BAR is in memory space.
+        let bar = [0u8, 1, 2, 3, 4, 5]
+            .iter()
+            .find_map(|i| match pci_dev.read_bar(*i) {
+                Some(Bar::Memory64 { addr, .. }) => Some(addr),
+                Some(Bar::Memory32 { addr, .. }) => Some(addr as u64),
+                _ => None,
+            })
+            .ok_or("no memory BAR for virtio-gpu")?;
 
+        // The queue registers are only a page; the notify window follows.
+        paging::ensure_identity_map_range(bar, 0x1000);
         let mmio = phys_to_virt(bar) as usize;
-        let notify_mult = unsafe { ((mmio + 0x20) as *const u16).read_volatile() as usize };
-        let queue_notify_addr = mmio + 0x50 + notify_mult * 4;
+
         let mut device = VirtioDevice {
             mmio,
-            queue_notify_addr,
+            notify_mult: 4,
         };
 
         device.reset();
         device.add_status(VIRTIO_STATUS_ACKNOWLEDGE);
         device.add_status(VIRTIO_STATUS_DRIVER);
 
+        // Reset re-initialises the device config, so read it afterwards.
+        device.read_notify_mult();
+
+        // The driver feature set must be a subset of what the device offers,
+        // otherwise the device clears FEATURES_OK. A device that does not
+        // offer VIRTIO_F_VERSION_1 speaks the legacy layout, which this
+        // driver does not implement.
         let features = device.read_features();
-        let mut guest_features = VIRTIO_F_VERSION_1;
-        if (features & (1 << VIRTIO_GPU_F_EDID)) != 0 {
-            guest_features |= 1 << VIRTIO_GPU_F_EDID;
+        if features & VIRTIO_F_VERSION_1 == 0 {
+            return Err("device does not offer VIRTIO_F_VERSION_1 (legacy-only)");
         }
+
+        const WANTED: u64 = VIRTIO_F_VERSION_1 | (1 << VIRTIO_GPU_F_EDID);
+        let guest_features = features & WANTED;
         device.write_features(guest_features);
         device.add_status(VIRTIO_STATUS_FEATURES_OK);
 
         if (device.read_status() & VIRTIO_STATUS_FEATURES_OK) == 0 {
+            log::warn!(
+                "VirtIO-GPU: FEATURES_OK rejected (status={:#x}, guest={:#x}, dev={:#x})",
+                device.read_status(),
+                guest_features,
+                features
+            );
             return Err("Features negotiation failed");
         }
 
         let ctrl_queue = Virtqueue::new(&mut device, 0)?;
 
         device.add_status(VIRTIO_STATUS_DRIVER_OK);
+
+        if (device.read_status() & VIRTIO_STATUS_DRIVER_OK) == 0 {
+            return Err("Device rejected DRIVER_OK (bad queue layout)");
+        }
 
         let mut gpu = Self {
             ctrl_queue: Mutex::new(ctrl_queue),
@@ -924,41 +984,100 @@ impl VirtioGpu {
 }
 
 impl VirtioDevice {
+    fn read_u8(&self, off: usize) -> u8 {
+        unsafe { ((self.mmio + off) as *const u8).read_volatile() }
+    }
+
+    fn write_u8(&self, off: usize, value: u8) {
+        unsafe { ((self.mmio + off) as *mut u8).write_volatile(value) }
+    }
+
+    fn read_u16(&self, off: usize) -> u16 {
+        unsafe { ((self.mmio + off) as *const u16).read_volatile() }
+    }
+
+    fn write_u16(&self, off: usize, value: u16) {
+        unsafe { ((self.mmio + off) as *mut u16).write_volatile(value) }
+    }
+
+    fn read_u32(&self, off: usize) -> u32 {
+        unsafe { ((self.mmio + off) as *const u32).read_volatile() }
+    }
+
+    fn write_u32(&self, off: usize, value: u32) {
+        unsafe { ((self.mmio + off) as *mut u32).write_volatile(value) }
+    }
+
+    fn read_u64(&self, off: usize) -> u64 {
+        let lo = self.read_u32(off) as u64;
+        let hi = self.read_u32(off + 4) as u64;
+        (hi << 32) | lo
+    }
+
+    fn write_u64(&self, off: usize, value: u64) {
+        self.write_u32(off, value as u32);
+        self.write_u32(off + 4, (value >> 32) as u32);
+    }
+
+    /// Read `notify_off_multiplier` from the device-specific config.
+    ///
+    /// Transitional devices answer with 0 here while still in legacy mode,
+    /// and the spec fixes the multiplier to 4 in that case.
+    fn read_notify_mult(&mut self) {
+        let mult = self.read_u16(VIRTIO_PCI_DEV_CONFIG) as usize;
+        self.notify_mult = if mult == 0 { 4 } else { mult };
+    }
+
+    /// Notify address for the selected queue.
+    fn queue_notify(&self, queue_idx: u16) -> usize {
+        self.write_u16(VIRTIO_PCI_QUEUE_SEL, queue_idx);
+        let off = self.read_u16(VIRTIO_PCI_QUEUE_NOTIFY_OFF) as usize;
+        self.mmio + VIRTIO_PCI_NOTIFY_BASE + off * self.notify_mult
+    }
+
     /// Performs the reset operation.
+    ///
+    /// The device acknowledges by clearing the status byte; polling keeps a
+    /// fast QEMU device and a slow one on the same path.
     fn reset(&mut self) {
-        unsafe {
-            (self.mmio as *mut u32).write_volatile(0);
+        self.write_u8(VIRTIO_PCI_STATUS, 0);
+        for _ in 0..RESET_POLL_LIMIT {
+            if self.read_u8(VIRTIO_PCI_STATUS) == 0 {
+                return;
+            }
+            core::hint::spin_loop();
         }
-        core::hint::spin_loop();
     }
 
     /// Performs the add status operation.
     fn add_status(&mut self, status: u8) {
-        unsafe {
-            let current = ((self.mmio + 0x14) as *const u8).read_volatile();
-            ((self.mmio + 0x14) as *mut u8).write_volatile(current | status);
-        }
+        let current = self.read_u8(VIRTIO_PCI_STATUS);
+        self.write_u8(VIRTIO_PCI_STATUS, current | status);
     }
 
     /// Reads status.
     fn read_status(&self) -> u8 {
-        unsafe { ((self.mmio + 0x14) as *const u8).read_volatile() }
+        self.read_u8(VIRTIO_PCI_STATUS)
     }
 
-    /// Reads features.
+    /// Reads a device feature word, selecting its bank first.
     fn read_features(&self) -> u64 {
-        unsafe {
-            let lo = (self.mmio as *const u32).read_volatile() as u64;
-            let hi = ((self.mmio + 4) as *const u32).read_volatile() as u64;
-            (hi << 32) | lo
+        let mut features = 0u64;
+        for bank in 0..2u32 {
+            self.write_u32(VIRTIO_PCI_DEV_FEAT_SEL, bank);
+            let word = self.read_u32(VIRTIO_PCI_DEV_FEAT) as u64;
+            features |= word << (bank * 32);
         }
+        self.write_u32(VIRTIO_PCI_DEV_FEAT_SEL, 0);
+        features
     }
 
-    /// Writes features.
+    /// Writes the driver feature words, selecting each bank first.
     fn write_features(&mut self, features: u64) {
-        unsafe {
-            (self.mmio as *mut u32).write_volatile((features & 0xFFFF_FFFF) as u32);
-            ((self.mmio + 4) as *mut u32).write_volatile(((features >> 32) & 0xFFFF_FFFF) as u32);
+        for bank in 0..2u32 {
+            self.write_u32(VIRTIO_PCI_DRV_FEAT_SEL, bank);
+            let word = (features >> (bank * 32)) as u32;
+            self.write_u32(VIRTIO_PCI_DRV_FEAT, word);
         }
     }
 }
@@ -967,14 +1086,16 @@ impl Virtqueue {
     /// Creates a new instance.
     fn new(device: &mut VirtioDevice, queue_idx: u16) -> Result<Self, &'static str> {
         unsafe {
-            ((device.mmio + 0x16) as *mut u16).write_volatile(queue_idx);
-            let max_size = ((device.mmio + 0x18) as *const u16).read_volatile() as usize;
+            device.write_u16(VIRTIO_PCI_QUEUE_SEL, queue_idx);
+            let max_size = device.read_u16(VIRTIO_PCI_QUEUE_SIZE) as usize;
             if max_size == 0 {
                 return Err("Queue size is zero");
             }
 
             let queue_size = core::cmp::min(max_size, VIRTIO_RING_SIZE) as u16;
-            ((device.mmio + 0x16) as *mut u16).write_volatile(queue_size);
+            device.write_u16(VIRTIO_PCI_QUEUE_SIZE, queue_size);
+            // No MSI-X vector for this queue.
+            device.write_u16(VIRTIO_PCI_QUEUE_MSIX, 0xFFFF);
 
             let desc_frame = allocate_zeroed_frame().ok_or("Failed to allocate desc")?;
             let avail_frame = allocate_zeroed_frame().ok_or("Failed to allocate avail")?;
@@ -1010,8 +1131,15 @@ impl Virtqueue {
             core::ptr::write_bytes(used_virt as *mut u8, 0, core::mem::size_of::<VirtqUsed>());
             core::ptr::write_bytes(payload_virt, 0, PAGE_SIZE << (VIRTQ_PAYLOAD_ORDER as usize));
 
-            ((device.mmio + 0x10) as *mut u32).write_volatile((desc_phys & 0xFFFF_FFFF) as u32);
-            ((device.mmio + 0x1A) as *mut u16).write_volatile(0xFFFF);
+            // Modern layout: three full 64-bit physical addresses, then enable.
+            // The legacy layout only had a single page frame number, which is
+            // why this used to write a truncated 32-bit address at 0x10.
+            device.write_u64(VIRTIO_PCI_QUEUE_DESC, desc_phys);
+            device.write_u64(VIRTIO_PCI_QUEUE_AVAIL, avail_phys);
+            device.write_u64(VIRTIO_PCI_QUEUE_USED, used_phys);
+            device.write_u16(VIRTIO_PCI_QUEUE_ENABLE, 1);
+
+            let notify_addr = device.queue_notify(queue_idx);
 
             let mut free_stack = [0u16; VIRTIO_RING_SIZE];
             for i in 0..(queue_size as usize) {
@@ -1024,7 +1152,7 @@ impl Virtqueue {
                 used: used_virt,
                 queue_idx,
                 queue_size,
-                notify_addr: device.queue_notify_addr,
+                notify_addr,
                 free_stack,
                 free_len: queue_size as usize,
                 last_used_idx: 0,

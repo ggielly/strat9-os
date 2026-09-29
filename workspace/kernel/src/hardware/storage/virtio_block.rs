@@ -619,7 +619,13 @@ static VIRTIO_BLOCK_IRQ: core::sync::atomic::AtomicU8 = core::sync::atomic::Atom
 /// Initialize VirtIO block device
 ///
 /// Scans PCI bus for VirtIO block devices and initializes the first one found.
+///
+/// Idempotent: `hardware::init()` and the component `storage_init` both call
+/// this, and a second probe would reset a live device.
 pub fn init() {
+    if !VIRTIO_BLOCK_PTR.load(Ordering::Acquire).is_null() {
+        return;
+    }
     log::info!("VirtIO-blk: Scanning for devices...");
 
     // Prefer strict class-based probe (mass storage), with fallback to

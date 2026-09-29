@@ -47,7 +47,7 @@ This project is in active development and not production-ready. The ABI is still
 #### Kernel
 
     - SMP boot with per-CPU data, TSS/GDT, GSBase-based SYSCALL, per-CPU caches and per-CPU scheduler
-    - Two-stage allocator: buddy allocator for early boot and a dedicated kernel allocator (CoW support, heap/kmalloc/slab)
+    - Two-stage allocator: a pre-buddy boot allocator for early init, then a buddy frame allocator (zones DMA/Normal/HighMem, migratetypes, per-CPU caches) under a slab kernel heap with a vmalloc large-object backend. COW via PTE bit 9 and capability refcounting
     - Virtual memory: 4-level paging, HHDM, CR3 switching, page-fault handling (COW, mmap), user/kernel mappings
     - Preemptive multitasking with APIC/x2APIC and per-CPU timers
     - UEFI boot path and bootable ISO
@@ -126,7 +126,7 @@ graph TD
 
 ### Prerequisites
 
-- Rust nightly with `rust-src` and `llvm-tools-preview`.
+- Rust nightly with `rust-src`, `rustc-dev` and `llvm-tools` (see `rust-toolchain.toml`).
   The version is **pinned** in [`rust-toolchain.toml`](rust-toolchain.toml)
   (currently `nightly-2026-07-20`) : newer nightlies break the kernel build
   (the `x86_64` crate no longer compiles against the `Step` trait, and LLVM
@@ -143,7 +143,7 @@ graph TD
 # Installs exactly the pinned version from rust-toolchain.toml:
 rustup toolchain install
 cargo --version   # run once inside the repo so rustup activates it
-rustup component add rust-src llvm-tools-preview
+rustup component add rust-src rustc-dev llvm-tools   # matches rust-toolchain.toml [components]
 rustup target add x86_64-unknown-none x86_64-unknown-uefi
 ```
 
@@ -170,15 +170,37 @@ See [HARDWARE.md](HARDWARE.md) for a complete list of supported drivers, tested 
 ## Repository way of life
 
 - `workspace/kernel/` : the strat9-os kernel : Bedrock
+- `workspace/kernel/libs/` : in-kernel support crates (`component`, `component-macro`)
 - `workspace/components/` : userspace components
-- `workspace/bootloader/` : UEFI bootloader (primary) + archived BIOS bootloader
-- `workspace/abi/` : shared ABI definitions (KernelArgs v2)
-- `doc/` : specifications and design docs
+- `workspace/drivers/` : bus drivers (`strat9-bus-drivers`) and NIC crates (`e1000`, `intel-ethernet`, `nic-queues`, `nic-buffers`, `net-core`, `driver-net-proto`)
+- `workspace/bootloader/` : UEFI bootloader (primary) + a **legacy** NASM BIOS bootloader at `workspace/bootloader/asm/x86_64/`, which is not built by any active task and is described as broken in its own Makefile
+- `workspace/abi/` : shared ABI definitions (`KernelArgs` boot ABI **v4**, 132 bytes, magic `ST9B`)
+- `workspace/kernel-l2-tests/` : host-side test harness that compiles real kernel modules verbatim
+- `docs-site/` : the published documentation site (mdBook) sources
+- `docs/` : design documents
+- `doc/` : specifications, engineering logs and screenshots
+- `sdk/` : vendored third-party SDK trees (musl) and the relibc shim
 - `tools/` : build and helper scripts
 
 ### Related specifications
 
-TODO...
+| Document | Contents | Status |
+|----------|----------|--------|
+| [docs-site/src/syscalls.md](docs-site/src/syscalls.md) | Full syscall reference with kernel argument lists and the ABI-versus-kernel gap list | Maintained |
+| [docs-site/src/abi.md](docs-site/src/abi.md) | `strat9-abi` module map and versioning policy | Maintained |
+| [docs-site/src/boot-sequence.md](docs-site/src/boot-sequence.md) | OVMF → UEFI bootloader → kernel chain and the `KernelArgs` handoff | Maintained |
+| [docs-site/src/memory-model.md](docs-site/src/memory-model.md) | Buddy, slab, vmalloc, COW, page tables | Maintained |
+| [docs-site/src/ipc-mechanisms.md](docs-site/src/ipc-mechanisms.md) | Transport manager, legacy IPC mechanisms | Maintained |
+| [docs-site/src/silo.md](docs-site/src/silo.md) | Silo lifecycle, octal mode, pledge/unveil | Maintained |
+| [docs-site/src/driver-model.md](docs-site/src/driver-model.md) | Component registration, PCI, driver inventory | Maintained |
+| [docs-site/src/abi-matrix.md](docs-site/src/abi-matrix.md) | POSIX API coverage through `musl-compat` | Maintained |
+| [doc/silo_security_model.md](doc/silo_security_model.md) | Security model proposal | **Design spec** — IPC coloration, capability derivation, family profiles and the audit ring are **not implemented** |
+| [doc/NATIVE_SYSCALLS.md](doc/NATIVE_SYSCALLS.md) | Native syscall reference | **Superseded** by `docs-site/src/syscalls.md` |
+| [doc/2026-04-buddy-allocator-evolution.md](doc/2026-04-buddy-allocator-evolution.md) | Buddy allocator engineering log | Dated log, still accurate |
+| [doc/riscv-port-implementation.md](doc/riscv-port-implementation.md) | riscv64 port plan | Proposal v1, partially delivered |
+| [docs/ipc-transport-manager-design.md](docs/ipc-transport-manager-design.md) | Transport manager design | **Superseded** by the docs-site IPC pages |
+| [docs/ipc-n3-mmu-thread-migration-spec.md](docs/ipc-n3-mmu-thread-migration-spec.md) | N3 MMU migration spec | Normative; implementation has known deviations |
+| [docs/mr-u-boot-replacement.md](docs/mr-u-boot-replacement.md) | Limine → UEFI bootloader migration | Historical MR summary |
 
 ## License
 

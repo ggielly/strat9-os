@@ -163,7 +163,10 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="architecture-overview"><a class="header" href="#architecture-overview">Architecture Overview</a></h1>
-<p>Strat9 OS is a microkernel-inspired operating system written in Rust. The kernel runs in Ring 0 on x86_64, with userspace processes isolated through capability-based security and silo boundaries.</p>
+<p>Strat9 OS is a microkernel-inspired operating system written in Rust. The kernel runs in Ring 0 on <strong>x86_64</strong>, booted through a homemade UEFI application. Userspace processes are isolated through capability-based security, four-level page tables with copy-on-write, and silo boundaries.</p>
+<blockquote>
+<p><strong>Scope.</strong> Only x86_64 is buildable and bootable today. The riscv64 backend (<code>kernel/src/arch/riscv64/</code>) is a two-file stub that is never compiled, and <code>kernel/src/hal/</code> is decorative: <code>X86_64Hal::current_cpu_id()</code> returns a hard-coded <code>0</code> and its text-boundary methods return a constant. The real architecture-neutral layer is <code>kernel/src/arch/facade.rs</code>.</p>
+</blockquote>
 <hr />
 <h2 id="kernel-subsystems"><a class="header" href="#kernel-subsystems">Kernel subsystems</a></h2>
 <pre><code class="language-mermaid">graph TB
@@ -174,7 +177,7 @@
         IPC[IPC]
         CAP[Capability System]
         SILO[Silo Manager]
-        VFS[VFS]
+        VFS[VFS + Schemes]
         SYSCALL[Syscall Entry]
         HW[Hardware Drivers]
     end
@@ -209,34 +212,41 @@
 <hr />
 <h2 id="subsystem-summary"><a class="header" href="#subsystem-summary">Subsystem summary</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Subsystem</th><th>Module</th><th>Purpose</th></tr></thead><tbody>
-<tr><td><strong>Boot</strong></td><td><code>boot/</code></td><td>Assembly stubs (16→64 bit), UEFI bootloader handoff, early init</td></tr>
-<tr><td><strong>Scheduler</strong></td><td><code>process/scheduler/</code></td><td>Per-CPU run queues, multi-class scheduling (RT FIFO/RR, Normal, Idle)</td></tr>
-<tr><td><strong>Memory</strong></td><td><code>memory/</code></td><td>Buddy allocator, slab heap, COW, page tables, vmalloc</td></tr>
-<tr><td><strong>IPC</strong></td><td><code>ipc/</code></td><td>3-level Transport Manager (TypeSafe/LockFree/MMU), typed channels, shared rings, semaphores</td></tr>
-<tr><td><strong>Capability</strong></td><td><code>capability.rs</code></td><td>Unforgeable tokens, per-resource refcounting</td></tr>
-<tr><td><strong>Silo</strong></td><td><code>silo/</code></td><td>Process isolation containers with resource quotas</td></tr>
-<tr><td><strong>VFS</strong></td><td><code>vfs/</code></td><td>Virtual filesystem with scheme-based I/O</td></tr>
-<tr><td><strong>Syscall</strong></td><td><code>syscall/</code></td><td>Syscall dispatch and validation</td></tr>
-<tr><td><strong>Drivers</strong></td><td><code>hardware/</code></td><td>NIC, storage, USB, GPU, VirtIO, PCI</td></tr>
+<tr><td><strong>Boot</strong></td><td><code>boot/</code></td><td><code>boot64.S</code> entry, <code>KernelArgs</code> handoff, module validation, logger, panic hooks, symbol table</td></tr>
+<tr><td><strong>Scheduler</strong></td><td><code>process/scheduler/</code>, <code>process/sched_classes/</code></td><td>Per-CPU run queues, multi-class scheduling, task tables</td></tr>
+<tr><td><strong>Process</strong></td><td><code>process/</code></td><td>Tasks, threads, signals, timers, ELF loading, fork/COW</td></tr>
+<tr><td><strong>Memory</strong></td><td><code>memory/</code></td><td>Boot allocator, buddy, frame metadata, slab heap, vmalloc, page tables, COW, address spaces, user slices</td></tr>
+<tr><td><strong>IPC</strong></td><td><code>ipc/</code>, <code>async_io/</code></td><td>Transport manager (TypeSafe/LockFree/MMU), ports, channels, shared rings, semaphores, io_uring-style async rings</td></tr>
+<tr><td><strong>Capability</strong></td><td><code>capability.rs</code></td><td>Unforgeable <code>CapId</code> tokens with per-resource permissions and refcounting</td></tr>
+<tr><td><strong>Silo</strong></td><td><code>silo/</code></td><td>Isolation containers, <code>OctalMode</code> pledge/unveil, quotas, module attach, events</td></tr>
+<tr><td><strong>VFS</strong></td><td><code>vfs/</code></td><td>Virtual filesystem with Plan 9-style scheme routing</td></tr>
+<tr><td><strong>Syscall</strong></td><td><code>syscall/</code></td><td>Dispatch table plus per-domain handlers</td></tr>
+<tr><td><strong>Drivers</strong></td><td><code>hardware/</code>, <code>framebuffer/</code>, <code>drivers/</code></td><td>NIC, storage (virtio-blk, AHCI, NVMe), USB (UHCI/EHCI/xHCI/HID), GPU, PCI, ACPI</td></tr>
+<tr><td><strong>ACPI</strong></td><td><code>acpi/</code></td><td>MADT, MCFG, FADT, HPET, RSDT, IVRS, DMAR, SLIT, WAET, BGRT</td></tr>
+<tr><td><strong>Kernel shell</strong></td><td><code>shell/</code></td><td>Interactive kernel-mode shell, commands, mouse, scripting</td></tr>
 </tbody></table>
 </div>
+<p>Several modules declared under <code>boot/</code> are <strong>dead code</strong>: <code>boot.S</code> (Multiboot1), <code>fat32_loader.rs</code>, <code>virtio_blk.rs</code>, <code>block_device.rs</code> and <code>fdt.rs</code> have no call sites. Modules are loaded by the UEFI bootloader from the ESP and registered in the VFS as <code>/initfs/&lt;name&gt;</code>.</p>
 <hr />
 <h2 id="design-principles"><a class="header" href="#design-principles">Design principles</a></h2>
 <ol>
 <li>
-<p><strong>Capability-based security</strong> : All kernel resources (memory, IPC ports, devices) are accessed through unforgeable <code>CapId</code> tokens. No raw pointers leak to userspace.</p>
+<p><strong>Capability-based security.</strong> Kernel resources (memory regions, IPC ports, volumes, transports) are reached through unforgeable <code>CapId</code> handles carrying a permission set (read / write / execute / grant / revoke). The IPC layer injects a capability <em>badge</em> into outgoing messages instead of a raw task id, so a receiver learns the sender's authority, not its pid. Raw pointers never cross into userspace.</p>
 </li>
 <li>
-<p><strong>Silo isolation</strong> : Processes run inside <em>silos</em> (analogous to containers). Each silo has memory quotas, capability boundaries, and IPC restrictions. Policy lives in userspace; the kernel enforces mechanisms.</p>
+<p><strong>Silo isolation.</strong> Processes run inside silos, each with an <code>OctalMode</code> capability mask, unveil rules for filesystem paths, memory and IPC quotas, and a lifecycle (created / started / suspended / stopped / sandboxed). Policy lives in userspace; the kernel enforces the mechanism. See <a href="./silo.html">Silo System</a>.</p>
 </li>
 <li>
-<p><strong>Per-CPU scheduling</strong> : Each CPU core has its own run queue set. Tasks are pinned to cores via the scheduler, avoiding cross-core lock contention on the hot path.</p>
+<p><strong>Per-CPU scheduling.</strong> Each core has its own run queue set and per-CPU allocator caches, and tasks are pinned to cores, keeping the hot path free of cross-core contention. Frame allocation uses a per-CPU cache of 256 frames per (zone, migratetype) pair with cross-CPU stealing.</p>
 </li>
 <li>
-<p><strong>COW-first memory</strong> : <code>fork()</code> shares pages via copy-on-write. Physical frames are freed only when the last reference disappears. Buddy allocator provides O(1) order-0 allocations via per-CPU caches.</p>
+<p><strong>Copy-on-write memory.</strong> <code>fork()</code> clones page tables, marks writable pages with PTE bit 9, and shares physical frames under capability refcounting. A write fault triggers <code>handle_cow_fault</code>, which either upgrades a singly-referenced page in place or allocates and copies. See <a href="./memory-model.html">Memory Management</a>.</p>
 </li>
 <li>
-<p><strong>Scheme-based I/O</strong> : Filesystem operations go through a VFS layer that routes to scheme handlers (like Plan 9). Userspace can implement custom schemes for devices, networks, and IPC.</p>
+<p><strong>Scheme-based I/O.</strong> Filesystem operations go through a VFS layer that routes to scheme handlers, Plan 9 style. Userspace implements custom schemes for devices, networks and IPC, and the current userspace network stack is reached through a <code>/dev/net</code> raw-packet scheme rather than BSD sockets.</p>
+</li>
+<li>
+<p><strong>Plan 9 style user servers.</strong> The kernel exposes no socket API at all. Networking, display and input are ordinary userspace services talking to the kernel over syscalls and schemes.</p>
 </li>
 </ol>
 <hr />
@@ -244,18 +254,20 @@
 <pre><code class="language-mermaid">sequenceDiagram
     participant U as Userspace
     participant K as Syscall Entry
-    participant C as Capability Check
+    participant C as Capability / Silo Check
     participant S as Subsystem
 
     U-&gt;&gt;K: syscall(SYS_READ, fd, buf, len)
-    K-&gt;&gt;K: Validate args, disable IRQs
-    K-&gt;&gt;C: Resolve CapId from fd
-    C-&gt;&gt;C: Check permissions (read)
+    K-&gt;&gt;K: Validate args, check pending signals
+    K-&gt;&gt;C: Resolve CapId / fd, check pledge + unveil
+    C-&gt;&gt;C: Check permissions
     C-&gt;&gt;S: Dispatch to VFS read
-    S-&gt;&gt;S: Page fault / buffer I/O
+    S-&gt;&gt;S: User-slice validation, page fault if unmapped
     S--&gt;&gt;K: Return bytes read
     K--&gt;&gt;U: Result in RAX
 </code></pre>
+<p>Argument validation goes through <code>UserSliceRead</code> / <code>UserSliceWrite</code>, which check that the userspace range lies below <code>USER_SPACE_END</code> and is at most 16 MiB. Single-byte copies are exempt from the size cap. Pending signals are checked on every syscall return through a per-CPU fast flag set by <code>send_signal</code>, so a signal targeting the running task costs one atomic test-and-clear on the common path.</p>
+<p>See <a href="./syscalls.html">Syscall Reference</a> for the full table and for the known gaps between the ABI headers and the dispatcher.</p>
 
                     </main>
 

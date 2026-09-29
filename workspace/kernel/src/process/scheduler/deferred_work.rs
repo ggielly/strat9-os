@@ -42,17 +42,20 @@ pub enum DeferredWork {
     WakeDeadlines = 1 << 1,
     /// Per-task Fair class accounting (runnable_len, tick_update_wait).
     PerTaskAccounting = 1 << 2,
-    /// NIC watchdog / IRQ-less N2 service (safe outside hardirq).
-    NicPoll = 1 << 3,
 }
 
-impl DeferredWork {
-    /// All work items combined.
-    const ALL: u32 = Self::IntervalTimers as u32
-        | Self::WakeDeadlines as u32
-        | Self::PerTaskAccounting as u32
-        | Self::NicPoll as u32;
-}
+/// Minimum ticks between two NIC watchdog passes.
+///
+/// `process_deferred_work()` runs on every context switch and in the idle
+/// loop, so raising a work item per tick would call `poll_all()` on every CPU
+/// on every switch. `poll_all()` takes the NIC registry lock and the per-queue
+/// spinlocks (`refill_rx_queue` locks two), which on a 4-CPU box is enough
+/// lock traffic to starve the shell. The watchdog only covers a stalled
+/// device, so once per second is plenty.
+const NIC_POLL_INTERVAL_TICKS: u64 = 100;
+
+static NEXT_NIC_POLL_TICK: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(u64::MAX);
 
 /// Per-CPU deferred work state.
 struct DeferredWorkCpu {
@@ -114,7 +117,40 @@ pub fn raise_tick_deferred_work() {
     raise_deferred_work(DeferredWork::IntervalTimers);
     raise_deferred_work(DeferredWork::WakeDeadlines);
     raise_deferred_work(DeferredWork::PerTaskAccounting);
-    raise_deferred_work(DeferredWork::NicPoll);
+}
+
+/// Run the NIC watchdog at a fixed low rate, on one CPU only.
+///
+/// Kept out of `raise_tick_deferred_work()`: `process_deferred_work()` runs on
+/// every context switch and in every idle loop, so a per-tick item would reach
+/// `poll_all()` hundreds of times per second across all CPUs and contend on
+/// the NIC locks. BSP-only also avoids four CPUs polling the same device.
+pub fn maybe_poll_nic() {
+    if crate::arch::percpu::current_cpu_index() != 0 {
+        return;
+    }
+    let tick = super::ticks();
+    match NEXT_NIC_POLL_TICK.compare_exchange(
+        u64::MAX,
+        tick.saturating_add(NIC_POLL_INTERVAL_TICKS),
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    ) {
+        Ok(_) => {}
+        Err(deadline) => {
+            let now = super::ticks();
+            if now < deadline {
+                return;
+            }
+            let _ = NEXT_NIC_POLL_TICK.compare_exchange(
+                deadline,
+                now.saturating_add(NIC_POLL_INTERVAL_TICKS),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+            crate::hardware::nic::poll_all();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -178,10 +214,8 @@ pub fn process_deferred_work() -> bool {
         process_per_task_accounting();
     }
 
-    if pending & DeferredWork::NicPoll as u32 != 0 {
-        // Safe here: deferred work runs outside the hardirq swapgs window.
-        crate::hardware::nic::poll_all();
-    }
+    // Rate-limited and BSP-only: see maybe_poll_nic().
+    maybe_poll_nic();
 
     work_cpu.processing.store(false, Ordering::Release);
     true

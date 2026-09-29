@@ -16,7 +16,7 @@ use core::{
     fmt,
     sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
 };
-use spin::Mutex;
+use spin::{Mutex, Once};
 
 pub(crate) static VGA_AVAILABLE: AtomicBool = AtomicBool::new(false);
 pub(crate) static FPS_LAST_TICK: AtomicU64 = AtomicU64::new(0);
@@ -28,6 +28,46 @@ const CLIPBOARD_CAP: usize = 8192;
 static CLIPBOARD: Mutex<([u8; CLIPBOARD_CAP], usize)> = Mutex::new(([0u8; CLIPBOARD_CAP], 0));
 
 pub static VGA_WRITER: Mutex<VgaWriter> = Mutex::new(VgaWriter::new());
+
+/// Geometry of the framebuffer handed over by the UEFI bootloader.
+#[derive(Clone, Copy)]
+pub struct UefiFbGeometry {
+    /// HHDM-mapped virtual address of the framebuffer.
+    pub virt_addr: usize,
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub fmt: PixelFormat,
+}
+
+static UEFI_FB: Once<Option<UefiFbGeometry>> = Once::new();
+
+fn publish_uefi_fb_geometry(
+    virt_addr: usize,
+    width: u32,
+    height: u32,
+    pitch: u32,
+    fmt: PixelFormat,
+) {
+    UEFI_FB.call_once(|| {
+        Some(UefiFbGeometry {
+            virt_addr,
+            width,
+            height,
+            pitch,
+            fmt,
+        })
+    });
+}
+
+/// Framebuffer geometry published by the bootloader, if any.
+///
+/// The video driver adopts this surface when no GPU device claims the
+/// framebuffer, so `/dev/display` still works on a machine where the
+/// virtio-gpu / amdgpu probe failed.
+pub fn uefi_framebuffer() -> Option<UefiFbGeometry> {
+    *UEFI_FB.call_once(|| None)
+}
 
 /// Returns whether available.
 #[inline]
@@ -213,6 +253,9 @@ pub fn init(
             RgbColor::new(0x12, 0x16, 0x1E),
         );
         VGA_AVAILABLE.store(true, Ordering::Relaxed);
+        // Publish the UEFI framebuffer geometry so the video driver can adopt
+        // this surface when no virtio-gpu/amdgpu device is available.
+        publish_uefi_fb_geometry(fb_virt as usize, fb_width, fb_height, pitch, fmt);
         // Initialise panic-screen raw framebuffer globals so the panic
         // handler can draw directly without locking VGA_WRITER.
         init_panic_fb_globals(

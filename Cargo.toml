@@ -83,9 +83,12 @@ opt-level = 2
 lto = false
 #codegen-units = 1 # Single codegen unit for max LTO
 panic = "abort" # No unwinding in kernel
-#strip = true      # Strip debug symbols from release
-strip = false
-debug = 2
+# Every module is copied into the boot image and read through the UEFI file
+# protocol, so DWARF dominated the payload: 107 MB of modules, 97 % of it
+# debug info. "debuginfo" drops DWARF but keeps the symbol table, so backtraces
+# and gdb still resolve names.
+strip = "debuginfo"
+debug = 2          # Still generated for fast incremental rebuilds, discarded at link
 incremental = true # Faster recompilation
 
 [profile.dev]

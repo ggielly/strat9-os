@@ -163,159 +163,216 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="driver-model"><a class="header" href="#driver-model">Driver Model</a></h1>
-<p>Strat9 OS uses a trait-based component model for drivers. Each driver registers itself during boot and is discovered through PCI/VirtIO enumeration.</p>
+<p>Strat9 OS does <strong>not</strong> use a driver trait. Drivers are plain modules in the kernel, initialised at boot through a linker-section registry of free functions, and discovered by scanning PCI.</p>
+<blockquote>
+<p><strong>Correction to earlier revisions of this page.</strong> There is no <code>trait Component</code> and no <code>#[derive(Component)]</code>. The real mechanism is a <code>#[repr(C)]</code> static placed in a linker section by the <code>#[init_component]</code> <strong>attribute macro</strong>. The same correction applies to the crate paths: <code>component</code> and <code>component-macro</code> live in <code>workspace/kernel/libs/</code>, not <code>workspace/components/</code>.</p>
+</blockquote>
 <hr />
 <h2 id="driver-categories"><a class="header" href="#driver-categories">Driver categories</a></h2>
 <pre><code class="language-mermaid">graph TB
     subgraph "Storage"
         NVMe[NVMe]
         AHCI[AHCI/SATA]
+        ATA[ATA legacy]
         VIO_BLK[VirtIO Block]
     end
 
     subgraph "Network"
         E1000[E1000/E1000e]
         IGC[IGC]
+        PCNET[PCnet]
+        RTL[RTL8139]
         VIO_NET[VirtIO Net]
     end
 
     subgraph "Input"
         USB_HID[USB HID]
-        PS2[PS/2 Keyboard]
+        PS2[PS/2 Keyboard + Mouse]
     end
 
     subgraph "Display"
         FB[Framebuffer]
         VGA[VGA text mode]
+        GPU[VirtIO GPU / AMDGPU stub]
     end
 
     subgraph "Bus"
-        PCI[PCI enumeration]
-        VIO[VirtIO transport]
-        USB[XHCI host controller]
+        PCI[PCI enumeration&lt;br/&gt;I/O port + ECAM]
+        VIO[VirtIO common]
+        USB[XHCI / EHCI / UHCI]
     end
 
     PCI --&gt; NVMe
     PCI --&gt; AHCI
     PCI --&gt; E1000
     PCI --&gt; IGC
+    PCI --&gt; PCNET
+    PCI --&gt; RTL
     VIO --&gt; VIO_BLK
     VIO --&gt; VIO_NET
     USB --&gt; USB_HID
 </code></pre>
 <hr />
-<h2 id="component-trait"><a class="header" href="#component-trait">Component trait</a></h2>
-<p>All drivers implement the <code>Component</code> trait, which provides a uniform registration interface:</p>
-<pre><code class="language-rust">pub trait Component: Send + Sync {
-    fn name(&amp;self) -&gt; &amp;str;
-    fn init(&amp;self) -&gt; Result&lt;(), ComponentError&gt;;
-    fn shutdown(&amp;self);
+<h2 id="component-registration"><a class="header" href="#component-registration">Component registration</a></h2>
+<h3 id="the-mechanism"><a class="header" href="#the-mechanism">The mechanism</a></h3>
+<p><code>workspace/kernel/libs/component</code> defines a registration record:</p>
+<pre><code class="language-rust">#[repr(C)]
+pub struct ComponentEntry {
+    pub name: &amp;'static str,                    // function name, used for dependency resolution
+    pub stage: InitStage,                      // lifecycle stage
+    pub init_fn: fn() -&gt; Result&lt;(), ComponentInitError&gt;,
+    pub path: &amp;'static str,                    // "file!():fn_name", for log messages
+    pub priority: u32,                         // lower = earlier within a topological level
+    pub depends_on: &amp;'static [&amp;'static str],   // same-stage names that must complete first
 }</code></pre>
-<p>Components are registered at boot via the <code>component-macro</code> derive macro:</p>
-<pre><code class="language-rust">#[derive(Component)]
-struct MyDriver { /* ... */ }</code></pre>
-<hr />
-<h2 id="pci-enumeration"><a class="header" href="#pci-enumeration">PCI enumeration</a></h2>
-<p>The PCI bus is scanned at boot using a BFS algorithm with early-exit optimization:</p>
-<ol>
-<li>For each (bus, device), probe function 0 first</li>
-<li>If vendor == 0xFFFF → skip all 8 functions (early exit)</li>
-<li>Read header type bit 7 for multi-function flag</li>
-<li>If PCI-to-PCI bridge → enqueue secondary bus</li>
-</ol>
-<p>This reduces worst-case probes from 65,536 to approx. 8,192 for typical topologies.</p>
-<p><strong>Key PCI types:</strong></p>
-<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Description</th></tr></thead><tbody>
-<tr><td><code>PciAddress</code></td><td>Bus/device/function address</td></tr>
-<tr><td><code>PciDevice</code></td><td>Device info (vendor, class, BARs, IRQ)</td></tr>
-<tr><td><code>ProbeCriteria</code></td><td>Filter for device discovery</td></tr>
+<p><code>InitStage</code> has four values:</p>
+<div class="table-wrapper"><table><thead><tr><th>Stage</th><th>When</th></tr></thead><tbody>
+<tr><td><code>Bootstrap</code></td><td>Early kernel init, before SMP</td></tr>
+<tr><td><code>Kthread</code></td><td>After SMP is up, in kernel-thread context</td></tr>
+<tr><td><code>Hardware</code></td><td>After the scheduler starts; device and driver probing</td></tr>
+<tr><td><code>Process</code></td><td>After the first userspace process is created</td></tr>
+</tbody></table>
+</div>
+<p><code>ComponentInitError</code> is <code>UninitializedDependencies(String)</code>, <code>InitFailed(&amp;'static str)</code> or <code>Unknown</code>.</p>
+<h3 id="registration"><a class="header" href="#registration">Registration</a></h3>
+<p><code>#[init_component]</code> from <code>workspace/kernel/libs/component-macro</code> is an <strong>attribute macro applied to a free function</strong>, not a derive on a struct:</p>
+<pre><code class="language-rust">#[component::init_component(hardware, priority = 10, depends_on = [acpi_init])]
+fn storage_init() -&gt; Result&lt;(), ComponentInitError&gt; {
+    virtio_block::init()?;
+    ahci::init()?;
+    nvme::init()?;
+    Ok(())
+}</code></pre>
+<p>The macro expands to a <code>#[used] static ComponentEntry</code> placed in the <code>.component_entries</code> linker section. <code>init_all(stage)</code> walks that section between the <code>__start_component_entries</code> and <code>__stop_component_entries</code> linker symbols, sorts by <code>depends_on</code> and then <code>priority</code>, and calls each <code>init_fn</code> in order. <code>list_components()</code> returns the same set as human-readable metadata.</p>
+<h3 id="what-actually-registers"><a class="header" href="#what-actually-registers">What actually registers</a></h3>
+<p><code>workspace/kernel/src/components.rs</code> holds the real initialisers. Most <code>Bootstrap</code> entries are explicit <em>markers</em>, because the work is inlined in <code>kernel_main</code> instead. The <code>Hardware</code> stage is where drivers genuinely register:</p>
+<div class="table-wrapper"><table><thead><tr><th>Stage</th><th>Calls</th></tr></thead><tbody>
+<tr><td><code>Bootstrap</code></td><td>Mostly markers; see <a href="./boot-sequence.html#kernel-init--kernelmain">Boot Sequence → kernel init</a></td></tr>
+<tr><td><code>Kthread</code></td><td>Kernel-thread start-up</td></tr>
+<tr><td><code>Hardware</code></td><td><code>hardware::init()</code>, <code>virtio_block::init()</code>, <code>ahci::init()</code>, <code>nvme::init()</code>, <code>hardware::timer::init()</code>, <code>hardware::usb::init()</code></td></tr>
+<tr><td><code>Process</code></td><td>Post-init-process registration (or <code>process::selftest::create_selftest_tasks()</code> under the <code>selftest</code> feature)</td></tr>
 </tbody></table>
 </div>
 <hr />
+<h2 id="pci-enumeration"><a class="header" href="#pci-enumeration">PCI enumeration</a></h2>
+<p><code>workspace/kernel/src/arch/x86_64/pci.rs</code> provides <strong>two</strong> scanners:</p>
+<ol>
+<li><strong>I/O-port CF8/CFC scanner</strong> — the classic BFS walk with early-exit optimisation</li>
+<li><strong>ECAM / MCFG scanner</strong> — used when ACPI provides an MCFG table</li>
+</ol>
+<p>The I/O-port scanner:</p>
+<ol>
+<li>For each (bus, device), probe function 0 first</li>
+<li>If vendor == <code>0xFFFF</code> → skip all 8 functions (early exit)</li>
+<li>Read header type bit 7 for the multi-function flag</li>
+<li>If the device is a PCI-to-PCI bridge → enqueue the secondary bus</li>
+</ol>
+<p>That reduces the worst case from 65,536 probes to roughly 8,192 for typical topologies.</p>
+<h3 id="key-types"><a class="header" href="#key-types">Key types</a></h3>
+<p>Defined in <code>workspace/kernel/src/hardware/pci_client.rs</code>:</p>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>PciAddress</code></td><td>Bus / device / function address</td></tr>
+<tr><td><code>PciDevice</code></td><td>Device info: vendor, class, BARs, IRQ</td></tr>
+<tr><td><code>ProbeCriteria</code></td><td>Filter for device discovery</td></tr>
+</tbody></table>
+</div>
+<p>Userspace reaches the same functionality through <code>SYS_PCI_ENUM</code> (240), <code>SYS_PCI_CFG_READ</code> (241) and <code>SYS_PCI_CFG_WRITE</code> (242).</p>
+<hr />
 <h2 id="nic-drivers"><a class="header" href="#nic-drivers">NIC drivers</a></h2>
 <h3 id="e1000--e1000e"><a class="header" href="#e1000--e1000e">E1000 / E1000e</a></h3>
-<p>Intel Ethernet drivers supporting:</p>
-<ul>
-<li>Legacy descriptor rings (T/R)</li>
-<li>MSI-X interrupt moderation</li>
-<li>Multicast filter</li>
-<li>VLAN offload</li>
-</ul>
+<p><code>workspace/kernel/src/hardware/nic/e1000*</code>. Intel Ethernet supporting legacy descriptor rings, MSI-X interrupt moderation, multicast filtering and VLAN offload.</p>
 <h3 id="igc"><a class="header" href="#igc">IGC</a></h3>
-<p>Intel I225/I226 2.5GbE driver with:</p>
-<ul>
-<li>Advanced RX/TX descriptors</li>
-<li>Time-based interrupt coalescing</li>
-<li>Hardware timestamping</li>
-</ul>
-<h3 id="common-nic-infrastructure"><a class="header" href="#common-nic-infrastructure">Common NIC infrastructure</a></h3>
-<div class="table-wrapper"><table><thead><tr><th>Module</th><th>Purpose</th></tr></thead><tbody>
+<p>Intel I225/I226 2.5GbE: advanced RX/TX descriptors, time-based interrupt coalescing, hardware timestamping.</p>
+<h3 id="others"><a class="header" href="#others">Others</a></h3>
+<p><code>pcnet</code> and <code>rtl8139</code> also live in <code>kernel/src/hardware/nic/</code>, alongside <code>virtio_net</code> and the shared <code>common.rs</code> / <code>data_plane.rs</code>.</p>
+<h3 id="shared-nic-crates"><a class="header" href="#shared-nic-crates">Shared NIC crates</a></h3>
+<p>Under <code>workspace/drivers/nic/</code>:</p>
+<div class="table-wrapper"><table><thead><tr><th>Crate</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>nic-queues</code></td><td>TX/RX queue management, descriptor ring abstraction</td></tr>
 <tr><td><code>nic-buffers</code></td><td>Buffer allocation, DMA-safe memory</td></tr>
-<tr><td><code>net-core</code></td><td>Packet parsing, protocol headers</td></tr>
+<tr><td><code>net-core</code></td><td>Packet parsing, protocol headers, <code>NetworkDevice</code> / <code>NetError</code></td></tr>
 <tr><td><code>driver-net-proto</code></td><td>Protocol driver trait</td></tr>
+<tr><td><code>intel-ethernet</code></td><td>Intel common register definitions</td></tr>
 </tbody></table>
 </div>
 <hr />
 <h2 id="storage-drivers"><a class="header" href="#storage-drivers">Storage drivers</a></h2>
-<h3 id="nvme"><a class="header" href="#nvme">NVMe</a></h3>
-<p>Full NVMe driver with:</p>
-<ul>
-<li>I/O queues (per-CPU submission/completion pairs)</li>
-<li>MSI-X interrupt steering</li>
-<li>Namespace management</li>
-<li>Admin queue for controller commands</li>
-</ul>
-<h3 id="ahci--sata"><a class="header" href="#ahci--sata">AHCI / SATA</a></h3>
-<p>AHCI controller driver for SATA devices:</p>
-<ul>
-<li>Port enumeration</li>
-<li>DMA PRDT (Physical Region Descriptor Table)</li>
-<li>FIS-based communication</li>
-</ul>
-<h3 id="virtio-block"><a class="header" href="#virtio-block">VirtIO Block</a></h3>
-<p>Paravirtualized block device for QEMU/KVM:</p>
-<ul>
-<li>VirtIO queue negotiation</li>
-<li>Multi-queue support</li>
-<li>Feature bits (discard, write cache)</li>
-</ul>
+<p>These are internal modules in <code>workspace/kernel/src/hardware/storage/</code>, wired by <code>storage_init</code> in the <code>Hardware</code> stage. They are <strong>not</strong> separate crates and are not in a driver registry.</p>
+<div class="table-wrapper"><table><thead><tr><th>Module</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>nvme.rs</code></td><td>I/O queues per CPU, MSI-X steering, namespace management, admin queue</td></tr>
+<tr><td><code>ahci.rs</code></td><td>Port enumeration, DMA PRDT, FIS-based command exchange</td></tr>
+<tr><td><code>ata_legacy.rs</code></td><td>PATA / legacy ATA</td></tr>
+<tr><td><code>virtio_block.rs</code></td><td>VirtIO queue negotiation, multi-queue, feature bits</td></tr>
+</tbody></table>
+</div>
 <hr />
 <h2 id="usb-stack"><a class="header" href="#usb-stack">USB stack</a></h2>
 <pre><code class="language-mermaid">graph TD
-    XHCI[XHCI Host Controller] --&gt; HUB[Hub Driver]
-    HUB --&gt; HID[USB HID - Keyboard/Mouse]
-    HUB --&gt; MASS[USB Mass Storage]
-    HUB --&gt; NET[USB Ethernet]
+    XHCI[XHCI Host Controller]
+    EHCI[EHCI]
+    UHCI[UHCI]
+    HID[USB HID — keyboard / mouse]
+
+    XHCI --&gt; HID
+    EHCI --&gt; HID
+    UHCI --&gt; HID
 </code></pre>
-<p>The XHCI driver manages the USB host controller, enumerates devices through hub traversal, and dispatches to class-specific drivers (HID, mass storage, etc.).</p>
+<p><code>workspace/kernel/src/hardware/usb/</code> contains <strong>only</strong> <code>mod.rs</code>, <code>xhci.rs</code>, <code>ehci.rs</code>, <code>uhci.rs</code> and <code>hid.rs</code>. The module header states the actual scope: host-controller drivers plus HID.</p>
+<blockquote>
+<p><strong>There is no hub driver, no mass-storage class driver and no USB Ethernet class driver.</strong> Earlier revisions of this page described a hub → HID / mass-storage / USB-Ethernet hierarchy that does not exist in the tree.</p>
+</blockquote>
 <hr />
-<h2 id="virtio-transport"><a class="header" href="#virtio-transport">VirtIO transport</a></h2>
-<p>VirtIO provides paravirtualized device access for QEMU/KVM:</p>
-<div class="table-wrapper"><table><thead><tr><th>Device</th><th>Module</th><th>Purpose</th></tr></thead><tbody>
-<tr><td>VirtIO Block</td><td><code>virtio/block</code></td><td>Block I/O</td></tr>
-<tr><td>VirtIO Net</td><td><code>virtio/net</code></td><td>Network</td></tr>
-<tr><td>VirtIO Console</td><td><code>virtio/console</code></td><td>Serial console</td></tr>
-<tr><td>VirtIO GPU</td><td><code>virtio/gpu</code></td><td>Display</td></tr>
-<tr><td>VirtIO Input</td><td><code>virtio/input</code></td><td>Keyboard/mouse</td></tr>
+<h2 id="virtio"><a class="header" href="#virtio">VirtIO</a></h2>
+<p><code>workspace/kernel/src/hardware/virtio/</code> holds the common transport plus console, GPU and RNG.</p>
+<div class="table-wrapper"><table><thead><tr><th>Device</th><th>Real module</th><th>Purpose</th></tr></thead><tbody>
+<tr><td>VirtIO Block</td><td><code>hardware/storage/virtio_block.rs</code></td><td>Block I/O</td></tr>
+<tr><td>VirtIO Net</td><td><code>hardware/nic/virtio_net.rs</code></td><td>Network</td></tr>
+<tr><td>VirtIO Console</td><td><code>hardware/virtio/console.rs</code></td><td>Paravirtual serial console</td></tr>
+<tr><td>VirtIO GPU</td><td><code>hardware/virtio/gpu.rs</code></td><td>Display; has a live <code>init()</code></td></tr>
+<tr><td>VirtIO RNG</td><td><code>hardware/virtio/rng.rs</code></td><td>Entropy source</td></tr>
+</tbody></table>
+</div>
+<p>The transport itself is <code>hardware/virtio/common.rs</code>.</p>
+<blockquote>
+<p>There is <strong>no <code>virtio/input.rs</code></strong>. Input is handled by <code>strate-input</code> in userspace plus the kernel's PS/2 and USB HID drivers.</p>
+</blockquote>
+<hr />
+<h2 id="other-subsystems"><a class="header" href="#other-subsystems">Other subsystems</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Subsystem</th><th>Location</th><th>Status</th></tr></thead><tbody>
+<tr><td>Framebuffer</td><td><code>kernel/src/framebuffer/</code> — <code>x86/</code>, <code>gpu/</code>, <code>generic.rs</code></td><td>Active; <code>aarch64/</code> is NEON code behind a <code>cfg</code> that never compiles today</td></tr>
+<tr><td>GPU</td><td><code>kernel/src/hardware/amdgpu/</code></td><td>Stub driver</td></tr>
+<tr><td>Thermal</td><td><code>kernel/src/hardware/thermal.rs</code></td><td>Present</td></tr>
+<tr><td>Embedded controller</td><td><code>kernel/src/hardware/ec.rs</code></td><td>Present</td></tr>
+<tr><td>Bus drivers</td><td><code>workspace/drivers/bus/</code> (<code>strat9-bus-drivers</code>)</td><td>8 SoC bus drivers with their own host test suite</td></tr>
+<tr><td>Display scheme</td><td><code>kernel/src/hardware/video/{display_scheme,graphics_adapter}.rs</code></td><td>Userspace-facing</td></tr>
 </tbody></table>
 </div>
 <hr />
 <h2 id="device-discovery-flow"><a class="header" href="#device-discovery-flow">Device discovery flow</a></h2>
 <pre><code class="language-mermaid">sequenceDiagram
-    participant BOOT as Boot
-    participant PCI as PCI Scanner
-    participant DRV as Driver Registry
+    participant BOOT as kernel_main
+    participant COMP as component registry
+    participant PCI as PCI scanner
+    participant INIT as Driver init
     participant DEV as Device
 
-    BOOT-&gt;&gt;PCI: Scan PCI bus
-    PCI-&gt;&gt;DRV: Notify: device found
-    DRV-&gt;&gt;DRV: Match vendor/device ID
-    DRV-&gt;&gt;DEV: Initialize driver
-    DEV-&gt;&gt;DEV: Map BARs, enable bus mastering
-    DEV-&gt;&gt;DEV: Register IRQ handler
-    DEV--&gt;&gt;BOOT: Device ready
+    BOOT-&gt;&gt;COMP: init_all(Hardware)
+    COMP-&gt;&gt;PCI: enumerate (I/O port + ECAM)
+    PCI--&gt;&gt;COMP: device list
+    COMP-&gt;&gt;INIT: virtio_block::init / ahci::init / nvme::init / usb::init
+    INIT-&gt;&gt;DEV: match vendor + device ID
+    DEV-&gt;&gt;DEV: map BARs, enable bus mastering
+    DEV-&gt;&gt;DEV: register IRQ handler
+    DEV--&gt;&gt;BOOT: device ready
 </code></pre>
+<p>Note that the registry hands control to a fixed set of <code>init()</code> calls. Matching happens inside each driver, not in a generic registry that drivers plug into.</p>
+<h2 id="see-also"><a class="header" href="#see-also">See also</a></h2>
+<ul>
+<li><a href="./architecture.html">Architecture Overview</a> — where each subsystem sits</li>
+<li><a href="./boot-sequence.html#kernel-init--kernelmain">Boot Sequence</a> — the ordered init sequence</li>
+<li><a href="./syscalls.html#pci">Syscall Reference → PCI</a> — the userspace-facing PCI syscalls</li>
+<li><code>HARDWARE.md</code> — the hardware support matrix with per-file status</li>
+</ul>
 
                     </main>
 

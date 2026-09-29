@@ -535,10 +535,14 @@ impl CanvasBuffer {
 /// Minimum scheduler ticks between two throttled presents, shared by the
 /// VGA console writer and the video driver.
 ///
-/// `TIMER_HZ` is 100 (one tick = 10 ms): allow one present per tick so
-/// pending console work is eligible within 10 ms. Paths that pace themselves
-/// (the userspace compositor, `Framebuffer::swap_buffers`) bypass this gate.
-pub const PRESENT_MIN_TICKS: u64 = 1;
+/// `TIMER_HZ` is 100, so 7 ticks caps the console at ~14 FPS. A present
+/// re-rasterises pending console cells and copies dirty regions, and the
+/// console-render task requests one on every tick; at one present per tick a
+/// 1600x1200 frame costs 7.3 MiB of copies 100 times a second, which starves
+/// the shell under TCG. 14 FPS is still below the point where console typing
+/// feels laggy, and callers that pace themselves (the userspace compositor,
+/// `Framebuffer::swap_buffers`) bypass this gate entirely.
+pub const PRESENT_MIN_TICKS: u64 = 7;
 
 impl FramebufferOps {
     pub fn detect() -> Self {

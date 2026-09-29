@@ -1,8 +1,26 @@
 # Strat9-OS : Architecture IPC : Modèle d'Isolation Hybride à 3 Niveaux
 
+> **⚠️ Document de conception historique — ne décrit pas l'implémentation actuelle.**
+>
+> Rédigé le 2026-06-23, jamais mis à jour depuis. La page publiée qui décrit le code réel est
+> [`docs-site/src/architecture-ipc-access-levels.md`](../docs-site/src/architecture-ipc-access-levels.md),
+> et la référence complète des transports est
+> [`docs-site/src/ipc-mechanisms.md`](../docs-site/src/ipc-mechanisms.md).
+>
+> Écarts principaux entre cette proposition et le code :
+>
+> | Proposition (ici) | Implémentation réelle |
+> |-------------------|----------------------|
+> | N1 = `SfiTransport`, sélectionné par un manifeste « 100 % safe Rust, `cargo-geiger = 0` » | N1 = `IntrusiveMailbox`. Aucun audit de sûreté dans la build ; le code contient du `unsafe` brut |
+> | N2 = anneau SPSC **en mémoire partagée** (RingHeader 64 B, slots, futex) | N2 = `ArrayQueue` MPMC sur le tas noyau, buffers boxés, aucune mémoire partagée, aucun futex |
+> | N2 et N3 = transports **Ring 3** isolés par la MMU | Les deux s'exécutent **entièrement dans le noyau** |
+> | N3 ≈ 460 cycles via `SYSCALL` + thread migration | Bascule CR3/PCID réelle, mais `send()` échoue (`EFAULT`) sur le modèle de tâches actuel |
+> | Chemin NIC où `strate-net` lit l'anneau **sans syscall** | `strate-net` est un silo userspace ; seul le chemin kernel-interne NIC↔scheduler utilise la mailbox N1 |
+> | Coûts ~3 / ~200 / ~460 cycles, CPU par paquet | Non mesurés. Les seuls chiffres présents dans le code sont trois littéraux `estimated_cost_cycles` (10, 400, 800), jamais lus |
+
 **Version** : 0.1.0  
 **Date** : 2026-06-23  
-**Statut** : Draft pour relecture architecturale  
+**Statut** : Draft pour relecture architecturale — *supersédé*  
 **Auteur** : Guillaume Gielly  
 
 ---

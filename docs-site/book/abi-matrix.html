@@ -163,88 +163,153 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="abi-support-matrix"><a class="header" href="#abi-support-matrix">ABI Support Matrix</a></h1>
-<p>Status of musl platform APIs on <code>x86_64-unknown-strat9</code>.</p>
-<p>Legend: <strong>OK</strong> = implemented, <strong>Stub</strong> = returns ENOSYS, <strong>Partial</strong> = limited.</p>
+<p>Status of POSIX platform APIs on the Strat9 OS x86_64 target, as implemented by the <code>musl-compat</code> shim (<code>workspace/components/musl-compat/src/lib.rs</code>) and the kernel dispatcher it targets.</p>
+<p>Legend: <strong>OK</strong> = mapped to a working syscall · <strong>Broken</strong> = mapped to a syscall whose kernel handler is missing or stubbed, so the call returns <code>ENOSYS</code> at runtime · <strong>Stub</strong> = the shim itself returns <code>ENOSYS</code> · <strong>Partial</strong> = reachable but semantically degraded.</p>
+<blockquote>
+<p><strong>Read the shim argument lists.</strong> The shim does not pass the same number of arguments as the kernel handler for several calls. A mapping marked <strong>OK</strong> here means "the syscall number is reachable", not "the call is correct". See <a href="#argument-count-mismatches">Argument-count mismatches</a> below and the <a href="./syscalls.html#known-gaps--abi-vs-kernel">Syscall Reference → Known gaps</a> page.</p>
+</blockquote>
 <h2 id="posix-file-io"><a class="header" href="#posix-file-io">POSIX File I/O</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>API</th><th>Status</th><th>Notes</th></tr></thead><tbody>
-<tr><td>open / openat</td><td>OK</td><td>Via SYS_OPEN</td></tr>
-<tr><td>read</td><td>OK</td><td>Via SYS_READ</td></tr>
-<tr><td>write</td><td>OK</td><td>Via SYS_WRITE</td></tr>
-<tr><td>close</td><td>OK</td><td>Via SYS_CLOSE</td></tr>
-<tr><td>lseek</td><td>OK</td><td>Via SYS_LSEEK</td></tr>
-<tr><td>pread</td><td>OK</td><td>Via SYS_PREAD</td></tr>
-<tr><td>pwrite</td><td>OK</td><td>Via SYS_PWRITE</td></tr>
-<tr><td>fstat / fstatat</td><td>OK</td><td>Via SYS_FSTAT / SYS_STAT</td></tr>
-<tr><td>dup / dup2</td><td>OK</td><td>Via SYS_DUP / SYS_DUP2</td></tr>
-<tr><td>pipe / pipe2</td><td>OK</td><td>Via SYS_PIPE</td></tr>
-<tr><td>fcntl</td><td>OK</td><td>Via SYS_FCNTL</td></tr>
-<tr><td>mkdir / mkdirat</td><td>OK</td><td>Via SYS_MKDIR</td></tr>
-<tr><td>unlink</td><td>OK</td><td>Via SYS_UNLINK</td></tr>
-<tr><td>rmdir</td><td>OK</td><td>Via SYS_RMDIR</td></tr>
-<tr><td>rename / renameat</td><td>OK</td><td>Via SYS_RENAME</td></tr>
-<tr><td>link</td><td>OK</td><td>Via SYS_LINK</td></tr>
-<tr><td>symlink</td><td>OK</td><td>Via SYS_SYMLINK</td></tr>
-<tr><td>readlink</td><td>OK</td><td>Via SYS_READLINK</td></tr>
-<tr><td>chmod / fchmod</td><td>OK</td><td>Via SYS_CHMOD / SYS_FCHMOD</td></tr>
-<tr><td>truncate / ftruncate</td><td>OK</td><td>Via SYS_TRUNCATE / SYS_FTRUNCATE</td></tr>
-<tr><td>chdir / fchdir</td><td>OK</td><td>Via SYS_CHDIR / SYS_FCHDIR</td></tr>
-<tr><td>getcwd</td><td>OK</td><td>Via SYS_GETCWD</td></tr>
-<tr><td>getdents</td><td>OK</td><td>Via SYS_GETDENTS</td></tr>
-<tr><td>access</td><td>OK</td><td>Open + close probe</td></tr>
-<tr><td>umask</td><td>OK</td><td>Via SYS_UMASK</td></tr>
-<tr><td>fsync / fdatasync</td><td>Stub</td><td>ENOSYS</td></tr>
-<tr><td>flock</td><td>Stub</td><td>ENOSYS</td></tr>
-<tr><td>chown / fchown / lchown</td><td>Stub</td><td>ENOSYS</td></tr>
-<tr><td>statvfs / fstatvfs</td><td>Stub</td><td>ENOSYS</td></tr>
-<tr><td>mknod / mknodat / mkfifoat</td><td>Stub</td><td>ENOSYS</td></tr>
+<tr><td>open</td><td>OK</td><td>Via <code>SYS_OPEN</code>; <code>O_*</code> flags translated by <code>posix_oflags_to_strat9()</code></td></tr>
+<tr><td>openat</td><td>OK</td><td>Via <code>SYS_OPENAT</code>, same flag translation</td></tr>
+<tr><td>read / write</td><td>OK</td><td>Via <code>SYS_READ</code> / <code>SYS_WRITE</code></td></tr>
+<tr><td>close</td><td>OK</td><td>Via <code>SYS_CLOSE</code></td></tr>
+<tr><td>lseek</td><td>OK</td><td>Via <code>SYS_LSEEK</code></td></tr>
+<tr><td>pread / pwrite</td><td>OK</td><td>Via <code>SYS_PREAD</code> / <code>SYS_PWRITE</code></td></tr>
+<tr><td>fstat</td><td>OK</td><td>Via <code>SYS_FSTAT</code></td></tr>
+<tr><td>stat</td><td><strong>Broken</strong></td><td>Mapped to <code>SYS_STAT</code> with 2 args; the handler takes 3 (<code>path_ptr, path_len, stat_ptr</code>)</td></tr>
+<tr><td>lstat</td><td><strong>Broken</strong></td><td>Same call as <code>stat</code>, and it deliberately does not follow symlinks</td></tr>
+<tr><td>newfstatat / fstatat</td><td>OK</td><td>Via <code>SYS_FSTATAT</code>. <code>AT_SYMLINK_NOFOLLOW</code> is ignored by the kernel</td></tr>
+<tr><td>mkdirat</td><td><strong>Broken</strong></td><td>Mapped to <code>SYS_MKDIRAT</code>, which has no dispatcher arm</td></tr>
+<tr><td>unlinkat</td><td><strong>Broken</strong></td><td>Mapped to <code>SYS_UNLINKAT</code>, which has no dispatcher arm</td></tr>
+<tr><td>renameat</td><td><strong>Broken</strong></td><td>Mapped to <code>SYS_RENAMEAT</code>, which has no dispatcher arm</td></tr>
+<tr><td>readlinkat</td><td><strong>Broken</strong></td><td>Mapped to <code>SYS_READLINKAT</code>, which has no dispatcher arm</td></tr>
+<tr><td>faccessat / faccessat2</td><td>OK</td><td>Via <code>SYS_FACCESSAT</code></td></tr>
+<tr><td>access</td><td>OK</td><td>Via <code>SYS_ACCESS</code>. Checks the process's real UID/GID against the file's permission bits</td></tr>
+<tr><td>dup / dup2</td><td>OK</td><td>Via <code>SYS_DUP</code> / <code>SYS_DUP2</code></td></tr>
+<tr><td>pipe</td><td>OK</td><td>Via <code>SYS_PIPE</code>. No <code>pipe2</code></td></tr>
+<tr><td>fcntl</td><td>OK</td><td>Via <code>SYS_FCNTL</code></td></tr>
+<tr><td>getdents</td><td>OK</td><td>Via <code>SYS_GETDENTS</code></td></tr>
+<tr><td>poll / ppoll</td><td>Partial</td><td>Mapped, but <code>sys_poll</code> ignores the timeout and reports <code>POLLIN</code> for any open fd</td></tr>
+<tr><td>ioctl</td><td><strong>Broken</strong></td><td>Mapped to <code>SYS_IOCTL</code>, which is a stub returning <code>ENOTTY</code> for every fd</td></tr>
+<tr><td>mkdir / unlink / rmdir</td><td><strong>Broken</strong></td><td>Mapped with too few arguments (<code>SYS_MKDIR</code> takes 3, <code>SYS_UNLINK</code>/<code>SYS_RMDIR</code> take 2)</td></tr>
+<tr><td>rename / link / symlink</td><td><strong>Broken</strong></td><td>Mapped with 2 args; the handlers take 4</td></tr>
+<tr><td>readlink</td><td><strong>Broken</strong></td><td>Mapped with 3 args; the handler takes 4</td></tr>
+<tr><td>chmod / fchmod</td><td><strong>Broken</strong> / OK</td><td><code>SYS_CHMOD</code> is called with 2 args (handler takes 3); <code>SYS_FCHMOD</code> is called correctly</td></tr>
+<tr><td>truncate</td><td><strong>Broken</strong></td><td>Mapped with 2 args; the handler takes 3. <code>ftruncate</code> is OK</td></tr>
+<tr><td>chdir / fchdir</td><td><strong>Broken</strong> / OK</td><td><code>SYS_CHDIR</code> is called with 1 arg (handler takes 2); <code>SYS_FCHDIR</code> is OK</td></tr>
+<tr><td>getcwd</td><td>OK</td><td>Via <code>SYS_GETCWD</code></td></tr>
+<tr><td>umask</td><td>OK</td><td>Via <code>SYS_UMASK</code></td></tr>
+<tr><td>fsync / fdatasync</td><td>Stub</td><td>The shim returns <code>ENOSYS</code>; the kernel handlers exist in <code>vfs/mod.rs</code> but are not dispatched</td></tr>
+<tr><td>flock</td><td>Stub</td><td><code>ENOSYS</code></td></tr>
+<tr><td>chown / fchown / lchown</td><td>Stub</td><td><code>ENOSYS</code></td></tr>
+<tr><td>statvfs / fstatvfs</td><td>Stub</td><td><code>ENOSYS</code></td></tr>
+<tr><td>mknod / mknodat / mkfifoat</td><td>Stub</td><td><code>ENOSYS</code></td></tr>
 </tbody></table>
 </div>
-<h2 id="process-management"><a class="header" href="#process-management">Process Management</a></h2>
+<h2 id="memory-management"><a class="header" href="#memory-management">Memory management</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>API</th><th>Status</th><th>Notes</th></tr></thead><tbody>
-<tr><td>exit</td><td>OK</td><td>Via SYS_PROC_EXIT</td></tr>
-<tr><td>fork</td><td>OK</td><td>Via SYS_PROC_FORK</td></tr>
-<tr><td>execve</td><td>OK</td><td>Via SYS_PROC_EXEC</td></tr>
-<tr><td>waitpid</td><td>OK</td><td>Via SYS_PROC_WAITPID</td></tr>
+<tr><td>mmap / munmap</td><td>OK</td><td>Anonymous and <code>MAP_PRIVATE</code> file-backed only; file-backed <code>MAP_SHARED</code> returns <code>ENOSYS</code></td></tr>
+<tr><td>mprotect</td><td>OK</td><td>Via <code>SYS_MPROTECT</code></td></tr>
+<tr><td>mremap</td><td>OK</td><td>Mapped, but with 4 args; <code>new_addr</code> is not passed through</td></tr>
+<tr><td>brk</td><td>OK</td><td>Via <code>SYS_BRK</code></td></tr>
+<tr><td>mlock / munlock</td><td>Stub</td><td><code>ENOSYS</code>. <code>MAP_LOCKED</code> and <code>MAP_POPULATE</code> are rejected by <code>sys_mmap</code></td></tr>
+<tr><td>madvise</td><td>Stub</td><td><code>ENOSYS</code></td></tr>
+</tbody></table>
+</div>
+<h2 id="process-management"><a class="header" href="#process-management">Process management</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>API</th><th>Status</th><th>Notes</th></tr></thead><tbody>
+<tr><td>exit</td><td>OK</td><td>Via <code>SYS_PROC_EXIT</code></td></tr>
+<tr><td>exit_group</td><td>OK</td><td>Via <code>SYS_EXIT_GROUP</code></td></tr>
+<tr><td>fork</td><td>OK</td><td>Via <code>SYS_PROC_FORK</code>; also reached through <code>clone</code> without <code>CLONE_THREAD</code></td></tr>
+<tr><td>clone (threaded)</td><td>OK</td><td><code>CLONE_THREAD</code> is routed to <code>SYS_THREAD_CREATE</code> with 5 arguments; <code>CLONE_PARENT_SETTID</code> writes the child TID back to <code>*ptid</code> in the shim</td></tr>
+<tr><td>execve</td><td>Partial</td><td>Via <code>SYS_PROC_EXECVE</code>. Refuses with <code>ENOTSUP</code> when the process is multithreaded</td></tr>
+<tr><td>wait4</td><td>OK</td><td>Via <code>SYS_PROC_WAITPID</code>; only <code>WNOHANG</code> is accepted by the kernel</td></tr>
 <tr><td>getpid / getppid / gettid</td><td>OK</td><td></td></tr>
-<tr><td>setsid / setpgid / getpgid / getsid</td><td>OK</td><td></td></tr>
-<tr><td>sched_yield</td><td>OK</td><td>Via SYS_PROC_YIELD</td></tr>
-<tr><td>nanosleep</td><td>OK</td><td>Via SYS_NANOSLEEP</td></tr>
-<tr><td>clock_gettime</td><td>OK</td><td>Via SYS_CLOCK_GETTIME</td></tr>
-<tr><td>brk</td><td>OK</td><td>Via SYS_BRK</td></tr>
-<tr><td>mmap / munmap</td><td>OK</td><td>Via SYS_MMAP / SYS_MUNMAP</td></tr>
-<tr><td>uname</td><td>OK</td><td>Via SYS_PROC_UNAME</td></tr>
-<tr><td>getuid / geteuid / getgid / getegid</td><td>Partial</td><td>Returns 0 (no UID model)</td></tr>
-<tr><td>mprotect / mlock / munlock</td><td>Stub</td><td>ENOSYS</td></tr>
-<tr><td>getrandom</td><td>OK</td><td>Via SYS_GETRANDOM (601), supports GRND_NONBLOCK</td></tr>
+<tr><td>getuid / geteuid / getgid / getegid</td><td>Partial</td><td>Return the process's stored IDs. There is no user database and no authorization model</td></tr>
+<tr><td>setuid / setgid</td><td>Partial</td><td>Same caveat: no privilege model behind them</td></tr>
+<tr><td>setsid / setpgid / getpgid / getpgrp / getsid</td><td>OK</td><td></td></tr>
+<tr><td>sched_yield</td><td>OK</td><td>Via <code>SYS_PROC_YIELD</code></td></tr>
+<tr><td>uname</td><td>OK</td><td>Via <code>SYS_UNAME</code>; writes 6 fixed 65-byte fields</td></tr>
+<tr><td>nanosleep</td><td>OK</td><td>Via <code>SYS_NANOSLEEP</code></td></tr>
+<tr><td>clock_gettime</td><td>OK</td><td>Only <code>CLOCK_REALTIME</code> and <code>CLOCK_MONOTONIC</code> are valid; other clock ids give <code>EINVAL</code></td></tr>
+<tr><td>clock_getres</td><td><strong>Broken</strong></td><td>The shim returns success <code>0</code> without writing anything to the caller's <code>res</code> pointer</td></tr>
+<tr><td>clock_nanosleep</td><td>OK</td><td>Via <code>SYS_CLOCK_NANOSLEEP</code>, <code>TIMER_ABSTIME</code> supported</td></tr>
+<tr><td>pause</td><td>Partial</td><td>Approximated as <code>SYS_SIGSUSPEND(NULL)</code></td></tr>
+<tr><td>getrandom</td><td>OK</td><td>Via <code>SYS_GETRANDOM</code>; <code>GRND_RANDOM</code> is accepted and ignored</td></tr>
+<tr><td>arch_prctl</td><td>OK</td><td><code>ARCH_SET_FS</code> / <code>ARCH_GET_FS</code>; other codes give <code>EINVAL</code></td></tr>
 </tbody></table>
 </div>
 <h2 id="signals"><a class="header" href="#signals">Signals</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>API</th><th>Status</th><th>Notes</th></tr></thead><tbody>
-<tr><td>kill</td><td>OK</td><td>Via SYS_KILL</td></tr>
-<tr><td>sigaction</td><td>OK</td><td>Via SYS_SIGACTION</td></tr>
-<tr><td>sigprocmask</td><td>OK</td><td>Via SYS_SIGPROCMASK</td></tr>
-<tr><td>sigsuspend</td><td>OK</td><td>Via SYS_SIGSUSPEND</td></tr>
-<tr><td>sigtimedwait</td><td>OK</td><td>Via SYS_SIGTIMEDWAIT</td></tr>
-<tr><td>getitimer / setitimer</td><td>OK</td><td>Via SYS_GETITIMER / SYS_SETITIMER</td></tr>
-<tr><td>sigaltstack</td><td>OK</td><td>Via SYS_SIGALTSTACK</td></tr>
+<tr><td>kill</td><td>OK</td><td>Via <code>SYS_KILL</code></td></tr>
+<tr><td>tkill / tgkill</td><td>OK</td><td>Both routed to <code>SYS_TGKILL</code></td></tr>
+<tr><td>rt_sigaction</td><td>OK</td><td>Via <code>SYS_SIGACTION</code></td></tr>
+<tr><td>rt_sigprocmask</td><td>OK</td><td>Via <code>SYS_SIGPROCMASK</code></td></tr>
+<tr><td>rt_sigpending</td><td>OK</td><td>Via <code>SYS_SIGPENDING</code></td></tr>
+<tr><td>rt_sigsuspend</td><td>OK</td><td>Via <code>SYS_SIGSUSPEND</code></td></tr>
+<tr><td>rt_sigtimedwait</td><td>OK</td><td>Via <code>SYS_SIGTIMEDWAIT</code></td></tr>
+<tr><td>rt_sigreturn</td><td>OK</td><td>Via <code>SYS_RT_SIGRETURN</code></td></tr>
+<tr><td>sigaltstack</td><td>OK</td><td>Via <code>SYS_SIGALTSTACK</code></td></tr>
+<tr><td>getitimer / setitimer</td><td>OK</td><td>Via <code>SYS_GETITIMER</code> / <code>SYS_SETITIMER</code></td></tr>
+<tr><td>sigqueue</td><td>Partial</td><td><code>sigval_ptr</code> is accepted and then ignored by the kernel handler</td></tr>
+</tbody></table>
+</div>
+<h2 id="thread-local-storage"><a class="header" href="#thread-local-storage">Thread-local storage</a></h2>
+<p>musl's TLS bootstrap needs these, so they are covered explicitly.</p>
+<div class="table-wrapper"><table><thead><tr><th>API</th><th>Status</th><th>Notes</th></tr></thead><tbody>
+<tr><td>set_tid_address</td><td>OK</td><td>Via <code>SYS_SET_TID_ADDRESS</code></td></tr>
+<tr><td>set_robust_list / get_robust_list</td><td>OK</td><td>Via <code>SYS_SET_ROBUST_LIST</code> / <code>SYS_GET_ROBUST_LIST</code></td></tr>
+<tr><td>arch_prctl(FS)</td><td>OK</td><td>Required for <code>errno</code> in TLS</td></tr>
 </tbody></table>
 </div>
 <h2 id="network--sockets"><a class="header" href="#network--sockets">Network / Sockets</a></h2>
+<p><strong>No BSD socket API exists.</strong> The shim's design comment describes a future Plan 9 <code>/net/tcp</code> scheme mapping, but until <code>strate-net</code> exposes it every socket entry point returns <code>ENOSYS</code>. Networked programs use the <code>/dev/net</code> raw-packet scheme or the <code>strate-net</code> scheme API instead of sockets.</p>
 <div class="table-wrapper"><table><thead><tr><th>API</th><th>Status</th><th>Notes</th></tr></thead><tbody>
-<tr><td>socketpair (AF_UNIX)</td><td>Partial</td><td>Backed by pipe (unidirectional)</td></tr>
-<tr><td>recvfrom / sendto</td><td>Partial</td><td>Delegates to read/write</td></tr>
-<tr><td>socket / bind / listen / accept / connect</td><td>Stub</td><td>ENOSYS</td></tr>
-<tr><td>setsockopt / getsockopt</td><td>Stub</td><td>ENOSYS</td></tr>
-<tr><td>shutdown</td><td>Stub</td><td>ENOSYS</td></tr>
+<tr><td>socket</td><td>Stub</td><td><code>ENOSYS</code></td></tr>
+<tr><td>socketpair</td><td>Stub</td><td><code>ENOSYS</code> — <em>not</em> backed by a pipe</td></tr>
+<tr><td>bind / listen / accept / connect</td><td>Stub</td><td><code>ENOSYS</code></td></tr>
+<tr><td>sendto / recvfrom</td><td>Stub</td><td><code>ENOSYS</code> — <em>not</em> delegated to read/write</td></tr>
+<tr><td>sendmsg / recvmsg</td><td>Stub</td><td><code>ENOSYS</code></td></tr>
+<tr><td>setsockopt / getsockopt</td><td>Stub</td><td><code>ENOSYS</code></td></tr>
+<tr><td>getsockname / getpeername</td><td>Stub</td><td><code>ENOSYS</code></td></tr>
+<tr><td>shutdown</td><td>Stub</td><td><code>ENOSYS</code></td></tr>
 </tbody></table>
 </div>
 <h2 id="epoll"><a class="header" href="#epoll">Epoll</a></h2>
+<p>There is no epoll support. The shim has no <code>LNR_epoll_*</code> arm, so every entry falls through to the catch-all <code>ENOSYS</code> return.</p>
 <div class="table-wrapper"><table><thead><tr><th>API</th><th>Status</th><th>Notes</th></tr></thead><tbody>
-<tr><td>epoll_create1</td><td>Partial</td><td>Backed by pipe fd</td></tr>
-<tr><td>epoll_ctl</td><td>Stub</td><td>No-op</td></tr>
-<tr><td>epoll_pwait</td><td>Partial</td><td>Sleeps, no real multiplexing</td></tr>
+<tr><td>epoll_create / epoll_create1</td><td>Stub</td><td><code>ENOSYS</code> — <em>not</em> backed by a pipe</td></tr>
+<tr><td>epoll_ctl</td><td>Stub</td><td><code>ENOSYS</code></td></tr>
+<tr><td>epoll_wait / epoll_pwait</td><td>Stub</td><td><code>ENOSYS</code></td></tr>
 </tbody></table>
 </div>
+<p>Use <code>SYS_POLL</code> (a non-blocking readiness snapshot) or the async ring (<code>SYS_ASYNC_*</code>) instead.</p>
+<h2 id="argument-count-mismatches"><a class="header" href="#argument-count-mismatches">Argument-count mismatches</a></h2>
+<p>These mappings pass fewer arguments than the kernel handler reads, so the handler sees a garbage value in the trailing register(s):</p>
+<div class="table-wrapper"><table><thead><tr><th>Shim call</th><th>Args passed</th><th>Args the handler reads</th></tr></thead><tbody>
+<tr><td><code>stat</code> / <code>lstat</code> → <code>SYS_STAT</code></td><td>2</td><td>3</td></tr>
+<tr><td><code>chdir</code> → <code>SYS_CHDIR</code></td><td>1</td><td>2</td></tr>
+<tr><td><code>unlink</code> → <code>SYS_UNLINK</code></td><td>1</td><td>2</td></tr>
+<tr><td><code>rmdir</code> → <code>SYS_RMDIR</code></td><td>1</td><td>2</td></tr>
+<tr><td><code>mkdir</code> → <code>SYS_MKDIR</code></td><td>2</td><td>3</td></tr>
+<tr><td><code>rename</code> → <code>SYS_RENAME</code></td><td>2</td><td>4</td></tr>
+<tr><td><code>link</code> → <code>SYS_LINK</code></td><td>2</td><td>4</td></tr>
+<tr><td><code>symlink</code> → <code>SYS_SYMLINK</code></td><td>2</td><td>4</td></tr>
+<tr><td><code>readlink</code> → <code>SYS_READLINK</code></td><td>3</td><td>4</td></tr>
+<tr><td><code>chmod</code> → <code>SYS_CHMOD</code></td><td>2</td><td>3</td></tr>
+<tr><td><code>truncate</code> → <code>SYS_TRUNCATE</code></td><td>2</td><td>3</td></tr>
+<tr><td><code>mremap</code> → <code>SYS_MREMAP</code></td><td>4</td><td>4 (no <code>new_addr</code> — documented, but callers must not expect it to be honoured)</td></tr>
+</tbody></table>
+</div>
+<p>Additionally, the shim routes <code>mkdirat</code>, <code>unlinkat</code>, <code>renameat</code> and <code>readlinkat</code> to syscall numbers the kernel does not dispatch, so they always return <code>ENOSYS</code> regardless of argument count.</p>
+<h2 id="see-also"><a class="header" href="#see-also">See also</a></h2>
+<ul>
+<li><a href="./syscalls.html">Syscall Reference</a> — numbers, kernel argument lists, and the full gap list</li>
+<li><a href="./syscall.html">Syscall Layer</a> — the <code>strat9-syscall</code> crate used by native userspace</li>
+<li><a href="./abi.html">ABI Overview</a> · <a href="./abi-changelog.html">ABI Changelog</a></li>
+</ul>
+
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">

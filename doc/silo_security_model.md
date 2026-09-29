@@ -1,5 +1,25 @@
 # Strat9-OS: Silo Security & IPC Coloration Model
 
+> ## ⚠️ DESIGN SPEC — several described mechanisms are NOT implemented
+>
+> Read this as a proposal, not as a description of the kernel. Status as of 2026-09-29:
+>
+> | Section | Status |
+> |---------|--------|
+> | §2 `SiloId` / `SiloTier` | ✅ Implemented, matches `silo/mod.rs` verbatim |
+> | §3 `OctalMode::from_octal` / `is_subset_of` | ✅ Implemented — but the value is **9-bit**, not 12-bit (control = bits 6-8, hardware = 3-5, registry = 0-2) |
+> | §4 IPC Coloration (`IpcLabel`, Biba no-write-up) | ❌ **Not implemented.** No `IpcLabel`, no `is_flow_allowed`, no structured 32-bit label. `allowed_ipc` has zero hits outside this document |
+> | §4.4 "a USER silo cannot send to a DRV silo" | ❌ Not enforced |
+> | §5 Capability model (`CapEntry`, `CapRights`, `CapabilityManager`, `CapError`, badge, derivation tree, `sys_cap_*`) | ❌ **None of these types exist.** The real model is `kernel/src/capability.rs`: `CapId`, `Capability`, `CapPermissions { read, write, execute, grant, revoke }` |
+> | §5.5 kernel refuses a grant when the target's mode ceiling excludes the type | ❌ Not implemented |
+> | §6 `sys_silo_pledge` / `sys_silo_unveil` signatures | ⚠️ Real signatures differ — see [Silo System](../docs-site/src/silo.md). Unveil rights are `UnveilRights { read, write, execute }`, not `CapRights` |
+> | §7 Family profiles (`FamilyProfile`, `FAMILY_PROFILES`, `init_validate_silo_policy`, `RegistrationError`) | ❌ **None exist.** Only `decode_family`, a plain 0-5 map |
+> | §8 Audit trail (`AuditEvent`, `AuditAction`, `AuditResult`, `AuditRingBuffer`, `AUDIT_RING_SIZE`) | ❌ **None exist.** `kernel/src/audit.rs` is not the BSM model described |
+> | §9 `silo.toml` format | ❌ Not a real format. The kernel parses flat TOML via `boot/toml.rs`; silo config arrives as a struct pointer through `SYS_SILO_CREATE` / `SYS_SILO_CONFIG` |
+> | §10 `strate ls` output | ❌ Invented. The real command is `strate-console-admin` (Chevron) |
+>
+> The **maintained** silo reference is [`docs-site/src/silo.md`](../docs-site/src/silo.md).
+
 ## 1. Overview
 
 Strat9-OS implements a multi-layered security model designed for a microkernel architecture. It distinguishes between **Identity** (who you are), **Capability** (what resources you own), and **Privilege** (what actions you are trusted to perform).

@@ -169,17 +169,44 @@
 </code></pre>
 <p>This script:</p>
 <ol>
-<li>builds docs (<code>cargo make docs-site</code>)</li>
-<li>regenerates ABI changelog auto section from git history</li>
-<li>commits/pushes current branch changes</li>
-<li>uploads built website to the remote vhost via SSH</li>
+<li>builds the docs site (<code>cargo make docs-site</code>)</li>
+<li>stages <code>docs-site/</code>, <code>tools/scripts/build-docs-site.sh</code>, <code>.gitlab-ci.yml</code>, <code>publish-doc.sh</code> and <code>Makefile.toml</code></li>
+<li>commits and pushes the current branch</li>
+<li>uploads <code>build/docs-site/</code> to the remote vhost over SSH (rsync with <code>--delete</code>)</li>
 </ol>
-<p>The docs builder publishes:</p>
+<p>Useful flags: <code>--no-commit</code>, <code>--no-push</code>, <code>--no-vhost-upload</code>, <code>--all-changes</code> (stage everything with <code>git add -A</code> instead of the fixed path list), and <code>-m "message"</code>.</p>
+<h3 id="deployment-target"><a class="header" href="#deployment-target">Deployment target</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Variable</th><th>Default</th></tr></thead><tbody>
+<tr><td><code>VHOST_SSH_ALIAS</code></td><td><code>strat9web</code></td></tr>
+<tr><td><code>VHOST_SSH_PORT</code></td><td><code>2223</code> (forwards to the edge-nginx container on <code>10.10.10.10:22</code>; the historical <code>32222</code> is closed)</td></tr>
+<tr><td><code>VHOST_REMOTE_PATH</code></td><td><code>/var/www/ram_strat9/api.strat9-os.org/public</code></td></tr>
+<tr><td><code>REMOTE_NAME</code></td><td><code>origin</code></td></tr>
+</tbody></table>
+</div>
+<p>OVMF firmware images are never uploaded: the script copies <code>OVMF_VARS.fd</code> to a scratch path so the packaged file stays pristine.</p>
+<h2 id="what-the-builder-does"><a class="header" href="#what-the-builder-does">What the builder does</a></h2>
+<p><code>tools/scripts/build-docs-site.sh</code> (invoked by <code>cargo make docs-site</code>, and the <code>docs-serve</code> task serves the result on port 8000):</p>
 <ol>
-<li>mdBook pages under <code>docs-site/</code></li>
-<li>rustdoc for all workspace crates (<code>cargo doc --workspace --no-deps</code>)</li>
-<li>a combined static site in <code>build/docs-site</code></li>
+<li><strong>Refreshes the ABI changelog</strong> — reads <code>ABI_VERSION_MAJOR</code> / <code>ABI_VERSION_MINOR</code> straight out of <code>workspace/abi/src/lib.rs</code>, then regenerates the block between <code>&lt;!-- AUTO-ABI-CHANGELOG:START --&gt;</code> and <code>&lt;!-- AUTO-ABI-CHANGELOG:END --&gt;</code> in <code>docs-site/src/abi-changelog.md</code> from the git history of <code>workspace/abi</code>, <code>workspace/components/syscall</code> and <code>workspace/kernel/src/syscall</code> (last 30 commits).</li>
+<li><strong>Refreshes the global changelog</strong> — same technique for <code>docs-site/src/changelog.md</code>, from the last 50 commits of any path, plus a total-commit count and the latest tag.</li>
+<li><strong>Runs <code>cargo doc</code> for every workspace package</strong> in <em>resilient</em> mode: each package is documented individually with <code>--no-deps --document-private-items</code>, and a failure is logged and stepped over rather than aborting the build. Packages that fail are listed at the end.</li>
+<li><strong>Builds the mdBook pages</strong> with <code>mdbook build docs-site</code>.</li>
+<li><strong>Assembles <code>build/docs-site/</code></strong> — the mdBook output at the root, <code>target/doc</code> merged into <code>api/</code>, and a <code>.nojekyll</code> marker. It then writes a generated <code>api/index.html</code> listing every crate that produced documentation.</li>
+<li><strong>Checks for broken links</strong> with <code>tools/scripts/check-links.py --site-dir build/docs-site</code>. This step is best-effort: a failure prints a warning and the build still succeeds.</li>
 </ol>
+<h2 id="running-the-pieces-by-hand"><a class="header" href="#running-the-pieces-by-hand">Running the pieces by hand</a></h2>
+<pre><code class="language-bash">bash tools/scripts/build-docs-site.sh                              # full build
+python3 -m http.server --directory build/docs-site 8000            # serve locally
+python3 tools/scripts/check-links.py --site-dir build/docs-site    # link check only
+mdbook serve docs-site                                              # live-reload preview
+</code></pre>
+<h2 id="notes-for-contributors"><a class="header" href="#notes-for-contributors">Notes for contributors</a></h2>
+<ul>
+<li>The two auto-generated blocks are <strong>owned by the build script</strong>. Anything you write between the <code>AUTO-CHANGELOG</code> / <code>AUTO-ABI-CHANGELOG</code> markers will be overwritten on the next run. Put prose outside them.</li>
+<li>Because the changelog blocks are regenerated from <code>git log</code>, running the script produces a diff even when no source changed. That is expected.</li>
+<li>Rustdoc is built per package, so a crate that fails to document is simply missing from the <code>api/</code> tree. The <code>abi-matrix.md</code> and <code>index.md</code> pages link to <code>api/&lt;crate_with_underscores&gt;/index.html</code>; a link to a crate that failed to build will show up in the link check.</li>
+<li><code>workspace/components/strate-fs-xfs</code> is excluded from the Cargo workspace and therefore has no API page.</li>
+</ul>
 
                     </main>
 

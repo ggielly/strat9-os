@@ -34,6 +34,12 @@ const ATA_DEVICE_MASTER: u8 = 0xA0;
 const ATA_DEVICE_SLAVE: u8 = 0xB0;
 const ATA_DEVICE_LBA: u8 = 0x40;
 
+/// Budget for one status poll, in TSC ticks (~1 ms at 1 GHz).
+///
+/// Probing an empty channel reads 0xFF forever, so this bounds the wasted
+/// wall-clock time rather than the iteration count.
+const POLL_TIMEOUT_TSC: u64 = 2_000_000;
+
 #[derive(Clone, Copy)]
 pub struct AtaChannel {
     io_base: u16,
@@ -80,19 +86,23 @@ impl AtaChannel {
 
     /// Performs the wait ready operation.
     fn wait_ready(&self) -> Result<(), &'static str> {
-        for _ in 0..100000 {
+        let deadline = self.poll_deadline();
+        loop {
             let status = self.read8(ATA_REG_STATUS);
             if (status & ATA_SR_BSY) == 0 {
                 return Ok(());
             }
+            if crate::arch::rdtsc() >= deadline {
+                return Err("ATA timeout");
+            }
             core::hint::spin_loop();
         }
-        Err("ATA timeout")
     }
 
     /// Performs the wait drq operation.
     fn wait_drq(&self) -> Result<(), &'static str> {
-        for _ in 0..100000 {
+        let deadline = self.poll_deadline();
+        loop {
             let status = self.read8(ATA_REG_STATUS);
             if (status & ATA_SR_DRQ) != 0 {
                 return Ok(());
@@ -100,9 +110,20 @@ impl AtaChannel {
             if (status & ATA_SR_ERR) != 0 {
                 return Err("ATA error");
             }
+            if crate::arch::rdtsc() >= deadline {
+                return Err("ATA timeout");
+            }
             core::hint::spin_loop();
         }
-        Err("ATA timeout")
+    }
+
+    /// Deadline for one status poll, in TSC ticks.
+    ///
+    /// A fixed iteration count cannot work here: the probe runs on ports with
+    /// no device behind them, so every wait burns its whole budget. A cycle
+    /// budget keeps the wall-clock cost constant across CPU speeds.
+    fn poll_deadline(&self) -> u64 {
+        crate::arch::rdtsc().wrapping_add(POLL_TIMEOUT_TSC)
     }
 
     /// Performs the select device operation.
@@ -300,7 +321,13 @@ static ATA_DRIVES: Mutex<Vec<Arc<AtaDrive>>> = Mutex::new(Vec::new());
 static ATA_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// Performs the init operation.
+///
+/// Idempotent: `hardware::init()` and the component graph both call this, and
+/// a second probe would re-pay the full timeout cost on empty channels.
 pub fn init() {
+    if ATA_INITIALIZED.load(Ordering::Relaxed) {
+        return;
+    }
     log::info!("[ATA] Scanning for legacy ATA/IDE devices...");
 
     let channels = [

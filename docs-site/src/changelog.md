@@ -4,12 +4,14 @@
 
 ## Project stats
 
-- **Total commits:** `660`
+- **Total commits:** `662`
 - **Latest tag:** `0.1.0`
 - **Repository:** [git.strat9-os.org](https://git.strat9-os.org/strat9-os/strat9-os)
 
 ## Recent commits (auto-generated)
 
+- 2026-09-27 [`f64aff3`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f64aff3c6072bbb7c6f7ef7e698dadab837df431) Implement console rendering and mouse input handling tasks
+- 2026-09-23 [`e53faf1`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e53faf1c817feabbcb42312889a1e0271ff835c2) docs: update published documentation
 - 2026-09-23 [`dec6766`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/dec676674d7c935126b8eea77b8bde72979727ff) Merge branch 'ELF-tuning-and-fix' into 'main'
 - 2026-09-23 [`e724272`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e724272e9bb7d4ddadb3f3a5cdcdcbf3c95e582e) Fix : unify logging to log::*, reject null ET_EXEC entry, warn on zero-size COPY relocs
 - 2026-09-14 [`4c008c5`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4c008c5cc3702bc915374b90a13518fec9268a9a) docs: update published documentation
@@ -58,7 +60,5 @@
 - 2026-08-25 [`acba1cf`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/acba1cf298b64a068b40a3c0811a43a4f9576e45) feat(arch,riscv64): Mapper trait surface on Sv48 skeleton
 - 2026-08-25 [`62d200e`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/62d200e60f23891c170aafd4f734374f910f3774) feat(arch,riscv64): real Sv48 scaffolding in x86_64-stub, ostd pointer helpers
 - 2026-08-25 [`e96df8f`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e96df8f0d54c6156f4be44509d3306033cbb08f1) refactor(arch): gate VGA-UI commands behind x86_64, complete riscv framebuffer_info stub
-- 2026-08-25 [`c587b62`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c587b6234fa5462576dc232ccea8535386feae10) refactor(arch): route debug breadcrumbs + ahci rep movsb through per-arch paths
-- 2026-08-25 [`88c5283`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/88c52834c3a0af3c6f01f14f3d7364f32a862281) refactor(arch): unify x86_64 crate access via x86_crate_shim, complete riscv stubs
 
 <!-- AUTO-CHANGELOG:END -->

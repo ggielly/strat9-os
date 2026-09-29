@@ -163,20 +163,44 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="syscall-layer"><a class="header" href="#syscall-layer">Syscall Layer</a></h1>
-<p>The userspace syscall crate is <code>workspace/components/syscall</code> (<code>strat9-syscall</code>).</p>
-<p>Useful entry points:</p>
+<p><code>workspace/components/syscall</code> — the <code>strat9-syscall</code> crate. It is the userspace entry point to the kernel: syscall numbers, typed wrappers, error mapping, and the shared data structures.</p>
+<p>Native Strat9 components link it directly. C components instead go through <code>workspace/components/musl-compat</code>, which translates Linux <code>LNR_*</code> numbers and POSIX flags into the same Strat9 syscall numbers. See <a href="./abi-matrix.html">ABI Support Matrix</a> for what that path covers.</p>
+<h2 id="modules"><a class="header" href="#modules">Modules</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Module</th><th>Contents</th></tr></thead><tbody>
+<tr><td><code>arch</code></td><td>Architecture-specific syscall entry (<code>syscall</code> instruction, register marshalling)</td></tr>
+<tr><td><code>call</code></td><td>High-level wrappers — one Rust function per syscall or per family</td></tr>
+<tr><td><code>number</code></td><td>Re-exports <code>strat9_abi::syscall::*</code>, so the numbers have exactly one definition</td></tr>
+<tr><td><code>error</code></td><td>Userspace error type and <code>to_errno()</code></td></tr>
+<tr><td><code>data</code></td><td>Re-exports <code>strat9_abi::data</code> wire structs</td></tr>
+<tr><td><code>flag</code></td><td><strong>POSIX</strong> <code>O_*</code> constants, plus translation into the Strat9 <code>OpenFlags</code> bitmask</td></tr>
+<tr><td><code>io</code></td><td>I/O helpers over the raw syscalls</td></tr>
+<tr><td><code>sigabi</code></td><td>Signal ABI: <code>sigaction</code>, <code>Sigaction</code>, altstack structures</td></tr>
+<tr><td><code>schemev2</code></td><td>Scheme (VFS) protocol types</td></tr>
+<tr><td><code>dirent</code></td><td>Directory entry structures</td></tr>
+</tbody></table>
+</div>
+<blockquote>
+<p><strong><code>flag</code> is the POSIX side.</strong> The constants here (<code>O_RDONLY = 0o000000</code>, <code>O_CREAT = 0o000100</code>, <code>O_TRUNC = 0o001000</code>, …) are Linux values, and the crate converts them to the Strat9-native <code>OpenFlags</code> bitmask before issuing <code>SYS_OPEN</code>. Do not pass a value from <code>strat9_syscall::flag</code> straight to the kernel, and do not use <code>strat9_abi::flag::OpenFlags</code> values with the POSIX helpers. See <a href="./syscalls.html#open-flags--openflags-strat9-native-not-posix">Syscall Reference → Open flags</a>.</p>
+</blockquote>
+<h2 id="error-convention"><a class="header" href="#error-convention">Error convention</a></h2>
+<p>The kernel returns a non-negative value on success and a negative errno in two's complement on failure. Userspace detects an error with <code>result &gt; 0xFFFF_F000</code> and recovers the number with <code>!result + 1</code>. The convention is pinned by <code>workspace/abi/tests/errno_abi.rs</code>, and <code>strat9_syscall::error</code> wraps it.</p>
+<h2 id="api-reference"><a class="header" href="#api-reference">API reference</a></h2>
 <ul>
-<li><code>strat9_syscall::call</code> for high-level wrappers</li>
-<li><code>strat9_syscall::number</code> for syscall constants</li>
-<li><code>strat9_syscall::error</code> for userspace error mapping</li>
-<li><code>strat9_syscall::data</code> for shared data structs</li>
-</ul>
-<p>API reference:</p>
-<ul>
+<li><a href="./api/strat9_syscall/arch/index.html">strat9_syscall::arch</a></li>
 <li><a href="./api/strat9_syscall/call/index.html">strat9_syscall::call</a></li>
 <li><a href="./api/strat9_syscall/number/index.html">strat9_syscall::number</a></li>
 <li><a href="./api/strat9_syscall/error/index.html">strat9_syscall::error</a></li>
 <li><a href="./api/strat9_syscall/data/index.html">strat9_syscall::data</a></li>
+<li><a href="./api/strat9_syscall/flag/index.html">strat9_syscall::flag</a></li>
+<li><a href="./api/strat9_syscall/io/index.html">strat9_syscall::io</a></li>
+<li><a href="./api/strat9_syscall/sigabi/index.html">strat9_syscall::sigabi</a></li>
+<li><a href="./api/strat9_syscall/schemev2/index.html">strat9_syscall::schemev2</a></li>
+<li><a href="./api/strat9_syscall/dirent/index.html">strat9_syscall::dirent</a></li>
+</ul>
+<h2 id="see-also"><a class="header" href="#see-also">See also</a></h2>
+<ul>
+<li><a href="./syscalls.html">Syscall Reference</a> — the full table, with the kernel's real argument lists and the known ABI gaps</li>
+<li><a href="./abi.html">ABI Overview</a> — where the numbers and structs are defined</li>
 </ul>
 
                     </main>

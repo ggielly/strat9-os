@@ -163,22 +163,62 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="abi-overview"><a class="header" href="#abi-overview">ABI Overview</a></h1>
-<p>The canonical ABI definitions live in <code>workspace/abi</code> (<code>strat9-abi</code> crate).</p>
-<p>Focus modules:</p>
-<ul>
-<li><code>strat9_abi::syscall</code> for syscall numbers</li>
-<li><code>strat9_abi::data</code> for shared wire/data structs</li>
-<li><code>strat9_abi::flag</code> for ABI-level flags</li>
-<li><code>strat9_abi::errno</code> for error codes</li>
-<li><code>strat9_abi::boot</code> for boot handoff ABI</li>
-</ul>
-<p>API reference:</p>
+<p>The canonical ABI definitions live in <code>workspace/abi</code> — the <code>strat9-abi</code> crate. It is <code>#![no_std]</code> and is the single source of truth shared by the kernel, the bootloader and every userspace component.</p>
+<pre><code class="language-text">workspace/abi/src/
+  lib.rs            ABI_VERSION_MAJOR / MINOR / PACKED
+  syscall.rs        syscall numbers (all 800+ lines are one constant per call)
+  data.rs           shared wire structs: TimeSpec, Stat, FileStat, IpcMessage, DirentHeader, SiloConfig...
+  flag.rs           OpenFlags, MapFlags, CallFlags, UnlinkFlags + POSIX translation
+  errno.rs          error numbers
+  boot.rs           boot handoff: KernelArgs, MemoryRegion, MemoryKind, ModuleTable
+  ip.rs             IP address parsing and formatting
+  ipc.rs            IPC handshake: IpcHandshake, IpcHandshakeReply, protocol version
+  ipc_codec.rs      wire codec for IPC messages
+  ipc_payload.rs    typed IPC payload variants
+</code></pre>
+<p>Nine modules, 4163 lines, plus nine integration test files under <code>workspace/abi/tests/</code>.</p>
+<h2 id="versioning"><a class="header" href="#versioning">Versioning</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Constant</th><th>Value</th></tr></thead><tbody>
+<tr><td><code>ABI_VERSION_MAJOR</code></td><td><code>0</code></td></tr>
+<tr><td><code>ABI_VERSION_MINOR</code></td><td><code>1</code></td></tr>
+<tr><td><code>ABI_VERSION_PACKED</code></td><td><code>0x0000_0001</code></td></tr>
+</tbody></table>
+</div>
+<p><code>SYS_ABI_VERSION</code> (900) returns <code>(major &lt;&lt; 16) | minor</code>, so the packed form is a single <code>u32</code>. Policy: major bumps for incompatible layout or numbering changes, minor for backward-compatible additions, and <strong>no silent renumbering</strong> of existing syscall IDs. Exported structs must be <code>repr(C)</code> with explicit size assertions.</p>
+<p>The <strong>boot handoff ABI is versioned separately</strong>: <code>STRAT9_BOOT_ABI_VERSION = 4</code> with magic <code>STRAT9_BOOT_MAGIC = 0x5354_3942</code> (<code>"ST9B"</code>) and a <code>KernelArgs</code> pinned at exactly 132 bytes.</p>
+<h2 id="api-reference"><a class="header" href="#api-reference">API reference</a></h2>
 <ul>
 <li><a href="./api/strat9_abi/syscall/index.html">strat9_abi::syscall</a></li>
 <li><a href="./api/strat9_abi/data/index.html">strat9_abi::data</a></li>
 <li><a href="./api/strat9_abi/flag/index.html">strat9_abi::flag</a></li>
 <li><a href="./api/strat9_abi/errno/index.html">strat9_abi::errno</a></li>
 <li><a href="./api/strat9_abi/boot/index.html">strat9_abi::boot</a></li>
+<li><a href="./api/strat9_abi/ip/index.html">strat9_abi::ip</a></li>
+<li><a href="./api/strat9_abi/ipc/index.html">strat9_abi::ipc</a></li>
+<li><a href="./api/strat9_abi/ipc_codec/index.html">strat9_abi::ipc_codec</a></li>
+<li><a href="./api/strat9_abi/ipc_payload/index.html">strat9_abi::ipc_payload</a></li>
+<li><a href="./api/strat9_abi/index.html">crate root constants</a></li>
+</ul>
+<h2 id="test-suite"><a class="header" href="#test-suite">Test suite</a></h2>
+<p><code>workspace/abi/tests/</code> is the anti-regression net for the ABI contract:</p>
+<div class="table-wrapper"><table><thead><tr><th>File</th><th>Covers</th></tr></thead><tbody>
+<tr><td><code>abi_stability.rs</code></td><td>Struct sizes, field offsets, alignment</td></tr>
+<tr><td><code>errno_abi.rs</code></td><td>Every errno value, the <code>&gt; 0xFFFF_F000</code> detection window, kernel→user→kernel roundtrips</td></tr>
+<tr><td><code>wire_format.rs</code></td><td><code>repr(C)</code> layout and byte order of every wire struct</td></tr>
+<tr><td><code>data_types.rs</code></td><td>Data struct semantics</td></tr>
+<tr><td><code>flags_translation.rs</code></td><td><code>posix_oflags_to_strat9</code> and the flag bit layouts</td></tr>
+<tr><td><code>ip_parsing.rs</code></td><td>Address parsing and formatting</td></tr>
+<tr><td><code>ipc_codec_roundtrip.rs</code></td><td>Encode/decode symmetry</td></tr>
+<tr><td><code>ipc_payload_wire.rs</code></td><td>Typed payload encoding</td></tr>
+<tr><td><code>ipc_handshake.rs</code></td><td>Handshake and version negotiation</td></tr>
+</tbody></table>
+</div>
+<h2 id="see-also"><a class="header" href="#see-also">See also</a></h2>
+<ul>
+<li><a href="./syscalls.html">Syscall Reference</a> — numbers, kernel argument lists, and the ABI-versus-kernel gap list</li>
+<li><a href="./abi-matrix.html">ABI Support Matrix</a> — POSIX API coverage through <code>musl-compat</code></li>
+<li><a href="./abi-changelog.html">ABI Changelog</a> — version history</li>
+<li><a href="./boot-sequence.html">Boot Sequence</a> — the <code>KernelArgs</code> handoff</li>
 </ul>
 
                     </main>

@@ -905,11 +905,11 @@ fn validate_task_context(task: &Arc<Task>) -> Result<(), &'static str> {
         return Err("null return IP in switch frame");
     }
 
-    // Return IP must be a canonical userspace or kernel address (not in the
-    // non-canonical hole 0x0000_8000_0000_0000..0xFFFF_7FFF_FFFF_FFFF).
-    let canonical = ret_ip < 0x0000_8000_0000_0000 || ret_ip >= 0xFFFF_8000_0000_0000;
-    if !canonical {
-        return Err("non-canonical return IP");
+    // This frame is consumed by the kernel's ret-based context switch. Even
+    // though low addresses (including 0x2) are canonical x86-64 addresses,
+    // they can never be valid return targets for a saved kernel context.
+    if ret_ip < 0xFFFF_8000_0000_0000 {
+        return Err("return IP is outside the kernel address space");
     }
 
     // ExtendedState is embedded in the Arc-owned Task, not in kernel_stack.

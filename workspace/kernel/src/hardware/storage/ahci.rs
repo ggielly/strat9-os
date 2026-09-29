@@ -1209,10 +1209,18 @@ impl BlockDevice for AhciController {
 static AHCI_PTR: core::sync::atomic::AtomicPtr<AhciController> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
+/// Set once the bus has been scanned, whether or not a controller was found.
+static AHCI_PROBED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// Scan the PCI bus for an AHCI controller and initialise it.
 ///
-/// Called once during kernel boot from `hardware::init()`.
+/// Idempotent: the component `storage_init` runs after `hardware::init()`.
+/// The guard is a flag rather than a check on `AHCI_PTR` because a failed
+/// probe legitimately leaves the pointer null and must not be retried.
 pub fn init() {
+    if AHCI_PROBED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
     log::info!("AHCI: scanning PCI bus...");
 
     match unsafe { AhciController::init() } {

@@ -87,6 +87,7 @@ pub extern "C" fn serial_task_main() -> ! {
     let mut offset = 0;
     ASYNC_OUTPUT.store(true, Ordering::Release);
     loop {
+        let mut did_work = false;
         if !PANIC_IN_PROGRESS.load(Ordering::Relaxed) {
             if let Some(mut port) = SERIAL1.try_lock() {
                 for _ in 0..TX_CHUNK_LEN {
@@ -95,6 +96,7 @@ pub extern "C" fn serial_task_main() -> ! {
                             Some(next) => {
                                 chunk = next;
                                 offset = 0;
+                                did_work = true;
                             }
                             None => break,
                         }
@@ -103,10 +105,17 @@ pub extern "C" fn serial_task_main() -> ! {
                         break;
                     }
                     offset += 1;
+                    did_work = true;
                 }
             }
         }
-        crate::process::yield_task();
+        if did_work {
+            crate::process::yield_task();
+        } else {
+            // No queued bytes: sleep until the next tick instead of polling
+            // the TX queue continuously.
+            crate::process::sleep_current_task_ticks(1);
+        }
     }
 }
 

@@ -37,7 +37,16 @@ if [ ! -f "$IMG" ]; then
     bash /workspace/tools/scripts/container-build.sh image
 fi
 
+qemu_accel=tcg
+if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+    qemu_accel=kvm
+    echo "QEMU acceleration: KVM"
+else
+    echo "QEMU acceleration: TCG (/dev/kvm unavailable; expose KVM to the host/container for hardware acceleration)"
+fi
+
 QEMU_CMD=(qemu-system-x86_64
+    -accel "$qemu_accel"
     -cdrom "$ISO"
     -drive "file=$IMG,format=raw,if=none,id=drv0"
     -device "virtio-blk-pci,drive=drv0"
@@ -48,6 +57,8 @@ QEMU_CMD=(qemu-system-x86_64
     -no-reboot
     -no-shutdown
     -serial mon:stdio
+    -debugcon "file:$WORKDIR/build/qemu-debugcon.log"
+    -global isa-debugcon.iobase=0xe9
     -D "$LOG"
 )
 

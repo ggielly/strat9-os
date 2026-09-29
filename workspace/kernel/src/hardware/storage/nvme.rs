@@ -1134,6 +1134,9 @@ static NVME_INITIALIZED: AtomicBool = AtomicBool::new(false);
 pub static NVME_IRQ_LINE: AtomicU8 = AtomicU8::new(0);
 
 pub fn init() {
+    if NVME_INITIALIZED.load(Ordering::Relaxed) {
+        return;
+    }
     log::info!("[NVMe] Scanning for NVMe controllers...");
 
     let candidates = pci::probe_all(ProbeCriteria {

@@ -3,6 +3,37 @@ use super::*;
 static FINISH_INTERRUPT_TRACE_BUDGET: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(32);
 
+/// Put the current task to sleep until at least `ticks` scheduler ticks pass.
+/// Unlike `yield_task`, this removes the task from the runnable queue while it
+/// waits, so periodic kernel workers do not keep a CPU busy when idle.
+pub fn sleep_current_task_ticks(ticks: u64) {
+    if ticks == 0 {
+        yield_task();
+        return;
+    }
+
+    let Some(task_id) = current_task_id() else {
+        yield_task();
+        return;
+    };
+    let Some(task) = get_task_by_id(task_id) else {
+        yield_task();
+        return;
+    };
+
+    let deadline = super::ticks()
+        .saturating_add(ticks)
+        .saturating_mul(crate::arch::timer::NS_PER_TICK);
+    task.wake_deadline_ns
+        .store(deadline, core::sync::atomic::Ordering::Relaxed);
+
+    while super::ticks().saturating_mul(crate::arch::timer::NS_PER_TICK) < deadline {
+        block_current_task();
+    }
+    task.wake_deadline_ns
+        .store(0, core::sync::atomic::Ordering::Relaxed);
+}
+
 /// Initialize the scheduler
 pub fn init_scheduler() {
     // Build scheduler state only for CPUs that are actually online. Using the

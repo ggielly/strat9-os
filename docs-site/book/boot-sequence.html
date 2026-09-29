@@ -163,124 +163,301 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="boot-sequence"><a class="header" href="#boot-sequence">Boot Sequence</a></h1>
-<p>Strat9 OS boots on x86_64 via the UEFI bootloader. The boot flow transitions from 16-bit real mode through protected mode to 64-bit long mode before jumping into Rust.</p>
+<p>Strat9 OS boots on <strong>x86_64 only</strong>, through a homemade Rust UEFI application. There is no BIOS bootloader, no 16-bit real-mode stage, and no Limine: firmware enters the bootloader already in long mode, the bootloader builds page tables, calls <code>ExitBootServices</code>, and switches CR3 straight into the kernel.</p>
+<blockquote>
+<p><strong>Architecture support.</strong> x86_64 is the only buildable and bootable target. <code>rust-toolchain.toml</code> pins <code>targets = ["x86_64-unknown-none"]</code>, <code>Makefile.toml</code> hardcodes <code>KERNEL_TARGET = "x86_64-unknown-none"</code>, and the bootloader targets <code>x86_64-unknown-uefi</code>. A <strong>riscv64</strong> port is in progress as a stub (<code>kernel/src/arch/riscv64/</code>, <code>targets/riscv64-strat9.json</code>, <code>doc/riscv-port-implementation.md</code>) — it is never compiled. There is <strong>no aarch64 port</strong>; the only aarch64 code is two NEON framebuffer files gated behind <code>#[cfg(target_arch = "aarch64")]</code>.</p>
+</blockquote>
 <hr />
 <h2 id="boot-flow"><a class="header" href="#boot-flow">Boot flow</a></h2>
 <pre><code class="language-mermaid">flowchart TD
-    A[BIOS/UEFI] --&gt; B[MBR / Stage 1]
-    B --&gt; C[Stage 2]
-    C --&gt; D[UEFI Bootloader]
-    D --&gt; E[kstart - Assembly]
-    E --&gt; F[start - Rust init]
-    F --&gt; G[main.rs - Kernel main]
+    A[QEMU q35 / OVMF] --&gt; B[ESP: FAT32, GPT]
+    B --&gt; C[BOOTX64.EFI&lt;br/&gt;strat9-bootloader.efi]
+    C --&gt; D[/boot/kernel.elf]
+    C --&gt; E[/boot/initfs/*&lt;br/&gt;must contain init or strate-init]
+    D --&gt; F[boot64.S : _start]
+    E --&gt; F
+    F --&gt; G[kmain]
+    G --&gt; H[kernel_main]
+    H --&gt; I[process::schedule - never returns]
 
     style A fill:#333,color:#fff
-    style D fill:#1a6b3a,color:#fff
-    style G fill:#1a6b3a,color:#fff
+    style C fill:#1a6b3a,color:#fff
+    style I fill:#1a6b3a,color:#fff
 </code></pre>
+<p>The image is built by <code>tools/scripts/create-uefi-image.sh</code>. The ESP spans sectors 2048..526335 (256 MiB).</p>
 <hr />
-<h2 id="stage-1--mbr-bootloader-bootloaderasm"><a class="header" href="#stage-1--mbr-bootloader-bootloaderasm">Stage 1 : MBR bootloader (<code>bootloader/asm/</code>)</a></h2>
-<p>The bootloader is written in NASM assembly. Stage 1 fits in exactly 512 bytes (MBR).</p>
-<p><strong>Responsibilities:</strong></p>
+<h2 id="stage--the-uefi-bootloader"><a class="header" href="#stage--the-uefi-bootloader">Stage : the UEFI bootloader</a></h2>
+<p><code>workspace/bootloader</code>, built for <code>x86_64-unknown-uefi</code>. Entry point <code>workspace/bootloader/src/main.rs</code>; see also <code>boot_plan.rs</code>, <code>cpu.rs</code>, <code>elf.rs</code>, <code>graphics.rs</code>, <code>memory_map.rs</code>, <code>memory.rs</code>, <code>modules.rs</code>, <code>page_tables.rs</code>, <code>paging.rs</code>.</p>
+<p><code>boot_kernel()</code> executes in this order:</p>
 <ol>
-<li>Load Stage 2 from disk (LBA reads via BIOS INT 13h)</li>
-<li>Enable A20 line</li>
-<li>Enter protected mode (32-bit)</li>
-<li>Jump to Stage 2</li>
+<li><code>BootMemory::new()</code> and a serial banner</li>
+<li><code>cpu::detect()</code> — CPUID feature detection</li>
+<li><code>LoadedImage</code> protocol; verify <code>paging::context_switch</code> lies inside the loaded image</li>
+<li><code>SimpleFileSystem</code> protocol; open the ESP volume</li>
+<li>Read <code>\boot\kernel.elf</code> into a <code>Vec</code></li>
+<li><code>elf::parse_elf64</code>, then <code>allocate_preferred</code> + <code>load_into</code></li>
+<li><code>modules::load_modules</code> from <code>\boot\initfs</code> — <strong>a file named <code>init</code> or <code>strate-init</code> must exist or boot aborts</strong> (<code>modules.rs:149-157</code>)</li>
+<li><code>select_framebuffer()</code> — walks every GOP mode and picks the best. <code>PixelFormat::Bitmask</code> and <code>BltOnly</code> are <strong>rejected</strong></li>
+<li>Locate the ACPI RSDP via <code>ACPI2_GUID</code>, falling back to <code>ACPI_GUID</code></li>
+<li>Build a 4096-byte <code>key=value\n</code> environment string</li>
+<li>Allocate: a 64 KiB transition stack, the module table, the environment block, the <code>KernelArgs</code> page, the memory-map array, and a page-table arena</li>
+<li>Build the boot page tables → <code>pml4_phys</code></li>
+<li>Pre-flight conversion of the UEFI memory map</li>
+<li><code>uefi::boot::exit_boot_services(Some(LOADER_DATA))</code>, immediately followed by <code>cli</code> / <code>cld</code></li>
+<li>Re-initialise COM1 (firmware may have left it in an unknown state)</li>
+<li>Fill <code>KernelArgs</code> and write it into a reserved page</li>
+<li><code>paging::context_switch(pml4_phys, stack_top, entry, args_ptr)</code></li>
 </ol>
-<hr />
-<h2 id="stage-2--protected--long-mode"><a class="header" href="#stage-2--protected--long-mode">Stage 2 : Protected → Long mode</a></h2>
-<p><strong>Responsibilities:</strong></p>
-<ol>
-<li>Detect available memory (INT 15h, E820)</li>
-<li>Load the kernel binary from disk</li>
-<li>Set up initial page tables (identity mapping + higher-half)</li>
-<li>Enable PAE, PGE, long mode</li>
-<li>Jump to 64-bit code</li>
-</ol>
-<hr />
-<h2 id="uefi-bootloader-handoff"><a class="header" href="#uefi-bootloader-handoff">UEFI bootloader handoff</a></h2>
-<p>The kernel is loaded by the UEFI bootloader. The bootloader provides:</p>
+<h3 id="context_switch"><a class="header" href="#context_switch"><code>context_switch</code></a></h3>
+<p><code>workspace/bootloader/src/paging.rs</code> is inline assembly that:</p>
 <ul>
-<li>Memory map (E820 equivalent)</li>
-<li>HHDM (Higher Half Direct Map) base address</li>
-<li>PML4 physical address</li>
-<li>RSDP (ACPI tables)</li>
-<li>Framebuffer info</li>
+<li>fixes CR0 (clears <code>EM</code> and <code>TS</code>, sets <code>MP</code>, <code>NE</code>, <code>WP</code>)</li>
+<li>disables caching, executes <code>wbinvd</code></li>
+<li>clears CR4 <code>PCIDE | PGE</code>, sets <code>OSFXSR | OSXMMEXCPT</code></li>
+<li>sets <code>IA32_EFER.NXE</code></li>
+<li>sets <code>rsp</code>, loads <code>cr3</code>, executes <code>wbinvd</code></li>
+<li>re-enables caching and jumps to the kernel entry point</li>
 </ul>
-<p>The <code>KernelArgs</code> struct captures all handoff data:</p>
-<pre><code class="language-text">KernelArgs {
-    hhdm_offset: u64,       // Higher-half direct map base
-    pml4_physical: u64,     // Boot page table
-    acpi_rsdp: Option&lt;NonNull&lt;u8&gt;&gt;,  // ACPI RSDP
-    memory_regions: &amp;[MemoryRegion],  // E820 memory map
-    framebuffer: FramebufferInfo,     // VGA/framebuffer
-}
-</code></pre>
-<hr />
-<h2 id="kernel-entry--kstart-assembly"><a class="header" href="#kernel-entry--kstart-assembly">Kernel entry : <code>kstart</code> (assembly)</a></h2>
-<p>Located in <code>boot/boot64.S</code>:</p>
-<ol>
-<li>Verify BSS is zero, data is non-zero (sanity check)</li>
-<li>Set up kernel stack (128 KiB, from <code>STACK</code> static)</li>
-<li>Jump to <code>start()</code> (Rust)</li>
-</ol>
-<hr />
-<h2 id="kernel-init--start-rust"><a class="header" href="#kernel-init--start-rust">Kernel init : <code>start()</code> (Rust)</a></h2>
-<p>Located in <code>boot/boot.rs</code> → <code>main.rs</code>:</p>
-<pre><code class="language-mermaid">flowchart TD
-    A[serial::init] --&gt; B[gdt::init_bsp]
-    B --&gt; C[idt::init_bsp]
-    C --&gt; D[memory::init]
-    D --&gt; E[paging::init]
-    E --&gt; F[interrupt::syscall::init]
-    F --&gt; G[allocator::init - buddy + slab]
-    G --&gt; H[acpi::init - parse MADT/IOAPIC]
-    H --&gt; I[apic::init - Local APIC]
-    I --&gt; J[smp::init - boot APs]
-    J --&gt; K[timer::init - APIC timer]
-    K --&gt; L[process::init - scheduler]
-    L --&gt; M[shell::init - init process]
-    M --&gt; N[scheduler::run - never returns]
-</code></pre>
-<p><strong>Key init steps:</strong></p>
-<div class="table-wrapper"><table><thead><tr><th>Step</th><th>Module</th><th>What happens</th></tr></thead><tbody>
-<tr><td>Serial</td><td><code>serial.rs</code></td><td>Initialize COM1 (0x3F8) at 115200 baud</td></tr>
-<tr><td>GDT</td><td><code>gdt.rs</code></td><td>Set up kernel/user code/data segments</td></tr>
-<tr><td>IDT</td><td><code>idt.rs</code></td><td>Install interrupt handlers (timer, syscall, page fault)</td></tr>
-<tr><td>Memory</td><td><code>memory/</code></td><td>Parse E820, initialize buddy allocator</td></tr>
-<tr><td>Paging</td><td><code>paging.rs</code></td><td>Set up kernel page tables (HHDM + higher-half)</td></tr>
-<tr><td>Syscall</td><td><code>syscall.rs</code></td><td>Install <code>syscall</code>/<code>sysret</code> MSRs</td></tr>
-<tr><td>Heap</td><td><code>heap.rs</code></td><td>Initialize slab allocator on top of buddy</td></tr>
-<tr><td>ACPI</td><td><code>acpi/</code></td><td>Parse MADT (APICs), IOAPIC, interrupt overrides</td></tr>
-<tr><td>APIC</td><td><code>apic.rs</code></td><td>Initialize Local APIC (xAPIC or x2APIC)</td></tr>
-<tr><td>SMP</td><td><code>smp.rs</code></td><td>INIT+SIPI sequence to boot Application Processors</td></tr>
-<tr><td>Timer</td><td><code>timer.rs</code></td><td>Calibrate and start APIC timer (periodic)</td></tr>
-<tr><td>Scheduler</td><td><code>scheduler/</code></td><td>Create per-CPU run queues, spawn idle tasks</td></tr>
-<tr><td>Init</td><td><code>shell/</code></td><td>Spawn the first userspace process (init)</td></tr>
+<h3 id="virtual-address-map"><a class="header" href="#virtual-address-map">Virtual address map</a></h3>
+<p>Defined in <code>workspace/bootloader/src/page_tables.rs</code> and <code>boot_plan.rs</code>:</p>
+<div class="table-wrapper"><table><thead><tr><th>Symbol</th><th>Value</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>KERNEL_VIRT_BASE</code></td><td><code>0xFFFF_FFFF_8000_0000</code></td><td>Higher-half kernel</td></tr>
+<tr><td><code>KERNEL_PHYS_BASE</code></td><td><code>0x10_0000</code> (1 MiB)</td><td>Load address, <code>MAX_KERNEL_IMAGE_SIZE = 1 GiB</code></td></tr>
+<tr><td><code>HHDM_OFFSET</code></td><td><code>0xFFFF_FF00_0000_0000</code></td><td>Higher-half direct map — <strong>not</strong> the more common <code>0xFFFF_8000_0000_0000</code></td></tr>
+<tr><td><code>FRAMEBUFFER_BASE</code></td><td><code>0xFFFF_DEAD_0000_0000</code></td><td>Framebuffer window</td></tr>
+<tr><td><code>ENVIRONMENT_BASE</code></td><td><code>0xFFFF_BEEF_0000_0000</code></td><td>Environment string</td></tr>
+<tr><td><code>INITIAL_ALLOCATION_LIMIT</code></td><td>8 GiB</td><td></td></tr>
+<tr><td><code>MAX_DIRECT_MAP</code></td><td>512 GiB</td><td></td></tr>
 </tbody></table>
 </div>
+<p>Paging is 4-level; PML4 slot 0 is the identity map and slot 1 is the HHDM.</p>
+<h3 id="environment-string"><a class="header" href="#environment-string">Environment string</a></h3>
+<p>Rather than a kernel command line, the bootloader passes a <code>key=value\n</code> string (max 4096 bytes), readable via <code>KernelArgs::env_get()</code>:</p>
+<p><code>loader</code>, <code>loader.version</code>, <code>loader.paging</code>, <code>fb.phys</code>, <code>fb.virt</code>, <code>fb.width</code>, <code>fb.height</code>, <code>fb.stride</code>, <code>fb.bpp</code>, <code>acpi.rsdp</code>, <code>console=ttyS0</code>, <code>console.baud=115200</code>, <code>kernel.entry</code>.</p>
+<hr />
+<h2 id="boot-handoff-kernelargs"><a class="header" href="#boot-handoff-kernelargs">Boot handoff: <code>KernelArgs</code></a></h2>
+<p>Defined in <a href="https://git.strat9-os.org/strat9-os/strat9-os/blob/main/workspace/abi/src/boot.rs"><code>workspace/abi/src/boot.rs</code></a>. <code>#[repr(C, packed)]</code>, <strong>exactly 132 bytes</strong> (asserted at compile time in two places).</p>
+<ul>
+<li><code>STRAT9_BOOT_MAGIC = 0x5354_3942</code> (<code>"ST9B"</code>)</li>
+<li><code>STRAT9_BOOT_ABI_VERSION = 4</code></li>
+</ul>
+<pre><code class="language-text">offset  field                        type
+------  --------------------------  ----
+   0    magic                        u32
+   4    abi_version                  u32
+   8    kernel_base                  u64
+  16    kernel_size                  u64
+  24    acpi_rsdp_base               u64   physical address
+  32    memory_map_base              u64   physical, array of MemoryRegion
+  40    memory_map_size              u64
+  48    framebuffer_addr             u64   PHYSICAL address of the FB
+  56    hhdm_offset                  u64
+  64    cmdline_ptr                  u64   physical, key=value string
+  72    cmdline_len                  u64
+  80    modules_base                 u64   physical, ModuleTable
+  88    modules_size                 u64
+  96    framebuffer_width            u32
+ 100    framebuffer_height           u32
+ 104    framebuffer_stride           u32
+ 108    framebuffer_bpp              u16
+ 110    framebuffer_red_mask_size    u8
+ 111    framebuffer_red_mask_shift   u8
+ 112    framebuffer_green_mask_size  u8
+ 113    framebuffer_green_mask_shift u8
+ 114    framebuffer_blue_mask_size   u8
+ 115    framebuffer_blue_mask_shift  u8
+ 116    bss_virt_base                u64
+ 124    bss_virt_size                u64
+</code></pre>
+<p><strong>Points worth knowing:</strong></p>
+<ul>
+<li><strong>There is no PML4 address in <code>KernelArgs</code>.</strong> The loader keeps <code>pml4_phys</code> for its own <code>context_switch</code> and prints it over serial; the kernel recovers CR3 itself. Any documentation showing a <code>pml4_physical</code> field is wrong.</li>
+<li><strong>The memory map is the UEFI map, not E820.</strong> The bootloader calls <code>uefi::boot::memory_map()</code> before <code>exit_boot_services()</code> and converts it: <code>CONVENTIONAL</code> → <code>MemoryKind::Free</code>, <code>BOOT_SERVICES_*</code> / <code>LOADER_*</code> → <code>Reclaim</code>, everything else → <code>Reserved</code>. There is no INT 13h or INT 15h/E820 in the active path.</li>
+<li><strong><code>framebuffer_addr</code> is a physical address.</strong> The virtual FB address (<code>0xFFFF_DEAD_0000_0000</code>) appears only in the <code>fb.virt=</code> environment key. The kernel defensively accepts either form.</li>
+<li><code>acpi_rsdp_base</code> is a plain <code>u64</code> physical address, not <code>Option&lt;NonNull&lt;u8&gt;&gt;</code>.</li>
+</ul>
+<h3 id="supporting-structures"><a class="header" href="#supporting-structures">Supporting structures</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Layout</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>MemoryRegion</code></td><td><code>{ base: u64, size: u64, kind: MemoryKind }</code>, 24 B, align 8</td><td></td></tr>
+<tr><td><code>MemoryKind</code></td><td><code>#[repr(transparent)] struct MemoryKind(pub u64)</code></td><td>A newtype, not a Rust <code>enum</code>. <code>Null=0</code>, <code>Free=1</code>, <code>Reclaim=2</code>, <code>Reserved=3</code></td></tr>
+<tr><td><code>ModuleTable</code></td><td><code>{ count: u32, entries: [ModuleEntry; 64] }</code>, 5128 B</td><td><code>MAX_BOOT_MODULES = 64</code></td></tr>
+<tr><td><code>ModuleEntry</code></td><td><code>{ name: [u8; 64], base: u64, size: u64 }</code>, 80 B</td><td></td></tr>
+<tr><td>—</td><td><code>MAX_BOOT_MEMORY_REGIONS = 1024</code></td><td></td></tr>
+</tbody></table>
+</div>
+<p>All accessors validate the advertised extent before dereferencing: <code>memory_regions()</code>, <code>modules()</code>, <code>cmdline_bytes()</code>, <code>cmdline_str()</code>, <code>env_get()</code>.</p>
+<hr />
+<h2 id="kernel-entry--boot64s"><a class="header" href="#kernel-entry--boot64s">Kernel entry : <code>boot64.S</code></a></h2>
+<p><code>workspace/kernel/src/boot/boot64.S</code> (ATT syntax, included by <code>boot/assembly.rs</code>):</p>
+<ol>
+<li><code>cli</code> / <code>cld</code>, stash the <code>KernelArgs</code> pointer from <code>%rdi</code> in <code>%r15</code></li>
+<li>Fill a 256-entry <strong>early IDT</strong> whose every entry points at <code>early_fault_halt</code></li>
+<li><code>lgdt</code> / <code>lidt</code> the early GDT, then <code>lretq</code> to reload <code>CS</code></li>
+<li>Write <code>'A'</code> to port <code>0xE9</code> (QEMU debug exit) as a progress marker</li>
+<li><strong>Clear BSS</strong> from <code>__bss_start</code> to <code>__bss_end</code> with <code>rep stosb</code></li>
+<li>Write <code>'B'</code>, load <code>boot_stack_top</code> into <code>%rsp</code> (<strong>64 KiB</strong> static stack), restore <code>%r15</code> to <code>%rdi</code>, write <code>'C'</code>, <code>call kmain</code></li>
+</ol>
+<p>The call chain is:</p>
+<pre><code class="language-text">boot64.S:_start
+  → kmain              (kernel/src/boot/dtb_boot.rs)
+  → crate::kernel_main (kernel/src/lib.rs)
+  → process::schedule() — never returns
+</code></pre>
+<p>There is <strong>no <code>kstart</code> symbol</strong> anywhere in the repository. Interrupts stay disabled through all of <code>kernel_main</code>; <code>sti</code> happens in <code>task_entry_trampoline</code>, not in the init path.</p>
+<blockquote>
+<p><code>boot64.S</code> also exports <code>switch_stack</code>, which is declared in <code>lib.rs</code> but <strong>never called</strong>: <code>kernel_main</code> allocates a 256 KiB kernel stack, logs it, and prints "stack switch deferred". <code>stack_switch_entry</code> is an <code>hlt</code> loop.</p>
+</blockquote>
+<hr />
+<h2 id="kernel-init--kernel_main"><a class="header" href="#kernel-init--kernel_main">Kernel init : <code>kernel_main</code></a></h2>
+<p><code>workspace/kernel/src/lib.rs</code>. Interrupts remain disabled; <code>debug_assert!</code> checkpoints are placed through the sequence.</p>
+<pre><code class="language-mermaid">flowchart TD
+    A[boot_timestamp / logger] --&gt; B[tss::init]
+    B --&gt; C[gdt::init]
+    C --&gt; D[x86_64::idt::init]
+    D --&gt; E[cpuid + init_cpu_extensions]
+    E --&gt; F[entropy / kaslr / crypto / panic hooks / symbols]
+    F --&gt; G[validate KernelArgs magic + version]
+    G --&gt; H[boot_alloc::init_boot_allocator]
+    H --&gt; I[buddy::init_buddy_allocator]
+    I --&gt; J[vmalloc::init + paging::init + map_all_ram]
+    J --&gt; K[vga + vgabuf flush]
+    K --&gt; L[syscall MSRs]
+    L --&gt; M[component::init_all Bootstrap]
+    M --&gt; N[vfs::init + register /initfs modules]
+    N --&gt; O[init_apic_subsystem]
+    O --&gt; P[smp::init - boot APs]
+    P --&gt; Q[keyboard + mouse]
+    Q --&gt; R[process::init_scheduler]
+    R --&gt; S[component::init_all Kthread + Hardware]
+    S --&gt; T[start_apic_timer_cached]
+    T --&gt; U[load init ELF from /initfs]
+    U --&gt; V[spawn shell + console tasks]
+    V --&gt; W[open AP scheduler gate]
+    W --&gt; X[process::schedule - never returns]
+</code></pre>
+<h3 id="ordered-init-steps"><a class="header" href="#ordered-init-steps">Ordered init steps</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>#</th><th>Step</th><th>Location in <code>lib.rs</code></th><th>What happens</th></tr></thead><tbody>
+<tr><td>1</td><td>Boot timestamp</td><td>356</td><td><code>x86_64::boot_timestamp::init()</code></td></tr>
+<tr><td>2</td><td>Logger</td><td>401-404</td><td>Serial log prefix, then <code>boot::logger::init()</code></td></tr>
+<tr><td>3</td><td><strong>TSS</strong></td><td>417</td><td><code>arch::tss::init()</code></td></tr>
+<tr><td>4</td><td><strong>GDT</strong></td><td>419</td><td><code>arch::gdt::init()</code></td></tr>
+<tr><td>5</td><td><strong>IDT</strong></td><td>421</td><td><code>arch::x86_64::idt::init()</code></td></tr>
+<tr><td>6</td><td>CPU features</td><td>453-462</td><td><code>cpuid::init()</code>, FPU/SSE/SMEP/SMAP/XSAVE, <code>set_extensions_ready()</code></td></tr>
+<tr><td>7</td><td>Security init</td><td>466-484</td><td><code>entropy::seed_from_rdrand</code>, <code>kaslr::init</code>, <code>crypto::init</code>, default panic hooks, symbol table</td></tr>
+<tr><td>8</td><td><strong>Boot args validation</strong></td><td>518-551</td><td>Null check, then magic and ABI-version check</td></tr>
+<tr><td>9</td><td>Publish <code>BOOT_ARGS</code></td><td>533</td><td>Stored in a global</td></tr>
+<tr><td>10</td><td>HHDM + UEFI reclaim</td><td>575-580</td><td><code>set_hhdm_offset</code>, and <code>retire_uefi_identity_code()</code> when <code>loader.paging=wx-uc-v1</code></td></tr>
+<tr><td>11</td><td>Parse handoff data</td><td>608-615</td><td><code>memory_regions()</code>, <code>modules()</code>, <code>validate_modules()</code></td></tr>
+<tr><td>12</td><td>Copy regions</td><td>677</td><td>Into the static <code>MMAP_WORK[1024]</code></td></tr>
+<tr><td>13</td><td><strong>Boot allocator</strong></td><td>684-692</td><td><code>boot_alloc::set_protected_ranges</code> + <code>init_boot_allocator</code></td></tr>
+<tr><td>14</td><td>Frame metadata</td><td>714-733</td><td><code>frame::metadata_size_for</code> + <code>init_metadata_array</code></td></tr>
+<tr><td>15</td><td><strong>Buddy allocator</strong></td><td>743</td><td><code>buddy::init_buddy_allocator(...)</code></td></tr>
+<tr><td>16</td><td>Kernel stack</td><td>757-801</td><td>Allocates 256 KiB; <strong>switch is deferred</strong></td></tr>
+<tr><td>17</td><td>Kernel config</td><td>811</td><td><code>boot::config::apply_kernel_config()</code> — currently a no-op stub</td></tr>
+<tr><td>18</td><td><strong>Vmalloc</strong></td><td>814</td><td><code>memory::vmalloc::init()</code></td></tr>
+<tr><td>19</td><td><strong>Paging</strong></td><td>841-859</td><td><code>paging::init(hhdm)</code>, <code>map_all_ram</code>, identity-map the framebuffer</td></tr>
+<tr><td>20</td><td>VGA</td><td>874-888</td><td><code>vga::init</code> + <code>vgabuf_flush_to_framebuffer()</code></td></tr>
+<tr><td>21</td><td><strong>Syscall MSRs</strong></td><td>903</td><td><code>SYSCALL</code> / <code>SYSRET</code> / <code>STAR</code> / <code>LSTAR</code> / <code>SFMASK</code></td></tr>
+<tr><td>22</td><td>Components (bootstrap)</td><td>912</td><td><code>component::init_all(InitStage::Bootstrap)</code></td></tr>
+<tr><td>23</td><td>Kernel address space</td><td>928</td><td><code>address_space::init_kernel_address_space()</code></td></tr>
+<tr><td>24</td><td><strong>VFS</strong></td><td>943-947</td><td><code>vfs::init()</code>, then <code>vfs::register_initfs_file("/initfs/&lt;name&gt;", …)</code> per boot module</td></tr>
+<tr><td>25</td><td>ACPI identity map</td><td>958</td><td><code>ensure_identity_map(args.acpi_rsdp_base)</code></td></tr>
+<tr><td>26</td><td><strong>APIC subsystem</strong></td><td>961</td><td>See below</td></tr>
+<tr><td>27</td><td>TLB</td><td>980</td><td><code>arch::tlb::init()</code> when the APIC is active</td></tr>
+<tr><td>28</td><td>Per-CPU</td><td>993-994</td><td><code>percpu::init_boot_cpu(bsp_apic_id)</code>, <code>init_gs_base(0)</code></td></tr>
+<tr><td>29</td><td><strong>SMP</strong></td><td>998</td><td><code>arch::smp::init()</code> — boots the APs</td></tr>
+<tr><td>30</td><td>Input</td><td>1014-1021</td><td>PS/2 keyboard, then PS/2 mouse when the APIC is active</td></tr>
+<tr><td>31</td><td><strong>Scheduler</strong></td><td>1039</td><td><code>process::init_scheduler()</code></td></tr>
+<tr><td>32</td><td><strong>APIC timer</strong></td><td>1070</td><td><code>start_apic_timer_cached()</code> on the BSP — <strong>the first point at which IF may be enabled</strong></td></tr>
+<tr><td>33</td><td>Components (kthread)</td><td>1087</td><td><code>InitStage::Kthread</code></td></tr>
+<tr><td>34</td><td>Components (hardware)</td><td>1101</td><td><code>InitStage::Hardware</code></td></tr>
+<tr><td>35</td><td>Device enumeration</td><td>1148-1207</td><td>virtio-blk, AHCI, NVMe, NICs</td></tr>
+<tr><td>36</td><td><strong>Load init</strong></td><td>1215-1295</td><td><code>process::elf::load_and_run_elf_with_caps</code> on <code>/initfs/init</code> or <code>/initfs/strate-init</code>, with a fallback through the boot-module table</td></tr>
+<tr><td>37</td><td>Grant volume capability</td><td>1301</td><td>To the init process</td></tr>
+<tr><td>38</td><td>Spawn kernel tasks</td><td>1318-1375</td><td><code>shell::shell_main</code> (64 KiB), then <code>console-mouse</code>, <code>console-render</code> (<code>vgabuf::console_task_main</code>) and <code>serial-output</code> (32 KiB) — <strong>x86_64 only</strong> — plus a <code>status-line</code> kthread</td></tr>
+<tr><td>39</td><td>Keyboard layout</td><td>1383</td><td><code>arch::keyboard_layout::set_french_layout()</code> (FR by default)</td></tr>
+<tr><td>40</td><td>Open AP gate</td><td>1390</td><td><code>smp::open_ap_scheduler_gate()</code></td></tr>
+<tr><td>41</td><td>Speaker</td><td>1396</td><td><code>arch::speaker::beep_startup()</code></td></tr>
+<tr><td>42</td><td><strong>Run</strong></td><td>1407</td><td><code>process::schedule()</code> — never returns</td></tr>
+</tbody></table>
+</div>
+<h3 id="apic--acpi-bring-up-detail"><a class="header" href="#apic--acpi-bring-up-detail">APIC / ACPI bring-up detail</a></h3>
+<p><code>init_apic_subsystem(rsdp_virt)</code> (<code>lib.rs:1414-1584</code>) performs:</p>
+<ul>
+<li><code>apic::is_present()</code> via CPUID</li>
+<li><code>acpi::init(rsdp_vaddr)</code></li>
+<li><code>acpi::madt::parse_madt()</code></li>
+<li><code>acpi::mcfg::parse_mcfg()</code> — optional, PCIe ECAM</li>
+<li><code>acpi::ivrs::Ivrs::get()</code> — optional, AMD IOMMU</li>
+<li><code>apic::init(local_apic_address)</code></li>
+<li><code>ioapic::init(addr, gsi_base)</code></li>
+<li><code>pic::init</code> / <code>disable_permanently</code>, then re-enable IRQ 1, 2 and 12 — <strong>PS/2 stays on the legacy PIC</strong></li>
+<li><code>ioapic::route_legacy_irq(0, …)</code>; mask IRQ 1 and IRQ 12</li>
+<li><code>timer::calibrate_apic_timer()</code> via PIT channel 2, falling back to <code>timer::init_pit(100)</code> on failure</li>
+<li>on success: <code>timer::stop_pit()</code> and mask legacy IRQ 0. The <strong>APIC timer is not started here</strong> — that happens at step 32.</li>
+</ul>
+<h3 id="component-init-stages"><a class="header" href="#component-init-stages">Component init stages</a></h3>
+<p><code>workspace/kernel/src/components.rs</code> defines four stages: <code>Bootstrap</code>, <code>Kthread</code>, <code>Hardware</code>, <code>Process</code>. Many <code>Bootstrap</code> entries are explicit <em>markers</em>, because the real work is inline in <code>kernel_main</code>. The <code>Hardware</code> stage genuinely calls <code>hardware::init()</code>, <code>virtio_block::init()</code>, <code>ahci::init()</code>, <code>nvme::init()</code>, <code>hardware::timer::init()</code> and <code>hardware::usb::init()</code>.</p>
 <hr />
 <h2 id="smp-boot--application-processors"><a class="header" href="#smp-boot--application-processors">SMP boot : Application Processors</a></h2>
-<pre><code class="language-mermaid">sequenceDiagram
-    participant BSP
-    participant TRAMP as Trampoline (0x8000)
-    participant AP
-
-    BSP-&gt;&gt;TRAMP: Copy trampoline to 0x8000
-    BSP-&gt;&gt;TRAMP: Write CR3 + RSP to data area
-    BSP-&gt;&gt;AP: INIT IPI (0x4500)
-    Note right of AP: 16-bit real mode
-    BSP-&gt;&gt;AP: SIPI (vector=0x8 → 0x8000)
-    TRAMP-&gt;&gt;AP: Enable protected mode
-    TRAMP-&gt;&gt;AP: Enable long mode + paging
-    TRAMP-&gt;&gt;AP: Load kernel stack
-    TRAMP-&gt;&gt;AP: Jump to smp_main (Rust)
-    AP-&gt;&gt;BSP: BOOTED_CORES++
-    BSP-&gt;&gt;BSP: Wait for all APs
-    BSP-&gt;&gt;AP: Open scheduler gate
-    AP-&gt;&gt;AP: Start per-CPU scheduler
-</code></pre>
+<p><code>workspace/kernel/src/arch/x86_64/smp.rs</code> (743 lines) uses the classic INIT/SIPI sequence with a 16 → 32 → 64-bit trampoline placed at <strong>physical <code>0x8000</code></strong>.</p>
+<p>Trampoline layout:</p>
+<div class="table-wrapper"><table><thead><tr><th>Offset</th><th>Content</th></tr></thead><tbody>
+<tr><td><code>0x8000</code></td><td>16-bit real-mode stub</td></tr>
+<tr><td><code>0x8010</code></td><td><code>_gdt_table</code> (32 B)</td></tr>
+<tr><td><code>0x8030</code></td><td><code>_gdt</code> GDTR</td></tr>
+<tr><td><code>0x8040</code></td><td>Real-mode setup</td></tr>
+<tr><td>after</td><td>32-bit code, then 64-bit code</td></tr>
+<tr><td><code>smp_trampoline_end</code></td><td>Data area: <code>+0</code> = CR3 (PML4 physical), <code>+8</code> = RSP (kernel stack top, virtual)</td></tr>
+</tbody></table>
+</div>
+<p>Sequence:</p>
+<ol>
+<li><code>copy_trampoline</code> with <code>sfence</code> + <code>wbinvd</code> before signalling</li>
+<li>Write the per-AP stack pointer into the trampoline data slot</li>
+<li><strong>INIT assert</strong> <code>ICR = 0xC500</code>, wait 10 ms; <strong>INIT de-assert</strong> <code>0x8500</code>, wait 200 µs</li>
+<li><strong>SIPI</strong> <code>0x0608</code> twice (vector <code>0x8</code> → <code>0x8000</code>), 200 µs apart</li>
+<li>The trampoline validates <code>IA32_PAT</code> (MSR <code>0x277 == 6</code>, i.e. PAT[0]=WB, PAT[3]=UC) and halts with port-<code>0xE9</code> <code>'P'</code> on mismatch</li>
+<li>It deliberately does <strong>not</strong> force SMEP/SMAP in CR4, because <code>qemu64</code> lacks them and <code>mov cr4</code> would <code>#GP</code></li>
+<li>APs are booted <strong>strictly one at a time</strong>: the BSP spins on <code>AP_REACHED_RUST</code> (timeout 500 M spins) before moving to the next AP</li>
+<li>After all APs: wait on <code>BOOTED_CORES</code> (200 M spins), then <strong>revoke execute permission on the trampoline page</strong> via <code>paging::set_trampoline_execution(0x8000, false)</code></li>
+</ol>
+<p><code>smp_main</code> then runs on each AP: CPUID leaf 1 for the APIC id → ack → <code>percpu::cpu_index_by_apic</code> → <code>init_gs_base</code> → <code>tss::init_cpu</code> → <code>gdt::init_cpu</code> → <code>syscall::init</code> → <code>init_cpu_extensions</code> → <code>tss::set_kernel_stack_for</code> → <code>idt::load()</code> <strong>last</strong> (deliberately) → <code>apic::init_ap()</code> → <code>mark_online_by_apic</code> → <code>BOOTED_CORES++</code> → barrier → wait for <code>AP_SCHED_GATE_OPEN</code> → <code>start_apic_timer_cached()</code> → <code>scheduler::schedule_on_cpu(cpu_index)</code>.</p>
+<p>AP stacks are <code>Task::DEFAULT_STACK_SIZE</code> from the buddy allocator, zeroed and intentionally leaked.</p>
+<hr />
+<h2 id="legacy-and-inactive-boot-paths"><a class="header" href="#legacy-and-inactive-boot-paths">Legacy and inactive boot paths</a></h2>
+<p>These remain in the tree but are <strong>not</strong> on the active path. Do not use them as a description of how the system actually boots.</p>
+<div class="table-wrapper"><table><thead><tr><th>Path</th><th>Status</th></tr></thead><tbody>
+<tr><td><code>workspace/bootloader/asm/*.asm</code> (stage1, stage2, cpuid, gdt, protected_mode, print, long_mode)</td><td><strong>Legacy and broken.</strong> <code>workspace/bootloader/asm/Makefile:1-9</code> says so itself. Only reachable through the <code>assemble-bootloader</code> task, whose own description reads "LEGACY: assemble the custom BIOS bootloader"</td></tr>
+<tr><td>U-Boot</td><td><strong>Legacy and broken.</strong> <code>uboot-image</code> and <code>uboot-image-release</code> both declare a dependency on a <code>setup-uboot</code> task that <strong>does not exist</strong> in <code>Makefile.toml</code>, so the command fails</td></tr>
+<tr><td>Limine</td><td><strong>Fully removed</strong> from the code (zero references under <code>workspace/</code>), though doc comments still mention it</td></tr>
+<tr><td><code>kernel/src/boot/boot.S</code></td><td><strong>Dead.</strong> A Multiboot1 stub that nothing <code>include_str!</code>s</td></tr>
+<tr><td><code>kernel/src/boot/fat32_loader.rs</code></td><td><strong>Dead.</strong> Declared in <code>boot/mod.rs</code> with no call sites; modules come from the bootloader's ESP read</td></tr>
+<tr><td><code>kernel/src/boot/virtio_blk.rs</code>, <code>boot/block_device.rs</code>, <code>boot/fdt.rs</code></td><td><strong>Dead.</strong> Declared, never called (<code>fdt.rs</code> is 648 lines of unreferenced FDT parsing)</td></tr>
+<tr><td><code>boot/limine_shim</code> and <code>lib.rs::boot_limine_shim</code></td><td><strong>Vestigial.</strong> Every function returns <code>None</code></td></tr>
+<tr><td><strong>PVH boot</strong></td><td><strong>Artifacts exist, wiring does not.</strong> See below</td></tr>
+<tr><td><code>boot/config.rs::apply_kernel_config()</code></td><td>A stub that logs "Using default configuration"; <code>kernel.toml</code> is never loaded</td></tr>
+</tbody></table>
+</div>
+<h3 id="pvh"><a class="header" href="#pvh">PVH</a></h3>
+<p>The Xen Para-Virtualization Hardware ELF-note protocol. The building blocks are all present:</p>
+<ul>
+<li><code>x86_64-unknown-none-pvh.json</code> — the standard kernel target JSON plus <code>-Tworkspace/kernel/linker-pvh.ld</code></li>
+<li><code>workspace/kernel/linker-pvh.ld</code> — links at <code>0x100000</code>, four <code>PT_LOAD</code> segments, discards <code>.got</code></li>
+<li><code>tools/scripts/add_pvh_notes.py</code> — injects the five Xen notes and a <code>PT_NOTE</code> program header into a built ELF</li>
+</ul>
+<p>But <strong>no <code>Makefile.toml</code> task, CI job or script invokes any of it</strong>, and the in-kernel branch is fatal: on a null <code>args_ptr</code>, <code>dtb_boot::build_minimal_args()</code> sets <code>memory_map_base = 0, memory_map_size = 0</code>, so <code>memory_regions()</code> returns an empty slice and <code>kernel_main</code> panics with <em>"Boot memory map is empty"</em> immediately after entry. Even past that, the RSDP and framebuffer fields would be zero, so ACPI and APIC bring-up would fail.</p>
+<p>Treat PVH as work-in-progress scaffolding, not a supported boot method.</p>
+<hr />
+<h2 id="see-also"><a class="header" href="#see-also">See also</a></h2>
+<ul>
+<li><a href="./architecture.html">Architecture Overview</a></li>
+<li><a href="./memory-model.html">Memory Management</a></li>
+<li><a href="./abi.html">ABI Overview</a> · <a href="./syscalls.html">Syscall Reference</a></li>
+<li><a href="./driver-model.html">Driver Model</a></li>
+<li><code>doc/riscv-port-implementation.md</code> — the riscv64 port plan (repository <code>doc/</code> directory)</li>
+<li><code>workspace/bootloader/README.md</code> — note that it still describes ABI v2 and omits <code>bss_virt_base</code> / <code>bss_virt_size</code></li>
+</ul>
 
                     </main>
 

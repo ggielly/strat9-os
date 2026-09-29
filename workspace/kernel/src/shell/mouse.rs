@@ -160,6 +160,8 @@ pub extern "C" fn mouse_task_main() -> ! {
                 }
             }
         });
-        crate::process::yield_task();
+        // USB HID and mouse input are polled at the 100 Hz scheduler cadence.
+        // Block between polls instead of remaining continuously runnable.
+        crate::process::sleep_current_task_ticks(1);
     }
 }

@@ -186,47 +186,70 @@
 </ul>
 <h2 id="recent-abi-updates-auto-generated"><a class="header" href="#recent-abi-updates-auto-generated">Recent ABI updates (auto-generated)</a></h2>
 <ul>
-<li>2026-09-13 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3898c5074c07d2b5bdbd13b505a51ccfe92a0e30"><code>3898c50</code></a> feat(bootloader, kernel, abi): homemade strat9 UEFI bootloader : rewrite with scheduler and memory hardening</li>
-<li>2026-08-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c03feb24811b210174712aa7be5a9e097e32a80d"><code>c03feb2</code></a> fix(abi): ENOTSUP 52→95, XFS EiB constant fix, decode_fixed roundtrip tests</li>
-<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3ca6d7c6e61014fe2ad305f22e5bf75c0bdaeebd"><code>3ca6d7c</code></a> feat: Add U-Boot setup script and boot protocol implementation</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/88c52834c3a0af3c6f01f14f3d7364f32a862281"><code>88c5283</code></a> refactor(arch): unify x86_64 crate access via x86_crate_shim, complete riscv stubs</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c8ca94c43ffb700129b00ddf661e45637515d6fc"><code>c8ca94c</code></a> refactor(arch): route shared code through arch::xshim, gate limine/x86 deps</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f3366e1db5be83bea4a1f71e16be6bcc442fbce9"><code>f3366e1</code></a> refactor(arch): migrate process/ and syscall/ call-sites to arch facade</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4399b5f5229b096596f6fe221f5509014a258c88"><code>4399b5f</code></a> test: pass 2 over full codebase — syscall, ABI data/handshake, NIC drivers, allocator</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/88feb023653dd6b3b919a743829575707f63fc24"><code>88feb02</code></a> test(abi): exhaustive L0/L1 anti-regression suite</li>
-<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/09216d7c556d521ef4e05528753ca02c70950e72"><code>09216d7</code></a> Merge branch 'fix/elf-loader-hardening' into 'main'</li>
-<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/2bad5b9b8ae1a351c26ddcc69a78488a5d659dfe"><code>2bad5b9</code></a> feat(elf): loader hardening (#62 #63 #64 #67 #68, groundwork #66)</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6ca7fef90feacf3fe163cf6c5be7ba833c460e02"><code>6ca7fef</code></a> fix(ipc): security hardening, perf fixes and typed wire-format layer</li>
-<li>2026-07-18 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/abb7dd7e60991de111632e72ae8658adccdf8697"><code>abb7dd7</code></a> feat(buddy): harden, optimize, and add kernel.toml configuration</li>
-<li>2026-07-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/fe68f9aacb1b70b8601cbdde1423be75628255d1"><code>fe68f9a</code></a> fix(vfs,console,scheduler): VFS improvements, console perf, panic backtrace</li>
-<li>2026-07-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3a5eb69d9b3041f89c205e184b4afe15c07ee44d"><code>3a5eb69</code></a> feat(silo): replace Vec with heapless::Vec for bounded fields</li>
-<li>2026-07-09 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ab22b0d9b010dd704cf6044580b4f310c5748524"><code>ab22b0d</code></a> feat: 3-level IPC transport, N3 MMU thread migration, graphical silo, NIC/E1000 fixes</li>
-<li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5a3d69c4e10c4cfc67976a837751ce50292f9032"><code>5a3d69c</code></a> feat: migrate input system to userspace</li>
-<li>2026-06-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3fea3f3776edefa7bdc7c3a8d930c8d17b0939a6"><code>3fea3f3</code></a> SMP hardware debug, NVMe fixes, VGA refactor, telnetd hardening, docs</li>
-<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e4ab1a96c3579117defffe0f5b32cf7cac853129"><code>e4ab1a9</code></a> Enhance network stack, NIC drivers, USB/NVMe subsystems, and thermal management</li>
-<li>2026-06-03 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0c40058547bd9b7ef07a837b1153577879510994"><code>0c40058</code></a> Refactor the network stack and add dual-stack userspace tooling</li>
-<li>2026-05-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/aeade5ef5fcfdddef2caa43da6af361a5102c7cd"><code>aeade5e</code></a> Code cleanup</li>
-<li>2026-05-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b2bbcc0bdd8c836ad396a1f32afd590b0c7236a8"><code>b2bbcc0</code></a> Improve and fix IPC</li>
-<li>2026-05-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/db23b5365e1ee201e8928c2a87ac2d449e876552"><code>db23b53</code></a> Fix major memory leak and remove sshd silo</li>
-<li>2026-05-19 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93c8927544e95bb8847495f1044913f9f9ff05b0"><code>93c8927</code></a> async: implement and optimize async I/O completion handling</li>
-<li>2026-05-18 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb"><code>7c5efb4</code></a> async: io_uring-like async I/O — ring, dispatch, AHCI bridge (Phases 1-4)</li>
-<li>2026-05-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/cc4944a2c78236c41fce4b8f1054e119fc2bcd8e"><code>cc4944a</code></a> Refactor and clean up code in various modules</li>
-<li>2026-05-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ecc416df41e29c26f6839ee15cffbc7a7dd41f05"><code>ecc416d</code></a> refactor: strate-init refactoring, ELF/VFS/signal hardening, TSC calibration fix</li>
-<li>2026-05-08 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f070d41c31fb505fef36603ee7cbc0c6648944b3"><code>f070d41</code></a> Add kernel entropy pool with interrupt-driven collection</li>
-<li>2026-05-08 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9dedb9f19215cd1ad7f4d65d88fe84e4832bfc7c"><code>9dedb9f</code></a> Implement robust list support (set_robust_list/get_robust_list)</li>
-<li>2026-05-08 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d2e90a2ffc1886bc3e72b6d2d10e4dd99c156d5a"><code>d2e90a2</code></a> Bridge clone() thread creation via SYS_THREAD_CREATE, add faccessat routing</li>
-<li>2026-05-08 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/dabcad2d5250a317a12ec3b41048a9dfe3d6019c"><code>dabcad2</code></a> Add sys_access(), sys_faccessat(), and SYS_GETRANDOM() in syscall dispatcher</li>
+<li>2026-09-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f64aff3c6072bbb7c6f7ef7e698dadab837df431"><code>f64aff3c</code></a> Implement console rendering and mouse input handling tasks</li>
+<li>2026-09-13 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3898c5074c07d2b5bdbd13b505a51ccfe92a0e30"><code>3898c507</code></a> feat(bootloader, kernel, abi): homemade strat9 UEFI bootloader : rewrite with scheduler and memory hardening</li>
+<li>2026-08-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c03feb24811b210174712aa7be5a9e097e32a80d"><code>c03feb24</code></a> fix(abi): ENOTSUP 52→95, XFS EiB constant fix, decode_fixed roundtrip tests</li>
+<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3ca6d7c6e61014fe2ad305f22e5bf75c0bdaeebd"><code>3ca6d7c6</code></a> feat: Add U-Boot setup script and boot protocol implementation</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/88c52834c3a0af3c6f01f14f3d7364f32a862281"><code>88c52834</code></a> refactor(arch): unify x86_64 crate access via x86_crate_shim, complete riscv stubs</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c8ca94c43ffb700129b00ddf661e45637515d6fc"><code>c8ca94c4</code></a> refactor(arch): route shared code through arch::xshim, gate limine/x86 deps</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f3366e1db5be83bea4a1f71e16be6bcc442fbce9"><code>f3366e1d</code></a> refactor(arch): migrate process/ and syscall/ call-sites to arch facade</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4399b5f5229b096596f6fe221f5509014a258c88"><code>4399b5f5</code></a> test: pass 2 over full codebase — syscall, ABI data/handshake, NIC drivers, allocator</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/88feb023653dd6b3b919a743829575707f63fc24"><code>88feb023</code></a> test(abi): exhaustive L0/L1 anti-regression suite</li>
+<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/09216d7c556d521ef4e05528753ca02c70950e72"><code>09216d7c</code></a> Merge branch 'fix/elf-loader-hardening' into 'main'</li>
+<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/2bad5b9b8ae1a351c26ddcc69a78488a5d659dfe"><code>2bad5b9b</code></a> feat(elf): loader hardening (#62 #63 #64 #67 #68, groundwork #66)</li>
+<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6ca7fef90feacf3fe163cf6c5be7ba833c460e02"><code>6ca7fef9</code></a> fix(ipc): security hardening, perf fixes and typed wire-format layer</li>
+<li>2026-07-18 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/abb7dd7e60991de111632e72ae8658adccdf8697"><code>abb7dd7e</code></a> feat(buddy): harden, optimize, and add kernel.toml configuration</li>
+<li>2026-07-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/fe68f9aacb1b70b8601cbdde1423be75628255d1"><code>fe68f9aa</code></a> fix(vfs,console,scheduler): VFS improvements, console perf, panic backtrace</li>
+<li>2026-07-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3a5eb69d9b3041f89c205e184b4afe15c07ee44d"><code>3a5eb69d</code></a> feat(silo): replace Vec with heapless::Vec for bounded fields</li>
+<li>2026-07-09 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ab22b0d9b010dd704cf6044580b4f310c5748524"><code>ab22b0d9</code></a> feat: 3-level IPC transport, N3 MMU thread migration, graphical silo, NIC/E1000 fixes</li>
+<li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5a3d69c4e10c4cfc67976a837751ce50292f9032"><code>5a3d69c4</code></a> feat: migrate input system to userspace</li>
+<li>2026-06-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3fea3f3776edefa7bdc7c3a8d930c8d17b0939a6"><code>3fea3f37</code></a> SMP hardware debug, NVMe fixes, VGA refactor, telnetd hardening, docs</li>
+<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e4ab1a96c3579117defffe0f5b32cf7cac853129"><code>e4ab1a96</code></a> Enhance network stack, NIC drivers, USB/NVMe subsystems, and thermal management</li>
+<li>2026-06-03 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0c40058547bd9b7ef07a837b1153577879510994"><code>0c400585</code></a> Refactor the network stack and add dual-stack userspace tooling</li>
+<li>2026-05-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/aeade5ef5fcfdddef2caa43da6af361a5102c7cd"><code>aeade5ef</code></a> Code cleanup</li>
+<li>2026-05-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b2bbcc0bdd8c836ad396a1f32afd590b0c7236a8"><code>b2bbcc0b</code></a> Improve and fix IPC</li>
+<li>2026-05-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/db23b5365e1ee201e8928c2a87ac2d449e876552"><code>db23b536</code></a> Fix major memory leak and remove sshd silo</li>
+<li>2026-05-19 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93c8927544e95bb8847495f1044913f9f9ff05b0"><code>93c89275</code></a> async: implement and optimize async I/O completion handling</li>
+<li>2026-05-18 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb"><code>7c5efb4d</code></a> async: io_uring-like async I/O — ring, dispatch, AHCI bridge (Phases 1-4)</li>
+<li>2026-05-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/cc4944a2c78236c41fce4b8f1054e119fc2bcd8e"><code>cc4944a2</code></a> Refactor and clean up code in various modules</li>
+<li>2026-05-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ecc416df41e29c26f6839ee15cffbc7a7dd41f05"><code>ecc416df</code></a> refactor: strate-init refactoring, ELF/VFS/signal hardening, TSC calibration fix</li>
+<li>2026-05-08 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f070d41c31fb505fef36603ee7cbc0c6648944b3"><code>f070d41c</code></a> Add kernel entropy pool with interrupt-driven collection</li>
+<li>2026-05-08 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9dedb9f19215cd1ad7f4d65d88fe84e4832bfc7c"><code>9dedb9f1</code></a> Implement robust list support (set_robust_list/get_robust_list)</li>
+<li>2026-05-08 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d2e90a2ffc1886bc3e72b6d2d10e4dd99c156d5a"><code>d2e90a2f</code></a> Bridge clone() thread creation via SYS_THREAD_CREATE, add faccessat routing</li>
 </ul>
 <!-- AUTO-ABI-CHANGELOG:END -->
 <h2 id="changelog-entries"><a class="header" href="#changelog-entries">Changelog entries</a></h2>
 <h3 id="01"><a class="header" href="#01">0.1</a></h3>
 <ul>
-<li>Introduced canonical <code>strat9-abi</code> crate as single source of truth.</li>
+<li>Introduced the canonical <code>strat9-abi</code> crate as single source of truth.</li>
 <li>Unified syscall numbers in <code>strat9_abi::syscall</code>.</li>
 <li>Unified shared structs (<code>TimeSpec</code>, <code>IpcMessage</code>, <code>FileStat</code>, PCI types).</li>
-<li>Added boot handoff ABI (<code>KernelArgs</code>, <code>MemoryRegion</code>, <code>MemoryKind</code>) with magic/version checks.</li>
-<li>Added ABI introspection syscall <code>SYS_ABI_VERSION</code>.</li>
+<li>Added the boot handoff ABI (<code>KernelArgs</code>, <code>MemoryRegion</code>, <code>MemoryKind</code>) with magic and version checks.</li>
+<li>Added the ABI introspection syscall <code>SYS_ABI_VERSION</code> (900).</li>
 </ul>
+<h3 id="boot-handoff-abi--tracked-separately"><a class="header" href="#boot-handoff-abi--tracked-separately">Boot handoff ABI — tracked separately</a></h3>
+<p>The boot struct is versioned on its own counter, not on <code>ABI_VERSION_*</code>.</p>
+<div class="table-wrapper"><table><thead><tr><th>Version</th><th>Struct</th><th>Size</th><th>Notes</th></tr></thead><tbody>
+<tr><td>2</td><td><code>KernelArgs</code></td><td>132 B</td><td>Superseded. Still described in <code>workspace/bootloader/README.md</code></td></tr>
+<tr><td>3</td><td><code>KernelArgs</code></td><td>132 B</td><td>Superseded</td></tr>
+<tr><td><strong>4</strong> (<code>STRAT9_BOOT_ABI_VERSION</code>)</td><td><code>KernelArgs</code></td><td><strong>132 B</strong></td><td>Current. Adds <code>bss_virt_base</code> / <code>bss_virt_size</code>, drops the <code>stack_base</code> / <code>stack_size</code> fields in favour of passing the stack in registers to <code>paging::context_switch</code></td></tr>
+</tbody></table>
+</div>
+<p><code>STRAT9_BOOT_MAGIC = 0x5354_3942</code> (<code>"ST9B"</code>). The size is asserted at compile time in two places in <code>workspace/abi/src/boot.rs</code>.</p>
+<h3 id="errno-corrections"><a class="header" href="#errno-corrections">Errno corrections</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Date</th><th>Change</th><th>Detail</th></tr></thead><tbody>
+<tr><td>2026-08-28</td><td><code>ENOTSUP</code> 52 → <strong>95</strong></td><td>Aligned with Linux <code>EOPNOTSUPP</code> so musl/relibc map 1:1. Pinned by <code>workspace/abi/tests/errno_abi.rs:57</code></td></tr>
+</tbody></table>
+</div>
+<blockquote>
+<p><strong>Open inconsistency.</strong> <code>strat9_abi::errno::ENOTSUP</code> is 95, but the kernel's <code>SyscallError::NotSupported</code> in <code>workspace/kernel/src/syscall/error.rs</code> is still <code>-52</code>, so the kernel currently emits a value the ABI does not define. <code>SyscallError</code> also lacks <code>ELOOP</code> (40), <code>EAFNOSUPPORT</code> (97), <code>EADDRINUSE</code> (98) and <code>ECONNREFUSED</code> (111), which the ABI does define. See <a href="./syscalls.html#enotsup-numbering">Syscall Reference → <code>ENOTSUP</code> numbering</a>.</p>
+</blockquote>
+<h3 id="flag-layout"><a class="header" href="#flag-layout">Flag layout</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Date</th><th>Change</th><th>Detail</th></tr></thead><tbody>
+<tr><td>initial</td><td><code>OpenFlags</code> defined as a bitflag set</td><td>Access mode is a 2-bit field (<code>READ</code>/<code>WRITE</code>), <strong>not</strong> a 0/1/2 enum. <code>posix_oflags_to_strat9()</code> performs the POSIX translation</td></tr>
+<tr><td>initial</td><td><code>MapFlags</code> declared with <code>MAP_NORESERVE</code>, <code>MAP_GROWSDOWN</code>, <code>MAP_LOCKED</code>, <code>MAP_POPULATE</code></td><td>The kernel's <code>sys_mmap</code> rejects these bits with <code>EINVAL</code>. See <a href="./syscalls.html#mapflags-vs-the-kernels-map">Syscall Reference → <code>MapFlags</code> vs the kernel's <code>MAP_*</code></a></td></tr>
+</tbody></table>
+</div>
 <h2 id="entry-template"><a class="header" href="#entry-template">Entry template</a></h2>
 <p>Use this template for future ABI entries:</p>
 <pre><code class="language-text">### X.Y

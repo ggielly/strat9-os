@@ -162,7 +162,128 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="ipc-transport-architecture"><a class="header" href="#ipc-transport-architecture">IPC Transport Architecture</a></h1>
+                        <h1 id="ipc-access-levels"><a class="header" href="#ipc-access-levels">IPC Access Levels</a></h1>
+<p>How Strat9 OS decides <em>how</em> two silos may talk to each other, and what each level actually costs.</p>
+<p>This page describes the implementation. The original proposal is preserved as a historical design note in <code>docs/architecture-ipc-access-levels.md</code> (v0.1.0, 2026-06-23, in French); several of its predictions did not survive contact with the code — see <a href="#divergences-from-the-design-note">Divergences from the design note</a> at the end.</p>
+<hr />
+<h2 id="the-three-levels"><a class="header" href="#the-three-levels">The three levels</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Label</th><th>Enum variant</th><th>Implementation</th><th>Where</th></tr></thead><tbody>
+<tr><td>N1</td><td><code>TransportLevel::TypeSafe</code> (= 1)</td><td><code>IntrusiveMailbox</code> — lock-free LIFO stack of kernel messages</td><td><code>kernel/src/ipc/mailbox.rs</code></td></tr>
+<tr><td>N2</td><td><code>TransportLevel::LockFree</code> (= 2)</td><td><code>LockFreeRing</code> — bounded MPMC queue on the kernel heap</td><td><code>kernel/src/ipc/lockfree_ring.rs</code></td></tr>
+<tr><td>N3</td><td><code>TransportLevel::Mmu</code> (= 3)</td><td><code>N3Transport</code> — CR3 switch with PCID, unidirectional</td><td><code>kernel/src/ipc/n3.rs</code></td></tr>
+</tbody></table>
+</div>
+<p>All three run <strong>inside the kernel</strong>. N1 is a kernel-internal mailbox; N2's queue lives on the kernel heap; N3's shared frame and message buffer are mapped kernel-only. Userspace never holds a transport endpoint directly — it goes through <code>SYS_TRANSPORT_*</code>.</p>
+<hr />
+<h2 id="selection"><a class="header" href="#selection">Selection</a></h2>
+<h3 id="silo-tiers"><a class="header" href="#silo-tiers">Silo tiers</a></h3>
+<p><code>SiloTier { Critical = 0, System = 1, User = 2 }</code>. The tier is not stored; <code>SiloId::new()</code> recomputes it from the numeric silo id on every construction:</p>
+<div class="table-wrapper"><table><thead><tr><th>Silo id</th><th>Tier</th></tr></thead><tbody>
+<tr><td><code>1..=9</code></td><td>Critical</td></tr>
+<tr><td><code>10..=999</code></td><td>System</td></tr>
+<tr><td>everything else, including <code>0</code></td><td>User</td></tr>
+</tbody></table>
+</div>
+<h3 id="the-matrix"><a class="header" href="#the-matrix">The matrix</a></h3>
+<p><code>TransportManager</code> holds a <code>[[TransportPolicyEntry; 3]; 3]</code>, indexed <code>[src.tier][dst.tier]</code>, where each entry is <code>(level, ring_capacity)</code>:</p>
+<div class="table-wrapper"><table><thead><tr><th>src \ dst</th><th>Critical</th><th>System</th><th>User</th></tr></thead><tbody>
+<tr><td><strong>Critical</strong></td><td>TypeSafe, 0</td><td>TypeSafe, 0</td><td>LockFree, 256</td></tr>
+<tr><td><strong>System</strong></td><td>TypeSafe, 0</td><td>LockFree, 256</td><td>LockFree, 256</td></tr>
+<tr><td><strong>User</strong></td><td>LockFree, 256</td><td>LockFree, 256</td><td><strong>Mmu</strong>, 0</td></tr>
+</tbody></table>
+</div>
+<h3 id="resolution-order"><a class="header" href="#resolution-order">Resolution order</a></h3>
+<p><code>establish(src: SiloId, dst: SiloId, config: TransportConfig)</code> applies three steps in order:</p>
+<ol>
+<li><strong>Cache.</strong> A 128-entry FIFO keyed on <code>(src.sid, dst.sid)</code>. A hit is reused only if the cached level is at least <code>config.min_level</code>.</li>
+<li><strong>Policy override.</strong> <code>policy_overrides</code> is consulted next. On a hit it wins outright — both <code>min_level</code> and the caller's <code>ring_capacity</code> are discarded. Only <code>TransportManager::set_policy()</code> populates this map, and it currently has no callers.</li>
+<li><strong>Matrix.</strong> Otherwise <code>level = max(matrix[src][dst], config.min_level)</code>. The caller's minimum can only <em>raise</em> the level, never lower it.</li>
+</ol>
+<h3 id="why-n1-is-unreachable-from-userspace"><a class="header" href="#why-n1-is-unreachable-from-userspace">Why N1 is unreachable from userspace</a></h3>
+<p><code>sys_transport_create</code> decodes <code>config_flags</code> and defaults the minimum level to <code>LockFree</code>:</p>
+<div class="table-wrapper"><table><thead><tr><th>Bits</th><th>Meaning</th><th>Default</th></tr></thead><tbody>
+<tr><td><code>[3:0]</code></td><td>Minimum level (1 TypeSafe, 2 LockFree, 3 Mmu)</td><td>2 — LockFree</td></tr>
+<tr><td><code>[23:8]</code></td><td>Ring capacity in slots</td><td>256</td></tr>
+</tbody></table>
+</div>
+<p>Because <code>min_level</code> is a floor, any caller that does not explicitly pass <code>1</code> raises both TypeSafe cells to LockFree. <strong>The N1 mailbox cannot be reached through <code>SYS_TRANSPORT_CREATE</code>.</strong> It is used only on the kernel-internal NIC ↔ scheduler path, via <code>notify_scheduler</code> and <code>poll_nic_events</code> in <code>kernel/src/ipc/n1.rs</code>.</p>
+<p>The ABI header's claim that "the transport level is selected automatically based on the silo tiers" is therefore only true for callers that pass no <code>config_flags</code> at all, and even then only for the User↔User cell.</p>
+<hr />
+<h2 id="level-details"><a class="header" href="#level-details">Level details</a></h2>
+<h3 id="n1--typesafe"><a class="header" href="#n1--typesafe">N1 — TypeSafe</a></h3>
+<p><code>IntrusiveMailbox</code> is a lock-free LIFO stack built on intrusive tagged pointers.</p>
+<pre><code class="language-rust">let mailbox = IntrusiveMailbox::new();   // preallocates 32 nodes
+mailbox.push(b"notification")?;          // LIFO push
+let msg = mailbox.pop();                 // last message first</code></pre>
+<ul>
+<li><strong>Genuinely LIFO</strong>, pinned by the unit test <code>push_pop_lifo_order</code> and by <code>kernel-l2-tests/tests/kernel_n1_semaphores.rs</code>.</li>
+<li><strong>Not <code>#[forbid(unsafe_code)]</code>.</strong> No <code>forbid</code>/<code>deny(unsafe_code)</code> exists anywhere under <code>kernel/src/ipc/</code>, and <code>mailbox.rs</code> has raw <code>unsafe</code> dereferences at lines 145, 162, 222, 235, 263 and 273. The two <code>forbid(unsafe_code)</code> attributes in the tree are in <code>kernel/src/ostd/</code>.</li>
+<li><strong>The preallocation never runs.</strong> <code>ipc::n1::init()</code>, which calls <code>preallocate_nodes(32)</code> on both mailboxes, has no callers, so the node pool is empty and every <code>push</code> falls back to a <code>Box</code> heap allocation — defeating the "no heap allocation on the IRQ path" intent.</li>
+<li>Advertised: 256-byte messages, non-blocking, not zero-copy, single direction, <code>estimated_cost_cycles: 10</code>.</li>
+</ul>
+<h3 id="n2--lockfree"><a class="header" href="#n2--lockfree">N2 — LockFree</a></h3>
+<p><code>LockFreeRing</code> wraps <code>crossbeam_queue::ArrayQueue&lt;Box&lt;[u8]&gt;&gt;</code> — a <strong>bounded MPMC</strong> queue, not SPSC. Each <code>write</code> heap-allocates and copies a boxed buffer.</p>
+<ul>
+<li><code>new(slot_count, slot_size)</code> rounds the capacity up to a power of two</li>
+<li><code>write</code> / <code>read</code>, plus <code>try_write</code> / <code>try_read</code> and <code>write_vectored</code></li>
+<li><code>notify_consumer_raw</code> and <code>notify_producer_raw</code> are <strong>empty functions</strong>; <code>wait_notification()</code> spins 64 times then loops on <code>block_current_task()</code>. There is no futex.</li>
+<li>There is <strong>no shared-memory ring, no DMA and no <code>RingHeader</code></strong>. <code>dma_buffer()</code> always returns <code>None</code>, and <code>frame_phys_addrs()</code> returns a single dummy frame kept for syscall compatibility.</li>
+<li>The SPSC typestate wrapper <code>TypedLockFreeRing</code> / <code>create_spsc_pair</code> exists in <code>ipc/transport.rs</code> but has <strong>zero call sites</strong>, and does not enforce SPSC at runtime.</li>
+<li>Advertised: 2048-byte messages, blocking, not zero-copy, vectored, bidirectional, <code>estimated_cost_cycles: 400</code>.</li>
+</ul>
+<h3 id="n3--mmu"><a class="header" href="#n3--mmu">N3 — MMU</a></h3>
+<p><code>kernel/src/ipc/n3.rs</code> is 1552 lines of real implementation: a naked <code>mov cr3, rax; ret</code> trampoline, an IDT-registered migration IPI at vector <code>0xF1</code>, a PCID allocator, a 4-level page-table walker that validates the target RIP, a shared 320-byte migration frame, a 64-entry frame pool with a bitmap allocator, and a 10 ms TSC watchdog.</p>
+<ul>
+<li><code>N3Tier</code> has only two variants — <code>PcidPreserving</code> and <code>FullIsolation</code> (named <code>"n3b"</code> and <code>"n3c"</code>). There is no N3a.</li>
+<li>The module carries a file-level <code>#![allow(dead_code)]</code> and has <strong>no <code>#[cfg(test)]</code> tests</strong>.</li>
+<li><strong>Sends currently fail.</strong> <code>N3Transport::send()</code> needs <code>task.trampoline_entry != 0</code> and then needs that RIP to pass <code>validate_rip()</code>, which rejects both <code>rip &gt;= 0xFFFF_8000_0000_0000</code> and any page with <code>U/S = 1</code> at every level of the walk. Every kernel task constructor sets <code>trampoline_entry = 0</code>; the only non-zero assignment is a userspace ELF entry point, which is exactly what the validator rejects. A User↔User transport is therefore <em>created successfully</em> and then fails on the first <code>send</code> with <code>EFAULT</code>. There is no fallback to N2.</li>
+<li>Advertised: 2048-byte messages, blocking, not zero-copy, unidirectional, <code>estimated_cost_cycles: 800</code>.</li>
+</ul>
+<hr />
+<h2 id="endpoint-shape"><a class="header" href="#endpoint-shape">Endpoint shape</a></h2>
+<p>For TypeSafe and LockFree, <code>TransportManager::create()</code> builds <strong>one</strong> object and <code>Arc::clone</code>s it into both <code>local</code> and <code>remote</code>. The two endpoints are the same underlying mailbox or queue: there is no directional split, and a TypeSafe transport has both ends pushing and popping the same LIFO stack. Only the Mmu branch is directional, and it is unidirectional by construction.</p>
+<p><code>sys_transport_create</code> also performs no validation that the destination silo exists.</p>
+<hr />
+<h2 id="syscall-surface"><a class="header" href="#syscall-surface">Syscall surface</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Syscall</th><th>#</th><th>Args</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>SYS_TRANSPORT_CREATE</code></td><td>260</td><td><code>dst_silo, config_flags</code></td><td>Returns a capability handle, not a raw id</td></tr>
+<tr><td><code>SYS_TRANSPORT_SEND</code></td><td>261</td><td><code>handle, buf_ptr, buf_len</code></td><td>Non-blocking in practice: a full queue returns <code>EAGAIN</code></td></tr>
+<tr><td><code>SYS_TRANSPORT_RECV</code></td><td>262</td><td><code>handle, buf_ptr, buf_len</code></td><td>Non-blocking in practice: an empty queue returns <code>EAGAIN</code></td></tr>
+<tr><td><code>SYS_TRANSPORT_CLOSE</code></td><td>263</td><td><code>handle</code></td><td>Removes the capability; the manager entry is reclaimed when the last reference drops</td></tr>
+<tr><td><code>SYS_TRANSPORT_INFO</code></td><td>264</td><td><code>handle, out_ptr</code></td><td>Writes <strong>8 bytes</strong> — the level discriminant. There is no <code>TransportInfo</code> type</td></tr>
+</tbody></table>
+</div>
+<p><code>ResourceType::IpcTransport</code> is a first-class pollable: readiness comes from <code>endpoint.has_data()</code> and <code>endpoint.has_space()</code>.</p>
+<hr />
+<h2 id="cost"><a class="header" href="#cost">Cost</a></h2>
+<p><strong>No measurement in the repository backs any cycle figure.</strong> There is no IPC benchmark — no <code>criterion</code>, <code>divan</code> or <code>iai</code> harness under <code>kernel/</code>, <code>abi/</code> or <code>kernel-l2-tests/</code>. The only TSC read in the IPC tree is the N3 watchdog timestamp.</p>
+<p>The only numbers present in code are three hardcoded <code>estimated_cost_cycles</code> literals, and <strong>nothing reads that field anywhere</strong>:</p>
+<div class="table-wrapper"><table><thead><tr><th>Level</th><th>Literal</th></tr></thead><tbody>
+<tr><td>TypeSafe</td><td><code>10</code></td></tr>
+<tr><td>LockFree</td><td><code>400</code></td></tr>
+<tr><td>Mmu</td><td><code>800</code></td></tr>
+</tbody></table>
+</div>
+<p>Treat these as scheduler hints, not measurements.</p>
+<hr />
+<h2 id="divergences-from-the-design-note"><a class="header" href="#divergences-from-the-design-note">Divergences from the design note</a></h2>
+<p><code>docs/architecture-ipc-access-levels.md</code> proposed a different shape in June 2026. Where the implementation differs:</p>
+<div class="table-wrapper"><table><thead><tr><th>Design note</th><th>Implementation</th></tr></thead><tbody>
+<tr><td>N1 as <code>SfiTransport</code> selecting by a "100 % safe Rust, <code>cargo-geiger = 0</code>" manifest check</td><td>N1 is <code>IntrusiveMailbox</code>, with no safety audit gate anywhere in the build</td></tr>
+<tr><td>N2 as an SPSC ring in <strong>shared memory</strong> with a <code>RingHeader</code>, a 64-byte header, N slots, and futex notification</td><td>N2 is a kernel-heap MPMC <code>ArrayQueue</code> of boxed buffers, with no shared memory and no futex</td></tr>
+<tr><td>N2/N3 as <strong>Ring 3</strong> transports with MMU isolation</td><td>Both run entirely in the kernel</td></tr>
+<tr><td>N3 as <code>SYSCALL</code> + thread migration at ~460 cycles</td><td>Implemented as a CR3/PCID switch, but unreachable on the current task model</td></tr>
+<tr><td>A NIC data path where <code>strate-net</code> reads the ring with <strong>zero syscalls</strong></td><td><code>strate-net</code> is a userspace silo; it reaches the NIC through syscalls, and the N1 mailbox is the only kernel-internal path</td></tr>
+<tr><td>Overheads of ~3 / ~200 / ~460 cycles and per-packet CPU percentages</td><td>Unmeasured. Only the three literals above exist</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="see-also"><a class="header" href="#see-also">See also</a></h2>
+<ul>
+<li><a href="./ipc-mechanisms.html">IPC Mechanisms</a> — the full transport reference, including the legacy port/channel/ring/semaphore mechanisms</li>
+<li><a href="./silo.html">Silo System</a> — where silo tiers and pledge/unveil are enforced</li>
+<li><a href="./syscalls.html#ipc--transport-n1n2n3">Syscall Reference → IPC: transport</a></li>
+</ul>
 
                     </main>
 

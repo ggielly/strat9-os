@@ -163,102 +163,201 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="memory-management"><a class="header" href="#memory-management">Memory Management</a></h1>
-<p>Strat9 OS uses a layered memory architecture: physical frame allocation (buddy), kernel heap (slab), virtual memory (page tables + COW), and large-object allocation (vmalloc).</p>
+<p>Strat9 OS uses a layered memory architecture: a pre-boot physical allocator, a real buddy frame allocator with per-CPU caches, a slab kernel heap with a vmalloc large-object backend, four-level page tables with an HHDM and copy-on-write, and demand paging for user VMAs.</p>
 <hr />
 <h2 id="memory-hierarchy"><a class="header" href="#memory-hierarchy">Memory hierarchy</a></h2>
 <pre><code class="language-mermaid">graph TB
     subgraph "Physical"
-        BUDDY[Buddy Allocator]
-        ZONES[Zone DMA / Normal / HighMem]
-        FRAMES[Physical Frames 4KiB]
+        BOOTALLOC[boot_alloc&lt;br/&gt;pre-buddy, first-fit]
+        ZONES[Zones: DMA / Normal / HighMem]
+        SEG[ZoneSegments&lt;br/&gt;per-order free lists + parity bitmaps]
+        META[Frame metadata array&lt;br/&gt;64 B MetaSlot per frame]
+        FRAMES[Physical frames, 4 KiB]
     end
 
-    subgraph "Kernel Heap"
-        SLAB[Slab Sub-allocator]
-        HEAP[GlobalAlloc Heap]
+    subgraph "Kernel heap"
+        SLAB[Slab: 26 size classes, &lt;= 2040 B]
+        VMALLOC[vmalloc: 1 GiB arena, &gt; 2040 B]
+        GLOBAL[LockedHeap global_allocator]
     end
 
-    subgraph "Virtual Memory"
-        AS[Address Space / PML4]
-        VMA[Virtual Memory Regions]
-        COW[COW Pages]
-        PAGING[Page Tables]
+    subgraph "Virtual memory"
+        AS[AddressSpace / PML4]
+        VMA[VMAs, demand paging]
+        COW[COW via PTE bit 9]
+        HHDM[Higher-Half Direct Map]
     end
 
-    subgraph "Large Objects"
-        VMALLOC[Vmalloc]
-    end
-
-    BUDDY --&gt; FRAMES
-    ZONES --&gt; BUDDY
+    BOOTALLOC --&gt; ZONES
+    ZONES --&gt; SEG
+    BOOTALLOC --&gt; META
+    SEG --&gt; FRAMES
     FRAMES --&gt; SLAB
-    SLAB --&gt; HEAP
-    FRAMES --&gt; PAGING
+    FRAMES --&gt; VMALLOC
+    SLAB --&gt; GLOBAL
+    VMALLOC --&gt; GLOBAL
     AS --&gt; VMA
     VMA --&gt; COW
-    COW --&gt; PAGING
-    FRAMES --&gt; VMALLOC
+    FRAMES --&gt; HHDM
 </code></pre>
-<hr />
-<h2 id="buddy-allocator"><a class="header" href="#buddy-allocator">Buddy allocator</a></h2>
-<p>The buddy allocator manages physical frames. It divides memory into zones (DMA, Normal, HighMem) and uses a free-list per order (0–10) for power-of-two allocations.</p>
-<p><strong>Key properties:</strong></p>
-<ul>
-<li>Order-0 allocations go through per-CPU caches (<code>LOCAL_FRAME_CACHES</code>) for O(1) fast path</li>
-<li>Cross-CPU stealing when local cache is empty</li>
-<li>Compaction assist when high-order allocations fail</li>
-<li>Refcount sentinel: free-list frames carry <code>REFCOUNT_UNUSED</code> (u32::MAX)</li>
-</ul>
-<pre><code class="language-text">alloc order-0:
-  1. Try local cache (per-CPU, PreemptDisabled lock)
-  2. Refill cache from buddy global
-  3. Steal from other CPU caches
-  4. Fallback to global buddy allocator
-</code></pre>
-<hr />
-<h2 id="slab-heap"><a class="header" href="#slab-heap">Slab heap</a></h2>
-<p>The kernel heap uses a slab sub-allocator for small objects (≤ 2048 bytes). Each size class has its own free list backed by whole pages from the buddy allocator.</p>
-<div class="table-wrapper"><table><thead><tr><th>Class size</th><th>Typical use</th></tr></thead><tbody>
-<tr><td>16 B</td><td>Small structs, list nodes</td></tr>
-<tr><td>32 B</td><td>Capability entries</td></tr>
-<tr><td>64 B</td><td>IPC message headers</td></tr>
-<tr><td>128 B</td><td>Task control blocks</td></tr>
-<tr><td>256 B</td><td>VMA entries</td></tr>
-<tr><td>512 B</td><td>Pathname buffers</td></tr>
-<tr><td>1024 B</td><td>Syscall argument buffers</td></tr>
-<tr><td>2048 B</td><td>Large temporary buffers</td></tr>
+<h2 id="module-map"><a class="header" href="#module-map">Module map</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>File</th><th>Lines</th><th>Role</th></tr></thead><tbody>
+<tr><td><code>memory/buddy.rs</code></td><td>2770</td><td>Physical frame allocator, per-CPU caches, fragmentation telemetry</td></tr>
+<tr><td><code>memory/address_space.rs</code></td><td>2257</td><td>Per-process PML4, VMAs, effective mappings, demand paging, COW clone</td></tr>
+<tr><td><code>memory/vmalloc.rs</code></td><td>1142</td><td>VM-backed large-allocation arena</td></tr>
+<tr><td><code>memory/heap.rs</code></td><td>1098</td><td><code>#[global_allocator]</code> — slab + vmalloc dispatch</td></tr>
+<tr><td><code>memory/frame.rs</code></td><td>955</td><td>Per-frame <code>MetaSlot</code> metadata, <code>FrameAllocOptions</code>, <code>REFCOUNT_UNUSED</code></td></tr>
+<tr><td><code>memory/boot_alloc.rs</code></td><td>571</td><td>Pre-buddy physical allocator used during early init</td></tr>
+<tr><td><code>memory/paging.rs</code></td><td>563</td><td><code>OffsetPageTable</code> wrapper, HHDM helpers, <code>BuddyFrameAllocator</code></td></tr>
+<tr><td><code>memory/userslice.rs</code></td><td>530</td><td>User-pointer validation, <code>USER_SPACE_END</code></td></tr>
+<tr><td><code>memory/zone.rs</code></td><td>468</td><td><code>ZoneType</code>, <code>Migratetype</code>, <code>Zone</code>, <code>ZoneSegment</code>, <code>BuddyBitmap</code></td></tr>
+<tr><td><code>memory/region_cap.rs</code></td><td>333</td><td>Exported memory-region capability registry</td></tr>
+<tr><td><code>memory/ownership.rs</code></td><td>322</td><td><code>OwnershipTable</code> — capability refcounts for shared blocks</td></tr>
+<tr><td><code>memory/cow.rs</code></td><td>128</td><td>COW flag helpers and the transient COW pin</td></tr>
+<tr><td><code>memory/block.rs</code></td><td>140</td><td><code>BlockHandle</code> and the typestate <code>PhysBlock&lt;S&gt;</code></td></tr>
+<tr><td><code>memory/mapping_index.rs</code></td><td>92</td><td><code>CapId</code> → live mappings reverse index</td></tr>
+<tr><td><code>memory/block_meta.rs</code></td><td>50</td><td><code>resolve_handle()</code> compatibility shim</td></tr>
 </tbody></table>
 </div>
-<p>Allocations &gt; 2048 bytes go directly to the buddy allocator via <code>vmalloc</code>.</p>
+<p>There is <strong>no <code>memory/alloc.rs</code></strong>. The only kernel <code>#[global_allocator]</code> is in <code>heap.rs</code>.</p>
 <hr />
-<h2 id="copy-on-write-cow"><a class="header" href="#copy-on-write-cow">Copy-on-Write (COW)</a></h2>
-<p>COW enables efficient <code>fork()</code> by sharing physical frames between parent and child.</p>
-<pre><code class="language-mermaid">sequenceDiagram
-    participant P as Parent
-    participant K as Kernel
-    participant C as Child
-
-    P-&gt;&gt;K: fork()
-    K-&gt;&gt;K: Clone page tables (mark all RO + COW)
-    K-&gt;&gt;K: Share physical frames (refcount++)
-    K--&gt;&gt;C: New address space
-
-    Note over C: Child writes to shared page
-    C-&gt;&gt;K: Page fault (COW)
-    K-&gt;&gt;K: Allocate new frame, copy page
-    K-&gt;&gt;K: Remap child's PTE (RW, clear COW)
-    K-&gt;&gt;K: Decrement parent refcount
-    K--&gt;&gt;C: Write succeeds
-</code></pre>
-<p><strong>COW refcount invariant:</strong></p>
+<h2 id="boot-allocator-pre-buddy"><a class="header" href="#boot-allocator-pre-buddy">Boot allocator (pre-buddy)</a></h2>
+<p><code>memory/boot_alloc.rs</code> serves the allocations needed <em>before</em> the buddy exists: the frame metadata array, the buddy bitmaps, and the segment tables.</p>
 <ul>
-<li>refcount == 1 → sole owner (no sharing)</li>
-<li>refcount &gt; 1 → shared (writes trigger COW fault)</li>
-<li>refcount == REFCOUNT_UNUSED → free-list frame</li>
+<li><code>BootAllocator { regions: [BootRegion; 512], len, accessible_limit }</code>, first-fit over sorted, merged <code>Free</code> + <code>Reclaim</code> extents</li>
+<li><code>MAX_BOOT_ALLOC_REGIONS = 512</code>, <code>MAX_PROTECTED_RANGES = 32</code></li>
+<li><code>try_alloc_accessible</code> is gated on <code>is_hhdm_range_mapped_now</code>, so it refuses addresses the HHDM cannot currently translate</li>
+<li><code>boot_alloc::seal()</code> is called at the end of buddy init (<code>buddy.rs:185</code>); the allocator refuses further allocations afterwards</li>
 </ul>
+<p>There is <strong>no E820 parser</strong> anywhere in the workspace. The map comes from the UEFI bootloader's <code>GetMemoryMap()</code>; see <a href="./boot-sequence.html">Boot Sequence</a>.</p>
+<hr />
+<h2 id="buddy-allocator"><a class="header" href="#buddy-allocator">Buddy allocator</a></h2>
+<p>A real buddy allocator modelled on Linux's design.</p>
+<ul>
+<li><code>BuddyAllocator { zones: [Zone; 3], bitmap_pool: [(u64, u64); 3] }</code></li>
+<li>Each <code>Zone</code> is a <strong>range-split container of <code>ZoneSegment</code>s</strong>, not a flat bitmap: each segment owns its per-order free lists and parity bitmaps, and segment lookup is a binary search</li>
+<li><code>free_lists: [[u64; MAX_ORDER + 1]; Migratetype::COUNT]</code> per segment</li>
+<li>Coalescing uses per-order parity bitmaps (<code>insert_free_block</code>, <code>toggle_pair</code>, <code>buddy_phys</code>)</li>
+<li><strong>Free-list links live in the out-of-band <code>MetaSlot</code>, never in page bytes</strong></li>
+<li>Global lock: <code>static BUDDY_ALLOCATOR: SpinLock&lt;Option&lt;BuddyAllocator&gt;&gt;</code></li>
+<li>Every alloc/free takes an <code>IrqDisabledToken</code>, a compile-time proof that interrupts are disabled</li>
+</ul>
+<h3 id="orders"><a class="header" href="#orders">Orders</a></h3>
+<p><code>MAX_ORDER = 11</code> → orders 0..=11, i.e. 4 KiB up to <strong>8 MiB</strong>. Allocations above order 11 are rejected.</p>
+<h3 id="zones"><a class="header" href="#zones">Zones</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Zone</th><th>Range</th><th>Default migratetype</th></tr></thead><tbody>
+<tr><td><code>DMA</code> (<code>ZoneType::DMA = 0</code>)</td><td>0 .. 16 MiB</td><td>Unmovable</td></tr>
+<tr><td><code>Normal</code> (<code>ZoneType::Normal = 1</code>)</td><td>16 MiB .. 896 MiB</td><td>Unmovable</td></tr>
+<tr><td><code>HighMem</code> (<code>ZoneType::HighMem = 2</code>)</td><td>above 896 MiB</td><td>Movable</td></tr>
+</tbody></table>
+</div>
+<p>Each zone enforces watermarks and a lowmem reserve before it will accept another allocation. Scan order depends on migratetype: Unmovable scans Normal → HighMem → DMA, while Movable scans <strong>HighMem → Normal → DMA</strong> so that pageable allocations do not consume low memory. A failed allocation is retried once with watermarks ignored.</p>
+<h3 id="migratetypes"><a class="header" href="#migratetypes">Migratetypes</a></h3>
+<p><code>Migratetype { Unmovable = 0, Movable = 1 }</code>. Each segment carries a free list per (order, migratetype), and 2 MiB pageblocks are tagged so that a pageblock's migratetype is stable. <code>fallback_order()</code> allows bidirectional cross-class borrowing when one class is exhausted. Merging a block with a buddy of a different migratetype is refused.</p>
+<h3 id="per-cpu-caches"><a class="header" href="#per-cpu-caches">Per-CPU caches</a></h3>
+<ul>
+<li><code>LOCAL_FRAME_CACHES: [SpinLock&lt;LocalFrameCache, PreemptDisabled&gt;; LOCAL_CACHE_SLOTS]</code></li>
+<li><code>LOCAL_CACHE_SLOTS = Migratetype::COUNT * MAX_CPUS</code> = 2 × 32 = <strong>64 slots</strong></li>
+<li><code>LOCAL_CACHE_CAPACITY = 256</code> frames per cache</li>
+<li><code>LOCAL_CACHE_REFILL_ORDER = 4</code> (16 pages), <code>LOCAL_CACHE_FLUSH_BATCH = 64</code></li>
+<li>Cacheability filter: Unmovable caches draw <strong>only from Normal</strong>; Movable caches draw from <strong>Normal + HighMem, never DMA</strong></li>
+</ul>
+<pre><code class="language-text">alloc order-0:
+  1. Take from the local per-CPU cache
+  2. Refill the cache from the buddy free lists (one order-4 block)
+  3. Steal from another CPU's cache
+  4. Fall back to the global buddy allocator
+</code></pre>
+<h3 id="refcount-sentinel"><a class="header" href="#refcount-sentinel">Refcount sentinel</a></h3>
+<p><code>REFCOUNT_UNUSED: u32 = u32::MAX</code> (<code>memory/frame.rs:81</code>).</p>
+<div class="table-wrapper"><table><thead><tr><th>Refcount</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>REFCOUNT_UNUSED</code></td><td>Frame sits on a free list</td></tr>
+<tr><td><code>1</code></td><td>Sole owner, not shared</td></tr>
+<tr><td><code>&gt; 1</code></td><td>Shared, writes trigger a COW fault</td></tr>
+</tbody></table>
+</div>
+<p><code>FrameAllocOptions::allocate</code> performs a fail-fast <code>cas_refcount(REFCOUNT_UNUSED, 1)</code> and panics on mismatch, and <code>mark_block_allocated</code> carries a matching <code>debug_assert_eq!</code>.</p>
+<h3 id="frame-metadata"><a class="header" href="#frame-metadata">Frame metadata</a></h3>
+<p>A 64-byte <code>MetaSlot</code> is allocated for <strong>every</strong> 4 KiB frame at boot, out of band from <code>boot_alloc</code>. The layout contract is <code>refcount</code> at byte offset 32.</p>
+<ul>
+<li><code>meta_guard::{NONE, KERNEL_ONLY, POISONED}</code></li>
+<li><code>frame_flags::{ALLOCATED, FREE, KERNEL, USER, POISONED, MOVABLE, COW, DLL, ANONYMOUS, DMA}</code></li>
+<li><code>FrameMetaVtable { on_last_ref, on_unmap, … }</code> teardown hooks, dispatched from <code>release_owned_block</code></li>
+<li><code>FrameAllocOptions</code> / <code>FramePurpose</code> policy: page-table frames are force-zeroed, others are zeroed by default</li>
+<li>Poisoned blocks are quarantined and never recycled</li>
+<li>Debug builds keep a double-alloc / double-free bitmap</li>
+<li>Per-order allocation-failure counters and per-order fragmentation scores feed <code>dump_diagnostics()</code></li>
+</ul>
+<h3 id="compaction-is-compaction-assist-not-compaction"><a class="header" href="#compaction-is-compaction-assist-not-compaction">"Compaction" is compaction-<em>assist</em>, not compaction</a></h3>
+<p>There is <strong>no page migration</strong>: no <code>migrate_page</code>, no pageblock relocation, no <code>MIGRATE_*</code> types. What exists is a fragmentation-score-gated <strong>drain of the per-CPU order-0 caches</strong> when a high-order allocation fails.</p>
+<ul>
+<li><code>COMPACTION_FRAGMENTATION_THRESHOLD</code> defaults to <strong>35</strong>; <code>set_compaction_threshold</code> can change it at runtime</li>
+<li><code>compaction_candidate()</code> and <code>compaction_drain_budget()</code> select the victim zones; <code>alloc_migratetype</code> invokes the assist on a miss</li>
+<li><code>CompactionStats</code> counters are dumped from the IDT panic path</li>
+</ul>
+<p><code>workspace/assets/boot/kernel.toml</code> sets <code>[buddy] compaction_threshold = 35</code>, but <code>boot::config::apply_kernel_config()</code> is currently a no-op stub, so the file is not read at boot.</p>
+<hr />
+<h2 id="slab-kernel-heap"><a class="header" href="#slab-kernel-heap">Slab kernel heap</a></h2>
+<p><code>memory/heap.rs</code> implements <code>unsafe impl GlobalAlloc</code> for <code>LockedHeap</code>, registered as <code>#[global_allocator]</code>. An <code>#[alloc_error_handler]</code> provides extensive OOM diagnostics.</p>
+<ul>
+<li><code>SlabState { partial_pages: [*mut SlabPageHeader; NUM_SLABS] }</code> behind a spinlock</li>
+<li>A 24-byte <code>SlabPageHeader</code> lives at byte 0 of every buddy-drawn 4 KiB page; a refill takes one order-0 page from the buddy and carves it</li>
+<li>Pages that become completely empty are returned to the buddy allocator</li>
+<li><strong>Corruption detection is on unconditionally</strong>: <code>HEAP_POISON_ENABLED = true</code>, poison byte <code>0xDE</code>, canary <code>0xDEAD_BEEF</code>, 8-byte tail redzone. Every allocation memsets the body and every deallocation verifies the canary</li>
+</ul>
+<h3 id="size-classes"><a class="header" href="#size-classes">Size classes</a></h3>
+<p><strong>26 classes</strong>, not powers of two. The progression is roughly 1.25× above 64 bytes:</p>
+<pre><code class="language-text">  8,  16,  24,  32,  48,  64,  80,  96, 112, 128, 160, 192,
+224, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1280, 1536,
+1792, 2048
+</code></pre>
+<p>Each class guarantees alignment equal to its largest power-of-two divisor — for example 24 → 8, 48 → 16, 80 → 16, 112 → 16, 160 → 32, 192 → 64, 320 → 64, 640 → 128, 896 → 128, 1280 → 256, 1792 → 256. Blocks per page is <code>(4096 - align_up(24, class_align)) / class_size</code>, so the 2048 class fits exactly one block per page.</p>
+<h3 id="the-cut-over-is-2040-bytes-not-2048"><a class="header" href="#the-cut-over-is-2040-bytes-not-2048">The cut-over is 2040 bytes, not 2048</a></h3>
+<p><code>MAX_SLAB_SIZE = SLAB_SIZES[last] - REDZONE_TAIL</code> = 2048 − 8 = <strong>2040</strong>. The backend is chosen on <code>effective = max(layout.size(), layout.align())</code>: at or below 2040 the slab serves the request, above it the allocation goes to vmalloc. A class only matches if <code>size + 8 &lt;= class_size</code> and <code>align &lt;= class_alignment</code>. The large path rejects <code>align &gt; 4096</code>, since vmalloc only guarantees 4 KiB alignment.</p>
+<hr />
+<h2 id="vmalloc"><a class="header" href="#vmalloc">Vmalloc</a></h2>
+<p><code>memory/vmalloc.rs</code> is the large-object backend, not a separate API used only for oversized buddy orders.</p>
+<div class="table-wrapper"><table><thead><tr><th>Constant</th><th>Value</th></tr></thead><tbody>
+<tr><td><code>VMALLOC_VIRT_START</code></td><td><code>0xffff_c000_0000_0000</code></td></tr>
+<tr><td><code>VMALLOC_SIZE</code></td><td>1 GiB</td></tr>
+<tr><td><code>VMALLOC_VIRT_END</code></td><td><code>0xffff_c040_0000_0000</code></td></tr>
+<tr><td><code>ARENA_START_PAGE</code></td><td>1 (page 0 stays mapped as an anchor)</td></tr>
+</tbody></table>
+</div>
+<p>The arena lives at <strong>PML4[384]</strong>, in the shared kernel half. <code>ensure_kernel_subtree_ready()</code> permanently maps a bootstrap frame at <code>VMALLOC_VIRT_START</code> so the PDPT/PD/PT subtree is inherited by every address space cloned later.</p>
+<ul>
+<li>Intrusive <code>VmallocNode</code> free-extent and live-allocation lists, carved from <strong>raw buddy pages rather than the heap</strong>, deliberately, to avoid allocator recursion</li>
+<li>Best-fit virtual range reservation with coalescing of adjacent free extents</li>
+<li><code>vfree</code> runs in three phases — unmap under the lock, release the lock, then TLB shootdown and frame release — specifically to avoid holding a spinlock across an IPI</li>
+<li>Per-allocation attribution (task, pid, tid, silo, size, sequence, callsite) powers leak analysis</li>
+<li>Backed by <strong>individual order-0 buddy frames</strong>, mapped into a contiguous virtual range — not by high-order buddy blocks</li>
+</ul>
+<p>There is <strong>no path that routes "allocations larger than the buddy max order" to vmalloc</strong>. The only automatic trigger is the 2040-byte heap cut-over; everything else is an explicit <code>allocate_kernel_virtual()</code> call.</p>
+<hr />
+<h2 id="copy-on-write"><a class="header" href="#copy-on-write">Copy-on-Write</a></h2>
+<p>COW is implemented and wired into the real page-fault path.</p>
+<h3 id="the-cow-marker-is-pte-bit-9"><a class="header" href="#the-cow-marker-is-pte-bit-9">The COW marker is PTE bit 9</a></h3>
+<p><code>const COW_BIT: PageTableFlags = PageTableFlags::BIT_9</code> — set in the parent during clone and checked by the fault handler. This is distinct from the <code>frame_flags::COW</code> metadata bit, which is a separate concept.</p>
+<h3 id="clone-side"><a class="header" href="#clone-side">Clone side</a></h3>
+<p><code>AddressSpace::clone_cow()</code> (<code>address_space.rs:1846+</code>) walks every writable effective mapping, clears WRITABLE, sets the COW bit in the parent, maps the same physical frame in the child, takes a transient ownership pin, registers a child <code>EffectiveMapping</code> under a <strong>new</strong> <code>CapId</code>, then drops the pin. The child is mapped writable first and downgraded afterwards so intermediate PDPT/PD levels are created writable. Any error rolls the whole clone back.</p>
+<h3 id="fault-side"><a class="header" href="#fault-side">Fault side</a></h3>
+<p><code>handle_cow_fault(virt_addr, address_space)</code> (<code>syscall/fork.rs:395-627</code>):</p>
+<ol>
+<li>Reject if the PTE lacks bit 9</li>
+<li><code>refcount == 1</code> → simply add WRITABLE, clear COW, <code>invlpg</code></li>
+<li><code>refcount &gt; 1</code> → allocate (order 0 for 4 KiB, <strong>order 9</strong> for 2 MiB), <code>copy_nonoverlapping</code>, unmap and remap, roll back on any failure, initialise the new handle's refcount</li>
+<li>Both <code>VmaPageSize::Small</code> and <code>VmaPageSize::Huge</code> are handled</li>
+</ol>
+<p><code>page_fault_handler</code> (<code>arch/x86_64/idt.rs:853-1085</code>) tries COW <strong>first</strong>, and only for a <code>PROTECTION_VIOLATION</code> caused by a write in user mode. Otherwise it falls through to <code>AddressSpace::handle_fault()</code> for demand paging. A present page that takes a protection violation is explicitly <strong>not</strong> retried.</p>
+<h3 id="refcount-ownership"><a class="header" href="#refcount-ownership">Refcount ownership</a></h3>
+<p>Refcounts live in two layers:</p>
+<ol>
+<li><strong><code>OwnershipTable</code></strong> (<code>memory/ownership.rs</code>) is authoritative. <code>OwnerEntry { state, refcount, caps, transient_refs }</code> in a single spinlocked <code>BTreeMap</code>, with <code>BlockState { BuddyReserved, Exclusive, Shared, Free }</code> and <code>RemoveRefResult { Freed, NowExclusive, StillPinned, StillShared }</code>. The COW transient pin is <code>pin()</code> / <code>unpin()</code>.</li>
+<li><strong><code>MetaSlot.refcount</code></strong> mirrors it via <code>sync_meta</code> and doubles as the buddy free-list sentinel. Reads prefer the ownership table and fall back to metadata.</li>
+</ol>
 <hr />
 <h2 id="page-tables"><a class="header" href="#page-tables">Page tables</a></h2>
-<p>The kernel uses x86_64 4-level paging (PML4 → PDPT → PD → PT).</p>
+<p>Four-level x86_64 paging: PML4 → PDPT → PD → PT. There is no LA57/5-level support; the translation walker uses fixed shifts <code>[39, 30, 21, 12]</code>.</p>
 <div class="table-wrapper"><table><thead><tr><th>Level</th><th>Covers</th><th>Entry size</th></tr></thead><tbody>
 <tr><td>PML4</td><td>512 GiB</td><td>8 bytes</td></tr>
 <tr><td>PDPT</td><td>1 GiB</td><td>8 bytes</td></tr>
@@ -266,19 +365,49 @@
 <tr><td>PT</td><td>4 KiB</td><td>8 bytes</td></tr>
 </tbody></table>
 </div>
-<p><strong>Address space layout:</strong></p>
-<ul>
-<li><code>PML4[0..256]</code> → user space (per-process)</li>
-<li><code>PML4[256..512]</code> → kernel space (shared across all processes)</li>
-</ul>
-<p>Each user process gets a fresh PML4 with the kernel half cloned from the boot PML4. This shares kernel L3/L2/L1 subtrees : kernel mapping changes propagate automatically.</p>
+<h3 id="address-space-layout"><a class="header" href="#address-space-layout">Address space layout</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Region</th><th>Location</th><th>PML4 slot</th></tr></thead><tbody>
+<tr><td>User space</td><td>low half</td><td><code>0..256</code></td></tr>
+<tr><td>Kernel image</td><td><code>0xFFFF_FFFF_8000_0000</code></td><td><code>511</code></td></tr>
+<tr><td>HHDM</td><td><code>0xFFFF_FF00_0000_0000</code></td><td><code>510</code></td></tr>
+<tr><td>vmalloc arena</td><td><code>0xffff_c000_0000_0000</code></td><td><code>384</code></td></tr>
+<tr><td>Framebuffer window</td><td><code>0xFFFF_DEAD_0000_0000</code></td><td>kernel half</td></tr>
+<tr><td>Environment block</td><td><code>0xFFFF_BEEF_0000_0000</code></td><td>kernel half</td></tr>
+</tbody></table>
+</div>
+<p><code>AddressSpace::new_user()</code> zeroes a fresh PML4 frame and clones entries 256..512 from the kernel PML4. <strong>PML4[511] holding the kernel image is shared, not privatised</strong> — isolation comes from the U/S page bits, not from a per-process copy.</p>
+<blockquote>
+<p>Two in-tree comments contradict this and are out of date: <code>memory/userslice.rs:96-108</code> (claiming user space ends at <code>0x7FFF_FFFF_FFFF</code> and userspace is linked in the higher half) and <code>workspace/components/user-linker.ld:8-15</code> (claiming a private PML4[511] copy). Userspace binaries are in fact linked at <strong><code>0x400000</code></strong> in the low half.</p>
+</blockquote>
+<h3 id="userspace-bounds"><a class="header" href="#userspace-bounds">Userspace bounds</a></h3>
+<p><code>USER_SPACE_END = 0xFFFF_FFFF_FFFF_FFFF</code> (<code>memory/userslice.rs:109</code>), re-exported as <code>USER_ADDR_MAX</code> and <code>USER_TOP_EXCLUSIVE</code>. <code>MAX_USER_SLICE_LEN = 16 MiB</code> caps a single user-pointer copy.</p>
+<h3 id="hhdm"><a class="header" href="#hhdm">HHDM</a></h3>
+<p><code>static HHDM_OFFSET: AtomicU64</code> with <code>set_hhdm_offset</code>, <code>hhdm_offset</code>, <code>phys_to_virt</code> and <code>virt_to_phys</code>. The value is <strong><code>0xFFFF_FF00_0000_0000</code></strong>, not the more common <code>0xFFFF_8000_0000_0000</code>. The bootloader maps 8 GiB initially with a 512 GiB ceiling; the kernel extends the map lazily itself via <code>paging::map_all_ram</code>, using write-back for RAM and uncacheable + write-through + no-execute for MMIO.</p>
+<p><code>retire_uefi_identity_code()</code> drops the UEFI identity mapping to read-only when <code>loader.paging=wx-uc-v1</code>, and <code>set_trampoline_execution</code> controls execute permission on the AP trampoline page at physical <code>0x8000</code>.</p>
+<h3 id="kaslr"><a class="header" href="#kaslr">KASLR</a></h3>
+<p><code>BRK_BASE = 0x20_0000_0000</code> (512 MiB) and <code>MMAP_BASE = 0x60_0000_0000</code> (1.5 GiB) are the nominal constants, but both are randomised at runtime through <code>kaslr::mmap_base()</code>, and the stack base sits at <code>0x0000_7FFF_F000_0000</code>. The VMA maps in <code>address_space.rs</code> are built from the randomised values.</p>
+<h3 id="demand-paging"><a class="header" href="#demand-paging">Demand paging</a></h3>
+<p><code>AddressSpace::handle_fault()</code> services faults for <code>VmaType::{Anonymous, Stack, Code}</code> user VMAs.</p>
+<h3 id="huge-pages"><a class="header" href="#huge-pages">Huge pages</a></h3>
+<p>Partial 2 MiB support only. <code>MAP_HUGETLB</code> sets <code>VmaPageSize::Huge</code>; the address and length are rounded to 2 MiB, and the VMA is backed by a <strong>physically contiguous order-9 buddy block</strong> mapped with <code>PageTableFlags::HUGE_PAGE</code>. COW at 2 MiB granularity is implemented. There is no 1 GiB page support, no reserved-hugepage pool, no <code>MADV_HUGEPAGE</code> and no transparent huge pages.</p>
 <hr />
-<h2 id="vmalloc"><a class="header" href="#vmalloc">Vmalloc</a></h2>
-<p>Large non-contiguous allocations use <code>vmalloc</code>, which maps arbitrary physical pages into a contiguous virtual range. Used for:</p>
+<h2 id="known-rough-edges"><a class="header" href="#known-rough-edges">Known rough edges</a></h2>
 <ul>
-<li>Large metadata arrays</li>
-<li>Buffers that don't need physical contiguity</li>
-<li>Allocations &gt; buddy max order</li>
+<li><strong><code>ostd::mm::AllocatedPages</code> leaks its frames on drop.</strong> <code>memory/ostd/mm.rs:419-431</code> carries a <code>TODO</code> and deliberately does not deallocate. <code>ostd::mm::Vmar</code> (<code>:520-588</code>) is a stub whose <code>alloc</code> is unimplemented.</li>
+<li><strong><code>init_cow_subsystem</code> is an empty no-op</strong> (<code>memory/mod.rs:62-63</code>). COW is initialised implicitly.</li>
+<li><strong><code>boot::config::apply_kernel_config()</code> is a stub</strong>, so <code>kernel.toml</code> is never read.</li>
+<li><strong><code>memory/mod.rs:28-30</code> refers to "BIOS/identity-mapped boot"</strong>, which no longer exists; the HHDM-is-zero path is exercised only by host tests.</li>
+<li><strong><code>memory/vmalloc.rs:16-17</code> places the HHDM at <code>0xffff8000_0000_0000</code></strong>, which is the canonical higher-half boundary (PML4[256]), not the actual HHDM start.</li>
+<li><strong><code>memory/cow.rs:15-19</code></strong> describes <code>COW_LOCK</code> as protecting the refcounts; it guards only the metadata flag bits, and the fault handler reads PTE bit 9 instead. The real refcounts are in <code>OwnershipTable</code>.</li>
+</ul>
+<hr />
+<h2 id="see-also"><a class="header" href="#see-also">See also</a></h2>
+<ul>
+<li><a href="./boot-sequence.html">Boot Sequence</a> — where the HHDM offset and memory map come from</li>
+<li><a href="./architecture.html">Architecture Overview</a></li>
+<li><a href="./syscalls.html#memory-management">Syscall Reference → Memory management</a> — <code>mmap</code>, <code>brk</code>, <code>mremap</code> and the <code>PROT_*</code> / <code>MAP_*</code> flags</li>
+<li><code>doc/2026-04-buddy-allocator-evolution.md</code> — historical design note (repository <code>doc/</code> directory)</li>
+<li><code>workspace/kernel-l2-tests/</code> — host-side tests that compile the real <code>buddy.rs</code>, <code>zone.rs</code>, <code>frame.rs</code> and <code>boot_alloc.rs</code> verbatim</li>
 </ul>
 
                     </main>
