@@ -70,7 +70,8 @@ pub fn kernel_elf_bytes() -> Option<&'static [u8]> {
     if base == 0 || size == 0 {
         return None;
     }
-    Some(unsafe { core::slice::from_raw_parts(base as *const u8, size) })
+    let virt_base = base.checked_add(crate::memory::hhdm_offset())?;
+    Some(unsafe { core::slice::from_raw_parts(virt_base as *const u8, size) })
 }
 
 /// Enable SSE (OSFXSR, OSXMMEXCPT) and FPU (NE) in CR0/CR4.
@@ -201,6 +202,13 @@ pub unsafe extern "C" fn kmain(args_ptr: u64) -> ! {
         );
         early_print(b"\r\n");
         hlt_loop();
+    }
+
+    // KernelArgs points to the retained on-disk ELF bytes in boot memory.
+    // kernel_elf_bytes() applies the HHDM offset once it has been installed.
+    unsafe {
+        KERNEL_ELF_BASE = args.kernel_base;
+        KERNEL_ELF_SIZE = args.kernel_size;
     }
 
     let memory_map_base =

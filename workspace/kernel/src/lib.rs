@@ -481,7 +481,6 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     e9_mark!(b'k');
     boot::panic::install_default_panic_hooks();
     e9_mark!(b'l');
-    boot::symbols::init();
     e9_mark!(b'm');
 
     // Nice logo :D
@@ -573,6 +572,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     let hhdm = args.hhdm_offset;
     memory::set_hhdm_offset(hhdm);
+    // Resolve panic backtraces only after the physical-to-virtual HHDM mapping
+    // is known and the bootloader-provided ELF copy can be read safely.
+    boot::symbols::init();
     #[cfg(target_arch = "x86_64")]
     if args.env_get("loader.paging") == Some("wx-uc-v1") {
         // No low EFI instruction is needed now. Revoke its executable alias

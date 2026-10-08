@@ -517,7 +517,52 @@ fn interrupt_frame_fits(task: &Arc<Task>, rsp: u64) -> bool {
     let stack_base = task.kernel_stack.virt_base.as_u64();
     let stack_top = stack_base + task.kernel_stack.size as u64;
     let frame_size = core::mem::size_of::<crate::syscall::SyscallFrame>() as u64;
-    rsp >= stack_base && rsp.saturating_add(frame_size) <= stack_top
+    rsp & 7 == 0 && rsp >= stack_base && rsp.saturating_add(frame_size) <= stack_top
+}
+
+#[derive(Clone, Copy)]
+struct IretFrameInfo {
+    rip: u64,
+    cs: u64,
+    rflags: u64,
+    rsp: u64,
+    ss: u64,
+}
+
+/// Read the hardware return portion of a saved SyscallFrame. The caller must
+/// first prove that the complete frame lies inside the task's kernel stack.
+#[inline]
+fn read_iret_frame(rsp: u64) -> IretFrameInfo {
+    let word = |index: usize| unsafe { core::ptr::read_unaligned((rsp as *const u64).add(index)) };
+    IretFrameInfo {
+        rip: word(15),
+        cs: word(16),
+        rflags: word(17),
+        rsp: word(18),
+        ss: word(19),
+    }
+}
+
+/// Validate an interrupt frame saved by the Ring-3 LAPIC timer path before
+/// the naked trampoline pivots stacks and executes IRETQ.
+fn validate_iret_frame(frame: IretFrameInfo) -> Result<(), &'static str> {
+    let user_top = 0x0000_8000_0000_0000u64;
+    if frame.rip == 0 || frame.rip >= user_top {
+        return Err("iret RIP is not a nonzero user-canonical address");
+    }
+    if frame.rsp == 0 || frame.rsp >= user_top {
+        return Err("iret RSP is not a nonzero user-canonical address");
+    }
+    if frame.cs != crate::arch::gdt::user_code_selector().0 as u64 {
+        return Err("iret CS is not the current CPU's user code selector");
+    }
+    if frame.ss != crate::arch::gdt::user_data_selector().0 as u64 {
+        return Err("iret SS is not the current CPU's user data selector");
+    }
+    if frame.rflags & 0x2 == 0 {
+        return Err("iret RFLAGS reserved bit 1 is clear");
+    }
+    Ok(())
 }
 
 /// Called from the timer interrupt handler (or a resched IPI) to potentially
@@ -697,9 +742,45 @@ pub fn maybe_preempt_from_interrupt(
                     new_fpu: current_fpu,
                 });
             }
-            let fits = interrupt_frame_fits(&next, next_rsp);
-            if next_rsp == 0 || !fits {
+            let fits = next_rsp != 0 && interrupt_frame_fits(&next, next_rsp);
+            let iret_frame = if fits {
+                Some(read_iret_frame(next_rsp))
+            } else {
+                None
+            };
+            let invalid_reason = if next_rsp == 0 {
+                Some("missing saved interrupt frame")
+            } else if !fits {
+                Some("saved interrupt frame is outside or misaligned in kernel stack")
+            } else {
+                iret_frame.and_then(|frame| validate_iret_frame(frame).err())
+            };
+            if let Some(reason) = invalid_reason {
                 unsafe { core::arch::asm!("mov al, 'A'; out 0xe9, al", out("al") _) };
+                if let Some(frame) = iret_frame {
+                    crate::serial_force_println!(
+                        "[sched-iret] reject task='{}' id={} cpu={} frame={:#018x} reason={} rip={:#018x} cs={:#06x} rflags={:#018x} rsp={:#018x} ss={:#06x}",
+                        next.name,
+                        next.id.as_u64(),
+                        cpu_index,
+                        next_rsp,
+                        reason,
+                        frame.rip,
+                        frame.cs,
+                        frame.rflags,
+                        frame.rsp,
+                        frame.ss,
+                    );
+                } else {
+                    crate::serial_force_println!(
+                        "[sched-iret] reject task='{}' id={} cpu={} frame={:#018x} reason={} (frame fields unreadable)",
+                        next.name,
+                        next.id.as_u64(),
+                        cpu_index,
+                        next_rsp,
+                        reason,
+                    );
+                }
                 let is_idle_fallback = Arc::ptr_eq(&next, &cpu.idle_task);
                 _task_to_drop = cpu.task_to_drop.take();
 

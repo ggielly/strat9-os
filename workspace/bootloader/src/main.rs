@@ -225,6 +225,19 @@ fn boot_kernel() -> BootResult<()> {
     // SAFETY: UEFI reserved this whole image before any segment is written.
     // The source Vec is a separate, still-live UEFI allocation.
     unsafe { elf_info.load_into(&buf, kernel_allocation) }.map_err(BootError::invalid)?;
+
+    // Keep a copy of the original ELF file for the kernel's panic symbol
+    // resolver. The loaded PT_LOAD image does not contain the ELF section
+    // table, so it cannot be used to recover .symtab/.strtab later.
+    let kernel_elf_allocation = boot_memory.allocate(file_size as u64, "kernel ELF symbols")?;
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            buf.as_ptr(),
+            kernel_elf_allocation.base as *mut u8,
+            file_size,
+        );
+    }
+    let kernel_elf_base = kernel_elf_allocation.base;
     drop(buf);
 
     uefi::system::with_stdout(|stdout| {
@@ -495,8 +508,8 @@ fn boot_kernel() -> BootResult<()> {
     let args = KernelArgs {
         magic: strat9_abi::boot::STRAT9_BOOT_MAGIC,
         abi_version: strat9_abi::boot::STRAT9_BOOT_ABI_VERSION,
-        kernel_base: elf_info.phys_base,
-        kernel_size: elf_info.phys_end - elf_info.phys_base,
+        kernel_base: kernel_elf_base,
+        kernel_size: file_size as u64,
         acpi_rsdp_base: rsdp_addr,
         memory_map_base: mmap_region_base,
         memory_map_size: region_count as u64 * core::mem::size_of::<MemoryRegion>() as u64,

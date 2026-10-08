@@ -1884,7 +1884,9 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     if let Some((name, offset)) = crate::boot::symbols::lookup(rip) {
         crate::serial_force_println!("[GPF] symbol={}+{:#x}", name, offset);
     } else {
-        crate::serial_force_println!("[GPF] symbol unavailable (ELF symbol table not loaded or RIP not covered)");
+        crate::serial_force_println!(
+            "[GPF] symbol unavailable (ELF symbol table not loaded or RIP not covered)"
+        );
     }
     crate::serial_force_println!(
         "[GPF] error-code: EXT={} IDT={} TI={} selector-index={}",
