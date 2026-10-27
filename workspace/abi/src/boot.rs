@@ -81,7 +81,7 @@ pub const MAX_BOOT_MEMORY_REGIONS: usize = 1024;
 pub const MODULE_TABLE_SIZE: usize = core::mem::size_of::<ModuleTable>();
 const MODULE_TABLE_HEADER_SIZE: usize = core::mem::offset_of!(ModuleTable, entries);
 
-/// Bootloader-to-kernel handoff structure (ABI v2, 136 bytes).
+/// Bootloader-to-kernel handoff structure (ABI v5, 132 bytes).
 ///
 /// Field layout is ordered to avoid internal padding:
 /// - u64 fields first (8-byte aligned)

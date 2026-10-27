@@ -46,7 +46,6 @@ pub mod message;
 pub mod n1;
 pub mod n3;
 pub mod port;
-pub mod quota;
 pub mod reply;
 pub mod semaphore;
 pub mod shared_ring;
@@ -67,7 +66,6 @@ pub use n3::{
     N3Transport, N3_SHARED_FRAME_VA,
 };
 pub use port::{create_port, destroy_port, get_port, IpcError, Port, PortId};
-pub use quota::{IpcQuota, QuotaExceeded};
 pub use semaphore::{
     create_semaphore, destroy_semaphore, get_semaphore, PosixSemaphore, SemId, SemaphoreError,
 };
