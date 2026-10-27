@@ -231,8 +231,15 @@ impl Scheme for DisplayScheme {
                 buf[..n].copy_from_slice(&b[start..start + n]);
                 Ok(n)
             }
-            Handle::Screen(_display_id, screen, _) => {
-                // Read pixel data from the frame-backed surface.
+            Handle::Screen(_display_id, screen, writable) => {
+                // A display surface is a pixel device, not a byte stream.
+                // `cat /dev/display/0.0` would otherwise dump megabytes of
+                // binary (including XOFF/escape bytes) into the console and
+                // make the terminal appear frozen. Only a writable handle
+                // (display server, console, screenshot tool) may read pixels.
+                if !*writable {
+                    return Err(SyscallError::PermissionDenied);
+                }
                 let scr = screen.read();
                 Ok(scr.read_into(offset as usize, buf))
             }
@@ -491,9 +498,12 @@ impl Scheme for DisplayScheme {
     /// never torn down while the system runs).
     fn mmap_frames(&self, fid: u64) -> Option<MmapFrames> {
         let handles = self.handles.read();
-        let Handle::Screen(_, screen, _) = handles.get(&fid)? else {
+        let Handle::Screen(_, screen, writable) = handles.get(&fid)? else {
             return None;
         };
+        if !*writable {
+            return None;
+        }
         let scr = screen.read();
         Some(MmapFrames {
             frames: scr.frames(),
