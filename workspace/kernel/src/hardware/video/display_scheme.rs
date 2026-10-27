@@ -318,7 +318,13 @@ impl Scheme for DisplayScheme {
                         if format.is_xrgb8888() {
                             // SIMD BGR888 -> XRGB8888 (pshufb-based, handles
                             // unaligned edges with a scalar tail).
-                            (fb_ops().convert)(row32.as_mut_ptr(), pixels.as_ptr().add(off), w);
+                            unsafe {
+                                (fb_ops().convert)(
+                                    row32.as_mut_ptr(),
+                                    pixels.as_ptr().add(off),
+                                    w,
+                                );
+                            }
                         } else {
                             // Rare GOP layout (RGB masks, BGRX, ...): pack
                             // each pixel with the real shifts.
