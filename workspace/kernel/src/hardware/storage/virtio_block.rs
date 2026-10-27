@@ -6,7 +6,7 @@
 //! Reference: VirtIO spec v1.2, Section 5.2 (Block Device)
 
 use crate::{
-    arch::pci::{self, PciDevice},
+    hardware::pci_client::{self as pci, PciDevice},
     hardware::virtio::{
         common::{VirtioDevice, Virtqueue},
         status,

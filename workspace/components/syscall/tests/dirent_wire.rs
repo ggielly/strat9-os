@@ -1,14 +1,16 @@
-//! L1 — `strat9_syscall`: dirent records, SchemeV2, SigAbi wire conformance.
+//! L1 : `strat9_syscall`: dirent records, SchemeV2, SigAbi wire conformance.
 //!
 //! `DirentIter` parses the packed kernel getdents format
 //! (`DirentHeader(12B) + name + NUL`). Malicious or truncated buffers come
-//! straight from filesystem silos — the iterator must never panic and never
+//! straight from filesystem silos : the iterator must never panic and never
 //! read out of bounds.
 
-use strat9_syscall::dirent::{Dirent, DirentIter};
-use strat9_syscall::schemev2::SchemeV2;
-use strat9_syscall::sigabi::SigAbi;
 use strat9_abi::data::DirentHeader;
+use strat9_syscall::{
+    dirent::{Dirent, DirentIter},
+    schemev2::SchemeV2,
+    sigabi::SigAbi,
+};
 
 // ===========================================================================
 // Dirent construction

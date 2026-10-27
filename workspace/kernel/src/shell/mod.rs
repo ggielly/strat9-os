@@ -373,7 +373,16 @@ pub extern "C" fn shell_main() -> ! {
         }
 
         // Read from keyboard buffer
+        // TEMP DEBUG: 'S' pulse each shell-loop iteration, 'R' when a char arrives.
+        unsafe {
+            crate::e9_mark!(b'S');
+        }
         if let Some(ch) = crate::arch::keyboard::read_char() {
+            unsafe {
+                crate::e9_mark!(b'R');
+                crate::e9_mark!(ch);
+                crate::e9_mark!(b'\n');
+            }
             // Any keypress returns the view to live output.
             if crate::arch::vga::is_available() {
                 crate::arch::vga::scroll_to_live();

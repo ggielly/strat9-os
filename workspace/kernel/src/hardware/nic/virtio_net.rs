@@ -8,7 +8,7 @@
 //! https://docs.oasis-open.org/virtio/virtio/v1.4/cs01/virtio-v1.4-cs01.html#x1-2700001
 
 use crate::{
-    arch::pci::{self, PciDevice},
+    hardware::pci_client::{self as pci, PciDevice},
     hardware::{
         nic as net,
         virtio::{

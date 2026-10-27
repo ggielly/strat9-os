@@ -1200,6 +1200,7 @@ struct ModuleImage {
 
 struct ModuleRegistry {
     modules: BTreeMap<u64, ModuleImage>,
+    next_id: u64,
 }
 
 impl ModuleRegistry {
@@ -1207,14 +1208,22 @@ impl ModuleRegistry {
     const fn new() -> Self {
         ModuleRegistry {
             modules: BTreeMap::new(),
+            next_id: 1,
         }
+    }
+
+    // Both storage paths share the same namespace. Never recycle IDs: stale
+    // module capabilities must not resolve to a later registration.
+    fn allocate_id(&mut self) -> Result<u64, SyscallError> {
+        let id = self.next_id;
+        self.next_id = id.checked_add(1).ok_or(SyscallError::OutOfMemory)?;
+        Ok(id)
     }
 
     /// Performs the register operation.
     fn register(&mut self, data: Vec<u8>) -> Result<u64, SyscallError> {
         let header = parse_module_header(&data)?;
-        static NEXT_MOD: AtomicU64 = AtomicU64::new(1);
-        let id = NEXT_MOD.fetch_add(1, Ordering::Relaxed);
+        let id = self.allocate_id()?;
         self.modules.insert(
             id,
             ModuleImage {
@@ -1228,8 +1237,7 @@ impl ModuleRegistry {
 
     fn register_static(&mut self, data: &'static [u8]) -> Result<u64, SyscallError> {
         let header = parse_module_header(data)?;
-        static NEXT_MOD: AtomicU64 = AtomicU64::new(1);
-        let id = NEXT_MOD.fetch_add(1, Ordering::Relaxed);
+        let id = self.allocate_id()?;
         self.modules.insert(
             id,
             ModuleImage {
@@ -1583,6 +1591,12 @@ pub fn kernel_spawn_strate(
         let effective_xcr0 = (silo.config.xcr0_mask & fpu_xcr0).max(0x3);
         task.xcr0_mask
             .store(effective_xcr0, core::sync::atomic::Ordering::Relaxed);
+        // Propagate silo CPU affinity to task for scheduler placement.
+        let affinity = silo.config.cpu_affinity_mask;
+        if affinity != 0 {
+            task.affinity_mask
+                .store(affinity, core::sync::atomic::Ordering::Relaxed);
+        }
     }
     mgr.map_task(task_id, silo_id);
     mgr.push_event(SiloEvent {
@@ -1860,23 +1874,25 @@ pub fn sys_module_load(fd_or_ptr: u64, len: u64) -> Result<u64, SyscallError> {
             let user = UserSliceRead::new(fd_or_ptr, len)?;
             if matches!(user.read_u8(0), Ok(b'/')) {
                 let path_buf = user.read_to_vec();
-                if let Ok(path) = core::str::from_utf8(&path_buf) {
-                    if let Some(data) = crate::vfs::get_initfs_file_bytes(path) {
-                        let mut registry = MODULE_REGISTRY.lock();
-                        let id = registry.register_static(data)?;
-                        drop(registry);
+                let path =
+                    core::str::from_utf8(&path_buf).map_err(|_| SyscallError::InvalidArgument)?;
+                let data = crate::vfs::get_initfs_file_bytes(path).ok_or_else(|| {
+                    log::warn!("module_load: initfs path not found: '{}'", path);
+                    SyscallError::NotFound
+                })?;
+                let mut registry = MODULE_REGISTRY.lock();
+                let id = registry.register_static(data)?;
+                drop(registry);
 
-                        let cap = get_capability_manager().create_capability(
-                            ResourceType::Module,
-                            id as usize,
-                            CapPermissions::all(),
-                        );
+                let cap = get_capability_manager().create_capability(
+                    ResourceType::Module,
+                    id as usize,
+                    CapPermissions::all(),
+                );
 
-                        let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-                        let cap_id = unsafe { (&mut *task.process.capabilities.get()).insert(cap) };
-                        return Ok(cap_id.as_u64());
-                    }
-                }
+                let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+                let cap_id = unsafe { (&mut *task.process.capabilities.get()).insert(cap) };
+                return Ok(cap_id.as_u64());
             }
         }
 
@@ -2275,9 +2291,9 @@ fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
             // could hold an unrelated capability at the same slot. Verify
             // the duplicated capability actually matches a resource that
             // was explicitly granted to this silo before seeding it.
-            let authorized = granted_resources.iter().any(|g| {
-                g.resource_type == dup.resource_type && g.resource == dup.resource
-            });
+            let authorized = granted_resources
+                .iter()
+                .any(|g| g.resource_type == dup.resource_type && g.resource == dup.resource);
             if !authorized {
                 log::warn!(
                     "[silo] start sid={}: cap handle {} does not match any \
@@ -2368,6 +2384,12 @@ fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
         let effective_xcr0 = (silo.config.xcr0_mask & fpu_xcr0).max(0x3);
         task.xcr0_mask
             .store(effective_xcr0, core::sync::atomic::Ordering::Relaxed);
+        // Propagate silo CPU affinity to task for scheduler placement.
+        let affinity = silo.config.cpu_affinity_mask;
+        if affinity != 0 {
+            task.affinity_mask
+                .store(affinity, core::sync::atomic::Ordering::Relaxed);
+        }
     }
     mgr.map_task(task_id, silo_id);
     mgr.push_event(SiloEvent {

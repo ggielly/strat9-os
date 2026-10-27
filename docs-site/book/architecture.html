@@ -37,11 +37,23 @@
             const path_to_root = "";
             const default_light_theme = "coal";
             const default_dark_theme = "coal";
+            window.path_to_searchindex_js = "searchindex.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc.js"></script>
     </head>
     <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
     <div id="body-container">
         <!-- Work around some values being stored in localStorage wrapped in quotes -->
         <script>
@@ -82,10 +94,13 @@
                 sidebar = sidebar || 'visible';
             } else {
                 sidebar = 'hidden';
+                sidebar_toggle.checked = false;
             }
-            sidebar_toggle.checked = sidebar === 'visible';
-            html.classList.remove('sidebar-visible');
-            html.classList.add("sidebar-" + sidebar);
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
         </script>
 
         <nav id="sidebar" class="sidebar" aria-label="Table of contents">
@@ -119,7 +134,7 @@
                             <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
                             <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
                         </ul>
-                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
                             <i class="fa fa-search"></i>
                         </button>
                     </div>
@@ -133,7 +148,7 @@
                         <a href="https://git.strat9-os.org/strat9-os/" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="https://git.strat9-os.org/strat9-os/edit/main/docs-site/src/architecture.md" title="Suggest an edit" aria-label="Suggest an edit">
+                        <a href="https://git.strat9-os.org/strat9-os/edit/main/docs-site/src/architecture.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -142,7 +157,12 @@
 
                 <div id="search-wrapper" class="hidden">
                     <form id="searchbar-outer" class="searchbar-outer">
-                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
                     </form>
                     <div id="searchresults-outer" class="searchresults-outer hidden">
                         <div id="searchresults-header" class="searchresults-header"></div>
@@ -209,7 +229,7 @@
 <hr />
 <h2 id="subsystem-summary"><a class="header" href="#subsystem-summary">Subsystem summary</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Subsystem</th><th>Module</th><th>Purpose</th></tr></thead><tbody>
-<tr><td><strong>Boot</strong></td><td><code>boot/</code></td><td>Assembly stubs (16→64 bit), Limine handoff, early init</td></tr>
+<tr><td><strong>Boot</strong></td><td><code>boot/</code></td><td>Assembly stubs (16→64 bit), UEFI bootloader handoff, early init</td></tr>
 <tr><td><strong>Scheduler</strong></td><td><code>process/scheduler/</code></td><td>Per-CPU run queues, multi-class scheduling (RT FIFO/RR, Normal, Idle)</td></tr>
 <tr><td><strong>Memory</strong></td><td><code>memory/</code></td><td>Buddy allocator, slab heap, COW, page tables, vmalloc</td></tr>
 <tr><td><strong>IPC</strong></td><td><code>ipc/</code></td><td>3-level Transport Manager (TypeSafe/LockFree/MMU), typed channels, shared rings, semaphores</td></tr>
@@ -304,6 +324,7 @@
 
         <!-- Custom JS scripts -->
         <script src="src/theme/mermaid-init.js"></script>
+
 
 
     </div>

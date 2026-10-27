@@ -5,24 +5,22 @@
 //! review point / commit it traces.
 //!
 //! Families:
-//! 1. **Golden** — typed helpers emit byte-for-byte what the historical
+//! 1. **Golden** : typed helpers emit byte-for-byte what the historical
 //!    hand-rolled encodings produced (no wire drift).
-//! 2. **Round-trip** — encode → parse recovers the original values.
-//! 3. **Bounds** — malformed input is rejected, never truncated.
+//! 2. **Round-trip** : encode → parse recovers the original values.
+//! 3. **Bounds** : malformed input is rejected, never truncated.
 
-use strat9_abi::data::{
-    IpcMessage, TimeSpec, IPC_FILE_FLAG_DIRECTORY, IPC_MESSAGE_ALIGN, IPC_MESSAGE_SIZE,
+use strat9_abi::{
+    data::{IpcMessage, TimeSpec, IPC_FILE_FLAG_DIRECTORY, IPC_MESSAGE_ALIGN, IPC_MESSAGE_SIZE},
+    ipc::{IpcHandshake, IpcHandshakeReply, IPC_HANDSHAKE_VERSION_MISMATCH},
+    ipc_codec::{encode_fixed, get_str, put_u16_len_prefixed, InlineBlobHeader, PAYLOAD_CAPACITY},
+    ipc_payload::*,
 };
-use strat9_abi::ipc_codec::{
-    encode_fixed, get_str, put_u16_len_prefixed, InlineBlobHeader, PAYLOAD_CAPACITY,
-};
-use strat9_abi::ipc_payload::*;
-use strat9_abi::ipc::{IpcHandshake, IpcHandshakeReply, IPC_HANDSHAKE_VERSION_MISMATCH};
 
 const PATH: &str = "/etc/passwd";
 
 // ===========================================================================
-// Constants (review H4 / S2 — single source of truth for capacities)
+// Constants (review H4 / S2 : single source of truth for capacities)
 // ===========================================================================
 
 #[test]
@@ -39,7 +37,7 @@ fn message_constants_are_the_single_source_of_truth() {
 }
 
 // ===========================================================================
-// Opcodes (review H2 — wire contract lives in the ABI)
+// Opcodes (review H2 : wire contract lives in the ABI)
 // ===========================================================================
 
 #[test]
@@ -55,7 +53,7 @@ fn opcode_values_are_pinned() {
 }
 
 // ===========================================================================
-// A1 — InlineBlobHeader length guard
+// A1 : InlineBlobHeader length guard
 // ===========================================================================
 
 #[test]
@@ -79,7 +77,7 @@ fn a1_inline_blob_roundtrip() {
 }
 
 // ===========================================================================
-// A2 — encode_fixed fails loudly on oversized structs
+// A2 : encode_fixed fails loudly on oversized structs
 // ===========================================================================
 
 #[test]
@@ -92,7 +90,7 @@ fn a2_encode_fixed_panics_on_oversized_struct() {
 }
 
 // ===========================================================================
-// S4 — handshake reserved-field validation
+// S4 : handshake reserved-field validation
 // ===========================================================================
 
 #[test]
@@ -107,7 +105,10 @@ fn s4_handshake_reserved_field_detection() {
     let pad = IpcHandshake { _reserved: 7, ..hs };
     assert!(pad.has_reserved_bits_set());
 
-    let reply = IpcHandshakeReply { flags: 1, ..IpcHandshakeReply::ok() };
+    let reply = IpcHandshakeReply {
+        flags: 1,
+        ..IpcHandshakeReply::ok()
+    };
     assert!(reply.has_reserved_bits_set());
     assert_eq!(
         IpcHandshakeReply::reject(IPC_HANDSHAKE_VERSION_MISMATCH).status,
@@ -116,7 +117,7 @@ fn s4_handshake_reserved_field_detection() {
 }
 
 // ===========================================================================
-// A5 — TimeSpec negative clamping
+// A5 : TimeSpec negative clamping
 // ===========================================================================
 
 #[test]
@@ -124,23 +125,38 @@ fn a5_timespec_negative_components_clamp_to_zero() {
     // Before the fix: (-1).tv_sec as u64 wrapped to ~u64::MAX and the
     // saturating multiply turned a negative nanosleep into an
     // almost-infinite sleep.
-    let neg_sec = TimeSpec { tv_sec: -1, tv_nsec: 500_000_000 };
+    let neg_sec = TimeSpec {
+        tv_sec: -1,
+        tv_nsec: 500_000_000,
+    };
     assert_eq!(neg_sec.to_nanos(), 0);
-    let neg_nsec = TimeSpec { tv_sec: 0, tv_nsec: -1 };
+    let neg_nsec = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: -1,
+    };
     assert_eq!(neg_nsec.to_nanos(), 0);
 }
 
 #[test]
 fn a5_timespec_checked_to_nanos_rejects_negatives() {
-    let ok = TimeSpec { tv_sec: 1, tv_nsec: 500_000_000 };
+    let ok = TimeSpec {
+        tv_sec: 1,
+        tv_nsec: 500_000_000,
+    };
     assert_eq!(ok.checked_to_nanos(), Some(1_500_000_000));
-    let neg = TimeSpec { tv_sec: -5, tv_nsec: 0 };
+    let neg = TimeSpec {
+        tv_sec: -5,
+        tv_nsec: 0,
+    };
     assert_eq!(neg.checked_to_nanos(), None);
 }
 
 #[test]
 fn a5_timespec_saturation_and_roundtrip() {
-    let huge = TimeSpec { tv_sec: i64::MAX, tv_nsec: 999_999_999 };
+    let huge = TimeSpec {
+        tv_sec: i64::MAX,
+        tv_nsec: 999_999_999,
+    };
     assert_eq!(huge.to_nanos(), u64::MAX);
     let back = TimeSpec::from_nanos(1_500_000_000);
     assert_eq!((back.tv_sec, back.tv_nsec), (1, 500_000_000));
@@ -148,7 +164,7 @@ fn a5_timespec_saturation_and_roundtrip() {
 }
 
 // ===========================================================================
-// H1 — unified status replies
+// H1 : unified status replies
 // ===========================================================================
 
 #[test]
@@ -170,13 +186,13 @@ fn h1_status_reply_matches_legacy_encodings() {
 }
 
 // ===========================================================================
-// H3 — typed open/write wire format (real layout)
+// H3 : typed open/write wire format (real layout)
 // ===========================================================================
 
 #[test]
 fn open_request_golden_matches_historical_kernel_encoding() {
     // Historical kernel build_open_msg:
-    //   [flags u32 @0..4][len u16 @4..6][path @6..] — no InlineBlobHeader.
+    //   [flags u32 @0..4][len u16 @4..6][path @6..] : no InlineBlobHeader.
     let msg = OpenRequest::encode(OPCODE_OPEN, 0x02, PATH).unwrap();
     assert_eq!(msg.msg_type, OPCODE_OPEN);
     let mut expected = [0u8; PAYLOAD_CAPACITY];

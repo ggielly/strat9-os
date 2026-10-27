@@ -342,4 +342,8 @@ pub trait SchedClassRq {
     fn update_current(&mut self, rt: &CurrentRuntime, task: &Task, is_yield: bool) -> bool;
     /// Performs the remove operation.
     fn remove(&mut self, task_id: crate::process::TaskId) -> bool;
+    /// Called once per timer tick.  Increments wait-time counters for all
+    /// queued (non-running) tasks.  Default no-op for classes that don't
+    /// track starvation.
+    fn tick_update_wait(&mut self) {}
 }

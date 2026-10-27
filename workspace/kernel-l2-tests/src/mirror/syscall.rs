@@ -1,4 +1,4 @@
-//! Mirror of kernel/src/syscall — real error mapping + time shim.
+//! Mirror of kernel/src/syscall : real error mapping + time shim.
 //!
 //! The real error.rs needs three error enums from hardware-bound modules;
 //! they are provided as minimal shims below with identical variants so the

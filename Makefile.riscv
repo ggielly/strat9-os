@@ -1,0 +1,45 @@
+.PHONY: all clean kernel bootloader run check clippy fmt doc
+
+CARGO ?= cargo
+QEMU ?= qemu-system-riscv64
+TARGET ?= riscv64imac-unknown-none-elf
+
+KERNEL_DIR ?= workspace/kernel
+BUILD_DIR ?= build/riscv
+KERNEL_ELF ?= $(abspath target/$(TARGET)/release/kernel)
+QEMU_LOG ?= $(abspath $(BUILD_DIR)/qemu.log)
+QEMU_SCRIPT ?= $(abspath tools/scripts/run-qemu-riscv.sh)
+BUILD_STD_FLAGS := -Z build-std=core,alloc,compiler_builtins -Z build-std-features=compiler-builtins-mem
+QEMU_ARGS ?=
+
+all: kernel
+
+kernel:
+	@echo "Building Strat9 kernel for RISC-V..."
+	cd $(KERNEL_DIR) && $(CARGO) build --release $(BUILD_STD_FLAGS) --target $(TARGET)
+	@test -f "$(KERNEL_ELF)"
+	@echo "Kernel built successfully: $(KERNEL_ELF)"
+
+bootloader:
+	@echo "RISC-V boot uses the OpenSBI firmware provided by QEMU."
+	@echo "No standalone bootloader artifact is required for this port."
+
+clean:
+	$(CARGO) clean
+	rm -rf "$(BUILD_DIR)"
+
+run: kernel
+	@echo "Launching QEMU for RISC-V..."
+	KERNEL_ELF="$(KERNEL_ELF)" QEMU_LOG="$(QEMU_LOG)" QEMU="$(QEMU)" "$(QEMU_SCRIPT)" $(QEMU_ARGS)
+
+check:
+	cd $(KERNEL_DIR) && $(CARGO) check $(BUILD_STD_FLAGS) --target $(TARGET)
+
+clippy:
+	cd $(KERNEL_DIR) && $(CARGO) clippy $(BUILD_STD_FLAGS) --target $(TARGET)
+
+fmt:
+	$(CARGO) fmt --all
+
+doc:
+	cd $(KERNEL_DIR) && $(CARGO) doc --target $(TARGET) --no-deps --open

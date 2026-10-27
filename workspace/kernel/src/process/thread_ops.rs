@@ -286,6 +286,8 @@ fn build_user_thread_task(
         ticks: core::sync::atomic::AtomicU64::new(0),
         sched_policy: SyncUnsafeCell::new(parent.sched_policy()),
         home_cpu: core::sync::atomic::AtomicUsize::new(usize::MAX),
+        last_cpu: core::sync::atomic::AtomicUsize::new(usize::MAX),
+        affinity_mask: core::sync::atomic::AtomicU64::new(0),
         vruntime: core::sync::atomic::AtomicU64::new(parent.vruntime()),
         fair_rq_generation: core::sync::atomic::AtomicU64::new(0),
         fair_on_rq: core::sync::atomic::AtomicBool::new(false),
@@ -296,6 +298,16 @@ fn build_user_thread_task(
         fpu_state: SyncUnsafeCell::new(child_fpu),
         xcr0_mask: core::sync::atomic::AtomicU64::new(parent.xcr0_mask.load(Ordering::Relaxed)),
         rt_link: intrusive_collections::LinkedListLink::new(),
+        rt_budget_remaining: core::sync::atomic::AtomicU64::new(
+            parent.rt_budget_remaining.load(Ordering::Relaxed),
+        ),
+        rt_budget_period_start: core::sync::atomic::AtomicU64::new(
+            parent.rt_budget_period_start.load(Ordering::Relaxed),
+        ),
+        rt_degraded: core::sync::atomic::AtomicBool::new(
+            parent.rt_degraded.load(Ordering::Relaxed),
+        ),
+        fair_wait_ticks: core::sync::atomic::AtomicU64::new(0),
     });
 
     // CpuContext initial stack layout: r15, r14, r13(arg), r12(entry), rbp, rbx, ret
@@ -315,7 +327,7 @@ fn build_user_thread_task(
 // Public helpers (shared by dispatcher syscalls and the /thread scheme)
 // ============================================================================
 
-const USER_TOP_EXCLUSIVE: u64 = 0x0000_8000_0000_0000;
+const USER_TOP_EXCLUSIVE: u64 = crate::memory::userslice::USER_SPACE_END;
 
 /// Core of `SYS_THREAD_CREATE` and `/thread/create`.
 ///

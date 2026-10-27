@@ -1,11 +1,10 @@
-//! L1 — `strat9_syscall::error`: typed errno surface conformance.
+//! L1 : `strat9_syscall::error`: typed errno surface conformance.
 //!
 //! `Error` is the userspace-facing enum mirroring `strat9_abi::errno` via
 //! num_enum. Roundtrips, demux of raw RAX values and symbolic names are
 //! all part of the userspace contract (musl-compat relies on them).
 
-use strat9_syscall::error::Error;
-use strat9_syscall::error as errno; // errno consts are glob-re-exported into error
+use strat9_syscall::{error as errno, error::Error}; // errno consts are glob-re-exported into error
 
 #[test]
 fn error_roundtrip_all_named_variants() {
@@ -73,8 +72,14 @@ fn demux_decodes_negative_errno_encoding() {
 
     // Roundtrip every named errno through demux.
     for e in [
-        errno::EPERM, errno::ENOENT, errno::EBADF, errno::ENOMEM,
-        errno::EACCES, errno::EINVAL, errno::ENOSYS, errno::ECONNREFUSED,
+        errno::EPERM,
+        errno::ENOENT,
+        errno::EBADF,
+        errno::ENOMEM,
+        errno::EACCES,
+        errno::EINVAL,
+        errno::ENOSYS,
+        errno::ECONNREFUSED,
     ] {
         let wire = (-(e as isize)) as usize;
         assert_eq!(Error::demux(wire), Err(Error::from_errno(e)));
@@ -137,7 +142,7 @@ mod posix_flag_constants {
 
     #[test]
     fn linux_x86_64_values_are_pinned() {
-        // From linux asm-generic/fcntl.h — these MUST stay bit-identical
+        // From linux asm-generic/fcntl.h : these MUST stay bit-identical
         // or every POSIX binary breaks in new creative ways (see F8).
         assert_eq!(O_ACCMODE, 0o3);
         assert_eq!(O_RDONLY, 0o0);
@@ -149,11 +154,11 @@ mod posix_flag_constants {
         assert_eq!(O_TRUNC, 0o1000);
         assert_eq!(O_APPEND, 0o2000);
         assert_eq!(O_NONBLOCK, 0o4000);
-        assert_eq!(O_DSYNC, 0o10000);       // was O_CLOEXEC before the fix!
+        assert_eq!(O_DSYNC, 0o10000); // was O_CLOEXEC before the fix!
         assert_eq!(O_DIRECTORY, 0o200000);
-        assert_eq!(O_NOFOLLOW, 0o400000);   // F8: was 0o100000 (O_CLOEXEC)!
-        assert_eq!(O_SYNC, 0o4010000);      // __O_SYNC | O_DSYNC
-        assert_eq!(O_RSYNC, O_SYNC);        // Linux defines O_RSYNC == O_SYNC on x86_64
+        assert_eq!(O_NOFOLLOW, 0o400000); // F8: was 0o100000 (O_CLOEXEC)!
+        assert_eq!(O_SYNC, 0o4010000); // __O_SYNC | O_DSYNC
+        assert_eq!(O_RSYNC, O_SYNC); // Linux defines O_RSYNC == O_SYNC on x86_64
     }
 
     #[test]
@@ -162,8 +167,15 @@ mod posix_flag_constants {
         // both copies must agree bit-for-bit or translation silently diverges.
         // Spot-check via roundtrip of each individual bit.
         for bit in [
-            O_CREAT, O_EXCL, O_NOCTTY, O_TRUNC, O_APPEND, O_NONBLOCK,
-            O_DIRECTORY, O_NOFOLLOW, O_SYNC,
+            O_CREAT,
+            O_EXCL,
+            O_NOCTTY,
+            O_TRUNC,
+            O_APPEND,
+            O_NONBLOCK,
+            O_DIRECTORY,
+            O_NOFOLLOW,
+            O_SYNC,
         ] {
             let out = strat9_syscall::flag::posix_oflags_to_strat9(bit);
             assert!(

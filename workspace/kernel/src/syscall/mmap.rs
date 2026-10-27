@@ -8,13 +8,13 @@
 //!  - [`sys_mprotect`] – change page permissions (SYS_MPROTECT = 104)
 
 use crate::{
+    arch::xshim::VirtAddr,
     memory::address_space::{VmaFlags, VmaType},
     process::current_task_clone,
     syscall::error::SyscallError,
 };
 use core::sync::atomic::Ordering;
 use strat9_abi::data::MemoryRegionInfo as MemoryRegionInfoAbi;
-use crate::arch::xshim::VirtAddr;
 
 // ================================================================================
 // Virtual address layout constants
@@ -27,7 +27,7 @@ pub const BRK_BASE: u64 = 0x0000_0000_2000_0000; // 512 MiB
 pub const MMAP_BASE: u64 = 0x0000_0000_6000_0000; // 1.5 GiB
 
 /// Exclusive upper bound of the canonical user-space address range.
-const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
+const USER_SPACE_END: u64 = crate::memory::userslice::USER_SPACE_END;
 
 // ================================================================================
 // PROT flags (arg3 of mmap)
@@ -545,6 +545,7 @@ pub fn sys_mem_region_export(addr: u64) -> Result<u64, SyscallError> {
             revoke: true,
         },
         resource: resource_id as usize,
+        badge: handle_cap.as_u64(),
     };
     let cap_id = unsafe { (&mut *task.process.capabilities.get()).insert(cap) };
     Ok(cap_id.as_u64())

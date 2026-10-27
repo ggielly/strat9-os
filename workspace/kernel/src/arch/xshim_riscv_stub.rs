@@ -1,6 +1,13 @@
 // riscv64 stub of the x86_64 crate surface used by not-yet-gated code.
 // Every item traps at runtime; this exists only so the riscv build can
 // typecheck while call-sites are migrated (jalons R2-R5).
+
+// Compatibility paths retained by shared legacy call sites. These point to
+// the RISC-V facade implementations and keep x86-only code out of the build.
+pub use crate::arch::facade_riscv::{gdt, idt, msi, pci};
+pub use crate::arch::riscv64::{boot_timestamp, cpuid, serial, speaker};
+pub use crate::arch::riscv64::{cli, hlt, init_cpu_extensions, interrupts_enabled, rdtsc, restore_flags, save_flags_and_cli, sti};
+
 pub mod registers {
     pub mod control {
         pub struct Cr3;
@@ -48,9 +55,7 @@ pub mod instructions {
             pub fn write(&mut self, _v: T) {}
         }
     }
-    pub mod hlt {
-        pub fn hlt() {}
-    }
+    pub use crate::arch::riscv64::hlt;
 }
 pub mod structures {
     pub mod paging {

@@ -8,7 +8,7 @@
 
 use super::{vring_flags, VirtqDesc};
 use crate::{
-    arch::pci::{Bar, PciDevice},
+    hardware::pci_client::{Bar, PciDevice},
     memory::{self, PhysFrame},
 };
 use core::{

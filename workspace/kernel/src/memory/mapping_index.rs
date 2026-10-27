@@ -2,8 +2,8 @@
 
 use alloc::collections::BTreeMap;
 
-use smallvec::SmallVec;
 use crate::arch::xshim::VirtAddr;
+use smallvec::SmallVec;
 
 use crate::{
     capability::CapId, memory::address_space::VmaPageSize, process::task::Pid, sync::SpinLock,

@@ -1,13 +1,15 @@
-//! L1 — VFS scheme wire payloads: parse/serialize conformance.
+//! L1 : VFS scheme wire payloads: parse/serialize conformance.
 //!
 //! These tests pin the exact byte layout of the scheme protocol between
 //! the kernel VFS router and filesystem/network Silos. The kernel and all
 //! servers MUST agree on these layouts; a regression on either side is
 //! caught here before it reaches QEMU.
 
-use strat9_abi::data::IpcMessage;
-use strat9_abi::ipc_codec::{put_str, InlineBlobHeader};
-use strat9_abi::ipc_payload::*;
+use strat9_abi::{
+    data::IpcMessage,
+    ipc_codec::{put_str, InlineBlobHeader},
+    ipc_payload::*,
+};
 use zerocopy::IntoBytes;
 
 const PAYLOAD: usize = 240;
@@ -26,7 +28,7 @@ fn scheme_opcodes_are_pinned() {
 }
 
 // ===========================================================================
-// OpenRequest — raw u16 length prefix at 4..6, path at 6.. (NOT InlineBlob)
+// OpenRequest : raw u16 length prefix at 4..6, path at 6.. (NOT InlineBlob)
 // ===========================================================================
 
 #[test]
@@ -69,18 +71,23 @@ fn open_request_max_inline_capacity_is_exact() {
     assert_eq!(parsed.len(), IpcMessage::OPEN_INLINE_CAPACITY);
 
     // One byte more must not fit.
-    assert!(put_str(&mut payload, 6, &"a".repeat(IpcMessage::OPEN_INLINE_CAPACITY + 1)).is_none());
+    assert!(put_str(
+        &mut payload,
+        6,
+        &"a".repeat(IpcMessage::OPEN_INLINE_CAPACITY + 1)
+    )
+    .is_none());
 }
 
 // ===========================================================================
-// WriteRequest — raw u16 length at 16..18, data at 18..
+// WriteRequest : raw u16 length at 16..18, data at 18..
 // ===========================================================================
 
 #[test]
 fn write_request_prefix_and_data_roundtrip() {
     let mut payload = [0u8; PAYLOAD];
-    payload[0..8].copy_from_slice(&7777u64.to_le_bytes());   // ino
-    payload[8..16].copy_from_slice(&4096u64.to_le_bytes());  // offset
+    payload[0..8].copy_from_slice(&7777u64.to_le_bytes()); // ino
+    payload[8..16].copy_from_slice(&4096u64.to_le_bytes()); // offset
     let data = b"hello world";
     payload[16..18].copy_from_slice(&(data.len() as u16).to_le_bytes());
     payload[WriteRequest::DATA_OFFSET..WriteRequest::DATA_OFFSET + data.len()]
@@ -101,7 +108,11 @@ fn write_request_rejects_truncated_prefix() {
     assert!(WriteRequest::parse_prefix(&[0u8; 18]).is_some());
 
     // data_len beyond payload → data() returns None.
-    let req = WriteRequest { ino: 1, offset: 2, data_len: 999 };
+    let req = WriteRequest {
+        ino: 1,
+        offset: 2,
+        data_len: 999,
+    };
     let _ = ({ req.ino }, { req.offset });
     assert_eq!(req.data(&[0u8; PAYLOAD]), None);
 }
@@ -130,12 +141,12 @@ fn open_reply_layout_offsets() {
     };
     let b = reply.as_bytes();
     assert_eq!(b.len(), 32);
-    assert_eq!(&b[0..4], &0u32.to_le_bytes());     // status @0
-    assert_eq!(&b[8..16], &42u64.to_le_bytes());   // ino @8
+    assert_eq!(&b[0..4], &0u32.to_le_bytes()); // status @0
+    assert_eq!(&b[8..16], &42u64.to_le_bytes()); // ino @8
     assert_eq!(&b[16..24], &0x1000u64.to_le_bytes()); // size @16
-    assert_eq!(&b[24..28], &3u32.to_le_bytes());   // file_flags @24
+    assert_eq!(&b[24..28], &3u32.to_le_bytes()); // file_flags @24
 
-    // F5 FIXED: OpenReply now derives KnownLayout — decode_fixed works for
+    // F5 FIXED: OpenReply now derives KnownLayout : decode_fixed works for
     // the whole payload surface (no more hand-parsing).
     let msg = strat9_abi::ipc_codec::encode_fixed(0x80, &reply);
     let back: &OpenReply = strat9_abi::ipc_codec::decode_fixed(&msg).unwrap();
@@ -175,7 +186,11 @@ fn create_request_embeds_inline_blob_header() {
 
 #[test]
 fn tcp_connect_reply_layout() {
-    let r = TcpConnectReply { status: 0, _pad: 0, conn_id: 0xDEAD_BEEF };
+    let r = TcpConnectReply {
+        status: 0,
+        _pad: 0,
+        conn_id: 0xDEAD_BEEF,
+    };
     assert_eq!(size_of::<TcpConnectReply>(), 16);
     let b = r.as_bytes();
     assert_eq!(&b[8..16], &0xDEAD_BEEFu64.to_le_bytes());
@@ -189,7 +204,12 @@ fn lseek_whence_values_documented() {
     const SEEK_CUR: u32 = 1;
     const SEEK_END: u32 = 2;
     for w in [SEEK_SET, SEEK_CUR, SEEK_END] {
-        let req = LseekRequest { ino: 1, offset: -8, whence: w, _pad: 0 };
+        let req = LseekRequest {
+            ino: 1,
+            offset: -8,
+            whence: w,
+            _pad: 0,
+        };
         assert_eq!({ req.whence }, w);
         assert!(req.offset < 0); // negative offsets are legal for SEEK_CUR/END
     }
@@ -207,22 +227,76 @@ fn decode_fixed_works_for_all_fixed_payload_structs() {
         ($ty:ty, $val:expr) => {{
             let v: $ty = $val;
             let msg = strat9_abi::ipc_codec::encode_fixed(0x80, &v);
-            let back: &$ty = decode_fixed(&msg).unwrap_or_else(|| {
-                panic!(concat!(stringify!($ty), ": decode_fixed failed"))
-            });
+            let back: &$ty = decode_fixed(&msg)
+                .unwrap_or_else(|| panic!(concat!(stringify!($ty), ": decode_fixed failed")));
             let orig_bytes = v.as_bytes();
-            assert_eq!(back.as_bytes(), orig_bytes, concat!(stringify!($ty), " wire mismatch"));
+            assert_eq!(
+                back.as_bytes(),
+                orig_bytes,
+                concat!(stringify!($ty), " wire mismatch")
+            );
         }};
     }
 
     roundtrip!(StatusReply, StatusReply { status: 22 });
-    roundtrip!(OpenReply, OpenReply { status: 0, _pad0: 0, ino: 9, size: 64, file_flags: 1, _pad1: 0 });
-    roundtrip!(ReadReply, ReadReply { status: 0, count: 10 });
-    roundtrip!(WriteReply, WriteReply { status: 0, written: 10 });
-    roundtrip!(CreateReply, CreateReply { status: 0, _pad: 0, ino: 5 });
-    roundtrip!(LseekReply, LseekReply { status: 0, _pad: 0, offset: 4096 });
-    roundtrip!(TcpConnectReply, TcpConnectReply { status: 0, _pad: 0, conn_id: 7 });
+    roundtrip!(
+        OpenReply,
+        OpenReply {
+            status: 0,
+            _pad0: 0,
+            ino: 9,
+            size: 64,
+            file_flags: 1,
+            _pad1: 0
+        }
+    );
+    roundtrip!(
+        ReadReply,
+        ReadReply {
+            status: 0,
+            count: 10
+        }
+    );
+    roundtrip!(
+        WriteReply,
+        WriteReply {
+            status: 0,
+            written: 10
+        }
+    );
+    roundtrip!(
+        CreateReply,
+        CreateReply {
+            status: 0,
+            _pad: 0,
+            ino: 5
+        }
+    );
+    roundtrip!(
+        LseekReply,
+        LseekReply {
+            status: 0,
+            _pad: 0,
+            offset: 4096
+        }
+    );
+    roundtrip!(
+        TcpConnectReply,
+        TcpConnectReply {
+            status: 0,
+            _pad: 0,
+            conn_id: 7
+        }
+    );
     roundtrip!(CloseRequest, CloseRequest { ino: 3 });
     roundtrip!(StatRequest, StatRequest { ino: 3 });
-    roundtrip!(ReadRequest, ReadRequest { ino: 3, offset: 8, count: 128, _pad: 0 });
+    roundtrip!(
+        ReadRequest,
+        ReadRequest {
+            ino: 3,
+            offset: 8,
+            count: 128,
+            _pad: 0
+        }
+    );
 }

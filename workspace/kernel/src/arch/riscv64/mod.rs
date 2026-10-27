@@ -7,7 +7,16 @@
 //! during early boot (jalon R1 of the port plan). Modules are added
 //! incrementally as call-sites are migrated.
 
+pub mod boot;
+pub mod paging;
+pub mod pci;
+pub mod percpu;
+pub mod plic;
+pub mod sbi;
 pub mod serial;
+pub mod timer;
+pub mod trap;
+pub mod virtio_mmio;
 
 // ---------------------------------------------------------------------------
 // Transitional stubs (x86-only subsystems). Each is scheduled to become a
@@ -15,13 +24,19 @@ pub mod serial;
 // ---------------------------------------------------------------------------
 
 pub mod vga {
-    pub use super::vga_shim::VGA_WRITER;
-    pub use super::vga_text::{TextAlign, TextOptions, UiTheme};
-    pub fn is_available() -> bool { false }
+    pub use super::{
+        vga_shim::VGA_WRITER,
+        vga_text::{TextAlign, TextOptions, UiTheme},
+    };
+    pub fn is_available() -> bool {
+        false
+    }
     #[allow(non_snake_case)]
     pub struct RgbColor;
     impl RgbColor {
-        pub fn new(_r: u8, _g: u8, _b: u8) -> Self { RgbColor }
+        pub fn new(_r: u8, _g: u8, _b: u8) -> Self {
+            RgbColor
+        }
     }
     pub fn flush_display() {}
 
@@ -82,9 +97,9 @@ pub mod vga {
     #[allow(clippy::too_many_arguments)]
     pub fn init(
         fb_addr: u64,
-        width: usize,
-        height: usize,
-        stride: usize,
+        width: u32,
+        height: u32,
+        stride: u32,
         bpp: u16,
         _red_size: u8,
         _red_shift: u8,
@@ -127,7 +142,7 @@ pub mod vga {
     pub fn screen_size() -> (usize, usize) {
         (0, 0)
     }
-    pub fn begin_frame() {}
+    pub fn begin_frame() -> bool { false }
     pub fn end_frame() {}
     pub fn fill_rect(_x: i32, _y: i32, _w: i32, _h: i32, _color: u32) {}
     pub fn text_rows() -> usize {
@@ -142,8 +157,8 @@ pub mod vga {
     pub fn hide_text_cursor() {}
     pub fn write_text(_s: &str) {}
     pub fn write_char(_c: char) {}
-    pub fn scroll_view_up() {}
-    pub fn scroll_view_down() {}
+    pub fn scroll_view_up(_lines: usize) {}
+    pub fn scroll_view_down(_lines: usize) {}
     pub fn scroll_to_live() {}
     pub fn start_selection(_x: usize, _y: usize) {}
     pub fn update_selection(_x: usize, _y: usize) {}
@@ -152,14 +167,12 @@ pub mod vga {
     pub fn scrollbar_hit_test(_x: usize, _y: usize) -> bool {
         false
     }
-    pub fn scrollbar_drag_to(_x: usize, _y: usize) {}
+    pub fn scrollbar_drag_to(_y: usize) {}
     pub fn scrollbar_click(_x: usize, _y: usize) {}
-    pub fn update_mouse_cursor(_x: usize, _y: usize) {}
-    pub fn panic_draw_direct(_msg: &str) {}
+    pub fn update_mouse_cursor(_x: i32, _y: i32) {}
+    pub fn panic_draw_direct(_lines: &[&str]) {}
     pub fn vga_debug_writeln(_s: &str) {}
-
 }
-
 
 pub mod vga_shim {
     // Minimal writer that discards output: on riscv64 the console is serial-only.
@@ -171,6 +184,7 @@ pub mod vga_shim {
     }
     impl VgaWriterShim {
         pub fn clear(&mut self) {}
+        pub fn set_rgb_color(&mut self, _fg: super::vga::RgbColor, _bg: super::vga::RgbColor) {}
     }
     pub static VGA_WRITER: spin::Mutex<VgaWriterShim> = spin::Mutex::new(VgaWriterShim);
 }
@@ -185,9 +199,15 @@ pub mod vgabuf {
 pub mod boot_timestamp {
     static mut TSC_KHZ: u64 = 10_000; // QEMU virt timebase ~10 MHz
     pub fn init() {}
-    pub fn tsc_khz() -> u64 { unsafe { core::ptr::addr_of!(TSC_KHZ).read() } }
-    pub fn elapsed_ms() -> u64 { super::rdtsc() / 10_000 }
-    pub fn elapsed_us() -> u64 { super::rdtsc() / 10 }
+    pub fn tsc_khz() -> u64 {
+        unsafe { core::ptr::addr_of!(TSC_KHZ).read() }
+    }
+    pub fn elapsed_ms() -> u64 {
+        super::rdtsc() / 10_000
+    }
+    pub fn elapsed_us() -> u64 {
+        super::rdtsc() / 10
+    }
 }
 
 pub mod idt {
@@ -195,19 +215,12 @@ pub mod idt {
     pub fn init() {}
     pub fn register_ahci_irq(_irq: u8) {}
     pub fn register_nvme_irq(_irq: u8) {}
+    pub fn register_nvme_irq_vector(_irq: u8) {}
     pub fn register_virtio_block_irq(_irq: u8) {}
     pub fn register_xhci_irq(_irq: u8) {}
+    pub fn register_xhci_irq_vector(_irq: u8) {}
     pub fn register_nic_irq(_irq: u8) {}
 }
-
-pub mod timer {
-    pub const TIMER_HZ: u64 = 100;
-    pub const NS_PER_TICK: u64 = 1_000_000_000 / TIMER_HZ;
-    pub fn is_apic_timer_active() -> bool { false }
-    pub fn apic_ticks_per_10ms() -> u32 { 0 }
-    pub fn start_apic_timer_cached() {}
-}
-
 
 use core::arch::asm;
 
@@ -220,23 +233,13 @@ pub fn hlt() {
 /// Disable interrupts (clear SIE in sstatus).
 #[inline]
 pub fn cli() {
-    unsafe {
-        asm!(
-            "csrci sstatus, 0x2",
-            options(nomem, nostack)
-        )
-    }
+    unsafe { asm!("csrci sstatus, 0x2", options(nomem, nostack)) }
 }
 
 /// Enable interrupts (set SIE in sstatus).
 #[inline]
 pub fn sti() {
-    unsafe {
-        asm!(
-            "csrsi sstatus, 0x2",
-            options(nomem, nostack)
-        )
-    }
+    unsafe { asm!("csrsi sstatus, 0x2", options(nomem, nostack)) }
 }
 
 /// Check if interrupts (SIE) are enabled.
@@ -282,7 +285,7 @@ pub fn restore_flags(flags: u64) {
     }
 }
 
-/// Read the `time` CSR (rdtime equivalent) — cycle counter.
+/// Read the `time` CSR (rdtime equivalent) : cycle counter.
 /// On QEMU virt this increments at a fixed frequency (~10 MHz via CLINT),
 /// usable as an early monotonic timestamp source.
 #[inline]
@@ -310,29 +313,43 @@ pub mod cpuid {
     /// Placeholder ISA-feature probe. Real implementation reads the
     /// `riscv,isa` device-tree property (jalon R1.4).
     #[derive(Default)]
-    pub struct IsaFeatures;
+    pub struct IsaFeatures {
+        pub features: CpuFeatures,
+    }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
-    pub struct CpuFeature;
+    pub struct CpuFeature(pub u32);
     impl CpuFeature {
-        pub const SMEP: CpuFeature = CpuFeature;
-        pub const SMAP: CpuFeature = CpuFeature;
+        pub const SMEP: CpuFeature = CpuFeature(1 << 0);
+        pub const SMAP: CpuFeature = CpuFeature(1 << 1);
     }
 
-    #[derive(Clone, Copy, Default)]
+    #[derive(Clone, Copy, Default, Debug)]
     pub struct CpuFeatures {
-        bits: u32,
+        bits: u64,
     }
+    #[derive(Clone, Copy)]
+    pub struct XsaveProfile {
+        pub xcr0_mask: u64,
+        pub area_size: usize,
+    }
+    pub trait FeatureMask { fn mask(&self) -> u64; }
+    impl FeatureMask for CpuFeature { fn mask(&self) -> u64 { self.0 as u64 } }
+    impl FeatureMask for CpuFeatures { fn mask(&self) -> u64 { self.bits } }
     impl CpuFeatures {
-        pub fn contains(self, _f: CpuFeature) -> bool {
-            false
+        pub const SMEP: Self = Self { bits: CpuFeature::SMEP.0 as u64 };
+        pub const SMAP: Self = Self { bits: CpuFeature::SMAP.0 as u64 };
+        pub const fn from_bits_truncate(bits: u64) -> Self { Self { bits } }
+        pub const fn bits(self) -> u64 { self.bits }
+        pub fn contains<T: FeatureMask>(self, other: T) -> bool {
+            self.bits & other.mask() == other.mask()
         }
     }
 
     pub fn init() {}
 
     pub fn host() -> IsaFeatures {
-        IsaFeatures
+        IsaFeatures { features: CpuFeatures::default() }
     }
     pub fn host_uses_xsave() -> bool {
         false
@@ -346,13 +363,15 @@ pub mod cpuid {
     pub fn xsave_size_for_xcr0(_xcr0: u64) -> usize {
         512
     }
-    pub fn xcr0_for_features(_f: &CpuFeatures) -> u64 {
+    pub fn xcr0_for_features(_f: CpuFeatures) -> u64 {
         0
+    }
+    pub fn boot_xsave_profile() -> XsaveProfile {
+        XsaveProfile { xcr0_mask: 0, area_size: 512 }
     }
     pub fn features_to_flags_string(_f: &IsaFeatures) -> alloc::string::String {
         alloc::string::String::new()
     }
-
 }
 
 pub mod speaker {
@@ -372,7 +391,7 @@ pub mod cpuid_x86_shim {
     }
 }
 
-/// x86-only CPU extensions init — no-op on RISC-V.
+/// x86-only CPU extensions init : no-op on RISC-V.
 pub fn init_cpu_extensions() {}
 
 // VGA text options (serial-only console: no-ops)
@@ -390,7 +409,6 @@ pub mod vga_text {
     }
     pub struct UiTheme;
 }
-
 
 // Transitional extras -------------------------------------------------------
 
@@ -432,9 +450,9 @@ pub mod vga_draw {
     #[allow(clippy::too_many_arguments)]
     pub fn init(
         fb_addr: u64,
-        width: usize,
-        height: usize,
-        stride: usize,
+        width: u32,
+        height: u32,
+        stride: u32,
         bpp: u16,
         _red_size: u8,
         _red_shift: u8,
@@ -445,8 +463,7 @@ pub mod vga_draw {
     ) {
         let _ = (fb_addr, width, height, stride, bpp);
     }
-
-    }
+}
 
 pub mod config_consts {
     pub const STATUS: u8 = 0x06;
@@ -455,9 +472,9 @@ pub mod config_consts {
 }
 
 // Re-exports used by facade_riscv
+pub use config_consts as pci_config_consts;
 pub use timer_extra as timer_pit;
 pub use vga_draw as vga_surface;
-pub use config_consts as pci_config_consts;
 
 pub use timer_extra as riscv_timer_pit;
 

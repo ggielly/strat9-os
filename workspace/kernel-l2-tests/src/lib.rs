@@ -4,9 +4,9 @@
 //! `#[path]` includes, resolving their `crate::` dependencies against
 //! functional stand-ins defined here:
 //!
-//! - `sync::irq` — fake: single-threaded host, `with_irqs_disabled` is a no-op
+//! - `sync::irq` : fake: single-threaded host, `with_irqs_disabled` is a no-op
 //!   wrapper handing out a dummy [`IrqDisabledToken`].
-//! - `memory` — fake frame allocator backed by an in-memory arena, exposing
+//! - `memory` : fake frame allocator backed by an in-memory arena, exposing
 //!   the same `allocate_frame`/`free_frame`/`PhysFrame` surface the IPC ring
 //!   code uses.
 //!
@@ -20,7 +20,7 @@
 extern crate alloc;
 
 // ===========================================================================
-// Kernel tree mirror — pure modules only
+// Kernel tree mirror : pure modules only
 // ===========================================================================
 
 // Root re-export of the fake IRQ layer so included modules resolving
@@ -40,8 +40,7 @@ pub mod arch {
         pub mod percpu {
             pub const MAX_CPUS: usize = 32;
 
-            static COUNT: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
+            static COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
             pub fn preempt_disable() {
                 COUNT.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
@@ -68,8 +67,10 @@ pub mod arch {
 
 /// Fake process layer: single fake task; blocking is a test failure.
 pub mod process {
-    use core::fmt;
-    use core::sync::atomic::{AtomicU64, Ordering};
+    use core::{
+        fmt,
+        sync::atomic::{AtomicU64, Ordering},
+    };
 
     /// Mirror of kernel TaskId (u64 newtype).
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -103,7 +104,7 @@ pub mod process {
 
     /// Stand-in panic: kernel code must never reach this in host tests.
     pub fn block_current_task() {
-        panic!("process::block_current_task called on host — test tried to block");
+        panic!("process::block_current_task called on host : test tried to block");
     }
 
     /// No-op on the host (nothing to wake); matches kernel bool signature.
@@ -162,7 +163,6 @@ pub mod hardware {
     }
 }
 
-
 // Kernel serial macros: route to stderr so test output stays visible.
 #[macro_export]
 macro_rules! serial_println {
@@ -184,14 +184,13 @@ macro_rules! serial_force_println {
 #[path = "mirror/sync.rs"]
 pub mod sync;
 
-/// Mirror of kernel/src/syscall — only the pieces pure modules need.
+/// Mirror of kernel/src/syscall : only the pieces pure modules need.
 #[path = "mirror/syscall.rs"]
 pub mod syscall;
 
 /// Boot-time TOML configuration parser, verbatim from the kernel.
 #[path = "../../kernel/src/boot/toml.rs"]
 pub mod boot_toml;
-
 
 #[path = "mirror/ipc.rs"]
 pub mod ipc;
@@ -214,7 +213,7 @@ pub mod vfs;
 // Functional stand-ins for hardware-bound kernel modules
 // ===========================================================================
 
-/// Mirror of kernel/src/boot — entry types are re-exports of strat9_abi.
+/// Mirror of kernel/src/boot : entry types are re-exports of strat9_abi.
 pub mod boot {
     pub mod entry {
         pub use strat9_abi::boot::{KernelArgs, MemoryKind, MemoryRegion};

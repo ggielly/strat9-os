@@ -1,4 +1,4 @@
-//! L0/L1 — remaining `strat9_abi::data` types (pass 2 coverage).
+//! L0/L1 : remaining `strat9_abi::data` types (pass 2 coverage).
 //!
 //! SiloMode subset logic, DirentHeader packing, PCI probe criteria and
 //! struct size pins for everything crossing the kernel boundary that the
@@ -58,7 +58,12 @@ fn ipc_file_flag_bits_are_pinned() {
 #[test]
 fn dirent_header_packing() {
     assert_eq!(DirentHeader::SIZE, 12);
-    let h = DirentHeader { ino: 7, file_type: 4, name_len: 11, _padding: 0 };
+    let h = DirentHeader {
+        ino: 7,
+        file_type: 4,
+        name_len: 11,
+        _padding: 0,
+    };
     // header + name + NUL
     assert_eq!(h.entry_size(), 12 + 11 + 1);
     assert_eq!(size_of::<DirentHeader>(), DirentHeader::SIZE);
@@ -66,7 +71,12 @@ fn dirent_header_packing() {
 
 #[test]
 fn dirent_header_zero_name() {
-    let h = DirentHeader { ino: 0, file_type: 0, name_len: 0, _padding: 0 };
+    let h = DirentHeader {
+        ino: 0,
+        file_type: 0,
+        name_len: 0,
+        _padding: 0,
+    };
     assert_eq!(h.entry_size(), 13); // 12 header + NUL only
 }
 
@@ -83,7 +93,11 @@ fn data_struct_sizes_are_pinned() {
     assert_eq!(size_of::<AsyncRingLayout>(), 40); // 4×u64 + u32+u32
     assert_eq!(size_of::<PciAddress>(), 4); // align(4): b+d+f+pad
     assert_eq!(size_of::<PciProbeCriteria>(), 12); // 4+2+2+1+1+1+1
-    assert_eq!(size_of::<SiloConfig>() % 8, 0, "SiloConfig must stay pointer-aligned");
+    assert_eq!(
+        size_of::<SiloConfig>() % 8,
+        0,
+        "SiloConfig must stay pointer-aligned"
+    );
 }
 
 #[test]

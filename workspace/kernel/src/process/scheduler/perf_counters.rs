@@ -26,6 +26,10 @@ pub static SCHED_PREEMPT_TSC: AtomicU64 = AtomicU64::new(0);
 pub static CTX_SWITCH_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static CTX_SWITCH_TSC: AtomicU64 = AtomicU64::new(0);
 
+/// Deferred work processing (`process_deferred_work`).
+pub static DEFERRED_WORK_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static DEFERRED_WORK_TSC: AtomicU64 = AtomicU64::new(0);
+
 // ---------------------------------------------------------------------------
 // RAII scope helper
 // ---------------------------------------------------------------------------
@@ -89,7 +93,7 @@ impl PerfStat {
 }
 
 /// Return a snapshot of all perf counters.
-pub fn snapshot() -> [PerfStat; 4] {
+pub fn snapshot() -> [PerfStat; 5] {
     [
         PerfStat {
             name: "irq_timer",
@@ -110,6 +114,11 @@ pub fn snapshot() -> [PerfStat; 4] {
             name: "ctx_switch",
             count: CTX_SWITCH_COUNT.load(Ordering::Relaxed),
             total_tsc: CTX_SWITCH_TSC.load(Ordering::Relaxed),
+        },
+        PerfStat {
+            name: "dwork",
+            count: DEFERRED_WORK_COUNT.load(Ordering::Relaxed),
+            total_tsc: DEFERRED_WORK_TSC.load(Ordering::Relaxed),
         },
     ]
 }

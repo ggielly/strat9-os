@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =====================================================================
-# Assemble strat9-os bootloader (NASM) — LEGACY boot path
+# Assemble strat9-os bootloader (NASM) : LEGACY boot path
 #
 # The active boot path is Limine (see tools/scripts/create-limine-image.sh
 # and limine.conf). This script assembles the legacy custom BIOS

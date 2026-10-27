@@ -10,7 +10,7 @@ use alloc::{string::String, vec::Vec};
 const AUDIT_CAPACITY: usize = 512;
 
 /// Categories of auditable events.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuditCategory {
     /// Silo lifecycle (create, destroy, suspend, resume).
     Silo,
@@ -22,6 +22,22 @@ pub enum AuditCategory {
     Process,
     /// Security policy change (pledge, unveil, sandbox).
     Security,
+}
+
+impl AuditCategory {
+    /// Stable short label, as shown by the `audit` command.
+    ///
+    /// Lives here rather than in the shell so the wording is owned by the
+    /// module that defines the category.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuditCategory::Silo => "silo",
+            AuditCategory::Capability => "cap",
+            AuditCategory::Syscall => "syscall",
+            AuditCategory::Process => "process",
+            AuditCategory::Security => "security",
+        }
+    }
 }
 
 /// A single audit log entry.

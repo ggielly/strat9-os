@@ -20,7 +20,7 @@ fn wait_task_exit(name: &'static str, timeout_ticks: u64) -> bool {
             return true;
         }
         if ticks().saturating_sub(start) > timeout_ticks {
-            crate::serial_println!("[selftest] timeout waiting '{}'", name);
+            crate::serial_println!("[selftest] FAIL: timeout waiting '{}'", name);
             return false;
         }
         crate::process::yield_task();
@@ -180,6 +180,12 @@ extern "C" fn selftest_orchestrator() -> ! {
     crate::process::errno_test::create_errno_test_task();
     let _ = wait_task_exit("errno-test", 3_000);
 
+    //  Pure logic behind the shell tool and utility commands: the argument
+    //  parsers, the grep line splitter, the NTP reply validator, the
+    //  environment grammar and the shared output formatters.
+    crate::shell::commands::util::create_shell_util_test_task();
+    let _ = wait_task_exit("shell-util-test", 3_000);
+
     let strate_ok = run_strate_lifecycle_e2e();
     if strate_ok {
         crate::serial_println!("[selftest][strate] PASS");
@@ -199,6 +205,6 @@ pub fn create_selftest_tasks() {
         TaskPriority::High,
     ) {
         Ok(task) => add_task(task),
-        Err(_) => crate::serial_println!("[selftest] failed to create orchestrator task"),
+        Err(_) => crate::serial_println!("[selftest] FAIL: failed to create orchestrator task"),
     }
 }

@@ -1,4 +1,4 @@
-//! L1 — POSIX ↔ Strat9 flags translation, exhaustively.
+//! L1 : POSIX ↔ Strat9 flags translation, exhaustively.
 //!
 //! `posix_oflags_to_strat9` is the single entry point used by musl-compat
 //! and relibc to convert `O_*` flags. A regression here silently breaks
@@ -84,14 +84,23 @@ fn all_modifier_combinations_translate() {
 
             // Access mode always translated.
             match acc {
-                O_RDONLY => assert!(out.contains(OpenFlags::READ) && !out.contains(OpenFlags::WRITE)),
-                O_WRONLY => assert!(out.contains(OpenFlags::WRITE) && !out.contains(OpenFlags::READ)),
+                O_RDONLY => {
+                    assert!(out.contains(OpenFlags::READ) && !out.contains(OpenFlags::WRITE))
+                }
+                O_WRONLY => {
+                    assert!(out.contains(OpenFlags::WRITE) && !out.contains(OpenFlags::READ))
+                }
                 _ => assert!(out.contains(OpenFlags::READ) && out.contains(OpenFlags::WRITE)),
             }
             // Every requested modifier present...
             for (i, (_, check)) in MODIFIERS.iter().enumerate() {
                 if mask & (1 << i) != 0 {
-                    assert!(check(&out), "modifier bit {} of {:#o} lost", 1 << i, posix | acc);
+                    assert!(
+                        check(&out),
+                        "modifier bit {} of {:#o} lost",
+                        1 << i,
+                        posix | acc
+                    );
                 }
             }
             // ...and no spurious CREATE/TRUNCATE/etc. when not requested.
@@ -107,13 +116,16 @@ fn all_modifier_combinations_translate() {
 
 #[test]
 fn classic_open_calls_translate_correctly() {
-    // open(path, O_RDONLY) — most common case
+    // open(path, O_RDONLY) : most common case
     let f = posix_oflags_to_strat9(O_RDONLY);
     assert_eq!(f, OpenFlags::RDONLY);
 
     // open(path, O_WRONLY | O_CREAT | O_TRUNC, mode)
     let f = posix_oflags_to_strat9(O_WRONLY | O_CREAT | O_TRUNC);
-    assert_eq!(f, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE);
+    assert_eq!(
+        f,
+        OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE
+    );
 
     // open(path, O_RDWR | O_CREAT | O_EXCL)
     let f = posix_oflags_to_strat9(O_RDWR | O_CREAT | O_EXCL);

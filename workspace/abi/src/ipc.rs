@@ -36,7 +36,7 @@
 //! };
 //! ```
 
-use zerocopy::{FromBytes, IntoBytes, Immutable};
+use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 /// Magic number for IPC handshake (`"IPC9"` in ASCII).
 ///

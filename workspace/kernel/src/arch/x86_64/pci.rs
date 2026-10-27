@@ -100,7 +100,11 @@ fn device_name(vendor: u16, device: u16) -> Option<&'static str> {
 }
 
 /// Human-readable PCI class name.
-fn class_name(class: u8, subclass: u8) -> Option<&'static str> {
+///
+/// Public so the `lspci` shell command reports the same names the kernel
+/// decodes: it used to carry its own 20-arm table of the same class codes, in a
+/// different order and with different spellings.
+pub fn class_name(class: u8, subclass: u8) -> Option<&'static str> {
     match (class, subclass) {
         (0x00, 0x00) => Some("Legacy Device"),
         (0x00, 0x01) => Some("VGA-Compatible Device"),
@@ -1233,8 +1237,7 @@ fn scan_ecam_devices() -> Vec<PciDevice> {
         let end_bus = entry.end_bus;
 
         // Ensure the ECAM region is identity-mapped
-        let region_size =
-            ((end_bus as usize - start_bus as usize + 1) as u64) * (32 * 8 * 4096);
+        let region_size = ((end_bus as usize - start_bus as usize + 1) as u64) * (32 * 8 * 4096);
         memory::paging::ensure_identity_map_range(ecam_phys, region_size);
         let ecam_virt = crate::memory::phys_to_virt(ecam_phys) as usize;
 

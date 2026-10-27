@@ -4,6 +4,8 @@ target = "x86_64-unknown-none"
 [target.x86_64-unknown-none]
 rustflags = [
     "-C",
+    "relocation-model=static",
+    "-C",
     "link-arg=-Lworkspace/kernel",
     "-C",
     "link-arg=-Tworkspace/kernel/linker.ld",
@@ -21,4 +23,16 @@ rustflags = [
     # "curve25519_dalek_backend=\"fiat\"",
     # "--cfg",
     # "curve25519_dalek_bits=\"32\"",
+]
+
+[target.riscv64imac-unknown-none-elf]
+rustflags = [
+    "-C",
+    "link-arg=-Tworkspace/kernel/linker-riscv.ld",
+    "-C",
+    "relocation-model=static",
+    "-C",
+    "code-model=medium",
+    "-C",
+    "force-frame-pointers=yes",
 ]

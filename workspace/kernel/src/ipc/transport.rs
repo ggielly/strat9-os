@@ -219,7 +219,9 @@ impl IpcTransport for LockFreeRing {
         TransportCapabilities {
             max_message_size: 2048,
             blocking: true,
-            zero_copy: true,
+            // P1 fix: messages live in ArrayQueue<Box<[u8]>> (kernel heap),
+            // not in shared-memory frames.  Advertise honestly.
+            zero_copy: false,
             vectored: true,
             directions: 2,
             estimated_cost_cycles: 400,

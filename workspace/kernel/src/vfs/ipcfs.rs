@@ -115,6 +115,7 @@ impl Scheme for IpcControlScheme {
                 semaphore::SemaphoreError::WouldBlock => SyscallError::Again,
                 semaphore::SemaphoreError::Destroyed => SyscallError::Pipe,
                 semaphore::SemaphoreError::NotFound => SyscallError::NotFound,
+                semaphore::SemaphoreError::Interrupted => SyscallError::Interrupted,
             })?;
             HandleKind::Sem(id)
         } else if let Some(rest) = p.strip_prefix("shm/") {
@@ -191,12 +192,14 @@ impl Scheme for IpcControlScheme {
                         semaphore::SemaphoreError::Destroyed => SyscallError::Pipe,
                         semaphore::SemaphoreError::InvalidValue => SyscallError::InvalidArgument,
                         semaphore::SemaphoreError::NotFound => SyscallError::NotFound,
+                        semaphore::SemaphoreError::Interrupted => SyscallError::Interrupted,
                     })?,
                     "trywait" => sem.try_wait().map_err(|e| match e {
                         semaphore::SemaphoreError::WouldBlock => SyscallError::Again,
                         semaphore::SemaphoreError::Destroyed => SyscallError::Pipe,
                         semaphore::SemaphoreError::InvalidValue => SyscallError::InvalidArgument,
                         semaphore::SemaphoreError::NotFound => SyscallError::NotFound,
+                        semaphore::SemaphoreError::Interrupted => SyscallError::Interrupted,
                     })?,
                     _ => return Err(SyscallError::InvalidArgument),
                 }

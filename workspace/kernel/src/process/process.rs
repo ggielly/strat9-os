@@ -1,5 +1,6 @@
 use crate::{
     capability::CapabilityTable,
+    ipc::quota::IpcQuota,
     memory::AddressSpace,
     process::{signal::SigActionData, task::SyncUnsafeCell},
     sync::SpinLock,
@@ -40,6 +41,9 @@ pub struct Process {
     pub cwd_fd: AtomicU64,
     /// File creation mask (inherited by children, NOT reset by exec).
     pub umask: AtomicU32,
+
+    /// Per-process IPC resource quotas (channels, queue slots, bytes).
+    pub ipc_quota: IpcQuota,
 }
 
 impl Process {
@@ -58,6 +62,7 @@ impl Process {
             cwd: SyncUnsafeCell::new(String::from("/")),
             cwd_fd: AtomicU64::new(u64::MAX),
             umask: AtomicU32::new(0o022),
+            ipc_quota: IpcQuota::new(),
         }
     }
 

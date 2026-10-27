@@ -1,4 +1,4 @@
-//! L1 — VFS types conformance: mode bits, FILETIME conversions, capabilities.
+//! L1 : VFS types conformance: mode bits, FILETIME conversions, capabilities.
 //!
 //! `VfsFileType` maps Unix mode bits ↔ internal enum; `VfsTimestamp`
 //! converts Unix epoch ↔ Windows FILETIME. Both conversions cross an ABI
@@ -98,7 +98,10 @@ fn filetime_before_windows_epoch_clamps_to_zero() {
     // Dates before the Windows epoch (1601) cannot be represented;
     // documented clamp to 0 instead of wrapping into the future.
     assert_eq!(VfsTimestamp::new(-11_644_473_601, 0).to_filetime(), 0);
-    assert_eq!(VfsTimestamp::new(i64::MIN / 2, 999_999_999).to_filetime(), 0);
+    assert_eq!(
+        VfsTimestamp::new(i64::MIN / 2, 999_999_999).to_filetime(),
+        0
+    );
     // One second BEFORE the Unix epoch is still representable (Windows
     // epoch starts in 1601).
     assert_eq!(
@@ -112,9 +115,9 @@ fn filetime_roundtrip_sample_values() {
     const SAMPLES: &[i64] = &[
         0,
         1,
-        951_782_400,      // 2000-01-01
-        1_700_000_000,    // ~2023-11
-        4_102_444_800,    // year 2100
+        951_782_400,   // 2000-01-01
+        1_700_000_000, // ~2023-11
+        4_102_444_800, // year 2100
     ];
     for &secs in SAMPLES {
         for &nsec in &[0u32, 1, 500_000_000, 999_999_999] {
@@ -143,7 +146,7 @@ fn filetime_overflow_finding_beyond_year_60k() {
 fn filetime_nanosecond_quantization_is_100ns() {
     let ts = VfsTimestamp::new(0, 999_999_999); // max nsec
     let ft = ts.to_filetime();
-    assert_eq!(ft % 10_000_000, 9_999_999); // 999.999999 µs → 9_999_999 ticks... 
+    assert_eq!(ft % 10_000_000, 9_999_999); // 999.999999 µs → 9_999_999 ticks...
     let back = VfsTimestamp::from_filetime(ft);
     assert_eq!(back.nsecs, 999_999_900); // quantized down to 100ns grid
 }
@@ -171,13 +174,15 @@ mod capabilities {
         // FsCapabilities does not derive PartialEq; pin default == read_only_linux
         // field by field.
         let d = FsCapabilities::default();
-        assert!(d.read_only == ro.read_only
-            && d.case_sensitive == ro.case_sensitive
-            && d.max_filename_len == ro.max_filename_len
-            && d.max_path_len == ro.max_path_len
-            && d.supports_symlinks == ro.supports_symlinks
-            && d.supports_hardlinks == ro.supports_hardlinks
-            && d.max_file_size == ro.max_file_size);
+        assert!(
+            d.read_only == ro.read_only
+                && d.case_sensitive == ro.case_sensitive
+                && d.max_filename_len == ro.max_filename_len
+                && d.max_path_len == ro.max_path_len
+                && d.supports_symlinks == ro.supports_symlinks
+                && d.supports_hardlinks == ro.supports_hardlinks
+                && d.max_file_size == ro.max_file_size
+        );
     }
 
     #[test]
@@ -191,7 +196,10 @@ mod capabilities {
         // not fit in u64.
         assert_eq!(FsCapabilities::xfs().max_file_size, 8 * EIB);
         assert_eq!(FsCapabilities::btrfs().max_file_size, u64::MAX);
-        assert_eq!(FsCapabilities::read_only_linux().max_file_size, i64::MAX as u64);
+        assert_eq!(
+            FsCapabilities::read_only_linux().max_file_size,
+            i64::MAX as u64
+        );
     }
 
     #[test]

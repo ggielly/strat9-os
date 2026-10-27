@@ -20,16 +20,16 @@ pub use x86_64::{
 mod neutral {
     pub use crate::ostd::mm::{PhysAddr, VirtAddr};
 
-/// Page granularity markers (4 KiB / 2 MiB).
+    /// Page granularity markers (4 KiB / 2 MiB).
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub struct Size4KiB;
-    
+
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub struct Size2MiB;
-    
+
     pub const SIZE_4KIB: u64 = 4096;
     pub const SIZE_2MIB: u64 = 2 * 1024 * 1024;
-    
+
     bitflags::bitflags! {
         /// Page-table flags, arch-neutral encoding (subset of both ISAs).
         #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -43,7 +43,7 @@ mod neutral {
             const BIT_9 = 1 << 9; // used as COW marker on x86_64
         }
     }
-    
+
     /// Result of a translation walk.
     #[derive(Clone, Copy, Debug)]
     pub enum TranslateResult {
@@ -55,20 +55,20 @@ mod neutral {
         NotMapped,
         InvalidFrameAddress(PhysAddr),
     }
-    
+
     /// A physical memory frame of a given size.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub struct PhysFrame<S> {
         start: PhysAddr,
         _size: core::marker::PhantomData<S>,
     }
-    
+
     impl<S> PhysFrame<S> {
         pub fn start_address(&self) -> PhysAddr {
             self.start
         }
     }
-    
+
     impl PhysFrame<Size4KiB> {
         pub fn containing_address(addr: PhysAddr) -> Self {
             Self {
@@ -77,7 +77,7 @@ mod neutral {
             }
         }
     }
-    
+
     impl PhysFrame<Size2MiB> {
         pub fn containing_address(addr: PhysAddr) -> Self {
             Self {
@@ -98,8 +98,5 @@ pub const PTR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
 /// (neutral version; on riscv64 implemented by the Sv48 mapper).
 #[cfg(not(target_arch = "x86_64"))]
 pub trait Translate {
-    fn translate(
-        &self,
-        virt: VirtAddr,
-    ) -> Option<(PhysFrame<Size4KiB>, PageTableFlags)>;
+    fn translate(&self, virt: VirtAddr) -> Option<(PhysFrame<Size4KiB>, PageTableFlags)>;
 }

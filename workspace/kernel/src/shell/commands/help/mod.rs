@@ -17,7 +17,7 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("");
     shell_println!("-- Process --");
     shell_println!("  ps                - List all tasks");
-    shell_println!("  top               - Graphical task manager (interactive)");
+    shell_println!("  top               - System monitor (TUI, or serial without VGA)");
     shell_println!("  kill <pid>        - Terminate a task by PID");
     shell_println!("  whoami            - Show current silo identity");
 
@@ -52,9 +52,12 @@ pub fn cmd_help(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("  silo pledge <x> <mode> - Reduce silo permissions (octal)");
     shell_println!("  silo unveil <x> <path> <rwx> - Restrict path access");
     shell_println!("  silo sandbox <x>  - Enter sandbox mode");
+    shell_println!("  silo limit <x> <key> <value> - Adjust memory/task/cpu limits");
+    shell_println!("  silo attach <x>  - Stream a silo's debug output (q to detach)");
     shell_println!("  silo top [--sort mem|tasks] - Silo resource overview");
     shell_println!("  silo logs <x>     - Show silo event log");
     shell_println!("  silos             - Shortcut for 'silo list'");
+    shell_println!("  strate <sub>      - Same subcommands as 'silo', listed by strate name");
 
     shell_println!("");
     shell_println!("-- Memory --");

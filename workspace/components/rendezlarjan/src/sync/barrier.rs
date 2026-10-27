@@ -36,7 +36,7 @@ impl Barrier {
                     .is_ok()
                 {
                     // Spin until the phase flips (v1 policy: bounded spin then
-                    // futex on the same word — value change wakes us).
+                    // futex on the same word : value change wakes us).
                     loop {
                         let cur = self.state.load(Ordering::Acquire);
                         if cur >> 16 != phase {

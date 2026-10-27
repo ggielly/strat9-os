@@ -8,7 +8,9 @@ pub mod data_plane;
 pub mod e1000_drv;
 pub mod e1000e_drv;
 pub mod igc_drv;
+#[cfg(target_arch = "x86_64")]
 pub mod pcnet_drv;
+#[cfg(target_arch = "x86_64")]
 pub mod rtl8139_drv;
 pub mod scheme;
 pub mod virtio_net;
@@ -284,7 +286,9 @@ pub fn init() {
     e1000e_drv::init();
     igc_drv::init();
     e1000_drv::init();
+    #[cfg(target_arch = "x86_64")]
     pcnet_drv::init();
+    #[cfg(target_arch = "x86_64")]
     rtl8139_drv::init();
     virtio_net::init();
     if let Err(e) = scheme::register_net_scheme() {

@@ -72,14 +72,24 @@ pub fn init_cpu_extensions() {
         let mut cr0: u64;
         asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack));
         cr0 &= !(1 << 2); // clear EM
-        cr0 |= 1 << 1; // set MP
+        cr0 |= (1 << 1) | (1 << 5); // set MP + NE
         asm!("mov cr0, {}", in(reg) cr0, options(nomem, nostack));
 
         asm!("fninit", options(nomem, nostack));
 
         if cpuid::host_uses_xsave() {
             let xcr0 = cpuid::host_default_xcr0();
-            xsetbv(0, xcr0);
+            // Validate: requested XCR0 must be a subset of hardware support.
+            // On APs, HOST_CPU contains the BSP's feature set; mask to be safe.
+            let supported = cpuid::host().supported_xcr0;
+            debug_assert_eq!(
+                xcr0 & !supported,
+                0,
+                "XCR0 {:#x} has bits outside hardware support {:#x}",
+                xcr0,
+                supported
+            );
+            xsetbv(0, xcr0 & supported);
         }
     }
 }
@@ -154,8 +164,17 @@ pub fn sti() {
 ///
 /// Must be paired with `clac()` after the user-memory access is complete.
 /// Only needed when CR4.SMAP is set.
+///
+/// #CPUID guard: QEMU TCG raises #UD on CLAC/STAC when the CPU model does
+/// not advertise CPUID.(7,0):EBX.SMAP (e.g. plain `-cpu qemu64`), even
+/// though real Ivy Bridge+ CPUs execute them unconditionally. Gate both
+/// instructions on the detected feature so kernels built with SMAP-aware
+/// user accessors boot on any CPU model.
 #[inline]
 pub fn stac() {
+    if !cpu_has_smap() {
+        return;
+    }
     unsafe {
         asm!("stac", options(nomem, nostack, preserves_flags));
     }
@@ -166,9 +185,21 @@ pub fn stac() {
 /// Paired with `stac()`.
 #[inline]
 pub fn clac() {
+    if !cpu_has_smap() {
+        return;
+    }
     unsafe {
         asm!("clac", options(nomem, nostack, preserves_flags));
     }
+}
+
+/// Whether CPUID.(7,0):EBX.SMAP is available. Cached on first use; the
+/// `cpu()` call is cheap (single Relaxed load) once `cpuid::init()` ran.
+#[inline]
+fn cpu_has_smap() -> bool {
+    crate::arch::x86_64::cpuid::host()
+        .features
+        .contains(crate::arch::x86_64::cpuid::CpuFeatures::SMAP)
 }
 
 /// Check if interrupts are enabled
@@ -243,8 +274,8 @@ pub fn wrmsr(msr: u32, val: u64) {
 
 /// Execute CPUID instruction.
 ///
-/// rbx is reserved by LLVM, so we save/restore it manually.
-#[inline]
+/// Damn, rbx is reserved by LLVM, so we save/restore it manually.
+#[inline(never)]
 pub fn cpuid(leaf: u32, sub_leaf: u32) -> (u32, u32, u32, u32) {
     let eax: u32;
     let ebx: u32;
@@ -254,12 +285,13 @@ pub fn cpuid(leaf: u32, sub_leaf: u32) -> (u32, u32, u32, u32) {
         asm!(
             "push rbx",
             "cpuid",
-            "mov {ebx_out:e}, ebx",
+            "mov r11d, ebx",
             "pop rbx",
             inout("eax") leaf => eax,
             inout("ecx") sub_leaf => ecx,
-            ebx_out = out(reg) ebx,
+            out("r11") ebx,
             out("edx") edx,
+            options(nostack, preserves_flags),
         );
     }
     (eax, ebx, ecx, edx)
@@ -270,12 +302,21 @@ pub fn cpuid(leaf: u32, sub_leaf: u32) -> (u32, u32, u32, u32) {
 /// Returns the number of CPU cycles since reset. Available from the
 /// very first instruction : use this as the sole timing source during
 /// early boot (before APIC/PIT timers are configured).
+///
+/// LFENCE is emitted before RDTSC to ensure all prior instructions
+/// have completed (RDTSC is non-serializing).
 #[inline]
 pub fn rdtsc() -> u64 {
     let eax: u32;
     let edx: u32;
     unsafe {
-        asm!("rdtsc", out("eax") eax, out("edx") edx, options(nomem, nostack));
+        asm!(
+            "lfence",
+            "rdtsc",
+            out("eax") eax,
+            out("edx") edx,
+            options(nomem, nostack),
+        );
     }
     ((edx as u64) << 32) | eax as u64
 }

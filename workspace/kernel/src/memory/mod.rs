@@ -13,6 +13,7 @@ pub mod frame;
 pub mod heap;
 pub mod mapping_index;
 pub mod ownership;
+pub mod physical_access;
 pub mod paging;
 pub mod region_cap;
 pub mod userslice;
@@ -50,6 +51,30 @@ pub fn phys_to_virt(phys: u64) -> u64 {
 #[inline]
 pub fn virt_to_phys(virt: u64) -> u64 {
     virt.wrapping_sub(HHDM_OFFSET.load(Ordering::Relaxed))
+}
+
+/// Invalidate a local translation-cache entry through the architecture ABI.
+#[inline]
+pub fn invalidate_local_page(vaddr: u64) {
+    #[cfg(target_arch = "x86_64")]
+    crate::arch::tlb::local_page(crate::arch::xshim::VirtAddr::new(vaddr));
+    #[cfg(target_arch = "riscv64")]
+    crate::arch::tlb::local_page(crate::arch::xshim::VirtAddr::new(vaddr));
+}
+
+/// Invalidate a virtual-address range on all CPUs through the architecture ABI.
+#[inline]
+pub fn shootdown_range(start: u64, end: u64) {
+    #[cfg(target_arch = "x86_64")]
+    crate::arch::tlb::shootdown_range(
+        crate::arch::xshim::VirtAddr::new(start),
+        crate::arch::xshim::VirtAddr::new(end),
+    );
+    #[cfg(target_arch = "riscv64")]
+    crate::arch::tlb::shootdown_range(
+        crate::arch::xshim::VirtAddr::new(start),
+        crate::arch::xshim::VirtAddr::new(end),
+    );
 }
 
 /// Initialize the memory management subsystem

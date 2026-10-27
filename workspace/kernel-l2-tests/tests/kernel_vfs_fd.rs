@@ -1,16 +1,18 @@
-//! L2 — VFS file layer: OpenFile offsets/permissions + FileDescriptorTable.
+//! L2 : VFS file layer: OpenFile offsets/permissions + FileDescriptorTable.
 //!
 //! Uses a controllable mock `Scheme` (the trait's defaults make this cheap)
-//! against the VERBATIM kernel OpenFile / FileDescriptorTable code — the
+//! against the VERBATIM kernel OpenFile / FileDescriptorTable code : the
 //! same logic every POSIX-style fd operation flows through.
 
-use std::sync::Arc;
-use kernel_l2_tests::vfs::fd::FileDescriptorTable;
-use kernel_l2_tests::vfs::file::OpenFile;
-use kernel_l2_tests::vfs::scheme::{
-    DirEntry, FileFlags, FileStat, KernelScheme, OpenFlags, OpenResult, Scheme,
+use kernel_l2_tests::{
+    syscall::error::SyscallError,
+    vfs::{
+        fd::FileDescriptorTable,
+        file::OpenFile,
+        scheme::{DirEntry, FileFlags, FileStat, KernelScheme, OpenFlags, OpenResult, Scheme},
+    },
 };
-use kernel_l2_tests::syscall::error::SyscallError;
+use std::sync::Arc;
 
 // ===========================================================================
 // Mock scheme: in-memory file with configurable content
@@ -24,7 +26,10 @@ struct Mock {
 
 impl Mock {
     fn new(data: &[u8]) -> Self {
-        Self { data: kernel_l2_tests::sync::SpinLock::new(data.to_vec()), fail_writes: false }
+        Self {
+            data: kernel_l2_tests::sync::SpinLock::new(data.to_vec()),
+            fail_writes: false,
+        }
     }
 }
 
@@ -116,10 +121,7 @@ fn openfile_write_on_readonly_denied() {
 #[test]
 fn openfile_read_on_writeonly_denied() {
     let f = open_file(OpenFlags::WRITE);
-    assert_eq!(
-        f.read(&mut [0u8; 4]),
-        Err(SyscallError::PermissionDenied)
-    );
+    assert_eq!(f.read(&mut [0u8; 4]), Err(SyscallError::PermissionDenied));
 }
 
 #[test]
@@ -188,7 +190,7 @@ fn fd_duplicate_targets_lowest_free_fd() {
     let dup = t.duplicate(0).expect("dup");
     assert_eq!(dup, 1, "dup must land on lowest free slot");
     // Both fds reference the same underlying file: writes through one are
-    // visible via the other (shared offset? no — separate offsets per fd,
+    // visible via the other (shared offset? no : separate offsets per fd,
     // but same scheme+file_id; we pin handle identity instead).
     assert!(t.get(dup).is_ok());
     assert!(Arc::ptr_eq(&t.get(0).unwrap(), &t.get(dup).unwrap()));

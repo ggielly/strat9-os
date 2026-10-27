@@ -242,7 +242,17 @@ impl<W: fmt::Write> fmt::Write for BootPrefixWriter<'_, W> {
 
 /// Initialize the serial port
 pub fn init() {
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'x', options(nomem, nostack));
+    }
+    SERIAL1.lock();
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'y', options(nomem, nostack));
+    }
     SERIAL1.lock().init();
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'z', options(nomem, nostack));
+    }
 }
 
 /// Parse kernel cmdline from UEFI bootloader boot arguments.
@@ -328,6 +338,11 @@ pub fn get_cmdline() -> &'static str {
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
 
+    // Gate all serial output at the function body level.
+    if !crate::debug_cfg::SERIAL_ENABLED {
+        return;
+    }
+
     // Check if we are in emergency panic mode.
     if PANIC_IN_PROGRESS.load(Ordering::Relaxed) {
         // SAFETY: In emergency mode, we bypass the mutex to ensure output.
@@ -365,6 +380,11 @@ pub fn _print(args: fmt::Arguments) {
 pub fn _print_force(args: fmt::Arguments) {
     use core::fmt::Write;
 
+    // Gate all serial output at the function body level.
+    if !crate::debug_cfg::SERIAL_ENABLED {
+        return;
+    }
+
     // Check if we are in emergency panic mode.
     if PANIC_IN_PROGRESS.load(Ordering::Relaxed) {
         // SAFETY: In emergency mode, we bypass the lock to ensure output.
@@ -388,7 +408,9 @@ pub fn _print_force(args: fmt::Arguments) {
 #[macro_export]
 macro_rules! serial_print {
     ($($arg:tt)*) => {
-        $crate::arch::x86_64::serial::_print(format_args!($($arg)*))
+        if $crate::debug_cfg::SERIAL_ENABLED {
+            $crate::arch::x86_64::serial::_print(format_args!($($arg)*))
+        }
     };
 }
 
@@ -396,12 +418,24 @@ macro_rules! serial_print {
 #[macro_export]
 macro_rules! serial_println {
     () => ($crate::serial_print!("\n"));
-    ($($arg:tt)*) => ($crate::serial_print!("{}\n", format_args!($($arg)*)));
+    ($($arg:tt)*) => {
+        if $crate::debug_cfg::SERIAL_ENABLED {
+            $crate::arch::x86_64::serial::_print(format_args!("{}\n", format_args!($($arg)*)))
+        }
+    };
 }
 
 /// Print to serial port with newline, bypassing the shared mutex.
 #[macro_export]
 macro_rules! serial_force_println {
-    () => ($crate::arch::x86_64::serial::_print_force(format_args!("\n")));
-    ($($arg:tt)*) => ($crate::arch::x86_64::serial::_print_force(format_args!("{}\n", format_args!($($arg)*))));
+    () => {
+        if $crate::debug_cfg::SERIAL_ENABLED {
+            $crate::arch::x86_64::serial::_print_force(format_args!("\n"))
+        }
+    };
+    ($($arg:tt)*) => {
+        if $crate::debug_cfg::SERIAL_ENABLED {
+            $crate::arch::x86_64::serial::_print_force(format_args!("{}\n", format_args!($($arg)*)))
+        }
+    };
 }

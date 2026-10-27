@@ -44,11 +44,7 @@ const RZ_STRESS_INCREMENTS: usize = 50;
 
 /// Read and parse `/thread/stats` -> (allocated_total, active).
 fn read_thread_stats() -> Option<(usize, usize)> {
-    let fd = call::open(
-        "/thread/stats",
-        strat9_syscall::flag::O_RDONLY,
-    )
-    .ok()?;
+    let fd = call::open("/thread/stats", strat9_syscall::flag::O_RDONLY).ok()?;
     let mut content = alloc::vec::Vec::new();
     let mut buf = [0u8; 128];
     loop {
@@ -64,11 +60,12 @@ fn read_thread_stats() -> Option<(usize, usize)> {
     let _ = call::close(fd);
 
     let parse_after_label = |label: &[u8]| -> Option<usize> {
-        let pos = content
-            .windows(label.len())
-            .position(|w| w == label)?;
+        let pos = content.windows(label.len()).position(|w| w == label)?;
         let rest = &content[pos + label.len()..];
-        let end = rest.iter().position(|&b| !b.is_ascii_digit()).unwrap_or(rest.len());
+        let end = rest
+            .iter()
+            .position(|&b| !b.is_ascii_digit())
+            .unwrap_or(rest.len());
         if end == 0 {
             return None;
         }
@@ -922,8 +919,7 @@ pub extern "C" fn _start() -> ! {
             exit_process(64);
         }
     }
-    let stress_total =
-        (RZ_STRESS_THREADS * RZ_STRESS_INCREMENTS * RZ_STRESS_THREADS) as usize;
+    let stress_total = (RZ_STRESS_THREADS * RZ_STRESS_INCREMENTS * RZ_STRESS_THREADS) as usize;
     let stress_seen = STRESS_COUNTER.load(Ordering::SeqCst);
     if stress_seen != stress_total {
         log("[init-test:rz] ERROR: mutex stress lost updates want=");

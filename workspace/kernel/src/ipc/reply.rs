@@ -95,6 +95,10 @@ pub fn wait_for_reply(task_id: TaskId, waiting_on: TaskId) -> IpcMessage {
     };
 
     let msg = waitq.wait_until(|| {
+        // P2 fix: check for pending signals to avoid livelock.
+        if crate::process::signal::has_pending_signals() {
+            return Some(epipe_reply());
+        }
         let mut registry = REPLIES.lock();
         match registry.slots.get_mut(&task_id) {
             Some(ReplySlot {
@@ -184,6 +188,24 @@ pub enum DeliverError {
     /// Without this check, any process could forge replies into another
     /// process's blocked `SYS_IPC_CALL` (reply spoofing).
     NotResponder,
+}
+
+/// Check whether `responder` is authorized to reply to `target`.
+///
+/// Returns `Ok(())` if the authorization check passes, or the appropriate
+/// `DeliverError` otherwise.  This is used by `sys_ipc_reply` to validate
+/// authorization **before** performing handle transfer, preventing capability
+/// injection into arbitrary processes.
+pub fn check_authorization(responder: TaskId, target: TaskId) -> Result<(), DeliverError> {
+    let registry = REPLIES.lock();
+    let slot = registry
+        .slots
+        .get(&target)
+        .ok_or(DeliverError::NoPendingCall)?;
+    if slot.waiting_on != Some(responder) {
+        return Err(DeliverError::NotResponder);
+    }
+    Ok(())
 }
 
 /// Deliver a reply message to the given task.

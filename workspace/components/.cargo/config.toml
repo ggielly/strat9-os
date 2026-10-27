@@ -1,0 +1,23 @@
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C",
+    "relocation-model=static",
+    "-C",
+    "link-arg=-Lworkspace/kernel",
+    # Components link in the dedicated LOW-HALF window (0x400000): user and
+    # kernel no longer fight for the higher-half addresses. Never use the
+    # kernel linker script for user binaries (see user-linker.ld docs).
+    "-C",
+    "link-arg=-Tworkspace/components/user-linker.ld",
+    "-C",
+    "link-arg=-no-pie",
+    "-C",
+    "link-arg=-z",
+    "-C",
+    "link-arg=nostart-stop-gc",
+    "-C",
+    "code-model=kernel",
+    # N3 send() captures sender_rip via [rbp + 8]; frame pointers mandatory.
+    "-C",
+    "force-frame-pointers=yes",
+]

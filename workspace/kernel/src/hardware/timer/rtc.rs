@@ -102,6 +102,41 @@ impl RtcDateTime {
         (days * 86400 + hour * 3600 + minute * 60 + second) as u64
     }
 
+    /// Convert a Unix timestamp (seconds since 1970-01-01 00:00:00 UTC) to a
+    /// civil date.
+    ///
+    /// Inverse of [`RtcDateTime::to_timestamp`], same algorithm run backwards, so
+    /// the two cannot disagree about leap years. Callers that only want to
+    /// display a file timestamp (the shell's `ls -l`) use this instead of
+    /// re-deriving calendar arithmetic with a fixed-length year.
+    pub fn from_timestamp(timestamp: u64) -> Self {
+        let secs = timestamp as i64;
+        let days = secs.div_euclid(86400);
+        let rem = secs.rem_euclid(86400);
+
+        // Shift the year to start in March so leap days land at the end.
+        let z = days + 719468;
+        let era = z.div_euclid(146097);
+        let doe = z.rem_euclid(146097);
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+
+        Self {
+            second: (rem % 60) as u8,
+            minute: ((rem / 60) % 60) as u8,
+            hour: (rem / 3600) as u8,
+            weekday: (days + 4).rem_euclid(7) as u8, // 1970-01-01 was a Thursday
+            day: d as u8,
+            month: m as u8,
+            year: if m <= 2 { (y + 1) as u16 } else { y as u16 },
+            century: (((if m <= 2 { y + 1 } else { y }) / 100) + 1) as u16,
+        }
+    }
+
     /// Format as ISO 8601 string (simplified)
     pub fn to_string(&self) -> [u8; 19] {
         let mut buf = [0u8; 19];

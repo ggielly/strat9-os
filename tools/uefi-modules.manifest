@@ -1,0 +1,24 @@
+# group  ELF filename          cargo-make producer
+# base: required in every UEFI image; test: required when STRAT9_INCLUDE_TESTS=1.
+base strate-init strate-init-release
+base console-admin strate-console-admin-release
+base strate-net-silo strate-net-release
+base strate-bus strate-bus-release
+base fs-ext4-strate strate-ext4-release
+base strate-fs-ramfs strate-fs-ramfs-release
+base strate-wasm strate-wasm-release
+base strate-webrtc strate-webrtc-release
+base display-server strate-graphical-release
+base dhcp-client dhcp-client-release
+base ping ping-release
+base telnetd telnetd-release
+base udp-tool udp-tool-release
+base web-admin strate-web-admin-release
+test test_pid strate-silo-test-release
+test test_syscalls strate-silo-test-release
+test test_exec strate-silo-test-release
+test test_exec_helper strate-silo-test-release
+test test_mem strate-mem-test-release
+test test_mem_stressed strate-mem-test-release
+test test_mem_region strate-mem-test-release
+test test_mem_region_proc strate-mem-test-release

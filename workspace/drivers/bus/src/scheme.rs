@@ -138,7 +138,7 @@ pub struct BusSchemeServer {
     /// Driver-name → index into `drivers`, built once at construction.
     ///
     /// Path resolution is O(log n) instead of a linear scan over all
-    /// driver names on every open/existence check — significant with the
+    /// driver names on every open/existence check : significant with the
     /// 100–1000 drivers this server is expected to host.
     name_to_idx: BTreeMap<String, usize>,
 }
@@ -257,7 +257,7 @@ impl BusSchemeServer {
             return true;
         }
         // PCI paths: strictly validate the sub-path instead of accepting
-        // anything under `pci/` — otherwise opening `/bus/pci/<junk>`
+        // anything under `pci/` : otherwise opening `/bus/pci/<junk>`
         // succeeds and burns a handle on a path that can only answer
         // "unknown".
         if Self::is_pci_path(path) {
@@ -947,7 +947,7 @@ impl BusSchemeServer {
 }
 
 // ===========================================================================
-// Tests — pure path/parsing helpers pinned by the security review.
+// Tests : pure path/parsing helpers pinned by the security review.
 // Host-runnable: cargo test -p strat9-bus-drivers
 // ===========================================================================
 
@@ -955,7 +955,7 @@ impl BusSchemeServer {
 mod review_tests {
     use super::*;
 
-    // S5 — normalize_path: dot segments, `..` traversal, repeated slashes.
+    // S5 : normalize_path: dot segments, `..` traversal, repeated slashes.
 
     #[test]
     fn s5_normalize_collapses_dots_and_slashes() {
@@ -991,7 +991,7 @@ mod review_tests {
         assert_eq!(BusSchemeServer::normalize_path("pci/../../x"), None);
     }
 
-    // A4 — hardened hex parsing.
+    // A4 : hardened hex parsing.
 
     #[test]
     fn a4_hex_parsers_reject_sign_and_repeated_prefixes() {
@@ -1014,7 +1014,7 @@ mod review_tests {
         assert!(BusSchemeServer::parse_reg_offset("reg/+4").is_none());
     }
 
-    // V3 — strict pci sub-path validation.
+    // V3 : strict pci sub-path validation.
 
     #[test]
     fn v3_pci_cfg_path_rejects_bad_width_and_bdf() {

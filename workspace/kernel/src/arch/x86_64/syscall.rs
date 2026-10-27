@@ -79,6 +79,8 @@ pub fn init() {
 #[unsafe(naked)]
 unsafe extern "C" fn syscall_entry() {
     core::arch::naked_asm!(
+        // Preserve RAX (syscall number) and argument registers until saved below.
+        // In particular, writing a debug marker to AL corrupts the syscall number.
         // Swap GS to kernel base (per-CPU)
         "swapgs",
 

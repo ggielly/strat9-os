@@ -237,6 +237,7 @@ const MSR_GS_BASE: u32 = 0xC000_0101;
 /// Supported operations:
 /// - `ARCH_SET_FS` (0x1002): Set user-space FS.base (Thread Local Storage).
 /// - `ARCH_GET_FS` (0x1003): Read current FS.base into *arg.
+#[cfg(target_arch = "x86_64")]
 pub fn sys_arch_prctl(code: u64, addr: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::Fault)?;
     match code {
@@ -271,11 +272,18 @@ pub fn sys_arch_prctl(code: u64, addr: u64) -> Result<u64, SyscallError> {
     }
 }
 
+/// Segment-base controls are x86-specific and have no RISC-V equivalent.
+#[cfg(target_arch = "riscv64")]
+pub fn sys_arch_prctl(_code: u64, _addr: u64) -> Result<u64, SyscallError> {
+    Err(SyscallError::NotSupported)
+}
+
 /// Write a 64-bit value to an MSR.
 ///
 /// # Safety
 /// Must only be called with valid MSR addresses. Misuse causes a #GP.
 #[inline]
+#[cfg(target_arch = "x86_64")]
 unsafe fn wrmsr(msr: u32, value: u64) {
     let lo = value as u32;
     let hi = (value >> 32) as u32;
@@ -295,6 +303,7 @@ unsafe fn wrmsr(msr: u32, value: u64) {
 /// # Safety
 /// Must only be called with valid MSR addresses.
 #[inline]
+#[cfg(target_arch = "x86_64")]
 unsafe fn rdmsr(msr: u32) -> u64 {
     let lo: u32;
     let hi: u32;

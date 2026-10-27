@@ -1,4 +1,4 @@
-//! L0 — ABI stability conformance tests (anti-regression golden values).
+//! L0 : ABI stability conformance tests (anti-regression golden values).
 //!
 //! These tests pin the **wire-level** contract of the Strat9 ABI:
 //! syscall numbers, struct sizes/offsets, IPC constants. Any change here
@@ -7,14 +7,16 @@
 //! If one of these tests fails after an intentional change, update the
 //! golden value in the same commit and add a note to `abi-changelog.md`.
 
-use strat9_abi::data::{
-    FileStat, IpcMessage, Stat, TimeSpec, IPC_MESSAGE_ALIGN, IPC_MESSAGE_SIZE,
-    IPC_PAYLOAD_CAPACITY,
+use strat9_abi::{
+    data::{
+        FileStat, IpcMessage, Stat, TimeSpec, IPC_MESSAGE_ALIGN, IPC_MESSAGE_SIZE,
+        IPC_PAYLOAD_CAPACITY,
+    },
+    errno,
+    ipc::IPC_HANDSHAKE_MAGIC,
+    ipc_codec::{InlineBlobHeader, PAYLOAD_CAPACITY},
+    syscall::*,
 };
-use strat9_abi::errno;
-use strat9_abi::ipc::IPC_HANDSHAKE_MAGIC;
-use strat9_abi::ipc_codec::{InlineBlobHeader, PAYLOAD_CAPACITY};
-use strat9_abi::syscall::*;
 
 // ===========================================================================
 // Golden syscall number table
@@ -336,7 +338,7 @@ fn ipc_message_header_fields_offsets() {
 
 #[test]
 fn ipc_handshake_magic_is_ipc9() {
-    // "IPC9" little-endian sentinel — must never drift.
+    // "IPC9" little-endian sentinel : must never drift.
     assert_eq!(IPC_HANDSHAKE_MAGIC, 0x4950_4339);
 }
 

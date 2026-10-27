@@ -185,6 +185,7 @@ impl From<crate::ipc::port::IpcError> for SyscallError {
             IpcError::NotOwner => SyscallError::PermissionDenied,
             IpcError::PortDestroyed => SyscallError::Pipe,
             IpcError::WouldBlock => SyscallError::Again,
+            IpcError::Interrupted => SyscallError::Interrupted,
         }
     }
 }
@@ -211,6 +212,7 @@ impl From<crate::ipc::channel::ChannelError> for SyscallError {
         match err {
             ChannelError::WouldBlock => SyscallError::Again,
             ChannelError::Disconnected => SyscallError::Pipe,
+            ChannelError::Interrupted => SyscallError::Interrupted,
         }
     }
 }

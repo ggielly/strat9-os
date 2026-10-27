@@ -51,7 +51,12 @@ impl Mutex {
                     if state != CONTENDED
                         && self
                             .state
-                            .compare_exchange(state, CONTENDED, Ordering::Release, Ordering::Relaxed)
+                            .compare_exchange(
+                                state,
+                                CONTENDED,
+                                Ordering::Release,
+                                Ordering::Relaxed,
+                            )
                             .is_err()
                     {
                         state = self.state.load(Ordering::Relaxed);

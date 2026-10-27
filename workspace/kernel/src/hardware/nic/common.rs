@@ -5,6 +5,7 @@
 //! `NetworkDevice` for both the legacy e1000 and the e1000e drivers.
 
 use crate::{
+    arch::xshim::VirtAddr,
     hardware::pci_client::{self as pci, Bar, PciDevice},
     memory::{self},
     sync::SpinLock,
@@ -13,7 +14,6 @@ use alloc::sync::Arc;
 use e1000::E1000Nic;
 use net_core::{NetError, NetworkDevice};
 use nic_buffers::{DmaAllocator, DmaRegion};
-use crate::arch::xshim::VirtAddr;
 
 /// Kernel-side DMA allocator backed by the physical buddy allocator.
 pub struct KernelDma;
@@ -45,8 +45,9 @@ impl DmaAllocator for KernelDma {
     unsafe fn free_dma(&self, region: DmaRegion) {
         let pages = (region.size + 4095) / 4096;
         let order = pages.next_power_of_two().trailing_zeros() as u8;
-        let frame =
-            crate::memory::PhysFrame::containing_address(crate::arch::xshim::PhysAddr::new(region.phys));
+        let frame = crate::memory::PhysFrame::containing_address(
+            crate::arch::xshim::PhysAddr::new(region.phys),
+        );
         crate::sync::with_irqs_disabled(|token| {
             crate::memory::free_phys_contiguous(token, frame, order);
         });

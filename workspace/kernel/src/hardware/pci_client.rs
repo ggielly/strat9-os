@@ -3,9 +3,10 @@ pub use crate::arch::pci::{
     net_subclass, sata_progif, storage_subclass, vendor, MSI_ADDR_BASE, MSI_ADDR_DEST_SHIFT,
 };
 use crate::{
-    arch::pci as arch_pci,
     vfs::{self, OpenFlags},
 };
+#[cfg(target_arch = "x86_64")]
+use crate::arch::pci as arch_pci;
 use alloc::{format, string::String, vec::Vec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,11 +206,13 @@ fn cfg_path(addr: PciAddress, offset: u8, width: u8) -> String {
 }
 
 /// Converts address to arch address.
+#[cfg(target_arch = "x86_64")]
 fn to_arch_addr(addr: PciAddress) -> arch_pci::PciAddress {
     arch_pci::PciAddress::new(addr.bus, addr.device, addr.function)
 }
 
 /// Creates a lightweight arch device handle for direct cfg access.
+#[cfg(target_arch = "x86_64")]
 fn arch_dev_handle(addr: PciAddress) -> arch_pci::PciDevice {
     arch_pci::PciDevice {
         address: to_arch_addr(addr),
@@ -234,13 +237,26 @@ fn cfg_read(addr: PciAddress, offset: u8, width: u8) -> Option<u32> {
     }
 
     // Early boot fallback when /bus/pci is not available yet.
-    let dev = arch_dev_handle(addr);
-    Some(match width {
-        1 => dev.read_config_u8(offset) as u32,
-        2 => dev.read_config_u16(offset) as u32,
-        4 => dev.read_config_u32(offset),
-        _ => return None,
-    })
+    #[cfg(target_arch = "x86_64")]
+    {
+        let dev = arch_dev_handle(addr);
+        Some(match width {
+            1 => dev.read_config_u8(offset) as u32,
+            2 => dev.read_config_u16(offset) as u32,
+            4 => dev.read_config_u32(offset),
+            _ => return None,
+        })
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        use crate::arch::riscv64::pci;
+        Some(match width {
+            1 => pci::read_config_u8(addr.bus, addr.device, addr.function, offset) as u32,
+            2 => pci::read_config_u16(addr.bus, addr.device, addr.function, offset) as u32,
+            4 => pci::read_config_u32(addr.bus, addr.device, addr.function, offset),
+            _ => return None,
+        })
+    }
 }
 
 /// Performs the cfg write operation.
@@ -250,14 +266,43 @@ fn cfg_write(addr: PciAddress, offset: u8, width: u8, value: u32) -> bool {
     }
 
     // Early boot fallback when /bus/pci is not available yet.
-    let dev = arch_dev_handle(addr);
-    match width {
-        1 => dev.write_config_u8(offset, value as u8),
-        2 => dev.write_config_u16(offset, value as u16),
-        4 => dev.write_config_u32(offset, value),
-        _ => return false,
+    #[cfg(target_arch = "x86_64")]
+    {
+        let dev = arch_dev_handle(addr);
+        match width {
+            1 => dev.write_config_u8(offset, value as u8),
+            2 => dev.write_config_u16(offset, value as u16),
+            4 => dev.write_config_u32(offset, value),
+            _ => return false,
+        }
+        true
     }
-    true
+    #[cfg(target_arch = "riscv64")]
+    {
+        use crate::arch::riscv64::pci;
+        let aligned = offset & !3;
+        let shift = (offset & 3) * 8;
+        match width {
+            1 | 2 => {
+                let bits = (width as u32) * 8;
+                if shift as u32 + bits > 32 {
+                    return false;
+                }
+                let mask = ((1u32 << bits) - 1) << shift;
+                let old = pci::read_config_u32(addr.bus, addr.device, addr.function, aligned);
+                pci::write_config_u32(
+                    addr.bus,
+                    addr.device,
+                    addr.function,
+                    aligned,
+                    (old & !mask) | ((value << shift) & mask),
+                );
+            }
+            4 => pci::write_config_u32(addr.bus, addr.device, addr.function, aligned, value),
+            _ => return false,
+        }
+        true
+    }
 }
 
 impl PciDevice {
@@ -301,8 +346,20 @@ impl PciDevice {
             let hex = text.strip_prefix("0x")?;
             return u32::from_str_radix(hex, 16).ok();
         }
-        let dev = arch_dev_handle(self.address);
-        dev.read_config_u32_ext(offset)
+        #[cfg(target_arch = "x86_64")]
+        {
+            arch_dev_handle(self.address).read_config_u32_ext(offset)
+        }
+        #[cfg(target_arch = "riscv64")]
+        {
+            let offset = u8::try_from(offset).ok()?;
+            Some(crate::arch::riscv64::pci::read_config_u32(
+                self.address.bus,
+                self.address.device,
+                self.address.function,
+                offset,
+            ))
+        }
     }
 
     /// Walk the PCI capability linked-list and return the config-space offset
@@ -412,21 +469,44 @@ pub fn all_devices() -> Vec<PciDevice> {
     }
 
     // Early boot fallback when /bus/pci/inventory is not ready yet.
-    arch_pci::all_devices()
-        .into_iter()
-        .map(|d| PciDevice {
-            address: PciAddress::new(d.address.bus, d.address.device, d.address.function),
-            vendor_id: d.vendor_id,
-            device_id: d.device_id,
-            class_code: d.class_code,
-            subclass: d.subclass,
-            prog_if: d.prog_if,
-            revision: d.revision,
-            header_type: d.header_type,
-            interrupt_line: d.interrupt_line,
-            interrupt_pin: d.interrupt_pin,
-        })
-        .collect()
+    #[cfg(target_arch = "x86_64")]
+    {
+        arch_pci::all_devices()
+            .into_iter()
+            .map(|d| PciDevice {
+                address: PciAddress::new(d.address.bus, d.address.device, d.address.function),
+                vendor_id: d.vendor_id,
+                device_id: d.device_id,
+                class_code: d.class_code,
+                subclass: d.subclass,
+                prog_if: d.prog_if,
+                revision: d.revision,
+                header_type: d.header_type,
+                interrupt_line: d.interrupt_line,
+                interrupt_pin: d.interrupt_pin,
+            })
+            .collect()
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        let mut raw = [crate::arch::riscv64::pci::PciDeviceInfo::EMPTY; 256];
+        let count = crate::arch::riscv64::pci::enumerate(&mut raw);
+        raw[..count]
+            .iter()
+            .map(|d| PciDevice {
+                address: PciAddress::new(d.bus, d.device, d.function),
+                vendor_id: d.vendor_id,
+                device_id: d.device_id,
+                class_code: d.class_code,
+                subclass: d.subclass,
+                prog_if: d.prog_if,
+                revision: d.revision,
+                header_type: d.header_type,
+                interrupt_line: d.interrupt_line,
+                interrupt_pin: d.interrupt_pin,
+            })
+            .collect::<Vec<_>>()
+    }
 }
 
 /// Performs the find device operation.
@@ -478,5 +558,6 @@ pub fn probe_first(criteria: ProbeCriteria) -> Option<PciDevice> {
 /// Performs the invalidate cache operation.
 pub fn invalidate_cache() {
     let _ = open_write("/bus/pci/rescan", &[1, 0, 0, 0]);
+    #[cfg(target_arch = "x86_64")]
     arch_pci::invalidate_cache();
 }

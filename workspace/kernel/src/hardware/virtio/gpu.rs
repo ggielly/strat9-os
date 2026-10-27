@@ -2,7 +2,7 @@
 // Reference: VirtIO spec v1.2, Section 5.4 (GPU Device)
 
 use crate::{
-    arch::pci::{self, Bar, ProbeCriteria},
+    hardware::pci_client::{self as pci, Bar, ProbeCriteria},
     memory::{self, allocate_zeroed_frame, phys_to_virt, PhysFrame},
 };
 use alloc::{sync::Arc, vec, vec::Vec};
@@ -435,9 +435,10 @@ impl VirtioGpu {
 
         if resp.enabled != 0 {
             // Clamp to sane limits to prevent buddy exhaustion if the GPU
-            // returns garbage dimensions.
-            const MAX_WIDTH: u32 = 3840;
-            const MAX_HEIGHT: u32 = 2160;
+            // returns garbage dimensions.  Also keep the framebuffer small
+            // enough that the text console is readable on a typical monitor.
+            const MAX_WIDTH: u32 = 1280;
+            const MAX_HEIGHT: u32 = 720;
             let w = resp.rect.width.min(MAX_WIDTH);
             let h = resp.rect.height.min(MAX_HEIGHT);
             if w == 0 || h == 0 {
@@ -777,7 +778,7 @@ impl VirtioGpu {
             },
             resource_id: 1,
         };
-        let _ : Result<CtrlHeader, &'static str> =
+        let _: Result<CtrlHeader, &'static str> =
             self.send_command::<CmdResourceDetachBacking, CtrlHeader>(&det);
 
         let entry = MemEntry {

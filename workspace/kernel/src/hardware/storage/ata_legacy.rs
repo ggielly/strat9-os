@@ -54,12 +54,18 @@ impl AtaChannel {
 
     /// Performs the read8 operation.
     fn read8(&self, offset: usize) -> u8 {
-        unsafe { crate::x86_crate_shim::instructions::port::Port::new(self.io_base + offset as u16).read() }
+        unsafe {
+            crate::x86_crate_shim::instructions::port::Port::new(self.io_base + offset as u16)
+                .read()
+        }
     }
 
     /// Performs the write8 operation.
     fn write8(&self, offset: usize, value: u8) {
-        unsafe { crate::x86_crate_shim::instructions::port::Port::new(self.io_base + offset as u16).write(value) }
+        unsafe {
+            crate::x86_crate_shim::instructions::port::Port::new(self.io_base + offset as u16)
+                .write(value)
+        }
     }
 
     /// Performs the read16 operation.

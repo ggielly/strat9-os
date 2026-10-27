@@ -60,7 +60,11 @@ impl AnsiParser {
 }
 
 fn param_or(params: &vte::Params, idx: usize) -> u16 {
-    params.iter().nth(idx).and_then(|p| p.first().copied()).unwrap_or(0)
+    params
+        .iter()
+        .nth(idx)
+        .and_then(|p| p.first().copied())
+        .unwrap_or(0)
 }
 
 fn has_params(params: &vte::Params, idx: usize) -> bool {
@@ -72,21 +76,27 @@ struct ActionCollector<'a>(&'a mut Vec<AnsiAction>);
 impl vte::Perform for ActionCollector<'_> {
     fn print(&mut self, _c: char) {}
     fn execute(&mut self, _b: u8) {}
-    fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, _action: char) {}
+    fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, _action: char) {
+    }
     fn put(&mut self, _b: u8) {}
     fn unhook(&mut self) {}
     fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {}
 
-    fn csi_dispatch(&mut self, params: &vte::Params, _intermediates: &[u8], _ignore: bool, action: char) {
+    fn csi_dispatch(
+        &mut self,
+        params: &vte::Params,
+        _intermediates: &[u8],
+        _ignore: bool,
+        action: char,
+    ) {
         let a = match action {
             'A' => AnsiAction::CursorUp(param_or(params, 0)),
             'B' => AnsiAction::CursorDown(param_or(params, 0)),
             'C' => AnsiAction::CursorForward(param_or(params, 0)),
             'D' => AnsiAction::CursorBack(param_or(params, 0)),
-            'H' | 'f' => AnsiAction::CursorPosition(
-                param_or(params, 0).max(1),
-                param_or(params, 1).max(1),
-            ),
+            'H' | 'f' => {
+                AnsiAction::CursorPosition(param_or(params, 0).max(1), param_or(params, 1).max(1))
+            }
             'G' => AnsiAction::CursorHorizontalAbsolute(param_or(params, 0)),
             'J' => AnsiAction::EraseDisplay(match param_or(params, 0) {
                 1 => EraseMode::Above,
@@ -137,11 +147,28 @@ fn parse_sgr_colorspace(params: &vte::Params, is_fg: bool) -> SgrParam {
     let second = param_or(params, 1);
     if second == 5 && has_params(params, 2) {
         let c = param_or(params, 2) as u8;
-        if is_fg { SgrParam::FgColor(c) } else { SgrParam::BgColor(c) }
-    } else if second == 2 && has_params(params, 3) && has_params(params, 4) && has_params(params, 5) {
-        let (r, g, b) = (param_or(params, 3) as u8, param_or(params, 4) as u8, param_or(params, 5) as u8);
-        if is_fg { SgrParam::FgRgb(r, g, b) } else { SgrParam::BgRgb(r, g, b) }
+        if is_fg {
+            SgrParam::FgColor(c)
+        } else {
+            SgrParam::BgColor(c)
+        }
+    } else if second == 2 && has_params(params, 3) && has_params(params, 4) && has_params(params, 5)
+    {
+        let (r, g, b) = (
+            param_or(params, 3) as u8,
+            param_or(params, 4) as u8,
+            param_or(params, 5) as u8,
+        );
+        if is_fg {
+            SgrParam::FgRgb(r, g, b)
+        } else {
+            SgrParam::BgRgb(r, g, b)
+        }
     } else {
-        if is_fg { SgrParam::FgColor(7) } else { SgrParam::BgColor(0) }
+        if is_fg {
+            SgrParam::FgColor(7)
+        } else {
+            SgrParam::BgColor(0)
+        }
     }
 }
