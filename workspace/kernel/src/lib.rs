@@ -594,7 +594,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         let mut i = 0usize;
         while i < regions.len().min(16) {
             let r = &regions[i];
-            // kind: 0=Null 1=Free 2=Reclaim 3=Reserved
+            // kind (ABI v5): 0=Null 1=Free 2=Reclaim 3=Reserved 4=Bad 5=AcpiNvs
             let k = (r.kind.0 as u8) + b'0';
             let base = r.base;
             let size = r.size;
