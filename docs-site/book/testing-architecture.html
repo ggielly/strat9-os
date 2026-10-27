@@ -166,28 +166,24 @@
 <blockquote>
 <p>Objectif : non-régression systématique pour chaque module du système — kernel,
 ABI, IPC, mémoire, VFS, drivers, composants userspace (Silos/Strates).</p>
-<p>Statut initial constaté : ~66 <code>#[test]</code> dans tout le workspace, concentrés sur
-<code>ipc/lockfree_ring</code>, <code>xfs-rs</code> et <code>fs-abstraction</code>. Aucun stage de test en CI.
-<code>cargo test --workspace</code> échoue côté hôte (<code>duplicate lang item panic_impl</code>)
-car le kernel et les composants sont <code>#![no_std]</code> ciblant <code>x86_64-unknown-none</code>.</p>
 </blockquote>
 <h2 id="1-les-5-couches-de-test-pyramide"><a class="header" href="#1-les-5-couches-de-test-pyramide">1. Les 5 couches de test (pyramide)</a></h2>
 <pre><code>        ┌─────────────────────────────────────┐
-   L4   │  Tests end-to-end QEMU (ISO boot)    │  lents, few, high value
+   L4   │  Tests end-to-end QEMU (ISO UEFI)    │  lents, peu, forte valeur
         ├─────────────────────────────────────┤
    L3   │  Self-tests kernel in-QEMU           │  (feature `selftest`)
         ├─────────────────────────────────────┤
-   L2   │  Unit tests no_std on host           │  pure logic, gated
+   L2   │  Unit tests no_std sur hôte           │  logique pure, modules réels
         ├─────────────────────────────────────┤
-   L1   │  Unit tests host (std)               │  ABI, parsers, codecs
+   L1   │  Unit tests hôte (std)               │  ABI, parseurs, codecs
         ├─────────────────────────────────────┤
-   L0   │  Static ABI conformance assertions   │  compile-time
+   L0   │  Assertions de conformité ABI        │  compile-time
         └─────────────────────────────────────┘
 </code></pre>
 <h3 id="l0--conformance-abi-statique-compile-time"><a class="header" href="#l0--conformance-abi-statique-compile-time">L0 — Conformance ABI statique (compile-time)</a></h3>
 <ul>
-<li><code>static_assertions::assert_eq_size!</code> / <code>assert_eq_align!</code> / <code>const_assert!</code>
-sur <strong>toutes</strong> les structures <code>#[repr(C)]</code> traversant la frontière kernel ↔ userspace.</li>
+<li><code>assert_eq_size!</code> / <code>assert_eq_align!</code> sur <strong>toutes</strong> les structures <code>#[repr(C)]</code>
+traversant la frontière kernel ↔ userspace.</li>
 <li>Golden values des numéros de syscall : tout changement est une rupture d'ABI
 et doit être un commit explicite + bump de <code>ABI_VERSION_MINOR</code>.</li>
 <li>Fichier : <code>workspace/abi/tests/abi_stability.rs</code>.</li>
@@ -196,53 +192,80 @@ et doit être un commit explicite + bump de <code>ABI_VERSION_MINOR</code>.</li>
 <p>Tout ce qui est logique pure sans dépendance matérielle :</p>
 <ul>
 <li>crate <code>strat9-abi</code> entière (errno, flags, parsing IP, codec IPC, payloads) ;</li>
-<li>math safe (<code>safe_math</code>), unicode, parseurs TOML de boot ;</li>
+<li>math safe (<code>safe_math</code>), Unicode, parseurs TOML de boot ;</li>
 <li>conversions POSIX ↔ Strat9 (musl-compat, relibc shims).</li>
-<li>Exécution : <code>cargo test -p &lt;crate&gt;</code> — doit rester <strong>vert en permanence</strong>.</li>
 </ul>
+<p>Exécution : <code>cargo make test-host</code> (paquet de crates, target <code>x86_64-unknown-linux-gnu</code>)
+et <code>cargo make test-host-alloc</code> (variantes <code>alloc</code>). Les deux doivent rester <strong>verts</strong>.</p>
 <h3 id="l2--tests-unitaires-no_std-sur-hôte"><a class="header" href="#l2--tests-unitaires-no_std-sur-hôte">L2 — Tests unitaires <code>no_std</code> sur hôte</a></h3>
 <p>Pour la logique kernel testable sans matériel (allocateurs, anneaux IPC,
-tables de capabilities, routage de schemes) :</p>
-<ul>
-<li>Pattern recommandé : extraire la logique pure dans des modules sans dépendance
-arch (<code>mod pure</code>), tester ces modules avec <code>#[cfg(test)]</code> compilés pour hôte ;</li>
-<li>Alternative : harness de test custom embarqué dans l'image (voir L3).</li>
-</ul>
-<h3 id="l2--opérationnel--crate-ombre-workspacekernel-l2-tests"><a class="header" href="#l2--opérationnel--crate-ombre-workspacekernel-l2-tests">L2 — opérationnel : crate ombre <code>workspace/kernel-l2-tests</code></a></h3>
-<p>Les modules purs du kernel sont compilés <strong>verbatim</strong> (<code>#[path]</code> includes)
-dans une crate hôte qui fournit des fakes fonctionnels :
+tables de capabilities, routage de schemes). Pattern retenu : la crate ombre
+<code>workspace/kernel-l2-tests</code> compile les modules purs du kernel <strong>verbatim</strong>
+(<code>#[path]</code>) dans une crate hôte qui fournit des fakes fonctionnels :
 <code>sync/irq</code> (token factice), <code>arch/x86_64/percpu</code> (compteurs), <code>silo</code>,
-translation HHDM (offset réel vers une arena hôte → l'allocateur buddy
-travaille sur de la vraie mémoire). Les tests inline <code>#[cfg(test)]</code> du
-kernel s'exécutent enfin. Cible : <code>cargo make test-kernel-l2</code>.
-Modules couverts : <code>sync/{fixed_queue,guardian,spinlock}</code>, <code>ipc/{message, lockfree_ring,mailbox}</code>, <code>memory/{boot_alloc,zone,frame,buddy}</code>,
-<code>namespace</code>, <code>boot/toml</code>. Prochains candidats : <code>ipc/channel</code>, <code>vfs</code>
-(routeur de schemes), classes d'ordonnancement.</p>
+translation HHDM (offset réel vers une arena hôte, donc l'allocateur buddy
+travaille sur de la vraie mémoire). Les tests inline <code>#[cfg(test)]</code> du kernel
+s'exécutent enfin. Cible : <code>cargo make test-kernel-l2</code>.</p>
+<p><strong>Modules couverts</strong> (state current) :</p>
+<div class="table-wrapper"><table><thead><tr><th>Domaine</th><th>Modules</th></tr></thead><tbody>
+<tr><td>Mémoire</td><td><code>memory/{boot_alloc, zone, frame, buddy}</code> — compilés verbatim</td></tr>
+<tr><td>Sync</td><td><code>sync/{fixed_queue, guardian, spinlock}</code></td></tr>
+<tr><td>IPC</td><td><code>ipc/{message, lockfree_ring, mailbox}</code>, <code>ipc/channel</code></td></tr>
+<tr><td>VFS</td><td>routage de schemes (<code>kernel_vfs_scheme</code>, <code>kernel_vfs_fd</code>), pipes</td></tr>
+<tr><td>Nommage</td><td><code>namespace</code></td></tr>
+<tr><td>Boot</td><td><code>boot/toml</code>, <code>boot/entry</code>, et les chemins <code>boot/{graphics, handoff, initfs, memory, transition}</code></td></tr>
+<tr><td>Syscall</td><td>mapping d'erreurs (<code>mirror/syscall.rs</code>)</td></tr>
+<tr><td>Ordonnancement</td><td><code>process/sched_classes/nice.rs</code> (nice → <code>sched_nice</code>)</td></tr>
+</tbody></table>
+</div>
+<blockquote>
+<p>Les « prochains candidats » <code>ipc/channel</code> et le routeur de schemes <code>vfs</code>
+mentionnés dans les versions précédentes de cette page sont <strong>désormais couverts</strong>.</p>
+</blockquote>
 <h3 id="l3--self-tests-kernel-in-qemu-feature-selftest"><a class="header" href="#l3--self-tests-kernel-in-qemu-feature-selftest">L3 — Self-tests kernel in-QEMU (feature <code>selftest</code>)</a></h3>
-<p>Le kernel dispose déjà de <code>cargo make kernel-test</code> + <code>selftest.rs</code>.
-Convention à généraliser :</p>
+<p>Le kernel dispose de <code>cargo make kernel-test</code> et de
+<code>workspace/kernel/src/process/selftest.rs</code>. Convention :</p>
 <ul>
-<li>chaque sous-système déclare une fonction <code>&lt;module&gt;_selftest() -&gt; Result</code>;</li>
+<li>chaque sous-système déclare une fonction <code>&lt;module&gt;_selftest() -&gt; Result</code> ;</li>
 <li>l'orchestrateur affiche <code>[selftest] PASS/FAIL &lt;name&gt;</code> sur le port série ;</li>
-<li>sortie vérifiable mécaniquement : grep <code>SELFTEST-FAIL</code> sur la sortie série.</li>
+<li>sortie vérifiable mécaniquement : <code>tools/scripts/selftest-log.py</code> reconnaît
+<code>[selftest] orchestrator start</code>, <code>[selftest] orchestrator done</code> et le marqueur
+de succès <code>[selftest][strate] PASS</code>.</li>
 </ul>
 <h3 id="l4--tests-dintégration-bout-en-bout-qemu"><a class="header" href="#l4--tests-dintégration-bout-en-bout-qemu">L4 — Tests d'intégration bout-en-bout QEMU</a></h3>
-<p>Silos utilisateurs dédiés (<code>test_mem_region</code>, <code>test_exec</code>, …) lancés depuis
-l'initfs ; le harnais QEMU vérifie la sortie série (<code>TEST-PASS</code>/<code>TEST-FAIL</code>)
-avec timeout. Cible cargo-make unique : <code>cargo make ci-qemu-tests</code>.</p>
+<p>Silos utilisateurs dédiés (<code>test_mem</code>, <code>test_pid</code>, <code>test_exec</code>, …) lancés depuis
+l'initfs ; le harnais QEMU vérifie la sortie série avec timeout.</p>
+<p>Tâche cargo-make : <strong><code>cargo make qemu-tests</code></strong> (construit l'ISO UEFI de selftest
+puis lance le harnais). Il n'existe pas de tâche <code>ci-qemu-tests</code>.</p>
+<div class="table-wrapper"><table><thead><tr><th>Outil</th><th>Rôle</th></tr></thead><tbody>
+<tr><td><code>tools/scripts/qemu-selftest.sh</code></td><td>Harnais QEMU : <code>--timeout</code>, <code>--smp</code>, <code>--mem</code>, <code>--log</code>, <code>--iso</code>, <code>--image</code>, <code>--firmware</code></td></tr>
+<tr><td><code>tools/scripts/selftest-log.py</code></td><td>Analyse du log série et verdict</td></tr>
+<tr><td><code>tools/scripts/create-uefi-image.sh</code> / <code>create-iso-uefi.sh</code></td><td>Construction de l'image et de l'ISO</td></tr>
+</tbody></table>
+</div>
+<hr />
 <h2 id="2-matrice-module--couches"><a class="header" href="#2-matrice-module--couches">2. Matrice module → couches</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Module</th><th>L0</th><th>L1</th><th>L2</th><th>L3</th><th>L4</th></tr></thead><tbody>
 <tr><td><code>strat9-abi</code></td><td>✅</td><td>✅</td><td>—</td><td>—</td><td>—</td></tr>
-<tr><td><code>kernel/ipc</code> (codec, rings, mailbox)</td><td>✅</td><td>✅*</td><td>✅</td><td>✅</td><td>✅</td></tr>
-<tr><td><code>kernel/memory</code> (buddy, heap, cow)</td><td>—</td><td>partiel</td><td>✅</td><td>✅</td><td>✅ (<code>test_mem_region</code>)</td></tr>
+<tr><td><code>kernel/ipc</code> (codec, rings, mailbox, channels)</td><td>✅</td><td>✅*</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td><code>kernel/memory</code> (buddy, frame, boot_alloc)</td><td>—</td><td>partiel</td><td>✅</td><td>✅</td><td>✅ (<code>test_mem_region</code>)</td></tr>
 <tr><td><code>kernel/process</code> (sched, signals, futex)</td><td>—</td><td>—</td><td>✅</td><td>✅</td><td>✅</td></tr>
-<tr><td><code>kernel/vfs</code> (schemes, router, ramfs)</td><td>—</td><td>—</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td><code>kernel/vfs</code> (schemes, router, pipes)</td><td>—</td><td>—</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td><code>kernel/syscall</code> (mapping d'erreurs)</td><td>—</td><td>✅</td><td>✅</td><td>—</td><td>—</td></tr>
 <tr><td><code>strate-fs-abstraction</code></td><td>—</td><td>✅</td><td>—</td><td>—</td><td>✅</td></tr>
-<tr><td><code>strate-fs-ext4/ramfs</code></td><td>—</td><td>partiel</td><td>—</td><td>—</td><td>✅</td></tr>
+<tr><td><code>strate-fs-ext4</code> / <code>ramfs</code></td><td>—</td><td>partiel</td><td>—</td><td>—</td><td>✅</td></tr>
+<tr><td><code>strat9-syscall</code> (error, dirent, flags)</td><td>—</td><td>✅</td><td>—</td><td>—</td><td>—</td></tr>
+<tr><td><code>strat9-bus-drivers</code></td><td>—</td><td>✅ (37 tests)</td><td>—</td><td>—</td><td>—</td></tr>
 <tr><td>drivers (e1000, virtio, ahci)</td><td>—</td><td>partiel</td><td>—</td><td>✅</td><td>✅ (loopback QEMU)</td></tr>
 </tbody></table>
 </div>
-<p>* via extraction <code>pure</code> ou duplication contrôlée des constantes.</p>
+<p>* via la crate ombre L2 ou l'extraction <code>pure</code>.</p>
+<blockquote>
+<p><code>strat9-bus-drivers</code> a une suite de tests hôte de 37 tests répartie sur 7 fichiers,
+mais son crate <strong>ne figure pas</strong> dans la liste de paquets de <code>test-host</code>. Ces tests
+ne sont donc pas dans le gate CI actuel.</p>
+</blockquote>
+<hr />
 <h2 id="3-conventions"><a class="header" href="#3-conventions">3. Conventions</a></h2>
 <ol>
 <li><strong>Nommage</strong> : <code>tests/&lt;module&gt;_*.rs</code> (intégration), <code>#[cfg(test)] mod tests</code>
@@ -252,26 +275,58 @@ pour les parseurs/codecs.</li>
 <li><strong>Golden values</strong> pour toute constante cross-binaire (numéros syscall, layouts,
 opcodes IPC) : la régression est détectée même si aucun consumer n'est compilé.</li>
 <li><strong>Roundtrip systématique</strong> pour codecs : <code>decode(encode(x)) == x</code> + tests de
-corruption/troncature (bytes aléatoires déterministes, pas de RNG non seedé).</li>
+corruption/troncature (octets aléatoires déterministes, pas de RNG non seedé).</li>
 <li>Chaque PR qui touche un module doit être accompagnée des tests de sa couche.</li>
 </ol>
-<h2 id="4-ci-roadmap"><a class="header" href="#4-ci-roadmap">4. CI (roadmap)</a></h2>
-<p>Stage GitLab <code>test</code> entre <code>build</code> et <code>release</code> :</p>
-<ol>
-<li><code>cargo test --workspace --exclude strat9-kernel ...</code> (crates host-safe) ;</li>
-<li>build kernel <code>--features selftest</code> (garde la compilation des selftests) ;</li>
-<li>job optionnel QEMU : boot ISO + grep série (runner avec qemu-system-x86_64).</li>
-</ol>
+<hr />
+<h2 id="4-ci"><a class="header" href="#4-ci">4. CI</a></h2>
+<p>Stages GitLab (<code>.gitlab-ci.yml</code>), <strong>dans cet ordre</strong> :</p>
+<pre><code class="language-text">test  →  test-qemu  →  build  →  release
+</code></pre>
+<blockquote>
+<p>Les versions précédentes de cette page indiquaient <code>test</code> <strong>entre</strong> <code>build</code> et
+<code>release</code>. C'est faux : <code>test</code> est le <strong>premier</strong> stage, et le stage <code>test-qemu</code>
+n'existait pas.</p>
+</blockquote>
+<div class="table-wrapper"><table><thead><tr><th>Stage</th><th>Jobs</th><th>Contenu</th></tr></thead><tbody>
+<tr><td><code>test</code></td><td><code>test-host</code></td><td><code>cargo make test-host</code></td></tr>
+<tr><td><code>test</code></td><td><code>build-docs</code></td><td>Construction du site de documentation</td></tr>
+<tr><td><code>test-qemu</code></td><td><code>build-selftest-iso</code></td><td><code>tools/ci/build-selftest-iso.sh</code> sur un runner taggé <code>[qemu, kvm, proxmox]</code></td></tr>
+<tr><td><code>test-qemu</code></td><td><code>qemu-proxmox</code></td><td><code>./tools/scripts/qemu-selftest.sh --iso … --timeout 180</code> — <code>allow_failure: true</code></td></tr>
+<tr><td><code>build</code></td><td><code>build-os-release</code></td><td>Image de release</td></tr>
+<tr><td><code>release</code></td><td><code>release-latest</code></td><td>Publication</td></tr>
+</tbody></table>
+</div>
+<p>Le kernel compilé avec <code>--features selftest</code> est construit par <code>kernel-test</code>,
+qui est <strong>volontairement exclu de <code>ci-tests</code></strong> tant que le pin
+<code>nightly-2026-07-20</code> n'est pas confirmé vert ; il reste couvert par le job
+<code>qemu-proxmox</code>.</p>
+<p><strong>Point à surveiller.</strong> Le stage <code>build</code> construit encore la release via
+<code>cargo make uboot-image-release</code>, c'est-à-dire par le chemin U-Boot marqué
+<code>[LEGACY]</code>, et non par le chemin UEFI (<code>uefi-image-release</code>) que la CI QEMU
+utilise. Voir <code>docs/mr-u-boot-replacement.md</code>.</p>
+<hr />
 <h2 id="5-questions-ouvertes-à-arbitrer"><a class="header" href="#5-questions-ouvertes-à-arbitrer">5. Questions ouvertes (à arbitrer)</a></h2>
 <ol>
-<li><strong>Base de branche</strong> : branchée sur le HEAD de <code>fix/ipc-scheme-security-review</code>
-(5078255). Si vous préférez une base <code>main</code>, rebase trivial (fichiers nouveaux uniquement).</li>
-<li><strong>L2 kernel-hôte</strong> : préférer l'extraction de modules purs (refactor plus large,
-meilleure couverture) ou dupliquer les tests in-QEMU (zéro refactor, exécution
-plus lente) ? Recommandation : extraction progressive, en commençant par IPC.</li>
-<li><strong>QEMU en CI</strong> : un runner GitLab avec KVM/qemu est-il disponible ? Sinon TCG
-(lent mais suffisant pour L3/L4 courts).</li>
+<li><strong>L2 kernel-hôte</strong> : l'extraction de modules purs (refactor plus large,
+meilleure couverture) ou la duplication des tests in-QEMU (zéro refactor,
+exécution plus lente) ? La crate ombre a résolu le problème sans refactor ;
+la question ne se pose plus que pour les modules qui restent couplés à l'arch.</li>
+<li><strong>QEMU en CI</strong> : le runner Proxmox est provisionné et <code>qemu-proxmox</code> est en
+<code>allow_failure</code>. Faut-il le rendre bloquant ?</li>
+<li><strong><code>test-host</code> incomplet</strong> : ajouter <code>strat9-bus-drivers</code> (37 tests) à la liste
+de paquets, et décider du sort des crates sans suite hôte.</li>
+<li><strong>Chemins morts</strong> : <code>tools/scripts/rebuild-and-test.sh</code> assemble encore
+<code>bootloader/asm/x86_64/stage2.asm</code> par un chemin inexistant et cible le flux
+BIOS retiré ; <code>tools/scripts/test-boot.sh</code> démarre une image brute sans
+firmware et est désormais orphelin (la tâche <code>cargo make test-boot</code> fait le
+même travail en UEFI). Supprimer ou recâbler ?</li>
 </ol>
+<h2 id="voir-aussi"><a class="header" href="#voir-aussi">Voir aussi</a></h2>
+<ul>
+<li><a href="./testing-findings.html">Testing Findings Report</a> — l'inventaire des findings numérotés et l'état de chaque correctif</li>
+<li><a href="./abi.html">ABI Overview</a> — la couche L0 en détail</li>
+</ul>
 
                     </main>
 

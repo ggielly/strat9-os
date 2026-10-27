@@ -223,7 +223,10 @@ echo "  copying strates..."
 [ -f workspace/target/x86_64-unknown-none/release/fs-ext4 ] && \
     cp workspace/target/x86_64-unknown-none/release/fs-ext4 build/iso_root/strates/
 
-# Copy initfs runtime binaries (required by strate-init boot flow)
+# Copy initfs runtime binaries (required by strate-init boot flow).
+# Paths must match workspace/assets/boot/silo.toml (canonical boot config):
+#   /initfs/strate-net-silo  and  /initfs/dhcp-client
+# Aliases under /initfs/strate-net and /initfs/bin/ are kept for shell PATH.
 echo "  copying initfs runtime binaries..."
 [ -f workspace/target/x86_64-unknown-none/release/strate-init ] && \
     cp workspace/target/x86_64-unknown-none/release/strate-init build/iso_root/initfs/strate-init
@@ -232,9 +235,13 @@ echo "  copying initfs runtime binaries..."
 [ -f workspace/target/x86_64-unknown-none/release/strate-bus ] && \
     cp workspace/target/x86_64-unknown-none/release/strate-bus build/iso_root/initfs/strate-bus
 [ -f workspace/target/x86_64-unknown-strat9/release/strate-net-silo ] && \
+    cp workspace/target/x86_64-unknown-strat9/release/strate-net-silo build/iso_root/initfs/strate-net-silo
+[ -f workspace/target/x86_64-unknown-strat9/release/strate-net-silo ] && \
     cp workspace/target/x86_64-unknown-strat9/release/strate-net-silo build/iso_root/initfs/strate-net
 [ -f workspace/target/x86_64-unknown-none/release/strate-webrtc ] && \
     cp workspace/target/x86_64-unknown-none/release/strate-webrtc build/iso_root/initfs/strate-webrtc
+[ -f workspace/target/x86_64-unknown-none/release/dhcp-client ] && \
+    cp workspace/target/x86_64-unknown-none/release/dhcp-client build/iso_root/initfs/dhcp-client
 [ -f workspace/target/x86_64-unknown-none/release/dhcp-client ] && \
     cp workspace/target/x86_64-unknown-none/release/dhcp-client build/iso_root/initfs/bin/dhcp-client
 [ -f workspace/target/x86_64-unknown-none/release/test_mem_region ] && \

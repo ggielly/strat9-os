@@ -7,6 +7,13 @@ set -e
 
 disk_image="build/strat9-os.img"
 qemu="qemu-system-x86_64"
+qemu_accel=tcg
+if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+    qemu_accel=kvm
+    echo "QEMU acceleration: KVM"
+else
+    echo "QEMU acceleration: TCG (/dev/kvm unavailable; expose KVM to the host/container for hardware acceleration)"
+fi
 
 if [ ! -f "$disk_image" ]; then
     echo "Image disque introuvable: $disk_image"
@@ -27,12 +34,15 @@ echo "============================================"
 echo ""
 
 "$qemu" \
+    -accel "$qemu_accel" \
     -drive format=raw,file="$disk_image" \
     -machine q35 \
     -cpu qemu64 \
     -m 256M \
     -display gtk,grab-on-hover=off,zoom-to-fit=on \
     -serial file:build/serial.txt \
+    -debugcon file:build/qemu-debugcon.log \
+    -global isa-debugcon.iobase=0xe9 \
     -no-reboot \
     -no-shutdown \
     -d int,cpu_reset \

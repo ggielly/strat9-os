@@ -66,6 +66,14 @@ pub struct VgaWriter {
     pub(crate) sb: ScrollbackBuffer,
     pub(crate) scroll_offset: usize,
 
+    // Live text damage is stored as cells, not repeatedly rasterized pixels.
+    // Rows form a ring: scrolling only rotates the head and clears one row.
+    console_cells: Vec<SbCell>,
+    console_dirty_cells: Vec<bool>,
+    console_row_head: usize,
+    console_pending_scroll: usize,
+    console_pending: bool,
+
     /// Mouse + text cursor manager.
     pub(crate) cursor: CursorManager,
 
@@ -197,6 +205,11 @@ impl VgaWriter {
             },
             sb: ScrollbackBuffer::new(),
             scroll_offset: 0,
+            console_cells: Vec::new(),
+            console_dirty_cells: Vec::new(),
+            console_row_head: 0,
+            console_pending_scroll: 0,
+            console_pending: false,
             cursor: CursorManager::new(),
             sel_active: false,
             sel_start_row: 0,
@@ -266,6 +279,11 @@ impl VgaWriter {
         };
         self.sb = ScrollbackBuffer::new();
         self.scroll_offset = 0;
+        self.console_cells = alloc::vec![SbCell { ch: ' ', fg: self.fg, bg: self.bg }; cols * rows];
+        self.console_dirty_cells = alloc::vec![false; cols * rows];
+        self.console_row_head = 0;
+        self.console_pending_scroll = 0;
+        self.console_pending = false;
         self.cursor = CursorManager::new();
         self.cursor.tc_visible = false;
         self.cursor.tc_col = 0;
@@ -466,6 +484,7 @@ impl VgaWriter {
 
     /// Sets clip rect.
     pub fn set_clip_rect(&mut self, x: usize, y: usize, width: usize, height: usize) {
+        self.render_pending_console();
         let x_end = core::cmp::min(x.saturating_add(width), self.can().width);
         let y_end = core::cmp::min(y.saturating_add(height), self.can().height);
         self.clip = ClipRect {
@@ -478,6 +497,7 @@ impl VgaWriter {
 
     /// Performs the reset clip rect operation.
     pub fn reset_clip_rect(&mut self) {
+        self.render_pending_console();
         self.clip = ClipRect {
             x: 0,
             y: 0,
@@ -493,6 +513,7 @@ impl VgaWriter {
 
     /// Enables double buffer.
     pub fn enable_double_buffer(&mut self) -> bool {
+        self.render_pending_console();
         if !self.enabled {
             return false;
         }
@@ -507,14 +528,15 @@ impl VgaWriter {
         }
         self.canm().draw_to_back = true;
         self.canm().track_dirty = true;
-        self.clear_dirty();
+        // Preserve text damage already materialized before the graphics frame.
         true
     }
 
     /// Disables double buffer.
     pub fn disable_double_buffer(&mut self, present: bool) {
+        self.render_pending_console();
         if present {
-            self.present();
+            self.present_inner(true);
         }
         self.canm().draw_to_back = false;
         self.canm().track_dirty = false;
@@ -531,14 +553,12 @@ impl VgaWriter {
             return;
         }
 
-        if self.can().track_dirty && self.can().dirty.len == 0 {
+        if !self.console_pending && self.can().track_dirty && self.can().dirty.len == 0 {
             self.canm().present_pending = false;
             return;
         }
 
-        // Rate-limit: skip if not enough time since last present.
-        // Debug output calls present() very frequently; the human eye
-        // cannot see >60 FPS, and each present() copies the full dirty region.
+        // Gate both rasterization and presentation, not just framebuffer copies.
         let now = crate::process::scheduler::ticks();
         if !force
             && now != 0
@@ -547,6 +567,10 @@ impl VgaWriter {
             self.canm().present_pending = true;
             return;
         }
+
+        // Rasterize only the final visible cells for this frame. Intermediate
+        // scroll positions and overwritten characters never reach the framebuffer.
+        self.render_pending_console();
 
         // Extract all info through can() first to avoid borrow conflicts
         let bpp = self.fmt.bpp;
@@ -690,15 +714,6 @@ impl VgaWriter {
                 gpu.flush_now();
             }
         }
-
-        if self.cursor.mc_visible && self.cursor.mc_dirty {
-            self.mc_save_hw();
-            self.mc_draw_hw();
-        }
-        if self.cursor.tc_visible && self.cursor.tc_dirty {
-            self.text_cursor_save_hw();
-            self.text_cursor_draw_hw();
-        }
     }
 
     pub(crate) fn request_present(&mut self) {
@@ -706,7 +721,8 @@ impl VgaWriter {
             return;
         }
         self.canm().present_pending = true;
-        self.present_if_due(false);
+        // Early boot has no ticking renderer yet; retain synchronous visibility.
+        self.present_if_due(crate::process::scheduler::ticks() == 0);
     }
 
     pub(crate) fn present_if_due(&mut self, force: bool) {
@@ -815,7 +831,7 @@ impl VgaWriter {
         self.mc_save_hw();
         self.mc_draw_hw();
         self.cursor.mc_visible = true;
-        self.present_if_due(false);
+        self.request_present();
     }
 
     /// Performs the hide mouse cursor operation.
@@ -824,7 +840,7 @@ impl VgaWriter {
             self.mc_erase_hw();
             self.cursor.mc_visible = false;
         }
-        self.present_if_due(false);
+        self.request_present();
     }
 
     pub(crate) fn text_cursor_rect(&self) -> Option<(usize, usize, usize, usize)> {
@@ -1070,6 +1086,9 @@ impl VgaWriter {
         if !self.enabled {
             return;
         }
+        self.console_pending = false;
+        self.console_pending_scroll = 0;
+        self.console_dirty_cells.fill(false);
         let packed = self.pack_color(color);
         let canvas = self.can();
         let (fw, fh) = (canvas.width, canvas.height);
@@ -1210,11 +1229,13 @@ impl VgaWriter {
 
     /// Performs the draw pixel operation.
     pub fn draw_pixel(&mut self, x: usize, y: usize, color: RgbColor) {
+        self.render_pending_console();
         self.put_pixel_raw(x, y, self.pack_color(color));
     }
 
     /// Performs the draw pixel alpha operation.
     pub fn draw_pixel_alpha(&mut self, x: usize, y: usize, color: RgbColor, alpha: u8) {
+        self.render_pending_console();
         if !self.enabled
             || alpha == 0
             || x >= self.can().width
@@ -1240,6 +1261,7 @@ impl VgaWriter {
 
     /// Performs the draw line operation.
     pub fn draw_line(&mut self, x0: isize, y0: isize, x1: isize, y1: isize, color: RgbColor) {
+        self.render_pending_console();
         let mut x = x0;
         let mut y = y0;
         let dx = (x1 - x0).abs();
@@ -1270,6 +1292,7 @@ impl VgaWriter {
 
     /// Performs the draw rect operation.
     pub fn draw_rect(&mut self, x: usize, y: usize, width: usize, height: usize, color: RgbColor) {
+        self.render_pending_console();
         if width == 0 || height == 0 {
             return;
         }
@@ -1283,6 +1306,7 @@ impl VgaWriter {
 
     /// Performs the fill rect operation.
     pub fn fill_rect(&mut self, x: usize, y: usize, width: usize, height: usize, color: RgbColor) {
+        self.render_pending_console();
         let Some((sx, sy, sw, sh)) = self.clipped_rect(x, y, width, height) else {
             return;
         };
@@ -1350,6 +1374,7 @@ impl VgaWriter {
         color: RgbColor,
         alpha: u8,
     ) {
+        self.render_pending_console();
         if !self.enabled || width == 0 || height == 0 || alpha == 0 {
             return;
         }
@@ -1375,6 +1400,7 @@ impl VgaWriter {
         src_height: usize,
         pixels: &[RgbColor],
     ) -> bool {
+        self.render_pending_console();
         let len = src_width.saturating_mul(src_height);
         if !self.enabled || src_width == 0 || src_height == 0 || pixels.len() < len {
             return false;
@@ -1451,6 +1477,7 @@ impl VgaWriter {
         src_height: usize,
         bytes: &[u8],
     ) -> bool {
+        self.render_pending_console();
         let needed = src_width.saturating_mul(src_height).saturating_mul(3);
         if !self.enabled || src_width == 0 || src_height == 0 || bytes.len() < needed {
             return false;
@@ -1528,6 +1555,7 @@ impl VgaWriter {
         bytes: &[u8],
         global_alpha: u8,
     ) -> bool {
+        self.render_pending_console();
         let needed = src_width.saturating_mul(src_height).saturating_mul(4);
         if !self.enabled
             || src_width == 0
@@ -1577,6 +1605,7 @@ impl VgaWriter {
         sprite: SpriteRgba<'_>,
         global_alpha: u8,
     ) -> bool {
+        self.render_pending_console();
         self.blit_rgba(
             dst_x,
             dst_y,
@@ -1596,6 +1625,7 @@ impl VgaWriter {
         fg: RgbColor,
         bg: RgbColor,
     ) {
+        self.render_pending_console();
         if !self.enabled {
             return;
         }
@@ -2012,6 +2042,7 @@ impl VgaWriter {
     }
 
     pub(crate) fn render_viewport_full(&mut self) {
+        self.render_pending_console();
         let (prev_draw_to_back, prev_track_dirty) = self.begin_viewport_render();
         let text_h = self.text_area_height();
         let text_w = self.can().width.saturating_sub(SCROLLBAR_W);
@@ -2030,6 +2061,7 @@ impl VgaWriter {
     }
 
     pub(crate) fn set_scroll_offset_and_render(&mut self, new_offset: usize) {
+        self.render_pending_console();
         let old_offset = self.scroll_offset;
         self.scroll_offset = new_offset;
         if !self.redraw_from_scrollback_incremental(old_offset) {
@@ -2163,6 +2195,7 @@ impl VgaWriter {
         text: &str,
         opts: TextOptions,
     ) -> TextMetrics {
+        self.render_pending_console();
         if !self.enabled {
             return TextMetrics {
                 width: 0,
@@ -2217,6 +2250,7 @@ impl VgaWriter {
         layer_w: usize,
         layer_h: usize,
     ) {
+        self.render_pending_console();
         if !self.enabled || layer_w == 0 || layer_h == 0 {
             return;
         }
@@ -2272,13 +2306,16 @@ impl VgaWriter {
         if !self.enabled {
             return;
         }
-        let dy = self.font_info.glyph_h;
-        let text_h = self.text_area_height();
-        if dy >= text_h {
-            self.clear();
-            return;
-        }
-        self.move_text_view_pixels_up(dy);
+        self.console_row_head = (self.console_row_head + 1) % self.rows;
+        self.console_pending_scroll = (self.console_pending_scroll + 1).min(self.rows);
+        let bottom = ((self.console_row_head + self.rows - 1) % self.rows) * self.cols;
+        self.console_cells[bottom..bottom + self.cols].fill(SbCell {
+            ch: ' ',
+            fg: self.fg,
+            bg: self.bg,
+        });
+        self.console_dirty_cells[bottom..bottom + self.cols].fill(true);
+        self.console_pending = true;
         self.row = self.rows - 1;
     }
 
@@ -2288,6 +2325,8 @@ impl VgaWriter {
             return;
         }
         let c = normalize_console_char(c);
+
+        self.console_pending = true;
 
         // Mirror into scrollback (always, even when scrolled back) ========================================
         self.sb_mirror_char(c);
@@ -2307,12 +2346,12 @@ impl VgaWriter {
             '\u{8}' => {
                 if self.col > 0 {
                     self.col -= 1;
-                    self.draw_glyph(self.col, self.row, ' ');
+                    self.queue_console_glyph(' ');
                 }
             }
             '\0' => {}
             ch => {
-                self.draw_glyph(self.col, self.row, ch);
+                self.queue_console_glyph(ch);
                 self.col += 1;
             }
         }
@@ -2357,23 +2396,80 @@ impl VgaWriter {
             self.write_char(ch);
             i += 1;
         }
-        if self.draw_to_back_buffer() && self.can().dirty.len != 0 {
+        if self.draw_to_back_buffer() && (self.console_pending || self.can().dirty.len != 0) {
             self.canm().present_pending = true;
         }
     }
 
-    /// Flush: draw scrollbar + present to screen.
-    /// Call after a batch of `write_bytes()` calls to display everything at once.
-    /// NOTE: write_bytes() already called begin_viewport_render(), so we must NOT
-    /// call it again here : that would clear the dirty rects before present().
+    /// Publish a pending frame; the cadence gate precedes all rasterization.
     pub(crate) fn flush_display(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        self.request_present();
+    }
+
+    fn queue_console_glyph(&mut self, ch: char) {
+        if self.row >= self.rows || self.col >= self.cols {
+            return;
+        }
+        let idx = ((self.console_row_head + self.row) % self.rows) * self.cols + self.col;
+        self.console_cells[idx] = SbCell {
+            ch,
+            fg: self.fg,
+            bg: self.bg,
+        };
+        self.console_dirty_cells[idx] = true;
+        self.console_pending = true;
+    }
+
+    /// Materialize pending text before a present or an explicit graphics draw.
+    /// No allocations, and at most one pixel scroll regardless of output volume.
+    pub(crate) fn render_pending_console(&mut self) {
+        if !self.enabled || !self.console_pending {
+            return;
+        }
+        // Clear first: drawing primitives below may call this ordering barrier.
+        self.console_pending = false;
+        let mouse_visible = self.cursor.mc_visible;
+        let text_visible = self.cursor.tc_visible;
+        if mouse_visible {
+            self.mc_erase_hw();
+        }
+        if text_visible {
+            self.text_cursor_erase_hw();
+        }
+        let scroll = core::mem::take(&mut self.console_pending_scroll);
+        if scroll != 0 {
+            self.move_text_view_pixels_up(scroll * self.font_info.glyph_h);
+        }
+        for row in 0..self.rows {
+            let start = ((self.console_row_head + row) % self.rows) * self.cols;
+            for col in 0..self.cols {
+                let idx = start + col;
+                if !core::mem::replace(&mut self.console_dirty_cells[idx], false) {
+                    continue;
+                }
+                let cell = self.console_cells[idx];
+                self.draw_glyph_at_pixel(
+                    col * self.font_info.glyph_w,
+                    row * self.font_info.glyph_h,
+                    cell.ch,
+                    cell.fg,
+                    cell.bg,
+                );
+            }
+        }
         self.draw_scrollbar_inner();
-        // Force back-buffer mode and dirty tracking for the present cycle.
-        // We do NOT restore prev_draw/prev_track because the caller
-        // (write_bytes) expects dirty rects to survive into the next write.
-        self.canm().draw_to_back = true;
-        self.canm().track_dirty = true;
-        self.end_viewport_render(true, true);
+        // Compose overlays into the completed frame, before present copies it.
+        if text_visible {
+            self.text_cursor_save_hw();
+            self.text_cursor_draw_hw();
+        }
+        if mouse_visible {
+            self.mc_save_hw();
+            self.mc_draw_hw();
+        }
     }
 
     // =============================================================

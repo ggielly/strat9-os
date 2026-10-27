@@ -485,7 +485,6 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     e9_mark!(b'k');
     boot::panic::install_default_panic_hooks();
     e9_mark!(b'l');
-    boot::symbols::init();
     e9_mark!(b'm');
 
     // Nice logo :D
@@ -577,6 +576,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // =============================================
     let hhdm = args.hhdm_offset;
     memory::set_hhdm_offset(hhdm);
+    // Resolve panic backtraces only after the physical-to-virtual HHDM mapping
+    // is known and the bootloader-provided ELF copy can be read safely.
+    boot::symbols::init();
     #[cfg(target_arch = "x86_64")]
     if args.env_get("loader.paging") == Some("wx-uc-v1") {
         // No low EFI instruction is needed now. Revoke its executable alias
@@ -1331,6 +1333,36 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                 serial_println!("[WARN] Failed to create shell task: {}", e);
             }
         }
+        #[cfg(target_arch = "x86_64")]
+        {
+            match process::Task::new_kernel_task_with_stack(
+                shell::mouse_task_main,
+                "console-mouse",
+                process::TaskPriority::Normal,
+                64 * 1024,
+            ) {
+                Ok(task) => process::add_task(task),
+                Err(err) => serial_println!("[WARN] Mouse task unavailable: {}", err),
+            }
+            match process::Task::new_kernel_task_with_stack(
+                arch::x86_64::vgabuf::console_task_main,
+                "console-render",
+                process::TaskPriority::Normal,
+                64 * 1024,
+            ) {
+                Ok(task) => process::add_task(task),
+                Err(err) => serial_println!("[WARN] Console task unavailable: {}", err),
+            }
+            match process::Task::new_kernel_task_with_stack(
+                arch::x86_64::serial::serial_task_main,
+                "serial-output",
+                process::TaskPriority::Low,
+                32 * 1024,
+            ) {
+                Ok(task) => process::add_task(task),
+                Err(err) => serial_println!("[WARN] Serial task unavailable: {}", err),
+            }
+        }
         crate::e9_mark!(b'Y');
         if let Ok(status_task) = process::Task::new_kernel_task_with_stack(
             arch::vga::status_line_task_main,
@@ -1341,7 +1373,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             process::add_task(status_task);
             crate::e9_mark!(b'y');
             // Switch from live VGA debug output to buffered vgabuf path.
-            // The status_line_task will flush vgabuf to the framebuffer.
+            // The console-render task drains vgabuf; status-line is a fallback.
             crate::debug_cfg::set_vga_debug_live(false);
         }
     }

@@ -75,17 +75,23 @@ pub fn sys_net_recv(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     let mut kbuf = SmallVec::<[u8; NET_INLINE_BUF_CAPACITY]>::new();
     kbuf.resize(buf_len, 0u8);
 
-    // Try N2 data-plane ring first (zero-copy path, filled by IRQ handler).
+    // Prefer the N2 ring (IRQ-filled). If it is empty — no IRQ wired yet,
+    // or a dropped interrupt — fall back to a direct HW receive so DHCP
+    // and link-local IPv6 still make progress.
     let n = {
-        let dp_guard = crate::hardware::nic::data_plane().lock();
-        if let Some(ref dp) = *dp_guard {
-            match dp.pop_rx(0, &mut kbuf) {
-                Ok(Some(n)) => n,
-                Ok(None) => return Err(SyscallError::Again),
-                Err(_) => return Err(SyscallError::Again),
+        let from_ring = {
+            let dp_guard = crate::hardware::nic::data_plane().lock();
+            match dp_guard.as_ref() {
+                Some(dp) => match dp.pop_rx(0, &mut kbuf) {
+                    Ok(Some(n)) => Some(n),
+                    _ => None,
+                },
+                None => None,
             }
+        };
+        if let Some(n) = from_ring {
+            n
         } else {
-            // Fall back to direct HW receive (legacy path without N2).
             let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::Again)?;
             match device.receive(&mut kbuf) {
                 Ok(n) => n,
@@ -128,18 +134,29 @@ pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     }
     trace_dhcp_frame("tx", &kbuf);
 
-    // Try N2 data-plane TX ring first (deferred TX via IRQ handler).
-    {
-        let dp_guard = crate::hardware::nic::data_plane().lock();
-        if let Some(ref dp) = *dp_guard {
-            dp.push_tx(0, &kbuf).map_err(|_| SyscallError::Again)?;
-            dp.notify_tx_producer(0);
+    // Use the N2 TX ring only when an IRQ handler will drain it.
+    // Without a registered NIC device the ring would stall forever.
+    if crate::hardware::nic::nic_irq_ready() {
+        let pushed = {
+            let dp_guard = crate::hardware::nic::data_plane().lock();
+            match dp_guard.as_ref() {
+                Some(dp) => match dp.push_tx(0, &kbuf) {
+                    Ok(()) => {
+                        dp.notify_tx_producer(0);
+                        true
+                    }
+                    Err(_) => false,
+                },
+                None => false,
+            }
+        };
+        if pushed {
             crate::serial_println!("[net] tx ok {} bytes (N2 ring)", buf_len);
             return Ok(buf_len as u64);
         }
     }
 
-    // Fall back to direct HW transmit (legacy path without N2).
+    // Direct HW transmit (no N2, no IRQ, or ring full).
     let device = crate::hardware::nic::get_default_device().ok_or(SyscallError::Again)?;
     if let Err(e) = device.transmit(&kbuf) {
         let se = SyscallError::from(e);
@@ -149,7 +166,7 @@ pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
         return Err(se);
     }
 
-    crate::serial_println!("[net] tx ok {} bytes", buf_len);
+    crate::serial_println!("[net] tx ok {} bytes (direct)", buf_len);
     Ok(buf_len as u64)
 }
 

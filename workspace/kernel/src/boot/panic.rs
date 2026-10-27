@@ -179,6 +179,12 @@ fn dump_panic_info(info: &PanicInfo) {
     crate::serial_force_println!("CPU={}  CR0={:#X}  CR2={:#X}", cpu, cr0, cr2);
     crate::serial_force_println!("CR3={:#X}  CR4={:#X}", cr3, cr4);
     crate::serial_force_println!("RSP={:#018X}  RBP={:#018X}", rsp, rbp);
+    let (symbols_loaded, symbol_count) = super::symbols::status();
+    crate::serial_force_println!(
+        "Symbols: loaded={} entries={}",
+        symbols_loaded,
+        symbol_count
+    );
     crate::serial_force_println!("");
 
     // Backtrace

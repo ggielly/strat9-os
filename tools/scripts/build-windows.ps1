@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     Build strat9-os under Windows and create bootable ISO.
@@ -168,10 +168,12 @@ $Modules = @(
     @{ Src = "target\$Target\$ProfileDir\strate-fs-ramfs"; Dst = "initfs/strate-fs-ramfs" }
     @{ Src = "target\$Target\$ProfileDir\strate-init"; Dst = "initfs/init" }
     @{ Src = "target\$Target\$ProfileDir\console-admin"; Dst = "initfs/console-admin" }
+    @{ Src = "target\$Target\$ProfileDir\strate-net-silo"; Dst = "initfs/strate-net-silo" }
     @{ Src = "target\$Target\$ProfileDir\strate-net-silo"; Dst = "initfs/strate-net" }
     @{ Src = "target\$Target\$ProfileDir\strate-bus"; Dst = "initfs/strate-bus" }
     @{ Src = "target\$Target\$ProfileDir\strate-wasm"; Dst = "initfs/strate-wasm" }
     @{ Src = "target\$Target\$ProfileDir\strate-webrtc"; Dst = "initfs/strate-webrtc" }
+    @{ Src = "target\$Target\$ProfileDir\dhcp-client"; Dst = "initfs/dhcp-client" }
     @{ Src = "target\$Target\$ProfileDir\dhcp-client"; Dst = "initfs/bin/dhcp-client" }
     @{ Src = "target\$Target\$ProfileDir\ping"; Dst = "initfs/bin/ping" }
     @{ Src = "target\$Target\$ProfileDir\telnetd"; Dst = "initfs/bin/telnetd" }

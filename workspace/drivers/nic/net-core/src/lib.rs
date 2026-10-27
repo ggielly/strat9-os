@@ -25,6 +25,37 @@ impl core::fmt::Display for NetError {
     }
 }
 
+/// Link-layer media type, as reported by `ifconfig`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetMedia {
+    /// Ethernet framing (Ethernet II header, 6-byte MAC).
+    Ethernet,
+    /// IEEE 802.3 framing without the Ethernet II type field.
+    Ieee8023,
+    /// Point-to-point serial link.
+    Ppp,
+    /// Fibre channel.
+    FibreChannel,
+    /// Loopback adapter.
+    Loopback,
+    /// Anything a driver cannot classify.
+    Other,
+}
+
+impl NetMedia {
+    /// Short lowercase name used by `ifconfig`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ethernet => "ethernet",
+            Self::Ieee8023 => "ieee802.3",
+            Self::Ppp => "ppp",
+            Self::FibreChannel => "fibrechannel",
+            Self::Loopback => "loopback",
+            Self::Other => "other",
+        }
+    }
+}
+
 /// Unified network device interface.
 ///
 /// Kernel-resident drivers wrap their hardware-specific struct in a
@@ -37,6 +68,11 @@ pub trait NetworkDevice: Send + Sync {
     fn mac_address(&self) -> [u8; 6];
     fn link_up(&self) -> bool;
     fn handle_interrupt(&self) {}
+
+    /// Link-layer media. Ethernet is the only framing implemented today.
+    fn media(&self) -> NetMedia {
+        NetMedia::Ethernet
+    }
 
     /// Periodic housekeeping called from the timer path (or interrupt
     /// context).  Default is a no-op; drivers that need a watchdog or

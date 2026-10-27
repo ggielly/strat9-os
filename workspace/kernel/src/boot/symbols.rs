@@ -26,7 +26,7 @@ static mut STRTAB_LEN: usize = 0;
 
 /// Initialize the symbol table from the kernel ELF. Called once during early boot.
 pub fn init() {
-    if INITIALIZED.load(Ordering::Relaxed) {
+    if INITIALIZED.load(Ordering::Acquire) {
         return;
     }
 
@@ -120,7 +120,7 @@ pub fn init() {
         syms.sort_unstable_by_key(|s| s.addr);
     }
 
-    INITIALIZED.store(true, Ordering::Relaxed);
+    INITIALIZED.store(true, Ordering::Release);
 }
 
 /// Find a section's data by name in the ELF.
@@ -134,7 +134,7 @@ fn find_section_data<'a>(elf: &xmas_elf::ElfFile<'a>, name: &str) -> &'a [u8] {
 /// Look up an address in the symbol table. Returns (name, offset_from_symbol).
 /// Uses binary search for O(log n) lookup.
 pub fn lookup(addr: u64) -> Option<(&'static str, u64)> {
-    if !INITIALIZED.load(Ordering::Relaxed) {
+    if !INITIALIZED.load(Ordering::Acquire) {
         return None;
     }
 
@@ -161,6 +161,20 @@ pub fn lookup(addr: u64) -> Option<(&'static str, u64)> {
 
     let name = get_symbol_name(sym.name_offset);
     Some((name, offset))
+}
+
+/// Report whether the ELF symbol table was loaded and how many entries it has.
+/// This is useful in panic output to distinguish an unknown address from a
+/// missing symbol table in the boot image.
+pub fn status() -> (bool, usize) {
+    let initialized = INITIALIZED.load(Ordering::Acquire);
+    let count = if initialized {
+        // Initialization completes before normal task scheduling starts.
+        unsafe { SYMBOL_COUNT }
+    } else {
+        0
+    };
+    (initialized, count)
 }
 
 /// Get a symbol name from the string table.

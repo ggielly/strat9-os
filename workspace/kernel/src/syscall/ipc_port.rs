@@ -30,12 +30,13 @@ pub fn sys_ipc_create_port(_flags: u64) -> Result<u64, SyscallError> {
     let cap = get_capability_manager().create_capability(
         ResourceType::IpcPort,
         port_id.as_u64() as usize,
-        // P1 fix: least-privilege permissions (no execute, no grant, no revoke).
+        // Owner may bind the port into the namespace (ipc_bind_port requires
+        // grant). No execute; no revoke. Other ops only need read/write.
         CapPermissions {
             read: true,
             write: true,
             execute: false,
-            grant: false,
+            grant: true,
             revoke: false,
         },
     );

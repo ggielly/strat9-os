@@ -2,178 +2,239 @@
 
 > Issues découvertes par la suite anti-régression (`test/anti-regression-suite`).
 > Chaque finding est référencé par un test qui le documente/pinne.
+>
+> **Comptages de tests recalculés le 2026-09-29** par `grep -c '#\[test\]'` sur
+> l'arborescence `workspace/`, hors `target/` et hors `strate-fs-xfs`.
 
-## F1 — Build kernel cassé par le nightly non épinglé (bloquant) — ✅ RÉSOLU
-Épinglé sur `nightly-2026-08-20` (dernier bon vérifié : bisect 08-20 OK /
-08-23 cassé, cause PR rust-lang/rust#160302 mergé le 23/08 à 21:33 UTC,
-commit fb6531d550e0). Le code exige en outre `Step::forward/backward_overflowing`
-(PR #155114, 09/07/2026) ⇒ fenêtre compatible [2026-07-10 .. 2026-08-22].
-Correctif associé : `[profile.dev] opt-level = 0 → 1` car O0 déclenche une
-ICE LLVM distincte (#158532) sur les intrinsèques AVX2. Builds debug,
-release, selftest et gate hôte tous vérifiés verts.
-`framebuffer/x86/avx2.rs` utilise `#[target_feature(enable = "avx2")]`.
-Sur `rustc 1.100.0-nightly`, activer sse/avx sur une cible soft-float
-(`x86_64-unknown-none`) est une **erreur dure** (lint `x86_softfloat_sse`).
-`cargo make kernel` échoue sur toutes les branches.
-**Options** :
-1. (recommandé, immédiat) Épingler l'outilchain : `channel = "nightly-2026-06-xx"`
-   dans `rust-toolchain.toml` — dernière version connue fonctionnelle ;
-2. (long terme) Adapter `avx2.rs` : runtime detection + assembly inline
-   ou wrapper compilé sans soft-float constraint.
+## F1 — Build kernel cassé par le nightly non épinglé — ⚠️ PARTIELLEMENT RÉSOLU
 
-## F2 — `VfsTimestamp::to_filetime` déborde — ⏳ à faire
-`(secs + WINDOWS_EPOCH_OFFSET) as u64 * 10_000_000` sans arithmetic checkée :
-panic debug / wrap release au-delà de ~an 60000. Entrée contrôlée par le disque
-ou le réseau (chemins stat) ⇒ à traiter comme entrée hostile.
-**Fix proposé** : `checked_mul` → `FsError::ArithmeticOverflow`.
+Le diagnostic reste valable : `framebuffer/x86/avx2.rs` utilise
+`#[target_feature(enable = "avx2")]`, et sur un nightly récent activer SSE/AVX sur
+une cible soft-float (`x86_64-unknown-none`) est une **erreur dure**
+(lint `x86_softfloat_sse`).
+
+**Mais l'état réel diffère de ce qu'annonce la version précédente de cette page :**
+
+| Élément | Documenté ici | Réalité |
+|---------|---------------|---------|
+| Pin d'outilchain | `nightly-2026-08-20` | **`nightly-2026-07-20`** (`rust-toolchain.toml:14`) |
+| Fenêtre compatible | `[2026-07-10 .. 2026-08-22]` | Non documentée ailleurs ; le pin est simplement `2026-07-20` |
+| Correctif `[profile.dev] opt-level = 0 → 1` | « associé », statut ✅ | **Non appliqué** — `Cargo.toml:95` est toujours `opt-level = 0` |
+| Statut global | ✅ RÉSOLU | `Makefile.toml:196-201` exclut **volontairement** `kernel-test` de `ci-tests` « until confirmed on the 07-20 pin » |
+
+Le pin est en place, mais la fenêtre d analysing de bisect et le contournement
+`opt-level` ne le sont pas, et le kernel selftest n'est pas dans le gate
+`ci-tests`. Il reste couvert par le job QEMU `qemu-proxmox`.
+
+---
+
+## F2 — `VfsTimestamp::to_filetime` déborde — ⏳ TOUJOURS OUVERT
+
+`strate-fs-abstraction/src/types.rs:113-121` fait toujours
+`(windows_secs as u64) * 10_000_000` sans arithmétique vérifiée : panic en
+debug, wrap en release au-delà de ~an 60000. Entrée contrôlée par le disque ou
+le réseau (chemins `stat`) ⇒ à traiter comme une entrée hostile.
+
+**Pinné** par un test `#[should_panic]` dans `types_conformance.rs:134-143`.
+
+**Correctif proposé** : `checked_mul` → `FsError::ArithmeticOverflow`.
 
 ## F3 — `FsCapabilities::xfs()/btrfs()` : valeurs PiB au lieu de EiB — ✅ RÉSOLU
-XFS = 8 EiB réels ; btrfs clampé à u64::MAX (16 EiB = 2^64). Tests mis à jour.
-Commentaires « 8 EiB »/« 16 EiB », chaînes littérales à 5 facteurs `1024`
-⇒ valeurs réelles 8 **PiB** / 16 **PiB** (16 EiB ne tient même pas dans u64).
-Décider : corriger les commentaires ou l'arithmétique.
 
-## F4 — `parse_ipv6_literal` sur-accepte le `::` — ⏳ à durcir (RFC 4291)
+`capabilities.rs:105` vaut désormais `8 * Self::EIB` et `:146` clamp btrfs à
+`u64::MAX`. Test mis à jour dans `types_conformance.rs:188-201`.
+
+## F4 — `parse_ipv6_literal` sur-accepte le `::` — ⏳ TOUJOURS OUVERT
+
 RFC 4291 interdit `::` quand 8 groupes explicites sont déjà présents ;
-le parseur accepte `1:2:3:4:5:6:7:8::`. Sans danger immédiat (sortie bien
-formée) mais à durcir pour la conformité.
+`abi/src/ip.rs:185-243` accepte toujours `1:2:3:4:5:6:7:8::`. Sans danger
+immédiat (la sortie reste bien formée) mais à durcir pour la conformité.
+
+**Pinné** par `abi/tests/ip_parsing.rs:179-185`.
 
 ## F5 — `OpenReply` n'implémente pas `KnownLayout` — ✅ RÉSOLU
-`KnownLayout` dérivé via zerocopy (déjà dépendance) sur toute la surface
-de payloads `repr(C)` + `InlineBlobHeader`. Test de regression roundtrip
-`decode_fixed` ajouté pour chaque struct fixe.
 
-## F6 — `ENOTSUP = 52` n'est pas la valeur Linux — ✅ RÉSOLU
-Renommé 52 → 95 (= Linux x86_64) : constante ABI, selftest kernel,
-tests golden, entrée changelog ABI.
+`KnownLayout` est maintenant dérivé via zerocopy sur toute la surface de
+payloads `repr(C)` (`abi/src/data.rs:234`, `ipc_codec.rs:63`), `decode_fixed`
+l'exige (`ipc_codec.rs:268`), et un test de roundtrip existe par struct fixe
+(`abi/tests/ipc_payload_wire.rs:222`).
 
-## F7 — Test unitaire préexistant cassé depuis longtemps
-`strate-fs-abstraction/tests/unit_tests.rs` importait `fs_abstraction`
-(ancien nom de crate) : aucun test de cette crate ne tournait depuis le
-renommage. Corrigé — preuve que l'absence de CI de test laisse pourrir
-la couverture silencieusement.
+## F6 — `ENOTSUP = 52` n'est pas la valeur Linux — ⚠️ RÉSOLU CÔTÉ ABI, PAS CÔTÉ KERNEL
+
+`strat9_abi::errno::ENOTSUP` vaut **95** (`abi/src/errno.rs:92`) et le test
+golden le verrouille (`abi/tests/errno_abi.rs:57`).
+
+**Mais le kernel émet toujours `-52` :** `SyscallError::NotSupported = -52`
+dans `kernel/src/syscall/error.rs:61`. Le noyau produit donc une valeur que
+l'ABI ne définit pas. `SyscallError` ne définit par ailleurs ni `ELOOP` (40),
+ni `EAFNOSUPPORT` (97), ni `EADDRINUSE` (98), ni `ECONNREFUSED` (111).
+
+Cela affecte notamment le refus de `SYS_PROC_EXECVE` sur un processus
+multi-threadé, qui renvoie `-52` là où l'appelant attend `ENOTSUP` = 95.
+
+## F7 — Test unitaire préexistant cassé depuis longtemps — ✅ RÉSOLU
+
+`strate-fs-abstraction/tests/unit_tests.rs:3` importe bien `strate_fs_abstraction`
+(correct). Preuve que l'absence de CI laisse pourrir la couverture en silence.
 
 ## F8 — Constantes POSIX fausses dans `strat9_syscall::flag` — ✅ RÉSOLU
-Trouvé lors de la passe 2 par la table dorée Linux :
-- `O_NOFOLLOW = 0o100000` → en réalité **O_CLOEXEC** sur Linux ; corrigé à `0o400000` ;
-- `O_NOCTTY = 0o400000` → en réalité **O_NOFOLLOW** sur Linux (!) ; corrigé à `0o000400`,
-  détecté par le test doré lui-même après le premier fix ;
-- `O_DSYNC = 0o02000000` → **O_CLOEXEC** aussi ; corrigé à `0o10000`.
-La traduction `posix_oflags_to_strat9` (crate abi) utilisait ses propres copies
-correctes — mais tout composant consommant ces constantes directement cassait.
-Leçon : les tables dorées attrapent ce que la relecture manuelle rate.
+
+Trouvé par la table dorée Linux :
+- `O_NOFOLLOW` corrigé à `0o0400000` (`abi/src/flag.rs:136`) ;
+- `O_NOCTTY` corrigé à `0o000400` (`flag.rs:131`) — détecté par le test doré
+  lui-même après le premier correctif ;
+- `O_DSYNC` corrigé à `0o10000` (`flag.rs:37`).
+
+> Note : la version précédente de cette page nommait la troisième constante
+> `O_DSYNC = 0o02000000 → 0o10000`. Le symbole à `0o04000000` s'appelle
+> `O_SYNC` (`flag.rs:34`), et `O_DSYNC` est bien à `0o10000`.
+
+La traduction `posix_oflags_to_strat9` utilisait ses propres copies correctes —
+mais tout composant consommant ces constantes directement cassait.
 
 ## F9 — Test inline `lockfree_ring::full_ring` faux depuis sa création — ✅ CORRIGÉ
-Découvert dès la première exécution réelle des tests inline du kernel (jamais
-possibles avant le harnais L2) : `LockFreeRing::new(4, 64)` crée 4 slots
-(`next_power_of_two`), donc 4 writes réussissent — le test attendait Full
-au 4ᵉ. Le test était off-by-one ; corrigé dans le bloc `#[cfg(test)]`.
+
+`LockFreeRing::new(4, 64)` crée 4 slots (`next_power_of_two`), donc 4 writes
+réussissent — le test attendait `Full` au 4ᵉ. Corrigé dans le bloc
+`#[cfg(test)]` de `ipc/lockfree_ring.rs:267-276`, commentaire « F9 fix
+(L2 host harness) » à l'appui.
 
 ## F10 — Port I/O `out 0xe9` dans les primitives de sync — ✅ CONTOURNÉ
-`emit_trace_e9` (spinlock.rs) et d'autres traces diagnostiques émettent sur
-le port série E9 via `asm!("out 0xe9")` : instruction ring-0, SIGSEGV garanti
+
+`emit_trace_e9` (`kernel/src/sync/spinlock.rs:171-177, 262-267, 344-350`) émet
+sur le port série E9 via `asm!("out 0xe9")` : instruction ring-0, `#GP` garanti
 en userspace. Compilé hors du binaire de test uniquement sous le cfg
-`kernel_l2_host` (posé par `workspace/kernel-l2-tests/.cargo/config.toml`) ;
-production inchangée.
+`kernel_l2_host`, posé par `workspace/kernel-l2-tests/.cargo/config.toml:5`.
+Production inchangée.
 
-## F11 — La mailbox d'événements N1 est LIFO — ⚠️ épinglé, à arbitrer
-`notify_scheduler`/`poll_scheduler_events` s'appuient sur `IntrusiveMailbox`
-(stack documentée « order is reversed on reception ») : les événements
-arrivent en ordre INVERSE d'émission. Sans gravité pour des événements
-indépendants, mais toute logique future dépendant de l'ordre causal
-(SchedTick avant Wakeup…) héritera de cette inversion. Épinglé AS IMPLEMENTED.
+## F11 — La mailbox d'événements N1 est LIFO — ⚠️ ÉPINGLÉ COMME SPÉCIFIÉ
 
-## F12 — `get_initfs_file_bytes` ne retrouve pas les fichiers enregistrés avec préfixe — ⚠️ à vérifier au runtime
-Le boot enregistre les modules Limine avec leur chemin complet
-(`/initfs/fs-ext4`, cf. log « Registered /initfs/fs-ext4 »), mais le lookup
-strip `/initfs/` avant recherche : clé stockée `/initfs/fs-ext4`, clé cherchée
-`fs-ext4` → raté. Conséquence possible : exec d'initfs via ce chemin cassé.
-Épinglé dans kernel_vfs_scheme.rs ; à confirmer sur le runtime QEMU.
+`notify_scheduler` / `poll_scheduler_events` s'appuient sur `IntrusiveMailbox`,
+dont l'ordre est explicitement documenté comme inversé à la réception
+(`ipc/mailbox.rs:1-8, 87-97`). Les événements arrivent donc en ordre **inverse**
+d'émission.
+
+Sans gravité pour des événements indépendants, mais toute logique future
+dépendant de l'ordre causal (SchedTick avant Wakeup…) héritera de cette
+inversion. Épinglé **as implemented** par `push_pop_lifo_order`
+(`mailbox.rs:373-382`) et par `kernel-l2-tests/tests/kernel_n1_semaphores.rs`.
+
+## F12 — `get_initfs_file_bytes` ne retrouve pas les fichiers enregistrés avec préfixe — ⚠️ TOUJOURS OUVERT
+
+Le boot enregistre les modules avec leur chemin complet
+(`/initfs/<name>`), mais le lookup retire `/initfs/` avant recherche : clé
+stockée `/initfs/fs-ext4`, clé cherchée `fs-ext4` → raté. Conséquence possible :
+exec d'un binaire initfs par ce chemin cassé.
+
+**La référence de fichier a changé** : le lookup est désormais dans
+`vfs/scheme_router.rs:130-134` (et non plus `kernel_l2_scheme.rs`). Épinglé par
+`kernel-l2-tests/tests/kernel_vfs_scheme.rs:141-153` ; à confirmer sur le
+runtime QEMU.
 
 ## F13 — Écrire dans un pipe à lecture fermée boucle à l'infini — ✅ CORRIGÉ
+
 Trouvé par le harnais L2 (le test pendait indéfiniment) :
-`Pipe::write` évalue la condition « read end closed → EPIPE » via
-`wait_until`, mais le bras `Err(_) => {}` du match avalait l'erreur et
-relançait la boucle — spin 100% CPU infini au lieu de retourner `EPIPE`.
-Violation directe du contrat POSIX (SIGPIPE/EPIPE). Fix : propagation de
-l'erreur fatale (`Err(e) => return Err(e)`), seul `Again` reste transitoire.
-Impact production réel : tout processus écrivant dans un pipe dont le
-lecteur est mort (shell pipelines, IPC interne) se figeait.
+`Pipe::write` (`vfs/pipe.rs:180-183`) évaluait « read end closed → `EPIPE` »
+via `wait_until`, mais le bras `Err(_) => {}` avalait l'erreur et relançait la
+boucle — spin 100 % CPU au lieu de `EPIPE`. Fix : propagation de l'erreur
+fatale ; seul `Again` reste transitoire.
 
-## F14 — Limine v8.7 panique sur les kernels fraîchement construits — 🔍 investigation ouverte
-Constaté en tentant la validation L3/L4 : `Limine PANIC: elf: No higher
-half PHDRs exist` au chargement de `boot():/boot/kernel.elf`, sur NOTRE
-kernel selftest ET sur le kernel release reconstruit le 25/08 15:02.
-Pourtant `readelf -l` montre 4 PT_LOAD en higher-half (0xffffffff8000_0000+),
-entry point compris, ET_EXEC non-relocatable — le check `elf64_get_ranges`
-de Limine v8.7.0 (common/lib/elf.c:646) devrait compter 4 ranges.
-Éléments discriminants :
-- les binaires Limine sont identiques (md5) dans les deux worktrees
-  (clone v8.x-binary @ aad3edd, jan 2025) ;
-- l'ISO construite ce matin depuis le VIEUX kernel (mai) bootait ;
-- le kernel a donc changé, pas Limine → propriété ELF subtile en cause
-  (memsz ~2 Go de .bss par segment ? ordre/alignement des PHDRs ?).
-⚠️ CONTEXTE : le flux de boot est en migration (bootloader perso BIOS
-`workspace/bootloader` + `create-image.sh`, commits UEFI sur d'autres
-branches). À arbitrer : réparer la chaîne Limine (utile pour les selftests
-L3/L4 automatisés) ou basculer le harnais QEMU sur le bootloader perso.
-En attendant, la porte CI L0/L1/L2 (364 tests) ne dépend pas du boot QEMU.
+Impact production réel : tout processus écrivant dans un pipe dont le lecteur
+est mort (pipelines du shell, IPC interne) se figeait.
 
-## Couverture ajoutée (L2 — code kernel réel sur hôte)
+## F14 — Limine v8.7 panique sur les kernels fraîchement construits — ✅ SANS OBJET
 
-| Suite | Tests | Périmètre |
-|---|---|---|
-| inline kernel récupérés | 13 | lockfree_ring (8), mailbox (3), boot/toml (3*) |
-| `kernel-l2-tests/tests/buddy_allocator.rs` | 6 | buddy réel sur mémoire hôte: alignement par ordre, épuisement→OOM propre, zéro après purpose-alloc, stress 2000 ops avec payload tags, tolérance double-free |
-| `kernel-l2-tests/tests/kernel_sync_namespace.rs` | 10 | FixedQueue FIFO/wraparound/overflow, SpinLock réel, namespace bind/unbind/resolve longest-prefix |
-| `kernel-l2-tests/tests/kernel_channels.rs` | 9 | canal MPMC typé (multi-producteurs, disconnect lifecycle), SyncChan registre + drain-first après destroy |
-| `kernel-l2-tests/tests/kernel_n1_semaphores.rs` | 6+2 inline | événements N1 (ordre LIFO épinglé), sémaphores POSIX (comptage, destroy, registre) |
+**Limine a été entièrement retiré du code.** Il ne reste que deux identifiants
+de stub morts (`kernel/src/boot/mod.rs:56 pub mod limine_shim` et
+`kernel/src/lib.rs:1589 pub mod boot_limine_shim`) plus des commentaires ;
+aucune dépendance Limine n'existe.
 
-| `kernel-l2-tests/tests/kernel_vfs_scheme.rs` | 7 | finalize_pseudo_stat, registre KernelScheme (/initfs), routeur global de schemes, F12 |
+Le dilemme « réparer Limine ou basculer sur le bootloader perso » a été tranché
+par `docs/mr-u-boot-replacement.md` : le harnais QEMU utilise désormais
+`cargo make qemu-tests` sur une **ISO UEFI** construite avec le bootloader
+propre `strat9-bootloader.efi`. Le stage CI `test-qemu` en est la livraison.
 
-| `kernel-l2-tests/tests/kernel_vfs_fd.rs` | 13 | OpenFile (offset partagé POSIX, permissions, EOF), FileDescriptorTable (réuse plus bas fd, dup F_DUPFD, cloexec), Nice saturé + AtomicNice |
+> **Réserve** : le stage `build` de `.gitlab-ci.yml` construit encore la release
+> via `cargo make uboot-image-release` — un chemin marqué `[LEGACY]`, pas le
+> chemin UEFI que la CI QEMU valide. Voir [Testing Architecture](./testing-architecture.md#4-ci).
 
-| `kernel-l2-tests/tests/kernel_pipes.rs` | 9 | pipes kernel: FIFO, wraparound 4096, EOF/EPIPE lifecycle (F13), registre PipeScheme |
+---
 
-Total porte CI : **364 tests verts**.
+## Couverture L0 / L1 — tests hôte
 
-Reste candidat L2 : classes d'ordonnancement complètes (nécessitent une
-fake AddressSpace), fake userslice pour handlers read/write d'IpcScheme.
-
-Total porte CI : **327 tests verts**.
-
-Reste candidat L2 (documenté) : `vfs/scheme.rs` + routeur — bloqué par
-`memory/userslice.rs` qui valide les pointeurs userspace contre les tables
-de pages x86 réelles ; nécessitera une fake de validation de région.
-
-\* comptage approximatif des modules inclus.
-Harnais : crate ombre `workspace/kernel-l2-tests` — modules kernel inclus
-verbatim via `#[path]`, fakes fonctionnels pour IRQ/percpu/silo/HHDM.
+Comptages vérifiés le 2026-09-29.
 
 | Suite | Tests | Périmètre |
 |---|---|---|
 | `abi/tests/abi_stability.rs` | 10 | golden syscalls (169), layouts, magics |
-| `abi/tests/errno_abi.rs` | 4 | valeurs Linux, convention de détection |
-| `abi/tests/flags_translation.rs` | 8 | POSIX↔Strat9 exhaustif (1536 combos) |
+| `abi/tests/wire_format.rs` | **25** | layouts `repr(C)` et endian de toutes les structs filaire |
+| `abi/tests/ipc_codec_roundtrip.rs` | 16 | codec bornes / roundtrip / endian |
+| `abi/tests/ipc_payload_wire.rs` | **13** | wire format schemes VFS *(12 documentés auparavant)* |
+| `abi/tests/data_types.rs` | 9 | SiloMode, DirentHeader, PCI, tailles de structs |
 | `abi/tests/ip_parsing.rs` | 9 | IPv4/IPv6 edge cases |
-| `abi/tests/ipc_codec_roundtrip.rs` | 16 | codec bornes/roundtrip/endian |
-| `abi/tests/ipc_payload_wire.rs` | 12 | wire format schemes VFS |
-| `fs-abstraction/tests/safe_math_edge_cases.rs` | 23 | arith safe exhaustive |
-| `fs-abstraction/tests/types_conformance.rs` | 13+1 | mode bits, FILETIME, caps |
-| `abi/tests/ipc_handshake.rs` | 8 | handshake IPC wire + validation réservés |
-| `abi/tests/data_types.rs` | 9 | SiloMode, DirentHeader, PCI, tailles structs |
-| `syscall/tests/error_and_flags.rs` | 8 | Error↔errno roundtrip, demux RAX, flags Linux |
-| `syscall/tests/dirent_wire.rs` | 10 | getdents packed parsing, SchemeV2, SigAbi |
-| `intel-ethernet/tests/descriptors.rs` | 10 | layouts SDM 16B, anneaux Rx/Tx |
-| `driver-net-proto/tests/wire_protocol.rs` | 3 | opcodes + headers IPC réseau |
-| `alloc-freelist/tests/allocator.rs` | 6 | GlobalAlloc: alignement, réuse, OOM propre |
+| `abi/tests/flags_translation.rs` | 8 | POSIX ↔ Strat9 exhaustif (1536 combinaisons) |
+| `abi/tests/ipc_handshake.rs` | **7** | handshake IPC filaire + validation des réservés *(8 documentés auparavant)* |
+| `abi/tests/errno_abi.rs` | 4 | valeurs Linux, fenêtre de détection, roundtrip noyau↔user |
+| `fs-abstraction/tests/types_conformance.rs` | 13 | bits de mode, FILETIME, capabilities |
+| `fs-abstraction/tests/safe_math_edge_cases.rs` | **13** | arithmétique sûre *(23 documentés auparavant — régression ou réécriture)* |
+| `fs-abstraction/tests/unit_tests.rs` | 1 | smoke test (F7) |
+| `syscall/tests/dirent_wire.rs` | **11** | parsing getdents packed, SchemeV2, SigAbi *(10 documentés)* |
+| `syscall/tests/error_and_flags.rs` | 8 | roundtrip Error↔errno, démultiplexage RAX, flags Linux |
+| `intel-ethernet/tests/descriptors.rs` | 10 | layouts SDM 16 B, anneaux Rx/Tx |
+| `driver-net-proto/tests/wire_protocol.rs` | 3 | opcodes + en-têtes IPC réseau |
+| `alloc-freelist/tests/allocator.rs` | 6 | GlobalAlloc : alignement, réemploi, OOM propre |
+| `drivers/bus/tests/*` (7 fichiers) | **37** | brcmstb_gisb, firewall_scheme, moxtet, qcom_ssc_block_bus, sun50i_de2, ts_nbus, vexpress_config |
 
-Porte CI : `cargo make ci-tests` — **162+ tests hôte verts** (stage GitLab `test`).
+**Total tests hôte : 190**
 
 Porte CI : `cargo make ci-tests` (stage GitLab `test`, job `test-host`).
+`strat9-bus-drivers` **n'est pas** dans la liste de paquets de `test-host`
+(`Makefile.toml:112-123`) : ses 37 tests ne sont pas dans le gate.
 
-## Prochaines étapes proposées (L2/L3/L4)
-1. L2 kernel-hôte : extraire la logique pure IPC/mémoire en modules testables hôte.
-2. L3 : généraliser le pattern selftest (`PASS/FAIL` série grep-able) à tous
-   les sous-systèmes kernel.
-3. L4 : harnais QEMU automatisé (boot ISO + grep série + timeout) en job GitLab.
+---
+
+## Couverture L2 — code kernel réel sur hôte
+
+Modules kernel compilés **verbatim** via `#[path]` dans la crate ombre
+`workspace/kernel-l2-tests`, avec des fakes fonctionnels pour IRQ / percpu /
+silo / HHDM (l'offset HHDM réel pointe vers une arena hôte, donc l'allocateur
+buddy travaille sur de la vraie mémoire).
+
+| Suite | Tests | Périmètre |
+|---|---|---|
+| `boot_memory.rs` | 23 | chemins mémoire du handoff de boot |
+| `kernel_vfs_fd.rs` | 13 | OpenFile (offset partagé POSIX, permissions, EOF), FileDescriptorTable (réemploi du plus bas fd, dup `F_DUPFD`, cloexec), Nice saturé + AtomicNice |
+| `boot_handoff.rs` | 11 | validation de `KernelArgs` (magic, version, étendues) |
+| `kernel_sync_namespace.rs` | 10 | FixedQueue FIFO/wraparound/overflow, SpinLock réel, namespace bind/unbind/resolve longest-prefix |
+| `boot_graphics.rs` | 10 | handoff du framebuffer |
+| `kernel_pipes.rs` | 9 | pipes kernel : FIFO, wraparound 4096, cycle EOF/EPIPE (F13), registre PipeScheme |
+| `kernel_channels.rs` | 9 | canal MPMC typé (multi-producteurs, cycle de disconnect), SyncChan registre + drain-first après destroy |
+| `boot_initfs.rs` | 9 | enregistrement et lecture des modules initfs |
+| `buddy_allocator.rs` | 6 | buddy réel sur mémoire hôte : alignement par ordre, épuisement → OOM propre, zéro après purpose-alloc, stress 2000 ops avec payload tags, tolérance double-free |
+| `kernel_n1_semaphores.rs` | 6 | événements N1 (ordre LIFO épinglé, F11), sémaphores POSIX (comptage, destroy, registre) |
+| `boot_transition.rs` | 9 | bascule de contexte de transition |
+| `kernel_vfs_scheme.rs` | 7 | finalize_pseudo_stat, registre KernelScheme (`/initfs`), routeur global de schemes, F12 |
+
+**Total tests L2 : 122** *(plus les tests `#[cfg(test)]` inline du kernel récupérés
+par la crate ombre : lockfree_ring, mailbox, boot/toml)*
+
+**Total toutes couches (`workspace/**/tests/*.rs`, hors `xfs-rs`) : 325**
+
+> Les versions précédentes de cette page donnaient trois totaux mutuellement
+> contradictoires — « 364 tests verts », « 327 tests verts » et « 162+ tests
+> hôte verts ». Aucun n'était re-derivable. Le tableau ci-dessus est recompté et
+> les trois lignes ont été supprimées.
+
+---
+
+## Candidats L2 restants
+
+- Classes d'ordonnancement complètes (necessitent une fausse `AddressSpace`).
+- Faux `userslice` pour les handlers read/write d'`IpcScheme` — bloqué par
+  `memory/userslice.rs`, qui valide les pointeurs userspace contre les tables
+  de pages x86 réelles ; il faudra une fausse de validation de région.
+
+## Voir aussi
+
+- [Testing Architecture](./testing-architecture.md) — les 5 couches et la CI
+- [ABI Support Matrix](./abi-matrix.md) — l'état réel de la couverture POSIX

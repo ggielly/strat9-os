@@ -15,7 +15,7 @@ pub mod rtl8139_drv;
 pub mod scheme;
 pub mod virtio_net;
 
-pub use net_core::{NetError, NetworkDevice, MTU};
+pub use net_core::{NetError, NetMedia, NetworkDevice, MTU};
 
 use alloc::{format, string::String, sync::Arc, vec::Vec};
 use spin::RwLock;
@@ -83,6 +83,17 @@ fn next_index_for(prefix: &str) -> usize {
 /// `init()`; read by `nic_handler` in the IDT to send EOI.
 pub static NIC_IRQ_LINE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0xFF);
 
+/// Count of NIC IRQs that arrived before any driver registered a device.
+/// Kept as a counter (not a log) so a shared or unmapped vector cannot
+/// flood the console.
+static NIC_SPURIOUS_IRQS: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Number of NIC IRQs seen with no device registered.
+pub fn spurious_irq_count() -> u32 {
+    NIC_SPURIOUS_IRQS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Global reference to the first NIC device, used by `nic_handler` to call
 /// `handle_interrupt()`.  Set via `set_nic_device()` after PCI probe.
 ///
@@ -94,12 +105,20 @@ static NIC_DEVICE: spin::Mutex<Option<Arc<dyn NetworkDevice>>> = spin::Mutex::ne
 
 /// Store a NIC device reference and its IRQ line for the IDT handler.
 ///
-/// Called from NIC drivers (`e1000_drv`, `e1000e_drv`, …) after successful
-/// initialisation.
+/// Called from NIC drivers (`e1000_drv`, `e1000e_drv`, `virtio_net`, …)
+/// after successful initialisation.
 pub fn set_nic_device(dev: Arc<dyn NetworkDevice>, irq: u8) {
     NIC_IRQ_LINE.store(irq, core::sync::atomic::Ordering::Relaxed);
     *NIC_DEVICE.lock() = Some(dev);
     log::info!("NIC dispatch set for IRQ {}", irq);
+}
+
+/// True when a NIC IRQ handler is registered (N2 rings will be drained).
+///
+/// Syscall TX uses the N2 ring only in this case; otherwise it transmits
+/// directly so packets are not stuck in an undrained ring.
+pub fn nic_irq_ready() -> bool {
+    NIC_DEVICE.lock().is_some()
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +158,10 @@ pub fn handle_interrupt() {
     let dev = match dev {
         Some(d) => d,
         None => {
-            crate::serial_println!("[net] IRQ: no NIC device registered");
+            // Spurious: some other device shares this vector, or the NIC IRQ
+            // fired before a driver registered. Silent, otherwise a hot
+            // interrupt line floods the console and starves the shell.
+            NIC_SPURIOUS_IRQS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             return;
         }
     };
@@ -147,16 +169,20 @@ pub fn handle_interrupt() {
     // Phase 2 : drain N2 rings (no NIC_DEVICE lock held, IRQs may still be
     // disabled by the IDT entry). Holding only NIC_DATA_PLANE here.
     if let Some(ref dp) = *NIC_DATA_PLANE.lock() {
-        // Drain pending RX packets from HW into the N2 RX ring.
+        // Bounded: this runs in interrupt context, so a driver that keeps
+        // reporting a packet would otherwise spin here forever.
+        const MAX_IRQ_DRAIN: usize = 32;
         let mut buf = [0u8; 2048];
         let mut rx_count = 0usize;
         let mut backpressure = false;
-        while let Ok(n) = dev.receive(&mut buf) {
-            if n > 0 {
-                rx_count += 1;
-                if rx_count <= 3 {
-                    crate::serial_println!("[net] IRQ rx {} bytes (slot {})", n, rx_count);
-                }
+        while rx_count < MAX_IRQ_DRAIN {
+            let n = match dev.receive(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            rx_count += 1;
+            if rx_count <= 3 {
+                crate::serial_println!("[net] IRQ rx {} bytes (slot {})", n, rx_count);
             }
             if dp.push_rx(0, &buf[..n]).is_err() {
                 crate::serial_println!("[net] IRQ RX ring full, backpressure");
@@ -166,9 +192,6 @@ pub fn handle_interrupt() {
         }
         if rx_count > 3 {
             crate::serial_println!("[net] IRQ rx total {} packets", rx_count);
-        }
-        if rx_count == 0 {
-            crate::serial_println!("[net] IRQ rx: no packets received from HW");
         }
 
         // N1 : notify scheduler if the RX ring is full (backpressure).
@@ -193,15 +216,12 @@ pub fn handle_interrupt() {
         if let Some(event) = crate::ipc::n1::poll_nic_events() {
             log::trace!("[net] N1 sched=>NIC event: {:?}", event);
         }
-    } else {
-        crate::serial_println!("[net] IRQ: N2 data plane not initialized");
     }
-
+    // strate-net registers its task id late; waking a not-yet-known task on
+    // every IRQ is pure console spam, so stay quiet until it shows up.
     let tid_u64 = STRATE_NET_TID.load(core::sync::atomic::Ordering::Relaxed);
     if tid_u64 != 0 {
         let _ = crate::process::scheduler::wake_task(crate::process::TaskId(tid_u64));
-    } else {
-        crate::serial_println!("[net] IRQ: strate-net not registered (TID=0)");
     }
 }
 
@@ -250,17 +270,59 @@ pub fn list_interfaces() -> Vec<String> {
 }
 
 /// Call `poll()` on every registered NIC (watchdog + link check).
-/// Safe to call from any non-IRQ context (allocates via get_all_tasks).
-///
-/// # TODO
-///
-/// Hook this into a kernel workqueue or periodic thread instead of
-/// the APIC timer tick : SpinLock::lock reads percpu data (GS:[0])
-/// which is unsafe during the swapgs=>iretq window.
+/// Safe from deferred-work / idle / syscall-return contexts only —
+/// not from the hardirq swapgs window.
 pub fn poll_all() {
-    let guard = NET_DEVICES.read();
-    for entry in guard.iter() {
-        entry.device.poll();
+    {
+        let guard = NET_DEVICES.read();
+        for entry in guard.iter() {
+            entry.device.poll();
+        }
+    }
+
+    // When no IRQ path is wired, opportunistically drain HW into N2
+    // (and N2 TX onto the wire) so strate-net keeps making progress.
+    if !nic_irq_ready() {
+        service_data_plane_polling();
+    }
+}
+
+/// Drain RX HW → N2 and N2 TX → HW without relying on a NIC IRQ.
+fn service_data_plane_polling() {
+    let device = match get_default_device() {
+        Some(d) => d,
+        None => return,
+    };
+    let dp_guard = NIC_DATA_PLANE.lock();
+    let dp = match dp_guard.as_ref() {
+        Some(dp) => dp,
+        None => {
+            // No N2: direct RX is handled by sys_net_recv itself.
+            return;
+        }
+    };
+
+    let mut buf = [0u8; 2048];
+    let mut rx_count = 0usize;
+    while rx_count < 8 {
+        let n = match device.receive(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        if dp.push_rx(0, &buf[..n]).is_err() {
+            break;
+        }
+        rx_count += 1;
+    }
+    if rx_count > 0 {
+        dp.notify_rx_consumer(0);
+    }
+
+    let mut tx_buf = [0u8; 2048];
+    while let Ok(Some(n)) = dp.pop_tx(0, &mut tx_buf) {
+        if device.transmit(&tx_buf[..n]).is_err() {
+            break;
+        }
     }
 }
 

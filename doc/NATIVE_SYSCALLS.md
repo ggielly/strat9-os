@@ -1,5 +1,32 @@
 # strat9-os native syscalls reference
 
+> ## ⚠️ SUPERSEDED — do not use as a reference
+>
+> This document (2026-03-27) is the most stale file in the repository. It has drifted
+> substantially from the code:
+>
+> | This document says | Reality |
+> |--------------------|---------|
+> | Constants live in `kernel/src/syscall/numbers.rs` | That file does not exist. They live in **`workspace/abi/src/syscall.rs`** (169 pinned entries) |
+> | Block layout from `docs/ABI_STRAT9-OS_DESIGN.md` | That file does not exist |
+> | `SYS_MEM_MAP` (100), `SYS_MEM_UNMAP` (101), `SYS_MEM_PROTECT` (102) | `SYS_MMAP` (100), `SYS_MUNMAP` (101), **`SYS_BRK` (102)**; `SYS_MREMAP` (103) and `SYS_MPROTECT` (104) are missing entirely |
+> | `SYS_NS_BIND` (205) / `SYS_NS_UNBIND` (206) | `SYS_IPC_BIND_PORT` / `SYS_IPC_UNBIND_PORT` |
+> | `SYS_PROC_CREATE` (302) | `SYS_PROC_FORK` |
+> | `SYS_PROC_WAIT` (303) / `SYS_PROC_KILL` (304) | `SYS_FUTEX_WAIT` (303) / `SYS_FUTEX_WAKE` (304) |
+> | `SYS_TIME_MONOTONIC` (500) / `SYS_TIME_REALTIME` (501) / `SYS_ALARM_SET` (502) | `SYS_CLOCK_GETTIME` (500) / `SYS_NANOSLEEP` (501) / `SYS_CLOCK_NANOSLEEP` (502) |
+> | `SYS_ALARM_CANCEL` (503), `SYS_YIELD_UNTIL` (504) | **Do not exist** |
+> | `SYS_IPC_SEND` carries a "64-byte inline message" | `IPC_MESSAGE_SIZE` is **256** bytes (16-byte header, 240-byte payload) |
+>
+> It also omits roughly 60 syscalls that do exist, including the entire
+> `SYS_TRANSPORT_*` (260-264) block, `SYS_SEM_*` (230-234), `SYS_PCI_*` (240-242),
+> `SYS_ASYNC_*` (250-254), `SYS_FUTEX_*` (305-307), the `*at` variants (462-468),
+> `SYS_SILO_PLEDGE`/`UNVEIL`/`ENTER_SANDBOX`/`RENAME` (809-812) and `SYS_ABI_VERSION` (900).
+>
+> **The maintained reference is [`docs-site/src/syscalls.md`](../docs-site/src/syscalls.md)**,
+> which is checked against both the ABI constants and the kernel dispatcher.
+>
+> Kept here only as a record of the original block-layout intent.
+
 Syscall numbers follow the block layout defined in `docs/ABI_STRAT9-OS_DESIGN.md`.
 Calling convention: `rax` = syscall number, `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9` = args 1-6,
 return value in `rax`. `rcx` and `r11` are clobbered by the CPU.

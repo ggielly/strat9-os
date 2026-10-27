@@ -779,9 +779,46 @@ pub fn init() {
         }
     }
 
-    // VirtIO GPU and AMDGPU not available, UEFI bootloader framebuffer is already set up in boot
+    // The bootloader already programmed a framebuffer and the VGA console is
+    // drawing to it. Adopt that surface when no GPU device claimed it, so
+    // /dev/display still resolves instead of reporting no framebuffer.
+    #[cfg(target_arch = "x86_64")]
+    if !Framebuffer::is_available() {
+        if let Some(uefi) = crate::arch::x86_64::vga::uefi_framebuffer() {
+            // The VGA layer keeps the bootloader's field layout (bpp and
+            // per-channel sizes); translate it into mask/shift form.
+            let (red_mask, green_mask, blue_mask) = match uefi.fmt.bpp {
+                32 => (0x00FF_0000u32, 0x0000_FF00u32, 0x0000_00FFu32),
+                _ => (0x00FF0000u32, 0x0000FF00u32, 0x000000FFu32),
+            };
+            let format = PixelFormat {
+                red_mask,
+                red_shift: uefi.fmt.red_shift,
+                green_mask,
+                green_shift: uefi.fmt.green_shift,
+                blue_mask,
+                blue_shift: uefi.fmt.blue_shift,
+                bits_per_pixel: uefi.fmt.bpp as u8,
+            };
+            match Framebuffer::init_bootloader(
+                uefi.virt_addr as u64,
+                uefi.width,
+                uefi.height,
+                uefi.pitch,
+                format,
+            ) {
+                Ok(()) => log::info!(
+                    "[FB] Using UEFI bootloader framebuffer ({}x{})",
+                    uefi.width,
+                    uefi.height
+                ),
+                Err(e) => log::warn!("[FB] UEFI framebuffer unusable: {}", e),
+            }
+        }
+    }
+
     if Framebuffer::is_available() {
-        log::info!("[FB] Using UEFI bootloader framebuffer");
+        log::info!("[FB] Framebuffer ready");
     } else {
         log::warn!("[FB] No framebuffer available");
     }

@@ -14,6 +14,8 @@ use crate::{
 pub use strat9_abi::boot::ModuleEntry as LoadedModule;
 use strat9_abi::boot::{ModuleTable, MAX_BOOT_MODULES, MODULE_TABLE_SIZE};
 
+const MODULE_READ_CHUNK_SIZE: usize = 1024 * 1024;
+
 // FileInfo requires 8-byte alignment; a Vec<u8> or [u8; N] does not promise it.
 // 4 KiB covers the FAT filename limit. Larger firmware entries fail explicitly.
 #[repr(align(8))]
@@ -208,14 +210,27 @@ pub fn load_modules(
             // not expose page padding, and no module is published on partial data.
             let buf =
                 unsafe { core::slice::from_raw_parts_mut(allocation.base as *mut u8, file_size) };
-            let read = file.read(buf).map_err(|e| {
-                module_error(path, BootError::firmware("read module payload", e.status()))
-            })?;
-            if read != file_size {
-                return Err(module_error(
-                    path,
-                    BootError::invalid("module payload ended before its advertised size"),
-                ));
+            let mut offset = 0;
+            while offset < file_size {
+                let chunk_len = (file_size - offset).min(MODULE_READ_CHUNK_SIZE);
+                let read = file
+                    .read(&mut buf[offset..offset + chunk_len])
+                    .map_err(|e| {
+                        module_error(path, BootError::firmware("read module payload", e.status()))
+                    })?;
+                if read == 0 {
+                    return Err(module_error(
+                        path,
+                        BootError::invalid("module payload ended before its advertised size"),
+                    ));
+                }
+                if read > chunk_len {
+                    return Err(module_error(
+                        path,
+                        BootError::invalid("module read exceeded the requested chunk"),
+                    ));
+                }
+                offset += read;
             }
         }
         modules.push(LoadedModule {

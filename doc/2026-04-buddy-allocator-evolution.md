@@ -1,5 +1,17 @@
 # Strat9-OS memory allocator evolution - April 2026
 
+> **Historical engineering log, April 2026.** Kept for design rationale. Every concrete
+> symbol it cites still exists and still matches `workspace/kernel/src/memory/`
+> (`ZoneSegment`, `ZoneType`, `Migratetype`, `PAGEBLOCK_ORDER = 9`, `fragmentation_score`,
+> `ZonePressure`, `ZoneStats`, `CompactionStats`, `COMPACTION_FRAGMENTATION_THRESHOLD = 35`,
+> `UNMOVABLE_ZONE_ORDER`, `MOVABLE_ZONE_ORDER`).
+>
+> One correction: it calls `COMPACTION_FRAGMENTATION_THRESHOLD` a `const`; it is an
+> `AtomicUsize` with a runtime setter (`set_compaction_threshold`).
+>
+> The **maintained** memory reference is
+> [`docs-site/src/memory-model.md`](../docs-site/src/memory-model.md).
+
 Technical notes for the April 2026 engineering update.
 
 ## Overview

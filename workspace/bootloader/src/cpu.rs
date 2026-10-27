@@ -85,3 +85,125 @@ pub fn validate_pat(pat: u64) -> Result<(), &'static str> {
     }
     Ok(())
 }
+
+/// Read the timestamp counter.
+pub fn rdtsc() -> u64 {
+    let low: u32;
+    let high: u32;
+    unsafe {
+        core::arch::asm!("rdtsc", out("eax") low, out("edx") high, options(nomem, nostack))
+    };
+    ((high as u64) << 32) | low as u64
+}
+
+const PIT_FREQUENCY: u64 = 1_193_182;
+const PIT_CH2_PORT: u16 = 0x42;
+const PIT_COMMAND_PORT: u16 = 0x43;
+const PC_SPEAKER_PORT: u16 = 0x61;
+/// Largest count the 16-bit counter accepts, giving the longest window and so
+/// the smallest relative error. 65535 / 1_193_182 Hz is about 54.9 ms.
+const PIT_WINDOW_COUNT: u64 = 0xFFFF;
+/// Bounded so a machine without a working PIT cannot wedge the boot.
+const PIT_MAX_POLLS: u32 = 10_000_000;
+
+/// # Safety
+/// `port` must be a byte-wide I/O port.
+unsafe fn outb(port: u16, value: u8) {
+    unsafe { core::arch::asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack)) };
+}
+
+/// # Safety
+/// `port` must be a byte-wide I/O port.
+unsafe fn inb(port: u16) -> u8 {
+    let value: u8;
+    unsafe { core::arch::asm!("in al, dx", in("dx") port, out("al") value, options(nomem, nostack)) };
+    value
+}
+
+/// Measure the TSC frequency against PIT channel 2, for CPUs that do not
+/// report one. `-cpu qemu64` implements neither leaf 0x15 nor 0x16, so without
+/// this the boot timings would carry no scale at all.
+///
+/// Channel 2 drives the PC speaker and no interrupt, so driving it briefly is
+/// harmless; the gate bit and port 0x61 are restored either way.
+fn calibrate_tsc_khz_pit() -> Option<u64> {
+    let saved = unsafe { inb(PC_SPEAKER_PORT) };
+    let armed = saved & 0xFC;
+    // Gate low: in mode 0 the count must not start before the counter is armed,
+    // otherwise the measurement window opens before we begin sampling.
+    unsafe { outb(PC_SPEAKER_PORT, armed) };
+    // Channel 2, lobyte/hibyte, mode 0 (one-shot), binary.
+    unsafe {
+        outb(PIT_COMMAND_PORT, 0xB0);
+        outb(PIT_CH2_PORT, (PIT_WINDOW_COUNT & 0xFF) as u8);
+        outb(PIT_CH2_PORT, ((PIT_WINDOW_COUNT >> 8) & 0xFF) as u8);
+    }
+
+    // Sample before releasing the gate. The release latency is then excluded
+    // from the window, which understates the frequency rather than overstating
+    // it -- a slow boot report instead of a falsely fast one.
+    let start = rdtsc();
+    unsafe { outb(PC_SPEAKER_PORT, armed | 0x01) };
+
+    // Bit 5 is channel 2's output; in mode 0 it latches high at terminal count.
+    let mut polls = 0;
+    while unsafe { inb(PC_SPEAKER_PORT) } & 0x20 == 0 {
+        polls += 1;
+        if polls > PIT_MAX_POLLS {
+            unsafe { outb(PC_SPEAKER_PORT, saved) };
+            return None;
+        }
+    }
+    let delta = rdtsc().wrapping_sub(start);
+    unsafe { outb(PC_SPEAKER_PORT, saved) };
+
+    if delta == 0 {
+        return None;
+    }
+    let window = PIT_WINDOW_COUNT as u128 * 1_000;
+    let khz = (delta as u128 * PIT_FREQUENCY as u128) / window;
+    if khz == 0 {
+        return None;
+    }
+    Some(khz as u64)
+}
+
+/// TSC frequency in kHz, or `None` when no trustworthy figure is available.
+///
+/// CPUID is preferred because it costs nothing, but it is absent on the
+/// emulated CPU models this project boots (`-cpu qemu64` reports neither leaf
+/// 0x15 nor 0x16), so a PIT measurement backs it up. Callers must treat `None`
+/// as "unknown" rather than substituting a default, because a wrong scale turns
+/// every duration report into fiction.
+pub fn tsc_frequency_khz() -> Option<u64> {
+    if let Some(khz) = tsc_frequency_khz_cpuid() {
+        return Some(khz);
+    }
+    calibrate_tsc_khz_pit()
+}
+
+fn tsc_frequency_khz_cpuid() -> Option<u64> {
+    use core::arch::x86_64::__cpuid;
+    let max_leaf = __cpuid(0).eax;
+    if max_leaf >= 0x15 {
+        let leaf = __cpuid(0x15);
+        if leaf.eax != 0 && leaf.ecx != 0 {
+            if let Some(khz) = (leaf.ecx as u64)
+                .checked_mul(leaf.ebx as u64)
+                .and_then(|scaled| scaled.checked_div(leaf.eax as u64))
+                .and_then(|hz| hz.checked_div(1_000))
+            {
+                if khz != 0 {
+                    return Some(khz);
+                }
+            }
+        }
+    }
+    if max_leaf >= 0x16 {
+        let mhz = __cpuid(0x16).eax & 0xFFFF;
+        if mhz != 0 {
+            return Some(mhz as u64 * 1_000);
+        }
+    }
+    None
+}
