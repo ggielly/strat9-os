@@ -11,6 +11,13 @@ pub struct ModuleFileName {
 }
 
 impl ModuleFileName {
+    /// Placeholder for fixed-capacity arrays; never handed to callers.
+    pub const EMPTY: Self = Self {
+        name: [0; 64],
+        path: [0; PREFIX.len() + 64],
+        len: 0,
+    };
+
     /// `raw` excludes the firmware's terminating NUL. Rejection is lossless:
     /// no character is removed, normalized or truncated to make a name fit.
     pub fn new(raw: &[u16]) -> Result<Self, &'static str> {

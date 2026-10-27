@@ -161,6 +161,16 @@ CPUs without 1 GiB leaves keep the 2 MiB topology. Splitting is decided during
 planning (`map_gib_leaf` / `map_huge_leaf`), never by rewriting a leaf that has
 already been stored, so `Tables::child` can reject collisions.
 
+## Allocation policy
+
+The load path owns no heap. The module list is a fixed `[ModuleEntry; 64]`
+array (the handoff table is capped at 64 anyway), so enumeration checks the
+count once and never allocates per entry. The kernel file is read into an owned
+page range (`boot_memory.allocate`) that is released back to the firmware as
+soon as the segments are copied, instead of a pool `Vec`. What remains on the
+pool allocator is the bounded handoff reservation list (≤ 81 entries) and the
+framebuffer mode list.
+
 ## Tests
 
 ```bash

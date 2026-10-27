@@ -122,14 +122,21 @@ fn boot_kernel() -> BootResult<()> {
     let file_size = file_info.file_size() as usize;
 
     bootln!("[boot] kernel.elf: {} bytes", file_size);
+    if file_size == 0 {
+        return Err(BootError::invalid("kernel.elf is empty"));
+    }
 
-    // Read kernel into memory
-    let mut buf = alloc::vec::Vec::new();
-    buf.try_reserve_exact(file_size)
-        .map_err(|_| BootError::out_of_resources("kernel file buffer"))?;
-    buf.resize(file_size, 0u8);
+    // Read the kernel from an owned page range rather than the UEFI pool: the
+    // loader then depends on no heap allocator, the buffer is page-accounted,
+    // and it is released as soon as the segments have been copied.
+    let file_allocation =
+        boot_memory.allocate(file_size as u64, MemoryLabel::None, "kernel file buffer")?;
+    // SAFETY: the allocation is zeroed, page-aligned and exclusively owned, and
+    // `file_size` bytes fit inside it, for the duration of this borrow.
+    let buf =
+        unsafe { core::slice::from_raw_parts_mut(file_allocation.base as *mut u8, file_size) };
     let read = file
-        .read(&mut buf)
+        .read(buf)
         .map_err(|error| BootError::firmware("read kernel.elf", error.status()))?;
     if read != file_size {
         return Err(BootError::invalid(
@@ -142,17 +149,17 @@ fn boot_kernel() -> BootResult<()> {
 
     bootln!("[boot] Parsing kernel ELF file...");
 
-    let mut elf_info = elf::parse_elf64(&buf).map_err(BootError::invalid)?;
+    let mut elf_info = elf::parse_elf64(buf).map_err(BootError::invalid)?;
     let kernel_allocation = boot_memory.allocate_preferred(
         elf_info.phys_base,
         elf_info.image_size(),
         MemoryLabel::KernelImage,
         "kernel image pages",
     )?;
-    // SAFETY: UEFI reserved this whole image before any segment is written.
-    // The source Vec is a separate, still-live UEFI allocation.
-    unsafe { elf_info.load_into(&buf, kernel_allocation) }.map_err(BootError::invalid)?;
-    drop(buf);
+    // SAFETY: UEFI reserved this whole image before any segment is written, and
+    // the source is a distinct, still-live boot allocation.
+    unsafe { elf_info.load_into(buf, kernel_allocation) }.map_err(BootError::invalid)?;
+    boot_memory.release(file_allocation)?;
 
     bootln!(
         "[boot] ELF: entry=0x{:x}, {} segments, phys_end=0x{:x}",
@@ -268,7 +275,6 @@ fn boot_kernel() -> BootResult<()> {
     let module_table_base = module_table.base;
     // SAFETY: the page allocation covers the complete fixed-capacity table.
     unsafe { modules::write_module_table(module_list.as_slice(), module_table) }?;
-    drop(module_list);
 
     let environment = boot_memory.allocate(
         env_total_size as u64,

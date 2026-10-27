@@ -1,4 +1,3 @@
-use alloc::vec::Vec;
 use core::fmt::Write;
 use uefi::{
     prelude::*,
@@ -13,6 +12,50 @@ use crate::{
 };
 pub use strat9_abi::boot::ModuleEntry as LoadedModule;
 use strat9_abi::boot::{MemoryLabel, ModuleTable, MAX_BOOT_MODULES, MODULE_TABLE_SIZE};
+
+/// Fixed-capacity module list.
+///
+/// The handoff table is already capped at `MAX_BOOT_MODULES`, so the loader
+/// needs no heap and cannot fail on a late allocation: enumeration checks the
+/// count first and every push is infallible afterwards.
+pub struct ModuleList {
+    entries: [LoadedModule; MAX_BOOT_MODULES],
+    len: usize,
+}
+
+const EMPTY_MODULE: LoadedModule = LoadedModule {
+    name: [0; 64],
+    base: 0,
+    size: 0,
+};
+
+impl ModuleList {
+    const fn new() -> Self {
+        Self {
+            entries: [EMPTY_MODULE; MAX_BOOT_MODULES],
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, module: LoadedModule) -> Result<(), &'static str> {
+        match self.entries.get_mut(self.len) {
+            Some(slot) => {
+                *slot = module;
+                self.len += 1;
+                Ok(())
+            }
+            None => Err("too many boot modules (maximum 64)"),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn as_slice(&self) -> &[LoadedModule] {
+        &self.entries[..self.len]
+    }
+}
 
 // FileInfo requires 8-byte alignment; a Vec<u8> or [u8; N] does not promise it.
 // 4 KiB covers the FAT filename limit. Larger firmware entries fail explicitly.
@@ -65,10 +108,7 @@ pub unsafe fn write_module_table(
     ModuleTable::write_into(bytes, modules).map_err(BootError::invalid)
 }
 
-pub fn load_modules(
-    volume: &mut Directory,
-    memory: &mut BootMemory,
-) -> BootResult<Vec<LoadedModule>> {
+pub fn load_modules(volume: &mut Directory, memory: &mut BootMemory) -> BootResult<ModuleList> {
     let directory_path = cstr16!("\\boot\\initfs");
     let handle = volume
         .open(directory_path, FileMode::Read, FileAttribute::empty())
@@ -93,7 +133,8 @@ pub fn load_modules(
         }
     };
 
-    let mut names: Vec<ModuleFileName> = Vec::new();
+    let mut names = [ModuleFileName::EMPTY; MAX_BOOT_MODULES];
+    let mut name_count = 0usize;
     let mut entry_buffer = InfoBuffer([0; 4096]);
     loop {
         let info = match dir.read_entry(&mut entry_buffer.0) {
@@ -119,7 +160,7 @@ pub fn load_modules(
         }
         let filename = ModuleFileName::new(info.file_name().to_u16_slice())
             .map_err(|reason| module_error(info.file_name(), BootError::invalid(reason)))?;
-        if names
+        if names[..name_count]
             .iter()
             .any(|previous| previous.as_str().eq_ignore_ascii_case(filename.as_str()))
         {
@@ -128,23 +169,18 @@ pub fn load_modules(
                 BootError::invalid("duplicate module filename"),
             ));
         }
-        if names.len() == MAX_BOOT_MODULES {
+        if name_count == MAX_BOOT_MODULES {
             return Err(module_error(
                 info.file_name(),
                 BootError::invalid("too many boot modules (maximum 64)"),
             ));
         }
-        names.try_reserve(1).map_err(|_| {
-            module_error(
-                info.file_name(),
-                BootError::out_of_resources("module filename list"),
-            )
-        })?;
-        names.push(filename);
+        names[name_count] = filename;
+        name_count += 1;
     }
     dir.close();
-    names.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
-    if !names
+    names[..name_count].sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
+    if !names[..name_count]
         .iter()
         .any(|name| matches!(name.as_str(), "init" | "strate-init"))
     {
@@ -153,17 +189,11 @@ pub fn load_modules(
             BootError::invalid("required init or strate-init module is missing"),
         ));
     }
-    let _ = writeln!(E9, "[boot] initfs: {} files enumerated", names.len());
+    let _ = writeln!(E9, "[boot] initfs: {} files enumerated", name_count);
 
-    let mut modules = Vec::new();
-    modules.try_reserve_exact(names.len()).map_err(|_| {
-        module_error(
-            directory_path,
-            BootError::out_of_resources("loaded module list"),
-        )
-    })?;
+    let mut modules = ModuleList::new();
     let mut info_buffer = InfoBuffer([0; 4096]);
-    for filename in names {
+    for filename in names[..name_count].iter() {
         // The validated path contains the original UCS-2 units and one NUL.
         let path = CStr16::from_u16_with_nul(filename.path())
             .map_err(|_| module_error(directory_path, BootError::invalid("invalid module path")))?;
@@ -218,11 +248,13 @@ pub fn load_modules(
                 ));
             }
         }
-        modules.push(LoadedModule {
-            name: filename.abi_name(),
-            base: allocation.base,
-            size,
-        });
+        modules
+            .push(LoadedModule {
+                name: filename.abi_name(),
+                base: allocation.base,
+                size,
+            })
+            .map_err(|reason| module_error(path, BootError::invalid(reason)))?;
         let _ = writeln!(
             E9,
             "[boot] initfs: loaded '{}' ({} bytes)",

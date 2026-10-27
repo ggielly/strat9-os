@@ -132,6 +132,30 @@ impl BootMemory {
         Ok(range)
     }
 
+    /// Return an allocation to the firmware before ExitBootServices.
+    ///
+    /// Used for transient buffers: releasing keeps them out of the handoff map
+    /// and gives the pages back to the firmware. The range must be one this
+    /// registry issued, so a wrong pointer cannot free foreign memory.
+    pub fn release(&mut self, range: PhysicalRange) -> BootResult<()> {
+        let Some(index) = self.reservations[..self.count]
+            .iter()
+            .position(|reservation| reservation.range == range)
+        else {
+            return Err(BootError::invalid("release of an unknown boot allocation"));
+        };
+        let Some(ptr) = NonNull::new(range.base as *mut u8) else {
+            return Err(BootError::invalid("release of a null boot allocation"));
+        };
+        // SAFETY: the range came from this registry, so these pages were
+        // allocated by AllocatePages and are still owned exclusively.
+        unsafe { boot::free_pages(ptr, (range.size / PAGE_SIZE) as usize) }
+            .map_err(|error| BootError::firmware("release boot allocation", error.status()))?;
+        self.reservations.copy_within(index + 1..self.count, index);
+        self.count -= 1;
+        Ok(())
+    }
+
     pub fn reservations(&mut self) -> &[Reservation] {
         self.reservations[..self.count].sort_unstable_by_key(|reservation| reservation.range.base);
         &self.reservations[..self.count]
