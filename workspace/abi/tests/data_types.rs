@@ -5,7 +5,6 @@
 //! pass-1 suite did not already cover.
 
 use strat9_abi::data::*;
-use zerocopy::IntoBytes;
 
 // ===========================================================================
 // SiloMode: 9-bit octal permissions [control:3][hardware:3][registry:3]
