@@ -9,6 +9,19 @@ This page tracks ABI evolution for `strat9-abi`.
 - **No silent renumbering** of existing syscall IDs.
 - **`repr(C)` and explicit size checks** are mandatory for exported ABI structs.
 
+## Boot handoff ABI (`strat9_abi::boot`)
+
+The bootloader/kernel handoff has its own version, `STRAT9_BOOT_ABI_VERSION`,
+independent from the syscall `ABI_VERSION_*` above. The kernel refuses to
+boot when it does not match exactly.
+
+| Version | Change |
+|---|---|
+| 2 | First documented handoff (`KernelArgs`, framebuffer, modules) |
+| 3 | Framebuffer channel masks |
+| 4 | BSS virtual range fields |
+| 5 | `MemoryKind::Bad` (4) and `MemoryKind::AcpiNvs` (5); layout unchanged (132 bytes) |
+
 <!-- AUTO-ABI-CHANGELOG:START -->
 
 ## Current version
