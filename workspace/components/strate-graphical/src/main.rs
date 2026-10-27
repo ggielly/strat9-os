@@ -12,7 +12,7 @@ extern crate alloc;
 
 use alloc::{format, vec, vec::Vec};
 use core::{alloc::Layout, panic::PanicInfo};
-use strat9_syscall::call;
+use strat9_syscall::{call, number, syscall6};
 
 // ---------------------------------------------------------------------------
 // Global allocator (bump + brk)
@@ -72,6 +72,13 @@ struct Buffer {
     h: u32,
     stride: u32,
     bpp: u8,
+    /// Native pixel layout of the surface.
+    red_shift: u8,
+    green_shift: u8,
+    blue_shift: u8,
+    /// True when `ptr` is a `MAP_SHARED` view of the display surface: no
+    /// pixel writes through the scheme are needed, only damage messages.
+    mapped: bool,
     ptr: *mut u8,
 }
 
@@ -85,14 +92,34 @@ impl Buffer {
         for row in y2..y2 + rh {
             for col in x2..x2 + rw {
                 let o = (row * self.stride + col * b) as usize;
-                unsafe {
-                    *self.ptr.add(o) = c.b;
-                    *self.ptr.add(o + 1) = c.g;
-                    *self.ptr.add(o + 2) = c.r;
-                }
+                self.store(o, c);
             }
         }
     }
+
+    fn pack(&self, c: Color) -> u32 {
+        let mut packed = ((c.r as u32) << self.red_shift)
+            | ((c.g as u32) << self.green_shift)
+            | ((c.b as u32) << self.blue_shift);
+        if self.bpp == 32 {
+            packed |= 0xFF00_0000;
+        }
+        packed
+    }
+
+    fn store(&self, off: usize, c: Color) {
+        let packed = self.pack(c);
+        unsafe {
+            if self.bpp == 32 {
+                core::ptr::write_unaligned(self.ptr.add(off) as *mut u32, packed);
+            } else {
+                *self.ptr.add(off) = packed as u8;
+                *self.ptr.add(off + 1) = (packed >> 8) as u8;
+                *self.ptr.add(off + 2) = (packed >> 16) as u8;
+            }
+        }
+    }
+
     fn hline(&self, x: u32, y: u32, w: u32, c: Color) {
         self.fill(x, y, w, 1, c);
     }
@@ -111,11 +138,7 @@ impl Buffer {
         }
         let b = self.bpp as u32 / 8;
         let o = (y as u32 * self.stride + x as u32 * b) as usize;
-        unsafe {
-            *self.ptr.add(o) = c.b;
-            *self.ptr.add(o + 1) = c.g;
-            *self.ptr.add(o + 2) = c.r;
-        }
+        self.store(o, c);
     }
 }
 
@@ -532,7 +555,9 @@ fn draw_glyph(buf: &Buffer, x: i32, y: i32, ch: u8, c: Color) {
 
 /// Present the full offscreen buffer to the display via the kernel scheme.
 fn present_full(dfd: u32, dmg_fd: u32, buf: &Buffer, scratch: &mut Vec<u8>) {
-    write_rect_packet(dfd, buf, scratch, 0, 0, buf.w, buf.h);
+    if !buf.mapped {
+        write_rect_packet(dfd, buf, scratch, 0, 0, buf.w, buf.h);
+    }
     send_damage(dmg_fd, 0, 0, buf.w, buf.h);
 }
 
@@ -542,8 +567,16 @@ fn send_damage(dmg_fd: u32, x: u32, y: u32, w: u32, h: u32) {
     if w == 0 || h == 0 {
         return;
     }
-    let s = format!("{},{},{},{}", x, y, w, h);
-    let _ = call::write(dmg_fd as usize, s.as_bytes());
+    // Binary DMG2 protocol: magic, rect count, display id, then one rect.
+    let mut msg = [0u8; 16];
+    msg[0..4].copy_from_slice(b"DMG2");
+    msg[4..6].copy_from_slice(&1u16.to_le_bytes());
+    msg[6..8].copy_from_slice(&0u16.to_le_bytes());
+    msg[8..10].copy_from_slice(&(x as u16).to_le_bytes());
+    msg[10..12].copy_from_slice(&(y as u16).to_le_bytes());
+    msg[12..14].copy_from_slice(&(w as u16).to_le_bytes());
+    msg[14..16].copy_from_slice(&(h as u16).to_le_bytes());
+    let _ = call::write(dmg_fd as usize, &msg);
 }
 
 /// Write one rectangle of pixels in a SINGLE scheme write using wire
@@ -567,9 +600,10 @@ fn write_rect_packet(
     }
     let b = buf.bpp as usize / 8;
 
-    // Gather rows into the scratch packet (rows are contiguous only when
-    // the rect spans the full width).
-    let needed = 6 + w as usize * h as usize * b;
+    // Gather rows into the scratch packet, converting native pixels back to
+    // the scheme's BGR888 wire format (rows are contiguous only when the
+    // rect spans the full width).
+    let needed = 6 + w as usize * h as usize * 3;
     scratch.clear();
     scratch.reserve(needed.saturating_sub(scratch.capacity()));
 
@@ -582,10 +616,23 @@ fn write_rect_packet(
 
     for row in y..y.saturating_add(h) {
         let row_off = row as usize * buf.stride as usize + x as usize * b;
-        let row_bytes = w as usize * b;
-        scratch.extend_from_slice(unsafe {
-            core::slice::from_raw_parts(buf.ptr.add(row_off), row_bytes)
-        });
+        for col in 0..w as usize {
+            let off = row_off + col * b;
+            let packed = unsafe {
+                if b == 4 {
+                    core::ptr::read_unaligned(buf.ptr.add(off) as *const u32)
+                } else {
+                    let p = buf.ptr.add(off);
+                    (*p as u32) | ((*p.add(1) as u32) << 8) | ((*p.add(2) as u32) << 16)
+                }
+            };
+            let r = (packed >> buf.red_shift) & 0xFF;
+            let g = (packed >> buf.green_shift) & 0xFF;
+            let blue = (packed >> buf.blue_shift) & 0xFF;
+            scratch.push(blue as u8);
+            scratch.push(g as u8);
+            scratch.push(r as u8);
+        }
     }
 
     matches!(call::write(dfd as usize, scratch), Ok(_))
@@ -603,7 +650,9 @@ fn present_rect(
     w: u32,
     h: u32,
 ) -> bool {
-    let ok = write_rect_packet(dfd, buf, scratch, x, y, w, h);
+    // With a mapped surface the pixels are already in the display frames;
+    // only the damage notification is needed.
+    let ok = buf.mapped || write_rect_packet(dfd, buf, scratch, x, y, w, h);
     if ok {
         send_damage(dmg_fd, x, y, w, h);
     }
@@ -731,6 +780,10 @@ pub extern "C" fn _start() -> ! {
     let mut w = 800u32;
     let mut h = 600u32;
     let mut bpp = 32u8;
+    let mut stride = 0usize;
+    let mut red_shift = 16u8;
+    let mut green_shift = 8u8;
+    let mut blue_shift = 0u8;
     match call::open("/dev/display/info", 0) {
         Ok(fd) => {
             log(&format!("[display-server]   opened info fd={}", fd));
@@ -746,6 +799,14 @@ pub extern "C" fn _start() -> ! {
                             h = v.parse().unwrap_or(600);
                         } else if let Some(v) = p.strip_prefix("bpp=") {
                             bpp = v.parse().unwrap_or(32);
+                        } else if let Some(v) = p.strip_prefix("stride=") {
+                            stride = v.parse().unwrap_or(0);
+                        } else if let Some(v) = p.strip_prefix("red_shift=") {
+                            red_shift = v.parse().unwrap_or(16);
+                        } else if let Some(v) = p.strip_prefix("green_shift=") {
+                            green_shift = v.parse().unwrap_or(8);
+                        } else if let Some(v) = p.strip_prefix("blue_shift=") {
+                            blue_shift = v.parse().unwrap_or(0);
                         }
                     }
                 }
@@ -814,15 +875,47 @@ pub extern "C" fn _start() -> ! {
         }
     };
 
-    // Step 5: Allocate offscreen buffer
-    log("[display-server] step 5: allocating framebuffer...");
+    // Step 5: map the display surface (zero-copy) or fall back to an
+    // offscreen buffer written through the scheme.
+    log("[display-server] step 5: mapping framebuffer...");
     let bpp_b = bpp as usize / 8;
-    let fb_sz = w as usize * h as usize * bpp_b;
-    let mut fb = vec![0u8; fb_sz];
-    log(&format!(
-        "[display-server]   allocated {} bytes ({}x{}x{})",
-        fb_sz, w, h, bpp_b
-    ));
+    if stride == 0 {
+        stride = w as usize * bpp_b;
+    }
+    let fb_sz = stride * h as usize;
+    const PROT_READ_WRITE: usize = 3;
+    const MAP_SHARED: usize = 1;
+    let mapped = unsafe {
+        syscall6(
+            number::SYS_MMAP,
+            0,
+            fb_sz,
+            PROT_READ_WRITE,
+            MAP_SHARED,
+            dfd,
+            0,
+        )
+    }
+    .ok()
+    .filter(|addr| *addr != 0);
+    let mut fb_fallback: Vec<u8> = Vec::new();
+    let (fb_ptr, is_mapped) = match mapped {
+        Some(addr) => {
+            log(&format!(
+                "[display-server]   mapped {} bytes at {:#x}",
+                fb_sz, addr
+            ));
+            (addr as *mut u8, true)
+        }
+        None => {
+            fb_fallback = vec![0u8; fb_sz];
+            log(&format!(
+                "[display-server]   mmap unavailable, fallback {} bytes ({}x{}x{})",
+                fb_sz, w, h, bpp_b
+            ));
+            (fb_fallback.as_mut_ptr(), false)
+        }
+    };
 
     // Step 5b: open the damage handle (the screen fd only accepts pixels;
     // "present"/"x,y,w,h" commands go through /dev/display/damage).
@@ -850,9 +943,13 @@ pub extern "C" fn _start() -> ! {
     let buf = Buffer {
         w,
         h,
-        stride: w * bpp_b as u32,
+        stride: stride as u32,
         bpp,
-        ptr: fb.as_mut_ptr(),
+        red_shift,
+        green_shift,
+        blue_shift,
+        mapped: is_mapped,
+        ptr: fb_ptr,
     };
     let mut srv = Server::new(buf, w, h);
 

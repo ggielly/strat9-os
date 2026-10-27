@@ -9,6 +9,8 @@ pub struct InputHandler {
     ctrl: bool,
     alt: bool,
     caps_lock: bool,
+    /// Set after an 0xE0 prefix byte; the next scancode is extended.
+    extended: bool,
 }
 
 impl InputHandler {
@@ -20,30 +22,60 @@ impl InputHandler {
             ctrl: false,
             alt: false,
             caps_lock: false,
+            extended: false,
         })
     }
 
-    pub fn read_byte(&mut self) -> Option<u8> {
-        let mut buf = [0u8; 1];
-        match call::read(self.kbd_fd, &mut buf) {
-            Ok(1) => {
-                let scancode = buf[0];
-                self.process_scancode(scancode)
-            }
-            _ => None,
+    /// Read up to `out.len()` raw scancodes in a single syscall.
+    ///
+    /// Non-blocking: returns 0 when nothing is pending.
+    pub fn read_raw(&mut self, out: &mut [u8]) -> usize {
+        match call::read(self.kbd_fd, out) {
+            Ok(n) => n.min(out.len()),
+            Err(_) => 0,
         }
+    }
+
+    /// Translate a batch of raw scancodes into ASCII bytes.
+    ///
+    /// Modifier state and a pending 0xE0 prefix persist across calls, so a
+    /// scancode burst can be split anywhere.
+    pub fn translate(&mut self, raw: &[u8], out: &mut [u8]) -> usize {
+        let mut n = 0;
+        for &scancode in raw {
+            if n >= out.len() {
+                break;
+            }
+            if let Some(byte) = self.process_scancode(scancode) {
+                out[n] = byte;
+                n += 1;
+            }
+        }
+        n
     }
 
     fn process_scancode(&mut self, scancode: u8) -> Option<u8> {
         let pressed = (scancode & 0x80) == 0;
         let code = scancode & 0x7F;
 
-        // 0xE0 prefix marks an extended scancode. The next byte carries
-        // the actual code. Extended scancodes (e.g. right Ctrl = 0xE0 0x1D)
-        // are handled by treating 0xE0 as a prefix that we skip : the real
-        // code follows on the next read.
+        // 0xE0 prefix marks an extended scancode; the next byte carries the
+        // actual code. Keep the prefix across reads so right Ctrl/Alt are
+        // not mistaken for their left counterparts.
         if scancode == 0xE0 {
-            return None; // Prefix byte, next call has the real code.
+            self.extended = true;
+            return None;
+        }
+        let extended = self.extended;
+        self.extended = false;
+
+        if extended {
+            // Only the modifiers we track have a useful extended form.
+            match code {
+                0x1D => self.ctrl = pressed,
+                0x38 => self.alt = pressed,
+                _ => {}
+            }
+            return None;
         }
 
         match code {

@@ -5,7 +5,7 @@
 extern crate alloc;
 
 use core::{alloc::Layout, panic::PanicInfo};
-use strat9_syscall::call;
+use strat9_syscall::{call, data::TimeSpec};
 
 mod ansi;
 mod input;
@@ -19,6 +19,11 @@ use terminal::TerminalCore;
 
 const DEFAULT_FG: u32 = 0xE2E8F0;
 const DEFAULT_BG: u32 = 0x12161E;
+
+/// Cursor blink period. Blinking is the only periodic redraw source.
+const CURSOR_BLINK_MS: u64 = 500;
+/// Idle sleep when no input is pending (5 ms).
+const IDLE_SLEEP_NS: i64 = 5_000_000;
 
 alloc_freelist::define_freelist_brk_allocator!(
     pub struct BumpAllocator;
@@ -73,31 +78,76 @@ pub extern "C" fn _start() -> ! {
         \x1b[1;36m  strat9-os console (ring 3)\x1b[0m\n\
         \x1b[1;36m========================================\x1b[0m\n\
         \x1b[90mType 'help' for commands.\x1b[0m\n\n";
-    for &b in banner {
-        term.process_byte(b);
-    }
+    term.process_bytes(banner);
 
-    let mut cells = [[scrollback::Cell::blank(DEFAULT_FG, DEFAULT_BG); 256]; 64];
-    render_terminal(&term, &mut cells);
-    rend.render(&cells, term.cursor_row, term.cursor_col, term.rows);
+    rend.render(
+        &term.screen,
+        term.cursor_row,
+        term.cursor_col,
+        term.rows,
+        true,
+    );
+
+    let mut cursor_visible = true;
+    let mut next_blink_ms = now_ms() + CURSOR_BLINK_MS;
+    let mut raw = [0u8; 64];
+    let mut input = [0u8; 64];
 
     loop {
-        if let Some(byte) = kbd.read_byte() {
-            term.process_byte(byte);
+        let mut dirty = false;
+
+        // One syscall per scancode burst, then translate the whole batch.
+        // `read_raw` is non-blocking, so an empty read means idle.
+        let raw_n = kbd.read_raw(&mut raw);
+        let text_n = kbd.translate(&raw[..raw_n], &mut input);
+        if text_n > 0 && term.process_bytes(&input[..text_n]) {
+            dirty = true;
         }
 
-        render_terminal(&term, &mut cells);
-        rend.render(&cells, term.cursor_row, term.cursor_col, term.rows);
+        // Cursor blink is the only periodic redraw source.
+        let now = now_ms();
+        if now >= next_blink_ms {
+            cursor_visible = !cursor_visible;
+            while next_blink_ms <= now {
+                next_blink_ms += CURSOR_BLINK_MS;
+            }
+            dirty = true;
+        }
 
-        let _ = call::sched_yield();
+        if dirty {
+            rend.render(
+                &term.screen,
+                term.cursor_row,
+                term.cursor_col,
+                term.rows,
+                cursor_visible,
+            );
+            let _ = call::sched_yield();
+        } else {
+            // No blocking poll() on /dev/input/kbd is exposed yet, so sleep
+            // briefly instead of spinning; rendering stays damage-driven.
+            let req = TimeSpec {
+                tv_sec: 0,
+                tv_nsec: IDLE_SLEEP_NS,
+            };
+            let mut rem = TimeSpec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            let _ = call::nanosleep(&req, &mut rem);
+        }
     }
 }
 
-fn render_terminal(term: &TerminalCore, cells: &mut [[scrollback::Cell; 256]; 64]) {
-    let visible_rows = term.rows.min(64);
-    for row in 0..visible_rows {
-        for col in 0..term.cols.min(256) {
-            cells[row][col] = term.screen[row][col];
-        }
+/// Monotonic time in milliseconds, used for cursor blinking only.
+fn now_ms() -> u64 {
+    let mut ts = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if call::clock_gettime(strat9_syscall::CLOCK_MONOTONIC, &mut ts).is_ok() {
+        (ts.tv_sec.max(0) as u64) * 1000 + (ts.tv_nsec.max(0) as u64) / 1_000_000
+    } else {
+        0
     }
 }

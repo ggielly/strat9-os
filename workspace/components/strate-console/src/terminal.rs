@@ -15,9 +15,6 @@ pub struct TerminalCore {
     pub cursor_col: usize,
     pub scroll_top: usize,
     pub scroll_bottom: usize,
-    /// Current editing line buffer.
-    pub line_cells: [Cell; MAX_COLS],
-    pub line_len: usize,
     /// Visible screen buffer: all rows rendered on screen.
     pub screen: [[Cell; MAX_COLS]; MAX_ROWS],
     pub fg: u32,
@@ -28,6 +25,8 @@ pub struct TerminalCore {
     pub default_bg: u32,
     pub scrollback: CircularBuffer,
     ansi: AnsiParser,
+    /// Reused action scratch, so a chunk never allocates per byte.
+    actions: alloc::vec::Vec<AnsiAction>,
 }
 
 impl TerminalCore {
@@ -40,8 +39,6 @@ impl TerminalCore {
             cursor_col: 0,
             scroll_top: 0,
             scroll_bottom: rows,
-            line_cells: [blank; MAX_COLS],
-            line_len: 0,
             screen: [[blank; MAX_COLS]; MAX_ROWS],
             fg: default_fg,
             bg: default_bg,
@@ -51,102 +48,108 @@ impl TerminalCore {
             default_bg,
             scrollback: CircularBuffer::new(cols, default_fg, default_bg),
             ansi: AnsiParser::new(),
+            actions: alloc::vec::Vec::new(),
         }
     }
 
-    pub fn process_byte(&mut self, byte: u8) -> bool {
+    /// Process a chunk of terminal input (UTF-8 bytes, escape sequences and
+    /// C0 controls). Returns true if anything changed on screen.
+    ///
+    /// `vte` keeps partial UTF-8/escape state across calls, so chunks may be
+    /// split anywhere. The action scratch is reused: no per-byte allocation.
+    pub fn process_bytes(&mut self, bytes: &[u8]) -> bool {
+        self.ansi.feed_into(bytes, &mut self.actions);
         let mut changed = false;
-        let slice = self.ansi.feed_bytes(&[byte]);
-        let actions: alloc::vec::Vec<_> = slice.iter().copied().collect();
-        for action in &actions {
-            changed |= self.handle_action(*action);
+        for i in 0..self.actions.len() {
+            let action = self.actions[i];
+            changed |= self.handle_action(action);
         }
-        if changed {
-            return true;
-        }
-        if byte >= 0x20 && byte <= 0x7E {
-            self.handle_char(byte);
-            true
-        } else if byte == b'\n' || byte == b'\r' || byte == b'\t' || byte == 0x08 || byte == 0x7F {
-            self.handle_char(byte);
-            true
-        } else {
-            false
-        }
+        changed
     }
 
-    fn handle_char(&mut self, byte: u8) -> bool {
-        match byte {
-            b'\n' => {
-                self.flush_line();
-                self.cursor_row += 1;
-                if self.cursor_row >= self.scroll_bottom {
-                    self.scroll_up();
-                    self.cursor_row = self.scroll_bottom - 1;
-                }
+    fn handle_char(&mut self, ch: char) -> bool {
+        match ch {
+            '\n' => {
+                self.cursor_col = 0;
+                self.advance_row();
                 true
             }
-            b'\r' => {
+            '\r' => {
                 self.cursor_col = 0;
                 true
             }
-            b'\t' => {
+            '\t' => {
                 self.cursor_col = (self.cursor_col + 8) & !7;
                 if self.cursor_col >= self.cols {
                     self.cursor_col = 0;
-                    self.cursor_row += 1;
-                    if self.cursor_row >= self.scroll_bottom {
-                        self.scroll_up();
-                        self.cursor_row = self.scroll_bottom - 1;
-                    }
+                    self.advance_row();
                 }
                 true
             }
-            0x08 | 0x7F => {
+            '\u{8}' | '\u{7f}' => {
                 if self.cursor_col > 0 {
                     self.cursor_col -= 1;
-                    self.set_cell(self.cursor_col, self.cursor_row, b' ');
+                    self.set_cell(self.cursor_col, self.cursor_row, ' ');
                 }
                 true
             }
-            0x07 | 0x00 => false,
-            ch @ 0x20..=0x7E => {
-                self.set_cell(self.cursor_col, self.cursor_row, ch);
+            '\u{7}' | '\0' => false,
+            c if c.is_control() => false,
+            c => {
+                self.set_cell(self.cursor_col, self.cursor_row, c);
                 self.cursor_col += 1;
                 if self.cursor_col >= self.cols {
                     self.cursor_col = 0;
-                    self.cursor_row += 1;
-                    if self.cursor_row >= self.scroll_bottom {
-                        self.scroll_up();
-                        self.cursor_row = self.scroll_bottom - 1;
-                    }
+                    self.advance_row();
                 }
                 true
             }
-            _ => false,
+        }
+    }
+
+    /// Move to the next line, scrolling the configured region if needed.
+    fn advance_row(&mut self) {
+        self.cursor_row += 1;
+        if self.cursor_row >= self.scroll_bottom {
+            self.scroll_up(1);
+            self.cursor_row = self.scroll_bottom.saturating_sub(1);
         }
     }
 
     fn handle_action(&mut self, action: AnsiAction) -> bool {
         match action {
             AnsiAction::CursorUp(n) => {
-                self.cursor_row = self.cursor_row.saturating_sub(n as usize);
+                self.cursor_row = self.cursor_row.saturating_sub((n as usize).max(1));
             }
             AnsiAction::CursorDown(n) => {
-                self.cursor_row = (self.cursor_row + n as usize).min(self.scroll_bottom - 1);
+                self.cursor_row = (self.cursor_row + (n as usize).max(1))
+                    .min(self.scroll_bottom.saturating_sub(1));
             }
             AnsiAction::CursorForward(n) => {
-                self.cursor_col = (self.cursor_col + n as usize).min(self.cols - 1);
+                self.cursor_col =
+                    (self.cursor_col + (n as usize).max(1)).min(self.cols.saturating_sub(1));
             }
             AnsiAction::CursorBack(n) => {
-                self.cursor_col = self.cursor_col.saturating_sub(n as usize);
+                self.cursor_col = self.cursor_col.saturating_sub((n as usize).max(1));
             }
             AnsiAction::CursorPosition(row, col) => {
-                self.cursor_row = (row as usize - 1).min(self.rows - 1);
-                self.cursor_col = (col as usize - 1).min(self.cols - 1);
+                self.cursor_row = (row as usize)
+                    .saturating_sub(1)
+                    .min(self.rows.saturating_sub(1));
+                self.cursor_col = (col as usize)
+                    .saturating_sub(1)
+                    .min(self.cols.saturating_sub(1));
             }
             AnsiAction::CursorHorizontalAbsolute(col) => {
-                self.cursor_col = (col as usize - 1).min(self.cols - 1);
+                self.cursor_col = (col as usize)
+                    .saturating_sub(1)
+                    .min(self.cols.saturating_sub(1));
+            }
+            AnsiAction::Print(c) => {
+                self.handle_char(c);
+            }
+            AnsiAction::Execute(b) => {
+                self.handle_char(b as char);
             }
             AnsiAction::EraseDisplay(mode) => {
                 self.erase_display(mode);
@@ -155,18 +158,21 @@ impl TerminalCore {
                 self.erase_line(mode);
             }
             AnsiAction::ScrollUp(n) => {
-                for _ in 0..n {
-                    self.scroll_up();
-                }
+                self.scroll_up((n as usize).max(1));
             }
             AnsiAction::ScrollDown(n) => {
-                for _ in 0..n {
-                    self.scroll_down();
-                }
+                self.scroll_down((n as usize).max(1));
             }
             AnsiAction::SetScrollRegion(top, bottom) => {
-                self.scroll_top = (top as usize - 1).min(self.rows - 1);
-                self.scroll_bottom = (bottom as usize).min(self.rows);
+                self.scroll_top = (top as usize)
+                    .saturating_sub(1)
+                    .min(self.rows.saturating_sub(1));
+                // An omitted bottom parameter (0) means "last row".
+                self.scroll_bottom = if bottom == 0 {
+                    self.rows
+                } else {
+                    (bottom as usize).min(self.rows)
+                };
                 if self.scroll_top >= self.scroll_bottom {
                     self.scroll_top = 0;
                     self.scroll_bottom = self.rows;
@@ -213,7 +219,7 @@ impl TerminalCore {
         }
     }
 
-    fn set_cell(&mut self, col: usize, row: usize, ch: u8) {
+    fn set_cell(&mut self, col: usize, row: usize, ch: char) {
         if col < self.cols && row < self.rows {
             let (fg, bg) = if self.inverse {
                 (self.bg, self.fg)
@@ -225,86 +231,100 @@ impl TerminalCore {
             } else {
                 fg
             };
-            let cell = Cell {
-                ch,
+            self.screen[row][col] = Cell {
+                ch: ch as u32,
                 fg: bold_color,
                 bg,
             };
-            self.line_cells[col] = cell;
-            self.screen[row][col] = cell;
-            self.line_len = self.line_len.max(col + 1);
         }
     }
 
-    fn flush_line(&mut self) {
-        // Copy the completed line into the screen buffer.
-        for col in 0..self.line_len.min(MAX_COLS).min(self.cols) {
-            if self.cursor_row < self.rows {
-                // If cursor_row is at the bottom, scroll first.
-                if self.cursor_row >= self.screen.len() {
-                    self.scroll_screen_up();
-                }
-                self.screen[self.cursor_row.min(self.rows - 1)][col] = self.line_cells[col];
+    /// Scroll the active region up by `n` lines.
+    ///
+    /// Rows leaving the screen (a region starting at row 0) are appended to
+    /// the scrollback. Only the region is shifted; rows above `scroll_top`
+    /// and below `scroll_bottom` stay untouched.
+    fn scroll_up(&mut self, n: usize) {
+        let top = self.scroll_top.min(self.rows.saturating_sub(1));
+        let bottom = self.scroll_bottom.min(self.rows);
+        if top >= bottom || n == 0 {
+            return;
+        }
+        let blank = Cell::blank(self.default_fg, self.default_bg);
+        let width = self.cols.min(MAX_COLS);
+        for _ in 0..n.min(bottom - top) {
+            if top == 0 {
+                let line = self.screen[0];
+                self.scrollback.push_line(&line[..width], width);
             }
+            self.screen.copy_within((top + 1)..bottom, top);
+            self.screen[bottom - 1] = [blank; MAX_COLS];
         }
-        // Clear the current editing line for the next input line.
-        self.scrollback
-            .push_line(&self.line_cells[..self.line_len], self.line_len);
+    }
+
+    /// Insert `n` blank lines at the top of the active region.
+    fn scroll_down(&mut self, n: usize) {
+        let top = self.scroll_top.min(self.rows.saturating_sub(1));
+        let bottom = self.scroll_bottom.min(self.rows);
+        if top >= bottom || n == 0 {
+            return;
+        }
         let blank = Cell::blank(self.default_fg, self.default_bg);
-        self.line_cells = [blank; MAX_COLS];
-        self.line_len = 0;
-    }
-
-    fn scroll_screen_up(&mut self) {
-        // Shift all screen rows up by one, losing the top row.
-        for r in 1..self.rows.min(MAX_ROWS) {
-            self.screen[r - 1] = self.screen[r];
-        }
-        // Clear the last row.
-        let blank = Cell::blank(self.default_fg, self.default_bg);
-        if self.rows > 0 {
-            self.screen[self.rows - 1] = [blank; MAX_COLS];
+        for _ in 0..n.min(bottom - top) {
+            self.screen.copy_within(top..(bottom - 1), top + 1);
+            self.screen[top] = [blank; MAX_COLS];
         }
     }
-
-    fn scroll_up(&mut self) {
-        self.flush_line();
-        self.scrollback.push_line(&[], 0);
-    }
-
-    fn scroll_down(&mut self) {}
 
     fn erase_display(&mut self, mode: EraseMode) {
+        let row = self.cursor_row.min(self.rows.saturating_sub(1));
         match mode {
             EraseMode::Below => {
                 for c in self.cursor_col..self.cols {
-                    self.set_cell(c, self.cursor_row, b' ');
+                    self.set_cell(c, row, ' ');
+                }
+                for r in (row + 1)..self.rows {
+                    for c in 0..self.cols {
+                        self.set_cell(c, r, ' ');
+                    }
+                }
+            }
+            EraseMode::Above => {
+                for r in 0..row {
+                    for c in 0..self.cols {
+                        self.set_cell(c, r, ' ');
+                    }
+                }
+                for c in 0..=self.cursor_col.min(self.cols.saturating_sub(1)) {
+                    self.set_cell(c, row, ' ');
                 }
             }
             EraseMode::All => {
-                for c in 0..self.cols {
-                    self.set_cell(c, self.cursor_row, b' ');
+                for r in 0..self.rows {
+                    for c in 0..self.cols {
+                        self.set_cell(c, r, ' ');
+                    }
                 }
             }
-            _ => {}
         }
     }
 
     fn erase_line(&mut self, mode: EraseMode) {
+        let row = self.cursor_row.min(self.rows.saturating_sub(1));
         match mode {
             EraseMode::Below => {
                 for c in self.cursor_col..self.cols {
-                    self.set_cell(c, self.cursor_row, b' ');
+                    self.set_cell(c, row, ' ');
                 }
             }
             EraseMode::Above => {
-                for c in 0..self.cursor_col {
-                    self.set_cell(c, self.cursor_row, b' ');
+                for c in 0..=self.cursor_col.min(self.cols.saturating_sub(1)) {
+                    self.set_cell(c, row, ' ');
                 }
             }
             EraseMode::All => {
                 for c in 0..self.cols {
-                    self.set_cell(c, self.cursor_row, b' ');
+                    self.set_cell(c, row, ' ');
                 }
             }
         }

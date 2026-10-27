@@ -47,6 +47,30 @@ pub struct PixelFormat {
     pub bits_per_pixel: u8,
 }
 
+impl PixelFormat {
+    /// True for the common XRGB layout used by UEFI GOP on x86:
+    /// red in bits 16..23, green 8..15, blue 0..7 (little-endian bytes
+    /// B,G,R,X). This is the layout the SIMD `convert_bgr_to_argb` produces.
+    pub fn is_xrgb8888(&self) -> bool {
+        self.bits_per_pixel == 32
+            && self.red_shift == 16
+            && self.green_shift == 8
+            && self.blue_shift == 0
+    }
+
+    /// Pack an RGB888 triple (wire format) into this framebuffer's native
+    /// 32-bit pixel layout. The unused/alpha byte is set opaque.
+    pub fn pack_rgb(&self, r: u8, g: u8, b: u8) -> u32 {
+        let mut v = ((r as u32) << self.red_shift)
+            | ((g as u32) << self.green_shift)
+            | ((b as u32) << self.blue_shift);
+        if self.bits_per_pixel == 32 {
+            v |= 0xFF00_0000;
+        }
+        v
+    }
+}
+
 impl Default for PixelFormat {
     /// Builds a default instance.
     fn default() -> Self {
@@ -779,40 +803,55 @@ pub fn init() {
         }
     }
 
-    // The bootloader already programmed a framebuffer and the VGA console is
-    // drawing to it. Adopt that surface when no GPU device claimed it, so
-    // /dev/display still resolves instead of reporting no framebuffer.
-    #[cfg(target_arch = "x86_64")]
+    // VirtIO GPU and AMDGPU not available: adopt the bootloader framebuffer.
+    // The early VGA console already uses it, but the display scheme needs a
+    // `FramebufferInfo` entry, which only `init_bootloader` publishes.
     if !Framebuffer::is_available() {
-        if let Some(uefi) = crate::arch::x86_64::vga::uefi_framebuffer() {
-            // The VGA layer keeps the bootloader's field layout (bpp and
-            // per-channel sizes); translate it into mask/shift form.
-            let (red_mask, green_mask, blue_mask) = match uefi.fmt.bpp {
-                32 => (0x00FF_0000u32, 0x0000_FF00u32, 0x0000_00FFu32),
-                _ => (0x00FF0000u32, 0x0000FF00u32, 0x000000FFu32),
-            };
-            let format = PixelFormat {
-                red_mask,
-                red_shift: uefi.fmt.red_shift,
-                green_mask,
-                green_shift: uefi.fmt.green_shift,
-                blue_mask,
-                blue_shift: uefi.fmt.blue_shift,
-                bits_per_pixel: uefi.fmt.bpp as u8,
-            };
-            match Framebuffer::init_bootloader(
-                uefi.virt_addr as u64,
-                uefi.width,
-                uefi.height,
-                uefi.pitch,
-                format,
-            ) {
-                Ok(()) => log::info!(
-                    "[FB] Using UEFI bootloader framebuffer ({}x{})",
-                    uefi.width,
-                    uefi.height
-                ),
-                Err(e) => log::warn!("[FB] UEFI framebuffer unusable: {}", e),
+        if let Some(args) = crate::boot_args() {
+            if args.framebuffer_addr != 0
+                && args.framebuffer_stride != 0
+                && args.framebuffer_height != 0
+            {
+                let hhdm = crate::memory::hhdm_offset();
+                let fb_virt = if hhdm != 0 && args.framebuffer_addr < hhdm {
+                    crate::memory::phys_to_virt(args.framebuffer_addr)
+                } else {
+                    args.framebuffer_addr
+                };
+                let mask = |size: u8, shift: u8| -> u32 {
+                    if size == 0 {
+                        0
+                    } else {
+                        (((1u64 << size) - 1) as u32) << shift
+                    }
+                };
+                let format = PixelFormat {
+                    red_mask: mask(
+                        args.framebuffer_red_mask_size,
+                        args.framebuffer_red_mask_shift,
+                    ),
+                    red_shift: args.framebuffer_red_mask_shift,
+                    green_mask: mask(
+                        args.framebuffer_green_mask_size,
+                        args.framebuffer_green_mask_shift,
+                    ),
+                    green_shift: args.framebuffer_green_mask_shift,
+                    blue_mask: mask(
+                        args.framebuffer_blue_mask_size,
+                        args.framebuffer_blue_mask_shift,
+                    ),
+                    blue_shift: args.framebuffer_blue_mask_shift,
+                    bits_per_pixel: args.framebuffer_bpp as u8,
+                };
+                if let Err(e) = Framebuffer::init_bootloader(
+                    fb_virt,
+                    args.framebuffer_width,
+                    args.framebuffer_height,
+                    args.framebuffer_stride,
+                    format,
+                ) {
+                    log::warn!("[FB] Bootloader framebuffer init failed: {}", e);
+                }
             }
         }
     }
