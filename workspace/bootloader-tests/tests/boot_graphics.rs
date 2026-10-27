@@ -1,6 +1,8 @@
 //! Actual GOP geometry and page-table construction with synthetic physical
 //! addresses. These tests do not execute firmware or privileged instructions.
-#![allow(dead_code)]
+//! `unused_imports` comes from the included loader sources (their `pub use`
+//! re-exports are unreachable from an integration-test crate root).
+#![allow(dead_code, unused_imports)]
 #[path = "../../bootloader/src/boot_plan.rs"]
 mod boot_plan;
 #[path = "../../bootloader/src/elf.rs"]
@@ -24,20 +26,34 @@ const NX: u64 = 1 << 63;
 const UC: u64 = 0x18;
 const ADDRESS: u64 = 0x000F_FFFF_FFFF_F000;
 const ARENA: u64 = 0x2000_0000;
+const HUGE_PAGE: u64 = 0x20_0000;
+const HUGE: u64 = 1 << 7;
 const EMPTY: PhysicalRange = PhysicalRange { base: 0, size: 0 };
 const WB: [PhysicalRange; 1] = [PhysicalRange { base: 0, size: GIB }];
 
 #[test]
 fn console_modes_prefer_readable_resolution_with_firmware_fallbacks() {
     let mut modes = [
-        (3840, 2160), (800, 600), (1920, 1080), (1600, 1200), (1280, 1024),
+        (3840, 2160),
+        (800, 600),
+        (1920, 1080),
+        (1600, 1200),
+        (1280, 1024),
     ];
     modes.sort_by_key(|&(w, h)| {
-        Framebuffer::geometry(w, h, w, false).unwrap().console_mode_rank()
+        Framebuffer::geometry(w, h, w, false)
+            .unwrap()
+            .console_mode_rank()
     });
     assert_eq!(
         modes,
-        [(1600, 1200), (1280, 1024), (800, 600), (1920, 1080), (3840, 2160)]
+        [
+            (1600, 1200),
+            (1280, 1024),
+            (800, 600),
+            (1920, 1080),
+            (3840, 2160)
+        ]
     );
 }
 const LOADER: PhysicalRange = PhysicalRange {
@@ -81,6 +97,7 @@ fn plan(image: &Elf64Info) -> MappingPlan<'_> {
         write_back: &WB,
         framebuffer: EMPTY,
         environment: EMPTY,
+        gib_pages: true,
     }
 }
 
@@ -243,7 +260,7 @@ fn ram_and_mmio_are_nx_with_consistent_cache_selectors() {
     }
     // Adjacent WB RAM keeps its original policy; no entire 2 MiB region is retyped.
     assert_eq!(
-        walk(&words, HHDM_OFFSET + fb.base - PAGE_SIZE).unwrap().1,
+        walk(&words, HHDM_OFFSET + fb.base - PAGE_SIZE).unwrap().1 & !HUGE,
         3 | NX
     );
 }
@@ -309,4 +326,83 @@ fn final_cache_map_may_split_ram_but_must_not_retype_it() {
     assert!(!layout.agrees_with_firmware(ram, false));
     assert!(layout.agrees_with_firmware(mmio, false));
     assert!(!layout.agrees_with_firmware(mmio, true));
+}
+
+#[test]
+fn homogeneous_direct_map_windows_use_one_gib_leaves() {
+    let image = kernel();
+    let words = build(&plan(&image));
+    // Windows above WB RAM hold MMIO: uniform UC, no kernel or EFI code, so a
+    // single 1 GiB leaf replaces 512 PD entries and one PD page.
+    for offset in [0, HHDM_OFFSET] {
+        let (physical, flags, span) = walk(&words, offset + 4 * GIB).unwrap();
+        assert_eq!((physical, span), (4 * GIB, GIB));
+        assert_eq!(flags & !HUGE, 3 | NX | UC);
+        assert_ne!(flags & HUGE, 0);
+        assert_eq!(
+            walk(&words, offset + 4 * GIB + GIB - PAGE_SIZE).map(|leaf| leaf.0),
+            Some(5 * GIB - PAGE_SIZE)
+        );
+    }
+    // The mapped window stops exactly at the prepared direct map end.
+    assert!(walk(&words, 8 * GIB).is_none());
+    assert!(walk(&words, HHDM_OFFSET + 8 * GIB).is_none());
+}
+
+#[test]
+fn low_memory_kernel_and_efi_image_keep_fine_leaves() {
+    let image = kernel();
+    let words = build(&plan(&image));
+    let image_range = page_tables::page_range(LOADER).unwrap();
+    assert_eq!(walk(&words, 0).unwrap().2, PAGE_SIZE); // fixed MTRRs/trampoline
+    assert_eq!(walk(&words, image_range.base).unwrap().2, PAGE_SIZE); // identity RX
+    assert_eq!(
+        walk(&words, HHDM_OFFSET + image_range.base).unwrap().2,
+        HUGE_PAGE
+    );
+    for page in 0..6 {
+        let physical = image.phys_base + page * PAGE_SIZE;
+        assert_eq!(walk(&words, physical).unwrap().2, PAGE_SIZE);
+        assert_eq!(walk(&words, HHDM_OFFSET + physical).unwrap().2, PAGE_SIZE);
+    }
+    // An untouched window of WB RAM next to the kernel stays at 2 MiB.
+    assert_eq!(
+        walk(&words, HHDM_OFFSET + 0x100_0000 + 4 * PAGE_SIZE)
+            .unwrap()
+            .2,
+        HUGE_PAGE
+    );
+}
+
+#[test]
+fn cpus_without_one_gib_pages_stay_on_two_mib_leaves() {
+    let image = kernel();
+    let layout = MappingPlan {
+        gib_pages: false,
+        ..plan(&image)
+    };
+    let words = build(&layout);
+    let (physical, flags, span) = walk(&words, HHDM_OFFSET + 4 * GIB).unwrap();
+    assert_eq!((physical, span), (4 * GIB, HUGE_PAGE));
+    assert_eq!(flags & !HUGE, 3 | NX | UC);
+    assert_eq!(
+        walk(&words, HHDM_OFFSET + 4 * GIB + HUGE_PAGE).unwrap().0,
+        4 * GIB + HUGE_PAGE
+    );
+}
+
+#[test]
+fn one_gib_leaves_shrink_the_page_table_arena() {
+    let image = kernel();
+    let fine = MappingPlan {
+        gib_pages: false,
+        ..plan(&image)
+    };
+    let coarse = plan(&image);
+    let fine_pages = fine.table_pages().unwrap();
+    let coarse_pages = coarse.table_pages().unwrap();
+    // Seven MMIO windows collapse from (1 PD + 512 PT-free PD entries) to a
+    // single PDPT leaf each, in both the identity and the HHDM alias.
+    assert_eq!(fine_pages - coarse_pages, 7 * 2);
+    assert!(coarse_pages * PAGE_SIZE <= fine_pages * PAGE_SIZE);
 }

@@ -1,0 +1,20 @@
+[package]
+name = "strat9-bootloader-tests"
+publish = false
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+# Host tests for the UEFI bootloader's pure modules (boot plan, page tables,
+# ELF geometry, GOP geometry). The sources under test are included verbatim
+# with #[path], so these tests exercise the exact code the firmware runs
+# without touching privileged instructions or GOP hardware.
+#
+# Standalone workspace: the main workspace targets x86_64-unknown-none, but
+# these tests are ordinary host binaries. Run them with
+#   cargo test --manifest-path workspace/bootloader-tests/Cargo.toml \
+#       --target x86_64-unknown-linux-gnu
+[workspace]
+
+[dependencies]
+# memory_map.rs re-uses the boot ABI definitions the loader hands to the kernel.
+strat9-abi = { path = "../abi" }

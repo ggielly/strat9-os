@@ -28,6 +28,11 @@ impl CpuFeatures {
     pub fn physical_limit(self) -> u64 {
         1u64 << self.physical_bits
     }
+
+    /// CPUID 8000_0001h EDX[26]. Only an optimization: unset keeps 2 MiB leaves.
+    pub fn supports_1gib_pages(self) -> bool {
+        self.extended_edx & (1 << 26) != 0
+    }
 }
 
 pub fn validate_paging_mode(cr0: u64, cr4: u64, efer: u64) -> Result<(), &'static str> {

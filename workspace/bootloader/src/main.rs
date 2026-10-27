@@ -323,8 +323,13 @@ fn boot_kernel() -> BootResult<()> {
     uefi::system::with_stdout(|stdout| {
         let _ = writeln!(
             stdout,
-            "[boot] Initial identity/HHDM: {} GiB, 4 KiB/2 MiB pages, NX, video UC",
-            direct_map.end() / boot_plan::GIB
+            "[boot] Initial identity/HHDM: {} GiB, {} pages, NX, video UC",
+            direct_map.end() / boot_plan::GIB,
+            if cpu_features.supports_1gib_pages() {
+                "4 KiB/2 MiB/1 GiB"
+            } else {
+                "4 KiB/2 MiB"
+            }
         );
     });
     let mapping_plan = page_tables::MappingPlan {
@@ -334,6 +339,7 @@ fn boot_kernel() -> BootResult<()> {
         write_back: &write_back,
         framebuffer: framebuffer_aperture,
         environment,
+        gib_pages: cpu_features.supports_1gib_pages(),
     };
     let table_pages = mapping_plan.table_pages().map_err(BootError::invalid)?;
     let table_area = boot_memory.allocate(table_pages * PAGE_SIZE, "page-table arena")?;

@@ -9,6 +9,7 @@ pub const FRAMEBUFFER_BASE: u64 = 0xFFFF_DEAD_0000_0000;
 pub const ENVIRONMENT_BASE: u64 = 0xFFFF_BEEF_0000_0000;
 pub const HHDM_OFFSET: u64 = 0xFFFF_FF00_0000_0000;
 const HUGE_PAGE: u64 = 0x20_0000;
+const GIB_PAGE: u64 = 0x4000_0000;
 const PRESENT: u64 = 1;
 const WRITABLE: u64 = 1 << 1;
 const HUGE: u64 = 1 << 7;
@@ -58,6 +59,9 @@ pub struct MappingPlan<'a> {
     /// The complete GOP aperture, not just visible pixels.
     pub framebuffer: PhysicalRange,
     pub environment: PhysicalRange,
+    /// The CPU reports 1 GiB leaves (CPUID 8000_0001h EDX[26]). Direct-map
+    /// windows that are homogeneous fall back to 2 MiB leaves when unset.
+    pub gib_pages: bool,
 }
 
 impl MappingPlan<'_> {
@@ -175,20 +179,42 @@ impl MappingPlan<'_> {
         Ok(())
     }
 
-    fn split_direct_leaf(&self, physical: u64, identity: bool) -> bool {
-        let chunk = PhysicalRange {
-            base: physical,
-            size: HUGE_PAGE,
-        };
-        // Keep low memory granular for fixed MTRRs and the later AP trampoline.
-        physical == 0
-            || self.cache_flags(chunk).is_none()
-            || overlaps(chunk, self.kernel_range().expect("validated kernel"))
-            || (identity
+    /// A single leaf may cover `chunk` only when the whole chunk shares one
+    /// cache policy and carries no kernel image or (identity-only) EFI code.
+    fn uniform_leaf(&self, chunk: PhysicalRange, identity: bool) -> bool {
+        self.cache_flags(chunk).is_some()
+            && !overlaps(chunk, self.kernel_range().expect("validated kernel"))
+            && !(identity
                 && overlaps(
                     chunk,
                     page_range(self.loader_image).expect("validated image"),
                 ))
+    }
+
+    /// One 1 GiB leaf for this direct-map window. The first window stays
+    /// page-granular for fixed MTRRs and the later AP trampoline.
+    fn map_gib_leaf(&self, physical: u64, identity: bool) -> bool {
+        self.gib_pages
+            && physical != 0
+            && self.uniform_leaf(
+                PhysicalRange {
+                    base: physical,
+                    size: GIB_PAGE,
+                },
+                identity,
+            )
+    }
+
+    /// One 2 MiB leaf inside a window that needs finer granularity.
+    fn map_huge_leaf(&self, physical: u64, identity: bool) -> bool {
+        physical != 0
+            && self.uniform_leaf(
+                PhysicalRange {
+                    base: physical,
+                    size: HUGE_PAGE,
+                },
+                identity,
+            )
     }
 
     fn kernel_flags(&self, physical: u64) -> u64 {
@@ -229,12 +255,17 @@ impl MappingPlan<'_> {
 
     pub fn table_pages(&self) -> Result<u64, &'static str> {
         self.validate()?;
-        // Root, identity/HHDM PDPTs, kernel PDPT+PD, direct-map PDs, kernel PTs.
-        let mut pages =
-            5 + 2 * (self.direct_map.end() / GIB) + self.kernel_range()?.size.div_ceil(HUGE_PAGE);
+        // Root, one PDPT per direct-map alias, kernel PDPT+PD, kernel PTs.
+        let mut pages = 5 + self.kernel_range()?.size.div_ceil(HUGE_PAGE);
         for identity in [true, false] {
-            for physical in (0..self.direct_map.end()).step_by(HUGE_PAGE as usize) {
-                pages += u64::from(self.split_direct_leaf(physical, identity));
+            for gib in (0..self.direct_map.end()).step_by(GIB_PAGE as usize) {
+                if self.map_gib_leaf(gib, identity) {
+                    continue;
+                }
+                pages += 1; // page directory for this 1 GiB window
+                for physical in (gib..gib + GIB_PAGE).step_by(HUGE_PAGE as usize) {
+                    pages += u64::from(!self.map_huge_leaf(physical, identity));
+                }
             }
         }
         for range in [self.framebuffer, self.environment] {
@@ -280,23 +311,32 @@ impl Tables<'_> {
         }
     }
 
+    /// `leaf_shift` is 12 (4 KiB), 21 (2 MiB) or 30 (1 GiB). Descending stops
+    /// before the level whose entry becomes the leaf.
     fn map(
         &mut self,
         virtual_addr: u64,
         physical: u64,
         flags: u64,
-        huge: bool,
+        leaf_shift: u8,
     ) -> Result<(), &'static str> {
+        let (huge, leaf_shift) = match leaf_shift {
+            30 => (true, 30u8),
+            21 => (true, 21),
+            12 => (false, 12),
+            _ => return Err("invalid leaf shift"),
+        };
+        // Every supported leaf is naturally aligned with its own index bits.
+        if physical % (1u64 << leaf_shift) != 0 || virtual_addr % (1u64 << leaf_shift) != 0 {
+            return Err("misaligned leaf");
+        }
         let mut table = 0;
-        for shift in [39, 30] {
+        for shift in [39, 30, 21] {
+            if shift == leaf_shift {
+                break;
+            }
             table = self.child(table, ((virtual_addr >> shift) & 511) as usize)?;
         }
-        let leaf_shift = if huge {
-            21
-        } else {
-            table = self.child(table, ((virtual_addr >> 21) & 511) as usize)?;
-            12
-        };
         let slot = table + ((virtual_addr >> leaf_shift) & 511) as usize;
         if self.words[slot] != 0 {
             return Err("duplicate page mapping");
@@ -339,29 +379,36 @@ pub fn build_page_tables(
     };
     tables.allocate()?;
     for (offset, identity) in [(0, true), (HHDM_OFFSET, false)] {
-        for physical in (0..plan.direct_map.end()).step_by(HUGE_PAGE as usize) {
-            if plan.split_direct_leaf(physical, identity) {
-                for page in (physical..physical + HUGE_PAGE).step_by(PAGE_SIZE as usize) {
-                    tables.map(
-                        offset + page,
-                        page,
-                        plan.direct_flags(page, identity)?,
-                        false,
-                    )?;
-                }
-            } else {
+        for gib in (0..plan.direct_map.end()).step_by(GIB_PAGE as usize) {
+            if plan.map_gib_leaf(gib, identity) {
                 let cache = plan
                     .cache_flags(PhysicalRange {
-                        base: physical,
-                        size: HUGE_PAGE,
+                        base: gib,
+                        size: GIB_PAGE,
                     })
                     .ok_or("mixed huge-page cache attributes")?;
-                tables.map(
-                    offset + physical,
-                    physical,
-                    PRESENT | WRITABLE | NX | cache,
-                    true,
-                )?;
+                tables.map(offset + gib, gib, PRESENT | WRITABLE | NX | cache, 30)?;
+                continue;
+            }
+            for physical in (gib..gib + GIB_PAGE).step_by(HUGE_PAGE as usize) {
+                if plan.map_huge_leaf(physical, identity) {
+                    let cache = plan
+                        .cache_flags(PhysicalRange {
+                            base: physical,
+                            size: HUGE_PAGE,
+                        })
+                        .ok_or("mixed huge-page cache attributes")?;
+                    tables.map(
+                        offset + physical,
+                        physical,
+                        PRESENT | WRITABLE | NX | cache,
+                        21,
+                    )?;
+                } else {
+                    for page in (physical..physical + HUGE_PAGE).step_by(PAGE_SIZE as usize) {
+                        tables.map(offset + page, page, plan.direct_flags(page, identity)?, 12)?;
+                    }
+                }
             }
         }
     }
@@ -372,7 +419,7 @@ pub fn build_page_tables(
             KERNEL_VIRT_BASE + displacement,
             physical,
             plan.kernel_flags(physical),
-            false,
+            12,
         )?;
     }
     for (window, range, flags) in [
@@ -392,7 +439,7 @@ pub fn build_page_tables(
                     size: PAGE_SIZE,
                 })
                 .ok_or("mixed window cache attributes")?;
-            tables.map(window + displacement, physical, flags | cache, false)?;
+            tables.map(window + displacement, physical, flags | cache, 12)?;
         }
     }
     if tables.used as u64 != size / 8 {

@@ -106,6 +106,32 @@ cargo make uefi-image
 cargo make run-uefi
 ```
 
+## Page tables
+
+`page_tables.rs` builds a bounded four-level tree in one arena computed by
+`MappingPlan::table_pages()`. The identity map (low physical memory) and the
+HHDM share the same policy, per 1 GiB window:
+
+| Leaves | When |
+|---|---|
+| 4 KiB | low memory (`0..2 MiB`: fixed MTRRs, AP trampoline), the kernel image, and any window whose cache policy changes inside it |
+| 2 MiB | a 1 GiB window that needs finer granularity because of the kernel, the EFI transition image, or a WB/UC boundary |
+| 1 GiB | the whole window is one WB or one UC range with no kernel or EFI image (CPUID `8000_0001h` EDX[26] only) |
+
+`MappingPlan::gib_pages` is fed from `CpuFeatures::supports_1gib_pages()`, so
+CPUs without 1 GiB leaves keep the 2 MiB topology. Splitting is decided during
+planning (`map_gib_leaf` / `map_huge_leaf`), never by rewriting a leaf that has
+already been stored, so `Tables::child` can reject collisions.
+
+## Tests
+
+```bash
+# Host tests for the pure modules (no firmware, no privileged instructions)
+cargo make test-bootloader
+# or
+cargo test --manifest-path workspace/bootloader-tests/Cargo.toml
+```
+
 ## Dependencies
 
 - `uefi` 0.39 (UEFI protocols)

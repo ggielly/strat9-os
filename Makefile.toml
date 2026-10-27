@@ -138,9 +138,15 @@ cwd = "workspace/kernel-l2-tests"
 command = "cargo"
 args = ["test", "--target", "x86_64-unknown-linux-gnu"]
 
+[tasks.test-bootloader]
+description = "Host tests for the UEFI bootloader pure modules (page tables, boot plan, GOP)"
+cwd = "workspace/bootloader-tests"
+command = "cargo"
+args = ["test", "--target", "x86_64-unknown-linux-gnu"]
+
 [tasks.ci-tests]
-description = "Full CI gate: host tests, kernel L2 mirror and UEFI tooling regressions"
-dependencies = ["test-host", "test-host-alloc", "test-kernel-l2", "test-uefi-tools"]
+description = "Full CI gate: host tests, kernel L2 mirror, bootloader and UEFI tooling regressions"
+dependencies = ["test-host", "test-host-alloc", "test-kernel-l2", "test-bootloader", "test-uefi-tools"]
 
 [tasks.test-uefi-tools]
 description = "UEFI geometry, packaging failures and serial harness (synthetic fixtures, no builds/QEMU)"

@@ -188,11 +188,22 @@ fn maximum_supported_layout_has_a_bounded_page_table_budget() {
         write_back: &wb,
         framebuffer: PhysicalRange { base: 0, size: 0 },
         environment: PhysicalRange { base: 0, size: 0 },
+        gib_pages: true,
     };
     let pages = mapping.table_pages().unwrap();
-    // Base topology (1541), 512 kernel PTs per physical alias, low memory
-    // PT in each alias, and one additional identity PT for the EFI image.
-    assert_eq!(pages, 2568);
+    // Root + two alias PDPTs + kernel PDPT/PD + 512 kernel PTs (517), then:
+    //  per alias: window 0 (4 KiB low memory, then the whole 1 GiB kernel
+    //    crosses it) = 1 PD + 512 PT; window 1 (kernel tail) = 1 PD + 1 PT;
+    //    the other 510 GiB windows are single 1 GiB leaves;
+    //  identity only: the EFI image at 2 GiB splits that window = 1 PD + 1 PT.
+    assert_eq!(pages, 517 + 515 + 517);
+    // Without 1 GiB leaves the same layout needs one PD per GiB and 512 kernel
+    // PTs per alias: the previous topology.
+    let fine = page_tables::MappingPlan {
+        gib_pages: false,
+        ..mapping
+    };
+    assert_eq!(fine.table_pages().unwrap(), 2568);
     let area = PhysicalRange {
         base: PAGE_SIZE,
         size: page_allocation_size(pages * PAGE_SIZE).unwrap(),
@@ -222,4 +233,14 @@ fn pat_selectors_are_verified_without_reprogramming_other_entries() {
     assert!(cpu::validate_pat(0x0101_0101_0000_0006).is_ok());
     assert!(cpu::validate_pat(0x0007_0406_0107_0406).is_err());
     assert!(cpu::validate_pat(0x0007_0406_0007_0400).is_err());
+}
+
+#[test]
+fn one_gib_page_support_is_optional_but_reported() {
+    let mut cpu = supported_cpu();
+    assert!(!cpu.supports_1gib_pages());
+    assert!(cpu.validate().is_ok());
+    cpu.extended_edx |= 1 << 26;
+    assert!(cpu.validate().is_ok());
+    assert!(cpu.supports_1gib_pages());
 }
