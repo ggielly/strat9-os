@@ -80,6 +80,16 @@ the ring wrapped) and replays it through the HHDM as soon as the direct map is
 available. A boot with no working UART therefore still shows what the loader
 did, including the lines it could not print.
 
+### Memory map labels (ABI v6)
+
+Reserved ranges carry a label in `MemoryKind` bits 32..40 -- `kernel image`,
+`boot modules`, `page tables`, `boot log`, `environment`, `KernelArgs`,
+`memory map`, `boot stack`, `framebuffer` -- so the map the kernel receives
+says who owns each page instead of leaving a wall of anonymous "reserved"
+descriptors. Only reserved ranges may carry one: free RAM keeps the exact
+`MemoryKind::Free` value the allocator compares against, and the builder
+rejects a label on anything else.
+
 ---
 
 ## Kernel entry : `kstart` (assembly)

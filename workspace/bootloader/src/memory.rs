@@ -7,7 +7,8 @@ use uefi::{
     Status,
 };
 
-use crate::memory_map::{page_allocation_size, PhysicalRange, PAGE_SIZE};
+use crate::memory_map::{page_allocation_size, PhysicalRange, Reservation, PAGE_SIZE};
+use strat9_abi::boot::MemoryLabel;
 
 // 64 module payloads, kernel, page tables, stack, map, environment and arguments.
 const MAX_ALLOCATIONS: usize = 80;
@@ -41,7 +42,7 @@ impl BootError {
 pub type BootResult<T> = Result<T, BootError>;
 
 pub struct BootMemory {
-    ranges: [PhysicalRange; MAX_ALLOCATIONS],
+    reservations: [Reservation; MAX_ALLOCATIONS],
     count: usize,
     // Drop is only allowed to call FreePages before ExitBootServices.
     release_on_drop: bool,
@@ -50,14 +51,22 @@ pub struct BootMemory {
 impl BootMemory {
     pub fn new() -> Self {
         Self {
-            ranges: [PhysicalRange { base: 0, size: 0 }; MAX_ALLOCATIONS],
+            reservations: [Reservation::new(
+                PhysicalRange { base: 0, size: 0 },
+                MemoryLabel::None,
+            ); MAX_ALLOCATIONS],
             count: 0,
             release_on_drop: true,
         }
     }
 
-    pub fn allocate(&mut self, size: u64, operation: &'static str) -> BootResult<PhysicalRange> {
-        self.allocate_inner(size, None, operation)
+    pub fn allocate(
+        &mut self,
+        size: u64,
+        label: MemoryLabel,
+        operation: &'static str,
+    ) -> BootResult<PhysicalRange> {
+        self.allocate_inner(size, None, label, operation)
     }
 
     /// Keep the existing physical placement if available, otherwise relocate the
@@ -66,18 +75,20 @@ impl BootMemory {
         &mut self,
         base: u64,
         size: u64,
+        label: MemoryLabel,
         operation: &'static str,
     ) -> BootResult<PhysicalRange> {
-        self.allocate_inner(size, Some(base), operation)
+        self.allocate_inner(size, Some(base), label, operation)
     }
 
     fn allocate_inner(
         &mut self,
         size: u64,
         preferred: Option<u64>,
+        label: MemoryLabel,
         operation: &'static str,
     ) -> BootResult<PhysicalRange> {
-        if self.count == self.ranges.len() {
+        if self.count == self.reservations.len() {
             return Err(BootError::out_of_resources("boot allocation registry full"));
         }
         let size = page_allocation_size(size).map_err(BootError::invalid)?;
@@ -115,15 +126,15 @@ impl BootMemory {
         };
         // Record ownership before the first write. All allocations come from
         // AllocatePages, so they are page-aligned and cannot overlap live pools.
-        self.ranges[self.count] = range;
+        self.reservations[self.count] = Reservation::new(range, label);
         self.count += 1;
         unsafe { core::ptr::write_bytes(allocation.as_ptr(), 0, size as usize) };
         Ok(range)
     }
 
-    pub fn reservations(&mut self) -> &[PhysicalRange] {
-        self.ranges[..self.count].sort_unstable_by_key(|range| range.base);
-        &self.ranges[..self.count]
+    pub fn reservations(&mut self) -> &[Reservation] {
+        self.reservations[..self.count].sort_unstable_by_key(|reservation| reservation.range.base);
+        &self.reservations[..self.count]
     }
 
     /// No fallible preparation may follow this call. The next operation must
@@ -138,7 +149,8 @@ impl Drop for BootMemory {
         if !self.release_on_drop {
             return;
         }
-        for range in self.ranges[..self.count].iter().rev() {
+        for reservation in self.reservations[..self.count].iter().rev() {
+            let range = reservation.range;
             // SAFETY: these pages were allocated here. On an error return all
             // callers have stopped using their raw pointers before this owner drops.
             if let Some(ptr) = NonNull::new(range.base as *mut u8) {

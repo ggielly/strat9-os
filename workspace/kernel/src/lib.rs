@@ -631,6 +631,39 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             first.kind
         );
     }
+    // ABI v6: reserved ranges carry the reason the loader kept them. Summarise
+    // per owner rather than dumping one line per descriptor (64 module payloads
+    // would drown the interesting ones), so the boot log answers "who owns
+    // this page?" without a debugger.
+    {
+        use strat9_abi::boot::MemoryLabel;
+        for index in 1..=9u8 {
+            let Some(label) = MemoryLabel::from_index(index) else {
+                continue;
+            };
+            let mut ranges = 0usize;
+            let mut bytes = 0u64;
+            let mut first = 0u64;
+            for region in regions {
+                if region.kind.label() == Some(label) {
+                    if ranges == 0 {
+                        first = region.base;
+                    }
+                    ranges += 1;
+                    bytes = bytes.saturating_add(region.size);
+                }
+            }
+            if ranges != 0 {
+                serial_println!(
+                    "[init]   reserved {:<14} x{} {:>10} bytes from {:#x}",
+                    label.name(),
+                    ranges,
+                    bytes,
+                    first
+                );
+            }
+        }
+    }
     // DEBUG: dump regions 0..6 on the E9 port (raw, no format_args).
     {
         let mut i = 0usize;

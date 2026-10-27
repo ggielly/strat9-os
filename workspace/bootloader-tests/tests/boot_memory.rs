@@ -8,9 +8,9 @@ mod elf;
 mod memory_map;
 
 use memory_map::{
-    page_allocation_size, MemoryMapBuilder, PageFrameCursor, PhysicalRange, PAGE_SIZE,
+    page_allocation_size, MemoryMapBuilder, PageFrameCursor, PhysicalRange, Reservation, PAGE_SIZE,
 };
-use strat9_abi::boot::{MemoryKind, MemoryRegion};
+use strat9_abi::boot::{MemoryKind, MemoryLabel, MemoryRegion};
 
 const EMPTY: MemoryRegion = MemoryRegion {
     base: 0,
@@ -26,14 +26,23 @@ fn region(start_page: u64, pages: u64, kind: MemoryKind) -> MemoryRegion {
     }
 }
 
-fn reservation(start_page: u64, pages: u64) -> PhysicalRange {
+fn range(start_page: u64, pages: u64) -> PhysicalRange {
     PhysicalRange {
         base: start_page * PAGE_SIZE,
         size: pages * PAGE_SIZE,
     }
 }
 
-fn convert(input: &[MemoryRegion], owned: &[PhysicalRange]) -> Vec<MemoryRegion> {
+/// Reservation without a label: matches what the builder emitted before v6.
+fn reservation(start_page: u64, pages: u64) -> Reservation {
+    Reservation::new(range(start_page, pages), MemoryLabel::None)
+}
+
+fn labelled(start_page: u64, pages: u64, label: MemoryLabel) -> Reservation {
+    Reservation::new(range(start_page, pages), label)
+}
+
+fn convert(input: &[MemoryRegion], owned: &[Reservation]) -> Vec<MemoryRegion> {
     let mut output = [EMPTY; 64];
     let len = {
         let mut builder = MemoryMapBuilder::new(&mut output, owned).unwrap();
@@ -124,15 +133,21 @@ fn malformed_ranges_fail_before_emitting_descriptors() {
     for owned in [
         vec![reservation(2, 3), reservation(4, 1)], // overlap
         vec![reservation(4, 1), reservation(2, 1)], // unordered
-        vec![PhysicalRange {
-            base: 1,
-            size: PAGE_SIZE,
-        }],
+        vec![Reservation::new(
+            PhysicalRange {
+                base: 1,
+                size: PAGE_SIZE,
+            },
+            MemoryLabel::None,
+        )],
         vec![reservation(1, 0)],
-        vec![PhysicalRange {
-            base: u64::MAX - PAGE_SIZE + 1,
-            size: PAGE_SIZE,
-        }],
+        vec![Reservation::new(
+            PhysicalRange {
+                base: u64::MAX - PAGE_SIZE + 1,
+                size: PAGE_SIZE,
+            },
+            MemoryLabel::None,
+        )],
     ] {
         assert!(MemoryMapBuilder::new(&mut output, &owned).is_err());
     }
@@ -149,7 +164,7 @@ fn malformed_ranges_fail_before_emitting_descriptors() {
 
 #[test]
 fn page_table_arena_exhaustion_never_yields_a_frame_outside_ownership() {
-    let owned = reservation(0x1200, 3);
+    let owned = range(0x1200, 3);
     let mut cursor = PageFrameCursor::new(owned).unwrap();
     for page in 0..3 {
         assert_eq!(cursor.next_frame().unwrap(), owned.base + page * PAGE_SIZE);
@@ -157,13 +172,13 @@ fn page_table_arena_exhaustion_never_yields_a_frame_outside_ownership() {
     for _ in 0..3 {
         assert!(cursor.next_frame().is_err());
     }
-    assert!(PageFrameCursor::new(reservation(0, 1)).is_err());
+    assert!(PageFrameCursor::new(range(0, 1)).is_err());
     assert!(PageFrameCursor::new(PhysicalRange {
         base: owned.base + 1,
         size: PAGE_SIZE
     })
     .is_err());
-    assert!(PageFrameCursor::new(reservation(1, 0)).is_err());
+    assert!(PageFrameCursor::new(range(1, 0)).is_err());
 }
 
 #[test]
@@ -556,4 +571,106 @@ fn dynamically_linked_or_tls_kernels_are_refused() {
         file[120..124].copy_from_slice(&program_type.to_le_bytes());
         assert!(elf::parse_elf64(&file).is_err());
     }
+}
+
+// ===========================================================================
+// ABI v6: reservations carry a label (MemoryKind bits 32..40)
+// ===========================================================================
+
+#[test]
+fn labelled_reservations_document_who_owns_the_range() {
+    let owned = [
+        labelled(2, 2, MemoryLabel::KernelImage),
+        labelled(4, 1, MemoryLabel::BootLog),
+    ];
+    let output = convert(&[region(1, 6, MemoryKind::Reclaim)], &owned);
+    let kinds: Vec<_> = output
+        .iter()
+        .map(|descriptor| (descriptor.base / PAGE_SIZE, descriptor.kind))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            (1, MemoryKind::Reclaim),
+            (2, MemoryLabel::KernelImage.kind()),
+            (4, MemoryLabel::BootLog.kind()),
+            (5, MemoryKind::Reclaim),
+        ]
+    );
+    assert_eq!(
+        output[1].kind.label().map(MemoryLabel::name),
+        Some("kernel image")
+    );
+    assert_eq!(output[0].kind.label(), None);
+    // Free/reclaimable RAM keeps the exact value the kernel compares against.
+    for descriptor in &output {
+        if descriptor.kind.label_index() == 0 {
+            assert!(matches!(
+                descriptor.kind,
+                MemoryKind::Free | MemoryKind::Reclaim
+            ));
+        }
+    }
+}
+
+#[test]
+fn adjacent_same_label_reservations_merge_but_distinct_labels_do_not() {
+    let merged = convert(
+        &[region(1, 6, MemoryKind::Free)],
+        &[
+            labelled(2, 2, MemoryLabel::Modules),
+            labelled(4, 2, MemoryLabel::Modules),
+        ],
+    );
+    let reserved: Vec<_> = merged
+        .iter()
+        .filter(|descriptor| descriptor.kind.base() == MemoryKind::Reserved)
+        .collect();
+    assert_eq!(reserved.len(), 1, "one merged descriptor");
+    assert_eq!(
+        (reserved[0].base / PAGE_SIZE, reserved[0].size / PAGE_SIZE),
+        (2, 4)
+    );
+
+    let split = convert(
+        &[region(1, 6, MemoryKind::Free)],
+        &[
+            labelled(2, 2, MemoryLabel::Modules),
+            labelled(4, 2, MemoryLabel::PageTables),
+        ],
+    );
+    assert_eq!(
+        split
+            .iter()
+            .filter(|descriptor| descriptor.kind.base() == MemoryKind::Reserved)
+            .count(),
+        2,
+        "different owners must stay visible"
+    );
+}
+
+#[test]
+fn a_label_on_free_or_reclaimable_ram_is_rejected() {
+    let mut output = [EMPTY; 4];
+    let mut builder = MemoryMapBuilder::new(&mut output, &[]).unwrap();
+    assert!(builder
+        .push(region(
+            1,
+            2,
+            MemoryKind::Free.with_label(MemoryLabel::Modules)
+        ))
+        .is_err());
+    assert!(builder
+        .push(region(
+            1,
+            2,
+            MemoryKind::Reclaim.with_label(MemoryLabel::BootLog)
+        ))
+        .is_err());
+    assert_eq!(builder.len(), 0, "a rejected descriptor emits nothing");
+    // A labelled reserved descriptor (as produced by the builder itself) is fine.
+    assert!(builder
+        .push(region(1, 2, MemoryLabel::Handoff.kind()))
+        .is_ok());
+    assert_eq!(builder.len(), 1);
 }

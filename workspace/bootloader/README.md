@@ -65,6 +65,25 @@ Offsets are pinned by `workspace/abi/tests/boot_handoff.rs`.
 `abi_version` is checked for exact equality by the kernel: a mismatched pair
 refuses to boot instead of reading fields at the wrong offsets.
 
+## Memory map labels (v6)
+
+`MemoryRegion.kind` is 8 bytes: the low 32 bits are the kind (`Null`, `Free`,
+`Reclaim`, `Reserved`) and bits 32..40 optionally hold a `MemoryLabel` naming
+*why* the loader kept a range -- `kernel image`, `boot modules`, `page tables`,
+`boot log`, `environment`, `KernelArgs`, `memory map`, `boot stack`,
+`framebuffer`. No new field, no new ABI version.
+
+Only reserved ranges are labelled, and the builder rejects a label anywhere
+else: the kernel compares free and reclaimable regions with
+`kind == MemoryKind::Free`, so a label there would hide RAM from the allocator.
+Classification code uses `kind.base()`. The kernel prints one line per labelled
+range at boot:
+
+```text
+[init]   reserved 0x000000400000+0x40000 : kernel image
+[init]   reserved 0x000000500000+0x4000 : boot log
+```
+
 ## Boot log ring (v6)
 
 The loader reserves 16 KiB (`boot_log.rs`) and appends every `[boot]` line to

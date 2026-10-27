@@ -30,8 +30,8 @@ mod paging;
 
 use boot_plan::DirectMapPlan;
 use memory::{BootError, BootMemory, BootResult};
-use memory_map::{MemoryMapBuilder, PhysicalRange, MAX_MEMORY_REGIONS, PAGE_SIZE};
-use strat9_abi::boot::{KernelArgs, MemoryKind, MemoryRegion};
+use memory_map::{MemoryMapBuilder, PhysicalRange, Reservation, MAX_MEMORY_REGIONS, PAGE_SIZE};
+use strat9_abi::boot::{KernelArgs, MemoryKind, MemoryLabel, MemoryRegion};
 
 /// Print one line to the UEFI console *and* record it in the boot log ring.
 ///
@@ -66,8 +66,11 @@ fn boot_kernel() -> BootResult<()> {
     let mut boot_memory = BootMemory::new();
     // The log ring comes first: every later message, including failures, must
     // survive ExitBootServices for the kernel to replay.
-    let boot_log_area =
-        boot_memory.allocate(boot_log::BOOT_LOG_CAPACITY, "boot log ring")?;
+    let boot_log_area = boot_memory.allocate(
+        boot_log::BOOT_LOG_CAPACITY,
+        MemoryLabel::BootLog,
+        "boot log ring",
+    )?;
     boot_log::init(boot_log_area).map_err(BootError::invalid)?;
     bootln!("Strat9-OS bootloader. Version 0.1.0, UEFI mode.");
     bootln!("Copyright (C) 2026 Guillaume Gielly. All rights reserved.");
@@ -143,6 +146,7 @@ fn boot_kernel() -> BootResult<()> {
     let kernel_allocation = boot_memory.allocate_preferred(
         elf_info.phys_base,
         elf_info.image_size(),
+        MemoryLabel::KernelImage,
         "kernel image pages",
     )?;
     // SAFETY: UEFI reserved this whole image before any segment is written.
@@ -249,26 +253,40 @@ fn boot_kernel() -> BootResult<()> {
 
     // Allocate every object that must survive the firmware before leaving UEFI.
     let stack_size: u64 = 64 * 1024;
-    let stack = boot_memory.allocate(stack_size, "kernel transition stack")?;
+    let stack = boot_memory.allocate(
+        stack_size,
+        MemoryLabel::BootStack,
+        "kernel transition stack",
+    )?;
     let stack_base = stack.base;
     let module_table_size = modules::module_table_size();
-    let module_table = boot_memory.allocate(module_table_size, "module table pages")?;
+    let module_table = boot_memory.allocate(
+        module_table_size,
+        MemoryLabel::Modules,
+        "module table pages",
+    )?;
     let module_table_base = module_table.base;
     // SAFETY: the page allocation covers the complete fixed-capacity table.
     unsafe { modules::write_module_table(module_list.as_slice(), module_table) }?;
     drop(module_list);
 
-    let environment = boot_memory.allocate(env_total_size as u64, "environment pages")?;
+    let environment = boot_memory.allocate(
+        env_total_size as u64,
+        MemoryLabel::Environment,
+        "environment pages",
+    )?;
     let env_phys_base = environment.base;
     unsafe {
         core::ptr::copy_nonoverlapping(env_buf.as_ptr(), env_phys_base as *mut u8, env_total_size);
     }
     let args_storage = boot_memory.allocate(
         core::mem::size_of::<KernelArgs>() as u64,
+        MemoryLabel::Handoff,
         "kernel arguments page",
     )?;
     let map_storage = boot_memory.allocate(
         (MAX_MEMORY_REGIONS * core::mem::size_of::<MemoryRegion>()) as u64,
+        MemoryLabel::MemoryMap,
         "kernel memory map pages",
     )?;
     let mmap_region_base = map_storage.base;
@@ -339,13 +357,17 @@ fn boot_kernel() -> BootResult<()> {
         gib_pages: cpu_features.supports_1gib_pages(),
     };
     let table_pages = mapping_plan.table_pages().map_err(BootError::invalid)?;
-    let table_area = boot_memory.allocate(table_pages * PAGE_SIZE, "page-table arena")?;
+    let table_area = boot_memory.allocate(
+        table_pages * PAGE_SIZE,
+        MemoryLabel::PageTables,
+        "page-table arena",
+    )?;
     let pml4_phys = unsafe { paging::create_page_tables(table_area, &mapping_plan) }
         .map_err(BootError::invalid)?;
 
     // GOP may use stolen RAM: exclude its whole aperture from the allocator,
     // without making BootMemory responsible for freeing firmware-owned pages.
-    let mut reservations = alloc::vec::Vec::new();
+    let mut reservations: alloc::vec::Vec<Reservation> = alloc::vec::Vec::new();
     reservations
         .try_reserve_exact(boot_memory.reservations().len() + 1)
         .map_err(|_| BootError::out_of_resources("handoff reservations"))?;
@@ -353,12 +375,15 @@ fn boot_kernel() -> BootResult<()> {
     if framebuffer_aperture.size != 0 {
         if reservations
             .iter()
-            .any(|range| page_tables::overlaps(*range, framebuffer_aperture))
+            .any(|reservation| page_tables::overlaps(reservation.range, framebuffer_aperture))
         {
             return Err(BootError::invalid("framebuffer overlaps boot allocations"));
         }
-        reservations.push(framebuffer_aperture);
-        reservations.sort_unstable_by_key(|range| range.base);
+        reservations.push(Reservation::new(
+            framebuffer_aperture,
+            MemoryLabel::Framebuffer,
+        ));
+        reservations.sort_unstable_by_key(|reservation| reservation.range.base);
     }
 
     drop(volume);
@@ -565,7 +590,7 @@ fn buf_str(buf: &mut [u8]) -> BufWriter<'_> {
 /// Convert directly into a preallocated, permanently reserved handoff buffer.
 fn convert_memory_map(
     map: &impl MemoryMap,
-    reservations: &[PhysicalRange],
+    reservations: &[Reservation],
     storage: PhysicalRange,
     plan: &page_tables::MappingPlan<'_>,
 ) -> Result<usize, &'static str> {

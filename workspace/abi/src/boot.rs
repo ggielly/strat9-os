@@ -465,6 +465,16 @@ pub struct MemoryRegion {
 }
 
 /// Memory region type identifier.
+///
+/// The low 32 bits are the kind ([`MemoryKind::Null`], [`MemoryKind::Free`],
+/// [`MemoryKind::Reclaim`], [`MemoryKind::Reserved`]). Bits 32..40 optionally
+/// hold a [`MemoryLabel`] for a reserved range, which documents *why* the
+/// loader kept it -- no extra field, no extra ABI version.
+///
+/// Only reserved ranges may carry a label: the kernel compares free and
+/// reclaimable regions by equality (`kind == MemoryKind::Free`), so a label
+/// there would silently hide RAM from the allocator. Use
+/// [`MemoryKind::base`] when classifying.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FromBytes, IntoBytes)]
 #[repr(transparent)]
 pub struct MemoryKind(pub u64);
@@ -475,6 +485,88 @@ impl MemoryKind {
     pub const Free: Self = Self(1);
     pub const Reclaim: Self = Self(2);
     pub const Reserved: Self = Self(3);
+
+    /// First bit of the label field.
+    pub const LABEL_SHIFT: u32 = 32;
+
+    /// Kind without its label, safe to compare with the constants above.
+    pub const fn base(self) -> Self {
+        Self(self.0 & 0xFFFF_FFFF)
+    }
+
+    /// Raw label index, `0` when the region carries none.
+    pub const fn label_index(self) -> u8 {
+        ((self.0 >> Self::LABEL_SHIFT) & 0xFF) as u8
+    }
+
+    /// Decoded label, `None` when absent or unknown.
+    pub const fn label(self) -> Option<MemoryLabel> {
+        MemoryLabel::from_index(self.label_index())
+    }
+
+    /// Attach a label. Callers must only do this to reserved ranges.
+    pub const fn with_label(self, label: MemoryLabel) -> Self {
+        Self(self.0 | ((label as u64) << Self::LABEL_SHIFT))
+    }
+}
+
+/// Why the loader reserved a range, so a memory-map dump is self-documenting.
+///
+/// The discriminants are part of the ABI: they are stored in
+/// [`MemoryKind::label_index`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum MemoryLabel {
+    None = 0,
+    KernelImage = 1,
+    Modules = 2,
+    PageTables = 3,
+    BootLog = 4,
+    Environment = 5,
+    Handoff = 6,
+    MemoryMap = 7,
+    BootStack = 8,
+    Framebuffer = 9,
+}
+
+impl MemoryLabel {
+    /// Decode a stored index; `0` (unlabelled) and unknown values yield `None`.
+    pub const fn from_index(index: u8) -> Option<Self> {
+        Some(match index {
+            0 => return None,
+            1 => Self::KernelImage,
+            2 => Self::Modules,
+            3 => Self::PageTables,
+            4 => Self::BootLog,
+            5 => Self::Environment,
+            6 => Self::Handoff,
+            7 => Self::MemoryMap,
+            8 => Self::BootStack,
+            9 => Self::Framebuffer,
+            _ => return None,
+        })
+    }
+
+    /// Reserved kind carrying this label.
+    pub const fn kind(self) -> MemoryKind {
+        MemoryKind::Reserved.with_label(self)
+    }
+
+    /// Stable human-readable name, used by the kernel's memory-map dump.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "reserved",
+            Self::KernelImage => "kernel image",
+            Self::Modules => "boot modules",
+            Self::PageTables => "page tables",
+            Self::BootLog => "boot log",
+            Self::Environment => "environment",
+            Self::Handoff => "KernelArgs",
+            Self::MemoryMap => "memory map",
+            Self::BootStack => "boot stack",
+            Self::Framebuffer => "framebuffer",
+        }
+    }
 }
 
 // ABI size assertions (packed: no padding, 156 bytes with the boot log ring)

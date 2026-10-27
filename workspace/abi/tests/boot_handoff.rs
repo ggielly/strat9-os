@@ -1,4 +1,5 @@
-//! L0/L1 : boot handoff (`KernelArgs`) layout and boot-log ring geometry.
+//! L0/L1 : boot handoff (`KernelArgs`) layout, boot-log ring geometry and
+//! memory-region labels.
 //!
 //! The loader and the kernel are built separately and only meet through this
 //! struct, so every field offset is pinned here. A silent reordering would
@@ -7,7 +8,8 @@
 use core::mem::{offset_of, size_of};
 
 use strat9_abi::boot::{
-    BootLogSpans, KernelArgs, MAX_BOOT_LOG_SIZE, MIN_BOOT_LOG_SIZE, STRAT9_BOOT_ABI_VERSION,
+    BootLogSpans, KernelArgs, MemoryKind, MemoryLabel, MAX_BOOT_LOG_SIZE, MIN_BOOT_LOG_SIZE,
+    STRAT9_BOOT_ABI_VERSION,
 };
 
 fn blank_args() -> KernelArgs {
@@ -131,4 +133,66 @@ fn a_saturated_counter_still_yields_a_valid_window() {
         (u64::MAX - 4096) as usize % 4096,
         "start must be written - size, modulo the ring"
     );
+}
+
+// ===========================================================================
+// ABI v6: memory region labels live in MemoryKind bits 32..40
+// ===========================================================================
+
+#[test]
+fn memory_label_indices_and_names_are_pinned() {
+    // The discriminants are stored in the handoff map: renumbering one would
+    // relabel regions in every existing dump.
+    assert_eq!(MemoryLabel::None as u8, 0);
+    assert_eq!(MemoryLabel::KernelImage as u8, 1);
+    assert_eq!(MemoryLabel::Modules as u8, 2);
+    assert_eq!(MemoryLabel::PageTables as u8, 3);
+    assert_eq!(MemoryLabel::BootLog as u8, 4);
+    assert_eq!(MemoryLabel::Environment as u8, 5);
+    assert_eq!(MemoryLabel::Handoff as u8, 6);
+    assert_eq!(MemoryLabel::MemoryMap as u8, 7);
+    assert_eq!(MemoryLabel::BootStack as u8, 8);
+    assert_eq!(MemoryLabel::Framebuffer as u8, 9);
+    assert_eq!(MemoryLabel::BootLog.name(), "boot log");
+    assert_eq!(MemoryLabel::None.name(), "reserved");
+}
+
+#[test]
+fn a_label_does_not_change_the_base_kind() {
+    for label in [
+        MemoryLabel::KernelImage,
+        MemoryLabel::PageTables,
+        MemoryLabel::BootLog,
+        MemoryLabel::Framebuffer,
+    ] {
+        let kind = label.kind();
+        assert_eq!(kind.base(), MemoryKind::Reserved);
+        assert_eq!(kind.label(), Some(label));
+        assert_eq!(kind.label_index(), label as u8);
+        assert_ne!(kind, MemoryKind::Reserved);
+    }
+    // Unlabelled reserved, free and reclaimable kinds are unchanged.
+    assert_eq!(MemoryLabel::None.kind(), MemoryKind::Reserved);
+    assert_eq!(MemoryKind::Reserved.label(), None);
+    assert_eq!(MemoryKind::Free.label(), None);
+    assert_eq!(MemoryKind::Free.label_index(), 0);
+}
+
+#[test]
+fn a_labelled_free_kind_is_detectable_but_never_used() {
+    // The kernel compares free RAM by equality, so this value would hide it
+    // from the allocator. `base()` is what classification code must use.
+    let trap = MemoryKind::Free.with_label(MemoryLabel::Modules);
+    assert_ne!(trap, MemoryKind::Free);
+    assert_eq!(trap.base(), MemoryKind::Free);
+    assert_eq!(trap.label(), Some(MemoryLabel::Modules));
+}
+
+#[test]
+fn unknown_label_indices_degrade_without_panicking() {
+    let unknown = MemoryKind(MemoryKind::Reserved.0 | (200u64 << MemoryKind::LABEL_SHIFT));
+    assert_eq!(unknown.label(), None);
+    assert_eq!(unknown.label_index(), 200);
+    assert_eq!(unknown.base(), MemoryKind::Reserved);
+    assert_eq!(MemoryLabel::from_index(200), None);
 }

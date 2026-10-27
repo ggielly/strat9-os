@@ -1,6 +1,6 @@
 //! Pure, bounded conversion of firmware regions and boot-owned reservations.
 
-use strat9_abi::boot::{MemoryKind, MemoryRegion};
+use strat9_abi::boot::{MemoryKind, MemoryLabel, MemoryRegion};
 
 pub const PAGE_SIZE: u64 = 4096;
 pub use strat9_abi::boot::MAX_BOOT_MEMORY_REGIONS as MAX_MEMORY_REGIONS;
@@ -16,6 +16,22 @@ impl PhysicalRange {
         self.base
             .checked_add(self.size)
             .ok_or("physical range overflow")
+    }
+}
+
+/// A boot-owned range and the reason it is reserved.
+///
+/// The label ends up in the handoff memory map (`MemoryKind` bits 32..40), so
+/// the kernel sees "reserved: kernel image" instead of "reserved".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reservation {
+    pub range: PhysicalRange,
+    pub label: MemoryLabel,
+}
+
+impl Reservation {
+    pub const fn new(range: PhysicalRange, label: MemoryLabel) -> Self {
+        Self { range, label }
     }
 }
 
@@ -67,17 +83,18 @@ impl PageFrameCursor {
 /// No heap allocation or firmware operation is performed by this builder.
 pub struct MemoryMapBuilder<'a> {
     output: &'a mut [MemoryRegion],
-    reservations: &'a [PhysicalRange],
+    reservations: &'a [Reservation],
     len: usize,
 }
 
 impl<'a> MemoryMapBuilder<'a> {
     pub fn new(
         output: &'a mut [MemoryRegion],
-        reservations: &'a [PhysicalRange],
+        reservations: &'a [Reservation],
     ) -> Result<Self, &'static str> {
         let mut previous_end = 0;
-        for range in reservations {
+        for reservation in reservations {
+            let range = reservation.range;
             if range.size == 0
                 || range.base % PAGE_SIZE != 0
                 || range.size % PAGE_SIZE != 0
@@ -102,17 +119,25 @@ impl<'a> MemoryMapBuilder<'a> {
         if region.size == 0 {
             return Ok(());
         }
+        // A label on free RAM would break the kernel's `== MemoryKind::Free`.
+        if region.kind.label_index() != 0 && region.kind.base() != MemoryKind::Reserved {
+            return Err("label on a non-reserved region");
+        }
         let end = region
             .base
             .checked_add(region.size)
             .ok_or("memory descriptor overflow")?;
-        if !matches!(region.kind, MemoryKind::Free | MemoryKind::Reclaim) {
+        if !matches!(
+            region.kind.base(),
+            MemoryKind::Free | MemoryKind::Reclaim
+        ) {
             return self.emit(region.base, end, region.kind);
         }
 
         let mut cursor = region.base;
         for index in 0..self.reservations.len() {
-            let range = self.reservations[index];
+            let reservation = self.reservations[index];
+            let range = reservation.range;
             let range_end = range.end()?;
             if range_end <= cursor {
                 continue;
@@ -123,7 +148,7 @@ impl<'a> MemoryMapBuilder<'a> {
             let start = range.base.max(cursor);
             let stop = range_end.min(end);
             self.emit(cursor, start, region.kind)?;
-            self.emit(start, stop, MemoryKind::Reserved)?;
+            self.emit(start, stop, reservation.label.kind())?;
             cursor = stop;
             if cursor == end {
                 break;

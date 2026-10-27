@@ -12,7 +12,7 @@ use crate::{
     module_name::ModuleFileName,
 };
 pub use strat9_abi::boot::ModuleEntry as LoadedModule;
-use strat9_abi::boot::{ModuleTable, MAX_BOOT_MODULES, MODULE_TABLE_SIZE};
+use strat9_abi::boot::{MemoryLabel, ModuleTable, MAX_BOOT_MODULES, MODULE_TABLE_SIZE};
 
 // FileInfo requires 8-byte alignment; a Vec<u8> or [u8; N] does not promise it.
 // 4 KiB covers the FAT filename limit. Larger firmware entries fail explicitly.
@@ -201,7 +201,7 @@ pub fn load_modules(
         }
         // Empty config/data files still get a valid owned pointer and a VFS entry.
         let allocation = memory
-            .allocate(size.max(1), "module payload pages")
+            .allocate(size.max(1), MemoryLabel::Modules, "module payload pages")
             .map_err(|e| module_error(path, e))?;
         if file_size != 0 {
             // SAFETY: the owned allocation covers the exact file extent. Read does
