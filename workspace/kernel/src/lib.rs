@@ -28,6 +28,7 @@ pub mod components;
 pub mod crypto;
 pub mod debug;
 pub mod debug_cfg;
+pub mod display_state;
 
 pub mod async_io;
 pub mod dma;

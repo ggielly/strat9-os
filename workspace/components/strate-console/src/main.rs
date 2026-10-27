@@ -5,7 +5,7 @@
 extern crate alloc;
 
 use core::{alloc::Layout, panic::PanicInfo};
-use strat9_syscall::call;
+use strat9_syscall::{call, data::TimeSpec};
 
 mod ansi;
 mod input;
@@ -19,6 +19,11 @@ use terminal::TerminalCore;
 
 const DEFAULT_FG: u32 = 0xE2E8F0;
 const DEFAULT_BG: u32 = 0x12161E;
+
+/// Cursor blink period. Blinking is the only periodic redraw source.
+const CURSOR_BLINK_MS: u64 = 500;
+/// Idle sleep when no input is pending (5 ms).
+const IDLE_SLEEP_NS: i64 = 5_000_000;
 
 alloc_freelist::define_freelist_brk_allocator!(
     pub struct BumpAllocator;
@@ -79,17 +84,72 @@ pub extern "C" fn _start() -> ! {
 
     let mut cells = [[scrollback::Cell::blank(DEFAULT_FG, DEFAULT_BG); 256]; 64];
     render_terminal(&term, &mut cells);
-    rend.render(&cells, term.cursor_row, term.cursor_col, term.rows);
+    rend.render(&cells, term.cursor_row, term.cursor_col, term.rows, true);
+
+    let mut cursor_visible = true;
+    let mut next_blink_ms = now_ms() + CURSOR_BLINK_MS;
 
     loop {
-        if let Some(byte) = kbd.read_byte() {
-            term.process_byte(byte);
+        let mut dirty = false;
+
+        // Drain pending input in small batches. `read_byte` is non-blocking,
+        // so a batch keeps latency low without starving other silos.
+        for _ in 0..32 {
+            match kbd.read_byte() {
+                Some(byte) => {
+                    term.process_byte(byte);
+                    dirty = true;
+                }
+                None => break,
+            }
         }
 
-        render_terminal(&term, &mut cells);
-        rend.render(&cells, term.cursor_row, term.cursor_col, term.rows);
+        // Cursor blink is the only periodic redraw source.
+        let now = now_ms();
+        if now >= next_blink_ms {
+            cursor_visible = !cursor_visible;
+            while next_blink_ms <= now {
+                next_blink_ms += CURSOR_BLINK_MS;
+            }
+            dirty = true;
+        }
 
-        let _ = call::sched_yield();
+        if dirty {
+            render_terminal(&term, &mut cells);
+            rend.render(
+                &cells,
+                term.cursor_row,
+                term.cursor_col,
+                term.rows,
+                cursor_visible,
+            );
+            let _ = call::sched_yield();
+        } else {
+            // No blocking poll() on /dev/input/kbd is exposed yet, so sleep
+            // briefly instead of spinning; rendering stays damage-driven.
+            let req = TimeSpec {
+                tv_sec: 0,
+                tv_nsec: IDLE_SLEEP_NS,
+            };
+            let mut rem = TimeSpec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            let _ = call::nanosleep(&req, &mut rem);
+        }
+    }
+}
+
+/// Monotonic time in milliseconds, used for cursor blinking only.
+fn now_ms() -> u64 {
+    let mut ts = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if call::clock_gettime(strat9_syscall::CLOCK_MONOTONIC, &mut ts).is_ok() {
+        (ts.tv_sec.max(0) as u64) * 1000 + (ts.tv_nsec.max(0) as u64) / 1_000_000
+    } else {
+        0
     }
 }
 

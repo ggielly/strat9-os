@@ -1,6 +1,8 @@
 //! Console renderer: glyph cache, dirty rect tracking, framebuffer present.
 //! Uses /dev/display/0.0 for output.
 
+use alloc::format;
+
 use crate::scrollback::Cell;
 use strat9_syscall::call;
 
@@ -21,6 +23,9 @@ pub struct Renderer {
     pub rows: usize,
     prev_cells: [[Cell; MAX_COLS]; MAX_ROWS],
     prev_initialized: bool,
+    prev_cursor_row: usize,
+    prev_cursor_col: usize,
+    prev_cursor_visible: bool,
 }
 
 // SAFETY: Renderer contains only an fd (usize, integer type always Send)
@@ -30,8 +35,9 @@ unsafe impl Send for Renderer {}
 
 impl Renderer {
     pub fn open() -> Option<Self> {
-        let fd = call::openat(0, "/dev/display/0.0", 0x1, 0).ok()?;
-        let dmg_fd = match call::openat(0, "/dev/display/damage", 0x1, 0) {
+        // 0x2 = OpenFlags::WRITE (Strat9 native flags, not POSIX).
+        let fd = call::openat(0, "/dev/display/0.0", 0x2, 0).ok()?;
+        let dmg_fd = match call::openat(0, "/dev/display/damage", 0x2, 0) {
             Ok(fd) => fd,
             Err(_) => {
                 let _ = call::debug_log(b"[console] FATAL: cannot open /dev/display/damage\n");
@@ -59,6 +65,9 @@ impl Renderer {
             rows: rows.max(1).min(MAX_ROWS),
             prev_cells: [[blank; MAX_COLS]; MAX_ROWS],
             prev_initialized: false,
+            prev_cursor_row: usize::MAX,
+            prev_cursor_col: usize::MAX,
+            prev_cursor_visible: false,
         })
     }
 
@@ -68,7 +77,11 @@ impl Renderer {
         cursor_row: usize,
         cursor_col: usize,
         rows: usize,
+        cursor_visible: bool,
     ) {
+        // Union of all changed cells for this frame, in pixels.
+        let mut damage: Option<(usize, usize, usize, usize)> = None;
+
         for row in 0..rows.min(self.rows) {
             for col in 0..self.cols {
                 let cell = cells[row][col];
@@ -77,16 +90,61 @@ impl Renderer {
                 } else {
                     Cell::blank(0xE2E8F0, 0x12161E)
                 };
-                let is_cursor = row == cursor_row && col == cursor_col;
-                if !is_cursor && cell.ch == prev.ch && cell.fg == prev.fg && cell.bg == prev.bg {
+                let is_cursor = cursor_visible && row == cursor_row && col == cursor_col;
+                let was_cursor = self.prev_cursor_visible
+                    && row == self.prev_cursor_row
+                    && col == self.prev_cursor_col;
+
+                // Redraw only when the cell content or its cursor state
+                // changed. In particular, moving or blinking the cursor must
+                // repaint the cells it leaves behind.
+                if self.prev_initialized
+                    && cell.ch == prev.ch
+                    && cell.fg == prev.fg
+                    && cell.bg == prev.bg
+                    && is_cursor == was_cursor
+                {
                     continue;
                 }
+
                 self.render_glyph(col, row, &cell, is_cursor);
                 self.prev_cells[row][col] = cell;
+
+                let x0 = col * GLYPH_W;
+                let y0 = row * GLYPH_H;
+                let x1 = x0 + GLYPH_W;
+                let y1 = y0 + GLYPH_H;
+                damage = Some(match damage {
+                    None => (x0, y0, x1, y1),
+                    Some((dx0, dy0, dx1, dy1)) => {
+                        (dx0.min(x0), dy0.min(y0), dx1.max(x1), dy1.max(y1))
+                    }
+                });
             }
         }
+
         self.prev_initialized = true;
-        let _ = call::write(self.dmg_fd, b"present");
+        self.prev_cursor_row = cursor_row;
+        self.prev_cursor_col = cursor_col;
+        self.prev_cursor_visible = cursor_visible;
+
+        // One damage message per frame instead of a full-screen "present" :
+        // the display scheme blits only this rectangle to the real screen.
+        if let Some((x0, y0, x1, y1)) = damage {
+            self.submit_damage(x0, y0, x1, y1);
+        }
+    }
+
+    /// Submit the union of this frame's changed pixels to
+    /// `/dev/display/damage` ("x,y,w,h"; display 0).
+    fn submit_damage(&self, x0: usize, y0: usize, x1: usize, y1: usize) {
+        let w = x1.saturating_sub(x0);
+        let h = y1.saturating_sub(y0);
+        if w == 0 || h == 0 {
+            return;
+        }
+        let msg = format!("{},{},{},{}\n", x0, y0, w, h);
+        let _ = call::write(self.dmg_fd, msg.as_bytes());
     }
 
     fn render_glyph(&self, col: usize, row: usize, cell: &Cell, is_cursor: bool) {

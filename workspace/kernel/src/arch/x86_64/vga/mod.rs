@@ -45,7 +45,7 @@ pub use panic_screen::{init_panic_fb_globals, panic_draw_direct};
 #[macro_export]
 macro_rules! vga_print {
     ($($arg:tt)*) => {
-        if !$crate::debug_cfg::is_quiet() {
+        if !$crate::debug_cfg::is_quiet() && $crate::display_state::kernel_fb_allowed() {
             $crate::arch::x86_64::vga::_print(format_args!($($arg)*));
         }
     };
@@ -56,13 +56,13 @@ macro_rules! vga_print {
 #[macro_export]
 macro_rules! vga_println {
     () => {
-        if !$crate::debug_cfg::is_quiet() {
+        if !$crate::debug_cfg::is_quiet() && $crate::display_state::kernel_fb_allowed() {
             $crate::vga_print!("\n");
             $crate::arch::x86_64::vga::flush_display();
         }
     };
     ($($arg:tt)*) => {
-        if !$crate::debug_cfg::is_quiet() {
+        if !$crate::debug_cfg::is_quiet() && $crate::display_state::kernel_fb_allowed() {
             $crate::vga_print!("{}\n", format_args!($($arg)*));
             $crate::arch::x86_64::vga::flush_display();
         }

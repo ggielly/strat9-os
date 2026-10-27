@@ -53,8 +53,12 @@ fn fb_ops() -> crate::framebuffer::FramebufferOps {
 enum Handle {
     Root,
     Info,
-    /// Per-display screen: (global_display_id, offscreen buffer).
-    Screen(u32, Arc<RwLock<HeapScreen>>),
+    /// Per-display screen: (global_display_id, offscreen buffer, writable).
+    ///
+    /// `writable` records whether this handle participates in display
+    /// ownership: a writable handle hands the framebuffer from the kernel to
+    /// the display strate, and the matching close hands it back.
+    Screen(u32, Arc<RwLock<HeapScreen>>, bool),
     Damage,
     Clear,
 }
@@ -115,7 +119,7 @@ impl DisplayScheme {
 }
 
 impl Scheme for DisplayScheme {
-    fn open(&self, path: &str, _flags: OpenFlags) -> Result<OpenResult, SyscallError> {
+    fn open(&self, path: &str, flags: OpenFlags) -> Result<OpenResult, SyscallError> {
         let path = path.trim_start_matches('/');
         let id = self.alloc_id();
 
@@ -133,10 +137,16 @@ impl Scheme for DisplayScheme {
             Handle::Clear
         } else if let Some(display_id) = Self::parse_display_path(path) {
             let screen = self.get_or_create_screen(display_id);
-            Handle::Screen(display_id, screen)
+            Handle::Screen(display_id, screen, flags.contains(OpenFlags::WRITE))
         } else {
             return Err(SyscallError::NotFound);
         };
+
+        // A writable screen handle transfers framebuffer ownership from the
+        // kernel boot console to the userspace display strate.
+        if let Handle::Screen(_, _, true) = &handle {
+            crate::display_state::acquire_strate();
+        }
 
         self.handles.write().insert(id, handle.clone());
 
@@ -188,6 +198,7 @@ impl Scheme for DisplayScheme {
                         s.push_str(&format!("display.{}.{}x{}\n", i, w, h));
                     }
                 }
+                s.push_str(&format!("owner={}\n", crate::display_state::owner_name()));
                 let b = s.as_bytes();
                 let start = offset as usize;
                 if start >= b.len() {
@@ -197,7 +208,7 @@ impl Scheme for DisplayScheme {
                 buf[..n].copy_from_slice(&b[start..start + n]);
                 Ok(n)
             }
-            Handle::Screen(_display_id, screen) => {
+            Handle::Screen(_display_id, screen, _) => {
                 // Read pixel data from offscreen buffer.
                 let scr = screen.read();
                 let scr_stride = scr.stride() as usize;
@@ -222,7 +233,7 @@ impl Scheme for DisplayScheme {
 
         match handle {
             Handle::Root | Handle::Info => Err(SyscallError::PermissionDenied),
-            Handle::Screen(_display_id, screen) => {
+            Handle::Screen(_display_id, screen, _) => {
                 // Write pixel data to offscreen buffer.
                 //
                 // Wire format v2:
@@ -384,7 +395,12 @@ impl Scheme for DisplayScheme {
     }
 
     fn close(&self, fid: u64) -> Result<(), SyscallError> {
-        self.handles.write().remove(&fid);
+        let removed = self.handles.write().remove(&fid);
+        // A writable screen handle held a display ownership reference; the
+        // last one gives the framebuffer back to the kernel boot console.
+        if matches!(removed, Some(Handle::Screen(_, _, true))) {
+            crate::display_state::release_strate();
+        }
         Ok(())
     }
 
@@ -415,7 +431,7 @@ impl Scheme for DisplayScheme {
                 DEV_CHAR_FS,
                 1,
             ),
-            Handle::Screen(did, _) => finalize_pseudo_stat(
+            Handle::Screen(did, _, _) => finalize_pseudo_stat(
                 FileStat {
                     st_ino: 2 + *did as u64,
                     st_mode: 0o0100666,
