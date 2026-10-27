@@ -622,6 +622,10 @@ fn firmware_region(entry: &MemoryDescriptor) -> Result<MemoryRegion, &'static st
         | MemoryType::BOOT_SERVICES_DATA
         | MemoryType::LOADER_CODE
         | MemoryType::LOADER_DATA => MemoryKind::Reclaim,
+        // Firmware-reported unusable pages (hardware errors, address holes).
+        MemoryType::UNUSABLE => MemoryKind::Bad,
+        // ACPI NVS: tables that must outlive the boot, never reclaimable.
+        MemoryType::ACPI_NON_VOLATILE => MemoryKind::AcpiNvs,
         _ => MemoryKind::Reserved,
     };
     entry

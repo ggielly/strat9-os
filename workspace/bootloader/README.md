@@ -22,30 +22,40 @@ UEFI Firmware → bootx64.efi (FAT ESP)
   ├── 1. Open SimpleFileSystem → /boot/kernel.elf
   ├── 2. Parse ELF64, load segments to physical memory
   ├── 3. Load modules from /boot/initfs/*
-  ├── 4. GOP → framebuffer
+  ├── 4. GOP → framebuffer (best console mode)
   ├── 5. GetMemoryMap → memory regions
   ├── 6. ACPI RSDP → config table
   ├── 7. Build environment string (key=value)
-  ├── 8. ExitBootServices() → bare metal
-  ├── 9. Create page tables (identity + higher-half + framebuffer)
-  ├── 10. Build KernelArgs (ABI v2, 132 bytes)
-  └── 11. Context switch → kernel_main(KernelArgs)
+  ├── 8. Allocate every handoff object (transition stack, module
+  │      table, environment, KernelArgs, memory map)
+  ├── 9. Create page tables (identity + HHDM + kernel + framebuffer
+  │      + environment) and preflight the final memory map
+  ├── 10. ExitBootServices() → bare metal
+  ├── 11. Fill KernelArgs in its reserved page
+  └── 12. Context switch → kernel_main(KernelArgs)
 ```
 
-## ABI v2 (132 bytes, `#[repr(C, packed)]`)
+Steps 9 and 10 are ordered this way on purpose: the page-table arena is
+written through the firmware identity map, so the tables must exist before
+`ExitBootServices`. Only the `CR3` load happens afterwards, inside
+`paging::context_switch`, where no firmware call or allocation is possible.
+
+## ABI v5 (132 bytes, `#[repr(C, packed)]`)
+
+Version 5 adds nothing to the layout: it widens `MemoryKind` with `Bad` (4)
+and `AcpiNvs` (5). The struct is still exactly 132 bytes, checked by a
+`const` assertion in `abi/src/boot.rs`.
 
 | Field | Type | Description |
 |---|---|---|
 | `magic` | u32 | 0x53543942 ("ST9B") |
-| `abi_version` | u32 | 2 |
+| `abi_version` | u32 | 5 |
 | `kernel_base` | u64 | Physical address of kernel ELF |
 | `kernel_size` | u64 | Size of kernel in bytes |
-| `stack_base` | u64 | Physical address of boot stack |
-| `stack_size` | u64 | Size of boot stack |
 | `acpi_rsdp_base` | u64 | Physical address of RSDP |
 | `memory_map_base` | u64 | Physical address of MemoryRegion array |
 | `memory_map_size` | u64 | Size of memory map in bytes |
-| `framebuffer_addr` | u64 | **Virtual** address (0xFFFF_DEAD_...) |
+| `framebuffer_addr` | u64 | **Physical** address of pixel 0 |
 | `hhdm_offset` | u64 | Higher Half Direct Map offset |
 | `cmdline_ptr` | u64 | Physical address of environment string |
 | `cmdline_len` | u64 | Length of environment string |
@@ -56,6 +66,26 @@ UEFI Firmware → bootx64.efi (FAT ESP)
 | `framebuffer_stride` | u32 | Bytes per row |
 | `framebuffer_bpp` | u16 | Bits per pixel |
 | `framebuffer_*_mask_*` | u8×6 | RGB channel masks |
+| `bss_virt_base` | u64 | Virtual start of the kernel zero-fill tail |
+| `bss_virt_size` | u64 | Size of that tail (0 if none) |
+
+The transition stack is not part of the ABI: the loader switches to a
+64 KiB stack it owns, but only `RSP` is affected, and the kernel installs
+its own stack during early init.
+
+### Memory kinds (`MemoryRegion.kind`)
+
+| Value | Name | Meaning |
+|---|---|---|
+| 1 | `Free` | usable RAM |
+| 2 | `Reclaim` | boot-services/loader memory, reusable after init |
+| 3 | `Reserved` | firmware/devices/bootloader, never allocate |
+| 4 | `Bad` | firmware-reported unusable memory, never touch |
+| 5 | `AcpiNvs` | ACPI NVS tables, preserved for system lifetime |
+
+`Null` (0) is a placeholder and is never emitted. `AcpiNvs` and `Bad` are
+new in ABI v5; a v4 kernel refuses a v5 loader (version mismatch) instead
+of silently treating them as `Reserved`.
 
 ## Environment String
 
