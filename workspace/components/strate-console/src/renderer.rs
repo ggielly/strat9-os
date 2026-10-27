@@ -12,7 +12,7 @@
 use alloc::vec::Vec;
 
 use crate::scrollback::Cell;
-use strat9_syscall::call;
+use strat9_syscall::{call, number, syscall6};
 
 const GLYPH_W: usize = 8;
 const GLYPH_H: usize = 16;
@@ -42,7 +42,10 @@ pub struct Renderer {
     prev_cursor_col: usize,
     prev_cursor_visible: bool,
     glyphs: GlyphCache,
-    /// Reused rectangle packet for one row run.
+    /// `MAP_SHARED` view of the display surface, when available. With it,
+    /// pixels are written directly and only damage messages go to the kernel.
+    surface: Option<SurfaceMap>,
+    /// Reused rectangle packet for one row run (fallback write path).
     row_buf: Vec<u8>,
     damage: [(usize, usize, usize, usize); MAX_DAMAGE_RECTS],
     damage_len: usize,
@@ -63,6 +66,30 @@ struct GlyphTile {
 struct GlyphCache {
     entries: [Option<GlyphTile>; GLYPH_CACHE],
     next: usize,
+}
+
+/// Direct mapping of the display surface (native pixel format).
+#[derive(Clone, Copy)]
+struct SurfaceMap {
+    addr: *mut u8,
+    stride: usize,
+    bpp: u8,
+    red_shift: u8,
+    green_shift: u8,
+    blue_shift: u8,
+}
+
+impl SurfaceMap {
+    fn pack(&self, color: u32) -> u32 {
+        let r = (color >> 16) & 0xFF;
+        let g = (color >> 8) & 0xFF;
+        let b = color & 0xFF;
+        let mut packed = (r << self.red_shift) | (g << self.green_shift) | (b << self.blue_shift);
+        if self.bpp == 32 {
+            packed |= 0xFF00_0000;
+        }
+        packed
+    }
 }
 
 impl GlyphCache {
@@ -93,6 +120,10 @@ impl Renderer {
         let info_str = core::str::from_utf8(&info_buf).unwrap_or("display.0=800x600");
         let (w, h) = parse_display_size(info_str).unwrap_or((800, 600));
 
+        // Zero-copy path: map the frame-backed surface writable. On any
+        // failure, fall back to the rectangle write protocol.
+        let surface = map_surface(fd, info_str, w, h);
+
         let cols = w / GLYPH_W;
         let rows = h / GLYPH_H;
         let blank = Cell::blank(0xE2E8F0, 0x12161E);
@@ -110,6 +141,7 @@ impl Renderer {
             prev_cursor_col: usize::MAX,
             prev_cursor_visible: false,
             glyphs: GlyphCache::new(),
+            surface,
             row_buf: Vec::with_capacity(6 + MAX_RUN_CELLS * GLYPH_W * GLYPH_H * 3),
             damage: [(0, 0, 0, 0); MAX_DAMAGE_RECTS],
             damage_len: 0,
@@ -201,40 +233,73 @@ impl Renderer {
         cursor_col: usize,
         cursor_visible: bool,
     ) {
+        let surface = self.surface;
+        let bytes_pp = surface.map(|s| s.bpp as usize / 8).unwrap_or(0);
+
         let mut chunk_start = start;
         while chunk_start <= end {
             let chunk_end = (chunk_start + MAX_RUN_CELLS - 1).min(end);
             let width_cells = chunk_end - chunk_start + 1;
 
-            self.row_buf.clear();
-            let x = (chunk_start * GLYPH_W) as u16;
-            let y = (row * GLYPH_H) as u16;
-            let w = (width_cells * GLYPH_W) as u16;
-            self.row_buf.extend_from_slice(&x.to_le_bytes());
-            self.row_buf.extend_from_slice(&y.to_le_bytes());
-            self.row_buf.extend_from_slice(&w.to_le_bytes());
-
-            for gy in 0..GLYPH_H {
-                for col in chunk_start..=chunk_end {
-                    let cell = cells[row][col];
-                    let is_cursor = cursor_visible && row == cursor_row && col == cursor_col;
-                    let (fg, bg) = if is_cursor {
-                        (cell.bg, cell.fg)
-                    } else {
-                        (cell.fg, cell.bg)
-                    };
-                    let tile = self.glyph_tile(cell.ch, fg, bg);
-                    for gx in 0..GLYPH_W {
-                        let color = tile[gy * GLYPH_W + gx];
-                        // Wire format is BGR888.
-                        self.row_buf.push(color as u8);
-                        self.row_buf.push((color >> 8) as u8);
-                        self.row_buf.push((color >> 16) as u8);
+            if let Some(s) = surface {
+                // Zero-copy: compose straight into the mapped surface in its
+                // native pixel layout. No write syscall at all.
+                for gy in 0..GLYPH_H {
+                    for col in chunk_start..=chunk_end {
+                        let cell = cells[row][col];
+                        let is_cursor = cursor_visible && row == cursor_row && col == cursor_col;
+                        let (fg, bg) = if is_cursor {
+                            (cell.bg, cell.fg)
+                        } else {
+                            (cell.fg, cell.bg)
+                        };
+                        let tile = self.glyph_tile(cell.ch, fg, bg);
+                        for gx in 0..GLYPH_W {
+                            let packed = s.pack(tile[gy * GLYPH_W + gx]);
+                            let off = row * s.stride + (col * GLYPH_W + gx) * bytes_pp;
+                            unsafe {
+                                if s.bpp == 32 {
+                                    core::ptr::write_unaligned(s.addr.add(off) as *mut u32, packed);
+                                } else {
+                                    *s.addr.add(off) = packed as u8;
+                                    *s.addr.add(off + 1) = (packed >> 8) as u8;
+                                    *s.addr.add(off + 2) = (packed >> 16) as u8;
+                                }
+                            }
+                        }
                     }
                 }
-            }
+            } else {
+                self.row_buf.clear();
+                let x = (chunk_start * GLYPH_W) as u16;
+                let y = (row * GLYPH_H) as u16;
+                let w = (width_cells * GLYPH_W) as u16;
+                self.row_buf.extend_from_slice(&x.to_le_bytes());
+                self.row_buf.extend_from_slice(&y.to_le_bytes());
+                self.row_buf.extend_from_slice(&w.to_le_bytes());
 
-            let _ = call::write(self.fb_fd, &self.row_buf);
+                for gy in 0..GLYPH_H {
+                    for col in chunk_start..=chunk_end {
+                        let cell = cells[row][col];
+                        let is_cursor = cursor_visible && row == cursor_row && col == cursor_col;
+                        let (fg, bg) = if is_cursor {
+                            (cell.bg, cell.fg)
+                        } else {
+                            (cell.fg, cell.bg)
+                        };
+                        let tile = self.glyph_tile(cell.ch, fg, bg);
+                        for gx in 0..GLYPH_W {
+                            let color = tile[gy * GLYPH_W + gx];
+                            // Wire format is BGR888.
+                            self.row_buf.push(color as u8);
+                            self.row_buf.push((color >> 8) as u8);
+                            self.row_buf.push((color >> 16) as u8);
+                        }
+                    }
+                }
+
+                let _ = call::write(self.fb_fd, &self.row_buf);
+            }
 
             for col in chunk_start..=chunk_end {
                 self.prev_cells[row][col] = cells[row][col];
@@ -604,20 +669,77 @@ fn vline(glyph: &mut [u8; 16], x: usize, y0: usize, y1: usize) {
     }
 }
 
-fn parse_display_size(info: &str) -> Option<(usize, usize)> {
+fn parse_usize_field(info: &str, key: &str) -> Option<usize> {
     for line in info.lines() {
+        if let Some(value) = line.strip_prefix(key) {
+            return value.trim().parse().ok();
+        }
+    }
+    None
+}
+
+/// Map the display surface writable (`MAP_SHARED`) for zero-copy rendering.
+fn map_surface(fd: usize, info: &str, w: usize, h: usize) -> Option<SurfaceMap> {
+    let stride = parse_usize_field(info, "stride=").unwrap_or(w * 4);
+    let bpp = parse_usize_field(info, "bpp=").unwrap_or(32) as u8;
+    if bpp != 24 && bpp != 32 {
+        return None;
+    }
+    let red_shift = parse_usize_field(info, "red_shift=").unwrap_or(16) as u8;
+    let green_shift = parse_usize_field(info, "green_shift=").unwrap_or(8) as u8;
+    let blue_shift = parse_usize_field(info, "blue_shift=").unwrap_or(0) as u8;
+
+    let len = stride.checked_mul(h)?;
+    if len == 0 {
+        return None;
+    }
+
+    const PROT_READ_WRITE: usize = 3;
+    const MAP_SHARED: usize = 1;
+    let addr =
+        unsafe { syscall6(number::SYS_MMAP, 0, len, PROT_READ_WRITE, MAP_SHARED, fd, 0) }.ok()?;
+    if addr == 0 {
+        return None;
+    }
+
+    Some(SurfaceMap {
+        addr: addr as *mut u8,
+        stride,
+        bpp,
+        red_shift,
+        green_shift,
+        blue_shift,
+    })
+}
+
+fn parse_display_size(info: &str) -> Option<(usize, usize)> {
+    let mut width = None;
+    let mut height = None;
+    for line in info.lines() {
+        if let Some(value) = line.strip_prefix("width=") {
+            width = value.trim().parse().ok();
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("height=") {
+            height = value.trim().parse().ok();
+            continue;
+        }
         // Accept both "display.0=800x600" and "display/0=800x600" formats.
         if let Some(eq_pos) = line.find('=') {
             let val = &line[eq_pos + 1..];
-            // Try 'x' separator first, then 'x' with optional whitespace.
-            let x_pos = val.find('x').or_else(|| val.find('×'))?;
-            let w: usize = val[..x_pos].trim().parse().ok()?;
-            let h: usize = val[x_pos + 1..].trim().parse().ok()?;
-            if w > 0 && h > 0 {
-                return Some((w, h));
+            if let Some(x_pos) = val.find('x').or_else(|| val.find('×')) {
+                let w: Option<usize> = val[..x_pos].trim().parse().ok();
+                let h: Option<usize> = val[x_pos + 1..].trim().parse().ok();
+                if let (Some(w), Some(h)) = (w, h) {
+                    if w > 0 && h > 0 {
+                        return Some((w, h));
+                    }
+                }
             }
         }
     }
-    // Fallback: try to find any two numbers separated by 'x' in the whole string.
-    None
+    match (width, height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => Some((w, h)),
+        _ => None,
+    }
 }

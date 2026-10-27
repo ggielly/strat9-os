@@ -31,8 +31,8 @@ use crate::{
     },
     syscall::error::SyscallError,
     vfs::scheme::{
-        finalize_pseudo_stat, DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme,
-        DEV_CHAR_FS, DT_CHR, DT_REG,
+        finalize_pseudo_stat, DirEntry, FileFlags, FileStat, MmapFrames, OpenFlags, OpenResult,
+        Scheme, DEV_CHAR_FS, DT_CHR, DT_REG,
     },
 };
 use alloc::{collections::BTreeMap, format, string::String, sync::Arc, vec::Vec};
@@ -205,6 +205,23 @@ impl Scheme for DisplayScheme {
                     }
                 }
                 s.push_str(&format!("owner={}\n", crate::display_state::owner_name()));
+                if let Some(info) = Framebuffer::info() {
+                    let bpp = info.format.bits_per_pixel;
+                    // Offscreen surfaces are tightly packed (`width * bpp/8`);
+                    // the hardware stride may be larger and is irrelevant here.
+                    let surface_stride = info.width.saturating_mul(bpp as u32 / 8);
+                    s.push_str(&format!(
+                        "width={}\nheight={}\nbpp={}\nstride={}\n\
+                         red_shift={}\ngreen_shift={}\nblue_shift={}\n",
+                        info.width,
+                        info.height,
+                        bpp,
+                        surface_stride,
+                        info.format.red_shift,
+                        info.format.green_shift,
+                        info.format.blue_shift,
+                    ));
+                }
                 let b = s.as_bytes();
                 let start = offset as usize;
                 if start >= b.len() {
@@ -215,19 +232,9 @@ impl Scheme for DisplayScheme {
                 Ok(n)
             }
             Handle::Screen(_display_id, screen, _) => {
-                // Read pixel data from offscreen buffer.
+                // Read pixel data from the frame-backed surface.
                 let scr = screen.read();
-                let scr_stride = scr.stride() as usize;
-                let start = offset as usize;
-                let total = scr_stride * scr.height() as usize;
-                if start >= total {
-                    return Ok(0);
-                }
-                let n = core::cmp::min(total - start, buf.len());
-                unsafe {
-                    core::ptr::copy_nonoverlapping(scr.pixels().add(start), buf.as_mut_ptr(), n);
-                }
-                Ok(n)
+                Ok(scr.read_into(offset as usize, buf))
             }
             Handle::Damage | Handle::Clear => Err(SyscallError::PermissionDenied),
         }
@@ -268,8 +275,10 @@ impl Scheme for DisplayScheme {
                 let screen_h = scr.height() as usize;
                 let stride = scr.stride() as usize;
                 let format = scr.format();
-                let dst = scr.pixels_mut();
 
+                if bpp != 32 && bpp != 24 {
+                    return Ok(buf.len());
+                }
                 if x >= screen_w || y >= screen_h {
                     return Err(SyscallError::InvalidArgument);
                 }
@@ -287,50 +296,56 @@ impl Scheme for DisplayScheme {
                 // the stream ends when exhausted or when the bottom of the
                 // screen is reached. Wire bytes are B,G,R (as produced by the
                 // display server); they are packed into the screen's native
-                // masks below instead of being copied blindly.
+                // masks, then written page-by-page into the frame-backed
+                // surface.
                 let src_row_bytes = w * 3;
+                let dst_row_bytes = w * bpx;
+                // 32bpp rows are staged as u32 so the SIMD convert and the
+                // scalar pack both write naturally aligned words.
+                let mut row32: Vec<u32> = Vec::new();
+                let mut row24: Vec<u8> = Vec::new();
+                if bpp == 32 {
+                    row32 = alloc::vec![0u32; w];
+                } else {
+                    row24 = alloc::vec![0u8; dst_row_bytes];
+                }
+
                 let mut off = 0usize;
                 let mut py = y;
                 while py < screen_h && off + src_row_bytes <= pixels.len() {
                     let dst_off = py * stride + x * bpx;
-                    unsafe {
-                        if bpp == 32 {
-                            if format.is_xrgb8888() {
-                                // SIMD BGR888 -> XRGB8888 (pshufb-based,
-                                // handles unaligned edges with a scalar
-                                // tail). Plain stores: HeapScreen is cached
-                                // RAM, volatile would only block vectorization.
-                                (fb_ops().convert)(
-                                    dst.add(dst_off) as *mut u32,
-                                    pixels.as_ptr().add(off),
-                                    w,
-                                );
-                            } else {
-                                // Rare GOP layout (RGB masks, BGRX, ...):
-                                // pack each pixel with the real shifts.
-                                let dst32 = dst.add(dst_off) as *mut u32;
-                                for i in 0..w {
-                                    let s = off + i * 3;
-                                    let packed =
-                                        format.pack_rgb(pixels[s + 2], pixels[s + 1], pixels[s]);
-                                    core::ptr::write_unaligned(dst32.add(i), packed);
-                                }
-                            }
-                        } else if bpp == 24 {
-                            let ptr = dst.add(dst_off);
+                    if bpp == 32 {
+                        if format.is_xrgb8888() {
+                            // SIMD BGR888 -> XRGB8888 (pshufb-based, handles
+                            // unaligned edges with a scalar tail).
+                            (fb_ops().convert)(row32.as_mut_ptr(), pixels.as_ptr().add(off), w);
+                        } else {
+                            // Rare GOP layout (RGB masks, BGRX, ...): pack
+                            // each pixel with the real shifts.
                             for i in 0..w {
                                 let s = off + i * 3;
-                                let packed =
-                                    format.pack_rgb(pixels[s + 2], pixels[s + 1], pixels[s]);
-                                *ptr.add(i * 3) = packed as u8;
-                                *ptr.add(i * 3 + 1) = (packed >> 8) as u8;
-                                *ptr.add(i * 3 + 2) = (packed >> 16) as u8;
+                                row32[i] = format.pack_rgb(pixels[s + 2], pixels[s + 1], pixels[s]);
                             }
-                        } else {
-                            // Unsupported screen bpp: drop silently.
-                            return Ok(buf.len());
+                        }
+                        let bytes = unsafe {
+                            core::slice::from_raw_parts(row32.as_ptr() as *const u8, dst_row_bytes)
+                        };
+                        if scr.write_from(dst_off, bytes) != dst_row_bytes {
+                            break;
+                        }
+                    } else {
+                        for i in 0..w {
+                            let s = off + i * 3;
+                            let packed = format.pack_rgb(pixels[s + 2], pixels[s + 1], pixels[s]);
+                            row24[i * 3] = packed as u8;
+                            row24[i * 3 + 1] = (packed >> 8) as u8;
+                            row24[i * 3 + 2] = (packed >> 16) as u8;
+                        }
+                        if scr.write_from(dst_off, &row24) != dst_row_bytes {
+                            break;
                         }
                     }
+
                     off += src_row_bytes;
                     py += 1;
                 }
@@ -434,13 +449,8 @@ impl Scheme for DisplayScheme {
                 let screens = self.screens.read();
                 for (_, screen_arc) in screens.iter() {
                     let mut scr = screen_arc.write();
-                    unsafe {
-                        core::ptr::write_bytes(
-                            scr.pixels_mut(),
-                            0,
-                            scr.stride() as usize * scr.height() as usize,
-                        );
-                    }
+                    let size = scr.stride() as usize * scr.height() as usize;
+                    scr.fill_bytes(0, size, 0);
                 }
                 // Also clear the onscreen framebuffers.
                 let total = total_display_count();
@@ -466,6 +476,23 @@ impl Scheme for DisplayScheme {
             crate::display_state::release_strate();
         }
         Ok(())
+    }
+
+    /// Expose the frame-backed surface to `MAP_SHARED`.
+    ///
+    /// The screen itself stays in the display scheme's registry, so its
+    /// frames outlive both the handle and the user mapping (the scheme is
+    /// never torn down while the system runs).
+    fn mmap_frames(&self, fid: u64) -> Option<MmapFrames> {
+        let handles = self.handles.read();
+        let Handle::Screen(_, screen, _) = handles.get(&fid)? else {
+            return None;
+        };
+        let scr = screen.read();
+        Some(MmapFrames {
+            frames: scr.frames(),
+            len: scr.size(),
+        })
     }
 
     fn stat(&self, fid: u64) -> Result<FileStat, SyscallError> {

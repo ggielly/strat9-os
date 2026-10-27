@@ -64,6 +64,14 @@ bitflags::bitflags! {
 
 pub use strat9_abi::flag::OpenFlags;
 
+/// Physical frames backing a file that supports `MAP_SHARED`.
+pub struct MmapFrames {
+    /// Physical address of each 4 KiB page.
+    pub frames: Vec<u64>,
+    /// Meaningful byte length of the mapping.
+    pub len: usize,
+}
+
 /// Abstraction for a filesystem/service backend.
 pub trait Scheme: Send + Sync {
     /// Open a file/resource at the given path within this scheme.
@@ -77,6 +85,13 @@ pub trait Scheme: Send + Sync {
 
     /// Write bytes to an open file.
     fn write(&self, file_id: u64, offset: u64, buf: &[u8]) -> Result<usize, SyscallError>;
+
+    /// Frames backing this open file for a `MAP_SHARED` mapping, if the
+    /// scheme supports memory-mapped surfaces. The frames stay owned by the
+    /// scheme and must outlive the user mapping.
+    fn mmap_frames(&self, _file_id: u64) -> Option<MmapFrames> {
+        None
+    }
 
     /// Submit a read against a userspace buffer for async I/O.
     ///

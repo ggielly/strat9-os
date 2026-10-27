@@ -21,9 +21,18 @@
 //! └─────────────────────────────────────────────────┘
 //! ```
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::fmt;
 use spin::RwLock;
+
+use crate::{
+    capability::CapId,
+    memory::{
+        self, allocate_mapping_cap_id, ownership_table, release_owned_block, resolve_handle,
+        unregister_mapping_identity, OwnerError, PhysFrame,
+    },
+    sync::with_irqs_disabled,
+};
 
 use super::framebuffer::PixelFormat;
 
@@ -77,10 +86,14 @@ pub trait DisplayScreen: Send + Sync {
     fn stride(&self) -> u32;
     /// Bits per pixel.
     fn bpp(&self) -> u8;
-    /// Pointer to the raw pixel data.
-    fn pixels(&self) -> *const u8;
-    /// Mutable pointer to the raw pixel data.
-    fn pixels_mut(&mut self) -> *mut u8;
+    /// Copy `out.len()` bytes starting at byte `offset` of the surface.
+    fn read_into(&self, offset: usize, out: &mut [u8]) -> usize;
+    /// Copy `src` into the surface at byte `offset`.
+    fn write_from(&mut self, offset: usize, src: &[u8]) -> usize;
+    /// Fill `len` bytes at `offset` with `value`.
+    fn fill_bytes(&mut self, offset: usize, len: usize, value: u8);
+    /// Copy one damage rectangle to a physical framebuffer.
+    fn copy_rows_to(&self, dst: *mut u8, dst_stride: usize, damage: Damage, bpp_bytes: usize);
 }
 
 /// Trait for a graphics adapter managing one or more displays.
@@ -112,8 +125,16 @@ pub trait GraphicsAdapter: Send + Sync {
 // Concrete implementation: UEFI bootloader/VirtIO framebuffer adapter
 // ============================================================================
 
-/// A heap-allocated offscreen pixel buffer.
-#[derive(Clone)]
+/// An offscreen pixel surface backed by **individual physical frames**.
+///
+/// Frame backing (instead of a kernel heap `Box`) is what makes
+/// `MAP_SHARED` possible: the display scheme can hand the frame list to
+/// `sys_mmap`, and a display client writes pixels directly into the mapped
+/// pages. The kernel accesses the same frames through the HHDM, page by page,
+/// so physical contiguity is not required.
+///
+/// `size` is the number of meaningful bytes (`stride * height`); the last
+/// page may contain padding.
 pub struct HeapScreen {
     width: u32,
     height: u32,
@@ -123,7 +144,12 @@ pub struct HeapScreen {
     /// the scheme are packed into this layout, so a GOP with RGB masks is not
     /// displayed with swapped red/blue channels.
     format: PixelFormat,
-    data: Box<[u8]>,
+    pages: Vec<PhysFrame>,
+    /// One ownership reference per page, mirroring `/dev/ipc/shm` rings:
+    /// a user `MAP_SHARED` unmap drops its mapping ref, but the frame stays
+    /// alive until the screen itself is dropped.
+    owner_caps: Vec<CapId>,
+    size: usize,
 }
 
 impl fmt::Debug for HeapScreen {
@@ -134,6 +160,7 @@ impl fmt::Debug for HeapScreen {
             .field("stride", &self.stride)
             .field("bpp", &self.bpp)
             .field("format", &self.format)
+            .field("pages", &self.pages.len())
             .finish()
     }
 }
@@ -146,24 +173,138 @@ impl HeapScreen {
 
     /// Create a new zero-initialized screen with an explicit native pixel
     /// layout (masks/shifts come from the bootloader or GPU driver).
+    ///
+    /// On frame-allocation failure the screen is left empty (`pages` empty):
+    /// all surface operations then become no-ops instead of panicking.
     pub fn new_with_format(width: u32, height: u32, bpp: u8, mut format: PixelFormat) -> Self {
         format.bits_per_pixel = bpp;
-        let stride = width * (bpp as u32 / 8);
-        let size = (stride * height) as usize;
-        let data = alloc::vec![0u8; size].into_boxed_slice();
+        let stride = width.saturating_mul(bpp as u32 / 8);
+        let size = stride as usize * height as usize;
+        let page_count = (size + 4095) / 4096;
+
+        let mut pages = Vec::with_capacity(page_count);
+        let mut owner_caps = Vec::with_capacity(page_count);
+        for _ in 0..page_count {
+            let frame = match with_irqs_disabled(|token| memory::allocate_frame(token)) {
+                Ok(frame) => frame,
+                Err(_) => {
+                    release_screen_pages(&mut pages, &mut owner_caps);
+                    return Self {
+                        width,
+                        height,
+                        stride,
+                        bpp,
+                        format,
+                        pages: Vec::new(),
+                        owner_caps: Vec::new(),
+                        size: 0,
+                    };
+                }
+            };
+
+            // Take an ownership reference before the page can be mapped
+            // shared: unmapping userspace then only drops the mapping ref.
+            let owner_cap = allocate_mapping_cap_id();
+            let handle = resolve_handle(frame.start_address);
+            match ownership_table().ensure_ref(handle, owner_cap) {
+                Ok(_) | Err(OwnerError::CapAlreadyPresent) => {}
+                Err(_) => {
+                    with_irqs_disabled(|token| memory::free_frame(token, frame));
+                    release_screen_pages(&mut pages, &mut owner_caps);
+                    return Self {
+                        width,
+                        height,
+                        stride,
+                        bpp,
+                        format,
+                        pages: Vec::new(),
+                        owner_caps: Vec::new(),
+                        size: 0,
+                    };
+                }
+            }
+
+            let va = memory::phys_to_virt(frame.start_address.as_u64());
+            unsafe { core::ptr::write_bytes(va as *mut u8, 0, 4096) };
+            pages.push(frame);
+            owner_caps.push(owner_cap);
+        }
+
         Self {
             width,
             height,
             stride,
             bpp,
             format,
-            data,
+            pages,
+            owner_caps,
+            size,
         }
     }
 
     /// Native pixel layout used by this screen.
     pub fn format(&self) -> PixelFormat {
         self.format
+    }
+
+    /// Meaningful byte length of the surface.
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    /// Physical address of every backing page, for `MAP_SHARED`.
+    pub fn frames(&self) -> Vec<u64> {
+        self.pages
+            .iter()
+            .map(|frame| frame.start_address.as_u64())
+            .collect()
+    }
+
+    fn page_ptr(&self, offset: usize) -> Option<(*const u8, usize)> {
+        if offset >= self.size {
+            return None;
+        }
+        let page = offset / 4096;
+        let in_page = offset % 4096;
+        let frame = self.pages.get(page)?;
+        let va = memory::phys_to_virt(frame.start_address.as_u64());
+        Some(((va as *const u8).wrapping_add(in_page), in_page))
+    }
+
+    /// Copy out of the surface, crossing page boundaries as needed.
+    fn copy_out(&self, offset: usize, dst: *mut u8, len: usize) {
+        let mut done = 0usize;
+        while done < len {
+            let Some((src, _)) = self.page_ptr(offset + done) else {
+                return;
+            };
+            let in_page = (offset + done) % 4096;
+            let chunk = core::cmp::min(len - done, 4096 - in_page);
+            unsafe {
+                core::ptr::copy_nonoverlapping(src, dst.add(done), chunk);
+            }
+            done += chunk;
+        }
+    }
+}
+
+/// Release the ownership refs of a screen's pages.
+///
+/// The last ownership ref frees the underlying frame; a user `MAP_SHARED`
+/// mapping holds a separate mapping ref, so a client unmap never frees a
+/// frame the screen still uses.
+fn release_screen_pages(pages: &mut Vec<PhysFrame>, owner_caps: &mut Vec<CapId>) {
+    for (frame, cap) in pages.drain(..).zip(owner_caps.drain(..)) {
+        let handle = resolve_handle(frame.start_address);
+        if let Some(block) = unregister_mapping_identity(handle, cap) {
+            release_owned_block(block);
+        }
+    }
+}
+
+impl Drop for HeapScreen {
+    fn drop(&mut self) {
+        release_screen_pages(&mut self.pages, &mut self.owner_caps);
     }
 }
 
@@ -180,11 +321,70 @@ impl DisplayScreen for HeapScreen {
     fn bpp(&self) -> u8 {
         self.bpp
     }
-    fn pixels(&self) -> *const u8 {
-        self.data.as_ptr()
+
+    fn read_into(&self, offset: usize, out: &mut [u8]) -> usize {
+        let n = core::cmp::min(out.len(), self.size.saturating_sub(offset));
+        self.copy_out(offset, out.as_mut_ptr(), n);
+        n
     }
-    fn pixels_mut(&mut self) -> *mut u8 {
-        self.data.as_mut_ptr()
+
+    fn write_from(&mut self, offset: usize, src: &[u8]) -> usize {
+        let n = core::cmp::min(src.len(), self.size.saturating_sub(offset));
+        let mut done = 0usize;
+        while done < n {
+            let Some((_, in_page)) = self.page_ptr(offset + done) else {
+                break;
+            };
+            let page = (offset + done) / 4096;
+            let Some(frame) = self.pages.get(page) else {
+                break;
+            };
+            let va = memory::phys_to_virt(frame.start_address.as_u64());
+            let chunk = core::cmp::min(n - done, 4096 - in_page);
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    src.as_ptr().add(done),
+                    (va as *mut u8).wrapping_add(in_page),
+                    chunk,
+                );
+            }
+            done += chunk;
+        }
+        done
+    }
+
+    fn fill_bytes(&mut self, offset: usize, len: usize, value: u8) {
+        let n = core::cmp::min(len, self.size.saturating_sub(offset));
+        let mut done = 0usize;
+        while done < n {
+            let page = (offset + done) / 4096;
+            let in_page = (offset + done) % 4096;
+            let Some(frame) = self.pages.get(page) else {
+                break;
+            };
+            let va = memory::phys_to_virt(frame.start_address.as_u64());
+            let chunk = core::cmp::min(n - done, 4096 - in_page);
+            unsafe {
+                core::ptr::write_bytes((va as *mut u8).wrapping_add(in_page), value, chunk);
+            }
+            done += chunk;
+        }
+    }
+
+    fn copy_rows_to(&self, dst: *mut u8, dst_stride: usize, damage: Damage, bpp_bytes: usize) {
+        if self.pages.is_empty() || bpp_bytes == 0 {
+            return;
+        }
+        let d = damage.clip(self.width, self.height);
+        if !d.is_valid() {
+            return;
+        }
+        let row_bytes = d.width as usize * bpp_bytes;
+        for row in 0..d.height as usize {
+            let src_off = (d.y as usize + row) * self.stride as usize + d.x as usize * bpp_bytes;
+            let dst_off = (d.y as usize + row) * dst_stride + d.x as usize * bpp_bytes;
+            self.copy_out(src_off, unsafe { dst.add(dst_off) }, row_bytes);
+        }
     }
 }
 
@@ -256,44 +456,18 @@ impl GraphicsAdapter for SimpleDisplayAdapter {
             return;
         }
 
-        let damage = damage.clip(screen.width(), screen.height());
-        if !damage.is_valid() {
+        let bpp_bytes = self.fb_bpp as usize / 8;
+        if bpp_bytes != 3 && bpp_bytes != 4 {
             return;
         }
 
-        let bpp = self.fb_bpp as usize;
-        let dst_stride = self.fb_stride as usize;
-        let src_stride = screen.stride() as usize;
-        let dst = self.fb_virt as *mut u8;
-        let src = screen.pixels();
-
-        if bpp == 32 {
-            let bytes_per_row = damage.width as usize * 4;
-            for row in 0..damage.height as usize {
-                let src_off = (damage.y as usize + row) * src_stride + damage.x as usize * 4;
-                let dst_off = (damage.y as usize + row) * dst_stride + damage.x as usize * 4;
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        src.add(src_off),
-                        dst.add(dst_off),
-                        bytes_per_row,
-                    );
-                }
-            }
-        } else if bpp == 24 {
-            let bytes_per_row = damage.width as usize * 3;
-            for row in 0..damage.height as usize {
-                let src_off = (damage.y as usize + row) * src_stride + damage.x as usize * 3;
-                let dst_off = (damage.y as usize + row) * dst_stride + damage.x as usize * 3;
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        src.add(src_off),
-                        dst.add(dst_off),
-                        bytes_per_row,
-                    );
-                }
-            }
-        }
+        // Frame-backed surface: copy only the damaged rows, page-aware.
+        screen.copy_rows_to(
+            self.fb_virt as *mut u8,
+            self.fb_stride as usize,
+            damage,
+            bpp_bytes,
+        );
     }
 }
 

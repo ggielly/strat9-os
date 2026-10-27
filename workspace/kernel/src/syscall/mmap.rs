@@ -87,11 +87,124 @@ fn vma_flags_to_prot(flags: VmaFlags) -> u32 {
 // sys_mmap
 // ================================================================================
 
+/// Map the frames of a scheme-backed surface into the caller (`MAP_SHARED`).
+///
+/// Used by `/dev/display/<id>.<screen>`: the display scheme owns the
+/// frame-backed surface and exposes its physical pages through
+/// `Scheme::mmap_frames`. The mapping is writable by the display client, so
+/// pixels are written once, with no per-frame copy into the kernel.
+fn map_shared_file(
+    fd_raw: u64,
+    addr: u64,
+    len: u64,
+    prot: u32,
+    flags: u32,
+    offset: u64,
+) -> Result<u64, SyscallError> {
+    if len == 0 || offset != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if flags & MAP_HUGETLB != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let task = current_task_clone().ok_or(SyscallError::Fault)?;
+    let open_file = {
+        let fd_table = unsafe { &*task.process.fd_table.get() };
+        fd_table.get(fd_raw as u32)?
+    };
+    let mapping = open_file
+        .scheme()
+        .mmap_frames(open_file.file_id())
+        .ok_or(SyscallError::NotImplemented)?;
+    if mapping.frames.is_empty() || mapping.len == 0 {
+        return Err(SyscallError::NotImplemented);
+    }
+
+    let page_bytes = 4096u64;
+    let page_count = mapping.frames.len();
+    let map_len = (page_count as u64)
+        .checked_mul(page_bytes)
+        .ok_or(SyscallError::InvalidArgument)?;
+    if len > map_len {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let addr_space = task.process.address_space_arc();
+    let target = if flags & MAP_FIXED != 0 {
+        if addr % page_bytes != 0 || addr == 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        if addr.saturating_add(map_len) > USER_SPACE_END {
+            return Err(SyscallError::InvalidArgument);
+        }
+        if flags & MAP_FIXED_NOREPLACE != 0 {
+            if addr_space.has_mapping_in_range(addr, map_len) {
+                return Err(SyscallError::AlreadyExists);
+            }
+        } else {
+            addr_space
+                .unmap_range(addr, map_len)
+                .map_err(|_| SyscallError::InvalidArgument)?;
+        }
+        addr
+    } else {
+        let hint = if addr != 0 {
+            addr
+        } else {
+            task.process.mmap_hint.load(Ordering::Relaxed)
+        };
+        addr_space
+            .find_free_vma_range(
+                hint,
+                page_count,
+                crate::memory::address_space::VmaPageSize::Small,
+            )
+            .or_else(|| {
+                addr_space.find_free_vma_range(
+                    crate::kaslr::mmap_base(),
+                    page_count,
+                    crate::memory::address_space::VmaPageSize::Small,
+                )
+            })
+            .ok_or(SyscallError::OutOfMemory)?
+    };
+
+    addr_space
+        .map_shared_frames_with_cap_ids(
+            target,
+            &mapping.frames,
+            None,
+            prot_to_vma_flags(prot),
+            VmaType::Anonymous,
+        )
+        .map_err(|_| SyscallError::OutOfMemory)?;
+
+    if flags & MAP_FIXED == 0 {
+        let _ = task
+            .process
+            .mmap_hint
+            .fetch_max(target.saturating_add(map_len), Ordering::Relaxed);
+    }
+
+    log::trace!(
+        "sys_mmap: shared surface {:#x}..{:#x} ({} pages, fd={})",
+        target,
+        target + map_len,
+        page_count,
+        fd_raw as u32
+    );
+    Ok(target)
+}
+
 /// SYS_MMAP (100): map anonymous virtual memory.
 ///
-/// Only `MAP_ANONYMOUS` mappings are supported at this stage; file-backed mmaps
-/// return `NotImplemented`.  Both `MAP_PRIVATE` and `MAP_SHARED` are accepted
-/// for anonymous memory (they are equivalent when there is no backing file).
+/// `MAP_ANONYMOUS` maps fresh anonymous frames. File-backed `MAP_PRIVATE`
+/// copies the file into anonymous frames; file-backed `MAP_SHARED` maps the
+/// frames exposed by `Scheme::mmap_frames` (display surfaces).
 ///
 /// Returns the mapped virtual address on success, or a negative error code.
 pub fn sys_mmap(
@@ -131,9 +244,8 @@ pub fn sys_mmap(
         if is_private == is_shared {
             return Err(SyscallError::InvalidArgument);
         }
-        if !is_private {
-            log::warn!("sys_mmap: file-backed MAP_SHARED not yet supported");
-            return Err(SyscallError::NotImplemented);
+        if is_shared {
+            return map_shared_file(fd_raw, addr, len, prot, flags, offset);
         }
         if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
             return Err(SyscallError::InvalidArgument);
