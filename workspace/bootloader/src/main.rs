@@ -16,6 +16,7 @@ use uefi::{
     table::cfg::ConfigTableEntry,
 };
 
+mod boot_log;
 mod boot_plan;
 mod cpu;
 mod elf;
@@ -32,18 +33,28 @@ use memory::{BootError, BootMemory, BootResult};
 use memory_map::{MemoryMapBuilder, PhysicalRange, MAX_MEMORY_REGIONS, PAGE_SIZE};
 use strat9_abi::boot::{KernelArgs, MemoryKind, MemoryRegion};
 
+/// Print one line to the UEFI console *and* record it in the boot log ring.
+///
+/// After `ExitBootServices` the console half is skipped automatically: the
+/// ring keeps the text for the kernel to replay. Arguments are expanded twice
+/// (once for each sink), so pass values, not expressions with side effects.
+macro_rules! bootln {
+    ($($arg:tt)*) => {{
+        crate::boot_log::record(format_args!($($arg)*));
+        if crate::boot_log::console_enabled() {
+            uefi::system::with_stdout(|stdout| {
+                let _ = writeln!(stdout, $($arg)*);
+            });
+        }
+    }};
+}
+
 #[entry]
 fn efi_main() -> Status {
     match boot_kernel() {
         Ok(()) => Status::SUCCESS,
         Err(error) => {
-            uefi::system::with_stdout(|stdout| {
-                let _ = writeln!(
-                    stdout,
-                    "[boot] ERROR: {}: {:?}",
-                    error.operation, error.status
-                );
-            });
+            bootln!("[boot] ERROR: {}: {:?}", error.operation, error.status);
             error.status
         }
     }
@@ -53,13 +64,13 @@ fn boot_kernel() -> BootResult<()> {
     // Own permanent allocations before opening other resources, so an error
     // return closes files and drops temporary buffers before freeing their pages.
     let mut boot_memory = BootMemory::new();
-    uefi::system::with_stdout(|stdout| {
-        let _ = writeln!(stdout, "Strat9-OS bootloader. Version 0.1.0, UEFI mode.");
-        let _ = writeln!(
-            stdout,
-            "Copyright (C) 2026 Guillaume Gielly. All rights reserved."
-        );
-    });
+    // The log ring comes first: every later message, including failures, must
+    // survive ExitBootServices for the kernel to replay.
+    let boot_log_area =
+        boot_memory.allocate(boot_log::BOOT_LOG_CAPACITY, "boot log ring")?;
+    boot_log::init(boot_log_area).map_err(BootError::invalid)?;
+    bootln!("Strat9-OS bootloader. Version 0.1.0, UEFI mode.");
+    bootln!("Copyright (C) 2026 Guillaume Gielly. All rights reserved.");
 
     // Check the CPU and locate every byte of the EFI transition image.
     let cpu_features = cpu::detect().map_err(BootError::invalid)?;
@@ -88,9 +99,7 @@ fn boot_kernel() -> BootResult<()> {
         .open_volume()
         .map_err(|error| BootError::firmware("open boot volume", error.status()))?;
 
-    uefi::system::with_stdout(|stdout| {
-        let _ = writeln!(stdout, "[boot] The filesystem is OK");
-    });
+    bootln!("[boot] The filesystem is OK");
 
     //  kernel file
     let mut file = volume
@@ -109,9 +118,7 @@ fn boot_kernel() -> BootResult<()> {
         .map_err(|error| BootError::firmware("kernel file information", error.status()))?;
     let file_size = file_info.file_size() as usize;
 
-    uefi::system::with_stdout(|stdout| {
-        let _ = writeln!(stdout, "[boot] kernel.elf: {} bytes", file_size);
-    });
+    bootln!("[boot] kernel.elf: {} bytes", file_size);
 
     // Read kernel into memory
     let mut buf = alloc::vec::Vec::new();
@@ -128,13 +135,9 @@ fn boot_kernel() -> BootResult<()> {
     }
     drop(file);
 
-    uefi::system::with_stdout(|stdout| {
-        let _ = writeln!(stdout, "[boot] Kernel loaded OK");
-    });
+    bootln!("[boot] Kernel loaded OK");
 
-    uefi::system::with_stdout(|stdout| {
-        let _ = writeln!(stdout, "[boot] Parsing kernel ELF file...");
-    });
+    bootln!("[boot] Parsing kernel ELF file...");
 
     let mut elf_info = elf::parse_elf64(&buf).map_err(BootError::invalid)?;
     let kernel_allocation = boot_memory.allocate_preferred(
@@ -147,20 +150,17 @@ fn boot_kernel() -> BootResult<()> {
     unsafe { elf_info.load_into(&buf, kernel_allocation) }.map_err(BootError::invalid)?;
     drop(buf);
 
-    uefi::system::with_stdout(|stdout| {
-        let _ = writeln!(
-            stdout,
-            "[boot] ELF: entry=0x{:x}, {} segments, phys_end=0x{:x}",
-            elf_info.entry, elf_info.segment_count, elf_info.phys_end
-        );
-    });
+    bootln!(
+        "[boot] ELF: entry=0x{:x}, {} segments, phys_end=0x{:x}",
+        elf_info.entry,
+        elf_info.segment_count,
+        elf_info.phys_end
+    );
 
     // Load modules
     let module_list = modules::load_modules(&mut volume, &mut boot_memory)?;
 
-    uefi::system::with_stdout(|stdout| {
-        let _ = writeln!(stdout, "[boot] Modules: {}", module_list.len());
-    });
+    bootln!("[boot] Modules: {}", module_list.len());
 
     let framebuffer = select_framebuffer();
     let fb_phys = framebuffer.physical;
@@ -320,18 +320,15 @@ fn boot_kernel() -> BootResult<()> {
             .include(framebuffer_aperture)
             .map_err(BootError::invalid)?;
     }
-    uefi::system::with_stdout(|stdout| {
-        let _ = writeln!(
-            stdout,
-            "[boot] Initial identity/HHDM: {} GiB, {} pages, NX, video UC",
-            direct_map.end() / boot_plan::GIB,
-            if cpu_features.supports_1gib_pages() {
-                "4 KiB/2 MiB/1 GiB"
-            } else {
-                "4 KiB/2 MiB"
-            }
-        );
-    });
+    bootln!(
+        "[boot] Initial identity/HHDM: {} GiB, {} pages, NX, video UC",
+        direct_map.end() / boot_plan::GIB,
+        if cpu_features.supports_1gib_pages() {
+            "4 KiB/2 MiB/1 GiB"
+        } else {
+            "4 KiB/2 MiB"
+        }
+    );
     let mapping_plan = page_tables::MappingPlan {
         direct_map,
         kernel: &elf_info,
@@ -374,11 +371,12 @@ fn boot_kernel() -> BootResult<()> {
         .map_err(BootError::invalid)?;
     drop(preview);
 
-    uefi::system::with_stdout(|stdout| {
-        let _ = writeln!(stdout, "[boot] ExitBootServices...");
-    });
+    bootln!("[boot] ExitBootServices...");
 
     boot_memory.retain_for_handoff();
+    // Firmware output protocols are invalid from here on; the ring keeps
+    // recording so the kernel can replay these lines.
+    boot_log::disable_console();
     let mmap_iter = unsafe { uefi::boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) };
     // No firmware calls follow: stop maskable interrupts and normalize DF before
     // touching the execution environment. This asm is also a compiler memory barrier.
@@ -403,6 +401,7 @@ fn boot_kernel() -> BootResult<()> {
 
         // Test output
         let msg = b"[boot] After ExitBootServices, serial OK\r\n";
+        boot_log::append(b"[boot] After ExitBootServices, serial OK\n");
         let lsr: u16 = base + 5;
         let thr: u16 = base;
         for &b in msg {
@@ -419,7 +418,7 @@ fn boot_kernel() -> BootResult<()> {
 
     // Step 11: Build KernelArgs
     let (bss_virt_base, bss_virt_size) = elf_info.bss_range();
-    let args = KernelArgs {
+    let mut args = KernelArgs {
         magic: strat9_abi::boot::STRAT9_BOOT_MAGIC,
         abi_version: strat9_abi::boot::STRAT9_BOOT_ABI_VERSION,
         kernel_base: elf_info.phys_base,
@@ -445,14 +444,16 @@ fn boot_kernel() -> BootResult<()> {
         modules_size: module_table_size,
         bss_virt_base,
         bss_virt_size,
+        boot_log_base: boot_log_area.base,
+        boot_log_size: boot_log_area.size,
+        // Filled after the last message below, so no tail is dropped.
+        boot_log_written: 0,
     };
-
-    // The handoff itself lives in reserved pages, not on the firmware stack.
     let args_ptr = args_storage.base as *mut KernelArgs;
-    unsafe { args_ptr.write(args) };
 
     unsafe {
         let write_com1 = |s: &[u8]| {
+            boot_log::append(s);
             let lsr: u16 = 0x3F8 + 5;
             let thr: u16 = 0x3F8;
             for &b in s {
@@ -513,6 +514,11 @@ fn boot_kernel() -> BootResult<()> {
 
         write_com1(b"[boot] Jumping to kernel (after pause)...\r\n");
     }
+
+    // The handoff itself lives in reserved pages, not on the firmware stack.
+    // Seal the log first: this is the last append the kernel will see.
+    args.boot_log_written = boot_log::written();
+    unsafe { args_ptr.write(args) };
 
     unsafe {
         // Every register used by this returning asm block is an explicit input.
@@ -703,12 +709,7 @@ fn select_framebuffer() -> graphics::Framebuffer {
         current_framebuffer(&mut gop)
     })();
     if selected.is_none() {
-        uefi::system::with_stdout(|stdout| {
-            let _ = writeln!(
-                stdout,
-                "[boot] No usable RGB/BGR framebuffer; serial console only"
-            );
-        });
+        bootln!("[boot] No usable RGB/BGR framebuffer; serial console only");
     }
     selected.unwrap_or_default()
 }

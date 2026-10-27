@@ -32,30 +32,49 @@ UEFI Firmware → bootx64.efi (FAT ESP)
   └── 11. Context switch → kernel_main(KernelArgs)
 ```
 
-## ABI v2 (132 bytes, `#[repr(C, packed)]`)
+## ABI v6 (156 bytes, `#[repr(C, packed)]`)
 
-| Field | Type | Description |
-|---|---|---|
-| `magic` | u32 | 0x53543942 ("ST9B") |
-| `abi_version` | u32 | 2 |
-| `kernel_base` | u64 | Physical address of kernel ELF |
-| `kernel_size` | u64 | Size of kernel in bytes |
-| `stack_base` | u64 | Physical address of boot stack |
-| `stack_size` | u64 | Size of boot stack |
-| `acpi_rsdp_base` | u64 | Physical address of RSDP |
-| `memory_map_base` | u64 | Physical address of MemoryRegion array |
-| `memory_map_size` | u64 | Size of memory map in bytes |
-| `framebuffer_addr` | u64 | **Virtual** address (0xFFFF_DEAD_...) |
-| `hhdm_offset` | u64 | Higher Half Direct Map offset |
-| `cmdline_ptr` | u64 | Physical address of environment string |
-| `cmdline_len` | u64 | Length of environment string |
-| `modules_base` | u64 | Physical address of ModuleTable |
-| `modules_size` | u64 | Size of ModuleTable |
-| `framebuffer_width` | u32 | Width in pixels |
-| `framebuffer_height` | u32 | Height in pixels |
-| `framebuffer_stride` | u32 | Bytes per row |
-| `framebuffer_bpp` | u16 | Bits per pixel |
-| `framebuffer_*_mask_*` | u8×6 | RGB channel masks |
+Offsets are pinned by `workspace/abi/tests/boot_handoff.rs`.
+
+| Offset | Field | Type | Description |
+|---:|---|---|---|
+| 0 | `magic` | u32 | 0x53543942 ("ST9B") |
+| 4 | `abi_version` | u32 | 6 |
+| 8 | `kernel_base` | u64 | Physical address of kernel ELF |
+| 16 | `kernel_size` | u64 | Size of kernel in bytes |
+| 24 | `acpi_rsdp_base` | u64 | Physical address of RSDP |
+| 32 | `memory_map_base` | u64 | Physical address of MemoryRegion array |
+| 40 | `memory_map_size` | u64 | Size of memory map in bytes |
+| 48 | `framebuffer_addr` | u64 | Physical address of the GOP aperture |
+| 56 | `hhdm_offset` | u64 | Higher Half Direct Map offset |
+| 64 | `cmdline_ptr` | u64 | Physical address of environment string |
+| 72 | `cmdline_len` | u64 | Length of environment string |
+| 80 | `modules_base` | u64 | Physical address of ModuleTable |
+| 88 | `modules_size` | u64 | Size of ModuleTable |
+| 96 | `framebuffer_width` | u32 | Width in pixels |
+| 100 | `framebuffer_height` | u32 | Height in pixels |
+| 104 | `framebuffer_stride` | u32 | Bytes per row |
+| 108 | `framebuffer_bpp` | u16 | Bits per pixel |
+| 110 | `framebuffer_*_mask_*` | u8×6 | RGB channel masks |
+| 116 | `bss_virt_base` | u64 | Start of the kernel's zeroed BSS |
+| 124 | `bss_virt_size` | u64 | Size of the zeroed BSS |
+| 132 | `boot_log_base` | u64 | Physical address of the boot log ring |
+| 140 | `boot_log_size` | u64 | Ring capacity (power of two) |
+| 148 | `boot_log_written` | u64 | Bytes ever appended (monotonic), see below |
+
+`abi_version` is checked for exact equality by the kernel: a mismatched pair
+refuses to boot instead of reading fields at the wrong offsets.
+
+## Boot log ring (v6)
+
+The loader reserves 16 KiB (`boot_log.rs`) and appends every `[boot]` line to
+it, including the ones printed after `ExitBootServices`, when the UEFI console
+is already gone. It is a plain byte buffer with no header: the writer always
+appends at `boot_log_written % boot_log_size`, so the kernel derives the valid
+window with `KernelArgs::boot_log_spans()` -- oldest byte first, split in two
+spans when the ring wrapped -- and replays it once through the HHDM before the
+first allocation. Nothing is allocated, no firmware is called, and a ring
+never written costs nothing (`boot_log_written == 0`).
 
 ## Environment String
 

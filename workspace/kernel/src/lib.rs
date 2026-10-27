@@ -586,6 +586,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     }
     serial_println!("[init] HHDM offset: 0x{:x}", hhdm);
 
+    // Replay what the loader recorded before the UEFI console disappeared.
+    boot::log_replay::replay(args);
+
     let memory_map_base =
         unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.memory_map_base)) };
     let memory_map_size =

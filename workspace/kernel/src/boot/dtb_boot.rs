@@ -196,6 +196,10 @@ pub unsafe extern "C" fn kmain(args_ptr: u64) -> ! {
             )),
             bss_virt_base: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).bss_virt_base)),
             bss_virt_size: core::ptr::read_unaligned(core::ptr::addr_of!((*ptr).bss_virt_size)),
+            // ABI v6: the DTB path has no loader log ring.
+            boot_log_base: 0,
+            boot_log_size: 0,
+            boot_log_written: 0,
         }
     };
 
@@ -279,5 +283,8 @@ fn build_minimal_args() -> super::entry::KernelArgs {
         modules_size: 0,
         bss_virt_base: 0,
         bss_virt_size: 0,
+        boot_log_base: 0,
+        boot_log_size: 0,
+        boot_log_written: 0,
     }
 }

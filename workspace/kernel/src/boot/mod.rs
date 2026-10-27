@@ -20,6 +20,9 @@ pub mod entry;
 /// Physical boot-module validation and initfs address conversion.
 pub mod modules;
 
+/// Replay of the bootloader log ring (ABI v6).
+pub mod log_replay;
+
 /// Boot-protocol entry point (DTB/PVH)
 pub mod dtb_boot;
 

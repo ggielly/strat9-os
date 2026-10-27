@@ -69,6 +69,17 @@ KernelArgs {
 }
 ```
 
+### Boot log ring (ABI v6)
+
+Everything the loader prints is also appended to a 16 KiB ring reserved in RAM
+(`workspace/bootloader/src/boot_log.rs`), including the lines written after
+`ExitBootServices`, when the UEFI console is already gone. `KernelArgs` carries
+the ring's physical base, its capacity and a monotonic byte count; the kernel
+recomputes the valid window with `KernelArgs::boot_log_spans()` (two spans when
+the ring wrapped) and replays it through the HHDM as soon as the direct map is
+available. A boot with no working UART therefore still shows what the loader
+did, including the lines it could not print.
+
 ---
 
 ## Kernel entry : `kstart` (assembly)

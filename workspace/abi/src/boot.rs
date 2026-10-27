@@ -1,4 +1,4 @@
-//! Bootloader-to-kernel handoff ABI (v2).
+//! Bootloader-to-kernel handoff ABI (v6).
 //!
 //! This module defines the data structures passed from the bootloader
 //! to the kernel at entry point. The kernel reads these structures
@@ -64,7 +64,11 @@
 use zerocopy::{FromBytes, IntoBytes};
 
 /// ABI version for the boot handoff structure.
-pub const STRAT9_BOOT_ABI_VERSION: u32 = 4;
+///
+/// Version 5 is reserved for the memory-kind extension (`Bad`, `AcpiNvs`)
+/// developed on `fix/boot-abi-consistency`; this lineage skipped it so the
+/// two layouts can never both claim to be v5. Version 6 adds the boot log ring.
+pub const STRAT9_BOOT_ABI_VERSION: u32 = 6;
 
 /// Magic number validating the boot handoff (`"ST9B"` in ASCII).
 pub const STRAT9_BOOT_MAGIC: u32 = 0x5354_3942; // "ST9B"
@@ -76,7 +80,7 @@ pub const MAX_BOOT_MEMORY_REGIONS: usize = 1024;
 pub const MODULE_TABLE_SIZE: usize = core::mem::size_of::<ModuleTable>();
 const MODULE_TABLE_HEADER_SIZE: usize = core::mem::offset_of!(ModuleTable, entries);
 
-/// Bootloader-to-kernel handoff structure (ABI v2, 136 bytes).
+/// Bootloader-to-kernel handoff structure (ABI v6, 156 bytes).
 ///
 /// Field layout is ordered to avoid internal padding:
 /// - u64 fields first (8-byte aligned)
@@ -88,7 +92,7 @@ const MODULE_TABLE_HEADER_SIZE: usize = core::mem::offset_of!(ModuleTable, entri
 ///
 /// ## Identity (8 bytes)
 /// - `magic`: must equal [`STRAT9_BOOT_MAGIC`] (`0x5354_3942`)
-/// - `abi_version`: must equal [`STRAT9_BOOT_ABI_VERSION`] (currently `3`)
+/// - `abi_version`: must equal [`STRAT9_BOOT_ABI_VERSION`] (currently `6`)
 ///
 /// ## Kernel memory (16 bytes)
 /// - `kernel_base`: physical address of the kernel ELF image
@@ -114,6 +118,13 @@ const MODULE_TABLE_HEADER_SIZE: usize = core::mem::offset_of!(ModuleTable, entri
 /// ## Modules (16 bytes)
 /// - `modules_base`: physical address of the [`ModuleTable`]
 /// - `modules_size`: total size of the module table in bytes
+///
+/// ## Boot log ring (24 bytes, since v6)
+/// - `boot_log_base`: physical address of the ring buffer
+/// - `boot_log_size`: ring capacity in bytes (power of two)
+/// - `boot_log_written`: total bytes ever appended, monotonically increasing.
+///   Only the last `min(boot_log_written, boot_log_size)` bytes are valid; see
+///   [`KernelArgs::boot_log_spans`] for the ordering after a wrap.
 #[derive(Debug, FromBytes, IntoBytes)]
 #[repr(C, packed)]
 pub struct KernelArgs {
@@ -147,10 +158,20 @@ pub struct KernelArgs {
     // --- BSS region ---
     pub bss_virt_base: u64,
     pub bss_virt_size: u64,
+    // --- Boot log ring (v6) ---
+    pub boot_log_base: u64,
+    pub boot_log_size: u64,
+    pub boot_log_written: u64,
 }
 
-// Ensure struct is exactly 132 bytes with no padding
-const _: () = assert!(core::mem::size_of::<KernelArgs>() == 132);
+// Ensure struct is exactly 156 bytes with no padding
+const _: () = assert!(core::mem::size_of::<KernelArgs>() == 156);
+
+/// Upper bound on a handoff ring, so a corrupted size cannot make the kernel
+/// scan an absurd physical range.
+pub const MAX_BOOT_LOG_SIZE: u64 = 1 << 20;
+/// Smallest ring accepted: one page, enough for the loader's own messages.
+pub const MIN_BOOT_LOG_SIZE: u64 = 4096;
 
 impl KernelArgs {
     /// Read the memory map, rejecting malformed lengths instead of truncating.
@@ -240,6 +261,44 @@ impl KernelArgs {
         };
         ModuleTable::read_from(bytes)
     }
+
+    /// Geometry of the bootloader log ring, oldest byte first.
+    ///
+    /// The ring is a plain byte buffer: the loader appends at
+    /// `boot_log_written % boot_log_size`, so only the last
+    /// `min(boot_log_written, boot_log_size)` bytes are meaningful. After a
+    /// wrap the oldest bytes sit at the end of the buffer and the newest at the
+    /// beginning, which is why the valid window is returned as two spans.
+    ///
+    /// A pair of zeroes means "no log". Any other inconsistent or implausible
+    /// geometry is rejected instead of being clamped.
+    pub fn boot_log_spans(&self) -> Result<BootLogSpans, &'static str> {
+        let base = self.boot_log_base;
+        let size = self.boot_log_size;
+        if base == 0 && size == 0 {
+            return Ok(BootLogSpans::EMPTY);
+        }
+        if base == 0 || size == 0 {
+            return Err("inconsistent boot log range");
+        }
+        if !size.is_power_of_two() || !(MIN_BOOT_LOG_SIZE..=MAX_BOOT_LOG_SIZE).contains(&size) {
+            return Err("invalid boot log ring size");
+        }
+        if base % MIN_BOOT_LOG_SIZE != 0 {
+            return Err("unaligned boot log ring");
+        }
+        let valid = self.boot_log_written.min(size) as usize;
+        if valid == 0 {
+            return Ok(BootLogSpans::EMPTY);
+        }
+        let start = ((self.boot_log_written - valid as u64) % size) as usize;
+        let first = (size as usize - start).min(valid);
+        Ok(BootLogSpans {
+            start,
+            first,
+            second: valid - first,
+        })
+    }
 }
 
 /// Pure metadata validation, performed before dereferencing a handoff address.
@@ -255,6 +314,33 @@ fn checked_handoff_range(base: u64, size: u64, align: usize) -> Result<usize, &'
         return Err("handoff range exceeds addressable size");
     }
     Ok(size as usize)
+}
+
+/// Valid window of the bootloader log ring, oldest byte first.
+///
+/// Read `first` bytes at `base + start`, then `second` bytes at `base`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BootLogSpans {
+    pub start: usize,
+    pub first: usize,
+    pub second: usize,
+}
+
+impl BootLogSpans {
+    pub const EMPTY: Self = Self {
+        start: 0,
+        first: 0,
+        second: 0,
+    };
+
+    /// Total number of bytes the reader must consume.
+    pub fn len(&self) -> usize {
+        self.first + self.second
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// Module table header + entries.
@@ -391,8 +477,8 @@ impl MemoryKind {
     pub const Reserved: Self = Self(3);
 }
 
-// ABI size assertions (packed: no padding, 132 bytes with BSS fields)
-const _: () = assert!(core::mem::size_of::<KernelArgs>() == 132);
+// ABI size assertions (packed: no padding, 156 bytes with the boot log ring)
+const _: () = assert!(core::mem::size_of::<KernelArgs>() == 156);
 const _: () = assert!(core::mem::align_of::<KernelArgs>() == 1);
 static_assertions::assert_eq_size!(MemoryRegion, [u8; 24]);
 static_assertions::const_assert_eq!(core::mem::align_of::<MemoryRegion>(), 8);

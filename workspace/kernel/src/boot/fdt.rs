@@ -76,6 +76,10 @@ pub unsafe fn build_kernel_args_from_dtb(dtb_ptr: u64) -> KernelArgs {
         modules_size: 0,
         bss_virt_base: 0,
         bss_virt_size: 0,
+        // ABI v6: the FDT path has no loader log ring.
+        boot_log_base: 0,
+        boot_log_size: 0,
+        boot_log_written: 0,
     };
 
     if dtb_ptr == 0 {
