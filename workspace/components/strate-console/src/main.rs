@@ -78,30 +78,30 @@ pub extern "C" fn _start() -> ! {
         \x1b[1;36m  strat9-os console (ring 3)\x1b[0m\n\
         \x1b[1;36m========================================\x1b[0m\n\
         \x1b[90mType 'help' for commands.\x1b[0m\n\n";
-    for &b in banner {
-        term.process_byte(b);
-    }
+    term.process_bytes(banner);
 
-    let mut cells = [[scrollback::Cell::blank(DEFAULT_FG, DEFAULT_BG); 256]; 64];
-    render_terminal(&term, &mut cells);
-    rend.render(&cells, term.cursor_row, term.cursor_col, term.rows, true);
+    rend.render(
+        &term.screen,
+        term.cursor_row,
+        term.cursor_col,
+        term.rows,
+        true,
+    );
 
     let mut cursor_visible = true;
     let mut next_blink_ms = now_ms() + CURSOR_BLINK_MS;
+    let mut raw = [0u8; 64];
+    let mut input = [0u8; 64];
 
     loop {
         let mut dirty = false;
 
-        // Drain pending input in small batches. `read_byte` is non-blocking,
-        // so a batch keeps latency low without starving other silos.
-        for _ in 0..32 {
-            match kbd.read_byte() {
-                Some(byte) => {
-                    term.process_byte(byte);
-                    dirty = true;
-                }
-                None => break,
-            }
+        // One syscall per scancode burst, then translate the whole batch.
+        // `read_raw` is non-blocking, so an empty read means idle.
+        let raw_n = kbd.read_raw(&mut raw);
+        let text_n = kbd.translate(&raw[..raw_n], &mut input);
+        if text_n > 0 && term.process_bytes(&input[..text_n]) {
+            dirty = true;
         }
 
         // Cursor blink is the only periodic redraw source.
@@ -115,9 +115,8 @@ pub extern "C" fn _start() -> ! {
         }
 
         if dirty {
-            render_terminal(&term, &mut cells);
             rend.render(
-                &cells,
+                &term.screen,
                 term.cursor_row,
                 term.cursor_col,
                 term.rows,
@@ -150,14 +149,5 @@ fn now_ms() -> u64 {
         (ts.tv_sec.max(0) as u64) * 1000 + (ts.tv_nsec.max(0) as u64) / 1_000_000
     } else {
         0
-    }
-}
-
-fn render_terminal(term: &TerminalCore, cells: &mut [[scrollback::Cell; 256]; 64]) {
-    let visible_rows = term.rows.min(64);
-    for row in 0..visible_rows {
-        for col in 0..term.cols.min(256) {
-            cells[row][col] = term.screen[row][col];
-        }
     }
 }

@@ -26,15 +26,32 @@ impl InputHandler {
         })
     }
 
-    pub fn read_byte(&mut self) -> Option<u8> {
-        let mut buf = [0u8; 1];
-        match call::read(self.kbd_fd, &mut buf) {
-            Ok(1) => {
-                let scancode = buf[0];
-                self.process_scancode(scancode)
-            }
-            _ => None,
+    /// Read up to `out.len()` raw scancodes in a single syscall.
+    ///
+    /// Non-blocking: returns 0 when nothing is pending.
+    pub fn read_raw(&mut self, out: &mut [u8]) -> usize {
+        match call::read(self.kbd_fd, out) {
+            Ok(n) => n.min(out.len()),
+            Err(_) => 0,
         }
+    }
+
+    /// Translate a batch of raw scancodes into ASCII bytes.
+    ///
+    /// Modifier state and a pending 0xE0 prefix persist across calls, so a
+    /// scancode burst can be split anywhere.
+    pub fn translate(&mut self, raw: &[u8], out: &mut [u8]) -> usize {
+        let mut n = 0;
+        for &scancode in raw {
+            if n >= out.len() {
+                break;
+            }
+            if let Some(byte) = self.process_scancode(scancode) {
+                out[n] = byte;
+                n += 1;
+            }
+        }
+        n
     }
 
     fn process_scancode(&mut self, scancode: u8) -> Option<u8> {

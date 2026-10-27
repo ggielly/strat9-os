@@ -156,7 +156,14 @@ impl Renderer {
             (cell.fg, cell.bg)
         };
 
-        let glyph_idx = (cell.ch as usize).wrapping_sub(0x20);
+        // The 8x16 font only covers ASCII; other Unicode scalars are kept in
+        // the model (Cell.ch is a u32) and displayed as '?' until a wider
+        // font/atlas exists.
+        let glyph_idx = if (0x20..=0x7E).contains(&cell.ch) {
+            (cell.ch - 0x20) as usize
+        } else {
+            (b'?' as u32 - 0x20) as usize
+        };
         let glyph = if glyph_idx < 95 {
             &FONT_8X16[glyph_idx]
         } else {
@@ -178,9 +185,11 @@ impl Renderer {
             for col_bit in 0..GLYPH_W {
                 let bit = (row_bits >> (7 - col_bit)) & 1;
                 let color = if bit != 0 { fg } else { bg };
-                pixel_data[offset] = (color >> 16) as u8;
+                // Wire format is BGR888 (byte order B,G,R), matching the
+                // display scheme's BGR888 -> native conversion.
+                pixel_data[offset] = color as u8;
                 pixel_data[offset + 1] = (color >> 8) as u8;
-                pixel_data[offset + 2] = color as u8;
+                pixel_data[offset + 2] = (color >> 16) as u8;
                 offset += 3;
             }
         }

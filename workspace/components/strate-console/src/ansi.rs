@@ -9,6 +9,10 @@ pub enum AnsiAction {
     CursorBack(u16),
     CursorPosition(u16, u16),
     CursorHorizontalAbsolute(u16),
+    /// A printable Unicode scalar decoded by vte (UTF-8 aware).
+    Print(char),
+    /// A C0 control byte (BEL, BS, HT, LF, CR, ...).
+    Execute(u8),
     EraseDisplay(EraseMode),
     EraseLine(EraseMode),
     Sgr(SgrParam),
@@ -40,22 +44,24 @@ pub enum SgrParam {
 
 pub struct AnsiParser {
     parser: VteParser,
-    actions: Vec<AnsiAction>,
 }
 
 impl AnsiParser {
     pub fn new() -> Self {
         AnsiParser {
             parser: VteParser::new(),
-            actions: Vec::new(),
         }
     }
 
-    pub fn feed_bytes(&mut self, bytes: &[u8]) -> &[AnsiAction] {
-        self.actions.clear();
-        let mut collector = ActionCollector(&mut self.actions);
+    /// Feed a chunk of bytes and append the decoded actions to `out`.
+    ///
+    /// The caller owns the scratch buffer, so a chunk costs no allocation
+    /// once its capacity has grown. `vte` keeps partial escape/UTF-8 state
+    /// across calls, which is why chunks may be split anywhere.
+    pub fn feed_into(&mut self, bytes: &[u8], out: &mut Vec<AnsiAction>) {
+        out.clear();
+        let mut collector = ActionCollector(out);
         self.parser.advance(&mut collector, bytes);
-        &self.actions
     }
 }
 
@@ -74,8 +80,14 @@ fn has_params(params: &vte::Params, idx: usize) -> bool {
 struct ActionCollector<'a>(&'a mut Vec<AnsiAction>);
 
 impl vte::Perform for ActionCollector<'_> {
-    fn print(&mut self, _c: char) {}
-    fn execute(&mut self, _b: u8) {}
+    fn print(&mut self, c: char) {
+        self.0.push(AnsiAction::Print(c));
+    }
+
+    fn execute(&mut self, b: u8) {
+        self.0.push(AnsiAction::Execute(b));
+    }
+
     fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, _action: char) {
     }
     fn put(&mut self, _b: u8) {}

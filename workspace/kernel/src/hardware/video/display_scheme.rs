@@ -96,11 +96,17 @@ impl DisplayScheme {
             .map(|(a, local_id)| a.display_size(local_id))
             .unwrap_or((800, 600));
 
-        let bpp = Framebuffer::info()
-            .map(|i| i.format.bits_per_pixel)
-            .unwrap_or(32);
+        // Keep the bootloader/GPU native layout (masks and shifts), not just
+        // the depth: a GOP can expose RGB masks instead of the common XRGB
+        // order, and copying raw bytes would swap red and blue.
+        let format = Framebuffer::info().map(|i| i.format).unwrap_or_default();
 
-        let screen = Arc::new(RwLock::new(HeapScreen::new(w, h, bpp)));
+        let screen = Arc::new(RwLock::new(HeapScreen::new_with_format(
+            w,
+            h,
+            format.bits_per_pixel,
+            format,
+        )));
         self.screens.write().insert(display_id, screen.clone());
         screen
     }
@@ -237,12 +243,13 @@ impl Scheme for DisplayScheme {
                 // Write pixel data to offscreen buffer.
                 //
                 // Wire format v2:
-                //   [x u16le][y u16le][w u16le][r,g,b × w per row, ...]
+                //   [x u16le][y u16le][w u16le][b,g,r × w per row, ...]
                 // - `w == 0` means "fill to the right edge" (screen_w - x).
                 // - Rows advance by exactly w pixels per row while pixel
                 //   data remains; a single write can carry h*w pixels.
-                // - Pixels are RGB888 and are converted to the screen
-                //   format on ingest (SIMD-accelerated for 32bpp screens).
+                // - Pixels are BGR888 (byte order B,G,R) and are packed into
+                //   the screen's native masks on ingest (SIMD-accelerated for
+                //   the common XRGB layout).
                 //
                 // Note: the file offset is currently ignored; callers must
                 // send complete rectangles starting at their (x, y).
@@ -260,6 +267,7 @@ impl Scheme for DisplayScheme {
                 let screen_w = scr.width() as usize;
                 let screen_h = scr.height() as usize;
                 let stride = scr.stride() as usize;
+                let format = scr.format();
                 let dst = scr.pixels_mut();
 
                 if x >= screen_w || y >= screen_h {
@@ -275,29 +283,48 @@ impl Scheme for DisplayScheme {
                     return Ok(buf.len());
                 }
 
-                // Per-row ingest. Each row consumes exactly w*bpp/8 target
-                // pixels from the stream; the stream ends when exhausted or
-                // when the bottom of the screen is reached.
-                let src_row_bytes = w * 3; // wire format is always RGB888
+                // Per-row ingest. Each row consumes exactly w*3 source bytes;
+                // the stream ends when exhausted or when the bottom of the
+                // screen is reached. Wire bytes are B,G,R (as produced by the
+                // display server); they are packed into the screen's native
+                // masks below instead of being copied blindly.
+                let src_row_bytes = w * 3;
                 let mut off = 0usize;
                 let mut py = y;
                 while py < screen_h && off + src_row_bytes <= pixels.len() {
                     let dst_off = py * stride + x * bpx;
                     unsafe {
                         if bpp == 32 {
-                            // SIMD RGB888 -> XRGB8888 (pshufb-based, handles
-                            // unaligned edges with a scalar tail). Plain
-                            // stores: the HeapScreen lives in cached RAM,
-                            // volatile would only block vectorization.
-                            (fb_ops().convert)(
-                                dst.add(dst_off) as *mut u32,
-                                pixels.as_ptr().add(off),
-                                w,
-                            );
+                            if format.is_xrgb8888() {
+                                // SIMD BGR888 -> XRGB8888 (pshufb-based,
+                                // handles unaligned edges with a scalar
+                                // tail). Plain stores: HeapScreen is cached
+                                // RAM, volatile would only block vectorization.
+                                (fb_ops().convert)(
+                                    dst.add(dst_off) as *mut u32,
+                                    pixels.as_ptr().add(off),
+                                    w,
+                                );
+                            } else {
+                                // Rare GOP layout (RGB masks, BGRX, ...):
+                                // pack each pixel with the real shifts.
+                                let dst32 = dst.add(dst_off) as *mut u32;
+                                for i in 0..w {
+                                    let s = off + i * 3;
+                                    let packed =
+                                        format.pack_rgb(pixels[s + 2], pixels[s + 1], pixels[s]);
+                                    core::ptr::write_unaligned(dst32.add(i), packed);
+                                }
+                            }
                         } else if bpp == 24 {
                             let ptr = dst.add(dst_off);
-                            for i in 0..src_row_bytes {
-                                *ptr.add(i) = pixels[off + i];
+                            for i in 0..w {
+                                let s = off + i * 3;
+                                let packed =
+                                    format.pack_rgb(pixels[s + 2], pixels[s + 1], pixels[s]);
+                                *ptr.add(i * 3) = packed as u8;
+                                *ptr.add(i * 3 + 1) = (packed >> 8) as u8;
+                                *ptr.add(i * 3 + 2) = (packed >> 16) as u8;
                             }
                         } else {
                             // Unsupported screen bpp: drop silently.
@@ -507,6 +534,26 @@ impl Scheme for DisplayScheme {
 
 /// Register the display scheme at `/dev/display/`.
 pub fn register_display_scheme() -> Result<(), SyscallError> {
+    // Validate the pixel layout once: a malformed mask set would silently
+    // swap channels or drop pixels on every present.
+    if let Some(info) = Framebuffer::info() {
+        let f = info.format;
+        if f.bits_per_pixel != 32 && f.bits_per_pixel != 24 {
+            log::warn!(
+                "[display] unsupported {} bpp framebuffer; expecting 24 or 32",
+                f.bits_per_pixel
+            );
+        }
+        if f.red_mask == 0 || f.green_mask == 0 || f.blue_mask == 0 {
+            log::warn!(
+                "[display] incomplete RGB masks (r={:#x} g={:#x} b={:#x}); colours may be wrong",
+                f.red_mask,
+                f.green_mask,
+                f.blue_mask
+            );
+        }
+    }
+
     // Create and register the default adapter from the global framebuffer.
     if let Some(adapter) = SimpleDisplayAdapter::from_framebuffer() {
         graphics_adapter::register_adapter(Arc::new(adapter));

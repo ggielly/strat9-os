@@ -10,14 +10,20 @@ pub struct ScrollLine {
 
 #[derive(Clone, Copy)]
 pub struct Cell {
-    pub ch: u8,
+    /// Unicode scalar value (u32 so the terminal model is UTF-8 complete;
+    /// the current 8x16 font only rasterizes ASCII and shows '?' otherwise).
+    pub ch: u32,
     pub fg: u32,
     pub bg: u32,
 }
 
 impl Cell {
     pub const fn blank(fg: u32, bg: u32) -> Self {
-        Cell { ch: b' ', fg, bg }
+        Cell {
+            ch: b' ' as u32,
+            fg,
+            bg,
+        }
     }
 }
 

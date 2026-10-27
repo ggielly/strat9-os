@@ -25,6 +25,8 @@ use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::fmt;
 use spin::RwLock;
 
+use super::framebuffer::PixelFormat;
+
 /// Dirty region for partial screen updates.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Damage {
@@ -117,6 +119,10 @@ pub struct HeapScreen {
     height: u32,
     stride: u32,
     bpp: u8,
+    /// Native pixel layout of the target framebuffer. Pixels written through
+    /// the scheme are packed into this layout, so a GOP with RGB masks is not
+    /// displayed with swapped red/blue channels.
+    format: PixelFormat,
     data: Box<[u8]>,
 }
 
@@ -127,13 +133,21 @@ impl fmt::Debug for HeapScreen {
             .field("height", &self.height)
             .field("stride", &self.stride)
             .field("bpp", &self.bpp)
+            .field("format", &self.format)
             .finish()
     }
 }
 
 impl HeapScreen {
-    /// Create a new zero-initialized screen.
+    /// Create a new zero-initialized screen using the default XRGB layout.
     pub fn new(width: u32, height: u32, bpp: u8) -> Self {
+        Self::new_with_format(width, height, bpp, PixelFormat::default())
+    }
+
+    /// Create a new zero-initialized screen with an explicit native pixel
+    /// layout (masks/shifts come from the bootloader or GPU driver).
+    pub fn new_with_format(width: u32, height: u32, bpp: u8, mut format: PixelFormat) -> Self {
+        format.bits_per_pixel = bpp;
         let stride = width * (bpp as u32 / 8);
         let size = (stride * height) as usize;
         let data = alloc::vec![0u8; size].into_boxed_slice();
@@ -142,8 +156,14 @@ impl HeapScreen {
             height,
             stride,
             bpp,
+            format,
             data,
         }
+    }
+
+    /// Native pixel layout used by this screen.
+    pub fn format(&self) -> PixelFormat {
+        self.format
     }
 }
 
@@ -222,7 +242,10 @@ impl GraphicsAdapter for SimpleDisplayAdapter {
     }
 
     fn create_framebuffer(&self, width: u32, height: u32) -> HeapScreen {
-        HeapScreen::new(width, height, self.fb_bpp)
+        let format = super::framebuffer::Framebuffer::info()
+            .map(|i| i.format)
+            .unwrap_or_default();
+        HeapScreen::new_with_format(width, height, self.fb_bpp, format)
     }
 
     fn update_plane(&self, display_id: usize, screen: &HeapScreen, damage: Damage) {

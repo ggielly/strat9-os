@@ -47,6 +47,30 @@ pub struct PixelFormat {
     pub bits_per_pixel: u8,
 }
 
+impl PixelFormat {
+    /// True for the common XRGB layout used by UEFI GOP on x86:
+    /// red in bits 16..23, green 8..15, blue 0..7 (little-endian bytes
+    /// B,G,R,X). This is the layout the SIMD `convert_bgr_to_argb` produces.
+    pub fn is_xrgb8888(&self) -> bool {
+        self.bits_per_pixel == 32
+            && self.red_shift == 16
+            && self.green_shift == 8
+            && self.blue_shift == 0
+    }
+
+    /// Pack an RGB888 triple (wire format) into this framebuffer's native
+    /// 32-bit pixel layout. The unused/alpha byte is set opaque.
+    pub fn pack_rgb(&self, r: u8, g: u8, b: u8) -> u32 {
+        let mut v = ((r as u32) << self.red_shift)
+            | ((g as u32) << self.green_shift)
+            | ((b as u32) << self.blue_shift);
+        if self.bits_per_pixel == 32 {
+            v |= 0xFF00_0000;
+        }
+        v
+    }
+}
+
 impl Default for PixelFormat {
     /// Builds a default instance.
     fn default() -> Self {
