@@ -8,7 +8,7 @@
 extern crate alloc;
 
 use alloc::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     string::{String, ToString},
     sync::Arc,
     vec::Vec,
@@ -19,6 +19,28 @@ use strate_fs_abstraction::{
     FsCapabilities, FsError, FsResult, RenameFlags, VfsDirEntry, VfsFileInfo, VfsFileSystem,
     VfsFileType, VfsTimestamp, VfsVolumeInfo,
 };
+
+/// Maximum size of a single regular file, in bytes.
+///
+/// `write` and `set_size` refuse to grow a file past this bound *before*
+/// touching the allocator. Without it, an untrusted client could send a
+/// `WRITE` with an arbitrary offset, forcing `Vec::resize` to attempt a
+/// multi-gigabyte allocation that trips the allocator's OOM handler and
+/// kills the whole Silo (heap is only 2 MiB).
+pub const MAX_FILE_SIZE: usize = 1024 * 1024; // 1 MiB per file
+
+/// Maximum total bytes of file data across the whole filesystem.
+///
+/// The server heap is a small pool shared by every client of the Silo. This
+/// global budget stops a single client from creating/writing files until the
+/// allocator aborts (`exit(12)`). Headroom is reserved for directory
+/// metadata, inodes and the session table.
+pub const MAX_TOTAL_DATA: u64 = 1536 * 1024; // 1.5 MiB total
+
+/// Maximum number of nodes visited by a single tree walk
+/// (`directory_contains_inode`, `collect_detached_subtree`). Bounds the work
+/// performed per call and makes the walks cycle-proof.
+pub const MAX_TRAVERSAL_NODES: usize = 65536;
 
 /// Internal node type for RamFS
 enum RamNode {
@@ -51,6 +73,9 @@ pub struct RamFileSystem {
     inodes: RwLock<BTreeMap<u64, Arc<RamInode>>>,
     next_inode: AtomicU64,
     capabilities: FsCapabilities,
+    /// Bytes of file data currently stored across all inodes (budget guard
+    /// against exhausting the shared server heap).
+    total_data_bytes: AtomicU64,
 }
 
 impl RamFileSystem {
@@ -67,7 +92,23 @@ impl RamFileSystem {
             inodes: RwLock::new(inodes),
             next_inode: AtomicU64::new(10), // Start user inodes at 10
             capabilities: FsCapabilities::writable_linux(),
+            total_data_bytes: AtomicU64::new(0),
         }
+    }
+
+    /// Validates a directory entry name.
+    ///
+    /// Rejects empty names, `.` and `..` (which must stay virtual), and any
+    /// name containing a path separator or NUL so that no entry can shadow
+    /// POSIX path semantics.
+    fn validate_name(name: &str) -> FsResult<()> {
+        if name.is_empty() || name == "." || name == ".." {
+            return Err(FsError::InvalidArgument);
+        }
+        if name.bytes().any(|b| b == b'/' || b == b'\0') {
+            return Err(FsError::InvalidArgument);
+        }
+        Ok(())
     }
 
     /// Returns node.
@@ -80,12 +121,25 @@ impl RamFileSystem {
     }
 
     /// Implements allocate inode.
+    ///
+    /// Never reuses inode 0 (reserved) or 2 (root), and never overwrites an
+    /// id that is still present in the map, even if `next_inode` ever wraps.
+    /// The loop is bounded in practice: with a 2 MiB heap the map can never
+    /// hold 2^64 entries.
     fn allocate_inode(&self, node: RamNode) -> u64 {
-        let id = self.next_inode.fetch_add(1, Ordering::SeqCst);
-        self.inodes
-            .write()
-            .insert(id, Arc::new(RamInode::new(node)));
-        id
+        let inode = Arc::new(RamInode::new(node));
+        loop {
+            let id = self.next_inode.fetch_add(1, Ordering::SeqCst);
+            if id == 0 || id == 2 {
+                continue;
+            }
+            let mut map = self.inodes.write();
+            if map.contains_key(&id) {
+                continue;
+            }
+            map.insert(id, inode);
+            return id;
+        }
     }
 
     /// Implements lookup child inode.
@@ -120,8 +174,15 @@ impl RamFileSystem {
     }
 
     /// Implements register open.
+    ///
+    /// The inode-map read lock is held across the 0->1 CAS so a concurrent
+    /// GC (which removes inodes under the write lock only when the open
+    /// counter is 0) cannot collect this inode between our lookup and our
+    /// increment: the GC's write lock excludes us until the CAS lands, and
+    /// its re-check then sees a non-zero counter.
     pub fn register_open(&self, ino: u64) -> FsResult<()> {
-        let inode = self.get_node(ino)?;
+        let guard = self.inodes.read();
+        let inode = guard.get(&ino).cloned().ok_or(FsError::InodeNotFound)?;
         let mut current = inode.open_count.load(Ordering::Acquire);
         loop {
             if current == u32::MAX {
@@ -173,19 +234,39 @@ impl RamFileSystem {
     }
 
     /// Implements directory contains inode.
+    ///
+    /// Iterative walk with a visited set and a node budget: it can never loop
+    /// forever even if the tree is ever corrupted into containing a cycle,
+    /// and it bounds the work per call.
     fn directory_contains_inode(&self, root_dir_ino: u64, target_ino: u64) -> FsResult<bool> {
+        if root_dir_ino == target_ino {
+            return Ok(true);
+        }
+
         let mut stack = Vec::new();
         stack.push(root_dir_ino);
+        let mut visited = BTreeSet::new();
+        let mut nodes_seen = 0usize;
 
         while let Some(current) = stack.pop() {
-            if current == target_ino {
-                return Ok(true);
+            if !visited.insert(current) {
+                continue; // cycle guard
+            }
+            nodes_seen += 1;
+            if nodes_seen > MAX_TRAVERSAL_NODES {
+                return Err(FsError::ArithmeticOverflow);
             }
 
-            let node = self.get_node(current)?;
+            let node = match self.get_node(current) {
+                Ok(node) => node,
+                Err(_) => continue, // node vanished mid-walk
+            };
             let guard = node.node.lock();
             if let RamNode::Directory { entries, .. } = &*guard {
                 for &child in entries.values() {
+                    if child == target_ino {
+                        return Ok(true);
+                    }
                     stack.push(child);
                 }
             }
@@ -206,34 +287,70 @@ impl RamFileSystem {
     }
 
     /// Implements collect detached subtree.
-    fn collect_detached_subtree(&self, ino: u64) -> FsResult<()> {
-        if self.is_open(ino) {
-            return Ok(());
-        }
+    ///
+    /// Iterative (explicit stack) with a visited set and a node budget, so a
+    /// legitimately deep tree cannot overflow the stack and a corrupted tree
+    /// cannot loop. An inode is only removed under the map's write lock and
+    /// only when its open counter is still 0, so a concurrent `register_open`
+    /// cannot observe an inode that was just collected. File data freed here
+    /// is returned to the global data budget.
+    fn collect_detached_subtree(&self, root: u64) -> FsResult<()> {
+        let mut stack = Vec::new();
+        stack.push(root);
+        let mut visited = BTreeSet::new();
+        let mut nodes_seen = 0usize;
+        let mut freed = 0u64;
 
-        let children = match self.get_node(ino) {
-            Ok(node) => {
+        while let Some(ino) = stack.pop() {
+            if ino == self.root_inode() {
+                continue;
+            }
+            if !visited.insert(ino) {
+                continue; // cycle guard
+            }
+            nodes_seen += 1;
+            if nodes_seen > MAX_TRAVERSAL_NODES {
+                // Refuse unbounded work in a single call. The subtree is left
+                // in place rather than partially freed; a later pass retries.
+                return Err(FsError::ArithmeticOverflow);
+            }
+
+            let node = match self.get_node(ino) {
+                Ok(node) => node,
+                Err(_) => continue, // already collected
+            };
+            // Anything still open must survive.
+            if node.open_count.load(Ordering::Acquire) > 0 {
+                continue;
+            }
+
+            let mut children = Vec::new();
+            let mut data_bytes = 0usize;
+            {
                 let guard = node.node.lock();
                 match &*guard {
                     RamNode::Directory { entries, .. } => {
-                        let mut out = Vec::new();
                         for &child in entries.values() {
-                            out.push(child);
+                            children.push(child);
                         }
-                        out
                     }
-                    RamNode::File { .. } => Vec::new(),
+                    RamNode::File { data, .. } => data_bytes = data.len(),
                 }
             }
-            Err(_) => return Ok(()),
-        };
+            for child in children {
+                stack.push(child);
+            }
 
-        for child in children {
-            self.collect_detached_subtree(child)?;
+            // Re-check the open counter under the write lock before removing.
+            let mut map = self.inodes.write();
+            if node.open_count.load(Ordering::Acquire) == 0 {
+                map.remove(&ino);
+                freed += data_bytes as u64;
+            }
         }
 
-        if !self.is_open(ino) {
-            self.inodes.write().remove(&ino);
+        if freed > 0 {
+            self.total_data_bytes.fetch_sub(freed, Ordering::AcqRel);
         }
         Ok(())
     }
@@ -328,8 +445,27 @@ impl VfsFileSystem for RamFileSystem {
             } => {
                 let start = usize::try_from(offset).map_err(|_| FsError::InvalidArgument)?;
                 let end = start.checked_add(data.len()).ok_or(FsError::FileTooLarge)?;
+                // Cap the file size *before* any resize: on a 64-bit target
+                // `usize::try_from(offset)` never fails, so an arbitrary
+                // offset must not be able to force a giant allocation that
+                // aborts the whole Silo.
+                if end > MAX_FILE_SIZE {
+                    return Err(FsError::FileTooLarge);
+                }
                 if end > file_data.len() {
+                    let growth = end - file_data.len();
+                    let used = self.total_data_bytes.load(Ordering::Acquire);
+                    if used.saturating_add(growth as u64) > MAX_TOTAL_DATA {
+                        return Err(FsError::NoSpace);
+                    }
+                    // `try_reserve` turns allocator failure into a logical
+                    // error instead of hitting the OOM handler (exit).
+                    if file_data.try_reserve(growth).is_err() {
+                        return Err(FsError::NoSpace);
+                    }
                     file_data.resize(end, 0);
+                    self.total_data_bytes
+                        .fetch_add(growth as u64, Ordering::AcqRel);
                 }
                 file_data[start..end].copy_from_slice(data);
                 Ok(data.len())
@@ -373,6 +509,7 @@ impl VfsFileSystem for RamFileSystem {
 
     /// Implements create file.
     fn create_file(&self, parent_ino: u64, name: &str, mode: u32) -> FsResult<VfsFileInfo> {
+        Self::validate_name(name)?;
         let parent = self.get_node(parent_ino)?;
         {
             let guard = parent.node.lock();
@@ -411,6 +548,7 @@ impl VfsFileSystem for RamFileSystem {
 
     /// Implements create directory.
     fn create_directory(&self, parent_ino: u64, name: &str, mode: u32) -> FsResult<VfsFileInfo> {
+        Self::validate_name(name)?;
         let parent = self.get_node(parent_ino)?;
         {
             let guard = parent.node.lock();
@@ -464,34 +602,37 @@ impl VfsFileSystem for RamFileSystem {
             return Err(FsError::InvalidArgument);
         }
 
-        let node = self.get_node(child_ino)?;
-        {
-            let node_guard = node.node.lock();
-            if let RamNode::Directory {
-                entries: child_entries,
-                ..
-            } = &*node_guard
-            {
-                if !child_entries.is_empty() {
-                    return Err(FsError::NotEmpty);
-                }
-            }
-        }
+        let child = self.get_node(child_ino)?;
 
-        let mut guard = parent.node.lock();
-        match &mut *guard {
-            RamNode::Directory { entries, .. } => {
-                let current = *entries.get(name).ok_or(FsError::NotFound)?;
-                if current != child_ino {
-                    return Err(FsError::InvalidArgument);
+        // Hold the child's lock while removing from the parent, so the
+        // "directory is empty" check and the removal are atomic w.r.t. a
+        // concurrent create_file in the same directory. Lock order is always
+        // parent -> child; nothing takes child then parent, so no deadlock.
+        {
+            let mut guard = parent.node.lock();
+            let mut child_guard = child.node.lock();
+            match &mut *guard {
+                RamNode::Directory { entries, .. } => {
+                    let current = *entries.get(name).ok_or(FsError::NotFound)?;
+                    if current != child_ino {
+                        return Err(FsError::InvalidArgument);
+                    }
+                    if let RamNode::Directory {
+                        entries: child_entries,
+                        ..
+                    } = &mut *child_guard
+                    {
+                        if !child_entries.is_empty() {
+                            return Err(FsError::NotEmpty);
+                        }
+                    }
+                    entries.remove(name);
                 }
-                entries.remove(name);
-                drop(guard);
-                self.collect_if_detached(child_ino)?;
-                Ok(())
+                _ => return Err(FsError::NotADirectory),
             }
-            _ => Err(FsError::NotADirectory),
         }
+        self.collect_if_detached(child_ino)?;
+        Ok(())
     }
 
     /// Implements rename.
@@ -512,6 +653,7 @@ impl VfsFileSystem for RamFileSystem {
         if flags.no_replace && flags.replace_if_exists {
             return Err(FsError::InvalidArgument);
         }
+        Self::validate_name(new_name)?;
 
         let old_parent_node = self.get_node(old_parent)?;
         let moved_ino = {
@@ -582,6 +724,20 @@ impl VfsFileSystem for RamFileSystem {
             }
         }
 
+        // Re-check the anti-cycle condition immediately before the final
+        // insertion. The traversal is cycle-safe (visited set + budget), so a
+        // residual cycle cannot hang here; this closes the check/act gap that
+        // the earlier check above would otherwise leave open.
+        {
+            let moved_node = self.get_node(moved_ino)?;
+            let moved_guard = moved_node.node.lock();
+            if let RamNode::Directory { .. } = &*moved_guard {
+                if self.directory_contains_inode(moved_ino, new_parent)? {
+                    return Err(FsError::InvalidArgument);
+                }
+            }
+        }
+
         let mut guard = new_parent_node.node.lock();
         match &mut *guard {
             RamNode::Directory { entries, .. } => {
@@ -607,8 +763,31 @@ impl VfsFileSystem for RamFileSystem {
         let mut guard = node.node.lock();
         match &mut *guard {
             RamNode::File { data, .. } => {
+                if size > MAX_FILE_SIZE as u64 {
+                    return Err(FsError::FileTooLarge);
+                }
                 let new_size = usize::try_from(size).map_err(|_| FsError::FileTooLarge)?;
-                data.resize(new_size, 0);
+                let old_len = data.len();
+                if new_size > old_len {
+                    let growth = new_size - old_len;
+                    let used = self.total_data_bytes.load(Ordering::Acquire);
+                    if used.saturating_add(growth as u64) > MAX_TOTAL_DATA {
+                        return Err(FsError::NoSpace);
+                    }
+                    if data.try_reserve(growth).is_err() {
+                        return Err(FsError::NoSpace);
+                    }
+                    data.resize(new_size, 0);
+                    self.total_data_bytes
+                        .fetch_add(growth as u64, Ordering::AcqRel);
+                } else {
+                    // Shrinking returns bytes to the shared budget.
+                    data.resize(new_size, 0);
+                    let freed = (old_len - new_size) as u64;
+                    if freed > 0 {
+                        self.total_data_bytes.fetch_sub(freed, Ordering::AcqRel);
+                    }
+                }
                 Ok(())
             }
             _ => Err(FsError::IsADirectory),
