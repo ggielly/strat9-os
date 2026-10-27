@@ -51,7 +51,7 @@ pub use pipe::PipeScheme;
 pub use procfs::ProcScheme;
 pub use ramfs_scheme::RamfsScheme;
 pub use scheme::{
-    DirEntry, DynScheme, FileFlags, FileStat, IpcScheme, KernelScheme, OpenFlags, Scheme,
+    DirEntry, DynScheme, FileFlags, FileStat, IpcScheme, KernelScheme, OpenFlags, Scheme, DT_DIR,
 };
 pub use scheme_router::{
     get_initfs_file_bytes, init_builtin_schemes, list_schemes, mount_scheme, register_initfs_file,
@@ -406,7 +406,39 @@ pub fn getdents(fd: u32) -> Result<alloc::vec::Vec<DirEntry>, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let fd_table = unsafe { &*task.process.fd_table.get() };
     let file = fd_table.get(fd)?;
-    file.readdir()
+    let mut entries = file.readdir()?;
+
+    // Mounts are VFS prefixes, not entries of the underlying scheme. Merge
+    // the direct child mounts of this directory so `ls /dev` shows
+    // `console`, `display`, `input`, `pts`, ... even though the /dev scheme
+    // itself only knows null/zero/random/urandom.
+    let dir = file.path().trim_end_matches('/');
+    let dir = if dir.is_empty() { "/" } else { dir };
+    for prefix in list_mounts() {
+        let child = if dir == "/" {
+            prefix.strip_prefix('/')
+        } else {
+            prefix
+                .strip_prefix(dir)
+                .and_then(|rest| rest.strip_prefix('/'))
+        };
+        let Some(child) = child else {
+            continue;
+        };
+        if child.is_empty() || child.contains('/') {
+            continue;
+        }
+        if entries.iter().any(|entry| entry.name == child) {
+            continue;
+        }
+        entries.push(DirEntry {
+            ino: 0,
+            file_type: DT_DIR,
+            name: String::from(child),
+        });
+    }
+
+    Ok(entries)
 }
 
 /// Create a background stdin: a pipe read-end whose write end is immediately
@@ -1420,6 +1452,15 @@ pub fn init() {
         log::error!("[VFS] Failed to mount /dev: {:?}", e);
     } else {
         log::info!("[VFS] Mounted /dev (block-device scheme)");
+    }
+
+    // Display scheme (/dev/display) : registered by the framebuffer init, but
+    // mount it here as a safety net (ordering between FB and VFS init is not
+    // guaranteed, and a duplicate mount is harmless).
+    match mount_scheme("display", "/dev/display") {
+        Ok(()) => log::info!("[VFS] Mounted /dev/display (display scheme)"),
+        Err(SyscallError::AlreadyExists) => {}
+        Err(e) => log::warn!("[VFS] /dev/display not mounted: {:?}", e),
     }
 
     // Console scheme (/dev/console) : backs stdin/stdout/stderr for ELF processes
