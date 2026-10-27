@@ -337,7 +337,44 @@ impl Scheme for DisplayScheme {
                 Ok(buf.len())
             }
             Handle::Damage => {
-                // Parse: "present" or "display_id,x,y,w,h" or just "x,y,w,h" for display 0.
+                // Binary protocol (preferred):
+                //   "DMG2" | count u16le | display u16le | (x,y,w,h) u16le * count
+                // One syscall can present several disjoint rectangles.
+                if buf.len() >= 8 && buf.starts_with(b"DMG2") {
+                    let count = u16::from_le_bytes([buf[4], buf[5]]) as usize;
+                    let display_id = u16::from_le_bytes([buf[6], buf[7]]) as u32;
+                    if count > 1024 || buf.len() < 8 + count.saturating_mul(8) {
+                        return Err(SyscallError::InvalidArgument);
+                    }
+                    let adapter = get_adapter_for_display(display_id as usize);
+                    let screen = self.screens.read().get(&display_id).cloned();
+                    if let (Some((adapter, local_id)), Some(screen)) = (adapter, screen) {
+                        let scr = screen.read();
+                        for i in 0..count {
+                            let off = 8 + i * 8;
+                            let x = u16::from_le_bytes([buf[off], buf[off + 1]]) as u32;
+                            let y = u16::from_le_bytes([buf[off + 2], buf[off + 3]]) as u32;
+                            let w = u16::from_le_bytes([buf[off + 4], buf[off + 5]]) as u32;
+                            let h = u16::from_le_bytes([buf[off + 6], buf[off + 7]]) as u32;
+                            if w == 0 || h == 0 {
+                                continue;
+                            }
+                            adapter.update_plane(
+                                local_id,
+                                &*scr,
+                                Damage {
+                                    x,
+                                    y,
+                                    width: w,
+                                    height: h,
+                                },
+                            );
+                        }
+                    }
+                    return Ok(buf.len());
+                }
+
+                // Legacy text protocol: "present", "[display,]x,y,w,h".
                 let s = core::str::from_utf8(buf).unwrap_or("").trim();
                 if s == "present" || s.is_empty() {
                     // Present all displays.

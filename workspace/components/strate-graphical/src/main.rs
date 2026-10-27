@@ -542,8 +542,16 @@ fn send_damage(dmg_fd: u32, x: u32, y: u32, w: u32, h: u32) {
     if w == 0 || h == 0 {
         return;
     }
-    let s = format!("{},{},{},{}", x, y, w, h);
-    let _ = call::write(dmg_fd as usize, s.as_bytes());
+    // Binary DMG2 protocol: magic, rect count, display id, then one rect.
+    let mut msg = [0u8; 16];
+    msg[0..4].copy_from_slice(b"DMG2");
+    msg[4..6].copy_from_slice(&1u16.to_le_bytes());
+    msg[6..8].copy_from_slice(&0u16.to_le_bytes());
+    msg[8..10].copy_from_slice(&(x as u16).to_le_bytes());
+    msg[10..12].copy_from_slice(&(y as u16).to_le_bytes());
+    msg[12..14].copy_from_slice(&(w as u16).to_le_bytes());
+    msg[14..16].copy_from_slice(&(h as u16).to_le_bytes());
+    let _ = call::write(dmg_fd as usize, &msg);
 }
 
 /// Write one rectangle of pixels in a SINGLE scheme write using wire
