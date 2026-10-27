@@ -40,6 +40,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use spin::{Once, RwLock};
 
 const MAX_HANDLES: usize = 64;
+/// Maximum bytes copied by one snapshot read. Keeps a single syscall bounded
+/// and lets the lock be released between chunks.
+const MAX_SNAPSHOT_READ: usize = 64 * 1024;
 
 /// SIMD pixel-ingest ops for the Screen write path (RGB888 wire format ->
 /// screen format). Detected once on first use; falls back to scalar
@@ -59,6 +62,11 @@ enum Handle {
     /// ownership: a writable handle hands the framebuffer from the kernel to
     /// the display strate, and the matching close hands it back.
     Screen(u32, Arc<RwLock<HeapScreen>>, bool),
+    /// Bounded, explicit screenshot stream for a display (raw native pixels).
+    ///
+    /// `writable` is required for reads: a plain READ-only open (`cat`) is
+    /// refused so the console cannot be flooded by accident.
+    Snapshot(u32, bool),
     Damage,
     Clear,
 }
@@ -141,6 +149,17 @@ impl Scheme for DisplayScheme {
             Handle::Damage
         } else if path == "clear" {
             Handle::Clear
+        } else if path == "snapshot" {
+            let _ = self.get_or_create_screen(0);
+            Handle::Snapshot(0, flags.contains(OpenFlags::WRITE))
+        } else if let Some(prefix) = path.strip_suffix(".snapshot") {
+            let display_id: u32 = prefix
+                .split('.')
+                .next()
+                .and_then(|id| id.parse().ok())
+                .ok_or(SyscallError::NotFound)?;
+            let _ = self.get_or_create_screen(display_id);
+            Handle::Snapshot(display_id, flags.contains(OpenFlags::WRITE))
         } else if let Some(display_id) = Self::parse_display_path(path) {
             let screen = self.get_or_create_screen(display_id);
             Handle::Screen(display_id, screen, flags.contains(OpenFlags::WRITE))
@@ -160,6 +179,7 @@ impl Scheme for DisplayScheme {
             Handle::Root => FileFlags::DIRECTORY,
             Handle::Info => FileFlags::DEVICE,
             Handle::Screen(..) => FileFlags::DEVICE | FileFlags::CHUNK_WRITE,
+            Handle::Snapshot(..) => FileFlags::DEVICE | FileFlags::CHUNK_READ,
             Handle::Damage | Handle::Clear => FileFlags::DEVICE | FileFlags::CHUNK_WRITE,
         };
 
@@ -243,6 +263,27 @@ impl Scheme for DisplayScheme {
                 let scr = screen.read();
                 Ok(scr.read_into(offset as usize, buf))
             }
+            Handle::Snapshot(display_id, writable) => {
+                // Explicit bounded capture stream. READ-only opens are denied
+                // so `cat snapshot` cannot flood the terminal either.
+                if !*writable {
+                    return Err(SyscallError::PermissionDenied);
+                }
+                let screen = self
+                    .screens
+                    .read()
+                    .get(display_id)
+                    .cloned()
+                    .ok_or(SyscallError::NotFound)?;
+                let scr = screen.read();
+                let start = offset as usize;
+                if start >= scr.size() {
+                    return Ok(0);
+                }
+                let max = core::cmp::min(buf.len(), MAX_SNAPSHOT_READ);
+                let n = core::cmp::min(max, scr.size() - start);
+                Ok(scr.read_into(start, &mut buf[..n]))
+            }
             Handle::Damage | Handle::Clear => Err(SyscallError::PermissionDenied),
         }
     }
@@ -252,7 +293,9 @@ impl Scheme for DisplayScheme {
         let handle = h.get(&fid).ok_or(SyscallError::BadHandle)?;
 
         match handle {
-            Handle::Root | Handle::Info => Err(SyscallError::PermissionDenied),
+            Handle::Root | Handle::Info | Handle::Snapshot(..) => {
+                Err(SyscallError::PermissionDenied)
+            }
             Handle::Screen(_display_id, screen, _) => {
                 // Write pixel data to offscreen buffer.
                 //
@@ -549,6 +592,25 @@ impl Scheme for DisplayScheme {
                 DEV_CHAR_FS,
                 2 + *did as u64,
             ),
+            Handle::Snapshot(did, _) => {
+                let size = self
+                    .screens
+                    .read()
+                    .get(did)
+                    .map(|screen| screen.read().size())
+                    .unwrap_or(0);
+                finalize_pseudo_stat(
+                    FileStat {
+                        st_ino: 0x102,
+                        st_mode: 0o0100444,
+                        st_nlink: 1,
+                        st_size: size as u64,
+                        ..FileStat::zeroed()
+                    },
+                    DEV_CHAR_FS,
+                    0x102,
+                )
+            }
             Handle::Damage => finalize_pseudo_stat(
                 FileStat {
                     st_ino: 0x100,
@@ -597,6 +659,11 @@ impl Scheme for DisplayScheme {
             });
         }
 
+        entries.push(DirEntry {
+            ino: 0x102,
+            file_type: DT_CHR,
+            name: String::from("snapshot"),
+        });
         entries.push(DirEntry {
             ino: 0x100,
             file_type: DT_CHR,
