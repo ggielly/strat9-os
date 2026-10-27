@@ -106,8 +106,9 @@ fn vgabuf_flush_all_direct() {
     for i in 0..count {
         lines[i] = core::str::from_utf8(owned[i].as_bytes()).unwrap_or("<non-utf8>");
     }
-    if count > 0 {
-        crate::arch::x86_64::vga::panic_draw_direct(&lines[..count]);
+    let mut lines = [""; MAX_LINES];
+    for i in 0..count {
+        lines[i] = core::str::from_utf8(owned[i].as_bytes()).unwrap_or("<non-utf8>");
     }
 }
 

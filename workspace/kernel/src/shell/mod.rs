@@ -359,6 +359,11 @@ pub extern "C" fn shell_main() -> ! {
         }
 
         if let Some(ch) = crate::arch::keyboard::read_char() {
+            unsafe {
+                core::arch::asm!("out 0xe9, al", in("al") b'R', options(nomem, nostack));
+                core::arch::asm!("out 0xe9, al", in("al") ch, options(nomem, nostack));
+                core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
+            }
             // Any keypress returns the view to live output.
             if crate::arch::vga::is_available() {
                 crate::arch::vga::scroll_to_live();

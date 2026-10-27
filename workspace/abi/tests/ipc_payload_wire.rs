@@ -131,13 +131,14 @@ fn status_reply_wire_bytes() {
 
 #[test]
 fn open_reply_layout_offsets() {
+    // Current wire layout (24 bytes, packed): status @0, file_id @4,
+    // size @12, file_flags @20. The earlier 32-byte layout with
+    // `_pad0/ino/_pad1` was never produced by any server.
     let reply = OpenReply {
         status: 0,
-        _pad0: 0,
-        ino: 42,
+        file_id: 42,
         size: 0x1000,
         file_flags: 3,
-        _pad1: 0,
     };
     let b = reply.as_bytes();
     assert_eq!(b.len(), 32);
@@ -170,18 +171,25 @@ fn read_reply_count_matches_data_len_contract() {
 }
 
 #[test]
-fn create_request_embeds_inline_blob_header() {
+fn create_request_is_mode_plus_raw_path_length() {
+    // Same wire convention as OpenRequest: mode @0..4, raw u16 path_len
+    // @4..6, path @6.. (no InlineBlobHeader, 6-byte prefix total).
     let mut payload = [0u8; PAYLOAD];
+    let path = "/dev";
     payload[0..4].copy_from_slice(&0o755u32.to_le_bytes()); // mode
-    let hdr = InlineBlobHeader { len: 5, kind: 0 };
-    payload[4..8].copy_from_slice(hdr.as_bytes());
-    put_str(&mut payload, 8, "/dev").unwrap();
+    payload[4..6].copy_from_slice(&(path.len() as u16).to_le_bytes());
+    put_str(&mut payload, CreateRequest::PATH_OFFSET, path).unwrap();
 
-    assert_eq!(size_of::<CreateRequest>(), 8); // mode(4) + hdr(4)
-    let mode = u32::from_le_bytes(payload[0..4].try_into().unwrap());
-    let parsed_hdr = InlineBlobHeader::parse(&payload, 4).unwrap();
+    assert_eq!(size_of::<CreateRequest>(), 6); // mode(4) + path_len(2)
+    assert_eq!(CreateRequest::PATH_OFFSET, 6);
+
+    let (mode, parsed) = CreateRequest::parse(&payload).expect("valid create");
     assert_eq!(mode, 0o755);
-    assert_eq!((parsed_hdr.len, parsed_hdr.kind), (5, 0));
+    assert_eq!(parsed, path);
+
+    // A length prefix that claims more bytes than available is rejected.
+    payload[4..6].copy_from_slice(&1000u16.to_le_bytes());
+    assert!(CreateRequest::parse(&payload).is_none());
 }
 
 #[test]
@@ -216,12 +224,27 @@ fn lseek_whence_values_documented() {
 }
 
 // ===========================================================================
-// F5 regression guard: decode_fixed must work for EVERY fixed-size reply
+// Fixed-size payloads: pinned sizes (packed, no padding surprises)
 // ===========================================================================
 
 #[test]
-fn decode_fixed_works_for_all_fixed_payload_structs() {
-    use strat9_abi::ipc_codec::decode_fixed;
+fn fixed_payload_sizes_are_pinned() {
+    // `decode_fixed`/`encode_fixed` only cover the `data::*` types; scheme
+    // payloads expose explicit `parse`/`encode_into` instead, so what must
+    // be pinned here is the exact wire size of each struct.
+    assert_eq!(size_of::<StatusReply>(), 4);
+    assert_eq!(size_of::<OpenReply>(), 24);
+    assert_eq!(size_of::<ReadReply>(), 8);
+    assert_eq!(size_of::<WriteReply>(), 8);
+    assert_eq!(size_of::<CreateReply>(), 12);
+    assert_eq!(size_of::<LseekReply>(), 16);
+    assert_eq!(size_of::<TcpConnectReply>(), 16);
+    assert_eq!(size_of::<CloseRequest>(), 8);
+    assert_eq!(size_of::<StatRequest>(), 8);
+    assert_eq!(size_of::<ReadRequest>(), 24);
+    assert_eq!(size_of::<CreateRequest>(), 6);
+    assert_eq!(size_of::<OpenRequest>(), 6);
+    assert_eq!(size_of::<WriteRequest>(), 18);
 
     macro_rules! roundtrip {
         ($ty:ty, $val:expr) => {{

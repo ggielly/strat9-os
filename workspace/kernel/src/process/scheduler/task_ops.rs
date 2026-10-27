@@ -1150,10 +1150,7 @@ pub fn kill_task(id: TaskId) -> bool {
                     lockdep_acquire(LockRank::IdentityW, None);
                     let mut identity = SCHED_IDENTITY.write();
                     GlobalSchedState::unregister_identity_locked(
-                        &mut identity,
-                        id,
-                        task_pid,
-                        current.tid,
+                        &mut identity, id, task_pid, current.tid,
                     );
                     identity.parent_of.remove(&current.id);
                     lockdep_release(LockRank::IdentityW);
@@ -1228,10 +1225,7 @@ pub fn kill_task(id: TaskId) -> bool {
                             lockdep_acquire(LockRank::IdentityW, None);
                             let mut identity = SCHED_IDENTITY.write();
                             GlobalSchedState::unregister_identity_locked(
-                                &mut identity,
-                                id,
-                                task_pid,
-                                task.tid,
+                                &mut identity, id, task_pid, task.tid,
                             );
                             lockdep_release(LockRank::IdentityW);
                             drop(identity);
@@ -1262,10 +1256,7 @@ pub fn kill_task(id: TaskId) -> bool {
                         lockdep_acquire(LockRank::IdentityW, None);
                         let mut identity = SCHED_IDENTITY.write();
                         GlobalSchedState::unregister_identity_locked(
-                            &mut identity,
-                            id,
-                            task_pid,
-                            task.tid,
+                            &mut identity, id, task_pid, task.tid,
                         );
                         lockdep_release(LockRank::IdentityW);
                         drop(identity);

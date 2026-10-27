@@ -71,5 +71,5 @@ ratatui = { version = "0.30.0", default-features = false }
 
 ###
 [build-dependencies]
-cc = "1.0"
+#cc = "1.0"
 nasm-rs = "0.3.2"

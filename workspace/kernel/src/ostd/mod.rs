@@ -15,7 +15,6 @@
 
 extern crate alloc;
 
-pub mod boot;
 pub mod cpu;
 pub mod mm;
 pub mod task;

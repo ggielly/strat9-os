@@ -93,6 +93,73 @@ impl Drop for UserAccessGuard {
 impl !Send for UserAccessGuard {}
 impl !Sync for UserAccessGuard {}
 
+// ===========================================================================
+// UserPod : marker trait for types safe to read/write via UserSlice
+// ===========================================================================
+
+/// Marker trait for types whose every bit pattern is valid (POD / plain old data).
+///
+/// This is an **unsafe** trait: implementors must guarantee that every possible
+/// bit pattern of the type is a valid value.  This prevents reading into bools,
+/// enums with invalid discriminants, references, pointers, or other non-POD types.
+///
+/// # Implementors
+///
+/// Only implement this for types where *all* bit patterns are valid:
+/// primitive integer types, `#[repr(C)]` structs of `UserPod` fields, etc.
+/// Never implement for `bool`, `char`, enums, references, or pointers.
+pub unsafe trait UserPod: Copy + 'static {}
+
+unsafe impl UserPod for u8 {}
+unsafe impl UserPod for u16 {}
+unsafe impl UserPod for u32 {}
+unsafe impl UserPod for u64 {}
+unsafe impl UserPod for i8 {}
+unsafe impl UserPod for i16 {}
+unsafe impl UserPod for i32 {}
+unsafe impl UserPod for i64 {}
+unsafe impl UserPod for usize {}
+unsafe impl UserPod for isize {}
+
+// ===========================================================================
+// UserAccessGuard : RAII guard for SMAP/AC stac/clac
+// ===========================================================================
+
+/// RAII guard that disables Supervisor Mode Access Prevention (SMAP) on
+/// creation and re-enables it on drop.  Ensures AC is restored on all
+/// code paths including panics and early returns.
+///
+/// # Usage
+///
+/// ```ignore
+/// let _guard = UserAccessGuard::new();
+/// // ... access user memory safely ...
+/// // AC is re-enabled when _guard is dropped.
+/// ```
+pub struct UserAccessGuard {
+    _private: (),
+}
+
+impl UserAccessGuard {
+    /// Disable SMAP (set AC flag) and return a guard that will re-enable it on drop.
+    #[inline]
+    pub fn new() -> Self {
+        crate::arch::stac();
+        UserAccessGuard { _private: () }
+    }
+}
+
+impl Drop for UserAccessGuard {
+    #[inline]
+    fn drop(&mut self) {
+        crate::arch::clac();
+    }
+}
+
+// UserAccessGuard is per-CPU state and must not be sent across threads.
+impl !Send for UserAccessGuard {}
+impl !Sync for UserAccessGuard {}
+
 /// End of user-accessible virtual address space.
 ///
 /// On x86_64 with 4-level paging, canonical user addresses are

@@ -347,6 +347,13 @@ ${QEMU} \
 # i8042 PS/2 controller, which the kernel handles (IRQ1 -> scancodes -> shell read_char verified
 # end-to-end). Re-add USB once hardware/usb/xhci.rs enumerates devices.
 
+# NOTE (keyboard): -device usb-kbd/-device usb-tablet/-device usb-ehci/-device qemu-xhci were
+# REMOVED here. QEMU routes GTK input to the first attached keyboard device; with a USB keyboard
+# present, keys went to the USB HID path, which the kernel's xHCI driver does not yet drive
+# (BAR0 unassigned -> HCSPARAMS reads 0 -> no port enumeration). Without them, input goes to the
+# i8042 PS/2 controller, which the kernel handles (IRQ1 -> scancodes -> shell read_char verified
+# end-to-end). Re-add USB once hardware/usb/xhci.rs enumerates devices.
+
 [tasks.run-gui-smp-dev-opt]
 description = "Run kernel SMP dev-opt with GUI"
 dependencies = ["uefi-image"]

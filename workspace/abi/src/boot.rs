@@ -1,4 +1,4 @@
-//! Bootloader-to-kernel handoff ABI (v2).
+//! Bootloader-to-kernel handoff ABI (v5).
 //!
 //! This module defines the data structures passed from the bootloader
 //! to the kernel at entry point. The kernel reads these structures
@@ -8,7 +8,7 @@
 //! # Boot flow
 //!
 //! ```text
-//! UEFI/BIOS => bootloader => kernel_main(KernelArgs)
+//! UEFI => bootloader => kernel_main(KernelArgs)
 //! ```
 //!
 //! The bootloader populates `KernelArgs` in a reserved memory region,
@@ -17,15 +17,17 @@
 //!
 //! # ABI stability
 //!
-//! The `KernelArgs` layout is frozen per ABI version. Changing the layout
-//! requires bumping [`STRAT9_BOOT_ABI_VERSION`] and updating both
-//! bootloader and kernel simultaneously.
+//! The `KernelArgs` layout is frozen per ABI version. Any layout change
+//! **and** any change to the value set of [`MemoryKind`] requires bumping
+//! [`STRAT9_BOOT_ABI_VERSION`] and updating both bootloader and kernel
+//! simultaneously: the kernel refuses to boot on a version mismatch.
 //!
 //! # Virtual memory layout (BOOTBOOT-inspired)
 //!
 //! ```text
-//! 0xFFFF_DEAD_0000_0000  => Framebuffer (read-only after boot)
+//! 0xFFFF_DEAD_0000_0000  => Framebuffer window (UC, read-only after boot)
 //! 0xFFFF_BEEF_0000_0000  => Environment string (key=value)
+//! 0xFFFF_FF00_0000_0000  => Higher-half direct map (HHDM)
 //! 0xFFFFFFFF_8000_0000  => Kernel code/data
 //! 0x0000_0000_0000_0000  => Identity map (first 4GB)
 //! ```
@@ -46,8 +48,8 @@
 //!         }
 //!     }
 //!
-//!     // Framebuffer (already mapped at 0xFFFF_DEAD_0000_0000)
-//!     let fb = args.framebuffer_addr as *mut u32;
+//!     // Framebuffer: physical address, map it through the HHDM first.
+//!     let fb = (args.framebuffer_addr + args.hhdm_offset) as *mut u32;
 //!
 //!     // Environment (key=value pairs)
 //!     if let Some(baud) = args.env_get("console.baud") {
@@ -64,7 +66,10 @@
 use zerocopy::{FromBytes, IntoBytes};
 
 /// ABI version for the boot handoff structure.
-pub const STRAT9_BOOT_ABI_VERSION: u32 = 4;
+///
+/// History: 2 = first documented handoff, 3 = framebuffer masks, 4 = BSS
+/// range fields, 5 = [`MemoryKind::Bad`] and [`MemoryKind::AcpiNvs`] added.
+pub const STRAT9_BOOT_ABI_VERSION: u32 = 5;
 
 /// Magic number validating the boot handoff (`"ST9B"` in ASCII).
 pub const STRAT9_BOOT_MAGIC: u32 = 0x5354_3942; // "ST9B"
@@ -88,7 +93,7 @@ const MODULE_TABLE_HEADER_SIZE: usize = core::mem::offset_of!(ModuleTable, entri
 ///
 /// ## Identity (8 bytes)
 /// - `magic`: must equal [`STRAT9_BOOT_MAGIC`] (`0x5354_3942`)
-/// - `abi_version`: must equal [`STRAT9_BOOT_ABI_VERSION`] (currently `3`)
+/// - `abi_version`: must equal [`STRAT9_BOOT_ABI_VERSION`] (currently `5`)
 ///
 /// ## Kernel memory (16 bytes)
 /// - `kernel_base`: physical address of the kernel ELF image
@@ -102,7 +107,9 @@ const MODULE_TABLE_HEADER_SIZE: usize = core::mem::offset_of!(ModuleTable, entri
 /// - `memory_map_size`: total size of the memory map in bytes
 ///
 /// ## Framebuffer (8 bytes + masks)
-/// - `framebuffer_addr`: **virtual** address (`0xFFFF_DEAD_0000_0000`)
+/// - `framebuffer_addr`: **physical** address of pixel 0. The loader also
+///   maps a read-only window at `0xFFFF_DEAD_0000_0000`; the kernel may use
+///   either the window or the physical address (via HHDM/identity mapping).
 ///
 /// ## HHDM (8 bytes)
 /// - `hhdm_offset`: Higher Half Direct Map offset
@@ -114,6 +121,10 @@ const MODULE_TABLE_HEADER_SIZE: usize = core::mem::offset_of!(ModuleTable, entri
 /// ## Modules (16 bytes)
 /// - `modules_base`: physical address of the [`ModuleTable`]
 /// - `modules_size`: total size of the module table in bytes
+///
+/// ## BSS (16 bytes)
+/// - `bss_virt_base`: virtual start of the kernel's zero-fill tail
+/// - `bss_virt_size`: size of that tail (0 when the image has none)
 #[derive(Debug, FromBytes, IntoBytes)]
 #[repr(C, packed)]
 pub struct KernelArgs {
@@ -379,16 +390,32 @@ pub struct MemoryRegion {
 }
 
 /// Memory region type identifier.
+///
+/// The value set is part of the ABI: adding a variant requires bumping
+/// [`STRAT9_BOOT_ABI_VERSION`] (see v5, which added `Bad` and `AcpiNvs`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FromBytes, IntoBytes)]
 #[repr(transparent)]
 pub struct MemoryKind(pub u64);
 
 #[allow(non_upper_case_globals)]
 impl MemoryKind {
+    /// Placeholder never emitted by the loader.
     pub const Null: Self = Self(0);
+    /// Usable RAM: the kernel may hand it to its allocator.
     pub const Free: Self = Self(1);
+    /// Firmware memory that becomes usable once its content has been
+    /// consumed (boot-services code/data, loader image, ACPI reclaimable
+    /// is **not** included: see `Reserved`).
     pub const Reclaim: Self = Self(2);
+    /// Reserved for firmware, devices or the bootloader. Never allocate.
     pub const Reserved: Self = Self(3);
+    /// Memory the firmware marked unusable (UEFI `EfiUnusableMemory`):
+    /// hardware errors or address holes. Never allocate, never touch.
+    pub const Bad: Self = Self(4);
+    /// ACPI NVS memory (`EfiACPIReclaimMemory`'s non-volatile sibling):
+    /// holds firmware tables that must survive for the whole system
+    /// lifetime. Never allocate; the kernel may read it.
+    pub const AcpiNvs: Self = Self(5);
 }
 
 // ABI size assertions (packed: no padding, 132 bytes with BSS fields)
