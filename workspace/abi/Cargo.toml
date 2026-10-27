@@ -9,3 +9,6 @@ authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
 zerocopy = { workspace = true }
 bitflags = { workspace = true }
 static_assertions = "1.1"
+
+[lints]
+workspace = true

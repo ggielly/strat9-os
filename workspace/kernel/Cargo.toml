@@ -31,7 +31,9 @@ crossbeam-queue = { version = "0.3.12", default-features = false, features = [
 ] }
 smallvec = { version = "1.13", default-features = false }
 
-heapless = { version = "0.9", default-features = false, features = ["mpmc_large"] }
+heapless = { version = "0.9", default-features = false, features = [
+    "mpmc_large",
+] }
 intrusive-collections = { version = "0.9", default-features = false, features = [
     "alloc",
 ] }
@@ -71,5 +73,5 @@ ratatui = { version = "0.30.0", default-features = false }
 
 ###
 [build-dependencies]
-cc = "1.0"
+#cc = "1.0"
 nasm-rs = "0.3.2"
