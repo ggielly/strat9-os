@@ -803,7 +803,59 @@ pub fn init() {
         }
     }
 
-    // VirtIO GPU and AMDGPU not available, UEFI bootloader framebuffer is already set up in boot
+    // VirtIO GPU and AMDGPU not available: adopt the bootloader framebuffer.
+    // The early VGA console already uses it, but the display scheme needs a
+    // `FramebufferInfo` entry, which only `init_bootloader` publishes.
+    if !Framebuffer::is_available() {
+        if let Some(args) = crate::boot_args() {
+            if args.framebuffer_addr != 0
+                && args.framebuffer_stride != 0
+                && args.framebuffer_height != 0
+            {
+                let hhdm = crate::memory::hhdm_offset();
+                let fb_virt = if hhdm != 0 && args.framebuffer_addr < hhdm {
+                    crate::memory::phys_to_virt(args.framebuffer_addr)
+                } else {
+                    args.framebuffer_addr
+                };
+                let mask = |size: u8, shift: u8| -> u32 {
+                    if size == 0 {
+                        0
+                    } else {
+                        (((1u64 << size) - 1) as u32) << shift
+                    }
+                };
+                let format = PixelFormat {
+                    red_mask: mask(
+                        args.framebuffer_red_mask_size,
+                        args.framebuffer_red_mask_shift,
+                    ),
+                    red_shift: args.framebuffer_red_mask_shift,
+                    green_mask: mask(
+                        args.framebuffer_green_mask_size,
+                        args.framebuffer_green_mask_shift,
+                    ),
+                    green_shift: args.framebuffer_green_mask_shift,
+                    blue_mask: mask(
+                        args.framebuffer_blue_mask_size,
+                        args.framebuffer_blue_mask_shift,
+                    ),
+                    blue_shift: args.framebuffer_blue_mask_shift,
+                    bits_per_pixel: args.framebuffer_bpp as u8,
+                };
+                if let Err(e) = Framebuffer::init_bootloader(
+                    fb_virt,
+                    args.framebuffer_width,
+                    args.framebuffer_height,
+                    args.framebuffer_stride,
+                    format,
+                ) {
+                    log::warn!("[FB] Bootloader framebuffer init failed: {}", e);
+                }
+            }
+        }
+    }
+
     if Framebuffer::is_available() {
         log::info!("[FB] Using UEFI bootloader framebuffer");
     } else {
