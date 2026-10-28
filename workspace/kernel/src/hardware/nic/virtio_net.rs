@@ -257,6 +257,45 @@ impl VirtioNetDevice {
         Ok(())
     }
 
+    /// Re-add an RX frame to the virtqueue and to the tracking queue.
+    fn recycle_rx_frame(
+        &self,
+        mut rx_queue: crate::sync::SpinLockGuard<'_, Virtqueue>,
+        frame: PhysFrame,
+        order: u8,
+    ) {
+        let buf_size = NET_HDR_SIZE.load(Ordering::Relaxed) + net::MTU;
+        let buf_addr = frame.start_address.as_u64();
+        match rx_queue.add_buffer(&[(buf_addr, buf_size as u32, true)]) {
+            Ok(_) => {
+                let mut frames = self.rx_frames.lock();
+                if frames.push_back((frame, order)).is_err() {
+                    // The buffer is already published to the device; freeing
+                    // it would let the device DMA into reused memory.  Leak
+                    // it instead (unreachable with equal capacities).
+                    log::warn!("[vtnet] RX tracking queue full; leaking one buffer");
+                }
+            }
+            Err(_) => {
+                crate::sync::with_irqs_disabled(|token| {
+                    memory::free_phys_contiguous(token, frame, order);
+                });
+            }
+        }
+        if rx_queue.should_notify() {
+            self.device.notify_queue(0);
+        }
+    }
+
+    /// Return a TX frame to the reuse pool, or free it if the pool is full.
+    fn release_tx_frame(&self, frame: PhysFrame, order: u8) {
+        if self.tx_pool.lock().push_back((frame, order)).is_err() {
+            crate::sync::with_irqs_disabled(|token| {
+                memory::free_phys_contiguous(token, frame, order);
+            });
+        }
+    }
+
     /// Read link status from device
     fn read_link_status(&self) -> u16 {
         // Status is at offset 6 in device-specific config (offset 20 + 6 = 26)
@@ -328,36 +367,6 @@ impl NetworkDevice for VirtioNetDevice {
         Ok(packet_len)
     }
 
-    /// Re-add an RX frame to the virtqueue and to the tracking queue.
-    fn recycle_rx_frame(
-        &self,
-        mut rx_queue: crate::sync::SpinLockGuard<'_, Virtqueue>,
-        frame: PhysFrame,
-        order: u8,
-    ) {
-        let buf_size = NET_HDR_SIZE.load(Ordering::Relaxed) + net::MTU;
-        let buf_addr = frame.start_address.as_u64();
-        match rx_queue.add_buffer(&[(buf_addr, buf_size as u32, true)]) {
-            Ok(_) => {
-                let mut frames = self.rx_frames.lock();
-                if frames.push_back((frame, order)).is_err() {
-                    // The buffer is already published to the device; freeing
-                    // it would let the device DMA into reused memory.  Leak
-                    // it instead (unreachable with equal capacities).
-                    log::warn!("[vtnet] RX tracking queue full; leaking one buffer");
-                }
-            }
-            Err(_) => {
-                crate::sync::with_irqs_disabled(|token| {
-                    memory::free_phys_contiguous(token, frame, order);
-                });
-            }
-        }
-        if rx_queue.should_notify() {
-            self.device.notify_queue(0);
-        }
-    }
-
     /// Performs the transmit operation.
     fn transmit(&self, buf: &[u8]) -> Result<(), NetError> {
         if buf.len() > net::MTU {
@@ -373,10 +382,13 @@ impl NetworkDevice for VirtioNetDevice {
         let pooled = self.tx_pool.lock().pop_front();
         let (buf_frame, buf_order) = match pooled {
             Some(frame) => frame,
-            None => crate::sync::with_irqs_disabled(|token| {
-                memory::allocate_phys_contiguous(token, buf_order)
-            })
-            .map_err(|_| NetError::NotReady)?,
+            None => {
+                let frame = crate::sync::with_irqs_disabled(|token| {
+                    memory::allocate_phys_contiguous(token, buf_order)
+                })
+                .map_err(|_| NetError::NotReady)?;
+                (frame, buf_order)
+            }
         };
 
         let buf_addr = buf_frame.start_address.as_u64();
@@ -432,15 +444,6 @@ impl NetworkDevice for VirtioNetDevice {
         drop(tx_queue);
 
         Ok(())
-    }
-
-    /// Return a TX frame to the reuse pool, or free it if the pool is full.
-    fn release_tx_frame(&self, frame: PhysFrame, order: u8) {
-        if self.tx_pool.lock().push_back((frame, order)).is_err() {
-            crate::sync::with_irqs_disabled(|token| {
-                memory::free_phys_contiguous(token, frame, order);
-            });
-        }
     }
 
     /// Performs the mac address operation.

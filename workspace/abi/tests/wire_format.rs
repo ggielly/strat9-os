@@ -25,14 +25,14 @@ const PATH: &str = "/etc/passwd";
 
 #[test]
 fn message_constants_are_the_single_source_of_truth() {
-    assert_eq!(IPC_MESSAGE_SIZE, 256);
+    assert_eq!(IPC_MESSAGE_SIZE, 1024);
     assert_eq!(IPC_MESSAGE_ALIGN, 64);
-    assert_eq!(PAYLOAD_CAPACITY, 240);
+    assert_eq!(PAYLOAD_CAPACITY, 1008);
     // P1/P4/S2: servers must derive batch sizes from these, not magic numbers.
-    assert_eq!(IpcMessage::OPEN_INLINE_CAPACITY, 234);
-    assert_eq!(IpcMessage::UNLINK_INLINE_CAPACITY, 238);
-    assert_eq!(IpcMessage::READ_INLINE_CAPACITY, 232); // was 40 in bus scheme
-    assert_eq!(IpcMessage::WRITE_INLINE_CAPACITY, 222); // was 30 in bus scheme
+    assert_eq!(IpcMessage::OPEN_INLINE_CAPACITY, 1002);
+    assert_eq!(IpcMessage::UNLINK_INLINE_CAPACITY, 1006);
+    assert_eq!(IpcMessage::READ_INLINE_CAPACITY, 1000); // was 40 in bus scheme
+    assert_eq!(IpcMessage::WRITE_INLINE_CAPACITY, 990); // was 30 in bus scheme
     assert_eq!(IpcMessage::REPLY_MSG_TYPE, 0x80); // H1
 }
 

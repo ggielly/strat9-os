@@ -343,6 +343,7 @@ impl SharedTxToken {
                 | strat9_abi::net::fd_flags::NEED_COMP,
             vlan: 0,
             rss: 0,
+            reserved: 0,
         };
         // SAFETY: single TX producer (this thread).
         if unsafe { (*self.header).tx_push(desc) } {

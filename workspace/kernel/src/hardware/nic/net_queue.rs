@@ -250,7 +250,11 @@ impl NetQueue {
         }
         let page = offset / 4096;
         let delta = offset % 4096;
-        self.vas.get(page).map(|base| (*base as *mut u8).add(delta))
+        // SAFETY: `delta < 4096`, so the result stays inside the page whose
+        // base address was recorded in `vas` for this region.
+        self.vas
+            .get(page)
+            .map(|base| unsafe { (*base as *mut u8).add(delta) })
     }
 
     /// Physical address of a byte offset in the region.
@@ -331,6 +335,7 @@ impl NetQueue {
             flags: strat9_abi::net::fd_flags::SOP | strat9_abi::net::fd_flags::EOP,
             vlan: 0,
             rss: 0,
+            reserved: 0,
         };
         // SAFETY: single RX producer (IRQ/poll path serialised by the caller).
         if unsafe { self.header().rx_push(desc) } {

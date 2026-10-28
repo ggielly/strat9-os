@@ -24,14 +24,18 @@ fn main() {
         println!("cargo:rerun-if-changed=src/framebuffer/x86/asm/x86inc.asm");
 
         // Use nasm-rs to assemble the x86inc.asm-based NASM files (dav1d style)
-        // Output format: elf64 for ELF (Linux), win64 for PE (Windows)
-        let out_format = if env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "windows" {
-            "win64"
-        } else {
-            "elf64"
-        };
+        // Output format: elf64 for ELF (kernel), win64 for PE (host checks).
+        // NASM's win64 backend does not accept `-F dwarf`; host checks on
+        // Windows therefore build the objects without debug info.
+        let is_windows = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "windows";
+        let out_format = if is_windows { "win64" } else { "elf64" };
 
         let mut assembly = nasm_rs::Build::new();
+        // Honor an explicit NASM path (useful on Windows where `nasm` is not
+        // always in PATH and nasm-rs probes `nasm` without the `.exe` suffix).
+        if let Ok(nasm) = env::var("NASM") {
+            assembly.nasm(nasm);
+        }
         // nasm-rs otherwise selects MSVC's lib.exe from the HOST platform,
         // which cannot archive the ELF objects of x86_64-unknown-none.
         assembly.archiver_is_msvc(env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() == "msvc");
@@ -41,15 +45,15 @@ fn main() {
         ] {
             assembly.file(file);
         }
-        for flag in [
-            &format!("-I{asm_dir}/"),
-            &format!("-f{out_format}"),
-            "-DARCH_X86_64=1",
-            "-g",
-            "-F",
-            "dwarf",
-        ] {
-            assembly.flag(flag);
+        assembly.flag(&format!("-I{asm_dir}/"));
+        assembly.flag(&format!("-f{out_format}"));
+        assembly.flag("-DARCH_X86_64=1");
+        if !is_windows {
+            // The win64 backend of NASM does not accept DWARF debug output;
+            // host checks on Windows build the objects without debug info.
+            assembly.flag("-g");
+            assembly.flag("-F");
+            assembly.flag("dwarf");
         }
         assembly
             .compile("libframebuffer_asm.a")
