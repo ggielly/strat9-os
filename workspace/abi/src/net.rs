@@ -134,6 +134,8 @@ pub struct NetFrameDesc {
     pub vlan: u16,
     /// Reserved for RSS/queue steering.
     pub rss: u16,
+    /// Reserved, must be zero.
+    pub reserved: u32,
 }
 
 const _: () = assert!(core::mem::size_of::<NetFrameDesc>() == 16);
