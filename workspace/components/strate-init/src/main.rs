@@ -813,13 +813,13 @@ struct SupervisedChild {
     name_len: u8,
     pid: u64,
     /// Silo handle, kept so a crashed strate can be restarted in place.
-    silo_handle: u64,
+    silo_handle: usize,
     health: StrateHealth,
     restart_count: u16,
 }
 
 impl SupervisedChild {
-    fn from_name(name: &str, pid: u64, silo_handle: u64) -> Self {
+    fn from_name(name: &str, pid: u64, silo_handle: usize) -> Self {
         let mut buf = [0u8; 32];
         let n = core::cmp::min(name.len(), 32);
         buf[..n].copy_from_slice(&name.as_bytes()[..n]);
@@ -844,7 +844,7 @@ static mut SUPERVISED: [Option<SupervisedChild>; 16] = [
 static mut SUPERVISED_COUNT: usize = 0;
 const SUPERVISED_CAPACITY: usize = 16;
 
-fn register_supervised(name: &str, pid: u64, silo_handle: u64) {
+fn register_supervised(name: &str, pid: u64, silo_handle: usize) {
     unsafe {
         if SUPERVISED_COUNT < SUPERVISED_CAPACITY {
             let sup = &mut *core::ptr::addr_of_mut!(SUPERVISED);

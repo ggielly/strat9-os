@@ -287,6 +287,9 @@ impl SharedTxToken {
         F: FnOnce(&mut [u8]) -> R,
     {
         if self.slot == u32::MAX || len > NET_FRAME_SIZE {
+            if self.slot != u32::MAX {
+                unsafe { (*self.header).free_tx_slot(self.slot) };
+            }
             self.released = true;
             return f(&mut []);
         }
