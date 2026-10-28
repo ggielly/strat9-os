@@ -71,6 +71,7 @@ impl CommandRegistry {
         // Hardware / IPC / Diagnostics
         registry.register("lspci", hw::cmd_lspci);
         registry.register("lsns", hw::cmd_lsns);
+        registry.register("iommu", hw::cmd_iommu);
         registry.register("cpuinfo", sys::cmd_cpuinfo);
         registry.register("dmesg", util::cmd_dmesg);
         registry.register("audit", util::cmd_audit);

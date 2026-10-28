@@ -1474,10 +1474,13 @@ pub fn groups() -> Vec<IommuGroup> {
 ///
 /// This never touches hardware: activation is a separate, explicit step.
 pub fn init() {
+    // `serial_println!` rather than `log::info!`: the IOMMU banner must be
+    // visible even if the log gate (EXTENSIONS_READY) or quiet mode is active.
+    crate::serial_println!("[IOMMU] init: probing firmware tables");
     let discovery = crate::arch::iommu::init();
     load_reserved_regions();
     if discovery.present {
-        log::info!(
+        crate::serial_println!(
             "[IOMMU] {} backend, {} DRHD unit(s), {} RMRR, {} ATSR, {} bit host width, \
              intr-remap={}, x2apic-opt-out={}, ready={}",
             discovery.backend,
@@ -1489,8 +1492,16 @@ pub fn init() {
             discovery.x2apic_opt_out,
             discovery.ready
         );
+        log::info!(
+            "[IOMMU] {} backend, {} unit(s), ready={}",
+            discovery.backend,
+            discovery.units,
+            discovery.ready
+        );
     } else {
-        log::info!("[IOMMU] no IOMMU firmware table found (DMA is untranslated)");
+        crate::serial_println!(
+            "[IOMMU] no IOMMU firmware table found (DMA is untranslated)"
+        );
     }
 }
 
