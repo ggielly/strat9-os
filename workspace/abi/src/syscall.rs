@@ -904,6 +904,18 @@ pub const SYS_NET_FEATURES: usize = 423;
 /// Notify the kernel that a shared-queue TX descriptor has been published.
 pub const SYS_NET_TX_PUBLISH: usize = 424;
 
+/// Drain one device hotplug/link event into a `NetEvent`.
+pub const SYS_NET_DEVICE_EVENT: usize = 425;
+
+/// Quiesce a device (stop DMA/interrupts, drain queues).
+pub const SYS_NET_QUIESCE: usize = 426;
+
+/// Resume a quiesced device.
+pub const SYS_NET_RESUME: usize = 427;
+
+/// Unmap a shared queue region (hot-restart cleanup).
+pub const SYS_NET_QUEUE_UNMAP: usize = 428;
+
 /// Check file accessibility using the real user/group IDs.
 ///
 /// - `path_ptr`: pointer to the path string

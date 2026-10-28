@@ -688,7 +688,7 @@ fn boot_silos(mut silos: Vec<SiloDef>) {
                                 log("\n");
                             }
                             Ok(pid) => {
-                                register_supervised(&str_def.name, pid as u64);
+                                register_supervised(&str_def.name, pid as u64, silo_handle);
                                 if str_def.stype == "wasm-runtime" {
                                     runtime_targets
                                         .push((str_def.name.clone(), str_def.target.clone()));
@@ -740,7 +740,7 @@ fn boot_silos(mut silos: Vec<SiloDef>) {
                                 log("\n");
                             }
                             Ok(pid) => {
-                                register_supervised(&str_def.name, pid as u64);
+                                register_supervised(&str_def.name, pid as u64, silo_handle);
                                 if str_def.stype == "wasm-runtime" {
                                     runtime_targets
                                         .push((str_def.name.clone(), str_def.target.clone()));
@@ -812,12 +812,14 @@ struct SupervisedChild {
     name: [u8; 32],
     name_len: u8,
     pid: u64,
+    /// Silo handle, kept so a crashed strate can be restarted in place.
+    silo_handle: u64,
     health: StrateHealth,
     restart_count: u16,
 }
 
 impl SupervisedChild {
-    fn from_name(name: &str, pid: u64) -> Self {
+    fn from_name(name: &str, pid: u64, silo_handle: u64) -> Self {
         let mut buf = [0u8; 32];
         let n = core::cmp::min(name.len(), 32);
         buf[..n].copy_from_slice(&name.as_bytes()[..n]);
@@ -825,6 +827,7 @@ impl SupervisedChild {
             name: buf,
             name_len: n as u8,
             pid,
+            silo_handle,
             health: StrateHealth::Ready,
             restart_count: 0,
         }
@@ -841,11 +844,11 @@ static mut SUPERVISED: [Option<SupervisedChild>; 16] = [
 static mut SUPERVISED_COUNT: usize = 0;
 const SUPERVISED_CAPACITY: usize = 16;
 
-fn register_supervised(name: &str, pid: u64) {
+fn register_supervised(name: &str, pid: u64, silo_handle: u64) {
     unsafe {
         if SUPERVISED_COUNT < SUPERVISED_CAPACITY {
             let sup = &mut *core::ptr::addr_of_mut!(SUPERVISED);
-            sup[SUPERVISED_COUNT] = Some(SupervisedChild::from_name(name, pid));
+            sup[SUPERVISED_COUNT] = Some(SupervisedChild::from_name(name, pid, silo_handle));
             SUPERVISED_COUNT += 1;
         } else {
             log("[init] WARN: SUPERVISED_CAPACITY exhausted, strate '");
@@ -884,6 +887,32 @@ fn supervisor_loop() -> ! {
                                 log(", restarts=");
                                 log_u32(child.restart_count as u32);
                                 log(")\n");
+
+                                // Hot-restart in place: the silo and its
+                                // module are already loaded, so `silo_start`
+                                // re-creates the task.  The replacement
+                                // strate re-binds its namespace path; the
+                                // mount takeover in `ipc_bind_port` makes
+                                // that atomic.
+                                if child.restart_count < 3 {
+                                    child.restart_count += 1;
+                                    match call::silo_start(child.silo_handle) {
+                                        Ok(new_pid) => {
+                                            child.pid = new_pid as u64;
+                                            child.health = StrateHealth::Ready;
+                                            log("[init] Supervisor: restarted '");
+                                            log(child.name_str());
+                                            log("' pid=");
+                                            log_u32(new_pid as u32);
+                                            log("\n");
+                                        }
+                                        Err(e) => {
+                                            log("[init] Supervisor: restart failed: ");
+                                            log(e.name());
+                                            log("\n");
+                                        }
+                                    }
+                                }
                                 break;
                             }
                         }

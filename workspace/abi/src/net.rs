@@ -114,6 +114,10 @@ pub mod event {
     pub const LINK_DOWN: u32 = 4;
     pub const QUEUE_ERROR: u32 = 5;
     pub const RESET: u32 = 6;
+    pub const DEVICE_ADD: u32 = 7;
+    pub const DEVICE_REMOVE: u32 = 8;
+    pub const QUIESCE: u32 = 9;
+    pub const RESUME: u32 = 10;
 }
 
 /// One frame descriptor, 16 bytes.

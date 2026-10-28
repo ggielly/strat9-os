@@ -5,7 +5,9 @@
 
 pub mod common;
 pub mod data_plane;
+pub mod hotplug;
 pub mod net_queue;
+pub mod switch;
 pub mod e1000_drv;
 pub mod e1000e_drv;
 pub mod igc_drv;
@@ -146,6 +148,11 @@ pub fn handle_interrupt() {
         return;
     };
 
+    hotplug::update_link(
+        device_resource_id(&dev) as u64,
+        dev.link_up(),
+        dev.epoch(),
+    );
     // Phase 2: bounded RX drain into the shared queue.  No allocation:
     // `push_rx` copies into a preallocated slot.  Only the per-queue Arc is
     // cloned; the global registry lock is not held while touching the device.
@@ -236,9 +243,67 @@ pub fn register_device(device: Arc<dyn NetworkDevice>) -> String {
     let mut devs = NET_DEVICES.write();
     devs.push(NetDeviceEntry {
         iface: iface.clone(),
-        device,
+        device: device.clone(),
     });
+    drop(devs);
+
+    hotplug::set_initial_link(device.link_up());
+    hotplug::push(hotplug::DeviceEvent::new(
+        strat9_abi::net::event::DEVICE_ADD,
+        device_resource_id(&device) as u64,
+        device.epoch(),
+        0,
+    ));
     iface
+}
+
+/// Remove a device from the registry and publish a `Remove` event.
+///
+/// The data plane keeps the queue alive until its `Arc` is dropped, so a
+/// stale mapping cannot be freed under a running consumer.
+pub fn unregister_device(resource: usize) -> bool {
+    let removed = {
+        let mut devs = NET_DEVICES.write();
+        if let Some(pos) = devs
+            .iter()
+            .position(|entry| device_resource_id(&entry.device) == resource)
+        {
+            Some(devs.remove(pos))
+        } else {
+            None
+        }
+    };
+    if let Some(entry) = removed {
+        hotplug::push(hotplug::DeviceEvent::new(
+            strat9_abi::net::event::DEVICE_REMOVE,
+            resource as u64,
+            entry.device.epoch(),
+            0,
+        ));
+        true
+    } else {
+        false
+    }
+}
+
+/// Quiesce every registered device and publish the event.
+pub fn quiesce_all() {
+    for entry in NET_DEVICES.read().iter() {
+        let _ = entry.device.quiesce();
+        hotplug::push(hotplug::DeviceEvent::new(
+            strat9_abi::net::event::QUIESCE,
+            device_resource_id(&entry.device) as u64,
+            entry.device.epoch(),
+            0,
+        ));
+    }
+}
+
+/// Resume every registered device after a quiesce.
+pub fn resume_all() {
+    for entry in NET_DEVICES.read().iter() {
+        let _ = entry.device.resume();
+    }
 }
 
 /// Returns device.
@@ -351,6 +416,16 @@ fn init_data_plane() {
     }
     match NicDataPlane::new(count) {
         Ok(dp) => {
+            {
+                let devices = NET_DEVICES.read();
+                for (index, entry) in devices.iter().enumerate() {
+                    dp.configure(
+                        index,
+                        entry.device.features(),
+                        entry.device.mtu() as u32,
+                    );
+                }
+            }
             *NIC_DATA_PLANE.lock() = Some(dp);
             log::info!("[net] data plane initialised with {} queue(s)", count);
         }

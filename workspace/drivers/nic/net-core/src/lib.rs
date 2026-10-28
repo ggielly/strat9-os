@@ -42,4 +42,49 @@ pub trait NetworkDevice: Send + Sync {
     /// context).  Default is a no-op; drivers that need a watchdog or
     /// buffer-reclamation cycle override this.
     fn poll(&self) {}
+
+    /// Negotiated `strat9_abi::net::features::*` mask.
+    ///
+    /// Drivers return only the features they actually implement; the stack
+    /// must never assume an offload is available.  Default is 0 (software
+    /// fallback for everything).
+    fn features(&self) -> u64 {
+        0
+    }
+
+    /// IP MTU (without the Ethernet header).
+    fn mtu(&self) -> usize {
+        MTU - 14
+    }
+
+    /// Number of hardware queues exposed by the device.
+    fn queue_count(&self) -> u16 {
+        1
+    }
+
+    /// Current link speed in Mbps, or 0 when unknown.
+    fn link_speed_mbps(&self) -> u32 {
+        0
+    }
+
+    /// Device generation.  Bumped after reset/hotplug; consumers must reject
+    /// operations carrying a stale epoch.
+    fn epoch(&self) -> u32 {
+        1
+    }
+
+    /// Stop DMA and interrupts, drain in-flight work.  Default no-op.
+    fn quiesce(&self) -> Result<(), NetError> {
+        Ok(())
+    }
+
+    /// Resume after `quiesce`.
+    fn resume(&self) -> Result<(), NetError> {
+        Ok(())
+    }
+
+    /// Reset the device.
+    fn reset(&self) -> Result<(), NetError> {
+        Ok(())
+    }
 }

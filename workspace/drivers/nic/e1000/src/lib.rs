@@ -12,6 +12,8 @@ use nic_queues::{RxDescriptor, RxRing, TxDescriptor, TxRing};
 pub const NUM_RX: usize = 128;
 pub const NUM_TX: usize = 128;
 pub const RX_BUF_SIZE: usize = 4096;
+/// Update the RX tail in batches instead of once per packet.
+const RX_REFILL_BATCH: usize = 8;
 
 const RESET_MAX_POLLS: u32 = 200_000;
 const EEPROM_MAX_POLLS: u32 = 50_000;
@@ -68,6 +70,8 @@ pub struct E1000Nic {
     tx_since_last_reclaim: u64,
     /// Last known TDH value for watchdog stall detection.
     last_tdh: usize,
+    /// Number of RX descriptors recycled since the last RDT write.
+    rx_refill: usize,
 }
 
 // SAFETY: E1000Nic owns its MMIO region and DMA buffers. It is safe to send
@@ -253,6 +257,7 @@ impl E1000Nic {
                 stats: E1000Stats::new(),
                 tx_since_last_reclaim: 0,
                 last_tdh: 0,
+                rx_refill: 0,
             })
         }
     }
@@ -277,20 +282,27 @@ impl E1000Nic {
         &self.stats
     }
 
-    /// Recycle an RX descriptor: clear status, restore buffer address, bump tail.
+    /// Recycle an RX descriptor: clear status, restore buffer address, and
+    /// periodically publish the new tail.  Writing RDT on every packet is a
+    /// costly MMIO round trip; batching keeps the ring full without stalling
+    /// the device (128 descriptors, batch of 8).
     fn recycle_rx_desc(&mut self, idx: usize) {
         self.rx.desc_mut(idx).clear_status();
         self.rx
             .desc_mut(idx)
             .set_buffer_addr(self.rx_bufs[idx].phys);
         let new_tail = self.rx.advance();
-        unsafe {
-            wr(self.mmio, regs::RDT, new_tail as u32);
+        self.rx_refill += 1;
+        if self.rx_refill >= RX_REFILL_BATCH || new_tail == 0 {
+            self.rx_refill = 0;
+            unsafe {
+                wr(self.mmio, regs::RDT, new_tail as u32);
+            }
         }
     }
 
     pub fn receive(&mut self, buf: &mut [u8]) -> Result<usize, NetError> {
-        if !self.check_link() {
+        if !self.link_up {
             return Err(NetError::LinkDown);
         }
 
@@ -350,7 +362,7 @@ impl E1000Nic {
     }
 
     pub fn transmit(&mut self, buf: &[u8]) -> Result<(), NetError> {
-        if !self.check_link() {
+        if !self.link_up {
             return Err(NetError::LinkDown);
         }
 
@@ -507,9 +519,25 @@ impl E1000Nic {
         false
     }
 
+    /// Stop RX/TX and mask interrupts.  Safe to call before reset/hot-unplug.
+    pub fn quiesce(&mut self) {
+        unsafe {
+            wr(self.mmio, regs::IMC, 0xFFFF_FFFF);
+            let _ = rd(self.mmio, regs::ICR);
+            wr(self.mmio, regs::RCTL, 0);
+            wr(self.mmio, regs::TCTL, 0);
+        }
+        self.link_up = false;
+    }
+
+    /// Reset the controller and re-point the existing rings.
+    pub fn reset(&mut self, alloc: &dyn DmaAllocator) {
+        self.reinit_hardware(alloc);
+    }
+
     /// Re-initialise hardware without tearing down the DMA rings.  Used by
-    /// the watchdog to recover from a stuck state.
-    fn reinit_hardware(&mut self, _alloc: &dyn DmaAllocator) {
+    /// the watchdog and by the hotplug resume path.
+    pub fn reinit_hardware(&mut self, _alloc: &dyn DmaAllocator) {
         unsafe {
             // Mask all interrupts while we re-init.
             wr(self.mmio, regs::IMC, 0xFFFF_FFFF);

@@ -85,6 +85,8 @@ pub struct VirtioNetDevice {
     mac_address: [u8; 6],
     pub rx_frames: SpinLock<FixedQueue<(PhysFrame, u8), RX_FRAME_TRACK_CAPACITY>>,
     tx_frames: SpinLock<FixedQueue<(PhysFrame, u8), TX_FRAME_TRACK_CAPACITY>>,
+    /// Completed TX buffers, reused instead of freeing/reallocating.
+    tx_pool: SpinLock<FixedQueue<(PhysFrame, u8), TX_FRAME_TRACK_CAPACITY>>,
 }
 
 // Send and Sync are safe because we use SpinLocks
@@ -178,6 +180,7 @@ impl VirtioNetDevice {
             mac_address,
             rx_frames: SpinLock::new(FixedQueue::new()),
             tx_frames: SpinLock::new(FixedQueue::new()),
+            tx_pool: SpinLock::new(FixedQueue::new()),
         };
 
         // Fill RX queue with buffers
@@ -306,13 +309,9 @@ impl NetworkDevice for VirtioNetDevice {
         );
 
         if buf.len() < packet_len {
-            // Buffer too small, packet lost
-            crate::sync::with_irqs_disabled(|token| {
-                memory::free_phys_contiguous(token, frame, order);
-            });
-            drop(rx_queue);
-            // We still need to refill.
-            let _ = self.refill_rx_queue();
+            // Recycle the buffer instead of freeing it; the packet is
+            // dropped but the ring keeps its full complement of buffers.
+            self.recycle_rx_frame(rx_queue, frame, order);
             return Err(NetError::BufferTooSmall);
         }
 
@@ -323,16 +322,40 @@ impl NetworkDevice for VirtioNetDevice {
             }
         }
 
-        // Free the frame
-        crate::sync::with_irqs_disabled(|token| {
-            memory::free_phys_contiguous(token, frame, order);
-        });
-        drop(rx_queue);
-
-        // Refill RX queue
-        let _ = self.refill_rx_queue();
+        // Re-publish the same frame: no allocation, no free in steady state.
+        self.recycle_rx_frame(rx_queue, frame, order);
 
         Ok(packet_len)
+    }
+
+    /// Re-add an RX frame to the virtqueue and to the tracking queue.
+    fn recycle_rx_frame(
+        &self,
+        mut rx_queue: crate::sync::SpinLockGuard<'_, Virtqueue>,
+        frame: PhysFrame,
+        order: u8,
+    ) {
+        let buf_size = NET_HDR_SIZE.load(Ordering::Relaxed) + net::MTU;
+        let buf_addr = frame.start_address.as_u64();
+        match rx_queue.add_buffer(&[(buf_addr, buf_size as u32, true)]) {
+            Ok(_) => {
+                let mut frames = self.rx_frames.lock();
+                if frames.push_back((frame, order)).is_err() {
+                    // The buffer is already published to the device; freeing
+                    // it would let the device DMA into reused memory.  Leak
+                    // it instead (unreachable with equal capacities).
+                    log::warn!("[vtnet] RX tracking queue full; leaking one buffer");
+                }
+            }
+            Err(_) => {
+                crate::sync::with_irqs_disabled(|token| {
+                    memory::free_phys_contiguous(token, frame, order);
+                });
+            }
+        }
+        if rx_queue.should_notify() {
+            self.device.notify_queue(0);
+        }
     }
 
     /// Performs the transmit operation.
@@ -341,15 +364,20 @@ impl NetworkDevice for VirtioNetDevice {
             return Err(NetError::BufferTooSmall);
         }
 
-        // Allocate TX buffer (header + data)
+        // Allocate TX buffer (header + data), reusing a completed buffer when
+        // available.  Steady state does no allocation at all.
         let buf_size = NET_HDR_SIZE.load(Ordering::Relaxed) + buf.len();
         let buf_pages = (buf_size + 4095) / 4096;
         let buf_order = buf_pages.next_power_of_two().trailing_zeros() as u8;
 
-        let buf_frame = crate::sync::with_irqs_disabled(|token| {
-            memory::allocate_phys_contiguous(token, buf_order)
-        })
-        .map_err(|_| NetError::NotReady)?;
+        let pooled = self.tx_pool.lock().pop_front();
+        let (buf_frame, buf_order) = match pooled {
+            Some(frame) => frame,
+            None => crate::sync::with_irqs_disabled(|token| {
+                memory::allocate_phys_contiguous(token, buf_order)
+            })
+            .map_err(|_| NetError::NotReady)?,
+        };
 
         let buf_addr = buf_frame.start_address.as_u64();
         let virt_addr = crate::memory::phys_to_virt(buf_addr);
@@ -366,38 +394,37 @@ impl NetworkDevice for VirtioNetDevice {
         // Submit to TX queue
         let mut tx_queue = self.tx_queue.lock();
 
-        // Reclaim completed TX buffers before submitting.
-        // The used ring is FIFO so draining here frees exactly the frames
-        // that were pushed earlier in the same order.
-        while let Some((_token, _len)) = tx_queue.get_used() {
-            if let Some((_frame, order)) = self.tx_frames.lock().pop_front() {
-                crate::sync::with_irqs_disabled(|token| {
-                    memory::free_phys_contiguous(token, _frame, order);
-                });
+        // Reclaim completed TX buffers before submitting.  The used ring is
+        // FIFO, so frames are recycled in submission order into `tx_pool`.
+        while tx_queue.get_used().is_some() {
+            if let Some((frame, order)) = self.tx_frames.lock().pop_front() {
+                if self.tx_pool.lock().push_back((frame, order)).is_err() {
+                    crate::sync::with_irqs_disabled(|token| {
+                        memory::free_phys_contiguous(token, frame, order);
+                    });
+                }
             }
         }
 
-        let head = tx_queue
-            .add_buffer(&[(buf_addr, buf_size as u32, false)]) // Device Readable
-            .map_err(|_| {
-                // Free buffer if queue is full
-                crate::sync::with_irqs_disabled(|token| {
-                    memory::free_phys_contiguous(token, buf_frame, buf_order);
-                });
-                NetError::TxQueueFull
-            })?;
+        let _head = match tx_queue.add_buffer(&[(buf_addr, buf_size as u32, false)]) {
+            Ok(head) => head,
+            Err(_) => {
+                self.release_tx_frame(buf_frame, buf_order);
+                return Err(NetError::TxQueueFull);
+            }
+        };
 
-        if let Err(_) = self.tx_frames.lock().push_back((buf_frame, buf_order)) {
-            // Tracking queue full : free the frame we just submitted
-            // (the descriptor is already in the available ring but the
-            // device hasn't seen it yet; get_used will reclaim it later
-            // and we won't be able to free it.  This is a safety net.)
-            crate::sync::with_irqs_disabled(|token| {
-                memory::free_phys_contiguous(token, buf_frame, buf_order);
-            });
+        if self
+            .tx_frames
+            .lock()
+            .push_back((buf_frame, buf_order))
+            .is_err()
+        {
+            // Should be unreachable: `tx_frames` has the same capacity as the
+            // virtqueue, so `add_buffer` fails first.  Do not recycle the
+            // buffer while the device may still DMA into it.
+            log::warn!("[vtnet] TX tracking queue full; leaking one buffer");
         }
-
-        log::trace!("[vtnet] tx: submit {} bytes @ {:#x}", buf_size, buf_addr);
 
         if tx_queue.should_notify() {
             self.device.notify_queue(1);
@@ -405,6 +432,15 @@ impl NetworkDevice for VirtioNetDevice {
         drop(tx_queue);
 
         Ok(())
+    }
+
+    /// Return a TX frame to the reuse pool, or free it if the pool is full.
+    fn release_tx_frame(&self, frame: PhysFrame, order: u8) {
+        if self.tx_pool.lock().push_back((frame, order)).is_err() {
+            crate::sync::with_irqs_disabled(|token| {
+                memory::free_phys_contiguous(token, frame, order);
+            });
+        }
     }
 
     /// Performs the mac address operation.
@@ -416,6 +452,20 @@ impl NetworkDevice for VirtioNetDevice {
     fn link_up(&self) -> bool {
         let status = self.read_link_status();
         status & net_status::VIRTIO_NET_S_LINK_UP != 0
+    }
+
+    fn features(&self) -> u64 {
+        // Checked/TSO negotiation is not wired yet; smoltcp computes
+        // checksums in software and the driver keeps the legacy header.
+        0
+    }
+
+    fn mtu(&self) -> usize {
+        1500
+    }
+
+    fn queue_count(&self) -> u16 {
+        1
     }
 }
 

@@ -164,6 +164,7 @@ pub struct KernelE1000Adapter {
     inner: SpinLock<E1000Nic>,
     mac: [u8; 6],
     name: &'static str,
+    epoch: core::sync::atomic::AtomicU32,
 }
 
 impl KernelE1000Adapter {
@@ -174,6 +175,7 @@ impl KernelE1000Adapter {
             inner: SpinLock::new(nic),
             mac,
             name: driver_name,
+            epoch: core::sync::atomic::AtomicU32::new(1),
         })
     }
 }
@@ -205,6 +207,44 @@ impl NetworkDevice for KernelE1000Adapter {
 
     fn poll(&self) {
         let mut nic = self.inner.lock();
+        nic.check_link();
         nic.watchdog_tick(&KernelDma);
+    }
+
+    fn features(&self) -> u64 {
+        // The legacy e1000 path does not negotiate offloads yet; smoltcp
+        // keeps computing checksums in software.
+        0
+    }
+
+    fn mtu(&self) -> usize {
+        1500
+    }
+
+    fn queue_count(&self) -> u16 {
+        1
+    }
+
+    fn epoch(&self) -> u32 {
+        self.epoch.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    fn quiesce(&self) -> Result<(), NetError> {
+        self.inner.lock().quiesce();
+        Ok(())
+    }
+
+    fn resume(&self) -> Result<(), NetError> {
+        self.inner.lock().reset(&KernelDma);
+        self.epoch
+            .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        Ok(())
+    }
+
+    fn reset(&self) -> Result<(), NetError> {
+        self.inner.lock().reset(&KernelDma);
+        self.epoch
+            .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        Ok(())
     }
 }

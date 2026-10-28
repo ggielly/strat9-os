@@ -15,7 +15,7 @@
 use super::error::SyscallError;
 use crate::{
     capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
-    hardware::nic::{self, net_queue::NetQueue},
+    hardware::nic::{self, hotplug, net_queue::NetQueue},
     memory::{
         address_space::{VmaFlags, VmaPageSize, VmaType},
         UserSliceRead, UserSliceWrite,
@@ -205,7 +205,7 @@ pub fn sys_net_info(info_type: u64, buf_ptr: u64) -> Result<u64, SyscallError> {
             Ok(core::mem::size_of::<NetLinkInfo>() as u64)
         }
         2 => {
-            let mtu: u32 = 1500;
+            let mtu: u32 = dev.mtu() as u32;
             let user = UserSliceWrite::new(buf_ptr, 4)?;
             user.copy_from(&mtu.to_le_bytes());
             Ok(4)
@@ -351,56 +351,95 @@ pub fn sys_net_queue_map(dev: u64, qid: u64, out_ptr: u64) -> Result<u64, Syscal
             .ok_or(SyscallError::BadHandle)?
     };
 
-    let ring = queue.region();
-    let frames = ring.frame_phys_addrs();
-    let mapping_caps = ring.mapping_cap_ids().to_vec();
-    let pages = ring.page_count();
-    let size = pages
-        .checked_mul(4096)
-        .ok_or(SyscallError::InvalidArgument)? as u64;
-
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let addr_space = task.process.address_space_arc();
-    let base = addr_space
-        .find_free_vma_range(
-            crate::kaslr::mmap_base(),
-            pages,
-            VmaPageSize::Small,
-        )
-        .ok_or(SyscallError::OutOfMemory)?;
+    let ring = queue.region();
+    if !queue.try_map(task.id.as_u64()) {
+        return Err(SyscallError::AlreadyExists);
+    }
+    let result = (|| -> Result<u64, SyscallError> {
+        let frames = ring.frame_phys_addrs();
+        let mapping_caps = ring.mapping_cap_ids().to_vec();
+        let pages = ring.page_count();
+        let size = pages
+            .checked_mul(4096)
+            .ok_or(SyscallError::InvalidArgument)? as u64;
 
-    addr_space
-        .map_shared_frames_with_cap_ids(
+        let addr_space = task.process.address_space_arc();
+        let base = addr_space
+            .find_free_vma_range(crate::kaslr::mmap_base(), pages, VmaPageSize::Small)
+            .ok_or(SyscallError::OutOfMemory)?;
+
+        addr_space
+            .map_shared_frames_with_cap_ids(
+                base,
+                &frames,
+                Some(&mapping_caps),
+                VmaFlags {
+                    readable: true,
+                    writable: true,
+                    executable: false,
+                    user_accessible: true,
+                },
+                VmaType::Anonymous,
+            )
+            .map_err(|_| SyscallError::OutOfMemory)?;
+
+        let map = NetQueueMap {
             base,
-            &frames,
-            Some(&mapping_caps),
-            VmaFlags {
-                readable: true,
-                writable: true,
-                executable: false,
-                user_accessible: true,
-            },
-            VmaType::Anonymous,
-        )
-        .map_err(|_| SyscallError::OutOfMemory)?;
+            len: size,
+            qid: qid as u16,
+            frame_size: NET_FRAME_SIZE as u16,
+            slots: NET_RING_SLOTS as u16,
+            flags: 0,
+        };
+        let user = UserSliceWrite::new(out_ptr, core::mem::size_of::<NetQueueMap>())?;
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                &map as *const NetQueueMap as *const u8,
+                core::mem::size_of::<NetQueueMap>(),
+            )
+        };
+        user.copy_from(bytes);
+        queue.set_mapped_base(base);
+        Ok(size)
+    })();
+    if result.is_err() {
+        queue.unmap_reservation();
+    }
+    result
+}
 
-    let map = NetQueueMap {
-        base,
-        len: size,
-        qid: qid as u16,
-        frame_size: NET_FRAME_SIZE as u16,
-        slots: NET_RING_SLOTS as u16,
-        flags: 0,
+/// `SYS_NET_QUEUE_UNMAP`: unmap a shared queue region.
+///
+/// Called by a restarted strate before re-mapping.  The queue reservation is
+/// released only after the PTEs are removed.
+pub fn sys_net_queue_unmap(dev: u64, qid: u64) -> Result<u64, SyscallError> {
+    let _resource = nic_capability(dev, CapPermissions::read_write())?;
+    if qid > u16::MAX as u64 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let queue = {
+        let guard = nic::data_plane().lock();
+        guard
+            .as_ref()
+            .and_then(|dp| dp.clone_queue(qid as usize))
+            .ok_or(SyscallError::BadHandle)?
     };
-    let user = UserSliceWrite::new(out_ptr, core::mem::size_of::<NetQueueMap>())?;
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            &map as *const NetQueueMap as *const u8,
-            core::mem::size_of::<NetQueueMap>(),
-        )
-    };
-    user.copy_from(bytes);
-    Ok(size)
+    let base = queue.take_mapped_base();
+    if base == 0 {
+        return Ok(0);
+    }
+    let pages = queue.region().page_count();
+    let size = (pages as u64)
+        .checked_mul(4096)
+        .ok_or(SyscallError::InvalidArgument)?;
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    task.process
+        .address_space_arc()
+        .unmap_range(base, size)
+        .map_err(|_| SyscallError::IoError)?;
+    queue.unmap_reservation();
+    Ok(0)
 }
 
 /// `SYS_NET_KICK`: drain the shared TX ring to the device.
@@ -462,7 +501,7 @@ pub fn sys_net_link(dev: u64, out_ptr: u64) -> Result<u64, SyscallError> {
     let mtu = queue
         .as_ref()
         .map(|q| q.header().mtu.load(Ordering::Acquire))
-        .unwrap_or(1500);
+        .unwrap_or_else(|| device.mtu() as u32);
     let info = NetLinkInfo {
         mac: device.mac_address(),
         _pad: 0,
@@ -670,6 +709,66 @@ pub fn sys_net_event_reset(dev: u64, qid: u64) -> Result<u64, SyscallError> {
     let queue = queue_from_handle(dev, qid as u16)?;
     // A new registration means the old wakeup was consumed.
     queue.event.notify();
+    Ok(0)
+}
+
+/// `SYS_NET_DEVICE_EVENT`: drain one hotplug/link event.
+pub fn sys_net_device_event(out_ptr: u64) -> Result<u64, SyscallError> {
+    // Resolve the capability acquired with SYS_NET_OPEN.  The legacy ABI has
+    // no handle argument, so the default NIC capability is used.
+    let _device = default_nic(CapPermissions {
+        read: true,
+        write: false,
+        execute: false,
+        grant: false,
+        revoke: false,
+    })?;
+
+    let Some(device_event) = hotplug::pop() else {
+        return Err(SyscallError::Again);
+    };
+    let event = NetEvent {
+        kind: device_event.kind,
+        qid: 0,
+        flags: 0,
+        epoch: device_event.epoch,
+        _pad: 0,
+        data: device_event.resource,
+    };
+    let user = UserSliceWrite::new(out_ptr, core::mem::size_of::<NetEvent>())?;
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &event as *const NetEvent as *const u8,
+            core::mem::size_of::<NetEvent>(),
+        )
+    };
+    user.copy_from(bytes);
+    Ok(0)
+}
+
+/// `SYS_NET_QUIESCE`: stop a device before hot-unplug/reset.
+pub fn sys_net_quiesce(dev: u64) -> Result<u64, SyscallError> {
+    let device = nic_from_handle(dev, CapPermissions::read_write())?;
+    device.quiesce().map_err(|_| SyscallError::IoError)?;
+    hotplug::push(hotplug::DeviceEvent::new(
+        event::QUIESCE,
+        nic::device_resource_id(&device) as u64,
+        device.epoch(),
+        0,
+    ));
+    Ok(0)
+}
+
+/// `SYS_NET_RESUME`: resume a quiesced device.
+pub fn sys_net_resume(dev: u64) -> Result<u64, SyscallError> {
+    let device = nic_from_handle(dev, CapPermissions::read_write())?;
+    device.resume().map_err(|_| SyscallError::IoError)?;
+    hotplug::push(hotplug::DeviceEvent::new(
+        event::RESUME,
+        nic::device_resource_id(&device) as u64,
+        device.epoch(),
+        0,
+    ));
     Ok(0)
 }
 

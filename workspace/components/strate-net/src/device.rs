@@ -129,16 +129,10 @@ impl SharedNetDevice {
         // SAFETY: `header` is a valid mapped region for the lifetime of the
         // device; the RX ring has a single consumer (this thread).
         let Some(desc) = (unsafe { (*self.header).rx_pop() }) else {
-            if let NetTxToken::Shared(ref token) = tx {
-                unsafe { (*self.header).free_tx_slot(token.slot) };
-            }
             return None;
         };
         let Some(ptr) = self.slot_ptr(desc.slot) else {
             unsafe { (*self.header).free_rx_slot(desc.slot) };
-            if let NetTxToken::Shared(ref token) = tx {
-                unsafe { (*self.header).free_tx_slot(token.slot) };
-            }
             return None;
         };
         let token = NetRxToken::Shared(SharedRxToken {
@@ -146,6 +140,7 @@ impl SharedNetDevice {
             slot: desc.slot,
             ptr,
             len: desc.len as usize,
+            released: false,
         });
         Some((token, tx))
     }
@@ -161,17 +156,8 @@ impl SharedNetDevice {
             slot,
             ptr,
             pending: self.tx_pending.clone(),
+            released: false,
         }))
-    }
-
-    fn tx_token(&self) -> NetTxToken {
-        // Kept for symmetry; no caller should use an unallocated token.
-        NetTxToken::Shared(SharedTxToken {
-            header: self.header,
-            slot: u32::MAX,
-            ptr: core::ptr::null_mut(),
-            pending: self.tx_pending.clone(),
-        })
     }
 
     fn slot_ptr(&self, slot: u32) -> Option<*mut u8> {
@@ -261,10 +247,11 @@ pub(crate) struct SharedRxToken {
     slot: u32,
     ptr: *mut u8,
     len: usize,
+    released: bool,
 }
 
 impl SharedRxToken {
-    fn consume<R, F>(self, f: F) -> R
+    fn consume<R, F>(mut self, f: F) -> R
     where
         F: FnOnce(&[u8]) -> R,
     {
@@ -272,7 +259,17 @@ impl SharedRxToken {
         // owned by this consumer until `free_rx_slot`.
         let out = unsafe { f(core::slice::from_raw_parts(self.ptr, self.len)) };
         unsafe { (*self.header).free_rx_slot(self.slot) };
+        self.released = true;
         out
+    }
+}
+
+impl Drop for SharedRxToken {
+    fn drop(&mut self) {
+        if !self.released {
+            // SAFETY: the slot is still owned by this token.
+            unsafe { (*self.header).free_rx_slot(self.slot) };
+        }
     }
 }
 
@@ -281,14 +278,16 @@ pub(crate) struct SharedTxToken {
     slot: u32,
     ptr: *mut u8,
     pending: Arc<AtomicBool>,
+    released: bool,
 }
 
 impl SharedTxToken {
-    fn consume<R, F>(self, len: usize, f: F) -> R
+    fn consume<R, F>(mut self, len: usize, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
     {
         if self.slot == u32::MAX || len > NET_FRAME_SIZE {
+            self.released = true;
             return f(&mut []);
         }
         // SAFETY: the slot was allocated for this token; the closure writes
@@ -310,7 +309,17 @@ impl SharedTxToken {
             unsafe { (*self.header).free_tx_slot(self.slot) };
             TX_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
         }
+        self.released = true;
         out
+    }
+}
+
+impl Drop for SharedTxToken {
+    fn drop(&mut self) {
+        if !self.released && self.slot != u32::MAX {
+            // SAFETY: the slot is still owned by this token.
+            unsafe { (*self.header).free_tx_slot(self.slot) };
+        }
     }
 }
 

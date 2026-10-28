@@ -46,7 +46,7 @@ use core::fmt::Write;
 pub use blkdev_scheme::BlkDevScheme;
 pub use fd::{FileDescriptorTable, STDERR, STDIN, STDOUT};
 pub use file::OpenFile;
-pub use mount::{list_mounts, mount, mount_count, resolve, unmount, Namespace};
+pub use mount::{list_mounts, mount, mount_count, mount_replace, resolve, unmount, Namespace};
 pub use pipe::PipeScheme;
 pub use procfs::ProcScheme;
 pub use ramfs_scheme::RamfsScheme;
