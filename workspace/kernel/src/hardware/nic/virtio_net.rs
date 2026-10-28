@@ -8,10 +8,10 @@
 //! https://docs.oasis-open.org/virtio/virtio/v1.4/cs01/virtio-v1.4-cs01.html#x1-2700001
 
 use crate::{
+    dma::DmaMapper,
     hardware::{
         iommu::DmaProt,
         nic as net,
-        nic::common::DmaMapper,
         pci_client::{self as pci, PciDevice},
         virtio::{
             common::{VirtioDevice, Virtqueue},

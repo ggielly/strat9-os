@@ -6,10 +6,14 @@
 //! Reference: VirtIO spec v1.2, Section 5.2 (Block Device)
 
 use crate::{
-    hardware::pci_client::{self as pci, PciDevice},
-    hardware::virtio::{
-        common::{VirtioDevice, Virtqueue},
-        status,
+    dma::{DmaBuffer, DmaMapper},
+    hardware::{
+        iommu::{DmaProt, Sbdf},
+        pci_client::{self as pci, PciDevice},
+        virtio::{
+            common::{VirtioDevice, Virtqueue},
+            status,
+        },
     },
     memory,
     sync::SpinLock,
@@ -150,70 +154,50 @@ const BOUNCE_POOL_SIZE: usize = 64 * 1024;
 /// Eliminates per-I/O frame allocation/free for the common case.
 /// Large requests (> BOUNCE_POOL_SIZE) fall back to on-demand allocation.
 struct BouncePool {
-    frame: memory::PhysFrame,
-    order: u8,
+    buffer: DmaBuffer,
 }
 
 impl BouncePool {
     /// Allocate a single physically-contiguous bounce buffer.
-    unsafe fn allocate() -> Result<Self, BlockError> {
-        let pages = (BOUNCE_POOL_SIZE + 4095) / 4096;
-        let order = pages.next_power_of_two().trailing_zeros() as u8;
-        let frame =
-            crate::sync::with_irqs_disabled(|token| memory::allocate_phys_contiguous(token, order))
-                .map_err(|_| BlockError::NotReady)?;
-        Ok(Self { frame, order })
-    }
-
-    fn phys(&self) -> u64 {
-        self.frame.start_address.as_u64()
+    unsafe fn allocate(sbdf: Sbdf) -> Result<Self, BlockError> {
+        let buffer = DmaBuffer::alloc_for(sbdf, BOUNCE_POOL_SIZE, DmaProt::READ_WRITE)
+            .map_err(|_| BlockError::NotReady)?;
+        Ok(Self { buffer })
     }
 
     fn virt(&self) -> u64 {
-        crate::memory::phys_to_virt(self.phys())
+        self.buffer.virt_addr()
     }
-}
 
-impl Drop for BouncePool {
-    fn drop(&mut self) {
-        crate::sync::with_irqs_disabled(|token| {
-            memory::free_phys_contiguous(token, self.frame, self.order);
-        });
+    fn device(&self) -> u64 {
+        self.buffer.device_addr()
     }
 }
 
 /// Pre-allocated metadata frame: [Header (16 B)] + padding + [Status (1 B)].
 /// Reused for every request : never alloc/freed per I/O.
 struct MetaPool {
-    frame: memory::PhysFrame,
+    buffer: DmaBuffer,
 }
 
 impl MetaPool {
-    unsafe fn allocate() -> Result<Self, BlockError> {
-        let frame = crate::sync::with_irqs_disabled(|token| memory::allocate_frame(token))
+    unsafe fn allocate(sbdf: Sbdf) -> Result<Self, BlockError> {
+        let buffer = DmaBuffer::alloc_for(sbdf, 4096, DmaProt::READ_WRITE)
             .map_err(|_| BlockError::NotReady)?;
-        Ok(Self { frame })
-    }
-
-    fn phys(&self) -> u64 {
-        self.frame.start_address.as_u64()
+        Ok(Self { buffer })
     }
 
     fn virt(&self) -> u64 {
-        crate::memory::phys_to_virt(self.phys())
+        self.buffer.virt_addr()
+    }
+
+    fn device(&self) -> u64 {
+        self.buffer.device_addr()
     }
 
     /// Layout offset for the status byte (right after the header).
     fn status_offset(&self) -> u64 {
         mem::size_of::<BlockRequestHeader>() as u64
-    }
-}
-
-impl Drop for MetaPool {
-    fn drop(&mut self) {
-        crate::sync::with_irqs_disabled(|token| {
-            memory::free_frame(token, self.frame);
-        });
     }
 }
 
@@ -223,6 +207,8 @@ pub struct VirtioBlockDevice {
     queue: SpinLock<Virtqueue>,
     capacity: u64,
     block_size: u32,
+    /// Physical -> device address translator.
+    dma: DmaMapper,
     /// Pre-allocated DMA resources : no per-I/O alloc/free for common requests.
     bounce_pool: BouncePool,
     meta_pool: MetaPool,
@@ -249,10 +235,19 @@ impl VirtioBlockDevice {
     /// The PCI device must be a valid VirtIO block device
     pub unsafe fn new(pci_dev: PciDevice) -> Result<Self, &'static str> {
         log::info!("VirtIO-blk: Initializing device at {:?}", pci_dev.address);
+        let sbdf = Sbdf::new(
+            0,
+            pci_dev.address.bus,
+            pci_dev.address.device,
+            pci_dev.address.function,
+        );
+        let dma = DmaMapper::for_sbdf(sbdf);
 
         // Pre-allocate DMA resources before touching the device.
-        let bounce_pool = BouncePool::allocate().map_err(|_| "Failed to allocate bounce pool")?;
-        let meta_pool = MetaPool::allocate().map_err(|_| "Failed to allocate meta pool")?;
+        let bounce_pool = BouncePool::allocate(sbdf)
+            .map_err(|_| "Failed to allocate bounce pool")?;
+        let meta_pool = MetaPool::allocate(sbdf)
+            .map_err(|_| "Failed to allocate meta pool")?;
 
         // Create VirtIO device
         let device = VirtioDevice::new(pci_dev)?;
@@ -306,7 +301,20 @@ impl VirtioBlockDevice {
         log::info!("VirtIO-blk: queue 0 size = {}", queue_size);
 
         // Create virtqueue (queue 0 is the request queue)
-        let queue = Virtqueue::new(queue_size)?;
+        let mut queue = Virtqueue::new(queue_size)?;
+
+        // Map the contiguous vring into the device domain (identity when the
+        // IOMMU is inactive).
+        {
+            let phys = queue.ring_phys();
+            let iova = dma.translate(phys, queue.ring_size(), DmaProt::READ_WRITE);
+            let delta = iova.wrapping_sub(phys);
+            queue.set_device_addresses(
+                queue.desc_area().wrapping_add(delta),
+                queue.avail_area().wrapping_add(delta),
+                queue.used_area().wrapping_add(delta),
+            );
+        }
 
         // Setup queue with device
         device.setup_queue(0, &queue);
@@ -346,6 +354,7 @@ impl VirtioBlockDevice {
             queue: SpinLock::new(queue),
             capacity,
             block_size: blk_size,
+            dma,
             bounce_pool,
             meta_pool,
         })
@@ -358,9 +367,8 @@ impl VirtioBlockDevice {
         buf_size: usize,
         is_write: bool,
         src: Option<&[u8]>,
-    ) -> Result<(u64, u64, Option<(memory::PhysFrame, u8)>), BlockError> {
+    ) -> Result<(u64, u64, Option<(memory::PhysFrame, u8, u64, usize)>), BlockError> {
         if buf_size <= BOUNCE_POOL_SIZE {
-            let phys = self.bounce_pool.phys();
             let virt = self.bounce_pool.virt();
             if is_write {
                 if let Some(s) = src {
@@ -369,7 +377,7 @@ impl VirtioBlockDevice {
                     }
                 }
             }
-            Ok((phys, virt, None))
+            Ok((self.bounce_pool.device(), virt, None))
         } else {
             // Large request: fall back to per-I/O allocation.
             let buf_pages = (buf_size + 4095) / 4096;
@@ -380,6 +388,9 @@ impl VirtioBlockDevice {
             .map_err(|_| BlockError::NotReady)?;
             let buf_phys = buf_frame.start_address.as_u64();
             let buf_virt = crate::memory::phys_to_virt(buf_phys);
+            let buf_device = self
+                .dma
+                .translate(buf_phys, buf_size, DmaProt::READ_WRITE);
             if is_write {
                 if let Some(s) = src {
                     unsafe {
@@ -387,12 +398,17 @@ impl VirtioBlockDevice {
                     }
                 }
             }
-            Ok((buf_phys, buf_virt, Some((buf_frame, buf_order))))
+            Ok((
+                buf_device,
+                buf_virt,
+                Some((buf_frame, buf_order, buf_device, buf_size)),
+            ))
         }
     }
 
-    fn release_dma_buffer(&self, allocated: Option<(memory::PhysFrame, u8)>) {
-        if let Some((frame, order)) = allocated {
+    fn release_dma_buffer(&self, allocated: Option<(memory::PhysFrame, u8, u64, usize)>) {
+        if let Some((frame, order, device, len)) = allocated {
+            self.dma.release(device, len);
             crate::sync::with_irqs_disabled(|token| {
                 memory::free_phys_contiguous(token, frame, order);
             });
@@ -407,7 +423,7 @@ impl VirtioBlockDevice {
         mut data_buf: Option<(&mut [u8], bool)>, // (buffer, is_write)
     ) -> Result<(), BlockError> {
         // ── Metadata (pre-allocated, reused : no per-I/O alloc) ──────────
-        let meta_phys = self.meta_pool.phys();
+        let meta_phys = self.meta_pool.device();
         let meta_virt = self.meta_pool.virt();
         let status_off = self.meta_pool.status_offset();
 
@@ -426,7 +442,7 @@ impl VirtioBlockDevice {
         }
 
         // ── Data buffer (pool => fallback alloc) ──────────────────────────
-        let mut data_alloc: Option<(memory::PhysFrame, u8)> = None;
+        let mut data_alloc: Option<(memory::PhysFrame, u8, u64, usize)> = None;
         let mut dma_buf_virt: u64 = 0;
 
         let mut buffers = Vec::with_capacity(3);

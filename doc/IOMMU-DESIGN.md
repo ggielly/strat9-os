@@ -127,8 +127,9 @@ Known P2 limits:
   address space needs the PCI device-capability milestone;
 * DMAR fault *interrupts* are not routed to an IRQ; `FaultRecord`s currently
   come from the backend and from `inject_fault`;
-* storage DMA is still physical, so activation stays a boot-time decision to
-  be taken after that migration (see §10).
+* storage DMA is migrated, but virtio-gpu, USB and the early boot block
+  loader still use physical DMA, so activation stays a boot-time decision
+  (see §10).
 
 ## 7. `/srv/iommu`
 
@@ -164,10 +165,12 @@ copies across the boundary (`load`/`store`).  It uses
 `DmaBuffer::alloc_constrained` (or `alloc_constrained_in` for a domain), so
 the staging memory is pinned and IOMMU-mapped like any other DMA buffer.
 
-## 10. NIC DMA migration
+## 10. NIC and storage DMA migration
 
-Network drivers now program **device addresses**, not physical addresses:
+Network and storage drivers now program **device addresses**, not physical
+addresses:
 
+**NIC**
 * `nic_buffers::DmaRegion` carries `phys`, `iova` and `domain_id`;
   `device_addr()` returns the IOVA when mapped and the physical address
   otherwise.
@@ -179,14 +182,27 @@ Network drivers now program **device addresses**, not physical addresses:
 * virtio-net uses `DmaMapper`: the contiguous vring of each queue is mapped
   once and `setup_queue` receives the translated descriptor PFN; RX/TX frames
   are mapped when allocated and tracked with their IOVA in the frame pools.
-* When translation is inactive, every helper is an identity mapping, so the
-  boot path and DMA behaviour are unchanged.
 
-Storage drivers (AHCI, NVMe, virtio-blk) still use physical addresses
-(`DmaBuffer::dma_addr()`).  Hardware translation therefore cannot be enabled
-from `SYS_IOMMU_ACTIVATE` after boot: it would invalidate every existing
-storage mapping.  Activation must become a boot-time decision taken **before**
-device probing, after storage has been migrated the same way.
+**Storage**
+* AHCI maps its per-port CLB/FIS/CTAB frame once and programs the device
+  address in `PxCLB/PxFB` and the command-table pointer.  Data transfers use
+  `DmaBuffer::alloc_for(sbdf, …)` and `device_addr()`.
+* NVMe maps admin/I/O queues, identify buffers and PRP lists, and interprets
+  `read_blocks`/`write_blocks` addresses as device addresses.
+* virtio-blk maps its vring, bounce pool and metadata pool; large per-I/O
+  buffers are mapped through `DmaMapper` and unmapped on completion.
+* `DmaBuffer::alloc_for()` is the generic bridge: it is `alloc()` when the
+  IOMMU is inactive and `alloc_in(domain)` otherwise.
+
+When translation is inactive, every helper is an identity mapping, so the
+boot path and DMA behaviour are unchanged.
+
+Remaining DMA masters not yet migrated: virtio-gpu, USB (xHCI/EHCI/UHCI),
+virtio-console/rng, and the early boot block loader.  Hardware translation
+therefore cannot be enabled from `SYS_IOMMU_ACTIVATE` after boot: it would
+invalidate every existing mapping.  Activation must become a boot-time
+decision taken **before** device probing, with either all DMA masters
+migrated or a pass-through/identity domain for the remaining ones.
 
 ## 11. Validation
 

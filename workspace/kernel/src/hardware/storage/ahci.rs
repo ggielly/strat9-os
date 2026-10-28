@@ -151,8 +151,13 @@ pub enum AhciError {
 struct AhciPort {
     port_num: u8,
     port_virt: u64, // virtual address of port registers
+    #[allow(dead_code)]
     mem_phys: u64,  // physical base of the per-port CLB/FB/CTAB frame
     mem_virt: u64,  // HHDM virtual address of that frame
+    /// Device-visible address of `mem_phys` (IOVA when translated).
+    mem_device: u64,
+    /// PCI function owning this port.
+    sbdf: crate::hardware::iommu::Sbdf,
     sector_count: u64,
 }
 
@@ -382,7 +387,8 @@ fn submit_cmd(
         return Err(AhciError::Busy);
     }
 
-    let dma_buf = DmaBuffer::alloc(nbytes).map_err(|_| AhciError::Alloc)?;
+    let dma_buf = DmaBuffer::alloc_for(port.sbdf, nbytes, crate::hardware::iommu::DmaProt::READ_WRITE)
+        .map_err(|_| AhciError::Alloc)?;
 
     if write {
         // SAFETY: dma_buf virtual addr is valid for nbytes; buf.len() >= nbytes
@@ -391,7 +397,7 @@ fn submit_cmd(
         }
     }
 
-    let ctab_phys = port.mem_phys + CTAB_OFF;
+    let ctab_phys = port.mem_device + CTAB_OFF;
     let cmdh_virt = port.mem_virt + CLB_OFF; // slot 0 = first 32 bytes of CLB
     let ctab_virt = port.mem_virt + CTAB_OFF;
 
@@ -432,8 +438,8 @@ fn submit_cmd(
 
         // PRDT entry 0 (16 bytes)
         let p = t.add(CTAB_PRDT);
-        // DBA: physical address of DMA buffer
-        let dma_phys = dma_buf.dma_addr().as_u64();
+        // DBA: device address of DMA buffer
+        let dma_phys = dma_buf.device_addr();
         ptr::write_unaligned(p.add(0) as *mut u32, (dma_phys & 0xFFFF_FFFF) as u32);
         ptr::write_unaligned(p.add(4) as *mut u32, (dma_phys >> 32) as u32);
         ptr::write_unaligned(p.add(8) as *mut u32, 0u32);
@@ -560,7 +566,7 @@ fn submit_async_cmd(
         }
     }
 
-    let ctab_phys = port.mem_phys + CTAB_OFF;
+    let ctab_phys = port.mem_device + CTAB_OFF;
     let cmdh_virt = port.mem_virt + CLB_OFF;
     let ctab_virt = port.mem_virt + CTAB_OFF;
 
@@ -600,7 +606,7 @@ fn submit_async_cmd(
 
         // PRDT entry 0 (16 bytes)
         let p = t.add(CTAB_PRDT);
-        let dma_phys = dma_buf.dma_addr().as_u64();
+        let dma_phys = dma_buf.device_addr();
         ptr::write_unaligned(p.add(0) as *mut u32, (dma_phys & 0xFFFF_FFFF) as u32);
         ptr::write_unaligned(p.add(4) as *mut u32, (dma_phys >> 32) as u32);
         ptr::write_unaligned(p.add(8) as *mut u32, 0u32);
@@ -658,7 +664,8 @@ pub(crate) fn submit_async_storage_op(
         UserSliceWrite::new(user_buf_vaddr, nbytes).map_err(|_| AhciError::InvalidUserBuffer)?;
     }
 
-    let dma_buf = DmaBuffer::alloc(nbytes).map_err(|_| AhciError::Alloc)?;
+    let dma_buf = DmaBuffer::alloc_for(port.sbdf, nbytes, crate::hardware::iommu::DmaProt::READ_WRITE)
+        .map_err(|_| AhciError::Alloc)?;
 
     let idx = port.port_num as usize;
     let ata_cmd = if write {
@@ -1028,7 +1035,20 @@ impl AhciController {
             // SAFETY: mem_virt is valid HHDM-mapped physical memory, 4096 bytes
             ptr::write_bytes(mem_virt as *mut u8, 0, 4096);
 
-            port_rebase(pvirt, mem_phys);
+            let sbdf = crate::hardware::iommu::Sbdf::new(
+                0,
+                pci_dev.address.bus,
+                pci_dev.address.device,
+                pci_dev.address.function,
+            );
+            let mapper = crate::dma::DmaMapper::for_sbdf(sbdf);
+            let mem_device = mapper.translate(
+                mem_phys,
+                4096,
+                crate::hardware::iommu::DmaProt::READ_WRITE,
+            );
+
+            port_rebase(pvirt, mem_device);
 
             // Enable per-port interrupts (DHRE + TFEE)
             port_enable_irq(pvirt);
@@ -1043,6 +1063,8 @@ impl AhciController {
                 port_virt: pvirt,
                 mem_phys,
                 mem_virt,
+                mem_device,
+                sbdf,
                 sector_count: 0,
             };
 
@@ -1116,6 +1138,8 @@ mod tests {
             port_virt: 0,
             mem_phys: 0,
             mem_virt: 0,
+            mem_device: 0,
+            sbdf: crate::hardware::iommu::Sbdf::from_pci(0, 0, 0),
             sector_count: 1024,
         }
     }
