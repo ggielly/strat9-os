@@ -67,6 +67,12 @@ pub enum ResourceType {
     Namespace,
     /// IPC transport endpoint (N1/N2/N3).
     IpcTransport,
+    /// An IOMMU domain delegated to a driver (SYS_IOMMU_*).
+    IommuDomain,
+    /// A DMA buffer mapped into an IOMMU domain.
+    DmaBuffer,
+    /// A remapped interrupt cookie (MSI / MSI-X with IR).
+    IrqCookie,
 }
 
 /// Permissions associated with a capability
@@ -116,6 +122,70 @@ impl CapPermissions {
     }
 }
 
+/// DMA rights carried by an IOMMU-related capability.
+///
+/// These are deliberately separate from [`CapPermissions`]: `read`/`write` on
+/// a capability describe what the *holder* may do to the resource, while
+/// `DmaRights` describe what a *device* may do through a mapping.  Overloading
+/// the two made it too easy to grant device write access by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DmaRights {
+    /// Create new mappings.
+    pub map: bool,
+    /// Remove existing mappings.
+    pub unmap: bool,
+    /// Device may read memory through the mapping.
+    pub read: bool,
+    /// Device may write memory through the mapping.
+    pub write: bool,
+    /// May attach interrupt cookies to the domain.
+    pub irq: bool,
+}
+
+impl DmaRights {
+    /// No DMA right at all.
+    pub const fn none() -> Self {
+        DmaRights {
+            map: false,
+            unmap: false,
+            read: false,
+            write: false,
+            irq: false,
+        }
+    }
+
+    /// Map/unmap, read-only device access.
+    pub const fn map_read() -> Self {
+        DmaRights {
+            map: true,
+            unmap: true,
+            read: true,
+            write: false,
+            irq: false,
+        }
+    }
+
+    /// Full DMA control, including interrupt cookies.
+    pub const fn all() -> Self {
+        DmaRights {
+            map: true,
+            unmap: true,
+            read: true,
+            write: true,
+            irq: true,
+        }
+    }
+
+    /// True when every right in `required` is present.
+    pub const fn contains(self, required: DmaRights) -> bool {
+        (!required.map || self.map)
+            && (!required.unmap || self.unmap)
+            && (!required.read || self.read)
+            && (!required.write || self.write)
+            && (!required.irq || self.irq)
+    }
+}
+
 /// A capability token that grants access to a kernel resource
 #[derive(Debug, Clone)]
 pub struct Capability {
@@ -138,6 +208,11 @@ pub struct Capability {
     /// receiver can distinguish individual clients without learning their
     /// global task IDs.
     pub badge: u64,
+    /// Device-side DMA rights (IOMMU capabilities only).
+    ///
+    /// Always [`DmaRights::none`] for capabilities that do not describe a DMA
+    /// domain or buffer.
+    pub dma: DmaRights,
 }
 
 /// Table of capabilities for a process
@@ -302,6 +377,7 @@ impl CapabilityTable {
                     permissions: cap.permissions,
                     resource: cap.resource,
                     badge: cap.badge,
+                    dma: cap.dma,
                 })
             } else {
                 None
@@ -326,6 +402,7 @@ impl CapabilityTable {
                     permissions: cap.permissions,
                     resource: cap.resource,
                     badge: new_badge,
+                    dma: cap.dma,
                 })
             } else {
                 None
@@ -372,6 +449,32 @@ impl CapabilityManager {
             resource_type,
             permissions,
             resource,
+            dma: DmaRights::none(),
+        };
+
+        self.all_capabilities.lock().insert(cap.id, cap.clone());
+        self.increment_resource_refcount(resource_type, resource);
+        cap
+    }
+
+    /// Register a resource and grant explicit device-side DMA rights.
+    ///
+    /// Used by the IOMMU syscalls for `IommuDomain` / `DmaBuffer` handles.
+    pub fn create_dma_capability(
+        &self,
+        resource_type: ResourceType,
+        resource: usize,
+        permissions: CapPermissions,
+        dma: DmaRights,
+    ) -> Capability {
+        let id = CapId::new();
+        let cap = Capability {
+            badge: id.as_u64(),
+            id,
+            resource_type,
+            permissions,
+            resource,
+            dma,
         };
 
         self.all_capabilities.lock().insert(cap.id, cap.clone());

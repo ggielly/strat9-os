@@ -23,6 +23,7 @@ pub mod fork;
 pub mod futex;
 pub mod ipc_port;
 pub mod ipc_ring;
+pub mod iommu;
 pub mod mmap;
 pub mod net;
 pub mod numbers;

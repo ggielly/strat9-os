@@ -57,6 +57,7 @@ pub fn sys_chan_create(capacity: u64) -> Result<u64, SyscallError> {
         // When this capability is granted/delegated, the granter can supply
         // a custom badge so the receiver can distinguish individual clients.
         badge: cap_id.as_u64(),
+        dma: crate::capability::DmaRights::none(),
     };
     let handle = caps.insert(chan_cap);
 

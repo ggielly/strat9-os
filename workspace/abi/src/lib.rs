@@ -14,5 +14,6 @@ pub mod ip;
 pub mod ipc;
 pub mod ipc_codec;
 pub mod ipc_payload;
+pub mod iommu;
 pub mod net;
 pub mod syscall;

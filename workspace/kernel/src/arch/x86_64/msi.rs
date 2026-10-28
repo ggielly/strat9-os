@@ -33,6 +33,33 @@ fn alloc_msi_vector() -> u8 {
         .unwrap_or(MSI_VECTOR_BASE)
 }
 
+/// True when interrupt remapping is both advertised and active.
+///
+/// P0 keeps the VT-d backend inactive, so this is `false` on real hardware;
+/// the MSI path therefore refuses destination IDs that do not fit the 8-bit
+/// MSI address field instead of silently truncating them.
+fn interrupt_remapping_active() -> bool {
+    crate::arch::iommu::interrupt_remapping_active()
+}
+
+/// Build the MSI message address for `lapic_id`.
+///
+/// Without interrupt remapping the destination APIC ID is encoded in bits
+/// 19:12 of the message address, so IDs above 255 cannot be represented and
+/// must not be truncated.
+fn msi_message_address(lapic_id: u32) -> Option<u32> {
+    if lapic_id <= 0xFF {
+        Some(MSI_ADDR_BASE | (lapic_id << MSI_ADDR_DEST_SHIFT))
+    } else if interrupt_remapping_active() {
+        // With interrupt remapping the destination lives in the IRTE; the
+        // message address is the standard base.
+        Some(MSI_ADDR_BASE)
+    } else {
+        None
+    }
+}
+
+
 /// Try to enable MSI on `pci_dev` with `vector`.
 ///
 /// Returns `true` on success, `false` if MSI is not supported or
@@ -55,7 +82,16 @@ fn enable_msi(pci_dev: &PciDevice, vector: u8) -> bool {
     let lapic_id = crate::arch::x86_64::apic::lapic_id();
 
     // Message Address = 0xFEE0_0000 | (LAPIC ID << 12)
-    let msg_addr = MSI_ADDR_BASE | (lapic_id << MSI_ADDR_DEST_SHIFT);
+    let Some(msg_addr) = msi_message_address(lapic_id) else {
+        log::warn!(
+            "MSI: {:04x}:{:04x} wants APIC id {:#x} but MSI destinations are 8-bit \
+             and interrupt remapping is unavailable; keeping INTx",
+            pci_dev.vendor_id,
+            pci_dev.device_id,
+            lapic_id
+        );
+        return false;
+    };
 
     // Message Data = vector (fixed delivery, edge-triggered)
     let msg_data = vector as u16;
@@ -172,7 +208,16 @@ fn enable_msix(pci_dev: &PciDevice, vector: u8) -> bool {
     let table_virt = crate::memory::phys_to_virt(table_phys) as *mut u32;
 
     let lapic_id = crate::arch::x86_64::apic::lapic_id();
-    let msg_addr = MSI_ADDR_BASE | (lapic_id << MSI_ADDR_DEST_SHIFT);
+    let Some(msg_addr) = msi_message_address(lapic_id) else {
+        log::warn!(
+            "MSI-X: {:04x}:{:04x} wants APIC id {:#x} but MSI destinations are 8-bit \
+             and interrupt remapping is unavailable; keeping INTx",
+            pci_dev.vendor_id,
+            pci_dev.device_id,
+            lapic_id
+        );
+        return false;
+    };
     let msg_data = vector as u32; // bits 7:0 = vector
 
     // Program the first MSI-X table entry (16 bytes per entry).

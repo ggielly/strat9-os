@@ -17,6 +17,9 @@ pub mod virtio;
 
 /// Performs the init operation.
 pub fn init() {
+    // Parse DMAR/IVRS and record the discovery summary.  This never programs
+    // translation: `iommu::activate()` stays false until the backend is ready.
+    iommu::init();
     ec::init();
     crate::arch::speaker::beep_phase(7); // EC
     thermal::init();

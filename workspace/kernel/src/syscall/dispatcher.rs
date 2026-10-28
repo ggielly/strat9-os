@@ -16,8 +16,8 @@
 use crate::ipc::{channel, port, semaphore, shared_ring, ChanId, PortId, RingId, SemId};
 
 use super::{
-    chan, debug, error::SyscallError, exec::sys_execve, fork::sys_fork, ipc_port, ipc_ring, net,
-    numbers::*, pci, process as proc_sys, semaphore as sem_handler, transport, volume,
+    chan, debug, error::SyscallError, exec::sys_execve, fork::sys_fork, ipc_port, ipc_ring, iommu,
+    net, numbers::*, pci, process as proc_sys, semaphore as sem_handler, transport, volume,
     SyscallFrame,
 };
 use crate::{
@@ -300,6 +300,16 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_NET_QUIESCE => net::sys_net_quiesce(arg1),
         SYS_NET_RESUME => net::sys_net_resume(arg1),
         SYS_NET_QUEUE_UNMAP => net::sys_net_queue_unmap(arg1, arg2),
+
+        // IOMMU / DMA isolation (440-449) ==================================
+        SYS_IOMMU_INFO => iommu::sys_iommu_info(arg1),
+        SYS_IOMMU_DOMAIN_CREATE => iommu::sys_iommu_domain_create(arg1),
+        SYS_IOMMU_DOMAIN_DESTROY => iommu::sys_iommu_domain_destroy(arg1),
+        SYS_IOMMU_MAP => iommu::sys_iommu_map(arg1, arg2),
+        SYS_IOMMU_UNMAP => iommu::sys_iommu_unmap(arg1, arg2, arg3),
+        SYS_IOMMU_TRANSLATE => iommu::sys_iommu_translate(arg1, arg2),
+        SYS_IOMMU_ACTIVATE => iommu::sys_iommu_activate(),
+        SYS_IOMMU_DOMAIN_INFO => iommu::sys_iommu_domain_info(arg1, arg2),
 
         // Storage syscalls (600-699) ========================================
         SYS_VOLUME_READ => volume::sys_volume_read(arg1, arg2, arg3, arg4),
@@ -675,6 +685,9 @@ fn resource_type_code(rt: ResourceType) -> u32 {
         ResourceType::Volume => 17,
         ResourceType::Namespace => 18,
         ResourceType::IpcTransport => 19,
+        ResourceType::IommuDomain => 20,
+        ResourceType::DmaBuffer => 21,
+        ResourceType::IrqCookie => 22,
     }
 }
 

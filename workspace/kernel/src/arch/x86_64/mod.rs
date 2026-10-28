@@ -8,6 +8,7 @@ pub mod cpuid;
 pub mod gdt;
 pub mod idt;
 pub mod io;
+pub mod iommu;
 pub mod ioapic;
 pub mod keyboard;
 pub mod keyboard_layout;

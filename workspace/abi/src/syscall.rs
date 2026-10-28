@@ -916,6 +916,68 @@ pub const SYS_NET_RESUME: usize = 427;
 /// Unmap a shared queue region (hot-restart cleanup).
 pub const SYS_NET_QUEUE_UNMAP: usize = 428;
 
+// =============================================================================
+// IOMMU / DMA domain management (440-449)
+// =============================================================================
+//
+// P0 exposes bookkeeping only: the ABI lets a driver obtain a domain, map and
+// unmap buffers, and query the software translation table.  Hardware
+// translation stays disabled (`SYS_IOMMU_ACTIVATE` returns 0) until the VT-d
+// backend is validated.
+
+/// Query the platform IOMMU summary.
+///
+/// - `out_ptr`: pointer to a writable [`strat9_abi::iommu::IommuInfo`]
+///
+/// Returns `0` on success.
+pub const SYS_IOMMU_INFO: usize = 440;
+
+/// Create (or look up) the IOMMU domain bound to a PCI function.
+///
+/// - `sbdf`: packed `segment:16 | bus:8 | device:5 | function:3`
+///
+/// Returns an `IommuDomain` capability handle on success.
+pub const SYS_IOMMU_DOMAIN_CREATE: usize = 441;
+
+/// Destroy an IOMMU domain and revoke all of its mappings.
+///
+/// - `handle`: `IommuDomain` capability handle
+///
+/// Returns `0` on success.
+pub const SYS_IOMMU_DOMAIN_DESTROY: usize = 442;
+
+/// Map physical memory into a domain.
+///
+/// - `handle`: `IommuDomain` capability handle
+/// - `desc_ptr`: pointer to a [`strat9_abi::iommu::IommuMapDesc`]
+///
+/// Returns `0` on success.
+pub const SYS_IOMMU_MAP: usize = 443;
+
+/// Remove mappings covering `[iova, iova + len)`.
+///
+/// - `handle`: `IommuDomain` capability handle
+/// - `iova`, `len`: page-aligned range
+///
+/// Returns the number of removed mappings.
+pub const SYS_IOMMU_UNMAP: usize = 444;
+
+/// Translate an IOVA with the software table.
+///
+/// Returns the physical address, or `-ENOENT` when unmapped.
+pub const SYS_IOMMU_TRANSLATE: usize = 445;
+
+/// Attempt to enable hardware translation.
+///
+/// Returns `1` when translation is active, `0` when the backend is not ready.
+pub const SYS_IOMMU_ACTIVATE: usize = 446;
+
+/// Query one domain's identity and counters.
+///
+/// - `handle`: `IommuDomain` capability handle
+/// - `out_ptr`: pointer to a writable [`strat9_abi::iommu::IommuDomainInfo`]
+pub const SYS_IOMMU_DOMAIN_INFO: usize = 449;
+
 /// Check file accessibility using the real user/group IDs.
 ///
 /// - `path_ptr`: pointer to the path string
