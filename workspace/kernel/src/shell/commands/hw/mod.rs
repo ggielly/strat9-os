@@ -75,3 +75,64 @@ pub fn cmd_lsns(_args: &[String]) -> Result<(), ShellError> {
     shell_println!("{} binding(s)", bindings.len());
     Ok(())
 }
+
+/// `iommu`: dump the IOMMU discovery, counters, groups and reserved regions.
+pub fn cmd_iommu(_args: &[String]) -> Result<(), ShellError> {
+    use crate::hardware::iommu;
+
+    let discovery = crate::arch::iommu::discovery();
+    shell_println!(
+        "IOMMU present={} enabled={} ready={} backend={}",
+        discovery.present,
+        iommu::enabled(),
+        discovery.ready,
+        discovery.backend
+    );
+    shell_println!(
+        "units={} rmrr={} atsr={} width={} intr_remap={} x2apic_opt_out={}",
+        discovery.units,
+        discovery.rmrrs,
+        discovery.atsrs,
+        discovery.host_address_width,
+        discovery.intr_remap,
+        discovery.x2apic_opt_out
+    );
+
+    let stats = iommu::stats();
+    shell_println!(
+        "domains live={} created={} destroyed={} maps={} unmaps={} faults={} dropped={}",
+        iommu::domain_count(),
+        stats.domains_created,
+        stats.domains_destroyed,
+        stats.maps,
+        stats.unmaps,
+        stats.faults,
+        stats.dropped_faults
+    );
+
+    let groups = iommu::groups();
+    shell_println!("IOMMU groups: {}", groups.len());
+    for group in &groups {
+        shell_println!(
+            "  group={} seg={} bus={:02x} devices={}",
+            group.id,
+            group.segment,
+            group.bus,
+            group.devices.len()
+        );
+    }
+
+    let reserved = iommu::reserved_regions();
+    shell_println!("Reserved regions (RMRR/IVMD): {}", reserved.len());
+    for region in &reserved {
+        shell_println!(
+            "  seg={} {:#x}..{:#x} devices={} all_buses={}",
+            region.segment,
+            region.base,
+            region.limit,
+            region.devices.len(),
+            region.all_bus_from.is_some()
+        );
+    }
+    Ok(())
+}
