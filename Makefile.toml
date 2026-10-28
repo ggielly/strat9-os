@@ -111,15 +111,24 @@ description = "Run all host-safe unit tests (L1): ABI, fs-abstraction, parsers"
 command = "cargo"
 args = [
     "test",
-    "--target", "x86_64-unknown-linux-gnu",
-    "-p", "strat9-abi",
-    "-p", "strate-fs-abstraction",
-    "-p", "strat9-syscall",
-    "-p", "alloc-freelist",
-    "-p", "nic-queues",
-    "-p", "net-core",
-    "-p", "driver-net-proto",
-    "-p", "intel-ethernet",
+    "--target",
+    "x86_64-unknown-linux-gnu",
+    "-p",
+    "strat9-abi",
+    "-p",
+    "strate-fs-abstraction",
+    "-p",
+    "strat9-syscall",
+    "-p",
+    "alloc-freelist",
+    "-p",
+    "nic-queues",
+    "-p",
+    "net-core",
+    "-p",
+    "driver-net-proto",
+    "-p",
+    "intel-ethernet",
 ]
 
 [tasks.test-host-alloc]
@@ -127,9 +136,14 @@ description = "Host tests with alloc feature (WindowsString, capabilities)"
 command = "cargo"
 args = [
     "test",
-    "--target", "x86_64-unknown-linux-gnu",
-    "-p", "strat9-abi",
-    "-p", "strate-fs-abstraction", "--features", "strate-fs-abstraction/alloc",
+    "--target",
+    "x86_64-unknown-linux-gnu",
+    "-p",
+    "strat9-abi",
+    "-p",
+    "strate-fs-abstraction",
+    "--features",
+    "strate-fs-abstraction/alloc",
 ]
 
 [tasks.test-kernel-l2]
@@ -140,12 +154,27 @@ args = ["test", "--target", "x86_64-unknown-linux-gnu"]
 
 [tasks.ci-tests]
 description = "Full CI gate: host tests, kernel L2 mirror and UEFI tooling regressions"
-dependencies = ["test-host", "test-host-alloc", "test-kernel-l2", "test-uefi-tools"]
+dependencies = [
+    "test-host",
+    "test-host-alloc",
+    "test-kernel-l2",
+    "test-uefi-tools",
+]
 
 [tasks.test-uefi-tools]
 description = "UEFI geometry, packaging failures and serial harness (synthetic fixtures, no builds/QEMU)"
 command = "python3"
-args = ["-B", "-m", "unittest", "discover", "-s", "tools/scripts/tests", "-p", "test_*.py", "-v"]
+args = [
+    "-B",
+    "-m",
+    "unittest",
+    "discover",
+    "-s",
+    "tools/scripts/tests",
+    "-p",
+    "test_*.py",
+    "-v",
+]
 
 [tasks.qemu-selftest]
 description = "L3/L4: boot selftest UEFI ISO in QEMU (ephemeral), verify serial markers"
@@ -270,7 +299,8 @@ bash tools/scripts/create-uboot-image.sh
 description = "Run kernel SMP release with GUI"
 dependencies = ["uefi-image-release", "iso-uefi-release"]
 script_runner = "@shell"
-script = ['''
+script = [
+    '''
 ${QEMU} \
     -machine q35 \
     -cpu qemu64 \
@@ -284,8 +314,10 @@ ${QEMU} \
     -device virtio-net-pci,netdev=net0 \
     -netdev user,id=net0,hostfwd=tcp::2222-:22 \
     -serial stdio \
+    -device intel-iommu \
     -no-reboot
-''']
+''',
+]
 
 # NOTE (keyboard): -device usb-kbd/-device usb-tablet/-device usb-ehci/-device qemu-xhci were
 # REMOVED here. QEMU routes GTK input to the first attached keyboard device; with a USB keyboard
@@ -298,7 +330,8 @@ ${QEMU} \
 description = "Run kernel SMP dev-opt with GUI"
 dependencies = ["uefi-image"]
 script_runner = "@shell"
-script = ['''
+script = [
+    '''
 ${QEMU} \
     -machine q35 \
     -cpu qemu64 \
@@ -316,13 +349,15 @@ ${QEMU} \
     -netdev user,id=net0,hostfwd=tcp::2222-:22 \
     -serial mon:stdio \
     -no-reboot
-''']
+''',
+]
 
 [tasks.run-debug]
 description = "Run kernel debug (no GUI, serial only)"
 dependencies = ["uefi-image"]
 script_runner = "@shell"
-script = ['''
+script = [
+    '''
 ${QEMU} \
     -machine q35 \
     -cpu qemu64 \
@@ -333,13 +368,15 @@ ${QEMU} \
     -drive file=build/strat9-os-uefi.img,format=raw \
     -nographic \
     -no-reboot
-''']
+''',
+]
 
 [tasks.run-debug-headless]
 description = "Run kernel debug headless (no display)"
 dependencies = ["uefi-image"]
 script_runner = "@shell"
-script = ['''
+script = [
+    '''
 ${QEMU} \
     -machine q35 \
     -cpu qemu64 \
@@ -351,13 +388,15 @@ ${QEMU} \
     -display none \
     -serial stdio \
     -no-reboot
-''']
+''',
+]
 
 [tasks.run-debug-net]
 description = "Run kernel debug with networking (e1000 NAT)"
 dependencies = ["uefi-image"]
 script_runner = "@shell"
-script = ['''
+script = [
+    '''
 ${QEMU} \
     -machine q35 \
     -cpu qemu64 \
@@ -370,13 +409,15 @@ ${QEMU} \
     -netdev user,id=net0,hostfwd=tcp::2222-:22 \
     -nographic \
     -no-reboot
-''']
+''',
+]
 
 [tasks.run-debug-net-headless]
 description = "Run kernel debug with networking headless"
 dependencies = ["uefi-image"]
 script_runner = "@shell"
-script = ['''
+script = [
+    '''
 ${QEMU} \
     -machine q35 \
     -cpu qemu64 \
@@ -390,7 +431,8 @@ ${QEMU} \
     -display none \
     -serial stdio \
     -no-reboot
-''']
+''',
+]
 
 # =============================================================================
 # Legacy custom bootloader (NOT the active boot path - see limine-image)
@@ -415,7 +457,8 @@ bash tools/scripts/create-image.sh
 description = "Boot test: kernel + serial output verification"
 dependencies = ["uefi-image"]
 script_runner = "@shell"
-script = ['''
+script = [
+    '''
 timeout 30 ${QEMU} \
     -machine q35 \
     -cpu qemu64 \
@@ -426,7 +469,8 @@ timeout 30 ${QEMU} \
     -drive file=build/strat9-os-uefi.img,format=raw \
     -nographic \
     -no-reboot 2>&1 | head -50
-''']
+''',
+]
 
 # =============================================================================
 # UEFI Bootloader Tasks
@@ -440,7 +484,14 @@ args = ["build", "--target", "x86_64-unknown-uefi", "-p", "strat9-bootloader"]
 [tasks.bootloader-uefi-release]
 description = "Build UEFI bootloader (release)"
 command = "cargo"
-args = ["build", "--target", "x86_64-unknown-uefi", "-p", "strat9-bootloader", "--release"]
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-uefi",
+    "-p",
+    "strat9-bootloader",
+    "--release",
+]
 
 [tasks.uefi-image]
 description = "Create UEFI bootable image"
@@ -516,7 +567,8 @@ bash tools/scripts/create-iso-uefi.sh
 description = "Run with OVMF UEFI firmware"
 dependencies = ["uefi-image"]
 script_runner = "@shell"
-script = ['''
+script = [
+    '''
 ${QEMU} \
     -machine q35 \
     -cpu qemu64 \
@@ -527,13 +579,15 @@ ${QEMU} \
     -drive file=build/strat9-os-uefi.img,format=raw \
     -serial mon:stdio \
     -no-reboot
-''']
+''',
+]
 
 [tasks.run-uefi-gui]
 description = "Run UEFI with GUI (OVMF + display)"
 dependencies = ["uefi-image"]
 script_runner = "@shell"
-script = ['''
+script = [
+    '''
 ${QEMU} \
     -machine q35 \
     -cpu qemu64 \
@@ -551,7 +605,8 @@ ${QEMU} \
     -netdev user,id=net0,hostfwd=tcp::2222-:22 \
     -serial mon:stdio \
     -no-reboot
-''']
+''',
+]
 
 # =============================================================================
 # Component builds (release only)
@@ -561,102 +616,253 @@ ${QEMU} \
 description = "Build EXT4 filesystem component (release)"
 cwd = "workspace/components/strate-fs-ext4"
 command = "cargo"
-args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
 
 [tasks.strate-fs-ramfs-release]
 description = "Build RAM filesystem component (release)"
 cwd = "workspace/components/strate-fs-ramfs"
 command = "cargo"
-args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
 
 [tasks.strate-silo-test-release]
 description = "Build init/test component (release)"
 cwd = "workspace/components/strate-silo-test"
 command = "cargo"
-args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
 
 [tasks.strate-mem-test-release]
 description = "Build memory stress test component (release)"
 cwd = "workspace/components/strate-mem-test"
 command = "cargo"
-args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
 
 [tasks.strate-init-release]
 description = "Build init process (release)"
 cwd = "workspace/components/strate-init"
 command = "cargo"
-args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
 
 [tasks.strate-net-release]
 description = "Build network silo (release)"
 cwd = "workspace/components/strate-net"
 command = "cargo"
-args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
 
 [tasks.strate-bus-release]
 description = "Build bus silo (release)"
 cwd = "workspace/components/strate-bus"
 command = "cargo"
-args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
 
 [tasks.strate-wasm-release]
 description = "Build wasm runtime silo (release)"
 cwd = "workspace/components/strate-wasm"
 command = "cargo"
-args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
 
 [tasks.strate-webrtc-release]
 description = "Build webrtc silo (release)"
 cwd = "workspace/components/strate-webrtc"
 command = "cargo"
-args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
 
 [tasks.strate-console-admin-release]
 description = "Build console-admin silo (release)"
 cwd = "workspace/components/strate-console-admin"
 command = "cargo"
-args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
 
 [tasks.strate-graphical-release]
 description = "Build graphical display server (release)"
 cwd = "workspace/components/strate-graphical"
 command = "cargo"
-args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
 
 [tasks.dhcp-client-release]
 description = "Build DHCP client (release)"
 cwd = "workspace/components/netutils/dhcp-client"
 command = "cargo"
-args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
 
 [tasks.ping-release]
 description = "Build ping utility (release)"
 cwd = "workspace/components/netutils/ping"
 command = "cargo"
-args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
 
 [tasks.telnetd-release]
 description = "Build telnet server (release)"
 cwd = "workspace/components/netutils/telnetd"
 command = "cargo"
-args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
 
 [tasks.udp-tool-release]
 description = "Build UDP utility (release)"
 cwd = "workspace/components/netutils/udp-tool"
 command = "cargo"
-args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
 
 [tasks.strate-web-admin-release]
 description = "Build web-admin silo (release)"
 cwd = "workspace/components/strate-web-admin"
 command = "cargo"
-args = ["build", "--target", "x86_64-unknown-none", "--release", "-Z", "build-std=core,alloc", "-Z", "build-std-features=compiler-builtins-mem"]
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
 
 [tasks.build-console]
 workspace = false
 command = "cargo"
-args = ["build", "--target", "x86_64-unknown-none", "-p", "strate-console", "--release"]
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "-p",
+    "strate-console",
+    "--release",
+]
 
 # =============================================================================
 # Utility tasks
@@ -727,46 +933,113 @@ args = ["build", "--release", "--target", "x86_64-pc-windows-gnu"]
 description = "Run with Windows GUI (debug)"
 dependencies = ["uefi-image"]
 command = "cargo"
-args = ["run", "--release", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows"]
+args = [
+    "run",
+    "--release",
+    "--target",
+    "x86_64-pc-windows-gnu",
+    "-p",
+    "strate-gui-windows",
+]
 
 [tasks.run-wingui-smp]
 description = "Run with Windows GUI SMP (debug)"
 dependencies = ["uefi-image"]
 command = "cargo"
-args = ["run", "--release", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows", "--", "--smp"]
+args = [
+    "run",
+    "--release",
+    "--target",
+    "x86_64-pc-windows-gnu",
+    "-p",
+    "strate-gui-windows",
+    "--",
+    "--smp",
+]
 
 [tasks.run-wingui-release]
 description = "Run with Windows GUI (release)"
 dependencies = ["uefi-image-release"]
 command = "cargo"
-args = ["run", "--release", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows"]
+args = [
+    "run",
+    "--release",
+    "--target",
+    "x86_64-pc-windows-gnu",
+    "-p",
+    "strate-gui-windows",
+]
 
 [tasks.run-wingui-smp-release]
 description = "Run with Windows GUI SMP (release)"
 dependencies = ["uefi-image-release"]
 command = "cargo"
-args = ["run", "--release", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows", "--", "--smp"]
+args = [
+    "run",
+    "--release",
+    "--target",
+    "x86_64-pc-windows-gnu",
+    "-p",
+    "strate-gui-windows",
+    "--",
+    "--smp",
+]
 
 [tasks.run-wingui-dev-opt]
 description = "Run with Windows GUI (dev-opt)"
 dependencies = ["uefi-image"]
 command = "cargo"
-args = ["run", "--profile", "dev-opt", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows"]
+args = [
+    "run",
+    "--profile",
+    "dev-opt",
+    "--target",
+    "x86_64-pc-windows-gnu",
+    "-p",
+    "strate-gui-windows",
+]
 
 [tasks.run-wingui-smp-dev-opt]
 description = "Run with Windows GUI SMP (dev-opt)"
 dependencies = ["uefi-image"]
 command = "cargo"
-args = ["run", "--profile", "dev-opt", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows", "--", "--smp"]
+args = [
+    "run",
+    "--profile",
+    "dev-opt",
+    "--target",
+    "x86_64-pc-windows-gnu",
+    "-p",
+    "strate-gui-windows",
+    "--",
+    "--smp",
+]
 
 [tasks.run-wingui-test]
 description = "Run Windows GUI test"
 dependencies = ["uefi-image"]
 command = "cargo"
-args = ["run", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows", "--", "--test"]
+args = [
+    "run",
+    "--target",
+    "x86_64-pc-windows-gnu",
+    "-p",
+    "strate-gui-windows",
+    "--",
+    "--test",
+]
 
 [tasks.run-wingui-test-release]
 description = "Run Windows GUI test (release)"
 dependencies = ["uefi-image-release"]
 command = "cargo"
-args = ["run", "--release", "--target", "x86_64-pc-windows-gnu", "-p", "strate-gui-windows", "--", "--test"]
+args = [
+    "run",
+    "--release",
+    "--target",
+    "x86_64-pc-windows-gnu",
+    "-p",
+    "strate-gui-windows",
+    "--",
+    "--test",
+]
