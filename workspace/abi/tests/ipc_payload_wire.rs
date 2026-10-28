@@ -8,7 +8,7 @@
 use strat9_abi::{data::IpcMessage, ipc_codec::put_str, ipc_payload::*};
 use zerocopy::IntoBytes;
 
-const PAYLOAD: usize = 240;
+const PAYLOAD: usize = IpcMessage::PAYLOAD_CAPACITY;
 
 // ===========================================================================
 // Opcodes
@@ -47,7 +47,7 @@ fn open_request_parse_rejects_truncated_and_lying_lengths() {
 
     // path_len claims more bytes than available.
     let mut payload = [0u8; PAYLOAD];
-    payload[4..6].copy_from_slice(&1000u16.to_le_bytes());
+    payload[4..6].copy_from_slice(&u16::MAX.to_le_bytes());
     assert_eq!(OpenRequest::parse(&payload), None);
 
     // path_len = 0 → empty but valid.
@@ -185,7 +185,7 @@ fn create_request_is_mode_plus_raw_path_length() {
     assert_eq!(parsed, path);
 
     // A length prefix that claims more bytes than available is rejected.
-    payload[4..6].copy_from_slice(&1000u16.to_le_bytes());
+    payload[4..6].copy_from_slice(&u16::MAX.to_le_bytes());
     assert!(CreateRequest::parse(&payload).is_none());
 }
 
