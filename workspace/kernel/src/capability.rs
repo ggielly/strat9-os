@@ -235,9 +235,27 @@ impl CapabilityTable {
         })
     }
 
+    /// Find the first capability of `resource_type` with the required
+    /// permissions.  Used by syscalls that operate on a singleton resource
+    /// (the default NIC) without forcing userspace to carry a handle in the
+    /// legacy ABI.
+    pub fn find_by_type_with_permissions(
+        &self,
+        resource_type: ResourceType,
+        required: CapPermissions,
+    ) -> Option<&Capability> {
+        self.capabilities.values().find(|cap| {
+            cap.resource_type == resource_type
+                && (!required.read || cap.permissions.read)
+                && (!required.write || cap.permissions.write)
+                && (!required.execute || cap.permissions.execute)
+                && (!required.grant || cap.permissions.grant)
+                && (!required.revoke || cap.permissions.revoke)
+        })
+    }
+
     /// Get a reference to a capability if it exists and has the required permissions
-    pub fn get_with_permissions(&self, id: CapId, required: CapPermissions) -> Option<&Capability> {
-        self.capabilities.get(&id).filter(|cap| {
+    pub fn get_with_permissions(&self, id: CapId, required: CapPermissions) -> Option<&Capability> {        self.capabilities.get(&id).filter(|cap| {
             // Check if the capability has all required permissions
             (!required.read || cap.permissions.read)
                 && (!required.write || cap.permissions.write)

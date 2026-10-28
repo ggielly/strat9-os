@@ -1204,6 +1204,18 @@ fn probe_from_word00(address: PciAddress, word00: u32) -> Option<PciDevice> {
 ///   - a lock-free double-buffered snapshot model.
 static PCI_DEVICE_CACHE: SpinLock<Option<Vec<PciDevice>>> = SpinLock::new(None);
 
+/// Invalidate the boot-time snapshot and re-enumerate the bus.
+///
+/// Hotplug support: the old snapshot is dropped, then `all_devices()`
+/// performs a fresh I/O + ECAM scan.  Drivers must re-probe after this call.
+pub fn rescan() -> usize {
+    {
+        let mut cache = PCI_DEVICE_CACHE.lock();
+        *cache = None;
+    }
+    all_devices().len()
+}
+
 // ---------------------------------------------------------------------------
 // ECAM (PCIe Enhanced Configuration Access Mechanism) scanner
 // ---------------------------------------------------------------------------

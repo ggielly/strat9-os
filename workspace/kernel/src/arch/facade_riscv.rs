@@ -303,6 +303,11 @@ pub mod pci_full {
     pub fn all_devices() -> alloc::vec::Vec<PciDevice> {
         alloc::vec::Vec::new()
     }
+
+    /// RISC-V PCI hotplug is not wired yet.
+    pub fn rescan() -> usize {
+        0
+    }
     pub fn invalidate_cache() {}
     pub fn probe_all(_crit: ProbeCriteria) -> alloc::vec::Vec<PciDevice> {
         alloc::vec::Vec::new()

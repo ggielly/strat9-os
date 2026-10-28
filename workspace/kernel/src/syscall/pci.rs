@@ -148,6 +148,12 @@ pub fn sys_pci_enum(
     Ok(out.len() as u64)
 }
 
+/// SYS_PCI_RESCAN: invalidate the cached inventory and re-enumerate.
+pub fn sys_pci_rescan() -> Result<u64, SyscallError> {
+    crate::silo::require_silo_admin()?;
+    Ok(pci::rescan() as u64)
+}
+
 /// SYS_PCI_CFG_READ: read from PCI configuration space.
 pub fn sys_pci_cfg_read(addr_ptr: u64, offset: u64, width: u64) -> Result<u64, SyscallError> {
     let dev_addr = read_pci_address(addr_ptr)?;
