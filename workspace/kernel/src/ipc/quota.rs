@@ -14,7 +14,7 @@ pub const MAX_QUEUE_SLOTS_PER_PROCESS: u64 = 65_536;
 
 /// Maximum total buffered bytes across all channels owned by a single process.
 ///
-/// Each `IpcMessage` is `IPC_MESSAGE_SIZE` (256) bytes, so this effectively
+/// Each `IpcMessage` is `IPC_MESSAGE_SIZE` (1024) bytes, so this effectively
 /// caps the total number of queued messages.
 pub const MAX_BUFFERED_BYTES_PER_PROCESS: u64 = MAX_QUEUE_SLOTS_PER_PROCESS * 256;
 

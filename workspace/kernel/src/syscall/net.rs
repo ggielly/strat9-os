@@ -55,6 +55,19 @@ fn nic_capability(handle: u64, required: CapPermissions) -> Result<usize, Syscal
     Ok(cap.resource)
 }
 
+/// Check for a `Nic` capability without resolving the device.
+///
+/// Hotplug events must remain readable after the device has been removed
+/// from the registry, so this variant does not call `get_device_by_resource`.
+fn nic_cap_present(required: CapPermissions) -> Result<(), SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    // SAFETY: the capability table belongs to the current process.
+    let caps = unsafe { &*task.process.capabilities.get() };
+    caps.find_by_type_with_permissions(ResourceType::Nic, required)
+        .map(|_| ())
+        .ok_or(SyscallError::PermissionDenied)
+}
+
 /// Resolve the default NIC through the caller's `Nic` capability.
 fn default_nic(required: CapPermissions) -> Result<alloc::sync::Arc<dyn nic::NetworkDevice>, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
@@ -714,9 +727,8 @@ pub fn sys_net_event_reset(dev: u64, qid: u64) -> Result<u64, SyscallError> {
 
 /// `SYS_NET_DEVICE_EVENT`: drain one hotplug/link event.
 pub fn sys_net_device_event(out_ptr: u64) -> Result<u64, SyscallError> {
-    // Resolve the capability acquired with SYS_NET_OPEN.  The legacy ABI has
-    // no handle argument, so the default NIC capability is used.
-    let _device = default_nic(CapPermissions {
+    // Only the capability is required: the device may already be gone.
+    nic_cap_present(CapPermissions {
         read: true,
         write: false,
         execute: false,
