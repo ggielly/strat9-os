@@ -196,6 +196,7 @@ dependencies = [
     "strate-graphical-release",
     "strate-net-release",
     "strate-bus-release",
+    "strate-iommu-release",
     "strate-wasm-release",
     "strate-webrtc-release",
     "dhcp-client-release",
@@ -250,6 +251,7 @@ dependencies = [
     "strate-graphical-release",
     "strate-net-release",
     "strate-bus-release",
+    "strate-iommu-release",
     "strate-wasm-release",
     "strate-webrtc-release",
     "dhcp-client-release",
@@ -277,6 +279,7 @@ dependencies = [
     "strate-graphical-release",
     "strate-net-release",
     "strate-bus-release",
+    "strate-iommu-release",
     "strate-wasm-release",
     "strate-webrtc-release",
     "dhcp-client-release",
@@ -505,6 +508,7 @@ dependencies = [
     "strate-graphical-release",
     "strate-net-release",
     "strate-bus-release",
+    "strate-iommu-release",
     "strate-wasm-release",
     "strate-webrtc-release",
     "dhcp-client-release",
@@ -531,6 +535,7 @@ dependencies = [
     "strate-graphical-release",
     "strate-net-release",
     "strate-bus-release",
+    "strate-iommu-release",
     "strate-wasm-release",
     "strate-webrtc-release",
     "dhcp-client-release",
@@ -705,6 +710,21 @@ args = [
 [tasks.strate-bus-release]
 description = "Build bus silo (release)"
 cwd = "workspace/components/strate-bus"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-iommu-release]
+description = "Build IOMMU policy/diagnostic silo (release)"
+cwd = "workspace/components/strate-iommu"
 command = "cargo"
 args = [
     "build",

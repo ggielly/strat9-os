@@ -231,6 +231,8 @@ echo "  copying initfs runtime binaries..."
     cp workspace/target/x86_64-unknown-none/release/console-admin build/iso_root/initfs/console-admin
 [ -f workspace/target/x86_64-unknown-none/release/strate-bus ] && \
     cp workspace/target/x86_64-unknown-none/release/strate-bus build/iso_root/initfs/strate-bus
+[ -f workspace/target/x86_64-unknown-none/release/strate-iommu-silo ] && \
+    cp workspace/target/x86_64-unknown-none/release/strate-iommu-silo build/iso_root/initfs/strate-iommu-silo
 [ -f workspace/target/x86_64-unknown-strat9/release/strate-net-silo ] && \
     cp workspace/target/x86_64-unknown-strat9/release/strate-net-silo build/iso_root/initfs/strate-net
 [ -f workspace/target/x86_64-unknown-none/release/strate-webrtc ] && \

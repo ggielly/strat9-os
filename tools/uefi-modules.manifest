@@ -4,6 +4,7 @@ base strate-init strate-init-release
 base console-admin strate-console-admin-release
 base strate-net-silo strate-net-release
 base strate-bus strate-bus-release
+base strate-iommu-silo strate-iommu-release
 base fs-ext4-strate strate-ext4-release
 base strate-fs-ramfs strate-fs-ramfs-release
 base strate-wasm strate-wasm-release

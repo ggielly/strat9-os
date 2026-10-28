@@ -21,8 +21,8 @@ use crate::{
 };
 use alloc::{sync::Arc, vec, vec::Vec};
 use strat9_abi::iommu::{
-    IommuDomainInfo, IommuFault, IommuGroupInfo, IommuInfo, IommuMapDesc, IommuReservedRegion,
-    IommuStats,
+    IommuDomainInfo, IommuFault, IommuGroupInfo, IommuInfo, IommuMapDesc, IommuMsi,
+    IommuReservedRegion, IommuStats,
 };
 
 /// Maximum number of descriptors accepted by one batch syscall.
@@ -311,6 +311,50 @@ pub fn sys_iommu_domain_info(handle: u64, out_ptr: u64) -> Result<u64, SyscallEr
         refs: domain.refs() as u32,
     };
     write_struct(out_ptr, &info)?;
+    Ok(0)
+}
+
+fn backend_error(error: crate::arch::iommu::IommuError) -> SyscallError {
+    use crate::arch::iommu::IommuError as Backend;
+    match error {
+        Backend::NotPresent | Backend::NotReady | Backend::Unsupported => {
+            SyscallError::NotSupported
+        }
+        Backend::Hardware | Backend::InvalidDomain => SyscallError::IoError,
+    }
+}
+
+/// SYS_PCI_MSI_ALLOC (455): allocate an IRTE for a device vector.
+pub fn sys_pci_msi_alloc(
+    sbdf_raw: u64,
+    vector: u64,
+    out_ptr: u64,
+) -> Result<u64, SyscallError> {
+    require_control()?;
+    if sbdf_raw > u32::MAX as u64 || vector > u8::MAX as u64 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let sbdf = Sbdf::from_u32(sbdf_raw as u32);
+    let allocation = crate::arch::iommu::allocate_msi(sbdf, vector as u8)
+        .map_err(backend_error)?;
+    let msi = IommuMsi {
+        cookie: allocation.cookie,
+        vector: vector as u32,
+        address: allocation.address,
+        data: allocation.data,
+        reserved: 0,
+    };
+    write_struct(out_ptr, &msi)?;
+    Ok(0)
+}
+
+/// SYS_PCI_MSI_FREE (456): release an IRTE.
+pub fn sys_pci_msi_free(cookie: u64) -> Result<u64, SyscallError> {
+    require_control()?;
+    if cookie > u32::MAX as u64 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    crate::arch::iommu::free_msi(cookie as u32).map_err(backend_error)?;
     Ok(0)
 }
 

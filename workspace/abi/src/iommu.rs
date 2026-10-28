@@ -84,6 +84,21 @@ pub struct IommuFault {
     pub owner: u32,
 }
 
+/// One MSI message allocated through interrupt remapping.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IommuMsi {
+    /// Opaque cookie for `SYS_PCI_MSI_FREE`.
+    pub cookie: u32,
+    /// Vector encoded in the IRTE.
+    pub vector: u32,
+    /// Message address to program in the device.
+    pub address: u64,
+    /// Message data (0 for an IRTE doorbell).
+    pub data: u32,
+    pub reserved: u32,
+}
+
 /// Global counters returned by `SYS_IOMMU_STATS`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -138,6 +153,7 @@ mod tests {
         assert_eq!(core::mem::size_of::<IommuStats>(), 64);
         assert_eq!(core::mem::size_of::<IommuGroupInfo>(), 12);
         assert_eq!(core::mem::size_of::<IommuReservedRegion>(), 32);
+        assert_eq!(core::mem::size_of::<IommuMsi>(), 24);
     }
 
     #[test]

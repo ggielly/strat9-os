@@ -6,7 +6,9 @@
 //! Inspired by Asterinas OSTD `ostd/src/mm/dma/`.
 
 pub mod buffer;
+pub mod bounce;
 pub mod direction;
 
-pub use buffer::DmaBuffer;
+pub use bounce::DmaBounce;
+pub use buffer::{DmaBuffer, DmaConstraint, DmaError};
 pub use direction::{DmaBidirectional, DmaDirection, DmaFromDevice, DmaToDevice};

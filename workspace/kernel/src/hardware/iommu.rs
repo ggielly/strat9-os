@@ -1596,6 +1596,43 @@ fn load_reserved_regions() {
     if !regions.is_empty() {
         log::info!("[IOMMU] {} reserved region(s) from RMRR", regions.len());
     }
+
+    // AMD IVMD: 0x20 = reserved, 0x22 = non-translated (also reserved).
+    if let Some(ivrs) = crate::acpi::get_ivrs() {
+        for md in ivrs.ivmd_blocks() {
+            if md.typ != 0x20 && md.typ != 0x22 {
+                continue;
+            }
+            let Some(end) = md.start_addr.checked_add(md.length_bytes) else {
+                continue;
+            };
+            if end <= md.start_addr {
+                continue;
+            }
+            let mut devices = Vec::new();
+            let mut all_bus_from = None;
+            if md.device_id == 0xffff {
+                all_bus_from = Some(0);
+            } else {
+                let devfn = md.device_id;
+                devices.push(Sbdf::new(
+                    md.pci_segment,
+                    (devfn >> 8) as u8,
+                    ((devfn >> 3) & 0x1f) as u8,
+                    (devfn & 0x7) as u8,
+                ));
+            }
+            regions.push(ReservedRegion {
+                segment: md.pci_segment,
+                base: md.start_addr,
+                limit: end - 1,
+                devices,
+                all_bus_from,
+                identity_mapped: false,
+            });
+        }
+    }
+
     set_reserved_regions(regions, false);
 }
 

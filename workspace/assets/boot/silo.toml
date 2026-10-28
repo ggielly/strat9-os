@@ -21,6 +21,16 @@ type = "elf"
 probe_mode = "full"
 
 [[silos]]
+name = "iommu"
+family = "SYS"
+mode = "716"
+sid = 42
+[[silos.strates]]
+name = "strate-iommu"
+binary = "/initfs/strate-iommu-silo"
+type = "elf"
+
+[[silos]]
 name = "network"
 family = "NET"
 mode = "076"

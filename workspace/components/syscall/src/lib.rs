@@ -1754,4 +1754,25 @@ pub mod call {
             )
         }
     }
+
+    /// Allocate an IRTE and return the MSI message.
+    pub fn pci_msi_alloc(
+        sbdf: u32,
+        vector: u8,
+        out: &mut ::strat9_abi::iommu::IommuMsi,
+    ) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_PCI_MSI_ALLOC,
+                sbdf as usize,
+                vector as usize,
+                out as *mut _ as usize,
+            )
+        }
+    }
+
+    /// Release an IRTE.
+    pub fn pci_msi_free(cookie: u32) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_PCI_MSI_FREE, cookie as usize) }
+    }
 }

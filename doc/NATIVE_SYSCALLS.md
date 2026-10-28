@@ -129,6 +129,8 @@ Constants are defined in `kernel/src/syscall/numbers.rs`.
 | 452 | `SYS_IOMMU_STATS` | out: `IommuStats*` | Global counters. |
 | 453 | `SYS_IOMMU_GROUPS` | out, max | Coarse IOMMU groups. |
 | 454 | `SYS_IOMMU_RESERVED` | out, max | RMRR/IVMD reserved regions. |
+| 455 | `SYS_PCI_MSI_ALLOC` | sbdf, vector, out | Allocate an IRTE, return the MSI doorbell. |
+| 456 | `SYS_PCI_MSI_FREE` | cookie | Release an IRTE. |
 
 ---
 
