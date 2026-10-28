@@ -27,10 +27,6 @@ pub fn init() {
     crate::arch::speaker::beep_phase(10); // Storage
     timer::init();
     crate::arch::speaker::beep_phase(11); // Timer
-    // The hotplug watchdog needs a working time source. Starting it before
-    // `timer::init()` made `hpet::delay_ms()` fall back to a busy spin and
-    // flooded the console with PCI scans during boot.
-    nic::hotplug::start_watchdog();
     usb::init();
     crate::arch::speaker::beep_phase(12); // USB
     virtio::gpu::init();
