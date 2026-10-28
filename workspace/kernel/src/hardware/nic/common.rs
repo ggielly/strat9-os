@@ -6,7 +6,10 @@
 
 use crate::{
     arch::xshim::VirtAddr,
-    hardware::pci_client::{self as pci, Bar, PciDevice},
+    hardware::{
+        iommu::{self, DmaProt, Domain, Sbdf},
+        pci_client::{self as pci, Bar, PciDevice},
+    },
     memory::{self},
     sync::SpinLock,
 };
@@ -16,7 +19,44 @@ use net_core::{NetError, NetworkDevice};
 use nic_buffers::{DmaAllocator, DmaRegion};
 
 /// Kernel-side DMA allocator backed by the physical buddy allocator.
-pub struct KernelDma;
+///
+/// When IOMMU translation is active, the allocator also creates/uses the
+/// device domain and returns the IOVA in [`DmaRegion::device_addr`].  When
+/// translation is inactive it behaves exactly as before and returns the
+/// physical address.
+pub struct KernelDma {
+    domain: Option<Arc<Domain>>,
+}
+
+impl KernelDma {
+    /// Untranslated allocator (boot-time default, tests).
+    pub const fn new() -> Self {
+        Self { domain: None }
+    }
+
+    /// Allocator bound to a device; only creates a domain when translation is
+    /// actually enabled, so the boot path is unchanged.
+    pub fn for_sbdf(sbdf: Sbdf) -> Self {
+        if iommu::enabled() {
+            Self {
+                domain: iommu::find_domain(sbdf).or_else(|| {
+                    iommu::domain_for_owned(sbdf, None, iommu::FaultPolicy::Log).ok()
+                }),
+            }
+        } else {
+            Self { domain: None }
+        }
+    }
+
+    fn map(&self, phys: u64, len: usize) -> (u64, u16) {
+        if let Some(domain) = &self.domain {
+            if let Ok(iova) = domain.map_auto(phys, len as u64, DmaProt::READ_WRITE) {
+                return (iova, domain.id().raw());
+            }
+        }
+        (0, 0)
+    }
+}
 
 impl DmaAllocator for KernelDma {
     /// Allocates a physically contiguous DMA region of at least `size` bytes.
@@ -29,10 +69,14 @@ impl DmaAllocator for KernelDma {
         .map_err(|_| nic_buffers::DmaAllocError)?;
         let phys = frame.start_address.as_u64();
         let virt = memory::phys_to_virt(phys) as *mut u8;
+        let size = pages * 4096;
+        let (iova, domain_id) = self.map(phys, size);
         Ok(DmaRegion {
             phys,
+            iova,
+            domain_id,
             virt,
-            size: pages * 4096,
+            size,
         })
     }
 
@@ -43,6 +87,13 @@ impl DmaAllocator for KernelDma {
     /// The caller must ensure that `region` was previously allocated by this
     /// allocator and has not already been freed.
     unsafe fn free_dma(&self, region: DmaRegion) {
+        if region.iova != 0 {
+            // Prefer the region's own domain: the allocator handle used to
+            // free may be a different short-lived instance.
+            if let Some(domain) = iommu::get_domain(iommu::DomainId::from_raw(region.domain_id)) {
+                let _ = domain.unmap(region.iova, region.size as u64);
+            }
+        }
         let pages = (region.size + 4095) / 4096;
         let order = pages.next_power_of_two().trailing_zeros() as u8;
         let frame = crate::memory::PhysFrame::containing_address(
@@ -51,6 +102,59 @@ impl DmaAllocator for KernelDma {
         crate::sync::with_irqs_disabled(|token| {
             crate::memory::free_phys_contiguous(token, frame, order);
         });
+    }
+}
+
+/// Per-device DMA address translator.
+///
+/// Unlike [`KernelDma`], this does not allocate frames: it maps existing
+/// physical ranges into the device's IOMMU domain and returns the address the
+/// device must program.  When translation is inactive it returns the physical
+/// address unchanged, so drivers can use it unconditionally.
+pub struct DmaMapper {
+    domain: Option<Arc<Domain>>,
+}
+
+impl DmaMapper {
+    /// Build a translator for `sbdf`; creates a domain only when IOMMU
+    /// translation is active.
+    pub fn for_sbdf(sbdf: Sbdf) -> Self {
+        if iommu::enabled() {
+            Self {
+                domain: iommu::find_domain(sbdf).or_else(|| {
+                    iommu::domain_for_owned(sbdf, None, iommu::FaultPolicy::Log).ok()
+                }),
+            }
+        } else {
+            Self { domain: None }
+        }
+    }
+
+    /// Map `[phys, phys + len)` and return the device address.
+    pub fn translate(&self, phys: u64, len: usize, prot: DmaProt) -> u64 {
+        if let Some(domain) = &self.domain {
+            if let Ok(iova) = domain.map_auto(phys, len as u64, prot) {
+                return iova;
+            }
+        }
+        phys
+    }
+
+    /// Release a mapping previously returned by [`DmaMapper::translate`].
+    pub fn release(&self, address: u64, len: usize) {
+        if let Some(domain) = &self.domain {
+            // A translated address lives above IOVA_BASE; physical addresses
+            // from the buddy allocator may also be high, so only unmap when
+            // we actually own the domain and the address belongs to it.
+            if domain.translate(address).is_some() {
+                let _ = domain.unmap(address, len as u64);
+            }
+        }
+    }
+
+    /// True when translation is active.
+    pub fn is_translating(&self) -> bool {
+        self.domain.is_some() && iommu::enabled()
     }
 }
 
@@ -164,17 +268,19 @@ pub struct KernelE1000Adapter {
     inner: SpinLock<E1000Nic>,
     mac: [u8; 6],
     name: &'static str,
+    sbdf: Sbdf,
     epoch: core::sync::atomic::AtomicU32,
 }
 
 impl KernelE1000Adapter {
     /// Wrap an initialised `E1000Nic` and produce an `Arc<dyn NetworkDevice>`.
-    pub fn new(nic: E1000Nic, driver_name: &'static str) -> Arc<Self> {
+    pub fn new(nic: E1000Nic, driver_name: &'static str, sbdf: Sbdf) -> Arc<Self> {
         let mac = nic.mac_address();
         Arc::new(Self {
             inner: SpinLock::new(nic),
             mac,
             name: driver_name,
+            sbdf,
             epoch: core::sync::atomic::AtomicU32::new(1),
         })
     }
@@ -208,7 +314,7 @@ impl NetworkDevice for KernelE1000Adapter {
     fn poll(&self) {
         let mut nic = self.inner.lock();
         nic.check_link();
-        nic.watchdog_tick(&KernelDma);
+        nic.watchdog_tick(&KernelDma::for_sbdf(self.sbdf));
     }
 
     fn features(&self) -> u64 {
@@ -239,14 +345,14 @@ impl NetworkDevice for KernelE1000Adapter {
     }
 
     fn resume(&self) -> Result<(), NetError> {
-        self.inner.lock().reset(&KernelDma);
+        self.inner.lock().reset(&KernelDma::for_sbdf(self.sbdf));
         self.epoch
             .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
         Ok(())
     }
 
     fn reset(&self) -> Result<(), NetError> {
-        self.inner.lock().reset(&KernelDma);
+        self.inner.lock().reset(&KernelDma::for_sbdf(self.sbdf));
         self.epoch
             .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
         Ok(())

@@ -126,7 +126,9 @@ Known P2 limits:
 * `SYS_PCI_BAR_MAP` is not wired yet: mapping a device BAR into a user
   address space needs the PCI device-capability milestone;
 * DMAR fault *interrupts* are not routed to an IRQ; `FaultRecord`s currently
-  come from the backend and from `inject_fault`.
+  come from the backend and from `inject_fault`;
+* storage DMA is still physical, so activation stays a boot-time decision to
+  be taken after that migration (see §10).
 
 ## 7. `/srv/iommu`
 
@@ -162,7 +164,31 @@ copies across the boundary (`load`/`store`).  It uses
 `DmaBuffer::alloc_constrained` (or `alloc_constrained_in` for a domain), so
 the staging memory is pinned and IOMMU-mapped like any other DMA buffer.
 
-## 10. Validation
+## 10. NIC DMA migration
+
+Network drivers now program **device addresses**, not physical addresses:
+
+* `nic_buffers::DmaRegion` carries `phys`, `iova` and `domain_id`;
+  `device_addr()` returns the IOVA when mapped and the physical address
+  otherwise.
+* `KernelDma::for_sbdf()` creates the device domain only when
+  `iommu::enabled()` is true.  `alloc_dma` maps the region and records the
+  IOVA; `free_dma` unmaps through the recorded domain id.
+* The e1000/e1000e/igc drivers use `device_addr()` for ring bases and
+  descriptor buffer addresses.
+* virtio-net uses `DmaMapper`: the contiguous vring of each queue is mapped
+  once and `setup_queue` receives the translated descriptor PFN; RX/TX frames
+  are mapped when allocated and tracked with their IOVA in the frame pools.
+* When translation is inactive, every helper is an identity mapping, so the
+  boot path and DMA behaviour are unchanged.
+
+Storage drivers (AHCI, NVMe, virtio-blk) still use physical addresses
+(`DmaBuffer::dma_addr()`).  Hardware translation therefore cannot be enabled
+from `SYS_IOMMU_ACTIVATE` after boot: it would invalidate every existing
+storage mapping.  Activation must become a boot-time decision taken **before**
+device probing, after storage has been migrated the same way.
+
+## 11. Validation
 
 * `cargo check -p strat9-kernel --target x86_64-unknown-none`
 * `cargo test -p strat9-abi`

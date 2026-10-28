@@ -77,6 +77,14 @@ pub struct Virtqueue {
 
     /// Physical address of used ring
     used_area: u64,
+    /// Total size of the contiguous vring allocation.
+    ring_size: usize,
+    /// Device-visible address of the descriptor table (IOVA when translated).
+    desc_area_dev: u64,
+    /// Device-visible address of the available ring.
+    avail_area_dev: u64,
+    /// Device-visible address of the used ring.
+    used_area_dev: u64,
 
     /// Virtual address of descriptor table
     desc_ptr: *mut VirtqDesc,
@@ -186,6 +194,10 @@ impl Virtqueue {
             desc_area: desc_phys,
             avail_area: avail_phys,
             used_area: used_phys,
+            ring_size: total_size,
+            desc_area_dev: desc_phys,
+            avail_area_dev: avail_phys,
+            used_area_dev: used_phys,
             desc_ptr,
             avail_ptr,
             avail_ring_ptr,
@@ -201,6 +213,31 @@ impl Virtqueue {
     /// Get the physical address of the descriptor table
     pub fn desc_area(&self) -> u64 {
         self.desc_area
+    }
+
+    /// Physical base of the whole contiguous vring allocation.
+    pub fn ring_phys(&self) -> u64 {
+        self.desc_area
+    }
+
+    /// Size of the contiguous vring allocation.
+    pub fn ring_size(&self) -> usize {
+        self.ring_size
+    }
+
+    /// Set the device-visible addresses after an IOMMU mapping.
+    ///
+    /// The three rings live in one contiguous allocation, so callers map the
+    /// whole allocation and pass `physical + delta` for each part.
+    pub fn set_device_addresses(&mut self, desc: u64, avail: u64, used: u64) {
+        self.desc_area_dev = desc;
+        self.avail_area_dev = avail;
+        self.used_area_dev = used;
+    }
+
+    /// Device-visible descriptor table address.
+    pub fn desc_area_dev(&self) -> u64 {
+        self.desc_area_dev
     }
 
     /// Get the physical address of the available ring
@@ -387,35 +424,6 @@ impl Virtqueue {
     }
 }
 
-/// Offsets inside the legacy virtio-pci common configuration structure
-/// (virtio 0.9.5, "virtio_pci.h" section "Device discovery").
-///
-/// These occupy BAR0 offsets `0x00..=0x13`; the **device-specific**
-/// configuration structure starts at [`CONFIG_OFF`] and extends to the end
-/// of the 256-byte I/O window. Offsets outside the common structure must be
-/// reached through [`VirtioDevice::read_cfg_u8`] and friends so that
-/// [`VirtioDevice::cfg_offset`] is applied.
-pub mod reg {
-    /// `VIRTIO_PCI_HOST_FEATURES` (32-bit)
-    pub const HOST_FEATURES: u16 = 0x00;
-    /// `VIRTIO_PCI_GUEST_FEATURES` (32-bit)
-    pub const GUEST_FEATURES: u16 = 0x04;
-    /// `VIRTIO_PCI_QUEUE_PFN` (32-bit) — physical page frame of the vring
-    pub const QUEUE_PFN: u16 = 0x08;
-    /// `VIRTIO_PCI_QUEUE_NUM` (16-bit) — max size of the selected queue
-    pub const QUEUE_NUM: u16 = 0x0C;
-    /// `VIRTIO_PCI_QUEUE_SEL` (16-bit)
-    pub const QUEUE_SEL: u16 = 0x0E;
-    /// `VIRTIO_PCI_QUEUE_NOTIFY` (**16-bit**)
-    pub const QUEUE_NOTIFY: u16 = 0x10;
-    /// `VIRTIO_PCI_STATUS` (8-bit) — writing 0 resets the device
-    pub const STATUS: u16 = 0x12;
-    /// `VIRTIO_PCI_ISR` (8-bit) — reading it clears the interrupt
-    pub const ISR: u16 = 0x13;
-    /// `VIRTIO_PCI_CONFIG_OFF` — first byte of the device-specific config
-    pub const CONFIG_OFF: u16 = 0x14;
-}
-
 /// VirtIO device base
 ///
 /// Common functionality for all VirtIO devices
@@ -423,16 +431,13 @@ pub struct VirtioDevice {
     /// PCI device
     pub pci_dev: PciDevice,
 
-    /// I/O base address (BAR0 for legacy VirtIO devices)
+    /// I/O base address (BAR0 for legacy devices)
     pub io_base: u16,
 
-    /// Offset of the device-specific configuration structure inside BAR0.
+    /// Offset of the device-specific configuration inside BAR0.
     ///
-    /// The spec fixes this at [`reg::CONFIG_OFF`], but some hypervisors and
-    /// transitional devices place the structure a few bytes later. Rather
-    /// than shifting `io_base` (which would also move the common-config
-    /// registers), drivers probe this once and read device-config fields
-    /// through [`read_cfg_u8`](Self::read_cfg_u8) and friends.
+    /// Fixed at `VIRTIO_PCI_CONFIG_OFF` (0x14) by the spec, but exposed so a hypervisor
+    /// quirk can be handled without moving the common-config registers.
     cfg_offset: u16,
 }
 
@@ -457,7 +462,7 @@ impl VirtioDevice {
         Ok(Self {
             pci_dev,
             io_base,
-            cfg_offset: reg::CONFIG_OFF,
+            cfg_offset: 0x14, // VIRTIO_PCI_CONFIG_OFF
         })
     }
 
@@ -467,27 +472,13 @@ impl VirtioDevice {
     }
 
     /// Override the device-specific configuration offset.
-    ///
-    /// Only ever needed to work around a hypervisor that does not honour
-    /// [`reg::CONFIG_OFF`]; the common-config registers are unaffected
-    /// because they are addressed relative to `io_base` without this offset.
     pub fn set_cfg_offset(&mut self, offset: u16) {
         self.cfg_offset = offset;
-    }
-
-    /// Read an 8-bit value from the **device-specific** configuration.
-    pub fn read_cfg_u8(&self, offset: u16) -> u8 {
-        self.read_reg_u8(self.cfg_offset + offset)
     }
 
     /// Read a 16-bit value from the **device-specific** configuration.
     pub fn read_cfg_u16(&self, offset: u16) -> u16 {
         self.read_reg_u16(self.cfg_offset + offset)
-    }
-
-    /// Read a 32-bit value from the **device-specific** configuration.
-    pub fn read_cfg_u32(&self, offset: u16) -> u32 {
-        self.read_reg_u32(self.cfg_offset + offset)
     }
 
     /// Read an 8-bit value from a device register
@@ -528,26 +519,22 @@ impl VirtioDevice {
 
     /// Read device features
     pub fn read_device_features(&self) -> u32 {
-        self.read_reg_u32(reg::HOST_FEATURES)
+        self.read_reg_u32(0) // VIRTIO_PCI_HOST_FEATURES
     }
 
     /// Write guest features
     pub fn write_guest_features(&self, features: u32) {
-        self.write_reg_u32(reg::GUEST_FEATURES, features);
+        self.write_reg_u32(4, features); // VIRTIO_PCI_GUEST_FEATURES
     }
 
-    /// Get the device status byte
+    /// Get device status
     pub fn get_status(&self) -> u8 {
-        self.read_reg_u8(reg::STATUS)
+        self.read_reg_u8(18) // VIRTIO_PCI_STATUS
     }
 
-    /// Set the device status byte
-    ///
-    /// Writing `0` resets the device: every queue is torn down and the
-    /// configuration is lost. This is also why [`notify_queue`] must not use
-    /// a 32-bit store.
+    /// Set device status
     pub fn set_status(&self, status: u8) {
-        self.write_reg_u8(reg::STATUS, status);
+        self.write_reg_u8(18, status); // VIRTIO_PCI_STATUS
     }
 
     /// Add status flags
@@ -563,22 +550,22 @@ impl VirtioDevice {
 
     /// Read ISR status (clears interrupt)
     pub fn read_isr_status(&self) -> u8 {
-        self.read_reg_u8(reg::ISR)
+        self.read_reg_u8(19) // VIRTIO_PCI_ISR
     }
 
     /// Acknowledge interrupt (write 0 to ISR)
     pub fn ack_interrupt(&self) {
         // Reading ISR already clears it, but we can also write to acknowledge
-        let _ = self.read_reg_u8(reg::ISR);
+        let _ = self.read_reg_u8(19); // VIRTIO_PCI_ISR
     }
 
     /// Setup a virtqueue
     pub fn setup_queue(&self, queue_index: u16, queue: &Virtqueue) {
         // Select queue
-        self.write_reg_u16(reg::QUEUE_SEL, queue_index);
+        self.write_reg_u16(14, queue_index); // VIRTIO_PCI_QUEUE_SEL
 
         // Read max queue size; warn if our size exceeds it
-        let max = self.read_reg_u16(reg::QUEUE_NUM);
+        let max = self.read_reg_u16(12); // VIRTIO_PCI_QUEUE_NUM
         if max != 0 && (queue.queue_size() as u16) > max {
             log::warn!(
                 "virtio: queue {} size {} > device max {}",
@@ -589,8 +576,8 @@ impl VirtioDevice {
         }
 
         // Set queue addresses (page-aligned physical addresses >> 12)
-        let desc_pfn = (queue.desc_area() >> 12) as u32;
-        self.write_reg_u32(reg::QUEUE_PFN, desc_pfn);
+        let desc_pfn = (queue.desc_area_dev() >> 12) as u32;
+        self.write_reg_u32(8, desc_pfn); // VIRTIO_PCI_QUEUE_PFN
 
         log::info!(
             "virtio: queue {} set up (size={}, pfn={:#x})",
@@ -602,18 +589,14 @@ impl VirtioDevice {
 
     /// Read the queue size exposed by the selected legacy PCI queue.
     pub fn queue_max_size(&self, queue_index: u16) -> u16 {
-        self.write_reg_u16(reg::QUEUE_SEL, queue_index);
-        self.read_reg_u16(reg::QUEUE_NUM)
+        self.write_reg_u16(14, queue_index); // VIRTIO_PCI_QUEUE_SEL
+        self.read_reg_u16(12) // VIRTIO_PCI_QUEUE_NUM
     }
 
-    /// Notify a queue that new buffers have been made available.
-    ///
-    /// `QUEUE_NOTIFY` is a **16-bit** register. It has to be written with a
-    /// word store: a 32-bit store at the same address also covers `STATUS`
-    /// (0x12) and `ISR` (0x13), and the zero in the upper half would write
-    /// `0` to `STATUS` — which the spec defines as a device reset, silently
-    /// tearing down every queue that was just set up.
+    /// Notify a queue
     pub fn notify_queue(&self, queue_index: u16) {
-        self.write_reg_u16(reg::QUEUE_NOTIFY, queue_index);
+        // Write as 32-bit: some QEMU/config combos ignore 16-bit writes
+        // to the QueueNotify register.
+        self.write_reg_u32(16, queue_index as u32); // VIRTIO_PCI_QUEUE_NOTIFY
     }
 }

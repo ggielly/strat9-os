@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{
     arch::{ioapic, msi},
-    hardware::pci_client as pci,
+    hardware::{iommu::Sbdf, pci_client as pci},
     serial_println,
 };
 use e1000::E1000Nic;
@@ -29,6 +29,14 @@ pub fn init() {
         probe.pci_dev.address
     );
 
+    let sbdf = Sbdf::new(
+        0,
+        probe.pci_dev.address.bus,
+        probe.pci_dev.address.device,
+        probe.pci_dev.address.function,
+    );
+    let dma = KernelDma::for_sbdf(sbdf);
+
     let mut init_ok = None;
     for attempt in 0..2 {
         log::info!(
@@ -37,7 +45,7 @@ pub fn init() {
             probe.mmio_phys,
             probe.mmio_virt
         );
-        match E1000Nic::init(probe.mmio_virt, &KernelDma) {
+        match E1000Nic::init(probe.mmio_virt, &dma) {
             Ok(nic) => {
                 log::info!("E1000: core init ok on attempt {}", attempt + 1);
                 init_ok = Some(nic);
@@ -70,7 +78,7 @@ pub fn init() {
             mac[4],
             mac[5]
         );
-        let dev = KernelE1000Adapter::new(nic, "e1000");
+        let dev = KernelE1000Adapter::new(nic, "e1000", sbdf);
         let iface = register_device(dev.clone());
 
         // --- Wire up NIC interrupt: MSI => MSI-X => INTx fallback ---

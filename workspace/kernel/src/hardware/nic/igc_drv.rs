@@ -2,7 +2,10 @@ use super::{
     common::{probe_e1000_pci, KernelDma},
     register_device,
 };
-use crate::{hardware::pci_client as pci, sync::SpinLock};
+use crate::{
+    hardware::{iommu::Sbdf, pci_client as pci},
+    sync::SpinLock,
+};
 use alloc::sync::Arc;
 use e1000::E1000Nic;
 use net_core::{NetError, NetworkDevice};
@@ -17,6 +20,7 @@ const IGC_IDS: &[u16] = &[
 pub struct KernelIgc {
     inner: SpinLock<E1000Nic>,
     mac: [u8; 6],
+    sbdf: Sbdf,
 }
 
 impl NetworkDevice for KernelIgc {
@@ -40,7 +44,7 @@ impl NetworkDevice for KernelIgc {
     }
     fn poll(&self) {
         let mut nic = self.inner.lock();
-        nic.watchdog_tick(&KernelDma);
+        nic.watchdog_tick(&KernelDma::for_sbdf(self.sbdf));
     }
 }
 
@@ -56,6 +60,14 @@ pub fn init() {
         probe.pci_dev.address
     );
 
+    let sbdf = Sbdf::new(
+        0,
+        probe.pci_dev.address.bus,
+        probe.pci_dev.address.device,
+        probe.pci_dev.address.function,
+    );
+    let dma = KernelDma::for_sbdf(sbdf);
+
     let mut init_ok = None;
     for attempt in 0..3 {
         log::info!(
@@ -64,7 +76,7 @@ pub fn init() {
             probe.mmio_phys,
             probe.mmio_virt
         );
-        if let Ok(nic) = E1000Nic::init(probe.mmio_virt, &KernelDma) {
+        if let Ok(nic) = E1000Nic::init(probe.mmio_virt, &dma) {
             log::info!("IGC: core init ok on attempt {}", attempt + 1);
             init_ok = Some(nic);
             break;
@@ -85,6 +97,7 @@ pub fn init() {
             let dev = Arc::new(KernelIgc {
                 mac,
                 inner: SpinLock::new(nic),
+                sbdf,
             });
             register_device(dev);
         }
