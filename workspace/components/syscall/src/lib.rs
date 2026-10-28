@@ -1611,4 +1611,147 @@ pub mod call {
         // --- Terminate ---
         exit(255)
     }
+
+    // =======================================================================
+    // IOMMU control (block 440-459)
+    // =======================================================================
+
+    /// Query the platform IOMMU summary.
+    pub fn iommu_info(out: &mut ::strat9_abi::iommu::IommuInfo) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_IOMMU_INFO, out as *mut _ as usize) }
+    }
+
+    /// Create (or look up) the domain bound to `sbdf`.
+    pub fn iommu_domain_create(sbdf: u32) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_IOMMU_DOMAIN_CREATE, sbdf as usize) }
+    }
+
+    /// Destroy a domain handle.
+    pub fn iommu_domain_destroy(handle: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_IOMMU_DOMAIN_DESTROY, handle) }
+    }
+
+    /// Map one range into a domain.
+    pub fn iommu_map(
+        handle: usize,
+        desc: &::strat9_abi::iommu::IommuMapDesc,
+    ) -> error::Result<usize> {
+        unsafe {
+            syscall2(
+                number::SYS_IOMMU_MAP,
+                handle,
+                desc as *const _ as usize,
+            )
+        }
+    }
+
+    /// Remove a range from a domain.
+    pub fn iommu_unmap(handle: usize, iova: u64, len: u64) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_IOMMU_UNMAP,
+                handle,
+                iova as usize,
+                len as usize,
+            )
+        }
+    }
+
+    /// Software IOVA translation.
+    pub fn iommu_translate(handle: usize, iova: u64) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_IOMMU_TRANSLATE, handle, iova as usize) }
+    }
+
+    /// Try to enable hardware translation.
+    pub fn iommu_activate() -> error::Result<usize> {
+        unsafe { syscall0(number::SYS_IOMMU_ACTIVATE) }
+    }
+
+    /// Query one domain.
+    pub fn iommu_domain_info(
+        handle: usize,
+        out: &mut ::strat9_abi::iommu::IommuDomainInfo,
+    ) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_IOMMU_DOMAIN_INFO, handle, out as *mut _ as usize) }
+    }
+
+    /// Pop one fault record.  Returns `1` when `out` was filled.
+    pub fn iommu_fault_next(
+        out: &mut ::strat9_abi::iommu::IommuFault,
+    ) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_IOMMU_FAULT_NEXT, out as *mut _ as usize) }
+    }
+
+    /// Control an existing domain.
+    pub fn iommu_domain_ctl(handle: usize, command: usize, argument: usize) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_IOMMU_DOMAIN_CTL,
+                handle,
+                command,
+                argument,
+            )
+        }
+    }
+
+    /// Batch map.
+    pub fn iommu_map_batch(
+        handle: usize,
+        descs: &[::strat9_abi::iommu::IommuMapDesc],
+    ) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_IOMMU_MAP_BATCH,
+                handle,
+                descs.as_ptr() as usize,
+                descs.len(),
+            )
+        }
+    }
+
+    /// Batch unmap.
+    pub fn iommu_unmap_batch(
+        handle: usize,
+        descs: &[::strat9_abi::iommu::IommuMapDesc],
+    ) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_IOMMU_UNMAP_BATCH,
+                handle,
+                descs.as_ptr() as usize,
+                descs.len(),
+            )
+        }
+    }
+
+    /// Global counters.
+    pub fn iommu_stats(out: &mut ::strat9_abi::iommu::IommuStats) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_IOMMU_STATS, out as *mut _ as usize) }
+    }
+
+    /// Coarse IOMMU groups.  Returns the number written.
+    pub fn iommu_groups(
+        out: &mut [::strat9_abi::iommu::IommuGroupInfo],
+    ) -> error::Result<usize> {
+        unsafe {
+            syscall2(
+                number::SYS_IOMMU_GROUPS,
+                out.as_mut_ptr() as usize,
+                out.len(),
+            )
+        }
+    }
+
+    /// Firmware-reserved regions.  Returns the number written.
+    pub fn iommu_reserved(
+        out: &mut [::strat9_abi::iommu::IommuReservedRegion],
+    ) -> error::Result<usize> {
+        unsafe {
+            syscall2(
+                number::SYS_IOMMU_RESERVED,
+                out.as_mut_ptr() as usize,
+                out.len(),
+            )
+        }
+    }
 }

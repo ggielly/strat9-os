@@ -15,8 +15,7 @@ use crate::{arch::x86_64::pci::*, hardware::pci_client::PciDevice};
 /// the MSI path therefore refuses destination IDs that do not fit the 8-bit
 /// MSI address field instead of silently truncating them.
 fn interrupt_remapping_active() -> bool {
-    let backend = crate::arch::iommu::backend();
-    backend.is_ready() && backend.interrupt_remapping()
+    crate::arch::iommu::interrupt_remapping_active()
 }
 
 /// Build the MSI message address for `lapic_id`.

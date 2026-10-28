@@ -213,6 +213,18 @@ struct SiloConfig {
     sid: u32,
     mode: u16,
     family: u8,
+    cpu_features_required: u64,
+    cpu_features_allowed: u64,
+    xcr0_mask: u64,
+    graphics_max_sessions: u16,
+    graphics_session_ttl_sec: u32,
+    graphics_reserved: u16,
+    dma_max_domains: u32,
+    dma_max_bytes: u64,
+    dma_iova_base: u64,
+    dma_iova_limit: u64,
+    dma_fault_policy: u8,
+    dma_reserved: [u8; 7],
 }
 
 impl SiloConfig {
@@ -234,6 +246,18 @@ impl SiloConfig {
             sid,
             mode: 0o000,
             family: 5,
+            cpu_features_required: 0,
+            cpu_features_allowed: u64::MAX,
+            xcr0_mask: 0,
+            graphics_max_sessions: 0,
+            graphics_session_ttl_sec: 0,
+            graphics_reserved: 0,
+            dma_max_domains: 0,
+            dma_max_bytes: 0,
+            dma_iova_base: 0,
+            dma_iova_limit: 0,
+            dma_fault_policy: 0,
+            dma_reserved: [0; 7],
         }
     }
 }

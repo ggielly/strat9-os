@@ -1074,6 +1074,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "strate-iommu"
+version = "0.1.0"
+dependencies = [
+ "alloc-freelist",
+ "strat9-abi",
+ "strat9-syscall",
+]
+
+[[package]]
 name = "strate-net"
 version = "0.1.0"
 dependencies = [

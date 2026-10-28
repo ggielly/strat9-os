@@ -110,6 +110,28 @@ Constants are defined in `kernel/src/syscall/numbers.rs`.
 
 ---
 
+## Block 440-459: IOMMU / DMA isolation
+
+| # | Name | Args | Description |
+|---|------|------|-------------|
+| 440 | `SYS_IOMMU_INFO` | out: `IommuInfo*` | Platform summary. |
+| 441 | `SYS_IOMMU_DOMAIN_CREATE` | sbdf: u32 | Create a domain, return an `IommuDomain` cap. |
+| 442 | `SYS_IOMMU_DOMAIN_DESTROY` | handle | Destroy the domain and all mappings. |
+| 443 | `SYS_IOMMU_MAP` | handle, `IommuMapDesc*` | Map physical memory (quota + RMRR checked). |
+| 444 | `SYS_IOMMU_UNMAP` | handle, iova, len | Unmap an exact range. |
+| 445 | `SYS_IOMMU_TRANSLATE` | handle, iova | Software translation. |
+| 446 | `SYS_IOMMU_ACTIVATE` | - | 1 when hardware translation is active, 0 otherwise. |
+| 447 | `SYS_IOMMU_FAULT_NEXT` | out: `IommuFault*` | Pop one fault record. |
+| 448 | `SYS_IOMMU_DOMAIN_CTL` | handle, cmd, arg | quiesce/resume/detach/budget/policy. |
+| 449 | `SYS_IOMMU_DOMAIN_INFO` | handle, out | Domain identity and counters. |
+| 450 | `SYS_IOMMU_MAP_BATCH` | handle, descs, count | Up to 64 mappings, rollback on error. |
+| 451 | `SYS_IOMMU_UNMAP_BATCH` | handle, descs, count | Up to 64 unmappings. |
+| 452 | `SYS_IOMMU_STATS` | out: `IommuStats*` | Global counters. |
+| 453 | `SYS_IOMMU_GROUPS` | out, max | Coarse IOMMU groups. |
+| 454 | `SYS_IOMMU_RESERVED` | out, max | RMRR/IVMD reserved regions. |
+
+---
+
 ## Block 500-599: time & alarms <!-- NEW -->
 
 | # | Name | Args | Description |

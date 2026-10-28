@@ -60,6 +60,70 @@ pub struct IommuDomainInfo {
     pub refs: u32,
 }
 
+/// One fault record returned by `SYS_IOMMU_FAULT_NEXT`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IommuFault {
+    pub seq: u64,
+    pub timestamp_ns: u64,
+    pub iova: u64,
+    pub domain_id: u16,
+    pub segment: u16,
+    pub bus: u8,
+    pub device: u8,
+    pub function: u8,
+    /// 0=read, 1=write, 2=permission, 3=out-of-range.
+    pub reason: u8,
+    /// 0=logged, 1=notified, 2=owner revoked, 3=panic.
+    pub action: u8,
+    /// Reserved, must be zero.
+    pub reserved: [u8; 3],
+    /// Access bits of the faulting access.
+    pub prot: u32,
+    /// Owning silo SID, or `u32::MAX` for kernel domains.
+    pub owner: u32,
+}
+
+/// Global counters returned by `SYS_IOMMU_STATS`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IommuStats {
+    pub domains_created: u64,
+    pub domains_destroyed: u64,
+    pub maps: u64,
+    pub unmaps: u64,
+    pub faults: u64,
+    pub dropped_faults: u64,
+    pub activations: u64,
+    /// Number of live domains at the time of the call.
+    pub domains_live: u64,
+}
+
+/// One coarse IOMMU group returned by `SYS_IOMMU_GROUPS`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IommuGroupInfo {
+    pub id: u32,
+    pub segment: u16,
+    pub bus: u8,
+    pub device_count: u8,
+    pub reserved: u32,
+}
+
+/// One firmware-reserved region returned by `SYS_IOMMU_RESERVED`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IommuReservedRegion {
+    pub base: u64,
+    pub limit: u64,
+    pub segment: u16,
+    pub reserved: u16,
+    pub device_count: u32,
+    /// 1 when at least one whole bus range is covered.
+    pub all_buses: u32,
+    pub reserved2: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,6 +134,10 @@ mod tests {
         assert_eq!(core::mem::size_of::<IommuInfo>(), 20);
         assert_eq!(core::mem::size_of::<IommuMapDesc>(), 32);
         assert_eq!(core::mem::size_of::<IommuDomainInfo>(), 24);
+        assert_eq!(core::mem::size_of::<IommuFault>(), 48);
+        assert_eq!(core::mem::size_of::<IommuStats>(), 64);
+        assert_eq!(core::mem::size_of::<IommuGroupInfo>(), 12);
+        assert_eq!(core::mem::size_of::<IommuReservedRegion>(), 32);
     }
 
     #[test]

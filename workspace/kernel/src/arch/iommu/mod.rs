@@ -10,7 +10,7 @@
 //! `hardware::iommu::activate()` still returns `false` and no device is ever
 //! silently placed behind an untested translation unit.
 
-use crate::hardware::iommu::DomainId;
+use crate::hardware::iommu::{DmaProt, DomainId, MappingKind, Sbdf};
 
 /// Errors returned by an IOMMU backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,8 +81,39 @@ pub trait Backend: Send + Sync {
     /// Flush cached translations for one domain.
     fn invalidate_domain(&self, domain: DomainId);
 
-    /// True when interrupt remapping can be used.
+    /// Install one shadow mapping in the backend's page tables.
+    fn map(
+        &self,
+        _domain: DomainId,
+        _sbdf: Sbdf,
+        _iova: u64,
+        _phys: u64,
+        _len: u64,
+        _prot: DmaProt,
+        _kind: MappingKind,
+    ) -> Result<(), IommuError> {
+        Err(IommuError::Unsupported)
+    }
+
+    /// Remove one shadow mapping from the backend's page tables.
+    fn unmap(
+        &self,
+        _domain: DomainId,
+        _sbdf: Sbdf,
+        _iova: u64,
+        _len: u64,
+        _kind: MappingKind,
+    ) -> Result<(), IommuError> {
+        Err(IommuError::Unsupported)
+    }
+
+    /// True when interrupt remapping is advertised.
     fn interrupt_remapping(&self) -> bool {
+        false
+    }
+
+    /// True when interrupt remapping is actually programmed and usable.
+    fn interrupt_remapping_active(&self) -> bool {
         false
     }
 }
@@ -155,4 +186,42 @@ pub fn is_available() -> bool {
 /// Try to activate translation through the authoritative backend.
 pub fn activate() -> Result<(), IommuError> {
     backend().activate()
+}
+
+/// Install one mapping in the authoritative backend.
+pub fn map_domain(
+    domain: DomainId,
+    sbdf: Sbdf,
+    iova: u64,
+    phys: u64,
+    len: u64,
+    prot: DmaProt,
+    kind: MappingKind,
+) -> Result<(), IommuError> {
+    let backend = backend();
+    if backend.name() == "none" {
+        // No IOMMU: the software domain remains the source of truth.
+        return Ok(());
+    }
+    backend.map(domain, sbdf, iova, phys, len, prot, kind)
+}
+
+/// Remove one mapping from the authoritative backend.
+pub fn unmap_domain(
+    domain: DomainId,
+    sbdf: Sbdf,
+    iova: u64,
+    len: u64,
+    kind: MappingKind,
+) -> Result<(), IommuError> {
+    let backend = backend();
+    if backend.name() == "none" {
+        return Ok(());
+    }
+    backend.unmap(domain, sbdf, iova, len, kind)
+}
+
+/// True when MSI interrupt remapping is active (not merely advertised).
+pub fn interrupt_remapping_active() -> bool {
+    backend().interrupt_remapping_active()
 }
