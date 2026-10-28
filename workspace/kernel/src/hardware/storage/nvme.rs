@@ -80,21 +80,30 @@ unsafe fn regs_read64(base: usize, offset: u64) -> u64 {
 ///
 /// The caller must ensure `buf_phys` is page-aligned and the buffer is physically
 /// contiguous for multi-page transfers.
-unsafe fn build_prp_list(buf_phys: u64, byte_count: usize) -> (u64, u64) {
-    let first_page_remaining = NVME_PAGE_SIZE - (buf_phys as usize % NVME_PAGE_SIZE);
+unsafe fn build_prp_list(
+    dma: &crate::dma::DmaMapper,
+    buf_device: u64,
+    byte_count: usize,
+) -> (u64, u64) {
+    let first_page_remaining = NVME_PAGE_SIZE - (buf_device as usize % NVME_PAGE_SIZE);
     if byte_count <= first_page_remaining {
-        return (buf_phys, 0);
+        return (buf_device, 0);
     }
 
     // Allocate a PRP list page
     let prp_frame = allocate_zeroed_frame().expect("NVMe: failed to allocate PRP list");
     let prp_phys = prp_frame.start_address.as_u64();
+    let prp_device = dma.translate(
+        prp_phys,
+        NVME_PAGE_SIZE,
+        crate::hardware::iommu::DmaProt::READ_WRITE,
+    );
     paging::ensure_identity_map_range(prp_phys, NVME_PAGE_SIZE as u64);
     let prp_virt = phys_to_virt(prp_phys) as *mut u64;
 
-    // First page covers buf_phys..end_of_first_page
+    // First page covers buf_device..end_of_first_page
     let mut remaining = byte_count - first_page_remaining;
-    let mut next_phys = (buf_phys & !0xFFF) + NVME_PAGE_SIZE as u64;
+    let mut next_phys = (buf_device & !0xFFF) + NVME_PAGE_SIZE as u64;
     let mut idx = 0;
 
     while remaining > 0 && idx < MAX_PRP_ENTRIES {
@@ -104,7 +113,7 @@ unsafe fn build_prp_list(buf_phys: u64, byte_count: usize) -> (u64, u64) {
         remaining = remaining.saturating_sub(NVME_PAGE_SIZE);
     }
 
-    (buf_phys, prp_phys)
+    (buf_device, prp_device)
 }
 
 #[repr(transparent)]
@@ -351,7 +360,13 @@ unsafe impl<T: QueueType> Send for IoQueue<T> {}
 unsafe impl<T: QueueType> Sync for IoQueue<T> {}
 
 impl<T: QueueType> IoQueue<T> {
-    fn new(registers_base: usize, size: usize, queue_id: u16, dstrd: usize) -> Self {
+    fn new(
+        registers_base: usize,
+        size: usize,
+        queue_id: u16,
+        dstrd: usize,
+        dma: &crate::dma::DmaMapper,
+    ) -> Self {
         let doorbell_offset =
             0x1000 + ((((queue_id as usize) * 2) + T::DOORBELL_OFFSET) * (4 << dstrd));
         let doorbell =
@@ -369,6 +384,12 @@ impl<T: QueueType> IoQueue<T> {
                 size * core::mem::size_of::<T::EntryType>(),
             );
         }
+
+        let phys_addr = dma.translate(
+            phys_addr,
+            NVME_PAGE_SIZE,
+            crate::hardware::iommu::DmaProt::READ_WRITE,
+        );
 
         Self {
             doorbell,
@@ -396,22 +417,28 @@ pub struct NvmeController {
     irq_line: u8,
     io_done: Box<[AtomicBool]>,
     io_wq: WaitQueue,
+    dma: crate::dma::DmaMapper,
 }
 
 unsafe impl Send for NvmeController {}
 unsafe impl Sync for NvmeController {}
 
 impl NvmeController {
-    unsafe fn new(registers: usize, name: String) -> Result<Self, NvmeError> {
+    unsafe fn new(
+        registers: usize,
+        name: String,
+        sbdf: crate::hardware::iommu::Sbdf,
+    ) -> Result<Self, NvmeError> {
         let regs = &*(registers as *const Registers);
         let dstrd = regs.capability.doorbell_stride() as usize;
         let max_entries = regs.capability.max_queue_entries();
         let queue_size = core::cmp::min(max_entries as usize, 1024);
 
-        let admin_queue = QueuePair::new(registers, queue_size, dstrd);
+        let dma = crate::dma::DmaMapper::for_sbdf(sbdf);
+        let admin_queue = QueuePair::new(registers, queue_size, dstrd, &dma);
 
-        let io_sub = IoQueue::new(registers, IO_QUEUE_SIZE, 1, dstrd);
-        let io_comp = IoQueue::new(registers, IO_QUEUE_SIZE, 1, dstrd);
+        let io_sub = IoQueue::new(registers, IO_QUEUE_SIZE, 1, dstrd, &dma);
+        let io_comp = IoQueue::new(registers, IO_QUEUE_SIZE, 1, dstrd, &dma);
         let io_queue = IoQueuePair {
             submission: io_sub,
             completion: io_comp,
@@ -432,6 +459,7 @@ impl NvmeController {
             irq_line: 0,
             io_done,
             io_wq: WaitQueue::new(),
+            dma,
         };
 
         controller.init_admin_queue()?;
@@ -679,11 +707,16 @@ impl NvmeController {
         unsafe {
             ptr::write_bytes(virt, 0, NVME_PAGE_SIZE);
         }
+        let device = self.dma.translate(
+            phys,
+            NVME_PAGE_SIZE,
+            crate::hardware::iommu::DmaProt::READ_WRITE,
+        );
 
         let cmd = Command {
             opcode: 0x06,
             nsid,
-            prp1: phys,
+            prp1: device,
             cdw10: cns as u32,
             ..Default::default()
         };
@@ -832,10 +865,10 @@ impl NvmeController {
         nsid: u32,
         lba: u64,
         block_count: u32,
-        buf_phys: u64,
+        buf_device: u64,
     ) -> Result<(), NvmeError> {
         let byte_count = block_count as usize * 512;
-        let (prp1, prp2) = unsafe { build_prp_list(buf_phys, byte_count) };
+        let (prp1, prp2) = unsafe { build_prp_list(&self.dma, buf_device, byte_count) };
 
         let cmd_id = {
             let mut cmd = Command {
@@ -869,10 +902,10 @@ impl NvmeController {
         nsid: u32,
         lba: u64,
         block_count: u32,
-        buf_phys: u64,
+        buf_device: u64,
     ) -> Result<(), NvmeError> {
         let byte_count = block_count as usize * 512;
-        let (prp1, prp2) = unsafe { build_prp_list(buf_phys, byte_count) };
+        let (prp1, prp2) = unsafe { build_prp_list(&self.dma, buf_device, byte_count) };
 
         let cmd_id = {
             let mut cmd = Command {
@@ -1022,7 +1055,13 @@ struct Queue<T: QueueType> {
 }
 
 impl<T: QueueType> Queue<T> {
-    fn new(registers_base: usize, size: usize, queue_id: u16, dstrd: usize) -> Self {
+    fn new(
+        registers_base: usize,
+        size: usize,
+        queue_id: u16,
+        dstrd: usize,
+        dma: &crate::dma::DmaMapper,
+    ) -> Self {
         let doorbell_offset =
             0x1000 + ((((queue_id as usize) * 2) + T::DOORBELL_OFFSET) * (4 << dstrd));
         let doorbell =
@@ -1040,6 +1079,13 @@ impl<T: QueueType> Queue<T> {
                 size * core::mem::size_of::<T::EntryType>(),
             );
         }
+
+        // Program the device-visible address (identity when IOMMU is off).
+        let phys_addr = dma.translate(
+            phys_addr,
+            NVME_PAGE_SIZE,
+            crate::hardware::iommu::DmaProt::READ_WRITE,
+        );
 
         Self {
             doorbell,
@@ -1087,15 +1133,20 @@ impl Queue<Submission> {
 }
 
 impl QueuePair {
-    fn new(registers_base: usize, size: usize, dstrd: usize) -> Self {
+    fn new(
+        registers_base: usize,
+        size: usize,
+        dstrd: usize,
+        dma: &crate::dma::DmaMapper,
+    ) -> Self {
         static NEXT_ID: AtomicU8 = AtomicU8::new(0);
         let id = NEXT_ID.fetch_add(1, Ordering::SeqCst) as u16;
         Self {
             id,
             size,
             command_id: 0,
-            submission: Queue::new(registers_base, size, id, dstrd),
-            completion: Queue::new(registers_base, size, id, dstrd),
+            submission: Queue::new(registers_base, size, id, dstrd, dma),
+            completion: Queue::new(registers_base, size, id, dstrd, dma),
         }
     }
 
@@ -1176,7 +1227,18 @@ pub fn init() {
         let registers = phys_to_virt(bar) as usize;
         let name = format!("nvme{}", i);
 
-        match unsafe { NvmeController::new(registers, name.clone()) } {
+        match unsafe {
+            NvmeController::new(
+                registers,
+                name.clone(),
+                crate::hardware::iommu::Sbdf::new(
+                    0,
+                    pci_dev.address.bus,
+                    pci_dev.address.device,
+                    pci_dev.address.function,
+                ),
+            )
+        } {
             Ok(mut controller) => {
                 controller.set_irq_line(irq);
                 NVME_IRQ_LINE.store(vector, Ordering::Relaxed);

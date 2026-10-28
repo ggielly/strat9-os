@@ -105,59 +105,6 @@ impl DmaAllocator for KernelDma {
     }
 }
 
-/// Per-device DMA address translator.
-///
-/// Unlike [`KernelDma`], this does not allocate frames: it maps existing
-/// physical ranges into the device's IOMMU domain and returns the address the
-/// device must program.  When translation is inactive it returns the physical
-/// address unchanged, so drivers can use it unconditionally.
-pub struct DmaMapper {
-    domain: Option<Arc<Domain>>,
-}
-
-impl DmaMapper {
-    /// Build a translator for `sbdf`; creates a domain only when IOMMU
-    /// translation is active.
-    pub fn for_sbdf(sbdf: Sbdf) -> Self {
-        if iommu::enabled() {
-            Self {
-                domain: iommu::find_domain(sbdf).or_else(|| {
-                    iommu::domain_for_owned(sbdf, None, iommu::FaultPolicy::Log).ok()
-                }),
-            }
-        } else {
-            Self { domain: None }
-        }
-    }
-
-    /// Map `[phys, phys + len)` and return the device address.
-    pub fn translate(&self, phys: u64, len: usize, prot: DmaProt) -> u64 {
-        if let Some(domain) = &self.domain {
-            if let Ok(iova) = domain.map_auto(phys, len as u64, prot) {
-                return iova;
-            }
-        }
-        phys
-    }
-
-    /// Release a mapping previously returned by [`DmaMapper::translate`].
-    pub fn release(&self, address: u64, len: usize) {
-        if let Some(domain) = &self.domain {
-            // A translated address lives above IOVA_BASE; physical addresses
-            // from the buddy allocator may also be high, so only unmap when
-            // we actually own the domain and the address belongs to it.
-            if domain.translate(address).is_some() {
-                let _ = domain.unmap(address, len as u64);
-            }
-        }
-    }
-
-    /// True when translation is active.
-    pub fn is_translating(&self) -> bool {
-        self.domain.is_some() && iommu::enabled()
-    }
-}
-
 /// Result of a successful PCI probe for an E1000-family device.
 pub struct ProbeResult {
     /// The PCI device handle (already configured for bus-master + memory space).

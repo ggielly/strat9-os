@@ -8,7 +8,9 @@
 pub mod buffer;
 pub mod bounce;
 pub mod direction;
+pub mod mapper;
 
 pub use bounce::DmaBounce;
 pub use buffer::{DmaBuffer, DmaConstraint, DmaError};
+pub use mapper::DmaMapper;
 pub use direction::{DmaBidirectional, DmaDirection, DmaFromDevice, DmaToDevice};

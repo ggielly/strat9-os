@@ -121,6 +121,32 @@ impl DmaBuffer {
         Ok(buffer)
     }
 
+    /// Allocate a buffer for the PCI function `sbdf`.
+    ///
+    /// When IOMMU translation is active the buffer is mapped into (or created
+    /// for) the device domain; otherwise this is exactly [`DmaBuffer::alloc`].
+    pub fn alloc_for(
+        sbdf: crate::hardware::iommu::Sbdf,
+        bytes: usize,
+        prot: DmaProt,
+    ) -> Result<Self, DmaError> {
+        if crate::hardware::iommu::enabled() {
+            let domain = crate::hardware::iommu::find_domain(sbdf)
+                .or_else(|| {
+                    crate::hardware::iommu::domain_for_owned(
+                        sbdf,
+                        None,
+                        crate::hardware::iommu::FaultPolicy::Log,
+                    )
+                    .ok()
+                })
+                .ok_or(DmaError::Constraint)?;
+            Self::alloc_in(domain, bytes, prot)
+        } else {
+            Self::alloc(bytes)
+        }
+    }
+
     /// Allocate a constrained buffer and map it into `domain`.
     pub fn alloc_constrained_in(
         domain: Arc<Domain>,
