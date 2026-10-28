@@ -294,10 +294,10 @@ fn syscall_range_groups_are_respected() {
 #[test]
 fn struct_sizes_are_pinned() {
     assert_eq!(size_of::<IpcMessage>(), IPC_MESSAGE_SIZE);
-    assert_eq!(IPC_MESSAGE_SIZE, 256);
+    assert_eq!(IPC_MESSAGE_SIZE, 1024);
     assert_eq!(IPC_MESSAGE_ALIGN, 64);
-    assert_eq!(IPC_PAYLOAD_CAPACITY, 240);
-    assert_eq!(PAYLOAD_CAPACITY, 240);
+    assert_eq!(IPC_PAYLOAD_CAPACITY, 1008);
+    assert_eq!(PAYLOAD_CAPACITY, 1008);
 
     assert_eq!(size_of::<TimeSpec>(), 16);
 
@@ -319,15 +319,15 @@ fn file_stat_layout_is_pinned() {
 
 #[test]
 fn ipc_inline_capacities_match_overhead_constants() {
-    assert_eq!(IpcMessage::OPEN_INLINE_CAPACITY, 234); // 240 - 6
-    assert_eq!(IpcMessage::UNLINK_INLINE_CAPACITY, 238); // 240 - 2
-    assert_eq!(IpcMessage::READ_INLINE_CAPACITY, 232); // 240 - 8
-    assert_eq!(IpcMessage::WRITE_INLINE_CAPACITY, 222); // 240 - 18
+    assert_eq!(IpcMessage::OPEN_INLINE_CAPACITY, 1002); // 1008 - 6
+    assert_eq!(IpcMessage::UNLINK_INLINE_CAPACITY, 1006); // 1008 - 2
+    assert_eq!(IpcMessage::READ_INLINE_CAPACITY, 1000); // 1008 - 8
+    assert_eq!(IpcMessage::WRITE_INLINE_CAPACITY, 990); // 1008 - 18
 }
 
 #[test]
 fn ipc_message_header_fields_offsets() {
-    // sender @0..8, msg_type @8..12, flags @12..16, payload @16..256.
+    // sender @0..8, msg_type @8..12, flags @12..16, payload @16..1024.
     let msg = IpcMessage::new(0x42);
     let base = &msg as *const _ as usize;
     assert_eq!(&msg.sender as *const _ as usize - base, 0);

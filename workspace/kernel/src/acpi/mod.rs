@@ -94,6 +94,11 @@ pub fn get_bgrt() -> Option<&'static bgrt::Bgrt> {
     bgrt::Bgrt::get()
 }
 
+/// Get DMAR table (Intel IOMMU)
+pub fn get_dmar() -> Option<dmar::Dmar> {
+    dmar::Dmar::get()
+}
+
 /// Get IVRS table (AMD IOMMU)
 pub fn get_ivrs() -> Option<ivrs::Ivrs> {
     ivrs::Ivrs::get()

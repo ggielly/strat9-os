@@ -218,6 +218,7 @@ impl NicDataPlane {
                 | strat9_abi::net::fd_flags::NEED_COMP,
             vlan: 0,
             rss: 0,
+            reserved: 0,
         };
         if !queue.push_tx(desc) {
             return Err(TxError::QueueFull);

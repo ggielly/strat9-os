@@ -16,10 +16,11 @@ use crate::{
 
 const MSG_SIZE: usize = core::mem::size_of::<IpcMessage>();
 
-// ABI contract: userspace hardcodes MSG_SIZE = 256.  If IpcMessage's size
-// changes, this assertion forces a deliberate review of the userspace ABI.
+// ABI contract: userspace uses `strat9_abi::data::IPC_MESSAGE_SIZE`.
+// If IpcMessage's size changes, this assertion forces a deliberate review of
+// the userspace ABI in lock-step with the ABI constant.
 const _: () = assert!(
-    MSG_SIZE == 256,
+    MSG_SIZE == strat9_abi::data::IPC_MESSAGE_SIZE,
     "IpcMessage size changed : update userspace ABI"
 );
 

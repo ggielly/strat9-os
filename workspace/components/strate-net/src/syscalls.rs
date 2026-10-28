@@ -17,7 +17,7 @@ pub fn net_recv(buf: &mut [u8]) -> Result<usize> {
 
 /// Open the default NIC and install a `Nic` capability for this task.
 pub fn net_open() -> Result<u64> {
-    unsafe { syscall1(strat9_abi::syscall::SYS_NET_OPEN, 0) }
+    unsafe { syscall1(strat9_abi::syscall::SYS_NET_OPEN, 0).map(|handle| handle as u64) }
 }
 
 /// Implements net send.

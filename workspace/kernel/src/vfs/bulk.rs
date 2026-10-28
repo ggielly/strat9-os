@@ -101,7 +101,11 @@ impl BulkHandle {
         }
         let page = offset / 4096;
         let delta = offset % 4096;
-        self.vas.get(page).map(|base| (*base as *mut u8).add(delta))
+        // SAFETY: `delta < 4096`, so the result stays inside the page whose
+        // base address was recorded in `vas` for this ring.
+        self.vas
+            .get(page)
+            .map(|base| unsafe { (*base as *mut u8).add(delta) })
     }
 
     /// Copy ring → caller buffer.
