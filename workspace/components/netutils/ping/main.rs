@@ -10,11 +10,10 @@
 
 #![no_std]
 #![no_main]
-#![feature(alloc_error_handler)]
 
 extern crate alloc;
 
-use core::{alloc::Layout, fmt::Write, panic::PanicInfo};
+use core::{fmt::Write, panic::PanicInfo};
 use strat9_abi::ip::{
     is_ipv4_literal_candidate, is_ipv6_literal_candidate, parse_ipv4_literal, parse_ipv6_literal,
 };
