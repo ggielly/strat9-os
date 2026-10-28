@@ -73,7 +73,7 @@ impl MountTable {
         } else {
             prefix
         };
-        self.mounts.retain(|m| m.prefix != prefix);
+        self.mounts.retain(|m| m.prefix.as_str() != prefix);
         self.mounts.push(Mount {
             prefix: String::from(prefix),
             scheme,
