@@ -328,6 +328,14 @@ pub const SYS_PCI_CFG_READ: usize = 241;
 /// - `value`: value to write
 pub const SYS_PCI_CFG_WRITE: usize = 242;
 
+/// Re-enumerate the PCI bus.
+///
+/// Invalidates the boot-time snapshot and walks ECAM/I/O config space again.
+/// Used by the device manager when a hotplug event is received.
+///
+/// Returns the number of devices found.
+pub const SYS_PCI_RESCAN: usize = 243;
+
 // ── Block 250-254: Async I/O ────────────────────────────────────────────────
 
 /// Set up async event notification on a file descriptor.
@@ -840,6 +848,14 @@ pub const SYS_NET_SEND: usize = 411;
 /// Returns `0` on success.
 pub const SYS_NET_INFO: usize = 412;
 
+/// Open the default network device and obtain a `Nic` capability.
+///
+/// Must be called once by the networking strate before any other network
+/// syscall.  The caller must belong to a `NET`, `DRV` or `SYS` silo.
+///
+/// Returns the capability handle (currently also usable as a device id).
+pub const SYS_NET_OPEN: usize = 413;
+
 /// Register the calling task as the strate-net networking silo.
 ///
 /// Called once by strate-net during startup.  The NIC IRQ handler uses
@@ -847,6 +863,46 @@ pub const SYS_NET_INFO: usize = 412;
 ///
 /// Returns `0` on success.
 pub const SYS_NET_REGISTER: usize = 414;
+
+/// Map the shared RX/TX queue region of a network device.
+///
+/// - `dev`: handle returned by `SYS_NET_OPEN`
+/// - `qid`: queue index
+/// - `out_ptr`: pointer to a `NetQueueMap` result
+///
+/// Returns the mapped length on success.
+pub const SYS_NET_QUEUE_MAP: usize = 415;
+
+/// Ring the TX doorbell of a queue.
+pub const SYS_NET_KICK: usize = 416;
+
+/// Bind a queue interrupt to an IPC port (or event counter).
+///
+/// - `dev`: device handle
+/// - `qid`: queue index
+/// - `port`: IPC port handle that receives `NET_EVENT_RX` messages
+pub const SYS_NET_IRQ_BIND: usize = 417;
+
+/// Query link state and MTU.
+pub const SYS_NET_LINK: usize = 418;
+
+/// Receive up to `max` frames in one syscall.
+pub const SYS_NET_RX_BATCH: usize = 419;
+
+/// Transmit up to `count` frames in one syscall.
+pub const SYS_NET_TX_BATCH: usize = 420;
+
+/// Query queue features and statistics.
+pub const SYS_NET_QUEUE_INFO: usize = 421;
+
+/// Wait for a network event (blocking) or poll it (non-blocking).
+pub const SYS_NET_EVENT_WAIT: usize = 422;
+
+/// Get or set negotiated device features.
+pub const SYS_NET_FEATURES: usize = 423;
+
+/// Notify the kernel that a shared-queue TX descriptor has been published.
+pub const SYS_NET_TX_PUBLISH: usize = 424;
 
 /// Check file accessibility using the real user/group IDs.
 ///

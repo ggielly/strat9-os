@@ -1396,6 +1396,17 @@ pub fn current_task_silo_label() -> Option<String> {
     silo.strate_label.clone()
 }
 
+/// Family of the silo owning the calling task.
+///
+/// Used by resource-acquisition syscalls (network, PCI, …) to apply a
+/// least-privilege policy without hard-coding task ids.
+pub fn current_task_family() -> Option<StrateFamily> {
+    let task = current_task_clone()?;
+    let mgr = SILO_MANAGER.lock();
+    let silo_id = mgr.silo_for_task(task.id)?;
+    mgr.get(silo_id).ok().map(|silo| silo.family)
+}
+
 /// Performs the list silos snapshot operation.
 pub fn list_silos_snapshot() -> Vec<SiloSnapshot> {
     let mgr = SILO_MANAGER.lock();

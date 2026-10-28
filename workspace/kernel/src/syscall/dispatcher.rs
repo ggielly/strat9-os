@@ -228,6 +228,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_PCI_ENUM => pci::sys_pci_enum(arg1, arg2, arg3),
         SYS_PCI_CFG_READ => pci::sys_pci_cfg_read(arg1, arg2, arg3),
         SYS_PCI_CFG_WRITE => pci::sys_pci_cfg_write(arg1, arg2, arg3, arg4),
+        SYS_PCI_RESCAN => pci::sys_pci_rescan(),
 
         // Typed MPMC sync-channel (IPC-02) ==================================
         SYS_CHAN_CREATE => chan::sys_chan_create(arg1),
@@ -283,7 +284,18 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_NET_RECV => net::sys_net_recv(arg1, arg2),
         SYS_NET_SEND => net::sys_net_send(arg1, arg2),
         SYS_NET_INFO => net::sys_net_info(arg1, arg2),
+        SYS_NET_OPEN => net::sys_net_open(),
         SYS_NET_REGISTER => net::sys_net_register(),
+        SYS_NET_QUEUE_MAP => net::sys_net_queue_map(arg1, arg2, arg3),
+        SYS_NET_KICK => net::sys_net_kick(arg1, arg2),
+        SYS_NET_IRQ_BIND => net::sys_net_irq_bind(arg1, arg2, arg3),
+        SYS_NET_LINK => net::sys_net_link(arg1, arg2),
+        SYS_NET_RX_BATCH => net::sys_net_rx_batch(arg1, arg2, arg3),
+        SYS_NET_TX_BATCH => net::sys_net_tx_batch(arg1, arg2, arg3),
+        SYS_NET_QUEUE_INFO => net::sys_net_queue_info(arg1, arg2, arg3),
+        SYS_NET_EVENT_WAIT => net::sys_net_event_wait(arg1, arg2, arg3),
+        SYS_NET_FEATURES => net::sys_net_features(arg1, arg2, arg3),
+        SYS_NET_TX_PUBLISH => net::sys_net_tx_publish(arg1, arg2),
 
         // Storage syscalls (600-699) ========================================
         SYS_VOLUME_READ => volume::sys_volume_read(arg1, arg2, arg3, arg4),

@@ -209,6 +209,18 @@ fn wait_for_kernel_mac(max_attempts: usize) -> Option<[u8; 6]> {
 pub extern "C" fn _start() -> ! {
     log("[strate-net] Starting network silo\n");
 
+    match net_open() {
+        Ok(handle) => {
+            log("[strate-net] NIC capability acquired\n");
+            let _ = handle;
+        }
+        Err(e) => {
+            log("[strate-net] net_open failed: ");
+            log_error_code(e);
+            log("\n");
+        }
+    }
+
     let port = match call::ipc_create_port(0) {
         Ok(p) => p as u64,
         Err(e) => {
