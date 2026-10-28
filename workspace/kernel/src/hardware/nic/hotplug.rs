@@ -118,6 +118,14 @@ pub fn poll_pci() {
                 1,
                 0,
             ));
+            // Revoke any DMA domain bound to the removed function.
+            let sbdf = crate::hardware::iommu::Sbdf::new(
+                0,
+                (*id >> 16) as u8,
+                (*id >> 8) as u8,
+                (*id & 0xff) as u8,
+            );
+            crate::hardware::iommu::detach_device(sbdf);
         }
     }
     *old = current;

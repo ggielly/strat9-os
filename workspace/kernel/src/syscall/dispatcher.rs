@@ -310,6 +310,13 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_IOMMU_TRANSLATE => iommu::sys_iommu_translate(arg1, arg2),
         SYS_IOMMU_ACTIVATE => iommu::sys_iommu_activate(),
         SYS_IOMMU_DOMAIN_INFO => iommu::sys_iommu_domain_info(arg1, arg2),
+        SYS_IOMMU_FAULT_NEXT => iommu::sys_iommu_fault_next(arg1),
+        SYS_IOMMU_DOMAIN_CTL => iommu::sys_iommu_domain_ctl(arg1, arg2, arg3),
+        SYS_IOMMU_MAP_BATCH => iommu::sys_iommu_map_batch(arg1, arg2, arg3),
+        SYS_IOMMU_UNMAP_BATCH => iommu::sys_iommu_unmap_batch(arg1, arg2, arg3),
+        SYS_IOMMU_STATS => iommu::sys_iommu_stats(arg1),
+        SYS_IOMMU_GROUPS => iommu::sys_iommu_groups(arg1, arg2),
+        SYS_IOMMU_RESERVED => iommu::sys_iommu_reserved(arg1, arg2),
 
         // Storage syscalls (600-699) ========================================
         SYS_VOLUME_READ => volume::sys_volume_read(arg1, arg2, arg3, arg4),

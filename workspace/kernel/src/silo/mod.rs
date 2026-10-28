@@ -459,6 +459,18 @@ pub struct SiloConfig {
     pub graphics_session_ttl_sec: u32,
     /// Reserved for ABI expansion.
     pub graphics_reserved: u16,
+    /// Maximum number of IOMMU domains owned by this silo (0 = unlimited).
+    pub dma_max_domains: u32,
+    /// Maximum number of bytes mapped by this silo (0 = unlimited).
+    pub dma_max_bytes: u64,
+    /// Lowest IOVA the silo may use (0 = kernel default).
+    pub dma_iova_base: u64,
+    /// Highest IOVA the silo may use (0 = kernel default).
+    pub dma_iova_limit: u64,
+    /// Fault policy: 0=log, 1=notify, 2=kill owner, 3=panic.
+    pub dma_fault_policy: u8,
+    /// Reserved for ABI expansion.
+    pub dma_reserved: [u8; 7],
 }
 
 impl Default for SiloConfig {
@@ -485,6 +497,12 @@ impl Default for SiloConfig {
             graphics_max_sessions: 0,
             graphics_session_ttl_sec: 0,
             graphics_reserved: 0,
+            dma_max_domains: 0,
+            dma_max_bytes: 0,
+            dma_iova_base: 0,
+            dma_iova_limit: 0,
+            dma_fault_policy: 0,
+            dma_reserved: [0; 7],
         }
     }
 }
@@ -505,6 +523,18 @@ impl SiloConfig {
             return Err(SyscallError::InvalidArgument);
         }
         if self.flags & SILO_FLAG_WEBRTC_NATIVE != 0 && self.flags & SILO_FLAG_GRAPHICS == 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        // DMA quotas: both ends must be page-aligned and ordered.
+        if self.dma_iova_base != 0 || self.dma_iova_limit != 0 {
+            if self.dma_iova_base & 0xfff != 0
+                || self.dma_iova_limit & 0xfff != 0
+                || self.dma_iova_base >= self.dma_iova_limit
+            {
+                return Err(SyscallError::InvalidArgument);
+            }
+        }
+        if self.dma_fault_policy > 3 {
             return Err(SyscallError::InvalidArgument);
         }
         if self.flags & SILO_FLAG_GRAPHICS == 0 {
@@ -1405,6 +1435,43 @@ pub fn current_task_family() -> Option<StrateFamily> {
     let mgr = SILO_MANAGER.lock();
     let silo_id = mgr.silo_for_task(task.id)?;
     mgr.get(silo_id).ok().map(|silo| silo.family)
+}
+
+/// DMA quota attached to a silo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DmaQuota {
+    /// 0 = unlimited.
+    pub max_domains: u32,
+    /// 0 = unlimited.
+    pub max_bytes: u64,
+    /// 0 = backend default (`IOVA_BASE`).
+    pub iova_base: u64,
+    /// 0 = no upper bound.
+    pub iova_limit: u64,
+    pub fault_policy: crate::hardware::iommu::FaultPolicy,
+}
+
+/// SID of the silo owning the current task.
+pub fn current_task_sid() -> Option<u32> {
+    let task = current_task_clone()?;
+    SILO_MANAGER.lock().silo_for_task(task.id)
+}
+
+/// DMA quota of the current task's silo, if it belongs to one.
+pub fn current_task_dma_quota() -> Option<DmaQuota> {
+    let task = current_task_clone()?;
+    let mgr = SILO_MANAGER.lock();
+    let sid = mgr.silo_for_task(task.id)?;
+    let silo = mgr.get(sid).ok()?;
+    Some(DmaQuota {
+        max_domains: silo.config.dma_max_domains,
+        max_bytes: silo.config.dma_max_bytes,
+        iova_base: silo.config.dma_iova_base,
+        iova_limit: silo.config.dma_iova_limit,
+        fault_policy: crate::hardware::iommu::FaultPolicy::from_raw(
+            silo.config.dma_fault_policy,
+        ),
+    })
 }
 
 /// Performs the list silos snapshot operation.
@@ -2466,6 +2533,10 @@ pub fn on_task_terminated(task_id: TaskId) {
             data1: 0,
             tick: crate::process::scheduler::ticks(),
         });
+        drop(mgr);
+        // A dead silo must not keep DMA mappings alive.  The IOMMU layer
+        // takes its own locks, so this runs after SILO_MANAGER is released.
+        crate::hardware::iommu::revoke_owner(silo_id);
     }
 }
 

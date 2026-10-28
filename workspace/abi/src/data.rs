@@ -602,6 +602,18 @@ pub struct SiloConfig {
     /// Graphics session time-to-live in seconds.
     pub graphics_session_ttl_sec: u32,
     pub graphics_reserved: u16,
+    /// Maximum number of IOMMU domains owned by this silo (0 = unlimited).
+    pub dma_max_domains: u32,
+    /// Maximum number of bytes mapped by this silo (0 = unlimited).
+    pub dma_max_bytes: u64,
+    /// Lowest IOVA the silo may use (0 = kernel default).
+    pub dma_iova_base: u64,
+    /// Highest IOVA the silo may use (0 = kernel default).
+    pub dma_iova_limit: u64,
+    /// Fault policy: 0=log, 1=notify, 2=kill owner, 3=panic.
+    pub dma_fault_policy: u8,
+    /// Reserved for ABI expansion.
+    pub dma_reserved: [u8; 7],
 }
 
 impl SiloConfig {
@@ -629,6 +641,12 @@ impl SiloConfig {
             graphics_max_sessions: 0,
             graphics_session_ttl_sec: 0,
             graphics_reserved: 0,
+            dma_max_domains: 0,
+            dma_max_bytes: 0,
+            dma_iova_base: 0,
+            dma_iova_limit: 0,
+            dma_fault_policy: 0,
+            dma_reserved: [0; 7],
         }
     }
 }
@@ -648,6 +666,7 @@ assert_abi_struct!(StatVfs, 88, 8);
 assert_abi_struct!(Map, 32, 8);
 assert_abi_struct!(FileStat, 112, 8);
 assert_abi_struct!(IpcMessage, IPC_MESSAGE_SIZE, IPC_MESSAGE_ALIGN);
+assert_abi_struct!(SiloConfig, 176, 8);
 assert_abi_struct!(TimeSpec, 16, 8);
 assert_abi_struct!(HandleInfo, 16, 8);
 assert_abi_struct!(MemoryRegionInfo, 24, 8);

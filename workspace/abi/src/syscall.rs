@@ -978,6 +978,45 @@ pub const SYS_IOMMU_ACTIVATE: usize = 446;
 /// - `out_ptr`: pointer to a writable [`strat9_abi::iommu::IommuDomainInfo`]
 pub const SYS_IOMMU_DOMAIN_INFO: usize = 449;
 
+/// Pop one fault record from the bounded global queue.
+///
+/// - `out_ptr`: pointer to a writable [`strat9_abi::iommu::IommuFault`]
+///
+/// Returns `1` when a record was written, `0` when the queue is empty.
+pub const SYS_IOMMU_FAULT_NEXT: usize = 447;
+
+/// Control an existing domain.
+///
+/// - `handle`: `IommuDomain` capability handle
+/// - `command`: 0=quiesce, 1=resume, 2=detach, 3=refill fault budget,
+///   4=set fault policy (`arg3` is the policy)
+pub const SYS_IOMMU_DOMAIN_CTL: usize = 448;
+
+/// Batch `SYS_IOMMU_MAP`: `count` [`strat9_abi::iommu::IommuMapDesc`] entries.
+pub const SYS_IOMMU_MAP_BATCH: usize = 450;
+
+/// Batch unmap: `count` entries where `iova`/`len` are used.
+pub const SYS_IOMMU_UNMAP_BATCH: usize = 451;
+
+/// Global IOMMU counters.
+///
+/// - `out_ptr`: pointer to a writable [`strat9_abi::iommu::IommuStats`]
+pub const SYS_IOMMU_STATS: usize = 452;
+
+/// List the coarse IOMMU groups derived from the DMAR.
+///
+/// - `out_ptr`: array of [`strat9_abi::iommu::IommuGroupInfo`]
+/// - `max_entries`: capacity of the array
+///
+/// Returns the number of entries written.
+pub const SYS_IOMMU_GROUPS: usize = 453;
+
+/// List the firmware-reserved regions (RMRR/IVMD).
+///
+/// - `out_ptr`: array of [`strat9_abi::iommu::IommuReservedRegion`]
+/// - `max_entries`: capacity of the array
+pub const SYS_IOMMU_RESERVED: usize = 454;
+
 /// Check file accessibility using the real user/group IDs.
 ///
 /// - `path_ptr`: pointer to the path string

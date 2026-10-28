@@ -129,7 +129,11 @@ Each silo is assigned a three-digit octal mode `[C][H][R]` that defines its beha
 
 * `4` (Interrupt): Permission to register IRQ handlers.
 * `2` (I/O): Permission to access I/O ports or MMIO ranges.
-* `1` (DMA): Permission to perform direct physical memory access.
+* `1` (DMA): Permission to hold DMA/IOMMU capabilities. Since P1 this is
+  **not** arbitrary physical access: the silo can only map buffers it owns
+  into an `IommuDomain` capability, bounded by `dma_max_bytes`,
+  `dma_max_domains` and `dma_iova_base/limit`. Firmware-reserved ranges
+  (RMRR/IVMD) are never handed to a silo unless the device is their owner.
 * *Example: `6` (Standard Driver), `0` (Pure Software).*
 
 ### Digit 3: Registry (R) : Plan 9 Namespace (`/srv`)
