@@ -17,6 +17,7 @@ mod vfs;
 use core::{alloc::Layout, panic::PanicInfo};
 use smoltcp::{iface::PollResult, socket::tcp, time::Instant};
 use state::NetworkStrate;
+use strat9_abi::net::{NetQueueHeader, NetQueueMap};
 use strate_net::{syscalls::*, IpcMessage, OPCODE_CLOSE, OPCODE_OPEN, OPCODE_READ, OPCODE_WRITE};
 
 alloc_freelist::define_freelist_brk_allocator!(
@@ -114,6 +115,7 @@ impl NetworkStrate {
             let poll_result = self
                 .interface
                 .poll(now, &mut self.device, &mut self.sockets);
+            self.device.flush();
 
             self.process_icmp();
 
@@ -159,6 +161,7 @@ impl NetworkStrate {
                 let _ = self
                     .interface
                     .poll(now2, &mut self.device, &mut self.sockets);
+                self.device.flush();
                 self.process_icmp();
                 self.process_ipv6_slaac();
             }
@@ -209,17 +212,20 @@ fn wait_for_kernel_mac(max_attempts: usize) -> Option<[u8; 6]> {
 pub extern "C" fn _start() -> ! {
     log("[strate-net] Starting network silo\n");
 
-    match net_open() {
+    // Acquire the NIC capability once.  Without it every raw network syscall
+    // returns EPERM; this is the capability gate introduced in P0.
+    let dev_handle = match net_open() {
         Ok(handle) => {
             log("[strate-net] NIC capability acquired\n");
-            let _ = handle;
+            handle as u64
         }
         Err(e) => {
             log("[strate-net] net_open failed: ");
             log_error_code(e);
             log("\n");
+            0
         }
-    }
+    };
 
     let port = match call::ipc_create_port(0) {
         Ok(p) => p as u64,
@@ -258,7 +264,33 @@ pub extern "C" fn _start() -> ! {
         log("[strate-net] NIC registration failed (will poll)\n");
     }
 
-    let mut strate = NetworkStrate::new(mac);
+    // Try to map the shared queue region.  On success RX/TX are syscall-free
+    // and copy-free between the kernel and this stack.
+    let device = if dev_handle != 0 {
+        let mut map = NetQueueMap::default();
+        match call::net_queue_map(dev_handle as usize, 0, &mut map) {
+            Ok(_) if map.base != 0 => {
+                let header = map.base as *mut NetQueueHeader;
+                // SAFETY: the kernel returned a writable mapping of a
+                // `NetQueue` region; verify the magic before using it.
+                if unsafe { (*header).is_valid() } {
+                    log("[strate-net] Shared queue mapped (zero-copy data plane)\n");
+                    unsafe { crate::device::NetDevice::shared(dev_handle, header, mac) }
+                } else {
+                    log("[strate-net] Invalid shared queue magic, using copy path\n");
+                    crate::device::NetDevice::legacy()
+                }
+            }
+            _ => {
+                log("[strate-net] Queue map failed, using copy path\n");
+                crate::device::NetDevice::legacy()
+            }
+        }
+    } else {
+        crate::device::NetDevice::legacy()
+    };
+
+    let mut strate = NetworkStrate::new(mac, device);
     strate.serve(port);
 }
 

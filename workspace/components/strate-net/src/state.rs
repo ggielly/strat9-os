@@ -9,7 +9,7 @@ use smoltcp::{
 use strate_net::IpcMessage;
 
 use crate::{
-    device::Strat9NetDevice,
+    device::NetDevice,
     ip::{link_local_from_mac, IpConfig, Ipv6Config},
     ipc::reply_read,
 };
@@ -68,7 +68,7 @@ impl OpenedFile {
 }
 
 pub(crate) struct NetworkStrate {
-    pub(crate) device: Strat9NetDevice,
+    pub(crate) device: NetDevice,
     pub(crate) interface: Interface,
     pub(crate) sockets: SocketSet<'static>,
     pub(crate) dhcp_handle: SocketHandle,
@@ -98,8 +98,7 @@ pub(crate) struct NetworkStrate {
 }
 
 impl NetworkStrate {
-    pub(crate) fn new(mac: [u8; 6]) -> Self {
-        let mut device = Strat9NetDevice;
+    pub(crate) fn new(mac: [u8; 6], mut device: NetDevice) -> Self {
         let config = Config::new(EthernetAddress(mac).into());
         let mut interface = Interface::new(config, &mut device, Instant::from_micros(0));
         let mut sockets = SocketSet::new(alloc::vec![]);

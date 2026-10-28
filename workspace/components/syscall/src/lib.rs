@@ -1182,6 +1182,99 @@ pub mod call {
         unsafe { syscall2(number::SYS_NET_INFO, info_type, buf_ptr) }
     }
 
+    /// Open the default NIC and install a `Nic` capability.
+    pub fn net_open() -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_NET_OPEN, 0) }
+    }
+
+    /// Map the shared queue region of `dev`.
+    pub fn net_queue_map(dev: usize, qid: usize, out: &mut strat9_abi::net::NetQueueMap) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_NET_QUEUE_MAP,
+                dev,
+                qid,
+                out as *mut strat9_abi::net::NetQueueMap as usize,
+            )
+        }
+    }
+
+    /// Ring the TX doorbell of `qid`.
+    pub fn net_kick(dev: usize, qid: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_NET_KICK, dev, qid) }
+    }
+
+    /// Bind a queue IRQ to an IPC port.
+    pub fn net_irq_bind(dev: usize, qid: usize, port: usize) -> error::Result<usize> {
+        unsafe { syscall3(number::SYS_NET_IRQ_BIND, dev, qid, port) }
+    }
+
+    /// Query link state.
+    pub fn net_link(dev: usize, out: &mut strat9_abi::net::NetLinkInfo) -> error::Result<usize> {
+        unsafe {
+            syscall2(
+                number::SYS_NET_LINK,
+                dev,
+                out as *mut strat9_abi::net::NetLinkInfo as usize,
+            )
+        }
+    }
+
+    /// Receive a batch of frames.
+    pub fn net_rx_batch(dev: usize, frames: &mut [strat9_abi::net::NetFrame]) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_NET_RX_BATCH,
+                dev,
+                frames.as_mut_ptr() as usize,
+                frames.len(),
+            )
+        }
+    }
+
+    /// Transmit a batch of frames.
+    pub fn net_tx_batch(dev: usize, frames: &[strat9_abi::net::NetFrame]) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_NET_TX_BATCH,
+                dev,
+                frames.as_ptr() as usize,
+                frames.len(),
+            )
+        }
+    }
+
+    /// Query queue features and statistics.
+    pub fn net_queue_info(
+        dev: usize,
+        qid: usize,
+        out: &mut strat9_abi::net::NetQueueInfo,
+    ) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_NET_QUEUE_INFO,
+                dev,
+                qid,
+                out as *mut strat9_abi::net::NetQueueInfo as usize,
+            )
+        }
+    }
+
+    /// Wait for or poll a queue event.
+    pub fn net_event_wait(dev: usize, qid: usize, timeout_ns: usize) -> error::Result<usize> {
+        unsafe { syscall3(number::SYS_NET_EVENT_WAIT, dev, qid, timeout_ns) }
+    }
+
+    /// Get or set negotiated features.
+    pub fn net_features(dev: usize, mask: usize, set: usize) -> error::Result<usize> {
+        unsafe { syscall3(number::SYS_NET_FEATURES, dev, mask, set) }
+    }
+
+    /// Publish TX descriptors and kick.
+    pub fn net_tx_publish(dev: usize, qid: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_NET_TX_PUBLISH, dev, qid) }
+    }
+
     // ========================================================================
     // Volumes / block devices (block 420-422)
     // ========================================================================
