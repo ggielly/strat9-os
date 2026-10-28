@@ -8,9 +8,11 @@
 //! https://docs.oasis-open.org/virtio/virtio/v1.4/cs01/virtio-v1.4-cs01.html#x1-2700001
 
 use crate::{
-    hardware::pci_client::{self as pci, PciDevice},
     hardware::{
+        iommu::DmaProt,
         nic as net,
+        nic::common::DmaMapper,
+        pci_client::{self as pci, PciDevice},
         virtio::{
             common::{VirtioDevice, Virtqueue},
             status,
@@ -83,10 +85,12 @@ pub struct VirtioNetDevice {
     rx_queue: SpinLock<Virtqueue>,
     tx_queue: SpinLock<Virtqueue>,
     mac_address: [u8; 6],
-    pub rx_frames: SpinLock<FixedQueue<(PhysFrame, u8), RX_FRAME_TRACK_CAPACITY>>,
-    tx_frames: SpinLock<FixedQueue<(PhysFrame, u8), TX_FRAME_TRACK_CAPACITY>>,
+    /// Physical -> device address translator (identity when IOMMU is off).
+    dma: DmaMapper,
+    pub rx_frames: SpinLock<FixedQueue<(PhysFrame, u8, u64), RX_FRAME_TRACK_CAPACITY>>,
+    tx_frames: SpinLock<FixedQueue<(PhysFrame, u8, u64), TX_FRAME_TRACK_CAPACITY>>,
     /// Completed TX buffers, reused instead of freeing/reallocating.
-    tx_pool: SpinLock<FixedQueue<(PhysFrame, u8), TX_FRAME_TRACK_CAPACITY>>,
+    tx_pool: SpinLock<FixedQueue<(PhysFrame, u8, u64), TX_FRAME_TRACK_CAPACITY>>,
 }
 
 // Send and Sync are safe because we use SpinLocks
@@ -97,6 +101,13 @@ impl VirtioNetDevice {
     /// Initialize a VirtIO network device from a PCI device
     pub unsafe fn new(pci_dev: PciDevice) -> Result<Self, &'static str> {
         log::info!("VirtIO-net: Initializing device at {:?}", pci_dev.address);
+        let sbdf = crate::hardware::iommu::Sbdf::new(
+            0,
+            pci_dev.address.bus,
+            pci_dev.address.device,
+            pci_dev.address.function,
+        );
+        let dma = DmaMapper::for_sbdf(sbdf);
 
         // Create VirtIO device
         let device = VirtioDevice::new(pci_dev)?;
@@ -146,8 +157,21 @@ impl VirtioNetDevice {
         // Create virtqueues
         // Queue 0: RX (receive)
         // Queue 1: TX (transmit)
-        let rx_queue = Virtqueue::new(128)?;
-        let tx_queue = Virtqueue::new(128)?;
+        let mut rx_queue = Virtqueue::new(128)?;
+        let mut tx_queue = Virtqueue::new(128)?;
+
+        // Map the contiguous vring of each queue into the device domain (a
+        // no-op returning the physical address when IOMMU is inactive).
+        for queue in [&mut rx_queue, &mut tx_queue] {
+            let phys = queue.ring_phys();
+            let iova = dma.translate(phys, queue.ring_size(), DmaProt::READ_WRITE);
+            let delta = iova.wrapping_sub(phys);
+            queue.set_device_addresses(
+                queue.desc_area().wrapping_add(delta),
+                queue.avail_area().wrapping_add(delta),
+                queue.used_area().wrapping_add(delta),
+            );
+        }
 
         // Setup queues with device
         device.setup_queue(0, &rx_queue);
@@ -178,6 +202,7 @@ impl VirtioNetDevice {
             rx_queue: SpinLock::new(rx_queue),
             tx_queue: SpinLock::new(tx_queue),
             mac_address,
+            dma,
             rx_frames: SpinLock::new(FixedQueue::new()),
             tx_frames: SpinLock::new(FixedQueue::new()),
             tx_pool: SpinLock::new(FixedQueue::new()),
@@ -218,6 +243,7 @@ impl VirtioNetDevice {
 
             let buf_addr = buf_frame.start_address.as_u64();
             let virt_addr = crate::memory::phys_to_virt(buf_addr);
+            let dev_addr = self.dma.translate(buf_addr, buf_size, DmaProt::READ_WRITE);
 
             // Zero the buffer (header needs to be zeroed mostly)
             unsafe {
@@ -225,9 +251,10 @@ impl VirtioNetDevice {
             }
 
             // Add buffer to RX queue (device Writable)
-            match rx_queue.add_buffer(&[(buf_addr, buf_size as u32, true)]) {
+            match rx_queue.add_buffer(&[(dev_addr, buf_size as u32, true)]) {
                 Ok(_) => {
-                    if rx_frames.push_back((buf_frame, buf_order)).is_err() {
+                    if rx_frames.push_back((buf_frame, buf_order, dev_addr)).is_err() {
+                        self.dma.release(dev_addr, buf_size);
                         crate::sync::with_irqs_disabled(|token| {
                             memory::free_phys_contiguous(token, buf_frame, buf_order);
                         });
@@ -237,6 +264,7 @@ impl VirtioNetDevice {
                 }
                 Err(_) => {
                     // Queue full, free the buffer
+                    self.dma.release(dev_addr, buf_size);
                     crate::sync::with_irqs_disabled(|token| {
                         memory::free_phys_contiguous(token, buf_frame, buf_order);
                     });
@@ -263,13 +291,13 @@ impl VirtioNetDevice {
         mut rx_queue: crate::sync::SpinLockGuard<'_, Virtqueue>,
         frame: PhysFrame,
         order: u8,
+        dev_addr: u64,
     ) {
         let buf_size = NET_HDR_SIZE.load(Ordering::Relaxed) + net::MTU;
-        let buf_addr = frame.start_address.as_u64();
-        match rx_queue.add_buffer(&[(buf_addr, buf_size as u32, true)]) {
+        match rx_queue.add_buffer(&[(dev_addr, buf_size as u32, true)]) {
             Ok(_) => {
                 let mut frames = self.rx_frames.lock();
-                if frames.push_back((frame, order)).is_err() {
+                if frames.push_back((frame, order, dev_addr)).is_err() {
                     // The buffer is already published to the device; freeing
                     // it would let the device DMA into reused memory.  Leak
                     // it instead (unreachable with equal capacities).
@@ -277,6 +305,7 @@ impl VirtioNetDevice {
                 }
             }
             Err(_) => {
+                self.dma.release(dev_addr, buf_size);
                 crate::sync::with_irqs_disabled(|token| {
                     memory::free_phys_contiguous(token, frame, order);
                 });
@@ -288,8 +317,15 @@ impl VirtioNetDevice {
     }
 
     /// Return a TX frame to the reuse pool, or free it if the pool is full.
-    fn release_tx_frame(&self, frame: PhysFrame, order: u8) {
-        if self.tx_pool.lock().push_back((frame, order)).is_err() {
+    fn release_tx_frame(&self, frame: PhysFrame, order: u8, dev_addr: u64) {
+        let buf_size = NET_HDR_SIZE.load(Ordering::Relaxed) + net::MTU;
+        if self
+            .tx_pool
+            .lock()
+            .push_back((frame, order, dev_addr))
+            .is_err()
+        {
+            self.dma.release(dev_addr, buf_size);
             crate::sync::with_irqs_disabled(|token| {
                 memory::free_phys_contiguous(token, frame, order);
             });
@@ -324,7 +360,7 @@ impl NetworkDevice for VirtioNetDevice {
         let _desc_index = token as usize;
         let _desc_table = rx_queue.desc_area(); // Physical address
 
-        let (frame, order) = self
+        let (frame, order, dev_addr) = self
             .rx_frames
             .lock()
             .pop_front()
@@ -350,7 +386,7 @@ impl NetworkDevice for VirtioNetDevice {
         if buf.len() < packet_len {
             // Recycle the buffer instead of freeing it; the packet is
             // dropped but the ring keeps its full complement of buffers.
-            self.recycle_rx_frame(rx_queue, frame, order);
+            self.recycle_rx_frame(rx_queue, frame, order, dev_addr);
             return Err(NetError::BufferTooSmall);
         }
 
@@ -362,7 +398,7 @@ impl NetworkDevice for VirtioNetDevice {
         }
 
         // Re-publish the same frame: no allocation, no free in steady state.
-        self.recycle_rx_frame(rx_queue, frame, order);
+        self.recycle_rx_frame(rx_queue, frame, order, dev_addr);
 
         Ok(packet_len)
     }
@@ -376,18 +412,27 @@ impl NetworkDevice for VirtioNetDevice {
         // Allocate TX buffer (header + data), reusing a completed buffer when
         // available.  Steady state does no allocation at all.
         let buf_size = NET_HDR_SIZE.load(Ordering::Relaxed) + buf.len();
-        let buf_pages = (buf_size + 4095) / 4096;
+        // Allocate the full MTU capacity so the mapping length is stable when
+        // a smaller frame reuses a pooled buffer.
+        let alloc_size = NET_HDR_SIZE.load(Ordering::Relaxed) + net::MTU;
+        let buf_pages = (alloc_size + 4095) / 4096;
         let buf_order = buf_pages.next_power_of_two().trailing_zeros() as u8;
 
         let pooled = self.tx_pool.lock().pop_front();
-        let (buf_frame, buf_order) = match pooled {
-            Some(frame) => frame,
+        let (buf_frame, buf_order, dev_addr) = match pooled {
+            Some(entry) => entry,
             None => {
                 let frame = crate::sync::with_irqs_disabled(|token| {
                     memory::allocate_phys_contiguous(token, buf_order)
                 })
                 .map_err(|_| NetError::NotReady)?;
-                (frame, buf_order)
+                let phys = frame.start_address.as_u64();
+                let mapped = self.dma.translate(
+                    phys,
+                    NET_HDR_SIZE.load(Ordering::Relaxed) + net::MTU,
+                    DmaProt::READ_WRITE,
+                );
+                (frame, buf_order, mapped)
             }
         };
 
@@ -409,8 +454,17 @@ impl NetworkDevice for VirtioNetDevice {
         // Reclaim completed TX buffers before submitting.  The used ring is
         // FIFO, so frames are recycled in submission order into `tx_pool`.
         while tx_queue.get_used().is_some() {
-            if let Some((frame, order)) = self.tx_frames.lock().pop_front() {
-                if self.tx_pool.lock().push_back((frame, order)).is_err() {
+            if let Some((frame, order, mapped)) = self.tx_frames.lock().pop_front() {
+                if self
+                    .tx_pool
+                    .lock()
+                    .push_back((frame, order, mapped))
+                    .is_err()
+                {
+                    self.dma.release(
+                        mapped,
+                        NET_HDR_SIZE.load(Ordering::Relaxed) + net::MTU,
+                    );
                     crate::sync::with_irqs_disabled(|token| {
                         memory::free_phys_contiguous(token, frame, order);
                     });
@@ -418,10 +472,10 @@ impl NetworkDevice for VirtioNetDevice {
             }
         }
 
-        let _head = match tx_queue.add_buffer(&[(buf_addr, buf_size as u32, false)]) {
+        let _head = match tx_queue.add_buffer(&[(dev_addr, buf_size as u32, false)]) {
             Ok(head) => head,
             Err(_) => {
-                self.release_tx_frame(buf_frame, buf_order);
+                self.release_tx_frame(buf_frame, buf_order, dev_addr);
                 return Err(NetError::TxQueueFull);
             }
         };
@@ -429,7 +483,7 @@ impl NetworkDevice for VirtioNetDevice {
         if self
             .tx_frames
             .lock()
-            .push_back((buf_frame, buf_order))
+            .push_back((buf_frame, buf_order, dev_addr))
             .is_err()
         {
             // Should be unreachable: `tx_frames` has the same capacity as the

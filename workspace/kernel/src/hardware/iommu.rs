@@ -1223,6 +1223,15 @@ pub fn get_domain(id: DomainId) -> Option<Arc<Domain>> {
     DOMAINS.lock().get(&id).cloned()
 }
 
+/// Find the live domain bound to `sbdf`, without taking a logical reference.
+pub fn find_domain(sbdf: Sbdf) -> Option<Arc<Domain>> {
+    DOMAINS
+        .lock()
+        .values()
+        .find(|domain| domain.sbdf() == sbdf)
+        .cloned()
+}
+
 /// Drop one logical reference, tearing down the domain when it reaches zero.
 pub fn release_domain(domain: &Arc<Domain>) -> bool {
     if domain.release() > 0 {

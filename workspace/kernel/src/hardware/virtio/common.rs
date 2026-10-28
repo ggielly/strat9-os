@@ -77,6 +77,14 @@ pub struct Virtqueue {
 
     /// Physical address of used ring
     used_area: u64,
+    /// Total size of the contiguous vring allocation.
+    ring_size: usize,
+    /// Device-visible address of the descriptor table (IOVA when translated).
+    desc_area_dev: u64,
+    /// Device-visible address of the available ring.
+    avail_area_dev: u64,
+    /// Device-visible address of the used ring.
+    used_area_dev: u64,
 
     /// Virtual address of descriptor table
     desc_ptr: *mut VirtqDesc,
@@ -186,6 +194,10 @@ impl Virtqueue {
             desc_area: desc_phys,
             avail_area: avail_phys,
             used_area: used_phys,
+            ring_size: total_size,
+            desc_area_dev: desc_phys,
+            avail_area_dev: avail_phys,
+            used_area_dev: used_phys,
             desc_ptr,
             avail_ptr,
             avail_ring_ptr,
@@ -201,6 +213,31 @@ impl Virtqueue {
     /// Get the physical address of the descriptor table
     pub fn desc_area(&self) -> u64 {
         self.desc_area
+    }
+
+    /// Physical base of the whole contiguous vring allocation.
+    pub fn ring_phys(&self) -> u64 {
+        self.desc_area
+    }
+
+    /// Size of the contiguous vring allocation.
+    pub fn ring_size(&self) -> usize {
+        self.ring_size
+    }
+
+    /// Set the device-visible addresses after an IOMMU mapping.
+    ///
+    /// The three rings live in one contiguous allocation, so callers map the
+    /// whole allocation and pass `physical + delta` for each part.
+    pub fn set_device_addresses(&mut self, desc: u64, avail: u64, used: u64) {
+        self.desc_area_dev = desc;
+        self.avail_area_dev = avail;
+        self.used_area_dev = used;
+    }
+
+    /// Device-visible descriptor table address.
+    pub fn desc_area_dev(&self) -> u64 {
+        self.desc_area_dev
     }
 
     /// Get the physical address of the available ring
@@ -514,7 +551,7 @@ impl VirtioDevice {
         }
 
         // Set queue addresses (page-aligned physical addresses >> 12)
-        let desc_pfn = (queue.desc_area() >> 12) as u32;
+        let desc_pfn = (queue.desc_area_dev() >> 12) as u32;
         self.write_reg_u32(8, desc_pfn); // VIRTIO_PCI_QUEUE_PFN
 
         log::info!(
