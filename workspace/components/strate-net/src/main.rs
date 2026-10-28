@@ -17,7 +17,7 @@ mod vfs;
 use core::{alloc::Layout, panic::PanicInfo};
 use smoltcp::{iface::PollResult, socket::tcp, time::Instant};
 use state::NetworkStrate;
-use strat9_abi::net::{NetQueueHeader, NetQueueMap};
+use strat9_abi::net::{NetEvent, NetQueueHeader, NetQueueMap};
 use strate_net::{syscalls::*, IpcMessage, OPCODE_CLOSE, OPCODE_OPEN, OPCODE_READ, OPCODE_WRITE};
 
 alloc_freelist::define_freelist_brk_allocator!(
@@ -103,6 +103,25 @@ impl NetworkStrate {
         self.enable_dhcp();
 
         loop {
+            // Drain hotplug/link events before polling: a removed device must
+            // not be touched by the stack.
+            let mut device_event = NetEvent::default();
+            if call::net_device_event(&mut device_event).is_ok() {
+                match device_event.kind {
+                    strat9_abi::net::event::DEVICE_REMOVE => {
+                        log("[strate-net] device removed, exiting for supervisor restart\n");
+                        exit(3);
+                    }
+                    strat9_abi::net::event::LINK_DOWN => {
+                        log("[strate-net] link down\n");
+                    }
+                    strat9_abi::net::event::LINK_UP => {
+                        log("[strate-net] link up\n");
+                    }
+                    _ => {}
+                }
+            }
+
             let now = now_instant();
             // Stamp pending pings before both polls so they are never
             // seen as "timed out" with send_ts_ns == 0.

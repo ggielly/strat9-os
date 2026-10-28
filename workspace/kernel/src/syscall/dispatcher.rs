@@ -296,6 +296,10 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_NET_EVENT_WAIT => net::sys_net_event_wait(arg1, arg2, arg3),
         SYS_NET_FEATURES => net::sys_net_features(arg1, arg2, arg3),
         SYS_NET_TX_PUBLISH => net::sys_net_tx_publish(arg1, arg2),
+        SYS_NET_DEVICE_EVENT => net::sys_net_device_event(arg1),
+        SYS_NET_QUIESCE => net::sys_net_quiesce(arg1),
+        SYS_NET_RESUME => net::sys_net_resume(arg1),
+        SYS_NET_QUEUE_UNMAP => net::sys_net_queue_unmap(arg1, arg2),
 
         // Storage syscalls (600-699) ========================================
         SYS_VOLUME_READ => volume::sys_volume_read(arg1, arg2, arg3, arg4),

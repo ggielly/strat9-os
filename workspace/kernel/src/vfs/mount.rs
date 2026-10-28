@@ -59,6 +59,30 @@ impl MountTable {
         Ok(())
     }
 
+    /// Mount a path prefix, replacing an existing mount with the same prefix.
+    ///
+    /// Used by strate hot-restart: a new instance takes over the namespace
+    /// entry atomically.  Callers must enforce the policy (only a `NET`/`DRV`
+    /// silo may replace `/net`, for example).
+    pub fn mount_replace(&mut self, prefix: &str, scheme: DynScheme) -> Result<(), SyscallError> {
+        if prefix.is_empty() || !prefix.starts_with('/') {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let prefix = if prefix.len() > 1 && prefix.ends_with('/') {
+            &prefix[..prefix.len() - 1]
+        } else {
+            prefix
+        };
+        self.mounts.retain(|m| m.prefix != prefix);
+        self.mounts.push(Mount {
+            prefix: String::from(prefix),
+            scheme,
+        });
+        self.mounts
+            .sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
+        Ok(())
+    }
+
     /// Unmount a path prefix.
     pub fn unmount(&mut self, prefix: &str) -> Result<(), SyscallError> {
         let pos = self
@@ -119,6 +143,11 @@ static GLOBAL_MOUNTS: Lazy<RwLock<MountTable>> = Lazy::new(|| RwLock::new(MountT
 /// Mount a scheme at a global path.
 pub fn mount(prefix: &str, scheme: DynScheme) -> Result<(), SyscallError> {
     GLOBAL_MOUNTS.write().mount(prefix, scheme)
+}
+
+/// Mount, replacing an existing prefix (strate hot-restart).
+pub fn mount_replace(prefix: &str, scheme: DynScheme) -> Result<(), SyscallError> {
+    GLOBAL_MOUNTS.write().mount_replace(prefix, scheme)
 }
 
 /// Unmount a global path.

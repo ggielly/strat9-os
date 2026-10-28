@@ -379,12 +379,18 @@ pub fn sys_ipc_bind_port(
         return Err(SyscallError::BadHandle);
     }
 
-    crate::vfs::mount(
-        path,
-        alloc::sync::Arc::new(crate::vfs::IpcScheme::new(PortId::from_u64(
-            cap.resource as u64,
-        ))),
-    )?;
+    let scheme = alloc::sync::Arc::new(crate::vfs::IpcScheme::new(PortId::from_u64(
+        cap.resource as u64,
+    )));
+    // Hot-restart: a strate may take over its own namespace entry.  Other
+    // paths keep the "no duplicate mount" rule so a random silo cannot
+    // hijack an arbitrary service.
+    if path == "/net" || path.starts_with("/srv/strate-") {
+        crate::vfs::mount_replace(path, scheme)?;
+        let _ = crate::namespace::unbind(path);
+    } else {
+        crate::vfs::mount(path, scheme)?;
+    }
     let _ = crate::namespace::bind(path, cap.resource as u64);
     let _ = silo::set_current_silo_label_from_path(path);
 

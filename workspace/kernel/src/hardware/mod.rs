@@ -5,6 +5,7 @@
 
 pub mod amdgpu;
 pub mod ec;
+pub mod iommu;
 pub mod nic;
 pub mod pci_client;
 pub mod storage;

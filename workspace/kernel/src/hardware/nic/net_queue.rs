@@ -103,6 +103,12 @@ pub struct NetQueue {
     pub features: AtomicU64,
     /// Serialises queue teardown against the IRQ handler.
     pub alive: AtomicU8,
+    /// True once the region has been mapped into a userspace strate.
+    mapped: core::sync::atomic::AtomicBool,
+    /// User virtual base of the mapping, 0 when unmapped.
+    mapped_base: AtomicU64,
+    /// Task that owns the mapping, 0 when unmapped.
+    mapped_owner: AtomicU64,
     /// Descriptor popped by a consumer whose buffer was too small.  It must
     /// be returned before the next descriptor to preserve ordering.
     pending_rx: SpinLock<Option<NetFrameDesc>>,
@@ -153,6 +159,9 @@ impl NetQueue {
             port: AtomicU64::new(0),
             features: AtomicU64::new(feature_mask),
             alive: AtomicU8::new(1),
+            mapped: core::sync::atomic::AtomicBool::new(false),
+            mapped_base: AtomicU64::new(0),
+            mapped_owner: AtomicU64::new(0),
             pending_rx: SpinLock::new(None),
         }))
     }
@@ -172,6 +181,49 @@ impl NetQueue {
     #[inline]
     pub fn region(&self) -> &Arc<SharedRing> {
         &self.ring
+    }
+
+    /// Reserve the single userspace mapping for `owner`.  Returns `false` if
+    /// another live task owns it.  A mapping left behind by a dead task is
+    /// reclaimed (hot-restart).
+    pub fn try_map(&self, owner: u64) -> bool {
+        if self
+            .mapped
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.mapped_owner.store(owner, Ordering::Release);
+            return true;
+        }
+
+        let previous = self.mapped_owner.load(Ordering::Acquire);
+        if previous != 0
+            && previous != owner
+            && crate::process::get_task_by_id(crate::process::TaskId::from_u64(previous)).is_none()
+        {
+            // The previous owner died without unmapping; its address space
+            // is gone, so only the bookkeeping needs to be reset.
+            self.mapped_owner.store(owner, Ordering::Release);
+            return true;
+        }
+        false
+    }
+
+    /// Release the mapping reservation after a failed map.
+    pub fn unmap_reservation(&self) {
+        self.mapped_base.store(0, Ordering::Release);
+        self.mapped_owner.store(0, Ordering::Release);
+        self.mapped.store(false, Ordering::Release);
+    }
+
+    /// Record the user base of a successful mapping.
+    pub fn set_mapped_base(&self, base: u64) {
+        self.mapped_base.store(base, Ordering::Release);
+    }
+
+    /// Take the user base of the mapping (0 if none).
+    pub fn take_mapped_base(&self) -> u64 {
+        self.mapped_base.swap(0, Ordering::AcqRel)
     }
 
     #[inline]
@@ -363,6 +415,12 @@ impl NetQueue {
     #[inline]
     pub fn feature_mask(&self) -> u64 {
         self.features.load(Ordering::Acquire)
+    }
+
+    /// Negotiate features and MTU after the driver has probed the device.
+    pub fn configure(&self, mask: u64, mtu: u32) {
+        self.set_features(mask);
+        self.header().mtu.store(mtu, Ordering::Release);
     }
 
     /// Enable features after negotiation.

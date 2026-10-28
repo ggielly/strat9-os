@@ -53,6 +53,13 @@ impl NicDataPlane {
         self.queues.len()
     }
 
+    /// Apply a driver's negotiated features and MTU to one queue.
+    pub fn configure(&self, index: usize, feature_mask: u64, mtu: u32) {
+        if let Some(queue) = self.queue(index) {
+            queue.configure(feature_mask, mtu);
+        }
+    }
+
     /// Push a received frame into the queue's RX ring.
     ///
     /// Called from the NIC IRQ/poll path.  No allocation, no lock.

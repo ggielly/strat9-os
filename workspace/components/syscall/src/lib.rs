@@ -1275,6 +1275,31 @@ pub mod call {
         unsafe { syscall2(number::SYS_NET_TX_PUBLISH, dev, qid) }
     }
 
+    /// Drain one device hotplug/link event.
+    pub fn net_device_event(out: &mut strat9_abi::net::NetEvent) -> error::Result<usize> {
+        unsafe {
+            syscall1(
+                number::SYS_NET_DEVICE_EVENT,
+                out as *mut strat9_abi::net::NetEvent as usize,
+            )
+        }
+    }
+
+    /// Quiesce a device.
+    pub fn net_quiesce(dev: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_NET_QUIESCE, dev) }
+    }
+
+    /// Resume a device.
+    pub fn net_resume(dev: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_NET_RESUME, dev) }
+    }
+
+    /// Unmap a shared queue region (hot-restart cleanup).
+    pub fn net_queue_unmap(dev: usize, qid: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_NET_QUEUE_UNMAP, dev, qid) }
+    }
+
     // ========================================================================
     // Volumes / block devices (block 420-422)
     // ========================================================================

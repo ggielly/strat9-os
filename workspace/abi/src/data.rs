@@ -9,7 +9,13 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 // ── IPC Message Constants ───────────────────────────────────────────────────
 
 /// Total size of an IPC message in bytes (including header and payload).
-pub const IPC_MESSAGE_SIZE: usize = 256;
+///
+/// 1 KiB: a compromise between the original 256-byte message (which capped
+/// stream reads at 232 bytes and forced ~71 round trips for a 16 KiB read)
+/// and a 4 KiB message (which would quadruple every port queue and every
+/// on-stack message).  The payload is large enough for a full TCP segment
+/// chunk without turning the IPC layer into a bulk transport.
+pub const IPC_MESSAGE_SIZE: usize = 1024;
 
 /// Alignment requirement for IPC messages (64-byte aligned for cache line).
 pub const IPC_MESSAGE_ALIGN: usize = 64;
@@ -17,7 +23,7 @@ pub const IPC_MESSAGE_ALIGN: usize = 64;
 /// Size of the IPC message header (sender + msg_type + flags).
 pub const IPC_MESSAGE_HEADER_SIZE: usize = 16;
 
-/// Maximum payload size in an IPC message (256 - 16 = 240 bytes).
+/// Maximum payload size in an IPC message (1024 - 16 = 1008 bytes).
 pub const IPC_PAYLOAD_CAPACITY: usize = IPC_MESSAGE_SIZE - IPC_MESSAGE_HEADER_SIZE;
 
 // ── IPC File Flags ──────────────────────────────────────────────────────────
@@ -395,10 +401,10 @@ impl FileStat {
 
 // ── IpcMessage ─────────────────────────────────────────────────────────────
 
-/// Fixed-size IPC message (256 bytes, 64-byte aligned).
+/// Fixed-size IPC message (1 KiB, 64-byte aligned).
 ///
 /// Used by IPC ports, channels, and the transport layer.
-/// The header occupies 16 bytes; the payload is 240 bytes.
+/// The header occupies 16 bytes; the payload is 1008 bytes.
 #[derive(Clone, Copy, FromBytes, IntoBytes, Immutable)]
 #[repr(C, align(64))]
 pub struct IpcMessage {
@@ -408,7 +414,7 @@ pub struct IpcMessage {
     pub msg_type: u32,
     /// Message flags (protocol-specific).
     pub flags: u32,
-    /// Payload data (up to 240 bytes).
+    /// Payload data (up to 1008 bytes).
     pub payload: [u8; IPC_PAYLOAD_CAPACITY],
 }
 
