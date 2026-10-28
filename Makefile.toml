@@ -330,6 +330,7 @@ ${QEMU} \
     -device e1000,netdev=net1 \
     -netdev user,id=net1,hostfwd=tcp::2323-:23 \
     -serial stdio \
+    -device intel-iommu \
     -no-reboot
 ''',
 ]
