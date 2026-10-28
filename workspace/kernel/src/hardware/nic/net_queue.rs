@@ -17,8 +17,7 @@ use strat9_abi::net::{
     features, link_flags, NetFrameDesc, NetQueueHeader, NET_FRAME_SIZE, NET_QUEUE_SIZE,
 };
 use crate::ipc::shared_ring::{self, RingId, SharedRing};
-use crate::sync::waitqueue::WaitQueue;
-use crate::sync::SpinLock;
+use crate::sync::{SpinLock, WaitQueue};
 
 /// Per-queue event counter and wait queue.
 ///
