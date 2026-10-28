@@ -614,6 +614,7 @@ impl E1000Nic {
 
         self.tx_since_last_reclaim = 0;
         self.last_tdh = 0;
+        self.rx_refill = 0;
         self.check_link();
     }
 
