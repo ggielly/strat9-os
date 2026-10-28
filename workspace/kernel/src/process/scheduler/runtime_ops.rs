@@ -1063,6 +1063,24 @@ pub fn state_snapshot() -> SchedulerStateSnapshot {
 pub(super) extern "C" fn idle_task_main() -> ! {
     let cpu = crate::arch::percpu::current_cpu_index();
     crate::serial_force_println!("[trace][sched] idle_task_main start cpu={}", cpu);
+
+    // The NIC hotplug watchdog must not become one of the first fair tasks:
+    // it is a periodic kernel thread and the scheduler bootstrap expects the
+    // first BSP task to be the init task (or idle). Start it lazily once the
+    // scheduler is actually running, from CPU0's idle context.
+    static HOTPLUG_STARTED: core::sync::atomic::AtomicBool =
+        core::sync::atomic::AtomicBool::new(false);
+    if cpu == 0
+        && !HOTPLUG_STARTED.swap(true, core::sync::atomic::Ordering::AcqRel)
+    {
+        if let Err(e) = crate::hardware::nic::hotplug::start_watchdog() {
+            crate::serial_force_println!(
+                "[sched] failed to start NIC hotplug watchdog: {}",
+                e
+            );
+        }
+    }
+
     loop {
         // Process any deferred work before halting. This ensures that
         // timer ticks raised during interrupt context get processed even

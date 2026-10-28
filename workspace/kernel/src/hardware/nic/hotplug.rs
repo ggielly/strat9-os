@@ -129,15 +129,19 @@ pub fn poll_pci() {
 }
 
 /// Start the polling watchdog.  Idempotent.
-pub fn start_watchdog() {
+pub fn start_watchdog() -> Result<(), &'static str> {
     use core::sync::atomic::{AtomicBool, Ordering};
     static STARTED: AtomicBool = AtomicBool::new(false);
     if STARTED.swap(true, Ordering::AcqRel) {
-        return;
+        return Ok(());
     }
-    let _ = crate::process::kthread::spawn("nic-hotplug", || loop {
+    if let Err(e) = crate::process::kthread::spawn("nic-hotplug", || loop {
         crate::hardware::timer::hpet::delay_ms(500);
         poll_pci();
-    });
+    }) {
+        STARTED.store(false, Ordering::Release);
+        return Err(e);
+    }
+    Ok(())
 }
 
