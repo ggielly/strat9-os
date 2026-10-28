@@ -38,6 +38,15 @@ pub(crate) fn reply_read(sender: u64, data: &[u8]) -> IpcMessage {
     msg
 }
 
+/// Reply carrying only a byte count, used by the bulk-ring path.
+pub(crate) fn reply_read_count(sender: u64, count: usize) -> IpcMessage {
+    let mut msg = IpcMessage::new(IpcMessage::REPLY_MSG_TYPE);
+    msg.sender = sender;
+    msg.payload[0..4].copy_from_slice(&0u32.to_le_bytes());
+    msg.payload[4..8].copy_from_slice(&(count as u32).to_le_bytes());
+    msg
+}
+
 pub(crate) fn reply_write(sender: u64, n: usize) -> IpcMessage {
     WriteReply::encode_ok(sender, n)
 }

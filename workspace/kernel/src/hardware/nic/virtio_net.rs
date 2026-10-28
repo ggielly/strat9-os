@@ -465,7 +465,7 @@ impl NetworkDevice for VirtioNetDevice {
     }
 
     fn queue_count(&self) -> u16 {
-        1
+        2
     }
 }
 

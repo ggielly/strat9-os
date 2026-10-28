@@ -88,7 +88,7 @@ fn nic_from_handle(
 }
 
 fn queue_from_handle(handle: u64, qid: u16) -> Result<alloc::sync::Arc<NetQueue>, SyscallError> {
-    let _ = nic_capability(
+    let resource = nic_capability(
         handle,
         CapPermissions {
             read: true,
@@ -101,7 +101,7 @@ fn queue_from_handle(handle: u64, qid: u16) -> Result<alloc::sync::Arc<NetQueue>
     let guard = nic::data_plane().lock();
     guard
         .as_ref()
-        .and_then(|dp| dp.clone_queue(qid as usize))
+        .and_then(|dp| dp.queue_for(resource as u64, qid))
         .ok_or(SyscallError::BadHandle)
 }
 
@@ -230,7 +230,7 @@ pub fn sys_net_info(info_type: u64, buf_ptr: u64) -> Result<u64, SyscallError> {
             Ok(1)
         }
         4 => {
-            let count = nic::queue_count() as u32;
+            let count = nic::default_queue_count() as u32;
             let user = UserSliceWrite::new(buf_ptr, 4)?;
             user.copy_from(&count.to_le_bytes());
             Ok(4)
@@ -352,7 +352,7 @@ pub fn sys_net_send(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
 
 /// `SYS_NET_QUEUE_MAP`: map a `NetQueue` region into the caller.
 pub fn sys_net_queue_map(dev: u64, qid: u64, out_ptr: u64) -> Result<u64, SyscallError> {
-    let _resource = nic_capability(dev, CapPermissions::read_write())?;
+    let resource = nic_capability(dev, CapPermissions::read_write())?;
     if qid > u16::MAX as u64 {
         return Err(SyscallError::InvalidArgument);
     }
@@ -360,7 +360,7 @@ pub fn sys_net_queue_map(dev: u64, qid: u64, out_ptr: u64) -> Result<u64, Syscal
         let guard = nic::data_plane().lock();
         guard
             .as_ref()
-            .and_then(|dp| dp.clone_queue(qid as usize))
+            .and_then(|dp| dp.queue_for(resource as u64, qid as u16))
             .ok_or(SyscallError::BadHandle)?
     };
 
@@ -427,7 +427,7 @@ pub fn sys_net_queue_map(dev: u64, qid: u64, out_ptr: u64) -> Result<u64, Syscal
 /// Called by a restarted strate before re-mapping.  The queue reservation is
 /// released only after the PTEs are removed.
 pub fn sys_net_queue_unmap(dev: u64, qid: u64) -> Result<u64, SyscallError> {
-    let _resource = nic_capability(dev, CapPermissions::read_write())?;
+    let resource = nic_capability(dev, CapPermissions::read_write())?;
     if qid > u16::MAX as u64 {
         return Err(SyscallError::InvalidArgument);
     }
@@ -435,7 +435,7 @@ pub fn sys_net_queue_unmap(dev: u64, qid: u64) -> Result<u64, SyscallError> {
         let guard = nic::data_plane().lock();
         guard
             .as_ref()
-            .and_then(|dp| dp.clone_queue(qid as usize))
+            .and_then(|dp| dp.queue_for(resource as u64, qid as u16))
             .ok_or(SyscallError::BadHandle)?
     };
     let base = queue.take_mapped_base();
@@ -457,7 +457,7 @@ pub fn sys_net_queue_unmap(dev: u64, qid: u64) -> Result<u64, SyscallError> {
 
 /// `SYS_NET_KICK`: drain the shared TX ring to the device.
 pub fn sys_net_kick(dev: u64, qid: u64) -> Result<u64, SyscallError> {
-    let _resource = nic_capability(
+    let resource = nic_capability(
         dev,
         CapPermissions {
             read: false,
@@ -470,7 +470,7 @@ pub fn sys_net_kick(dev: u64, qid: u64) -> Result<u64, SyscallError> {
     if qid > u16::MAX as u64 {
         return Err(SyscallError::InvalidArgument);
     }
-    Ok(nic::flush_tx(qid as usize) as u64)
+    Ok(nic::flush_tx_for(resource as u64, qid as u16) as u64)
 }
 
 /// `SYS_NET_IRQ_BIND`: route queue RX events to an IPC port.

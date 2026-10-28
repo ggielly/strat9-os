@@ -55,6 +55,9 @@ pub(crate) struct OpenedFile {
     pub(crate) path: String,
     pub(crate) cached_content: Option<alloc::vec::Vec<u8>>,
     pub(crate) read_spill: Option<alloc::vec::Vec<u8>>,
+    /// Server-side base of the optional bulk ring (0 = none).
+    pub(crate) bulk_base: u64,
+    pub(crate) bulk_len: usize,
 }
 
 impl OpenedFile {
@@ -63,6 +66,8 @@ impl OpenedFile {
             path: String::from(path),
             cached_content: None,
             read_spill: None,
+            bulk_base: 0,
+            bulk_len: 0,
         }
     }
 }

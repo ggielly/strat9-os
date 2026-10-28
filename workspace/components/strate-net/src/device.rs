@@ -17,7 +17,7 @@ use core::sync::atomic::AtomicUsize;
 use alloc::sync::Arc;
 
 use smoltcp::{
-    phy::{self, Device, DeviceCapabilities, Medium},
+    phy::{self, Checksum, Device, DeviceCapabilities, Medium},
     time::Instant,
 };
 use strat9_abi::net::{NetFrameDesc, NetQueueHeader, NET_FRAME_SIZE};
@@ -46,14 +46,17 @@ impl NetDevice {
     /// `header` must point to a valid `NetQueueHeader` mapped read/write.
     pub(crate) unsafe fn shared(
         dev_handle: u64,
-        header: *mut NetQueueHeader,
+        queues: alloc::vec::Vec<SharedQueue>,
         mac: [u8; 6],
+        features: u64,
     ) -> Self {
         NetDevice::Shared(SharedNetDevice {
             dev_handle,
-            header,
+            queues,
             mac,
-            tx_pending: Arc::new(AtomicBool::new(false)),
+            features,
+            rr_rx: 0,
+            rr_tx: 0,
         })
     }
 
@@ -101,6 +104,20 @@ impl Device for NetDevice {
         caps.max_transmission_unit = MAX_FRAME_SIZE;
         caps.medium = Medium::Ethernet;
         caps.max_burst_size = Some(16);
+
+        let features = match self {
+            NetDevice::Shared(device) => device.features,
+            NetDevice::Legacy(_) => 0,
+        };
+        if features & strat9_abi::net::features::CSUM_RX != 0 {
+            // The NIC validates RX checksums and drops bad frames; smoltcp
+            // must still compute TX checksums (`Checksum::Tx` = TX only).
+            caps.checksum.ipv4 = Checksum::Tx;
+            caps.checksum.tcp = Checksum::Tx;
+            caps.checksum.udp = Checksum::Tx;
+            caps.checksum.icmpv4 = Checksum::Tx;
+            caps.checksum.icmpv6 = Checksum::Tx;
+        }
         caps
     }
 }
@@ -109,11 +126,19 @@ impl Device for NetDevice {
 // Shared-memory backend
 // ---------------------------------------------------------------------------
 
+pub(crate) struct SharedQueue {
+    pub qid: u16,
+    pub header: *mut NetQueueHeader,
+    pub tx_pending: Arc<AtomicBool>,
+}
+
 pub(crate) struct SharedNetDevice {
     dev_handle: u64,
-    header: *mut NetQueueHeader,
+    queues: alloc::vec::Vec<SharedQueue>,
     mac: [u8; 6],
-    tx_pending: Arc<AtomicBool>,
+    features: u64,
+    rr_rx: usize,
+    rr_tx: usize,
 }
 
 // SAFETY: the shared header is only accessed through the ABI's single
@@ -123,58 +148,72 @@ unsafe impl Send for SharedNetDevice {}
 
 impl SharedNetDevice {
     fn receive_shared(&mut self) -> Option<(NetRxToken, NetTxToken)> {
-        // Allocate the TX token first: smoltcp uses it for immediate replies
-        // (ACK, ICMP) and expects a writable buffer.
-        let tx = self.transmit_shared()?;
-        // SAFETY: `header` is a valid mapped region for the lifetime of the
-        // device; the RX ring has a single consumer (this thread).
-        let Some(desc) = (unsafe { (*self.header).rx_pop() }) else {
+        let count = self.queues.len();
+        if count == 0 {
             return None;
-        };
-        let Some(ptr) = self.slot_ptr(desc.slot) else {
-            unsafe { (*self.header).free_rx_slot(desc.slot) };
-            return None;
-        };
-        let token = NetRxToken::Shared(SharedRxToken {
-            header: self.header,
-            slot: desc.slot,
-            ptr,
-            len: desc.len as usize,
-            released: false,
-        });
-        Some((token, tx))
+        }
+        for offset in 0..count {
+            let index = (self.rr_rx + offset) % count;
+            // Allocate the TX token first: smoltcp uses it for immediate
+            // replies (ACK, ICMP) and expects a writable buffer.
+            let Some(tx) = self.transmit_for(index) else {
+                continue;
+            };
+            let header = self.queues[index].header;
+            // SAFETY: `header` is a valid mapped region; the RX ring has a
+            // single consumer (this thread).
+            let Some(desc) = (unsafe { (*header).rx_pop() }) else {
+                continue;
+            };
+            let ptr = unsafe { (*header).rx_slot(desc.slot) };
+            self.rr_rx = (index + 1) % count;
+            let token = NetRxToken::Shared(SharedRxToken {
+                header,
+                slot: desc.slot,
+                ptr,
+                len: desc.len as usize,
+                released: false,
+            });
+            return Some((token, tx));
+        }
+        None
     }
 
-    fn transmit_shared(&mut self) -> Option<NetTxToken> {
-        let slot = unsafe { (*self.header).alloc_tx_slot() }?;
-        let Some(ptr) = self.slot_ptr_tx(slot) else {
-            unsafe { (*self.header).free_tx_slot(slot) };
-            return None;
-        };
+    fn transmit_for(&self, index: usize) -> Option<NetTxToken> {
+        let queue = self.queues.get(index)?;
+        let slot = unsafe { (*queue.header).alloc_tx_slot() }?;
+        let ptr = unsafe { (*queue.header).tx_slot(slot) };
         Some(NetTxToken::Shared(SharedTxToken {
-            header: self.header,
+            header: queue.header,
             slot,
             ptr,
-            pending: self.tx_pending.clone(),
+            pending: queue.tx_pending.clone(),
             released: false,
         }))
     }
 
-    fn slot_ptr(&self, slot: u32) -> Option<*mut u8> {
-        // SAFETY: header is valid; the ABI checks the slot range.
-        Some(unsafe { (*self.header).rx_slot(slot) })
-    }
-
-    fn slot_ptr_tx(&self, slot: u32) -> Option<*mut u8> {
-        // SAFETY: header is valid; the ABI checks the slot range.
-        Some(unsafe { (*self.header).tx_slot(slot) })
+    fn transmit_shared(&mut self) -> Option<NetTxToken> {
+        let count = self.queues.len();
+        if count == 0 {
+            return None;
+        }
+        for offset in 0..count {
+            let index = (self.rr_tx + offset) % count;
+            if let Some(token) = self.transmit_for(index) {
+                self.rr_tx = (index + 1) % count;
+                return Some(token);
+            }
+        }
+        None
     }
 
     pub(crate) fn flush(&mut self) {
-        if self.tx_pending.swap(false, Ordering::AcqRel) {
-            if call::net_kick(self.dev_handle as usize, 0).is_err() {
-                // Keep the flag set so the next poll retries the doorbell.
-                self.tx_pending.store(true, Ordering::Release);
+        for queue in self.queues.iter() {
+            if queue.tx_pending.swap(false, Ordering::AcqRel) {
+                if call::net_kick(self.dev_handle as usize, queue.qid as usize).is_err() {
+                    // Keep the flag set so the next poll retries the doorbell.
+                    queue.tx_pending.store(true, Ordering::Release);
+                }
             }
         }
     }

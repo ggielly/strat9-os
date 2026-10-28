@@ -212,9 +212,11 @@ impl NetworkDevice for KernelE1000Adapter {
     }
 
     fn features(&self) -> u64 {
-        // The legacy e1000 path does not negotiate offloads yet; smoltcp
-        // keeps computing checksums in software.
-        0
+        // RX checksum validation is done by the 8254x (SECRC + IPCS/TCP
+        // status); the driver drops frames with TCPE/IPE set.  TX checksum
+        // stays in software because the legacy descriptor path does not
+        // carry the L4 offset metadata.
+        strat9_abi::net::features::CSUM_RX
     }
 
     fn mtu(&self) -> usize {
@@ -222,7 +224,9 @@ impl NetworkDevice for KernelE1000Adapter {
     }
 
     fn queue_count(&self) -> u16 {
-        1
+        // One hardware ring, two software RSS queues: the IRQ path hashes the
+        // frame and the stack polls both queues.
+        2
     }
 
     fn epoch(&self) -> u32 {

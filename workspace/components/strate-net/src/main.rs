@@ -18,7 +18,10 @@ use core::{alloc::Layout, panic::PanicInfo};
 use smoltcp::{iface::PollResult, socket::tcp, time::Instant};
 use state::NetworkStrate;
 use strat9_abi::net::{NetEvent, NetQueueHeader, NetQueueMap};
-use strate_net::{syscalls::*, IpcMessage, OPCODE_CLOSE, OPCODE_OPEN, OPCODE_READ, OPCODE_WRITE};
+use strate_net::{
+    syscalls::*, IpcMessage, OPCODE_BULK_SETUP, OPCODE_BULK_TEARDOWN, OPCODE_CLOSE, OPCODE_OPEN,
+    OPCODE_READ, OPCODE_WRITE,
+};
 
 alloc_freelist::define_freelist_brk_allocator!(
     pub struct BumpAllocator;
@@ -163,6 +166,8 @@ impl NetworkStrate {
                     OPCODE_READ => self.handle_read(&msg),
                     OPCODE_WRITE => self.handle_write(&msg),
                     OPCODE_CLOSE => self.handle_close(&msg),
+                    OPCODE_BULK_SETUP => self.handle_bulk_setup(&msg),
+                    OPCODE_BULK_TEARDOWN => self.handle_bulk_teardown(&msg),
                     _ => IpcMessage::error_reply(msg.sender, -22),
                 };
                 let _ = call::ipc_reply(&reply);
@@ -283,27 +288,41 @@ pub extern "C" fn _start() -> ! {
         log("[strate-net] NIC registration failed (will poll)\n");
     }
 
-    // Try to map the shared queue region.  On success RX/TX are syscall-free
-    // and copy-free between the kernel and this stack.
+    // Try to map all shared queue regions.  On success RX/TX are syscall-free
+    // and copy-free between the kernel and this stack, and the stack polls
+    // every software RSS queue.
     let device = if dev_handle != 0 {
-        let mut map = NetQueueMap::default();
-        match call::net_queue_map(dev_handle as usize, 0, &mut map) {
-            Ok(_) if map.base != 0 => {
-                let header = map.base as *mut NetQueueHeader;
-                // SAFETY: the kernel returned a writable mapping of a
-                // `NetQueue` region; verify the magic before using it.
-                if unsafe { (*header).is_valid() } {
-                    log("[strate-net] Shared queue mapped (zero-copy data plane)\n");
-                    unsafe { crate::device::NetDevice::shared(dev_handle, header, mac) }
-                } else {
-                    log("[strate-net] Invalid shared queue magic, using copy path\n");
-                    crate::device::NetDevice::legacy()
-                }
+        let mut queue_count: u32 = 0;
+        let _ = call::net_info(4, &mut queue_count as *mut u32 as usize);
+        let count = core::cmp::min(queue_count, 8) as usize;
+        let mut queues = alloc::vec::Vec::with_capacity(count);
+        for qid in 0..count {
+            let mut map = NetQueueMap::default();
+            if call::net_queue_map(dev_handle as usize, qid, &mut map).is_err() || map.base == 0 {
+                break;
             }
-            _ => {
-                log("[strate-net] Queue map failed, using copy path\n");
-                crate::device::NetDevice::legacy()
+            let header = map.base as *mut NetQueueHeader;
+            // SAFETY: the kernel returned a writable mapping; verify magic.
+            if !unsafe { (*header).is_valid() } {
+                break;
             }
+            queues.push(crate::device::SharedQueue {
+                qid: qid as u16,
+                header,
+                tx_pending: alloc::sync::Arc::new(core::sync::atomic::AtomicBool::new(false)),
+            });
+        }
+        if queues.is_empty() {
+            log("[strate-net] Queue map failed, using copy path\n");
+            crate::device::NetDevice::legacy()
+        } else {
+            log("[strate-net] Shared queues mapped (zero-copy, multi-queue)\n");
+            let features = unsafe {
+                (*queues[0].header)
+                    .features
+                    .load(core::sync::atomic::Ordering::Acquire)
+            };
+            unsafe { crate::device::NetDevice::shared(dev_handle, queues, mac, features) }
         }
     } else {
         crate::device::NetDevice::legacy()

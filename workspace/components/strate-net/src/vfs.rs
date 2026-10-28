@@ -7,14 +7,15 @@ use smoltcp::{
     wire::{IpAddress, IpEndpoint, Ipv4Address},
 };
 use strat9_syscall::data::IPC_FILE_FLAG_DIRECTORY;
+use strat9_abi::ipc_payload::parse_bulk_setup;
 use strate_net::IpcMessage;
 
 use crate::{
     ip::{parse_ip, parse_ip_cidr, parse_ipv4, parse_ipv4_cidr, parse_ipv6, parse_ipv6_cidr},
     ipc::{
-        message_file_id, open_path, read_request, reply_ok, reply_open, reply_read, reply_write,
-        reply_write_data_len, write_data, HANDLE_FLAG_CONTROL, HANDLE_FLAG_DATAGRAM,
-        HANDLE_FLAG_INFO, HANDLE_FLAG_STREAM,
+        message_file_id, open_path, read_request, reply_ok, reply_open, reply_read,
+        reply_read_count, reply_write, reply_write_data_len, write_data, HANDLE_FLAG_CONTROL,
+        HANDLE_FLAG_DATAGRAM, HANDLE_FLAG_INFO, HANDLE_FLAG_STREAM,
     },
     state::{
         NetworkStrate, OpenedFile, TcpConnState, TcpListenerState, UdpBoundState, UdpConnState,
@@ -297,6 +298,12 @@ impl NetworkStrate {
             return IpcMessage::error_reply(msg.sender, -9); // EBADF
         }
 
+        if requested > IpcMessage::READ_INLINE_CAPACITY {
+            if let Some(reply) = self.bulk_read_tcp(msg.sender, file_id, requested) {
+                return reply;
+            }
+        }
+
         if let Some(listener) = self.tcp_listeners.get(&file_id).copied() {
             return self.handle_tcp_read(msg.sender, listener, requested);
         }
@@ -363,6 +370,13 @@ impl NetworkStrate {
         // Ownership check: fids are sequential and guessable.
         if !self.is_owner(file_id, msg.sender) {
             return IpcMessage::error_reply(msg.sender, -9); // EBADF
+        }
+
+        let data_len = u16::from_le_bytes([msg.payload[16], msg.payload[17]]) as usize;
+        if data_len > IpcMessage::WRITE_INLINE_CAPACITY {
+            if let Some(reply) = self.bulk_write_tcp(msg.sender, file_id, data_len) {
+                return reply;
+            }
         }
 
         if let Some(listener) = self.tcp_listeners.get(&file_id).copied() {
@@ -618,6 +632,92 @@ impl NetworkStrate {
         }
 
         IpcMessage::error_reply(msg.sender, -1)
+    }
+
+    pub(crate) fn handle_bulk_setup(&mut self, msg: &IpcMessage) -> IpcMessage {
+        let Some((ino, base, len)) = parse_bulk_setup(&msg.payload) else {
+            return IpcMessage::error_reply(msg.sender, -22);
+        };
+        if !self.is_owner(ino, msg.sender) {
+            return IpcMessage::error_reply(msg.sender, -9);
+        }
+        match self.open_handles.get_mut(&ino) {
+            Some(handle) => {
+                handle.bulk_base = base;
+                handle.bulk_len = len as usize;
+                reply_ok(msg.sender)
+            }
+            None => IpcMessage::error_reply(msg.sender, -9),
+        }
+    }
+
+    pub(crate) fn handle_bulk_teardown(&mut self, msg: &IpcMessage) -> IpcMessage {
+        let ino = message_file_id(msg);
+        if !self.is_owner(ino, msg.sender) {
+            return IpcMessage::error_reply(msg.sender, -9);
+        }
+        if let Some(handle) = self.open_handles.get_mut(&ino) {
+            handle.bulk_base = 0;
+            handle.bulk_len = 0;
+        }
+        reply_ok(msg.sender)
+    }
+
+    fn bulk_region(&self, file_id: u64) -> Option<(usize, usize)> {
+        let handle = self.open_handles.get(&file_id)?;
+        if handle.bulk_base == 0 || handle.bulk_len == 0 {
+            return None;
+        }
+        Some((handle.bulk_base as usize, handle.bulk_len))
+    }
+
+    fn bulk_read_tcp(
+        &mut self,
+        sender: u64,
+        file_id: u64,
+        requested: usize,
+    ) -> Option<IpcMessage> {
+        let (base, len) = self.bulk_region(file_id)?;
+        let socket = if let Some(listener) = self.tcp_listeners.get(&file_id).copied() {
+            listener.socket
+        } else if let Some(conn) = self.tcp_connections.get(&file_id).copied() {
+            conn.socket
+        } else {
+            return None;
+        };
+        let want = requested.min(len);
+        let socket = self.sockets.get_mut::<tcp::Socket>(socket);
+        if !socket.is_open() || (!socket.is_listening() && !socket.is_active()) {
+            return Some(IpcMessage::error_reply(sender, -104));
+        }
+        if !socket.can_recv() {
+            return Some(IpcMessage::error_reply(sender, -11));
+        }
+        // SAFETY: the kernel mapped `len` writable bytes at `base` in this
+        // address space and the fid ownership check passed.
+        let slice = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, want) };
+        match socket.recv_slice(slice) {
+            Ok(n) => Some(reply_read_count(sender, n)),
+            Err(_) => Some(IpcMessage::error_reply(sender, -5)),
+        }
+    }
+
+    fn bulk_write_tcp(&mut self, sender: u64, file_id: u64, data_len: usize) -> Option<IpcMessage> {
+        let (base, len) = self.bulk_region(file_id)?;
+        if data_len == 0 || data_len > len {
+            return Some(IpcMessage::error_reply(sender, -22));
+        }
+        let conn = self.tcp_connections.get(&file_id).copied()?;
+        let socket = self.sockets.get_mut::<tcp::Socket>(conn.socket);
+        if !socket.is_open() || !socket.can_send() {
+            return Some(IpcMessage::error_reply(sender, -11));
+        }
+        // SAFETY: same contract as `bulk_read_tcp`.
+        let slice = unsafe { core::slice::from_raw_parts(base as *const u8, data_len) };
+        match socket.send_slice(slice) {
+            Ok(n) => Some(reply_write(sender, n)),
+            Err(_) => Some(IpcMessage::error_reply(sender, -11)),
+        }
     }
 
     pub(crate) fn handle_close(&mut self, msg: &IpcMessage) -> IpcMessage {

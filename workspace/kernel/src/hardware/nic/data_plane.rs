@@ -16,26 +16,49 @@ use strat9_abi::net::{NetFrameDesc, NET_FRAME_SIZE};
 
 use super::net_queue::NetQueue;
 
+/// One device's queue range in the flat `queues` vector.
+#[derive(Debug, Clone, Copy)]
+pub struct DeviceQueues {
+    pub resource: u64,
+    pub first: usize,
+    pub count: usize,
+}
+
 /// A set of queues for the registered NICs.
 ///
-/// Historically each device had one RX/TX ring pair; the index in `queues`
-/// is the device/queue index used by the legacy syscalls.
+/// Each device owns `queue_count` queues (software RSS queues today, hardware
+/// queues when the driver exposes them).  `queues` stays a flat vector so the
+/// legacy syscalls can keep using a small integer index, while `devices` maps
+/// a `Nic` capability resource to its queue range.
 pub struct NicDataPlane {
     pub queues: Vec<Arc<NetQueue>>,
+    pub devices: Vec<DeviceQueues>,
 }
 
 impl NicDataPlane {
-    /// Create one queue per device.
-    pub fn new(queue_count: usize) -> Result<Self, &'static str> {
-        if queue_count == 0 {
+    /// Create `count` queues for each `(device_resource, count)` entry.
+    pub fn new(devices: &[(u64, u16)]) -> Result<Self, &'static str> {
+        if devices.is_empty() {
             return Err("no network queue requested");
         }
-        let mut queues = Vec::with_capacity(queue_count);
-        for index in 0..queue_count {
-            let queue = NetQueue::new(index as u64, 0, 0, 1500, 1)?;
-            queues.push(queue);
+        let mut queues = Vec::new();
+        let mut ranges = Vec::with_capacity(devices.len());
+        for (resource, count) in devices {
+            let first = queues.len();
+            let count = (*count).max(1);
+            for qid in 0..count {
+                queues.push(NetQueue::new(*resource, qid, 0, 1500, 1)?);
+            }
+            ranges.push(DeviceQueues {
+                resource: *resource,
+                first,
+                count: count as usize,
+            });
         }
-        Ok(Self { queues })
+        Ok(Self {
+            queues,
+            devices: ranges,
+        })
     }
 
     #[inline]
@@ -48,6 +71,24 @@ impl NicDataPlane {
         self.queues.get(index).cloned()
     }
 
+    /// Resolve `(device resource, queue id)` to a queue.
+    pub fn queue_for(&self, resource: u64, qid: u16) -> Option<Arc<NetQueue>> {
+        let range = self.devices.iter().find(|d| d.resource == resource)?;
+        if (qid as usize) >= range.count {
+            return None;
+        }
+        self.queues.get(range.first + qid as usize).cloned()
+    }
+
+    /// Number of queues exposed by a device.
+    pub fn queue_count_for(&self, resource: u64) -> u16 {
+        self.devices
+            .iter()
+            .find(|d| d.resource == resource)
+            .map(|d| d.count as u16)
+            .unwrap_or(0)
+    }
+
     #[inline]
     pub fn queue_count(&self) -> usize {
         self.queues.len()
@@ -57,6 +98,54 @@ impl NicDataPlane {
     pub fn configure(&self, index: usize, feature_mask: u64, mtu: u32) {
         if let Some(queue) = self.queue(index) {
             queue.configure(feature_mask, mtu);
+        }
+    }
+
+    /// Apply features/MTU to every queue of a device.
+    pub fn configure_device(&self, resource: u64, feature_mask: u64, mtu: u32) {
+        if let Some(range) = self.devices.iter().find(|d| d.resource == resource) {
+            for index in range.first..range.first + range.count {
+                if let Some(queue) = self.queue(index) {
+                    queue.configure(feature_mask, mtu);
+                }
+            }
+        }
+    }
+
+    pub fn push_rx_for(&self, resource: u64, qid: u16, data: &[u8]) -> bool {
+        self.queue_for(resource, qid)
+            .map(|queue| queue.push_rx(data))
+            .unwrap_or(false)
+    }
+
+    pub fn pop_rx_for(
+        &self,
+        resource: u64,
+        qid: u16,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>, RxError> {
+        let queue = self.queue_for(resource, qid).ok_or(RxError::InvalidQueue)?;
+        self.pop_rx_queue(&queue, buf)
+    }
+
+    pub fn push_tx_for(&self, resource: u64, qid: u16, data: &[u8]) -> Result<(), TxError> {
+        let queue = self.queue_for(resource, qid).ok_or(TxError::InvalidQueue)?;
+        self.push_tx_queue(&queue, data)
+    }
+
+    pub fn pop_tx_for(
+        &self,
+        resource: u64,
+        qid: u16,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>, TxError> {
+        let queue = self.queue_for(resource, qid).ok_or(TxError::InvalidQueue)?;
+        self.pop_tx_queue(&queue, buf)
+    }
+
+    pub fn set_link_for(&self, resource: u64, qid: u16, up: bool, speed_mbps: u32) {
+        if let Some(queue) = self.queue_for(resource, qid) {
+            queue.set_link(up, speed_mbps);
         }
     }
 
@@ -77,6 +166,10 @@ impl NicDataPlane {
     /// returned; this is the non-destructive read contract.
     pub fn pop_rx(&self, index: usize, buf: &mut [u8]) -> Result<Option<usize>, RxError> {
         let queue = self.queue(index).ok_or(RxError::InvalidQueue)?;
+        self.pop_rx_queue(&queue, buf)
+    }
+
+    fn pop_rx_queue(&self, queue: &Arc<NetQueue>, buf: &mut [u8]) -> Result<Option<usize>, RxError> {
         let Some(desc) = queue.pop_rx() else {
             return Ok(None);
         };
@@ -104,10 +197,14 @@ impl NicDataPlane {
     /// Queue one TX frame.  Copies into a slot; `kick()` must be called to
     /// notify the device (the legacy syscall does it inline).
     pub fn push_tx(&self, index: usize, data: &[u8]) -> Result<(), TxError> {
+        let queue = self.queue(index).ok_or(TxError::InvalidQueue)?;
+        self.push_tx_queue(&queue, data)
+    }
+
+    fn push_tx_queue(&self, queue: &Arc<NetQueue>, data: &[u8]) -> Result<(), TxError> {
         if data.len() > NET_FRAME_SIZE {
             return Err(TxError::TooLarge);
         }
-        let queue = self.queue(index).ok_or(TxError::InvalidQueue)?;
         let (slot, dst) = queue.alloc_tx().ok_or(TxError::QueueFull)?;
         // SAFETY: the slot is owned by us until published.
         unsafe {
@@ -133,6 +230,10 @@ impl NicDataPlane {
     /// can be reused as soon as the copy completes.
     pub fn pop_tx(&self, index: usize, buf: &mut [u8]) -> Result<Option<usize>, TxError> {
         let queue = self.queue(index).ok_or(TxError::InvalidQueue)?;
+        self.pop_tx_queue(&queue, buf)
+    }
+
+    fn pop_tx_queue(&self, queue: &Arc<NetQueue>, buf: &mut [u8]) -> Result<Option<usize>, TxError> {
         let Some(desc) = queue.pop_tx() else {
             return Ok(None);
         };

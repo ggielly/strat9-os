@@ -85,6 +85,9 @@ fn next_index_for(prefix: &str) -> usize {
 /// IRQ line of the first registered NIC.  Written once by the NIC driver's
 /// `init()`; read by `nic_handler` in the IDT to send EOI.
 pub static NIC_IRQ_LINE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0xFF);
+/// Resource id of the default device, used by the IRQ path to resolve queues.
+pub static NIC_RESOURCE: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 /// Global reference to the first NIC device, used by `nic_handler` to call
 /// `handle_interrupt()`.  Set via `set_nic_device()` after PCI probe.
@@ -101,6 +104,7 @@ static NIC_DEVICE: spin::Mutex<Option<Arc<dyn NetworkDevice>>> = spin::Mutex::ne
 /// initialisation.
 pub fn set_nic_device(dev: Arc<dyn NetworkDevice>, irq: u8) {
     NIC_IRQ_LINE.store(irq, core::sync::atomic::Ordering::Relaxed);
+    NIC_RESOURCE.store(device_resource_id(&dev), core::sync::atomic::Ordering::Release);
     *NIC_DEVICE.lock() = Some(dev);
     log::info!("NIC dispatch set for IRQ {}", irq);
 }
@@ -124,6 +128,17 @@ static STRATE_NET_TID: core::sync::atomic::AtomicU64 = core::sync::atomic::Atomi
 pub fn register_strate_net_tid(tid: u64) {
     STRATE_NET_TID.store(tid, core::sync::atomic::Ordering::Relaxed);
     log::info!("NIC: strate-net task {} registered for IRQ wakeup", tid);
+}
+
+/// FNV-1a hash over the L3/L4 bytes, used for software RSS steering.
+fn frame_hash(frame: &[u8]) -> u32 {
+    let start = core::cmp::min(frame.len(), 14);
+    let mut hash = 0x811c_9dc5u32;
+    for byte in &frame[start..] {
+        hash ^= *byte as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
 }
 
 /// Called from `idt.rs:nic_handler`.  Dispatches to the registered NIC's
@@ -153,35 +168,50 @@ pub fn handle_interrupt() {
         dev.link_up(),
         dev.epoch(),
     );
-    // Phase 2: bounded RX drain into the shared queue.  No allocation:
-    // `push_rx` copies into a preallocated slot.  Only the per-queue Arc is
-    // cloned; the global registry lock is not held while touching the device.
-    let queue = {
+    let resource = NIC_RESOURCE.load(core::sync::atomic::Ordering::Acquire) as u64;
+    let queue_count = {
         let guard = NIC_DATA_PLANE.lock();
-        guard.as_ref().and_then(|dp| dp.clone_queue(0))
+        guard
+            .as_ref()
+            .map(|dp| dp.queue_count_for(resource))
+            .unwrap_or(0)
     };
-    if let Some(queue) = queue {
-        queue.set_link(dev.link_up(), 0);
-        let mut buf = [0u8; 2048];
-        let mut budget = 64usize;
-        let mut rx_count = 0usize;
-        while budget > 0 {
-            budget -= 1;
-            match dev.receive(&mut buf) {
-                Ok(n) if n > 0 => {
-                    if !queue.push_rx(&buf[..n]) {
-                        break;
-                    }
-                    rx_count += 1;
-                }
-                _ => break,
-            }
-        }
+    if queue_count == 0 {
+        return;
+    }
 
-        if rx_count > 0 {
-            queue.event.notify();
+    let mut buf = [0u8; 2048];
+    let mut budget = 64usize;
+    let mut rx_count = 0usize;
+    while budget > 0 {
+        budget -= 1;
+        match dev.receive(&mut buf) {
+            Ok(n) if n > 0 => {
+                let qid = (frame_hash(&buf[..n]) % queue_count as u32) as u16;
+                let pushed = {
+                    let guard = NIC_DATA_PLANE.lock();
+                    guard
+                        .as_ref()
+                        .map(|dp| dp.push_rx_for(resource, qid, &buf[..n]))
+                        .unwrap_or(false)
+                };
+                if !pushed {
+                    break;
+                }
+                if let Some(queue) = {
+                    let guard = NIC_DATA_PLANE.lock();
+                    guard.as_ref().and_then(|dp| dp.queue_for(resource, qid))
+                } {
+                    queue.set_link(dev.link_up(), 0);
+                    queue.event.notify();
+                }
+                rx_count += 1;
+            }
+            _ => break,
         }
     }
+
+    let _ = rx_count;
 
     let tid_u64 = STRATE_NET_TID.load(core::sync::atomic::Ordering::Relaxed);
     if tid_u64 != 0 {
@@ -194,12 +224,56 @@ pub fn handle_interrupt() {
 /// Called from `SYS_NET_SEND` after publishing a frame, so a transmit never
 /// depends on an unrelated RX interrupt.  Returns the number of frames
 /// handed to the device.
+pub fn flush_tx_for(resource: u64, qid: u16) -> usize {
+    let dev = match get_device_by_resource(resource as usize).or_else(get_default_device) {
+        Some(dev) => dev,
+        None => return 0,
+    };
+
+    let mut sent = 0usize;
+    let mut buf = [0u8; 2048];
+    loop {
+        let next = {
+            let guard = NIC_DATA_PLANE.lock();
+            match guard.as_ref() {
+                Some(dp) => dp.pop_tx_for(resource, qid, &mut buf),
+                None => break,
+            }
+        };
+        match next {
+            Ok(Some(n)) => {
+                if dev.transmit(&buf[..n]).is_err() {
+                    break;
+                }
+                sent += 1;
+            }
+            _ => break,
+        }
+    }
+    sent
+}
+
+/// Default device resource id (0 when no NIC).
+pub fn default_resource() -> u64 {
+    NIC_RESOURCE.load(core::sync::atomic::Ordering::Acquire) as u64
+}
+
+/// Default device queue count.
+pub fn default_queue_count() -> u16 {
+    let resource = default_resource();
+    NIC_DATA_PLANE
+        .lock()
+        .as_ref()
+        .map(|dp| dp.queue_count_for(resource))
+        .unwrap_or(0)
+}
+
+/// Legacy flat-index flush (used by `SYS_NET_SEND`).
 pub fn flush_tx(queue_index: usize) -> usize {
     let dev = match get_default_device() {
         Some(dev) => dev,
         None => return 0,
     };
-
     let mut sent = 0usize;
     let mut buf = [0u8; 2048];
     loop {
@@ -397,6 +471,8 @@ pub fn init() {
     }
     // Initialise the N2 data plane if any NIC was registered.
     init_data_plane();
+    // Portable hotplug source: a 500 ms PCI scan in a kernel thread.
+    hotplug::start_watchdog();
 }
 
 // ── N2 data-plane global instance ─────────────────────────────────────────
@@ -409,25 +485,35 @@ static NIC_DATA_PLANE: Mutex<Option<NicDataPlane>> = Mutex::new(None);
 
 /// Initialise the data plane with one shared queue per registered device.
 fn init_data_plane() {
-    let count = NET_DEVICES.read().len();
-    if count == 0 {
+    let devices: Vec<(u64, u16)> = NET_DEVICES
+        .read()
+        .iter()
+        .map(|entry| {
+            (
+                device_resource_id(&entry.device) as u64,
+                entry.device.queue_count().max(1),
+            )
+        })
+        .collect();
+    if devices.is_empty() {
         log::debug!("[net] No NIC devices found : skipping data plane init");
         return;
     }
-    match NicDataPlane::new(count) {
+    match NicDataPlane::new(&devices) {
         Ok(dp) => {
             {
-                let devices = NET_DEVICES.read();
-                for (index, entry) in devices.iter().enumerate() {
-                    dp.configure(
-                        index,
+                let entries = NET_DEVICES.read();
+                for entry in entries.iter() {
+                    let resource = device_resource_id(&entry.device) as u64;
+                    dp.configure_device(
+                        resource,
                         entry.device.features(),
                         entry.device.mtu() as u32,
                     );
                 }
             }
             *NIC_DATA_PLANE.lock() = Some(dp);
-            log::info!("[net] data plane initialised with {} queue(s)", count);
+            log::info!("[net] data plane initialised with {} queue(s)", devices.len());
         }
         Err(e) => {
             log::warn!("[net] Failed to initialise data plane: {}", e);

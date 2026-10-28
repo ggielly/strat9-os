@@ -31,6 +31,8 @@ pub mod file;
 pub mod input_scheme;
 pub mod ipcfs;
 pub mod mount;
+pub mod bulk;
+pub use bulk::BulkHandle;
 pub mod pipe;
 pub mod procfs;
 pub mod pty_scheme;
