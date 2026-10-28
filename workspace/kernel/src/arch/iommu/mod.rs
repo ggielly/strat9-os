@@ -67,6 +67,17 @@ impl Discovery {
     }
 }
 
+/// One MSI message allocated through interrupt remapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsiAllocation {
+    /// Opaque cookie for [`Backend::free_msi`] (0 is invalid).
+    pub cookie: u32,
+    /// Message address the device must write to.
+    pub address: u64,
+    /// Message data (0 when delivered through an IRTE doorbell).
+    pub data: u32,
+}
+
 /// A hardware translation backend.
 pub trait Backend: Send + Sync {
     /// Stable backend name (`"vt-d"`, `"amd-vi"`, `"none"`).
@@ -115,6 +126,20 @@ pub trait Backend: Send + Sync {
     /// True when interrupt remapping is actually programmed and usable.
     fn interrupt_remapping_active(&self) -> bool {
         false
+    }
+
+    /// Allocate an IRTE and return the MSI message to program.
+    fn allocate_msi(
+        &self,
+        _sbdf: Sbdf,
+        _vector: u8,
+    ) -> Result<MsiAllocation, IommuError> {
+        Err(IommuError::Unsupported)
+    }
+
+    /// Release an IRTE previously returned by [`Backend::allocate_msi`].
+    fn free_msi(&self, _cookie: u32) -> Result<(), IommuError> {
+        Err(IommuError::Unsupported)
     }
 }
 
@@ -224,4 +249,14 @@ pub fn unmap_domain(
 /// True when MSI interrupt remapping is active (not merely advertised).
 pub fn interrupt_remapping_active() -> bool {
     backend().interrupt_remapping_active()
+}
+
+/// Allocate an MSI message through interrupt remapping.
+pub fn allocate_msi(sbdf: Sbdf, vector: u8) -> Result<MsiAllocation, IommuError> {
+    backend().allocate_msi(sbdf, vector)
+}
+
+/// Release an IRTE cookie.
+pub fn free_msi(cookie: u32) -> Result<(), IommuError> {
+    backend().free_msi(cookie)
 }

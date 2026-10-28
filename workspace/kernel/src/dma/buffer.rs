@@ -121,6 +121,18 @@ impl DmaBuffer {
         Ok(buffer)
     }
 
+    /// Allocate a constrained buffer and map it into `domain`.
+    pub fn alloc_constrained_in(
+        domain: Arc<Domain>,
+        bytes: usize,
+        constraint: DmaConstraint,
+        prot: DmaProt,
+    ) -> Result<Self, DmaError> {
+        let mut buffer = Self::alloc_constrained(bytes, constraint)?;
+        buffer.map_to(domain, prot)?;
+        Ok(buffer)
+    }
+
     /// Map this buffer into `domain` and return the IOVA the device must use.
     ///
     /// Fails if the buffer is already attached to a domain.

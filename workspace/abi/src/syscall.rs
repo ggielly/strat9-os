@@ -1017,6 +1017,18 @@ pub const SYS_IOMMU_GROUPS: usize = 453;
 /// - `max_entries`: capacity of the array
 pub const SYS_IOMMU_RESERVED: usize = 454;
 
+/// Allocate an IRTE and return the MSI message to program.
+///
+/// - `sbdf`: packed segment/bus/device/function
+/// - `vector`: IDT vector
+/// - `out_ptr`: pointer to a writable [`strat9_abi::iommu::IommuMsi`]
+///
+/// Requires interrupt remapping to be active; returns `-ENOTSUP` otherwise.
+pub const SYS_PCI_MSI_ALLOC: usize = 455;
+
+/// Free an IRTE previously allocated with `SYS_PCI_MSI_ALLOC`.
+pub const SYS_PCI_MSI_FREE: usize = 456;
+
 /// Check file accessibility using the real user/group IDs.
 ///
 /// - `path_ptr`: pointer to the path string

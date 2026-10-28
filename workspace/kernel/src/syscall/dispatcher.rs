@@ -317,6 +317,8 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_IOMMU_STATS => iommu::sys_iommu_stats(arg1),
         SYS_IOMMU_GROUPS => iommu::sys_iommu_groups(arg1, arg2),
         SYS_IOMMU_RESERVED => iommu::sys_iommu_reserved(arg1, arg2),
+        SYS_PCI_MSI_ALLOC => iommu::sys_pci_msi_alloc(arg1, arg2, arg3),
+        SYS_PCI_MSI_FREE => iommu::sys_pci_msi_free(arg1),
 
         // Storage syscalls (600-699) ========================================
         SYS_VOLUME_READ => volume::sys_volume_read(arg1, arg2, arg3, arg4),

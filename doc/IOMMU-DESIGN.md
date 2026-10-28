@@ -83,6 +83,8 @@ to `/srv/iommu` through the normal VFS rules.
 | 452 | `SYS_IOMMU_STATS` | global counters |
 | 453 | `SYS_IOMMU_GROUPS` | coarse DRHD groups |
 | 454 | `SYS_IOMMU_RESERVED` | RMRR/IVMD list |
+| 455 | `SYS_PCI_MSI_ALLOC` | IRTE + MSI doorbell (needs active IR) |
+| 456 | `SYS_PCI_MSI_FREE` | release an IRTE |
 
 All calls are gated to `SYS`/`DRV` strate families and to the capability
 `DmaRights`.
@@ -94,29 +96,35 @@ The backend builds, in kernel memory:
 * a 4 KiB root table (256 entries, 16 bytes each);
 * one 4 KiB context table per bus, allocated lazily;
 * one four-level second-level page-table tree per domain;
-* 4 KiB, 2 MiB and 1 GiB leaf entries (PS bit at level 2/3).
+* 4 KiB, 2 MiB and 1 GiB leaf entries (PS bit at level 2/3);
+* a 4 KiB queued-invalidation ring (256 descriptors) + WAIT status page;
+* a 4 KiB interrupt-remapping table (256 IRTEs).
 
-`CAP`/`ECAP` are read for every DRHD at boot. Activation (`RTADDR`, `GCMD.TE`,
-context/IOTLB invalidation) is implemented but gated by
-`HARDWARE_ACTIVATION_ENABLED = false` until the path is validated under QEMU
-`intel-iommu`. Consequences:
+Context entries use the legacy format: `TT = 00` (second-level
+translation), AGAW in bits 6:4 and the domain id in the high qword bits
+23:8.  Invalidation uses QI descriptor types 1 (context), 2 (IOTLB), 4
+(IRTE) and 5 (WAIT), then polls the WAIT status word.  IR allocation writes
+an extended IRTE (`P | SID | SQ | SVT=01 | vector | destination`) and
+returns the doorbell address `0xFEE00018 | (index << 5)` with `data = 0`.
+
+Activation (`RTADDR`, `GCMD.QI/SRTP/SIRTP/IRE/TE`, invalidation) is
+implemented but gated by `HARDWARE_ACTIVATION_ENABLED = false` until the
+path is validated under QEMU `intel-iommu`. Consequences:
 
 * `Backend::is_ready()` is false on real hardware;
 * `SYS_IOMMU_ACTIVATE` returns 0;
+* `SYS_PCI_MSI_ALLOC/FREE` return `ENOTSUP` until IR is active;
 * MSI/MSI-X keep the physical path and refuse APIC IDs > 255;
 * the shadow tables still give an exact, inspectable model of what would be
   programmed.
 
 Known P2 limits:
 
-* queued invalidation (`CAP.CM = 1`) is not implemented; activation refuses
-  such units;
-* interrupt remapping is advertised but not programmed (`IRTA` missing);
 * ATS/PASID/SR-IOV are not implemented;
+* scalable mode is not implemented (legacy tables only);
 * IOMMU groups are coarse (DRHD + bus), not a full ACS analysis;
-* `SYS_PCI_BAR_MAP`, `SYS_PCI_MSI_ALLOC` and `SYS_PCI_MSI_FREE` are not
-  wired yet: kernel drivers still program MSI, and MSI-X/BAR mapping for
-  userspace drivers is the next milestone after IR;
+* `SYS_PCI_BAR_MAP` is not wired yet: mapping a device BAR into a user
+  address space needs the PCI device-capability milestone;
 * DMAR fault *interrupts* are not routed to an IRQ; `FaultRecord`s currently
   come from the backend and from `inject_fault`.
 
@@ -134,10 +142,10 @@ requests over IPC:
 | `0x14` | IOMMU groups |
 | `0x15` | attempt activation |
 
-It is deliberately **not** started by the current initfs: enabling it is a
-one-line addition to `strate-init` once an initfs task copies
-`strate-iommu-silo`. Domains and buffers survive a restart because the
-kernel owns them.
+It is started by `strate-init` from `workspace/assets/boot/silo.toml`
+(SYS family, mode `716`) and copied into the initfs image by
+`tools/uefi-modules.manifest`.  Domains and buffers survive a restart
+because the kernel owns them.
 
 ## 8. Hotplug / lifecycle
 
@@ -147,7 +155,14 @@ kernel owns them.
 * `Drop for DmaBuffer` unmaps before returning frames to the buddy allocator,
   so a stale translation never points at recycled memory.
 
-## 9. Validation
+## 9. Bounce buffers
+
+`dma::DmaBounce` keeps a staging buffer inside a device's DMA window and
+copies across the boundary (`load`/`store`).  It uses
+`DmaBuffer::alloc_constrained` (or `alloc_constrained_in` for a domain), so
+the staging memory is pinned and IOMMU-mapped like any other DMA buffer.
+
+## 10. Validation
 
 * `cargo check -p strat9-kernel --target x86_64-unknown-none`
 * `cargo test -p strat9-abi`

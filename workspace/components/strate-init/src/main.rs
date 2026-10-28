@@ -148,6 +148,11 @@ struct SiloDef {
     graphics_max_sessions: u16,
     graphics_session_ttl_sec: u32,
     graphics_turn_policy: String,
+    dma_max_domains: u32,
+    dma_max_bytes: u64,
+    dma_iova_base: u64,
+    dma_iova_limit: u64,
+    dma_fault_policy: u8,
     strates: Vec<StrateDef>,
 }
 
@@ -195,6 +200,11 @@ fn parse_config(data: &str) -> Vec<SiloDef> {
                 graphics_max_sessions: 0,
                 graphics_session_ttl_sec: 0,
                 graphics_turn_policy: String::from("auto"),
+                dma_max_domains: 0,
+                dma_max_bytes: 0,
+                dma_iova_base: 0,
+                dma_iova_limit: 0,
+                dma_fault_policy: 0,
                 strates: Vec::new(),
             });
             section = Section::Silo;
@@ -228,6 +238,19 @@ fn parse_config(data: &str) -> Vec<SiloDef> {
                             s.graphics_session_ttl_sec = val.parse().unwrap_or(0)
                         }
                         "graphics_turn_policy" => s.graphics_turn_policy = String::from(val),
+                        "dma_max_domains" => s.dma_max_domains = val.parse().unwrap_or(0),
+                        "dma_max_bytes" => s.dma_max_bytes = parse_u64_auto(val).unwrap_or(0),
+                        "dma_iova_base" => s.dma_iova_base = parse_u64_auto(val).unwrap_or(0),
+                        "dma_iova_limit" => s.dma_iova_limit = parse_u64_auto(val).unwrap_or(0),
+                        "dma_fault_policy" => {
+                            s.dma_fault_policy = match val {
+                                "log" => 0,
+                                "notify" => 1,
+                                "kill" => 2,
+                                "panic" => 3,
+                                _ => val.parse().unwrap_or(0),
+                            }
+                        }
                         _ => {}
                     },
                     Section::Strate => {
@@ -283,6 +306,11 @@ fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
             graphics_max_sessions: 0,
             graphics_session_ttl_sec: 0,
             graphics_turn_policy: String::from("auto"),
+            dma_max_domains: 0,
+            dma_max_bytes: 0,
+            dma_iova_base: 0,
+            dma_iova_limit: 0,
+            dma_fault_policy: 0,
             strates: alloc::vec![StrateDef {
                 name: String::from("strate-bus"),
                 binary: String::from("/initfs/strate-bus"),
@@ -306,6 +334,11 @@ fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
             graphics_max_sessions: 0,
             graphics_session_ttl_sec: 0,
             graphics_turn_policy: String::from("auto"),
+            dma_max_domains: 0,
+            dma_max_bytes: 0,
+            dma_iova_base: 0,
+            dma_iova_limit: 0,
+            dma_fault_policy: 0,
             strates: alloc::vec![StrateDef {
                 name: String::from("strate-net"),
                 binary: String::from("/initfs/strate-net-silo"),
@@ -329,6 +362,11 @@ fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
             graphics_max_sessions: 0,
             graphics_session_ttl_sec: 0,
             graphics_turn_policy: String::from("auto"),
+            dma_max_domains: 0,
+            dma_max_bytes: 0,
+            dma_iova_base: 0,
+            dma_iova_limit: 0,
+            dma_fault_policy: 0,
             strates: alloc::vec![StrateDef {
                 name: String::from("dhcp-client"),
                 binary: String::from("/initfs/dhcp-client"),
@@ -473,6 +511,15 @@ fn parse_mode_octal(s: &str) -> Option<u16> {
 
 fn parse_toml_bool(s: &str) -> bool {
     matches!(s, "true" | "True" | "TRUE" | "1" | "yes" | "on")
+}
+
+/// Parse a decimal or `0x`-prefixed hexadecimal u64.
+fn parse_u64_auto(s: &str) -> Option<u64> {
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).ok()
+    } else {
+        s.parse().ok()
+    }
 }
 
 /// Implements ipc call status.
@@ -622,6 +669,11 @@ fn boot_silos(mut silos: Vec<SiloDef>) {
         } else {
             0
         };
+        config.dma_max_domains = s_def.dma_max_domains;
+        config.dma_max_bytes = s_def.dma_max_bytes;
+        config.dma_iova_base = s_def.dma_iova_base;
+        config.dma_iova_limit = s_def.dma_iova_limit;
+        config.dma_fault_policy = s_def.dma_fault_policy;
 
         let silo_handle = match call::silo_create((&config as *const SiloConfig) as usize) {
             Ok(h) => h,

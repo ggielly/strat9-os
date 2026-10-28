@@ -339,9 +339,12 @@ pub extern "C" fn _start() -> ! {
 
     if let Err(err) = call::ipc_bind_port(port as usize, b"/srv/iommu") {
         log_errno("[strate-iommu] bind /srv/iommu: ", err);
-        call::exit(2);
+        // Do not exit: a supervisor restart loop would only repeat the same
+        // failure.  Keep the port alive for diagnostics.
+        log("[strate-iommu] running without /srv/iommu binding\n");
+    } else {
+        log("[strate-iommu] bound /srv/iommu\n");
     }
-    log("[strate-iommu] bound /srv/iommu\n");
 
     report_startup();
 
