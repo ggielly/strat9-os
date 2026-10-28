@@ -10,3 +10,5 @@ pub const OPCODE_OPEN: u32 = 0x01;
 pub const OPCODE_READ: u32 = 0x02;
 pub const OPCODE_WRITE: u32 = 0x03;
 pub const OPCODE_CLOSE: u32 = 0x04;
+pub const OPCODE_BULK_SETUP: u32 = 0x09;
+pub const OPCODE_BULK_TEARDOWN: u32 = 0x0A;

@@ -8,6 +8,7 @@ use crate::{
     memory::{UserSliceRead, UserSliceWrite},
     sync::SpinLock,
     syscall::error::SyscallError,
+    vfs::bulk::{BulkHandle, BULK_SIZE},
 };
 use alloc::{
     collections::BTreeMap,
@@ -22,11 +23,11 @@ pub use strat9_abi::data::{
     IPC_FILE_FLAG_DEVICE, IPC_FILE_FLAG_DIRECTORY, IPC_FILE_FLAG_PIPE,
 };
 use strat9_abi::{
-    ipc_codec::{get_u32, put_u16_len_prefixed},
+    ipc_codec::{get_u32, put_u16, put_u16_len_prefixed},
     ipc_payload::{
-        CloseRequest, CreateRequest, OpenReply, OpenRequest, ReadReply, ReadRequest, WriteRequest,
-        OPCODE_CLOSE, OPCODE_CREATE_DIR, OPCODE_CREATE_FILE, OPCODE_OPEN, OPCODE_READ,
-        OPCODE_READDIR, OPCODE_UNLINK, OPCODE_WRITE,
+        encode_bulk_setup, encode_bulk_teardown, CloseRequest, CreateRequest, OpenReply,
+        OpenRequest, ReadReply, ReadRequest, WriteRequest, OPCODE_CLOSE, OPCODE_CREATE_DIR,
+        OPCODE_CREATE_FILE, OPCODE_OPEN, OPCODE_READ, OPCODE_READDIR, OPCODE_UNLINK, OPCODE_WRITE,
     },
 };
 
@@ -281,6 +282,8 @@ pub fn finalize_pseudo_stat(mut st: FileStat, st_dev: u64, st_rdev: u64) -> File
 pub struct IpcScheme {
     port_id: PortId,
     open_file_flags: SpinLock<BTreeMap<u64, FileFlags>>,
+    /// Per-fid bulk rings mapped into the scheme server.
+    bulk: SpinLock<BTreeMap<u64, Arc<BulkHandle>>>,
 }
 
 impl IpcScheme {
@@ -289,6 +292,7 @@ impl IpcScheme {
         IpcScheme {
             port_id,
             open_file_flags: SpinLock::new(BTreeMap::new()),
+            bulk: SpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -392,6 +396,23 @@ impl IpcScheme {
 
         Ok(crate::ipc::reply::wait_for_reply(task_id, port_owner))
     }
+
+    /// Allocate a bulk ring, map it into the server, and announce it.
+    fn setup_bulk(&self, file_id: u64) -> Option<Arc<BulkHandle>> {
+        let port = crate::ipc::port::get_port(self.port_id)?;
+        let owner = port.owner;
+        drop(port);
+        let server = crate::process::get_task_by_id(owner)?;
+        let bulk = Arc::new(BulkHandle::new(&server, BULK_SIZE).ok()?);
+        let msg = encode_bulk_setup(file_id, bulk.server_base(), bulk.size() as u32);
+        let reply = self.call(msg).ok()?;
+        Self::parse_status(&reply).ok()?;
+        Some(bulk)
+    }
+
+    fn bulk_for(&self, file_id: u64) -> Option<Arc<BulkHandle>> {
+        self.bulk.lock().get(&file_id).cloned()
+    }
 }
 
 impl Scheme for IpcScheme {
@@ -411,6 +432,13 @@ impl Scheme for IpcScheme {
         let flags = FileFlags::from_bits_truncate(file_flags);
         self.remember_open_flags(file_id, flags);
 
+        // Stream handles get a bulk ring: one RPC can then move up to 32 KiB.
+        if flags.contains(FileFlags::CHUNK_READ) && flags.contains(FileFlags::CHUNK_WRITE) {
+            if let Some(bulk) = self.setup_bulk(file_id) {
+                self.bulk.lock().insert(file_id, bulk);
+            }
+        }
+
         Ok(OpenResult {
             file_id,
             size: if size == u64::MAX { None } else { Some(size) },
@@ -420,6 +448,21 @@ impl Scheme for IpcScheme {
 
     /// Performs the read operation.
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
+        if buf.len() > IpcMessage::READ_INLINE_CAPACITY {
+            if let Some(bulk) = self.bulk_for(file_id) {
+                let count = core::cmp::min(buf.len(), bulk.size()) as u32;
+                let msg = Self::build_read_msg(file_id, offset, count);
+                let reply = self.call(msg)?;
+                Self::parse_status(&reply)?;
+                let n = get_u32(&reply.payload, 4).ok_or(SyscallError::IoError)? as usize;
+                let n = core::cmp::min(n, count as usize);
+                if n == 0 {
+                    return Ok(0);
+                }
+                return Ok(bulk.copy_to(&mut buf[..n]));
+            }
+        }
+
         let flags = self.open_flags_for(file_id);
         let chunked = flags.contains(FileFlags::CHUNK_READ);
         let chunk_size = if chunked {
@@ -458,6 +501,24 @@ impl Scheme for IpcScheme {
 
     /// Performs the write operation.
     fn write(&self, file_id: u64, offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
+        if buf.len() > IpcMessage::WRITE_INLINE_CAPACITY {
+            if let Some(bulk) = self.bulk_for(file_id) {
+                let n = core::cmp::min(buf.len(), bulk.size()).min(u16::MAX as usize);
+                if bulk.copy_from(&buf[..n]) != n {
+                    return Err(SyscallError::IoError);
+                }
+                let (mut msg, _) = WriteRequest::encode(OPCODE_WRITE, file_id, offset, &[])
+                    .ok_or(SyscallError::MessageSize)?;
+                // Inline data is empty; the length tells the server to read
+                // the payload from the bulk ring.
+                put_u16(&mut msg.payload, 16, n as u16);
+                let reply = self.call(msg)?;
+                Self::parse_status(&reply)?;
+                let written = get_u32(&reply.payload, 4).ok_or(SyscallError::IoError)? as usize;
+                return Ok(core::cmp::min(written, n));
+            }
+        }
+
         let flags = self.open_flags_for(file_id);
         let chunked = flags.contains(FileFlags::CHUNK_WRITE);
         // Non-chunked handles (control endpoints, datagrams) must fit in one IPC
@@ -498,6 +559,12 @@ impl Scheme for IpcScheme {
 
     /// Performs the close operation.
     fn close(&self, file_id: u64) -> Result<(), SyscallError> {
+        let bulk = self.bulk.lock().remove(&file_id);
+        if bulk.is_some() {
+            // Tell the server to stop using the ring before the mapping is
+            // removed by `BulkHandle::drop`.
+            let _ = self.call(encode_bulk_teardown(file_id));
+        }
         let msg = Self::build_close_msg(file_id);
         let reply = self.call(msg)?;
         Self::parse_status(&reply)?;

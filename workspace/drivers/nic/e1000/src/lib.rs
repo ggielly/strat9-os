@@ -327,9 +327,15 @@ impl E1000Nic {
         }
         if (err & rx_errors::TCPE) != 0 {
             log::trace!("e1000: RX TCP/UDP checksum error on descriptor {}", idx);
+            self.recycle_rx_desc(idx);
+            self.stats.rx_errors += 1;
+            return Err(NetError::NoPacket);
         }
         if (err & rx_errors::IPE) != 0 {
             log::trace!("e1000: RX IP checksum error on descriptor {}", idx);
+            self.recycle_rx_desc(idx);
+            self.stats.rx_errors += 1;
+            return Err(NetError::NoPacket);
         }
         if (st & rx_status::EOP) == 0 {
             log::warn!(

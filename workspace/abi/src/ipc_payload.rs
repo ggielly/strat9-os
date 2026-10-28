@@ -79,6 +79,39 @@ pub const OPCODE_CREATE_FILE: u32 = 0x05;
 pub const OPCODE_CREATE_DIR: u32 = 0x06;
 /// Wire `msg_type` for an unlink request.
 pub const OPCODE_UNLINK: u32 = 0x07;
+/// Wire `msg_type` for a bulk-ring setup request (kernel → scheme server).
+pub const OPCODE_BULK_SETUP: u32 = 0x09;
+/// Wire `msg_type` for a bulk-ring teardown request.
+pub const OPCODE_BULK_TEARDOWN: u32 = 0x0A;
+
+/// Encode a bulk-ring setup request.
+///
+/// Wire layout: `ino @ 0..8`, `base @ 8..16`, `len @ 16..20`.
+pub fn encode_bulk_setup(ino: u64, base: u64, len: u32) -> IpcMessage {
+    let mut msg = IpcMessage::new(OPCODE_BULK_SETUP);
+    msg.payload[0..8].copy_from_slice(&ino.to_le_bytes());
+    msg.payload[8..16].copy_from_slice(&base.to_le_bytes());
+    msg.payload[16..20].copy_from_slice(&len.to_le_bytes());
+    msg
+}
+
+/// Parse a bulk-ring setup request.
+pub fn parse_bulk_setup(payload: &[u8]) -> Option<(u64, u64, u32)> {
+    if payload.len() < 20 {
+        return None;
+    }
+    let ino = u64::from_le_bytes(payload[0..8].try_into().ok()?);
+    let base = u64::from_le_bytes(payload[8..16].try_into().ok()?);
+    let len = u32::from_le_bytes(payload[16..20].try_into().ok()?);
+    Some((ino, base, len))
+}
+
+/// Encode a bulk-ring teardown request.
+pub fn encode_bulk_teardown(ino: u64) -> IpcMessage {
+    let mut msg = IpcMessage::new(OPCODE_BULK_TEARDOWN);
+    msg.payload[0..8].copy_from_slice(&ino.to_le_bytes());
+    msg
+}
 
 // ===========================================================================
 // Generic status-only reply (used by every scheme)
