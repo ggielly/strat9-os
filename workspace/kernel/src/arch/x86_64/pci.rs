@@ -9,6 +9,7 @@ use super::io::{inl, outl};
 use crate::sync::SpinLock;
 use alloc::vec::Vec;
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// PCI Configuration Address Port
 const CONFIG_ADDRESS: u16 = 0xCF8;
@@ -1204,6 +1205,10 @@ fn probe_from_word00(address: PciAddress, word00: u32) -> Option<PciDevice> {
 ///   - a lock-free double-buffered snapshot model.
 static PCI_DEVICE_CACHE: SpinLock<Option<Vec<PciDevice>>> = SpinLock::new(None);
 
+/// When set, `with_cache`/ECAM scanning suppress serial diagnostics.  Used by
+/// the periodic hotplug poll: a 500 ms rescan must not flood the boot console.
+static PCI_SCAN_QUIET: AtomicBool = AtomicBool::new(false);
+
 /// Invalidate the boot-time snapshot and re-enumerate the bus.
 ///
 /// Hotplug support: the old snapshot is dropped, then `all_devices()`
@@ -1214,6 +1219,16 @@ pub fn rescan() -> usize {
         *cache = None;
     }
     all_devices().len()
+}
+
+/// Same as [`rescan`], but suppresses the scan diagnostics.  The hotplug
+/// watchdog uses it so a quiet system does not emit the full PCI inventory
+/// every 500 ms.
+pub fn rescan_quiet() -> usize {
+    let previous = PCI_SCAN_QUIET.swap(true, Ordering::AcqRel);
+    let count = rescan();
+    PCI_SCAN_QUIET.store(previous, Ordering::Release);
+    count
 }
 
 // ---------------------------------------------------------------------------
@@ -1228,18 +1243,23 @@ pub fn rescan() -> usize {
 fn scan_ecam_devices() -> Vec<PciDevice> {
     use crate::{acpi::mcfg, memory};
 
+    let log_scan = !PCI_SCAN_QUIET.load(Ordering::Relaxed);
     let mcfg_info = match mcfg::parse_mcfg() {
         Some(info) => info,
         None => {
-            log::info!("[PCI-ECAM] No MCFG table found, skipping ECAM scan");
+            if log_scan {
+                log::info!("[PCI-ECAM] No MCFG table found, skipping ECAM scan");
+            }
             return Vec::new();
         }
     };
 
-    log::info!(
-        "[PCI-ECAM] Found {} ECAM region(s)",
-        mcfg_info.entries.len()
-    );
+    if log_scan {
+        log::info!(
+            "[PCI-ECAM] Found {} ECAM region(s)",
+            mcfg_info.entries.len()
+        );
+    }
 
     let mut devices = Vec::new();
 
@@ -1260,14 +1280,16 @@ fn scan_ecam_devices() -> Vec<PciDevice> {
             base_virt: ecam_virt,
         });
 
-        log::info!(
-            "[PCI-ECAM] Region seg={} ecam={:#x} buses={}..{} virt={:#x}",
-            entry.segment_group,
-            ecam_phys,
-            start_bus,
-            end_bus,
-            ecam_virt
-        );
+        if log_scan {
+            log::info!(
+                "[PCI-ECAM] Region seg={} ecam={:#x} buses={}..{} virt={:#x}",
+                entry.segment_group,
+                ecam_phys,
+                start_bus,
+                end_bus,
+                ecam_virt
+            );
+        }
 
         // Scan each bus in the range
         for bus in start_bus..=end_bus {
@@ -1297,7 +1319,9 @@ fn scan_ecam_devices() -> Vec<PciDevice> {
         }
     }
 
-    log::info!("[PCI-ECAM] ECAM scan found {} device(s)", devices.len());
+    if log_scan {
+        log::info!("[PCI-ECAM] ECAM scan found {} device(s)", devices.len());
+    }
     devices
 }
 
@@ -1357,17 +1381,24 @@ fn probe_ecam_device(
 fn with_cache<R>(f: impl FnOnce(&[PciDevice]) -> R) -> R {
     let mut cache = PCI_DEVICE_CACHE.lock();
     if cache.is_none() {
+        let log_scan = !PCI_SCAN_QUIET.load(Ordering::Relaxed);
         let dummy = 0u64;
         let rsp = &dummy as *const u64 as u64;
-        crate::serial_println!("[PCI] Scanning PCI bus (rsp={:#x})...", rsp);
+        if log_scan {
+            crate::serial_println!("[PCI] Scanning PCI bus (rsp={:#x})...", rsp);
+        }
 
         // Phase 1: I/O port scan (0xCF8/0xCFC)
         let io_devices: Vec<PciDevice> = PciScanner::new().collect();
-        crate::serial_println!("[PCI] I/O scan: {} device(s)", io_devices.len());
+        if log_scan {
+            crate::serial_println!("[PCI] I/O scan: {} device(s)", io_devices.len());
+        }
 
         // Phase 2: ECAM MMIO scan (via MCFG ACPI table)
         let ecam_devices: Vec<PciDevice> = scan_ecam_devices();
-        crate::serial_println!("[PCI] ECAM scan: {} device(s)", ecam_devices.len());
+        if log_scan {
+            crate::serial_println!("[PCI] ECAM scan: {} device(s)", ecam_devices.len());
+        }
 
         // Merge: ECAM devices that are NOT already in the I/O scan
         let mut devices = io_devices;
@@ -1381,21 +1412,23 @@ fn with_cache<R>(f: impl FnOnce(&[PciDevice]) -> R) -> R {
                 devices.push(*ecam_dev);
             }
         }
-        crate::serial_println!("[PCI] Total: {} device(s) after merge", devices.len());
+        if log_scan {
+            crate::serial_println!("[PCI] Total: {} device(s) after merge", devices.len());
 
-        // Improved logging: human-readable names, IRQ, class
-        for dev in &devices {
-            let name = device_name(dev.vendor_id, dev.device_id).unwrap_or("Unknown");
-            let class = class_name(dev.class_code, dev.subclass).unwrap_or("???");
-            crate::serial_println!(
-                "[PCI]   {:02x}:{:02x}.{:x} {:<24} {} (IRQ={})",
-                dev.address.bus,
-                dev.address.device,
-                dev.address.function,
-                name,
-                class,
-                dev.interrupt_line,
-            );
+            // Improved logging: human-readable names, IRQ, class
+            for dev in &devices {
+                let name = device_name(dev.vendor_id, dev.device_id).unwrap_or("Unknown");
+                let class = class_name(dev.class_code, dev.subclass).unwrap_or("???");
+                crate::serial_println!(
+                    "[PCI]   {:02x}:{:02x}.{:x} {:<24} {} (IRQ={})",
+                    dev.address.bus,
+                    dev.address.device,
+                    dev.address.function,
+                    name,
+                    class,
+                    dev.interrupt_line,
+                );
+            }
         }
         *cache = Some(devices);
     }

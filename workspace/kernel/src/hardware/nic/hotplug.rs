@@ -122,10 +122,10 @@ pub fn poll_pci() {
     }
     *old = current;
 
-    // Refresh the cached inventory used by the probe paths.  The actual
-    // driver bind/unbind is performed by the device manager (strate-bus) on
-    // `DEVICE_ADD/REMOVE`.
-    let _ = crate::arch::pci::rescan();
+    // Refresh the cached inventory used by the probe paths.  This runs every
+    // 500 ms, so use the quiet variant: the full PCI inventory must not be
+    // printed on every poll.
+    let _ = crate::arch::pci::rescan_quiet();
 }
 
 /// Start the polling watchdog.  Idempotent.
