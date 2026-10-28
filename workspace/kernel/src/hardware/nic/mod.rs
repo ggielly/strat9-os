@@ -471,8 +471,8 @@ pub fn init() {
     }
     // Initialise the N2 data plane if any NIC was registered.
     init_data_plane();
-    // Portable hotplug source: a 500 ms PCI scan in a kernel thread.
-    hotplug::start_watchdog();
+    // The hotplug watchdog is started later by `hardware::init()`, once the
+    // timer subsystem is available.
 }
 
 // ── N2 data-plane global instance ─────────────────────────────────────────
