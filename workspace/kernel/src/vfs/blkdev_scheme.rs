@@ -44,6 +44,7 @@ const FID_NULL: u64 = 3;
 const FID_ZERO: u64 = 4;
 const FID_RANDOM: u64 = 5;
 const FID_URANDOM: u64 = 6;
+const FID_NVME0: u64 = 7;
 
 const RDEV_NULL: u64 = (1u64 << 8) | 3;
 const RDEV_ZERO: u64 = (1u64 << 8) | 5;
@@ -51,6 +52,7 @@ const RDEV_RANDOM: u64 = (1u64 << 8) | 8;
 const RDEV_URANDOM: u64 = (1u64 << 8) | 9;
 const RDEV_SDA: u64 = (8u64 << 8) | 0;
 const RDEV_VDA: u64 = (254u64 << 8) | 0;
+const RDEV_NVME0: u64 = (259u64 << 8) | 0;
 
 // ========== xorshift64 fallback PRNG ====================================
 static PRNG_STATE: AtomicU64 = AtomicU64::new(0xdeadbeef_cafebabe);
@@ -129,6 +131,14 @@ impl Scheme for BlkDevScheme {
                     flags: FileFlags::DEVICE,
                 })
             }
+            "nvme0n1" => {
+                let dev = NvmeBlockDevice::first().ok_or(SyscallError::NotFound)?;
+                Ok(OpenResult {
+                    file_id: FID_NVME0,
+                    size: Some(dev.bytes()),
+                    flags: FileFlags::DEVICE,
+                })
+            }
             "null" => Ok(OpenResult {
                 file_id: FID_NULL,
                 size: Some(0),
@@ -194,6 +204,10 @@ impl Scheme for BlkDevScheme {
                     .ok_or(SyscallError::BadHandle)?;
                 sector_read(dev, offset, buf).map_err(|_| SyscallError::IoError)
             }
+            FID_NVME0 => {
+                let dev = nvme_device()?;
+                sector_read(&dev, offset, buf).map_err(|_| SyscallError::IoError)
+            }
             _ => Err(SyscallError::BadHandle),
         }
     }
@@ -213,6 +227,10 @@ impl Scheme for BlkDevScheme {
                 let dev = crate::hardware::storage::virtio_block::get_device()
                     .ok_or(SyscallError::BadHandle)?;
                 sector_write(dev, offset, buf).map_err(|_| SyscallError::IoError)
+            }
+            FID_NVME0 => {
+                let dev = nvme_device()?;
+                sector_write(&dev, offset, buf).map_err(|_| SyscallError::IoError)
             }
             _ => Err(SyscallError::PermissionDenied),
         }
@@ -315,6 +333,9 @@ impl Scheme for BlkDevScheme {
                 .ok_or(SyscallError::BadHandle)?;
             return Ok(dev.sector_count() * SECTOR_SIZE as u64);
         }
+        if file_id == FID_NVME0 {
+            return Ok(nvme_device()?.bytes());
+        }
         Err(SyscallError::BadHandle)
     }
 
@@ -336,6 +357,10 @@ impl Scheme for BlkDevScheme {
                 .ok_or(SyscallError::BadHandle)?
                 .flush()
                 .map_err(|_| SyscallError::IoError),
+            FID_NVME0 => {
+                let dev = nvme_device()?;
+                dev.flush().map_err(|_| SyscallError::IoError)
+            }
             FID_NULL | FID_ZERO | FID_RANDOM | FID_URANDOM | FID_ROOT => Ok(()),
             _ => Err(SyscallError::BadHandle),
         }
@@ -446,6 +471,23 @@ impl Scheme for BlkDevScheme {
                     RDEV_VDA,
                 ))
             }
+            FID_NVME0 => {
+                let dev = nvme_device()?;
+                let size = dev.bytes();
+                Ok(finalize_pseudo_stat(
+                    FileStat {
+                        st_ino: FID_NVME0,
+                        st_mode: 0o060_660,
+                        st_nlink: 1,
+                        st_size: size,
+                        st_blksize: SECTOR_SIZE as u64,
+                        st_blocks: dev.sector_count(),
+                        ..FileStat::zeroed()
+                    },
+                    DEV_DEVFS,
+                    RDEV_NVME0,
+                ))
+            }
             _ => Err(SyscallError::BadHandle),
         }
     }
@@ -492,8 +534,137 @@ impl Scheme for BlkDevScheme {
                 name: String::from("vda"),
             });
         }
+        if NvmeBlockDevice::first().is_some() {
+            entries.push(DirEntry {
+                ino: FID_NVME0,
+                file_type: DT_BLK,
+                name: String::from("nvme0n1"),
+            });
+        }
         Ok(entries)
     }
+}
+
+// ========== NVMe adapter ==============================================
+
+/// Exposes the first NVMe namespace through the kernel [`BlockDevice`] trait,
+/// so `/dev/nvme0n1` reuses the exact same byte-offset/partial-sector helpers
+/// as AHCI and virtio-blk instead of duplicating a second I/O path.
+struct NvmeBlockDevice {
+    controller: alloc::sync::Arc<spin::Mutex<crate::hardware::storage::nvme::NvmeController>>,
+    nsid: u32,
+    /// Size in 512-byte sectors, independent of the namespace LBA size.
+    sectors: u64,
+}
+
+impl NvmeBlockDevice {
+    /// Builds the adapter for namespace 0 of the first controller, if any.
+    fn first() -> Option<Self> {
+        let controller = crate::hardware::storage::nvme::get_first_controller()?;
+        let (nsid, block_size, blocks) = {
+            let guard = controller.lock();
+            let namespace = guard.get_namespace(0)?;
+            (namespace.nsid, namespace.block_size, namespace.size)
+        };
+        if block_size == 0 {
+            return None;
+        }
+        let bytes = blocks.checked_mul(block_size as u64)?;
+        Some(Self {
+            controller,
+            nsid,
+            sectors: bytes / SECTOR_SIZE as u64,
+        })
+    }
+
+    fn bytes(&self) -> u64 {
+        self.sectors * SECTOR_SIZE as u64
+    }
+
+    fn read_bytes(&self, offset: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        let end = offset
+            .checked_add(buf.len() as u64)
+            .ok_or(BlockError::InvalidSector)?;
+        if end > self.bytes() {
+            return Err(BlockError::InvalidSector);
+        }
+        self.controller
+            .lock()
+            .read_bytes(self.nsid, offset, buf)
+            .map_err(|_| BlockError::IoError)
+    }
+
+    fn write_bytes(&self, offset: u64, data: &[u8]) -> Result<(), BlockError> {
+        let end = offset
+            .checked_add(data.len() as u64)
+            .ok_or(BlockError::InvalidSector)?;
+        if end > self.bytes() {
+            return Err(BlockError::InvalidSector);
+        }
+        self.controller
+            .lock()
+            .write_bytes(self.nsid, offset, data)
+            .map_err(|_| BlockError::IoError)
+    }
+}
+
+impl BlockDevice for NvmeBlockDevice {
+    fn read_sector(&self, sector: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        if buf.len() < SECTOR_SIZE {
+            return Err(BlockError::BufferTooSmall);
+        }
+        let offset = sector
+            .checked_mul(SECTOR_SIZE as u64)
+            .ok_or(BlockError::InvalidSector)?;
+        self.read_bytes(offset, &mut buf[..SECTOR_SIZE])
+    }
+
+    fn write_sector(&self, sector: u64, buf: &[u8]) -> Result<(), BlockError> {
+        if buf.len() < SECTOR_SIZE {
+            return Err(BlockError::BufferTooSmall);
+        }
+        let offset = sector
+            .checked_mul(SECTOR_SIZE as u64)
+            .ok_or(BlockError::InvalidSector)?;
+        self.write_bytes(offset, &buf[..SECTOR_SIZE])
+    }
+
+    fn read_sectors(&self, sector: u64, count: u16, buf: &mut [u8]) -> Result<(), BlockError> {
+        let nbytes = (count as usize) * SECTOR_SIZE;
+        if buf.len() < nbytes {
+            return Err(BlockError::BufferTooSmall);
+        }
+        let offset = sector
+            .checked_mul(SECTOR_SIZE as u64)
+            .ok_or(BlockError::InvalidSector)?;
+        self.read_bytes(offset, &mut buf[..nbytes])
+    }
+
+    fn write_sectors(&self, sector: u64, count: u16, buf: &[u8]) -> Result<(), BlockError> {
+        let nbytes = (count as usize) * SECTOR_SIZE;
+        if buf.len() < nbytes {
+            return Err(BlockError::BufferTooSmall);
+        }
+        let offset = sector
+            .checked_mul(SECTOR_SIZE as u64)
+            .ok_or(BlockError::InvalidSector)?;
+        self.write_bytes(offset, &buf[..nbytes])
+    }
+
+    fn sector_count(&self) -> u64 {
+        self.sectors
+    }
+
+    fn flush(&self) -> Result<(), BlockError> {
+        self.controller
+            .lock()
+            .flush(self.nsid)
+            .map_err(|_| BlockError::IoError)
+    }
+}
+
+fn nvme_device() -> Result<NvmeBlockDevice, SyscallError> {
+    NvmeBlockDevice::first().ok_or(SyscallError::BadHandle)
 }
 
 // ========== Byte-offset <-> sector I/O helpers ======================================================
