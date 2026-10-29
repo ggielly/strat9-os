@@ -26,6 +26,9 @@ use spin::Mutex;
 const NVME_PAGE_SIZE: usize = 4096;
 const IO_QUEUE_SIZE: usize = 64;
 const MAX_IO_COMMANDS: usize = IO_QUEUE_SIZE;
+/// Upper bound on blocks per I/O command, bounding the contiguous DMA
+/// allocation (128 blocks = 64 KiB at 512 B, 512 KiB at 4 KiB).
+const MAX_TRANSFER_BLOCKS: usize = 128;
 const MAX_PRP_ENTRIES: usize = NVME_PAGE_SIZE / 8; // 512 entries per PRP list page
 
 const ADMIN_CQE_ERROR: u16 = (0x1 << 14) | (0x1 << 10);
@@ -74,9 +77,11 @@ unsafe fn regs_read64(base: usize, offset: u64) -> u64 {
 
 /// Build PRP (Physical Region Page) list for a physically contiguous buffer.
 ///
-/// Returns (prp1, prp2):
-/// - If the buffer fits in a single page: prp1 = buf_phys, prp2 = 0
-/// - If the buffer spans multiple pages: prp1 = buf_phys, prp2 = PRP list phys addr
+/// Returns `(prp1, prp2, owned)`:
+/// - If the buffer fits in a single page: `prp1 = buf_phys, prp2 = 0`, `owned = None`
+/// - If the buffer spans multiple pages: `prp2 = PRP list phys`, and `owned`
+///   carries the PRP list frame + its device address so the caller can free
+///   and unmap it once the command has completed.
 ///
 /// The caller must ensure `buf_phys` is page-aligned and the buffer is physically
 /// contiguous for multi-page transfers.
@@ -84,10 +89,10 @@ unsafe fn build_prp_list(
     dma: &crate::dma::DmaMapper,
     buf_device: u64,
     byte_count: usize,
-) -> (u64, u64) {
+) -> (u64, u64, Option<(crate::memory::PhysFrame, u64)>) {
     let first_page_remaining = NVME_PAGE_SIZE - (buf_device as usize % NVME_PAGE_SIZE);
     if byte_count <= first_page_remaining {
-        return (buf_device, 0);
+        return (buf_device, 0, None);
     }
 
     // Allocate a PRP list page
@@ -113,7 +118,7 @@ unsafe fn build_prp_list(
         remaining = remaining.saturating_sub(NVME_PAGE_SIZE);
     }
 
-    (buf_device, prp_device)
+    (buf_device, prp_device, Some((prp_frame, prp_device)))
 }
 
 #[repr(transparent)]
@@ -226,11 +231,14 @@ struct Registers {
     acq_high: VolatileCell<u32>,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum NvmeError {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NvmeError {
     ControllerFatal,
     Timeout,
     InvalidNamespace,
+    /// Offset/length does not describe a whole number of namespace blocks.
+    InvalidParameter,
+    OutOfMemory,
     IoError,
 }
 
@@ -416,6 +424,7 @@ pub struct NvmeController {
     pub name: String,
     irq_line: u8,
     io_done: Box<[AtomicBool]>,
+    io_error: Box<[AtomicBool]>,
     io_wq: WaitQueue,
     dma: crate::dma::DmaMapper,
 }
@@ -449,6 +458,9 @@ impl NvmeController {
         let io_done: Box<[AtomicBool]> = (0..MAX_IO_COMMANDS)
             .map(|_| AtomicBool::new(false))
             .collect();
+        let io_error: Box<[AtomicBool]> = (0..MAX_IO_COMMANDS)
+            .map(|_| AtomicBool::new(false))
+            .collect();
 
         let mut controller = Self {
             registers,
@@ -458,6 +470,7 @@ impl NvmeController {
             name,
             irq_line: 0,
             io_done,
+            io_error,
             io_wq: WaitQueue::new(),
             dma,
         };
@@ -850,6 +863,7 @@ impl NvmeController {
 
         let idx = cmd_id as usize % MAX_IO_COMMANDS;
         self.io_done[idx].store(false, Ordering::SeqCst);
+        self.io_error[idx].store(false, Ordering::SeqCst);
 
         unsafe {
             ptr::write(io.submission.entries.add(slot), *command);
@@ -860,77 +874,114 @@ impl NvmeController {
         Ok(cmd_id)
     }
 
+    /// Reads `block_count` namespace blocks of `block_size` bytes.
+    ///
+    /// `buf_device` is the device address of a physically contiguous buffer;
+    /// use [`Self::read_bytes`] for the safe CPU-buffer wrapper.
     pub fn read_blocks(
         &self,
         nsid: u32,
         lba: u64,
         block_count: u32,
+        block_size: u32,
         buf_device: u64,
     ) -> Result<(), NvmeError> {
-        let byte_count = block_count as usize * 512;
-        let (prp1, prp2) = unsafe { build_prp_list(&self.dma, buf_device, byte_count) };
-
-        let cmd_id = {
-            let mut cmd = Command {
-                opcode: 0x02,
-                nsid,
-                prp1,
-                prp2,
-                cdw10: (lba & 0xFFFF_FFFF) as u32,
-                cdw11: ((lba >> 32) & 0xFFFF_FFFF) as u32,
-                cdw12: (block_count - 1),
-                ..Default::default()
-            };
-            self.submit_io_command(&mut cmd)?
-        };
-
-        let idx = cmd_id as usize % MAX_IO_COMMANDS;
-
-        self.io_wq.wait_until(|| {
-            if self.io_done[idx].load(Ordering::Acquire) {
-                Some(())
-            } else {
-                None
-            }
-        });
-
-        Ok(())
+        self.submit_data_command(0x02, nsid, lba, block_count, block_size, buf_device)
     }
 
+    /// Writes `block_count` namespace blocks of `block_size` bytes.
+    ///
+    /// `buf_device` is the device address of a physically contiguous buffer;
+    /// use [`Self::write_bytes`] for the safe CPU-buffer wrapper.
     pub fn write_blocks(
         &self,
         nsid: u32,
         lba: u64,
         block_count: u32,
+        block_size: u32,
         buf_device: u64,
     ) -> Result<(), NvmeError> {
-        let byte_count = block_count as usize * 512;
-        let (prp1, prp2) = unsafe { build_prp_list(&self.dma, buf_device, byte_count) };
+        self.submit_data_command(0x01, nsid, lba, block_count, block_size, buf_device)
+    }
 
-        let cmd_id = {
-            let mut cmd = Command {
-                opcode: 0x01,
-                nsid,
-                prp1,
-                prp2,
-                cdw10: (lba & 0xFFFF_FFFF) as u32,
-                cdw11: ((lba >> 32) & 0xFFFF_FFFF) as u32,
-                cdw12: (block_count - 1),
-                ..Default::default()
+    fn submit_data_command(
+        &self,
+        opcode: u8,
+        nsid: u32,
+        lba: u64,
+        block_count: u32,
+        block_size: u32,
+        buf_device: u64,
+    ) -> Result<(), NvmeError> {
+        if block_count == 0 || block_size == 0 {
+            return Err(NvmeError::InvalidParameter);
+        }
+        let byte_count = (block_count as usize)
+            .checked_mul(block_size as usize)
+            .ok_or(NvmeError::InvalidParameter)?;
+        let (prp1, prp2, prp_owned) = unsafe { build_prp_list(&self.dma, buf_device, byte_count) };
+
+        let result = (|| {
+            let cmd_id = {
+                let mut cmd = Command {
+                    opcode,
+                    nsid,
+                    prp1,
+                    prp2,
+                    cdw10: (lba & 0xFFFF_FFFF) as u32,
+                    cdw11: ((lba >> 32) & 0xFFFF_FFFF) as u32,
+                    cdw12: block_count - 1,
+                    ..Default::default()
+                };
+                self.submit_io_command(&mut cmd)?
             };
-            self.submit_io_command(&mut cmd)?
-        };
 
-        let idx = cmd_id as usize % MAX_IO_COMMANDS;
+            let idx = cmd_id as usize % MAX_IO_COMMANDS;
+            self.wait_io(idx)?;
 
-        self.io_wq.wait_until(|| {
-            if self.io_done[idx].load(Ordering::Acquire) {
-                Some(())
-            } else {
-                None
+            if self.io_error[idx].load(Ordering::Acquire) {
+                return Err(NvmeError::IoError);
             }
-        });
+            Ok(())
+        })();
 
+        // The PRP list is only referenced by the command descriptor, so it can
+        // be unmapped and returned to the buddy allocator once the command has
+        // completed (or failed).
+        if let Some((frame, device)) = prp_owned {
+            self.dma.release(device, NVME_PAGE_SIZE);
+            crate::sync::with_irqs_disabled(|token| {
+                crate::memory::free_frame(token, frame);
+            });
+        }
+
+        result
+    }
+
+    /// Waits for the completion of command slot `idx`.
+    ///
+    /// In task context this blocks on the completion WaitQueue (IRQ driven);
+    /// before the scheduler exists it falls back to a bounded poll so that
+    /// probing/mount paths cannot panic on `wait_until` without a task.
+    fn wait_io(&self, idx: usize) -> Result<(), NvmeError> {
+        if crate::process::current_task_id().is_some() {
+            self.io_wq.wait_until(|| {
+                if self.io_done[idx].load(Ordering::Acquire) {
+                    Some(())
+                } else {
+                    None
+                }
+            });
+            return Ok(());
+        }
+
+        let deadline = tsc_deadline_ms(5_000);
+        while !self.io_done[idx].load(Ordering::Acquire) {
+            if tsc_expired(deadline) {
+                return Err(NvmeError::Timeout);
+            }
+            core::hint::spin_loop();
+        }
         Ok(())
     }
 
@@ -950,16 +1001,159 @@ impl NvmeController {
         };
 
         let idx = cmd_id as usize % MAX_IO_COMMANDS;
+        self.wait_io(idx)?;
 
-        self.io_wq.wait_until(|| {
-            if self.io_done[idx].load(Ordering::Acquire) {
-                Some(())
-            } else {
-                None
-            }
-        });
-
+        if self.io_error[idx].load(Ordering::Acquire) {
+            return Err(NvmeError::IoError);
+        }
         Ok(())
+    }
+
+    /// Reads `buf.len()` bytes at `offset` through a DMA bounce buffer.
+    ///
+    /// The namespace block size is honoured: unaligned ranges are handled with
+    /// a block-granular read, so a 512-byte sector read works on both 512-byte
+    /// and 4 KiB native namespaces.
+    pub fn read_bytes(&self, nsid: u32, offset: u64, buf: &mut [u8]) -> Result<(), NvmeError> {
+        self.transfer_bytes(nsid, offset, buf.as_mut_ptr(), buf.len(), false)
+    }
+
+    /// Writes `data` at `offset` through a DMA bounce buffer.
+    ///
+    /// Like [`Self::read_bytes`], partial namespace blocks are completed with
+    /// a read-modify-write so the surrounding bytes are preserved.
+    pub fn write_bytes(&self, nsid: u32, offset: u64, data: &[u8]) -> Result<(), NvmeError> {
+        self.transfer_bytes(nsid, offset, data.as_ptr() as *mut u8, data.len(), true)
+    }
+
+    /// Returns `(block_count, block_size)` for a namespace.
+    pub fn namespace_layout(&self, nsid: u32) -> Result<(u64, u32), NvmeError> {
+        let namespace = self
+            .namespaces
+            .iter()
+            .find(|namespace| namespace.nsid == nsid)
+            .ok_or(NvmeError::InvalidNamespace)?;
+        if namespace.block_size == 0 {
+            return Err(NvmeError::InvalidNamespace);
+        }
+        Ok((namespace.size, namespace.block_size))
+    }
+
+    /// Shared byte-range engine for [`Self::read_bytes`]/[`Self::write_bytes`].
+    ///
+    /// # Safety
+    /// `cpu` must be valid for `len` bytes of read access (and write access
+    /// when `write == false`); every modification of the buffer only happens
+    /// through this function.
+    fn transfer_bytes(
+        &self,
+        nsid: u32,
+        offset: u64,
+        cpu: *mut u8,
+        len: usize,
+        write: bool,
+    ) -> Result<(), NvmeError> {
+        if len == 0 {
+            return Ok(());
+        }
+        let (blocks, block_size) = self.namespace_layout(nsid)?;
+        let bs = block_size as usize;
+        let capacity = blocks
+            .checked_mul(block_size as u64)
+            .ok_or(NvmeError::InvalidParameter)?;
+        let end = offset
+            .checked_add(len as u64)
+            .ok_or(NvmeError::InvalidParameter)?;
+        if end > capacity {
+            return Err(NvmeError::InvalidParameter);
+        }
+
+        let mut pos = 0usize;
+        let mut scratch = Vec::new();
+        while pos < len {
+            let byte_offset = offset + pos as u64;
+            let lba = byte_offset / block_size as u64;
+            let in_block = (byte_offset % block_size as u64) as usize;
+            let remaining = len - pos;
+
+            if in_block == 0 && remaining >= bs {
+                // Full blocks: one command up to MAX_TRANSFER_BLOCKS.
+                let count = (remaining / bs).min(MAX_TRANSFER_BLOCKS as usize);
+                let bytes = count * bs;
+                self.dma_transfer(nsid, lba, count as u32, block_size, cpu, pos, bytes, write)?;
+                pos += bytes;
+            } else {
+                // Partial block on either edge: block-granular read-modify-write.
+                let n = (bs - in_block).min(remaining);
+                if scratch.len() < bs {
+                    scratch.resize(bs, 0);
+                }
+                let scratch_ptr = scratch.as_mut_ptr();
+                if write {
+                    self.dma_transfer(nsid, lba, 1, block_size, scratch_ptr, 0, bs, false)?;
+                    // SAFETY: `cpu` is readable for `len` bytes and `pos + n <= len`.
+                    unsafe {
+                        ptr::copy_nonoverlapping(cpu.add(pos), scratch_ptr.add(in_block), n);
+                    }
+                    self.dma_transfer(nsid, lba, 1, block_size, scratch_ptr, 0, bs, true)?;
+                } else {
+                    self.dma_transfer(nsid, lba, 1, block_size, scratch_ptr, 0, bs, false)?;
+                    // SAFETY: `cpu` is writable for `len` bytes and `pos + n <= len`.
+                    unsafe {
+                        ptr::copy_nonoverlapping(scratch_ptr.add(in_block), cpu.add(pos), n);
+                    }
+                }
+                pos += n;
+            }
+        }
+        Ok(())
+    }
+
+    /// Copies `len` bytes between `cpu + cpu_offset` and a DMA bounce buffer and
+    /// issues a single NVMe I/O command.
+    #[allow(clippy::too_many_arguments)]
+    fn dma_transfer(
+        &self,
+        nsid: u32,
+        lba: u64,
+        block_count: u32,
+        block_size: u32,
+        cpu: *mut u8,
+        cpu_offset: usize,
+        len: usize,
+        write: bool,
+    ) -> Result<(), NvmeError> {
+        let pages = len.div_ceil(4096);
+        let order = pages.next_power_of_two().trailing_zeros() as u8;
+        let frame = crate::sync::with_irqs_disabled(|token| {
+            crate::memory::allocate_phys_contiguous(token, order)
+        })
+        .map_err(|_| NvmeError::OutOfMemory)?;
+        let phys = frame.start_address.as_u64();
+        let virt = crate::memory::phys_to_virt(phys);
+        let device = self
+            .dma
+            .translate(phys, len, crate::hardware::iommu::DmaProt::READ_WRITE);
+
+        // SAFETY: the bounce frame was allocated with `len` bytes of capacity
+        // and `cpu + cpu_offset` is valid for `len` bytes from the caller.
+        let result = unsafe {
+            if write {
+                ptr::copy_nonoverlapping(cpu.add(cpu_offset), virt as *mut u8, len);
+                self.write_blocks(nsid, lba, block_count, block_size, device)
+            } else {
+                self.read_blocks(nsid, lba, block_count, block_size, device)
+                    .map(|()| {
+                        ptr::copy_nonoverlapping(virt as *const u8, cpu.add(cpu_offset), len);
+                    })
+            }
+        };
+
+        self.dma.release(device, len);
+        crate::sync::with_irqs_disabled(|token| {
+            crate::memory::free_phys_contiguous(token, frame, order);
+        });
+        result
     }
 
     pub fn handle_interrupt(&self) {
@@ -985,6 +1179,7 @@ impl NvmeController {
                 if sc != 0 && dnr == 0 {
                     log::warn!("NVMe: I/O error cmd_id={} sc={}", cmd_id, sc);
                 }
+                self.io_error[idx].store(sc != 0, Ordering::Release);
                 self.io_done[idx].store(true, Ordering::Release);
                 self.io_wq.wake_all();
             } else {
