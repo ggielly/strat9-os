@@ -34,6 +34,33 @@ fn run_pure_suite() -> bool {
     let mut passed = 0usize;
     let mut total = 0usize;
 
+    let mut unsupported = SiloConfig::default();
+    unsupported.cpu_shares = 100;
+    check(
+        "CPU shares refused without enforcement",
+        matches!(unsupported.validate(), Err(SyscallError::NotSupported)),
+        &mut passed,
+        &mut total,
+    );
+    unsupported.cpu_shares = 0;
+    unsupported.cpu_quota_us = 1000;
+    unsupported.cpu_period_us = 10000;
+    check(
+        "CPU quota refused without enforcement",
+        matches!(unsupported.validate(), Err(SyscallError::NotSupported)),
+        &mut passed,
+        &mut total,
+    );
+    unsupported.cpu_quota_us = 0;
+    unsupported.cpu_period_us = 0;
+    unsupported.io_bw_read = 4096;
+    check(
+        "I/O quota refused without enforcement",
+        matches!(unsupported.validate(), Err(SyscallError::NotSupported)),
+        &mut passed,
+        &mut total,
+    );
+
     // --- SiloId tiers -----------------------------------------------------
     check(
         "tier critical 1..=9",
@@ -357,7 +384,7 @@ fn run_lifecycle_suite() -> bool {
 
     // Quota adjustment via kernel_limit_silo.
     total += 1;
-    if crate::silo::kernel_limit_silo("t-silo-a", "mem_max", 1024 * 1024).is_ok() {
+    if crate::silo::kernel_limit_silo("t-silo-a", "mem_max", 64 * 1024 * 1024).is_ok() {
         passed += 1;
     } else {
         crate::serial_println!("[silo-test][ASSERT] FAIL: limit mem_max");
@@ -365,7 +392,7 @@ fn run_lifecycle_suite() -> bool {
 
     // Invalid quota: mem_min above mem_max.
     total += 1;
-    if crate::silo::kernel_limit_silo("t-silo-a", "mem_min", 2048 * 1024).is_err() {
+    if crate::silo::kernel_limit_silo("t-silo-a", "mem_min", 128 * 1024 * 1024).is_err() {
         passed += 1;
     } else {
         crate::serial_println!("[silo-test][ASSERT] FAIL: min>max accepted");
@@ -396,8 +423,25 @@ fn run_lifecycle_suite() -> bool {
         crate::serial_println!("[silo-test][ASSERT] FAIL: kill");
     }
 
+    if stopped {
+        let start = crate::process::scheduler::ticks();
+        loop {
+            crate::process::scheduler::flush_deferred_silo_cleanups();
+            if crate::silo::silo_detail_snapshot("t-silo-a")
+                .map(|s| s.base.state == super::SiloState::Stopped)
+                .unwrap_or(false)
+            {
+                break;
+            }
+            if crate::process::scheduler::ticks().saturating_sub(start) >= 500 {
+                break;
+            }
+            crate::process::yield_task();
+        }
+    }
     total += 1;
-    if stopped && crate::silo::kernel_destroy_silo("t-silo-b").is_ok() {
+    let renamed = stopped && crate::silo::kernel_rename_silo_label("t-silo-a", "t-silo-b").is_ok();
+    if renamed && crate::silo::kernel_destroy_silo("t-silo-b").is_ok() {
         passed += 1;
     } else {
         crate::serial_println!("[silo-test][ASSERT] FAIL: destroy");

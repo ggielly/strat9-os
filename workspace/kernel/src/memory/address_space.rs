@@ -172,6 +172,57 @@ pub struct AddressSpace {
     effective_mappings: SpinLock<BTreeMap<u64, EffectiveMapping>>,
     /// Process identifier owning this address space, when bound to a process.
     owner_pid: AtomicU32,
+    /// Stable owner of VMA charges, shared by all threads of this process.
+    silo_memory_account: SpinLock<Option<Arc<crate::silo::SiloMemoryAccount>>>,
+}
+
+/// Refund a VMA reservation on every error path, including frame-allocation failure.
+struct PendingSiloCharge {
+    account: Option<Arc<crate::silo::SiloMemoryAccount>>,
+    bytes: u64,
+}
+
+impl PendingSiloCharge {
+    fn commit(mut self) {
+        self.bytes = 0;
+    }
+}
+
+impl Drop for PendingSiloCharge {
+    fn drop(&mut self) {
+        if let Some(account) = &self.account {
+            account.release(self.bytes);
+        }
+    }
+}
+
+/// Remove any eagerly mapped pages if construction fails before the VMA exists.
+struct PendingRegionMap<'a> {
+    space: &'a AddressSpace,
+    start: u64,
+    page_count: usize,
+    page_bytes: u64,
+    committed: bool,
+}
+
+impl Drop for PendingRegionMap<'_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        for i in 0..self.page_count {
+            let addr = self.start + i as u64 * self.page_bytes;
+            if let Some(mapping) = self.space.effective_mapping_by_start(addr) {
+                self.space.teardown_effective_mapping_for_drop(mapping);
+            }
+        }
+        if self.page_count != 0 {
+            crate::arch::tlb::shootdown_range(
+                VirtAddr::new(self.start),
+                VirtAddr::new(self.start + self.page_count as u64 * self.page_bytes),
+            );
+        }
+    }
 }
 
 // SAFETY: AddressSpace is protected by the scheduler lock and per-task ownership.
@@ -186,7 +237,9 @@ type KernelPageTableEntry = crate::x86_crate_shim::structures::paging::page_tabl
 
 #[cfg(target_arch = "riscv64")]
 fn translate_result(mapper: &OffsetPageTable<'_>, vaddr: VirtAddr) -> TranslateResult {
-    mapper.translate(vaddr).unwrap_or(TranslateResult::NotMapped)
+    mapper
+        .translate(vaddr)
+        .unwrap_or(TranslateResult::NotMapped)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -226,6 +279,7 @@ impl AddressSpace {
             regions: SpinLock::new(BTreeMap::new()),
             effective_mappings: SpinLock::new(BTreeMap::new()),
             owner_pid: AtomicU32::new(0),
+            silo_memory_account: SpinLock::new(None),
         }
     }
 
@@ -334,7 +388,56 @@ impl AddressSpace {
             regions: SpinLock::new(BTreeMap::new()),
             effective_mappings: SpinLock::new(BTreeMap::new()),
             owner_pid: AtomicU32::new(0),
+            silo_memory_account: SpinLock::new(None),
         })
+    }
+
+    /// Bind before publication and charge mappings created by the ELF loader/fork.
+    pub(crate) fn bind_silo_memory_account(
+        &self,
+        account: Arc<crate::silo::SiloMemoryAccount>,
+    ) -> Result<(), crate::syscall::error::SyscallError> {
+        let mut owner = self.silo_memory_account.lock();
+        if let Some(existing) = owner.as_ref() {
+            return if Arc::ptr_eq(existing, &account) {
+                Ok(())
+            } else {
+                Err(crate::syscall::error::SyscallError::PermissionDenied)
+            };
+        }
+        let bytes = self
+            .regions
+            .lock()
+            .values()
+            .try_fold(0u64, |sum, region| {
+                sum.checked_add((region.page_count as u64).checked_mul(region.page_size.bytes())?)
+            })
+            .ok_or(crate::syscall::error::SyscallError::OutOfMemory)?;
+        account.charge(bytes)?;
+        *owner = Some(account);
+        Ok(())
+    }
+
+    pub(crate) fn silo_memory_account(&self) -> Option<Arc<crate::silo::SiloMemoryAccount>> {
+        self.silo_memory_account.lock().clone()
+    }
+
+    fn reserve_silo_memory(
+        &self,
+        bytes: u64,
+    ) -> Result<PendingSiloCharge, crate::syscall::error::SyscallError> {
+        let account = self.silo_memory_account.lock().clone();
+        if let Some(account) = &account {
+            account.charge(bytes)?;
+        }
+        Ok(PendingSiloCharge { account, bytes })
+    }
+
+    fn release_silo_memory(&self, bytes: u64) {
+        let account = self.silo_memory_account.lock().clone();
+        if let Some(account) = account {
+            account.release(bytes);
+        }
     }
 
     /// Registers an effective mapping in the address space tracking table.
@@ -544,8 +647,10 @@ impl AddressSpace {
             }
         }
 
-        // Enforce per-silo memory quota (best effort; non-silo tasks are ignored).
-        crate::silo::charge_current_task_memory(len).map_err(|_| "Silo memory quota exceeded")?;
+        // Charge the address-space owner, regardless of the task performing the mapping.
+        let charge = self
+            .reserve_silo_memory(len)
+            .map_err(|_| "Silo memory quota exceeded")?;
 
         // Track the region, attempting to merge with previous.
         let mut regions = self.regions.lock();
@@ -591,6 +696,7 @@ impl AddressSpace {
             page_count,
             page_size
         );
+        charge.commit();
         Ok(())
     }
 
@@ -812,8 +918,17 @@ impl AddressSpace {
         }
 
         // Enforce per-silo memory quota for eagerly mapped regions.
-        crate::silo::charge_current_task_memory(len).map_err(|_| "Silo memory quota exceeded")?;
+        let charge = self
+            .reserve_silo_memory(len)
+            .map_err(|_| "Silo memory quota exceeded")?;
 
+        let mut pending_map = PendingRegionMap {
+            space: self,
+            start,
+            page_count: 0,
+            page_bytes,
+            committed: false,
+        };
         let page_flags = flags.to_page_flags();
         let mut frame_allocator = BuddyFrameAllocator;
 
@@ -922,7 +1037,6 @@ impl AddressSpace {
                     }
                 }
 
-                crate::silo::release_current_task_memory(len);
                 return Err("Failed to map page");
             }
 
@@ -987,11 +1101,11 @@ impl AddressSpace {
                         }
                     }
                 }
-                crate::silo::release_current_task_memory(len);
                 return Err("Failed to track mapped region page");
             }
 
             mapped_pages += 1;
+            pending_map.page_count = mapped_pages;
         }
 
         // Track the region
@@ -1022,6 +1136,8 @@ impl AddressSpace {
             page_count as u64
         );
 
+        pending_map.committed = true;
+        charge.commit();
         Ok(())
     }
 
@@ -1074,6 +1190,9 @@ impl AddressSpace {
             }
         }
 
+        let charge = self
+            .reserve_silo_memory(len)
+            .map_err(|_| "Silo memory quota exceeded")?;
         let mut page_flags = flags.to_page_flags();
         if page_size == VmaPageSize::Huge {
             page_flags |= PageTableFlags::HUGE_PAGE;
@@ -1213,6 +1332,7 @@ impl AddressSpace {
                 page_size,
             },
         );
+        charge.commit();
         Ok(())
     }
 
@@ -1312,7 +1432,7 @@ impl AddressSpace {
         );
 
         let released = (page_count as u64).saturating_mul(page_bytes);
-        crate::silo::release_current_task_memory(released);
+        self.release_silo_memory(released);
 
         Ok(())
     }
@@ -1693,7 +1813,7 @@ impl AddressSpace {
         // Other CPUs may still have stale translations for the unmapped pages.
         crate::arch::tlb::shootdown_range(VirtAddr::new(addr), VirtAddr::new(end));
 
-        crate::silo::release_current_task_memory(released_bytes);
+        self.release_silo_memory(released_bytes);
         Ok(())
     }
 
@@ -1816,7 +1936,7 @@ impl AddressSpace {
         }
 
         let _ = self.regions.lock().remove(&start);
-        crate::silo::release_current_task_memory(len);
+        self.release_silo_memory(len);
     }
 
     /// Unmap all tracked user regions (best-effort).
@@ -1863,7 +1983,6 @@ impl AddressSpace {
                 mapping.cap_id.as_u64()
             );
             self.teardown_effective_mapping_for_drop(mapping);
-            crate::silo::release_current_task_memory(mapping.page_size.bytes());
         }
     }
 

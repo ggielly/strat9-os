@@ -17,7 +17,7 @@ use ratatui::{
 #[cfg(target_arch = "x86_64")]
 pub(crate) use ratatui_backend::Strat9RatatuiBackend;
 
-const TOP_REFRESH_TICKS: u64 = 10; // 100ms at 100Hz
+const TOP_REFRESH_TICKS: u64 = 100; // 1s at 100Hz; avoid expensive registry/VFS polling at 10Hz
 const MAX_CPU_GAUGES: usize = 8;
 
 #[derive(Clone)]
@@ -104,20 +104,10 @@ fn collect_silos_from_proc_scheme() -> Option<(Vec<SiloRowData>, Vec<StrateRowDa
         let label = fields.next()?;
         let name = fields.next()?;
 
-        let strate_name = if label != "-" && !label.is_empty() {
-            String::from(label)
-        } else {
-            String::from(name)
-        };
-        if let Some((_, belongs)) = strate_index
-            .iter_mut()
-            .find(|(entry_name, _)| *entry_name == strate_name)
-        {
-            if !belongs.iter().any(|x| x == name) {
-                belongs.push(String::from(name));
-            }
-        } else {
-            strate_index.push((strate_name, vec![String::from(name)]));
+        let instances = fields.next()?;
+        for strate_name in instances.split(',').filter(|name| !name.is_empty()) {
+            // Keep one row per live instance, even if two tasks share a name.
+            strate_index.push((String::from(strate_name), vec![String::from(name)]));
         }
 
         silos.push(SiloRowData {
@@ -170,7 +160,7 @@ fn collect_snapshot() -> TopSnapshot {
             };
             tasks.push(TaskRowData {
                 pid: format!("{}", task.pid),
-                name: String::from(task.name),
+                name: task.name.clone(),
                 state: state_str,
                 priority: format!("{:?}", task.priority),
                 ticks: task.ticks.load(Ordering::Relaxed),
@@ -189,20 +179,8 @@ fn collect_snapshot() -> TopSnapshot {
 
         for s in silo_snapshots {
             let label = s.strate_label.unwrap_or_default();
-            let strate_name = if !label.is_empty() {
-                label.clone()
-            } else {
-                s.name.clone()
-            };
-            if let Some((_, belongs)) = strate_index
-                .iter_mut()
-                .find(|(name, _)| *name == strate_name)
-            {
-                if !belongs.iter().any(|x| x == &s.name) {
-                    belongs.push(s.name.clone());
-                }
-            } else {
-                strate_index.push((strate_name, vec![s.name.clone()]));
+            for instance in s.runtime_strates {
+                strate_index.push((instance, vec![s.name.clone()]));
             }
             silos.push(SiloRowData {
                 sid: format!("{}", s.id),

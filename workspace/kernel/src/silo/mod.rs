@@ -3,6 +3,9 @@
 //! This module provides the core kernel structures and syscalls
 //! to create and manage silos. Policy lives in userspace (silo admin).
 
+mod memory_account;
+pub(crate) use memory_account::SiloMemoryAccount;
+
 use crate::{
     capability::{get_capability_manager, CapId, CapPermissions, Capability, ResourceType},
     hardware::storage::{ahci, virtio_block},
@@ -240,7 +243,7 @@ pub fn sys_silo_rename(handle: u64, label_ptr: u64, label_len: u64) -> Result<u6
         return Err(SyscallError::AlreadyExists);
     }
     let silo = mgr.get_mut(silo_id)?;
-    silo.strate_label = Some(String::from(label));
+    silo.strate_label = Some(Arc::from(label));
     Ok(0)
 }
 
@@ -516,6 +519,15 @@ impl SiloConfig {
         if self.cpu_quota_us > 0 && self.cpu_period_us == 0 {
             return Err(SyscallError::InvalidArgument);
         }
+        // Refuse quotas that have no scheduler/I/O enforcement yet.
+        if self.cpu_shares != 0
+            || self.cpu_quota_us != 0
+            || self.cpu_period_us != 0
+            || self.io_bw_read != 0
+            || self.io_bw_write != 0
+        {
+            return Err(SyscallError::NotSupported);
+        }
         if self.caps_len > MAX_SILO_CAPS as u64 {
             return Err(SyscallError::InvalidArgument);
         }
@@ -660,15 +672,15 @@ pub fn pack_fault(reason: SiloFaultReason, subcode: u64) -> u64 {
 #[derive(Debug)]
 struct Silo {
     id: SiloId,
-    name: String,
-    strate_label: Option<String>,
+    name: Arc<str>,
+    strate_label: Option<Arc<str>>,
     state: SiloState,
     config: SiloConfig,
     mode: OctalMode,
     family: StrateFamily,
     /// Current memory usage accounted to this silo (bytes).
     /// This tracks user-space virtual regions reserved/mapped via AddressSpace APIs.
-    mem_usage_bytes: u64,
+    memory_account: Arc<SiloMemoryAccount>,
     flags: u32,
     module_id: Option<u64>,
     tasks: HVec<TaskId, 64>,
@@ -737,6 +749,8 @@ pub struct SiloSnapshot {
     pub strate_label: Option<String>,
     pub state: SiloState,
     pub task_count: usize,
+    /// Names of launched strate tasks actually visible to the scheduler.
+    pub runtime_strates: Vec<String>,
     pub mem_usage_bytes: u64,
     pub mem_min_bytes: u64,
     pub mem_max_bytes: u64,
@@ -808,13 +822,13 @@ impl SiloManager {
 
         let silo = Silo {
             id,
-            name,
+            name: Arc::from(name),
             strate_label: None,
             state: SiloState::Created,
             config: *config,
             mode: OctalMode::from_octal(config.mode),
             family,
-            mem_usage_bytes: 0,
+            memory_account: Arc::new(SiloMemoryAccount::new(config.mem_max)),
             flags: config.flags as u32,
             module_id: None,
             tasks: HVec::new(),
@@ -1292,76 +1306,6 @@ impl ModuleRegistry {
 
 static MODULE_REGISTRY: SpinLock<ModuleRegistry> = SpinLock::new(ModuleRegistry::new());
 
-/// Charge memory usage against a task's silo quota (if any).
-///
-/// Uses `try_lock`: callers sit on memory-mapping paths that can execute
-/// while `SILO_MANAGER` is held elsewhere on the same CPU (e.g. a snapshot
-/// helper allocating under the lock). A blocking acquisition there would
-/// self-deadlock the kernel; skipping accounting under contention is the
-/// documented best-effort trade-off (same policy as
-/// [`try_silo_id_for_task`]).
-fn charge_task_silo_memory(task_id: TaskId, bytes: u64) -> Result<(), SyscallError> {
-    if bytes == 0 {
-        return Ok(());
-    }
-    let Some(mut mgr) = SILO_MANAGER.try_lock() else {
-        return Ok(());
-    };
-    let Some(silo_id) = mgr.silo_for_task(task_id) else {
-        return Ok(());
-    };
-    let silo = mgr.get_mut(silo_id)?;
-    let next = silo
-        .mem_usage_bytes
-        .checked_add(bytes)
-        .ok_or(SyscallError::OutOfMemory)?;
-    if silo.config.mem_max != 0 && next > silo.config.mem_max {
-        return Err(SyscallError::OutOfMemory);
-    }
-    silo.mem_usage_bytes = next;
-    Ok(())
-}
-
-/// Release memory usage from a task's silo quota (if any).
-///
-/// Best-effort `try_lock`, mirroring [`charge_task_silo_memory`].
-fn release_task_silo_memory(task_id: TaskId, bytes: u64) {
-    if bytes == 0 {
-        return;
-    }
-    let Some(mut mgr) = SILO_MANAGER.try_lock() else {
-        return;
-    };
-    let Some(silo_id) = mgr.silo_for_task(task_id) else {
-        return;
-    };
-    if let Ok(silo) = mgr.get_mut(silo_id) {
-        silo.mem_usage_bytes = silo.mem_usage_bytes.saturating_sub(bytes);
-    }
-}
-
-/// Charge memory usage against the current task's silo quota (if any).
-///
-/// Returns `OutOfMemory` when charging would exceed `SiloConfig.mem_max`.
-/// Tasks that are not part of a silo are ignored.
-pub fn charge_current_task_memory(bytes: u64) -> Result<(), SyscallError> {
-    let Some(task) = crate::process::scheduler::current_task_clone_try() else {
-        // Boot-time/kernel contexts may have no current task.
-        // Also avoid deadlock when scheduler lock is already held in cleanup paths.
-        return Ok(());
-    };
-    charge_task_silo_memory(task.id, bytes)
-}
-
-/// Release memory usage from the current task's silo quota (if any).
-///
-/// Tasks that are not part of a silo are ignored.
-pub fn release_current_task_memory(bytes: u64) {
-    if let Some(task) = crate::process::scheduler::current_task_clone_try() {
-        release_task_silo_memory(task.id, bytes);
-    }
-}
-
 /// Performs the extract strate label operation.
 fn extract_strate_label(path: &str) -> Option<String> {
     let prefix = "/srv/strate-fs-";
@@ -1372,7 +1316,7 @@ fn extract_strate_label(path: &str) -> Option<String> {
     if label.is_empty() || parts.next().is_some() {
         return None;
     }
-    Some(String::from(label))
+    Some(Arc::from(label))
 }
 
 /// Performs the sanitize label operation.
@@ -1412,7 +1356,7 @@ pub fn set_current_silo_label_from_path(path: &str) -> Result<(), SyscallError> 
     // Do not overwrite a label that was already set (e.g. by kernel_spawn_strate).
     // The spawner's requested label takes precedence over the default path-derived one.
     if silo.strate_label.is_none() {
-        silo.strate_label = Some(label);
+        silo.strate_label = Some(Arc::from(label));
     }
     Ok(())
 }
@@ -1423,7 +1367,7 @@ pub fn current_task_silo_label() -> Option<String> {
     let mgr = SILO_MANAGER.lock();
     let silo_id = mgr.silo_for_task(task.id)?;
     let silo = mgr.get(silo_id).ok()?;
-    silo.strate_label.clone()
+    silo.strate_label.as_deref().map(String::from)
 }
 
 /// Family of the silo owning the calling task.
@@ -1476,29 +1420,76 @@ pub fn current_task_dma_quota() -> Option<DmaQuota> {
 
 /// Performs the list silos snapshot operation.
 pub fn list_silos_snapshot() -> Vec<SiloSnapshot> {
-    let mgr = SILO_MANAGER.lock();
-    mgr.silos
-        .values()
-        .map(|s| SiloSnapshot {
-            id: s.id.sid,
-            tier: s.id.tier,
-            name: s.name.clone(),
-            strate_label: s.strate_label.clone(),
-            state: s.state,
-            task_count: s.tasks.len(),
-            mem_usage_bytes: s.mem_usage_bytes,
-            mem_min_bytes: s.config.mem_min,
-            mem_max_bytes: s.config.mem_max,
-            mode: s.config.mode,
-            graphics_flags: s.config.flags
-                & (SILO_FLAG_GRAPHICS
-                    | SILO_FLAG_WEBRTC_NATIVE
-                    | SILO_FLAG_GRAPHICS_READ_ONLY
-                    | SILO_FLAG_WEBRTC_TURN_FORCE),
-            graphics_max_sessions: s.config.graphics_max_sessions,
-            graphics_session_ttl_sec: s.config.graphics_session_ttl_sec,
+    // Preallocate outside the registry lock. Capturing Arc references and fixed
+    // task arrays cannot allocate; strings and runtime lookups happen afterwards.
+    let rows = loop {
+        let capacity = SILO_MANAGER.lock().silos.len();
+        let mut rows = Vec::with_capacity(capacity);
+        let mgr = SILO_MANAGER.lock();
+        if mgr.silos.len() > rows.capacity() {
+            continue;
+        }
+        for s in mgr.silos.values() {
+            rows.push((
+                s.id,
+                s.name.clone(),
+                s.strate_label.clone(),
+                s.state,
+                s.config,
+                s.memory_account.clone(),
+                s.tasks.clone(),
+            ));
+        }
+        break rows;
+    };
+    rows.into_iter()
+        .map(|(id, name, label, state, config, account, tasks)| {
+            let runtime_strates = runtime_strate_names(&tasks, label.as_deref());
+            SiloSnapshot {
+                id: id.sid,
+                tier: id.tier,
+                name: String::from(name.as_ref()),
+                strate_label: label.as_deref().map(String::from),
+                state,
+                task_count: tasks.len(),
+                runtime_strates,
+                mem_usage_bytes: account.used(),
+                mem_min_bytes: config.mem_min,
+                mem_max_bytes: config.mem_max,
+                mode: config.mode,
+                graphics_flags: config.flags
+                    & (SILO_FLAG_GRAPHICS
+                        | SILO_FLAG_WEBRTC_NATIVE
+                        | SILO_FLAG_GRAPHICS_READ_ONLY
+                        | SILO_FLAG_WEBRTC_TURN_FORCE),
+                graphics_max_sessions: config.graphics_max_sessions,
+                graphics_session_ttl_sec: config.graphics_session_ttl_sec,
+            }
         })
         .collect()
+}
+
+fn runtime_strate_names(tasks: &HVec<TaskId, 64>, boot_label: Option<&str>) -> Vec<String> {
+    let mut names = Vec::new();
+    for tid in tasks {
+        if let Some(task) = crate::process::get_task_by_id(*tid) {
+            if task.get_state() == crate::process::TaskState::Dead {
+                continue;
+            }
+            if let Some((_, name)) = task
+                .name
+                .split_once("/strate-admin-")
+                .or_else(|| task.name.split_once("/strate-"))
+            {
+                names.push(String::from(name));
+            } else if task.is_kernel() {
+                if let Some(label) = boot_label {
+                    names.push(String::from(label));
+                }
+            }
+        }
+    }
+    names
 }
 
 /// Return silo identity + memory accounting for a task, if the task belongs to a silo.
@@ -1525,8 +1516,8 @@ pub fn silo_info_for_task(task_id: TaskId) -> Option<(u32, Option<String>, u64, 
     let silo = mgr.get(silo_id).ok()?;
     Some((
         silo.id.sid,
-        silo.strate_label.clone(),
-        silo.mem_usage_bytes,
+        silo.strate_label.as_deref().map(String::from),
+        silo.memory_account.used(),
         silo.config.mem_min,
         silo.config.mem_max,
     ))
@@ -1552,6 +1543,25 @@ fn compute_silo_xcr0(config: &SiloConfig) -> u64 {
     xcr0_for_features(allowed)
 }
 
+/// Rolls back a manual launch until its task has been published.
+struct PendingStrateLaunch {
+    module_id: u64,
+    silo_id: Option<u32>,
+    committed: bool,
+}
+
+impl Drop for PendingStrateLaunch {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if let Some(sid) = self.silo_id {
+            SILO_MANAGER.lock().silos.remove(&sid);
+        }
+        MODULE_REGISTRY.lock().remove(self.module_id);
+    }
+}
+
 /// Performs the kernel spawn strate operation.
 pub fn kernel_spawn_strate(
     elf_data: &[u8],
@@ -1563,6 +1573,11 @@ pub fn kernel_spawn_strate(
         registry.register(elf_data.to_vec())?
     };
 
+    let mut pending = PendingStrateLaunch {
+        module_id,
+        silo_id: None,
+        committed: false,
+    };
     let silo_id = {
         let mut mgr = SILO_MANAGER.lock();
         // For kernel_spawn_strate (manual command), we auto-assign SID > 1000.
@@ -1595,13 +1610,13 @@ pub fn kernel_spawn_strate(
 
         let silo = Silo {
             id,
-            name: alloc::format!("silo-{}", id.sid),
-            strate_label: Some(requested_label),
-            state: SiloState::Ready,
+            name: Arc::from(alloc::format!("silo-{}", id.sid)),
+            strate_label: Some(Arc::from(requested_label)),
+            state: SiloState::Loading,
             config: cfg,
             mode: OctalMode::from_octal(0),
             family: StrateFamily::USR,
-            mem_usage_bytes: 0,
+            memory_account: Arc::new(SiloMemoryAccount::new(cfg.mem_max)),
             flags: 0,
             module_id: Some(module_id),
             tasks: HVec::new(),
@@ -1617,6 +1632,7 @@ pub fn kernel_spawn_strate(
         id.sid
     };
 
+    pending.silo_id = Some(silo_id);
     let module_data = {
         let registry = MODULE_REGISTRY.lock();
         let module = registry.get(module_id).ok_or(SyscallError::BadHandle)?;
@@ -1645,25 +1661,30 @@ pub fn kernel_spawn_strate(
         let mgr = SILO_MANAGER.lock();
         let silo = mgr.get(silo_id)?;
         silo.strate_label
-            .clone()
+            .as_deref()
+            .map(String::from)
             .unwrap_or_else(|| alloc::format!("silo-{}", silo.id.sid))
     };
-    let task_name: &'static str =
-        Box::leak(alloc::format!("silo-{}/strate-admin-{}", silo_id, display).into_boxed_str());
-    let task =
-        crate::process::elf::load_elf_task_with_caps(module_data.as_slice(), task_name, &seed_caps)
-            .map_err(|_| SyscallError::InvalidArgument)?;
+    let task_name = alloc::format!("silo-{}/strate-admin-{}", silo_id, display);
+    let account = {
+        let mgr = SILO_MANAGER.lock();
+        mgr.get(silo_id)?.memory_account.clone()
+    };
+    let task = crate::process::elf::load_elf_task_in_silo(
+        module_data.as_slice(),
+        &task_name,
+        &seed_caps,
+        account,
+    )
+    .map_err(map_elf_start_error)?;
     let task_id = task.id;
 
     let mut mgr = SILO_MANAGER.lock();
     {
         let silo = mgr.get_mut(silo_id)?;
-        if let Err(task) = silo.tasks.push(task_id) {
-            log::error!(
-                "[silo] tasks full (capacity=64), task {} not registered",
-                task.0
-            );
-        }
+        silo.tasks
+            .push(task_id)
+            .map_err(|_| SyscallError::QueueFull)?;
         silo.state = SiloState::Running;
         let fpu_xcr0 = unsafe { (*task.fpu_state.get()).xcr0_mask };
         let effective_xcr0 = (silo.config.xcr0_mask & fpu_xcr0).max(0x3);
@@ -1684,8 +1705,9 @@ pub fn kernel_spawn_strate(
         data1: 0,
         tick: crate::process::scheduler::ticks(),
     });
-    drop(mgr);
     crate::process::add_task(task);
+    drop(mgr);
+    pending.committed = true;
     Ok(silo_id)
 }
 
@@ -1711,50 +1733,12 @@ fn resolve_selector_to_silo_id(selector: &str, mgr: &SiloManager) -> Result<u32,
 
 /// Performs the kernel stop silo operation.
 pub fn kernel_stop_silo(selector: &str, force_kill: bool) -> Result<u32, SyscallError> {
-    let (silo_id, tasks) = {
-        let mut mgr = SILO_MANAGER.lock();
-        let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
-        let mut tasks = HVec::<TaskId, 64>::new();
-        {
-            let silo = mgr.get_mut(silo_id)?;
-            match silo.state {
-                SiloState::Running | SiloState::Paused => {
-                    tasks = silo.tasks.clone();
-                    silo.tasks.clear();
-                    silo.state = if force_kill {
-                        SiloState::Stopped
-                    } else {
-                        SiloState::Stopping
-                    };
-                }
-                SiloState::Stopping => {
-                    if force_kill {
-                        silo.state = SiloState::Stopped;
-                    }
-                }
-                SiloState::Stopped | SiloState::Created | SiloState::Ready => {}
-                _ => return Err(SyscallError::InvalidArgument),
-            }
-        }
-        for tid in &tasks {
-            mgr.unmap_task(*tid);
-        }
-        mgr.push_event(SiloEvent {
-            silo_id: silo_id as u64,
-            kind: if force_kill {
-                SiloEventKind::Killed
-            } else {
-                SiloEventKind::Stopped
-            },
-            data0: 0,
-            data1: 0,
-            tick: crate::process::scheduler::ticks(),
-        });
-        (silo_id, tasks)
+    let silo_id = {
+        let mgr = SILO_MANAGER.lock();
+        resolve_selector_to_silo_id(selector, &mgr)?
     };
-    for tid in tasks {
-        crate::process::kill_task(tid);
-    }
+    let tasks = stop_or_kill_silo_by_id(silo_id, force_kill, false)?;
+    request_silo_task_termination(&tasks, force_kill);
     Ok(silo_id)
 }
 
@@ -1764,7 +1748,7 @@ pub fn kernel_start_silo(selector: &str) -> Result<u32, SyscallError> {
         let mgr = SILO_MANAGER.lock();
         resolve_selector_to_silo_id(selector, &mgr)?
     };
-    let _ = start_silo_by_id(silo_id)?;
+    let _ = start_silo_by_id(silo_id, None)?;
     Ok(silo_id)
 }
 
@@ -1812,7 +1796,7 @@ pub fn kernel_rename_silo_label(selector: &str, new_label: &str) -> Result<u32, 
     let silo = mgr.get_mut(silo_id)?;
     match silo.state {
         SiloState::Stopped | SiloState::Created | SiloState::Ready | SiloState::Crashed => {
-            silo.strate_label = Some(String::from(new_label));
+            silo.strate_label = Some(Arc::from(new_label));
             Ok(silo_id)
         }
         _ => Err(SyscallError::InvalidArgument),
@@ -1841,8 +1825,8 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
         let id = SiloId::new(sid);
         let silo = Silo {
             id,
-            name: alloc::format!("silo-{}", id.sid),
-            strate_label: Some(sanitized),
+            name: Arc::from(alloc::format!("silo-{}", id.sid)),
+            strate_label: Some(Arc::from(sanitized)),
             state: SiloState::Running,
             config: SiloConfig {
                 sid: id.sid,
@@ -1852,7 +1836,7 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
             },
             mode: OctalMode::from_octal(0o777),
             family: StrateFamily::SYS,
-            mem_usage_bytes: 0,
+            memory_account: Arc::new(SiloMemoryAccount::new(0)),
             flags: 0,
             module_id: None,
             tasks: {
@@ -1868,6 +1852,9 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
             output_buf: None,
         };
 
+        let task = crate::process::get_task_by_id(task_id).ok_or(SyscallError::NotFound)?;
+        let address_space = task.process.address_space_arc();
+
         let mut mgr = SILO_MANAGER.lock();
         if mgr.silos.contains_key(&id.sid) {
             return Err(SyscallError::Again);
@@ -1878,6 +1865,9 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
             .any(|s| s.strate_label.as_deref() == silo.strate_label.as_deref())
         {
             return Err(SyscallError::AlreadyExists);
+        }
+        if !address_space.is_kernel() {
+            address_space.bind_silo_memory_account(silo.memory_account.clone())?;
         }
         mgr.silos.insert(id.sid, Box::new(silo));
         drop(mgr);
@@ -2233,6 +2223,7 @@ pub fn sys_silo_config(handle: u64, res_ptr: u64) -> Result<u64, SyscallError> {
     let mut config = config;
     config.xcr0_mask = compute_silo_xcr0(&config);
 
+    silo.memory_account.set_max(config.mem_max)?;
     silo.config = config;
     silo.mode = requested_mode;
     silo.family = family;
@@ -2274,7 +2265,7 @@ pub fn sys_silo_attach_module(handle: u64, module_handle: u64) -> Result<u64, Sy
 }
 
 /// Starts silo by id.
-fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
+fn start_silo_by_id(silo_id: u32, instance_name: Option<&str>) -> Result<u64, SyscallError> {
     let (
         module_id,
         granted_caps,
@@ -2294,8 +2285,8 @@ fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
             SiloState::Ready | SiloState::Stopped | SiloState::Running
         );
         let within_task_limit = match silo.config.max_tasks {
-            0 => true, // 0 = unlimited
-            max => silo.tasks.len() < max as usize,
+            0 => !silo.tasks.is_full(), // bounded by kernel membership storage
+            max => !silo.tasks.is_full() && silo.tasks.len() < max as usize,
         };
         let module_id = silo.module_id;
         let granted_caps = silo.granted_caps.clone();
@@ -2330,7 +2321,11 @@ fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
         let mut mgr = SILO_MANAGER.lock();
         if let Ok(silo) = mgr.get_mut(silo_id) {
             if matches!(silo.state, SiloState::Loading) {
-                silo.state = state;
+                silo.state = if state == SiloState::Running && silo.tasks.is_empty() {
+                    SiloState::Stopped
+                } else {
+                    state
+                };
             }
         }
     };
@@ -2392,15 +2387,14 @@ fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
         seed_caps.push(create_silo_admin_capability());
     }
 
-    let display = silo_label.unwrap_or(silo_name);
+    let display =
+        instance_name.unwrap_or_else(|| silo_label.as_deref().unwrap_or(silo_name.as_ref()));
     let task_name_owned = if silo_flags & SILO_FLAG_ADMIN != 0 {
         alloc::format!("silo-{}/strate-admin-{}", silo_id, display)
     } else {
         alloc::format!("silo-{}/strate-{}", silo_id, display)
     };
-    // Intentional leak: task names are expected to live for the task lifetime.
-    // This avoids generic "silo" labels in process viewers.
-    let task_name: &'static str = Box::leak(task_name_owned.into_boxed_str());
+    let task_name = task_name_owned;
 
     let module_data = {
         let registry = MODULE_REGISTRY.lock();
@@ -2413,18 +2407,26 @@ fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
         }
     };
 
-    let load_result =
-        crate::process::elf::load_elf_task_with_caps(module_data.as_slice(), task_name, &seed_caps)
-            .map_err(|err| {
-                log::warn!(
-                    "silo_start: sid={} module={} task='{}' load failed: {}",
-                    silo_id,
-                    module_id,
-                    task_name,
-                    err
-                );
-                map_elf_start_error(err)
-            });
+    let account = {
+        let mgr = SILO_MANAGER.lock();
+        mgr.get(silo_id)?.memory_account.clone()
+    };
+    let load_result = crate::process::elf::load_elf_task_in_silo(
+        module_data.as_slice(),
+        &task_name,
+        &seed_caps,
+        account,
+    )
+    .map_err(|err| {
+        log::warn!(
+            "silo_start: sid={} module={} task='{}' load failed: {}",
+            silo_id,
+            module_id,
+            task_name,
+            err
+        );
+        map_elf_start_error(err)
+    });
 
     let task = match load_result {
         Ok(task) => task,
@@ -2451,12 +2453,17 @@ fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
                 return Err(e);
             }
         };
-        if let Err(task) = silo.tasks.push(task_id) {
-            log::error!(
-                "[silo] tasks full (capacity=64), task {} not registered",
-                task.0
-            );
+        // Configuration may have reduced max_tasks while the image loaded.
+        if silo.tasks.is_full()
+            || (silo.config.max_tasks != 0 && silo.tasks.len() >= silo.config.max_tasks as usize)
+        {
+            drop(mgr);
+            rollback_loading(previous_state);
+            return Err(SyscallError::QueueFull);
         }
+        silo.tasks
+            .push(task_id)
+            .map_err(|_| SyscallError::QueueFull)?;
         silo.state = SiloState::Running;
         let fpu_xcr0 = unsafe { (*task.fpu_state.get()).xcr0_mask };
         let effective_xcr0 = (silo.config.xcr0_mask & fpu_xcr0).max(0x3);
@@ -2477,8 +2484,8 @@ fn start_silo_by_id(silo_id: u32) -> Result<u64, SyscallError> {
         data1: 0,
         tick: crate::process::scheduler::ticks(),
     });
-    drop(mgr);
     crate::process::add_task(task);
+    drop(mgr);
     Ok(task_pid as u64)
 }
 
@@ -2493,7 +2500,36 @@ pub fn sys_silo_start(handle: u64) -> Result<u64, SyscallError> {
         revoke: false,
     };
     let silo_id = resolve_silo_handle(handle, required)?;
-    start_silo_by_id(silo_id)
+    start_silo_by_id(silo_id, None)
+}
+
+/// Named launch for init; the legacy one-argument start syscall is unchanged.
+pub fn sys_silo_start_named(
+    handle: u64,
+    name_ptr: u64,
+    name_len: u64,
+) -> Result<u64, SyscallError> {
+    if name_len == 0 {
+        return sys_silo_start(handle);
+    }
+    require_silo_admin()?;
+    if name_len > 64 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let bytes = UserSliceRead::new(name_ptr, name_len as usize)?.read_to_vec();
+    let name = core::str::from_utf8(&bytes).map_err(|_| SyscallError::InvalidArgument)?;
+    if !is_valid_label(name) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let required = CapPermissions {
+        read: false,
+        write: false,
+        execute: true,
+        grant: false,
+        revoke: false,
+    };
+    let sid = resolve_silo_handle(handle, required)?;
+    start_silo_by_id(sid, Some(name))
 }
 
 /// Best-effort cleanup hook called by the scheduler when a task terminates.
@@ -2549,46 +2585,79 @@ fn stop_or_kill_silo_by_id(
     let mut mgr = SILO_MANAGER.lock();
     let tasks = {
         let silo = mgr.get_mut(silo_id)?;
-        if force_kill {
-            silo.state = SiloState::Stopped;
-            let tasks = silo.tasks.clone();
-            silo.tasks.clear();
-            tasks
-        } else {
-            match silo.state {
-                SiloState::Running | SiloState::Paused => {
-                    silo.state = SiloState::Stopping;
-                    let tasks = silo.tasks.clone();
-                    silo.tasks.clear();
-                    tasks
-                }
-                _ if require_running => return Err(SyscallError::InvalidArgument),
-                _ => HVec::new(),
+        match silo.state {
+            SiloState::Running | SiloState::Paused | SiloState::Stopping | SiloState::Crashed => {
+                // Membership survives until the scheduler's termination callback.
+                // It remains available to security checks and memory cleanup.
+                silo.state = if silo.tasks.is_empty() {
+                    SiloState::Stopped
+                } else {
+                    SiloState::Stopping
+                };
+                silo.tasks.clone()
             }
+            SiloState::Created | SiloState::Ready | SiloState::Stopped if !require_running => {
+                HVec::new()
+            }
+            _ => return Err(SyscallError::InvalidArgument),
         }
     };
-
-    for tid in &tasks {
-        mgr.unmap_task(*tid);
+    if force_kill {
+        mgr.push_event(SiloEvent {
+            silo_id: silo_id.into(),
+            kind: SiloEventKind::Killed,
+            data0: 0,
+            data1: 0,
+            tick: crate::process::scheduler::ticks(),
+        });
     }
-    if !force_kill {
-        if let Ok(silo) = mgr.get_mut(silo_id) {
-            silo.state = SiloState::Stopped;
+    Ok(tasks)
+}
+
+fn request_silo_task_termination(tasks: &HVec<TaskId, 64>, force_kill: bool) {
+    for tid in tasks {
+        if let Some(task) = crate::process::get_task_by_id(*tid) {
+            if force_kill || task.is_kernel() {
+                crate::process::kill_task(*tid);
+            } else {
+                // Allow user handlers to release their resources. A blocked or
+                // ignored SIGTERM keeps the silo Stopping until a force kill.
+                let _ = crate::process::send_signal(*tid, crate::process::Signal::SIGTERM);
+            }
         }
     }
-    mgr.push_event(SiloEvent {
-        silo_id: silo_id.into(),
-        kind: if force_kill {
-            SiloEventKind::Killed
-        } else {
-            SiloEventKind::Stopped
-        },
-        data0: 0,
-        data1: 0,
-        tick: crate::process::scheduler::ticks(),
-    });
+}
 
-    Ok(tasks)
+/// Admit descendants before publication, preserving silo limits and affinity.
+/// Keeping the registry lock through publication prevents stop racing admission.
+pub(crate) fn add_child_task_to_silo(parent: TaskId, child: Arc<Task>) -> Result<(), SyscallError> {
+    let mut mgr = SILO_MANAGER.lock();
+    if let Some(sid) = mgr.silo_for_task(parent) {
+        let silo = mgr.get_mut(sid)?;
+        if silo.state != SiloState::Running {
+            return Err(SyscallError::PermissionDenied);
+        }
+        if silo.tasks.is_full()
+            || (silo.config.max_tasks != 0 && silo.tasks.len() >= silo.config.max_tasks as usize)
+        {
+            return Err(SyscallError::QueueFull);
+        }
+        child
+            .process
+            .address_space_arc()
+            .bind_silo_memory_account(silo.memory_account.clone())?;
+        if silo.config.cpu_affinity_mask != 0 {
+            child
+                .affinity_mask
+                .store(silo.config.cpu_affinity_mask, Ordering::Relaxed);
+        }
+        silo.tasks
+            .push(child.id)
+            .map_err(|_| SyscallError::QueueFull)?;
+        mgr.map_task(child.id, sid);
+    }
+    crate::process::scheduler::add_task_with_parent(child, parent);
+    Ok(())
 }
 
 /// Performs the sys silo stop operation.
@@ -2604,9 +2673,7 @@ pub fn sys_silo_stop(handle: u64) -> Result<u64, SyscallError> {
     let silo_id = resolve_silo_handle(handle, required)?;
     let tasks = stop_or_kill_silo_by_id(silo_id, false, true)?;
 
-    for tid in tasks {
-        crate::process::kill_task(tid);
-    }
+    request_silo_task_termination(&tasks, false);
     Ok(0)
 }
 
@@ -3012,15 +3079,18 @@ pub fn silo_detail_snapshot(selector: &str) -> Result<SiloDetailSnapshot, Syscal
     let mgr = SILO_MANAGER.lock();
     let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
     let s = mgr.get(silo_id)?;
-    Ok(SiloDetailSnapshot {
+    let tasks = s.tasks.clone();
+    let label = s.strate_label.clone();
+    let mut detail = SiloDetailSnapshot {
         base: SiloSnapshot {
             id: s.id.sid,
             tier: s.id.tier,
-            name: s.name.clone(),
-            strate_label: s.strate_label.clone(),
+            name: String::from(s.name.as_ref()),
+            strate_label: s.strate_label.as_deref().map(String::from),
             state: s.state,
             task_count: s.tasks.len(),
-            mem_usage_bytes: s.mem_usage_bytes,
+            runtime_strates: Vec::new(),
+            mem_usage_bytes: s.memory_account.used(),
             mem_min_bytes: s.config.mem_min,
             mem_max_bytes: s.config.mem_max,
             mode: s.config.mode,
@@ -3059,7 +3129,10 @@ pub fn silo_detail_snapshot(selector: &str) -> Result<SiloDetailSnapshot, Syscal
                 | SILO_FLAG_WEBRTC_TURN_FORCE),
         graphics_max_sessions: s.config.graphics_max_sessions,
         graphics_session_ttl_sec: s.config.graphics_session_ttl_sec,
-    })
+    };
+    drop(mgr);
+    detail.base.runtime_strates = runtime_strate_names(&tasks, label.as_deref());
+    Ok(detail)
 }
 
 pub fn list_events_snapshot() -> Vec<SiloEventSnapshot> {
@@ -3201,16 +3274,17 @@ pub fn kernel_limit_silo(selector: &str, key: &str, value: u64) -> Result<u32, S
             next_max_tasks = value as u32;
         }
         "cpu_shares" => {
-            if value > u32::MAX as u64 {
-                return Err(SyscallError::InvalidArgument);
+            if value != 0 {
+                return Err(SyscallError::NotSupported);
             }
-            next_cpu_shares = value as u32;
+            next_cpu_shares = 0;
         }
         _ => return Err(SyscallError::InvalidArgument),
     }
     if next_mem_max != 0 && next_mem_min > next_mem_max {
         return Err(SyscallError::InvalidArgument);
     }
+    silo.memory_account.set_max(next_mem_max)?;
     silo.config.mem_min = next_mem_min;
     silo.config.mem_max = next_mem_max;
     silo.config.max_tasks = next_max_tasks;
@@ -3348,12 +3422,8 @@ pub fn handle_user_fault(
             if let Ok(silo) = mgr.get_mut(silo_id) {
                 silo.state = SiloState::Crashed;
                 tasks = silo.tasks.clone();
-                silo.tasks.clear();
                 silo.event_seq = silo.event_seq.wrapping_add(1);
             }
-        }
-        for tid in &tasks {
-            mgr.unmap_task(*tid);
         }
         mgr.push_event(SiloEvent {
             silo_id: silo_id.into(),

@@ -185,7 +185,7 @@ impl ProcScheme {
         silos.sort_by_key(|s| s.id);
         let _ = writeln!(
             output,
-            "id\tstate\ttasks\tmem_used\tmem_min\tmem_max\tgfx_flags\tgfx_sessions\tgfx_ttl\tlabel\tname"
+            "id\tstate\ttasks\tmem_used\tmem_min\tmem_max\tgfx_flags\tgfx_sessions\tgfx_ttl\tlabel\tname\tstrates"
         );
         for s in silos {
             let label = s.strate_label.unwrap_or_else(|| String::from("-"));
@@ -196,7 +196,7 @@ impl ProcScheme {
             };
             let _ = writeln!(
                 output,
-                "{}\t{:?}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{:?}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 s.id,
                 s.state,
                 s.task_count,
@@ -207,7 +207,8 @@ impl ProcScheme {
                 s.graphics_max_sessions,
                 s.graphics_session_ttl_sec,
                 label,
-                s.name
+                s.name,
+                s.runtime_strates.join(",")
             );
         }
         output

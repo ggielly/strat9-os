@@ -13,7 +13,6 @@
 use super::{
     block_current_task, current_task_clone, current_task_id, current_tid, get_child_task_id_by_tid,
     get_task_id_by_tid, kill_task,
-    scheduler::add_task_with_parent,
     task::{CpuContext, ExtendedState, KernelStack, SyncUnsafeCell, Task},
     try_wait_child, WaitChildResult,
 };
@@ -271,7 +270,7 @@ fn build_user_thread_task(
         stack_canary: core::sync::atomic::AtomicU64::new(0),
         stack_canary_addr: core::sync::atomic::AtomicU64::new(0),
         kernel_stack_user: SyncUnsafeCell::new(None),
-        name: "user-thread",
+        name: alloc::string::String::from("user-thread"),
         process: parent.process.clone(),
         pending_signals: crate::process::signal::SignalSet::new(),
         blocked_signals: parent.blocked_signals.clone(),
@@ -287,7 +286,9 @@ fn build_user_thread_task(
         sched_policy: SyncUnsafeCell::new(parent.sched_policy()),
         home_cpu: core::sync::atomic::AtomicUsize::new(usize::MAX),
         last_cpu: core::sync::atomic::AtomicUsize::new(usize::MAX),
-        affinity_mask: core::sync::atomic::AtomicU64::new(0),
+        affinity_mask: core::sync::atomic::AtomicU64::new(
+            parent.affinity_mask.load(Ordering::Relaxed),
+        ),
         vruntime: core::sync::atomic::AtomicU64::new(parent.vruntime()),
         fair_rq_generation: core::sync::atomic::AtomicU64::new(0),
         fair_on_rq: core::sync::atomic::AtomicBool::new(false),
@@ -376,7 +377,7 @@ pub fn create_user_thread(
     });
 
     let child = build_user_thread_task(&parent, user_ctx, tls_base)?;
-    add_task_with_parent(child.clone(), parent.id);
+    crate::silo::add_child_task_to_silo(parent.id, child.clone())?;
     Ok(child)
 }
 
@@ -427,7 +428,10 @@ pub fn create_user_thread_with_kernel_stack(
     };
     child.set_kernel_stack_user(stack_base, stack_len);
 
-    add_task_with_parent(child.clone(), parent.id);
+    if let Err(error) = crate::silo::add_child_task_to_silo(parent.id, child.clone()) {
+        reclaim_kernel_user_stack(&child);
+        return Err(error);
+    }
     Ok(child)
 }
 

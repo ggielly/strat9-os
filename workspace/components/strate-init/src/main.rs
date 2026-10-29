@@ -84,7 +84,7 @@ fn read_file(path: &str) -> Result<Vec<u8>, &'static str> {
     let mut out = Vec::new();
 
     let mut chunk = [0u8; 8192]; //8k temp buffer, to avoid large stack usage
-    // 64k bug here
+                                 // 64k bug here
 
     let mut eagain = 0usize;
     loop {
@@ -733,7 +733,7 @@ fn boot_silos(mut silos: Vec<SiloDef>) {
                             log("\n");
                             continue;
                         }
-                        match call::silo_start(silo_handle) {
+                        match call::silo_start_named(silo_handle, &str_def.name) {
                             Err(e) => {
                                 log("[init] silo_start failed: ");
                                 log(e.name());
@@ -785,7 +785,7 @@ fn boot_silos(mut silos: Vec<SiloDef>) {
                             log("\n");
                             continue;
                         }
-                        match call::silo_start(silo_handle) {
+                        match call::silo_start_named(silo_handle, &str_def.name) {
                             Err(e) => {
                                 log("[init] silo_start failed: ");
                                 log(e.name());

@@ -110,6 +110,16 @@ fn run_strate_lifecycle_e2e() -> bool {
         let _ = silo::kernel_destroy_silo("e2e-ram-a");
         return false;
     }
+    if !wait_until(500, || {
+        crate::process::scheduler::flush_deferred_silo_cleanups();
+        silo::silo_detail_snapshot("e2e-ram-a")
+            .map(|s| s.base.state == silo::SiloState::Stopped)
+            .unwrap_or(false)
+    }) {
+        crate::serial_println!("[selftest][strate] FAIL: stop never completed");
+        let _ = silo::kernel_stop_silo("e2e-ram-a", true);
+        return false;
+    }
     crate::serial_println!("[selftest][strate] stop ok");
 
     if silo::kernel_rename_silo_label("e2e-ram-a", "e2e-ram-b").is_err() {

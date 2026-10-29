@@ -50,15 +50,18 @@ pub use wasm_run::cmd_wasm_run;
 use silo_attach::cmd_silo_attach;
 use silo_limit::cmd_silo_limit;
 
+#[cfg(target_arch = "x86_64")]
+use crate::shell::commands::top::Strat9RatatuiBackend;
 use crate::{
     arch::vga,
     memory,
     process::elf::load_and_run_elf,
-    shell::{output::{clear_screen, format_bytes}, ShellError},
+    shell::{
+        output::{clear_screen, format_bytes},
+        ShellError,
+    },
     shell_println, silo, vfs,
 };
-#[cfg(target_arch = "x86_64")]
-use crate::shell::commands::top::Strat9RatatuiBackend;
 use alloc::{string::String, vec::Vec};
 use ratatui::{
     layout::{Constraint, Direction, Layout},
@@ -1368,23 +1371,7 @@ fn cmd_silo_list(args: &[String]) -> Result<(), ShellError> {
         let display_name = managed_name_for_runtime_sid(&managed_runtime_sids, s.id)
             .unwrap_or_else(|| s.name.clone());
         let label = s.strate_label.clone().unwrap_or_else(|| String::from("-"));
-        let mut strates = Vec::new();
-        for m in &managed {
-            if managed_runtime_sids
-                .iter()
-                .any(|(name, sid)| *sid == s.id && *name == m.name)
-            {
-                for st in &m.strates {
-                    if !st.name.is_empty() {
-                        push_unique(&mut strates, &st.name);
-                    }
-                }
-            }
-        }
-        if strates.is_empty() && label != "-" {
-            strates.push(alloc::format!("{} (kernel)", label));
-        }
-        let strates_cell = join_csv(&strates);
+        let strates_cell = join_csv(&s.runtime_strates);
         let (used_val, used_unit) = format_bytes(s.mem_usage_bytes as usize);
         let mem_cell = if s.mem_max_bytes == 0 {
             alloc::format!("{} {} / unlimited", used_val, used_unit)
@@ -1466,23 +1453,7 @@ fn cmd_strate_list(_args: &[String]) -> Result<(), ShellError> {
 
     let mut runtime_entries: Vec<StrateEntry> = Vec::new();
     for runtime in silo::list_silos_snapshot() {
-        let mut names: Vec<String> = Vec::new();
-        for m in &managed {
-            if m.name == runtime.name || m.sid == runtime.id {
-                for st in &m.strates {
-                    if !st.name.is_empty() {
-                        push_unique(&mut names, &st.name);
-                    }
-                }
-            }
-        }
-        if names.is_empty() {
-            if let Some(label) = runtime.strate_label {
-                names.push(label);
-            } else {
-                continue;
-            }
-        }
+        let names = runtime.runtime_strates;
 
         for name in names {
             if let Some(e) = runtime_entries.iter_mut().find(|e| e.name == name) {

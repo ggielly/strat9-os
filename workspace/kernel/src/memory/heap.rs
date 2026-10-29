@@ -102,6 +102,7 @@ pub(crate) fn classify_kernel_heap_backend(layout: Layout) -> KernelHeapBackend 
 //   - Every block carved by refill() is filled with POISON_BYTE in bytes [8..N-4]
 //     and stamped with SLAB_CANARY in the last 4 bytes.
 //   - dealloc_block() restores the canary and re-poisons before linking.
+//     The live allocation's canary is checked before either operation.
 //   - alloc_block() verifies poison and canary before handing the block out;
 //     a mismatch is logged immediately via serial_println! (non-allocating).
 //
@@ -367,6 +368,11 @@ impl SlabState {
         if HEAP_POISON_ENABLED {
             if slab_size >= 12 {
                 let cp = ptr.add(slab_size - 4) as *mut u32;
+                assert_eq!(
+                    *cp, SLAB_CANARY,
+                    "slab buffer overflow: class={} block={:p}",
+                    slab_size, ptr,
+                );
                 *cp = SLAB_CANARY;
             }
             let end = slab_size.saturating_sub(4);
@@ -759,8 +765,10 @@ fn log_common_oom_header(layout: Layout, effective: usize) {
     let tid = crate::process::current_task_id()
         .map(|t| t.as_u64())
         .unwrap_or(0);
-    let task_name = crate::process::current_task_clone()
-        .map(|t| t.name)
+    let current_task = crate::process::current_task_clone();
+    let task_name = current_task
+        .as_ref()
+        .map(|t| t.name.as_str())
         .unwrap_or("<none>");
 
     crate::serial_println!(

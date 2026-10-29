@@ -1729,7 +1729,7 @@ extern "C" fn elf_ring3_trampoline() -> ! {
 ///
 /// # Returns
 /// `Ok(())` on success, `Err` with a static error message on failure.
-pub fn load_and_run_elf(elf_data: &[u8], name: &'static str) -> Result<TaskId, &'static str> {
+pub fn load_and_run_elf(elf_data: &[u8], name: &str) -> Result<TaskId, &'static str> {
     load_and_run_elf_with_caps(elf_data, name, &[])
 }
 
@@ -1738,10 +1738,10 @@ pub fn load_and_run_elf(elf_data: &[u8], name: &'static str) -> Result<TaskId, &
 /// `extra_args` maps to `argv[1..]`; `argv[0]` is always `name`.
 pub fn load_and_run_elf_with_args(
     elf_data: &[u8],
-    name: &'static str,
+    name: &str,
     extra_args: &[&str],
 ) -> Result<TaskId, &'static str> {
-    let task = load_elf_task_inner(elf_data, name, extra_args, &[], USER_STACK_PAGES)?;
+    let task = load_elf_task_inner(elf_data, name, extra_args, &[], USER_STACK_PAGES, None)?;
     let task_id = task.id;
     crate::process::add_task(task);
     Ok(task_id)
@@ -1753,12 +1753,12 @@ pub fn load_and_run_elf_with_args(
 /// [`USER_STACK_MIN_PAGES`]..=[`USER_STACK_MAX_PAGES`] (issue #64).
 pub fn load_and_run_elf_with_stack(
     elf_data: &[u8],
-    name: &'static str,
+    name: &str,
     extra_args: &[&str],
     seed_caps: &[Capability],
     stack_pages: usize,
 ) -> Result<TaskId, &'static str> {
-    let task = load_elf_task_inner(elf_data, name, extra_args, seed_caps, stack_pages)?;
+    let task = load_elf_task_inner(elf_data, name, extra_args, seed_caps, stack_pages, None)?;
     let task_id = task.id;
     crate::process::add_task(task);
     Ok(task_id)
@@ -1767,16 +1767,33 @@ pub fn load_and_run_elf_with_stack(
 /// Thin public wrapper that keeps the existing API stable.
 pub fn load_elf_task_with_caps(
     elf_data: &[u8],
-    name: &'static str,
+    name: &str,
     seed_caps: &[Capability],
 ) -> Result<Arc<Task>, &'static str> {
-    load_elf_task_inner(elf_data, name, &[], seed_caps, USER_STACK_PAGES)
+    load_elf_task_inner(elf_data, name, &[], seed_caps, USER_STACK_PAGES, None)
+}
+
+/// Bind the silo quota before the first ELF/stack mapping.
+pub(crate) fn load_elf_task_in_silo(
+    elf_data: &[u8],
+    name: &str,
+    seed_caps: &[Capability],
+    account: Arc<crate::silo::SiloMemoryAccount>,
+) -> Result<Arc<Task>, &'static str> {
+    load_elf_task_inner(
+        elf_data,
+        name,
+        &[],
+        seed_caps,
+        USER_STACK_PAGES,
+        Some(account),
+    )
 }
 
 /// Performs the load and run elf with caps operation.
 pub fn load_and_run_elf_with_caps(
     elf_data: &[u8],
-    name: &'static str,
+    name: &str,
     seed_caps: &[Capability],
 ) -> Result<TaskId, &'static str> {
     log::trace!(
@@ -1784,7 +1801,7 @@ pub fn load_and_run_elf_with_caps(
         name,
         elf_data.len()
     );
-    let task = load_elf_task_inner(elf_data, name, &[], seed_caps, USER_STACK_PAGES)?;
+    let task = load_elf_task_inner(elf_data, name, &[], seed_caps, USER_STACK_PAGES, None)?;
     let task_id = task.id;
     let runtime_entry = task
         .trampoline_entry
@@ -2179,7 +2196,7 @@ fn map_user_stack(
 
 /// Everything [`build_ring3_task`] needs to assemble the kernel-side task.
 struct Ring3TaskParams<'a> {
-    name: &'static str,
+    name: &'a str,
     user_as: Arc<AddressSpace>,
     seed_caps: &'a [Capability],
     stack: UserStackLayout,
@@ -2248,7 +2265,7 @@ fn build_ring3_task(params: Ring3TaskParams<'_>) -> Result<Arc<Task>, &'static s
         stack_canary: core::sync::atomic::AtomicU64::new(stack.canary),
         stack_canary_addr: core::sync::atomic::AtomicU64::new(stack.top - 8),
         kernel_stack_user: SyncUnsafeCell::new(None),
-        name,
+        name: alloc::string::String::from(name),
         process: Arc::new(crate::process::process::Process::new(pid, user_as)),
         pending_signals: super::signal::SignalSet::new(),
         blocked_signals: super::signal::SignalSet::new(),
@@ -2379,10 +2396,11 @@ fn build_ring3_task(params: Ring3TaskParams<'_>) -> Result<Arc<Task>, &'static s
 /// `extra_args` are written to the user stack as argv[1..] after the program name.
 fn load_elf_task_inner(
     elf_data: &[u8],
-    name: &'static str,
+    name: &str,
     extra_args: &[&str],
     seed_caps: &[Capability],
     stack_pages: usize,
+    memory_account: Option<Arc<crate::silo::SiloMemoryAccount>>,
 ) -> Result<Arc<Task>, &'static str> {
     if !(USER_STACK_MIN_PAGES..=USER_STACK_MAX_PAGES).contains(&stack_pages) {
         return Err("User stack size out of range");
@@ -2410,6 +2428,11 @@ fn load_elf_task_inner(
     // Step 2: Create user address space
     log::trace!("[trace][elf] load_elf_task user_as begin");
     let user_as = Arc::new(AddressSpace::new_user()?);
+    if let Some(account) = memory_account {
+        user_as
+            .bind_silo_memory_account(account)
+            .map_err(|_| "Silo memory quota exceeded")?;
+    }
     log::trace!("[trace][elf] load_elf_task user_as done");
 
     let phdrs: Vec<Elf64Phdr> = try_collect_exact(program_headers(elf_data, &header))?;

@@ -28,7 +28,6 @@ use crate::{
     memory::{resolve_handle, AddressSpace, EffectiveMapping, VmaPageSize},
     process::{
         current_task_clone,
-        scheduler::add_task_with_parent,
         signal::{SigActionData, SigStack, SignalSet},
         task::{CpuContext, KernelStack, Pid, SyncUnsafeCell, Task},
         TaskId, TaskState,
@@ -227,7 +226,7 @@ fn build_child_task(
         stack_canary_addr: core::sync::atomic::AtomicU64::new(0),
         kernel_stack_user: SyncUnsafeCell::new(None),
 
-        name: "fork-child",
+        name: alloc::string::String::from("fork-child"),
         process: alloc::sync::Arc::new(crate::process::process::Process {
             pid,
             address_space: crate::process::task::SyncUnsafeCell::new(child_as),
@@ -281,7 +280,7 @@ fn build_child_task(
         sched_policy: SyncUnsafeCell::new(parent.sched_policy()),
         home_cpu: AtomicUsize::new(usize::MAX),
         last_cpu: AtomicUsize::new(usize::MAX),
-        affinity_mask: AtomicU64::new(0),
+        affinity_mask: AtomicU64::new(parent.affinity_mask.load(Ordering::Relaxed)),
         vruntime: AtomicU64::new(parent.vruntime()),
         fair_rq_generation: AtomicU64::new(0),
         fair_on_rq: AtomicBool::new(false),
@@ -384,7 +383,7 @@ pub fn sys_fork(frame: &SyscallFrame) -> Result<ForkResult, SyscallError> {
 
     let child_task = build_child_task(&parent, child_as, child_user_ctx)?;
     let child_pid = child_task.pid;
-    add_task_with_parent(child_task, parent.id);
+    crate::silo::add_child_task_to_silo(parent.id, child_task)?;
 
     Ok(ForkResult { child_pid })
 }

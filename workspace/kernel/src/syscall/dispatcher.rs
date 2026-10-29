@@ -339,6 +339,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_SILO_CONFIG => silo::sys_silo_config(arg1, arg2),
         SYS_SILO_ATTACH_MODULE => silo::sys_silo_attach_module(arg1, arg2),
         SYS_SILO_START => silo::sys_silo_start(arg1),
+        SYS_SILO_START_NAMED => silo::sys_silo_start_named(arg1, arg2, arg3),
         SYS_SILO_STOP => silo::sys_silo_stop(arg1),
         SYS_SILO_KILL => silo::sys_silo_kill(arg1),
         SYS_SILO_EVENT_NEXT => silo::sys_silo_event_next(arg1),

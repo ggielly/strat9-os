@@ -1423,6 +1423,18 @@ pub mod call {
         unsafe { syscall1(number::SYS_SILO_START, silo_id) }
     }
 
+    /// Start a strate with its configured instance name for runtime diagnostics.
+    pub fn silo_start_named(silo_id: usize, name: &str) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_SILO_START_NAMED,
+                silo_id,
+                name.as_ptr() as usize,
+                name.len(),
+            )
+        }
+    }
+
     /// Gracefully stop a silo.
     pub fn silo_stop(silo_id: usize) -> error::Result<usize> {
         unsafe { syscall1(number::SYS_SILO_STOP, silo_id) }
