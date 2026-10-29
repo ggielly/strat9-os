@@ -102,7 +102,11 @@ const MODULE_TABLE_HEADER_SIZE: usize = core::mem::offset_of!(ModuleTable, entri
 /// - `memory_map_size`: total size of the memory map in bytes
 ///
 /// ## Framebuffer (8 bytes + masks)
-/// - `framebuffer_addr`: **virtual** address (`0xFFFF_DEAD_0000_0000`)
+/// - `framebuffer_addr`: framebuffer base. Either a physical address (current
+///   bootloader) or an HHDM/virtual alias; the kernel normalizes values at or
+///   above `hhdm_offset` by subtracting it. The kernel maps the physical range
+///   itself, so `framebuffer_addr` must not be a dedicated non-HHDM alias
+///   unless the kernel is taught about it.
 ///
 /// ## HHDM (8 bytes)
 /// - `hhdm_offset`: Higher Half Direct Map offset

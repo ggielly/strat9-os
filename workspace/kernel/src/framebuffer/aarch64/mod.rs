@@ -9,5 +9,8 @@ pub fn detect_and_init_ops() -> FramebufferOps {
         blit: neon::blit_neon,
         blend: neon::blend_neon,
         convert: neon::convert_bgr_to_argb_neon,
+        // No non-temporal store path on aarch64 yet: reuse the cached ops.
+        fill_nt: neon::fill_neon,
+        blit_nt: neon::blit_neon,
     }
 }
