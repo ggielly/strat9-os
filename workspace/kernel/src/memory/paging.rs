@@ -420,6 +420,155 @@ fn uncached_hhdm_flags() -> PageTableFlags {
     flags
 }
 
+/// Flags selecting write-combining (WC) for a 4 KiB HHDM mapping.
+///
+/// The PAT index is `(PAT << 2) | (PCD << 1) | PWT` with PAT = PTE bit 12.
+/// `arch::x86_64::pat::init()` programs slot 1 (index `0b001`) as WC, which a
+/// leaf selects with `PWT = 1`, `PCD = 0` and the PAT bit clear. Setting bit
+/// 12 instead would select slot 4, which stays Uncacheable.
+#[cfg(target_arch = "x86_64")]
+fn wc_hhdm_flags() -> PageTableFlags {
+    // PAT index for 4 KiB pages is `(PAT << 2) | (PCD << 1) | PWT`.
+    // PA1 is programmed to Write-Combining by `arch::x86_64::pat`, so a WC
+    // leaf selects it with PWT=1, PCD=0 and the PAT bit (bit 12) clear.
+    // Using bit 12 here would select PA4, which stays Uncacheable.
+    PageTableFlags::PRESENT
+        | PageTableFlags::WRITABLE
+        | PageTableFlags::NO_EXECUTE
+        | PageTableFlags::WRITE_THROUGH
+}
+
+/// Whether this CPU can map memory as write-combining through PAT.
+///
+/// Returns `false` on architectures without PAT.
+pub fn framebuffer_wc_supported() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::arch::x86_64::pat::wc_supported()
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// Map a physical framebuffer range into the HHDM as write-combining (WC).
+///
+/// Unlike [`ensure_identity_map_range`], this helper **updates** the cache
+/// policy of pages that are already mapped (firmware framebuffer mappings or
+/// RAM the bootloader already described): a WC framebuffer is only useful if
+/// the existing WB/UC leaf is rewritten. Pages that are not mapped at all are
+/// created with WC flags.
+///
+/// Only the requested range is touched. On CPUs whose PAT has no WC slot the
+/// call falls back to the UC identity mapping so the framebuffer remains
+/// usable (with slower MMIO writes) instead of unmapped.
+pub fn ensure_framebuffer_range_wc(phys_base: u64, size: u64) {
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (phys_base, size);
+        return;
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        use crate::x86_crate_shim::structures::paging::mapper::FlagUpdateError;
+
+        if size == 0 || !is_initialized() {
+            return;
+        }
+
+        if !framebuffer_wc_supported() {
+            log::warn!(
+                "IA32_PAT has no WC slot; mapping framebuffer {:#x}..{:#x} as UC",
+                phys_base,
+                phys_base.saturating_add(size),
+            );
+            ensure_identity_map_range(phys_base, size);
+            return;
+        }
+
+        let page_size = 4096u64;
+        let start = phys_base & !(page_size - 1);
+        let end = (phys_base.saturating_add(size).saturating_add(page_size - 1))
+            & !(page_size - 1);
+        if start >= end {
+            return;
+        }
+
+        let _guard = KERNEL_PT_LOCK.lock();
+        let flags = wc_hhdm_flags();
+        let phys_offset = VirtAddr::new(crate::memory::hhdm_offset());
+        let (level_4_frame, _) = Cr3::read();
+        let level_4_virt = phys_offset + level_4_frame.start_address().as_u64();
+
+        // SAFETY: level_4_virt points to the active CR3 PML4 via HHDM.
+        let l4_table = unsafe { &mut *level_4_virt.as_mut_ptr::<PageTable>() };
+        let mut mapper = unsafe { OffsetPageTable::new(l4_table, phys_offset) };
+        let mut allocator = BuddyFrameAllocator;
+
+        let mut mapped_count: u64 = 0;
+        let mut updated_count: u64 = 0;
+        let mut p = start;
+        while p < end {
+            let virt = VirtAddr::new(crate::memory::phys_to_virt(p));
+            let page = Page::<Size4KiB>::containing_address(virt);
+
+            if mapper.translate_addr(virt).is_none() {
+                let frame = X86PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(p));
+                // SAFETY: frame is a valid physical page; mapper uses HHDM offset.
+                match unsafe { mapper.map_to(page, frame, flags, &mut allocator) } {
+                    Ok(flush) => {
+                        flush.flush();
+                        mapped_count += 1;
+                    }
+                    Err(_) => {
+                        log::error!("ensure_framebuffer_range_wc: failed to map {:#x}", p);
+                    }
+                }
+            } else {
+                // SAFETY: the mapping exists and the flags only change cache
+                // policy; the caller is wiring a framebuffer under its lock.
+                match unsafe { mapper.update_flags(page, flags) } {
+                    Ok(flush) => {
+                        flush.flush();
+                        updated_count += 1;
+                    }
+                    Err(FlagUpdateError::ParentEntryHugePage) => {
+                        // The range is covered by a 2 MiB / 1 GiB leaf owned by
+                        // the bootloader. Splitting it is out of scope; leave
+                        // its cache policy untouched and report it.
+                        log::warn!(
+                            "ensure_framebuffer_range_wc: {:#x} is part of a huge page; \
+                             WC not applied",
+                            p
+                        );
+                    }
+                    Err(_) => {
+                        log::error!("ensure_framebuffer_range_wc: failed to update {:#x}", p);
+                    }
+                }
+            }
+            p = p.saturating_add(page_size);
+        }
+
+        // Other CPUs may hold stale TLB entries for the HHDM range. The IPI
+        // path is a no-op until the APIC is initialized (early boot).
+        if mapped_count + updated_count > 0 {
+            let virt_start = VirtAddr::new(crate::memory::phys_to_virt(start));
+            let virt_end = VirtAddr::new(crate::memory::phys_to_virt(end));
+            crate::arch::x86_64::tlb::shootdown_range(virt_start, virt_end);
+            log::debug!(
+                "Framebuffer WC: {} mapped, {} retyped, phys {:#x}..{:#x}",
+                mapped_count,
+                updated_count,
+                start,
+                end,
+            );
+        }
+    }
+}
+
 // Existing mappings retain their cache policy and ELF protections. Only the
 // RAM-map caller requests WB; missing MMIO/firmware pages use UC and NX.
 fn ensure_hhdm_range(phys_base: u64, size: u64, flags: PageTableFlags) {

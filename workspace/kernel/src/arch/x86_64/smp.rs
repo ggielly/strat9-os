@@ -57,7 +57,7 @@ static AP_REACHED_RUST: AtomicUsize = AtomicUsize::new(usize::MAX);
 //   0x8010:  _gdt_table  (32 bytes: null, code64, data, code32)
 //   0x8030:  _gdt        (GDTR: limit=31, base=0x8010)
 //   0x8040:  real-mode setup (xor ax,ax; lgdt; enter PM)
-//   SMP_PM_ADDR:   32-bit code (PAT check, PAE + NXE + LME + paging)
+//   SMP_PM_ADDR:   32-bit code (PAT programming, PAE + NXE + LME + paging)
 //   SMP_LONG_ADDR: 64-bit code (load stack, jump to smp_main)
 //
 // CRITICAL: The GDT table and descriptor MUST occupy these exact offsets.
@@ -128,12 +128,22 @@ smp_trampoline_32:
     mov ds, ax
     mov ss, ax
 
-    # INIT does not reset PAT. Check the selectors used by BSP's new tables
-    # before enabling paging; stop this AP explicitly if firmware disagrees.
+    # INIT does not reset PAT, and firmware may leave no WC slot. Program the
+    # kernel layout before enabling paging so this AP indexes the same memory
+    # types as the BSP: PA0=WB, PA1=WC, PA2=WT, PA3=UC.
+    # NOTE: this constant duplicates arch/x86_64/pat::PAT_WC_VALUE; the 32-bit
+    # real-mode/protected-mode trampoline cannot call into Rust.
+    mov ecx, 0x277
+    mov eax, 0x10E
+    xor edx, edx
+    wrmsr
+
+    # Verify the four low selectors (PA0..PA3) survived the write; stop this
+    # AP explicitly if the CPU refuses the WC layout.
     mov ecx, 0x277
     rdmsr
-    and eax, 0xff0000ff
-    cmp eax, 6                       # PAT[0] = WB, PAT[3] = UC
+    and eax, 0x7ff
+    cmp eax, 0x10E
     je 3f
     mov al, 0x50                     # E9: P (PAT mismatch)
     out 0xe9, al

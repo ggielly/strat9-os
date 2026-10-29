@@ -897,7 +897,11 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         };
         let fb_size =
             (args.framebuffer_stride as u64).saturating_mul(args.framebuffer_height as u64);
-        memory::paging::ensure_identity_map_range(fb_phys, fb_size);
+        // Write-combining when PAT provides a WC slot: a firmware framebuffer
+        // is MMIO memory, and every pixel write to a UC mapping is a slow
+        // uncached store. The helper retypes an existing mapping if needed and
+        // falls back to UC when WC is unavailable.
+        memory::paging::ensure_framebuffer_range_wc(fb_phys, fb_size);
         serial_println!(
             "[init] Framebuffer mapped: phys=0x{:x} size={} bytes",
             fb_phys,
@@ -927,6 +931,60 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     );
     // Flush any log lines buffered before VGA was available.
     arch::vgabuf::vgabuf_flush_to_framebuffer();
+
+    // Record the firmware framebuffer for the display subsystem. It is
+    // published later by `hardware::init()` only if no native driver
+    // (VirtIO/AMDGPU) takes over: early boot has no allocator yet, and the
+    // uncached fallback may need one to allocate a cached back-buffer.
+    if args.framebuffer_addr != 0
+        && args.framebuffer_width != 0
+        && args.framebuffer_height != 0
+        && args.framebuffer_stride != 0
+        && (args.framebuffer_bpp == 24 || args.framebuffer_bpp == 32)
+    {
+        let fb_phys = if args.framebuffer_addr >= hhdm {
+            args.framebuffer_addr - hhdm
+        } else {
+            args.framebuffer_addr
+        };
+        let fb_virt = memory::phys_to_virt(fb_phys) as usize;
+        let mask = |size: u8, shift: u8| -> u32 {
+            if size == 0 || size >= 32 {
+                0
+            } else {
+                ((1u32 << size) - 1) << shift
+            }
+        };
+        let format = crate::hardware::video::framebuffer::PixelFormat {
+            red_mask: mask(
+                args.framebuffer_red_mask_size,
+                args.framebuffer_red_mask_shift,
+            ),
+            red_shift: args.framebuffer_red_mask_shift,
+            green_mask: mask(
+                args.framebuffer_green_mask_size,
+                args.framebuffer_green_mask_shift,
+            ),
+            green_shift: args.framebuffer_green_mask_shift,
+            blue_mask: mask(
+                args.framebuffer_blue_mask_size,
+                args.framebuffer_blue_mask_shift,
+            ),
+            blue_shift: args.framebuffer_blue_mask_shift,
+            bits_per_pixel: args.framebuffer_bpp as u8,
+        };
+        if let Err(e) =
+            crate::hardware::video::framebuffer::register_boot_framebuffer(
+                fb_virt,
+                args.framebuffer_width,
+                args.framebuffer_height,
+                args.framebuffer_stride,
+                format,
+            )
+        {
+            serial_println!("[init] Framebuffer source not published: {}", e);
+        }
+    }
     vga_println!("[OK] Paging initialized");
     vga_println!("[OK] Serial port initialized");
     vga_println!("[OK] Memory manager active");

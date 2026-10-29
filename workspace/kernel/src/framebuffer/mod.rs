@@ -1,7 +1,10 @@
 use alloc::vec::Vec;
 
+pub mod fpu;
 pub mod generic;
 pub mod gpu;
+
+pub use fpu::FpuGuard;
 
 #[cfg(test)]
 pub mod tests;
@@ -189,6 +192,16 @@ pub struct FramebufferOps {
     pub blit: FnBlit,
     pub blend: FnBlend,
     pub convert: FnConvert,
+    /// Non-temporal (streaming-store) variant of [`Self::fill`]. Safe to use
+    /// only when the destination is write-combining memory; there is no
+    /// ordering guarantee until the implementation issues its fence.
+    ///
+    /// On the pinned nightly this aliases the cached path: `_mm_stream_si128`
+    /// hits an LLVM `+soft-float` lowering bug on `x86_64-unknown-none`.
+    /// Write-combining memory already batches stores without `movntdq`.
+    pub fill_nt: FnFill,
+    /// Non-temporal (streaming-store) variant of [`Self::blit`].
+    pub blit_nt: FnBlit,
 }
 
 // ---------------------------------------------------------------------------
@@ -229,6 +242,8 @@ pub struct CanvasBuffer {
     pub last_present_tick: u64,
     /// SIMD-accelerated pixel ops (fill, blit, blend, convert).
     pub ops: FramebufferOps,
+    /// Target is write-combining memory; use non-temporal stores when possible.
+    pub wc: bool,
     /// Reusable row buffer for the 24bpp present path (S5): allocated once
     /// at the largest row seen instead of one Vec per region per present.
     pub present_row_buf: Option<Vec<u8>>,
@@ -237,6 +252,21 @@ pub struct CanvasBuffer {
 unsafe impl Send for CanvasBuffer {}
 
 impl CanvasBuffer {
+    /// Fence write-combining stores emitted by the non-temporal ops.
+    ///
+    /// One fence per public drawing call is enough; the individual rows do not
+    /// need to be globally visible to each other.
+    #[inline]
+    fn wc_fence(&self) {
+        if !self.wc {
+            return;
+        }
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!("sfence", options(nostack, preserves_flags));
+        }
+    }
+
     /// Enable double-buffering by allocating and syncing a back-buffer.
     pub fn enable_back_buffer(&mut self) -> bool {
         if self.back_buffer.is_some() {
@@ -368,6 +398,10 @@ impl CanvasBuffer {
 
     /// Fill a rectangle with a packed colour.
     pub fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: u32) {
+        // SSE2 pixel paths clobber XMM registers. The guard preserves the
+        // interrupted/caller FPU state; AVX (YMM) must not be used until the
+        // save path switches to XSAVE.
+        let _fpu = FpuGuard::save();
         if w == 0 || h == 0 {
             return;
         }
@@ -392,6 +426,13 @@ impl CanvasBuffer {
         }
 
         if self.bpp == 32 {
+            // Streaming stores are only beneficial (and only safe) on
+            // write-combining framebuffer memory.
+            let fill = if self.wc {
+                self.ops.fill_nt
+            } else {
+                self.ops.fill
+            };
             for py in y..y_end {
                 if let Some(off) = py
                     .checked_mul(self.pitch)
@@ -399,7 +440,7 @@ impl CanvasBuffer {
                 {
                     unsafe {
                         let ptr = self.addr.add(off) as *mut u32;
-                        (self.ops.fill)(ptr, color, sw);
+                        fill(ptr, color, sw);
                     }
                 }
             }
@@ -410,9 +451,159 @@ impl CanvasBuffer {
                 }
             }
         }
+        self.wc_fence();
         if self.track_dirty {
             self.dirty.include(x as u32, y as u32, sw as u32, sh as u32);
         }
+    }
+
+    /// Copy a packed XRGB8888 rectangle from `src` into the canvas.
+    ///
+    /// `src` holds `w * h` tightly packed 32bpp pixels (stride `w * 4`). The
+    /// rectangle is clipped against the canvas bounds; the actually written
+    /// `(width, height)` is returned, or `None` when the rectangle is empty,
+    /// entirely off-screen, unsupported (`bpp` other than 24/32), or `src` is
+    /// too short.
+    ///
+    /// Non-temporal stores are used only for a write-combining (`.wc`) target
+    /// at 32bpp; every other path uses cached stores.
+    pub fn blit_rect(
+        &mut self,
+        src: &[u8],
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+    ) -> Option<(usize, usize)> {
+        // SSE2 pixel paths clobber XMM registers. The guard preserves the
+        // interrupted/caller FPU state; AVX (YMM) must not be used until the
+        // save path switches to XSAVE.
+        let _fpu = FpuGuard::save();
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let x_end = core::cmp::min(x.saturating_add(w), self.width);
+        let y_end = core::cmp::min(y.saturating_add(h), self.height);
+        if x_end <= x || y_end <= y {
+            return None;
+        }
+        let cw = x_end - x;
+        let ch = y_end - y;
+        let needed = w
+            .checked_mul(h)
+            .and_then(|n| n.checked_mul(4))?;
+        if src.len() < needed {
+            return None;
+        }
+        let src_stride = w * 4;
+
+        // Double buffering: convert the packed bytes into the u32 back-buffer.
+        if self.draw_to_back {
+            if let Some(buf) = self.back_buffer.as_mut() {
+                for row in 0..ch {
+                    let dst_start = (y + row) * self.width + x;
+                    let src_row = row * src_stride;
+                    for col in 0..cw {
+                        let o = src_row + col * 4;
+                        buf[dst_start + col] = u32::from_le_bytes([
+                            src[o],
+                            src[o + 1],
+                            src[o + 2],
+                            src[o + 3],
+                        ]);
+                    }
+                }
+                if self.track_dirty {
+                    self.dirty.include(x as u32, y as u32, cw as u32, ch as u32);
+                }
+                return Some((cw, ch));
+            }
+        }
+
+        match self.bpp {
+            32 => {
+                // `blit`/`blit_nt` consume `*const u32`; a byte slice handed
+                // by the caller may not be 4-byte aligned. Fall back to
+                // unaligned per-pixel reads in that case.
+                if (src.as_ptr() as usize) & 3 != 0 {
+                    for row in 0..ch {
+                        let dst_row = (y + row) * self.pitch + x * 4;
+                        let src_row = row * src_stride;
+                        for col in 0..cw {
+                            let o = src_row + col * 4;
+                            let px = u32::from_le_bytes([
+                                src[o],
+                                src[o + 1],
+                                src[o + 2],
+                                src[o + 3],
+                            ]);
+                            unsafe {
+                                core::ptr::write_volatile(
+                                    self.addr.add(dst_row + col * 4) as *mut u32,
+                                    px,
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    let use_nt = self.wc;
+                    let blit = if use_nt {
+                        self.ops.blit_nt
+                    } else {
+                        self.ops.blit
+                    };
+                    let stride_pixels = self.pitch / 4;
+                    // Fast path: a full-width, unclipped row block is contiguous in
+                    // both source and destination.
+                    if x == 0 && cw == self.width && cw == w && stride_pixels == self.width {
+                        let dst_off = y * self.pitch;
+                        unsafe {
+                            blit(
+                                self.addr.add(dst_off) as *mut u32,
+                                src.as_ptr() as *const u32,
+                                cw * ch,
+                            );
+                        }
+                    } else {
+                        for row in 0..ch {
+                            let dst_off = (y + row) * self.pitch + x * 4;
+                            let src_off = row * src_stride;
+                            unsafe {
+                                blit(
+                                    self.addr.add(dst_off) as *mut u32,
+                                    src.as_ptr().add(src_off) as *const u32,
+                                    cw,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            24 => {
+                // Packed XRGB8888 -> B,G,R bytes. NT stores do not help on a
+                // 3-byte-per-pixel layout, so stay scalar.
+                for row in 0..ch {
+                    let dst_row = (y + row) * self.pitch + x * 3;
+                    let src_row = row * src_stride;
+                    for col in 0..cw {
+                        let o = src_row + col * 4;
+                        let off = dst_row + col * 3;
+                        unsafe {
+                            core::ptr::write_volatile(self.addr.add(off), src[o]);
+                            core::ptr::write_volatile(self.addr.add(off + 1), src[o + 1]);
+                            core::ptr::write_volatile(self.addr.add(off + 2), src[o + 2]);
+                        }
+                    }
+                }
+            }
+            _ => return None,
+        }
+
+        self.wc_fence();
+        if self.track_dirty {
+            self.dirty.include(x as u32, y as u32, cw as u32, ch as u32);
+        }
+        Some((cw, ch))
     }
 
     /// Flush dirty back-buffer regions to the hardware framebuffer.
@@ -420,6 +611,10 @@ impl CanvasBuffer {
     /// Uses SIMD-accelerated `ops.blit` when the back-buffer's row stride
     /// matches the frame-buffer's stride, falling back to row-by-row copies.
     pub fn present(&mut self) {
+        // SSE2 pixel paths clobber XMM registers. The guard preserves the
+        // interrupted/caller FPU state; AVX (YMM) must not be used until the
+        // save path switches to XSAVE.
+        let _fpu = FpuGuard::save();
         let Some(buf) = self.back_buffer.as_ref() else {
             return;
         };
@@ -456,12 +651,18 @@ impl CanvasBuffer {
 
             // Fast path: row stride matches, blit contiguous block.
             if self.bpp == 32 {
+                let use_nt = self.wc;
+                let blit = if use_nt {
+                    self.ops.blit_nt
+                } else {
+                    self.ops.blit
+                };
                 if self.width == stride_pixels_u32 && rx == 0 && rw == self.width {
                     let off = ry * self.width + rx;
                     let dst_off = ry * pitch + rx * 4;
                     unsafe {
                         let src = buf_ptr.add(off) as *const u8;
-                        (self.ops.blit)(
+                        blit(
                             fb_addr.add(dst_off) as *mut u32,
                             src as *const u32,
                             rw * rh,
@@ -474,7 +675,7 @@ impl CanvasBuffer {
                         let dst_off = (ry + row) * pitch + rx * 4;
                         unsafe {
                             let src = buf_ptr.add(src_off) as *const u32;
-                            (self.ops.blit)(fb_addr.add(dst_off) as *mut u32, src, rw);
+                            blit(fb_addr.add(dst_off) as *mut u32, src, rw);
                         }
                     }
                 }
@@ -508,6 +709,7 @@ impl CanvasBuffer {
             }
         }
 
+        self.wc_fence();
         self.dirty.clear();
         self.present_pending = false;
     }
@@ -565,6 +767,8 @@ impl FramebufferOps {
                 blit: generic::blit_generic,
                 blend: generic::blend_generic,
                 convert: generic::convert_bgr_to_argb_generic,
+                fill_nt: generic::fill_nt_generic,
+                blit_nt: generic::blit_nt_generic,
             }
         }
     }

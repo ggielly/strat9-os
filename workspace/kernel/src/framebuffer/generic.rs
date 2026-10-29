@@ -8,6 +8,17 @@ pub unsafe fn blit_generic(dst: *mut u32, src: *const u32, count: usize) {
     core::ptr::copy_nonoverlapping(src, dst, count);
 }
 
+/// Non-temporal fill fallback: portable code has no streaming stores, so this
+/// is identical to [`fill_generic`] (and needs no fence).
+pub unsafe fn fill_nt_generic(dst: *mut u32, color: u32, count: usize) {
+    fill_generic(dst, color, count);
+}
+
+/// Non-temporal blit fallback: identical to [`blit_generic`].
+pub unsafe fn blit_nt_generic(dst: *mut u32, src: *const u32, count: usize) {
+    blit_generic(dst, src, count);
+}
+
 pub unsafe fn blend_generic(dst: *mut u32, src: *const u32, alpha: u8, count: usize) {
     let alpha_u32 = alpha as u32;
     let inv_alpha = 255 - alpha_u32;

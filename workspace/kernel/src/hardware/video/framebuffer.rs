@@ -1,26 +1,33 @@
 // Framebuffer abstraction layer
 //
 // Provides a unified framebuffer interface that can use:
-// - UEFI bootloader framebuffer (bootloader-provided, UC on every boot alias)
+// - UEFI bootloader framebuffer (firmware-provided, mapped write-combining)
 // - VirtIO GPU framebuffer (native driver, zero-copy backing)
-// - Future/TODO : other GPU drivers (Bochs DRM, etc.)
+// - AMDGPU framebuffer (native driver, contiguous RAM buffer)
 //
-// Features:
-// - Resolution switching
-// - Double buffering
-// - Basic 2D drawing primitives
-// - Text rendering support
-// - SIMD pixel ops with streaming stores above the L2-derived threshold
-
+// Design rules:
+// - One install path (`install`) publishes the lockless geometry snapshot,
+//   sets the availability flag, and releases the buffers of the previous
+//   source. Adding a new source cannot forget one of the three.
+// - Geometry is published through a seqlock so a re-init (driver upgrade,
+//   resolution change) cannot leave `width()`/`info()` stale.
+// - Draw target selection lives in `CanvasBuffer` (S6), including the
+//   optional cached back-buffer used when the scanout memory is uncached.
+// - Presentation runs under the framebuffer lock: a concurrent draw must
+//   never mutate the buffer the GPU is reading, and a re-init must never
+//   free a buffer that is still being presented.
 #![allow(dead_code)]
 
 use crate::{
-    framebuffer::{CanvasBuffer, DirtyRectSet, FramebufferOps, MAX_DIRTY_RECTS, PRESENT_MIN_TICKS},
+    framebuffer::{CanvasBuffer, DirtyRectSet, FramebufferOps, PRESENT_MIN_TICKS},
     hardware::virtio::gpu,
-    memory::{self, phys_to_virt},
+    memory::{self, phys_to_virt, PhysFrame},
 };
-use core::sync::atomic::{AtomicBool, Ordering};
-use spin::{Mutex, Once};
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
+use spin::Mutex;
 
 /// Maximum supported resolution
 const MAX_WIDTH: u32 = 3840;
@@ -48,6 +55,18 @@ pub struct PixelFormat {
 }
 
 impl PixelFormat {
+    const fn zero() -> Self {
+        Self {
+            red_mask: 0,
+            red_shift: 0,
+            green_mask: 0,
+            green_shift: 0,
+            blue_mask: 0,
+            blue_shift: 0,
+            bits_per_pixel: 0,
+        }
+    }
+
     /// True for the common XRGB layout used by UEFI GOP on x86:
     /// red in bits 16..23, green 8..15, blue 0..7 (little-endian bytes
     /// B,G,R,X). This is the layout the SIMD `convert_bgr_to_argb` produces.
@@ -68,6 +87,24 @@ impl PixelFormat {
             v |= 0xFF00_0000;
         }
         v
+    }
+
+    /// Whether the draw paths can render this format without conversion.
+    ///
+    /// `blit_rect` consumes packed XRGB8888, and the pixel/fill paths use the
+    /// shifts directly, so only 32/24 bpp with the canonical R-G-B order is
+    /// accepted. Anything else is rejected at init instead of being displayed
+    /// with swapped channels.
+    pub fn is_supported(&self) -> bool {
+        matches!(
+            (
+                self.bits_per_pixel,
+                self.red_shift,
+                self.green_shift,
+                self.blue_shift
+            ),
+            (32, 16, 8, 0) | (24, 16, 8, 0)
+        )
     }
 }
 
@@ -98,6 +135,20 @@ pub struct FramebufferInfo {
     pub source: FramebufferSource,
 }
 
+impl FramebufferInfo {
+    const fn zero() -> Self {
+        Self {
+            base: 0,
+            base_virt: 0,
+            width: 0,
+            height: 0,
+            stride: 0,
+            format: PixelFormat::zero(),
+            source: FramebufferSource::None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct FramebufferRenderStats {
     pub present_pending: bool,
@@ -108,19 +159,24 @@ pub struct FramebufferRenderStats {
 unsafe impl Send for FramebufferInfo {}
 unsafe impl Sync for FramebufferInfo {}
 
+/// A physically contiguous buffer owned by the framebuffer subsystem.
+struct OwnedBuffer {
+    virt: *mut u8,
+    frame: PhysFrame,
+    order: u8,
+}
+
 /// Main framebuffer structure
 pub struct Framebuffer {
     info: FramebufferInfo,
-    /// Shared double-buffered canvas (dirty tracking, present throttling, SIMD ops)
+    /// Shared canvas: dirty tracking, present throttling, SIMD ops, and the
+    /// single implementation of draw-target selection.
     pub canvas: CanvasBuffer,
-    /// Raw double buffer for VirtIO GPU (physically contiguous)
-    double_buffer: Option<*mut u8>,
-    /// Whether the raw double buffer should be used
+    /// Scanout buffer owned by the framebuffer (VirtIO GPU only). `None` means
+    /// the hardware framebuffer belongs to firmware or another driver.
+    double_buffer: Option<OwnedBuffer>,
+    /// Whether draws target `double_buffer`.
     use_double_buffer: bool,
-    /// Total framebuffer size in bytes
-    fb_size: usize,
-    /// Whether console deferred present is active
-    console_defer_present: bool,
     /// True when the VirtIO backing IS our double buffer (zero-copy present)
     zero_copy_backing: bool,
 }
@@ -129,16 +185,129 @@ unsafe impl Send for Framebuffer {}
 unsafe impl Sync for Framebuffer {}
 
 static FRAMEBUFFER: Mutex<Option<Framebuffer>> = Mutex::new(None);
-/// Lockless snapshot of the display geometry, published once at init.
-///
-/// Getters (`info`/`width`/`height`/`stride`/`source`) read this instead of
-/// taking the framebuffer mutex, so hot paths and frequent queries never
-/// contend with drawing (G4).
-static FB_INFO: Once<FramebufferInfo> = Once::new();
 static FRAMEBUFFER_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Firmware framebuffer described during early boot.
+///
+/// Kept separately from [`FRAMEBUFFER`] because early boot runs before the
+/// global allocator exists (the uncached fallback path may allocate a cached
+/// back-buffer), and because a native driver must be allowed to take over
+/// before the firmware buffer is published.
+#[derive(Clone, Copy)]
+struct BootFramebuffer {
+    addr_virt: usize,
+    width: u32,
+    height: u32,
+    stride: u32,
+    format: PixelFormat,
+}
+static BOOT_FRAMEBUFFER: Mutex<Option<BootFramebuffer>> = Mutex::new(None);
+
+// ---------------------------------------------------------------------------
+// Lockless geometry snapshot (seqlock)
+// ---------------------------------------------------------------------------
+
+struct InfoCell(UnsafeCell<FramebufferInfo>);
+// SAFETY: all accesses go through `publish_info`/`read_info`, which implement
+// the seqlock protocol (odd sequence = write in progress).
+unsafe impl Sync for InfoCell {}
+
+static FB_INFO: InfoCell = InfoCell(UnsafeCell::new(FramebufferInfo::zero()));
+static FB_INFO_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Publish a new geometry snapshot.
+///
+/// The sequence counter makes the update replaceable: readers retry while a
+/// write is in progress, so a driver upgrade or a future `set_mode` cannot
+/// leave the lockless getters pointing at the previous source.
 fn publish_info(info: FramebufferInfo) {
-    FB_INFO.call_once(|| info);
+    let seq = FB_INFO_SEQ.load(Ordering::Relaxed);
+    FB_INFO_SEQ.store(seq.wrapping_add(1), Ordering::Release);
+    // SAFETY: exclusive writer by protocol (single writer under the FRAMEBUFFER
+    // lock); readers only copy while the sequence is even and stable.
+    unsafe { FB_INFO.0.get().write(info) };
+    FB_INFO_SEQ.store(seq.wrapping_add(2), Ordering::Release);
+}
+
+fn read_info() -> Option<FramebufferInfo> {
+    if !FRAMEBUFFER_INITIALIZED.load(Ordering::Acquire) {
+        return None;
+    }
+    loop {
+        let first = FB_INFO_SEQ.load(Ordering::Acquire);
+        if first & 1 != 0 {
+            core::hint::spin_loop();
+            continue;
+        }
+        // SAFETY: the sequence is even, so no writer is active. A writer that
+        // starts now bumps the sequence to odd and the comparison below fails.
+        let info = unsafe { FB_INFO.0.get().read() };
+        core::sync::atomic::fence(Ordering::Acquire);
+        if FB_INFO_SEQ.load(Ordering::Acquire) == first {
+            return Some(info);
+        }
+    }
+}
+
+/// Install a new framebuffer source atomically.
+///
+/// Every `init_*` goes through this helper so the availability flag, the
+/// snapshot and the release of the previous source can never diverge.
+fn install(fb: Framebuffer, info: FramebufferInfo) {
+    let previous = {
+        let mut guard = FRAMEBUFFER.lock();
+        let previous = guard.replace(fb);
+        publish_info(info);
+        FRAMEBUFFER_INITIALIZED.store(true, Ordering::Release);
+        previous
+    };
+    // Drop the lock before returning buffers to the allocator: the old
+    // framebuffer is already unreachable, and rendering holds the lock for
+    // the whole present, so no in-flight I/O can still reference it.
+    if let Some(previous) = previous {
+        previous.release_owned_buffers();
+    }
+}
+
+fn validate_boot_geometry(
+    addr_virt: usize,
+    width: u32,
+    height: u32,
+    stride: u32,
+    format: &PixelFormat,
+) -> Result<(), &'static str> {
+    if addr_virt == 0 || width == 0 || height == 0 || stride == 0 {
+        return Err("Invalid framebuffer parameters");
+    }
+    if width > MAX_WIDTH || height > MAX_HEIGHT {
+        return Err("Framebuffer resolution exceeds MAX_WIDTH/MAX_HEIGHT");
+    }
+    if !format.is_supported() {
+        return Err("Unsupported pixel format (expected 32/24 bpp R-G-B)");
+    }
+    Ok(())
+}
+
+/// Record the firmware framebuffer without publishing it yet.
+///
+/// Called from early boot (before the allocator exists). [`init`] installs it
+/// as the fallback source if no native driver takes over.
+pub fn register_boot_framebuffer(
+    addr_virt: usize,
+    width: u32,
+    height: u32,
+    stride: u32,
+    format: PixelFormat,
+) -> Result<(), &'static str> {
+    validate_boot_geometry(addr_virt, width, height, stride, &format)?;
+    *BOOT_FRAMEBUFFER.lock() = Some(BootFramebuffer {
+        addr_virt,
+        width,
+        height,
+        stride,
+        format,
+    });
+    Ok(())
 }
 
 impl Framebuffer {
@@ -146,65 +315,109 @@ impl Framebuffer {
         self.canvas.present_pending = true;
     }
 
+    /// Present the pending dirty regions. Called with the framebuffer lock
+    /// already held.
+    fn present_locked(&mut self) {
+        let dirty_empty = self.canvas.dirty.len == 0;
+        if dirty_empty {
+            self.canvas.present_pending = false;
+            return;
+        }
+
+        if self.info.source == FramebufferSource::VirtioGpu {
+            if let Some(db) = self.double_buffer.as_ref() {
+                if self.zero_copy_backing {
+                    // Coalesce the dirty rects into their bounding box, then
+                    // present straight from the attached backing.
+                    let mut bx0 = u32::MAX;
+                    let mut by0 = u32::MAX;
+                    let mut bx1 = 0u32;
+                    let mut by1 = 0u32;
+                    let mut idx = 0;
+                    while idx < self.canvas.dirty.len {
+                        let rect = self.canvas.dirty.rects[idx];
+                        if rect.is_valid() {
+                            bx0 = bx0.min(rect.x0);
+                            by0 = by0.min(rect.y0);
+                            bx1 = bx1.max(rect.x1);
+                            by1 = by1.max(rect.y1);
+                        }
+                        idx += 1;
+                    }
+                    if bx1 > bx0 && by1 > by0 {
+                        if let Some(gpu) = gpu::get_gpu() {
+                            let _ = gpu.present_scanout_rect(bx0, by0, bx1 - bx0, by1 - by0);
+                        }
+                    }
+                } else if let Some(gpu) = gpu::get_gpu() {
+                    // Bounce path: the GPU copies from our buffer while we
+                    // hold the lock, so no other core can draw into it.
+                    let mut idx = 0;
+                    while idx < self.canvas.dirty.len {
+                        let rect = self.canvas.dirty.rects[idx];
+                        if rect.is_valid() {
+                            let _ = unsafe {
+                                gpu.present_from_linear(
+                                    db.virt,
+                                    self.info.stride,
+                                    rect.x0,
+                                    rect.y0,
+                                    rect.x1.saturating_sub(rect.x0),
+                                    rect.y1.saturating_sub(rect.y0),
+                                )
+                            };
+                        }
+                        idx += 1;
+                    }
+                }
+            }
+        } else if self.canvas.draw_to_back {
+            // Uncached scanout without PAT/WC support: draws land in the
+            // cached canvas and are flushed here.
+            self.canvas.present();
+        }
+
+        self.canvas.dirty.clear();
+        self.canvas.present_pending = false;
+        self.canvas.last_present_tick = crate::process::scheduler::ticks();
+    }
+
     fn present_if_due(&mut self, force: bool) {
         if !self.canvas.present_pending {
             return;
         }
-        if self.use_double_buffer {
-            return;
-        }
         let now = crate::process::scheduler::ticks();
         if force || now.saturating_sub(self.canvas.last_present_tick) >= PRESENT_MIN_TICKS {
-            self.canvas.present_pending = false;
-            self.canvas.last_present_tick = now;
-        } else {
-            return;
+            self.present_locked();
         }
-
-        if self.info.source != FramebufferSource::VirtioGpu {
-            self.canvas.dirty.clear();
-            return;
-        }
-
-        if let Some(gpu) = gpu::get_gpu() {
-            let mut idx = 0;
-            while idx < self.canvas.dirty.len {
-                let rect = self.canvas.dirty.rects[idx];
-                if rect.is_valid() {
-                    let _ = unsafe {
-                        gpu.present_from_linear(
-                            self.info.base_virt as *const u8,
-                            self.info.stride,
-                            rect.x0,
-                            rect.y0,
-                            rect.x1.saturating_sub(rect.x0),
-                            rect.y1.saturating_sub(rect.y0),
-                        )
-                    };
-                }
-                idx += 1;
-            }
-        }
-        self.canvas.dirty.clear();
     }
 
-    /// Initialize framebuffer with bootloader-provided buffer
+    /// Returns the buffers owned by this instance to the allocator.
+    fn release_owned_buffers(&self) {
+        if let Some(db) = self.double_buffer.as_ref() {
+            crate::sync::with_irqs_disabled(|token| {
+                memory::free_phys_contiguous(token, db.frame, db.order);
+            });
+        }
+    }
+
+    /// Initialize framebuffer with the bootloader-provided buffer.
+    ///
+    /// `addr_virt` must be the virtual address of the framebuffer (the HHDM
+    /// alias or the bootloader's dedicated UC/WC alias), not the physical
+    /// address.
     pub fn init_bootloader(
-        addr: u64,
+        addr_virt: usize,
         width: u32,
         height: u32,
         stride: u32,
         format: PixelFormat,
     ) -> Result<(), &'static str> {
-        if addr == 0 || width == 0 || height == 0 {
-            return Err("Invalid framebuffer parameters");
-        }
-
-        let base_virt = addr as usize;
+        validate_boot_geometry(addr_virt, width, height, stride, &format)?;
 
         let info = FramebufferInfo {
-            base: addr,
-            base_virt,
+            base: 0,
+            base_virt: addr_virt,
             width,
             height,
             stride,
@@ -212,8 +425,13 @@ impl Framebuffer {
             source: FramebufferSource::Bootloader,
         };
 
-        let canvas = CanvasBuffer {
-            addr: base_virt as *mut u8,
+        // The kernel maps the firmware framebuffer write-combining when PAT
+        // allows it. If it does not, draw into a cached back-buffer and copy
+        // dirty rects during `swap_buffers` instead of doing every pixel write
+        // on uncached memory.
+        let wc = crate::memory::paging::framebuffer_wc_supported();
+        let mut canvas = CanvasBuffer {
+            addr: addr_virt as *mut u8,
             width: width as usize,
             height: height as usize,
             pitch: stride as usize,
@@ -225,29 +443,35 @@ impl Framebuffer {
             present_pending: false,
             last_present_tick: 0,
             ops: FramebufferOps::detect(),
+            wc,
             present_row_buf: None,
         };
+        if !wc {
+            canvas.enable_back_buffer();
+        }
+        let use_double_buffer = canvas.draw_to_back;
 
         let fb = Framebuffer {
             info,
             canvas,
             double_buffer: None,
-            use_double_buffer: false,
-            fb_size: (stride as usize) * (height as usize),
-            console_defer_present: false,
+            use_double_buffer,
             zero_copy_backing: false,
         };
 
-        *FRAMEBUFFER.lock() = Some(fb);
-        publish_info(info);
-        FRAMEBUFFER_INITIALIZED.store(true, Ordering::SeqCst);
+        install(fb, info);
 
         log::info!(
-            "[FB] Bootloader framebuffer: {}x{} @ {}bpp, stride={}",
+            "[FB] Bootloader framebuffer: {}x{} @ {}bpp, stride={}, {}",
             width,
             height,
             format.bits_per_pixel,
-            stride
+            stride,
+            if wc {
+                "write-combining"
+            } else {
+                "uncached + back-buffer"
+            }
         );
 
         Ok(())
@@ -264,16 +488,11 @@ impl Framebuffer {
         if gpu_info.width == 0 || gpu_info.height == 0 {
             return Err("Invalid VirtIO GPU dimensions");
         }
+        if gpu_info.width > MAX_WIDTH || gpu_info.height > MAX_HEIGHT {
+            return Err("VirtIO GPU resolution exceeds MAX_WIDTH/MAX_HEIGHT");
+        }
 
-        let format = PixelFormat {
-            red_mask: 0x00FF0000,
-            red_shift: 16,
-            green_mask: 0x0000FF00,
-            green_shift: 8,
-            blue_mask: 0x000000FF,
-            blue_shift: 0,
-            bits_per_pixel: 32,
-        };
+        let format = PixelFormat::default();
 
         // Allocate double buffer for VirtIO GPU (physically contiguous).
         let stride = gpu_info.stride;
@@ -281,7 +500,7 @@ impl Framebuffer {
         if db_size == 0 {
             return Err("Invalid VirtIO framebuffer size");
         }
-        let db_pages = (db_size + 4095) / 4096;
+        let db_pages = db_size.div_ceil(4096);
         let db_order = db_pages.next_power_of_two().trailing_zeros() as u8;
         let db_frame = crate::sync::with_irqs_disabled(|token| {
             memory::allocate_phys_contiguous(token, db_order)
@@ -335,22 +554,25 @@ impl Framebuffer {
             present_pending: false,
             last_present_tick: 0,
             ops: FramebufferOps::detect(),
+            // Scanout memory is cached RAM here: streaming stores would only
+            // hurt subsequent reads.
+            wc: false,
             present_row_buf: None,
         };
 
         let fb = Framebuffer {
             info,
             canvas,
-            double_buffer: Some(db_virt),
+            double_buffer: Some(OwnedBuffer {
+                virt: db_virt,
+                frame: db_frame,
+                order: db_order,
+            }),
             use_double_buffer: true,
-            fb_size: (stride as usize) * (gpu_info.height as usize),
-            console_defer_present: false,
             zero_copy_backing: zero_copy,
         };
 
-        *FRAMEBUFFER.lock() = Some(fb);
-        publish_info(info);
-        FRAMEBUFFER_INITIALIZED.store(true, Ordering::SeqCst);
+        install(fb, info);
 
         log::info!(
             "[FB] VirtIO GPU framebuffer: {}x{} @ {}bpp, stride={} ({})",
@@ -370,26 +592,24 @@ impl Framebuffer {
 
     /// Initialize framebuffer with AMDGPU
     pub fn init_amd_gpu() -> Result<(), &'static str> {
-        let gpu_guard = crate::hardware::amdgpu::get_gpu().ok_or("AMDGPU not available")?;
-        let gpu = gpu_guard.as_ref().ok_or("AMDGPU not initialized")?;
-
-        let (phys, width, height, pitch) = gpu.framebuffer_info();
-
-        let format = PixelFormat {
-            red_mask: 0x00FF0000,
-            red_shift: 16,
-            green_mask: 0x0000FF00,
-            green_shift: 8,
-            blue_mask: 0x000000FF,
-            blue_shift: 0,
-            bits_per_pixel: 32,
+        let (phys, width, height, pitch, base_virt) = {
+            let gpu_guard = crate::hardware::amdgpu::get_gpu().ok_or("AMDGPU not available")?;
+            let gpu = gpu_guard.as_ref().ok_or("AMDGPU not initialized")?;
+            let (phys, width, height, pitch) = gpu.framebuffer_info();
+            (phys, width, height, pitch, gpu.fb_virt())
         };
 
-        let hhdm = crate::memory::hhdm_offset();
-        let base_virt = (phys as u64 + hhdm) as usize;
+        if width == 0 || height == 0 || pitch == 0 {
+            return Err("Invalid AMDGPU framebuffer geometry");
+        }
+        if width > MAX_WIDTH || height > MAX_HEIGHT {
+            return Err("AMDGPU resolution exceeds MAX_WIDTH/MAX_HEIGHT");
+        }
+
+        let format = PixelFormat::default();
 
         let info = FramebufferInfo {
-            base: phys as u64,
+            base: phys,
             base_virt,
             width,
             height,
@@ -411,22 +631,24 @@ impl Framebuffer {
             present_pending: false,
             last_present_tick: 0,
             ops: FramebufferOps::detect(),
+            // The driver allocates the scanout from coherent RAM, mapped
+            // write-back through the HHDM.
+            wc: false,
             present_row_buf: None,
         };
 
-        *FRAMEBUFFER.lock() = Some(Framebuffer {
+        let fb = Framebuffer {
             info,
             canvas,
             double_buffer: None,
             use_double_buffer: false,
-            fb_size: (pitch as usize) * (height as usize),
-            console_defer_present: false,
             zero_copy_backing: false,
-        });
-        publish_info(info);
+        };
+
+        install(fb, info);
 
         log::info!(
-            "[FB] AMDGPU framebuffer: {}x{} @ {}bpp, {} bytes",
+            "[FB] AMDGPU framebuffer: {}x{} @ {}bpp, stride={} bytes",
             info.width,
             info.height,
             info.format.bits_per_pixel,
@@ -436,35 +658,34 @@ impl Framebuffer {
         Ok(())
     }
 
-    /// Get framebuffer info (lockless: reads the init-time snapshot)
+    /// Get framebuffer info (lockless: reads the seqlock snapshot)
     pub fn info() -> Option<FramebufferInfo> {
-        FB_INFO.get().copied()
+        read_info()
     }
 
     /// Get framebuffer width (lockless)
     pub fn width() -> u32 {
-        FB_INFO.get().map(|i| i.width).unwrap_or(0)
+        read_info().map(|i| i.width).unwrap_or(0)
     }
 
     /// Get framebuffer height (lockless)
     pub fn height() -> u32 {
-        FB_INFO.get().map(|i| i.height).unwrap_or(0)
+        read_info().map(|i| i.height).unwrap_or(0)
     }
 
     /// Get stride in bytes per row (lockless)
     pub fn stride() -> u32 {
-        FB_INFO.get().map(|i| i.stride).unwrap_or(0)
+        read_info().map(|i| i.stride).unwrap_or(0)
     }
 
     /// Check if framebuffer is initialized
     pub fn is_available() -> bool {
-        FRAMEBUFFER_INITIALIZED.load(Ordering::Relaxed)
+        FRAMEBUFFER_INITIALIZED.load(Ordering::Acquire)
     }
 
     /// Get framebuffer source (lockless)
     pub fn source() -> FramebufferSource {
-        FB_INFO
-            .get()
+        read_info()
             .map(|i| i.source)
             .unwrap_or(FramebufferSource::None)
     }
@@ -480,30 +701,41 @@ impl Framebuffer {
             })
     }
 
-    /// Set a pixel at (x, y) with RGB color.
+    /// Set a pixel. Prefer [`Self::blit_rect`] for batches: this takes the
+    /// framebuffer lock once per pixel.
     ///
-    /// Delegates to [`CanvasBuffer::write_pixel`] (S6: single implementation
-    /// of target selection). Takes the framebuffer lock for a single pixel:
-    /// fine for sparse dots, but batched drawing MUST go through
-    /// [`Self::blit_rect`] instead.
-    pub fn set_pixel(x: u32, y: u32, r: u8, g: u8, b: u8) {
+    /// Returns `false` when the pixel is out of bounds or the framebuffer is
+    /// unavailable.
+    pub fn set_pixel(x: u32, y: u32, r: u8, g: u8, b: u8) -> bool {
         let mut guard = FRAMEBUFFER.lock();
-        let fb = match guard.as_mut() {
-            Some(f) => f,
-            None => return,
-        };
-
-        if x >= fb.info.width || y >= fb.info.height {
-            return;
+        match guard.as_mut() {
+            Some(fb) => fb.set_pixel_impl(x, y, r, g, b),
+            None => false,
         }
+    }
 
-        let pixel = ((r as u32) << fb.info.format.red_shift)
-            | ((g as u32) << fb.info.format.green_shift)
-            | ((b as u32) << fb.info.format.blue_shift);
+    /// Lock-free variant of [`Self::set_pixel`] for panic/IRQ paths.
+    pub fn try_set_pixel(x: u32, y: u32, r: u8, g: u8, b: u8) -> bool {
+        let Some(mut guard) = FRAMEBUFFER.try_lock() else {
+            return false;
+        };
+        match guard.as_mut() {
+            Some(fb) => fb.set_pixel_impl(x, y, r, g, b),
+            None => false,
+        }
+    }
 
-        fb.canvas.write_pixel(x as usize, y as usize, pixel);
-        fb.canvas.dirty.include(x, y, 1, 1);
-        fb.request_present();
+    fn set_pixel_impl(&mut self, x: u32, y: u32, r: u8, g: u8, b: u8) -> bool {
+        if x >= self.info.width || y >= self.info.height {
+            return false;
+        }
+        let pixel = ((r as u32) << self.info.format.red_shift)
+            | ((g as u32) << self.info.format.green_shift)
+            | ((b as u32) << self.info.format.blue_shift);
+        self.canvas.write_pixel(x as usize, y as usize, pixel);
+        self.canvas.dirty.include(x, y, 1, 1);
+        self.request_present();
+        true
     }
 
     /// Fill rectangle with color.
@@ -513,98 +745,91 @@ impl Framebuffer {
     /// the framebuffer lock once for the whole rectangle. Does NOT present;
     /// call `swap_buffers()` after a batch of draw operations.
     pub fn fill_rect(x: u32, y: u32, width: u32, height: u32, r: u8, g: u8, b: u8) {
-        if width == 0 || height == 0 {
-            return;
-        }
-
         let mut guard = FRAMEBUFFER.lock();
-        let fb = match guard.as_mut() {
-            Some(f) => f,
-            None => return,
+        if let Some(fb) = guard.as_mut() {
+            fb.fill_rect_impl(x, y, width, height, r, g, b);
+        }
+    }
+
+    /// Lock-free variant of [`Self::fill_rect`] for panic/IRQ paths.
+    ///
+    /// Returns `false` when the framebuffer lock is held by another context:
+    /// the caller must drop the frame rather than deadlock.
+    pub fn try_fill_rect(x: u32, y: u32, width: u32, height: u32, r: u8, g: u8, b: u8) -> bool {
+        let Some(mut guard) = FRAMEBUFFER.try_lock() else {
+            return false;
         };
-
-        if x >= fb.info.width || y >= fb.info.height {
-            return;
+        match guard.as_mut() {
+            Some(fb) => fb.fill_rect_impl(x, y, width, height, r, g, b),
+            None => false,
         }
+    }
 
-        let width = width.min(fb.info.width - x);
-        let height = height.min(fb.info.height - y);
+    fn fill_rect_impl(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        r: u8,
+        g: u8,
+        b: u8,
+    ) -> bool {
+        if width == 0 || height == 0 || x >= self.info.width || y >= self.info.height {
+            return false;
+        }
+        let width = width.min(self.info.width - x);
+        let height = height.min(self.info.height - y);
         if width == 0 || height == 0 {
-            return;
+            return false;
         }
-
-        let pixel = ((r as u32) << fb.info.format.red_shift)
-            | ((g as u32) << fb.info.format.green_shift)
-            | ((b as u32) << fb.info.format.blue_shift);
-
-        fb.canvas.fill_rect(
+        let pixel = ((r as u32) << self.info.format.red_shift)
+            | ((g as u32) << self.info.format.green_shift)
+            | ((b as u32) << self.info.format.blue_shift);
+        self.canvas.fill_rect(
             x as usize,
             y as usize,
             width as usize,
             height as usize,
             pixel,
         );
-        fb.request_present();
+        self.request_present();
+        true
     }
 
-    /// Blit a packed 32bpp XRGB rectangle into the current draw target
-    /// (double buffer when enabled, else the hardware framebuffer).
+    /// Blit a packed 32bpp XRGB rectangle into the current draw target.
     ///
-    /// This is the batch primitive: the framebuffer lock is taken exactly
-    /// once and a single dirty rectangle is marked, whatever the size.
     /// `src` holds `h` rows of `w` pixels with a tight row stride of `w*4`
-    /// bytes; the rect is clipped against screen bounds.
+    /// bytes. Clipping, target selection (back buffer vs hardware), bpp
+    /// conversion and dirty marking all live in [`CanvasBuffer::blit_rect`].
     pub fn blit_rect(src: &[u8], x: u32, y: u32, w: u32, h: u32) {
-        if w == 0 || h == 0 || x >= Self::width() || y >= Self::height() {
-            return;
-        }
-        let needed = w as usize * h as usize * 4;
-        if src.len() < needed {
-            return;
-        }
-
         let mut guard = FRAMEBUFFER.lock();
-        let fb = match guard.as_mut() {
-            Some(f) => f,
-            None => return,
-        };
-
-        let max_w = fb.info.width - x;
-        let max_h = fb.info.height - y;
-        let w = w.min(max_w);
-        let h = h.min(max_h);
-        if w == 0 || h == 0 {
-            return;
+        if let Some(fb) = guard.as_mut() {
+            fb.blit_rect_impl(src, x, y, w, h);
         }
+    }
 
-        let offset = if fb.use_double_buffer {
-            fb.double_buffer.unwrap_or(fb.info.base_virt as *mut u8)
-        } else {
-            fb.info.base_virt as *mut u8
+    /// Lock-free variant of [`Self::blit_rect`] for panic/IRQ paths.
+    pub fn try_blit_rect(src: &[u8], x: u32, y: u32, w: u32, h: u32) -> bool {
+        let Some(mut guard) = FRAMEBUFFER.try_lock() else {
+            return false;
         };
-
-        let stride = fb.info.stride as usize;
-        let stride_pixels = stride / 4;
-        let src_row_bytes = w as usize * 4;
-        let full_width_contiguous =
-            x == 0 && w as usize == fb.info.width as usize && stride_pixels == w as usize;
-
-        unsafe {
-            if full_width_contiguous {
-                let dst = offset.add(y as usize * stride) as *mut u32;
-                let s = src.as_ptr() as *const u32;
-                (fb.canvas.ops.blit)(dst, s, w as usize * h as usize);
-            } else {
-                for dy in 0..h as usize {
-                    let dst = offset.add((y as usize + dy) * stride + x as usize * 4) as *mut u32;
-                    let s = src.as_ptr().add(dy * src_row_bytes) as *const u32;
-                    (fb.canvas.ops.blit)(dst, s, w as usize);
-                }
-            }
+        match guard.as_mut() {
+            Some(fb) => fb.blit_rect_impl(src, x, y, w, h),
+            None => false,
         }
+    }
 
-        fb.canvas.dirty.include(x, y, w, h);
-        fb.request_present();
+    fn blit_rect_impl(&mut self, src: &[u8], x: u32, y: u32, w: u32, h: u32) -> bool {
+        if self
+            .canvas
+            .blit_rect(src, x as usize, y as usize, w as usize, h as usize)
+            .is_none()
+        {
+            return false;
+        }
+        self.request_present();
+        true
     }
 
     /// Draw a horizontal line
@@ -619,247 +844,132 @@ impl Framebuffer {
 
     /// Clear screen to black
     pub fn clear() {
-        let info = Self::info();
-        if let Some(info) = info {
-            Self::fill_rect(0, 0, info.width, info.height, 0, 0, 0);
+        let mut guard = FRAMEBUFFER.lock();
+        if let Some(fb) = guard.as_mut() {
+            fb.clear_impl();
         }
+    }
+
+    /// Lock-free variant of [`Self::clear`] for panic/IRQ paths.
+    pub fn try_clear() -> bool {
+        let Some(mut guard) = FRAMEBUFFER.try_lock() else {
+            return false;
+        };
+        match guard.as_mut() {
+            Some(fb) => fb.clear_impl(),
+            None => false,
+        }
+    }
+
+    fn clear_impl(&mut self) -> bool {
+        let (width, height) = (self.info.width, self.info.height);
+        if width == 0 || height == 0 {
+            return false;
+        }
+        self.canvas
+            .fill_rect(0, 0, width as usize, height as usize, 0);
+        self.request_present();
+        true
     }
 
     /// Swap buffers (for double buffering)
+    ///
+    /// The framebuffer lock is held for the whole presentation, including the
+    /// GPU transfer. This is what prevents a concurrent draw from mutating the
+    /// buffer the GPU is reading/writing, and what makes it safe to free the
+    /// previous scanout buffer during a re-init.
     pub fn swap_buffers() {
-        enum VirtioPresent {
-            ZeroCopy {
-                x: u32,
-                y: u32,
-                w: u32,
-                h: u32,
-            },
-            BounceCopy {
-                src: *const u8,
-                stride: u32,
-                regions: [(u32, u32, u32, u32); MAX_DIRTY_RECTS],
-                count: usize,
-            },
-        }
-
-        let mut virtio_present = None;
-        {
-            let mut guard = FRAMEBUFFER.lock();
-            let fb = match guard.as_mut() {
-                Some(f) => f,
-                None => return,
-            };
-
-            if !fb.use_double_buffer || fb.double_buffer.is_none() {
-                return;
-            }
-
-            let db = fb.double_buffer.unwrap();
-            if fb.canvas.dirty.len == 0 {
-                return;
-            }
-
-            if fb.info.source == FramebufferSource::VirtioGpu {
-                // G3: coalesce dirty rects into their bounding box, then
-                // present. With an attached external backing this is a
-                // single TRANSFER+FLUSH pair straight from our draw target
-                // (zero copy); otherwise fall back to the bounce-copy path
-                // per rect.
-                let mut bx0 = u32::MAX;
-                let mut by0 = u32::MAX;
-                let mut bx1 = 0u32;
-                let mut by1 = 0u32;
-                let mut idx = 0;
-                while idx < fb.canvas.dirty.len {
-                    let rect = fb.canvas.dirty.rects[idx];
-                    if rect.is_valid() {
-                        bx0 = bx0.min(rect.x0);
-                        by0 = by0.min(rect.y0);
-                        bx1 = bx1.max(rect.x1);
-                        by1 = by1.max(rect.y1);
-                    }
-                    idx += 1;
-                }
-
-                virtio_present = if fb.zero_copy_backing && bx1 > bx0 && by1 > by0 {
-                    Some(VirtioPresent::ZeroCopy {
-                        x: bx0,
-                        y: by0,
-                        w: bx1 - bx0,
-                        h: by1 - by0,
-                    })
-                } else {
-                    let mut regions = [(0u32, 0u32, 0u32, 0u32); MAX_DIRTY_RECTS];
-                    let mut idx = 0;
-                    while idx < fb.canvas.dirty.len {
-                        let rect = fb.canvas.dirty.rects[idx];
-                        regions[idx] = (
-                            rect.x0,
-                            rect.y0,
-                            rect.x1.saturating_sub(rect.x0),
-                            rect.y1.saturating_sub(rect.y0),
-                        );
-                        idx += 1;
-                    }
-                    Some(VirtioPresent::BounceCopy {
-                        src: db as *const u8,
-                        stride: fb.info.stride,
-                        regions,
-                        count: fb.canvas.dirty.len,
-                    })
-                };
-            } else {
-                let dst = fb.info.base_virt as *mut u32;
-                let src_base = db as *const u32;
-                let stride_pixels = (fb.info.stride / 4) as usize;
-                let mut idx = 0;
-                while idx < fb.canvas.dirty.len {
-                    let rect = fb.canvas.dirty.rects[idx];
-                    let x = rect.x0 as usize;
-                    let y = rect.y0 as usize;
-                    let width = rect.x1.saturating_sub(rect.x0) as usize;
-                    let height = rect.y1.saturating_sub(rect.y0) as usize;
-                    // Blit groupé : si stride == width, tout est contigu, un seul appel
-                    if stride_pixels == width {
-                        let off = y * stride_pixels + x;
-                        unsafe {
-                            (fb.canvas.ops.blit)(dst.add(off), src_base.add(off), width * height);
-                        }
-                    } else {
-                        for row in 0..height {
-                            let row_off = (y + row) * stride_pixels + x;
-                            unsafe {
-                                (fb.canvas.ops.blit)(
-                                    dst.add(row_off),
-                                    src_base.add(row_off),
-                                    width,
-                                );
-                            }
-                        }
-                    }
-                    idx += 1;
-                }
-            }
+        let mut guard = FRAMEBUFFER.lock();
+        let Some(fb) = guard.as_mut() else {
+            return;
+        };
+        if !fb.use_double_buffer && !fb.canvas.draw_to_back {
+            // Direct drawing: the pixels are already in the scanout buffer.
+            // Reset the pending dirty state so it cannot leak into a later
+            // back-buffered source.
             fb.canvas.dirty.clear();
             fb.canvas.present_pending = false;
-            fb.canvas.last_present_tick = crate::process::scheduler::ticks();
+            return;
         }
-
-        match virtio_present {
-            Some(VirtioPresent::ZeroCopy { x, y, w, h }) => {
-                if let Some(gpu) = gpu::get_gpu() {
-                    let _ = gpu.present_scanout_rect(x, y, w, h);
-                }
-            }
-            Some(VirtioPresent::BounceCopy {
-                src,
-                stride,
-                regions,
-                count: region_count,
-            }) => {
-                if let Some(gpu) = gpu::get_gpu() {
-                    let mut idx = 0;
-                    while idx < region_count {
-                        let (px, py, pw, ph) = regions[idx];
-                        let _ = unsafe { gpu.present_from_linear(src, stride, px, py, pw, ph) };
-                        idx += 1;
-                    }
-                }
-            }
-            None => {}
-        }
+        fb.present_locked();
     }
 
     /// Enable/disable double buffering
+    ///
+    /// On VirtIO GPU the draw target is the scanout buffer itself, so
+    /// disabling double buffering would silently stop presenting. The request
+    /// is ignored for that source.
     pub fn set_double_buffering(enable: bool) {
-        let mut fb = FRAMEBUFFER.lock();
-        if let Some(ref mut f) = fb.as_mut() {
-            f.use_double_buffer = enable && f.double_buffer.is_some();
+        let mut guard = FRAMEBUFFER.lock();
+        let Some(fb) = guard.as_mut() else {
+            return;
+        };
+        if fb.info.source == FramebufferSource::VirtioGpu {
+            log::warn!("[FB] set_double_buffering ignored on VirtIO scanout buffer");
+            return;
         }
+        if enable {
+            fb.canvas.enable_back_buffer();
+        } else {
+            fb.canvas.disable_back_buffer(true);
+        }
+        fb.use_double_buffer = fb.canvas.draw_to_back;
     }
 }
 
 pub use crate::framebuffer::RgbColor;
 
 /// Initialize framebuffer subsystem
+///
+/// The bootloader framebuffer is installed earlier (see `init_bootloader`);
+/// this pass upgrades to a native driver when one initializes successfully.
+/// AMDGPU is attempted even when a firmware framebuffer exists, because the
+/// native path is faster and supports different modes.
 pub fn init() {
     log::info!("[FB] Initializing framebuffer subsystem...");
 
-    // Try VirtIO GPU first (native driver)
+    // Try VirtIO GPU first (native driver).
+    let mut installed = None;
     if gpu::is_available() {
-        if let Err(e) = Framebuffer::init_virtio_gpu() {
-            log::warn!("[FB] VirtIO GPU init failed: {}", e);
-        } else {
-            log::info!("[FB] Using VirtIO GPU framebuffer");
+        match Framebuffer::init_virtio_gpu() {
+            Ok(()) => installed = Some(FramebufferSource::VirtioGpu),
+            Err(e) => log::warn!("[FB] VirtIO GPU init failed: {}", e),
         }
     }
 
-    // Try AMDGPU (real hardware)
-    if !Framebuffer::is_available() && crate::hardware::amdgpu::is_available() {
-        if let Err(e) = Framebuffer::init_amd_gpu() {
-            log::warn!("[FB] AMDGPU init failed: {}", e);
-        } else {
-            log::info!("[FB] Using AMDGPU framebuffer");
+    // Try AMDGPU (real hardware) when VirtIO did not take over.
+    if installed.is_none() && crate::hardware::amdgpu::is_available() {
+        match Framebuffer::init_amd_gpu() {
+            Ok(()) => installed = Some(FramebufferSource::AmdGpu),
+            Err(e) => log::warn!("[FB] AMDGPU init failed: {}", e),
         }
     }
 
-    // VirtIO GPU and AMDGPU not available: adopt the bootloader framebuffer.
-    // The early VGA console already uses it, but the display scheme needs a
-    // `FramebufferInfo` entry, which only `init_bootloader` publishes.
-    if !Framebuffer::is_available() {
-        if let Some(args) = crate::boot_args() {
-            if args.framebuffer_addr != 0
-                && args.framebuffer_stride != 0
-                && args.framebuffer_height != 0
-            {
-                let hhdm = crate::memory::hhdm_offset();
-                let fb_virt = if hhdm != 0 && args.framebuffer_addr < hhdm {
-                    crate::memory::phys_to_virt(args.framebuffer_addr)
-                } else {
-                    args.framebuffer_addr
-                };
-                let mask = |size: u8, shift: u8| -> u32 {
-                    if size == 0 {
-                        0
-                    } else {
-                        (((1u64 << size) - 1) as u32) << shift
-                    }
-                };
-                let format = PixelFormat {
-                    red_mask: mask(
-                        args.framebuffer_red_mask_size,
-                        args.framebuffer_red_mask_shift,
-                    ),
-                    red_shift: args.framebuffer_red_mask_shift,
-                    green_mask: mask(
-                        args.framebuffer_green_mask_size,
-                        args.framebuffer_green_mask_shift,
-                    ),
-                    green_shift: args.framebuffer_green_mask_shift,
-                    blue_mask: mask(
-                        args.framebuffer_blue_mask_size,
-                        args.framebuffer_blue_mask_shift,
-                    ),
-                    blue_shift: args.framebuffer_blue_mask_shift,
-                    bits_per_pixel: args.framebuffer_bpp as u8,
-                };
-                if let Err(e) = Framebuffer::init_bootloader(
-                    fb_virt,
-                    args.framebuffer_width,
-                    args.framebuffer_height,
-                    args.framebuffer_stride,
-                    format,
-                ) {
-                    log::warn!("[FB] Bootloader framebuffer init failed: {}", e);
-                }
+    // Fall back to the firmware framebuffer recorded during early boot.
+    if installed.is_none() && !Framebuffer::is_available() {
+        let boot = BOOT_FRAMEBUFFER.lock().take();
+        if let Some(boot) = boot {
+            match Framebuffer::init_bootloader(
+                boot.addr_virt,
+                boot.width,
+                boot.height,
+                boot.stride,
+                boot.format,
+            ) {
+                Ok(()) => installed = Some(FramebufferSource::Bootloader),
+                Err(e) => log::warn!("[FB] Bootloader framebuffer rejected: {}", e),
             }
         }
     }
 
-    if Framebuffer::is_available() {
-        log::info!("[FB] Framebuffer ready");
-    } else {
-        log::warn!("[FB] No framebuffer available");
+    let source = installed.unwrap_or_else(Framebuffer::source);
+    match source {
+        FramebufferSource::VirtioGpu => log::info!("[FB] Using VirtIO GPU framebuffer"),
+        FramebufferSource::AmdGpu => log::info!("[FB] Using AMDGPU framebuffer"),
+        FramebufferSource::Bootloader => {
+            log::info!("[FB] Using UEFI bootloader framebuffer")
+        }
+        FramebufferSource::None => log::warn!("[FB] No framebuffer available"),
     }
 
     // Register /dev/display/ scheme

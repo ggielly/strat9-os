@@ -257,6 +257,7 @@ impl VgaWriter {
             present_pending: false,
             last_present_tick: 0,
             ops: crate::framebuffer::FramebufferOps::detect(),
+            wc: crate::memory::paging::framebuffer_wc_supported(),
             present_row_buf: None,
         });
         self.fmt = fmt;

@@ -40,6 +40,33 @@ pub unsafe fn blit_sse2(dst: *mut u32, src: *const u32, count: usize) {
     }
 }
 
+// === Streaming (non-temporal) store entry points ===========================
+// The pinned nightly `1.100.0-nightly (2026-07-20)` cannot lower
+// `_mm_stream_si128` (movntdq) for `x86_64-unknown-none`: the target emits
+// `+soft-float`, and LLVM aborts in stdarch with
+//   "LLVM ERROR: Do not know how to split this operator's operand!"
+//   "scalar-to-vector conversion failed"
+// The streaming paths are therefore implemented with cached SSE2 stores.
+//
+// This keeps the performance win that matters here: the framebuffer pages are
+// mapped Write-Combining, and WC memory already bypasses the cache and merges
+// stores into write-combining buffers. `movntdq` would only avoid cache-line
+// allocation, which WC memory does not perform anyway.
+//
+// Restore `_mm_stream_si128` (or use handwritten `movntdq` inline asm) once the
+// toolchain bug is fixed; the call sites already dispatch through
+// `FramebufferOps::fill_nt` / `blit_nt`.
+
+#[target_feature(enable = "sse2")]
+pub unsafe fn fill_nt_sse2(dst: *mut u32, color: u32, count: usize) {
+    fill_sse2(dst, color, count);
+}
+
+#[target_feature(enable = "sse2")]
+pub unsafe fn blit_nt_sse2(dst: *mut u32, src: *const u32, count: usize) {
+    blit_sse2(dst, src, count);
+}
+
 // In sse2, we use SSE4.1 blend where possible, but if only sse2 is available,
 // we'll implement a basic one. For simplicity, we use SSE2 compatible intrinsics.
 #[target_feature(enable = "sse2")]

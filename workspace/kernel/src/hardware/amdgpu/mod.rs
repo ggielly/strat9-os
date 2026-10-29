@@ -6,12 +6,10 @@
 
 pub mod regs;
 
-use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
-use crate::hardware::pci_client as pci;
-use crate::memory::{allocate_zeroed_frame, PhysFrame};
+use crate::{hardware::pci_client as pci, memory::PhysFrame};
 
 /// ATI/AMD display controller vendor ID.
 pub const AMD_VENDOR: u16 = 0x1002;
@@ -50,7 +48,15 @@ pub struct AmdGpu {
     fb_height: u32,
     fb_bpp: u32,
     fb_size: usize,
-    _frames: Vec<PhysFrame>,
+    /// Contiguous physical block backing the framebuffer.
+    ///
+    /// Kept so the block can be freed later (with `fb_order`) once the
+    /// display is torn down. The block is never freed today.
+    #[allow(dead_code)]
+    fb_frame: PhysFrame,
+    /// Buddy order of `fb_frame` (`2^fb_order` contiguous 4 KiB pages).
+    #[allow(dead_code)]
+    fb_order: u8,
 }
 
 static GPU: Mutex<Option<AmdGpu>> = Mutex::new(None);
@@ -118,37 +124,54 @@ pub fn init() {
     };
     crate::serial_println!("[amdgpu] VRAM: {} MB", vram_mb);
 
-    // Allocate framebuffer
+    // Allocate the framebuffer.
+    //
+    // Physical contiguity is mandatory: the CRTC scans out one linear region
+    // beginning at `fb_phys` and walking `pitch * height` bytes in order. A
+    // block of independently allocated pages would let the CPU (writing via
+    // the HHDM) and the scanout engine disagree on which bytes back a given
+    // screen offset, producing a corrupted image. One contiguous buddy block
+    // guarantees both views map identically.
     let (w, h, bpp) = (1024u32, 768u32, 32u32);
     let pitch = w * (bpp / 8);
     let fb_size = (pitch * h) as usize;
     let fb_pages = (fb_size + 4095) / 4096;
-
-    let mut frames = Vec::new();
-    for _ in 0..fb_pages {
-        match allocate_zeroed_frame() {
-            Some(f) => frames.push(f),
-            None => {
-                crate::serial_println!("[amdgpu] FB alloc failed");
-                return;
-            }
-        }
+    let order = fb_pages.next_power_of_two().trailing_zeros() as u8;
+    if order >= 63 {
+        crate::serial_println!("[amdgpu] FB order {} too large", order);
+        return;
     }
 
-    let fb_phys = frames[0].start_address.as_u64();
-    let hhdm = crate::memory::hhdm_offset();
-    let fb_virt = (fb_phys + hhdm) as usize;
+    let frame = match crate::sync::with_irqs_disabled(|t| {
+        crate::memory::allocate_phys_contiguous(t, order)
+    }) {
+        Ok(f) => f,
+        Err(_) => {
+            crate::serial_println!("[amdgpu] FB alloc failed (order {})", order);
+            return;
+        }
+    };
+
+    let fb_phys = frame.start_address.as_u64();
+    let fb_virt = crate::memory::phys_to_virt(fb_phys) as usize;
+
+    // The contiguous allocator hands out raw memory, so clear the region
+    // before it is handed to the display engine.
+    unsafe {
+        core::ptr::write_bytes(fb_virt as *mut u8, 0, fb_size);
+    }
 
     let gpu = AmdGpu {
         mmio,
-        fb_phys: fb_phys as u64,
+        fb_phys,
         fb_virt,
         fb_pitch: pitch,
         fb_width: w,
         fb_height: h,
         fb_bpp: bpp,
         fb_size,
-        _frames: frames,
+        fb_frame: frame,
+        fb_order: order,
     };
 
     gpu.configure_crtc();
@@ -197,12 +220,12 @@ impl AmdGpu {
 
     pub fn present_region(&self, _x: u32, _y: u32, _w: u32, _h: u32) {}
 
-    pub fn framebuffer_info(&self) -> (u32, u32, u32, u32) {
-        (
-            self.fb_phys as u32,
-            self.fb_width,
-            self.fb_height,
-            self.fb_pitch,
-        )
+    pub fn framebuffer_info(&self) -> (u64, u32, u32, u32) {
+        (self.fb_phys, self.fb_width, self.fb_height, self.fb_pitch)
+    }
+
+    /// Virtual (HHDM) base address of the framebuffer.
+    pub fn fb_virt(&self) -> usize {
+        self.fb_virt
     }
 }

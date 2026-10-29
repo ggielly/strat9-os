@@ -107,9 +107,12 @@ const MODULE_TABLE_HEADER_SIZE: usize = core::mem::offset_of!(ModuleTable, entri
 /// - `memory_map_size`: total size of the memory map in bytes
 ///
 /// ## Framebuffer (8 bytes + masks)
-/// - `framebuffer_addr`: **physical** address of pixel 0. The loader also
-///   maps a read-only window at `0xFFFF_DEAD_0000_0000`; the kernel may use
-///   either the window or the physical address (via HHDM/identity mapping).
+/// - `framebuffer_addr`: framebuffer base. The current loader passes a
+///   **physical** address and also maps a read-only window at
+///   `0xFFFF_DEAD_0000_0000`; the kernel may use either the window or the
+///   physical address (via HHDM/identity mapping). Values at or above
+///   `hhdm_offset` are normalized by subtracting it, so an HHDM alias is also
+///   accepted. The kernel maps the physical range itself.
 ///
 /// ## HHDM (8 bytes)
 /// - `hhdm_offset`: Higher Half Direct Map offset

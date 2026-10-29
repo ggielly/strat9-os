@@ -15,6 +15,7 @@ pub mod keyboard_layout;
 pub mod keyboard_us;
 pub mod mouse;
 pub mod msi;
+pub mod pat;
 pub mod pci;
 pub mod percpu;
 pub mod pic;
@@ -93,6 +94,10 @@ pub fn init_cpu_extensions() {
             xsetbv(0, xcr0 & supported);
         }
     }
+
+    // Program IA32_PAT so the framebuffer can select write-combining through
+    // the PAT bit. Idempotent: APs reach this function too.
+    pat::init();
 }
 
 /// Whether CR4.OSXSAVE is currently enabled on this CPU.
