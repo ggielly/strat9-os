@@ -318,6 +318,29 @@ impl Scheme for BlkDevScheme {
         Err(SyscallError::BadHandle)
     }
 
+    //  sync ========================================
+
+    /// Flushes the underlying device's volatile write cache.
+    ///
+    /// Character devices (`null`, `zero`, `random`, `urandom`) have no cache
+    /// and succeed immediately. Block devices forward to the driver's real
+    /// flush command and propagate failures, so `fsync(/dev/sda)` is now
+    /// meaningful.
+    fn sync(&self, file_id: u64) -> Result<(), SyscallError> {
+        match file_id {
+            FID_SDA => ahci::get_device()
+                .ok_or(SyscallError::BadHandle)?
+                .flush()
+                .map_err(|_| SyscallError::IoError),
+            FID_VDA => crate::hardware::storage::virtio_block::get_device()
+                .ok_or(SyscallError::BadHandle)?
+                .flush()
+                .map_err(|_| SyscallError::IoError),
+            FID_NULL | FID_ZERO | FID_RANDOM | FID_URANDOM | FID_ROOT => Ok(()),
+            _ => Err(SyscallError::BadHandle),
+        }
+    }
+
     //  stat ========================================
 
     /// Performs the stat operation.

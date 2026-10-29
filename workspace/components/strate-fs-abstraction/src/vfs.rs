@@ -409,7 +409,9 @@ pub trait BlockDevice: Send + Sync {
     }
 
     /// Flushes any cached writes to the device.
-    fn flush(&self) -> FsResult<()> {
-        Ok(())
-    }
+    ///
+    /// Must not return `Ok(())` unless the device acknowledged the flush (or
+    /// genuinely has no volatile cache). A default no-op here would make
+    /// `fsync` silently lie, so every implementation states its policy.
+    fn flush(&self) -> FsResult<()>;
 }

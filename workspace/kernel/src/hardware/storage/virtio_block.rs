@@ -131,6 +131,15 @@ pub trait BlockDevice {
 
     /// Get the total number of sectors on the device.
     fn sector_count(&self) -> u64;
+
+    /// Flush the device's volatile write cache.
+    ///
+    /// A successful return must guarantee that every write which completed
+    /// before this call is durable on the medium. Returning `Ok(())` without
+    /// a device acknowledgement makes `fsync` lie, so this method has no
+    /// default implementation: every driver must state its durability policy
+    /// explicitly. A device with no volatile cache returns `Ok(())`.
+    fn flush(&self) -> Result<(), BlockError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -207,6 +216,9 @@ pub struct VirtioBlockDevice {
     queue: SpinLock<Virtqueue>,
     capacity: u64,
     block_size: u32,
+    /// `VIRTIO_BLK_F_FLUSH` was offered by the device and negotiated, so a
+    /// `VIRTIO_BLK_T_FLUSH` request is legal and meaningful.
+    has_flush: bool,
     /// Physical -> device address translator.
     dma: DmaMapper,
     /// Pre-allocated DMA resources : no per-I/O alloc/free for common requests.
@@ -275,7 +287,8 @@ impl VirtioBlockDevice {
         if has_blk_size {
             guest_features |= 1 << 6;
         }
-        if dev_feat & (1 << 9) != 0 {
+        let has_flush = dev_feat & (1 << 9) != 0;
+        if has_flush {
             guest_features |= 1 << 9; // VIRTIO_BLK_F_FLUSH
         }
         if dev_feat & (1 << 29) != 0 {
@@ -354,6 +367,7 @@ impl VirtioBlockDevice {
             queue: SpinLock::new(queue),
             capacity,
             block_size: blk_size,
+            has_flush,
             dma,
             bounce_pool,
             meta_pool,
@@ -622,6 +636,18 @@ impl BlockDevice for VirtioBlockDevice {
     /// Performs the sector count operation.
     fn sector_count(&self) -> u64 {
         self.capacity
+    }
+
+    /// Issues `VIRTIO_BLK_T_FLUSH` and waits for the device status byte.
+    ///
+    /// Without `VIRTIO_BLK_F_FLUSH` the device is specified to have no
+    /// volatile write-back cache, so there is nothing to make durable and the
+    /// call succeeds without touching the device.
+    fn flush(&self) -> Result<(), BlockError> {
+        if !self.has_flush {
+            return Ok(());
+        }
+        self.do_request(RequestType::Flush, 0, None)
     }
 }
 

@@ -29,6 +29,7 @@ const ATA_SR_DRQ: u8 = 0x08;
 const ATA_SR_ERR: u8 = 0x01;
 
 const ATA_CMD_IDENTIFY: u8 = 0xEC;
+const ATA_CMD_FLUSH_CACHE: u8 = 0xE7;
 
 const ATA_DEVICE_MASTER: u8 = 0xA0;
 const ATA_DEVICE_SLAVE: u8 = 0xB0;
@@ -228,6 +229,21 @@ impl AtaChannel {
         self.wait_ready()?;
         Ok(())
     }
+
+    /// Flushes the drive's volatile write cache (`FLUSH CACHE`, 0xE7).
+    ///
+    /// Commands are only accepted when the drive is not busy, and completion
+    /// is not reported until the status register clears BSY without ERR.
+    fn flush_cache(&self, device: u8) -> Result<(), &'static str> {
+        self.wait_ready()?;
+        self.select_device(device, 0);
+        self.write8(ATA_REG_COMMAND, ATA_CMD_FLUSH_CACHE);
+        self.wait_ready()?;
+        if (self.read8(ATA_REG_STATUS) & ATA_SR_ERR) != 0 {
+            return Err("ATA flush error");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -293,6 +309,13 @@ impl BlockDevice for AtaDrive {
     /// Performs the sector count operation.
     fn sector_count(&self) -> u64 {
         self.info.capacity
+    }
+
+    /// Flushes the drive's volatile write cache (`FLUSH CACHE`, 0xE7).
+    fn flush(&self) -> Result<(), BlockError> {
+        self.channel
+            .flush_cache(self.device)
+            .map_err(|_| BlockError::IoError)
     }
 }
 

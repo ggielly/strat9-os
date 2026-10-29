@@ -934,6 +934,34 @@ impl NvmeController {
         Ok(())
     }
 
+    /// Flushes the namespace's volatile write cache (`NVMe Flush`, opcode 0x00).
+    ///
+    /// The command transfers no data (PRPs stay zero) and completion is only
+    /// reported once the controller posts a completion queue entry, so a
+    /// successful return means the namespace cache was actually flushed.
+    pub fn flush(&self, nsid: u32) -> Result<(), NvmeError> {
+        let cmd_id = {
+            let mut cmd = Command {
+                opcode: 0x00,
+                nsid,
+                ..Default::default()
+            };
+            self.submit_io_command(&mut cmd)?
+        };
+
+        let idx = cmd_id as usize % MAX_IO_COMMANDS;
+
+        self.io_wq.wait_until(|| {
+            if self.io_done[idx].load(Ordering::Acquire) {
+                Some(())
+            } else {
+                None
+            }
+        });
+
+        Ok(())
+    }
+
     pub fn handle_interrupt(&self) {
         let mut io = self.io_queue.lock();
 

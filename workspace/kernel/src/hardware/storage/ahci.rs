@@ -114,6 +114,7 @@ const FIS_LBA_MODE: u8 = 1 << 6;
 const ATA_IDENTIFY: u8 = 0xEC;
 const ATA_READ_DMA_EXT: u8 = 0x25;
 const ATA_WRITE_DMA_EXT: u8 = 0x35;
+const ATA_FLUSH_CACHE_EXT: u8 = 0xEA;
 
 const EFAULT: i32 = -14;
 
@@ -448,6 +449,23 @@ fn submit_cmd(
         ptr::write_unaligned(p.add(12) as *mut u32, dbc);
     }
 
+    issue_and_await_slot0(port)?;
+
+    if !write {
+        // SAFETY: dma_buf virtual addr valid, nbytes ≤ allocated
+        unsafe {
+            ptr::copy_nonoverlapping(dma_buf.virt_addr() as *const u8, buf.as_mut_ptr(), nbytes);
+        }
+    }
+    Ok(())
+}
+
+/// Issues the command already staged in slot 0 and waits for completion.
+///
+/// Shared by data commands and `FLUSH CACHE EXT` so both paths use exactly the
+/// same completion/error handling (IRQ wait in task context, bounded poll at
+/// boot).
+fn issue_and_await_slot0(port: &AhciPort) -> Result<(), AhciError> {
     let idx = port.port_num as usize;
 
     // Clear any stale completion state before issuing the command
@@ -510,13 +528,50 @@ fn submit_cmd(
         unsafe { wr32(port.port_virt, PORT_IS, 0xFFFF_FFFF) };
     }
 
-    if !write {
-        // SAFETY: dma_buf virtual addr valid, nbytes ≤ allocated
-        unsafe {
-            ptr::copy_nonoverlapping(dma_buf.virt_addr() as *const u8, buf.as_mut_ptr(), nbytes);
-        }
-    }
     Ok(())
+}
+
+/// Issues `FLUSH CACHE EXT` (0xEA) and waits for the device acknowledgement.
+///
+/// The command carries no payload, so the PRDT is empty (`PRDTL = 0`) and no
+/// DMA buffer is allocated. `fsync` must not report success before this
+/// returns, otherwise the write-back cache can still lose acknowledged writes.
+fn submit_flush(port: &AhciPort) -> Result<(), AhciError> {
+    // SAFETY: MMIO read to check device readiness
+    let tfd = unsafe { rd32(port.port_virt, PORT_TFD) };
+    if tfd & (TFD_BSY | TFD_DRQ) != 0 {
+        return Err(AhciError::Busy);
+    }
+
+    let ctab_phys = port.mem_device + CTAB_OFF;
+    let cmdh_virt = port.mem_virt + CLB_OFF; // slot 0 = first 32 bytes of CLB
+    let ctab_virt = port.mem_virt + CTAB_OFF;
+
+    // SAFETY: cmdh_virt and ctab_virt point to our allocated frame
+    unsafe {
+        let h = cmdh_virt as *mut u8;
+        ptr::write_bytes(h, 0, 32);
+
+        // CFL = 5 (H2D FIS = 20 B); W = 0: the device reads no data.
+        ptr::write_unaligned(h.add(CMDH_FLAGS) as *mut u16, 5u16.to_le());
+        ptr::write_unaligned(h.add(CMDH_PRDTL) as *mut u16, 0u16.to_le());
+        ptr::write_unaligned(
+            h.add(CMDH_CTBA) as *mut u32,
+            (ctab_phys & 0xFFFF_FFFF) as u32,
+        );
+        ptr::write_unaligned(h.add(CMDH_CTBAU) as *mut u32, (ctab_phys >> 32) as u32);
+
+        let t = ctab_virt as *mut u8;
+        ptr::write_bytes(t, 0, CTAB_PRDT + 16);
+
+        let f = t.add(CTAB_CFIS);
+        *f.add(FIS_TYPE) = FIS_TYPE_H2D;
+        *f.add(FIS_FLAGS) = FIS_C_BIT;
+        *f.add(FIS_CMD) = ATA_FLUSH_CACHE_EXT;
+        *f.add(FIS_DEVICE) = FIS_LBA_MODE;
+    }
+
+    issue_and_await_slot0(port)
 }
 
 // ========== Async command submission =======================================
@@ -1227,6 +1282,12 @@ impl BlockDevice for AhciController {
     /// Performs the sector count operation.
     fn sector_count(&self) -> u64 {
         self.sector_count()
+    }
+
+    /// Flushes the drive's volatile write cache (`FLUSH CACHE EXT`, 0xEA).
+    fn flush(&self) -> Result<(), BlockError> {
+        let port = self.first_port().ok_or(BlockError::NotReady)?;
+        submit_flush(port).map_err(|_| BlockError::IoError)
     }
 }
 

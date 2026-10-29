@@ -42,6 +42,10 @@ pub trait BlockDevice: Send + Sync {
     fn write_at(&self, offset: u64, data: &[u8]) -> FsResult<usize>;
     /// Implements size.
     fn size(&self) -> u64;
+    /// Flushes volatile device caches.
+    ///
+    /// Required (no default): a no-op default turns `fsync` into a lie.
+    fn flush(&self) -> FsResult<()>;
 }
 
 pub trait FileSystem: Send + Sync {
