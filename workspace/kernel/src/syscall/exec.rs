@@ -120,6 +120,9 @@ pub fn sys_execve(
     let new_as = AddressSpace::new_user().map_err(|_| SyscallError::OutOfMemory)?;
     let new_as_arc = alloc::sync::Arc::new(new_as);
     new_as_arc.set_owner_pid(current.pid);
+    if let Some(account) = current.process.address_space_arc().silo_memory_account() {
+        new_as_arc.bind_silo_memory_account(account)?;
+    }
 
     let load_info = match load_elf_image(elf_data, &new_as_arc) {
         Ok(info) => info,

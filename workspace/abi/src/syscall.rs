@@ -1313,19 +1313,19 @@ pub const SYS_SILO_ATTACH_MODULE: usize = 802;
 /// the running state.
 pub const SYS_SILO_START: usize = 803;
 
-/// Stop a silo gracefully (sends SIGTERM, waits for cleanup).
+/// Request a graceful silo stop (SIGTERM for user tasks).
 ///
 /// - `silo_id`: silo to stop
 ///
-/// Returns `0` on success, `-ETIMEDOUT` if the silo doesn't stop in time.
+/// Returns `0` once requested. The silo remains Stopping until all tasks terminate.
 pub const SYS_SILO_STOP: usize = 804;
 
 /// Force-kill a silo immediately (SIGKILL).
 ///
 /// - `silo_id`: silo to kill
 ///
-/// The silo is terminated without cleanup. Use `SYS_SILO_STOP` for
-/// graceful shutdown.
+/// Tasks are forcibly terminated; scheduler cleanup completes asynchronously.
+/// Use `SYS_SILO_STOP` to give user tasks a chance to handle SIGTERM.
 pub const SYS_SILO_KILL: usize = 805;
 
 /// Wait for the next event from a silo.
@@ -1385,6 +1385,10 @@ pub const SYS_SILO_ENTER_SANDBOX: usize = 811;
 ///
 /// The name is used for display and debugging purposes.
 pub const SYS_SILO_RENAME: usize = 812;
+
+/// Start a strate with an instance name. Arguments: silo handle, name pointer, name length.
+/// Existing SYS_SILO_START remains a one-argument syscall.
+pub const SYS_SILO_START_NAMED: usize = 813;
 
 // ── Block 900: ABI Introspection ────────────────────────────────────────────
 

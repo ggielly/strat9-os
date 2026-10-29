@@ -275,7 +275,7 @@ pub struct Task {
     /// paths (fork, exec, raw SYS_THREAD_CREATE).
     pub kernel_stack_user: SyncUnsafeCell<Option<(u64, u64)>>,
     /// Task name for debugging purposes
-    pub name: &'static str,
+    pub name: alloc::string::String,
     /// Capabilities granted to this task
     /// Address space for this task (kernel tasks share the kernel AS)
     pub process: Arc<crate::process::process::Process>,
@@ -946,7 +946,7 @@ impl Task {
     /// Create a new kernel task with a real allocated stack
     pub fn new_kernel_task(
         entry_point: extern "C" fn() -> !,
-        name: &'static str,
+        name: &str,
         priority: TaskPriority,
     ) -> Result<Arc<Self>, &'static str> {
         Self::new_kernel_task_with_stack(entry_point, name, priority, Self::DEFAULT_STACK_SIZE)
@@ -955,7 +955,7 @@ impl Task {
     /// Create a new kernel task with a custom kernel stack size.
     pub fn new_kernel_task_with_stack(
         entry_point: extern "C" fn() -> !,
-        name: &'static str,
+        name: &str,
         priority: TaskPriority,
         stack_size: usize,
     ) -> Result<Arc<Self>, &'static str> {
@@ -1020,7 +1020,7 @@ impl Task {
             stack_canary: AtomicU64::new(0),
             stack_canary_addr: AtomicU64::new(0),
             kernel_stack_user: SyncUnsafeCell::new(None),
-            name,
+            name: alloc::string::String::from(name),
             process,
             pending_signals: super::signal::SignalSet::new(),
             blocked_signals: super::signal::SignalSet::new(),
@@ -1062,7 +1062,7 @@ impl Task {
     pub fn new_user_task(
         entry_point: u64,
         address_space: Arc<AddressSpace>,
-        name: &'static str,
+        name: &str,
         priority: TaskPriority,
     ) -> Result<Arc<Self>, &'static str> {
         let kernel_stack = KernelStack::allocate(Self::DEFAULT_STACK_SIZE)?;
@@ -1102,7 +1102,7 @@ impl Task {
             stack_canary: AtomicU64::new(0),
             stack_canary_addr: AtomicU64::new(0),
             kernel_stack_user: SyncUnsafeCell::new(None),
-            name,
+            name: alloc::string::String::from(name),
             process: Arc::new(crate::process::process::Process::new(pid, address_space)),
             pending_signals: super::signal::SignalSet::new(),
             blocked_signals: super::signal::SignalSet::new(),

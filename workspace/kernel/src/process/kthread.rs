@@ -15,7 +15,7 @@ use crate::process::{
     scheduler::add_task,
     task::{Task, TaskId, TaskPriority},
 };
-use alloc::{boxed::Box, string::String, sync::Arc};
+use alloc::{boxed::Box, sync::Arc};
 
 /// Trampoline for closure-based kernel threads.
 ///
@@ -32,15 +32,13 @@ extern "C" fn kthread_trampoline(arg0: u64) -> ! {
 
 /// Spawn a kernel thread running `f`.
 ///
-/// `name` is copied into a leaked allocation so it satisfies the `&'static str`
-/// field of `Task`; kernel threads are few and long-lived, so this is bounded.
+/// The task owns its name and releases it when the last task reference is dropped.
 ///
 /// Returns the `TaskId` of the new task once it is registered with the
 /// scheduler (it may not have started running yet).
 pub fn spawn<F: FnOnce() + Send + 'static>(name: &str, f: F) -> Result<TaskId, &'static str> {
     let stored: Box<dyn FnOnce() + Send> = Box::new(f);
     let arg0 = Box::into_raw(Box::new(stored)) as u64;
-    let leaked_name: &'static str = Box::leak(String::from(name).into_boxed_str());
 
     // `Task::new_kernel_task_with_stack` declares `extern "C" fn() -> !`, while
     // the scheduler bootstrap (`task_entry_trampoline` -> `task_post_switch_enter`)
@@ -52,7 +50,7 @@ pub fn spawn<F: FnOnce() + Send + 'static>(name: &str, f: F) -> Result<TaskId, &
 
     let task = Task::new_kernel_task_with_stack(
         entry,
-        leaked_name,
+        name,
         TaskPriority::Normal,
         Task::DEFAULT_STACK_SIZE,
     )?;

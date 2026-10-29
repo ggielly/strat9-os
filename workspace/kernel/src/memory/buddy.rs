@@ -278,7 +278,12 @@ impl BuddyAllocator {
                 .filter_map(|region| Self::zone_intersection_aligned(region, zi))
                 .map(|(start, end)| ((end - start) / PAGE_SIZE) as usize)
                 .sum::<usize>();
-            let needed_bytes = Self::bitmap_bytes_upper_bound_for_pages(managed_pages);
+            let segment_count = memory_regions
+                .iter()
+                .filter_map(|region| Self::zone_intersection_aligned(region, zi))
+                .count();
+            let needed_bytes =
+                Self::bitmap_bytes_upper_bound_for_pages(managed_pages, segment_count);
             let reserved_bytes = Self::align_up(needed_bytes as u64, PAGE_SIZE);
 
             if reserved_bytes == 0 {
@@ -908,7 +913,10 @@ impl BuddyAllocator {
     /// Performs the pair index operation.
     #[inline]
     fn pair_index(segment: &ZoneSegment, phys: u64, order: u8) -> usize {
-        Self::page_index(segment, phys) >> (order as usize + 1)
+        // Pair boundaries follow physical alignment, just like seeding and splitting.
+        let shift = order as usize + 1;
+        ((phys / PAGE_SIZE) >> shift) as usize
+            - ((segment.base.as_u64() / PAGE_SIZE) >> shift) as usize
     }
 
     /// Performs the toggle pair operation.
@@ -926,18 +934,15 @@ impl BuddyAllocator {
     /// Performs the buddy phys operation.
     #[inline]
     fn buddy_phys(segment: &ZoneSegment, phys: u64, order: u8) -> Option<u64> {
-        let base = segment.base.as_u64();
-        if phys < base {
+        if !Self::segment_contains_block(segment, phys, order) {
             return None;
         }
-        let offset = phys - base;
         let block_size = PAGE_SIZE << order;
-        let buddy_offset = offset ^ block_size;
-        let buddy_page = (buddy_offset / PAGE_SIZE) as usize;
-        if buddy_page >= segment.page_count {
+        let buddy = phys ^ block_size;
+        if !Self::segment_contains_block(segment, buddy, order) {
             return None;
         }
-        Some(base + buddy_offset)
+        Some(buddy)
     }
 
     /// Performs the mark allocated operation.
@@ -1156,11 +1161,16 @@ impl BuddyAllocator {
         boot_alloc::protected_ranges_snapshot()
     }
 
-    /// Performs the pairs for order operation.
+    /// Upper bound on physical pairs overlapped by a segment at this order.
     #[inline]
     fn pairs_for_order(span_pages: usize, order: u8) -> usize {
         let pair_span = 1usize << (order as usize + 1);
-        span_pages.div_ceil(pair_span)
+        // An unaligned segment can overlap one extra physical pair.
+        if span_pages == 0 {
+            0
+        } else {
+            span_pages.div_ceil(pair_span) + 1
+        }
     }
 
     /// Performs the bits to bytes operation.
@@ -1169,7 +1179,7 @@ impl BuddyAllocator {
         bits.div_ceil(8)
     }
 
-    /// Performs the bitmap bytes for span operation.
+    /// Upper bound on bitmap bytes for a segment with arbitrary alignment.
     fn bitmap_bytes_for_span(span_pages: usize) -> usize {
         let mut bytes = 0usize;
         for order in 0..=MAX_ORDER as u8 {
@@ -1191,7 +1201,7 @@ impl BuddyAllocator {
     /// overhead to account for small segments where the bound is less tight.
     /// The factor of 2 provides safety margin for edge cases (segmentation,
     /// alignment, debug bitmaps).
-    fn bitmap_bytes_upper_bound_for_pages(page_count: usize) -> usize {
+    fn bitmap_bytes_upper_bound_for_pages(page_count: usize, segment_count: usize) -> usize {
         // Buddy bitmaps: ~1 bit per page across all orders (sum of s/2^(k+1) ≈ s)
         // Factor of 2 for safety margin and segmentation overhead
         #[allow(unused_mut)]
@@ -1202,6 +1212,10 @@ impl BuddyAllocator {
             bits = bits.saturating_add(page_count);
         }
         Self::bits_to_bytes(bits)
+            // Each segment has independently rounded byte arrays, plus the
+            // extra pair at unaligned boundaries. Boot reservations are
+            // page-aligned prefix allocations and cannot add segments.
+            .saturating_add(segment_count.saturating_mul(2 * (MAX_ORDER + 1) + 1))
             .saturating_add(Self::pageblock_tag_bytes_upper_bound_for_pages(page_count))
     }
 
@@ -1996,30 +2010,28 @@ fn drain_local_caches_to_global(max_pages: usize, global: &mut OnDemandGlobalLoc
     let mut batch = [0u64; LOCAL_CACHE_FLUSH_BATCH];
     for migratetype in Migratetype::ALL {
         for cpu in 0..crate::arch::percpu::MAX_CPUS {
-            if drained >= max_pages {
-                break;
-            }
-            let target = core::cmp::min(batch.len(), max_pages.saturating_sub(drained));
-            if target == 0 {
-                break;
-            }
+            // Bound the pass even if another CPU continuously refills this cache.
+            let mut cache_budget = LOCAL_CACHE_CAPACITY;
+            while drained < max_pages && cache_budget != 0 {
+                let target = batch.len().min(max_pages - drained).min(cache_budget);
+                let popped = {
+                    let mut cache = LOCAL_FRAME_CACHES[local_cache_slot(cpu, migratetype)].lock();
+                    cache.pop_many(&mut batch[..target])
+                };
+                if popped == 0 {
+                    break;
+                }
 
-            let popped = {
-                let mut cache = LOCAL_FRAME_CACHES[local_cache_slot(cpu, migratetype)].lock();
-                cache.pop_many(&mut batch[..target])
-            };
-            if popped == 0 {
-                continue;
-            }
+                for phys in batch.iter().take(popped).copied() {
+                    local_cached_dec_phys(phys, migratetype);
+                }
+                global.free_phys_batch(&batch, popped);
 
-            for phys in batch.iter().take(popped).copied() {
-                local_cached_dec_phys(phys, migratetype);
+                // Never hold global while acquiring the next local cache lock.
+                global.unlock();
+                drained += popped;
+                cache_budget -= popped;
             }
-            global.free_phys_batch(&batch, popped);
-
-            // Keep lock acquisition on-demand during cross-CPU draining.
-            global.unlock();
-            drained += popped;
         }
     }
 
@@ -2041,29 +2053,25 @@ fn drain_local_caches_for_zone(
 
     for migratetype in primary_migratetype.fallback_order() {
         for cpu in 0..crate::arch::percpu::MAX_CPUS {
-            if drained >= max_pages {
-                return drained;
-            }
+            let mut cache_budget = LOCAL_CACHE_CAPACITY;
+            while drained < max_pages && cache_budget != 0 {
+                let target = batch.len().min(max_pages - drained).min(cache_budget);
+                let popped = {
+                    let mut cache = LOCAL_FRAME_CACHES[local_cache_slot(cpu, migratetype)].lock();
+                    cache.pop_many_for_zone(&mut batch[..target], zone_idx)
+                };
+                if popped == 0 {
+                    break;
+                }
 
-            let target = core::cmp::min(batch.len(), max_pages.saturating_sub(drained));
-            if target == 0 {
-                break;
+                for phys in batch.iter().take(popped).copied() {
+                    local_cached_dec_phys(phys, migratetype);
+                }
+                global.free_phys_batch(&batch, popped);
+                global.unlock();
+                drained += popped;
+                cache_budget -= popped;
             }
-
-            let popped = {
-                let mut cache = LOCAL_FRAME_CACHES[local_cache_slot(cpu, migratetype)].lock();
-                cache.pop_many_for_zone(&mut batch[..target], zone_idx)
-            };
-            if popped == 0 {
-                continue;
-            }
-
-            for phys in batch.iter().take(popped).copied() {
-                local_cached_dec_phys(phys, migratetype);
-            }
-            global.free_phys_batch(&batch, popped);
-            global.unlock();
-            drained += popped;
         }
     }
 
@@ -2326,13 +2334,12 @@ pub fn alloc_migratetype(
                     );
                     let retry = global.alloc_with_migratetype(order, migratetype);
                     record_compaction_attempt(candidate, drained, retry.is_ok());
-                    if retry.is_ok() || drained != 0 {
+                    if retry.is_ok() {
                         return retry;
                     }
-                } else {
-                    global.unlock();
                 }
 
+                global.unlock();
                 let _ = drain_local_caches_to_global(usize::MAX, &mut global);
                 global.alloc_with_migratetype(order, migratetype)
             }

@@ -194,6 +194,7 @@ const GOLDEN_SYSCALLS: &[(&str, usize)] = &[
     ("SYS_SILO_UNVEIL", SYS_SILO_UNVEIL),
     ("SYS_SILO_ENTER_SANDBOX", SYS_SILO_ENTER_SANDBOX),
     ("SYS_SILO_RENAME", SYS_SILO_RENAME),
+    ("SYS_SILO_START_NAMED", SYS_SILO_START_NAMED),
     ("SYS_ABI_VERSION", SYS_ABI_VERSION),
 ];
 
@@ -203,6 +204,7 @@ fn syscall_numbers_are_pinned() {
     // above documents every value; these asserts catch accidental renumbering
     // even if the table itself was regenerated carelessly.
     assert_eq!(SYS_NULL, 0);
+    assert_eq!(SYS_SILO_START_NAMED, 813);
     assert_eq!(SYS_MMAP, 100);
     assert_eq!(SYS_IPC_CREATE_PORT, 200);
     assert_eq!(SYS_PROC_EXIT, 300);
@@ -280,6 +282,7 @@ fn syscall_range_groups_are_respected() {
     for n in [
         SYS_SILO_CREATE,
         SYS_SILO_START,
+        SYS_SILO_START_NAMED,
         SYS_SILO_STOP,
         SYS_SILO_ENTER_SANDBOX,
     ] {

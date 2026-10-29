@@ -96,7 +96,11 @@ SiloConfig {
 }
 ```
 
-**Memory accounting:** Every allocation through the kernel heap charges against the silo's `mem_usage_bytes`. When `mem_max` is exceeded, `charge_current_task_memory()` returns `OutOfMemory`. This is enforced transparently in the buddy allocator and slab paths.
+**Memory accounting:** `mem_usage_bytes` counts user virtual regions, including shared mappings, ELF segments, stacks and reservations. Each address space retains its silo's account, so mapping and cleanup charge the owner rather than the calling task. The quota lock is independent of the registry; contention never skips accounting. Threads share their process's account and forked address spaces reserve their own virtual-region budget.
+
+**CPU and I/O quotas:** Nonzero `cpu_shares`, CPU time quotas/periods and I/O bandwidth limits are currently rejected with `NotSupported`; they are not silently accepted. CPU affinity remains supported.
+
+**Stopping:** Stop requests send `SIGTERM` to user tasks; kill requests force termination. A silo stays `Stopping`, with its task associations intact, until scheduler cleanup completes. A task that ignores or blocks `SIGTERM` requires a kill request. Kernel tasks are forcibly terminated because they do not run user signal handlers.
 
 ---
 
