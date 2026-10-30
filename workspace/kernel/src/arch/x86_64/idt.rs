@@ -78,7 +78,7 @@ impl SwapGsGuard {
     #[inline(always)]
     fn new(from_ring3: bool) -> Self {
         if from_ring3 {
-            // SAFETY: We are in Ring 0 with interrupts disabled (standard for
+            // SAFETY: we are in Ring 0 with interrupts disabled (standard for
             // interrupt handlers).  GS_BASE currently points at user space (0);
             // swapgs gives us the kernel per-CPU block via KERNEL_GS_BASE.
             unsafe { core::arch::asm!("swapgs", options(nostack, preserves_flags)) };

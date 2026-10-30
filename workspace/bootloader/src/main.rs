@@ -129,13 +129,16 @@ fn boot_kernel() -> BootResult<()> {
     // Own permanent allocations before opening other resources, so an error
     // return closes files and drops temporary buffers before freeing their pages.
     let mut boot_memory = BootMemory::new();
+
+    // TODO : add Vergen here
     uefi::system::with_stdout(|stdout| {
-        let _ = writeln!(stdout, "Strat9-OS bootloader. Version 0.1.0, UEFI mode.");
+        let _ = writeln!(stdout, "Strat9-OS bootloader UEFI mode, version 0.1.0.");
         let _ = writeln!(
             stdout,
-            "Copyright (C) 2026 Guillaume Gielly. All rights reserved."
+            "Copyright (C) 2024-26 Guillaume Gielly. Licenced under the AGPL version 3."
         );
     });
+
     boot_timer.announce_tsc();
     boot_timer.mark_uefi("start");
 
@@ -635,8 +638,10 @@ impl BootTimer {
                     self.khz % 1_000
                 );
             } else {
-                let _ =
-                    writeln!(stdout, "[boot] TSC: frequency unknown, timings stay in ticks");
+                let _ = writeln!(
+                    stdout,
+                    "[boot] TSC: frequency unknown, timings stay in ticks"
+                );
             }
         });
     }
