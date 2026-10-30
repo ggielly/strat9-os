@@ -38,36 +38,36 @@ See:
 
 ## Recent ABI updates (auto-generated)
 
-- 2026-09-27 [`f64aff3c`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f64aff3c6072bbb7c6f7ef7e698dadab837df431) Implement console rendering and mouse input handling tasks
-- 2026-09-13 [`3898c507`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3898c5074c07d2b5bdbd13b505a51ccfe92a0e30) feat(bootloader, kernel, abi): homemade strat9 UEFI bootloader : rewrite with scheduler and memory hardening
-- 2026-08-28 [`c03feb24`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c03feb24811b210174712aa7be5a9e097e32a80d) fix(abi): ENOTSUP 52→95, XFS EiB constant fix, decode_fixed roundtrip tests
-- 2026-08-27 [`3ca6d7c6`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3ca6d7c6e61014fe2ad305f22e5bf75c0bdaeebd) feat: Add U-Boot setup script and boot protocol implementation
-- 2026-08-25 [`88c52834`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/88c52834c3a0af3c6f01f14f3d7364f32a862281) refactor(arch): unify x86_64 crate access via x86_crate_shim, complete riscv stubs
-- 2026-08-25 [`c8ca94c4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c8ca94c43ffb700129b00ddf661e45637515d6fc) refactor(arch): route shared code through arch::xshim, gate limine/x86 deps
-- 2026-08-25 [`f3366e1d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f3366e1db5be83bea4a1f71e16be6bcc442fbce9) refactor(arch): migrate process/ and syscall/ call-sites to arch facade
-- 2026-08-25 [`4399b5f5`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4399b5f5229b096596f6fe221f5509014a258c88) test: pass 2 over full codebase — syscall, ABI data/handshake, NIC drivers, allocator
-- 2026-08-25 [`88feb023`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/88feb023653dd6b3b919a743829575707f63fc24) test(abi): exhaustive L0/L1 anti-regression suite
-- 2026-08-27 [`09216d7c`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/09216d7c556d521ef4e05528753ca02c70950e72) Merge branch 'fix/elf-loader-hardening' into 'main'
-- 2026-08-27 [`2bad5b9b`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/2bad5b9b8ae1a351c26ddcc69a78488a5d659dfe) feat(elf): loader hardening (#62 #63 #64 #67 #68, groundwork #66)
-- 2026-08-25 [`6ca7fef9`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6ca7fef90feacf3fe163cf6c5be7ba833c460e02) fix(ipc): security hardening, perf fixes and typed wire-format layer
-- 2026-07-18 [`abb7dd7e`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/abb7dd7e60991de111632e72ae8658adccdf8697) feat(buddy): harden, optimize, and add kernel.toml configuration
-- 2026-07-17 [`fe68f9aa`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/fe68f9aacb1b70b8601cbdde1423be75628255d1) fix(vfs,console,scheduler): VFS improvements, console perf, panic backtrace
-- 2026-07-14 [`3a5eb69d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3a5eb69d9b3041f89c205e184b4afe15c07ee44d) feat(silo): replace Vec with heapless::Vec for bounded fields
-- 2026-07-09 [`ab22b0d9`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ab22b0d9b010dd704cf6044580b4f310c5748524) feat: 3-level IPC transport, N3 MMU thread migration, graphical silo, NIC/E1000 fixes
-- 2026-06-25 [`5a3d69c4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5a3d69c4e10c4cfc67976a837751ce50292f9032) feat: migrate input system to userspace
-- 2026-06-24 [`3fea3f37`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3fea3f3776edefa7bdc7c3a8d930c8d17b0939a6) SMP hardware debug, NVMe fixes, VGA refactor, telnetd hardening, docs
-- 2026-06-16 [`e4ab1a96`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e4ab1a96c3579117defffe0f5b32cf7cac853129) Enhance network stack, NIC drivers, USB/NVMe subsystems, and thermal management
-- 2026-06-03 [`0c400585`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0c40058547bd9b7ef07a837b1153577879510994) Refactor the network stack and add dual-stack userspace tooling
-- 2026-05-24 [`aeade5ef`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/aeade5ef5fcfdddef2caa43da6af361a5102c7cd) Code cleanup
-- 2026-05-24 [`b2bbcc0b`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b2bbcc0bdd8c836ad396a1f32afd590b0c7236a8) Improve and fix IPC
-- 2026-05-23 [`db23b536`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/db23b5365e1ee201e8928c2a87ac2d449e876552) Fix major memory leak and remove sshd silo
-- 2026-05-19 [`93c89275`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93c8927544e95bb8847495f1044913f9f9ff05b0) async: implement and optimize async I/O completion handling
-- 2026-05-18 [`7c5efb4d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb) async: io_uring-like async I/O — ring, dispatch, AHCI bridge (Phases 1-4)
-- 2026-05-14 [`cc4944a2`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/cc4944a2c78236c41fce4b8f1054e119fc2bcd8e) Refactor and clean up code in various modules
-- 2026-05-14 [`ecc416df`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ecc416df41e29c26f6839ee15cffbc7a7dd41f05) refactor: strate-init refactoring, ELF/VFS/signal hardening, TSC calibration fix
-- 2026-05-08 [`f070d41c`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f070d41c31fb505fef36603ee7cbc0c6648944b3) Add kernel entropy pool with interrupt-driven collection
-- 2026-05-08 [`9dedb9f1`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9dedb9f19215cd1ad7f4d65d88fe84e4832bfc7c) Implement robust list support (set_robust_list/get_robust_list)
-- 2026-05-08 [`d2e90a2f`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d2e90a2ffc1886bc3e72b6d2d10e4dd99c156d5a) Bridge clone() thread creation via SYS_THREAD_CREATE, add faccessat routing
+- 2026-10-30 [`627a5b7`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/627a5b757a4aa70e3c0c723d810347c3fd26e148) abi/net: allow documented unsafe ring primitives under the workspace lint
+- 2026-10-30 [`f41d977`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f41d977c5d3e8374400f94435f181d6a2dc8117d) Fix build after Code-refactor integration
+- 2026-10-29 [`a7baa3a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a7baa3ae3ae1a615b87a26350c5d8b7985611315) Refactor silo memory management and enhance syscall functionality
+- 2026-10-29 [`97cb28a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/97cb28adf1aa53af61b1133db3181e1d2c9f9a9c) Implement framebuffer write-combining support and FPU state preservation
+- 2026-10-28 [`62e40ef`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/62e40efb60b484b5e5bafb04f0d531a7ec68b6bc) feat(iommu): finish P1/P2 with QI, IR/MSI, IVMD, bounce buffers and strate-iommu boot wiring
+- 2026-10-28 [`5ccb269`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5ccb26910068ceb1ab43ec656ec463a7976b7c70) feat(iommu): P1 policy/robustness and P2 shadow tables, superpages and batch DMA
+- 2026-10-28 [`db8ae4d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/db8ae4db6bd95a93910e6de14d3ecb517ee2c870) feat(iommu): P0 domain/IOVA management, DMAR parser and DMA isolation ABI
+- 2026-10-28 [`2f07be9`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/2f07be9bd8cb0f93b67600492aa446ced8311763) test(abi): align ipc_payload_wire with the real 24-byte OpenReply
+- 2026-10-28 [`861ee54`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/861ee546838667511ad42236df8b1ca8522f9069) fix: unblock kernel build after 1 KiB IPC and net queue changes
+- 2026-10-28 [`9ef21eb`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9ef21ebf385bd205cbee8de8f713c59d181527a9) Fix compilation
+- 2026-10-28 [`e109204`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e10920414ea12581538af9c161e8ad7723327b44) net: bulk VFS rings, multi-queue RSS, PCI hotplug polling and RX checksum offload
+- 2026-10-28 [`9d15fed`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9d15fed44964c5c5a441dedf59fd1f76fa79eeee) net(P2-P4): offload negotiation, hotplug, IOMMU bookkeeping, vSwitch/QoS, bulk IPC
+- 2026-10-28 [`c4d4a13`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c4d4a13ea4d9ba4c9d2a25d6a803fe589f492c32) net(P1): zero-copy shared queue between kernel and strate-net
+- 2026-10-28 [`215eab6`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/215eab6cf813b566c5c49cf8b16cc4e6608bf662) net(P0): capability-gated syscalls, bounded IRQ, shared queue foundation
+- 2026-10-27 [`f76ffc3`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f76ffc3f7522d26eda94447d3a0e5eb5cb3916c0) Merge branch 'feature/console-display-strates' into HEAD
+- 2026-10-27 [`af6560c`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/af6560c462050268cf1230edc5861554f5076ac7) Merge boot ABI branch and repair duplicated additions
+- 2026-10-27 [`024c393`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/024c39314d4003ae56cab1c43d66aa62ec87e631) Merge remote-tracking branch 'origin/fix/boot-abi-consistency' into integration/merge-all
+- 2026-10-27 [`ea7c302`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ea7c302996f627819d6e6ace15cc161b5162dad6) Merge remote-tracking branch 'origin/Fix-and-enhance-networking' into integration/merge-all
+- 2026-10-27 [`c1a9fa4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c1a9fa442f2f35052c7f145941592a6ede95a7b3) console: MAP_SHARED frame-backed display surface
+- 2026-10-27 [`94ff288`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/94ff2886a51123efdac4bad659c333445b9ec76f) test(abi): repair stale scheme payload wire tests and a lint regression
+- 2026-10-27 [`b071184`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b071184d8fd93a828f2209a7f6395f31151a8e61) fix(dependencies): clean up unused packages and update features in Cargo.toml
+- 2026-10-27 [`8c18cdb`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/8c18cdbebd023f2c4b7711572dca0030335a557c) fix(abi): bump boot handoff ABI to v5 and document it
+- 2026-09-27 [`f64aff3`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f64aff3c6072bbb7c6f7ef7e698dadab837df431) Implement console rendering and mouse input handling tasks
+- 2026-09-26 [`f7818ad`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f7818ad4c8936d2fefdc4cf1cce19932ffc0119d) Merge canonical GitLab main with RISC-V integration
+- 2026-09-26 [`4e45f2d`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4e45f2d1c3ae872d0631c8342baf2e00312059cd) Fix merge integration for RISC-V backend
+- 2026-09-26 [`bb2df28`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/bb2df28041b624236e15c6fce6bebe9ed12c991d) Merge branch feat/hal-arch-facade into main
+- 2026-09-25 [`18818c4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/18818c4da69438eac459a92551130a21d9c3da2a) chore(riscv): gate remaining x86-only helpers
+- 2026-09-25 [`fedacdf`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/fedacdf07474f45d9d6b948c4eb0e9d03c73773e) chore(riscv): scope architecture-specific imports
+- 2026-09-25 [`ac591e8`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ac591e85aa9700fad2fe5db272d3229250b5f377) fix(riscv): gate x86 assembly and align facade signatures
+- 2026-09-25 [`582d31c`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/582d31cdd36cc1fc8e9536f08904b77dc9298eea) fix(riscv): align architecture facade interfaces
 
 <!-- AUTO-ABI-CHANGELOG:END -->
 

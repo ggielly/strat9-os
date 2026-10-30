@@ -404,20 +404,19 @@ python3 tools/scripts/check-links.py --site-dir build/docs-site
 <p>Argument validation goes through <code>UserSliceRead</code> / <code>UserSliceWrite</code>, which check that the userspace range lies below <code>USER_SPACE_END</code> and is at most 16 MiB. Single-byte copies are exempt from the size cap. Pending signals are checked on every syscall return through a per-CPU fast flag set by <code>send_signal</code>, so a signal targeting the running task costs one atomic test-and-clear on the common path.</p>
 <p>See <a href="./syscalls.html">Syscall Reference</a> for the full table and for the known gaps between the ABI headers and the dispatcher.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="silo-system"><a class="header" href="#silo-system">Silo System</a></h1>
-<p>Silos are Strat9 OS's primary isolation mechanism. Each silo is a container for processes with bounded resources, restricted capabilities, and filesystem path control. Policy is expressed by the caller; the kernel enforces the mechanism.</p>
-<p>The implementation lives in <code>workspace/kernel/src/silo/</code> (<code>mod.rs</code>, 3292 lines, plus <code>silo_test.rs</code> behind the <code>selftest</code> feature).</p>
+<p>Silos are Strat9 OS's primary isolation mechanism. Each silo is a container for processes with bounded resources, restricted capabilities, and filesystem access control. Policy lives in userspace; the kernel enforces mechanisms.</p>
 <hr />
 <h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
 <pre><code class="language-mermaid">graph TB
     subgraph "Admin (Silo Admin)"
-        ADMIN[strate-console-admin / strate-web-admin]
+        ADMIN[Console Admin / Web Admin]
     end
 
     subgraph "Kernel"
         SM[Silo Manager]
         CAP[Capability System]
         MEM[Memory Accounting]
-        EV[Event Ring]
+        EV[Event Queue]
     end
 
     subgraph "Silo 1 (System)"
@@ -441,15 +440,14 @@ python3 tools/scripts/check-links.py --site-dir build/docs-site
 </code></pre>
 <hr />
 <h2 id="silo-identity"><a class="header" href="#silo-identity">Silo identity</a></h2>
-<p>Each silo is a <code>SiloId { sid: u32, tier: SiloTier }</code>. The tier is <strong>not stored or configured</strong> — <code>SiloId::new()</code> recomputes it from the numeric id on every construction:</p>
+<p>Each silo has a numeric ID (<code>SiloId</code>) and a tier derived from the ID range:</p>
 <div class="table-wrapper"><table><thead><tr><th>ID range</th><th>Tier</th><th>Purpose</th></tr></thead><tbody>
-<tr><td><code>1..=9</code></td><td><code>SiloTier::Critical</code></td><td>Kernel system services (init, logger)</td></tr>
-<tr><td><code>10..=999</code></td><td><code>SiloTier::System</code></td><td>Drivers, filesystems, network</td></tr>
-<tr><td>everything else, <strong>including <code>0</code></strong></td><td><code>SiloTier::User</code></td><td>User applications</td></tr>
+<tr><td>1–9</td><td><code>Critical</code></td><td>Kernel system services (init, logger)</td></tr>
+<tr><td>10–999</td><td><code>System</code></td><td>Drivers, filesystems, network</td></tr>
+<tr><td>1000+</td><td><code>User</code></td><td>User applications</td></tr>
 </tbody></table>
 </div>
-<p><code>kernel_check_spawn_invariants</code> rejects a User-tier silo that requests hardware or control permission bits.</p>
-<p>Ids are allocated from the lowest free value upward for boot strates (<code>register_boot_strate_task</code>) and from 1000 upward for <code>kernel_spawn_strate</code>.</p>
+<p>User-tier silos cannot have hardware or control permissions (enforced at creation).</p>
 <hr />
 <h2 id="silo-lifecycle"><a class="header" href="#silo-lifecycle">Silo lifecycle</a></h2>
 <pre><code class="language-mermaid">stateDiagram-v2
@@ -461,90 +459,56 @@ python3 tools/scripts/check-links.py --site-dir build/docs-site
     Running --&gt; Stopping : SYS_SILO_STOP (graceful)
     Stopping --&gt; Stopped : tasks exit
     Running --&gt; Stopped : SYS_SILO_KILL (force)
+    Stopped --&gt; [*] : SYS_SILO_DESTROY
     Running --&gt; Crashed : fault / panic
     Crashed --&gt; Stopped : cleanup
-    Stopped --&gt; [*] : kernel_destroy_silo (in-kernel, not a syscall)
 </code></pre>
-<p><code>SiloState</code> declares ten values: <code>Created (0)</code>, <code>Loading (1)</code>, <code>Ready (2)</code>, <code>Running (3)</code>, <code>Paused (4)</code>, <code>Stopping (5)</code>, <code>Stopped (6)</code>, <code>Crashed (7)</code>, <code>Zombie (8)</code>, <code>Destroyed (9)</code>.</p>
-<blockquote>
-<p><strong>In practice only <code>Crashed</code> is ever assigned</strong> as a terminal state. <code>Zombie</code> and <code>Destroyed</code> are declared but never set — a destroyed silo is removed from the registry outright, so there is no observable <code>Destroyed</code> state.</p>
-</blockquote>
-<p><strong>There is no <code>SYS_SILO_DESTROY</code> syscall.</strong> The syscall block is 800–812 plus <code>SYS_ABI_VERSION</code> (900). Destruction is the in-kernel <code>kernel_destroy_silo()</code>, reachable through the admin silo.</p>
+<p><strong>States:</strong> <code>Created → Loading → Ready → Running → Paused → Stopping → Stopped → Destroyed</code> (also <code>Crashed</code>, <code>Zombie</code>)</p>
 <hr />
 <h2 id="resource-limits"><a class="header" href="#resource-limits">Resource limits</a></h2>
-<p><code>SiloConfig</code> is passed by pointer to <code>SYS_SILO_CREATE</code>, and patched later by <code>SYS_SILO_CONFIG</code>:</p>
-<pre><code class="language-text">SiloConfig {                      // repr(C)
-    mem_min: u64,                 // Minimum guaranteed memory (bytes)
-    mem_max: u64,                 // Maximum allowed memory (0 = unlimited)
-    cpu_shares: u32,              // CPU share weight
-    cpu_quota_us: u64,            // CPU time quota per period (microseconds)
-    cpu_period_us: u64,           // Quota period (microseconds)
-    cpu_affinity_mask: u64,       // CPU affinity bitmask
-    max_tasks: u32,               // Maximum concurrent tasks
-    io_bw_read: u64,              // Read bandwidth limit
-    io_bw_write: u64,             // Write bandwidth limit
-    caps_ptr: u64,                // Pointer to an extra capability list
-    caps_len: u64,
-    flags: u64,                   // Feature flags (see below)
-    sid: u32,
-    mode: u16,                    // OctalMode, see below
-    family: u8,                   // StrateFamily, see below
-    cpu_features_required: u64,
-    cpu_features_allowed: u64,
-    xcr0_mask: u64,               // Computed from allowed features &amp; host caps
-    graphics_max_sessions: u16,   // 0 = graphics disabled
-    graphics_session_ttl_sec: u32,
-    graphics_reserved: u16,       // Reserved for ABI expansion
+<p>The <code>SiloConfig</code> struct defines per-silo resource bounds:</p>
+<pre><code class="language-text">SiloConfig {
+    mem_min: u64,           // Minimum guaranteed memory (bytes)
+    mem_max: u64,           // Maximum allowed memory (0 = unlimited)
+    cpu_shares: u32,        // CPU share weight (for proportional scheduling)
+    cpu_quota_us: u64,      // CPU time quota per period (microseconds)
+    cpu_period_us: u64,     // Quota period (microseconds)
+    cpu_affinity_mask: u64, // CPU affinity bitmask
+    max_tasks: u32,         // Maximum concurrent tasks
+    io_bw_read: u64,        // Read bandwidth limit
+    io_bw_write: u64,       // Write bandwidth limit
+    flags: u64,             // Feature flags
+    family: u8,             // Silo family (SYS/DRV/FS/NET/WASM/USR)
 }
 </code></pre>
-<p><code>sid</code> and <code>mode</code> are the two fields actually read back from the incoming struct.</p>
-<h3 id="memory-accounting-is-best-effort-not-transparent"><a class="header" href="#memory-accounting-is-best-effort-not-transparent">Memory accounting is best-effort, not transparent</a></h3>
-<p><code>charge_task_silo_memory</code> is called from <strong><code>memory/address_space.rs</code></strong> — on address-space reserve and on <code>mmap</code> — and released on unmap, fork, exec and thread exit. It is <strong>not</strong> hooked into the buddy allocator or the slab.</p>
-<p>Worse, the charge path uses <code>try_lock</code> on the silo manager and <strong>silently skips charging when the lock is contended</strong>. The limit is therefore an accounting approximation under contention, not hard enforcement at the allocator. When a charge is refused, the allocation fails with <code>ENOMEM</code>.</p>
+<p><strong>Memory accounting:</strong> <code>mem_usage_bytes</code> counts user virtual regions, including shared mappings, ELF segments, stacks and reservations. Each address space retains its silo's account, so mapping and cleanup charge the owner rather than the calling task. The quota lock is independent of the registry; contention never skips accounting. Threads share their process's account and forked address spaces reserve their own virtual-region budget.</p>
+<p><strong>CPU and I/O quotas:</strong> Nonzero <code>cpu_shares</code>, CPU time quotas/periods and I/O bandwidth limits are currently rejected with <code>NotSupported</code>; they are not silently accepted. CPU affinity remains supported.</p>
+<p><strong>Stopping:</strong> Stop requests send <code>SIGTERM</code> to user tasks; kill requests force termination. A silo stays <code>Stopping</code>, with its task associations intact, until scheduler cleanup completes. A task that ignores or blocks <code>SIGTERM</code> requires a kill request. Kernel tasks are forcibly terminated because they do not run user signal handlers.</p>
 <hr />
-<h2 id="octal-mode-pledge--unveil"><a class="header" href="#octal-mode-pledge--unveil">Octal mode (pledge / unveil)</a></h2>
-<p>Access control uses an <code>OctalMode</code> of three <code>bitflags!</code> bitfields. On the wire it is a <strong>9-bit</strong> value (<code>strat9_abi::data::SiloMode(u16)</code>, documented as "9-bit octal silo permission mode"), not 12-bit:</p>
-<div class="table-wrapper"><table><thead><tr><th>Bit positions</th><th>Group</th><th>Permissions</th></tr></thead><tbody>
-<tr><td><code>6–8</code></td><td><strong>Control</strong> (<code>ControlMode: u8</code>)</td><td><code>LIST (0b100)</code>, <code>STOP (0b010)</code>, <code>SPAWN (0b001)</code></td></tr>
-<tr><td><code>3–5</code></td><td><strong>Hardware</strong> (<code>HardwareMode: u8</code>)</td><td><code>INTERRUPT (0b100)</code>, <code>IO (0b010)</code>, <code>DMA (0b001)</code></td></tr>
-<tr><td><code>0–2</code></td><td><strong>Registry</strong> (<code>RegistryMode: u8</code>)</td><td><code>LOOKUP (0b100)</code>, <code>BIND (0b010)</code>, <code>PROXY (0b001)</code></td></tr>
+<h2 id="octal-mode-pledgeunveil"><a class="header" href="#octal-mode-pledgeunveil">Octal mode (pledge/unveil)</a></h2>
+<p>Access control uses an <code>OctalMode</code> with three permission groups, encoded as a 12-bit octal value:</p>
+<div class="table-wrapper"><table><thead><tr><th>Bits</th><th>Group</th><th>Permissions</th></tr></thead><tbody>
+<tr><td>8–10</td><td><strong>Control</strong></td><td><code>LIST</code> (0b100), <code>STOP</code> (0b010), <code>SPAWN</code> (0b001)</td></tr>
+<tr><td>5–7</td><td><strong>Hardware</strong></td><td><code>INTERRUPT</code> (0b100), <code>IO</code> (0b010), <code>DMA</code> (0b001)</td></tr>
+<tr><td>2–4</td><td><strong>Registry</strong></td><td><code>LOOKUP</code> (0b100), <code>BIND</code> (0b010), <code>PROXY</code> (0b001)</td></tr>
 </tbody></table>
 </div>
-<p><code>OctalMode::from_octal</code> reads <code>(val &gt;&gt; 6) &amp; 0o7</code>, <code>(val &gt;&gt; 3) &amp; 0o7</code> and <code>val &amp; 0o7</code> respectively. The layout is pinned by <code>workspace/abi/tests/data_types.rs</code> (<code>silo_mode_bit_layout_is_lsb_registry</code>).</p>
-<p><strong>Worked example.</strong> <code>0o755</code> is <code>111 101 101</code>:</p>
-<ul>
-<li>control <code>111</code> → <code>LIST | STOP | SPAWN</code></li>
-<li>hardware <code>101</code> → <code>INTERRUPT | DMA</code> (the middle bit is <code>IO</code>)</li>
-<li>registry <code>101</code> → <code>LOOKUP | PROXY</code> (the middle bit is <code>BIND</code>)</li>
-</ul>
+<p>Example: <code>0o755</code> = LIST+STOP+SPAWN + INTERRUPT+IO + LOOKUP+BIND</p>
 <h3 id="pledge"><a class="header" href="#pledge">Pledge</a></h3>
-<p><code>SYS_SILO_PLEDGE(mode_val: u64)</code> restricts the silo's permissions. The argument is the <strong>octal value itself</strong>, not a string or a pointer. The new mode must be a subset of the current one; escalation is rejected with <code>EACCES</code>:</p>
-<pre><code class="language-rust">// OctalMode::pledge — the only form of this that compiles as written
-pub fn pledge(&amp;mut self, new_mode: OctalMode) -&gt; Result&lt;(), SyscallError&gt; {
-    if !new_mode.is_subset_of(self) {
-        return Err(SyscallError::PermissionDenied); // escalation attempt
-    }
-    *self = new_mode;
-    Ok(())
-}</code></pre>
-<p>The syscall wrapper also mirrors the value into <code>silo.config.mode</code> and pushes a <code>Started</code> event (reused as "Updated").</p>
-<h3 id="unveil"><a class="header" href="#unveil">Unveil</a></h3>
-<p><code>SYS_SILO_UNVEIL(path_ptr, path_len, rights_bits)</code> restricts filesystem access. The third argument is an <code>UnveilRights</code> <strong>bitmask</strong>, not a <code>"rwx"</code> string: <code>read = 0x1</code>, <code>write = 0x2</code>, <code>execute = 0x4</code>; any other bit gives <code>EINVAL</code>.</p>
-<pre><code class="language-text">limits: path length &lt;= 1024 bytes, at most 128 rules (ENOBUFS beyond that)
-path must be absolute, non-empty and contain no NUL byte
+<p><code>SYS_SILO_PLEDGE(mode)</code> restricts the silo's permissions. The new mode must be a <strong>subset</strong> of the current mode : escalation is rejected with <code>PermissionDenied</code>.</p>
+<pre><code class="language-text">silo.mode.pledge(new_mode):
+    if !new_mode.is_subset_of(self.mode):
+        return PermissionDenied  // escalation attempt
+    self.mode = new_mode
 </code></pre>
-<p><strong>Matching.</strong> A rule <code>/srv/data</code> matches <code>/srv/data/file.txt</code> but not <code>/srv/other</code>. A rule <code>/</code> matches everything.</p>
-<p><strong>Three behaviours that are easy to get wrong:</strong></p>
-<ol>
-<li><strong>A silo with no unveil rules has <em>unrestricted</em> path access.</strong> <code>enforce_path_for_current_task</code> returns <code>Ok(())</code> immediately when the rule list is empty. The default-deny only applies once at least one rule exists.</li>
-<li><strong>Re-declaring an existing path narrows, never widens.</strong> A second unveil for the same path <em>intersects</em> the rights with what is already there.</li>
-<li><strong>Sandboxed silos still go through the same path check</strong>, so an empty rule list stays permissive.</li>
-</ol>
+<h3 id="unveil"><a class="header" href="#unveil">Unveil</a></h3>
+<p><code>SYS_SILO_UNVEIL(path, rights)</code> restricts filesystem access to specific paths with read/write/execute permissions. Multiple rules can be added; if a path matches no rule, access is denied.</p>
+<p><strong>Rights bits:</strong> <code>read (0x1)</code>, <code>write (0x2)</code>, <code>execute (0x4)</code></p>
+<p><strong>Matching:</strong> A rule <code>/srv/data</code> matches <code>/srv/data/file.txt</code> but not <code>/srv/other</code>. Rule <code>/</code> matches everything.</p>
 <h3 id="enter-sandbox"><a class="header" href="#enter-sandbox">Enter Sandbox</a></h3>
-<p><code>SYS_SILO_ENTER_SANDBOX()</code> takes no arguments and is <strong>irreversible</strong>: it clears the registry permission bits and sets a sandbox flag that <code>enforce_silo_may_grant</code> consults to block further capability grants.</p>
+<p><code>SYS_SILO_ENTER_SANDBOX()</code> is <strong>irreversible</strong> : it clears all registry permissions and prevents further capability grants. Once sandboxed, the silo cannot escape.</p>
 <hr />
 <h2 id="family-types"><a class="header" href="#family-types">Family types</a></h2>
-<p><code>StrateFamily</code> is a plain <code>u8</code> enum, decoded from a numeric field with <code>decode_family</code>:</p>
 <div class="table-wrapper"><table><thead><tr><th>Family</th><th>Value</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>SYS</code></td><td>0</td><td>System services (init, admin)</td></tr>
 <tr><td><code>DRV</code></td><td>1</td><td>Hardware drivers</td></tr>
@@ -554,113 +518,85 @@ path must be absolute, non-empty and contain no NUL byte
 <tr><td><code>USR</code></td><td>5</td><td>User applications</td></tr>
 </tbody></table>
 </div>
-<blockquote>
-<p>The family is carried in the config and the IPC message label, but the kernel does <strong>not</strong> enforce a family-based IPC policy. There is no per-family allow-list and no "a USER silo may not talk to a DRV silo" check.</p>
-</blockquote>
 <hr />
 <h2 id="feature-flags"><a class="header" href="#feature-flags">Feature flags</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Value</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>SILO_FLAG_ADMIN</code></td><td><code>1 &lt;&lt; 0</code></td><td>Silo has admin capabilities</td></tr>
 <tr><td><code>SILO_FLAG_GRAPHICS</code></td><td><code>1 &lt;&lt; 1</code></td><td>Graphics session support</td></tr>
-<tr><td><code>SILO_FLAG_WEBRTC_NATIVE</code></td><td><code>1 &lt;&lt; 2</code></td><td>WebRTC native support (requires graphics)</td></tr>
+<tr><td><code>SILO_FLAG_WEBRTC_NATIVE</code></td><td><code>1 &lt;&lt; 2</code></td><td>WebRTC native support (requires GRAPHICS)</td></tr>
 <tr><td><code>SILO_FLAG_GRAPHICS_READ_ONLY</code></td><td><code>1 &lt;&lt; 3</code></td><td>Graphics read-only mode</td></tr>
 <tr><td><code>SILO_FLAG_WEBRTC_TURN_FORCE</code></td><td><code>1 &lt;&lt; 4</code></td><td>Force TURN relay for WebRTC</td></tr>
 </tbody></table>
 </div>
 <hr />
-<h2 id="silo-syscalls"><a class="header" href="#silo-syscalls">Silo syscalls</a></h2>
-<div class="table-wrapper"><table><thead><tr><th>#</th><th>Syscall</th><th>Kernel args</th><th>Notes</th></tr></thead><tbody>
-<tr><td>800</td><td><code>SYS_SILO_CREATE</code></td><td><code>config_ptr: u64</code></td><td>Takes a <code>SiloConfig</code> pointer; the doc's "no arguments" is wrong</td></tr>
-<tr><td>801</td><td><code>SYS_SILO_CONFIG</code></td><td><code>handle, res_ptr</code></td><td>Two arguments, not the five <code>(silo_id, key, …)</code> the ABI header claims</td></tr>
-<tr><td>802</td><td><code>SYS_SILO_ATTACH_MODULE</code></td><td><code>handle, module_handle</code></td><td></td></tr>
-<tr><td>803</td><td><code>SYS_SILO_START</code></td><td><code>handle</code></td><td></td></tr>
-<tr><td>804</td><td><code>SYS_SILO_STOP</code></td><td><code>handle</code></td><td>Graceful</td></tr>
-<tr><td>805</td><td><code>SYS_SILO_KILL</code></td><td><code>handle</code></td><td>Force</td></tr>
-<tr><td>806</td><td><code>SYS_SILO_EVENT_NEXT</code></td><td><code>event_ptr</code></td><td><strong>No silo id</strong> — the silo is derived from the caller</td></tr>
-<tr><td>807</td><td><code>SYS_SILO_SUSPEND</code></td><td><code>handle</code></td><td></td></tr>
-<tr><td>808</td><td><code>SYS_SILO_RESUME</code></td><td><code>handle</code></td><td></td></tr>
-<tr><td>809</td><td><code>SYS_SILO_PLEDGE</code></td><td><code>mode_val: u64</code></td><td>The octal value directly</td></tr>
-<tr><td>810</td><td><code>SYS_SILO_UNVEIL</code></td><td><code>path_ptr, path_len, rights_bits</code></td><td>Bitmask, not a string</td></tr>
-<tr><td>811</td><td><code>SYS_SILO_ENTER_SANDBOX</code></td><td>:</td><td>Irreversible</td></tr>
-<tr><td>812</td><td><code>SYS_SILO_RENAME</code></td><td><code>handle, label_ptr, label_len</code></td><td></td></tr>
-</tbody></table>
-</div>
-<hr />
 <h2 id="module-system-cmod"><a class="header" href="#module-system-cmod">Module system (CMOD)</a></h2>
-<p>Silos can load code modules in the <code>CMOD</code> binary format. <code>Strat9ModuleHeader</code>:</p>
-<pre><code class="language-text">magic: "CMOD"
-version: 1 or 2
-cpu_arch: 0 (x86_64)
-flags: MODULE_FLAG_SIGNED | MODULE_FLAG_KERNEL
-code_offset / code_size / data_offset / data_size / bss_size
-entry_point
-export / import / relocation tables
-key_id / signature
-cpu_features_required   (v2 and later)
+<p>Silos can load code modules in the <code>CMOD</code> binary format:</p>
+<pre><code class="language-text">Strat9ModuleHeader {
+    magic: "CMOD",
+    version: 1 or 2,
+    cpu_arch: 0 (x86_64),
+    flags: MODULE_FLAG_SIGNED | MODULE_FLAG_KERNEL,
+    code_offset/size, data_offset/size, bss_size,
+    entry_point,
+    export/import/relocation tables,
+    key_id, signature,
+    cpu_features_required (v2+),
+}
 </code></pre>
-<p><code>parse_module_header</code> validates magic, version, alignment and the signature, and rejects anything it does not recognise.</p>
 <p><strong>Loading flow:</strong></p>
 <ol>
-<li>Admin calls <code>SYS_MODULE_LOAD(fd_or_ptr, len)</code> with a blob from a file, an IPC stream or initfs</li>
-<li>Kernel validates the header and registers the module in the global <code>ModuleRegistry</code></li>
+<li>Admin calls <code>SYS_MODULE_LOAD</code> with a blob (from file, IPC stream, or initfs path)</li>
+<li>Kernel validates the header (magic, version, alignment, signature)</li>
+<li>Module is registered in the global <code>ModuleRegistry</code></li>
 <li>Admin calls <code>SYS_SILO_ATTACH_MODULE</code> to bind the module to a silo</li>
 <li>Admin calls <code>SYS_SILO_START</code> to launch the silo's entry point</li>
 </ol>
 <hr />
 <h2 id="events"><a class="header" href="#events">Events</a></h2>
-<p>The kernel pushes events to a fixed-capacity ring of <strong>256</strong> entries (<code>SILO_EVENTS_CAPACITY</code>). Userspace reads them with <code>SYS_SILO_EVENT_NEXT</code>, which writes a <code>SiloEvent</code> to the pointer it is given.</p>
+<p>The kernel pushes events to a fixed-capacity ring buffer (256 entries). Userspace polls via <code>SYS_SILO_EVENT_NEXT</code>.</p>
 <div class="table-wrapper"><table><thead><tr><th>Event</th><th>Trigger</th></tr></thead><tbody>
-<tr><td><code>Started</code></td><td>Silo started — or config updated (the kind is reused for both)</td></tr>
+<tr><td><code>Started</code></td><td>Silo started or config updated</td></tr>
 <tr><td><code>Stopped</code></td><td>Graceful stop</td></tr>
 <tr><td><code>Killed</code></td><td>Force kill</td></tr>
-<tr><td><code>Crashed</code></td><td>Fault or panic</td></tr>
+<tr><td><code>Crashed</code></td><td>Fault/panic (data0 encodes fault reason + subcode)</td></tr>
 <tr><td><code>Paused</code></td><td>Suspended</td></tr>
 <tr><td><code>Resumed</code></td><td>Resumed from pause</td></tr>
 </tbody></table>
 </div>
-<p><strong>Crash encoding:</strong> <code>data0 = fault_reason | (subcode &lt;&lt; 16)</code> with <code>FAULT_SUBCODE_SHIFT = 16</code>:</p>
+<p><strong>Crash encoding:</strong> <code>data0 = fault_reason | (subcode &lt;&lt; 16)</code></p>
 <ul>
 <li><code>PageFault (1)</code>, <code>GeneralProtection (2)</code>, <code>InvalidOpcode (3)</code></li>
 </ul>
 <hr />
 <h2 id="silo-admin"><a class="header" href="#silo-admin">Silo admin</a></h2>
-<p>Admin operations require a <code>ResourceType::Silo</code> capability carrying the <code>grant</code> permission. <code>SILO_ADMIN_RESOURCE = 0</code> is the special admin handle. The init process receives one at boot through <code>create_silo_admin_capability()</code> / <code>grant_silo_admin_to_task</code>.</p>
-<p><strong>Every admin function takes a <code>&amp;str</code> selector — either the numeric SID or the label — and returns <code>Result&lt;u32, SyscallError&gt;</code> where the <code>u32</code> is the resolved silo id.</strong> The signatures in older revisions of this page took an <code>OctalMode</code> directly and returned nothing; that is not what the code does.</p>
+<p>Admin operations require a <code>ResourceType::Silo</code> capability with <code>grant</code> permission. The <code>SILO_ADMIN_RESOURCE</code> (resource 0) is the special admin handle.</p>
+<p><strong>Bootstrap:</strong> The init process receives a silo-admin capability at boot via <code>create_silo_admin_capability()</code>.</p>
+<p><strong>Admin operations:</strong></p>
 <div class="table-wrapper"><table><thead><tr><th>Operation</th><th>Function</th><th>Description</th></tr></thead><tbody>
-<tr><td>Create</td><td><code>kernel_spawn_strate(selector, …)</code></td><td>Register module, create silo, spawn task; auto-assigns ids from 1000</td></tr>
-<tr><td>Start</td><td><code>kernel_start_silo(selector)</code></td><td>Transitions Ready → Running</td></tr>
-<tr><td>Stop</td><td><code>kernel_stop_silo(selector)</code></td><td>Graceful stop</td></tr>
-<tr><td>Kill</td><td><code>kernel_stop_silo(selector)</code> on a killed silo</td><td>Force stop</td></tr>
-<tr><td>Destroy</td><td><code>kernel_destroy_silo(selector)</code></td><td>Removes the silo from the registry; must be stopped first</td></tr>
-<tr><td>Rename</td><td><code>kernel_rename_silo_label(selector, label)</code></td><td>Change the display label</td></tr>
-<tr><td>Pledge</td><td><code>sys_silo_pledge(mode_val: u64)</code></td><td>Restrict permissions</td></tr>
-<tr><td>Unveil</td><td><code>sys_silo_unveil(path_ptr, path_len, rights_bits)</code></td><td>Restrict filesystem access</td></tr>
-<tr><td>Sandbox</td><td><code>sys_silo_enter_sandbox()</code></td><td>Irreversible lockdown</td></tr>
+<tr><td>Create</td><td><code>kernel_spawn_strate()</code></td><td>Register module, create silo, spawn task</td></tr>
+<tr><td>Start</td><td><code>kernel_start_silo()</code></td><td>Transitions Ready → Running</td></tr>
+<tr><td>Stop</td><td><code>kernel_stop_silo()</code></td><td>Graceful stop (tasks exit)</td></tr>
+<tr><td>Kill</td><td><code>kernel_stop_silo(force=true)</code></td><td>Force kill all tasks</td></tr>
+<tr><td>Destroy</td><td><code>kernel_destroy_silo()</code></td><td>Remove silo (must be stopped)</td></tr>
+<tr><td>Rename</td><td><code>kernel_rename_silo_label()</code></td><td>Change silo label</td></tr>
+<tr><td>Pledge</td><td><code>sys_silo_pledge()</code></td><td>Restrict permissions</td></tr>
+<tr><td>Unveil</td><td><code>sys_silo_unveil()</code></td><td>Restrict filesystem access</td></tr>
+<tr><td>Sandbox</td><td><code>sys_silo_enter_sandbox()</code></td><td>Lock down (irreversible)</td></tr>
 </tbody></table>
 </div>
 <hr />
 <h2 id="path-based-label-assignment"><a class="header" href="#path-based-label-assignment">Path-based label assignment</a></h2>
-<p>When a filesystem path matches <code>/srv/strate-fs-&lt;type&gt;/&lt;label&gt;/</code>, <code>extract_strate_label</code> derives the label and assigns it to the silo. This provides convention-based service discovery for filesystem-hosted strates.</p>
+<p>When a filesystem path matches <code>/srv/strate-fs-&lt;type&gt;/&lt;label&gt;/</code>, the label is automatically assigned to the silo. This allows convention-based service discovery.</p>
 <hr />
 <h2 id="silo-vs-other-isolation-mechanisms"><a class="header" href="#silo-vs-other-isolation-mechanisms">Silo vs. other isolation mechanisms</a></h2>
-<div class="table-wrapper"><table><thead><tr><th>Mechanism</th><th>Scope</th><th>Enforcement</th><th>State</th></tr></thead><tbody>
-<tr><td><strong>Silo</strong></td><td>Process group + resources + capabilities</td><td>Kernel <code>SiloManager</code></td><td>Implemented</td></tr>
-<tr><td><strong>Capability</strong></td><td>Individual resource access</td><td>Kernel <code>capability.rs</code> (<code>CapId</code>, <code>CapPermissions</code>)</td><td>Implemented</td></tr>
-<tr><td><strong>Pledge</strong></td><td>Octal-mode permission subset</td><td>Kernel <code>OctalMode::pledge</code></td><td>Implemented</td></tr>
-<tr><td><strong>Unveil</strong></td><td>Filesystem path access</td><td>Kernel <code>UnveilRule</code> list</td><td>Implemented, with the empty-list caveat above</td></tr>
-<tr><td><strong>Sandbox</strong></td><td>Full lockdown, irreversible</td><td>Kernel sandbox flag</td><td>Implemented</td></tr>
-<tr><td><strong>Family policy</strong></td><td>Per-family IPC restrictions</td><td>—</td><td><strong>Not implemented</strong> — the family is carried but never enforced</td></tr>
-<tr><td><strong>Memory quota</strong></td><td>Per-silo <code>mem_max</code></td><td><code>memory/address_space.rs</code></td><td>Implemented, best-effort under lock contention</td></tr>
-<tr><td><strong>Capability type ceiling</strong></td><td>Restrict which capability types a silo may hold</td><td>—</td><td><strong>Not implemented</strong></td></tr>
+<div class="table-wrapper"><table><thead><tr><th>Mechanism</th><th>Scope</th><th>Enforcement</th></tr></thead><tbody>
+<tr><td><strong>Silo</strong></td><td>Process group + resources + capabilities</td><td>Kernel (SiloManager)</td></tr>
+<tr><td><strong>Capability</strong></td><td>Individual resource access</td><td>Kernel (CapabilityManager)</td></tr>
+<tr><td><strong>Pledge</strong></td><td>Syscall permission subset</td><td>Kernel (OctalMode)</td></tr>
+<tr><td><strong>Unveil</strong></td><td>Filesystem path access</td><td>Kernel (UnveilRules)</td></tr>
+<tr><td><strong>Sandbox</strong></td><td>Full lockdown (irreversible)</td><td>Kernel (sandboxed flag)</td></tr>
 </tbody></table>
-</div>
-<h2 id="see-also"><a class="header" href="#see-also">See also</a></h2>
-<ul>
-<li><a href="./syscalls.html#silo-management">Syscall Reference → Silo management</a></li>
-<li><a href="./ipc-mechanisms.html">IPC Mechanisms</a> — silo tiers drive the transport matrix</li>
-<li><code>doc/silo_security_model.md</code> — the design spec; several of its mechanisms (IPC coloration, capability derivation, family profiles, the audit ring) are <strong>not implemented</strong>. Read it as a proposal, not a description.</li>
-</ul>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="memory-management"><a class="header" href="#memory-management">Memory Management</a></h1>
+</div><div style="break-before: page; page-break-before: always;"></div><h1 id="memory-management"><a class="header" href="#memory-management">Memory Management</a></h1>
 <p>Strat9 OS uses a layered memory architecture: a pre-boot physical allocator, a real buddy frame allocator with per-CPU caches, a slab kernel heap with a vmalloc large-object backend, four-level page tables with an HHDM and copy-on-write, and demand paging for user VMAs.</p>
 <hr />
 <h2 id="memory-hierarchy"><a class="header" href="#memory-hierarchy">Memory hierarchy</a></h2>
@@ -899,7 +835,7 @@ cpu_features_required   (v2 and later)
 <li><strong><code>memory/cow.rs:15-19</code></strong> describes <code>COW_LOCK</code> as protecting the refcounts; it guards only the metadata flag bits, and the fault handler reads PTE bit 9 instead. The real refcounts are in <code>OwnershipTable</code>.</li>
 </ul>
 <hr />
-<h2 id="see-also-1"><a class="header" href="#see-also-1">See also</a></h2>
+<h2 id="see-also"><a class="header" href="#see-also">See also</a></h2>
 <ul>
 <li><a href="./boot-sequence.html">Boot Sequence</a> — where the HHDM offset and memory map come from</li>
 <li><a href="./architecture.html">Architecture Overview</a></li>
@@ -1194,7 +1130,7 @@ cpu_features_required   (v2 and later)
 <p>But <strong>no <code>Makefile.toml</code> task, CI job or script invokes any of it</strong>, and the in-kernel branch is fatal: on a null <code>args_ptr</code>, <code>dtb_boot::build_minimal_args()</code> sets <code>memory_map_base = 0, memory_map_size = 0</code>, so <code>memory_regions()</code> returns an empty slice and <code>kernel_main</code> panics with <em>"Boot memory map is empty"</em> immediately after entry. Even past that, the RSDP and framebuffer fields would be zero, so ACPI and APIC bring-up would fail.</p>
 <p>Treat PVH as work-in-progress scaffolding, not a supported boot method.</p>
 <hr />
-<h2 id="see-also-2"><a class="header" href="#see-also-2">See also</a></h2>
+<h2 id="see-also-1"><a class="header" href="#see-also-1">See also</a></h2>
 <ul>
 <li><a href="./architecture.html">Architecture Overview</a></li>
 <li><a href="./memory-model.html">Memory Management</a></li>
@@ -1452,7 +1388,7 @@ cpu_features_required   (v2 and later)
 <p>These are scheduler hints, and <strong>nothing reads <code>estimated_cost_cycles</code></strong> anywhere in the tree.</p>
 <p>Treat every range previously quoted for N1 (3-10 cycles), N2 (400-4000), N3 (800-2000), the per-tier N3 costs, and the CPU-usage-per-packet figures as unverified design targets. The only defensible statement today is the three literals above.</p>
 <hr />
-<h2 id="see-also-3"><a class="header" href="#see-also-3">See also</a></h2>
+<h2 id="see-also-2"><a class="header" href="#see-also-2">See also</a></h2>
 <ul>
 <li><a href="./syscalls.html#ipc--transport-n1n2n3">Syscall Reference → IPC: transport</a></li>
 <li><a href="./silo.html">Silo System</a> — silo lifecycle, pledge/unveil</li>
@@ -1584,7 +1520,7 @@ let msg = mailbox.pop();                 // last message first</code></pre>
 </tbody></table>
 </div>
 <hr />
-<h2 id="see-also-4"><a class="header" href="#see-also-4">See also</a></h2>
+<h2 id="see-also-3"><a class="header" href="#see-also-3">See also</a></h2>
 <ul>
 <li><a href="./ipc-mechanisms.html">IPC Mechanisms</a> — the full transport reference, including the legacy port/channel/ring/semaphore mechanisms</li>
 <li><a href="./silo.html">Silo System</a> — where silo tiers and pledge/unveil are enforced</li>
@@ -1794,7 +1730,7 @@ fn storage_init() -&gt; Result&lt;(), ComponentInitError&gt; {
     DEV--&gt;&gt;BOOT: device ready
 </code></pre>
 <p>Note that the registry hands control to a fixed set of <code>init()</code> calls. Matching happens inside each driver, not in a generic registry that drivers plug into.</p>
-<h2 id="see-also-5"><a class="header" href="#see-also-5">See also</a></h2>
+<h2 id="see-also-4"><a class="header" href="#see-also-4">See also</a></h2>
 <ul>
 <li><a href="./architecture.html">Architecture Overview</a> — where each subsystem sits</li>
 <li><a href="./boot-sequence.html#kernel-init--kernelmain">Boot Sequence</a> — the ordered init sequence</li>
@@ -1852,7 +1788,7 @@ fn storage_init() -&gt; Result&lt;(), ComponentInitError&gt; {
 <tr><td><code>ipc_handshake.rs</code></td><td>Handshake and version negotiation</td></tr>
 </tbody></table>
 </div>
-<h2 id="see-also-6"><a class="header" href="#see-also-6">See also</a></h2>
+<h2 id="see-also-5"><a class="header" href="#see-also-5">See also</a></h2>
 <ul>
 <li><a href="./syscalls.html">Syscall Reference</a> — numbers, kernel argument lists, and the ABI-versus-kernel gap list</li>
 <li><a href="./abi-matrix.html">ABI Support Matrix</a> — POSIX API coverage through <code>musl-compat</code></li>
@@ -1868,7 +1804,17 @@ fn storage_init() -&gt; Result&lt;(), ComponentInitError&gt; {
 <li><strong>No silent renumbering</strong> of existing syscall IDs.</li>
 <li><strong><code>repr(C)</code> and explicit size checks</strong> are mandatory for exported ABI structs.</li>
 </ul>
-<!-- AUTO-ABI-CHANGELOG:START -->
+<h2 id="boot-handoff-abi-strat9_abiboot"><a class="header" href="#boot-handoff-abi-strat9_abiboot">Boot handoff ABI (<code>strat9_abi::boot</code>)</a></h2>
+<p>The bootloader/kernel handoff has its own version, <code>STRAT9_BOOT_ABI_VERSION</code>,
+independent from the syscall <code>ABI_VERSION_*</code> above. The kernel refuses to
+boot when it does not match exactly.</p>
+<div class="table-wrapper"><table><thead><tr><th>Version</th><th>Change</th></tr></thead><tbody>
+<tr><td>2</td><td>First documented handoff (<code>KernelArgs</code>, framebuffer, modules)</td></tr>
+<tr><td>3</td><td>Framebuffer channel masks</td></tr>
+<tr><td>4</td><td>BSS virtual range fields</td></tr>
+<tr><td>5</td><td><code>MemoryKind::Bad</code> (4) and <code>MemoryKind::AcpiNvs</code> (5); layout unchanged (132 bytes)</td></tr>
+</tbody></table>
+</div><!-- AUTO-ABI-CHANGELOG:START -->
 <h2 id="current-version"><a class="header" href="#current-version">Current version</a></h2>
 <ul>
 <li><code>ABI_VERSION_MAJOR = 0</code></li>
@@ -1883,36 +1829,36 @@ fn storage_init() -&gt; Result&lt;(), ComponentInitError&gt; {
 </ul>
 <h2 id="recent-abi-updates-auto-generated"><a class="header" href="#recent-abi-updates-auto-generated">Recent ABI updates (auto-generated)</a></h2>
 <ul>
-<li>2026-09-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f64aff3c6072bbb7c6f7ef7e698dadab837df431"><code>f64aff3c</code></a> Implement console rendering and mouse input handling tasks</li>
-<li>2026-09-13 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3898c5074c07d2b5bdbd13b505a51ccfe92a0e30"><code>3898c507</code></a> feat(bootloader, kernel, abi): homemade strat9 UEFI bootloader : rewrite with scheduler and memory hardening</li>
-<li>2026-08-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c03feb24811b210174712aa7be5a9e097e32a80d"><code>c03feb24</code></a> fix(abi): ENOTSUP 52→95, XFS EiB constant fix, decode_fixed roundtrip tests</li>
-<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3ca6d7c6e61014fe2ad305f22e5bf75c0bdaeebd"><code>3ca6d7c6</code></a> feat: Add U-Boot setup script and boot protocol implementation</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/88c52834c3a0af3c6f01f14f3d7364f32a862281"><code>88c52834</code></a> refactor(arch): unify x86_64 crate access via x86_crate_shim, complete riscv stubs</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c8ca94c43ffb700129b00ddf661e45637515d6fc"><code>c8ca94c4</code></a> refactor(arch): route shared code through arch::xshim, gate limine/x86 deps</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f3366e1db5be83bea4a1f71e16be6bcc442fbce9"><code>f3366e1d</code></a> refactor(arch): migrate process/ and syscall/ call-sites to arch facade</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4399b5f5229b096596f6fe221f5509014a258c88"><code>4399b5f5</code></a> test: pass 2 over full codebase — syscall, ABI data/handshake, NIC drivers, allocator</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/88feb023653dd6b3b919a743829575707f63fc24"><code>88feb023</code></a> test(abi): exhaustive L0/L1 anti-regression suite</li>
-<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/09216d7c556d521ef4e05528753ca02c70950e72"><code>09216d7c</code></a> Merge branch 'fix/elf-loader-hardening' into 'main'</li>
-<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/2bad5b9b8ae1a351c26ddcc69a78488a5d659dfe"><code>2bad5b9b</code></a> feat(elf): loader hardening (#62 #63 #64 #67 #68, groundwork #66)</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6ca7fef90feacf3fe163cf6c5be7ba833c460e02"><code>6ca7fef9</code></a> fix(ipc): security hardening, perf fixes and typed wire-format layer</li>
-<li>2026-07-18 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/abb7dd7e60991de111632e72ae8658adccdf8697"><code>abb7dd7e</code></a> feat(buddy): harden, optimize, and add kernel.toml configuration</li>
-<li>2026-07-17 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/fe68f9aacb1b70b8601cbdde1423be75628255d1"><code>fe68f9aa</code></a> fix(vfs,console,scheduler): VFS improvements, console perf, panic backtrace</li>
-<li>2026-07-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3a5eb69d9b3041f89c205e184b4afe15c07ee44d"><code>3a5eb69d</code></a> feat(silo): replace Vec with heapless::Vec for bounded fields</li>
-<li>2026-07-09 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ab22b0d9b010dd704cf6044580b4f310c5748524"><code>ab22b0d9</code></a> feat: 3-level IPC transport, N3 MMU thread migration, graphical silo, NIC/E1000 fixes</li>
-<li>2026-06-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5a3d69c4e10c4cfc67976a837751ce50292f9032"><code>5a3d69c4</code></a> feat: migrate input system to userspace</li>
-<li>2026-06-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3fea3f3776edefa7bdc7c3a8d930c8d17b0939a6"><code>3fea3f37</code></a> SMP hardware debug, NVMe fixes, VGA refactor, telnetd hardening, docs</li>
-<li>2026-06-16 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e4ab1a96c3579117defffe0f5b32cf7cac853129"><code>e4ab1a96</code></a> Enhance network stack, NIC drivers, USB/NVMe subsystems, and thermal management</li>
-<li>2026-06-03 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0c40058547bd9b7ef07a837b1153577879510994"><code>0c400585</code></a> Refactor the network stack and add dual-stack userspace tooling</li>
-<li>2026-05-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/aeade5ef5fcfdddef2caa43da6af361a5102c7cd"><code>aeade5ef</code></a> Code cleanup</li>
-<li>2026-05-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b2bbcc0bdd8c836ad396a1f32afd590b0c7236a8"><code>b2bbcc0b</code></a> Improve and fix IPC</li>
-<li>2026-05-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/db23b5365e1ee201e8928c2a87ac2d449e876552"><code>db23b536</code></a> Fix major memory leak and remove sshd silo</li>
-<li>2026-05-19 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93c8927544e95bb8847495f1044913f9f9ff05b0"><code>93c89275</code></a> async: implement and optimize async I/O completion handling</li>
-<li>2026-05-18 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7c5efb4d549c9b259c9fe4d7d5d13b050750c1bb"><code>7c5efb4d</code></a> async: io_uring-like async I/O — ring, dispatch, AHCI bridge (Phases 1-4)</li>
-<li>2026-05-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/cc4944a2c78236c41fce4b8f1054e119fc2bcd8e"><code>cc4944a2</code></a> Refactor and clean up code in various modules</li>
-<li>2026-05-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ecc416df41e29c26f6839ee15cffbc7a7dd41f05"><code>ecc416df</code></a> refactor: strate-init refactoring, ELF/VFS/signal hardening, TSC calibration fix</li>
-<li>2026-05-08 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f070d41c31fb505fef36603ee7cbc0c6648944b3"><code>f070d41c</code></a> Add kernel entropy pool with interrupt-driven collection</li>
-<li>2026-05-08 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9dedb9f19215cd1ad7f4d65d88fe84e4832bfc7c"><code>9dedb9f1</code></a> Implement robust list support (set_robust_list/get_robust_list)</li>
-<li>2026-05-08 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d2e90a2ffc1886bc3e72b6d2d10e4dd99c156d5a"><code>d2e90a2f</code></a> Bridge clone() thread creation via SYS_THREAD_CREATE, add faccessat routing</li>
+<li>2026-10-30 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/627a5b757a4aa70e3c0c723d810347c3fd26e148"><code>627a5b7</code></a> abi/net: allow documented unsafe ring primitives under the workspace lint</li>
+<li>2026-10-30 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f41d977c5d3e8374400f94435f181d6a2dc8117d"><code>f41d977</code></a> Fix build after Code-refactor integration</li>
+<li>2026-10-29 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a7baa3ae3ae1a615b87a26350c5d8b7985611315"><code>a7baa3a</code></a> Refactor silo memory management and enhance syscall functionality</li>
+<li>2026-10-29 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/97cb28adf1aa53af61b1133db3181e1d2c9f9a9c"><code>97cb28a</code></a> Implement framebuffer write-combining support and FPU state preservation</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/62e40efb60b484b5e5bafb04f0d531a7ec68b6bc"><code>62e40ef</code></a> feat(iommu): finish P1/P2 with QI, IR/MSI, IVMD, bounce buffers and strate-iommu boot wiring</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5ccb26910068ceb1ab43ec656ec463a7976b7c70"><code>5ccb269</code></a> feat(iommu): P1 policy/robustness and P2 shadow tables, superpages and batch DMA</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/db8ae4db6bd95a93910e6de14d3ecb517ee2c870"><code>db8ae4d</code></a> feat(iommu): P0 domain/IOVA management, DMAR parser and DMA isolation ABI</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/2f07be9bd8cb0f93b67600492aa446ced8311763"><code>2f07be9</code></a> test(abi): align ipc_payload_wire with the real 24-byte OpenReply</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/861ee546838667511ad42236df8b1ca8522f9069"><code>861ee54</code></a> fix: unblock kernel build after 1 KiB IPC and net queue changes</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9ef21ebf385bd205cbee8de8f713c59d181527a9"><code>9ef21eb</code></a> Fix compilation</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e10920414ea12581538af9c161e8ad7723327b44"><code>e109204</code></a> net: bulk VFS rings, multi-queue RSS, PCI hotplug polling and RX checksum offload</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9d15fed44964c5c5a441dedf59fd1f76fa79eeee"><code>9d15fed</code></a> net(P2-P4): offload negotiation, hotplug, IOMMU bookkeeping, vSwitch/QoS, bulk IPC</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c4d4a13ea4d9ba4c9d2a25d6a803fe589f492c32"><code>c4d4a13</code></a> net(P1): zero-copy shared queue between kernel and strate-net</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/215eab6cf813b566c5c49cf8b16cc4e6608bf662"><code>215eab6</code></a> net(P0): capability-gated syscalls, bounded IRQ, shared queue foundation</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f76ffc3f7522d26eda94447d3a0e5eb5cb3916c0"><code>f76ffc3</code></a> Merge branch 'feature/console-display-strates' into HEAD</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/af6560c462050268cf1230edc5861554f5076ac7"><code>af6560c</code></a> Merge boot ABI branch and repair duplicated additions</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/024c39314d4003ae56cab1c43d66aa62ec87e631"><code>024c393</code></a> Merge remote-tracking branch 'origin/fix/boot-abi-consistency' into integration/merge-all</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ea7c302996f627819d6e6ace15cc161b5162dad6"><code>ea7c302</code></a> Merge remote-tracking branch 'origin/Fix-and-enhance-networking' into integration/merge-all</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c1a9fa442f2f35052c7f145941592a6ede95a7b3"><code>c1a9fa4</code></a> console: MAP_SHARED frame-backed display surface</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/94ff2886a51123efdac4bad659c333445b9ec76f"><code>94ff288</code></a> test(abi): repair stale scheme payload wire tests and a lint regression</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b071184d8fd93a828f2209a7f6395f31151a8e61"><code>b071184</code></a> fix(dependencies): clean up unused packages and update features in Cargo.toml</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/8c18cdbebd023f2c4b7711572dca0030335a557c"><code>8c18cdb</code></a> fix(abi): bump boot handoff ABI to v5 and document it</li>
+<li>2026-09-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f64aff3c6072bbb7c6f7ef7e698dadab837df431"><code>f64aff3</code></a> Implement console rendering and mouse input handling tasks</li>
+<li>2026-09-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f7818ad4c8936d2fefdc4cf1cce19932ffc0119d"><code>f7818ad</code></a> Merge canonical GitLab main with RISC-V integration</li>
+<li>2026-09-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4e45f2d1c3ae872d0631c8342baf2e00312059cd"><code>4e45f2d</code></a> Fix merge integration for RISC-V backend</li>
+<li>2026-09-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/bb2df28041b624236e15c6fce6bebe9ed12c991d"><code>bb2df28</code></a> Merge branch feat/hal-arch-facade into main</li>
+<li>2026-09-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/18818c4da69438eac459a92551130a21d9c3da2a"><code>18818c4</code></a> chore(riscv): gate remaining x86-only helpers</li>
+<li>2026-09-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/fedacdf07474f45d9d6b948c4eb0e9d03c73773e"><code>fedacdf</code></a> chore(riscv): scope architecture-specific imports</li>
+<li>2026-09-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ac591e85aa9700fad2fe5db272d3229250b5f377"><code>ac591e8</code></a> fix(riscv): gate x86 assembly and align facade signatures</li>
+<li>2026-09-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/582d31cdd36cc1fc8e9536f08904b77dc9298eea"><code>582d31c</code></a> fix(riscv): align architecture facade interfaces</li>
 </ul>
 <!-- AUTO-ABI-CHANGELOG:END -->
 <h2 id="changelog-entries"><a class="header" href="#changelog-entries">Changelog entries</a></h2>
@@ -2100,7 +2046,7 @@ fn storage_init() -&gt; Result&lt;(), ComponentInitError&gt; {
 </tbody></table>
 </div>
 <p>Additionally, the shim routes <code>mkdirat</code>, <code>unlinkat</code>, <code>renameat</code> and <code>readlinkat</code> to syscall numbers the kernel does not dispatch, so they always return <code>ENOSYS</code> regardless of argument count.</p>
-<h2 id="see-also-7"><a class="header" href="#see-also-7">See also</a></h2>
+<h2 id="see-also-6"><a class="header" href="#see-also-6">See also</a></h2>
 <ul>
 <li><a href="./syscalls.html">Syscall Reference</a> — numbers, kernel argument lists, and the full gap list</li>
 <li><a href="./syscall.html">Syscall Layer</a> — the <code>strat9-syscall</code> crate used by native userspace</li>
@@ -2668,7 +2614,7 @@ fn storage_init() -&gt; Result&lt;(), ComponentInitError&gt; {
 <h3 id="mapflags-vs-the-kernels-map_"><a class="header" href="#mapflags-vs-the-kernels-map_"><code>MapFlags</code> vs the kernel's <code>MAP_*</code></a></h3>
 <p><code>strat9_abi::flag::MapFlags</code> declares <code>MAP_NORESERVE</code>, <code>MAP_GROWSDOWN</code>, <code>MAP_LOCKED</code> and <code>MAP_POPULATE</code>. <code>sys_mmap</code> validates flags against a narrower set and returns <code>EINVAL</code> for those bits. Write mmap callers against the table in <a href="syscalls.html#memory-map-flags--map-mmap">Memory-map flags</a>, not against <code>MapFlags</code>.</p>
 <hr />
-<h2 id="see-also-8"><a class="header" href="#see-also-8">See also</a></h2>
+<h2 id="see-also-7"><a class="header" href="#see-also-7">See also</a></h2>
 <ul>
 <li><a href="./syscall.html">Syscall Layer</a> — the userspace <code>strat9-syscall</code> crate</li>
 <li><a href="./abi.html">ABI Overview</a> — where the definitions live</li>
@@ -2711,7 +2657,7 @@ fn storage_init() -&gt; Result&lt;(), ComponentInitError&gt; {
 <li><a href="./api/strat9_syscall/schemev2/index.html">strat9_syscall::schemev2</a></li>
 <li><a href="./api/strat9_syscall/dirent/index.html">strat9_syscall::dirent</a></li>
 </ul>
-<h2 id="see-also-9"><a class="header" href="#see-also-9">See also</a></h2>
+<h2 id="see-also-8"><a class="header" href="#see-also-8">See also</a></h2>
 <ul>
 <li><a href="./syscalls.html">Syscall Reference</a> — the full table, with the kernel's real argument lists and the known ABI gaps</li>
 <li><a href="./abi.html">ABI Overview</a> — where the numbers and structs are defined</li>
@@ -2720,62 +2666,62 @@ fn storage_init() -&gt; Result&lt;(), ComponentInitError&gt; {
 <!-- AUTO-CHANGELOG:START -->
 <h2 id="project-stats"><a class="header" href="#project-stats">Project stats</a></h2>
 <ul>
-<li><strong>Total commits:</strong> <code>662</code></li>
+<li><strong>Total commits:</strong> <code>852</code></li>
 <li><strong>Latest tag:</strong> <code>0.1.0</code></li>
 <li><strong>Repository:</strong> <a href="https://git.strat9-os.org/strat9-os/strat9-os">git.strat9-os.org</a></li>
 </ul>
 <h2 id="recent-commits-auto-generated"><a class="header" href="#recent-commits-auto-generated">Recent commits (auto-generated)</a></h2>
 <ul>
-<li>2026-09-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f64aff3c6072bbb7c6f7ef7e698dadab837df431"><code>f64aff3</code></a> Implement console rendering and mouse input handling tasks</li>
-<li>2026-09-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e53faf1c817feabbcb42312889a1e0271ff835c2"><code>e53faf1</code></a> docs: update published documentation</li>
-<li>2026-09-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/dec676674d7c935126b8eea77b8bde72979727ff"><code>dec6766</code></a> Merge branch 'ELF-tuning-and-fix' into 'main'</li>
-<li>2026-09-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e724272e9bb7d4ddadb3f3a5cdcdcbf3c95e582e"><code>e724272</code></a> Fix : unify logging to log::*, reject null ET_EXEC entry, warn on zero-size COPY relocs</li>
-<li>2026-09-14 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4c008c5cc3702bc915374b90a13518fec9268a9a"><code>4c008c5</code></a> docs: update published documentation</li>
-<li>2026-09-13 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/981429b03d580bf5e7dd51a7003628f176683285"><code>981429b</code></a> Merge branch 'fix/UEFI-bootloader' into 'main'</li>
-<li>2026-09-13 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3898c5074c07d2b5bdbd13b505a51ccfe92a0e30"><code>3898c50</code></a> feat(bootloader, kernel, abi): homemade strat9 UEFI bootloader : rewrite with scheduler and memory hardening</li>
-<li>2026-08-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/228eaa541a22686b510eab7224464c74012f7c29"><code>228eaa5</code></a> fix: regenerate corrupted Cargo.lock (stray merge conflict markers from rebase)</li>
-<li>2026-08-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/93dd0e5fbfea6eba551f12df3a03cdf86655d90a"><code>93dd0e5</code></a> kernel: integrate cpuid.rs leaf1 detection diagnostics from ramfs-hardening WIP</li>
-<li>2026-08-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4eb5b3d734ec46eab7861f08485c9ce017bf5cd8"><code>4eb5b3d</code></a> Merge branch 'enhance-async-implementation' into 'main'</li>
-<li>2026-08-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/00d83d71214282e5fd47d942446593aad18d3739"><code>00d83d7</code></a> feat(kernel): async I/O overhaul : userspace ring mapping, deferred completions, Scheme trait redesign</li>
-<li>2026-08-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6738421e2e93a7dcc9b3030f4c2b257b6280051b"><code>6738421</code></a> Merge branch 'fix/errno-and-capabilities' into 'main'</li>
-<li>2026-08-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c03feb24811b210174712aa7be5a9e097e32a80d"><code>c03feb2</code></a> fix(abi): ENOTSUP 52→95, XFS EiB constant fix, decode_fixed roundtrip tests</li>
-<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/50a807df4a2e2be5ca9ef7c803f0a5df34113d72"><code>50a807d</code></a> fix(framebuffer): update fill and blit operations to use dynamic detection</li>
-<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7807362668fc98f2aa5dbea312f3e50662cf5553"><code>7807362</code></a> Merge branch 'feat/graphics-performance' into 'main'</li>
-<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7ed9263109ac3fba8d14cda9ece0b7772f76a0e1"><code>7ed9263</code></a> style: apply rustfmt to paging.rs and framebuffer.rs</li>
-<li>2026-08-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/aaf0fb632687a87130464df0eb67a7bca1ef2cfb"><code>aaf0fb6</code></a> fix(kernel): work around nightly LLVM ISel abort on pshufb/movntdq</li>
-<li>2026-08-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7087cffae28c256938700560f1bb00eefb5eb3ad"><code>7087cff</code></a> refactor(graphics): CanvasBuffer hygiene - S4/S5/S6 partial</li>
-<li>2026-08-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/0e0d5fe7b198864e3763aa46f9c3c7cc2b8c54a4"><code>0e0d5fe</code></a> perf(graphics): streaming stores for large fills/blits (S2)</li>
-<li>2026-08-24 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4aec188c3e8206f5a02db4e7a15b7d6e180a6871"><code>4aec188</code></a> perf(graphics): Write-Combining framebuffer via dedicated PAT entry; unified present throttling</li>
-<li>2026-08-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6b3ceccd7ffbeb179c2952050f706c749f6fde7a"><code>6b3cecc</code></a> perf(graphics): batched blit API and lockless framebuffer info getters</li>
-<li>2026-08-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/75af9adef3742b94e66b89c546a3260d90e491db"><code>75af9ad</code></a> perf(graphics): zero-copy VirtIO GPU presentation with coalesced damage</li>
-<li>2026-08-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/706577f3e4ca9d85728fa1cd85f760a9bb641909"><code>706577f</code></a> perf(graphics): SIMD pixel ingest + explicit-width wire protocol for /dev/display</li>
-<li>2026-08-23 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d4f597d9d086c4450aaf3500d27c2b821a73a4cd"><code>d4f597d</code></a> perf(graphics): event-driven compositor with partial damage present</li>
-<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/067772e9315b102d784ddfd8ca3f7b4f6c648c48"><code>067772e</code></a> Merge branch 'feat/Replace-Limine-bootloader-with-U-Boot-for-multi-architecture-support' into 'main'</li>
-<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3ca6d7c6e61014fe2ad305f22e5bf75c0bdaeebd"><code>3ca6d7c</code></a> feat: Add U-Boot setup script and boot protocol implementation</li>
-<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/df64d6d703fdf2ff0071f1ab8ced90647153f19f"><code>df64d6d</code></a> Merge branch 'fixing-the-network-again' into 'main'</li>
-<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/eccb4d178eabb9eb3070ec09f179556b292c1d4c"><code>eccb4d1</code></a> fix(net): ICMP reply handling + wasmi upgrade + clippy fixes</li>
-<li>2026-08-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/25cc18bd5fcf4c13196353f7d58949f8592b1288"><code>25cc18b</code></a> Merge branch 'feat/hal-arch-facade' into 'main'</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e725386af47ca1033326c74873b4691e9cd7f78e"><code>e725386</code></a> ok</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7262385fd627431898a1423a0721dca8075719cc"><code>7262385</code></a> fix(arch,riscv64): dedupe duplicated stub modules in facade_riscv</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/892cb03ff1ff04707db577bd2c14f72ba3211d6b"><code>892cb03</code></a> fix(arch,riscv64): SegmentSelector newtype for gdt stub, safe unmap on stub mapper</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/580b86f94a889f23df94e69dbcf3d1df442a3ffb"><code>580b86f</code></a> feat(ostd): Add/Sub<u64> operator impls for neutral PhysAddr/VirtAddr</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/4260fbc8627daa57cd2f853c2a5e540480e8322a"><code>4260fbc</code></a> fix(arch,riscv64): mapper::MapToError path fix inside OffsetPageTable impl</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/60b50c68fe4d3144d2781b91a268e04aa0ab16db"><code>60b50c6</code></a> feat(arch,riscv64): working Sv48 translate walker in stub mapper</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/529715a7ad45ae0c5e96429fa0eb047bdd10c749"><code>529715a</code></a> feat(ipc,riscv64): Sv48 tagged-pointer layout for IntrusiveMailbox</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c0863955d190741a9ae1f0472d822cbaecd04cef"><code>c086395</code></a> feat(arch,riscv64): PciDevice config-space accessors (stubbed, R5 wires ECAM)</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a7903794e027df236e63a2eae06b333b8e19c765"><code>a790379</code></a> fix(arch,riscv64): MouseEvent struct + u8 KEY_* scancode parity with x86</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/3e447a2f866e0bc7b175c486d47bcf22aae3efa7"><code>3e447a2</code></a> fix(arch,riscv64): restore unmap (tuple PhysFrame+MapperFlush) on stub mapper</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/bf02f8866041b9a89a423ac46981862e36635797"><code>bf02f88</code></a> fix(arch,riscv64): unmap returns PhysFrame, Cr3::write/Cr3Flags::empty stubs</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/dc404b5b3ad1688134828ddb2673cab16e75e894"><code>dc404b5</code></a> fix(arch,riscv64): sealed PortValue trait for port stub (kills E0034)</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6d3f7723f47e783074ca6f955db5547f3d99ce3a"><code>6d3f772</code></a> fix(arch,riscv64): port stub typed read/write impls, drop stale traits</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c9dbfb0e086b59d2bd003ce623fb17863ccb62fa"><code>c9dbfb0</code></a> fix(arch): annotate ambiguous PhysFrame::containing_address call-sites</li>
-<li>2026-08-26 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/8731a5069e8c39860b905406a96e33f22f41f956"><code>8731a50</code></a> refactor(arch): Port trait-based reads, gate top TUI behind x86_64</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/1da8196961cc7851832f7b4efcdf235e27619ec4"><code>1da8196</code></a> fix(arch,riscv64): dedupe stubs, align keyboard read_char, FrameAllocator cfg</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/daf86f567c28b137fad449eebd753b7ec9af24d3"><code>daf86f5</code></a> fix(arch,riscv64): align stub signatures with x86 call-sites</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/922d42965ec6257e63cabb2f5fb28171d7986b64"><code>922d429</code></a> feat(arch,riscv64): full PciDevice struct + PCI surface stubs</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/acba1cf298b64a068b40a3c0811a43a4f9576e45"><code>acba1cf</code></a> feat(arch,riscv64): Mapper trait surface on Sv48 skeleton</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/62d200e60f23891c170aafd4f734374f910f3774"><code>62d200e</code></a> feat(arch,riscv64): real Sv48 scaffolding in x86_64-stub, ostd pointer helpers</li>
-<li>2026-08-25 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e96df8f0d54c6156f4be44509d3306033cbb08f1"><code>e96df8f</code></a> refactor(arch): gate VGA-UI commands behind x86_64, complete riscv framebuffer_info stub</li>
+<li>2026-10-30 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/627a5b757a4aa70e3c0c723d810347c3fd26e148"><code>627a5b7</code></a> abi/net: allow documented unsafe ring primitives under the workspace lint</li>
+<li>2026-10-30 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7a388638e288183d877111ff31544d040a90c21d"><code>7a38863</code></a> Fix some stuff.</li>
+<li>2026-10-30 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f41d977c5d3e8374400f94435f181d6a2dc8117d"><code>f41d977</code></a> Fix build after Code-refactor integration</li>
+<li>2026-10-29 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a7baa3ae3ae1a615b87a26350c5d8b7985611315"><code>a7baa3a</code></a> Refactor silo memory management and enhance syscall functionality</li>
+<li>2026-10-29 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/97cb28adf1aa53af61b1133db3181e1d2c9f9a9c"><code>97cb28a</code></a> Implement framebuffer write-combining support and FPU state preservation</li>
+<li>2026-10-29 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/dca633126d1f9e8dce9e12e124f01326bbb2a732"><code>dca6331</code></a> feat(vfs): add NVMe block device support under /dev/nvme0n1</li>
+<li>2026-10-29 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7a14f0f16763aa5a174a01f7ff0bf2f719b5a689"><code>7a14f0f</code></a> feat(storage): implement flush method for block devices to ensure data durability. Users's fsync() reachs now the hardware.</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7cbfc7536bd68965d37945dd33f146be27e8b152"><code>7cbfc75</code></a> feat(storage): migrate AHCI, NVMe and virtio-blk DMA to device addresses</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ae8177432968290f32c28c6a3f8ec7b215bafa07"><code>ae81774</code></a> feat(nic): migrate DMA programming to IOMMU device addresses</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/62e40efb60b484b5e5bafb04f0d531a7ec68b6bc"><code>62e40ef</code></a> feat(iommu): finish P1/P2 with QI, IR/MSI, IVMD, bounce buffers and strate-iommu boot wiring</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/8a0b5ff7c6c4688407524b7b7412df171c0e8169"><code>8a0b5ff</code></a> Add -device intel-iommu inside qemu</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e9e41d3b48d1227faa8dce63a3de792b46a7c70f"><code>e9e41d3</code></a> fix(iommu): make the boot banner unconditional and add a shell iommu command</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5ccb26910068ceb1ab43ec656ec463a7976b7c70"><code>5ccb269</code></a> feat(iommu): P1 policy/robustness and P2 shadow tables, superpages and batch DMA</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/db8ae4db6bd95a93910e6de14d3ecb517ee2c870"><code>db8ae4d</code></a> feat(iommu): P0 domain/IOVA management, DMAR parser and DMA isolation ABI</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e5ddd2b6a9329ca7bcfc12a6275ee3611e3113f0"><code>e5ddd2b</code></a> fix(boot): defer the NIC hotplug watchdog until the scheduler is running</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/764d072f0faaedf36f3289d85fe6ef2aaaf927b5"><code>764d072</code></a> fix(boot): start NIC hotplug after timers and quiet periodic PCI rescans</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7278974e7729db867d71a9872bcd35765437e086"><code>7278974</code></a> fix(ping): restore alloc_error_handler feature gate and Layout import</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a12663900c104051df15fb02c91600b10be26a1b"><code>a126639</code></a> refactor: remove unused alloc_error_handler feature from ping utility</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/2f07be9bd8cb0f93b67600492aa446ced8311763"><code>2f07be9</code></a> test(abi): align ipc_payload_wire with the real 24-byte OpenReply</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/861ee546838667511ad42236df8b1ca8522f9069"><code>861ee54</code></a> fix: unblock kernel build after 1 KiB IPC and net queue changes</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9ef21ebf385bd205cbee8de8f713c59d181527a9"><code>9ef21eb</code></a> Fix compilation</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ab30389193742a99a4368709945d6ab63c6986bb"><code>ab30389</code></a> docs: network data plane, bulk VFS rings and hotplug notes</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e10920414ea12581538af9c161e8ad7723327b44"><code>e109204</code></a> net: bulk VFS rings, multi-queue RSS, PCI hotplug polling and RX checksum offload</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/61d03a5f11a1d65bdcaa623aa2b5af2d23f6bc33"><code>61d03a5</code></a> net: reset RX refill batch counter on controller reinit</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/1a93b50f27336a719f9c98a775b775466460ef02"><code>1a93b50</code></a> net: hotplug event capability check and mount replacement cleanup</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/d82d29c1627a4bf09c268fcbb094a7b24b207ce7"><code>d82d29c</code></a> net: post-audit fixes for token lifetime, queue ownership and supervisor restart</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9d15fed44964c5c5a441dedf59fd1f76fa79eeee"><code>9d15fed</code></a> net(P2-P4): offload negotiation, hotplug, IOMMU bookkeeping, vSwitch/QoS, bulk IPC</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c4d4a13ea4d9ba4c9d2a25d6a803fe589f492c32"><code>c4d4a13</code></a> net(P1): zero-copy shared queue between kernel and strate-net</li>
+<li>2026-10-28 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/215eab6cf813b566c5c49cf8b16cc4e6608bf662"><code>215eab6</code></a> net(P0): capability-gated syscalls, bounded IRQ, shared queue foundation</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a5abadbbecf5de2eb02e0bce2cbf0e64778259d7"><code>a5abadb</code></a> Merge branch 'ELF-tuning-and-fix' into HEAD</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f76ffc3f7522d26eda94447d3a0e5eb5cb3916c0"><code>f76ffc3</code></a> Merge branch 'feature/console-display-strates' into HEAD</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/af6560c462050268cf1230edc5861554f5076ac7"><code>af6560c</code></a> Merge boot ABI branch and repair duplicated additions</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/024c39314d4003ae56cab1c43d66aa62ec87e631"><code>024c393</code></a> Merge remote-tracking branch 'origin/fix/boot-abi-consistency' into integration/merge-all</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e0d0c424a0e6055e7efa0b1091c99fabdb51b8f4"><code>e0d0c42</code></a> Merge remote-tracking branch 'origin/fix/ramfs-hardening' into integration/merge-all</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ea7c302996f627819d6e6ace15cc161b5162dad6"><code>ea7c302</code></a> Merge remote-tracking branch 'origin/Fix-and-enhance-networking' into integration/merge-all</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c3c177c178380821b1d56a9e6892aff37a31f466"><code>c3c177c</code></a> Merge remote-tracking branch 'origin/refactor/decompose-load-elf-task-inner' into integration/merge-all</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c629b18a90f71b64d1ac6b36ebbbda526678b96b"><code>c629b18</code></a> Merge remote-tracking branch 'origin/fix/boot-process' into integration/merge-all</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6798cfe244873d50c236702ab7836935f9afc2d9"><code>6798cfe</code></a> display: add bounded snapshot capture stream</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7b344a398eac3d377203cba974ffe32615a3c8e8"><code>7b344a3</code></a> display: refuse byte-stream reads on write-only screen handles</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/02e51cd2c806b269243a56fd9fede98d77269e12"><code>02e51cd</code></a> video: adopt the bootloader framebuffer for the display scheme</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9916a78171c4b5979b630d040dada587a01ae97a"><code>9916a78</code></a> vfs: list direct child mounts and ensure /dev/display is mounted</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/cffb84ea24ba000654d5c123dec82d13cd818cb6"><code>cffb84e</code></a> Fix missing unsafe</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c1a9fa442f2f35052c7f145941592a6ede95a7b3"><code>c1a9fa4</code></a> console: MAP_SHARED frame-backed display surface</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9dee8c6968728746a7f343734af4e3d4b8aa97ff"><code>9dee8c6</code></a> console: row-batched glyphs, DMG2 damage list, glyph atlas</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/97de74a67c4092b6a5682149bfde6f31bf730cb5"><code>97de74a</code></a> console: fix scrolling, UTF-8 input, batched keyboard and pixel masks</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/839f42ce661633d42da337de0baac3af5bb5108e"><code>839f42c</code></a> console: display ownership handoff + damage-driven strate console</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/df5cd772caff21fd6ce2860d8ccf8dee76d2b0b1"><code>df5cd77</code></a> Merge branch 'main' of ssh://git.strat9-os.org:2222/strat9-os/strat9-os</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a1017046973dd1cbd0c3ef4288d6f4da60b1f5ed"><code>a101704</code></a> docs(kernel): list all ABI v5 memory kinds in the E9 boot dump</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/94ff2886a51123efdac4bad659c333445b9ec76f"><code>94ff288</code></a> test(abi): repair stale scheme payload wire tests and a lint regression</li>
+<li>2026-10-27 <a href="https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b071184d8fd93a828f2209a7f6395f31151a8e61"><code>b071184</code></a> fix(dependencies): clean up unused packages and update features in Cargo.toml</li>
 </ul>
 <!-- AUTO-CHANGELOG:END -->
 <div style="break-before: page; page-break-before: always;"></div><h1 id="publishing"><a class="header" href="#publishing">Publishing</a></h1>
