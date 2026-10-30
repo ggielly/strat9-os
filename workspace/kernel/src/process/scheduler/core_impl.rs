@@ -813,6 +813,17 @@ pub(super) fn yield_cpu_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> Optio
     crate::arch::tss::set_kernel_stack(crate::arch::xshim::VirtAddr::new(stack_top));
     crate::arch::syscall::set_kernel_rsp(stack_top);
 
+    // The outgoing task is about to be saved by `do_switch_context`, i.e. as a
+    // ret-based switch frame in `context.saved_rsp`. Any iret frame it may have
+    // had (from an earlier Ring-3 preemption) becomes DEAD here: that area of
+    // its kernel stack will be overwritten by the blocking syscall/IRQ activity
+    // before the task runs again. Leaving `ResumeKind::IretFrame` + a stale
+    // `interrupt_rsp` lets the timer path later "resume" it by popping 15 GPRs
+    // and iretq-ing into whatever now lives there (observed: wild jump to a
+    // user stack address / small data value -> kernel instruction fetch fault).
+    current.set_resume_kind(crate::process::task::ResumeKind::RetFrame);
+    current.set_interrupt_rsp(0);
+
     // Switch CR3 if the new task has a different address space.
     // SAFETY: The new task's address space has a valid PML4 with the kernel half mapped.
     unsafe {

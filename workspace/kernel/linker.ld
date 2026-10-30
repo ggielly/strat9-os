@@ -63,7 +63,9 @@ SECTIONS
         *(.zdebug*)
         *(.ARM.exidx)
         *(.ARM.extab)
-        *(.symtab)
-        *(.strtab)
+        /* .symtab/.strtab are intentionally KEPT: boot::symbols parses them
+         * from the kernel ELF to resolve RIPs in panic/backtrace output.
+         * They are non-alloc sections, so they are not part of any PT_LOAD
+         * and never reach memory. */
     }
 }

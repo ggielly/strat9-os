@@ -117,11 +117,16 @@ pub fn print_prompt() {
 }
 
 /// Print raw text without per-character formatting overhead.
+///
+/// Used by the interactive line editor (echo of typed characters, cursor
+/// moves), so it must reach **both** consoles and flush: `write_bytes` only
+/// marks the frame dirty, and a terminal that never presents looks exactly
+/// like dropped keystrokes.
 pub fn print_text(text: &str) {
+    crate::serial_print!("{}", text);
     if crate::arch::vga::is_available() {
         crate::arch::vga::write_text(text);
-    } else {
-        crate::serial_print!("{}", text);
+        crate::arch::vga::flush_display();
     }
 }
 

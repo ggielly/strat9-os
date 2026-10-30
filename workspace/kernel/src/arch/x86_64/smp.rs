@@ -71,16 +71,27 @@ static AP_REACHED_RUST: AtomicUsize = AtomicUsize::new(usize::MAX);
 #[cfg(target_arch = "x86_64")]
 global_asm!(
     r#"
-.section .text
+.pushsection .text, "ax", @progbits
 .code16
 
 .global smp_trampoline
 .global smp_trampoline_end
+# Exported only so the Rust side can assert the hard-coded physical layout.
+.global smp_gdt_table
+.global smp_gdt_descr
+.global smp_pm_setup
 
 .set SMP_VAR_ADDR, 0x8000 + (smp_trampoline_end - smp_trampoline)
 .set SMP_PM_ADDR, 0x8000 + (smp_trampoline_32 - smp_trampoline)
 .set SMP_LONG_ADDR, 0x8000 + (smp_trampoline_64 - smp_trampoline)
 
+# The GDT/GDTR/real-mode prologue use hard-coded physical offsets (0x8010,
+# 0x8030, 0x8040) because they are reached before any relocation logic
+# exists. Those offsets are only valid if the stub itself lands on a 16-byte
+# boundary: `.align` is relative to the SECTION, not to the label, so an
+# unaligned `smp_trampoline` would silently shift everything and the AP
+# would triple-fault on `lgdt [0x8030]`. Pin it and assert the layout below.
+.balign 16
 smp_trampoline:
     cli
     cld
@@ -92,11 +103,13 @@ smp_trampoline:
 #   _gdt_table starts at 0x8010, _gdt (GDTR) is at 0x8030.
 # -------------------------------------------------------------------
 .align 16
+smp_gdt_table:
 _gdt_table:
     .long 0, 0                       # null  (selector 0)
     .long 0x0000ffff, 0x00af9b00     # code64, accessed (identity page is RX)
     .long 0x0000ffff, 0x00cf9300     # data, accessed
     .long 0x0000ffff, 0x00cf9b00     # code32, accessed
+smp_gdt_descr:
 _gdt:
     .word _gdt - _gdt_table - 1      # limit = 31 (4 entries × 8 - 1)
     .long 0x8010                     # base  = 0x8010
@@ -106,6 +119,7 @@ _gdt:
 # -------------------------------------------------------------------
 # Real-mode setup continues at 0x8040.
 # -------------------------------------------------------------------
+smp_pm_setup:
     xor ax, ax
     mov ds, ax
     lgdt [0x8030]                    # loads GDTR from 0x8030
@@ -131,10 +145,24 @@ smp_trampoline_32:
     # INIT does not reset PAT, and firmware may leave no WC slot. Program the
     # kernel layout before enabling paging so this AP indexes the same memory
     # types as the BSP: PA0=WB, PA1=WC, PA2=WT, PA3=UC.
+    #
+    # Selectors are BYTE-spaced in IA32_PAT (PA0 bits 2:0, PA1 bits 10:8,
+    # PA2 bits 18:16, PA3 bits 26:24) => 6 | (1<<8) | (4<<16) = 0x40106.
+    # Packing them as 3-bit fields sets reserved bits and #GPs on real CPUs.
+    #
     # NOTE: this constant duplicates arch/x86_64/pat::PAT_WC_VALUE; the 32-bit
     # real-mode/protected-mode trampoline cannot call into Rust.
+    #
+    # Gate on CPUID.01H:EDX[16] (PAT): WRMSR to an unsupported MSR is a #GP,
+    # and there is no IDT yet on this AP => triple fault.
+    mov eax, 1
+    xor ecx, ecx
+    cpuid
+    test edx, 0x10000
+    jz 4f
+
     mov ecx, 0x277
-    mov eax, 0x10E
+    mov eax, 0x40106
     xor edx, edx
     wrmsr
 
@@ -142,14 +170,14 @@ smp_trampoline_32:
     # AP explicitly if the CPU refuses the WC layout.
     mov ecx, 0x277
     rdmsr
-    and eax, 0x7ff
-    cmp eax, 0x10E
-    je 3f
+    and eax, 0x07070707
+    cmp eax, 0x40106
+    je 4f
     mov al, 0x50                     # E9: P (PAT mismatch)
     out 0xe9, al
 2:  hlt
     jmp 2b
-3:
+4:
     mov eax, cr0
     or eax, 0x40000000              # CD = 1
     and eax, 0xdfffffff             # NW = 0
@@ -167,13 +195,35 @@ smp_trampoline_32:
     mov cr4, eax
 
     # Enable Long Mode (EFER.LME)
+    #
+    # NXE (bit 11) is only writable if CPUID.80000001H:EDX[20] is set; without
+    # the check, `wrmsr` takes a #GP and, with no IDT yet on this AP, a triple
+    # fault. Mirror the PAT guard above.
+    mov eax, 0x80000000
+    cpuid
+    cmp eax, 0x80000001
+    jb 5f
+    mov eax, 0x80000001
+    xor ecx, ecx
+    cpuid
+    test edx, 0x100000               # EDX[20] = NX
+    jz 5f
+
     mov ecx, 0xc0000080
-    xor edx, edx
-    rdmsr
+    rdmsr                            # (rdmsr already overwrites EDX)
     or eax, 0x901                    # NXE + LME + SCE
     wrmsr
+    jmp 6f
+5:
+    mov ecx, 0xc0000080
+    rdmsr
+    or eax, 0x101                    # LME + SCE, no NXE
+    wrmsr
+6:
 
-    # Load kernel PML4 from data area
+    # Load kernel PML4 from data area.
+    # NOTE: only the low 32 bits are loaded (we are still in 32-bit mode), so
+    # the PML4 must live below 4 GiB. copy_trampoline() asserts this.
     mov eax, [SMP_VAR_ADDR]
     mov cr3, eax
 
@@ -195,6 +245,13 @@ smp_trampoline_64:
     # Load kernel stack pointer
     mov rsp, [SMP_VAR_ADDR + 8]
 
+    # We arrive via `jmp`, not `call`, so no return address was pushed. The
+    # SysV ABI requires RSP % 16 == 8 *at function entry* (it is 16-aligned at
+    # the call site, minus the 8-byte return address). Stack tops are page
+    # aligned, so bias RSP by 8 to keep the invariant; otherwise any
+    # movaps/movdqa spill emitted by smp_main's prologue raises #GP.
+    sub rsp, 8
+
     # Clear RFLAGS.IF only, preserve architectural default state.
     # pushfq reads RFLAGS; AND clears IF (bit 9); popfq restores.
     pushfq
@@ -213,12 +270,23 @@ smp_trampoline_64:
 
 .align 8
 smp_trampoline_end:
+
+# -------------------------------------------------------------------
+# Layout invariants are verified at runtime by copy_trampoline() (the LLVM
+# integrated assembler cannot evaluate label differences in `.if`): the
+# 16-bit prologue jumps to *hard-coded* physical addresses, so any drift
+# becomes a silent triple fault on AP boot. Checked here instead.
+# -------------------------------------------------------------------
+.popsection
 "#
 );
 
 unsafe extern "C" {
     fn smp_trampoline();
     fn smp_trampoline_end();
+    fn smp_gdt_table();
+    fn smp_gdt_descr();
+    fn smp_pm_setup();
 }
 
 /// Busy-wait for the given number of microseconds (very rough).
@@ -271,6 +339,34 @@ fn copy_trampoline(cr3_phys: u64, stack_top_virt: u64) -> Result<(), &'static st
 
     if tramp_len + 16 > 4096 {
         return Err("SMP: trampoline exceeds its reserved page");
+    }
+    // The 16-bit prologue jumps to hard-coded physical addresses (0x8040) and
+    // `lgdt [0x8030]` reads an embedded GDTR. Verify the assembled layout once:
+    // any drift would otherwise be a silent triple fault on AP boot.
+    let base = smp_trampoline as *const u8 as usize;
+    let gdt_off = smp_gdt_table as *const u8 as usize - base;
+    let descr_off = smp_gdt_descr as *const u8 as usize - base;
+    let pm_off = smp_pm_setup as *const u8 as usize - base;
+    if gdt_off != 0x10 || descr_off != 0x30 || pm_off != 0x40 {
+        crate::serial_force_println!(
+            "[smp] FATAL: trampoline layout drifted (gdt={:#x} expected 0x10, \
+             gdtr={:#x} expected 0x30, pm={:#x} expected 0x40)",
+            gdt_off,
+            descr_off,
+            pm_off
+        );
+        return Err("SMP: trampoline layout does not match hard-coded offsets");
+    }
+    // The 32-bit stage loads CR3 with `mov eax, [..]` / `mov cr3, eax`: only
+    // the low 32 bits survive. A PML4 above 4 GiB would boot the AP on a
+    // truncated address space.
+    if cr3_phys >= 1 << 32 {
+        return Err("SMP: PML4 above 4 GiB, unreachable from the 32-bit trampoline");
+    }
+    // RSP must satisfy the SysV ABI at smp_main entry once the stub biases it
+    // by 8 (see smp_trampoline_64): the stack top itself must be 16-aligned.
+    if stack_top_virt & 0xF != 0 {
+        return Err("SMP: AP kernel stack top is not 16-byte aligned");
     }
     ensure_identity_mapping(TRAMPOLINE_PHYS_ADDR, tramp_len + 16)?;
 

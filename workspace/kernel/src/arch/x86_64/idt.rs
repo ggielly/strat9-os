@@ -116,21 +116,36 @@ fn needs_swapgs(cs: u16) -> bool {
     if (cs & 3) == 3 {
         return true;
     }
-    // Slow path: check if GS_BASE unexpectedly points to user space.
-    // SAFETY: rdmsr is privileged but we are in Ring 0 (exception handler).
-    let gs_base: u64 = unsafe {
-        let lo: u32;
-        let hi: u32;
+    // Slow path: a low `IA32_GS_BASE` is *not* enough to conclude "user GS":
+    // during early boot (BSP/AP before `percpu::init`) both GS bases are 0.
+    // Misclassifying that as the swapgs window made unrelated faults (e.g. a
+    // `#GP` from a bad WRMSR at 0.01s) take the fatal "SWAPGS-WINDOW" path.
+    // The window only exists when the *kernel* GS base is still installed in
+    // IA32_KERNEL_GS_BASE, i.e. `swapgs` already ran but we are still Ring 0.
+    let gs_base = read_msr(0xC000_0101); // IA32_GS_BASE
+    if gs_base >= 0xFFFF_8000_0000_0000 {
+        return false;
+    }
+    let kernel_gs_base = read_msr(0xC000_0102); // IA32_KERNEL_GS_BASE
+    kernel_gs_base >= 0xFFFF_8000_0000_0000
+}
+
+/// Read a 64-bit MSR. Callers guarantee the MSR is supported at Ring 0.
+#[inline(always)]
+fn read_msr(msr: u32) -> u64 {
+    let lo: u32;
+    let hi: u32;
+    // SAFETY: `rdmsr` is privileged, executed in Ring 0 exception context.
+    unsafe {
         core::arch::asm!(
             "rdmsr",
-            in("ecx") 0xC000_0101u32,  // IA32_GS_BASE
+            in("ecx") msr,
             out("eax") lo,
             out("edx") hi,
             options(nostack, preserves_flags),
         );
-        (lo as u64) | ((hi as u64) << 32)
-    };
-    gs_base < 0xFFFF_8000_0000_0000
+    }
+    (lo as u64) | ((hi as u64) << 32)
 }
 
 /// Combined IDT storage + lock in a single struct to prevent memory corruption.
@@ -161,6 +176,7 @@ pub fn live_gate_info(vector: u8) -> Option<LiveIdtGateInfo> {
     }
 
     let entry_offset = vector as usize * 16;
+
     if entry_offset + 16 > idtr.limit as usize + 1 {
         return None;
     }
@@ -1123,6 +1139,17 @@ fn decode_error_code(ec: PageFaultErrorCode) -> &'static str {
     let p = ec.contains(PageFaultErrorCode::PROTECTION_VIOLATION);
     let w = ec.contains(PageFaultErrorCode::CAUSED_BY_WRITE);
     let u = ec.contains(PageFaultErrorCode::USER_MODE);
+    // Bit 4 (I/D) is the only way to tell "we tried to *execute* this
+    // address" from a data access. Ignoring it made a wild jump
+    // (RIP == CR2) look like a bogus kernel read.
+    if ec.contains(PageFaultErrorCode::INSTRUCTION_FETCH) {
+        return match (p, u) {
+            (false, false) => "kernel instruction fetch of non-present page",
+            (false, true) => "user instruction fetch of non-present page",
+            (true, false) => "kernel instruction fetch protection violation (NX / supervisor-only)",
+            (true, true) => "user instruction fetch protection violation (NX / supervisor-only)",
+        };
+    }
     match (p, w, u) {
         (false, false, false) => "kernel read of non-present page",
         (false, true, false) => "kernel write to non-present page",
@@ -1463,6 +1490,41 @@ fn dump_page_fault_full(
         (error_code.bits() >> 3) & 1,
         (error_code.bits() >> 4) & 1
     );
+
+    // --- Instruction-fetch fault: RIP itself is what is unmapped. -----------
+    // Nothing "read" here: the CPU was told to execute a bogus address (wild
+    // call/jmp/ret or a corrupted iretq frame). The frame chain is unusable in
+    // that case, so dump the words around RSP to expose the return address that
+    // led to the jump.
+    if error_code.contains(PageFaultErrorCode::INSTRUCTION_FETCH) {
+        crate::serial_println!("\x1b[1;33m--- Instruction fetch fault ---\x1b[0m");
+        crate::serial_println!("  faulting RIP : {:#018x} (no executable mapping)", rip);
+        crate::serial_println!("  RSP          : {:#018x}", rsp);
+        crate::serial_println!("  stack words (candidate return addresses):");
+        let text_lo = 0xffff_ffff_8000_0000u64;
+        let text_hi = 0xffff_ffff_8060_0000u64;
+        for i in 0..16u64 {
+            let addr = rsp.wrapping_add(i * 8);
+            let virt = x86_64::VirtAddr::new(addr);
+            if crate::memory::paging::translate(virt).is_none() {
+                crate::serial_println!("    [rsp+{:#04x}] <unmapped>", i * 8);
+                break;
+            }
+            // SAFETY: translate() proved the page is mapped and readable.
+            let val = unsafe { *(addr as *const u64) };
+            let tag = if (text_lo..text_hi).contains(&val) {
+                "   <- kernel .text"
+            } else {
+                ""
+            };
+            let sym = match crate::boot::symbols::lookup(val) {
+                Some((name, 0)) => alloc::format!("   {}", name),
+                Some((name, off)) => alloc::format!("   {}+{:#x}", name, off),
+                None => alloc::string::String::new(),
+            };
+            crate::serial_println!("    [rsp+{:#04x}] = {:#018x}{}{}", i * 8, val, tag, sym);
+        }
+    }
 
     // --- Faulting context ---
     crate::serial_println!("\x1b[1;33m--- Faulting context ---\x1b[0m");

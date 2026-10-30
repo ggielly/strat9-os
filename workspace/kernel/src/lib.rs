@@ -580,6 +580,14 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // Resolve panic backtraces only after the physical-to-virtual HHDM mapping
     // is known and the bootloader-provided ELF copy can be read safely.
     boot::symbols::init();
+    {
+        let (loaded, count) = boot::symbols::status();
+        if loaded {
+            serial_println!("[init] kernel symbols: {} entries", count);
+        } else {
+            serial_println!("[init] kernel symbols: unavailable (stripped ELF?)");
+        }
+    }
     #[cfg(target_arch = "x86_64")]
     if args.env_get("loader.paging") == Some("wx-uc-v1") {
         // No low EFI instruction is needed now. Revoke its executable alias
