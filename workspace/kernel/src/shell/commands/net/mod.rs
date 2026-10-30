@@ -20,22 +20,44 @@ pub use telnet::cmd_telnet;
 
 /// Read an ELF binary from a VFS path into a Vec<u8>.
 /// Shared helper used by ping and other commands that spawn userspace binaries.
+///
+/// The image installs modules at `/initfs/<name>` (see
+/// `tools/uefi-modules.manifest`), while some shell paths historically used
+/// `/initfs/bin/<name>`. Both layouts are accepted so a path change cannot
+/// make a userspace tool silently unlaunchable.
 pub(super) fn read_elf(path: &str) -> Result<alloc::vec::Vec<u8>, ShellError> {
-    let fd = vfs::open(path, OpenFlags::READ).map_err(|_| {
-        shell_println!("{}: not found", path);
-        ShellError::ExecutionFailed
-    })?;
-    let data = vfs::read_all(fd).map_err(|_| {
+    let alternate = if let Some(name) = path.strip_prefix("/initfs/bin/") {
+        Some(alloc::format!("/initfs/{}", name))
+    } else if let Some(name) = path.strip_prefix("/initfs/") {
+        Some(alloc::format!("/initfs/bin/{}", name))
+    } else {
+        None
+    };
+    let candidates = [Some(alloc::string::String::from(path)), alternate];
+
+    for candidate in candidates.iter().flatten() {
+        let Ok(fd) = vfs::open(candidate, OpenFlags::READ) else {
+            continue;
+        };
+        let data = match vfs::read_all(fd) {
+            Ok(data) => data,
+            Err(_) => {
+                let _ = vfs::close(fd);
+                shell_println!("{}: read error", candidate);
+                return Err(ShellError::ExecutionFailed);
+            }
+        };
         let _ = vfs::close(fd);
-        shell_println!("{}: read error", path);
-        ShellError::ExecutionFailed
-    })?;
-    let _ = vfs::close(fd);
-    Ok(data)
+        return Ok(data);
+    }
+
+    shell_println!("{}: not found", path);
+    Err(ShellError::ExecutionFailed)
 }
 
-/// Spawn a userspace ELF binary from `/initfs/bin/<name>` with the given
-/// shell arguments as `argv[1..]`.  Returns immediately after scheduling.
+/// Spawn a userspace ELF binary from `/initfs/<name>` (or the legacy
+/// `/initfs/bin/<name>`) with the given shell arguments as `argv[1..]`.
+/// Returns immediately after scheduling.
 pub(super) fn spawn_elf_with_args(
     bin_path: &str,
     task_name: &'static str,
@@ -55,7 +77,7 @@ pub(super) fn spawn_elf_with_args(
     }
 }
 
-/// Performs the cmd ping spawn operation (launches /initfs/bin/ping with args).
+/// Performs the cmd ping spawn operation (launches /initfs/ping with args).
 pub(super) fn cmd_ping_spawn_impl(args: &[String]) -> Result<(), ShellError> {
     // Early IPv4 validation : same behaviour as kping
     if let Some(target) = args.first() {
@@ -64,7 +86,7 @@ pub(super) fn cmd_ping_spawn_impl(args: &[String]) -> Result<(), ShellError> {
             return Ok(());
         }
     }
-    spawn_elf_with_args("/initfs/bin/ping", "ping", args)
+    spawn_elf_with_args("/initfs/ping", "ping", args)
 }
 
 /// Busy-wait for approximately `ms` milliseconds, yielding to other tasks.
