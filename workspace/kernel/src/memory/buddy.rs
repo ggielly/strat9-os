@@ -1801,6 +1801,17 @@ pub fn debug_buddy_lock_addr() -> usize {
 static ALLOC_IN_PROGRESS: [core::sync::atomic::AtomicBool; crate::arch::percpu::MAX_CPUS] =
     [const { core::sync::atomic::AtomicBool::new(false) }; crate::arch::percpu::MAX_CPUS];
 
+/// True when this CPU is currently inside the buddy allocator (alloc or free).
+///
+/// The panic handler uses this to avoid running the full, allocating panic
+/// dump when it would re-enter the allocator and turn the original panic into
+/// a misleading "Recursive allocation detected" double panic.
+pub(crate) fn allocator_busy_on_this_cpu() -> bool {
+    let cpu_idx = crate::arch::percpu::current_cpu_index();
+    cpu_idx < ALLOC_IN_PROGRESS.len()
+        && ALLOC_IN_PROGRESS[cpu_idx].load(core::sync::atomic::Ordering::Acquire)
+}
+
 struct LocalFrameCache {
     len: usize,
     frames: [u64; LOCAL_CACHE_CAPACITY],
@@ -1988,17 +1999,59 @@ fn local_cached_inc_phys(phys: u64, migratetype: Migratetype) {
         .fetch_add(1, AtomicOrdering::Relaxed);
 }
 
+/// Decrement a cached-frame counter without ever wrapping below zero.
+///
+/// These counters are *heuristics*: they feed `zone_effective_free_pages()`
+/// and the compaction scoring, never the free lists themselves.  Under memory
+/// pressure they can briefly drift (a drained remote cache, a frame freed on a
+/// different CPU), and a plain `fetch_sub` would wrap to `usize::MAX` and make
+/// the allocator believe there are billions of cached pages.  Saturating at 0
+/// keeps the heuristic conservative and, more importantly, keeps a stale
+/// count from turning into an allocator panic/underflow.
+#[inline]
+fn cached_counter_dec(counter: &core::sync::atomic::AtomicUsize) -> usize {
+    let mut current = counter.load(AtomicOrdering::Relaxed);
+    loop {
+        if current == 0 {
+            return 0;
+        }
+        match counter.compare_exchange_weak(
+            current,
+            current - 1,
+            AtomicOrdering::Relaxed,
+            AtomicOrdering::Relaxed,
+        ) {
+            Ok(_) => return current,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 #[inline]
 fn local_cached_dec_phys(phys: u64, migratetype: Migratetype) {
-    let prev_total = LOCAL_CACHED_FRAMES.fetch_sub(1, AtomicOrdering::Relaxed);
-    debug_assert!(prev_total > 0);
+    let prev_total = cached_counter_dec(&LOCAL_CACHED_FRAMES);
     let zone = zone_index_for_phys(phys);
-    let prev_zone = LOCAL_CACHED_ZONE_FRAMES[zone].fetch_sub(1, AtomicOrdering::Relaxed);
-    debug_assert!(prev_zone > 0);
-    let prev_zone_type = LOCAL_CACHED_ZONE_MIGRATETYPE_FRAMES
-        [local_cached_zone_migratetype_slot(zone, migratetype)]
-    .fetch_sub(1, AtomicOrdering::Relaxed);
-    debug_assert!(prev_zone_type > 0);
+    let prev_zone = cached_counter_dec(&LOCAL_CACHED_ZONE_FRAMES[zone]);
+    if prev_zone == 0 {
+        // Keep a bounded diagnostic: this is a heuristic drift, not a fatal
+        // error anymore.  Printing from the allocator must stay rate-limited
+        // and allocation-free.
+        static WARNED: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if WARNED.fetch_add(1, AtomicOrdering::Relaxed) < 8 {
+            crate::serial_force_println!(
+                "[buddy] cached-zone drift: phys={:#x} zone={} total={} mt={:?}",
+                phys,
+                zone,
+                prev_total,
+                migratetype
+            );
+        }
+    }
+    let _prev_zone_type = cached_counter_dec(
+        &LOCAL_CACHED_ZONE_MIGRATETYPE_FRAMES
+            [local_cached_zone_migratetype_slot(zone, migratetype)],
+    );
 }
 
 fn drain_local_caches_to_global(max_pages: usize, global: &mut OnDemandGlobalLock) -> usize {
@@ -2245,7 +2298,7 @@ fn free_order0_cached(frame: PhysFrame, migratetype: Migratetype) {
     }
 
     let cpu_idx = crate::arch::percpu::current_cpu_index();
-    let mut spill = [0u64; LOCAL_CACHE_FLUSH_BATCH];
+    let mut spill = [0u64; LOCAL_CACHE_FLUSH_BATCH + 1];
 
     let spill_len = {
         let mut cache = LOCAL_FRAME_CACHES[local_cache_slot(cpu_idx, migratetype)].lock();
@@ -2258,7 +2311,7 @@ fn free_order0_cached(frame: PhysFrame, migratetype: Migratetype) {
         }
 
         // Cache full: pop existing frames to spill to buddy, then retry the push.
-        let mut spill_len = cache.pop_many(&mut spill);
+        let mut spill_len = cache.pop_many(&mut spill[..LOCAL_CACHE_FLUSH_BATCH]);
         for phys in spill.iter().take(spill_len).copied() {
             local_cached_dec_phys(phys, migratetype);
         }

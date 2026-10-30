@@ -1607,6 +1607,27 @@ extern "C" fn elf_ring3_trampoline() -> ! {
     // before `iretq`, with `CS=0x8` and `GS=user`, and the first `gs:[..]`
     // access in the handler faults in the swapgs->iretq window.
 
+    // Pre-fault the user entry page while GS still points at the kernel
+    // per-CPU block.  If the very first user instruction faults after
+    // `swapgs ; iretq`, the fault is delivered with GS already switched to
+    // userspace, which the entry stubs do not expect.
+    //
+    // SMAP: with CR4.SMAP=1 a plain supervisor load from a *present* user
+    // page raises #PF (P=1, US=0 => "kernel protection violation"), which
+    // the fault handler correctly treats as fatal.  Access the page through
+    // the STAC/CLAC window so the probe works on every CPU that exposes
+    // SMAP (e.g. VMware Workstation guests), not only on CPU models that
+    // hide the feature (plain `-cpu qemu64`).
+    //
+    // Interrupts are masked for the rest of this function; `iretq` restores
+    // the user RFLAGS (IF=1) from the frame built below.
+    let _flags = crate::arch::save_flags_and_cli();
+    crate::arch::stac();
+    // SAFETY: `user_rip` is inside the ELF's validated user mapping, and
+    // SMAP is temporarily disabled by `stac()` on CPUs that need it.
+    let _first_user_byte = unsafe { core::ptr::read_volatile(user_rip as *const u8) };
+    crate::arch::clac();
+
     // Each `out 0xe9, al` writes an ASCII character to QEMU's E9 port.
     // Debug builds include probes 1-4 for diagnosing IRETQ failures;
     // release builds omit them to avoid port I/O overhead.
@@ -1642,14 +1663,6 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             "mov al, 0x32",     // '2'
             "out 0xe9, al",
             "pop rax",
-
-            //  Pre-fault the user code page
-            // Touch the first byte at user_rip to trigger a demand page fault
-            // while GS is still the kernel per-CPU block. Without this, the
-            // iretq instruction itself can fault in the SWAPGS->Ring3 window,
-            // producing a SWAPGS-WINDOW page fault (CS=Ring0 but GS=user).
-            "mov rax, {rip}",
-            "movzx rax, byte ptr [rax]",
 
             //  Load arg0 into RDI
             "mov rdi, {arg0}",
@@ -1693,10 +1706,6 @@ extern "C" fn elf_ring3_trampoline() -> ! {
             "push {rflags}",
             "push {cs}",
             "push {rip}",
-
-            //  Pre-fault the user code page
-            "mov rax, {rip}",
-            "movzx rax, byte ptr [rax]",
 
             //  Load arg0 into RDI
             "mov rdi, {arg0}",

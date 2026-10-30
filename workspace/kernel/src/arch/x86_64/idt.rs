@@ -82,6 +82,10 @@ impl SwapGsGuard {
             // interrupt handlers).  GS_BASE currently points at user space (0);
             // swapgs gives us the kernel per-CPU block via KERNEL_GS_BASE.
             unsafe { core::arch::asm!("swapgs", options(nostack, preserves_flags)) };
+            // Userspace can run with AC=1 (SMAP override).  If we entered from
+            // Ring 3, clear it so the kernel cannot inherit a disabled SMAP.
+            // `clac()` is CPUID-gated, so this is a no-op on CPUs without SMAP.
+            crate::arch::clac();
         }
         Self { from_ring3 }
     }
@@ -241,6 +245,12 @@ unsafe extern "C" fn lapic_timer_entry() -> ! {
         "test qword ptr [rsp + 8], 0x3",
         "jz 2f",
         "swapgs",
+        // Coming from Ring 3: userspace may have AC=1 (the SMAP override).
+        // Clear it before running any kernel code. `btr` on memory is legal
+        // on CPUs without SMAP, unlike `clac`.
+        "pushfq",
+        "btr qword ptr [rsp], 18",
+        "popfq",
         "2:",
         // Save GPRs in reverse order so that final RSP points at a SyscallFrame.
         "push rax",
@@ -317,6 +327,12 @@ unsafe extern "C" fn resched_ipi_entry() -> ! {
         "test qword ptr [rsp + 8], 0x3",
         "jz 2f",
         "swapgs",
+        // Coming from Ring 3: userspace may have AC=1 (the SMAP override).
+        // Clear it before running any kernel code. `btr` on memory is legal
+        // on CPUs without SMAP, unlike `clac`.
+        "pushfq",
+        "btr qword ptr [rsp], 18",
+        "popfq",
         "2:",
         "push rax",
         "push rcx",

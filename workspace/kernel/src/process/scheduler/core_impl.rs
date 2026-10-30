@@ -751,7 +751,9 @@ pub(super) fn pick_next_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> 
 
     next.set_state(TaskState::Running);
     next.last_cpu.store(cpu_index, Ordering::Relaxed);
+    let class = cpu.class_table.class_for_task(&next);
     cpu.current_task = Some(next.clone());
+    super::publish_current_task(cpu_index, &next, class);
     cpu.current_runtime = crate::process::sched::CurrentRuntime::new();
     next
 }
@@ -795,10 +797,14 @@ pub(super) fn yield_cpu_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> Optio
         drop(cpu.task_to_drop.take());
         if let Some(prev) = cpu.task_to_requeue.take() {
             prev.set_state(TaskState::Running);
-            cpu.current_task = Some(prev);
+            let class = cpu.class_table.class_for_task(&prev);
+            cpu.current_task = Some(prev.clone());
+            super::publish_current_task(cpu_index, &prev, class);
         } else {
             current.set_state(TaskState::Running);
+            let class = cpu.class_table.class_for_task(&current);
             cpu.current_task = Some(current.clone());
+            super::publish_current_task(cpu_index, &current, class);
         }
         if !is_idle {
             next.set_state(TaskState::Ready);
@@ -848,6 +854,13 @@ pub(super) fn drain_post_switch_local(
     cpu: &mut SchedulerCpu,
     take_drop: bool,
 ) -> Option<Arc<Task>> {
+    // Re-publish before anything can be deallocated: the previous task may be
+    // dropped below (last `Arc`), and the timer hardirq must not chase its
+    // `ticks` pointer afterwards.
+    if let Some(current) = cpu.current_task.as_ref() {
+        let class = cpu.class_table.class_for_task(current);
+        super::publish_current_task(crate::arch::percpu::current_cpu_index(), current, class);
+    }
     let task_to_drop = if take_drop {
         cpu.task_to_drop.take()
     } else {

@@ -23,9 +23,18 @@ const IA32_FMASK: u32 = 0xC000_0084;
 /// EFER bit: System Call Extensions
 const EFER_SCE: u64 = 1 << 0;
 
-/// FMASK: Clear IF (0x200), DF (0x400), TF (0x100) on SYSCALL entry.
-/// This ensures interrupts are disabled and direction flag is clear.
-const FMASK_VALUE: u64 = 0x200 | 0x400 | 0x100;
+/// RFLAGS.AC: Alignment Check / SMAP override.
+///
+/// Userspace may set AC with `popfq`.  If it is still set when the CPU takes
+/// a SYSCALL, the kernel would run with SMAP disabled (AC=1 is the SMAP
+/// override).  Clear it in FMASK exactly like Linux does, so a hostile or
+/// buggy Ring 3 program cannot turn off SMAP for the whole kernel.
+const RFLAGS_AC: u64 = 1 << 18;
+
+/// FMASK: Clear IF (0x200), DF (0x400), TF (0x100) and AC (0x40000) on
+/// SYSCALL entry. This ensures interrupts are disabled, the direction flag is
+/// clear, and SMAP stays enforced in the kernel.
+const FMASK_VALUE: u64 = 0x200 | 0x400 | 0x100 | RFLAGS_AC;
 
 /// Update the kernel RSP used by the SYSCALL entry point.
 ///

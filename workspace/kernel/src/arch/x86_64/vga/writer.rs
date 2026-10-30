@@ -165,6 +165,96 @@ impl VgaWriter {
         self.glyph_mask_cache.get(start..end)
     }
 
+    /// Existing glyph for `ch`, without the '?' fallback of
+    /// [`Self::glyph_index_for_char`].
+    fn lookup_glyph(&self, ch: char) -> Option<usize> {
+        if ch.is_ascii() && (ch as usize) < self.font_info.glyph_count {
+            return Some(ch as usize);
+        }
+        let cp = ch as u32;
+        self.unicode_map
+            .iter()
+            .find(|(u, _)| *u == cp)
+            .map(|(_, glyph)| *glyph)
+    }
+
+    /// Append a glyph made of the full block's pixels, restricted by `cover`.
+    fn push_derived_block_glyph(&mut self, cp: u32, cover: impl Fn(usize, usize) -> bool) {
+        if self.lookup_glyph(char::from_u32(cp).unwrap_or(' ')).is_some() {
+            return; // font already has it: never overwrite a real design
+        }
+        let Some(full) = self.lookup_glyph('█') else {
+            return;
+        };
+        let gw = self.font_info.glyph_w;
+        let gh = self.font_info.glyph_h;
+        if gw == 0 || gh == 0 {
+            return;
+        }
+        let glyph_pixels = gw * gh;
+        let start = full * glyph_pixels;
+        let Some(src) = self
+            .glyph_mask_cache
+            .get(start..start + glyph_pixels)
+            .map(<[u8]>::to_vec)
+        else {
+            return;
+        };
+
+        let mut mask = alloc::vec![0u8; glyph_pixels];
+        for y in 0..gh {
+            for x in 0..gw {
+                if cover(x, y) {
+                    mask[y * gw + x] = src[y * gw + x];
+                }
+            }
+        }
+        let index = self.font_info.glyph_count;
+        self.glyph_mask_cache.extend_from_slice(&mask);
+        self.font_info.glyph_count += 1;
+        self.unicode_map.push((cp, index));
+    }
+
+    /// Fill in the block-element range (U+2580..=U+2593) the loaded font lacks.
+    ///
+    /// Sparklines and gauges need the eighth-height blocks (▁▂▃▄▅▆▇) to draw a
+    /// smooth gradient; most bitmap console fonts only ship ▀▄█▌. GNU Unifont
+    /// has the full set, but its 16x16 cell would drop this console from
+    /// 160x36 to 80x45, so the missing glyphs are *derived from the font's own
+    /// full block* instead: identical metrics, identical style, no extra asset.
+    pub(crate) fn synthesize_block_glyphs(&mut self) {
+        let w = self.font_info.glyph_w;
+        let h = self.font_info.glyph_h;
+        if w == 0 || h == 0 {
+            return;
+        }
+        // `n` eighths of a cell, rounded up so 1/8 of a 20px cell is 3px.
+        let v_from = |n: usize| -> usize { h - (h * n).div_ceil(8) };
+        let h_from = |n: usize| -> usize { (w * n).div_ceil(8) };
+
+        // Lower blocks: U+2581 (1/8) .. U+2587 (7/8).
+        for n in 1..=7usize {
+            let top = v_from(n);
+            self.push_derived_block_glyph(0x2580 + n as u32, |_, y| y >= top);
+        }
+        // U+2580 upper half, U+2584 lower half.
+        self.push_derived_block_glyph(0x2580, |_, y| y < h.div_ceil(2));
+        self.push_derived_block_glyph(0x2584, |_, y| y >= v_from(4));
+
+        // Left blocks: U+2589 (7/8) .. U+258F (1/8), plus halves.
+        for n in 1..=7usize {
+            let right = h_from(n);
+            self.push_derived_block_glyph(0x2590 - n as u32, |x, _| x < right);
+        }
+        self.push_derived_block_glyph(0x258C, |x, _| x < h_from(4));
+        self.push_derived_block_glyph(0x2590, |x, _| x >= w.div_ceil(2));
+
+        // Shades: 25 %, 50 %, 75 % dithering.
+        self.push_derived_block_glyph(0x2591, |x, y| (x + y) % 4 == 0);
+        self.push_derived_block_glyph(0x2592, |x, y| (x + y) % 2 == 0);
+        self.push_derived_block_glyph(0x2593, |x, y| (x + y) % 4 != 0);
+    }
+
     /// Creates a new instance.
     pub const fn new() -> Self {
         Self {
@@ -271,6 +361,9 @@ impl VgaWriter {
         self.font_info = font_info;
         self.glyph_mask_cache = Self::build_glyph_mask_cache(FONT_PSF, &self.font_info);
         self.unicode_map = parse_psf2_unicode_map(FONT_PSF, &self.font_info);
+        // The stock font ships █ but not ▁..▇; sparklines/gauges need the
+        // gradient, so derive the missing blocks from █ at native metrics.
+        self.synthesize_block_glyphs();
         self.status_bar_height = status_bar_height;
         self.clip = ClipRect {
             x: 0,
@@ -1648,9 +1741,19 @@ impl VgaWriter {
         }
     }
 
+    /// Whether the loaded PSF font has a real glyph for `ch` (as opposed to
+    /// falling back to `?`). Used by the `top` backend to keep box drawing /
+    /// block elements when the font covers them.
+    pub(crate) fn supports_char(&self, ch: char) -> bool {
+        if ch.is_ascii() && (ch as usize) < self.font_info.glyph_count {
+            return true;
+        }
+        let cp = ch as u32;
+        self.unicode_map.iter().any(|(u, _)| *u == cp)
+    }
+
     /// Performs the glyph index for char operation.
-    pub(crate) fn glyph_index_for_char(&self, ch: char) -> usize {
-        if ch.is_ascii() {
+    pub(crate) fn glyph_index_for_char(&self, ch: char) -> usize {        if ch.is_ascii() {
             let idx = ch as usize;
             if idx < self.font_info.glyph_count {
                 return idx;

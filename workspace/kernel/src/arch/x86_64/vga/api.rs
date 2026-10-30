@@ -120,6 +120,20 @@ pub fn write_char(ch: char) {
     write_text(ch.encode_utf8(&mut buf));
 }
 
+/// Whether the loaded PSF font can actually render `ch`.
+///
+/// The console font (zap-ext-light20) covers full box drawing, `█`, `░`, `▒`,
+/// `•` and the arrows, but has **no** sparkline levels (`▁`..`▇`) and no
+/// triangles. Widget renderers use this to keep pretty glyphs when they exist
+/// and fall back to ASCII otherwise, instead of forcing a downgrade for every
+/// character.
+pub fn supports_char(ch: char) -> bool {
+    if !is_available() {
+        return ch.is_ascii();
+    }
+    with_writer(|w| w.supports_char(ch)).unwrap_or(false)
+}
+
 /// Performs the current fps operation.
 pub(crate) fn current_fps(tick: u64) -> u64 {
     let last_tick = FPS_LAST_TICK.load(Ordering::Relaxed);

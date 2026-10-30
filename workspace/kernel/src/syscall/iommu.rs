@@ -185,7 +185,7 @@ fn enforce_map_quota(
     Ok(())
 }
 
-/// SYS_IOMMU_INFO (440): write the platform summary.
+/// SYS_IOMMU_INFO (520): write the platform summary.
 pub fn sys_iommu_info(out_ptr: u64) -> Result<u64, SyscallError> {
     require_control()?;
     let discovery = crate::arch::iommu::discovery();
@@ -203,7 +203,7 @@ pub fn sys_iommu_info(out_ptr: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
-/// SYS_IOMMU_DOMAIN_CREATE (441): bind a domain to a PCI function.
+/// SYS_IOMMU_DOMAIN_CREATE (521): bind a domain to a PCI function.
 pub fn sys_iommu_domain_create(sbdf_raw: u64) -> Result<u64, SyscallError> {
     require_control()?;
     if sbdf_raw > u32::MAX as u64 {
@@ -236,7 +236,7 @@ pub fn sys_iommu_domain_create(sbdf_raw: u64) -> Result<u64, SyscallError> {
     Ok(handle.as_u64())
 }
 
-/// SYS_IOMMU_DOMAIN_DESTROY (442): revoke all mappings of a domain.
+/// SYS_IOMMU_DOMAIN_DESTROY (522): revoke all mappings of a domain.
 pub fn sys_iommu_domain_destroy(handle: u64) -> Result<u64, SyscallError> {
     require_control()?;
     let domain = domain_from_handle(handle, DmaRights::none())?;
@@ -247,7 +247,7 @@ pub fn sys_iommu_domain_destroy(handle: u64) -> Result<u64, SyscallError> {
     }
 }
 
-/// SYS_IOMMU_MAP (443): map a physical range into a domain.
+/// SYS_IOMMU_MAP (523): map a physical range into a domain.
 pub fn sys_iommu_map(handle: u64, desc_ptr: u64) -> Result<u64, SyscallError> {
     require_control()?;
     let domain = domain_from_handle(handle, DmaRights { map: true, unmap: false, read: false, write: false, irq: false })?;
@@ -270,7 +270,7 @@ pub fn sys_iommu_map(handle: u64, desc_ptr: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
-/// SYS_IOMMU_UNMAP (444): remove mappings covering a range.
+/// SYS_IOMMU_UNMAP (524): remove mappings covering a range.
 pub fn sys_iommu_unmap(handle: u64, iova: u64, len: u64) -> Result<u64, SyscallError> {
     require_control()?;
     let domain = domain_from_handle(handle, DmaRights { map: false, unmap: true, read: false, write: false, irq: false })?;
@@ -278,7 +278,7 @@ pub fn sys_iommu_unmap(handle: u64, iova: u64, len: u64) -> Result<u64, SyscallE
     Ok(removed as u64)
 }
 
-/// SYS_IOMMU_TRANSLATE (445): software IOVA -> physical translation.
+/// SYS_IOMMU_TRANSLATE (525): software IOVA -> physical translation.
 pub fn sys_iommu_translate(handle: u64, iova: u64) -> Result<u64, SyscallError> {
     require_control()?;
     let domain = domain_from_handle(handle, DmaRights::none())?;
@@ -288,13 +288,13 @@ pub fn sys_iommu_translate(handle: u64, iova: u64) -> Result<u64, SyscallError> 
         .ok_or(SyscallError::NotFound)
 }
 
-/// SYS_IOMMU_ACTIVATE (446): try to enable hardware translation.
+/// SYS_IOMMU_ACTIVATE (526): try to enable hardware translation.
 pub fn sys_iommu_activate() -> Result<u64, SyscallError> {
     require_control()?;
     Ok(iommu::activate() as u64)
 }
 
-/// SYS_IOMMU_DOMAIN_INFO (449): write one domain's identity and counters.
+/// SYS_IOMMU_DOMAIN_INFO (529): write one domain's identity and counters.
 pub fn sys_iommu_domain_info(handle: u64, out_ptr: u64) -> Result<u64, SyscallError> {
     require_control()?;
     let domain = domain_from_handle(handle, DmaRights::none())?;
@@ -324,7 +324,7 @@ fn backend_error(error: crate::arch::iommu::IommuError) -> SyscallError {
     }
 }
 
-/// SYS_PCI_MSI_ALLOC (455): allocate an IRTE for a device vector.
+/// SYS_PCI_MSI_ALLOC (535): allocate an IRTE for a device vector.
 pub fn sys_pci_msi_alloc(
     sbdf_raw: u64,
     vector: u64,
@@ -348,7 +348,7 @@ pub fn sys_pci_msi_alloc(
     Ok(0)
 }
 
-/// SYS_PCI_MSI_FREE (456): release an IRTE.
+/// SYS_PCI_MSI_FREE (536): release an IRTE.
 pub fn sys_pci_msi_free(cookie: u64) -> Result<u64, SyscallError> {
     require_control()?;
     if cookie > u32::MAX as u64 {
@@ -358,7 +358,7 @@ pub fn sys_pci_msi_free(cookie: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
-/// SYS_IOMMU_FAULT_NEXT (447): pop one fault record.
+/// SYS_IOMMU_FAULT_NEXT (527): pop one fault record.
 pub fn sys_iommu_fault_next(out_ptr: u64) -> Result<u64, SyscallError> {
     require_control()?;
     let Some(fault) = iommu::next_fault() else {
@@ -383,7 +383,7 @@ pub fn sys_iommu_fault_next(out_ptr: u64) -> Result<u64, SyscallError> {
     Ok(1)
 }
 
-/// SYS_IOMMU_DOMAIN_CTL (448): quiesce / resume / detach / policy.
+/// SYS_IOMMU_DOMAIN_CTL (528): quiesce / resume / detach / policy.
 pub fn sys_iommu_domain_ctl(
     handle: u64,
     command: u64,
@@ -412,7 +412,7 @@ pub fn sys_iommu_domain_ctl(
     Ok(0)
 }
 
-/// SYS_IOMMU_MAP_BATCH (450): map several ranges in one call.
+/// SYS_IOMMU_MAP_BATCH (530): map several ranges in one call.
 pub fn sys_iommu_map_batch(
     handle: u64,
     desc_ptr: u64,
@@ -486,7 +486,7 @@ pub fn sys_iommu_map_batch(
     Ok(mapped.len() as u64)
 }
 
-/// SYS_IOMMU_UNMAP_BATCH (451): unmap several ranges in one call.
+/// SYS_IOMMU_UNMAP_BATCH (531): unmap several ranges in one call.
 pub fn sys_iommu_unmap_batch(
     handle: u64,
     desc_ptr: u64,
@@ -512,7 +512,7 @@ pub fn sys_iommu_unmap_batch(
     Ok(removed)
 }
 
-/// SYS_IOMMU_STATS (452): global counters.
+/// SYS_IOMMU_STATS (532): global counters.
 pub fn sys_iommu_stats(out_ptr: u64) -> Result<u64, SyscallError> {
     require_control()?;
     let stats = iommu::stats();
@@ -530,7 +530,7 @@ pub fn sys_iommu_stats(out_ptr: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
-/// SYS_IOMMU_GROUPS (453): coarse IOMMU groups.
+/// SYS_IOMMU_GROUPS (533): coarse IOMMU groups.
 pub fn sys_iommu_groups(
     out_ptr: u64,
     max_entries: u64,
@@ -556,7 +556,7 @@ pub fn sys_iommu_groups(
     Ok(count as u64)
 }
 
-/// SYS_IOMMU_RESERVED (454): firmware-reserved regions.
+/// SYS_IOMMU_RESERVED (534): firmware-reserved regions.
 pub fn sys_iommu_reserved(
     out_ptr: u64,
     max_entries: u64,

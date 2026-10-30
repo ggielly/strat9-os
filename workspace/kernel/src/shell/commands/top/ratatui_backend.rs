@@ -101,19 +101,27 @@ impl Strat9RatatuiBackend {
     }
 
     /// Performs the normalize symbol operation.
+    ///
+    /// The console font covers full box drawing, `█`, `░`, `▒`, `•` and arrows,
+    /// so those are kept verbatim; only characters the font cannot render fall
+    /// back to ASCII. (This used to force ASCII unconditionally, which turned
+    /// every gauge into `#` and every border into `+|-`.)
     fn normalize_symbol(symbol: &str) -> char {
         let ch = symbol.chars().next().unwrap_or(' ');
+        if ch == ' ' || vga::supports_char(ch) {
+            return ch;
+        }
         match ch {
-            // Box drawing fallback
-            '│' | '┃' => '|',
-            '─' | '━' => '-',
-            '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼' => '+',
-            // Block/shade fallback (used by gauges/progress)
-            '█' | '▇' | '▆' | '▅' | '▄' | '▃' | '▂' | '▁' | '░' | '▒' | '▓' => {
-                '#'
-            }
-            // Keep printable ASCII and Latin-1 letters/numbers as-is.
-            c if c.is_ascii_graphic() || c == ' ' => c,
+            // Unicode arrows/triangles: ASCII equivalents.
+            '▲' | '↑' => '^',
+            '▼' | '↓' | '▾' => 'v',
+            '►' | '▶' | '▸' | '→' => '>',
+            '◄' | '◀' | '◂' | '←' => '<',
+            // Sparkline levels the font does not have.
+            '▁' | '▂' | '▃' => '.',
+            '▄' | '▅' => ':',
+            '▆' | '▇' => '|',
+            c if c.is_ascii_graphic() => c,
             _ => '?',
         }
     }

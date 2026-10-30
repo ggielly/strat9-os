@@ -245,6 +245,35 @@ pub fn panic_handler(info: &PanicInfo) -> ! {
     // 1. Emergency serial mode : serial_println! bypasses all locks.
     crate::arch::serial::enter_emergency_mode();
 
+    // 1b. Publish the *first* panic before anything that can allocate.
+    //
+    // `dump_panic_info()`/VGA formatting may heap-allocate.  If the panic
+    // happened while the buddy allocator lock was held (e.g. an invariant
+    // inside `alloc`/`free`), that allocation re-enters the allocator, trips
+    // the `ALLOC_IN_PROGRESS` guard and raises a second "Recursive allocation
+    // detected" panic.  The double-panic path used to be the only thing
+    // printed, hiding the real cause.  Emit it now, unconditionally and
+    // allocation-free, so the original message is always on the wire.
+    crate::serial_force_println!("\n[panic] {}", info.message());
+    if let Some(loc) = info.location() {
+        crate::serial_force_println!("[panic] at {}:{}", loc.file(), loc.line());
+    }
+
+    // 1c. If the fault happened inside the buddy allocator, do NOT run the
+    // full dump: it may allocate and re-enter the allocator (the source of the
+    // confusing "Recursive allocation detected" double panic).  The original
+    // message above is what matters; stop here with a minimal report.
+    if crate::memory::buddy::allocator_busy_on_this_cpu() {
+        crate::serial_force_println!(
+            "[panic] buddy allocator is busy on this CPU; skipping allocating dump \
+             (the message above is the original panic)"
+        );
+        crate::arch::smp::broadcast_panic_halt();
+        loop {
+            crate::arch::hlt();
+        }
+    }
+
     // 2. Guard against recursive panics.
     if PANIC_IN_PROGRESS.swap(true, Ordering::SeqCst) {
         // Double panic: dump as much as we can with stack-only formatting.

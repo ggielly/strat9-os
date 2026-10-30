@@ -280,7 +280,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_FSTATAT => crate::vfs::sys_fstatat(arg1, arg2, arg3, arg5),
         SYS_FACCESSAT => crate::vfs::sys_faccessat(arg1, arg2, arg3, arg4, frame.r8),
 
-        // Network syscalls (500-599) ========================================
+        // Network syscalls (470-489) ========================================
         SYS_NET_RECV => net::sys_net_recv(arg1, arg2),
         SYS_NET_SEND => net::sys_net_send(arg1, arg2),
         SYS_NET_INFO => net::sys_net_info(arg1, arg2),
@@ -301,7 +301,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_NET_RESUME => net::sys_net_resume(arg1),
         SYS_NET_QUEUE_UNMAP => net::sys_net_queue_unmap(arg1, arg2),
 
-        // IOMMU / DMA isolation (440-449) ==================================
+        // IOMMU / DMA isolation (520-539) ==================================
         SYS_IOMMU_INFO => iommu::sys_iommu_info(arg1),
         SYS_IOMMU_DOMAIN_CREATE => iommu::sys_iommu_domain_create(arg1),
         SYS_IOMMU_DOMAIN_DESTROY => iommu::sys_iommu_domain_destroy(arg1),

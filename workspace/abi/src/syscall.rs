@@ -821,7 +821,7 @@ pub const SYS_FSTAT: usize = 408;
 /// Returns `0` on success.
 pub const SYS_STAT: usize = 409;
 
-// ── Block 410-419: Network ──────────────────────────────────────────────────
+// ── Block 470-489: Network ──────────────────────────────────────────────────
 
 /// Receive a network packet.
 ///
@@ -830,7 +830,7 @@ pub const SYS_STAT: usize = 409;
 ///
 /// Returns the number of bytes received. The packet includes all headers
 /// (Ethernet, IP, TCP/UDP).
-pub const SYS_NET_RECV: usize = 410;
+pub const SYS_NET_RECV: usize = 470;
 
 /// Send a network packet.
 ///
@@ -838,7 +838,7 @@ pub const SYS_NET_RECV: usize = 410;
 /// - `buf_len`: length of the packet
 ///
 /// Returns the number of bytes sent.
-pub const SYS_NET_SEND: usize = 411;
+pub const SYS_NET_SEND: usize = 471;
 
 /// Query network interface information.
 ///
@@ -846,7 +846,7 @@ pub const SYS_NET_SEND: usize = 411;
 /// - `buf_ptr`: buffer to receive the information
 ///
 /// Returns `0` on success.
-pub const SYS_NET_INFO: usize = 412;
+pub const SYS_NET_INFO: usize = 472;
 
 /// Open the default network device and obtain a `Nic` capability.
 ///
@@ -854,7 +854,7 @@ pub const SYS_NET_INFO: usize = 412;
 /// syscall.  The caller must belong to a `NET`, `DRV` or `SYS` silo.
 ///
 /// Returns the capability handle (currently also usable as a device id).
-pub const SYS_NET_OPEN: usize = 413;
+pub const SYS_NET_OPEN: usize = 473;
 
 /// Register the calling task as the strate-net networking silo.
 ///
@@ -862,7 +862,7 @@ pub const SYS_NET_OPEN: usize = 413;
 /// this registration to wake the networking task when packets arrive.
 ///
 /// Returns `0` on success.
-pub const SYS_NET_REGISTER: usize = 414;
+pub const SYS_NET_REGISTER: usize = 474;
 
 /// Map the shared RX/TX queue region of a network device.
 ///
@@ -871,53 +871,53 @@ pub const SYS_NET_REGISTER: usize = 414;
 /// - `out_ptr`: pointer to a `NetQueueMap` result
 ///
 /// Returns the mapped length on success.
-pub const SYS_NET_QUEUE_MAP: usize = 415;
+pub const SYS_NET_QUEUE_MAP: usize = 475;
 
 /// Ring the TX doorbell of a queue.
-pub const SYS_NET_KICK: usize = 416;
+pub const SYS_NET_KICK: usize = 476;
 
 /// Bind a queue interrupt to an IPC port (or event counter).
 ///
 /// - `dev`: device handle
 /// - `qid`: queue index
 /// - `port`: IPC port handle that receives `NET_EVENT_RX` messages
-pub const SYS_NET_IRQ_BIND: usize = 417;
+pub const SYS_NET_IRQ_BIND: usize = 477;
 
 /// Query link state and MTU.
-pub const SYS_NET_LINK: usize = 418;
+pub const SYS_NET_LINK: usize = 478;
 
 /// Receive up to `max` frames in one syscall.
-pub const SYS_NET_RX_BATCH: usize = 419;
+pub const SYS_NET_RX_BATCH: usize = 479;
 
 /// Transmit up to `count` frames in one syscall.
-pub const SYS_NET_TX_BATCH: usize = 420;
+pub const SYS_NET_TX_BATCH: usize = 480;
 
 /// Query queue features and statistics.
-pub const SYS_NET_QUEUE_INFO: usize = 421;
+pub const SYS_NET_QUEUE_INFO: usize = 481;
 
 /// Wait for a network event (blocking) or poll it (non-blocking).
-pub const SYS_NET_EVENT_WAIT: usize = 422;
+pub const SYS_NET_EVENT_WAIT: usize = 482;
 
 /// Get or set negotiated device features.
-pub const SYS_NET_FEATURES: usize = 423;
+pub const SYS_NET_FEATURES: usize = 483;
 
 /// Notify the kernel that a shared-queue TX descriptor has been published.
-pub const SYS_NET_TX_PUBLISH: usize = 424;
+pub const SYS_NET_TX_PUBLISH: usize = 484;
 
 /// Drain one device hotplug/link event into a `NetEvent`.
-pub const SYS_NET_DEVICE_EVENT: usize = 425;
+pub const SYS_NET_DEVICE_EVENT: usize = 485;
 
 /// Quiesce a device (stop DMA/interrupts, drain queues).
-pub const SYS_NET_QUIESCE: usize = 426;
+pub const SYS_NET_QUIESCE: usize = 486;
 
 /// Resume a quiesced device.
-pub const SYS_NET_RESUME: usize = 427;
+pub const SYS_NET_RESUME: usize = 487;
 
 /// Unmap a shared queue region (hot-restart cleanup).
-pub const SYS_NET_QUEUE_UNMAP: usize = 428;
+pub const SYS_NET_QUEUE_UNMAP: usize = 488;
 
 // =============================================================================
-// IOMMU / DMA domain management (440-449)
+// IOMMU / DMA domain management (520-539)
 // =============================================================================
 //
 // P0 exposes bookkeeping only: the ABI lets a driver obtain a domain, map and
@@ -930,21 +930,21 @@ pub const SYS_NET_QUEUE_UNMAP: usize = 428;
 /// - `out_ptr`: pointer to a writable [`strat9_abi::iommu::IommuInfo`]
 ///
 /// Returns `0` on success.
-pub const SYS_IOMMU_INFO: usize = 440;
+pub const SYS_IOMMU_INFO: usize = 520;
 
 /// Create (or look up) the IOMMU domain bound to a PCI function.
 ///
 /// - `sbdf`: packed `segment:16 | bus:8 | device:5 | function:3`
 ///
 /// Returns an `IommuDomain` capability handle on success.
-pub const SYS_IOMMU_DOMAIN_CREATE: usize = 441;
+pub const SYS_IOMMU_DOMAIN_CREATE: usize = 521;
 
 /// Destroy an IOMMU domain and revoke all of its mappings.
 ///
 /// - `handle`: `IommuDomain` capability handle
 ///
 /// Returns `0` on success.
-pub const SYS_IOMMU_DOMAIN_DESTROY: usize = 442;
+pub const SYS_IOMMU_DOMAIN_DESTROY: usize = 522;
 
 /// Map physical memory into a domain.
 ///
@@ -952,7 +952,7 @@ pub const SYS_IOMMU_DOMAIN_DESTROY: usize = 442;
 /// - `desc_ptr`: pointer to a [`strat9_abi::iommu::IommuMapDesc`]
 ///
 /// Returns `0` on success.
-pub const SYS_IOMMU_MAP: usize = 443;
+pub const SYS_IOMMU_MAP: usize = 523;
 
 /// Remove mappings covering `[iova, iova + len)`.
 ///
@@ -960,48 +960,48 @@ pub const SYS_IOMMU_MAP: usize = 443;
 /// - `iova`, `len`: page-aligned range
 ///
 /// Returns the number of removed mappings.
-pub const SYS_IOMMU_UNMAP: usize = 444;
+pub const SYS_IOMMU_UNMAP: usize = 524;
 
 /// Translate an IOVA with the software table.
 ///
 /// Returns the physical address, or `-ENOENT` when unmapped.
-pub const SYS_IOMMU_TRANSLATE: usize = 445;
+pub const SYS_IOMMU_TRANSLATE: usize = 525;
 
 /// Attempt to enable hardware translation.
 ///
 /// Returns `1` when translation is active, `0` when the backend is not ready.
-pub const SYS_IOMMU_ACTIVATE: usize = 446;
+pub const SYS_IOMMU_ACTIVATE: usize = 526;
 
 /// Query one domain's identity and counters.
 ///
 /// - `handle`: `IommuDomain` capability handle
 /// - `out_ptr`: pointer to a writable [`strat9_abi::iommu::IommuDomainInfo`]
-pub const SYS_IOMMU_DOMAIN_INFO: usize = 449;
+pub const SYS_IOMMU_DOMAIN_INFO: usize = 529;
 
 /// Pop one fault record from the bounded global queue.
 ///
 /// - `out_ptr`: pointer to a writable [`strat9_abi::iommu::IommuFault`]
 ///
 /// Returns `1` when a record was written, `0` when the queue is empty.
-pub const SYS_IOMMU_FAULT_NEXT: usize = 447;
+pub const SYS_IOMMU_FAULT_NEXT: usize = 527;
 
 /// Control an existing domain.
 ///
 /// - `handle`: `IommuDomain` capability handle
 /// - `command`: 0=quiesce, 1=resume, 2=detach, 3=refill fault budget,
 ///   4=set fault policy (`arg3` is the policy)
-pub const SYS_IOMMU_DOMAIN_CTL: usize = 448;
+pub const SYS_IOMMU_DOMAIN_CTL: usize = 528;
 
 /// Batch `SYS_IOMMU_MAP`: `count` [`strat9_abi::iommu::IommuMapDesc`] entries.
-pub const SYS_IOMMU_MAP_BATCH: usize = 450;
+pub const SYS_IOMMU_MAP_BATCH: usize = 530;
 
 /// Batch unmap: `count` entries where `iova`/`len` are used.
-pub const SYS_IOMMU_UNMAP_BATCH: usize = 451;
+pub const SYS_IOMMU_UNMAP_BATCH: usize = 531;
 
 /// Global IOMMU counters.
 ///
 /// - `out_ptr`: pointer to a writable [`strat9_abi::iommu::IommuStats`]
-pub const SYS_IOMMU_STATS: usize = 452;
+pub const SYS_IOMMU_STATS: usize = 532;
 
 /// List the coarse IOMMU groups derived from the DMAR.
 ///
@@ -1009,13 +1009,13 @@ pub const SYS_IOMMU_STATS: usize = 452;
 /// - `max_entries`: capacity of the array
 ///
 /// Returns the number of entries written.
-pub const SYS_IOMMU_GROUPS: usize = 453;
+pub const SYS_IOMMU_GROUPS: usize = 533;
 
 /// List the firmware-reserved regions (RMRR/IVMD).
 ///
 /// - `out_ptr`: array of [`strat9_abi::iommu::IommuReservedRegion`]
 /// - `max_entries`: capacity of the array
-pub const SYS_IOMMU_RESERVED: usize = 454;
+pub const SYS_IOMMU_RESERVED: usize = 534;
 
 /// Allocate an IRTE and return the MSI message to program.
 ///
@@ -1024,10 +1024,10 @@ pub const SYS_IOMMU_RESERVED: usize = 454;
 /// - `out_ptr`: pointer to a writable [`strat9_abi::iommu::IommuMsi`]
 ///
 /// Requires interrupt remapping to be active; returns `-ENOTSUP` otherwise.
-pub const SYS_PCI_MSI_ALLOC: usize = 455;
+pub const SYS_PCI_MSI_ALLOC: usize = 535;
 
 /// Free an IRTE previously allocated with `SYS_PCI_MSI_ALLOC`.
-pub const SYS_PCI_MSI_FREE: usize = 456;
+pub const SYS_PCI_MSI_FREE: usize = 536;
 
 /// Check file accessibility using the real user/group IDs.
 ///

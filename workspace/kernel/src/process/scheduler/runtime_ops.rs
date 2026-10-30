@@ -729,10 +729,14 @@ pub fn maybe_preempt_from_interrupt(
                 _task_to_drop = cpu.task_to_drop.take();
                 if let Some(prev) = cpu.task_to_requeue.take() {
                     prev.set_state(TaskState::Running);
-                    cpu.current_task = Some(prev);
+                    let class = cpu.class_table.class_for_task(&prev);
+                    cpu.current_task = Some(prev.clone());
+                    super::publish_current_task(cpu_index, &prev, class);
                 } else {
                     current.set_state(TaskState::Running);
+                    let class = cpu.class_table.class_for_task(&current);
                     cpu.current_task = Some(current.clone());
+                    super::publish_current_task(cpu_index, &current, class);
                 }
                 next.set_state(TaskState::Ready);
                 let class = cpu.class_table.class_for_task(&next);
@@ -788,10 +792,14 @@ pub fn maybe_preempt_from_interrupt(
 
                 if let Some(prev) = cpu.task_to_requeue.take() {
                     prev.set_state(TaskState::Running);
-                    cpu.current_task = Some(prev);
+                    let class = cpu.class_table.class_for_task(&prev);
+                    cpu.current_task = Some(prev.clone());
+                    super::publish_current_task(cpu_index, &prev, class);
                 } else {
                     current.set_state(TaskState::Running);
+                    let class = cpu.class_table.class_for_task(&current);
                     cpu.current_task = Some(current.clone());
+                    super::publish_current_task(cpu_index, &current, class);
                 }
 
                 if !is_idle_fallback {

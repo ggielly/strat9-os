@@ -40,6 +40,33 @@ pub fn timer_tick() {
 
     if cpu_is_valid(cpu_idx) {
         CPU_TOTAL_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
+        // Attribute this tick exactly once, lock-free. Must stay in lockstep
+        // with CPU_TOTAL_TICKS: these counters feed `1 - idle/total`, so any
+        // lost or double-counted tick skews `top`'s CPU usage.
+        match CPU_CLASS[cpu_idx].load(Ordering::Relaxed) {
+            CPU_CLASS_IDLE => {
+                CPU_IDLE_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
+            }
+            CPU_CLASS_RT => {
+                CPU_RT_RUNTIME_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
+            }
+            // Fair, and the brief UNKNOWN window before the first pick
+            // (booting counts as busy, which is accurate).
+            _ => {
+                CPU_FAIR_RUNTIME_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        // Per-task CPU time: one tick for the task this CPU is running.
+        // `CPU_CURRENT_TICKS` is published by the scheduler at every switch and
+        // re-published before the outgoing `Arc` can be dropped, so the pointer
+        // is valid for as long as it is reachable from this CPU.
+        let ticks_ptr = CPU_CURRENT_TICKS[cpu_idx].load(Ordering::Acquire);
+        if ticks_ptr != 0 {
+            // SAFETY: see above; the slot is only written by this CPU's
+            // scheduler, and republished on switch.
+            unsafe { (*(ticks_ptr as *const AtomicU64)).fetch_add(1, Ordering::Relaxed) };
+        }
     }
 
     // BSP wall-clock: ALWAYS advance, regardless of any lock state.

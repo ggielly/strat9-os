@@ -308,6 +308,14 @@ pub(crate) fn lockdep_assert_held(_rank: LockRank) {}
 ///
 /// CPU usage over a time window:
 /// `usage = 1 - (delta_idle / delta_total)`.
+///
+/// INVARIANT: the class counters below are incremented **once per timer tick
+/// from the hardirq** (see `timer_ops::timer_tick`), never from deferred work.
+/// They used to be updated in `process_per_task_accounting()`, which runs from a
+/// coalescing bitmask: N ticks raised `PerTaskAccounting` once, so only a
+/// handful of ticks were ever attributed. `CPU_TOTAL_TICKS` kept counting all of
+/// them, `busy = total - idle` was therefore ~100% on a completely idle box,
+/// and `top`'s "CPU(avg)" was meaningless.
 static CPU_TOTAL_TICKS: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
 static CPU_IDLE_TICKS: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
@@ -316,6 +324,52 @@ static CPU_RT_RUNTIME_TICKS: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
 static CPU_FAIR_RUNTIME_TICKS: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
+
+/// Scheduling class currently running on each CPU, cached lock-free.
+///
+/// The hardirq cannot take `LOCAL_SCHEDULERS` (try_lock drops the tick when the
+/// lock is held), so the class is published by the scheduler whenever it
+/// installs `current_task` and read here with a plain atomic load.
+pub(crate) const CPU_CLASS_UNKNOWN: u8 = 0;
+pub(crate) const CPU_CLASS_IDLE: u8 = 1;
+pub(crate) const CPU_CLASS_FAIR: u8 = 2;
+pub(crate) const CPU_CLASS_RT: u8 = 3;
+pub(crate) static CPU_CLASS: [core::sync::atomic::AtomicU8; crate::arch::percpu::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU8::new(CPU_CLASS_UNKNOWN) };
+        crate::arch::percpu::MAX_CPUS];
+
+/// Address of the current task's `ticks` counter on each CPU, cached lock-free.
+///
+/// Same rationale as [`CPU_CLASS`]: per-task CPU time must be accounted once per
+/// tick. It used to be incremented from the coalescing deferred-work bitmask, so
+/// a task that ran for 100 ticks without a context switch was credited 1 tick,
+/// which made `top`'s per-task column and its "biggest consumer" sort wrong.
+pub(crate) static CPU_CURRENT_TICKS: [core::sync::atomic::AtomicUsize;
+    crate::arch::percpu::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::arch::percpu::MAX_CPUS];
+
+/// Publish the task now running on `cpu_index` (class + tick counter address).
+///
+/// Must be called every time `SchedulerCpu::current_task` changes, and again
+/// after a switch completes (before the previous task can be dropped), so the
+/// timer hardirq never dereferences a stale `Arc`.
+pub(crate) fn publish_current_task(
+    cpu_index: usize,
+    task: &crate::process::task::Task,
+    class: crate::process::sched::SchedClassId,
+) {
+    if cpu_index >= crate::arch::percpu::MAX_CPUS {
+        return;
+    }
+    let value = match class {
+        crate::process::sched::SchedClassId::Idle => CPU_CLASS_IDLE,
+        crate::process::sched::SchedClassId::Fair => CPU_CLASS_FAIR,
+        crate::process::sched::SchedClassId::RealTime => CPU_CLASS_RT,
+    };
+    CPU_CLASS[cpu_index].store(value, Ordering::Relaxed);
+    let ticks = core::ptr::addr_of!(task.ticks) as usize;
+    CPU_CURRENT_TICKS[cpu_index].store(ticks, Ordering::Release);
+}
 static CPU_SWITCH_COUNT: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
 static CPU_PREEMPT_COUNT: [AtomicU64; crate::arch::percpu::MAX_CPUS] =

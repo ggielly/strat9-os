@@ -226,8 +226,7 @@ pub fn process_deferred_work() -> bool {
 /// This is the deferred version of the per-task block that was previously
 /// inline in `timer_tick()`. Acquires LOCAL_SCHEDULERS[cpu] via try_lock.
 fn process_per_task_accounting() {
-    use super::{CPU_FAIR_RUNTIME_TICKS, CPU_IDLE_TICKS, CPU_RT_RUNTIME_TICKS, LOCAL_SCHEDULERS};
-    use crate::process::sched::SchedClassId;
+    use super::LOCAL_SCHEDULERS;
 
     let cpu_idx = crate::arch::percpu::current_cpu_index();
     if !super::cpu_is_valid(cpu_idx) {
@@ -239,19 +238,11 @@ fn process_per_task_accounting() {
         if let Some(mut guard) = LOCAL_SCHEDULERS[cpu_idx].try_lock_no_irqsave() {
             if let Some(ref mut cpu) = *guard {
                 let should_resched = if let Some(ref current_task) = cpu.current_task {
-                    let class = cpu.class_table.class_for_task(current_task);
-                    match class {
-                        SchedClassId::RealTime => {
-                            CPU_RT_RUNTIME_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
-                        }
-                        SchedClassId::Fair => {
-                            CPU_FAIR_RUNTIME_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
-                        }
-                        SchedClassId::Idle => {
-                            CPU_IDLE_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-                    current_task.ticks.fetch_add(1, Ordering::Relaxed);
+                    // CPU-class runtime (idle/rt/fair) and per-task tick
+                    // accounting happen in the timer hardirq, NOT here: this
+                    // path is raised through a coalescing bitmask, so it runs at
+                    // most once per batch of ticks and used to starve both the
+                    // idle counter and `task.ticks`.
                     cpu.current_runtime.update();
                     cpu.class_rqs.update_current(
                         &cpu.current_runtime,
