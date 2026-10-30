@@ -24,6 +24,11 @@
 //! 0x83000 TX frame pool   (NET_POOL_SLOTS × 2048 bytes)
 //! 0x103000 end
 //! ```
+// The ring primitives in this module are `unsafe fn` whose contracts are
+// documented per function; the workspace denies `unsafe_op_in_unsafe_fn`, so
+// opt this wire-format module out rather than wrapping every pointer access.
+#![allow(unsafe_op_in_unsafe_fn)]
+
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
