@@ -143,7 +143,7 @@ pub fn create_user_test_task() {
         stack_canary_addr: core::sync::atomic::AtomicU64::new(0),
         kernel_stack_user: SyncUnsafeCell::new(None),
 
-        name: "test-user-ring3",
+        name: alloc::string::String::from("test-user-ring3"),
         process: alloc::sync::Arc::new(crate::process::process::Process::new(pid, user_as)),
         pending_signals: super::signal::SignalSet::new(),
 

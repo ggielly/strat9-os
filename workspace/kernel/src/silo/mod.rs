@@ -1316,7 +1316,7 @@ fn extract_strate_label(path: &str) -> Option<String> {
     if label.is_empty() || parts.next().is_some() {
         return None;
     }
-    Some(Arc::from(label))
+    Some(String::from(label))
 }
 
 /// Performs the sanitize label operation.
@@ -3310,7 +3310,7 @@ fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode
         (
             task.pid,
             task.tid,
-            task.name,
+            task.name.clone(),
             state,
             as_ref.cr3().as_u64(),
             as_ref.is_kernel(),

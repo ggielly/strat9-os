@@ -231,7 +231,7 @@ fn syscall_table_is_exhaustive() {
     // table, this count check fails and forces a conscious review.
     assert_eq!(
         GOLDEN_SYSCALLS.len(),
-        169,
+        170,
         "golden table out of sync: add new SYS_* consts AND their pinned values"
     );
 }

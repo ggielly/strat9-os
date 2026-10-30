@@ -18,7 +18,8 @@ pub mod scripting;
 
 use commands::CommandRegistry;
 use output::{print_char, print_prompt, print_text};
-use parser::{parse_pipeline, Redirect};
+use parser::{Pipeline, Redirect, Word};
+use scripting::ScriptConstruct;
 
 use crate::{shell_print, shell_println, sync::FixedQueue, vfs};
 use strat9_abi::flag::OpenFlags;
@@ -590,84 +591,84 @@ pub extern "C" fn shell_main() -> ! {
     }
 }
 
+/// Resolve a lexer word using shell variables and environment.
+fn resolve_word(word: &Word) -> String {
+    word.resolve(scripting::resolve_var)
+}
+
 /// Execute a command line, handling scripting, pipes and redirections.
 fn execute_line(line: &str, registry: &CommandRegistry) {
-    let expanded = scripting::expand_vars(line);
+    match scripting::parse_script(line) {
+        Ok(constructs) => {
+            for construct in &constructs {
+                execute_construct(construct, registry);
+            }
+        }
+        Err(error) => shell_println!("shell: parse error: {:?}", error),
+    }
+}
 
-    match scripting::parse_script(&expanded) {
-        scripting::ScriptConstruct::SetVar { key, val } => {
-            let expanded_val = scripting::expand_vars(&val);
-            scripting::set_var(&key, &expanded_val);
+fn execute_construct(construct: &ScriptConstruct, registry: &CommandRegistry) {
+    match construct {
+        ScriptConstruct::Simple(pipeline) => execute_pipeline(pipeline, registry),
+        ScriptConstruct::SetVar { key, val } => {
+            scripting::set_var(key, &resolve_word(val));
             scripting::set_last_exit(0);
-            return;
         }
-        scripting::ScriptConstruct::UnsetVar(key) => {
-            scripting::unset_var(&key);
+        ScriptConstruct::UnsetVar(key) => {
+            scripting::unset_var(key);
             scripting::set_last_exit(0);
-            return;
         }
-        scripting::ScriptConstruct::ForLoop { var, items, body } => {
-            for item in &items {
-                scripting::set_var(&var, item);
-                for cmd in &body {
-                    let exp = scripting::expand_vars(cmd);
-                    execute_pipeline(&exp, registry);
+        ScriptConstruct::ForLoop { var, items, body } => {
+            for item in items {
+                scripting::set_var(var, &resolve_word(item));
+                for cmd in body {
+                    execute_construct(cmd, registry);
                 }
             }
-            return;
         }
-        scripting::ScriptConstruct::WhileLoop { cond, body } => {
+        ScriptConstruct::WhileLoop { cond, body } => {
             let mut iters = 0u32;
             loop {
                 if iters > 10000 || is_interrupted() {
                     break;
                 }
-                let cond_expanded = scripting::expand_vars(&cond);
-                execute_pipeline(&cond_expanded, registry);
+                for cmd in cond {
+                    execute_construct(cmd, registry);
+                }
                 if scripting::last_exit() != 0 {
                     break;
                 }
-                for cmd in &body {
-                    let exp = scripting::expand_vars(cmd);
-                    execute_pipeline(&exp, registry);
+                for cmd in body {
+                    execute_construct(cmd, registry);
                 }
                 iters += 1;
             }
-            return;
         }
-        scripting::ScriptConstruct::IfElse {
+        ScriptConstruct::IfElse {
             cond,
             then_body,
             else_body,
         } => {
-            let cond_expanded = scripting::expand_vars(&cond);
-            execute_pipeline(&cond_expanded, registry);
+            for cmd in cond {
+                execute_construct(cmd, registry);
+            }
             let branch = if scripting::last_exit() == 0 {
-                &then_body
+                then_body
             } else {
-                &else_body
+                else_body
             };
             for cmd in branch {
-                let exp = scripting::expand_vars(cmd);
-                execute_pipeline(&exp, registry);
+                execute_construct(cmd, registry);
             }
-            return;
-        }
-        scripting::ScriptConstruct::Simple(s) => {
-            execute_pipeline(&s, registry);
         }
     }
 }
 
-/// Execute a single pipeline (no scripting).
-fn execute_pipeline(line: &str, registry: &CommandRegistry) {
+/// Execute a single parsed pipeline (no scripting).
+fn execute_pipeline(pipeline: &Pipeline, registry: &CommandRegistry) {
     // Ensure stale pipe input from a previous command cannot leak.
     output::clear_pipe_input();
-
-    let pipeline = match parse_pipeline(line) {
-        Some(p) => p,
-        None => return,
-    };
 
     let stage_count = pipeline.stages.len();
     let mut pipe_data: Option<alloc::vec::Vec<u8>> = None;
@@ -675,16 +676,18 @@ fn execute_pipeline(line: &str, registry: &CommandRegistry) {
     for (i, stage) in pipeline.stages.iter().enumerate() {
         let is_last = i == stage_count - 1;
         let needs_capture = !is_last || stage.stdout_redirect.is_some();
+        let command = stage.command.resolve(scripting::resolve_var);
 
-        if let Some(ref stdin_path) = stage.stdin_redirect {
-            match vfs::open(stdin_path, vfs::OpenFlags::READ) {
+        if let Some(ref stdin) = stage.stdin_redirect {
+            let path = stdin.resolve(scripting::resolve_var);
+            match vfs::open(&path, vfs::OpenFlags::READ) {
                 Ok(fd) => {
                     let data = vfs::read_all(fd).unwrap_or_default();
                     let _ = vfs::close(fd);
                     output::set_pipe_input(data);
                 }
                 Err(e) => {
-                    shell_println!("shell: cannot open '{}': {:?}", stdin_path, e);
+                    shell_println!("shell: cannot open '{}': {:?}", path, e);
                     return;
                 }
             }
@@ -696,7 +699,7 @@ fn execute_pipeline(line: &str, registry: &CommandRegistry) {
             output::start_capture();
         }
 
-        let result = registry.execute(&stage.command);
+        let result = registry.execute(&command);
 
         let captured = if needs_capture {
             output::take_capture()
@@ -710,17 +713,17 @@ fn execute_pipeline(line: &str, registry: &CommandRegistry) {
             }
             Err(ShellError::UnknownCommand) => {
                 scripting::set_last_exit(127);
-                shell_println!("Error: unknown command '{}'", stage.command.name);
+                shell_println!("Error: unknown command '{}'", command.name);
                 return;
             }
             Err(ShellError::InvalidArguments) => {
                 scripting::set_last_exit(2);
-                shell_println!("Error: invalid arguments for '{}'", stage.command.name);
+                shell_println!("Error: invalid arguments for '{}'", command.name);
                 return;
             }
             Err(ShellError::ExecutionFailed) => {
                 scripting::set_last_exit(1);
-                shell_println!("Error: '{}' execution failed", stage.command.name);
+                shell_println!("Error: '{}' execution failed", command.name);
                 return;
             }
         }
@@ -729,7 +732,11 @@ fn execute_pipeline(line: &str, registry: &CommandRegistry) {
         output::clear_pipe_input();
 
         if let Some(ref redirect) = stage.stdout_redirect {
-            apply_redirect(redirect, &captured);
+            let (append, path) = match redirect {
+                Redirect::Truncate(word) => (false, word.resolve(scripting::resolve_var)),
+                Redirect::Append(word) => (true, word.resolve(scripting::resolve_var)),
+            };
+            apply_redirect(append, &path, &captured);
         }
 
         if !is_last {
@@ -911,27 +918,17 @@ fn longest_common_prefix(strings: &[&str]) -> alloc::string::String {
 }
 
 /// Write captured output to a file (truncate or append).
-fn apply_redirect(redirect: &Redirect, data: &[u8]) {
-    match redirect {
-        Redirect::Truncate(path) => {
-            let flags = OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE;
-            match vfs::open(path, flags) {
-                Ok(fd) => {
-                    let _ = vfs::write(fd, data);
-                    let _ = vfs::close(fd);
-                }
-                Err(e) => shell_println!("shell: cannot write '{}': {:?}", path, e),
-            }
+fn apply_redirect(append: bool, path: &str, data: &[u8]) {
+    let flags = if append {
+        OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::APPEND
+    } else {
+        OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE
+    };
+    match vfs::open(path, flags) {
+        Ok(fd) => {
+            let _ = vfs::write(fd, data);
+            let _ = vfs::close(fd);
         }
-        Redirect::Append(path) => {
-            let flags = OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::APPEND;
-            match vfs::open(path, flags) {
-                Ok(fd) => {
-                    let _ = vfs::write(fd, data);
-                    let _ = vfs::close(fd);
-                }
-                Err(e) => shell_println!("shell: cannot append '{}': {:?}", path, e),
-            }
-        }
+        Err(e) => shell_println!("shell: cannot write '{}': {:?}", path, e),
     }
 }

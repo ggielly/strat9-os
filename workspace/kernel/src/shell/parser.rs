@@ -217,7 +217,7 @@ pub fn parse(line: &str) -> Option<Command> {
     if pipeline.stages.len() != 1 { return None; }
     let stage = pipeline.stages.into_iter().next()?;
     if stage.stdin_redirect.is_some() || stage.stdout_redirect.is_some() { return None; }
-    Some(stage.command.resolve(String::from))
+    Some(stage.command.resolve(|text| String::from(text)))
 }
 
 #[cfg(test)]
@@ -225,7 +225,7 @@ mod tests {
     use super::*;
     #[test] fn quoted_operators_and_empty_words_are_arguments() {
         let p = try_parse_pipeline("echo 'a|b;>' \"\" a\\ b").unwrap().unwrap();
-        let cmd = p.stages[0].command.resolve(String::from);
+        let cmd = p.stages[0].command.resolve(|text| String::from(text));
         assert_eq!(cmd.args, ["a|b;>", "", "a b"]);
     }
     #[test] fn expansion_cannot_inject_operators_and_single_quotes_are_literal() {

@@ -35,6 +35,19 @@ pub fn expand_vars(input: &str) -> String {
     result
 }
 
+/// Resolve one variable name produced by the quote-aware lexer.
+///
+/// Unlike [`expand_vars`], the lexer has already separated literal text from
+/// `$name` fragments, so this only has to look the name up (and handle `$?`).
+pub fn resolve_var(name: &str) -> String {
+    if name == "?" {
+        return alloc::format!("{}", last_exit());
+    }
+    get_var(name)
+        .or_else(|| super::commands::util::shell_getenv(name))
+        .unwrap_or_default()
+}
+
 #[derive(Debug)]
 pub enum ScriptConstruct {
     Simple(Pipeline),

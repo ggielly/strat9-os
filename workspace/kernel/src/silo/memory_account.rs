@@ -6,6 +6,16 @@ pub(crate) struct SiloMemoryAccount {
     budget: SpinLock<MemoryBudget>,
 }
 
+impl core::fmt::Debug for SiloMemoryAccount {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let budget = self.budget.lock();
+        f.debug_struct("SiloMemoryAccount")
+            .field("used", &budget.used)
+            .field("max", &budget.max)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44,6 +54,7 @@ mod tests {
     }
 }
 
+#[derive(Debug)]
 struct MemoryBudget {
     used: u64,
     max: u64,
