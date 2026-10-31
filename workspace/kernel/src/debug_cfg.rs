@@ -69,5 +69,25 @@ pub fn set_vga_debug_buffer(enabled: bool) {
 pub const SERIAL_ENABLED: bool = true;
 
 // ---------------------------------------------------------------------------
+// SMP
+// ---------------------------------------------------------------------------
+
+/// Bring up the application processors.
+///
+/// Disabled temporarily: on the Lenovo X13 the APs never acknowledge TLB
+/// shootdown IPIs, so every mapping waits 10M cycles per CPU and the hardware
+/// stage (USB/Bluetooth) is never reached. Single-CPU boot is enough to test
+/// the Bluetooth path. Re-enable once AP/IPI bring-up is fixed.
+pub const SMP_ENABLED: bool = false;
+
+/// Run the storage drivers (VirtIO-blk, AHCI, NVMe) during the hardware stage.
+///
+/// Disabled temporarily: on the Lenovo X13 the storage probe resets the machine
+/// (triple fault, no panic output) right after the VirtIO scan, before USB is
+/// initialised. The BT test only needs initfs/ramfs, so storage can stay off
+/// until the AHCI/NVMe probe is fixed.
+pub const STORAGE_ENABLED: bool = false;
+
+// ---------------------------------------------------------------------------
 // Future debug flags : TODO
 // ---------------------------------------------------------------------------

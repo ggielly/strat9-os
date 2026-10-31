@@ -159,8 +159,12 @@ fn pci_init() -> Result<(), ComponentInitError> {
 }
 
 /// Storage drivers (VirtIO block, AHCI, NVMe).
-#[component::init_component(hardware, priority = 1, depends_on = pci_init)]
+#[component::init_component(hardware, priority = 2, depends_on = pci_init)]
 fn storage_init() -> Result<(), ComponentInitError> {
+    if !crate::debug_cfg::STORAGE_ENABLED {
+        log::warn!("[component] Storage init disabled (STORAGE_ENABLED=false)");
+        return Ok(());
+    }
     crate::hardware::storage::virtio_block::init();
     crate::hardware::storage::ahci::init();
     crate::hardware::storage::nvme::init();
@@ -190,7 +194,7 @@ fn timer_init() -> Result<(), ComponentInitError> {
 }
 
 /// USB controllers (xHCI, EHCI, UHCI).
-#[component::init_component(hardware, priority = 2, depends_on = pci_init)]
+#[component::init_component(hardware, priority = 0, depends_on = pci_init)]
 fn usb_init() -> Result<(), ComponentInitError> {
     crate::hardware::usb::init();
     log::info!("[component] USB controllers initialized");

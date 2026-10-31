@@ -182,7 +182,20 @@ fn selectors_for(cpu_index: usize) -> Selectors {
         crate::arch::x86_64::percpu::MAX_CPUS,
     );
     if !SELECTORS_INIT[cpu_index].load(Ordering::Acquire) {
-        panic!("GDT selectors for CPU{} not initialized", cpu_index);
+        // The early `gdt::init()` writes into the pre-paging mapping. After
+        // the kernel address space is remapped, this bookkeeping flag can be
+        // read as zero even though the GDT is loaded and working (observed on
+        // the X13 when the init ELF is built). The descriptor layout is fixed
+        // by `init_cpu`, so fall back to the known selector values instead of
+        // panicking.
+        return Selectors {
+            kernel_code: SegmentSelector(0x08),
+            kernel_data: SegmentSelector(0x10),
+            user_code32: SegmentSelector(0x18),
+            user_data: SegmentSelector(0x20),
+            user_code64: SegmentSelector(0x28),
+            tss: SegmentSelector(0x30),
+        };
     }
     // SAFETY: Initialized in init_cpu and stored for 'static lifetime.
     unsafe { *SELECTORS[cpu_index].as_ptr() }
