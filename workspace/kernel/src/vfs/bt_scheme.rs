@@ -39,6 +39,10 @@ use super::{
 const HCI0_FILE_ID: u64 = 1;
 const STATS_FILE_ID: u64 = 2;
 const ROOT_FILE_ID: u64 = 3;
+const CTL_FILE_ID: u64 = 4;
+
+/// Last vendor control-IN response (only one consumer: strate-bt).
+static CTL_RESPONSE: SpinLock<([u8; 64], usize)> = SpinLock::new(([0; 64], 0));
 
 static SCHEME: SpinLock<Option<Arc<BtScheme>>> = SpinLock::new(None);
 static REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -72,8 +76,21 @@ impl Scheme for BtScheme {
                     flags: FileFlags::DIRECTORY,
                 });
             }
-            "hci0" => HCI0_FILE_ID,
+            "hci0" => {
+                if !btusb::is_present() {
+                    // No HCI device yet: let the daemon retry instead of
+                    // writing commands into a transport that does not exist.
+                    return Err(SyscallError::NotFound);
+                }
+                HCI0_FILE_ID
+            }
             "stats" => STATS_FILE_ID,
+            "ctl" => {
+                if !btusb::is_present() {
+                    return Err(SyscallError::NotFound);
+                }
+                CTL_FILE_ID
+            }
             _ => return Err(SyscallError::NotFound),
         };
 
@@ -95,12 +112,57 @@ impl Scheme for BtScheme {
                 buf[..len].copy_from_slice(&text.as_bytes()[start..start + len]);
                 Ok(len)
             }
+            CTL_FILE_ID => {
+                let mut ctl = CTL_RESPONSE.lock();
+                if ctl.1 == 0 {
+                    return Err(SyscallError::Again);
+                }
+                let n = core::cmp::min(ctl.1, buf.len());
+                buf[..n].copy_from_slice(&ctl.0[..n]);
+                ctl.1 = 0;
+                Ok(n)
+            }
             _ => Err(SyscallError::BadHandle),
         }
     }
 
     /// Performs the write operation.
     fn write(&self, file_id: u64, _offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
+        if file_id == CTL_FILE_ID {
+            // Request: [bmRequestType][bRequest][wValue u16][wIndex u16]
+            //          [wLength u16][data...]
+            if buf.len() < 8 {
+                return Err(SyscallError::InvalidArgument);
+            }
+            let setup = [
+                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+            ];
+            let len = u16::from_le_bytes([buf[6], buf[7]]) as usize;
+            if len > 64 {
+                return Err(SyscallError::InvalidArgument);
+            }
+            if buf[0] & 0x80 != 0 {
+                // Control IN: the response is read back through read().
+                let mut resp = [0u8; 64];
+                let n = btusb::vendor_control(setup, Some(&mut resp[..len]), len)
+                    .map_err(|_| SyscallError::Again)?;
+                let mut ctl = CTL_RESPONSE.lock();
+                ctl.0[..n].copy_from_slice(&resp[..n]);
+                ctl.1 = n;
+            } else {
+                // Control OUT: caller data follows the 8-byte header.
+                if buf.len() < 8 + len {
+                    return Err(SyscallError::InvalidArgument);
+                }
+                let mut data = [0u8; 64];
+                data[..len].copy_from_slice(&buf[8..8 + len]);
+                btusb::vendor_control(setup, Some(&mut data[..len]), len)
+                    .map_err(|_| SyscallError::Again)?;
+                CTL_RESPONSE.lock().1 = 0;
+            }
+            return Ok(buf.len());
+        }
+
         if file_id != HCI0_FILE_ID {
             return Err(SyscallError::BadHandle);
         }
@@ -109,8 +171,18 @@ impl Scheme for BtScheme {
         }
 
         let mut consumed = 0usize;
+        let mut needs_tx_wait = false;
         while consumed < buf.len() {
             let remaining = &buf[consumed..];
+            if remaining.len() >= 3
+                && remaining[0] == 0x01
+                && remaining[1] == 0x6F
+                && remaining[2] == 0xFC
+            {
+                // MediaTek WMT command: the following control-IN must not race
+                // with this bulk OUT completion.
+                needs_tx_wait = true;
+            }
             let total = match btusb::h4_total_len(remaining) {
                 Some(total) if total <= remaining.len() => total,
                 _ => {
@@ -135,6 +207,9 @@ impl Scheme for BtScheme {
 
         if consumed > 0 {
             btusb::kick_tx();
+            if needs_tx_wait {
+                let _ = btusb::wait_tx_idle(100);
+            }
         }
         Ok(consumed)
     }
@@ -149,6 +224,7 @@ impl Scheme for BtScheme {
         let (mode, rdev) = match file_id {
             HCI0_FILE_ID => (0o020666, 1),  // S_IFCHR | rw-rw-rw-
             STATS_FILE_ID => (0o020444, 2), // S_IFCHR | r--r--r--
+            CTL_FILE_ID => (0o020666, 3),   // S_IFCHR | rw-rw-rw-
             ROOT_FILE_ID => (0o040555, 0),  // directory
             _ => return Err(SyscallError::BadHandle),
         };

@@ -46,6 +46,13 @@ if ! has '\[xHCI\] Found [1-9]'; then
     echo "        run-uefi-gui), ou vérifier le port PCI sur matériel réel."
     exit 1
 fi
+if has 'HCSPARAMS1 reports 0 ports'; then
+    echo "xHCI : contrôleur présent mais 0 port détecté."
+    echo "      → le BAR/MMIO n'est pas lisible (BAR0 non assigné ou hors HHDM)."
+    echo "        C'est un problème xHCI, pas Bluetooth : aucun device ne peut"
+    echo "        être énuméré tant que ce n'est pas corrigé."
+    exit 1
+fi
 echo "xHCI : contrôleur présent."
 
 if has '\[USB-BT\] Attached'; then
@@ -92,13 +99,25 @@ fi
 echo "strate-bt : transport ouvert."
 if has 'Realtek RTL8761BU firmware ready'; then
     echo "firmware : patch RTL8761BU chargé."
+elif has 'MediaTek MT7961 firmware ready'; then
+    echo "firmware : patch MT7961 (MT7921) chargé."
 elif has 'Realtek: /initfs/rtl8761bu_fw.bin missing'; then
-    echo "firmware : blob absent de l'initfs."
+    echo "firmware : blob Realtek absent de l'initfs."
     echo "      → copier rtl8761bu_fw.bin / rtl8761bu_config.bin dans"
     echo "        workspace/assets/firmware/ puis reconstruire l'image."
     exit 1
-elif has 'no Realtek firmware loaded'; then
-    echo "firmware : pas de patch Realtek (contrôleur non-Realtek ou échec)."
+elif has 'MTK: firmware file missing'; then
+    echo "firmware : blob MT7961 absent de l'initfs."
+    echo "      → copier BT_RAM_CODE_MT7961_1_2_hdr.bin dans"
+    echo "        workspace/assets/firmware/ puis reconstruire l'image."
+    exit 1
+elif has 'MTK: (firmware fragment failed|section query timeout|function enable timeout)'; then
+    echo "firmware : le download MT7961 a échoué."
+    echo "      → vérifier la variante (1_2 vs 1a_2), les control transfers"
+    echo "        EP0 et le fichier de firmware."
+    exit 1
+elif has 'no firmware loaded'; then
+    echo "firmware : aucun patch Realtek/MediaTek (contrôleur inconnu ou échec)."
 fi
 if has 'LE advertising enable failed'; then
     echo "advertising : LE Set Advertising Enable a échoué."

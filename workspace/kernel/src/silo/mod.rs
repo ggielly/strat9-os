@@ -2885,7 +2885,10 @@ pub fn enforce_console_access() -> Result<(), SyscallError> {
     let mgr = SILO_MANAGER.lock();
     if let Some(silo_id) = mgr.silo_for_task(task.id) {
         if let Ok(silo) = mgr.get(silo_id) {
-            if matches!(silo.family, StrateFamily::SYS | StrateFamily::NET) {
+            if matches!(
+                silo.family,
+                StrateFamily::SYS | StrateFamily::DRV | StrateFamily::NET
+            ) {
                 return Ok(());
             }
         }

@@ -42,10 +42,10 @@ pub fn enumerate_device(
 
     match dev_desc[4] {
         0x03 => hid::enumerate_device(port, slot_id, dev_desc),
-        // Most dongles are 0xE0 (wireless) or 0x00 (composite, class lives on
-        // the interface). Other classes are definitively not Bluetooth, so do
-        // not spend control transfers probing them.
-        0xE0 | 0x00 => btusb::enumerate_device(controller, port, slot_id, dev_desc),
+        // 0xE0 = wireless; 0xEF = miscellaneous with an Interface Association
+        // (MediaTek MT7921 reports 0xEF at device level, HCI on the interface);
+        // 0x00 = composite. Other classes are not Bluetooth.
+        0xE0 | 0xEF | 0x00 => btusb::enumerate_device(controller, port, slot_id, dev_desc),
         _ => {}
     }
 }

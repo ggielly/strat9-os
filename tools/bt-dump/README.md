@@ -102,3 +102,51 @@ Si le blob manque :
 Le parseur est testé contre le vrai blob (30 210 octets, 120 fragments,
 `fw_version 0xdfc6d922`).
 
+## Vérification de l'image (faite sur ce dépôt)
+
+Le dongle branché sur Linux est `0bda:a728` (Realtek **RTL8761BU**,
+full-speed) :
+
+- interface 0 : HCI `E0/01/01`, interrupt IN `0x81`, bulk OUT `0x02`,
+  bulk IN `0x82` — exactement ce que `btusb` attend ;
+- port racine xHCI, pas de hub ;
+- firmware Linux : `rtl8761bu_fw.bin` + `rtl8761bu_config.bin`.
+
+Ce qui a été vérifié dans l'image reconstruite :
+
+- `boot/initfs/strate-bt` présent, ELF64, contient les 15 chaînes Realtek ;
+- `rtl8761bu_fw.bin` présent, md5 identique à la source
+  (`e6da3f44…`), `rtl8761bu_config.bin` présent ;
+- `silo.toml` contient le silo `bt` → `/initfs/strate-bt` ;
+- le noyau expose `/dev/bt`, prépare la tâche `silo-102/strate-bt` et
+  enregistre `/initfs/strate-bt` (57 368 octets).
+
+Deux blocages restent, **hors Bluetooth** :
+
+1. Sous QEMU (`qemu-xhci`), `HCSPARAMS1` renvoie **0 port** au noyau alors que
+   QEMU expose 8 ports : le BAR0 est à `0x8_0000_0000` (au-dessus de 4 Gio) et
+   la lecture MMIO du noyau renvoie 0. Aucun device USB n'est donc énuméré.
+2. Le build courant panique dans `vmalloc` (`KernelMapFailed`) pendant le stage
+   matériel, avant la strate. L'image précédente passait ce point : régression
+   mémoire/paging à corriger avant tout test BT.
+
+Sur matériel réel (X13), le BAR xHCI du PCH est généralement sous 4 Gio ; le
+point 1 peut donc ne pas se produire, mais le point 2 est à vérifier.
+
+> Le firmware de cette section est celui du **dongle RTL8761BU**. Le
+> Bluetooth **interne** du X13 (`0489:e0cd`) est un **MediaTek MT7921**
+> (MT7961, BT 5.2). Il est maintenant pris en charge par le même transport :
+> le chargement MTK utilise `BT_RAM_CODE_MT7961_1_2_hdr.bin` (532 Kio,
+> présent dans `workspace/assets/firmware/`), le protocole WMT (`0xFC6F`,
+> event vendor `0xE4`) et des control transfers EP0 via `/dev/bt/ctl`.
+> Logs attendus : `[strate-bt] MTK: downloading firmware` puis
+> `[strate-bt] MediaTek MT7961 firmware ready`.
+>
+> Deux corrections de transport ont été nécessaires pour ce device :
+> routage de la classe **0xEF** (Interface Association) et indexation des
+> endpoints par **DCI** (`2*num + direction`) : le MT7921 utilise EP2 OUT
+> et EP2 IN, comme le dongle Realtek, et les deux partageaient le même slot.
+
+
+
+

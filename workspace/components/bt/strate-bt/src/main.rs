@@ -8,7 +8,7 @@
 
 use core::panic::PanicInfo;
 use strat9_syscall::{call, data::TimeSpec, flag, number};
-use strate_bt::{realtek, Session, gatt::RxAction};
+use strate_bt::{gatt::RxAction, hci, mediatek, realtek, wmt, Session};
 
 const EAGAIN: usize = 11;
 
@@ -19,8 +19,11 @@ const LOG_STATS_PATH: &str = "/dev/log/stats";
 /// RTL8761BU blobs, copied into the initfs by `create-uefi-image.sh`.
 const RTL_FW_PATH: &str = "/initfs/rtl8761bu_fw.bin";
 const RTL_CFG_PATH: &str = "/initfs/rtl8761bu_config.bin";
+/// MediaTek MT7961 (MT7921) Bluetooth RAM code.
+const MTK_FW_PATH: &str = "/initfs/BT_RAM_CODE_MT7961_1_2_hdr.bin";
+const CTL_PATH: &str = "/dev/bt/ctl";
 
-const FW_MAX: usize = 48 * 1024;
+const FW_MAX: usize = 600 * 1024;
 const PATCH_MAX: usize = 32 * 1024;
 
 static mut FW_BUF: [u8; FW_MAX] = [0; FW_MAX];
@@ -318,12 +321,128 @@ fn realtek_setup(fd: usize) -> bool {
     true
 }
 
+/// Sends a vendor control-IN request through `/dev/bt/ctl` and reads the data.
+fn ctl_in(
+    ctl: usize,
+    request_type: u8,
+    request: u8,
+    value: u16,
+    index: u16,
+    len: usize,
+    out: &mut [u8],
+) -> Option<usize> {
+    if len > out.len() || len > 64 {
+        return None;
+    }
+    let mut req = [0u8; 8];
+    req[0] = request_type;
+    req[1] = request;
+    req[2..4].copy_from_slice(&value.to_le_bytes());
+    req[4..6].copy_from_slice(&index.to_le_bytes());
+    req[6..8].copy_from_slice(&(len as u16).to_le_bytes());
+    if !write_all(ctl, &req) {
+        return None;
+    }
+    for _ in 0..50 {
+        match call::read(ctl, out) {
+            Ok(n) if n > 0 => return Some(n),
+            Err(e) if e.to_errno() == EAGAIN => sleep_ms(10),
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Sends one WMT command over HCI and fetches its vendor event via control IN.
+fn wmt_cmd(hci: usize, ctl: usize, op: u8, flag: u8, data: &[u8]) -> Option<u8> {
+    let mut params = [0u8; 300];
+    let n = wmt::build(op, flag, data, &mut params)?;
+    let mut cmd = [0u8; 320];
+    let cn = hci::command(&mut cmd, wmt::HCI_OP_WMT, &params[..n])?;
+    if !write_all(hci, &cmd[..cn]) {
+        return None;
+    }
+    let mut ev = [0u8; 64];
+    for _ in 0..100 {
+        if let Some(en) = ctl_in(ctl, 0xC0, 1, 48, 0, 64, &mut ev) {
+            if let Some(e) = wmt::parse_event(&ev[..en]) {
+                if e.op == op {
+                    return Some(e.flag);
+                }
+            }
+        }
+        sleep_ms(10);
+    }
+    None
+}
+
+/// MediaTek MT7961 (MT7921) RAM-code download.
+fn mtk_setup(hci: usize, ctl: usize) -> bool {
+    let fw = fw_buf();
+    let fw_len = read_file(MTK_FW_PATH, fw);
+    if fw_len == 0 {
+        log("[strate-bt] MTK: firmware file missing\n");
+        return false;
+    }
+    let Some(count) = mediatek::section_count(&fw[..fw_len]) else {
+        log("[strate-bt] MTK: bad firmware header\n");
+        return false;
+    };
+    log("[strate-bt] MTK: downloading firmware\n");
+    for i in 0..count {
+        let Some(s) = mediatek::section(&fw[..fw_len], i) else {
+            return false;
+        };
+        if s.size == 0 {
+            continue;
+        }
+        let mut hdr = [0u8; mediatek::NEED_SEND_SIZE + 1];
+        if mediatek::section_header(&fw[..fw_len], i, &mut hdr).is_none() {
+            return false;
+        }
+        let mut status = mediatek::PATCH_UNDONE;
+        for _ in 0..20 {
+            let Some(st) = wmt_cmd(hci, ctl, wmt::OP_PATCH_DWNLD, 0, &hdr) else {
+                log("[strate-bt] MTK: section query timeout\n");
+                return false;
+            };
+            status = st;
+            if status == mediatek::PATCH_DONE {
+                break;
+            }
+            if status != mediatek::PATCH_PROGRESS {
+                break;
+            }
+            sleep_ms(100);
+        }
+        if status == mediatek::PATCH_DONE {
+            continue;
+        }
+        let nfrag = mediatek::fragment_count(s.size);
+        for f in 0..nfrag {
+            let Some((flag, data)) = mediatek::fragment(&fw[..fw_len], s, f) else {
+                return false;
+            };
+            if wmt_cmd(hci, ctl, wmt::OP_PATCH_DWNLD, flag, data).is_none() {
+                log("[strate-bt] MTK: firmware fragment failed\n");
+                return false;
+            }
+        }
+    }
+    if wmt_cmd(hci, ctl, wmt::OP_FUNC_CTRL, 0, &[1]).is_none() {
+        log("[strate-bt] MTK: function enable timeout\n");
+        return false;
+    }
+    log("[strate-bt] MTK: firmware downloaded\n");
+    true
+}
+
 #[unsafe(no_mangle)]
-pub extern "C" fn _start() -> ! {
-    log("[strate-bt] starting\n");
+pub extern "C" fn _start() -> ! {    log("[strate-bt] starting\n");
 
     let hci = open_retry(HCI_PATH);
     let log_stream = open_retry(LOG_STREAM_PATH);
+    let ctl = open_retry(CTL_PATH);
 
     // Absolute position of the next byte this daemon will forward. The ring can
     // wrap while no client is subscribed; `oldest` lets us detect and report
@@ -338,8 +457,10 @@ pub extern "C" fn _start() -> ! {
     let mut init = [0u8; 256];
     if realtek_setup(hci) {
         log("[strate-bt] Realtek RTL8761BU firmware ready\n");
+    } else if mtk_setup(hci, ctl) {
+        log("[strate-bt] MediaTek MT7961 firmware ready\n");
     } else {
-        log("[strate-bt] no Realtek firmware loaded (generic HCI path)\n");
+        log("[strate-bt] no firmware loaded (generic HCI path)\n");
     }
     if let Some(n) = Session::initialization_sequence(&mut init) {
         if !write_all(hci, &init[..n]) {

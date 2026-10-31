@@ -359,6 +359,16 @@ impl Endpoint {
     fn is_in(self) -> bool {
         self.addr & 0x80 != 0
     }
+
+    /// xHCI Device Context Index: `(endpoint number << 1) | IN`.
+    ///
+    /// The xHCI endpoint context arrays (and transfer-event `ep_id`) are indexed
+    /// by DCI, not by endpoint number. EP2 OUT and EP2 IN are therefore two
+    /// distinct slots (4 and 5), which matters for every USB Bluetooth device
+    /// that uses the same endpoint number in both directions.
+    fn dci(self) -> u8 {
+        (self.number() << 1) | self.is_in() as u8
+    }
 }
 
 /// HCI transport endpoints selected from a configuration descriptor.
@@ -583,13 +593,10 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// Both numbering conventions are accepted because the xHCI driver and the
 /// HID driver historically used different values here: the endpoint number
 /// (1..15) and the xHCI device context index (`2*n + direction`).
+/// True when `ep_id` (an xHCI DCI from a transfer event) is this endpoint.
 fn endpoint_matches(endpoint: Endpoint, ep_id: u8) -> bool {
-    let number = endpoint.number();
-    if number == 0 {
-        return false;
-    }
-    let dci = (number << 1) | endpoint.is_in() as u8;
-    ep_id == number || ep_id == dci
+    let dci = endpoint.dci();
+    dci != 0 && ep_id == dci
 }
 
 /// Initializes the transport. Idempotent; called from `hardware::usb::init()`.
@@ -654,8 +661,9 @@ fn configure_endpoint(
     ep_type: u32,
     buffer_len: usize,
 ) -> bool {
-    let number = endpoint.number();
-    if number == 0 {
+    let dci = endpoint.dci();
+    // xHCI exposes at most 31 DCIs and its per-slot arrays are 31 entries.
+    if dci == 0 || dci >= 31 {
         return false;
     }
     let interval = if ep_type == EP_TYPE_INTR_IN {
@@ -666,7 +674,7 @@ fn configure_endpoint(
     if controller
         .setup_endpoint(
             slot_id,
-            number,
+            dci,
             endpoint.max_packet as u32,
             ep_type,
             interval,
@@ -675,15 +683,16 @@ fn configure_endpoint(
         .is_err()
     {
         log::warn!(
-            "[USB-BT] Endpoint setup failed: slot={} ep={:02x} type={}",
+            "[USB-BT] Endpoint setup failed: slot={} ep={:02x} dci={} type={}",
             slot_id,
             endpoint.addr,
+            dci,
             ep_type
         );
         return false;
     }
     if controller
-        .alloc_interrupt_buffer(slot_id, number, buffer_len)
+        .alloc_interrupt_buffer(slot_id, dci, buffer_len)
         .is_err()
     {
         log::warn!(
@@ -762,10 +771,11 @@ pub fn enumerate_device(
         return;
     };
 
-    if hci.bulk_in.number() == hci.bulk_out.number() {
+    if hci.bulk_in.dci() == hci.bulk_out.dci() {
         log::warn!(
-            "[USB-BT] Endpoint number collision (ep{:x} used for bulk IN and OUT), skipping",
-            hci.bulk_in.number()
+            "[USB-BT] Endpoint DCI collision (ep{:02x}/ep{:02x}), skipping",
+            hci.bulk_in.addr,
+            hci.bulk_out.addr
         );
         return;
     }
@@ -821,12 +831,12 @@ pub fn enumerate_device(
 
     // Arm the receive paths.
     controller
-        .submit_interrupt_transfer(slot_id, hci.bulk_in.number())
+        .submit_interrupt_transfer(slot_id, hci.bulk_in.dci())
         .ok();
     if let Some(intr) = hci.intr_in {
-        if intr.number() != hci.bulk_in.number() {
+        if intr.dci() != hci.bulk_in.dci() {
             controller
-                .submit_interrupt_transfer(slot_id, intr.number())
+                .submit_interrupt_transfer(slot_id, intr.dci())
                 .ok();
         }
     }
@@ -1091,6 +1101,30 @@ pub fn tx_complete(ep_id: u8, len: usize) {
     }
 }
 
+/// Waits until the in-flight bulk OUT packet has completed.
+///
+/// `ctrl_transfer()` drains the xHCI event ring and discards non-EP0 events,
+/// so a WMT command's bulk-OUT completion must be processed (by the IRQ
+/// handler) before the following control-IN. Returns false on timeout or when
+/// the transport is absent.
+pub fn wait_tx_idle(timeout_ticks: u32) -> bool {
+    for _ in 0..timeout_ticks.max(1) {
+        match STATE.try_lock() {
+            Some(state) => {
+                if !state.present {
+                    return false;
+                }
+                if state.in_flight.is_none() {
+                    return true;
+                }
+            }
+            None => {}
+        }
+        crate::process::sleep_current_task_ticks(1);
+    }
+    false
+}
+
 /// Submits queued packets to the bulk OUT endpoint when it is idle.
 ///
 /// No-op when the transport is absent or the endpoint already has a transfer
@@ -1103,7 +1137,7 @@ pub fn kick_tx() {
         if !state.present {
             return;
         }
-        (state.slot_id, state.ep_out.number())
+        (state.slot_id, state.ep_out.dci())
     };
 
     if let Some(controller_arc) = xhci::get_controller(0) {
@@ -1117,6 +1151,26 @@ pub fn kick_tx() {
             );
         }
     }
+}
+
+/// Issues an EP0 vendor control transfer for the Bluetooth device.
+///
+/// Setup packet: `[bmRequestType, bRequest, wValue lo, wValue hi,
+/// wIndex lo, wIndex hi, wLength lo, wLength hi]`.
+pub fn vendor_control(
+    setup: [u8; 8],
+    data: Option<&mut [u8]>,
+    len: usize,
+) -> Result<usize, &'static str> {
+    let slot = BT_SLOT.load(Ordering::Acquire);
+    if slot == 0xFF {
+        return Err("no HCI device");
+    }
+    crate::sync::with_irqs_disabled(|_| {
+        let controller = xhci::get_controller(0).ok_or("no xHCI controller")?;
+        let mut controller = controller.lock();
+        controller.vendor_control(slot, &setup, data, len)
+    })
 }
 
 // ============================================================================

@@ -18,7 +18,9 @@ pub mod dump;
 pub mod gatt;
 pub mod hci;
 pub mod l2cap;
+pub mod mediatek;
 pub mod realtek;
+pub mod wmt;
 
 use acl::AclReassembler;
 use att::{AttServer, AttServerDispatch};
