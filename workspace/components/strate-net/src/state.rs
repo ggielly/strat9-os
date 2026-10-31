@@ -23,11 +23,64 @@ pub(crate) struct PendingPing {
     pub(crate) is_v6: bool,
 }
 
+/// Maximum number of accepted-but-not-yet-served connections kept per
+/// listener.  smoltcp has no accept queue, so strate-net emulates one: the
+/// listening socket is replaced as soon as the handshake starts, and the
+/// accepted socket waits here until the previous session ends.
+pub(crate) const LISTEN_BACKLOG: usize = 4;
+
 #[derive(Clone, Copy)]
 pub(crate) struct TcpListenerState {
+    /// Socket that is always kept in `LISTEN` on `port` (except for the
+    /// instant between handshake detection and replacement).
     pub(crate) socket: SocketHandle,
     pub(crate) port: u16,
     pub(crate) auto_relisten: bool,
+    /// Accepted connection currently served by this fid, if any.
+    pub(crate) session: Option<SocketHandle>,
+    /// Accepted connections waiting for `session` to finish.
+    pub(crate) backlog: [Option<SocketHandle>; LISTEN_BACKLOG],
+    /// Set when a session ended and the next read should report EOF (0 bytes).
+    pub(crate) eof: bool,
+}
+
+impl TcpListenerState {
+    pub(crate) fn new(socket: SocketHandle, port: u16, auto_relisten: bool) -> Self {
+        Self {
+            socket,
+            port,
+            auto_relisten,
+            session: None,
+            backlog: [None; LISTEN_BACKLOG],
+            eof: false,
+        }
+    }
+
+    /// Number of queued connections (diagnostics only).
+    pub(crate) fn backlog_len(&self) -> usize {
+        self.backlog.iter().filter(|slot| slot.is_some()).count()
+    }
+
+    /// Queue an accepted connection.  Returns false when the backlog is full.
+    pub(crate) fn push_backlog(&mut self, handle: SocketHandle) -> bool {
+        for slot in self.backlog.iter_mut() {
+            if slot.is_none() {
+                *slot = Some(handle);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Take the oldest queued connection.
+    pub(crate) fn pop_backlog(&mut self) -> Option<SocketHandle> {
+        for slot in self.backlog.iter_mut() {
+            if let Some(handle) = slot.take() {
+                return Some(handle);
+            }
+        }
+        None
+    }
 }
 
 #[derive(Copy, Clone)]

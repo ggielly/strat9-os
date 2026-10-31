@@ -76,29 +76,38 @@ impl GlobalSchedState {
         let pid = task.pid;
         let pgid = task.pgid.load(Ordering::Relaxed);
         let sid = task.sid.load(Ordering::Relaxed);
-        crate::serial_println!(
-            "[trace][sched] register_identity enter tid={} pid={} pgid={} sid={}",
-            task_id.as_u64(),
-            pid,
-            pgid,
-            sid
-        );
+        let verbose = crate::process::scheduler_verbose_enabled();
+        if verbose {
+            crate::serial_println!(
+                "[trace][sched] register_identity enter tid={} pid={} pgid={} sid={}",
+                task_id.as_u64(),
+                pid,
+                pgid,
+                sid
+            );
+        }
         identity.pid_to_pgid.insert(pid, pgid);
-        crate::serial_println!(
-            "[trace][sched] register_identity pid_to_pgid inserted pid={}",
-            pid
-        );
+        if verbose {
+            crate::serial_println!(
+                "[trace][sched] register_identity pid_to_pgid inserted pid={}",
+                pid
+            );
+        }
         identity.pid_to_sid.insert(pid, sid);
-        crate::serial_println!(
-            "[trace][sched] register_identity pid_to_sid inserted pid={}",
-            pid
-        );
+        if verbose {
+            crate::serial_println!(
+                "[trace][sched] register_identity pid_to_sid inserted pid={}",
+                pid
+            );
+        }
         Self::member_add(&mut identity.pgid_members, pgid, task_id);
         Self::member_add(&mut identity.sid_members, sid, task_id);
-        crate::serial_println!(
-            "[trace][sched] register_identity done tid={}",
-            task_id.as_u64()
-        );
+        if crate::process::scheduler_verbose_enabled() {
+            crate::serial_println!(
+                "[trace][sched] register_identity done tid={}",
+                task_id.as_u64()
+            );
+        }
     }
 
     /// Performs the unregister identity locked operation.
@@ -140,11 +149,13 @@ impl GlobalSchedState {
     /// Performs the add task on cpu operation.
     fn add_task_on_cpu(&mut self, task: Arc<Task>, cpu_index: usize) -> Option<usize> {
         let task_id = task.id;
-        crate::serial_println!(
-            "[trace][sched] add_task_on_cpu enter tid={} cpu={}",
-            task_id.as_u64(),
-            cpu_index
-        );
+        if crate::process::scheduler_verbose_enabled() {
+            crate::serial_println!(
+                "[trace][sched] add_task_on_cpu enter tid={} cpu={}",
+                task_id.as_u64(),
+                cpu_index
+            );
+        }
         task.set_state(TaskState::Ready);
 
         self.insert_all_task_locked(task_id, task.clone());
@@ -437,7 +448,9 @@ impl GlobalSchedState {
             result
         });
         if all_idle {
-            crate::serial_println!("[trace][sched] select_cpu_for_task early-boot best=0");
+            if crate::process::scheduler_verbose_enabled() {
+                crate::serial_println!("[trace][sched] select_cpu_for_task early-boot best=0");
+            }
             return 0;
         }
 
@@ -496,19 +509,23 @@ impl GlobalSchedState {
             // If last_cpu is also eligible and has equal or lower load, prefer it.
             if let Some(lc) = best_aff_last {
                 if best_aff_last_load <= best_aff_load {
-                    crate::serial_println!(
-                        "[trace][sched] select_cpu_for_task affinity+last_cpu cpu={} load={}",
-                        lc,
-                        best_aff_last_load
-                    );
+                    if crate::process::scheduler_verbose_enabled() {
+                        crate::serial_println!(
+                            "[trace][sched] select_cpu_for_task affinity+last_cpu cpu={} load={}",
+                            lc,
+                            best_aff_last_load
+                        );
+                    }
                     return lc;
                 }
             }
-            crate::serial_println!(
-                "[trace][sched] select_cpu_for_task affinity cpu={} load={}",
-                aff_cpu,
-                best_aff_load
-            );
+            if crate::process::scheduler_verbose_enabled() {
+                crate::serial_println!(
+                    "[trace][sched] select_cpu_for_task affinity cpu={} load={}",
+                    aff_cpu,
+                    best_aff_load
+                );
+            }
             return aff_cpu;
         }
 
@@ -539,11 +556,13 @@ impl GlobalSchedState {
                 best_load = load;
             }
         }
-        crate::serial_println!(
-            "[trace][sched] select_cpu_for_task fallback best={} load={}",
-            best,
-            best_load
-        );
+        if crate::process::scheduler_verbose_enabled() {
+            crate::serial_println!(
+                "[trace][sched] select_cpu_for_task fallback best={} load={}",
+                best,
+                best_load
+            );
+        }
         best
     }
 
@@ -722,28 +741,15 @@ pub(super) fn pick_next_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> 
     }
 
     // Step 2: pick from local class_rqs.
-    unsafe {
-        crate::e9_mark!(b'O');
-    }
+    // No e9 breadcrumbs here: this runs on every context switch, and a raw
+    // `out 0xe9` per branch turns a busy system into an I/O storm.
     let next = if let Some(next) = cpu.class_rqs.pick_next(&cpu.class_table) {
-        unsafe {
-            crate::e9_mark!(b'J');
-        }
         next
     } else {
         // Step 3: local queues empty — try work-stealing before idle.
-        unsafe {
-            crate::e9_mark!(b'S');
-        }
         if let Some(stolen) = steal_task_local(cpu, cpu_index) {
-            unsafe {
-                crate::e9_mark!(b's');
-            }
             stolen
         } else {
-            unsafe {
-                crate::e9_mark!(b'j');
-            }
             // Step 4: idle fallback.
             cpu.idle_task.clone()
         }

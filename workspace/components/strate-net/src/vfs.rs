@@ -51,11 +51,7 @@ impl NetworkStrate {
         let fid = self.insert_open_handle(sender, path);
         self.tcp_listeners.insert(
             fid,
-            TcpListenerState {
-                socket,
-                port,
-                auto_relisten,
-            },
+            TcpListenerState::new(socket, port, auto_relisten),
         );
         reply_open(sender, fid, u64::MAX, HANDLE_FLAG_STREAM)
     }
@@ -304,8 +300,8 @@ impl NetworkStrate {
             }
         }
 
-        if let Some(listener) = self.tcp_listeners.get(&file_id).copied() {
-            return self.handle_tcp_read(msg.sender, listener, requested);
+        if self.tcp_listeners.contains_key(&file_id) {
+            return self.handle_tcp_read(msg.sender, file_id, requested);
         }
         if let Some(conn) = self.tcp_connections.get(&file_id).copied() {
             return self.handle_tcp_conn_read(msg.sender, conn, requested);
@@ -379,8 +375,8 @@ impl NetworkStrate {
             }
         }
 
-        if let Some(listener) = self.tcp_listeners.get(&file_id).copied() {
-            return self.handle_tcp_write(msg.sender, listener, msg);
+        if self.tcp_listeners.contains_key(&file_id) {
+            return self.handle_tcp_write(msg.sender, file_id, msg);
         }
         if let Some(conn) = self.tcp_connections.get(&file_id).copied() {
             return self.handle_tcp_conn_write(msg.sender, conn, msg);
@@ -678,8 +674,12 @@ impl NetworkStrate {
         requested: usize,
     ) -> Option<IpcMessage> {
         let (base, len) = self.bulk_region(file_id)?;
-        let socket = if let Some(listener) = self.tcp_listeners.get(&file_id).copied() {
-            listener.socket
+        let socket = if self.tcp_listeners.contains_key(&file_id) {
+            let _ = self.service_tcp_listener(file_id);
+            match self.listener_session(file_id) {
+                Some(handle) => handle,
+                None => return Some(IpcMessage::error_reply(sender, -11)),
+            }
         } else if let Some(conn) = self.tcp_connections.get(&file_id).copied() {
             conn.socket
         } else {
@@ -687,7 +687,7 @@ impl NetworkStrate {
         };
         let want = requested.min(len);
         let socket = self.sockets.get_mut::<tcp::Socket>(socket);
-        if !socket.is_open() || (!socket.is_listening() && !socket.is_active()) {
+        if !socket.is_open() {
             return Some(IpcMessage::error_reply(sender, -104));
         }
         if !socket.can_recv() {
@@ -707,8 +707,19 @@ impl NetworkStrate {
         if data_len == 0 || data_len > len {
             return Some(IpcMessage::error_reply(sender, -22));
         }
-        let conn = self.tcp_connections.get(&file_id).copied()?;
-        let socket = self.sockets.get_mut::<tcp::Socket>(conn.socket);
+        let conn = self.tcp_connections.get(&file_id).copied();
+        let socket_handle = if let Some(conn) = conn {
+            conn.socket
+        } else if self.tcp_listeners.contains_key(&file_id) {
+            let _ = self.service_tcp_listener(file_id);
+            match self.listener_session(file_id) {
+                Some(handle) => handle,
+                None => return Some(IpcMessage::error_reply(sender, -11)),
+            }
+        } else {
+            return None;
+        };
+        let socket = self.sockets.get_mut::<tcp::Socket>(socket_handle);
         if !socket.is_open() || !socket.can_send() {
             return Some(IpcMessage::error_reply(sender, -11));
         }
@@ -731,7 +742,18 @@ impl NetworkStrate {
         self.forget_handle(file_id);
         self.open_handles.remove(&file_id);
         if let Some(listener) = self.tcp_listeners.remove(&file_id) {
+            // A LISTEN socket has no connection state to flush: drop it now.
             let _ = self.sockets.remove(listener.socket);
+            if let Some(session) = listener.session {
+                let socket = self.sockets.get_mut::<tcp::Socket>(session);
+                socket.close();
+                self.lingering_sockets.push(session);
+            }
+            for handle in listener.backlog.into_iter().flatten() {
+                let socket = self.sockets.get_mut::<tcp::Socket>(handle);
+                socket.close();
+                self.lingering_sockets.push(handle);
+            }
         }
         if let Some(conn) = self.tcp_connections.remove(&file_id) {
             let socket = self.sockets.get_mut::<tcp::Socket>(conn.socket);

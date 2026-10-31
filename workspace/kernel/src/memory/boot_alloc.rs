@@ -59,15 +59,14 @@ impl BootAllocator {
             static INIT_CALLS: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             let n = INIT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
-            unsafe {
-                let hex = b"0123456789abcdef";
-                crate::e9_mark!(b'I');
-                for sh in [12usize, 8, 4, 0] {
-                    let nib = hex[((n >> sh) & 0xF) as usize];
-                    crate::e9_mark!(nib);
-                }
-                crate::e9_mark!(b'\n');
+
+            let hex = b"0123456789abcdef";
+            crate::e9_mark!(b'I');
+            for sh in [12usize, 8, 4, 0] {
+                let nib = hex[((n >> sh) & 0xF) as usize];
+                crate::e9_mark!(nib);
             }
+            crate::e9_mark!(b'\n');
         }
         crate::e9_println!("BI init");
         if self.len != 0 {
@@ -132,7 +131,7 @@ impl BootAllocator {
     pub fn try_alloc(&mut self, size: usize, align: usize) -> Option<PhysAddr> {
         if crate::debug_cfg::is_quiet() {
             // TEMP DEBUG: 'b' pulse per try_alloc (throttled by caller loops anyway).
-            unsafe { crate::e9_mark!(b'b') };
+            crate::e9_mark!(b'b');
         }
         if size == 0 {
             return Some(PhysAddr::new(0));
@@ -171,7 +170,7 @@ impl BootAllocator {
 
     pub fn try_alloc_accessible(&mut self, size: usize, align: usize) -> Option<PhysAddr> {
         if crate::debug_cfg::is_quiet() {
-            unsafe { crate::e9_mark!(b'a') };
+            crate::e9_mark!(b'a');
         }
         if size == 0 {
             return Some(PhysAddr::new(0));
@@ -400,17 +399,16 @@ impl BootAllocator {
     fn rebuild_accessible_limit(&mut self) {
         // TEMP DEBUG: count rebuild calls; pulse a hex digit every 65536.
         REBUILD_CALL_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
         let n = REBUILD_CALL_COUNT.load(core::sync::atomic::Ordering::Relaxed);
         if n % 65536 == 0 {
-            unsafe {
-                let hex = b"0123456789abcdef";
-                crate::e9_mark!(b'$');
-                for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
-                    let nib = hex[((n >> sh) & 0xF) as usize];
-                    crate::e9_mark!(nib);
-                }
-                crate::e9_mark!(b'\n');
+            let hex = b"0123456789abcdef";
+            crate::e9_mark!(b'$');
+            for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
+                let nib = hex[((n >> sh) & 0xF) as usize];
+                crate::e9_mark!(nib);
             }
+            crate::e9_mark!(b'\n');
         }
         crate::e9_mark!(b'Q');
         let mut limit = 0u64;

@@ -116,10 +116,10 @@ impl NetworkStrate {
                         exit(3);
                     }
                     strat9_abi::net::event::LINK_DOWN => {
-                        log("[strate-net] link down\n");
+                        log("[strate-net] link is DOWN !\n");
                     }
                     strat9_abi::net::event::LINK_UP => {
-                        log("[strate-net] link up\n");
+                        log("[strate-net] link is UP !\n");
                     }
                     _ => {}
                 }
@@ -153,6 +153,7 @@ impl NetworkStrate {
 
             self.process_dhcp();
             self.process_ipv6_slaac();
+            self.service_all_tcp_listeners();
 
             let mut msg = IpcMessage::new(0);
             let mut got_ipc = false;
@@ -188,6 +189,7 @@ impl NetworkStrate {
                 self.device.flush();
                 self.process_icmp();
                 self.process_ipv6_slaac();
+                self.service_all_tcp_listeners();
             }
 
             if !got_ipc && poll_result == PollResult::None {

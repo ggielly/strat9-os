@@ -124,8 +124,12 @@ fn read_cr_regs() -> (u64, u64, u64, u64) {
 /// Dump backtrace via frame-pointer unwinding, printing directly to serial.
 fn dump_backtrace() {
     crate::serial_println!("RSP=0x{:016X} RBP=0x{:016X}", read_rsp(), read_rbp());
+    dump_backtrace_from(read_rbp());
+}
+
+/// Walk a frame-pointer chain starting at `rbp`.
+pub(crate) fn dump_backtrace_from(mut rbp: u64) {
     crate::serial_println!("Backtrace (frame-pointer):");
-    let mut rbp = read_rbp();
     for i in 0..16 {
         if rbp == 0 || (rbp & 0x7) != 0 {
             crate::serial_println!("  #{:02}: stop (invalid rbp)", i);

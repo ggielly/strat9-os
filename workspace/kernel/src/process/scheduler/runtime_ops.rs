@@ -75,17 +75,22 @@ pub fn init_scheduler() {
 /// Add a task to the scheduler
 pub fn add_task(task: Arc<Task>) {
     let tid = task.id;
-    crate::serial_force_println!(
-        "[trace][sched] add_task enter tid={} name={}",
-        tid.as_u64(),
-        task.name
-    );
-    crate::serial_force_println!(
-        "[trace][sched] lock addrs sched={:#x} slab={:#x} buddy={:#x}",
-        crate::process::scheduler::debug_scheduler_lock_addr(),
-        crate::memory::heap::debug_slab_lock_addr(),
-        crate::memory::buddy::debug_buddy_lock_addr()
-    );
+    // Task creation can be frequent (watchdog respawns, exec). Keep the
+    // diagnostics but only emit them when scheduler tracing is requested.
+    let verbose = crate::process::scheduler_verbose_enabled();
+    if verbose {
+        crate::serial_force_println!(
+            "[trace][sched] add_task enter tid={} name={}",
+            tid.as_u64(),
+            task.name
+        );
+        crate::serial_force_println!(
+            "[trace][sched] lock addrs sched={:#x} slab={:#x} buddy={:#x}",
+            crate::process::scheduler::debug_scheduler_lock_addr(),
+            crate::memory::heap::debug_slab_lock_addr(),
+            crate::memory::buddy::debug_buddy_lock_addr()
+        );
+    }
     let mut spins = 0usize;
     let mut scheduler = loop {
         if let Some(guard) = GLOBAL_SCHED_STATE.try_lock() {
@@ -102,20 +107,29 @@ pub fn add_task(task: Arc<Task>) {
         }
         core::hint::spin_loop();
     };
-    crate::serial_force_println!("[trace][sched] add_task lock acquired tid={}", tid.as_u64());
     let ipi_to_cpu = if let Some(ref mut sched) = *scheduler {
-        crate::serial_force_println!(
-            "[trace][sched] add_task scheduler present tid={}",
-            tid.as_u64()
-        );
+        if verbose {
+            crate::serial_force_println!(
+                "[trace][sched] add_task lock acquired tid={}",
+                tid.as_u64()
+            );
+            crate::serial_force_println!(
+                "[trace][sched] add_task scheduler present tid={}",
+                tid.as_u64()
+            );
+        }
         let ipi = sched.add_task(task);
-        crate::serial_force_println!("[trace][sched] add_task done tid={}", tid.as_u64());
+        if verbose {
+            crate::serial_force_println!("[trace][sched] add_task done tid={}", tid.as_u64());
+        }
         ipi
     } else {
-        crate::serial_force_println!(
-            "[trace][sched] add_task scheduler missing tid={}",
-            tid.as_u64()
-        );
+        if verbose {
+            crate::serial_force_println!(
+                "[trace][sched] add_task scheduler missing tid={}",
+                tid.as_u64()
+            );
+        }
         None
     };
     drop(scheduler);
@@ -151,10 +165,10 @@ pub fn schedule() -> ! {
 pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     crate::e9_println!("BD-ENTER cpu={}", cpu_index);
     // TEMP DEBUG raw pulse: BD-ENTER via raw marks too (formatted E9 may be silent).
-    unsafe {
-        crate::e9_mark!(b'B');
-        crate::e9_mark!(b'D');
-    }
+
+    crate::e9_mark!(b'B');
+    crate::e9_mark!(b'D');
+
     // Disable interrupts for the entire critical section.
     //
     // On the BSP, IF may be 1 (interrupts were enabled in Phase 9).
@@ -187,13 +201,13 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
             } else {
                 0
             };
-            unsafe {
-                crate::e9_mark!(b'M');
-            }
+
+            crate::e9_mark!(b'M');
+
             let mut local = LOCAL_SCHEDULERS[idx].lock();
-            unsafe {
-                crate::e9_mark!(b'N');
-            }
+
+            crate::e9_mark!(b'N');
+
             if let Some(ref mut cpu) = *local {
                 break super::core_impl::pick_next_task_local(cpu, idx);
             }
@@ -214,13 +228,12 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
         }
         core::hint::spin_loop();
     }; // Lock is released here before jumping to first task
-    unsafe {
-        crate::e9_mark!(b'R');
-    }
+
+    crate::e9_mark!(b'R');
+
     super::task_ops::flush_deferred_silo_cleanups();
-    unsafe {
-        crate::e9_mark!(b'r');
-    }
+
+    crate::e9_mark!(b'r');
 
     // NOTE: serial_force_println! (formatted format_args!) hangs in this kernel build
     // (known vtable issue). Raw E9 marks only in the scheduler hot path.
@@ -231,9 +244,9 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
             first_task.kernel_stack.virt_base.as_u64() + first_task.kernel_stack.size as u64;
         crate::arch::tss::set_kernel_stack(crate::arch::xshim::VirtAddr::new(stack_top));
         crate::arch::syscall::set_kernel_rsp(stack_top);
-        unsafe {
-            crate::e9_mark!(b'S');
-        }
+
+        crate::e9_mark!(b'S');
+
         crate::serial_force_println!(
             "[trace][sched] schedule_on_cpu stacks set cpu={} rsp0={:#x}",
             cpu_index,
@@ -243,9 +256,9 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
 
     // Switch to the first task's address space (no-op for kernel tasks)
     // SAFETY: The first task's address space is valid (kernel AS at boot).
-    unsafe {
-        crate::e9_mark!(b'U');
-    }
+
+    crate::e9_mark!(b'U');
+
     if let Err(e) = validate_task_context(&first_task) {
         panic!(
             "scheduler: invalid first task '{}' (id={:?}): {}",
@@ -260,9 +273,8 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
     unsafe {
         first_task.process.address_space_arc().switch_to();
     }
-    unsafe {
-        crate::e9_mark!(b'K');
-    }
+
+    crate::e9_mark!(b'K');
 
     // Jump to the first task (never returns)
     // SAFETY: The context was set up by CpuContext::new with a valid stack frame.
@@ -831,17 +843,6 @@ pub fn maybe_preempt_from_interrupt(
                 let old_fpu = current.fpu_state.get() as *mut u8;
                 let new_fpu = next.fpu_state.get() as *const u8;
 
-                // TEMP DEBUG: pulse the picked task id + stack top.
-                unsafe {
-                    let hex = b"0123456789abcdef";
-                    crate::e9_mark!(b'@');
-                    let tid = next.id.as_u64();
-                    for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
-                        let nib = hex[((tid >> sh) & 0xF) as usize];
-                        crate::e9_mark!(nib);
-                    }
-                    crate::e9_mark!(b'\n');
-                }
                 Some(crate::arch::idt::InterruptReturnDecision {
                     next_rsp,
                     old_fpu,
@@ -1078,14 +1079,9 @@ pub(super) extern "C" fn idle_task_main() -> ! {
     // scheduler is actually running, from CPU0's idle context.
     static HOTPLUG_STARTED: core::sync::atomic::AtomicBool =
         core::sync::atomic::AtomicBool::new(false);
-    if cpu == 0
-        && !HOTPLUG_STARTED.swap(true, core::sync::atomic::Ordering::AcqRel)
-    {
+    if cpu == 0 && !HOTPLUG_STARTED.swap(true, core::sync::atomic::Ordering::AcqRel) {
         if let Err(e) = crate::hardware::nic::hotplug::start_watchdog() {
-            crate::serial_force_println!(
-                "[sched] failed to start NIC hotplug watchdog: {}",
-                e
-            );
+            crate::serial_force_println!("[sched] failed to start NIC hotplug watchdog: {}", e);
         }
     }
 

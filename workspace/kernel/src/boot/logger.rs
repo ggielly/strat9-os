@@ -18,7 +18,7 @@ static LOGGER: SerialLogger = SerialLogger;
 impl log::Log for SerialLogger {
     /// Performs the enabled operation.
     fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= Level::Trace
+        metadata.level() <= log::max_level()
     }
 
     /// Performs the log operation.
@@ -143,7 +143,15 @@ pub fn init() {
     log::set_logger(&LOGGER)
         .map(|()| {
             crate::e9_mark!(b'|');
-            log::set_max_level(LevelFilter::Trace);
+            // Release builds keep Info+ only: driver/scheduler Trace output is
+            // thousands of lines per second and starves the console (and the
+            // tasks waiting on the serial lock). Debug builds keep everything.
+            let level = if cfg!(debug_assertions) {
+                LevelFilter::Trace
+            } else {
+                LevelFilter::Info
+            };
+            log::set_max_level(level);
             crate::e9_mark!(b'}');
         })
         .expect("Failed to set logger");

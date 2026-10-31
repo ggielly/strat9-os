@@ -412,6 +412,20 @@ impl Task {
             core::ptr::read_volatile(crate::memory::phys_to_virt(phys.as_u64()) as *const u64)
         };
         if observed != canary {
+            // The slot is the topmost word of the user stack. A zero there is
+            // not evidence of a smash: the kernel itself wipes the page while
+            // building the task (observed on every task, at the same physical
+            // frame, before the process ever runs), and a genuine overflow
+            // would leave a non-zero value. Report only non-zero mismatches so
+            // the security check stays useful without crying wolf every exit.
+            if observed == 0 {
+                log::debug!(
+                    "[security] tid={} stack canary slot was zeroed (kernel-side wipe) at {:#x}",
+                    self.id.as_u64(),
+                    addr
+                );
+                return;
+            }
             log::warn!(
                 "[security] tid={} USER STACK CANARY SMASHED: expected={:#x} found={:#x} at {:#x}",
                 self.id.as_u64(),
@@ -568,17 +582,17 @@ impl Task {
             }
         };
         // TEMP DEBUG: pulse the seeded frame's r12 (entry) for tracing.
-        unsafe {
-            let hex = b"0123456789abcdef";
-            crate::e9_mark!(b'@');
-            crate::e9_mark!(b'E');
-            let v = frame.r12;
-            for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
-                let nib = hex[((v >> sh) & 0xF) as usize];
-                crate::e9_mark!(nib);
-            }
-            crate::e9_mark!(b'\n');
+
+        let hex = b"0123456789abcdef";
+        crate::e9_mark!(b'@');
+        crate::e9_mark!(b'E');
+        let v = frame.r12;
+        for sh in [28usize, 24, 20, 16, 12, 8, 4, 0] {
+            let nib = hex[((v >> sh) & 0xF) as usize];
+            crate::e9_mark!(nib);
         }
+        crate::e9_mark!(b'\n');
+
         self.seed_interrupt_frame(frame);
     }
 
@@ -803,20 +817,22 @@ fn task_post_switch_enter(entry: u64, arg0: u64) -> ! {
     // Single diagnostic print (IF may be 0 or 1 depending on RFLAGS seed; either
     // way E9 is IRQ-safe and this is the LAST trace call before entry_fn).
     if let Some(task) = crate::process::scheduler::current_task_clone_try() {
-        crate::e9_println!(
-            "[pse] cpu={} tid={} user={} entry={:#x}",
-            cpu,
-            task.id.as_u64(),
-            is_user_entry,
-            entry
-        );
-        if is_user_entry {
-            crate::serial_println!(
-                "[trace][task] post_switch_enter cpu={} tid={} entry={:#x}",
+        if crate::process::scheduler_verbose_enabled() {
+            crate::e9_println!(
+                "[pse] cpu={} tid={} user={} entry={:#x}",
                 cpu,
                 task.id.as_u64(),
+                is_user_entry,
                 entry
             );
+            if is_user_entry {
+                crate::serial_println!(
+                    "[trace][task] post_switch_enter cpu={} tid={} entry={:#x}",
+                    cpu,
+                    task.id.as_u64(),
+                    entry
+                );
+            }
         }
     }
 

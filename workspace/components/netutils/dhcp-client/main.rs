@@ -5,7 +5,7 @@
 //! polls the `/net/ip`, `/net/gateway`, `/net/route` and `/net/dns` scheme files until a
 //! valid address is obtained, then prints the result to the console.
 //!
-//! All I/O is done through Plan 9–style schemes – no BSD sockets.
+//! All I/O is done through Plan 9–style schemes, there's no BSD sockets.
 
 #![no_std]
 #![no_main]
@@ -146,7 +146,7 @@ pub extern "C" fn _start() -> ! {
     let mut background_mode = false;
 
     loop {
-        // Try to read the IP address from the network strate
+        // Try to read the IP address from the network scheme
         let ip_n = match scheme_read("/net/ip", &mut ip_buf) {
             Ok(n) => n,
             Err(_) => {
@@ -187,7 +187,7 @@ pub extern "C" fn _start() -> ! {
 
         let ip_str = core::str::from_utf8(&ip_buf[..ip_n]).unwrap_or("").trim();
 
-        // Split "a.b.c.d/prefix" into address and netmask
+        // Split "aaa.bbb.ccc.ddd/prefix" into address and netmask
         let (addr, netmask) = if let Some(slash) = ip_str.find('/') {
             let prefix_str = &ip_str[slash + 1..];
             let mask = cidr_to_netmask(prefix_str).unwrap_or([0u8; 20]);
@@ -199,7 +199,7 @@ pub extern "C" fn _start() -> ! {
         log("\n");
         log("============================================================\n");
         log("  Network configuration (DHCP)\n");
-        log("------------------------------------------------------------\n");
+        log("============================================================\n");
         log("  Address : ");
         log(addr);
         log("\n  Netmask : ");

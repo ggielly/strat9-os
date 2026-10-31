@@ -126,12 +126,21 @@ impl NetworkStrate {
                     for (fid, listener) in self.tcp_listeners.iter() {
                         let socket = self.sockets.get::<tcp::Socket>(listener.socket);
                         let mode = if listener.auto_relisten { "auto" } else { "once" };
+                        let session = match listener.session {
+                            Some(handle) => {
+                                let s = self.sockets.get::<tcp::Socket>(handle);
+                                Self::tcp_state_name(s.state())
+                            }
+                            None => "none",
+                        };
                         let line = alloc::format!(
-                            "fid={} port={} state={} mode={}\n",
+                            "fid={} port={} state={} mode={} session={} backlog={}\n",
                             fid,
                             listener.port,
                             Self::tcp_state_name(socket.state()),
-                            mode
+                            mode,
+                            session,
+                            listener.backlog_len()
                         );
                         content.extend_from_slice(line.as_bytes());
                     }
