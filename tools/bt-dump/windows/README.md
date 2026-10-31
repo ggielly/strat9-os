@@ -19,4 +19,18 @@ boot: strat9 microkernel
 [--- lost 1234 bytes ---]   [--- gap: 3 frames ---]
 ```
 Ctrl-C quitte proprement ; reconnexion auto après 1 s.
-Tests : `python3 -m unittest -v test_s9frame.py`
+Tests : `python3 -m unittest -v test_s9frame.py test_s9dump.py`
+
+## Erreur `WinError -2147023838` (0x80070422)
+
+Le service Bluetooth Windows est arrêté/désactivé, ou aucun adaptateur n'est
+actif. Ce n'est pas le client : `bleak` ne peut pas ouvrir la radio.
+
+1. `services.msc` → **Bluetooth Support Service** (`bthserv`) → *Automatique* → **Démarrer**.
+2. Paramètres → Bluetooth et appareils : vérifier que le Bluetooth est activé.
+3. Vérifier l'adaptateur : `Get-PnpDevice -Class Bluetooth` et `Get-Service bthserv`.
+4. VM / Windows Server : le Bluetooth de l'hôte n'est généralement pas exposé ;
+   passer un dongle USB en passthrough, ou lancer le client sur le PC hôte.
+
+Le client affiche désormais cette aide une fois, puis espace les tentatives
+(1 s → 2 s → 4 s … 30 s) au lieu de boucler toutes les secondes.

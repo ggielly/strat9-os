@@ -102,6 +102,44 @@ async def session(device, args, queue):
             log.close()
 
 
+def _win_error_code(exc):
+    """Return the unsigned Win32/HRESULT code carried by an exception."""
+    for value in (getattr(exc, "winerror", None), *getattr(exc, "args", ())):
+        if isinstance(value, int):
+            code = value & 0xFFFFFFFF
+            if code:
+                return code
+    return None
+
+
+_WIN_HINTS = {
+    # ERROR_SERVICE_DISABLED (0x80070422 / 1058)
+    0x80070422: (
+        "[bluetooth] Service Bluetooth désactivé ou aucun adaptateur actif.\n"
+        "  Windows : services.msc -> « Bluetooth Support Service » (bthserv)\n"
+        "            -> Type de démarrage : Automatique -> Démarrer.\n"
+        "  Vérifie aussi Paramètres > Bluetooth et appareils, et qu'un adaptateur\n"
+        "  existe : PowerShell  Get-PnpDevice -Class Bluetooth ; Get-Service bthserv.\n"
+        "  Dans une VM ou Windows Server, l'hôte ne partage pas son Bluetooth :\n"
+        "  passe un dongle USB en passthrough (ou utilise le PC hôte)."
+    ),
+    # ERROR_ACCESS_DENIED
+    0x80070005: (
+        "[bluetooth] Accès refusé au périphérique Bluetooth.\n"
+        "  Vérifie les stratégies de groupe / l'antivirus, et relance sans\n"
+        "  élévation si l'outil est lancé en administrateur."
+    ),
+}
+
+
+def win_error_hint(exc):
+    """Return a human hint for known Windows Bluetooth errors, else None."""
+    code = _win_error_code(exc)
+    if code == 1058:  # same service error, unsigned Win32 form
+        code = 0x80070422
+    return _WIN_HINTS.get(code)
+
+
 async def run(args):
     from bleak import BleakScanner
 
@@ -116,6 +154,8 @@ async def run(args):
         threading.Thread(target=reader, daemon=True).start()
         say("[stdin] type a line + Enter to send it to the device")
 
+    delay = 1
+    seen_hints = set()
     while True:
         try:
             if args.address:
@@ -133,10 +173,18 @@ async def run(args):
                     continue
                 say(f"[scan] found {target.name} ({target.address})")
             await session(target, args, queue)
+            delay = 1
+            seen_hints.clear()
         except Exception as exc:
-            say(f"[error] {exc}")
-        say("[reconnect in 1s]")
-        await asyncio.sleep(1)
+            hint = win_error_hint(exc)
+            if hint and hint not in seen_hints:
+                seen_hints.add(hint)
+                say(hint)
+            else:
+                say(f"[error] {exc}")
+        say(f"[reconnect in {delay}s]")
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, 30)
 
 
 def main(argv=None):
