@@ -499,6 +499,12 @@ struct BtState {
     events_on_bulk: bool,
     rx_event_ring: PacketRing<RX_EVENT_RING>,
     rx_acl_ring: PacketRing<RX_ACL_RING>,
+    /// H4 reassembly across USB transfers (events arrive on a 16-byte
+    /// interrupt endpoint, so a 22-byte LE Connection Complete spans two).
+    evt_reasm: [u8; 260],
+    evt_reasm_len: usize,
+    acl_reasm: [u8; 1100],
+    acl_reasm_len: usize,
     tx: TxQueue<TX_RING_BYTES, TX_RING_PACKETS>,
     /// Length of the packet popped by `next_tx_packet` and awaiting completion.
     in_flight: Option<usize>,
@@ -535,6 +541,10 @@ impl BtState {
             events_on_bulk: false,
             rx_event_ring: PacketRing::new(),
             rx_acl_ring: PacketRing::new(),
+            evt_reasm: [0; 260],
+            evt_reasm_len: 0,
+            acl_reasm: [0; 1100],
+            acl_reasm_len: 0,
             tx: TxQueue::new(),
             in_flight: None,
             rx_events: 0,
@@ -587,7 +597,14 @@ pub fn init() {
     if INITIALIZED.swap(true, Ordering::AcqRel) {
         return;
     }
-    log::info!("[USB-BT] HCI-over-USB transport initialized");
+    if is_present() {
+        log::info!("[USB-BT] HCI-over-USB transport ready (device attached)");
+    } else {
+        log::info!(
+            "[USB-BT] no HCI interface on any xHCI device (QEMU has no emulated \
+             Bluetooth dongle; on real hardware check root port + xHCI)"
+        );
+    }
 }
 
 /// True when an HCI interface is configured.
@@ -873,12 +890,71 @@ fn queue_packet(state: &mut BtState, packet: &[u8]) -> bool {
     }
 }
 
+/// Appends bytes to the reassembly buffer; returns true on overflow.
+fn append_reasm(state: &mut BtState, use_evt: bool, data: &[u8]) -> bool {
+    let (buf_len, len) = if use_evt {
+        (state.evt_reasm.len(), state.evt_reasm_len)
+    } else {
+        (state.acl_reasm.len(), state.acl_reasm_len)
+    };
+    let n = core::cmp::min(buf_len.saturating_sub(len), data.len());
+    if use_evt {
+        state.evt_reasm[len..len + n].copy_from_slice(&data[..n]);
+        state.evt_reasm_len = len + n;
+    } else {
+        state.acl_reasm[len..len + n].copy_from_slice(&data[..n]);
+        state.acl_reasm_len = len + n;
+    }
+    n < data.len()
+}
+
+/// Drops `n` bytes from the front of the reassembly buffer.
+fn drop_reasm_prefix(state: &mut BtState, use_evt: bool, n: usize) {
+    if use_evt {
+        let len = state.evt_reasm_len;
+        let n = n.min(len);
+        state.evt_reasm.copy_within(n..len, 0);
+        state.evt_reasm_len = len - n;
+    } else {
+        let len = state.acl_reasm_len;
+        let n = n.min(len);
+        state.acl_reasm.copy_within(n..len, 0);
+        state.acl_reasm_len = len - n;
+    }
+}
+
+/// Copies the head packet into `out`.
+///
+/// `None` means "wait for more bytes"; `Some(0)` means a malformed header that
+/// the caller must resync by dropping one byte.
+fn peek_reasm(state: &BtState, use_evt: bool, out: &mut [u8; 1100]) -> Option<usize> {
+    let src = if use_evt {
+        &state.evt_reasm[..state.evt_reasm_len]
+    } else {
+        &state.acl_reasm[..state.acl_reasm_len]
+    };
+    if src.is_empty() {
+        return None;
+    }
+    match h4_total_len(src) {
+        // Larger than any packet we can buffer: malformed, resync.
+        Some(t) if t > out.len() => Some(0),
+        Some(t) if t <= src.len() => {
+            out[..t].copy_from_slice(&src[..t]);
+            Some(t)
+        }
+        // Valid header, wait for the rest.
+        Some(_) => None,
+        None => Some(0),
+    }
+}
+
 /// Called by the xHCI completion handler with a completed IN transfer.
 ///
 /// Runs in interrupt context: only `try_lock` is used, and no allocation is
-/// performed. A transfer may contain one or several complete H4 packets; an
-/// incomplete trailing packet is counted as a drop (reassembly across USB
-/// transfers is a later phase).
+/// performed. HCI events arriving on a 16-byte interrupt endpoint (and large
+/// ACL packets on bulk IN) may span several USB transfers, so bytes are
+/// reassembled per endpoint before complete H4 packets are queued.
 pub fn on_transfer(slot_id: u8, ep_id: u8, data: &[u8]) {
     if data.is_empty() {
         return;
@@ -897,26 +973,35 @@ pub fn on_transfer(slot_id: u8, ep_id: u8, data: &[u8]) {
     if endpoint_matches(state.ep_out, ep_id) {
         return;
     }
-    if !endpoint_matches(state.ep_in, ep_id) && !endpoint_matches(state.ep_evt, ep_id) {
+    let is_in = endpoint_matches(state.ep_in, ep_id);
+    let is_evt = endpoint_matches(state.ep_evt, ep_id);
+    if !is_in && !is_evt {
         state.rx_dropped = state.rx_dropped.saturating_add(1);
         return;
     }
 
-    let mut offset = 0usize;
-    while offset < data.len() {
-        let remaining = &data[offset..];
-        let total = match h4_total_len(remaining) {
-            Some(total) if total <= remaining.len() => total,
-            _ => {
-                // Partial or malformed tail.
+    // Events get their own small buffer unless they share the bulk endpoint.
+    let use_evt = is_evt && !is_in;
+
+    if append_reasm(&mut state, use_evt, data) {
+        state.rx_dropped = state.rx_dropped.saturating_add(1);
+    }
+
+    let mut packet = [0u8; 1100];
+    loop {
+        match peek_reasm(&state, use_evt, &mut packet) {
+            None => break,
+            Some(0) => {
+                drop_reasm_prefix(&mut state, use_evt, 1);
                 state.rx_dropped = state.rx_dropped.saturating_add(1);
-                break;
             }
-        };
-        if !queue_packet(&mut state, &remaining[..total]) {
-            state.rx_dropped = state.rx_dropped.saturating_add(1);
+            Some(total) => {
+                if !queue_packet(&mut state, &packet[..total]) {
+                    state.rx_dropped = state.rx_dropped.saturating_add(1);
+                }
+                drop_reasm_prefix(&mut state, use_evt, total);
+            }
         }
-        offset += total;
     }
 }
 

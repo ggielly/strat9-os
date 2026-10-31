@@ -27,6 +27,19 @@ pub fn enumerate_device(
     slot_id: u8,
     dev_desc: &[u8; 18],
 ) {
+    let vid = u16::from_le_bytes([dev_desc[8], dev_desc[9]]);
+    let pid = u16::from_le_bytes([dev_desc[10], dev_desc[11]]);
+    log::info!(
+        "[USB] dev {:04x}:{:04x} class={:02x}/{:02x}/{:02x} port={} slot={}",
+        vid,
+        pid,
+        dev_desc[4],
+        dev_desc[5],
+        dev_desc[6],
+        port,
+        slot_id
+    );
+
     match dev_desc[4] {
         0x03 => hid::enumerate_device(port, slot_id, dev_desc),
         // Most dongles are 0xE0 (wireless) or 0x00 (composite, class lives on

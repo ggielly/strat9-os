@@ -59,6 +59,13 @@ fn bsd_prefix(driver_name: &str) -> &'static str {
     {
         return "vtnet"; // VirtIO
     }
+    if lower.len() >= 3
+        && (lower[0] | 0x20) == b'i'
+        && (lower[1] | 0x20) == b'w'
+        && (lower[2] | 0x20) == b'l'
+    {
+        return "wlan"; // Intel Wi-Fi
+    }
     "net" // fallback
 }
 

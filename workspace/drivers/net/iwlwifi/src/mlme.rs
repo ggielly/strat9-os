@@ -271,6 +271,11 @@ impl Mlme {
         self.candidate.as_ref()
     }
 
+    /// Next 802.11 sequence-control value.
+    pub fn next_seq(&mut self) -> u16 {
+        self.seq.next()
+    }
+
     pub fn set_channel_hint(&mut self, channel: u8) {
         if let Some(mut bss) = self.candidate {
             bss.channel = channel;
@@ -299,9 +304,7 @@ pub fn extract_eapol(frame: &[u8]) -> Option<&[u8]> {
     if fc & 0x000c != 0x0008 {
         return None;
     }
-    let to_ds = fc & 0x0100 != 0;
-    let from_ds = fc & 0x0200 != 0;
-    let hdr = if to_ds && from_ds { 30 } else { 24 };
+    let hdr = crate::dot11::header_len(fc);
     let body = frame.get(hdr..)?;
     // LLC/SNAP + EtherType 0x888e
     if body.len() < 8 || body[..6] != [0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00] {

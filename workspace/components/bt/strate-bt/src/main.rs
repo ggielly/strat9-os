@@ -8,13 +8,39 @@
 
 use core::panic::PanicInfo;
 use strat9_syscall::{call, data::TimeSpec, flag, number};
-use strate_bt::{Session, gatt::RxAction};
+use strate_bt::{realtek, Session, gatt::RxAction};
 
 const EAGAIN: usize = 11;
 
 const HCI_PATH: &str = "/dev/bt/hci0";
 const LOG_STREAM_PATH: &str = "/dev/log/stream";
 const LOG_STATS_PATH: &str = "/dev/log/stats";
+
+/// RTL8761BU blobs, copied into the initfs by `create-uefi-image.sh`.
+const RTL_FW_PATH: &str = "/initfs/rtl8761bu_fw.bin";
+const RTL_CFG_PATH: &str = "/initfs/rtl8761bu_config.bin";
+
+const FW_MAX: usize = 48 * 1024;
+const PATCH_MAX: usize = 32 * 1024;
+
+static mut FW_BUF: [u8; FW_MAX] = [0; FW_MAX];
+static mut CFG_BUF: [u8; 64] = [0; 64];
+static mut PATCH_BUF: [u8; PATCH_MAX] = [0; PATCH_MAX];
+
+fn fw_buf() -> &'static mut [u8] {
+    // SAFETY: single-threaded strate; the buffer is used once during setup.
+    unsafe { &mut *core::ptr::addr_of_mut!(FW_BUF) }
+}
+
+fn cfg_buf() -> &'static mut [u8] {
+    // SAFETY: single-threaded strate; the buffer is used once during setup.
+    unsafe { &mut *core::ptr::addr_of_mut!(CFG_BUF) }
+}
+
+fn patch_buf() -> &'static mut [u8] {
+    // SAFETY: single-threaded strate; the buffer is used once during setup.
+    unsafe { &mut *core::ptr::addr_of_mut!(PATCH_BUF) }
+}
 
 fn log(msg: &str) {
     let _ = call::debug_log(msg.as_bytes());
@@ -124,6 +150,174 @@ fn read_stats(fd: usize) -> (Option<u64>, Option<u64>, Option<u64>) {
     }
 }
 
+/// Reads a whole initfs file into `buf`; returns 0 when the file is absent.
+fn read_file(path: &str, buf: &mut [u8]) -> usize {
+    let fd = match call::open(path, flag::O_RDONLY) {
+        Ok(fd) => fd,
+        Err(_) => return 0,
+    };
+    let mut off = 0usize;
+    while off < buf.len() {
+        match call::read(fd, &mut buf[off..]) {
+            Ok(0) => break,
+            Ok(n) => off += n,
+            Err(e) if e.to_errno() == EAGAIN => sleep_ms(5),
+            Err(_) => break,
+        }
+    }
+    let _ = call::close(fd);
+    off
+}
+
+/// Sends one HCI command and waits for its Command Complete/Status.
+///
+/// Returns the return parameters (status first) in `ret`. Other events are
+/// discarded: during firmware download no ACL traffic exists yet.
+fn hci_cmd_sync(
+    fd: usize,
+    opcode: u16,
+    params: &[u8],
+    ret: &mut [u8],
+    timeout_ms: u32,
+) -> Option<usize> {
+    let mut cmd = [0u8; 300];
+    let n = strate_bt::hci::command(&mut cmd, opcode, params)?;
+    if !write_all(fd, &cmd[..n]) {
+        return None;
+    }
+
+    let mut buf = [0u8; 1024];
+    let mut status_seen: Option<u8> = None;
+    for _ in 0..(timeout_ms / 10).max(1) {
+        match call::read(fd, &mut buf) {
+            Ok(n) if n > 0 => {
+                // Command Complete: 04 0E plen ncmd opcode(2) params...
+                if n >= 6 && buf[0] == 0x04 && buf[1] == 0x0E {
+                    let plen = buf[2] as usize;
+                    if plen >= 3 && n >= 3 + plen {
+                        let ev_op = u16::from_le_bytes([buf[4], buf[5]]);
+                        if ev_op == opcode {
+                            let rlen = (plen - 3).min(ret.len());
+                            ret[..rlen].copy_from_slice(&buf[6..6 + rlen]);
+                            return Some(rlen);
+                        }
+                    }
+                }
+                // Command Status: 04 0F 04 status ncmd opcode(2).  Remember it
+                // but keep waiting for the Command Complete so a stale status
+                // cannot be mistaken for the next fragment's completion.
+                if n >= 7 && buf[0] == 0x04 && buf[1] == 0x0F {
+                    let ev_op = u16::from_le_bytes([buf[5], buf[6]]);
+                    if ev_op == opcode {
+                        status_seen = Some(buf[3]);
+                    }
+                }
+            }
+            _ => sleep_ms(10),
+        }
+    }
+    if let Some(status) = status_seen {
+        ret[0] = status;
+        return Some(1);
+    }
+    None
+}
+
+/// Realtek RTL8761BU bring-up: version probe, firmware patch download.
+///
+/// Returns false for a non-Realtek controller or when the initfs blobs are
+/// missing; the caller then falls back to the generic HCI init sequence.
+fn realtek_setup(fd: usize) -> bool {
+    let mut r = [0u8; 64];
+
+    // 1. Chip subversion via 0xFC61.
+    let Some(n) = hci_cmd_sync(
+        fd,
+        realtek::OP_READ_REG16,
+        &realtek::CHIP_SUBVER_ARG,
+        &mut r,
+        1000,
+    ) else {
+        log("[strate-bt] Realtek: no answer to 0xFC61\n");
+        return false;
+    };
+    if n < 3 || r[0] != 0 {
+        log("[strate-bt] Realtek: 0xFC61 failed\n");
+        return false;
+    }
+    let subver = u16::from_le_bytes([r[1], r[2]]);
+    if subver != realtek::RTL_ROM_LMP_8761A {
+        log("[strate-bt] Realtek: not an RTL8761BU (subver != 8761)\n");
+        return false;
+    }
+
+    // 2. Read Local Version, then ROM version (chip id = rom + 1).
+    let _ = hci_cmd_sync(fd, 0x1001, &[], &mut r, 1000);
+    let Some(n) = hci_cmd_sync(fd, realtek::OP_READ_ROM_VERSION, &[], &mut r, 1000) else {
+        log("[strate-bt] Realtek: ROM version read failed\n");
+        return false;
+    };
+    if n < 2 || r[0] != 0 {
+        log("[strate-bt] Realtek: ROM version status != 0\n");
+        return false;
+    }
+    let rom_version = r[1];
+
+    // 3. Load the firmware + optional config from initfs.
+    let fw = fw_buf();
+    let fw_len = read_file(RTL_FW_PATH, fw);
+    if fw_len == 0 {
+        log("[strate-bt] Realtek: /initfs/rtl8761bu_fw.bin missing\n");
+        return false;
+    }
+    let cfg = cfg_buf();
+    let cfg_len = read_file(RTL_CFG_PATH, cfg);
+    let out = patch_buf();
+    let info = match realtek::build_patch(&fw[..fw_len], rom_version, &cfg[..cfg_len], out) {
+        Ok(info) => info,
+        Err(e) => {
+            log(match e {
+                realtek::RtlError::UnsupportedV2 => {
+                    "[strate-bt] Realtek: v2 firmware format unsupported\n"
+                }
+                realtek::RtlError::NoPatch(_) => {
+                    "[strate-bt] Realtek: no patch for this chip id\n"
+                }
+                _ => "[strate-bt] Realtek: firmware parse failed\n",
+            });
+            return false;
+        }
+    };
+
+    // 4. Download in 0xFC20 fragments, one command at a time.
+    let total = info.total_len;
+    let mut payload = [0u8; realtek::RTL_FRAG_LEN + 1];
+    let count = realtek::fragment_count(total);
+    for i in 0..count {
+        let Some(plen) = realtek::fragment(&out[..total], i, &mut payload) else {
+            log("[strate-bt] Realtek: fragment build failed\n");
+            return false;
+        };
+        let Some(rn) = hci_cmd_sync(fd, realtek::OP_DOWNLOAD, &payload[..plen], &mut r, 3000)
+        else {
+            log("[strate-bt] Realtek: firmware download timeout\n");
+            return false;
+        };
+        if rn < 1 || r[0] != 0 {
+            log("[strate-bt] Realtek: firmware download rejected\n");
+            return false;
+        }
+    }
+
+    // 5. Confirm the new version.
+    if let Some(n) = hci_cmd_sync(fd, 0x1001, &[], &mut r, 1000) {
+        if n >= 4 {
+            log("[strate-bt] Realtek: firmware downloaded, version updated\n");
+        }
+    }
+    true
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     log("[strate-bt] starting\n");
@@ -142,6 +336,11 @@ pub extern "C" fn _start() -> ! {
     }
 
     let mut init = [0u8; 256];
+    if realtek_setup(hci) {
+        log("[strate-bt] Realtek RTL8761BU firmware ready\n");
+    } else {
+        log("[strate-bt] no Realtek firmware loaded (generic HCI path)\n");
+    }
     if let Some(n) = Session::initialization_sequence(&mut init) {
         if !write_all(hci, &init[..n]) {
             log("[strate-bt] HCI init write failed\n");
@@ -168,6 +367,9 @@ pub extern "C" fn _start() -> ! {
                         }
                     }
                     Err(_) => log("[strate-bt] malformed HCI packet\n"),
+                }
+                if session.take_advertising_error() {
+                    log("[strate-bt] LE advertising enable failed (firmware?)\n");
                 }
             }
             Err(e) => {

@@ -18,6 +18,7 @@ pub mod dump;
 pub mod gatt;
 pub mod hci;
 pub mod l2cap;
+pub mod realtek;
 
 use acl::AclReassembler;
 use att::{AttServer, AttServerDispatch};
@@ -65,6 +66,8 @@ pub struct Session {
     log_active: bool,
     /// Set on disconnection: advertising must be re-enabled by the host.
     rearm_advertising: bool,
+    /// Set when `LE Set Advertising Enable` returns a non-zero status.
+    advertising_error: bool,
 }
 
 impl Default for Session {
@@ -86,6 +89,7 @@ impl Session {
             log_len: 0,
             log_active: false,
             rearm_advertising: false,
+            advertising_error: false,
         }
     }
 
@@ -107,6 +111,11 @@ impl Session {
 
     pub fn notifications_enabled(&self) -> bool {
         self.connected && self.gatt.cccd_enabled()
+    }
+
+    /// Returns true once if the last `LE Set Advertising Enable` failed.
+    pub fn take_advertising_error(&mut self) -> bool {
+        core::mem::take(&mut self.advertising_error)
     }
 
     pub fn take_action(&mut self) -> Option<RxAction> {
@@ -132,6 +141,9 @@ impl Session {
                     if mtu >= 27 {
                         self.acl_mtu = core::cmp::min(mtu, 512);
                     }
+                }
+                if opcode == hci::OP_LE_SET_ADVERTISING_ENABLE {
+                    self.advertising_error = returns.is_empty() || returns[0] != 0;
                 }
             }
             hci::Event::LeMeta(hci::LeEvent::ConnectionComplete { status, handle, .. }) => {

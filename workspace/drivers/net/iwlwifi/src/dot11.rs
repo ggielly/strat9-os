@@ -475,6 +475,18 @@ pub fn build_data_frame(
     out
 }
 
+/// 802.11 MAC header length (24, 26, 30 or 32 bytes).
+pub fn header_len(fc: u16) -> usize {
+    let mut len = 24usize;
+    if fc & FCTL_TO_DS != 0 && fc & FCTL_FROM_DS != 0 {
+        len += 6;
+    }
+    if fc & 0x0080 != 0 {
+        len += 2; // QoS control
+    }
+    len
+}
+
 /// Convert an unprotected 802.11 data payload into an Ethernet II frame.
 pub fn data_to_ethernet(frame: &[u8]) -> Option<Vec<u8>> {
     if frame.len() < 24 {
@@ -486,7 +498,7 @@ pub fn data_to_ethernet(frame: &[u8]) -> Option<Vec<u8>> {
     }
     let to_ds = fc & FCTL_TO_DS != 0;
     let from_ds = fc & FCTL_FROM_DS != 0;
-    let hdr_len = if to_ds && from_ds { 30 } else { 24 };
+    let hdr_len = header_len(fc);
     if frame.len() < hdr_len + 8 {
         return None;
     }
@@ -510,27 +522,47 @@ pub fn data_to_ethernet(frame: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// CCMP AAD for a data frame (22 bytes, no A4/QoS).
-pub fn ccmp_aad(frame: &[u8]) -> [u8; 22] {
+/// CCMP AAD for a data frame.  Returns the AAD and its length, which depends
+/// on A4 (WDS) and QoS control presence.
+pub fn ccmp_aad(frame: &[u8]) -> ([u8; 30], usize) {
     let fc = u16::from_le_bytes([frame[0], frame[1]]);
     // Mask Retry/PM/MoreData, clear subtype bits for data, set Protected.
     let mut mask = fc & !(0x0800 | 0x1000 | 0x2000);
     mask &= !0x0070;
     mask |= FCTL_PROTECTED;
-    let mut aad = [0u8; 22];
+    let a4 = mask & FCTL_TO_DS != 0 && mask & FCTL_FROM_DS != 0;
+    let qos = mask & 0x0080 != 0;
+    let mut aad = [0u8; 30];
     aad[0..2].copy_from_slice(&mask.to_le_bytes());
     aad[2..8].copy_from_slice(&frame[4..10]);
     aad[8..14].copy_from_slice(&frame[10..16]);
     aad[14..20].copy_from_slice(&frame[16..22]);
     aad[20] = frame[22] & 0x0f;
     aad[21] = 0;
-    aad
+    let mut len = 22usize;
+    if a4 {
+        aad[len..len + 6].copy_from_slice(&frame[24..30]);
+        len += 6;
+    }
+    if qos {
+        let qc = if a4 { 30 } else { 24 };
+        aad[len] = frame[qc];
+        aad[len + 1] = 0;
+        len += 2;
+    }
+    (aad, len)
 }
 
 /// CCMP 13-byte nonce: priority | A2 | PN.
 pub fn ccmp_nonce(frame: &[u8], pn: &[u8; 6]) -> [u8; 13] {
+    let fc = u16::from_le_bytes([frame[0], frame[1]]);
+    let hdr = header_len(fc);
     let mut nonce = [0u8; 13];
-    nonce[0] = 0; // priority / management
+    nonce[0] = if fc & 0x0080 != 0 && hdr >= 26 {
+        frame[hdr - 2] & 0x0f // QoS TID for 802.11 data
+    } else {
+        0
+    };
     nonce[1..7].copy_from_slice(&frame[10..16]);
     nonce[7..13].copy_from_slice(pn);
     nonce
@@ -551,11 +583,11 @@ pub fn ccmp_protect(
     let fc = u16::from_le_bytes([frame[0], frame[1]]) | FCTL_PROTECTED;
     frame[0..2].copy_from_slice(&fc.to_le_bytes());
 
-    let aad = ccmp_aad(frame);
+    let (aad, aad_len) = ccmp_aad(frame);
     let nonce = ccmp_nonce(frame, pn);
     let mut payload = frame.split_off(hdr_len);
     let mut mic = [0u8; CCMP_MIC_LEN];
-    ccm_encrypt(key, &nonce, &aad, &mut payload, &mut mic);
+    ccm_encrypt(key, &nonce, &aad[..aad_len], &mut payload, &mut mic);
 
     // CCMP header: LSB..MSB PN with ExtIV.
     let mut hdr = [0u8; CCMP_HDR_LEN];
@@ -588,13 +620,13 @@ pub fn ccmp_unprotect(key: &[u8; 16], frame: &mut Vec<u8>, hdr_len: usize) -> Op
         frame[hdr_len + 1],
         frame[hdr_len],
     ];
-    let aad = ccmp_aad(frame);
+    let (aad, aad_len) = ccmp_aad(frame);
     let nonce = ccmp_nonce(frame, &pn);
     let mut mic = [0u8; CCMP_MIC_LEN];
     mic.copy_from_slice(&frame[frame.len() - CCMP_MIC_LEN..]);
     let mut payload =
         frame[hdr_len + CCMP_HDR_LEN..frame.len() - CCMP_MIC_LEN].to_vec();
-    if !ccm_decrypt(key, &nonce, &aad, &mut payload, &mic) {
+    if !ccm_decrypt(key, &nonce, &aad[..aad_len], &mut payload, &mic) {
         return None;
     }
     frame.truncate(hdr_len);
@@ -650,6 +682,29 @@ mod tests {
         assert_eq!(&out[..6], &eth[..6]);
         assert_eq!(&out[6..12], &eth[6..12]);
         assert_eq!(&out[12..], &eth[12..]);
+    }
+
+    #[test]
+    fn qos_ccmp_roundtrip() {
+        let key = [0x55u8; 16];
+        let mut f = Vec::new();
+        // QoS data, ToDS.
+        f.extend_from_slice(&(FC_TYPE_DATA | FCTL_TO_DS | 0x0080).to_le_bytes());
+        f.extend_from_slice(&[0, 0]);
+        f.extend_from_slice(&[0x22; 6]); // BSSID (A1)
+        f.extend_from_slice(&[0x11; 6]); // SA (A2)
+        f.extend_from_slice(&[0xaa; 6]); // DA (A3)
+        f.extend_from_slice(&[0x10, 0x00]); // seq
+        f.extend_from_slice(&[0x05, 0x00]); // QoS control (TID 5)
+        f.extend_from_slice(&LLC_SNAP);
+        f.extend_from_slice(&[0x08, 0x00, 0xde, 0xad]);
+        let hdr = header_len(u16::from_le_bytes([f[0], f[1]]));
+        assert_eq!(hdr, 26);
+        let pn = [9, 8, 7, 6, 5, 4];
+        assert!(ccmp_protect(&key, &mut f, &pn, hdr));
+        assert!(ccmp_unprotect(&key, &mut f, hdr).is_some());
+        let eth = data_to_ethernet(&f).unwrap();
+        assert_eq!(&eth[12..], &[0x08, 0x00, 0xde, 0xad]);
     }
 
     #[test]

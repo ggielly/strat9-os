@@ -15,8 +15,9 @@ protocol/WPA2 logic can be unit-tested on the host.
 | WPA2-PSK 4-way + group key handshake | `wpa2.rs` | implemented, tested |
 | SHA-1/HMAC/PBKDF2/AES/CCMP/key-wrap | `crypto/` | implemented, RFC test vectors |
 | 802.11 frames, RSN/HT/VHT/HE IEs, CCMP | `dot11.rs` | implemented, tested |
-| **TX data queue (`iwl_tx_cmd_v9`)** | `device.rs::tx_80211` | **TODO** |
-| **Firmware key install wiring + queue allocation** | `device.rs` | **TODO** |
+| TX data queue (`iwl_tx_cmd_v9`, SCD queue 1) | `transport.rs::send_mpdu` | implemented, not hardware-validated |
+| Software CCMP on TX/RX + Ethernet glue | `device.rs` | implemented, tested |
+| NetworkDevice registration | `kernel/.../iwlwifi_drv.rs` | implemented |
 
 ## Why the AX201 is different
 
@@ -74,10 +75,11 @@ on purpose so a typo cannot silently disable encryption.
 4. runs `WifiDevice::init()` (firmware self-load + alive wait),
 5. starts the station MLME.
 
-It currently **does not register a `NetworkDevice`**: the TX data queue is the
-last missing hardware piece. Registering a device whose `transmit()` always
-fails would make strate-net pick a dead interface. `link_up()` in
-`WifiDevice` is therefore false until `tx_80211()` programs real TFDs.
+The adapter registers `wlan0` once the firmware is alive. `link_up()` stays
+false until the WPA2 handshake completes, so the IP stack does not start DHCP
+on a half-associated interface. Crypto is deliberately done in software
+(CCMP) with `IWL_TX_FLAGS_ENCRYPT_DIS`; firmware key offload is not used so
+RX frames remain ciphertext and the supplicant owns the keys.
 
 ## Testing
 
@@ -85,7 +87,7 @@ fails would make strate-net pick a dead interface. `link_up()` in
 cargo test -p iwlwifi-ax201 --lib
 ```
 
-30 tests cover RFC 3394 key wrap, RFC 3610 CCM, FIPS-197 AES, RFC 2202
+32 tests cover RFC 3394 key wrap, RFC 3610 CCM, FIPS-197 AES, RFC 2202
 HMAC-SHA1, RFC 6070 PBKDF2, the WPA2 PMK/PTK derivation, the full 4-way
 handshake against a simulated AP, beacon/RSN parsing, CCMP protect/unprotect,
 the TLV firmware parser, the context-info layout and the command offsets.
@@ -101,14 +103,15 @@ the TLV firmware parser, the context-info layout and the command offsets.
 
 ## Next steps for hardware bring-up
 
-1. Implement `tx_80211()` with `iwl_tx_cmd_v9` (TB0 = TX command, TB1 = MPDU)
-   on a queue allocated by `ADD_STA` (`tfd_queue_msk`).
-2. Match the exact command sizes/versions for API 77 (`MAC_CONTEXT_CMD`,
-   `PHY_CONTEXT_CMD`, `ADD_STA` v10, `ADD_STA_KEY` v2/v3).
-3. Validate the RX MPDU descriptor length for the specific firmware build
-   (the parser tries 24/28/32-byte offsets).
-4. Install PTK/GTK in firmware after the 4-way handshake and enable the TX
-   queue; set `link_up()` only then.
-5. Add regulatory/NVM handling (`LARI_CONFIG_CHANGE`) for 5 GHz channels.
-6. Feed SNonce from the kernel CSPRNG instead of the current deterministic
-   mix (already marked in `device.rs`).
+1. Validate the exact command sizes/versions against the AX201 firmware
+   (`MAC_CONTEXT_CMD` 156-byte payload, `PHY_CONTEXT_CMD`, `ADD_STA` v10,
+   `SCD_QUEUE_CONFIG_CMD` v3).
+2. Validate the RX MPDU descriptor length for the specific firmware build
+   (the parser tries 24/28/32-byte offsets) and the RX byte-count handling.
+3. Add regulatory/NVM handling (`LARI_CONFIG_CHANGE`) for 5 GHz channels.
+4. Feed SNonce from the kernel CSPRNG instead of the current deterministic
+   mix (`device.rs::make_snonce`).
+5. Add 802.11 retry/backoff for scan (currently passive scan only) and
+   reconnection after beacon loss.
+6. Consider firmware key offload (`ADD_STA_KEY`) once RX decrypted-frame flags
+   are parsed, to reduce per-packet CPU cost.

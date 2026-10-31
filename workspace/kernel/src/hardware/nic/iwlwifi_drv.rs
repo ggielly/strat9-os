@@ -15,12 +15,17 @@
 //! image script copies it into `/boot/initfs` when present.  Without it the
 //! driver logs a warning and leaves the interface unregistered.
 //!
-//! **Hardware status:** the transport/RX/command/firmware paths are
-//! implemented; the TX data queue (`iwl_tx_cmd_v9`) is still a documented
-//! TODO, so the device is *not* registered as a `NetworkDevice` yet.  This
-//! avoids handing a half-wired interface to strate-net.
+//! **Hardware status:** transport, firmware self-load, RX, command and TX
+//! data paths are implemented and the interface is registered as `wlan0`.
+//! `link_up()` only becomes true after the WPA2 handshake, and all crypto is
+//! software CCMP.  The remaining validation work is tracked in the driver
+//! README (command sizes, RX descriptor length, regulatory/NVM).
 
 use core::ptr;
+
+use alloc::sync::Arc;
+
+use net_core::{NetError, NetMedia, NetworkDevice};
 
 use iwlwifi_ax201::config::{self, WifiConfig};
 use iwlwifi_ax201::device::WifiDevice;
@@ -32,6 +37,7 @@ use crate::arch::xshim::VirtAddr;
 use crate::hardware::nic::common::KernelDma;
 use crate::hardware::pci_client::{self as pci, Bar};
 use crate::memory;
+use crate::sync::SpinLock;
 
 const CONFIG_PATH: &str = "/initfs/wifi.toml";
 const MMIO_WINDOW: u64 = 0x0010_0000;
@@ -103,8 +109,59 @@ fn mmio_base(dev: &pci::PciDevice) -> Option<u64> {
     }
 }
 
+/// `NetworkDevice` adapter around `WifiDevice<PciBus>`.
+struct KernelWifi {
+    inner: SpinLock<WifiDevice<PciBus>>,
+    mac: [u8; 6],
+}
+
+impl NetworkDevice for KernelWifi {
+    fn name(&self) -> &str {
+        "iwlwifi-ax201"
+    }
+
+    fn receive(&self, buf: &mut [u8]) -> Result<usize, NetError> {
+        let mut wifi = self.inner.lock();
+        wifi.poll();
+        wifi.receive_eth(buf).ok_or(NetError::NoPacket)
+    }
+
+    fn transmit(&self, buf: &[u8]) -> Result<(), NetError> {
+        let mut wifi = self.inner.lock();
+        if wifi.transmit_eth(buf) {
+            Ok(())
+        } else {
+            Err(NetError::TxQueueFull)
+        }
+    }
+
+    fn mac_address(&self) -> [u8; 6] {
+        self.mac
+    }
+
+    fn link_up(&self) -> bool {
+        self.inner.lock().is_connected()
+    }
+
+    fn media(&self) -> NetMedia {
+        NetMedia::Ethernet
+    }
+
+    fn mtu(&self) -> usize {
+        1500
+    }
+
+    fn poll(&self) {
+        self.inner.lock().poll();
+    }
+
+    fn link_speed_mbps(&self) -> u32 {
+        if self.link_up() { 866 } else { 0 }
+    }
+}
+
 /// Probe and initialise the AX201.  Returns true when the firmware reached
-/// the alive state (the data path may still be incomplete).
+/// the alive state and the interface was registered.
 pub fn init() -> bool {
     if !memory::paging::is_initialized() {
         return false;
@@ -186,9 +243,16 @@ pub fn init() -> bool {
                 if let Err(e) = wifi.connect() {
                     log::warn!("[iwlwifi] station connect failed: {:?}", e);
                 }
-                // Keep the controller alive; the TX data queue still needs a
-                // `iwl_tx_cmd_v9` implementation before registration.
-                core::mem::forget(wifi);
+                let mac = wifi.mac();
+                let dev = Arc::new(KernelWifi {
+                    inner: SpinLock::new(wifi),
+                    mac,
+                });
+                let iface = super::register_device(dev);
+                log::info!(
+                    "[iwlwifi] registered {} (AX201, 802.11ax 2x2, waiting for WPA2 handshake)",
+                    iface
+                );
                 return true;
             }
             Err(e) => {

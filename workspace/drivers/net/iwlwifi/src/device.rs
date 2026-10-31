@@ -7,10 +7,12 @@
 //!
 //! The RX, command and firmware paths are implemented.  The **TX data queue**
 //! (`iwl_tx_cmd_v9` + ADD_STA queue allocation) is the remaining hardware
-//! piece: `tx_80211()` records frames in `pending_tx` instead of programming a
-//! TFD.  Until it is implemented, `link_up()` stays false so the IP stack does
-//! not select a half-wired interface.
+//! TX data path uses `iwl_tx_cmd_v9` on queue 1 (allocated with `ADD_STA` and
+//! enabled through `SCD_QUEUE_CONFIG_CMD`).  The management/EAPOL/data frames
+//! are CCMP-protected in software and marked `ENCRYPT_DIS` so the firmware
+//! does not encrypt them twice.
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 
@@ -52,13 +54,16 @@ pub struct WifiDevice<B: Bus> {
     pub mlme: Mlme,
     mac: MacAddr,
     stats: WifiStats,
-    /// Frames produced by the MLME and waiting for the TX data queue.
-    pending_tx: Vec<Vec<u8>>,
     /// Decrypted Ethernet frames waiting for `receive()`.
-    rx_eth: Vec<Vec<u8>>,
+    rx_eth: VecDeque<Vec<u8>>,
     tx_pn: [u8; 6],
     pub hw_name: &'static str,
     pub firmware_loaded: bool,
+    /// Last join frame sent, retransmitted on MLME timeouts.
+    last_frame: Option<Vec<u8>>,
+    retry_ticks: u32,
+    last_generation: u32,
+    retries: u32,
 }
 
 impl<B: Bus> WifiDevice<B> {
@@ -74,11 +79,14 @@ impl<B: Bus> WifiDevice<B> {
             mlme: Mlme::new(mac),
             mac,
             stats: WifiStats::default(),
-            pending_tx: Vec::new(),
-            rx_eth: Vec::new(),
+            rx_eth: VecDeque::new(),
             tx_pn: [0, 0, 0, 0, 0, 1],
             hw_name: "Intel Wi-Fi 6 AX201",
             firmware_loaded: false,
+            last_frame: None,
+            retry_ticks: 0,
+            last_generation: 0,
+            retries: 0,
         }
     }
 
@@ -96,6 +104,8 @@ impl<B: Bus> WifiDevice<B> {
         }
         self.transport.rx_init()?;
         self.transport.tx_init()?;
+        // Data queue 1 carries management/EAPOL/data frames for the AP STA.
+        self.transport.data_tx_alloc(1)?;
         self.transport.load_firmware(&image)?;
         let _alive = self.transport.wait_alive(2_000)?;
         self.firmware_loaded = true;
@@ -116,6 +126,8 @@ impl<B: Bus> WifiDevice<B> {
                 .mlme
                 .begin_direct_join(&self.cfg, bssid, channel)
                 .map_err(|_| TransportError::UnsupportedHw)?;
+            self.send_join_commands(bssid, channel, false, 0);
+            self.last_frame = Some(frame.clone());
             self.tx_80211(&frame);
         } else {
             self.mlme.start_scan();
@@ -134,6 +146,29 @@ impl<B: Bus> WifiDevice<B> {
         while let Some(pkt) = self.transport.rx_next_into(&mut block) {
             self.handle_notification(&pkt, &block[..]);
         }
+
+        // Retransmit auth/assoc on timeout (APs do not retry these for us).
+        if self.mlme.generation != self.last_generation {
+            self.last_generation = self.mlme.generation;
+            self.retry_ticks = 0;
+            self.retries = 0;
+        }
+        self.retry_ticks = self.retry_ticks.saturating_add(1);
+        let waiting = matches!(
+            self.mlme.state,
+            MlmeState::Authenticating | MlmeState::Associating
+        );
+        if waiting && self.retry_ticks >= 3 {
+            self.retry_ticks = 0;
+            self.retries = self.retries.saturating_add(1);
+            if self.retries > 5 {
+                self.stats.rx_dropped += 1;
+                self.mlme.state = MlmeState::Failed;
+                self.last_frame = None;
+            } else if let Some(frame) = self.last_frame.clone() {
+                let _ = self.tx_80211(&frame);
+            }
+        }
     }
 
     fn handle_notification(&mut self, pkt: &RxPacketInfo, payload: &[u8]) {
@@ -149,8 +184,13 @@ impl<B: Bus> WifiDevice<B> {
             cmd::CMD_SCAN_COMPLETE_UMAC | cmd::CMD_SCAN_ITERATION_COMPLETE_UMAC => {
                 if self.mlme.state == MlmeState::Scanning {
                     if self.mlme.candidate().is_some() {
+                        let candidate = self.mlme.candidate().copied();
                         match self.mlme.begin_join(&self.cfg) {
                             Ok(frame) => {
+                                if let Some(bss) = candidate {
+                                    self.send_join_commands(bss.bssid, bss.channel, false, 0);
+                                }
+                                self.last_frame = Some(frame.clone());
                                 self.tx_80211(&frame);
                             }
                             Err(_) => self.stats.rx_dropped += 1,
@@ -176,9 +216,20 @@ impl<B: Bus> WifiDevice<B> {
             if subtype == dot11::FC_SUBTYPE_AUTH || subtype == dot11::FC_SUBTYPE_ASSOC_RESP {
                 let snonce = self.make_snonce();
                 match self.mlme.on_mgmt(frame, &self.cfg, &snonce) {
-                    Ok((frames, _event)) => {
+                    Ok((frames, event)) => {
+                        let last_frame = frames.last().cloned();
                         for f in frames {
                             self.tx_80211(&f);
+                        }
+                        match event {
+                            Some(MlmeEvent::Authenticated) => {
+                                self.last_frame = last_frame;
+                            }
+                            Some(MlmeEvent::Associated { .. }) => {
+                                self.on_associated();
+                                self.last_frame = None;
+                            }
+                            _ => {}
                         }
                     }
                     Err(_) => self.stats.rx_dropped += 1,
@@ -193,7 +244,7 @@ impl<B: Bus> WifiDevice<B> {
 
         // Protected frames: CCMP-decrypt with the pairwise TK.
         let mut owned = frame.to_vec();
-        let hdr_len = if fc & 0x0300 == 0x0300 { 30 } else { 24 };
+        let hdr_len = dot11::header_len(fc);
         if fc & dot11::FCTL_PROTECTED != 0 {
             if !self.mlme.is_connected() {
                 self.stats.rx_dropped += 1;
@@ -214,14 +265,9 @@ impl<B: Bus> WifiDevice<B> {
             self.stats.eapol += 1;
             let snonce = self.make_snonce();
             match self.mlme.on_mgmt(&owned, &self.cfg, &snonce) {
-                Ok((frames, event)) => {
+                Ok((frames, _event)) => {
                     for f in frames {
                         self.tx_80211(&f);
-                    }
-                    if matches!(event, Some(MlmeEvent::HandshakeComplete)) {
-                        // Keys are now in software; firmware key installation
-                        // (ADD_STA_KEY) is issued by the connection manager.
-                        self.install_firmware_keys();
                     }
                 }
                 Err(_) => self.stats.rx_dropped += 1,
@@ -234,38 +280,7 @@ impl<B: Bus> WifiDevice<B> {
             return;
         }
         if let Some(eth) = dot11::data_to_ethernet(&owned) {
-            self.rx_eth.push(eth);
-        }
-    }
-
-    /// Install the PTK/GTK in the firmware.  Called after the 4-way
-    /// handshake.  Kept separate because it depends on the ADD_STA queue
-    /// allocation performed by the connection manager.
-    fn install_firmware_keys(&mut self) {
-        let Some(supp) = self.mlme.supplicant.as_ref() else {
-            return;
-        };
-        let keys = supp.keys();
-        if !keys.installed {
-            return;
-        }
-        let ptk = keys.tk();
-        let _ = self.transport.send_cmd(
-            cmd::CMD_ADD_STA_KEY,
-            cmd::GROUP_LEGACY,
-            cmd::VER_ADD_STA_KEY,
-            &cmd::add_sta_key(1, 0, &ptk, 0, false),
-        );
-        if keys.gtk_len > 0 {
-            let mut gtk = [0u8; 16];
-            let n = keys.gtk_len.min(16);
-            gtk[..n].copy_from_slice(&keys.gtk[..n]);
-            let _ = self.transport.send_cmd(
-                cmd::CMD_ADD_STA_KEY,
-                cmd::GROUP_LEGACY,
-                cmd::VER_ADD_STA_KEY,
-                &cmd::add_sta_key(1, 1, &gtk, keys.gtk_key_id, true),
-            );
+            self.rx_eth.push_back(eth);
         }
     }
 
@@ -286,24 +301,132 @@ impl<B: Bus> WifiDevice<B> {
         out
     }
 
-    /// Queue an 802.11 frame for transmission.
-    ///
-    /// TODO(data-path): program `iwl_tx_cmd_v9` into a TX queue allocated by
-    /// ADD_STA (TFD TB0 = TX command, TB1 = MPDU) instead of buffering here.
-    fn tx_80211(&mut self, frame: &[u8]) -> bool {
-        self.stats.tx_80211 += 1;
-        self.pending_tx.push(frame.to_vec());
-        // Bound the staging queue so a misconfiguration cannot leak memory.
-        if self.pending_tx.len() > 32 {
-            self.pending_tx.remove(0);
-            self.stats.tx_dropped += 1;
+    /// Send every management command needed before the first auth frame.
+    fn send_join_commands(&mut self, bssid: MacAddr, channel: u8, assoc: bool, aid: u16) {
+        use crate::cmd::{self, id_and_color};
+        let band = if channel <= 14 { cmd::PHY_BAND_2GHZ } else { cmd::PHY_BAND_5GHZ };
+        let action = if assoc { cmd::CTXT_ACTION_MODIFY } else { cmd::CTXT_ACTION_ADD };
+        let _ = self.transport.send_cmd(
+            cmd::CMD_PHY_CONTEXT,
+            cmd::GROUP_LEGACY,
+            cmd::VER_PHY_CONTEXT,
+            &cmd::phy_context(id_and_color(0, 1), action, channel, band, cmd::PHY_WIDTH_20),
+        );
+        let mac_ctx = cmd::mac_context_sta(
+            id_and_color(1, 1),
+            action,
+            self.mac,
+            bssid,
+            assoc,
+            aid,
+            self.mlme.beacon_interval(),
+            self.mlme.dtim_period(),
+        );
+        let _ = self.transport.send_cmd(
+            cmd::CMD_MAC_CONTEXT,
+            cmd::GROUP_LEGACY,
+            cmd::VER_MAC_CONTEXT,
+            &mac_ctx,
+        );
+        if assoc {
+            let _ = self.transport.send_cmd(
+                cmd::CMD_ADD_STA,
+                cmd::GROUP_LEGACY,
+                cmd::VER_ADD_STA,
+                &cmd::add_sta_modify(
+                    1,
+                    id_and_color(1, 1),
+                    bssid,
+                    aid,
+                    1 << 1,
+                    cmd::STA_FLAG_ASSOCIATED | cmd::STA_FLAG_AUTHORIZED,
+                ),
+            );
+        } else {
+            let _ = self.transport.send_cmd(
+                cmd::CMD_ADD_STA,
+                cmd::GROUP_LEGACY,
+                cmd::VER_ADD_STA,
+                &cmd::add_sta(1, id_and_color(1, 1), bssid, 0, 1 << 1, 0),
+            );
+            let _ = self.transport.data_tx_enable(1, 0);
         }
-        false
     }
 
-    /// Frames waiting for the data TX queue (diagnostics / future work).
-    pub fn pending_tx(&self) -> &[Vec<u8>] {
-        &self.pending_tx
+    /// Association completed: update MAC/STA contexts and install keys.
+    fn on_associated(&mut self) {
+        let Some(bss) = self.mlme.bss else {
+            return;
+        };
+        let aid = self.mlme.aid();
+        self.send_join_commands(bss.bssid, bss.channel, true, aid);
+    }
+
+    /// Transmit one 802.11 frame on the data queue.
+    ///
+    /// Crypto is entirely in software: unprotected data frames (EAPOL msg4,
+    /// group-key reply) are CCMP-wrapped once the PTK is installed, and the
+    /// firmware is told not to encrypt (`IWL_TX_FLAGS_ENCRYPT_DIS`).  Firmware
+    /// key offload is deliberately not used so RX frames stay encrypted and
+    /// the software CCMP path sees the real ciphertext.
+    fn tx_80211(&mut self, frame: &[u8]) -> bool {
+        let mut owned: Vec<u8> = frame.to_vec();
+        if owned.len() >= 24 {
+            let fc = u16::from_le_bytes([owned[0], owned[1]]);
+            let is_data = fc & 0x000c == 0x0008;
+            let protected = fc & dot11::FCTL_PROTECTED != 0;
+            if is_data && !protected {
+                if let Some(supp) = self.mlme.supplicant.as_ref() {
+                    if supp.keys().installed {
+                        let tk = supp.keys().tk();
+                        let pn = self.next_pn();
+                        let hdr = dot11::header_len(fc);
+                        if !dot11::ccmp_protect(&tk, &mut owned, &pn, hdr) {
+                            self.stats.tx_dropped += 1;
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        match self.transport.send_mpdu(&owned, true) {
+            Ok(_) => {
+                self.stats.tx_80211 += 1;
+                true
+            }
+            Err(_) => {
+                self.stats.tx_dropped += 1;
+                false
+            }
+        }
+    }
+
+    /// Pop one decrypted Ethernet frame for the IP stack.
+    pub fn receive_eth(&mut self, out: &mut [u8]) -> Option<usize> {
+        let frame = self.rx_eth.pop_front()?;
+        if frame.len() > out.len() {
+            return None;
+        }
+        out[..frame.len()].copy_from_slice(&frame);
+        Some(frame.len())
+    }
+
+    /// Send one Ethernet II frame to the AP, adding CCMP when associated.
+    pub fn transmit_eth(&mut self, frame: &[u8]) -> bool {
+        if frame.len() < 14 || !self.mlme.is_connected() {
+            return false;
+        }
+        let Some(bss) = self.mlme.bss else {
+            return false;
+        };
+        let mut dst = [0u8; 6];
+        dst.copy_from_slice(&frame[..6]);
+        let mut src = [0u8; 6];
+        src.copy_from_slice(&frame[6..12]);
+        let seq = self.mlme.next_seq();
+        let mpdu = dot11::build_data_frame(dst, src, bss.bssid, &frame[12..], seq);
+        // `tx_80211` adds CCMP now that the PTK is installed.
+        self.tx_80211(&mpdu)
     }
 
     pub fn stats(&self) -> &WifiStats {
