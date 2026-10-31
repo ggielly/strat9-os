@@ -25,11 +25,13 @@
 //! ```
 
 pub mod blkdev_scheme;
+pub mod bt_scheme;
 pub mod console_scheme;
 pub mod fd;
 pub mod file;
 pub mod input_scheme;
 pub mod ipcfs;
+pub mod log_scheme;
 pub mod mount;
 pub mod bulk;
 pub use bulk::BulkHandle;
@@ -1483,6 +1485,17 @@ pub fn init() {
         log::error!("[VFS] Failed to mount /dev/input: {:?}", e);
     } else {
         log::info!("[VFS] Mounted /dev/input (raw keyboard + mouse events)");
+    }
+
+    // Bluetooth HCI scheme (`/dev/bt`). The USB probe may already have
+    // registered it before `/dev` existed, so this call is idempotent and
+    // retries the mount.
+    bt_scheme::init_bt_scheme();
+
+    // Kernel boot log ring (`/dev/log`). The serial hook fills the ring from
+    // the first formatted log record, so a late daemon can replay boot output.
+    if let Err(e) = log_scheme::init_log_scheme() {
+        log::warn!("[VFS] /dev/log not mounted: {:?}", e);
     }
 
     log::info!("[VFS] VFS ready");

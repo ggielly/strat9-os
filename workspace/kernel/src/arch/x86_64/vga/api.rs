@@ -206,6 +206,16 @@ pub fn init(
     blue_size: u8,
     blue_shift: u8,
 ) {
+    // `console.mode=serial` means "never touch the framebuffer": no clear, no
+    // glyphs, no status bar, and no `/dev/display` publication. Boot then runs
+    // at serial speed, which is the right trade-off when debugging a laptop
+    // over a USB-serial adapter.
+    if super::is_serial() {
+        VGA_AVAILABLE.store(false, Ordering::Relaxed);
+        log::info!("Framebuffer console disabled (console.mode=serial)");
+        return;
+    }
+
     if fb_addr == 0 || fb_width == 0 || fb_height == 0 || pitch == 0 {
         VGA_AVAILABLE.store(false, Ordering::Relaxed);
         log::info!("Framebuffer console unavailable (no framebuffer)");
@@ -250,22 +260,30 @@ pub fn init(
         fmt,
     ) {
         writer.set_color(Color::LightCyan, Color::Black);
-        writer.clear_with(RgbColor::new(0x12, 0x16, 0x1E));
-        // Decorative background mark for Strat9 identity.
-        let deco_w = (writer.width() / 3).clamp(120, 300);
-        let deco_h = (writer.height() / 4).clamp(90, 220);
-        let deco_x = writer.width().saturating_sub(deco_w + 24);
-        let deco_y = 24;
-        writer.draw_strata_stack(deco_x, deco_y, deco_w, deco_h);
+        let lite = super::is_lite();
+        // Lite mode uses a plain black background: the tinted "strata" fill
+        // is 2 million pixel stores on a 1080p panel and buys nothing when
+        // the goal is a fast, readable boot log.
+        let background = if lite {
+            RgbColor::new(0, 0, 0)
+        } else {
+            RgbColor::new(0x12, 0x16, 0x1E)
+        };
+        writer.clear_with(background);
+        if !lite {
+            // Decorative background mark for Strat9 identity.
+            let deco_w = (writer.width() / 3).clamp(120, 300);
+            let deco_h = (writer.height() / 4).clamp(90, 220);
+            let deco_x = writer.width().saturating_sub(deco_w + 24);
+            let deco_y = 24;
+            writer.draw_strata_stack(deco_x, deco_y, deco_w, deco_h);
+        }
         writer.set_rgb_color(
             RgbColor::new(0xA7, 0xD8, 0xD8),
-            RgbColor::new(0x12, 0x16, 0x1E),
+            background,
         );
         writer.write_bytes("Strat9-OS v0.1.0\n");
-        writer.set_rgb_color(
-            RgbColor::new(0xE2, 0xE8, 0xF0),
-            RgbColor::new(0x12, 0x16, 0x1E),
-        );
+        writer.set_rgb_color(RgbColor::new(0xE2, 0xE8, 0xF0), background);
         VGA_AVAILABLE.store(true, Ordering::Relaxed);
         // Publish the UEFI framebuffer geometry so the video driver can adopt
         // this surface when no virtio-gpu/amdgpu device is available.
@@ -291,8 +309,31 @@ pub fn init(
             bpp,
             pitch
         );
+        let wc = writer.canvas_wc();
         drop(writer);
-        draw_boot_status_line(UiTheme::OCEAN_STATUS);
+        if lite {
+            // No status bar in lite mode: it repaints a full-width strip on a
+            // timer, and every repaint competes with the boot log for the
+            // (possibly uncached) framebuffer.
+            log::info!(
+                "[console] mode=lite fb={}x{}x{} pitch={} wc={}",
+                fb_width,
+                fb_height,
+                bpp,
+                pitch,
+                wc
+            );
+        } else {
+            draw_boot_status_line(UiTheme::OCEAN_STATUS);
+            log::info!(
+                "[console] mode=full fb={}x{}x{} pitch={} wc={}",
+                fb_width,
+                fb_height,
+                bpp,
+                pitch,
+                wc
+            );
+        }
     } else {
         writer.enabled = false;
         VGA_AVAILABLE.store(false, Ordering::Relaxed);

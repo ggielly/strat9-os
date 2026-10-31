@@ -1,0 +1,16 @@
+[package]
+name = "iwlwifi-ax201"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Intel Wi-Fi 6 AX201 (CNVi, 802.11ax 2x2) driver core with WPA2 supplicant"
+
+[dependencies]
+net-core = { path = "../../nic/net-core" }
+nic-buffers = { path = "../../nic/nic-buffers" }
+
+[lib]
+name = "iwlwifi_ax201"
+path = "src/lib.rs"

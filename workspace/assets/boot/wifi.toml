@@ -1,0 +1,36 @@
+# Strat9 OS Wi-Fi configuration for the Intel AX201 (CNVi) driver.
+#
+# The file is embedded at /initfs/wifi.toml by tools/scripts/create-uefi-image.sh.
+# Set `enabled = true` once the values below match your access point.
+#
+# Firmware: Intel does not allow redistributing the ucode blob.  Copy the
+# matching file from your Linux installation, e.g.
+#   cp /lib/firmware/iwlwifi-QuZ-a0-hr-b0-77.ucode workspace/assets/firmware/
+# The image script copies every *.ucode in that directory to /initfs.
+
+[wifi]
+enabled = false
+
+# Interface name reported by ifconfig once the data path is wired.
+interface = "wlan0"
+
+# Regulatory country (ISO 3166-1 alpha-2).  Used for 5 GHz channel selection.
+country = "FR"
+
+# SSID and WPA2-PSK passphrase (8..63 ASCII characters), or a raw PMK:
+#   psk = "<64 hex digits>"
+ssid = "ChangeMe"
+passphrase = "ChangeMe-1234"
+
+# Firmware path inside the initfs namespace.
+firmware = "/initfs/iwlwifi-QuZ-a0-hr-b0-77.ucode"
+
+# Set to true for a non-broadcasting AP.
+hidden = false
+
+# Optional.  When both are set the driver joins directly (no scan):
+# bssid = "aa:bb:cc:dd:ee:ff"
+# channel = 6
+
+[roam]
+# Reserved for future roaming policy (RSSI thresholds, BSSID blacklist).

@@ -201,6 +201,7 @@ dependencies = [
     "strate-webrtc-release",
     "dhcp-client-release",
     "ping-release",
+    "strate-bt-release",
     "telnetd-release",
     "udp-tool-release",
     "strate-web-admin-release",
@@ -256,6 +257,7 @@ dependencies = [
     "strate-webrtc-release",
     "dhcp-client-release",
     "ping-release",
+    "strate-bt-release",
     "telnetd-release",
     "udp-tool-release",
     "strate-web-admin-release",
@@ -284,6 +286,7 @@ dependencies = [
     "strate-webrtc-release",
     "dhcp-client-release",
     "ping-release",
+    "strate-bt-release",
     "telnetd-release",
     "udp-tool-release",
     "strate-web-admin-release",
@@ -554,6 +557,7 @@ dependencies = [
     "strate-webrtc-release",
     "dhcp-client-release",
     "ping-release",
+    "strate-bt-release",
     "telnetd-release",
     "udp-tool-release",
     "strate-web-admin-release",
@@ -581,6 +585,7 @@ dependencies = [
     "strate-webrtc-release",
     "dhcp-client-release",
     "ping-release",
+    "strate-bt-release",
     "telnetd-release",
     "udp-tool-release",
     "strate-web-admin-release",
@@ -1107,4 +1112,25 @@ args = [
     "strate-gui-windows",
     "--",
     "--test",
+]
+
+# =============================================================================
+# Bluetooth console dump
+# =============================================================================
+
+[tasks.strate-bt-release]
+description = "Build Bluetooth LE console dump strate (release)"
+cwd = "workspace/components/bt/strate-bt"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "--features",
+    "runtime",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
 ]

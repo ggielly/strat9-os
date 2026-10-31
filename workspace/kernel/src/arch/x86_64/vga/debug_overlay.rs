@@ -59,11 +59,15 @@ fn vga_debug_scroll() {
     let bg = panic_pack_rgb(fmt, 0x12, 0x16, 0x1E);
 
     unsafe {
-        // Shift content up by one text line.
-        core::ptr::copy(fb.add(line_bytes), fb, total);
+        // Shift content up by one text line. `copy_forward` uses 8-byte
+        // stores: `core::ptr::copy` lowers to `rep movsb`, which on uncached
+        // framebuffer memory runs at a few MB/s and makes the panel repaint
+        // visibly from top to bottom.
+        super::fastfb::copy_forward(fb, fb.add(line_bytes), total);
         // Fill the newly exposed last line.
         let clear = fb.add((max_row - 1) * line_bytes);
         vga_debug_fill_line(clear, pitch, max_col, bpp_bytes, bg);
+        super::fastfb::fence();
     }
 }
 
@@ -77,23 +81,8 @@ unsafe fn vga_debug_fill_line(
     color: u32,
 ) {
     let fill_pixels = max_col * 8; // visible pixel width only
-    if bpp_bytes == 4 {
-        for row in 0..16 {
-            let r = base.add(row * pitch) as *mut u32;
-            for p in 0..fill_pixels {
-                core::ptr::write_volatile(r.add(p), color);
-            }
-        }
-    } else {
-        let fill_bytes = fill_pixels * 3;
-        for row in 0..16 {
-            let r = base.add(row * pitch);
-            for x in (0..fill_bytes).step_by(3) {
-                core::ptr::write_volatile(r.add(x), color as u8);
-                core::ptr::write_volatile(r.add(x + 1), (color >> 8) as u8);
-                core::ptr::write_volatile(r.add(x + 2), (color >> 16) as u8);
-            }
-        }
+    for row in 0..16 {
+        super::fastfb::fill_pixels(base.add(row * pitch), bpp_bytes, color, fill_pixels);
     }
 }
 
@@ -106,24 +95,13 @@ unsafe fn vga_debug_clear_cell(
     bpp_bytes: usize,
     bg: u32,
 ) {
-    if bpp_bytes == 4 {
-        let x_off = x * 4;
-        for row in 0..16 {
-            let r = fb.add((y + row) * pitch + x_off) as *mut u32;
-            for c in 0..8 {
-                core::ptr::write_volatile(r.add(c), bg);
-            }
-        }
-    } else {
-        for row in 0..16 {
-            let r = fb.add((y + row) * pitch + x * 3);
-            for c in 0..8 {
-                let p = r.add(c * 3);
-                core::ptr::write_volatile(p, bg as u8);
-                core::ptr::write_volatile(p.add(1), (bg >> 8) as u8);
-                core::ptr::write_volatile(p.add(2), (bg >> 16) as u8);
-            }
-        }
+    for row in 0..16 {
+        super::fastfb::fill_pixels(
+            fb.add((y + row) * pitch + x * bpp_bytes),
+            bpp_bytes,
+            bg,
+            8,
+        );
     }
 }
 
@@ -151,34 +129,20 @@ unsafe fn vga_debug_draw_glyph(
     };
     let gs = idx * 16;
 
-    if bpp_bytes == 4 {
-        for row in 0..16 {
-            let mask = PANIC_FONT_8X16[gs + row];
-            if mask == 0 {
-                continue;
-            }
-            let r = fb.add((y + row) * pitch + x * 4) as *mut u32;
-            for col in 0..8 {
-                if (mask >> (7 - col)) & 1 != 0 {
-                    core::ptr::write_volatile(r.add(col), fg);
-                }
+    // The cell is already background-filled: only the set pixels of each
+    // glyph row are written, as one contiguous 8-pixel store.
+    for row in 0..16 {
+        let mask = PANIC_FONT_8X16[gs + row];
+        if mask == 0 {
+            continue;
+        }
+        let mut colors = [bg; 8];
+        for col in 0..8 {
+            if (mask >> (7 - col)) & 1 != 0 {
+                colors[col] = fg;
             }
         }
-    } else {
-        for row in 0..16 {
-            let mask = PANIC_FONT_8X16[gs + row];
-            if mask == 0 {
-                continue;
-            }
-            for col in 0..8 {
-                if (mask >> (7 - col)) & 1 != 0 {
-                    let p = fb.add((y + row) * pitch + (x + col) * 3);
-                    core::ptr::write_volatile(p, fg as u8);
-                    core::ptr::write_volatile(p.add(1), (fg >> 8) as u8);
-                    core::ptr::write_volatile(p.add(2), (fg >> 16) as u8);
-                }
-            }
-        }
+        super::fastfb::store_row(fb.add((y + row) * pitch + x * bpp_bytes), bpp_bytes, &colors);
     }
 }
 

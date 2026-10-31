@@ -21,6 +21,16 @@ type = "elf"
 probe_mode = "full"
 
 [[silos]]
+name = "bt"
+family = "DRV"
+mode = "076"
+sid = 42
+[[silos.strates]]
+name = "strate-bt"
+binary = "/initfs/strate-bt"
+type = "elf"
+
+[[silos]]
 name = "iommu"
 family = "SYS"
 mode = "716"

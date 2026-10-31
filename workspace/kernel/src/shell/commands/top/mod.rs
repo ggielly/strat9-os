@@ -1221,6 +1221,13 @@ fn render(frame: &mut ratatui::Frame<'_>, view: &View<'_>, table_state: &mut Tab
 /// Top command main loop
 #[cfg(target_arch = "x86_64")]
 pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
+    if crate::arch::x86_64::vga::is_lite() {
+        shell_println!(
+            "Error: 'top' needs the graphical console. Reboot with console.mode=full \
+             (see /boot/strat9.cfg)."
+        );
+        return Ok(());
+    }
     let Some(_guard) = TuiGuard::enter() else {
         shell_println!("Error: 'top' requires a graphical framebuffer console.");
         return Ok(());

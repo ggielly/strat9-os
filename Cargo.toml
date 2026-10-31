@@ -17,6 +17,7 @@ members = [
     "workspace/drivers/nic/nic-queues",
     "workspace/drivers/nic/intel-ethernet",
     "workspace/drivers/nic/e1000",
+    "workspace/drivers/net/iwlwifi",
     "workspace/drivers/nic/driver-net-proto",
     "workspace/components/api",
     "workspace/components/alloc-freelist",
@@ -44,6 +45,7 @@ members = [
     "workspace/components/musl-compat",
     "workspace/components/strate-console",
     "workspace/components/strate-iommu",
+    "workspace/components/bt/strate-bt",
 ]
 exclude = [
     "workspace/components/strate-fs-xfs", # Missing fs-abstraction dependency : TODO

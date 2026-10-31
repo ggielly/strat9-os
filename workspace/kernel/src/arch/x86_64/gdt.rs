@@ -24,7 +24,7 @@ use core::{
 };
 use x86_64::{
     instructions::{
-        segmentation::{Segment, CS, DS, SS, ES, FS},
+        segmentation::{Segment, CS, DS, ES, FS, SS},
         tables::load_tss,
     },
     structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector},
@@ -135,9 +135,7 @@ pub fn init_cpu(cpu_index: usize) {
 
         // Raw e9 output : e9_println! with format_args hangs before IDT is loaded.
         for &b in b"GDT init OK\n" {
-            unsafe {
-                core::arch::asm!("out 0xe9, al", in("al") b, options(nomem, nostack));
-            }
+            core::arch::asm!("out 0xe9, al", in("al") b, options(nomem, nostack));
         }
     }
 }

@@ -38,6 +38,7 @@ pub mod hal;
 pub mod hardware;
 pub mod ipc;
 pub mod kaslr;
+pub mod log_ring;
 pub mod memory;
 pub mod namespace;
 pub mod process;
@@ -894,10 +895,25 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // VMware bootloader HHDM may be sparse, causing PF on new heap pages.
     memory::paging::map_all_ram(&mmap_work[..mmap_work_len]);
 
+    // Console rendering mode: `console.mode=full|lite|serial` from the boot
+    // environment (see `/boot/strat9.cfg`). Selected before any framebuffer
+    // access so `serial` never touches the panel and `lite` skips the
+    // decorative boot art.
+    let console_mode = arch::x86_64::vga::select_console_mode(&args);
+    serial_println!(
+        "[init] Console mode: {} (console.mode={})",
+        console_mode.as_str(),
+        args.env_get("console.mode").unwrap_or("auto")
+    );
+
     // Framebuffer is often backed by MMIO memory outside RAM (e.g. around 0xFDxxxxxx),
     // or sometimes at the very end of RAM that might be missed by the bootloader's initial map.
     // Explicitly map its full range in HHDM for all later graphics access.
-    if args.framebuffer_addr != 0 && args.framebuffer_stride != 0 && args.framebuffer_height != 0 {
+    if console_mode != arch::x86_64::vga::ConsoleMode::Serial
+        && args.framebuffer_addr != 0
+        && args.framebuffer_stride != 0
+        && args.framebuffer_height != 0
+    {
         let fb_phys = if args.framebuffer_addr >= hhdm {
             args.framebuffer_addr - hhdm
         } else {
@@ -1439,14 +1455,19 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         }
         #[cfg(target_arch = "x86_64")]
         {
-            match process::Task::new_kernel_task_with_stack(
-                shell::mouse_task_main,
-                "console-mouse",
-                process::TaskPriority::Normal,
-                64 * 1024,
-            ) {
-                Ok(task) => process::add_task(task),
-                Err(err) => serial_println!("[WARN] Mouse task unavailable: {}", err),
+            // Lite mode is a text console: no pointer, no status strip, no
+            // panel chrome. Skipping these workers removes the periodic
+            // full-width repaints that make a real panel feel slow.
+            if !arch::x86_64::vga::is_lite() {
+                match process::Task::new_kernel_task_with_stack(
+                    shell::mouse_task_main,
+                    "console-mouse",
+                    process::TaskPriority::Normal,
+                    64 * 1024,
+                ) {
+                    Ok(task) => process::add_task(task),
+                    Err(err) => serial_println!("[WARN] Mouse task unavailable: {}", err),
+                }
             }
             match process::Task::new_kernel_task_with_stack(
                 arch::x86_64::vgabuf::console_task_main,
@@ -1468,18 +1489,23 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             }
         }
         crate::e9_mark!(b'Y');
-        if let Ok(status_task) = process::Task::new_kernel_task_with_stack(
-            arch::vga::status_line_task_main,
-            "status-line",
-            process::TaskPriority::Low,
-            64 * 1024,
-        ) {
-            process::add_task(status_task);
-            crate::e9_mark!(b'y');
-            // Switch from live VGA debug output to buffered vgabuf path.
-            // The console-render task drains vgabuf; status-line is a fallback.
-            crate::debug_cfg::set_vga_debug_live(false);
+        let spawn_status_line = !arch::vga::is_lite();
+        if spawn_status_line {
+            if let Ok(status_task) = process::Task::new_kernel_task_with_stack(
+                arch::vga::status_line_task_main,
+                "status-line",
+                process::TaskPriority::Low,
+                64 * 1024,
+            ) {
+                process::add_task(status_task);
+                crate::e9_mark!(b'y');
+            }
         }
+        // Switch from live VGA debug output to buffered vgabuf path.
+        // The console-render task drains vgabuf; status-line is a fallback.
+        // In lite mode there is no fallback drawer, so the buffered path must
+        // still take over (it is the only writer).
+        crate::debug_cfg::set_vga_debug_live(false);
     }
     #[cfg(feature = "selftest")]
     {

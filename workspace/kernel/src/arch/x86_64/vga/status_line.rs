@@ -269,6 +269,11 @@ pub fn set_status_ip(ip: &str) {
 
 /// Performs the draw system status line operation.
 pub fn draw_system_status_line(theme: UiTheme) {
+    // Lite mode has no status strip: it repaints a full-width row on a timer,
+    // which is exactly the periodic framebuffer traffic we are avoiding.
+    if super::is_lite() {
+        return;
+    }
     let info = status_line_info();
     let tick = crate::process::scheduler::ticks();
     let render = StatusLineRender::new(&info.hostname, &info.ip, tick);
@@ -362,7 +367,7 @@ fn try_status_line_snapshot() -> Option<(
 
 /// Performs the maybe refresh system status line operation.
 pub fn maybe_refresh_system_status_line(theme: UiTheme) {
-    if !is_available() {
+    if !is_available() || super::is_lite() {
         return;
     }
 

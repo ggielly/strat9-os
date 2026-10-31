@@ -532,6 +532,7 @@ impl UhciController {
                 self.ctrl_transfer(port, &set_config, None, 0, addr, max_pkt0 as u32, low_speed)
             };
 
+            // EHCI/UHCI have no bulk endpoint plumbing yet: HID only.
             crate::hardware::usb::hid::enumerate_device(port, addr as u8, &dev_desc);
 
             usb_address += 1;

@@ -6,6 +6,8 @@
 // - UHCI (USB 1.1)
 // - HID devices (keyboard, mouse)
 
+pub mod btusb;
+pub mod class;
 pub mod ehci;
 pub mod hid;
 #[cfg(target_arch = "x86_64")]
@@ -47,6 +49,10 @@ pub fn init() {
     #[cfg(target_arch = "x86_64")]
     uhci::init();
     crate::e9_mark!(b'U');
+
+    // Bluetooth HCI transport. Enumeration already probed every device through
+    // `class::enumerate_device`; this only announces readiness.
+    btusb::init();
 
     // Initialize HID drivers after controllers are ready
     hid::init();

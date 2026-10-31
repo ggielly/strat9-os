@@ -390,6 +390,48 @@ impl VgaWriter {
         true
     }
 
+    /// True when the lightweight text console is selected.
+    #[inline]
+    pub(crate) fn lite_mode(&self) -> bool {
+        super::is_lite()
+    }
+
+    /// Whether the framebuffer mapping is write-combining.
+    pub fn canvas_wc(&self) -> bool {
+        self.canvas.as_ref().map(|c| c.wc).unwrap_or(false)
+    }
+
+    /// Bulk-fill `count` pixels with `packed`, via the SIMD framebuffer ops.
+    ///
+    /// The direct-to-hardware paths used to issue one `write_volatile` per
+    /// pixel. On a 1080p panel a clear is 2 million stores, and on uncached
+    /// MMIO each one is a separate bus transaction: that is the "screen
+    /// repaints from top to bottom" boot delay. The SSE2 fill writes 16 bytes
+    /// per store and keeps the stores sequential, which is what write-combining
+    /// memory needs to merge them into full cache lines.
+    #[inline]
+    fn hw_fill_row(&self, dst: *mut u8, packed: u32, count: usize) {
+        if count == 0 {
+            return;
+        }
+        let ops = self.can().ops;
+        // SAFETY: `dst` addresses `count` consecutive 32bpp pixels inside the
+        // mapped framebuffer row selected by the caller.
+        unsafe { (ops.fill)(dst as *mut u32, packed, count) };
+    }
+
+    /// Fence pending write-combining stores so they become visible.
+    #[inline]
+    fn hw_fence(&self) {
+        if !self.canvas_wc() {
+            return;
+        }
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!("sfence", options(nostack, preserves_flags));
+        }
+    }
+
     /// Performs the pack color operation.
     #[inline]
     pub(crate) fn pack_color(&self, color: RgbColor) -> u32 {
@@ -612,10 +654,37 @@ impl VgaWriter {
             return false;
         }
         if self.can().back_buffer.is_none() {
-            let mut buf = Vec::with_capacity(self.can().width.saturating_mul(self.can().height));
-            for y in 0..self.can().height {
-                for x in 0..self.can().width {
-                    buf.push(self.read_hw_pixel_packed(x, y));
+            let (fw, fh) = (self.can().width, self.can().height);
+            let mut buf = Vec::new();
+            if let Err(_) = buf.try_reserve_exact(fw.saturating_mul(fh)) {
+                return false;
+            }
+            if self.lite_mode() {
+                // Lite mode owns the whole screen and has just cleared it, so
+                // there is nothing worth preserving. Reading every pixel back
+                // from the (possibly uncached) framebuffer costs a full panel
+                // round-trip on real hardware; fill instead.
+                buf.resize(fw.saturating_mul(fh), self.bg);
+            } else if self.fmt.bpp == 32 {
+                // Wide hardware path: one bulk copy per row.
+                buf.resize(fw.saturating_mul(fh), 0);
+                let src = self.can().addr;
+                let pitch = self.can().pitch;
+                for y in 0..fh {
+                    // SAFETY: row `y` is `fw` 32bpp pixels wide.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            src.add(y * pitch),
+                            buf.as_mut_ptr().add(y * fw) as *mut u8,
+                            fw * 4,
+                        );
+                    }
+                }
+            } else {
+                for y in 0..fh {
+                    for x in 0..fw {
+                        buf.push(self.read_hw_pixel_packed(x, y));
+                    }
                 }
             }
             self.canm().back_buffer = Some(buf);
@@ -654,9 +723,10 @@ impl VgaWriter {
 
         // Gate both rasterization and presentation, not just framebuffer copies.
         let now = crate::process::scheduler::ticks();
+        let min_ticks = core::cmp::max(super::present_min_ticks(), 1);
         if !force
             && now != 0
-            && now.saturating_sub(self.can().last_present_tick) < PRESENT_MIN_TICKS
+            && now.saturating_sub(self.can().last_present_tick) < min_ticks
         {
             self.canm().present_pending = true;
             return;
@@ -726,24 +796,32 @@ impl VgaWriter {
 
             if bpp == 32 {
                 let row_bytes = region.w * 4;
+                let ops = self.can().ops;
                 if region.x == 0 && region.w == fb_width && pitch == row_bytes {
                     // Full-width scroll damage is contiguous in both buffers.
                     unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            buf_ptr.add(region.y * fb_width) as *const u8,
-                            fb_addr.add(region.y * pitch),
-                            row_bytes * region.h,
+                        (ops.blit)(
+                            fb_addr.add(region.y * pitch) as *mut u32,
+                            buf_ptr.add(region.y * fb_width),
+                            region.w * region.h,
                         );
                     }
                 } else {
                     for y in region.y..(region.y + region.h) {
-                        let src = unsafe { buf_ptr.add(y * fb_width + region.x) as *const u8 };
+                        let src = unsafe { buf_ptr.add(y * fb_width + region.x) };
                         let dst_off = y * pitch + region.x * 4;
+                        // SAFETY: `src` is `region.w` u32 inside the back buffer;
+                        // `dst_off..dst_off+row_bytes` is inside the mapped row.
                         unsafe {
-                            core::ptr::copy_nonoverlapping(src, fb_addr.add(dst_off), row_bytes);
+                            (ops.blit)(
+                                fb_addr.add(dst_off) as *mut u32,
+                                src,
+                                region.w,
+                            );
                         }
                     }
                 }
+                self.hw_fence();
             } else {
                 // 24bpp: convert row-by-row to packed bytes, then bulk-copy.
                 // Stack buffer avoids heap allocation; falls back to heap
@@ -812,6 +890,11 @@ impl VgaWriter {
 
     pub(crate) fn request_present(&mut self) {
         if !self.draw_to_back_buffer() {
+            // Direct mode (no back buffer, e.g. a driver that scans out the
+            // same surface): rasterize pending cells, there is nothing to copy.
+            if self.can().track_dirty {
+                self.present_inner(false);
+            }
             return;
         }
         self.canm().present_pending = true;
@@ -824,7 +907,8 @@ impl VgaWriter {
             return;
         }
         let now = crate::process::scheduler::ticks();
-        if force || now.saturating_sub(self.canm().last_present_tick) >= PRESENT_MIN_TICKS {
+        let min_ticks = core::cmp::max(super::present_min_ticks(), 1);
+        if force || now.saturating_sub(self.canm().last_present_tick) >= min_ticks {
             self.present_inner(force);
         }
     }
@@ -1199,19 +1283,16 @@ impl VgaWriter {
         }
 
         let _ = canvas;
-        // Direct HW path: bulk fill per row.
+        // Direct HW path: one bulk store sequence per row.
         if self.fmt.bpp == 32 {
             let canvas = self.can();
-            let _row_bytes = fw * 4;
+            let pitch = canvas.pitch;
+            let base = canvas.addr;
             for y in 0..fh {
-                let off = y * canvas.pitch;
-                unsafe {
-                    let ptr = canvas.addr.add(off) as *mut u32;
-                    for x in 0..fw {
-                        core::ptr::write_volatile(ptr.add(x), packed);
-                    }
-                }
+                // SAFETY: row `y` of the mapped framebuffer is `fw` pixels wide.
+                self.hw_fill_row(unsafe { base.add(y * pitch) }, packed, fw);
             }
+            self.hw_fence();
         } else {
             for y in 0..fh {
                 for x in 0..fw {
@@ -1433,21 +1514,17 @@ impl VgaWriter {
         }
 
         if self.fmt.bpp == 32 {
+            let pitch = self.can().pitch;
+            let base = self.can().addr;
             for py in sy..(sy + sh) {
-                let Some(row_off) = py
-                    .checked_mul(self.can().pitch)
-                    .and_then(|v| v.checked_add(sx * 4))
+                let Some(row_off) = py.checked_mul(pitch).and_then(|v| v.checked_add(sx * 4))
                 else {
                     continue;
                 };
-                let count = sw;
-                unsafe {
-                    let ptr = self.can().addr.add(row_off) as *mut u32;
-                    for i in 0..count {
-                        core::ptr::write_volatile(ptr.add(i), packed);
-                    }
-                }
+                // SAFETY: `row_off` + sw*4 stays inside the row clip computed above.
+                self.hw_fill_row(unsafe { base.add(row_off) }, packed, sw);
             }
+            self.hw_fence();
             return;
         }
 
@@ -1817,23 +1894,38 @@ impl VgaWriter {
             self.mark_dirty_rect(pixel_x, pixel_y, gw, gh);
         } else {
             if self.fmt.bpp == 32 {
+                // Stage each glyph row in a small stack buffer, then emit one
+                // sequential bulk store. A glyph is 8..16 pixels wide, so this
+                // turns 128 scattered volatile stores per cell into a handful
+                // of contiguous 32..64-byte writes.
+                let mut row = [0u32; 32];
+                let pitch = self.can().pitch;
+                // Clip to the right edge: a glyph drawn at the last column
+                // must not spill into the next row's pixels.
+                let w = gw
+                    .min(row.len())
+                    .min(self.can().width.saturating_sub(pixel_x));
+                let base = self.can().addr;
                 for gy in 0..gh {
-                    if let Some(off) = self.pixel_offset(pixel_x, pixel_y + gy) {
-                        let row_ptr = unsafe { self.can().addr.add(off) } as *mut u32;
-                        for gx in 0..gw {
-                            let idx = gy * gw + gx;
-                            let color = if idx < glyph_pixels && unsafe { *mask_ptr.add(idx) } != 0
-                            {
-                                fg
-                            } else {
-                                bg
-                            };
-                            unsafe {
-                                core::ptr::write_volatile(row_ptr.add(gx), color);
-                            }
-                        }
+                    if self.pixel_offset(pixel_x, pixel_y + gy).is_none() {
+                        continue;
                     }
+                    for gx in 0..w {
+                        let idx = gy * gw + gx;
+                        row[gx] = if idx < glyph_pixels && unsafe { *mask_ptr.add(idx) } != 0 {
+                            fg
+                        } else {
+                            bg
+                        };
+                    }
+                    let off = (pixel_y + gy) * pitch + pixel_x * 4;
+                    let ops = self.can().ops;
+                    // SAFETY: `off` is inside the row (checked by pixel_offset)
+                    // and `w` pixels fit from pixel_x because the back-buffer
+                    // branch is only skipped at the very edge.
+                    unsafe { (ops.blit)(base.add(off) as *mut u32, row.as_ptr(), w) };
                 }
+                self.hw_fence();
             } else {
                 for gy in 0..gh {
                     for gx in 0..gw {
@@ -2191,13 +2283,19 @@ impl VgaWriter {
             }
             self.mark_dirty_rect(0, 0, row_width, text_h);
         } else {
+            // Direct mode: move the panel bytes themselves. `ptr::copy`
+            // lowers to `rep movsb`, which degrades badly on uncached MMIO;
+            // 8-byte stores keep the write-combining buffers fed.
             unsafe {
-                core::ptr::copy(
-                    self.can().addr.add(pixels * self.can().pitch),
-                    self.can().addr,
+                let src = self.can().addr.add(pixels * self.can().pitch);
+                let dst = self.can().addr;
+                crate::arch::x86_64::vga::fastfb::copy_forward(
+                    dst,
+                    src,
                     move_rows * self.can().pitch,
                 );
             }
+            self.hw_fence();
         }
         self.fill_rect(0, move_rows, text_w, pixels, self.unpack_color(self.bg));
     }
@@ -2221,12 +2319,15 @@ impl VgaWriter {
             self.mark_dirty_rect(0, 0, row_width, text_h);
         } else {
             unsafe {
-                core::ptr::copy(
-                    self.can().addr,
-                    self.can().addr.add(pixels * self.can().pitch),
+                let src = self.can().addr;
+                let dst = self.can().addr.add(pixels * self.can().pitch);
+                crate::arch::x86_64::vga::fastfb::copy_backward(
+                    dst,
+                    src,
                     move_rows * self.can().pitch,
                 );
             }
+            self.hw_fence();
         }
         self.fill_rect(0, 0, text_w, pixels, self.unpack_color(self.bg));
     }
@@ -2564,7 +2665,11 @@ impl VgaWriter {
                 );
             }
         }
-        self.draw_scrollbar_inner();
+        if !self.lite_mode() {
+            // The scrollbar strip repaints the full right edge on every frame;
+            // lite mode is a plain log console with no scrollback UI.
+            self.draw_scrollbar_inner();
+        }
         // Compose overlays into the completed frame, before present copies it.
         if text_visible {
             self.text_cursor_save_hw();

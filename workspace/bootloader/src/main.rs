@@ -278,6 +278,44 @@ fn boot_kernel() -> BootResult<()> {
             .unwrap_or(0)
     });
 
+    // Optional boot configuration: `/boot/strat9.cfg` on the same ESP as
+    // kernel.elf. One `key=value` per line, `#` starts a comment. Because the
+    // kernel's `env_get` returns the FIRST match, these lines are written
+    // before the loader defaults and therefore override them. This is how a
+    // machine is switched to `console.mode=lite` (or `serial`) without
+    // rebuilding: edit the file on the ESP.
+    const MAX_BOOT_CONFIG: usize = 2048;
+    let mut boot_cfg = alloc::vec::Vec::new();
+    match volume.open(
+        cstr16!("\\boot\\strat9.cfg"),
+        FileMode::Read,
+        FileAttribute::empty(),
+    ) {
+        Ok(handle) => {
+            if let Some(mut cfg_file) = handle.into_regular_file() {
+                let mut cfg_buf = [0u8; MAX_BOOT_CONFIG];
+                match cfg_file.read(&mut cfg_buf) {
+                    Ok(n) => boot_cfg.extend_from_slice(&cfg_buf[..n]),
+                    Err(error) => uefi::system::with_stdout(|stdout| {
+                        let _ = writeln!(
+                            stdout,
+                            "[boot] strat9.cfg read failed: {}",
+                            error.status()
+                        );
+                    }),
+                }
+            }
+        }
+        Err(_) => {
+            // Absent config is the normal case, not an error.
+        }
+    }
+    if boot_cfg.len() == MAX_BOOT_CONFIG {
+        uefi::system::with_stdout(|stdout| {
+            let _ = writeln!(stdout, "[boot] strat9.cfg truncated at {} bytes", MAX_BOOT_CONFIG);
+        });
+    }
+
     // Build environment string
     let mut env_buf = [0u8; 4096];
     let mut env_len: usize = 0;
@@ -290,6 +328,19 @@ fn boot_kernel() -> BootResult<()> {
     }
 
     {
+        // User configuration first: first match wins in the kernel parser.
+        for raw in boot_cfg.split(|b| *b == b'\n') {
+            let line = match core::str::from_utf8(raw) {
+                Ok(line) => line.trim_end_matches('\r').trim(),
+                Err(_) => continue,
+            };
+            if line.is_empty() || line.starts_with('#') || !line.contains('=') {
+                continue;
+            }
+            env_write(&mut env_buf, &mut env_len, line);
+            env_write(&mut env_buf, &mut env_len, "\n");
+        }
+
         env_write(
             &mut env_buf,
             &mut env_len,

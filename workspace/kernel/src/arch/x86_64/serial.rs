@@ -465,7 +465,10 @@ pub fn _print(args: fmt::Arguments) {
     if PANIC_IN_PROGRESS.load(Ordering::Relaxed) {
         // SAFETY: In emergency mode, we bypass the mutex to ensure output.
         let mut port = unsafe { SerialPort::new(0x3F8) };
-        let _ = port.write_fmt(args);
+        let mut tee = crate::log_ring::TeeWriter::new(&mut port);
+        let _ = tee.write_fmt(args);
+        // Panic path: never spin on the ring lock.
+        let _ = crate::log_ring::try_push(tee.captured());
         return;
     }
 
@@ -483,22 +486,32 @@ pub fn _print(args: fmt::Arguments) {
         let mut queued = QueuedWriter {
             chunk: TxChunk::EMPTY,
         };
-        let mut prefix_writer = BootPrefixWriter::new(&mut queued);
-        let mut writer = AnsiStylingWriter::new(&mut prefix_writer);
-        let _ = writer.write_fmt(args);
-        let _ = writer.finish();
-        prefix_writer.finish();
+        let mut tee = crate::log_ring::TeeWriter::new(&mut queued);
+        {
+            let mut prefix_writer = BootPrefixWriter::new(&mut tee);
+            let mut writer = AnsiStylingWriter::new(&mut prefix_writer);
+            let _ = writer.write_fmt(args);
+            let _ = writer.finish();
+            prefix_writer.finish();
+        }
+        // Best-effort: logging must never block or panic on the ring.
+        let _ = crate::log_ring::try_push(tee.captured());
+        drop(tee);
         let _ = queued.flush();
         return;
     }
 
     // Early boot: no worker exists yet. Never block acquiring the port lock.
     if let Some(mut port) = SERIAL1.try_lock() {
-        let mut prefix_writer = BootPrefixWriter::new(&mut *port);
-        let mut writer = AnsiStylingWriter::new(&mut prefix_writer);
-        let _ = writer.write_fmt(args);
-        let _ = writer.finish();
-        prefix_writer.finish();
+        let mut tee = crate::log_ring::TeeWriter::new(&mut *port);
+        {
+            let mut prefix_writer = BootPrefixWriter::new(&mut tee);
+            let mut writer = AnsiStylingWriter::new(&mut prefix_writer);
+            let _ = writer.write_fmt(args);
+            let _ = writer.finish();
+            prefix_writer.finish();
+        }
+        let _ = crate::log_ring::try_push(tee.captured());
     }
 }
 
@@ -529,9 +542,13 @@ pub fn _print_force(args: fmt::Arguments) {
     let saved_flags = force_lock_acquire();
     // SAFETY: We hold `FORCE_LOCK` with IRQs disabled, giving exclusive UART access.
     let mut port = unsafe { SerialPort::new(0x3F8) };
-    let mut prefix_writer = BootPrefixWriter::new(&mut port);
-    let _ = prefix_writer.write_fmt(args);
-    prefix_writer.finish();
+    let mut tee = crate::log_ring::TeeWriter::new(&mut port);
+    {
+        let mut prefix_writer = BootPrefixWriter::new(&mut tee);
+        let _ = prefix_writer.write_fmt(args);
+        prefix_writer.finish();
+    }
+    let _ = crate::log_ring::try_push(tee.captured());
     // Release lock and restore RFLAGS (re-enables IRQs if they were on before).
     force_lock_release(saved_flags);
 }

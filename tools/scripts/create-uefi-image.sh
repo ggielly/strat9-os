@@ -16,6 +16,9 @@ MODULE_TARGET_DIR="target/x86_64-unknown-none/$MODULE_PROFILE"
 BOOTLOADER_EFI="target/x86_64-unknown-uefi/$PROFILE/strat9-bootloader.efi"
 KERNEL_ELF="target/x86_64-unknown-none/$PROFILE/kernel"
 SILO_CONFIG="$SCRIPT_DIR/../../workspace/assets/boot/silo.toml"
+# Optional kernel boot configuration: copied to the ESP as /boot/strat9.cfg so
+# a machine can be switched to the lite (or serial) console without a rebuild.
+BOOT_CONFIG="$SCRIPT_DIR/../../workspace/assets/boot/strat9.cfg"
 
 strat9_image_name "$IMAGE_BASENAME"
 case "$PROFILE:$MODULE_PROFILE" in
@@ -48,6 +51,22 @@ cp -- "$MODULE_MANIFEST" "$ROOT/modules.manifest"
 printf '%s\n' "$INCLUDE_TESTS" > "$ROOT/include-tests"
 strat9_copy_modules "$MODULE_TARGET_DIR" "$ROOT/boot/initfs"
 cp -- "$SILO_CONFIG" "$ROOT/boot/initfs/silo.toml"
+
+# Wi-Fi configuration and (optional) Intel firmware.  The firmware blob is not
+# redistributed with the repository; drop it in workspace/assets/firmware/.
+WIFI_CONFIG="$SCRIPT_DIR/../../workspace/assets/boot/wifi.toml"
+if [[ -f "$WIFI_CONFIG" ]]; then
+    cp -- "$WIFI_CONFIG" "$ROOT/boot/initfs/wifi.toml"
+fi
+WIFI_FW_DIR="$SCRIPT_DIR/../../workspace/assets/firmware"
+if [[ -d "$WIFI_FW_DIR" ]]; then
+    while IFS= read -r -d '' fw; do
+        cp -- "$fw" "$ROOT/boot/initfs/$(basename "$fw")"
+    done < <(find "$WIFI_FW_DIR" -maxdepth 1 -type f -name '*.ucode' -print0)
+fi
+if [[ -s "$BOOT_CONFIG" ]]; then
+    cp -- "$BOOT_CONFIG" "$ROOT/boot/strat9.cfg"
+fi
 strat9_check_payload "$ROOT"
 
 SECTOR_SIZE=512

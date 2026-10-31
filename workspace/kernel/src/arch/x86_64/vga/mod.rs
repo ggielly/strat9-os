@@ -18,8 +18,10 @@
 
 mod api;
 mod canvas;
+mod console_mode;
 mod cursor;
 mod debug_overlay;
+pub(crate) mod fastfb;
 mod font;
 mod panic_screen;
 mod scrollback;
@@ -30,6 +32,10 @@ mod writer;
 // Re-export everything that was previously public from the old monolithic vga.rs.
 pub use api::*;
 pub use canvas::Canvas;
+pub use console_mode::{
+    current as console_mode, is_lite, is_serial, present_min_ticks,
+    select as select_console_mode, ConsoleMode,
+};
 pub use types::*;
 pub use writer::VgaWriter;
 

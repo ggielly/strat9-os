@@ -11,6 +11,7 @@ pub mod switch;
 pub mod e1000_drv;
 pub mod e1000e_drv;
 pub mod igc_drv;
+pub mod iwlwifi_drv;
 #[cfg(target_arch = "x86_64")]
 pub mod pcnet_drv;
 #[cfg(target_arch = "x86_64")]
@@ -532,6 +533,8 @@ pub fn init() {
     #[cfg(target_arch = "x86_64")]
     rtl8139_drv::init();
     virtio_net::init();
+    // Wi-Fi is optional and only registered once the firmware is alive.
+    iwlwifi_drv::init();
     if let Err(e) = scheme::register_net_scheme() {
         log::warn!("[net] Failed to register net scheme: {:?}", e);
     }

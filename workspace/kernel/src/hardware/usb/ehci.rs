@@ -537,6 +537,7 @@ impl EhciController {
             let _ = unsafe { self.ctrl_transfer(port, &set_config, None, 0, addr, max_pkt0) };
 
             // Phase 5: Hand off to HID driver
+            // EHCI/UHCI have no bulk endpoint plumbing yet: HID only.
             crate::hardware::usb::hid::enumerate_device(port, addr, &desc18);
 
             usb_address += 1;

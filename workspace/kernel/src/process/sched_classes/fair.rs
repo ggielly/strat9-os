@@ -16,10 +16,12 @@ const BASE_SLICE_TICKS: u64 = 1;
 /// Fair starvation threshold in ticks.
 ///
 /// A Fair task that has waited this many ticks without being selected is
-/// boosted to the front of its vruntime position.  At TIMER_HZ=100:
-/// 100 ticks = 1 second.  This prevents indefinite starvation when RT
-/// tasks consume most of the CPU.
-const FAIR_STARVATION_THRESHOLD_TICKS: u64 = 100;
+/// boosted ahead of the vruntime order.  At TIMER_HZ=100 this bounds wakeup
+/// latency: with the old value of 100, a task woken by a 10 ms timer only ran
+/// after ~1 second, which made every telnetd read/write round-trip take a
+/// second.  2 ticks (20 ms) keeps the scheduler responsive while still
+/// preferring the vruntime order whenever it is usable.
+const FAIR_STARVATION_THRESHOLD_TICKS: u64 = 2;
 
 /// Performs the nice to weight operation.
 pub const fn nice_to_weight(nice: super::nice::Nice) -> u64 {

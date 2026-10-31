@@ -440,13 +440,12 @@ pub extern "C" fn _start() -> ! {
                     LineAction::Disconnect
                 ) {
                     log("[telnetd] client quit\n");
-                    // Explicit quit: flush the session with a graceful close,
-                    // then create a fresh listener.  open_listener() never
-                    // returns "fatal", so the daemon cannot die here.
-                    let _ = call::close(fd);
+                    // Explicit quit: say goodbye and drop the session state,
+                    // but keep the listening fd open.  Closing it would also
+                    // tear down strate-net's accept backlog (queued clients).
+                    // The peer closes its side; strate-net then reaps this
+                    // session and promotes the next queued connection.
                     session.reset();
-                    sleep_ms(100);
-                    fd = open_listener();
                     idle_ticks = 0;
                 }
             }

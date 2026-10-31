@@ -57,6 +57,7 @@ nic-buffers = { path = "../drivers/nic/nic-buffers" }
 nic-queues = { path = "../drivers/nic/nic-queues" }
 intel-ethernet = { path = "../drivers/nic/intel-ethernet" }
 e1000 = { path = "../drivers/nic/e1000" }
+iwlwifi-ax201 = { path = "../drivers/net/iwlwifi" }
 driver-net-proto = { path = "../drivers/nic/driver-net-proto" }
 ratatui = { version = "0.30.0", default-features = false }
 

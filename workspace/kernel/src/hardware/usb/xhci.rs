@@ -65,6 +65,8 @@ const TRB_TD_SIZE_MASK: u32 = 0x1F;
 
 const EP_TYPE_CONTROL: u32 = 4;
 const EP_TYPE_INTR_IN: u32 = 7;
+const EP_TYPE_BULK_OUT: u32 = 2;
+const EP_TYPE_BULK_IN: u32 = 6;
 
 const fn trb_get_type(d3: u32) -> u32 {
     (d3 >> TRB_TYPE_SHIFT) & 0xFF
@@ -1007,7 +1009,9 @@ impl XhciController {
                             }
                         }
 
-                        crate::hardware::usb::hid::enumerate_device(port, slot_id, &dev_desc);
+                        crate::hardware::usb::class::enumerate_device(
+                            self, port, slot_id, &dev_desc,
+                        );
                     } else {
                         log::warn!("[xHCI] Port {} get device descriptor failed", port);
                     }
@@ -1421,12 +1425,37 @@ pub fn handle_interrupt() {
                                         };
 
                                         if !buf.is_null() && actual_len > 0 {
-                                            // SAFETY: buf/actual_len describe the
-                                            // transfer buffer filled by the ring.
-                                            unsafe {
-                                                crate::hardware::usb::hid::receive_interrupt_report(
-                                                    slot_id, ep_id, buf, actual_len,
-                                                );
+                                            if crate::hardware::usb::btusb::owns_endpoint(
+                                                slot_id, ep_id,
+                                            ) {
+                                                if crate::hardware::usb::btusb::is_bulk_out(
+                                                    slot_id, ep_id,
+                                                ) {
+                                                    crate::hardware::usb::btusb::tx_complete(
+                                                        ep_id,
+                                                        actual_len,
+                                                    );
+                                                } else {
+                                                    // SAFETY: buf/actual_len describe the
+                                                    // transfer buffer filled by the ring and
+                                                    // stay valid for the duration of the call.
+                                                    let data = unsafe {
+                                                        core::slice::from_raw_parts(
+                                                            buf, actual_len,
+                                                        )
+                                                    };
+                                                    crate::hardware::usb::btusb::on_transfer(
+                                                        slot_id, ep_id, data,
+                                                    );
+                                                }
+                                            } else {
+                                                // SAFETY: buf/actual_len describe the
+                                                // transfer buffer filled by the ring.
+                                                unsafe {
+                                                    crate::hardware::usb::hid::receive_interrupt_report(
+                                                        slot_id, ep_id, buf, actual_len,
+                                                    );
+                                                }
                                             }
                                         }
 
@@ -1444,6 +1473,15 @@ pub fn handle_interrupt() {
                                     if let Some(ref mut dev) = controller.device_slots[idx] {
                                         let ep = ep_id as usize;
                                         if ep < MAX_ENDPOINTS {
+                                            if crate::hardware::usb::btusb::is_bulk_out(
+                                                slot_id, ep_id,
+                                            ) {
+                                                // Release the in-flight packet even on
+                                                // failure; userspace handles retries.
+                                                crate::hardware::usb::btusb::tx_complete(
+                                                    ep_id, 0,
+                                                );
+                                            }
                                             dev.ep_dequeue[ep] =
                                                 (dev.ep_dequeue[ep] + 1) % (XHCI_RING_TRBS - 1);
                                             if dev.ep_dequeue[ep] == 0 {
@@ -1484,6 +1522,24 @@ pub fn handle_interrupt() {
                         {
                             continue;
                         }
+
+                        // Bulk OUT is demand driven: only queue a TRB when a
+                        // Bluetooth packet is waiting, never re-arm stale bytes.
+                        if crate::hardware::usb::btusb::is_bulk_out(dev.slot_id, ep as u8) {
+                            let buf = dev.ep_buf[ep];
+                            // SAFETY: `buf` is the endpoint buffer allocated by
+                            // `alloc_interrupt_buffer` and is BULK_OUT_MAX long.
+                            match unsafe {
+                                crate::hardware::usb::btusb::fill_bulk_out(
+                                    buf,
+                                    crate::hardware::usb::btusb::BULK_OUT_MAX,
+                                )
+                            } {
+                                Some(len) => dev.ep_buf_len[ep] = len,
+                                None => continue,
+                            }
+                        }
+
                         let deq = dev.ep_dequeue[ep];
                         let cycle = dev.ep_cycle[ep];
                         let buf_phys = dev.ep_buf_phys[ep];
@@ -1502,5 +1558,70 @@ pub fn handle_interrupt() {
                 }
             }
         }
+    }
+}
+
+impl XhciController {
+    /// Queues one Bluetooth bulk OUT packet when the endpoint is idle.
+    ///
+    /// Returns `Ok(())` both when a transfer was submitted and when the TX
+    /// queue is empty. The completion event re-arms the endpoint through the
+    /// normal `handle_interrupt` loop, so at most one bulk OUT TRB is
+    /// outstanding per endpoint.
+    pub fn submit_bulk_out(&mut self, slot_id: u8, endpoint: u8) -> Result<(), &'static str> {
+        let idx = slot_id as usize;
+        if idx >= self.device_slots.len() {
+            return Err("Invalid slot for bulk OUT");
+        }
+        let ep = endpoint as usize;
+        if ep == 0 || ep >= MAX_ENDPOINTS {
+            return Err("Invalid bulk OUT endpoint");
+        }
+
+        // Copy the state out so the borrow ends before `ring_doorbell(&mut self)`.
+        let (buf, buf_phys, tr_ring, deq, cycle, active) = {
+            let dev = self.device_slots[idx]
+                .as_ref()
+                .ok_or("Invalid slot for bulk OUT")?;
+            (
+                dev.ep_buf[ep],
+                dev.ep_buf_phys[ep],
+                dev.ep_transfer_rings[ep],
+                dev.ep_dequeue[ep],
+                dev.ep_cycle[ep],
+                dev.ep_active[ep],
+            )
+        };
+        if active {
+            return Ok(());
+        }
+        if buf.is_null() || tr_ring.is_null() {
+            return Err("No buffer or transfer ring for bulk OUT");
+        }
+
+        // SAFETY: `buf` is the endpoint buffer allocated by
+        // `alloc_interrupt_buffer` and is BULK_OUT_MAX bytes long.
+        let len = match unsafe {
+            crate::hardware::usb::btusb::fill_bulk_out(
+                buf,
+                crate::hardware::usb::btusb::BULK_OUT_MAX,
+            )
+        } {
+            Some(len) => len,
+            None => return Ok(()),
+        };
+
+        let trb = Trb::normal(buf_phys, len as u32, cycle, true);
+        unsafe {
+            core::ptr::write_volatile(tr_ring.add(deq), trb);
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            self.ring_doorbell(slot_id, endpoint);
+        }
+
+        if let Some(dev) = self.device_slots[idx].as_mut() {
+            dev.ep_buf_len[ep] = len;
+            dev.ep_active[ep] = true;
+        }
+        Ok(())
     }
 }

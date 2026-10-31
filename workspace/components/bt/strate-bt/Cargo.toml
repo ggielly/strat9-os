@@ -1,0 +1,23 @@
+[package]
+name = "strate-bt"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+description = "Minimal BLE GATT peripheral and log dump pump for Strat9"
+
+[lib]
+name = "strate_bt"
+path = "src/lib.rs"
+
+[[bin]]
+name = "strate-bt"
+path = "src/main.rs"
+required-features = ["runtime"]
+
+[features]
+default = []
+runtime = ["dep:strat9-syscall"]
+
+[dependencies]
+strat9-syscall = { path = "../../syscall", optional = true }

@@ -415,6 +415,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "iwlwifi-ax201"
+version = "0.1.0"
+dependencies = [
+ "net-core",
+ "nic-buffers",
+]
+
+[[package]]
 name = "kasuari"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -938,6 +946,7 @@ dependencies = [
  "heapless 0.9.3",
  "intel-ethernet",
  "intrusive-collections",
+ "iwlwifi-ax201",
  "log",
  "lru 0.12.5",
  "nasm-rs",
@@ -968,6 +977,13 @@ dependencies = [
  "strat9-abi",
  "thiserror",
  "zerocopy",
+]
+
+[[package]]
+name = "strate-bt"
+version = "0.1.0"
+dependencies = [
+ "strat9-syscall",
 ]
 
 [[package]]
