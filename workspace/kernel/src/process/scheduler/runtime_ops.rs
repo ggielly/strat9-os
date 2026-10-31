@@ -1095,6 +1095,15 @@ pub(super) extern "C" fn idle_task_main() -> ! {
         // when the CPU has no other runnable tasks.
         super::deferred_work::process_deferred_work();
 
+        // Interrupt-driven preemption cannot start a task that has never run:
+        // it has no iret frame yet, and the IRQ path deliberately refuses to
+        // fabricate one. On a CPU whose only context is idle, nothing else
+        // would ever pick such a task, so boot-time silos queued on this CPU
+        // would stay Ready forever (observed: APs with fair tasks queued,
+        // sw=0/pre=0 in `scheduler metrics`). Yield explicitly before halting
+        // so the ret-based path can launch them.
+        yield_task();
+
         // Be explicit on SMP: never rely on inherited IF state.
         // If IF=0, HLT can deadlock that CPU forever.
         crate::arch::sti();

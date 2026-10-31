@@ -268,17 +268,30 @@ pub fn sys_net_recv(buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
 
     let mut kbuf = [0u8; MAX_FRAME];
     let n = {
-        // Prefer the N2 ring (IRQ-filled). If it is empty — no IRQ wired yet,
-        // or a dropped interrupt — fall back to a direct HW receive so DHCP
-        // and link-local IPv6 still make progress.
+        // Prefer the N2 rings (IRQ-filled). The IRQ path RSS-distributes
+        // frames across every queue of the device, but a legacy consumer has
+        // no queue-to-thread mapping: it must drain *all* queues. Popping only
+        // queue 0 silently stranded every frame whose hash landed on another
+        // queue (observed: ARP replies and TCP SYN-ACK paths lost, so DHCP and
+        // broadcast worked while unicast services never answered).
+        let device_resource = nic::default_device_with_id().map(|(_, resource)| resource as u64);
         let mut from_ring = None;
         {
             let guard = nic::data_plane().lock();
             if let Some(dp) = guard.as_ref() {
-                match dp.pop_rx(0, &mut kbuf[..requested]) {
-                    Ok(Some(n)) => from_ring = Some(n),
-                    Ok(None) => {}
-                    Err(error) => return Err(error.into()),
+                if let Some(resource) = device_resource {
+                    let queues = dp.queue_count_for(resource).max(1);
+                    for qid in 0..queues {
+                        match dp.pop_rx_for(resource, qid, &mut kbuf[..requested]) {
+                            Ok(Some(n)) => {
+                                from_ring = Some(n);
+                                break;
+                            }
+                            Ok(None) => {}
+                            Err(nic::data_plane::RxError::InvalidQueue) => break,
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
                 }
             }
         }
