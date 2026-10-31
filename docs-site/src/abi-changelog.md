@@ -38,6 +38,8 @@ See:
 
 ## Recent ABI updates (auto-generated)
 
+- 2026-10-31 [`a08f12a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a08f12ae3e800e623bbe208051a771a0f672e657) tools: improve GPL header script for Rust files and update website links kernel: enhance idle task handling with explicit yield to prevent deadlocks syscall: refine network receive logic to handle multiple queues effectively
+- 2026-10-31 [`f2b7eb0`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f2b7eb032c624c5bcfe699d0729bc27d05939e72) Refactor TUI and syscall handling
 - 2026-10-30 [`627a5b7`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/627a5b757a4aa70e3c0c723d810347c3fd26e148) abi/net: allow documented unsafe ring primitives under the workspace lint
 - 2026-10-30 [`f41d977`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f41d977c5d3e8374400f94435f181d6a2dc8117d) Fix build after Code-refactor integration
 - 2026-10-29 [`a7baa3a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a7baa3ae3ae1a615b87a26350c5d8b7985611315) Refactor silo memory management and enhance syscall functionality
@@ -66,8 +68,6 @@ See:
 - 2026-09-26 [`bb2df28`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/bb2df28041b624236e15c6fce6bebe9ed12c991d) Merge branch feat/hal-arch-facade into main
 - 2026-09-25 [`18818c4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/18818c4da69438eac459a92551130a21d9c3da2a) chore(riscv): gate remaining x86-only helpers
 - 2026-09-25 [`fedacdf`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/fedacdf07474f45d9d6b948c4eb0e9d03c73773e) chore(riscv): scope architecture-specific imports
-- 2026-09-25 [`ac591e8`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/ac591e85aa9700fad2fe5db272d3229250b5f377) fix(riscv): gate x86 assembly and align facade signatures
-- 2026-09-25 [`582d31c`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/582d31cdd36cc1fc8e9536f08904b77dc9298eea) fix(riscv): align architecture facade interfaces
 
 <!-- AUTO-ABI-CHANGELOG:END -->
 

@@ -4,12 +4,18 @@
 
 ## Project stats
 
-- **Total commits:** `852`
+- **Total commits:** `858`
 - **Latest tag:** `0.1.0`
 - **Repository:** [git.strat9-os.org](https://git.strat9-os.org/strat9-os/strat9-os)
 
 ## Recent commits (auto-generated)
 
+- 2026-10-31 [`39a5290`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/39a5290eee0f125c41865eceba4e57c81935901e) Enhance TCP listener management and logging
+- 2026-10-31 [`a08f12a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a08f12ae3e800e623bbe208051a771a0f672e657) tools: improve GPL header script for Rust files and update website links kernel: enhance idle task handling with explicit yield to prevent deadlocks syscall: refine network receive logic to handle multiple queues effectively
+- 2026-10-31 [`f2b7eb0`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f2b7eb032c624c5bcfe699d0729bc27d05939e72) Refactor TUI and syscall handling
+- 2026-10-31 [`e851b19`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e851b19db6053103e9f99078d5f8ecb121896019) shell: launch ping from /initfs/ping
+- 2026-10-30 [`5383d49`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/5383d49c83be2e99553d0c449baf1a319c940ed3) kernel: enhance IDT and PAT handling, improve shell parser and output functions
+- 2026-10-30 [`84ef5e4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/84ef5e4f0bdd85ccde024f1c7e65ca201959a38e) docs: update published documentation
 - 2026-10-30 [`627a5b7`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/627a5b757a4aa70e3c0c723d810347c3fd26e148) abi/net: allow documented unsafe ring primitives under the workspace lint
 - 2026-10-30 [`7a38863`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7a388638e288183d877111ff31544d040a90c21d) Fix some stuff.
 - 2026-10-30 [`f41d977`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f41d977c5d3e8374400f94435f181d6a2dc8117d) Fix build after Code-refactor integration
@@ -54,11 +60,5 @@
 - 2026-10-27 [`cffb84e`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/cffb84ea24ba000654d5c123dec82d13cd818cb6) Fix missing unsafe
 - 2026-10-27 [`c1a9fa4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c1a9fa442f2f35052c7f145941592a6ede95a7b3) console: MAP_SHARED frame-backed display surface
 - 2026-10-27 [`9dee8c6`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9dee8c6968728746a7f343734af4e3d4b8aa97ff) console: row-batched glyphs, DMG2 damage list, glyph atlas
-- 2026-10-27 [`97de74a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/97de74a67c4092b6a5682149bfde6f31bf730cb5) console: fix scrolling, UTF-8 input, batched keyboard and pixel masks
-- 2026-10-27 [`839f42c`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/839f42ce661633d42da337de0baac3af5bb5108e) console: display ownership handoff + damage-driven strate console
-- 2026-10-27 [`df5cd77`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/df5cd772caff21fd6ce2860d8ccf8dee76d2b0b1) Merge branch 'main' of ssh://git.strat9-os.org:2222/strat9-os/strat9-os
-- 2026-10-27 [`a101704`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a1017046973dd1cbd0c3ef4288d6f4da60b1f5ed) docs(kernel): list all ABI v5 memory kinds in the E9 boot dump
-- 2026-10-27 [`94ff288`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/94ff2886a51123efdac4bad659c333445b9ec76f) test(abi): repair stale scheme payload wire tests and a lint regression
-- 2026-10-27 [`b071184`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b071184d8fd93a828f2209a7f6395f31151a8e61) fix(dependencies): clean up unused packages and update features in Cargo.toml
 
 <!-- AUTO-CHANGELOG:END -->
