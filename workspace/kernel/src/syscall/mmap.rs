@@ -629,6 +629,35 @@ pub fn sys_mprotect(addr: u64, len: u64, prot: u64) -> Result<u64, SyscallError>
     Ok(0)
 }
 
+/// SYS_MLOCK (108): pin the backing blocks of a mapped range.
+///
+/// The pin keeps each block alive until `SYS_MUNLOCK`, `munmap`, or process
+/// teardown. Locks are per effective mapping and are not inherited by `fork`.
+pub fn sys_mlock(addr: u64, len: u64) -> Result<u64, SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::Fault)?;
+    task.process
+        .address_space_arc()
+        .mlock_range(addr, len)
+        .map_err(|error| {
+            log::debug!("sys_mlock({:#x}, {:#x}) failed: {}", addr, len, error);
+            SyscallError::InvalidArgument
+        })?;
+    Ok(0)
+}
+
+/// SYS_MUNLOCK (109): release pins installed by `SYS_MLOCK`.
+pub fn sys_munlock(addr: u64, len: u64) -> Result<u64, SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::Fault)?;
+    task.process
+        .address_space_arc()
+        .munlock_range(addr, len)
+        .map_err(|error| {
+            log::debug!("sys_munlock({:#x}, {:#x}) failed: {}", addr, len, error);
+            SyscallError::InvalidArgument
+        })?;
+    Ok(0)
+}
+
 /// SYS_MEM_REGION_EXPORT (105): export a tracked region as a public handle.
 pub fn sys_mem_region_export(addr: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::Fault)?;

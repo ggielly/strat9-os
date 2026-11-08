@@ -34,9 +34,9 @@ use spin::Once;
 use crate::{
     capability::CapId,
     memory::{
-        allocate_mapping_cap_id, mapping_index, paging::BuddyFrameAllocator, release_owned_block,
-        resolve_handle, try_register_mapping_identity, unregister_mapping_identity, BlockHandle,
-        MappingRef,
+        allocate_mapping_cap_id, mapping_index, ownership_table, paging::BuddyFrameAllocator,
+        release_owned_block, resolve_handle, try_register_mapping_identity,
+        unregister_mapping_identity, BlockHandle, MappingRef, RemoveRefResult,
     },
     process::task::Pid,
     sync::SpinLock,
@@ -130,6 +130,15 @@ pub struct EffectiveMapping {
     pub page_size: VmaPageSize,
 }
 
+/// One mapping pinned by `mlock`.
+#[derive(Clone, Copy)]
+struct LockedMapping {
+    /// Backing block kept alive by the pin.
+    handle: BlockHandle,
+    /// Mapped length in bytes (4 KiB or 2 MiB).
+    len: u64,
+}
+
 /// A per-process address space backed by a PML4 page table.
 ///
 /// Kernel tasks share a single `AddressSpace` (the kernel AS).
@@ -174,6 +183,8 @@ pub struct AddressSpace {
     owner_pid: AtomicU32,
     /// Stable owner of VMA charges, shared by all threads of this process.
     silo_memory_account: SpinLock<Option<Arc<crate::silo::SiloMemoryAccount>>>,
+    /// Mappings pinned by `mlock`, keyed by effective-mapping start VA.
+    locked_mappings: SpinLock<BTreeMap<u64, LockedMapping>>,
 }
 
 /// Refund a VMA reservation on every error path, including frame-allocation failure.
@@ -286,6 +297,7 @@ impl AddressSpace {
             effective_mappings: SpinLock::new(BTreeMap::new()),
             owner_pid: AtomicU32::new(0),
             silo_memory_account: SpinLock::new(None),
+            locked_mappings: SpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -395,6 +407,7 @@ impl AddressSpace {
             effective_mappings: SpinLock::new(BTreeMap::new()),
             owner_pid: AtomicU32::new(0),
             silo_memory_account: SpinLock::new(None),
+            locked_mappings: SpinLock::new(BTreeMap::new()),
         })
     }
 
@@ -514,6 +527,7 @@ impl AddressSpace {
 
     /// Removes an effective mapping from the address space tracking table.
     pub fn unregister_effective_mapping(&self, start: u64) -> Option<EffectiveMapping> {
+        self.release_mapping_lock(start);
         let mapping = self.effective_mappings.lock().remove(&start);
         if let Some(mapping) = mapping {
             if let Some(block) = unregister_mapping_identity(mapping.handle, mapping.cap_id) {
@@ -541,6 +555,108 @@ impl AddressSpace {
     /// Returns the effective mapping that starts exactly at `start`.
     pub fn effective_mapping_by_start(&self, start: u64) -> Option<EffectiveMapping> {
         self.effective_mappings.lock().get(&start).copied()
+    }
+
+    /// Pins every mapped block intersecting `[start, start + len)`.
+    ///
+    /// Lock granularity is the effective mapping: a 2 MiB mapping is pinned as
+    /// one block even when only part of it is covered. Locks are not inherited
+    /// by `fork` and are released automatically by unmap/teardown.
+    pub fn mlock_range(&self, start: u64, len: u64) -> Result<usize, &'static str> {
+        let end = validate_lock_range(start, len)?;
+
+        let candidates: Vec<(u64, BlockHandle, u64)> = {
+            let mappings = self.effective_mappings.lock();
+            let from = start.saturating_sub(VmaPageSize::Huge.bytes());
+            let mut out = Vec::new();
+            for (&mstart, mapping) in mappings.range(from..end) {
+                let mlen = mapping.page_size.bytes();
+                if mstart.saturating_add(mlen) <= start {
+                    continue;
+                }
+                out.push((mstart, mapping.handle, mlen));
+            }
+            out
+        };
+        if candidates.is_empty() {
+            return Err("mlock: no mapped page in range");
+        }
+
+        let mut inserted: Vec<(u64, BlockHandle)> = Vec::new();
+        let mut failed = false;
+        {
+            let mut locked = self.locked_mappings.lock();
+            for (mstart, handle, mlen) in candidates {
+                if locked.contains_key(&mstart) {
+                    continue;
+                }
+                if ownership_table().pin(handle).is_err() {
+                    failed = true;
+                    break;
+                }
+                locked.insert(mstart, LockedMapping { handle, len: mlen });
+                inserted.push((mstart, handle));
+            }
+            if failed {
+                for (key, _) in &inserted {
+                    locked.remove(key);
+                }
+            }
+        }
+        if failed {
+            for (_, handle) in &inserted {
+                unpin_and_release(*handle);
+            }
+            return Err("mlock: pin failed");
+        }
+        Ok(inserted.len())
+    }
+
+    /// Unpins the mappings fully contained in `[start, start + len)`.
+    ///
+    /// A partially covered mapping stays pinned: the lock unit is the mapping,
+    /// so unlocking is deliberately conservative rather than leaking a pin.
+    pub fn munlock_range(&self, start: u64, len: u64) -> Result<usize, &'static str> {
+        let end = validate_lock_range(start, len)?;
+        let mut removed: Vec<BlockHandle> = Vec::new();
+        {
+            let mut locked = self.locked_mappings.lock();
+            let keys: Vec<u64> = locked
+                .range(start..end)
+                .filter_map(|(&key, mapping)| {
+                    if key.saturating_add(mapping.len) <= end {
+                        Some(key)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for key in keys {
+                if let Some(mapping) = locked.remove(&key) {
+                    removed.push(mapping.handle);
+                }
+            }
+        }
+        for handle in &removed {
+            unpin_and_release(*handle);
+        }
+        Ok(removed.len())
+    }
+
+    /// Bytes currently pinned by `mlock` in this address space.
+    pub fn locked_bytes(&self) -> u64 {
+        self.locked_mappings
+            .lock()
+            .values()
+            .fold(0u64, |sum, mapping| sum.saturating_add(mapping.len))
+    }
+
+    /// Drops the `mlock` pin associated with one effective mapping.
+    fn release_mapping_lock(&self, mapping_start: u64) {
+        let entry = self.locked_mappings.lock().remove(&mapping_start);
+        if let Some(mapping) = entry {
+            unpin_and_release(mapping.handle);
+        }
     }
 
     /// Unmaps the effective mapping that starts at `start`.
@@ -1952,6 +2068,7 @@ impl AddressSpace {
     }
 
     fn teardown_effective_mapping_for_drop(&self, mapping: EffectiveMapping) {
+        self.release_mapping_lock(mapping.start);
         // SAFETY: the address space is being torn down; any remaining user mapping
         // must be detached from ownership tracking before page-table reclamation.
         unsafe {
@@ -2322,6 +2439,33 @@ impl AddressSpace {
             free_l3_table(l3_frame);
             l4[i].set_unused();
         }
+    }
+}
+
+/// Validates an `mlock`/`munlock` range and returns its page-aligned end.
+fn validate_lock_range(start: u64, len: u64) -> Result<u64, &'static str> {
+    if len == 0 {
+        return Err("mlock: zero length");
+    }
+    if start % 4096 != 0 {
+        return Err("mlock: unaligned address");
+    }
+    let len = len
+        .checked_add(4095)
+        .ok_or("mlock: length overflow")?
+        & !4095u64;
+    let end = start.checked_add(len).ok_or("mlock: address overflow")?;
+    const USER_SPACE_END: u64 = crate::memory::userslice::USER_SPACE_END;
+    if end > USER_SPACE_END {
+        return Err("mlock: range outside user space");
+    }
+    Ok(end)
+}
+
+/// Releases one `mlock` pin, freeing the block when it was the last reference.
+fn unpin_and_release(handle: BlockHandle) {
+    if let Ok(RemoveRefResult::Freed(block)) = ownership_table().unpin(handle) {
+        release_owned_block(block);
     }
 }
 

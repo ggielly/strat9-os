@@ -41,6 +41,8 @@ const GOLDEN_SYSCALLS: &[(&str, usize)] = &[
     ("SYS_MEM_REGION_EXPORT", SYS_MEM_REGION_EXPORT),
     ("SYS_MEM_REGION_MAP", SYS_MEM_REGION_MAP),
     ("SYS_MEM_REGION_INFO", SYS_MEM_REGION_INFO),
+    ("SYS_MLOCK", SYS_MLOCK),
+    ("SYS_MUNLOCK", SYS_MUNLOCK),
     ("SYS_IPC_CREATE_PORT", SYS_IPC_CREATE_PORT),
     ("SYS_IPC_SEND", SYS_IPC_SEND),
     ("SYS_IPC_RECV", SYS_IPC_RECV),
@@ -264,7 +266,7 @@ fn syscall_table_is_exhaustive() {
     // table, this count check fails and forces a conscious review.
     assert_eq!(
         GOLDEN_SYSCALLS.len(),
-        203,
+        205,
         "golden table out of sync: add new SYS_* consts AND their pinned values"
     );
 }
@@ -300,6 +302,8 @@ fn syscall_range_groups_are_respected() {
         SYS_MEM_REGION_EXPORT,
         SYS_MEM_REGION_MAP,
         SYS_MEM_REGION_INFO,
+        SYS_MLOCK,
+        SYS_MUNLOCK,
     ] {
         assert!(in_range(n, 100, 199), "mem syscall {} out of 100..199", n);
     }

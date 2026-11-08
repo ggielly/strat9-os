@@ -135,6 +135,27 @@ pub const SYS_MEM_REGION_MAP: usize = 106;
 /// Returns `0` on success.
 pub const SYS_MEM_REGION_INFO: usize = 107;
 
+/// Lock a mapped range in memory (pin its backing blocks).
+///
+/// The pages keep their physical blocks alive until `SYS_MUNLOCK`, `munmap`,
+/// or process teardown. Locks are not inherited across `fork`.
+///
+/// - `addr`: start address (must be page-aligned)
+/// - `len`: length in bytes (rounded up to a page boundary)
+///
+/// Returns `0` on success. Fails with `-EINVAL` when the range is not
+/// fully mapped or is outside user space.
+pub const SYS_MLOCK: usize = 108;
+
+/// Unlock a range previously passed to `SYS_MLOCK`.
+///
+/// Only mappings fully contained in `[addr, addr + len)` are unlocked; a
+/// partially covered mapping stays pinned (the lock granularity is the
+/// effective mapping, not the 4 KiB page).
+///
+/// Returns `0` on success.
+pub const SYS_MUNLOCK: usize = 109;
+
 // ── Block 200-219: IPC ─────────────────────────────────────────────────────
 
 /// Create a new IPC port.

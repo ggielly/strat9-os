@@ -860,6 +860,19 @@ pub mod call {
         }
     }
 
+    /// Pin a mapped range in memory (`mlock`).
+    ///
+    /// Keeps the backing blocks alive until [`munlock`], `munmap`, or process
+    /// teardown. Fails if the range is not fully mapped.
+    pub fn mlock(addr: usize, len: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_MLOCK, addr, len) }
+    }
+
+    /// Release pins installed by [`mlock`].
+    pub fn munlock(addr: usize, len: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_MUNLOCK, addr, len) }
+    }
+
     // ===========================================================================
     // IPC : Ports (block 200-211)
     // ===========================================================================

@@ -121,6 +121,8 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_MEM_REGION_EXPORT => super::mmap::sys_mem_region_export(arg1),
         SYS_MEM_REGION_MAP => super::mmap::sys_mem_region_map(arg1, arg2, arg3),
         SYS_MEM_REGION_INFO => super::mmap::sys_mem_region_info(arg1, arg2),
+        SYS_MLOCK => super::mmap::sys_mlock(arg1, arg2),
+        SYS_MUNLOCK => super::mmap::sys_munlock(arg1, arg2),
 
         // Process management (block 300-399)
         SYS_PROC_EXIT => sys_proc_exit(arg1),
