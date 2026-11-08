@@ -12,6 +12,9 @@ path = "src/main.rs"
 [features]
 default = []
 selftest = []
+# Opt-in: enable VT-d translation before device probing, with pass-through
+# context entries for drivers that still use physical DMA.
+iommu-activate = []
 
 # 2026-09-07
 # Enable the runtime safety check in `apply_segment_permissions` that

@@ -20,6 +20,20 @@ pub fn init() {
     // Parse DMAR/IVRS and record the discovery summary.  This never programs
     // translation: `iommu::activate()` stays false until the backend is ready.
     iommu::init();
+    #[cfg(feature = "iommu-activate")]
+    {
+        // Must run before the NIC/storage probes: those drivers create their
+        // domains only when `iommu::enabled()` is already true.
+        if iommu::activate() {
+            crate::serial_println!(
+                "[IOMMU] translation active before device probe (pass-through for unmigrated devices)"
+            );
+        } else {
+            crate::serial_println!(
+                "[IOMMU] activation requested by feature but failed; DMA stays physical"
+            );
+        }
+    }
     ec::init();
     crate::arch::speaker::beep_phase(7); // EC
     thermal::init();

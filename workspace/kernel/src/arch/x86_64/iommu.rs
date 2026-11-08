@@ -27,7 +27,14 @@ use crate::{
 };
 
 /// Flip only after QEMU/hardware validation of the activation path.
-pub const HARDWARE_ACTIVATION_ENABLED: bool = false;
+///
+/// Enabled by the kernel feature `iommu-activate`, so a normal build keeps
+/// translation disabled and the boot path unchanged.
+pub const HARDWARE_ACTIVATION_ENABLED: bool = cfg!(feature = "iommu-activate");
+
+/// Interrupt remapping is not enabled yet: MSI messages are still physical.
+/// Enabling IRE without programming every device's IRTE would drop MSI.
+pub const INTERRUPT_REMAPPING_ENABLED: bool = false;
 
 // Register offsets from the DRHD register base.
 const VTD_CAP: usize = 0x08;
@@ -54,6 +61,7 @@ const GSTS_TES: u32 = 1 << 31;
 
 const ECAP_QI: u64 = 1 << 1;
 const ECAP_IR: u64 = 1 << 3;
+const ECAP_PT: u64 = 1 << 5;
 
 const CAP_CM: u64 = 1 << 7;
 
@@ -233,6 +241,9 @@ impl Backend for VtdBackend {
         }
 
         // Root table, then context-entry translation.
+        // Devices that are not migrated yet get a pass-through context entry
+        // so GPU/USB/virtio keep using physical DMA instead of faulting.
+        install_passthrough_contexts(state)?;
         for unit in &mut state.units {
             mmio_write64(unit.virt, VTD_RTADDR, state.root);
             mmio_write32(unit.virt, VTD_GCMD, mmio_read32(unit.virt, VTD_GCMD) | GCMD_SRTP);
@@ -241,8 +252,10 @@ impl Backend for VtdBackend {
             }
         }
 
-        // Optional interrupt remapping.
-        if state.units.iter().any(|unit| unit.ecap & ECAP_IR != 0) {
+        // Optional interrupt remapping (kept off until every MSI is an IRTE).
+        if INTERRUPT_REMAPPING_ENABLED
+            && state.units.iter().any(|unit| unit.ecap & ECAP_IR != 0)
+        {
             match ir_enable(state) {
                 Ok(()) => IR_ACTIVE.store(true, Ordering::Release),
                 Err(err) => log::warn!("[IOMMU] interrupt remapping unavailable: {:?}", err),
@@ -742,6 +755,52 @@ fn install_root_entry(root: u64, bus: u8, context: u64) -> Result<(), IommuError
     unsafe {
         table_write(root, (bus as usize) * 2, entry);
         table_write(root, (bus as usize) * 2 + 1, 0);
+    }
+    Ok(())
+}
+
+/// Give every PCI function a pass-through context entry unless it already has
+/// a translated one.
+///
+/// This lets devices that still program physical addresses (GPU, USB,
+/// virtio-console/rng, boot loader) keep working when translation is enabled.
+/// It is not an isolation guarantee for those devices, but it keeps the boot
+/// alive while drivers are migrated one by one.
+fn install_passthrough_contexts(state: &mut VtdState) -> Result<(), IommuError> {
+    if state.units.is_empty() {
+        return Ok(());
+    }
+    if state.units.iter().any(|unit| unit.ecap & ECAP_PT == 0) {
+        log::warn!(
+            "[IOMMU] pass-through unsupported by a DRHD; activation needs all DMA masters migrated"
+        );
+        return Err(IommuError::Unsupported);
+    }
+
+    // Pass-through legacy context entry: P=1, TT=10.
+    const PASSTHROUGH_ENTRY: u64 = SL_PRESENT | (0b10 << 2);
+
+    for bus in 0..=u8::MAX {
+        let context = match state.context_tables.get(&bus) {
+            Some(context) => *context,
+            None => {
+                let context = alloc_zeroed_table()?;
+                state.context_tables.insert(bus, context);
+                install_root_entry(state.root, bus, context)?;
+                context
+            }
+        };
+        for devfn in 0..256usize {
+            // SAFETY: `context` is a 4 KiB table, devfn < 256.
+            let low = unsafe { table_read(context, devfn * 2) };
+            if low & SL_PRESENT == 0 {
+                // SAFETY: same as above.
+                unsafe {
+                    table_write(context, devfn * 2, PASSTHROUGH_ENTRY);
+                    table_write(context, devfn * 2 + 1, 0);
+                }
+            }
+        }
     }
     Ok(())
 }
