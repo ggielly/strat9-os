@@ -24,6 +24,8 @@ elf_loader_assert_remote_active = []
 # that rejects resolvers planted in writable/non-executable pages.
 ifunc_resolver_vma_check = []
 
+mmu_aspace_guard = []
+
 [dependencies]
 lru = { version = "0.12", default-features = false, features = ["hashbrown"] }
 crossbeam-queue = { version = "0.3.12", default-features = false, features = [
@@ -31,7 +33,9 @@ crossbeam-queue = { version = "0.3.12", default-features = false, features = [
 ] }
 smallvec = { version = "1.13", default-features = false }
 
-heapless = { version = "0.9", default-features = false, features = ["mpmc_large"] }
+heapless = { version = "0.9", default-features = false, features = [
+    "mpmc_large",
+] }
 intrusive-collections = { version = "0.9", default-features = false, features = [
     "alloc",
 ] }

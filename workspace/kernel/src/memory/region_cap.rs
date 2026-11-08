@@ -8,7 +8,7 @@ use smallvec::{smallvec, SmallVec};
 use crate::{capability::CapId, sync::SpinLock};
 
 use super::{
-    address_space::{AddressSpace, VmaFlags, VmaPageSize, VmaType},
+    address_space::{AddressSpace, SiloCharge, VmaFlags, VmaPageSize, VmaType},
     cow, ownership_table, release_owned_block, revoke_mapping_cap_id,
     try_register_mapping_identity, unregister_mapping_identity, BlockHandle, OwnerError,
 };
@@ -267,13 +267,14 @@ impl MemoryRegionRegistry {
             };
 
             address_space
-                .map_shared_handles_with_cap_ids(
+                .map_shared_handles_with_cap_ids_charged(
                     base,
                     &entry.handles,
                     Some(&entry.mapping_cap_ids),
                     effective_flags,
                     entry.vma_type,
                     entry.page_size,
+                    SiloCharge::AlreadyCharged,
                 )
                 .map(|_| (base, entry.size))
                 .map_err(|_| RegionCapError::OutOfMemory)

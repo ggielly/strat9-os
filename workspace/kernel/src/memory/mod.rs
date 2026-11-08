@@ -16,6 +16,7 @@ pub mod ownership;
 pub mod physical_access;
 pub mod paging;
 pub mod region_cap;
+pub mod typed_mem;
 pub mod userslice;
 pub mod vmalloc;
 pub mod zone;

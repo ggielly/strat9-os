@@ -182,6 +182,12 @@ struct PendingSiloCharge {
     bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SiloCharge {
+    Charge,
+    AlreadyCharged,
+}
+
 impl PendingSiloCharge {
     fn commit(mut self) {
         self.bytes = 0;
@@ -1153,6 +1159,11 @@ impl AddressSpace {
     }
 
     /// Maps shared physical blocks with optional stable mapping identities.
+    ///
+    /// Charges the target address space's silo for the mapping length. For an
+    /// exported region whose frames are already accounted by their owner, use
+    /// [`Self::map_shared_handles_with_cap_ids_charged`] with
+    /// [`SiloCharge::AlreadyCharged`] so the same pages are not counted twice.
     pub fn map_shared_handles_with_cap_ids(
         &self,
         start: u64,
@@ -1161,6 +1172,30 @@ impl AddressSpace {
         flags: VmaFlags,
         vma_type: VmaType,
         page_size: VmaPageSize,
+    ) -> Result<(), &'static str> {
+        self.map_shared_handles_with_cap_ids_charged(
+            start,
+            handles,
+            mapping_cap_ids,
+            flags,
+            vma_type,
+            page_size,
+            SiloCharge::Charge,
+        )
+    }
+
+    /// [`Self::map_shared_handles_with_cap_ids`] with an explicit charge policy.
+    ///
+
+    pub(crate) fn map_shared_handles_with_cap_ids_charged(
+        &self,
+        start: u64,
+        handles: &[BlockHandle],
+        mapping_cap_ids: Option<&[CapId]>,
+        flags: VmaFlags,
+        vma_type: VmaType,
+        page_size: VmaPageSize,
+        charge_policy: SiloCharge,
     ) -> Result<(), &'static str> {
         let page_count = handles.len();
         let page_bytes = page_size.bytes();
@@ -1190,9 +1225,13 @@ impl AddressSpace {
             }
         }
 
-        let charge = self
-            .reserve_silo_memory(len)
-            .map_err(|_| "Silo memory quota exceeded")?;
+        let charge = match charge_policy {
+            SiloCharge::Charge => Some(
+                self.reserve_silo_memory(len)
+                    .map_err(|_| "Silo memory quota exceeded")?,
+            ),
+            SiloCharge::AlreadyCharged => None,
+        };
         let mut page_flags = flags.to_page_flags();
         if page_size == VmaPageSize::Huge {
             page_flags |= PageTableFlags::HUGE_PAGE;
@@ -1332,7 +1371,9 @@ impl AddressSpace {
                 page_size,
             },
         );
-        charge.commit();
+        if let Some(charge) = charge {
+            charge.commit();
+        }
         Ok(())
     }
 
@@ -1817,8 +1858,35 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Debug guard: a user-space walk must use the page tables currently
+    /// installed on this CPU.
+    ///
+    #[inline]
+    fn debug_assert_user_walk_uses_active_cr3(&self, vaddr: VirtAddr) {
+        #[cfg(all(feature = "mmu_aspace_guard", target_arch = "x86_64"))]
+        {
+            const USER_SPACE_END: u64 = crate::memory::userslice::USER_SPACE_END;
+            if vaddr.as_u64() < USER_SPACE_END {
+                let (active, _) = Cr3::read();
+                debug_assert_eq!(
+                    active.start_address(),
+                    self.cr3_phys,
+                    "user-space translation through a stale AddressSpace: \
+                     CR3 is {:#x}, this space expects {:#x}",
+                    active.start_address().as_u64(),
+                    self.cr3_phys.as_u64(),
+                );
+            }
+        }
+        #[cfg(not(all(feature = "mmu_aspace_guard", target_arch = "x86_64")))]
+        {
+            let _ = vaddr;
+        }
+    }
+
     /// Translate a virtual address to its mapped physical address.
     pub fn translate(&self, vaddr: VirtAddr) -> Option<PhysAddr> {
+        self.debug_assert_user_walk_uses_active_cr3(vaddr);
         // SAFETY: Read-only access to the page tables.
         let mapper = unsafe { self.mapper() };
         mapper.translate_addr(vaddr)
@@ -1826,6 +1894,7 @@ impl AddressSpace {
 
     /// Translate a virtual address to the current block handle and page-table flags.
     pub fn translate_to_handle(&self, vaddr: VirtAddr) -> Option<(BlockHandle, PageTableFlags)> {
+        self.debug_assert_user_walk_uses_active_cr3(vaddr);
         // SAFETY: Read-only access to the page tables.
         let mapper = unsafe { self.mapper() };
         let translated = translate_result(&mapper, vaddr);
