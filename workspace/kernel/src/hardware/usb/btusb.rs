@@ -359,6 +359,16 @@ impl Endpoint {
     fn is_in(self) -> bool {
         self.addr & 0x80 != 0
     }
+
+    /// xHCI Device Context Index: `(endpoint number << 1) | IN`.
+    ///
+    /// The xHCI endpoint context arrays (and transfer-event `ep_id`) are indexed
+    /// by DCI, not by endpoint number. EP2 OUT and EP2 IN are therefore two
+    /// distinct slots (4 and 5), which matters for every USB Bluetooth device
+    /// that uses the same endpoint number in both directions.
+    fn dci(self) -> u8 {
+        (self.number() << 1) | self.is_in() as u8
+    }
 }
 
 /// HCI transport endpoints selected from a configuration descriptor.
@@ -499,6 +509,12 @@ struct BtState {
     events_on_bulk: bool,
     rx_event_ring: PacketRing<RX_EVENT_RING>,
     rx_acl_ring: PacketRing<RX_ACL_RING>,
+    /// H4 reassembly across USB transfers (events arrive on a 16-byte
+    /// interrupt endpoint, so a 22-byte LE Connection Complete spans two).
+    evt_reasm: [u8; 260],
+    evt_reasm_len: usize,
+    acl_reasm: [u8; 1100],
+    acl_reasm_len: usize,
     tx: TxQueue<TX_RING_BYTES, TX_RING_PACKETS>,
     /// Length of the packet popped by `next_tx_packet` and awaiting completion.
     in_flight: Option<usize>,
@@ -535,6 +551,10 @@ impl BtState {
             events_on_bulk: false,
             rx_event_ring: PacketRing::new(),
             rx_acl_ring: PacketRing::new(),
+            evt_reasm: [0; 260],
+            evt_reasm_len: 0,
+            acl_reasm: [0; 1100],
+            acl_reasm_len: 0,
             tx: TxQueue::new(),
             in_flight: None,
             rx_events: 0,
@@ -573,13 +593,10 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// Both numbering conventions are accepted because the xHCI driver and the
 /// HID driver historically used different values here: the endpoint number
 /// (1..15) and the xHCI device context index (`2*n + direction`).
+/// True when `ep_id` (an xHCI DCI from a transfer event) is this endpoint.
 fn endpoint_matches(endpoint: Endpoint, ep_id: u8) -> bool {
-    let number = endpoint.number();
-    if number == 0 {
-        return false;
-    }
-    let dci = (number << 1) | endpoint.is_in() as u8;
-    ep_id == number || ep_id == dci
+    let dci = endpoint.dci();
+    dci != 0 && ep_id == dci
 }
 
 /// Initializes the transport. Idempotent; called from `hardware::usb::init()`.
@@ -587,7 +604,14 @@ pub fn init() {
     if INITIALIZED.swap(true, Ordering::AcqRel) {
         return;
     }
-    log::info!("[USB-BT] HCI-over-USB transport initialized");
+    if is_present() {
+        log::info!("[USB-BT] HCI-over-USB transport ready (device attached)");
+    } else {
+        log::info!(
+            "[USB-BT] no HCI interface on any xHCI device (QEMU has no emulated \
+             Bluetooth dongle; on real hardware check root port + xHCI)"
+        );
+    }
 }
 
 /// True when an HCI interface is configured.
@@ -637,8 +661,9 @@ fn configure_endpoint(
     ep_type: u32,
     buffer_len: usize,
 ) -> bool {
-    let number = endpoint.number();
-    if number == 0 {
+    let dci = endpoint.dci();
+    // xHCI exposes at most 31 DCIs and its per-slot arrays are 31 entries.
+    if dci == 0 || dci >= 31 {
         return false;
     }
     let interval = if ep_type == EP_TYPE_INTR_IN {
@@ -649,7 +674,7 @@ fn configure_endpoint(
     if controller
         .setup_endpoint(
             slot_id,
-            number,
+            dci,
             endpoint.max_packet as u32,
             ep_type,
             interval,
@@ -658,15 +683,16 @@ fn configure_endpoint(
         .is_err()
     {
         log::warn!(
-            "[USB-BT] Endpoint setup failed: slot={} ep={:02x} type={}",
+            "[USB-BT] Endpoint setup failed: slot={} ep={:02x} dci={} type={}",
             slot_id,
             endpoint.addr,
+            dci,
             ep_type
         );
         return false;
     }
     if controller
-        .alloc_interrupt_buffer(slot_id, number, buffer_len)
+        .alloc_interrupt_buffer(slot_id, dci, buffer_len)
         .is_err()
     {
         log::warn!(
@@ -745,10 +771,11 @@ pub fn enumerate_device(
         return;
     };
 
-    if hci.bulk_in.number() == hci.bulk_out.number() {
+    if hci.bulk_in.dci() == hci.bulk_out.dci() {
         log::warn!(
-            "[USB-BT] Endpoint number collision (ep{:x} used for bulk IN and OUT), skipping",
-            hci.bulk_in.number()
+            "[USB-BT] Endpoint DCI collision (ep{:02x}/ep{:02x}), skipping",
+            hci.bulk_in.addr,
+            hci.bulk_out.addr
         );
         return;
     }
@@ -804,12 +831,12 @@ pub fn enumerate_device(
 
     // Arm the receive paths.
     controller
-        .submit_interrupt_transfer(slot_id, hci.bulk_in.number())
+        .submit_interrupt_transfer(slot_id, hci.bulk_in.dci())
         .ok();
     if let Some(intr) = hci.intr_in {
-        if intr.number() != hci.bulk_in.number() {
+        if intr.dci() != hci.bulk_in.dci() {
             controller
-                .submit_interrupt_transfer(slot_id, intr.number())
+                .submit_interrupt_transfer(slot_id, intr.dci())
                 .ok();
         }
     }
@@ -873,12 +900,71 @@ fn queue_packet(state: &mut BtState, packet: &[u8]) -> bool {
     }
 }
 
+/// Appends bytes to the reassembly buffer; returns true on overflow.
+fn append_reasm(state: &mut BtState, use_evt: bool, data: &[u8]) -> bool {
+    let (buf_len, len) = if use_evt {
+        (state.evt_reasm.len(), state.evt_reasm_len)
+    } else {
+        (state.acl_reasm.len(), state.acl_reasm_len)
+    };
+    let n = core::cmp::min(buf_len.saturating_sub(len), data.len());
+    if use_evt {
+        state.evt_reasm[len..len + n].copy_from_slice(&data[..n]);
+        state.evt_reasm_len = len + n;
+    } else {
+        state.acl_reasm[len..len + n].copy_from_slice(&data[..n]);
+        state.acl_reasm_len = len + n;
+    }
+    n < data.len()
+}
+
+/// Drops `n` bytes from the front of the reassembly buffer.
+fn drop_reasm_prefix(state: &mut BtState, use_evt: bool, n: usize) {
+    if use_evt {
+        let len = state.evt_reasm_len;
+        let n = n.min(len);
+        state.evt_reasm.copy_within(n..len, 0);
+        state.evt_reasm_len = len - n;
+    } else {
+        let len = state.acl_reasm_len;
+        let n = n.min(len);
+        state.acl_reasm.copy_within(n..len, 0);
+        state.acl_reasm_len = len - n;
+    }
+}
+
+/// Copies the head packet into `out`.
+///
+/// `None` means "wait for more bytes"; `Some(0)` means a malformed header that
+/// the caller must resync by dropping one byte.
+fn peek_reasm(state: &BtState, use_evt: bool, out: &mut [u8; 1100]) -> Option<usize> {
+    let src = if use_evt {
+        &state.evt_reasm[..state.evt_reasm_len]
+    } else {
+        &state.acl_reasm[..state.acl_reasm_len]
+    };
+    if src.is_empty() {
+        return None;
+    }
+    match h4_total_len(src) {
+        // Larger than any packet we can buffer: malformed, resync.
+        Some(t) if t > out.len() => Some(0),
+        Some(t) if t <= src.len() => {
+            out[..t].copy_from_slice(&src[..t]);
+            Some(t)
+        }
+        // Valid header, wait for the rest.
+        Some(_) => None,
+        None => Some(0),
+    }
+}
+
 /// Called by the xHCI completion handler with a completed IN transfer.
 ///
 /// Runs in interrupt context: only `try_lock` is used, and no allocation is
-/// performed. A transfer may contain one or several complete H4 packets; an
-/// incomplete trailing packet is counted as a drop (reassembly across USB
-/// transfers is a later phase).
+/// performed. HCI events arriving on a 16-byte interrupt endpoint (and large
+/// ACL packets on bulk IN) may span several USB transfers, so bytes are
+/// reassembled per endpoint before complete H4 packets are queued.
 pub fn on_transfer(slot_id: u8, ep_id: u8, data: &[u8]) {
     if data.is_empty() {
         return;
@@ -897,26 +983,35 @@ pub fn on_transfer(slot_id: u8, ep_id: u8, data: &[u8]) {
     if endpoint_matches(state.ep_out, ep_id) {
         return;
     }
-    if !endpoint_matches(state.ep_in, ep_id) && !endpoint_matches(state.ep_evt, ep_id) {
+    let is_in = endpoint_matches(state.ep_in, ep_id);
+    let is_evt = endpoint_matches(state.ep_evt, ep_id);
+    if !is_in && !is_evt {
         state.rx_dropped = state.rx_dropped.saturating_add(1);
         return;
     }
 
-    let mut offset = 0usize;
-    while offset < data.len() {
-        let remaining = &data[offset..];
-        let total = match h4_total_len(remaining) {
-            Some(total) if total <= remaining.len() => total,
-            _ => {
-                // Partial or malformed tail.
+    // Events get their own small buffer unless they share the bulk endpoint.
+    let use_evt = is_evt && !is_in;
+
+    if append_reasm(&mut state, use_evt, data) {
+        state.rx_dropped = state.rx_dropped.saturating_add(1);
+    }
+
+    let mut packet = [0u8; 1100];
+    loop {
+        match peek_reasm(&state, use_evt, &mut packet) {
+            None => break,
+            Some(0) => {
+                drop_reasm_prefix(&mut state, use_evt, 1);
                 state.rx_dropped = state.rx_dropped.saturating_add(1);
-                break;
             }
-        };
-        if !queue_packet(&mut state, &remaining[..total]) {
-            state.rx_dropped = state.rx_dropped.saturating_add(1);
+            Some(total) => {
+                if !queue_packet(&mut state, &packet[..total]) {
+                    state.rx_dropped = state.rx_dropped.saturating_add(1);
+                }
+                drop_reasm_prefix(&mut state, use_evt, total);
+            }
         }
-        offset += total;
     }
 }
 
@@ -1006,6 +1101,30 @@ pub fn tx_complete(ep_id: u8, len: usize) {
     }
 }
 
+/// Waits until the in-flight bulk OUT packet has completed.
+///
+/// `ctrl_transfer()` drains the xHCI event ring and discards non-EP0 events,
+/// so a WMT command's bulk-OUT completion must be processed (by the IRQ
+/// handler) before the following control-IN. Returns false on timeout or when
+/// the transport is absent.
+pub fn wait_tx_idle(timeout_ticks: u32) -> bool {
+    for _ in 0..timeout_ticks.max(1) {
+        match STATE.try_lock() {
+            Some(state) => {
+                if !state.present {
+                    return false;
+                }
+                if state.in_flight.is_none() {
+                    return true;
+                }
+            }
+            None => {}
+        }
+        crate::process::sleep_current_task_ticks(1);
+    }
+    false
+}
+
 /// Submits queued packets to the bulk OUT endpoint when it is idle.
 ///
 /// No-op when the transport is absent or the endpoint already has a transfer
@@ -1018,7 +1137,7 @@ pub fn kick_tx() {
         if !state.present {
             return;
         }
-        (state.slot_id, state.ep_out.number())
+        (state.slot_id, state.ep_out.dci())
     };
 
     if let Some(controller_arc) = xhci::get_controller(0) {
@@ -1032,6 +1151,26 @@ pub fn kick_tx() {
             );
         }
     }
+}
+
+/// Issues an EP0 vendor control transfer for the Bluetooth device.
+///
+/// Setup packet: `[bmRequestType, bRequest, wValue lo, wValue hi,
+/// wIndex lo, wIndex hi, wLength lo, wLength hi]`.
+pub fn vendor_control(
+    setup: [u8; 8],
+    data: Option<&mut [u8]>,
+    len: usize,
+) -> Result<usize, &'static str> {
+    let slot = BT_SLOT.load(Ordering::Acquire);
+    if slot == 0xFF {
+        return Err("no HCI device");
+    }
+    crate::sync::with_irqs_disabled(|_| {
+        let controller = xhci::get_controller(0).ok_or("no xHCI controller")?;
+        let mut controller = controller.lock();
+        controller.vendor_control(slot, &setup, data, len)
+    })
 }
 
 // ============================================================================

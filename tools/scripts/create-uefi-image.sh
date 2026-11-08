@@ -63,6 +63,10 @@ if [[ -d "$WIFI_FW_DIR" ]]; then
     while IFS= read -r -d '' fw; do
         cp -- "$fw" "$ROOT/boot/initfs/$(basename "$fw")"
     done < <(find "$WIFI_FW_DIR" -maxdepth 1 -type f -name '*.ucode' -print0)
+    # Bluetooth firmware blobs (e.g. rtl8761bu_fw.bin / rtl8761bu_config.bin).
+    while IFS= read -r -d '' fw; do
+        cp -- "$fw" "$ROOT/boot/initfs/$(basename "$fw")"
+    done < <(find "$WIFI_FW_DIR" -maxdepth 1 -type f -name '*.bin' -print0)
 fi
 if [[ -s "$BOOT_CONFIG" ]]; then
     cp -- "$BOOT_CONFIG" "$ROOT/boot/strat9.cfg"

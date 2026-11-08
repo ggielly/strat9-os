@@ -267,12 +267,13 @@ impl Wpa2Supplicant {
                 );
                 self.last_replay = key.replay_counter;
                 let kck = self.keys.kck();
+                let rsn = rsn_ie_wpa2_psk_ccmp();
                 let msg2 = self.build_key_frame(
                     key.replay_counter,
                     &self.snonce,
                     KEY_INFO_VERSION_CCMP | KEY_INFO_PAIRWISE | KEY_INFO_MIC,
                     &kck,
-                    &[],
+                    &rsn,
                     false,
                 );
                 self.state = WpaState::WaitMsg4;
@@ -459,6 +460,8 @@ mod tests {
         let msg2 = &out[0];
         let parsed2 = parse_eapol_key(msg2).unwrap();
         assert_eq!(parsed2.nonce, snonce);
+        // Msg2 carries the RSN IE in its key data.
+        assert_eq!(parsed2.key_data_len, 22);
 
         // Derive the AP side PTK and craft Msg3 with a GTK.
         let ap_ptk = derive_ptk(&pmk, &sta, &bssid, &anonce, &snonce);

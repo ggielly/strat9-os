@@ -1115,18 +1115,25 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         let bsp_apic_id = arch::apic::lapic_id();
         arch::percpu::init_boot_cpu(bsp_apic_id);
         arch::percpu::init_gs_base(0);
-        serial_println!("[init] SMP: booting secondary cores...");
-        vga_println!("[..] SMP: starting APs...");
+        if crate::debug_cfg::SMP_ENABLED {
+            serial_println!("[init] SMP: booting secondary cores...");
+            vga_println!("[..] SMP: starting APs...");
 
-        match arch::smp::init() {
-            Ok(count) => {
-                serial_println!("[init] SMP: {} core(s) online", count);
-                vga_println!("[OK] SMP: {} core(s) online", count);
+            match arch::smp::init() {
+                Ok(count) => {
+                    serial_println!("[init] SMP: {} core(s) online", count);
+                    vga_println!("[OK] SMP: {} core(s) online", count);
+                }
+                Err(e) => {
+                    serial_println!("[init] SMP init failed: {}", e);
+                    vga_println!("[WARN] SMP init failed: {}", e);
+                }
             }
-            Err(e) => {
-                serial_println!("[init] SMP init failed: {}", e);
-                vga_println!("[WARN] SMP init failed: {}", e);
-            }
+        } else {
+            serial_println!(
+                "[init] SMP disabled (debug_cfg::SMP_ENABLED=false), single CPU"
+            );
+            vga_println!("[..] SMP disabled, single CPU");
         }
     } else {
         arch::percpu::init_boot_cpu(0);

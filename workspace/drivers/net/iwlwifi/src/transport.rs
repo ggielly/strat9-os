@@ -16,6 +16,7 @@
 //! iwl-prph.h).  This module deliberately does not depend on the kernel: the
 //! `Bus` trait supplies MMIO and DMA from the caller.
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use nic_buffers::DmaRegion;
@@ -105,6 +106,16 @@ struct TxQueue {
     write: usize,
 }
 
+struct DataQueue {
+    id: u8,
+    tfd_table: DmaRegion,
+    bc_table: DmaRegion,
+    cmd_bufs: DmaRegion,
+    write: usize,
+    read: usize,
+    slots: usize,
+}
+
 /// DMA buffer that must stay alive while the firmware references it.
 struct FwDma {
     _region: DmaRegion,
@@ -122,6 +133,17 @@ pub struct IwlTransport<B: Bus> {
     sequence: u16,
     pub fw_version: u32,
     pub fw_api: u8,
+    data_q: Option<DataQueue>,
+    /// Notifications consumed while waiting for a command response.
+    deferred_rx: VecDeque<RxOwned>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RxOwned {
+    pub cmd: u8,
+    pub group: u8,
+    pub sequence: u16,
+    pub data: Vec<u8>,
 }
 
 impl<B: Bus> IwlTransport<B> {
@@ -142,6 +164,8 @@ impl<B: Bus> IwlTransport<B> {
             sequence: 0,
             fw_version: 0,
             fw_api: 0,
+            data_q: None,
+            deferred_rx: VecDeque::new(),
         }
     }
 
@@ -483,37 +507,114 @@ impl<B: Bus> IwlTransport<B> {
     /// RFH buffer is handed back to the device immediately; callers must not
     /// retain a slice into DMA memory.
     pub fn rx_next_into(&mut self, out: &mut [u8]) -> Option<RxPacketInfo> {
-        let rx = self.rx.as_mut()?;
-        // closed_rb_num is the first u16 of the status word for 22000.
-        let closed = unsafe { (rx.status.virt as *const u16).read_unaligned() } as usize & 0xfff;
-        if rx.read == closed {
-            return None;
+        if let Some(pkt) = self.deferred_rx.pop_front() {
+            let n = pkt.data.len().min(out.len());
+            out[..n].copy_from_slice(&pkt.data[..n]);
+            return Some(RxPacketInfo {
+                cmd: pkt.cmd,
+                group: pkt.group,
+                sequence: pkt.sequence,
+                payload_len: n,
+            });
         }
-        let idx = rx.read & (RX_BD_ENTRIES - 1);
-        let buf = &rx.buffers[idx];
-        unsafe {
-            let pkt = buf.virt;
-            let len_n_flags = (pkt as *const u32).read_unaligned();
-            let len = (len_n_flags & 0x3fff) as usize;
-            rx.read = (rx.read + 1) & (RX_BD_ENTRIES - 1);
-            if len < 8 || len > RX_BUF_SIZE {
+        let info = {
+            let rx = self.rx.as_mut()?;
+            // closed_rb_num is the first u16 of the status word for 22000.
+            let closed = unsafe { (rx.status.virt as *const u16).read_unaligned() } as usize & 0xfff;
+            if rx.read == closed {
                 return None;
             }
-            let cmd = *pkt.add(4);
-            let group = *pkt.add(5);
-            let seq = (pkt.add(6) as *const u16).read_unaligned();
-            let payload_len = (len - 8).min(out.len());
-            core::ptr::copy_nonoverlapping(pkt.add(8), out.as_mut_ptr(), payload_len);
-            Some(RxPacketInfo {
-                cmd,
-                group,
-                sequence: seq,
-                payload_len,
-            })
+            let idx = rx.read & (RX_BD_ENTRIES - 1);
+            let buf = &rx.buffers[idx];
+            let info = unsafe {
+                let pkt = buf.virt;
+                let len_n_flags = (pkt as *const u32).read_unaligned();
+                let len = (len_n_flags & 0x3fff) as usize;
+                rx.read = (rx.read + 1) & (RX_BD_ENTRIES - 1);
+                // Re-arm the consumed RBD before handing the packet back.
+                rx.write = (rx.write + 1) & (RX_BD_ENTRIES - 1);
+                let addr = rx.buffers[rx.write].device_addr();
+                (rx.free_bd.virt.add(rx.write * 8) as *mut u64).write_unaligned(addr);
+                self.bus.write32(regs::RFH_Q_FRBDCB_WIDX_TRG, (rx.write & !7) as u32);
+                if len < 8 || len > RX_BUF_SIZE {
+                    return None;
+                }
+                let cmd = *pkt.add(4);
+                let group = *pkt.add(5);
+                let seq = (pkt.add(6) as *const u16).read_unaligned();
+                let payload_len = (len - 8).min(out.len());
+                core::ptr::copy_nonoverlapping(pkt.add(8), out.as_mut_ptr(), payload_len);
+                RxPacketInfo {
+                    cmd,
+                    group,
+                    sequence: seq,
+                    payload_len,
+                }
+            };
+            info
+        };
+
+        // A TX_CMD response releases its TFD slot.
+        if info.cmd == 0x1c && info.group == 0 {
+            if let Some(q) = self.data_q.as_mut() {
+                q.read = ((info.sequence as usize & 0xff) + 1) % q.slots;
+            }
         }
+        Some(info)
+    }
+
+    /// Copy the next received notification into an owned buffer.
+    pub fn rx_poll_owned(&mut self) -> Option<RxOwned> {
+        if let Some(pkt) = self.deferred_rx.pop_front() {
+            return Some(pkt);
+        }
+        let mut block = [0u8; 2048];
+        let info = self.rx_next_into(&mut block)?;
+        Some(RxOwned {
+            cmd: info.cmd,
+            group: info.group,
+            sequence: info.sequence,
+            data: block[..info.payload_len].to_vec(),
+        })
+    }
+
+    /// Wait for the response to command sequence `seq`.
+    ///
+    /// Non-matching notifications are preserved in `deferred_rx` so the
+    /// normal RX path still sees them.
+    pub fn wait_response(&mut self, seq: u16, timeout_ms: u32) -> Option<Vec<u8>> {
+        let steps = timeout_ms.saturating_mul(100);
+        for _ in 0..steps {
+            while let Some(pkt) = self.rx_poll_owned() {
+                // Responses carry the request sequence without SEQ_RX_FRAME.
+                if pkt.sequence == seq && pkt.sequence & 0x8000 == 0 {
+                    return Some(pkt.data);
+                }
+                self.deferred_rx.push_back(pkt);
+                if self.deferred_rx.len() > 64 {
+                    self.deferred_rx.pop_front();
+                }
+            }
+            self.bus.delay_us(10);
+        }
+        None
+    }
+
+    /// Send a host command and wait for its response.
+    pub fn send_cmd_wait(
+        &mut self,
+        cmd: u8,
+        group: u8,
+        version: u8,
+        payload: &[u8],
+        timeout_ms: u32,
+    ) -> Option<Vec<u8>> {
+        let seq = self.send_cmd(cmd, group, version, payload).ok()?;
+        self.wait_response(seq, timeout_ms)
     }
 
     // -- TX commands -------------------------------------------------------
+
 
     pub fn send_cmd(
         &mut self,
@@ -553,6 +654,154 @@ impl<B: Bus> IwlTransport<B> {
             regs::HBUS_TARG_WRPTR,
             ((tx.write as u32) & 0xff) | ((regs::IWL_CMD_QUEUE_ID as u32) << 8),
         );
+        Ok(seq)
+    }
+
+    /// Allocate the data TX queue tables (does not enable the queue yet).
+    pub fn data_tx_alloc(&mut self, id: u8) -> Result<(), TransportError> {
+        const SLOTS: usize = 128;
+        const SLOT_SIZE: usize = 2048;
+        let tfd_table = self.alloc_32bit(SLOTS * TFD_SIZE)?;
+        let bc_table = self.alloc_32bit(SLOTS * 2)?;
+        let cmd_bufs = self.alloc_32bit(SLOTS * SLOT_SIZE)?;
+        // 64-bit TFD circular-buffer base for this queue.
+        self.write64(regs::TFH_TFDQ_CBB_TABLE + 8 * id as u32, tfd_table.device_addr());
+        self.data_q = Some(DataQueue {
+            id,
+            tfd_table,
+            bc_table,
+            cmd_bufs,
+            write: 0,
+            read: 0,
+            slots: SLOTS,
+        });
+        Ok(())
+    }
+
+    /// Enable the data queue in the SCD and bind it to `sta_id`/`tid`.
+    ///
+    /// Tries the new `SCD_QUEUE_CONFIG_CMD` first (22000 firmware API 77)
+    /// and falls back to the legacy `SCD_QUEUE_CFG` command.
+    pub fn data_tx_enable(&mut self, sta_id: u8, tid: u8) -> Result<(), TransportError> {
+        let Some(q) = self.data_q.as_ref() else {
+            return Err(TransportError::TxQueueFull);
+        };
+        let id = q.id;
+        let cb_size = (q.slots.trailing_zeros() as u32).saturating_sub(3);
+        let sta_mask = 1u32 << (sta_id & 31);
+
+        let mut cfg = Vec::with_capacity(40);
+        cfg.extend_from_slice(&0u32.to_le_bytes()); // IWL_SCD_QUEUE_ADD
+        cfg.extend_from_slice(&sta_mask.to_le_bytes());
+        cfg.push(tid);
+        cfg.extend_from_slice(&[0u8; 3]);
+        cfg.extend_from_slice(&0u32.to_le_bytes()); // flags
+        cfg.extend_from_slice(&cb_size.to_le_bytes());
+        cfg.extend_from_slice(&q.bc_table.device_addr().to_le_bytes());
+        cfg.extend_from_slice(&q.tfd_table.device_addr().to_le_bytes());
+
+        // DATA_PATH_GROUP = 5, SCD_QUEUE_CONFIG_CMD = 0x17.
+        if let Some(resp) = self.send_cmd_wait(0x17, 5, 3, &cfg, 200) {
+            // Response starts with a little-endian status (0 = success).
+            let status = if resp.len() >= 4 {
+                u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]])
+            } else {
+                0
+            };
+            if status == 0 {
+                return Ok(());
+            }
+        }
+
+        // Legacy SCD_QUEUE_CFG (legacy group, 0x1d).
+        let mut old = [0u8; 12];
+        old[0] = 0; // token
+        old[1] = sta_id;
+        old[2] = tid;
+        old[3] = id;
+        old[4] = 1; // SCD_CFG_ENABLE_QUEUE
+        old[5] = 0; // aggregate
+        old[6] = 0; // tx_fifo BE
+        old[7] = 64; // BA window
+        old[8..10].copy_from_slice(&0u16.to_le_bytes());
+        let _ = self.send_cmd_wait(0x1d, 0, 1, &old, 200);
+        Ok(())
+    }
+
+    /// Transmit one 802.11 MPDU on the data queue.
+    ///
+    /// Layout in the DMA slot: `iwl_cmd_header` (4) + `iwl_tx_cmd_v9` (20)
+    /// + MPDU.  TB0 is the fixed 64-byte first chunk, TB1 the remainder.
+    pub fn send_mpdu(&mut self, mpdu: &[u8], encrypt_disabled: bool) -> Result<u16, TransportError> {
+        const SLOT_SIZE: usize = 2048;
+        const TX_CMD: u8 = 0x1c;
+        let q = self.data_q.as_mut().ok_or(TransportError::TxQueueFull)?;
+        if (q.write + 1) % q.slots == q.read {
+            return Err(TransportError::TxQueueFull);
+        }
+        let slot = q.write;
+        let total = 24 + mpdu.len();
+        if total > SLOT_SIZE {
+            return Err(TransportError::TxQueueFull);
+        }
+        let seq = (slot as u16 & 0xff) | ((q.id as u16) << 8);
+
+        unsafe {
+            let base = q.cmd_bufs.virt.add(slot * SLOT_SIZE);
+            // Clear the header + TX command; the slot is reused and may hold
+            // stale dram_info / rate bytes from a previous frame.
+            core::ptr::write_bytes(base, 0, 24);
+            *base = TX_CMD;
+            *base.add(1) = 0;
+            (base.add(2) as *mut u16).write_unaligned(seq);
+            // iwl_tx_cmd_v9
+            let cmd = base.add(4);
+            (cmd as *mut u16).write_unaligned(mpdu.len() as u16);
+            (cmd.add(2) as *mut u16).write_unaligned(0); // offload_assist
+            let mut flags = (1u32 << 0) // IWL_TX_FLAGS_CMD_RATE
+                | (1u32 << 2) // IWL_TX_FLAGS_HIGH_PRI
+                | (1u32 << 3) // TX_CMD_FLG_ACK
+                | (1u32 << 13); // TX_CMD_FLG_SEQ_CTL
+            if encrypt_disabled {
+                flags |= 1u32 << 1; // IWL_TX_FLAGS_ENCRYPT_DIS
+            }
+            (cmd.add(4) as *mut u32).write_unaligned(flags);
+            // dram_info (8 bytes) remains zero.
+            // rate_n_flags: 1 Mbps CCK, antenna A (management/pre-assoc).
+            (cmd.add(16) as *mut u32).write_unaligned(0x0000_4000);
+            core::ptr::copy_nonoverlapping(mpdu.as_ptr(), cmd.add(20), mpdu.len());
+
+            let tb0_len = 64usize.min(total);
+            let tb1_len = total - tb0_len;
+            let tfd = q.tfd_table.virt.add(slot * TFD_SIZE);
+            let num_tbs = if tb1_len > 0 { 2 } else { 1 };
+            (tfd as *mut u16).write_unaligned(num_tbs);
+            (tfd.add(2) as *mut u16).write_unaligned(tb0_len as u16);
+            (tfd.add(4) as *mut u64).write_unaligned(
+                q.cmd_bufs.device_addr() + (slot * SLOT_SIZE) as u64,
+            );
+            if num_tbs == 2 {
+                (tfd.add(2 + 10) as *mut u16).write_unaligned(tb1_len as u16);
+                (tfd.add(2 + 10 + 2) as *mut u64).write_unaligned(
+                    q.cmd_bufs.device_addr() + (slot * SLOT_SIZE + tb0_len) as u64,
+                );
+            }
+
+            // Byte-count table entry: four-byte units + fetch chunks in
+            // bits 14:12 (22000 format).
+            let filled = 2 + num_tbs as u32 * 10;
+            let chunks = ((filled + 63) / 64).saturating_sub(1) as u16;
+            let words = ((mpdu.len() as u32 + 3) / 4) as u16;
+            let bc = (words & 0x0fff) | ((chunks & 0x3) << 12);
+            (q.bc_table.virt.add(slot * 2) as *mut u16).write_unaligned(bc);
+        }
+
+        q.write = (slot + 1) % q.slots;
+        self.bus.write32(
+            regs::HBUS_TARG_WRPTR,
+            ((q.write as u32) & 0xff) | ((q.id as u32) << 8),
+        );
+        self.sequence = self.sequence.wrapping_add(1);
         Ok(seq)
     }
 
@@ -699,6 +948,31 @@ mod tests {
     fn context_info_layout_is_stable() {
         // 4 + 4 + 8 + 24 + 16 + 16 + 12*3 + 48 + 1536 + 48
         assert_eq!(core::mem::size_of::<ContextInfo>(), 1792);
+    }
+
+    #[test]
+    fn data_tfd_and_rate_layout() {
+        let bus = MockBus::new();
+        bus.write32(regs::CSR_GP_CNTRL, regs::GP_CNTRL_MAC_CLOCK_READY);
+        let mut t = IwlTransport::new(bus);
+        t.tx_init().unwrap();
+        t.data_tx_alloc(1).unwrap();
+        let mut mpdu = alloc::vec![0u8; 80];
+        mpdu[0] = 0x80; // beacon frame control (any MPDU works)
+        t.send_mpdu(&mpdu, true).unwrap();
+        let q = t.data_q.as_ref().unwrap();
+        unsafe {
+            let tfd = q.tfd_table.virt;
+            assert_eq!((tfd as *const u16).read_unaligned(), 2);
+            assert_eq!((tfd.add(2) as *const u16).read_unaligned(), 64);
+            let cmd = q.cmd_bufs.virt;
+            assert_eq!(*cmd, 0x1c); // TX_CMD
+            // rate_n_flags is at cmd header (4) + tx_cmd offset 16.
+            let rate = (cmd.add(4 + 16) as *const u32).read_unaligned();
+            assert_eq!(rate, 0x4000);
+            let bc = (q.bc_table.virt as *const u16).read_unaligned();
+            assert_eq!(bc & 0x0fff, (80u16 + 3) / 4);
+        }
     }
 
     #[test]

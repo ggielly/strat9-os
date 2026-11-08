@@ -358,6 +358,21 @@ impl XhciController {
         let rt_regs = (mmio_base + rtsoff as usize) as *mut RuntimeRegisters;
 
         let max_ports = (((*cap_regs).hcsparams1 >> 24) & 0xFF) as usize;
+        let hcsparams1 = (*cap_regs).hcsparams1;
+        log::info!(
+            "[xHCI] BAR0={:#x} caplength={} hcsparams1={:#x} ports={}",
+            bar,
+            caplength,
+            hcsparams1,
+            max_ports
+        );
+        if max_ports == 0 {
+            log::warn!(
+                "[xHCI] HCSPARAMS1 reports 0 ports: BAR0 {:#x} is unassigned or \
+                 its MMIO window is not readable",
+                bar
+            );
+        }
 
         let mut controller = Self {
             mmio_base,
@@ -1562,6 +1577,22 @@ pub fn handle_interrupt() {
 }
 
 impl XhciController {
+    /// Issues a vendor control transfer on EP0.
+    ///
+    /// Used by the MediaTek WMT path (control-IN event fetch and register
+    /// reads). Runs with IRQs disabled on the caller's CPU so the xHCI IRQ
+    /// handler cannot deadlock on the controller lock while the transfer is
+    /// pending.
+    pub fn vendor_control(
+        &mut self,
+        slot_id: u8,
+        setup: &[u8; 8],
+        data: Option<&mut [u8]>,
+        len: usize,
+    ) -> Result<usize, &'static str> {
+        unsafe { self.ctrl_transfer(slot_id, setup, data, len) }
+    }
+
     /// Queues one Bluetooth bulk OUT packet when the endpoint is idle.
     ///
     /// Returns `Ok(())` both when a transfer was submitted and when the TX

@@ -2390,8 +2390,14 @@ pub unsafe fn init_kernel_address_space() {
 
 /// Get a reference to the kernel address space.
 ///
-/// Panics if called before `init_kernel_address_space()`.
+/// Initializes it lazily if the early singleton was lost across the kernel
+/// address-space switch (observed on the X13: the `Once` state lives in a
+/// `.bss` page that is not the one mapped after the switch).
 pub fn kernel_address_space() -> &'static Arc<AddressSpace> {
+    KERNEL_ADDRESS_SPACE.call_once(|| {
+        // SAFETY: paging is initialized; this runs before tasks are scheduled.
+        Arc::new(unsafe { AddressSpace::new_kernel() })
+    });
     KERNEL_ADDRESS_SPACE
         .get()
         .expect("Kernel address space not initialized")

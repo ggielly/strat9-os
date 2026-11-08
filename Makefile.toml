@@ -432,6 +432,46 @@ ${QEMU} \
 ''',
 ]
 
+[tasks.run-bt-debug]
+description = "Run headless with xHCI + optional USB Bluetooth passthrough (BT_USB_HOST)"
+dependencies = ["uefi-image"]
+script_runner = "@shell"
+script = [
+    '''
+# BT_USB_HOST examples (host Linux):
+#   BT_USB_HOST='usb-host,hostbus=1,hostaddr=5' cargo make run-bt-debug
+#   BT_USB_HOST='usb-host,vendorid=0x0a12,productid=0x0001' cargo make run-bt-debug
+# On the host, unbind the dongle from the Linux Bluetooth stack first
+# (e.g. `sudo modprobe -r btusb`) or use a dedicated dongle.
+# Prefer KVM when available; nested TCG is far too slow to reach USB init.
+qemu_accel=tcg
+if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+    qemu_accel=kvm
+fi
+echo "QEMU acceleration: $qemu_accel"
+[ -f build/OVMF_VARS.fd ] || cp /usr/share/OVMF/OVMF_VARS_4M.fd build/OVMF_VARS.fd
+${QEMU} \
+    -accel "$qemu_accel" \
+    -machine q35 \
+    -cpu qemu64 \
+    -smp 2 \
+    -m 2G \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=build/OVMF_VARS.fd \
+    -drive file=build/strat9-os-uefi.img,format=raw \
+    -device qemu-xhci \
+    ${BT_USB_HOST:+-device "$BT_USB_HOST"} \
+    -display none \
+    -serial file:build/serial-bt.log \
+    -debugcon file:build/qemu-debugcon-bt.log \
+    -global isa-debugcon.iobase=0xe9 \
+    -no-reboot
+echo "serial  : build/serial-bt.log"
+echo "debugcon: build/qemu-debugcon-bt.log"
+echo "analyse : tools/bt-dump/diagnose.sh build/serial-bt.log"
+''',
+]
+
 [tasks.run-debug-net]
 description = "Run kernel debug with networking (e1000 NAT)"
 dependencies = ["uefi-image"]

@@ -195,12 +195,30 @@ pub fn add_sta(
     b
 }
 
+/// Modify an existing station (same layout as `add_sta`, mode = modify).
+pub fn add_sta_modify(
+    sta_id: u8,
+    mac_id_color: u32,
+    addr: MacAddr,
+    assoc_id: u16,
+    tfd_queue_msk: u32,
+    station_flags: u32,
+) -> Vec<u8> {
+    let mut b = add_sta(sta_id, mac_id_color, addr, assoc_id, tfd_queue_msk, station_flags);
+    b[0] = STA_MODE_MODIFY;
+    // Select which fields are updated: station queues (BIT(7)).
+    b[17] = 0x80;
+    b
+}
+
 /// `struct iwl_mvm_add_sta_key_cmd` (v2/v3) for CCMP.
 pub fn add_sta_key(sta_id: u8, key_offset: u8, key: &[u8; 16], key_id: u8, multicast: bool) -> Vec<u8> {
-    let mut b = alloc::vec![0u8; 88];
+    let mut b = alloc::vec![0u8; 76];
     b[0] = sta_id;
     b[1] = key_offset;
-    let mut flags = STA_KEY_FLG_CCM | ((key_id as u16 & 0x3) << STA_KEY_FLG_KEYID_POS);
+    let mut flags = STA_KEY_FLG_CCM
+        | (1 << 3) // STA_KEY_FLG_WEP_KEY_MAP
+        | ((key_id as u16 & 0x3) << STA_KEY_FLG_KEYID_POS);
     if multicast {
         flags |= STA_KEY_MULTICAST;
     }
@@ -256,7 +274,6 @@ pub fn scan_request(
     b[48] = 0;
     b[49] = channels.len() as u8;
     put_u16(&mut b, 50, 0);
-    let _ = b.len();
     // Channel config array (8 bytes per channel).
     for (ch, band, active) in channels {
         let mut c = [0u8; 8];

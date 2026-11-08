@@ -4,12 +4,18 @@
 
 ## Project stats
 
-- **Total commits:** `858`
+- **Total commits:** `864`
 - **Latest tag:** `0.1.0`
 - **Repository:** [git.strat9-os.org](https://git.strat9-os.org/strat9-os/strat9-os)
 
 ## Recent commits (auto-generated)
 
+- 2026-11-01 [`e76cef8`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/e76cef80c23f2ed931496facbcb72480af2b7263) Fix GDT selector initialization fallback, update storage and USB component priorities, and add temporary debug flags for SMP and storage drivers
+- 2026-11-01 [`89df43a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/89df43ac23e511a67c53214329612ad13196acb9) Add MediaTek firmware parsing and WMT command handling
+- 2026-10-31 [`b6fb38e`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b6fb38e6c5985d9911a0be0cf865ad87c8f35cf1) Add Realtek RTL8761BU firmware handling module
+- 2026-10-31 [`a91d38c`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a91d38c906ca4bd47b940b5fa1379feaf991a612) Hoock windows BT errors
+- 2026-10-31 [`01de2cb`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/01de2cb4937e00d5ea6d502f592ef12901cdb72f) Add Bluetooth HCI support and logging mechanism
+- 2026-10-31 [`b981984`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/b9819844f91e6d675c9c82ccccee51d0e53f33c6) docs: update published documentation
 - 2026-10-31 [`39a5290`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/39a5290eee0f125c41865eceba4e57c81935901e) Enhance TCP listener management and logging
 - 2026-10-31 [`a08f12a`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/a08f12ae3e800e623bbe208051a771a0f672e657) tools: improve GPL header script for Rust files and update website links kernel: enhance idle task handling with explicit yield to prevent deadlocks syscall: refine network receive logic to handle multiple queues effectively
 - 2026-10-31 [`f2b7eb0`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/f2b7eb032c624c5bcfe699d0729bc27d05939e72) Refactor TUI and syscall handling
@@ -54,11 +60,5 @@
 - 2026-10-27 [`c3c177c`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c3c177c178380821b1d56a9e6892aff37a31f466) Merge remote-tracking branch 'origin/refactor/decompose-load-elf-task-inner' into integration/merge-all
 - 2026-10-27 [`c629b18`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c629b18a90f71b64d1ac6b36ebbbda526678b96b) Merge remote-tracking branch 'origin/fix/boot-process' into integration/merge-all
 - 2026-10-27 [`6798cfe`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/6798cfe244873d50c236702ab7836935f9afc2d9) display: add bounded snapshot capture stream
-- 2026-10-27 [`7b344a3`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/7b344a398eac3d377203cba974ffe32615a3c8e8) display: refuse byte-stream reads on write-only screen handles
-- 2026-10-27 [`02e51cd`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/02e51cd2c806b269243a56fd9fede98d77269e12) video: adopt the bootloader framebuffer for the display scheme
-- 2026-10-27 [`9916a78`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9916a78171c4b5979b630d040dada587a01ae97a) vfs: list direct child mounts and ensure /dev/display is mounted
-- 2026-10-27 [`cffb84e`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/cffb84ea24ba000654d5c123dec82d13cd818cb6) Fix missing unsafe
-- 2026-10-27 [`c1a9fa4`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/c1a9fa442f2f35052c7f145941592a6ede95a7b3) console: MAP_SHARED frame-backed display surface
-- 2026-10-27 [`9dee8c6`](https://git.strat9-os.org/strat9-os/strat9-os/-/commit/9dee8c6968728746a7f343734af4e3d4b8aa97ff) console: row-batched glyphs, DMG2 damage list, glyph atlas
 
 <!-- AUTO-CHANGELOG:END -->
