@@ -39,6 +39,7 @@
 //! - `status_line` : Status bar kthread and rendering
 
 mod api;
+pub mod boot_progress;
 mod canvas;
 mod console_mode;
 mod cursor;

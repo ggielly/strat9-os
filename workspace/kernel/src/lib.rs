@@ -327,6 +327,20 @@ fn log_boot_module_magics(stage: &str) {
 #[cfg(not(feature = "selftest"))]
 fn log_boot_module_magics(_stage: &str) {}
 
+/// Advances the on-screen pastel boot-progress bar at a milestone.
+///
+/// No-op before the framebuffer console is up (and on non-x86). The bar simply
+/// stops growing wherever the boot freezes, which locates the hang visually on
+/// a machine with no serial port.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn boot_bar(step: usize, label: &str) {
+    crate::arch::x86_64::vga::boot_progress::render(step, label);
+}
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+fn boot_bar(_step: usize, _label: &str) {}
+
 /// Main kernel initialization - called by bootloader entry points
 pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     #[cfg(target_arch = "x86_64")]
@@ -905,6 +919,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
 
     boot_milestone!("Memory manager ready");
     arch::speaker::beep_phase(2);
+    boot_bar(1, "memory");
     log_boot_module_magics("post-buddy");
 
     // Sanity check: verify buddy allocator was initialized.
@@ -969,6 +984,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     serial_println!("[init] Paging initialized.");
     boot_milestone!("Paging initialized");
     arch::speaker::beep_phase(3);
+    boot_bar(2, "paging");
 
     // =============================================
     // Phase 3: console output (VGA or serial fallback)
@@ -989,6 +1005,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     );
     // Flush any log lines buffered before VGA was available.
     arch::vgabuf::vgabuf_flush_to_framebuffer();
+    // First point the framebuffer can show the bar; steps 1-2 already passed so
+    // it appears ~3/11 filled.
+    boot_bar(3, "console");
 
     // Record the firmware framebuffer for the display subsystem. It is
     // published later by `hardware::init()` only if no native driver
@@ -1170,6 +1189,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     }
     boot_milestone!("APIC + SMP ready");
     arch::speaker::beep_phase(4);
+    boot_bar(8, "apic+smp");
 
     arch::keyboard::init();
     serial_println!("[init] PS/2 keyboard controller initialized.");
@@ -1234,6 +1254,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     serial_println!("[trace][bsp] after init_scheduler");
     boot_milestone!("Scheduler + timer ready");
     arch::speaker::beep_phase(5);
+    boot_bar(9, "scheduler");
     vga_println!("[OK] Multitasking enabled");
 
     // =============================================
@@ -1264,6 +1285,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     serial_println!("[init] Hardware components initialized.");
     vga_println!("[OK] Hardware components ready");
     boot_milestone!("Hardware drivers ready");
+    boot_bar(10, "drivers");
 
     #[cfg(feature = "selftest")]
     {
@@ -1563,6 +1585,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     crate::e9_println!("BC pre-schedule");
     crate::e9_mark!(b'H');
     boot_milestone!("Boot complete ! Now entering in scheduler");
+    boot_bar(11, "ready");
     arch::speaker::beep_startup();
     serial_println!("[init] Boot complete. Starting preemptive scheduler...");
     vga_println!("[OK] Starting multitasking (preemptive)");
@@ -1606,6 +1629,7 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
     }
     serial_println!("[init]   6b. ACPI RSDP validated");
     vga_println!("[apic] 6b ACPI RSDP validated");
+    boot_bar(4, "acpi");
 
     // Step 6c: Parse MADT
     let madt_info = match acpi::madt::parse_madt() {
@@ -1617,6 +1641,7 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
     };
     serial_println!("[init]   6c. MADT parsed");
     vga_println!("[apic] 6c MADT parsed");
+    boot_bar(5, "madt");
 
     if let Some(mcfg) = acpi::mcfg::parse_mcfg() {
         serial_println!(
@@ -1673,6 +1698,7 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
     ioapic::init(io_apic_entry.address, io_apic_entry.gsi_base);
     serial_println!("[init]   6e. I/O APIC initialized");
     vga_println!("[apic] 6e I/O APIC initialized");
+    boot_bar(6, "ioapic");
 
     // Step 6f: remap PIC to 0x20+ then keep only PS/2 input IRQs enabled.
     // Must remap first to avoid stray interrupts at exception vectors (0-31).
@@ -1710,6 +1736,7 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
 
     let ticks_per_10ms = timer::calibrate_apic_timer();
     vga_println!("[apic] 6h calibration returned {}", ticks_per_10ms);
+    boot_bar(7, "apic-timer");
 
     if ticks_per_10ms == 0 {
         log::error!("APIC: timer calibration FAILED");
