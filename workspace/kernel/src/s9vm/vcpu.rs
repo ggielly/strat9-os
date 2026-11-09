@@ -414,6 +414,18 @@ impl Vcpu {
             )
         }
     }
+    /// Programme l'injection d'un NMI au prochain passage dans l'invité.
+    ///
+    /// # Safety
+    /// Le bloc de contrôle doit être chargé et l'invité inactif.
+    pub unsafe fn inject_nmi(&self) -> Result<(), VcpuError> {
+        unsafe {
+            self.control
+                .write_u32(field::ENTRY_INTERRUPT_INFO, crate::s9vm::exit::nmi_info())?;
+        }
+        Ok(())
+    }
+
     /// Programme l'injection d'une interruption externe au prochain passage
     /// dans l'invité (champ « VM-entry interruption information »).
     ///

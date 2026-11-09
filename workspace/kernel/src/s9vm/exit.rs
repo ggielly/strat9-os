@@ -355,3 +355,13 @@ pub const ENTRY_INTERRUPT_DELIVER_ERROR: u32 = 1 << 11;
 pub const fn external_interrupt_info(vector: u8) -> u32 {
     ENTRY_INTERRUPT_VALID | ENTRY_INTERRUPT_TYPE_EXTERNAL | (vector as u32)
 }
+
+/// Type « NMI » dans le champ d'entrée (bits 10:8 = 2).
+pub const ENTRY_INTERRUPT_TYPE_NMI: u32 = 2 << 8;
+/// Vecteur architectural du NMI.
+pub const NMI_VECTOR: u8 = 2;
+
+/// Encode le champ d'entrée pour injecter un NMI à la prochaine entrée.
+pub const fn nmi_info() -> u32 {
+    ENTRY_INTERRUPT_VALID | ENTRY_INTERRUPT_TYPE_NMI | (NMI_VECTOR as u32)
+}

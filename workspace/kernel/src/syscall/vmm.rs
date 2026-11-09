@@ -333,6 +333,50 @@ pub fn sys_vmm_irq_wait(vcpu_handle: u64, timeout_ns: u64) -> Result<u64, Syscal
     Ok(u64::from(ready))
 }
 
+/// SYS_VMM_PAUSE (575) : met un monde en pause.
+pub fn sys_vmm_pause(vmm_handle: u64) -> Result<u64, SyscallError> {
+    let required = CapPermissions {
+        write: true,
+        ..CapPermissions::none()
+    };
+    let world = vmm_world(vmm_handle, required)?;
+    vm::pause(world).map_err(map_vm_error)?;
+    Ok(0)
+}
+
+/// SYS_VMM_RESUME (576) : reprend un monde en pause.
+pub fn sys_vmm_resume(vmm_handle: u64) -> Result<u64, SyscallError> {
+    let required = CapPermissions {
+        write: true,
+        ..CapPermissions::none()
+    };
+    let world = vmm_world(vmm_handle, required)?;
+    vm::resume(world).map_err(map_vm_error)?;
+    Ok(0)
+}
+
+/// SYS_VMM_INJECT_NMI (578) : programme un NMI pour le prochain `RUN`.
+pub fn sys_vmm_inject_nmi(vcpu_handle: u64) -> Result<u64, SyscallError> {
+    let required = CapPermissions {
+        write: true,
+        ..CapPermissions::none()
+    };
+    let vcpu = vcpu_target(vcpu_handle, required)?;
+    vm::inject_nmi(vcpu).map_err(map_vcpu_error)?;
+    Ok(0)
+}
+
+/// SYS_VMM_DEBUG_DUMP (579) : journalise un instantané du moteur.
+///
+/// Sérialise un résumé des mondes et de leurs vCPU dans la sortie noyau
+/// (série / journal), puis retourne 0. Aucune donnée n'est copiée vers
+/// l'espace utilisateur : c'est un outil de diagnostic.
+pub fn sys_vmm_debug_dump(_vmm_handle: u64) -> Result<u64, SyscallError> {
+    require_control()?;
+    crate::s9vm::vm::debug_dump();
+    Ok(0)
+}
+
 /// SYS_VMM_INFO (569) : snapshot d'un monde, ou résumé global si `vmm_id = 0`.
 pub fn sys_vmm_info(vmm_handle: u64, out_ptr: u64) -> Result<u64, SyscallError> {
     let mut info = VmmInfo {
@@ -436,5 +480,6 @@ fn map_run_error(error: vm::RunError) -> SyscallError {
         vm::RunError::Hardware(_) => SyscallError::IoError,
         vm::RunError::ExitStorm => SyscallError::Again,
         vm::RunError::Busy => SyscallError::Again,
+        vm::RunError::Paused => SyscallError::Again,
     }
 }

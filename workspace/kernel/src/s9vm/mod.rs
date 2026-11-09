@@ -26,6 +26,7 @@
 //! L'absence de VT-x n'est jamais fatale : le noyau démarre normalement et
 //! journalise `virtualisation inactive`.
 
+pub mod apic;
 pub mod caps;
 pub mod control;
 pub mod exit;

@@ -23,6 +23,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame};
 use crate::process::{kthread, scheduler::ticks, sleep_current_task_ticks, TaskId};
+use crate::s9vm::apic::LocalApic;
 use crate::s9vm::caps::HwCaps;
 use crate::s9vm::exit::ExitClass;
 use crate::s9vm::exitqueue::ExitQueue;
@@ -237,6 +238,8 @@ struct World {
     /// Destruction en cours : toute nouvelle opération est refusée et les
     /// tâches vCPU sont arrêtées avant de libérer la mémoire.
     closing: bool,
+    /// Monde en pause : les `RUN` sont refusés (`Paused`) jusqu'à reprise.
+    paused: bool,
 }
 
 /// vCPU logique : identifiant opaque, APIC id et bloc de registres ABI.
@@ -259,8 +262,12 @@ pub struct VcpuSlot {
     pub regs: VmmRegs,
     /// Contexte matériel (créé au premier `RUN`).
     hardware: Option<Vcpu>,
+    /// APIC local invité (état architectural, page MMIO et MSR x2APIC).
+    apic: LocalApic,
     /// Interruption externe en attente d'injection au prochain `RUN`.
     pending_irq: Option<u8>,
+    /// NMI en attente d'injection au prochain `RUN`.
+    pending_nmi: bool,
     /// Tâche noyau qui pilote ce vCPU (créée avec le vCPU).
     task: Option<TaskId>,
     /// Un `RUN` a été demandé et n'a pas encore été pris en compte.
@@ -309,6 +316,7 @@ pub fn create(name: &[u8], silo_id: u32) -> Option<WorldRecord> {
             vcpus: Vec::new(),
             exits: ExitQueue::default(),
             closing: false,
+            paused: false,
         },
     );
     Some(record)
@@ -420,7 +428,9 @@ fn new_vcpu_slot(id: u64, apic_id: u32) -> VcpuSlot {
         apic_id,
         regs,
         hardware: None,
+        apic: LocalApic::new(apic_id),
         pending_irq: None,
+        pending_nmi: false,
         task: None,
         run_requested: false,
         run_in_flight: false,
@@ -445,6 +455,44 @@ pub fn list() -> Vec<WorldRecord> {
         .values()
         .map(|world| world.record)
         .collect()
+}
+
+/// Journalise un instantané du moteur (diagnostic noyau).
+pub fn debug_dump() {
+    let worlds = list();
+    log::info!(
+        "[s9vm] debug: {} monde(s), {} CPU actif(s)",
+        worlds.len(),
+        crate::s9vm::active_cpu_count()
+    );
+    for world in worlds {
+        let name = core::str::from_utf8(world.name_slice()).unwrap_or("<non-utf8>");
+        log::info!(
+            "[s9vm] debug: world {} name={} silo={} state={} vcpus={} pages={}",
+            world.id,
+            name,
+            world.silo_id,
+            world.state,
+            world.vcpu_count,
+            world.mapped_pages
+        );
+        let mut worlds = WORLDS.lock();
+        if let Some(entry) = worlds.get(&world.id) {
+            for slot in &entry.vcpus {
+                log::info!(
+                    "[s9vm] debug:   vcpu {} apic={} tpr={} irr={} isr={} irq={:?} nmi={} task={:?}",
+                    slot.id,
+                    slot.apic.apic_id(),
+                    slot.apic.tpr(),
+                    slot.apic.has_pending(),
+                    slot.apic.in_service(),
+                    slot.pending_irq,
+                    slot.pending_nmi,
+                    slot.task
+                );
+            }
+        }
+    }
 }
 
 /// Nombre de mondes.
@@ -558,6 +606,8 @@ pub enum RunError {
     ExitStorm,
     /// Un `RUN` est déjà en vol pour ce vCPU.
     Busy,
+    /// Le monde est en pause.
+    Paused,
 }
 
 impl From<VcpuError> for RunError {
@@ -660,7 +710,7 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
     }
     // 1. Retire le contexte matériel et les registres du registre, sans tenir
     //    le verrou pendant l'exécution.
-    let (world_id, mut hardware, mut regs, pointer, pending_irq) = {
+    let (world_id, mut hardware, mut regs, pointer, pending_irq, pending_nmi) = {
         let mut worlds = WORLDS.lock();
         let world = vcpu_world_mut(&mut worlds, vcpu_id).ok_or(RunError::UnknownVcpu)?;
         let slot = world
@@ -672,7 +722,8 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
         let pointer = memory.second_level_pointer(caps);
         let hardware = slot.hardware.take();
         let pending_irq = slot.pending_irq.take();
-        (world.record.id, hardware, slot.regs, pointer, pending_irq)
+        let pending_nmi = core::mem::replace(&mut slot.pending_nmi, false);
+        (world.record.id, hardware, slot.regs, pointer, pending_irq, pending_nmi)
     };
     let mut hardware = match hardware {
         Some(hardware) => hardware,
@@ -704,6 +755,11 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
             result = Err(RunError::Hardware(error));
         } else if let Err(error) = hardware.configure(caps, &guest) {
             result = Err(RunError::Hardware(error));
+        } else if pending_nmi {
+            // Le NMI est prioritaire sur une interruption externe en attente.
+            if let Err(error) = hardware.inject_nmi() {
+                result = Err(RunError::Hardware(error));
+            }
         } else if let Some(vector) = pending_irq {
             // Injection différée : le champ « VM-entry interruption
             // information » est écrit juste avant l'entrée ; le processeur le
@@ -954,6 +1010,9 @@ pub fn request_run(vcpu_id: u64) -> Result<(), RunError> {
         if world.closing {
             return Err(RunError::UnknownVcpu);
         }
+        if world.paused {
+            return Err(RunError::Paused);
+        }
         let slot = &mut world.vcpus[index];
         if slot.shutdown || slot.task.is_none() {
             return Err(RunError::UnknownVcpu);
@@ -1035,7 +1094,54 @@ pub fn inject_irq(vcpu_id: u64, vector: u8) -> Result<(), VcpuRegistryError> {
         .find(|slot| slot.id == vcpu_id)
         .ok_or(VcpuRegistryError::Unknown)?;
     slot.pending_irq = Some(vector);
+    slot.apic.inject(vector);
     Ok(())
+}
+
+/// Programme l'injection d'un NMI dans un vCPU (délivré au prochain `RUN`).
+pub fn inject_nmi(vcpu_id: u64) -> Result<(), VcpuRegistryError> {
+    let mut worlds = WORLDS.lock();
+    let world = vcpu_world_mut(&mut worlds, vcpu_id).ok_or(VcpuRegistryError::Unknown)?;
+    let slot = world
+        .vcpus
+        .iter_mut()
+        .find(|slot| slot.id == vcpu_id)
+        .ok_or(VcpuRegistryError::Unknown)?;
+    slot.pending_nmi = true;
+    Ok(())
+}
+
+/// Met un monde en pause (`RUN` refusé jusqu'à reprise).
+pub fn pause(world_id: u64) -> Result<(), VmError> {
+    let mut worlds = WORLDS.lock();
+    let world = worlds.get_mut(&world_id).ok_or(VmError::Unknown)?;
+    if world.closing {
+        return Err(VmError::Unknown);
+    }
+    world.paused = true;
+    world.record.state = strat9_abi::vmm::state::PAUSED;
+    Ok(())
+}
+
+/// Reprend un monde en pause.
+pub fn resume(world_id: u64) -> Result<(), VmError> {
+    let mut worlds = WORLDS.lock();
+    let world = worlds.get_mut(&world_id).ok_or(VmError::Unknown)?;
+    if world.closing {
+        return Err(VmError::Unknown);
+    }
+    world.paused = false;
+    world.record.state = strat9_abi::vmm::state::RUNNING;
+    Ok(())
+}
+
+/// Vrai si le monde est en pause.
+pub fn is_paused(world_id: u64) -> bool {
+    WORLDS
+        .lock()
+        .get(&world_id)
+        .map(|world| world.paused)
+        .unwrap_or(false)
 }
 
 /// Vecteur d'interruption en attente pour un vCPU, s'il existe.

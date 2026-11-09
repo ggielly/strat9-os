@@ -1669,17 +1669,20 @@ pub const SYS_VMM_SET_CPUID_POLICY: usize = 573;
 /// Reserved: read per-exit statistics.
 pub const SYS_VMM_GET_EXIT_STATS: usize = 574;
 
-/// Reserved: pause a vCPU.
+/// Pause a world: `RUN` returns `EAGAIN` until resumed. Argument: VMM
+/// capability handle.
 pub const SYS_VMM_PAUSE: usize = 575;
 
-/// Reserved: resume a vCPU.
+/// Resume a paused world. Argument: VMM capability handle.
 pub const SYS_VMM_RESUME: usize = 576;
 
 /// Reserved: set a vCPU affinity mask.
 pub const SYS_VMM_SET_AFFINITY: usize = 577;
 
-/// Reserved: inject a non-maskable interrupt.
+/// Inject an NMI into a vCPU (delivered at the next `RUN`). Argument: VCPU
+/// capability handle.
 pub const SYS_VMM_INJECT_NMI: usize = 578;
 
-/// Reserved: dump a world's debug state.
+/// Dump the engine state to the kernel log (diagnostic). Argument: VMM
+/// capability handle (silo admin only).
 pub const SYS_VMM_DEBUG_DUMP: usize = 579;
