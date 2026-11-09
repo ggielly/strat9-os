@@ -237,10 +237,7 @@ fn parse_section(data: &[u8]) -> Result<Option<FwSection<'_>>, FwError> {
     let dest = le32(data, 0).unwrap();
     // Separators have no payload.
     if dest == regs::CPU1_CPU2_SEPARATOR_SECTION || dest == regs::PAGING_SEPARATOR_SECTION {
-        return Ok(Some(FwSection {
-            dest,
-            data: &[],
-        }));
+        return Ok(Some(FwSection { dest, data: &[] }));
     }
     Ok(Some(FwSection {
         dest,

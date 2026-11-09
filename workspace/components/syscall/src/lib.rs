@@ -1223,7 +1223,11 @@ pub mod call {
     }
 
     /// Map the shared queue region of `dev`.
-    pub fn net_queue_map(dev: usize, qid: usize, out: &mut strat9_abi::net::NetQueueMap) -> error::Result<usize> {
+    pub fn net_queue_map(
+        dev: usize,
+        qid: usize,
+        out: &mut strat9_abi::net::NetQueueMap,
+    ) -> error::Result<usize> {
         unsafe {
             syscall3(
                 number::SYS_NET_QUEUE_MAP,
@@ -1256,7 +1260,10 @@ pub mod call {
     }
 
     /// Receive a batch of frames.
-    pub fn net_rx_batch(dev: usize, frames: &mut [strat9_abi::net::NetFrame]) -> error::Result<usize> {
+    pub fn net_rx_batch(
+        dev: usize,
+        frames: &mut [strat9_abi::net::NetFrame],
+    ) -> error::Result<usize> {
         unsafe {
             syscall3(
                 number::SYS_NET_RX_BATCH,
@@ -1683,25 +1690,12 @@ pub mod call {
         handle: usize,
         desc: &::strat9_abi::iommu::IommuMapDesc,
     ) -> error::Result<usize> {
-        unsafe {
-            syscall2(
-                number::SYS_IOMMU_MAP,
-                handle,
-                desc as *const _ as usize,
-            )
-        }
+        unsafe { syscall2(number::SYS_IOMMU_MAP, handle, desc as *const _ as usize) }
     }
 
     /// Remove a range from a domain.
     pub fn iommu_unmap(handle: usize, iova: u64, len: u64) -> error::Result<usize> {
-        unsafe {
-            syscall3(
-                number::SYS_IOMMU_UNMAP,
-                handle,
-                iova as usize,
-                len as usize,
-            )
-        }
+        unsafe { syscall3(number::SYS_IOMMU_UNMAP, handle, iova as usize, len as usize) }
     }
 
     /// Software IOVA translation.
@@ -1719,26 +1713,27 @@ pub mod call {
         handle: usize,
         out: &mut ::strat9_abi::iommu::IommuDomainInfo,
     ) -> error::Result<usize> {
-        unsafe { syscall2(number::SYS_IOMMU_DOMAIN_INFO, handle, out as *mut _ as usize) }
+        unsafe {
+            syscall2(
+                number::SYS_IOMMU_DOMAIN_INFO,
+                handle,
+                out as *mut _ as usize,
+            )
+        }
     }
 
     /// Pop one fault record.  Returns `1` when `out` was filled.
-    pub fn iommu_fault_next(
-        out: &mut ::strat9_abi::iommu::IommuFault,
-    ) -> error::Result<usize> {
+    pub fn iommu_fault_next(out: &mut ::strat9_abi::iommu::IommuFault) -> error::Result<usize> {
         unsafe { syscall1(number::SYS_IOMMU_FAULT_NEXT, out as *mut _ as usize) }
     }
 
     /// Control an existing domain.
-    pub fn iommu_domain_ctl(handle: usize, command: usize, argument: usize) -> error::Result<usize> {
-        unsafe {
-            syscall3(
-                number::SYS_IOMMU_DOMAIN_CTL,
-                handle,
-                command,
-                argument,
-            )
-        }
+    pub fn iommu_domain_ctl(
+        handle: usize,
+        command: usize,
+        argument: usize,
+    ) -> error::Result<usize> {
+        unsafe { syscall3(number::SYS_IOMMU_DOMAIN_CTL, handle, command, argument) }
     }
 
     /// Batch map.
@@ -1777,9 +1772,7 @@ pub mod call {
     }
 
     /// Coarse IOMMU groups.  Returns the number written.
-    pub fn iommu_groups(
-        out: &mut [::strat9_abi::iommu::IommuGroupInfo],
-    ) -> error::Result<usize> {
+    pub fn iommu_groups(out: &mut [::strat9_abi::iommu::IommuGroupInfo]) -> error::Result<usize> {
         unsafe {
             syscall2(
                 number::SYS_IOMMU_GROUPS,

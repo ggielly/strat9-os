@@ -118,12 +118,7 @@ impl Dumper {
     /// The first call emits HELLO (seq 0).  Subsequent calls emit DATA frames;
     /// `cursor` is caller-owned and must start at 0 for each new input slice.
     /// Returns `None` when the input slice is exhausted.
-    pub fn next_frame(
-        &mut self,
-        data: &[u8],
-        out: &mut [u8],
-        cursor: &mut usize,
-    ) -> Option<usize> {
+    pub fn next_frame(&mut self, data: &[u8], out: &mut [u8], cursor: &mut usize) -> Option<usize> {
         if !self.hello_sent {
             self.hello_sent = true;
             return self.emit(TYPE_HELLO, &[], out);
@@ -218,10 +213,16 @@ mod tests {
         let mut out = [0u8; 16];
         let n = d.drop_frame(0x1122_3344, &mut out).unwrap();
         assert_eq!(n, 9);
-        assert_eq!(&out[..9], &[TYPE_DROP, 0x00, 0, 0, 0, 0x44, 0x33, 0x22, 0x11]);
+        assert_eq!(
+            &out[..9],
+            &[TYPE_DROP, 0x00, 0, 0, 0, 0x44, 0x33, 0x22, 0x11]
+        );
         let f = decode(&out[..n]).unwrap();
         assert_eq!(f.kind, TYPE_DROP);
-        assert_eq!(u32::from_le_bytes(f.payload.try_into().unwrap()), 0x1122_3344);
+        assert_eq!(
+            u32::from_le_bytes(f.payload.try_into().unwrap()),
+            0x1122_3344
+        );
         assert_eq!(d.seq(), 1);
     }
 

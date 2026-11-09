@@ -2058,8 +2058,7 @@ fn local_cached_dec_phys(phys: u64, migratetype: Migratetype) {
         // Keep a bounded diagnostic: this is a heuristic drift, not a fatal
         // error anymore.  Printing from the allocator must stay rate-limited
         // and allocation-free.
-        static WARNED: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
+        static WARNED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
         if WARNED.fetch_add(1, AtomicOrdering::Relaxed) < 8 {
             crate::serial_force_println!(
                 "[buddy] cached-zone drift: phys={:#x} zone={} total={} mt={:?}",

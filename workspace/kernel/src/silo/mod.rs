@@ -1434,9 +1434,7 @@ pub fn current_task_dma_quota() -> Option<DmaQuota> {
         max_bytes: silo.config.dma_max_bytes,
         iova_base: silo.config.dma_iova_base,
         iova_limit: silo.config.dma_iova_limit,
-        fault_policy: crate::hardware::iommu::FaultPolicy::from_raw(
-            silo.config.dma_fault_policy,
-        ),
+        fault_policy: crate::hardware::iommu::FaultPolicy::from_raw(silo.config.dma_fault_policy),
     })
 }
 

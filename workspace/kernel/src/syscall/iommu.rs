@@ -33,9 +33,7 @@
 
 use super::error::SyscallError;
 use crate::{
-    capability::{
-        get_capability_manager, CapId, CapPermissions, DmaRights, ResourceType,
-    },
+    capability::{get_capability_manager, CapId, CapPermissions, DmaRights, ResourceType},
     hardware::iommu::{self, DmaProt, Domain, DomainId, FaultPolicy, IommuError, Sbdf},
     memory::{UserSliceRead, UserSliceWrite},
     process::current_task_clone,
@@ -74,7 +72,10 @@ fn map_error(err: IommuError) -> SyscallError {
 }
 
 /// Resolve an `IommuDomain` capability and enforce the required DMA rights.
-fn domain_from_handle(handle: u64, required: DmaRights) -> Result<Arc<iommu::Domain>, SyscallError> {
+fn domain_from_handle(
+    handle: u64,
+    required: DmaRights,
+) -> Result<Arc<iommu::Domain>, SyscallError> {
     silo::enforce_cap_for_current_task(handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     // SAFETY: the capability table belongs to the current process and this
@@ -138,9 +139,7 @@ fn write_array<T: Copy>(ptr: u64, entries: &[T]) -> Result<(), SyscallError> {
     let bytes = entries.len() * core::mem::size_of::<T>();
     let slice = UserSliceWrite::new(ptr, bytes)?;
     // SAFETY: the slice covers a valid `&[T]`.
-    let raw = unsafe {
-        core::slice::from_raw_parts(entries.as_ptr() as *const u8, bytes)
-    };
+    let raw = unsafe { core::slice::from_raw_parts(entries.as_ptr() as *const u8, bytes) };
     slice.copy_from(raw);
     Ok(())
 }
@@ -272,7 +271,16 @@ pub fn sys_iommu_domain_destroy(handle: u64) -> Result<u64, SyscallError> {
 /// SYS_IOMMU_MAP (523): map a physical range into a domain.
 pub fn sys_iommu_map(handle: u64, desc_ptr: u64) -> Result<u64, SyscallError> {
     require_control()?;
-    let domain = domain_from_handle(handle, DmaRights { map: true, unmap: false, read: false, write: false, irq: false })?;
+    let domain = domain_from_handle(
+        handle,
+        DmaRights {
+            map: true,
+            unmap: false,
+            read: false,
+            write: false,
+            irq: false,
+        },
+    )?;
     let desc: IommuMapDesc = read_struct(desc_ptr)?;
     if desc.reserved != 0 {
         return Err(SyscallError::InvalidArgument);
@@ -295,7 +303,16 @@ pub fn sys_iommu_map(handle: u64, desc_ptr: u64) -> Result<u64, SyscallError> {
 /// SYS_IOMMU_UNMAP (524): remove mappings covering a range.
 pub fn sys_iommu_unmap(handle: u64, iova: u64, len: u64) -> Result<u64, SyscallError> {
     require_control()?;
-    let domain = domain_from_handle(handle, DmaRights { map: false, unmap: true, read: false, write: false, irq: false })?;
+    let domain = domain_from_handle(
+        handle,
+        DmaRights {
+            map: false,
+            unmap: true,
+            read: false,
+            write: false,
+            irq: false,
+        },
+    )?;
     let removed = domain.unmap(iova, len).map_err(map_error)?;
     Ok(removed as u64)
 }
@@ -347,18 +364,13 @@ fn backend_error(error: crate::arch::iommu::IommuError) -> SyscallError {
 }
 
 /// SYS_PCI_MSI_ALLOC (535): allocate an IRTE for a device vector.
-pub fn sys_pci_msi_alloc(
-    sbdf_raw: u64,
-    vector: u64,
-    out_ptr: u64,
-) -> Result<u64, SyscallError> {
+pub fn sys_pci_msi_alloc(sbdf_raw: u64, vector: u64, out_ptr: u64) -> Result<u64, SyscallError> {
     require_control()?;
     if sbdf_raw > u32::MAX as u64 || vector > u8::MAX as u64 {
         return Err(SyscallError::InvalidArgument);
     }
     let sbdf = Sbdf::from_u32(sbdf_raw as u32);
-    let allocation = crate::arch::iommu::allocate_msi(sbdf, vector as u8)
-        .map_err(backend_error)?;
+    let allocation = crate::arch::iommu::allocate_msi(sbdf, vector as u8).map_err(backend_error)?;
     let msi = IommuMsi {
         cookie: allocation.cookie,
         vector: vector as u32,
@@ -406,11 +418,7 @@ pub fn sys_iommu_fault_next(out_ptr: u64) -> Result<u64, SyscallError> {
 }
 
 /// SYS_IOMMU_DOMAIN_CTL (528): quiesce / resume / detach / policy.
-pub fn sys_iommu_domain_ctl(
-    handle: u64,
-    command: u64,
-    argument: u64,
-) -> Result<u64, SyscallError> {
+pub fn sys_iommu_domain_ctl(handle: u64, command: u64, argument: u64) -> Result<u64, SyscallError> {
     require_control()?;
     let domain = domain_from_handle(handle, DmaRights::none())?;
     let id = domain.id();
@@ -435,11 +443,7 @@ pub fn sys_iommu_domain_ctl(
 }
 
 /// SYS_IOMMU_MAP_BATCH (530): map several ranges in one call.
-pub fn sys_iommu_map_batch(
-    handle: u64,
-    desc_ptr: u64,
-    count: u64,
-) -> Result<u64, SyscallError> {
+pub fn sys_iommu_map_batch(handle: u64, desc_ptr: u64, count: u64) -> Result<u64, SyscallError> {
     require_control()?;
     let domain = domain_from_handle(
         handle,
@@ -509,11 +513,7 @@ pub fn sys_iommu_map_batch(
 }
 
 /// SYS_IOMMU_UNMAP_BATCH (531): unmap several ranges in one call.
-pub fn sys_iommu_unmap_batch(
-    handle: u64,
-    desc_ptr: u64,
-    count: u64,
-) -> Result<u64, SyscallError> {
+pub fn sys_iommu_unmap_batch(handle: u64, desc_ptr: u64, count: u64) -> Result<u64, SyscallError> {
     require_control()?;
     let domain = domain_from_handle(
         handle,
@@ -528,8 +528,8 @@ pub fn sys_iommu_unmap_batch(
     let descs: Vec<IommuMapDesc> = read_array(desc_ptr, count)?;
     let mut removed = 0u64;
     for desc in &descs {
-        removed = removed
-            .saturating_add(domain.unmap(desc.iova, desc.len).map_err(map_error)? as u64);
+        removed =
+            removed.saturating_add(domain.unmap(desc.iova, desc.len).map_err(map_error)? as u64);
     }
     Ok(removed)
 }
@@ -553,10 +553,7 @@ pub fn sys_iommu_stats(out_ptr: u64) -> Result<u64, SyscallError> {
 }
 
 /// SYS_IOMMU_GROUPS (533): coarse IOMMU groups.
-pub fn sys_iommu_groups(
-    out_ptr: u64,
-    max_entries: u64,
-) -> Result<u64, SyscallError> {
+pub fn sys_iommu_groups(out_ptr: u64, max_entries: u64) -> Result<u64, SyscallError> {
     require_control()?;
     if max_entries == 0 {
         return Ok(0);
@@ -579,10 +576,7 @@ pub fn sys_iommu_groups(
 }
 
 /// SYS_IOMMU_RESERVED (534): firmware-reserved regions.
-pub fn sys_iommu_reserved(
-    out_ptr: u64,
-    max_entries: u64,
-) -> Result<u64, SyscallError> {
+pub fn sys_iommu_reserved(out_ptr: u64, max_entries: u64) -> Result<u64, SyscallError> {
     require_control()?;
     if max_entries == 0 {
         return Ok(0);

@@ -86,11 +86,7 @@ impl AclReassembler {
 
     /// Feed one ACL fragment.  Returns the total frame length when the L2CAP
     /// PDU is complete, `None` while more fragments are needed.
-    pub fn push(
-        &mut self,
-        header: AclHeader,
-        payload: &[u8],
-    ) -> Result<Option<usize>, AclError> {
+    pub fn push(&mut self, header: AclHeader, payload: &[u8]) -> Result<Option<usize>, AclError> {
         if payload.len() != header.data_len as usize {
             return Err(AclError::TruncatedL2cap);
         }
@@ -107,9 +103,7 @@ impl AclReassembler {
                     return Err(AclError::TruncatedL2cap);
                 }
                 let l2cap_len = u16::from_le_bytes([payload[0], payload[1]]) as usize;
-                let total = 4usize
-                    .checked_add(l2cap_len)
-                    .ok_or(AclError::Overflow)?;
+                let total = 4usize.checked_add(l2cap_len).ok_or(AclError::Overflow)?;
                 if total > MAX_L2CAP_PDU {
                     return Err(AclError::Overflow);
                 }
@@ -288,10 +282,7 @@ mod tests {
     fn interleaved_handles_are_rejected() {
         let mut r = AclReassembler::new();
         let p = pdu(8);
-        assert_eq!(
-            r.push(header(0x40, 0, 6), &p[..6]).unwrap(),
-            None
-        );
+        assert_eq!(r.push(header(0x40, 0, 6), &p[..6]).unwrap(), None);
         assert_eq!(
             r.push(header(0x41, 1, 6), &p[6..12]),
             Err(AclError::HandleMismatch)
@@ -306,15 +297,18 @@ mod tests {
         big[1] = 0xff; // 65535-byte L2CAP PDU
         big[2] = 0x04;
         big[3] = 0x00;
-        assert_eq!(
-            r.push(header(1, 0, 8), &big),
-            Err(AclError::Overflow)
-        );
+        assert_eq!(r.push(header(1, 0, 8), &big), Err(AclError::Overflow));
 
         let p = pdu(8);
-        assert_eq!(r.push(header(1, 1, 4), &p[..4]), Err(AclError::UnexpectedContinuation));
+        assert_eq!(
+            r.push(header(1, 1, 4), &p[..4]),
+            Err(AclError::UnexpectedContinuation)
+        );
         assert_eq!(r.push(header(1, 0, 4), &p[..4]).unwrap(), None);
-        assert_eq!(r.push(header(1, 0, 4), &p[4..8]), Err(AclError::UnexpectedStart));
+        assert_eq!(
+            r.push(header(1, 0, 4), &p[4..8]),
+            Err(AclError::UnexpectedStart)
+        );
     }
 
     #[test]
@@ -324,8 +318,14 @@ mod tests {
         assert_eq!(r.push(header(1, 0, 7), &p[..7]), Err(AclError::TooMuchData));
 
         let p = pdu(8);
-        assert_eq!(r.push(header(1, 3, 4), &p[..4]), Err(AclError::InvalidBoundary));
-        assert_eq!(r.push(header(1, 1, 4), &p[..4]), Err(AclError::UnexpectedContinuation));
+        assert_eq!(
+            r.push(header(1, 3, 4), &p[..4]),
+            Err(AclError::InvalidBoundary)
+        );
+        assert_eq!(
+            r.push(header(1, 1, 4), &p[..4]),
+            Err(AclError::UnexpectedContinuation)
+        );
     }
 
     #[test]
@@ -367,7 +367,12 @@ mod tests {
             let dlen = u16::from_le_bytes([out[off + 3], out[off + 4]]) as usize;
             let flags = u16::from_le_bytes([out[off + 1], out[off + 2]]);
             let pb = ((flags >> 12) & 3) as u8;
-            done = r.push(AclHeader::new(flags & 0x0fff, pb, 0, dlen as u16), &out[off + 5..off + 5 + dlen]).unwrap();
+            done = r
+                .push(
+                    AclHeader::new(flags & 0x0fff, pb, 0, dlen as u16),
+                    &out[off + 5..off + 5 + dlen],
+                )
+                .unwrap();
             off += 5 + dlen;
         }
         assert_eq!(done, Some(ln));

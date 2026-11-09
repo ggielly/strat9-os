@@ -450,15 +450,15 @@ pub fn free_pcid(pcid: u16) {
 pub fn pcid_available() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
-    // 1. CPUID check: bit 17 of ECX after CPUID(EAX=1) indicates PCID support.
-    let (_, _, ecx, _) = crate::arch::cpuid(1, 0);
-    if ecx & (1 << 17) == 0 {
-        return false;
-    }
-    // 2. Check CR4.PCIDE (bit 17) is actually set (may be masked by hypervisor).
-    //    Intel SDM Vol.3A §4.10.4: CR4.PCIDE = 1 enables PCID in CR3.
-    let cr4 = crate::x86_crate_shim::registers::control::Cr4::read();
-    cr4.contains(crate::x86_crate_shim::registers::control::Cr4Flags::PCID)
+        // 1. CPUID check: bit 17 of ECX after CPUID(EAX=1) indicates PCID support.
+        let (_, _, ecx, _) = crate::arch::cpuid(1, 0);
+        if ecx & (1 << 17) == 0 {
+            return false;
+        }
+        // 2. Check CR4.PCIDE (bit 17) is actually set (may be masked by hypervisor).
+        //    Intel SDM Vol.3A §4.10.4: CR4.PCIDE = 1 enables PCID in CR3.
+        let cr4 = crate::x86_crate_shim::registers::control::Cr4::read();
+        cr4.contains(crate::x86_crate_shim::registers::control::Cr4Flags::PCID)
     }
     #[cfg(target_arch = "riscv64")]
     {
@@ -1138,9 +1138,10 @@ fn map_page_in_space(
     target_va: u64,
     address_space: &AddressSpace,
 ) -> Result<(), &'static str> {
-    use crate::arch::xshim::{PageTableFlags, PhysFrame, Size4KiB};
-    use crate::arch::xshim::{PhysAddr, VirtAddr};
-    use crate::x86_crate_shim::structures::paging::{Mapper, Page};
+    use crate::{
+        arch::xshim::{PageTableFlags, PhysAddr, PhysFrame, Size4KiB, VirtAddr},
+        x86_crate_shim::structures::paging::{Mapper, Page},
+    };
 
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(target_va));
     let phys_frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(frame_phys));

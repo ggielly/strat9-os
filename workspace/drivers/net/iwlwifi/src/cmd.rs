@@ -115,13 +115,7 @@ fn put_u64(buf: &mut [u8], off: usize, v: u64) {
 }
 
 /// `struct iwl_phy_context_cmd` (32 bytes for API v3..v7).
-pub fn phy_context(
-    id_color: u32,
-    action: u32,
-    channel: u8,
-    band: u8,
-    width: u8,
-) -> Vec<u8> {
+pub fn phy_context(id_color: u32, action: u32, channel: u8, band: u8, width: u8) -> Vec<u8> {
     let mut b = alloc::vec![0u8; 32];
     put_u32(&mut b, 0, id_color);
     put_u32(&mut b, 4, action);
@@ -168,7 +162,13 @@ pub fn mac_context_sta(
     // QoS defaults.
     put_u32(&mut b, 56, 0);
     // iwl_ac_qos ac[5]: cw_min, cw_max, aifsn, fifos_mask, txop
-    let ac = [(0x000f, 0x03ff, 2u8), (0x000f, 0x03ff, 2), (0x000f, 0x03ff, 2), (0x000f, 0x03ff, 2), (0x0003, 0x0007, 2)];
+    let ac = [
+        (0x000f, 0x03ff, 2u8),
+        (0x000f, 0x03ff, 2),
+        (0x000f, 0x03ff, 2),
+        (0x000f, 0x03ff, 2),
+        (0x0003, 0x0007, 2),
+    ];
     for (i, (cwmin, cwmax, aifsn)) in ac.iter().enumerate() {
         let off = 60 + i * 8;
         put_u16(&mut b, off, *cwmin);
@@ -226,7 +226,14 @@ pub fn add_sta_modify(
     tfd_queue_msk: u32,
     station_flags: u32,
 ) -> Vec<u8> {
-    let mut b = add_sta(sta_id, mac_id_color, addr, assoc_id, tfd_queue_msk, station_flags);
+    let mut b = add_sta(
+        sta_id,
+        mac_id_color,
+        addr,
+        assoc_id,
+        tfd_queue_msk,
+        station_flags,
+    );
     b[0] = STA_MODE_MODIFY;
     // Select which fields are updated: station queues (BIT(7)).
     b[17] = 0x80;
@@ -234,7 +241,13 @@ pub fn add_sta_modify(
 }
 
 /// `struct iwl_mvm_add_sta_key_cmd` (v2/v3) for CCMP.
-pub fn add_sta_key(sta_id: u8, key_offset: u8, key: &[u8; 16], key_id: u8, multicast: bool) -> Vec<u8> {
+pub fn add_sta_key(
+    sta_id: u8,
+    key_offset: u8,
+    key: &[u8; 16],
+    key_id: u8,
+    multicast: bool,
+) -> Vec<u8> {
     let mut b = alloc::vec![0u8; 76];
     b[0] = sta_id;
     b[1] = key_offset;
@@ -373,7 +386,14 @@ mod tests {
 
     #[test]
     fn add_sta_is_48_bytes() {
-        let b = add_sta(2, id_and_color(1, 1), [1; 6], 0x0100, 0x2, STA_FLAG_ASSOCIATED);
+        let b = add_sta(
+            2,
+            id_and_color(1, 1),
+            [1; 6],
+            0x0100,
+            0x2,
+            STA_FLAG_ASSOCIATED,
+        );
         assert_eq!(b.len(), 48);
         assert_eq!(&b[8..14], &[1u8; 6]);
         assert_eq!(b[16], 2);

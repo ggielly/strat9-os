@@ -46,8 +46,10 @@
 //! of the retained window. That is normal operation and is reported by
 //! [`overwritten`]. `dropped` only counts pushes that were refused.
 
-use core::fmt;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::{
+    fmt,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use crate::sync::SpinLock;
 

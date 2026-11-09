@@ -455,9 +455,7 @@ pub fn parse_event(packet: &[u8]) -> Result<Event<'_>, ParseError> {
     }
     let code = packet[1];
     let plen = packet[2] as usize;
-    let end = 3usize
-        .checked_add(plen)
-        .ok_or(ParseError::BadLength)?;
+    let end = 3usize.checked_add(plen).ok_or(ParseError::BadLength)?;
     if packet.len() < end {
         return Err(ParseError::Truncated);
     }
@@ -583,15 +581,7 @@ mod tests {
         assert_cmd(&b[..n], OP_LE_READ_BUFFER_SIZE, 0);
 
         let n = le_set_advertising_params(
-            &mut b,
-            0x00a0,
-            0x00a0,
-            0x00,
-            0x00,
-            0x00,
-            &[0u8; 6],
-            0x07,
-            0x00,
+            &mut b, 0x00a0, 0x00a0, 0x00, 0x00, 0x00, &[0u8; 6], 0x07, 0x00,
         )
         .unwrap();
         assert_cmd(&b[..n], OP_LE_SET_ADVERTISING_PARAMS, 15);
@@ -763,7 +753,15 @@ mod tests {
         );
 
         let pkt = [
-            0x04, EVT_LE_META, 0x06, LE_PHY_UPDATE, 0x00, 0x40, 0x00, 0x02, 0x01,
+            0x04,
+            EVT_LE_META,
+            0x06,
+            LE_PHY_UPDATE,
+            0x00,
+            0x40,
+            0x00,
+            0x02,
+            0x01,
         ];
         assert_eq!(
             parse_event(&pkt).unwrap(),
@@ -797,11 +795,17 @@ mod tests {
                 assert_eq!(c.num_handles, 2);
                 assert_eq!(
                     c.iter().next().copied(),
-                    Some(CompletedPacket { handle: 0x40, count: 1 })
+                    Some(CompletedPacket {
+                        handle: 0x40,
+                        count: 1
+                    })
                 );
                 assert_eq!(
                     c.iter().nth(1).copied(),
-                    Some(CompletedPacket { handle: 0x41, count: 2 })
+                    Some(CompletedPacket {
+                        handle: 0x41,
+                        count: 2
+                    })
                 );
             }
             _ => panic!("wrong event"),
@@ -838,7 +842,10 @@ mod tests {
             parse_event(&[0x04, LE_META_BAD, 0x00]),
             Err(ParseError::UnsupportedEvent)
         );
-        assert_eq!(parse_event(&[0x02, 0x0e, 0x00]), Err(ParseError::BadPacketType));
+        assert_eq!(
+            parse_event(&[0x02, 0x0e, 0x00]),
+            Err(ParseError::BadPacketType)
+        );
     }
 
     const LE_META_BAD: u8 = 0x99;

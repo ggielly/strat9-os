@@ -362,7 +362,7 @@ pub fn enumerate_device(port: usize, slot_id: u8, dev_desc: &[u8; 18]) {
                                     unsafe {
                                         crate::e9_mark!(b'K');
                                         crate::e9_mark!(b'b');
-                                        crate::e9_mark!(b'0'+b_interface_protocol);
+                                        crate::e9_mark!(b'0' + b_interface_protocol);
                                         crate::e9_mark!(b'\n');
                                     }
 
@@ -387,7 +387,11 @@ pub fn enumerate_device(port: usize, slot_id: u8, dev_desc: &[u8; 18]) {
                                         .alloc_interrupt_buffer(slot_id, ep_num, buf_size);
                                     unsafe {
                                         crate::e9_mark!(b'K');
-                                        crate::e9_mark!(if alloc_res.is_ok() { b'a' } else { b'A' });
+                                        crate::e9_mark!(if alloc_res.is_ok() {
+                                            b'a'
+                                        } else {
+                                            b'A'
+                                        });
                                         crate::e9_mark!(b'\n');
                                     }
                                     if let Ok((_buf_virt, _buf_phys)) = alloc_res {

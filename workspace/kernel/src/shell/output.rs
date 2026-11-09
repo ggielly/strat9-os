@@ -238,13 +238,7 @@ pub fn format_epoch_time(unix_secs: u64) -> String {
         .get((dt.month as usize).saturating_sub(1))
         .copied()
         .unwrap_or("???");
-    alloc::format!(
-        "{} {:>2} {:02}:{:02}",
-        month,
-        dt.day,
-        dt.hour,
-        dt.minute
-    )
+    alloc::format!("{} {:>2} {:02}:{:02}", month, dt.day, dt.hour, dt.minute)
 }
 
 /// Formats a Unix timestamp as a full `YYYY-MM-DD HH:MM:SS UTC` stamp.

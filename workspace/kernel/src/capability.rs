@@ -356,7 +356,8 @@ impl CapabilityTable {
     }
 
     /// Get a reference to a capability if it exists and has the required permissions
-    pub fn get_with_permissions(&self, id: CapId, required: CapPermissions) -> Option<&Capability> {        self.capabilities.get(&id).filter(|cap| {
+    pub fn get_with_permissions(&self, id: CapId, required: CapPermissions) -> Option<&Capability> {
+        self.capabilities.get(&id).filter(|cap| {
             // Check if the capability has all required permissions
             (!required.read || cap.permissions.read)
                 && (!required.write || cap.permissions.write)

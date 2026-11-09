@@ -64,11 +64,7 @@ pub unsafe fn fill_pixels(dst: *mut u8, bpp_bytes: usize, color: u32, pixels: us
         }
         3 => {
             // Pack eight 24-bit pixels (24 bytes) per iteration.
-            let b = [
-                color as u8,
-                (color >> 8) as u8,
-                (color >> 16) as u8,
-            ];
+            let b = [color as u8, (color >> 8) as u8, (color >> 16) as u8];
             let mut i = 0usize;
             while i + 8 <= pixels {
                 let mut chunk = [0u8; 24];

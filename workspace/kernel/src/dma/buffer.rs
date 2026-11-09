@@ -133,11 +133,7 @@ impl DmaBuffer {
     /// This is the preferred constructor for a device that is behind an
     /// IOMMU: the returned buffer is already coherent with the device's
     /// address space and will be unmapped automatically on drop.
-    pub fn alloc_in(
-        domain: Arc<Domain>,
-        bytes: usize,
-        prot: DmaProt,
-    ) -> Result<Self, DmaError> {
+    pub fn alloc_in(domain: Arc<Domain>, bytes: usize, prot: DmaProt) -> Result<Self, DmaError> {
         let mut buffer = Self::alloc(bytes)?;
         buffer.map_to(domain, prot)?;
         Ok(buffer)

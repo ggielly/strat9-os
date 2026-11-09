@@ -71,9 +71,7 @@ impl BulkHandle {
         let frames = ring.frame_phys_addrs();
         let mapping_caps = ring.mapping_cap_ids().to_vec();
         let pages = ring.page_count();
-        let size = pages
-            .checked_mul(4096)
-            .ok_or("bulk ring size overflow")?;
+        let size = pages.checked_mul(4096).ok_or("bulk ring size overflow")?;
 
         let server_space = server.process.address_space_arc();
         let base = server_space
@@ -175,7 +173,9 @@ impl BulkHandle {
 impl Drop for BulkHandle {
     fn drop(&mut self) {
         // Remove the server mapping before releasing the pages.
-        let _ = self.server_space.unmap_range(self.server_base, self.size as u64);
+        let _ = self
+            .server_space
+            .unmap_range(self.server_base, self.size as u64);
         // Drop the registry entry; `ring` keeps the pages alive until here.
         let _ = shared_ring::destroy_ring(self.ring_id);
         let _ = &self.ring;

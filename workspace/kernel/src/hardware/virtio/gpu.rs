@@ -25,7 +25,7 @@
 
 use crate::{
     hardware::pci_client::{self as pci, Bar, ProbeCriteria},
-    memory::{self, paging, allocate_zeroed_frame, phys_to_virt, PhysFrame},
+    memory::{self, allocate_zeroed_frame, paging, phys_to_virt, PhysFrame},
 };
 use alloc::{sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};

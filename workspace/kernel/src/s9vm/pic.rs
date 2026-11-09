@@ -275,10 +275,7 @@ impl Pic {
     pub const fn handles_port(port: u16) -> bool {
         matches!(
             port,
-            port::MASTER_COMMAND
-                | port::MASTER_DATA
-                | port::SLAVE_COMMAND
-                | port::SLAVE_DATA
+            port::MASTER_COMMAND | port::MASTER_DATA | port::SLAVE_COMMAND | port::SLAVE_DATA
         )
     }
 

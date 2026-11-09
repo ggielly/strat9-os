@@ -30,11 +30,9 @@
 //! Events are deliberately small and allocation-free: a fixed ring of 64
 //! entries, written from IRQ/control context and read by the strate.
 
-use crate::{
-    sync::{FixedQueue, SpinLock},
-};
-use strat9_abi::net::event;
+use crate::sync::{FixedQueue, SpinLock};
 use core::sync::atomic::{AtomicBool, Ordering};
+use strat9_abi::net::event;
 
 /// One device lifecycle event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,8 +55,7 @@ impl DeviceEvent {
 }
 
 const EVENT_CAPACITY: usize = 64;
-static EVENTS: SpinLock<FixedQueue<DeviceEvent, EVENT_CAPACITY>> =
-    SpinLock::new(FixedQueue::new());
+static EVENTS: SpinLock<FixedQueue<DeviceEvent, EVENT_CAPACITY>> = SpinLock::new(FixedQueue::new());
 
 /// Last link state observed by the IRQ handler, used to emit transitions.
 static LINK_UP: AtomicBool = AtomicBool::new(false);
@@ -124,22 +121,12 @@ pub fn poll_pci() {
 
     for id in current.iter() {
         if !old.contains(id) {
-            push(DeviceEvent::new(
-                event::DEVICE_ADD,
-                *id,
-                1,
-                0,
-            ));
+            push(DeviceEvent::new(event::DEVICE_ADD, *id, 1, 0));
         }
     }
     for id in old.iter() {
         if !current.contains(id) {
-            push(DeviceEvent::new(
-                event::DEVICE_REMOVE,
-                *id,
-                1,
-                0,
-            ));
+            push(DeviceEvent::new(event::DEVICE_REMOVE, *id, 1, 0));
             // Revoke any DMA domain bound to the removed function.
             let sbdf = crate::hardware::iommu::Sbdf::new(
                 0,
@@ -174,4 +161,3 @@ pub fn start_watchdog() -> Result<(), &'static str> {
     }
     Ok(())
 }
-

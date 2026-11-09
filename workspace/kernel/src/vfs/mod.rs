@@ -48,6 +48,7 @@
 
 pub mod blkdev_scheme;
 pub mod bt_scheme;
+pub mod bulk;
 pub mod console_scheme;
 pub mod fd;
 pub mod file;
@@ -55,7 +56,6 @@ pub mod input_scheme;
 pub mod ipcfs;
 pub mod log_scheme;
 pub mod mount;
-pub mod bulk;
 pub use bulk::BulkHandle;
 pub mod pipe;
 pub mod procfs;
@@ -1421,7 +1421,11 @@ pub fn init() {
     {
         let cpu_count = crate::arch::percpu::get_cpu_count().max(1);
         let register_cpu_value = |path: &str, value: &str| {
-            let bytes = Box::leak(alloc::format!("{}\n", value).into_bytes().into_boxed_slice());
+            let bytes = Box::leak(
+                alloc::format!("{}\n", value)
+                    .into_bytes()
+                    .into_boxed_slice(),
+            );
             kernel_scheme.register(path, bytes.as_ptr(), bytes.len());
         };
 

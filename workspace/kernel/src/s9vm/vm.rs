@@ -37,25 +37,26 @@
 //! No policy is decided here: access checks are done by the syscall layer
 //! (capabilities).
 
-use alloc::collections::BTreeMap;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame};
-use crate::process::{kthread, scheduler::ticks, sleep_current_task_ticks, TaskId};
-use crate::s9vm::apic::LocalApic;
-use crate::s9vm::caps::HwCaps;
-use crate::s9vm::exit::ExitClass;
-use crate::s9vm::exitqueue::ExitQueue;
-use crate::s9vm::guest::{FixedBits, GuestState};
-use crate::s9vm::ioapic::IoApic;
-use crate::s9vm::pic::Pic;
-use crate::s9vm::memmap::{perms_from_abi, GuestMap, MapError};
-use crate::s9vm::mmu::Perms as MmuPerms;
-use crate::s9vm::mmu::PAGE_SIZE;
-use crate::s9vm::vcpu::{ExitInfo, SecondLevelMemory, Vcpu, VcpuError};
-use crate::sync::{SpinLock, WaitQueue};
+use crate::{
+    memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame},
+    process::{kthread, scheduler::ticks, sleep_current_task_ticks, TaskId},
+    s9vm::{
+        apic::LocalApic,
+        caps::HwCaps,
+        exit::ExitClass,
+        exitqueue::ExitQueue,
+        guest::{FixedBits, GuestState},
+        ioapic::IoApic,
+        memmap::{perms_from_abi, GuestMap, MapError},
+        mmu::{Perms as MmuPerms, PAGE_SIZE},
+        pic::Pic,
+        vcpu::{ExitInfo, SecondLevelMemory, Vcpu, VcpuError},
+    },
+    sync::{SpinLock, WaitQueue},
+};
 use strat9_abi::vmm::{exit_kind, VmmExitEvent, VmmRegs};
 
 /// Maximum number of simultaneous worlds (safety bound).
@@ -211,7 +212,10 @@ impl WorldMemory {
                 return Err(VmError::OutOfMemory);
             };
             let hpa = frame.start_address.as_u64();
-            if let Err(error) = self.second_level.map_4k(gpa + index * PAGE_SIZE, hpa, perms) {
+            if let Err(error) = self
+                .second_level
+                .map_4k(gpa + index * PAGE_SIZE, hpa, perms)
+            {
                 allocated.push(frame);
                 self.rollback(gpa, mapped, allocated);
                 self.map.remove(gpa);
@@ -394,10 +398,7 @@ pub fn destroy(id: u64) -> Option<WorldRecord> {
 }
 
 /// Finds a world and the index of a vCPU in that world.
-fn locate_slot(
-    worlds: &mut BTreeMap<u64, World>,
-    vcpu_id: u64,
-) -> Option<(&mut World, usize)> {
+fn locate_slot(worlds: &mut BTreeMap<u64, World>, vcpu_id: u64) -> Option<(&mut World, usize)> {
     for world in worlds.values_mut() {
         if let Some(index) = world.vcpus.iter().position(|slot| slot.id == vcpu_id) {
             return Some((world, index));
@@ -477,11 +478,7 @@ pub fn get(id: u64) -> Option<WorldRecord> {
 
 /// Lists the worlds (identifier order).
 pub fn list() -> Vec<WorldRecord> {
-    WORLDS
-        .lock()
-        .values()
-        .map(|world| world.record)
-        .collect()
+    WORLDS.lock().values().map(|world| world.record).collect()
 }
 
 /// Logs an engine snapshot (kernel diagnostic).
@@ -758,7 +755,14 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
         let hardware = slot.hardware.take();
         let pending_irq = slot.pending_irq.take();
         let pending_nmi = core::mem::replace(&mut slot.pending_nmi, false);
-        (world.record.id, hardware, slot.regs, pointer, pending_irq, pending_nmi)
+        (
+            world.record.id,
+            hardware,
+            slot.regs,
+            pointer,
+            pending_irq,
+            pending_nmi,
+        )
     };
     let mut hardware = match hardware {
         Some(hardware) => hardware,
@@ -1199,7 +1203,10 @@ fn vcpu_world_mut(worlds: &mut BTreeMap<u64, World>, vcpu_id: u64) -> Option<&mu
 }
 
 /// Writes a vCPU's register block.
-pub fn set_vcpu_regs(vcpu_id: u64, regs: &strat9_abi::vmm::VmmRegs) -> Result<(), VcpuRegistryError> {
+pub fn set_vcpu_regs(
+    vcpu_id: u64,
+    regs: &strat9_abi::vmm::VmmRegs,
+) -> Result<(), VcpuRegistryError> {
     if regs.abi_version != strat9_abi::vmm::VMM_ABI_VERSION {
         return Err(VcpuRegistryError::BadAbiVersion);
     }
@@ -1260,4 +1267,3 @@ pub fn clear() {
         }
     }
 }
-

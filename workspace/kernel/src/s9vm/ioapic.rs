@@ -145,7 +145,9 @@ impl IoApic {
             0x00 => u32::from(self.id) << 24,
             0x01 => VERSION,
             0x02 => 0, // arbitration register, unused with one I/O APIC
-            index if (REDIRECTION_BASE..REDIRECTION_BASE + 2 * PIN_COUNT as u32).contains(&index) => {
+            index
+                if (REDIRECTION_BASE..REDIRECTION_BASE + 2 * PIN_COUNT as u32).contains(&index) =>
+            {
                 let offset = index - REDIRECTION_BASE;
                 let pin = (offset / 2) as usize;
                 let raw = self.redirection[pin].raw;
@@ -163,7 +165,9 @@ impl IoApic {
     fn write_register(&mut self, index: u32, value: u32) {
         match index {
             0x00 => self.id = ((value >> 24) & 0xFF) as u8,
-            index if (REDIRECTION_BASE..REDIRECTION_BASE + 2 * PIN_COUNT as u32).contains(&index) => {
+            index
+                if (REDIRECTION_BASE..REDIRECTION_BASE + 2 * PIN_COUNT as u32).contains(&index) =>
+            {
                 let offset = index - REDIRECTION_BASE;
                 let pin = (offset / 2) as usize;
                 let mut raw = self.redirection[pin].raw;

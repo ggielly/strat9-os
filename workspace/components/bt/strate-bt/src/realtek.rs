@@ -222,7 +222,10 @@ mod tests {
     fn missing_chip_is_reported() {
         let (fw, cfg) = synthetic();
         let mut out = [0u8; 32];
-        assert_eq!(build_patch(&fw, 7, &cfg, &mut out), Err(RtlError::NoPatch(8)));
+        assert_eq!(
+            build_patch(&fw, 7, &cfg, &mut out),
+            Err(RtlError::NoPatch(8))
+        );
     }
 
     #[test]
@@ -236,7 +239,10 @@ mod tests {
         let mut bad = fw.clone();
         bad[0] = b'X';
         let mut out = [0u8; 32];
-        assert_eq!(build_patch(&bad, 1, &cfg, &mut out), Err(RtlError::BadSignature));
+        assert_eq!(
+            build_patch(&bad, 1, &cfg, &mut out),
+            Err(RtlError::BadSignature)
+        );
     }
 
     #[test]

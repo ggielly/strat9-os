@@ -55,8 +55,8 @@ mod writer;
 pub use api::*;
 pub use canvas::Canvas;
 pub use console_mode::{
-    current as console_mode, is_lite, is_serial, present_min_ticks,
-    select as select_console_mode, ConsoleMode,
+    current as console_mode, is_lite, is_serial, present_min_ticks, select as select_console_mode,
+    ConsoleMode,
 };
 pub use types::*;
 pub use writer::VgaWriter;

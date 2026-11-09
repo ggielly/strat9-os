@@ -47,11 +47,17 @@ static NEXT_MSI_VECTOR: core::sync::atomic::AtomicU8 =
 /// Reserve the next free MSI/MSI-X vector.
 fn alloc_msi_vector() -> u8 {
     NEXT_MSI_VECTOR
-        .fetch_update(core::sync::atomic::Ordering::Relaxed,
-                      core::sync::atomic::Ordering::Relaxed,
-                      |v| {
-                          if v + 1 >= MSI_VECTOR_END { None } else { Some(v + 1) }
-                      })
+        .fetch_update(
+            core::sync::atomic::Ordering::Relaxed,
+            core::sync::atomic::Ordering::Relaxed,
+            |v| {
+                if v + 1 >= MSI_VECTOR_END {
+                    None
+                } else {
+                    Some(v + 1)
+                }
+            },
+        )
         .unwrap_or(MSI_VECTOR_BASE)
 }
 
@@ -80,7 +86,6 @@ fn msi_message_address(lapic_id: u32) -> Option<u32> {
         None
     }
 }
-
 
 /// Try to enable MSI on `pci_dev` with `vector`.
 ///
@@ -314,5 +319,12 @@ pub fn probe_and_enable(pci_dev: &PciDevice, prefer_msix: bool) -> (u8, u8) {
         pci_dev.device_id,
         irq_line,
     );
-    (irq_line, if irq_line < 16 { 0x20 + irq_line } else { irq_line })
+    (
+        irq_line,
+        if irq_line < 16 {
+            0x20 + irq_line
+        } else {
+            irq_line
+        },
+    )
 }

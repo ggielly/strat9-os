@@ -92,10 +92,7 @@ mod tests {
         let mut out = [0u8; 32];
         let n = build(OP_PATCH_DWNLD, 1, &[0xAA, 0xBB, 0xCC], &mut out).unwrap();
         assert_eq!(n, 8);
-        assert_eq!(
-            &out[..8],
-            &[1, 1, 4, 0, 1, 0xAA, 0xBB, 0xCC]
-        );
+        assert_eq!(&out[..8], &[1, 1, 4, 0, 1, 0xAA, 0xBB, 0xCC]);
     }
 
     #[test]

@@ -38,13 +38,14 @@
 //! iwl-prph.h).  This module deliberately does not depend on the kernel: the
 //! `Bus` trait supplies MMIO and DMA from the caller.
 
-use alloc::collections::VecDeque;
-use alloc::vec::Vec;
+use alloc::{collections::VecDeque, vec::Vec};
 
 use nic_buffers::DmaRegion;
 
-use crate::fw::{FwSection, UcodeImage};
-use crate::regs;
+use crate::{
+    fw::{FwSection, UcodeImage},
+    regs,
+};
 
 /// MMIO + DMA abstraction.  The kernel implements this on top of the PCI
 /// BAR mapping and the buddy DMA allocator; tests can use a mock.
@@ -222,9 +223,7 @@ impl<B: Bus> IwlTransport<B> {
         self.set_bit(regs::CSR_GP_CNTRL, regs::GP_CNTRL_MAC_ACCESS_REQ);
         for _ in 0..1000 {
             let v = self.bus.read32(regs::CSR_GP_CNTRL);
-            if v & regs::GP_CNTRL_MAC_CLOCK_READY != 0
-                && v & regs::GP_CNTRL_GOING_TO_SLEEP == 0
-            {
+            if v & regs::GP_CNTRL_MAC_CLOCK_READY != 0 && v & regs::GP_CNTRL_GOING_TO_SLEEP == 0 {
                 return Ok(());
             }
             self.bus.delay_us(10);
@@ -242,10 +241,13 @@ impl<B: Bus> IwlTransport<B> {
 
     pub fn apm_init(&mut self) -> Result<(), TransportError> {
         // Reset handshake.
-        self.bus
-            .write32(regs::CSR_RESET, regs::RESET_SW_RESET | regs::RESET_STOP_MASTER);
+        self.bus.write32(
+            regs::CSR_RESET,
+            regs::RESET_SW_RESET | regs::RESET_STOP_MASTER,
+        );
         self.bus.delay_us(10);
-        self.bus.write32(regs::CSR_RESET, regs::RESET_MASTER_DISABLED);
+        self.bus
+            .write32(regs::CSR_RESET, regs::RESET_MASTER_DISABLED);
         self.bus.delay_us(10);
         self.bus.write32(regs::CSR_RESET, 0);
 
@@ -257,8 +259,10 @@ impl<B: Bus> IwlTransport<B> {
         self.set_bit(regs::CSR_ANA_PLL_CFG, regs::ANA_PLL_CFG_VAL);
 
         // Activate the NIC: set INIT_DONE and wait for the MAC clock.
-        self.bus
-            .write32(regs::CSR_GP_CNTRL, self.bus.read32(regs::CSR_GP_CNTRL) | regs::GP_CNTRL_INIT_DONE);
+        self.bus.write32(
+            regs::CSR_GP_CNTRL,
+            self.bus.read32(regs::CSR_GP_CNTRL) | regs::GP_CNTRL_INIT_DONE,
+        );
         for _ in 0..1000 {
             let v = self.bus.read32(regs::CSR_GP_CNTRL);
             if v & regs::GP_CNTRL_MAC_CLOCK_READY != 0 && v & regs::GP_CNTRL_INIT_DONE != 0 {
@@ -312,7 +316,10 @@ impl<B: Bus> IwlTransport<B> {
         let status = self.alloc_32bit(8)?;
         let mut buffers = Vec::with_capacity(RX_BD_ENTRIES);
         for _ in 0..RX_BD_ENTRIES {
-            let buf = self.bus.alloc_dma(RX_BUF_SIZE).ok_or(TransportError::NoDma)?;
+            let buf = self
+                .bus
+                .alloc_dma(RX_BUF_SIZE)
+                .ok_or(TransportError::NoDma)?;
             buffers.push(buf);
         }
 
@@ -361,10 +368,8 @@ impl<B: Bus> IwlTransport<B> {
         let cmd_bufs = self.alloc_32bit(CMD_SLOTS * CMD_SLOT_SIZE)?;
         // Command queue lives on TFH queue 0.
         self.write64(regs::TFH_TFDQ_CBB_TABLE, tfd_table.device_addr());
-        self.bus.write32(
-            regs::HBUS_TARG_WRPTR,
-            (regs::IWL_CMD_QUEUE_ID as u32) << 8,
-        );
+        self.bus
+            .write32(regs::HBUS_TARG_WRPTR, (regs::IWL_CMD_QUEUE_ID as u32) << 8);
         self.tx = Some(TxQueue {
             tfd_table,
             cmd_bufs,
@@ -542,7 +547,8 @@ impl<B: Bus> IwlTransport<B> {
         let info = {
             let rx = self.rx.as_mut()?;
             // closed_rb_num is the first u16 of the status word for 22000.
-            let closed = unsafe { (rx.status.virt as *const u16).read_unaligned() } as usize & 0xfff;
+            let closed =
+                unsafe { (rx.status.virt as *const u16).read_unaligned() } as usize & 0xfff;
             if rx.read == closed {
                 return None;
             }
@@ -557,7 +563,8 @@ impl<B: Bus> IwlTransport<B> {
                 rx.write = (rx.write + 1) & (RX_BD_ENTRIES - 1);
                 let addr = rx.buffers[rx.write].device_addr();
                 (rx.free_bd.virt.add(rx.write * 8) as *mut u64).write_unaligned(addr);
-                self.bus.write32(regs::RFH_Q_FRBDCB_WIDX_TRG, (rx.write & !7) as u32);
+                self.bus
+                    .write32(regs::RFH_Q_FRBDCB_WIDX_TRG, (rx.write & !7) as u32);
                 if len < 8 || len > RX_BUF_SIZE {
                     return None;
                 }
@@ -637,7 +644,6 @@ impl<B: Bus> IwlTransport<B> {
 
     // -- TX commands -------------------------------------------------------
 
-
     pub fn send_cmd(
         &mut self,
         cmd: u8,
@@ -666,9 +672,10 @@ impl<B: Bus> IwlTransport<B> {
 
             let tfd = tx.tfd_table.virt.add(slot * TFD_SIZE);
             (tfd as *mut u16).write_unaligned(1); // num_tbs
-            // struct iwl_tfh_tb { u16 tb_len; u64 addr; }
+                                                  // struct iwl_tfh_tb { u16 tb_len; u64 addr; }
             (tfd.add(2) as *mut u16).write_unaligned(total as u16);
-            (tfd.add(4) as *mut u64).write_unaligned(tx.cmd_bufs.device_addr() + (slot * CMD_SLOT_SIZE) as u64);
+            (tfd.add(4) as *mut u64)
+                .write_unaligned(tx.cmd_bufs.device_addr() + (slot * CMD_SLOT_SIZE) as u64);
         }
 
         tx.write = (slot + 1) % CMD_SLOTS;
@@ -687,7 +694,10 @@ impl<B: Bus> IwlTransport<B> {
         let bc_table = self.alloc_32bit(SLOTS * 2)?;
         let cmd_bufs = self.alloc_32bit(SLOTS * SLOT_SIZE)?;
         // 64-bit TFD circular-buffer base for this queue.
-        self.write64(regs::TFH_TFDQ_CBB_TABLE + 8 * id as u32, tfd_table.device_addr());
+        self.write64(
+            regs::TFH_TFDQ_CBB_TABLE + 8 * id as u32,
+            tfd_table.device_addr(),
+        );
         self.data_q = Some(DataQueue {
             id,
             tfd_table,
@@ -754,7 +764,11 @@ impl<B: Bus> IwlTransport<B> {
     ///
     /// Layout in the DMA slot: `iwl_cmd_header` (4) + `iwl_tx_cmd_v9` (20)
     /// + MPDU.  TB0 is the fixed 64-byte first chunk, TB1 the remainder.
-    pub fn send_mpdu(&mut self, mpdu: &[u8], encrypt_disabled: bool) -> Result<u16, TransportError> {
+    pub fn send_mpdu(
+        &mut self,
+        mpdu: &[u8],
+        encrypt_disabled: bool,
+    ) -> Result<u16, TransportError> {
         const SLOT_SIZE: usize = 2048;
         const TX_CMD: u8 = 0x1c;
         let q = self.data_q.as_mut().ok_or(TransportError::TxQueueFull)?;
@@ -799,9 +813,8 @@ impl<B: Bus> IwlTransport<B> {
             let num_tbs = if tb1_len > 0 { 2 } else { 1 };
             (tfd as *mut u16).write_unaligned(num_tbs);
             (tfd.add(2) as *mut u16).write_unaligned(tb0_len as u16);
-            (tfd.add(4) as *mut u64).write_unaligned(
-                q.cmd_bufs.device_addr() + (slot * SLOT_SIZE) as u64,
-            );
+            (tfd.add(4) as *mut u64)
+                .write_unaligned(q.cmd_bufs.device_addr() + (slot * SLOT_SIZE) as u64);
             if num_tbs == 2 {
                 (tfd.add(2 + 10) as *mut u16).write_unaligned(tb1_len as u16);
                 (tfd.add(2 + 10 + 2) as *mut u64).write_unaligned(
@@ -836,12 +849,7 @@ impl<B: Bus> IwlTransport<B> {
 fn parse_alive(payload: &[u8]) -> AliveInfo {
     let u32_at = |o: usize| -> u32 {
         if payload.len() >= o + 4 {
-            u32::from_le_bytes([
-                payload[o],
-                payload[o + 1],
-                payload[o + 2],
-                payload[o + 3],
-            ])
+            u32::from_le_bytes([payload[o], payload[o + 1], payload[o + 2], payload[o + 3]])
         } else {
             0
         }
@@ -989,7 +997,7 @@ mod tests {
             assert_eq!((tfd.add(2) as *const u16).read_unaligned(), 64);
             let cmd = q.cmd_bufs.virt;
             assert_eq!(*cmd, 0x1c); // TX_CMD
-            // rate_n_flags is at cmd header (4) + tx_cmd offset 16.
+                                    // rate_n_flags is at cmd header (4) + tx_cmd offset 16.
             let rate = (cmd.add(4 + 16) as *const u32).read_unaligned();
             assert_eq!(rate, 0x4000);
             let bc = (q.bc_table.virt as *const u16).read_unaligned();

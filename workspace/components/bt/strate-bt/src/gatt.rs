@@ -83,14 +83,12 @@ const APPEARANCE_DECL: [u8; 5] = [0x02, 0x05, 0x00, 0x01, 0x2A];
 const TX_DECL: [u8; 19] = [
     0x10, // NOTIFY
     0x08, 0x00, // value handle 8
-    0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5, 0x03, 0x00, 0x40,
-    0x6E,
+    0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5, 0x03, 0x00, 0x40, 0x6E,
 ];
 const RX_DECL: [u8; 19] = [
     0x0C, // WRITE | WRITE_NO_RESPONSE
     0x0B, 0x00, // value handle 11
-    0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5, 0x02, 0x00, 0x40,
-    0x6E,
+    0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5, 0x02, 0x00, 0x40, 0x6E,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,9 +237,7 @@ fn parse_decimal(s: &str) -> Option<u32> {
         if !b.is_ascii_digit() {
             return None;
         }
-        v = v
-            .checked_mul(10)?
-            .checked_add((b - b'0') as u32)?;
+        v = v.checked_mul(10)?.checked_add((b - b'0') as u32)?;
     }
     Some(v)
 }
@@ -360,8 +356,7 @@ impl AttServer for GattServer {
                     return None;
                 }
                 out[total..total + 2].copy_from_slice(&h.to_le_bytes());
-                out[total + 2..total + 4]
-                    .copy_from_slice(&Self::group_end(h).to_le_bytes());
+                out[total + 2..total + 4].copy_from_slice(&Self::group_end(h).to_le_bytes());
                 self.copy_value(h, &mut out[total + 4..total + 4 + vlen])?;
                 total += entry_len;
             }
@@ -507,7 +502,12 @@ mod tests {
 
         // Within the NUS range both 128-bit declarations fit.
         let (len, total) = s
-            .read_by_type(HANDLE_TX_DECL, HANDLE_RX_VALUE, &CHARACTERISTIC_UUID, &mut out)
+            .read_by_type(
+                HANDLE_TX_DECL,
+                HANDLE_RX_VALUE,
+                &CHARACTERISTIC_UUID,
+                &mut out,
+            )
             .unwrap();
         assert_eq!(len, 21);
         assert_eq!(total, 42);

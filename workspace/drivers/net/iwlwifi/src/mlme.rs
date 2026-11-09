@@ -29,13 +29,15 @@
 
 use alloc::vec::Vec;
 
-use crate::config::WifiConfig;
-use crate::dot11::{
-    build_assoc_request, build_auth_request, build_deauth, parse_assoc_response,
-    parse_auth_response, parse_beacon, BssInfo, MacAddr, SequenceCounter, BROADCAST,
-    STATUS_SUCCESS,
+use crate::{
+    config::WifiConfig,
+    dot11::{
+        build_assoc_request, build_auth_request, build_deauth, parse_assoc_response,
+        parse_auth_response, parse_beacon, BssInfo, MacAddr, SequenceCounter, BROADCAST,
+        STATUS_SUCCESS,
+    },
+    wpa2::{Wpa2Supplicant, WpaState},
 };
-use crate::wpa2::{Wpa2Supplicant, WpaState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MlmeState {
@@ -157,7 +159,12 @@ impl Mlme {
     }
 
     /// Join a specific BSS without scanning (config carries BSSID/channel).
-    pub fn begin_direct_join(&mut self, cfg: &WifiConfig, bssid: MacAddr, channel: u8) -> Result<Vec<u8>, MlmeError> {
+    pub fn begin_direct_join(
+        &mut self,
+        cfg: &WifiConfig,
+        bssid: MacAddr,
+        channel: u8,
+    ) -> Result<Vec<u8>, MlmeError> {
         let pmk = cfg.pmk().ok_or(MlmeError::NotConfigured)?;
         let mut bss = BssInfo {
             bssid,
@@ -244,7 +251,12 @@ impl Mlme {
                 match supp.handle_eapol(eapol, snonce) {
                     Ok(responses) => {
                         for response in responses {
-                            out.push(build_eapol_data_frame(bss.bssid, self.sta, &response, self.seq.next()));
+                            out.push(build_eapol_data_frame(
+                                bss.bssid,
+                                self.sta,
+                                &response,
+                                self.seq.next(),
+                            ));
                         }
                         if supp.state() == WpaState::Installed {
                             self.keys_installed = true;
@@ -350,8 +362,10 @@ pub fn build_eapol_data_frame(bssid: MacAddr, sta: MacAddr, eapol: &[u8], seq: u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dot11::{FC_SUBTYPE_ASSOC_RESP, FC_SUBTYPE_AUTH, FC_TYPE_MGMT};
-    use crate::wpa2::EAPOL_TYPE_KEY;
+    use crate::{
+        dot11::{FC_SUBTYPE_ASSOC_RESP, FC_SUBTYPE_AUTH, FC_TYPE_MGMT},
+        wpa2::EAPOL_TYPE_KEY,
+    };
 
     fn cfg() -> WifiConfig {
         let text = "[wifi]\nenabled=true\nssid=\"IEEE\"\npassphrase=\"password\"\nbssid=\"02:00:00:00:00:02\"\n";
@@ -394,7 +408,12 @@ mod tests {
         assoc.extend_from_slice(&0x4000u16.to_le_bytes()); // aid
         let frame = mgmt(FC_TYPE_MGMT | FC_SUBTYPE_ASSOC_RESP, sta, bssid, &assoc);
         let (_, ev) = mlme.on_mgmt(&frame, &cfg, &[0; 32]).unwrap();
-        assert_eq!(ev, Some(MlmeEvent::Associated { aid: 0x4000 & 0x3fff }));
+        assert_eq!(
+            ev,
+            Some(MlmeEvent::Associated {
+                aid: 0x4000 & 0x3fff
+            })
+        );
         assert_eq!(mlme.state, MlmeState::FourWayHandshake);
     }
 

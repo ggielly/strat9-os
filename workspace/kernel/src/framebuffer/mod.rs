@@ -511,9 +511,7 @@ impl CanvasBuffer {
         }
         let cw = x_end - x;
         let ch = y_end - y;
-        let needed = w
-            .checked_mul(h)
-            .and_then(|n| n.checked_mul(4))?;
+        let needed = w.checked_mul(h).and_then(|n| n.checked_mul(4))?;
         if src.len() < needed {
             return None;
         }
@@ -527,12 +525,8 @@ impl CanvasBuffer {
                     let src_row = row * src_stride;
                     for col in 0..cw {
                         let o = src_row + col * 4;
-                        buf[dst_start + col] = u32::from_le_bytes([
-                            src[o],
-                            src[o + 1],
-                            src[o + 2],
-                            src[o + 3],
-                        ]);
+                        buf[dst_start + col] =
+                            u32::from_le_bytes([src[o], src[o + 1], src[o + 2], src[o + 3]]);
                     }
                 }
                 if self.track_dirty {
@@ -553,12 +547,8 @@ impl CanvasBuffer {
                         let src_row = row * src_stride;
                         for col in 0..cw {
                             let o = src_row + col * 4;
-                            let px = u32::from_le_bytes([
-                                src[o],
-                                src[o + 1],
-                                src[o + 2],
-                                src[o + 3],
-                            ]);
+                            let px =
+                                u32::from_le_bytes([src[o], src[o + 1], src[o + 2], src[o + 3]]);
                             unsafe {
                                 core::ptr::write_volatile(
                                     self.addr.add(dst_row + col * 4) as *mut u32,
@@ -684,11 +674,7 @@ impl CanvasBuffer {
                     let dst_off = ry * pitch + rx * 4;
                     unsafe {
                         let src = buf_ptr.add(off) as *const u8;
-                        blit(
-                            fb_addr.add(dst_off) as *mut u32,
-                            src as *const u32,
-                            rw * rh,
-                        );
+                        blit(fb_addr.add(dst_off) as *mut u32, src as *const u32, rw * rh);
                         // (ops.blit) uses copy_nonoverlapping internally
                     }
                 } else {

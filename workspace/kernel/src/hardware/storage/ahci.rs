@@ -175,7 +175,7 @@ struct AhciPort {
     port_num: u8,
     port_virt: u64, // virtual address of port registers
     #[allow(dead_code)]
-    mem_phys: u64,  // physical base of the per-port CLB/FB/CTAB frame
+    mem_phys: u64, // physical base of the per-port CLB/FB/CTAB frame
     mem_virt: u64,  // HHDM virtual address of that frame
     /// Device-visible address of `mem_phys` (IOVA when translated).
     mem_device: u64,
@@ -410,8 +410,12 @@ fn submit_cmd(
         return Err(AhciError::Busy);
     }
 
-    let dma_buf = DmaBuffer::alloc_for(port.sbdf, nbytes, crate::hardware::iommu::DmaProt::READ_WRITE)
-        .map_err(|_| AhciError::Alloc)?;
+    let dma_buf = DmaBuffer::alloc_for(
+        port.sbdf,
+        nbytes,
+        crate::hardware::iommu::DmaProt::READ_WRITE,
+    )
+    .map_err(|_| AhciError::Alloc)?;
 
     if write {
         // SAFETY: dma_buf virtual addr is valid for nbytes; buf.len() >= nbytes
@@ -741,8 +745,12 @@ pub(crate) fn submit_async_storage_op(
         UserSliceWrite::new(user_buf_vaddr, nbytes).map_err(|_| AhciError::InvalidUserBuffer)?;
     }
 
-    let dma_buf = DmaBuffer::alloc_for(port.sbdf, nbytes, crate::hardware::iommu::DmaProt::READ_WRITE)
-        .map_err(|_| AhciError::Alloc)?;
+    let dma_buf = DmaBuffer::alloc_for(
+        port.sbdf,
+        nbytes,
+        crate::hardware::iommu::DmaProt::READ_WRITE,
+    )
+    .map_err(|_| AhciError::Alloc)?;
 
     let idx = port.port_num as usize;
     let ata_cmd = if write {
@@ -1119,11 +1127,8 @@ impl AhciController {
                 pci_dev.address.function,
             );
             let mapper = crate::dma::DmaMapper::for_sbdf(sbdf);
-            let mem_device = mapper.translate(
-                mem_phys,
-                4096,
-                crate::hardware::iommu::DmaProt::READ_WRITE,
-            );
+            let mem_device =
+                mapper.translate(mem_phys, 4096, crate::hardware::iommu::DmaProt::READ_WRITE);
 
             port_rebase(pvirt, mem_device);
 

@@ -165,11 +165,7 @@ fn render_stats(writer: &mut PayloadWriter<'_>) {
             let _ = writeln!(
                 writer,
                 "maps={} unmaps={} faults={} dropped={} activations={}",
-                stats.maps,
-                stats.unmaps,
-                stats.faults,
-                stats.dropped_faults,
-                stats.activations
+                stats.maps, stats.unmaps, stats.faults, stats.dropped_faults, stats.activations
             );
         }
         Err(err) => {

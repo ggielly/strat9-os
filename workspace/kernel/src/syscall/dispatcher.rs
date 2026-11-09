@@ -38,8 +38,8 @@
 use crate::ipc::{channel, port, semaphore, shared_ring, ChanId, PortId, RingId, SemId};
 
 use super::{
-    chan, debug, error::SyscallError, exec::sys_execve, fork::sys_fork, ipc_port, ipc_ring, iommu,
-    net, numbers::*, pci, process as proc_sys, semaphore as sem_handler, transport, volume, vmm,
+    chan, debug, error::SyscallError, exec::sys_execve, fork::sys_fork, iommu, ipc_port, ipc_ring,
+    net, numbers::*, pci, process as proc_sys, semaphore as sem_handler, transport, vmm, volume,
     SyscallFrame,
 };
 use crate::{

@@ -104,12 +104,7 @@ fn write_all(fd: usize, data: &[u8]) -> bool {
 }
 
 fn read_text_file(path: &str, out: &mut [u8]) -> usize {
-    let fd = match call::openat(
-        0,
-        path,
-        flag::OpenFlags::RDONLY.bits() as usize,
-        0,
-    ) {
+    let fd = match call::openat(0, path, flag::OpenFlags::RDONLY.bits() as usize, 0) {
         Ok(fd) => fd,
         Err(_) => return 0,
     };
@@ -232,9 +227,7 @@ fn send_negotiation(fd: usize) {
     // suppress go-ahead.
     let _ = write_all(
         fd,
-        &[
-            IAC, WILL, OPT_ECHO, IAC, WILL, OPT_SGA, IAC, DO, OPT_SGA,
-        ],
+        &[IAC, WILL, OPT_ECHO, IAC, WILL, OPT_SGA, IAC, DO, OPT_SGA],
     );
 }
 

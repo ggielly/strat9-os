@@ -2472,10 +2472,7 @@ fn validate_lock_range(start: u64, len: u64) -> Result<u64, &'static str> {
     if start % 4096 != 0 {
         return Err("mlock: unaligned address");
     }
-    let len = len
-        .checked_add(4095)
-        .ok_or("mlock: length overflow")?
-        & !4095u64;
+    let len = len.checked_add(4095).ok_or("mlock: length overflow")? & !4095u64;
     let end = start.checked_add(len).ok_or("mlock: address overflow")?;
     const USER_SPACE_END: u64 = crate::memory::userslice::USER_SPACE_END;
     if end > USER_SPACE_END {

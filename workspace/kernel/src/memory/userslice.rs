@@ -115,7 +115,6 @@ impl Drop for UserAccessGuard {
 impl !Send for UserAccessGuard {}
 impl !Sync for UserAccessGuard {}
 
-
 /// End of user-accessible virtual address space.
 ///
 /// On x86_64 with 4-level paging, canonical user addresses are
@@ -253,7 +252,9 @@ fn check_pages_mapped(
         // Use the x86_64 crate's full translate to get the mapped frame + flags.
         use crate::arch::xshim::TranslateResult;
         #[cfg(target_arch = "riscv64")]
-        let translated = mapper.translate(vaddr).unwrap_or(TranslateResult::NotMapped);
+        let translated = mapper
+            .translate(vaddr)
+            .unwrap_or(TranslateResult::NotMapped);
         #[cfg(target_arch = "x86_64")]
         let translated = mapper.translate(vaddr);
         match translated {

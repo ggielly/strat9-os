@@ -32,8 +32,10 @@
 
 use alloc::vec::Vec;
 
-use crate::crypto::ccmp::{ccm_decrypt, ccm_encrypt};
-use crate::crypto::CCMP_MIC_LEN;
+use crate::crypto::{
+    ccmp::{ccm_decrypt, ccm_encrypt},
+    CCMP_MIC_LEN,
+};
 
 pub type MacAddr = [u8; 6];
 pub const BROADCAST: MacAddr = [0xff; 6];
@@ -238,14 +240,7 @@ impl SequenceCounter {
     }
 }
 
-fn push_header(
-    out: &mut Vec<u8>,
-    fc: u16,
-    a1: MacAddr,
-    a2: MacAddr,
-    a3: MacAddr,
-    seq: u16,
-) {
+fn push_header(out: &mut Vec<u8>, fc: u16, a1: MacAddr, a2: MacAddr, a3: MacAddr, seq: u16) {
     out.extend_from_slice(&fc.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes()); // duration
     out.extend_from_slice(&a1);
@@ -484,14 +479,7 @@ pub fn build_data_frame(
     seq: u16,
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(36 + eth_type_payload.len());
-    push_header(
-        &mut out,
-        FC_TYPE_DATA | FCTL_TO_DS,
-        bssid,
-        src,
-        dst,
-        seq,
-    );
+    push_header(&mut out, FC_TYPE_DATA | FCTL_TO_DS, bssid, src, dst, seq);
     out.extend_from_slice(&LLC_SNAP);
     out.extend_from_slice(eth_type_payload);
     out
@@ -592,12 +580,7 @@ pub fn ccmp_nonce(frame: &[u8], pn: &[u8; 6]) -> [u8; 13] {
 
 /// Encrypt a data frame in place: insert the CCMP header after the 802.11
 /// header and append the MIC.  `frame` must be unprotected (no CCMP header).
-pub fn ccmp_protect(
-    key: &[u8; 16],
-    frame: &mut Vec<u8>,
-    pn: &[u8; 6],
-    hdr_len: usize,
-) -> bool {
+pub fn ccmp_protect(key: &[u8; 16], frame: &mut Vec<u8>, pn: &[u8; 6], hdr_len: usize) -> bool {
     if frame.len() < hdr_len {
         return false;
     }
@@ -646,8 +629,7 @@ pub fn ccmp_unprotect(key: &[u8; 16], frame: &mut Vec<u8>, hdr_len: usize) -> Op
     let nonce = ccmp_nonce(frame, &pn);
     let mut mic = [0u8; CCMP_MIC_LEN];
     mic.copy_from_slice(&frame[frame.len() - CCMP_MIC_LEN..]);
-    let mut payload =
-        frame[hdr_len + CCMP_HDR_LEN..frame.len() - CCMP_MIC_LEN].to_vec();
+    let mut payload = frame[hdr_len + CCMP_HDR_LEN..frame.len() - CCMP_MIC_LEN].to_vec();
     if !ccm_decrypt(key, &nonce, &aad[..aad_len], &mut payload, &mic) {
         return None;
     }

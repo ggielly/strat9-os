@@ -202,7 +202,10 @@ impl VgaWriter {
 
     /// Append a glyph made of the full block's pixels, restricted by `cover`.
     fn push_derived_block_glyph(&mut self, cp: u32, cover: impl Fn(usize, usize) -> bool) {
-        if self.lookup_glyph(char::from_u32(cp).unwrap_or(' ')).is_some() {
+        if self
+            .lookup_glyph(char::from_u32(cp).unwrap_or(' '))
+            .is_some()
+        {
             return; // font already has it: never overwrite a real design
         }
         let Some(full) = self.lookup_glyph('█') else {
@@ -746,10 +749,7 @@ impl VgaWriter {
         // Gate both rasterization and presentation, not just framebuffer copies.
         let now = crate::process::scheduler::ticks();
         let min_ticks = core::cmp::max(super::present_min_ticks(), 1);
-        if !force
-            && now != 0
-            && now.saturating_sub(self.can().last_present_tick) < min_ticks
-        {
+        if !force && now != 0 && now.saturating_sub(self.can().last_present_tick) < min_ticks {
             self.canm().present_pending = true;
             return;
         }
@@ -835,11 +835,7 @@ impl VgaWriter {
                         // SAFETY: `src` is `region.w` u32 inside the back buffer;
                         // `dst_off..dst_off+row_bytes` is inside the mapped row.
                         unsafe {
-                            (ops.blit)(
-                                fb_addr.add(dst_off) as *mut u32,
-                                src,
-                                region.w,
-                            );
+                            (ops.blit)(fb_addr.add(dst_off) as *mut u32, src, region.w);
                         }
                     }
                 }
@@ -1852,7 +1848,8 @@ impl VgaWriter {
     }
 
     /// Performs the glyph index for char operation.
-    pub(crate) fn glyph_index_for_char(&self, ch: char) -> usize {        if ch.is_ascii() {
+    pub(crate) fn glyph_index_for_char(&self, ch: char) -> usize {
+        if ch.is_ascii() {
             let idx = ch as usize;
             if idx < self.font_info.glyph_count {
                 return idx;

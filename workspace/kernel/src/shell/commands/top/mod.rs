@@ -526,7 +526,11 @@ impl Tree {
                 if strate.silos.split(", ").any(|o| o == silo.name) {
                     let key = format!("{}/{}", silo_key, strate.name);
                     let mut task_children = Vec::new();
-                    for task in snapshot.tasks.iter().filter(|t| t.name.starts_with(&prefix)) {
+                    for task in snapshot
+                        .tasks
+                        .iter()
+                        .filter(|t| t.name.starts_with(&prefix))
+                    {
                         if task.name.ends_with(&strate.name) || task.name.contains(&strate.name) {
                             let tkey = format!("{}/t{}", key, task.tid);
                             task_children.push(tkey.clone());
@@ -707,9 +711,7 @@ impl TuiGuard {
         let was_double_buffer = vga::double_buffer_mode();
         vga::set_double_buffer_mode(true);
         vga::hide_text_cursor();
-        Some(Self {
-            was_double_buffer,
-        })
+        Some(Self { was_double_buffer })
     }
 }
 
@@ -901,7 +903,11 @@ fn render_mem_panel(frame: &mut ratatui::Frame<'_>, view: &View<'_>, area: ratat
     );
 }
 
-fn render_sched_panel(frame: &mut ratatui::Frame<'_>, view: &View<'_>, area: ratatui::layout::Rect) {
+fn render_sched_panel(
+    frame: &mut ratatui::Frame<'_>,
+    view: &View<'_>,
+    area: ratatui::layout::Rect,
+) {
     let s = &view.snapshot.scheduler;
     let w = view.sched;
     let cpu_count = s.cpu_count.min(crate::arch::percpu::MAX_CPUS);
@@ -996,7 +1002,10 @@ fn render_tree(frame: &mut ratatui::Frame<'_>, view: &View<'_>, area: ratatui::l
         let mut spans: Vec<Span> = Vec::new();
         // Indentation with box-drawing guides.
         for _ in 1..node.depth {
-            spans.push(Span::styled("│ ", Style::default().fg(Color::Rgb(0x44, 0x44, 0x44))));
+            spans.push(Span::styled(
+                "│ ",
+                Style::default().fg(Color::Rgb(0x44, 0x44, 0x44)),
+            ));
         }
         let marker = if node.children.is_empty() {
             "· "
@@ -1008,7 +1017,11 @@ fn render_tree(frame: &mut ratatui::Frame<'_>, view: &View<'_>, area: ratatui::l
         spans.push(Span::styled(marker, Style::default().fg(node.color)));
         spans.push(Span::styled(
             node.label.clone(),
-            Style::default().fg(if idx == selected { Color::White } else { node.color }),
+            Style::default().fg(if idx == selected {
+                Color::White
+            } else {
+                node.color
+            }),
         ));
         spans.push(Span::styled(
             format!("  {}", node.right),
@@ -1069,13 +1082,19 @@ fn render_details(frame: &mut ratatui::Frame<'_>, view: &View<'_>, area: ratatui
                 format!(" {} ", kind.to_uppercase()),
                 Style::default().fg(Color::Black).bg(node.color),
             ),
-            Span::styled(format!(" {}", node.label), Style::default().fg(Color::White)),
+            Span::styled(
+                format!(" {}", node.label),
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(Span::styled(meta, Style::default().fg(MID))),
     ];
     if node.kind == NodeKind::Task {
         lines.push(Line::from(vec![
-            Span::styled("  k", Style::default().fg(CRIT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "  k",
+                Style::default().fg(CRIT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" kill   ", Style::default().fg(DIM)),
             Span::styled("s", Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
             Span::styled(" suspend   ", Style::default().fg(DIM)),
@@ -1282,9 +1301,8 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
             if let Some((tid, _)) = pending_kill.clone() {
                 match ch {
                     b'y' | b'Y' => {
-                        let _ = crate::process::kill_task(
-                            crate::process::task::TaskId::from_u64(tid),
-                        );
+                        let _ =
+                            crate::process::kill_task(crate::process::task::TaskId::from_u64(tid));
                         pending_kill = None;
                     }
                     b'n' | b'N' => pending_kill = None,
@@ -1368,9 +1386,11 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
             .iter()
             .map(|t| (t.tid.clone(), t.ticks))
             .collect();
-        snapshot
-            .tasks
-            .sort_by(|a, b| b.cpu_pct.partial_cmp(&a.cpu_pct).unwrap_or(core::cmp::Ordering::Equal));
+        snapshot.tasks.sort_by(|a, b| {
+            b.cpu_pct
+                .partial_cmp(&a.cpu_pct)
+                .unwrap_or(core::cmp::Ordering::Equal)
+        });
 
         let mem_pct = pct_u16(memory_ratio(&snapshot)) as u64;
         history.push(

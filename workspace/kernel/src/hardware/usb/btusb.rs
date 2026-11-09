@@ -41,7 +41,7 @@
 
 use crate::{hardware::usb::xhci, sync::SpinLock, syscall::error::SyscallError};
 use alloc::string::String;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 /// H4 packet indicator: HCI command packet.
 pub const H4_COMMAND: u8 = 0x01;
@@ -775,10 +775,7 @@ pub fn enumerate_device(
             .get_configuration_descriptor(slot_id, 0, &mut config_desc, total_len)
             .is_err()
     {
-        log::warn!(
-            "[USB-BT] Cannot read full configuration: slot={}",
-            slot_id
-        );
+        log::warn!("[USB-BT] Cannot read full configuration: slot={}", slot_id);
         return;
     }
 
@@ -820,13 +817,7 @@ pub fn enumerate_device(
     );
 
     let in_len = BULK_IN_BUF_LEN.min(4096);
-    if !configure_endpoint(
-        controller,
-        slot_id,
-        hci.bulk_in,
-        EP_TYPE_BULK_IN,
-        in_len,
-    ) {
+    if !configure_endpoint(controller, slot_id, hci.bulk_in, EP_TYPE_BULK_IN, in_len) {
         return;
     }
     if !configure_endpoint(

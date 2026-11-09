@@ -173,10 +173,7 @@ mod tests {
         let mut aad = [0u8; 8];
         hex("0001020304050607", &mut aad);
         let mut data = [0u8; 23];
-        hex(
-            "08090A0B0C0D0E0F101112131415161718191A1B1C1D1E",
-            &mut data,
-        );
+        hex("08090A0B0C0D0E0F101112131415161718191A1B1C1D1E", &mut data);
         let mut mic = [0u8; 8];
         ccm_encrypt(&key, &nonce, &aad, &mut data, &mut mic);
 

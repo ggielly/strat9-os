@@ -20,15 +20,13 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
+#[cfg(target_arch = "x86_64")]
+use crate::arch::pci as arch_pci;
 pub use crate::arch::pci::{
     cap_id, class, command, config, device, intel_eth, msi_cap, msi_ctrl, msix_cap, msix_ctrl,
     net_subclass, sata_progif, storage_subclass, vendor, MSI_ADDR_BASE, MSI_ADDR_DEST_SHIFT,
 };
-use crate::{
-    vfs::{self, OpenFlags},
-};
-#[cfg(target_arch = "x86_64")]
-use crate::arch::pci as arch_pci;
+use crate::vfs::{self, OpenFlags};
 use alloc::{format, string::String, vec::Vec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

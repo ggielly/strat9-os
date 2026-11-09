@@ -27,18 +27,18 @@
 
 pub mod common;
 pub mod data_plane;
-pub mod hotplug;
-pub mod net_queue;
-pub mod switch;
 pub mod e1000_drv;
 pub mod e1000e_drv;
+pub mod hotplug;
 pub mod igc_drv;
 pub mod iwlwifi_drv;
+pub mod net_queue;
 #[cfg(target_arch = "x86_64")]
 pub mod pcnet_drv;
 #[cfg(target_arch = "x86_64")]
 pub mod rtl8139_drv;
 pub mod scheme;
+pub mod switch;
 pub mod virtio_net;
 
 pub use net_core::{NetError, NetMedia, NetworkDevice, MTU};
@@ -116,14 +116,12 @@ fn next_index_for(prefix: &str) -> usize {
 /// `init()`; read by `nic_handler` in the IDT to send EOI.
 pub static NIC_IRQ_LINE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0xFF);
 /// Resource id of the default device, used by the IRQ path to resolve queues.
-pub static NIC_RESOURCE: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
+pub static NIC_RESOURCE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// Count of NIC IRQs that arrived before any driver registered a device.
 /// Kept as a counter (not a log) so a shared or unmapped vector cannot
 /// flood the console.
-static NIC_SPURIOUS_IRQS: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
+static NIC_SPURIOUS_IRQS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Number of NIC IRQs seen with no device registered.
 pub fn spurious_irq_count() -> u32 {
@@ -145,7 +143,10 @@ static NIC_DEVICE: spin::Mutex<Option<Arc<dyn NetworkDevice>>> = spin::Mutex::ne
 /// after successful initialisation.
 pub fn set_nic_device(dev: Arc<dyn NetworkDevice>, irq: u8) {
     NIC_IRQ_LINE.store(irq, core::sync::atomic::Ordering::Relaxed);
-    NIC_RESOURCE.store(device_resource_id(&dev), core::sync::atomic::Ordering::Release);
+    NIC_RESOURCE.store(
+        device_resource_id(&dev),
+        core::sync::atomic::Ordering::Release,
+    );
     *NIC_DEVICE.lock() = Some(dev);
     log::info!("NIC dispatch set for IRQ {}", irq);
 }
@@ -216,11 +217,7 @@ pub fn handle_interrupt() {
         return;
     };
 
-    hotplug::update_link(
-        device_resource_id(&dev) as u64,
-        dev.link_up(),
-        dev.epoch(),
-    );
+    hotplug::update_link(device_resource_id(&dev) as u64, dev.link_up(), dev.epoch());
     let resource = NIC_RESOURCE.load(core::sync::atomic::Ordering::Acquire) as u64;
     let queue_count = {
         let guard = NIC_DATA_PLANE.lock();
@@ -265,7 +262,6 @@ pub fn handle_interrupt() {
     }
 
     let _ = rx_count;
-
 
     let tid_u64 = STRATE_NET_TID.load(core::sync::atomic::Ordering::Relaxed);
     if tid_u64 != 0 {
@@ -611,7 +607,10 @@ fn init_data_plane() {
                 }
             }
             *NIC_DATA_PLANE.lock() = Some(dp);
-            log::info!("[net] data plane initialised with {} queue(s)", devices.len());
+            log::info!(
+                "[net] data plane initialised with {} queue(s)",
+                devices.len()
+            );
         }
         Err(e) => {
             log::warn!("[net] Failed to initialise data plane: {}", e);

@@ -34,8 +34,10 @@
 //! The assembler calls must be made with local interrupts
 //! disabled and a control block loaded on the current CPU.
 
-use core::arch::asm;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::{
+    arch::asm,
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+};
 
 /// Diagnostic: when enabled, every successful `vmwrite` is followed by a read
 /// of the VM-instruction error field. The first field whose write leaves a
@@ -634,4 +636,3 @@ pub unsafe fn invalidate_second_level_all() {
         );
     }
 }
-

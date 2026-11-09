@@ -106,7 +106,7 @@ fn read_file(path: &str) -> Result<Vec<u8>, &'static str> {
     let mut out = Vec::new();
 
     let mut chunk = [0u8; 8192]; //8k temp buffer, to avoid large stack usage
-                                 // 64k bug here
+    // 64k bug here
 
     let mut eagain = 0usize;
     loop {

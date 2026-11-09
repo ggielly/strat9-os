@@ -33,8 +33,7 @@
 //! The `Device` trait is implemented once for the [`NetDevice`] enum so the
 //! smoltcp `Interface` is monomorphised over a single type.
 
-use core::sync::atomic::{AtomicBool, Ordering};
-use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use alloc::sync::Arc;
 
@@ -252,7 +251,10 @@ fn legacy_receive() -> Option<(NetRxToken, NetTxToken)> {
     match net_recv(&mut buf) {
         Ok(n) if n > 0 => {
             let len = core::cmp::min(n, MAX_FRAME_SIZE);
-            Some((NetRxToken::Legacy(LegacyRxToken { buf, len }), NetTxToken::Legacy(LegacyTxToken)))
+            Some((
+                NetRxToken::Legacy(LegacyRxToken { buf, len }),
+                NetTxToken::Legacy(LegacyTxToken),
+            ))
         }
         Err(e) => {
             if e.to_errno() != 11 && RX_ERR_LOG_BUDGET.load(Ordering::Relaxed) > 0 {

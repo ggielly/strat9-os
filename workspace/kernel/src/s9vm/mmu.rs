@@ -310,12 +310,7 @@ impl SecondLevel {
 
     /// Walks the tables down to the table containing the leaf of the requested
     /// level (`SHIFT_PT` for 4 KiB, `SHIFT_PD` for 2 MiB).
-    fn leaf_table<M: TableMemory>(
-        &self,
-        memory: &M,
-        gpa: u64,
-        leaf_shift: u32,
-    ) -> Option<u64> {
+    fn leaf_table<M: TableMemory>(&self, memory: &M, gpa: u64, leaf_shift: u32) -> Option<u64> {
         if gpa >= MAX_GPA {
             return None;
         }
@@ -367,11 +362,7 @@ impl SecondLevel {
             pdpt & entry::ADDR_MASK
         } else {
             let table = memory.alloc_table().ok_or(MmuError::OutOfMemory)?;
-            memory.write_entry(
-                pdpt_table,
-                pdpt_slot,
-                table | entry::READ | entry::WRITE,
-            );
+            memory.write_entry(pdpt_table, pdpt_slot, table | entry::READ | entry::WRITE);
             table
         };
         if shift == SHIFT_PD {

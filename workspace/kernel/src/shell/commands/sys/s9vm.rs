@@ -47,7 +47,10 @@ fn cmd_status() -> Result<(), ShellError> {
     let detected = crate::s9vm::detected();
     let active = crate::s9vm::active_cpu_count();
     let worlds = crate::s9vm::vm::count();
-    shell_println!("s9vm: {}", if detected { "detected" } else { "unavailable" });
+    shell_println!(
+        "s9vm: {}",
+        if detected { "detected" } else { "unavailable" }
+    );
     if !detected {
         shell_println!("  reason: {}", crate::s9vm::unavailable_reason());
     }

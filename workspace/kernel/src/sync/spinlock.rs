@@ -192,7 +192,9 @@ impl<T: ?Sized> SpinLock<T, IrqDisabled> {
                 // as a best-effort `None` return in hot paths.
                 // F10: ring-0 port I/O compiled out under kernel_l2_host.
                 #[cfg(all(not(kernel_l2_host), target_arch = "x86_64"))]
-                unsafe { core::arch::asm!("mov al, 'V'; out 0xe9, al", out("al") _) };
+                unsafe {
+                    core::arch::asm!("mov al, 'V'; out 0xe9, al", out("al") _)
+                };
                 #[cfg(any(kernel_l2_host, target_arch = "riscv64"))]
                 let _ = 0u8;
                 return None;
@@ -280,7 +282,9 @@ fn emit_trace_e9(lock_addr: usize, tag_offset: u8) {
             // Compiled out only under the kernel-l2-tests harness cfg;
             // production behavior is unchanged.
             #[cfg(all(not(kernel_l2_host), target_arch = "x86_64"))]
-            unsafe { core::arch::asm!("out 0xe9, al", in("al") ch) };
+            unsafe {
+                core::arch::asm!("out 0xe9, al", in("al") ch)
+            };
             #[cfg(any(kernel_l2_host, target_arch = "riscv64"))]
             let _ = ch;
         }
@@ -361,7 +365,9 @@ impl<'a, T: ?Sized, G: Guardian> Drop for SpinLockGuard<'a, T, G> {
                 let ch = b'a' + (i as u8);
                 // F10: see acquire-side note above.
                 #[cfg(all(not(kernel_l2_host), target_arch = "x86_64"))]
-                unsafe { core::arch::asm!("out 0xe9, al", in("al") ch) };
+                unsafe {
+                    core::arch::asm!("out 0xe9, al", in("al") ch)
+                };
                 #[cfg(any(kernel_l2_host, target_arch = "riscv64"))]
                 let _ = ch;
             }

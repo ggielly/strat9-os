@@ -97,13 +97,20 @@ pub fn init() {
         }
     }
 
-    let total_controllers = (if xhci::is_available() { 1 } else { 0 })
-        + (if ehci::is_available() { 1 } else { 0 })
-        + {
+    let total_controllers =
+        (if xhci::is_available() { 1 } else { 0 }) + (if ehci::is_available() { 1 } else { 0 }) + {
             #[cfg(target_arch = "x86_64")]
-            { if uhci::is_available() { 1 } else { 0 } }
+            {
+                if uhci::is_available() {
+                    1
+                } else {
+                    0
+                }
+            }
             #[cfg(not(target_arch = "x86_64"))]
-            { 0 }
+            {
+                0
+            }
         };
 
     log::info!("[USB] Total USB controllers: {}", total_controllers);

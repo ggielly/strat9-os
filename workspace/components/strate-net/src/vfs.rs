@@ -28,8 +28,8 @@ use smoltcp::{
     socket::{tcp, udp},
     wire::{IpAddress, IpEndpoint, Ipv4Address},
 };
-use strat9_syscall::data::IPC_FILE_FLAG_DIRECTORY;
 use strat9_abi::ipc_payload::parse_bulk_setup;
+use strat9_syscall::data::IPC_FILE_FLAG_DIRECTORY;
 use strate_net::IpcMessage;
 
 use crate::{
@@ -71,10 +71,8 @@ impl NetworkStrate {
         }
         let socket = self.sockets.add(socket);
         let fid = self.insert_open_handle(sender, path);
-        self.tcp_listeners.insert(
-            fid,
-            TcpListenerState::new(socket, port, auto_relisten),
-        );
+        self.tcp_listeners
+            .insert(fid, TcpListenerState::new(socket, port, auto_relisten));
         reply_open(sender, fid, u64::MAX, HANDLE_FLAG_STREAM)
     }
 
@@ -689,12 +687,7 @@ impl NetworkStrate {
         Some((handle.bulk_base as usize, handle.bulk_len))
     }
 
-    fn bulk_read_tcp(
-        &mut self,
-        sender: u64,
-        file_id: u64,
-        requested: usize,
-    ) -> Option<IpcMessage> {
+    fn bulk_read_tcp(&mut self, sender: u64, file_id: u64, requested: usize) -> Option<IpcMessage> {
         let (base, len) = self.bulk_region(file_id)?;
         let socket = if self.tcp_listeners.contains_key(&file_id) {
             let _ = self.service_tcp_listener(file_id);

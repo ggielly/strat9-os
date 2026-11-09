@@ -1469,17 +1469,14 @@ pub fn handle_interrupt() {
                                                     slot_id, ep_id,
                                                 ) {
                                                     crate::hardware::usb::btusb::tx_complete(
-                                                        ep_id,
-                                                        actual_len,
+                                                        ep_id, actual_len,
                                                     );
                                                 } else {
                                                     // SAFETY: buf/actual_len describe the
                                                     // transfer buffer filled by the ring and
                                                     // stay valid for the duration of the call.
                                                     let data = unsafe {
-                                                        core::slice::from_raw_parts(
-                                                            buf, actual_len,
-                                                        )
+                                                        core::slice::from_raw_parts(buf, actual_len)
                                                     };
                                                     crate::hardware::usb::btusb::on_transfer(
                                                         slot_id, ep_id, data,
@@ -1515,9 +1512,7 @@ pub fn handle_interrupt() {
                                             ) {
                                                 // Release the in-flight packet even on
                                                 // failure; userspace handles retries.
-                                                crate::hardware::usb::btusb::tx_complete(
-                                                    ep_id, 0,
-                                                );
+                                                crate::hardware::usb::btusb::tx_complete(ep_id, 0);
                                             }
                                             dev.ep_dequeue[ep] =
                                                 (dev.ep_dequeue[ep] + 1) % (XHCI_RING_TRBS - 1);

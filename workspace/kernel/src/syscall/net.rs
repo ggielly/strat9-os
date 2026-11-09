@@ -91,7 +91,9 @@ fn nic_cap_present(required: CapPermissions) -> Result<(), SyscallError> {
 }
 
 /// Resolve the default NIC through the caller's `Nic` capability.
-fn default_nic(required: CapPermissions) -> Result<alloc::sync::Arc<dyn nic::NetworkDevice>, SyscallError> {
+fn default_nic(
+    required: CapPermissions,
+) -> Result<alloc::sync::Arc<dyn nic::NetworkDevice>, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     // SAFETY: same argument as above.
     let caps = unsafe { &*task.process.capabilities.get() };
@@ -176,7 +178,10 @@ pub fn sys_net_register() -> Result<u64, SyscallError> {
     let _dev = default_nic(CapPermissions::read_write())?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     nic::register_strate_net_tid(task.id.as_u64());
-    log::info!("[net] networking strate registered (tid={})", task.id.as_u64());
+    log::info!(
+        "[net] networking strate registered (tid={})",
+        task.id.as_u64()
+    );
     Ok(0)
 }
 
@@ -613,9 +618,7 @@ pub fn sys_net_rx_batch(dev: u64, frames_ptr: u64, count: u64) -> Result<u64, Sy
     let mut done = 0usize;
     for index in 0..count {
         let offset = index * core::mem::size_of::<NetFrame>();
-        let frame = unsafe {
-            core::ptr::read_unaligned(raw[offset..].as_ptr() as *const NetFrame)
-        };
+        let frame = unsafe { core::ptr::read_unaligned(raw[offset..].as_ptr() as *const NetFrame) };
         if frame.len as usize > MAX_FRAME {
             return Err(SyscallError::MessageSize);
         }
@@ -655,9 +658,7 @@ pub fn sys_net_tx_batch(dev: u64, frames_ptr: u64, count: u64) -> Result<u64, Sy
     let mut done = 0usize;
     for index in 0..count {
         let offset = index * core::mem::size_of::<NetFrame>();
-        let frame = unsafe {
-            core::ptr::read_unaligned(raw[offset..].as_ptr() as *const NetFrame)
-        };
+        let frame = unsafe { core::ptr::read_unaligned(raw[offset..].as_ptr() as *const NetFrame) };
         let len = frame.len as usize;
         if !(MIN_FRAME..=MAX_FRAME).contains(&len) {
             return Err(SyscallError::MessageSize);
@@ -741,10 +742,7 @@ pub fn sys_net_event_wait(dev: u64, qid: u64, timeout_ns: u64) -> Result<u64, Sy
         };
     }
     queue.event.wait(&mut seen);
-    queue
-        .header()
-        .irq_count
-        .fetch_add(1, Ordering::Relaxed);
+    queue.header().irq_count.fetch_add(1, Ordering::Relaxed);
     Ok(1)
 }
 

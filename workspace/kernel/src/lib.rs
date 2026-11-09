@@ -725,7 +725,11 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                 let mut shift = 0i32;
                 while shift < 40 {
                     let nib = ((base >> shift) & 0xF) as u8;
-                    let c = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+                    let c = if nib < 10 {
+                        b'0' + nib
+                    } else {
+                        b'a' + nib - 10
+                    };
                     core::arch::asm!("out 0xe9, al", in("al") c, options(nomem, nostack));
                     shift += 4;
                 }
@@ -733,7 +737,11 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                 shift = 0;
                 while shift < 40 {
                     let nib = ((size >> shift) & 0xF) as u8;
-                    let c = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+                    let c = if nib < 10 {
+                        b'0' + nib
+                    } else {
+                        b'a' + nib - 10
+                    };
                     core::arch::asm!("out 0xe9, al", in("al") c, options(nomem, nostack));
                     shift += 4;
                 }
@@ -1023,15 +1031,13 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             blue_shift: args.framebuffer_blue_mask_shift,
             bits_per_pixel: args.framebuffer_bpp as u8,
         };
-        if let Err(e) =
-            crate::hardware::video::framebuffer::register_boot_framebuffer(
-                fb_virt,
-                args.framebuffer_width,
-                args.framebuffer_height,
-                args.framebuffer_stride,
-                format,
-            )
-        {
+        if let Err(e) = crate::hardware::video::framebuffer::register_boot_framebuffer(
+            fb_virt,
+            args.framebuffer_width,
+            args.framebuffer_height,
+            args.framebuffer_stride,
+            format,
+        ) {
             serial_println!("[init] Framebuffer source not published: {}", e);
         }
     }
@@ -1156,9 +1162,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                 }
             }
         } else {
-            serial_println!(
-                "[init] SMP disabled (debug_cfg::SMP_ENABLED=false), single CPU"
-            );
+            serial_println!("[init] SMP disabled (debug_cfg::SMP_ENABLED=false), single CPU");
             vga_println!("[..] SMP disabled, single CPU");
         }
     } else {

@@ -300,10 +300,7 @@ pub fn init(
             let deco_y = 24;
             writer.draw_strata_stack(deco_x, deco_y, deco_w, deco_h);
         }
-        writer.set_rgb_color(
-            RgbColor::new(0xA7, 0xD8, 0xD8),
-            background,
-        );
+        writer.set_rgb_color(RgbColor::new(0xA7, 0xD8, 0xD8), background);
         writer.write_bytes("Strat9-OS v0.1.0\n");
         writer.set_rgb_color(RgbColor::new(0xE2, 0xE8, 0xF0), background);
         VGA_AVAILABLE.store(true, Ordering::Relaxed);

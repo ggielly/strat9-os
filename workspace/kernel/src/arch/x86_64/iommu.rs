@@ -132,10 +132,7 @@ impl Qi {
         let tail = ((next * 16) & (QI_SIZE_BYTES - 1)) as u64;
         // SAFETY: MMIO write to this unit's IQT register.
         unsafe {
-            core::ptr::write_volatile(
-                (self.register_base as usize + VTD_IQT) as *mut u64,
-                tail,
-            );
+            core::ptr::write_volatile((self.register_base as usize + VTD_IQT) as *mut u64, tail);
         }
     }
 
@@ -143,10 +140,7 @@ impl Qi {
         // Status word: set to ~0, ask the unit to write 0 on completion.
         // SAFETY: `status` is a 4 KiB page owned by this unit.
         unsafe {
-            core::ptr::write_volatile(
-                memory::phys_to_virt(self.status) as *mut u32,
-                u32::MAX,
-            );
+            core::ptr::write_volatile(memory::phys_to_virt(self.status) as *mut u32, u32::MAX);
         }
         core::sync::atomic::fence(Ordering::SeqCst);
         // WAIT descriptor: type 5, SW=1, status data 0, status address.
@@ -268,16 +262,18 @@ impl Backend for VtdBackend {
         install_passthrough_contexts(state)?;
         for unit in &mut state.units {
             mmio_write64(unit.virt, VTD_RTADDR, state.root);
-            mmio_write32(unit.virt, VTD_GCMD, mmio_read32(unit.virt, VTD_GCMD) | GCMD_SRTP);
+            mmio_write32(
+                unit.virt,
+                VTD_GCMD,
+                mmio_read32(unit.virt, VTD_GCMD) | GCMD_SRTP,
+            );
             if !wait_bits(unit.virt, VTD_GSTS, GSTS_RTPS) {
                 return Err(IommuError::Hardware);
             }
         }
 
         // Optional interrupt remapping (kept off until every MSI is an IRTE).
-        if INTERRUPT_REMAPPING_ENABLED
-            && state.units.iter().any(|unit| unit.ecap & ECAP_IR != 0)
-        {
+        if INTERRUPT_REMAPPING_ENABLED && state.units.iter().any(|unit| unit.ecap & ECAP_IR != 0) {
             match ir_enable(state) {
                 Ok(()) => IR_ACTIVE.store(true, Ordering::Release),
                 Err(err) => log::warn!("[IOMMU] interrupt remapping unavailable: {:?}", err),
@@ -286,7 +282,11 @@ impl Backend for VtdBackend {
 
         // Finally enable DMA translation.
         for unit in &mut state.units {
-            mmio_write32(unit.virt, VTD_GCMD, mmio_read32(unit.virt, VTD_GCMD) | GCMD_TE);
+            mmio_write32(
+                unit.virt,
+                VTD_GCMD,
+                mmio_read32(unit.virt, VTD_GCMD) | GCMD_TE,
+            );
             if !wait_bits(unit.virt, VTD_GSTS, GSTS_TES) {
                 log::error!("[IOMMU] unit seg={} refused TE", unit.segment);
                 return Err(IommuError::Hardware);
@@ -381,7 +381,10 @@ impl Backend for VtdBackend {
     ) -> Result<(), IommuError> {
         let guard = STATE.lock();
         let state = guard.as_ref().ok_or(IommuError::NotPresent)?;
-        let shadow = state.domains.get(&domain).ok_or(IommuError::InvalidDomain)?;
+        let shadow = state
+            .domains
+            .get(&domain)
+            .ok_or(IommuError::InvalidDomain)?;
 
         let mut offset = 0u64;
         while offset < len {
@@ -412,11 +415,7 @@ impl Backend for VtdBackend {
         IR_ACTIVE.load(Ordering::Acquire)
     }
 
-    fn allocate_msi(
-        &self,
-        sbdf: Sbdf,
-        vector: u8,
-    ) -> Result<MsiAllocation, IommuError> {
+    fn allocate_msi(&self, sbdf: Sbdf, vector: u8) -> Result<MsiAllocation, IommuError> {
         if !IR_ACTIVE.load(Ordering::Acquire) {
             return Err(IommuError::NotReady);
         }
@@ -603,7 +602,11 @@ fn qi_setup(unit: &mut Unit) -> Result<(), IommuError> {
         return Err(IommuError::Hardware);
     }
     unit.qi = Some(qi);
-    mmio_write32(unit.virt, VTD_GCMD, mmio_read32(unit.virt, VTD_GCMD) | GCMD_QI);
+    mmio_write32(
+        unit.virt,
+        VTD_GCMD,
+        mmio_read32(unit.virt, VTD_GCMD) | GCMD_QI,
+    );
     if !wait_bits(unit.virt, VTD_GSTS, GSTS_QIES) {
         return Err(IommuError::Hardware);
     }
@@ -658,10 +661,7 @@ fn flush_unit(unit: &Unit, context: bool, iotlb: bool) {
 fn ir_enable(state: &mut VtdState) -> Result<(), IommuError> {
     let phys = alloc_zeroed_table()?;
     let x2apic = crate::arch::x86_64::apic::lapic_id() > 0xff;
-    state.ir = Some(IrTable {
-        phys,
-        used: [0; 4],
-    });
+    state.ir = Some(IrTable { phys, used: [0; 4] });
 
     for unit in &mut state.units {
         if unit.ecap & ECAP_IR == 0 {
@@ -670,12 +670,20 @@ fn ir_enable(state: &mut VtdState) -> Result<(), IommuError> {
         // One page = 256 IRTEs, so the size field is 0.
         let irta = phys | if x2apic { 0x800 } else { 0 };
         mmio_write64(unit.virt, VTD_IRTA, irta);
-        mmio_write32(unit.virt, VTD_GCMD, mmio_read32(unit.virt, VTD_GCMD) | GCMD_SIRTP);
+        mmio_write32(
+            unit.virt,
+            VTD_GCMD,
+            mmio_read32(unit.virt, VTD_GCMD) | GCMD_SIRTP,
+        );
         if !wait_bits(unit.virt, VTD_GSTS, GSTS_SIRTPS) {
             return Err(IommuError::Hardware);
         }
         qi_flush_ir(unit);
-        mmio_write32(unit.virt, VTD_GCMD, mmio_read32(unit.virt, VTD_GCMD) | GCMD_IRE);
+        mmio_write32(
+            unit.virt,
+            VTD_GCMD,
+            mmio_read32(unit.virt, VTD_GCMD) | GCMD_IRE,
+        );
         if !wait_bits(unit.virt, VTD_GSTS, GSTS_IRES) {
             return Err(IommuError::Hardware);
         }
@@ -684,9 +692,7 @@ fn ir_enable(state: &mut VtdState) -> Result<(), IommuError> {
 }
 
 fn write_irte(ir: &IrTable, index: usize, sbdf: Sbdf, vector: u8, lapic: u32) {
-    let sid = ((sbdf.bus as u64) << 8)
-        | ((sbdf.device as u64) << 3)
-        | (sbdf.function as u64 & 0x7);
+    let sid = ((sbdf.bus as u64) << 8) | ((sbdf.device as u64) << 3) | (sbdf.function as u64 & 0x7);
     let destination = lapic as u64;
     // Extended IRTE: P | SID | SQ | SVT=01 | vector | destination low.
     let qw0 = SL_PRESENT
@@ -709,9 +715,8 @@ fn write_irte(ir: &IrTable, index: usize, sbdf: Sbdf, vector: u8, lapic: u32) {
 // =============================================================================
 
 fn alloc_zeroed_table() -> Result<u64, IommuError> {
-    let frame =
-        crate::sync::with_irqs_disabled(|token| memory::allocate_phys_contiguous(token, 0))
-            .map_err(|_| IommuError::Hardware)?;
+    let frame = crate::sync::with_irqs_disabled(|token| memory::allocate_phys_contiguous(token, 0))
+        .map_err(|_| IommuError::Hardware)?;
     let phys = frame.start_address.as_u64();
     let virt = memory::phys_to_virt(phys) as *mut u8;
     // SAFETY: the buddy allocator returned a full 4 KiB frame owned by us.

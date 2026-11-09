@@ -30,8 +30,10 @@
 use super::io::{inl, outl};
 use crate::sync::SpinLock;
 use alloc::vec::Vec;
-use core::fmt;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+    fmt,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 /// PCI Configuration Address Port
 const CONFIG_ADDRESS: u16 = 0xCF8;

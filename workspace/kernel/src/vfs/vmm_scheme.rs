@@ -40,14 +40,17 @@
 //! end) and never blocks. Opening the file again produces a new
 //! snapshot.
 
-use alloc::string::String;
-use alloc::{collections::BTreeMap, sync::Arc};
-use core::fmt::Write;
-use core::sync::atomic::{AtomicU64, Ordering};
+use alloc::{collections::BTreeMap, string::String, sync::Arc};
+use core::{
+    fmt::Write,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
-use crate::s9vm::{self, vm};
-use crate::sync::SpinLock;
-use crate::syscall::error::SyscallError;
+use crate::{
+    s9vm::{self, vm},
+    sync::SpinLock,
+    syscall::error::SyscallError,
+};
 
 use super::{
     scheme::{
@@ -90,7 +93,11 @@ impl VmmScheme {
     fn engine_text() -> String {
         let detected = s9vm::detected();
         let mut text = String::new();
-        let _ = writeln!(text, "engine={}", if detected { "detected" } else { "unavailable" });
+        let _ = writeln!(
+            text,
+            "engine={}",
+            if detected { "detected" } else { "unavailable" }
+        );
         let _ = writeln!(text, "active_cpus={}", s9vm::active_cpu_count());
         if !detected {
             let _ = writeln!(text, "vt_x=absent reason={}", s9vm::unavailable_reason());
@@ -111,17 +118,11 @@ impl VmmScheme {
     fn list_text() -> String {
         let mut text = String::new();
         for world in vm::list() {
-            let name = core::str::from_utf8(world.name_slice())
-                .unwrap_or("<non-utf8>");
+            let name = core::str::from_utf8(world.name_slice()).unwrap_or("<non-utf8>");
             let _ = writeln!(
                 text,
                 "world {} name={} silo={} state={} vcpus={} pages={}",
-                world.id,
-                name,
-                world.silo_id,
-                world.state,
-                world.vcpu_count,
-                world.mapped_pages
+                world.id, name, world.silo_id, world.state, world.vcpu_count, world.mapped_pages
             );
         }
         text
@@ -182,7 +183,9 @@ impl Scheme for VmmScheme {
             (Kind::Text(Self::text_for_path(path)?), FileFlags::DEVICE)
         };
         let file_id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        self.files.lock().insert(file_id, VmmFile { kind, cursor: 0 });
+        self.files
+            .lock()
+            .insert(file_id, VmmFile { kind, cursor: 0 });
         Ok(OpenResult {
             file_id,
             size: None,

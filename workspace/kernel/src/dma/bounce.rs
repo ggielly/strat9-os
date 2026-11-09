@@ -68,11 +68,7 @@ impl DmaBounce {
         // SAFETY: both regions are valid for `src.len()` bytes and the staging
         // buffer is private to this object.
         unsafe {
-            ptr::copy_nonoverlapping(
-                src.as_ptr(),
-                self.staging.virt_addr() as *mut u8,
-                src.len(),
-            );
+            ptr::copy_nonoverlapping(src.as_ptr(), self.staging.virt_addr() as *mut u8, src.len());
         }
         self.len = src.len();
         Ok(())

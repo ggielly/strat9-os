@@ -45,13 +45,15 @@
 //! target machine without rebuilding: the first passing variant identifies the
 //! field family the processor objected to.
 
-use crate::memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame};
-use crate::s9vm::caps::HwCaps;
-use crate::s9vm::exit::{ExitClass, ExitReason};
-use crate::s9vm::guest::{
-    GuestState, Segment, AR_CODE_DATA, AR_DEFAULT_BIG, AR_LONG_MODE, AR_PRESENT,
+use crate::{
+    memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame},
+    s9vm::{
+        caps::HwCaps,
+        exit::{ExitClass, ExitReason},
+        guest::{GuestState, Segment, AR_CODE_DATA, AR_DEFAULT_BIG, AR_LONG_MODE, AR_PRESENT},
+        vcpu::{SecondLevelMemory, Vcpu, VcpuError},
+    },
 };
-use crate::s9vm::vcpu::{SecondLevelMemory, Vcpu, VcpuError};
 
 /// Size of the test guest area: 6 pages (tables + code + stack).
 const GUEST_PAGES: u64 = 6;

@@ -281,7 +281,10 @@ impl VirtioNetDevice {
             // Add buffer to RX queue (device Writable)
             match rx_queue.add_buffer(&[(dev_addr, buf_size as u32, true)]) {
                 Ok(_) => {
-                    if rx_frames.push_back((buf_frame, buf_order, dev_addr)).is_err() {
+                    if rx_frames
+                        .push_back((buf_frame, buf_order, dev_addr))
+                        .is_err()
+                    {
                         self.dma.release(dev_addr, buf_size);
                         crate::sync::with_irqs_disabled(|token| {
                             memory::free_phys_contiguous(token, buf_frame, buf_order);
@@ -456,11 +459,9 @@ impl NetworkDevice for VirtioNetDevice {
                 })
                 .map_err(|_| NetError::NotReady)?;
                 let phys = frame.start_address.as_u64();
-                let mapped = self.dma.translate(
-                    phys,
-                    self.hdr_size + net::MTU,
-                    DmaProt::READ_WRITE,
-                );
+                let mapped =
+                    self.dma
+                        .translate(phys, self.hdr_size + net::MTU, DmaProt::READ_WRITE);
                 (frame, buf_order, mapped)
             }
         };
@@ -490,10 +491,7 @@ impl NetworkDevice for VirtioNetDevice {
                     .push_back((frame, order, mapped))
                     .is_err()
                 {
-                    self.dma.release(
-                        mapped,
-                        self.hdr_size + net::MTU,
-                    );
+                    self.dma.release(mapped, self.hdr_size + net::MTU);
                     crate::sync::with_irqs_disabled(|token| {
                         memory::free_phys_contiguous(token, frame, order);
                     });

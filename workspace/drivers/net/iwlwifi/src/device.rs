@@ -34,17 +34,16 @@
 //! are CCMP-protected in software and marked `ENCRYPT_DIS` so the firmware
 //! does not encrypt them twice.
 
-use alloc::collections::VecDeque;
-use alloc::vec::Vec;
+use alloc::{collections::VecDeque, vec::Vec};
 
-
-
-use crate::cmd;
-use crate::config::WifiConfig;
-use crate::dot11::{self, MacAddr};
-use crate::fw;
-use crate::mlme::{Mlme, MlmeEvent, MlmeState};
-use crate::transport::{Bus, IwlTransport, RxPacketInfo, TransportError};
+use crate::{
+    cmd,
+    config::WifiConfig,
+    dot11::{self, MacAddr},
+    fw,
+    mlme::{Mlme, MlmeEvent, MlmeState},
+    transport::{Bus, IwlTransport, RxPacketInfo, TransportError},
+};
 
 pub struct WifiStats {
     pub rx_80211: u64,
@@ -89,11 +88,7 @@ pub struct WifiDevice<B: Bus> {
 }
 
 impl<B: Bus> WifiDevice<B> {
-    pub fn new(
-        transport: IwlTransport<B>,
-        cfg: WifiConfig,
-        expected_mac: Option<MacAddr>,
-    ) -> Self {
+    pub fn new(transport: IwlTransport<B>, cfg: WifiConfig, expected_mac: Option<MacAddr>) -> Self {
         let mac = expected_mac.unwrap_or(transport.hw.mac);
         Self {
             transport,
@@ -117,7 +112,9 @@ impl<B: Bus> WifiDevice<B> {
         let image = fw::parse_tlv(firmware).map_err(|_| TransportError::BadFirmware)?;
         self.transport.apm_init()?;
         // The AX201 is the QuZ (CNVi) part; reject other 22000 variants.
-        if self.transport.hw.hw_type != 0 && self.transport.hw.hw_type != crate::regs::QUZ_HW_REV_TYPE {
+        if self.transport.hw.hw_type != 0
+            && self.transport.hw.hw_type != crate::regs::QUZ_HW_REV_TYPE
+        {
             return Err(TransportError::UnsupportedHw);
         }
         if self.transport.hw.mac != [0; 6] && self.transport.hw.mac != self.mac {
@@ -155,9 +152,12 @@ impl<B: Bus> WifiDevice<B> {
             self.mlme.start_scan();
             let channels = [(1u8, 0u8, false), (6, 0, false), (11, 0, false)];
             let req = cmd::scan_request(&channels, Some(self.cfg.ssid()), self.cfg.bssid, 1);
-            let _ = self
-                .transport
-                .send_cmd(cmd::CMD_SCAN_REQ_UMAC, cmd::GROUP_LEGACY, cmd::VER_SCAN_REQ, &req);
+            let _ = self.transport.send_cmd(
+                cmd::CMD_SCAN_REQ_UMAC,
+                cmd::GROUP_LEGACY,
+                cmd::VER_SCAN_REQ,
+                &req,
+            );
         }
         Ok(())
     }
@@ -326,8 +326,16 @@ impl<B: Bus> WifiDevice<B> {
     /// Send every management command needed before the first auth frame.
     fn send_join_commands(&mut self, bssid: MacAddr, channel: u8, assoc: bool, aid: u16) {
         use crate::cmd::{self, id_and_color};
-        let band = if channel <= 14 { cmd::PHY_BAND_2GHZ } else { cmd::PHY_BAND_5GHZ };
-        let action = if assoc { cmd::CTXT_ACTION_MODIFY } else { cmd::CTXT_ACTION_ADD };
+        let band = if channel <= 14 {
+            cmd::PHY_BAND_2GHZ
+        } else {
+            cmd::PHY_BAND_5GHZ
+        };
+        let action = if assoc {
+            cmd::CTXT_ACTION_MODIFY
+        } else {
+            cmd::CTXT_ACTION_ADD
+        };
         let _ = self.transport.send_cmd(
             cmd::CMD_PHY_CONTEXT,
             cmd::GROUP_LEGACY,
@@ -514,6 +522,9 @@ mod tests {
         ];
         payload.extend_from_slice(&beacon);
         let mpdu = strip_rx_mpdu(&payload).unwrap();
-        assert_eq!(u16::from_le_bytes([mpdu[0], mpdu[1]]), FC_TYPE_MGMT | FC_SUBTYPE_BEACON);
+        assert_eq!(
+            u16::from_le_bytes([mpdu[0], mpdu[1]]),
+            FC_TYPE_MGMT | FC_SUBTYPE_BEACON
+        );
     }
 }

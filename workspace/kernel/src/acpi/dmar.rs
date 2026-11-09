@@ -146,10 +146,7 @@ impl ScopeKind {
 
     /// True when the scope describes a PCI function.
     pub const fn is_pci(self) -> bool {
-        matches!(
-            self,
-            ScopeKind::PciEndpoint | ScopeKind::PciSubHierarchy
-        )
+        matches!(self, ScopeKind::PciEndpoint | ScopeKind::PciSubHierarchy)
     }
 }
 
@@ -240,11 +237,7 @@ impl Rmrr {
 
     /// True when any scope of this region covers the given PCI function.
     pub fn covers(&self, segment: u16, bus: u8, device: u8, function: u8) -> bool {
-        self.segment == segment
-            && self
-                .scopes
-                .iter()
-                .any(|s| s.covers(bus, device, function))
+        self.segment == segment && self.scopes.iter().any(|s| s.covers(bus, device, function))
     }
 }
 

@@ -305,9 +305,7 @@ fn realtek_setup(fd: usize) -> bool {
                 realtek::RtlError::UnsupportedV2 => {
                     "[strate-bt] Realtek: v2 firmware format unsupported\n"
                 }
-                realtek::RtlError::NoPatch(_) => {
-                    "[strate-bt] Realtek: no patch for this chip id\n"
-                }
+                realtek::RtlError::NoPatch(_) => "[strate-bt] Realtek: no patch for this chip id\n",
                 _ => "[strate-bt] Realtek: firmware parse failed\n",
             });
             return false;
@@ -460,7 +458,8 @@ fn mtk_setup(hci: usize, ctl: usize) -> bool {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _start() -> ! {    log("[strate-bt] starting\n");
+pub extern "C" fn _start() -> ! {
+    log("[strate-bt] starting\n");
 
     let hci = open_retry(HCI_PATH);
     let log_stream = open_retry(LOG_STREAM_PATH);
@@ -595,8 +594,8 @@ pub extern "C" fn _start() -> ! {    log("[strate-bt] starting\n");
                         if oldest > log_cursor {
                             let lost = oldest - log_cursor;
                             log_cursor = oldest;
-                            if let Some(n) = session
-                                .report_drop(lost.min(u32::MAX as u64) as u32, &mut out)
+                            if let Some(n) =
+                                session.report_drop(lost.min(u32::MAX as u64) as u32, &mut out)
                             {
                                 let _ = write_all(hci, &out[..n]);
                             }
@@ -606,8 +605,8 @@ pub extern "C" fn _start() -> ! {    log("[strate-bt] starting\n");
                         if dropped > dropped_last {
                             let lost = dropped - dropped_last;
                             dropped_last = dropped;
-                            if let Some(n) = session
-                                .report_drop(lost.min(u32::MAX as u64) as u32, &mut out)
+                            if let Some(n) =
+                                session.report_drop(lost.min(u32::MAX as u64) as u32, &mut out)
                             {
                                 let _ = write_all(hci, &out[..n]);
                             }

@@ -346,9 +346,7 @@ impl HwCaps {
             vpid: secondary.supports(control_bits::PROC2_ENABLE_VPID),
             invvpid_single_context: ept_vpid & ept_vpid_cap::INVVPID_SINGLE_CONTEXT != 0,
             invvpid_all_context: ept_vpid & ept_vpid_cap::INVVPID_ALL_CONTEXT != 0,
-            invvpid_individual_address: ept_vpid
-                & ept_vpid_cap::INVVPID_INDIVIDUAL_ADDRESS
-                != 0,
+            invvpid_individual_address: ept_vpid & ept_vpid_cap::INVVPID_INDIVIDUAL_ADDRESS != 0,
             unrestricted_guest: secondary.supports(control_bits::PROC2_UNRESTRICTED_GUEST),
             apic_register_virt: secondary.supports(control_bits::PROC2_APIC_REGISTER_VIRT),
             virtual_interrupt_delivery: secondary

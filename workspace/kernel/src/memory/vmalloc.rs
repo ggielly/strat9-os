@@ -69,9 +69,7 @@
 //! allocation to prevent deadlock with the buddy allocator.
 
 use crate::{
-    arch::{
-        xshim::{PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB, VirtAddr},
-    },
+    arch::xshim::{PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB, VirtAddr},
     memory::{
         frame::PhysFrame,
         paging::{map_page_kernel, unmap_page_kernel},

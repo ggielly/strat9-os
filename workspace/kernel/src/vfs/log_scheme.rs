@@ -45,8 +45,10 @@
 //! fresh one.
 
 use alloc::{collections::BTreeMap, string::String, sync::Arc};
-use core::fmt::Write;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::{
+    fmt::Write,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use crate::{log_ring, sync::SpinLock, syscall::error::SyscallError};
 
@@ -182,9 +184,7 @@ impl Scheme for LogScheme {
         };
 
         let file_id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        self.files
-            .lock()
-            .insert(file_id, LogFile { kind, cursor });
+        self.files.lock().insert(file_id, LogFile { kind, cursor });
 
         Ok(OpenResult {
             file_id,

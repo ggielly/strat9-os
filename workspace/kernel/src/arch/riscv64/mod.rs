@@ -164,7 +164,9 @@ pub mod vga {
     pub fn screen_size() -> (usize, usize) {
         (0, 0)
     }
-    pub fn begin_frame() -> bool { false }
+    pub fn begin_frame() -> bool {
+        false
+    }
     pub fn end_frame() {}
     pub fn fill_rect(_x: i32, _y: i32, _w: i32, _h: i32, _color: u32) {}
     pub fn text_rows() -> usize {
@@ -355,14 +357,32 @@ pub mod cpuid {
         pub xcr0_mask: u64,
         pub area_size: usize,
     }
-    pub trait FeatureMask { fn mask(&self) -> u64; }
-    impl FeatureMask for CpuFeature { fn mask(&self) -> u64 { self.0 as u64 } }
-    impl FeatureMask for CpuFeatures { fn mask(&self) -> u64 { self.bits } }
+    pub trait FeatureMask {
+        fn mask(&self) -> u64;
+    }
+    impl FeatureMask for CpuFeature {
+        fn mask(&self) -> u64 {
+            self.0 as u64
+        }
+    }
+    impl FeatureMask for CpuFeatures {
+        fn mask(&self) -> u64 {
+            self.bits
+        }
+    }
     impl CpuFeatures {
-        pub const SMEP: Self = Self { bits: CpuFeature::SMEP.0 as u64 };
-        pub const SMAP: Self = Self { bits: CpuFeature::SMAP.0 as u64 };
-        pub const fn from_bits_truncate(bits: u64) -> Self { Self { bits } }
-        pub const fn bits(self) -> u64 { self.bits }
+        pub const SMEP: Self = Self {
+            bits: CpuFeature::SMEP.0 as u64,
+        };
+        pub const SMAP: Self = Self {
+            bits: CpuFeature::SMAP.0 as u64,
+        };
+        pub const fn from_bits_truncate(bits: u64) -> Self {
+            Self { bits }
+        }
+        pub const fn bits(self) -> u64 {
+            self.bits
+        }
         pub fn contains<T: FeatureMask>(self, other: T) -> bool {
             self.bits & other.mask() == other.mask()
         }
@@ -371,7 +391,9 @@ pub mod cpuid {
     pub fn init() {}
 
     pub fn host() -> IsaFeatures {
-        IsaFeatures { features: CpuFeatures::default() }
+        IsaFeatures {
+            features: CpuFeatures::default(),
+        }
     }
     pub fn host_uses_xsave() -> bool {
         false
@@ -389,7 +411,10 @@ pub mod cpuid {
         0
     }
     pub fn boot_xsave_profile() -> XsaveProfile {
-        XsaveProfile { xcr0_mask: 0, area_size: 512 }
+        XsaveProfile {
+            xcr0_mask: 0,
+            area_size: 512,
+        }
     }
     pub fn features_to_flags_string(_f: &IsaFeatures) -> alloc::string::String {
         alloc::string::String::new()

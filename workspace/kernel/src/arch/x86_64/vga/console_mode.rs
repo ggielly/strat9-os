@@ -42,7 +42,7 @@
 //! hypervisor, where the graphical console is known to be cheap and is also
 //! what the test suite screenshots.
 
-use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use strat9_abi::boot::KernelArgs;
 

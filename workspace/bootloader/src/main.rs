@@ -319,11 +319,8 @@ fn boot_kernel() -> BootResult<()> {
                 match cfg_file.read(&mut cfg_buf) {
                     Ok(n) => boot_cfg.extend_from_slice(&cfg_buf[..n]),
                     Err(error) => uefi::system::with_stdout(|stdout| {
-                        let _ = writeln!(
-                            stdout,
-                            "[boot] strat9.cfg read failed: {}",
-                            error.status()
-                        );
+                        let _ =
+                            writeln!(stdout, "[boot] strat9.cfg read failed: {}", error.status());
                     }),
                 }
             }
@@ -334,7 +331,11 @@ fn boot_kernel() -> BootResult<()> {
     }
     if boot_cfg.len() == MAX_BOOT_CONFIG {
         uefi::system::with_stdout(|stdout| {
-            let _ = writeln!(stdout, "[boot] strat9.cfg truncated at {} bytes", MAX_BOOT_CONFIG);
+            let _ = writeln!(
+                stdout,
+                "[boot] strat9.cfg truncated at {} bytes",
+                MAX_BOOT_CONFIG
+            );
         });
     }
 

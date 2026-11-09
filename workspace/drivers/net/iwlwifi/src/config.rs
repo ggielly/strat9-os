@@ -45,8 +45,7 @@
 //! `#` comments.  Unknown keys are rejected so a typo cannot silently leave
 //! the interface unconfigured.
 
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 use crate::crypto::{derive_pmk, PMK_LEN};
 
@@ -133,9 +132,7 @@ impl WifiConfig {
 
     /// True when the config has enough material to join a WPA2-PSK network.
     pub fn is_complete(&self) -> bool {
-        self.enabled
-            && self.ssid_len > 0
-            && (self.psk.is_some() || self.passphrase_len >= 8)
+        self.enabled && self.ssid_len > 0 && (self.psk.is_some() || self.passphrase_len >= 8)
     }
 
     /// PMK from the configured passphrase, or the configured raw PSK.
@@ -193,17 +190,25 @@ pub fn parse(text: &str) -> Result<WifiConfig, ConfigError> {
         }
 
         match key {
-            "enabled" => cfg.enabled = parse_bool(value).ok_or_else(|| err(line_no, ConfigErrorKind::InvalidValue))?,
-            "hidden" => cfg.hidden = parse_bool(value).ok_or_else(|| err(line_no, ConfigErrorKind::InvalidValue))?,
+            "enabled" => {
+                cfg.enabled =
+                    parse_bool(value).ok_or_else(|| err(line_no, ConfigErrorKind::InvalidValue))?
+            }
+            "hidden" => {
+                cfg.hidden =
+                    parse_bool(value).ok_or_else(|| err(line_no, ConfigErrorKind::InvalidValue))?
+            }
             "interface" => {
-                let s = parse_string(value).ok_or_else(|| err(line_no, ConfigErrorKind::InvalidValue))?;
+                let s = parse_string(value)
+                    .ok_or_else(|| err(line_no, ConfigErrorKind::InvalidValue))?;
                 if s.is_empty() || s.len() > 16 {
                     return Err(err(line_no, ConfigErrorKind::InvalidValue));
                 }
                 cfg.interface = String::from(s);
             }
             "country" => {
-                let s = parse_string(value).ok_or_else(|| err(line_no, ConfigErrorKind::InvalidValue))?;
+                let s = parse_string(value)
+                    .ok_or_else(|| err(line_no, ConfigErrorKind::InvalidValue))?;
                 let b = s.as_bytes();
                 if b.len() != 2 || !b.iter().all(|c| c.is_ascii_alphabetic()) {
                     return Err(err(line_no, ConfigErrorKind::InvalidValue));
@@ -211,7 +216,8 @@ pub fn parse(text: &str) -> Result<WifiConfig, ConfigError> {
                 cfg.country = [b[0].to_ascii_uppercase(), b[1].to_ascii_uppercase()];
             }
             "ssid" => {
-                let s = parse_string(value).ok_or_else(|| err(line_no, ConfigErrorKind::InvalidValue))?;
+                let s = parse_string(value)
+                    .ok_or_else(|| err(line_no, ConfigErrorKind::InvalidValue))?;
                 let b = s.as_bytes();
                 if b.is_empty() || b.len() > MAX_SSID {
                     return Err(err(line_no, ConfigErrorKind::InvalidValue));
@@ -221,7 +227,8 @@ pub fn parse(text: &str) -> Result<WifiConfig, ConfigError> {
                 cfg.ssid_len = b.len();
             }
             "passphrase" => {
-                let s = parse_string(value).ok_or_else(|| err(line_no, ConfigErrorKind::InvalidValue))?;
+                let s = parse_string(value)
+                    .ok_or_else(|| err(line_no, ConfigErrorKind::InvalidValue))?;
                 let b = s.as_bytes();
                 if b.len() < 8 || b.len() > MAX_PASSPHRASE {
                     return Err(err(line_no, ConfigErrorKind::InvalidValue));
@@ -231,11 +238,13 @@ pub fn parse(text: &str) -> Result<WifiConfig, ConfigError> {
                 cfg.passphrase_len = b.len();
             }
             "psk" => {
-                let s = parse_string(value).ok_or_else(|| err(line_no, ConfigErrorKind::InvalidValue))?;
+                let s = parse_string(value)
+                    .ok_or_else(|| err(line_no, ConfigErrorKind::InvalidValue))?;
                 cfg.psk = Some(parse_hex_array(s.as_bytes(), line_no)?);
             }
             "firmware" => {
-                let s = parse_string(value).ok_or_else(|| err(line_no, ConfigErrorKind::InvalidValue))?;
+                let s = parse_string(value)
+                    .ok_or_else(|| err(line_no, ConfigErrorKind::InvalidValue))?;
                 if s.is_empty() || s.len() > MAX_PATH {
                     return Err(err(line_no, ConfigErrorKind::InvalidValue));
                 }
@@ -252,7 +261,8 @@ pub fn parse(text: &str) -> Result<WifiConfig, ConfigError> {
                 cfg.channel = Some(v);
             }
             "bssid" => {
-                let s = parse_string(value).ok_or_else(|| err(line_no, ConfigErrorKind::InvalidValue))?;
+                let s = parse_string(value)
+                    .ok_or_else(|| err(line_no, ConfigErrorKind::InvalidValue))?;
                 let mut out = [0u8; 6];
                 let mut n = 0usize;
                 for part in s.split([':', '-']) {
@@ -359,7 +369,8 @@ fn parse_hex_array(bytes: &[u8], line: usize) -> Result<[u8; PMK_LEN], ConfigErr
     let mut out = [0u8; PMK_LEN];
     for i in 0..PMK_LEN {
         let hi = hexval(bytes[i * 2]).ok_or_else(|| err(line, ConfigErrorKind::InvalidValue))?;
-        let lo = hexval(bytes[i * 2 + 1]).ok_or_else(|| err(line, ConfigErrorKind::InvalidValue))?;
+        let lo =
+            hexval(bytes[i * 2 + 1]).ok_or_else(|| err(line, ConfigErrorKind::InvalidValue))?;
         out[i] = (hi << 4) | lo;
     }
     Ok(out)
@@ -430,10 +441,7 @@ hidden = false
     #[test]
     fn accepts_psk_hex() {
         let psk = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
-        let text = alloc::format!(
-            "[wifi]\nenabled=true\nssid=\"x\"\npsk=\"{}\"\n",
-            psk
-        );
+        let text = alloc::format!("[wifi]\nenabled=true\nssid=\"x\"\npsk=\"{}\"\n", psk);
         let cfg = parse(&text).unwrap();
         assert_eq!(cfg.psk.unwrap()[0], 0x00);
         assert_eq!(cfg.psk.unwrap()[31], 0xff);

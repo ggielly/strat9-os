@@ -38,10 +38,10 @@
 
 use alloc::vec::Vec;
 
-use crate::crypto::{
-    derive_ptk, hmac_sha1, key_unwrap, CCMP_KEY_LEN, PMK_LEN, PTK_LEN,
+use crate::{
+    crypto::{derive_ptk, hmac_sha1, key_unwrap, CCMP_KEY_LEN, PMK_LEN, PTK_LEN},
+    dot11::MacAddr,
 };
-use crate::dot11::MacAddr;
 
 pub const EAPOL_TYPE_KEY: u8 = 3;
 pub const EAPOL_VERSION_2004: u8 = 2;
@@ -350,8 +350,7 @@ impl Wpa2Supplicant {
             }
             if key.is_encrypted() {
                 let kek = self.keys.kek();
-                let wrapped =
-                    &frame[key.key_data_offset..key.key_data_offset + key.key_data_len];
+                let wrapped = &frame[key.key_data_offset..key.key_data_offset + key.key_data_len];
                 self.parse_group_key_data(&kek, wrapped, true)?;
             }
             let kck = self.keys.kck();

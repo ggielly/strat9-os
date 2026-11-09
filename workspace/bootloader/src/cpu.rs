@@ -112,9 +112,7 @@ pub fn validate_pat(pat: u64) -> Result<(), &'static str> {
 pub fn rdtsc() -> u64 {
     let low: u32;
     let high: u32;
-    unsafe {
-        core::arch::asm!("rdtsc", out("eax") low, out("edx") high, options(nomem, nostack))
-    };
+    unsafe { core::arch::asm!("rdtsc", out("eax") low, out("edx") high, options(nomem, nostack)) };
     ((high as u64) << 32) | low as u64
 }
 
@@ -131,14 +129,18 @@ const PIT_MAX_POLLS: u32 = 10_000_000;
 /// # Safety
 /// `port` must be a byte-wide I/O port.
 unsafe fn outb(port: u16, value: u8) {
-    unsafe { core::arch::asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack)) };
+    unsafe {
+        core::arch::asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack))
+    };
 }
 
 /// # Safety
 /// `port` must be a byte-wide I/O port.
 unsafe fn inb(port: u16) -> u8 {
     let value: u8;
-    unsafe { core::arch::asm!("in al, dx", in("dx") port, out("al") value, options(nomem, nostack)) };
+    unsafe {
+        core::arch::asm!("in al, dx", in("dx") port, out("al") value, options(nomem, nostack))
+    };
     value
 }
 

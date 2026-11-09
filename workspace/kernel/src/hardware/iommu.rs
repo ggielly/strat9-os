@@ -38,11 +38,7 @@
 //! before the `DOMAIN_BITMAP` lock.  A [`Domain`] state lock is never taken
 //! while holding the registry lock.
 
-use alloc::{
-    collections::BTreeMap,
-    sync::Arc,
-    vec::Vec,
-};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::{
     fmt,
     ops::{BitAnd, BitOr},
@@ -678,12 +674,7 @@ impl Domain {
         Self::new_owned(id, sbdf, None, FaultPolicy::Log)
     }
 
-    fn new_owned(
-        id: DomainId,
-        sbdf: Sbdf,
-        owner: Option<u32>,
-        policy: FaultPolicy,
-    ) -> Self {
+    fn new_owned(id: DomainId, sbdf: Sbdf, owner: Option<u32>, policy: FaultPolicy) -> Self {
         Self {
             id,
             sbdf,
@@ -793,13 +784,7 @@ impl Domain {
     ///
     /// The range must be page-aligned, non-empty and must not overlap an
     /// existing mapping.  The overlap check is O(log n).
-    pub fn map(
-        &self,
-        iova: u64,
-        phys: u64,
-        len: u64,
-        prot: DmaProt,
-    ) -> Result<(), IommuError> {
+    pub fn map(&self, iova: u64, phys: u64, len: u64, prot: DmaProt) -> Result<(), IommuError> {
         let kind = MappingKind::best_for(iova, len)
             .filter(|kind| phys & (kind.size() - 1) == 0)
             .unwrap_or(MappingKind::Page4K);
@@ -902,12 +887,7 @@ impl Domain {
     }
 
     /// Allocate a free IOVA range and map `phys` into it.
-    pub fn map_auto(
-        &self,
-        phys: u64,
-        len: u64,
-        prot: DmaProt,
-    ) -> Result<u64, IommuError> {
+    pub fn map_auto(&self, phys: u64, len: u64, prot: DmaProt) -> Result<u64, IommuError> {
         validate_range(0, len)?;
         let iova = {
             let state = self.state.lock();
@@ -1216,9 +1196,7 @@ pub fn domain_for_owned(
         if end <= start {
             continue;
         }
-        if let Err(err) =
-            domain.map_reserved(start, start, end - start, DmaProt::READ_WRITE)
-        {
+        if let Err(err) = domain.map_reserved(start, start, end - start, DmaProt::READ_WRITE) {
             log::warn!(
                 "[IOMMU] cannot identity-map RMRR {:#x}..{:#x} for {}: {:?}",
                 start,
@@ -1530,9 +1508,7 @@ pub fn init() {
             discovery.ready
         );
     } else {
-        crate::serial_println!(
-            "[IOMMU] no IOMMU firmware table found (DMA is untranslated)"
-        );
+        crate::serial_println!("[IOMMU] no IOMMU firmware table found (DMA is untranslated)");
     }
 }
 
@@ -1680,14 +1656,20 @@ mod tests {
     #[test]
     fn map_translate_unmap() {
         let domain = Domain::new(DomainId(7), Sbdf::from_pci(0, 2, 0));
-        domain.map(IOVA_BASE, 0x1000, 0x2000, DmaProt::READ_WRITE).unwrap();
+        domain
+            .map(IOVA_BASE, 0x1000, 0x2000, DmaProt::READ_WRITE)
+            .unwrap();
         let t = domain.translate(IOVA_BASE + 0x1800).unwrap();
         assert_eq!(t.phys, 0x2800);
         assert_eq!(t.remaining, 0x800);
         assert_eq!(domain.generation(), 1);
 
-        assert!(domain.map(IOVA_BASE, 0x9000, 0x1000, DmaProt::READ).is_err());
-        assert!(domain.map(IOVA_BASE - 0x1000, 0x9000, 0x3000, DmaProt::READ).is_err());
+        assert!(domain
+            .map(IOVA_BASE, 0x9000, 0x1000, DmaProt::READ)
+            .is_err());
+        assert!(domain
+            .map(IOVA_BASE - 0x1000, 0x9000, 0x3000, DmaProt::READ)
+            .is_err());
 
         assert_eq!(domain.unmap(IOVA_BASE, 0x2000).unwrap(), 1);
         assert!(domain.translate(IOVA_BASE).is_none());
@@ -1743,9 +1725,7 @@ mod tests {
             Err(IommuError::Quiesced)
         );
         domain.resume();
-        assert!(domain
-            .map(IOVA_BASE, 0x1000, 0x1000, DmaProt::READ)
-            .is_ok());
+        assert!(domain.map(IOVA_BASE, 0x1000, 0x1000, DmaProt::READ).is_ok());
     }
 
     #[test]

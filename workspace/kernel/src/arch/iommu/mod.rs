@@ -151,11 +151,7 @@ pub trait Backend: Send + Sync {
     }
 
     /// Allocate an IRTE and return the MSI message to program.
-    fn allocate_msi(
-        &self,
-        _sbdf: Sbdf,
-        _vector: u8,
-    ) -> Result<MsiAllocation, IommuError> {
+    fn allocate_msi(&self, _sbdf: Sbdf, _vector: u8) -> Result<MsiAllocation, IommuError> {
         Err(IommuError::Unsupported)
     }
 

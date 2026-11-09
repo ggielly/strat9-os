@@ -134,7 +134,14 @@ mod tests {
         fw[map + 4..map + 8].copy_from_slice(&(96 + 128u32).to_le_bytes());
         fw[map + 16..map + 20].copy_from_slice(&8u32.to_le_bytes());
         let s = section(&fw, 0).unwrap();
-        assert_eq!(s, Section { index: 0, offset: 224, size: 8 });
+        assert_eq!(
+            s,
+            Section {
+                index: 0,
+                offset: 224,
+                size: 8
+            }
+        );
         assert!(section(&fw, 1).is_none());
 
         let mut hdr = [0xFFu8; 53];

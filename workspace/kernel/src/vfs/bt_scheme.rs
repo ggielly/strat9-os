@@ -54,7 +54,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::{hardware::usb::btusb, sync::SpinLock, syscall::error::SyscallError};
 
 use super::{
-    scheme::{finalize_pseudo_stat, FileFlags, FileStat, OpenFlags, OpenResult, Scheme, DEV_CHAR_FS},
+    scheme::{
+        finalize_pseudo_stat, FileFlags, FileStat, OpenFlags, OpenResult, Scheme, DEV_CHAR_FS,
+    },
     scheme_router::{mount_scheme, register_scheme},
 };
 

@@ -41,7 +41,6 @@ macro_rules! e9_mark {
     };
 }
 
-
 pub struct QemuDebug;
 
 impl fmt::Write for QemuDebug {

@@ -35,17 +35,17 @@
 //! No policy is decided here: the module does not know what a guest OS, a
 //! device or a complete virtual machine is.
 
-use crate::memory::frame::{
-    FrameAllocOptions, FramePurpose, PhysFrame,
+use crate::{
+    memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame},
+    s9vm::{
+        caps::HwCaps,
+        control::{field, ControlBlock, ControlError},
+        exit::{ExitClass, ExitReason},
+        guest::GuestState,
+        launch::{s9vm_enter_guest, s9vm_guest_exit, EnterFrame, S9VM_ENTER_FRAME_SIZE},
+        mmu::{self, Perms, SecondLevel, TableMemory},
+    },
 };
-use crate::s9vm::control::{field, ControlBlock, ControlError};
-use crate::s9vm::exit::{ExitReason, ExitClass};
-use crate::s9vm::guest::GuestState;
-use crate::s9vm::launch::{
-    s9vm_enter_guest, s9vm_guest_exit, EnterFrame, S9VM_ENTER_FRAME_SIZE,
-};
-use crate::s9vm::mmu::{self, Perms, SecondLevel, TableMemory};
-use crate::s9vm::caps::HwCaps;
 
 /// Control bits useful for configuration (SDM).
 pub mod bits {
@@ -144,10 +144,8 @@ struct HostStack {
 impl HostStack {
     fn allocate() -> Result<Self, VcpuError> {
         // 16 KiB, order 2.
-        let frame = crate::sync::with_irqs_disabled(|token| {
-            crate::memory::buddy::alloc(token, 2)
-        })
-        .map_err(|_| VcpuError::OutOfMemory)?;
+        let frame = crate::sync::with_irqs_disabled(|token| crate::memory::buddy::alloc(token, 2))
+            .map_err(|_| VcpuError::OutOfMemory)?;
         let base = crate::memory::phys_to_virt(frame.start_address.as_u64());
         let top = (base + 16 * 1024) & !0xF;
         Ok(Self { frame, top })
@@ -268,24 +266,14 @@ impl SecondLevelMemory {
     }
 
     /// Maps a 4 KiB page.
-    pub fn map_4k(
-        &mut self,
-        gpa: u64,
-        hpa: u64,
-        perms: Perms,
-    ) -> Result<(), VcpuError> {
+    pub fn map_4k(&mut self, gpa: u64, hpa: u64, perms: Perms) -> Result<(), VcpuError> {
         self.root
             .map_4k(&mut self.tables, gpa, hpa, mmu::PAGE_SIZE, perms)
             .map_err(VcpuError::Translation)
     }
 
     /// Maps a 2 MiB region.
-    pub fn map_2m(
-        &mut self,
-        gpa: u64,
-        hpa: u64,
-        perms: Perms,
-    ) -> Result<(), VcpuError> {
+    pub fn map_2m(&mut self, gpa: u64, hpa: u64, perms: Perms) -> Result<(), VcpuError> {
         self.root
             .map_2m(&mut self.tables, gpa, hpa, mmu::entry::LARGE_2MB, perms)
             .map_err(VcpuError::Translation)
@@ -293,12 +281,7 @@ impl SecondLevelMemory {
 
     /// Value of the translation pointer, ready for the control block.
     pub fn pointer(&self, caps: &HwCaps) -> u64 {
-        mmu::encode_second_level_pointer(
-            self.root.root_phys(),
-            6,
-            true,
-            caps.ept_ad,
-        )
+        mmu::encode_second_level_pointer(self.root.root_phys(), 6, true, caps.ept_ad)
     }
 }
 
@@ -562,7 +545,8 @@ impl Vcpu {
             self.control.write_u16(field::HOST_FS_SELECTOR, fs)?;
             self.control.write_u16(field::HOST_GS_SELECTOR, gs)?;
             self.control.write_u16(field::HOST_TR_SELECTOR, tr)?;
-            self.control.write_natural(field::HOST_TR_BASE, tr_base(tr))?;
+            self.control
+                .write_natural(field::HOST_TR_BASE, tr_base(tr))?;
 
             // Host system tables.
             let (gdtr_base, _gdtr_limit) = read_gdtr();
@@ -575,20 +559,13 @@ impl Vcpu {
             // Host FS/GS bases (GS carries the per-CPU data).
             let fs_base = crate::arch::x86_64::rdmsr(0xC000_0100);
             let gs_base = crate::arch::x86_64::rdmsr(0xC000_0101);
+            self.control.write_natural(field::HOST_FS_BASE, fs_base)?;
+            self.control.write_natural(field::HOST_GS_BASE, gs_base)?;
+            self.control.write_u32(field::HOST_SYSENTER_CS, cs as u32)?;
             self.control
-                .write_natural(field::HOST_FS_BASE, fs_base)?;
+                .write_natural(field::HOST_SYSENTER_ESP, crate::arch::x86_64::rdmsr(0x175))?;
             self.control
-                .write_natural(field::HOST_GS_BASE, gs_base)?;
-            self.control
-                .write_u32(field::HOST_SYSENTER_CS, cs as u32)?;
-            self.control.write_natural(
-                field::HOST_SYSENTER_ESP,
-                crate::arch::x86_64::rdmsr(0x175),
-            )?;
-            self.control.write_natural(
-                field::HOST_SYSENTER_EIP,
-                crate::arch::x86_64::rdmsr(0x176),
-            )?;
+                .write_natural(field::HOST_SYSENTER_EIP, crate::arch::x86_64::rdmsr(0x176))?;
         }
         Ok(())
     }
@@ -677,11 +654,7 @@ impl Vcpu {
     ///
     /// # Safety
     /// The control block must be loaded.
-    pub unsafe fn configure(
-        &mut self,
-        caps: &HwCaps,
-        guest: &GuestState,
-    ) -> Result<(), VcpuError> {
+    pub unsafe fn configure(&mut self, caps: &HwCaps, guest: &GuestState) -> Result<(), VcpuError> {
         self.guest = *guest;
         // VMX preemption timer is disabled until the hardware validation of
         // the entry path succeeds: its field write was the only ignored
@@ -696,8 +669,10 @@ impl Vcpu {
             self.control
                 .write_u64(field::GUEST_VMCS_LINK_POINTER, u64::MAX)?;
             self.control.write_u32(field::EXCEPTION_BITMAP, 0)?;
-            self.control.write_u32(field::PAGE_FAULT_ERROR_CODE_MASK, 0)?;
-            self.control.write_u32(field::PAGE_FAULT_ERROR_CODE_MATCH, 0)?;
+            self.control
+                .write_u32(field::PAGE_FAULT_ERROR_CODE_MASK, 0)?;
+            self.control
+                .write_u32(field::PAGE_FAULT_ERROR_CODE_MATCH, 0)?;
             self.control.write_u32(field::CR3_TARGET_COUNT, 0)?;
             // No host-controlled CR bits and no read shadows: the guest sees
             // exactly the state loaded at entry. These fields must be
@@ -770,7 +745,8 @@ impl Vcpu {
             self.control.write_u64(field::GUEST_PAT, guest.pat)?;
             self.control.write_natural(field::GUEST_RSP, guest.rsp)?;
             self.control.write_natural(field::GUEST_RIP, guest.rip)?;
-            self.control.write_natural(field::GUEST_RFLAGS, guest.rflags)?;
+            self.control
+                .write_natural(field::GUEST_RFLAGS, guest.rflags)?;
             self.control.write_natural(field::GUEST_DR7, guest.dr7)?;
             // Auxiliary 64-bit guest fields that are loaded by VM entry on
             // most processors (PAT is written above). The hypervisor this
@@ -788,10 +764,8 @@ impl Vcpu {
                 field::GUEST_PENDING_DEBUG_EXCEPTIONS,
                 guest.pending_debug_exceptions,
             )?;
-            self.control.write_u32(
-                field::GUEST_INTERRUPTIBILITY_INFO,
-                guest.interruptibility,
-            )?;
+            self.control
+                .write_u32(field::GUEST_INTERRUPTIBILITY_INFO, guest.interruptibility)?;
             self.control
                 .write_u32(field::GUEST_ACTIVITY_STATE, guest.activity_state)?;
 
@@ -885,7 +859,8 @@ impl Vcpu {
             self.control.write_u16(selector_field, segment.selector)?;
             self.control.write_natural(base_field, segment.base)?;
             self.control.write_u32(limit_field, segment.limit)?;
-            self.control.write_u32(access_rights_field, segment.access_rights)?;
+            self.control
+                .write_u32(access_rights_field, segment.access_rights)?;
         }
         Ok(())
     }
@@ -893,8 +868,7 @@ impl Vcpu {
     unsafe fn write_controls(&self, caps: &HwCaps) -> Result<(), VcpuError> {
         let pin = caps.pin_allowed.apply(bits::PIN_EXTERNAL_INTERRUPT_EXITING);
         let primary = caps.primary_proc_allowed.apply(
-            crate::s9vm::caps::control_bits::PROC_ACTIVATE_SECONDARY
-                | bits::PRIMARY_HLT_EXITING,
+            crate::s9vm::caps::control_bits::PROC_ACTIVATE_SECONDARY | bits::PRIMARY_HLT_EXITING,
         );
         let secondary = caps
             .secondary_proc_allowed
@@ -930,18 +904,12 @@ impl Vcpu {
             // Re-armed on every entry: each guest time slice is bounded,
             // including after an internal resumption.
             unsafe {
-                let _ = self
-                    .control
-                    .write_u32(field::VMX_PREEMPTION_TIMER, ticks);
+                let _ = self.control.write_u32(field::VMX_PREEMPTION_TIMER, ticks);
             }
         }
         // SAFETY: caller contract; the trampoline restores the host state.
-        let failed = unsafe {
-            s9vm_enter_guest(
-                &mut self.frame as *mut EnterFrame,
-                self.host_stack.top(),
-            )
-        };
+        let failed =
+            unsafe { s9vm_enter_guest(&mut self.frame as *mut EnterFrame, self.host_stack.top()) };
         if failed != 0 {
             // The error code is in the block's instruction field.
             // SAFETY: block loaded.
@@ -1059,21 +1027,27 @@ impl Vcpu {
 fn read_cr0() -> u64 {
     let value: u64;
     // SAFETY: read of a control register.
-    unsafe { core::arch::asm!("mov {}, cr0", out(reg) value, options(nomem, nostack, preserves_flags)) };
+    unsafe {
+        core::arch::asm!("mov {}, cr0", out(reg) value, options(nomem, nostack, preserves_flags))
+    };
     value
 }
 
 fn read_cr3() -> u64 {
     let value: u64;
     // SAFETY: read of a control register.
-    unsafe { core::arch::asm!("mov {}, cr3", out(reg) value, options(nomem, nostack, preserves_flags)) };
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) value, options(nomem, nostack, preserves_flags))
+    };
     value
 }
 
 fn read_cr4() -> u64 {
     let value: u64;
     // SAFETY: read of a control register.
-    unsafe { core::arch::asm!("mov {}, cr4", out(reg) value, options(nomem, nostack, preserves_flags)) };
+    unsafe {
+        core::arch::asm!("mov {}, cr4", out(reg) value, options(nomem, nostack, preserves_flags))
+    };
     value
 }
 
@@ -1135,8 +1109,3 @@ fn tr_base(selector: u16) -> u64 {
         ControlBlock::decode_tss_base(low, upper)
     }
 }
-
-
-
-
-

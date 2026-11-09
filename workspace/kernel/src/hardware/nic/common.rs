@@ -61,9 +61,8 @@ impl KernelDma {
     pub fn for_sbdf(sbdf: Sbdf) -> Self {
         if iommu::enabled() {
             Self {
-                domain: iommu::find_domain(sbdf).or_else(|| {
-                    iommu::domain_for_owned(sbdf, None, iommu::FaultPolicy::Log).ok()
-                }),
+                domain: iommu::find_domain(sbdf)
+                    .or_else(|| iommu::domain_for_owned(sbdf, None, iommu::FaultPolicy::Log).ok()),
             }
         } else {
             Self { domain: None }

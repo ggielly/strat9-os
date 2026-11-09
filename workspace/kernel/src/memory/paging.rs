@@ -512,8 +512,7 @@ pub fn ensure_framebuffer_range_wc(phys_base: u64, size: u64) {
 
         let page_size = 4096u64;
         let start = phys_base & !(page_size - 1);
-        let end = (phys_base.saturating_add(size).saturating_add(page_size - 1))
-            & !(page_size - 1);
+        let end = (phys_base.saturating_add(size).saturating_add(page_size - 1)) & !(page_size - 1);
         if start >= end {
             return;
         }

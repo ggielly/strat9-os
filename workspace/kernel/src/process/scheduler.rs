@@ -357,8 +357,7 @@ pub(crate) const CPU_CLASS_IDLE: u8 = 1;
 pub(crate) const CPU_CLASS_FAIR: u8 = 2;
 pub(crate) const CPU_CLASS_RT: u8 = 3;
 pub(crate) static CPU_CLASS: [core::sync::atomic::AtomicU8; crate::arch::percpu::MAX_CPUS] =
-    [const { core::sync::atomic::AtomicU8::new(CPU_CLASS_UNKNOWN) };
-        crate::arch::percpu::MAX_CPUS];
+    [const { core::sync::atomic::AtomicU8::new(CPU_CLASS_UNKNOWN) }; crate::arch::percpu::MAX_CPUS];
 
 /// Address of the current task's `ticks` counter on each CPU, cached lock-free.
 ///

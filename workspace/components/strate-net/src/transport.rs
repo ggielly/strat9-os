@@ -186,9 +186,7 @@ impl NetworkStrate {
                 let mut data = [0u8; IpcMessage::READ_INLINE_CAPACITY];
                 let want = requested.min(data.len());
                 match socket.recv_slice(&mut data[..want]) {
-                    Ok(n) => {
-                        return reply_read(sender, &data[..n])
-                    }
+                    Ok(n) => return reply_read(sender, &data[..n]),
                     Err(_) => return IpcMessage::error_reply(sender, -5),
                 }
             }
@@ -233,12 +231,8 @@ impl NetworkStrate {
 
         let data = write_data(msg);
         match socket.send_slice(data) {
-            Ok(n) => {
-                reply_write(sender, n)
-            }
-            Err(_) => {
-                IpcMessage::error_reply(sender, -11)
-            }
+            Ok(n) => reply_write(sender, n),
+            Err(_) => IpcMessage::error_reply(sender, -11),
         }
     }
 

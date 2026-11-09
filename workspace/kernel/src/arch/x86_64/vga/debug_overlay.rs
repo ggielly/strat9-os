@@ -118,12 +118,7 @@ unsafe fn vga_debug_clear_cell(
     bg: u32,
 ) {
     for row in 0..16 {
-        super::fastfb::fill_pixels(
-            fb.add((y + row) * pitch + x * bpp_bytes),
-            bpp_bytes,
-            bg,
-            8,
-        );
+        super::fastfb::fill_pixels(fb.add((y + row) * pitch + x * bpp_bytes), bpp_bytes, bg, 8);
     }
 }
 
@@ -164,7 +159,11 @@ unsafe fn vga_debug_draw_glyph(
                 colors[col] = fg;
             }
         }
-        super::fastfb::store_row(fb.add((y + row) * pitch + x * bpp_bytes), bpp_bytes, &colors);
+        super::fastfb::store_row(
+            fb.add((y + row) * pitch + x * bpp_bytes),
+            bpp_bytes,
+            &colors,
+        );
     }
 }
 

@@ -205,9 +205,7 @@ impl PortSet {
         if let Some(slot) = ports.get_mut(id.port() as usize) {
             *slot = None;
         }
-        self.fdb
-            .lock()
-            .retain(|_, port| *port != id);
+        self.fdb.lock().retain(|_, port| *port != id);
     }
 
     fn port_sink(&self, id: PortId) -> Option<Arc<dyn PortSink>> {
@@ -296,7 +294,10 @@ impl PortSet {
                     }
                 }
             }
-            if let Some(port) = ports.get(src.port() as usize).and_then(|slot| slot.as_ref()) {
+            if let Some(port) = ports
+                .get(src.port() as usize)
+                .and_then(|slot| slot.as_ref())
+            {
                 port.stats.rx_packets.fetch_add(1, Ordering::Relaxed);
                 port.stats
                     .rx_bytes

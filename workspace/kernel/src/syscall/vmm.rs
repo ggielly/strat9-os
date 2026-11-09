@@ -36,15 +36,17 @@
 //! directly.
 
 use super::error::SyscallError;
-use crate::capability::{
-    get_capability_manager, CapId, CapPermissions, ResourceType,
+use crate::{
+    capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
+    memory::{UserSliceRead, UserSliceWrite},
+    process::current_task_clone,
+    s9vm,
+    s9vm::{
+        memmap::MapError,
+        vm::{self, VmError},
+    },
+    silo,
 };
-use crate::memory::{UserSliceRead, UserSliceWrite};
-use crate::process::current_task_clone;
-use crate::s9vm::memmap::MapError;
-use crate::s9vm::vm::{self, VmError};
-use crate::s9vm;
-use crate::silo;
 use alloc::vec;
 use strat9_abi::vmm::{state, VmmInfo, VmmRegs};
 
@@ -82,11 +84,8 @@ fn install_handle(
     permissions: CapPermissions,
 ) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let capability = get_capability_manager().create_capability(
-        resource_type,
-        resource as usize,
-        permissions,
-    );
+    let capability =
+        get_capability_manager().create_capability(resource_type, resource as usize, permissions);
     // SAFETY: the task's capability table is protected by the
     // `CapabilityTable` API; the pattern is identical to the other kernel
     // handle creations.
@@ -182,8 +181,8 @@ pub fn sys_vmm_create(name_ptr: u64, name_len: u64, silo_id: u64) -> Result<u64,
     if slice.copy_to(&mut name[..name_len as usize]) != name_len as usize {
         return Err(SyscallError::Fault);
     }
-    let record = vm::create(&name[..name_len as usize], silo_id as u32)
-        .ok_or(SyscallError::OutOfMemory)?;
+    let record =
+        vm::create(&name[..name_len as usize], silo_id as u32).ok_or(SyscallError::OutOfMemory)?;
     match install_handle(ResourceType::Vmm, record.id, VMM_OWNER) {
         Ok(handle) => Ok(handle),
         Err(error) => {
@@ -228,8 +227,7 @@ pub fn sys_vmm_map_mem(
     if memtype != 0 && memtype != 6 {
         return Err(SyscallError::NotSupported);
     }
-    vm::map_memory(world, &caps, gpa, len, perms as u32, memtype as u8)
-        .map_err(map_vm_error)
+    vm::map_memory(world, &caps, gpa, len, perms as u32, memtype as u8).map_err(map_vm_error)
 }
 
 /// SYS_VMM_SET_REGS (563): writes a vCPU's register block.

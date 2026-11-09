@@ -101,12 +101,7 @@ fn le16(buf: &[u8], off: usize) -> u16 {
     u16::from_le_bytes([buf[off], buf[off + 1]])
 }
 
-fn error_response(
-    out: &mut [u8],
-    request_opcode: u8,
-    handle: u16,
-    code: u8,
-) -> Option<usize> {
+fn error_response(out: &mut [u8], request_opcode: u8, handle: u16, code: u8) -> Option<usize> {
     if out.len() < 5 {
         return None;
     }
@@ -187,12 +182,7 @@ pub trait AttServerDispatch: AttServer {
                 match self.read_by_type(start, end, uuid, &mut out[2..]) {
                     Some((entry_len, total)) => {
                         if entry_len == 0 || entry_len > u8::MAX as usize {
-                            return error_response(
-                                out,
-                                opcode,
-                                start,
-                                ERR_INSUFFICIENT_RESOURCES,
-                            );
+                            return error_response(out, opcode, start, ERR_INSUFFICIENT_RESOURCES);
                         }
                         out[0] = ATT_READ_BY_TYPE_RSP;
                         out[1] = entry_len as u8;
@@ -256,12 +246,7 @@ pub trait AttServerDispatch: AttServer {
                 match self.read_group(start, end, uuid, &mut out[2..]) {
                     Some((entry_len, total)) => {
                         if entry_len == 0 || entry_len > u8::MAX as usize {
-                            return error_response(
-                                out,
-                                opcode,
-                                start,
-                                ERR_INSUFFICIENT_RESOURCES,
-                            );
+                            return error_response(out, opcode, start, ERR_INSUFFICIENT_RESOURCES);
                         }
                         out[0] = ATT_READ_BY_GROUP_TYPE_RSP;
                         out[1] = entry_len as u8;
@@ -318,10 +303,7 @@ mod tests {
         let n = s
             .handle_request(&[0x10, 0x01, 0x00, 0xFF, 0xFF, 0x00, 0x28], &mut out)
             .unwrap();
-        assert_eq!(
-            &out[..n],
-            &[0x11, 0x06, 0x01, 0x00, 0x05, 0x00, 0x00, 0x18]
-        );
+        assert_eq!(&out[..n], &[0x11, 0x06, 0x01, 0x00, 0x05, 0x00, 0x00, 0x18]);
 
         let n = s
             .handle_request(&[0x10, 0x06, 0x00, 0xFF, 0xFF, 0x00, 0x28], &mut out)
@@ -354,10 +336,15 @@ mod tests {
         let n = s
             .handle_request(&[0x08, 0x01, 0x00, 0xFF, 0xFF, 0x00, 0x2A], &mut out)
             .unwrap();
-        assert_eq!(&out[..n], &[0x09, 0x09, 0x03, 0x00, b'S', b'9', b'-', b'D', b'U', b'M', b'P']);
+        assert_eq!(
+            &out[..n],
+            &[0x09, 0x09, 0x03, 0x00, b'S', b'9', b'-', b'D', b'U', b'M', b'P']
+        );
 
         // 5. Enable notifications through the TX CCCD.
-        let n = s.handle_request(&[0x12, 0x09, 0x00, 0x01, 0x00], &mut out).unwrap();
+        let n = s
+            .handle_request(&[0x12, 0x09, 0x00, 0x01, 0x00], &mut out)
+            .unwrap();
         assert_eq!(&out[..n], &[0x13]);
         assert!(s.cccd_enabled());
         assert_eq!(s.notify_handle(), 8);
@@ -382,11 +369,15 @@ mod tests {
         assert_eq!(&out[..n], &[0x0B, b'S', b'9', b'-', b'D', b'U', b'M', b'P']);
 
         // Read Blob with an offset into the device name.
-        let n = s.handle_request(&[0x0C, 0x03, 0x00, 0x03, 0x00], &mut out).unwrap();
+        let n = s
+            .handle_request(&[0x0C, 0x03, 0x00, 0x03, 0x00], &mut out)
+            .unwrap();
         assert_eq!(&out[..n], &[0x0D, b'D', b'U', b'M', b'P']);
 
         // Offset past the end -> Invalid Offset.
-        let n = s.handle_request(&[0x0C, 0x03, 0x00, 0x40, 0x00], &mut out).unwrap();
+        let n = s
+            .handle_request(&[0x0C, 0x03, 0x00, 0x40, 0x00], &mut out)
+            .unwrap();
         assert_eq!(&out[..n], &[0x01, 0x0C, 0x03, 0x00, ERR_INVALID_OFFSET]);
 
         let n = s.handle_request(&[0x0A, 0xFE, 0x00], &mut out).unwrap();
@@ -398,16 +389,15 @@ mod tests {
         let mut s = gatt::GattServer::new();
         let mut out = [0u8; 64];
 
-        let n = s.handle_request(&[0x12, 0x0B, 0x00, b'h', b'i'], &mut out).unwrap();
+        let n = s
+            .handle_request(&[0x12, 0x0B, 0x00, b'h', b'i'], &mut out)
+            .unwrap();
         assert_eq!(&out[..n], &[0x13]);
 
         let n = s.handle_request(&[0x0A, 0x0B, 0x00], &mut out).unwrap();
         assert_eq!(&out[..n], &[0x0B, b'h', b'i']);
 
-        assert_eq!(
-            s.handle_request(&[0x52, 0x0B, 0x00, b'x'], &mut out),
-            None
-        );
+        assert_eq!(s.handle_request(&[0x52, 0x0B, 0x00, b'x'], &mut out), None);
         let n = s.handle_request(&[0x0A, 0x0B, 0x00], &mut out).unwrap();
         assert_eq!(&out[..n], &[0x0B, b'x']);
     }
@@ -417,14 +407,24 @@ mod tests {
         let mut s = gatt::GattServer::new();
         let mut out = [0u8; 64];
 
-        let n = s.handle_request(&[0x12, 0x08, 0x00, 0x01], &mut out).unwrap();
-        assert_eq!(&out[..n], &[0x01, 0x12, 0x08, 0x00, ERR_WRITE_NOT_PERMITTED]);
+        let n = s
+            .handle_request(&[0x12, 0x08, 0x00, 0x01], &mut out)
+            .unwrap();
+        assert_eq!(
+            &out[..n],
+            &[0x01, 0x12, 0x08, 0x00, ERR_WRITE_NOT_PERMITTED]
+        );
 
-        let n = s.handle_request(&[0x12, 0xFF, 0x00, 0x01], &mut out).unwrap();
+        let n = s
+            .handle_request(&[0x12, 0xFF, 0x00, 0x01], &mut out)
+            .unwrap();
         assert_eq!(&out[..n], &[0x01, 0x12, 0xFF, 0x00, ERR_INVALID_HANDLE]);
 
         let n = s.handle_request(&[0x99], &mut out).unwrap();
-        assert_eq!(&out[..n], &[0x01, 0x99, 0x00, 0x00, ERR_REQUEST_NOT_SUPPORTED]);
+        assert_eq!(
+            &out[..n],
+            &[0x01, 0x99, 0x00, 0x00, ERR_REQUEST_NOT_SUPPORTED]
+        );
 
         // Unknown UUID in a type read.
         let n = s

@@ -191,7 +191,11 @@ impl NicDataPlane {
         self.pop_rx_queue(&queue, buf)
     }
 
-    fn pop_rx_queue(&self, queue: &Arc<NetQueue>, buf: &mut [u8]) -> Result<Option<usize>, RxError> {
+    fn pop_rx_queue(
+        &self,
+        queue: &Arc<NetQueue>,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>, RxError> {
         let Some(desc) = queue.pop_rx() else {
             return Ok(None);
         };
@@ -256,7 +260,11 @@ impl NicDataPlane {
         self.pop_tx_queue(&queue, buf)
     }
 
-    fn pop_tx_queue(&self, queue: &Arc<NetQueue>, buf: &mut [u8]) -> Result<Option<usize>, TxError> {
+    fn pop_tx_queue(
+        &self,
+        queue: &Arc<NetQueue>,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>, TxError> {
         let Some(desc) = queue.pop_tx() else {
             return Ok(None);
         };
@@ -293,16 +301,12 @@ impl NicDataPlane {
 
     /// Count RX packets without consuming them.
     pub fn rx_pending(&self, index: usize) -> u32 {
-        self.queue(index)
-            .map(|q| q.header().rx.len())
-            .unwrap_or(0)
+        self.queue(index).map(|q| q.header().rx.len()).unwrap_or(0)
     }
 
     /// Count TX packets without consuming them.
     pub fn tx_pending(&self, index: usize) -> u32 {
-        self.queue(index)
-            .map(|q| q.header().tx.len())
-            .unwrap_or(0)
+        self.queue(index).map(|q| q.header().tx.len()).unwrap_or(0)
     }
 
     /// Update the link state exported in every queue header.

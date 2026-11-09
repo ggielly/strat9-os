@@ -30,8 +30,7 @@
 //!
 //! Pure module (host-testable): it depends only on the ABI.
 
-use alloc::collections::VecDeque;
-use alloc::vec::Vec;
+use alloc::{collections::VecDeque, vec::Vec};
 
 use strat9_abi::vmm::VmmExitEvent;
 

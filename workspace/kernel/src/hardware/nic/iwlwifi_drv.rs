@@ -49,17 +49,23 @@ use alloc::sync::Arc;
 
 use net_core::{NetError, NetMedia, NetworkDevice};
 
-use iwlwifi_ax201::config::{self, WifiConfig};
-use iwlwifi_ax201::device::WifiDevice;
-use iwlwifi_ax201::regs;
-use iwlwifi_ax201::transport::{Bus, IwlTransport};
+use iwlwifi_ax201::{
+    config::{self, WifiConfig},
+    device::WifiDevice,
+    regs,
+    transport::{Bus, IwlTransport},
+};
 use nic_buffers::{DmaAllocator, DmaRegion};
 
-use crate::arch::xshim::VirtAddr;
-use crate::hardware::nic::common::KernelDma;
-use crate::hardware::pci_client::{self as pci, Bar};
-use crate::memory;
-use crate::sync::SpinLock;
+use crate::{
+    arch::xshim::VirtAddr,
+    hardware::{
+        nic::common::KernelDma,
+        pci_client::{self as pci, Bar},
+    },
+    memory,
+    sync::SpinLock,
+};
 
 const CONFIG_PATH: &str = "/initfs/wifi.toml";
 const MMIO_WINDOW: u64 = 0x0010_0000;
@@ -104,7 +110,10 @@ fn parse_config() -> Option<WifiConfig> {
     let bytes = match read_initfs(CONFIG_PATH) {
         Some(b) => b,
         None => {
-            log::info!("[iwlwifi] {} not present; Wi-Fi stays disabled", CONFIG_PATH);
+            log::info!(
+                "[iwlwifi] {} not present; Wi-Fi stays disabled",
+                CONFIG_PATH
+            );
             return None;
         }
     };
@@ -178,7 +187,11 @@ impl NetworkDevice for KernelWifi {
     }
 
     fn link_speed_mbps(&self) -> u32 {
-        if self.link_up() { 866 } else { 0 }
+        if self.link_up() {
+            866
+        } else {
+            0
+        }
     }
 }
 
@@ -225,7 +238,11 @@ pub fn init() -> bool {
         dev.write_config_u16(pci::config::COMMAND, cmd);
 
         let Some(mmio_phys) = mmio_base(&dev) else {
-            log::error!("[iwlwifi] no MMIO BAR on {:04x}:{:04x}", dev.vendor_id, dev.device_id);
+            log::error!(
+                "[iwlwifi] no MMIO BAR on {:04x}:{:04x}",
+                dev.vendor_id,
+                dev.device_id
+            );
             continue;
         };
         memory::paging::ensure_identity_map_range(mmio_phys, MMIO_WINDOW);

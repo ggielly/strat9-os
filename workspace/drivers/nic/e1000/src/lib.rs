@@ -182,7 +182,11 @@ impl E1000Nic {
             }
 
             wr(mmio_base, regs::RDBAL, rx_ring_region.device_addr() as u32);
-            wr(mmio_base, regs::RDBAH, (rx_ring_region.device_addr() >> 32) as u32);
+            wr(
+                mmio_base,
+                regs::RDBAH,
+                (rx_ring_region.device_addr() >> 32) as u32,
+            );
             wr(mmio_base, regs::RDLEN, rx_ring_region.size as u32);
             wr(mmio_base, regs::RDH, 0);
             wr(mmio_base, regs::RDT, (NUM_RX - 1) as u32);
@@ -199,7 +203,11 @@ impl E1000Nic {
             let tx_descs = tx_ring_region.virt as *mut LegacyTxDesc;
 
             wr(mmio_base, regs::TDBAL, tx_ring_region.device_addr() as u32);
-            wr(mmio_base, regs::TDBAH, (tx_ring_region.device_addr() >> 32) as u32);
+            wr(
+                mmio_base,
+                regs::TDBAH,
+                (tx_ring_region.device_addr() >> 32) as u32,
+            );
             wr(mmio_base, regs::TDLEN, tx_ring_region.size as u32);
             wr(mmio_base, regs::TDH, 0);
             wr(mmio_base, regs::TDT, 0);
@@ -414,7 +422,9 @@ impl E1000Nic {
             ptr::copy_nonoverlapping(buf.as_ptr(), self.tx_bufs[idx].virt, buf.len());
         }
 
-        let _submitted = self.tx.submit(self.tx_bufs[idx].device_addr(), buf.len() as u16);
+        let _submitted = self
+            .tx
+            .submit(self.tx_bufs[idx].device_addr(), buf.len() as u16);
         unsafe {
             wr(self.mmio, regs::TDT, self.tx.tail() as u32);
         }

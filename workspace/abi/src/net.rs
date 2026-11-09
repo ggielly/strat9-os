@@ -51,7 +51,6 @@
 // opt this wire-format module out rather than wrapping every pointer access.
 #![allow(unsafe_op_in_unsafe_fn)]
 
-
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// `"STNQ"` little-endian.
@@ -444,12 +443,7 @@ pub fn bitmap_alloc(words: &[AtomicU64; 4]) -> Option<u32> {
             let bit = (!current).trailing_zeros();
             let mask = 1u64 << bit;
             if word
-                .compare_exchange_weak(
-                    current,
-                    current | mask,
-                    Ordering::AcqRel,
-                    Ordering::Relaxed,
-                )
+                .compare_exchange_weak(current, current | mask, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
                 return Some(index as u32 * 64 + bit);

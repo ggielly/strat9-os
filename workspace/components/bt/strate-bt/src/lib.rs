@@ -158,7 +158,9 @@ impl Session {
 
     fn on_event(&mut self, packet: &[u8]) -> Result<(), SessionError> {
         match hci::parse_event(packet)? {
-            hci::Event::CommandComplete { opcode, returns, .. } => {
+            hci::Event::CommandComplete {
+                opcode, returns, ..
+            } => {
                 if opcode == hci::OP_LE_READ_BUFFER_SIZE && returns.len() >= 4 {
                     // status, le_acl_mtu (u16), le_max_pkt (u8), ...
                     let mtu = u16::from_le_bytes([returns[1], returns[2]]) as usize;
@@ -201,11 +203,7 @@ impl Session {
     /// Feed one complete H4 packet read from `/dev/bt/hci0`.  Any packet that
     /// must be written back is produced in `out`; the return value is its
     /// length (`0` when nothing is to be sent).
-    pub fn on_hci_packet(
-        &mut self,
-        packet: &[u8],
-        out: &mut [u8],
-    ) -> Result<usize, SessionError> {
+    pub fn on_hci_packet(&mut self, packet: &[u8], out: &mut [u8]) -> Result<usize, SessionError> {
         if packet.is_empty() {
             return Ok(0);
         }
@@ -263,11 +261,7 @@ impl Session {
 
     /// Write an attribute directly (test/helper path).  Returns the pending
     /// RX command action, if the write produced one.
-    pub fn on_att_write(
-        &mut self,
-        handle: u16,
-        data: &[u8],
-    ) -> Result<Option<RxAction>, u8> {
+    pub fn on_att_write(&mut self, handle: u16, data: &[u8]) -> Result<Option<RxAction>, u8> {
         self.gatt.write(handle, data)?;
         Ok(self.gatt.take_rx_action())
     }
@@ -382,7 +376,8 @@ mod tests {
         let mut l2 = [0u8; 128];
         let l2n = l2cap::build_att(req, &mut l2).unwrap();
         let mut acl_buf = [0u8; 256];
-        let acl_n = acl::fragment(s.connection_handle(), &l2[..l2n], 20, false, &mut acl_buf).unwrap();
+        let acl_n =
+            acl::fragment(s.connection_handle(), &l2[..l2n], 20, false, &mut acl_buf).unwrap();
 
         let mut response = [0u8; 128];
         let mut response_len = 0usize;
@@ -546,10 +541,7 @@ mod tests {
         let n = Session::initialization_sequence(&mut out).unwrap();
         assert!(n > 90);
         assert_eq!(out[0], hci::H4_CMD);
-        assert_eq!(
-            u16::from_le_bytes([out[1], out[2]]),
-            hci::OP_RESET
-        );
+        assert_eq!(u16::from_le_bytes([out[1], out[2]]), hci::OP_RESET);
         let mut pos = 0usize;
         let mut last = 0u16;
         while pos < n {
@@ -565,7 +557,9 @@ mod tests {
     fn malformed_hci_is_reported() {
         let mut s = Session::new();
         let mut out = [0u8; 64];
-        assert!(s.on_hci_packet(&[hci::H4_EVT, hci::EVT_COMMAND_STATUS, 0x04], &mut out).is_err());
+        assert!(s
+            .on_hci_packet(&[hci::H4_EVT, hci::EVT_COMMAND_STATUS, 0x04], &mut out)
+            .is_err());
         assert_eq!(s.on_hci_packet(&[], &mut out).unwrap(), 0);
         assert_eq!(s.on_hci_packet(&[0x99, 0x00], &mut out).unwrap(), 0);
     }

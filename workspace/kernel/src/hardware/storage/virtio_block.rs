@@ -278,10 +278,9 @@ impl VirtioBlockDevice {
         let dma = DmaMapper::for_sbdf(sbdf);
 
         // Pre-allocate DMA resources before touching the device.
-        let bounce_pool = BouncePool::allocate(sbdf)
-            .map_err(|_| "Failed to allocate bounce pool")?;
-        let meta_pool = MetaPool::allocate(sbdf)
-            .map_err(|_| "Failed to allocate meta pool")?;
+        let bounce_pool =
+            BouncePool::allocate(sbdf).map_err(|_| "Failed to allocate bounce pool")?;
+        let meta_pool = MetaPool::allocate(sbdf).map_err(|_| "Failed to allocate meta pool")?;
 
         // Create VirtIO device
         let device = VirtioDevice::new(pci_dev)?;
@@ -424,9 +423,7 @@ impl VirtioBlockDevice {
             .map_err(|_| BlockError::NotReady)?;
             let buf_phys = buf_frame.start_address.as_u64();
             let buf_virt = crate::memory::phys_to_virt(buf_phys);
-            let buf_device = self
-                .dma
-                .translate(buf_phys, buf_size, DmaProt::READ_WRITE);
+            let buf_device = self.dma.translate(buf_phys, buf_size, DmaProt::READ_WRITE);
             if is_write {
                 if let Some(s) = src {
                     unsafe {

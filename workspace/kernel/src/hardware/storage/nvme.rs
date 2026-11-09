@@ -33,7 +33,7 @@
 #![allow(dead_code)]
 
 use crate::{
-    arch::boot_timestamp as boot_timestamp,
+    arch::boot_timestamp,
     hardware::pci_client::{self as pci, Bar, ProbeCriteria},
     memory::{allocate_zeroed_frame, paging, phys_to_virt},
     sync::waitqueue::WaitQueue,
@@ -1378,12 +1378,7 @@ impl Queue<Submission> {
 }
 
 impl QueuePair {
-    fn new(
-        registers_base: usize,
-        size: usize,
-        dstrd: usize,
-        dma: &crate::dma::DmaMapper,
-    ) -> Self {
+    fn new(registers_base: usize, size: usize, dstrd: usize, dma: &crate::dma::DmaMapper) -> Self {
         static NEXT_ID: AtomicU8 = AtomicU8::new(0);
         let id = NEXT_ID.fetch_add(1, Ordering::SeqCst) as u16;
         Self {

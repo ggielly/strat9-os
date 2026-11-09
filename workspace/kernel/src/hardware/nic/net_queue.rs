@@ -33,13 +33,15 @@
 //! syscall per packet.
 
 use alloc::{sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
+use crate::{
+    ipc::shared_ring::{self, RingId, SharedRing},
+    sync::{SpinLock, WaitQueue},
+};
 use strat9_abi::net::{
     features, link_flags, NetFrameDesc, NetQueueHeader, NET_FRAME_SIZE, NET_QUEUE_SIZE,
 };
-use crate::ipc::shared_ring::{self, RingId, SharedRing};
-use crate::sync::{SpinLock, WaitQueue};
 
 /// Per-queue event counter and wait queue.
 ///
@@ -144,7 +146,13 @@ unsafe impl Sync for NetQueue {}
 
 impl NetQueue {
     /// Allocate and initialise a queue region.
-    pub fn new(dev_id: u64, qid: u16, feature_mask: u64, mtu: u32, epoch: u32) -> Result<Arc<Self>, &'static str> {
+    pub fn new(
+        dev_id: u64,
+        qid: u16,
+        feature_mask: u64,
+        mtu: u32,
+        epoch: u32,
+    ) -> Result<Arc<Self>, &'static str> {
         let ring_id = shared_ring::create_ring(NET_QUEUE_SIZE)
             .map_err(|_| "failed to allocate network queue region")?;
         let ring = shared_ring::get_ring(ring_id).ok_or("network queue region disappeared")?;
@@ -434,7 +442,9 @@ impl NetQueue {
             flags |= link_flags::UP | link_flags::CARRIER | link_flags::FULL_DUPLEX;
         }
         self.header().link.store(flags, Ordering::Release);
-        self.header().speed_mbps.store(speed_mbps, Ordering::Relaxed);
+        self.header()
+            .speed_mbps
+            .store(speed_mbps, Ordering::Relaxed);
     }
 
     /// Current feature mask.
