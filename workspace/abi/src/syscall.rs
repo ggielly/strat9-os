@@ -1708,3 +1708,21 @@ pub const SYS_VMM_INJECT_NMI: usize = 578;
 /// Dump the engine state to the kernel log (diagnostic). Argument: VMM
 /// capability handle (silo admin only).
 pub const SYS_VMM_DEBUG_DUMP: usize = 579;
+
+/// Complete the last exit reported for a vCPU after the policy emulated it.
+///
+/// Arguments: VCPU capability handle, value, RIP advance in bytes (0 for exits
+/// that already advanced RIP, such as I/O instructions). The value is written
+/// to the guest's RAX (for `IN`/MMIO reads); the advance is added to the guest
+/// RIP (for exits whose instruction must be restarted after emulation, such as
+/// EPT violations). Returns 0.
+pub const SYS_VMM_EXIT_COMPLETE: usize = 580;
+
+/// Complete the last exit reported for a vCPU after the policy emulated it.
+///
+/// Arguments: VCPU capability handle, value, RIP advance in bytes (0 for exits
+/// that already advanced RIP, such as I/O instructions). The value is written
+/// to the guest's RAX (for `IN`/MMIO reads); the advance is added to the guest
+/// RIP (for exits whose instruction must be restarted after emulation, such as
+/// EPT violations). Returns 0.
+pub const SYS_VMM_EXIT_COMPLETE: usize = 580;

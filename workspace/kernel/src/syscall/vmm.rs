@@ -397,6 +397,28 @@ pub fn sys_vmm_debug_dump(_vmm_handle: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
+/// SYS_VMM_EXIT_COMPLETE (580): completes an exit emulated by the policy.
+///
+/// `value` is written to the guest `RAX` and `advance` bytes are added to the
+/// guest `RIP` (0 for I/O exits, instruction length for MMIO/EPT exits).
+pub fn sys_vmm_exit_complete(
+    vcpu_handle: u64,
+    value: u64,
+    advance: u64,
+) -> Result<u64, SyscallError> {
+    let required = CapPermissions {
+        write: true,
+        ..CapPermissions::none()
+    };
+    let vcpu = vcpu_target(vcpu_handle, required)?;
+    if advance > 15 {
+        // Longest x86 instruction is 15 bytes.
+        return Err(SyscallError::InvalidArgument);
+    }
+    vm::complete_exit(vcpu, value, advance).map_err(map_vcpu_error)?;
+    Ok(0)
+}
+
 /// SYS_VMM_INFO (569): snapshot of a world, or global summary if `vmm_id = 0`.
 pub fn sys_vmm_info(vmm_handle: u64, out_ptr: u64) -> Result<u64, SyscallError> {
     let mut info = VmmInfo {

@@ -1119,6 +1119,30 @@ pub fn wait_exit(vcpu_id: u64, timeout_ns: u64) -> Result<bool, VcpuRegistryErro
     }
 }
 
+/// Completes an exit that the policy emulated: writes the result value to
+/// the guest `RAX` and adds `advance` bytes to the guest `RIP`.
+///
+/// `advance` is 0 for exits that already advanced `RIP` (I/O instructions);
+/// it is the instruction length for exits that must be retried or skipped
+/// after emulation (EPT violations, MMIO). Only the software register block is
+/// updated: the next `RUN` rebuilds the guest state from it.
+pub fn complete_exit(
+    vcpu_id: u64,
+    value: u64,
+    advance: u64,
+) -> Result<(), VcpuRegistryError> {
+    let mut worlds = WORLDS.lock();
+    let world = vcpu_world_mut(&mut worlds, vcpu_id).ok_or(VcpuRegistryError::Unknown)?;
+    let slot = world
+        .vcpus
+        .iter_mut()
+        .find(|slot| slot.id == vcpu_id)
+        .ok_or(VcpuRegistryError::Unknown)?;
+    slot.regs.rax = value;
+    slot.regs.rip = slot.regs.rip.wrapping_add(advance);
+    Ok(())
+}
+
 /// Schedules the injection of an external interrupt into a vCPU.
 ///
 /// The injection is deferred: the vector is remembered and written into the
