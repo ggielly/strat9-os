@@ -755,6 +755,18 @@ impl Vcpu {
             self.control.write_natural(field::GUEST_RIP, guest.rip)?;
             self.control.write_natural(field::GUEST_RFLAGS, guest.rflags)?;
             self.control.write_natural(field::GUEST_DR7, guest.dr7)?;
+            // Auxiliary 64-bit guest fields that are loaded by VM entry on
+            // most processors (PAT is written above). The hypervisor this
+            // kernel may run under rebuilds the effective control block and
+            // expects these fields to hold the guest's values, not leftovers:
+            // an uninitialised PERF_GLOBAL_CTRL or PDPTE has already caused
+            // entry failures on nested setups.
+            self.control.write_u64(field::GUEST_DEBUGCTL, 0)?;
+            self.control.write_u64(field::GUEST_PERF_GLOBAL_CTRL, 0)?;
+            self.control.write_u64(field::GUEST_PDPTE0, 0)?;
+            self.control.write_u64(field::GUEST_PDPTE1, 0)?;
+            self.control.write_u64(field::GUEST_PDPTE2, 0)?;
+            self.control.write_u64(field::GUEST_PDPTE3, 0)?;
             self.control.write_u64(
                 field::GUEST_PENDING_DEBUG_EXCEPTIONS,
                 guest.pending_debug_exceptions,
