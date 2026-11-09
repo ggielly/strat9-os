@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! Wi-Fi configuration (TOML) and validation.
 //!
 //! The on-disk format is intentionally small: one `[wifi]` table (and an
@@ -429,6 +451,22 @@ hidden = false
     fn rejects_short_passphrase() {
         let e = parse("[wifi]\nenabled=true\nssid=\"x\"\npassphrase=\"short\"\n").unwrap_err();
         assert_eq!(e.kind, ConfigErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn parse_string_handles_escapes() {
+        assert_eq!(parse_string(r#""a\nb""#).as_deref(), Some("a\nb"));
+        assert_eq!(parse_string(r#""a\tb""#).as_deref(), Some("a\tb"));
+        assert_eq!(parse_string(r#""a\rb""#).as_deref(), Some("a\rb"));
+        assert_eq!(parse_string(r#""a\"b""#).as_deref(), Some("a\"b"));
+        assert_eq!(parse_string(r#""a\\b""#).as_deref(), Some("a\\b"));
+        assert_eq!(parse_string(r#""a\qb""#), None);
+    }
+
+    #[test]
+    fn comment_after_escaped_quote_is_preserved() {
+        let line = r##"ssid = "a\"#b" # comment"##;
+        assert_eq!(strip_comment(line), r##"ssid = "a\"#b" "##);
     }
 
     #[test]
