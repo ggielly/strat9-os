@@ -158,13 +158,13 @@ fn rejects_bad_interruptibility_state() {
 
 #[test]
 fn segment_helpers_build_expected_access_rights() {
-    // Data: type 2, S=1, P=1, DPL=0.
-    assert_eq!(data_access_rights(0), 0x92);
-    // 64-bit code: type A, S=1, P=1, L=1.
+    // Data: type 3 (read/write, accessed), S=1, P=1, DPL=0.
+    assert_eq!(data_access_rights(0), 0x93);
+    // 64-bit code: type B (execute/read, accessed), S=1, P=1, L=1.
     // VMCS access-rights: L = bit 13 (not bit 9), D/B = bit 14.
     assert_eq!(AR_LONG_MODE, 1 << 13);
     assert_eq!(AR_DEFAULT_BIG, 1 << 14);
-    assert_eq!(long_code_access_rights(0), 0x209A);
+    assert_eq!(long_code_access_rights(0), 0x209B);
     assert!(long_code_access_rights(0) & AR_LONG_MODE != 0);
     // Unusable.
     assert!(unusable_access_rights() & AR_UNUSABLE != 0);
