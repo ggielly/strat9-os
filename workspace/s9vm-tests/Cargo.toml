@@ -20,5 +20,6 @@ publish = false
 # noyau.
 
 [dependencies]
+strat9-abi = { path = "../abi" }
 
 [workspace]

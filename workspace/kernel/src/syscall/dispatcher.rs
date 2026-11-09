@@ -17,7 +17,7 @@ use crate::ipc::{channel, port, semaphore, shared_ring, ChanId, PortId, RingId, 
 
 use super::{
     chan, debug, error::SyscallError, exec::sys_execve, fork::sys_fork, ipc_port, ipc_ring, iommu,
-    net, numbers::*, pci, process as proc_sys, semaphore as sem_handler, transport, volume,
+    net, numbers::*, pci, process as proc_sys, semaphore as sem_handler, transport, volume, vmm,
     SyscallFrame,
 };
 use crate::{
@@ -321,6 +321,18 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_IOMMU_RESERVED => iommu::sys_iommu_reserved(arg1, arg2),
         SYS_PCI_MSI_ALLOC => iommu::sys_pci_msi_alloc(arg1, arg2, arg3),
         SYS_PCI_MSI_FREE => iommu::sys_pci_msi_free(arg1),
+
+        // Virtualization s9vm (560-579) ====================================
+        SYS_VMM_CREATE => vmm::sys_vmm_create(arg1, arg2, arg3),
+        SYS_VMM_DESTROY => vmm::sys_vmm_destroy(arg1),
+        SYS_VMM_MAP_MEM => vmm::sys_vmm_map_mem(arg1, arg2, arg3, arg4, frame.r8),
+        SYS_VMM_SET_REGS => vmm::sys_vmm_set_regs(arg1, arg2),
+        SYS_VMM_GET_REGS => vmm::sys_vmm_get_regs(arg1, arg2),
+        SYS_VMM_RUN => vmm::sys_vmm_run(arg1),
+        SYS_VMM_INJECT_IRQ => vmm::sys_vmm_inject_irq(arg1, arg2),
+        SYS_VMM_EXIT_HANDLER => vmm::sys_vmm_exit_handler(arg1, arg2),
+        SYS_VMM_IRQ_WAIT => vmm::sys_vmm_irq_wait(arg1, arg2),
+        SYS_VMM_INFO => vmm::sys_vmm_info(arg1, arg2),
 
         // Storage syscalls (600-699) ========================================
         SYS_VOLUME_READ => volume::sys_volume_read(arg1, arg2, arg3, arg4),
@@ -700,6 +712,8 @@ fn resource_type_code(rt: ResourceType) -> u32 {
         ResourceType::IommuDomain => 20,
         ResourceType::DmaBuffer => 21,
         ResourceType::IrqCookie => 22,
+        ResourceType::Vmm => 23,
+        ResourceType::Vcpu => 24,
     }
 }
 

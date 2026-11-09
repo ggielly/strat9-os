@@ -34,6 +34,7 @@ pub mod launch;
 pub mod mmu;
 pub mod selftest;
 pub mod vcpu;
+pub mod vm;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 

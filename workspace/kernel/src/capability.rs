@@ -73,6 +73,10 @@ pub enum ResourceType {
     DmaBuffer,
     /// A remapped interrupt cookie (MSI / MSI-X with IR).
     IrqCookie,
+    /// A virtual world managed by s9vm (`SYS_VMM_*`).
+    Vmm,
+    /// A virtual CPU belonging to a virtual world.
+    Vcpu,
 }
 
 /// Permissions associated with a capability

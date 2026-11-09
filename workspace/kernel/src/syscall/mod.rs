@@ -37,6 +37,7 @@ pub mod signal;
 pub mod time;
 pub mod transport;
 pub mod volume;
+pub mod vmm;
 pub mod wait;
 
 pub use dispatcher::dispatch;

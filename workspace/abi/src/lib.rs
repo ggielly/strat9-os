@@ -17,3 +17,4 @@ pub mod ipc_payload;
 pub mod iommu;
 pub mod net;
 pub mod syscall;
+pub mod vmm;

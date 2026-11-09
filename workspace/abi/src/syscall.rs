@@ -1602,3 +1602,64 @@ pub const SYS_SILO_START_NAMED: usize = 813;
 /// `0x0001_0002`. Userspace can use this to check for ABI compatibility
 /// before making syscalls.
 pub const SYS_ABI_VERSION: usize = 900;
+
+// ── Block 560-569: s9vm virtualization (P0 surface) ────────────────────────
+//
+// The block 537-599 is free; 520-536 is used by the IOMMU. The P0 surface is
+// deliberately small: 10 calls, with 570-579 reserved for the next steps so
+// that no renumbering is needed.
+
+/// Create a virtual world. Arguments: name pointer, name length, silo id.
+/// Returns an opaque mm_id.
+pub const SYS_VMM_CREATE: usize = 560;
+
+/// Destroy a virtual world and all its vCPUs. Argument: mm_id.
+pub const SYS_VMM_DESTROY: usize = 561;
+
+/// Map memory into a world's second-level translation.
+/// Arguments: mm_id, guest physical address, length, permissions, memory type.
+pub const SYS_VMM_MAP_MEM: usize = 562;
+
+/// Write a vCPU register block. Arguments: cpu_id, pointer to VmmRegs.
+pub const SYS_VMM_SET_REGS: usize = 563;
+
+/// Read a vCPU register block. Arguments: cpu_id, pointer to VmmRegs.
+pub const SYS_VMM_GET_REGS: usize = 564;
+
+/// Submit a vCPU to the scheduler. Argument: cpu_id. Asynchronous.
+pub const SYS_VMM_RUN: usize = 565;
+
+/// Inject an interrupt into a vCPU. Arguments: cpu_id, vector.
+pub const SYS_VMM_INJECT_IRQ: usize = 566;
+
+/// Read the next exit event of a world. Arguments: mm_id, pointer to
+/// VmmExitEvent. Returns 0 when no event is pending.
+pub const SYS_VMM_EXIT_HANDLER: usize = 567;
+
+/// Wait for a vCPU wake-up (interrupt, exit, timer). Arguments: cpu_id,
+/// timeout in nanoseconds.
+pub const SYS_VMM_IRQ_WAIT: usize = 568;
+
+/// Query a world snapshot. Arguments: mm_id, pointer to VmmInfo.
+pub const SYS_VMM_INFO: usize = 569;
+
+/// Reserved: create a vCPU.
+pub const SYS_VMM_CREATE_VCPU: usize = 570;
+/// Reserved: destroy a vCPU.
+pub const SYS_VMM_DESTROY_VCPU: usize = 571;
+/// Reserved: map an IOMMU domain into a world.
+pub const SYS_VMM_MAP_IOMMU: usize = 572;
+/// Reserved: set the CPUID policy of a world.
+pub const SYS_VMM_SET_CPUID_POLICY: usize = 573;
+/// Reserved: read per-exit statistics.
+pub const SYS_VMM_GET_EXIT_STATS: usize = 574;
+/// Reserved: pause a vCPU.
+pub const SYS_VMM_PAUSE: usize = 575;
+/// Reserved: resume a vCPU.
+pub const SYS_VMM_RESUME: usize = 576;
+/// Reserved: set a vCPU affinity mask.
+pub const SYS_VMM_SET_AFFINITY: usize = 577;
+/// Reserved: inject a non-maskable interrupt.
+pub const SYS_VMM_INJECT_NMI: usize = 578;
+/// Reserved: dump a world's debug state.
+pub const SYS_VMM_DEBUG_DUMP: usize = 579;

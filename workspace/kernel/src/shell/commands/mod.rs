@@ -32,6 +32,7 @@ impl CommandRegistry {
         // General
         registry.register("help", help::cmd_help);
         registry.register("version", sys::cmd_version);
+        registry.register("s9vm", sys::cmd_s9vm);
         registry.register("clear", sys::cmd_clear);
         registry.register("reboot", sys::cmd_reboot);
         registry.register("shutdown", sys::cmd_shutdown);
