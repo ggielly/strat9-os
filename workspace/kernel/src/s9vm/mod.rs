@@ -51,6 +51,7 @@
 pub mod apic;
 pub mod caps;
 pub mod control;
+pub mod decode;
 pub mod exit;
 pub mod exitqueue;
 pub mod guest;
