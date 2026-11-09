@@ -108,6 +108,8 @@ pub mod field {
 
     // --- Champs de contrôle 32 bits ---
     pub const PIN_BASED_CONTROLS: u32 = 0x4000;
+    /// Valeur du timer de préemption VMX (32 bits).
+    pub const VMX_PREEMPTION_TIMER: u32 = 0x482E;
     pub const PRIMARY_PROC_BASED_CONTROLS: u32 = 0x4002;
     pub const EXCEPTION_BITMAP: u32 = 0x4004;
     pub const PAGE_FAULT_ERROR_CODE_MASK: u32 = 0x4006;

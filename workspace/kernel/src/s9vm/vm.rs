@@ -17,10 +17,12 @@
 //! la couche syscall (capabilities).
 
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame};
+use crate::process::{kthread, scheduler::ticks, sleep_current_task_ticks, TaskId};
 use crate::s9vm::caps::HwCaps;
 use crate::s9vm::exit::ExitClass;
 use crate::s9vm::exitqueue::ExitQueue;
@@ -29,7 +31,7 @@ use crate::s9vm::memmap::{perms_from_abi, GuestMap, MapError};
 use crate::s9vm::mmu::Perms as MmuPerms;
 use crate::s9vm::mmu::PAGE_SIZE;
 use crate::s9vm::vcpu::{ExitInfo, SecondLevelMemory, Vcpu, VcpuError};
-use crate::sync::SpinLock;
+use crate::sync::{SpinLock, WaitQueue};
 use strat9_abi::vmm::{exit_kind, VmmExitEvent, VmmRegs};
 
 /// Nombre maximal de mondes simultanés (borne de sécurité).
@@ -232,6 +234,9 @@ struct World {
     memory: Option<WorldMemory>,
     vcpus: Vec<VcpuSlot>,
     exits: ExitQueue,
+    /// Destruction en cours : toute nouvelle opération est refusée et les
+    /// tâches vCPU sont arrêtées avant de libérer la mémoire.
+    closing: bool,
 }
 
 /// vCPU logique : identifiant opaque, APIC id et bloc de registres ABI.
@@ -239,6 +244,12 @@ struct World {
 /// Le contexte matériel (bloc de contrôle, pile hôte, état invité) est créé au
 /// moment de l'exécution, pas à la création logique : un monde peut être
 /// configuré (mémoire, vCPU, registres) avant que le matériel ne soit activé.
+///
+/// Modèle ADR-4 : chaque vCPU est piloté par une **tâche noyau** dédiée
+/// ([`VcpuSlot::task`]). La tâche attend une demande de `RUN`, exécute
+/// l'invité jusqu'à la prochaine sortie de politique, empile l'événement puis
+/// se remet en attente. Le noyau garantit ainsi qu'un invité ne s'exécute
+/// jamais sur la pile de l'appelant syscall.
 pub struct VcpuSlot {
     /// Identifiant opaque du vCPU.
     pub id: u64,
@@ -250,6 +261,24 @@ pub struct VcpuSlot {
     hardware: Option<Vcpu>,
     /// Interruption externe en attente d'injection au prochain `RUN`.
     pending_irq: Option<u8>,
+    /// Tâche noyau qui pilote ce vCPU (créée avec le vCPU).
+    task: Option<TaskId>,
+    /// Un `RUN` a été demandé et n'a pas encore été pris en compte.
+    run_requested: bool,
+    /// Un `RUN` est en vol : un seul appelant à la fois.
+    run_in_flight: bool,
+    /// Le dernier `RUN` demandé est terminé.
+    run_done: bool,
+    /// Résultat du dernier `RUN` (valide quand `run_done`).
+    run_result: Option<Result<(), RunError>>,
+    /// Arrêt demandé (destruction du vCPU ou du monde).
+    shutdown: bool,
+    /// La tâche noyau a terminé et ses ressources matérielles sont déchargées.
+    exited: bool,
+    /// Réveil de la tâche vCPU sur demande de `RUN` (ou d'arrêt).
+    run_wait: Arc<WaitQueue>,
+    /// Réveil des appelants bloqués sur la fin d'un `RUN` ou sur un arrêt.
+    done_wait: Arc<WaitQueue>,
 }
 
 /// Registre global des mondes.
@@ -279,13 +308,46 @@ pub fn create(name: &[u8], silo_id: u32) -> Option<WorldRecord> {
             memory: None,
             vcpus: Vec::new(),
             exits: ExitQueue::default(),
+            closing: false,
         },
     );
     Some(record)
 }
 
 /// Détruit un monde et libère sa mémoire invitée.
+///
+/// Les tâches vCPU sont arrêtées et attendues **avant** de libérer la mémoire :
+/// une tâche encore en vol pourrait sinon déréférencer les tables de second
+/// niveau du monde. Un second appel concurrent pendant la fermeture retourne
+/// `None`.
 pub fn destroy(id: u64) -> Option<WorldRecord> {
+    // 1. Marque le monde fermé et réveille toutes les tâches vCPU.
+    let mut to_join: Vec<u64> = Vec::new();
+    let mut wakers: Vec<Arc<WaitQueue>> = Vec::new();
+    {
+        let mut worlds = WORLDS.lock();
+        let world = worlds.get_mut(&id)?;
+        if world.closing {
+            return None;
+        }
+        world.closing = true;
+        for slot in world.vcpus.iter_mut() {
+            slot.shutdown = true;
+            wakers.push(Arc::clone(&slot.run_wait));
+            wakers.push(Arc::clone(&slot.done_wait));
+            if slot.task.is_some() {
+                to_join.push(slot.id);
+            }
+        }
+    }
+    for waiter in wakers {
+        waiter.wake_all();
+    }
+    // 2. Attend la sortie des tâches vCPU, sans tenir le verrou.
+    for vcpu in to_join {
+        wait_vcpu_exited(vcpu);
+    }
+    // 3. Retire le monde et libère la mémoire invitée.
     let world = {
         let mut worlds = WORLDS.lock();
         worlds.remove(&id)?
@@ -294,6 +356,81 @@ pub fn destroy(id: u64) -> Option<WorldRecord> {
         memory.destroy();
     }
     Some(world.record)
+}
+
+/// Retrouve un monde et l'index d'un vCPU dans ce monde.
+fn locate_slot(
+    worlds: &mut BTreeMap<u64, World>,
+    vcpu_id: u64,
+) -> Option<(&mut World, usize)> {
+    for world in worlds.values_mut() {
+        if let Some(index) = world.vcpus.iter().position(|slot| slot.id == vcpu_id) {
+            return Some((world, index));
+        }
+    }
+    None
+}
+
+/// Attend que la tâche noyau d'un vCPU ait terminé (ou que le vCPU ait
+/// disparu du registre).
+fn wait_vcpu_exited(vcpu_id: u64) {
+    loop {
+        let waiters = {
+            let mut worlds = WORLDS.lock();
+            let Some((world, index)) = locate_slot(&mut worlds, vcpu_id) else {
+                return;
+            };
+            let slot = &world.vcpus[index];
+            if slot.exited || slot.task.is_none() {
+                return;
+            }
+            Arc::clone(&slot.done_wait)
+        };
+        waiters.wait_until(|| {
+            let mut worlds = WORLDS.lock();
+            match locate_slot(&mut worlds, vcpu_id) {
+                Some((world, index)) if !world.vcpus[index].exited => None,
+                _ => Some(()),
+            }
+        });
+    }
+}
+
+/// Retire un vCPU du registre sans attendre de tâche.
+fn remove_vcpu(vcpu_id: u64) -> bool {
+    let mut worlds = WORLDS.lock();
+    for world in worlds.values_mut() {
+        if let Some(index) = world.vcpus.iter().position(|slot| slot.id == vcpu_id) {
+            world.vcpus.remove(index);
+            world.record.vcpu_count = world.vcpus.len() as u32;
+            return true;
+        }
+    }
+    false
+}
+
+/// Crée l'entrée de registre d'un vCPU.
+fn new_vcpu_slot(id: u64, apic_id: u32) -> VcpuSlot {
+    let regs = strat9_abi::vmm::VmmRegs {
+        abi_version: strat9_abi::vmm::VMM_ABI_VERSION,
+        ..Default::default()
+    };
+    VcpuSlot {
+        id,
+        apic_id,
+        regs,
+        hardware: None,
+        pending_irq: None,
+        task: None,
+        run_requested: false,
+        run_in_flight: false,
+        run_done: false,
+        run_result: None,
+        shutdown: false,
+        exited: false,
+        run_wait: Arc::new(WaitQueue::new()),
+        done_wait: Arc::new(WaitQueue::new()),
+    }
 }
 
 /// Retourne un enregistrement.
@@ -400,6 +537,8 @@ pub enum VcpuRegistryError {
     Limit,
     /// Version d'ABI incompatible.
     BadAbiVersion,
+    /// La tâche noyau du vCPU n'a pas pu être créée.
+    Thread,
 }
 
 /// Erreurs d'exécution d'un vCPU.
@@ -417,6 +556,8 @@ pub enum RunError {
     Hardware(VcpuError),
     /// La limite d'exits consécutifs résumés est atteinte (boucle pathologique).
     ExitStorm,
+    /// Un `RUN` est déjà en vol pour ce vCPU.
+    Busy,
 }
 
 impl From<VcpuError> for RunError {
@@ -433,10 +574,7 @@ const MAX_RESUMED_EXITS: u32 = 64;
 const fn is_resumable(class: ExitClass) -> bool {
     matches!(
         class,
-        ExitClass::ExternalInterrupt
-            | ExitClass::InterruptWindow
-            | ExitClass::Apic
-            | ExitClass::PreemptionTimer
+        ExitClass::ExternalInterrupt | ExitClass::InterruptWindow | ExitClass::Apic
     )
 }
 
@@ -498,6 +636,9 @@ fn event_from_exit(exit: &ExitInfo, vcpu_id: u64) -> VmmExitEvent {
         ExitClass::ExceptionOrNmi => {
             event.kind = exit_kind::EXCEPTION;
             event.flags = exit.interrupt_info;
+        }
+        ExitClass::PreemptionTimer => {
+            event.kind = exit_kind::PREEMPTION_TIMER;
         }
         _ => {
             event.kind = exit_kind::OTHER;
@@ -632,40 +773,252 @@ pub fn exit_count(world_id: u64) -> Option<usize> {
 /// Prochain identifiant de vCPU (global, jamais 0).
 static NEXT_VCPU: AtomicU64 = AtomicU64::new(1);
 
-/// Crée un vCPU logique dans un monde.
+/// Crée un vCPU logique dans un monde et la tâche noyau qui le pilote.
 pub fn create_vcpu(world_id: u64, apic_id: u32) -> Result<u64, VcpuRegistryError> {
-    let mut worlds = WORLDS.lock();
-    let world = worlds.get_mut(&world_id).ok_or(VcpuRegistryError::WorldUnknown)?;
-    if world.vcpus.len() >= MAX_VCPUS_PER_WORLD {
-        return Err(VcpuRegistryError::Limit);
-    }
-    let id = NEXT_VCPU.fetch_add(1, Ordering::AcqRel);
-    let regs = strat9_abi::vmm::VmmRegs {
-        abi_version: strat9_abi::vmm::VMM_ABI_VERSION,
-        ..Default::default()
+    // 1. Enregistre le vCPU sans tenir le verrou pendant la création de tâche.
+    let id = {
+        let mut worlds = WORLDS.lock();
+        let world = worlds
+            .get_mut(&world_id)
+            .ok_or(VcpuRegistryError::WorldUnknown)?;
+        if world.closing {
+            return Err(VcpuRegistryError::WorldUnknown);
+        }
+        if world.vcpus.len() >= MAX_VCPUS_PER_WORLD {
+            return Err(VcpuRegistryError::Limit);
+        }
+        let id = NEXT_VCPU.fetch_add(1, Ordering::AcqRel);
+        world.vcpus.push(new_vcpu_slot(id, apic_id));
+        world.record.vcpu_count = world.vcpus.len() as u32;
+        id
     };
-    world.vcpus.push(VcpuSlot {
-        id,
-        apic_id,
-        regs,
-        hardware: None,
-        pending_irq: None,
-    });
-    world.record.vcpu_count = world.vcpus.len() as u32;
+    // 2. Crée la tâche noyau du vCPU (modèle ADR-4).
+    let task = match kthread::spawn("s9vm-vcpu", move || vcpu_task_main(world_id, id)) {
+        Ok(task) => task,
+        Err(_) => {
+            let _ = remove_vcpu(id);
+            return Err(VcpuRegistryError::Thread);
+        }
+    };
+    // 3. Publie l'identifiant de tâche si le vCPU existe encore.
+    {
+        let mut worlds = WORLDS.lock();
+        if let Some((world, index)) = locate_slot(&mut worlds, id) {
+            world.vcpus[index].task = Some(task);
+        }
+    }
     Ok(id)
 }
 
 /// Détruit un vCPU logique. Retourne `false` s'il est inconnu.
+///
+/// La tâche noyau est arrêtée et attendue avant que l'entrée ne soit retirée :
+/// le contexte matériel (bloc de contrôle, pile hôte, EPT) n'est jamais libéré
+/// pendant une entrée invitée.
 pub fn destroy_vcpu(vcpu_id: u64) -> bool {
-    let mut worlds = WORLDS.lock();
-    for world in worlds.values_mut() {
-        if let Some(index) = world.vcpus.iter().position(|slot| slot.id == vcpu_id) {
-            world.vcpus.remove(index);
-            world.record.vcpu_count = world.vcpus.len() as u32;
-            return true;
+    let (run_wait, done_wait, has_task) = {
+        let mut worlds = WORLDS.lock();
+        let Some((world, index)) = locate_slot(&mut worlds, vcpu_id) else {
+            return false;
+        };
+        let slot = &mut world.vcpus[index];
+        if slot.shutdown {
+            return false;
+        }
+        slot.shutdown = true;
+        (
+            Arc::clone(&slot.run_wait),
+            Arc::clone(&slot.done_wait),
+            slot.task.is_some(),
+        )
+    };
+    run_wait.wake_all();
+    done_wait.wake_all();
+    if has_task {
+        wait_vcpu_exited(vcpu_id);
+    }
+    remove_vcpu(vcpu_id)
+}
+
+/// Corps de la tâche noyau d'un vCPU : attend les demandes de `RUN`, exécute
+/// l'invité jusqu'à la prochaine sortie de politique, publie l'événement puis
+/// se remet en attente.
+fn vcpu_task_main(world_id: u64, vcpu_id: u64) {
+    let _ = world_id;
+    loop {
+        // Réveils : demande de RUN ou arrêt.
+        let run_wait = {
+            let mut worlds = WORLDS.lock();
+            let Some((world, index)) = locate_slot(&mut worlds, vcpu_id) else {
+                return;
+            };
+            let slot = &world.vcpus[index];
+            if slot.shutdown {
+                break;
+            }
+            Arc::clone(&slot.run_wait)
+        };
+        let run = run_wait.wait_until(|| {
+            let mut worlds = WORLDS.lock();
+            match locate_slot(&mut worlds, vcpu_id) {
+                Some((world, index)) => {
+                    let slot = &mut world.vcpus[index];
+                    if slot.shutdown {
+                        Some(false)
+                    } else if slot.run_requested {
+                        slot.run_requested = false;
+                        Some(true)
+                    } else {
+                        None
+                    }
+                }
+                None => Some(false),
+            }
+        });
+        if !run {
+            break;
+        }
+
+        let result = execute_one_run(vcpu_id);
+
+        let done_wait = {
+            let mut worlds = WORLDS.lock();
+            let Some((world, index)) = locate_slot(&mut worlds, vcpu_id) else {
+                return;
+            };
+            let slot = &mut world.vcpus[index];
+            slot.run_done = true;
+            slot.run_in_flight = false;
+            slot.run_result = Some(result);
+            Arc::clone(&slot.done_wait)
+        };
+        done_wait.wake_all();
+    }
+    cleanup_vcpu(vcpu_id);
+}
+
+/// Exécute un `RUN` (une entrée invitée au maximum) dans la tâche vCPU.
+fn execute_one_run(vcpu_id: u64) -> Result<(), RunError> {
+    if crate::s9vm::active_cpu_count() == 0 {
+        return Err(RunError::HardwareNotReady);
+    }
+    let caps = crate::s9vm::detect().ok_or(RunError::HardwareNotReady)?;
+    // Les interruptions hôte restent coupées pendant l'entrée invitée : le
+    // temps invité est borné par la sortie suivante (P0). La préemption VMX
+    // (timer) viendra avec le modèle de préemption complet.
+    crate::sync::with_irqs_disabled(|_| run_vcpu(vcpu_id, &caps))
+}
+
+/// Décharge le contexte matériel et signale la sortie de la tâche vCPU.
+fn cleanup_vcpu(vcpu_id: u64) {
+    let hardware = {
+        let mut worlds = WORLDS.lock();
+        match locate_slot(&mut worlds, vcpu_id) {
+            Some((world, index)) => world.vcpus[index].hardware.take(),
+            None => None,
+        }
+    };
+    if let Some(mut hardware) = hardware {
+        if crate::s9vm::active_cpu_count() > 0 {
+            // SAFETY: plus aucun invité ne s'exécute sur ce vCPU.
+            unsafe {
+                let _ = hardware.clear();
+            }
         }
     }
-    false
+    let done_wait = {
+        let mut worlds = WORLDS.lock();
+        match locate_slot(&mut worlds, vcpu_id) {
+            Some((world, index)) => {
+                let slot = &mut world.vcpus[index];
+                slot.exited = true;
+                Arc::clone(&slot.done_wait)
+            }
+            None => return,
+        }
+    };
+    done_wait.wake_all();
+}
+
+/// Demande l'exécution d'un vCPU et **bloque** l'appelant jusqu'à la fin de ce
+/// `RUN` (une sortie de politique au maximum).
+///
+/// Un seul `RUN` peut être en vol par vCPU ; un second appel concurrent reçoit
+/// [`RunError::Busy`].
+pub fn request_run(vcpu_id: u64) -> Result<(), RunError> {
+    let (run_wait, done_wait) = {
+        let mut worlds = WORLDS.lock();
+        let Some((world, index)) = locate_slot(&mut worlds, vcpu_id) else {
+            return Err(RunError::UnknownVcpu);
+        };
+        if world.closing {
+            return Err(RunError::UnknownVcpu);
+        }
+        let slot = &mut world.vcpus[index];
+        if slot.shutdown || slot.task.is_none() {
+            return Err(RunError::UnknownVcpu);
+        }
+        if slot.run_in_flight || slot.run_requested {
+            return Err(RunError::Busy);
+        }
+        slot.run_in_flight = true;
+        slot.run_requested = true;
+        slot.run_done = false;
+        slot.run_result = None;
+        (Arc::clone(&slot.run_wait), Arc::clone(&slot.done_wait))
+    };
+    run_wait.wake_one();
+    done_wait
+        .wait_until(|| {
+            let mut worlds = WORLDS.lock();
+            match locate_slot(&mut worlds, vcpu_id) {
+                Some((world, index)) => {
+                    let slot = &mut world.vcpus[index];
+                    if slot.run_done {
+                        Some(slot.run_result.take())
+                    } else {
+                        None
+                    }
+                }
+                None => Some(Some(Err(RunError::UnknownVcpu))),
+            }
+        })
+        .unwrap_or(Err(RunError::UnknownVcpu))
+}
+
+/// Attend qu'au moins un événement de sortie soit disponible dans le monde du
+/// vCPU, ou que le délai expire.
+///
+/// `timeout_ns = 0` teste immédiatement (pas d'attente). Retourne `true` si un
+/// événement est en attente, `false` en cas d'expiration.
+pub fn wait_exit(vcpu_id: u64, timeout_ns: u64) -> Result<bool, VcpuRegistryError> {
+    let world_id = {
+        let mut worlds = WORLDS.lock();
+        let Some((world, index)) = locate_slot(&mut worlds, vcpu_id) else {
+            return Err(VcpuRegistryError::Unknown);
+        };
+        if world.closing || world.vcpus[index].shutdown {
+            return Err(VcpuRegistryError::Unknown);
+        }
+        world.record.id
+    };
+    if exit_count(world_id).unwrap_or(0) > 0 {
+        return Ok(true);
+    }
+    if timeout_ns == 0 {
+        return Ok(false);
+    }
+    let budget_ticks = (timeout_ns / crate::arch::timer::NS_PER_TICK).max(1);
+    let deadline = ticks().saturating_add(budget_ticks);
+    loop {
+        if exit_count(world_id).unwrap_or(0) > 0 {
+            return Ok(true);
+        }
+        if ticks() >= deadline {
+            return Ok(false);
+        }
+        sleep_current_task_ticks(1);
+    }
 }
 
 /// Programme l'injection d'une interruption externe dans un vCPU.
@@ -696,11 +1049,11 @@ pub fn pending_irq(vcpu_id: u64) -> Option<u8> {
         .and_then(|slot| slot.pending_irq)
 }
 
-/// Retrouve le monde propriétaire d'un vCPU.
+/// Retrouve le monde propriétaire d'un vCPU (hors fermeture).
 fn vcpu_world_mut(worlds: &mut BTreeMap<u64, World>, vcpu_id: u64) -> Option<&mut World> {
     worlds
         .values_mut()
-        .find(|world| world.vcpus.iter().any(|slot| slot.id == vcpu_id))
+        .find(|world| !world.closing && world.vcpus.iter().any(|slot| slot.id == vcpu_id))
 }
 
 /// Écrit le bloc de registres d'un vCPU.

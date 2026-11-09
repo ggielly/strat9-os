@@ -1610,44 +1610,54 @@ pub const SYS_ABI_VERSION: usize = 900;
 // that no renumbering is needed.
 
 /// Create a virtual world. Arguments: name pointer, name length, silo id.
-/// Returns an opaque vmm_id.
+/// Returns an opaque VMM capability handle; the raw world id never leaves the
+/// kernel.
 pub const SYS_VMM_CREATE: usize = 560;
 
-/// Destroy a virtual world and all its vCPUs. Argument: vmm_id.
+/// Destroy a virtual world and all its vCPUs. Argument: VMM capability handle
+/// (revoke permission required).
 pub const SYS_VMM_DESTROY: usize = 561;
 
 /// Map memory into a world's second-level translation.
-/// Arguments: vmm_id, guest physical address, length, permissions, memory type.
+/// Arguments: VMM capability handle, guest physical address, length,
+/// permissions, memory type.
 pub const SYS_VMM_MAP_MEM: usize = 562;
 
-/// Write a vCPU register block. Arguments: vcpu_id, pointer to VmmRegs.
+/// Write a vCPU register block. Arguments: VCPU capability handle, pointer to
+/// VmmRegs.
 pub const SYS_VMM_SET_REGS: usize = 563;
 
-/// Read a vCPU register block. Arguments: vcpu_id, pointer to VmmRegs.
+/// Read a vCPU register block. Arguments: VCPU capability handle, pointer to
+/// VmmRegs.
 pub const SYS_VMM_GET_REGS: usize = 564;
 
-/// Submit a vCPU to the scheduler. Argument: vcpu_id. Asynchronous.
+/// Run a vCPU until its next policy exit. Argument: VCPU capability handle.
+/// Blocking: returns once the event has been queued.
 pub const SYS_VMM_RUN: usize = 565;
 
-/// Inject an interrupt into a vCPU. Arguments: vcpu_id, vector.
+/// Inject an interrupt into a vCPU. Arguments: VCPU capability handle, vector.
 pub const SYS_VMM_INJECT_IRQ: usize = 566;
 
-/// Read the next exit event of a world. Arguments: vmm_id, pointer to
+/// Read the next exit event of a world. Arguments: VMM capability handle, pointer to
 /// VmmExitEvent. Returns 1 when an event was written, 0 when the queue is
 /// empty.
 pub const SYS_VMM_EXIT_HANDLER: usize = 567;
 
-/// Wait for a vCPU wake-up (interrupt, exit, timer). Arguments: vcpu_id,
-/// timeout in nanoseconds.
+/// Wait for a vCPU wake-up (interrupt, exit, timer). Arguments: VCPU
+/// capability handle, timeout in nanoseconds. Returns 1 if an exit event is
+/// pending, 0 on timeout.
 pub const SYS_VMM_IRQ_WAIT: usize = 568;
 
-/// Query a world snapshot. Arguments: vmm_id, pointer to VmmInfo.
+/// Query a world snapshot. Arguments: VMM capability handle (0 = global
+/// summary, silo admin only), pointer to VmmInfo.
 pub const SYS_VMM_INFO: usize = 569;
 
-/// Create a vCPU in a world. Arguments: vmm_id, APIC id.
+/// Create a vCPU in a world. Arguments: VMM capability handle, APIC id.
+/// Returns an opaque VCPU capability handle.
 pub const SYS_VMM_CREATE_VCPU: usize = 570;
 
-/// Destroy a vCPU. Argument: vcpu_id.
+/// Destroy a vCPU. Argument: VCPU capability handle (revoke permission
+/// required).
 pub const SYS_VMM_DESTROY_VCPU: usize = 571;
 
 /// Reserved: map an IOMMU domain into a world.

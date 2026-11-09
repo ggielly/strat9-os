@@ -102,6 +102,8 @@ pub mod exit_kind {
     pub const EXCEPTION: u32 = 6;
     /// Autre sortie à traiter par la politique.
     pub const OTHER: u32 = 7;
+    /// Tranche de temps invitée expirée (timer de préemption VMX).
+    pub const PREEMPTION_TIMER: u32 = 8;
 }
 
 /// Événement de sortie remonté au monde de politique.

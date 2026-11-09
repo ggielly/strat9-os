@@ -42,6 +42,7 @@ pub mod ramfs_scheme;
 pub mod scheme;
 pub mod scheme_router;
 pub mod threads_scheme;
+pub mod vmm_scheme;
 
 use crate::{process::current_task_clone, sync::SpinLock, syscall::error::SyscallError};
 use alloc::{boxed::Box, string::String, sync::Arc};
@@ -1496,6 +1497,12 @@ pub fn init() {
     // the first formatted log record, so a late daemon can replay boot output.
     if let Err(e) = log_scheme::init_log_scheme() {
         log::warn!("[VFS] /dev/log not mounted: {:?}", e);
+    }
+
+    // s9vm diagnostic view (`/dev/vmm`), read-only: mirrors the engine state
+    // for userland tools without exposing any control operation.
+    if let Err(e) = vmm_scheme::init_vmm_scheme() {
+        log::warn!("[VFS] /dev/vmm not mounted: {:?}", e);
     }
 
     log::info!("[VFS] VFS ready");

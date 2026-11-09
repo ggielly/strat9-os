@@ -41,6 +41,8 @@ pub mod bits {
     pub const SECONDARY_ENABLE_EPT: u32 = 1 << 1;
     /// Contrôle secondaire : invité non restreint.
     pub const SECONDARY_UNRESTRICTED_GUEST: u32 = 1 << 7;
+    /// Contrôle « pin » : timer de préemption (borne le temps invité).
+    pub const PIN_PREEMPTION_TIMER: u32 = 1 << 6;
     /// Contrôle « pin » : sortie sur interruption externe.
     pub const PIN_EXTERNAL_INTERRUPT_EXITING: u32 = 1 << 0;
 }
@@ -287,6 +289,8 @@ pub struct Vcpu {
     launched: bool,
     second_level_pointer: u64,
     exit: Option<ExitInfo>,
+    /// Rechargement du timer de préemption (comptes) si le CPU le supporte.
+    preemption_timer: Option<u32>,
 }
 
 impl Vcpu {
@@ -316,6 +320,7 @@ impl Vcpu {
             launched: false,
             second_level_pointer,
             exit: None,
+            preemption_timer: None,
         })
     }
 
@@ -616,6 +621,13 @@ impl Vcpu {
         guest: &GuestState,
     ) -> Result<(), VcpuError> {
         self.guest = *guest;
+        self.preemption_timer = if caps.preemption_timer {
+            // ~1 M de « ticks » du timer : borne le temps invité sans créer
+            // une tempête de sorties.
+            Some(1_000_000)
+        } else {
+            None
+        };
         // SAFETY: bloc chargé ; les largeurs correspondent aux champs.
         unsafe {
             self.write_guest_state(guest)?;
@@ -787,9 +799,11 @@ impl Vcpu {
     }
 
     unsafe fn write_controls(&self, caps: &HwCaps) -> Result<(), VcpuError> {
-        let pin = caps
-            .pin_allowed
-            .apply(bits::PIN_EXTERNAL_INTERRUPT_EXITING);
+        let mut pin_requested = bits::PIN_EXTERNAL_INTERRUPT_EXITING;
+        if caps.preemption_timer {
+            pin_requested |= bits::PIN_PREEMPTION_TIMER;
+        }
+        let pin = caps.pin_allowed.apply(pin_requested);
         let primary = caps.primary_proc_allowed.apply(
             crate::s9vm::caps::control_bits::PROC_ACTIVATE_SECONDARY
                 | bits::PRIMARY_HLT_EXITING,
@@ -824,6 +838,15 @@ impl Vcpu {
     /// - `configure_host` et `configure` doivent avoir été appelés.
     pub unsafe fn run(&mut self) -> Result<ExitInfo, VcpuError> {
         self.frame.launched = u64::from(self.launched);
+        if let Some(ticks) = self.preemption_timer {
+            // Réarmé à chaque entrée : chaque tranche de temps invitée est
+            // bornée, y compris après une reprise interne.
+            unsafe {
+                let _ = self
+                    .control
+                    .write_u32(field::VMX_PREEMPTION_TIMER, ticks);
+            }
+        }
         // SAFETY: contrat de l'appelant ; le trampoline restaure l'état hôte.
         let failed = unsafe {
             s9vm_enter_guest(
