@@ -31,6 +31,7 @@ pub mod control;
 pub mod exit;
 pub mod guest;
 pub mod launch;
+pub mod memmap;
 pub mod mmu;
 pub mod selftest;
 pub mod vcpu;
@@ -298,3 +299,8 @@ pub fn activation_region(cpu: usize) -> Option<u64> {
     }
     Some(REGIONS[cpu].load(Ordering::Acquire))
 }
+
+/// Les constantes de pagination de memmap doivent rester alignées sur celles
+/// du module de traduction.
+const _: () = assert!(crate::s9vm::memmap::PAGE_SIZE == crate::s9vm::mmu::PAGE_SIZE);
+const _: () = assert!(crate::s9vm::memmap::MAX_GPA == crate::s9vm::mmu::MAX_GPA);

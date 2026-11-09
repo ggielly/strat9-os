@@ -13,10 +13,12 @@
 
 use super::error::SyscallError;
 use crate::memory::{UserSliceRead, UserSliceWrite};
-use crate::s9vm::{self, vm};
+use crate::s9vm::memmap::MapError;
+use crate::s9vm::vm::{self, VmError};
+use crate::s9vm;
 use crate::silo;
 use alloc::vec;
-use strat9_abi::vmm::{state, VmmInfo};
+use strat9_abi::vmm::{state, VmmInfo, VmmRegs};
 
 /// Taille maximale d'une structure lue depuis l'espace utilisateur.
 const MAX_STRUCT: usize = 192;
@@ -86,28 +88,65 @@ pub fn sys_vmm_destroy(vmm_id: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
-/// SYS_VMM_MAP_MEM (562) : à implémenter avec la mémoire invitée.
+/// SYS_VMM_MAP_MEM (562) : mappe de la RAM invitée dans un monde.
+///
+/// `perms` : bits 1 = lecture, 2 = écriture, 4 = exécution (0 = lecture).
+/// `memtype` : 0 = write-back (seul type supporté pour l'instant).
 pub fn sys_vmm_map_mem(
-    _vmm_id: u64,
-    _gpa: u64,
-    _len: u64,
-    _perms: u64,
-    _memtype: u64,
+    vmm_id: u64,
+    gpa: u64,
+    len: u64,
+    perms: u64,
+    memtype: u64,
 ) -> Result<u64, SyscallError> {
     require_control()?;
-    Err(SyscallError::NotImplemented)
+    let caps = s9vm::detect().ok_or(SyscallError::NotSupported)?;
+    if vmm_id == 0 || perms > 0b111 || memtype > 6 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if memtype != 0 && memtype != 6 {
+        return Err(SyscallError::NotSupported);
+    }
+    vm::map_memory(vmm_id, &caps, gpa, len, perms as u32, memtype as u8)
+        .map_err(map_vm_error)
 }
 
-/// SYS_VMM_SET_REGS (563) : à implémenter avec l'API vCPU.
-pub fn sys_vmm_set_regs(_vcpu_id: u64, _regs_ptr: u64) -> Result<u64, SyscallError> {
+/// SYS_VMM_SET_REGS (563) : écrit le bloc de registres d'un vCPU.
+pub fn sys_vmm_set_regs(vcpu_id: u64, regs_ptr: u64) -> Result<u64, SyscallError> {
     require_control()?;
-    Err(SyscallError::NotImplemented)
+    let regs: VmmRegs = read_struct(regs_ptr)?;
+    vm::set_vcpu_regs(vcpu_id, &regs).map_err(map_vcpu_error)?;
+    Ok(0)
 }
 
-/// SYS_VMM_GET_REGS (564) : à implémenter avec l'API vCPU.
-pub fn sys_vmm_get_regs(_vcpu_id: u64, _regs_ptr: u64) -> Result<u64, SyscallError> {
+/// SYS_VMM_GET_REGS (564) : lit le bloc de registres d'un vCPU.
+pub fn sys_vmm_get_regs(vcpu_id: u64, regs_ptr: u64) -> Result<u64, SyscallError> {
     require_control()?;
-    Err(SyscallError::NotImplemented)
+    let regs = vm::get_vcpu_regs(vcpu_id).ok_or(SyscallError::NotFound)?;
+    write_struct(regs_ptr, &regs)?;
+    Ok(0)
+}
+
+/// SYS_VMM_CREATE_VCPU (570) : crée un vCPU logique dans un monde.
+pub fn sys_vmm_create_vcpu(vmm_id: u64, apic_id: u64) -> Result<u64, SyscallError> {
+    require_control()?;
+    if vmm_id == 0 || apic_id > u32::MAX as u64 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    vm::create_vcpu(vmm_id, apic_id as u32).map_err(map_vcpu_error)
+}
+
+/// SYS_VMM_DESTROY_VCPU (571) : détruit un vCPU logique.
+pub fn sys_vmm_destroy_vcpu(vcpu_id: u64) -> Result<u64, SyscallError> {
+    require_control()?;
+    if vcpu_id == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if vm::destroy_vcpu(vcpu_id) {
+        Ok(0)
+    } else {
+        Err(SyscallError::NotFound)
+    }
 }
 
 /// SYS_VMM_RUN (565) : à implémenter avec l'ordonnancement des vCPU.
@@ -198,10 +237,23 @@ pub fn mark_running(vmm_id: u64) -> bool {
 pub fn mark_stopped(vmm_id: u64) -> bool {
     vm::set_state(vmm_id, state::STOPPED)
 }
-
-/// Alloue un tampon utilitaire (évite un import inutilisé dans certains
-/// profils de compilation).
-#[allow(dead_code)]
-fn _scratch() -> alloc::vec::Vec<u8> {
-    vec![0u8; 0]
+fn map_vm_error(error: VmError) -> SyscallError {
+    match error {
+        VmError::Unknown => SyscallError::NotFound,
+        VmError::Map(MapError::InvalidRange) => SyscallError::InvalidArgument,
+        VmError::Map(MapError::Overlap) => SyscallError::InvalidArgument,
+        VmError::Map(MapError::QuotaExceeded) => SyscallError::OutOfMemory,
+        VmError::Map(MapError::TooManyRegions) => SyscallError::OutOfMemory,
+        VmError::Map(MapError::NotMapped) => SyscallError::NotFound,
+        VmError::OutOfMemory => SyscallError::OutOfMemory,
+        VmError::Translation(_) => SyscallError::NotSupported,
+    }
+}
+fn map_vcpu_error(error: vm::VcpuRegistryError) -> SyscallError {
+    match error {
+        vm::VcpuRegistryError::WorldUnknown => SyscallError::NotFound,
+        vm::VcpuRegistryError::Unknown => SyscallError::NotFound,
+        vm::VcpuRegistryError::Limit => SyscallError::OutOfMemory,
+        vm::VcpuRegistryError::BadAbiVersion => SyscallError::InvalidArgument,
+    }
 }

@@ -134,24 +134,66 @@ impl HostStack {
     }
 }
 
-/// Fournisseur de tables qui accède à la mémoire physique via le HHDM.
-pub struct HhdmTables;
+/// Fournisseur de tables qui accède à la mémoire physique via le HHDM et
+/// garde la trace des tables allouées pour pouvoir les libérer.
+pub struct HhdmTables {
+    allocated: alloc::vec::Vec<u64>,
+}
+
+impl HhdmTables {
+    /// Crée un fournisseur vide.
+    pub fn new() -> Self {
+        Self {
+            allocated: alloc::vec::Vec::new(),
+        }
+    }
+
+    /// Libère toutes les tables allouées (les entrées ne sont plus lues après
+    /// cet appel).
+    pub fn free_all(&mut self) {
+        if self.allocated.is_empty() {
+            return;
+        }
+        crate::sync::with_irqs_disabled(|token| {
+            for table in self.allocated.drain(..) {
+                let frame = crate::memory::frame::PhysFrame::containing_address(
+                    crate::arch::xshim::PhysAddr::new(table),
+                );
+                crate::memory::free_frame(token, frame);
+            }
+        });
+    }
+}
+
+impl Default for HhdmTables {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl TableMemory for HhdmTables {
     fn alloc_table(&mut self) -> Option<u64> {
-        crate::sync::with_irqs_disabled(|token| {
+        let result = crate::sync::with_irqs_disabled(|token| {
             FrameAllocOptions::new()
                 .purpose(FramePurpose::PageTable)
                 .allocate(token)
                 .ok()
                 .map(|frame| frame.start_address.as_u64())
-        })
+        });
+        if let Some(table) = result {
+            self.allocated.push(table);
+        }
+        result
     }
 
     fn free_table(&mut self, table: u64) {
-        // Les tables ne sont pas libérées tant que le vCPU vit : la
-        // libération est prise en charge par le propriétaire de la VM.
-        let _ = table;
+        // La libération est centralisée dans `free_all` : l'ordre de
+        // libération des tables n'a pas d'importance pour l'allocateur, mais
+        // éviter les doubles libérations est plus simple ainsi. On retire
+        // l'entrée de la liste pour ne pas la libérer deux fois.
+        if let Some(index) = self.allocated.iter().position(|entry| *entry == table) {
+            self.allocated.swap_remove(index);
+        }
     }
 
     fn read_entry(&self, table: u64, index: usize) -> u64 {
@@ -177,9 +219,24 @@ pub struct SecondLevelMemory {
 impl SecondLevelMemory {
     /// Crée une traduction vide.
     pub fn new() -> Result<Self, VcpuError> {
-        let mut tables = HhdmTables;
+        let mut tables = HhdmTables::new();
         let root = SecondLevel::new(&mut tables)?;
         Ok(Self { tables, root })
+    }
+
+    /// Libère toutes les tables de traduction.
+    pub fn destroy(mut self) {
+        self.tables.free_all();
+    }
+
+    /// Traduit une adresse physique invitée, si elle est mappée.
+    pub fn translate(&self, gpa: u64) -> Option<u64> {
+        self.root.translate(&self.tables, gpa)
+    }
+
+    /// Retire un mapping de 4 Kio.
+    pub fn unmap_4k(&mut self, gpa: u64) -> bool {
+        self.root.unmap_4k(&mut self.tables, gpa)
     }
 
     /// Mappe une page de 4 Kio.
