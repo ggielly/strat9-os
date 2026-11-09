@@ -390,7 +390,7 @@ impl Vcpu {
                  ar(cs={:#x} ss={:#x} ds={:#x} es={:#x} fs={:#x} gs={:#x} ldtr={:#x} tr={:#x}) \
                  lim(cs={:#x} ss={:#x} ds={:#x} es={:#x} fs={:#x} gs={:#x} ldtr={:#x} tr={:#x}) \
                  gdtr={:#x}/{:#x} idtr={:#x}/{:#x} link={:#x} dbgctl={:#x} \
-                 exit(reason={:#x} qual={:#x} instrerr={:#x} len={:#x} info={:#x}) \
+                 exit(reason={:#x} qual={:#x} gpa={:#x} instrerr={:#x} len={:#x} info={:#x}) \
                  sysenter(cs={:#x} esp={:#x} eip={:#x}) \
                  ctl(pin={:#x} primary={:#x} secondary={:#x} exit={:#x} entry={:#x})",
                 natural(field::GUEST_CR0),
@@ -436,6 +436,7 @@ impl Vcpu {
                 natural(field::GUEST_DEBUGCTL),
                 u32_field(field::EXIT_REASON),
                 natural(field::EXIT_QUALIFICATION),
+                natural(field::GUEST_PHYSICAL_ADDRESS),
                 u32_field(field::INSTRUCTION_ERROR),
                 u32_field(field::EXIT_INSTRUCTION_LENGTH),
                 u32_field(field::EXIT_INSTRUCTION_INFO),

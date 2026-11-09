@@ -66,6 +66,13 @@ pub mod entry {
     pub const LARGE_1GB: u64 = 1024 * 1024 * 1024;
 }
 
+/// Permissions for intermediate (non-leaf) EPT entries. EPT permissions are
+/// AND-ed across all levels, so an intermediate entry must grant read, write
+/// and execute; the effective access is then constrained by the leaf. Omitting
+/// execute here would make every guest instruction fetch fault with an EPT
+/// violation regardless of the leaf permission.
+const INTERMEDIATE_PERMS: u64 = entry::READ | entry::WRITE | entry::EXECUTE;
+
 /// Permissions requested for a mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Perms {
@@ -350,7 +357,7 @@ impl SecondLevel {
             pml4 & entry::ADDR_MASK
         } else {
             let table = memory.alloc_table().ok_or(MmuError::OutOfMemory)?;
-            memory.write_entry(self.root, pml4_slot, table | entry::READ | entry::WRITE);
+            memory.write_entry(self.root, pml4_slot, table | INTERMEDIATE_PERMS);
             table
         };
         if shift == SHIFT_PDPT {
@@ -362,7 +369,7 @@ impl SecondLevel {
             pdpt & entry::ADDR_MASK
         } else {
             let table = memory.alloc_table().ok_or(MmuError::OutOfMemory)?;
-            memory.write_entry(pdpt_table, pdpt_slot, table | entry::READ | entry::WRITE);
+            memory.write_entry(pdpt_table, pdpt_slot, table | INTERMEDIATE_PERMS);
             table
         };
         if shift == SHIFT_PD {
@@ -374,7 +381,7 @@ impl SecondLevel {
             pd & entry::ADDR_MASK
         } else {
             let table = memory.alloc_table().ok_or(MmuError::OutOfMemory)?;
-            memory.write_entry(pd_table, pd_slot, table | entry::READ | entry::WRITE);
+            memory.write_entry(pd_table, pd_slot, table | INTERMEDIATE_PERMS);
             table
         };
         Ok(pt_table)

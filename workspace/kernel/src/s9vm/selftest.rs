@@ -282,9 +282,14 @@ pub fn run(caps: &HwCaps) -> Result<SelftestReport, SelftestError> {
     let pt = alloc_frame()?;
 
     // Guest paging tables: GVA = GPA identity over 6 pages.
-    write_u64(&pml4, 0, pdpt.start_address.as_u64() | 0x3);
-    write_u64(&pdpt, 0, pd.start_address.as_u64() | 0x3);
-    write_u64(&pd, 0, pt.start_address.as_u64() | 0x3);
+    //
+    // The entries must hold *guest-physical* addresses (the GPA_* constants),
+    // not the host-physical frame addresses: the guest MMU walk yields GPAs,
+    // which the EPT then translates to HPAs. Writing HPAs here sends the walk
+    // to an unmapped GPA (EPT violation on the second level).
+    write_u64(&pml4, 0, GPA_PDPT | 0x3);
+    write_u64(&pdpt, 0, GPA_PD | 0x3);
+    write_u64(&pd, 0, GPA_PT | 0x3);
     for page in 0..GUEST_PAGES {
         let gpa = page * crate::s9vm::mmu::PAGE_SIZE;
         write_u64(&pt, page as usize * 8, gpa | 0x3);
