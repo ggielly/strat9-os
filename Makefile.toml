@@ -671,7 +671,7 @@ bash tools/scripts/create-uefi-image.sh
 ''']
 
 [tasks.s9vm-iso]
-description = "Build the s9vm validation ISO (own loader, serial console, s9vm.selftest=1)"
+description = "Build the s9vm validation ISO (own loader, serial console, s9vm.selftest=2)"
 dependencies = ["s9vm-image"]
 env = { STRAT9_IMAGE_BASENAME = "s9vm-test" }
 script_runner = "@shell"
