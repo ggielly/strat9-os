@@ -415,6 +415,17 @@ fn boot_kernel() -> BootResult<()> {
         env_write(&mut env_buf, &mut env_len, w.as_str());
     }
 
+    // env_write clamps at buf.len() - 1 (reserving the final NUL slot); reaching
+    // that bound means at least one key=value pair was silently dropped.
+    if env_len >= env_buf.len() - 1 {
+        uefi::system::with_stdout(|stdout| {
+            let _ = writeln!(
+                stdout,
+                "[boot] environment truncated at {} bytes",
+                env_buf.len() - 1
+            );
+        });
+    }
     env_buf[env_len] = 0;
     let env_total_size = env_len + 1;
 
@@ -517,6 +528,7 @@ fn boot_kernel() -> BootResult<()> {
     // GOP may use stolen RAM: exclude its whole aperture from the allocator,
     // without making BootMemory responsible for freeing firmware-owned pages.
     let mut reservations = alloc::vec::Vec::new();
+    boot_memory.sort_reservations();
     reservations
         .try_reserve_exact(boot_memory.reservations().len() + 1)
         .map_err(|_| BootError::out_of_resources("handoff reservations"))?;
@@ -569,7 +581,7 @@ fn boot_kernel() -> BootResult<()> {
         let base: u16 = 0x3F8;
         core::arch::asm!("out dx, al", in("al") 0x00u8, in("dx") base + 1, options(nomem, nostack)); // Disable interrupts
         core::arch::asm!("out dx, al", in("al") 0x80u8, in("dx") base + 3, options(nomem, nostack)); // Enable DLAB
-        core::arch::asm!("out dx, al", in("al") 0x03u8, in("dx") base + 0, options(nomem, nostack)); // Set divisor lo (38400 baud)
+        core::arch::asm!("out dx, al", in("al") 0x01u8, in("dx") base + 0, options(nomem, nostack)); // Set divisor lo (115200 baud, matches console.baud)
         core::arch::asm!("out dx, al", in("al") 0x00u8, in("dx") base + 1, options(nomem, nostack)); // Set divisor hi
         core::arch::asm!("out dx, al", in("al") 0x03u8, in("dx") base + 3, options(nomem, nostack)); // 8 bits, no parity, one stop
         core::arch::asm!("out dx, al", in("al") 0xC7u8, in("dx") base + 2, options(nomem, nostack)); // Enable FIFO

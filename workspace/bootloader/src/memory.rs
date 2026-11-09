@@ -143,8 +143,13 @@ impl BootMemory {
         Ok(range)
     }
 
-    pub fn reservations(&mut self) -> &[PhysicalRange] {
+    /// Order the recorded allocations by base address. Call once before reading
+    /// them back; the result is stable as long as no further allocation runs.
+    pub fn sort_reservations(&mut self) {
         self.ranges[..self.count].sort_unstable_by_key(|range| range.base);
+    }
+
+    pub fn reservations(&self) -> &[PhysicalRange] {
         &self.ranges[..self.count]
     }
 
