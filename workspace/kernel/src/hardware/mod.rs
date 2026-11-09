@@ -26,12 +26,26 @@ pub fn init() {
     crate::arch::speaker::beep_phase(8); // Thermal
     nic::init();
     crate::arch::speaker::beep_phase(9); // NIC
-    storage::init();
-    crate::arch::speaker::beep_phase(10); // Storage
     timer::init();
     crate::arch::speaker::beep_phase(11); // Timer
+
+    // USB/BT before the storage probe: the X13 storage driver resets the
+    // machine, so Bluetooth must attach and log first. The timer/APIC is
+    // already up so the xHCI MSI line is valid.
+    log::info!("****************************************");
+    log::info!("*** USB/BT EARLY (before storage) ***");
+    log::info!("****************************************");
     usb::init();
     crate::arch::speaker::beep_phase(12); // USB
+    log::info!("*** USB/BT EARLY INIT DONE ***");
+    log::info!("****************************************");
+
+    if crate::debug_cfg::STORAGE_ENABLED {
+        storage::init();
+    } else {
+        log::warn!("[storage] hardware storage probe disabled (STORAGE_ENABLED=false)");
+    }
+    crate::arch::speaker::beep_phase(10); // Storage
     virtio::gpu::init();
     crate::arch::speaker::beep_phase(13); // VirtIO GPU
     amdgpu::init();

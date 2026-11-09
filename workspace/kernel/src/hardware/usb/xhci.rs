@@ -345,6 +345,16 @@ impl XhciController {
             crate::e9_mark!(b'\n');
         }
         paging::ensure_identity_map_range(bar, XHCI_MMIO_SIZE as u64);
+        if !paging::is_hhdm_range_mapped_now(bar, XHCI_MMIO_SIZE as u64) {
+            // BAR above RAM / mapping failed: do not touch the MMIO window,
+            // otherwise a page fault takes the whole boot down before any
+            // diagnostic is visible.
+            log::error!(
+                "[xHCI] BAR0 {:#x} is not mapped in the HHDM; skipping controller",
+                bar
+            );
+            return Err("xHCI BAR0 not mapped");
+        }
 
         let mmio_base = phys_to_virt(bar) as usize;
         let cap_regs = mmio_base as *const CapRegisters;
@@ -1389,6 +1399,11 @@ pub fn init() {
 
 pub fn get_controller(index: usize) -> Option<Arc<Mutex<XhciController>>> {
     XHCI_CONTROLLERS.lock().get(index).cloned()
+}
+
+/// Number of xHCI controllers discovered at boot.
+pub fn controller_count() -> usize {
+    XHCI_CONTROLLERS.lock().len()
 }
 
 pub fn is_available() -> bool {

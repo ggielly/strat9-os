@@ -703,6 +703,10 @@ pub const fn metadata_size_for(ram_size: u64) -> u64 {
 static METADATA_BASE_VIRT: AtomicU64 = AtomicU64::new(0);
 static METADATA_FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// Shared metadata slot for MMIO/framebuffer/PCI BAR frames, which are above
+/// RAM and have no real per-frame metadata.
+static DUMMY_META: MetaSlot = MetaSlot::new();
+
 /// Initialize the global metadata array for all physical frames.
 pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
     crate::e9_mark!(b'X');
@@ -733,6 +737,14 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
         None => {
             // Cannot back the metadata: keep it disabled (get_meta_slot will
             // panic with a clear message rather than corrupt memory).
+            crate::serial_force_println!("****************************************");
+            crate::serial_force_println!(
+                "*** BUDDY METADATA FAILED: total_ram=0x{:x} frames={} need={} bytes ***",
+                total_ram,
+                frame_count,
+                bytes
+            );
+            crate::serial_force_println!("****************************************");
             crate::serial_force_println!("[frame] metadata alloc failed: need {} bytes", bytes);
             METADATA_BASE_VIRT.store(0, Ordering::Release);
             METADATA_FRAME_COUNT.store(0, Ordering::Release);
@@ -790,6 +802,14 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
     }
     METADATA_BASE_VIRT.store(virt, Ordering::Release);
     METADATA_FRAME_COUNT.store(frame_count, Ordering::Release);
+    crate::serial_force_println!("****************************************");
+    crate::serial_force_println!(
+        "*** BUDDY METADATA OK: phys=0x{:x} frames={} bytes={} ***",
+        phys,
+        frame_count,
+        bytes
+    );
+    crate::serial_force_println!("****************************************");
     crate::serial_force_println!(
         "[frame] metadata array @ {:#x} ({} frames, {} bytes)",
         virt,
@@ -864,7 +884,12 @@ pub fn get_meta_slot(phys: PhysAddr) -> &'static MetaSlot {
     assert!(base != 0, "frame metadata array is not initialized");
 
     let pfn = phys.as_u64() / PAGE_SIZE;
-    assert!(pfn < frame_count, "frame metadata access out of bounds");
+    if pfn >= frame_count {
+        // MMIO / framebuffer / PCI BAR pages live above RAM and have no
+        // per-frame metadata. Return a shared dummy instead of panicking.
+        // (Real RAM pages must always be inside `frame_count`.)
+        return &DUMMY_META;
+    }
 
     let byte_offset = pfn as usize * FRAME_META_SIZE;
     // SAFETY: le tableau global couvre au moins `frame_count` entrées et reste

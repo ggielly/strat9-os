@@ -438,7 +438,11 @@ fn mtk_setup(hci: usize, ctl: usize) -> bool {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _start() -> ! {    log("[strate-bt] starting\n");
+pub extern "C" fn _start() -> ! {
+    log("****************************************\n");
+    log("*** STRATE-BT: EARLY START ***\n");
+    log("****************************************\n");
+    log("[strate-bt] starting\n");
 
     let hci = open_retry(HCI_PATH);
     let log_stream = open_retry(LOG_STREAM_PATH);
@@ -462,9 +466,16 @@ pub extern "C" fn _start() -> ! {    log("[strate-bt] starting\n");
     } else {
         log("[strate-bt] no firmware loaded (generic HCI path)\n");
     }
+    log("****************************************\n");
+    log("*** STRATE-BT: FIRMWARE STEP DONE ***\n");
+    log("****************************************\n");
     if let Some(n) = Session::initialization_sequence(&mut init) {
         if !write_all(hci, &init[..n]) {
             log("[strate-bt] HCI init write failed\n");
+        } else {
+            log("****************************************\n");
+            log("*** STRATE-BT: ADVERTISING ENABLED ***\n");
+            log("****************************************\n");
         }
     }
 

@@ -88,6 +88,10 @@ pub const SMP_ENABLED: bool = false;
 /// until the AHCI/NVMe probe is fixed.
 pub const STORAGE_ENABLED: bool = false;
 
+/// Pause a few seconds after the USB/BT summary so the early xHCI lines can be
+/// photographed on real hardware (no serial console on the X13).
+pub const USB_BOOT_PAUSE: bool = true;
+
 // ---------------------------------------------------------------------------
 // Future debug flags : TODO
 // ---------------------------------------------------------------------------

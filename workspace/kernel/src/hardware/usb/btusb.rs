@@ -619,6 +619,16 @@ pub fn is_present() -> bool {
     BT_SLOT.load(Ordering::Acquire) != 0xFF
 }
 
+/// VID/PID of the attached HCI controller, if any.
+pub fn attached_ids() -> Option<(u16, u16)> {
+    let state = STATE.lock();
+    if state.present {
+        Some((state.vendor_id, state.product_id))
+    } else {
+        None
+    }
+}
+
 /// True when `slot_id`/`ep_id` belong to the Bluetooth device.
 ///
 /// Used by the xHCI interrupt path to route transfer events. Lock-free and
@@ -863,6 +873,13 @@ pub fn enumerate_device(
         product_id,
         slot_id
     );
+    log::info!("****************************************");
+    log::info!(
+        "*** BLUETOOTH HCI ATTACHED {:04x}:{:04x} ***",
+        vendor_id,
+        product_id
+    );
+    log::info!("****************************************");
 
     // Expose /dev/bt. The VFS mount may not exist yet at hardware-init time;
     // `init_bt_scheme()` is idempotent and retried by `vfs::init()`.

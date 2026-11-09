@@ -31,6 +31,9 @@ pub fn init() {
     // This ensures we use the fastest available controller for each device
 
     log::info!("[USB] Initializing USB subsystem...");
+    log::info!("****************************************");
+    log::info!("*** USB/BT EARLY: xHCI PROBE ***");
+    log::info!("****************************************");
 
     // Raw E9 progress marks (logger output may be silent during early boot):
     // 'X' xHCI done, 'E' EHCI done, 'U' UHCI done, 'H' HID init done, then
@@ -53,6 +56,34 @@ pub fn init() {
     // Bluetooth HCI transport. Enumeration already probed every device through
     // `class::enumerate_device`; this only announces readiness.
     btusb::init();
+    log::info!("****************************************");
+    log::info!(
+        "*** USB/BT EARLY: HCI ATTACHED = {} ***",
+        btusb::is_present()
+    );
+    log::info!("****************************************");
+
+    // Compact summary of every xHCI controller + the BT device, then pause so
+    // the lines can be photographed on real hardware.
+    let count = xhci::controller_count();
+    log::info!("*** xHCI SUMMARY: {} controller(s) ***", count);
+    for i in 0..count {
+        if let Some(controller) = xhci::get_controller(i) {
+            let ports = crate::sync::with_irqs_disabled(|_| controller.lock().port_count());
+            log::info!("*** xHCI[{}] ports={} ***", i, ports);
+        }
+    }
+    match btusb::attached_ids() {
+        Some((vid, pid)) => log::info!("*** BT DEVICE {:04x}:{:04x} ***", vid, pid),
+        None => log::info!("*** BT DEVICE: none ***"),
+    }
+    log::info!("****************************************");
+    log::info!("*** USB/BT SUMMARY ABOVE - PAUSE ***");
+    log::info!("*** press a key (or wait) to continue ***");
+    log::info!("****************************************");
+    if crate::debug_cfg::USB_BOOT_PAUSE {
+        boot_pause();
+    }
 
     // Initialize HID drivers after controllers are ready
     hid::init();
@@ -85,4 +116,27 @@ pub fn init() {
         };
 
     log::info!("[USB] Total USB controllers: {}", total_controllers);
+}
+
+/// Busy-wait until a PS/2 key is pressed, or ~a few seconds elapse.
+///
+/// Used once after the USB/BT summary so the early xHCI lines can be read or
+/// photographed on real hardware where there is no serial console.
+fn boot_pause() {
+    let mut spins: u64 = 0;
+    // ~3e9 pause hints: several seconds even on a fast CPU.
+    #[cfg(target_arch = "x86_64")]
+    {
+        while crate::arch::keyboard::read_char().is_none() && spins < 3_000_000_000 {
+            spins += 1;
+            core::hint::spin_loop();
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        while spins < 3_000_000_000 {
+            spins += 1;
+            core::hint::spin_loop();
+        }
+    }
 }

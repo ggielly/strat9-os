@@ -1567,6 +1567,39 @@ impl BuddyAllocator {
 
         let cpu_idx = crate::arch::percpu::current_cpu_index();
         if ALLOC_IN_PROGRESS[cpu_idx].swap(true, core::sync::atomic::Ordering::Acquire) {
+            // No allocation here: print through the synchronous paths first so
+            // the real-hardware screen shows the culprit even if the panic
+            // dump itself cannot allocate.
+            crate::serial_force_println!("****************************************");
+            crate::serial_force_println!(
+                "*** BUDDY RECURSION cpu={} order={} mt={:?} ***",
+                cpu_idx,
+                order,
+                migratetype
+            );
+            crate::serial_force_println!("****************************************");
+            // Non-allocating frame-pointer walk: identifies the caller even
+            // when the panic dump cannot allocate.
+            let mut rbp: u64;
+            unsafe {
+                core::arch::asm!(
+                    "mov {}, rbp",
+                    out(reg) rbp,
+                    options(nomem, nostack, preserves_flags)
+                );
+            }
+            for depth in 0..6 {
+                if rbp == 0 {
+                    break;
+                }
+                let ret = unsafe { core::ptr::read_volatile((rbp + 8) as *const u64) };
+                let next = unsafe { core::ptr::read_volatile(rbp as *const u64) };
+                crate::serial_force_println!("*** BT[{}] ret={:#x} ***", depth, ret);
+                if next <= rbp {
+                    break;
+                }
+                rbp = next;
+            }
             panic!("Recursive allocation detected on CPU {}!", cpu_idx);
         }
 
@@ -1600,6 +1633,39 @@ impl BuddyAllocator {
 
         let cpu_idx = crate::arch::percpu::current_cpu_index();
         if ALLOC_IN_PROGRESS[cpu_idx].swap(true, core::sync::atomic::Ordering::Acquire) {
+            // No allocation here: print through the synchronous paths first so
+            // the real-hardware screen shows the culprit even if the panic
+            // dump itself cannot allocate.
+            crate::serial_force_println!("****************************************");
+            crate::serial_force_println!(
+                "*** BUDDY RECURSION cpu={} order={} mt={:?} ***",
+                cpu_idx,
+                order,
+                migratetype
+            );
+            crate::serial_force_println!("****************************************");
+            // Non-allocating frame-pointer walk: identifies the caller even
+            // when the panic dump cannot allocate.
+            let mut rbp: u64;
+            unsafe {
+                core::arch::asm!(
+                    "mov {}, rbp",
+                    out(reg) rbp,
+                    options(nomem, nostack, preserves_flags)
+                );
+            }
+            for depth in 0..6 {
+                if rbp == 0 {
+                    break;
+                }
+                let ret = unsafe { core::ptr::read_volatile((rbp + 8) as *const u64) };
+                let next = unsafe { core::ptr::read_volatile(rbp as *const u64) };
+                crate::serial_force_println!("*** BT[{}] ret={:#x} ***", depth, ret);
+                if next <= rbp {
+                    break;
+                }
+                rbp = next;
+            }
             panic!("Recursive allocation detected on CPU {}!", cpu_idx);
         }
 

@@ -1339,6 +1339,18 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         serial_println!("[init] Storage verification skipped (boot path)");
         vga_println!("[..] Storage verification skipped at boot");
 
+        // The early singleton can be lost when the kernel switches address
+        // space. Re-create it here (outside the ELF loader) so that
+        // `build_ring3_task` never allocates while the buddy allocator is
+        // already locked (that caused "Recursive allocation" panics).
+        serial_println!("****************************************");
+        serial_println!("*** ELF LOAD: kernel AS pre-init ***");
+        serial_println!("****************************************");
+        vga_println!("****************************************");
+        vga_println!("*** ELF LOAD: kernel AS pre-init ***");
+        vga_println!("****************************************");
+        memory::address_space::init_kernel_address_space();
+
         // Launch init through the VFS populated from the boot module table.
         let mut init_loaded = false;
 
