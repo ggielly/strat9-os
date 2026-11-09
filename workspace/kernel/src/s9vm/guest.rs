@@ -86,20 +86,30 @@ pub const AR_DEFAULT_BIG: u32 = 1 << 14;
 pub const AR_PRESENT: u32 = 0x80;
 /// "Code or data" bit (1 = code/data, 0 = system).
 pub const AR_CODE_DATA: u32 = 0x10;
+/// "Granularity" bit (G, bit 15): the limit is scaled by 4 KiB. Mandatory
+/// when `limit[31:20] != 0` (e.g. a flat `0xFFFF_FFFF` limit).
+pub const AR_GRANULARITY: u32 = 1 << 15;
 
 /// Access rights of a read/write data segment, kernel (DPL 0).
+///
+/// Type 3 = read/write **accessed**. The accessed bit (bit 0 of the type) is
+/// mandatory on every usable SS/DS/ES at VM entry — type 2 is refused with
+/// "invalid guest state".
 pub const fn data_access_rights(dpl: u8) -> u32 {
-    0x2 | AR_CODE_DATA | AR_PRESENT | (((dpl as u32) & 3) << 5)
+    0x3 | AR_CODE_DATA | AR_PRESENT | (((dpl as u32) & 3) << 5)
 }
 
 /// Access rights of a 64-bit executable/readable code segment.
+///
+/// Type 0xB = execute/read **accessed**. CS must be an accessed code type
+/// (9/11/13/15) at VM entry; type 0xA is refused.
 pub const fn long_code_access_rights(dpl: u8) -> u32 {
-    0xA | AR_CODE_DATA | AR_PRESENT | AR_LONG_MODE | (((dpl as u32) & 3) << 5)
+    0xB | AR_CODE_DATA | AR_PRESENT | AR_LONG_MODE | (((dpl as u32) & 3) << 5)
 }
 
 /// Access rights of a 32-bit executable/readable code segment.
 pub const fn protected_code_access_rights(dpl: u8) -> u32 {
-    0xA | AR_CODE_DATA | AR_PRESENT | AR_DEFAULT_BIG | (((dpl as u32) & 3) << 5)
+    0xB | AR_CODE_DATA | AR_PRESENT | AR_DEFAULT_BIG | (((dpl as u32) & 3) << 5)
 }
 
 /// "Unusable" access rights (segment not loaded).
@@ -294,17 +304,20 @@ impl GuestState {
         state.cr3 = cr3;
         state.cr4 = CR4_PAE | CR4_PGE | CR4_OSFXSR | CR4_OSXMMEXCPT | CR4_VMXE;
         state.efer = EFER_SCE | EFER_LME | EFER_LMA | EFER_NXE;
+        // Flat 4 GiB segments: limit 0xFFFF_FFFF forces G = 1. TR is inherited
+        // from `real_mode` (type 0xB, present) and must stay usable: VMX never
+        // allows an unusable TR, unlike LDTR.
         state.cs = Segment {
             selector: 0x8,
             base: 0,
             limit: 0xFFFF_FFFF,
-            access_rights: long_code_access_rights(0),
+            access_rights: long_code_access_rights(0) | AR_GRANULARITY,
         };
         state.ss = Segment {
             selector: 0x10,
             base: 0,
             limit: 0xFFFF_FFFF,
-            access_rights: data_access_rights(0),
+            access_rights: data_access_rights(0) | AR_DEFAULT_BIG | AR_GRANULARITY,
         };
         state.ds = state.ss;
         state.es = state.ss;
