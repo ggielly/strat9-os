@@ -269,6 +269,7 @@ fn run_variant(
     // SAFETY: VT-x is active on this CPU (checked by the caller), interrupts
     // are disabled at the bootstrap stage, and the control
     // block has just been created for this vCPU.
+    Vcpu::set_write_trace(true);
     unsafe {
         vcpu.load()?;
         let error = vcpu.instruction_error();
@@ -285,7 +286,15 @@ fn run_variant(
         if error != 0 {
             log::warn!("[s9vm] instruction error after guest state: {:#x}", error);
         }
+        if let Some((field, error)) = Vcpu::write_trace_failure() {
+            log::warn!(
+                "[s9vm] first rejected vmwrite: field={:#x} error={:#x}",
+                field,
+                error
+            );
+        }
     }
+    Vcpu::set_write_trace(false);
 
     let mut report = SelftestReport {
         io_exits: 0,

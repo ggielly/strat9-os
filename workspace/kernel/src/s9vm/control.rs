@@ -35,6 +35,33 @@
 //! disabled and a control block loaded on the current CPU.
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+/// Diagnostic: when enabled, every successful `vmwrite` is followed by a read
+/// of the VM-instruction error field. The first field whose write leaves a
+/// non-zero error is recorded in [`TRACE_FIELD`]/[`TRACE_ERROR`]. This makes a
+/// silently rejected field identifiable on hardware.
+static WRITE_TRACE: AtomicBool = AtomicBool::new(false);
+static TRACE_FIELD: AtomicU32 = AtomicU32::new(u32::MAX);
+static TRACE_ERROR: AtomicU32 = AtomicU32::new(0);
+
+/// Enables or disables the write trace (also resets the recorded failure).
+pub fn set_write_trace(enabled: bool) {
+    TRACE_FIELD.store(u32::MAX, Ordering::Release);
+    TRACE_ERROR.store(0, Ordering::Release);
+    WRITE_TRACE.store(enabled, Ordering::Release);
+}
+
+/// First field (and error) for which a `vmwrite` left a non-zero instruction
+/// error, if any.
+pub fn write_trace_failure() -> Option<(u32, u32)> {
+    let field = TRACE_FIELD.load(Ordering::Acquire);
+    if field == u32::MAX {
+        None
+    } else {
+        Some((field, TRACE_ERROR.load(Ordering::Acquire)))
+    }
+}
 
 /// Weight of the fields according to bits 14:13 of the encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -525,6 +552,19 @@ impl ControlBlock {
         }
         if fail != 0 {
             return Err(ControlError::Failed);
+        }
+        if WRITE_TRACE.load(Ordering::Relaxed) {
+            // SAFETY: the block is loaded (checked above).
+            let error = unsafe { self.read_u32(field::INSTRUCTION_ERROR) }.unwrap_or(0);
+            if error != 0 {
+                let _ = TRACE_FIELD.compare_exchange(
+                    u32::MAX,
+                    field,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+                TRACE_ERROR.store(error, Ordering::Release);
+            }
         }
         Ok(())
     }

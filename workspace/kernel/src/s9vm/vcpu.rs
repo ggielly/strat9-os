@@ -346,6 +346,16 @@ impl Vcpu {
         })
     }
 
+    /// Enables/disables the per-write diagnostic trace.
+    pub fn set_write_trace(enabled: bool) {
+        crate::s9vm::control::set_write_trace(enabled);
+    }
+
+    /// First field whose write left a non-zero instruction error.
+    pub fn write_trace_failure() -> Option<(u32, u32)> {
+        crate::s9vm::control::write_trace_failure()
+    }
+
     /// VM-instruction error currently stored in the control block.
     ///
     /// # Safety
