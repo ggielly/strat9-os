@@ -1651,8 +1651,7 @@ pub mod call {
         if let Some(loc) = info.location() {
             let _ = write!(w, " at {}:{}:{}", loc.file(), loc.line(), loc.column());
         }
-        let _ = write!(w, "
-  {}", info.message());
+        let _ = write!(w, "\n  {}", info.message());
         let _ = writeln!(w);
         w.flush();
 

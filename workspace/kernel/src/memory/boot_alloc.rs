@@ -88,8 +88,7 @@ impl BootAllocator {
                 let nib = hex[((n >> sh) & 0xF) as usize];
                 crate::e9_mark!(nib);
             }
-            crate::e9_mark!(b'
-');
+            crate::e9_mark!(b'\n');
         }
         crate::e9_println!("BI init");
         if self.len != 0 {
@@ -431,8 +430,7 @@ impl BootAllocator {
                 let nib = hex[((n >> sh) & 0xF) as usize];
                 crate::e9_mark!(nib);
             }
-            crate::e9_mark!(b'
-');
+            crate::e9_mark!(b'\n');
         }
         crate::e9_mark!(b'Q');
         let mut limit = 0u64;

@@ -777,8 +777,7 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
             crate::e9_mark!(c);
             shift += 4;
         }
-        crate::e9_mark!(b'
-');
+        crate::e9_mark!(b'\n');
     }
     // Zero the array so every slot starts as DEFAULT vtable / empty links.
     // Chunked + E9-progress: a silent hang here (bad backing region, wrong
@@ -809,8 +808,7 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
             crate::e9_mark!(c);
             shift += 4;
         }
-        crate::e9_mark!(b'
-');
+        crate::e9_mark!(b'\n');
     }
     METADATA_BASE_VIRT.store(virt, Ordering::Release);
     METADATA_FRAME_COUNT.store(frame_count, Ordering::Release);

@@ -75,8 +75,7 @@ fn check_sigaction(signum: usize, expected_handler: u64, label: &str) -> bool {
         Ok(_) => {
             log_err("[test_exec_helper] ");
             log_err(label);
-            log_err(" mismatch
-");
+            log_err(" mismatch\n");
             false
         }
         Err(err) => {
@@ -84,8 +83,7 @@ fn check_sigaction(signum: usize, expected_handler: u64, label: &str) -> bool {
             log_err(label);
             log_err(": ");
             log_err(err.name());
-            log_err("
-");
+            log_err("\n");
             false
         }
     }
@@ -100,15 +98,13 @@ fn check_sigaltstack_reset() -> bool {
     match call::sigaltstack(0, &mut old as *mut _ as usize) {
         Ok(_) if (old.ss_flags & SS_DISABLE) != 0 => true,
         Ok(_) => {
-            log_err("[test_exec_helper] sigaltstack still enabled
-");
+            log_err("[test_exec_helper] sigaltstack still enabled\n");
             false
         }
         Err(err) => {
             log_err("[test_exec_helper] sigaltstack query: ");
             log_err(err.name());
-            log_err("
-");
+            log_err("\n");
             false
         }
     }
@@ -120,13 +116,11 @@ fn check_cloexec_closed() -> bool {
         Err(err) => {
             log_err("[test_exec_helper] cloexec query: ");
             log_err(err.name());
-            log_err("
-");
+            log_err("\n");
             false
         }
         Ok(_) => {
-            log_err("[test_exec_helper] cloexec fd still open
-");
+            log_err("[test_exec_helper] cloexec fd still open\n");
             false
         }
     }
@@ -140,8 +134,7 @@ fn panic(info: &PanicInfo) -> ! {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    log("[test_exec_helper] validating post-exec state
-");
+    log("[test_exec_helper] validating post-exec state\n");
 
     let mut ok = true;
     ok &= check_sigaction(SIGUSR1, 0, "SIGUSR1 reset to default");
@@ -150,8 +143,7 @@ pub extern "C" fn _start() -> ! {
     ok &= check_cloexec_closed();
 
     if ok {
-        log("[test_exec_helper] validation passed
-");
+        log("[test_exec_helper] validation passed\n");
         call::exit(0)
     } else {
         call::exit(1)

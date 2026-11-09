@@ -127,19 +127,15 @@ macro_rules! serial_print {
 /// Print to serial port with newline
 #[macro_export]
 macro_rules! serial_println {
-    () => ($crate::serial_print!("
-"));
-    ($($arg:tt)*) => ($crate::serial_print!("{}
-", format_args!($($arg)*)));
+    () => ($crate::serial_print!("\n"));
+    ($($arg:tt)*) => ($crate::serial_print!("{}\n", format_args!($($arg)*)));
 }
 
 /// Print to serial port with newline, bypassing the shared mutex.
 #[macro_export]
 macro_rules! serial_force_println {
-    () => ($crate::arch::serial::_print(format_args!("
-")));
-    ($($arg:tt)*) => ($crate::arch::serial::_print(format_args!("{}
-", format_args!($($arg)*))));
+    () => ($crate::arch::serial::_print(format_args!("\n")));
+    ($($arg:tt)*) => ($crate::arch::serial::_print(format_args!("{}\n", format_args!($($arg)*))));
 }
 
 /// Store a boot cmdline for later retrieval (set by the SBI boot path).

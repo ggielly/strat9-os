@@ -474,8 +474,7 @@ extern "C" fn lapic_timer_inner(
                         let nib = hex[((iret_rsp >> sh) & 0xF) as usize];
                         core::arch::asm!("out 0xe9, al", in("al") nib, options(nomem, nostack));
                     }
-                    core::arch::asm!("out 0xe9, al", in("al") b'
-', options(nomem, nostack));
+                    core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
                 }
                 return decision;
             }
@@ -815,8 +814,7 @@ pub fn register_nic_irq(irq: u8) {
 /// Performs the breakpoint handler operation.
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
     let _gs = SwapGsGuard::new(needs_swapgs(stack_frame.code_segment.0));
-    log::warn!("EXCEPTION: BREAKPOINT
-{:#?}", stack_frame);
+    log::warn!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
 }
 
 /// Performs the invalid opcode handler operation.
@@ -947,7 +945,7 @@ extern "x86-interrupt" fn page_fault_handler(
             .map(|v| v.as_u64())
             .unwrap_or(0);
         crate::serial_force_println!(
-            "[31;1m[pagefault][0m SWAPGS-WINDOW: CS={:#x} (Ring0) but GS was user! rip={:#x} addr={:#x} err={:#x}",
+            "\x1b[31;1m[pagefault]\x1b[0m SWAPGS-WINDOW: CS={:#x} (Ring0) but GS was user! rip={:#x} addr={:#x} err={:#x}",
             cs,
             stack_frame.instruction_pointer.as_u64(),
             fault_addr,
@@ -1047,7 +1045,7 @@ extern "x86-interrupt" fn page_fault_handler(
                             0
                         );
                         crate::serial_println!(
-                            "[31m[pagefault] COW resolve failed[0m: task={} [36mpid={}[0m tid={} [35maddr={:#x}[0m [35mrip={:#x}[0m err={}",
+                            "\x1b[31m[pagefault] COW resolve failed\x1b[0m: task={} \x1b[36mpid={}\x1b[0m tid={} \x1b[35maddr={:#x}\x1b[0m \x1b[35mrip={:#x}\x1b[0m err={}",
                             task.id.as_u64(),
                             task.pid,
                             task.tid,
@@ -1069,7 +1067,7 @@ extern "x86-interrupt" fn page_fault_handler(
                     // FORCE OUTPUT for the first user faults only; lazy demand paging can
                     // legitimately fault thousands of times during boot and flood serial.
                     crate::serial_force_println!(
-                        "[33m[pagefault] USER fault[0m: tid={} rip={:#x} addr={:#x} err={:#x}",
+                        "\x1b[33m[pagefault] USER fault\x1b[0m: tid={} rip={:#x} addr={:#x} err={:#x}",
                         task.tid,
                         rip,
                         vaddr.as_u64(),
@@ -1098,7 +1096,7 @@ extern "x86-interrupt" fn page_fault_handler(
                     Ok(()) => {
                         if do_pf_trace {
                             crate::serial_force_println!(
-                                "[32m[pagefault] USER fault resolved[0m: tid={} addr={:#x}",
+                                "\x1b[32m[pagefault] USER fault resolved\x1b[0m: tid={} addr={:#x}",
                                 task.tid,
                                 vaddr.as_u64()
                             );
@@ -1107,7 +1105,7 @@ extern "x86-interrupt" fn page_fault_handler(
                     }
                     Err(e) => {
                         crate::serial_force_println!(
-                            "[31m[pagefault] USER fault resolution FAILED[0m: tid={} addr={:#x} err={:?}",
+                            "\x1b[31m[pagefault] USER fault resolution FAILED\x1b[0m: tid={} addr={:#x} err={:?}",
                             task.tid,
                             vaddr.as_u64(),
                             e
@@ -1148,7 +1146,7 @@ extern "x86-interrupt" fn page_fault_handler(
     } else {
         // FORCE OUTPUT for kernel fault
         crate::serial_force_println!(
-            "[31;1m[pagefault] KERNEL fault[0m: rip={:#x} addr={:#x} err={:#x}",
+            "\x1b[31;1m[pagefault] KERNEL fault\x1b[0m: rip={:#x} addr={:#x} err={:#x}",
             rip,
             fault_addr.as_ref().map(|v| v.as_u64()).unwrap_or(0),
             error_code.bits()
@@ -1352,7 +1350,7 @@ fn dump_page_table_walk(vaddr: u64, cr3_phys: u64) {
             core::str::from_utf8(&f).unwrap_or("?").trim()
         );
         if l4e & 1 == 0 {
-            crate::serial_println!("  [1;31m  ==> STOP: PML4 not present ![0m");
+            crate::serial_println!("  \x1b[1;31m  ==> STOP: PML4 not present !\x1b[0m");
             return;
         }
 
@@ -1367,7 +1365,7 @@ fn dump_page_table_walk(vaddr: u64, cr3_phys: u64) {
             core::str::from_utf8(&f).unwrap_or("?").trim()
         );
         if l3e & 1 == 0 {
-            crate::serial_println!("  [1;31m ==> STOP: PDPT not present ![0m");
+            crate::serial_println!("  \x1b[1;31m ==> STOP: PDPT not present !\x1b[0m");
             return;
         }
         if l3e & 0x80 != 0 {
@@ -1389,7 +1387,7 @@ fn dump_page_table_walk(vaddr: u64, cr3_phys: u64) {
             core::str::from_utf8(&f).unwrap_or("?").trim()
         );
         if l2e & 1 == 0 {
-            crate::serial_println!("  [1;31m ==> STOP: PD not present ![0m");
+            crate::serial_println!("  \x1b[1;31m ==> STOP: PD not present !\x1b[0m");
             return;
         }
         if l2e & 0x80 != 0 {
@@ -1411,10 +1409,10 @@ fn dump_page_table_walk(vaddr: u64, cr3_phys: u64) {
             core::str::from_utf8(&f).unwrap_or("?").trim()
         );
         if l1e & 1 == 0 {
-            crate::serial_println!("  [1;31m ==> STOP: PT not present ![0m");
+            crate::serial_println!("  \x1b[1;31m ==> STOP: PT not present !\x1b[0m");
         } else {
             crate::serial_println!(
-                "  [1;32m ==> PAGE PRESENT[0m => phys {:#x} (check RW/US/NX flags)",
+                "  \x1b[1;32m ==> PAGE PRESENT\x1b[0m => phys {:#x} (check RW/US/NX flags)",
                 l1e & 0x000F_FFFF_FFFF_F000
             );
         }
@@ -1462,7 +1460,7 @@ fn dump_nearby_vma_regions(as_ref: &crate::memory::AddressSpace, fault_vaddr: u6
                 vma.flags,
                 vma.page_size,
                 if hit {
-                    "  [1;32m<<< FAULT[0m"
+                    "  \x1b[1;32m<<< FAULT\x1b[0m"
                 } else {
                     ""
                 }
@@ -1506,20 +1504,20 @@ fn dump_page_fault_full(
     let fault_vaddr = fault_addr.as_ref().map(|v| v.as_u64()).unwrap_or(0);
     let is_user = (cs & 3) == 3;
 
-    crate::serial_println!("[1;31m");
+    crate::serial_println!("\x1b[1;31m");
     crate::serial_println!(
         "****************************************************************************"
     );
     crate::serial_println!("*                  KERNEL PAGE FAULT EXCEPTiON                     *");
     crate::serial_println!(
-        "********************************************************************[0m"
+        "********************************************************************\x1b[0m"
     );
 
     // --- Error code ---
-    crate::serial_println!("[1;33m--- Error code ---[0m");
+    crate::serial_println!("\x1b[1;33m--- Error code ---\x1b[0m");
     crate::serial_println!("  Raw         : {:#06x}", error_code.bits());
     crate::serial_println!(
-        "  Diagnostic  : [1;31m{}[0m",
+        "  Diagnostic  : \x1b[1;31m{}\x1b[0m",
         decode_error_code(error_code)
     );
     crate::serial_println!(
@@ -1537,7 +1535,7 @@ fn dump_page_fault_full(
     // that case, so dump the words around RSP to expose the return address that
     // led to the jump.
     if error_code.contains(PageFaultErrorCode::INSTRUCTION_FETCH) {
-        crate::serial_println!("[1;33m--- Instruction fetch fault ---[0m");
+        crate::serial_println!("\x1b[1;33m--- Instruction fetch fault ---\x1b[0m");
         crate::serial_println!("  faulting RIP : {:#018x} (no executable mapping)", rip);
         crate::serial_println!("  RSP          : {:#018x}", rsp);
         crate::serial_println!("  stack words (candidate return addresses):");
@@ -1567,9 +1565,9 @@ fn dump_page_fault_full(
     }
 
     // --- Faulting context ---
-    crate::serial_println!("[1;33m--- Faulting context ---[0m");
-    crate::serial_println!("  CR2 (addr)  : [1;35m{:#018x}[0m", fault_vaddr);
-    crate::serial_println!("  RIP         : [1;36m{:#018x}[0m", rip);
+    crate::serial_println!("\x1b[1;33m--- Faulting context ---\x1b[0m");
+    crate::serial_println!("  CR2 (addr)  : \x1b[1;35m{:#018x}\x1b[0m", fault_vaddr);
+    crate::serial_println!("  RIP         : \x1b[1;36m{:#018x}\x1b[0m", rip);
     crate::serial_println!("  RSP         : {:#018x}", rsp);
     crate::serial_println!(
         "  CS          : {:#06x}  (ring={}{}) | SS : {:#06x}",
@@ -1613,7 +1611,7 @@ fn dump_page_fault_full(
     );
 
     // --- Control registers ---
-    crate::serial_println!("[1;33m--- Control registers ---[0m");
+    crate::serial_println!("\x1b[1;33m--- Control registers ---\x1b[0m");
     let cr0 = Cr0::read_raw();
     let (cr3_frame, cr3_flags) = Cr3::read();
     let cr3_phys = cr3_frame.start_address().as_u64();
@@ -1635,13 +1633,13 @@ fn dump_page_fault_full(
     );
 
     // --- CPU context ---
-    crate::serial_println!("[1;33m--- CPU context ---[0m");
+    crate::serial_println!("\x1b[1;33m--- CPU context ---\x1b[0m");
     crate::serial_println!("  LAPIC ID    : {}", super::apic::lapic_id());
     crate::serial_println!("  Ticks sched : {}", crate::process::scheduler::ticks());
     crate::serial_println!("  HHDM offset : {:#x}", crate::memory::hhdm_offset());
 
     // --- Task context ---
-    crate::serial_println!("[1;33m--- Task context ---[0m");
+    crate::serial_println!("\x1b[1;33m--- Task context ---\x1b[0m");
     if let Some(ref t) = *task {
         crate::serial_println!(
             "  ID={} PID={} TID={} TGID={} name=\"{}\" prio={:?} ticks={}",
@@ -1716,7 +1714,7 @@ fn dump_page_fault_full(
     }
 
     // --- Memory statistics ---
-    crate::serial_println!("[1;33m--- Memory stats ---[0m");
+    crate::serial_println!("\x1b[1;33m--- Memory stats ---\x1b[0m");
     if let Some(guard) = crate::memory::get_allocator().try_lock() {
         if let Some(ref alloc) = *guard {
             let (total, allocated) = alloc.page_totals();
@@ -1831,16 +1829,16 @@ fn dump_page_fault_full(
     }
 
     // --- Code bytes at RIP ---
-    crate::serial_println!("[1;33m--- Code at RIP ({:#x}) ---[0m", rip);
+    crate::serial_println!("\x1b[1;33m--- Code at RIP ({:#x}) ---\x1b[0m", rip);
     dump_memory_bytes(rip, cr3_phys, 32, "  ");
 
     // --- Stack dump ---
-    crate::serial_println!("[1;33m--- Stack dump (RSP={:#x}) ---[0m", rsp);
+    crate::serial_println!("\x1b[1;33m--- Stack dump (RSP={:#x}) ---\x1b[0m", rsp);
     dump_memory_bytes(rsp, cr3_phys, 128, "  ");
 
     // --- Page table walk ---
     crate::serial_println!(
-        "[1;33m--- Page table walk (CR2={:#x}, CR3={:#x}) ---[0m",
+        "\x1b[1;33m--- Page table walk (CR2={:#x}, CR3={:#x}) ---\x1b[0m",
         fault_vaddr,
         cr3_phys
     );
@@ -1852,7 +1850,7 @@ fn dump_page_fault_full(
 
     // --- VMA regions near fault ---
     if let Some(ref t) = *task {
-        crate::serial_println!("[1;33m--- VMA regions near fault ---[0m");
+        crate::serial_println!("\x1b[1;33m--- VMA regions near fault ---\x1b[0m");
         // SAFETY: Use the same safe ptr-chain read strategy as the Task CR3 section above:
         // Arc::as_ptr gives a valid *const AddressSpace if the Arc is alive, but the
         // Arc<AddressSpace> stored inside the SyncUnsafeCell might be corrupted.
@@ -1891,10 +1889,10 @@ fn dump_page_fault_full(
         }
     }
 
-    crate::serial_println!("[1;31m***********************************************************");
+    crate::serial_println!("\x1b[1;31m***********************************************************");
     crate::serial_println!("*                     END OF PAGE FAULT DuMP                      *");
     crate::serial_println!(
-        "*******************************************************************[0m"
+        "*******************************************************************\x1b[0m"
     );
 
     panic!(
@@ -1982,7 +1980,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     // Detect the swapgs=>iretq window case: CS says Ring 0 but GS was user.
     if swapgs_needed && !is_user {
         crate::serial_force_println!(
-            "[31;1m[GPF][0m SWAPGS-WINDOW: CS={:#x} (Ring0) but GS was user! rip={:#x} err={:#x} rsp={:#x}",
+            "\x1b[31;1m[GPF]\x1b[0m SWAPGS-WINDOW: CS={:#x} (Ring0) but GS was user! rip={:#x} err={:#x} rsp={:#x}",
             cs,
             stack_frame.instruction_pointer.as_u64(),
             error_code,
@@ -1998,7 +1996,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     if is_user {
         if let Some(tid) = crate::process::current_task_id() {
             crate::serial_force_println!(
-                "[31;1m[GPF][0m USER tid={} rip={:#x} err={:#x}",
+                "\x1b[31;1m[GPF]\x1b[0m USER tid={} rip={:#x} err={:#x}",
                 tid,
                 stack_frame.instruction_pointer.as_u64(),
                 error_code
@@ -2015,7 +2013,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     }
     let rip = stack_frame.instruction_pointer.as_u64();
     crate::serial_force_println!(
-        "[31;1m[GPF][0m KERNEL rip={:#018x} err={:#06x} cs={:#06x} ss={:#06x} rflags={:#018x} rsp={:#018x}",
+        "\x1b[31;1m[GPF]\x1b[0m KERNEL rip={:#018x} err={:#06x} cs={:#06x} ss={:#06x} rflags={:#018x} rsp={:#018x}",
         rip,
         error_code,
         stack_frame.code_segment.0,
@@ -2049,7 +2047,7 @@ extern "x86-interrupt" fn stack_segment_fault_handler(
     // and at that point GS is already swapped to user.
     let _gs = SwapGsGuard::new(needs_swapgs(stack_frame.code_segment.0));
     crate::serial_force_println!(
-        "[31;1m[STACK_FAULT][0m rip={:#x} err={:#x} cs={:#x} rsp={:#x}",
+        "\x1b[31;1m[STACK_FAULT]\x1b[0m rip={:#x} err={:#x} cs={:#x} rsp={:#x}",
         stack_frame.instruction_pointer.as_u64(),
         error_code,
         stack_frame.code_segment.0,
@@ -2119,15 +2117,14 @@ extern "x86-interrupt" fn double_fault_handler(
         }
     }
     crate::serial_force_println!(
-        "[31;1m[DOUBLE_FAULT][0m rip={:#x} err={:#x} cs={:#x} rsp={:#x}",
+        "\x1b[31;1m[DOUBLE_FAULT]\x1b[0m rip={:#x} err={:#x} cs={:#x} rsp={:#x}",
         stack_frame.instruction_pointer.as_u64(),
         error_code,
         stack_frame.code_segment.0,
         stack_frame.stack_pointer.as_u64()
     );
     panic!(
-        "EXCEPTION: DOUBLE FAULT (error code: {:#x})
-{:#?}",
+        "EXCEPTION: DOUBLE FAULT (error code: {:#x})\n{:#?}",
         error_code, stack_frame
     );
 }
@@ -2235,8 +2232,7 @@ extern "x86-interrupt" fn mouse_handler(_stack_frame: InterruptStackFrame) {
     // TEMP DEBUG: mouse IRQ pulse on E9.
     unsafe {
         core::arch::asm!("out 0xe9, al", in("al") b'M', options(nomem, nostack));
-        core::arch::asm!("out 0xe9, al", in("al") b'
-', options(nomem, nostack));
+        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
     }
     crate::arch::x86_64::mouse::handle_irq();
     // PS/2 mouse IRQ12 is intentionally kept on the remapped legacy PIC path.
@@ -2252,8 +2248,7 @@ extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
     unsafe {
         core::arch::asm!("out 0xe9, al", in("al") b'K', options(nomem, nostack));
         core::arch::asm!("out 0xe9, al", in("al") raw, options(nomem, nostack));
-        core::arch::asm!("out 0xe9, al", in("al") b'
-', options(nomem, nostack));
+        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
     }
 
     // Feed scancode + TSC low bits into the entropy pool.

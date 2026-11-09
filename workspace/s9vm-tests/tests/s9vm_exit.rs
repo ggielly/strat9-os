@@ -131,3 +131,4 @@ fn encodes_external_interrupt_injection_field() {
     assert_eq!(external_interrupt_info(0), 1 << 31);
     assert_eq!(external_interrupt_info(0xFF) & 0xFF, 0xFF);
 }
+

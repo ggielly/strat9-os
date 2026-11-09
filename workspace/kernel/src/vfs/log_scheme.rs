@@ -34,9 +34,7 @@
 //! /dev/log/
 //!   stream   read    byte stream, from oldest retained byte on open
 //!   stats    read    text snapshot taken at open (written/capacity/dropped/oldest)
-//!   ctl      write   "clear
-" or "mark <text>
-"; unknown lines are ignored
+//!   ctl      write   "clear\n" or "mark <text>\n"; unknown lines are ignored
 //! ```
 //!
 //! # Semantics
@@ -112,11 +110,7 @@ impl LogScheme {
         // Writing into a String cannot fail.
         let _ = write!(
             text,
-            "written={}
-capacity={}
-dropped={}
-oldest={}
-",
+            "written={}\ncapacity={}\ndropped={}\noldest={}\n",
             s.written, s.capacity, s.dropped, s.oldest
         );
         text
@@ -125,9 +119,8 @@ oldest={}
     /// Applies one `ctl` write. Unknown commands are ignored (Plan 9 style:
     /// the write succeeds, nothing happens).
     fn handle_ctl(buf: &[u8]) {
-        for raw in buf.split(|&b| b == b'
-') {
-            let line = if raw.last() == Some(&b'') {
+        for raw in buf.split(|&b| b == b'\n') {
+            let line = if raw.last() == Some(&b'\r') {
                 &raw[..raw.len() - 1]
             } else {
                 raw
@@ -148,8 +141,7 @@ impl Default for LogScheme {
     }
 }
 
-/// Pushes a bounded `[mark] <text>
-` line into the ring.
+/// Pushes a bounded `[mark] <text>\n` line into the ring.
 fn push_marker(text: &[u8]) {
     let n = core::cmp::min(text.len(), MAX_MARK_TEXT);
     let prefix = b"[mark] ";
@@ -157,8 +149,7 @@ fn push_marker(text: &[u8]) {
     line[..prefix.len()].copy_from_slice(prefix);
     line[prefix.len()..prefix.len() + n].copy_from_slice(&text[..n]);
     let end = prefix.len() + n;
-    line[end] = b'
-';
+    line[end] = b'\n';
     log_ring::push(&line[..end + 1]);
 }
 

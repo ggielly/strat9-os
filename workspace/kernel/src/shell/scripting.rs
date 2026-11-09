@@ -187,7 +187,7 @@ pub fn parse_script(line: &str) -> Result<Vec<ScriptConstruct>, ParseError> {
 pub fn quote_argument(arg: &str) -> String {
     let mut result = String::from("'");
     for ch in arg.chars() {
-        if ch == '\'' { result.push_str("'\''"); } else { result.push(ch); }
+        if ch == '\'' { result.push_str("'\\''"); } else { result.push(ch); }
     }
     result.push('\''); result
 }

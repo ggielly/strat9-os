@@ -297,7 +297,7 @@ fn strip_comment(line: &str) -> &str {
             continue;
         }
         match ch {
-            '\' if in_str => escape = true,
+            '\\' if in_str => escape = true,
             '"' => in_str = !in_str,
             '#' if !in_str => return &line[..i],
             _ => {}
@@ -331,18 +331,17 @@ fn parse_string(v: &str) -> Option<String> {
                 }
                 return Some(out);
             }
-            b'\' => {
+            b'\\' => {
                 i += 1;
                 if i >= bytes.len() {
                     return None;
                 }
                 match bytes[i] {
-                    b'n' => out.push('
-'),
-                    b't' => out.push('	'),
-                    b'r' => out.push(''),
+                    b'n' => out.push('\n'),
+                    b't' => out.push('\t'),
+                    b'r' => out.push('\r'),
                     b'"' => out.push('"'),
-                    b'\' => out.push('\'),
+                    b'\\' => out.push('\\'),
                     _ => return None,
                 }
             }
@@ -432,11 +431,7 @@ hidden = false
     fn accepts_psk_hex() {
         let psk = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
         let text = alloc::format!(
-            "[wifi]
-enabled=true
-ssid=\"x\"
-psk=\"{}\"
-",
+            "[wifi]\nenabled=true\nssid=\"x\"\npsk=\"{}\"\n",
             psk
         );
         let cfg = parse(&text).unwrap();
@@ -446,12 +441,7 @@ psk=\"{}\"
 
     #[test]
     fn rejects_unknown_key() {
-        let e = parse("[wifi]
-enabled=true
-ssid=\"x\"
-passphrase=\"12345678\"
-bogus=1
-")
+        let e = parse("[wifi]\nenabled=true\nssid=\"x\"\npassphrase=\"12345678\"\nbogus=1\n")
             .unwrap_err();
         assert_eq!(e.kind, ConfigErrorKind::UnknownKey);
         assert_eq!(e.line, 5);
@@ -459,21 +449,29 @@ bogus=1
 
     #[test]
     fn rejects_short_passphrase() {
-        let e = parse("[wifi]
-enabled=true
-ssid=\"x\"
-passphrase=\"short\"
-").unwrap_err();
+        let e = parse("[wifi]\nenabled=true\nssid=\"x\"\npassphrase=\"short\"\n").unwrap_err();
         assert_eq!(e.kind, ConfigErrorKind::InvalidValue);
     }
 
     #[test]
+    fn parse_string_handles_escapes() {
+        assert_eq!(parse_string(r#""a\nb""#).as_deref(), Some("a\nb"));
+        assert_eq!(parse_string(r#""a\tb""#).as_deref(), Some("a\tb"));
+        assert_eq!(parse_string(r#""a\rb""#).as_deref(), Some("a\rb"));
+        assert_eq!(parse_string(r#""a\"b""#).as_deref(), Some("a\"b"));
+        assert_eq!(parse_string(r#""a\\b""#).as_deref(), Some("a\\b"));
+        assert_eq!(parse_string(r#""a\qb""#), None);
+    }
+
+    #[test]
+    fn comment_after_escaped_quote_is_preserved() {
+        let line = r##"ssid = "a\"#b" # comment"##;
+        assert_eq!(strip_comment(line), r##"ssid = "a\"#b" "##);
+    }
+
+    #[test]
     fn comment_inside_string_is_preserved() {
-        let cfg = parse("[wifi]
-enabled=true
-ssid=\"a#b\"
-passphrase=\"12345678\"
-").unwrap();
+        let cfg = parse("[wifi]\nenabled=true\nssid=\"a#b\"\npassphrase=\"12345678\"\n").unwrap();
         assert_eq!(cfg.ssid(), b"a#b");
     }
 }

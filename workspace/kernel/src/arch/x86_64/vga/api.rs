@@ -304,8 +304,7 @@ pub fn init(
             RgbColor::new(0xA7, 0xD8, 0xD8),
             background,
         );
-        writer.write_bytes("Strat9-OS v0.1.0
-");
+        writer.write_bytes("Strat9-OS v0.1.0\n");
         writer.set_rgb_color(RgbColor::new(0xE2, 0xE8, 0xF0), background);
         VGA_AVAILABLE.store(true, Ordering::Relaxed);
         // Publish the UEFI framebuffer geometry so the video driver can adopt

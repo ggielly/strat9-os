@@ -23,7 +23,7 @@
 //! Exact UCS-2 paths for the subset of filenames representable by the boot ABI.
 use strat9_abi::boot::validate_module_name;
 
-const PREFIX: &[u8] = b"\boot\initfs\";
+const PREFIX: &[u8] = b"\\boot\\initfs\\";
 
 #[derive(Debug)]
 pub struct ModuleFileName {

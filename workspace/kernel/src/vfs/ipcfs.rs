@@ -173,15 +173,9 @@ impl Scheme for IpcControlScheme {
     /// Performs the read operation.
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
         self.handle_mut(file_id, |state| match state.kind {
-            HandleKind::Root => Ok(Self::read_static(offset, buf, "shm
-sem
-")),
-            HandleKind::ShmDir => Ok(Self::read_static(offset, buf, "new/<bytes>
-<ring_id>
-")),
-            HandleKind::SemDir => Ok(Self::read_static(offset, buf, "new/<initial>
-<sem_id>
-")),
+            HandleKind::Root => Ok(Self::read_static(offset, buf, "shm\nsem\n")),
+            HandleKind::ShmDir => Ok(Self::read_static(offset, buf, "new/<bytes>\n<ring_id>\n")),
+            HandleKind::SemDir => Ok(Self::read_static(offset, buf, "new/<initial>\n<sem_id>\n")),
             HandleKind::Ring(id) => {
                 let ring = shared_ring::get_ring(id).ok_or(SyscallError::NotFound)?;
                 let mut line = alloc::format!(
@@ -193,14 +187,12 @@ sem
                 if let Some((_, addr, size)) = state.last_map {
                     line.push_str(&alloc::format!(" mapped={:#x} mapped_size={}", addr, size));
                 }
-                line.push('
-');
+                line.push('\n');
                 Ok(Self::read_static(offset, buf, &line))
             }
             HandleKind::Sem(id) => {
                 let sem = semaphore::get_semaphore(id).ok_or(SyscallError::NotFound)?;
-                let line = alloc::format!("sem={} count={}
-", id.as_u64(), sem.count());
+                let line = alloc::format!("sem={} count={}\n", id.as_u64(), sem.count());
                 Ok(Self::read_static(offset, buf, &line))
             }
         })

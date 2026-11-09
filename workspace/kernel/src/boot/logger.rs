@@ -66,17 +66,16 @@ impl log::Log for SerialLogger {
             }
 
             let (level_str, msg_color) = match record.level() {
-                Level::Error => ("[31mERROR[0m", "[31m"),
-                Level::Warn => ("[33mWARN[0m", "[33m"),
-                Level::Info => ("[32mINFO[0m", "[37m"),
-                Level::Debug => ("[90mDEBUG[0m", "[90m"),
-                Level::Trace => ("[90mTRACE[0m", "[90m"),
+                Level::Error => ("\x1b[31mERROR\x1b[0m", "\x1b[31m"),
+                Level::Warn => ("\x1b[33mWARN\x1b[0m", "\x1b[33m"),
+                Level::Info => ("\x1b[32mINFO\x1b[0m", "\x1b[37m"),
+                Level::Debug => ("\x1b[90mDEBUG\x1b[0m", "\x1b[90m"),
+                Level::Trace => ("\x1b[90mTRACE\x1b[0m", "\x1b[90m"),
             };
 
             // 1. Serial: bounded, nonblocking enqueue once its worker is running.
             crate::arch::serial::_print(format_args!(
-                "[{}] {}{}[0m
-",
+                "[{}] {}{}\x1b[0m\n",
                 level_str,
                 msg_color,
                 record.args()
@@ -145,8 +144,7 @@ impl log::Log for SerialLogger {
                         buf: &mut vbuf,
                         pos: &mut vpos
                     },
-                    "[{}] {}
-",
+                    "[{}] {}\n",
                     record.level(),
                     record.args(),
                 );

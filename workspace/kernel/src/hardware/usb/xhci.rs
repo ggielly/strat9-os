@@ -341,8 +341,7 @@ impl XhciController {
                     // 'z' + 'B' = BAR invalid
                     crate::e9_mark!(b'z');
                     crate::e9_mark!(b'B');
-                    crate::e9_mark!(b'
-');
+                    crate::e9_mark!(b'\n');
                 }
                 return Err("Invalid BAR");
             }
@@ -365,8 +364,7 @@ impl XhciController {
                 crate::e9_mark!(nib);
             }
             let _ = bdf;
-            crate::e9_mark!(b'
-');
+            crate::e9_mark!(b'\n');
         }
         paging::ensure_identity_map_range(bar, XHCI_MMIO_SIZE as u64);
 
@@ -846,8 +844,7 @@ impl XhciController {
                     crate::e9_mark!(b'z');
                     crate::e9_mark!(b'3');
                     crate::e9_mark!((b'0' + (completion & 0xF) as u8));
-                    crate::e9_mark!(b'
-');
+                    crate::e9_mark!(b'\n');
                 }
                 log::warn!(
                     "[xHCI] Address Device failed: slot={} completion={}",
@@ -928,8 +925,7 @@ impl XhciController {
             crate::e9_mark!(b'x');
             crate::e9_mark!(b"0123456789abcdef"[((self.max_ports >> 4) & 0xF) as usize]);
             crate::e9_mark!(b"0123456789abcdef"[(self.max_ports & 0xF) as usize]);
-            crate::e9_mark!(b'
-');
+            crate::e9_mark!(b'\n');
         }
         let mut usb_address: u8 = 1;
 
@@ -947,8 +943,7 @@ impl XhciController {
                     let nib = b"0123456789abcdef"[((psc >> sh) & 0xF) as usize];
                     crate::e9_mark!(nib);
                 }
-                crate::e9_mark!(b'
-');
+                crate::e9_mark!(b'\n');
             }
 
             // NOTE: log::info! (formatted) hung the enumeration path in some
@@ -964,8 +959,7 @@ impl XhciController {
                     crate::e9_mark!(b"0123456789abcdef"[((portsc >> 24) & 0xF) as usize]);
                     crate::e9_mark!(b"0123456789abcdef"[((portsc >> 4) & 0xF) as usize]);
                     crate::e9_mark!(b"0123456789abcdef"[(portsc & 0xF) as usize]);
-                    crate::e9_mark!(b'
-');
+                    crate::e9_mark!(b'\n');
                 }
                 log::warn!("[xHCI] Port {} reset failed", port);
                 continue;
@@ -973,8 +967,7 @@ impl XhciController {
             unsafe {
                 crate::e9_mark!(b'z');
                 crate::e9_mark!(b'R');
-                crate::e9_mark!(b'
-');
+                crate::e9_mark!(b'\n');
             }
             unsafe {
                 crate::e9_mark!(b'R');
@@ -1011,8 +1004,7 @@ impl XhciController {
                                 crate::e9_mark!(lo);
                                 k += 1;
                             }
-                            crate::e9_mark!(b'
-');
+                            crate::e9_mark!(b'\n');
                         }
                         let vid = u16::from_le_bytes([dev_desc[2], dev_desc[3]]);
                         let pid = u16::from_le_bytes([dev_desc[4], dev_desc[5]]);
@@ -1214,8 +1206,7 @@ impl XhciController {
         if idx >= self.device_slots.len() || self.device_slots[idx].is_none() {
             unsafe {
                 crate::e9_mark!(b'1');
-                crate::e9_mark!(b'
-');
+                crate::e9_mark!(b'\n');
             }
             return Err("Invalid slot for control transfer");
         }
@@ -1226,8 +1217,7 @@ impl XhciController {
         if tr_ring.is_null() {
             unsafe {
                 crate::e9_mark!(b'2');
-                crate::e9_mark!(b'
-');
+                crate::e9_mark!(b'\n');
             }
             return Err("No transfer ring for EP0");
         }
@@ -1311,8 +1301,7 @@ impl XhciController {
                     unsafe {
                         crate::e9_mark!(b'X');
                         crate::e9_mark!(e.as_bytes()[0]);
-                        crate::e9_mark!(b'
-');
+                        crate::e9_mark!(b'\n');
                     }
                     return Err(e);
                 }
@@ -1332,8 +1321,7 @@ impl XhciController {
                 unsafe {
                     crate::e9_mark!(b'E');
                     crate::e9_mark!((b'0' + (completion & 0xF) as u8));
-                    crate::e9_mark!(b'
-');
+                    crate::e9_mark!(b'\n');
                 }
                 log::warn!(
                     "[xHCI] ctrl_transfer event error: type={} completion={}",

@@ -265,8 +265,7 @@ impl PtyScheme {
         let pairs = self.pairs.lock();
         let mut out = String::new();
         for &pty_id in pairs.keys() {
-            out.push_str(&alloc::format!("{}
-", pty_id));
+            out.push_str(&alloc::format!("{}\n", pty_id));
         }
         let bytes = out.as_bytes();
         let n = bytes.len().min(buf.len());

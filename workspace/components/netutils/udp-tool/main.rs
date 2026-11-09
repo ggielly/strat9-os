@@ -45,8 +45,7 @@ static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
-    log("[udp-tool] OOM
-");
+    log("[udp-tool] OOM\n");
     call::exit(12)
 }
 
@@ -115,8 +114,7 @@ fn parse_first_ipv4_line(path: &str, buf: &mut [u8; 128]) -> Option<[u8; 4]> {
     if n == 0 {
         return None;
     }
-    let line_end = buf[..n].iter().position(|&b| b == b'
-').unwrap_or(n);
+    let line_end = buf[..n].iter().position(|&b| b == b'\n').unwrap_or(n);
     let mut s = core::str::from_utf8(&buf[..line_end]).ok()?.trim();
     if let Some((head, _tail)) = s.split_once('/') {
         s = head;
@@ -159,8 +157,7 @@ pub extern "C" fn _start() -> ! {
     const PORT: u16 = 9999;
     const HEARTBEAT_MS: u64 = 2000;
 
-    log("[udp-tool] starting
-");
+    log("[udp-tool] starting\n");
 
     let mut path_buf = [0u8; 96];
     let bind_path = {
@@ -179,8 +176,7 @@ pub extern "C" fn _start() -> ! {
         match open_rw(bind_path) {
             Ok(fd) => break fd,
             Err(_) => {
-                debug("[udp-tool] waiting for /net/udp bind
-");
+                debug("[udp-tool] waiting for /net/udp bind\n");
                 sleep_ms(200);
             }
         }
@@ -194,16 +190,13 @@ pub extern "C" fn _start() -> ! {
     let send_path = ip_to_path(&default_target, PORT, &mut path_buf);
     let send_fd = open_rw(send_path).ok();
 
-    log("[udp-tool] bound on /net/udp/bind/9999
-");
+    log("[udp-tool] bound on /net/udp/bind/9999\n");
     log("[udp-tool] target path: ");
     log(send_path);
-    log("
-");
+    log("\n");
 
     if let Some(fd) = send_fd {
-        let _ = call::write(fd, b"udp-tool: hello
-");
+        let _ = call::write(fd, b"udp-tool: hello\n");
     }
 
     let mut last_heartbeat = clock_ns();
@@ -222,8 +215,7 @@ pub extern "C" fn _start() -> ! {
                 log(format_src(&src, src_port, &mut src_txt));
                 log(" | ");
                 log(dump_payload_ascii(payload, &mut ascii));
-                log("
-");
+                log("\n");
 
                 // Echo payload to sender via scheme path.
                 let reply_path = ip_to_path(&src, src_port, &mut path_buf);
@@ -237,8 +229,7 @@ pub extern "C" fn _start() -> ! {
             }
             Err(e) => {
                 if e.to_errno() != 11 {
-                    log("[udp-tool] read error
-");
+                    log("[udp-tool] read error\n");
                 }
             }
         }
@@ -246,8 +237,7 @@ pub extern "C" fn _start() -> ! {
         let now = clock_ns();
         if now.saturating_sub(last_heartbeat) >= HEARTBEAT_MS * 1_000_000 {
             if let Some(fd) = send_fd {
-                let _ = call::write(fd, b"udp-tool: heartbeat
-");
+                let _ = call::write(fd, b"udp-tool: heartbeat\n");
             }
             last_heartbeat = now;
         }

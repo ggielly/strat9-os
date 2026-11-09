@@ -184,8 +184,7 @@ pub(crate) fn dump_backtrace_from(mut rbp: u64) {
 
 /// Collect comprehensive debug info and print directly to serial (heap-safe).
 fn dump_panic_info(info: &PanicInfo) {
-    crate::serial_force_println!("
-[31;1m!!! KERNEL PANIC !!![0m");
+    crate::serial_force_println!("\n\x1b[31;1m!!! KERNEL PANIC !!!\x1b[0m");
     crate::serial_force_println!("=== GURU MEDiTATiON :: KERNEL PANiK ===");
     crate::serial_force_println!("");
 
@@ -281,8 +280,7 @@ pub fn panic_handler(info: &PanicInfo) -> ! {
     // detected" panic.  The double-panic path used to be the only thing
     // printed, hiding the real cause.  Emit it now, unconditionally and
     // allocation-free, so the original message is always on the wire.
-    crate::serial_force_println!("
-[panic] {}", info.message());
+    crate::serial_force_println!("\n[panic] {}", info.message());
     if let Some(loc) = info.location() {
         crate::serial_force_println!("[panic] at {}:{}", loc.file(), loc.line());
     }
@@ -306,8 +304,7 @@ pub fn panic_handler(info: &PanicInfo) -> ! {
     if PANIC_IN_PROGRESS.swap(true, Ordering::SeqCst) {
         // Double panic: dump as much as we can with stack-only formatting.
         crate::arch::cli();
-        crate::serial_force_println!("
-[31;1m!!! DOUBLE PANIC !!![0m");
+        crate::serial_force_println!("\n\x1b[31;1m!!! DOUBLE PANIC !!!\x1b[0m");
         if let Some(loc) = info.location() {
             crate::serial_force_println!("panic at {}:{}", loc.file(), loc.line());
         }

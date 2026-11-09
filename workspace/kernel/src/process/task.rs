@@ -613,8 +613,7 @@ impl Task {
             let nib = hex[((v >> sh) & 0xF) as usize];
             crate::e9_mark!(nib);
         }
-        crate::e9_mark!(b'
-');
+        crate::e9_mark!(b'\n');
 
         self.seed_interrupt_frame(frame);
     }

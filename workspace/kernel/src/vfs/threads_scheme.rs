@@ -176,8 +176,7 @@ impl ThreadsScheme {
             for t in tasks {
                 if t.tgid == cur.tgid {
                     out.push_str(itoa_u32(t.tid).as_str());
-                    out.push('
-');
+                    out.push('\n');
                 }
             }
         }
@@ -331,12 +330,10 @@ impl Scheme for ThreadsScheme {
                     let (allocated, active) = thread_ops::kernel_user_stack_stats();
                     let mut content = String::from("allocated ");
                     content.push_str(itoa_u32(allocated as u32).as_str());
-                    content.push('
-');
+                    content.push('\n');
                     content.push_str("active ");
                     content.push_str(itoa_u32(active as u32).as_str());
-                    content.push('
-');
+                    content.push('\n');
                     serve_string(&content, offset, buf)
                 }
                 _ => Err(SyscallError::PermissionDenied),

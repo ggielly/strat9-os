@@ -350,7 +350,7 @@ impl SlabState {
                     0
                 };
                 crate::serial_println!(
-                    "[1;31m[HEAP] USE-AFTER-FREE: slab[{}] block={:#x} off={} bytes=[{:02x} {:02x} {:02x} {:02x}][0m",
+                    "\x1b[1;31m[HEAP] USE-AFTER-FREE: slab[{}] block={:#x} off={} bytes=[{:02x} {:02x} {:02x} {:02x}]\x1b[0m",
                     slab_size,
                     block as u64,
                     off,
@@ -364,7 +364,7 @@ impl SlabState {
                 let canary = *(block.add(slab_size - 4) as *const u32);
                 if canary != SLAB_CANARY {
                     crate::serial_println!(
-                        "[1;31m[HEAP] CANARY OVERFLOW: slab[{}] block={:#x} expected={:#x} got={:#x}[0m",
+                        "\x1b[1;31m[HEAP] CANARY OVERFLOW: slab[{}] block={:#x} expected={:#x} got={:#x}\x1b[0m",
                         slab_size,
                         block as u64,
                         SLAB_CANARY,

@@ -174,3 +174,4 @@ pub fn start_watchdog() -> Result<(), &'static str> {
     }
     Ok(())
 }
+

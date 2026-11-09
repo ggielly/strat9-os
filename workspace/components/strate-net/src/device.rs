@@ -410,8 +410,7 @@ impl phy::TxToken for LegacyTxToken {
         F: FnOnce(&mut [u8]) -> R,
     {
         if len > MAX_FRAME_SIZE {
-            log("[strate-net] TX frame too large
-");
+            log("[strate-net] TX frame too large\n");
             return f(&mut []);
         }
 

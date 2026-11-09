@@ -1407,11 +1407,9 @@ fn initialize_memory_allocator(
     let kernel_end = unsafe { ptr::read_volatile(ptr::addr_of!(riscv_kernel_end) as *const u64) };
     protected[1] = Some((kernel_start, kernel_end.saturating_sub(kernel_start)));
     crate::memory::boot_alloc::set_protected_ranges(&protected);
-    super::serial::_print(format_args!("[strat9] initializing boot allocator
-"));
+    super::serial::_print(format_args!("[strat9] initializing boot allocator\r\n"));
     crate::memory::boot_alloc::init_boot_allocator(&boot_regions[..count]);
-    super::serial::_print(format_args!("[strat9] boot allocator ready
-"));
+    super::serial::_print(format_args!("[strat9] boot allocator ready\r\n"));
 
     let total_ram = boot_regions[..count]
         .iter()
@@ -1423,11 +1421,9 @@ fn initialize_memory_allocator(
         let mut boot_allocator = crate::memory::boot_alloc::get_boot_allocator().lock();
         crate::memory::frame::init_metadata_array(total_ram, &mut boot_allocator);
     }
-    super::serial::_print(format_args!("[strat9] frame metadata ready
-"));
+    super::serial::_print(format_args!("[strat9] frame metadata ready\r\n"));
     crate::memory::buddy::init_buddy_allocator(&boot_regions[..count]);
-    super::serial::_print(format_args!("[strat9] buddy allocator ready
-"));
+    super::serial::_print(format_args!("[strat9] buddy allocator ready\r\n"));
 
     let mut mapper = super::paging::Sv39Mapper::new();
     let mut mapped_pages = 0usize;
@@ -1436,16 +1432,14 @@ fn initialize_memory_allocator(
             match mapper.map_ram(region.base, region.size) {
                 Ok(pages) => mapped_pages += pages,
                 Err(error) => super::serial::_print(format_args!(
-                    "[strat9] Sv39 map failed for {:#x}: {:?}
-",
+                    "[strat9] Sv39 map failed for {:#x}: {:?}\r\n",
                     region.base, error
                 )),
             }
         }
     }
     super::serial::_print(format_args!(
-        "[strat9] Sv39 tables ready: root={:#x} mapped={} pages
-",
+        "[strat9] Sv39 tables ready: root={:#x} mapped={} pages\r\n",
         mapper.root_physical_address(),
         mapped_pages
     ));
@@ -1455,8 +1449,7 @@ fn initialize_memory_allocator(
         Ok(count) => count,
         Err(error) => {
             super::serial::_print(format_args!(
-                "[strat9] platform discovery failed: {:?}
-",
+                "[strat9] platform discovery failed: {:?}\r\n",
                 error
             ));
             0
@@ -1466,16 +1459,14 @@ fn initialize_memory_allocator(
     for region in &platform_regions[..platform_count] {
         if let Err(error) = mapper.map_mmio(region.base, region.size) {
             super::serial::_print(format_args!(
-                "[strat9] Sv39 MMIO map failed for {:#x}: {:?}
-",
+                "[strat9] Sv39 MMIO map failed for {:#x}: {:?}\r\n",
                 region.base, error
             ));
             platform_ok = false;
         }
     }
     super::serial::_print(format_args!(
-        "[strat9] platform regions: {}
-",
+        "[strat9] platform regions: {}\r\n",
         platform_count
     ));
 
@@ -1485,39 +1476,32 @@ fn initialize_memory_allocator(
                 let address = frame.start_address.as_u64();
                 crate::memory::buddy::free(&token, frame, 0);
                 super::serial::_print(format_args!(
-                    "[strat9] buddy alloc/free ok: {address:#x}
-"
+                    "[strat9] buddy alloc/free ok: {address:#x}\r\n"
                 ));
             }
             Err(error) => {
-                super::serial::_print(format_args!("[strat9] buddy alloc failed: {:?}
-", error))
+                super::serial::_print(format_args!("[strat9] buddy alloc failed: {:?}\r\n", error))
             }
         }
     }
 
     if platform_ok {
-        super::serial::_print(format_args!("[strat9] activating Sv39
-"));
+        super::serial::_print(format_args!("[strat9] activating Sv39\r\n"));
         unsafe {
             mapper.activate();
         }
-        super::serial::_print(format_args!("[strat9] Sv39 paging active
-"));
+        super::serial::_print(format_args!("[strat9] Sv39 paging active\r\n"));
         match info.plic_base() {
             Some(base) => match super::plic::init(base, info.hart_id()) {
                 Ok(()) => {
-                    super::serial::_print(format_args!("[strat9] PLIC ready: {:#x}
-", base))
+                    super::serial::_print(format_args!("[strat9] PLIC ready: {:#x}\r\n", base))
                 }
                 Err(error) => {
-                    super::serial::_print(format_args!("[strat9] PLIC unavailable: {}
-", error))
+                    super::serial::_print(format_args!("[strat9] PLIC unavailable: {}\r\n", error))
                 }
             },
             None => super::serial::_print(format_args!(
-                "[strat9] PLIC unavailable: DTB node missing
-"
+                "[strat9] PLIC unavailable: DTB node missing\r\n"
             )),
         }
         match info.pci_base() {
@@ -1526,20 +1510,17 @@ fn initialize_memory_allocator(
                     let mut devices = [super::pci::PciDeviceInfo::EMPTY; 32];
                     let count = super::pci::enumerate(&mut devices);
                     super::serial::_print(format_args!(
-                        "[strat9] PCI ECAM ready: {:#x} devices={}
-",
+                        "[strat9] PCI ECAM ready: {:#x} devices={}\r\n",
                         base, count
                     ));
                 }
                 Err(error) => super::serial::_print(format_args!(
-                    "[strat9] PCI ECAM unavailable: {}
-",
+                    "[strat9] PCI ECAM unavailable: {}\r\n",
                     error
                 )),
             },
             None => super::serial::_print(format_args!(
-                "[strat9] PCI ECAM unavailable: DTB node missing
-"
+                "[strat9] PCI ECAM unavailable: DTB node missing\r\n"
             )),
         }
         let mut virtio_devices = [RiscvVirtioMmioDevice::EMPTY; MAX_DTB_VIRTIO_MMIO_DEVICES];
@@ -1547,8 +1528,7 @@ fn initialize_memory_allocator(
             Ok(count) => count,
             Err(error) => {
                 super::serial::_print(format_args!(
-                    "[strat9] VirtIO-MMIO discovery failed: {:?}
-",
+                    "[strat9] VirtIO-MMIO discovery failed: {:?}\r\n",
                     error
                 ));
                 0
@@ -1565,15 +1545,13 @@ fn initialize_memory_allocator(
             match super::virtio_mmio::initialize(info) {
                 Ok(()) => virtio_ready += 1,
                 Err(error) => super::serial::_print(format_args!(
-                    "[strat9] VirtIO device init failed (id={}): {}
-",
+                    "[strat9] VirtIO device init failed (id={}): {}\r\n",
                     info.device_id, error
                 )),
             }
         }
         super::serial::_print(format_args!(
-            "[strat9] VirtIO-MMIO ready: nodes={} devices={} initialized={}
-",
+            "[strat9] VirtIO-MMIO ready: nodes={} devices={} initialized={}\r\n",
             virtio_device_count, virtio_transport_count, virtio_ready
         ));
 
@@ -1581,20 +1559,17 @@ fn initialize_memory_allocator(
             Some(frequency) => {
                 match super::timer::init(frequency, info.has_isa_extension("sstc")) {
                     Ok(frequency) => super::serial::_print(format_args!(
-                        "[strat9] SBI timer ready: {} Hz
-",
+                        "[strat9] SBI timer ready: {} Hz\r\n",
                         frequency
                     )),
                     Err(error) => super::serial::_print(format_args!(
-                        "[strat9] SBI timer unavailable: {}
-",
+                        "[strat9] SBI timer unavailable: {}\r\n",
                         error
                     )),
                 }
             }
             None => super::serial::_print(format_args!(
-                "[strat9] SBI timer unavailable: DTB timebase-frequency missing
-"
+                "[strat9] SBI timer unavailable: DTB timebase-frequency missing\r\n"
             )),
         }
         scheduler_smoke_init();
@@ -1602,11 +1577,9 @@ fn initialize_memory_allocator(
 }
 
 extern "C" fn riscv_task_probe() -> ! {
-    super::serial::_print(format_args!("[strat9] task start
-"));
+    super::serial::_print(format_args!("[strat9] task start\r\n"));
     crate::process::yield_task();
-    super::serial::_print(format_args!("[strat9] task resumed
-"));
+    super::serial::_print(format_args!("[strat9] task resumed\r\n"));
     park();
 }
 
@@ -1639,8 +1612,7 @@ pub unsafe extern "C" fn riscv_boot_entry(hart_id: usize, dtb: *const u8) -> ! {
     super::percpu::init_boot_cpu(hart_id as u32);
     super::serial::init();
     super::serial::_print(format_args!(
-        "[strat9] percpu ready: {}
-",
+        "[strat9] percpu ready: {}\r\n",
         super::percpu::current_cpu_index()
     ));
     unsafe {
@@ -1650,23 +1622,18 @@ pub unsafe extern "C" fn riscv_boot_entry(hart_id: usize, dtb: *const u8) -> ! {
             panic!("RISC-V context self-test failed");
         }
     }
-    super::serial::_print(format_args!("[strat9] context switch ok
-"));
+    super::serial::_print(format_args!("[strat9] context switch ok\r\n"));
     super::trap::init();
-    super::serial::_print(format_args!("
-[strat9] RISC-V OpenSBI entry
-"));
+    super::serial::_print(format_args!("\r\n[strat9] RISC-V OpenSBI entry\r\n"));
     super::serial::_print(format_args!(
-        "[strat9] hart={} dtb=0x{:x}
-",
+        "[strat9] hart={} dtb=0x{:x}\r\n",
         hart_id, dtb as usize
     ));
 
     match RiscvBootInfo::from_handoff(hart_id, dtb) {
         Ok(info) => {
             super::serial::_print(format_args!(
-                "[strat9] DTB valid: {} bytes, version {}
-",
+                "[strat9] DTB valid: {} bytes, version {}\r\n",
                 info.dtb_len(),
                 info.version()
             ));
@@ -1675,28 +1642,24 @@ pub unsafe extern "C" fn riscv_boot_entry(hart_id: usize, dtb: *const u8) -> ! {
                 Ok(count) => match RiscvBootInfo::validate_memory_regions(&regions[..count]) {
                     Ok(()) => {
                         super::serial::_print(format_args!(
-                            "[strat9] memory: {} valid regions
-",
+                            "[strat9] memory: {} valid regions\r\n",
                             count
                         ));
                         initialize_memory_allocator(&info, dtb, &regions, count);
                     }
                     Err(error) => super::serial::_print(format_args!(
-                        "[strat9] memory map rejected: {:?}
-",
+                        "[strat9] memory map rejected: {:?}\r\n",
                         error
                     )),
                 },
                 Err(error) => super::serial::_print(format_args!(
-                    "[strat9] memory discovery failed: {:?}
-",
+                    "[strat9] memory discovery failed: {:?}\r\n",
                     error
                 )),
             }
         }
         Err(error) => {
-            super::serial::_print(format_args!("[strat9] DTB rejected: {:?}
-", error));
+            super::serial::_print(format_args!("[strat9] DTB rejected: {:?}\r\n", error));
         }
     }
 

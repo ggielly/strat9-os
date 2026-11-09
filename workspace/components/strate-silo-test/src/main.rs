@@ -45,8 +45,7 @@ static ALLOCATOR: BrkAllocator = BrkAllocator;
 
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
-    let _ = call::debug_log(b"[silo-test] OOM in rendezlarjan validation
-");
+    let _ = call::debug_log(b"[silo-test] OOM in rendezlarjan validation\n");
     call::exit(97)
 }
 
@@ -137,20 +136,17 @@ fn log_err(msg: &str) {
 
 /// Implements log nl.
 fn log_nl() {
-    log("
-");
+    log("\n");
 }
 
 /// Implements log sep star.
 fn log_sep_star() {
-    log("************************************************************
-");
+    log("************************************************************\n");
 }
 
 /// Implements log sep eq.
 fn log_sep_eq() {
-    log("============================================================
-");
+    log("============================================================\n");
 }
 
 /// Implements log section.
@@ -380,10 +376,8 @@ fn panic(info: &PanicInfo) -> ! {
 pub extern "C" fn _start() -> ! {
     log_nl();
     log_sep_eq();
-    log("[init-test] Strat9 first userspace init/test binary starting
-");
-    log("[init-test] Goal: maximal verbosity for PID/FORK/WAIT/COW debugging
-");
+    log("[init-test] Strat9 first userspace init/test binary starting\n");
+    log("[init-test] Goal: maximal verbosity for PID/FORK/WAIT/COW debugging\n");
     log_sep_eq();
 
     log_section("STEP 1/11: reading identifiers via high-level wrappers");
@@ -441,17 +435,14 @@ pub extern "C" fn _start() -> ! {
     };
 
     if child_pid == 0 {
-        log("[init-test:child1] entered child branch
-");
+        log("[init-test:child1] entered child branch\n");
         log_result("[child1] getpid()", call::getpid());
         log_result("[child1] getppid()", call::getppid());
         log_result("[child1] gettid()", call::gettid());
-        log("[init-test:child1] doing sched_yield x2 to exercise scheduler
-");
+        log("[init-test:child1] doing sched_yield x2 to exercise scheduler\n");
         let _ = call::sched_yield();
         let _ = call::sched_yield();
-        log("[init-test:child1] exiting with code 42
-");
+        log("[init-test:child1] exiting with code 42\n");
         exit_process(42);
     }
 
@@ -467,8 +458,7 @@ pub extern "C" fn _start() -> ! {
         log(": ");
         match call::waitpid(child_pid as isize, Some(&mut child1_status), call::WNOHANG) {
             Ok(0) => {
-                log("no exit yet
-");
+                log("no exit yet\n");
                 let _ = call::sched_yield();
             }
             Ok(pid_done) => {
@@ -511,8 +501,7 @@ pub extern "C" fn _start() -> ! {
     let invalid_create = call::thread_create(thread_entry_ptr, 0x12345, 0, 0);
     log_result("thread_create(invalid stack align)", invalid_create);
     if !matches!(invalid_create, Err(Error::InvalidArgument)) {
-        log("[init-test:thread] ERROR: expected EINVAL for misaligned stack
-");
+        log("[init-test:thread] ERROR: expected EINVAL for misaligned stack\n");
         exit_process(19);
     }
 
@@ -556,16 +545,14 @@ pub extern "C" fn _start() -> ! {
         exit_process(22);
     };
     if joined_a != tid_a {
-        log("[init-test:thread] ERROR: joined tid mismatch for thread A
-");
+        log("[init-test:thread] ERROR: joined tid mismatch for thread A\n");
         exit_process(23);
     }
     log("[init-test:thread] join status for A=");
     log_i64(join_status_a as i64);
     log_nl();
     if join_status_a != THREAD_CASE_A.expected_exit {
-        log("[init-test:thread] ERROR: unexpected join status for thread A
-");
+        log("[init-test:thread] ERROR: unexpected join status for thread A\n");
         exit_process(24);
     }
 
@@ -579,16 +566,14 @@ pub extern "C" fn _start() -> ! {
         exit_process(25);
     };
     if joined_b != tid_b {
-        log("[init-test:thread] ERROR: joined tid mismatch for thread B
-");
+        log("[init-test:thread] ERROR: joined tid mismatch for thread B\n");
         exit_process(26);
     }
     log("[init-test:thread] join status for B=");
     log_i64(join_status_b as i64);
     log_nl();
     if join_status_b != THREAD_CASE_B.expected_exit {
-        log("[init-test:thread] ERROR: unexpected join status for thread B
-");
+        log("[init-test:thread] ERROR: unexpected join status for thread B\n");
         exit_process(27);
     }
 
@@ -604,8 +589,7 @@ pub extern "C" fn _start() -> ! {
         || THREAD_TID_SLOT_0.load(Ordering::SeqCst) == 0
         || THREAD_TID_SLOT_1.load(Ordering::SeqCst) == 0
     {
-        log("[init-test:thread] ERROR: not all thread start markers are set
-");
+        log("[init-test:thread] ERROR: not all thread start markers are set\n");
         exit_process(28);
     }
 
@@ -613,28 +597,24 @@ pub extern "C" fn _start() -> ! {
     let join_self = call::thread_join(self_tid, None);
     log_result("thread_join(self)", join_self);
     if !matches!(join_self, Err(Error::InvalidArgument)) {
-        log("[init-test:thread] ERROR: expected EINVAL for join(self)
-");
+        log("[init-test:thread] ERROR: expected EINVAL for join(self)\n");
         exit_process(29);
     }
 
     let join_missing = call::thread_join(u32::MAX as usize, None);
     log_result("thread_join(nonexistent tid)", join_missing);
     if !matches!(join_missing, Err(Error::NotFound)) {
-        log("[init-test:thread] ERROR: expected ENOENT for missing tid
-");
+        log("[init-test:thread] ERROR: expected ENOENT for missing tid\n");
         exit_process(30);
     }
 
     let join_twice = call::thread_join(tid_a, None);
     log_result("thread_join(already joined thread A)", join_twice);
     if !matches!(join_twice, Err(Error::NotFound)) {
-        log("[init-test:thread] ERROR: expected ENOENT for second join
-");
+        log("[init-test:thread] ERROR: expected ENOENT for second join\n");
         exit_process(31);
     }
-    log("[init-test:thread] SUCCESS: thread lifecycle + error paths validated
-");
+    log("[init-test:thread] SUCCESS: thread lifecycle + error paths validated\n");
 
     log_section("STEP 8/12: second fork/wait any-child path (child exits 7)");
     let second = call::fork();
@@ -648,8 +628,7 @@ pub extern "C" fn _start() -> ! {
         }
     };
     if child2_pid == 0 {
-        log("[init-test:child2] exiting with code 7 immediately
-");
+        log("[init-test:child2] exiting with code 7 immediately\n");
         exit_process(7);
     }
     log("[init-test:parent] second child pid=");
@@ -690,35 +669,30 @@ pub extern "C" fn _start() -> ! {
     };
 
     if cow_child_pid == 0 {
-        log("[init-test:cow:child] entered child branch
-");
+        log("[init-test:cow:child] entered child branch\n");
         let child_seen_before = cow_read();
         log("[init-test:cow:child] sentinel before write=");
         log_hex_u64(child_seen_before);
         log_nl();
         if child_seen_before != cow_initial {
-            log("[init-test:cow:child] ERROR: unexpected initial sentinel in child
-");
+            log("[init-test:cow:child] ERROR: unexpected initial sentinel in child\n");
             exit_process(90);
         }
 
-        log("[init-test:cow:child] writing sentinel to child-specific value
-");
+        log("[init-test:cow:child] writing sentinel to child-specific value\n");
         cow_write(cow_child_value);
         let child_seen_after = cow_read();
         log("[init-test:cow:child] sentinel after write=");
         log_hex_u64(child_seen_after);
         log_nl();
         if child_seen_after != cow_child_value {
-            log("[init-test:cow:child] ERROR: child write did not stick
-");
+            log("[init-test:cow:child] ERROR: child write did not stick\n");
             exit_process(91);
         }
 
         let _ = call::sched_yield();
         let _ = call::sched_yield();
-        log("[init-test:cow:child] CoW child path done, exiting code 77
-");
+        log("[init-test:cow:child] CoW child path done, exiting code 77\n");
         exit_process(77);
     }
 
@@ -746,25 +720,21 @@ pub extern "C" fn _start() -> ! {
     log_hex_u64(cow_after_child_exit);
     log_nl();
     if cow_after_child_exit != cow_initial {
-        log("[init-test:cow:parent] ERROR: parent observed child write (CoW broken)
-");
+        log("[init-test:cow:parent] ERROR: parent observed child write (CoW broken)\n");
         exit_process(14);
     }
 
-    log("[init-test:cow:parent] writing parent-specific value
-");
+    log("[init-test:cow:parent] writing parent-specific value\n");
     cow_write(cow_parent_value);
     let cow_after_parent_write = cow_read();
     log("[init-test:cow:parent] sentinel after parent write=");
     log_hex_u64(cow_after_parent_write);
     log_nl();
     if cow_after_parent_write != cow_parent_value {
-        log("[init-test:cow:parent] ERROR: parent write did not stick
-");
+        log("[init-test:cow:parent] ERROR: parent write did not stick\n");
         exit_process(15);
     }
-    log("[init-test:cow] SUCCESS: CoW isolation validated for parent/child writes
-");
+    log("[init-test:cow] SUCCESS: CoW isolation validated for parent/child writes\n");
 
     log_section("STEP 10/12: targeted CoW multi-page test (4 pages)");
     log("[init-test:cow4k] buffer address=");
@@ -794,13 +764,11 @@ pub extern "C" fn _start() -> ! {
 
     if cow_multi_child_pid == 0 {
         log_sep_star();
-        log("[init-test:cow4k:child] validating inherited page fingerprints
-");
+        log("[init-test:cow4k:child] validating inherited page fingerprints\n");
         for page in 0..4usize {
             log_cow_multi_page_snapshot("[init-test:cow4k:child:before]", page);
         }
-        log("[init-test:cow4k:child] mutating all 4 pages with child-only fingerprints
-");
+        log("[init-test:cow4k:child] mutating all 4 pages with child-only fingerprints\n");
         for page in 0..4usize {
             let base = page * 4096;
             cow_multi_write(base, (0x91 + page as u8));
@@ -808,8 +776,7 @@ pub extern "C" fn _start() -> ! {
             cow_multi_write(base + 4095, (0xB1 + page as u8));
             log_cow_multi_page_snapshot("[init-test:cow4k:child:after]", page);
         }
-        log("[init-test:cow4k:child] exiting code 88
-");
+        log("[init-test:cow4k:child] exiting code 88\n");
         exit_process(88);
     }
 
@@ -851,14 +818,12 @@ pub extern "C" fn _start() -> ! {
         }
     }
     if !waited_multi_ok {
-        log("[init-test:cow4k:parent] ERROR: waitpid timeout after retries
-");
+        log("[init-test:cow4k:parent] ERROR: waitpid timeout after retries\n");
         exit_process(17);
     }
     decode_wait_status(cow_multi_status);
 
-    log("[init-test:cow4k:parent] verifying parent view unchanged after child writes
-");
+    log("[init-test:cow4k:parent] verifying parent view unchanged after child writes\n");
     for page in 0..4usize {
         let base = page * 4096;
         let v0 = cow_multi_read(base);
@@ -873,8 +838,7 @@ pub extern "C" fn _start() -> ! {
         log_cow_multi_page_snapshot("[init-test:cow4k:parent:verified]", page);
     }
 
-    log("[init-test:cow4k:parent] now writing parent-only fingerprints
-");
+    log("[init-test:cow4k:parent] now writing parent-only fingerprints\n");
     for page in 0..4usize {
         let base = page * 4096;
         cow_multi_write(base, (0x21 + page as u8));
@@ -882,8 +846,7 @@ pub extern "C" fn _start() -> ! {
         cow_multi_write(base + 4095, (0x41 + page as u8));
         log_cow_multi_page_snapshot("[init-test:cow4k:parent:after]", page);
     }
-    log("[init-test:cow4k] SUCCESS: 4-page CoW isolation validated
-");
+    log("[init-test:cow4k] SUCCESS: 4-page CoW isolation validated\n");
 
     log_section("STEP 11/12: raw syscall sanity check for waitpid on no child again");
     let mut st: i32 = 0;
@@ -928,8 +891,7 @@ pub extern "C" fn _start() -> ! {
     match t_coherence.join() {
         Ok(code) if code == 55 => {}
         other => {
-            log("[init-test:rz] ERROR: join exit code mismatch (want 55)
-");
+            log("[init-test:rz] ERROR: join exit code mismatch (want 55)\n");
             if let Err(e) = other {
                 log_u64(e.to_errno() as u64);
             }
@@ -942,8 +904,7 @@ pub extern "C" fn _start() -> ! {
         || coherence_seen == 0
         || coherence_seen != coherence_handle_tid as usize
     {
-        log("[init-test:rz] ERROR: TID incoherent between lib/raw/handle
-");
+        log("[init-test:rz] ERROR: TID incoherent between lib/raw/handle\n");
         exit_process(62);
     }
     log("[init-test:rz] OK spawn/join coherent tid=");
@@ -999,8 +960,7 @@ pub extern "C" fn _start() -> ! {
     match self_join {
         Err(Error::InvalidArgument) => {}
         other => {
-            log("[init-test:rz] ERROR: expected EINVAL for self-join
-");
+            log("[init-test:rz] ERROR: expected EINVAL for self-join\n");
             if let Err(e) = other {
                 log_u64(e.to_errno() as u64);
             }
@@ -1008,16 +968,14 @@ pub extern "C" fn _start() -> ! {
             exit_process(66);
         }
     }
-    log("[init-test:rz] OK self-join EINVAL
-");
+    log("[init-test:rz] OK self-join EINVAL\n");
 
     // ---- 13d. thread_list includes current thread ----
     match rendezlarjan::thread_list() {
         Ok(list) => {
             let me = rendezlarjan::thread_current();
             if !list.iter().any(|info| info.tid == me) {
-                log("[init-test:rz] ERROR: thread_list missing current tid
-");
+                log("[init-test:rz] ERROR: thread_list missing current tid\n");
                 exit_process(67);
             }
             log("[init-test:rz] OK thread_list count=");
@@ -1036,8 +994,7 @@ pub extern "C" fn _start() -> ! {
     let baseline = match read_thread_stats() {
         Some(s) => s,
         None => {
-            log("[init-test:rz] ERROR: cannot read /thread/stats baseline
-");
+            log("[init-test:rz] ERROR: cannot read /thread/stats baseline\n");
             exit_process(68);
         }
     };
@@ -1075,12 +1032,10 @@ pub extern "C" fn _start() -> ! {
     log_u64(baseline.1 as u64);
     log_nl();
     if !leak_ok || final_stats.0 < baseline.0 + 50 {
-        log("[init-test:rz] ERROR: kernel-owned user stack leak suspected
-");
+        log("[init-test:rz] ERROR: kernel-owned user stack leak suspected\n");
         exit_process(70);
     }
-    log("[init-test:rz] OK zero-leak proof (active back to baseline after 50 detaches)
-");
+    log("[init-test:rz] OK zero-leak proof (active back to baseline after 50 detaches)\n");
 
     // ---- 13f. kill EPERM across processes (fork + pipe coordination) ----
     let pipe_fds = call::pipe();
@@ -1102,16 +1057,14 @@ pub extern "C" fn _start() -> ! {
                 if let Ok(t) = target {
                     let _ = t.join();
                 }
-                log("[init-test:rz:kill-child] done, exiting 5
-");
+                log("[init-test:rz:kill-child] done, exiting 5\n");
                 exit_process(5);
             }
             let _ = call::close(wr as usize);
             (rd, child_pid)
         }
         _ => {
-            log("[init-test:rz] ERROR: pipe/fork for kill test failed
-");
+            log("[init-test:rz] ERROR: pipe/fork for kill test failed\n");
             exit_process(71);
         }
     };
@@ -1131,12 +1084,10 @@ pub extern "C" fn _start() -> ! {
     let cross_kill = rendezlarjan::thread_kill(kill_target_tid);
     match cross_kill {
         Err(Error::PermissionDenied) => {
-            log("[init-test:rz] OK cross-process kill rejected with EPERM
-");
+            log("[init-test:rz] OK cross-process kill rejected with EPERM\n");
         }
         other => {
-            log("[init-test:rz] ERROR: expected EPERM for cross-process kill
-");
+            log("[init-test:rz] ERROR: expected EPERM for cross-process kill\n");
             if let Err(e) = other {
                 log("errno=");
                 log_u64(e.to_errno() as u64);
@@ -1147,8 +1098,7 @@ pub extern "C" fn _start() -> ! {
     }
     let mut kill_child_status: i32 = -1;
     if call::waitpid_blocking(kill_child_pid.1 as isize, &mut kill_child_status).is_err() {
-        log("[init-test:rz] ERROR: waitpid on kill-test child failed
-");
+        log("[init-test:rz] ERROR: waitpid on kill-test child failed\n");
         exit_process(73);
     }
     decode_wait_status(kill_child_status);
@@ -1171,8 +1121,7 @@ pub extern "C" fn _start() -> ! {
     };
     let victim_tid = victim.tid();
     match rendezlarjan::thread_kill(victim_tid) {
-        Ok(()) => log("[init-test:rz] OK same-process kill accepted
-"),
+        Ok(()) => log("[init-test:rz] OK same-process kill accepted\n"),
         Err(e) => {
             log("[init-test:rz] ERROR: same-process kill failed errno=");
             log_u64(e.to_errno() as u64);

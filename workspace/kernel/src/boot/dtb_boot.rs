@@ -130,8 +130,7 @@ pub unsafe extern "C" fn kmain(args_ptr: u64) -> ! {
     // Just use raw writes without init (bootloader already set up COM1).
     {
         let thr: u16 = 0x3F8;
-        let s = b"[kmain] RAW entry
-";
+        let s = b"[kmain] RAW entry\r\n";
         for &b in s {
             let mut lsr: u8;
             core::arch::asm!("in al, dx", in("dx") 0x3F8 + 5, out("al") lsr, options(nostack, preserves_flags));
@@ -154,8 +153,7 @@ pub unsafe extern "C" fn kmain(args_ptr: u64) -> ! {
         let mut early_port = uart_16550::SerialPort::new(0x3F8);
         let _ = core::fmt::Write::write_str(
             &mut early_port,
-            "[kmain] *** Strat9-OS kernel entry ***
-",
+            "[kmain] *** Strat9-OS kernel entry ***\r\n",
         );
     }
 
@@ -166,14 +164,12 @@ pub unsafe extern "C" fn kmain(args_ptr: u64) -> ! {
     // serial_println! and format_args! vtable dispatch may not work
     // before the full kernel is initialized.
     let args = if args_ptr == 0 {
-        early_print(b"[kmain] PVH boot (no args)
-");
+        early_print(b"[kmain] PVH boot (no args)\r\n");
         build_minimal_args()
     } else {
         early_print(b"[kmain] Bootloader boot (args=0x");
         early_print_hex(args_ptr);
-        early_print(b")
-");
+        early_print(b")\r\n");
         // Read KernelArgs from the bootloader-provided pointer.
         // The struct is #[repr(C, packed)] so we copy field-by-field.
         let ptr = args_ptr as *const strat9_abi::boot::KernelArgs;
@@ -231,8 +227,7 @@ pub unsafe extern "C" fn kmain(args_ptr: u64) -> ! {
         early_print_hex(
             unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.magic)) } as u64,
         );
-        early_print(b"
-");
+        early_print(b"\r\n");
         hlt_loop();
     }
 
@@ -259,8 +254,7 @@ pub unsafe extern "C" fn kmain(args_ptr: u64) -> ! {
     early_print_hex(framebuffer_addr);
     early_print(b" rsdp=0x");
     early_print_hex(acpi_rsdp_base);
-    early_print(b"
-");
+    early_print(b"\r\n");
 
     // Step 5: Hand off to kernel_main (still on bootstrap stack).
     // kernel_main will allocate a real stack after buddy allocator init.

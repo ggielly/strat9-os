@@ -70,10 +70,18 @@ add_header() {
         echo "Dry-run: Would add header to $file"
         return
     fi
-    local content
-    content=$(cat "$file")
-    echo -e "$header\n\n$content" > "$file"
-    echo "Added header to $file"
+    # Never use `echo -e` here: it interprets backslash escapes in the file
+    # content (\n, \t, \\, \x..), corrupting Rust literals. `printf` only
+    # formats the header; `cat` copies the source byte-for-byte.
+    local tmp="${file}.gpl-header.tmp"
+    if { printf '%s\n\n' "$header"; cat -- "$file"; } > "$tmp"; then
+        mv -- "$tmp" "$file"
+        echo "Added header to $file"
+    else
+        rm -f -- "$tmp"
+        echo "Failed to add header to $file" >&2
+        return 1
+    fi
 }
 
 scanned=0

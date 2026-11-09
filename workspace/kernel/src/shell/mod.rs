@@ -151,7 +151,7 @@ fn move_cursor_left_chars(n: usize) {
     }
     let mut tmp = String::with_capacity(n);
     for _ in 0..n {
-        tmp.push('');
+        tmp.push('\x08');
     }
     print_text(&tmp);
 }
@@ -164,13 +164,13 @@ fn clear_visible_line(line: &[u8]) {
     }
     let mut tmp = String::with_capacity(n.saturating_mul(3));
     for _ in 0..n {
-        tmp.push('');
+        tmp.push('\x08');
     }
     for _ in 0..n {
         tmp.push(' ');
     }
     for _ in 0..n {
-        tmp.push('');
+        tmp.push('\x08');
     }
     print_text(&tmp);
 }
@@ -187,7 +187,7 @@ fn redraw_line(input: &[u8], cursor_pos: usize) {
         }
     }
     tmp.push(' ');
-    tmp.push('');
+    tmp.push('\x08');
 
     let back_moves = if cursor_pos <= input.len() {
         if let (Ok(full), Ok(prefix)) = (
@@ -203,7 +203,7 @@ fn redraw_line(input: &[u8], cursor_pos: usize) {
     };
     tmp.reserve(back_moves);
     for _ in 0..back_moves {
-        tmp.push('');
+        tmp.push('\x08');
     }
     print_text(&tmp);
 }
@@ -227,13 +227,13 @@ fn redraw_full_line(input: &[u8], cursor_pos: usize) {
             .saturating_add(back_moves),
     );
     for _ in 0..n {
-        tmp.push('');
+        tmp.push('\x08');
     }
     for _ in 0..n {
         tmp.push(' ');
     }
     for _ in 0..n {
-        tmp.push('');
+        tmp.push('\x08');
     }
     if let Ok(s) = core::str::from_utf8(input) {
         tmp.push_str(s);
@@ -243,7 +243,7 @@ fn redraw_full_line(input: &[u8], cursor_pos: usize) {
         }
     }
     for _ in 0..back_moves {
-        tmp.push('');
+        tmp.push('\x08');
     }
     print_text(&tmp);
 }
@@ -385,8 +385,7 @@ pub extern "C" fn shell_main() -> ! {
             unsafe {
                 core::arch::asm!("out 0xe9, al", in("al") b'R', options(nomem, nostack));
                 core::arch::asm!("out 0xe9, al", in("al") ch, options(nomem, nostack));
-                core::arch::asm!("out 0xe9, al", in("al") b'
-', options(nomem, nostack));
+                core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
             }
             // Any keypress returns the view to live output.
             if crate::arch::vga::is_available() {
@@ -399,8 +398,7 @@ pub extern "C" fn shell_main() -> ! {
             }
 
             match ch {
-                b'' | b'
-' => {
+                b'\r' | b'\n' => {
                     in_escape_seq = false;
                     utf8_pending_len = 0;
                     shell_println!();
@@ -429,13 +427,13 @@ pub extern "C" fn shell_main() -> ! {
 
                     print_prompt();
                 }
-                b'' | b'' => {
+                b'\x08' | b'\x7f' => {
                     in_escape_seq = false;
                     utf8_pending_len = 0;
                     let _ =
                         delete_prev_char_at_cursor(&mut input_buf, &mut input_len, &mut cursor_pos);
                 }
-                b'' => {
+                b'\x03' => {
                     in_escape_seq = false;
                     utf8_pending_len = 0;
                     shell_println!("^C");
@@ -445,12 +443,12 @@ pub extern "C" fn shell_main() -> ! {
                     SHELL_INTERRUPTED.store(false, Ordering::Relaxed);
                     print_prompt();
                 }
-                b'	' => {
+                b'\t' => {
                     in_escape_seq = false;
                     utf8_pending_len = 0;
                     tab_complete(&mut input_buf, &mut input_len, &mut cursor_pos, &registry);
                 }
-                b'' => {
+                b'\x04' => {
                     in_escape_seq = false;
                     utf8_pending_len = 0;
                     let _ =
@@ -461,7 +459,7 @@ pub extern "C" fn shell_main() -> ! {
                     utf8_pending_len = 0;
                     if cursor_pos > 0 {
                         cursor_pos = prev_char_boundary(&input_buf[..input_len], cursor_pos);
-                        print_char('');
+                        print_char('\x08');
                     }
                 }
                 KEY_RIGHT => {
@@ -478,7 +476,7 @@ pub extern "C" fn shell_main() -> ! {
                     utf8_pending_len = 0;
                     while cursor_pos > 0 {
                         cursor_pos = prev_char_boundary(&input_buf[..input_len], cursor_pos);
-                        print_char('');
+                        print_char('\x08');
                     }
                 }
                 KEY_END => {
@@ -551,7 +549,7 @@ pub extern "C" fn shell_main() -> ! {
                         redraw_full_line(&input_buf[..input_len], cursor_pos);
                     }
                 }
-                b'' => {
+                b'\x1b' => {
                     utf8_pending_len = 0;
                     in_escape_seq = true;
                 }

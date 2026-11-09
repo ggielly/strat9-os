@@ -97,8 +97,7 @@ impl Scheme for NetScheme {
         let handle = h.get(&fid).ok_or(SyscallError::BadHandle)?;
         match handle {
             Handle::Root => {
-                let list: String = list_interfaces().into_iter().map(|n| n + "
-").collect();
+                let list: String = list_interfaces().into_iter().map(|n| n + "\n").collect();
                 let b = list.as_bytes();
                 let n = core::cmp::min(b.len(), buf.len());
                 buf[..n].copy_from_slice(&b[..n]);

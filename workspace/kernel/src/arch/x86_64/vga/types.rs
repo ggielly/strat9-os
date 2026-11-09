@@ -395,7 +395,7 @@ impl TerminalWidget {
 /// Parses ansi color prefix.
 pub(crate) fn parse_ansi_color_prefix(input: &str, default_fg: RgbColor) -> (RgbColor, String) {
     let bytes = input.as_bytes();
-    if !bytes.starts_with(b"[") {
+    if !bytes.starts_with(b"\x1b[") {
         return (default_fg, String::from(input));
     }
     let Some(mpos) = bytes.iter().position(|b| *b == b'm') else {

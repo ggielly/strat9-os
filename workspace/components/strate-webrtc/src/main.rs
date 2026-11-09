@@ -51,8 +51,7 @@ static ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
-    let _ = call::debug_log(b"[strate-webrtc] OOM
-");
+    let _ = call::debug_log(b"[strate-webrtc] OOM\n");
     call::exit(12);
 }
 
@@ -269,7 +268,7 @@ fn refresh_policies(rt: &mut Runtime) {
         if idx == 0 || line.is_empty() {
             continue;
         }
-        let mut cols = line.split('	');
+        let mut cols = line.split('\t');
         let sid = cols.next().and_then(|v| v.parse::<u32>().ok());
         let _state = cols.next();
         let _tasks = cols.next();
@@ -401,8 +400,7 @@ pub unsafe extern "C" fn _start() -> ! {
 
     let _ = call::ipc_bind_port(port_h, b"/srv/strate-webrtc/bootstrap");
     bind_alias(port_h, "default");
-    log("[strate-webrtc] online
-");
+    log("[strate-webrtc] online\n");
 
     loop {
         cleanup_expired(&mut rt, now_ns());

@@ -81,20 +81,15 @@ fn log_hex_u64(mut value: u64) {
 fn log_line(label: &str, value: u64) {
     log(label);
     log_u64(value);
-    log("
-");
+    log("\n");
 }
 
 /// Implements section.
 fn section(title: &str) {
-    log("
-============================================================
-");
+    log("\n============================================================\n");
     log("[test_mem] ");
     log(title);
-    log("
-============================================================
-");
+    log("\n============================================================\n");
 }
 
 /// Implements query brk.
@@ -104,8 +99,7 @@ fn query_brk() -> usize {
         Err(e) => {
             log_err("[test_mem] brk(0) failed: ");
             log_err(e.name());
-            log_err("
-");
+            log_err("\n");
             call::exit(101);
         }
     }
@@ -120,8 +114,7 @@ fn set_brk(new_brk: usize, ctx: &str) -> usize {
             log_err(ctx);
             log_err(": ");
             log_err(e.name());
-            log_err("
-");
+            log_err("\n");
             call::exit(102);
         }
     }
@@ -137,8 +130,7 @@ fn fill_and_verify_pages(base: usize, pages: usize, seed: u8, tag: &str) {
     log_u64(pages as u64);
     log(" seed=");
     log_hex_u64(seed as u64);
-    log("
-");
+    log("\n");
 
     let total = pages * PAGE_SIZE;
     let buf = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, total) };
@@ -168,16 +160,14 @@ fn fill_and_verify_pages(base: usize, pages: usize, seed: u8, tag: &str) {
             log_u64(p as u64);
             log_err(" in ");
             log_err(tag);
-            log_err("
-");
+            log_err("\n");
             call::exit(103);
         }
     }
 
     log("[test_mem] verify OK for ");
     log(tag);
-    log("
-");
+    log("\n");
 }
 
 /// Implements single roundtrip.
@@ -188,23 +178,18 @@ fn single_roundtrip(case_name: &str, pages: usize, seed: u8) {
 
     log("[test_mem] base brk     = ");
     log_hex_u64(base as u64);
-    log("
-[test_mem] target brk   = ");
+    log("\n[test_mem] target brk   = ");
     log_hex_u64(target as u64);
-    log("
-[test_mem] grow pages   = ");
+    log("\n[test_mem] grow pages   = ");
     log_u64(pages as u64);
-    log("
-");
+    log("\n");
 
     let after_grow = set_brk(target, case_name);
     log("[test_mem] after grow   = ");
     log_hex_u64(after_grow as u64);
-    log("
-");
+    log("\n");
     if after_grow < target {
-        log_err("[test_mem] ERROR: brk grow returned too small value
-");
+        log_err("[test_mem] ERROR: brk grow returned too small value\n");
         call::exit(104);
     }
 
@@ -213,11 +198,9 @@ fn single_roundtrip(case_name: &str, pages: usize, seed: u8) {
     let after_shrink = set_brk(base, case_name);
     log("[test_mem] after shrink = ");
     log_hex_u64(after_shrink as u64);
-    log("
-");
+    log("\n");
     if after_shrink > base {
-        log_err("[test_mem] ERROR: brk shrink did not return near base
-");
+        log_err("[test_mem] ERROR: brk shrink did not return near base\n");
         call::exit(105);
     }
 }
@@ -228,8 +211,7 @@ fn saw_tooth_stress() {
     let base = query_brk();
     log("[test_mem] initial base = ");
     log_hex_u64(base as u64);
-    log("
-");
+    log("\n");
 
     let mut pages = 1usize;
     for step in 0..18usize {
@@ -240,8 +222,7 @@ fn saw_tooth_stress() {
         log_u64(pages as u64);
         log(" pages -> ");
         log_hex_u64(target as u64);
-        log("
-");
+        log("\n");
         let _ = set_brk(target, "saw_tooth_grow");
         fill_and_verify_pages(base, pages, (0x40u8).wrapping_add(step as u8), "saw_tooth");
 
@@ -253,8 +234,7 @@ fn saw_tooth_stress() {
         log_u64(back_pages as u64);
         log(" pages -> ");
         log_hex_u64(back_target as u64);
-        log("
-");
+        log("\n");
         let _ = set_brk(back_target, "saw_tooth_shrink");
 
         pages = if pages >= 64 { 1 } else { pages * 2 };
@@ -264,8 +244,7 @@ fn saw_tooth_stress() {
     let final_brk = set_brk(base, "saw_tooth_final");
     log("[test_mem] final brk = ");
     log_hex_u64(final_brk as u64);
-    log("
-");
+    log("\n");
 }
 
 /// Implements churn many small ops.
@@ -281,8 +260,7 @@ fn churn_many_small_ops() {
         if i % 10 == 0 {
             log("[test_mem] churn checkpoint i=");
             log_u64(i as u64);
-            log("
-");
+            log("\n");
         }
     }
 }
@@ -296,10 +274,8 @@ fn panic(info: &PanicInfo) -> ! {
 /// Implements start.
 pub extern "C" fn _start() -> ! {
     section("Strat9 userspace memory stress test (very verbose)");
-    log("[test_mem] objectif: valider grow/shrink BRK + accès page par page
-");
-    log("[test_mem] ce test est volontairement verbeux
-");
+    log("[test_mem] objectif: valider grow/shrink BRK + accès page par page\n");
+    log("[test_mem] ce test est volontairement verbeux\n");
 
     let pid = call::getpid().unwrap_or(0);
     let tid = call::gettid().unwrap_or(0);
@@ -307,8 +283,7 @@ pub extern "C" fn _start() -> ! {
     log_u64(pid as u64);
     log(" tid=");
     log_u64(tid as u64);
-    log("
-");
+    log("\n");
 
     single_roundtrip("Roundtrip 1 page", 1, 0x11);
     single_roundtrip("Roundtrip 2 pages", 2, 0x22);

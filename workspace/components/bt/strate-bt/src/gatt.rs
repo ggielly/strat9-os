@@ -532,8 +532,7 @@ mod tests {
     #[test]
     fn rx_command_parsing() {
         assert_eq!(parse_rx_command(b"pause"), Some(RxAction::Pause));
-        assert_eq!(parse_rx_command(b" resume
-"), Some(RxAction::Resume));
+        assert_eq!(parse_rx_command(b" resume\r\n"), Some(RxAction::Resume));
         assert_eq!(parse_rx_command(b"stats"), Some(RxAction::Stats));
         assert_eq!(
             parse_rx_command(b"dump 128"),

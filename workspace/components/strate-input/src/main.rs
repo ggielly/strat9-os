@@ -60,7 +60,7 @@ static AZERTY_NORMAL: [u8; 128] = {
     t[0x0C] = b')';
     t[0x0D] = b'+';
     t[0x0E] = 0x08; // Backspace
-    t[0x0F] = b'	';
+    t[0x0F] = b'\t';
     t[0x10] = b'a';
     t[0x11] = b'z';
     t[0x12] = b'e';
@@ -73,8 +73,7 @@ static AZERTY_NORMAL: [u8; 128] = {
     t[0x19] = b'p';
     t[0x1A] = b'^';
     t[0x1B] = b'$';
-    t[0x1C] = b'
-'; // Enter
+    t[0x1C] = b'\n'; // Enter
     t[0x1E] = b'q';
     t[0x1F] = b's';
     t[0x20] = b'd';
@@ -129,10 +128,10 @@ static AZERTY_SHIFT: [u8; 128] = {
     t[0x09] = b'8';
     t[0x0A] = b'9';
     t[0x0B] = b'0';
-    t[0x0C] = b'ç'; // c cedilla
+    t[0x0C] = b'\xe7'; // c cedilla
     t[0x0D] = b'=';
     t[0x0E] = 0x08;
-    t[0x0F] = b'	';
+    t[0x0F] = b'\t';
     t[0x10] = b'A';
     t[0x11] = b'Z';
     t[0x12] = b'E';
@@ -143,10 +142,9 @@ static AZERTY_SHIFT: [u8; 128] = {
     t[0x17] = b'I';
     t[0x18] = b'O';
     t[0x19] = b'P';
-    t[0x1A] = b'è'; // e grave
-    t[0x1B] = b'£'; // pound sign
-    t[0x1C] = b'
-';
+    t[0x1A] = b'\xe8'; // e grave
+    t[0x1B] = b'\xa3'; // pound sign
+    t[0x1C] = b'\n';
     t[0x1E] = b'Q';
     t[0x1F] = b'S';
     t[0x20] = b'D';
@@ -158,7 +156,7 @@ static AZERTY_SHIFT: [u8; 128] = {
     t[0x26] = b'L';
     t[0x27] = b'M';
     t[0x28] = b'%';
-    t[0x29] = b'µ'; // mu
+    t[0x29] = b'\xb5'; // mu
     t[0x2B] = b'>';
     t[0x2C] = b'W';
     t[0x2D] = b'X';
@@ -169,7 +167,7 @@ static AZERTY_SHIFT: [u8; 128] = {
     t[0x32] = b'?';
     t[0x33] = b'.';
     t[0x34] = b'/';
-    t[0x35] = b'×'; // multiply
+    t[0x35] = b'\xd7'; // multiply
     t[0x39] = b' ';
     t
 };
@@ -191,7 +189,7 @@ static QWERTY_NORMAL: [u8; 128] = {
     t[0x0C] = b'0';
     t[0x0D] = b'-';
     t[0x0E] = 0x08;
-    t[0x0F] = b'	';
+    t[0x0F] = b'\t';
     t[0x10] = b'q';
     t[0x11] = b'w';
     t[0x12] = b'e';
@@ -204,8 +202,7 @@ static QWERTY_NORMAL: [u8; 128] = {
     t[0x19] = b'p';
     t[0x1A] = b'[';
     t[0x1B] = b']';
-    t[0x1C] = b'
-';
+    t[0x1C] = b'\n';
     t[0x1E] = b'a';
     t[0x1F] = b's';
     t[0x20] = b'd';
@@ -217,8 +214,8 @@ static QWERTY_NORMAL: [u8; 128] = {
     t[0x26] = b'l';
     t[0x27] = b';';
     t[0x28] = b'\'';
-    t[0x29] = b'\';
-    t[0x2B] = b'\';
+    t[0x29] = b'\\';
+    t[0x2B] = b'\\';
     t[0x2C] = b'z';
     t[0x2D] = b'x';
     t[0x2E] = b'c';
@@ -249,7 +246,7 @@ static QWERTY_SHIFT: [u8; 128] = {
     t[0x0C] = b')';
     t[0x0D] = b'_';
     t[0x0E] = 0x08;
-    t[0x0F] = b'	';
+    t[0x0F] = b'\t';
     t[0x10] = b'Q';
     t[0x11] = b'W';
     t[0x12] = b'E';
@@ -262,8 +259,7 @@ static QWERTY_SHIFT: [u8; 128] = {
     t[0x19] = b'P';
     t[0x1A] = b'{';
     t[0x1B] = b'}';
-    t[0x1C] = b'
-';
+    t[0x1C] = b'\n';
     t[0x1E] = b'A';
     t[0x1F] = b'S';
     t[0x20] = b'D';
@@ -443,8 +439,7 @@ pub extern "C" fn _start() -> ! {
 
 fn serial_println(s: &str) {
     let _ = call::write(2, s.as_bytes());
-    let _ = call::write(2, b"
-");
+    let _ = call::write(2, b"\n");
 }
 
 /// Log an open failure to stderr without alloc:
@@ -453,8 +448,7 @@ fn log_open_failure(dev: &str) {
     const PREFIX: &[u8] = b"[input-server] failed to open /dev/input/";
     let _ = call::write(2, PREFIX);
     let _ = call::write(2, dev.as_bytes());
-    let _ = call::write(2, b"
-");
+    let _ = call::write(2, b"\n");
 }
 
 #[panic_handler]

@@ -354,12 +354,7 @@ mod tests {
     use crate::wpa2::EAPOL_TYPE_KEY;
 
     fn cfg() -> WifiConfig {
-        let text = "[wifi]
-enabled=true
-ssid=\"IEEE\"
-passphrase=\"password\"
-bssid=\"02:00:00:00:00:02\"
-";
+        let text = "[wifi]\nenabled=true\nssid=\"IEEE\"\npassphrase=\"password\"\nbssid=\"02:00:00:00:00:02\"\n";
         crate::config::parse(text).unwrap()
     }
 

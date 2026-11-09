@@ -82,11 +82,9 @@ impl fmt::Write for QueuedWriter {
         for byte in text.bytes() {
             // Match uart_16550::SerialPort::send's terminal translation.
             match byte {
-                b'
-' => {
-                    self.byte(b'')?;
-                    self.byte(b'
-')?;
+                b'\n' => {
+                    self.byte(b'\r')?;
+                    self.byte(b'\n')?;
                 }
                 8 | 127 => {
                     self.byte(8)?;
@@ -186,10 +184,10 @@ fn force_lock_release(saved_flags: u64) {
     crate::arch::x86_64::restore_flags(saved_flags);
 }
 
-const ANSI_RESET: &str = "[0m";
-const ANSI_RED: &str = "[31m";
-const ANSI_GREEN: &str = "[32m";
-const ANSI_VIOLET: &str = "[35m";
+const ANSI_RESET: &str = "\x1b[0m";
+const ANSI_RED: &str = "\x1b[31m";
+const ANSI_GREEN: &str = "\x1b[32m";
+const ANSI_VIOLET: &str = "\x1b[35m";
 const TOKEN_BUF_CAP: usize = 64;
 
 /// Signal that the kernel has entered an emergency panic state.
@@ -362,14 +360,12 @@ impl<'a, W: fmt::Write> BootPrefixWriter<'a, W> {
 impl<W: fmt::Write> fmt::Write for BootPrefixWriter<'_, W> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for ch in s.chars() {
-            if self.line_start && ch != '
-' {
+            if self.line_start && ch != '\n' {
                 self.write_prefix()?;
                 self.line_start = false;
             }
             self.inner.write_char(ch)?;
-            if ch == '
-' {
+            if ch == '\n' {
                 self.line_start = true;
             }
         }
@@ -592,12 +588,10 @@ macro_rules! serial_print {
 /// Print to serial port with newline
 #[macro_export]
 macro_rules! serial_println {
-    () => ($crate::serial_print!("
-"));
+    () => ($crate::serial_print!("\n"));
     ($($arg:tt)*) => {
         if $crate::debug_cfg::SERIAL_ENABLED {
-            $crate::arch::x86_64::serial::_print(format_args!("{}
-", format_args!($($arg)*)))
+            $crate::arch::x86_64::serial::_print(format_args!("{}\n", format_args!($($arg)*)))
         }
     };
 }
@@ -607,14 +601,12 @@ macro_rules! serial_println {
 macro_rules! serial_force_println {
     () => {
         if $crate::debug_cfg::SERIAL_ENABLED {
-            $crate::arch::x86_64::serial::_print_force(format_args!("
-"))
+            $crate::arch::x86_64::serial::_print_force(format_args!("\n"))
         }
     };
     ($($arg:tt)*) => {
         if $crate::debug_cfg::SERIAL_ENABLED {
-            $crate::arch::x86_64::serial::_print_force(format_args!("{}
-", format_args!($($arg)*)))
+            $crate::arch::x86_64::serial::_print_force(format_args!("{}\n", format_args!($($arg)*)))
         }
     };
 }

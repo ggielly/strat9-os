@@ -1277,8 +1277,7 @@ fn build_pci_inventory_text() -> String {
     {
         let devices = crate::hardware::pci_client::all_devices();
         let mut out = String::new();
-        out.push_str("bus dev fn vendor device class subclass prog_if irq
-");
+        out.push_str("bus dev fn vendor device class subclass prog_if irq\n");
         for dev in devices.iter() {
             let _ = writeln!(
                 out,
@@ -1299,8 +1298,7 @@ fn build_pci_inventory_text() -> String {
 
     #[cfg(not(target_arch = "x86_64"))]
     {
-        String::from("unsupported-arch
-")
+        String::from("unsupported-arch\n")
     }
 }
 
@@ -1345,12 +1343,10 @@ pub fn init() {
     let kernel_scheme = KernelScheme::new();
 
     // Register some basic kernel files
-    static VERSION: &[u8] = b"Strat9-OS v0.1.0 (Bedrock)
-";
+    static VERSION: &[u8] = b"Strat9-OS v0.1.0 (Bedrock)\n";
     kernel_scheme.register("version", VERSION.as_ptr(), VERSION.len());
 
-    static CMDLINE: &[u8] = b"quiet loglevel=debug
-";
+    static CMDLINE: &[u8] = b"quiet loglevel=debug\n";
     kernel_scheme.register("cmdline", CMDLINE.as_ptr(), CMDLINE.len());
 
     let pci_inventory = build_pci_inventory_text().into_bytes().into_boxed_slice();
@@ -1358,8 +1354,7 @@ pub fn init() {
     kernel_scheme.register("pci/inventory", pci_inventory.as_ptr(), pci_inventory.len());
 
     let pci_count = pci_inventory
-        .split(|b| *b == b'
-')
+        .split(|b| *b == b'\n')
         .skip(1)
         .filter(|line| !line.is_empty())
         .count();
@@ -1377,24 +1372,21 @@ pub fn init() {
         let cpu_count = crate::arch::percpu::get_cpu_count().max(1);
 
         let count_s = Box::leak(
-            alloc::format!("{}
-", cpu_count)
+            alloc::format!("{}\n", cpu_count)
                 .into_bytes()
                 .into_boxed_slice(),
         );
         kernel_scheme.register("cpu/count", count_s.as_ptr(), count_s.len());
 
         let vendor_s = Box::leak(
-            alloc::format!("{}
-", host.vendor_string())
+            alloc::format!("{}\n", host.vendor_string())
                 .into_bytes()
                 .into_boxed_slice(),
         );
         kernel_scheme.register("cpu/vendor", vendor_s.as_ptr(), vendor_s.len());
 
         let model_s = Box::leak(
-            alloc::format!("{}
-", host.model_name_str())
+            alloc::format!("{}\n", host.model_name_str())
                 .into_bytes()
                 .into_boxed_slice(),
         );
@@ -1402,8 +1394,7 @@ pub fn init() {
 
         let features_s = Box::leak(
             alloc::format!(
-                "{}
-",
+                "{}\n",
                 crate::arch::cpuid::features_to_flags_string(host.features)
             )
             .into_bytes()
@@ -1412,16 +1403,14 @@ pub fn init() {
         kernel_scheme.register("cpu/features", features_s.as_ptr(), features_s.len());
 
         let xcr0_s = Box::leak(
-            alloc::format!("{:#x}
-", host.supported_xcr0)
+            alloc::format!("{:#x}\n", host.supported_xcr0)
                 .into_bytes()
                 .into_boxed_slice(),
         );
         kernel_scheme.register("cpu/xcr0", xcr0_s.as_ptr(), xcr0_s.len());
 
         let xsave_s = Box::leak(
-            alloc::format!("{}
-", host.xsave_size_current)
+            alloc::format!("{}\n", host.xsave_size_current)
                 .into_bytes()
                 .into_boxed_slice(),
         );
@@ -1432,8 +1421,7 @@ pub fn init() {
     {
         let cpu_count = crate::arch::percpu::get_cpu_count().max(1);
         let register_cpu_value = |path: &str, value: &str| {
-            let bytes = Box::leak(alloc::format!("{}
-", value).into_bytes().into_boxed_slice());
+            let bytes = Box::leak(alloc::format!("{}\n", value).into_bytes().into_boxed_slice());
             kernel_scheme.register(path, bytes.as_ptr(), bytes.len());
         };
 

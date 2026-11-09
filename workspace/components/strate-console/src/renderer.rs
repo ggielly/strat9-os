@@ -130,8 +130,7 @@ impl Renderer {
         let dmg_fd = match call::openat(0, "/dev/display/damage", 0x2, 0) {
             Ok(fd) => fd,
             Err(_) => {
-                let _ = call::debug_log(b"[console] FATAL: cannot open /dev/display/damage
-");
+                let _ = call::debug_log(b"[console] FATAL: cannot open /dev/display/damage\n");
                 return None;
             }
         };

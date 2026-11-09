@@ -203,8 +203,7 @@ pub fn vga_debug_write(s: &str) {
 
     for &byte in s.as_bytes() {
         match byte {
-            b'
-' => {
+            b'\n' => {
                 col = 0;
                 row += 1;
                 if row >= max_row {
@@ -212,10 +211,10 @@ pub fn vga_debug_write(s: &str) {
                     row = max_row - 1;
                 }
             }
-            b'' => {
+            b'\r' => {
                 col = 0;
             }
-            b'	' => {
+            b'\t' => {
                 col = (col + 8) & !7;
                 if col >= max_col {
                     col = 0;
@@ -264,8 +263,7 @@ pub fn vga_debug_writeln(s: &str) {
         s.len()
     };
     buf[..len].copy_from_slice(&s.as_bytes()[..len]);
-    buf[len] = b'
-';
+    buf[len] = b'\n';
     if let Ok(valid) = core::str::from_utf8(&buf[..len + 1]) {
         vga_debug_write(valid);
     }

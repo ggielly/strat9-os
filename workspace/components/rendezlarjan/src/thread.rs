@@ -363,8 +363,7 @@ pub fn thread_list() -> Result<Vec<ThreadInfo>> {
                         .unwrap_or(u32::MAX),
                 );
             }
-            b'
-' | b' ' | b'' | b'	' => {
+            b'\n' | b' ' | b'\r' | b'\t' => {
                 if let Some(v) = cur.take() {
                     out.push(ThreadInfo { tid: v });
                 }

@@ -580,8 +580,7 @@ pub fn init() {
     unsafe {
         core::arch::asm!("out 0xe9, al", in("al") b'q', options(nomem, nostack));
         core::arch::asm!("out 0xe9, al", in("al") (b'0' + candidates.len() as u8), options(nomem, nostack));
-        core::arch::asm!("out 0xe9, al", in("al") b'
-', options(nomem, nostack));
+        core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
     }
     for pci_dev in candidates.into_iter() {
         log::info!(
@@ -599,8 +598,7 @@ pub fn init() {
                 unsafe {
                     core::arch::asm!("out 0xe9, al", in("al") b'Q', options(nomem, nostack));
                     core::arch::asm!("out 0xe9, al", in("al") (b'0' + controller.port_count() as u8), options(nomem, nostack));
-                    core::arch::asm!("out 0xe9, al", in("al") b'
-', options(nomem, nostack));
+                    core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
                 }
                 controller.enumerate_all_ports();
                 UHCI_CONTROLLERS.lock().push(controller);

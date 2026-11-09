@@ -69,7 +69,6 @@ pub(super) fn cmd_silo_attach(args: &[String]) -> Result<(), ShellError> {
         crate::process::yield_task();
     }
 
-    shell_println!("
-Detached from silo {}", sid);
+    shell_println!("\nDetached from silo {}", sid);
     Ok(())
 }

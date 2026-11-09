@@ -192,18 +192,12 @@ impl Scheme for BlkDevScheme {
         match file_id {
             FID_ROOT => {
                 let mut listing = String::new();
-                listing.push_str("null
-urandom
-zero
-random
-");
+                listing.push_str("null\nurandom\nzero\nrandom\n");
                 if ahci::get_device().is_some() {
-                    listing.push_str("sda
-");
+                    listing.push_str("sda\n");
                 }
                 if crate::hardware::storage::virtio_block::get_device().is_some() {
-                    listing.push_str("vda
-");
+                    listing.push_str("vda\n");
                 }
                 let bytes = listing.as_bytes();
                 let start = offset as usize;

@@ -85,15 +85,13 @@ macro_rules! vga_print {
 macro_rules! vga_println {
     () => {
         if !$crate::debug_cfg::is_quiet() && $crate::display_state::kernel_fb_allowed() {
-            $crate::vga_print!("
-");
+            $crate::vga_print!("\n");
             $crate::arch::x86_64::vga::flush_display();
         }
     };
     ($($arg:tt)*) => {
         if !$crate::debug_cfg::is_quiet() && $crate::display_state::kernel_fb_allowed() {
-            $crate::vga_print!("{}
-", format_args!($($arg)*));
+            $crate::vga_print!("{}\n", format_args!($($arg)*));
             $crate::arch::x86_64::vga::flush_display();
         }
     };

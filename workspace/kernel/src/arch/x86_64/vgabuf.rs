@@ -52,14 +52,11 @@ pub fn vgabuf_total_dropped() -> usize {
 fn write_line(writer: &mut impl core::fmt::Write, line: &Line) {
     if let Ok(s) = core::str::from_utf8(line.as_bytes()) {
         let _ = writer.write_str(s);
-        if !s.ends_with('
-') {
-            let _ = writer.write_str("
-");
+        if !s.ends_with('\n') {
+            let _ = writer.write_str("\n");
         }
     } else {
-        let _ = writer.write_str("<non-utf8>
-");
+        let _ = writer.write_str("<non-utf8>\n");
     }
 }
 

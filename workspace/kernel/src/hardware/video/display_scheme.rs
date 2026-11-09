@@ -219,19 +219,15 @@ impl Scheme for DisplayScheme {
         match handle {
             Handle::Root => {
                 let total = total_display_count();
-                let mut out = format!("displays={}
-", total);
+                let mut out = format!("displays={}\n", total);
                 for i in 0..total {
                     if let Some((adapter, local_id)) = get_adapter_for_display(i) {
                         let (w, h) = adapter.display_size(local_id);
-                        out.push_str(&format!("{}.0={}x{}
-", i, w, h));
+                        out.push_str(&format!("{}.0={}x{}\n", i, w, h));
                     }
                 }
-                out.push_str("damage
-");
-                out.push_str("clear
-");
+                out.push_str("damage\n");
+                out.push_str("clear\n");
                 let b = out.as_bytes();
                 let start = offset as usize;
                 if start >= b.len() {
@@ -243,32 +239,22 @@ impl Scheme for DisplayScheme {
             }
             Handle::Info => {
                 let total = total_display_count();
-                let mut s = format!("adapter_displays={}
-", total);
+                let mut s = format!("adapter_displays={}\n", total);
                 for i in 0..total {
                     if let Some((adapter, local_id)) = get_adapter_for_display(i) {
                         let (w, h) = adapter.display_size(local_id);
-                        s.push_str(&format!("display.{}.{}x{}
-", i, w, h));
+                        s.push_str(&format!("display.{}.{}x{}\n", i, w, h));
                     }
                 }
-                s.push_str(&format!("owner={}
-", crate::display_state::owner_name()));
+                s.push_str(&format!("owner={}\n", crate::display_state::owner_name()));
                 if let Some(info) = Framebuffer::info() {
                     let bpp = info.format.bits_per_pixel;
                     // Offscreen surfaces are tightly packed (`width * bpp/8`);
                     // the hardware stride may be larger and is irrelevant here.
                     let surface_stride = info.width.saturating_mul(bpp as u32 / 8);
                     s.push_str(&format!(
-                        "width={}
-height={}
-bpp={}
-stride={}
-\
-                         red_shift={}
-green_shift={}
-blue_shift={}
-",
+                        "width={}\nheight={}\nbpp={}\nstride={}\n\
+                         red_shift={}\ngreen_shift={}\nblue_shift={}\n",
                         info.width,
                         info.height,
                         bpp,

@@ -339,8 +339,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         if crate::debug_cfg::SERIAL_ENABLED {
             let thr: u16 = 0x3F8;
             let lsr: u16 = 0x3F8 + 5;
-            let msg = b"[km] kernel_main enter
-";
+            let msg = b"[km] kernel_main enter\r\n";
             for &b in msg {
                 loop {
                     let s: u8;
@@ -367,8 +366,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     if crate::debug_cfg::SERIAL_ENABLED {
         let thr: u16 = 0x3F8;
         let lsr: u16 = 0x3F8 + 5;
-        let msg = b"[km] after debug_assert
-";
+        let msg = b"[km] after debug_assert\r\n";
         for &b in msg {
             loop {
                 let s: u8;
@@ -391,8 +389,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     if crate::debug_cfg::SERIAL_ENABLED {
         let thr: u16 = 0x3F8;
         let lsr: u16 = 0x3F8 + 5;
-        let msg = b"[km] after boot_timestamp
-";
+        let msg = b"[km] after boot_timestamp\r\n";
         for &b in msg {
             loop {
                 let s: u8;
@@ -414,8 +411,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     if crate::debug_cfg::SERIAL_ENABLED {
         let thr: u16 = 0x3F8;
         let lsr: u16 = 0x3F8 + 5;
-        let msg = b"[km] before init_serial
-";
+        let msg = b"[km] before init_serial\r\n";
         for &b in msg {
             loop {
                 let s: u8;
@@ -465,8 +461,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     if crate::debug_cfg::SERIAL_ENABLED {
         let thr: u16 = 0x3F8;
         let lsr: u16 = 0x3F8 + 5;
-        let msg = b"[km] IDT initialized
-";
+        let msg = b"[km] IDT initialized\r\n";
         for &b in msg {
             loop {
                 let s: u8;
@@ -529,7 +524,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     serial_println!();
     serial_println!(r"          __                 __   ________                         ");
     serial_println!(r"  _______/  |_____________ _/  |_/   __   \           ____  ______ ");
-    serial_println!(r" /  ___/\   __\_  __ \__  \   __\____    /  ______  /  _ \/  ___/ ");
+    serial_println!(r" /  ___/\   __\_  __ \__  \\   __\____    /  ______  /  _ \/  ___/ ");
     serial_println!(r" \___ \  |  |  |  | \// __ \|  |    /    /  /_____/ (  <_> )___ \  ");
     serial_println!(r"/____  > |__|  |__|  (____  /__|   /____/            \____/____  > ");
     serial_println!(r"     \/                   \/                                   \/  ");
@@ -707,8 +702,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                 }
                 crate::e9_mark!(b'/');
                 crate::e9_mark!(k);
-                crate::e9_mark!(b'
-');
+                crate::e9_mark!(b'\n');
             }
             i += 1;
         }
@@ -745,8 +739,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                 }
                 core::arch::asm!("out 0xe9, al", in("al") b'/', options(nomem, nostack));
                 core::arch::asm!("out 0xe9, al", in("al") k, options(nomem, nostack));
-                core::arch::asm!("out 0xe9, al", in("al") b'
-', options(nomem, nostack));
+                core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
             }
             i += 1;
         }
@@ -1413,8 +1406,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                     for b in raw.as_bytes() {
                         crate::e9_mark!(*b);
                     }
-                    crate::e9_mark!(b'
-');
+                    crate::e9_mark!(b'\n');
                 }
                 let name = raw;
                 if name == "init" || name == "strate-init" {
@@ -1432,8 +1424,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                             && elf_data[3] == b'F';
                         crate::e9_mark!(b'!');
                         crate::e9_mark!(if magic_ok { b'Y' } else { b'N' });
-                        crate::e9_mark!(b'
-');
+                        crate::e9_mark!(b'\n');
                     }
                     let init_caps = [crate::silo::create_silo_admin_capability()];
                     match process::elf::load_and_run_elf_with_caps(elf_data, "init", &init_caps) {
@@ -1450,8 +1441,7 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                             unsafe {
                                 crate::e9_mark!(b'X');
                                 crate::e9_mark!(code);
-                                crate::e9_mark!(b'
-');
+                                crate::e9_mark!(b'\n');
                             }
                             serial_println!("[init] Failed to load init ELF: {}", e);
                         }

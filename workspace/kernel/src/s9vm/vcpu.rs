@@ -1081,3 +1081,8 @@ fn tr_base(selector: u16) -> u64 {
         ControlBlock::decode_tss_base(low, upper)
     }
 }
+
+
+
+
+

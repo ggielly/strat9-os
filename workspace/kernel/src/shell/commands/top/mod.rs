@@ -179,7 +179,7 @@ fn collect_silos_from_proc_scheme() -> Option<(Vec<SiloRowData>, Vec<StrateRowDa
         if line_idx == 0 || line.is_empty() {
             continue;
         }
-        let mut fields = line.split('	');
+        let mut fields = line.split('\t');
         // sid, state, tasks, mem_used, mem_min, mem_max, gfx*, label, name, instances
         let Some(sid) = fields.next() else { continue };
         let Some(state) = fields.next() else { continue };
@@ -1302,8 +1302,7 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
                 crate::arch::keyboard::KEY_DOWN => tree.move_down(),
                 crate::arch::keyboard::KEY_RIGHT => tree.expand(),
                 crate::arch::keyboard::KEY_LEFT => tree.collapse(),
-                b' ' | b'' | b'
-' => tree.toggle(),
+                b' ' | b'\r' | b'\n' => tree.toggle(),
                 b'k' => {
                     if let Some(tid) = selected_task_tid(&tree) {
                         if let Some(node) = tree.selected_node() {

@@ -93,8 +93,7 @@ pub(crate) extern "C" fn riscv_trap_handler(frame: *mut TrapFrame) {
     }
 
     super::serial::_print(format_args!(
-        "[strat9] trap scause={:#x} sepc={:#x} stval={:#x} sstatus={:#x}
-",
+        "[strat9] trap scause={:#x} sepc={:#x} stval={:#x} sstatus={:#x}\r\n",
         frame.scause, frame.sepc, frame.stval, frame.sstatus
     ));
     super::cli();

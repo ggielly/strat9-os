@@ -156,8 +156,7 @@ pub fn init_cpu(cpu_index: usize) {
         SELECTORS_INIT[cpu_index].store(true, Ordering::Release);
 
         // Raw e9 output : e9_println! with format_args hangs before IDT is loaded.
-        for &b in b"GDT init OK
-" {
+        for &b in b"GDT init OK\n" {
             core::arch::asm!("out 0xe9, al", in("al") b, options(nomem, nostack));
         }
     }

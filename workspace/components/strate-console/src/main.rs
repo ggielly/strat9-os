@@ -58,8 +58,7 @@ static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
-    let _ = call::debug_log(b"[console] OOM
-");
+    let _ = call::debug_log(b"[console] OOM\n");
     loop {
         let _ = call::sched_yield();
     }
@@ -72,14 +71,12 @@ fn panic(info: &PanicInfo) -> ! {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    let _ = call::debug_log(b"[console] strate-console starting
-");
+    let _ = call::debug_log(b"[console] strate-console starting\n");
 
     let mut rend = match Renderer::open() {
         Some(r) => r,
         None => {
-            let _ = call::debug_log(b"[console] FATAL: cannot open /dev/display/0.0
-");
+            let _ = call::debug_log(b"[console] FATAL: cannot open /dev/display/0.0\n");
             loop {
                 let _ = call::sched_yield();
             }
@@ -89,8 +86,7 @@ pub extern "C" fn _start() -> ! {
     let mut kbd = match InputHandler::open() {
         Some(k) => k,
         None => {
-            let _ = call::debug_log(b"[console] FATAL: cannot open /dev/input/kbd
-");
+            let _ = call::debug_log(b"[console] FATAL: cannot open /dev/input/kbd\n");
             loop {
                 let _ = call::sched_yield();
             }
@@ -99,17 +95,11 @@ pub extern "C" fn _start() -> ! {
 
     let mut term = TerminalCore::new(rend.cols, rend.rows, DEFAULT_FG, DEFAULT_BG);
 
-    let banner = b"
-\
-        [1;36m========================================[0m
-\
-        [1;36m  strat9-os console (ring 3)[0m
-\
-        [1;36m========================================[0m
-\
-        [90mType 'help' for commands.[0m
-
-";
+    let banner = b"\n\
+        \x1b[1;36m========================================\x1b[0m\n\
+        \x1b[1;36m  strat9-os console (ring 3)\x1b[0m\n\
+        \x1b[1;36m========================================\x1b[0m\n\
+        \x1b[90mType 'help' for commands.\x1b[0m\n\n";
     term.process_bytes(banner);
 
     rend.render(

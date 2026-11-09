@@ -70,14 +70,12 @@ macro_rules! e9_print {
 macro_rules! e9_println {
     () => {
         if !$crate::debug_cfg::is_quiet() {
-            $crate::e9_print!("
-");
+            $crate::e9_print!("\n");
         }
     };
     ($($arg:tt)*) => {
         if !$crate::debug_cfg::is_quiet() {
-            $crate::e9_print!("{}
-", format_args!($($arg)*));
+            $crate::e9_print!("{}\n", format_args!($($arg)*));
         }
     };
 }
@@ -114,8 +112,7 @@ macro_rules! boot_milestone {
                 }
                 let _ = write!(
                     VgaBufWriter { buf: &mut vbuf, pos: &mut vpos },
-                    "[boot +{:>6}ms] {}
-",
+                    "[boot +{:>6}ms] {}\n",
                     $crate::arch::boot_timestamp::elapsed_ms(),
                     format_args!($($arg)*)
                 );

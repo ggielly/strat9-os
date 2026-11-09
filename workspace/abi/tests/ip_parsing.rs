@@ -80,8 +80,7 @@ fn ipv4_invalid_addresses() {
         " 1.2.3.4",        // leading space
         "0x1.2.3.4",       // hex prefix not allowed
         "١.٢.٣.٤",         // non-ASCII digits
-        "1.2.3.4
-",       // newline
+        "1.2.3.4\n",       // newline
     ];
     for &case in CASES {
         assert_eq!(

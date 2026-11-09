@@ -99,14 +99,10 @@ fn log_hex_u64(mut value: u64) {
 
 /// Implements section.
 fn section(title: &str) {
-    log("
-============================================================
-");
+    log("\n============================================================\n");
     log("[test_syscalls] ");
     log(title);
-    log("
-============================================================
-");
+    log("\n============================================================\n");
 }
 
 /// Implements ok.
@@ -118,8 +114,7 @@ fn ok(ctx: &mut Ctx, label: &str, value: usize) {
     log_u64(value as u64);
     log(" (");
     log_hex_u64(value as u64);
-    log(")
-");
+    log(")\n");
 }
 
 /// Implements fail.
@@ -129,8 +124,7 @@ fn fail(ctx: &mut Ctx, label: &str, err: Error) {
     log_err(label);
     log_err(" -> ");
     log_err(err.name());
-    log_err("
-");
+    log_err("\n");
 }
 
 /// Implements check ok.
@@ -165,8 +159,7 @@ fn check_expect_one_of(
                 log_err(label);
                 log_err(" -> expected error but got OK=");
                 log_u64(v as u64);
-                log_err("
-");
+                log_err("\n");
             }
         }
         Err(e) => {
@@ -195,8 +188,7 @@ fn check_expect_err(
             log_err(expected.name());
             log_err(" got OK=");
             log_u64(v as u64);
-            log_err("
-");
+            log_err("\n");
         }
         Err(e) => {
             if e == expected {
@@ -357,8 +349,7 @@ fn test_fs(ctx: &mut Ctx) {
     .unwrap_or(usize::MAX);
 
     if file_fd != usize::MAX {
-        let msg = b"syscall-iso-test
-";
+        let msg = b"syscall-iso-test\n";
         let _ = check_ok(ctx, "SYS_WRITE file", unsafe {
             syscall3(number::SYS_WRITE, file_fd, msg.as_ptr() as usize, msg.len())
         });
@@ -518,8 +509,7 @@ fn test_handles(ctx: &mut Ctx) {
     log_hex_u64(info.permissions as u64);
     log(" resource=");
     log_hex_u64(info.resource);
-    log("
-");
+    log("\n");
 
     let _ = check_ok(
         ctx,
@@ -584,8 +574,7 @@ pub extern "C" fn _start() -> ! {
     log_u64(ctx.pass);
     log(" fail=");
     log_u64(ctx.fail);
-    log("
-");
+    log("\n");
 
     if ctx.fail == 0 {
         call::exit(0);

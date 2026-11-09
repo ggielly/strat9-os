@@ -112,14 +112,10 @@ fn log_hex_u64(mut value: u64) {
 
 /// Print a section banner.
 fn section(title: &str) {
-    log("
-============================================================
-");
+    log("\n============================================================\n");
     log("[test_mem_region_proc] ");
     log(title);
-    log("
-============================================================
-");
+    log("\n============================================================\n");
 }
 
 /// Record a successful check.
@@ -131,8 +127,7 @@ fn ok(ctx: &mut Ctx, label: &str, value: usize) {
     log_u64(value as u64);
     log(" (");
     log_hex_u64(value as u64);
-    log(")
-");
+    log(")\n");
 }
 
 /// Record a failed check.
@@ -142,8 +137,7 @@ fn fail(ctx: &mut Ctx, label: &str, err: Error) {
     log_err(label);
     log_err(" -> ");
     log_err(err.name());
-    log_err("
-");
+    log_err("\n");
 }
 
 /// Check a syscall result and keep the successful value.
@@ -176,8 +170,7 @@ fn check_expect_err(
             log_err(expected.name());
             log_err(" got OK=");
             log_u64(value as u64);
-            log_err("
-");
+            log_err("\n");
         }
         Err(err) => {
             if err == expected {
@@ -298,8 +291,7 @@ fn verify_byte(ctx: &mut Ctx, label: &str, addr: usize, offset: usize, expected:
         log_hex_u64(observed as u64);
         log_err(" offset=");
         log_u64(offset as u64);
-        log_err("
-");
+        log_err("\n");
     }
 }
 
@@ -313,8 +305,7 @@ fn log_handle_info(label: &str, info: &HandleInfo) {
     log_hex_u64(info.permissions as u64);
     log(" resource=");
     log_hex_u64(info.resource);
-    log("
-");
+    log("\n");
 }
 
 /// Log region metadata.
@@ -327,16 +318,14 @@ fn log_region_info(label: &str, info: &MemoryRegionInfo) {
     log_u64(info.page_size);
     log(" flags=");
     log_hex_u64(info.flags as u64);
-    log("
-");
+    log("\n");
 }
 
 /// Exit the child process after logging a failure.
 fn child_abort(code: usize, msg: &str) -> ! {
     log_err("[child] ");
     log_err(msg);
-    log_err("
-");
+    log_err("\n");
     call::exit(code)
 }
 
@@ -433,10 +422,8 @@ fn wait_exit_code(status: i32) -> Option<i32> {
 /// Run the full multi-process MemoryRegion suite.
 fn run_suite(ctx: &mut Ctx) {
     section("MemoryRegion cross-process grant/revoke suite");
-    log("[test_mem_region_proc] parent grants region to a real child process
-");
-    log("[test_mem_region_proc] child maps, writes, revokes handle, then writes again
-");
+    log("[test_mem_region_proc] parent grants region to a real child process\n");
+    log("[test_mem_region_proc] child maps, writes, revokes handle, then writes again\n");
 
     let (parent_to_child_read, parent_to_child_write) = match call::pipe() {
         Ok((read_fd, write_fd)) => {
@@ -487,8 +474,7 @@ fn run_suite(ctx: &mut Ctx) {
             ctx.fail += 1;
             log_err("[FAIL] child ready handshake -> unexpected byte=");
             log_hex_u64(other as u64);
-            log_err("
-");
+            log_err("\n");
             return;
         }
         Err(err) => {
@@ -568,8 +554,7 @@ fn run_suite(ctx: &mut Ctx) {
             ctx.fail += 1;
             log_err("[FAIL] child stage1 completion -> unexpected byte=");
             log_hex_u64(other as u64);
-            log_err("
-");
+            log_err("\n");
             return;
         }
         Err(err) => {
@@ -615,8 +600,7 @@ fn run_suite(ctx: &mut Ctx) {
             ctx.fail += 1;
             log_err("[FAIL] child stage2 completion -> unexpected byte=");
             log_hex_u64(other as u64);
-            log_err("
-");
+            log_err("\n");
             return;
         }
         Err(err) => {
@@ -645,16 +629,14 @@ fn run_suite(ctx: &mut Ctx) {
         Some(_) => {
             log("[wait] child raw status=");
             log_u64(status as u64);
-            log("
-");
+            log("\n");
             if wait_exit_code(status) == Some(0) {
                 ok(ctx, "child exited with code 0", 0);
             } else {
                 ctx.fail += 1;
                 log_err("[FAIL] child exited with code 0 -> raw status=");
                 log_u64(status as u64);
-                log_err("
-");
+                log_err("\n");
             }
         }
         None => return,
@@ -690,8 +672,7 @@ pub extern "C" fn _start() -> ! {
     log_u64(ctx.pass);
     log(" fail=");
     log_u64(ctx.fail);
-    log("
-");
+    log("\n");
 
     if ctx.fail == 0 {
         call::exit(0);

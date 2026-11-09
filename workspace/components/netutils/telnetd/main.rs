@@ -36,8 +36,7 @@ static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
-    log("[telnetd] OOM
-");
+    log("[telnetd] OOM\n");
     call::exit(12)
 }
 
@@ -136,19 +135,16 @@ fn network_configured() -> bool {
 }
 
 fn wait_for_network() {
-    log("[telnetd] waiting for /net IP configuration
-");
+    log("[telnetd] waiting for /net IP configuration\n");
     let mut retries = 0u32;
     loop {
         if network_configured() {
-            log("[telnetd] network ready
-");
+            log("[telnetd] network ready\n");
             return;
         }
         retries = retries.saturating_add(1);
         if retries % 25 == 0 {
-            log("[telnetd] still waiting for DHCP/static IPv4...
-");
+            log("[telnetd] still waiting for DHCP/static IPv4...\n");
         }
         sleep_ms(200);
     }
@@ -166,19 +162,16 @@ fn open_listener() -> usize {
             0,
         ) {
             Ok(fd) => {
-                log("[telnetd] listening on :23
-");
+                log("[telnetd] listening on :23\n");
                 return fd;
             }
             Err(e) => {
                 let err = e.to_errno();
                 if retries % 25 == 0 {
                     if err == 98 {
-                        log("[telnetd] port 23 busy, retrying
-");
+                        log("[telnetd] port 23 busy, retrying\n");
                     } else {
-                        log("[telnetd] /net/tcp/listen not ready yet
-");
+                        log("[telnetd] /net/tcp/listen not ready yet\n");
                     }
                 }
                 retries = retries.saturating_add(1);
@@ -246,15 +239,11 @@ fn send_negotiation(fd: usize) {
 }
 
 fn send_prompt(fd: usize) {
-    let _ = write_all(fd, b"
-strat9> ");
+    let _ = write_all(fd, b"\r\nstrat9> ");
 }
 
 fn send_banner(fd: usize) {
-    let _ = write_all(fd, b"
-Strat9 Telnet
-Type 'help' for commands.
-");
+    let _ = write_all(fd, b"\r\nStrat9 Telnet\r\nType 'help' for commands.\r\n");
     send_prompt(fd);
 }
 
@@ -268,9 +257,7 @@ fn handle_command(fd: usize, line: &str) -> LineAction {
     if cmd == "help" {
         let _ = write_all(
             fd,
-            b"
-Commands: help, ip, net, echo <text>, clear, quit
-",
+            b"\r\nCommands: help, ip, net, echo <text>, clear, quit\r\n",
         );
         send_prompt(fd);
         return LineAction::Continue;
@@ -279,15 +266,12 @@ Commands: help, ip, net, echo <text>, clear, quit
     if cmd == "ip" {
         let mut buf = [0u8; 128];
         let n = read_text_file("/net/address", &mut buf);
-        let _ = write_all(fd, b"
-IP: ");
+        let _ = write_all(fd, b"\r\nIP: ");
         if n > 0 {
             let _ = write_all(fd, &buf[..n]);
-            let _ = write_all(fd, b"
-");
+            let _ = write_all(fd, b"\r\n");
         } else {
-            let _ = write_all(fd, b"n/a
-");
+            let _ = write_all(fd, b"n/a\r\n");
         }
         send_prompt(fd);
         return LineAction::Continue;
@@ -303,73 +287,58 @@ IP: ");
         let ndns = read_text_file("/net/dns", &mut dns);
         let nr = read_text_file("/net/route", &mut route);
 
-        let _ = write_all(fd, b"
-IP: ");
+        let _ = write_all(fd, b"\r\nIP: ");
         if nip > 0 {
             let _ = write_all(fd, &ip[..nip]);
-            let _ = write_all(fd, b"
-");
+            let _ = write_all(fd, b"\r\n");
         } else {
-            let _ = write_all(fd, b"n/a
-");
+            let _ = write_all(fd, b"n/a\r\n");
         }
         let _ = write_all(fd, b"GW: ");
         if ngw > 0 {
             let _ = write_all(fd, &gw[..ngw]);
-            let _ = write_all(fd, b"
-");
+            let _ = write_all(fd, b"\r\n");
         } else {
-            let _ = write_all(fd, b"n/a
-");
+            let _ = write_all(fd, b"n/a\r\n");
         }
         let _ = write_all(fd, b"DNS: ");
         if ndns > 0 {
             let _ = write_all(fd, &dns[..ndns]);
-            let _ = write_all(fd, b"
-");
+            let _ = write_all(fd, b"\r\n");
         } else {
-            let _ = write_all(fd, b"n/a
-");
+            let _ = write_all(fd, b"n/a\r\n");
         }
         let _ = write_all(fd, b"ROUTE: ");
         if nr > 0 {
             let _ = write_all(fd, &route[..nr]);
-            let _ = write_all(fd, b"
-");
+            let _ = write_all(fd, b"\r\n");
         } else {
-            let _ = write_all(fd, b"n/a
-");
+            let _ = write_all(fd, b"n/a\r\n");
         }
         send_prompt(fd);
         return LineAction::Continue;
     }
 
     if let Some(rest) = cmd.strip_prefix("echo ") {
-        let _ = write_all(fd, b"
-");
+        let _ = write_all(fd, b"\r\n");
         let _ = write_all(fd, rest.as_bytes());
-        let _ = write_all(fd, b"
-");
+        let _ = write_all(fd, b"\r\n");
         send_prompt(fd);
         return LineAction::Continue;
     }
 
     if cmd == "clear" {
-        let _ = write_all(fd, b"[2J[H");
+        let _ = write_all(fd, b"\x1b[2J\x1b[H");
         send_prompt(fd);
         return LineAction::Continue;
     }
 
     if cmd == "quit" || cmd == "exit" {
-        let _ = write_all(fd, b"
-Bye.
-");
+        let _ = write_all(fd, b"\r\nBye.\r\n");
         return LineAction::Disconnect;
     }
 
-    let _ = write_all(fd, b"
-Unknown command. Type 'help'.
-");
+    let _ = write_all(fd, b"\r\nUnknown command. Type 'help'.\r\n");
     send_prompt(fd);
     LineAction::Continue
 }
@@ -417,8 +386,7 @@ fn handle_bytes(fd: usize, session: &mut TelnetSession, bytes: &[u8]) -> LineAct
             }
             IacState::AfterCr => {
                 session.iac_state = IacState::Normal;
-                if b == b'
-' || b == 0 {
+                if b == b'\n' || b == 0 {
                     // CRLF or CR NUL: the line was already submitted on CR.
                     continue;
                 }
@@ -429,14 +397,13 @@ fn handle_bytes(fd: usize, session: &mut TelnetSession, bytes: &[u8]) -> LineAct
 
         match b {
             255 => session.iac_state = IacState::Iac,
-            b'' => {
+            b'\r' => {
                 session.iac_state = IacState::AfterCr;
                 if matches!(run_line(fd, session), LineAction::Disconnect) {
                     return LineAction::Disconnect;
                 }
             }
-            b'
-' => {
+            b'\n' => {
                 if matches!(run_line(fd, session), LineAction::Disconnect) {
                     return LineAction::Disconnect;
                 }
@@ -444,7 +411,7 @@ fn handle_bytes(fd: usize, session: &mut TelnetSession, bytes: &[u8]) -> LineAct
             0x08 | 0x7f => {
                 if session.line_len > 0 {
                     session.line_len -= 1;
-                    let _ = write_all(fd, b" ");
+                    let _ = write_all(fd, b"\x08 \x08");
                 }
             }
             0x20..=0x7e => {
@@ -461,8 +428,7 @@ fn handle_bytes(fd: usize, session: &mut TelnetSession, bytes: &[u8]) -> LineAct
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    log("[telnetd] Starting on /net/tcp/listen/23
-");
+    log("[telnetd] Starting on /net/tcp/listen/23\n");
     wait_for_network();
     let mut fd = open_listener();
     let mut session = TelnetSession::new();
@@ -476,8 +442,7 @@ pub extern "C" fn _start() -> ! {
                     // EOF for the current session.  The listening fd itself
                     // stays open: strate-net has already promoted the next
                     // queued connection (if any) onto the same fid.
-                    log("[telnetd] client disconnected
-");
+                    log("[telnetd] client disconnected\n");
                     session.reset();
                     idle_ticks = 0;
                 } else {
@@ -496,8 +461,7 @@ pub extern "C" fn _start() -> ! {
                     handle_bytes(fd, &mut session, &buf[..n]),
                     LineAction::Disconnect
                 ) {
-                    log("[telnetd] client quit
-");
+                    log("[telnetd] client quit\n");
                     // Explicit quit: say goodbye and drop the session state,
                     // but keep the listening fd open.  Closing it would also
                     // tear down strate-net's accept backlog (queued clients).
@@ -513,8 +477,7 @@ pub extern "C" fn _start() -> ! {
                     sleep_ms(10);
                     idle_ticks = idle_ticks.saturating_add(1);
                     if session.connected && idle_ticks > CLIENT_IDLE_TICKS {
-                        log("[telnetd] client idle timeout, disconnecting
-");
+                        log("[telnetd] client idle timeout, disconnecting\n");
                         let _ = call::close(fd);
                         session.reset();
                         fd = open_listener();
@@ -523,11 +486,9 @@ pub extern "C" fn _start() -> ! {
                     continue;
                 }
                 if err == ECONNRESET {
-                    log("[telnetd] connection reset
-");
+                    log("[telnetd] connection reset\n");
                 } else {
-                    log("[telnetd] read error, reconnecting
-");
+                    log("[telnetd] read error, reconnecting\n");
                 }
                 let _ = call::close(fd);
                 session.reset();

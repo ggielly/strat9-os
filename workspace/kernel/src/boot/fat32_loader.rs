@@ -764,7 +764,7 @@ fn is_valid_elf(data: &[u8]) -> bool {
     }
 
     // Magic
-    if &data[0..4] != b"ELF" {
+    if &data[0..4] != b"\x7fELF" {
         return false;
     }
 

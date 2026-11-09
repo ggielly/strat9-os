@@ -51,7 +51,7 @@ pub struct Elf64Info {
 
 /// Validate a static x86-64 kernel completely, without touching physical memory.
 pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
-    if data.len() < 64 || &data[..4] != b"ELF" {
+    if data.len() < 64 || &data[..4] != b"\x7fELF" {
         return Err("invalid ELF header");
     }
     if data[4] != 2 || data[5] != 1 {

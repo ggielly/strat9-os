@@ -429,13 +429,11 @@ impl NetworkStrate {
             let _ = call::debug_log(&target.octets());
             let _ = call::debug_log(b" seq=");
             let _ = call::debug_log(&[(seq >> 8) as u8, seq as u8]);
-            let _ = call::debug_log(b"
-");
+            let _ = call::debug_log(b"\n");
             if self.send_ping(target, seq, file_id) {
                 return reply_write(msg.sender, data_len);
             }
-            let _ = call::debug_log(b"[ping] write: send_ping failed
-");
+            let _ = call::debug_log(b"[ping] write: send_ping failed\n");
             return IpcMessage::error_reply(msg.sender, -11);
         }
 
@@ -453,13 +451,11 @@ impl NetworkStrate {
             let _ = call::debug_log(&target.octets());
             let _ = call::debug_log(b" seq=");
             let _ = call::debug_log(&[(seq >> 8) as u8, seq as u8]);
-            let _ = call::debug_log(b"
-");
+            let _ = call::debug_log(b"\n");
             if self.send_ping6(target, seq, file_id) {
                 return reply_write(msg.sender, data_len);
             }
-            let _ = call::debug_log(b"[ping] write: send_ping6 failed
-");
+            let _ = call::debug_log(b"[ping] write: send_ping6 failed\n");
             return IpcMessage::error_reply(msg.sender, -11);
         }
 

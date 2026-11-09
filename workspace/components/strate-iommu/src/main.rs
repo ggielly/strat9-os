@@ -69,8 +69,7 @@ static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
-    log("[strate-iommu] OOM
-");
+    log("[strate-iommu] OOM\n");
     call::exit(12);
 }
 
@@ -350,8 +349,7 @@ pub fn domain_snapshot(handle: usize) -> Option<IommuDomainInfo> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    log("[strate-iommu] starting
-");
+    log("[strate-iommu] starting\n");
 
     let port = match call::ipc_create_port(0) {
         Ok(port) => port as u64,
@@ -365,11 +363,9 @@ pub extern "C" fn _start() -> ! {
         log_errno("[strate-iommu] bind /srv/iommu: ", err);
         // Do not exit: a supervisor restart loop would only repeat the same
         // failure.  Keep the port alive for diagnostics.
-        log("[strate-iommu] running without /srv/iommu binding
-");
+        log("[strate-iommu] running without /srv/iommu binding\n");
     } else {
-        log("[strate-iommu] bound /srv/iommu
-");
+        log("[strate-iommu] bound /srv/iommu\n");
     }
 
     report_startup();

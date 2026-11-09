@@ -73,21 +73,18 @@ fn try_init<D: BusDriver + 'static>(
     mut driver: D,
 ) -> Option<(String, Box<dyn BusDriver>)> {
     if !driver.probe() {
-        let msg = alloc::format!("[bus] {}: probe failed (no hardware detected)
-", name);
+        let msg = alloc::format!("[bus] {}: probe failed (no hardware detected)\n", name);
         let _ = call::debug_log(msg.as_bytes());
         return None;
     }
     match driver.init(0) {
         Ok(()) => {
-            let msg = alloc::format!("[bus] {}: init OK
-", name);
+            let msg = alloc::format!("[bus] {}: init OK\n", name);
             let _ = call::debug_log(msg.as_bytes());
             Some((String::from(name), Box::new(driver)))
         }
         Err(e) => {
-            let msg = alloc::format!("[bus] {}: init skipped ({:?})
-", name, e);
+            let msg = alloc::format!("[bus] {}: init skipped ({:?})\n", name, e);
             let _ = call::debug_log(msg.as_bytes());
             None
         }

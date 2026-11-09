@@ -56,8 +56,7 @@ fn alloc_error(layout: Layout) -> ! {
         let mut w = BufWriter::new(&mut buf);
         let _ = write!(
             w,
-            "[web-admin] OOM: {} bytes align {}
-",
+            "[web-admin] OOM: {} bytes align {}\n",
             layout.size(),
             layout.align()
         );
@@ -111,8 +110,7 @@ static CONFIG: picoserve::Config =
 #[unsafe(no_mangle)]
 /// Implements start.
 pub extern "C" fn _start() -> ! {
-    log("[web-admin] Strat9 Web Admin starting on port 8080
-");
+    log("[web-admin] Strat9 Web Admin starting on port 8080\n");
 
     let app = routes::build_router();
     let mut conn_count: u64 = 0;
@@ -131,16 +129,14 @@ pub extern "C" fn _start() -> ! {
             match server.serve(socket).await {
                 Ok(info) => {
                     let msg = alloc::format!(
-                        "[web-admin] conn #{}: {} reqs
-",
+                        "[web-admin] conn #{}: {} reqs\n",
                         conn_count,
                         info.handled_requests_count
                     );
                     log(&msg);
                 }
                 Err(_) => {
-                    log("[web-admin] connection error
-");
+                    log("[web-admin] connection error\n");
                 }
             }
         });

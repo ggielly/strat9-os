@@ -208,3 +208,5 @@ fn long_mode_guest_cr4_has_vmxe() {
     assert_ne!(state.cr4 & CR4_VMXE, 0);
     assert_ne!(state.cr4 & CR4_PAE, 0);
 }
+
+

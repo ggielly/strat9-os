@@ -35,70 +35,40 @@ impl NetworkStrate {
         path: &str,
     ) -> core::result::Result<Vec<u8>, i32> {
         match path {
-            "" => Ok(b"ip
-address
-prefix
-netmask
-broadcast
-gateway
-route
-routes
-dns
-dhcp
-resolve
-ping
-tcp
-udp
-ip6
-ip6/address
-ip6/gateway
-".to_vec()),
+            "" => Ok(b"ip\naddress\nprefix\nnetmask\nbroadcast\ngateway\nroute\nroutes\ndns\ndhcp\nresolve\nping\ntcp\nudp\nip6\nip6/address\nip6/gateway\n".to_vec()),
             "ip" => Ok(if let Some(ref cfg) = self.ip_config {
-                alloc::format!("{}
-", cfg.address).into_bytes()
+                alloc::format!("{}\n", cfg.address).into_bytes()
             } else {
-                b"0.0.0.0/0
-".to_vec()
+                b"0.0.0.0/0\n".to_vec()
             }),
             "address" => Ok(if let Some(ref cfg) = self.ip_config {
-                alloc::format!("{}
-", cfg.host).into_bytes()
+                alloc::format!("{}\n", cfg.host).into_bytes()
             } else {
-                b"0.0.0.0
-".to_vec()
+                b"0.0.0.0\n".to_vec()
             }),
             "prefix" => Ok(if let Some(ref cfg) = self.ip_config {
-                alloc::format!("{}
-", cfg.prefix_len).into_bytes()
+                alloc::format!("{}\n", cfg.prefix_len).into_bytes()
             } else {
-                b"0
-".to_vec()
+                b"0\n".to_vec()
             }),
             "netmask" => Ok(if let Some(ref cfg) = self.ip_config {
-                alloc::format!("{}
-", cfg.netmask).into_bytes()
+                alloc::format!("{}\n", cfg.netmask).into_bytes()
             } else {
-                b"0.0.0.0
-".to_vec()
+                b"0.0.0.0\n".to_vec()
             }),
             "broadcast" => Ok(if let Some(ref cfg) = self.ip_config {
-                alloc::format!("{}
-", cfg.broadcast).into_bytes()
+                alloc::format!("{}\n", cfg.broadcast).into_bytes()
             } else {
-                b"0.0.0.0
-".to_vec()
+                b"0.0.0.0\n".to_vec()
             }),
             "gateway" => Ok(if let Some(ref cfg) = self.ip_config {
                 if let Some(gw) = cfg.gateway {
-                    alloc::format!("{}
-", gw).into_bytes()
+                    alloc::format!("{}\n", gw).into_bytes()
                 } else {
-                    b"0.0.0.0
-".to_vec()
+                    b"0.0.0.0\n".to_vec()
                 }
             } else {
-                b"0.0.0.0
-".to_vec()
+                b"0.0.0.0\n".to_vec()
             }),
             "dns" => {
                 let mut out = String::new();
@@ -108,17 +78,14 @@ ip6/gateway
                     wrote = true;
                 }
                 if !wrote {
-                    out.push_str("0.0.0.0
-");
+                    out.push_str("0.0.0.0\n");
                 }
                 Ok(out.into_bytes())
             }
             "dhcp" => Ok(if self.dhcp_enabled {
-                b"on
-".to_vec()
+                b"on\n".to_vec()
             } else {
-                b"off
-".to_vec()
+                b"off\n".to_vec()
             }),
             "ip6" | "ip6/address" => {
                 let addr = if let Some(ref cfg) = self.ipv6_config {
@@ -126,73 +93,57 @@ ip6/gateway
                 } else {
                     self.link_local_addr
                 };
-                Ok(alloc::format!("{}
-", addr).into_bytes())
+                Ok(alloc::format!("{}\n", addr).into_bytes())
             }
             "ip6/gateway" => Ok(if let Some(ref cfg) = self.ipv6_config {
                 if let Some(gw) = cfg.gateway {
-                    alloc::format!("{}
-", gw).into_bytes()
+                    alloc::format!("{}\n", gw).into_bytes()
                 } else {
-                    b"::
-".to_vec()
+                    b"::\n".to_vec()
                 }
             } else {
-                b"::
-".to_vec()
+                b"::\n".to_vec()
             }),
             "route" => Ok(if let Some(ref cfg) = self.ip_config {
                 if let Some(gw) = cfg.gateway {
-                    alloc::format!("default via {}
-", gw).into_bytes()
+                    alloc::format!("default via {}\n", gw).into_bytes()
                 } else if let Some(ref cfg6) = self.ipv6_config {
                     if let Some(gw) = cfg6.gateway {
-                        alloc::format!("default via {}
-", gw).into_bytes()
+                        alloc::format!("default via {}\n", gw).into_bytes()
                     } else {
-                        b"none
-".to_vec()
+                        b"none\n".to_vec()
                     }
                 } else {
-                    b"none
-".to_vec()
+                    b"none\n".to_vec()
                 }
             } else if let Some(ref cfg6) = self.ipv6_config {
                 if let Some(gw) = cfg6.gateway {
-                    alloc::format!("default via {}
-", gw).into_bytes()
+                    alloc::format!("default via {}\n", gw).into_bytes()
                 } else {
-                    b"none
-".to_vec()
+                    b"none\n".to_vec()
                 }
             } else {
-                b"none
-".to_vec()
+                b"none\n".to_vec()
             }),
             "routes" => {
                 let mut content = Vec::new();
                 self.interface.routes_mut().update(|table| {
                     for route in table.iter() {
-                        let line = alloc::format!("{} via {}
-", route.cidr, route.via_router);
+                        let line = alloc::format!("{} via {}\n", route.cidr, route.via_router);
                         content.extend_from_slice(line.as_bytes());
                     }
                 });
                 if content.is_empty() {
-                    content.extend_from_slice(b"none
-");
+                    content.extend_from_slice(b"none\n");
                 }
                 Ok(content)
             }
-            "resolve" => Ok(b"use /net/resolve/<hostname>
-".to_vec()),
-            "tcp" => Ok(b"use /net/tcp/listen/<port>, /net/tcp/listen-once/<port>, /net/tcp/connect/<ip>/<port>[/<local_port>], /net/tcp/listeners, /net/tcp/connections, /net/tcp/stats
-".to_vec()),
+            "resolve" => Ok(b"use /net/resolve/<hostname>\n".to_vec()),
+            "tcp" => Ok(b"use /net/tcp/listen/<port>, /net/tcp/listen-once/<port>, /net/tcp/connect/<ip>/<port>[/<local_port>], /net/tcp/listeners, /net/tcp/connections, /net/tcp/stats\n".to_vec()),
             "tcp/listeners" => {
                 let mut content = Vec::new();
                 if self.tcp_listeners.is_empty() {
-                    content.extend_from_slice(b"none
-");
+                    content.extend_from_slice(b"none\n");
                 } else {
                     for (fid, listener) in self.tcp_listeners.iter() {
                         let socket = self.sockets.get::<tcp::Socket>(listener.socket);
@@ -205,8 +156,7 @@ ip6/gateway
                             None => "none",
                         };
                         let line = alloc::format!(
-                            "fid={} port={} state={} mode={} session={} backlog={}
-",
+                            "fid={} port={} state={} mode={} session={} backlog={}\n",
                             fid,
                             listener.port,
                             Self::tcp_state_name(socket.state()),
@@ -222,8 +172,7 @@ ip6/gateway
             "tcp/connections" => {
                 let mut content = Vec::new();
                 if self.tcp_connections.is_empty() {
-                    content.extend_from_slice(b"none
-");
+                    content.extend_from_slice(b"none\n");
                 } else {
                     for (fid, conn) in self.tcp_connections.iter() {
                         let socket = self.sockets.get::<tcp::Socket>(conn.socket);
@@ -231,16 +180,14 @@ ip6/gateway
                         let remote = socket.remote_endpoint();
                         let line = match (local, remote) {
                             (Some(local), Some(remote)) => alloc::format!(
-                                "fid={} local={} remote={} state={}
-",
+                                "fid={} local={} remote={} state={}\n",
                                 fid,
                                 local,
                                 remote,
                                 Self::tcp_state_name(socket.state())
                             ),
                             _ => alloc::format!(
-                                "fid={} local_port={} remote={} state={}
-",
+                                "fid={} local_port={} remote={} state={}\n",
                                 fid,
                                 conn.local_port,
                                 conn.remote,
@@ -268,12 +215,7 @@ ip6/gateway
                     }
                 }
                 Ok(alloc::format!(
-                    "listeners={}
-connections={}
-established={}
-connecting={}
-closing={}
-",
+                    "listeners={}\nconnections={}\nestablished={}\nconnecting={}\nclosing={}\n",
                     listeners,
                     connections,
                     established,
@@ -282,13 +224,11 @@ closing={}
                 )
                 .into_bytes())
             }
-            "udp" => Ok(b"use /net/udp/bind/<port>, /net/udp/connect/<ip>/<port> or /net/udp/send/<ip>/<port>
-".to_vec()),
+            "udp" => Ok(b"use /net/udp/bind/<port>, /net/udp/connect/<ip>/<port> or /net/udp/send/<ip>/<port>\n".to_vec()),
             path if path.starts_with("resolve/") => {
                 let name = &path[8..];
                 self.resolve_hostname_blocking(name)
-                    .map(|addr| alloc::format!("{}
-", addr).into_bytes())
+                    .map(|addr| alloc::format!("{}\n", addr).into_bytes())
             }
             path if path.starts_with("ping/") || path.starts_with("ping6/") => {
                 if let Some((seq, rtt_us)) = self.ping_replies.first().copied() {
@@ -297,15 +237,13 @@ closing={}
                     let _ = call::debug_log(&[(seq >> 8) as u8, seq as u8]);
                     let _ = call::debug_log(b" rtt=");
                     let _ = call::debug_log(&[(rtt_us / 1000) as u8]);
-                    let _ = call::debug_log(b"ms
-");
+                    let _ = call::debug_log(b"ms\n");
                     let mut buf = vec![0u8; 10];
                     buf[0..2].copy_from_slice(&seq.to_le_bytes());
                     buf[2..10].copy_from_slice(&rtt_us.to_le_bytes());
                     Ok(buf)
                 } else {
-                    let _ = call::debug_log(b"[ping] read: no replies waiting
-");
+                    let _ = call::debug_log(b"[ping] read: no replies waiting\n");
                     Ok(Vec::new())
                 }
             }

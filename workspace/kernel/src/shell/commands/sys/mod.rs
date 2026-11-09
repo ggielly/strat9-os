@@ -310,8 +310,7 @@ fn render_silo_toml(silos: &[ManagedSiloDef]) -> String {
     let mut out = String::new();
     for (i, s) in silos.iter().enumerate() {
         if i > 0 {
-            out.push('
-');
+            out.push('\n');
         }
         let _ = writeln!(out, "[[silos]]");
         let _ = writeln!(out, "name = \"{}\"", s.name);
@@ -347,8 +346,7 @@ fn render_silo_toml(silos: &[ManagedSiloDef]) -> String {
             }
         }
         for st in &s.strates {
-            out.push('
-');
+            out.push('\n');
             let _ = writeln!(out, "[[silos.strates]]");
             let _ = writeln!(out, "name = \"{}\"", st.name);
             let _ = writeln!(out, "binary = \"{}\"", st.binary);
@@ -2385,16 +2383,14 @@ pub(super) fn cmd_wasm_run_impl(args: &[String]) -> Result<(), ShellError> {
 
 /// `health` : system health diagnostic (boot graph, strates, IPC, VFS mounts).
 pub(super) fn cmd_health_impl(_args: &[String]) -> Result<(), ShellError> {
-    shell_println!("=== Strat9 Health Report ===
-");
+    shell_println!("=== Strat9 Health Report ===\n");
 
     shell_println!("-- VFS Mounts --");
     for m in vfs::list_mounts() {
         shell_println!("  {}", m);
     }
 
-    shell_println!("
--- IPC Namespace --");
+    shell_println!("\n-- IPC Namespace --");
     let bindings = crate::namespace::list_all_bindings();
     if bindings.is_empty() {
         shell_println!("  (none)");
@@ -2404,8 +2400,7 @@ pub(super) fn cmd_health_impl(_args: &[String]) -> Result<(), ShellError> {
         }
     }
 
-    shell_println!("
--- Active Silos --");
+    shell_println!("\n-- Active Silos --");
     let silo_list = silo::list_silos_snapshot();
     if silo_list.is_empty() {
         shell_println!("  (none)");
@@ -2421,7 +2416,6 @@ pub(super) fn cmd_health_impl(_args: &[String]) -> Result<(), ShellError> {
         }
     }
 
-    shell_println!("
-=== End Health Report ===");
+    shell_println!("\n=== End Health Report ===");
     Ok(())
 }

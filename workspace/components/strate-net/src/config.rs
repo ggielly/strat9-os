@@ -47,8 +47,7 @@ impl NetworkStrate {
 
         match event {
             Some(dhcpv4::Event::Configured(config)) => {
-                crate::log("[strate-net] DHCP: address acquired
-");
+                crate::log("[strate-net] DHCP: address acquired\n");
 
                 self.interface.update_ip_addrs(|addrs| {
                     let cidr = IpCidr::new(
@@ -97,8 +96,7 @@ impl NetworkStrate {
                 self.refresh_dns_servers();
             }
             Some(dhcpv4::Event::Deconfigured) => {
-                crate::log("[strate-net] DHCP: deconfigured (lease expired?)
-");
+                crate::log("[strate-net] DHCP: deconfigured (lease expired?)\n");
                 if self.dns_from_dhcp {
                     self.dns_servers = [None; 3];
                     self.dns_from_dhcp = false;

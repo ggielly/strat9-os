@@ -45,8 +45,7 @@ pub fn cmd_watch(args: &[String]) -> Result<(), ShellError> {
     let interval_ticks = interval_secs * hz;
 
     shell_println!("Every {}s: {}", interval_secs, cmd_line);
-    shell_println!("Press Ctrl+C to stop.
-");
+    shell_println!("Press Ctrl+C to stop.\n");
 
     loop {
         if crate::shell::is_interrupted() {

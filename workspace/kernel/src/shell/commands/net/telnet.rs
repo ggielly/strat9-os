@@ -57,10 +57,7 @@ pub fn cmd_telnet(args: &[String]) -> Result<(), ShellError> {
     }
 
     if http_mode {
-        let req = alloc::format!("GET / HTTP/1.0
-Host: {}
-
-", ip);
+        let req = alloc::format!("GET / HTTP/1.0\r\nHost: {}\r\n\r\n", ip);
         let _ = vfs::write(fd, req.as_bytes());
     }
 
@@ -84,8 +81,7 @@ Host: {}
             }
         }
     }
-    shell_println!("
-Connection closed ({} bytes received)", total);
+    shell_println!("\nConnection closed ({} bytes received)", total);
     let _ = vfs::close(fd);
     Ok(())
 }

@@ -747,8 +747,7 @@ pub extern "C" fn smp_main() -> ! {
         use core::fmt::Write;
         let mut port = unsafe { uart_16550::SerialPort::new(0x3F8) };
         port.init();
-        let _ = port.write_fmt(format_args!("[smp][ap] entered smp_main
-"));
+        let _ = port.write_fmt(format_args!("[smp][ap] entered smp_main\n"));
         // CPUID leaf 1 EBX[31:24] = initial APIC ID.
         // rbx is LLVM-reserved, so save/restore it manually.
         let apic_id_raw: u32;
@@ -765,8 +764,7 @@ pub extern "C" fn smp_main() -> ! {
             );
         }
         apic_id = apic_id_raw >> 24;
-        let _ = port.write_fmt(format_args!("[smp][ap] cpuid apic_id={}
-", apic_id));
+        let _ = port.write_fmt(format_args!("[smp][ap] cpuid apic_id={}\n", apic_id));
     }
 
     // Signal BSP that this AP has reached Rust and consumed the trampoline RSP.
@@ -780,8 +778,7 @@ pub extern "C" fn smp_main() -> ! {
                 use core::fmt::Write;
                 let mut port = unsafe { uart_16550::SerialPort::new(0x3F8) };
                 let _ = port.write_fmt(format_args!(
-                    "[smp][ap] ERROR: apic_id={} not registered, halting
-",
+                    "[smp][ap] ERROR: apic_id={} not registered, halting\n",
                     apic_id
                 ));
             }
@@ -812,8 +809,7 @@ pub extern "C" fn smp_main() -> ! {
             use core::fmt::Write;
             let mut port = unsafe { uart_16550::SerialPort::new(0x3F8) };
             let _ = port.write_fmt(format_args!(
-                "[smp][ap] WARNING: XCR0 mismatch! expected={:#x} actual={:#x}
-",
+                "[smp][ap] WARNING: XCR0 mismatch! expected={:#x} actual={:#x}\n",
                 expected, actual
             ));
         }
@@ -839,8 +835,7 @@ pub extern "C" fn smp_main() -> ! {
         use core::fmt::Write;
         let mut port = unsafe { uart_16550::SerialPort::new(0x3F8) };
         let _ = port.write_fmt(format_args!(
-            "[smp][ap] cpu_index={} online, waiting for barrier
-",
+            "[smp][ap] cpu_index={} online, waiting for barrier\n",
             cpu_index
         ));
     }

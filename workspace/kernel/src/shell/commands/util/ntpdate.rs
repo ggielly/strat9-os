@@ -41,8 +41,7 @@ fn resolve_ntp_server(server: &str) -> Result<[u8; 4], ShellError> {
     if n == 0 {
         return Err(ShellError::ExecutionFailed);
     }
-    let end = buf[..n].iter().position(|&b| b == b'
-').unwrap_or(n);
+    let end = buf[..n].iter().position(|&b| b == b'\n').unwrap_or(n);
     let s = core::str::from_utf8(&buf[..end]).unwrap_or("").trim();
     parse_ipv4_literal(s).ok_or(ShellError::ExecutionFailed)
 }

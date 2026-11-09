@@ -86,14 +86,12 @@ fn open_retry(path: &str) -> usize {
     loop {
         match call::open(path, flag::O_RDWR | flag::O_NONBLOCK) {
             Ok(fd) => {
-                log("[strate-bt] device opened
-");
+                log("[strate-bt] device opened\n");
                 return fd;
             }
             Err(_) => {
                 if !logged {
-                    log("[strate-bt] waiting for device
-");
+                    log("[strate-bt] waiting for device\n");
                     logged = true;
                 }
                 sleep_ms(200);
@@ -151,7 +149,7 @@ fn find_field(buf: &[u8], key: &[u8]) -> Option<u64> {
     while i + key.len() <= buf.len() {
         if &buf[i..i + key.len()] == key {
             let mut j = i + key.len();
-            while j < buf.len() && (buf[j] == b' ' || buf[j] == b'	' || buf[j] == b'=') {
+            while j < buf.len() && (buf[j] == b' ' || buf[j] == b'\t' || buf[j] == b'=') {
                 j += 1;
             }
             let start = j;
@@ -265,32 +263,27 @@ fn realtek_setup(fd: usize) -> bool {
         &mut r,
         1000,
     ) else {
-        log("[strate-bt] Realtek: no answer to 0xFC61
-");
+        log("[strate-bt] Realtek: no answer to 0xFC61\n");
         return false;
     };
     if n < 3 || r[0] != 0 {
-        log("[strate-bt] Realtek: 0xFC61 failed
-");
+        log("[strate-bt] Realtek: 0xFC61 failed\n");
         return false;
     }
     let subver = u16::from_le_bytes([r[1], r[2]]);
     if subver != realtek::RTL_ROM_LMP_8761A {
-        log("[strate-bt] Realtek: not an RTL8761BU (subver != 8761)
-");
+        log("[strate-bt] Realtek: not an RTL8761BU (subver != 8761)\n");
         return false;
     }
 
     // 2. Read Local Version, then ROM version (chip id = rom + 1).
     let _ = hci_cmd_sync(fd, 0x1001, &[], &mut r, 1000);
     let Some(n) = hci_cmd_sync(fd, realtek::OP_READ_ROM_VERSION, &[], &mut r, 1000) else {
-        log("[strate-bt] Realtek: ROM version read failed
-");
+        log("[strate-bt] Realtek: ROM version read failed\n");
         return false;
     };
     if n < 2 || r[0] != 0 {
-        log("[strate-bt] Realtek: ROM version status != 0
-");
+        log("[strate-bt] Realtek: ROM version status != 0\n");
         return false;
     }
     let rom_version = r[1];
@@ -299,8 +292,7 @@ fn realtek_setup(fd: usize) -> bool {
     let fw = fw_buf();
     let fw_len = read_file(RTL_FW_PATH, fw);
     if fw_len == 0 {
-        log("[strate-bt] Realtek: /initfs/rtl8761bu_fw.bin missing
-");
+        log("[strate-bt] Realtek: /initfs/rtl8761bu_fw.bin missing\n");
         return false;
     }
     let cfg = cfg_buf();
@@ -311,15 +303,12 @@ fn realtek_setup(fd: usize) -> bool {
         Err(e) => {
             log(match e {
                 realtek::RtlError::UnsupportedV2 => {
-                    "[strate-bt] Realtek: v2 firmware format unsupported
-"
+                    "[strate-bt] Realtek: v2 firmware format unsupported\n"
                 }
                 realtek::RtlError::NoPatch(_) => {
-                    "[strate-bt] Realtek: no patch for this chip id
-"
+                    "[strate-bt] Realtek: no patch for this chip id\n"
                 }
-                _ => "[strate-bt] Realtek: firmware parse failed
-",
+                _ => "[strate-bt] Realtek: firmware parse failed\n",
             });
             return false;
         }
@@ -331,19 +320,16 @@ fn realtek_setup(fd: usize) -> bool {
     let count = realtek::fragment_count(total);
     for i in 0..count {
         let Some(plen) = realtek::fragment(&out[..total], i, &mut payload) else {
-            log("[strate-bt] Realtek: fragment build failed
-");
+            log("[strate-bt] Realtek: fragment build failed\n");
             return false;
         };
         let Some(rn) = hci_cmd_sync(fd, realtek::OP_DOWNLOAD, &payload[..plen], &mut r, 3000)
         else {
-            log("[strate-bt] Realtek: firmware download timeout
-");
+            log("[strate-bt] Realtek: firmware download timeout\n");
             return false;
         };
         if rn < 1 || r[0] != 0 {
-            log("[strate-bt] Realtek: firmware download rejected
-");
+            log("[strate-bt] Realtek: firmware download rejected\n");
             return false;
         }
     }
@@ -351,8 +337,7 @@ fn realtek_setup(fd: usize) -> bool {
     // 5. Confirm the new version.
     if let Some(n) = hci_cmd_sync(fd, 0x1001, &[], &mut r, 1000) {
         if n >= 4 {
-            log("[strate-bt] Realtek: firmware downloaded, version updated
-");
+            log("[strate-bt] Realtek: firmware downloaded, version updated\n");
         }
     }
     true
@@ -418,17 +403,14 @@ fn mtk_setup(hci: usize, ctl: usize) -> bool {
     let fw = fw_buf();
     let fw_len = read_file(MTK_FW_PATH, fw);
     if fw_len == 0 {
-        log("[strate-bt] MTK: firmware file missing
-");
+        log("[strate-bt] MTK: firmware file missing\n");
         return false;
     }
     let Some(count) = mediatek::section_count(&fw[..fw_len]) else {
-        log("[strate-bt] MTK: bad firmware header
-");
+        log("[strate-bt] MTK: bad firmware header\n");
         return false;
     };
-    log("[strate-bt] MTK: downloading firmware
-");
+    log("[strate-bt] MTK: downloading firmware\n");
     for i in 0..count {
         let Some(s) = mediatek::section(&fw[..fw_len], i) else {
             return false;
@@ -443,8 +425,7 @@ fn mtk_setup(hci: usize, ctl: usize) -> bool {
         let mut status = mediatek::PATCH_UNDONE;
         for _ in 0..20 {
             let Some(st) = wmt_cmd(hci, ctl, wmt::OP_PATCH_DWNLD, 0, &hdr) else {
-                log("[strate-bt] MTK: section query timeout
-");
+                log("[strate-bt] MTK: section query timeout\n");
                 return false;
             };
             status = st;
@@ -465,25 +446,21 @@ fn mtk_setup(hci: usize, ctl: usize) -> bool {
                 return false;
             };
             if wmt_cmd(hci, ctl, wmt::OP_PATCH_DWNLD, flag, data).is_none() {
-                log("[strate-bt] MTK: firmware fragment failed
-");
+                log("[strate-bt] MTK: firmware fragment failed\n");
                 return false;
             }
         }
     }
     if wmt_cmd(hci, ctl, wmt::OP_FUNC_CTRL, 0, &[1]).is_none() {
-        log("[strate-bt] MTK: function enable timeout
-");
+        log("[strate-bt] MTK: function enable timeout\n");
         return false;
     }
-    log("[strate-bt] MTK: firmware downloaded
-");
+    log("[strate-bt] MTK: firmware downloaded\n");
     true
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _start() -> ! {    log("[strate-bt] starting
-");
+pub extern "C" fn _start() -> ! {    log("[strate-bt] starting\n");
 
     let hci = open_retry(HCI_PATH);
     let log_stream = open_retry(LOG_STREAM_PATH);
@@ -501,19 +478,15 @@ pub extern "C" fn _start() -> ! {    log("[strate-bt] starting
 
     let mut init = [0u8; 256];
     if realtek_setup(hci) {
-        log("[strate-bt] Realtek RTL8761BU firmware ready
-");
+        log("[strate-bt] Realtek RTL8761BU firmware ready\n");
     } else if mtk_setup(hci, ctl) {
-        log("[strate-bt] MediaTek MT7961 firmware ready
-");
+        log("[strate-bt] MediaTek MT7961 firmware ready\n");
     } else {
-        log("[strate-bt] no firmware loaded (generic HCI path)
-");
+        log("[strate-bt] no firmware loaded (generic HCI path)\n");
     }
     if let Some(n) = Session::initialization_sequence(&mut init) {
         if !write_all(hci, &init[..n]) {
-            log("[strate-bt] HCI init write failed
-");
+            log("[strate-bt] HCI init write failed\n");
         }
     }
 
@@ -533,22 +506,18 @@ pub extern "C" fn _start() -> ! {    log("[strate-bt] starting
                     Ok(0) => {}
                     Ok(m) => {
                         if !write_all(hci, &out[..m]) {
-                            log("[strate-bt] HCI write failed
-");
+                            log("[strate-bt] HCI write failed\n");
                         }
                     }
-                    Err(_) => log("[strate-bt] malformed HCI packet
-"),
+                    Err(_) => log("[strate-bt] malformed HCI packet\n"),
                 }
                 if session.take_advertising_error() {
-                    log("[strate-bt] LE advertising enable failed (firmware?)
-");
+                    log("[strate-bt] LE advertising enable failed (firmware?)\n");
                 }
             }
             Err(e) => {
                 if e.to_errno() != EAGAIN {
-                    log("[strate-bt] HCI read error
-");
+                    log("[strate-bt] HCI read error\n");
                     sleep_ms(50);
                 }
             }
@@ -559,25 +528,21 @@ pub extern "C" fn _start() -> ! {    log("[strate-bt] starting
             match action {
                 RxAction::Pause => {
                     paused = true;
-                    log("[strate-bt] dump paused
-");
+                    log("[strate-bt] dump paused\n");
                 }
                 RxAction::Resume => {
                     paused = false;
-                    log("[strate-bt] dump resumed
-");
+                    log("[strate-bt] dump resumed\n");
                 }
                 RxAction::Stats => {
-                    log("[strate-bt] stats requested
-");
+                    log("[strate-bt] stats requested\n");
                 }
                 RxAction::Dump { count } => {
                     // TODO(hw): replay the last `count` bytes from the log ring
                     // once the console exposes a history read; today the dump
                     // stream is forward-only.
                     let _ = count;
-                    log("[strate-bt] dump replay not supported yet
-");
+                    log("[strate-bt] dump replay not supported yet\n");
                 }
             }
         }
@@ -592,8 +557,7 @@ pub extern "C" fn _start() -> ! {    log("[strate-bt] starting
                         match session.poll_log(&log_buf[..n], &mut out) {
                             Some(m) => {
                                 if !write_all(hci, &out[..m]) {
-                                    log("[strate-bt] notification write dropped
-");
+                                    log("[strate-bt] notification write dropped\n");
                                     break;
                                 }
                             }
@@ -603,8 +567,7 @@ pub extern "C" fn _start() -> ! {    log("[strate-bt] starting
                 }
                 Err(e) => {
                     if e.to_errno() != EAGAIN {
-                        log("[strate-bt] log stream read error
-");
+                        log("[strate-bt] log stream read error\n");
                     }
                 }
             }

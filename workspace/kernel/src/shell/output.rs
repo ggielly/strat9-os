@@ -102,8 +102,7 @@ macro_rules! shell_print {
 /// Print to both serial and VGA with newline, then flush to screen.
 #[macro_export]
 macro_rules! shell_println {
-    () => ($crate::shell_print!("
-"));
+    () => ($crate::shell_print!("\n"));
     ($($arg:tt)*) => {{
         if $crate::shell::output::is_capturing() {
             use core::fmt::Write;

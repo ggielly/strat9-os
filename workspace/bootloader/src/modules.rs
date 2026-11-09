@@ -93,7 +93,7 @@ pub fn load_modules(
     volume: &mut Directory,
     memory: &mut BootMemory,
 ) -> BootResult<Vec<LoadedModule>> {
-    let directory_path = cstr16!("\boot\initfs");
+    let directory_path = cstr16!("\\boot\\initfs");
     let handle = volume
         .open(directory_path, FileMode::Read, FileAttribute::empty())
         .map_err(|e| {

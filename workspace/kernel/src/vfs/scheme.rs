@@ -810,8 +810,7 @@ impl Scheme for KernelScheme {
             let files = self.files.lock();
             for name in files.keys() {
                 list.push_str(name);
-                list.push('
-');
+                list.push('\n');
             }
 
             if offset >= list.len() as u64 {

@@ -297,8 +297,7 @@ pub fn enumerate_device(port: usize, slot_id: u8, dev_desc: &[u8; 18]) {
         crate::e9_mark!(b'h');
         crate::e9_mark!(dev_class);
         crate::e9_mark!(dev_desc[6]);
-        crate::e9_mark!(b'
-');
+        crate::e9_mark!(b'\n');
     }
 
     if dev_class == 0x03 {
@@ -364,8 +363,7 @@ pub fn enumerate_device(port: usize, slot_id: u8, dev_desc: &[u8; 18]) {
                                         crate::e9_mark!(b'K');
                                         crate::e9_mark!(b'b');
                                         crate::e9_mark!(b'0'+b_interface_protocol);
-                                        crate::e9_mark!(b'
-');
+                                        crate::e9_mark!(b'\n');
                                     }
 
                                     let setup_ok = controller
@@ -381,8 +379,7 @@ pub fn enumerate_device(port: usize, slot_id: u8, dev_desc: &[u8; 18]) {
                                     unsafe {
                                         crate::e9_mark!(b'K');
                                         crate::e9_mark!(if setup_ok { b's' } else { b'S' });
-                                        crate::e9_mark!(b'
-');
+                                        crate::e9_mark!(b'\n');
                                     }
 
                                     let buf_size = ep_max_packet as usize;
@@ -391,8 +388,7 @@ pub fn enumerate_device(port: usize, slot_id: u8, dev_desc: &[u8; 18]) {
                                     unsafe {
                                         crate::e9_mark!(b'K');
                                         crate::e9_mark!(if alloc_res.is_ok() { b'a' } else { b'A' });
-                                        crate::e9_mark!(b'
-');
+                                        crate::e9_mark!(b'\n');
                                     }
                                     if let Ok((_buf_virt, _buf_phys)) = alloc_res {
                                         if b_interface_protocol == 1 {

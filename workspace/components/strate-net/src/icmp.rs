@@ -65,8 +65,7 @@ impl NetworkStrate {
 
         for (data, addr) in packets.iter() {
             if data.len() < 8 {
-                let _ = call::debug_log(b"[ping] recv too short
-");
+                let _ = call::debug_log(b"[ping] recv too short\n");
                 continue;
             }
 
@@ -78,8 +77,7 @@ impl NetworkStrate {
                 other => {
                     let _ = call::debug_log(b"[ping] recv unexpected type ");
                     let _ = call::debug_log(&[other]);
-                    let _ = call::debug_log(b"
-");
+                    let _ = call::debug_log(b"\n");
                 }
             }
         }
@@ -92,16 +90,14 @@ impl NetworkStrate {
 
         let socket = self.sockets.get_mut::<icmp::Socket>(self.icmp_handle);
         if !socket.can_send() {
-            let _ = call::debug_log(b"[ping] echo request v4: can_send false
-");
+            let _ = call::debug_log(b"[ping] echo request v4: can_send false\n");
             return;
         }
 
         // Build echo reply: swap type 8->0, keep ident+seq, recompute checksum.
         let payload_len = data.len();
         let Ok(buf) = socket.send(payload_len, IpAddress::Ipv4(src)) else {
-            let _ = call::debug_log(b"[ping] echo request v4: send failed
-");
+            let _ = call::debug_log(b"[ping] echo request v4: send failed\n");
             return;
         };
         buf.copy_from_slice(data);
@@ -113,8 +109,7 @@ impl NetworkStrate {
         let _ = call::debug_log(b"[ping] echo reply v4 sent to ");
         let octets = src.octets();
         let _ = call::debug_log(&[octets[0], b'.', octets[1], b'.', octets[2], b'.', octets[3]]);
-        let _ = call::debug_log(b"
-");
+        let _ = call::debug_log(b"\n");
     }
 
     fn handle_echo_request_v6(&mut self, data: &[u8], addr: IpAddress) {
@@ -124,16 +119,14 @@ impl NetworkStrate {
 
         let socket = self.sockets.get_mut::<icmp::Socket>(self.icmp_handle);
         if !socket.can_send() {
-            let _ = call::debug_log(b"[ping] echo request v6: can_send false
-");
+            let _ = call::debug_log(b"[ping] echo request v6: can_send false\n");
             return;
         }
 
         // Build echo reply: swap type 128->129, keep ident+seq, recompute checksum.
         let payload_len = data.len();
         let Ok(buf) = socket.send(payload_len, IpAddress::Ipv6(src)) else {
-            let _ = call::debug_log(b"[ping] echo request v6: send failed
-");
+            let _ = call::debug_log(b"[ping] echo request v6: send failed\n");
             return;
         };
         buf.copy_from_slice(data);
@@ -145,8 +138,7 @@ impl NetworkStrate {
         let checksum = icmpv6_checksum(&src_addr.octets(), &dst, buf);
         buf[2..4].copy_from_slice(&checksum.to_be_bytes());
 
-        let _ = call::debug_log(b"[ping] echo reply v6 sent
-");
+        let _ = call::debug_log(b"[ping] echo reply v6 sent\n");
     }
 
     fn handle_echo_reply_v4(&mut self, data: &[u8]) {
@@ -171,8 +163,7 @@ impl NetworkStrate {
             let _ = call::debug_log(&[(pending.seq >> 8) as u8, pending.seq as u8]);
             let _ = call::debug_log(b" rtt=");
             let _ = call::debug_log(&[(rtt_us / 1000) as u8]);
-            let _ = call::debug_log(b"ms
-");
+            let _ = call::debug_log(b"ms\n");
         }
     }
 
@@ -198,8 +189,7 @@ impl NetworkStrate {
             let _ = call::debug_log(&[(pending.seq >> 8) as u8, pending.seq as u8]);
             let _ = call::debug_log(b" rtt=");
             let _ = call::debug_log(&[(rtt_us / 1000) as u8]);
-            let _ = call::debug_log(b"ms
-");
+            let _ = call::debug_log(b"ms\n");
         }
     }
 
@@ -231,8 +221,7 @@ impl NetworkStrate {
             socket.bind(icmp::Endpoint::Ident(self.ping_ident)).ok();
         }
         if !socket.can_send() {
-            let _ = call::debug_log(b"[ping] send_ping v4: can_send false
-");
+            let _ = call::debug_log(b"[ping] send_ping v4: can_send false\n");
             return false;
         }
 
@@ -258,8 +247,7 @@ impl NetworkStrate {
         let _ = call::debug_log(&[(seq >> 8) as u8, seq as u8]);
         let _ = call::debug_log(b" token=");
         let _ = call::debug_log(&token.to_le_bytes());
-        let _ = call::debug_log(b"
-");
+        let _ = call::debug_log(b"\n");
 
         self.pending_pings.push(PendingPing {
             seq,
@@ -283,8 +271,7 @@ impl NetworkStrate {
             socket.bind(icmp::Endpoint::Ident(self.ping_ident)).ok();
         }
         if !socket.can_send() {
-            let _ = call::debug_log(b"[ping] send_ping6: can_send false
-");
+            let _ = call::debug_log(b"[ping] send_ping6: can_send false\n");
             return false;
         }
 
@@ -308,8 +295,7 @@ impl NetworkStrate {
         let _ = call::debug_log(&[(seq >> 8) as u8, seq as u8]);
         let _ = call::debug_log(b" token=");
         let _ = call::debug_log(&token.to_le_bytes());
-        let _ = call::debug_log(b"
-");
+        let _ = call::debug_log(b"\n");
 
         let src = if target.is_unicast_link_local() {
             self.link_local_addr

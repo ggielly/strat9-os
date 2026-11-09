@@ -354,8 +354,7 @@ pub(super) fn cmd_cat_impl(args: &[String]) -> Result<(), ShellError> {
         if args.is_empty() {
             let s = core::str::from_utf8(&piped).unwrap_or("(non-UTF8 data)");
             crate::shell_print!("{}", s);
-            if !s.ends_with('
-') {
+            if !s.ends_with('\n') {
                 shell_println!();
             }
             return Ok(());
@@ -379,8 +378,7 @@ pub(super) fn cmd_cat_impl(args: &[String]) -> Result<(), ShellError> {
                         crate::shell_print!("{}", s);
                     }
                     Err(e) => {
-                        shell_println!("
-Error reading file: {:?}", e);
+                        shell_println!("\nError reading file: {:?}", e);
                         break;
                     }
                 }

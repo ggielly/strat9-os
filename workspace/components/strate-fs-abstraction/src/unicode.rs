@@ -288,7 +288,7 @@ pub fn ascii_iequals(a: &[u16], b: &[u16]) -> bool {
 /// Invalid characters: \ / : * ? " < > |
 pub fn is_valid_filename(s: &[u16]) -> bool {
     const INVALID: [u16; 9] = [
-        '\' as u16,
+        '\\' as u16,
         '/' as u16,
         ':' as u16,
         '*' as u16,

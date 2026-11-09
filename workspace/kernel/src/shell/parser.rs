@@ -185,13 +185,13 @@ pub(crate) fn lex(input: &str) -> Result<Vec<Token>, ParseError> {
             }
             continue;
         }
-        if ch == '\' {
+        if ch == '\\' {
             let next = chars.next().ok_or(ParseError::DanglingEscape)?;
             word.quoted = true;
             active = true;
             // Within double quotes, only shell-significant characters are escaped.
-            if quote == Some('"') && !matches!(next, '$' | '"' | '\') {
-                word.push('\', false);
+            if quote == Some('"') && !matches!(next, '$' | '"' | '\\') {
+                word.push('\\', false);
             }
             word.push(next, false);
             continue;
@@ -374,7 +374,7 @@ mod tests {
     use super::*;
     #[test]
     fn quoted_operators_and_empty_words_are_arguments() {
-        let p = try_parse_pipeline("echo 'a|b;>' \"\" a\ b")
+        let p = try_parse_pipeline("echo 'a|b;>' \"\" a\\ b")
             .unwrap()
             .unwrap();
         let cmd = p.stages[0].command.resolve(|text| String::from(text));
@@ -398,7 +398,7 @@ mod tests {
             "echo > > out",
             "echo > a > b",
             "echo 'x",
-            "echo \",
+            "echo \\",
         ] {
             assert!(try_parse_pipeline(line).is_err(), "{}", line);
         }

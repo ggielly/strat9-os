@@ -621,8 +621,7 @@ fn panic_draw_str(
         if x + 8 > max_x {
             break;
         }
-        if byte == b'
-' {
+        if byte == b'\n' {
             break;
         }
         panic_draw_char(fb, pitch, x, y, byte, fg, bg, fmt);

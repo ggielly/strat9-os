@@ -1238,8 +1238,7 @@ pub fn read_packet(buf: &mut [u8]) -> Result<usize, SyscallError> {
 pub fn stats_text() -> String {
     let state = STATE.lock();
     alloc::format!(
-        "present={} slot={} vid={:04x} pid={:04x} ep_in={:02x} ep_out={:02x} ep_evt={:02x} events_on_bulk={} rx_events={} rx_acl={} rx_dropped={} tx_packets={} tx_bytes={} tx_dropped={} tx_queued={} irq_drops={}
-",
+        "present={} slot={} vid={:04x} pid={:04x} ep_in={:02x} ep_out={:02x} ep_evt={:02x} events_on_bulk={} rx_events={} rx_acl={} rx_dropped={} tx_packets={} tx_bytes={} tx_dropped={} tx_queued={} irq_drops={}\n",
         state.present,
         state.slot_id,
         state.vendor_id,

@@ -455,14 +455,13 @@ pub fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + s.len() / 8);
     for c in s.chars() {
         match c {
-            '"' => out.push_str("\\""),
-            '\' => out.push_str("\\"),
-            '
-' => out.push_str("\n"),
-            '' => out.push_str("\r"),
-            '	' => out.push_str("\t"),
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
             c if c.is_control() => {
-                let _ = write!(out, "\u{:04x}", c as u32);
+                let _ = write!(out, "\\u{:04x}", c as u32);
             }
             c => out.push(c),
         }
