@@ -205,9 +205,6 @@ fn run_guest(
                 if port == TEST_PORT {
                     report.observed_byte = Some((vcpu.guest().rax & 0xFF) as u8);
                 }
-                // For an exit on an I/O instruction, the processor has already
-                // set `GUEST_RIP` to the next instruction: do not
-                // advance it again, otherwise the resume would skip the `hlt`.
                 log::info!(
                     "[s9vm] I/O exit port={:#x} byte={:?} rip={:#x} len={}",
                     port,
@@ -215,6 +212,14 @@ fn run_guest(
                     vcpu.guest().rip,
                     exit.instruction_length
                 );
+                // On a VM exit caused by an I/O instruction, GUEST_RIP points at
+                // the instruction itself, not the next one: the processor does
+                // not auto-advance. Skip it with the reported instruction length,
+                // otherwise the resume re-executes the `out` forever.
+                // SAFETY: the control block is loaded and the guest is inactive.
+                unsafe {
+                    vcpu.advance_rip(u64::from(exit.instruction_length))?;
+                }
             }
             ExitClass::Halt => {
                 report.halt_exits += 1;
