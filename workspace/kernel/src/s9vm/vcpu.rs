@@ -346,6 +346,14 @@ impl Vcpu {
         })
     }
 
+    /// VM-instruction error currently stored in the control block.
+    ///
+    /// # Safety
+    /// The control block must be loaded on the current CPU.
+    pub unsafe fn instruction_error(&self) -> u32 {
+        unsafe { self.control.instruction_error() }
+    }
+
     /// Physical address of the control block.
     pub fn control_phys(&self) -> u64 {
         self.control.phys()

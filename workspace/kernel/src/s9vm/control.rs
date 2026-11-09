@@ -328,6 +328,17 @@ impl ControlBlock {
     /// - `self.phys` must be an initialized region, exclusively
     ///   reserved;
     /// - the block must not be loaded on another CPU.
+    /// Reads the VM-instruction error field (`0x4400`).
+    ///
+    /// It is only updated by failed VMX instructions; a successful instruction
+    /// leaves it unchanged. Returns 0 when the field cannot be read.
+    ///
+    /// # Safety
+    /// The control block must be loaded on the current CPU.
+    pub unsafe fn instruction_error(&self) -> u32 {
+        unsafe { self.read_u32(field::INSTRUCTION_ERROR).unwrap_or(0) }
+    }
+
     pub unsafe fn load(&mut self) -> Result<(), ControlError> {
         let phys = self.phys;
         let fail: u8;

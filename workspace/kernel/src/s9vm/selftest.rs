@@ -271,8 +271,20 @@ fn run_variant(
     // block has just been created for this vCPU.
     unsafe {
         vcpu.load()?;
+        let error = vcpu.instruction_error();
+        if error != 0 {
+            log::warn!("[s9vm] instruction error after load: {:#x}", error);
+        }
         vcpu.configure_host()?;
+        let error = vcpu.instruction_error();
+        if error != 0 {
+            log::warn!("[s9vm] instruction error after host state: {:#x}", error);
+        }
         vcpu.configure(caps, guest)?;
+        let error = vcpu.instruction_error();
+        if error != 0 {
+            log::warn!("[s9vm] instruction error after guest state: {:#x}", error);
+        }
     }
 
     let mut report = SelftestReport {
