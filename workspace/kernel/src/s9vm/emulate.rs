@@ -47,7 +47,7 @@
 //! supplies `PhysMemory` and `GuestContext` (see `machine.rs`).
 
 use super::{
-    apic::LocalApic,
+    apic::{LocalApic, x2apic},
     decode::{self, Decoded, MemoryAccess, PortAccess},
     exit::ExitClass,
     ioapic::IoApic,
@@ -81,6 +81,10 @@ const EPT_READ: u64 = 1 << 0;
 pub const APIC_BASE: u64 = 0xFEE0_0000;
 /// Base of the I/O APIC page in the conventional guest memory map.
 pub const IOAPIC_BASE: u64 = 0xFEC0_0000;
+/// First and last MSR of the x2APIC window (`0x800..=0x8FF`).
+pub const X2APIC_MSR_FIRST: u32 = 0x800;
+pub const X2APIC_MSR_LAST: u32 = 0x8FF;
+
 /// Base of the legacy PIC ports.
 pub const PIC_BASE_PORT: u16 = 0x20;
 /// POST/delay diagnostic port: writes are discarded, reads return zero.
@@ -402,6 +406,7 @@ pub fn handle_exit(
             qualification,
             guest_physical_address,
         ),
+        ExitClass::Msr => handle_msr_exit(apic, view, guest),
         _ => Ok(false),
     }
 }
@@ -468,6 +473,43 @@ fn serve_port(devices: &mut Devices, guest: &mut dyn GuestContext, access: &Port
         return true;
     }
     false
+}
+
+/// Handles an `RDMSR`/`WRMSR` exit.
+///
+/// Only the x2APIC window is modeled, and only when the guest actually uses
+/// the x2APIC interface: the kernel enables MSR bitmaps for `0x800..=0x8FF`,
+/// so the exit tells us the guest executed the instruction. `ECX` holds the
+/// MSR number, `EDX:EAX` the value (`rdmsr` writes them).
+fn handle_msr_exit(
+    apic: &mut LocalApic,
+    view: &mut MemoryView<'_>,
+    guest: &mut dyn GuestContext,
+) -> Result<bool, EmuError> {
+    let Decoded::Msr(access) = view.fetch(guest)? else {
+        return Ok(false);
+    };
+    // RCX (encoding order index 1) selects the MSR.
+    let msr = guest.gpr(1) as u32;
+    if !(X2APIC_MSR_FIRST..=X2APIC_MSR_LAST).contains(&msr) {
+        return Ok(false);
+    }
+    debug_assert!(x2apic::TPR <= msr);
+    if access.write {
+        let value = ((guest.gpr(2) & 0xFFFF_FFFF) << 32) | (guest.gpr(0) & 0xFFFF_FFFF);
+        if !apic.x2apic_write(msr, value) {
+            return Ok(false);
+        }
+    } else {
+        let Some(value) = apic.x2apic_read(msr) else {
+            return Ok(false);
+        };
+        // RDMSR replaces the low 32 bits of EDX and EAX only.
+        write_register(guest, 0, 4, value & 0xFFFF_FFFF);
+        write_register(guest, 2, 4, value >> 32);
+    }
+    guest.set_rip(access.next_rip);
+    Ok(true)
 }
 
 /// Handles an EPT violation on a modeled device page.

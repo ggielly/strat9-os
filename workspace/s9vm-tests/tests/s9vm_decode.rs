@@ -185,3 +185,36 @@ fn next_rip_tracks_instruction_length() {
     assert_eq!(decoded.next_rip(), 0xFFFF_FFFF_8000_0002);
     assert!(!decoded.describe().is_empty());
 }
+
+#[test]
+fn decodes_rdmsr() {
+    let decoded = decode_with(&[0x0F, 0x32], 0x1000).unwrap();
+    match decoded {
+        Decoded::Msr(access) => {
+            assert!(!access.write);
+            assert_eq!(access.next_rip, 0x1002);
+        }
+        _ => panic!("expected msr access"),
+    }
+}
+
+#[test]
+fn decodes_wrmsr_with_a_rex_prefix() {
+    // REX.W is accepted (and ignored) before wrmsr.
+    let decoded = decode_with(&[0x48, 0x0F, 0x30], 0x2000).unwrap();
+    match decoded {
+        Decoded::Msr(access) => {
+            assert!(access.write);
+            assert_eq!(access.next_rip, 0x2003);
+        }
+        _ => panic!("expected msr access"),
+    }
+}
+
+#[test]
+fn rejects_other_two_byte_opcodes() {
+    assert_eq!(
+        decode_with(&[0x0F, 0x31], 0x1000),
+        Err(DecodeError::Unsupported)
+    );
+}

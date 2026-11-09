@@ -481,3 +481,105 @@ fn modeled_ports_are_advertised() {
     assert!(!Devices::handles_port(0xE9));
     assert!(!Devices::handles_port(0x3F8));
 }
+
+#[test]
+fn wrmsr_programs_the_x2apic_tpr() {
+    let mut memory = machine();
+    // wrmsr: ECX = MSR number, EDX:EAX = value.
+    let rip = load_code(&mut memory, &[0x0F, 0x30]);
+    let mut guest = TestGuest::new(rip);
+    guest.regs[1] = 0x808; // IA32_X2APIC_TPR
+    guest.regs[2] = 0;
+    guest.regs[0] = 0x30;
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    let mut view = view(&mut memory, &guest);
+    let handled = handle_exit(
+        &mut devices,
+        &mut apic,
+        &mut view,
+        &mut guest,
+        ExitClass::Msr,
+        0,
+        0,
+    )
+    .expect("emulated");
+    assert!(handled);
+    assert_eq!(apic.tpr(), 0x30);
+    assert_eq!(guest.rip, rip + 2);
+}
+
+#[test]
+fn rdmsr_reads_the_x2apic_tpr_into_edx_eax() {
+    let mut memory = machine();
+    let rip = load_code(&mut memory, &[0x0F, 0x32]);
+    let mut guest = TestGuest::new(rip);
+    guest.regs[1] = 0x808;
+    guest.regs[0] = 0xFFFF_FFFF_FFFF_0000;
+    guest.regs[2] = 0xFFFF_FFFF_FFFF_0000;
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    apic.mmio_write(0x80, 0x50);
+    let mut view = view(&mut memory, &guest);
+    let handled = handle_exit(
+        &mut devices,
+        &mut apic,
+        &mut view,
+        &mut guest,
+        ExitClass::Msr,
+        0,
+        0,
+    )
+    .expect("emulated");
+    assert!(handled);
+    // Only EAX and EDX are replaced; the upper halves are preserved.
+    assert_eq!(guest.regs[0], 0xFFFF_FFFF_0000_0050);
+    assert_eq!(guest.regs[2], 0xFFFF_FFFF_0000_0000);
+    assert_eq!(guest.rip, rip + 2);
+}
+
+#[test]
+fn msr_outside_the_x2apic_window_is_left_to_policy() {
+    let mut memory = machine();
+    let rip = load_code(&mut memory, &[0x0F, 0x32]);
+    let mut guest = TestGuest::new(rip);
+    guest.regs[1] = 0x10; // IA32_TSC
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    let mut view = view(&mut memory, &guest);
+    let handled = handle_exit(
+        &mut devices,
+        &mut apic,
+        &mut view,
+        &mut guest,
+        ExitClass::Msr,
+        0,
+        0,
+    )
+    .expect("no error");
+    assert!(!handled);
+    assert_eq!(guest.rip, rip);
+}
+
+#[test]
+fn unmodeled_x2apic_msr_is_left_to_policy() {
+    let mut memory = machine();
+    let rip = load_code(&mut memory, &[0x0F, 0x32]);
+    let mut guest = TestGuest::new(rip);
+    guest.regs[1] = 0x8FF; // last MSR of the window, not modeled
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    let mut view = view(&mut memory, &guest);
+    let handled = handle_exit(
+        &mut devices,
+        &mut apic,
+        &mut view,
+        &mut guest,
+        ExitClass::Msr,
+        0,
+        0,
+    )
+    .expect("no error");
+    assert!(!handled);
+    assert_eq!(guest.rip, rip);
+}

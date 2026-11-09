@@ -65,11 +65,21 @@ pub struct PortAccess {
     pub next_rip: u64,
 }
 
+/// An MSR access decoded from an instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsrAccess {
+    /// True for `wrmsr` (`0x0F 0x30`), false for `rdmsr` (`0x0F 0x32`).
+    pub write: bool,
+    /// Value of RIP after the instruction.
+    pub next_rip: u64,
+}
+
 /// Result of decoding one instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decoded {
     Memory(MemoryAccess),
     Port(PortAccess),
+    Msr(MsrAccess),
 }
 
 impl Decoded {
@@ -78,6 +88,7 @@ impl Decoded {
         match self {
             Decoded::Memory(access) => access.next_rip,
             Decoded::Port(access) => access.next_rip,
+            Decoded::Msr(access) => access.next_rip,
         }
     }
 }
@@ -210,6 +221,20 @@ where
                 next_rip: rip.wrapping_add(index as u64),
             }))
         }
+        // Two-byte opcodes: only the MSR accesses are needed.
+        0x0F => {
+            let second = *bytes.get(index).ok_or(DecodeError::Truncated)?;
+            index += 1;
+            let write = match second {
+                0x30 => true,  // wrmsr
+                0x32 => false, // rdmsr
+                _ => return Err(DecodeError::Unsupported),
+            };
+            Ok(Decoded::Msr(MsrAccess {
+                write,
+                next_rip: rip.wrapping_add(index as u64),
+            }))
+        }
         _ => Err(DecodeError::Unsupported),
     }
 }
@@ -331,6 +356,11 @@ impl Decoded {
                 if access.write { "out" } else { "in" },
                 access.size,
                 access.register,
+                access.next_rip
+            ),
+            Decoded::Msr(access) => alloc::format!(
+                "msr {} next={:#x}",
+                if access.write { "write" } else { "read" },
                 access.next_rip
             ),
         }

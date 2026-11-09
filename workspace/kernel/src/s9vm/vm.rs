@@ -829,7 +829,10 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                         // Kernel fast path: accesses to the modeled devices
                         // are replayed in place, so the guest never observes
                         // the exit and policy is not involved.
-                        if matches!(exit.class(), ExitClass::IoPort | ExitClass::EptViolation) {
+                        if matches!(
+                            exit.class(),
+                            ExitClass::IoPort | ExitClass::Msr | ExitClass::EptViolation
+                        ) {
                             match machine.handle(&mut hardware, &mut apic, &exit) {
                                 Ok(true) => {
                                     if resumed >= MAX_RESUMED_EXITS {

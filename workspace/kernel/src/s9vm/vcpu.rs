@@ -71,6 +71,8 @@ pub mod bits {
     pub const PIN_PREEMPTION_TIMER: u32 = 1 << 6;
     /// Pin control: exit on external interrupt.
     pub const PIN_EXTERNAL_INTERRUPT_EXITING: u32 = 1 << 0;
+    /// Secondary control: use the MSR bitmaps (intercept `rdmsr`/`wrmsr`).
+    pub const SECONDARY_USE_MSR_BITMAPS: u32 = 1 << 28;
 }
 
 /// vCPU lifecycle errors.
@@ -289,6 +291,53 @@ impl SecondLevelMemory {
     }
 }
 
+/// Layout of the 4 KiB MSR bitmap.
+///
+/// Four 1 KiB bitmaps: read and write maps for MSRs `0x0000..0x1FFF`, then the
+/// same for `0xC000_0000..0xC000_1FFF`. A set bit means "exit".
+pub mod msr_bitmap {
+    /// Read map, low MSR range.
+    pub const READ_LOW: usize = 0x000;
+    /// Write map, low MSR range.
+    pub const WRITE_LOW: usize = 0x400;
+    /// Read map, high MSR range.
+    pub const READ_HIGH: usize = 0x800;
+    /// Write map, high MSR range.
+    pub const WRITE_HIGH: usize = 0xC00;
+    /// Size of the bitmap in bytes.
+    pub const BYTES: usize = 4096;
+    /// First intercepted MSR (x2APIC window).
+    pub const X2APIC_FIRST: u32 = 0x800;
+    /// Last intercepted MSR (x2APIC window).
+    pub const X2APIC_LAST: u32 = 0x8FF;
+}
+
+/// Allocates the MSR bitmap of a vCPU and intercepts the x2APIC MSR window on
+/// both reads and writes.
+///
+/// The frame is deliberately leaked with the other vCPU resources (control
+/// block, host stack): a vCPU currently lives as long as its world.
+fn alloc_msr_bitmap() -> Option<PhysFrame> {
+    let frame = crate::sync::with_irqs_disabled(|token| {
+        FrameAllocOptions::new()
+            .purpose(FramePurpose::KernelData)
+            .allocate(token)
+            .ok()
+    })?;
+    let base = crate::memory::phys_to_virt(frame.start_address.as_u64()) as *mut u8;
+    // SAFETY: the frame is exclusively owned by this vCPU and HHDM-mapped.
+    unsafe {
+        core::ptr::write_bytes(base, 0, msr_bitmap::BYTES);
+        for msr in msr_bitmap::X2APIC_FIRST..=msr_bitmap::X2APIC_LAST {
+            let byte = (msr / 8) as usize;
+            let bit = 1u8 << (msr % 8);
+            *base.add(msr_bitmap::READ_LOW + byte) |= bit;
+            *base.add(msr_bitmap::WRITE_LOW + byte) |= bit;
+        }
+    }
+    Some(frame)
+}
+
 /// A vCPU: resources, guest state and control block.
 pub struct Vcpu {
     control: ControlBlock,
@@ -300,6 +349,8 @@ pub struct Vcpu {
     exit: Option<ExitInfo>,
     /// Preemption timer reload (counts) if the CPU supports it.
     preemption_timer: Option<u32>,
+    /// MSR bitmap intercepting the x2APIC MSR window, when supported.
+    msr_bitmap: Option<PhysFrame>,
 }
 
 impl Vcpu {
@@ -330,6 +381,7 @@ impl Vcpu {
             second_level_pointer,
             exit: None,
             preemption_timer: None,
+            msr_bitmap: None,
         })
     }
 
@@ -666,6 +718,17 @@ impl Vcpu {
         // failures.
         let _ = caps;
         self.preemption_timer = None;
+        // The MSR bitmap is created once, on the first configuration: it
+        // intercepts the x2APIC MSRs so the kernel can model them. When the
+        // processor does not allow the control, no bitmap is allocated and
+        // the guest reaches the MSRs natively.
+        if self.msr_bitmap.is_none()
+            && caps
+                .secondary_proc_allowed
+                .supports(bits::SECONDARY_USE_MSR_BITMAPS)
+        {
+            self.msr_bitmap = alloc_msr_bitmap();
+        }
         // SAFETY: block loaded; widths match the fields.
         unsafe {
             self.write_guest_state(guest)?;
@@ -701,7 +764,7 @@ impl Vcpu {
                 self.control.write_u32(field::PLE_WINDOW, 60_000)?;
             }
             self.control.write_u64(field::TSC_OFFSET, 0)?;
-            self.control.write_u64(field::MSR_BITMAP, 0)?;
+            self.control.write_u64(field::MSR_BITMAP, self.msr_bitmap_phys())?;
             self.control.write_u64(field::IO_BITMAP_A, 0)?;
             self.control.write_u64(field::IO_BITMAP_B, 0)?;
             self.control
@@ -876,9 +939,12 @@ impl Vcpu {
                 | bits::PRIMARY_HLT_EXITING
                 | bits::PRIMARY_UNCONDITIONAL_IO_EXITING,
         );
-        let secondary = caps
-            .secondary_proc_allowed
-            .apply(bits::SECONDARY_ENABLE_EPT | bits::SECONDARY_UNRESTRICTED_GUEST);
+        let mut secondary =
+            bits::SECONDARY_ENABLE_EPT | bits::SECONDARY_UNRESTRICTED_GUEST;
+        if self.msr_bitmap.is_some() {
+            secondary |= bits::SECONDARY_USE_MSR_BITMAPS;
+        }
+        let secondary = caps.secondary_proc_allowed.apply(secondary);
         let exit = caps
             .exit_allowed
             .apply(bits::EXIT_HOST_ADDR_SPACE_SIZE | bits::EXIT_LOAD_IA32_EFER);
@@ -1064,6 +1130,14 @@ impl Vcpu {
         if let Some(shadow) = shadow_gpr(&mut self.guest, register) {
             *shadow = value;
         }
+    }
+
+    /// Physical address of the MSR bitmap (0 when not used).
+    pub fn msr_bitmap_phys(&self) -> u64 {
+        self.msr_bitmap
+            .as_ref()
+            .map(|frame| frame.start_address.as_u64())
+            .unwrap_or(0)
     }
 
     /// Sets the guest instruction pointer.

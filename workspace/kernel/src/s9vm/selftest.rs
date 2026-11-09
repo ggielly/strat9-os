@@ -217,23 +217,29 @@ fn run_guest(
         };
         report.total_exits += 1;
         let class = ExitReason::decode(exit.raw_reason).class();
+        // Kernel fast path first: modeled device accesses are replayed in
+        // place and never reach the policy path.
+        if matches!(
+            class,
+            ExitClass::IoPort | ExitClass::Msr | ExitClass::EptViolation
+        ) {
+            // SAFETY: the control block is loaded and the guest is not
+            // running (we are in the exit handler).
+            match unsafe { machine.handle(&mut vcpu, &mut apic, &exit) } {
+                Ok(true) => {
+                    report.emulated_exits += 1;
+                    let port = ((exit.qualification >> 16) & 0xFFFF) as u16;
+                    let is_in = (exit.qualification >> 3) & 0x1 != 0;
+                    if class == ExitClass::IoPort && port == PIC_DATA_PORT && is_in {
+                        report.pic_readback = Some((vcpu.guest().rax & 0xFF) as u8);
+                    }
+                    continue;
+                }
+                Ok(false) | Err(_) => {}
+            }
+        }
         match class {
             ExitClass::IoPort => {
-                // SAFETY: the control block is loaded and the guest is not
-                // running (we are in the exit handler).
-                match unsafe { machine.handle(&mut vcpu, &mut apic, &exit) } {
-                    Ok(true) => {
-                        // Fully emulated: no event for policy, resume directly.
-                        report.emulated_exits += 1;
-                        let port = ((exit.qualification >> 16) & 0xFFFF) as u16;
-                        let is_in = (exit.qualification >> 3) & 0x1 != 0;
-                        if port == PIC_DATA_PORT && is_in {
-                            report.pic_readback = Some((vcpu.guest().rax & 0xFF) as u8);
-                        }
-                        continue;
-                    }
-                    Ok(false) | Err(_) => {}
-                }
                 report.io_exits += 1;
                 // I/O qualification: port in bits 16..31.
                 let port = ((exit.qualification >> 16) & 0xFFFF) as u16;
