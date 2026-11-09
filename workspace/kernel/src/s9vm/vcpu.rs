@@ -385,7 +385,8 @@ impl Vcpu {
                  ar(cs={:#x} ss={:#x} ds={:#x} es={:#x} fs={:#x} gs={:#x} ldtr={:#x} tr={:#x}) \
                  lim(cs={:#x} ss={:#x} ds={:#x} es={:#x} fs={:#x} gs={:#x} ldtr={:#x} tr={:#x}) \
                  gdtr={:#x}/{:#x} idtr={:#x}/{:#x} link={:#x} dbgctl={:#x} smstate={:#x} \
-                 exit(reason={:#x} qual={:#x} instrerr={:#x} len={:#x} info={:#x})",
+                 exit(reason={:#x} qual={:#x} instrerr={:#x} len={:#x} info={:#x}) \
+                 ctl(pin={:#x} primary={:#x} secondary={:#x} exit={:#x} entry={:#x})",
                 natural(field::GUEST_CR0),
                 natural(field::GUEST_CR3),
                 natural(field::GUEST_CR4),
@@ -433,6 +434,11 @@ impl Vcpu {
                 u32_field(field::INSTRUCTION_ERROR),
                 u32_field(field::EXIT_INSTRUCTION_LENGTH),
                 u32_field(field::EXIT_INSTRUCTION_INFO),
+                u32_field(field::PIN_BASED_CONTROLS),
+                u32_field(field::PRIMARY_PROC_BASED_CONTROLS),
+                u32_field(field::SECONDARY_PROC_BASED_CONTROLS),
+                u32_field(field::EXIT_CONTROLS),
+                u32_field(field::ENTRY_CONTROLS),
             )
         }
     }
@@ -655,13 +661,12 @@ impl Vcpu {
         guest: &GuestState,
     ) -> Result<(), VcpuError> {
         self.guest = *guest;
-        self.preemption_timer = if caps.preemption_timer {
-            // ~1 M timer "ticks": bounds guest time without creating an exit
-            // storm.
-            Some(1_000_000)
-        } else {
-            None
-        };
+        // VMX preemption timer is disabled until the hardware validation of
+        // the entry path succeeds: its field write was the only ignored
+        // instruction error, and a timer tick storm would mask entry
+        // failures.
+        let _ = caps;
+        self.preemption_timer = None;
         // SAFETY: block loaded; widths match the fields.
         unsafe {
             self.write_guest_state(guest)?;
@@ -672,6 +677,18 @@ impl Vcpu {
             self.control.write_u32(field::PAGE_FAULT_ERROR_CODE_MASK, 0)?;
             self.control.write_u32(field::PAGE_FAULT_ERROR_CODE_MATCH, 0)?;
             self.control.write_u32(field::CR3_TARGET_COUNT, 0)?;
+            // No host-controlled CR bits and no read shadows: the guest sees
+            // exactly the state loaded at entry. These fields must be
+            // explicit even though the region is zeroed, because the host
+            // hypervisor uses them when it merges the guest controls.
+            self.control.write_u32(field::CR0_GUEST_HOST_MASK, 0)?;
+            self.control.write_u32(field::CR4_GUEST_HOST_MASK, 0)?;
+            self.control.write_u32(field::CR0_READ_SHADOW, 0)?;
+            self.control.write_u32(field::CR4_READ_SHADOW, 0)?;
+            // No MSR switching on entry/exit.
+            self.control.write_u32(field::EXIT_MSR_STORE_COUNT, 0)?;
+            self.control.write_u32(field::EXIT_MSR_LOAD_COUNT, 0)?;
+            self.control.write_u32(field::ENTRY_MSR_LOAD_COUNT, 0)?;
             self.control.write_u32(field::TPR_THRESHOLD, 0)?;
             self.control.write_u32(field::PLE_GAP, 0)?;
             self.control.write_u32(field::PLE_WINDOW, 0)?;
@@ -833,11 +850,7 @@ impl Vcpu {
     }
 
     unsafe fn write_controls(&self, caps: &HwCaps) -> Result<(), VcpuError> {
-        let mut pin_requested = bits::PIN_EXTERNAL_INTERRUPT_EXITING;
-        if caps.preemption_timer {
-            pin_requested |= bits::PIN_PREEMPTION_TIMER;
-        }
-        let pin = caps.pin_allowed.apply(pin_requested);
+        let pin = caps.pin_allowed.apply(bits::PIN_EXTERNAL_INTERRUPT_EXITING);
         let primary = caps.primary_proc_allowed.apply(
             crate::s9vm::caps::control_bits::PROC_ACTIVATE_SECONDARY
                 | bits::PRIMARY_HLT_EXITING,

@@ -137,6 +137,14 @@ pub mod field {
     pub const PAGE_FAULT_ERROR_CODE_MASK: u32 = 0x4006;
     pub const PAGE_FAULT_ERROR_CODE_MATCH: u32 = 0x4008;
     pub const CR3_TARGET_COUNT: u32 = 0x400A;
+    /// CR0 bits controlled by the host (0 = guest keeps its value).
+    pub const CR0_GUEST_HOST_MASK: u32 = 0x6000;
+    /// CR4 bits controlled by the host.
+    pub const CR4_GUEST_HOST_MASK: u32 = 0x6002;
+    /// Value guest reads back for CR0.
+    pub const CR0_READ_SHADOW: u32 = 0x6004;
+    /// Value guest reads back for CR4.
+    pub const CR4_READ_SHADOW: u32 = 0x6006;
     pub const EXIT_CONTROLS: u32 = 0x400C;
     pub const EXIT_MSR_STORE_COUNT: u32 = 0x400E;
     pub const EXIT_MSR_LOAD_COUNT: u32 = 0x4010;
@@ -281,8 +289,17 @@ impl ControlBlock {
     /// `region_virt` must be a valid, aligned address, covering at least
     /// 4 bytes, and not used by another object.
     pub unsafe fn prepare_region(&self, region_virt: *mut u8) {
-        // SAFETY: parameter contract; 4-byte write.
+        // The whole 4 KiB region must be zeroed before use: every VMCS field
+        // that is not written explicitly (masks, read shadows, MSR load
+        // counts, SMM/CET/PDPTE fields...) must read as 0. Garbage in the
+        // CR0/CR4 guest/host masks, for example, makes the host hypervisor
+        // merge guest control registers incorrectly and the processor then
+        // rejects the entry with "invalid guest state".
+        //
+        // SAFETY: parameter contract; the region is a private, 4 KiB-aligned
+        // frame owned by this control block.
         unsafe {
+            core::ptr::write_bytes(region_virt, 0, 4096);
             core::ptr::write_volatile(region_virt as *mut u32, self.revision);
         }
     }

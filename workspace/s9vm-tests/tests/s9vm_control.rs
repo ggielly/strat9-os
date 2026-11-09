@@ -139,3 +139,17 @@ fn tss_base_decoder_handles_low_addresses() {
     let upper = (base >> 32) as u32;
     assert_eq!(ControlBlock::decode_tss_base(low, upper), base);
 }
+
+#[test]
+fn control_masks_and_shadows_use_stable_encodings() {
+    // These fields are never left to chance: a garbage guest/host mask makes
+    // the host hypervisor merge guest control registers incorrectly and the
+    // processor rejects the entry with "invalid guest state".
+    assert_eq!(field::CR0_GUEST_HOST_MASK, 0x6000);
+    assert_eq!(field::CR4_GUEST_HOST_MASK, 0x6002);
+    assert_eq!(field::CR0_READ_SHADOW, 0x6004);
+    assert_eq!(field::CR4_READ_SHADOW, 0x6006);
+    assert_eq!(field::EXIT_MSR_STORE_COUNT, 0x400E);
+    assert_eq!(field::EXIT_MSR_LOAD_COUNT, 0x4010);
+    assert_eq!(field::ENTRY_MSR_LOAD_COUNT, 0x4014);
+}
