@@ -380,6 +380,42 @@ impl Default for Devices {
     }
 }
 
+/// What the execution loop must do before entering the guest to deliver a
+/// pending interrupt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptAction {
+    /// A deliverable vector is waiting and the guest is interruptible: inject
+    /// it at the next entry.
+    Inject,
+    /// A deliverable vector is waiting but the guest has interrupts disabled:
+    /// arm interrupt-window exiting so the vector is injected as soon as the
+    /// guest enables interrupts.
+    ArmWindow,
+    /// No vector is waiting any more: disarm interrupt-window exiting,
+    /// otherwise the processor would exit after every guest instruction.
+    DisarmWindow,
+    /// Nothing to do.
+    None,
+}
+
+/// Decides the interrupt-delivery action for one guest entry.
+///
+/// `pending` is `true` when the local APIC has a deliverable vector,
+/// `interruptible` mirrors `RFLAGS.IF`, and `window_armed` tells whether
+/// interrupt-window exiting is currently armed.
+pub const fn interrupt_action(
+    pending: bool,
+    interruptible: bool,
+    window_armed: bool,
+) -> InterruptAction {
+    match (pending, interruptible, window_armed) {
+        (true, true, _) => InterruptAction::Inject,
+        (true, false, _) => InterruptAction::ArmWindow,
+        (false, _, true) => InterruptAction::DisarmWindow,
+        (false, _, false) => InterruptAction::None,
+    }
+}
+
 /// Tries to consume an exit by replaying the faulting instruction.
 ///
 /// Returns `Ok(true)` when the exit was fully handled and the guest state has

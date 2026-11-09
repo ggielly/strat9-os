@@ -73,6 +73,8 @@ pub mod bits {
     pub const PIN_EXTERNAL_INTERRUPT_EXITING: u32 = 1 << 0;
     /// Secondary control: use the MSR bitmaps (intercept `rdmsr`/`wrmsr`).
     pub const SECONDARY_USE_MSR_BITMAPS: u32 = 1 << 28;
+    /// Primary control: exit when the guest opens an interrupt window.
+    pub const PRIMARY_INTERRUPT_WINDOW_EXITING: u32 = 1 << 2;
 }
 
 /// vCPU lifecycle errors.
@@ -1130,6 +1132,41 @@ impl Vcpu {
         if let Some(shadow) = shadow_gpr(&mut self.guest, register) {
             *shadow = value;
         }
+    }
+
+    /// Arms or disarms interrupt-window exiting.
+    ///
+    /// Interrupt-window exiting makes the processor exit as soon as the guest
+    /// becomes able to take an interrupt (`RFLAGS.IF` set, no shadow). The
+    /// kernel uses it to deliver a pending APIC vector to a guest that is
+    /// currently running with interrupts disabled.
+    ///
+    /// Returns `true` when the control is armed as requested, `false` when the
+    /// processor does not allow it: the caller then has to keep the vector
+    /// pending until the guest enables interrupts on its own.
+    ///
+    /// # Safety
+    /// The control block must be loaded on the current CPU and the guest must
+    /// not be running.
+    pub unsafe fn set_interrupt_window_exiting(
+        &mut self,
+        caps: &HwCaps,
+        enabled: bool,
+    ) -> Result<bool, VcpuError> {
+        let mut primary = bits::PRIMARY_HLT_EXITING | bits::PRIMARY_UNCONDITIONAL_IO_EXITING;
+        if enabled {
+            primary |= bits::PRIMARY_INTERRUPT_WINDOW_EXITING;
+        }
+        let primary = caps.primary_proc_allowed.apply(primary);
+        if enabled && primary & bits::PRIMARY_INTERRUPT_WINDOW_EXITING == 0 {
+            return Ok(false);
+        }
+        // SAFETY: caller contract.
+        unsafe {
+            self.control
+                .write_u32(field::PRIMARY_PROC_BASED_CONTROLS, primary)?;
+        }
+        Ok(enabled)
     }
 
     /// Physical address of the MSR bitmap (0 when not used).

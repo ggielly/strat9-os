@@ -46,6 +46,7 @@ use crate::{
     s9vm::{
         apic::LocalApic,
         caps::HwCaps,
+        emulate::{interrupt_action, InterruptAction},
         exit::ExitClass,
         exitqueue::ExitQueue,
         guest::{FixedBits, GuestState},
@@ -66,6 +67,8 @@ pub const NAME_MAX: usize = 32;
 pub const MAX_VCPUS_PER_WORLD: usize = 32;
 /// Default guest page quota (1 GiB).
 pub const DEFAULT_QUOTA_PAGES: u64 = 262_144;
+/// `RFLAGS.IF`: the guest is interruptible.
+const RFLAGS_IF: u64 = 1 << 9;
 
 /// Public record of a world.
 #[derive(Debug, Clone, Copy)]
@@ -292,8 +295,6 @@ pub struct VcpuSlot {
     hardware: Option<Vcpu>,
     /// Guest local APIC (architectural state, MMIO page and x2APIC MSR).
     apic: LocalApic,
-    /// External interrupt pending injection at the next `RUN`.
-    pending_irq: Option<u8>,
     /// NMI pending injection at the next `RUN`.
     pending_nmi: bool,
     /// Kernel task driving this vCPU (created with the vCPU).
@@ -454,7 +455,6 @@ fn new_vcpu_slot(id: u64, apic_id: u32) -> VcpuSlot {
         regs,
         hardware: None,
         apic: LocalApic::new(apic_id),
-        pending_irq: None,
         pending_nmi: false,
         task: None,
         run_requested: false,
@@ -514,7 +514,7 @@ pub fn debug_dump() {
                     slot.apic.tpr(),
                     slot.apic.has_pending(),
                     slot.apic.in_service(),
-                    slot.pending_irq,
+                    slot.apic.pending_vector(),
                     slot.pending_nmi,
                     slot.task
                 );
@@ -744,7 +744,6 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
         mut hardware,
         mut regs,
         pointer,
-        pending_irq,
         pending_nmi,
         mut machine,
         mut apic,
@@ -759,7 +758,6 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
         let memory = world.memory.as_ref().ok_or(RunError::NoMemory)?;
         let pointer = memory.second_level_pointer(caps);
         let hardware = slot.hardware.take();
-        let pending_irq = slot.pending_irq.take();
         let pending_nmi = core::mem::replace(&mut slot.pending_nmi, false);
         let apic_id = slot.apic_id;
         // The device model and the local APIC stay out of the registry while
@@ -772,7 +770,6 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
             hardware,
             slot.regs,
             pointer,
-            pending_irq,
             pending_nmi,
             machine,
             apic,
@@ -813,17 +810,63 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
             if let Err(error) = hardware.inject_nmi() {
                 result = Err(RunError::Hardware(error));
             }
-        } else if let Some(vector) = pending_irq {
-            // Deferred injection: the "VM-entry interruption information"
-            // field is written just before entry; the processor consumes it
-            // and resets it on delivery.
-            if let Err(error) = hardware.inject_interrupt(vector) {
-                result = Err(RunError::Hardware(error));
-            }
         }
         if result.is_ok() {
             let mut resumed = 0u32;
+            // True while interrupt-window exiting is armed in the control
+            // block: the guest has a pending vector but interrupts disabled.
+            let mut window_armed = false;
             loop {
+                // Interrupt delivery. The local APIC is the only source: the
+                // highest-priority deliverable vector is injected when the
+                // guest is interruptible; otherwise the interrupt window is
+                // armed so that the vector is delivered as soon as the guest
+                // enables interrupts. The window control is disarmed as soon
+                // as it is no longer needed, otherwise the processor would
+                // exit after every single instruction in the guest.
+                let interruptible = hardware.guest().rflags & RFLAGS_IF != 0;
+                let pending = apic.pending_vector();
+                match interrupt_action(pending.is_some(), interruptible, window_armed) {
+                    InterruptAction::Inject => {
+                        if let Some(vector) = pending {
+                            if let Err(error) = hardware.inject_interrupt(vector) {
+                                result = Err(RunError::Hardware(error));
+                                break;
+                            }
+                            // The vector moves to the in-service register: the
+                            // processor delivers it at the next entry.
+                            let _ = apic.service();
+                        }
+                        if window_armed {
+                            match hardware.set_interrupt_window_exiting(caps, false) {
+                                Ok(_) => window_armed = false,
+                                Err(error) => {
+                                    result = Err(RunError::Hardware(error));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    InterruptAction::ArmWindow => {
+                        match hardware.set_interrupt_window_exiting(caps, true) {
+                            Ok(armed) => window_armed = armed,
+                            Err(error) => {
+                                result = Err(RunError::Hardware(error));
+                                break;
+                            }
+                        }
+                    }
+                    InterruptAction::DisarmWindow => {
+                        match hardware.set_interrupt_window_exiting(caps, false) {
+                            Ok(_) => window_armed = false,
+                            Err(error) => {
+                                result = Err(RunError::Hardware(error));
+                                break;
+                            }
+                        }
+                    }
+                    InterruptAction::None => {}
+                }
                 match hardware.run() {
                     Ok(exit) => {
                         // Kernel fast path: accesses to the modeled devices
@@ -1191,7 +1234,9 @@ pub fn inject_irq(vcpu_id: u64, vector: u8) -> Result<(), VcpuRegistryError> {
         .iter_mut()
         .find(|slot| slot.id == vcpu_id)
         .ok_or(VcpuRegistryError::Unknown)?;
-    slot.pending_irq = Some(vector);
+    // The local APIC is the single delivery path: the vector waits in the IRR
+    // until the guest is interruptible (the execution loop injects it and
+    // arms the interrupt window when needed).
     slot.apic.inject(vector);
     Ok(())
 }
@@ -1243,7 +1288,7 @@ pub fn is_paused(world_id: u64) -> bool {
         .unwrap_or(false)
 }
 
-/// Pending interrupt vector for a vCPU, if any.
+/// Pending deliverable interrupt vector for a vCPU, if any.
 pub fn pending_irq(vcpu_id: u64) -> Option<u8> {
     let mut worlds = WORLDS.lock();
     let world = vcpu_world_mut(&mut worlds, vcpu_id)?;
@@ -1251,7 +1296,7 @@ pub fn pending_irq(vcpu_id: u64) -> Option<u8> {
         .vcpus
         .iter()
         .find(|slot| slot.id == vcpu_id)
-        .and_then(|slot| slot.pending_irq)
+        .and_then(|slot| slot.apic.pending_vector())
 }
 
 /// Finds the world owning a vCPU (excluding closing worlds).

@@ -20,8 +20,8 @@ mod ioapic;
 mod pic;
 
 use emulate::{
-    handle_exit, walk_guest, walk_second_level, DevicePage, Devices, GuestContext, MemoryView,
-    PhysMemory, IOAPIC_BASE,
+    handle_exit, interrupt_action, walk_guest, walk_second_level, DevicePage, Devices,
+    GuestContext, InterruptAction, MemoryView, PhysMemory, IOAPIC_BASE,
 };
 use exit::ExitClass;
 
@@ -582,4 +582,41 @@ fn unmodeled_x2apic_msr_is_left_to_policy() {
     .expect("no error");
     assert!(!handled);
     assert_eq!(guest.rip, rip);
+}
+
+#[test]
+fn interrupt_action_injects_when_the_guest_is_interruptible() {
+    assert_eq!(
+        interrupt_action(true, true, false),
+        InterruptAction::Inject
+    );
+    // A window that is still armed is disarmed after the injection.
+    assert_eq!(interrupt_action(true, true, true), InterruptAction::Inject);
+}
+
+#[test]
+fn interrupt_action_arms_the_window_when_interrupts_are_disabled() {
+    assert_eq!(
+        interrupt_action(true, false, false),
+        InterruptAction::ArmWindow
+    );
+    // Already armed: the action is idempotent.
+    assert_eq!(
+        interrupt_action(true, false, true),
+        InterruptAction::ArmWindow
+    );
+}
+
+#[test]
+fn interrupt_action_disarms_the_window_when_nothing_is_pending() {
+    assert_eq!(
+        interrupt_action(false, false, true),
+        InterruptAction::DisarmWindow
+    );
+    assert_eq!(
+        interrupt_action(false, true, true),
+        InterruptAction::DisarmWindow
+    );
+    assert_eq!(interrupt_action(false, true, false), InterruptAction::None);
+    assert_eq!(interrupt_action(false, false, false), InterruptAction::None);
 }
