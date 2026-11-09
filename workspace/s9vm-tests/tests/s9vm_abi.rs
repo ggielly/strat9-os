@@ -137,3 +137,9 @@ fn state_and_exit_kind_values_are_stable() {
 fn name_limit_matches_info_storage() {
     assert_eq!(abi::VMM_NAME_MAX, abi::VmmInfo::default().name.len());
 }
+
+#[test]
+fn exit_complete_syscall_number_is_stable() {
+    // Completes an exit emulated by the policy (value + RIP advance).
+    assert_eq!(SYS_VMM_EXIT_COMPLETE, 580);
+}
