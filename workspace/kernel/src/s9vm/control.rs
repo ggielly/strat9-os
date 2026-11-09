@@ -53,6 +53,32 @@ pub mod field {
     pub const GUEST_LDTR_SELECTOR: u32 = 0x080C;
     pub const GUEST_TR_SELECTOR: u32 = 0x080E;
 
+    // --- Limites invitées 32 bits ---
+    pub const GUEST_ES_LIMIT: u32 = 0x4800;
+    pub const GUEST_CS_LIMIT: u32 = 0x4802;
+    pub const GUEST_SS_LIMIT: u32 = 0x4804;
+    pub const GUEST_DS_LIMIT: u32 = 0x4806;
+    pub const GUEST_FS_LIMIT: u32 = 0x4808;
+    pub const GUEST_GS_LIMIT: u32 = 0x480A;
+    pub const GUEST_LDTR_LIMIT: u32 = 0x480C;
+    pub const GUEST_TR_LIMIT: u32 = 0x480E;
+    pub const GUEST_GDTR_LIMIT: u32 = 0x4810;
+    pub const GUEST_IDTR_LIMIT: u32 = 0x4812;
+
+    // --- Droits d'accès invités 32 bits ---
+    pub const GUEST_ES_ACCESS_RIGHTS: u32 = 0x4814;
+    pub const GUEST_CS_ACCESS_RIGHTS: u32 = 0x4816;
+    pub const GUEST_SS_ACCESS_RIGHTS: u32 = 0x4818;
+    pub const GUEST_DS_ACCESS_RIGHTS: u32 = 0x481A;
+    pub const GUEST_FS_ACCESS_RIGHTS: u32 = 0x481C;
+    pub const GUEST_GS_ACCESS_RIGHTS: u32 = 0x481E;
+    pub const GUEST_LDTR_ACCESS_RIGHTS: u32 = 0x4820;
+    pub const GUEST_TR_ACCESS_RIGHTS: u32 = 0x4822;
+    pub const GUEST_INTERRUPTIBILITY_INFO: u32 = 0x4824;
+    pub const GUEST_ACTIVITY_STATE: u32 = 0x4826;
+    pub const GUEST_SMSTATE: u32 = 0x4828;
+    pub const GUEST_SYSENTER_CS: u32 = 0x482A;
+
     // --- Sélecteurs hôte 16 bits ---
     pub const HOST_ES_SELECTOR: u32 = 0x0C00;
     pub const HOST_CS_SELECTOR: u32 = 0x0C02;
@@ -165,6 +191,7 @@ pub mod field {
 
     // --- Divers ---
     pub const GUEST_PHYSICAL_ADDRESS: u32 = 0x2400;
+    pub const EXIT_QUALIFICATION: u32 = 0x6400;
 }
 
 /// Erreurs des primitives du bloc de contrôle.

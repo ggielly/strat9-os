@@ -17,6 +17,15 @@ pub struct ExitReason {
     pub entry_failed: bool,
 }
 
+impl Default for ExitReason {
+    fn default() -> Self {
+        Self {
+            reason: 0,
+            entry_failed: false,
+        }
+    }
+}
+
 impl ExitReason {
     /// Décode la valeur brute lue dans le champ de sortie.
     pub const fn decode(raw: u32) -> Self {

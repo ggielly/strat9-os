@@ -29,7 +29,11 @@
 pub mod caps;
 pub mod control;
 pub mod exit;
+pub mod guest;
+pub mod launch;
 pub mod mmu;
+pub mod selftest;
+pub mod vcpu;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
@@ -265,10 +269,13 @@ pub fn init() {
     // L'activation consomme une frame : elle n'est tentée qu'au stage
     // `bootstrap`, après l'allocateur de frames.
     match activate_current_cpu() {
-        Ok(()) => log::info!(
-            "[s9vm] prêt ({} CPU activé(s))",
-            ACTIVE_CPUS.load(Ordering::Acquire)
-        ),
+        Ok(()) => {
+            log::info!(
+                "[s9vm] prêt ({} CPU activé(s))",
+                ACTIVE_CPUS.load(Ordering::Acquire)
+            );
+            selftest::maybe_run_from_boot_env(&caps);
+        }
         Err(error) => log::warn!("[s9vm] activation impossible ({:?})", error),
     }
 }
