@@ -1024,6 +1024,132 @@ impl Vcpu {
     pub fn guest(&self) -> &GuestState {
         &self.guest
     }
+
+    /// Second-level pointer (`EPT_POINTER` value) given to this vCPU.
+    pub const fn second_level_pointer(&self) -> u64 {
+        self.second_level_pointer
+    }
+
+    /// True if the guest runs with paging enabled.
+    pub fn paging_enabled(&self) -> bool {
+        self.guest.is_long_mode()
+    }
+
+    /// Reads a guest general-purpose register.
+    ///
+    /// The index follows the x86 encoding order: `0` = RAX, `1` = RCX,
+    /// `2` = RDX, `3` = RBX, `4` = RSP, `5` = RBP, `6` = RSI, `7` = RDI,
+    /// then `8..=15` = R8..R15.
+    pub fn guest_gpr(&self, register: u8) -> u64 {
+        gpr_from_frame(&self.frame, register).unwrap_or(0)
+    }
+
+    /// Writes a guest general-purpose register (encoding order).
+    ///
+    /// # Safety
+    /// The control block must be loaded on the current CPU and the guest must
+    /// not be running: this is only called from an exit handler, before the
+    /// guest is resumed.
+    pub unsafe fn set_guest_gpr(&mut self, register: u8, value: u64) {
+        if !gpr_into_frame(&mut self.frame, register, value) {
+            return;
+        }
+        // SAFETY: caller contract.
+        unsafe {
+            if register == GPR_RSP {
+                // RSP is loaded from the control block, not from the frame.
+                let _ = self.control.write_natural(field::GUEST_RSP, value);
+            }
+        }
+        if let Some(shadow) = shadow_gpr(&mut self.guest, register) {
+            *shadow = value;
+        }
+    }
+
+    /// Sets the guest instruction pointer.
+    ///
+    /// # Safety
+    /// Same contract as [`Self::set_guest_gpr`].
+    pub unsafe fn set_guest_rip(&mut self, rip: u64) {
+        self.guest.rip = rip;
+        // SAFETY: caller contract.
+        unsafe {
+            let _ = self.control.write_natural(field::GUEST_RIP, rip);
+        }
+    }
+}
+
+/// Index of RSP in the x86 register encoding order.
+const GPR_RSP: u8 = 4;
+
+/// Reads a general-purpose register out of the entry frame (encoding order).
+fn gpr_from_frame(frame: &EnterFrame, register: u8) -> Option<u64> {
+    Some(match register {
+        0 => frame.rax,
+        1 => frame.rcx,
+        2 => frame.rdx,
+        3 => frame.rbx,
+        4 => frame.rsp,
+        5 => frame.rbp,
+        6 => frame.rsi,
+        7 => frame.rdi,
+        8 => frame.r8,
+        9 => frame.r9,
+        10 => frame.r10,
+        11 => frame.r11,
+        12 => frame.r12,
+        13 => frame.r13,
+        14 => frame.r14,
+        15 => frame.r15,
+        _ => return None,
+    })
+}
+
+/// Writes a general-purpose register into the entry frame (encoding order).
+fn gpr_into_frame(frame: &mut EnterFrame, register: u8, value: u64) -> bool {
+    match register {
+        0 => frame.rax = value,
+        1 => frame.rcx = value,
+        2 => frame.rdx = value,
+        3 => frame.rbx = value,
+        4 => frame.rsp = value,
+        5 => frame.rbp = value,
+        6 => frame.rsi = value,
+        7 => frame.rdi = value,
+        8 => frame.r8 = value,
+        9 => frame.r9 = value,
+        10 => frame.r10 = value,
+        11 => frame.r11 = value,
+        12 => frame.r12 = value,
+        13 => frame.r13 = value,
+        14 => frame.r14 = value,
+        15 => frame.r15 = value,
+        _ => return false,
+    }
+    true
+}
+
+/// Mutable view of the shadow copy of a general-purpose register.
+fn shadow_gpr(guest: &mut GuestState, register: u8) -> Option<&mut u64> {
+    Some(match register {
+        0 => &mut guest.rax,
+        1 => &mut guest.rcx,
+        2 => &mut guest.rdx,
+        3 => &mut guest.rbx,
+        4 => &mut guest.rsp,
+        5 => &mut guest.rbp,
+        6 => &mut guest.rsi,
+        7 => &mut guest.rdi,
+        8 => &mut guest.r8,
+        9 => &mut guest.r9,
+        10 => &mut guest.r10,
+        11 => &mut guest.r11,
+        12 => &mut guest.r12,
+        13 => &mut guest.r13,
+        14 => &mut guest.r14,
+        15 => &mut guest.r15,
+        _ => return None,
+    })
 }
 
 // ---------------------------------------------------------------------------

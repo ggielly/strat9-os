@@ -29,7 +29,10 @@
 //! 1. building the guest tables and the second-level tables;
 //! 2. loading the control block;
 //! 3. guest entry (`vmlaunch`), exit on I/O, resume, exit on `hlt`;
-//! 4. clean shutdown.
+//! 4. kernel fast path: the guest programs the legacy interrupt controller
+//!    through its ports; those exits are replayed by the kernel and never
+//!    reach the policy path;
+//! 5. clean shutdown.
 //!
 //! The test is only started if the kernel is enabled on VT-x and if the boot
 //! option `s9vm.selftest=1` is present. It never panics: a failure is
@@ -43,9 +46,11 @@
 use crate::{
     memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame},
     s9vm::{
+        apic::LocalApic,
         caps::HwCaps,
         exit::{reason_name, ExitClass, ExitReason},
         guest::GuestState,
+        machine::Machine,
         vcpu::{SecondLevelMemory, Vcpu, VcpuError},
     },
 };
@@ -65,6 +70,11 @@ const STACK_TOP: u64 = GPA_STACK + 0x800;
 const TEST_BYTE: u8 = 0x41;
 /// I/O port used by the test (standard debug port of emulators).
 const TEST_PORT: u16 = 0xE9;
+/// Master PIC data port, used to check that the kernel *read path* is
+/// emulated (the guest reads back the interrupt mask it programmed).
+const PIC_DATA_PORT: u16 = 0x21;
+/// Interrupt mask read back by the guest after programming the PIC.
+const PIC_READBACK: u8 = 0xFF;
 
 /// Errors of the smoke test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +97,10 @@ pub struct SelftestReport {
     pub io_exits: u32,
     pub halt_exits: u32,
     pub total_exits: u32,
+    /// Exits replayed by the kernel device model (never reported to policy).
+    pub emulated_exits: u32,
+    /// Last value read by the guest from the PIC data port.
+    pub pic_readback: Option<u8>,
     pub observed_byte: Option<u8>,
     /// Name of the guest-state variant that entered successfully.
     pub variant: &'static str,
@@ -176,12 +190,18 @@ fn run_guest(
         io_exits: 0,
         halt_exits: 0,
         total_exits: 0,
+        emulated_exits: 0,
+        pic_readback: None,
         observed_byte: None,
         variant: "",
     };
 
+    // Kernel device model: exits on these devices are replayed in place.
+    let mut machine = Machine::new();
+    let mut apic = LocalApic::new(0);
+
     let mut outcome: Result<(), SelftestError> = Ok(());
-    for _ in 0..16 {
+    for _ in 0..64 {
         // SAFETY: `run` contract (block loaded, IRQs disabled).
         let exit = match unsafe { vcpu.run() } {
             Ok(exit) => exit,
@@ -199,6 +219,21 @@ fn run_guest(
         let class = ExitReason::decode(exit.raw_reason).class();
         match class {
             ExitClass::IoPort => {
+                // SAFETY: the control block is loaded and the guest is not
+                // running (we are in the exit handler).
+                match unsafe { machine.handle(&mut vcpu, &mut apic, &exit) } {
+                    Ok(true) => {
+                        // Fully emulated: no event for policy, resume directly.
+                        report.emulated_exits += 1;
+                        let port = ((exit.qualification >> 16) & 0xFFFF) as u16;
+                        let is_in = (exit.qualification >> 3) & 0x1 != 0;
+                        if port == PIC_DATA_PORT && is_in {
+                            report.pic_readback = Some((vcpu.guest().rax & 0xFF) as u8);
+                        }
+                        continue;
+                    }
+                    Ok(false) | Err(_) => {}
+                }
                 report.io_exits += 1;
                 // I/O qualification: port in bits 16..31.
                 let port = ((exit.qualification >> 16) & 0xFFFF) as u16;
@@ -266,8 +301,15 @@ fn run_guest(
     }
 
     match outcome {
-        Ok(()) if report.io_exits >= 1 && report.halt_exits >= 1 => Ok(report),
-        Ok(()) => Err(SelftestError::BadExit("guest did not reach hlt")),
+        Ok(())
+            if report.io_exits == 1
+                && report.halt_exits >= 1
+                && report.emulated_exits >= 1
+                && report.pic_readback == Some(PIC_READBACK) =>
+        {
+            Ok(report)
+        }
+        Ok(()) => Err(SelftestError::BadExit("guest device fast path failed")),
         Err(error) => Err(error),
     }
 }
@@ -300,8 +342,26 @@ pub fn run(caps: &HwCaps) -> Result<SelftestReport, SelftestError> {
         write_u64(&pt, page as usize * 8, gpa | 0x3);
     }
 
-    // Guest code: mov al, imm8 ; out 0xE9, al ; hlt.
-    write_bytes(&code, &[0xB0, TEST_BYTE, 0xE6, TEST_PORT as u8, 0xF4]);
+    // Guest code:
+    //   1. program the master 8259A (ICW1..ICW4) through ports 0x20/0x21;
+    //   2. mask every line, then read the mask back (kernel fast path);
+    //   3. write one byte to the debug port (policy path) and halt.
+    // Steps 1 and 2 must be serviced by the kernel without a policy exit.
+    write_bytes(
+        &code,
+        &[
+            0xB0, 0x11, 0xE6, 0x20, // mov al, 0x11 ; out 0x20, al (ICW1)
+            0xB0, 0x20, 0xE6, 0x21, // mov al, 0x20 ; out 0x21, al (ICW2)
+            0xB0, 0x04, 0xE6, 0x21, // mov al, 0x04 ; out 0x21, al (ICW3)
+            0xB0, 0x01, 0xE6, 0x21, // mov al, 0x01 ; out 0x21, al (ICW4)
+            0xB0, 0x00, 0xE6, 0x21, // mov al, 0x00 ; out 0x21, al (unmask)
+            0xE4, 0x21, // in al, 0x21 (mask = 0x00)
+            0xB0, PIC_READBACK, 0xE6, 0x21, // mov al, 0xFF ; out 0x21, al
+            0xE4, 0x21, // in al, 0x21 (mask = 0xFF)
+            0xB0, TEST_BYTE, 0xE6, TEST_PORT as u8, // mov al, byte ; out 0xE9, al
+            0xF4, // hlt
+        ],
+    );
 
     // Second-level translation: GPA → HPA for the 6 pages.
     let mut second_level = SecondLevelMemory::new().map_err(|_| SelftestError::Mmu)?;
@@ -352,11 +412,13 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
     log::info!("[s9vm] hardware smoke test requested");
     match run(caps) {
         Ok(report) => log::info!(
-            "[s9vm] selftest PASS: variant={} exits={} io={} hlt={} byte={:?}",
+            "[s9vm] selftest PASS: variant={} exits={} io={} hlt={} emulated={} pic={:?} byte={:?}",
             report.variant,
             report.total_exits,
             report.io_exits,
             report.halt_exits,
+            report.emulated_exits,
+            report.pic_readback,
             report.observed_byte
         ),
         Err(error) => log::warn!("[s9vm] selftest FAIL: {:?}", error),

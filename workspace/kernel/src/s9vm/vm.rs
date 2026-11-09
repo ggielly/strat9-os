@@ -49,10 +49,9 @@ use crate::{
         exit::ExitClass,
         exitqueue::ExitQueue,
         guest::{FixedBits, GuestState},
-        ioapic::IoApic,
+        machine::Machine,
         memmap::{perms_from_abi, GuestMap, MapError},
         mmu::{Perms as MmuPerms, PAGE_SIZE},
-        pic::Pic,
         vcpu::{ExitInfo, SecondLevelMemory, Vcpu, VcpuError},
     },
     sync::{SpinLock, WaitQueue},
@@ -267,10 +266,9 @@ struct World {
     closing: bool,
     /// Paused world: `RUN`s are refused (`Paused`) until resumed.
     paused: bool,
-    /// Guest 8259A pair (legacy PIC ports).
-    pic: Pic,
-    /// Guest I/O APIC (MMIO page).
-    ioapic: IoApic,
+    /// Guest chipset devices (8259A pair, I/O APIC) and the kernel bridge
+    /// that replays their accesses without leaving the kernel.
+    machine: Machine,
 }
 
 /// Logical vCPU: opaque identifier, APIC id and ABI register block.
@@ -347,8 +345,7 @@ pub fn create(name: &[u8], silo_id: u32) -> Option<WorldRecord> {
             exits: ExitQueue::default(),
             closing: false,
             paused: false,
-            pic: Pic::new(),
-            ioapic: IoApic::new(0),
+            machine: Machine::new(),
         },
     );
     Some(record)
@@ -504,10 +501,10 @@ pub fn debug_dump() {
         if let Some(entry) = worlds.get(&world.id) {
             log::info!(
                 "[s9vm] debug:   irqchip pic(imr={:#x}, irr={:#x}, isr={:#x}) ioapic(id={})",
-                entry.pic.master().mask(),
-                entry.pic.master().irr(),
-                entry.pic.master().isr(),
-                entry.ioapic.apic_id()
+                entry.machine.devices().pic.master().mask(),
+                entry.machine.devices().pic.master().irr(),
+                entry.machine.devices().pic.master().isr(),
+                entry.machine.devices().ioapic.apic_id()
             );
             for slot in &entry.vcpus {
                 log::info!(
@@ -742,7 +739,16 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
     }
     // 1. Takes the hardware context and the registers out of the registry,
     //    without holding the lock during execution.
-    let (world_id, mut hardware, mut regs, pointer, pending_irq, pending_nmi) = {
+    let (
+        world_id,
+        mut hardware,
+        mut regs,
+        pointer,
+        pending_irq,
+        pending_nmi,
+        mut machine,
+        mut apic,
+    ) = {
         let mut worlds = WORLDS.lock();
         let world = vcpu_world_mut(&mut worlds, vcpu_id).ok_or(RunError::UnknownVcpu)?;
         let slot = world
@@ -755,6 +761,12 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
         let hardware = slot.hardware.take();
         let pending_irq = slot.pending_irq.take();
         let pending_nmi = core::mem::replace(&mut slot.pending_nmi, false);
+        let apic_id = slot.apic_id;
+        // The device model and the local APIC stay out of the registry while
+        // the guest runs: the exit handler updates them without taking the
+        // registry lock, which a running guest must never wait on.
+        let machine = core::mem::replace(&mut world.machine, Machine::new());
+        let apic = core::mem::replace(&mut slot.apic, LocalApic::new(apic_id));
         (
             world.record.id,
             hardware,
@@ -762,6 +774,8 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
             pointer,
             pending_irq,
             pending_nmi,
+            machine,
+            apic,
         )
     };
     let mut hardware = match hardware {
@@ -812,6 +826,22 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
             loop {
                 match hardware.run() {
                     Ok(exit) => {
+                        // Kernel fast path: accesses to the modeled devices
+                        // are replayed in place, so the guest never observes
+                        // the exit and policy is not involved.
+                        if matches!(exit.class(), ExitClass::IoPort | ExitClass::EptViolation) {
+                            match machine.handle(&mut hardware, &mut apic, &exit) {
+                                Ok(true) => {
+                                    if resumed >= MAX_RESUMED_EXITS {
+                                        result = Err(RunError::ExitStorm);
+                                        break;
+                                    }
+                                    resumed += 1;
+                                    continue;
+                                }
+                                Ok(false) | Err(_) => {}
+                            }
+                        }
                         if is_resumable(exit.class()) && resumed < MAX_RESUMED_EXITS {
                             resumed += 1;
                             continue;
@@ -839,9 +869,11 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
     regs = regs_from_guest(hardware.guest(), &regs);
     let mut worlds = WORLDS.lock();
     if let Some(world) = worlds.get_mut(&world_id) {
+        world.machine = machine;
         if let Some(slot) = world.vcpus.iter_mut().find(|slot| slot.id == vcpu_id) {
             slot.regs = regs;
             slot.hardware = Some(hardware);
+            slot.apic = apic;
         }
     }
     result
