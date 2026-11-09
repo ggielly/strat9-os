@@ -1,13 +1,13 @@
-//! s9vm — état invité et validation avant entrée.
+//! s9vm — guest state and validation before entry.
 //!
-//! Module **pur** : il décrit l'état d'un processeur invité (registres
-//! généraux, registres de contrôle, segments, tables système) et vérifie les
-//! invariants que le matériel exigera de toute façon, mais avec un diagnostic
-//! exploitable côté noyau. Testable sur l'hôte (tests L2).
+//! **Pure** module: it describes the state of a guest processor (general
+//! registers, control registers, segments, system tables) and checks the
+//! invariants that the hardware will require anyway, but with a diagnostic
+//! usable on the kernel side. Testable on the host (L2 tests).
 //!
-//! Les règles proviennent de la SDM Intel (vol. 3C, chapitre « VM entry »
-//! et « checking and loading guest state »). Aucune constante propre à un
-//! hyperviseur particulier.
+//! The rules come from the Intel SDM (vol. 3C, "VM entry" chapter
+//! and "checking and loading guest state"). No constant specific to a
+//! particular hypervisor.
 
 /// Bit `CR0.PE` (protection enable).
 pub const CR0_PE: u64 = 1 << 0;
@@ -28,9 +28,9 @@ pub const CR0_PG: u64 = 1 << 31;
 pub const CR4_PAE: u64 = 1 << 5;
 /// Bit `CR4.VMXE`.
 ///
-/// `IA32_VMX_CR4_FIXED0` impose ce bit dans CR4 tant que l'opération VMX est
-/// active, y compris dans l'état invité : l'omettre provoque un échec
-/// d'entrée (`VM entry with invalid guest state`).
+/// `IA32_VMX_CR4_FIXED0` imposes this bit in CR4 as long as the VMX operation is
+/// active, including in the guest state: omitting it causes an entry
+/// failure (`VM entry with invalid guest state`).
 pub const CR4_VMXE: u64 = 1 << 13;
 /// Bit `CR4.PGE`.
 pub const CR4_PGE: u64 = 1 << 7;
@@ -49,57 +49,57 @@ pub const CR4_SMAP: u64 = 1 << 21;
 pub const EFER_SCE: u64 = 1 << 0;
 /// Bit `EFER.LME` (long mode enable).
 pub const EFER_LME: u64 = 1 << 8;
-/// Bit `EFER.LMA` (long mode active — positionné par le CPU, pas par l'hôte).
+/// Bit `EFER.LMA` (long mode active — set by the CPU, not by the host).
 pub const EFER_LMA: u64 = 1 << 10;
 /// Bit `EFER.NXE`.
 pub const EFER_NXE: u64 = 1 << 11;
 
-/// Bit « segment inutilisable » des droits d'accès invités (VMCS : bit 16).
+/// "Unusable segment" bit of the guest access rights (VMCS: bit 16).
 pub const AR_UNUSABLE: u32 = 1 << 16;
-/// Bit « L » (mode long) des droits d'accès de `CS`.
+/// "L" bit (long mode) of the `CS` access rights.
 pub const AR_LONG_MODE: u32 = 1 << 13;
-/// Bit « D/B » des droits d'accès.
+/// "D/B" bit of the access rights.
 pub const AR_DEFAULT_BIG: u32 = 1 << 14;
-/// Bit « présent ».
+/// "Present" bit.
 pub const AR_PRESENT: u32 = 0x80;
-/// Bit « code ou données » (1 = code/données, 0 = système).
+/// "Code or data" bit (1 = code/data, 0 = system).
 pub const AR_CODE_DATA: u32 = 0x10;
 
-/// Droits d'accès d'un segment de données lu/écrit, noyau (DPL 0).
+/// Access rights of a read/write data segment, kernel (DPL 0).
 pub const fn data_access_rights(dpl: u8) -> u32 {
     0x2 | AR_CODE_DATA | AR_PRESENT | (((dpl as u32) & 3) << 5)
 }
 
-/// Droits d'accès d'un segment de code 64 bits exécutable/lisible.
+/// Access rights of a 64-bit executable/readable code segment.
 pub const fn long_code_access_rights(dpl: u8) -> u32 {
     0xA | AR_CODE_DATA | AR_PRESENT | AR_LONG_MODE | (((dpl as u32) & 3) << 5)
 }
 
-/// Droits d'accès d'un segment de code 32 bits exécutable/lisible.
+/// Access rights of a 32-bit executable/readable code segment.
 pub const fn protected_code_access_rights(dpl: u8) -> u32 {
     0xA | AR_CODE_DATA | AR_PRESENT | AR_DEFAULT_BIG | (((dpl as u32) & 3) << 5)
 }
 
-/// Droits d'accès « inutilisable » (segment non chargé).
+/// "Unusable" access rights (segment not loaded).
 pub const fn unusable_access_rights() -> u32 {
     AR_UNUSABLE
 }
 
-/// Descripteur de segment tel que stocké dans le bloc de contrôle.
+/// Segment descriptor as stored in the control block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Segment {
-    /// Sélecteur (16 bits).
+    /// Selector (16 bits).
     pub selector: u16,
-    /// Base (ignorée en mode long sauf FS/GS).
+    /// Base (ignored in long mode except for FS/GS).
     pub base: u64,
-    /// Limite.
+    /// Limit.
     pub limit: u32,
-    /// Droits d'accès au format du bloc de contrôle.
+    /// Access rights in the control block format.
     pub access_rights: u32,
 }
 
 impl Segment {
-    /// Segment inutilisable (tous champs à zéro).
+    /// Unusable segment (all fields zero).
     pub const fn unusable() -> Self {
         Self {
             selector: 0,
@@ -109,22 +109,22 @@ impl Segment {
         }
     }
 
-    /// Vrai si le segment est marqué inutilisable.
+    /// True if the segment is marked unusable.
     pub const fn is_unusable(&self) -> bool {
         self.access_rights & AR_UNUSABLE != 0
     }
 
-    /// Vrai si le segment est un segment de code en mode long (L = 1).
+    /// True if the segment is a long-mode code segment (L = 1).
     pub const fn is_long_code(&self) -> bool {
         self.access_rights & AR_CODE_DATA != 0 && self.access_rights & AR_LONG_MODE != 0
     }
 }
 
-/// État complet d'un processeur invité, prêt à être chargé dans le bloc de
-/// contrôle.
+/// Complete state of a guest processor, ready to be loaded into the control
+/// block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GuestState {
-    // Registres généraux (rsp est un champ séparé).
+    // General-purpose registers (rsp is a separate field).
     pub rax: u64,
     pub rbx: u64,
     pub rcx: u64,
@@ -141,14 +141,14 @@ pub struct GuestState {
     pub r14: u64,
     pub r15: u64,
 
-    /// Pointeur d'instruction.
+    /// Instruction pointer.
     pub rip: u64,
-    /// Pointeur de pile.
+    /// Stack pointer.
     pub rsp: u64,
-    /// Drapeaux.
+    /// Flags.
     pub rflags: u64,
 
-    /// Registres de contrôle.
+    /// Control registers.
     pub cr0: u64,
     pub cr3: u64,
     pub cr4: u64,
@@ -156,7 +156,7 @@ pub struct GuestState {
     pub efer: u64,
     /// `DR7`.
     pub dr7: u64,
-    /// `IA32_PAT` (0 si non utilisé).
+    /// `IA32_PAT` (0 if unused).
     pub pat: u64,
 
     /// Segments.
@@ -169,7 +169,7 @@ pub struct GuestState {
     pub ldtr: Segment,
     pub tr: Segment,
 
-    /// Tables système.
+    /// System tables.
     pub gdtr_base: u64,
     pub gdtr_limit: u32,
     pub idtr_base: u64,
@@ -180,19 +180,19 @@ pub struct GuestState {
     pub sysenter_esp: u64,
     pub sysenter_eip: u64,
 
-    /// Exceptions de débogage en attente.
+    /// Pending debug exceptions.
     pub pending_debug_exceptions: u64,
-    /// État d'interruptibilité (bits STI/MOV-SS/SMI/NMI).
+    /// Interruptibility state (STI/MOV-SS/SMI/NMI bits).
     pub interruptibility: u32,
-    /// État d'activité (0 = actif).
+    /// Activity state (0 = active).
     pub activity_state: u32,
 }
 
 impl GuestState {
-    /// État de base en mode réel 16 bits, pour un invité minimal.
+    /// Basic 16-bit real-mode state, for a minimal guest.
     ///
-    /// Aucune paging, aucun segment en mode protégé : destiné aux tests de
-    /// fumée du moteur (l'invité exécute quelques instructions puis sort).
+    /// No paging, no protected-mode segment: intended for the smoke tests
+    /// of the engine (the guest executes a few instructions then exits).
     pub const fn real_mode(entry: u64, stack_top: u64) -> Self {
         Self {
             rax: 0,
@@ -250,7 +250,7 @@ impl GuestState {
                 selector: 0,
                 base: 0,
                 limit: 0xFFFF,
-                access_rights: 0x8B, // type 0xB (busy TSS 32 bits), présent
+                access_rights: 0x8B, // type 0xB (busy 32-bit TSS), present
             },
             gdtr_base: 0,
             gdtr_limit: 0,
@@ -265,7 +265,7 @@ impl GuestState {
         }
     }
 
-    /// État de base en mode long 64 bits (paging activée, CS.L = 1).
+    /// Basic 64-bit long mode state (paging enabled, CS.L = 1).
     pub const fn long_mode_64(entry: u64, stack_top: u64, cr3: u64) -> Self {
         let mut state = Self::real_mode(entry, stack_top);
         state.cr0 = CR0_PE | CR0_MP | CR0_NE | CR0_PG | CR0_WP;
@@ -291,23 +291,23 @@ impl GuestState {
         state
     }
 
-    /// Vrai si l'état demande le mode long 64 bits.
+    /// True if the state requests 64-bit long mode.
     pub const fn is_long_mode(&self) -> bool {
         (self.cr0 & CR0_PG) != 0 && (self.efer & EFER_LME) != 0
     }
 
-    /// Vrai si l'état est en mode réel (PE = 0).
+    /// True if the state is in real mode (PE = 0).
     pub const fn is_real_mode(&self) -> bool {
         (self.cr0 & CR0_PE) == 0
     }
 
-    /// Construit un état invité à partir d'un bloc de registres ABI.
+    /// Builds a guest state from an ABI register block.
     ///
-    /// Le mode long est sélectionné si `EFER.LME` et `CR0.PG` sont tous deux
-    /// positionnés ; sinon l'état de base est le mode réel. Les segments sont
-    /// initialisés en conséquence ; les registres fournis par l'appelant
-    /// (CR0/CR3/CR4/EFER/RIP/RSP/RFLAGS et GPR) écrasent les valeurs par
-    /// défaut. La cohérence finale est vérifiée par [`Self::validate`].
+    /// Long mode is selected if `EFER.LME` and `CR0.PG` are both
+    /// set; otherwise the base state is real mode. The segments are
+    /// initialized accordingly; the registers provided by the caller
+    /// (CR0/CR3/CR4/EFER/RIP/RSP/RFLAGS and GPRs) override the default
+    /// values. The final consistency is checked by [`Self::validate`].
     pub fn from_abi_regs(regs: &strat9_abi::vmm::VmmRegs) -> Self {
         let long_mode = (regs.efer & EFER_LME) != 0 && (regs.cr0 & CR0_PG) != 0;
         let mut state = if long_mode {
@@ -341,48 +341,48 @@ impl GuestState {
     }
 }
 
-/// Erreur de validation d'état invité, exploitable dans les logs.
+/// Guest state validation error, usable in logs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuestError {
-    /// Un bit interdit de CR0 est positionné.
+    /// A forbidden CR0 bit is set.
     Cr0FixedBit,
-    /// Un bit obligatoire de CR0 est absent.
+    /// A mandatory CR0 bit is missing.
     Cr0RequiredBit,
-    /// Un bit interdit de CR4 est positionné.
+    /// A forbidden CR4 bit is set.
     Cr4FixedBit,
-    /// Un bit obligatoire de CR4 est absent.
+    /// A mandatory CR4 bit is missing.
     Cr4RequiredBit,
-    /// Mode long demandé sans paging (`CR0.PG` absent).
+    /// Long mode requested without paging (`CR0.PG` absent).
     LongModeWithoutPaging,
-    /// Mode long demandé sans `EFER.LMA` dans le champ invité (le contrôle
-    /// d'entrée « load IA32_EFER » impose `LMA == IA-32e mode guest`).
+    /// Long mode requested without `EFER.LMA` in the guest field (the
+    /// "load IA32_EFER" entry control requires `LMA == IA-32e mode guest`).
     LongModeWithoutLma,
-    /// Mode réel sans « unrestricted guest ».
+    /// Real mode without "unrestricted guest".
     RealModeRestricted,
-    /// En mode long, `CS.L` doit être à 1 et `CS.D` à 0.
+    /// In long mode, `CS.L` must be 1 and `CS.D` must be 0.
     BadLongCodeSegment,
-    /// En mode long, bases de CS/SS/DS/ES doivent être nulles.
+    /// In long mode, the CS/SS/DS/ES bases must be zero.
     SegmentBaseNotZero,
-    /// En mode long, limites de CS/SS/DS/ES doivent valoir 0xFFFF_FFFF.
+    /// In long mode, the CS/SS/DS/ES limits must be 0xFFFF_FFFF.
     SegmentLimitNotFull,
-    /// `RFLAGS` contient une combinaison réservée.
+    /// `RFLAGS` contains a reserved combination.
     BadRflags,
-    /// État d'interruptibilité invalide.
+    /// Invalid interruptibility state.
     BadInterruptibility,
-    /// État d'activité non actif.
+    /// Non-active activity state.
     NotActive,
-    /// Segment de pile invalide.
+    /// Invalid stack segment.
     BadStackSegment,
 }
 
 impl GuestState {
-    /// Valide l'état avant une entrée invitée.
+    /// Validates the state before a guest entry.
     ///
-    /// `cr0_fixed0`/`cr0_fixed1` et `cr4_fixed0`/`cr4_fixed1` sont les MSR de
-    /// masques fixes lus au boot. `unrestricted_guest` indique si le mode
-    /// réel sans VM86 est disponible.
+    /// `cr0_fixed0`/`cr0_fixed1` and `cr4_fixed0`/`cr4_fixed1` are the fixed-mask
+    /// MSRs read at boot. `unrestricted_guest` indicates whether real
+    /// mode without VM86 is available.
     pub fn validate(&self, caps: &FixedBits, unrestricted_guest: bool) -> Result<(), GuestError> {
-        // CR0 : les bits fixes sont imposés par l'architecture.
+        // CR0: the fixed bits are imposed by the architecture.
         if self.cr0 & !caps.cr0_fixed1 != 0 {
             return Err(GuestError::Cr0FixedBit);
         }
@@ -396,19 +396,19 @@ impl GuestState {
             return Err(GuestError::Cr4RequiredBit);
         }
 
-        // Mode réel (PE = 0) : nécessite l'invité non restreint.
+        // Real mode (PE = 0): requires the unrestricted guest.
         if self.is_real_mode() && !unrestricted_guest {
             return Err(GuestError::RealModeRestricted);
         }
 
-        // Mode long : EFER.LME demande la paging, et CS doit être en mode long.
+        // Long mode: EFER.LME requests paging, and CS must be in long mode.
         if self.efer & EFER_LME != 0 {
             if self.cr0 & CR0_PG == 0 {
                 return Err(GuestError::LongModeWithoutPaging);
             }
-            // Le champ invité `IA32_EFER` est chargé (contrôle d'entrée
-            // « load IA32_EFER ») : le processeur exige que LMA reflète le
-            // mode IA-32e de l'entrée. Omettre LMA provoque un `VMfail`.
+            // The guest `IA32_EFER` field is loaded ("load IA32_EFER" entry
+            // control): the processor requires that LMA reflects the
+            // IA-32e mode of the entry. Omitting LMA causes a `VMfail`.
             if self.efer & EFER_LMA == 0 {
                 return Err(GuestError::LongModeWithoutLma);
             }
@@ -425,7 +425,7 @@ impl GuestState {
             }
         }
 
-        // RFLAGS : bit 1 obligatoire, bits réservés nuls.
+        // RFLAGS: bit 1 mandatory, reserved bits clear.
         if self.rflags & 0x2 == 0 {
             return Err(GuestError::BadRflags);
         }
@@ -434,17 +434,17 @@ impl GuestState {
             return Err(GuestError::BadRflags);
         }
 
-        // Interruptibilité : seuls les bits 0-3 sont définis.
+        // Interruptibility: only bits 0-3 are defined.
         if self.interruptibility & !0xF != 0 {
             return Err(GuestError::BadInterruptibility);
         }
 
-        // Activité : seul l'état « actif » (0) est accepté pour l'entrée.
+        // Activity: only the "active" state (0) is accepted for entry.
         if self.activity_state != 0 {
             return Err(GuestError::NotActive);
         }
 
-        // Pile : SS doit être utilisable si RSP est utilisé.
+        // Stack: SS must be usable if RSP is used.
         if self.ss.is_unusable() {
             return Err(GuestError::BadStackSegment);
         }
@@ -453,7 +453,7 @@ impl GuestState {
     }
 }
 
-/// Masques fixes de CR0/CR4, extraits des MSR de capacité.
+/// Fixed CR0/CR4 masks, extracted from the capability MSRs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FixedBits {
     pub cr0_fixed0: u64,
@@ -463,7 +463,7 @@ pub struct FixedBits {
 }
 
 impl FixedBits {
-    /// Construit depuis les masques bruts.
+    /// Builds from the raw masks.
     pub const fn new(cr0_fixed0: u64, cr0_fixed1: u64, cr4_fixed0: u64, cr4_fixed1: u64) -> Self {
         Self {
             cr0_fixed0,
@@ -473,7 +473,7 @@ impl FixedBits {
         }
     }
 
-    /// Masques permissifs (tests synthétiques, ou CPU dont les MSR valent
+    /// Permissive masks (synthetic tests, or a CPU whose MSRs are
     /// `0`/`u64::MAX`).
     pub const fn permissive() -> Self {
         Self {

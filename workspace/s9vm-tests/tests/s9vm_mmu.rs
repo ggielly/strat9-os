@@ -1,4 +1,4 @@
-//! L2 : traduction de second niveau s9vm (code noyau réel, mémoire hôte).
+//! L2: s9vm second-level translation (real kernel code, host memory).
 
 use std::collections::HashMap;
 
@@ -9,8 +9,8 @@ use mmu::{
     encode_second_level_pointer, entry, MmuError, Perms, SecondLevel, TableMemory, PAGE_SIZE,
 };
 
-/// Fournisseur de tables en mémoire hôte : chaque table est un tableau de
-/// 512 entrées, identifiée par un entier physique synthétique.
+/// Host-memory table provider: each table is an array of
+/// 512 entries, identified by a synthetic physical integer.
 struct HostTables {
     tables: HashMap<u64, [u64; 512]>,
     next: u64,
@@ -91,7 +91,7 @@ fn maps_and_translates_four_kib_pages() {
     assert_eq!(table.translate(&memory, 0x10_0000 + PAGE_SIZE), Some(0x20_1000));
     assert_eq!(table.translate(&memory, 0x10_2000), Some(0x20_2000));
     assert_eq!(table.translate(&memory, 0x11_0000), None);
-    // Au-delà de la plage mappée.
+    // Beyond the mapped range.
     assert_eq!(table.translate(&memory, 0x10_0000 + 3 * PAGE_SIZE), None);
 }
 
@@ -103,7 +103,7 @@ fn leaf_entries_carry_permissions_and_memory_type() {
         .map_4k(&mut memory, 0x0, 0x1000, PAGE_SIZE, Perms::read_execute())
         .expect("map");
 
-    // Retrouve la feuille par la marche de tables.
+    // Finds the leaf by walking the tables.
     let leaf = find_leaf(&memory, table.root_phys(), 0x0);
     assert_eq!(leaf & entry::READ, entry::READ);
     assert_eq!(leaf & entry::WRITE, 0);
@@ -170,16 +170,16 @@ fn unmaps_leaf_entries() {
     assert!(table.unmap_4k(&mut memory, 0x3000));
     assert_eq!(table.translate(&memory, 0x3000), None);
     assert_eq!(table.translate(&memory, 0x4000), Some(0x5000));
-    // Deuxième unmap : plus de feuille.
+    // Second unmap: no leaf anymore.
     assert!(!table.unmap_4k(&mut memory, 0x3000));
 }
 
 #[test]
 fn reports_out_of_memory_without_leaking_partial_state() {
-    // Racine + PDPT + PD + PT = 4 tables pour un mapping 4 Kio.
+    // Root + PDPT + PD + PT = 4 tables for a 4 KiB mapping.
     let mut memory = HostTables::with_limit(2);
     let table = SecondLevel::new(&mut memory).expect("root");
-    // La troisième allocation (PD) doit échouer.
+    // The third allocation (PD) must fail.
     assert_eq!(
         table.map_4k(&mut memory, 0x1000, 0x2000, PAGE_SIZE, Perms::read_write()),
         Err(MmuError::OutOfMemory)
@@ -214,7 +214,7 @@ fn encodes_second_level_pointer() {
     assert_ne!(with_ad & (1 << 6), 0);
 }
 
-/// Retrouve l'entrée feuille (niveau PT) pour une GPA, pour inspection.
+/// Finds the leaf entry (PT level) for a GPA, for inspection.
 fn find_leaf(memory: &HostTables, root: u64, gpa: u64) -> u64 {
     let pml4 = memory.read_entry(root, ((gpa >> 39) & 0x1FF) as usize);
     let pdpt = memory.read_entry(pml4 & entry::ADDR_MASK, ((gpa >> 30) & 0x1FF) as usize);
@@ -223,7 +223,7 @@ fn find_leaf(memory: &HostTables, root: u64, gpa: u64) -> u64 {
     pt
 }
 
-/// Retrouve l'entrée de niveau PD pour une GPA (page de 2 Mio).
+/// Finds the PD-level entry for a GPA (2 MiB page).
 fn find_pd_entry(memory: &HostTables, root: u64, gpa: u64) -> u64 {
     let pml4 = memory.read_entry(root, ((gpa >> 39) & 0x1FF) as usize);
     let pdpt = memory.read_entry(pml4 & entry::ADDR_MASK, ((gpa >> 30) & 0x1FF) as usize);

@@ -1,22 +1,22 @@
-//! `/dev/vmm` : vue utilisateur en lecture seule du moteur s9vm.
+//! `/dev/vmm`: read-only user view of the s9vm engine.
 //!
-//! Ce schéma est le miroir de diagnostic de l'état interne du moteur de
-//! virtualisation. Il n'expose **aucune opération de contrôle** : la création,
-//! la configuration et l'exécution des mondes passent exclusivement par les
-//! syscalls `SYS_VMM_*` et leurs capabilities.
+//! This scheme is the diagnostic mirror of the virtualization engine's
+//! internal state. It exposes **no control operation**: the creation,
+//! configuration and execution of worlds go exclusively through the
+//! `SYS_VMM_*` syscalls and their capabilities.
 //!
-//! # Contenu
+//! # Contents
 //!
 //! ```text
 //! /dev/vmm/
-//!   info           résumé du moteur (photo prise à l'ouverture)
-//!   worlds         liste des mondes, une ligne par monde
-//!   <id>/info      photo d'un monde
+//!   info           engine summary (snapshot taken at open)
+//!   worlds         list of worlds, one line per world
+//!   <id>/info      snapshot of a world
 //! ```
 //!
-//! Chaque fichier est une **photo** prise à l'ouverture : la lecture est
-//! finie (EOF à la fin) et ne bloque jamais. Ouvrir à nouveau le fichier
-//! produit une nouvelle photo.
+//! Each file is a **snapshot** taken at open: reading is finite (EOF at the
+//! end) and never blocks. Opening the file again produces a new
+//! snapshot.
 
 use alloc::string::String;
 use alloc::{collections::BTreeMap, sync::Arc};
@@ -35,13 +35,13 @@ use super::{
     scheme_router,
 };
 
-/// Identité de périphérique stable pour `/dev/vmm` (13 = premier slot libre).
+/// Stable device identity for `/dev/vmm` (13 = first free slot).
 const DEV_VMM: u64 = 13;
 
-/// Alloue les identifiants de fichier ouverts.
+/// Allocates open file identifiers.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Contenu d'un fichier ouvert : racine ou photo texte.
+/// Content of an open file: root or text snapshot.
 enum Kind {
     Root,
     Text(String),
@@ -52,13 +52,13 @@ struct VmmFile {
     cursor: u64,
 }
 
-/// Instance du schéma `/dev/vmm`.
+/// Instance of the `/dev/vmm` scheme.
 pub struct VmmScheme {
     files: SpinLock<BTreeMap<u64, VmmFile>>,
 }
 
 impl VmmScheme {
-    /// Crée une instance vide.
+    /// Creates an empty instance.
     pub fn new() -> Self {
         Self {
             files: SpinLock::new(BTreeMap::new()),
@@ -182,7 +182,7 @@ impl Scheme for VmmScheme {
     }
 
     fn write(&self, _file_id: u64, _offset: u64, _buf: &[u8]) -> Result<usize, SyscallError> {
-        // Vue strictement en lecture seule : toute écriture est refusée.
+        // Strictly read-only view: every write is refused.
         Err(SyscallError::PermissionDenied)
     }
 
@@ -241,10 +241,10 @@ impl Scheme for VmmScheme {
     }
 }
 
-/// Enregistre le schéma `vmm` et le monte sur `/dev/vmm`.
+/// Registers the `vmm` scheme and mounts it on `/dev/vmm`.
 ///
-/// Idempotent : un second appel (reprise de composant, ré-init) considère
-/// l'enregistrement ou le montage existant comme un succès.
+/// Idempotent: a second call (component restart, re-init) treats the
+/// existing registration or mount as a success.
 pub fn init_vmm_scheme() -> Result<(), SyscallError> {
     let scheme: DynScheme = Arc::new(VmmScheme::new());
     match scheme_router::register_scheme("vmm", scheme) {

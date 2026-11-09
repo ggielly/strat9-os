@@ -1,50 +1,50 @@
-//! s9vm — traduction de second niveau (tables de pages matérielles).
+//! s9vm — second-level translation (hardware page tables).
 //!
-//! Le module construit et parcourt les tables qui traduisent les adresses
-//! physiques invitées (GPA) vers les adresses physiques hôtes (HPA), selon la
-//! SDM Intel (traduction de second niveau, « EPT »). Il est **pur** : il ne
-//! connaît ni `HHDM`, ni allocateur de frames. L'accès mémoire aux tables est
-//! fourni par un [`TableMemory`] (le noyau fournit une implémentation HHDM,
-//! les tests une implémentation en mémoire hôte).
+//! The module builds and walks the tables that translate guest physical
+//! addresses (GPA) to host physical addresses (HPA), following the Intel
+//! SDM (second-level translation, "EPT"). It is **pure**: it knows
+//! neither `HHDM` nor a frame allocator. Memory access to the tables is
+//! provided by a [`TableMemory`] (the kernel provides an HHDM
+//! implementation, the tests a host-memory implementation).
 //!
-//! Convention : les adresses manipulées sont des adresses **physiques** ; le
-//! fournisseur [`TableMemory`] sait les lire et les écrire.
+//! Convention: the addresses handled are **physical** addresses; the
+//! [`TableMemory`] provider knows how to read and write them.
 
-/// Taille d'une page de base.
+/// Size of a base page.
 pub const PAGE_SIZE: u64 = 4096;
-/// Nombre d'entrées par table.
+/// Number of entries per table.
 pub const ENTRY_COUNT: usize = 512;
-/// Décalages des niveaux de la marche de tables 4 niveaux.
+/// Level shifts of the 4-level page-table walk.
 pub const SHIFT_PML4: u32 = 39;
 pub const SHIFT_PDPT: u32 = 30;
 pub const SHIFT_PD: u32 = 21;
 pub const SHIFT_PT: u32 = 12;
-/// Largeur maximale d'adresse physique invitée couverte (48 bits).
+/// Maximum guest physical address width covered (48 bits).
 pub const MAX_GPA: u64 = 1 << 48;
 
-/// Bits et masques des entrées de table de second niveau.
+/// Bits and masks of second-level table entries.
 pub mod entry {
-    /// Entrée présente.
+    /// Present entry.
     pub const PRESENT: u64 = 1 << 0;
-    /// Lecture autorisée (bit 0 de l'EPT).
+    /// Read allowed (EPT bit 0).
     pub const READ: u64 = 1 << 0;
-    /// Écriture autorisée (bit 1 de l'EPT).
+    /// Write allowed (EPT bit 1).
     pub const WRITE: u64 = 1 << 1;
-    /// Exécution autorisée (bit 2 de l'EPT).
+    /// Execute allowed (EPT bit 2).
     pub const EXECUTE: u64 = 1 << 2;
-    /// Type mémoire *write-back* (bits 5:3 = 6).
+    /// *Write-back* memory type (bits 5:3 = 6).
     pub const MEMTYPE_WB: u64 = 6 << 3;
-    /// Page de grande taille (bit 7, page de 2 Mio au niveau PD).
+    /// Large page (bit 7, 2 MiB page at the PD level).
     pub const LARGE_PAGE: u64 = 1 << 7;
-    /// Masque de l'adresse physique encodée (bits 51:12).
+    /// Mask of the encoded physical address (bits 51:12).
     pub const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
-    /// Alignement d'une page de 2 Mio.
+    /// Alignment of a 2 MiB page.
     pub const LARGE_2MB: u64 = 2 * 1024 * 1024;
-    /// Alignement d'une page de 1 Gio.
+    /// Alignment of a 1 GiB page.
     pub const LARGE_1GB: u64 = 1024 * 1024 * 1024;
 }
 
-/// Permissions demandées pour un mapping.
+/// Permissions requested for a mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Perms {
     pub read: bool,
@@ -53,7 +53,7 @@ pub struct Perms {
 }
 
 impl Perms {
-    /// Lecture seule et exécution (code invité).
+    /// Read-only and execute (guest code).
     pub const fn read_execute() -> Self {
         Self {
             read: true,
@@ -62,7 +62,7 @@ impl Perms {
         }
     }
 
-    /// Lecture/écriture (données invitées).
+    /// Read/write (guest data).
     pub const fn read_write() -> Self {
         Self {
             read: true,
@@ -71,7 +71,7 @@ impl Perms {
         }
     }
 
-    /// Toutes les permissions (RAM classique).
+    /// All permissions (regular RAM).
     pub const fn read_write_execute() -> Self {
         Self {
             read: true,
@@ -80,7 +80,7 @@ impl Perms {
         }
     }
 
-    /// Encode les permissions dans les bits 2:0 d'une entrée.
+    /// Encodes the permissions into bits 2:0 of an entry.
     pub const fn bits(self) -> u64 {
         let mut bits = 0;
         if self.read {
@@ -96,64 +96,64 @@ impl Perms {
     }
 }
 
-/// Erreurs de manipulation des tables.
+/// Table manipulation errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MmuError {
-    /// Le fournisseur n'a plus de table disponible.
+    /// The provider has no more table available.
     OutOfMemory,
-    /// Adresse ou longueur invalide.
+    /// Invalid address or length.
     InvalidRange,
-    /// Une page de 2 Mio est mal alignée.
+    /// A 2 MiB page is misaligned.
     Misaligned,
-    /// La mémoire récupérée auprès du fournisseur n'est pas utilisable.
+    /// The memory obtained from the provider is not usable.
     BadMemory,
-    /// Le mapping demandé chevauche un mapping existant incompatible.
+    /// The requested mapping overlaps an existing incompatible mapping.
     Conflict,
 }
 
-/// Fournisseur de mémoire pour les tables (allocation, lecture, écriture).
+/// Memory provider for the tables (allocation, read, write).
 ///
-/// Le noyau implémente ce trait en allouant des frames et en passant par le
-/// HHDM ; les tests utilisent une table en mémoire hôte. Chaque poignée
-/// (`table`) identifie une table de 512 entrées de 8 octets.
+/// The kernel implements this trait by allocating frames and going through the
+/// HHDM; the tests use a host-memory table. Each handle
+/// (`table`) identifies a table of 512 8-byte entries.
 pub trait TableMemory {
-    /// Alloue une table nulle et retourne sa poignée (identifiant physique).
+    /// Allocates a zeroed table and returns its handle (physical identifier).
     fn alloc_table(&mut self) -> Option<u64>;
-    /// Libère une table précédemment allouée.
+    /// Frees a previously allocated table.
     fn free_table(&mut self, table: u64);
-    /// Lit l'entrée `index` de la table.
+    /// Reads entry `index` of the table.
     fn read_entry(&self, table: u64, index: usize) -> u64;
-    /// Écrit l'entrée `index` de la table.
+    /// Writes entry `index` of the table.
     fn write_entry(&mut self, table: u64, index: usize, value: u64);
 }
 
-/// Racine d'une traduction de second niveau.
+/// Root of a second-level translation.
 #[derive(Debug)]
 pub struct SecondLevel {
     root: u64,
 }
 
 impl SecondLevel {
-    /// Crée une traduction vide (une table racine nulle).
+    /// Creates an empty translation (a zeroed root table).
     pub fn new<M: TableMemory>(memory: &mut M) -> Result<Self, MmuError> {
         let root = memory.alloc_table().ok_or(MmuError::OutOfMemory)?;
         Ok(Self { root })
     }
 
-    /// Adresse physique de la racine.
+    /// Physical address of the root.
     pub const fn root_phys(&self) -> u64 {
         self.root
     }
 
-    /// Libère la racine (les sous-tables doivent avoir été libérées par
-    /// [`Self::unmap`] ou par l'appelant).
+    /// Frees the root (the sub-tables must have been freed by
+    /// [`Self::unmap`] or by the caller).
     pub fn release<M: TableMemory>(&self, memory: &mut M) {
         memory.free_table(self.root);
     }
 
-    /// Mappe une plage de `len` octets (multiple de 4 Kio) en pages de 4 Kio.
+    /// Maps a range of `len` bytes (multiple of 4 KiB) in 4 KiB pages.
     ///
-    /// `gpa` et `hpa` doivent être alignés sur 4 Kio.
+    /// `gpa` and `hpa` must be 4 KiB aligned.
     pub fn map_4k<M: TableMemory>(
         &self,
         memory: &mut M,
@@ -183,9 +183,9 @@ impl SecondLevel {
         Ok(())
     }
 
-    /// Mappe une plage de `len` octets en pages de 2 Mio.
+    /// Maps a range of `len` bytes in 2 MiB pages.
     ///
-    /// `gpa`, `hpa` et `len` doivent être alignés sur 2 Mio.
+    /// `gpa`, `hpa`, and `len` must be 2 MiB aligned.
     pub fn map_2m<M: TableMemory>(
         &self,
         memory: &mut M,
@@ -216,7 +216,7 @@ impl SecondLevel {
         Ok(())
     }
 
-    /// Traduit une GPA en HPA, si une feuille existe.
+    /// Translates a GPA to an HPA, if a leaf exists.
     pub fn translate<M: TableMemory>(&self, memory: &M, gpa: u64) -> Option<u64> {
         if gpa >= MAX_GPA {
             return None;
@@ -231,8 +231,8 @@ impl SecondLevel {
             return None;
         }
         if pdpt & entry::LARGE_PAGE != 0 {
-            // Pages de 1 Gio : supportées uniquement si le fournisseur les a
-            // posées ; on les accepte en lecture.
+            // 1 GiB pages: supported only if the provider has
+            // placed them; they are accepted for reading.
             let base = pdpt & entry::ADDR_MASK & !(entry::LARGE_1GB - 1);
             return Some(base | (gpa & (entry::LARGE_1GB - 1)));
         }
@@ -253,12 +253,12 @@ impl SecondLevel {
         Some((pt & entry::ADDR_MASK) | (gpa & (PAGE_SIZE - 1)))
     }
 
-    /// Retire un mapping de 4 Kio. Retourne `true` si une feuille existait.
+    /// Removes a 4 KiB mapping. Returns `true` if a leaf existed.
     ///
-    /// Les tables intermédiaires devenues vides ne sont pas libérées (elles
-    /// peuvent être réutilisées par un mapping ultérieur) ; utiliser
-    /// [`Self::release`] après [`Self::release_all`] ou laisser le
-    /// propriétaire du fournisseur les récupérer.
+    /// Intermediate tables that become empty are not freed (they
+    /// can be reused by a later mapping); use
+    /// [`Self::release`] after [`Self::release_all`] or let the
+    /// provider owner reclaim them.
     pub fn unmap_4k<M: TableMemory>(&self, memory: &mut M, gpa: u64) -> bool {
         let Some(pt_table) = self.leaf_table(memory, gpa, SHIFT_PT) else {
             return false;
@@ -272,7 +272,7 @@ impl SecondLevel {
         true
     }
 
-    /// Retire un mapping de 2 Mio. Retourne `true` si une feuille existait.
+    /// Removes a 2 MiB mapping. Returns `true` if a leaf existed.
     pub fn unmap_2m<M: TableMemory>(&self, memory: &mut M, gpa: u64) -> bool {
         let Some(pd_table) = self.leaf_table(memory, gpa, SHIFT_PD) else {
             return false;
@@ -286,8 +286,8 @@ impl SecondLevel {
         true
     }
 
-    /// Parcourt les tables jusqu'au tableau contenant la feuille du niveau
-    /// demandé (`SHIFT_PT` pour 4 Kio, `SHIFT_PD` pour 2 Mio).
+    /// Walks the tables down to the table containing the leaf of the requested
+    /// level (`SHIFT_PT` for 4 KiB, `SHIFT_PD` for 2 MiB).
     fn leaf_table<M: TableMemory>(
         &self,
         memory: &M,
@@ -318,8 +318,8 @@ impl SecondLevel {
         Some(pd & entry::ADDR_MASK)
     }
 
-    /// Crée (si nécessaire) la table du niveau `shift` pour la GPA donnée et
-    /// retourne sa poignée. Alloue les niveaux manquants.
+    /// Creates (if necessary) the table of level `shift` for the given GPA and
+    /// returns its handle. Allocates the missing levels.
     fn ensure_table<M: TableMemory>(
         &self,
         memory: &mut M,
@@ -368,15 +368,15 @@ impl SecondLevel {
     }
 }
 
-/// Index d'une adresse dans la table du niveau `shift`.
+/// Index of an address in the table of level `shift`.
 const fn index_of(addr: u64, shift: u32) -> usize {
     ((addr >> shift) & 0x1FF) as usize
 }
 
-/// Encode la valeur d'activation de la traduction de second niveau (`EPTP`).
+/// Encodes the activation value of second-level translation (`EPTP`).
 ///
-/// Format (SDM) : bits 2:0 = type mémoire (6 = WB), bits 5:3 = longueur de
-/// marche moins 1 (3 pour 4 niveaux), bit 6 = A/D, bits 51:12 = racine.
+/// Format (SDM): bits 2:0 = memory type (6 = WB), bits 5:3 = walk
+/// length minus 1 (3 for 4 levels), bit 6 = A/D, bits 51:12 = root.
 pub const fn encode_second_level_pointer(
     root_phys: u64,
     memory_type: u8,

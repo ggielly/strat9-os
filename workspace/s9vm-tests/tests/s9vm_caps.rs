@@ -1,4 +1,4 @@
-//! L2 : décodage des capacités matérielles s9vm (code noyau réel).
+//! L2: decoding of s9vm hardware capabilities (real kernel code).
 
 extern crate alloc;
 
@@ -14,7 +14,7 @@ use caps::{
     MSR_TRUE_EXIT_CONTROLS, MSR_TRUE_PIN_BASED, MSR_TRUE_PRIMARY_PROC_BASED,
 };
 
-/// Photographie synthétique : contrôle total des valeurs décodées.
+/// Synthetic snapshot: full control over the decoded values.
 fn snapshot(values: &[(u32, u64)]) -> MsrSnapshot {
     MsrSnapshot::from_reader(|msr| {
         values
@@ -73,7 +73,7 @@ fn decodes_control_block_identity() {
 
 #[test]
 fn detects_ept_and_vpid_from_allowed_masks() {
-    // Bits bas = obligatoires, bits hauts = autorisés.
+    // Low bits = mandatory, high bits = allowed.
     let secondary = (control_bits::PROC2_ENABLE_EPT as u64)
         | ((control_bits::PROC2_ENABLE_EPT | control_bits::PROC2_ENABLE_VPID) as u64) << 32;
     let ept_vpid = ept_vpid_cap::WALK_LENGTH_4
@@ -124,7 +124,7 @@ fn ept_without_four_levels_is_unusable() {
 
 #[test]
 fn true_controls_take_precedence_when_present() {
-    // Le MSR de base interdit les contrôles, les MSR TRUE les autorisent.
+    // The base MSR forbids the controls; the TRUE MSRs allow them.
     let pin_true = (control_bits::PIN_PREEMPTION_TIMER as u64) << 32;
     let snap = snapshot(&[
         (
@@ -148,13 +148,13 @@ fn true_controls_take_precedence_when_present() {
 
 #[test]
 fn allowed_controls_apply_and_support() {
-    // Bits 0 et 1 obligatoires, bits 0..3 autorisés.
+    // Bits 0 and 1 mandatory, bits 0..3 allowed.
     let allowed = AllowedControls::from_msr(0b11 | (0b1111u64 << 32));
     assert_eq!(allowed.apply(0b1000), 0b1000 | 0b11);
     assert_eq!(allowed.apply(0b0100), 0b0100 | 0b11);
     assert!(allowed.supports(0b0100));
     assert!(!allowed.supports(0b1_0000));
-    // Les bits obligatoires sont forcés même s'ils ne sont pas demandés.
+    // Mandatory bits are forced even when not requested.
     assert_eq!(allowed.apply(0), 0b11);
 }
 
@@ -193,10 +193,10 @@ fn summary_mentions_key_capabilities() {
 
 #[test]
 fn vmx_capability_msr_numbers_match_intel_sdm() {
-    // Verrou de régression : ces numéros sont fixés par le SDM (vol. 3C,
-    // « VMX capability MSRs ») et ne doivent jamais être décalés. Un décalage
-    // fait lire l'énumération VMCS (`0x48A`) à la place des contrôles
-    // secondaires et rend EPT indétectable sur un hôte pourtant compatible.
+    // Regression lock: these numbers are fixed by the SDM (vol. 3C,
+    // "VMX capability MSRs") and must never be shifted. A shift
+    // makes the VMCS enumeration (`0x48A`) be read instead of the secondary
+    // controls and makes EPT undetectable on an otherwise compatible host.
     assert_eq!(MSR_BASIC, 0x480);
     assert_eq!(MSR_PIN_BASED, 0x481);
     assert_eq!(MSR_PRIMARY_PROC_BASED, 0x482);
@@ -218,8 +218,8 @@ fn vmx_capability_msr_numbers_match_intel_sdm() {
 
 #[test]
 fn ept_is_read_from_0x48b_and_0x48c_only() {
-    // Lecteur instrumenté : on vérifie que la photographie interroge bien les
-    // MSR secondaires en 0x48B et EPT/VPID en 0x48C (et pas 0x48A/0x48B).
+    // Instrumented reader: we check that the snapshot queries the secondary
+    // MSRs at 0x48B and EPT/VPID at 0x48C (and not 0x48A/0x48B).
     use core::cell::RefCell;
     let seen = RefCell::new(alloc::vec::Vec::new());
     let snapshot = MsrSnapshot::from_reader(|msr| {

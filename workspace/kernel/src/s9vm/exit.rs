@@ -1,19 +1,19 @@
-//! s9vm — décodage des sorties matérielles (VM-exits).
+//! s9vm — decoding of hardware exits (VM-exits).
 //!
-//! Module pur : il transforme la valeur brute `EXIT_REASON` (et les champs
-//! d'information associés) en structures exploitables, sans accès matériel.
-//! Testable sur l'hôte (tests L2).
+//! Pure module: it turns the raw `EXIT_REASON` value (and the associated
+//! information fields) into usable structures, with no hardware access.
+//! Host-testable (L2 tests).
 //!
-//! Les numéros de raison sont ceux de la documentation Intel (SDM vol. 3C,
+//! The reason numbers are those of the Intel documentation (SDM vol. 3C,
 //! appendix C).
 
-/// Raison de sortie décodée.
+/// Decoded exit reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExitReason {
-    /// Numéro de raison sur 16 bits.
+    /// Reason number on 16 bits.
     pub reason: u16,
-    /// Vrai si la sortie est en réalité un échec d'entrée invité (`VMLAUNCH`
-    /// ou `VMRESUME` a échoué et on est revenu à l'hôte).
+    /// True if the exit is actually a guest entry failure (`VMLAUNCH`
+    /// or `VMRESUME` failed and control returned to the host).
     pub entry_failed: bool,
 }
 
@@ -27,7 +27,7 @@ impl Default for ExitReason {
 }
 
 impl ExitReason {
-    /// Décode la valeur brute lue dans le champ de sortie.
+    /// Decodes the raw value read from the exit field.
     pub const fn decode(raw: u32) -> Self {
         Self {
             reason: (raw & 0xFFFF) as u16,
@@ -35,7 +35,7 @@ impl ExitReason {
         }
     }
 
-    /// Valeur brute telle qu'attendue par les champs matériels.
+    /// Raw value as expected by the hardware fields.
     pub const fn raw(self) -> u32 {
         let mut raw = self.reason as u32;
         if self.entry_failed {
@@ -44,7 +44,7 @@ impl ExitReason {
         raw
     }
 
-    /// Classe fonctionnelle de la sortie, utilisée par le dispatcher.
+    /// Functional class of the exit, used by the dispatcher.
     pub const fn class(self) -> ExitClass {
         if self.entry_failed {
             return ExitClass::EntryFailure;
@@ -79,76 +79,76 @@ impl ExitReason {
     }
 }
 
-/// Classes fonctionnelles de sortie ; le dispatcher de s9vm route sur cette
-/// classification plutôt que sur le numéro brut.
+/// Functional exit classes; the s9vm dispatcher routes on this
+/// classification rather than on the raw number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitClass {
-    /// Exception invité ou NMI.
+    /// Guest exception or NMI.
     ExceptionOrNmi,
-    /// Interruption externe (IRQ hôte à réinjecter).
+    /// External interrupt (host IRQ to reinject).
     ExternalInterrupt,
-    /// Triple faute : l'invité est mort, l'hôte survit.
+    /// Triple fault: the guest is dead, the host survives.
     TripleFault,
-    /// Fenêtre d'interruption ou de NMI à ouvrir.
+    /// Interrupt or NMI window to open.
     InterruptWindow,
-    /// `cpuid` invité.
+    /// Guest `cpuid`.
     Cpuid,
-    /// `hlt` invité.
+    /// Guest `hlt`.
     Halt,
-    /// `pause` invité (boucle d'attente).
+    /// Guest `pause` (wait loop).
     Pause,
-    /// Accès à un port d'E/S.
+    /// Access to an I/O port.
     IoPort,
-    /// Accès à un registre de contrôle.
+    /// Access to a control register.
     ControlRegister,
-    /// Accès à un registre de débogage.
+    /// Access to a debug register.
     DebugRegister,
-    /// Lecture/écriture de MSR.
+    /// MSR read/write.
     Msr,
-    /// `monitor`/`mwait` ou drapeau de surveillance.
+    /// `monitor`/`mwait` or monitor trap flag.
     MonitorWait,
-    /// Accès APIC (page, TPR, EOI).
+    /// APIC access (page, TPR, EOI).
     Apic,
-    /// Violation de traduction de second niveau (GPA non mappée).
+    /// Second-level translation violation (unmapped GPA).
     EptViolation,
-    /// Table de second niveau mal configurée (bug hôte).
+    /// Misconfigured second-level table (host bug).
     EptMisconfiguration,
-    /// Tranche de temps invité expirée.
+    /// Guest time slice expired.
     PreemptionTimer,
-    /// Appel de l'invité vers l'hôte.
+    /// Call from the guest to the host.
     Call,
-    /// État étendu (XSAVE/XCR0).
+    /// Extended state (XSAVE/XCR0).
     ExtendedState,
-    /// Invalidation TLB invité.
+    /// Guest TLB invalidation.
     Tlb,
-    /// Compteur de temps.
+    /// Time stamp counter.
     Timestamp,
-    /// Instruction de cache.
+    /// Cache instruction.
     Cache,
-    /// Échec d'entrée invité (état invité ou chargement MSR).
+    /// Guest entry failure (guest state or MSR loading).
     EntryFailure,
-    /// Non classée : à traiter par le chemin lent.
+    /// Unclassified: to be handled by the slow path.
     Unknown,
 }
 
-/// Lit le vecteur et le type d'événement d'un champ d'information
-/// d'interruption (`EXIT_INTERRUPT_INFO` / `IDT_VECTORING_INFO`).
+/// Reads the vector and event type from an interrupt information field
+/// (`EXIT_INTERRUPT_INFO` / `IDT_VECTORING_INFO`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VectorEvent {
-    /// Vecteur (0-255).
+    /// Vector (0-255).
     pub vector: u8,
-    /// Type d'événement (SDM : 0 = externe, 2 = NMI, 3 = exception
-    /// matérielle, 4 = logicielle, 5 = privilégiée, 6 = exception
-    /// logicielle).
+    /// Event type (SDM: 0 = external, 2 = NMI, 3 = hardware
+    /// exception, 4 = software, 5 = privileged, 6 = software
+    /// exception).
     pub kind: u8,
-    /// Vecteur délivré avec un code d'erreur.
+    /// Vector delivered with an error code.
     pub error_code_valid: bool,
-    /// Vrai si l'événement est valide (bit 31 de l'information).
+    /// True if the event is valid (bit 31 of the information field).
     pub valid: bool,
 }
 
 impl VectorEvent {
-    /// Décode le champ d'information d'interruption.
+    /// Decodes the interrupt information field.
     pub const fn decode(info: u32) -> Self {
         Self {
             vector: (info & 0xFF) as u8,
@@ -158,18 +158,18 @@ impl VectorEvent {
         }
     }
 
-    /// Vrai si l'événement est une exception (matérielle ou logicielle).
+    /// True if the event is an exception (hardware or software).
     pub const fn is_exception(self) -> bool {
         self.kind == 3 || self.kind == 6
     }
 
-    /// Vrai si l'événement est un NMI.
+    /// True if the event is an NMI.
     pub const fn is_nmi(self) -> bool {
         self.kind == 2
     }
 }
 
-// --- Raisons de sortie (SDM appendix C) ---
+// --- Exit reasons (SDM appendix C) ---
 pub const EXCEPTION_OR_NMI: u16 = 0;
 pub const EXTERNAL_INTERRUPT: u16 = 1;
 pub const TRIPLE_FAULT: u16 = 2;
@@ -231,7 +231,7 @@ pub const PML_FULL: u16 = 62;
 pub const XSAVES: u16 = 63;
 pub const XRSTORS: u16 = 64;
 
-/// Nom lisible d'une raison de sortie (diagnostic).
+/// Human-readable name of an exit reason (diagnostics).
 pub const fn reason_name(reason: u16) -> &'static str {
     match reason {
         0 => "exception-or-nmi",
@@ -298,21 +298,21 @@ pub const fn reason_name(reason: u16) -> &'static str {
     }
 }
 
-/// Errno interne pour les sorties non gérées.
+/// Internal errno for unhandled exits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitAction {
-    /// Traiter puis rentrer dans l'invité.
+    /// Handle, then re-enter the guest.
     Resume,
-    /// Réinjecter un événement puis rentrer.
+    /// Reinject an event, then re-enter.
     Inject,
-    /// Transférer au chemin lent (silo de politique).
+    /// Forward to the slow path (policy silo).
     Forward,
-    /// Arrêter le vCPU.
+    /// Stop the vCPU.
     Stop,
 }
 
-/// Politique de routage par défaut du socle : ce que le noyau sait traiter
-/// seul (sans policy ni IPC).
+/// Default routing policy of the base layer: what the kernel can handle
+/// on its own (without policy or IPC).
 pub const fn default_action(class: ExitClass) -> ExitAction {
     match class {
         ExitClass::ExceptionOrNmi
@@ -340,28 +340,28 @@ pub const fn default_action(class: ExitClass) -> ExitAction {
     }
 }
 
-/// Bit de validité du champ « VM-entry interruption information » (`0x4016`).
+/// Validity bit of the "VM-entry interruption information" field (`0x4016`).
 pub const ENTRY_INTERRUPT_VALID: u32 = 1 << 31;
-/// Type « interruption externe » dans le champ d'entrée (bits 10:8 = 0).
+/// "External interrupt" type in the entry field (bits 10:8 = 0).
 pub const ENTRY_INTERRUPT_TYPE_EXTERNAL: u32 = 0;
-/// Bit « délivrer un code d'erreur » du champ d'entrée.
+/// "Deliver an error code" bit of the entry field.
 pub const ENTRY_INTERRUPT_DELIVER_ERROR: u32 = 1 << 11;
 
-/// Encode le champ « VM-entry interruption information » pour injecter une
-/// interruption externe de vecteur `vector` à la prochaine entrée invitée.
+/// Encodes the "VM-entry interruption information" field to inject an
+/// external interrupt of vector `vector` at the next guest entry.
 ///
-/// Le vecteur doit tenir sur 8 bits ; l'appelant valide la plage. La fonction
-/// est pure pour être testable sur l'hôte.
+/// The vector must fit in 8 bits; the caller validates the range. The
+/// function is pure so that it can be tested on the host.
 pub const fn external_interrupt_info(vector: u8) -> u32 {
     ENTRY_INTERRUPT_VALID | ENTRY_INTERRUPT_TYPE_EXTERNAL | (vector as u32)
 }
 
-/// Type « NMI » dans le champ d'entrée (bits 10:8 = 2).
+/// "NMI" type in the entry field (bits 10:8 = 2).
 pub const ENTRY_INTERRUPT_TYPE_NMI: u32 = 2 << 8;
-/// Vecteur architectural du NMI.
+/// Architectural vector of the NMI.
 pub const NMI_VECTOR: u8 = 2;
 
-/// Encode le champ d'entrée pour injecter un NMI à la prochaine entrée.
+/// Encodes the entry field to inject an NMI at the next entry.
 pub const fn nmi_info() -> u32 {
     ENTRY_INTERRUPT_VALID | ENTRY_INTERRUPT_TYPE_NMI | (NMI_VECTOR as u32)
 }

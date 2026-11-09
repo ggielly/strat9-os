@@ -1,30 +1,30 @@
-//! s9vm — système de virtualisation bare-metal de strat9-os.
+//! s9vm — bare-metal virtualization system of strat9-os.
 //!
-//! # Principe
+//! # Principle
 //!
-//! **Bedrock fournit le mécanisme** (activation VT-x par CPU, bloc de contrôle
-//! matériel, traduction de second niveau, réception des sorties, injection
-//! d'événements), **le silo de politique** (à venir) décidera du cycle de vie
-//! des machines, du modèle de périphériques et du routage des interruptions.
+//! **Bedrock provides the mechanism** (per-CPU VT-x activation, hardware
+//! control block, second-level translation, exit reception, event
+//! injection), **the policy silo** (to come) will decide the life cycle
+//! of machines, device model, and interrupt routing.
 //!
-//! # Découpage
+//! # Layout
 //!
-//! | Module | Contenu | Testable hôte |
+//! | Module | Content | Host-testable |
 //! |---|---|---|
-//! | [`caps`] | décodage des MSR de capacité VT-x | oui |
-//! | [`control`] | encodage des champs, primitives du bloc de contrôle | oui (compile) |
-//! | [`mmu`] | tables de traduction de second niveau | oui |
-//! | [`exit`] | décodage et classification des sorties | oui |
+//! | [`caps`] | VT-x capability MSR decoding | yes |
+//! | [`control`] | field encoding, control block primitives | yes (compiles) |
+//! | [`mmu`] | second-level translation tables | yes |
+//! | [`exit`] | exit decoding and classification | yes |
 //!
-//! # Cycle d'initialisation
+//! # Initialization cycle
 //!
-//! 1. détection très tôt (CPUID + MSR), sans effet de bord ;
-//! 2. activation par CPU quand l'allocateur de frames est prêt (composant
-//!    `bootstrap`) : `CR4.VMXE`, région d'activation 4 Kio, activation ;
-//! 3. les vCPU seront créés plus tard par la couche de politique.
+//! 1. very early detection (CPUID + MSR), without side effects;
+//! 2. per-CPU activation when the frame allocator is ready (component
+//!    `bootstrap`): `CR4.VMXE`, 4 KiB activation region, activation;
+//! 3. vCPUs will be created later by the policy layer.
 //!
-//! L'absence de VT-x n'est jamais fatale : le noyau démarre normalement et
-//! journalise `virtualisation inactive`.
+//! The absence of VT-x is never fatal: the kernel boots normally and
+//! logs `virtualisation inactive`.
 
 pub mod apic;
 pub mod caps;
@@ -43,40 +43,40 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use caps::{CapsError, HwCaps, MsrSnapshot};
 
-/// Interrupteur global de compilation/comportement.
+/// Global compile/behavior switch.
 ///
-/// À `false`, `init()` ne fait que journaliser : utile pour un noyau de
-/// diagnostic ou une plateforme exotique. Le code reste compilé, ce qui évite
-/// deux variantes de binaire.
+/// When `false`, `init()` only logs: useful for a diagnostic kernel or
+/// an exotic platform. The code remains compiled, which avoids two
+/// binary variants.
 pub const S9VM_ENABLED: bool = true;
 
-/// Bit `CR4.VMXE` (activation de l'extension matérielle).
+/// `CR4.VMXE` bit (hardware extension enable).
 const CR4_VMXE: u64 = 1 << 13;
 
-/// Nombre maximum de CPU suivis (aligné sur `percpu::MAX_CPUS`).
+/// Maximum number of tracked CPUs (aligned with `percpu::MAX_CPUS`).
 const MAX_CPUS: usize = crate::arch::x86_64::percpu::MAX_CPUS;
 
-/// Régions d'activation par CPU (adresse physique, 0 = non activé).
+/// Per-CPU activation regions (physical address, 0 = not activated).
 static REGIONS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-/// CPU dont l'activation a réussi.
+/// CPU whose activation succeeded.
 static ACTIVATED: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
-/// Nombre de CPU activés.
+/// Number of activated CPUs.
 static ACTIVE_CPUS: AtomicU32 = AtomicU32::new(0);
-/// Capacités détectées une fois pour toutes (0 = non détectées).
+/// Capabilities detected once and for all (0 = not detected).
 static CAPS_VALID: AtomicBool = AtomicBool::new(false);
 
-/// Erreurs d'initialisation.
+/// Initialization errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitError {
-    /// Pas de VT-x sur ce CPU.
+    /// No VT-x on this CPU.
     NotSupported,
-    /// Le firmware a verrouillé l'interdiction d'activation.
+    /// Firmware has locked the activation prohibition.
     LockedByFirmware,
-    /// EPT absent ou inutilisable.
+    /// EPT absent or unusable.
     EptUnavailable,
-    /// Impossible d'allouer la région d'activation.
+    /// Cannot allocate the activation region.
     OutOfMemory,
-    /// L'instruction d'activation a échoué.
+    /// The activation instruction failed.
     ActivationFailed,
 }
 
@@ -90,39 +90,39 @@ impl From<CapsError> for InitError {
     }
 }
 
-/// Lit un MSR via la couche architecture.
+/// Reads an MSR through the architecture layer.
 #[inline]
 fn read_msr(msr: u32) -> u64 {
     crate::arch::x86_64::rdmsr(msr)
 }
 
-/// Écrit un MSR via la couche architecture.
+/// Writes an MSR through the architecture layer.
 #[inline]
 fn write_msr(msr: u32, value: u64) {
     crate::arch::x86_64::wrmsr(msr, value);
 }
 
-/// Lit `CR4`.
+/// Reads `CR4`.
 #[inline]
 fn read_cr4() -> u64 {
     let value: u64;
-    // SAFETY: lecture d'un registre de contrôle, sans effet de bord.
+    // SAFETY: read of a control register, no side effects.
     unsafe {
         core::arch::asm!("mov {}, cr4", out(reg) value, options(nomem, nostack, preserves_flags));
     }
     value
 }
 
-/// Écrit `CR4`.
+/// Writes `CR4`.
 #[inline]
 unsafe fn write_cr4(value: u64) {
-    // SAFETY: l'appelant garantit que les bits modifiés sont valides.
+    // SAFETY: the caller guarantees the modified bits are valid.
     unsafe {
         core::arch::asm!("mov cr4, {}", in(reg) value, options(nomem, nostack));
     }
 }
 
-/// Détecte les capacités matérielles. Ne modifie aucun état du CPU.
+/// Detects hardware capabilities. Does not modify any CPU state.
 pub fn detect() -> Option<HwCaps> {
     let info = crate::arch::x86_64::cpuid::host();
     let cpuid_vmx = info
@@ -135,11 +135,11 @@ pub fn detect() -> Option<HwCaps> {
     Some(HwCaps::from_snapshot(&snapshot, true))
 }
 
-/// Tente d'activer VT-x sur le CPU courant.
+/// Attempts to activate VT-x on the current CPU.
 ///
-/// Cette fonction est idempotente : un CPU déjà activé renvoie `Ok(())`.
-/// Elle alloue une région d'activation (une frame 4 Kio) qui reste réservée
-/// pour toute la vie du CPU.
+/// This function is idempotent: an already activated CPU returns `Ok(())`.
+/// It allocates an activation region (a 4 KiB frame) that remains reserved
+/// for the entire lifetime of the CPU.
 pub fn activate_current_cpu() -> Result<(), InitError> {
     let cpu = crate::arch::x86_64::percpu::current_cpu_index();
     if cpu >= MAX_CPUS {
@@ -153,9 +153,9 @@ pub fn activate_current_cpu() -> Result<(), InitError> {
         return Err(InitError::NotSupported);
     };
 
-    // Autorise l'activation si le firmware ne l'a pas fait mais n'a pas
-    // verrouillé le MSR. Si le MSR est verrouillé sans autorisation, il n'y a
-    // rien à faire : c'est un réglage BIOS.
+    // Enables activation if the firmware has not done so but has not
+    // locked the MSR. If the MSR is locked without authorization, there is
+    // nothing to do: it is a BIOS setting.
     if !caps.allowed {
         if caps.feature_control_locked {
             return Err(InitError::LockedByFirmware);
@@ -178,7 +178,7 @@ pub fn activate_current_cpu() -> Result<(), InitError> {
 
     caps.validate()?;
 
-    // Région d'activation : une frame zéro, 4 Kio alignée.
+    // Activation region: a zeroed, 4 KiB-aligned frame.
     let frame = crate::sync::with_irqs_disabled(|token| {
         crate::memory::frame::FrameAllocOptions::new()
             .purpose(crate::memory::frame::FramePurpose::PageTable)
@@ -187,25 +187,25 @@ pub fn activate_current_cpu() -> Result<(), InitError> {
     .map_err(|_| InitError::OutOfMemory)?;
     let phys = frame.start_address.as_u64();
 
-    // L'identifiant de révision doit être écrit dans les 4 premiers octets.
+    // The revision identifier must be written into the first 4 bytes.
     let virt = crate::memory::phys_to_virt(phys) as *mut u32;
-    // SAFETY: la frame est exclusivement réservée, le HHDM la couvre, et
-    // l'écriture porte sur ses 4 premiers octets.
+    // SAFETY: the frame is exclusively reserved, the HHDM covers it, and
+    // the write targets its first 4 bytes.
     unsafe {
         core::ptr::write_volatile(virt, caps.control_block_revision);
     }
 
-    // Active CR4.VMXE puis exécute l'activation matérielle.
+    // Enables CR4.VMXE then executes the hardware activation.
     let cr4 = read_cr4();
-    // SAFETY: le bit 13 est légal dès lors que CPUID l'annonce.
+    // SAFETY: bit 13 is legal as soon as CPUID advertises it.
     unsafe {
         write_cr4(cr4 | CR4_VMXE);
     }
-    // SAFETY: région initialisée, CPU annoncé compatible, interruptions
-    // locales désactivées par l'appelant (composant de boot).
+    // SAFETY: region initialized, CPU advertised compatible, local
+    // interrupts disabled by the caller (boot component).
     let failed = unsafe { enable_virtualization(phys) };
     if failed {
-        // SAFETY: restauration de l'état précédent.
+        // SAFETY: restoration of the previous state.
         unsafe {
             write_cr4(cr4);
         }
@@ -223,16 +223,16 @@ pub fn activate_current_cpu() -> Result<(), InitError> {
     Ok(())
 }
 
-/// Exécute l'activation matérielle (`vmxon`) sur une région pré-initialisée.
+/// Executes the hardware activation (`vmxon`) on a pre-initialized region.
 ///
 /// # Safety
-/// - le CPU doit annoncer VT-x et `CR4.VMXE` doit être positionné ;
-/// - `region_phys` doit être une frame 4 Kio alignée, initialisée avec
-///   l'identifiant de révision, exclusivement réservée ;
-/// - les interruptions locales doivent être désactivées.
+/// - the CPU must advertise VT-x and `CR4.VMXE` must be set;
+/// - `region_phys` must be a 4 KiB-aligned frame, initialized with
+///   the revision identifier, exclusively reserved;
+/// - local interrupts must be disabled.
 unsafe fn enable_virtualization(region_phys: u64) -> bool {
     let fail: u8;
-    // SAFETY: contrat de la fonction.
+    // SAFETY: function contract.
     unsafe {
         core::arch::asm!(
             "vmxon qword ptr [{region}]",
@@ -245,10 +245,10 @@ unsafe fn enable_virtualization(region_phys: u64) -> bool {
     fail != 0
 }
 
-/// Initialisation appelée par le composant de boot.
+/// Initialization called by the boot component.
 ///
-/// Ne panique jamais : toute indisponibilité est journalisée et le noyau
-/// poursuit son démarrage.
+/// Never panics: any unavailability is logged and the kernel
+/// continues booting.
 pub fn init() {
     if !S9VM_ENABLED {
         log::info!("[s9vm] désactivé par configuration");
@@ -270,8 +270,8 @@ pub fn init() {
             return;
         }
     }
-    // L'activation consomme une frame : elle n'est tentée qu'au stage
-    // `bootstrap`, après l'allocateur de frames.
+    // Activation consumes a frame: it is only attempted at the
+    // `bootstrap` stage, after the frame allocator.
     match activate_current_cpu() {
         Ok(()) => {
             log::info!(
@@ -284,17 +284,17 @@ pub fn init() {
     }
 }
 
-/// Nombre de CPU sur lesquels VT-x est actif.
+/// Number of CPUs on which VT-x is active.
 pub fn active_cpu_count() -> u32 {
     ACTIVE_CPUS.load(Ordering::Acquire)
 }
 
-/// Vrai si les capacités ont été détectées au boot.
+/// True if the capabilities were detected at boot.
 pub fn detected() -> bool {
     CAPS_VALID.load(Ordering::Acquire)
 }
 
-/// Adresse physique de la région d'activation d'un CPU, si activé.
+/// Physical address of a CPU's activation region, if activated.
 pub fn activation_region(cpu: usize) -> Option<u64> {
     if cpu >= MAX_CPUS || !ACTIVATED[cpu].load(Ordering::Acquire) {
         return None;
@@ -302,7 +302,7 @@ pub fn activation_region(cpu: usize) -> Option<u64> {
     Some(REGIONS[cpu].load(Ordering::Acquire))
 }
 
-/// Les constantes de pagination de memmap doivent rester alignées sur celles
-/// du module de traduction.
+/// The memmap paging constants must remain aligned with those
+/// of the translation module.
 const _: () = assert!(crate::s9vm::memmap::PAGE_SIZE == crate::s9vm::mmu::PAGE_SIZE);
 const _: () = assert!(crate::s9vm::memmap::MAX_GPA == crate::s9vm::mmu::MAX_GPA);

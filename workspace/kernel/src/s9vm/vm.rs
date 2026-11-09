@@ -1,20 +1,19 @@
-//! s9vm — registre des mondes virtuels et mémoire invitée.
+//! s9vm — registry of virtual worlds and guest memory.
 //!
-//! Cette couche tient le registre des mondes (identifiant opaque, nom, silo
-//! propriétaire, état) et possède, pour chaque monde, sa mémoire invitée :
-//! frames épinglées, carte GPA (`GuestMap`) et tables de traduction de second
-//! niveau (`SecondLevelMemory`).
+//! This layer keeps the world registry (opaque identifier, name, owning silo,
+//! state) and owns, for each world, its guest memory: pinned frames, GPA map
+//! (`GuestMap`) and second-level translation tables (`SecondLevelMemory`).
 //!
-//! Invariants :
-//! - une frame invitée est **épinglée** tant que le monde vit (jamais swappée,
-//!   jamais libérée) ;
-//! - l'ordre de destruction libère d'abord les tables de traduction, puis les
-//!   frames invitées ;
-//! - aucune allocation de frame n'est faite en tenant le verrou du registre :
-//!   la mémoire est sortie du registre, manipulée, puis remise en place.
+//! Invariants:
+//! - a guest frame is **pinned** for as long as the world lives (never
+//!   swapped, never freed);
+//! - destruction order frees the translation tables first, then the guest
+//!   frames;
+//! - no frame allocation is done while holding the registry lock: memory is
+//!   taken out of the registry, manipulated, then put back in place.
 //!
-//! Aucune politique n'est décidée ici : les contrôles d'accès sont faits par
-//! la couche syscall (capabilities).
+//! No policy is decided here: access checks are done by the syscall layer
+//! (capabilities).
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -35,31 +34,31 @@ use crate::s9vm::vcpu::{ExitInfo, SecondLevelMemory, Vcpu, VcpuError};
 use crate::sync::{SpinLock, WaitQueue};
 use strat9_abi::vmm::{exit_kind, VmmExitEvent, VmmRegs};
 
-/// Nombre maximal de mondes simultanés (borne de sécurité).
+/// Maximum number of simultaneous worlds (safety bound).
 pub const MAX_WORLDS: usize = 64;
-/// Longueur maximale d'un nom.
+/// Maximum length of a name.
 pub const NAME_MAX: usize = 32;
-/// Nombre maximal de vCPU par monde (borne de sécurité, avant quotas).
+/// Maximum number of vCPUs per world (safety bound, before quotas).
 pub const MAX_VCPUS_PER_WORLD: usize = 32;
-/// Quota de pages invitées par défaut (1 Gio).
+/// Default guest page quota (1 GiB).
 pub const DEFAULT_QUOTA_PAGES: u64 = 262_144;
 
-/// Enregistrement public d'un monde.
+/// Public record of a world.
 #[derive(Debug, Clone, Copy)]
 pub struct WorldRecord {
-    /// Identifiant opaque (jamais 0).
+    /// Opaque identifier (never 0).
     pub id: u64,
-    /// Nom (UTF-8 tronqué, complété par des zéros).
+    /// Name (truncated UTF-8, zero-padded).
     pub name: [u8; NAME_MAX],
-    /// Longueur utile du nom.
+    /// Usable length of the name.
     pub name_len: u8,
-    /// Silo propriétaire (0 = monde noyau).
+    /// Owning silo (0 = kernel world).
     pub silo_id: u32,
-    /// État (constantes `strat9_abi::vmm::state`).
+    /// State (`strat9_abi::vmm::state` constants).
     pub state: u32,
-    /// Nombre de vCPU enregistrés.
+    /// Number of registered vCPUs.
     pub vcpu_count: u32,
-    /// Pages invitées mappées.
+    /// Mapped guest pages.
     pub mapped_pages: u64,
 }
 
@@ -79,22 +78,22 @@ impl WorldRecord {
         }
     }
 
-    /// Nom sous forme de tranche d'octets utiles.
+    /// Name as a slice of usable bytes.
     pub fn name_slice(&self) -> &[u8] {
         &self.name[..self.name_len as usize]
     }
 }
 
-/// Erreurs de la couche mémoire invitée.
+/// Guest memory layer errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmError {
-    /// Monde inconnu.
+    /// Unknown world.
     Unknown,
-    /// Réservation invalide (alignement, chevauchement, quota).
+    /// Invalid reservation (alignment, overlap, quota).
     Map(MapError),
-    /// Plus de frames disponibles.
+    /// No more frames available.
     OutOfMemory,
-    /// Erreur de traduction de second niveau.
+    /// Second-level translation error.
     Translation(VcpuError),
 }
 
@@ -110,7 +109,7 @@ impl From<VcpuError> for VmError {
     }
 }
 
-/// Alloue une frame de RAM invitée (zéro, non movable, épinglée).
+/// Allocates a guest RAM frame (zeroed, non-movable, pinned).
 fn alloc_guest_frame() -> Option<PhysFrame> {
     crate::sync::with_irqs_disabled(|token| {
         FrameAllocOptions::new()
@@ -120,7 +119,7 @@ fn alloc_guest_frame() -> Option<PhysFrame> {
     })
 }
 
-/// Libère une liste de frames invitées.
+/// Frees a list of guest frames.
 fn free_guest_frames(frames: Vec<PhysFrame>) {
     if frames.is_empty() {
         return;
@@ -132,7 +131,7 @@ fn free_guest_frames(frames: Vec<PhysFrame>) {
     });
 }
 
-/// Mémoire invitée d'un monde.
+/// Guest memory of a world.
 pub struct WorldMemory {
     second_level: SecondLevelMemory,
     map: GuestMap,
@@ -140,7 +139,7 @@ pub struct WorldMemory {
 }
 
 impl WorldMemory {
-    /// Crée une mémoire invitée vide.
+    /// Creates empty guest memory.
     pub fn new(quota_pages: u64) -> Result<Self, VmError> {
         Ok(Self {
             second_level: SecondLevelMemory::new()?,
@@ -149,18 +148,18 @@ impl WorldMemory {
         })
     }
 
-    /// Pages réservées.
+    /// Reserved pages.
     pub fn pages(&self) -> u64 {
         self.map.pages()
     }
 
-    /// Mappe une plage GPA en RAM invitée (frames allouées et épinglées).
+    /// Maps a GPA range into guest RAM (frames allocated and pinned).
     ///
-    /// `memtype` doit valoir `0` (write-back par défaut) ; les autres types ne
-    /// sont pas encore supportés et sont refusés par l'appelant.
+    /// `memtype` must be `0` (default write-back); the other types are not yet
+    /// supported and are rejected by the caller.
     ///
-    /// En cas d'échec, tous les mappings et toutes les frames alloués pendant
-    /// l'appel sont annulés : la mémoire du monde reste cohérente.
+    /// On failure, every mapping and every frame allocated during the call is
+    /// undone: the world's memory stays consistent.
     pub fn map(
         &mut self,
         _caps: &HwCaps,
@@ -169,7 +168,7 @@ impl WorldMemory {
         perms_bits: u32,
         memtype: u8,
     ) -> Result<u64, VmError> {
-        // 1. Valide la plage et réserve le quota avant toute allocation.
+        // 1. Validates the range and reserves the quota before any allocation.
         self.map.reserve(gpa, len, perms_bits, memtype)?;
         let decoded = perms_from_abi(perms_bits);
         let perms = MmuPerms {
@@ -182,7 +181,7 @@ impl WorldMemory {
         let mut mapped: u64 = 0;
         for index in 0..pages {
             let Some(frame) = alloc_guest_frame() else {
-                // Plus de mémoire : annule ce qui a déjà été fait.
+                // Out of memory: undo what has already been done.
                 self.rollback(gpa, mapped, allocated);
                 self.map.remove(gpa);
                 return Err(VmError::OutOfMemory);
@@ -201,7 +200,7 @@ impl WorldMemory {
         Ok(pages)
     }
 
-    /// Annule `mapped` pages à partir de `gpa` et libère les frames.
+    /// Undoes `mapped` pages starting at `gpa` and frees the frames.
     fn rollback(&mut self, gpa: u64, mapped: u64, frames: Vec<PhysFrame>) {
         for index in 0..mapped {
             let _ = self.second_level.unmap_4k(gpa + index * PAGE_SIZE);
@@ -209,17 +208,17 @@ impl WorldMemory {
         free_guest_frames(frames);
     }
 
-    /// Traduit une GPA (diagnostic).
+    /// Translates a GPA (diagnostic).
     pub fn translate(&self, gpa: u64) -> Option<u64> {
         self.second_level.translate(gpa)
     }
 
-    /// Valeur du pointeur de traduction (EPTP) pour le bloc de contrôle.
+    /// Value of the translation pointer (EPTP) for the control block.
     pub fn second_level_pointer(&self, caps: &HwCaps) -> u64 {
         self.second_level.pointer(caps)
     }
 
-    /// Libère les tables de traduction puis les frames invitées.
+    /// Frees the translation tables, then the guest frames.
     pub fn destroy(mut self) {
         let frames = core::mem::take(&mut self.frames);
         self.map.clear();
@@ -228,73 +227,72 @@ impl WorldMemory {
     }
 }
 
-/// Monde enregistré : enregistrement public + mémoire invitée paresseuse +
-/// vCPU logiques.
+/// Registered world: public record + lazy guest memory +
+/// logical vCPUs.
 struct World {
     record: WorldRecord,
     memory: Option<WorldMemory>,
     vcpus: Vec<VcpuSlot>,
     exits: ExitQueue,
-    /// Destruction en cours : toute nouvelle opération est refusée et les
-    /// tâches vCPU sont arrêtées avant de libérer la mémoire.
+    /// Destruction in progress: any new operation is refused and the vCPU
+    /// tasks are stopped before the memory is freed.
     closing: bool,
-    /// Monde en pause : les `RUN` sont refusés (`Paused`) jusqu'à reprise.
+    /// Paused world: `RUN`s are refused (`Paused`) until resumed.
     paused: bool,
 }
 
-/// vCPU logique : identifiant opaque, APIC id et bloc de registres ABI.
+/// Logical vCPU: opaque identifier, APIC id and ABI register block.
 ///
-/// Le contexte matériel (bloc de contrôle, pile hôte, état invité) est créé au
-/// moment de l'exécution, pas à la création logique : un monde peut être
-/// configuré (mémoire, vCPU, registres) avant que le matériel ne soit activé.
+/// The hardware context (control block, host stack, guest state) is created at
+/// execution time, not at logical creation time: a world can be configured
+/// (memory, vCPUs, registers) before the hardware is activated.
 ///
-/// Modèle ADR-4 : chaque vCPU est piloté par une **tâche noyau** dédiée
-/// ([`VcpuSlot::task`]). La tâche attend une demande de `RUN`, exécute
-/// l'invité jusqu'à la prochaine sortie de politique, empile l'événement puis
-/// se remet en attente. Le noyau garantit ainsi qu'un invité ne s'exécute
-/// jamais sur la pile de l'appelant syscall.
+/// ADR-4 model: each vCPU is driven by a dedicated **kernel task**
+/// ([`VcpuSlot::task`]). The task waits for a `RUN` request, runs the guest
+/// until the next policy exit, queues the event, then waits again. The kernel
+/// thus guarantees that a guest never runs on the syscall caller's stack.
 pub struct VcpuSlot {
-    /// Identifiant opaque du vCPU.
+    /// Opaque identifier of the vCPU.
     pub id: u64,
-    /// Identifiant APIC invité.
+    /// Guest APIC identifier.
     pub apic_id: u32,
-    /// Bloc de registres ABI.
+    /// ABI register block.
     pub regs: VmmRegs,
-    /// Contexte matériel (créé au premier `RUN`).
+    /// Hardware context (created on the first `RUN`).
     hardware: Option<Vcpu>,
-    /// APIC local invité (état architectural, page MMIO et MSR x2APIC).
+    /// Guest local APIC (architectural state, MMIO page and x2APIC MSR).
     apic: LocalApic,
-    /// Interruption externe en attente d'injection au prochain `RUN`.
+    /// External interrupt pending injection at the next `RUN`.
     pending_irq: Option<u8>,
-    /// NMI en attente d'injection au prochain `RUN`.
+    /// NMI pending injection at the next `RUN`.
     pending_nmi: bool,
-    /// Tâche noyau qui pilote ce vCPU (créée avec le vCPU).
+    /// Kernel task driving this vCPU (created with the vCPU).
     task: Option<TaskId>,
-    /// Un `RUN` a été demandé et n'a pas encore été pris en compte.
+    /// A `RUN` has been requested and has not been taken into account yet.
     run_requested: bool,
-    /// Un `RUN` est en vol : un seul appelant à la fois.
+    /// A `RUN` is in flight: a single caller at a time.
     run_in_flight: bool,
-    /// Le dernier `RUN` demandé est terminé.
+    /// The last requested `RUN` is finished.
     run_done: bool,
-    /// Résultat du dernier `RUN` (valide quand `run_done`).
+    /// Result of the last `RUN` (valid when `run_done`).
     run_result: Option<Result<(), RunError>>,
-    /// Arrêt demandé (destruction du vCPU ou du monde).
+    /// Shutdown requested (vCPU or world destruction).
     shutdown: bool,
-    /// La tâche noyau a terminé et ses ressources matérielles sont déchargées.
+    /// The kernel task has finished and its hardware resources are unloaded.
     exited: bool,
-    /// Réveil de la tâche vCPU sur demande de `RUN` (ou d'arrêt).
+    /// Wake-up of the vCPU task on a `RUN` request (or shutdown).
     run_wait: Arc<WaitQueue>,
-    /// Réveil des appelants bloqués sur la fin d'un `RUN` ou sur un arrêt.
+    /// Wake-up of callers blocked on the end of a `RUN` or on a shutdown.
     done_wait: Arc<WaitQueue>,
 }
 
-/// Registre global des mondes.
+/// Global world registry.
 static WORLDS: SpinLock<BTreeMap<u64, World>> = SpinLock::new(BTreeMap::new());
-/// Prochain identifiant (1 = premier monde ; 0 est réservé au résumé global).
+/// Next identifier (1 = first world; 0 is reserved for the global summary).
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Crée un monde. Retourne `None` si le registre est plein ou si le nom est
-/// vide.
+/// Creates a world. Returns `None` if the registry is full or if the name is
+/// empty.
 pub fn create(name: &[u8], silo_id: u32) -> Option<WorldRecord> {
     if name.is_empty() || name.len() > NAME_MAX {
         return None;
@@ -322,14 +320,13 @@ pub fn create(name: &[u8], silo_id: u32) -> Option<WorldRecord> {
     Some(record)
 }
 
-/// Détruit un monde et libère sa mémoire invitée.
+/// Destroys a world and frees its guest memory.
 ///
-/// Les tâches vCPU sont arrêtées et attendues **avant** de libérer la mémoire :
-/// une tâche encore en vol pourrait sinon déréférencer les tables de second
-/// niveau du monde. Un second appel concurrent pendant la fermeture retourne
-/// `None`.
+/// The vCPU tasks are stopped and joined **before** the memory is freed: a
+/// task still in flight could otherwise dereference the world's second-level
+/// tables. A second concurrent call during the close returns `None`.
 pub fn destroy(id: u64) -> Option<WorldRecord> {
-    // 1. Marque le monde fermé et réveille toutes les tâches vCPU.
+    // 1. Marks the world closed and wakes all vCPU tasks.
     let mut to_join: Vec<u64> = Vec::new();
     let mut wakers: Vec<Arc<WaitQueue>> = Vec::new();
     {
@@ -351,11 +348,11 @@ pub fn destroy(id: u64) -> Option<WorldRecord> {
     for waiter in wakers {
         waiter.wake_all();
     }
-    // 2. Attend la sortie des tâches vCPU, sans tenir le verrou.
+    // 2. Waits for the vCPU tasks to exit, without holding the lock.
     for vcpu in to_join {
         wait_vcpu_exited(vcpu);
     }
-    // 3. Retire le monde et libère la mémoire invitée.
+    // 3. Removes the world and frees the guest memory.
     let world = {
         let mut worlds = WORLDS.lock();
         worlds.remove(&id)?
@@ -366,7 +363,7 @@ pub fn destroy(id: u64) -> Option<WorldRecord> {
     Some(world.record)
 }
 
-/// Retrouve un monde et l'index d'un vCPU dans ce monde.
+/// Finds a world and the index of a vCPU in that world.
 fn locate_slot(
     worlds: &mut BTreeMap<u64, World>,
     vcpu_id: u64,
@@ -379,8 +376,8 @@ fn locate_slot(
     None
 }
 
-/// Attend que la tâche noyau d'un vCPU ait terminé (ou que le vCPU ait
-/// disparu du registre).
+/// Waits for a vCPU's kernel task to finish (or for the vCPU to disappear from
+/// the registry).
 fn wait_vcpu_exited(vcpu_id: u64) {
     loop {
         let waiters = {
@@ -404,7 +401,7 @@ fn wait_vcpu_exited(vcpu_id: u64) {
     }
 }
 
-/// Retire un vCPU du registre sans attendre de tâche.
+/// Removes a vCPU from the registry without waiting for a task.
 fn remove_vcpu(vcpu_id: u64) -> bool {
     let mut worlds = WORLDS.lock();
     for world in worlds.values_mut() {
@@ -417,7 +414,7 @@ fn remove_vcpu(vcpu_id: u64) -> bool {
     false
 }
 
-/// Crée l'entrée de registre d'un vCPU.
+/// Creates the registry entry of a vCPU.
 fn new_vcpu_slot(id: u64, apic_id: u32) -> VcpuSlot {
     let regs = strat9_abi::vmm::VmmRegs {
         abi_version: strat9_abi::vmm::VMM_ABI_VERSION,
@@ -443,12 +440,12 @@ fn new_vcpu_slot(id: u64, apic_id: u32) -> VcpuSlot {
     }
 }
 
-/// Retourne un enregistrement.
+/// Returns a record.
 pub fn get(id: u64) -> Option<WorldRecord> {
     WORLDS.lock().get(&id).map(|world| world.record)
 }
 
-/// Liste les mondes (ordre des identifiants).
+/// Lists the worlds (identifier order).
 pub fn list() -> Vec<WorldRecord> {
     WORLDS
         .lock()
@@ -457,7 +454,7 @@ pub fn list() -> Vec<WorldRecord> {
         .collect()
 }
 
-/// Journalise un instantané du moteur (diagnostic noyau).
+/// Logs an engine snapshot (kernel diagnostic).
 pub fn debug_dump() {
     let worlds = list();
     log::info!(
@@ -495,12 +492,12 @@ pub fn debug_dump() {
     }
 }
 
-/// Nombre de mondes.
+/// Number of worlds.
 pub fn count() -> usize {
     WORLDS.lock().len()
 }
 
-/// Met à jour l'état d'un monde. Retourne `false` si le monde est inconnu.
+/// Updates a world's state. Returns `false` if the world is unknown.
 pub fn set_state(id: u64, state: u32) -> bool {
     let mut worlds = WORLDS.lock();
     match worlds.get_mut(&id) {
@@ -512,7 +509,7 @@ pub fn set_state(id: u64, state: u32) -> bool {
     }
 }
 
-/// Met à jour le nombre de vCPU d'un monde.
+/// Updates a world's vCPU count.
 pub fn set_vcpu_count(id: u64, count: u32) -> bool {
     let mut worlds = WORLDS.lock();
     match worlds.get_mut(&id) {
@@ -524,11 +521,11 @@ pub fn set_vcpu_count(id: u64, count: u32) -> bool {
     }
 }
 
-/// Mappe de la mémoire invitée dans un monde.
+/// Maps guest memory into a world.
 ///
-/// La mémoire est sortie du registre pendant l'allocation (jamais d'allocation
-/// de frames sous le verrou), puis remise en place. Si le monde a été détruit
-/// entre-temps, la mémoire est immédiatement libérée.
+/// The memory is taken out of the registry during allocation (never allocate
+/// frames under the lock), then put back in place. If the world was destroyed
+/// in the meantime, the memory is freed immediately.
 pub fn map_memory(
     id: u64,
     caps: &HwCaps,
@@ -537,9 +534,9 @@ pub fn map_memory(
     perms_bits: u32,
     memtype: u8,
 ) -> Result<u64, VmError> {
-    // Le registre est verrouillé le moins longtemps possible : on récupère la
-    // mémoire existante (ou on note son absence), puis on relâche le verrou
-    // avant toute allocation de frame.
+    // The registry is locked for as short a time as possible: the existing
+    // memory is retrieved (or its absence noted), then the lock is released
+    // before any frame allocation.
     enum Slot {
         Existing(WorldMemory),
         Empty,
@@ -574,39 +571,40 @@ pub fn map_memory(
     }
 }
 
-/// Erreurs de la couche vCPU.
+/// vCPU layer errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VcpuRegistryError {
-    /// Monde inconnu.
+    /// Unknown world.
     WorldUnknown,
-    /// vCPU inconnu.
+    /// Unknown vCPU.
     Unknown,
-    /// Limite de vCPU atteinte pour ce monde.
+    /// vCPU limit reached for this world.
     Limit,
-    /// Version d'ABI incompatible.
+    /// Incompatible ABI version.
     BadAbiVersion,
-    /// La tâche noyau du vCPU n'a pas pu être créée.
+    /// The vCPU's kernel task could not be created.
     Thread,
 }
 
-/// Erreurs d'exécution d'un vCPU.
+/// vCPU execution errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunError {
-    /// vCPU inconnu.
+    /// Unknown vCPU.
     UnknownVcpu,
-    /// Le monde n'a pas de mémoire invitée mappée.
+    /// The world has no mapped guest memory.
     NoMemory,
-    /// L'état invité fourni est invalide (voir `guest::GuestError`).
+    /// The supplied guest state is invalid (see `guest::GuestError`).
     InvalidGuestState,
-    /// Le matériel n'est pas activé sur ce CPU.
+    /// Hardware is not activated on this CPU.
     HardwareNotReady,
-    /// Erreur matérielle pendant l'exécution.
+    /// Hardware error during execution.
     Hardware(VcpuError),
-    /// La limite d'exits consécutifs résumés est atteinte (boucle pathologique).
+    /// The limit of consecutive summarized exits is reached (pathological
+    /// loop).
     ExitStorm,
-    /// Un `RUN` est déjà en vol pour ce vCPU.
+    /// A `RUN` is already in flight for this vCPU.
     Busy,
-    /// Le monde est en pause.
+    /// The world is paused.
     Paused,
 }
 
@@ -616,11 +614,11 @@ impl From<VcpuError> for RunError {
     }
 }
 
-/// Nombre maximal d'exits « résumables » traités en interne avant de rendre
-/// la main à la politique (protection contre une tempête d'interruptions).
+/// Maximum number of "resumable" exits handled internally before handing
+/// control back to policy (protection against an interrupt storm).
 const MAX_RESUMED_EXITS: u32 = 64;
 
-/// Vrai si une sortie peut être reprise immédiatement par le noyau.
+/// True if an exit can be resumed immediately by the kernel.
 const fn is_resumable(class: ExitClass) -> bool {
     matches!(
         class,
@@ -672,7 +670,7 @@ fn event_from_exit(exit: &ExitInfo, vcpu_id: u64) -> VmmExitEvent {
             event.kind = exit_kind::IO_PORT;
             event.port = ((qualification >> 16) & 0xFFFF) as u32;
             event.size = ((qualification & 0x7) + 1) as u32;
-            // Bit 3 : 0 = OUT, 1 = IN.
+            // Bit 3: 0 = OUT, 1 = IN.
             event.flags = ((qualification >> 3) & 1) as u32;
         }
         ExitClass::Halt => {
@@ -680,7 +678,7 @@ fn event_from_exit(exit: &ExitInfo, vcpu_id: u64) -> VmmExitEvent {
         }
         ExitClass::EptViolation => {
             event.kind = exit_kind::TRANSLATION;
-            // Bits 2:0 de la qualification EPT : lecture/écriture/exécution.
+            // Bits 2:0 of the EPT qualification: read/write/execute.
             event.flags = (exit.qualification & 0x7) as u32;
         }
         ExitClass::ExceptionOrNmi => {
@@ -698,18 +696,18 @@ fn event_from_exit(exit: &ExitInfo, vcpu_id: u64) -> VmmExitEvent {
     event
 }
 
-/// Exécute un vCPU jusqu'à la prochaine sortie « de politique » et empile
-/// l'événement correspondant dans la file du monde.
+/// Runs a vCPU until the next "policy" exit and queues the corresponding event
+/// in the world's queue.
 ///
-/// Les sorties purement hostiles au débit (interruption externe, fenêtre
-/// d'interruption, APIC, timer de préemption) sont reprises immédiatement par
-/// le noyau ; toutes les autres sont remontées à la politique.
+/// Exits that are purely hostile to throughput (external interrupt, interrupt
+/// window, APIC, preemption timer) are resumed immediately by the kernel; all
+/// the others are reported back to policy.
 pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
     if crate::s9vm::active_cpu_count() == 0 {
         return Err(RunError::HardwareNotReady);
     }
-    // 1. Retire le contexte matériel et les registres du registre, sans tenir
-    //    le verrou pendant l'exécution.
+    // 1. Takes the hardware context and the registers out of the registry,
+    //    without holding the lock during execution.
     let (world_id, mut hardware, mut regs, pointer, pending_irq, pending_nmi) = {
         let mut worlds = WORLDS.lock();
         let world = vcpu_world_mut(&mut worlds, vcpu_id).ok_or(RunError::UnknownVcpu)?;
@@ -730,7 +728,7 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
         None => Vcpu::new(caps, pointer)?,
     };
 
-    // 2. Construit et valide l'état invité.
+    // 2. Builds and validates the guest state.
     let mut guest = GuestState::from_abi_regs(&regs);
     let fixed = FixedBits::new(
         caps.cr0_fixed0,
@@ -742,10 +740,10 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
         .validate(&fixed, caps.unrestricted_guest)
         .map_err(|_| RunError::InvalidGuestState)?;
 
-    // 3. Charge le bloc de contrôle, configure et exécute.
-    // SAFETY: VT-x est actif sur ce CPU (vérifié ci-dessus) ; le bloc de
-    // contrôle et la pile hôte appartiennent à ce vCPU, qui n'est pas en
-    // cours d'exécution (contexte retiré du registre).
+    // 3. Loads the control block, configures and executes.
+    // SAFETY: VT-x is active on this CPU (checked above); the control block
+    // and the host stack belong to this vCPU, which is not currently running
+    // (context taken out of the registry).
     let mut result = Ok(());
     unsafe {
         let _ = hardware.clear();
@@ -756,14 +754,14 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
         } else if let Err(error) = hardware.configure(caps, &guest) {
             result = Err(RunError::Hardware(error));
         } else if pending_nmi {
-            // Le NMI est prioritaire sur une interruption externe en attente.
+            // The NMI takes priority over a pending external interrupt.
             if let Err(error) = hardware.inject_nmi() {
                 result = Err(RunError::Hardware(error));
             }
         } else if let Some(vector) = pending_irq {
-            // Injection différée : le champ « VM-entry interruption
-            // information » est écrit juste avant l'entrée ; le processeur le
-            // consomme et le remet à zéro lors de la livraison.
+            // Deferred injection: the "VM-entry interruption information"
+            // field is written just before entry; the processor consumes it
+            // and resets it on delivery.
             if let Err(error) = hardware.inject_interrupt(vector) {
                 result = Err(RunError::Hardware(error));
             }
@@ -794,8 +792,9 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
         }
     }
 
-    // 4. Recharge les registres depuis l'état invité post-exécution et remet
-    //    le contexte matériel dans le registre si le monde existe toujours.
+    // 4. Reloads the registers from the post-execution guest state and puts
+    //    the hardware context back into the registry if the world still
+    //    exists.
     regs = regs_from_guest(hardware.guest(), &regs);
     let mut worlds = WORLDS.lock();
     if let Some(world) = worlds.get_mut(&world_id) {
@@ -807,31 +806,31 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
     result
 }
 
-/// Empile un événement dans la file d'un monde.
+/// Queues an event in a world's queue.
 pub fn push_exit(world_id: u64, event: VmmExitEvent) -> Result<(), ()> {
     let mut worlds = WORLDS.lock();
     let world = worlds.get_mut(&world_id).ok_or(())?;
     world.exits.push(event).map_err(|_| ())
 }
 
-/// Dépile le prochain événement d'un monde.
+/// Dequeues the next event of a world.
 pub fn pop_exit(world_id: u64) -> Result<VmmExitEvent, ()> {
     let mut worlds = WORLDS.lock();
     let world = worlds.get_mut(&world_id).ok_or(())?;
     world.exits.pop().map_err(|_| ())
 }
 
-/// Nombre d'événements en attente pour un monde.
+/// Number of pending events for a world.
 pub fn exit_count(world_id: u64) -> Option<usize> {
     WORLDS.lock().get(&world_id).map(|world| world.exits.len())
 }
 
-/// Prochain identifiant de vCPU (global, jamais 0).
+/// Next vCPU identifier (global, never 0).
 static NEXT_VCPU: AtomicU64 = AtomicU64::new(1);
 
-/// Crée un vCPU logique dans un monde et la tâche noyau qui le pilote.
+/// Creates a logical vCPU in a world and the kernel task that drives it.
 pub fn create_vcpu(world_id: u64, apic_id: u32) -> Result<u64, VcpuRegistryError> {
-    // 1. Enregistre le vCPU sans tenir le verrou pendant la création de tâche.
+    // 1. Registers the vCPU without holding the lock during task creation.
     let id = {
         let mut worlds = WORLDS.lock();
         let world = worlds
@@ -848,7 +847,7 @@ pub fn create_vcpu(world_id: u64, apic_id: u32) -> Result<u64, VcpuRegistryError
         world.record.vcpu_count = world.vcpus.len() as u32;
         id
     };
-    // 2. Crée la tâche noyau du vCPU (modèle ADR-4).
+    // 2. Creates the vCPU's kernel task (ADR-4 model).
     let task = match kthread::spawn("s9vm-vcpu", move || vcpu_task_main(world_id, id)) {
         Ok(task) => task,
         Err(_) => {
@@ -856,7 +855,7 @@ pub fn create_vcpu(world_id: u64, apic_id: u32) -> Result<u64, VcpuRegistryError
             return Err(VcpuRegistryError::Thread);
         }
     };
-    // 3. Publie l'identifiant de tâche si le vCPU existe encore.
+    // 3. Publishes the task identifier if the vCPU still exists.
     {
         let mut worlds = WORLDS.lock();
         if let Some((world, index)) = locate_slot(&mut worlds, id) {
@@ -866,11 +865,11 @@ pub fn create_vcpu(world_id: u64, apic_id: u32) -> Result<u64, VcpuRegistryError
     Ok(id)
 }
 
-/// Détruit un vCPU logique. Retourne `false` s'il est inconnu.
+/// Destroys a logical vCPU. Returns `false` if it is unknown.
 ///
-/// La tâche noyau est arrêtée et attendue avant que l'entrée ne soit retirée :
-/// le contexte matériel (bloc de contrôle, pile hôte, EPT) n'est jamais libéré
-/// pendant une entrée invitée.
+/// The kernel task is stopped and joined before the entry is removed: the
+/// hardware context (control block, host stack, EPT) is never freed during a
+/// guest entry.
 pub fn destroy_vcpu(vcpu_id: u64) -> bool {
     let (run_wait, done_wait, has_task) = {
         let mut worlds = WORLDS.lock();
@@ -896,13 +895,12 @@ pub fn destroy_vcpu(vcpu_id: u64) -> bool {
     remove_vcpu(vcpu_id)
 }
 
-/// Corps de la tâche noyau d'un vCPU : attend les demandes de `RUN`, exécute
-/// l'invité jusqu'à la prochaine sortie de politique, publie l'événement puis
-/// se remet en attente.
+/// Body of a vCPU's kernel task: waits for `RUN` requests, runs the guest
+/// until the next policy exit, publishes the event then waits again.
 fn vcpu_task_main(world_id: u64, vcpu_id: u64) {
     let _ = world_id;
     loop {
-        // Réveils : demande de RUN ou arrêt.
+        // Wake-ups: RUN request or shutdown.
         let run_wait = {
             let mut worlds = WORLDS.lock();
             let Some((world, index)) = locate_slot(&mut worlds, vcpu_id) else {
@@ -953,19 +951,19 @@ fn vcpu_task_main(world_id: u64, vcpu_id: u64) {
     cleanup_vcpu(vcpu_id);
 }
 
-/// Exécute un `RUN` (une entrée invitée au maximum) dans la tâche vCPU.
+/// Executes a `RUN` (at most one guest entry) in the vCPU task.
 fn execute_one_run(vcpu_id: u64) -> Result<(), RunError> {
     if crate::s9vm::active_cpu_count() == 0 {
         return Err(RunError::HardwareNotReady);
     }
     let caps = crate::s9vm::detect().ok_or(RunError::HardwareNotReady)?;
-    // Les interruptions hôte restent coupées pendant l'entrée invitée : le
-    // temps invité est borné par la sortie suivante (P0). La préemption VMX
-    // (timer) viendra avec le modèle de préemption complet.
+    // Host interrupts stay disabled during the guest entry: guest time is
+    // bounded by the next exit (P0). VMX preemption (timer) will come with the
+    // full preemption model.
     crate::sync::with_irqs_disabled(|_| run_vcpu(vcpu_id, &caps))
 }
 
-/// Décharge le contexte matériel et signale la sortie de la tâche vCPU.
+/// Unloads the hardware context and signals the vCPU task's exit.
 fn cleanup_vcpu(vcpu_id: u64) {
     let hardware = {
         let mut worlds = WORLDS.lock();
@@ -976,7 +974,7 @@ fn cleanup_vcpu(vcpu_id: u64) {
     };
     if let Some(mut hardware) = hardware {
         if crate::s9vm::active_cpu_count() > 0 {
-            // SAFETY: plus aucun invité ne s'exécute sur ce vCPU.
+            // SAFETY: no guest is running on this vCPU anymore.
             unsafe {
                 let _ = hardware.clear();
             }
@@ -996,10 +994,10 @@ fn cleanup_vcpu(vcpu_id: u64) {
     done_wait.wake_all();
 }
 
-/// Demande l'exécution d'un vCPU et **bloque** l'appelant jusqu'à la fin de ce
-/// `RUN` (une sortie de politique au maximum).
+/// Requests execution of a vCPU and **blocks** the caller until the end of
+/// that `RUN` (at most one policy exit).
 ///
-/// Un seul `RUN` peut être en vol par vCPU ; un second appel concurrent reçoit
+/// Only one `RUN` can be in flight per vCPU; a second concurrent call receives
 /// [`RunError::Busy`].
 pub fn request_run(vcpu_id: u64) -> Result<(), RunError> {
     let (run_wait, done_wait) = {
@@ -1045,11 +1043,11 @@ pub fn request_run(vcpu_id: u64) -> Result<(), RunError> {
         .unwrap_or(Err(RunError::UnknownVcpu))
 }
 
-/// Attend qu'au moins un événement de sortie soit disponible dans le monde du
-/// vCPU, ou que le délai expire.
+/// Waits until at least one exit event is available in the vCPU's world, or
+/// until the timeout expires.
 ///
-/// `timeout_ns = 0` teste immédiatement (pas d'attente). Retourne `true` si un
-/// événement est en attente, `false` en cas d'expiration.
+/// `timeout_ns = 0` tests immediately (no wait). Returns `true` if an event is
+/// pending, `false` on timeout.
 pub fn wait_exit(vcpu_id: u64, timeout_ns: u64) -> Result<bool, VcpuRegistryError> {
     let world_id = {
         let mut worlds = WORLDS.lock();
@@ -1080,11 +1078,11 @@ pub fn wait_exit(vcpu_id: u64, timeout_ns: u64) -> Result<bool, VcpuRegistryErro
     }
 }
 
-/// Programme l'injection d'une interruption externe dans un vCPU.
+/// Schedules the injection of an external interrupt into a vCPU.
 ///
-/// L'injection est différée : le vecteur est mémorisé et écrit dans le champ
-/// « VM-entry interruption information » au prochain `run_vcpu`. Retourne
-/// `Unknown` si le vCPU n'existe pas.
+/// The injection is deferred: the vector is remembered and written into the
+/// "VM-entry interruption information" field at the next `run_vcpu`. Returns
+/// `Unknown` if the vCPU does not exist.
 pub fn inject_irq(vcpu_id: u64, vector: u8) -> Result<(), VcpuRegistryError> {
     let mut worlds = WORLDS.lock();
     let world = vcpu_world_mut(&mut worlds, vcpu_id).ok_or(VcpuRegistryError::Unknown)?;
@@ -1098,7 +1096,8 @@ pub fn inject_irq(vcpu_id: u64, vector: u8) -> Result<(), VcpuRegistryError> {
     Ok(())
 }
 
-/// Programme l'injection d'un NMI dans un vCPU (délivré au prochain `RUN`).
+/// Schedules the injection of an NMI into a vCPU (delivered at the next
+/// `RUN`).
 pub fn inject_nmi(vcpu_id: u64) -> Result<(), VcpuRegistryError> {
     let mut worlds = WORLDS.lock();
     let world = vcpu_world_mut(&mut worlds, vcpu_id).ok_or(VcpuRegistryError::Unknown)?;
@@ -1111,7 +1110,7 @@ pub fn inject_nmi(vcpu_id: u64) -> Result<(), VcpuRegistryError> {
     Ok(())
 }
 
-/// Met un monde en pause (`RUN` refusé jusqu'à reprise).
+/// Pauses a world (`RUN` refused until resumed).
 pub fn pause(world_id: u64) -> Result<(), VmError> {
     let mut worlds = WORLDS.lock();
     let world = worlds.get_mut(&world_id).ok_or(VmError::Unknown)?;
@@ -1123,7 +1122,7 @@ pub fn pause(world_id: u64) -> Result<(), VmError> {
     Ok(())
 }
 
-/// Reprend un monde en pause.
+/// Resumes a paused world.
 pub fn resume(world_id: u64) -> Result<(), VmError> {
     let mut worlds = WORLDS.lock();
     let world = worlds.get_mut(&world_id).ok_or(VmError::Unknown)?;
@@ -1135,7 +1134,7 @@ pub fn resume(world_id: u64) -> Result<(), VmError> {
     Ok(())
 }
 
-/// Vrai si le monde est en pause.
+/// True if the world is paused.
 pub fn is_paused(world_id: u64) -> bool {
     WORLDS
         .lock()
@@ -1144,7 +1143,7 @@ pub fn is_paused(world_id: u64) -> bool {
         .unwrap_or(false)
 }
 
-/// Vecteur d'interruption en attente pour un vCPU, s'il existe.
+/// Pending interrupt vector for a vCPU, if any.
 pub fn pending_irq(vcpu_id: u64) -> Option<u8> {
     let mut worlds = WORLDS.lock();
     let world = vcpu_world_mut(&mut worlds, vcpu_id)?;
@@ -1155,14 +1154,14 @@ pub fn pending_irq(vcpu_id: u64) -> Option<u8> {
         .and_then(|slot| slot.pending_irq)
 }
 
-/// Retrouve le monde propriétaire d'un vCPU (hors fermeture).
+/// Finds the world owning a vCPU (excluding closing worlds).
 fn vcpu_world_mut(worlds: &mut BTreeMap<u64, World>, vcpu_id: u64) -> Option<&mut World> {
     worlds
         .values_mut()
         .find(|world| !world.closing && world.vcpus.iter().any(|slot| slot.id == vcpu_id))
 }
 
-/// Écrit le bloc de registres d'un vCPU.
+/// Writes a vCPU's register block.
 pub fn set_vcpu_regs(vcpu_id: u64, regs: &strat9_abi::vmm::VmmRegs) -> Result<(), VcpuRegistryError> {
     if regs.abi_version != strat9_abi::vmm::VMM_ABI_VERSION {
         return Err(VcpuRegistryError::BadAbiVersion);
@@ -1178,7 +1177,7 @@ pub fn set_vcpu_regs(vcpu_id: u64, regs: &strat9_abi::vmm::VmmRegs) -> Result<()
     Ok(())
 }
 
-/// Lit le bloc de registres d'un vCPU.
+/// Reads a vCPU's register block.
 pub fn get_vcpu_regs(vcpu_id: u64) -> Option<strat9_abi::vmm::VmmRegs> {
     let worlds = WORLDS.lock();
     for world in worlds.values() {
@@ -1189,7 +1188,7 @@ pub fn get_vcpu_regs(vcpu_id: u64) -> Option<strat9_abi::vmm::VmmRegs> {
     None
 }
 
-/// Nombre de vCPU logiques d'un monde.
+/// Number of logical vCPUs of a world.
 pub fn vcpu_count(world_id: u64) -> Option<u32> {
     WORLDS
         .lock()
@@ -1197,13 +1196,13 @@ pub fn vcpu_count(world_id: u64) -> Option<u32> {
         .map(|world| world.vcpus.len() as u32)
 }
 
-/// Détail de diagnostic pour un monde : pages mappées et traduction d'une GPA.
+/// Diagnostic detail for a world: mapped pages and translation of a GPA.
 pub fn debug_translate(id: u64, gpa: u64) -> Option<u64> {
     let memory_ref = {
         let worlds = WORLDS.lock();
         let world = worlds.get(&id)?;
-        // On ne peut pas rendre une référence au-delà du verrou : on recopie
-        // la traduction avant de le relâcher.
+        // A reference cannot be handed out beyond the lock: the translation is
+        // copied before it is released.
         world
             .memory
             .as_ref()
@@ -1212,7 +1211,7 @@ pub fn debug_translate(id: u64, gpa: u64) -> Option<u64> {
     memory_ref
 }
 
-/// Libère toutes les entrées (tests et arrêt du noyau).
+/// Frees all entries (tests and kernel shutdown).
 pub fn clear() {
     let worlds: BTreeMap<u64, World> = {
         let mut guard = WORLDS.lock();

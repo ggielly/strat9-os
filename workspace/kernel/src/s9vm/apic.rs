@@ -1,27 +1,27 @@
-//! s9vm — modèle pur de l'APIC local invité (xAPIC / x2APIC).
+//! s9vm — pure model of the guest local APIC (xAPIC / x2APIC).
 //!
-//! Ce module modélise l'état architectural minimal d'un APIC local : registres
-//! MMIO (page de 4 Kio), registres x2APIC (MSR), IRR/ISR, priorité (TPR/PPR),
-//! EOI et IPI. Il **ne touche à aucun matériel** : la couche noyau lit/écrit
-//! les registres pour émuler les accès invités et décider des injections.
+//! This module models the minimal architectural state of a local APIC: MMIO
+//! registers (4 KiB page), x2APIC registers (MSRs), IRR/ISR, priority (TPR/PPR),
+//! EOI and IPI. It **touches no hardware**: the kernel layer reads/writes
+//! the registers to emulate guest accesses and decide injections.
 //!
-//! Les encodages proviennent de la documentation Intel (SDM vol. 3A, chapitre
-//! « Advanced Programmable Interrupt Controller »). Aucune constante propre à
-//! un hyperviseur particulier n'est utilisée.
+//! The encodings come from the Intel documentation (SDM vol. 3A, chapter
+//! "Advanced Programmable Interrupt Controller"). No constant specific to
+//! a particular hypervisor is used.
 //!
-//! ## Politique d'injection
+//! ## Injection policy
 //!
-//! Le modèle est volontairement séparé des fenêtres d'interruption du bloc de
-//! contrôle : il répond à « quelle interruption est délivrable ? » via
-//! [`LocalApic::pending_vector`], et l'appelant décide du moment (RFLAGS.IF,
-//! fenêtre d'interruption, etc.). La priorité architecturale est respectée :
-//! la plus petite classe de priorité strictement supérieure au PPR, puis le
-//! plus petit vecteur de cette classe.
+//! The model is deliberately kept separate from the control block's interrupt
+//! windows: it answers "which interrupt is deliverable?" via
+//! [`LocalApic::pending_vector`], and the caller decides when (RFLAGS.IF,
+//! interrupt window, etc.). Architectural priority is honored:
+//! the smallest priority class strictly greater than the PPR, then the
+//! smallest vector of that class.
 
-/// Taille de la page MMIO de l'APIC local.
+/// Size of the local APIC MMIO page.
 pub const PAGE_SIZE: usize = 0x1000;
 
-/// Décalages des registres MMIO xAPIC.
+/// Offsets of the xAPIC MMIO registers.
 pub mod reg {
     pub const ID: usize = 0x020;
     pub const VERSION: usize = 0x030;
@@ -49,7 +49,7 @@ pub mod reg {
     pub const SELF_IPI: usize = 0x3F0;
 }
 
-/// Registres x2APIC exposés par `RDMSR`/`WRMSR`.
+/// x2APIC registers exposed by `RDMSR`/`WRMSR`.
 pub mod x2apic {
     pub const ID: u32 = 0x802;
     pub const VERSION: u32 = 0x803;
@@ -70,16 +70,16 @@ pub mod x2apic {
     pub const SELF_IPI: u32 = 0x83F;
 }
 
-/// Version matérielle annoncée (famille xAPIC intégrée, 6 LVT).
+/// Advertised hardware version (integrated xAPIC family, 6 LVTs).
 pub const VERSION_VALUE: u32 = 0x0005_0014;
-/// Registre spurious : activé, vecteur 0xFF.
+/// Spurious register: enabled, vector 0xFF.
 pub const SVR_DEFAULT: u32 = 0x0000_01FF;
-/// Vecteur du registre spurious.
+/// Vector of the spurious register.
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
-/// Bit d'activation du registre spurious.
+/// Enable bit of the spurious register.
 pub const SVR_ENABLE: u32 = 1 << 8;
 
-/// Mode de livraison dans le registre ICR (bits 10:8).
+/// Delivery mode in the ICR register (bits 10:8).
 pub mod delivery {
     pub const FIXED: u32 = 0;
     pub const LOWEST: u32 = 1;
@@ -89,7 +89,7 @@ pub mod delivery {
     pub const STARTUP: u32 = 6;
 }
 
-/// Destination abrégée dans le registre ICR (bits 19:18).
+/// Shorthand destination in the ICR register (bits 19:18).
 pub mod shorthand {
     pub const NO_SHORTHAND: u32 = 0;
     pub const SELF: u32 = 1;
@@ -97,35 +97,35 @@ pub mod shorthand {
     pub const ALL_EXCLUDING_SELF: u32 = 3;
 }
 
-/// État complet d'un APIC local invité.
+/// Complete state of a guest local APIC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LocalApic {
-    /// Identifiant APIC (registre ID, 8 bits utiles dans le champ 31:24).
+    /// APIC identifier (ID register, 8 significant bits in field 31:24).
     id: u32,
-    /// Priorité de tâche (TPR), bits 7:0 utiles.
+    /// Task priority (TPR), bits 7:0 significant.
     tpr: u8,
-    /// Registre spurious (SVR).
+    /// Spurious register (SVR).
     svr: u32,
-    /// Registre d'état d'erreur.
+    /// Error status register.
     esr: u32,
-    /// Registres In-Service (8 x 32 bits = 256 vecteurs).
+    /// In-Service registers (8 x 32 bits = 256 vectors).
     isr: [u32; 8],
-    /// Registres In-Request (8 x 32 bits = 256 vecteurs).
+    /// In-Request registers (8 x 32 bits = 256 vectors).
     irr: [u32; 8],
-    /// LVT : timer, thermal, perf, LINT0, LINT1, error.
+    /// LVT: timer, thermal, perf, LINT0, LINT1, error.
     lvt: [u32; 6],
-    /// ICR bas/haut.
+    /// ICR low/high.
     icr_low: u32,
     icr_high: u32,
-    /// Compteur initial et courant du timer.
+    /// Initial and current timer count.
     initial_count: u32,
     current_count: u32,
-    /// Diviseur du timer.
+    /// Timer divider.
     divide_config: u32,
 }
 
 impl LocalApic {
-    /// Crée un APIC local pour `apic_id`, LVT masqués, SVR activé.
+    /// Creates a local APIC for `apic_id`, LVTs masked, SVR enabled.
     pub const fn new(apic_id: u32) -> Self {
         Self {
             id: (apic_id & 0xFF) << 24,
@@ -143,23 +143,23 @@ impl LocalApic {
         }
     }
 
-    /// Identifiant APIC (valeur de 8 bits, non décalée).
+    /// APIC identifier (8-bit value, not shifted).
     pub const fn apic_id(&self) -> u32 {
         self.id >> 24
     }
 
-    /// Priorité de tâche courante.
+    /// Current task priority.
     pub const fn tpr(&self) -> u8 {
         self.tpr
     }
 
-    /// Priorité du processeur (TPR et ISR combinés), sur 8 bits.
+    /// Processor priority (TPR and ISR combined), on 8 bits.
     pub fn ppr(&self) -> u8 {
         let mut ppr = self.tpr;
         for index in (0..8).rev() {
             if self.isr[index] != 0 {
-                // Le PPR est une priorité de classe : le quartet bas du
-                // vecteur le plus élevé en service est ignoré.
+                // The PPR is a class priority: the low nibble of the
+                // highest in-service vector is ignored.
                 ppr = ppr.max(highest_vector(index, self.isr[index]) & 0xF0);
                 break;
             }
@@ -167,22 +167,22 @@ impl LocalApic {
         ppr
     }
 
-    /// Vrai si le registre spurious active les interruptions.
+    /// True if the spurious register enables interrupts.
     pub const fn enabled(&self) -> bool {
         self.svr & SVR_ENABLE != 0
     }
 
-    /// Vrai si au moins un vecteur est en attente.
+    /// True if at least one vector is pending.
     pub fn has_pending(&self) -> bool {
         self.irr.iter().any(|word| *word != 0)
     }
 
-    /// Injecte un vecteur dans l'IRR (idempotent).
+    /// Injects a vector into the IRR (idempotent).
     pub fn inject(&mut self, vector: u8) {
         self.irr[(vector as usize) >> 5] |= 1 << (vector & 31);
     }
 
-    /// Vecteur délivrable le plus prioritaire, sans modifier l'état.
+    /// Highest-priority deliverable vector, without modifying the state.
     pub fn pending_vector(&self) -> Option<u8> {
         if !self.enabled() {
             return None;
@@ -200,9 +200,9 @@ impl LocalApic {
                     continue;
                 }
                 let class = priority_class(u32::from(vector));
-                // Priorité strictement supérieure au PPR : la classe doit
-                // être supérieure (les vecteurs de même classe sont bloqués,
-                // comme le demande l'architecture).
+                // Priority strictly greater than the PPR: the class must be
+                // greater (vectors of the same class are blocked,
+                // as required by the architecture).
                 if class > ppr_class {
                     best = Some(match best {
                         Some(current) => current.min(vector),
@@ -214,7 +214,7 @@ impl LocalApic {
         best
     }
 
-    /// Déplace le vecteur délivrable de l'IRR vers l'ISR et le retourne.
+    /// Moves the deliverable vector from the IRR to the ISR and returns it.
     pub fn service(&mut self) -> Option<u8> {
         let vector = self.pending_vector()?;
         self.irr[(vector as usize) >> 5] &= !(1 << (vector & 31));
@@ -222,7 +222,7 @@ impl LocalApic {
         Some(vector)
     }
 
-    /// Enregistre un EOI : retire de l'ISR le vecteur de plus haute priorité.
+    /// Records an EOI: removes the highest-priority vector from the ISR.
     pub fn eoi(&mut self) {
         for index in (0..8).rev() {
             let word = self.isr[index];
@@ -234,14 +234,14 @@ impl LocalApic {
         }
     }
 
-    /// Vrai si un vecteur est en service.
+    /// True if a vector is in service.
     pub fn in_service(&self) -> bool {
         self.isr.iter().any(|word| *word != 0)
     }
 
-    /// Lit un registre MMIO (adresse relative à la page APIC).
+    /// Reads an MMIO register (address relative to the APIC page).
     ///
-    /// Les offsets non implémentés retournent 0 (accès invité toléré).
+    /// Unimplemented offsets return 0 (guest access tolerated).
     pub fn mmio_read(&self, offset: usize) -> u32 {
         if let Some(index) = isr_index(offset, reg::ISR) {
             return self.isr[index];
@@ -271,7 +271,7 @@ impl LocalApic {
         }
     }
 
-    /// Écrit un registre MMIO. Les offsets non implémentés sont ignorés.
+    /// Writes an MMIO register. Unimplemented offsets are ignored.
     pub fn mmio_write(&mut self, offset: usize, value: u32) {
         match offset {
             reg::TPR => self.tpr = (value & 0xFF) as u8,
@@ -296,7 +296,7 @@ impl LocalApic {
         }
     }
 
-    /// Traite une écriture d'ICR bas : IPI fixe vers soi-même ou NMI.
+    /// Handles an ICR-low write: fixed IPI to self or NMI.
     fn write_icr_low(&mut self, value: u32) {
         self.icr_low = value;
         let delivery_mode = (value >> 8) & 0x7;
@@ -307,16 +307,16 @@ impl LocalApic {
                 self.inject(vector);
             }
             (delivery::NMI, _) | (delivery::INIT, _) | (delivery::STARTUP, _) => {
-                // Traités hors APIC (injection dédiée / remise à zéro) : on
-                // accepte l'écriture pour que l'invité continue.
+                // Handled outside the APIC (dedicated injection / reset): we
+                // accept the write so that the guest can continue.
             }
             _ => {
-                // Destination externe non modélisée en P1 (un seul CPU invité).
+                // External destination not modeled in P1 (a single guest CPU).
             }
         }
     }
 
-    /// Lit un MSR x2APIC. Retourne `None` hors de la plage `0x800..=0x8FF`.
+    /// Reads an x2APIC MSR. Returns `None` outside the `0x800..=0x8FF` range.
     pub fn x2apic_read(&self, msr: u32) -> Option<u64> {
         if let Some(index) = isr_msr_index(msr, x2apic::ISR) {
             return Some(u64::from(self.isr[index]));
@@ -344,7 +344,7 @@ impl LocalApic {
         Some(value)
     }
 
-    /// Écrit un MSR x2APIC. Retourne `false` si le MSR n'est pas modélisé.
+    /// Writes an x2APIC MSR. Returns `false` if the MSR is not modeled.
     pub fn x2apic_write(&mut self, msr: u32, value: u64) -> bool {
         match msr {
             x2apic::TPR => self.tpr = (value & 0xFF) as u8,
@@ -368,12 +368,12 @@ impl LocalApic {
     }
 }
 
-/// Vecteur le plus élevé d'un mot ISR/IRR (`index` = mot 0..7).
+/// Highest vector of an ISR/IRR word (`index` = word 0..7).
 fn highest_vector(index: usize, word: u32) -> u8 {
     (index as u8) * 32 + (31 - word.leading_zeros() as u8)
 }
 
-/// Index d'un registre ISR/IRR en MMIO (stride de 16 octets, 8 registres).
+/// Index of an ISR/IRR register in MMIO (16-byte stride, 8 registers).
 fn isr_index(offset: usize, base: usize) -> Option<usize> {
     if offset < base || offset >= base + 8 * 16 {
         return None;
@@ -385,7 +385,7 @@ fn isr_index(offset: usize, base: usize) -> Option<usize> {
     Some(delta / 16)
 }
 
-/// Index d'un registre ISR/IRR en x2APIC (8 MSR consécutifs).
+/// Index of an ISR/IRR register in x2APIC (8 consecutive MSRs).
 fn isr_msr_index(msr: u32, base: u32) -> Option<usize> {
     if msr < base || msr >= base + 8 {
         return None;
@@ -393,7 +393,7 @@ fn isr_msr_index(msr: u32, base: u32) -> Option<usize> {
     Some((msr - base) as usize)
 }
 
-/// Classe de priorité d'un vecteur (bits 7:4).
+/// Priority class of a vector (bits 7:4).
 pub const fn priority_class(vector: u32) -> u8 {
     ((vector >> 4) & 0xF) as u8
 }

@@ -49,7 +49,7 @@ pub mod syscall;
 pub mod trace;
 pub mod vfs;
 
-/// Virtualisation bare-metal s9vm (mécanisme noyau).
+/// Bare-metal virtualization s9vm (kernel mechanism).
 #[cfg(target_arch = "x86_64")]
 pub mod s9vm;
 

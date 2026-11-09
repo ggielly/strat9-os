@@ -1,65 +1,65 @@
-//! s9vm — carte mémoire invitée (GPA).
+//! s9vm — guest memory map (GPA).
 //!
-//! Module **pur** : il tient l'ensemble des plages d'adresses physiques
-//! invitées réservées pour un monde (chevauchements, alignement, quotas,
-//! comptabilité de pages) sans toucher aux frames ni aux tables de
-//! traduction. La couche noyau (`s9vm::vm`) associe ces plages aux frames
-//! épinglées et aux tables de second niveau.
+//! **Pure** module: it holds the set of guest physical address ranges
+//! reserved for a world (overlaps, alignment, quotas, page accounting)
+//! without touching frames or translation tables. The kernel layer
+//! (`s9vm::vm`) binds these ranges to pinned frames and second-level
+//! tables.
 //!
-//! Testable sur l'hôte (tests L2).
+//! Testable on the host (L2 tests).
 
 use alloc::collections::BTreeMap;
 
-/// Taille d'une page de base (4 Kio).
+/// Size of a base page (4 KiB).
 pub const PAGE_SIZE: u64 = 4096;
-/// Largeur maximale d'adresse physique invitée couverte (48 bits).
+/// Maximum guest physical address width covered (48 bits).
 pub const MAX_GPA: u64 = 1 << 48;
 
-/// Nombre maximal de plages distinctes par monde (borne de sécurité).
+/// Maximum number of distinct ranges per world (safety bound).
 pub const MAX_REGIONS: usize = 256;
 
-/// Erreurs de réservation.
+/// Reservation errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapError {
-    /// Adresse ou longueur nulle, non alignée, ou hors de l'espace GPA.
+    /// Zero, unaligned, or out-of-GPA-space address or length.
     InvalidRange,
-    /// La plage chevauche une plage déjà réservée.
+    /// The range overlaps an already reserved range.
     Overlap,
-    /// Quota de pages du monde dépassé.
+    /// World page quota exceeded.
     QuotaExceeded,
-    /// Trop de plages distinctes.
+    /// Too many distinct ranges.
     TooManyRegions,
-    /// La plage n'existe pas.
+    /// The range does not exist.
     NotMapped,
 }
 
-/// Plage réservée.
+/// Reserved range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Region {
-    /// Adresse physique invitée de départ (alignée 4 Kio).
+    /// Starting guest physical address (4 KiB aligned).
     pub gpa: u64,
-    /// Longueur en octets (multiple de 4 Kio).
+    /// Length in bytes (multiple of 4 KiB).
     pub len: u64,
-    /// Permissions demandées (bits `Perms` : 1 = lecture, 2 = écriture,
-    /// 4 = exécution).
+    /// Requested permissions (`Perms` bits: 1 = read, 2 = write,
+    /// 4 = execute).
     pub perms: u32,
-    /// Type mémoire (0 = WB par défaut).
+    /// Memory type (0 = WB by default).
     pub memtype: u8,
 }
 
 impl Region {
-    /// Adresse de fin (exclue).
+    /// End address (exclusive).
     pub const fn end(&self) -> u64 {
         self.gpa + self.len
     }
 
-    /// Vrai si la plage contient l'adresse.
+    /// True if the range contains the address.
     pub const fn contains(&self, gpa: u64) -> bool {
         gpa >= self.gpa && gpa < self.end()
     }
 }
 
-/// Carte mémoire invitée d'un monde.
+/// Guest memory map of a world.
 #[derive(Debug)]
 pub struct GuestMap {
     regions: BTreeMap<u64, Region>,
@@ -68,7 +68,7 @@ pub struct GuestMap {
 }
 
 impl GuestMap {
-    /// Crée une carte vide avec un quota de pages.
+    /// Creates an empty map with a page quota.
     pub fn new(quota_pages: u64) -> Self {
         Self {
             regions: BTreeMap::new(),
@@ -77,23 +77,23 @@ impl GuestMap {
         }
     }
 
-    /// Nombre de pages réservées.
+    /// Number of reserved pages.
     pub const fn pages(&self) -> u64 {
         self.pages
     }
 
-    /// Quota de pages.
+    /// Page quota.
     pub const fn quota_pages(&self) -> u64 {
         self.quota_pages
     }
 
-    /// Nombre de plages.
+    /// Number of ranges.
     pub fn region_count(&self) -> usize {
         self.regions.len()
     }
 
-    /// Réserve une plage. Idempotence interdite : un chevauchement exact est
-    /// une erreur, ce qui rend les doubles mappings visibles.
+    /// Reserves a range. Idempotence is forbidden: an exact overlap is
+    /// an error, which makes double mappings visible.
     pub fn reserve(
         &mut self,
         gpa: u64,
@@ -133,7 +133,7 @@ impl GuestMap {
         Ok(region)
     }
 
-    /// Vrai si `[gpa, end)` chevauche une plage existante.
+    /// True if `[gpa, end)` overlaps an existing range.
     fn overlaps(&self, gpa: u64, end: u64) -> bool {
         if let Some((_, previous)) = self.regions.range(..=gpa).next_back() {
             if previous.end() > gpa {
@@ -148,14 +148,14 @@ impl GuestMap {
         false
     }
 
-    /// Retire la plage commençant exactement à `gpa`.
+    /// Removes the range starting exactly at `gpa`.
     pub fn remove(&mut self, gpa: u64) -> Option<Region> {
         let region = self.regions.remove(&gpa)?;
         self.pages = self.pages.saturating_sub(region.len / PAGE_SIZE);
         Some(region)
     }
 
-    /// Retourne la plage contenant `gpa`.
+    /// Returns the range containing `gpa`.
     pub fn region_containing(&self, gpa: u64) -> Option<Region> {
         let (_, region) = self.regions.range(..=gpa).next_back()?;
         if region.contains(gpa) {
@@ -165,24 +165,24 @@ impl GuestMap {
         }
     }
 
-    /// Itère sur les plages (ordre croissant).
+    /// Iterates over the ranges (ascending order).
     pub fn regions(&self) -> impl Iterator<Item = &Region> {
         self.regions.values()
     }
 
-    /// Libère toute la carte (les frames restent à la charge de l'appelant).
+    /// Clears the whole map (frames remain the caller's responsibility).
     pub fn clear(&mut self) {
         self.regions.clear();
         self.pages = 0;
     }
 
-    /// Réinitialise le quota (utilisé quand un monde est reconfiguré).
+    /// Resets the quota (used when a world is reconfigured).
     pub fn set_quota(&mut self, quota_pages: u64) {
         self.quota_pages = quota_pages;
     }
 }
 
-/// Permissions décodées depuis l'ABI (1 = lecture, 2 = écriture, 4 = exécution).
+/// Permissions decoded from the ABI (1 = read, 2 = write, 4 = execute).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MapPerms {
     pub read: bool,
@@ -190,7 +190,7 @@ pub struct MapPerms {
     pub execute: bool,
 }
 
-/// Convertit des permissions ABI (1 = R, 2 = W, 4 = X ; 0 = lecture) en
+/// Converts ABI permissions (1 = R, 2 = W, 4 = X; 0 = read) into
 /// [`MapPerms`].
 pub const fn perms_from_abi(bits: u32) -> MapPerms {
     MapPerms {

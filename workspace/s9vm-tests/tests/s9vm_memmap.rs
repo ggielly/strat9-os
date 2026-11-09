@@ -1,4 +1,4 @@
-//! L2 : carte mémoire invitée s9vm (code noyau réel).
+//! L2: s9vm guest memory map (real kernel code).
 
 extern crate alloc;
 
@@ -50,27 +50,27 @@ fn rejects_ranges_beyond_guest_physical_space() {
 fn detects_overlap_before_inside_and_after() {
     let mut guest = map(64);
     guest.reserve(0x10_0000, 3 * PAGE, 3, 0).expect("first");
-    // Chevauchement par la gauche.
+    // Overlap from the left.
     assert_eq!(
         guest.reserve(0x0FF000, 2 * PAGE, 3, 0),
         Err(MapError::Overlap)
     );
-    // Exactement la même plage.
+    // Exactly the same range.
     assert_eq!(
         guest.reserve(0x10_0000, 3 * PAGE, 3, 0),
         Err(MapError::Overlap)
     );
-    // À l'intérieur.
+    // Inside.
     assert_eq!(
         guest.reserve(0x10_1000, PAGE, 3, 0),
         Err(MapError::Overlap)
     );
-    // Chevauchement par la droite.
+    // Overlap from the right.
     assert_eq!(
         guest.reserve(0x10_2000, 2 * PAGE, 3, 0),
         Err(MapError::Overlap)
     );
-    // Adjacent : accepté.
+    // Adjacent: accepted.
     guest.reserve(0x10_3000, PAGE, 3, 0).expect("adjacent");
     assert_eq!(guest.pages(), 4);
 }
@@ -94,7 +94,7 @@ fn removes_region_and_updates_pages() {
     assert_eq!(guest.pages(), 0);
     assert_eq!(guest.region_count(), 0);
     assert!(guest.remove(0x1000).is_none());
-    // La place libérée est réutilisable.
+    // The freed slot is reusable.
     guest.reserve(0x1000, 2 * PAGE, 3, 0).expect("re-reserve");
 }
 
@@ -144,7 +144,7 @@ fn converts_abi_permissions() {
     assert!(!read_only.write);
     assert!(!read_only.execute);
 
-    // 0 = lecture implicite (compatibilité).
+    // 0 = implicit read (compatibility).
     let default = perms_from_abi(0);
     assert!(default.read);
     assert!(!default.write);

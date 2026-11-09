@@ -111,10 +111,10 @@ fn drivers_init() -> Result<(), ComponentInitError> {
     Ok(())
 }
 
-/// Virtualisation bare-metal s9vm : détection des capacités puis activation
-/// matérielle sur le CPU de boot. Le stage `bootstrap` s'exécute après
-/// l'allocateur de frames et le paging : la région d'activation peut être
-/// allouée. L'absence de VT-x n'est jamais fatale.
+/// Bare-metal virtualization s9vm: capability detection then hardware
+/// activation on the boot CPU. The `bootstrap` stage runs after the frame
+/// allocator and paging, so the activation region can be allocated. Missing
+/// VT-x is never fatal.
 #[cfg(target_arch = "x86_64")]
 #[component::init_component(bootstrap, priority = 6, depends_on = [memory_init, arch_init, sync_init])]
 fn s9vm_init() -> Result<(), ComponentInitError> {

@@ -1,20 +1,20 @@
-//! s9vm — bloc de contrôle du processeur (structure d'état invitée/hôte).
+//! s9vm — processor control block (guest/host state structure).
 //!
-//! Ce module fournit :
-//! - l'encodage des champs (16, 32, 64 bits et « naturel ») selon la SDM ;
-//! - les primitives assembleur `vmptrld`, `vmclear`, `vmptrst`, `vmread`,
-//!   `vmwrite` (noms d'instructions Intel, sans lien avec un hyperviseur
-//!   commercial) ;
-//! - la fabrication de la valeur d'activation (`EPTP`) et le calcul des
-//!   contrôles à partir des masques « allowed ».
+//! This module provides:
+//! - field encoding (16, 32, 64 bits and "natural") according to the SDM;
+//! - the assembler primitives `vmptrld`, `vmclear`, `vmptrst`, `vmread`,
+//!   `vmwrite` (Intel instruction names, unrelated to a commercial
+//!   hypervisor);
+//! - the building of the enabling value (`EPTP`) and the computation of the
+//!   controls from the "allowed" masks.
 //!
-//! Le module ne dépend que de `core` : il est testable sur l'hôte (tests L2).
-//! Les appels assembleur doivent être faits avec les interruptions locales
-//! désactivées et un bloc de contrôle chargé sur le CPU courant.
+//! The module depends only on `core`: it is testable on the host (L2 tests).
+//! The assembler calls must be made with local interrupts
+//! disabled and a control block loaded on the current CPU.
 
 use core::arch::asm;
 
-/// Poids des champs selon les bits 14:13 de l'encodage.
+/// Weight of the fields according to bits 14:13 of the encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldWidth {
     Bits16,
@@ -24,7 +24,7 @@ pub enum FieldWidth {
 }
 
 impl FieldWidth {
-    /// Décode la largeur d'un champ depuis son encodage.
+    /// Decodes the width of a field from its encoding.
     pub const fn of(field: u32) -> Self {
         match (field >> 13) & 0b11 {
             0 => Self::Bits16,
@@ -35,15 +35,15 @@ impl FieldWidth {
     }
 }
 
-/// Encodages de champs utiles au socle s9vm. La largeur est déduite par
-/// [`FieldWidth::of`] ; ces constantes sont vérifiées par les tests L2.
+/// Field encodings that are useful to the s9vm foundation. The width is deduced
+/// by [`FieldWidth::of`]; these constants are checked by the L2 tests.
 pub mod field {
-    // --- Champs de contrôle 16 bits ---
+    // --- 16-bit control fields ---
     pub const VIRTUAL_PROCESSOR_ID: u32 = 0x0000;
     pub const POSTED_INTERRUPT_NOTIFICATION: u32 = 0x0002;
     pub const EPT_INDEX: u32 = 0x0004;
 
-    // --- Sélecteurs invités 16 bits ---
+    // --- 16-bit guest selectors ---
     pub const GUEST_ES_SELECTOR: u32 = 0x0800;
     pub const GUEST_CS_SELECTOR: u32 = 0x0802;
     pub const GUEST_SS_SELECTOR: u32 = 0x0804;
@@ -53,7 +53,7 @@ pub mod field {
     pub const GUEST_LDTR_SELECTOR: u32 = 0x080C;
     pub const GUEST_TR_SELECTOR: u32 = 0x080E;
 
-    // --- Limites invitées 32 bits ---
+    // --- 32-bit guest limits ---
     pub const GUEST_ES_LIMIT: u32 = 0x4800;
     pub const GUEST_CS_LIMIT: u32 = 0x4802;
     pub const GUEST_SS_LIMIT: u32 = 0x4804;
@@ -65,7 +65,7 @@ pub mod field {
     pub const GUEST_GDTR_LIMIT: u32 = 0x4810;
     pub const GUEST_IDTR_LIMIT: u32 = 0x4812;
 
-    // --- Droits d'accès invités 32 bits ---
+    // --- 32-bit guest access rights ---
     pub const GUEST_ES_ACCESS_RIGHTS: u32 = 0x4814;
     pub const GUEST_CS_ACCESS_RIGHTS: u32 = 0x4816;
     pub const GUEST_SS_ACCESS_RIGHTS: u32 = 0x4818;
@@ -79,7 +79,7 @@ pub mod field {
     pub const GUEST_SMSTATE: u32 = 0x4828;
     pub const GUEST_SYSENTER_CS: u32 = 0x482A;
 
-    // --- Sélecteurs hôte 16 bits ---
+    // --- 16-bit host selectors ---
     pub const HOST_ES_SELECTOR: u32 = 0x0C00;
     pub const HOST_CS_SELECTOR: u32 = 0x0C02;
     pub const HOST_SS_SELECTOR: u32 = 0x0C04;
@@ -88,7 +88,7 @@ pub mod field {
     pub const HOST_GS_SELECTOR: u32 = 0x0C0A;
     pub const HOST_TR_SELECTOR: u32 = 0x0C0C;
 
-    // --- Adresses de structures (64 bits) ---
+    // --- Structure addresses (64 bits) ---
     pub const IO_BITMAP_A: u32 = 0x2000;
     pub const IO_BITMAP_B: u32 = 0x2002;
     pub const MSR_BITMAP: u32 = 0x2004;
@@ -106,9 +106,9 @@ pub mod field {
     pub const CONTROL_WRITE_BITMAP: u32 = 0x2028;
     pub const VIRTUAL_EXCEPTION_INFO: u32 = 0x202A;
 
-    // --- Champs de contrôle 32 bits ---
+    // --- 32-bit control fields ---
     pub const PIN_BASED_CONTROLS: u32 = 0x4000;
-    /// Valeur du timer de préemption VMX (32 bits).
+    /// Value of the VMX preemption timer (32 bits).
     pub const VMX_PREEMPTION_TIMER: u32 = 0x482E;
     pub const PRIMARY_PROC_BASED_CONTROLS: u32 = 0x4002;
     pub const EXCEPTION_BITMAP: u32 = 0x4004;
@@ -128,7 +128,7 @@ pub mod field {
     pub const PLE_GAP: u32 = 0x4020;
     pub const PLE_WINDOW: u32 = 0x4022;
 
-    // --- Informations de sortie (32 bits, lecture seule) ---
+    // --- Exit information (32 bits, read-only) ---
     pub const INSTRUCTION_ERROR: u32 = 0x4400;
     pub const EXIT_REASON: u32 = 0x4402;
     pub const EXIT_INTERRUPT_INFO: u32 = 0x4404;
@@ -138,7 +138,7 @@ pub mod field {
     pub const EXIT_INSTRUCTION_LENGTH: u32 = 0x440C;
     pub const EXIT_INSTRUCTION_INFO: u32 = 0x440E;
 
-    // --- État invité 64 bits ---
+    // --- 64-bit guest state ---
     pub const GUEST_VMCS_LINK_POINTER: u32 = 0x2800;
     pub const GUEST_DEBUGCTL: u32 = 0x2802;
     pub const GUEST_PAT: u32 = 0x2804;
@@ -150,12 +150,12 @@ pub mod field {
     pub const GUEST_PDPTE3: u32 = 0x2810;
     pub const GUEST_IA32_XSS: u32 = 0x2816;
 
-    // --- État hôte 64 bits ---
+    // --- 64-bit host state ---
     pub const HOST_PAT: u32 = 0x2C00;
     pub const HOST_EFER: u32 = 0x2C02;
     pub const HOST_PERF_GLOBAL_CTRL: u32 = 0x2C04;
 
-    // --- État invité « naturel » (pleine largeur) ---
+    // --- Guest "natural" state (full width) ---
     pub const GUEST_CR0: u32 = 0x6800;
     pub const GUEST_CR3: u32 = 0x6802;
     pub const GUEST_CR4: u32 = 0x6804;
@@ -177,7 +177,7 @@ pub mod field {
     pub const GUEST_SYSENTER_ESP: u32 = 0x6824;
     pub const GUEST_SYSENTER_EIP: u32 = 0x6826;
 
-    // --- État hôte « naturel » ---
+    // --- Host "natural" state ---
     pub const HOST_CR0: u32 = 0x6C00;
     pub const HOST_CR3: u32 = 0x6C02;
     pub const HOST_CR4: u32 = 0x6C04;
@@ -186,49 +186,49 @@ pub mod field {
     pub const HOST_TR_BASE: u32 = 0x6C0A;
     pub const HOST_GDTR_BASE: u32 = 0x6C0C;
     pub const HOST_IDTR_BASE: u32 = 0x6C0E;
-    /// Sélecteur de code hôte pour `sysenter` (champ 32 bits, `0x4C00`).
+    /// Host code selector for `sysenter` (32-bit field, `0x4C00`).
     pub const HOST_SYSENTER_CS: u32 = 0x4C00;
     pub const HOST_SYSENTER_ESP: u32 = 0x6C10;
     pub const HOST_SYSENTER_EIP: u32 = 0x6C12;
     pub const HOST_RSP: u32 = 0x6C14;
     pub const HOST_RIP: u32 = 0x6C16;
 
-    // --- Divers ---
+    // --- Miscellaneous ---
     pub const GUEST_PHYSICAL_ADDRESS: u32 = 0x2400;
     pub const EXIT_QUALIFICATION: u32 = 0x6400;
 }
 
-/// Erreurs des primitives du bloc de contrôle.
+/// Errors of the control block primitives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlError {
-    /// L'instruction a signalé un échec (CF = 1).
+    /// The instruction reported a failure (CF = 1).
     Failed,
-    /// Le bloc n'est pas chargé sur ce CPU.
+    /// The block is not loaded on this CPU.
     NotLoaded,
-    /// La région est mal alignée ou trop petite.
+    /// The region is misaligned or too small.
     BadRegion,
-    /// Le CPU n'est pas en mode racine VT-x (activation absente).
+    /// The CPU is not in VT-x root mode (enabling absent).
     NotEnabled,
 }
 
-/// Portée d'un bloc de contrôle : une région physique alignée sur 4 Kio.
+/// Scope of a control block: a physical region aligned on 4 KiB.
 #[derive(Debug)]
 pub struct ControlBlock {
-    /// Adresse physique de la région (4 Kio alignée).
+    /// Physical address of the region (4 KiB aligned).
     phys: u64,
-    /// Identifiant de révision attendu dans les 4 premiers octets.
+    /// Revision identifier expected in the first 4 bytes.
     revision: u32,
-    /// Chargé sur le CPU courant (via `vmptrld`).
+    /// Loaded on the current CPU (via `vmptrld`).
     loaded: bool,
 }
 
 impl ControlBlock {
-    /// Crée un descripteur de bloc de contrôle.
+    /// Creates a control block descriptor.
     ///
     /// # Safety
-    /// `phys` doit désigner une région de 4 Kio alignée, exclusivement
-    /// réservée à ce bloc de contrôle, située dans de la RAM accessible par
-    /// le CPU. Aucun accès n'est fait ici.
+    /// `phys` must designate a 4 KiB aligned region, exclusively
+    /// reserved for this control block, located in RAM accessible by
+    /// the CPU. No access is made here.
     pub const unsafe fn new(phys: u64, revision: u32) -> Self {
         Self {
             phys,
@@ -237,43 +237,43 @@ impl ControlBlock {
         }
     }
 
-    /// Adresse physique de la région.
+    /// Physical address of the region.
     pub const fn phys(&self) -> u64 {
         self.phys
     }
 
-    /// Révision encodée dans la région.
+    /// Revision encoded in the region.
     pub const fn revision(&self) -> u32 {
         self.revision
     }
 
-    /// Vrai si le bloc est chargé sur le CPU courant.
+    /// True if the block is loaded on the current CPU.
     pub const fn is_loaded(&self) -> bool {
         self.loaded
     }
 
-    /// Initialise les 4 premiers octets de la région avec l'identifiant de
-    /// révision. `region_virt` est l'adresse virtuelle (HHDM) de la région.
+    /// Initializes the first 4 bytes of the region with the revision
+    /// identifier. `region_virt` is the virtual address (HHDM) of the region.
     ///
     /// # Safety
-    /// `region_virt` doit être une adresse valide, alignée, couvrant au moins
-    /// 4 octets, et non utilisée par un autre objet.
+    /// `region_virt` must be a valid, aligned address, covering at least
+    /// 4 bytes, and not used by another object.
     pub unsafe fn prepare_region(&self, region_virt: *mut u8) {
-        // SAFETY: contract du paramètre ; écriture de 4 octets.
+        // SAFETY: parameter contract; 4-byte write.
         unsafe {
             core::ptr::write_volatile(region_virt as *mut u32, self.revision);
         }
     }
 
-    /// Décode la base d'un descripteur de TSS 64 bits (16 octets).
+    /// Decodes the base of a 64-bit TSS descriptor (16 bytes).
     ///
-    /// En mode long, la base d'un TSS est éclatée en quatre morceaux :
-    /// `base[15:0]` dans les octets 2-3, `base[23:16]` dans l'octet 4,
-    /// `base[31:24]` dans l'octet 7 et `base[63:32]` dans les octets 8-11.
+    /// In long mode, the base of a TSS is split into four pieces:
+    /// `base[15:0]` in bytes 2-3, `base[23:16]` in byte 4,
+    /// `base[31:24]` in byte 7 and `base[63:32]` in bytes 8-11.
     ///
-    /// Cette fonction est pure pour être testable sur l'hôte : un décalage
-    /// erroné produit une adresse non canonique, que le processeur refuse au
-    /// moment de l'entrée invitée (`VMfail(8)`, host-state invalide).
+    /// This function is pure so that it is testable on the host: an incorrect
+    /// shift produces a non-canonical address, which the processor rejects at
+    /// guest entry time (`VMfail(8)`, invalid host-state).
     pub const fn decode_tss_base(descriptor_low: u64, descriptor_upper: u32) -> u64 {
         let base_low = (descriptor_low >> 16) & 0xFFFF;
         let base_mid = (descriptor_low >> 32) & 0xFF;
@@ -282,18 +282,18 @@ impl ControlBlock {
         base_low | (base_mid << 16) | (base_high << 24) | (base_upper << 32)
     }
 
-    /// Charge le bloc de contrôle sur le CPU courant (`vmptrld`).
+    /// Loads the control block on the current CPU (`vmptrld`).
     ///
     /// # Safety
-    /// - le CPU doit être en mode racine VT-x (activation préalable) ;
-    /// - `self.phys` doit être une région initialisée et exclusivement
-    ///   réservée ;
-    /// - le bloc ne doit pas être chargé sur un autre CPU.
+    /// - the CPU must be in VT-x root mode (prior enabling);
+    /// - `self.phys` must be an initialized region, exclusively
+    ///   reserved;
+    /// - the block must not be loaded on another CPU.
     pub unsafe fn load(&mut self) -> Result<(), ControlError> {
         let phys = self.phys;
         let fail: u8;
-        // SAFETY: l'opérande mémoire est une adresse physique 4 Kio alignée
-        // fournie par l'appelant. `vmptrld` lit 8 octets.
+        // SAFETY: the memory operand is a 4 KiB aligned physical address
+        // provided by the caller. `vmptrld` reads 8 bytes.
         unsafe {
             asm!(
                 "vmptrld qword ptr [{addr}]",
@@ -310,15 +310,15 @@ impl ControlBlock {
         Ok(())
     }
 
-    /// Décharge le bloc de contrôle (`vmclear`).
+    /// Unloads the control block (`vmclear`).
     ///
     /// # Safety
-    /// Le bloc doit être celui chargé sur le CPU courant, ou ne pas être
-    /// chargé du tout ; l'appelant garantit qu'aucun invité n'est actif.
+    /// The block must be the one loaded on the current CPU, or not be
+    /// loaded at all; the caller guarantees that no guest is active.
     pub unsafe fn clear(&mut self) -> Result<(), ControlError> {
         let phys = self.phys;
         let fail: u8;
-        // SAFETY: même contrat que `load`.
+        // SAFETY: same contract as `load`.
         unsafe {
             asm!(
                 "vmclear qword ptr [{addr}]",
@@ -335,14 +335,14 @@ impl ControlBlock {
         Ok(())
     }
 
-    /// Récupère l'adresse physique du bloc actuellement chargé (`vmptrst`).
+    /// Retrieves the physical address of the currently loaded block (`vmptrst`).
     ///
     /// # Safety
-    /// Le CPU doit être en mode racine VT-x.
+    /// The CPU must be in VT-x root mode.
     pub unsafe fn current_phys(&self) -> Result<u64, ControlError> {
         let mut phys: u64 = 0;
         let fail: u8;
-        // SAFETY: `vmptrst` écrit 8 octets dans `phys`, variable locale.
+        // SAFETY: `vmptrst` writes 8 bytes into `phys`, a local variable.
         unsafe {
             asm!(
                 "vmptrst qword ptr [{addr}]",
@@ -358,79 +358,79 @@ impl ControlBlock {
         Ok(phys)
     }
 
-    /// Lit un champ 16 bits.
+    /// Reads a 16-bit field.
     ///
     /// # Safety
-    /// - le bloc doit être chargé sur le CPU courant ;
-    /// - `field` doit être un encodage 16 bits valide.
+    /// - the block must be loaded on the current CPU;
+    /// - `field` must be a valid 16-bit encoding.
     pub unsafe fn read_u16(&self, field: u32) -> Result<u16, ControlError> {
-        // SAFETY: contrat de la méthode.
+        // SAFETY: method contract.
         unsafe { self.read_raw(field).map(|v| v as u16) }
     }
 
-    /// Lit un champ 32 bits.
+    /// Reads a 32-bit field.
     ///
     /// # Safety
-    /// Voir [`Self::read_u16`] ; `field` doit être un encodage 32 bits.
+    /// See [`Self::read_u16`]; `field` must be a 32-bit encoding.
     pub unsafe fn read_u32(&self, field: u32) -> Result<u32, ControlError> {
-        // SAFETY: contrat de la méthode.
+        // SAFETY: method contract.
         unsafe { self.read_raw(field).map(|v| v as u32) }
     }
 
-    /// Lit un champ 64 bits ou « naturel » (les deux sont lus sur 64 bits).
+    /// Reads a 64-bit or "natural" field (both are read as 64 bits).
     ///
     /// # Safety
-    /// Voir [`Self::read_u16`].
+    /// See [`Self::read_u16`].
     pub unsafe fn read_u64(&self, field: u32) -> Result<u64, ControlError> {
-        // SAFETY: contrat de la méthode.
+        // SAFETY: method contract.
         unsafe { self.read_raw(field) }
     }
 
-    /// Lit un champ « naturel » (pointeur, RSP/RIP, CR0/CR3/CR4…).
+    /// Reads a "natural" field (pointer, RSP/RIP, CR0/CR3/CR4…).
     ///
     /// # Safety
-    /// Voir [`Self::read_u16`].
+    /// See [`Self::read_u16`].
     pub unsafe fn read_natural(&self, field: u32) -> Result<u64, ControlError> {
-        // SAFETY: contrat de la méthode.
+        // SAFETY: method contract.
         unsafe { self.read_raw(field) }
     }
 
-    /// Écrit un champ 16 bits.
+    /// Writes a 16-bit field.
     ///
     /// # Safety
-    /// - le bloc doit être chargé sur le CPU courant ;
-    /// - `field` doit être un encodage 16 bits valide ;
-    /// - la valeur doit respecter les contraintes de l'architecture (sinon
-    ///   `VMLAUNCH` échouera et le diagnostic sera difficile).
+    /// - the block must be loaded on the current CPU;
+    /// - `field` must be a valid 16-bit encoding;
+    /// - the value must respect the architecture constraints (otherwise
+    ///   `VMLAUNCH` will fail and the diagnostic will be difficult).
     pub unsafe fn write_u16(&self, field: u32, value: u16) -> Result<(), ControlError> {
-        // SAFETY: contrat de la méthode.
+        // SAFETY: method contract.
         unsafe { self.write_raw(field, value as u64) }
     }
 
-    /// Écrit un champ 32 bits.
+    /// Writes a 32-bit field.
     ///
     /// # Safety
-    /// Voir [`Self::write_u16`].
+    /// See [`Self::write_u16`].
     pub unsafe fn write_u32(&self, field: u32, value: u32) -> Result<(), ControlError> {
-        // SAFETY: contrat de la méthode.
+        // SAFETY: method contract.
         unsafe { self.write_raw(field, value as u64) }
     }
 
-    /// Écrit un champ 64 bits ou « naturel ».
+    /// Writes a 64-bit or "natural" field.
     ///
     /// # Safety
-    /// Voir [`Self::write_u16`].
+    /// See [`Self::write_u16`].
     pub unsafe fn write_u64(&self, field: u32, value: u64) -> Result<(), ControlError> {
-        // SAFETY: contrat de la méthode.
+        // SAFETY: method contract.
         unsafe { self.write_raw(field, value) }
     }
 
-    /// Écrit un champ « naturel ».
+    /// Writes a "natural" field.
     ///
     /// # Safety
-    /// Voir [`Self::write_u16`].
+    /// See [`Self::write_u16`].
     pub unsafe fn write_natural(&self, field: u32, value: u64) -> Result<(), ControlError> {
-        // SAFETY: contrat de la méthode.
+        // SAFETY: method contract.
         unsafe { self.write_raw(field, value) }
     }
 
@@ -440,7 +440,7 @@ impl ControlBlock {
         }
         let value: u64;
         let fail: u8;
-        // SAFETY: le bloc est chargé (vérifié) et `field` vient de l'appelant.
+        // SAFETY: the block is loaded (checked) and `field` comes from the caller.
         unsafe {
             asm!(
                 "vmread {value}, {field}",
@@ -462,7 +462,7 @@ impl ControlBlock {
             return Err(ControlError::NotLoaded);
         }
         let fail: u8;
-        // SAFETY: le bloc est chargé (vérifié).
+        // SAFETY: the block is loaded (checked).
         unsafe {
             asm!(
                 "vmwrite {field}, {value}",
@@ -480,23 +480,23 @@ impl ControlBlock {
     }
 }
 
-/// Identifiant de révision du bloc de contrôle depuis `MSR_BASIC`.
+/// Control block revision identifier from `MSR_BASIC`.
 pub const fn revision_from_basic(basic: u64) -> u32 {
     (basic & 0x7FFF_FFFF) as u32
 }
 
-/// Taille minimale de la région du bloc de contrôle (octets), depuis
+/// Minimum size of the control block region (bytes), from
 /// `MSR_BASIC` bits 44:32.
 pub const fn region_size_from_basic(basic: u64) -> u16 {
     ((basic >> 32) & 0x1FFF) as u16
 }
 
-/// Construit la valeur d'activation de la traduction de second niveau
-/// (`EPTP`) : type mémoire, longueur de marche, A/D et adresse racine.
+/// Builds the enabling value of the second-level translation (`EPTP`):
+/// memory type, walk length, A/D and root address.
 ///
-/// Format (SDM) : bits 2:0 = type mémoire (6 = WB), bits 5:3 = longueur de
-/// marche moins 1 (3 pour 4 niveaux), bit 6 = A/D, bits 51:12 = adresse
-/// physique de la racine (PML4).
+/// Format (SDM): bits 2:0 = memory type (6 = WB), bits 5:3 = walk
+/// length minus 1 (3 for 4 levels), bit 6 = A/D, bits 51:12 = physical
+/// address of the root (PML4).
 pub const fn make_eptp(root_phys: u64, memory_type: u8, four_levels: bool, ad: bool) -> u64 {
     let mut value = (memory_type as u64) & 0x7;
     if four_levels {
@@ -508,15 +508,15 @@ pub const fn make_eptp(root_phys: u64, memory_type: u8, four_levels: bool, ad: b
     value | (root_phys & 0x000F_FFFF_FFFF_F000)
 }
 
-/// Invalide les traductions de second niveau pour un contexte donné
-/// (`invept` type 1, contexte unique). Ne fait rien si le CPU n'a pas `invept`.
+/// Invalidates the second-level translations for a given context
+/// (`invept` type 1, single context). Does nothing if the CPU has no `invept`.
 ///
 /// # Safety
-/// Le CPU doit être en mode racine VT-x et la traduction de second niveau ne
-/// doit plus être utilisée par un invité actif.
+/// The CPU must be in VT-x root mode and the second-level translation must no
+/// longer be used by an active guest.
 pub unsafe fn invalidate_second_level(eptp: u64) {
     let descriptor = [eptp, 0u64];
-    // SAFETY: `invept` lit 16 octets en mémoire (descripteur local).
+    // SAFETY: `invept` reads 16 bytes from memory (local descriptor).
     unsafe {
         asm!(
             "invept {kind}, [{descriptor}]",
@@ -527,14 +527,14 @@ pub unsafe fn invalidate_second_level(eptp: u64) {
     }
 }
 
-/// Invalide toutes les traductions de second niveau (`invept` type 2).
+/// Invalidates all second-level translations (`invept` type 2).
 ///
 /// # Safety
-/// Voir [`invalidate_second_level`].
+/// See [`invalidate_second_level`].
 pub unsafe fn invalidate_second_level_all() {
     let descriptor = [0u64, 0u64];
-    // SAFETY: `invept` type 2 ignore le descripteur, mais l'opérande mémoire
-    // doit être valide (16 octets lus).
+    // SAFETY: `invept` type 2 ignores the descriptor, but the memory operand
+    // must be valid (16 bytes read).
     unsafe {
         asm!(
             "invept {kind}, [{descriptor}]",

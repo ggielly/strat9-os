@@ -1,28 +1,28 @@
-//! s9vm — structures ABI du système de virtualisation.
+//! s9vm — ABI structures of the virtualization system.
 //!
-//! Toutes les structures sont `#[repr(C)]`, versionnées par
-//! [`VMM_ABI_VERSION`] et de taille fixe. Les identifiants (`vmm_id`,
-//! `vcpu_id`) sont des entiers opaques : jamais des pointeurs, jamais des
-//! adresses.
+//! All structures are `#[repr(C)]`, versioned by
+//! [`VMM_ABI_VERSION`] and fixed-size. The identifiers (`vmm_id`,
+//! `vcpu_id`) are opaque integers: never pointers, never
+//! addresses.
 //!
-//! Invariants :
-//! - un client vérifie `abi_version` avant toute utilisation ;
-//! - le noyau refuse une taille ou une version inattendue ;
-//! - toute évolution ajoute des champs **en fin** de structure et incrémente
-//!   la version.
+//! Invariants:
+//! - a client checks `abi_version` before any use;
+//! - the kernel refuses an unexpected size or version;
+//! - any evolution adds fields **at the end** of the structure and
+//!   increments the version.
 
-/// Version de l'ABI s9vm. Incrémenter à chaque évolution de structure.
+/// Version of the s9vm ABI. Increment on every structure change.
 pub const VMM_ABI_VERSION: u32 = 1;
 
-/// Nombre maximal de registres exposés par [`VmmRegs`] (registres généraux).
+/// Maximum number of registers exposed by [`VmmRegs`] (general-purpose registers).
 pub const VMM_REG_COUNT: usize = 16;
-/// Longueur maximale d'un nom de monde.
+/// Maximum length of a world name.
 pub const VMM_NAME_MAX: usize = 32;
 
-/// Bloc de registres partagé entre `SYS_VMM_SET_REGS` et `SYS_VMM_GET_REGS`.
+/// Register block shared between `SYS_VMM_SET_REGS` and `SYS_VMM_GET_REGS`.
 ///
-/// Taille : 184 octets. L'ordre suit l'ordre usuel de sauvegarde
-/// (`rax`, `rbx`, …) ; `rsp` et `rip` sont inclus.
+/// Size: 184 bytes. The order follows the usual save order
+/// (`rax`, `rbx`, …); `rsp` and `rip` are included.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VmmRegs {
@@ -52,24 +52,24 @@ pub struct VmmRegs {
     pub efer: u64,
 }
 
-/// États d'un monde, exposés par [`VmmInfo::state`].
+/// States of a world, exposed by [`VmmInfo::state`].
 pub mod state {
-    /// Monde créé, aucun vCPU en cours.
+    /// World created, no vCPU running.
     pub const CREATED: u32 = 0;
-    /// Monde en cours d'exécution.
+    /// World running.
     pub const RUNNING: u32 = 1;
-    /// Monde en pause.
+    /// World paused.
     pub const PAUSED: u32 = 2;
-    /// Monde arrêté.
+    /// World stopped.
     pub const STOPPED: u32 = 3;
-    /// Monde en erreur.
+    /// World in error.
     pub const FAILED: u32 = 4;
 }
 
-/// Snapshot d'un monde.
+/// Snapshot of a world.
 ///
-/// Taille : 96 octets. `vmm_id == 0` est réservé au résumé global du moteur
-/// (état, nombre de vCPU, compteurs).
+/// Size: 96 bytes. `vmm_id == 0` is reserved for the global engine summary
+/// (state, number of vCPUs, counters).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VmmInfo {
@@ -86,44 +86,44 @@ pub struct VmmInfo {
     pub name: [u8; VMM_NAME_MAX],
 }
 
-/// Nature d'un événement remonté au monde de politique.
+/// Nature of an event reported to the policy world.
 pub mod exit_kind {
-    /// Lecture MMIO à émuler.
+    /// MMIO read to emulate.
     pub const MMIO_READ: u32 = 1;
-    /// Écriture MMIO à émuler.
+    /// MMIO write to emulate.
     pub const MMIO_WRITE: u32 = 2;
-    /// Accès à un port d'E/S.
+    /// Access to an I/O port.
     pub const IO_PORT: u32 = 3;
-    /// `hlt` invité.
+    /// Guest `hlt`.
     pub const HALT: u32 = 4;
-    /// Violation de traduction de second niveau.
+    /// Second-level translation violation.
     pub const TRANSLATION: u32 = 5;
-    /// Exception ou NMI.
+    /// Exception or NMI.
     pub const EXCEPTION: u32 = 6;
-    /// Autre sortie à traiter par la politique.
+    /// Other exit to be handled by the policy.
     pub const OTHER: u32 = 7;
-    /// Tranche de temps invitée expirée (timer de préemption VMX).
+    /// Guest time slice expired (VMX preemption timer).
     pub const PREEMPTION_TIMER: u32 = 8;
 }
 
-/// Événement de sortie remonté au monde de politique.
+/// Exit event reported to the policy world.
 ///
-/// Taille : 48 octets.
+/// Size: 48 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VmmExitEvent {
     pub abi_version: u32,
-    /// Une des constantes de [`exit_kind`].
+    /// One of the [`exit_kind`] constants.
     pub kind: u32,
     pub vcpu_id: u64,
-    /// Adresse physique invitée concernée (0 si sans objet).
+    /// Guest physical address concerned (0 if not applicable).
     pub gpa: u64,
-    /// Largeur de l'accès (1, 2, 4, 8) pour MMIO/PIO, 0 sinon.
+    /// Access width (1, 2, 4, 8) for MMIO/PIO, 0 otherwise.
     pub size: u32,
     pub flags: u32,
-    /// Valeur lue ou à écrire pour MMIO/PIO.
+    /// Value read or to be written for MMIO/PIO.
     pub value: u64,
-    /// Port d'E/S pour [`exit_kind::IO_PORT`].
+    /// I/O port for [`exit_kind::IO_PORT`].
     pub port: u32,
     pub reserved: u32,
 }

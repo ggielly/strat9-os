@@ -1,4 +1,4 @@
-//! L2 : état invité s9vm et validation avant entrée (code noyau réel).
+//! L2: s9vm guest state and pre-entry validation (real kernel code).
 
 #[path = "../../kernel/src/s9vm/guest.rs"]
 mod guest;
@@ -56,7 +56,7 @@ fn long_mode_requires_long_code_segment() {
         Err(GuestError::BadLongCodeSegment)
     );
 
-    // L = 1 mais D = 1 : interdit.
+    // L = 1 but D = 1: forbidden.
     let mut state = GuestState::long_mode_64(0x1000, 0x2000, 0x3000);
     state.cs.access_rights = long_code_access_rights(0) | AR_DEFAULT_BIG;
     assert_eq!(
@@ -84,7 +84,7 @@ fn long_mode_requires_zero_bases_and_full_limits() {
 
 #[test]
 fn fixed_cr_bits_are_enforced() {
-    // CR0 : bit 0 obligatoire, bit 31 interdit.
+    // CR0: bit 0 mandatory, bit 31 forbidden.
     let caps = FixedBits::new(1 << 0, !(1 << 31), 0, u64::MAX);
     let mut state = GuestState::real_mode(0, 0x1000);
     state.cr0 = 0;
@@ -96,7 +96,7 @@ fn fixed_cr_bits_are_enforced() {
     state.cr0 = 1 << 31;
     assert_eq!(state.validate(&caps, true), Err(GuestError::Cr0FixedBit));
 
-    // CR4 : bit 5 obligatoire.
+    // CR4: bit 5 mandatory.
     let caps = FixedBits::new(0, u64::MAX, CR4_PAE, u64::MAX);
     let mut state = GuestState::real_mode(0, 0x1000);
     state.cr4 = 0;
@@ -109,11 +109,11 @@ fn fixed_cr_bits_are_enforced() {
 #[test]
 fn rejects_reserved_rflags_bits() {
     let mut state = GuestState::long_mode_64(0x1000, 0x2000, 0x3000);
-    state.rflags = 0; // bit 1 obligatoire
+    state.rflags = 0; // bit 1 mandatory
     assert_eq!(state.validate(&permissive(), true), Err(GuestError::BadRflags));
 
     let mut state = GuestState::long_mode_64(0x1000, 0x2000, 0x3000);
-    state.rflags = 0x2 | (1 << 3); // bit 3 réservé
+    state.rflags = 0x2 | (1 << 3); // bit 3 reserved
     assert_eq!(state.validate(&permissive(), true), Err(GuestError::BadRflags));
 }
 
@@ -136,15 +136,15 @@ fn rejects_bad_interruptibility_state() {
 
 #[test]
 fn segment_helpers_build_expected_access_rights() {
-    // Données : type 2, S=1, P=1, DPL=0.
+    // Data: type 2, S=1, P=1, DPL=0.
     assert_eq!(data_access_rights(0), 0x92);
-    // Code 64 bits : type A, S=1, P=1, L=1.
-    // VMCS access-rights : L = bit 13 (pas bit 9), D/B = bit 14.
+    // 64-bit code: type A, S=1, P=1, L=1.
+    // VMCS access-rights: L = bit 13 (not bit 9), D/B = bit 14.
     assert_eq!(AR_LONG_MODE, 1 << 13);
     assert_eq!(AR_DEFAULT_BIG, 1 << 14);
     assert_eq!(long_code_access_rights(0), 0x209A);
     assert!(long_code_access_rights(0) & AR_LONG_MODE != 0);
-    // Inutilisable.
+    // Unusable.
     assert!(unusable_access_rights() & AR_UNUSABLE != 0);
     assert!(Segment::unusable().is_unusable());
 }
@@ -162,8 +162,8 @@ fn long_mode_state_has_expected_flags() {
 
 #[test]
 fn long_mode_requires_lma_in_guest_efer_field() {
-    // Le contrôle d'entrée « load IA32_EFER » impose LMA == IA-32e mode.
-    // Un champ invité sans LMA fait échouer l'entrée (`VMfail`).
+    // The "load IA32_EFER" entry control requires LMA == IA-32e mode.
+    // A guest field without LMA makes the entry fail (`VMfail`).
     let mut state = GuestState::long_mode_64(0x1000, 0x2000, 0x3000);
     state.efer &= !EFER_LMA;
     assert_eq!(
@@ -181,7 +181,7 @@ fn long_mode_guest_efer_sets_lme_and_lma() {
 }
 #[test]
 fn long_mode_guest_cr4_has_vmxe() {
-    // IA32_VMX_CR4_FIXED0 exige CR4.VMXE dans l'état invité.
+    // IA32_VMX_CR4_FIXED0 requires CR4.VMXE in the guest state.
     let state = GuestState::long_mode_64(0x1000, 0x2000, 0x3000);
     assert_ne!(state.cr4 & CR4_VMXE, 0);
     assert_ne!(state.cr4 & CR4_PAE, 0);

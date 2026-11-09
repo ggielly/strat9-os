@@ -1,4 +1,4 @@
-//! L2 : décodage et classification des sorties s9vm (code noyau réel).
+//! L2: decoding and classification of s9vm exits (real kernel code).
 
 #[path = "../../kernel/src/s9vm/exit.rs"]
 mod exit;
@@ -49,7 +49,7 @@ fn classifies_common_exits() {
 
 #[test]
 fn default_routing_is_conservative() {
-    // Ce que le noyau traite seul.
+    // What the kernel handles on its own.
     assert_eq!(
         default_action(ExitClass::ExternalInterrupt),
         ExitAction::Resume
@@ -60,7 +60,7 @@ fn default_routing_is_conservative() {
         default_action(ExitClass::PreemptionTimer),
         ExitAction::Resume
     );
-    // Ce qui exige la politique (chemin lent).
+    // What requires policy (slow path).
     assert_eq!(default_action(ExitClass::IoPort), ExitAction::Forward);
     assert_eq!(default_action(ExitClass::Msr), ExitAction::Forward);
     assert_eq!(default_action(ExitClass::Cpuid), ExitAction::Forward);
@@ -75,7 +75,7 @@ fn default_routing_is_conservative() {
 
 #[test]
 fn decodes_vectoring_information() {
-    // Vecteur 14 (#PF), type 3 (exception matérielle), code d'erreur, valide.
+    // Vector 14 (#PF), type 3 (hardware exception), error code, valid.
     let info = 14 | (3 << 8) | (1 << 11) | (1 << 31);
     let event = VectorEvent::decode(info);
     assert_eq!(event.vector, 14);
@@ -85,7 +85,7 @@ fn decodes_vectoring_information() {
     assert!(event.is_exception());
     assert!(!event.is_nmi());
 
-    // NMI (type 2), sans code d'erreur.
+    // NMI (type 2), without error code.
     let nmi = VectorEvent::decode(2 | (2 << 8) | (1 << 31));
     assert!(nmi.is_nmi());
     assert!(!nmi.error_code_valid);
@@ -100,8 +100,8 @@ fn reason_names_are_distinct_and_known() {
 }
 #[test]
 fn encodes_external_interrupt_injection_field() {
-    // Champ VM-entry interruption information : bit 31 valide, type externe
-    // (bits 10:8 = 0), vecteur sur 8 bits.
+    // VM-entry interruption information field: bit 31 valid, external type
+    // (bits 10:8 = 0), 8-bit vector.
     let info = external_interrupt_info(0x40);
     assert_eq!(info & (1 << 31), 1 << 31);
     assert_eq!((info >> 8) & 0x7, 0);

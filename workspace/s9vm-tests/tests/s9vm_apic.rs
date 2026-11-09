@@ -1,4 +1,4 @@
-//! L2 : modèle d'APIC local invité (code noyau réel, non exécuté).
+//! L2: guest local APIC model (real kernel code, not executed).
 
 #[path = "../../kernel/src/s9vm/apic.rs"]
 mod apic;
@@ -36,9 +36,9 @@ fn inject_service_eoi_cycle() {
 fn tpr_blocks_lower_priority_classes() {
     let mut apic = LocalApic::new(0);
     apic.mmio_write(reg::TPR, 0x30);
-    apic.inject(0x21); // classe 2 <= 3 : bloqué
+    apic.inject(0x21); // class 2 <= 3: blocked
     assert_eq!(apic.pending_vector(), None);
-    apic.inject(0x41); // classe 4 > 3 : délivrable
+    apic.inject(0x41); // class 4 > 3: deliverable
     assert_eq!(apic.pending_vector(), Some(0x41));
 }
 
@@ -48,7 +48,7 @@ fn isr_raises_ppr_and_blocks_same_class() {
     apic.inject(0x30);
     apic.inject(0x31);
     assert_eq!(apic.service(), Some(0x30));
-    // Même classe que le vecteur en service : bloqué.
+    // Same class as the in-service vector: blocked.
     assert_eq!(apic.pending_vector(), None);
     apic.inject(0x40);
     assert_eq!(apic.pending_vector(), Some(0x40));
@@ -112,7 +112,7 @@ fn mmio_registers_round_trip() {
 #[test]
 fn isr_and_irr_words_use_16_byte_stride() {
     let mut apic = LocalApic::new(0);
-    apic.inject(0x40); // mot 2
+    apic.inject(0x40); // word 2
     assert_eq!(apic.mmio_read(reg::IRR + 2 * 16), 0x1);
     assert_eq!(apic.mmio_read(reg::IRR), 0);
     apic.service();
@@ -127,7 +127,7 @@ fn x2apic_round_trip_and_reserved() {
 
     assert!(apic.x2apic_write(x2apic::TPR, 0x40));
     assert_eq!(apic.tpr(), 0x40);
-    // IPI vers soi-même via ICR x2APIC.
+    // Self-IPI via the x2APIC ICR.
     let icr = ((shorthand::SELF as u64) << 18) | ((delivery::FIXED as u64) << 8) | 0x60;
     assert!(apic.x2apic_write(x2apic::ICR, icr));
     assert_eq!(apic.pending_vector(), Some(0x60));

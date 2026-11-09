@@ -1,17 +1,17 @@
-//! s9vm — test de fumée matériel du moteur.
+//! s9vm — hardware smoke test of the engine.
 //!
-//! Objectif : exécuter un invité minimal (mode long 64 bits, EPT active, deux
-//! pages mappées) qui écrit un octet sur un port d'E/S puis exécute `hlt`, et
-//! vérifier que le chemin complet fonctionne :
+//! Goal: run a minimal guest (64-bit long mode, EPT enabled, two
+//! mapped pages) that writes a byte to an I/O port and then executes `hlt`, and
+//! check that the full path works:
 //!
-//! 1. construction des tables invitées et des tables de second niveau ;
-//! 2. chargement du bloc de contrôle ;
-//! 3. entrée invitée (`vmlaunch`), sortie sur I/O, reprise, sortie sur `hlt` ;
-//! 4. arrêt propre.
+//! 1. building the guest tables and the second-level tables;
+//! 2. loading the control block;
+//! 3. guest entry (`vmlaunch`), exit on I/O, resume, exit on `hlt`;
+//! 4. clean shutdown.
 //!
-//! Le test n'est lancé que si le noyau est activé sur VT-x et si l'option de
-//! boot `s9vm.selftest=1` est présente. Il ne panique jamais : un échec est
-//! journalisé et le boot continue.
+//! The test is only started if the kernel is enabled on VT-x and if the boot
+//! option `s9vm.selftest=1` is present. It never panics: a failure is
+//! logged and boot continues.
 
 use crate::memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame};
 use crate::s9vm::caps::HwCaps;
@@ -19,7 +19,7 @@ use crate::s9vm::exit::{ExitClass, ExitReason};
 use crate::s9vm::guest::GuestState;
 use crate::s9vm::vcpu::{SecondLevelMemory, Vcpu, VcpuError};
 
-/// Taille de la zone invitée du test : 6 pages (tables + code + pile).
+/// Size of the test guest area: 6 pages (tables + code + stack).
 const GUEST_PAGES: u64 = 6;
 const GPA_PML4: u64 = 0x0000;
 const GPA_PDPT: u64 = 0x1000;
@@ -30,12 +30,12 @@ const GPA_PT: u64 = 0x5000;
 const ENTRY_POINT: u64 = GPA_CODE;
 const STACK_TOP: u64 = GPA_STACK + 0x800;
 
-/// Octet écrit par l'invité sur le port de test (0xE9).
+/// Byte written by the guest to the test port (0xE9).
 const TEST_BYTE: u8 = 0x41;
-/// Port d'E/S utilisé par le test (port de debug standard des émulateurs).
+/// I/O port used by the test (standard debug port of emulators).
 const TEST_PORT: u16 = 0xE9;
 
-/// Erreurs du test de fumée.
+/// Errors of the smoke test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelftestError {
     OutOfMemory,
@@ -51,7 +51,7 @@ impl From<VcpuError> for SelftestError {
     }
 }
 
-/// Résultat détaillé, journalisé par l'appelant.
+/// Detailed result, logged by the caller.
 pub struct SelftestReport {
     pub io_exits: u32,
     pub halt_exits: u32,
@@ -59,7 +59,7 @@ pub struct SelftestReport {
     pub observed_byte: Option<u8>,
 }
 
-/// Alloue une frame zéro pour l'invité.
+/// Allocates a zeroed frame for the guest.
 fn alloc_frame() -> Result<PhysFrame, SelftestError> {
     crate::sync::with_irqs_disabled(|token| {
         FrameAllocOptions::new()
@@ -69,19 +69,19 @@ fn alloc_frame() -> Result<PhysFrame, SelftestError> {
     .map_err(|_| SelftestError::OutOfMemory)
 }
 
-/// Écrit une valeur 64 bits dans une frame via le HHDM.
+/// Writes a 64-bit value into a frame through the HHDM.
 fn write_u64(frame: &PhysFrame, offset: usize, value: u64) {
     let base = crate::memory::phys_to_virt(frame.start_address.as_u64()) as *mut u8;
-    // SAFETY: la frame fait 4 Kio et `offset` est un décalage valide.
+    // SAFETY: the frame is 4 KiB and `offset` is a valid offset.
     unsafe {
         core::ptr::write_volatile(base.add(offset) as *mut u64, value);
     }
 }
 
-/// Écrit des octets dans une frame via le HHDM.
+/// Writes bytes into a frame through the HHDM.
 fn write_bytes(frame: &PhysFrame, bytes: &[u8]) {
     let base = crate::memory::phys_to_virt(frame.start_address.as_u64()) as *mut u8;
-    // SAFETY: la frame fait 4 Kio et `bytes` tient dans une page.
+    // SAFETY: the frame is 4 KiB and `bytes` fits in one page.
     unsafe {
         for (index, byte) in bytes.iter().enumerate() {
             core::ptr::write_volatile(base.add(index), *byte);
@@ -89,13 +89,13 @@ fn write_bytes(frame: &PhysFrame, bytes: &[u8]) {
     }
 }
 
-/// Exécute le test de fumée. Retourne un rapport ou une erreur.
+/// Runs the smoke test. Returns a report or an error.
 pub fn run(caps: &HwCaps) -> Result<SelftestReport, SelftestError> {
     if !caps.can_run() {
         return Err(SelftestError::BadExit("platform cannot run"));
     }
 
-    // Pages invitées : PML4, PDPT, PD, code, pile, PT.
+    // Guest pages: PML4, PDPT, PD, code, stack, PT.
     let pml4 = alloc_frame()?;
     let pdpt = alloc_frame()?;
     let pd = alloc_frame()?;
@@ -103,7 +103,7 @@ pub fn run(caps: &HwCaps) -> Result<SelftestReport, SelftestError> {
     let stack = alloc_frame()?;
     let pt = alloc_frame()?;
 
-    // Tables de pagination invitées : identité GVA = GPA sur 6 pages.
+    // Guest paging tables: GVA = GPA identity over 6 pages.
     write_u64(&pml4, 0, pdpt.start_address.as_u64() | 0x3);
     write_u64(&pdpt, 0, pd.start_address.as_u64() | 0x3);
     write_u64(&pd, 0, pt.start_address.as_u64() | 0x3);
@@ -112,10 +112,10 @@ pub fn run(caps: &HwCaps) -> Result<SelftestReport, SelftestError> {
         write_u64(&pt, page as usize * 8, gpa | 0x3);
     }
 
-    // Code invité : mov al, imm8 ; out 0xE9, al ; hlt.
+    // Guest code: mov al, imm8 ; out 0xE9, al ; hlt.
     write_bytes(&code, &[0xB0, TEST_BYTE, 0xE6, TEST_PORT as u8, 0xF4]);
 
-    // Traduction de second niveau : GPA → HPA pour les 6 pages.
+    // Second-level translation: GPA → HPA for the 6 pages.
     let mut second_level = SecondLevelMemory::new().map_err(|_| SelftestError::Mmu)?;
     let pages = [
         (GPA_PML4, &pml4),
@@ -139,8 +139,8 @@ pub fn run(caps: &HwCaps) -> Result<SelftestReport, SelftestError> {
     let mut vcpu = Vcpu::new(caps, pointer)?;
     let guest = GuestState::long_mode_64(ENTRY_POINT, STACK_TOP, GPA_PML4);
 
-    // Validation locale avant l'entrée : un état refusé ici produirait un
-    // « VM entry with invalid guest state » difficile à diagnostiquer.
+    // Local validation before entry: a state refused here would produce a
+    // "VM entry with invalid guest state" that is difficult to diagnose.
     let fixed = crate::s9vm::guest::FixedBits {
         cr0_fixed0: caps.cr0_fixed0,
         cr0_fixed1: caps.cr0_fixed1,
@@ -151,9 +151,9 @@ pub fn run(caps: &HwCaps) -> Result<SelftestReport, SelftestError> {
         log::warn!("[s9vm] état invité refusé par validate(): {:?}", error);
     }
 
-    // SAFETY: VT-x est actif sur ce CPU (vérifié par l'appelant), les
-    // interruptions sont désactivées au stage bootstrap, et le bloc de
-    // contrôle vient d'être créé pour ce vCPU.
+    // SAFETY: VT-x is active on this CPU (checked by the caller), interrupts
+    // are disabled at the bootstrap stage, and the control
+    // block has just been created for this vCPU.
     unsafe {
         vcpu.load()?;
         vcpu.configure_host()?;
@@ -169,12 +169,12 @@ pub fn run(caps: &HwCaps) -> Result<SelftestReport, SelftestError> {
 
     let mut outcome: Result<(), SelftestError> = Ok(());
     for _ in 0..16 {
-        // SAFETY: contrat de `run` (bloc chargé, IRQ coupées).
+        // SAFETY: `run` contract (block loaded, IRQs disabled).
         let exit = match unsafe { vcpu.run() } {
             Ok(exit) => exit,
             Err(error) => {
-                // SAFETY: le bloc de contrôle est encore chargé ; diagnostic
-                // utile pour les échecs `VmFail(8/9)`.
+                // SAFETY: the control block is still loaded; useful
+                // diagnostic for `VmFail(8/9)` failures.
                 unsafe {
                     log::warn!("[s9vm] {}", vcpu.host_diagnostics());
                 }
@@ -187,14 +187,14 @@ pub fn run(caps: &HwCaps) -> Result<SelftestReport, SelftestError> {
         match class {
             ExitClass::IoPort => {
                 report.io_exits += 1;
-                // Qualification d'E/S : port dans les bits 16..31.
+                // I/O qualification: port in bits 16..31.
                 let port = ((exit.qualification >> 16) & 0xFFFF) as u16;
                 if port == TEST_PORT {
                     report.observed_byte = Some((vcpu.guest().rax & 0xFF) as u8);
                 }
-                // Pour une sortie sur instruction d'E/S, le processeur a déjà
-                // positionné `GUEST_RIP` sur l'instruction suivante : ne pas
-                // l'avancer à nouveau, sinon la reprise saute le `hlt`.
+                // For an exit on an I/O instruction, the processor has already
+                // set `GUEST_RIP` to the next instruction: do not
+                // advance it again, otherwise the resume would skip the `hlt`.
                 log::info!(
                     "[s9vm] sortie E/S port={:#x} octet={:?} rip={:#x} len={}",
                     port,
@@ -208,12 +208,12 @@ pub fn run(caps: &HwCaps) -> Result<SelftestReport, SelftestError> {
                 break;
             }
             ExitClass::ExternalInterrupt | ExitClass::InterruptWindow => {
-                // Au boot, les interruptions hôte sont masquées : on reprend
-                // simplement l'invité.
+                // At boot, host interrupts are masked: we simply
+                // resume the guest.
             }
             ExitClass::EntryFailure => {
-                // SAFETY: le bloc de contrôle est encore chargé ; diagnostic
-                // du champ invité refusé par le processeur.
+                // SAFETY: the control block is still loaded; diagnostic
+                // of the guest field refused by the processor.
                 unsafe {
                     log::warn!("[s9vm] {}", vcpu.guest_diagnostics());
                 }
@@ -227,7 +227,7 @@ pub fn run(caps: &HwCaps) -> Result<SelftestReport, SelftestError> {
         }
     }
 
-    // SAFETY: le vCPU n'est plus actif ; on décharge son bloc de contrôle.
+    // SAFETY: the vCPU is no longer active; we unload its control block.
     unsafe {
         let _ = vcpu.clear();
     }
@@ -239,9 +239,9 @@ pub fn run(caps: &HwCaps) -> Result<SelftestReport, SelftestError> {
     }
 }
 
-/// Lance le test si l'option de boot `s9vm.selftest=1` est présente.
+/// Starts the test if the boot option `s9vm.selftest=1` is present.
 ///
-/// Ne fait rien si VT-x n'est pas actif. Ne panique jamais.
+/// Does nothing if VT-x is not active. Never panics.
 pub fn maybe_run_from_boot_env(caps: &HwCaps) {
     let enabled = crate::boot_args()
         .and_then(|args| args.env_get("s9vm.selftest"))

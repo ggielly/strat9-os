@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Crée une image disque UEFI (MBR + FAT32 ESP) à partir d'un répertoire.
+"""Creates a UEFI disk image (MBR + FAT32 ESP) from a directory.
 
-Objectif : produire un artefact bootable pour un hyperviseur hôte qui expose
-VT-x, sans dépendre d'outils de formatage absents de l'hôte de développement
-(pas de WSL, pas de privilèges administrateur, pas de mtools/mkfs).
+Goal: produce a bootable artifact for a host hypervisor that exposes
+VT-x, without depending on formatting tools absent from the development
+host (no WSL, no administrator privileges, no mtools/mkfs).
 
     python tools/scripts/make-esp-image.py --source build/qemu-esp \\
         --output build/s9vm-esp.img [--size-mb 280]
 
-L'image contient une table de partitions MBR (une partition FAT32 de type
-0x0C, démarrage LBA 2048) et une arborescence FAT32 complète, noms longs
-(LFN) inclus. Le bootloader du noyau lit les entrées 8.3 et LFN.
+The image contains an MBR partition table (one FAT32 partition of type
+0x0C, boot LBA 2048) and a complete FAT32 tree, long names (LFN)
+included. The kernel bootloader reads the 8.3 entries and LFN.
 
-Aucune dépendance externe : Python 3 standard uniquement.
+No external dependency: standard Python 3 only.
 """
 
 import argparse
@@ -24,7 +24,7 @@ SECTOR = 512
 PART_START_LBA = 2048
 RESERVED_SECTORS = 32
 NUM_FATS = 2
-SECTORS_PER_CLUSTER = 8  # 4 Kio
+SECTORS_PER_CLUSTER = 8  # 4 KiB
 CLUSTER_SIZE = SECTOR * SECTORS_PER_CLUSTER
 EOC = 0x0FFFFFFF
 FAT_ENTRIES_PER_SECTOR = SECTOR // 4
@@ -87,7 +87,7 @@ def lfn_checksum(short_name):
 
 
 def lfn_entries(name, short_name):
-    """Construit les entrées LFN (ordre disque : dernière partie d'abord)."""
+    """Builds the LFN entries (disk order: last part first)."""
     checksum = lfn_checksum(short_name)
     encoded = name.encode("utf-16-le")
     units = [encoded[i : i + 2] for i in range(0, len(encoded), 2)]
@@ -120,13 +120,13 @@ def short_entry(name, short_name, attr, cluster, size):
     entry[0:11] = short_name.encode("ascii")[:11]
     entry[11] = attr
     entry[12] = 0  # NT reserved
-    entry[13] = 0  # dixièmes de seconde de création
-    struct.pack_into("<H", entry, 14, FAT_TIME)  # heure de création
-    struct.pack_into("<H", entry, 16, FAT_DATE)  # date de création
-    struct.pack_into("<H", entry, 18, FAT_DATE)  # date de dernier accès
+    entry[13] = 0  # creation tenths of a second
+    struct.pack_into("<H", entry, 14, FAT_TIME)  # creation time
+    struct.pack_into("<H", entry, 16, FAT_DATE)  # creation date
+    struct.pack_into("<H", entry, 18, FAT_DATE)  # last access date
     struct.pack_into("<H", entry, 20, (cluster >> 16) & 0xFFFF)  # clusterHigh
-    struct.pack_into("<H", entry, 22, FAT_TIME)  # heure de modification
-    struct.pack_into("<H", entry, 24, FAT_DATE)  # date de modification
+    struct.pack_into("<H", entry, 22, FAT_TIME)  # modification time
+    struct.pack_into("<H", entry, 24, FAT_DATE)  # modification date
     struct.pack_into("<H", entry, 26, cluster & 0xFFFF)  # clusterLow
     struct.pack_into("<I", entry, 28, size)
     return bytes(entry)

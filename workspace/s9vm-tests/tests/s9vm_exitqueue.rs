@@ -1,4 +1,4 @@
-//! L2 : file d'événements de sortie s9vm (code noyau réel).
+//! L2: s9vm exit event queue (real kernel code).
 
 extern crate alloc;
 
@@ -47,7 +47,7 @@ fn rejects_push_when_full_and_counts_drops() {
     assert_eq!(queue.push(event(3)), Err(QueueError::Full));
     assert_eq!(queue.len(), 2);
     assert_eq!(queue.dropped(), 1);
-    // Les deux premiers sont toujours là, dans l'ordre.
+    // The first two are still there, in order.
     assert_eq!(queue.pop().expect("pop").value, 1);
     assert_eq!(queue.pop().expect("pop").value, 2);
 }

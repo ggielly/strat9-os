@@ -1,35 +1,35 @@
-//! s9vm — trampoline d'entrée/sortie invité.
+//! s9vm — guest entry/exit trampoline.
 //!
-//! La seule manière fiable d'entrer chez l'invité est une routine assembleur
-//! qui respecte le contrat matériel :
+//! The only reliable way to enter the guest is an assembly routine
+//! that honors the hardware contract:
 //!
-//! 1. sauvegarder les registres callee-saved de l'hôte ;
-//! 2. charger les registres généraux invités depuis [`EnterFrame`] ;
-//! 3. exécuter `vmlaunch` (première entrée) ou `vmresume` (entrées
-//!    suivantes) ;
-//! 4. sur sortie, le matériel charge `HOST_RSP`/`HOST_RIP` : on arrive sur le
-//!    label `s9vm_guest_exit`, qui sauve les registres invités et restaure
-//!    l'hôte.
+//! 1. save the host callee-saved registers;
+//! 2. load the guest general-purpose registers from [`EnterFrame`];
+//! 3. execute `vmlaunch` (first entry) or `vmresume` (subsequent
+//!    entries);
+//! 4. on exit, the hardware loads `HOST_RSP`/`HOST_RIP`: control arrives at the
+//!    `s9vm_guest_exit` label, which saves the guest registers and restores
+//!    the host.
 //!
-//! # Contrat
+//! # Contract
 //!
 //! `s9vm_enter_guest(frame, host_stack_top) -> u64`
-//! - `frame` : `*mut EnterFrame`, vivant pendant tout l'appel ;
-//! - `host_stack_top` : sommet (16 octets aligné) d'une pile hôte dédiée,
-//!    écrite dans `HOST_RSP` avant l'entrée ;
-//! - retour : `0` = sortie invité normale (lire la raison dans le bloc de
-//!   contrôle), `1` = échec d'entrée (`VMfail`, lire le statut).
+//! - `frame`: `*mut EnterFrame`, live for the whole call;
+//! - `host_stack_top`: top (16-byte aligned) of a dedicated host stack,
+//!    written into `HOST_RSP` before entry;
+//! - return: `0` = normal guest exit (read the reason from the control
+//!   block), `1` = entry failure (`VMfail`, read the status).
 //!
-//! Le frame est référencé par un pointeur rangé sur la pile hôte
-//! (`[host_stack_top - 8]`), ce qui permet de le retrouver au retour sans
-//! dépendre d'un registre (tous les GPR appartiennent à l'invité).
+//! The frame is referenced by a pointer stored on the host stack
+//! (`[host_stack_top - 8]`), which makes it possible to find it again on return
+//! without depending on a register (all GPRs belong to the guest).
 //!
-//! Les offsets `S9VM_F_*` sont partagés entre l'assembleur et la structure
-//! Rust ; un test hôte vérifie qu'ils correspondent (`offset_of!`).
+//! The `S9VM_F_*` offsets are shared between the assembler and the Rust
+//! structure; a host test verifies that they match (`offset_of!`).
 
 use core::arch::global_asm;
 
-/// Registres généraux invités, dans l'ordre de sauvegarde.
+/// Guest general-purpose registers, in save order.
 pub const S9VM_F_RAX: usize = 0;
 pub const S9VM_F_RBX: usize = 8;
 pub const S9VM_F_RCX: usize = 16;
@@ -57,10 +57,10 @@ pub const S9VM_F_HOST_R14: usize = 184;
 pub const S9VM_F_HOST_R15: usize = 192;
 pub const S9VM_F_STATUS: usize = 200;
 pub const S9VM_F_LAUNCHED: usize = 208;
-/// Taille totale du frame.
+/// Total size of the frame.
 pub const S9VM_ENTER_FRAME_SIZE: usize = 216;
 
-/// Zone d'échange entre le noyau et le trampoline pour une entrée invitée.
+/// Exchange area between the kernel and the trampoline for one guest entry.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct EnterFrame {
@@ -71,7 +71,7 @@ pub struct EnterFrame {
     pub rsi: u64,
     pub rdi: u64,
     pub rbp: u64,
-    /// RSP invité (informatif : le matériel utilise `GUEST_RSP`).
+    /// Guest RSP (informational: the hardware uses `GUEST_RSP`).
     pub rsp: u64,
     pub r8: u64,
     pub r9: u64,
@@ -81,11 +81,11 @@ pub struct EnterFrame {
     pub r13: u64,
     pub r14: u64,
     pub r15: u64,
-    /// RIP invité (informatif : le matériel utilise `GUEST_RIP`).
+    /// Guest RIP (informational: the hardware uses `GUEST_RIP`).
     pub rip: u64,
-    /// RFLAGS invité (informatif).
+    /// Guest RFLAGS (informational).
     pub rflags: u64,
-    /// RSP hôte sauvegardé par le trampoline.
+    /// Host RSP saved by the trampoline.
     pub host_rsp: u64,
     pub host_rbx: u64,
     pub host_rbp: u64,
@@ -93,14 +93,14 @@ pub struct EnterFrame {
     pub host_r13: u64,
     pub host_r14: u64,
     pub host_r15: u64,
-    /// Statut d'échec : drapeaux du CPU au moment du `VMfail`.
+    /// Failure status: CPU flags at the time of the `VMfail`.
     pub status: u64,
-    /// 1 si l'invité a déjà été lancé (`vmresume`), 0 sinon (`vmlaunch`).
+    /// 1 if the guest has already been launched (`vmresume`), 0 otherwise (`vmlaunch`).
     pub launched: u64,
 }
 
 impl EnterFrame {
-    /// Frame nul.
+    /// Zeroed frame.
     pub const fn zeroed() -> Self {
         Self {
             rax: 0,
@@ -134,9 +134,9 @@ impl EnterFrame {
     }
 }
 
-/// Vérifications à la compilation : les offsets partagés avec l'assembleur
-/// doivent correspondre exactement aux champs de [`EnterFrame`]. Une
-/// régression ici produirait une corruption silencieuse de l'état hôte.
+/// Compile-time checks: the offsets shared with the assembler
+/// must match the fields of [`EnterFrame`] exactly. A
+/// regression here would silently corrupt the host state.
 const _: () = {
     assert!(core::mem::offset_of!(EnterFrame, rax) == S9VM_F_RAX);
     assert!(core::mem::offset_of!(EnterFrame, rbx) == S9VM_F_RBX);
@@ -169,23 +169,23 @@ const _: () = {
 };
 
 extern "C" {
-    /// Point d'entrée assembleur (défini par [`S9VM_TRAMPOLINE`]).
+    /// Assembly entry point (defined by [`S9VM_TRAMPOLINE`]).
     ///
     /// # Safety
-    /// Voir le contrat du module ; ne jamais appeler si VT-x n'est pas actif
-    /// sur le CPU courant, ou si le bloc de contrôle n'est pas chargé.
+    /// See the module contract; never call when VT-x is not active
+    /// on the current CPU, or when the control block is not loaded.
     pub fn s9vm_enter_guest(frame: *mut EnterFrame, host_stack_top: u64) -> u64;
 
-    /// Label de reprise après sortie invité (adresse posée dans `HOST_RIP`).
-    /// Ce n'est pas une fonction appelable : on ne prend que son adresse.
+    /// Resume label after a guest exit (address placed in `HOST_RIP`).
+    /// This is not a callable function: only its address is taken.
     pub fn s9vm_guest_exit();
 
-    /// Entrée assembleur du guest (adresse utilisée pour `HOST_RIP`).
+    /// Assembly guest entry (address used for `HOST_RIP`).
     pub fn s9vm_guest_entry();
 }
 
-// Code du trampoline. Les offsets `S9VM_F_*` doivent rester synchronisés avec
-// [`EnterFrame`] ; un test hôte le vérifie.
+// Trampoline code. The `S9VM_F_*` offsets must stay in sync with
+// [`EnterFrame`]; a host test verifies it.
 global_asm!(
     r#"
     .set S9VM_F_RAX,        0
@@ -224,7 +224,7 @@ s9vm_enter_guest:
     push r13
     push r14
     push r15
-    push rdi                        /* slot de récupération sur échec */
+    push rdi                        /* recovery slot on failure */
     mov [rdi + S9VM_F_HOST_RSP], rsp
     mov [rdi + S9VM_F_HOST_RBX], rbx
     mov [rdi + S9VM_F_HOST_RBP], rbp
@@ -233,13 +233,13 @@ s9vm_enter_guest:
     mov [rdi + S9VM_F_HOST_R14], r14
     mov [rdi + S9VM_F_HOST_R15], r15
 
-    /* Pointeur de frame accessible depuis la pile hôte au retour. */
+    /* Frame pointer reachable from the host stack on return. */
     mov [rsi - 8], rdi
     mov rax, [rdi + S9VM_F_LAUNCHED]
     mov [rsi - 16], rax
 
-    /* Le choix vmlaunch/vmresume est fixé ici ; les mov suivants ne
-       modifient pas les drapeaux. */
+    /* The vmlaunch/vmresume choice is fixed here; the following movs
+       do not modify the flags. */
     cmp qword ptr [rsi - 16], 0
 
     mov rax, [rdi + S9VM_F_RAX]
@@ -265,7 +265,7 @@ s9vm_enter_guest:
     jmp .Ls9vm_fail
 
 .Ls9vm_fail:
-    /* Toujours sur la pile noyau : le frame est dans le slot poussé. */
+    /* Still on the kernel stack: the frame is in the pushed slot. */
     pop rdi
     pushfq
     pop rax
@@ -290,14 +290,14 @@ s9vm_enter_guest:
     .global s9vm_guest_entry
     .type s9vm_guest_entry, @function
 s9vm_guest_entry:
-    /* Jamais exécuté directement : adresse informative. */
+    /* Never executed directly: informational address. */
     ud2
 
     .global s9vm_guest_exit
     .type s9vm_guest_exit, @function
 s9vm_guest_exit:
-    /* Le matériel a chargé HOST_RSP = host_stack_top ; [rsp-8] = frame. */
-    mov [rsp - 16], rdi             /* sauve le rdi invité */
+    /* The hardware loaded HOST_RSP = host_stack_top; [rsp-8] = frame. */
+    mov [rsp - 16], rdi             /* saves the guest rdi */
     mov rdi, [rsp - 8]              /* frame */
     mov [rdi + S9VM_F_RAX], rax
     mov [rdi + S9VM_F_RBX], rbx
@@ -316,7 +316,7 @@ s9vm_guest_exit:
     mov [rdi + S9VM_F_RDI], rax
     mov qword ptr [rdi + S9VM_F_STATUS], 0
 
-    /* Restaure l'hôte et revient à l'appelant Rust. */
+    /* Restores the host and returns to the Rust caller. */
     mov rsp, [rdi + S9VM_F_HOST_RSP]
     mov rbx, [rdi + S9VM_F_HOST_RBX]
     mov rbp, [rdi + S9VM_F_HOST_RBP]

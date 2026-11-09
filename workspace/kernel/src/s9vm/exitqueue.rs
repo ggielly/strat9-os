@@ -1,31 +1,31 @@
-//! s9vm — file d'événements de sortie bornée.
+//! s9vm — bounded exit event queue.
 //!
-//! Chaque monde possède une file d'événements (taille fixe) que la couche
-//! d'exécution remplit et que la politique consomme via
-//! `SYS_VMM_EXIT_HANDLER`. La file est **bornée** : un producteur ne peut pas
-//! faire croître la mémoire du noyau, et un consommateur lent provoque un
-//! refus explicite (`Full`) plutôt qu'une perte silencieuse.
+//! Each world has an event queue (fixed size) that the execution layer
+//! fills and that the policy consumes via
+//! `SYS_VMM_EXIT_HANDLER`. The queue is **bounded**: a producer cannot
+//! grow kernel memory, and a slow consumer causes an
+//! explicit refusal (`Full`) rather than silent loss.
 //!
-//! Module pur (testable sur l'hôte) : il ne dépend que de l'ABI.
+//! Pure module (host-testable): it depends only on the ABI.
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use strat9_abi::vmm::VmmExitEvent;
 
-/// Capacité par défaut d'une file d'exits.
+/// Default capacity of an exit queue.
 pub const DEFAULT_CAPACITY: usize = 64;
 
-/// Erreurs de la file.
+/// Queue errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueError {
-    /// File pleine.
+    /// Queue full.
     Full,
-    /// File vide.
+    /// Queue empty.
     Empty,
 }
 
-/// File bornée d'événements de sortie.
+/// Bounded queue of exit events.
 #[derive(Debug)]
 pub struct ExitQueue {
     entries: VecDeque<VmmExitEvent>,
@@ -34,7 +34,7 @@ pub struct ExitQueue {
 }
 
 impl ExitQueue {
-    /// Crée une file de capacité donnée (au moins 1).
+    /// Creates a queue with the given capacity (at least 1).
     pub fn new(capacity: usize) -> Self {
         Self {
             entries: VecDeque::with_capacity(capacity),
@@ -43,28 +43,28 @@ impl ExitQueue {
         }
     }
 
-    /// Capacité.
+    /// Capacity.
     pub const fn capacity(&self) -> usize {
         self.capacity
     }
 
-    /// Nombre d'événements en attente.
+    /// Number of pending events.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Vrai si la file est vide.
+    /// True if the queue is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    /// Nombre d'événements refusés depuis la création (diagnostic).
+    /// Number of events refused since creation (diagnostics).
     pub const fn dropped(&self) -> u64 {
         self.dropped
     }
 
-    /// Ajoute un événement. Retourne `Full` si la file est pleine ; aucune
-    /// donnée n'est écrasée silencieusement.
+    /// Adds an event. Returns `Full` if the queue is full; no
+    /// data is silently overwritten.
     pub fn push(&mut self, event: VmmExitEvent) -> Result<(), QueueError> {
         if self.entries.len() >= self.capacity {
             self.dropped = self.dropped.saturating_add(1);
@@ -74,17 +74,17 @@ impl ExitQueue {
         Ok(())
     }
 
-    /// Retire le plus ancien événement.
+    /// Removes the oldest event.
     pub fn pop(&mut self) -> Result<VmmExitEvent, QueueError> {
         self.entries.pop_front().ok_or(QueueError::Empty)
     }
 
-    /// Vide la file et retourne les événements retirés.
+    /// Empties the queue and returns the removed events.
     pub fn drain(&mut self) -> Vec<VmmExitEvent> {
         self.entries.drain(..).collect()
     }
 
-    /// Vide la file.
+    /// Empties the queue.
     pub fn clear(&mut self) {
         self.entries.clear();
     }

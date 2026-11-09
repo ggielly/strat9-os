@@ -1,21 +1,21 @@
-//! s9vm — décodage des capacités matérielles de virtualisation (Intel VT-x).
+//! s9vm — decoding of hardware virtualization capabilities (Intel VT-x).
 //!
-//! Ce module est **pur** : il ne lit aucun MSR lui-même, il reçoit une
-//! photographie (`MsrSnapshot`) lue par la couche noyau (`s9vm::mod`). Il est
-//! donc compilable et testable sur l'hôte (tests L2).
+//! This module is **pure**: it reads no MSR itself, it receives a
+//! snapshot (`MsrSnapshot`) read by the kernel layer (`s9vm::mod`). It is
+//! therefore compilable and testable on the host (L2 tests).
 //!
-//! Les constantes d'encodage proviennent de la documentation Intel (SDM
-//! vol. 3C, chapitres « VMX ») : MSR `0x480`–`0x492`, `IA32_FEATURE_CONTROL`
-//! (`0x3A`). Aucune valeur propre à un hyperviseur particulier n'est utilisée.
+//! The encoding constants come from the Intel documentation (SDM
+//! vol. 3C, "VMX" chapters): MSRs `0x480`–`0x492`, `IA32_FEATURE_CONTROL`
+//! (`0x3A`). No value specific to a particular hypervisor is used.
 
-/// MSR `IA32_FEATURE_CONTROL` : verrouillage et autorisation d'activation.
+/// MSR `IA32_FEATURE_CONTROL`: lock and authorization of enabling.
 pub const MSR_FEATURE_CONTROL: u32 = 0x3A;
-/// `IA32_FEATURE_CONTROL` bit 0 : MSR verrouillé par le firmware.
+/// `IA32_FEATURE_CONTROL` bit 0: MSR locked by the firmware.
 pub const FEATURE_CONTROL_LOCKED: u64 = 1 << 0;
-/// `IA32_FEATURE_CONTROL` bit 2 : activation autorisée hors SMX.
+/// `IA32_FEATURE_CONTROL` bit 2: enabling allowed outside SMX.
 pub const FEATURE_CONTROL_ENABLE_OUTSIDE_SMX: u64 = 1 << 2;
 
-/// MSR de capacités VT-x (plage `0x480`–`0x492`).
+/// VT-x capability MSRs (range `0x480`–`0x492`).
 pub const MSR_BASIC: u32 = 0x480;
 pub const MSR_PIN_BASED: u32 = 0x481;
 pub const MSR_PRIMARY_PROC_BASED: u32 = 0x482;
@@ -34,89 +34,89 @@ pub const MSR_TRUE_PRIMARY_PROC_BASED: u32 = 0x48E;
 pub const MSR_TRUE_EXIT_CONTROLS: u32 = 0x48F;
 pub const MSR_TRUE_ENTRY_CONTROLS: u32 = 0x490;
 
-/// Bits du MSR `MSR_EPT_VPID_CAP` utiles à s9vm.
+/// Bits of the `MSR_EPT_VPID_CAP` MSR that are useful to s9vm.
 pub mod ept_vpid_cap {
-    /// Instruction `invept` disponible.
+    /// `invept` instruction available.
     pub const INVEPT: u64 = 1 << 0;
-    /// Marche de tables EPT sur 4 niveaux (`PM4L`).
+    /// 4-level EPT page walk (`PM4L`).
     pub const WALK_LENGTH_4: u64 = 1 << 6;
-    /// Type mémoire *uncacheable* supporté pour les tables EPT.
+    /// *Uncacheable* memory type supported for EPT tables.
     pub const MEMTYPE_UC: u64 = 1 << 8;
-    /// Type mémoire *write-back* supporté pour les tables EPT.
+    /// *Write-back* memory type supported for EPT tables.
     pub const MEMTYPE_WB: u64 = 1 << 14;
-    /// Pages de 2 Mio supportées dans l'EPT.
+    /// 2 MiB pages supported in the EPT.
     pub const PAGE_2MB: u64 = 1 << 16;
-    /// Pages de 1 Gio supportées dans l'EPT.
+    /// 1 GiB pages supported in the EPT.
     pub const PAGE_1GB: u64 = 1 << 17;
-    /// Bits *accessed/dirty* (A/D) supportés dans l'EPT.
+    /// *Accessed/dirty* (A/D) bits supported in the EPT.
     pub const ACCESSED_DIRTY: u64 = 1 << 21;
-    /// `invvpid` avec un contexte unique.
+    /// `invvpid` with a single context.
     pub const INVVPID_SINGLE_CONTEXT: u64 = 1 << 32;
-    /// `invvpid` avec tous les contextes.
+    /// `invvpid` with all contexts.
     pub const INVVPID_ALL_CONTEXT: u64 = 1 << 33;
-    /// `invvpid` avec une adresse individuelle.
+    /// `invvpid` with an individual address.
     pub const INVVPID_INDIVIDUAL_ADDRESS: u64 = 1 << 34;
-    /// `invvpid` avec un contexte unique, en conservant les entrées globales.
+    /// `invvpid` with a single context, retaining the global entries.
     pub const INVVPID_SINGLE_CONTEXT_RETAIN_GLOBALS: u64 = 1 << 35;
 }
 
-/// Bits utiles du MSR `MSR_PIN_BASED`, `MSR_PRIMARY_PROC_BASED`,
-/// `MSR_SECONDARY_PROC_BASED` et `MSR_MISC`.
+/// Useful bits of the `MSR_PIN_BASED`, `MSR_PRIMARY_PROC_BASED`,
+/// `MSR_SECONDARY_PROC_BASED` and `MSR_MISC` MSRs.
 pub mod control_bits {
-    /// Contrôles « pin-based » : sortie sur interruption externe.
+    /// "Pin-based" controls: exit on external interrupt.
     pub const PIN_EXTERNAL_INTERRUPT_EXITING: u32 = 1 << 0;
-    /// Contrôles « pin-based » : sortie sur NMI.
+    /// "Pin-based" controls: exit on NMI.
     pub const PIN_NMI_EXITING: u32 = 1 << 3;
-    /// Contrôles « pin-based » : NMI virtuels.
+    /// "Pin-based" controls: virtual NMIs.
     pub const PIN_VIRTUAL_NMIS: u32 = 1 << 5;
-    /// Contrôles « pin-based » : timer de préemption (tranche invitée).
+    /// "Pin-based" controls: preemption timer (guest time slice).
     pub const PIN_PREEMPTION_TIMER: u32 = 1 << 6;
-    /// Contrôles « pin-based » : interruptions postées.
+    /// "Pin-based" controls: posted interrupts.
     pub const PIN_POSTED_INTERRUPTS: u32 = 1 << 7;
 
-    /// Contrôles primaires : activer les contrôles secondaires.
+    /// Primary controls: activate the secondary controls.
     pub const PROC_ACTIVATE_SECONDARY: u32 = 1 << 31;
-    /// Contrôles primaires : bitmap d'E/S.
+    /// Primary controls: I/O bitmap.
     pub const PROC_USE_IO_BITMAPS: u32 = 1 << 25;
-    /// Contrôles primaires : bitmap de MSR.
+    /// Primary controls: MSR bitmap.
     pub const PROC_USE_MSR_BITMAPS: u32 = 1 << 28;
-    /// Contrôles primaires : sortie sur `hlt`.
+    /// Primary controls: exit on `hlt`.
     pub const PROC_HLT_EXITING: u32 = 1 << 7;
-    /// Contrôles primaires : sortie sur `rdtsc`.
+    /// Primary controls: exit on `rdtsc`.
     pub const PROC_RDTSC_EXITING: u32 = 1 << 12;
-    /// Contrôles primaires : sortie sur `mov cr`.
+    /// Primary controls: exit on `mov cr`.
     pub const PROC_CR3_LOAD_EXITING: u32 = 1 << 15;
 
-    /// Contrôles secondaires : activer l'EPT.
+    /// Secondary controls: activate the EPT.
     pub const PROC2_ENABLE_EPT: u32 = 1 << 1;
-    /// Contrôles secondaires : mode x2APIC virtuEL.
+    /// Secondary controls: virtual x2APIC mode.
     pub const PROC2_VIRTUALIZE_X2APIC: u32 = 1 << 4;
-    /// Contrôles secondaires : activer VPID.
+    /// Secondary controls: activate VPID.
     pub const PROC2_ENABLE_VPID: u32 = 1 << 5;
-    /// Contrôles secondaires : invité non restreint (real mode sans VM86).
+    /// Secondary controls: unrestricted guest (real mode without VM86).
     pub const PROC2_UNRESTRICTED_GUEST: u32 = 1 << 7;
-    /// Contrôles secondaires : virtualisation du registre APIC.
+    /// Secondary controls: virtualization of the APIC register.
     pub const PROC2_APIC_REGISTER_VIRT: u32 = 1 << 8;
-    /// Contrôles secondaires : livraison virtuelle des interruptions.
+    /// Secondary controls: virtual delivery of interrupts.
     pub const PROC2_VIRTUAL_INTERRUPT_DELIVERY: u32 = 1 << 9;
-    /// Contrôles secondaires : sortie sur boucle `pause` (PLE).
+    /// Secondary controls: exit on `pause` loop (PLE).
     pub const PROC2_PAUSE_LOOP_EXITING: u32 = 1 << 10;
-    /// Contrôles secondaires : shadowing du bloc de contrôle (nested).
+    /// Secondary controls: control block shadowing (nested).
     pub const PROC2_CONTROL_SHADOWING: u32 = 1 << 14;
-    /// Contrôles secondaires : `rdseed`.
+    /// Secondary controls: `rdseed`.
     pub const PROC2_ENABLE_RDSEED: u32 = 1 << 16;
-    /// Contrôles secondaires : *page modification logging*.
+    /// Secondary controls: *page modification logging*.
     pub const PROC2_ENABLE_PML: u32 = 1 << 17;
-    /// Contrôles secondaires : XSAVES/XRSTORS.
+    /// Secondary controls: XSAVES/XRSTORS.
     pub const PROC2_ENABLE_XSAVES: u32 = 1 << 20;
-    /// Contrôles secondaires : `umwait`.
+    /// Secondary controls: `umwait`.
     pub const PROC2_ENABLE_UMWAIT: u32 = 1 << 21;
-    /// Contrôles secondaires : `tpause`.
+    /// Secondary controls: `tpause`.
     pub const PROC2_ENABLE_TPAUSE: u32 = 1 << 22;
 }
 
-/// Photographie des MSR nécessaires à la détection. Toutes les valeurs sont
-/// brutes (telles que lues), le décodage est fait par [`HwCaps::from_snapshot`].
+/// Snapshot of the MSRs needed for detection. All values are
+/// raw (as read), decoding is done by [`HwCaps::from_snapshot`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MsrSnapshot {
     pub feature_control: u64,
@@ -139,8 +139,8 @@ pub struct MsrSnapshot {
 }
 
 impl MsrSnapshot {
-    /// Construit une photographie depuis un lecteur de MSR (le noyau fournit
-    /// un lecteur `rdmsr`, les tests un lecteur synthétique).
+    /// Builds a snapshot from an MSR reader (the kernel provides
+    /// an `rdmsr` reader, the tests a synthetic reader).
     pub fn from_reader<R: Fn(u32) -> u64>(read: R) -> Self {
         let mut snapshot = Self {
             feature_control: read(MSR_FEATURE_CONTROL),
@@ -161,9 +161,9 @@ impl MsrSnapshot {
             true_exit_controls: None,
             true_entry_controls: None,
         };
-        // Les MSR « TRUE_* » n'existent que si le bit 55 de `MSR_BASIC` est
-        // positionné (contrôles par défaut, SDM). Sur les CPU anciens, les MSR
-        // de base font foi.
+        // The "TRUE_*" MSRs only exist if bit 55 of `MSR_BASIC` is
+        // set (default controls, SDM). On older CPUs, the base
+        // MSRs are authoritative.
         if snapshot.basic & (1 << 55) != 0 {
             snapshot.true_pin_based = Some(read(MSR_TRUE_PIN_BASED));
             snapshot.true_primary_proc_based = Some(read(MSR_TRUE_PRIMARY_PROC_BASED));
@@ -174,87 +174,87 @@ impl MsrSnapshot {
     }
 }
 
-/// Jeu de capacités décodées, utilisé par le moteur `s9vm`.
+/// Set of decoded capabilities, used by the `s9vm` engine.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HwCaps {
-    /// Le firmware autorise l'activation (bit 2 de `IA32_FEATURE_CONTROL`).
+    /// The firmware allows enabling (bit 2 of `IA32_FEATURE_CONTROL`).
     pub allowed: bool,
-    /// MSR `IA32_FEATURE_CONTROL` verrouillé (s'il ne l'est pas, on peut
-    /// l'écrire une fois pour autoriser l'activation).
+    /// MSR `IA32_FEATURE_CONTROL` locked (if it is not, it can be
+    /// written once to allow enabling).
     pub feature_control_locked: bool,
-    /// Identifiant de révision du bloc de contrôle (bits 30:0 de `MSR_BASIC`).
+    /// Control block revision identifier (bits 30:0 of `MSR_BASIC`).
     pub control_block_revision: u32,
-    /// Taille de la région du bloc de contrôle en octets (bits 44:32).
+    /// Size of the control block region in bytes (bits 44:32).
     pub control_block_size: u16,
-    /// Type mémoire recommandé pour la région (bits 53:50 ; 6 = WB).
+    /// Recommended memory type for the region (bits 53:50; 6 = WB).
     pub control_block_memory_type: u8,
-    /// Les bits « TRUE_* » sont disponibles.
+    /// The "TRUE_*" bits are available.
     pub has_true_controls: bool,
-    /// EPT disponible (autorisé côté contrôles secondaires).
+    /// EPT available (allowed on the secondary controls side).
     pub ept: bool,
-    /// EPT sur 4 niveaux de marche.
+    /// EPT with 4 walk levels.
     pub ept_four_levels: bool,
-    /// EPT 2 Mio.
+    /// EPT 2 MiB.
     pub ept_2mb: bool,
-    /// EPT 1 Gio.
+    /// EPT 1 GiB.
     pub ept_1gb: bool,
-    /// EPT en write-back.
+    /// EPT in write-back.
     pub ept_wb: bool,
-    /// EPT avec bits A/D.
+    /// EPT with A/D bits.
     pub ept_ad: bool,
-    /// `invept` disponible.
+    /// `invept` available.
     pub invept: bool,
-    /// VPID disponible.
+    /// VPID available.
     pub vpid: bool,
-    /// Variantes d'`invvpid` disponibles.
+    /// `invvpid` variants available.
     pub invvpid_single_context: bool,
     pub invvpid_all_context: bool,
     pub invvpid_individual_address: bool,
-    /// Invité non restreint (16 bits sans VM86).
+    /// Unrestricted guest (16 bits without VM86).
     pub unrestricted_guest: bool,
-    /// APIC virtuelle (registre + livraison).
+    /// Virtual APIC (register + delivery).
     pub apic_register_virt: bool,
     pub virtual_interrupt_delivery: bool,
-    /// Interruptions postées.
+    /// Posted interrupts.
     pub posted_interrupts: bool,
-    /// Sortie sur boucle `pause` (PLE).
+    /// Exit on `pause` loop (PLE).
     pub pause_loop_exiting: bool,
-    /// x2APIC virtualisé.
+    /// Virtualized x2APIC.
     pub virtualize_x2apic: bool,
-    /// Timer de préemption.
+    /// Preemption timer.
     pub preemption_timer: bool,
-    /// NMI virtuels.
+    /// Virtual NMIs.
     pub virtual_nmis: bool,
-    /// `rdseed` autorisé dans l'invité.
+    /// `rdseed` allowed in the guest.
     pub rdseed: bool,
 
-    /// Valeurs « allowed » (32 bits bas / hauts) des MSR de contrôle, après
-    /// sélection des MSR `TRUE_*` quand ils existent.
+    /// "Allowed" values (low / high 32 bits) of the control MSRs, after
+    /// selecting the `TRUE_*` MSRs when they exist.
     pub pin_allowed: AllowedControls,
     pub primary_proc_allowed: AllowedControls,
     pub secondary_proc_allowed: AllowedControls,
     pub exit_allowed: AllowedControls,
     pub entry_allowed: AllowedControls,
 
-    /// Masques fixes de CR0/CR4.
+    /// Fixed CR0/CR4 masks.
     pub cr0_fixed0: u64,
     pub cr0_fixed1: u64,
     pub cr4_fixed0: u64,
     pub cr4_fixed1: u64,
 }
 
-/// Valeur d'un MSR de contrôle : bits devant être à 1 (bas) et bits pouvant
-/// être à 1 (hauts). Voir SDM « VMX capability MSRs ».
+/// Value of a control MSR: bits that must be 1 (low) and bits that may
+/// be 1 (high). See SDM "VMX capability MSRs".
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AllowedControls {
-    /// Bits qui doivent être à 1 dans le champ.
+    /// Bits that must be 1 in the field.
     pub must_be_one: u32,
-    /// Bits qui peuvent être à 1 dans le champ.
+    /// Bits that may be 1 in the field.
     pub may_be_one: u32,
 }
 
 impl AllowedControls {
-    /// Décode une valeur 64 bits de MSR de contrôle.
+    /// Decodes a 64-bit control MSR value.
     pub const fn from_msr(value: u64) -> Self {
         Self {
             must_be_one: value as u32,
@@ -262,27 +262,27 @@ impl AllowedControls {
         }
     }
 
-    /// Construit la valeur à écrire pour un contrôle souhaité : les bits
-    /// obligatoires sont forcés, les bits interdits sont effacés.
+    /// Builds the value to write for a desired control: the mandatory
+    /// bits are forced, the forbidden bits are cleared.
     ///
     /// `value = (desired & may_be_one) | must_be_one`
     ///
-    /// L'ordre relatif de `must_be_one` et `may_be_one` est sans importance :
-    /// l'architecture garantit que tout bit obligatoire est aussi autorisé.
+    /// The relative order of `must_be_one` and `may_be_one` does not matter:
+    /// the architecture guarantees that every mandatory bit is also allowed.
     pub const fn apply(self, desired: u32) -> u32 {
         (desired & self.may_be_one) | self.must_be_one
     }
 
-    /// Vrai si tous les bits demandés sont autorisés (utile pour diagnostiquer
-    /// une configuration demandée trop ambitieuse).
+    /// True if all requested bits are allowed (useful to diagnose
+    /// an overly ambitious requested configuration).
     pub const fn supports(self, desired: u32) -> bool {
         (desired & !self.may_be_one) == 0
     }
 }
 
 impl HwCaps {
-    /// Décode une photographie de MSR. `cpuid_vmx` est le résultat de
-    /// `CPUID.1:ECX[5]` ; il est passé séparément pour garder ce module pur.
+    /// Decodes an MSR snapshot. `cpuid_vmx` is the result of
+    /// `CPUID.1:ECX[5]`; it is passed separately to keep this module pure.
     pub fn from_snapshot(snapshot: &MsrSnapshot, cpuid_vmx: bool) -> Self {
         let pin = snapshot
             .true_pin_based
@@ -303,7 +303,7 @@ impl HwCaps {
         let secondary = AllowedControls::from_msr(snapshot.secondary_proc_based);
         let ept_vpid = snapshot.ept_vpid_cap;
 
-        let _ = cpuid_vmx; // La présence CPUID est vérifiée par l'appelant.
+        let _ = cpuid_vmx; // The CPUID presence is checked by the caller.
 
         Self {
             allowed: snapshot.feature_control & FEATURE_CONTROL_ENABLE_OUTSIDE_SMX != 0
@@ -349,12 +349,12 @@ impl HwCaps {
         }
     }
 
-    /// Vrai si la plateforme peut héberger le moteur s9vm avec EPT et VPID.
+    /// True if the platform can host the s9vm engine with EPT and VPID.
     pub const fn can_run(&self) -> bool {
         self.allowed && self.ept && self.ept_four_levels
     }
 
-    /// Résumé lisible (une ligne) pour les logs de boot.
+    /// Readable summary (one line) for boot logs.
     pub fn summary(&self) -> alloc::string::String {
         use alloc::format;
         format!(
@@ -381,19 +381,19 @@ impl HwCaps {
     }
 }
 
-/// Erreurs de détection.
+/// Detection errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapsError {
-    /// Le CPU n'expose pas VT-x (CPUID.1:ECX[5] = 0).
+    /// The CPU does not expose VT-x (CPUID.1:ECX[5] = 0).
     NotSupported,
-    /// Le firmware interdit l'activation et le MSR est verrouillé.
+    /// The firmware forbids enabling and the MSR is locked.
     LockedByFirmware,
-    /// EPT absent ou non utilisable en 4 niveaux.
+    /// EPT absent or not usable in 4 levels.
     EptUnavailable,
 }
 
 impl HwCaps {
-    /// Vérifie les conditions d'activation et renvoie une erreur explicite.
+    /// Checks the enabling conditions and returns an explicit error.
     pub fn validate(&self) -> Result<(), CapsError> {
         if !self.allowed {
             return Err(if self.feature_control_locked {

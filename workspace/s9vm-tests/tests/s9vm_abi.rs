@@ -1,4 +1,4 @@
-//! L2 : ABI s9vm (constantes, structure, version).
+//! L2: s9vm ABI (constants, structure, version).
 
 use strat9_abi::syscall::*;
 use strat9_abi::vmm as abi;
@@ -56,7 +56,7 @@ fn reserved_syscall_numbers_are_distinct_and_out_of_p0() {
 
 #[test]
 fn p0_block_does_not_collide_with_iommu_block() {
-    // Les syscalls IOMMU occupent 520..=536 ; le bloc VMM commence à 560.
+    // IOMMU syscalls occupy 520..=536; the VMM block starts at 560.
     assert!(SYS_VMM_CREATE > 536);
     assert!(SYS_VMM_CREATE < 600);
 }

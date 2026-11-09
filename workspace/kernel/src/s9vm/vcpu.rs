@@ -1,17 +1,17 @@
-//! s9vm — vCPU : état, configuration du bloc de contrôle, entrée/sortie.
+//! s9vm — vCPU: state, control block configuration, entry/exit.
 //!
-//! Un `Vcpu` est l'unité d'exécution invitée. Il possède :
-//! - un bloc de contrôle matériel ([`ControlBlock`]) ;
-//! - une pile hôte dédiée (utilisée par le trampoline pour revenir du guest) ;
-//! - l'état invité ([`GuestState`]) et la zone d'échange [`EnterFrame`].
+//! A `Vcpu` is the guest execution unit. It owns:
+//! - a hardware control block ([`ControlBlock`]);
+//! - a dedicated host stack (used by the trampoline to return from the guest);
+//! - the guest state ([`GuestState`]) and the [`EnterFrame`] exchange area.
 //!
-//! La configuration est volontairement explicite (`configure_host`,
-//! `configure_guest`, `configure_controls`) plutôt que répartie dans le
-//! constructeur : chaque étape est vérifiable et les erreurs matérielles
-//! (`VMfail`) sont attribuables à une étape.
+//! Configuration is deliberately explicit (`configure_host`,
+//! `configure_guest`, `configure_controls`) rather than spread across the
+//! constructor: each step is checkable and hardware errors (`VMfail`) can be
+//! attributed to a step.
 //!
-//! Aucune politique n'est décidée ici : le module ne sait pas ce qu'est un OS
-//! invité, un périphérique ou une machine virtuelle complète.
+//! No policy is decided here: the module does not know what a guest OS, a
+//! device or a complete virtual machine is.
 
 use crate::memory::frame::{
     FrameAllocOptions, FramePurpose, PhysFrame,
@@ -25,42 +25,42 @@ use crate::s9vm::launch::{
 use crate::s9vm::mmu::{self, Perms, SecondLevel, TableMemory};
 use crate::s9vm::caps::HwCaps;
 
-/// Bits de contrôle utiles à la configuration (SDM).
+/// Control bits useful for configuration (SDM).
 pub mod bits {
-    /// Contrôle de sortie : l'hôte fonctionne en mode 64 bits (IA-32e).
+    /// Exit control: the host runs in 64-bit mode (IA-32e).
     pub const EXIT_HOST_ADDR_SPACE_SIZE: u32 = 1 << 9;
-    /// Contrôle de sortie : recharger IA32_EFER de l'hôte (requis en 64 bits).
+    /// Exit control: reload the host IA32_EFER (required in 64-bit mode).
     pub const EXIT_LOAD_IA32_EFER: u32 = 1 << 21;
-    /// Contrôle d'entrée : l'invité fonctionne en mode 64 bits (IA-32e).
+    /// Entry control: the guest runs in 64-bit mode (IA-32e).
     pub const ENTRY_IA32E_MODE: u32 = 1 << 9;
-    /// Contrôle d'entrée : recharger IA32_EFER de l'invité (requis en 64 bits).
+    /// Entry control: reload the guest IA32_EFER (required in 64-bit mode).
     pub const ENTRY_LOAD_IA32_EFER: u32 = 1 << 15;
-    /// Contrôle primaire : sortie sur `hlt`.
+    /// Primary control: exit on `hlt`.
     pub const PRIMARY_HLT_EXITING: u32 = 1 << 7;
-    /// Contrôle secondaire : activer l'EPT.
+    /// Secondary control: enable EPT.
     pub const SECONDARY_ENABLE_EPT: u32 = 1 << 1;
-    /// Contrôle secondaire : invité non restreint.
+    /// Secondary control: unrestricted guest.
     pub const SECONDARY_UNRESTRICTED_GUEST: u32 = 1 << 7;
-    /// Contrôle « pin » : timer de préemption (borne le temps invité).
+    /// Pin control: preemption timer (bounds guest time).
     pub const PIN_PREEMPTION_TIMER: u32 = 1 << 6;
-    /// Contrôle « pin » : sortie sur interruption externe.
+    /// Pin control: exit on external interrupt.
     pub const PIN_EXTERNAL_INTERRUPT_EXITING: u32 = 1 << 0;
 }
 
-/// Erreurs du cycle de vie d'un vCPU.
+/// vCPU lifecycle errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VcpuError {
-    /// Allocation de frame impossible.
+    /// Frame allocation failed.
     OutOfMemory,
-    /// Opération sur le bloc de contrôle.
+    /// Operation on the control block.
     Control(ControlError),
-    /// Échec d'entrée (`VMfail`) : code lu dans le champ d'instruction.
+    /// Entry failure (`VMfail`): code read from the instruction field.
     VmFail(u32),
-    /// L'invité est déjà lancé et la reprise n'est pas permise.
+    /// The guest is already launched and resumption is not permitted.
     AlreadyLaunched,
-    /// L'EPT n'a pas pu être construite.
+    /// The EPT could not be built.
     Translation(mmu::MmuError),
-    /// État de sortie illisible.
+    /// Unreadable exit state.
     BadExit,
 }
 
@@ -76,44 +76,44 @@ impl From<mmu::MmuError> for VcpuError {
     }
 }
 
-/// Informations d'une sortie invitée, copiées hors du bloc de contrôle.
+/// Information about a guest exit, copied out of the control block.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ExitInfo {
-    /// Raison brute (bit 31 = échec d'entrée).
+    /// Raw reason (bit 31 = entry failure).
     pub raw_reason: u32,
-    /// Raison décodée.
+    /// Decoded reason.
     pub reason: ExitReason,
-    /// Qualification de sortie.
+    /// Exit qualification.
     pub qualification: u64,
-    /// Adresse physique invitée au moment de la sortie.
+    /// Guest physical address at the time of the exit.
     pub guest_physical_address: u64,
-    /// Information d'interruption.
+    /// Interrupt information.
     pub interrupt_info: u32,
-    /// Information de vectorisation (événement à réinjecter).
+    /// Vectoring information (event to be reinjected).
     pub vectoring_info: u32,
-    /// Code d'erreur de vectorisation.
+    /// Vectoring error code.
     pub vectoring_error: u32,
-    /// Longueur de l'instruction fautive.
+    /// Length of the faulting instruction.
     pub instruction_length: u32,
-    /// Information sur l'instruction.
+    /// Instruction information.
     pub instruction_info: u32,
-    /// Vrai si la sortie est un échec d'entrée.
+    /// True if the exit is an entry failure.
     pub entry_failed: bool,
 }
 
 impl ExitInfo {
-    /// Classe fonctionnelle de la sortie.
+    /// Functional class of the exit.
     pub fn class(&self) -> ExitClass {
         self.reason.class()
     }
 
-    /// Vrai s'il existe un événement à réinjecter.
+    /// True if there is an event to reinject.
     pub fn has_vectoring_event(&self) -> bool {
         self.vectoring_info & (1 << 31) != 0
     }
 }
 
-/// Pile hôte dédiée au trampoline.
+/// Host stack dedicated to the trampoline.
 struct HostStack {
     frame: PhysFrame,
     top: u64,
@@ -121,7 +121,7 @@ struct HostStack {
 
 impl HostStack {
     fn allocate() -> Result<Self, VcpuError> {
-        // 16 Kio, ordre 2.
+        // 16 KiB, order 2.
         let frame = crate::sync::with_irqs_disabled(|token| {
             crate::memory::buddy::alloc(token, 2)
         })
@@ -140,22 +140,22 @@ impl HostStack {
     }
 }
 
-/// Fournisseur de tables qui accède à la mémoire physique via le HHDM et
-/// garde la trace des tables allouées pour pouvoir les libérer.
+/// Table provider that accesses physical memory through the HHDM and keeps
+/// track of the allocated tables so they can be freed.
 pub struct HhdmTables {
     allocated: alloc::vec::Vec<u64>,
 }
 
 impl HhdmTables {
-    /// Crée un fournisseur vide.
+    /// Creates an empty provider.
     pub fn new() -> Self {
         Self {
             allocated: alloc::vec::Vec::new(),
         }
     }
 
-    /// Libère toutes les tables allouées (les entrées ne sont plus lues après
-    /// cet appel).
+    /// Frees all allocated tables (entries are no longer read after this
+    /// call).
     pub fn free_all(&mut self) {
         if self.allocated.is_empty() {
             return;
@@ -193,10 +193,10 @@ impl TableMemory for HhdmTables {
     }
 
     fn free_table(&mut self, table: u64) {
-        // La libération est centralisée dans `free_all` : l'ordre de
-        // libération des tables n'a pas d'importance pour l'allocateur, mais
-        // éviter les doubles libérations est plus simple ainsi. On retire
-        // l'entrée de la liste pour ne pas la libérer deux fois.
+        // Freeing is centralized in `free_all`: the free order of the tables
+        // does not matter to the allocator, but avoiding double frees is
+        // simpler this way. The entry is removed from the list so it is not
+        // freed twice.
         if let Some(index) = self.allocated.iter().position(|entry| *entry == table) {
             self.allocated.swap_remove(index);
         }
@@ -204,48 +204,48 @@ impl TableMemory for HhdmTables {
 
     fn read_entry(&self, table: u64, index: usize) -> u64 {
         let base = crate::memory::phys_to_virt(table) as *const u64;
-        // SAFETY: `table` provient de `alloc_table` (frame zéro, 4 Kio) et
-        // `index < 512` : lecture dans les limites de la frame.
+        // SAFETY: `table` comes from `alloc_table` (zeroed frame, 4 KiB) and
+        // `index < 512`: read within the frame bounds.
         unsafe { core::ptr::read_volatile(base.add(index)) }
     }
 
     fn write_entry(&mut self, table: u64, index: usize, value: u64) {
         let base = crate::memory::phys_to_virt(table) as *mut u64;
-        // SAFETY: même invariant que `read_entry` ; la frame est exclusive.
+        // SAFETY: same invariant as `read_entry`; the frame is exclusive.
         unsafe { core::ptr::write_volatile(base.add(index), value) }
     }
 }
 
-/// Ressources pré-allouées pour la traduction de second niveau.
+/// Pre-allocated resources for second-level translation.
 pub struct SecondLevelMemory {
     pub tables: HhdmTables,
     pub root: SecondLevel,
 }
 
 impl SecondLevelMemory {
-    /// Crée une traduction vide.
+    /// Creates an empty translation.
     pub fn new() -> Result<Self, VcpuError> {
         let mut tables = HhdmTables::new();
         let root = SecondLevel::new(&mut tables)?;
         Ok(Self { tables, root })
     }
 
-    /// Libère toutes les tables de traduction.
+    /// Frees all translation tables.
     pub fn destroy(mut self) {
         self.tables.free_all();
     }
 
-    /// Traduit une adresse physique invitée, si elle est mappée.
+    /// Translates a guest physical address, if it is mapped.
     pub fn translate(&self, gpa: u64) -> Option<u64> {
         self.root.translate(&self.tables, gpa)
     }
 
-    /// Retire un mapping de 4 Kio.
+    /// Removes a 4 KiB mapping.
     pub fn unmap_4k(&mut self, gpa: u64) -> bool {
         self.root.unmap_4k(&mut self.tables, gpa)
     }
 
-    /// Mappe une page de 4 Kio.
+    /// Maps a 4 KiB page.
     pub fn map_4k(
         &mut self,
         gpa: u64,
@@ -257,7 +257,7 @@ impl SecondLevelMemory {
             .map_err(VcpuError::Translation)
     }
 
-    /// Mappe une zone de 2 Mio.
+    /// Maps a 2 MiB region.
     pub fn map_2m(
         &mut self,
         gpa: u64,
@@ -269,7 +269,7 @@ impl SecondLevelMemory {
             .map_err(VcpuError::Translation)
     }
 
-    /// Valeur du pointeur de traduction, prête pour le bloc de contrôle.
+    /// Value of the translation pointer, ready for the control block.
     pub fn pointer(&self, caps: &HwCaps) -> u64 {
         mmu::encode_second_level_pointer(
             self.root.root_phys(),
@@ -280,7 +280,7 @@ impl SecondLevelMemory {
     }
 }
 
-/// Un vCPU : ressources, état invité et bloc de contrôle.
+/// A vCPU: resources, guest state and control block.
 pub struct Vcpu {
     control: ControlBlock,
     host_stack: HostStack,
@@ -289,12 +289,12 @@ pub struct Vcpu {
     launched: bool,
     second_level_pointer: u64,
     exit: Option<ExitInfo>,
-    /// Rechargement du timer de préemption (comptes) si le CPU le supporte.
+    /// Preemption timer reload (counts) if the CPU supports it.
     preemption_timer: Option<u32>,
 }
 
 impl Vcpu {
-    /// Crée les ressources d'un vCPU (bloc de contrôle et pile hôte).
+    /// Creates the resources of a vCPU (control block and host stack).
     pub fn new(caps: &HwCaps, second_level_pointer: u64) -> Result<Self, VcpuError> {
         let revision = caps.control_block_revision;
         let frame = crate::sync::with_irqs_disabled(|token| {
@@ -304,10 +304,10 @@ impl Vcpu {
         })
         .map_err(|_| VcpuError::OutOfMemory)?;
         let phys = frame.start_address.as_u64();
-        // La frame de bloc de contrôle doit exister avant la création du
-        // descripteur ; on la « fuit » volontairement (propriété du vCPU).
+        // The control block frame must exist before the descriptor is created;
+        // it is deliberately "leaked" (owned by the vCPU).
         let control = unsafe { ControlBlock::new(phys, revision) };
-        // SAFETY: la frame est exclusive, couverte par le HHDM et fait 4 Kio.
+        // SAFETY: the frame is exclusive, covered by the HHDM and is 4 KiB.
         unsafe {
             control.prepare_region(crate::memory::phys_to_virt(phys) as *mut u8);
         }
@@ -324,32 +324,32 @@ impl Vcpu {
         })
     }
 
-    /// Adresse physique du bloc de contrôle.
+    /// Physical address of the control block.
     pub fn control_phys(&self) -> u64 {
         self.control.phys()
     }
 
-    /// Adresse physique de la pile hôte.
+    /// Physical address of the host stack.
     pub fn host_stack_phys(&self) -> u64 {
         self.host_stack.phys()
     }
 
-    /// Charge le bloc de contrôle sur le CPU courant.
+    /// Loads the control block on the current CPU.
     ///
     /// # Safety
-    /// Le CPU doit être en mode racine VT-x et le bloc ne doit pas être
-    /// chargé sur un autre CPU.
+    /// The CPU must be in VT-x root mode and the block must not be loaded on
+    /// another CPU.
     pub unsafe fn load(&mut self) -> Result<(), VcpuError> {
-        // SAFETY: contrat de l'appelant.
+        // SAFETY: caller contract.
         unsafe { self.control.load()? };
         Ok(())
     }
 
-    /// Photographie des champs invités du bloc de contrôle, pour diagnostiquer
-    /// un échec d'entrée (« VM entry with invalid guest state »).
+    /// Snapshot of the guest fields of the control block, to diagnose an entry
+    /// failure ("VM entry with invalid guest state").
     ///
     /// # Safety
-    /// Le bloc de contrôle doit être chargé sur le CPU courant.
+    /// The control block must be loaded on the current CPU.
     pub unsafe fn guest_diagnostics(&self) -> alloc::string::String {
         use alloc::format;
         let natural = |f: u32| unsafe { self.control.read_natural(f).unwrap_or(u64::MAX) };
@@ -414,10 +414,10 @@ impl Vcpu {
             )
         }
     }
-    /// Programme l'injection d'un NMI au prochain passage dans l'invité.
+    /// Schedules an NMI injection at the next entry into the guest.
     ///
     /// # Safety
-    /// Le bloc de contrôle doit être chargé et l'invité inactif.
+    /// The control block must be loaded and the guest inactive.
     pub unsafe fn inject_nmi(&self) -> Result<(), VcpuError> {
         unsafe {
             self.control
@@ -426,11 +426,11 @@ impl Vcpu {
         Ok(())
     }
 
-    /// Programme l'injection d'une interruption externe au prochain passage
-    /// dans l'invité (champ « VM-entry interruption information »).
+    /// Schedules an external interrupt injection at the next entry into the
+    /// guest ("VM-entry interruption information" field).
     ///
     /// # Safety
-    /// Le bloc de contrôle doit être chargé et l'invité inactif.
+    /// The control block must be loaded and the guest inactive.
     pub unsafe fn inject_interrupt(&self, vector: u8) -> Result<(), VcpuError> {
         unsafe {
             self.control.write_u32(
@@ -440,11 +440,11 @@ impl Vcpu {
         }
         Ok(())
     }
-    /// Avance le pointeur d'instruction invité après l'émulation d'une
-    /// instruction qui a provoqué une sortie (E/S, `rdtsc`, etc.).
+    /// Advances the guest instruction pointer after emulating an instruction
+    /// that caused an exit (I/O, `rdtsc`, etc.).
     ///
     /// # Safety
-    /// Le bloc de contrôle doit être chargé et l'invité ne doit pas être actif.
+    /// The control block must be loaded and the guest must not be active.
     pub unsafe fn advance_rip(&mut self, bytes: u64) -> Result<(), VcpuError> {
         self.guest.rip = self.guest.rip.wrapping_add(bytes);
         unsafe {
@@ -453,21 +453,21 @@ impl Vcpu {
         }
         Ok(())
     }
-    /// Décharge le bloc de contrôle.
+    /// Unloads the control block.
     ///
     /// # Safety
-    /// Aucun invité ne doit être actif sur ce vCPU.
+    /// No guest must be active on this vCPU.
     pub unsafe fn clear(&mut self) -> Result<(), VcpuError> {
-        // SAFETY: contrat de l'appelant.
+        // SAFETY: caller contract.
         unsafe { self.control.clear()? };
         self.launched = false;
         Ok(())
     }
 
-    /// Écrit l'état hôte (CPU courant) dans le bloc de contrôle.
+    /// Writes the host state (current CPU) into the control block.
     ///
     /// # Safety
-    /// Le bloc de contrôle doit être chargé.
+    /// The control block must be loaded.
     pub unsafe fn configure_host(&self) -> Result<(), VcpuError> {
         let cr0 = read_cr0();
         let cr3 = read_cr3();
@@ -475,7 +475,7 @@ impl Vcpu {
         let efer = crate::arch::x86_64::rdmsr(0xC000_0080);
         let pat = crate::arch::x86_64::rdmsr(0x277);
 
-        // SAFETY: bloc chargé ; les écritures respectent les largeurs.
+        // SAFETY: block loaded; writes respect the widths.
         unsafe {
             self.control.write_natural(field::HOST_CR0, cr0)?;
             self.control.write_natural(field::HOST_CR3, cr3)?;
@@ -489,7 +489,7 @@ impl Vcpu {
                 s9vm_guest_exit as unsafe extern "C" fn() as usize as u64,
             )?;
 
-            // Segments hôte : lus depuis les registres du CPU courant.
+            // Host segments: read from the current CPU registers.
             let mut cs: u16;
             let mut ss: u16;
             let mut ds: u16;
@@ -514,7 +514,7 @@ impl Vcpu {
             self.control.write_u16(field::HOST_TR_SELECTOR, tr)?;
             self.control.write_natural(field::HOST_TR_BASE, tr_base(tr))?;
 
-            // Tables système hôte.
+            // Host system tables.
             let (gdtr_base, _gdtr_limit) = read_gdtr();
             let (idtr_base, _idtr_limit) = read_idtr();
             self.control
@@ -522,7 +522,7 @@ impl Vcpu {
             self.control
                 .write_natural(field::HOST_IDTR_BASE, idtr_base)?;
 
-            // Bases FS/GS hôte (GS porte les données par-CPU).
+            // Host FS/GS bases (GS carries the per-CPU data).
             let fs_base = crate::arch::x86_64::rdmsr(0xC000_0100);
             let gs_base = crate::arch::x86_64::rdmsr(0xC000_0101);
             self.control
@@ -543,21 +543,21 @@ impl Vcpu {
         Ok(())
     }
 
-    /// Photographie des champs hôte du bloc de contrôle, pour diagnostiquer un
-    /// échec d'entrée `VmFail(8)` (« invalid host-state field »).
+    /// Snapshot of the host fields of the control block, to diagnose a
+    /// `VmFail(8)` entry failure ("invalid host-state field").
     ///
-    /// Affiche aussi les valeurs réellement portées par le CPU au moment de
-    /// l'appel, ce qui permet de repérer un champ oublié ou mal encodé.
+    /// Also prints the values actually carried by the CPU at the time of the
+    /// call, which helps spot a forgotten or badly encoded field.
     ///
     /// # Safety
-    /// Le bloc de contrôle doit être chargé sur le CPU courant.
+    /// The control block must be loaded on the current CPU.
     pub unsafe fn host_diagnostics(&self) -> alloc::string::String {
         use alloc::format;
         let natural = |f: u32| unsafe { self.control.read_natural(f).unwrap_or(u64::MAX) };
         let u16_field = |f: u32| unsafe { self.control.read_u16(f).unwrap_or(u16::MAX) };
         let u32_field = |f: u32| unsafe { self.control.read_u32(f).unwrap_or(u32::MAX) };
 
-        // Sélecteurs réellement chargés dans le CPU.
+        // Selectors actually loaded in the CPU.
         let mut tr: u16 = 0;
         let mut cs: u16 = 0;
         let mut ss: u16 = 0;
@@ -623,10 +623,10 @@ impl Vcpu {
             )
         }
     }
-    /// Écrit l'état invité et les contrôles d'exécution.
+    /// Writes the guest state and the execution controls.
     ///
     /// # Safety
-    /// Le bloc de contrôle doit être chargé.
+    /// The control block must be loaded.
     pub unsafe fn configure(
         &mut self,
         caps: &HwCaps,
@@ -634,13 +634,13 @@ impl Vcpu {
     ) -> Result<(), VcpuError> {
         self.guest = *guest;
         self.preemption_timer = if caps.preemption_timer {
-            // ~1 M de « ticks » du timer : borne le temps invité sans créer
-            // une tempête de sorties.
+            // ~1 M timer "ticks": bounds guest time without creating an exit
+            // storm.
             Some(1_000_000)
         } else {
             None
         };
-        // SAFETY: bloc chargé ; les largeurs correspondent aux champs.
+        // SAFETY: block loaded; widths match the fields.
         unsafe {
             self.write_guest_state(guest)?;
             self.write_controls(caps)?;
@@ -668,9 +668,9 @@ impl Vcpu {
     }
 
     unsafe fn write_guest_state(&mut self, guest: &GuestState) -> Result<(), VcpuError> {
-        // SAFETY: appelant garantit le bloc chargé.
+        // SAFETY: caller guarantees the block is loaded.
         unsafe {
-            // Registres généraux.
+            // General registers.
             self.frame = EnterFrame {
                 rax: guest.rax,
                 rbx: guest.rbx,
@@ -694,7 +694,7 @@ impl Vcpu {
             };
             let _ = S9VM_ENTER_FRAME_SIZE;
 
-            // Registres de contrôle et d'état.
+            // Control and state registers.
             self.control.write_natural(field::GUEST_CR0, guest.cr0)?;
             self.control.write_natural(field::GUEST_CR3, guest.cr3)?;
             self.control.write_natural(field::GUEST_CR4, guest.cr4)?;
@@ -773,7 +773,7 @@ impl Vcpu {
                 guest.tr,
             )?;
 
-            // Tables système et MSR invités.
+            // Guest system tables and MSRs.
             self.control
                 .write_natural(field::GUEST_GDTR_BASE, guest.gdtr_base)?;
             self.control
@@ -800,7 +800,7 @@ impl Vcpu {
         access_rights_field: u32,
         segment: crate::s9vm::guest::Segment,
     ) -> Result<(), VcpuError> {
-        // SAFETY: appelant garantit le bloc chargé.
+        // SAFETY: caller guarantees the block is loaded.
         unsafe {
             self.control.write_u16(selector_field, segment.selector)?;
             self.control.write_natural(base_field, segment.base)?;
@@ -829,7 +829,7 @@ impl Vcpu {
         let entry = caps
             .entry_allowed
             .apply(bits::ENTRY_IA32E_MODE | bits::ENTRY_LOAD_IA32_EFER);
-        // SAFETY: bloc chargé ; largeurs 16 bits pour les contrôles.
+        // SAFETY: block loaded; 16-bit widths for the controls.
         unsafe {
             self.control.write_u32(field::PIN_BASED_CONTROLS, pin)?;
             self.control
@@ -842,24 +842,24 @@ impl Vcpu {
         Ok(())
     }
 
-    /// Lance ou reprend l'invité. Bloquant jusqu'à la prochaine sortie.
+    /// Launches or resumes the guest. Blocks until the next exit.
     ///
     /// # Safety
-    /// - VT-x doit être actif sur le CPU courant (le bloc est chargé) ;
-    /// - les interruptions locales doivent être désactivées ;
-    /// - `configure_host` et `configure` doivent avoir été appelés.
+    /// - VT-x must be active on the current CPU (the block is loaded);
+    /// - local interrupts must be disabled;
+    /// - `configure_host` and `configure` must have been called.
     pub unsafe fn run(&mut self) -> Result<ExitInfo, VcpuError> {
         self.frame.launched = u64::from(self.launched);
         if let Some(ticks) = self.preemption_timer {
-            // Réarmé à chaque entrée : chaque tranche de temps invitée est
-            // bornée, y compris après une reprise interne.
+            // Re-armed on every entry: each guest time slice is bounded,
+            // including after an internal resumption.
             unsafe {
                 let _ = self
                     .control
                     .write_u32(field::VMX_PREEMPTION_TIMER, ticks);
             }
         }
-        // SAFETY: contrat de l'appelant ; le trampoline restaure l'état hôte.
+        // SAFETY: caller contract; the trampoline restores the host state.
         let failed = unsafe {
             s9vm_enter_guest(
                 &mut self.frame as *mut EnterFrame,
@@ -867,8 +867,8 @@ impl Vcpu {
             )
         };
         if failed != 0 {
-            // Le code d'erreur est dans le champ d'instruction du bloc.
-            // SAFETY: bloc chargé.
+            // The error code is in the block's instruction field.
+            // SAFETY: block loaded.
             let code = unsafe {
                 self.control
                     .read_u32(field::INSTRUCTION_ERROR)
@@ -877,10 +877,10 @@ impl Vcpu {
             return Err(VcpuError::VmFail(code));
         }
         self.launched = true;
-        // SAFETY: bloc chargé ; lecture des champs de sortie.
+        // SAFETY: block loaded; reading the exit fields.
         let exit = unsafe { self.read_exit()? };
-        // Récupère l'état invité post-sortie conservé dans le bloc.
-        // SAFETY: bloc chargé.
+        // Retrieves the post-exit guest state kept in the block.
+        // SAFETY: block loaded.
         unsafe {
             if let Ok(rip) = self.control.read_natural(field::GUEST_RIP) {
                 self.guest.rip = rip;
@@ -910,7 +910,7 @@ impl Vcpu {
     }
 
     unsafe fn read_exit(&self) -> Result<ExitInfo, VcpuError> {
-        // SAFETY: bloc chargé ; champs 32 bits.
+        // SAFETY: block loaded; 32-bit fields.
         unsafe {
             let raw_reason = self.control.read_u32(field::EXIT_REASON)?;
             let reason = ExitReason::decode(raw_reason);
@@ -965,46 +965,46 @@ impl Vcpu {
         let _ = exit;
     }
 
-    /// Dernière sortie observée.
+    /// Last observed exit.
     pub fn last_exit(&self) -> Option<ExitInfo> {
         self.exit
     }
 
-    /// État invité courant (registres mis à jour après la dernière sortie).
+    /// Current guest state (registers updated after the last exit).
     pub fn guest(&self) -> &GuestState {
         &self.guest
     }
 }
 
 // ---------------------------------------------------------------------------
-// Accès CPU (lecture seule) utilisés pour construire l'état hôte.
+// CPU access (read-only) used to build the host state.
 // ---------------------------------------------------------------------------
 
 fn read_cr0() -> u64 {
     let value: u64;
-    // SAFETY: lecture d'un registre de contrôle.
+    // SAFETY: read of a control register.
     unsafe { core::arch::asm!("mov {}, cr0", out(reg) value, options(nomem, nostack, preserves_flags)) };
     value
 }
 
 fn read_cr3() -> u64 {
     let value: u64;
-    // SAFETY: lecture d'un registre de contrôle.
+    // SAFETY: read of a control register.
     unsafe { core::arch::asm!("mov {}, cr3", out(reg) value, options(nomem, nostack, preserves_flags)) };
     value
 }
 
 fn read_cr4() -> u64 {
     let value: u64;
-    // SAFETY: lecture d'un registre de contrôle.
+    // SAFETY: read of a control register.
     unsafe { core::arch::asm!("mov {}, cr4", out(reg) value, options(nomem, nostack, preserves_flags)) };
     value
 }
 
-/// Lit la base de la table des descripteurs globaux (`sgdt`).
+/// Reads the global descriptor table base (`sgdt`).
 fn read_gdtr() -> (u64, u16) {
     let mut descriptor = [0u8; 10];
-    // SAFETY: `sgdt` écrit 10 octets dans un buffer local.
+    // SAFETY: `sgdt` writes 10 bytes into a local buffer.
     unsafe {
         core::arch::asm!("sgdt [{}]", in(reg) descriptor.as_mut_ptr(), options(nostack));
     }
@@ -1022,10 +1022,10 @@ fn read_gdtr() -> (u64, u16) {
     (base, limit)
 }
 
-/// Lit la base de la table des descripteurs d'interruption (`sidt`).
+/// Reads the interrupt descriptor table base (`sidt`).
 fn read_idtr() -> (u64, u16) {
     let mut descriptor = [0u8; 10];
-    // SAFETY: `sidt` écrit 10 octets dans un buffer local.
+    // SAFETY: `sidt` writes 10 bytes into a local buffer.
     unsafe {
         core::arch::asm!("sidt [{}]", in(reg) descriptor.as_mut_ptr(), options(nostack));
     }
@@ -1043,7 +1043,7 @@ fn read_idtr() -> (u64, u16) {
     (base, limit)
 }
 
-/// Base d'un descripteur de TSS à partir de son sélecteur (GDT).
+/// Base of a TSS descriptor from its selector (GDT).
 fn tr_base(selector: u16) -> u64 {
     if selector == 0 {
         return 0;
@@ -1051,11 +1051,11 @@ fn tr_base(selector: u16) -> u64 {
     let index = (selector >> 3) as usize;
     let (gdt_base, _) = read_gdtr();
     let entry = (gdt_base as *const u8).wrapping_add(index * 8);
-    // SAFETY: le sélecteur TR désigne une entrée valide de la GDT courante.
+    // SAFETY: the TR selector designates a valid entry of the current GDT.
     unsafe {
         let low = core::ptr::read_volatile(entry as *const u64);
         let upper = core::ptr::read_volatile(entry.add(8) as *const u32);
-        // TSS 64 bits : base éclatée en quatre morceaux (voir SDM).
+        // 64-bit TSS: base split into four pieces (see SDM).
         ControlBlock::decode_tss_base(low, upper)
     }
 }
