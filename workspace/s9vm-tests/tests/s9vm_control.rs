@@ -75,3 +75,45 @@ fn eptp_masks_low_address_bits() {
     assert_eq!(eptp & 0xFFF, 0x1E); // type WB (6) + longueur (3 << 3)
     assert_eq!(eptp & 0x000F_FFFF_FFFF_F000, 0x1000_0000);
 }
+
+#[test]
+fn decodes_64bit_tss_descriptor_base() {
+    use control::ControlBlock;
+
+    // Descripteur de TSS 64 bits synthétique (16 octets) dont la base est
+    // éclatée comme l'exige le mode long : base[15:0] octets 2-3,
+    // base[23:16] octet 4, base[31:24] octet 7, base[63:32] octets 8-11.
+    // Un décodage erroné (décalage ou morceau oublié) produisait une adresse
+    // non canonique refusée à l'entrée invitée (`VMfail(8)`).
+    let base: u64 = 0xFFFF_FFFF_808B_1640;
+    let limit: u16 = 0x0067;
+    let access: u8 = 0x89; // TSS 64 bits disponible, DPL 0
+    let flags: u8 = 0x00;
+
+    let low = (limit as u64)
+        | (((base >> 0) & 0xFFFF) << 16)
+        | (((base >> 16) & 0xFF) << 32)
+        | ((access as u64) << 40)
+        | (((base >> 24) & 0xFF) << 56)
+        ;
+    // Octet 6 (limite 19:16 + flags) inséré entre l'accès et la base haute.
+    let low = low | ((flags as u64) << 48);
+    let upper = (base >> 32) as u32;
+
+    assert_eq!(ControlBlock::decode_tss_base(low, upper), base);
+
+    // L'adresse décodée doit rester canonique (bits 63:48 = 0xFFFF).
+    let decoded = ControlBlock::decode_tss_base(low, upper);
+    assert_eq!(decoded >> 48, 0xFFFF);
+    assert_eq!((decoded >> 47) & 1, 1);
+}
+
+#[test]
+fn tss_base_decoder_handles_low_addresses() {
+    use control::ControlBlock;
+
+    let base: u64 = 0x0000_0000_0040_0000;
+    let low = 0x67u64 | ((base & 0xFFFF) << 16) | (((base >> 16) & 0xFF) << 32);
+    let upper = (base >> 32) as u32;
+    assert_eq!(ControlBlock::decode_tss_base(low, upper), base);
+}

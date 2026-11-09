@@ -18,7 +18,9 @@ KERNEL_ELF="target/x86_64-unknown-none/$PROFILE/kernel"
 SILO_CONFIG="$SCRIPT_DIR/../../workspace/assets/boot/silo.toml"
 # Optional kernel boot configuration: copied to the ESP as /boot/strat9.cfg so
 # a machine can be switched to the lite (or serial) console without a rebuild.
-BOOT_CONFIG="$SCRIPT_DIR/../../workspace/assets/boot/strat9.cfg"
+# `STRAT9_BOOT_CONFIG` selects an alternate file (e.g. the s9vm selftest
+# variant) without touching the default one.
+BOOT_CONFIG="${STRAT9_BOOT_CONFIG:-$SCRIPT_DIR/../../workspace/assets/boot/strat9.cfg}"
 
 strat9_image_name "$IMAGE_BASENAME"
 case "$PROFILE:$MODULE_PROFILE" in

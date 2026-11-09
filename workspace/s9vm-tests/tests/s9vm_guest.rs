@@ -6,7 +6,7 @@ mod guest;
 use guest::{
     data_access_rights, long_code_access_rights, unusable_access_rights, FixedBits, GuestError,
     GuestState, Segment, AR_DEFAULT_BIG, AR_LONG_MODE, AR_UNUSABLE, CR0_PE, CR0_PG, CR4_PAE,
-    CR4_PGE, EFER_LME, EFER_NXE,
+    CR4_PGE, CR4_VMXE, EFER_LMA, EFER_LME, EFER_NXE,
 };
 
 fn permissive() -> FixedBits {
@@ -139,7 +139,10 @@ fn segment_helpers_build_expected_access_rights() {
     // Données : type 2, S=1, P=1, DPL=0.
     assert_eq!(data_access_rights(0), 0x92);
     // Code 64 bits : type A, S=1, P=1, L=1.
-    assert_eq!(long_code_access_rights(0), 0x29A);
+    // VMCS access-rights : L = bit 13 (pas bit 9), D/B = bit 14.
+    assert_eq!(AR_LONG_MODE, 1 << 13);
+    assert_eq!(AR_DEFAULT_BIG, 1 << 14);
+    assert_eq!(long_code_access_rights(0), 0x209A);
     assert!(long_code_access_rights(0) & AR_LONG_MODE != 0);
     // Inutilisable.
     assert!(unusable_access_rights() & AR_UNUSABLE != 0);
@@ -156,3 +159,32 @@ fn long_mode_state_has_expected_flags() {
     assert!(state.efer & EFER_LME != 0);
     assert!(state.efer & EFER_NXE != 0);
 }
+
+#[test]
+fn long_mode_requires_lma_in_guest_efer_field() {
+    // Le contrôle d'entrée « load IA32_EFER » impose LMA == IA-32e mode.
+    // Un champ invité sans LMA fait échouer l'entrée (`VMfail`).
+    let mut state = GuestState::long_mode_64(0x1000, 0x2000, 0x3000);
+    state.efer &= !EFER_LMA;
+    assert_eq!(
+        state.validate(&permissive(), true),
+        Err(GuestError::LongModeWithoutLma)
+    );
+}
+
+#[test]
+fn long_mode_guest_efer_sets_lme_and_lma() {
+    let state = GuestState::long_mode_64(0x1000, 0x2000, 0x3000);
+    assert!(state.efer & EFER_LME != 0);
+    assert!(state.efer & EFER_LMA != 0);
+    assert!(state.efer & EFER_NXE != 0);
+}
+#[test]
+fn long_mode_guest_cr4_has_vmxe() {
+    // IA32_VMX_CR4_FIXED0 exige CR4.VMXE dans l'état invité.
+    let state = GuestState::long_mode_64(0x1000, 0x2000, 0x3000);
+    assert_ne!(state.cr4 & CR4_VMXE, 0);
+    assert_ne!(state.cr4 & CR4_PAE, 0);
+}
+
+

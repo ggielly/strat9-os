@@ -26,12 +26,13 @@ pub const MSR_CR0_FIXED0: u32 = 0x486;
 pub const MSR_CR0_FIXED1: u32 = 0x487;
 pub const MSR_CR4_FIXED0: u32 = 0x488;
 pub const MSR_CR4_FIXED1: u32 = 0x489;
-pub const MSR_SECONDARY_PROC_BASED: u32 = 0x48A;
-pub const MSR_EPT_VPID_CAP: u32 = 0x48B;
-pub const MSR_TRUE_PIN_BASED: u32 = 0x48C;
-pub const MSR_TRUE_PRIMARY_PROC_BASED: u32 = 0x48D;
-pub const MSR_TRUE_EXIT_CONTROLS: u32 = 0x48E;
-pub const MSR_TRUE_ENTRY_CONTROLS: u32 = 0x48F;
+pub const MSR_VMCS_ENUM: u32 = 0x48A;
+pub const MSR_SECONDARY_PROC_BASED: u32 = 0x48B;
+pub const MSR_EPT_VPID_CAP: u32 = 0x48C;
+pub const MSR_TRUE_PIN_BASED: u32 = 0x48D;
+pub const MSR_TRUE_PRIMARY_PROC_BASED: u32 = 0x48E;
+pub const MSR_TRUE_EXIT_CONTROLS: u32 = 0x48F;
+pub const MSR_TRUE_ENTRY_CONTROLS: u32 = 0x490;
 
 /// Bits du MSR `MSR_EPT_VPID_CAP` utiles à s9vm.
 pub mod ept_vpid_cap {

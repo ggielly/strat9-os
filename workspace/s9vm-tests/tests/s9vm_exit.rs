@@ -4,7 +4,7 @@
 mod exit;
 
 use exit::{
-    default_action, reason_name, ExitAction, ExitClass, ExitReason, VectorEvent, CPUID,
+    default_action, external_interrupt_info, reason_name, ExitAction, ExitClass, ExitReason, VectorEvent, CPUID,
     EPT_MISCONFIGURATION, EPT_VIOLATION, EXCEPTION_OR_NMI, EXTERNAL_INTERRUPT, HLT, IO_INSTRUCTION,
     PAUSE, PREEMPTION_TIMER, TRIPLE_FAULT,
 };
@@ -98,3 +98,15 @@ fn reason_names_are_distinct_and_known() {
     assert_eq!(reason_name(CPUID), "cpuid");
     assert_eq!(reason_name(0xFFFF), "unknown");
 }
+#[test]
+fn encodes_external_interrupt_injection_field() {
+    // Champ VM-entry interruption information : bit 31 valide, type externe
+    // (bits 10:8 = 0), vecteur sur 8 bits.
+    let info = external_interrupt_info(0x40);
+    assert_eq!(info & (1 << 31), 1 << 31);
+    assert_eq!((info >> 8) & 0x7, 0);
+    assert_eq!(info & 0xFF, 0x40);
+    assert_eq!(external_interrupt_info(0), 1 << 31);
+    assert_eq!(external_interrupt_info(0xFF) & 0xFF, 0xFF);
+}
+

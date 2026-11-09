@@ -184,6 +184,8 @@ pub mod field {
     pub const HOST_TR_BASE: u32 = 0x6C0A;
     pub const HOST_GDTR_BASE: u32 = 0x6C0C;
     pub const HOST_IDTR_BASE: u32 = 0x6C0E;
+    /// Sélecteur de code hôte pour `sysenter` (champ 32 bits, `0x4C00`).
+    pub const HOST_SYSENTER_CS: u32 = 0x4C00;
     pub const HOST_SYSENTER_ESP: u32 = 0x6C10;
     pub const HOST_SYSENTER_EIP: u32 = 0x6C12;
     pub const HOST_RSP: u32 = 0x6C14;
@@ -259,6 +261,23 @@ impl ControlBlock {
         unsafe {
             core::ptr::write_volatile(region_virt as *mut u32, self.revision);
         }
+    }
+
+    /// Décode la base d'un descripteur de TSS 64 bits (16 octets).
+    ///
+    /// En mode long, la base d'un TSS est éclatée en quatre morceaux :
+    /// `base[15:0]` dans les octets 2-3, `base[23:16]` dans l'octet 4,
+    /// `base[31:24]` dans l'octet 7 et `base[63:32]` dans les octets 8-11.
+    ///
+    /// Cette fonction est pure pour être testable sur l'hôte : un décalage
+    /// erroné produit une adresse non canonique, que le processeur refuse au
+    /// moment de l'entrée invitée (`VMfail(8)`, host-state invalide).
+    pub const fn decode_tss_base(descriptor_low: u64, descriptor_upper: u32) -> u64 {
+        let base_low = (descriptor_low >> 16) & 0xFFFF;
+        let base_mid = (descriptor_low >> 32) & 0xFF;
+        let base_high = (descriptor_low >> 56) & 0xFF;
+        let base_upper = descriptor_upper as u64;
+        base_low | (base_mid << 16) | (base_high << 24) | (base_upper << 32)
     }
 
     /// Charge le bloc de contrôle sur le CPU courant (`vmptrld`).
@@ -523,3 +542,4 @@ pub unsafe fn invalidate_second_level_all() {
         );
     }
 }
+

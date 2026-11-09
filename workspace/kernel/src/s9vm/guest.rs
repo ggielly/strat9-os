@@ -26,6 +26,12 @@ pub const CR0_PG: u64 = 1 << 31;
 
 /// Bit `CR4.PAE`.
 pub const CR4_PAE: u64 = 1 << 5;
+/// Bit `CR4.VMXE`.
+///
+/// `IA32_VMX_CR4_FIXED0` impose ce bit dans CR4 tant que l'opération VMX est
+/// active, y compris dans l'état invité : l'omettre provoque un échec
+/// d'entrée (`VM entry with invalid guest state`).
+pub const CR4_VMXE: u64 = 1 << 13;
 /// Bit `CR4.PGE`.
 pub const CR4_PGE: u64 = 1 << 7;
 /// Bit `CR4.OSFXSR`.
@@ -51,9 +57,9 @@ pub const EFER_NXE: u64 = 1 << 11;
 /// Bit « segment inutilisable » des droits d'accès invités (VMCS : bit 16).
 pub const AR_UNUSABLE: u32 = 1 << 16;
 /// Bit « L » (mode long) des droits d'accès de `CS`.
-pub const AR_LONG_MODE: u32 = 1 << 9;
+pub const AR_LONG_MODE: u32 = 1 << 13;
 /// Bit « D/B » des droits d'accès.
-pub const AR_DEFAULT_BIG: u32 = 1 << 10;
+pub const AR_DEFAULT_BIG: u32 = 1 << 14;
 /// Bit « présent ».
 pub const AR_PRESENT: u32 = 0x80;
 /// Bit « code ou données » (1 = code/données, 0 = système).
@@ -264,8 +270,8 @@ impl GuestState {
         let mut state = Self::real_mode(entry, stack_top);
         state.cr0 = CR0_PE | CR0_MP | CR0_NE | CR0_PG | CR0_WP;
         state.cr3 = cr3;
-        state.cr4 = CR4_PAE | CR4_PGE | CR4_OSFXSR | CR4_OSXMMEXCPT;
-        state.efer = EFER_SCE | EFER_LME | EFER_NXE;
+        state.cr4 = CR4_PAE | CR4_PGE | CR4_OSFXSR | CR4_OSXMMEXCPT | CR4_VMXE;
+        state.efer = EFER_SCE | EFER_LME | EFER_LMA | EFER_NXE;
         state.cs = Segment {
             selector: 0x8,
             base: 0,
@@ -348,6 +354,9 @@ pub enum GuestError {
     Cr4RequiredBit,
     /// Mode long demandé sans paging (`CR0.PG` absent).
     LongModeWithoutPaging,
+    /// Mode long demandé sans `EFER.LMA` dans le champ invité (le contrôle
+    /// d'entrée « load IA32_EFER » impose `LMA == IA-32e mode guest`).
+    LongModeWithoutLma,
     /// Mode réel sans « unrestricted guest ».
     RealModeRestricted,
     /// En mode long, `CS.L` doit être à 1 et `CS.D` à 0.
@@ -396,6 +405,12 @@ impl GuestState {
         if self.efer & EFER_LME != 0 {
             if self.cr0 & CR0_PG == 0 {
                 return Err(GuestError::LongModeWithoutPaging);
+            }
+            // Le champ invité `IA32_EFER` est chargé (contrôle d'entrée
+            // « load IA32_EFER ») : le processeur exige que LMA reflète le
+            // mode IA-32e de l'entrée. Omettre LMA provoque un `VMfail`.
+            if self.efer & EFER_LMA == 0 {
+                return Err(GuestError::LongModeWithoutLma);
             }
             if !self.cs.is_long_code() || self.cs.access_rights & AR_DEFAULT_BIG != 0 {
                 return Err(GuestError::BadLongCodeSegment);
@@ -469,3 +484,4 @@ impl FixedBits {
         }
     }
 }
+

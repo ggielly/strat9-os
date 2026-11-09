@@ -29,8 +29,12 @@ use crate::s9vm::caps::HwCaps;
 pub mod bits {
     /// Contrôle de sortie : l'hôte fonctionne en mode 64 bits (IA-32e).
     pub const EXIT_HOST_ADDR_SPACE_SIZE: u32 = 1 << 9;
+    /// Contrôle de sortie : recharger IA32_EFER de l'hôte (requis en 64 bits).
+    pub const EXIT_LOAD_IA32_EFER: u32 = 1 << 21;
     /// Contrôle d'entrée : l'invité fonctionne en mode 64 bits (IA-32e).
     pub const ENTRY_IA32E_MODE: u32 = 1 << 9;
+    /// Contrôle d'entrée : recharger IA32_EFER de l'invité (requis en 64 bits).
+    pub const ENTRY_LOAD_IA32_EFER: u32 = 1 << 15;
     /// Contrôle primaire : sortie sur `hlt`.
     pub const PRIMARY_HLT_EXITING: u32 = 1 << 7;
     /// Contrôle secondaire : activer l'EPT.
@@ -336,6 +340,102 @@ impl Vcpu {
         Ok(())
     }
 
+    /// Photographie des champs invités du bloc de contrôle, pour diagnostiquer
+    /// un échec d'entrée (« VM entry with invalid guest state »).
+    ///
+    /// # Safety
+    /// Le bloc de contrôle doit être chargé sur le CPU courant.
+    pub unsafe fn guest_diagnostics(&self) -> alloc::string::String {
+        use alloc::format;
+        let natural = |f: u32| unsafe { self.control.read_natural(f).unwrap_or(u64::MAX) };
+        let u16_field = |f: u32| unsafe { self.control.read_u16(f).unwrap_or(u16::MAX) };
+        let u32_field = |f: u32| unsafe { self.control.read_u32(f).unwrap_or(u32::MAX) };
+        unsafe {
+            format!(
+                "guest cr0={:#x} cr3={:#x} cr4={:#x} efer={:#x} pat={:#x} rsp={:#x} rip={:#x} \
+                 rflags={:#x} dr7={:#x} act={:#x} intr={:#x} \
+                 sel(cs={:#x} ss={:#x} ds={:#x} es={:#x} fs={:#x} gs={:#x} ldtr={:#x} tr={:#x}) \
+                 ar(cs={:#x} ss={:#x} ds={:#x} es={:#x} fs={:#x} gs={:#x} ldtr={:#x} tr={:#x}) \
+                 lim(cs={:#x} ss={:#x} ds={:#x} es={:#x} fs={:#x} gs={:#x} ldtr={:#x} tr={:#x}) \
+                 gdtr={:#x}/{:#x} idtr={:#x}/{:#x} link={:#x} dbgctl={:#x} smstate={:#x} \
+                 exit(reason={:#x} qual={:#x} instrerr={:#x} len={:#x} info={:#x})",
+                natural(field::GUEST_CR0),
+                natural(field::GUEST_CR3),
+                natural(field::GUEST_CR4),
+                natural(field::GUEST_EFER),
+                natural(field::GUEST_PAT),
+                natural(field::GUEST_RSP),
+                natural(field::GUEST_RIP),
+                natural(field::GUEST_RFLAGS),
+                natural(field::GUEST_DR7),
+                u32_field(field::GUEST_ACTIVITY_STATE),
+                u32_field(field::GUEST_INTERRUPTIBILITY_INFO),
+                u16_field(field::GUEST_CS_SELECTOR),
+                u16_field(field::GUEST_SS_SELECTOR),
+                u16_field(field::GUEST_DS_SELECTOR),
+                u16_field(field::GUEST_ES_SELECTOR),
+                u16_field(field::GUEST_FS_SELECTOR),
+                u16_field(field::GUEST_GS_SELECTOR),
+                u16_field(field::GUEST_LDTR_SELECTOR),
+                u16_field(field::GUEST_TR_SELECTOR),
+                u32_field(field::GUEST_CS_ACCESS_RIGHTS),
+                u32_field(field::GUEST_SS_ACCESS_RIGHTS),
+                u32_field(field::GUEST_DS_ACCESS_RIGHTS),
+                u32_field(field::GUEST_ES_ACCESS_RIGHTS),
+                u32_field(field::GUEST_FS_ACCESS_RIGHTS),
+                u32_field(field::GUEST_GS_ACCESS_RIGHTS),
+                u32_field(field::GUEST_LDTR_ACCESS_RIGHTS),
+                u32_field(field::GUEST_TR_ACCESS_RIGHTS),
+                u32_field(field::GUEST_CS_LIMIT),
+                u32_field(field::GUEST_SS_LIMIT),
+                u32_field(field::GUEST_DS_LIMIT),
+                u32_field(field::GUEST_ES_LIMIT),
+                u32_field(field::GUEST_FS_LIMIT),
+                u32_field(field::GUEST_GS_LIMIT),
+                u32_field(field::GUEST_LDTR_LIMIT),
+                u32_field(field::GUEST_TR_LIMIT),
+                natural(field::GUEST_GDTR_BASE),
+                u32_field(field::GUEST_GDTR_LIMIT),
+                natural(field::GUEST_IDTR_BASE),
+                u32_field(field::GUEST_IDTR_LIMIT),
+                natural(field::GUEST_VMCS_LINK_POINTER),
+                natural(field::GUEST_DEBUGCTL),
+                u32_field(field::GUEST_SMSTATE),
+                u32_field(field::EXIT_REASON),
+                natural(field::EXIT_QUALIFICATION),
+                u32_field(field::INSTRUCTION_ERROR),
+                u32_field(field::EXIT_INSTRUCTION_LENGTH),
+                u32_field(field::EXIT_INSTRUCTION_INFO),
+            )
+        }
+    }
+    /// Programme l'injection d'une interruption externe au prochain passage
+    /// dans l'invité (champ « VM-entry interruption information »).
+    ///
+    /// # Safety
+    /// Le bloc de contrôle doit être chargé et l'invité inactif.
+    pub unsafe fn inject_interrupt(&self, vector: u8) -> Result<(), VcpuError> {
+        unsafe {
+            self.control.write_u32(
+                field::ENTRY_INTERRUPT_INFO,
+                crate::s9vm::exit::external_interrupt_info(vector),
+            )?;
+        }
+        Ok(())
+    }
+    /// Avance le pointeur d'instruction invité après l'émulation d'une
+    /// instruction qui a provoqué une sortie (E/S, `rdtsc`, etc.).
+    ///
+    /// # Safety
+    /// Le bloc de contrôle doit être chargé et l'invité ne doit pas être actif.
+    pub unsafe fn advance_rip(&mut self, bytes: u64) -> Result<(), VcpuError> {
+        self.guest.rip = self.guest.rip.wrapping_add(bytes);
+        unsafe {
+            self.control
+                .write_natural(field::GUEST_RIP, self.guest.rip)?;
+        }
+        Ok(())
+    }
     /// Décharge le bloc de contrôle.
     ///
     /// # Safety
@@ -413,13 +513,99 @@ impl Vcpu {
             self.control
                 .write_natural(field::HOST_GS_BASE, gs_base)?;
             self.control
-                .write_natural(field::HOST_SYSENTER_ESP, 0)?;
-            self.control
-                .write_natural(field::HOST_SYSENTER_EIP, 0)?;
+                .write_u32(field::HOST_SYSENTER_CS, cs as u32)?;
+            self.control.write_natural(
+                field::HOST_SYSENTER_ESP,
+                crate::arch::x86_64::rdmsr(0x175),
+            )?;
+            self.control.write_natural(
+                field::HOST_SYSENTER_EIP,
+                crate::arch::x86_64::rdmsr(0x176),
+            )?;
         }
         Ok(())
     }
 
+    /// Photographie des champs hôte du bloc de contrôle, pour diagnostiquer un
+    /// échec d'entrée `VmFail(8)` (« invalid host-state field »).
+    ///
+    /// Affiche aussi les valeurs réellement portées par le CPU au moment de
+    /// l'appel, ce qui permet de repérer un champ oublié ou mal encodé.
+    ///
+    /// # Safety
+    /// Le bloc de contrôle doit être chargé sur le CPU courant.
+    pub unsafe fn host_diagnostics(&self) -> alloc::string::String {
+        use alloc::format;
+        let natural = |f: u32| unsafe { self.control.read_natural(f).unwrap_or(u64::MAX) };
+        let u16_field = |f: u32| unsafe { self.control.read_u16(f).unwrap_or(u16::MAX) };
+        let u32_field = |f: u32| unsafe { self.control.read_u32(f).unwrap_or(u32::MAX) };
+
+        // Sélecteurs réellement chargés dans le CPU.
+        let mut tr: u16 = 0;
+        let mut cs: u16 = 0;
+        let mut ss: u16 = 0;
+        let mut ds: u16 = 0;
+        let mut es: u16 = 0;
+        let mut fs: u16 = 0;
+        let mut gs: u16 = 0;
+        unsafe {
+            core::arch::asm!("str ax", out("ax") tr, options(nomem, nostack));
+            core::arch::asm!("mov ax, cs", out("ax") cs, options(nomem, nostack));
+            core::arch::asm!("mov ax, ss", out("ax") ss, options(nomem, nostack));
+            core::arch::asm!("mov ax, ds", out("ax") ds, options(nomem, nostack));
+            core::arch::asm!("mov ax, es", out("ax") es, options(nomem, nostack));
+            core::arch::asm!("mov ax, fs", out("ax") fs, options(nomem, nostack));
+            core::arch::asm!("mov ax, gs", out("ax") gs, options(nomem, nostack));
+        }
+        let (gdtr_base, gdtr_limit) = read_gdtr();
+        let (idtr_base, idtr_limit) = read_idtr();
+        let efer = unsafe { crate::arch::x86_64::rdmsr(0xC000_0080) };
+        let pat = unsafe { crate::arch::x86_64::rdmsr(0x277) };
+        let host_sysenter_cs = u32_field(field::HOST_SYSENTER_CS);
+        unsafe {
+            format!(
+                "host cr0={:#x} cr3={:#x} cr4={:#x} efer={:#x} pat={:#x} rsp={:#x} rip={:#x} \
+                 sel(cs={:#x} ss={:#x} ds={:#x} es={:#x} fs={:#x} gs={:#x} tr={:#x}) \
+                 trbase={:#x} gdtr={:#x} idtr={:#x} fsb={:#x} gsb={:#x} \
+                 sysenter(cs={:#x} esp={:#x} eip={:#x}) exitctl={:#x} entryctl={:#x} \
+                 cpu(cr0={:#x} cr4={:#x} efer={:#x} pat={:#x} tr={:#x} \
+                 gdtr={:#x}/lim={:#x} idtr={:#x}/lim={:#x})",
+                natural(field::HOST_CR0),
+                natural(field::HOST_CR3),
+                natural(field::HOST_CR4),
+                natural(field::HOST_EFER),
+                natural(field::HOST_PAT),
+                natural(field::HOST_RSP),
+                natural(field::HOST_RIP),
+                u16_field(field::HOST_CS_SELECTOR),
+                u16_field(field::HOST_SS_SELECTOR),
+                u16_field(field::HOST_DS_SELECTOR),
+                u16_field(field::HOST_ES_SELECTOR),
+                u16_field(field::HOST_FS_SELECTOR),
+                u16_field(field::HOST_GS_SELECTOR),
+                u16_field(field::HOST_TR_SELECTOR),
+                natural(field::HOST_TR_BASE),
+                natural(field::HOST_GDTR_BASE),
+                natural(field::HOST_IDTR_BASE),
+                natural(field::HOST_FS_BASE),
+                natural(field::HOST_GS_BASE),
+                host_sysenter_cs,
+                natural(field::HOST_SYSENTER_ESP),
+                natural(field::HOST_SYSENTER_EIP),
+                u32_field(field::EXIT_CONTROLS),
+                u32_field(field::ENTRY_CONTROLS),
+                read_cr0(),
+                read_cr4(),
+                efer,
+                pat,
+                tr,
+                gdtr_base,
+                gdtr_limit,
+                idtr_base,
+                idtr_limit
+            )
+        }
+    }
     /// Écrit l'état invité et les contrôles d'exécution.
     ///
     /// # Safety
@@ -613,8 +799,10 @@ impl Vcpu {
             .apply(bits::SECONDARY_ENABLE_EPT | bits::SECONDARY_UNRESTRICTED_GUEST);
         let exit = caps
             .exit_allowed
-            .apply(bits::EXIT_HOST_ADDR_SPACE_SIZE);
-        let entry = caps.entry_allowed.apply(bits::ENTRY_IA32E_MODE);
+            .apply(bits::EXIT_HOST_ADDR_SPACE_SIZE | bits::EXIT_LOAD_IA32_EFER);
+        let entry = caps
+            .entry_allowed
+            .apply(bits::ENTRY_IA32E_MODE | bits::ENTRY_LOAD_IA32_EFER);
         // SAFETY: bloc chargé ; largeurs 16 bits pour les contrôles.
         unsafe {
             self.control.write_u32(field::PIN_BASED_CONTROLS, pin)?;
@@ -831,10 +1019,13 @@ fn tr_base(selector: u16) -> u64 {
     // SAFETY: le sélecteur TR désigne une entrée valide de la GDT courante.
     unsafe {
         let low = core::ptr::read_volatile(entry as *const u64);
-        // TSS 64 bits : base éclatée sur 3 morceaux.
-        let base_low = (low >> 16) & 0xFFFF;
-        let base_mid = (low >> 40) & 0xFF;
-        let high = core::ptr::read_volatile(entry.add(8) as *const u32) as u64;
-        base_low | (base_mid << 16) | ((high & 0xFFFF_FFFF) << 24)
+        let upper = core::ptr::read_volatile(entry.add(8) as *const u32);
+        // TSS 64 bits : base éclatée en quatre morceaux (voir SDM).
+        ControlBlock::decode_tss_base(low, upper)
     }
 }
+
+
+
+
+

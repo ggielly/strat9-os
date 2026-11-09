@@ -339,3 +339,19 @@ pub const fn default_action(class: ExitClass) -> ExitAction {
         | ExitClass::Unknown => ExitAction::Forward,
     }
 }
+
+/// Bit de validité du champ « VM-entry interruption information » (`0x4016`).
+pub const ENTRY_INTERRUPT_VALID: u32 = 1 << 31;
+/// Type « interruption externe » dans le champ d'entrée (bits 10:8 = 0).
+pub const ENTRY_INTERRUPT_TYPE_EXTERNAL: u32 = 0;
+/// Bit « délivrer un code d'erreur » du champ d'entrée.
+pub const ENTRY_INTERRUPT_DELIVER_ERROR: u32 = 1 << 11;
+
+/// Encode le champ « VM-entry interruption information » pour injecter une
+/// interruption externe de vecteur `vector` à la prochaine entrée invitée.
+///
+/// Le vecteur doit tenir sur 8 bits ; l'appelant valide la plage. La fonction
+/// est pure pour être testable sur l'hôte.
+pub const fn external_interrupt_info(vector: u8) -> u32 {
+    ENTRY_INTERRUPT_VALID | ENTRY_INTERRUPT_TYPE_EXTERNAL | (vector as u32)
+}

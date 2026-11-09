@@ -248,6 +248,8 @@ pub struct VcpuSlot {
     pub regs: VmmRegs,
     /// Contexte matériel (créé au premier `RUN`).
     hardware: Option<Vcpu>,
+    /// Interruption externe en attente d'injection au prochain `RUN`.
+    pending_irq: Option<u8>,
 }
 
 /// Registre global des mondes.
@@ -517,7 +519,7 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
     }
     // 1. Retire le contexte matériel et les registres du registre, sans tenir
     //    le verrou pendant l'exécution.
-    let (world_id, mut hardware, mut regs, pointer) = {
+    let (world_id, mut hardware, mut regs, pointer, pending_irq) = {
         let mut worlds = WORLDS.lock();
         let world = vcpu_world_mut(&mut worlds, vcpu_id).ok_or(RunError::UnknownVcpu)?;
         let slot = world
@@ -528,7 +530,8 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
         let memory = world.memory.as_ref().ok_or(RunError::NoMemory)?;
         let pointer = memory.second_level_pointer(caps);
         let hardware = slot.hardware.take();
-        (world.record.id, hardware, slot.regs, pointer)
+        let pending_irq = slot.pending_irq.take();
+        (world.record.id, hardware, slot.regs, pointer, pending_irq)
     };
     let mut hardware = match hardware {
         Some(hardware) => hardware,
@@ -560,7 +563,15 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
             result = Err(RunError::Hardware(error));
         } else if let Err(error) = hardware.configure(caps, &guest) {
             result = Err(RunError::Hardware(error));
-        } else {
+        } else if let Some(vector) = pending_irq {
+            // Injection différée : le champ « VM-entry interruption
+            // information » est écrit juste avant l'entrée ; le processeur le
+            // consomme et le remet à zéro lors de la livraison.
+            if let Err(error) = hardware.inject_interrupt(vector) {
+                result = Err(RunError::Hardware(error));
+            }
+        }
+        if result.is_ok() {
             let mut resumed = 0u32;
             loop {
                 match hardware.run() {
@@ -633,7 +644,13 @@ pub fn create_vcpu(world_id: u64, apic_id: u32) -> Result<u64, VcpuRegistryError
         abi_version: strat9_abi::vmm::VMM_ABI_VERSION,
         ..Default::default()
     };
-    world.vcpus.push(VcpuSlot { id, apic_id, regs, hardware: None });
+    world.vcpus.push(VcpuSlot {
+        id,
+        apic_id,
+        regs,
+        hardware: None,
+        pending_irq: None,
+    });
     world.record.vcpu_count = world.vcpus.len() as u32;
     Ok(id)
 }
@@ -649,6 +666,34 @@ pub fn destroy_vcpu(vcpu_id: u64) -> bool {
         }
     }
     false
+}
+
+/// Programme l'injection d'une interruption externe dans un vCPU.
+///
+/// L'injection est différée : le vecteur est mémorisé et écrit dans le champ
+/// « VM-entry interruption information » au prochain `run_vcpu`. Retourne
+/// `Unknown` si le vCPU n'existe pas.
+pub fn inject_irq(vcpu_id: u64, vector: u8) -> Result<(), VcpuRegistryError> {
+    let mut worlds = WORLDS.lock();
+    let world = vcpu_world_mut(&mut worlds, vcpu_id).ok_or(VcpuRegistryError::Unknown)?;
+    let slot = world
+        .vcpus
+        .iter_mut()
+        .find(|slot| slot.id == vcpu_id)
+        .ok_or(VcpuRegistryError::Unknown)?;
+    slot.pending_irq = Some(vector);
+    Ok(())
+}
+
+/// Vecteur d'interruption en attente pour un vCPU, s'il existe.
+pub fn pending_irq(vcpu_id: u64) -> Option<u8> {
+    let mut worlds = WORLDS.lock();
+    let world = vcpu_world_mut(&mut worlds, vcpu_id)?;
+    world
+        .vcpus
+        .iter()
+        .find(|slot| slot.id == vcpu_id)
+        .and_then(|slot| slot.pending_irq)
 }
 
 /// Retrouve le monde propriétaire d'un vCPU.
@@ -720,3 +765,4 @@ pub fn clear() {
         }
     }
 }
+

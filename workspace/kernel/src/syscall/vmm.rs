@@ -2,7 +2,7 @@
 //!
 //! Périmètre P0 : gestion du registre des mondes (`CREATE`, `DESTROY`,
 //! `INFO`). Les appels qui dépendent de l'exécution invitée (`MAP_MEM`,
-//! `SET_REGS`, `RUN`, `INJECT_IRQ`, `EXIT_HANDLER`, `IRQ_WAIT`) renvoient
+//! `SET_REGS`, `RUN`, `INJECT_IRQ`, `EXIT_HANDLER`, `IRQ_WAIT`) renvoyaient
 //! `ENOSYS` : leur implémentation viendra avec la couche vCPU exposée à
 //! l'utilisateur. Le but de cette étape est de figer l'ABI et le routage sans
 //! exposer de surface incomplète.
@@ -158,10 +158,19 @@ pub fn sys_vmm_run(vcpu_id: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
-/// SYS_VMM_INJECT_IRQ (566) : à implémenter avec l'API vCPU.
-pub fn sys_vmm_inject_irq(_vcpu_id: u64, _vector: u64) -> Result<u64, SyscallError> {
+/// SYS_VMM_INJECT_IRQ (566) : programme l'injection d'une interruption
+/// externe dans un vCPU ; elle sera délivrée à la prochaine entrée invitée.
+///
+/// `vector` doit être un vecteur valide (0..=255). L'injection est différée :
+/// le vecteur est mémorisé dans le vCPU et écrit dans le bloc de contrôle au
+/// prochain `RUN`.
+pub fn sys_vmm_inject_irq(vcpu_id: u64, vector: u64) -> Result<u64, SyscallError> {
     require_control()?;
-    Err(SyscallError::NotImplemented)
+    if vcpu_id == 0 || vector > u8::MAX as u64 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    vm::inject_irq(vcpu_id, vector as u8).map_err(map_vcpu_error)?;
+    Ok(0)
 }
 
 /// SYS_VMM_EXIT_HANDLER (567) : dépile un événement de sortie.

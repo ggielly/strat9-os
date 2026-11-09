@@ -190,3 +190,56 @@ fn summary_mentions_key_capabilities() {
     assert!(summary.contains("rev=7"));
     assert!(summary.contains("ept="));
 }
+
+#[test]
+fn vmx_capability_msr_numbers_match_intel_sdm() {
+    // Verrou de régression : ces numéros sont fixés par le SDM (vol. 3C,
+    // « VMX capability MSRs ») et ne doivent jamais être décalés. Un décalage
+    // fait lire l'énumération VMCS (`0x48A`) à la place des contrôles
+    // secondaires et rend EPT indétectable sur un hôte pourtant compatible.
+    assert_eq!(MSR_BASIC, 0x480);
+    assert_eq!(MSR_PIN_BASED, 0x481);
+    assert_eq!(MSR_PRIMARY_PROC_BASED, 0x482);
+    assert_eq!(MSR_EXIT_CONTROLS, 0x483);
+    assert_eq!(MSR_ENTRY_CONTROLS, 0x484);
+    assert_eq!(MSR_MISC, 0x485);
+    assert_eq!(MSR_CR0_FIXED0, 0x486);
+    assert_eq!(MSR_CR0_FIXED1, 0x487);
+    assert_eq!(MSR_CR4_FIXED0, 0x488);
+    assert_eq!(MSR_CR4_FIXED1, 0x489);
+    assert_eq!(caps::MSR_VMCS_ENUM, 0x48A);
+    assert_eq!(MSR_SECONDARY_PROC_BASED, 0x48B);
+    assert_eq!(MSR_EPT_VPID_CAP, 0x48C);
+    assert_eq!(MSR_TRUE_PIN_BASED, 0x48D);
+    assert_eq!(MSR_TRUE_PRIMARY_PROC_BASED, 0x48E);
+    assert_eq!(MSR_TRUE_EXIT_CONTROLS, 0x48F);
+    assert_eq!(MSR_TRUE_ENTRY_CONTROLS, 0x490);
+}
+
+#[test]
+fn ept_is_read_from_0x48b_and_0x48c_only() {
+    // Lecteur instrumenté : on vérifie que la photographie interroge bien les
+    // MSR secondaires en 0x48B et EPT/VPID en 0x48C (et pas 0x48A/0x48B).
+    use core::cell::RefCell;
+    let seen = RefCell::new(alloc::vec::Vec::new());
+    let snapshot = MsrSnapshot::from_reader(|msr| {
+        seen.borrow_mut().push(msr);
+        match msr {
+            0x3A => FEATURE_CONTROL_ENABLE_OUTSIDE_SMX | FEATURE_CONTROL_LOCKED,
+            0x480 => basic_msr(1, 4096, 6, false),
+            0x48B => ((control_bits::PROC2_ENABLE_EPT | control_bits::PROC2_ENABLE_VPID) as u64)
+                << 32,
+            0x48C => ept_vpid_cap::WALK_LENGTH_4 | ept_vpid_cap::MEMTYPE_WB,
+            _ => 0,
+        }
+    });
+    let caps = HwCaps::from_snapshot(&snapshot, true);
+    let seen = seen.into_inner();
+    assert!(seen.contains(&0x48B), "secondary controls lus en 0x48B: {seen:?}");
+    assert!(seen.contains(&0x48C), "EPT/VPID lus en 0x48C: {seen:?}");
+    assert!(!seen.contains(&0x48A), "0x48A (VMCS_ENUM) ne doit pas être lu: {seen:?}");
+    assert!(caps.ept);
+    assert!(caps.ept_four_levels);
+    assert!(caps.vpid);
+    assert!(caps.can_run());
+}

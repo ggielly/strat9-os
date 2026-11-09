@@ -139,6 +139,18 @@ pub fn run(caps: &HwCaps) -> Result<SelftestReport, SelftestError> {
     let mut vcpu = Vcpu::new(caps, pointer)?;
     let guest = GuestState::long_mode_64(ENTRY_POINT, STACK_TOP, GPA_PML4);
 
+    // Validation locale avant l'entrée : un état refusé ici produirait un
+    // « VM entry with invalid guest state » difficile à diagnostiquer.
+    let fixed = crate::s9vm::guest::FixedBits {
+        cr0_fixed0: caps.cr0_fixed0,
+        cr0_fixed1: caps.cr0_fixed1,
+        cr4_fixed0: caps.cr4_fixed0,
+        cr4_fixed1: caps.cr4_fixed1,
+    };
+    if let Err(error) = guest.validate(&fixed, caps.unrestricted_guest) {
+        log::warn!("[s9vm] état invité refusé par validate(): {:?}", error);
+    }
+
     // SAFETY: VT-x est actif sur ce CPU (vérifié par l'appelant), les
     // interruptions sont désactivées au stage bootstrap, et le bloc de
     // contrôle vient d'être créé pour ce vCPU.
@@ -161,6 +173,11 @@ pub fn run(caps: &HwCaps) -> Result<SelftestReport, SelftestError> {
         let exit = match unsafe { vcpu.run() } {
             Ok(exit) => exit,
             Err(error) => {
+                // SAFETY: le bloc de contrôle est encore chargé ; diagnostic
+                // utile pour les échecs `VmFail(8/9)`.
+                unsafe {
+                    log::warn!("[s9vm] {}", vcpu.host_diagnostics());
+                }
                 outcome = Err(SelftestError::from(error));
                 break;
             }
@@ -175,6 +192,16 @@ pub fn run(caps: &HwCaps) -> Result<SelftestReport, SelftestError> {
                 if port == TEST_PORT {
                     report.observed_byte = Some((vcpu.guest().rax & 0xFF) as u8);
                 }
+                // Pour une sortie sur instruction d'E/S, le processeur a déjà
+                // positionné `GUEST_RIP` sur l'instruction suivante : ne pas
+                // l'avancer à nouveau, sinon la reprise saute le `hlt`.
+                log::info!(
+                    "[s9vm] sortie E/S port={:#x} octet={:?} rip={:#x} len={}",
+                    port,
+                    report.observed_byte,
+                    vcpu.guest().rip,
+                    exit.instruction_length
+                );
             }
             ExitClass::Halt => {
                 report.halt_exits += 1;
@@ -185,6 +212,11 @@ pub fn run(caps: &HwCaps) -> Result<SelftestReport, SelftestError> {
                 // simplement l'invité.
             }
             ExitClass::EntryFailure => {
+                // SAFETY: le bloc de contrôle est encore chargé ; diagnostic
+                // du champ invité refusé par le processeur.
+                unsafe {
+                    log::warn!("[s9vm] {}", vcpu.guest_diagnostics());
+                }
                 outcome = Err(SelftestError::BadExit("entry failure"));
                 break;
             }
