@@ -27,6 +27,8 @@ use crate::s9vm::caps::HwCaps;
 use crate::s9vm::exit::ExitClass;
 use crate::s9vm::exitqueue::ExitQueue;
 use crate::s9vm::guest::{FixedBits, GuestState};
+use crate::s9vm::ioapic::IoApic;
+use crate::s9vm::pic::Pic;
 use crate::s9vm::memmap::{perms_from_abi, GuestMap, MapError};
 use crate::s9vm::mmu::Perms as MmuPerms;
 use crate::s9vm::mmu::PAGE_SIZE;
@@ -239,6 +241,10 @@ struct World {
     closing: bool,
     /// Paused world: `RUN`s are refused (`Paused`) until resumed.
     paused: bool,
+    /// Guest 8259A pair (legacy PIC ports).
+    pic: Pic,
+    /// Guest I/O APIC (MMIO page).
+    ioapic: IoApic,
 }
 
 /// Logical vCPU: opaque identifier, APIC id and ABI register block.
@@ -315,6 +321,8 @@ pub fn create(name: &[u8], silo_id: u32) -> Option<WorldRecord> {
             exits: ExitQueue::default(),
             closing: false,
             paused: false,
+            pic: Pic::new(),
+            ioapic: IoApic::new(0),
         },
     );
     Some(record)
@@ -475,6 +483,13 @@ pub fn debug_dump() {
         );
         let mut worlds = WORLDS.lock();
         if let Some(entry) = worlds.get(&world.id) {
+            log::info!(
+                "[s9vm] debug:   irqchip pic(imr={:#x}, irr={:#x}, isr={:#x}) ioapic(id={})",
+                entry.pic.master().mask(),
+                entry.pic.master().irr(),
+                entry.pic.master().isr(),
+                entry.ioapic.apic_id()
+            );
             for slot in &entry.vcpus {
                 log::info!(
                     "[s9vm] debug:   vcpu {} apic={} tpr={} irr={} isr={} irq={:?} nmi={} task={:?}",
