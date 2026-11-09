@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! Display VFS scheme : exposes framebuffer as `/dev/display/`.
 //!
 //! Modeled after Redox OS `vesad` + `driver-graphics` but implemented
@@ -197,15 +219,19 @@ impl Scheme for DisplayScheme {
         match handle {
             Handle::Root => {
                 let total = total_display_count();
-                let mut out = format!("displays={}\n", total);
+                let mut out = format!("displays={}
+", total);
                 for i in 0..total {
                     if let Some((adapter, local_id)) = get_adapter_for_display(i) {
                         let (w, h) = adapter.display_size(local_id);
-                        out.push_str(&format!("{}.0={}x{}\n", i, w, h));
+                        out.push_str(&format!("{}.0={}x{}
+", i, w, h));
                     }
                 }
-                out.push_str("damage\n");
-                out.push_str("clear\n");
+                out.push_str("damage
+");
+                out.push_str("clear
+");
                 let b = out.as_bytes();
                 let start = offset as usize;
                 if start >= b.len() {
@@ -217,22 +243,32 @@ impl Scheme for DisplayScheme {
             }
             Handle::Info => {
                 let total = total_display_count();
-                let mut s = format!("adapter_displays={}\n", total);
+                let mut s = format!("adapter_displays={}
+", total);
                 for i in 0..total {
                     if let Some((adapter, local_id)) = get_adapter_for_display(i) {
                         let (w, h) = adapter.display_size(local_id);
-                        s.push_str(&format!("display.{}.{}x{}\n", i, w, h));
+                        s.push_str(&format!("display.{}.{}x{}
+", i, w, h));
                     }
                 }
-                s.push_str(&format!("owner={}\n", crate::display_state::owner_name()));
+                s.push_str(&format!("owner={}
+", crate::display_state::owner_name()));
                 if let Some(info) = Framebuffer::info() {
                     let bpp = info.format.bits_per_pixel;
                     // Offscreen surfaces are tightly packed (`width * bpp/8`);
                     // the hardware stride may be larger and is irrelevant here.
                     let surface_stride = info.width.saturating_mul(bpp as u32 / 8);
                     s.push_str(&format!(
-                        "width={}\nheight={}\nbpp={}\nstride={}\n\
-                         red_shift={}\ngreen_shift={}\nblue_shift={}\n",
+                        "width={}
+height={}
+bpp={}
+stride={}
+\
+                         red_shift={}
+green_shift={}
+blue_shift={}
+",
                         info.width,
                         info.height,
                         bpp,

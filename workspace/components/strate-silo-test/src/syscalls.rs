@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 #![no_std]
 #![no_main]
 
@@ -77,10 +99,14 @@ fn log_hex_u64(mut value: u64) {
 
 /// Implements section.
 fn section(title: &str) {
-    log("\n============================================================\n");
+    log("
+============================================================
+");
     log("[test_syscalls] ");
     log(title);
-    log("\n============================================================\n");
+    log("
+============================================================
+");
 }
 
 /// Implements ok.
@@ -92,7 +118,8 @@ fn ok(ctx: &mut Ctx, label: &str, value: usize) {
     log_u64(value as u64);
     log(" (");
     log_hex_u64(value as u64);
-    log(")\n");
+    log(")
+");
 }
 
 /// Implements fail.
@@ -102,7 +129,8 @@ fn fail(ctx: &mut Ctx, label: &str, err: Error) {
     log_err(label);
     log_err(" -> ");
     log_err(err.name());
-    log_err("\n");
+    log_err("
+");
 }
 
 /// Implements check ok.
@@ -137,7 +165,8 @@ fn check_expect_one_of(
                 log_err(label);
                 log_err(" -> expected error but got OK=");
                 log_u64(v as u64);
-                log_err("\n");
+                log_err("
+");
             }
         }
         Err(e) => {
@@ -166,7 +195,8 @@ fn check_expect_err(
             log_err(expected.name());
             log_err(" got OK=");
             log_u64(v as u64);
-            log_err("\n");
+            log_err("
+");
         }
         Err(e) => {
             if e == expected {
@@ -327,7 +357,8 @@ fn test_fs(ctx: &mut Ctx) {
     .unwrap_or(usize::MAX);
 
     if file_fd != usize::MAX {
-        let msg = b"syscall-iso-test\n";
+        let msg = b"syscall-iso-test
+";
         let _ = check_ok(ctx, "SYS_WRITE file", unsafe {
             syscall3(number::SYS_WRITE, file_fd, msg.as_ptr() as usize, msg.len())
         });
@@ -487,7 +518,8 @@ fn test_handles(ctx: &mut Ctx) {
     log_hex_u64(info.permissions as u64);
     log(" resource=");
     log_hex_u64(info.resource);
-    log("\n");
+    log("
+");
 
     let _ = check_ok(
         ctx,
@@ -552,7 +584,8 @@ pub extern "C" fn _start() -> ! {
     log_u64(ctx.pass);
     log(" fail=");
     log_u64(ctx.fail);
-    log("\n");
+    log("
+");
 
     if ctx.fail == 0 {
         call::exit(0);

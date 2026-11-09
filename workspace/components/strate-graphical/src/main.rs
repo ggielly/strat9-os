@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! Display Server for strat9-os (strate-graphical)
 //!
 //! A Haiku-like Window Server that runs in a silo.
@@ -29,7 +51,8 @@ static ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
-    let _ = call::debug_log(b"[display-server] OOM\n");
+    let _ = call::debug_log(b"[display-server] OOM
+");
     loop {
         core::hint::spin_loop();
     }
@@ -533,7 +556,7 @@ fn draw_glyph(buf: &Buffer, x: i32, y: i32, ch: u8, c: Color) {
         b'(' => [0x0C, 0x18, 0x30, 0x30, 0x30, 0x18, 0x0C, 0x00],
         b')' => [0x30, 0x18, 0x0C, 0x0C, 0x0C, 0x18, 0x30, 0x00],
         b'/' => [0x02, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x40, 0x00],
-        b'\\' => [0x40, 0x60, 0x30, 0x18, 0x0C, 0x06, 0x02, 0x00],
+        b'\' => [0x40, 0x60, 0x30, 0x18, 0x0C, 0x06, 0x02, 0x00],
         b'[' => [0x3C, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3C, 0x00],
         b']' => [0x3C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x3C, 0x00],
         b'<' => [0x0C, 0x18, 0x30, 0x60, 0x30, 0x18, 0x0C, 0x00],
@@ -766,7 +789,8 @@ fn sync_prev_rect(prev: &mut [u8], cur: &[u8], stride: usize, y: u32, h: u32) {
 
 fn log(s: &str) {
     let _ = call::write(2, s.as_bytes());
-    let _ = call::write(2, b"\n");
+    let _ = call::write(2, b"
+");
 }
 
 #[no_mangle]

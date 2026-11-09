@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 #![no_std]
 #![no_main]
 
@@ -53,7 +75,8 @@ fn check_sigaction(signum: usize, expected_handler: u64, label: &str) -> bool {
         Ok(_) => {
             log_err("[test_exec_helper] ");
             log_err(label);
-            log_err(" mismatch\n");
+            log_err(" mismatch
+");
             false
         }
         Err(err) => {
@@ -61,7 +84,8 @@ fn check_sigaction(signum: usize, expected_handler: u64, label: &str) -> bool {
             log_err(label);
             log_err(": ");
             log_err(err.name());
-            log_err("\n");
+            log_err("
+");
             false
         }
     }
@@ -76,13 +100,15 @@ fn check_sigaltstack_reset() -> bool {
     match call::sigaltstack(0, &mut old as *mut _ as usize) {
         Ok(_) if (old.ss_flags & SS_DISABLE) != 0 => true,
         Ok(_) => {
-            log_err("[test_exec_helper] sigaltstack still enabled\n");
+            log_err("[test_exec_helper] sigaltstack still enabled
+");
             false
         }
         Err(err) => {
             log_err("[test_exec_helper] sigaltstack query: ");
             log_err(err.name());
-            log_err("\n");
+            log_err("
+");
             false
         }
     }
@@ -94,11 +120,13 @@ fn check_cloexec_closed() -> bool {
         Err(err) => {
             log_err("[test_exec_helper] cloexec query: ");
             log_err(err.name());
-            log_err("\n");
+            log_err("
+");
             false
         }
         Ok(_) => {
-            log_err("[test_exec_helper] cloexec fd still open\n");
+            log_err("[test_exec_helper] cloexec fd still open
+");
             false
         }
     }
@@ -112,7 +140,8 @@ fn panic(info: &PanicInfo) -> ! {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    log("[test_exec_helper] validating post-exec state\n");
+    log("[test_exec_helper] validating post-exec state
+");
 
     let mut ok = true;
     ok &= check_sigaction(SIGUSR1, 0, "SIGUSR1 reset to default");
@@ -121,7 +150,8 @@ pub extern "C" fn _start() -> ! {
     ok &= check_cloexec_closed();
 
     if ok {
-        log("[test_exec_helper] validation passed\n");
+        log("[test_exec_helper] validation passed
+");
         call::exit(0)
     } else {
         call::exit(1)

@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! Multi-driver VFS scheme served at `/bus/`.
 //!
 //! Each successfully-initialised bus driver appears as a sub-directory:
@@ -435,9 +457,11 @@ impl BusSchemeServer {
     fn generate_read_content(&mut self, kind: &HandleKind, offset: usize) -> Vec<u8> {
         let data = match kind {
             HandleKind::Root => {
-                let mut s = format!("drivers registered: {}\n", self.drivers.len());
+                let mut s = format!("drivers registered: {}
+", self.drivers.len());
                 for (name, d) in &self.drivers {
-                    s.push_str(&format!("  {} (compat: {:?})\n", name, d.compatible()));
+                    s.push_str(&format!("  {} (compat: {:?})
+", name, d.compatible()));
                 }
                 s.into_bytes()
             }
@@ -461,14 +485,23 @@ impl BusSchemeServer {
 
     fn read_pci_content(&mut self, path: &str) -> Vec<u8> {
         match path {
-            "" | PCI_PREFIX => b"inventory\ncount\nrescan\nfind\ncfg\n".to_vec(),
-            "pci/find" => b"usage: /bus/pci/find/<vendor>/<device>\n".to_vec(),
-            "pci/cfg" => b"usage: /bus/pci/cfg/<bb:dd.f>/<offset>/<width>\n".to_vec(),
+            "" | PCI_PREFIX => b"inventory
+count
+rescan
+find
+cfg
+".to_vec(),
+            "pci/find" => b"usage: /bus/pci/find/<vendor>/<device>
+".to_vec(),
+            "pci/cfg" => b"usage: /bus/pci/cfg/<bb:dd.f>/<offset>/<width>
+".to_vec(),
             "pci/inventory" => self.render_inventory(),
-            "pci/count" => format!("{}\n", self.pci_cache.len()).into_bytes(),
+            "pci/count" => format!("{}
+", self.pci_cache.len()).into_bytes(),
             path if path.starts_with("pci/find/") => {
                 let Some((vendor_id, device_id)) = BusSchemeServer::parse_find_path(path) else {
-                    return b"invalid path\n".to_vec();
+                    return b"invalid path
+".to_vec();
                 };
                 // Serve repeated/sequential reads from the cache; the
                 // syscall runs once per (vendor, device) until the next
@@ -508,7 +541,8 @@ impl BusSchemeServer {
                         let mut out = alloc::vec::Vec::new();
                         for d in matches.into_iter().take(n) {
                             let line = format!(
-                                "{:02x}:{:02x}.{} {:04x}:{:04x}\n",
+                                "{:02x}:{:02x}.{} {:04x}:{:04x}
+",
                                 d.address.bus,
                                 d.address.device,
                                 d.address.function,
@@ -518,16 +552,19 @@ impl BusSchemeServer {
                             out.extend_from_slice(line.as_bytes());
                         }
                         if out.is_empty() {
-                            b"none\n".to_vec()
+                            b"none
+".to_vec()
                         } else {
                             out
                         }
                     }
-                    Err(_) => b"error\n".to_vec(),
+                    Err(_) => b"error
+".to_vec(),
                 };
                 // Cache successful queries only: errors and invalid paths
                 // stay uncached so transient failures are retried.
-                if rendered != b"error\n" {
+                if rendered != b"error
+" {
                     // Bound the cache: evict the smallest key when full.
                     if self.find_cache.len() >= MAX_FIND_CACHE_ENTRIES {
                         if let Some(first) = self.find_cache.keys().next().copied() {
@@ -541,14 +578,18 @@ impl BusSchemeServer {
             }
             path if path.starts_with("pci/cfg/") => {
                 let Some((addr, reg, width)) = BusSchemeServer::parse_cfg_path(path) else {
-                    return b"invalid path\n".to_vec();
+                    return b"invalid path
+".to_vec();
                 };
                 match call::pci_cfg_read(&addr, reg, width) {
-                    Ok(v) => format!("0x{:08x}\n", v as u32).into_bytes(),
-                    Err(_) => b"error\n".to_vec(),
+                    Ok(v) => format!("0x{:08x}
+", v as u32).into_bytes(),
+                    Err(_) => b"error
+".to_vec(),
                 }
             }
-            _ => b"unknown\n".to_vec(),
+            _ => b"unknown
+".to_vec(),
         }
     }
 
@@ -560,46 +601,62 @@ impl BusSchemeServer {
     ) -> Vec<u8> {
         match sub_path {
             "" => {
-                let mut s = format!("driver: {}\n", name);
+                let mut s = format!("driver: {}
+", name);
                 for c in driver.compatible() {
-                    s.push_str(&format!("compatible: {}\n", c));
+                    s.push_str(&format!("compatible: {}
+", c));
                 }
-                s.push_str(&format!("errors: {}\n", driver.error_count()));
+                s.push_str(&format!("errors: {}
+", driver.error_count()));
                 s.into_bytes()
             }
             DRV_STATUS => {
-                format!("driver: {}\nerrors: {}\n", name, driver.error_count()).into_bytes()
+                format!("driver: {}
+errors: {}
+", name, driver.error_count()).into_bytes()
             }
-            DRV_ERROR_COUNT => format!("{}\n", driver.error_count()).into_bytes(),
+            DRV_ERROR_COUNT => format!("{}
+", driver.error_count()).into_bytes(),
             s if s.starts_with(DRV_REG_PREFIX) => {
                 if let Some(reg_offset) = BusSchemeServer::parse_reg_offset(s) {
                     match driver.read_reg(reg_offset) {
-                        Ok(val) => format!("0x{:08x}\n", val).into_bytes(),
-                        Err(_) => b"error\n".to_vec(),
+                        Ok(val) => format!("0x{:08x}
+", val).into_bytes(),
+                        Err(_) => b"error
+".to_vec(),
                     }
                 } else {
-                    b"invalid register\n".to_vec()
+                    b"invalid register
+".to_vec()
                 }
             }
             DRV_FIREWALL_INFO => match driver.as_firewall() {
                 Some(fw) => format!(
-                    "type: {:?}\nmax_entries: {}\n",
+                    "type: {:?}
+max_entries: {}
+",
                     fw.firewall_type(),
                     fw.max_entries()
                 )
                 .into_bytes(),
-                None => b"no firewall capability\n".to_vec(),
+                None => b"no firewall capability
+".to_vec(),
             },
             child_name => {
                 // Child device info
                 if let Some(child) = driver.children().iter().find(|c| c.name == child_name) {
                     format!(
-                        "name: {}\nbase: 0x{:x}\nsize: {}\n",
+                        "name: {}
+base: 0x{:x}
+size: {}
+",
                         child.name, child.base_addr, child.size
                     )
                     .into_bytes()
                 } else {
-                    b"unknown\n".to_vec()
+                    b"unknown
+".to_vec()
                 }
             }
         }
@@ -925,10 +982,12 @@ impl BusSchemeServer {
 
     fn render_inventory(&self) -> Vec<u8> {
         let mut out = alloc::vec::Vec::new();
-        out.extend_from_slice(b"bus:dev.fn vendor:device class:sub prog_if rev irq\n");
+        out.extend_from_slice(b"bus:dev.fn vendor:device class:sub prog_if rev irq
+");
         for d in &self.pci_cache {
             let line = format!(
-                "{:02x}:{:02x}.{} {:04x}:{:04x} {:02x}:{:02x} {:02x} {:02x} {}\n",
+                "{:02x}:{:02x}.{} {:04x}:{:04x} {:02x}:{:02x} {:02x} {:02x} {}
+",
                 d.address.bus,
                 d.address.device,
                 d.address.function,

@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! Keyboard input handler for the console.
 //! Reads from /dev/input/kbd, handles line editing in canonical mode.
 
@@ -126,7 +148,7 @@ impl InputHandler {
             0x27 => b';',
             0x28 => b'\'',
             0x29 => b'`',
-            0x2B => b'\\',
+            0x2B => b'\',
             0x33 => b',',
             0x34 => b'.',
             0x35 => b'/',
@@ -158,8 +180,9 @@ impl InputHandler {
             0x32 => b'm',
             0x39 => b' ',
             0x0E => 0x08,
-            0x1C => b'\n',
-            0x0F => b'\t',
+            0x1C => b'
+',
+            0x0F => b'	',
             0x01 => 0x1B,
             _ => 0,
         };
@@ -194,7 +217,7 @@ impl InputHandler {
                 b';' => b':',
                 b'\'' => b'"',
                 b'`' => b'~',
-                b'\\' => b'|',
+                b'\' => b'|',
                 b',' => b'<',
                 b'.' => b'>',
                 b'/' => b'?',

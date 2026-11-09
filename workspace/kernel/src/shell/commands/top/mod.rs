@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! `top` — system monitor.
 //!
 //! Layout inspiration: rrtop (small panels, sparklines, big numbers) for the
@@ -157,7 +179,7 @@ fn collect_silos_from_proc_scheme() -> Option<(Vec<SiloRowData>, Vec<StrateRowDa
         if line_idx == 0 || line.is_empty() {
             continue;
         }
-        let mut fields = line.split('\t');
+        let mut fields = line.split('	');
         // sid, state, tasks, mem_used, mem_min, mem_max, gfx*, label, name, instances
         let Some(sid) = fields.next() else { continue };
         let Some(state) = fields.next() else { continue };
@@ -1280,7 +1302,8 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
                 crate::arch::keyboard::KEY_DOWN => tree.move_down(),
                 crate::arch::keyboard::KEY_RIGHT => tree.expand(),
                 crate::arch::keyboard::KEY_LEFT => tree.collapse(),
-                b' ' | b'\r' | b'\n' => tree.toggle(),
+                b' ' | b'' | b'
+' => tree.toggle(),
                 b'k' => {
                     if let Some(tid) = selected_task_tid(&tree) {
                         if let Some(node) = tree.selected_node() {

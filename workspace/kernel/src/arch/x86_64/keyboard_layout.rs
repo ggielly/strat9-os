@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! Keyboard Layout Configuration
 //!
 //! Owns the shared keyboard modifier state and scancode processing logic.
@@ -24,7 +46,7 @@ pub static AZERTY_NORMAL: [u8; 128] = {
     t[0x0C] = b')';
     t[0x0D] = b'+';
     t[0x0E] = 0x08;
-    t[0x0F] = b'\t';
+    t[0x0F] = b'	';
     t[0x10] = b'a';
     t[0x11] = b'z';
     t[0x12] = b'e';
@@ -37,7 +59,8 @@ pub static AZERTY_NORMAL: [u8; 128] = {
     t[0x19] = b'p';
     t[0x1A] = b'^';
     t[0x1B] = b'$';
-    t[0x1C] = b'\n';
+    t[0x1C] = b'
+';
     t[0x1E] = b'q';
     t[0x1F] = b's';
     t[0x20] = b'd';
@@ -101,7 +124,7 @@ pub static AZERTY_SHIFT: [u8; 128] = {
     t[0x0C] = b')';
     t[0x0D] = b'+';
     t[0x0E] = 0x08;
-    t[0x0F] = b'\t';
+    t[0x0F] = b'	';
     t[0x10] = b'A';
     t[0x11] = b'Z';
     t[0x12] = b'E';
@@ -114,7 +137,8 @@ pub static AZERTY_SHIFT: [u8; 128] = {
     t[0x19] = b'P';
     t[0x1A] = b'l';
     t[0x1B] = b'*';
-    t[0x1C] = b'\n';
+    t[0x1C] = b'
+';
     t[0x1E] = b'Q';
     t[0x1F] = b'S';
     t[0x20] = b'D';
@@ -177,7 +201,7 @@ pub static QWERTY_NORMAL: [u8; 128] = {
     t[0x0C] = b'-';
     t[0x0D] = b'=';
     t[0x0E] = 0x08;
-    t[0x0F] = b'\t';
+    t[0x0F] = b'	';
     t[0x10] = b'q';
     t[0x11] = b'w';
     t[0x12] = b'e';
@@ -190,7 +214,8 @@ pub static QWERTY_NORMAL: [u8; 128] = {
     t[0x19] = b'p';
     t[0x1A] = b'[';
     t[0x1B] = b']';
-    t[0x1C] = b'\n';
+    t[0x1C] = b'
+';
     t[0x1E] = b'a';
     t[0x1F] = b's';
     t[0x20] = b'd';
@@ -204,7 +229,7 @@ pub static QWERTY_NORMAL: [u8; 128] = {
     t[0x28] = b'\'';
     t[0x29] = b'`';
     t[0x2A] = 0x00;
-    t[0x2B] = b'\\';
+    t[0x2B] = b'\';
     t[0x2C] = b'z';
     t[0x2D] = b'x';
     t[0x2E] = b'c';
@@ -253,7 +278,7 @@ pub static QWERTY_SHIFT: [u8; 128] = {
     t[0x0C] = b'_';
     t[0x0D] = b'+';
     t[0x0E] = 0x08;
-    t[0x0F] = b'\t';
+    t[0x0F] = b'	';
     t[0x10] = b'Q';
     t[0x11] = b'W';
     t[0x12] = b'E';
@@ -266,7 +291,8 @@ pub static QWERTY_SHIFT: [u8; 128] = {
     t[0x19] = b'P';
     t[0x1A] = b'{';
     t[0x1B] = b'}';
-    t[0x1C] = b'\n';
+    t[0x1C] = b'
+';
     t[0x1E] = b'A';
     t[0x1F] = b'S';
     t[0x20] = b'D';
@@ -431,7 +457,7 @@ pub fn process_scancode(scancode: u8, normal: &[u8; 128], shift: &[u8; 128]) -> 
             0x4D => Some(KEY_RIGHT),
             0x47 => Some(KEY_HOME),
             0x4F => Some(KEY_END),
-            0x53 => Some(b'\x7F'),
+            0x53 => Some(b''),
             _ => None,
         };
     }

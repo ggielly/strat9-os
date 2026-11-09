@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 #![no_std]
 #![no_main]
 #![feature(alloc_error_handler)]
@@ -24,7 +46,8 @@ static ALLOCATOR: BumpAllocator = BumpAllocator;
 #[alloc_error_handler]
 /// Implements alloc error.
 fn alloc_error(_layout: Layout) -> ! {
-    let _ = call::debug_log(b"[strate-bus] OOM\n");
+    let _ = call::debug_log(b"[strate-bus] OOM
+");
     call::exit(12);
 }
 
@@ -52,7 +75,8 @@ fn log_probe_counts(passed: u32, failed: u32) {
     let mut line = [0u8; 64];
     let prefix = b"[strate-bus] MMIO self-test: passed=";
     let mid = b" failed=";
-    let suffix = b"\n";
+    let suffix = b"
+";
     let mut off = 0usize;
 
     line[off..off + prefix.len()].copy_from_slice(prefix);
@@ -170,7 +194,8 @@ fn load_probe_mode() -> ProbeMode {
 #[unsafe(no_mangle)]
 /// Implements start.
 pub extern "C" fn _start() -> ! {
-    let _ = call::debug_log(b"[strate-bus] Starting\n");
+    let _ = call::debug_log(b"[strate-bus] Starting
+");
 
     const MAX_RETRIES: usize = 20;
     const BACKOFF_YIELDS: usize = 64;
@@ -184,7 +209,8 @@ pub extern "C" fn _start() -> ! {
                     break;
                 }
                 Err(_) => {
-                    let _ = call::debug_log(b"[strate-bus] ipc_create_port retry\n");
+                    let _ = call::debug_log(b"[strate-bus] ipc_create_port retry
+");
                     for _ in 0..(BACKOFF_YIELDS * (attempt + 1)) {
                         let _ = call::sched_yield();
                     }
@@ -194,7 +220,8 @@ pub extern "C" fn _start() -> ! {
         match p {
             Some(h) => h,
             None => {
-                let _ = call::debug_log(b"[strate-bus] ipc_create_port failed after retries\n");
+                let _ = call::debug_log(b"[strate-bus] ipc_create_port failed after retries
+");
                 call::exit(1);
             }
         }
@@ -205,7 +232,8 @@ pub extern "C" fn _start() -> ! {
             break;
         }
         if attempt + 1 == MAX_RETRIES {
-            let _ = call::debug_log(b"[strate-bus] ipc_bind_port failed after retries\n");
+            let _ = call::debug_log(b"[strate-bus] ipc_bind_port failed after retries
+");
             call::exit(2);
         }
         for _ in 0..(BACKOFF_YIELDS * (attempt + 1)) {
@@ -217,25 +245,31 @@ pub extern "C" fn _start() -> ! {
     let probe_mode = load_probe_mode();
     match probe_mode {
         ProbeMode::Quick => {
-            let _ = call::debug_log(b"[strate-bus] Probe mode: quick\n");
+            let _ = call::debug_log(b"[strate-bus] Probe mode: quick
+");
         }
         ProbeMode::Full => {
-            let _ = call::debug_log(b"[strate-bus] Probe mode: full\n");
+            let _ = call::debug_log(b"[strate-bus] Probe mode: full
+");
         }
     }
-    let _ = call::debug_log(b"[strate-bus] MMIO self-test starting\n");
+    let _ = call::debug_log(b"[strate-bus] MMIO self-test starting
+");
     let probe_result = probe::run_mmio_self_test_with_mode(probe_mode);
     if probe_result.all_passed() {
-        let _ = call::debug_log(b"[strate-bus] MMIO self-test: ALL PASSED\n");
+        let _ = call::debug_log(b"[strate-bus] MMIO self-test: ALL PASSED
+");
     } else {
-        let _ = call::debug_log(b"[strate-bus] MMIO self-test: FAILURES DETECTED\n");
+        let _ = call::debug_log(b"[strate-bus] MMIO self-test: FAILURES DETECTED
+");
     }
     log_probe_counts(probe_result.passed, probe_result.failed);
 
     // Init all bus drivers and skipped if the hardware is not present
     let drivers = registry::init_all();
     {
-        let msg = alloc::format!("[strate-bus] {} driver(s) registered\n", drivers.len());
+        let msg = alloc::format!("[strate-bus] {} driver(s) registered
+", drivers.len());
         let _ = call::debug_log(msg.as_bytes());
     }
 

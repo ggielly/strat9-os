@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! Utility commands: uptime, dmesg, echo, env, whoami, grep, setenv, unsetenv
 mod audit;
 mod date;
@@ -229,7 +251,8 @@ pub(super) fn cmd_grep_impl(args: &[String]) -> Result<(), ShellError> {
 
     let text = core::str::from_utf8(&data).unwrap_or("");
     let mut found = 0u32;
-    for line in text.split('\n') {
+    for line in text.split('
+') {
         if is_interrupted() {
             shell_println!("(grep cancelled after {} matches)", found);
             return Ok(());

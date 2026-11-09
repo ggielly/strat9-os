@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! Boot protocol entry point.
 //!
 //! This module handles the kernel entry from the bootloader or PVH stub.
@@ -108,7 +130,8 @@ pub unsafe extern "C" fn kmain(args_ptr: u64) -> ! {
     // Just use raw writes without init (bootloader already set up COM1).
     {
         let thr: u16 = 0x3F8;
-        let s = b"[kmain] RAW entry\r\n";
+        let s = b"[kmain] RAW entry
+";
         for &b in s {
             let mut lsr: u8;
             core::arch::asm!("in al, dx", in("dx") 0x3F8 + 5, out("al") lsr, options(nostack, preserves_flags));
@@ -131,7 +154,8 @@ pub unsafe extern "C" fn kmain(args_ptr: u64) -> ! {
         let mut early_port = uart_16550::SerialPort::new(0x3F8);
         let _ = core::fmt::Write::write_str(
             &mut early_port,
-            "[kmain] *** Strat9-OS kernel entry ***\r\n",
+            "[kmain] *** Strat9-OS kernel entry ***
+",
         );
     }
 
@@ -142,12 +166,14 @@ pub unsafe extern "C" fn kmain(args_ptr: u64) -> ! {
     // serial_println! and format_args! vtable dispatch may not work
     // before the full kernel is initialized.
     let args = if args_ptr == 0 {
-        early_print(b"[kmain] PVH boot (no args)\r\n");
+        early_print(b"[kmain] PVH boot (no args)
+");
         build_minimal_args()
     } else {
         early_print(b"[kmain] Bootloader boot (args=0x");
         early_print_hex(args_ptr);
-        early_print(b")\r\n");
+        early_print(b")
+");
         // Read KernelArgs from the bootloader-provided pointer.
         // The struct is #[repr(C, packed)] so we copy field-by-field.
         let ptr = args_ptr as *const strat9_abi::boot::KernelArgs;
@@ -205,7 +231,8 @@ pub unsafe extern "C" fn kmain(args_ptr: u64) -> ! {
         early_print_hex(
             unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(args.magic)) } as u64,
         );
-        early_print(b"\r\n");
+        early_print(b"
+");
         hlt_loop();
     }
 
@@ -232,7 +259,8 @@ pub unsafe extern "C" fn kmain(args_ptr: u64) -> ! {
     early_print_hex(framebuffer_addr);
     early_print(b" rsdp=0x");
     early_print_hex(acpi_rsdp_base);
-    early_print(b"\r\n");
+    early_print(b"
+");
 
     // Step 5: Hand off to kernel_main (still on bootstrap stack).
     // kernel_main will allocate a real stack after buddy allocator init.

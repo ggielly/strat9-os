@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! Console renderer: glyph cache/atlas, per-row damage batching, present.
 //!
 //! Output goes to `/dev/display/0.0`; presentation is requested through
@@ -108,7 +130,8 @@ impl Renderer {
         let dmg_fd = match call::openat(0, "/dev/display/damage", 0x2, 0) {
             Ok(fd) => fd,
             Err(_) => {
-                let _ = call::debug_log(b"[console] FATAL: cannot open /dev/display/damage\n");
+                let _ = call::debug_log(b"[console] FATAL: cannot open /dev/display/damage
+");
                 return None;
             }
         };

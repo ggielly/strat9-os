@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! Quote-aware Chevron lexer and pipeline parser.
 //! Operators are recognized before expansion: variable values are always data.
 
@@ -163,13 +185,13 @@ pub(crate) fn lex(input: &str) -> Result<Vec<Token>, ParseError> {
             }
             continue;
         }
-        if ch == '\\' {
+        if ch == '\' {
             let next = chars.next().ok_or(ParseError::DanglingEscape)?;
             word.quoted = true;
             active = true;
             // Within double quotes, only shell-significant characters are escaped.
-            if quote == Some('"') && !matches!(next, '$' | '"' | '\\') {
-                word.push('\\', false);
+            if quote == Some('"') && !matches!(next, '$' | '"' | '\') {
+                word.push('\', false);
             }
             word.push(next, false);
             continue;
@@ -352,7 +374,7 @@ mod tests {
     use super::*;
     #[test]
     fn quoted_operators_and_empty_words_are_arguments() {
-        let p = try_parse_pipeline("echo 'a|b;>' \"\" a\\ b")
+        let p = try_parse_pipeline("echo 'a|b;>' \"\" a\ b")
             .unwrap()
             .unwrap();
         let cmd = p.stages[0].command.resolve(|text| String::from(text));
@@ -376,7 +398,7 @@ mod tests {
             "echo > > out",
             "echo > a > b",
             "echo 'x",
-            "echo \\",
+            "echo \",
         ] {
             assert!(try_parse_pipeline(line).is_err(), "{}", line);
         }

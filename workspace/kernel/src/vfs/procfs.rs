@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! Procfs - process filesystem (similar to Linux & BSD /proc)
 //!
 //! Provides information about running processes and system state.
@@ -44,7 +66,8 @@ impl ProcScheme {
         // Handle /proc/self
         if path == "self" || path == "self/" {
             if let Some(pid) = current_pid() {
-                return Ok(ProcEntry::File(format!("{}\n", pid)));
+                return Ok(ProcEntry::File(format!("{}
+", pid)));
             }
             return Err(SyscallError::NotFound);
         }
@@ -95,7 +118,8 @@ impl ProcScheme {
             "" | "/" => Ok(ProcEntry::Directory),
             "status" => Ok(ProcEntry::File(self.get_process_status(task))),
             "cmdline" => Ok(ProcEntry::File(format!(
-                "{}\n",
+                "{}
+",
                 crate::arch::serial::get_cmdline()
             ))),
             _ => Err(SyscallError::NotFound),
@@ -112,33 +136,34 @@ impl ProcScheme {
         let has_fpu = host.features.contains(crate::arch::cpuid::CpuFeatures::FPU);
 
         for i in 0..cpu_count {
-            let _ = writeln!(output, "processor\t: {}", i);
-            let _ = writeln!(output, "vendor_id\t: {}", host.vendor_string());
-            let _ = writeln!(output, "cpu family\t: {}", host.family);
-            let _ = writeln!(output, "model\t\t: {}", host.model);
-            let _ = writeln!(output, "model name\t: {}", host.model_name_str());
-            let _ = writeln!(output, "stepping\t: {}", host.stepping);
-            let _ = writeln!(output, "cpu MHz\t\t: 2400.000");
-            let _ = writeln!(output, "cache size\t: 4096 KB");
-            let _ = writeln!(output, "physical id\t: {}", i);
-            let _ = writeln!(output, "siblings\t: 1");
-            let _ = writeln!(output, "core id\t\t: {}", i);
-            let _ = writeln!(output, "cpu cores\t: 1");
-            let _ = writeln!(output, "apicid\t\t: {}", i);
-            let _ = writeln!(output, "fpu\t\t: {}", if has_fpu { "yes" } else { "no" });
+            let _ = writeln!(output, "processor	: {}", i);
+            let _ = writeln!(output, "vendor_id	: {}", host.vendor_string());
+            let _ = writeln!(output, "cpu family	: {}", host.family);
+            let _ = writeln!(output, "model		: {}", host.model);
+            let _ = writeln!(output, "model name	: {}", host.model_name_str());
+            let _ = writeln!(output, "stepping	: {}", host.stepping);
+            let _ = writeln!(output, "cpu MHz		: 2400.000");
+            let _ = writeln!(output, "cache size	: 4096 KB");
+            let _ = writeln!(output, "physical id	: {}", i);
+            let _ = writeln!(output, "siblings	: 1");
+            let _ = writeln!(output, "core id		: {}", i);
+            let _ = writeln!(output, "cpu cores	: 1");
+            let _ = writeln!(output, "apicid		: {}", i);
+            let _ = writeln!(output, "fpu		: {}", if has_fpu { "yes" } else { "no" });
             let _ = writeln!(
                 output,
-                "fpu_exception\t: {}",
+                "fpu_exception	: {}",
                 if has_fpu { "yes" } else { "no" }
             );
-            let _ = writeln!(output, "cpuid level\t: 13");
-            let _ = writeln!(output, "wp\t\t: yes");
-            let _ = writeln!(output, "flags\t\t: {}", flags);
-            let _ = writeln!(output, "bogomips\t: 4800.00");
-            let _ = writeln!(output, "clflush size\t: 64");
-            let _ = writeln!(output, "cache_alignment\t: 64");
-            let _ = writeln!(output, "address sizes\t: 40 bits physical, 48 bits virtual");
-            let _ = writeln!(output, "power management:\n");
+            let _ = writeln!(output, "cpuid level	: 13");
+            let _ = writeln!(output, "wp		: yes");
+            let _ = writeln!(output, "flags		: {}", flags);
+            let _ = writeln!(output, "bogomips	: 4800.00");
+            let _ = writeln!(output, "clflush size	: 64");
+            let _ = writeln!(output, "cache_alignment	: 64");
+            let _ = writeln!(output, "address sizes	: 40 bits physical, 48 bits virtual");
+            let _ = writeln!(output, "power management:
+");
             let _ = writeln!(output, "");
         }
 
@@ -151,9 +176,9 @@ impl ProcScheme {
         let cpu_count = crate::arch::percpu::get_cpu_count();
 
         for index in 0..cpu_count {
-            let _ = writeln!(output, "processor\t: {}", index);
-            let _ = writeln!(output, "architecture\t: riscv64");
-            let _ = writeln!(output, "isa\t\t: not discovered (DTB support pending)");
+            let _ = writeln!(output, "processor	: {}", index);
+            let _ = writeln!(output, "architecture	: riscv64");
+            let _ = writeln!(output, "isa		: not discovered (DTB support pending)");
         }
 
         output
@@ -175,7 +200,8 @@ impl ProcScheme {
 
     /// Generate /proc/version content
     fn get_version(&self) -> String {
-        format!("Strat9-OS version 0.1.0 (Bedrock) #1 SMP x86_64 Strat9\n")
+        format!("Strat9-OS version 0.1.0 (Bedrock) #1 SMP x86_64 Strat9
+")
     }
 
     /// Generate /proc/silos content
@@ -185,7 +211,7 @@ impl ProcScheme {
         silos.sort_by_key(|s| s.id);
         let _ = writeln!(
             output,
-            "id\tstate\ttasks\tmem_used\tmem_min\tmem_max\tgfx_flags\tgfx_sessions\tgfx_ttl\tlabel\tname\tstrates"
+            "id	state	tasks	mem_used	mem_min	mem_max	gfx_flags	gfx_sessions	gfx_ttl	label	name	strates"
         );
         for s in silos {
             let label = s.strate_label.unwrap_or_else(|| String::from("-"));
@@ -196,7 +222,7 @@ impl ProcScheme {
             };
             let _ = writeln!(
                 output,
-                "{}\t{:?}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                "{}	{:?}	{}	{}	{}	{}	{}	{}	{}	{}	{}	{}",
                 s.id,
                 s.state,
                 s.task_count,
@@ -218,44 +244,44 @@ impl ProcScheme {
     fn get_process_status(&self, task: &Arc<crate::process::task::Task>) -> String {
         let mut output = String::new();
 
-        let _ = writeln!(output, "Name:\t{}", task.name);
-        let _ = writeln!(output, "State:\tR (running)");
-        let _ = writeln!(output, "Tgid:\t{}", task.tgid);
-        let _ = writeln!(output, "Pid:\t{}", task.pid);
+        let _ = writeln!(output, "Name:	{}", task.name);
+        let _ = writeln!(output, "State:	R (running)");
+        let _ = writeln!(output, "Tgid:	{}", task.tgid);
+        let _ = writeln!(output, "Pid:	{}", task.pid);
         let _ = writeln!(
             output,
-            "PPid:\t{}",
+            "PPid:	{}",
             get_parent_pid(task.id).map(|p| p as u64).unwrap_or(0)
         );
         let _ = writeln!(
             output,
-            "Pgid:\t{}",
+            "Pgid:	{}",
             task.pgid.load(core::sync::atomic::Ordering::Relaxed)
         );
         let _ = writeln!(
             output,
-            "Sid:\t{}",
+            "Sid:	{}",
             task.sid.load(core::sync::atomic::Ordering::Relaxed)
         );
         let uid = task.uid.load(core::sync::atomic::Ordering::Relaxed);
         let euid = task.euid.load(core::sync::atomic::Ordering::Relaxed);
         let gid = task.gid.load(core::sync::atomic::Ordering::Relaxed);
         let egid = task.egid.load(core::sync::atomic::Ordering::Relaxed);
-        let _ = writeln!(output, "Uid:\t{}\t{}\t{}\t{}", uid, euid, euid, euid);
-        let _ = writeln!(output, "Gid:\t{}\t{}\t{}\t{}", gid, egid, egid, egid);
-        let _ = writeln!(output, "Threads:\t1");
+        let _ = writeln!(output, "Uid:	{}	{}	{}	{}", uid, euid, euid, euid);
+        let _ = writeln!(output, "Gid:	{}	{}	{}	{}", gid, egid, egid, egid);
+        let _ = writeln!(output, "Threads:	1");
         if let Some((silo_id, label, mem_used, mem_min, mem_max)) =
             silo::silo_info_for_task(task.id)
         {
             let label = label.unwrap_or_else(|| String::from("-"));
-            let _ = writeln!(output, "SiloId:\t{}", silo_id);
-            let _ = writeln!(output, "SiloLabel:\t{}", label);
-            let _ = writeln!(output, "SiloMemUsed:\t{}", mem_used);
-            let _ = writeln!(output, "SiloMemMin:\t{}", mem_min);
+            let _ = writeln!(output, "SiloId:	{}", silo_id);
+            let _ = writeln!(output, "SiloLabel:	{}", label);
+            let _ = writeln!(output, "SiloMemUsed:	{}", mem_used);
+            let _ = writeln!(output, "SiloMemMin:	{}", mem_min);
             if mem_max == 0 {
-                let _ = writeln!(output, "SiloMemMax:\tunlimited");
+                let _ = writeln!(output, "SiloMemMax:	unlimited");
             } else {
-                let _ = writeln!(output, "SiloMemMax:\t{}", mem_max);
+                let _ = writeln!(output, "SiloMemMax:	{}", mem_max);
             }
         }
 
@@ -362,7 +388,11 @@ impl Scheme for ProcScheme {
         let (kind, pid) = Self::decode_id(file_id);
         let content = if file_id == 0 {
             // Root directory listing
-            let mut list = String::from("self\ncpuinfo\nmeminfo\nversion\n");
+            let mut list = String::from("self
+cpuinfo
+meminfo
+version
+");
             if let Some(tasks) = get_all_tasks() {
                 for task in tasks {
                     let _ = writeln!(list, "{}", task.pid);
@@ -371,7 +401,9 @@ impl Scheme for ProcScheme {
             list
         } else if file_id == 1 || kind == KIND_PROC_DIR {
             // Process directory listing (self dir or /proc/<pid>)
-            String::from("status\ncmdline\n")
+            String::from("status
+cmdline
+")
         } else {
             // File content : distinguish by kind (high 32 bits) for process files,
             // or by the literal file_id for well-known fixed files.
@@ -394,7 +426,8 @@ impl Scheme for ProcScheme {
                         .iter()
                         .find(|t| t.pid as u64 == pid)
                         .ok_or(SyscallError::NotFound)?;
-                    format!("{}\n", task.name)
+                    format!("{}
+", task.name)
                 }
                 _ => return Err(SyscallError::IoError),
             }

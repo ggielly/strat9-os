@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! ping : ICMP echo utility for strat9-os
 //!
 //! Sends ICMP echo requests by writing to `/net/ping/<target_ip>` and reads
@@ -32,7 +54,8 @@ static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
 #[alloc_error_handler]
 /// Implements alloc error.
 fn alloc_error(_layout: Layout) -> ! {
-    log("[ping] OOM\n");
+    log("[ping] OOM
+");
     call::exit(12)
 }
 
@@ -221,7 +244,8 @@ fn resolve_target<'a>(
     }
     let end = resolved_buf[..n]
         .iter()
-        .position(|&b| b == b'\n')
+        .position(|&b| b == b'
+')
         .unwrap_or(n);
     if end == 0 {
         return Err(ResolveError::ResolveFailed);
@@ -246,12 +270,18 @@ fn resolve_target<'a>(
 }
 
 fn print_usage() {
-    log("Usage: ping [-6] [-c count] [target] [count]\n");
-    log("       ping -h | --help\n");
-    log("Options:\n");
-    log("  -6           Require IPv6\n");
-    log("  -c <count>   Send count requests (default: 4)\n");
-    log("  -h, --help   Show this help\n");
+    log("Usage: ping [-6] [-c count] [target] [count]
+");
+    log("       ping -h | --help
+");
+    log("Options:
+");
+    log("  -6           Require IPv6
+");
+    log("  -c <count>   Send count requests (default: 4)
+");
+    log("  -h, --help   Show this help
+");
 }
 
 fn copy_target(dst: &mut [u8; 64], value: &str) -> usize {
@@ -280,7 +310,8 @@ fn read_default_target(family: Option<AddressFamily>, target: &mut [u8; 64]) -> 
 
     let end = gateway_buf[..n]
         .iter()
-        .position(|&b| b == b'\n')
+        .position(|&b| b == b'
+')
         .unwrap_or(n);
     if end == 0 {
         return None;
@@ -363,7 +394,8 @@ fn parse_args_from_stack(argc: usize, argv: *const *const u8) -> PingArgs {
             "-c" => {
                 i += 1;
                 if i >= argc {
-                    log("ping: missing value for -c\n");
+                    log("ping: missing value for -c
+");
                     print_usage();
                     call::exit(1);
                 }
@@ -371,7 +403,8 @@ fn parse_args_from_stack(argc: usize, argv: *const *const u8) -> PingArgs {
                 let Some(parsed) = str_to_u32(count_arg) else {
                     log("ping: invalid count: ");
                     log(count_arg);
-                    log("\n");
+                    log("
+");
                     call::exit(1);
                 };
                 count = parsed;
@@ -379,7 +412,8 @@ fn parse_args_from_stack(argc: usize, argv: *const *const u8) -> PingArgs {
             _ if arg.starts_with('-') => {
                 log("ping: unknown option: ");
                 log(arg);
-                log("\n");
+                log("
+");
                 print_usage();
                 call::exit(1);
             }
@@ -390,7 +424,8 @@ fn parse_args_from_stack(argc: usize, argv: *const *const u8) -> PingArgs {
                 let Some(parsed) = str_to_u32(arg) else {
                     log("ping: unexpected argument: ");
                     log(arg);
-                    log("\n");
+                    log("
+");
                     print_usage();
                     call::exit(1);
                 };
@@ -400,7 +435,8 @@ fn parse_args_from_stack(argc: usize, argv: *const *const u8) -> PingArgs {
             _ => {
                 log("ping: unexpected argument: ");
                 log(arg);
-                log("\n");
+                log("
+");
                 print_usage();
                 call::exit(1);
             }
@@ -413,7 +449,8 @@ fn parse_args_from_stack(argc: usize, argv: *const *const u8) -> PingArgs {
         target_len = match read_default_target(family, &mut target) {
             Some(len) => len,
             None => {
-                log("ping: no target specified and no default gateway configured\n");
+                log("ping: no target specified and no default gateway configured
+");
                 print_usage();
                 call::exit(1);
             }
@@ -476,13 +513,15 @@ extern "C" fn start_impl(initial_sp: *const u64) -> ! {
             log(family_name(family));
             log(" address: ");
             log(raw_target);
-            log("\n");
+            log("
+");
             call::exit(1);
         }
         Err(ResolveError::ResolveFailed) => {
             log("ping: cannot resolve host: ");
             log(raw_target);
-            log("\n");
+            log("
+");
             call::exit(1);
         }
         Err(ResolveError::FamilyMismatch { requested, actual }) => {
@@ -492,7 +531,8 @@ extern "C" fn start_impl(initial_sp: *const u64) -> ! {
             log(family_name(requested));
             log(" target, but got ");
             log(family_name(actual));
-            log("\n");
+            log("
+");
             call::exit(1);
         }
     };
@@ -501,7 +541,8 @@ extern "C" fn start_impl(initial_sp: *const u64) -> ! {
     log(target.addr);
     log(", sending ");
     log_u32(args.count);
-    log(" ICMP now\n");
+    log(" ICMP now
+");
 
     // Build the scheme path: /net/ping/<ip> or /net/ping6/<ip>
     let mut path_buf = [0u8; 128];
@@ -523,7 +564,8 @@ extern "C" fn start_impl(initial_sp: *const u64) -> ! {
         Err(()) => {
             log("ping: cannot open ");
             log(path);
-            log("\n");
+            log("
+");
             call::exit(1);
         }
     };
@@ -558,7 +600,8 @@ extern "C" fn start_impl(initial_sp: *const u64) -> ! {
             log("[pt] wr ");
             if scheme_write_fd(fd, req_bytes).is_ok() {
                 wrote = true;
-                log("ok\n");
+                log("ok
+");
                 break;
             }
             log(".");
@@ -570,7 +613,8 @@ extern "C" fn start_impl(initial_sp: *const u64) -> ! {
         if !wrote {
             log("  Request timeout (write failed): seq=");
             log_u32(seq);
-            log("\n");
+            log("
+");
             sent += 1;
             continue;
         }
@@ -583,7 +627,8 @@ extern "C" fn start_impl(initial_sp: *const u64) -> ! {
             let mut reply_buf = [0u8; 64];
             match scheme_read_fd(fd, &mut reply_buf) {
                 Ok(n) if n >= 10 => {
-                    log("rep\n");
+                    log("rep
+");
                     // Use the RTT computed by strate-net (accurate ICMP-level timing),
                     // not a local timestamp which would include IPC overhead.
                     let reply_seq = u16::from_le_bytes([reply_buf[0], reply_buf[1]]);
@@ -600,7 +645,8 @@ extern "C" fn start_impl(initial_sp: *const u64) -> ! {
                     log_u32(rtt_ms as u32);
                     log(".");
                     log_u32(rtt_frac as u32);
-                    log("ms\n");
+                    log("ms
+");
 
                     received += 1;
                     total_rtt_us += rtt_us;
@@ -625,10 +671,12 @@ extern "C" fn start_impl(initial_sp: *const u64) -> ! {
         }
 
         if !got_reply {
-            log("[pt] rto\n");
+            log("[pt] rto
+");
             log("  Request timeout: seq=");
             log_u32(seq);
-            log("\n");
+            log("
+");
         }
 
         if seq + 1 < args.count {
@@ -637,9 +685,11 @@ extern "C" fn start_impl(initial_sp: *const u64) -> ! {
     }
 
     // Statistics
-    log("\n--- ");
+    log("
+--- ");
     log(target.addr);
-    log(" ping statistics ---\n");
+    log(" ping statistics ---
+");
     log_u32(sent);
     log(" packets transmitted, ");
     log_u32(received);
@@ -650,7 +700,8 @@ extern "C" fn start_impl(initial_sp: *const u64) -> ! {
         log_u32(loss);
         log("% packet loss");
     }
-    log("\n");
+    log("
+");
 
     if received > 0 {
         let avg = total_rtt_us / received as u64;
@@ -660,7 +711,8 @@ extern "C" fn start_impl(initial_sp: *const u64) -> ! {
         log_u32((avg / 1000) as u32);
         log("/");
         log_u32((max_rtt_us / 1000) as u32);
-        log(" ms\n");
+        log(" ms
+");
     }
 
     scheme_close(fd);

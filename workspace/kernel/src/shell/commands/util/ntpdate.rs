@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 use super::*;
 use alloc::string::String;
 use strat9_abi::ip::parse_ipv4_literal;
@@ -19,7 +41,8 @@ fn resolve_ntp_server(server: &str) -> Result<[u8; 4], ShellError> {
     if n == 0 {
         return Err(ShellError::ExecutionFailed);
     }
-    let end = buf[..n].iter().position(|&b| b == b'\n').unwrap_or(n);
+    let end = buf[..n].iter().position(|&b| b == b'
+').unwrap_or(n);
     let s = core::str::from_utf8(&buf[..end]).unwrap_or("").trim();
     parse_ipv4_literal(s).ok_or(ShellError::ExecutionFailed)
 }

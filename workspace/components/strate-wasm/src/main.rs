@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 #![no_std]
 #![no_main]
 #![feature(alloc_error_handler)]
@@ -42,7 +64,8 @@ static ALLOCATOR: Talck<spin::Mutex<()>, BrkGrower> = Talck::new(Talc::new(BrkGr
 #[alloc_error_handler]
 /// Implements alloc error.
 fn alloc_error(_layout: Layout) -> ! {
-    let _ = call::debug_log(b"[strate-wasm] Fatal: OOM\n");
+    let _ = call::debug_log(b"[strate-wasm] Fatal: OOM
+");
     call::exit(12);
 }
 
@@ -301,7 +324,8 @@ pub unsafe extern "C" fn _start() -> ! {
     let final_path = format!("/srv/strate-wasm/{}", label);
     debug_log("[strate-wasm] running: ");
     debug_log(&final_path);
-    debug_log("\n");
+    debug_log("
+");
 
     let mut current_instance: Option<Instance> = None;
 
@@ -349,17 +373,20 @@ pub unsafe extern "C" fn _start() -> ! {
 
                     if read_failed {
                         if wasm_bytes.len() > MAX_WASM_SIZE {
-                            debug_log("[strate-wasm] load error: too large\n");
+                            debug_log("[strate-wasm] load error: too large
+");
                             send_response(src, RESP_ERR_TOO_LARGE);
                         } else {
-                            debug_log("[strate-wasm] load error: read\n");
+                            debug_log("[strate-wasm] load error: read
+");
                             send_response(src, RESP_ERR_READ);
                         }
                         continue;
                     }
 
                     if wasm_bytes.is_empty() {
-                        debug_log("[strate-wasm] load error: empty\n");
+                        debug_log("[strate-wasm] load error: empty
+");
                         send_response(src, RESP_ERR_READ);
                         continue;
                     }
@@ -370,13 +397,15 @@ pub unsafe extern "C" fn _start() -> ! {
                         .map(|i| i + 1)
                         .unwrap_or(0);
                     if trimmed_len == 0 {
-                        debug_log("[strate-wasm] load error: all-zero image\n");
+                        debug_log("[strate-wasm] load error: all-zero image
+");
                         send_response(src, RESP_ERR_MODULE);
                         continue;
                     }
                     let trimmed = &wasm_bytes[..trimmed_len];
                     let Some(effective_len) = wasm_effective_len(trimmed) else {
-                        debug_log("[strate-wasm] load error: bad magic\n");
+                        debug_log("[strate-wasm] load error: bad magic
+");
                         send_response(src, RESP_ERR_MODULE);
                         continue;
                     };
@@ -389,13 +418,15 @@ pub unsafe extern "C" fn _start() -> ! {
                                 send_response(src, RESP_OK);
                             }
                             Err(_) => {
-                                debug_log("[strate-wasm] load error: instantiate\n");
+                                debug_log("[strate-wasm] load error: instantiate
+");
                                 send_response(src, RESP_ERR_INSTANTIATE)
                             }
                         },
                         Err(_) => {
                             let line = format!(
-                                "[strate-wasm] load error: module parse failed (len={})\n",
+                                "[strate-wasm] load error: module parse failed (len={})
+",
                                 module_bytes.len()
                             );
                             debug_log(&line);
@@ -403,7 +434,8 @@ pub unsafe extern "C" fn _start() -> ! {
                         }
                     }
                 } else {
-                    debug_log("[strate-wasm] load error: open\n");
+                    debug_log("[strate-wasm] load error: open
+");
                     send_response(src, RESP_ERR_OPEN);
                 }
             }
@@ -419,17 +451,20 @@ pub unsafe extern "C" fn _start() -> ! {
                                 if store.data().exit_code.is_some() {
                                     send_response(src, RESP_OK);
                                 } else {
-                                    debug_log("[strate-wasm] run error: trap\n");
+                                    debug_log("[strate-wasm] run error: trap
+");
                                     send_response(src, RESP_ERR_RUN);
                                 }
                             }
                         }
                     } else {
-                        debug_log("[strate-wasm] run error: no _start\n");
+                        debug_log("[strate-wasm] run error: no _start
+");
                         send_response(src, RESP_ERR_NO_ENTRY);
                     }
                 } else {
-                    debug_log("[strate-wasm] run error: no instance\n");
+                    debug_log("[strate-wasm] run error: no instance
+");
                     send_response(src, RESP_ERR_NO_INSTANCE);
                 }
             }

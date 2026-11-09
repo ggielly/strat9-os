@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 #![no_std]
 #![no_main]
 #![feature(alloc_error_handler)]
@@ -34,7 +56,8 @@ static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
-    let _ = call::debug_log(b"[strate-net] OOM\n");
+    let _ = call::debug_log(b"[strate-net] OOM
+");
     exit(12);
 }
 
@@ -102,7 +125,8 @@ fn sleep_micros(micros: u64) {
 
 impl NetworkStrate {
     fn serve(&mut self, port: u64) -> ! {
-        log("[strate-net] Starting DHCP...\n");
+        log("[strate-net] Starting DHCP...
+");
         self.enable_dhcp();
 
         loop {
@@ -112,14 +136,17 @@ impl NetworkStrate {
             if call::net_device_event(&mut device_event).is_ok() {
                 match device_event.kind {
                     strat9_abi::net::event::DEVICE_REMOVE => {
-                        log("[strate-net] device removed, exiting for supervisor restart\n");
+                        log("[strate-net] device removed, exiting for supervisor restart
+");
                         exit(3);
                     }
                     strat9_abi::net::event::LINK_DOWN => {
-                        log("[strate-net] link is DOWN !\n");
+                        log("[strate-net] link is DOWN !
+");
                     }
                     strat9_abi::net::event::LINK_UP => {
-                        log("[strate-net] link is UP !\n");
+                        log("[strate-net] link is UP !
+");
                     }
                     _ => {}
                 }
@@ -219,13 +246,15 @@ fn wait_for_kernel_mac(max_attempts: usize) -> Option<[u8; 6]> {
     for attempt in 0..max_attempts {
         if net_info(0, &mut mac).is_ok() && mac != [0; 6] {
             if attempt != 0 {
-                log("[strate-net] Kernel NIC became available\n");
+                log("[strate-net] Kernel NIC became available
+");
             }
             return Some(mac);
         }
 
         if attempt == 0 {
-            log("[strate-net] Waiting for kernel NIC registration...\n");
+            log("[strate-net] Waiting for kernel NIC registration...
+");
         }
 
         sleep_micros(1000);
@@ -236,19 +265,22 @@ fn wait_for_kernel_mac(max_attempts: usize) -> Option<[u8; 6]> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    log("[strate-net] Starting network silo\n");
+    log("[strate-net] Starting network silo
+");
 
     // Acquire the NIC capability once.  Without it every raw network syscall
     // returns EPERM; this is the capability gate introduced in P0.
     let dev_handle = match net_open() {
         Ok(handle) => {
-            log("[strate-net] NIC capability acquired\n");
+            log("[strate-net] NIC capability acquired
+");
             handle as u64
         }
         Err(e) => {
             log("[strate-net] net_open failed: ");
             log_error_code(e);
-            log("\n");
+            log("
+");
             0
         }
     };
@@ -258,7 +290,8 @@ pub extern "C" fn _start() -> ! {
         Err(e) => {
             log("[strate-net] Failed to create port: ");
             log_error_code(e);
-            log("\n");
+            log("
+");
             exit(1);
         }
     };
@@ -266,28 +299,34 @@ pub extern "C" fn _start() -> ! {
     if let Err(e) = call::ipc_bind_port(port as usize, b"/net") {
         log("[strate-net] Failed to bind to /net: ");
         log_error_code(e);
-        log("\n");
+        log("
+");
         exit(2);
     }
 
-    log("[strate-net] Bound to /net\n");
+    log("[strate-net] Bound to /net
+");
 
     let mac = match wait_for_kernel_mac(2048) {
         Some(mac) => {
-            log("[strate-net] MAC acquired from kernel\n");
+            log("[strate-net] MAC acquired from kernel
+");
             mac
         }
         None => {
-            log("[strate-net] No NIC found after waiting, using fallback MAC\n");
+            log("[strate-net] No NIC found after waiting, using fallback MAC
+");
             [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]
         }
     };
 
     // Register with the NIC subsystem so the IRQ handler can wake us.
     if net_register().is_ok() {
-        log("[strate-net] Registered with NIC IRQ dispatch\n");
+        log("[strate-net] Registered with NIC IRQ dispatch
+");
     } else {
-        log("[strate-net] NIC registration failed (will poll)\n");
+        log("[strate-net] NIC registration failed (will poll)
+");
     }
 
     // Try to map all shared queue regions.  On success RX/TX are syscall-free
@@ -315,10 +354,12 @@ pub extern "C" fn _start() -> ! {
             });
         }
         if queues.is_empty() {
-            log("[strate-net] Queue map failed, using copy path\n");
+            log("[strate-net] Queue map failed, using copy path
+");
             crate::device::NetDevice::legacy()
         } else {
-            log("[strate-net] Shared queues mapped (zero-copy, multi-queue)\n");
+            log("[strate-net] Shared queues mapped (zero-copy, multi-queue)
+");
             let features = unsafe {
                 (*queues[0].header)
                     .features

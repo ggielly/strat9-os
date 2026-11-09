@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 use crate::{
     capability::CapId,
     memory::{
@@ -204,7 +226,7 @@ pub fn destroy_ring(id: RingId) -> Result<(), RingError> {
     let len = map.len();
     if len > 10_000 {
         crate::serial_println!(
-            "\x1b[1;31m[ipc] RINGS BTreeMap corrupted: len={} for id={} \u{2014} aborting remove\x1b[0m",
+            "[1;31m[ipc] RINGS BTreeMap corrupted: len={} for id={} \u{2014} aborting remove[0m",
             len, id.as_u64()
         );
         return Err(RingError::NotFound);

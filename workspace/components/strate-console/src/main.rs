@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 #![no_std]
 #![no_main]
 #![feature(alloc_error_handler)]
@@ -36,7 +58,8 @@ static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
-    let _ = call::debug_log(b"[console] OOM\n");
+    let _ = call::debug_log(b"[console] OOM
+");
     loop {
         let _ = call::sched_yield();
     }
@@ -49,12 +72,14 @@ fn panic(info: &PanicInfo) -> ! {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    let _ = call::debug_log(b"[console] strate-console starting\n");
+    let _ = call::debug_log(b"[console] strate-console starting
+");
 
     let mut rend = match Renderer::open() {
         Some(r) => r,
         None => {
-            let _ = call::debug_log(b"[console] FATAL: cannot open /dev/display/0.0\n");
+            let _ = call::debug_log(b"[console] FATAL: cannot open /dev/display/0.0
+");
             loop {
                 let _ = call::sched_yield();
             }
@@ -64,7 +89,8 @@ pub extern "C" fn _start() -> ! {
     let mut kbd = match InputHandler::open() {
         Some(k) => k,
         None => {
-            let _ = call::debug_log(b"[console] FATAL: cannot open /dev/input/kbd\n");
+            let _ = call::debug_log(b"[console] FATAL: cannot open /dev/input/kbd
+");
             loop {
                 let _ = call::sched_yield();
             }
@@ -73,11 +99,17 @@ pub extern "C" fn _start() -> ! {
 
     let mut term = TerminalCore::new(rend.cols, rend.rows, DEFAULT_FG, DEFAULT_BG);
 
-    let banner = b"\n\
-        \x1b[1;36m========================================\x1b[0m\n\
-        \x1b[1;36m  strat9-os console (ring 3)\x1b[0m\n\
-        \x1b[1;36m========================================\x1b[0m\n\
-        \x1b[90mType 'help' for commands.\x1b[0m\n\n";
+    let banner = b"
+\
+        [1;36m========================================[0m
+\
+        [1;36m  strat9-os console (ring 3)[0m
+\
+        [1;36m========================================[0m
+\
+        [90mType 'help' for commands.[0m
+
+";
     term.process_bytes(banner);
 
     rend.render(

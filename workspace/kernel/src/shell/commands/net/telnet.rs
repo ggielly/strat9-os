@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 use super::*;
 
 /// Open a TCP connection and send/receive data interactively.
@@ -35,7 +57,10 @@ pub fn cmd_telnet(args: &[String]) -> Result<(), ShellError> {
     }
 
     if http_mode {
-        let req = alloc::format!("GET / HTTP/1.0\r\nHost: {}\r\n\r\n", ip);
+        let req = alloc::format!("GET / HTTP/1.0
+Host: {}
+
+", ip);
         let _ = vfs::write(fd, req.as_bytes());
     }
 
@@ -59,7 +84,8 @@ pub fn cmd_telnet(args: &[String]) -> Result<(), ShellError> {
             }
         }
     }
-    shell_println!("\nConnection closed ({} bytes received)", total);
+    shell_println!("
+Connection closed ({} bytes received)", total);
     let _ = vfs::close(fd);
     Ok(())
 }

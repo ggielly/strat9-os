@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! EXT4 Filesystem Strate (userspace)
 //!
 //! IPC-based filesystem strate that mounts an EXT4 volume and serves
@@ -29,7 +51,8 @@ static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
 #[alloc_error_handler]
 /// Implements alloc error.
 fn alloc_error(_layout: Layout) -> ! {
-    debug_log("[fs-ext4] OOM\n");
+    debug_log("[fs-ext4] OOM
+");
     exit(12);
 }
 
@@ -91,12 +114,14 @@ fn bind_srv_alias(port_handle: u64, label: &str) {
     let path = format!("/srv/strate-fs-ext4/{}", label);
     match call::ipc_bind_port(port_handle as usize, path.as_bytes()) {
         Ok(_) => {
-            let msg = format!("[fs-ext4] Port alias bound to {}\n", path);
+            let msg = format!("[fs-ext4] Port alias bound to {}
+", path);
             debug_log(&msg);
         }
         Err(e) => {
             let msg = format!(
-                "[fs-ext4] Failed to bind port alias {}: {}\n",
+                "[fs-ext4] Failed to bind port alias {}: {}
+",
                 path,
                 e.name()
             );
@@ -298,26 +323,30 @@ fn map_sys_err(err: Error) -> BlockDeviceError {
 
 /// Implements log sys err.
 fn log_sys_err(prefix: &str, err: Error) {
-    let msg = format!("[fs-ext4] {}: {} ({})\n", prefix, err.name(), err);
+    let msg = format!("[fs-ext4] {}: {} ({})
+", prefix, err.name(), err);
     debug_log(&msg);
 }
 
 /// Implements validate volume handle.
 fn validate_volume_handle(handle: u64) -> Result<u64> {
-    let msg = format!("[fs-ext4] Probing volume handle={}\n", handle);
+    let msg = format!("[fs-ext4] Probing volume handle={}
+", handle);
     debug_log(&msg);
     let sectors = volume_info(handle)?;
     if sectors == 0 {
         return Err(Error::InvalidArgument);
     }
     let msg = format!(
-        "[fs-ext4] Volume info OK: handle={} sectors={}\n",
+        "[fs-ext4] Volume info OK: handle={} sectors={}
+",
         handle, sectors
     );
     debug_log(&msg);
     let mut probe = [0u8; SECTOR_SIZE];
     let _ = volume_read(handle, 0, &mut probe, 1)?;
-    let msg = format!("[fs-ext4] Sector-0 probe OK: handle={}\n", handle);
+    let msg = format!("[fs-ext4] Sector-0 probe OK: handle={}
+", handle);
     debug_log(&msg);
     Ok(sectors)
 }
@@ -329,7 +358,8 @@ fn discover_volume_handle_local() -> Option<u64> {
     for h in 0u64..256u64 {
         if let Ok(sectors) = validate_volume_handle(h) {
             let msg = format!(
-                "[fs-ext4] Discovered local volume handle={} sectors={}\n",
+                "[fs-ext4] Discovered local volume handle={} sectors={}
+",
                 h, sectors
             );
             debug_log(&msg);
@@ -381,7 +411,8 @@ impl BlockDevice for VolumeBlockDevice {
 
 /// Implements wait for bootstrap.
 fn wait_for_bootstrap(port_handle: u64) -> BootstrapInfo {
-    debug_log("[fs-ext4] Waiting for volume bootstrap...\n");
+    debug_log("[fs-ext4] Waiting for volume bootstrap...
+");
     loop {
         let mut msg = IpcMessage::new(0);
         if call::ipc_recv(port_handle as usize, &mut msg).is_err() {
@@ -436,42 +467,51 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
     // TODO: Initialize allocator (we need heap)
     // For now, this will panic since we can't allocate
 
-    debug_log("[fs-ext4] Starting EXT4 filesystem strate\n");
+    debug_log("[fs-ext4] Starting EXT4 filesystem strate
+");
 
     let port_handle = match call::ipc_create_port(0) {
         Ok(h) => h as u64,
         Err(_) => {
-            debug_log("[fs-ext4] Failed to create IPC port\n");
+            debug_log("[fs-ext4] Failed to create IPC port
+");
             exit(1);
         }
     };
 
-    debug_log("[fs-ext4] IPC port created\n");
+    debug_log("[fs-ext4] IPC port created
+");
 
     if call::ipc_bind_port(port_handle as usize, INITIAL_BIND_PATH).is_err() {
-        debug_log("[fs-ext4] Failed to bind initial port alias\n");
+        debug_log("[fs-ext4] Failed to bind initial port alias
+");
         exit(2);
     }
 
-    debug_log("[fs-ext4] Port bound to /srv/strate-fs-ext4/default\n");
+    debug_log("[fs-ext4] Port bound to /srv/strate-fs-ext4/default
+");
 
     let mut volume_handle = bootstrap_handle;
     let mut bootstrap_label = String::from("default");
     if volume_handle == 0 {
-        debug_log("[fs-ext4] Waiting for early bootstrap message...\n");
+        debug_log("[fs-ext4] Waiting for early bootstrap message...
+");
         if let Some(info) = try_wait_for_bootstrap(port_handle, 2048) {
             let msg = format!(
-                "[fs-ext4] Received bootstrap handle: {} label: {}\n",
+                "[fs-ext4] Received bootstrap handle: {} label: {}
+",
                 info.handle, info.label
             );
             debug_log(&msg);
             volume_handle = info.handle;
             bootstrap_label = info.label;
         } else if let Some(h) = discover_volume_handle_local() {
-            debug_log("[fs-ext4] Bootstrap message timeout, using local discovery fallback\n");
+            debug_log("[fs-ext4] Bootstrap message timeout, using local discovery fallback
+");
             volume_handle = h;
         } else {
-            debug_log("[fs-ext4] Bootstrap message timeout, switching to blocking wait\n");
+            debug_log("[fs-ext4] Bootstrap message timeout, switching to blocking wait
+");
             let info = wait_for_bootstrap(port_handle);
             volume_handle = info.handle;
             bootstrap_label = info.label;
@@ -479,7 +519,8 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
     }
     {
         let msg = format!(
-            "[fs-ext4] Volume handle ready: {} label: {}\n",
+            "[fs-ext4] Volume handle ready: {} label: {}
+",
             volume_handle, bootstrap_label
         );
         debug_log(&msg);
@@ -492,7 +533,8 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
         attempts = attempts.wrapping_add(1);
         if attempts <= 4 || attempts.is_multiple_of(16) {
             let msg = format!(
-                "[fs-ext4] Mount loop attempt={} handle={} label={}\n",
+                "[fs-ext4] Mount loop attempt={} handle={} label={}
+",
                 attempts, volume_handle, bootstrap_label
             );
             debug_log(&msg);
@@ -500,7 +542,8 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
         match validate_volume_handle(volume_handle) {
             Ok(sectors) => {
                 let msg = format!(
-                    "[fs-ext4] volume probe OK: handle={} sectors={} (attempt={})\n",
+                    "[fs-ext4] volume probe OK: handle={} sectors={} (attempt={})
+",
                     volume_handle, sectors, attempts
                 );
                 debug_log(&msg);
@@ -509,12 +552,14 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
                 log_sys_err("volume probe failed", err);
                 // If we started without bootstrap capability, wait for a fresh handle periodically.
                 if bootstrap_handle == 0 && attempts.is_multiple_of(8) {
-                    debug_log("[fs-ext4] Waiting for refreshed bootstrap handle...\n");
+                    debug_log("[fs-ext4] Waiting for refreshed bootstrap handle...
+");
                     let info = wait_for_bootstrap(port_handle);
                     volume_handle = info.handle;
                     bootstrap_label = info.label;
                     let msg = format!(
-                        "[fs-ext4] Refreshed volume handle: {} label: {}\n",
+                        "[fs-ext4] Refreshed volume handle: {} label: {}
+",
                         volume_handle, bootstrap_label
                     );
                     debug_log(&msg);
@@ -530,7 +575,8 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
             Ok(dev) => alloc::sync::Arc::new(dev),
             Err(e) => {
                 let msg = format!(
-                    "[fs-ext4] Failed to init volume device (attempt={}): {:?}\n",
+                    "[fs-ext4] Failed to init volume device (attempt={}): {:?}
+",
                     attempts, e
                 );
                 debug_log(&msg);
@@ -542,7 +588,8 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
         };
 
         let msg = format!(
-            "[fs-ext4] Block device ready: handle={} (attempt={})\n",
+            "[fs-ext4] Block device ready: handle={} (attempt={})
+",
             volume_handle, attempts
         );
         debug_log(&msg);
@@ -551,7 +598,8 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
             Ok(fs) => fs,
             Err(e) => {
                 let msg = format!(
-                    "[fs-ext4] Failed to mount EXT4 filesystem (attempt={}): {:?}\n",
+                    "[fs-ext4] Failed to mount EXT4 filesystem (attempt={}): {:?}
+",
                     attempts, e
                 );
                 debug_log(&msg);
@@ -562,8 +610,10 @@ pub extern "C" fn _start(bootstrap_handle: u64) -> ! {
             }
         };
 
-        debug_log("[fs-ext4] EXT4 mounted successfully\n");
-        debug_log("[fs-ext4] Strate ready, waiting for requests...\n");
+        debug_log("[fs-ext4] EXT4 mounted successfully
+");
+        debug_log("[fs-ext4] Strate ready, waiting for requests...
+");
 
         // Create strate and start serving
         let mut strate = Ext4Strate::new(fs);

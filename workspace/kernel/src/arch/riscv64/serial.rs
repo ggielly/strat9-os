@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! NS16550A UART driver (MMIO) for riscv64 QEMU virt.
 //!
 //! QEMU virt maps the first UART at physical 0x10000000, IRQ 10, with a
@@ -105,15 +127,19 @@ macro_rules! serial_print {
 /// Print to serial port with newline
 #[macro_export]
 macro_rules! serial_println {
-    () => ($crate::serial_print!("\n"));
-    ($($arg:tt)*) => ($crate::serial_print!("{}\n", format_args!($($arg)*)));
+    () => ($crate::serial_print!("
+"));
+    ($($arg:tt)*) => ($crate::serial_print!("{}
+", format_args!($($arg)*)));
 }
 
 /// Print to serial port with newline, bypassing the shared mutex.
 #[macro_export]
 macro_rules! serial_force_println {
-    () => ($crate::arch::serial::_print(format_args!("\n")));
-    ($($arg:tt)*) => ($crate::arch::serial::_print(format_args!("{}\n", format_args!($($arg)*))));
+    () => ($crate::arch::serial::_print(format_args!("
+")));
+    ($($arg:tt)*) => ($crate::arch::serial::_print(format_args!("{}
+", format_args!($($arg)*))));
 }
 
 /// Store a boot cmdline for later retrieval (set by the SBI boot path).

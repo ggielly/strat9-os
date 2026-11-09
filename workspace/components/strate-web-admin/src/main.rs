@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 #![no_std]
 #![no_main]
 #![feature(alloc_error_handler)]
@@ -34,7 +56,8 @@ fn alloc_error(layout: Layout) -> ! {
         let mut w = BufWriter::new(&mut buf);
         let _ = write!(
             w,
-            "[web-admin] OOM: {} bytes align {}\n",
+            "[web-admin] OOM: {} bytes align {}
+",
             layout.size(),
             layout.align()
         );
@@ -88,7 +111,8 @@ static CONFIG: picoserve::Config =
 #[unsafe(no_mangle)]
 /// Implements start.
 pub extern "C" fn _start() -> ! {
-    log("[web-admin] Strat9 Web Admin starting on port 8080\n");
+    log("[web-admin] Strat9 Web Admin starting on port 8080
+");
 
     let app = routes::build_router();
     let mut conn_count: u64 = 0;
@@ -107,14 +131,16 @@ pub extern "C" fn _start() -> ! {
             match server.serve(socket).await {
                 Ok(info) => {
                     let msg = alloc::format!(
-                        "[web-admin] conn #{}: {} reqs\n",
+                        "[web-admin] conn #{}: {} reqs
+",
                         conn_count,
                         info.handled_requests_count
                     );
                     log(&msg);
                 }
                 Err(_) => {
-                    log("[web-admin] connection error\n");
+                    log("[web-admin] connection error
+");
                 }
             }
         });

@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! Silo manager (kernel-side, minimal mechanisms only)
 //!
 //! This module provides the core kernel structures and syscalls
@@ -291,7 +313,7 @@ fn normalize_unveil_path(path: &str) -> Result<String, SyscallError> {
             prev_slash = true;
             continue;
         }
-        if ch == '\0' {
+        if ch == ' ' {
             return Err(SyscallError::InvalidArgument);
         }
         prev_slash = false;
@@ -3322,7 +3344,7 @@ fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode
 
     if let Some((pid, tid, name, state, as_cr3, as_is_kernel)) = task_meta {
         crate::serial_force_println!(
-            "\x1b[31m[handle_user_fault]\x1b[0m task={} \x1b[36mpid={}\x1b[0m tid={} name='{}' state={:?} reason={:?} \x1b[35mrip={:#x}\x1b[0m \x1b[35mextra={:#x}\x1b[0m subcode={:#x} as_cr3={:#x} as_kernel={}",
+            "[31m[handle_user_fault][0m task={} [36mpid={}[0m tid={} name='{}' state={:?} reason={:?} [35mrip={:#x}[0m [35mextra={:#x}[0m subcode={:#x} as_cr3={:#x} as_kernel={}",
             task_id.as_u64(),
             pid,
             tid,
@@ -3337,7 +3359,7 @@ fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode
         );
     } else {
         crate::serial_force_println!(
-            "\x1b[31m[handle_user_fault]\x1b[0m task={} reason={:?} \x1b[35mrip={:#x}\x1b[0m \x1b[35mextra={:#x}\x1b[0m subcode={:#x} (task metadata unavailable)",
+            "[31m[handle_user_fault][0m task={} reason={:?} [35mrip={:#x}[0m [35mextra={:#x}[0m subcode={:#x} (task metadata unavailable)",
             task_id.as_u64(),
             reason,
             rip,
@@ -3356,7 +3378,7 @@ fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode
         let shadow_stack = (subcode & 0x40) != 0;
         let sgx = (subcode & 0x8000) != 0;
         crate::serial_force_println!(
-            "\x1b[31m[handle_user_fault]\x1b[0m \x1b[31mpagefault\x1b[0m \x1b[35maddr={:#x}\x1b[0m \x1b[35mrip={:#x}\x1b[0m ec={:#x} present={} write={} user={} reserved={} ifetch={} pkey={} shadow_stack={} sgx={}",
+            "[31m[handle_user_fault][0m [31mpagefault[0m [35maddr={:#x}[0m [35mrip={:#x}[0m ec={:#x} present={} write={} user={} reserved={} ifetch={} pkey={} shadow_stack={} sgx={}",
             extra,
             rip,
             subcode,
@@ -3371,13 +3393,13 @@ fn dump_user_fault(task_id: TaskId, reason: SiloFaultReason, extra: u64, subcode
         );
         if user && extra < 0x1000 {
             crate::serial_force_println!(
-                "\x1b[31m[handle_user_fault]\x1b[0m \x1b[33mhint: low user address fault ({:#x}) -> probable NULL/near-NULL dereference\x1b[0m",
+                "[31m[handle_user_fault][0m [33mhint: low user address fault ({:#x}) -> probable NULL/near-NULL dereference[0m",
                 extra
             );
         }
     } else {
         crate::serial_force_println!(
-            "\x1b[31m[handle_user_fault]\x1b[0m \x1b[31mfault detail\x1b[0m \x1b[35mrip={:#x}\x1b[0m code={:#x}",
+            "[31m[handle_user_fault][0m [31mfault detail[0m [35mrip={:#x}[0m code={:#x}",
             rip,
             subcode
         );
@@ -3394,7 +3416,7 @@ pub fn handle_user_fault(
 ) {
     // FORCE OUTPUT for user fault - bypasses normal logging mutexes
     crate::serial_force_println!(
-        "\x1b[31;1m[handle_user_fault] CRITICAL FAULT\x1b[0m: tid={} reason={:?} rip={:#x} addr={:#x} err={:#x}",
+        "[31;1m[handle_user_fault] CRITICAL FAULT[0m: tid={} reason={:?} rip={:#x} addr={:#x} err={:#x}",
         task_id.as_u64(),
         reason,
         rip,

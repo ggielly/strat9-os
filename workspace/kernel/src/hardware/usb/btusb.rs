@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 // USB Bluetooth (HCI over USB) transport
 // Reference: Bluetooth Core Specification, Vol 4, Part B (HCI USB transport)
 //
@@ -1216,7 +1238,8 @@ pub fn read_packet(buf: &mut [u8]) -> Result<usize, SyscallError> {
 pub fn stats_text() -> String {
     let state = STATE.lock();
     alloc::format!(
-        "present={} slot={} vid={:04x} pid={:04x} ep_in={:02x} ep_out={:02x} ep_evt={:02x} events_on_bulk={} rx_events={} rx_acl={} rx_dropped={} tx_packets={} tx_bytes={} tx_dropped={} tx_queued={} irq_drops={}\n",
+        "present={} slot={} vid={:04x} pid={:04x} ep_in={:02x} ep_out={:02x} ep_evt={:02x} events_on_bulk={} rx_events={} rx_acl={} rx_dropped={} tx_packets={} tx_bytes={} tx_dropped={} tx_queued={} irq_drops={}
+",
         state.present,
         state.slot_id,
         state.vendor_id,

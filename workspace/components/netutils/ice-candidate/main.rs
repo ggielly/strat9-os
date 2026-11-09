@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 #![no_std]
 #![no_main]
 #![feature(alloc_error_handler)]
@@ -30,7 +52,8 @@ static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
-    let _ = call::write(1, b"[ice-candidate] OOM\n");
+    let _ = call::write(1, b"[ice-candidate] OOM
+");
     call::exit(12)
 }
 
@@ -77,7 +100,8 @@ fn resolve_target<'a>(target: &'a str, resolved_buf: &'a mut [u8; 64]) -> Option
     }
     let end = resolved_buf[..n]
         .iter()
-        .position(|&b| b == b'\n')
+        .position(|&b| b == b'
+')
         .unwrap_or(n);
     if end == 0 {
         return None;
@@ -122,7 +146,8 @@ fn read_stun_config<'a>(host_buf: &'a mut [u8; 253], port_out: &mut u16) -> &'a 
     };
     // Trim trailing whitespace / newlines.
     let mut end = n;
-    while end > 0 && (raw[end - 1] == b'\n' || raw[end - 1] == b'\r' || raw[end - 1] == b' ') {
+    while end > 0 && (raw[end - 1] == b'
+' || raw[end - 1] == b'' || raw[end - 1] == b' ') {
         end -= 1;
     }
     let line = &raw[..end];
@@ -155,7 +180,8 @@ fn read_local_ip<'a>(out: &'a mut [u8; 64]) -> Option<&'a str> {
     if n == 0 {
         return None;
     }
-    let mut end = out[..n].iter().position(|&b| b == b'\n').unwrap_or(n);
+    let mut end = out[..n].iter().position(|&b| b == b'
+').unwrap_or(n);
     if let Some(slash) = out[..end].iter().position(|&b| b == b'/') {
         end = slash;
     }
@@ -238,7 +264,8 @@ pub extern "C" fn _start() -> ! {
     let stun_host = read_stun_config(&mut stun_host_buf, &mut stun_port);
     let mut resolved = [0u8; 64];
     let Some(stun_ip) = resolve_target(stun_host, &mut resolved) else {
-        log("[ice-candidate] resolve failed\n");
+        log("[ice-candidate] resolve failed
+");
         call::exit(1);
     };
 
@@ -257,13 +284,15 @@ pub extern "C" fn _start() -> ! {
     let fd = match scheme_open(&path, O_RDWR) {
         Ok(fd) => fd,
         Err(_) => {
-            log("[ice-candidate] stun open failed\n");
+            log("[ice-candidate] stun open failed
+");
             call::exit(2);
         }
     };
 
     if call::write(fd as usize, &req).is_err() {
-        log("[ice-candidate] stun send failed\n");
+        log("[ice-candidate] stun send failed
+");
         let _ = call::close(fd as usize);
         call::exit(2);
     }
@@ -288,7 +317,8 @@ pub extern "C" fn _start() -> ! {
     if let Some(local_ip) = read_local_ip(&mut local_ip_buf) {
         // RFC 8445 §5.1.1: use port 0 when the actual bound port is not known.
         let host = format!(
-            "candidate:1 1 UDP {} {} 0 typ host\r\n",
+            "candidate:1 1 UDP {} {} 0 typ host
+",
             ICE_HOST_PRIORITY, local_ip
         );
         log(&host);
@@ -297,7 +327,8 @@ pub extern "C" fn _start() -> ! {
     if let Some((ip, port)) = mapped {
         let srflx = format!(
             // RFC 8445 §5.1.1: rport 0 when the reflexive base port is not tracked.
-            "candidate:2 1 UDP {} {}.{}.{}.{} {} typ srflx raddr 0.0.0.0 rport 0\r\n",
+            "candidate:2 1 UDP {} {}.{}.{}.{} {} typ srflx raddr 0.0.0.0 rport 0
+",
             ICE_SRFLX_PRIORITY, ip[0], ip[1], ip[2], ip[3], port
         );
         log(&srflx);
@@ -305,7 +336,8 @@ pub extern "C" fn _start() -> ! {
         call::exit(0);
     }
 
-    log("[ice-candidate] no srflx candidate\n");
+    log("[ice-candidate] no srflx candidate
+");
     let _ = call::close(fd as usize);
     call::exit(3)
 }

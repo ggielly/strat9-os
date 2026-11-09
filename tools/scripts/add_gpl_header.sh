@@ -5,8 +5,8 @@
 dry_run=false
 path="."
 exclude=("target" "build" ".git")
-website="<WEBSITE>"
-repository="<REPOSITORY>"
+website="https://www.strat9-os.org"
+repository="https://github.com/strat9-os/strat9-os"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -56,7 +56,7 @@ header="/*
  * Website: $website
  * Repository: $repository
  *
- * Copyright (C) 2026 Guillaume Gielly
+ * Copyright (C) 2023-26 Guillaume Gielly
  */"
 
 has_header() {

@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 use crate::arch::xshim::VirtAddr;
 use core::{
     panic::PanicInfo,
@@ -162,7 +184,8 @@ pub(crate) fn dump_backtrace_from(mut rbp: u64) {
 
 /// Collect comprehensive debug info and print directly to serial (heap-safe).
 fn dump_panic_info(info: &PanicInfo) {
-    crate::serial_force_println!("\n\x1b[31;1m!!! KERNEL PANIC !!!\x1b[0m");
+    crate::serial_force_println!("
+[31;1m!!! KERNEL PANIC !!![0m");
     crate::serial_force_println!("=== GURU MEDiTATiON :: KERNEL PANiK ===");
     crate::serial_force_println!("");
 
@@ -258,7 +281,8 @@ pub fn panic_handler(info: &PanicInfo) -> ! {
     // detected" panic.  The double-panic path used to be the only thing
     // printed, hiding the real cause.  Emit it now, unconditionally and
     // allocation-free, so the original message is always on the wire.
-    crate::serial_force_println!("\n[panic] {}", info.message());
+    crate::serial_force_println!("
+[panic] {}", info.message());
     if let Some(loc) = info.location() {
         crate::serial_force_println!("[panic] at {}:{}", loc.file(), loc.line());
     }
@@ -282,7 +306,8 @@ pub fn panic_handler(info: &PanicInfo) -> ! {
     if PANIC_IN_PROGRESS.swap(true, Ordering::SeqCst) {
         // Double panic: dump as much as we can with stack-only formatting.
         crate::arch::cli();
-        crate::serial_force_println!("\n\x1b[31;1m!!! DOUBLE PANIC !!!\x1b[0m");
+        crate::serial_force_println!("
+[31;1m!!! DOUBLE PANIC !!![0m");
         if let Some(loc) = info.location() {
             crate::serial_force_println!("panic at {}:{}", loc.file(), loc.line());
         }

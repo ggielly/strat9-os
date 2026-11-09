@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 // USB xHCI Host Controller Driver
 // Reference: xHCI spec 1.2
 //
@@ -319,7 +341,8 @@ impl XhciController {
                     // 'z' + 'B' = BAR invalid
                     crate::e9_mark!(b'z');
                     crate::e9_mark!(b'B');
-                    crate::e9_mark!(b'\n');
+                    crate::e9_mark!(b'
+');
                 }
                 return Err("Invalid BAR");
             }
@@ -342,7 +365,8 @@ impl XhciController {
                 crate::e9_mark!(nib);
             }
             let _ = bdf;
-            crate::e9_mark!(b'\n');
+            crate::e9_mark!(b'
+');
         }
         paging::ensure_identity_map_range(bar, XHCI_MMIO_SIZE as u64);
 
@@ -822,7 +846,8 @@ impl XhciController {
                     crate::e9_mark!(b'z');
                     crate::e9_mark!(b'3');
                     crate::e9_mark!((b'0' + (completion & 0xF) as u8));
-                    crate::e9_mark!(b'\n');
+                    crate::e9_mark!(b'
+');
                 }
                 log::warn!(
                     "[xHCI] Address Device failed: slot={} completion={}",
@@ -903,7 +928,8 @@ impl XhciController {
             crate::e9_mark!(b'x');
             crate::e9_mark!(b"0123456789abcdef"[((self.max_ports >> 4) & 0xF) as usize]);
             crate::e9_mark!(b"0123456789abcdef"[(self.max_ports & 0xF) as usize]);
-            crate::e9_mark!(b'\n');
+            crate::e9_mark!(b'
+');
         }
         let mut usb_address: u8 = 1;
 
@@ -921,7 +947,8 @@ impl XhciController {
                     let nib = b"0123456789abcdef"[((psc >> sh) & 0xF) as usize];
                     crate::e9_mark!(nib);
                 }
-                crate::e9_mark!(b'\n');
+                crate::e9_mark!(b'
+');
             }
 
             // NOTE: log::info! (formatted) hung the enumeration path in some
@@ -937,7 +964,8 @@ impl XhciController {
                     crate::e9_mark!(b"0123456789abcdef"[((portsc >> 24) & 0xF) as usize]);
                     crate::e9_mark!(b"0123456789abcdef"[((portsc >> 4) & 0xF) as usize]);
                     crate::e9_mark!(b"0123456789abcdef"[(portsc & 0xF) as usize]);
-                    crate::e9_mark!(b'\n');
+                    crate::e9_mark!(b'
+');
                 }
                 log::warn!("[xHCI] Port {} reset failed", port);
                 continue;
@@ -945,7 +973,8 @@ impl XhciController {
             unsafe {
                 crate::e9_mark!(b'z');
                 crate::e9_mark!(b'R');
-                crate::e9_mark!(b'\n');
+                crate::e9_mark!(b'
+');
             }
             unsafe {
                 crate::e9_mark!(b'R');
@@ -982,7 +1011,8 @@ impl XhciController {
                                 crate::e9_mark!(lo);
                                 k += 1;
                             }
-                            crate::e9_mark!(b'\n');
+                            crate::e9_mark!(b'
+');
                         }
                         let vid = u16::from_le_bytes([dev_desc[2], dev_desc[3]]);
                         let pid = u16::from_le_bytes([dev_desc[4], dev_desc[5]]);
@@ -1184,7 +1214,8 @@ impl XhciController {
         if idx >= self.device_slots.len() || self.device_slots[idx].is_none() {
             unsafe {
                 crate::e9_mark!(b'1');
-                crate::e9_mark!(b'\n');
+                crate::e9_mark!(b'
+');
             }
             return Err("Invalid slot for control transfer");
         }
@@ -1195,7 +1226,8 @@ impl XhciController {
         if tr_ring.is_null() {
             unsafe {
                 crate::e9_mark!(b'2');
-                crate::e9_mark!(b'\n');
+                crate::e9_mark!(b'
+');
             }
             return Err("No transfer ring for EP0");
         }
@@ -1279,7 +1311,8 @@ impl XhciController {
                     unsafe {
                         crate::e9_mark!(b'X');
                         crate::e9_mark!(e.as_bytes()[0]);
-                        crate::e9_mark!(b'\n');
+                        crate::e9_mark!(b'
+');
                     }
                     return Err(e);
                 }
@@ -1299,7 +1332,8 @@ impl XhciController {
                 unsafe {
                     crate::e9_mark!(b'E');
                     crate::e9_mark!((b'0' + (completion & 0xF) as u8));
-                    crate::e9_mark!(b'\n');
+                    crate::e9_mark!(b'
+');
                 }
                 log::warn!(
                     "[xHCI] ctrl_transfer event error: type={} completion={}",

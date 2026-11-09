@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 use core::{
     fmt,
     sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
@@ -60,9 +82,11 @@ impl fmt::Write for QueuedWriter {
         for byte in text.bytes() {
             // Match uart_16550::SerialPort::send's terminal translation.
             match byte {
-                b'\n' => {
-                    self.byte(b'\r')?;
-                    self.byte(b'\n')?;
+                b'
+' => {
+                    self.byte(b'')?;
+                    self.byte(b'
+')?;
                 }
                 8 | 127 => {
                     self.byte(8)?;
@@ -162,10 +186,10 @@ fn force_lock_release(saved_flags: u64) {
     crate::arch::x86_64::restore_flags(saved_flags);
 }
 
-const ANSI_RESET: &str = "\x1b[0m";
-const ANSI_RED: &str = "\x1b[31m";
-const ANSI_GREEN: &str = "\x1b[32m";
-const ANSI_VIOLET: &str = "\x1b[35m";
+const ANSI_RESET: &str = "[0m";
+const ANSI_RED: &str = "[31m";
+const ANSI_GREEN: &str = "[32m";
+const ANSI_VIOLET: &str = "[35m";
 const TOKEN_BUF_CAP: usize = 64;
 
 /// Signal that the kernel has entered an emergency panic state.
@@ -338,12 +362,14 @@ impl<'a, W: fmt::Write> BootPrefixWriter<'a, W> {
 impl<W: fmt::Write> fmt::Write for BootPrefixWriter<'_, W> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for ch in s.chars() {
-            if self.line_start && ch != '\n' {
+            if self.line_start && ch != '
+' {
                 self.write_prefix()?;
                 self.line_start = false;
             }
             self.inner.write_char(ch)?;
-            if ch == '\n' {
+            if ch == '
+' {
                 self.line_start = true;
             }
         }
@@ -566,10 +592,12 @@ macro_rules! serial_print {
 /// Print to serial port with newline
 #[macro_export]
 macro_rules! serial_println {
-    () => ($crate::serial_print!("\n"));
+    () => ($crate::serial_print!("
+"));
     ($($arg:tt)*) => {
         if $crate::debug_cfg::SERIAL_ENABLED {
-            $crate::arch::x86_64::serial::_print(format_args!("{}\n", format_args!($($arg)*)))
+            $crate::arch::x86_64::serial::_print(format_args!("{}
+", format_args!($($arg)*)))
         }
     };
 }
@@ -579,12 +607,14 @@ macro_rules! serial_println {
 macro_rules! serial_force_println {
     () => {
         if $crate::debug_cfg::SERIAL_ENABLED {
-            $crate::arch::x86_64::serial::_print_force(format_args!("\n"))
+            $crate::arch::x86_64::serial::_print_force(format_args!("
+"))
         }
     };
     ($($arg:tt)*) => {
         if $crate::debug_cfg::SERIAL_ENABLED {
-            $crate::arch::x86_64::serial::_print_force(format_args!("{}\n", format_args!($($arg)*)))
+            $crate::arch::x86_64::serial::_print_force(format_args!("{}
+", format_args!($($arg)*)))
         }
     };
 }

@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 #![no_std]
 #![no_main]
 
@@ -73,10 +95,14 @@ fn log_hex_u64(mut value: u64) {
 
 /// Print a section banner.
 fn section(title: &str) {
-    log("\n============================================================\n");
+    log("
+============================================================
+");
     log("[test_mem_region] ");
     log(title);
-    log("\n============================================================\n");
+    log("
+============================================================
+");
 }
 
 /// Record a successful check.
@@ -88,7 +114,8 @@ fn ok(ctx: &mut Ctx, label: &str, value: usize) {
     log_u64(value as u64);
     log(" (");
     log_hex_u64(value as u64);
-    log(")\n");
+    log(")
+");
 }
 
 /// Record a failed check.
@@ -98,7 +125,8 @@ fn fail(ctx: &mut Ctx, label: &str, err: Error) {
     log_err(label);
     log_err(" -> ");
     log_err(err.name());
-    log_err("\n");
+    log_err("
+");
 }
 
 /// Check a syscall result and keep the successful value.
@@ -131,7 +159,8 @@ fn check_expect_err(
             log_err(expected.name());
             log_err(" got OK=");
             log_u64(value as u64);
-            log_err("\n");
+            log_err("
+");
         }
         Err(err) => {
             if err == expected {
@@ -166,7 +195,8 @@ fn dump_memory_registers(label: &str, addr: usize, len: usize) {
     log_hex_u64(slice[mid + 127] as u64);
     log(", last=");
     log_hex_u64(slice[len - 1] as u64);
-    log("}\n");
+    log("}
+");
 }
 
 /// Fill the source region with a deterministic pattern.
@@ -196,7 +226,8 @@ fn verify_same_bytes(ctx: &mut Ctx, label: &str, left: usize, right: usize) {
             log_hex_u64(lhs[index] as u64);
             log_err(" right=");
             log_hex_u64(rhs[index] as u64);
-            log_err("\n");
+            log_err("
+");
             return;
         }
     }
@@ -228,7 +259,8 @@ fn verify_write_propagation(
         log_hex_u64(observed as u64);
         log_err(" offset=");
         log_u64(offset as u64);
-        log_err("\n");
+        log_err("
+");
     }
 }
 
@@ -242,7 +274,8 @@ fn log_handle_info(label: &str, info: &HandleInfo) {
     log_hex_u64(info.permissions as u64);
     log(" resource=");
     log_hex_u64(info.resource);
-    log("\n");
+    log("
+");
 }
 
 /// Print the metadata returned by mem_region_info.
@@ -255,7 +288,8 @@ fn log_region_info(label: &str, info: &MemoryRegionInfo) {
     log_u64(info.page_size);
     log(" flags=");
     log_hex_u64(info.flags as u64);
-    log("\n");
+    log("
+");
 }
 
 /// Create the anonymous source mapping used for export tests.
@@ -339,7 +373,8 @@ fn test_export_and_metadata(ctx: &mut Ctx, source: usize) -> Option<usize> {
             ctx.fail += 1;
             log_err("[FAIL] handle_info.resource_type == MemoryRegion -> got ");
             log_u64(handle_info.resource_type as u64);
-            log_err("\n");
+            log_err("
+");
         }
     }
 
@@ -363,7 +398,8 @@ fn test_export_and_metadata(ctx: &mut Ctx, source: usize) -> Option<usize> {
             ctx.fail += 1;
             log_err("[FAIL] region_info.size -> got ");
             log_u64(region_info.size);
-            log_err("\n");
+            log_err("
+");
         }
         if region_info.page_size == PAGE_SIZE as u64 {
             ok(ctx, "region_info.page_size", region_info.page_size as usize);
@@ -371,7 +407,8 @@ fn test_export_and_metadata(ctx: &mut Ctx, source: usize) -> Option<usize> {
             ctx.fail += 1;
             log_err("[FAIL] region_info.page_size -> got ");
             log_u64(region_info.page_size);
-            log_err("\n");
+            log_err("
+");
         }
         if region_info.flags & ((PROT_READ | PROT_WRITE) as u32) == (PROT_READ | PROT_WRITE) as u32
         {
@@ -380,7 +417,8 @@ fn test_export_and_metadata(ctx: &mut Ctx, source: usize) -> Option<usize> {
             ctx.fail += 1;
             log_err("[FAIL] region_info.flags has RW -> got ");
             log_hex_u64(region_info.flags as u64);
-            log_err("\n");
+            log_err("
+");
         }
     }
 
@@ -401,7 +439,8 @@ fn test_mapping_alias(ctx: &mut Ctx, source: usize, handle: usize, label: &str) 
     log_hex_u64(mapped_addr as u64);
     log(" size=");
     log_u64(size as u64);
-    log("\n");
+    log("
+");
     dump_memory_registers("source", source, REGION_LEN);
     dump_memory_registers(label, mapped_addr, REGION_LEN);
     verify_same_bytes(ctx, "alias bytes match source", source, mapped_addr);
@@ -519,8 +558,10 @@ fn test_handle_lifecycle(ctx: &mut Ctx, source: usize, handle: usize, first_alia
 /// Run the full MemoryRegion coverage suite.
 fn run_suite(ctx: &mut Ctx) {
     section("MemoryRegion public capability suite");
-    log("[test_mem_region] exhaustive single-process mapping validation\n");
-    log("[test_mem_region] this binary is intended for manual Chevron execution\n");
+    log("[test_mem_region] exhaustive single-process mapping validation
+");
+    log("[test_mem_region] this binary is intended for manual Chevron execution
+");
 
     let pid = call::getpid().unwrap_or(0);
     let tid = call::gettid().unwrap_or(0);
@@ -532,7 +573,8 @@ fn run_suite(ctx: &mut Ctx) {
     log_u64(PAGE_SIZE as u64);
     log(" region_len=");
     log_u64(REGION_LEN as u64);
-    log("\n");
+    log("
+");
 
     let source = match map_source_region(ctx) {
         Some(value) => value,
@@ -596,7 +638,8 @@ pub extern "C" fn _start() -> ! {
     log_u64(ctx.pass);
     log(" fail=");
     log_u64(ctx.fail);
-    log("\n");
+    log("
+");
 
     if ctx.fail == 0 {
         call::exit(0);

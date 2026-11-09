@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! Minimal TOML subset parser for kernel boot configuration.
 //!
 //! Zero-copy design: keys, section names and unescaped string values borrow
@@ -18,7 +40,8 @@
 //! - `key = value` inside a section (keys before any header are rejected)
 //! - Value types: integers (decimal + `0x` hex), booleans, basic strings
 //! - `#` comments, full-line or trailing, respecting quoted strings
-//! - Basic-string escapes: `\n \t \r \" \\`
+//! - Basic-string escapes: `
+ 	  \" \`
 //!
 //! Not supported by design: floats, arrays, inline tables, multi-line
 //! strings, dotted keys, duplicate keys (rejected at parse time).
@@ -30,7 +53,8 @@ pub enum ConfigValue<'a> {
     Integer(i64),
     Boolean(bool),
     /// `Cow::Borrowed` when the raw text needed no unescaping (common case),
-    /// `Cow::Owned` only when `\n`-style escapes had to be expanded.
+    /// `Cow::Owned` only when `
+`-style escapes had to be expanded.
     String(Cow<'a, str>),
 }
 
@@ -89,7 +113,8 @@ pub fn parse_toml<'a>(data: &'a [u8]) -> Result<TomlConfig<'a>, &'static str> {
     let text = core::str::from_utf8(data).map_err(|_| "invalid UTF-8 in TOML")?;
 
     // Pre-size once: one entry max per line keeps reallocations away.
-    let approx_lines = text.bytes().filter(|&b| b == b'\n').count();
+    let approx_lines = text.bytes().filter(|&b| b == b'
+').count();
     let mut entries: Vec<(&'a str, &'a str, ConfigValue<'a>)> = Vec::with_capacity(approx_lines);
 
     let mut sec: &'a str = "";
@@ -168,19 +193,20 @@ fn strip_comment(line: &str) -> &str {
 
 /// Expand basic-string escapes, borrowing when there is nothing to expand.
 fn unescape_cow(s: &str) -> Cow<'_, str> {
-    if !s.contains('\\') {
+    if !s.contains('\') {
         return Cow::Borrowed(s);
     }
     let mut out = alloc::string::String::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
-        if c == '\\' {
+        if c == '\' {
             match chars.next() {
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
-                Some('r') => out.push('\r'),
+                Some('n') => out.push('
+'),
+                Some('t') => out.push('	'),
+                Some('r') => out.push(''),
                 Some('"') => out.push('"'),
-                Some('\\') => out.push('\\'),
+                Some('\') => out.push('\'),
                 // Unknown escapes: keep literally (lenient on purpose).
                 Some(other) => out.push(other),
                 None => {}
@@ -249,14 +275,15 @@ name = \"a#b\"  # hash inside string stays
     fn test_escape_sequences() {
         let toml = b"
 [s]
-path = \"C:\\\\boot\\\\kernel\"
-msg = \"line\\\\nnext\"
-plain = \"no\\\\escapes\"
+path = \"C:\\boot\\kernel\"
+msg = \"line\\nnext\"
+plain = \"no\\escapes\"
 ";
         let config = parse_toml(toml).unwrap();
-        assert_eq!(config.get_str("s", "path"), Some("C:\\boot\\kernel"));
-        assert_eq!(config.get_str("s", "msg"), Some("line\nnext"));
-        assert_eq!(config.get_str("s", "plain"), Some("no\\escapes"));
+        assert_eq!(config.get_str("s", "path"), Some("C:\boot\kernel"));
+        assert_eq!(config.get_str("s", "msg"), Some("line
+next"));
+        assert_eq!(config.get_str("s", "plain"), Some("no\escapes"));
     }
 
     #[test]
@@ -271,7 +298,10 @@ pair = \"key=value\"
 
     #[test]
     fn test_reject_key_before_section() {
-        let toml = b"orphan = 1\n[s]\nx = 1\n";
+        let toml = b"orphan = 1
+[s]
+x = 1
+";
         assert_eq!(
             parse_toml(toml).err(),
             Some("key-value pair before any [section] header")

@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 #![no_std]
 #![no_main]
 
@@ -49,7 +71,9 @@ fn panic_handler(info: &core::panic::PanicInfo) -> ! {
         unsafe { core::arch::asm!("out 0xe9, al", in("al") b, options(nomem, nostack)) };
     }
     let _ = write!(PanicPort, "{info}");
-    for &b in b"\r\n[boot] HALTED\r\n" {
+    for &b in b"
+[boot] HALTED
+" {
         unsafe { core::arch::asm!("out 0xe9, al", in("al") b, options(nomem, nostack)) };
     }
 
@@ -64,8 +88,9 @@ fn panic_handler(info: &core::panic::PanicInfo) -> ! {
             let _ = write!(sink, "{info}");
         }
         let message_len = n.min(copy.len() - 2);
-        copy[message_len] = b'\r';
-        copy[message_len + 1] = b'\n';
+        copy[message_len] = b'';
+        copy[message_len + 1] = b'
+';
         unsafe { write_com1(&copy[..message_len + 2]) };
     }
 
@@ -177,7 +202,7 @@ fn boot_kernel() -> BootResult<()> {
     //  kernel file
     let mut file = volume
         .open(
-            cstr16!("\\boot\\kernel.elf"),
+            cstr16!("\boot\kernel.elf"),
             FileMode::Read,
             FileAttribute::empty(),
         )
@@ -287,7 +312,7 @@ fn boot_kernel() -> BootResult<()> {
     const MAX_BOOT_CONFIG: usize = 2048;
     let mut boot_cfg = alloc::vec::Vec::new();
     match volume.open(
-        cstr16!("\\boot\\strat9.cfg"),
+        cstr16!("\boot\strat9.cfg"),
         FileMode::Read,
         FileAttribute::empty(),
     ) {
@@ -329,30 +354,36 @@ fn boot_kernel() -> BootResult<()> {
 
     {
         // User configuration first: first match wins in the kernel parser.
-        for raw in boot_cfg.split(|b| *b == b'\n') {
+        for raw in boot_cfg.split(|b| *b == b'
+') {
             let line = match core::str::from_utf8(raw) {
-                Ok(line) => line.trim_end_matches('\r').trim(),
+                Ok(line) => line.trim_end_matches('').trim(),
                 Err(_) => continue,
             };
             if line.is_empty() || line.starts_with('#') || !line.contains('=') {
                 continue;
             }
             env_write(&mut env_buf, &mut env_len, line);
-            env_write(&mut env_buf, &mut env_len, "\n");
+            env_write(&mut env_buf, &mut env_len, "
+");
         }
 
         env_write(
             &mut env_buf,
             &mut env_len,
-            "loader=strat9-bootloader-uefi\n",
+            "loader=strat9-bootloader-uefi
+",
         );
-        env_write(&mut env_buf, &mut env_len, "loader.version=0.1.0\n");
-        env_write(&mut env_buf, &mut env_len, "loader.paging=wx-uc-v1\n");
+        env_write(&mut env_buf, &mut env_len, "loader.version=0.1.0
+");
+        env_write(&mut env_buf, &mut env_len, "loader.paging=wx-uc-v1
+");
 
         let mut tmp = [0u8; 32];
 
         let mut w = buf_str(&mut tmp);
-        let _ = write!(w, "fb.phys=0x{:x}\n", fb_phys);
+        let _ = write!(w, "fb.phys=0x{:x}
+", fb_phys);
         env_write(&mut env_buf, &mut env_len, w.as_str());
 
         let mut w = buf_str(&mut tmp);
@@ -361,34 +392,43 @@ fn boot_kernel() -> BootResult<()> {
         } else {
             paging::FRAMEBUFFER_BASE + (fb_phys & (PAGE_SIZE - 1))
         };
-        let _ = write!(w, "fb.virt=0x{:x}\n", fb_virt);
+        let _ = write!(w, "fb.virt=0x{:x}
+", fb_virt);
         env_write(&mut env_buf, &mut env_len, w.as_str());
 
         let mut w = buf_str(&mut tmp);
-        let _ = write!(w, "fb.width={}\n", fb_width);
+        let _ = write!(w, "fb.width={}
+", fb_width);
         env_write(&mut env_buf, &mut env_len, w.as_str());
 
         let mut w = buf_str(&mut tmp);
-        let _ = write!(w, "fb.height={}\n", fb_height);
+        let _ = write!(w, "fb.height={}
+", fb_height);
         env_write(&mut env_buf, &mut env_len, w.as_str());
 
         let mut w = buf_str(&mut tmp);
-        let _ = write!(w, "fb.stride={}\n", fb_stride);
+        let _ = write!(w, "fb.stride={}
+", fb_stride);
         env_write(&mut env_buf, &mut env_len, w.as_str());
 
         let mut w = buf_str(&mut tmp);
-        let _ = write!(w, "fb.bpp={}\n", fb_bpp);
+        let _ = write!(w, "fb.bpp={}
+", fb_bpp);
         env_write(&mut env_buf, &mut env_len, w.as_str());
 
         let mut w = buf_str(&mut tmp);
-        let _ = write!(w, "acpi.rsdp=0x{:x}\n", rsdp_addr);
+        let _ = write!(w, "acpi.rsdp=0x{:x}
+", rsdp_addr);
         env_write(&mut env_buf, &mut env_len, w.as_str());
 
-        env_write(&mut env_buf, &mut env_len, "console=ttyS0\n");
-        env_write(&mut env_buf, &mut env_len, "console.baud=115200\n");
+        env_write(&mut env_buf, &mut env_len, "console=ttyS0
+");
+        env_write(&mut env_buf, &mut env_len, "console.baud=115200
+");
 
         let mut w = buf_str(&mut tmp);
-        let _ = write!(w, "kernel.entry=0x{:x}\n", elf_info.entry);
+        let _ = write!(w, "kernel.entry=0x{:x}
+", elf_info.entry);
         env_write(&mut env_buf, &mut env_len, w.as_str());
     }
 
@@ -552,7 +592,8 @@ fn boot_kernel() -> BootResult<()> {
         core::arch::asm!("out dx, al", in("al") 0xC7u8, in("dx") base + 2, options(nomem, nostack)); // Enable FIFO
         core::arch::asm!("out dx, al", in("al") 0x0Bu8, in("dx") base + 4, options(nomem, nostack)); // IRQs enabled, RTS/DSR set
 
-        write_com1(b"[boot] After ExitBootServices, serial OK\r\n");
+        write_com1(b"[boot] After ExitBootServices, serial OK
+");
     }
     COM1_READY.store(true, core::sync::atomic::Ordering::Release);
     boot_timer.mark_com1("serial initialized");
@@ -596,8 +637,9 @@ fn boot_kernel() -> BootResult<()> {
             const HEX: &[u8; 16] = b"0123456789abcdef";
             let mut i = 16;
             let mut v = val;
-            buf[i] = b'\r';
-            buf[17] = b'\n';
+            buf[i] = b'';
+            buf[17] = b'
+';
             loop {
                 i -= 1;
                 buf[i] = HEX[(v & 0xf) as usize];
@@ -610,7 +652,8 @@ fn boot_kernel() -> BootResult<()> {
         }
 
         let mut hexbuf: [u8; 18] = [0; 18];
-        write_com1(b"[boot] context_switch(\r\n");
+        write_com1(b"[boot] context_switch(
+");
         write_com1(b"  pml4=");
         write_com1(hex_str(pml4_phys, &mut hexbuf));
         write_com1(b"  stack=");
@@ -619,7 +662,8 @@ fn boot_kernel() -> BootResult<()> {
         write_com1(hex_str(elf_info.entry, &mut hexbuf));
         write_com1(b"  args=");
         write_com1(hex_str(args_ptr as u64, &mut hexbuf));
-        write_com1(b")\r\n");
+        write_com1(b")
+");
         write_com1(b"[boot] mmap_base=");
         write_com1(hex_str(mmap_region_base, &mut hexbuf));
         write_com1(b" region_count=");
@@ -628,8 +672,10 @@ fn boot_kernel() -> BootResult<()> {
         let first_kind = (*(mmap_region_base as *const MemoryRegion)).kind.0;
         write_com1(b" first_kind=");
         write_com1(hex_str(first_kind, &mut hexbuf));
-        write_com1(b"\r\n");
-        write_com1(b"[boot] Jumping to kernel (pause loop)...\r\n");
+        write_com1(b"
+");
+        write_com1(b"[boot] Jumping to kernel (pause loop)...
+");
 
         // Small delay to let serial flush
         for _ in 0..100000 {
@@ -637,7 +683,8 @@ fn boot_kernel() -> BootResult<()> {
         }
         boot_timer.mark_com1("handoff pause complete");
 
-        write_com1(b"[boot] Jumping to kernel (after pause)...\r\n");
+        write_com1(b"[boot] Jumping to kernel (after pause)...
+");
     }
 
     unsafe {
@@ -709,7 +756,8 @@ impl BootTimer {
         );
         uefi::system::with_stdout(|stdout| {
             let _ =
-                stdout.write_str(core::str::from_utf8(&line[..len]).unwrap_or("[boot] timing\n"));
+                stdout.write_str(core::str::from_utf8(&line[..len]).unwrap_or("[boot] timing
+"));
         });
         // Exclude the cost of printing this marker from the next stage.
         self.previous = read_tsc();
@@ -758,7 +806,8 @@ fn format_timing_line(
         // Splitting first keeps the fractional part from losing precision.
         let _ = writeln!(
             writer,
-            "[boot +{}.{:03} ms, +{}.{:03} ms] {}\r\n",
+            "[boot +{}.{:03} ms, +{}.{:03} ms] {}
+",
             total / khz,
             (total % khz) * 1_000 / khz,
             delta / khz,
@@ -766,7 +815,8 @@ fn format_timing_line(
             stage
         );
     } else {
-        let _ = writeln!(writer, "[boot +{} ticks, +{}] {}\r\n", total, delta, stage);
+        let _ = writeln!(writer, "[boot +{} ticks, +{}] {}
+", total, delta, stage);
     }
     let len = writer.pos;
     drop(writer);
@@ -1023,8 +1073,9 @@ fn halt_after_boot_services(reason: &str) -> ! {
         line[n] = b' ';
         n += 1;
     }
-    line[n] = b'\r';
-    line[n + 1] = b'\n';
+    line[n] = b'';
+    line[n + 1] = b'
+';
     n += 2;
     for &b in &line[..n] {
         unsafe { core::arch::asm!("out 0xe9, al", in("al") b, options(nomem, nostack)) };

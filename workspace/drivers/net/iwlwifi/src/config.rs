@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! Wi-Fi configuration (TOML) and validation.
 //!
 //! The on-disk format is intentionally small: one `[wifi]` table (and an
@@ -275,7 +297,7 @@ fn strip_comment(line: &str) -> &str {
             continue;
         }
         match ch {
-            '\\' if in_str => escape = true,
+            '\' if in_str => escape = true,
             '"' => in_str = !in_str,
             '#' if !in_str => return &line[..i],
             _ => {}
@@ -309,17 +331,18 @@ fn parse_string(v: &str) -> Option<String> {
                 }
                 return Some(out);
             }
-            b'\\' => {
+            b'\' => {
                 i += 1;
                 if i >= bytes.len() {
                     return None;
                 }
                 match bytes[i] {
-                    b'n' => out.push('\n'),
-                    b't' => out.push('\t'),
-                    b'r' => out.push('\r'),
+                    b'n' => out.push('
+'),
+                    b't' => out.push('	'),
+                    b'r' => out.push(''),
                     b'"' => out.push('"'),
-                    b'\\' => out.push('\\'),
+                    b'\' => out.push('\'),
                     _ => return None,
                 }
             }
@@ -409,7 +432,11 @@ hidden = false
     fn accepts_psk_hex() {
         let psk = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
         let text = alloc::format!(
-            "[wifi]\nenabled=true\nssid=\"x\"\npsk=\"{}\"\n",
+            "[wifi]
+enabled=true
+ssid=\"x\"
+psk=\"{}\"
+",
             psk
         );
         let cfg = parse(&text).unwrap();
@@ -419,7 +446,12 @@ hidden = false
 
     #[test]
     fn rejects_unknown_key() {
-        let e = parse("[wifi]\nenabled=true\nssid=\"x\"\npassphrase=\"12345678\"\nbogus=1\n")
+        let e = parse("[wifi]
+enabled=true
+ssid=\"x\"
+passphrase=\"12345678\"
+bogus=1
+")
             .unwrap_err();
         assert_eq!(e.kind, ConfigErrorKind::UnknownKey);
         assert_eq!(e.line, 5);
@@ -427,13 +459,21 @@ hidden = false
 
     #[test]
     fn rejects_short_passphrase() {
-        let e = parse("[wifi]\nenabled=true\nssid=\"x\"\npassphrase=\"short\"\n").unwrap_err();
+        let e = parse("[wifi]
+enabled=true
+ssid=\"x\"
+passphrase=\"short\"
+").unwrap_err();
         assert_eq!(e.kind, ConfigErrorKind::InvalidValue);
     }
 
     #[test]
     fn comment_inside_string_is_preserved() {
-        let cfg = parse("[wifi]\nenabled=true\nssid=\"a#b\"\npassphrase=\"12345678\"\n").unwrap();
+        let cfg = parse("[wifi]
+enabled=true
+ssid=\"a#b\"
+passphrase=\"12345678\"
+").unwrap();
         assert_eq!(cfg.ssid(), b"a#b");
     }
 }

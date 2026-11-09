@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! Bus driver registry : discovers and instantiates all known bus drivers.
 //!
 //! Each driver implements the `BusDriver` trait and declares one or more
@@ -51,18 +73,21 @@ fn try_init<D: BusDriver + 'static>(
     mut driver: D,
 ) -> Option<(String, Box<dyn BusDriver>)> {
     if !driver.probe() {
-        let msg = alloc::format!("[bus] {}: probe failed (no hardware detected)\n", name);
+        let msg = alloc::format!("[bus] {}: probe failed (no hardware detected)
+", name);
         let _ = call::debug_log(msg.as_bytes());
         return None;
     }
     match driver.init(0) {
         Ok(()) => {
-            let msg = alloc::format!("[bus] {}: init OK\n", name);
+            let msg = alloc::format!("[bus] {}: init OK
+", name);
             let _ = call::debug_log(msg.as_bytes());
             Some((String::from(name), Box::new(driver)))
         }
         Err(e) => {
-            let msg = alloc::format!("[bus] {}: init skipped ({:?})\n", name, e);
+            let msg = alloc::format!("[bus] {}: init skipped ({:?})
+", name, e);
             let _ = call::debug_log(msg.as_bytes());
             None
         }

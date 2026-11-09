@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 use super::scheme::{
     finalize_pseudo_stat, DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme, DEV_IPCFS,
     DT_DIR, DT_REG,
@@ -151,9 +173,15 @@ impl Scheme for IpcControlScheme {
     /// Performs the read operation.
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
         self.handle_mut(file_id, |state| match state.kind {
-            HandleKind::Root => Ok(Self::read_static(offset, buf, "shm\nsem\n")),
-            HandleKind::ShmDir => Ok(Self::read_static(offset, buf, "new/<bytes>\n<ring_id>\n")),
-            HandleKind::SemDir => Ok(Self::read_static(offset, buf, "new/<initial>\n<sem_id>\n")),
+            HandleKind::Root => Ok(Self::read_static(offset, buf, "shm
+sem
+")),
+            HandleKind::ShmDir => Ok(Self::read_static(offset, buf, "new/<bytes>
+<ring_id>
+")),
+            HandleKind::SemDir => Ok(Self::read_static(offset, buf, "new/<initial>
+<sem_id>
+")),
             HandleKind::Ring(id) => {
                 let ring = shared_ring::get_ring(id).ok_or(SyscallError::NotFound)?;
                 let mut line = alloc::format!(
@@ -165,12 +193,14 @@ impl Scheme for IpcControlScheme {
                 if let Some((_, addr, size)) = state.last_map {
                     line.push_str(&alloc::format!(" mapped={:#x} mapped_size={}", addr, size));
                 }
-                line.push('\n');
+                line.push('
+');
                 Ok(Self::read_static(offset, buf, &line))
             }
             HandleKind::Sem(id) => {
                 let sem = semaphore::get_semaphore(id).ok_or(SyscallError::NotFound)?;
-                let line = alloc::format!("sem={} count={}\n", id.as_u64(), sem.count());
+                let line = alloc::format!("sem={} count={}
+", id.as_u64(), sem.count());
                 Ok(Self::read_static(offset, buf, &line))
             }
         })

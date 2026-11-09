@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! Virtual File System (VFS) - Plan 9-inspired namespace.
 //!
 //! The VFS provides:
@@ -1255,7 +1277,8 @@ fn build_pci_inventory_text() -> String {
     {
         let devices = crate::hardware::pci_client::all_devices();
         let mut out = String::new();
-        out.push_str("bus dev fn vendor device class subclass prog_if irq\n");
+        out.push_str("bus dev fn vendor device class subclass prog_if irq
+");
         for dev in devices.iter() {
             let _ = writeln!(
                 out,
@@ -1276,7 +1299,8 @@ fn build_pci_inventory_text() -> String {
 
     #[cfg(not(target_arch = "x86_64"))]
     {
-        String::from("unsupported-arch\n")
+        String::from("unsupported-arch
+")
     }
 }
 
@@ -1321,10 +1345,12 @@ pub fn init() {
     let kernel_scheme = KernelScheme::new();
 
     // Register some basic kernel files
-    static VERSION: &[u8] = b"Strat9-OS v0.1.0 (Bedrock)\n";
+    static VERSION: &[u8] = b"Strat9-OS v0.1.0 (Bedrock)
+";
     kernel_scheme.register("version", VERSION.as_ptr(), VERSION.len());
 
-    static CMDLINE: &[u8] = b"quiet loglevel=debug\n";
+    static CMDLINE: &[u8] = b"quiet loglevel=debug
+";
     kernel_scheme.register("cmdline", CMDLINE.as_ptr(), CMDLINE.len());
 
     let pci_inventory = build_pci_inventory_text().into_bytes().into_boxed_slice();
@@ -1332,7 +1358,8 @@ pub fn init() {
     kernel_scheme.register("pci/inventory", pci_inventory.as_ptr(), pci_inventory.len());
 
     let pci_count = pci_inventory
-        .split(|b| *b == b'\n')
+        .split(|b| *b == b'
+')
         .skip(1)
         .filter(|line| !line.is_empty())
         .count();
@@ -1350,21 +1377,24 @@ pub fn init() {
         let cpu_count = crate::arch::percpu::get_cpu_count().max(1);
 
         let count_s = Box::leak(
-            alloc::format!("{}\n", cpu_count)
+            alloc::format!("{}
+", cpu_count)
                 .into_bytes()
                 .into_boxed_slice(),
         );
         kernel_scheme.register("cpu/count", count_s.as_ptr(), count_s.len());
 
         let vendor_s = Box::leak(
-            alloc::format!("{}\n", host.vendor_string())
+            alloc::format!("{}
+", host.vendor_string())
                 .into_bytes()
                 .into_boxed_slice(),
         );
         kernel_scheme.register("cpu/vendor", vendor_s.as_ptr(), vendor_s.len());
 
         let model_s = Box::leak(
-            alloc::format!("{}\n", host.model_name_str())
+            alloc::format!("{}
+", host.model_name_str())
                 .into_bytes()
                 .into_boxed_slice(),
         );
@@ -1372,7 +1402,8 @@ pub fn init() {
 
         let features_s = Box::leak(
             alloc::format!(
-                "{}\n",
+                "{}
+",
                 crate::arch::cpuid::features_to_flags_string(host.features)
             )
             .into_bytes()
@@ -1381,14 +1412,16 @@ pub fn init() {
         kernel_scheme.register("cpu/features", features_s.as_ptr(), features_s.len());
 
         let xcr0_s = Box::leak(
-            alloc::format!("{:#x}\n", host.supported_xcr0)
+            alloc::format!("{:#x}
+", host.supported_xcr0)
                 .into_bytes()
                 .into_boxed_slice(),
         );
         kernel_scheme.register("cpu/xcr0", xcr0_s.as_ptr(), xcr0_s.len());
 
         let xsave_s = Box::leak(
-            alloc::format!("{}\n", host.xsave_size_current)
+            alloc::format!("{}
+", host.xsave_size_current)
                 .into_bytes()
                 .into_boxed_slice(),
         );
@@ -1399,7 +1432,8 @@ pub fn init() {
     {
         let cpu_count = crate::arch::percpu::get_cpu_count().max(1);
         let register_cpu_value = |path: &str, value: &str| {
-            let bytes = Box::leak(alloc::format!("{}\n", value).into_bytes().into_boxed_slice());
+            let bytes = Box::leak(alloc::format!("{}
+", value).into_bytes().into_boxed_slice());
             kernel_scheme.register(path, bytes.as_ptr(), bytes.len());
         };
 

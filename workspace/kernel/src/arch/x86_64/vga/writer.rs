@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 use super::{
     api::current_ui_scale,
     cursor::{CursorManager, CURSOR_H, CURSOR_PIXELS, CURSOR_W, TEXT_CURSOR_MAX_DIM},
@@ -1241,7 +1263,8 @@ impl VgaWriter {
                 bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
             }
             if row < end_row {
-                bytes.push(b'\n');
+                bytes.push(b'
+');
             }
         }
         if let Some(mut clip) = CLIPBOARD.try_lock() {
@@ -1807,7 +1830,8 @@ impl VgaWriter {
         let mut cx = pixel_x;
         let cy = pixel_y;
         for ch in text.chars() {
-            if ch == '\n' {
+            if ch == '
+' {
                 break;
             }
             if cx + gw > self.can().width || cy + gh > self.can().height {
@@ -2344,7 +2368,8 @@ impl VgaWriter {
         let wrap_cols = max_cols.filter(|&c| c > 0);
 
         for ch in text.chars() {
-            if ch == '\n' {
+            if ch == '
+' {
                 lines.push(current);
                 current = Vec::new();
                 continue;
@@ -2542,19 +2567,20 @@ impl VgaWriter {
         // ==============================
 
         match c {
-            '\n' => {
+            '
+' => {
                 self.col = 0;
                 self.row += 1;
             }
-            '\r' => self.col = 0,
-            '\t' => self.col = (self.col + 4) & !3,
+            '' => self.col = 0,
+            '	' => self.col = (self.col + 4) & !3,
             '\u{8}' => {
                 if self.col > 0 {
                     self.col -= 1;
                     self.queue_console_glyph(' ');
                 }
             }
-            '\0' => {}
+            ' ' => {}
             ch => {
                 self.queue_console_glyph(ch);
                 self.col += 1;
@@ -2872,8 +2898,9 @@ impl VgaWriter {
 /// Performs the normalize console char operation.
 fn normalize_console_char(ch: char) -> char {
     match ch {
-        '\n' | '\r' | '\t' | '\u{8}' => ch,
-        c if c.is_control() => '\0',
+        '
+' | '' | '	' | '\u{8}' => ch,
+        c if c.is_control() => ' ',
         // Graceful fallback when font lacks box-drawing coverage.
         '\u{2500}' | '\u{2501}' | '\u{2504}' | '\u{2505}' | '\u{2013}' | '\u{2014}' => '-',
         '\u{2502}' | '\u{2503}' => '|',

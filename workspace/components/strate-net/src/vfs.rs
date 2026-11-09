@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 use alloc::vec::Vec;
 use strate_net::syscalls::call;
 
@@ -407,11 +429,13 @@ impl NetworkStrate {
             let _ = call::debug_log(&target.octets());
             let _ = call::debug_log(b" seq=");
             let _ = call::debug_log(&[(seq >> 8) as u8, seq as u8]);
-            let _ = call::debug_log(b"\n");
+            let _ = call::debug_log(b"
+");
             if self.send_ping(target, seq, file_id) {
                 return reply_write(msg.sender, data_len);
             }
-            let _ = call::debug_log(b"[ping] write: send_ping failed\n");
+            let _ = call::debug_log(b"[ping] write: send_ping failed
+");
             return IpcMessage::error_reply(msg.sender, -11);
         }
 
@@ -429,11 +453,13 @@ impl NetworkStrate {
             let _ = call::debug_log(&target.octets());
             let _ = call::debug_log(b" seq=");
             let _ = call::debug_log(&[(seq >> 8) as u8, seq as u8]);
-            let _ = call::debug_log(b"\n");
+            let _ = call::debug_log(b"
+");
             if self.send_ping6(target, seq, file_id) {
                 return reply_write(msg.sender, data_len);
             }
-            let _ = call::debug_log(b"[ping] write: send_ping6 failed\n");
+            let _ = call::debug_log(b"[ping] write: send_ping6 failed
+");
             return IpcMessage::error_reply(msg.sender, -11);
         }
 

@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 use core::sync::atomic::{AtomicBool, Ordering};
 use log::{Level, LevelFilter, Metadata, Record};
 
@@ -44,16 +66,17 @@ impl log::Log for SerialLogger {
             }
 
             let (level_str, msg_color) = match record.level() {
-                Level::Error => ("\x1b[31mERROR\x1b[0m", "\x1b[31m"),
-                Level::Warn => ("\x1b[33mWARN\x1b[0m", "\x1b[33m"),
-                Level::Info => ("\x1b[32mINFO\x1b[0m", "\x1b[37m"),
-                Level::Debug => ("\x1b[90mDEBUG\x1b[0m", "\x1b[90m"),
-                Level::Trace => ("\x1b[90mTRACE\x1b[0m", "\x1b[90m"),
+                Level::Error => ("[31mERROR[0m", "[31m"),
+                Level::Warn => ("[33mWARN[0m", "[33m"),
+                Level::Info => ("[32mINFO[0m", "[37m"),
+                Level::Debug => ("[90mDEBUG[0m", "[90m"),
+                Level::Trace => ("[90mTRACE[0m", "[90m"),
             };
 
             // 1. Serial: bounded, nonblocking enqueue once its worker is running.
             crate::arch::serial::_print(format_args!(
-                "[{}] {}{}\x1b[0m\n",
+                "[{}] {}{}[0m
+",
                 level_str,
                 msg_color,
                 record.args()
@@ -122,7 +145,8 @@ impl log::Log for SerialLogger {
                         buf: &mut vbuf,
                         pos: &mut vpos
                     },
-                    "[{}] {}\n",
+                    "[{}] {}
+",
                     record.level(),
                     record.args(),
                 );

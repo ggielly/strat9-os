@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 #![no_std]
 #![no_main]
 #![allow(dead_code)]
@@ -117,13 +139,15 @@ fn read_line(line: &mut LineBuf) {
             Ok(1) => {
                 let b = byte[0];
                 match b {
-                    b'\n' | b'\r' => {
-                        write_str("\n");
+                    b'
+' | b'' => {
+                        write_str("
+");
                         return;
                     }
                     0x7F | 0x08 => {
                         if line.pop() {
-                            write_str("\x08 \x08");
+                            write_str(" ");
                         }
                     }
                     0x20..=0x7E if line.push(b) => {
@@ -266,18 +290,30 @@ static NEXT_SID: AtomicU32 = AtomicU32::new(1000);
 
 /// Implements cmd help.
 fn cmd_help() {
-    write_str("Available commands:\n");
-    write_str("  help              - Show this help\n");
-    write_str("  silos             - List known silos\n");
-    write_str("  silo-create       - Create a new silo\n");
-    write_str("  silo-load <path>  - Load ELF from initfs into a module\n");
-    write_str("  silo-attach <silo> <mod> - Attach a module to a silo\n");
-    write_str("  silo-start <id>   - Start a silo\n");
-    write_str("  silo-stop <id>    - Stop a silo\n");
-    write_str("  silo-kill <id>    - Force-kill a silo\n");
-    write_str("  mod-load <path>   - Load a module from initfs path\n");
-    write_str("  pid               - Show current PID\n");
-    write_str("  exit              - Exit console-admin\n");
+    write_str("Available commands:
+");
+    write_str("  help              - Show this help
+");
+    write_str("  silos             - List known silos
+");
+    write_str("  silo-create       - Create a new silo
+");
+    write_str("  silo-load <path>  - Load ELF from initfs into a module
+");
+    write_str("  silo-attach <silo> <mod> - Attach a module to a silo
+");
+    write_str("  silo-start <id>   - Start a silo
+");
+    write_str("  silo-stop <id>    - Stop a silo
+");
+    write_str("  silo-kill <id>    - Force-kill a silo
+");
+    write_str("  mod-load <path>   - Load a module from initfs path
+");
+    write_str("  pid               - Show current PID
+");
+    write_str("  exit              - Exit console-admin
+");
 }
 
 /// Implements cmd pid.
@@ -286,12 +322,14 @@ fn cmd_pid() {
         Ok(pid) => {
             write_str("PID: ");
             write_u64(pid as u64);
-            write_str("\n");
+            write_str("
+");
         }
         Err(e) => {
             write_str("getpid failed: ");
             write_str(e.name());
-            write_str("\n");
+            write_str("
+");
         }
     }
 }
@@ -307,19 +345,22 @@ fn cmd_silo_create() {
                 write_u64(handle as u64);
                 write_str(" sid=");
                 write_u64(sid as u64);
-                write_str("\n");
+                write_str("
+");
                 return;
             }
             Err(strat9_syscall::error::Error::AlreadyExists) => continue,
             Err(e) => {
                 write_str("silo_create failed: ");
                 write_str(e.name());
-                write_str("\n");
+                write_str("
+");
                 return;
             }
         }
     }
-    write_str("silo_create failed: no free SID range\n");
+    write_str("silo_create failed: no free SID range
+");
 }
 
 /// Implements cmd silo start.
@@ -330,15 +371,18 @@ fn cmd_silo_start(args: &str) {
             Ok(_) => {
                 write_str("Silo ");
                 write_u64(id as u64);
-                write_str(" started.\n");
+                write_str(" started.
+");
             }
             Err(e) => {
                 write_str("silo_start failed: ");
                 write_str(e.name());
-                write_str("\n");
+                write_str("
+");
             }
         },
-        None => write_str("Usage: silo-start <handle>\n"),
+        None => write_str("Usage: silo-start <handle>
+"),
     }
 }
 
@@ -350,15 +394,18 @@ fn cmd_silo_stop(args: &str) {
             Ok(_) => {
                 write_str("Silo ");
                 write_u64(id as u64);
-                write_str(" stopped.\n");
+                write_str(" stopped.
+");
             }
             Err(e) => {
                 write_str("silo_stop failed: ");
                 write_str(e.name());
-                write_str("\n");
+                write_str("
+");
             }
         },
-        None => write_str("Usage: silo-stop <handle>\n"),
+        None => write_str("Usage: silo-stop <handle>
+"),
     }
 }
 
@@ -370,15 +417,18 @@ fn cmd_silo_kill(args: &str) {
             Ok(_) => {
                 write_str("Silo ");
                 write_u64(id as u64);
-                write_str(" killed.\n");
+                write_str(" killed.
+");
             }
             Err(e) => {
                 write_str("silo_kill failed: ");
                 write_str(e.name());
-                write_str("\n");
+                write_str("
+");
             }
         },
-        None => write_str("Usage: silo-kill <handle>\n"),
+        None => write_str("Usage: silo-kill <handle>
+"),
     }
 }
 
@@ -386,21 +436,25 @@ fn cmd_silo_kill(args: &str) {
 fn cmd_mod_load(args: &str) {
     let path = trim(args);
     if path.is_empty() {
-        write_str("Usage: mod-load <initfs-path>\n");
-        write_str("  e.g.: mod-load /initfs/strate-fs-ramfs\n");
+        write_str("Usage: mod-load <initfs-path>
+");
+        write_str("  e.g.: mod-load /initfs/strate-fs-ramfs
+");
         return;
     }
 
     write_str("Opening ");
     write_str(path);
-    write_str("...\n");
+    write_str("...
+");
 
     let fd = match call::openat(0, path, 0x1, 0) {
         Ok(fd) => fd,
         Err(e) => {
             write_str("open failed: ");
             write_str(e.name());
-            write_str("\n");
+            write_str("
+");
             return;
         }
     };
@@ -425,7 +479,8 @@ fn cmd_mod_load(args: &str) {
             Err(e) => {
                 write_str("read failed: ");
                 write_str(e.name());
-                write_str("\n");
+                write_str("
+");
                 let _ = call::close(fd as usize);
                 return;
             }
@@ -435,7 +490,8 @@ fn cmd_mod_load(args: &str) {
 
     write_str("Read ");
     write_u64(total as u64);
-    write_str(" bytes. Loading module...\n");
+    write_str(" bytes. Loading module...
+");
 
     let result =
         unsafe { strat9_syscall::syscall2(number::SYS_MODULE_LOAD, scratch_ptr as usize, total) };
@@ -444,12 +500,14 @@ fn cmd_mod_load(args: &str) {
         Ok(handle) => {
             write_str("Module loaded, handle=");
             write_u64(handle as u64);
-            write_str("\n");
+            write_str("
+");
         }
         Err(e) => {
             write_str("module_load failed: ");
             write_str(e.name());
-            write_str("\n");
+            write_str("
+");
         }
     }
 }
@@ -458,13 +516,15 @@ fn cmd_mod_load(args: &str) {
 fn cmd_silo_load(args: &str) {
     let path = trim(args);
     if path.is_empty() {
-        write_str("Usage: silo-load <initfs-path>\n");
+        write_str("Usage: silo-load <initfs-path>
+");
         return;
     }
     // Load the module first
     cmd_mod_load(path);
     // TODO: auto-attach once we store the last module handle
-    write_str("Use 'silo-create' + 'silo-attach <silo> <mod>' to wire it up.\n");
+    write_str("Use 'silo-create' + 'silo-attach <silo> <mod>' to wire it up.
+");
 }
 
 /// Implements cmd silo attach.
@@ -478,23 +538,28 @@ fn cmd_silo_attach(args: &str) {
                 write_u64(mod_id as u64);
                 write_str(" attached to silo ");
                 write_u64(silo_id as u64);
-                write_str(".\n");
+                write_str(".
+");
             }
             Err(e) => {
                 write_str("silo_attach_module failed: ");
                 write_str(e.name());
-                write_str("\n");
+                write_str("
+");
             }
         },
-        _ => write_str("Usage: silo-attach <silo-handle> <module-handle>\n"),
+        _ => write_str("Usage: silo-attach <silo-handle> <module-handle>
+"),
     }
 }
 
 /// Implements cmd silos.
 fn cmd_silos() {
     // TODO: implement silo listing via a query syscall or /proc/silos
-    write_str("Silo listing not yet implemented.\n");
-    write_str("(Requires a silo_list or silo_query syscall.)\n");
+    write_str("Silo listing not yet implemented.
+");
+    write_str("(Requires a silo_list or silo_query syscall.)
+");
 }
 
 // ---------------------------------------------------------------------------
@@ -522,13 +587,16 @@ fn dispatch(line: &str) {
         "silo-kill" => cmd_silo_kill(args),
         "mod-load" => cmd_mod_load(args),
         "exit" | "quit" => {
-            write_str("Exiting console-admin.\n");
+            write_str("Exiting console-admin.
+");
             call::exit(0);
         }
         _ => {
             write_str("Unknown command: ");
             write_str(cmd);
-            write_str("\nType 'help' for available commands.\n");
+            write_str("
+Type 'help' for available commands.
+");
         }
     }
 }
@@ -545,11 +613,16 @@ fn panic(info: &PanicInfo) -> ! {
     #[no_mangle]
     /// Implements start.
     pub extern "C" fn _start() -> ! {
-        write_str("\n");
-        write_str("============================================================\n");
-        write_str("[console-admin] strat9-os: silo console admin\n");
-        write_str("[console-admin] Ready (IPC mode : use chevron shell to interact).\n");
-        write_str("============================================================\n");
+        write_str("
+");
+        write_str("============================================================
+");
+        write_str("[console-admin] strat9-os: silo console admin
+");
+        write_str("[console-admin] Ready (IPC mode : use chevron shell to interact).
+");
+        write_str("============================================================
+");
 
         // TODO: replace with IPC event loop once IPC channels are wired up.
         // For now, idle so we don't steal keyboard input from the chevron shell.

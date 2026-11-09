@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! ThreadsScheme : Plan 9 style `/thread` control files.
 //!
 //! Exposes the userspace thread API as filesystem operations. All lifecycle
@@ -154,7 +176,8 @@ impl ThreadsScheme {
             for t in tasks {
                 if t.tgid == cur.tgid {
                     out.push_str(itoa_u32(t.tid).as_str());
-                    out.push('\n');
+                    out.push('
+');
                 }
             }
         }
@@ -308,10 +331,12 @@ impl Scheme for ThreadsScheme {
                     let (allocated, active) = thread_ops::kernel_user_stack_stats();
                     let mut content = String::from("allocated ");
                     content.push_str(itoa_u32(allocated as u32).as_str());
-                    content.push('\n');
+                    content.push('
+');
                     content.push_str("active ");
                     content.push_str(itoa_u32(active as u32).as_str());
-                    content.push('\n');
+                    content.push('
+');
                     serve_string(&content, offset, buf)
                 }
                 _ => Err(SyscallError::PermissionDenied),

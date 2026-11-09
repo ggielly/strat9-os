@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 /// Live debug framebuffer overlay.
 ///
 /// Writes directly to the VGA framebuffer, bypassing VGA_WRITER and all
@@ -181,7 +203,8 @@ pub fn vga_debug_write(s: &str) {
 
     for &byte in s.as_bytes() {
         match byte {
-            b'\n' => {
+            b'
+' => {
                 col = 0;
                 row += 1;
                 if row >= max_row {
@@ -189,10 +212,10 @@ pub fn vga_debug_write(s: &str) {
                     row = max_row - 1;
                 }
             }
-            b'\r' => {
+            b'' => {
                 col = 0;
             }
-            b'\t' => {
+            b'	' => {
                 col = (col + 8) & !7;
                 if col >= max_col {
                     col = 0;
@@ -241,7 +264,8 @@ pub fn vga_debug_writeln(s: &str) {
         s.len()
     };
     buf[..len].copy_from_slice(&s.as_bytes()[..len]);
-    buf[len] = b'\n';
+    buf[len] = b'
+';
     if let Ok(valid) = core::str::from_utf8(&buf[..len + 1]) {
         vga_debug_write(valid);
     }

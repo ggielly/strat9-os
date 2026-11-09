@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 #![no_std]
 #![no_main]
 
@@ -90,10 +112,14 @@ fn log_hex_u64(mut value: u64) {
 
 /// Print a section banner.
 fn section(title: &str) {
-    log("\n============================================================\n");
+    log("
+============================================================
+");
     log("[test_mem_region_proc] ");
     log(title);
-    log("\n============================================================\n");
+    log("
+============================================================
+");
 }
 
 /// Record a successful check.
@@ -105,7 +131,8 @@ fn ok(ctx: &mut Ctx, label: &str, value: usize) {
     log_u64(value as u64);
     log(" (");
     log_hex_u64(value as u64);
-    log(")\n");
+    log(")
+");
 }
 
 /// Record a failed check.
@@ -115,7 +142,8 @@ fn fail(ctx: &mut Ctx, label: &str, err: Error) {
     log_err(label);
     log_err(" -> ");
     log_err(err.name());
-    log_err("\n");
+    log_err("
+");
 }
 
 /// Check a syscall result and keep the successful value.
@@ -148,7 +176,8 @@ fn check_expect_err(
             log_err(expected.name());
             log_err(" got OK=");
             log_u64(value as u64);
-            log_err("\n");
+            log_err("
+");
         }
         Err(err) => {
             if err == expected {
@@ -269,7 +298,8 @@ fn verify_byte(ctx: &mut Ctx, label: &str, addr: usize, offset: usize, expected:
         log_hex_u64(observed as u64);
         log_err(" offset=");
         log_u64(offset as u64);
-        log_err("\n");
+        log_err("
+");
     }
 }
 
@@ -283,7 +313,8 @@ fn log_handle_info(label: &str, info: &HandleInfo) {
     log_hex_u64(info.permissions as u64);
     log(" resource=");
     log_hex_u64(info.resource);
-    log("\n");
+    log("
+");
 }
 
 /// Log region metadata.
@@ -296,14 +327,16 @@ fn log_region_info(label: &str, info: &MemoryRegionInfo) {
     log_u64(info.page_size);
     log(" flags=");
     log_hex_u64(info.flags as u64);
-    log("\n");
+    log("
+");
 }
 
 /// Exit the child process after logging a failure.
 fn child_abort(code: usize, msg: &str) -> ! {
     log_err("[child] ");
     log_err(msg);
-    log_err("\n");
+    log_err("
+");
     call::exit(code)
 }
 
@@ -400,8 +433,10 @@ fn wait_exit_code(status: i32) -> Option<i32> {
 /// Run the full multi-process MemoryRegion suite.
 fn run_suite(ctx: &mut Ctx) {
     section("MemoryRegion cross-process grant/revoke suite");
-    log("[test_mem_region_proc] parent grants region to a real child process\n");
-    log("[test_mem_region_proc] child maps, writes, revokes handle, then writes again\n");
+    log("[test_mem_region_proc] parent grants region to a real child process
+");
+    log("[test_mem_region_proc] child maps, writes, revokes handle, then writes again
+");
 
     let (parent_to_child_read, parent_to_child_write) = match call::pipe() {
         Ok((read_fd, write_fd)) => {
@@ -452,7 +487,8 @@ fn run_suite(ctx: &mut Ctx) {
             ctx.fail += 1;
             log_err("[FAIL] child ready handshake -> unexpected byte=");
             log_hex_u64(other as u64);
-            log_err("\n");
+            log_err("
+");
             return;
         }
         Err(err) => {
@@ -532,7 +568,8 @@ fn run_suite(ctx: &mut Ctx) {
             ctx.fail += 1;
             log_err("[FAIL] child stage1 completion -> unexpected byte=");
             log_hex_u64(other as u64);
-            log_err("\n");
+            log_err("
+");
             return;
         }
         Err(err) => {
@@ -578,7 +615,8 @@ fn run_suite(ctx: &mut Ctx) {
             ctx.fail += 1;
             log_err("[FAIL] child stage2 completion -> unexpected byte=");
             log_hex_u64(other as u64);
-            log_err("\n");
+            log_err("
+");
             return;
         }
         Err(err) => {
@@ -607,14 +645,16 @@ fn run_suite(ctx: &mut Ctx) {
         Some(_) => {
             log("[wait] child raw status=");
             log_u64(status as u64);
-            log("\n");
+            log("
+");
             if wait_exit_code(status) == Some(0) {
                 ok(ctx, "child exited with code 0", 0);
             } else {
                 ctx.fail += 1;
                 log_err("[FAIL] child exited with code 0 -> raw status=");
                 log_u64(status as u64);
-                log_err("\n");
+                log_err("
+");
             }
         }
         None => return,
@@ -650,7 +690,8 @@ pub extern "C" fn _start() -> ! {
     log_u64(ctx.pass);
     log(" fail=");
     log_u64(ctx.fail);
-    log("\n");
+    log("
+");
 
     if ctx.fail == 0 {
         call::exit(0);

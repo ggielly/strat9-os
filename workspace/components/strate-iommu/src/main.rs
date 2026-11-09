@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! `strate-iommu` : IOMMU policy and diagnostic server.
 //!
 //! P1 scope: this server is deliberately **outside the data path**.  Drivers
@@ -47,7 +69,8 @@ static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
-    log("[strate-iommu] OOM\n");
+    log("[strate-iommu] OOM
+");
     call::exit(12);
 }
 
@@ -327,7 +350,8 @@ pub fn domain_snapshot(handle: usize) -> Option<IommuDomainInfo> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    log("[strate-iommu] starting\n");
+    log("[strate-iommu] starting
+");
 
     let port = match call::ipc_create_port(0) {
         Ok(port) => port as u64,
@@ -341,9 +365,11 @@ pub extern "C" fn _start() -> ! {
         log_errno("[strate-iommu] bind /srv/iommu: ", err);
         // Do not exit: a supervisor restart loop would only repeat the same
         // failure.  Keep the port alive for diagnostics.
-        log("[strate-iommu] running without /srv/iommu binding\n");
+        log("[strate-iommu] running without /srv/iommu binding
+");
     } else {
-        log("[strate-iommu] bound /srv/iommu\n");
+        log("[strate-iommu] bound /srv/iommu
+");
     }
 
     report_startup();

@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 #![no_std]
 #![no_main]
 
@@ -57,10 +79,14 @@ fn log_hex_u64(mut value: u64) {
 
 /// Implements section.
 fn section(title: &str) {
-    log("\n############################################################\n");
+    log("
+############################################################
+");
     log("[test_mem_stressed] ");
     log(title);
-    log("\n############################################################\n");
+    log("
+############################################################
+");
 }
 
 /// Implements query brk.
@@ -70,7 +96,8 @@ fn query_brk() -> usize {
         Err(e) => {
             log_err("[test_mem_stressed] brk(0) failed: ");
             log_err(e.name());
-            log_err("\n");
+            log_err("
+");
             call::exit(201);
         }
     }
@@ -85,7 +112,8 @@ fn set_brk(new_brk: usize, ctx: &str) -> usize {
             log_err(ctx);
             log_err(": ");
             log_err(e.name());
-            log_err("\n");
+            log_err("
+");
             call::exit(202);
         }
     }
@@ -107,7 +135,8 @@ fn touch_pages(base: usize, pages: usize, seed: u8, tag: &str) {
     log_u64(pages as u64);
     log(" seed=");
     log_hex_u64(seed as u64);
-    log("\n");
+    log("
+");
 
     let total = pages * PAGE_SIZE;
     let buf = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, total) };
@@ -136,7 +165,8 @@ fn touch_pages(base: usize, pages: usize, seed: u8, tag: &str) {
                 log_hex_u64(got as u64);
                 log_err(" tag=");
                 log_err(tag);
-                log_err("\n");
+                log_err("
+");
                 call::exit(203);
             }
         }
@@ -156,7 +186,8 @@ fn stage_fixed_rounds() {
         log_u64(*pages as u64);
         log(" target=");
         log_hex_u64(target as u64);
-        log("\n");
+        log("
+");
         let _ = set_brk(target, "stage_fixed_rounds_grow");
         touch_pages(
             base,
@@ -190,7 +221,8 @@ fn stage_sawtooth_heavy() {
             log_u64(pages as u64);
             log(" shrink_pages=");
             log_u64(shrink_pages as u64);
-            log("\n");
+            log("
+");
         }
 
         pages = if pages >= 192 { 5 } else { pages + 7 };
@@ -216,7 +248,8 @@ fn stage_churn_loops() {
             log_u64(i as u64);
             log(" pages=");
             log_u64(pages as u64);
-            log("\n");
+            log("
+");
         }
     }
 }
@@ -230,8 +263,10 @@ fn panic(info: &PanicInfo) -> ! {
 /// Implements start.
 pub extern "C" fn _start() -> ! {
     section("Start");
-    log("[test_mem_stressed] test intensif (verbose) demarre\n");
-    log("[test_mem_stressed] NOTE: binaire manuel, non lance automatiquement a l'init\n");
+    log("[test_mem_stressed] test intensif (verbose) demarre
+");
+    log("[test_mem_stressed] NOTE: binaire manuel, non lance automatiquement a l'init
+");
 
     let pid = call::getpid().unwrap_or(0);
     let tid = call::gettid().unwrap_or(0);
@@ -239,13 +274,15 @@ pub extern "C" fn _start() -> ! {
     log_u64(pid as u64);
     log(" tid=");
     log_u64(tid as u64);
-    log("\n");
+    log("
+");
 
     stage_fixed_rounds();
     stage_sawtooth_heavy();
     stage_churn_loops();
 
     section("Done");
-    log("[test_mem_stressed] SUCCESS\n");
+    log("[test_mem_stressed] SUCCESS
+");
     call::exit(0)
 }

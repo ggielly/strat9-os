@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! `/dev/log` : replay the kernel boot log to userspace.
 //!
 //! This scheme is the userspace view of [`crate::log_ring`]. The serial hook
@@ -12,7 +34,9 @@
 //! /dev/log/
 //!   stream   read    byte stream, from oldest retained byte on open
 //!   stats    read    text snapshot taken at open (written/capacity/dropped/oldest)
-//!   ctl      write   "clear\n" or "mark <text>\n"; unknown lines are ignored
+//!   ctl      write   "clear
+" or "mark <text>
+"; unknown lines are ignored
 //! ```
 //!
 //! # Semantics
@@ -88,7 +112,11 @@ impl LogScheme {
         // Writing into a String cannot fail.
         let _ = write!(
             text,
-            "written={}\ncapacity={}\ndropped={}\noldest={}\n",
+            "written={}
+capacity={}
+dropped={}
+oldest={}
+",
             s.written, s.capacity, s.dropped, s.oldest
         );
         text
@@ -97,8 +125,9 @@ impl LogScheme {
     /// Applies one `ctl` write. Unknown commands are ignored (Plan 9 style:
     /// the write succeeds, nothing happens).
     fn handle_ctl(buf: &[u8]) {
-        for raw in buf.split(|&b| b == b'\n') {
-            let line = if raw.last() == Some(&b'\r') {
+        for raw in buf.split(|&b| b == b'
+') {
+            let line = if raw.last() == Some(&b'') {
                 &raw[..raw.len() - 1]
             } else {
                 raw
@@ -119,7 +148,8 @@ impl Default for LogScheme {
     }
 }
 
-/// Pushes a bounded `[mark] <text>\n` line into the ring.
+/// Pushes a bounded `[mark] <text>
+` line into the ring.
 fn push_marker(text: &[u8]) {
     let n = core::cmp::min(text.len(), MAX_MARK_TEXT);
     let prefix = b"[mark] ";
@@ -127,7 +157,8 @@ fn push_marker(text: &[u8]) {
     line[..prefix.len()].copy_from_slice(prefix);
     line[prefix.len()..prefix.len() + n].copy_from_slice(&text[..n]);
     let end = prefix.len() + n;
-    line[end] = b'\n';
+    line[end] = b'
+';
     log_ring::push(&line[..end + 1]);
 }
 

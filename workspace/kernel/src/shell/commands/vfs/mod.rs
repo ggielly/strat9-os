@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 //! VFS management commands
 mod cat;
 mod cd;
@@ -332,7 +354,8 @@ pub(super) fn cmd_cat_impl(args: &[String]) -> Result<(), ShellError> {
         if args.is_empty() {
             let s = core::str::from_utf8(&piped).unwrap_or("(non-UTF8 data)");
             crate::shell_print!("{}", s);
-            if !s.ends_with('\n') {
+            if !s.ends_with('
+') {
                 shell_println!();
             }
             return Ok(());
@@ -356,7 +379,8 @@ pub(super) fn cmd_cat_impl(args: &[String]) -> Result<(), ShellError> {
                         crate::shell_print!("{}", s);
                     }
                     Err(e) => {
-                        shell_println!("\nError reading file: {:?}", e);
+                        shell_println!("
+Error reading file: {:?}", e);
                         break;
                     }
                 }

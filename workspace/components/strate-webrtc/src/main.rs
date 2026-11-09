@@ -1,3 +1,25 @@
+/*
+ * This file is part of strat9-os.
+ *
+ * strat9-os is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * strat9-os is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.strat9-os.org
+ * Repository: https://github.com/strat9-os/strat9-os
+ *
+ * Copyright (C) 2023-26 Guillaume Gielly
+ */
+
 #![no_std]
 #![no_main]
 #![feature(alloc_error_handler)]
@@ -29,7 +51,8 @@ static ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
-    let _ = call::debug_log(b"[strate-webrtc] OOM\n");
+    let _ = call::debug_log(b"[strate-webrtc] OOM
+");
     call::exit(12);
 }
 
@@ -246,7 +269,7 @@ fn refresh_policies(rt: &mut Runtime) {
         if idx == 0 || line.is_empty() {
             continue;
         }
-        let mut cols = line.split('\t');
+        let mut cols = line.split('	');
         let sid = cols.next().and_then(|v| v.parse::<u32>().ok());
         let _state = cols.next();
         let _tasks = cols.next();
@@ -378,7 +401,8 @@ pub unsafe extern "C" fn _start() -> ! {
 
     let _ = call::ipc_bind_port(port_h, b"/srv/strate-webrtc/bootstrap");
     bind_alias(port_h, "default");
-    log("[strate-webrtc] online\n");
+    log("[strate-webrtc] online
+");
 
     loop {
         cleanup_expired(&mut rt, now_ns());
