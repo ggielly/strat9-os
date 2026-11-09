@@ -59,6 +59,10 @@ pub mod bits {
     pub const ENTRY_LOAD_IA32_EFER: u32 = 1 << 15;
     /// Primary control: exit on `hlt`.
     pub const PRIMARY_HLT_EXITING: u32 = 1 << 7;
+    /// Primary control: unconditional exit on every I/O instruction (`in`/`out`).
+    /// Without it (and without I/O bitmaps) the guest performs port I/O
+    /// natively, so the host never observes it.
+    pub const PRIMARY_UNCONDITIONAL_IO_EXITING: u32 = 1 << 24;
     /// Secondary control: enable EPT.
     pub const SECONDARY_ENABLE_EPT: u32 = 1 << 1;
     /// Secondary control: unrestricted guest.
@@ -385,7 +389,7 @@ impl Vcpu {
                  sel(cs={:#x} ss={:#x} ds={:#x} es={:#x} fs={:#x} gs={:#x} ldtr={:#x} tr={:#x}) \
                  ar(cs={:#x} ss={:#x} ds={:#x} es={:#x} fs={:#x} gs={:#x} ldtr={:#x} tr={:#x}) \
                  lim(cs={:#x} ss={:#x} ds={:#x} es={:#x} fs={:#x} gs={:#x} ldtr={:#x} tr={:#x}) \
-                 gdtr={:#x}/{:#x} idtr={:#x}/{:#x} link={:#x} dbgctl={:#x} smstate={:#x} \
+                 gdtr={:#x}/{:#x} idtr={:#x}/{:#x} link={:#x} dbgctl={:#x} \
                  exit(reason={:#x} qual={:#x} instrerr={:#x} len={:#x} info={:#x}) \
                  sysenter(cs={:#x} esp={:#x} eip={:#x}) \
                  ctl(pin={:#x} primary={:#x} secondary={:#x} exit={:#x} entry={:#x})",
@@ -430,7 +434,6 @@ impl Vcpu {
                 u32_field(field::GUEST_IDTR_LIMIT),
                 natural(field::GUEST_VMCS_LINK_POINTER),
                 natural(field::GUEST_DEBUGCTL),
-                u32_field(field::GUEST_SMSTATE),
                 u32_field(field::EXIT_REASON),
                 natural(field::EXIT_QUALIFICATION),
                 u32_field(field::INSTRUCTION_ERROR),
@@ -868,7 +871,9 @@ impl Vcpu {
     unsafe fn write_controls(&self, caps: &HwCaps) -> Result<(), VcpuError> {
         let pin = caps.pin_allowed.apply(bits::PIN_EXTERNAL_INTERRUPT_EXITING);
         let primary = caps.primary_proc_allowed.apply(
-            crate::s9vm::caps::control_bits::PROC_ACTIVATE_SECONDARY | bits::PRIMARY_HLT_EXITING,
+            crate::s9vm::caps::control_bits::PROC_ACTIVATE_SECONDARY
+                | bits::PRIMARY_HLT_EXITING
+                | bits::PRIMARY_UNCONDITIONAL_IO_EXITING,
         );
         let secondary = caps
             .secondary_proc_allowed

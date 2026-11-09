@@ -35,22 +35,17 @@
 //! option `s9vm.selftest=1` is present. It never panics: a failure is
 //! logged and boot continues.
 //!
-//! # Guest-state variants
-//!
-//! Real hardware validates the guest state at VM entry much more strictly than
-//! the software model. When the first variant fails with `entry failure`, the
-//! test tries a few well-known valid shapes of the same guest (unusable TR,
-//! real descriptor-table limits, OS-like access rights...) and logs the
-//! outcome of each. This makes a strict-field failure diagnosable on the
-//! target machine without rebuilding: the first passing variant identifies the
-//! field family the processor objected to.
+//! The guest state is the canonical 64-bit flat shape produced by
+//! [`GuestState::long_mode_64`]; it is entered once. Any exit the engine does
+//! not expect is logged with its decoded reason so a failure is diagnosable on
+//! the target machine without rebuilding.
 
 use crate::{
     memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame},
     s9vm::{
         caps::HwCaps,
-        exit::{ExitClass, ExitReason},
-        guest::{GuestState, Segment, AR_CODE_DATA, AR_DEFAULT_BIG, AR_LONG_MODE, AR_PRESENT},
+        exit::{reason_name, ExitClass, ExitReason},
+        guest::GuestState,
         vcpu::{SecondLevelMemory, Vcpu, VcpuError},
     },
 };
@@ -127,129 +122,8 @@ fn write_bytes(frame: &PhysFrame, bytes: &[u8]) {
     }
 }
 
-/// Access rights of an OS-like 64-bit writable data segment (`SS`/`DS`/`ES`).
-///
-/// Type 3 (read/write, accessed), `S=1`, `DPL=0`, `P=1`, `D/B=1`, `G=1`:
-/// `0xC093` in the VMCS access-rights format (bits 14/15 are `D/B`/`G`).
-const fn os_data_access_rights() -> u32 {
-    (0x3 | AR_CODE_DATA | AR_PRESENT) | AR_DEFAULT_BIG | (1 << 15)
-}
-
-/// Access rights of an OS-like 64-bit code segment (`CS`).
-///
-/// Type 11 (execute/read, accessed), `S=1`, `DPL=0`, `P=1`, `L=1`, `G=1`.
-const fn os_code_access_rights() -> u32 {
-    (0xB | AR_CODE_DATA | AR_PRESENT | AR_LONG_MODE) | (1 << 15)
-}
-
-/// Builds the guest-state variants tried by the smoke test.
-///
-/// Variant 0 is the software-model baseline. The others are common valid
-/// shapes of the same guest; a hardware rejection of variant 0 can thus be
-/// attributed to one field family.
-fn build_variants(base: &GuestState) -> [(&'static str, GuestState); 15] {
-    let mut variants = [("baseline", *base); 15];
-
-    // Unusable TR: no TSS is needed by this guest (no ring transition).
-    let mut guest = *base;
-    guest.tr = Segment::unusable();
-    variants[1] = ("tr-unusable", guest);
-
-    // Real descriptor-table limits (KVM/OS shape: 0xFFFF, base 0).
-    let mut guest = *base;
-    guest.gdtr_limit = 0xFFFF;
-    guest.idtr_limit = 0xFFFF;
-    variants[2] = ("table-limits-ffff", guest);
-
-    // Data segments as type-3 accessed RW (0x93 in the VMCS format).
-    let mut guest = *base;
-    let data = 0x3 | AR_CODE_DATA | AR_PRESENT;
-    guest.ss.access_rights = data;
-    guest.ds.access_rights = data;
-    guest.es.access_rights = data;
-    variants[3] = ("data-ar-93", guest);
-
-    // Data segments with D/B set (0x4093): OS-like flat segments.
-    let mut guest = *base;
-    let data = (0x3 | AR_CODE_DATA | AR_PRESENT) | AR_DEFAULT_BIG;
-    guest.ss.access_rights = data;
-    guest.ds.access_rights = data;
-    guest.es.access_rights = data;
-    variants[4] = ("data-ar-4093", guest);
-
-    // Data segments with D/B and G set (0xC093): exactly what a 64-bit OS uses.
-    let mut guest = *base;
-    let data = os_data_access_rights();
-    guest.ss.access_rights = data;
-    guest.ds.access_rights = data;
-    guest.es.access_rights = data;
-    variants[5] = ("data-ar-c093", guest);
-
-    // Code segment with G set and accessed type (0xA09B).
-    let mut guest = *base;
-    guest.cs.access_rights = os_code_access_rights();
-    variants[6] = ("cs-ar-a09b", guest);
-
-    // TR usable with a non-null selector and a TSS-sized limit.
-    let mut guest = *base;
-    guest.tr = Segment {
-        selector: 0x30,
-        base: 0,
-        limit: 0x67,
-        access_rights: 0x8B,
-    };
-    variants[7] = ("tr-selector-30", guest);
-
-    // Combination of the OS-like shape: table limits, OS data/code AR,
-    // unusable TR (this guest performs no privilege transition).
-    let mut guest = *base;
-    guest.gdtr_limit = 0xFFFF;
-    guest.idtr_limit = 0xFFFF;
-    guest.ss.access_rights = os_data_access_rights();
-    guest.ds.access_rights = os_data_access_rights();
-    guest.es.access_rights = os_data_access_rights();
-    guest.cs.access_rights = os_code_access_rights();
-    guest.tr = Segment::unusable();
-    variants[8] = ("os-shaped", guest);
-
-    // SYSENTER selector set to a valid ring-0 code selector (0x8).
-    let mut guest = *base;
-    guest.sysenter_cs = 0x8;
-    variants[9] = ("sysenter-cs-8", guest);
-
-    // Minimal CR0: PE | NE | PG (drop MP/WP).
-    let mut guest = *base;
-    guest.cr0 = 0x8000_0021;
-    variants[10] = ("cr0-min", guest);
-
-    // Minimal CR4: PAE | VMXE (drop PGE/OSFXSR/OSXMMEXCPT).
-    let mut guest = *base;
-    guest.cr4 = 0x2020;
-    variants[11] = ("cr4-min", guest);
-
-    // EFER without SCE: LME | LMA | NXE.
-    let mut guest = *base;
-    guest.efer = 0xD00;
-    variants[12] = ("efer-no-sce", guest);
-
-    // Descriptor tables pointing at a mapped page with a real limit.
-    let mut guest = *base;
-    guest.gdtr_base = GPA_PT;
-    guest.gdtr_limit = 0xFFFF;
-    guest.idtr_base = GPA_PT;
-    guest.idtr_limit = 0xFFFF;
-    variants[13] = ("tables-mapped", guest);
-
-    // Interrupts enabled in RFLAGS (IF = 1).
-    let mut guest = *base;
-    guest.rflags = 0x202;
-    variants[14] = ("rflags-if", guest);
-
-    variants
-}
-
-/// Runs one guest-state variant. Returns a report on success.
-fn run_variant(
+/// Enters the canonical guest and drives its exits. Returns a report on success.
+fn run_guest(
     caps: &HwCaps,
     second_level_pointer: u64,
     guest: &GuestState,
@@ -360,6 +234,21 @@ fn run_variant(
                 break;
             }
             _ => {
+                let reason = ExitReason::decode(exit.raw_reason).reason;
+                log::warn!(
+                    "[s9vm] unexpected exit: reason={:#x} ({}) class={:?} qual={:#x} \
+                     rip={:#x} exits={}",
+                    reason,
+                    reason_name(reason),
+                    class,
+                    exit.qualification,
+                    vcpu.guest().rip,
+                    report.total_exits,
+                );
+                // SAFETY: the control block is still loaded.
+                unsafe {
+                    log::warn!("[s9vm] {}", vcpu.guest_diagnostics());
+                }
                 outcome = Err(SelftestError::BadExit("unexpected exit"));
                 break;
             }
@@ -425,28 +314,18 @@ pub fn run(caps: &HwCaps) -> Result<SelftestReport, SelftestError> {
     }
     let pointer = second_level.pointer(caps);
 
-    let base = GuestState::long_mode_64(ENTRY_POINT, STACK_TOP, GPA_PML4);
-    let variants = build_variants(&base);
-    let mut last_error = SelftestError::BadExit("no variant tried");
-    for (index, (name, guest)) in variants.iter().enumerate() {
-        match run_variant(caps, pointer, guest) {
-            Ok(mut report) => {
-                report.variant = name;
-                log::info!("[s9vm] guest variant {} ({}) entered", index, name);
-                return Ok(report);
-            }
-            Err(error) => {
-                log::warn!(
-                    "[s9vm] guest variant {} ({}) failed: {:?}",
-                    index,
-                    name,
-                    error
-                );
-                last_error = error;
-            }
+    let guest = GuestState::long_mode_64(ENTRY_POINT, STACK_TOP, GPA_PML4);
+    match run_guest(caps, pointer, &guest) {
+        Ok(mut report) => {
+            report.variant = "canonical";
+            log::info!("[s9vm] guest entered (canonical 64-bit flat state)");
+            Ok(report)
+        }
+        Err(error) => {
+            log::warn!("[s9vm] guest failed: {:?}", error);
+            Err(error)
         }
     }
-    Err(last_error)
 }
 
 /// Starts the test if the boot option `s9vm.selftest=1` is present.
