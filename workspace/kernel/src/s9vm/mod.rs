@@ -263,7 +263,7 @@ pub fn activate_current_cpu() -> Result<(), InitError> {
     ACTIVATED[cpu].store(true, Ordering::Release);
     ACTIVE_CPUS.fetch_add(1, Ordering::AcqRel);
     log::info!(
-        "[s9vm] activation matérielle OK (cpu {}, région {:#x})",
+        "[s9vm] hardware activation OK (cpu {}, region {:#x})",
         cpu,
         phys
     );
@@ -298,23 +298,23 @@ unsafe fn enable_virtualization(region_phys: u64) -> bool {
 /// continues booting.
 pub fn init() {
     if !S9VM_ENABLED {
-        log::info!("[s9vm] désactivé par configuration");
+        log::info!("[s9vm] disabled by configuration");
         return;
     }
     let Some(caps) = detect() else {
         log::info!(
-            "[s9vm] VT-x absent — virtualisation inactive ({})",
+            "[s9vm] VT-x absent — virtualization inactive ({})",
             unavailable_reason()
         );
         return;
     };
     CAPS_VALID.store(true, Ordering::Release);
-    log::info!("[s9vm] capacités: {}", caps.summary());
+    log::info!("[s9vm] capabilities: {}", caps.summary());
     match caps.validate() {
         Ok(()) => {}
         Err(error) => {
             log::warn!(
-                "[s9vm] plateforme non exploitable ({:?}) — virtualisation inactive",
+                "[s9vm] platform unusable ({:?}) — virtualization inactive",
                 error
             );
             return;
@@ -325,12 +325,12 @@ pub fn init() {
     match activate_current_cpu() {
         Ok(()) => {
             log::info!(
-                "[s9vm] prêt ({} CPU activé(s))",
+                "[s9vm] ready ({} CPU activated)",
                 ACTIVE_CPUS.load(Ordering::Acquire)
             );
             selftest::maybe_run_from_boot_env(&caps);
         }
-        Err(error) => log::warn!("[s9vm] activation impossible ({:?})", error),
+        Err(error) => log::warn!("[s9vm] activation failed ({:?})", error),
     }
 }
 

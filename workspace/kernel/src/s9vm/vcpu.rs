@@ -386,6 +386,7 @@ impl Vcpu {
                  lim(cs={:#x} ss={:#x} ds={:#x} es={:#x} fs={:#x} gs={:#x} ldtr={:#x} tr={:#x}) \
                  gdtr={:#x}/{:#x} idtr={:#x}/{:#x} link={:#x} dbgctl={:#x} smstate={:#x} \
                  exit(reason={:#x} qual={:#x} instrerr={:#x} len={:#x} info={:#x}) \
+                 sysenter(cs={:#x} esp={:#x} eip={:#x}) \
                  ctl(pin={:#x} primary={:#x} secondary={:#x} exit={:#x} entry={:#x})",
                 natural(field::GUEST_CR0),
                 natural(field::GUEST_CR3),
@@ -434,6 +435,9 @@ impl Vcpu {
                 u32_field(field::INSTRUCTION_ERROR),
                 u32_field(field::EXIT_INSTRUCTION_LENGTH),
                 u32_field(field::EXIT_INSTRUCTION_INFO),
+                u32_field(field::GUEST_SYSENTER_CS),
+                natural(field::GUEST_SYSENTER_ESP),
+                natural(field::GUEST_SYSENTER_EIP),
                 u32_field(field::PIN_BASED_CONTROLS),
                 u32_field(field::PRIMARY_PROC_BASED_CONTROLS),
                 u32_field(field::SECONDARY_PROC_BASED_CONTROLS),

@@ -257,9 +257,9 @@ fn ept_is_read_from_0x48b_and_0x48c_only() {
     });
     let caps = HwCaps::from_snapshot(&snapshot, true);
     let seen = seen.into_inner();
-    assert!(seen.contains(&0x48B), "secondary controls lus en 0x48B: {seen:?}");
-    assert!(seen.contains(&0x48C), "EPT/VPID lus en 0x48C: {seen:?}");
-    assert!(!seen.contains(&0x48A), "0x48A (VMCS_ENUM) ne doit pas être lu: {seen:?}");
+    assert!(seen.contains(&0x48B), "secondary controls read at 0x48B: {seen:?}");
+    assert!(seen.contains(&0x48C), "EPT/VPID read at 0x48C: {seen:?}");
+    assert!(!seen.contains(&0x48A), "0x48A (VMCS_ENUM) must not be read: {seen:?}");
     assert!(caps.ept);
     assert!(caps.ept_four_levels);
     assert!(caps.vpid);

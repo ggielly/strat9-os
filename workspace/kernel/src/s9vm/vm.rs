@@ -488,7 +488,7 @@ pub fn list() -> Vec<WorldRecord> {
 pub fn debug_dump() {
     let worlds = list();
     log::info!(
-        "[s9vm] debug: {} monde(s), {} CPU actif(s)",
+        "[s9vm] debug: {} world(s), {} active CPU(s)",
         worlds.len(),
         crate::s9vm::active_cpu_count()
     );

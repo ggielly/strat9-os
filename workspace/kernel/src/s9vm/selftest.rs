@@ -145,8 +145,8 @@ const fn os_code_access_rights() -> u32 {
 /// Variant 0 is the software-model baseline. The others are common valid
 /// shapes of the same guest; a hardware rejection of variant 0 can thus be
 /// attributed to one field family.
-fn build_variants(base: &GuestState) -> [(&'static str, GuestState); 9] {
-    let mut variants = [("baseline", *base); 9];
+fn build_variants(base: &GuestState) -> [(&'static str, GuestState); 15] {
+    let mut variants = [("baseline", *base); 15];
 
     // Unusable TR: no TSS is needed by this guest (no ring transition).
     let mut guest = *base;
@@ -209,6 +209,39 @@ fn build_variants(base: &GuestState) -> [(&'static str, GuestState); 9] {
     guest.cs.access_rights = os_code_access_rights();
     guest.tr = Segment::unusable();
     variants[8] = ("os-shaped", guest);
+
+    // SYSENTER selector set to a valid ring-0 code selector (0x8).
+    let mut guest = *base;
+    guest.sysenter_cs = 0x8;
+    variants[9] = ("sysenter-cs-8", guest);
+
+    // Minimal CR0: PE | NE | PG (drop MP/WP).
+    let mut guest = *base;
+    guest.cr0 = 0x8000_0021;
+    variants[10] = ("cr0-min", guest);
+
+    // Minimal CR4: PAE | VMXE (drop PGE/OSFXSR/OSXMMEXCPT).
+    let mut guest = *base;
+    guest.cr4 = 0x2020;
+    variants[11] = ("cr4-min", guest);
+
+    // EFER without SCE: LME | LMA | NXE.
+    let mut guest = *base;
+    guest.efer = 0xD00;
+    variants[12] = ("efer-no-sce", guest);
+
+    // Descriptor tables pointing at a mapped page with a real limit.
+    let mut guest = *base;
+    guest.gdtr_base = GPA_PT;
+    guest.gdtr_limit = 0xFFFF;
+    guest.idtr_base = GPA_PT;
+    guest.idtr_limit = 0xFFFF;
+    variants[13] = ("tables-mapped", guest);
+
+    // Interrupts enabled in RFLAGS (IF = 1).
+    let mut guest = *base;
+    guest.rflags = 0x202;
+    variants[14] = ("rflags-if", guest);
 
     variants
 }

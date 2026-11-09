@@ -43,7 +43,7 @@ fn p0_syscall_numbers_are_distinct_and_in_range() {
         assert_eq!(
             *number,
             560 + index,
-            "numérotation P0 non contiguë à l'index {}",
+            "P0 numbering is not contiguous at index {}",
             index
         );
     }

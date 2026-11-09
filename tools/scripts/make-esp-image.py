@@ -76,7 +76,7 @@ def make_short(name, used):
         if candidate not in used:
             used.add(candidate)
             return candidate
-    raise RuntimeError(f"impossible de générer un nom court pour {name}")
+    raise RuntimeError(f"cannot generate a short name for {name}")
 
 
 def lfn_checksum(short_name):
@@ -181,7 +181,7 @@ class Fat32Image:
     def alloc_cluster(self):
         cluster = self.next_cluster
         if cluster >= self.clusters + 2:
-            raise RuntimeError("image pleine")
+            raise RuntimeError("image is full")
         self.next_cluster += 1
         return cluster
 
@@ -235,7 +235,7 @@ class Fat32Image:
         for entry in entries:
             raw.extend(b"".join(dir_entries_for(entry.name, entry.cluster, entry.size if entry.attr == 0x20 else None, used)))
         if len(raw) > CLUSTER_SIZE:
-            raise RuntimeError("trop d'entrées dans un répertoire (une grappe max)")
+            raise RuntimeError("too many directory entries (one cluster max)")
         offset = self.cluster_offset(cluster)
         self.image[offset : offset + len(raw)] = raw
 
@@ -291,21 +291,21 @@ class Fat32Image:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Crée une image disque UEFI FAT32 (MBR).")
-    parser.add_argument("--source", required=True, help="répertoire à copier (racine de l'ESP)")
-    parser.add_argument("--output", required=True, help="fichier image à écrire")
-    parser.add_argument("--size-mb", type=int, default=280, help="taille de l'image en Mio")
+    parser = argparse.ArgumentParser(description="Create a UEFI FAT32 disk image (MBR).")
+    parser.add_argument("--source", required=True, help="directory to copy (ESP root)")
+    parser.add_argument("--output", required=True, help="image file to write")
+    parser.add_argument("--size-mb", type=int, default=280, help="image size in MiB")
     args = parser.parse_args()
 
     if not os.path.isdir(args.source):
-        print(f"source introuvable : {args.source}", file=sys.stderr)
+        print(f"source not found: {args.source}", file=sys.stderr)
         return 1
     image = Fat32Image(args.size_mb * 1024 * 1024)
     data = image.build(args.source)
     os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".", exist_ok=True)
     with open(args.output, "wb") as handle:
         handle.write(data)
-    print(f"image écrite : {args.output} ({len(data)} octets, {image.clusters} grappes FAT32)")
+    print(f"image written: {args.output} ({len(data)} bytes, {image.clusters} FAT32 clusters)")
     return 0
 
 

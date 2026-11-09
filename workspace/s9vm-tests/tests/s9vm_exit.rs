@@ -63,7 +63,7 @@ fn classifies_common_exits() {
         assert_eq!(
             ExitReason::decode(reason as u32).class(),
             expected,
-            "raison {}",
+            "reason {}",
             reason
         );
     }
