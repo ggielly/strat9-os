@@ -674,36 +674,36 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             let k = (r.kind.0 as u8) + b'0';
             let base = r.base;
             let size = r.size;
-            unsafe {
-                crate::e9_mark!(b'R');
-                // base nibbles (low 5 bytes enough)
-                let mut shift = 0i32;
-                while shift < 40 {
-                    let nib = ((base >> shift) & 0xF) as u8;
-                    let c = if nib < 10 {
-                        b'0' + nib
-                    } else {
-                        b'a' + nib - 10
-                    };
-                    crate::e9_mark!(c);
-                    shift += 4;
-                }
-                crate::e9_mark!(b'/');
-                shift = 0;
-                while shift < 40 {
-                    let nib = ((size >> shift) & 0xF) as u8;
-                    let c = if nib < 10 {
-                        b'0' + nib
-                    } else {
-                        b'a' + nib - 10
-                    };
-                    crate::e9_mark!(c);
-                    shift += 4;
-                }
-                crate::e9_mark!(b'/');
-                crate::e9_mark!(k);
-                crate::e9_mark!(b'\n');
+
+            crate::e9_mark!(b'R');
+            // base nibbles (low 5 bytes enough)
+            let mut shift = 0i32;
+            while shift < 40 {
+                let nib = ((base >> shift) & 0xF) as u8;
+                let c = if nib < 10 {
+                    b'0' + nib
+                } else {
+                    b'a' + nib - 10
+                };
+                crate::e9_mark!(c);
+                shift += 4;
             }
+            crate::e9_mark!(b'/');
+            shift = 0;
+            while shift < 40 {
+                let nib = ((size >> shift) & 0xF) as u8;
+                let c = if nib < 10 {
+                    b'0' + nib
+                } else {
+                    b'a' + nib - 10
+                };
+                crate::e9_mark!(c);
+                shift += 4;
+            }
+            crate::e9_mark!(b'/');
+            crate::e9_mark!(k);
+            crate::e9_mark!(b'\n');
+
             i += 1;
         }
     }
@@ -1405,13 +1405,13 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
             // even when the formatted serial path is unavailable.
             for module in boot_modules {
                 let raw = module.name_str();
-                unsafe {
-                    crate::e9_mark!(b'N');
-                    for b in raw.as_bytes() {
-                        crate::e9_mark!(*b);
-                    }
-                    crate::e9_mark!(b'\n');
+
+                crate::e9_mark!(b'N');
+                for b in raw.as_bytes() {
+                    crate::e9_mark!(*b);
                 }
+                crate::e9_mark!(b'\n');
+
                 let name = raw;
                 if name == "init" || name == "strate-init" {
                     let view = boot::modules::InitfsModule::from_physical(module, hhdm)
@@ -1420,16 +1420,16 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                         core::slice::from_raw_parts(view.virtual_base as *const u8, view.len)
                     };
                     // E9: ELF magic check before handing to the loader.
-                    unsafe {
-                        let magic_ok = elf_data.len() >= 4
-                            && elf_data[0] == 0x7F
-                            && elf_data[1] == b'E'
-                            && elf_data[2] == b'L'
-                            && elf_data[3] == b'F';
-                        crate::e9_mark!(b'!');
-                        crate::e9_mark!(if magic_ok { b'Y' } else { b'N' });
-                        crate::e9_mark!(b'\n');
-                    }
+
+                    let magic_ok = elf_data.len() >= 4
+                        && elf_data[0] == 0x7F
+                        && elf_data[1] == b'E'
+                        && elf_data[2] == b'L'
+                        && elf_data[3] == b'F';
+                    crate::e9_mark!(b'!');
+                    crate::e9_mark!(if magic_ok { b'Y' } else { b'N' });
+                    crate::e9_mark!(b'\n');
+
                     let init_caps = [crate::silo::create_silo_admin_capability()];
                     match process::elf::load_and_run_elf_with_caps(elf_data, "init", &init_caps) {
                         Ok(task_id) => {
@@ -1442,11 +1442,11 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
                         Err(e) => {
                             // E9: report failure code letter.
                             let code = e.as_bytes().first().copied().unwrap_or(b'?');
-                            unsafe {
-                                crate::e9_mark!(b'X');
-                                crate::e9_mark!(code);
-                                crate::e9_mark!(b'\n');
-                            }
+
+                            crate::e9_mark!(b'X');
+                            crate::e9_mark!(code);
+                            crate::e9_mark!(b'\n');
+
                             serial_println!("[init] Failed to load init ELF: {}", e);
                         }
                     }
@@ -1605,6 +1605,7 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
         }
     }
     serial_println!("[init]   6b. ACPI RSDP validated");
+    vga_println!("[apic] 6b ACPI RSDP validated");
 
     // Step 6c: Parse MADT
     let madt_info = match acpi::madt::parse_madt() {
@@ -1615,6 +1616,7 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
         }
     };
     serial_println!("[init]   6c. MADT parsed");
+    vga_println!("[apic] 6c MADT parsed");
 
     if let Some(mcfg) = acpi::mcfg::parse_mcfg() {
         serial_println!(
@@ -1670,6 +1672,7 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
     memory::paging::ensure_identity_map(io_apic_entry.address as u64);
     ioapic::init(io_apic_entry.address, io_apic_entry.gsi_base);
     serial_println!("[init]   6e. I/O APIC initialized");
+    vga_println!("[apic] 6e I/O APIC initialized");
 
     // Step 6f: remap PIC to 0x20+ then keep only PS/2 input IRQs enabled.
     // Must remap first to avoid stray interrupts at exception vectors (0-31).
@@ -1700,8 +1703,13 @@ fn init_apic_subsystem(rsdp_vaddr: u64) -> bool {
     serial_println!(
         "[timer] ================================ TIMER INIT ================================"
     );
+    // Visible marker: if the screen stops here, the PIT channel 2 / port 0x61
+    // bit-5 poll is the culprit (it is bounded to ~10M slow INs, so it can look
+    // frozen for ~10 s on real hardware before timing out to the PIT fallback).
+    vga_println!("[apic] 6h calibrating APIC timer (PIT ch2 poll)...");
 
     let ticks_per_10ms = timer::calibrate_apic_timer();
+    vga_println!("[apic] 6h calibration returned {}", ticks_per_10ms);
 
     if ticks_per_10ms == 0 {
         log::error!("APIC: timer calibration FAILED");
