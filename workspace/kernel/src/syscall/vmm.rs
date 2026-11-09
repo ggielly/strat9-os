@@ -149,10 +149,13 @@ pub fn sys_vmm_destroy_vcpu(vcpu_id: u64) -> Result<u64, SyscallError> {
     }
 }
 
-/// SYS_VMM_RUN (565) : à implémenter avec l'ordonnancement des vCPU.
-pub fn sys_vmm_run(_vcpu_id: u64) -> Result<u64, SyscallError> {
+/// SYS_VMM_RUN (565) : exécute un vCPU jusqu'à la prochaine sortie « de
+/// politique » et empile l'événement dans la file du monde.
+pub fn sys_vmm_run(vcpu_id: u64) -> Result<u64, SyscallError> {
     require_control()?;
-    Err(SyscallError::NotImplemented)
+    let caps = s9vm::detect().ok_or(SyscallError::NotSupported)?;
+    vm::run_vcpu(vcpu_id, &caps).map_err(map_run_error)?;
+    Ok(0)
 }
 
 /// SYS_VMM_INJECT_IRQ (566) : à implémenter avec l'API vCPU.
@@ -161,10 +164,17 @@ pub fn sys_vmm_inject_irq(_vcpu_id: u64, _vector: u64) -> Result<u64, SyscallErr
     Err(SyscallError::NotImplemented)
 }
 
-/// SYS_VMM_EXIT_HANDLER (567) : à implémenter avec la file d'exits.
-pub fn sys_vmm_exit_handler(_vmm_id: u64, _event_ptr: u64) -> Result<u64, SyscallError> {
+/// SYS_VMM_EXIT_HANDLER (567) : dépile un événement de sortie.
+///
+/// Retourne 1 si un événement a été écrit, 0 si la file est vide.
+pub fn sys_vmm_exit_handler(vmm_id: u64, event_ptr: u64) -> Result<u64, SyscallError> {
     require_control()?;
-    Err(SyscallError::NotImplemented)
+    let event = match vm::pop_exit(vmm_id) {
+        Ok(event) => event,
+        Err(()) => return Ok(0),
+    };
+    write_struct(event_ptr, &event)?;
+    Ok(1)
 }
 
 /// SYS_VMM_IRQ_WAIT (568) : à implémenter avec le réveil des vCPU.
@@ -255,5 +265,15 @@ fn map_vcpu_error(error: vm::VcpuRegistryError) -> SyscallError {
         vm::VcpuRegistryError::Unknown => SyscallError::NotFound,
         vm::VcpuRegistryError::Limit => SyscallError::OutOfMemory,
         vm::VcpuRegistryError::BadAbiVersion => SyscallError::InvalidArgument,
+    }
+}
+fn map_run_error(error: vm::RunError) -> SyscallError {
+    match error {
+        vm::RunError::UnknownVcpu => SyscallError::NotFound,
+        vm::RunError::NoMemory => SyscallError::Again,
+        vm::RunError::InvalidGuestState => SyscallError::InvalidArgument,
+        vm::RunError::HardwareNotReady => SyscallError::NotSupported,
+        vm::RunError::Hardware(_) => SyscallError::IoError,
+        vm::RunError::ExitStorm => SyscallError::Again,
     }
 }

@@ -1633,7 +1633,8 @@ pub const SYS_VMM_RUN: usize = 565;
 pub const SYS_VMM_INJECT_IRQ: usize = 566;
 
 /// Read the next exit event of a world. Arguments: vmm_id, pointer to
-/// VmmExitEvent. Returns 0 when no event is pending.
+/// VmmExitEvent. Returns 1 when an event was written, 0 when the queue is
+/// empty.
 pub const SYS_VMM_EXIT_HANDLER: usize = 567;
 
 /// Wait for a vCPU wake-up (interrupt, exit, timer). Arguments: vcpu_id,

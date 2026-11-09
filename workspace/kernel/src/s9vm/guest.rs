@@ -294,6 +294,45 @@ impl GuestState {
     pub const fn is_real_mode(&self) -> bool {
         (self.cr0 & CR0_PE) == 0
     }
+
+    /// Construit un état invité à partir d'un bloc de registres ABI.
+    ///
+    /// Le mode long est sélectionné si `EFER.LME` et `CR0.PG` sont tous deux
+    /// positionnés ; sinon l'état de base est le mode réel. Les segments sont
+    /// initialisés en conséquence ; les registres fournis par l'appelant
+    /// (CR0/CR3/CR4/EFER/RIP/RSP/RFLAGS et GPR) écrasent les valeurs par
+    /// défaut. La cohérence finale est vérifiée par [`Self::validate`].
+    pub fn from_abi_regs(regs: &strat9_abi::vmm::VmmRegs) -> Self {
+        let long_mode = (regs.efer & EFER_LME) != 0 && (regs.cr0 & CR0_PG) != 0;
+        let mut state = if long_mode {
+            Self::long_mode_64(regs.rip, regs.rsp, regs.cr3)
+        } else {
+            Self::real_mode(regs.rip, regs.rsp)
+        };
+        state.rax = regs.rax;
+        state.rbx = regs.rbx;
+        state.rcx = regs.rcx;
+        state.rdx = regs.rdx;
+        state.rsi = regs.rsi;
+        state.rdi = regs.rdi;
+        state.rbp = regs.rbp;
+        state.r8 = regs.r8;
+        state.r9 = regs.r9;
+        state.r10 = regs.r10;
+        state.r11 = regs.r11;
+        state.r12 = regs.r12;
+        state.r13 = regs.r13;
+        state.r14 = regs.r14;
+        state.r15 = regs.r15;
+        state.rip = regs.rip;
+        state.rsp = regs.rsp;
+        state.rflags = regs.rflags;
+        state.cr0 = regs.cr0;
+        state.cr3 = regs.cr3;
+        state.cr4 = regs.cr4;
+        state.efer = regs.efer;
+        state
+    }
 }
 
 /// Erreur de validation d'état invité, exploitable dans les logs.

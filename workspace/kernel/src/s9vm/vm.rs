@@ -22,11 +22,15 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame};
 use crate::s9vm::caps::HwCaps;
+use crate::s9vm::exit::ExitClass;
+use crate::s9vm::exitqueue::ExitQueue;
+use crate::s9vm::guest::{FixedBits, GuestState};
 use crate::s9vm::memmap::{perms_from_abi, GuestMap, MapError};
 use crate::s9vm::mmu::Perms as MmuPerms;
 use crate::s9vm::mmu::PAGE_SIZE;
-use crate::s9vm::vcpu::{SecondLevelMemory, VcpuError};
+use crate::s9vm::vcpu::{ExitInfo, SecondLevelMemory, Vcpu, VcpuError};
 use crate::sync::SpinLock;
+use strat9_abi::vmm::{exit_kind, VmmExitEvent, VmmRegs};
 
 /// Nombre maximal de mondes simultanés (borne de sécurité).
 pub const MAX_WORLDS: usize = 64;
@@ -207,6 +211,11 @@ impl WorldMemory {
         self.second_level.translate(gpa)
     }
 
+    /// Valeur du pointeur de traduction (EPTP) pour le bloc de contrôle.
+    pub fn second_level_pointer(&self, caps: &HwCaps) -> u64 {
+        self.second_level.pointer(caps)
+    }
+
     /// Libère les tables de traduction puis les frames invitées.
     pub fn destroy(mut self) {
         let frames = core::mem::take(&mut self.frames);
@@ -222,6 +231,7 @@ struct World {
     record: WorldRecord,
     memory: Option<WorldMemory>,
     vcpus: Vec<VcpuSlot>,
+    exits: ExitQueue,
 }
 
 /// vCPU logique : identifiant opaque, APIC id et bloc de registres ABI.
@@ -229,14 +239,15 @@ struct World {
 /// Le contexte matériel (bloc de contrôle, pile hôte, état invité) est créé au
 /// moment de l'exécution, pas à la création logique : un monde peut être
 /// configuré (mémoire, vCPU, registres) avant que le matériel ne soit activé.
-#[derive(Debug, Clone, Copy)]
 pub struct VcpuSlot {
     /// Identifiant opaque du vCPU.
     pub id: u64,
     /// Identifiant APIC invité.
     pub apic_id: u32,
     /// Bloc de registres ABI.
-    pub regs: strat9_abi::vmm::VmmRegs,
+    pub regs: VmmRegs,
+    /// Contexte matériel (créé au premier `RUN`).
+    hardware: Option<Vcpu>,
 }
 
 /// Registre global des mondes.
@@ -265,6 +276,7 @@ pub fn create(name: &[u8], silo_id: u32) -> Option<WorldRecord> {
             record,
             memory: None,
             vcpus: Vec::new(),
+            exits: ExitQueue::default(),
         },
     );
     Some(record)
@@ -388,6 +400,224 @@ pub enum VcpuRegistryError {
     BadAbiVersion,
 }
 
+/// Erreurs d'exécution d'un vCPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunError {
+    /// vCPU inconnu.
+    UnknownVcpu,
+    /// Le monde n'a pas de mémoire invitée mappée.
+    NoMemory,
+    /// L'état invité fourni est invalide (voir `guest::GuestError`).
+    InvalidGuestState,
+    /// Le matériel n'est pas activé sur ce CPU.
+    HardwareNotReady,
+    /// Erreur matérielle pendant l'exécution.
+    Hardware(VcpuError),
+    /// La limite d'exits consécutifs résumés est atteinte (boucle pathologique).
+    ExitStorm,
+}
+
+impl From<VcpuError> for RunError {
+    fn from(value: VcpuError) -> Self {
+        Self::Hardware(value)
+    }
+}
+
+/// Nombre maximal d'exits « résumables » traités en interne avant de rendre
+/// la main à la politique (protection contre une tempête d'interruptions).
+const MAX_RESUMED_EXITS: u32 = 64;
+
+/// Vrai si une sortie peut être reprise immédiatement par le noyau.
+const fn is_resumable(class: ExitClass) -> bool {
+    matches!(
+        class,
+        ExitClass::ExternalInterrupt
+            | ExitClass::InterruptWindow
+            | ExitClass::Apic
+            | ExitClass::PreemptionTimer
+    )
+}
+
+fn regs_from_guest(guest: &GuestState, base: &VmmRegs) -> VmmRegs {
+    VmmRegs {
+        abi_version: strat9_abi::vmm::VMM_ABI_VERSION,
+        flags: base.flags,
+        rax: guest.rax,
+        rbx: guest.rbx,
+        rcx: guest.rcx,
+        rdx: guest.rdx,
+        rsi: guest.rsi,
+        rdi: guest.rdi,
+        rbp: guest.rbp,
+        rsp: guest.rsp,
+        r8: guest.r8,
+        r9: guest.r9,
+        r10: guest.r10,
+        r11: guest.r11,
+        r12: guest.r12,
+        r13: guest.r13,
+        r14: guest.r14,
+        r15: guest.r15,
+        rip: guest.rip,
+        rflags: guest.rflags,
+        cr0: guest.cr0,
+        cr3: guest.cr3,
+        cr4: guest.cr4,
+        efer: guest.efer,
+    }
+}
+
+fn event_from_exit(exit: &ExitInfo, vcpu_id: u64) -> VmmExitEvent {
+    let class = exit.class();
+    let mut event = VmmExitEvent {
+        abi_version: strat9_abi::vmm::VMM_ABI_VERSION,
+        vcpu_id,
+        gpa: exit.guest_physical_address,
+        flags: 0,
+        ..VmmExitEvent::default()
+    };
+    match class {
+        ExitClass::IoPort => {
+            let qualification = exit.qualification;
+            event.kind = exit_kind::IO_PORT;
+            event.port = ((qualification >> 16) & 0xFFFF) as u32;
+            event.size = ((qualification & 0x7) + 1) as u32;
+            // Bit 3 : 0 = OUT, 1 = IN.
+            event.flags = ((qualification >> 3) & 1) as u32;
+        }
+        ExitClass::Halt => {
+            event.kind = exit_kind::HALT;
+        }
+        ExitClass::EptViolation => {
+            event.kind = exit_kind::TRANSLATION;
+            // Bits 2:0 de la qualification EPT : lecture/écriture/exécution.
+            event.flags = (exit.qualification & 0x7) as u32;
+        }
+        ExitClass::ExceptionOrNmi => {
+            event.kind = exit_kind::EXCEPTION;
+            event.flags = exit.interrupt_info;
+        }
+        _ => {
+            event.kind = exit_kind::OTHER;
+            event.flags = exit.raw_reason;
+        }
+    }
+    event
+}
+
+/// Exécute un vCPU jusqu'à la prochaine sortie « de politique » et empile
+/// l'événement correspondant dans la file du monde.
+///
+/// Les sorties purement hostiles au débit (interruption externe, fenêtre
+/// d'interruption, APIC, timer de préemption) sont reprises immédiatement par
+/// le noyau ; toutes les autres sont remontées à la politique.
+pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
+    if crate::s9vm::active_cpu_count() == 0 {
+        return Err(RunError::HardwareNotReady);
+    }
+    // 1. Retire le contexte matériel et les registres du registre, sans tenir
+    //    le verrou pendant l'exécution.
+    let (world_id, mut hardware, mut regs, pointer) = {
+        let mut worlds = WORLDS.lock();
+        let world = vcpu_world_mut(&mut worlds, vcpu_id).ok_or(RunError::UnknownVcpu)?;
+        let slot = world
+            .vcpus
+            .iter_mut()
+            .find(|slot| slot.id == vcpu_id)
+            .ok_or(RunError::UnknownVcpu)?;
+        let memory = world.memory.as_ref().ok_or(RunError::NoMemory)?;
+        let pointer = memory.second_level_pointer(caps);
+        let hardware = slot.hardware.take();
+        (world.record.id, hardware, slot.regs, pointer)
+    };
+    let mut hardware = match hardware {
+        Some(hardware) => hardware,
+        None => Vcpu::new(caps, pointer)?,
+    };
+
+    // 2. Construit et valide l'état invité.
+    let mut guest = GuestState::from_abi_regs(&regs);
+    let fixed = FixedBits::new(
+        caps.cr0_fixed0,
+        caps.cr0_fixed1,
+        caps.cr4_fixed0,
+        caps.cr4_fixed1,
+    );
+    guest
+        .validate(&fixed, caps.unrestricted_guest)
+        .map_err(|_| RunError::InvalidGuestState)?;
+
+    // 3. Charge le bloc de contrôle, configure et exécute.
+    // SAFETY: VT-x est actif sur ce CPU (vérifié ci-dessus) ; le bloc de
+    // contrôle et la pile hôte appartiennent à ce vCPU, qui n'est pas en
+    // cours d'exécution (contexte retiré du registre).
+    let mut result = Ok(());
+    unsafe {
+        let _ = hardware.clear();
+        if let Err(error) = hardware.load() {
+            result = Err(RunError::Hardware(error));
+        } else if let Err(error) = hardware.configure_host() {
+            result = Err(RunError::Hardware(error));
+        } else if let Err(error) = hardware.configure(caps, &guest) {
+            result = Err(RunError::Hardware(error));
+        } else {
+            let mut resumed = 0u32;
+            loop {
+                match hardware.run() {
+                    Ok(exit) => {
+                        if is_resumable(exit.class()) && resumed < MAX_RESUMED_EXITS {
+                            resumed += 1;
+                            continue;
+                        }
+                        if is_resumable(exit.class()) {
+                            result = Err(RunError::ExitStorm);
+                        } else {
+                            let event = event_from_exit(&exit, vcpu_id);
+                            let _ = push_exit(world_id, event);
+                        }
+                        break;
+                    }
+                    Err(error) => {
+                        result = Err(RunError::Hardware(error));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Recharge les registres depuis l'état invité post-exécution et remet
+    //    le contexte matériel dans le registre si le monde existe toujours.
+    regs = regs_from_guest(hardware.guest(), &regs);
+    let mut worlds = WORLDS.lock();
+    if let Some(world) = worlds.get_mut(&world_id) {
+        if let Some(slot) = world.vcpus.iter_mut().find(|slot| slot.id == vcpu_id) {
+            slot.regs = regs;
+            slot.hardware = Some(hardware);
+        }
+    }
+    result
+}
+
+/// Empile un événement dans la file d'un monde.
+pub fn push_exit(world_id: u64, event: VmmExitEvent) -> Result<(), ()> {
+    let mut worlds = WORLDS.lock();
+    let world = worlds.get_mut(&world_id).ok_or(())?;
+    world.exits.push(event).map_err(|_| ())
+}
+
+/// Dépile le prochain événement d'un monde.
+pub fn pop_exit(world_id: u64) -> Result<VmmExitEvent, ()> {
+    let mut worlds = WORLDS.lock();
+    let world = worlds.get_mut(&world_id).ok_or(())?;
+    world.exits.pop().map_err(|_| ())
+}
+
+/// Nombre d'événements en attente pour un monde.
+pub fn exit_count(world_id: u64) -> Option<usize> {
+    WORLDS.lock().get(&world_id).map(|world| world.exits.len())
+}
+
 /// Prochain identifiant de vCPU (global, jamais 0).
 static NEXT_VCPU: AtomicU64 = AtomicU64::new(1);
 
@@ -403,7 +633,7 @@ pub fn create_vcpu(world_id: u64, apic_id: u32) -> Result<u64, VcpuRegistryError
         abi_version: strat9_abi::vmm::VMM_ABI_VERSION,
         ..Default::default()
     };
-    world.vcpus.push(VcpuSlot { id, apic_id, regs });
+    world.vcpus.push(VcpuSlot { id, apic_id, regs, hardware: None });
     world.record.vcpu_count = world.vcpus.len() as u32;
     Ok(id)
 }

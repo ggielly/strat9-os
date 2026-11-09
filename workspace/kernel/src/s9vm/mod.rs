@@ -29,6 +29,7 @@
 pub mod caps;
 pub mod control;
 pub mod exit;
+pub mod exitqueue;
 pub mod guest;
 pub mod launch;
 pub mod memmap;
