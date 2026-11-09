@@ -124,6 +124,29 @@ unsafe fn write_cr4(value: u64) {
     }
 }
 
+/// Explains why VT-x is unavailable, for logs and diagnostics.
+///
+/// Performs the same read-only CPUID/MSR probes as [`detect`] and returns a
+/// short cause. Never modifies CPU state.
+pub fn unavailable_reason() -> &'static str {
+    let info = crate::arch::x86_64::cpuid::host();
+    let cpuid_vmx = info
+        .features
+        .contains(crate::arch::x86_64::cpuid::CpuFeatures::VMX);
+    if !cpuid_vmx {
+        return "CPUID.1:ECX.VMX=0 (hypervisor or firmware hides VT-x)";
+    }
+    let feature_control = read_msr(caps::MSR_FEATURE_CONTROL);
+    if feature_control & caps::FEATURE_CONTROL_ENABLE_OUTSIDE_SMX != 0 {
+        return "unknown (CPUID and IA32_FEATURE_CONTROL both allow VT-x)";
+    }
+    if feature_control & caps::FEATURE_CONTROL_LOCKED != 0 {
+        "IA32_FEATURE_CONTROL is locked and forbids VMXON"
+    } else {
+        "IA32_FEATURE_CONTROL does not enable VMXON"
+    }
+}
+
 /// Detects hardware capabilities. Does not modify any CPU state.
 pub fn detect() -> Option<HwCaps> {
     let info = crate::arch::x86_64::cpuid::host();
@@ -257,7 +280,10 @@ pub fn init() {
         return;
     }
     let Some(caps) = detect() else {
-        log::info!("[s9vm] VT-x absent — virtualisation inactive");
+        log::info!(
+            "[s9vm] VT-x absent — virtualisation inactive ({})",
+            unavailable_reason()
+        );
         return;
     };
     CAPS_VALID.store(true, Ordering::Release);

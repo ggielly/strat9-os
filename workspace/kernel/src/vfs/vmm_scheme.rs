@@ -70,6 +70,9 @@ impl VmmScheme {
         let mut text = String::new();
         let _ = writeln!(text, "engine={}", if detected { "detected" } else { "unavailable" });
         let _ = writeln!(text, "active_cpus={}", s9vm::active_cpu_count());
+        if !detected {
+            let _ = writeln!(text, "vt_x=absent reason={}", s9vm::unavailable_reason());
+        }
         let _ = writeln!(text, "worlds={}", vm::count());
         let _ = writeln!(text, "abi_version={}", strat9_abi::vmm::VMM_ABI_VERSION);
         if let Some(caps) = s9vm::detect() {
