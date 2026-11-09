@@ -152,12 +152,19 @@ cwd = "workspace/kernel-l2-tests"
 command = "cargo"
 args = ["test", "--target", "x86_64-unknown-linux-gnu"]
 
+[tasks.test-s9vm]
+description = "L2 s9vm: host tests for the s9vm virtualization core (caps, control block, second-level tables, exits)"
+cwd = "workspace/s9vm-tests"
+command = "cargo"
+args = ["test"]
+
 [tasks.ci-tests]
 description = "Full CI gate: host tests, kernel L2 mirror and UEFI tooling regressions"
 dependencies = [
     "test-host",
     "test-host-alloc",
     "test-kernel-l2",
+    "test-s9vm",
     "test-uefi-tools",
 ]
 

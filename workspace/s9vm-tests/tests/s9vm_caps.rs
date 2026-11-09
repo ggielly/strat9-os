@@ -1,0 +1,192 @@
+//! L2 : décodage des capacités matérielles s9vm (code noyau réel).
+
+extern crate alloc;
+
+#[path = "../../kernel/src/s9vm/caps.rs"]
+mod caps;
+
+use caps::{
+    control_bits, ept_vpid_cap, AllowedControls, CapsError, HwCaps, MsrSnapshot,
+    FEATURE_CONTROL_ENABLE_OUTSIDE_SMX, FEATURE_CONTROL_LOCKED, MSR_BASIC,
+    MSR_CR0_FIXED0, MSR_CR0_FIXED1, MSR_CR4_FIXED0, MSR_CR4_FIXED1, MSR_ENTRY_CONTROLS,
+    MSR_EPT_VPID_CAP, MSR_EXIT_CONTROLS, MSR_FEATURE_CONTROL, MSR_MISC, MSR_PIN_BASED,
+    MSR_PRIMARY_PROC_BASED, MSR_SECONDARY_PROC_BASED, MSR_TRUE_ENTRY_CONTROLS,
+    MSR_TRUE_EXIT_CONTROLS, MSR_TRUE_PIN_BASED, MSR_TRUE_PRIMARY_PROC_BASED,
+};
+
+/// Photographie synthétique : contrôle total des valeurs décodées.
+fn snapshot(values: &[(u32, u64)]) -> MsrSnapshot {
+    MsrSnapshot::from_reader(|msr| {
+        values
+            .iter()
+            .find(|(key, _)| *key == msr)
+            .map(|(_, value)| *value)
+            .unwrap_or(0)
+    })
+}
+
+fn basic_msr(revision: u32, size: u16, memory_type: u8, true_controls: bool) -> u64 {
+    let mut value = revision as u64;
+    value |= (size as u64) << 32;
+    value |= (memory_type as u64) << 50;
+    if true_controls {
+        value |= 1 << 55;
+    }
+    value
+}
+
+#[test]
+fn rejects_when_feature_control_disallows_activation() {
+    let snap = snapshot(&[(MSR_FEATURE_CONTROL, FEATURE_CONTROL_LOCKED)]);
+    let caps = HwCaps::from_snapshot(&snap, true);
+    assert!(!caps.allowed);
+    assert_eq!(caps.validate(), Err(CapsError::LockedByFirmware));
+}
+
+#[test]
+fn rejects_without_cpuid_flag() {
+    let snap = snapshot(&[(
+        MSR_FEATURE_CONTROL,
+        FEATURE_CONTROL_ENABLE_OUTSIDE_SMX | FEATURE_CONTROL_LOCKED,
+    )]);
+    let caps = HwCaps::from_snapshot(&snap, false);
+    assert!(!caps.allowed);
+}
+
+#[test]
+fn decodes_control_block_identity() {
+    let snap = snapshot(&[
+        (
+            MSR_FEATURE_CONTROL,
+            FEATURE_CONTROL_ENABLE_OUTSIDE_SMX | FEATURE_CONTROL_LOCKED,
+        ),
+        (MSR_BASIC, basic_msr(0x12, 4096, 6, false)),
+        (MSR_SECONDARY_PROC_BASED, (u64::MAX & !0) | 0),
+        (MSR_EPT_VPID_CAP, 0),
+    ]);
+    let caps = HwCaps::from_snapshot(&snap, true);
+    assert_eq!(caps.control_block_revision, 0x12);
+    assert_eq!(caps.control_block_size, 4096);
+    assert_eq!(caps.control_block_memory_type, 6);
+    assert!(!caps.has_true_controls);
+}
+
+#[test]
+fn detects_ept_and_vpid_from_allowed_masks() {
+    // Bits bas = obligatoires, bits hauts = autorisés.
+    let secondary = (control_bits::PROC2_ENABLE_EPT as u64)
+        | ((control_bits::PROC2_ENABLE_EPT | control_bits::PROC2_ENABLE_VPID) as u64) << 32;
+    let ept_vpid = ept_vpid_cap::WALK_LENGTH_4
+        | ept_vpid_cap::MEMTYPE_WB
+        | ept_vpid_cap::PAGE_2MB
+        | ept_vpid_cap::ACCESSED_DIRTY
+        | ept_vpid_cap::INVEPT;
+    let snap = snapshot(&[
+        (
+            MSR_FEATURE_CONTROL,
+            FEATURE_CONTROL_ENABLE_OUTSIDE_SMX | FEATURE_CONTROL_LOCKED,
+        ),
+        (MSR_BASIC, basic_msr(1, 4096, 6, false)),
+        (MSR_PRIMARY_PROC_BASED, 0),
+        (MSR_SECONDARY_PROC_BASED, secondary),
+        (MSR_EPT_VPID_CAP, ept_vpid),
+    ]);
+    let caps = HwCaps::from_snapshot(&snap, true);
+    assert!(caps.ept);
+    assert!(caps.ept_four_levels);
+    assert!(caps.vpid);
+    assert!(caps.ept_2mb);
+    assert!(caps.ept_wb);
+    assert!(caps.ept_ad);
+    assert!(!caps.ept_1gb);
+    assert!(caps.can_run());
+    assert_eq!(caps.validate(), Ok(()));
+}
+
+#[test]
+fn ept_without_four_levels_is_unusable() {
+    let secondary = ((control_bits::PROC2_ENABLE_EPT | control_bits::PROC2_ENABLE_VPID) as u64)
+        << 32;
+    let snap = snapshot(&[
+        (
+            MSR_FEATURE_CONTROL,
+            FEATURE_CONTROL_ENABLE_OUTSIDE_SMX | FEATURE_CONTROL_LOCKED,
+        ),
+        (MSR_BASIC, basic_msr(1, 4096, 6, false)),
+        (MSR_SECONDARY_PROC_BASED, secondary),
+        (MSR_EPT_VPID_CAP, 0),
+    ]);
+    let caps = HwCaps::from_snapshot(&snap, true);
+    assert!(caps.ept);
+    assert!(!caps.ept_four_levels);
+    assert_eq!(caps.validate(), Err(CapsError::EptUnavailable));
+}
+
+#[test]
+fn true_controls_take_precedence_when_present() {
+    // Le MSR de base interdit les contrôles, les MSR TRUE les autorisent.
+    let pin_true = (control_bits::PIN_PREEMPTION_TIMER as u64) << 32;
+    let snap = snapshot(&[
+        (
+            MSR_FEATURE_CONTROL,
+            FEATURE_CONTROL_ENABLE_OUTSIDE_SMX | FEATURE_CONTROL_LOCKED,
+        ),
+        (MSR_BASIC, basic_msr(1, 4096, 6, true)),
+        (MSR_PIN_BASED, 0),
+        (MSR_TRUE_PIN_BASED, pin_true),
+        (MSR_PRIMARY_PROC_BASED, 0),
+        (MSR_TRUE_PRIMARY_PROC_BASED, 0),
+        (MSR_EXIT_CONTROLS, 0),
+        (MSR_TRUE_EXIT_CONTROLS, 0),
+        (MSR_ENTRY_CONTROLS, 0),
+        (MSR_TRUE_ENTRY_CONTROLS, 0),
+    ]);
+    let caps = HwCaps::from_snapshot(&snap, true);
+    assert!(caps.has_true_controls);
+    assert!(caps.preemption_timer);
+}
+
+#[test]
+fn allowed_controls_apply_and_support() {
+    // Bits 0 et 1 obligatoires, bits 0..3 autorisés.
+    let allowed = AllowedControls::from_msr(0b11 | (0b1111u64 << 32));
+    assert_eq!(allowed.apply(0b1000), 0b1000 | 0b11);
+    assert_eq!(allowed.apply(0b0100), 0b0100 | 0b11);
+    assert!(allowed.supports(0b0100));
+    assert!(!allowed.supports(0b1_0000));
+    // Les bits obligatoires sont forcés même s'ils ne sont pas demandés.
+    assert_eq!(allowed.apply(0), 0b11);
+}
+
+#[test]
+fn fixed_cr_masks_are_exposed() {
+    let snap = snapshot(&[
+        (
+            MSR_FEATURE_CONTROL,
+            FEATURE_CONTROL_ENABLE_OUTSIDE_SMX | FEATURE_CONTROL_LOCKED,
+        ),
+        (MSR_BASIC, basic_msr(1, 4096, 6, false)),
+        (MSR_CR0_FIXED0, 0x8000_0021),
+        (MSR_CR0_FIXED1, 0xFFFF_FFFF),
+        (MSR_CR4_FIXED0, 0x2000),
+        (MSR_CR4_FIXED1, 0xFFFF_FFFF),
+        (MSR_MISC, 0),
+    ]);
+    let caps = HwCaps::from_snapshot(&snap, true);
+    assert_eq!(caps.cr0_fixed0, 0x8000_0021);
+    assert_eq!(caps.cr4_fixed0, 0x2000);
+}
+
+#[test]
+fn summary_mentions_key_capabilities() {
+    let snap = snapshot(&[
+        (
+            MSR_FEATURE_CONTROL,
+            FEATURE_CONTROL_ENABLE_OUTSIDE_SMX | FEATURE_CONTROL_LOCKED,
+        ),
+        (MSR_BASIC, basic_msr(7, 4096, 6, false)),
+    ]);
+    let summary = HwCaps::from_snapshot(&snap, true).summary();
+    assert!(summary.contains("rev=7"));
+    assert!(summary.contains("ept="));
+}

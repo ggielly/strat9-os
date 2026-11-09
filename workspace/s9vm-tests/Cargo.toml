@@ -1,0 +1,24 @@
+[package]
+name = "s9vm-tests"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+# Harnais de tests hôte dédié au moteur de virtualisation s9vm.
+#
+# Il compile **verbatim** les modules purs de `workspace/kernel/src/s9vm/`
+# (caps, control, mmu, exit) via `#[path]`, sans dépendance au miroir L2 du
+# noyau : ces modules ne dépendent que de `core`/`alloc` et d'aucun service
+# matériel. Cela permet de faire tourner les tests de non-régression s9vm
+# indépendamment de l'état du harnais L2 complet.
+#
+#   cargo test --manifest-path workspace/s9vm-tests/Cargo.toml
+#
+# Le crate n'est pas membre du workspace racine (comme `kernel-l2-tests`) ; il
+# possède son propre workspace pour ne pas être entraîné par la compilation du
+# noyau.
+
+[dependencies]
+
+[workspace]

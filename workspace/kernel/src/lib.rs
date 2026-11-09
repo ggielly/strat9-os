@@ -49,6 +49,10 @@ pub mod syscall;
 pub mod trace;
 pub mod vfs;
 
+/// Virtualisation bare-metal s9vm (mécanisme noyau).
+#[cfg(target_arch = "x86_64")]
+pub mod s9vm;
+
 // Re-export the kernel entry point from the boot module
 pub use boot::dtb_boot::kmain;
 
