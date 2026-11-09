@@ -48,6 +48,7 @@ use crate::{
     s9vm::{
         apic::LocalApic,
         caps::HwCaps,
+        emulate::{interrupt_action, InterruptAction},
         exit::{reason_name, ExitClass, ExitReason},
         guest::GuestState,
         machine::Machine,
@@ -75,6 +76,27 @@ const TEST_PORT: u16 = 0xE9;
 const PIC_DATA_PORT: u16 = 0x21;
 /// Interrupt mask read back by the guest after programming the PIC.
 const PIC_READBACK: u8 = 0xFF;
+
+// Interrupt-delivery phase.
+/// Guest pages for the interrupt test: the first six, plus the IDT page.
+const IRQ_GUEST_PAGES: u64 = 7;
+/// Guest-physical address of the IDT page (page 6).
+const GPA_IDT: u64 = 0x6000;
+/// Vector delivered by the kernel.
+const IRQ_VECTOR: u8 = 0x20;
+/// Byte written by the interrupt handler to the debug port.
+const IRQ_BYTE: u8 = 0x42;
+/// Offset of the handler inside the code page.
+const IRQ_HANDLER_OFFSET: u64 = 8;
+
+/// Guest code of the interrupt phase.
+///
+/// Entry: `sti` ; `nop` ; `hlt` ; padding. Handler (offset 8): writes the
+/// marker byte to the debug port, then halts.
+const IRQ_GUEST_CODE: [u8; 16] = [
+    0xFB, 0x90, 0xF4, 0x00, 0x00, 0x00, 0x00, 0x00, // sti ; nop ; hlt
+    0xB0, IRQ_BYTE, 0xE6, 0xE9, 0xF4, 0x00, 0x00, 0x00, // mov al,0x42; out 0xE9,al; hlt
+];
 
 /// Errors of the smoke test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -404,29 +426,254 @@ pub fn run(caps: &HwCaps) -> Result<SelftestReport, SelftestError> {
     }
 }
 
+/// Report of the interrupt-delivery phase.
+pub struct InterruptReport {
+    pub total_exits: u32,
+    pub window_exits: u32,
+    pub io_exits: u32,
+    pub halt_exits: u32,
+    pub injected: u32,
+    pub observed_byte: Option<u8>,
+}
+
+/// Interrupt-delivery test.
+///
+/// The guest installs an interrupt gate for [`IRQ_VECTOR`], enables
+/// interrupts, and expects the vector injected by the kernel. This exercises
+/// the interrupt window: the guest is not interruptible at entry (`IF = 0`),
+/// so the kernel arms interrupt-window exiting; the `sti` opens the window,
+/// the kernel injects the pending vector, and the handler runs.
+pub fn run_interrupt(caps: &HwCaps) -> Result<InterruptReport, SelftestError> {
+    if !caps.can_run() {
+        return Err(SelftestError::BadExit("platform cannot run"));
+    }
+
+    // Guest pages: tables, code, stack, IDT.
+    let pml4 = alloc_frame()?;
+    let pdpt = alloc_frame()?;
+    let pd = alloc_frame()?;
+    let code = alloc_frame()?;
+    let stack = alloc_frame()?;
+    let pt = alloc_frame()?;
+    let idt = alloc_frame()?;
+
+    // Identity guest paging over the seven pages.
+    write_u64(&pml4, 0, GPA_PDPT | 0x3);
+    write_u64(&pdpt, 0, GPA_PD | 0x3);
+    write_u64(&pd, 0, GPA_PT | 0x3);
+    for page in 0..IRQ_GUEST_PAGES {
+        let gpa = page * crate::s9vm::mmu::PAGE_SIZE;
+        write_u64(&pt, page as usize * 8, gpa | 0x3);
+    }
+
+    write_bytes(&code, &IRQ_GUEST_CODE);
+
+    // Interrupt gate: present, DPL 0, 64-bit interrupt gate (type 0xE).
+    let handler = GPA_CODE + IRQ_HANDLER_OFFSET;
+    let low = (handler & 0xFFFF)
+        | (0x8 << 16)          // code selector
+        | (0x8E << 40)         // type: present, DPL 0, 64-bit interrupt gate
+        | (((handler >> 16) & 0xFFFF) << 48);
+    let high = handler >> 32;
+    let entry_offset = usize::from(IRQ_VECTOR) * 16;
+    write_u64(&idt, entry_offset, low);
+    write_u64(&idt, entry_offset + 8, high);
+
+    // Second-level translation.
+    let mut second_level = SecondLevelMemory::new().map_err(|_| SelftestError::Mmu)?;
+    let pages = [
+        (GPA_PML4, &pml4),
+        (GPA_PDPT, &pdpt),
+        (GPA_PD, &pd),
+        (GPA_CODE, &code),
+        (GPA_STACK, &stack),
+        (GPA_PT, &pt),
+        (GPA_IDT, &idt),
+    ];
+    for (gpa, frame) in pages {
+        second_level
+            .map_4k(
+                gpa,
+                frame.start_address.as_u64(),
+                crate::s9vm::mmu::Perms::read_write_execute(),
+            )
+            .map_err(|_| SelftestError::Mmu)?;
+    }
+    let pointer = second_level.pointer(caps);
+
+    // The guest starts with interrupts disabled; the kernel will arm the
+    // interrupt window.
+    let mut guest = GuestState::long_mode_64(ENTRY_POINT, STACK_TOP, GPA_PML4);
+    guest.idtr_base = GPA_IDT;
+    guest.idtr_limit = u32::from(IRQ_VECTOR) * 16 + 15;
+
+    let mut vcpu = Vcpu::new(caps, pointer)?;
+    // SAFETY: VT-x is active on this CPU (checked above), interrupts are
+    // disabled, and the block was just created for this vCPU.
+    unsafe {
+        vcpu.load()?;
+        vcpu.configure_host()?;
+        vcpu.configure(caps, &guest)?;
+    }
+
+    let mut apic = LocalApic::new(0);
+    apic.inject(IRQ_VECTOR);
+
+    let mut report = InterruptReport {
+        total_exits: 0,
+        window_exits: 0,
+        io_exits: 0,
+        halt_exits: 0,
+        injected: 0,
+        observed_byte: None,
+    };
+    let mut window_armed = false;
+    let mut outcome: Result<(), SelftestError> = Ok(());
+
+    for _ in 0..32 {
+        // Same delivery policy as the execution loop.
+        let interruptible = vcpu.guest().rflags & (1 << 9) != 0;
+        let pending = apic.pending_vector();
+        match interrupt_action(pending.is_some(), interruptible, window_armed) {
+            InterruptAction::Inject => {
+                if let Some(vector) = pending {
+                    // SAFETY: the block is loaded and the guest is inactive.
+                    unsafe {
+                        vcpu.inject_interrupt(vector)?;
+                    }
+                    let _ = apic.service();
+                    report.injected += 1;
+                }
+                if window_armed {
+                    // SAFETY: same contract.
+                    unsafe {
+                        vcpu.set_interrupt_window_exiting(caps, false)?;
+                    }
+                    window_armed = false;
+                }
+            }
+            InterruptAction::ArmWindow => {
+                // SAFETY: same contract.
+                window_armed = unsafe { vcpu.set_interrupt_window_exiting(caps, true)? };
+                if !window_armed {
+                    outcome = Err(SelftestError::BadExit("interrupt window unavailable"));
+                    break;
+                }
+            }
+            InterruptAction::DisarmWindow => {
+                // SAFETY: same contract.
+                unsafe {
+                    vcpu.set_interrupt_window_exiting(caps, false)?;
+                }
+                window_armed = false;
+            }
+            InterruptAction::None => {}
+        }
+
+        // SAFETY: `run` contract (block loaded, IRQs disabled).
+        let exit = match unsafe { vcpu.run() } {
+            Ok(exit) => exit,
+            Err(error) => {
+                outcome = Err(SelftestError::from(error));
+                break;
+            }
+        };
+        report.total_exits += 1;
+        match ExitReason::decode(exit.raw_reason).class() {
+            ExitClass::IoPort => {
+                report.io_exits += 1;
+                let port = ((exit.qualification >> 16) & 0xFFFF) as u16;
+                if port == TEST_PORT {
+                    report.observed_byte = Some((vcpu.guest().rax & 0xFF) as u8);
+                }
+                // SAFETY: block loaded, guest inactive.
+                unsafe {
+                    vcpu.advance_rip(u64::from(exit.instruction_length))?;
+                }
+            }
+            ExitClass::Halt => {
+                report.halt_exits += 1;
+                break;
+            }
+            ExitClass::InterruptWindow => {
+                report.window_exits += 1;
+            }
+            ExitClass::ExternalInterrupt => {}
+            other => {
+                log::warn!(
+                    "[s9vm] interrupt test: unexpected exit class={:?} rip={:#x}",
+                    other,
+                    vcpu.guest().rip
+                );
+                outcome = Err(SelftestError::BadExit("unexpected interrupt-test exit"));
+                break;
+            }
+        }
+    }
+
+    // SAFETY: the vCPU is no longer active.
+    unsafe {
+        let _ = vcpu.clear();
+    }
+
+    match outcome {
+        Ok(())
+            if report.injected >= 1
+                && report.halt_exits >= 1
+                && report.observed_byte == Some(IRQ_BYTE) =>
+        {
+            Ok(report)
+        }
+        Ok(()) => Err(SelftestError::BadExit("interrupt was not delivered")),
+        Err(error) => Err(error),
+    }
+}
+
 /// Starts the test if the boot option `s9vm.selftest=1` is present.
 ///
 /// Does nothing if VT-x is not active. Never panics.
 pub fn maybe_run_from_boot_env(caps: &HwCaps) {
-    let enabled = crate::boot_args()
+    // Value: 1/true = device fast path, 2/all = both phases, irq = interrupt
+    // phase only.
+    let mode = crate::boot_args()
         .and_then(|args| args.env_get("s9vm.selftest"))
-        .map(|value| value == "1" || value == "true")
-        .unwrap_or(false);
-    if !enabled {
+        .unwrap_or("");
+    if mode.is_empty() || mode == "0" || mode == "false" {
         return;
     }
-    log::info!("[s9vm] hardware smoke test requested");
-    match run(caps) {
-        Ok(report) => log::info!(
-            "[s9vm] selftest PASS: variant={} exits={} io={} hlt={} emulated={} pic={:?} byte={:?}",
-            report.variant,
-            report.total_exits,
-            report.io_exits,
-            report.halt_exits,
-            report.emulated_exits,
-            report.pic_readback,
-            report.observed_byte
-        ),
-        Err(error) => log::warn!("[s9vm] selftest FAIL: {:?}", error),
+    let device_phase = matches!(mode, "1" | "true" | "2" | "all");
+    let interrupt_phase = matches!(mode, "2" | "all" | "irq");
+
+    if device_phase {
+        log::info!("[s9vm] hardware smoke test requested");
+        match run(caps) {
+            Ok(report) => log::info!(
+                "[s9vm] selftest PASS: variant={} exits={} io={} hlt={} emulated={} pic={:?} byte={:?}",
+                report.variant,
+                report.total_exits,
+                report.io_exits,
+                report.halt_exits,
+                report.emulated_exits,
+                report.pic_readback,
+                report.observed_byte
+            ),
+            Err(error) => log::warn!("[s9vm] selftest FAIL: {:?}", error),
+        }
+    }
+
+    if interrupt_phase {
+        log::info!("[s9vm] interrupt-delivery test requested");
+        match run_interrupt(caps) {
+            Ok(report) => log::info!(
+                "[s9vm] irqtest PASS: exits={} windows={} injected={} io={} hlt={} byte={:?}",
+                report.total_exits,
+                report.window_exits,
+                report.injected,
+                report.io_exits,
+                report.halt_exits,
+                report.observed_byte
+            ),
+            Err(error) => log::warn!("[s9vm] irqtest FAIL: {:?}", error),
+        }
     }
 }
