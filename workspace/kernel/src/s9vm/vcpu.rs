@@ -712,8 +712,15 @@ impl Vcpu {
             self.control.write_u32(field::EXIT_MSR_LOAD_COUNT, 0)?;
             self.control.write_u32(field::ENTRY_MSR_LOAD_COUNT, 0)?;
             self.control.write_u32(field::TPR_THRESHOLD, 0)?;
-            self.control.write_u32(field::PLE_GAP, 0)?;
-            self.control.write_u32(field::PLE_WINDOW, 0)?;
+            // PLE_GAP/PLE_WINDOW only exist when the PAUSE-loop-exiting
+            // capability is available. Writing them unconditionally makes
+            // the host hypervisor reject the field (VM-instruction error
+            // 0xc, "unsupported VMCS component"), which was observed on a
+            // CPU that exposes no PLE support. Leave them zeroed there.
+            if caps.pause_loop_exiting {
+                self.control.write_u32(field::PLE_GAP, 0x50)?;
+                self.control.write_u32(field::PLE_WINDOW, 60_000)?;
+            }
             self.control.write_u64(field::TSC_OFFSET, 0)?;
             self.control.write_u64(field::MSR_BITMAP, 0)?;
             self.control.write_u64(field::IO_BITMAP_A, 0)?;
