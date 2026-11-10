@@ -38,6 +38,11 @@
 //! - `loader`: an ELF64 image built in kernel memory, loaded into a world with
 //!   [`crate::s9vm::vm::load_image`] (mapping, file-backed copy, BSS zeroing),
 //!   then executed: the guest prints its marker on the debug port and halts;
+//! - `acpi`: the guest discovers the firmware tables written by
+//!   [`crate::s9vm::vm::write_acpi`] (RSDP scan, checksum, XSDT walk, MADT
+//!   Local APIC count). This phase needs a registered vCPU, so it is deferred
+//!   to a kernel thread created at the `kthread` stage (see
+//!   [`s9vm_acpi_selftest`]) instead of running in the early bootstrap;
 //! - `2`/`all`: every phase.
 //!
 //! The guest state is the canonical 64-bit flat shape produced by
@@ -46,22 +51,20 @@
 //! the target machine without rebuilding.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
     memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame},
     s9vm::{
         apic::LocalApic,
         caps::HwCaps,
-        emulate::{interrupt_action, InterruptAction},
-        exit::{reason_name, ExitClass, ExitReason},
+        emulate::{InterruptAction, interrupt_action},
+        exit::{ExitClass, ExitReason, reason_name},
         guest::GuestState,
-        guestcode::{LOADER_CODE, LOADER_MARKER},
+        guestcode::{ACPI_CODE, ACPI_FAIL_MARKER, ACPI_MARKER, LOADER_CODE, LOADER_MARKER},
         machine::Machine,
-        virtio,
-        virtio_blk,
-        virtio_net,
         vcpu::{SecondLevelMemory, Vcpu, VcpuError},
-        vm,
+        virtio, virtio_blk, virtio_net, vm,
     },
 };
 
@@ -287,6 +290,42 @@ const LOADER_CODE_OFFSET: u64 = 0x100;
 const ELF_HEADER_SIZE: usize = 64;
 /// Size of one ELF64 program header.
 const ELF_PROGRAM_HEADER_SIZE: usize = 56;
+
+// ACPI-discovery phase.
+//
+// The guest scans the legacy BIOS window `ACPI_SCAN_START..ACPI_SCAN_END` for
+// the RSDP, validates it, walks the XSDT and the MADT. Every page the payload
+// touches is identity-mapped by one page table covering the first 2 MiB, so
+// the scan window, the code and the stack share the same flat mapping.
+/// Guest-physical address of the page-table root.
+const ACPI_GPA_PML4: u64 = 0x0000;
+/// Guest-physical address of the page-directory pointer table.
+const ACPI_GPA_PDPT: u64 = 0x1000;
+/// Guest-physical address of the page directory.
+const ACPI_GPA_PD: u64 = 0x2000;
+/// Guest-physical address of the page table (identity maps 0..2 MiB).
+const ACPI_GPA_PT: u64 = 0x3000;
+/// Guest-physical page holding the discovery payload.
+const ACPI_GPA_CODE: u64 = 0x1_0000;
+/// Guest-physical page used as the guest stack.
+const ACPI_GPA_STACK: u64 = 0x1_1000;
+/// Initial guest stack pointer (inside the stack page).
+const ACPI_STACK_TOP: u64 = ACPI_GPA_STACK + 0x800;
+/// First guest-physical address of the scan window (legacy EBDA/BIOS area).
+const ACPI_SCAN_START: u64 = vm::ACPI_GPA;
+/// End (exclusive) of the scan window covered by the ACPI specification.
+const ACPI_SCAN_END: u64 = 0x10_0000;
+/// Number of 4 KiB guest pages in the scan window.
+const ACPI_SCAN_PAGES: u64 = (ACPI_SCAN_END - ACPI_SCAN_START) / crate::s9vm::mmu::PAGE_SIZE;
+/// Guest memory permissions of the page tables, the code and the stack.
+const ACPI_GUEST_PERMS: u32 = 7;
+/// Read-only guest permissions of the scan window (the guest only reads it).
+const ACPI_SCAN_PERMS: u32 = 1;
+/// Maximum number of exits driven for the ACPI phase (safety bound).
+const ACPI_MAX_EXITS: u32 = 64;
+
+/// Deferred request flag for the ACPI phase (see [`s9vm_acpi_selftest`]).
+static ACPI_SELFTEST_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Flat 64-bit code descriptor (selector `0x08`).
 ///
@@ -611,16 +650,39 @@ pub fn run(caps: &HwCaps) -> Result<SelftestReport, SelftestError> {
     write_bytes(
         &code,
         &[
-            0xB0, 0x11, 0xE6, 0x20, // mov al, 0x11 ; out 0x20, al (ICW1)
-            0xB0, 0x20, 0xE6, 0x21, // mov al, 0x20 ; out 0x21, al (ICW2)
-            0xB0, 0x04, 0xE6, 0x21, // mov al, 0x04 ; out 0x21, al (ICW3)
-            0xB0, 0x01, 0xE6, 0x21, // mov al, 0x01 ; out 0x21, al (ICW4)
-            0xB0, 0x00, 0xE6, 0x21, // mov al, 0x00 ; out 0x21, al (unmask)
-            0xE4, 0x21, // in al, 0x21 (mask = 0x00)
-            0xB0, PIC_READBACK, 0xE6, 0x21, // mov al, 0xFF ; out 0x21, al
-            0xE4, 0x21, // in al, 0x21 (mask = 0xFF)
-            0xB0, TEST_BYTE, 0xE6, TEST_PORT as u8, // mov al, byte ; out 0xE9, al
-            0xF4, // hlt
+            0xB0,
+            0x11,
+            0xE6,
+            0x20, // mov al, 0x11 ; out 0x20, al (ICW1)
+            0xB0,
+            0x20,
+            0xE6,
+            0x21, // mov al, 0x20 ; out 0x21, al (ICW2)
+            0xB0,
+            0x04,
+            0xE6,
+            0x21, // mov al, 0x04 ; out 0x21, al (ICW3)
+            0xB0,
+            0x01,
+            0xE6,
+            0x21, // mov al, 0x01 ; out 0x21, al (ICW4)
+            0xB0,
+            0x00,
+            0xE6,
+            0x21, // mov al, 0x00 ; out 0x21, al (unmask)
+            0xE4,
+            0x21, // in al, 0x21 (mask = 0x00)
+            0xB0,
+            PIC_READBACK,
+            0xE6,
+            0x21, // mov al, 0xFF ; out 0x21, al
+            0xE4,
+            0x21, // in al, 0x21 (mask = 0xFF)
+            0xB0,
+            TEST_BYTE,
+            0xE6,
+            TEST_PORT as u8, // mov al, byte ; out 0xE9, al
+            0xF4,            // hlt
         ],
     );
 
@@ -1609,6 +1671,23 @@ fn read_world_byte(world_id: u64, gpa: u64) -> Result<u8, SelftestError> {
     Ok(unsafe { core::ptr::read_volatile(page) })
 }
 
+/// Writes `bytes` at the start of the guest page at `gpa` in a world.
+fn write_world_bytes(world_id: u64, gpa: u64, bytes: &[u8]) -> Result<(), SelftestError> {
+    let page_size = crate::s9vm::mmu::PAGE_SIZE as usize;
+    if bytes.len() > page_size {
+        return Err(SelftestError::BadExit("payload crosses a page boundary"));
+    }
+    let page = world_page(world_id, gpa)?;
+    // SAFETY: the page belongs to a world reserved for this test, is mapped by
+    // the HHDM, and the length check above keeps the write inside the page.
+    unsafe {
+        for (index, byte) in bytes.iter().enumerate() {
+            core::ptr::write_volatile(page.add(index), *byte);
+        }
+    }
+    Ok(())
+}
+
 /// Image-loader test.
 ///
 /// Builds a small ELF64 image in kernel memory and loads it into a fresh world
@@ -1687,8 +1766,7 @@ fn run_loader_in_world(caps: &HwCaps, world_id: u64) -> Result<LoaderReport, Sel
 
     // 4. Uses the world's own second-level translation tables: the run must
     //    exercise the EPT built by `map_memory` and the loader, not a copy.
-    let pointer =
-        vm::second_level_pointer(world_id, caps).map_err(|_| SelftestError::VmFail(4))?;
+    let pointer = vm::second_level_pointer(world_id, caps).map_err(|_| SelftestError::VmFail(4))?;
 
     // 5. Enters the loaded image: RIP is the relocated entry point returned by
     //    the loader, RSP points into the guest stack page.
@@ -1776,12 +1854,296 @@ fn run_loader_in_world(caps: &HwCaps, world_id: u64) -> Result<LoaderReport, Sel
     }
 }
 
+/// Report of the ACPI-discovery phase.
+pub struct AcpiReport {
+    pub total_exits: u32,
+    pub io_exits: u32,
+    pub halt_exits: u32,
+    /// First byte written by the guest on the debug port (`b'A'` on success).
+    pub marker: Option<u8>,
+    /// Local APIC entries counted by the guest in the MADT.
+    pub madt_apics: u8,
+    /// Local APIC entries the kernel expects (one per registered vCPU).
+    pub expected_apics: u8,
+    /// Guest-physical address of the RSDP the guest validated.
+    pub rsdp: u64,
+}
+
+/// ACPI-discovery test.
+///
+/// Creates a fresh world with one registered vCPU (the MADT describes it),
+/// maps a flat identity window covering the page tables, the payload, the
+/// stack and the legacy BIOS scan window, asks the engine to write the
+/// firmware tables with [`vm::write_acpi`], then runs the guest payload
+/// [`ACPI_CODE`] with the world's own second-level tables.
+///
+/// The world (and its vCPU task) is destroyed on every path.
+pub fn run_acpi(caps: &HwCaps) -> Result<AcpiReport, SelftestError> {
+    if !caps.can_run() {
+        return Err(SelftestError::BadExit("platform cannot run"));
+    }
+    // The world is destroyed on every path, including failures.
+    let record = vm::create(b"s9vm-acpi", 0).ok_or(SelftestError::VmFail(1))?;
+    let result = run_acpi_in_world(caps, record.id);
+    let _ = vm::destroy(record.id);
+    result
+}
+
+/// Body of the ACPI phase; the caller owns and destroys the world.
+fn run_acpi_in_world(caps: &HwCaps, world_id: u64) -> Result<AcpiReport, SelftestError> {
+    let page_size = crate::s9vm::mmu::PAGE_SIZE;
+
+    // 1. A registered vCPU is required: `write_acpi` builds the MADT from the
+    //    world's vCPU APIC identifiers. This phase therefore runs from a
+    //    kernel thread (see `s9vm_acpi_selftest`), never from the early
+    //    bootstrap where the scheduler is not available yet.
+    let _vcpu_id = vm::create_vcpu(world_id, 0).map_err(|_| SelftestError::VmFail(2))?;
+    let expected_apics = vm::get(world_id)
+        .map(|record| record.vcpu_count as u8)
+        .unwrap_or(0);
+    if expected_apics == 0 {
+        return Err(SelftestError::BadExit("ACPI phase has no vCPU"));
+    }
+
+    // 2. Guest memory: page tables, payload, stack, then the whole scan
+    //    window. The scan window is read-only for the guest; the copy done by
+    //    `write_acpi` goes through the HHDM and does not need EPT write
+    //    permission.
+    for gpa in [
+        ACPI_GPA_PML4,
+        ACPI_GPA_PDPT,
+        ACPI_GPA_PD,
+        ACPI_GPA_PT,
+        ACPI_GPA_CODE,
+        ACPI_GPA_STACK,
+    ] {
+        vm::map_memory(world_id, caps, gpa, page_size, ACPI_GUEST_PERMS, 0)
+            .map_err(|_| SelftestError::VmFail(3))?;
+    }
+    vm::map_memory(
+        world_id,
+        caps,
+        ACPI_SCAN_START,
+        ACPI_SCAN_PAGES * page_size,
+        ACPI_SCAN_PERMS,
+        0,
+    )
+    .map_err(|_| SelftestError::VmFail(4))?;
+
+    // 3. Identity guest paging: one page table maps the first 2 MiB, which
+    //    covers the tables, the payload, the stack and the scan window.
+    write_world_u64(world_id, ACPI_GPA_PML4, 0, ACPI_GPA_PDPT | 0x3)?;
+    write_world_u64(world_id, ACPI_GPA_PDPT, 0, ACPI_GPA_PD | 0x3)?;
+    write_world_u64(world_id, ACPI_GPA_PD, 0, ACPI_GPA_PT | 0x3)?;
+    for gpa in [
+        ACPI_GPA_PML4,
+        ACPI_GPA_PDPT,
+        ACPI_GPA_PD,
+        ACPI_GPA_PT,
+        ACPI_GPA_CODE,
+        ACPI_GPA_STACK,
+    ] {
+        let index = (gpa / page_size) as usize;
+        write_world_u64(world_id, ACPI_GPA_PT, index * 8, gpa | 0x3)?;
+    }
+    for page in 0..ACPI_SCAN_PAGES {
+        let gpa = ACPI_SCAN_START + page * page_size;
+        let index = (gpa / page_size) as usize;
+        write_world_u64(world_id, ACPI_GPA_PT, index * 8, gpa | 0x3)?;
+    }
+
+    // 4. Payload and firmware tables.
+    write_world_bytes(world_id, ACPI_GPA_CODE, ACPI_CODE)?;
+    vm::write_acpi(world_id, caps, vm::ACPI_GPA).map_err(|_| SelftestError::VmFail(5))?;
+    // The copy is observable through the world translation: first byte of the
+    // RSDP signature.
+    if read_world_byte(world_id, vm::ACPI_GPA)? != b'R' {
+        return Err(SelftestError::BadExit("ACPI image was not copied"));
+    }
+
+    // 5. Uses the world's own second-level translation tables.
+    let pointer = vm::second_level_pointer(world_id, caps).map_err(|_| SelftestError::VmFail(6))?;
+
+    // 6. Enters the payload; the stack lives in its own identity-mapped page.
+    let guest = GuestState::long_mode_64(ACPI_GPA_CODE, ACPI_STACK_TOP, ACPI_GPA_PML4);
+    let mut vcpu = Vcpu::new(caps, pointer)?;
+    // SAFETY: VT-x is active on this CPU (checked by the caller), the control
+    // block was just created for this vCPU and no other CPU runs it.
+    unsafe {
+        vcpu.load()?;
+        vcpu.configure_host()?;
+        vcpu.configure(caps, &guest)?;
+    }
+
+    let mut report = AcpiReport {
+        total_exits: 0,
+        io_exits: 0,
+        halt_exits: 0,
+        marker: None,
+        madt_apics: 0,
+        expected_apics,
+        rsdp: vm::ACPI_GPA,
+    };
+    // The guest is entered from a kernel thread here; mask host interrupts for
+    // the duration of the direct run loop, as the bootstrap phases do.
+    let saved_flags = crate::arch::save_flags_and_cli();
+    let mut debug_out = [0u8; 4];
+    let mut debug_len = 0usize;
+    let mut outcome: Result<(), SelftestError> = Ok(());
+    for _ in 0..ACPI_MAX_EXITS {
+        // SAFETY: `run` contract (control block loaded, IRQs disabled).
+        let exit = match unsafe { vcpu.run() } {
+            Ok(exit) => exit,
+            Err(error) => {
+                outcome = Err(SelftestError::from(error));
+                break;
+            }
+        };
+        report.total_exits += 1;
+        match ExitReason::decode(exit.raw_reason).class() {
+            ExitClass::IoPort => {
+                report.io_exits += 1;
+                let port = ((exit.qualification >> 16) & 0xFFFF) as u16;
+                if port == TEST_PORT && debug_len < debug_out.len() {
+                    debug_out[debug_len] = (vcpu.guest().rax & 0xFF) as u8;
+                    debug_len += 1;
+                }
+                // SAFETY: the control block is loaded and the guest is
+                // inactive (we are in the exit handler).
+                if let Err(error) = unsafe { vcpu.advance_rip(u64::from(exit.instruction_length)) }
+                {
+                    outcome = Err(SelftestError::from(error));
+                    break;
+                }
+            }
+            ExitClass::Halt => {
+                report.halt_exits += 1;
+                break;
+            }
+            ExitClass::ExternalInterrupt | ExitClass::InterruptWindow => {}
+            ExitClass::PreemptionTimer => {}
+            other => {
+                log::warn!(
+                    "[s9vm] acpi test: unexpected exit class={:?} reason={:#x} \
+                     qual={:#x} rip={:#x} marker={:?} io={} total={}",
+                    other,
+                    exit.raw_reason,
+                    exit.qualification,
+                    vcpu.guest().rip,
+                    report.marker,
+                    report.io_exits,
+                    report.total_exits
+                );
+                outcome = Err(SelftestError::BadExit("unexpected ACPI-test exit"));
+                break;
+            }
+        }
+    }
+    crate::arch::restore_flags(saved_flags);
+
+    // SAFETY: the vCPU is no longer active.
+    unsafe {
+        let _ = vcpu.clear();
+    }
+
+    report.marker = if debug_len > 0 {
+        Some(debug_out[0])
+    } else {
+        None
+    };
+    report.madt_apics = if debug_len > 1 { debug_out[1] } else { 0 };
+
+    if let Err(error) = outcome {
+        return Err(error);
+    }
+    if report.halt_exits == 0 {
+        log::warn!(
+            "[s9vm] acpi test: guest never halted (marker={:?} io={} total={})",
+            report.marker,
+            report.io_exits,
+            report.total_exits
+        );
+        return Err(SelftestError::BadExit("ACPI guest did not halt"));
+    }
+    if report.marker != Some(ACPI_MARKER) {
+        log::warn!(
+            "[s9vm] acpi test: guest rejected the tables (marker={:?} expected={} io={} total={})",
+            report.marker,
+            ACPI_MARKER,
+            report.io_exits,
+            report.total_exits
+        );
+        return Err(SelftestError::BadExit("ACPI guest rejected the tables"));
+    }
+    if report.madt_apics != expected_apics {
+        log::warn!(
+            "[s9vm] acpi test: MADT Local APIC count={} expected={} \
+             marker={:?} io={} total={}",
+            report.madt_apics,
+            expected_apics,
+            report.marker,
+            report.io_exits,
+            report.total_exits
+        );
+        return Err(SelftestError::BadExit("unexpected MADT Local APIC count"));
+    }
+    Ok(report)
+}
+
+/// Kthread-stage hook: runs the deferred ACPI phase.
+///
+/// The phase needs a registered vCPU, which needs the scheduler (`create_vcpu`
+/// spawns a kernel task). It is therefore requested by
+/// [`maybe_run_from_boot_env`] during the early bootstrap and executed here,
+/// once the scheduler exists, in its own kernel thread.
+#[cfg(target_arch = "x86_64")]
+#[component::init_component(kthread, priority = 50)]
+fn s9vm_acpi_selftest() -> Result<(), component::ComponentInitError> {
+    if !ACPI_SELFTEST_REQUESTED.swap(false, Ordering::AcqRel) {
+        return Ok(());
+    }
+    match crate::process::kthread::spawn("s9vm-acpi-selftest", run_acpi_task) {
+        Ok(_) => {}
+        Err(error) => log::warn!(
+            "[s9vm] acpitest FAIL: cannot spawn the guest task ({})",
+            error
+        ),
+    }
+    Ok(())
+}
+
+/// Body of the deferred ACPI selftest task.
+fn run_acpi_task() {
+    let Some(caps) = crate::s9vm::detect() else {
+        log::warn!("[s9vm] acpitest FAIL: platform capabilities unavailable");
+        return;
+    };
+    match run_acpi(&caps) {
+        Ok(report) => log::info!(
+            "[s9vm] acpitest PASS: total={} io={} hlt={} marker={:?} rsdp={:#x} \
+             madt_apics={} expected={}",
+            report.total_exits,
+            report.io_exits,
+            report.halt_exits,
+            report.marker,
+            report.rsdp,
+            report.madt_apics,
+            report.expected_apics
+        ),
+        Err(error) => log::warn!("[s9vm] acpitest FAIL: {:?}", error),
+    }
+}
+
 /// Starts the test if the boot option `s9vm.selftest=1` is present.
 ///
 /// Does nothing if VT-x is not active. Never panics.
+///
+/// The ACPI phase needs the scheduler (it registers a vCPU), so when requested
+/// it is deferred to the `kthread` stage through [`s9vm_acpi_selftest`]; the
+/// other phases run here, during the early bootstrap.
 pub fn maybe_run_from_boot_env(caps: &HwCaps) {
     // Value: 1/true = device fast path; 2/all = every phase; irq, console,
-    // blk, net, loader = one phase only.
+    // blk, net, loader, acpi = one phase only.
     let mode = crate::boot_args()
         .and_then(|args| args.env_get("s9vm.selftest"))
         .unwrap_or("");
@@ -1794,6 +2156,14 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
     let block_phase = matches!(mode, "2" | "all" | "blk");
     let network_phase = matches!(mode, "2" | "all" | "net");
     let loader_phase = matches!(mode, "2" | "all" | "loader");
+    let acpi_phase = matches!(mode, "2" | "all" | "acpi");
+
+    if acpi_phase {
+        // The ACPI phase registers a vCPU, which needs the scheduler: defer it
+        // to the kthread stage instead of deadlocking the bootstrap.
+        ACPI_SELFTEST_REQUESTED.store(true, Ordering::Release);
+        log::info!("[s9vm] ACPI-discovery test requested (deferred to kthread stage)");
+    }
 
     if device_phase {
         log::info!("[s9vm] hardware smoke test requested");

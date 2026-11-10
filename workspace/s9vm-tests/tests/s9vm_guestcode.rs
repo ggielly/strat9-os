@@ -13,7 +13,10 @@ mod decode;
 mod guestcode;
 
 use decode::{Decoded, RegisterAccess};
-use guestcode::{DEBUG_PORT, HLT, LOADER_CODE, LOADER_MARKER};
+use guestcode::{
+    ACPI_CODE, ACPI_FAIL_MARKER, ACPI_FAIL_TAIL, ACPI_MARKER, ACPI_SUCCESS_TAIL, DEBUG_PORT, HLT,
+    LOADER_CODE, LOADER_MARKER,
+};
 
 fn decode_at(bytes: &[u8], rip: u64) -> Decoded {
     decode::decode(bytes, rip, |_index| 0).expect("payload instruction must decode")
@@ -63,4 +66,140 @@ fn loader_payload_is_position_independent() {
     assert_eq!(first.instruction_length(base), 2);
     let second = decode_at(&LOADER_CODE[2..], base + 2);
     assert_eq!(second.instruction_length(base + 2), 2);
+}
+
+// ---------------------------------------------------------------------------
+// ACPI-discovery payload
+// ---------------------------------------------------------------------------
+
+#[test]
+fn acpi_payload_starts_with_the_scan_base() {
+    // `mov ebx, 0x000E0000`: first address of the legacy BIOS scan window.
+    let rip = 0x10_0000;
+    let decoded = decode_at(ACPI_CODE, rip);
+    match decoded {
+        Decoded::Register(RegisterAccess {
+            register,
+            size,
+            value,
+            ..
+        }) => {
+            assert_eq!(register, 3, "destination must be EBX");
+            assert_eq!(size, 4);
+            assert_eq!(value, 0x000E_0000);
+            assert_eq!(decoded.instruction_length(rip), 5);
+        }
+        other => panic!("expected the scan base load, got {other:?}"),
+    }
+}
+
+#[test]
+fn acpi_payload_fits_in_one_guest_page() {
+    assert!(!ACPI_CODE.is_empty());
+    assert!(ACPI_CODE.len() < 4096);
+    assert!(ACPI_SUCCESS_TAIL < ACPI_CODE.len());
+    assert!(ACPI_FAIL_TAIL < ACPI_CODE.len());
+    assert!(ACPI_SUCCESS_TAIL < ACPI_FAIL_TAIL);
+    assert_eq!(*ACPI_CODE.last().expect("payload is not empty"), HLT);
+}
+
+#[test]
+fn acpi_success_tail_publishes_the_marker() {
+    let rip = 0x10_0000 + ACPI_SUCCESS_TAIL as u64;
+    let bytes = &ACPI_CODE[ACPI_SUCCESS_TAIL..];
+    let decoded = decode_at(bytes, rip);
+    match decoded {
+        Decoded::Register(RegisterAccess {
+            register,
+            size,
+            value,
+            ..
+        }) => {
+            assert_eq!(register, 0, "marker is written to AL");
+            assert_eq!(size, 1);
+            assert_eq!(value, ACPI_MARKER as u64);
+            assert_eq!(decoded.instruction_length(rip), 2);
+        }
+        other => panic!("expected `mov al, marker`, got {other:?}"),
+    }
+    assert_eq!(bytes[0], 0xB0);
+    assert_eq!(bytes[1], ACPI_MARKER);
+}
+
+#[test]
+fn acpi_success_tail_outputs_marker_and_count() {
+    let bytes = &ACPI_CODE[ACPI_SUCCESS_TAIL..];
+    let mut offset = 0usize;
+    let rip = 0x10_0000 + ACPI_SUCCESS_TAIL as u64;
+
+    // 1. `mov al, 'A'`
+    let first = decode_at(bytes, rip);
+    assert_eq!(first.instruction_length(rip), 2);
+    offset += 2;
+
+    // 2. `out 0xE9, al` (marker)
+    let marker_out = decode_at(&bytes[offset..], rip + offset as u64);
+    match marker_out {
+        Decoded::Port(access) => {
+            assert_eq!(access.port, DEBUG_PORT);
+            assert!(access.write);
+            assert_eq!(access.size, 1);
+            assert_eq!(marker_out.instruction_length(rip + offset as u64), 2);
+        }
+        other => panic!("expected the marker `out`, got {other:?}"),
+    }
+    offset += 2;
+
+    // 3. `mov al, dl` (the Local APIC count). The kernel decoder only accepts
+    //    the memory forms of `mov`, so the register form is checked as raw
+    //    bytes: `88 D0` = `mov al, dl`.
+    assert_eq!(bytes[offset], 0x88);
+    assert_eq!(bytes[offset + 1], 0xD0);
+    offset += 2;
+
+    // 4. `out 0xE9, al` (count)
+    let count_out = decode_at(&bytes[offset..], rip + offset as u64);
+    match count_out {
+        Decoded::Port(access) => {
+            assert_eq!(access.port, DEBUG_PORT);
+            assert!(access.write);
+            assert_eq!(access.size, 1);
+            assert_eq!(count_out.instruction_length(rip + offset as u64), 2);
+        }
+        other => panic!("expected the count `out`, got {other:?}"),
+    }
+    offset += 2;
+
+    // 5. `hlt`
+    assert_eq!(bytes[offset], HLT);
+    assert_eq!(offset + 1, ACPI_FAIL_TAIL - ACPI_SUCCESS_TAIL);
+}
+
+#[test]
+fn acpi_failure_tail_publishes_the_failure_marker() {
+    let bytes = &ACPI_CODE[ACPI_FAIL_TAIL..];
+    let rip = 0x10_0000 + ACPI_FAIL_TAIL as u64;
+    let decoded = decode_at(bytes, rip);
+    match decoded {
+        Decoded::Register(RegisterAccess {
+            register, value, ..
+        }) => {
+            assert_eq!(register, 0);
+            assert_eq!(value, ACPI_FAIL_MARKER as u64);
+            assert_eq!(decoded.instruction_length(rip), 2);
+        }
+        other => panic!("expected `mov al, 'F'`, got {other:?}"),
+    }
+    assert_eq!(bytes[1], ACPI_FAIL_MARKER);
+
+    let out = decode_at(&bytes[2..], rip + 2);
+    match out {
+        Decoded::Port(access) => {
+            assert_eq!(access.port, DEBUG_PORT);
+            assert!(access.write);
+        }
+        other => panic!("expected the failure `out`, got {other:?}"),
+    }
+    assert_eq!(bytes[4], HLT);
+    assert_eq!(bytes.len(), 5);
 }
