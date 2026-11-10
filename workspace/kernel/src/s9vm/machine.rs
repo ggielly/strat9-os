@@ -148,6 +148,25 @@ impl Machine {
         self.devices.net.push_frame(frame);
     }
 
+    /// Services the device receive queues against the current guest memory.
+    ///
+    /// Called before a guest entry: input and frames queued by the user side
+    /// are moved into the driver's available buffers.
+    ///
+    /// # Safety
+    /// The control block must be loaded and the guest must not be running.
+    pub unsafe fn service_devices(&mut self, vcpu: &mut Vcpu) {
+        let Self { devices, memory } = self;
+        let mut view = MemoryView::new(
+            memory,
+            vcpu.second_level_pointer(),
+            vcpu.guest().cr3,
+            vcpu.paging_enabled(),
+        );
+        devices.console.service_rx(&mut view);
+        devices.net.service_rx(&mut view);
+    }
+
     /// Tries to consume an exit by replaying the faulting instruction against
     /// the device model.
     ///

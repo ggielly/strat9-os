@@ -1718,3 +1718,11 @@ pub const SYS_VMM_DEBUG_DUMP: usize = 579;
 /// EPT violations). Returns 0.
 pub const SYS_VMM_EXIT_COMPLETE: usize = 580;
 
+// Console I/O of a world (bytes copied to/from the caller's buffer).
+/// Queues bytes for the guest console (`arg1` = world handle, `arg2` = buffer,
+/// `arg3` = length). Returns the number of bytes queued.
+pub const SYS_VMM_CONSOLE_INPUT: usize = 581;
+/// Drains console output bytes (`arg1` = world handle, `arg2` = buffer,
+/// `arg3` = capacity). Returns the number of bytes copied.
+pub const SYS_VMM_CONSOLE_OUTPUT: usize = 582;
+

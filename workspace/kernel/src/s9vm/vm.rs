@@ -69,6 +69,14 @@ pub const MAX_VCPUS_PER_WORLD: usize = 32;
 pub const DEFAULT_QUOTA_PAGES: u64 = 262_144;
 /// `RFLAGS.IF`: the guest is interruptible.
 const RFLAGS_IF: u64 = 1 << 9;
+/// Maximum bytes queued for the guest console at once.
+pub const MAX_CONSOLE_PENDING: usize = 64 * 1024;
+/// Maximum bytes of console output kept for the user side.
+pub const MAX_CONSOLE_OUTPUT: usize = 64 * 1024;
+/// Maximum frames queued for the guest network device.
+pub const MAX_PENDING_FRAMES: usize = 64;
+/// Maximum size of one injected network frame.
+pub const MAX_FRAME_SIZE: usize = 64 * 1024;
 
 /// Public record of a world.
 #[derive(Debug, Clone, Copy)]
@@ -315,6 +323,13 @@ struct World {
     machine: Machine,
     /// Cumulative execution counters (diagnostics).
     stats: WorldStats,
+    /// Console input queued by the user side, delivered at the next `RUN`.
+    pending_console_input: Vec<u8>,
+    /// Console output produced by the guest, drained by the user side.
+    console_output: Vec<u8>,
+    /// Frames queued for the guest network device, delivered at the next
+    /// `RUN`.
+    pending_frames: Vec<Vec<u8>>,
 }
 
 /// Logical vCPU: opaque identifier, APIC id and ABI register block.
@@ -391,6 +406,9 @@ pub fn create(name: &[u8], silo_id: u32) -> Option<WorldRecord> {
             paused: false,
             machine: Machine::new(),
             stats: WorldStats::default(),
+            pending_console_input: Vec::new(),
+            console_output: Vec::new(),
+            pending_frames: Vec::new(),
         },
     );
     Some(record)
@@ -792,6 +810,9 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
         mut machine,
         mut apic,
         mut stats,
+        mut pending_console_input,
+        mut pending_frames,
+        mut console_output,
     ) = {
         let mut worlds = WORLDS.lock();
         let world = vcpu_world_mut(&mut worlds, vcpu_id).ok_or(RunError::UnknownVcpu)?;
@@ -811,6 +832,9 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
         let machine = core::mem::replace(&mut world.machine, Machine::new());
         let apic = core::mem::replace(&mut slot.apic, LocalApic::new(apic_id));
         let stats = core::mem::replace(&mut world.stats, WorldStats::default());
+        let pending_console_input = core::mem::take(&mut world.pending_console_input);
+        let pending_frames = core::mem::take(&mut world.pending_frames);
+        let console_output = core::mem::take(&mut world.console_output);
         (
             world.record.id,
             hardware,
@@ -820,6 +844,9 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
             machine,
             apic,
             stats,
+            pending_console_input,
+            pending_frames,
+            console_output,
         )
     };
     let mut hardware = match hardware {
@@ -860,6 +887,24 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
             }
         }
         if result.is_ok() {
+            // Queued console input and network frames entered the world
+            // while the vCPU was not running (they cannot be touched during
+            // execution): hand them to the device model now, then service the
+            // receive queues against the guest memory.
+            if !pending_console_input.is_empty() {
+                machine
+                    .devices_mut()
+                    .console
+                    .push_input(&pending_console_input);
+                pending_console_input.clear();
+            }
+            if !pending_frames.is_empty() {
+                for frame in &pending_frames {
+                    machine.push_network_frame(frame);
+                }
+                pending_frames.clear();
+            }
+            machine.service_devices(&mut hardware);
             let mut resumed = 0u32;
             // True while interrupt-window exiting is armed in the control
             // block: the guest has a pending vector but interrupts disabled.
@@ -966,6 +1011,7 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                                             core::str::from_utf8(&output)
                                                 .unwrap_or("<binary data>")
                                         );
+                                        push_console_output(&mut console_output, &output);
                                     }
                                     continue;
                                 }
@@ -1005,6 +1051,9 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
     if let Some(world) = worlds.get_mut(&world_id) {
         world.machine = machine;
         world.stats = stats;
+        world.console_output = console_output;
+        world.pending_console_input = pending_console_input;
+        world.pending_frames = pending_frames;
         if let Some(slot) = world.vcpus.iter_mut().find(|slot| slot.id == vcpu_id) {
             slot.regs = regs;
             slot.hardware = Some(hardware);
@@ -1014,14 +1063,53 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
     result
 }
 
+/// Appends bytes to the bounded console-output queue of a world.
+fn push_console_output(queue: &mut Vec<u8>, bytes: &[u8]) {
+    queue.extend_from_slice(bytes);
+    if queue.len() > MAX_CONSOLE_OUTPUT {
+        let excess = queue.len() - MAX_CONSOLE_OUTPUT;
+        queue.drain(..excess);
+    }
+}
+
+/// Queues console input for a world.
+///
+/// The bytes are delivered to the guest's receive queue at the next `RUN`;
+/// this is the entry point of a console scheme.
+pub fn push_console_input(world_id: u64, bytes: &[u8]) -> Result<usize, ()> {
+    let mut worlds = WORLDS.lock();
+    let world = worlds.get_mut(&world_id).ok_or(())?;
+    let room = MAX_CONSOLE_PENDING.saturating_sub(world.pending_console_input.len());
+    let count = core::cmp::min(room, bytes.len());
+    world
+        .pending_console_input
+        .extend_from_slice(&bytes[..count]);
+    Ok(count)
+}
+
+/// Drains console output of a world into `out`.
+///
+/// Returns the number of bytes copied (0 when nothing is pending).
+pub fn read_console_output(world_id: u64, out: &mut [u8]) -> Result<usize, ()> {
+    let mut worlds = WORLDS.lock();
+    let world = worlds.get_mut(&world_id).ok_or(())?;
+    let count = core::cmp::min(out.len(), world.console_output.len());
+    out[..count].copy_from_slice(&world.console_output[..count]);
+    world.console_output.drain(..count);
+    Ok(count)
+}
+
 /// Queues a frame for the network device of a world.
 ///
-/// The frame is handed to the guest's receive queue at its next notification;
-/// this is the entry point a network scheme will use.
+/// The frame is handed to the guest's receive queue at the next `RUN`; this is
+/// the entry point a network scheme will use.
 pub fn push_network_frame(world_id: u64, frame: &[u8]) -> Result<(), ()> {
     let mut worlds = WORLDS.lock();
     let world = worlds.get_mut(&world_id).ok_or(())?;
-    world.machine.push_network_frame(frame);
+    if frame.len() > MAX_FRAME_SIZE || world.pending_frames.len() >= MAX_PENDING_FRAMES {
+        return Err(());
+    }
+    world.pending_frames.push(frame.to_vec());
     Ok(())
 }
 

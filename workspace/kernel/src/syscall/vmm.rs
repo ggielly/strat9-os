@@ -419,6 +419,47 @@ pub fn sys_vmm_exit_complete(
     Ok(0)
 }
 
+/// Maximum bytes transferred by one console syscall.
+const MAX_CONSOLE_IO: u64 = 64 * 1024;
+
+/// SYS_VMM_CONSOLE_INPUT (581): queues bytes for the guest console.
+pub fn sys_vmm_console_input(
+    vmm_handle: u64,
+    buf_ptr: u64,
+    len: u64,
+) -> Result<u64, SyscallError> {
+    let world = vmm_world(vmm_handle, VMM_OWNER)?;
+    if len == 0 || len > MAX_CONSOLE_IO || buf_ptr == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let mut bytes = alloc::vec![0u8; len as usize];
+    let slice = UserSliceRead::new(buf_ptr, len as usize)?;
+    if slice.copy_to(&mut bytes) != len as usize {
+        return Err(SyscallError::Fault);
+    }
+    let queued = vm::push_console_input(world, &bytes).map_err(|_| SyscallError::NotFound)?;
+    Ok(queued as u64)
+}
+
+/// SYS_VMM_CONSOLE_OUTPUT (582): drains console output bytes.
+pub fn sys_vmm_console_output(
+    vmm_handle: u64,
+    buf_ptr: u64,
+    len: u64,
+) -> Result<u64, SyscallError> {
+    let world = vmm_world(vmm_handle, VMM_OWNER)?;
+    if len == 0 || len > MAX_CONSOLE_IO || buf_ptr == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let mut bytes = alloc::vec![0u8; len as usize];
+    let count = vm::read_console_output(world, &mut bytes).map_err(|_| SyscallError::NotFound)?;
+    if count > 0 {
+        let slice = UserSliceWrite::new(buf_ptr, count)?;
+        slice.copy_from(&bytes[..count]);
+    }
+    Ok(count as u64)
+}
+
 /// SYS_VMM_INFO (569): snapshot of a world, or global summary if `vmm_id = 0`.
 pub fn sys_vmm_info(vmm_handle: u64, out_ptr: u64) -> Result<u64, SyscallError> {
     let mut info = VmmInfo {
