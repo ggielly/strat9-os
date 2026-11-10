@@ -28,12 +28,20 @@
 //! (`s9vm::vm`) binds these ranges to pinned frames and second-level
 //! tables.
 //!
+//! It also owns the granularity plan used by that binding: a reservation
+//! whose base is 2 MiB aligned and whose length is a multiple of 2 MiB is
+//! split into 2 MiB leaves, while a partial head or tail stays on 4 KiB
+//! pages. [`plan_map`] performs the split; the caller installs the segments
+//! (2 MiB needs a 2 MiB-aligned, physically contiguous frame block).
+//!
 //! Testable on the host (L2 tests).
 
-use alloc::collections::BTreeMap;
+use alloc::{collections::BTreeMap, vec::Vec};
 
 /// Size of a base page (4 KiB).
 pub const PAGE_SIZE: u64 = 4096;
+/// Size of a large second-level page (2 MiB).
+pub const LARGE_PAGE_SIZE: u64 = 2 * 1024 * 1024;
 /// Maximum guest physical address width covered (48 bits).
 pub const MAX_GPA: u64 = 1 << 48;
 
@@ -202,6 +210,124 @@ impl GuestMap {
     pub fn set_quota(&mut self, quota_pages: u64) {
         self.quota_pages = quota_pages;
     }
+
+    /// Reserves a range and returns its 2 MiB/4 KiB mapping plan.
+    ///
+    /// The reservation rules (alignment, overlap, quota) are exactly those of
+    /// [`Self::reserve`]: the quota counts the same number of 4 KiB pages
+    /// whatever the granularity, so a 2 MiB leaf accounts for 512 pages.
+    pub fn reserve_with_plan(
+        &mut self,
+        gpa: u64,
+        len: u64,
+        perms: u32,
+        memtype: u8,
+    ) -> Result<(Region, Vec<MapSegment>), MapError> {
+        let region = self.reserve(gpa, len, perms, memtype)?;
+        let plan = plan_map(gpa, len)?;
+        Ok((region, plan))
+    }
+}
+
+/// Granularity of one mapping-plan segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageSize {
+    /// One 4 KiB second-level page.
+    Page4K,
+    /// One 2 MiB second-level page.
+    Page2M,
+}
+
+/// One contiguous piece of a guest mapping plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapSegment {
+    /// Starting guest physical address (aligned to `page_size`).
+    pub gpa: u64,
+    /// Length in bytes (multiple of `page_size`).
+    pub len: u64,
+    /// Granularity used for this segment.
+    pub page_size: PageSize,
+}
+
+impl MapSegment {
+    /// End address (exclusive).
+    pub const fn end(&self) -> u64 {
+        self.gpa + self.len
+    }
+
+    /// Number of 4 KiB pages covered by this segment.
+    ///
+    /// This is the quota cost: a 2 MiB leaf accounts for 512 pages.
+    pub const fn pages(&self) -> u64 {
+        self.len / PAGE_SIZE
+    }
+
+    /// True when the segment must be installed with a 2 MiB leaf.
+    pub const fn is_large(&self) -> bool {
+        matches!(self.page_size, PageSize::Page2M)
+    }
+}
+
+/// Plans the 2 MiB/4 KiB split of `[gpa, gpa + len)`.
+///
+/// Rules:
+/// - the range must be 4 KiB aligned and inside the guest physical space,
+///   like [`GuestMap::reserve`];
+/// - a 2 MiB-aligned, 2 MiB-multiple middle is emitted as 2 MiB segments;
+/// - a partial head (base not 2 MiB aligned) and a partial tail stay 4 KiB;
+/// - a granularity never straddles a 2 MiB boundary, so one 2 MiB region is
+///   always mapped with a single granularity.
+///
+/// The plan only splits the **GPA** range. Installing a 2 MiB segment also
+/// requires a 2 MiB-aligned, physically contiguous host block; a caller that
+/// cannot provide one must fall back to 4 KiB pages for that region.
+pub fn plan_map(gpa: u64, len: u64) -> Result<Vec<MapSegment>, MapError> {
+    if len == 0 || gpa % PAGE_SIZE != 0 || len % PAGE_SIZE != 0 {
+        return Err(MapError::InvalidRange);
+    }
+    let end = gpa.checked_add(len).ok_or(MapError::InvalidRange)?;
+    if end > MAX_GPA {
+        return Err(MapError::InvalidRange);
+    }
+
+    let mut segments = Vec::new();
+    let mut cursor = gpa;
+    let mut remaining = len;
+
+    // Partial head: 4 KiB pages up to the next 2 MiB boundary.
+    let head = (LARGE_PAGE_SIZE - (cursor % LARGE_PAGE_SIZE)) % LARGE_PAGE_SIZE;
+    if head != 0 {
+        let take = core::cmp::min(head, remaining);
+        segments.push(MapSegment {
+            gpa: cursor,
+            len: take,
+            page_size: PageSize::Page4K,
+        });
+        cursor += take;
+        remaining -= take;
+    }
+
+    // 2 MiB-aligned middle.
+    while remaining >= LARGE_PAGE_SIZE {
+        segments.push(MapSegment {
+            gpa: cursor,
+            len: LARGE_PAGE_SIZE,
+            page_size: PageSize::Page2M,
+        });
+        cursor += LARGE_PAGE_SIZE;
+        remaining -= LARGE_PAGE_SIZE;
+    }
+
+    // Partial tail.
+    if remaining != 0 {
+        segments.push(MapSegment {
+            gpa: cursor,
+            len: remaining,
+            page_size: PageSize::Page4K,
+        });
+    }
+
+    Ok(segments)
 }
 
 /// Permissions decoded from the ABI (1 = read, 2 = write, 4 = execute).

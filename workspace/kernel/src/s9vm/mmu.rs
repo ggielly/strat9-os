@@ -230,18 +230,47 @@ impl SecondLevel {
         if gpa.checked_add(len).map_or(true, |end| end > MAX_GPA) {
             return Err(MmuError::InvalidRange);
         }
-        let leaf = perms.bits() | entry::MEMTYPE_WB | entry::LARGE_PAGE;
-        let pages = len / align;
-        for index in 0..pages {
-            let offset = index * align;
-            let table = self.ensure_table(memory, gpa + offset, SHIFT_PD)?;
-            let slot = index_of(gpa + offset, SHIFT_PD);
-            let existing = memory.read_entry(table, slot);
-            if existing & entry::PRESENT != 0 {
-                return Err(MmuError::Conflict);
-            }
-            memory.write_entry(table, slot, (hpa + offset) | leaf);
+        let mut offset = 0u64;
+        while offset < len {
+            self.map_2m_leaf(memory, gpa + offset, hpa + offset, perms)?;
+            offset += align;
         }
+        Ok(())
+    }
+
+    /// Installs one 2 MiB leaf for the 2 MiB-aligned GPA `gpa`.
+    ///
+    /// Additive helper for callers that build their own mapping plan (for
+    /// example a large guest range split into 2 MiB leaves with 4 KiB
+    /// head/tail pages). The GPA and HPA must be 2 MiB aligned; the range must
+    /// fit below [`MAX_GPA`].
+    ///
+    /// Returns [`MmuError::Conflict`] when the destination PD slot is already
+    /// present. That covers both an existing 2 MiB leaf and a 4 KiB page-table
+    /// subtree: granularities are never silently mixed inside one 2 MiB
+    /// region. Callers that need to replace an existing 4 KiB mapping must
+    /// unmap it first (after unmapping every 4 KiB page of the region).
+    pub fn map_2m_leaf<M: TableMemory>(
+        &self,
+        memory: &mut M,
+        gpa: u64,
+        hpa: u64,
+        perms: Perms,
+    ) -> Result<(), MmuError> {
+        let align = entry::LARGE_2MB;
+        if gpa % align != 0 || hpa % align != 0 {
+            return Err(MmuError::Misaligned);
+        }
+        if gpa.checked_add(align).map_or(true, |end| end > MAX_GPA) {
+            return Err(MmuError::InvalidRange);
+        }
+        let table = self.ensure_table(memory, gpa, SHIFT_PD)?;
+        let slot = index_of(gpa, SHIFT_PD);
+        if memory.read_entry(table, slot) & entry::PRESENT != 0 {
+            return Err(MmuError::Conflict);
+        }
+        let leaf = perms.bits() | entry::MEMTYPE_WB | entry::LARGE_PAGE;
+        memory.write_entry(table, slot, hpa | leaf);
         Ok(())
     }
 
@@ -344,6 +373,11 @@ impl SecondLevel {
 
     /// Creates (if necessary) the table of level `shift` for the given GPA and
     /// returns its handle. Allocates the missing levels.
+    ///
+    /// A large leaf met while walking down (a 1 GiB leaf at the PDPT level or a
+    /// 2 MiB leaf at the PD level) is reported as [`MmuError::Conflict`]: it
+    /// must never be mistaken for a table pointer, which would silently write
+    /// page-table entries into guest memory.
     fn ensure_table<M: TableMemory>(
         &self,
         memory: &mut M,
@@ -366,6 +400,10 @@ impl SecondLevel {
         let pdpt_slot = index_of(gpa, SHIFT_PDPT);
         let pdpt = memory.read_entry(pdpt_table, pdpt_slot);
         let pd_table = if pdpt & entry::PRESENT != 0 {
+            if pdpt & entry::LARGE_PAGE != 0 {
+                // 1 GiB leaf, not a PD table.
+                return Err(MmuError::Conflict);
+            }
             pdpt & entry::ADDR_MASK
         } else {
             let table = memory.alloc_table().ok_or(MmuError::OutOfMemory)?;
@@ -378,6 +416,10 @@ impl SecondLevel {
         let pd_slot = index_of(gpa, SHIFT_PD);
         let pd = memory.read_entry(pd_table, pd_slot);
         let pt_table = if pd & entry::PRESENT != 0 {
+            if pd & entry::LARGE_PAGE != 0 {
+                // 2 MiB leaf, not a PT table.
+                return Err(MmuError::Conflict);
+            }
             pd & entry::ADDR_MASK
         } else {
             let table = memory.alloc_table().ok_or(MmuError::OutOfMemory)?;

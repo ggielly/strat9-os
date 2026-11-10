@@ -22,11 +22,17 @@
 
 //! L2: s9vm second-level translation (real kernel code, host memory).
 
+extern crate alloc;
+
 use std::collections::HashMap;
+
+#[path = "../../kernel/src/s9vm/memmap.rs"]
+mod memmap;
 
 #[path = "../../kernel/src/s9vm/mmu.rs"]
 mod mmu;
 
+use memmap::{plan_map, GuestMap, MapError, MapSegment, PageSize, LARGE_PAGE_SIZE};
 use mmu::{
     encode_second_level_pointer, entry, MmuError, Perms, SecondLevel, TableMemory, PAGE_SIZE,
 };
@@ -81,9 +87,7 @@ impl TableMemory for HostTables {
     }
 
     fn write_entry(&mut self, table: u64, index: usize, value: u64) {
-        self.tables
-            .entry(table)
-            .or_insert([0u64; 512])[index] = value;
+        self.tables.entry(table).or_insert([0u64; 512])[index] = value;
     }
 }
 
@@ -110,7 +114,10 @@ fn maps_and_translates_four_kib_pages() {
         .expect("map");
 
     assert_eq!(table.translate(&memory, 0x10_0000), Some(0x20_0000));
-    assert_eq!(table.translate(&memory, 0x10_0000 + PAGE_SIZE), Some(0x20_1000));
+    assert_eq!(
+        table.translate(&memory, 0x10_0000 + PAGE_SIZE),
+        Some(0x20_1000)
+    );
     assert_eq!(table.translate(&memory, 0x10_2000), Some(0x20_2000));
     assert_eq!(table.translate(&memory, 0x11_0000), None);
     // Beyond the mapped range.
@@ -147,7 +154,13 @@ fn rejects_misaligned_ranges() {
         Err(MmuError::InvalidRange)
     );
     assert_eq!(
-        table.map_2m(&mut memory, 0x10_0000 + 0x1000, 0x20_0000, 0x20_0000, Perms::read_write()),
+        table.map_2m(
+            &mut memory,
+            0x10_0000 + 0x1000,
+            0x20_0000,
+            0x20_0000,
+            Perms::read_write()
+        ),
         Err(MmuError::Misaligned)
     );
 }
@@ -171,10 +184,7 @@ fn maps_large_pages_with_page_size_bit() {
         table.translate(&memory, 0x4000_0000 + 0x1F_FFFF),
         Some(0x801F_FFFF)
     );
-    assert_eq!(
-        table.translate(&memory, 0x4020_0000),
-        Some(0x8020_0000)
-    );
+    assert_eq!(table.translate(&memory, 0x4020_0000), Some(0x8020_0000));
     assert_eq!(table.translate(&memory, 0x4040_0000), None);
 
     let leaf = find_pd_entry(&memory, table.root_phys(), 0x4000_0000);
@@ -187,7 +197,13 @@ fn unmaps_leaf_entries() {
     let mut memory = HostTables::new();
     let table = SecondLevel::new(&mut memory).expect("root");
     table
-        .map_4k(&mut memory, 0x3000, 0x4000, 2 * PAGE_SIZE, Perms::read_write())
+        .map_4k(
+            &mut memory,
+            0x3000,
+            0x4000,
+            2 * PAGE_SIZE,
+            Perms::read_write(),
+        )
         .expect("map");
     assert!(table.unmap_4k(&mut memory, 0x3000));
     assert_eq!(table.translate(&memory, 0x3000), None);
@@ -250,4 +266,348 @@ fn find_pd_entry(memory: &HostTables, root: u64, gpa: u64) -> u64 {
     let pml4 = memory.read_entry(root, ((gpa >> 39) & 0x1FF) as usize);
     let pdpt = memory.read_entry(pml4 & entry::ADDR_MASK, ((gpa >> 30) & 0x1FF) as usize);
     memory.read_entry(pdpt & entry::ADDR_MASK, ((gpa >> 21) & 0x1FF) as usize)
+}
+
+// ---------------------------------------------------------------------------
+// 2 MiB mapping plan (`memmap::plan_map`)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn plan_aligned_range_uses_2m_segments() {
+    // 4 MiB = two 2 MiB leaves.
+    let plan = plan_map(0x4000_0000, 2 * LARGE_PAGE_SIZE).expect("plan");
+    assert_eq!(plan.len(), 2);
+    for (index, segment) in plan.iter().enumerate() {
+        assert_eq!(segment.page_size, PageSize::Page2M);
+        assert_eq!(segment.len, LARGE_PAGE_SIZE);
+        assert_eq!(segment.gpa, 0x4000_0000 + index as u64 * LARGE_PAGE_SIZE);
+        assert_eq!(segment.pages(), 512);
+        assert!(segment.is_large());
+    }
+    assert_eq!(
+        plan.iter().map(|segment| segment.pages()).sum::<u64>(),
+        1024
+    );
+}
+
+#[test]
+fn plan_unaligned_range_keeps_4k_head_and_tail() {
+    let gpa = 0x4000_1000;
+    let len = 6 * 1024 * 1024;
+    let plan = plan_map(gpa, len).expect("plan");
+    assert_eq!(plan.len(), 4);
+    assert_eq!(plan[0].page_size, PageSize::Page4K);
+    assert_eq!(plan[0].gpa, gpa);
+    assert_eq!(plan[0].len, LARGE_PAGE_SIZE - PAGE_SIZE);
+    assert_eq!(plan[1].page_size, PageSize::Page2M);
+    assert_eq!(plan[2].page_size, PageSize::Page2M);
+    assert_eq!(plan[3].page_size, PageSize::Page4K);
+    assert_eq!(plan[3].len, PAGE_SIZE);
+    assert_eq!(plan[0].gpa, gpa);
+    assert_eq!(plan.last().expect("tail").end(), gpa + len);
+    // The plan is a contiguous partition of the range.
+    for pair in plan.windows(2) {
+        assert_eq!(pair[0].end(), pair[1].gpa);
+    }
+}
+
+#[test]
+fn plan_small_range_is_one_4k_segment() {
+    let plan = plan_map(0x123000, 3 * PAGE_SIZE).expect("plan");
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0].page_size, PageSize::Page4K);
+    assert_eq!(plan[0].len, 3 * PAGE_SIZE);
+    assert_eq!(plan[0].pages(), 3);
+}
+
+#[test]
+fn plan_never_mixes_granularity_inside_a_2m_region() {
+    let gpa = 0x4000_1000;
+    let len = 6 * 1024 * 1024;
+    let plan = plan_map(gpa, len).expect("plan");
+    let window = |address: u64| address & !(LARGE_PAGE_SIZE - 1);
+    for segment in &plan {
+        match segment.page_size {
+            PageSize::Page2M => {
+                assert_eq!(segment.gpa % LARGE_PAGE_SIZE, 0);
+                assert_eq!(segment.len % LARGE_PAGE_SIZE, 0);
+            }
+            PageSize::Page4K => {
+                // A 4 KiB segment must stay inside a single 2 MiB window.
+                assert_eq!(window(segment.gpa), window(segment.end() - 1));
+            }
+        }
+    }
+    // No 2 MiB window contains both granularities.
+    for segment in plan.iter().filter(|segment| segment.is_large()) {
+        for other in &plan {
+            if other.page_size == PageSize::Page4K {
+                let overlap = other.gpa < segment.end() && segment.gpa < other.end();
+                assert!(!overlap, "4 KiB segment overlaps a 2 MiB leaf");
+            }
+        }
+    }
+}
+
+#[test]
+fn plan_rejects_invalid_ranges() {
+    assert_eq!(plan_map(0x1000, 0), Err(MapError::InvalidRange));
+    assert_eq!(plan_map(0x1001, PAGE_SIZE), Err(MapError::InvalidRange));
+    assert_eq!(plan_map(0x1000, PAGE_SIZE + 1), Err(MapError::InvalidRange));
+    assert_eq!(
+        plan_map((1u64 << 48) - PAGE_SIZE, 2 * PAGE_SIZE),
+        Err(MapError::InvalidRange)
+    );
+}
+
+#[test]
+fn reserve_with_plan_enforces_quota_in_4k_pages() {
+    let mut guest = GuestMap::new(1024);
+    let (_, plan) = guest
+        .reserve_with_plan(0x4000_0000, 2 * LARGE_PAGE_SIZE, 3, 0)
+        .expect("reserve 4 MiB");
+    assert_eq!(plan.len(), 2);
+    assert_eq!(guest.pages(), 1024);
+    assert_eq!(guest.region_count(), 1);
+
+    let mut too_small = GuestMap::new(1023);
+    assert_eq!(
+        too_small.reserve_with_plan(0x4000_0000, 2 * LARGE_PAGE_SIZE, 3, 0),
+        Err(MapError::QuotaExceeded)
+    );
+    assert_eq!(too_small.pages(), 0);
+    assert_eq!(too_small.region_count(), 0);
+
+    // 4 MiB + one 4 KiB page needs 1025 pages.
+    let mut guest = GuestMap::new(1024);
+    assert_eq!(
+        guest.reserve_with_plan(0x4000_0000, 2 * LARGE_PAGE_SIZE + PAGE_SIZE, 3, 0),
+        Err(MapError::QuotaExceeded)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 2 MiB leaves in the built tables (`mmu::SecondLevel::map_2m_leaf`)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn installs_2m_leaves_for_aligned_range() {
+    let mut memory = HostTables::new();
+    let table = SecondLevel::new(&mut memory).expect("root");
+    for index in 0..2u64 {
+        table
+            .map_2m_leaf(
+                &mut memory,
+                0x4000_0000 + index * LARGE_PAGE_SIZE,
+                0x8000_0000 + index * LARGE_PAGE_SIZE,
+                Perms::read_write_execute(),
+            )
+            .expect("map 2m leaf");
+    }
+    // Root + PDPT + PD: no PT table is allocated for large leaves.
+    assert_eq!(memory.allocations, 3);
+    assert_eq!(table.translate(&memory, 0x4000_0000), Some(0x8000_0000));
+    assert_eq!(
+        table.translate(&memory, 0x4000_0000 + LARGE_PAGE_SIZE - 1),
+        Some(0x801F_FFFF)
+    );
+    assert_eq!(table.translate(&memory, 0x4020_0000), Some(0x8020_0000));
+    assert_eq!(table.translate(&memory, 0x4040_0000 - 1), Some(0x803F_FFFF));
+    assert_eq!(table.translate(&memory, 0x4040_0000), None);
+    let leaf = find_pd_entry(&memory, table.root_phys(), 0x4020_0000);
+    assert_eq!(leaf & entry::LARGE_PAGE, entry::LARGE_PAGE);
+    assert_eq!(leaf & entry::MEMTYPE_WB, entry::MEMTYPE_WB);
+    assert_eq!(leaf & entry::READ, entry::READ);
+    assert_eq!(leaf & entry::WRITE, entry::WRITE);
+    assert_eq!(find_leaf(&memory, table.root_phys(), 0x4000_0000), 0);
+}
+
+#[test]
+fn mixed_range_maps_4k_edges_and_2m_middle() {
+    let mut memory = HostTables::new();
+    let table = SecondLevel::new(&mut memory).expect("root");
+    let gpa = 0x4000_1000;
+    let head_len = LARGE_PAGE_SIZE - PAGE_SIZE;
+    table
+        .map_4k(&mut memory, gpa, 0x8000_1000, head_len, Perms::read_write())
+        .expect("head 4k");
+    table
+        .map_2m_leaf(&mut memory, 0x4020_0000, 0x8020_0000, Perms::read_write())
+        .expect("middle 2m");
+    table
+        .map_4k(
+            &mut memory,
+            0x4040_0000,
+            0x8040_0000,
+            PAGE_SIZE,
+            Perms::read_write(),
+        )
+        .expect("tail 4k");
+
+    // Head uses a PT leaf; the middle slot is a large leaf; the tail a PT leaf.
+    assert_eq!(
+        find_leaf(&memory, table.root_phys(), 0x4000_1000) & entry::LARGE_PAGE,
+        0
+    );
+    assert_eq!(
+        find_pd_entry(&memory, table.root_phys(), 0x4020_0000) & entry::LARGE_PAGE,
+        entry::LARGE_PAGE
+    );
+    assert_eq!(
+        find_leaf(&memory, table.root_phys(), 0x4040_0000) & entry::LARGE_PAGE,
+        0
+    );
+    // Root + PDPT + PD + head PT + tail PT.
+    assert_eq!(memory.allocations, 5);
+}
+
+#[test]
+fn translate_covers_whole_mixed_range() {
+    let mut memory = HostTables::new();
+    let table = SecondLevel::new(&mut memory).expect("root");
+    let gpa = 0x4000_1000;
+    table
+        .map_4k(
+            &mut memory,
+            gpa,
+            0x8000_1000,
+            LARGE_PAGE_SIZE - PAGE_SIZE,
+            Perms::read_write(),
+        )
+        .expect("head");
+    table
+        .map_2m_leaf(&mut memory, 0x4020_0000, 0x8020_0000, Perms::read_write())
+        .expect("middle");
+    table
+        .map_4k(
+            &mut memory,
+            0x4040_0000,
+            0x8040_0000,
+            PAGE_SIZE,
+            Perms::read_write(),
+        )
+        .expect("tail");
+
+    assert_eq!(table.translate(&memory, gpa), Some(0x8000_1000));
+    assert_eq!(
+        table.translate(&memory, gpa + PAGE_SIZE - 1),
+        Some(0x8000_1FFF)
+    );
+    assert_eq!(
+        table.translate(&memory, 0x4020_0000 + 0x1234),
+        Some(0x8020_1234)
+    );
+    assert_eq!(table.translate(&memory, 0x403F_FFFF), Some(0x803F_FFFF));
+    assert_eq!(table.translate(&memory, 0x4040_0000), Some(0x8040_0000));
+    assert_eq!(table.translate(&memory, 0x4040_1000), None);
+}
+
+#[test]
+fn map_2m_leaf_rejects_conflict_with_4k_entries() {
+    let mut memory = HostTables::new();
+    let table = SecondLevel::new(&mut memory).expect("root");
+    table
+        .map_4k(
+            &mut memory,
+            0x4000_1000,
+            0x9000_1000,
+            PAGE_SIZE,
+            Perms::read_write(),
+        )
+        .expect("4k page");
+    assert_eq!(
+        table.map_2m_leaf(&mut memory, 0x4000_0000, 0x8000_0000, Perms::read_write()),
+        Err(MmuError::Conflict)
+    );
+    // The existing 4 KiB mapping is untouched.
+    assert_eq!(table.translate(&memory, 0x4000_1000), Some(0x9000_1000));
+}
+
+#[test]
+fn map_4k_rejects_region_mapped_as_2m() {
+    let mut memory = HostTables::new();
+    let table = SecondLevel::new(&mut memory).expect("root");
+    table
+        .map_2m_leaf(&mut memory, 0x4000_0000, 0x8000_0000, Perms::read_write())
+        .expect("2m leaf");
+    // Walk-down must refuse to treat the large leaf as a PT table.
+    assert_eq!(
+        table.map_4k(
+            &mut memory,
+            0x4000_1000,
+            0x9000_1000,
+            PAGE_SIZE,
+            Perms::read_write()
+        ),
+        Err(MmuError::Conflict)
+    );
+    assert_eq!(table.translate(&memory, 0x4000_1000), Some(0x8000_1000));
+}
+
+#[test]
+fn map_2m_leaf_rejects_misalignment_and_overflow() {
+    let mut memory = HostTables::new();
+    let table = SecondLevel::new(&mut memory).expect("root");
+    assert_eq!(
+        table.map_2m_leaf(&mut memory, 0x4000_1000, 0x8000_0000, Perms::read_write()),
+        Err(MmuError::Misaligned)
+    );
+    assert_eq!(
+        table.map_2m_leaf(&mut memory, 0x4000_0000, 0x8000_1000, Perms::read_write()),
+        Err(MmuError::Misaligned)
+    );
+    assert_eq!(
+        table.map_2m_leaf(&mut memory, 1 << 48, 0x8000_0000, Perms::read_write()),
+        Err(MmuError::InvalidRange)
+    );
+}
+
+#[test]
+fn unmap_rules_stay_coherent_for_large_pages() {
+    let mut memory = HostTables::new();
+    let table = SecondLevel::new(&mut memory).expect("root");
+    table
+        .map_2m_leaf(&mut memory, 0x4000_0000, 0x8000_0000, Perms::read_write())
+        .expect("2m leaf");
+    // A 4 KiB unmap must not tear down a 2 MiB leaf.
+    assert!(!table.unmap_4k(&mut memory, 0x4000_0000));
+    assert_eq!(table.translate(&memory, 0x4000_0000), Some(0x8000_0000));
+    assert!(table.unmap_2m(&mut memory, 0x4000_0000));
+    assert_eq!(table.translate(&memory, 0x4000_0000), None);
+    assert!(!table.unmap_2m(&mut memory, 0x4000_0000));
+    // After a full unmap the same 2 MiB slot can be remapped as 4 KiB.
+    table
+        .map_4k(
+            &mut memory,
+            0x4000_0000,
+            0x9000_0000,
+            PAGE_SIZE,
+            Perms::read_write(),
+        )
+        .expect("4k after unmap");
+    assert_eq!(table.translate(&memory, 0x4000_0000), Some(0x9000_0000));
+}
+
+#[test]
+fn four_kib_mapping_behaviour_unchanged() {
+    let mut memory = HostTables::new();
+    let table = SecondLevel::new(&mut memory).expect("root");
+    table
+        .map_4k(
+            &mut memory,
+            0x10_0000,
+            0x20_0000,
+            3 * PAGE_SIZE,
+            Perms::read_write(),
+        )
+        .expect("map 4k");
+    assert_eq!(memory.allocations, 4);
+    assert_eq!(table.translate(&memory, 0x10_0000), Some(0x20_0000));
+    assert_eq!(table.translate(&memory, 0x10_1000), Some(0x20_1000));
+    assert_eq!(table.translate(&memory, 0x10_3000), None);
+    let plan = plan_map(0x10_0000, 3 * PAGE_SIZE).expect("plan");
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0].page_size, PageSize::Page4K);
+    let segment: MapSegment = plan[0];
+    assert_eq!(segment.end(), 0x10_3000);
 }
