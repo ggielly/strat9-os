@@ -54,6 +54,7 @@ use crate::{
         machine::Machine,
         memmap::{perms_from_abi, GuestMap, MapError, MAX_GPA},
         mmu::{Perms as MmuPerms, PAGE_SIZE},
+        timing::{ExitLatencyHistogram, WorldTiming, EXIT_LATENCY_BUCKETS},
         vcpu::{ExitInfo, SecondLevelMemory, Vcpu, VcpuError},
     },
     sync::{SpinLock, WaitQueue},
@@ -165,6 +166,50 @@ impl WorldStats {
         self.windows_armed += other.windows_armed;
         self.timer_exits += other.timer_exits;
     }
+}
+
+/// Number of exit classes tracked by [`WorldTimingSnapshot`].
+pub const TIMING_CLASS_COUNT: usize = WorldTiming::class_count();
+
+/// Compact, `Copy` view of a world's cumulative timing aggregates.
+///
+/// Produced by the read-only `timing()` accessor. Latencies are expressed in
+/// time-stamp counter cycles, as measured on the CPU that ran the vCPU; no
+/// conversion to nanoseconds is done here, because the time-stamp counter
+/// frequency is a property of the host and must be supplied by the reader.
+///
+/// Semantics:
+/// - the histogram is **cumulative** for the lifetime of the world;
+/// - `window` and `peak_window` are the counts of the current and peak
+///   sliding windows of the global exit-rate meter, one slot per `run_vcpu`
+///   invocation (one time slice);
+/// - percentiles are conservative upper bounds of logarithmic buckets, never
+///   lower than the exact percentile (see the `timing` module).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorldTimingSnapshot {
+    /// Number of exits recorded since the world was created.
+    pub exits: u64,
+    /// Mean latency of every recorded exit, in cycles (0 when `exits == 0`).
+    pub mean_cycles: u64,
+    /// 95th percentile upper bound of every recorded exit, in cycles.
+    pub p95_cycles: u64,
+    /// Smallest recorded exit latency, in cycles (0 when `exits == 0`).
+    pub min_cycles: u64,
+    /// Largest recorded exit latency, in cycles (0 when `exits == 0`).
+    pub max_cycles: u64,
+    /// Number of in-kernel device-model replays measured.
+    pub handler_samples: u64,
+    /// Mean device-model replay latency, in cycles (0 when no sample).
+    pub handler_mean_cycles: u64,
+    /// 95th percentile upper bound of the device-model replay latency.
+    pub handler_p95_cycles: u64,
+    /// Cumulative number of exits per class, indexed by
+    /// [`WorldTiming::class_index`] (always `TIMING_CLASS_COUNT` entries).
+    pub per_class: [u64; TIMING_CLASS_COUNT],
+    /// Exits recorded in the current sliding window (all classes).
+    pub window: u64,
+    /// Highest sliding-window value observed (all classes).
+    pub peak_window: u64,
 }
 
 /// Guest memory layer errors.
@@ -335,6 +380,16 @@ struct World {
     machine: Machine,
     /// Cumulative execution counters (diagnostics).
     stats: WorldStats,
+    /// Cumulative exit-latency aggregates, per exit class (diagnostics).
+    ///
+    /// Taken out of the registry while a vCPU of the world runs, with the same
+    /// take/put pattern as `stats`, so that the running guest never takes the
+    /// registry lock and the exit path never allocates.
+    timing: WorldTiming,
+    /// Cumulative latency of the in-kernel device-model replay (fast-path
+    /// exits), in time-stamp counter cycles. Same lifetime and take/put rules
+    /// as `timing`.
+    handler_timing: ExitLatencyHistogram,
     /// Console input queued by the user side, delivered at the next `RUN`.
     pending_console_input: Vec<u8>,
     /// Console output produced by the guest, drained by the user side.
@@ -422,6 +477,8 @@ pub fn create(name: &[u8], silo_id: u32) -> Option<WorldRecord> {
             paused: false,
             machine: Machine::new(),
             stats: WorldStats::default(),
+            timing: WorldTiming::default(),
+            handler_timing: ExitLatencyHistogram::default(),
             pending_console_input: Vec::new(),
             console_output: Vec::new(),
             pending_frames: Vec::new(),
@@ -437,6 +494,10 @@ pub fn create(name: &[u8], silo_id: u32) -> Option<WorldRecord> {
 /// The vCPU tasks are stopped and joined **before** the memory is freed: a
 /// task still in flight could otherwise dereference the world's second-level
 /// tables. A second concurrent call during the close returns `None`.
+///
+/// The timing aggregates (`timing`, `handler_timing`) are plain values owned by
+/// the world: they are dropped with it, so no separate reset is needed and no
+/// snapshot can outlive the world (the snapshot is `Copy`).
 pub fn destroy(id: u64) -> Option<WorldRecord> {
     // 1. Marks the world closed and wakes all vCPU tasks.
     let mut to_join: Vec<u64> = Vec::new();
@@ -977,6 +1038,22 @@ fn event_from_exit(exit: &ExitInfo, vcpu_id: u64) -> VmmExitEvent {
 /// Exits that are purely hostile to throughput (external interrupt, interrupt
 /// window, APIC, preemption timer) are resumed immediately by the kernel; all
 /// the others are reported back to policy.
+///
+/// # Timing
+///
+/// Every guest entry is bracketed by two time-stamp counter reads. The delta is
+/// recorded in the world's cumulative timing aggregates, per exit class: the
+/// decoded reason for exits that reach policy, the functional class for exits
+/// replayed by the kernel. Because the pair spans the guest entry and the exit
+/// delivery, the delta measures the entry/exit cost **on the CPU that runs the
+/// vCPU** only for single-instruction exits (I/O port, MSR access, second-level
+/// violation), where the guest time is negligible; for asynchronous exits
+/// (external interrupt, preemption timer, halt) it also contains the guest time
+/// slice that preceded the exit, and must not be read as the exit latency.
+/// Device-model replay latency is measured separately around the replay.
+///
+/// The sliding window of the rate meters is advanced once per call: one call is
+/// one time slice.
 pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
     if crate::s9vm::active_cpu_count() == 0 {
         return Err(RunError::HardwareNotReady);
@@ -992,6 +1069,8 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
         mut machine,
         mut apic,
         mut stats,
+        mut timing,
+        mut handler_timing,
         mut pending_console_input,
         mut pending_frames,
         mut console_output,
@@ -1016,6 +1095,11 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
         let machine = core::mem::replace(&mut world.machine, Machine::new());
         let apic = core::mem::replace(&mut slot.apic, LocalApic::new(apic_id));
         let stats = core::mem::replace(&mut world.stats, WorldStats::default());
+        // The timing aggregates follow the same take/put pattern as `stats`:
+        // the running vCPU updates them without ever taking the registry lock.
+        let timing = core::mem::replace(&mut world.timing, WorldTiming::default());
+        let handler_timing =
+            core::mem::replace(&mut world.handler_timing, ExitLatencyHistogram::default());
         let pending_console_input = core::mem::take(&mut world.pending_console_input);
         let pending_frames = core::mem::take(&mut world.pending_frames);
         let console_output = core::mem::take(&mut world.console_output);
@@ -1030,6 +1114,8 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
             machine,
             apic,
             stats,
+            timing,
+            handler_timing,
             pending_console_input,
             pending_frames,
             console_output,
@@ -1037,6 +1123,10 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
             network_output_bytes,
         )
     };
+    // One sliding-window slot per invocation: the rate meters measure exits per
+    // time slice, and a "slice" is one `run_vcpu` call, whether or not the
+    // guest actually entered (hardware setup failures included).
+    timing.advance_window();
     let mut hardware = match hardware {
         Some(hardware) => hardware,
         None => Vcpu::new(caps, pointer)?,
@@ -1154,18 +1244,35 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                     }
                     InterruptAction::None => {}
                 }
-                match hardware.run() {
+                // Bracket the guest entry with two time-stamp counter reads.
+                // The delta is the wall-clock time spent between the host and
+                // the guest: guest execution plus the hardware entry and exit
+                // sequences. See the function documentation for what it means
+                // per class.
+                let entry_tsc = core::arch::x86_64::_rdtsc();
+                let run_result = hardware.run();
+                let exit_tsc = core::arch::x86_64::_rdtsc();
+                let exit_cycles = exit_tsc.saturating_sub(entry_tsc);
+                match run_result {
                     Ok(exit) => {
+                        let class = exit.class();
                         // Kernel fast path: accesses to the modeled devices
                         // are replayed in place, so the guest never observes
                         // the exit and policy is not involved.
                         if matches!(
-                            exit.class(),
+                            class,
                             ExitClass::IoPort | ExitClass::Msr | ExitClass::EptViolation
                         ) {
-                            let class = exit.class();
-                            match machine.handle(&mut hardware, &mut apic, &exit) {
+                            // Replay latency: handler cost only, without the
+                            // guest time contained in `exit_cycles`.
+                            let handler_tsc = core::arch::x86_64::_rdtsc();
+                            let handled = machine.handle(&mut hardware, &mut apic, &exit);
+                            let handler_cycles =
+                                core::arch::x86_64::_rdtsc().saturating_sub(handler_tsc);
+                            match handled {
                                 Ok(true) => {
+                                    timing.record(class, exit_cycles);
+                                    handler_timing.record(handler_cycles);
                                     if resumed >= MAX_RESUMED_EXITS {
                                         result = Err(RunError::ExitStorm);
                                         break;
@@ -1198,8 +1305,8 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                                                     > MAX_NETWORK_OUTPUT_BYTES
                                             {
                                                 let dropped = network_output.remove(0);
-                                                network_output_bytes =
-                                                    network_output_bytes.saturating_sub(dropped.len());
+                                                network_output_bytes = network_output_bytes
+                                                    .saturating_sub(dropped.len());
                                             }
                                             network_output_bytes += frame.len();
                                             network_output.push(frame);
@@ -1222,15 +1329,19 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                                 Ok(false) | Err(_) => {}
                             }
                         }
-                        if is_resumable(exit.class()) && resumed < MAX_RESUMED_EXITS {
+                        // Exits that are not replayed by the kernel: the
+                        // decoded reason is recorded so that guest entry
+                        // failures remain distinguishable from ordinary exits.
+                        timing.record_exit(exit.reason, exit_cycles);
+                        if is_resumable(class) && resumed < MAX_RESUMED_EXITS {
                             resumed += 1;
                             continue;
                         }
-                        if is_resumable(exit.class()) {
+                        if is_resumable(class) {
                             result = Err(RunError::ExitStorm);
                         } else {
                             stats.policy_exits += 1;
-                            if exit.class() == ExitClass::PreemptionTimer {
+                            if class == ExitClass::PreemptionTimer {
                                 stats.timer_exits += 1;
                             }
                             let event = event_from_exit(&exit, vcpu_id);
@@ -1255,6 +1366,8 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
     if let Some(world) = worlds.get_mut(&world_id) {
         world.machine = machine;
         world.stats = stats;
+        world.timing = timing;
+        world.handler_timing = handler_timing;
         world.console_output = console_output;
         world.pending_console_input = pending_console_input;
         world.pending_frames = pending_frames;
@@ -1404,16 +1517,14 @@ pub fn write_acpi(world_id: u64, caps: &HwCaps, base_gpa: u64) -> Result<(), VmE
         if world.vcpus.is_empty() {
             return Err(VmError::Map(MapError::InvalidRange));
         }
-        world
-            .vcpus
-            .iter()
-            .map(|slot| slot.apic_id as u8)
-            .collect()
+        world.vcpus.iter().map(|slot| slot.apic_id as u8).collect()
     };
 
     // 2. Builds the image outside the registry lock.
     let builder = AcpiBuilder::new(base_gpa, &apic_ids);
-    let layout = builder.layout().map_err(|_| VmError::Map(MapError::InvalidRange))?;
+    let layout = builder
+        .layout()
+        .map_err(|_| VmError::Map(MapError::InvalidRange))?;
     let mut image = alloc::vec![0u8; layout.total_len];
     builder
         .encode(&mut image)
@@ -1631,6 +1742,113 @@ pub fn total_stats() -> WorldStats {
         total.add(&world.stats);
     }
     total
+}
+
+/// Upper bound of the bucket that contains the `p`-th sample of the union of
+/// every per-class histogram, in cycles.
+///
+/// The merged distribution is never materialised: the populations are summed
+/// bucket by bucket across the classes, which keeps the accessor allocation
+/// free. This is the same conservative semantics as
+/// `ExitLatencyHistogram::percentile`.
+fn merged_percentile(timing: &WorldTiming, p: u8, count: u64) -> u64 {
+    if count == 0 {
+        return 0;
+    }
+    let clamped = if p > 100 { 100 } else { p } as u64;
+    let scaled = clamped.saturating_mul(count);
+    let mut rank = scaled / 100;
+    if scaled % 100 != 0 || rank == 0 {
+        rank = rank.saturating_add(1);
+    }
+    let mut cumulative = 0u64;
+    for bucket in 0..EXIT_LATENCY_BUCKETS {
+        let mut population = 0u64;
+        for index in 0..TIMING_CLASS_COUNT {
+            if let Some(class) = WorldTiming::class_at(index) {
+                population = population.saturating_add(timing.latency(class).bucket_count(bucket));
+            }
+        }
+        cumulative = cumulative.saturating_add(population);
+        if cumulative >= rank {
+            return ExitLatencyHistogram::bucket_upper_bound(bucket);
+        }
+    }
+    // Defensive: the populations sum to `count`, so the loop always returns.
+    0
+}
+
+/// Builds a compact snapshot from the two per-world aggregates.
+fn timing_snapshot(timing: &WorldTiming, handler: &ExitLatencyHistogram) -> WorldTimingSnapshot {
+    let mut snapshot = WorldTimingSnapshot::default();
+    let mut sum = 0u64;
+    let mut min = u64::MAX;
+    let mut max = 0u64;
+    for index in 0..TIMING_CLASS_COUNT {
+        let Some(class) = WorldTiming::class_at(index) else {
+            continue;
+        };
+        let histogram = timing.latency(class);
+        snapshot.per_class[index] = histogram.count();
+        snapshot.exits = snapshot.exits.saturating_add(histogram.count());
+        sum = sum.saturating_add(histogram.sum());
+        if let Some(value) = histogram.min() {
+            if value < min {
+                min = value;
+            }
+        }
+        if let Some(value) = histogram.max() {
+            if value > max {
+                max = value;
+            }
+        }
+    }
+    if snapshot.exits != 0 {
+        snapshot.mean_cycles = sum / snapshot.exits;
+        snapshot.min_cycles = min;
+        snapshot.max_cycles = max;
+        snapshot.p95_cycles = merged_percentile(timing, 95, snapshot.exits);
+    }
+    snapshot.handler_samples = handler.count();
+    snapshot.handler_mean_cycles = handler.mean().unwrap_or(0);
+    snapshot.handler_p95_cycles = handler.percentile(95).unwrap_or(0);
+    snapshot.window = timing.total_rate().window();
+    snapshot.peak_window = timing.total_rate().peak_window();
+    snapshot
+}
+
+/// Read-only timing snapshot of a world.
+///
+/// Returns `None` when the world does not exist. The aggregates are taken out
+/// of the registry while a vCPU runs (the execution path must never take the
+/// registry lock), so a snapshot taken during execution reports the state of
+/// the last completed time slice; the in-flight samples are put back when
+/// `run_vcpu` returns.
+pub fn timing(world_id: u64) -> Option<WorldTimingSnapshot> {
+    let worlds = WORLDS.lock();
+    let world = worlds.get(&world_id)?;
+    Some(timing_snapshot(&world.timing, &world.handler_timing))
+}
+
+/// Returns the second-level translation pointer (EPTP) of a world.
+///
+/// The value is the control-block pointer the hardware uses to walk the guest
+/// physical address space; it is the world's real translation table, not a
+/// mirror. It stays valid as long as the world exists and its guest memory has
+/// not been destroyed, but it must be treated as an opaque, short-lived value:
+/// the registry lock is taken only for the lookup, so the caller must already
+/// synchronise with world destruction (or copy the value while the world is
+/// known to be alive, e.g. during a `RUN`). Returns [`VmError::Unknown`] when
+/// the world does not exist and [`VmError::Map`] with
+/// [`MapError::NotMapped`] when the world has no guest memory yet.
+pub fn second_level_pointer(world_id: u64, caps: &HwCaps) -> Result<u64, VmError> {
+    let worlds = WORLDS.lock();
+    let world = worlds.get(&world_id).ok_or(VmError::Unknown)?;
+    let memory = world
+        .memory
+        .as_ref()
+        .ok_or(VmError::Map(MapError::NotMapped))?;
+    Ok(memory.second_level_pointer(caps))
 }
 
 /// Number of pending events for a world.
@@ -1898,11 +2116,7 @@ pub fn wait_exit(vcpu_id: u64, timeout_ns: u64) -> Result<bool, VcpuRegistryErro
 /// it is the instruction length for exits that must be retried or skipped
 /// after emulation (EPT violations, MMIO). Only the software register block is
 /// updated: the next `RUN` rebuilds the guest state from it.
-pub fn complete_exit(
-    vcpu_id: u64,
-    value: u64,
-    advance: u64,
-) -> Result<(), VcpuRegistryError> {
+pub fn complete_exit(vcpu_id: u64, value: u64, advance: u64) -> Result<(), VcpuRegistryError> {
     let mut worlds = WORLDS.lock();
     let world = vcpu_world_mut(&mut worlds, vcpu_id).ok_or(VcpuRegistryError::Unknown)?;
     let slot = world
@@ -2036,6 +2250,22 @@ pub fn vcpu_count(world_id: u64) -> Option<u32> {
         .lock()
         .get(&world_id)
         .map(|world| world.vcpus.len() as u32)
+}
+
+/// Second-level translation pointer (EPTP) of a world.
+///
+/// This is the value the control block uses as its second-level pointer. It is
+/// only valid while the world lives (the tables are freed by `destroy`); the
+/// caller must not cache it beyond the world's lifetime. The registry lock is
+/// taken briefly and never across guest execution.
+pub fn second_level_pointer(world_id: u64, caps: &HwCaps) -> Result<u64, VmError> {
+    let worlds = WORLDS.lock();
+    let world = worlds.get(&world_id).ok_or(VmError::Unknown)?;
+    let memory = world
+        .memory
+        .as_ref()
+        .ok_or(VmError::Map(MapError::NotMapped))?;
+    Ok(memory.second_level_pointer(caps))
 }
 
 /// Diagnostic detail for a world: mapped pages and translation of a GPA.
