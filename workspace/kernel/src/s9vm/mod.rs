@@ -48,6 +48,7 @@
 //! The absence of VT-x is never fatal: the kernel boots normally and
 //! logs `virtualisation inactive`.
 
+pub mod acpi;
 pub mod apic;
 pub mod bootinfo;
 pub mod caps;
@@ -57,6 +58,7 @@ pub mod emulate;
 pub mod exit;
 pub mod exitqueue;
 pub mod guest;
+pub mod image;
 pub mod ioapic;
 pub mod launch;
 pub mod machine;
@@ -64,6 +66,7 @@ pub mod memmap;
 pub mod mmu;
 pub mod pic;
 pub mod selftest;
+pub mod timing;
 pub mod vcpu;
 pub mod virtio;
 pub mod virtio_blk;
