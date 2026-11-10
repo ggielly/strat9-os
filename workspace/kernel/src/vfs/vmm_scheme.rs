@@ -33,20 +33,21 @@
 //! /dev/vmm/
 //!   info               engine summary (snapshot taken at open)
 //!   worlds             list of worlds, one line per world
-//!   <id>/              directory: info, stats, exits, console
+//!   <id>/              directory: info, stats, exits, vcpus, console, disk
 //!   <id>/info          snapshot of a world
 //!   <id>/stats         snapshot of every world counter (pause, vCPUs, queue)
-//!   <id>/exits         exit-queue snapshot (pending count, never consumed)
+//!   <id>/exits         exit-queue snapshot (pending count + oldest event peek)
+//!   <id>/vcpus         per-vCPU diagnostic snapshot
 //!   <id>/console       console stream (read drains output, write queues input)
+//!   <id>/disk          raw block-device view (byte-addressed, read/write)
 //! ```
 //!
 //! # Read semantics
 //!
-//! Every file except `<id>/console` is a **snapshot** taken at open: reading
-//! is finite (EOF at the end) and never blocks. Opening the file again
-//! produces a new snapshot, which is also true for `<id>/stats` and
-//! `<id>/exits`: they report the counters and the queue depth observed at
-//! open time.
+//! Every file except `<id>/console` and `<id>/disk` is a **snapshot** taken at
+//! open: reading is finite (EOF at the end) and never blocks. Opening the file
+//! again produces a new snapshot, which is also true for `<id>/stats`,
+//! `<id>/exits` and `<id>/vcpus`: they report the state observed at open time.
 //!
 //! `<id>/console` is a **stream**, not a snapshot. Each `read` drains the
 //! output the guest has produced since the previous read; a read that finds
@@ -58,13 +59,21 @@
 //! nothing can be accepted, the write reports `EAGAIN` so a non-blocking
 //! front-end can retry later.
 //!
+//! `<id>/disk` is a **raw, byte-addressed view of the world's block device**.
+//! Reads and writes use the file's current offset (advanced per call); a read
+//! stops at the end of the disk and returns 0, and a write is short when the
+//! disk ends. This is a debug/import/export path, not a coherency protocol:
+//! host I/O is not synchronized with the guest's own virtio requests. Pause
+//! the world (`SYS_VMM_PAUSE`) before reading or writing the disk image if the
+//! guest can touch its block device concurrently.
+//!
 //! # Exit queue ownership
 //!
 //! The exit queue is owned by the policy: it is consumed through
-//! `SYS_VMM_EXIT_HANDLER`. `<id>/exits` is therefore strictly non-consuming.
-//! The engine exposes no peek operation, so the snapshot reports the pending
-//! depth but cannot describe the oldest queued event; that text is reported as
-//! unavailable instead of consuming an event behind the policy's back.
+//! `SYS_VMM_EXIT_HANDLER`. `<id>/exits` is therefore strictly non-consuming:
+//! it reports the pending depth and describes the **oldest** queued event with
+//! `vm::peek_exit` only. `VmmExitEvent` carries the guest physical address,
+//! access size/port/value and flags; it does not carry a guest RIP.
 //!
 //! Unknown paths return [`SyscallError::NotFound`].
 
@@ -73,6 +82,8 @@ use core::{
     fmt::Write,
     sync::atomic::{AtomicU64, Ordering},
 };
+
+use strat9_abi::vmm::exit_kind;
 
 use crate::{
     s9vm::{self, vm},
@@ -94,7 +105,8 @@ const DEV_VMM: u64 = 13;
 /// Allocates open file identifiers.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Content of an open file: root, world directory, text snapshot or stream.
+/// Content of an open file: root, world directory, text snapshot, stream or
+/// raw block device.
 enum Kind {
     /// Scheme root directory.
     Root,
@@ -104,6 +116,8 @@ enum Kind {
     Text(String),
     /// Live console of one world (read drains, write queues input).
     Console { world_id: u64 },
+    /// Raw block device of one world, addressed by byte offset in `cursor`.
+    Disk { world_id: u64 },
 }
 
 struct VmmFile {
@@ -250,7 +264,25 @@ impl VmmScheme {
         Ok(text)
     }
 
+    /// Human-readable name of an ABI exit kind.
+    fn exit_kind_name(kind: u32) -> &'static str {
+        match kind {
+            exit_kind::MMIO_READ => "mmio_read",
+            exit_kind::MMIO_WRITE => "mmio_write",
+            exit_kind::IO_PORT => "io_port",
+            exit_kind::HALT => "halt",
+            exit_kind::TRANSLATION => "translation",
+            exit_kind::EXCEPTION => "exception",
+            exit_kind::PREEMPTION_TIMER => "preemption_timer",
+            exit_kind::OTHER => "other",
+            _ => "unknown",
+        }
+    }
+
     /// Non-consuming snapshot of the exit queue of one world.
+    ///
+    /// The queue belongs to the policy; only `vm::peek_exit` is used, so the
+    /// oldest event is described without being removed.
     fn exits_text(id: u64) -> Result<String, SyscallError> {
         if vm::get(id).is_none() {
             return Err(SyscallError::NotFound);
@@ -259,13 +291,108 @@ impl VmmScheme {
         let mut text = String::new();
         let _ = writeln!(text, "world={}", id);
         let _ = writeln!(text, "pending={}", pending);
-        // The queue is policy-owned and the engine has no peek operation:
-        // describing the oldest event would require consuming it.
-        let _ = writeln!(
-            text,
-            "last_event=unavailable (queue owned by the policy consumer)"
-        );
+        match vm::peek_exit(id) {
+            Ok(event) => {
+                let _ = writeln!(
+                    text,
+                    "last_event=kind={} kind_id={} vcpu={} gpa={:#x} size={} \
+                     port={:#x} value={:#x} flags={:#x}",
+                    Self::exit_kind_name(event.kind),
+                    event.kind,
+                    event.vcpu_id,
+                    event.gpa,
+                    event.size,
+                    event.port,
+                    event.value,
+                    event.flags
+                );
+            }
+            Err(()) => {
+                let _ = writeln!(text, "last_event=none");
+            }
+        }
         Ok(text)
+    }
+
+    /// Finite snapshot of every logical vCPU of one world.
+    fn vcpus_text(id: u64) -> Result<String, SyscallError> {
+        let snapshots = vm::vcpu_snapshots(id).ok_or(SyscallError::NotFound)?;
+        let mut text = String::new();
+        let _ = writeln!(text, "world={}", id);
+        let _ = writeln!(text, "vcpus={}", snapshots.len());
+        for vcpu in &snapshots {
+            let _ = writeln!(
+                text,
+                "vcpu id={} apic_id={} hardware_ready={} executing={} pending_nmi={}",
+                vcpu.id, vcpu.apic_id, vcpu.hardware_ready, vcpu.executing, vcpu.pending_nmi
+            );
+        }
+        Ok(text)
+    }
+
+    /// Reads disk bytes starting at byte `offset`.
+    ///
+    /// The engine API is sector-addressed, so the first and last sectors are
+    /// read into a scratch buffer and only the requested byte range is copied.
+    fn disk_read_at(world_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
+        let mut scratch = [0u8; 512];
+        let mut done = 0usize;
+        while done < buf.len() {
+            let absolute = offset
+                .checked_add(done as u64)
+                .ok_or(SyscallError::InvalidArgument)?;
+            let sector = absolute / 512;
+            let in_sector = (absolute % 512) as usize;
+            let copied = vm::read_disk(world_id, sector, &mut scratch[in_sector..])
+                .map_err(|()| SyscallError::NotFound)?;
+            if copied == 0 {
+                break; // end of disk
+            }
+            let take = core::cmp::min(copied, buf.len() - done);
+            buf[done..done + take].copy_from_slice(&scratch[in_sector..in_sector + take]);
+            done += take;
+            if take < copied {
+                break; // caller buffer full
+            }
+        }
+        Ok(done)
+    }
+
+    /// Writes disk bytes starting at byte `offset`.
+    ///
+    /// Unaligned ranges use a read-modify-write on the touched sector; the
+    /// engine itself is sector-addressed.
+    fn disk_write_at(world_id: u64, offset: u64, data: &[u8]) -> Result<usize, SyscallError> {
+        let mut scratch = [0u8; 512];
+        let mut done = 0usize;
+        while done < data.len() {
+            let absolute = offset
+                .checked_add(done as u64)
+                .ok_or(SyscallError::InvalidArgument)?;
+            let sector = absolute / 512;
+            let in_sector = (absolute % 512) as usize;
+            let room = 512 - in_sector;
+            let take = core::cmp::min(room, data.len() - done);
+            // Read the existing sector so bytes outside the written range are
+            // preserved; a sector past the end yields 0 and the write stops.
+            let existing = vm::read_disk(world_id, sector, &mut scratch)
+                .map_err(|()| SyscallError::NotFound)?;
+            if existing == 0 {
+                break; // nothing beyond the end of the disk
+            }
+            scratch[in_sector..in_sector + take].copy_from_slice(&data[done..done + take]);
+            let written =
+                vm::write_disk(world_id, sector, &scratch).map_err(|()| SyscallError::NotFound)?;
+            if written <= in_sector {
+                break; // no room left in the disk
+            }
+            let accepted = core::cmp::min(written - in_sector, take);
+            done += accepted;
+            if accepted < take {
+                break; // short write at the end of the disk
+            }
+        }
+        Ok(done)
     }
 
     /// Resolves a non-directory path to the content of an open file.
@@ -280,6 +407,7 @@ impl VmmScheme {
                             "info" => Self::world_text(id),
                             "stats" => Self::stats_text(id),
                             "exits" => Self::exits_text(id),
+                            "vcpus" => Self::vcpus_text(id),
                             _ => Err(SyscallError::NotFound),
                         };
                     }
@@ -306,6 +434,14 @@ impl VmmScheme {
                     return Err(SyscallError::NotFound);
                 }
                 return Ok((Kind::Console { world_id: id }, FileFlags::DEVICE));
+            }
+        }
+        if let Some(id_text) = path.strip_suffix("/disk") {
+            if let Ok(id) = id_text.parse::<u64>() {
+                if vm::disk_sectors(id).is_none() {
+                    return Err(SyscallError::NotFound);
+                }
+                return Ok((Kind::Disk { world_id: id }, FileFlags::DEVICE));
             }
         }
         Ok((Kind::Text(Self::text_for_path(path)?), FileFlags::DEVICE))
@@ -344,6 +480,11 @@ impl VmmScheme {
                     DirEntry {
                         ino: 0,
                         file_type: DT_REG,
+                        name: String::from("disk"),
+                    },
+                    DirEntry {
+                        ino: 0,
+                        file_type: DT_REG,
                         name: String::from("exits"),
                     },
                     DirEntry {
@@ -356,9 +497,16 @@ impl VmmScheme {
                         file_type: DT_REG,
                         name: String::from("stats"),
                     },
+                    DirEntry {
+                        ino: 0,
+                        file_type: DT_REG,
+                        name: String::from("vcpus"),
+                    },
                 ]
             }
-            Kind::Text(_) | Kind::Console { .. } => return Err(SyscallError::NotADirectory),
+            Kind::Text(_) | Kind::Console { .. } | Kind::Disk { .. } => {
+                return Err(SyscallError::NotADirectory)
+            }
         };
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(entries)
@@ -427,6 +575,12 @@ impl Scheme for VmmScheme {
                 let world_id = *world_id;
                 vm::read_console_output(world_id, buf).map_err(|()| SyscallError::NotFound)
             }
+            Kind::Disk { world_id } => {
+                let world_id = *world_id;
+                let n = Self::disk_read_at(world_id, entry.cursor, buf)?;
+                entry.cursor += n as u64;
+                Ok(n)
+            }
         }
     }
 
@@ -446,6 +600,15 @@ impl Scheme for VmmScheme {
                     return Err(SyscallError::Again);
                 }
                 Ok(accepted)
+            }
+            Kind::Disk { world_id } => {
+                let world_id = *world_id;
+                // Raw byte-addressed write; a short count means the end of the
+                // disk was reached. Guest I/O is not synchronized: pause the
+                // world first when coherency matters.
+                let n = Self::disk_write_at(world_id, entry.cursor, buf)?;
+                entry.cursor += n as u64;
+                Ok(n)
             }
             // Every other file is a read-only diagnostic snapshot.
             Kind::Root | Kind::WorldDir(_) | Kind::Text(_) => Err(SyscallError::PermissionDenied),
@@ -470,6 +633,19 @@ impl Scheme for VmmScheme {
                 st_blocks: 0,
                 ..FileStat::zeroed()
             },
+            Kind::Disk { world_id } => {
+                let sectors = vm::disk_sectors(*world_id).ok_or(SyscallError::NotFound)?;
+                let capacity = sectors.saturating_mul(512);
+                FileStat {
+                    st_ino: file_id,
+                    st_mode: 0o020666,
+                    st_nlink: 1,
+                    st_size: capacity,
+                    st_blksize: 512,
+                    st_blocks: capacity / 512,
+                    ..FileStat::zeroed()
+                }
+            }
             Kind::Console { .. } => FileStat {
                 st_ino: file_id,
                 st_mode: 0o020666,
@@ -513,7 +689,8 @@ pub fn init_vmm_scheme() -> Result<(), SyscallError> {
     match scheme_router::mount_scheme("vmm", "/dev/vmm") {
         Ok(()) => {
             log::info!(
-                "[vmm] Scheme at /dev/vmm/ (info, worlds, <id>/{{info,stats,exits,console}})"
+                "[vmm] Scheme at /dev/vmm/ \
+                 (info, worlds, <id>/{{info,stats,exits,vcpus,console,disk}})"
             );
             Ok(())
         }
