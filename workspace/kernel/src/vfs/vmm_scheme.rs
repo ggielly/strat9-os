@@ -38,7 +38,8 @@
 //!   <id>/              directory: info, stats, timing, exits, vcpus, console, disk, control
 //!   <id>/info          snapshot of a world
 //!   <id>/stats         snapshot of every world counter (pause, vCPUs, queue)
-//!   <id>/timing        exit-latency and exit-rate aggregates (TSC cycles)
+//!   <id>/timing        exit-latency and exit-rate aggregates (cycles, plus ns
+//!                      when the host TSC frequency is known)
 //!   <id>/exits         exit-queue snapshot (pending count + oldest event peek)
 //!   <id>/vcpus         per-vCPU diagnostic snapshot
 //!   <id>/console       console stream (read drains output, write queues input)
@@ -294,15 +295,28 @@ impl VmmScheme {
 
     /// Timing snapshot of one world (exit latency and rate aggregates).
     ///
-    /// Cycles are time-stamp counter ticks on the CPU that ran the vCPU; the
-    /// reader must convert them with the host's TSC frequency. See the timing
-    /// module documentation for what each class means and why asynchronous
-    /// exits include the preceding guest time slice.
+    /// Cycles are time-stamp counter ticks on the CPU that ran the vCPU. When
+    /// the host TSC frequency is known, each latency is also reported in
+    /// nanoseconds, converted with the same rounded rules as
+    /// `s9vm::tsc::TscFrequency`. When it is unknown, the file prints
+    /// `tsc_hz=unknown` and no `*_ns` line: the reader then has to convert the
+    /// raw cycles itself. See the timing module documentation for what each
+    /// class means and why asynchronous exits include the preceding guest time
+    /// slice.
     fn timing_text(id: u64) -> Result<String, SyscallError> {
         let world = vm::get(id).ok_or(SyscallError::NotFound)?;
         let timing = vm::timing(id).ok_or(SyscallError::NotFound)?;
+        let frequency = Self::host_tsc_frequency();
         let mut text = String::new();
         let _ = writeln!(text, "world {}", world.id);
+        match frequency {
+            Some(frequency) => {
+                let _ = writeln!(text, "tsc_hz={}", frequency.hz());
+            }
+            None => {
+                let _ = writeln!(text, "tsc_hz=unknown");
+            }
+        }
         let _ = writeln!(text, "exits={}", timing.exits);
         let _ = writeln!(text, "mean_cycles={}", timing.mean_cycles);
         let _ = writeln!(text, "p95_cycles={}", timing.p95_cycles);
@@ -313,10 +327,74 @@ impl VmmScheme {
         let _ = writeln!(text, "handler_samples={}", timing.handler_samples);
         let _ = writeln!(text, "handler_mean_cycles={}", timing.handler_mean_cycles);
         let _ = writeln!(text, "handler_p95_cycles={}", timing.handler_p95_cycles);
+        if let Some(frequency) = frequency {
+            let _ = writeln!(
+                text,
+                "mean_ns={}",
+                frequency.nanoseconds(timing.mean_cycles)
+            );
+            let _ = writeln!(text, "p95_ns={}", frequency.nanoseconds(timing.p95_cycles));
+            let _ = writeln!(text, "min_ns={}", frequency.nanoseconds(timing.min_cycles));
+            let _ = writeln!(text, "max_ns={}", frequency.nanoseconds(timing.max_cycles));
+            let _ = writeln!(
+                text,
+                "handler_mean_ns={}",
+                frequency.nanoseconds(timing.handler_mean_cycles)
+            );
+            let _ = writeln!(
+                text,
+                "handler_p95_ns={}",
+                frequency.nanoseconds(timing.handler_p95_cycles)
+            );
+        }
         for (index, count) in timing.per_class.iter().enumerate() {
             let _ = writeln!(text, "class_{}={}", index, count);
         }
         Ok(text)
+    }
+
+    /// Host TSC frequency used to convert timing cycles to nanoseconds.
+    ///
+    /// The frequency is a property of the host CPU. It is detected once from
+    /// CPUID leaves `0x15` and `0x16` and cached in [`crate::s9vm::tsc`], so
+    /// opening the diagnostic file never repeats the detection. When the CPUID
+    /// leaves do not expose a plausible value (common on emulated CPUs), the
+    /// frequency measured at boot by the timer calibration
+    /// ([`crate::arch::x86_64::boot_timestamp`], CPUID or PIT based) is used as
+    /// a last resort. Returns `None` when neither source is usable; the caller
+    /// then keeps raw cycles only.
+    fn host_tsc_frequency() -> Option<crate::s9vm::tsc::TscFrequency> {
+        if let Some(frequency) = crate::s9vm::tsc::get() {
+            return Some(frequency);
+        }
+        let frequency = crate::s9vm::tsc::detect(Self::cpuid_leaf(0x15), Self::cpuid_leaf(0x16))
+            .or_else(Self::calibrated_tsc_frequency)?;
+        crate::s9vm::tsc::set(frequency);
+        Some(frequency)
+    }
+
+    /// TSC frequency measured by the boot-time timer calibration, if within
+    /// the model's plausibility bounds.
+    ///
+    /// The calibration runs during timer initialisation, before any file of
+    /// this scheme can be opened; its 2 GHz default is therefore not expected
+    /// to be observed through this path.
+    fn calibrated_tsc_frequency() -> Option<crate::s9vm::tsc::TscFrequency> {
+        let khz = crate::arch::x86_64::boot_timestamp::tsc_khz();
+        crate::s9vm::tsc::TscFrequency::from_hz(khz.saturating_mul(1_000))
+    }
+
+    /// Reads one CPUID leaf as `[EAX, EBX, ECX, EDX]`.
+    ///
+    /// Leaves above the host's maximum basic leaf are reported as zero: the
+    /// hardware returns the highest basic leaf instead, which would be
+    /// misinterpreted by the frequency model.
+    fn cpuid_leaf(leaf: u32) -> [u32; 4] {
+        if leaf > crate::arch::x86_64::cpuid(0, 0).0 {
+            return [0; 4];
+        }
+        let (eax, ebx, ecx, edx) = crate::arch::x86_64::cpuid(leaf, 0);
+        [eax, ebx, ecx, edx]
     }
 
     /// Human-readable name of an ABI exit kind.
