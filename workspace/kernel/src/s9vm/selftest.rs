@@ -22,21 +22,23 @@
 
 //! s9vm — hardware smoke test of the engine.
 //!
-//! Goal: run a minimal guest (64-bit long mode, EPT enabled, two
-//! mapped pages) that writes a byte to an I/O port and then executes `hlt`, and
-//! check that the full path works:
+//! Goal: run minimal guests (64-bit long mode, EPT enabled, page tables built
+//! by the kernel) that exercise the full path — guest tables and second-level
+//! tables, control-block load, guest entry, exits, kernel fast paths and clean
+//! shutdown — without panicking: a failure is logged and boot continues.
 //!
-//! 1. building the guest tables and the second-level tables;
-//! 2. loading the control block;
-//! 3. guest entry (`vmlaunch`), exit on I/O, resume, exit on `hlt`;
-//! 4. kernel fast path: the guest programs the legacy interrupt controller
-//!    through its ports; those exits are replayed by the kernel and never
-//!    reach the policy path;
-//! 5. clean shutdown.
+//! Phases, selected by the boot option `s9vm.selftest`:
 //!
-//! The test is only started if the kernel is enabled on VT-x and if the boot
-//! option `s9vm.selftest=1` is present. It never panics: a failure is
-//! logged and boot continues.
+//! - `device` (`1`/`true`): canonical guest, legacy interrupt controller
+//!   fast path, I/O exit and `hlt`;
+//! - `irq`: interrupt delivery through the interrupt window;
+//! - `console`: virtio console transport, both directions;
+//! - `blk`: virtio block request replay;
+//! - `net`: virtio network transmit;
+//! - `loader`: an ELF64 image built in kernel memory, loaded into a world with
+//!   [`crate::s9vm::vm::load_image`] (mapping, file-backed copy, BSS zeroing),
+//!   then executed: the guest prints its marker on the debug port and halts;
+//! - `2`/`all`: every phase.
 //!
 //! The guest state is the canonical 64-bit flat shape produced by
 //! [`GuestState::long_mode_64`]; it is entered once. Any exit the engine does
@@ -58,6 +60,7 @@ use crate::{
         virtio_blk,
         virtio_net,
         vcpu::{SecondLevelMemory, Vcpu, VcpuError},
+        vm,
     },
 };
 
@@ -259,6 +262,35 @@ const NET_GUEST_CODE: &[u8] = &[
     0xE6, 0xE9, // out 0xE9, al
     0xF4, // hlt
 ];
+
+// Loader phase.
+/// Guest-physical address of the page-table root used by the loaded guest.
+const LOADER_GPA_PML4: u64 = 0x0000;
+/// Guest-physical address of the page-directory pointer table.
+const LOADER_GPA_PDPT: u64 = 0x1000;
+/// Guest-physical address of the page directory.
+const LOADER_GPA_PD: u64 = 0x2000;
+/// Guest-physical address of the page table (identity maps 0..2 MiB).
+const LOADER_GPA_PT: u64 = 0x3000;
+/// Guest-physical base address where the generated ELF image is loaded.
+const LOADER_IMAGE_BASE: u64 = 0x1_0000;
+/// Guest-physical page used as the guest stack.
+const LOADER_GPA_STACK: u64 = 0x2_0000;
+/// Initial guest stack pointer (inside the stack page).
+const LOADER_STACK_TOP: u64 = LOADER_GPA_STACK + 0x800;
+/// Byte written by the loaded guest on the debug port.
+const LOADER_MARKER: u8 = b'L';
+/// Guest memory permissions of the loader phase (read | write | execute).
+const LOADER_GUEST_PERMS: u32 = 7;
+/// Offset of the guest code inside the generated image.
+const LOADER_CODE_OFFSET: u64 = 0x100;
+/// Size of an ELF64 header.
+const ELF_HEADER_SIZE: usize = 64;
+/// Size of one ELF64 program header.
+const ELF_PROGRAM_HEADER_SIZE: usize = 56;
+/// Guest code of the loader phase: `mov al, 'L'`, `mov dx, 0xE9`,
+/// `out dx, al`, `hlt`.
+const LOADER_GUEST_CODE: &[u8] = &[0xB0, LOADER_MARKER, 0xBA, 0xE9, 0x00, 0xEE, 0xF4];
 
 /// Flat 64-bit code descriptor (selector `0x08`).
 ///
@@ -1481,12 +1513,288 @@ pub fn run_net(caps: &HwCaps) -> Result<NetworkReport, SelftestError> {
     }
 }
 
+/// Report of the image-loader phase.
+pub struct LoaderReport {
+    pub total_exits: u32,
+    pub io_exits: u32,
+    pub halt_exits: u32,
+    /// Byte written by the loaded guest on the debug port.
+    pub marker: Option<u8>,
+    /// Guest-physical entry point returned by the loader.
+    pub entry: u64,
+    /// Guest-physical image base address.
+    pub image_base: u64,
+    /// Guest pages covered by the loaded image span.
+    pub pages: u64,
+}
+
+/// Writes a little-endian `u16` at `offset` inside a byte buffer.
+fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+    bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+/// Writes a little-endian `u32` at `offset` inside a byte buffer.
+fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+/// Writes a little-endian `u64` at `offset` inside a byte buffer.
+fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
+    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+/// Builds a minimal ELF64 guest image in kernel memory.
+///
+/// Layout: ELF64 header, one `PT_LOAD` program header, then the guest code at
+/// [`LOADER_CODE_OFFSET`]. The segment is loaded at [`LOADER_IMAGE_BASE`], its
+/// file-backed prefix (`p_filesz`) covers the header and the code, and its
+/// memory size (`p_memsz`) is one full page: the loader must zero the rest of
+/// the page (BSS).
+fn loader_image() -> Vec<u8> {
+    let page_size = crate::s9vm::mmu::PAGE_SIZE;
+    let mut image = Vec::new();
+    image.resize(ELF_HEADER_SIZE + ELF_PROGRAM_HEADER_SIZE, 0);
+    image.resize(LOADER_CODE_OFFSET as usize, 0);
+    image.extend_from_slice(LOADER_GUEST_CODE);
+    let file_size = image.len() as u64;
+
+    image[0..4].copy_from_slice(b"\x7fELF");
+    image[4] = 2; // ELFCLASS64
+    image[5] = 1; // ELFDATA2LSB
+    image[6] = 1; // EV_CURRENT
+    put_u16(&mut image, 0x10, 2); // e_type = ET_EXEC
+    put_u16(&mut image, 0x12, 62); // e_machine = EM_X86_64
+    put_u32(&mut image, 0x14, 1); // e_version = EV_CURRENT
+    put_u64(&mut image, 0x18, LOADER_IMAGE_BASE + LOADER_CODE_OFFSET); // e_entry
+    put_u64(&mut image, 0x20, ELF_HEADER_SIZE as u64); // e_phoff
+    put_u16(&mut image, 0x34, ELF_HEADER_SIZE as u16); // e_ehsize
+    put_u16(&mut image, 0x36, ELF_PROGRAM_HEADER_SIZE as u16); // e_phentsize
+    put_u16(&mut image, 0x38, 1); // e_phnum
+
+    let phdr = ELF_HEADER_SIZE;
+    put_u32(&mut image, phdr, 1); // p_type = PT_LOAD
+    put_u32(&mut image, phdr + 4, 5); // p_flags = PF_R | PF_X
+    put_u64(&mut image, phdr + 8, 0); // p_offset
+    put_u64(&mut image, phdr + 16, LOADER_IMAGE_BASE); // p_vaddr
+    put_u64(&mut image, phdr + 24, LOADER_IMAGE_BASE); // p_paddr
+    put_u64(&mut image, phdr + 32, file_size); // p_filesz
+    put_u64(&mut image, phdr + 40, page_size); // p_memsz (one page, BSS tail)
+    put_u64(&mut image, phdr + 48, page_size); // p_align
+    image
+}
+
+/// Returns the HHDM pointer of the guest page at `gpa` in a world.
+fn world_page(world_id: u64, gpa: u64) -> Result<*mut u8, SelftestError> {
+    let hpa = vm::debug_translate(world_id, gpa).ok_or(SelftestError::Mmu)?;
+    Ok(crate::memory::phys_to_virt(hpa) as *mut u8)
+}
+
+/// Writes a 64-bit page-table entry at `offset` inside the guest page at `gpa`.
+fn write_world_u64(
+    world_id: u64,
+    gpa: u64,
+    offset: usize,
+    value: u64,
+) -> Result<(), SelftestError> {
+    let page = world_page(world_id, gpa)?;
+    // SAFETY: the page belongs to a world reserved for this test, is mapped by
+    // the HHDM, and the callers keep `offset + 8` inside the 4 KiB page.
+    unsafe {
+        core::ptr::write_volatile(page.add(offset) as *mut u64, value);
+    }
+    Ok(())
+}
+
+/// Reads one byte of the guest page at `gpa` in a world.
+fn read_world_byte(world_id: u64, gpa: u64) -> Result<u8, SelftestError> {
+    let page = world_page(world_id, gpa)?;
+    // SAFETY: same invariant as `write_world_u64`; the first byte is inside
+    // the page.
+    Ok(unsafe { core::ptr::read_volatile(page) })
+}
+
+/// Image-loader test.
+///
+/// Builds a small ELF64 image in kernel memory and loads it into a fresh world
+/// with [`vm::load_image`]: guest pages mapped through `map_memory`, file-backed
+/// bytes copied page by page (GPA -> HPA -> HHDM), zero-filled tail. The image
+/// is then entered exactly like the other phases: the guest writes its marker
+/// on the debug port and halts. The guest page tables are the canonical
+/// identity layout; the second-level tables used for the run translate the
+/// world's own frames (through the world's diagnostic translation), so the
+/// executed image is the one the loader produced.
+pub fn run_loader(caps: &HwCaps) -> Result<LoaderReport, SelftestError> {
+    if !caps.can_run() {
+        return Err(SelftestError::BadExit("platform cannot run"));
+    }
+    // The world is destroyed on every path, including failures.
+    let record = vm::create(b"s9vm-loader", 0).ok_or(SelftestError::VmFail(1))?;
+    let result = run_loader_in_world(caps, record.id);
+    let _ = vm::destroy(record.id);
+    result
+}
+
+/// Body of the loader phase; the caller owns and destroys the world.
+fn run_loader_in_world(caps: &HwCaps, world_id: u64) -> Result<LoaderReport, SelftestError> {
+    let page_size = crate::s9vm::mmu::PAGE_SIZE;
+
+    // 1. Guest memory backing the page tables and the stack. The image pages
+    //    are mapped by the loader itself, which also allocates them.
+    for gpa in [
+        LOADER_GPA_PML4,
+        LOADER_GPA_PDPT,
+        LOADER_GPA_PD,
+        LOADER_GPA_PT,
+        LOADER_GPA_STACK,
+    ] {
+        vm::map_memory(world_id, caps, gpa, page_size, LOADER_GUEST_PERMS, 0)
+            .map_err(|_| SelftestError::VmFail(2))?;
+    }
+
+    // 2. Identity guest paging over the pages the guest touches. A single page
+    //    table maps the first 2 MiB, which covers every GPA of the phase.
+    write_world_u64(world_id, LOADER_GPA_PML4, 0, LOADER_GPA_PDPT | 0x3)?;
+    write_world_u64(world_id, LOADER_GPA_PDPT, 0, LOADER_GPA_PD | 0x3)?;
+    write_world_u64(world_id, LOADER_GPA_PD, 0, LOADER_GPA_PT | 0x3)?;
+    for gpa in [
+        LOADER_GPA_PML4,
+        LOADER_GPA_PDPT,
+        LOADER_GPA_PD,
+        LOADER_GPA_PT,
+        LOADER_IMAGE_BASE,
+        LOADER_GPA_STACK,
+    ] {
+        let index = (gpa / page_size) as usize;
+        write_world_u64(world_id, LOADER_GPA_PT, index * 8, gpa | 0x3)?;
+    }
+
+    // 3. Loads the image through the kernel loader.
+    let image = loader_image();
+    let loaded = vm::load_image(world_id, caps, &image, LOADER_IMAGE_BASE)
+        .map_err(|_| SelftestError::VmFail(3))?;
+    let expected_entry = LOADER_IMAGE_BASE + LOADER_CODE_OFFSET;
+    if loaded.entry != expected_entry
+        || loaded.image_base != LOADER_IMAGE_BASE
+        || loaded.span_min != LOADER_IMAGE_BASE
+        || loaded.span_max != LOADER_IMAGE_BASE + page_size
+    {
+        return Err(SelftestError::BadExit("loader returned an unexpected plan"));
+    }
+    // The copy and the zero-fill are observable through the world translation:
+    // first opcode of the guest code, then one byte of the BSS tail.
+    if read_world_byte(world_id, loaded.entry)? != LOADER_GUEST_CODE[0] {
+        return Err(SelftestError::BadExit("image data was not copied"));
+    }
+    if read_world_byte(world_id, LOADER_IMAGE_BASE + 0x800)? != 0 {
+        return Err(SelftestError::BadExit("image BSS was not zeroed"));
+    }
+
+    // 4. Second-level translation over the world's frames. The registry does
+    //    not expose its EPTP: the diagnostic translation of each page yields
+    //    the same HPAs, so the run uses exactly the frames the loader filled.
+    let mut second_level = SecondLevelMemory::new().map_err(|_| SelftestError::Mmu)?;
+    for gpa in [
+        LOADER_GPA_PML4,
+        LOADER_GPA_PDPT,
+        LOADER_GPA_PD,
+        LOADER_GPA_PT,
+        LOADER_IMAGE_BASE,
+        LOADER_GPA_STACK,
+    ] {
+        let hpa = vm::debug_translate(world_id, gpa).ok_or(SelftestError::Mmu)?;
+        second_level
+            .map_4k(gpa, hpa, crate::s9vm::mmu::Perms::read_write_execute())
+            .map_err(|_| SelftestError::Mmu)?;
+    }
+    let pointer = second_level.pointer(caps);
+
+    // 5. Enters the loaded image: RIP is the relocated entry point returned by
+    //    the loader, RSP points into the guest stack page.
+    let guest = GuestState::long_mode_64(loaded.entry, LOADER_STACK_TOP, LOADER_GPA_PML4);
+    let mut vcpu = Vcpu::new(caps, pointer)?;
+    // SAFETY: VT-x is active on this CPU (checked by the caller), interrupts
+    // are disabled and the control block was just created for this vCPU.
+    unsafe {
+        vcpu.load()?;
+        vcpu.configure_host()?;
+        vcpu.configure(caps, &guest)?;
+    }
+
+    let mut report = LoaderReport {
+        total_exits: 0,
+        io_exits: 0,
+        halt_exits: 0,
+        marker: None,
+        entry: loaded.entry,
+        image_base: loaded.image_base,
+        pages: loaded.span_pages(),
+    };
+    let mut outcome: Result<(), SelftestError> = Ok(());
+    for _ in 0..32 {
+        // SAFETY: `run` contract (block loaded, IRQs disabled).
+        let exit = match unsafe { vcpu.run() } {
+            Ok(exit) => exit,
+            Err(error) => {
+                outcome = Err(SelftestError::from(error));
+                break;
+            }
+        };
+        report.total_exits += 1;
+        match ExitReason::decode(exit.raw_reason).class() {
+            ExitClass::IoPort => {
+                report.io_exits += 1;
+                let port = ((exit.qualification >> 16) & 0xFFFF) as u16;
+                if port == TEST_PORT {
+                    report.marker = Some((vcpu.guest().rax & 0xFF) as u8);
+                }
+                // SAFETY: the control block is loaded and the guest is
+                // inactive (we are in the exit handler).
+                unsafe {
+                    vcpu.advance_rip(u64::from(exit.instruction_length))?;
+                }
+            }
+            ExitClass::Halt => {
+                report.halt_exits += 1;
+                break;
+            }
+            ExitClass::ExternalInterrupt | ExitClass::InterruptWindow => {}
+            ExitClass::PreemptionTimer => {}
+            other => {
+                log::warn!(
+                    "[s9vm] loader test: unexpected exit class={:?} reason={:#x} \
+                     qual={:#x} rip={:#x}",
+                    other,
+                    exit.raw_reason,
+                    exit.qualification,
+                    vcpu.guest().rip
+                );
+                outcome = Err(SelftestError::BadExit("unexpected loader-test exit"));
+                break;
+            }
+        }
+    }
+
+    // SAFETY: the vCPU is no longer active.
+    unsafe {
+        let _ = vcpu.clear();
+    }
+    second_level.destroy();
+
+    match outcome {
+        Ok(()) if report.halt_exits >= 1 && report.marker == Some(LOADER_MARKER) => Ok(report),
+        Ok(()) => Err(SelftestError::BadExit(
+            "loaded image did not report its marker",
+        )),
+        Err(error) => Err(error),
+    }
+}
+
 /// Starts the test if the boot option `s9vm.selftest=1` is present.
 ///
 /// Does nothing if VT-x is not active. Never panics.
 pub fn maybe_run_from_boot_env(caps: &HwCaps) {
-    // Value: 1/true = device fast path, 2/all = both phases, irq = interrupt
-    // phase only.
+    // Value: 1/true = device fast path; 2/all = every phase; irq, console,
+    // blk, net, loader = one phase only.
     let mode = crate::boot_args()
         .and_then(|args| args.env_get("s9vm.selftest"))
         .unwrap_or("");
@@ -1498,6 +1806,7 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
     let console_phase = matches!(mode, "2" | "all" | "console");
     let block_phase = matches!(mode, "2" | "all" | "blk");
     let network_phase = matches!(mode, "2" | "all" | "net");
+    let loader_phase = matches!(mode, "2" | "all" | "loader");
 
     if device_phase {
         log::info!("[s9vm] hardware smoke test requested");
@@ -1578,6 +1887,23 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
                 report.observed_byte
             ),
             Err(error) => log::warn!("[s9vm] irqtest FAIL: {:?}", error),
+        }
+    }
+
+    if loader_phase {
+        log::info!("[s9vm] image-loader test requested");
+        match run_loader(caps) {
+            Ok(report) => log::info!(
+                "[s9vm] loadertest PASS: entry={:#x} base={:#x} pages={} exits={} io={} hlt={} marker={:?}",
+                report.entry,
+                report.image_base,
+                report.pages,
+                report.total_exits,
+                report.io_exits,
+                report.halt_exits,
+                report.marker
+            ),
+            Err(error) => log::warn!("[s9vm] loadertest FAIL: {:?}", error),
         }
     }
 }
