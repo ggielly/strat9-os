@@ -1,0 +1,18 @@
+# Guest kernel image build configuration.
+#
+# The image is a standalone fixed-address binary (not a component linked into
+# the userspace window), so it carries its own linker script and disables PIE.
+# Keeping these flags in the crate's cargo config (instead of a cargo-make task
+# `env`) is important: a task-level RUSTFLAGS leaks into sibling builds in the
+# same cargo-make invocation and breaks the other components.
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C",
+    "relocation-model=static",
+    "-C",
+    "link-arg=-no-pie",
+    "-C",
+    "link-arg=-Ts9vm-guest.ld",
+    "-C",
+    "link-arg=--build-id=none",
+]

@@ -994,10 +994,9 @@ args = [
     "--target-dir",
     "../../../target",
 ]
-# Standalone crate: its own linker script places the image at the guest
-# conventional 0x100000 load address. The path is relative to the crate
-# directory (cargo runs rustc there).
-env = { RUSTFLAGS = "-C relocation-model=static -C link-arg=-no-pie -C link-arg=-Ts9vm-guest.ld -C link-arg=--build-id=none" }
+# The standalone crate carries its own `.cargo/config.toml` with the linker
+# flags (fixed 0x100000 load address). No task-level `env`: cargo-make would
+# leak RUSTFLAGS into the sibling component builds of the same invocation.
 [tasks.strate-graphical-release]
 description = "Build graphical display server (release)"
 cwd = "workspace/components/strate-graphical"

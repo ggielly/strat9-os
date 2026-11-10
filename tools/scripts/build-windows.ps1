@@ -99,7 +99,8 @@ $Components = @(
     @{ Name = "s9vm-console"; Cwd = "workspace\components\s9vm-console" }
     @{ Name = "s9vm-vmm"; Cwd = "workspace\components\s9vm-vmm" }
     # Bare-metal guest kernel image: standalone crate, own linker script at 0x100000.
-    @{ Name = "s9vm-guest"; Cwd = "workspace\guest\s9vm-guest"; TargetDir = (Join-Path $RootDir "target"); Env = @{ RUSTFLAGS = "-C relocation-model=static -C link-arg=-no-pie -C link-arg=-Ts9vm-guest.ld -C link-arg=--build-id=none" } }
+    # Bare-metal guest kernel image: standalone crate, its .cargo/config.toml carries the linker flags.
+    @{ Name = "s9vm-guest"; Cwd = "workspace\guest\s9vm-guest"; TargetDir = (Join-Path $RootDir "target") }
     @{ Name = "strate-net"; Cwd = "workspace\components\strate-net" }
     @{ Name = "strate-bus"; Cwd = "workspace\components\strate-bus" }
     @{ Name = "strate-wasm"; Cwd = "workspace\components\strate-wasm" }
