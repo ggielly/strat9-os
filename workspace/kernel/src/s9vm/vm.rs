@@ -945,6 +945,17 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                                         ExitClass::Msr => stats.emulated_msr += 1,
                                         _ => {}
                                     }
+                                    // Frames transmitted by the guest are
+                                    // drained here: until a network scheme
+                                    // exists, the kernel only reports their
+                                    // size (payloads are not logged).
+                                    let frames = machine.drain_network();
+                                    if !frames.is_empty() {
+                                        log::info!(
+                                            "[s9vm] net: {} octets transmitted",
+                                            frames.len()
+                                        );
+                                    }
                                     // The console device model collects the
                                     // bytes the guest wrote; the kernel only
                                     // routes them to its own log for now.
@@ -1001,6 +1012,17 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
         }
     }
     result
+}
+
+/// Queues a frame for the network device of a world.
+///
+/// The frame is handed to the guest's receive queue at its next notification;
+/// this is the entry point a network scheme will use.
+pub fn push_network_frame(world_id: u64, frame: &[u8]) -> Result<(), ()> {
+    let mut worlds = WORLDS.lock();
+    let world = worlds.get_mut(&world_id).ok_or(())?;
+    world.machine.push_network_frame(frame);
+    Ok(())
 }
 
 /// Queues an event in a world's queue.

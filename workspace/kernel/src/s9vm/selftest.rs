@@ -56,6 +56,7 @@ use crate::{
         machine::Machine,
         virtio,
         virtio_blk,
+        virtio_net,
         vcpu::{SecondLevelMemory, Vcpu, VcpuError},
     },
 };
@@ -190,6 +191,48 @@ const BLK_GUEST_CODE: &[u8] = &[
     0xB9, 0x00, 0x00, 0x00, 0x00, // mov ecx, 0 (request queue)
     0x89, 0x08, //
     0x8A, 0x04, 0x25, 0x40, 0x70, 0x00, 0x00, // mov al, byte [0x7040]
+    0xE6, 0xE9, // out 0xE9, al
+    0xF4, // hlt
+];
+
+// Network phase.
+/// Guest-physical address of the virtio network transport page.
+const NET_MMIO_BASE: u64 = 0xFEB0_2000;
+/// Frame the kernel sends through the transmit queue.
+const NET_FRAME: &[u8] = b"PING";
+/// Marker written by the guest once the transmit queue was notified.
+const NET_MARKER: u8 = b'N';
+/// Guest code of the network phase.
+///
+/// Programs the virtio network transport (status, transmit queue, queue
+/// address registers, ready, notify), then reports through the debug port and
+/// halts. The kernel checks the frame captured by the device model.
+const NET_GUEST_CODE: &[u8] = &[
+    0xB8, 0x70, 0x20, 0xB0, 0xFE, // mov eax, NET_MMIO_BASE + 0x70 (STATUS)
+    0xB9, 0x0F, 0x00, 0x00, 0x00, // mov ecx, ACK | DRIVER | FEATURES_OK | DRIVER_OK
+    0x89, 0x08, //
+    0xB8, 0x30, 0x20, 0xB0, 0xFE, // mov eax, QUEUE_SEL
+    0xB9, 0x01, 0x00, 0x00, 0x00, // mov ecx, 1 (transmit queue)
+    0x89, 0x08, //
+    0xB8, 0x38, 0x20, 0xB0, 0xFE, // mov eax, QUEUE_NUM
+    0xB9, 0x08, 0x00, 0x00, 0x00, // mov ecx, 8
+    0x89, 0x08, //
+    0xB8, 0x80, 0x20, 0xB0, 0xFE, // mov eax, QUEUE_DESC_LOW
+    0xB9, 0x00, 0x60, 0x00, 0x00, // mov ecx, GPA_QUEUES
+    0x89, 0x08, //
+    0xB8, 0x90, 0x20, 0xB0, 0xFE, // mov eax, QUEUE_AVAIL_LOW
+    0xB9, 0x00, 0x61, 0x00, 0x00, // mov ecx, GPA_QUEUES + 0x100
+    0x89, 0x08, //
+    0xB8, 0xA0, 0x20, 0xB0, 0xFE, // mov eax, QUEUE_USED_LOW
+    0xB9, 0x00, 0x62, 0x00, 0x00, // mov ecx, GPA_QUEUES + 0x200
+    0x89, 0x08, //
+    0xB8, 0x44, 0x20, 0xB0, 0xFE, // mov eax, QUEUE_READY
+    0xB9, 0x01, 0x00, 0x00, 0x00, // mov ecx, 1
+    0x89, 0x08, //
+    0xB8, 0x50, 0x20, 0xB0, 0xFE, // mov eax, QUEUE_NOTIFY
+    0xB9, 0x01, 0x00, 0x00, 0x00, // mov ecx, 1 (transmit queue)
+    0x89, 0x08, //
+    0xB0, NET_MARKER, // mov al, marker
     0xE6, 0xE9, // out 0xE9, al
     0xF4, // hlt
 ];
@@ -1195,6 +1238,199 @@ pub fn run_blk(caps: &HwCaps) -> Result<BlockReport, SelftestError> {
     }
 }
 
+/// Report of the network phase.
+pub struct NetworkReport {
+    pub total_exits: u32,
+    pub emulated_exits: u32,
+    pub halt_exits: u32,
+    pub marker: Option<u8>,
+    pub transmitted: u32,
+    pub payload: Vec<u8>,
+}
+
+/// Network transport test.
+///
+/// The kernel publishes a transmit packet (10-byte virtio_net_hdr + payload)
+/// in guest memory; the guest programs the transport and notifies the transmit
+/// queue. The device model must capture the payload. This validates the
+/// network transport page end to end.
+pub fn run_net(caps: &HwCaps) -> Result<NetworkReport, SelftestError> {
+    if !caps.can_run() {
+        return Err(SelftestError::BadExit("platform cannot run"));
+    }
+
+    let pml4 = alloc_frame()?;
+    let pdpt = alloc_frame()?;
+    let pd = alloc_frame()?;
+    let pt = alloc_frame()?;
+    let code = alloc_frame()?;
+    let stack = alloc_frame()?;
+    let queues = alloc_frame()?;
+    let buffer = alloc_frame()?;
+    let pd_high = alloc_frame()?;
+
+    write_u64(&pml4, 0, CONSOLE_GPA_PDPT | 0x3);
+    write_u64(&pdpt, 0, CONSOLE_GPA_PD | 0x3);
+    write_u64(&pdpt, 3 * 8, CONSOLE_GPA_PD_HIGH | 0x3);
+    write_u64(&pd, 0, CONSOLE_GPA_PT | 0x3);
+    write_u64(
+        &pd_high,
+        CONSOLE_PD_MMIO_INDEX * 8,
+        CONSOLE_GPA_MMIO_WINDOW | 0x83,
+    );
+    for page in 0..CONSOLE_GUEST_PAGES {
+        let gpa = page * crate::s9vm::mmu::PAGE_SIZE;
+        write_u64(&pt, page as usize * 8, gpa | 0x3);
+    }
+
+    write_bytes(&code, NET_GUEST_CODE);
+
+    // Transmit packet: zeroed network header, then the frame; one readable
+    // descriptor publishes it.
+    let mut packet = alloc::vec![0u8; virtio_net::NET_HDR_SIZE];
+    packet.extend_from_slice(NET_FRAME);
+    write_bytes(&buffer, &packet);
+    let descriptor = virtio::Descriptor {
+        addr: GPA_CONSOLE_BUFFER,
+        len: packet.len() as u32,
+        flags: 0,
+        next: 0,
+    };
+    write_bytes(&queues, &descriptor.encode());
+    // Available ring: idx = 1, ring[0] = 0.
+    write_u64(&queues, 0x100, 1 << 16);
+
+    let mut second_level = SecondLevelMemory::new().map_err(|_| SelftestError::Mmu)?;
+    let pages = [
+        (CONSOLE_GPA_PML4, &pml4),
+        (CONSOLE_GPA_PDPT, &pdpt),
+        (CONSOLE_GPA_PD, &pd),
+        (CONSOLE_GPA_PT, &pt),
+        (CONSOLE_GPA_CODE, &code),
+        (CONSOLE_GPA_STACK, &stack),
+        (GPA_QUEUES, &queues),
+        (GPA_CONSOLE_BUFFER, &buffer),
+        (CONSOLE_GPA_PD_HIGH, &pd_high),
+    ];
+    for (gpa, frame) in pages {
+        second_level
+            .map_4k(
+                gpa,
+                frame.start_address.as_u64(),
+                crate::s9vm::mmu::Perms::read_write_execute(),
+            )
+            .map_err(|_| SelftestError::Mmu)?;
+    }
+    let pointer = second_level.pointer(caps);
+
+    let guest = GuestState::long_mode_64(
+        CONSOLE_GPA_CODE,
+        CONSOLE_GPA_STACK + 0x800,
+        CONSOLE_GPA_PML4,
+    );
+    let mut vcpu = Vcpu::new(caps, pointer)?;
+    // SAFETY: VT-x active, interrupts disabled, control block freshly created.
+    unsafe {
+        vcpu.load()?;
+        vcpu.configure_host()?;
+        vcpu.configure(caps, &guest)?;
+    }
+
+    let mut machine = Machine::new();
+    let mut apic = LocalApic::new(0);
+    let mut report = NetworkReport {
+        total_exits: 0,
+        emulated_exits: 0,
+        halt_exits: 0,
+        marker: None,
+        transmitted: 0,
+        payload: Vec::new(),
+    };
+    let mut outcome: Result<(), SelftestError> = Ok(());
+
+    for _ in 0..64 {
+        // SAFETY: `run` contract.
+        let exit = match unsafe { vcpu.run() } {
+            Ok(exit) => exit,
+            Err(error) => {
+                outcome = Err(SelftestError::from(error));
+                break;
+            }
+        };
+        report.total_exits += 1;
+        let class = ExitReason::decode(exit.raw_reason).class();
+        if matches!(
+            class,
+            ExitClass::IoPort | ExitClass::Msr | ExitClass::EptViolation
+        ) {
+            // SAFETY: block loaded, guest inactive.
+            match unsafe { machine.handle(&mut vcpu, &mut apic, &exit) } {
+                Ok(true) => {
+                    report.emulated_exits += 1;
+                    let port = ((exit.qualification >> 16) & 0xFFFF) as u16;
+                    if class == ExitClass::IoPort && port == TEST_PORT {
+                        report.marker = Some((vcpu.guest().rax & 0xFF) as u8);
+                    }
+                    continue;
+                }
+                Ok(false) | Err(_) => {}
+            }
+        }
+        match class {
+            ExitClass::IoPort => {
+                let port = ((exit.qualification >> 16) & 0xFFFF) as u16;
+                if port == TEST_PORT {
+                    report.marker = Some((vcpu.guest().rax & 0xFF) as u8);
+                }
+                // SAFETY: block loaded, guest inactive.
+                unsafe {
+                    vcpu.advance_rip(u64::from(exit.instruction_length))?;
+                }
+            }
+            ExitClass::Halt => {
+                report.halt_exits += 1;
+                break;
+            }
+            ExitClass::ExternalInterrupt | ExitClass::InterruptWindow => {}
+            ExitClass::PreemptionTimer => {}
+            other => {
+                log::warn!(
+                    "[s9vm] network test: unexpected exit class={:?} reason={:#x} qual={:#x} \
+                     gpa={:#x} rip={:#x}",
+                    other,
+                    exit.raw_reason,
+                    exit.qualification,
+                    exit.guest_physical_address,
+                    vcpu.guest().rip
+                );
+                outcome = Err(SelftestError::BadExit("unexpected network-test exit"));
+                break;
+            }
+        }
+    }
+
+    report.transmitted = machine.devices().net.frames_sent();
+    report.payload = machine.drain_network();
+
+    // SAFETY: the vCPU is no longer active.
+    unsafe {
+        let _ = vcpu.clear();
+    }
+
+    match outcome {
+        Ok(())
+            if report.halt_exits >= 1
+                && report.marker == Some(NET_MARKER)
+                && report.transmitted >= 1
+                && report.payload == NET_FRAME =>
+        {
+            Ok(report)
+        }
+        Ok(()) => Err(SelftestError::BadExit("network frame was not transmitted")),
+        Err(error) => Err(error),
+    }
+}
+
 /// Starts the test if the boot option `s9vm.selftest=1` is present.
 ///
 /// Does nothing if VT-x is not active. Never panics.
@@ -1211,6 +1447,7 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
     let interrupt_phase = matches!(mode, "2" | "all" | "irq");
     let console_phase = matches!(mode, "2" | "all" | "console");
     let block_phase = matches!(mode, "2" | "all" | "blk");
+    let network_phase = matches!(mode, "2" | "all" | "net");
 
     if device_phase {
         log::info!("[s9vm] hardware smoke test requested");
@@ -1242,6 +1479,22 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
                 report.output.len()
             ),
             Err(error) => log::warn!("[s9vm] consoletest FAIL: {:?}", error),
+        }
+    }
+
+    if network_phase {
+        log::info!("[s9vm] network-transport test requested");
+        match run_net(caps) {
+            Ok(report) => log::info!(
+                "[s9vm] nettest PASS: exits={} emulated={} hlt={} marker={:?} transmitted={} payload={}",
+                report.total_exits,
+                report.emulated_exits,
+                report.halt_exits,
+                report.marker,
+                report.transmitted,
+                report.payload.len()
+            ),
+            Err(error) => log::warn!("[s9vm] nettest FAIL: {:?}", error),
         }
     }
 

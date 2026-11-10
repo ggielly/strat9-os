@@ -22,6 +22,8 @@ mod pic;
 mod virtio;
 #[path = "../../kernel/src/s9vm/virtio_blk.rs"]
 mod virtio_blk;
+#[path = "../../kernel/src/s9vm/virtio_net.rs"]
+mod virtio_net;
 #[path = "../../kernel/src/s9vm/virtio_console.rs"]
 mod virtio_console;
 
@@ -1120,4 +1122,83 @@ fn block_read_request_is_served_through_the_transport_page() {
         apic.pending_vector(),
         Some(emulate::BLK_IRQ_VECTOR)
     );
+}
+
+// ---------------------------------------------------------------------------
+// virtio network transport page
+// ---------------------------------------------------------------------------
+
+#[test]
+fn network_page_is_identified() {
+    assert_eq!(
+        emulate::device_page(emulate::NET_BASE + 0x50),
+        Some(DevicePage::Net)
+    );
+}
+
+#[test]
+fn network_frame_is_captured_through_the_transport_page() {
+    let mut memory = machine();
+    let mut guest = TestGuest::new(CODE_PAGE);
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+
+    mmio_write(
+        &mut devices,
+        &mut apic,
+        &mut memory,
+        &mut guest,
+        emulate::NET_BASE,
+        u64::from(virtio_net::reg::STATUS),
+        virtio_net::status::ACKNOWLEDGE
+            | virtio_net::status::DRIVER
+            | virtio_net::status::FEATURES_OK
+            | virtio_net::status::DRIVER_OK,
+    );
+    // Transmit queue (1).
+    for (offset, value) in [
+        (virtio_net::reg::QUEUE_SEL, 1),
+        (virtio_net::reg::QUEUE_NUM, 8),
+        (virtio_net::reg::QUEUE_DESC_LOW, CONSOLE_DESC as u32),
+        (virtio_net::reg::QUEUE_AVAIL_LOW, CONSOLE_AVAIL as u32),
+        (virtio_net::reg::QUEUE_USED_LOW, CONSOLE_USED as u32),
+        (virtio_net::reg::QUEUE_READY, 1),
+    ] {
+        mmio_write(
+            &mut devices,
+            &mut apic,
+            &mut memory,
+            &mut guest,
+            emulate::NET_BASE,
+            u64::from(offset),
+            value,
+        );
+    }
+
+    // Packet: zeroed network header + payload, one readable descriptor.
+    let mut packet = alloc::vec![0u8; virtio_net::NET_HDR_SIZE];
+    packet.extend_from_slice(b"frame");
+    memory.write_bytes(CONSOLE_BUFFER, &packet);
+    let descriptor = virtio::Descriptor {
+        addr: CONSOLE_BUFFER,
+        len: packet.len() as u32,
+        flags: 0,
+        next: 0,
+    };
+    memory.write_bytes(CONSOLE_DESC, &descriptor.encode());
+    memory.write_bytes(CONSOLE_AVAIL + 2, &1u16.to_le_bytes());
+    memory.write_bytes(CONSOLE_AVAIL + 4, &0u16.to_le_bytes());
+
+    mmio_write(
+        &mut devices,
+        &mut apic,
+        &mut memory,
+        &mut guest,
+        emulate::NET_BASE,
+        u64::from(virtio_net::reg::QUEUE_NOTIFY),
+        1,
+    );
+    assert_eq!(devices.net.output(), b"frame");
+    assert_eq!(devices.net.frames_sent(), 1);
+    assert_eq!(apic.pending_vector(), Some(emulate::NET_IRQ_VECTOR));
 }

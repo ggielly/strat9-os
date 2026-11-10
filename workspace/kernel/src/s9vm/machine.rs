@@ -138,6 +138,16 @@ impl Machine {
         self.devices.console.drain_output()
     }
 
+    /// Takes the frames the guest transmitted on the virtio network device.
+    pub fn drain_network(&mut self) -> alloc::vec::Vec<u8> {
+        self.devices.net.drain_output()
+    }
+
+    /// Queues a frame for the guest's receive path.
+    pub fn push_network_frame(&mut self, frame: &[u8]) {
+        self.devices.net.push_frame(frame);
+    }
+
     /// Tries to consume an exit by replaying the faulting instruction against
     /// the device model.
     ///

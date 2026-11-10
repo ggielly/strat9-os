@@ -67,6 +67,7 @@ pub mod vcpu;
 pub mod virtio;
 pub mod virtio_blk;
 pub mod virtio_console;
+pub mod virtio_net;
 pub mod vm;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};

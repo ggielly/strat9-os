@@ -55,6 +55,7 @@ use super::{
     virtio::QueueMemory,
     virtio_blk::VirtioBlk,
     virtio_console::VirtioConsole,
+    virtio_net::VirtioNet,
 };
 
 /// Page size of the second-level and guest page tables.
@@ -90,6 +91,10 @@ pub const CONSOLE_BASE: u64 = 0xFEB0_0000;
 pub const BLK_BASE: u64 = 0xFEB0_1000;
 /// Interrupt vector used to signal the block device.
 pub const BLK_IRQ_VECTOR: u8 = 0x22;
+/// Base of the virtio network transport page (virtio-mmio layout).
+pub const NET_BASE: u64 = 0xFEB0_2000;
+/// Interrupt vector used to signal the network device.
+pub const NET_IRQ_VECTOR: u8 = 0x23;
 /// Interrupt vector used to signal the console.
 ///
 /// The virtio-mmio transport does not define its own interrupt: the platform
@@ -430,6 +435,8 @@ pub struct Devices {
     pub console: VirtioConsole,
     /// Virtio block device (MMIO transport page).
     pub blk: VirtioBlk,
+    /// Virtio network device (MMIO transport page).
+    pub net: VirtioNet,
 }
 
 impl Devices {
@@ -440,6 +447,7 @@ impl Devices {
             ioapic: IoApic::new(0),
             console: VirtioConsole::new(),
             blk: VirtioBlk::new(64 * 1024),
+            net: VirtioNet::new(),
         }
     }
 
@@ -670,6 +678,8 @@ pub enum DevicePage {
     Console,
     /// Virtio block transport page.
     Blk,
+    /// Virtio network transport page.
+    Net,
 }
 
 /// Identifies the modeled device page containing `address`.
@@ -683,6 +693,8 @@ pub fn device_page(address: u64) -> Option<DevicePage> {
         Some(DevicePage::Console)
     } else if page == BLK_BASE {
         Some(DevicePage::Blk)
+    } else if page == NET_BASE {
+        Some(DevicePage::Net)
     } else {
         None
     }
@@ -720,6 +732,7 @@ fn read_mmio(devices: &Devices, apic: &LocalApic, page: DevicePage, offset: usiz
         DevicePage::IoApic => devices.ioapic.mmio_read(offset & 0xFF),
         DevicePage::Console => devices.console.read(offset as u32 & 0xFFF),
         DevicePage::Blk => devices.blk.read(offset as u32 & 0xFFF),
+        DevicePage::Net => devices.net.read(offset as u32 & 0xFFF),
     }
 }
 
@@ -748,6 +761,12 @@ fn write_mmio(
             devices.blk.write(offset as u32 & 0xFFF, value, view);
             if devices.blk.interrupt_status() != 0 {
                 apic.inject(BLK_IRQ_VECTOR);
+            }
+        }
+        DevicePage::Net => {
+            devices.net.write(offset as u32 & 0xFFF, value, view);
+            if devices.net.interrupt_status() != 0 {
+                apic.inject(NET_IRQ_VECTOR);
             }
         }
     }
