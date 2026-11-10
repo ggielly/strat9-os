@@ -79,6 +79,18 @@ pub const VMM_CMDLINE_MAX: usize = 256;
 /// caller.
 pub const VMM_IOMMU_MAX_MAP_BYTES: u64 = 1 << 30;
 
+/// Sector size of the world block device (virtio-blk), in bytes.
+pub const VMM_DISK_SECTOR_SIZE: u64 = 512;
+/// Capacity a world block device has after `SYS_VMM_LOAD_DISK`, in bytes.
+///
+/// The block device starts smaller (64 KiB in the current engine) and a disk
+/// image grows it; the load call never shrinks it and always leaves at least
+/// this capacity, zero-filled after the image, so a guest sees a stable
+/// 128 KiB (256-sector) disk for small images.
+pub const VMM_DISK_DEFAULT_BYTES: u64 = 128 * 1024;
+/// Maximum size of one `SYS_VMM_LOAD_DISK` image (16 MiB).
+pub const VMM_DISK_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Register block shared between `SYS_VMM_SET_REGS` and `SYS_VMM_GET_REGS`.
 ///
 /// Size: 184 bytes. The order follows the usual save order

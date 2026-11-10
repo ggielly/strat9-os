@@ -8,10 +8,10 @@ mod virtio;
 mod virtio_blk;
 
 use alloc::vec::Vec;
-use virtio::{Descriptor, QueueMemory, DESCRIPTOR_SIZE, DESC_F_WRITE, VIRTQ_AVAIL_F_NO_INTERRUPT};
+use virtio::{DESC_F_WRITE, DESCRIPTOR_SIZE, Descriptor, QueueMemory, VIRTQ_AVAIL_F_NO_INTERRUPT};
 use virtio_blk::{
-    reg, request, request_status, status, VirtioBlk, DEVICE_ID, MAGIC, QUEUE_NUM_MAX, SECTOR_SIZE,
-    VERSION,
+    DEVICE_ID, MAGIC, QUEUE_NUM_MAX, SECTOR_SIZE, VERSION, VirtioBlk, reg, request, request_status,
+    status,
 };
 
 struct Memory {
@@ -400,4 +400,101 @@ fn no_interrupt_flag_suppresses_the_completion_interrupt() {
         device.interrupt_status() & virtio_blk::interrupt::USED_RING,
         0
     );
+}
+
+// ---------------------------------------------------------------------------
+// Disk replacement primitives used by `SYS_VMM_LOAD_DISK`
+//
+// The capacity policy (grow-only, 128 KiB floor, 16 MiB bound) lives in
+// `s9vm::vm::load_disk`, which is not host-includable because it depends on
+// the world registry. These tests exercise the device-level primitives that
+// function uses: zero-filling the disk, copying a shorter image over it, and
+// rebuilding a zeroed device when the image grows it.
+// ---------------------------------------------------------------------------
+
+/// Mirror of the in-place branch of `vm::load_disk`: capacity unchanged,
+/// zero-fill then copy the image.
+fn replace_in_place(device: &mut VirtioBlk, image: &[u8]) {
+    let disk = device.disk_mut();
+    assert!(image.len() <= disk.len());
+    disk.fill(0);
+    disk[..image.len()].copy_from_slice(image);
+}
+
+/// Mirror of the growth branch of `vm::load_disk`: rebuild the device zeroed
+/// at `capacity`, preserving the access mode, then copy the image.
+fn replace_with_growth(device: &mut VirtioBlk, image: &[u8], capacity: usize) {
+    assert!(image.len() <= capacity);
+    let read_only = device.read_only();
+    let mut fresh = if read_only {
+        VirtioBlk::new_read_only(capacity)
+    } else {
+        VirtioBlk::new(capacity)
+    };
+    fresh.disk_mut()[..image.len()].copy_from_slice(image);
+    *device = fresh;
+}
+
+#[test]
+fn load_disk_shorter_image_zero_fills_the_tail() {
+    let mut device = VirtioBlk::new(128 * 1024);
+    // Old content must not survive a replacement.
+    device.disk_mut().fill(0xAA);
+    let image = [0x5Au8; 4 * SECTOR_SIZE];
+    replace_in_place(&mut device, &image);
+    assert_eq!(&device.disk_mut()[..image.len()], &image[..]);
+    assert!(
+        device.disk_mut()[image.len()..]
+            .iter()
+            .all(|byte| *byte == 0),
+        "bytes after the image must be zero-filled"
+    );
+    assert_eq!(device.sectors(), 256);
+}
+
+#[test]
+fn load_disk_growth_rebuilds_a_zeroed_device() {
+    let mut device = VirtioBlk::new(64 * 1024);
+    device.disk_mut().fill(0xAA);
+    let image = [0x3Cu8; 8 * SECTOR_SIZE];
+    replace_with_growth(&mut device, &image, 128 * 1024);
+    assert_eq!(device.sectors(), 256);
+    assert_eq!(&device.disk_mut()[..image.len()], &image[..]);
+    assert!(
+        device.disk_mut()[image.len()..]
+            .iter()
+            .all(|byte| *byte == 0),
+        "the rebuilt device must be zeroed after the image"
+    );
+    // Device identity is preserved: it is still a virtio block device.
+    let mut memory = Memory::new();
+    let _ = ready_with(&mut memory, device);
+}
+
+#[test]
+fn load_disk_growth_preserves_read_only_mode() {
+    let mut device = VirtioBlk::new_read_only(64 * 1024);
+    assert!(device.read_only());
+    let image = [0x11u8; SECTOR_SIZE];
+    replace_with_growth(&mut device, &image, 128 * 1024);
+    assert!(device.read_only(), "the access mode must be preserved");
+    assert_eq!(&device.disk_mut()[..image.len()], &image[..]);
+}
+
+#[test]
+fn load_disk_image_writes_remain_visible_through_sectors() {
+    // The raw `/dev/vmm/<id>/disk` view addresses the same bytes the guest
+    // reads: a replacement is visible sector by sector. One read request of
+    // two sectors covers both markers.
+    let mut device = VirtioBlk::new(128 * 1024);
+    let mut image = [0u8; 2 * SECTOR_SIZE];
+    image[0] = 0xDE;
+    image[SECTOR_SIZE] = 0xAD;
+    replace_in_place(&mut device, &image);
+    let mut memory = Memory::new();
+    let mut device = ready_with(&mut memory, device);
+    build_request(&mut memory, request::IN, 0, (2 * SECTOR_SIZE) as u32, true);
+    device.write(reg::QUEUE_NOTIFY, 0, &mut memory);
+    assert_eq!(memory.slice(STATUS_BYTE, 1)[0], request_status::OK);
+    assert_eq!(memory.slice(DATA, 2 * SECTOR_SIZE), &image[..]);
 }

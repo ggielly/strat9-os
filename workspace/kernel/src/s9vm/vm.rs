@@ -57,10 +57,14 @@ use crate::{
         mmu::{PAGE_SIZE, Perms as MmuPerms},
         timing::{EXIT_LATENCY_BUCKETS, ExitLatencyHistogram, WorldTiming},
         vcpu::{ExitInfo, SecondLevelMemory, Vcpu, VcpuError},
+        virtio_blk::VirtioBlk,
     },
     sync::{SpinLock, WaitQueue},
 };
-use strat9_abi::vmm::{VMM_IOMMU_MAX_MAP_BYTES, VmmExitEvent, VmmRegs, exit_kind};
+use strat9_abi::vmm::{
+    VMM_DISK_DEFAULT_BYTES, VMM_DISK_MAX_BYTES, VMM_DISK_SECTOR_SIZE, VMM_IOMMU_MAX_MAP_BYTES,
+    VmmExitEvent, VmmRegs, exit_kind,
+};
 
 /// Maximum number of simultaneous worlds (safety bound).
 pub const MAX_WORLDS: usize = 64;
@@ -1962,6 +1966,63 @@ pub fn write_disk(world_id: u64, sector: u64, data: &[u8]) -> Result<usize, ()> 
     let count = core::cmp::min(data.len(), disk.len() - offset);
     disk[offset..offset + count].copy_from_slice(&data[..count]);
     Ok(count)
+}
+
+/// Errors of [`load_disk`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskError {
+    /// The world does not exist (or is being destroyed).
+    Unknown,
+    /// Empty or non-sector-multiple image length.
+    InvalidLength,
+    /// Image larger than [`VMM_DISK_MAX_BYTES`].
+    TooLarge,
+}
+
+/// Replaces the contents of a world's block device with a disk image.
+///
+/// `bytes` must be a non-empty multiple of [`VMM_DISK_SECTOR_SIZE`] and at
+/// most [`VMM_DISK_MAX_BYTES`]. The image is copied from sector 0, the device
+/// is **never shrunk**, and the capacity after the call is at least
+/// `max(current, VMM_DISK_DEFAULT_BYTES, image length)`. Bytes past the image
+/// are zero, so a shorter image fully replaces the previous content; when the
+/// device has to grow it is rebuilt zeroed (read-only mode preserved), which
+/// resets its virtio transport state. Meant to be called before the guest
+/// boots. Returns the resulting capacity in 512-byte sectors.
+pub fn load_disk(world_id: u64, bytes: &[u8]) -> Result<u64, DiskError> {
+    if bytes.is_empty() || bytes.len() as u64 % VMM_DISK_SECTOR_SIZE != 0 {
+        return Err(DiskError::InvalidLength);
+    }
+    if bytes.len() as u64 > VMM_DISK_MAX_BYTES {
+        return Err(DiskError::TooLarge);
+    }
+    let mut worlds = WORLDS.lock();
+    let world = worlds.get_mut(&world_id).ok_or(DiskError::Unknown)?;
+    if world.closing {
+        return Err(DiskError::Unknown);
+    }
+    let blk = &mut world.machine.devices_mut().blk;
+    let current = blk.sectors() * VMM_DISK_SECTOR_SIZE;
+    // Grow-only: never shrink, and leave at least the documented default
+    // capacity so a small image still yields a stable 256-sector device.
+    let target = current.max(VMM_DISK_DEFAULT_BYTES).max(bytes.len() as u64);
+    if target == current {
+        // In-place replacement keeps the virtio transport state.
+        let disk = blk.disk_mut();
+        disk.fill(0);
+        disk[..bytes.len()].copy_from_slice(bytes);
+    } else {
+        // Growth rebuilds the device zeroed; preserve the access mode.
+        let read_only = blk.read_only();
+        let mut fresh = if read_only {
+            VirtioBlk::new_read_only(target as usize)
+        } else {
+            VirtioBlk::new(target as usize)
+        };
+        fresh.disk_mut()[..bytes.len()].copy_from_slice(bytes);
+        *blk = fresh;
+    }
+    Ok(target / VMM_DISK_SECTOR_SIZE)
 }
 
 /// Diagnostic snapshot of one logical vCPU.

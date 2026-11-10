@@ -510,3 +510,25 @@ fn run_syscall_contract_is_stable() {
     assert!(SYS_VMM_RUN > SYS_VMM_GET_REGS);
     assert!(SYS_VMM_RUN < SYS_VMM_INJECT_IRQ);
 }
+
+#[test]
+fn load_disk_syscall_number_is_stable() {
+    assert_eq!(SYS_VMM_LOAD_DISK, 593);
+    assert_eq!(SYS_VMM_LOAD_DISK, SYS_VMM_SET_CMDLINE + 1);
+    assert!(SYS_VMM_LOAD_DISK < 600);
+}
+
+#[test]
+fn disk_constants_are_coherent() {
+    assert_eq!(abi::VMM_DISK_SECTOR_SIZE, 512);
+    assert_eq!(abi::VMM_DISK_DEFAULT_BYTES, 128 * 1024);
+    assert_eq!(abi::VMM_DISK_MAX_BYTES, 16 * 1024 * 1024);
+    // The image bound is a whole number of sectors, at least the default
+    // capacity, and the default is a whole number of sectors too.
+    assert_eq!(abi::VMM_DISK_DEFAULT_BYTES % abi::VMM_DISK_SECTOR_SIZE, 0);
+    assert_eq!(abi::VMM_DISK_MAX_BYTES % abi::VMM_DISK_SECTOR_SIZE, 0);
+    assert!(abi::VMM_DISK_DEFAULT_BYTES <= abi::VMM_DISK_MAX_BYTES);
+    // 128 KiB is exactly 256 sectors, the capacity documented for the load
+    // call.
+    assert_eq!(abi::VMM_DISK_DEFAULT_BYTES / abi::VMM_DISK_SECTOR_SIZE, 256);
+}

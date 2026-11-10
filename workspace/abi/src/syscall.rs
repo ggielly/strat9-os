@@ -1880,3 +1880,23 @@ pub const SYS_VMM_LOAD_MODULE: usize = 591;
 /// line is published to the guest by `SYS_VMM_BOOT_PARAMS`. Returns the stored
 /// length.
 pub const SYS_VMM_SET_CMDLINE: usize = 592;
+
+/// Replace the contents of a world's block device with a disk image.
+///
+/// `arg1` = VMM capability handle (write capability required),
+/// `arg2` = user pointer to the image bytes,
+/// `arg3` = length in bytes: non-zero, a multiple of
+/// [`strat9_abi::vmm::VMM_DISK_SECTOR_SIZE`] and at most
+/// [`strat9_abi::vmm::VMM_DISK_MAX_BYTES`].
+///
+/// Semantics: the image is copied from the start of the disk, the following
+/// bytes are zero-filled, and the device is **never shrunk**. If the image is
+/// larger than the current device, the device grows to the image length; in
+/// any case the capacity after the call is at least
+/// [`strat9_abi::vmm::VMM_DISK_DEFAULT_BYTES`]. Bytes beyond the image are
+/// zero, so a shorter image fully replaces the previous content. The call is
+/// meant to be issued before the guest boots: it resets the virtio transport
+/// state when the device has to grow (the access mode, read-only or writable,
+/// is preserved). Use the raw `/dev/vmm/<id>/disk` view to inspect or patch
+/// the image afterwards. Returns 0.
+pub const SYS_VMM_LOAD_DISK: usize = 593;

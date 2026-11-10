@@ -55,9 +55,10 @@ use crate::{
 };
 use alloc::vec;
 use strat9_abi::vmm::{
-    VMM_ABI_VERSION, VMM_CMDLINE_MAX, VMM_IOMMU_MAX_MAP_BYTES, VMM_LIST_MAX, VMM_MODULE_MAX_BYTES,
-    VMM_NAME_MAX, VMM_VCPU_LIST_MAX, VmmCpuidPolicy, VmmImageInfo, VmmInfo, VmmIommuMap, VmmRegs,
-    VmmVcpuInfo, VmmWorldEntry, VmmWorldStats, iommu_flags, state, vcpu_flags,
+    VMM_ABI_VERSION, VMM_CMDLINE_MAX, VMM_DISK_MAX_BYTES, VMM_DISK_SECTOR_SIZE,
+    VMM_IOMMU_MAX_MAP_BYTES, VMM_LIST_MAX, VMM_MODULE_MAX_BYTES, VMM_NAME_MAX, VMM_VCPU_LIST_MAX,
+    VmmCpuidPolicy, VmmImageInfo, VmmInfo, VmmIommuMap, VmmRegs, VmmVcpuInfo, VmmWorldEntry,
+    VmmWorldStats, iommu_flags, state, vcpu_flags,
 };
 
 /// Maximum size of a structure read from user space.
@@ -885,6 +886,50 @@ pub fn sys_vmm_set_cmdline(
     }
     let stored = vm::set_cmdline(world, &cmdline).map_err(map_vm_error)?;
     Ok(stored as u64)
+}
+
+/// SYS_VMM_LOAD_DISK (593): replaces a world's block-device image.
+///
+/// `arg1` = VMM capability handle (write permission required),
+/// `arg2` = user pointer to the image bytes,
+/// `arg3` = image length: non-zero, a multiple of
+/// [`VMM_DISK_SECTOR_SIZE`], at most [`VMM_DISK_MAX_BYTES`].
+///
+/// The bytes are copied into a bounded kernel buffer, then
+/// [`vm::load_disk`] replaces the device content: image first, zero-fill after
+/// it, grow-only (never shrink), and at least
+/// [`strat9_abi::vmm::VMM_DISK_DEFAULT_BYTES`] of capacity. Intended to be
+/// called before the guest boots; when the device grows its virtio transport
+/// state is reset (the read-only mode is preserved). Returns 0.
+pub fn sys_vmm_load_disk(
+    vmm_handle: u64,
+    image_ptr: u64,
+    image_len: u64,
+) -> Result<u64, SyscallError> {
+    let required = CapPermissions {
+        write: true,
+        ..CapPermissions::none()
+    };
+    let world = vmm_world(vmm_handle, required)?;
+    if image_len == 0 || image_len % VMM_DISK_SECTOR_SIZE != 0 || image_len > VMM_DISK_MAX_BYTES {
+        return Err(SyscallError::InvalidArgument);
+    }
+    // Bounded by VMM_DISK_MAX_BYTES (16 MiB) by the check above.
+    let mut image = vec![0u8; image_len as usize];
+    let slice = UserSliceRead::new(image_ptr, image.as_slice().len())?;
+    if slice.copy_to(&mut image) != image.len() {
+        return Err(SyscallError::Fault);
+    }
+    vm::load_disk(world, &image).map_err(map_disk_error)?;
+    Ok(0)
+}
+
+/// Maps a [`vm::DiskError`] to the syscall ABI.
+fn map_disk_error(error: vm::DiskError) -> SyscallError {
+    match error {
+        vm::DiskError::Unknown => SyscallError::BadHandle,
+        vm::DiskError::InvalidLength | vm::DiskError::TooLarge => SyscallError::InvalidArgument,
+    }
 }
 
 /// SYS_VMM_VCPU_LIST (588): enumerates the vCPUs of a world into a caller
