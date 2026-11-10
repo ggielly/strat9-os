@@ -143,6 +143,11 @@ impl Machine {
         self.devices.net.drain_output()
     }
 
+    /// Takes the individual frames the guest transmitted.
+    pub fn drain_network_frames(&mut self) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
+        self.devices.net.drain_frames()
+    }
+
     /// Queues a frame for the guest's receive path.
     pub fn push_network_frame(&mut self, frame: &[u8]) {
         self.devices.net.push_frame(frame);

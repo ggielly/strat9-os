@@ -34,7 +34,7 @@
 //!   increments the version.
 
 /// Version of the s9vm ABI. Increment on every structure change.
-pub const VMM_ABI_VERSION: u32 = 2;
+pub const VMM_ABI_VERSION: u32 = 3;
 
 /// Maximum number of registers exposed by [`VmmRegs`] (general-purpose registers).
 pub const VMM_REG_COUNT: usize = 16;
@@ -220,6 +220,29 @@ pub struct VmmWorldStats {
     pub exits_pending: u64,
 }
 
+/// Result of `SYS_VMM_LOAD_IMAGE` (586).
+///
+/// Size: 40 bytes, alignment 8. All addresses are guest-physical. `entry` is
+/// the relocated entry point the policy must load into the vCPU `RIP`; the
+/// span is the page-aligned footprint actually reserved in the world, holes
+/// included.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VmmImageInfo {
+    /// ABI version of the structure.
+    pub abi_version: u32,
+    /// Reserved, zeroed by the kernel.
+    pub reserved: u32,
+    /// Guest-physical entry point.
+    pub entry: u64,
+    /// Guest-physical base the image was loaded at.
+    pub image_base: u64,
+    /// Lowest guest-physical address covered (inclusive).
+    pub span_min: u64,
+    /// Highest guest-physical address covered (exclusive).
+    pub span_max: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,6 +255,7 @@ mod tests {
         assert_eq!(size_of::<VmmExitEvent>(), 48);
         assert_eq!(size_of::<VmmWorldEntry>(), 72);
         assert_eq!(size_of::<VmmWorldStats>(), 96);
+        assert_eq!(size_of::<VmmImageInfo>(), 40);
     }
 
     #[test]

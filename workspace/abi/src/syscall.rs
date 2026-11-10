@@ -1757,3 +1757,28 @@ pub const SYS_VMM_LIST: usize = 584;
 /// `arg2` = pointer to [`strat9_abi::vmm::VmmWorldStats`]. Returns 0.
 pub const SYS_VMM_STATS: usize = 585;
 
+/// Load an ELF64 guest image into a world's guest memory.
+///
+/// `arg1` = VMM capability handle (write capability required),
+/// `arg2` = guest-physical load base (4 KiB aligned),
+/// `arg3` = pointer to the image bytes in the caller address space,
+/// `arg4` = image length in bytes,
+/// `arg5` = pointer to a [`strat9_abi::vmm::VmmImageInfo`] filled with the
+/// relocated entry point and the loaded span.
+///
+/// The image is parsed and fully validated before any guest page is mapped, so
+/// a malformed image leaves the world untouched. Nothing is executed: the
+/// policy sets the vCPU registers from the returned entry point and then calls
+/// `RUN`. Returns 0.
+pub const SYS_VMM_LOAD_IMAGE: usize = 586;
+
+/// Write the firmware description tables (ACPI) of a world into guest memory.
+///
+/// `arg1` = VMM capability handle (write capability required),
+/// `arg2` = guest-physical base address (16-byte aligned, conventionally
+/// `0x000E_0000`).
+///
+/// One Local APIC entry is emitted per vCPU of the world. The window is mapped
+/// read-only when it is not already backed by guest memory. Returns 0.
+pub const SYS_VMM_ACPI: usize = 587;
+

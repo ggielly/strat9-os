@@ -125,6 +125,8 @@ pub const MAC: [u8; 6] = [0x52, 0x54, 0x39, 0x00, 0x00, 0x01];
 pub const BUDGET: usize = 8192;
 /// Maximum number of transmitted bytes buffered for the kernel.
 pub const OUTPUT_CAPACITY: usize = 128 * 1024;
+/// Maximum number of transmitted frames kept with their boundaries.
+pub const MAX_OUTPUT_FRAMES: usize = 256;
 /// Maximum number of received frames buffered for the driver.
 pub const INPUT_CAPACITY: usize = 256;
 
@@ -143,6 +145,7 @@ pub struct VirtioNet {
     tx_queue: Option<SplitQueue>,
     input: VecDeque<Vec<u8>>,
     output: Vec<u8>,
+    output_frames: VecDeque<Vec<u8>>,
     frames_sent: u32,
     frames_received: u32,
     link_up: bool,
@@ -168,6 +171,7 @@ impl VirtioNet {
             tx_queue: None,
             input: VecDeque::new(),
             output: Vec::new(),
+            output_frames: VecDeque::new(),
             frames_sent: 0,
             frames_received: 0,
             link_up: true,
@@ -260,6 +264,14 @@ impl VirtioNet {
     /// Takes the transmitted bytes.
     pub fn drain_output(&mut self) -> Vec<u8> {
         core::mem::take(&mut self.output)
+    }
+
+    /// Takes the individual frames the guest transmitted (no virtio header).
+    ///
+    /// The flat [`Self::drain_output`] accessor loses frame boundaries; this
+    /// one is used by the network front-end, which needs packet boundaries.
+    pub fn drain_frames(&mut self) -> Vec<Vec<u8>> {
+        self.output_frames.drain(..).collect()
     }
 
     /// Queues a frame for the receive path.
@@ -526,6 +538,10 @@ impl VirtioNet {
                 let payload = &packet[NET_HDR_SIZE..];
                 let count = core::cmp::min(payload.len(), OUTPUT_CAPACITY - self.output.len());
                 self.output.extend_from_slice(&payload[..count]);
+                if self.output_frames.len() >= MAX_OUTPUT_FRAMES {
+                    self.output_frames.pop_front();
+                }
+                self.output_frames.push_back(payload[..count].to_vec());
                 total += count;
                 self.frames_sent = self.frames_sent.wrapping_add(1);
             }

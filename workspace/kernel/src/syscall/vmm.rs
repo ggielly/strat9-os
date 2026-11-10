@@ -50,12 +50,18 @@ use crate::{
 };
 use alloc::vec;
 use strat9_abi::vmm::{
-    state, VmmInfo, VmmRegs, VmmWorldEntry, VmmWorldStats, VMM_ABI_VERSION, VMM_LIST_MAX,
-    VMM_NAME_MAX,
+    state, VmmImageInfo, VmmInfo, VmmRegs, VmmWorldEntry, VmmWorldStats, VMM_ABI_VERSION,
+    VMM_LIST_MAX, VMM_NAME_MAX,
 };
 
 /// Maximum size of a structure read from user space.
 const MAX_STRUCT: usize = 192;
+
+/// Maximum size of a guest image accepted by `SYS_VMM_LOAD_IMAGE`.
+///
+/// The bytes are copied into a temporary kernel buffer before the loader parses
+/// them, so this bound also protects kernel memory.
+const MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Maximum number of entries written by one `SYS_VMM_LIST` call.
 ///
@@ -596,6 +602,64 @@ pub fn sys_vmm_stats(vmm_handle: u64, out_ptr: u64) -> Result<u64, SyscallError>
     Ok(0)
 }
 
+/// SYS_VMM_LOAD_IMAGE (586): loads an ELF64 guest image into a world.
+///
+/// The image bytes are copied out of the caller address space first, so a
+/// malformed pointer is rejected before any guest page is mapped. On success
+/// the relocated entry point and the loaded span are written to `out_ptr` as a
+/// [`VmmImageInfo`]; the caller sets the vCPU registers from it.
+pub fn sys_vmm_load_image(
+    vmm_handle: u64,
+    gpa: u64,
+    image_ptr: u64,
+    image_len: u64,
+    out_ptr: u64,
+) -> Result<u64, SyscallError> {
+    let required = CapPermissions {
+        write: true,
+        ..CapPermissions::none()
+    };
+    let world = vmm_world(vmm_handle, required)?;
+    let caps = s9vm::detect().ok_or(SyscallError::NotSupported)?;
+    if image_len == 0 || image_len > MAX_IMAGE_BYTES {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if out_ptr == 0 {
+        return Err(SyscallError::Fault);
+    }
+    let slice = UserSliceRead::new(image_ptr, image_len as usize)?;
+    let mut image = vec![0u8; image_len as usize];
+    if slice.copy_to(&mut image) != image_len as usize {
+        return Err(SyscallError::Fault);
+    }
+    let loaded = vm::load_image(world, &caps, &image, gpa).map_err(map_vm_error)?;
+    let info = VmmImageInfo {
+        abi_version: VMM_ABI_VERSION,
+        entry: loaded.entry,
+        image_base: loaded.image_base,
+        span_min: loaded.span_min,
+        span_max: loaded.span_max,
+        ..VmmImageInfo::default()
+    };
+    write_struct(out_ptr, &info)?;
+    Ok(0)
+}
+
+/// SYS_VMM_ACPI (587): writes the firmware description tables of a world.
+///
+/// The tables describe the world's vCPUs and the I/O APIC and are placed at
+/// `gpa` (16-byte aligned, conventionally [`vm::ACPI_GPA`]). Returns 0.
+pub fn sys_vmm_acpi(vmm_handle: u64, gpa: u64) -> Result<u64, SyscallError> {
+    let required = CapPermissions {
+        write: true,
+        ..CapPermissions::none()
+    };
+    let world = vmm_world(vmm_handle, required)?;
+    let caps = s9vm::detect().ok_or(SyscallError::NotSupported)?;
+    vm::write_acpi(world, &caps, gpa).map_err(map_vm_error)?;
+    Ok(0)
+}
+
 /// SYS_VMM_INFO (569): snapshot of a world, or global summary if `vmm_id = 0`.
 pub fn sys_vmm_info(vmm_handle: u64, out_ptr: u64) -> Result<u64, SyscallError> {
     let mut info = VmmInfo {
@@ -620,7 +684,16 @@ pub fn sys_vmm_info(vmm_handle: u64, out_ptr: u64) -> Result<u64, SyscallError> 
             state::STOPPED
         };
         info.vmm_id = 0;
-        info.vcpu_count = vm::count() as u32;
+        // The global summary aggregates every world: the vCPU count is the
+        // number of vCPUs currently registered, not the number of worlds.
+        let mut vcpus = 0u64;
+        let mut pages = 0u64;
+        for record in vm::list() {
+            vcpus = vcpus.saturating_add(u64::from(record.vcpu_count));
+            pages = pages.saturating_add(record.mapped_pages);
+        }
+        info.vcpu_count = vcpus.min(u64::from(u32::MAX)) as u32;
+        info.mapped_pages = pages;
         let name = b"s9vm";
         info.name[..name.len()].copy_from_slice(name);
     } else {

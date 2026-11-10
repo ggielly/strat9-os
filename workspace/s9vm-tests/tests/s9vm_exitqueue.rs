@@ -97,3 +97,18 @@ fn drain_and_clear() {
     assert!(queue.is_empty());
     assert_eq!(queue.dropped(), 0);
 }
+
+#[test]
+fn peek_returns_the_oldest_event_without_consuming_it() {
+    let mut queue = ExitQueue::new(4);
+    assert_eq!(queue.peek(), Err(QueueError::Empty));
+    queue.push(event(1)).expect("first");
+    queue.push(event(2)).expect("second");
+    assert_eq!(queue.len(), 2);
+    assert_eq!(queue.peek().expect("peek").value, 1);
+    assert_eq!(queue.len(), 2);
+    assert_eq!(queue.peek().expect("peek again").value, 1);
+    // A pop still returns the same event first.
+    assert_eq!(queue.pop().expect("pop").value, 1);
+    assert_eq!(queue.peek().expect("peek").value, 2);
+}

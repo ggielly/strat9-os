@@ -100,6 +100,14 @@ impl ExitQueue {
         self.entries.pop_front().ok_or(QueueError::Empty)
     }
 
+    /// Reads the oldest event **without** removing it (diagnostics only).
+    ///
+    /// The queue is owned by the policy: a diagnostic reader must not consume
+    /// an event behind its back.
+    pub fn peek(&self) -> Result<VmmExitEvent, QueueError> {
+        self.entries.front().copied().ok_or(QueueError::Empty)
+    }
+
     /// Empties the queue and returns the removed events.
     pub fn drain(&mut self) -> Vec<VmmExitEvent> {
         self.entries.drain(..).collect()

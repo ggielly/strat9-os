@@ -84,8 +84,8 @@ fn p0_block_does_not_collide_with_iommu_block() {
 }
 
 #[test]
-fn abi_version_is_two() {
-    assert_eq!(abi::VMM_ABI_VERSION, 2);
+fn abi_version_is_current() {
+    assert_eq!(abi::VMM_ABI_VERSION, 3);
 }
 
 #[test]
@@ -100,6 +100,18 @@ fn info_structure_layout() {
     use core::mem::{align_of, size_of};
     assert_eq!(size_of::<abi::VmmInfo>(), 96);
     assert_eq!(align_of::<abi::VmmInfo>(), 8);
+}
+
+#[test]
+fn image_info_structure_layout() {
+    use core::mem::{align_of, offset_of, size_of};
+    assert_eq!(size_of::<abi::VmmImageInfo>(), 40);
+    assert_eq!(align_of::<abi::VmmImageInfo>(), 8);
+    assert_eq!(offset_of!(abi::VmmImageInfo, abi_version), 0);
+    assert_eq!(offset_of!(abi::VmmImageInfo, entry), 8);
+    let info = abi::VmmImageInfo::default();
+    assert_eq!(info.entry, 0);
+    assert_eq!(info.span_max, 0);
 }
 
 #[test]

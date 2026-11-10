@@ -78,6 +78,12 @@ pub const MAX_CONSOLE_OUTPUT: usize = 64 * 1024;
 pub const MAX_PENDING_FRAMES: usize = 64;
 /// Maximum size of one injected network frame.
 pub const MAX_FRAME_SIZE: usize = 64 * 1024;
+/// Maximum number of guest-transmitted frames buffered for the network
+/// front-end.
+pub const MAX_NETWORK_OUTPUT_FRAMES: usize = 64;
+/// Maximum number of guest-transmitted octets buffered for the network
+/// front-end.
+pub const MAX_NETWORK_OUTPUT_BYTES: usize = 256 * 1024;
 
 /// Public record of a world.
 #[derive(Debug, Clone, Copy)]
@@ -336,6 +342,10 @@ struct World {
     /// Frames queued for the guest network device, delivered at the next
     /// `RUN`.
     pending_frames: Vec<Vec<u8>>,
+    /// Frames transmitted by the guest, waiting for the network front-end.
+    network_output: Vec<Vec<u8>>,
+    /// Octets currently queued in `network_output` (bounded).
+    network_output_bytes: usize,
 }
 
 /// Logical vCPU: opaque identifier, APIC id and ABI register block.
@@ -415,6 +425,8 @@ pub fn create(name: &[u8], silo_id: u32) -> Option<WorldRecord> {
             pending_console_input: Vec::new(),
             console_output: Vec::new(),
             pending_frames: Vec::new(),
+            network_output: Vec::new(),
+            network_output_bytes: 0,
         },
     );
     Some(record)
@@ -983,6 +995,8 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
         mut pending_console_input,
         mut pending_frames,
         mut console_output,
+        mut network_output,
+        mut network_output_bytes,
     ) = {
         let mut worlds = WORLDS.lock();
         let world = vcpu_world_mut(&mut worlds, vcpu_id).ok_or(RunError::UnknownVcpu)?;
@@ -1005,6 +1019,8 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
         let pending_console_input = core::mem::take(&mut world.pending_console_input);
         let pending_frames = core::mem::take(&mut world.pending_frames);
         let console_output = core::mem::take(&mut world.console_output);
+        let network_output = core::mem::take(&mut world.network_output);
+        let network_output_bytes = core::mem::replace(&mut world.network_output_bytes, 0);
         (
             world.record.id,
             hardware,
@@ -1017,6 +1033,8 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
             pending_console_input,
             pending_frames,
             console_output,
+            network_output,
+            network_output_bytes,
         )
     };
     let mut hardware = match hardware {
@@ -1161,15 +1179,31 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                                         _ => {}
                                     }
                                     // Frames transmitted by the guest are
-                                    // drained here: until a network scheme
-                                    // exists, the kernel only reports their
-                                    // size (payloads are not logged).
-                                    let frames = machine.drain_network();
+                                    // queued for the network front-end. The
+                                    // queue is bounded: a slow consumer loses
+                                    // the oldest frames instead of growing
+                                    // kernel memory without limit.
+                                    let frames = machine.drain_network_frames();
                                     if !frames.is_empty() {
                                         log::info!(
                                             "[s9vm] net: {} octets transmitted",
-                                            frames.len()
+                                            frames.iter().map(|frame| frame.len()).sum::<usize>()
                                         );
+                                        for frame in frames {
+                                            if frame.len() > MAX_FRAME_SIZE {
+                                                continue;
+                                            }
+                                            if network_output.len() >= MAX_NETWORK_OUTPUT_FRAMES
+                                                || network_output_bytes + frame.len()
+                                                    > MAX_NETWORK_OUTPUT_BYTES
+                                            {
+                                                let dropped = network_output.remove(0);
+                                                network_output_bytes =
+                                                    network_output_bytes.saturating_sub(dropped.len());
+                                            }
+                                            network_output_bytes += frame.len();
+                                            network_output.push(frame);
+                                        }
                                     }
                                     // The console device model collects the
                                     // bytes the guest wrote; the kernel only
@@ -1224,6 +1258,8 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
         world.console_output = console_output;
         world.pending_console_input = pending_console_input;
         world.pending_frames = pending_frames;
+        world.network_output = network_output;
+        world.network_output_bytes = network_output_bytes;
         if let Some(slot) = world.vcpus.iter_mut().find(|slot| slot.id == vcpu_id) {
             slot.regs = regs;
             slot.hardware = Some(hardware);
@@ -1330,6 +1366,228 @@ pub fn write_boot_info(world_id: u64, gpa: u64) -> Result<(), VmError> {
         );
     }
     Ok(())
+}
+
+/// Conventional guest-physical address of the firmware table image.
+///
+/// ACPI-compatible guests search for the `RSD PTR ` signature on 16-byte
+/// boundaries in the extended BIOS data area and in the
+/// `0x000E_0000..=0x000F_FFFF` window, so placing the image there makes it
+/// discoverable without extending the boot-information page.
+pub const ACPI_GPA: u64 = 0x000E_0000;
+
+/// Writes the firmware description tables of a world at `base_gpa`.
+///
+/// The image is built from the world's vCPU APIC identifiers (one MADT Local
+/// APIC entry each) and placed in guest memory. If the range is not mapped
+/// yet, it is mapped read-only; if it already belongs to guest RAM (a firmware
+/// region mapped by the loader, for instance), the tables are written into the
+/// existing pages. `base_gpa` must be 16-byte aligned and the image must stay
+/// inside the guest-physical address space.
+pub fn write_acpi(world_id: u64, caps: &HwCaps, base_gpa: u64) -> Result<(), VmError> {
+    use crate::s9vm::acpi::{AcpiBuilder, IMAGE_ALIGN, MAX_IMAGE_LEN};
+
+    if base_gpa % IMAGE_ALIGN != 0 {
+        return Err(VmError::Map(MapError::InvalidRange));
+    }
+    if base_gpa
+        .checked_add(MAX_IMAGE_LEN as u64)
+        .map_or(true, |end| end > MAX_GPA)
+    {
+        return Err(VmError::Map(MapError::InvalidRange));
+    }
+
+    // 1. APIC identifiers of the world's vCPUs (the MADT describes them).
+    let apic_ids: Vec<u8> = {
+        let worlds = WORLDS.lock();
+        let world = worlds.get(&world_id).ok_or(VmError::Unknown)?;
+        if world.vcpus.is_empty() {
+            return Err(VmError::Map(MapError::InvalidRange));
+        }
+        world
+            .vcpus
+            .iter()
+            .map(|slot| slot.apic_id as u8)
+            .collect()
+    };
+
+    // 2. Builds the image outside the registry lock.
+    let builder = AcpiBuilder::new(base_gpa, &apic_ids);
+    let layout = builder.layout().map_err(|_| VmError::Map(MapError::InvalidRange))?;
+    let mut image = alloc::vec![0u8; layout.total_len];
+    builder
+        .encode(&mut image)
+        .map_err(|_| VmError::Map(MapError::InvalidRange))?;
+    let len = image.len();
+    let page_len = ((len as u64 + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+
+    // 3. Maps the window when it is not already backed by guest memory. An
+    //    overlap is not an error: the range may already be covered by a larger
+    //    reserved region, in which case the copy below simply uses it.
+    let already_mapped = {
+        let worlds = WORLDS.lock();
+        match worlds
+            .get(&world_id)
+            .and_then(|world| world.memory.as_ref())
+        {
+            Some(memory) => (0..page_len)
+                .step_by(PAGE_SIZE as usize)
+                .all(|offset| memory.translate(base_gpa + offset as u64).is_some()),
+            None => return Err(VmError::Map(MapError::NotMapped)),
+        }
+    };
+    if !already_mapped {
+        if let Err(error) = map_memory(world_id, caps, base_gpa, page_len, 1, 0) {
+            if error != VmError::Map(MapError::Overlap) {
+                return Err(error);
+            }
+        }
+    }
+
+    // 4. Copies the tables page by page through the HHDM.
+    let mut worlds = WORLDS.lock();
+    let world = worlds.get_mut(&world_id).ok_or(VmError::Unknown)?;
+    let memory = world
+        .memory
+        .as_ref()
+        .ok_or(VmError::Map(MapError::NotMapped))?;
+    let mut copied = 0usize;
+    while copied < len {
+        let page_gpa = base_gpa + ((copied / PAGE_SIZE as usize) * PAGE_SIZE as usize) as u64;
+        let page_offset = copied % PAGE_SIZE as usize;
+        let count = core::cmp::min(PAGE_SIZE as usize - page_offset, len - copied);
+        let hpa = memory
+            .translate(page_gpa)
+            .ok_or(VmError::Map(MapError::NotMapped))?;
+        // SAFETY: the page belongs to this world and is mapped by the HHDM;
+        // `page_offset + count <= PAGE_SIZE`.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                image[copied..].as_ptr(),
+                (crate::memory::phys_to_virt(hpa) as *mut u8).add(page_offset),
+                count,
+            );
+        }
+        copied += count;
+    }
+    drop(worlds);
+
+    log::info!(
+        "[s9vm] firmware tables at {:#x}: {} byte(s), {} vCPU(s)",
+        base_gpa,
+        len,
+        apic_ids.len()
+    );
+    Ok(())
+}
+
+/// Peeks at the oldest pending exit event of a world, without consuming it.
+///
+/// The exit queue is owned by the policy; this accessor only feeds diagnostics
+/// (`/dev/vmm/<id>/exits`) and never changes the queue.
+pub fn peek_exit(world_id: u64) -> Result<VmmExitEvent, ()> {
+    WORLDS
+        .lock()
+        .get(&world_id)
+        .ok_or(())?
+        .exits
+        .peek()
+        .map_err(|_| ())
+}
+
+/// Pops one frame transmitted by the guest and queued for the network
+/// front-end. Returns `Ok(None)` when the queue is empty.
+pub fn read_network_frame(world_id: u64) -> Result<Option<Vec<u8>>, ()> {
+    let mut worlds = WORLDS.lock();
+    let world = worlds.get_mut(&world_id).ok_or(())?;
+    if world.network_output.is_empty() {
+        return Ok(None);
+    }
+    let frame = world.network_output.remove(0);
+    world.network_output_bytes = world.network_output_bytes.saturating_sub(frame.len());
+    Ok(Some(frame))
+}
+
+/// Capacity of the world's block device, in 512-byte sectors.
+pub fn disk_sectors(world_id: u64) -> Option<u64> {
+    WORLDS
+        .lock()
+        .get(&world_id)
+        .map(|world| world.machine.devices().blk.sectors())
+}
+
+/// Reads sectors from the world's block device into `out`.
+///
+/// Returns the number of bytes copied, clamped to the disk capacity and to the
+/// length of `out`.
+pub fn read_disk(world_id: u64, sector: u64, out: &mut [u8]) -> Result<usize, ()> {
+    let mut worlds = WORLDS.lock();
+    let world = worlds.get_mut(&world_id).ok_or(())?;
+    let disk = world.machine.devices_mut().blk.disk_mut();
+    let offset = sector
+        .checked_mul(512)
+        .and_then(|offset| usize::try_from(offset).ok())
+        .ok_or(())?;
+    if offset >= disk.len() {
+        return Ok(0);
+    }
+    let count = core::cmp::min(out.len(), disk.len() - offset);
+    out[..count].copy_from_slice(&disk[offset..offset + count]);
+    Ok(count)
+}
+
+/// Writes sectors to the world's block device from `data`.
+///
+/// Returns the number of bytes written, clamped to the disk capacity and to
+/// the length of `data`.
+pub fn write_disk(world_id: u64, sector: u64, data: &[u8]) -> Result<usize, ()> {
+    let mut worlds = WORLDS.lock();
+    let world = worlds.get_mut(&world_id).ok_or(())?;
+    let disk = world.machine.devices_mut().blk.disk_mut();
+    let offset = sector
+        .checked_mul(512)
+        .and_then(|offset| usize::try_from(offset).ok())
+        .ok_or(())?;
+    if offset >= disk.len() {
+        return Ok(0);
+    }
+    let count = core::cmp::min(data.len(), disk.len() - offset);
+    disk[offset..offset + count].copy_from_slice(&data[..count]);
+    Ok(count)
+}
+
+/// Diagnostic snapshot of one logical vCPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VcpuSnapshot {
+    /// Opaque vCPU identifier.
+    pub id: u64,
+    /// Guest APIC identifier.
+    pub apic_id: u32,
+    /// `true` when a hardware context has been created (at least one `RUN`).
+    pub hardware_ready: bool,
+    /// `true` while a `RUN` request is pending or executing.
+    pub executing: bool,
+    /// `true` when an NMI is pending delivery.
+    pub pending_nmi: bool,
+}
+
+/// Diagnostic snapshot of every vCPU of a world.
+pub fn vcpu_snapshots(world_id: u64) -> Option<Vec<VcpuSnapshot>> {
+    let worlds = WORLDS.lock();
+    let world = worlds.get(&world_id)?;
+    Some(
+        world
+            .vcpus
+            .iter()
+            .map(|slot| VcpuSnapshot {
+                id: slot.id,
+                apic_id: slot.apic_id,
+                hardware_ready: slot.hardware.is_some(),
+                executing: slot.run_requested || slot.run_in_flight,
+                pending_nmi: slot.pending_nmi,
+            })
+            .collect(),
+    )
 }
 
 /// Queues a frame for the network device of a world.
