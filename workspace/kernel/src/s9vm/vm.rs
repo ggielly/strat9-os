@@ -2421,6 +2421,17 @@ fn vcpu_task_main(world_id: u64, vcpu_id: u64) {
         }
 
         let result = execute_one_run(vcpu_id);
+        // Diagnostics: one line per RUN tells an operator whether the vCPU
+        // task executed at all (a missing line means the task never ran; an
+        // error here is the reason the guest stopped).
+        match &result {
+            Ok(()) => log::info!("[s9vm] vcpu task {}: run executed", vcpu_id),
+            Err(error) => log::warn!(
+                "[s9vm] vcpu task {}: run failed ({:?})",
+                vcpu_id,
+                error
+            ),
+        }
 
         let done_wait = {
             let mut worlds = WORLDS.lock();
@@ -2444,6 +2455,27 @@ fn execute_one_run(vcpu_id: u64) -> Result<(), RunError> {
         return Err(RunError::HardwareNotReady);
     }
     let caps = crate::s9vm::detect().ok_or(RunError::HardwareNotReady)?;
+    // VT-x activation is **per CPU**: the vCPU kernel task can be scheduled on
+    // a CPU that has never executed `VMXON` (activation at boot only enables
+    // the boot CPU). Running a guest there would execute VMX instructions
+    // without a VMXON root and fault the kernel, so the task activates the
+    // current CPU first (the activation is idempotent and cheap once done).
+    // `VMXON` expects interrupts disabled.
+    let activated = crate::s9vm::activation_region(
+        crate::arch::x86_64::percpu::current_cpu_index(),
+    )
+    .is_some();
+    if !activated {
+        let result =
+            crate::sync::with_irqs_disabled(|_| crate::s9vm::activate_current_cpu());
+        if result.is_err() {
+            log::warn!(
+                "[s9vm] vcpu task: cannot activate VT-x on cpu {}",
+                crate::arch::x86_64::percpu::current_cpu_index()
+            );
+            return Err(RunError::HardwareNotReady);
+        }
+    }
     // Host interrupts stay disabled during the guest entry: guest time is
     // bounded by the next exit (P0). VMX preemption (timer) will come with the
     // full preemption model.
