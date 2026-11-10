@@ -64,6 +64,7 @@ pub mod ramfs_scheme;
 pub mod scheme;
 pub mod scheme_router;
 pub mod threads_scheme;
+pub mod vmm_net_scheme;
 pub mod vmm_scheme;
 
 use crate::{process::current_task_clone, sync::SpinLock, syscall::error::SyscallError};
@@ -1536,6 +1537,14 @@ pub fn init() {
     // for userland tools without exposing any control operation.
     if let Err(e) = vmm_scheme::init_vmm_scheme() {
         log::warn!("[VFS] /dev/vmm not mounted: {:?}", e);
+    }
+
+    // s9vm guest network relay (`/dev/vmm-net`): one directory per world with
+    // `<id>/{tx,rx,info}`; frame boundaries are preserved in both directions.
+    // `/net` is the host network namespace (userspace strate) and is left
+    // untouched.
+    if let Err(e) = vmm_net_scheme::init_vmm_net_scheme() {
+        log::warn!("[VFS] /dev/vmm-net not mounted: {:?}", e);
     }
 
     log::info!("[VFS] VFS ready");
