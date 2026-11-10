@@ -43,6 +43,12 @@
 //!   Local APIC count). This phase needs a registered vCPU, so it is deferred
 //!   to a kernel thread created at the `kthread` stage (see
 //!   [`s9vm_acpi_selftest`]) instead of running in the early bootstrap;
+//! - `smp`: one world with two vCPUs, each with its own page tables, code page
+//!   and stack, driven through the kernel vCPU tasks (`request_run`,
+//!   `complete_exit`) in an interleaved order. It validates that the two vCPU
+//!   contexts (CR3, RIP, RSP, marker) are independent and persisted across
+//!   runs; like `acpi` it is deferred to the `kthread` stage (see
+//!   [`s9vm_smp_selftest`]);
 //! - `2`/`all`: every phase.
 //!
 //! The guest state is the canonical 64-bit flat shape produced by
@@ -52,6 +58,7 @@
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
+use strat9_abi::vmm::{VMM_ABI_VERSION, VmmRegs, exit_kind};
 
 use crate::{
     memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame},
@@ -61,7 +68,10 @@ use crate::{
         emulate::{InterruptAction, interrupt_action},
         exit::{ExitClass, ExitReason, reason_name},
         guest::GuestState,
-        guestcode::{ACPI_CODE, ACPI_FAIL_MARKER, ACPI_MARKER, LOADER_CODE, LOADER_MARKER},
+        guestcode::{
+            ACPI_CODE, ACPI_FAIL_MARKER, ACPI_MARKER, LOADER_CODE, LOADER_MARKER, SMP_CODE_0,
+            SMP_CODE_1, SMP_HLT_OFFSET, SMP_MARKERS, SMP_OUT_INSTRUCTION_LEN, SMP_SHARED_GPA,
+        },
         machine::Machine,
         vcpu::{SecondLevelMemory, Vcpu, VcpuError},
         virtio, virtio_blk, virtio_net, vm,
@@ -326,6 +336,85 @@ const ACPI_MAX_EXITS: u32 = 64;
 
 /// Deferred request flag for the ACPI phase (see [`s9vm_acpi_selftest`]).
 static ACPI_SELFTEST_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+// SMP (multi-vCPU) phase.
+//
+// One world hosts two vCPUs. Each vCPU has its own page tables, code page and
+// stack page, so the two guest contexts differ in CR3, RIP, RSP and marker;
+// both also write their marker into one shared guest page. The phase drives
+// the vCPUs through the kernel tasks (`request_run`) in an interleaved order:
+// round 0 runs both vCPUs to their `out` exit, round 1 resumes both from their
+// saved state to the `hlt` exit.
+/// Guest-physical page-table root of the first vCPU.
+const SMP_VCPU0_GPA_PML4: u64 = 0x0000;
+/// Guest-physical page-directory pointer table of the first vCPU.
+const SMP_VCPU0_GPA_PDPT: u64 = 0x1000;
+/// Guest-physical page directory of the first vCPU.
+const SMP_VCPU0_GPA_PD: u64 = 0x2000;
+/// Guest-physical page table of the first vCPU.
+const SMP_VCPU0_GPA_PT: u64 = 0x3000;
+/// Code page of the first vCPU.
+const SMP_VCPU0_GPA_CODE: u64 = 0x1_0000;
+/// Stack page of the first vCPU.
+const SMP_VCPU0_GPA_STACK: u64 = 0x1_1000;
+/// Guest-physical page-table root of the second vCPU.
+const SMP_VCPU1_GPA_PML4: u64 = 0x8000;
+/// Guest-physical page-directory pointer table of the second vCPU.
+const SMP_VCPU1_GPA_PDPT: u64 = 0x9000;
+/// Guest-physical page directory of the second vCPU.
+const SMP_VCPU1_GPA_PD: u64 = 0xA000;
+/// Guest-physical page table of the second vCPU.
+const SMP_VCPU1_GPA_PT: u64 = 0xB000;
+/// Code page of the second vCPU.
+const SMP_VCPU1_GPA_CODE: u64 = 0x1_2000;
+/// Stack page of the second vCPU.
+const SMP_VCPU1_GPA_STACK: u64 = 0x1_3000;
+/// Guest memory permissions of the SMP page tables, code and stacks.
+const SMP_GUEST_PERMS: u32 = 7;
+/// Maximum number of `request_run` calls driven by the SMP phase.
+const SMP_MAX_RUNS: u32 = 8;
+
+/// Static description of one vCPU of the SMP phase.
+struct SmpLayout {
+    pml4: u64,
+    pdpt: u64,
+    pd: u64,
+    pt: u64,
+    code: u64,
+    stack: u64,
+    stack_top: u64,
+    marker: u8,
+    payload: &'static [u8],
+}
+
+/// Layouts of the two vCPUs, in APIC-id order.
+const SMP_LAYOUTS: [SmpLayout; 2] = [
+    SmpLayout {
+        pml4: SMP_VCPU0_GPA_PML4,
+        pdpt: SMP_VCPU0_GPA_PDPT,
+        pd: SMP_VCPU0_GPA_PD,
+        pt: SMP_VCPU0_GPA_PT,
+        code: SMP_VCPU0_GPA_CODE,
+        stack: SMP_VCPU0_GPA_STACK,
+        stack_top: SMP_VCPU0_GPA_STACK + 0x800,
+        marker: SMP_MARKERS[0],
+        payload: SMP_CODE_0,
+    },
+    SmpLayout {
+        pml4: SMP_VCPU1_GPA_PML4,
+        pdpt: SMP_VCPU1_GPA_PDPT,
+        pd: SMP_VCPU1_GPA_PD,
+        pt: SMP_VCPU1_GPA_PT,
+        code: SMP_VCPU1_GPA_CODE,
+        stack: SMP_VCPU1_GPA_STACK,
+        stack_top: SMP_VCPU1_GPA_STACK + 0x800,
+        marker: SMP_MARKERS[1],
+        payload: SMP_CODE_1,
+    },
+];
+
+/// Deferred request flag for the SMP phase (see [`s9vm_smp_selftest`]).
+static SMP_SELFTEST_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Flat 64-bit code descriptor (selector `0x08`).
 ///
@@ -2134,7 +2223,397 @@ fn run_acpi_task() {
     }
 }
 
-/// Starts the test if the boot option `s9vm.selftest=1` is present.
+/// Report of the SMP (multi-vCPU) phase.
+pub struct SmpReport {
+    /// Number of vCPUs in the world (always 2 for this phase).
+    pub vcpus: u32,
+    /// Markers read back from the shared guest page, per vCPU index.
+    pub markers: [Option<u8>; 2],
+    /// Policy exits observed for each vCPU (`out` + `hlt`).
+    pub exits_per_vcpu: [u32; 2],
+    /// Total policy exits observed.
+    pub exits: u32,
+    /// `hlt` exits observed (one per vCPU).
+    pub hlt: u32,
+    /// `RUN` calls that reached the hardware (`WorldStats::runs`).
+    pub runs: u64,
+    /// APIC identifiers of the two vCPUs, sorted.
+    pub apic_ids: [u32; 2],
+    /// Final guest `RIP` of each vCPU (distinct code pages).
+    pub rips: [u64; 2],
+    /// Final guest `RSP` of each vCPU (distinct stacks).
+    pub rsps: [u64; 2],
+    /// Guest `CR3` of each vCPU (distinct page tables).
+    pub cr3s: [u64; 2],
+}
+
+/// Builds the ABI register block that starts one SMP vCPU.
+///
+/// The long-mode guest state supplies the canonical CR0/CR4/EFER and the flat
+/// segments; the caller only chooses the entry point, the stack and the page
+/// tables, which is what makes the two vCPU contexts independent.
+fn smp_guest_regs(entry: u64, stack_top: u64, cr3: u64) -> VmmRegs {
+    let guest = GuestState::long_mode_64(entry, stack_top, cr3);
+    VmmRegs {
+        abi_version: VMM_ABI_VERSION,
+        flags: 0,
+        rax: guest.rax,
+        rbx: guest.rbx,
+        rcx: guest.rcx,
+        rdx: guest.rdx,
+        rsi: guest.rsi,
+        rdi: guest.rdi,
+        rbp: guest.rbp,
+        rsp: guest.rsp,
+        r8: guest.r8,
+        r9: guest.r9,
+        r10: guest.r10,
+        r11: guest.r11,
+        r12: guest.r12,
+        r13: guest.r13,
+        r14: guest.r14,
+        r15: guest.r15,
+        rip: guest.rip,
+        rflags: guest.rflags,
+        cr0: guest.cr0,
+        cr3: guest.cr3,
+        cr4: guest.cr4,
+        efer: guest.efer,
+    }
+}
+
+/// Writes the identity page tables of one SMP vCPU.
+///
+/// The vCPU only touches its own code page, its own stack page and the shared
+/// marker page, so the leaf page table maps exactly those three pages. The
+/// table pages themselves are reached only by the hardware page walker.
+fn smp_write_page_tables(
+    world_id: u64,
+    layout: &SmpLayout,
+    page_size: u64,
+) -> Result<(), SelftestError> {
+    write_world_u64(world_id, layout.pml4, 0, layout.pdpt | 0x3)?;
+    write_world_u64(world_id, layout.pdpt, 0, layout.pd | 0x3)?;
+    write_world_u64(world_id, layout.pd, 0, layout.pt | 0x3)?;
+    for gpa in [layout.code, layout.stack, SMP_SHARED_GPA] {
+        let index = (gpa / page_size) as usize;
+        write_world_u64(world_id, layout.pt, index * 8, gpa | 0x3)?;
+    }
+    Ok(())
+}
+
+/// SMP (multi-vCPU) test.
+///
+/// Creates one world with two vCPUs (APIC ids 0 and 1), each with its own page
+/// tables, code page and stack page, plus one shared guest page. The phase
+/// drives the kernel vCPU tasks through `request_run` in an **interleaved**
+/// order: round 0 runs both vCPUs to their `out` exit (the markers are written
+/// to the shared page), round 1 resumes both from their saved context to the
+/// `hlt` exit. Both contexts therefore survive a context switch between the
+/// two vCPUs; this validates independent, persisted vCPU state, not parallel
+/// host execution.
+///
+/// The world (and its vCPU tasks) is destroyed on every path.
+pub fn run_smp(caps: &HwCaps) -> Result<SmpReport, SelftestError> {
+    if !caps.can_run() {
+        return Err(SelftestError::BadExit("platform cannot run"));
+    }
+    let record = vm::create(b"s9vm-smp", 0).ok_or(SelftestError::VmFail(1))?;
+    let result = run_smp_in_world(caps, record.id);
+    let _ = vm::destroy(record.id);
+    result
+}
+
+/// Body of the SMP phase; the caller owns and destroys the world.
+fn run_smp_in_world(caps: &HwCaps, world_id: u64) -> Result<SmpReport, SelftestError> {
+    let page_size = crate::s9vm::mmu::PAGE_SIZE;
+
+    // 1. Two vCPUs in the same world; the MADT/APIC ids are 0 and 1.
+    let vcpus = [
+        vm::create_vcpu(world_id, 0).map_err(|_| SelftestError::VmFail(2))?,
+        vm::create_vcpu(world_id, 1).map_err(|_| SelftestError::VmFail(3))?,
+    ];
+
+    // 2. Guest memory: per-vCPU page tables, code and stack, plus one shared
+    //    page both vCPUs write to.
+    for layout in SMP_LAYOUTS.iter() {
+        for gpa in [
+            layout.pml4,
+            layout.pdpt,
+            layout.pd,
+            layout.pt,
+            layout.code,
+            layout.stack,
+        ] {
+            vm::map_memory(world_id, caps, gpa, page_size, SMP_GUEST_PERMS, 0)
+                .map_err(|_| SelftestError::VmFail(4))?;
+        }
+    }
+    vm::map_memory(
+        world_id,
+        caps,
+        SMP_SHARED_GPA,
+        page_size,
+        SMP_GUEST_PERMS,
+        0,
+    )
+    .map_err(|_| SelftestError::VmFail(5))?;
+
+    // 3. Per-vCPU page tables, payload and initial register block.
+    for (index, layout) in SMP_LAYOUTS.iter().enumerate() {
+        smp_write_page_tables(world_id, layout, page_size)?;
+        write_world_bytes(world_id, layout.code, layout.payload)?;
+        let regs = smp_guest_regs(layout.code, layout.stack_top, layout.pml4);
+        vm::set_vcpu_regs(vcpus[index], &regs).map_err(|_| {
+            log::warn!(
+                "[s9vm] smp test: vCPU {} rejected its register block",
+                index
+            );
+            SelftestError::BadExit("smp register block rejected")
+        })?;
+    }
+
+    // 4. Interleaved execution: both vCPUs run to the `out` exit, then both
+    //    resume from their saved state and run to `hlt`.
+    let mut markers: [Option<u8>; 2] = [None; 2];
+    let mut exits_per_vcpu: [u32; 2] = [0; 2];
+    let mut hlt = 0u32;
+    let mut total_runs = 0u32;
+    for round in 0..2u32 {
+        for (index, layout) in SMP_LAYOUTS.iter().enumerate() {
+            if total_runs >= SMP_MAX_RUNS {
+                return Err(SelftestError::BadExit("smp RUN budget exhausted"));
+            }
+            let vcpu = vcpus[index];
+            vm::request_run(vcpu).map_err(|error| {
+                log::warn!(
+                    "[s9vm] smp test: vCPU {} round {} RUN failed: {:?} \
+                     markers={:?} exits={} hlt={}",
+                    index,
+                    round,
+                    error,
+                    markers,
+                    exits_per_vcpu[0] + exits_per_vcpu[1],
+                    hlt
+                );
+                SelftestError::BadExit("smp RUN failed")
+            })?;
+            total_runs += 1;
+            let event = vm::pop_exit(world_id)
+                .map_err(|_| SelftestError::BadExit("smp exit queue empty after RUN"))?;
+            if event.vcpu_id != vcpu {
+                log::warn!(
+                    "[s9vm] smp test: vCPU {} received an event for vCPU {}",
+                    index,
+                    event.vcpu_id
+                );
+                return Err(SelftestError::BadExit("smp exit routed to the wrong vCPU"));
+            }
+            exits_per_vcpu[index] += 1;
+            match event.kind {
+                exit_kind::IO_PORT => {
+                    if round != 0 || event.port as u16 != TEST_PORT || event.flags != 0 {
+                        log::warn!(
+                            "[s9vm] smp test: vCPU {} unexpected I/O exit round={} \
+                             port={:#x} flags={:#x}",
+                            index,
+                            round,
+                            event.port,
+                            event.flags
+                        );
+                        return Err(SelftestError::BadExit("smp unexpected I/O exit"));
+                    }
+                    // The `out` instruction is two bytes and the hardware does
+                    // not advance RIP for a policy I/O exit: skip it. Keep the
+                    // marker in RAX so the final register block is meaningful.
+                    vm::complete_exit(vcpu, u64::from(layout.marker), SMP_OUT_INSTRUCTION_LEN)
+                        .map_err(|_| SelftestError::BadExit("smp complete_exit failed"))?;
+                }
+                exit_kind::HALT => {
+                    if round != 1 {
+                        log::warn!("[s9vm] smp test: vCPU {} halted in round {}", index, round);
+                        return Err(SelftestError::BadExit("smp early hlt"));
+                    }
+                    hlt += 1;
+                }
+                other => {
+                    log::warn!(
+                        "[s9vm] smp test: vCPU {} round {} unexpected exit kind={} \
+                         port={:#x} flags={:#x} gpa={:#x}",
+                        index,
+                        round,
+                        other,
+                        event.port,
+                        event.flags,
+                        event.gpa
+                    );
+                    return Err(SelftestError::BadExit("smp unexpected exit"));
+                }
+            }
+        }
+    }
+
+    // 5. Markers: the shared page is the authoritative trace (written by the
+    //    guest before the exit), and each vCPU context must also still hold
+    //    its own marker in RAX.
+    for index in 0..2 {
+        let byte = read_world_byte(world_id, SMP_SHARED_GPA + index as u64)?;
+        markers[index] = Some(byte);
+    }
+
+    let mut rips = [0u64; 2];
+    let mut rsps = [0u64; 2];
+    let mut cr3s = [0u64; 2];
+    for (index, layout) in SMP_LAYOUTS.iter().enumerate() {
+        let regs = vm::get_vcpu_regs(vcpus[index])
+            .ok_or(SelftestError::BadExit("smp vCPU register block missing"))?;
+        rips[index] = regs.rip;
+        rsps[index] = regs.rsp;
+        cr3s[index] = regs.cr3;
+        if (regs.rax & 0xFF) as u8 != layout.marker {
+            log::warn!(
+                "[s9vm] smp test: vCPU {} RAX marker={:#x} expected={:#x}",
+                index,
+                regs.rax & 0xFF,
+                layout.marker
+            );
+            return Err(SelftestError::BadExit(
+                "smp marker lost from the register block",
+            ));
+        }
+    }
+
+    let expected_rip = [
+        SMP_VCPU0_GPA_CODE + SMP_HLT_OFFSET,
+        SMP_VCPU1_GPA_CODE + SMP_HLT_OFFSET,
+    ];
+    let expected_rsp = [SMP_VCPU0_GPA_STACK + 0x800, SMP_VCPU1_GPA_STACK + 0x800];
+    let expected_cr3 = [SMP_VCPU0_GPA_PML4, SMP_VCPU1_GPA_PML4];
+    if rips != expected_rip
+        || rsps != expected_rsp
+        || cr3s != expected_cr3
+        || rips[0] == rips[1]
+        || rsps[0] == rsps[1]
+        || cr3s[0] == cr3s[1]
+    {
+        log::warn!(
+            "[s9vm] smp test: contexts not independent rips={:?} rsps={:?} cr3s={:?}",
+            rips,
+            rsps,
+            cr3s
+        );
+        return Err(SelftestError::BadExit(
+            "smp vCPU contexts are not independent",
+        ));
+    }
+
+    // 6. APIC identifiers and engine counters.
+    let mut apic_ids = [0u32; 2];
+    {
+        let snapshots = vm::vcpu_snapshots(world_id)
+            .ok_or(SelftestError::BadExit("smp world snapshots missing"))?;
+        if snapshots.len() != 2 {
+            return Err(SelftestError::BadExit("smp world does not have two vCPUs"));
+        }
+        apic_ids[0] = snapshots[0].apic_id;
+        apic_ids[1] = snapshots[1].apic_id;
+        apic_ids.sort_unstable();
+    }
+    if apic_ids != [0, 1] {
+        log::warn!("[s9vm] smp test: unexpected APIC ids {:?}", apic_ids);
+        return Err(SelftestError::BadExit("smp unexpected APIC ids"));
+    }
+
+    let stats = vm::stats(world_id).ok_or(SelftestError::BadExit("smp stats missing"))?;
+    let pending = vm::exit_count(world_id).unwrap_or(0);
+    let total_exits = exits_per_vcpu[0] + exits_per_vcpu[1];
+    if hlt != 2
+        || total_exits != 4
+        || pending != 0
+        || stats.runs < u64::from(total_runs)
+        || stats.policy_exits != u64::from(total_exits)
+    {
+        log::warn!(
+            "[s9vm] smp test: counters hlt={} exits={:?} pending={} runs={} \
+             policy_exits={} markers={:?}",
+            hlt,
+            exits_per_vcpu,
+            pending,
+            stats.runs,
+            stats.policy_exits,
+            markers
+        );
+        return Err(SelftestError::BadExit("smp exit counters mismatch"));
+    }
+
+    if markers != [Some(SMP_MARKERS[0]), Some(SMP_MARKERS[1])] {
+        log::warn!(
+            "[s9vm] smp test: shared markers={:?} expected={:?}",
+            markers,
+            SMP_MARKERS
+        );
+        return Err(SelftestError::BadExit("smp shared markers mismatch"));
+    }
+
+    Ok(SmpReport {
+        vcpus: 2,
+        markers,
+        exits_per_vcpu,
+        exits: total_exits,
+        hlt,
+        runs: stats.runs,
+        apic_ids,
+        rips,
+        rsps,
+        cr3s,
+    })
+}
+
+/// Kthread-stage hook: runs the deferred SMP phase.
+///
+/// Like the ACPI phase, the SMP phase needs registered vCPUs and therefore the
+/// scheduler: it is requested during the early bootstrap and executed here in
+/// its own kernel thread.
+#[cfg(target_arch = "x86_64")]
+#[component::init_component(kthread, priority = 51)]
+fn s9vm_smp_selftest() -> Result<(), component::ComponentInitError> {
+    if !SMP_SELFTEST_REQUESTED.swap(false, Ordering::AcqRel) {
+        return Ok(());
+    }
+    match crate::process::kthread::spawn("s9vm-smp-selftest", run_smp_task) {
+        Ok(_) => {}
+        Err(error) => log::warn!(
+            "[s9vm] smptest FAIL: cannot spawn the guest task ({})",
+            error
+        ),
+    }
+    Ok(())
+}
+
+/// Body of the deferred SMP selftest task.
+fn run_smp_task() {
+    let Some(caps) = crate::s9vm::detect() else {
+        log::warn!("[s9vm] smptest FAIL: platform capabilities unavailable");
+        return;
+    };
+    match run_smp(&caps) {
+        Ok(report) => log::info!(
+            "[s9vm] smptest PASS: vcpus={} markers={:?} exits={} hlt={} runs={} \
+             apic_ids={:?} rips={:?} rsps={:?} cr3s={:?}",
+            report.vcpus,
+            report.markers,
+            report.exits,
+            report.hlt,
+            report.runs,
+            report.apic_ids,
+            report.rips,
+            report.rsps,
+            report.cr3s
+        ),
+        Err(error) => log::warn!("[s9vm] smptest FAIL: {:?}", error),
+    }
+}
+
 ///
 /// Does nothing if VT-x is not active. Never panics.
 ///
@@ -2157,12 +2636,18 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
     let network_phase = matches!(mode, "2" | "all" | "net");
     let loader_phase = matches!(mode, "2" | "all" | "loader");
     let acpi_phase = matches!(mode, "2" | "all" | "acpi");
+    let smp_phase = matches!(mode, "2" | "all" | "smp");
 
     if acpi_phase {
         // The ACPI phase registers a vCPU, which needs the scheduler: defer it
         // to the kthread stage instead of deadlocking the bootstrap.
         ACPI_SELFTEST_REQUESTED.store(true, Ordering::Release);
         log::info!("[s9vm] ACPI-discovery test requested (deferred to kthread stage)");
+    }
+    if smp_phase {
+        // Same constraint as ACPI: two registered vCPUs require the scheduler.
+        SMP_SELFTEST_REQUESTED.store(true, Ordering::Release);
+        log::info!("[s9vm] SMP (two-vCPU) test requested (deferred to kthread stage)");
     }
 
     if device_phase {

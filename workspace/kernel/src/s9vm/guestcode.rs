@@ -247,3 +247,79 @@ pub const ACPI_CODE: &[u8] = &[
 
 /// The payload must fit in the single guest code page the phase maps.
 const _: () = assert!(ACPI_CODE.len() < 4096);
+
+// ============================================================================
+// SMP (multi-vCPU) payloads
+// ============================================================================
+
+/// Guest-physical page shared by both vCPUs of the SMP phase.
+///
+/// Each payload stores its marker in this page before reporting it on the
+/// debug port, so the kernel can prove that two independent vCPU contexts
+/// produced two distinct results.
+pub const SMP_SHARED_GPA: u64 = 0x0001_4000;
+/// Per-vCPU markers published by the SMP payloads (`[vcpu0, vcpu1]`).
+pub const SMP_MARKERS: [u8; 2] = [b'P', b'Q'];
+/// Length of the `out` instruction in the SMP payloads (`out 0xE9, al`).
+pub const SMP_OUT_INSTRUCTION_LEN: u64 = 2;
+/// Offset of the final `hlt` inside [`SMP_CODE_0`] and [`SMP_CODE_1`].
+pub const SMP_HLT_OFFSET: u64 = 13;
+
+/// Guest program of the first vCPU of the SMP phase.
+///
+/// ```text
+/// mov al, 'P'                 ; B0 50
+/// mov [0x00014000], al        ; A2 00 40 01 00 00 00 00 00  (moffs64)
+/// out 0xE9, al                ; E6 E9
+/// hlt                         ; F4
+/// ```
+///
+/// The absolute `moffs` write to the shared page is deliberate: it leaves a
+/// kernel-visible trace of the marker that does not depend on the exit path,
+/// so the phase can tell a missing exit from a lost register value. The
+/// payload is 14 bytes and never falls through into the zero-filled tail of
+/// its page.
+pub const SMP_CODE_0: &[u8] = &[
+    0xB0,
+    SMP_MARKERS[0], // mov al, 'P'
+    0xA2,           // mov moffs64, al
+    0x00,
+    0x40,
+    0x01,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00, // address 0x0001_4000 (little endian)
+    0xE6,
+    DEBUG_PORT as u8, // out 0xE9, al
+    0xF4,             // hlt
+];
+
+/// Guest program of the second vCPU of the SMP phase.
+///
+/// Identical to [`SMP_CODE_0`] except for the marker (`Q`) and the shared-page
+/// byte it writes (`0x0001_4001`), so the two vCPUs produce distinguishable
+/// results in the same page.
+pub const SMP_CODE_1: &[u8] = &[
+    0xB0,
+    SMP_MARKERS[1], // mov al, 'Q'
+    0xA2,           // mov moffs64, al
+    0x01,
+    0x40,
+    0x01,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00, // address 0x0001_4001 (little endian)
+    0xE6,
+    DEBUG_PORT as u8, // out 0xE9, al
+    0xF4,             // hlt
+];
+
+/// Both SMP payloads must fit in their single guest code page.
+const _: () = assert!(SMP_CODE_0.len() < 4096);
+const _: () = assert!(SMP_CODE_1.len() < 4096);
+const _: () = assert!(SMP_CODE_0.len() == SMP_CODE_1.len());
+const _: () = assert!(SMP_HLT_OFFSET as usize == SMP_CODE_0.len() - 1);

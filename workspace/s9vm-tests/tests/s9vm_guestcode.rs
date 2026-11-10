@@ -15,7 +15,8 @@ mod guestcode;
 use decode::{Decoded, RegisterAccess};
 use guestcode::{
     ACPI_CODE, ACPI_FAIL_MARKER, ACPI_FAIL_TAIL, ACPI_MARKER, ACPI_SUCCESS_TAIL, DEBUG_PORT, HLT,
-    LOADER_CODE, LOADER_MARKER,
+    LOADER_CODE, LOADER_MARKER, SMP_CODE_0, SMP_CODE_1, SMP_HLT_OFFSET, SMP_MARKERS,
+    SMP_SHARED_GPA,
 };
 
 fn decode_at(bytes: &[u8], rip: u64) -> Decoded {
@@ -202,4 +203,86 @@ fn acpi_failure_tail_publishes_the_failure_marker() {
     }
     assert_eq!(bytes[4], HLT);
     assert_eq!(bytes.len(), 5);
+}
+
+// ---------------------------------------------------------------------------
+// SMP (two-vCPU) payloads
+// ---------------------------------------------------------------------------
+
+#[test]
+fn smp_payloads_are_fixed_length_and_distinct() {
+    assert_eq!(SMP_CODE_0.len(), 14);
+    assert_eq!(SMP_CODE_0.len(), SMP_CODE_1.len());
+    assert_ne!(SMP_CODE_0, SMP_CODE_1);
+    assert_ne!(SMP_MARKERS[0], SMP_MARKERS[1]);
+    assert_eq!(*SMP_CODE_0.last().expect("payload is not empty"), HLT);
+    assert_eq!(*SMP_CODE_1.last().expect("payload is not empty"), HLT);
+    assert_eq!(SMP_HLT_OFFSET as usize, SMP_CODE_0.len() - 1);
+    // The two payloads differ in their marker byte and in the shared-page
+    // address, so a wrong per-vCPU constant cannot silently alias.
+    assert_eq!(SMP_CODE_0[1], SMP_MARKERS[0]);
+    assert_eq!(SMP_CODE_1[1], SMP_MARKERS[1]);
+    assert_eq!(&SMP_CODE_0[3..11], &(SMP_SHARED_GPA).to_le_bytes());
+    assert_eq!(&SMP_CODE_1[3..11], &(SMP_SHARED_GPA + 1).to_le_bytes());
+}
+
+fn decode_smp_payload(code: &[u8], marker: u8, shared_gpa: u64) {
+    let base = 0x10_0000;
+
+    // 1. `mov al, marker`
+    let first = decode_at(code, base);
+    match first {
+        Decoded::Register(RegisterAccess {
+            register,
+            size,
+            value,
+            ..
+        }) => {
+            assert_eq!(register, 0);
+            assert_eq!(size, 1);
+            assert_eq!(value, u64::from(marker));
+            assert_eq!(first.instruction_length(base), 2);
+        }
+        other => panic!("expected `mov al, marker`, got {other:?}"),
+    }
+
+    // 2. `mov [shared], al` (A2 = moffs64): decoded as a one-byte store to the
+    //    shared guest page.
+    let second = decode_at(&code[2..], base + 2);
+    match second {
+        Decoded::Memory(access) => {
+            assert_eq!(access.address, shared_gpa);
+            assert_eq!(access.size, 1);
+            assert!(access.write);
+            assert_eq!(access.register, 0);
+            assert_eq!(second.instruction_length(base + 2), 9);
+        }
+        other => panic!("expected the shared-page store, got {other:?}"),
+    }
+    assert_eq!(code[2], 0xA2);
+
+    // 3. `out 0xE9, al`
+    let out = decode_at(&code[11..], base + 11);
+    match out {
+        Decoded::Port(access) => {
+            assert_eq!(access.port, DEBUG_PORT);
+            assert!(access.write);
+            assert_eq!(access.size, 1);
+            assert_eq!(out.instruction_length(base + 11), 2);
+        }
+        other => panic!("expected the marker `out`, got {other:?}"),
+    }
+
+    // 4. `hlt`
+    assert_eq!(code[13], HLT);
+}
+
+#[test]
+fn smp_payload_zero_is_decodable() {
+    decode_smp_payload(SMP_CODE_0, SMP_MARKERS[0], SMP_SHARED_GPA);
+}
+
+#[test]
+fn smp_payload_one_is_decodable() {
+    decode_smp_payload(SMP_CODE_1, SMP_MARKERS[1], SMP_SHARED_GPA + 1);
 }
