@@ -32,7 +32,10 @@ mod memmap;
 #[path = "../../kernel/src/s9vm/mmu.rs"]
 mod mmu;
 
-use memmap::{plan_map, GuestMap, MapError, MapSegment, PageSize, LARGE_PAGE_SIZE};
+use memmap::{
+    contiguous_2m_aligned, plan_map, GuestMap, MapError, MapSegment, PageSize, LARGE_PAGE_FRAMES,
+    LARGE_PAGE_SIZE,
+};
 use mmu::{
     encode_second_level_pointer, entry, MmuError, Perms, SecondLevel, TableMemory, PAGE_SIZE,
 };
@@ -610,4 +613,145 @@ fn four_kib_mapping_behaviour_unchanged() {
     assert_eq!(plan[0].page_size, PageSize::Page4K);
     let segment: MapSegment = plan[0];
     assert_eq!(segment.end(), 0x10_3000);
+}
+
+// ---------------------------------------------------------------------------
+// Host-contiguity test for 2 MiB leaves (`memmap::contiguous_2m_aligned`)
+// ---------------------------------------------------------------------------
+
+/// Builds the host frame list of one aligned 2 MiB block.
+fn aligned_block(base: u64) -> Vec<u64> {
+    (0..LARGE_PAGE_FRAMES as u64)
+        .map(|index| base + index * PAGE_SIZE)
+        .collect()
+}
+
+#[test]
+fn contiguity_accepts_aligned_block() {
+    let frames = aligned_block(0x8000_0000);
+    assert!(contiguous_2m_aligned(0x8000_0000, &frames));
+}
+
+#[test]
+fn contiguity_accepts_frames_in_any_order() {
+    let mut frames = aligned_block(0x8000_0000);
+    frames.reverse();
+    assert!(contiguous_2m_aligned(0x8000_0000, &frames));
+    frames.swap(0, LARGE_PAGE_FRAMES - 1);
+    assert!(contiguous_2m_aligned(0x8000_0000, &frames));
+}
+
+#[test]
+fn contiguity_rejects_unaligned_base() {
+    // A perfectly contiguous block whose base is only 4 KiB aligned cannot
+    // back a 2 MiB leaf.
+    let frames = aligned_block(0x8000_1000);
+    assert!(!contiguous_2m_aligned(0x8000_1000, &frames));
+}
+
+#[test]
+fn contiguity_rejects_out_of_block_frame() {
+    let mut frames = aligned_block(0x8000_0000);
+    // Point the last frame just past the 2 MiB block: simulates a hole.
+    frames[LARGE_PAGE_FRAMES - 1] = 0x8020_0000;
+    assert!(!contiguous_2m_aligned(0x8000_0000, &frames));
+}
+
+#[test]
+fn contiguity_rejects_duplicate_frame() {
+    let mut frames = aligned_block(0x8000_0000);
+    frames[7] = frames[0];
+    assert!(!contiguous_2m_aligned(0x8000_0000, &frames));
+}
+
+#[test]
+fn contiguity_rejects_wrong_frame_count() {
+    let frames = aligned_block(0x8000_0000);
+    assert!(!contiguous_2m_aligned(
+        0x8000_0000,
+        &frames[..LARGE_PAGE_FRAMES - 1]
+    ));
+    assert!(!contiguous_2m_aligned(0x8000_0000, &[]));
+}
+
+#[test]
+fn aligned_four_mib_reservation_installs_two_large_leaves() {
+    let plan = plan_map(0x4000_0000, 2 * LARGE_PAGE_SIZE).expect("plan");
+    assert_eq!(plan.len(), 2);
+    let mut memory = HostTables::new();
+    let table = SecondLevel::new(&mut memory).expect("root");
+    for (index, segment) in plan.iter().enumerate() {
+        assert!(segment.is_large());
+        let hpa = 0x8000_0000 + index as u64 * LARGE_PAGE_SIZE;
+        let frames = aligned_block(hpa);
+        let base = *frames.iter().min().expect("non-empty");
+        assert!(contiguous_2m_aligned(base, &frames));
+        table
+            .map_2m_leaf(&mut memory, segment.gpa, hpa, Perms::read_write_execute())
+            .expect("large leaf");
+    }
+    // Root + PDPT + PD: both 2 MiB leaves live in the same PD.
+    assert_eq!(memory.allocations, 3);
+    assert_eq!(table.translate(&memory, 0x4000_0000), Some(0x8000_0000));
+    assert_eq!(
+        table.translate(&memory, 0x4000_0000 + LARGE_PAGE_SIZE - 1),
+        Some(0x801F_FFFF)
+    );
+    assert_eq!(table.translate(&memory, 0x4020_0000), Some(0x8020_0000));
+    assert_eq!(table.translate(&memory, 0x4040_0000 - 1), Some(0x803F_FFFF));
+    assert_eq!(table.translate(&memory, 0x4040_0000), None);
+    assert_eq!(
+        find_pd_entry(&memory, table.root_phys(), 0x4000_0000) & entry::LARGE_PAGE,
+        entry::LARGE_PAGE
+    );
+    assert_eq!(
+        find_pd_entry(&memory, table.root_phys(), 0x4020_0000) & entry::LARGE_PAGE,
+        entry::LARGE_PAGE
+    );
+}
+
+#[test]
+fn fragmented_host_falls_back_to_four_kib_pages() {
+    // The allocator returned 512 consecutive frames, but the block starts at
+    // a 4 KiB-aligned (not 2 MiB-aligned) HPA: a 2 MiB leaf cannot be used.
+    let gpa = 0x4000_0000;
+    let hpa = 0x8000_1000;
+    let frames = aligned_block(hpa);
+    let base = *frames.iter().min().expect("non-empty");
+    assert!(!contiguous_2m_aligned(base, &frames));
+
+    let mut memory = HostTables::new();
+    let table = SecondLevel::new(&mut memory).expect("root");
+    for (index, frame_hpa) in frames.iter().enumerate() {
+        table
+            .map_4k(
+                &mut memory,
+                gpa + index as u64 * PAGE_SIZE,
+                *frame_hpa,
+                PAGE_SIZE,
+                Perms::read_write(),
+            )
+            .expect("4k fallback");
+    }
+    assert_eq!(memory.allocations, 4);
+    assert_eq!(table.translate(&memory, gpa), Some(hpa));
+    assert_eq!(
+        table.translate(&memory, gpa + LARGE_PAGE_SIZE - 1),
+        Some(hpa + LARGE_PAGE_SIZE - 1)
+    );
+    assert_eq!(
+        find_pd_entry(&memory, table.root_phys(), gpa) & entry::LARGE_PAGE,
+        0
+    );
+}
+
+#[test]
+fn unaligned_range_has_no_large_segments() {
+    // A 2 MiB range that is not 2 MiB aligned is entirely head/tail: no large
+    // leaf can be planned, so the mapper stays on 4 KiB pages.
+    let plan = plan_map(0x4000_1000, LARGE_PAGE_SIZE).expect("plan");
+    assert_eq!(plan.len(), 2);
+    assert!(plan.iter().all(|segment| !segment.is_large()));
+    assert_eq!(plan[0].len, LARGE_PAGE_SIZE - PAGE_SIZE);
+    assert_eq!(plan[1].len, PAGE_SIZE);
 }

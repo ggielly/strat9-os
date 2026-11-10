@@ -52,7 +52,7 @@ use crate::{
         guest::{FixedBits, GuestState},
         image::{Image, Segment},
         machine::Machine,
-        memmap::{perms_from_abi, GuestMap, MapError, MAX_GPA},
+        memmap::{contiguous_2m_aligned, perms_from_abi, plan_map, GuestMap, MapError, MAX_GPA},
         mmu::{Perms as MmuPerms, PAGE_SIZE},
         timing::{ExitLatencyHistogram, WorldTiming, EXIT_LATENCY_BUCKETS},
         vcpu::{ExitInfo, SecondLevelMemory, Vcpu, VcpuError},
@@ -286,8 +286,22 @@ impl WorldMemory {
     /// `memtype` must be `0` (default write-back); the other types are not yet
     /// supported and are rejected by the caller.
     ///
+    /// # Granularity
+    ///
+    /// The range is split by [`memmap::plan_map`]: a 2 MiB-aligned middle is
+    /// mapped with 2 MiB second-level leaves when the 512 newly allocated
+    /// host frames are 2 MiB aligned and physically contiguous, while a
+    /// partial head or tail stays on 4 KiB pages. A 2 MiB segment whose frames
+    /// are not contiguous (fragmented allocator) falls back to 4 KiB pages for
+    /// that segment, so correctness never depends on host contiguity.
+    ///
+    /// Large leaves reduce second-level table memory and TLB pressure; the
+    /// fallback keeps the mapping usable when the allocator cannot provide a
+    /// contiguous block.
+    ///
     /// On failure, every mapping and every frame allocated during the call is
-    /// undone: the world's memory stays consistent.
+    /// undone: the world's memory stays consistent. Quota accounting is
+    /// unchanged: a 2 MiB leaf still counts as 512 pages.
     pub fn map(
         &mut self,
         _caps: &HwCaps,
@@ -296,7 +310,9 @@ impl WorldMemory {
         perms_bits: u32,
         memtype: u8,
     ) -> Result<u64, VmError> {
-        // 1. Validates the range and reserves the quota before any allocation.
+        // 1. Plan the granularity, then validate and reserve the quota before
+        //    allocating anything.
+        let plan = plan_map(gpa, len)?;
         self.map.reserve(gpa, len, perms_bits, memtype)?;
         let decoded = perms_from_abi(perms_bits);
         let perms = MmuPerms {
@@ -306,35 +322,81 @@ impl WorldMemory {
         };
         let pages = len / PAGE_SIZE;
         let mut allocated: Vec<PhysFrame> = Vec::with_capacity(pages as usize);
-        let mut mapped: u64 = 0;
-        for index in 0..pages {
-            let Some(frame) = alloc_guest_frame() else {
-                // Out of memory: undo what has already been done.
-                self.rollback(gpa, mapped, allocated);
-                self.map.remove(gpa);
-                return Err(VmError::OutOfMemory);
-            };
-            let hpa = frame.start_address.as_u64();
-            if let Err(error) = self
-                .second_level
-                .map_4k(gpa + index * PAGE_SIZE, hpa, perms)
-            {
+        // Installed mappings, in order: (gpa, len, is_2m_leaf).
+        let mut installed: Vec<(u64, u64, bool)> = Vec::new();
+
+        for segment in &plan {
+            let frame_count = (segment.len / PAGE_SIZE) as usize;
+            let first_frame = allocated.len();
+            for _ in 0..frame_count {
+                let Some(frame) = alloc_guest_frame() else {
+                    self.rollback_mapping(&installed, allocated);
+                    self.map.remove(gpa);
+                    return Err(VmError::OutOfMemory);
+                };
                 allocated.push(frame);
-                self.rollback(gpa, mapped, allocated);
-                self.map.remove(gpa);
-                return Err(VmError::Translation(error));
             }
-            allocated.push(frame);
-            mapped += 1;
+
+            if segment.is_large() {
+                let hp_as: Vec<u64> = allocated[first_frame..]
+                    .iter()
+                    .map(|frame| frame.start_address.as_u64())
+                    .collect();
+                let base = hp_as.iter().copied().min().unwrap_or(0);
+                if contiguous_2m_aligned(base, &hp_as) {
+                    match self.second_level.map_2m(segment.gpa, base, perms) {
+                        Ok(()) => {
+                            installed.push((segment.gpa, segment.len, true));
+                            continue;
+                        }
+                        Err(error) => {
+                            self.rollback_mapping(&installed, allocated);
+                            self.map.remove(gpa);
+                            return Err(VmError::Translation(error));
+                        }
+                    }
+                }
+                // Fragmented or unaligned host frames: fall through to 4 KiB
+                // pages for this 2 MiB segment.
+            }
+
+            for index in 0..frame_count {
+                let hpa = allocated[first_frame + index].start_address.as_u64();
+                let page_gpa = segment.gpa + index as u64 * PAGE_SIZE;
+                match self.second_level.map_4k(page_gpa, hpa, perms) {
+                    Ok(()) => installed.push((page_gpa, PAGE_SIZE, false)),
+                    Err(error) => {
+                        self.rollback_mapping(&installed, allocated);
+                        self.map.remove(gpa);
+                        return Err(VmError::Translation(error));
+                    }
+                }
+            }
         }
+
         self.frames.extend(allocated);
         Ok(pages)
     }
 
-    /// Undoes `mapped` pages starting at `gpa` and frees the frames.
-    fn rollback(&mut self, gpa: u64, mapped: u64, frames: Vec<PhysFrame>) {
-        for index in 0..mapped {
-            let _ = self.second_level.unmap_4k(gpa + index * PAGE_SIZE);
+    /// Undoes installed mappings and frees every frame of a failed `map`.
+    ///
+    /// Mappings are torn down in reverse installation order; 2 MiB leaves use
+    /// `unmap_2m`, 4 KiB pages use `unmap_4k`. The frame list is then returned
+    /// to the allocator exactly once (it is moved in, so no double free is
+    /// possible).
+    fn rollback_mapping(&mut self, installed: &[(u64, u64, bool)], frames: Vec<PhysFrame>) {
+        for &(segment_gpa, segment_len, is_large) in installed.iter().rev() {
+            if is_large {
+                let _ = self
+                    .second_level
+                    .root
+                    .unmap_2m(&mut self.second_level.tables, segment_gpa);
+            } else {
+                let page_count = segment_len / PAGE_SIZE;
+                for index in 0..page_count {
+                    let _ = self.second_level.unmap_4k(segment_gpa + index * PAGE_SIZE);
+                }
+            }
         }
         free_guest_frames(frames);
     }

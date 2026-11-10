@@ -42,6 +42,8 @@ use alloc::{collections::BTreeMap, vec::Vec};
 pub const PAGE_SIZE: u64 = 4096;
 /// Size of a large second-level page (2 MiB).
 pub const LARGE_PAGE_SIZE: u64 = 2 * 1024 * 1024;
+/// Number of 4 KiB frames covered by one 2 MiB leaf.
+pub const LARGE_PAGE_FRAMES: usize = (LARGE_PAGE_SIZE / PAGE_SIZE) as usize;
 /// Maximum guest physical address width covered (48 bits).
 pub const MAX_GPA: u64 = 1 << 48;
 
@@ -328,6 +330,45 @@ pub fn plan_map(gpa: u64, len: u64) -> Result<Vec<MapSegment>, MapError> {
     }
 
     Ok(segments)
+}
+
+/// Checks that `hp_as` is exactly the set of frames of one 2 MiB-aligned block.
+///
+/// This is the host-contiguity test used before installing a 2 MiB leaf: a
+/// large leaf maps 512 consecutive 4 KiB frames starting at a 2 MiB-aligned
+/// host physical address. `base` is the lowest HPA of the set (the caller
+/// derives it from the allocated frames) and `hp_as` is a slice of
+/// [`LARGE_PAGE_FRAMES`] host physical addresses, in any order.
+///
+/// Returns `false` when the count is wrong, the base is not 2 MiB aligned, a
+/// frame is misaligned, out of the block, or duplicated. A fragmented
+/// allocator (holes, an unaligned base, or fewer than 512 frames) therefore
+/// always returns `false`, and the caller falls back to 4 KiB pages.
+pub fn contiguous_2m_aligned(base: u64, hp_as: &[u64]) -> bool {
+    if hp_as.len() != LARGE_PAGE_FRAMES || base % LARGE_PAGE_SIZE != 0 {
+        return false;
+    }
+    let Some(end) = base.checked_add(LARGE_PAGE_SIZE) else {
+        return false;
+    };
+
+    // One bit per 4 KiB frame of the block: 512 bits.
+    let mut seen = [0u64; LARGE_PAGE_FRAMES / 64];
+    for &hpa in hp_as {
+        if hpa % PAGE_SIZE != 0 || hpa < base || hpa >= end {
+            return false;
+        }
+        let index = ((hpa - base) / PAGE_SIZE) as usize;
+        let word = &mut seen[index / 64];
+        let mask = 1u64 << (index % 64);
+        if *word & mask != 0 {
+            return false; // duplicate frame
+        }
+        *word |= mask;
+    }
+
+    // All 512 bits must be set: the set must cover the whole block.
+    seen.iter().all(|word| *word == u64::MAX)
 }
 
 /// Permissions decoded from the ABI (1 = read, 2 = write, 4 = execute).
