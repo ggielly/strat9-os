@@ -35,16 +35,16 @@
 //
 //
 
-use crate::ipc::{channel, port, semaphore, shared_ring, ChanId, PortId, RingId, SemId};
+use crate::ipc::{ChanId, PortId, RingId, SemId, channel, port, semaphore, shared_ring};
 
 use super::{
-    chan, debug, error::SyscallError, exec::sys_execve, fork::sys_fork, iommu, ipc_port, ipc_ring,
-    net, numbers::*, pci, process as proc_sys, semaphore as sem_handler, transport, vmm, volume,
-    SyscallFrame,
+    SyscallFrame, chan, debug, error::SyscallError, exec::sys_execve, fork::sys_fork, iommu,
+    ipc_port, ipc_ring, net, numbers::*, pci, process as proc_sys, semaphore as sem_handler,
+    transport, vmm, volume,
 };
 use crate::{
     async_io::syscall as async_sys,
-    capability::{release_capability, CapId, CapPermissions, ResourceType},
+    capability::{CapId, CapPermissions, ResourceType, release_capability},
     memory::{UserSliceRead, UserSliceWrite},
     process::current_task_clone,
     silo,
@@ -357,6 +357,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_VMM_INFO => vmm::sys_vmm_info(arg1, arg2),
         SYS_VMM_CREATE_VCPU => vmm::sys_vmm_create_vcpu(arg1, arg2),
         SYS_VMM_DESTROY_VCPU => vmm::sys_vmm_destroy_vcpu(arg1),
+        SYS_VMM_MAP_IOMMU => vmm::sys_vmm_map_iommu(arg1, arg2),
         SYS_VMM_SET_CPUID_POLICY => vmm::sys_vmm_set_cpuid_policy(arg1, arg2),
         SYS_VMM_PAUSE => vmm::sys_vmm_pause(arg1),
         SYS_VMM_RESUME => vmm::sys_vmm_resume(arg1),

@@ -84,8 +84,8 @@ fn p0_block_does_not_collide_with_iommu_block() {
 
 #[test]
 fn abi_version_is_current() {
-    // Version 5: append-only CPUID policy over version 4.
-    assert_eq!(abi::VMM_ABI_VERSION, 5);
+    // Version 6: append-only IOMMU mapping surface over version 5.
+    assert_eq!(abi::VMM_ABI_VERSION, 6);
 }
 
 #[test]
@@ -426,4 +426,87 @@ fn guest_module_and_cmdline_limits_are_coherent() {
     // The boot-parameter block has room for exactly these limits.
     assert_eq!(abi::VMM_MAX_MODULES, 4);
     assert!(abi::VMM_CMDLINE_MAX <= 256);
+}
+
+#[test]
+fn iommu_map_syscall_number_is_stable() {
+    // 572 was documented as reserved until the IOMMU model was wired; it must
+    // now sit between the vCPU calls and SET_CPUID_POLICY.
+    assert_eq!(SYS_VMM_MAP_IOMMU, 572);
+    assert!(SYS_VMM_MAP_IOMMU > SYS_VMM_DESTROY_VCPU);
+    assert!(SYS_VMM_MAP_IOMMU < SYS_VMM_SET_CPUID_POLICY);
+}
+
+#[test]
+fn iommu_map_layout() {
+    use core::mem::{align_of, offset_of, size_of};
+
+    assert_eq!(size_of::<abi::VmmIommuMap>(), 40);
+    assert_eq!(align_of::<abi::VmmIommuMap>(), 8);
+
+    assert_eq!(offset_of!(abi::VmmIommuMap, abi_version), 0);
+    assert_eq!(offset_of!(abi::VmmIommuMap, flags), 4);
+    assert_eq!(offset_of!(abi::VmmIommuMap, device), 8);
+    assert_eq!(offset_of!(abi::VmmIommuMap, perms), 12);
+    assert_eq!(offset_of!(abi::VmmIommuMap, iova), 16);
+    assert_eq!(offset_of!(abi::VmmIommuMap, length), 24);
+    assert_eq!(offset_of!(abi::VmmIommuMap, reserved), 32);
+
+    // No implicit padding: the last fixed field ends exactly at `size`.
+    assert_eq!(
+        offset_of!(abi::VmmIommuMap, reserved) + 8,
+        size_of::<abi::VmmIommuMap>()
+    );
+}
+
+#[test]
+fn iommu_map_zeroed_defaults() {
+    let request = abi::VmmIommuMap::default();
+    assert_eq!(request.abi_version, 0);
+    assert_eq!(request.flags, 0);
+    assert_eq!(request.device, 0);
+    assert_eq!(request.perms, 0);
+    assert_eq!(request.iova, 0);
+    assert_eq!(request.length, 0);
+    assert_eq!(request.reserved, 0);
+}
+
+#[test]
+fn iommu_flags_are_distinct_bits() {
+    use abi::iommu_flags::{ALL, MAP, REQUIRE_2M, UNMAP};
+
+    assert_eq!(MAP, 1 << 0);
+    assert_eq!(UNMAP, 1 << 1);
+    assert_eq!(REQUIRE_2M, 1 << 2);
+    assert_eq!(ALL, MAP | UNMAP | REQUIRE_2M);
+
+    let flags = [MAP, UNMAP, REQUIRE_2M];
+    for (index, flag) in flags.iter().enumerate() {
+        assert_eq!(flag.count_ones(), 1);
+        for (other_index, other) in flags.iter().enumerate() {
+            if index != other_index {
+                assert_eq!(flag & other, 0);
+            }
+        }
+    }
+    // `ALL` never sets a bit outside the three defined flags.
+    assert_eq!(ALL & !0x7, 0);
+}
+
+#[test]
+fn iommu_map_length_bound_is_one_gib() {
+    assert_eq!(abi::VMM_IOMMU_MAX_MAP_BYTES, 1 << 30);
+    // The ABI bound is page aligned and large enough for one PCI BAR-sized
+    // assignment chunk.
+    assert_eq!(abi::VMM_IOMMU_MAX_MAP_BYTES % 4096, 0);
+    assert!(abi::VMM_IOMMU_MAX_MAP_BYTES >= 2 * 1024 * 1024);
+}
+
+#[test]
+fn run_syscall_contract_is_stable() {
+    // The kernel bounds one RUN to 10 s and reports ETIMEDOUT on expiry; the
+    // ABI number and ordering must not drift.
+    assert_eq!(SYS_VMM_RUN, 565);
+    assert!(SYS_VMM_RUN > SYS_VMM_GET_REGS);
+    assert!(SYS_VMM_RUN < SYS_VMM_INJECT_IRQ);
 }

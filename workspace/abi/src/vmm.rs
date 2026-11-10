@@ -42,7 +42,11 @@
 /// Version 5 is append-only over version 4: it adds [`VmmCpuidPolicy`] and the
 /// `SYS_VMM_SET_CPUID_POLICY` (573) syscall that installs it. No existing
 /// structure changed.
-pub const VMM_ABI_VERSION: u32 = 5;
+///
+/// Version 6 is append-only over version 5: it adds [`VmmIommuMap`] and the
+/// `SYS_VMM_MAP_IOMMU` (572) syscall that programs the per-world device
+/// translation domain. No existing structure changed.
+pub const VMM_ABI_VERSION: u32 = 6;
 
 /// Maximum number of registers exposed by [`VmmRegs`] (general-purpose registers).
 pub const VMM_REG_COUNT: usize = 16;
@@ -68,6 +72,12 @@ pub const VMM_MAX_MODULES: usize = 4;
 pub const VMM_MODULE_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum command-line length accepted by `SYS_VMM_SET_CMDLINE`.
 pub const VMM_CMDLINE_MAX: usize = 256;
+/// Maximum number of bytes mapped by one `SYS_VMM_MAP_IOMMU` call (1 GiB).
+///
+/// A call is bounded so a single syscall can never walk an unbounded IOVA
+/// range under the world registry lock; larger assignments are split by the
+/// caller.
+pub const VMM_IOMMU_MAX_MAP_BYTES: u64 = 1 << 30;
 
 /// Register block shared between `SYS_VMM_SET_REGS` and `SYS_VMM_GET_REGS`.
 ///
@@ -363,6 +373,56 @@ pub struct VmmCpuidPolicy {
 static_assertions::assert_eq_size!(VmmCpuidPolicy, [u8; 56]);
 static_assertions::const_assert_eq!(core::mem::align_of::<VmmCpuidPolicy>(), 4);
 
+/// Operation and validation flags of [`VmmIommuMap`].
+pub mod iommu_flags {
+    /// Install the IOVA range: the domain maps every page to the host frame
+    /// backing that guest-physical address.
+    pub const MAP: u32 = 1 << 0;
+    /// Remove the IOVA range previously installed by [`MAP`].
+    pub const UNMAP: u32 = 1 << 1;
+    /// The range must be mapped with 2 MiB leaves: IOVA, length and backing
+    /// host addresses must be 2 MiB aligned/contiguous. Without this flag the
+    /// kernel installs 4 KiB leaves.
+    pub const REQUIRE_2M: u32 = 1 << 2;
+    /// Every defined bit; reserved bits are never set.
+    pub const ALL: u32 = MAP | UNMAP | REQUIRE_2M;
+}
+
+/// Request of `SYS_VMM_MAP_IOMMU` (572): program the device translation
+/// domain of a world.
+///
+/// Size: 40 bytes, alignment 8. The structure is self-describing through
+/// `abi_version`; `reserved` must be zero and is rejected otherwise.
+///
+/// The `iova` is the address the **device** uses, not the guest physical
+/// address: for a passthrough device the two are equal only when the guest
+/// does not see a virtual IOMMU. The kernel resolves each IOVA page through
+/// the world's guest memory map and installs the resulting host frame in the
+/// world's IOMMU domain; no host address is ever returned to userspace.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VmmIommuMap {
+    /// ABI version of the structure ([`VMM_ABI_VERSION`]).
+    pub abi_version: u32,
+    /// [`iommu_flags`] bits; exactly one of `MAP`/`UNMAP` must be set.
+    pub flags: u32,
+    /// PCI segment/bus/device/function identifier of the assigned device.
+    pub device: u32,
+    /// Permission bits of the mapping: 1 = read, 2 = write, 4 = execute
+    /// (same encoding as the second-level entries). Must be 1..=7 for `MAP`.
+    pub perms: u32,
+    /// Device-visible base address (4 KiB aligned; 2 MiB aligned when
+    /// [`iommu_flags::REQUIRE_2M`] is set).
+    pub iova: u64,
+    /// Length in bytes, bounded by [`VMM_IOMMU_MAX_MAP_BYTES`].
+    pub length: u64,
+    /// Reserved, must be zero.
+    pub reserved: u64,
+}
+
+static_assertions::assert_eq_size!(VmmIommuMap, [u8; 40]);
+static_assertions::const_assert_eq!(core::mem::align_of::<VmmIommuMap>(), 8);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,6 +438,7 @@ mod tests {
         assert_eq!(size_of::<VmmImageInfo>(), 40);
         assert_eq!(size_of::<VmmVcpuInfo>(), 32);
         assert_eq!(size_of::<VmmCpuidPolicy>(), 56);
+        assert_eq!(size_of::<VmmIommuMap>(), 40);
     }
 
     #[test]

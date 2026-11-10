@@ -42,24 +42,25 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
     memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame},
-    process::{kthread, scheduler::ticks, sleep_current_task_ticks, TaskId},
+    process::{TaskId, kthread, scheduler::ticks, sleep_current_task_ticks},
     s9vm::{
         apic::LocalApic,
         caps::HwCaps,
-        emulate::{interrupt_action, InterruptAction},
+        emulate::{InterruptAction, interrupt_action},
         exit::ExitClass,
         exitqueue::ExitQueue,
         guest::{FixedBits, GuestState},
         image::{Image, Segment},
+        iommu::{DeviceId, DomainId, IommuError, IommuModel},
         machine::Machine,
-        memmap::{contiguous_2m_aligned, perms_from_abi, plan_map, GuestMap, MapError, MAX_GPA},
-        mmu::{Perms as MmuPerms, PAGE_SIZE},
-        timing::{ExitLatencyHistogram, WorldTiming, EXIT_LATENCY_BUCKETS},
+        memmap::{GuestMap, MAX_GPA, MapError, contiguous_2m_aligned, perms_from_abi, plan_map},
+        mmu::{PAGE_SIZE, Perms as MmuPerms},
+        timing::{EXIT_LATENCY_BUCKETS, ExitLatencyHistogram, WorldTiming},
         vcpu::{ExitInfo, SecondLevelMemory, Vcpu, VcpuError},
     },
     sync::{SpinLock, WaitQueue},
 };
-use strat9_abi::vmm::{exit_kind, VmmExitEvent, VmmRegs};
+use strat9_abi::vmm::{VMM_IOMMU_MAX_MAP_BYTES, VmmExitEvent, VmmRegs, exit_kind};
 
 /// Maximum number of simultaneous worlds (safety bound).
 pub const MAX_WORLDS: usize = 64;
@@ -73,6 +74,12 @@ pub const MAX_MODULES_PER_WORLD: usize = 4;
 pub const MAX_MODULE_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum length of the guest command line stored by `SYS_VMM_SET_CMDLINE`.
 pub const CMDLINE_MAX: usize = 256;
+/// Maximum bytes covered by one `SYS_VMM_MAP_IOMMU` request (1 GiB).
+pub const IOMMU_MAX_MAP_BYTES: u64 = VMM_IOMMU_MAX_MAP_BYTES;
+/// Granularity of one IOMMU leaf installed by `SYS_VMM_MAP_IOMMU`.
+const IOMMU_PAGE_SIZE: u64 = PAGE_SIZE;
+/// Size of a large IOMMU leaf (2 MiB) installed when `REQUIRE_2M` is set.
+const IOMMU_LARGE_PAGE_SIZE: u64 = 2 * 1024 * 1024;
 /// Default guest page quota (1 GiB).
 pub const DEFAULT_QUOTA_PAGES: u64 = 262_144;
 /// `RFLAGS.IF`: the guest is interruptible.
@@ -475,6 +482,14 @@ struct World {
     cmdline: [u8; CMDLINE_MAX],
     /// Number of valid bytes in `cmdline`.
     cmdline_len: usize,
+    /// Device translation model of this world (IOMMU).
+    ///
+    /// The model is pure and owns no frame: it maps device-visible addresses
+    /// to host frames already owned by `memory`. It is empty until the first
+    /// `SYS_VMM_MAP_IOMMU` call, which lazily allocates the domain.
+    iommu: IommuModel,
+    /// Address space allocated in `iommu`, if any.
+    iommu_domain: Option<DomainId>,
 }
 
 /// One guest module/initrd range recorded for the boot-parameter block.
@@ -570,6 +585,8 @@ pub fn create(name: &[u8], silo_id: u32) -> Option<WorldRecord> {
             modules: Vec::new(),
             cmdline: [0u8; CMDLINE_MAX],
             cmdline_len: 0,
+            iommu: IommuModel::new(),
+            iommu_domain: None,
         },
     );
     Some(record)
@@ -642,11 +659,15 @@ fn destroy_inner(id: u64, timeout_ns: Option<u64>) -> Option<WorldRecord> {
         }
     }
     // 3. Removes the world and frees the guest memory.
-    let world = {
+    let mut world = {
         let mut worlds = WORLDS.lock();
         worlds.remove(&id)?
     };
-    if let Some(memory) = world.memory {
+    // The IOMMU model owns no frame, but its domains and device bindings must
+    // not outlive the world: drop them explicitly before the guest frames.
+    world.iommu.destroy();
+    world.iommu_domain = None;
+    if let Some(memory) = world.memory.take() {
         memory.destroy();
     }
     Some(world.record)
@@ -2272,6 +2293,219 @@ pub fn exit_count(world_id: u64) -> Option<usize> {
     WORLDS.lock().get(&world_id).map(|world| world.exits.len())
 }
 
+// ============================================================================
+// Device translation (IOMMU)
+// ============================================================================
+
+/// Validates the shape of an IOMMU map/unmap request.
+fn validate_iommu_range(iova: u64, len: u64, require_2m: bool) -> Result<(), IommuError> {
+    if len == 0
+        || len > IOMMU_MAX_MAP_BYTES
+        || len % IOMMU_PAGE_SIZE != 0
+        || iova % IOMMU_PAGE_SIZE != 0
+    {
+        return Err(IommuError::InvalidRange);
+    }
+    if iova.checked_add(len).map_or(true, |end| end > MAX_GPA) {
+        return Err(IommuError::InvalidRange);
+    }
+    if require_2m && (iova % IOMMU_LARGE_PAGE_SIZE != 0 || len % IOMMU_LARGE_PAGE_SIZE != 0) {
+        return Err(IommuError::InvalidRange);
+    }
+    Ok(())
+}
+
+/// Returns the IOMMU domain of a world, allocating it on first use.
+///
+/// One domain per world: every device assigned to the world shares the same
+/// address space, so a mapping installed for one device is visible to the
+/// others (the device set is trusted to be co-operating; isolation is between
+/// worlds, not inside one).
+fn iommu_domain(world: &mut World) -> Result<DomainId, IommuError> {
+    if world.closing {
+        return Err(IommuError::UnknownDomain);
+    }
+    match world.iommu_domain {
+        Some(domain) => Ok(domain),
+        None => {
+            let domain = world.iommu.create_domain()?;
+            world.iommu_domain = Some(domain);
+            Ok(domain)
+        }
+    }
+}
+
+/// Maps an IOVA range of a world to the host frames backing its guest memory.
+///
+/// Contract:
+/// - `iova`/`len` are 4 KiB aligned and `len <= IOMMU_MAX_MAP_BYTES`; with
+///   `require_2m` both are 2 MiB aligned and every 2 MiB block must be backed
+///   by a physically contiguous, 2 MiB-aligned host range.
+/// - Every IOVA page must be backed by the world's guest memory
+///   (`WorldMemory::translate`); an unmapped GPA returns
+///   [`IommuError::NotMapped`] and nothing is installed.
+/// - The device is bound to the world domain (idempotent when already bound).
+/// - All-or-nothing: on any error the leaves installed by this call are
+///   removed before returning.
+///
+/// Returns the number of 4 KiB pages covered. The host physical addresses are
+/// never returned to the caller.
+pub fn iommu_map(
+    world_id: u64,
+    iova: u64,
+    len: u64,
+    perms: MmuPerms,
+    require_2m: bool,
+    device: u32,
+) -> Result<u64, IommuError> {
+    validate_iommu_range(iova, len, require_2m)?;
+    let mut worlds = WORLDS.lock();
+    let world = worlds.get_mut(&world_id).ok_or(IommuError::UnknownDomain)?;
+    let domain = iommu_domain(world)?;
+    let memory = world.memory.as_ref().ok_or(IommuError::NotMapped)?;
+    let pages = len / IOMMU_PAGE_SIZE;
+
+    if require_2m {
+        let leaves = len / IOMMU_LARGE_PAGE_SIZE;
+        let mut done = 0u64;
+        for leaf in 0..leaves {
+            let base = iova + leaf * IOMMU_LARGE_PAGE_SIZE;
+            let hpa = match memory.translate(base) {
+                Some(hpa) => hpa,
+                None => {
+                    if done > 0 {
+                        let _ = world
+                            .iommu
+                            .unmap_2m(domain, iova, done * IOMMU_LARGE_PAGE_SIZE);
+                    }
+                    return Err(IommuError::NotMapped);
+                }
+            };
+            if hpa % IOMMU_LARGE_PAGE_SIZE != 0 {
+                if done > 0 {
+                    let _ = world
+                        .iommu
+                        .unmap_2m(domain, iova, done * IOMMU_LARGE_PAGE_SIZE);
+                }
+                return Err(IommuError::InvalidRange);
+            }
+            // A 2 MiB leaf needs a physically contiguous block: verify every
+            // 4 KiB page of the block maps to the expected contiguous HPA.
+            let block_pages = IOMMU_LARGE_PAGE_SIZE / IOMMU_PAGE_SIZE;
+            for sub in 1..block_pages {
+                let gpa = base + sub * IOMMU_PAGE_SIZE;
+                if memory.translate(gpa) != Some(hpa + sub * IOMMU_PAGE_SIZE) {
+                    if done > 0 {
+                        let _ = world
+                            .iommu
+                            .unmap_2m(domain, iova, done * IOMMU_LARGE_PAGE_SIZE);
+                    }
+                    return Err(IommuError::NotMapped);
+                }
+            }
+            if let Err(error) = world
+                .iommu
+                .map_2m(domain, base, hpa, IOMMU_LARGE_PAGE_SIZE, perms)
+            {
+                if done > 0 {
+                    let _ = world
+                        .iommu
+                        .unmap_2m(domain, iova, done * IOMMU_LARGE_PAGE_SIZE);
+                }
+                return Err(error);
+            }
+            done += 1;
+        }
+    } else {
+        let mut done = 0u64;
+        for page in 0..pages {
+            let gpa = iova + page * IOMMU_PAGE_SIZE;
+            let hpa = match memory.translate(gpa) {
+                Some(hpa) => hpa,
+                None => {
+                    if done > 0 {
+                        let _ = world.iommu.unmap(domain, iova, done * IOMMU_PAGE_SIZE);
+                    }
+                    return Err(IommuError::NotMapped);
+                }
+            };
+            if let Err(error) = world.iommu.map(domain, gpa, hpa, IOMMU_PAGE_SIZE, perms) {
+                if done > 0 {
+                    let _ = world.iommu.unmap(domain, iova, done * IOMMU_PAGE_SIZE);
+                }
+                return Err(error);
+            }
+            done += 1;
+        }
+    }
+
+    // Bind the device to the world domain. Binding twice to the same domain
+    // is idempotent; any other failure rolls the mapping back.
+    match world.iommu.bind_device(domain, DeviceId(device)) {
+        Ok(()) | Err(IommuError::AlreadyBound) => {}
+        Err(error) => {
+            if require_2m {
+                let _ = world.iommu.unmap_2m(domain, iova, len);
+            } else {
+                let _ = world.iommu.unmap(domain, iova, len);
+            }
+            return Err(error);
+        }
+    }
+    Ok(pages)
+}
+
+/// Removes an IOVA range of a world from its device translation domain.
+///
+/// The range must have been installed by [`iommu_map`] with the same leaf
+/// size. When the domain becomes empty the device is unbound. Returns the
+/// number of 4 KiB pages removed.
+pub fn iommu_unmap(
+    world_id: u64,
+    iova: u64,
+    len: u64,
+    require_2m: bool,
+    device: u32,
+) -> Result<u64, IommuError> {
+    validate_iommu_range(iova, len, require_2m)?;
+    let mut worlds = WORLDS.lock();
+    let world = worlds.get_mut(&world_id).ok_or(IommuError::UnknownDomain)?;
+    if world.closing {
+        return Err(IommuError::UnknownDomain);
+    }
+    let domain = world.iommu_domain.ok_or(IommuError::NotMapped)?;
+    let pages = if require_2m {
+        world.iommu.unmap_2m(domain, iova, len)?
+    } else {
+        world.iommu.unmap(domain, iova, len)?
+    };
+    if world.iommu.mapped_entries(domain) == Some(0) {
+        let _ = world.iommu.unbind_device(DeviceId(device));
+    }
+    Ok(pages)
+}
+
+/// Translates one device-visible address of a world.
+///
+/// This is a **kernel-side** diagnostic/device-model accessor: the host
+/// physical address is never exposed through the syscall ABI.
+pub fn iommu_translate(world_id: u64, iova: u64) -> Option<u64> {
+    let mut worlds = WORLDS.lock();
+    let world = worlds.get_mut(&world_id)?;
+    if world.closing {
+        return None;
+    }
+    let domain = world.iommu_domain?;
+    world.iommu.translate(domain, iova)
+}
+
+/// Number of leaves installed in the device translation domain of a world.
+pub fn iommu_mapped_entries(world_id: u64) -> Option<usize> {
+    let worlds = WORLDS.lock();
+    let world = worlds.get(&world_id)?;
+    world.iommu.mapped_entries(world.iommu_domain?)
+}
+
 /// Next vCPU identifier (global, never 0).
 static NEXT_VCPU: AtomicU64 = AtomicU64::new(1);
 
@@ -2300,10 +2534,7 @@ pub fn create_vcpu(world_id: u64, apic_id: u32) -> Result<u64, VcpuRegistryError
     // userspace syscall), and a silently dropped kernel task used to be
     // indistinguishable from a hang. The three log lines below tell an operator
     // exactly where a stuck `SYS_VMM_CREATE_VCPU` stopped.
-    log::info!(
-        "[s9vm] create_vcpu {}: spawning the vCPU kernel task",
-        id
-    );
+    log::info!("[s9vm] create_vcpu {}: spawning the vCPU kernel task", id);
     let task = match kthread::spawn("s9vm-vcpu", move || vcpu_task_main(world_id, id)) {
         Ok(task) => task,
         Err(_) => {
@@ -2426,11 +2657,7 @@ fn vcpu_task_main(world_id: u64, vcpu_id: u64) {
         // error here is the reason the guest stopped).
         match &result {
             Ok(()) => log::info!("[s9vm] vcpu task {}: run executed", vcpu_id),
-            Err(error) => log::warn!(
-                "[s9vm] vcpu task {}: run failed ({:?})",
-                vcpu_id,
-                error
-            ),
+            Err(error) => log::warn!("[s9vm] vcpu task {}: run failed ({:?})", vcpu_id, error),
         }
 
         let done_wait = {
@@ -2461,13 +2688,10 @@ fn execute_one_run(vcpu_id: u64) -> Result<(), RunError> {
     // without a VMXON root and fault the kernel, so the task activates the
     // current CPU first (the activation is idempotent and cheap once done).
     // `VMXON` expects interrupts disabled.
-    let activated = crate::s9vm::activation_region(
-        crate::arch::x86_64::percpu::current_cpu_index(),
-    )
-    .is_some();
+    let activated =
+        crate::s9vm::activation_region(crate::arch::x86_64::percpu::current_cpu_index()).is_some();
     if !activated {
-        let result =
-            crate::sync::with_irqs_disabled(|_| crate::s9vm::activate_current_cpu());
+        let result = crate::sync::with_irqs_disabled(|_| crate::s9vm::activate_current_cpu());
         if result.is_err() {
             log::warn!(
                 "[s9vm] vcpu task: cannot activate VT-x on cpu {}",

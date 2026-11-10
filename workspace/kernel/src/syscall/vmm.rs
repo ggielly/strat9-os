@@ -41,12 +41,13 @@
 
 use super::error::SyscallError;
 use crate::{
-    capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
+    capability::{CapId, CapPermissions, ResourceType, get_capability_manager},
     memory::{UserSliceRead, UserSliceWrite},
     process::current_task_clone,
     s9vm,
     s9vm::{
         cpuid::{self, CpuidPolicy},
+        iommu::IommuError,
         memmap::MapError,
         vm::{self, VmError},
     },
@@ -54,13 +55,22 @@ use crate::{
 };
 use alloc::vec;
 use strat9_abi::vmm::{
-    state, vcpu_flags, VmmCpuidPolicy, VmmImageInfo, VmmInfo, VmmRegs, VmmVcpuInfo, VmmWorldEntry,
-    VmmWorldStats, VMM_ABI_VERSION, VMM_CMDLINE_MAX, VMM_LIST_MAX, VMM_MODULE_MAX_BYTES,
-    VMM_NAME_MAX, VMM_VCPU_LIST_MAX,
+    VMM_ABI_VERSION, VMM_CMDLINE_MAX, VMM_IOMMU_MAX_MAP_BYTES, VMM_LIST_MAX, VMM_MODULE_MAX_BYTES,
+    VMM_NAME_MAX, VMM_VCPU_LIST_MAX, VmmCpuidPolicy, VmmImageInfo, VmmInfo, VmmIommuMap, VmmRegs,
+    VmmVcpuInfo, VmmWorldEntry, VmmWorldStats, iommu_flags, state, vcpu_flags,
 };
 
 /// Maximum size of a structure read from user space.
 const MAX_STRUCT: usize = 192;
+
+/// Timeout applied to one `SYS_VMM_RUN` (10 s).
+///
+/// A guest that never reaches a policy exit (stuck vCPU task, pathological
+/// exit loop) must not block the caller forever: `RUN` returns
+/// [`SyscallError::TimedOut`] after this budget. The vCPU may still be busy at
+/// that point, so the caller must destroy the world rather than retry; the
+/// kernel logs the vCPU task state to help diagnose the defect.
+const RUN_TIMEOUT_NS: u64 = 10_000_000_000;
 
 /// Maximum size of a guest image accepted by `SYS_VMM_LOAD_IMAGE`.
 ///
@@ -323,6 +333,11 @@ pub fn sys_vmm_destroy_vcpu(vcpu_handle: u64) -> Result<u64, SyscallError> {
 
 /// SYS_VMM_RUN (565): runs a vCPU until the next "policy" exit and pushes
 /// the event onto the world's queue.
+///
+/// The call is blocked until the exit event is queued **or** until
+/// [`RUN_TIMEOUT_NS`] expires. On timeout the vCPU task may still be busy, so
+/// the caller must destroy the world (the kernel log carries the vCPU task
+/// diagnostic); retrying `RUN` would just hit the same stuck task.
 pub fn sys_vmm_run(vcpu_handle: u64) -> Result<u64, SyscallError> {
     let required = CapPermissions {
         execute: true,
@@ -330,9 +345,7 @@ pub fn sys_vmm_run(vcpu_handle: u64) -> Result<u64, SyscallError> {
         ..CapPermissions::none()
     };
     let vcpu = vcpu_target(vcpu_handle, required)?;
-    // `RUN` is blocking: the vCPU's kernel task runs the guest until the
-    // next policy exit, then the caller resumes.
-    vm::request_run(vcpu).map_err(map_run_error)?;
+    vm::request_run_timeout(vcpu, RUN_TIMEOUT_NS).map_err(map_run_error)?;
     Ok(0)
 }
 
@@ -411,6 +424,103 @@ pub fn sys_vmm_set_cpuid_policy(vmm_handle: u64, policy_ptr: u64) -> Result<u64,
         return Err(SyscallError::NotFound);
     }
     Ok(0)
+}
+
+/// SYS_VMM_MAP_IOMMU (572): programs the device translation domain of a
+/// world.
+///
+/// `arg1` = VMM capability handle (write permission required),
+/// `arg2` = pointer to a [`VmmIommuMap`]. Exactly one of
+/// [`iommu_flags::MAP`] / [`iommu_flags::UNMAP`] must be set; `REQUIRE_2M`
+/// additionally enforces 2 MiB alignment on both the IOVA range and the
+/// backing host memory.
+///
+/// `MAP`: every IOVA page of the request is resolved through the world's
+/// guest memory; an address not backed by mapped guest RAM returns `ENOENT`
+/// and nothing is installed (all-or-nothing). The device is bound to the
+/// world domain. `UNMAP`: the range must have been installed with the same
+/// leaf size, otherwise `ENOENT`.
+///
+/// Never returns a host physical address: the translation is kernel-side
+/// only.
+pub fn sys_vmm_map_iommu(vmm_handle: u64, req_ptr: u64) -> Result<u64, SyscallError> {
+    let required = CapPermissions {
+        write: true,
+        ..CapPermissions::none()
+    };
+    let world = vmm_world(vmm_handle, required)?;
+    let request: VmmIommuMap = read_struct(req_ptr)?;
+    if request.abi_version != VMM_ABI_VERSION || request.reserved != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if request.flags & !iommu_flags::ALL != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let map = request.flags & iommu_flags::MAP != 0;
+    let unmap = request.flags & iommu_flags::UNMAP != 0;
+    // Exactly one operation; MAP|UNMAP or neither is a caller bug.
+    if map == unmap {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let require_2m = request.flags & iommu_flags::REQUIRE_2M != 0;
+    if request.length == 0 || request.length > VMM_IOMMU_MAX_MAP_BYTES {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if request.iova % 4096 != 0 || request.length % 4096 != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if require_2m
+        && (request.iova % (2 * 1024 * 1024) != 0 || request.length % (2 * 1024 * 1024) != 0)
+    {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    if map {
+        // Permission bits 1 = read, 2 = write, 4 = execute; at least one bit
+        // and no reserved bit.
+        if request.perms == 0 || request.perms & !0x7 != 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let perms = crate::s9vm::mmu::Perms {
+            read: request.perms & 0x1 != 0,
+            write: request.perms & 0x2 != 0,
+            execute: request.perms & 0x4 != 0,
+        };
+        vm::iommu_map(
+            world,
+            request.iova,
+            request.length,
+            perms,
+            require_2m,
+            request.device,
+        )
+        .map_err(map_iommu_error)?;
+    } else {
+        vm::iommu_unmap(
+            world,
+            request.iova,
+            request.length,
+            require_2m,
+            request.device,
+        )
+        .map_err(map_iommu_error)?;
+    }
+    Ok(0)
+}
+
+/// Maps an IOMMU model error to the syscall ABI.
+///
+/// `InvalidRange`→`EINVAL`, `Overlap`→`EEXIST`, `NotMapped`→`ENOENT`,
+/// quota/domain exhaustion→`ENOMEM`, unknown world/domain→`EBADF`.
+fn map_iommu_error(error: IommuError) -> SyscallError {
+    match error {
+        IommuError::InvalidRange => SyscallError::InvalidArgument,
+        IommuError::Overlap => SyscallError::AlreadyExists,
+        IommuError::NotMapped => SyscallError::NotFound,
+        IommuError::QuotaExceeded | IommuError::TooManyDomains => SyscallError::OutOfMemory,
+        IommuError::UnknownDomain => SyscallError::BadHandle,
+        IommuError::AlreadyBound => SyscallError::AlreadyExists,
+    }
 }
 
 /// SYS_VMM_PAUSE (575): pauses a world.
@@ -1017,11 +1127,7 @@ fn cpuid_policy_from_abi(request: &VmmCpuidPolicy) -> Result<CpuidPolicy, Syscal
 
 /// A zero ABI field means "keep the engine default".
 fn defaulted(value: u32, default: u32) -> u32 {
-    if value == 0 {
-        default
-    } else {
-        value
-    }
+    if value == 0 { default } else { value }
 }
 
 fn map_vm_error(error: VmError) -> SyscallError {
@@ -1055,6 +1161,8 @@ fn map_run_error(error: vm::RunError) -> SyscallError {
         vm::RunError::ExitStorm => SyscallError::Again,
         vm::RunError::Busy => SyscallError::Again,
         vm::RunError::Paused => SyscallError::Again,
-        vm::RunError::Timeout => SyscallError::Again,
+        // The vCPU task did not finish within the `RUN` budget: report the
+        // timeout (ETIMEDOUT) instead of retrying forever.
+        vm::RunError::Timeout => SyscallError::TimedOut,
     }
 }

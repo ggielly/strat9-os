@@ -1654,7 +1654,12 @@ pub const SYS_VMM_SET_REGS: usize = 563;
 pub const SYS_VMM_GET_REGS: usize = 564;
 
 /// Run a vCPU until its next policy exit. Argument: VCPU capability handle.
-/// Blocking: returns once the event has been queued.
+///
+/// Blocking: returns once the exit event has been queued, or when the kernel
+/// run timeout expires (10 s). A timeout returns `ETIMEDOUT`; the vCPU may
+/// still be busy at that point, so the caller must destroy the world (or the
+/// vCPU) instead of retrying forever. The kernel logs the vCPU task state when
+/// it happens, which is the diagnostic to collect.
 pub const SYS_VMM_RUN: usize = 565;
 
 /// Inject an interrupt into a vCPU. Arguments: VCPU capability handle, vector.
@@ -1682,7 +1687,26 @@ pub const SYS_VMM_CREATE_VCPU: usize = 570;
 /// required).
 pub const SYS_VMM_DESTROY_VCPU: usize = 571;
 
-/// Reserved: map an IOMMU domain into a world.
+/// Program the device translation domain (IOMMU) of a world.
+///
+/// Arguments: VMM capability handle (write permission required), pointer to a
+/// [`strat9_abi::vmm::VmmIommuMap`] request. `flags` selects
+/// [`strat9_abi::vmm::iommu_flags::MAP`] or
+/// [`strat9_abi::vmm::iommu_flags::UNMAP`], optionally with
+/// [`strat9_abi::vmm::iommu_flags::REQUIRE_2M`].
+///
+/// For `MAP` the kernel resolves every IOVA page of the request through the
+/// world's guest memory (the IOVA must be backed by mapped guest RAM),
+/// installs 4 KiB or 2 MiB leaves in the world's IOMMU domain and binds the
+/// device identifier to that domain. For `UNMAP` the range must have been
+/// installed by a matching call. No host physical address and no kernel object
+/// is ever returned to userspace.
+///
+/// Errors: `EINVAL` (invalid range/flags/permissions/alignment), `EEXIST`
+/// (overlap), `ENOENT` (IOVA not backed by the world's guest memory, or
+/// nothing to unmap), `ENOMEM` (domain/leaf quota), `EBADF` (unknown world or
+/// domain). The per-call length is bounded by
+/// [`strat9_abi::vmm::VMM_IOMMU_MAX_MAP_BYTES`].
 pub const SYS_VMM_MAP_IOMMU: usize = 572;
 
 /// Set the guest CPU description of a world. Arguments: VMM capability handle
