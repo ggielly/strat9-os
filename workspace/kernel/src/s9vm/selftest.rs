@@ -43,6 +43,8 @@
 //! not expect is logged with its decoded reason so a failure is diagnosable on
 //! the target machine without rebuilding.
 
+use alloc::vec::Vec;
+
 use crate::{
     memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame},
     s9vm::{
@@ -84,6 +86,63 @@ const IRQ_GUEST_PAGES: u64 = 8;
 const GPA_IDT: u64 = 0x6000;
 /// Guest-physical address of the GDT page (page 7).
 const GPA_GDT: u64 = 0x7000;
+
+// Console phase.
+/// Guest-physical address of the virtio console transport page.
+const CONSOLE_MMIO_BASE: u64 = 0xFEB0_0000;
+/// Guest pages of the console phase: tables, code, stack, queues, buffer.
+const CONSOLE_GUEST_PAGES: u64 = 8;
+/// Guest-physical address of the queue page (descriptor table + rings).
+const GPA_QUEUES: u64 = 0x6000;
+/// Guest-physical address of the console buffer page.
+const GPA_CONSOLE_BUFFER: u64 = 0x7000;
+/// Bytes the guest sends to the console.
+const CONSOLE_TEXT: &[u8] = b"ok\n";
+/// Marker written to the debug port after the console notification.
+const CONSOLE_MARKER: u8 = b'C';
+
+const CONSOLE_GPA_PML4: u64 = 0x0000;
+const CONSOLE_GPA_PDPT: u64 = 0x1000;
+const CONSOLE_GPA_PD: u64 = 0x2000;
+const CONSOLE_GPA_PT: u64 = 0x3000;
+const CONSOLE_GPA_CODE: u64 = 0x4000;
+const CONSOLE_GPA_STACK: u64 = 0x5000;
+
+/// Guest code of the console phase.
+///
+/// Programs the virtio console transport (status, transmit queue, queue
+/// address registers, ready, notify), then reports through the debug port and
+/// halts. All the queue structures are prepared by the kernel, so the guest
+/// only exercises the transport page.
+const CONSOLE_GUEST_CODE: &[u8] = &[
+    0xB8, 0x70, 0x00, 0xB0, 0xFE, // mov eax, CONSOLE_MMIO_BASE + 0x70 (STATUS)
+    0xB9, 0x0F, 0x00, 0x00, 0x00, // mov ecx, ACK | DRIVER | FEATURES_OK | DRIVER_OK
+    0x89, 0x08, // mov [rax], ecx
+    0xB8, 0x30, 0x00, 0xB0, 0xFE, // mov eax, QUEUE_SEL
+    0xB9, 0x01, 0x00, 0x00, 0x00, // mov ecx, 1 (transmit queue)
+    0x89, 0x08, //
+    0xB8, 0x38, 0x00, 0xB0, 0xFE, // mov eax, QUEUE_NUM
+    0xB9, 0x08, 0x00, 0x00, 0x00, // mov ecx, 8
+    0x89, 0x08, //
+    0xB8, 0x80, 0x00, 0xB0, 0xFE, // mov eax, QUEUE_DESC_LOW
+    0xB9, 0x00, 0x60, 0x00, 0x00, // mov ecx, GPA_QUEUES
+    0x89, 0x08, //
+    0xB8, 0x90, 0x00, 0xB0, 0xFE, // mov eax, QUEUE_AVAIL_LOW
+    0xB9, 0x00, 0x61, 0x00, 0x00, // mov ecx, GPA_QUEUES + 0x100
+    0x89, 0x08, //
+    0xB8, 0xA0, 0x00, 0xB0, 0xFE, // mov eax, QUEUE_USED_LOW
+    0xB9, 0x00, 0x62, 0x00, 0x00, // mov ecx, GPA_QUEUES + 0x200
+    0x89, 0x08, //
+    0xB8, 0x44, 0x00, 0xB0, 0xFE, // mov eax, QUEUE_READY
+    0xB9, 0x01, 0x00, 0x00, 0x00, // mov ecx, 1
+    0x89, 0x08, //
+    0xB8, 0x50, 0x00, 0xB0, 0xFE, // mov eax, QUEUE_NOTIFY
+    0xB9, 0x01, 0x00, 0x00, 0x00, // mov ecx, 1 (transmit queue)
+    0x89, 0x08, //
+    0xB0, CONSOLE_MARKER, // mov al, marker
+    0xE6, 0xE9, // out 0xE9, al
+    0xF4, // hlt
+];
 
 /// Flat 64-bit code descriptor (selector `0x08`).
 ///
@@ -665,6 +724,190 @@ pub fn run_interrupt(caps: &HwCaps) -> Result<InterruptReport, SelftestError> {
     }
 }
 
+/// Report of the console phase.
+pub struct ConsoleReport {
+    pub total_exits: u32,
+    pub emulated_exits: u32,
+    pub io_exits: u32,
+    pub halt_exits: u32,
+    pub marker: Option<u8>,
+    pub output: Vec<u8>,
+}
+
+/// Console transport test.
+///
+/// The kernel prepares a transmit queue in guest memory (descriptor, available
+/// ring, buffer), the guest programs the virtio-mmio transport page and
+/// notifies the transmit queue, and the kernel device model must collect the
+/// buffer. This validates the whole EMUlATION path for a device page: EPT
+/// violation, instruction replay, register file, split-queue access to guest
+/// memory, and the output routing.
+pub fn run_console(caps: &HwCaps) -> Result<ConsoleReport, SelftestError> {
+    if !caps.can_run() {
+        return Err(SelftestError::BadExit("platform cannot run"));
+    }
+
+    let pml4 = alloc_frame()?;
+    let pdpt = alloc_frame()?;
+    let pd = alloc_frame()?;
+    let pt = alloc_frame()?;
+    let code = alloc_frame()?;
+    let stack = alloc_frame()?;
+    let queues = alloc_frame()?;
+    let buffer = alloc_frame()?;
+
+    // Identity guest paging over the eight pages.
+    write_u64(&pml4, 0, CONSOLE_GPA_PDPT | 0x3);
+    write_u64(&pdpt, 0, CONSOLE_GPA_PD | 0x3);
+    write_u64(&pd, 0, CONSOLE_GPA_PT | 0x3);
+    for page in 0..CONSOLE_GUEST_PAGES {
+        let gpa = page * crate::s9vm::mmu::PAGE_SIZE;
+        write_u64(&pt, page as usize * 8, gpa | 0x3);
+    }
+
+    write_bytes(&code, CONSOLE_GUEST_CODE);
+
+    // Transmit queue prepared by the kernel:
+    // - descriptor 0 at offset 0: device-readable buffer;
+    // - available ring at offset 0x100: one published descriptor;
+    // - used ring at offset 0x200: zeroed.
+    let descriptor: [u8; 16] = {
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&GPA_CONSOLE_BUFFER.to_le_bytes());
+        bytes[8..12].copy_from_slice(&(CONSOLE_TEXT.len() as u32).to_le_bytes());
+        bytes
+    };
+    write_bytes(&queues, &descriptor);
+    // flags = 0, idx = 1, ring[0] = 0.
+    write_u64(&queues, 0x100, 1 << 16);
+    write_bytes(&buffer, CONSOLE_TEXT);
+
+    let mut second_level = SecondLevelMemory::new().map_err(|_| SelftestError::Mmu)?;
+    let pages = [
+        (CONSOLE_GPA_PML4, &pml4),
+        (CONSOLE_GPA_PDPT, &pdpt),
+        (CONSOLE_GPA_PD, &pd),
+        (CONSOLE_GPA_PT, &pt),
+        (CONSOLE_GPA_CODE, &code),
+        (CONSOLE_GPA_STACK, &stack),
+        (GPA_QUEUES, &queues),
+        (GPA_CONSOLE_BUFFER, &buffer),
+    ];
+    for (gpa, frame) in pages {
+        second_level
+            .map_4k(
+                gpa,
+                frame.start_address.as_u64(),
+                crate::s9vm::mmu::Perms::read_write_execute(),
+            )
+            .map_err(|_| SelftestError::Mmu)?;
+    }
+    let pointer = second_level.pointer(caps);
+
+    let guest = GuestState::long_mode_64(
+        CONSOLE_GPA_CODE,
+        CONSOLE_GPA_STACK + 0x800,
+        CONSOLE_GPA_PML4,
+    );
+    let mut vcpu = Vcpu::new(caps, pointer)?;
+    // SAFETY: VT-x is active on this CPU, interrupts are disabled and the
+    // control block was just created for this vCPU.
+    unsafe {
+        vcpu.load()?;
+        vcpu.configure_host()?;
+        vcpu.configure(caps, &guest)?;
+    }
+
+    let mut machine = Machine::new();
+    let mut apic = LocalApic::new(0);
+    let mut report = ConsoleReport {
+        total_exits: 0,
+        emulated_exits: 0,
+        io_exits: 0,
+        halt_exits: 0,
+        marker: None,
+        output: Vec::new(),
+    };
+    let mut outcome: Result<(), SelftestError> = Ok(());
+
+    for _ in 0..64 {
+        // SAFETY: `run` contract (block loaded, IRQs disabled).
+        let exit = match unsafe { vcpu.run() } {
+            Ok(exit) => exit,
+            Err(error) => {
+                outcome = Err(SelftestError::from(error));
+                break;
+            }
+        };
+        report.total_exits += 1;
+        let class = ExitReason::decode(exit.raw_reason).class();
+        if matches!(
+            class,
+            ExitClass::IoPort | ExitClass::Msr | ExitClass::EptViolation
+        ) {
+            // SAFETY: block loaded, guest inactive.
+            match unsafe { machine.handle(&mut vcpu, &mut apic, &exit) } {
+                Ok(true) => {
+                    report.emulated_exits += 1;
+                    report.output.extend(machine.drain_console());
+                    let port = ((exit.qualification >> 16) & 0xFFFF) as u16;
+                    if class == ExitClass::IoPort && port == TEST_PORT {
+                        report.marker = Some((vcpu.guest().rax & 0xFF) as u8);
+                    }
+                    continue;
+                }
+                Ok(false) | Err(_) => {}
+            }
+        }
+        match class {
+            ExitClass::IoPort => {
+                report.io_exits += 1;
+                let port = ((exit.qualification >> 16) & 0xFFFF) as u16;
+                if port == TEST_PORT {
+                    report.marker = Some((vcpu.guest().rax & 0xFF) as u8);
+                }
+                // SAFETY: block loaded, guest inactive.
+                unsafe {
+                    vcpu.advance_rip(u64::from(exit.instruction_length))?;
+                }
+            }
+            ExitClass::Halt => {
+                report.halt_exits += 1;
+                break;
+            }
+            ExitClass::ExternalInterrupt | ExitClass::InterruptWindow => {}
+            ExitClass::PreemptionTimer => {}
+            other => {
+                log::warn!(
+                    "[s9vm] console test: unexpected exit class={:?} reason={:#x} rip={:#x}",
+                    other,
+                    exit.raw_reason,
+                    vcpu.guest().rip
+                );
+                outcome = Err(SelftestError::BadExit("unexpected console-test exit"));
+                break;
+            }
+        }
+    }
+
+    // SAFETY: the vCPU is no longer active.
+    unsafe {
+        let _ = vcpu.clear();
+    }
+
+    match outcome {
+        Ok(())
+            if report.halt_exits >= 1
+                && report.marker == Some(CONSOLE_MARKER)
+                && report.output == CONSOLE_TEXT =>
+        {
+            Ok(report)
+        }
+        Ok(()) => Err(SelftestError::BadExit("console data was not delivered")),
+        Err(error) => Err(error),
+    }
+}
+
 /// Starts the test if the boot option `s9vm.selftest=1` is present.
 ///
 /// Does nothing if VT-x is not active. Never panics.
@@ -679,6 +922,7 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
     }
     let device_phase = matches!(mode, "1" | "true" | "2" | "all");
     let interrupt_phase = matches!(mode, "2" | "all" | "irq");
+    let console_phase = matches!(mode, "2" | "all" | "console");
 
     if device_phase {
         log::info!("[s9vm] hardware smoke test requested");
@@ -694,6 +938,22 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
                 report.observed_byte
             ),
             Err(error) => log::warn!("[s9vm] selftest FAIL: {:?}", error),
+        }
+    }
+
+    if console_phase {
+        log::info!("[s9vm] console-transport test requested");
+        match run_console(caps) {
+            Ok(report) => log::info!(
+                "[s9vm] consoletest PASS: exits={} emulated={} io={} hlt={} marker={:?} bytes={}",
+                report.total_exits,
+                report.emulated_exits,
+                report.io_exits,
+                report.halt_exits,
+                report.marker,
+                report.output.len()
+            ),
+            Err(error) => log::warn!("[s9vm] consoletest FAIL: {:?}", error),
         }
     }
 

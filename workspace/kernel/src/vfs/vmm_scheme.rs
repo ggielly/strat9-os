@@ -104,6 +104,22 @@ impl VmmScheme {
         }
         let _ = writeln!(text, "worlds={}", vm::count());
         let _ = writeln!(text, "abi_version={}", strat9_abi::vmm::VMM_ABI_VERSION);
+        let stats = vm::total_stats();
+        let _ = writeln!(
+            text,
+            "runs={} policy_exits={} emulated_exits={}",
+            stats.runs, stats.policy_exits, stats.emulated_exits
+        );
+        let _ = writeln!(
+            text,
+            "emulated_io={} emulated_mmio={} emulated_msr={}",
+            stats.emulated_io, stats.emulated_mmio, stats.emulated_msr
+        );
+        let _ = writeln!(
+            text,
+            "injected_interrupts={} windows_armed={} timer_exits={}",
+            stats.injected_interrupts, stats.windows_armed, stats.timer_exits
+        );
         if let Some(caps) = s9vm::detect() {
             let _ = writeln!(text, "can_run={}", caps.can_run());
             let _ = writeln!(
@@ -119,10 +135,20 @@ impl VmmScheme {
         let mut text = String::new();
         for world in vm::list() {
             let name = core::str::from_utf8(world.name_slice()).unwrap_or("<non-utf8>");
+            let stats = vm::stats(world.id).unwrap_or_default();
             let _ = writeln!(
                 text,
-                "world {} name={} silo={} state={} vcpus={} pages={}",
-                world.id, name, world.silo_id, world.state, world.vcpu_count, world.mapped_pages
+                "world {} name={} silo={} state={} vcpus={} pages={} \
+                 runs={} emulated={} policy_exits={}",
+                world.id,
+                name,
+                world.silo_id,
+                world.state,
+                world.vcpu_count,
+                world.mapped_pages,
+                stats.runs,
+                stats.emulated_exits,
+                stats.policy_exits
             );
         }
         text
@@ -138,6 +164,16 @@ impl VmmScheme {
         let _ = writeln!(text, "state={}", world.state);
         let _ = writeln!(text, "vcpus={}", world.vcpu_count);
         let _ = writeln!(text, "pages={}", world.mapped_pages);
+        let stats = vm::stats(world.id).unwrap_or_default();
+        let _ = writeln!(text, "runs={}", stats.runs);
+        let _ = writeln!(text, "policy_exits={}", stats.policy_exits);
+        let _ = writeln!(text, "emulated_exits={}", stats.emulated_exits);
+        let _ = writeln!(text, "emulated_io={}", stats.emulated_io);
+        let _ = writeln!(text, "emulated_mmio={}", stats.emulated_mmio);
+        let _ = writeln!(text, "emulated_msr={}", stats.emulated_msr);
+        let _ = writeln!(text, "injected_interrupts={}", stats.injected_interrupts);
+        let _ = writeln!(text, "windows_armed={}", stats.windows_armed);
+        let _ = writeln!(text, "timer_exits={}", stats.timer_exits);
         Ok(text)
     }
 

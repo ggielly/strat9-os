@@ -52,6 +52,8 @@ use super::{
     exit::ExitClass,
     ioapic::IoApic,
     pic::Pic,
+    virtio::QueueMemory,
+    virtio_console::VirtioConsole,
 };
 
 /// Page size of the second-level and guest page tables.
@@ -81,6 +83,8 @@ const EPT_READ: u64 = 1 << 0;
 pub const APIC_BASE: u64 = 0xFEE0_0000;
 /// Base of the I/O APIC page in the conventional guest memory map.
 pub const IOAPIC_BASE: u64 = 0xFEC0_0000;
+/// Base of the virtio console transport page (virtio-mmio layout).
+pub const CONSOLE_BASE: u64 = 0xFEB0_0000;
 /// First and last MSR of the x2APIC window (`0x800..=0x8FF`).
 pub const X2APIC_MSR_FIRST: u32 = 0x800;
 pub const X2APIC_MSR_LAST: u32 = 0x8FF;
@@ -336,6 +340,49 @@ impl<'a> MemoryView<'a> {
         true
     }
 
+    /// Reads `out.len()` bytes at a guest-physical address.
+    pub fn read_physical(&mut self, gpa: u64, out: &mut [u8]) -> bool {
+        let mut done = 0usize;
+        while done < out.len() {
+            let address = gpa.wrapping_add(done as u64);
+            let Some((hpa, _)) = walk_second_level(self.memory, self.ept_root, address) else {
+                return false;
+            };
+            let chunk = core::cmp::min(
+                out.len() - done,
+                (PAGE_SIZE - (address & PAGE_OFFSET_MASK)) as usize,
+            );
+            if !self.memory.read_bytes(hpa, &mut out[done..done + chunk]) {
+                return false;
+            }
+            done += chunk;
+        }
+        true
+    }
+
+    /// Writes `bytes` at a guest-physical address.
+    pub fn write_physical(&mut self, gpa: u64, bytes: &[u8]) -> bool {
+        let mut done = 0usize;
+        while done < bytes.len() {
+            let address = gpa.wrapping_add(done as u64);
+            let Some((hpa, _)) = walk_second_level(self.memory, self.ept_root, address) else {
+                return false;
+            };
+            let chunk = core::cmp::min(
+                bytes.len() - done,
+                (PAGE_SIZE - (address & PAGE_OFFSET_MASK)) as usize,
+            );
+            if !self
+                .memory
+                .write_bytes(hpa, &bytes[done..done + chunk])
+            {
+                return false;
+            }
+            done += chunk;
+        }
+        true
+    }
+
     /// Fetches and decodes the instruction at the guest instruction pointer.
     fn fetch(&mut self, guest: &dyn GuestContext) -> Result<Decoded, EmuError> {
         let rip = guest.rip();
@@ -348,23 +395,36 @@ impl<'a> MemoryView<'a> {
     }
 }
 
+impl QueueMemory for MemoryView<'_> {
+    fn read_gpa(&mut self, gpa: u64, out: &mut [u8]) -> bool {
+        self.read_physical(gpa, out)
+    }
+
+    fn write_gpa(&mut self, gpa: u64, bytes: &[u8]) -> bool {
+        self.write_physical(gpa, bytes)
+    }
+}
+
 /// Device model owned by a world: the chipset devices shared by all its
 /// vCPUs. The local APIC is per-vCPU and lives in the vCPU slot; the exit
 /// handlers receive it separately.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Devices {
     /// Cascaded 8259A pair.
     pub pic: Pic,
     /// I/O APIC (MMIO page).
     pub ioapic: IoApic,
+    /// Virtio console (MMIO transport page).
+    pub console: VirtioConsole,
 }
 
 impl Devices {
-    /// Creates the chipset model.
-    pub const fn new() -> Self {
+    /// Creates the device model.
+    pub fn new() -> Self {
         Self {
             pic: Pic::new(),
             ioapic: IoApic::new(0),
+            console: VirtioConsole::new(),
         }
     }
 
@@ -577,7 +637,7 @@ fn handle_mmio_exit(
     if !matches!(access.size, 1 | 2 | 4) {
         return Ok(false);
     }
-    if !serve_mmio(devices, apic, guest, page, &access) {
+    if !serve_mmio(devices, apic, view, guest, page, &access) {
         return Ok(false);
     }
     guest.set_rip(access.next_rip);
@@ -591,6 +651,8 @@ pub enum DevicePage {
     Apic,
     /// I/O APIC MMIO page.
     IoApic,
+    /// Virtio console transport page.
+    Console,
 }
 
 /// Identifies the modeled device page containing `address`.
@@ -600,6 +662,8 @@ pub fn device_page(address: u64) -> Option<DevicePage> {
         Some(DevicePage::Apic)
     } else if page == IOAPIC_BASE {
         Some(DevicePage::IoApic)
+    } else if page == CONSOLE_BASE {
+        Some(DevicePage::Console)
     } else {
         None
     }
@@ -609,6 +673,7 @@ pub fn device_page(address: u64) -> Option<DevicePage> {
 fn serve_mmio(
     devices: &mut Devices,
     apic: &mut LocalApic,
+    view: &mut MemoryView<'_>,
     guest: &mut dyn GuestContext,
     page: DevicePage,
     access: &MemoryAccess,
@@ -620,7 +685,7 @@ fn serve_mmio(
         let value = guest.gpr(access.register);
         let word = read_mmio(devices, apic, page, offset);
         let merged = (word & !((mask as u32) << shift)) | (((value as u32) & mask as u32) << shift);
-        write_mmio(devices, apic, page, offset, merged);
+        write_mmio(devices, apic, view, page, offset, merged);
     } else {
         let word = read_mmio(devices, apic, page, offset);
         let value = (u64::from(word) >> shift) & mask;
@@ -634,6 +699,7 @@ fn read_mmio(devices: &Devices, apic: &LocalApic, page: DevicePage, offset: usiz
     match page {
         DevicePage::Apic => apic.mmio_read(offset & 0xFFF),
         DevicePage::IoApic => devices.ioapic.mmio_read(offset & 0xFF),
+        DevicePage::Console => devices.console.read(offset as u32 & 0xFFF),
     }
 }
 
@@ -641,6 +707,7 @@ fn read_mmio(devices: &Devices, apic: &LocalApic, page: DevicePage, offset: usiz
 fn write_mmio(
     devices: &mut Devices,
     apic: &mut LocalApic,
+    view: &mut MemoryView<'_>,
     page: DevicePage,
     offset: usize,
     value: u32,
@@ -648,6 +715,7 @@ fn write_mmio(
     match page {
         DevicePage::Apic => apic.mmio_write(offset & 0xFFF, value),
         DevicePage::IoApic => devices.ioapic.mmio_write(offset & 0xFF, value),
+        DevicePage::Console => devices.console.write(offset as u32 & 0xFFF, value, view),
     }
 }
 

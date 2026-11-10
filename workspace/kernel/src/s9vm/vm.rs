@@ -111,6 +111,47 @@ impl WorldRecord {
     }
 }
 
+/// Cumulative execution counters of a world.
+///
+/// They are diagnostics only: nothing in the engine depends on them. They are
+/// updated by the execution loop and exposed read-only through `/dev/vmm`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorldStats {
+    /// `RUN` calls that reached the hardware.
+    pub runs: u64,
+    /// Exits handed to policy through the event queue.
+    pub policy_exits: u64,
+    /// Exits replayed in the kernel by the device model.
+    pub emulated_exits: u64,
+    /// Replayed I/O instructions (PIC ports, POST port).
+    pub emulated_io: u64,
+    /// Replayed MMIO accesses (APIC and I/O APIC pages).
+    pub emulated_mmio: u64,
+    /// Replayed MSR accesses (x2APIC window).
+    pub emulated_msr: u64,
+    /// Interrupts injected into the guest.
+    pub injected_interrupts: u64,
+    /// Times interrupt-window exiting was armed.
+    pub windows_armed: u64,
+    /// Guest time slices that expired (preemption timer).
+    pub timer_exits: u64,
+}
+
+impl WorldStats {
+    /// Adds another set of counters to this one.
+    pub fn add(&mut self, other: &Self) {
+        self.runs += other.runs;
+        self.policy_exits += other.policy_exits;
+        self.emulated_exits += other.emulated_exits;
+        self.emulated_io += other.emulated_io;
+        self.emulated_mmio += other.emulated_mmio;
+        self.emulated_msr += other.emulated_msr;
+        self.injected_interrupts += other.injected_interrupts;
+        self.windows_armed += other.windows_armed;
+        self.timer_exits += other.timer_exits;
+    }
+}
+
 /// Guest memory layer errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmError {
@@ -272,6 +313,8 @@ struct World {
     /// Guest chipset devices (8259A pair, I/O APIC) and the kernel bridge
     /// that replays their accesses without leaving the kernel.
     machine: Machine,
+    /// Cumulative execution counters (diagnostics).
+    stats: WorldStats,
 }
 
 /// Logical vCPU: opaque identifier, APIC id and ABI register block.
@@ -347,6 +390,7 @@ pub fn create(name: &[u8], silo_id: u32) -> Option<WorldRecord> {
             closing: false,
             paused: false,
             machine: Machine::new(),
+            stats: WorldStats::default(),
         },
     );
     Some(record)
@@ -747,6 +791,7 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
         pending_nmi,
         mut machine,
         mut apic,
+        mut stats,
     ) = {
         let mut worlds = WORLDS.lock();
         let world = vcpu_world_mut(&mut worlds, vcpu_id).ok_or(RunError::UnknownVcpu)?;
@@ -765,6 +810,7 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
         // registry lock, which a running guest must never wait on.
         let machine = core::mem::replace(&mut world.machine, Machine::new());
         let apic = core::mem::replace(&mut slot.apic, LocalApic::new(apic_id));
+        let stats = core::mem::replace(&mut world.stats, WorldStats::default());
         (
             world.record.id,
             hardware,
@@ -773,6 +819,7 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
             pending_nmi,
             machine,
             apic,
+            stats,
         )
     };
     let mut hardware = match hardware {
@@ -797,6 +844,7 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
     // and the host stack belong to this vCPU, which is not currently running
     // (context taken out of the registry).
     let mut result = Ok(());
+    stats.runs += 1;
     unsafe {
         let _ = hardware.clear();
         if let Err(error) = hardware.load() {
@@ -836,6 +884,7 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                             // The vector moves to the in-service register: the
                             // processor delivers it at the next entry.
                             let _ = apic.service();
+                            stats.injected_interrupts += 1;
                         }
                         if window_armed {
                             match hardware.set_interrupt_window_exiting(caps, false) {
@@ -849,7 +898,12 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                     }
                     InterruptAction::ArmWindow => {
                         match hardware.set_interrupt_window_exiting(caps, true) {
-                            Ok(armed) => window_armed = armed,
+                            Ok(armed) => {
+                                if armed {
+                                    stats.windows_armed += 1;
+                                }
+                                window_armed = armed;
+                            }
                             Err(error) => {
                                 result = Err(RunError::Hardware(error));
                                 break;
@@ -876,6 +930,7 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                             exit.class(),
                             ExitClass::IoPort | ExitClass::Msr | ExitClass::EptViolation
                         ) {
+                            let class = exit.class();
                             match machine.handle(&mut hardware, &mut apic, &exit) {
                                 Ok(true) => {
                                     if resumed >= MAX_RESUMED_EXITS {
@@ -883,6 +938,24 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                                         break;
                                     }
                                     resumed += 1;
+                                    stats.emulated_exits += 1;
+                                    match class {
+                                        ExitClass::IoPort => stats.emulated_io += 1,
+                                        ExitClass::EptViolation => stats.emulated_mmio += 1,
+                                        ExitClass::Msr => stats.emulated_msr += 1,
+                                        _ => {}
+                                    }
+                                    // The console device model collects the
+                                    // bytes the guest wrote; the kernel only
+                                    // routes them to its own log for now.
+                                    let output = machine.drain_console();
+                                    if !output.is_empty() {
+                                        log::info!(
+                                            "[s9vm] console: {}",
+                                            core::str::from_utf8(&output)
+                                                .unwrap_or("<binary data>")
+                                        );
+                                    }
                                     continue;
                                 }
                                 Ok(false) | Err(_) => {}
@@ -895,6 +968,10 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                         if is_resumable(exit.class()) {
                             result = Err(RunError::ExitStorm);
                         } else {
+                            stats.policy_exits += 1;
+                            if exit.class() == ExitClass::PreemptionTimer {
+                                stats.timer_exits += 1;
+                            }
                             let event = event_from_exit(&exit, vcpu_id);
                             let _ = push_exit(world_id, event);
                         }
@@ -916,6 +993,7 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
     let mut worlds = WORLDS.lock();
     if let Some(world) = worlds.get_mut(&world_id) {
         world.machine = machine;
+        world.stats = stats;
         if let Some(slot) = world.vcpus.iter_mut().find(|slot| slot.id == vcpu_id) {
             slot.regs = regs;
             slot.hardware = Some(hardware);
@@ -937,6 +1015,21 @@ pub fn pop_exit(world_id: u64) -> Result<VmmExitEvent, ()> {
     let mut worlds = WORLDS.lock();
     let world = worlds.get_mut(&world_id).ok_or(())?;
     world.exits.pop().map_err(|_| ())
+}
+
+/// Cumulative execution counters of a world.
+pub fn stats(world_id: u64) -> Option<WorldStats> {
+    WORLDS.lock().get(&world_id).map(|world| world.stats)
+}
+
+/// Cumulative execution counters of every world.
+pub fn total_stats() -> WorldStats {
+    let worlds = WORLDS.lock();
+    let mut total = WorldStats::default();
+    for world in worlds.values() {
+        total.add(&world.stats);
+    }
+    total
 }
 
 /// Number of pending events for a world.

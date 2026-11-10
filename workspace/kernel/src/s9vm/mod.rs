@@ -64,6 +64,8 @@ pub mod mmu;
 pub mod pic;
 pub mod selftest;
 pub mod vcpu;
+pub mod virtio;
+pub mod virtio_console;
 pub mod vm;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};

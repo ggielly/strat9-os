@@ -116,7 +116,7 @@ pub struct Machine {
 
 impl Machine {
     /// Creates the machine of a world.
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             devices: Devices::new(),
             memory: HhdmMemory,
@@ -131,6 +131,11 @@ impl Machine {
     /// Mutable device model (kernel-side interrupt delivery).
     pub fn devices_mut(&mut self) -> &mut Devices {
         &mut self.devices
+    }
+
+    /// Takes the bytes the guest wrote to the virtio console.
+    pub fn drain_console(&mut self) -> alloc::vec::Vec<u8> {
+        self.devices.console.drain_output()
     }
 
     /// Tries to consume an exit by replaying the faulting instruction against

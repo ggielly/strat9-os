@@ -18,10 +18,14 @@ mod exit;
 mod ioapic;
 #[path = "../../kernel/src/s9vm/pic.rs"]
 mod pic;
+#[path = "../../kernel/src/s9vm/virtio.rs"]
+mod virtio;
+#[path = "../../kernel/src/s9vm/virtio_console.rs"]
+mod virtio_console;
 
 use emulate::{
     handle_exit, interrupt_action, walk_guest, walk_second_level, DevicePage, Devices,
-    GuestContext, InterruptAction, MemoryView, PhysMemory, IOAPIC_BASE,
+    GuestContext, InterruptAction, MemoryView, PhysMemory, CONSOLE_BASE, IOAPIC_BASE,
 };
 use exit::ExitClass;
 
@@ -55,6 +59,10 @@ impl TestMemory {
     fn write_u64(&mut self, address: u64, value: u64) {
         let offset = address as usize;
         self.bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn slice(&self, address: u64, len: usize) -> &[u8] {
+        &self.bytes[address as usize..address as usize + len]
     }
 
     fn write_bytes(&mut self, address: u64, bytes: &[u8]) {
@@ -619,4 +627,280 @@ fn interrupt_action_disarms_the_window_when_nothing_is_pending() {
     );
     assert_eq!(interrupt_action(false, true, false), InterruptAction::None);
     assert_eq!(interrupt_action(false, false, false), InterruptAction::None);
+}
+
+// ---------------------------------------------------------------------------
+// virtio console transport page
+// ---------------------------------------------------------------------------
+
+const CONSOLE_DESC: u64 = 0x9000;
+const CONSOLE_AVAIL: u64 = 0xA000;
+const CONSOLE_USED: u64 = 0xB000;
+const CONSOLE_BUFFER: u64 = 0xC000;
+
+/// Writes one console transport register through a replayed instruction.
+fn console_write(
+    devices: &mut Devices,
+    apic: &mut apic::LocalApic,
+    memory: &mut TestMemory,
+    guest: &mut TestGuest,
+    offset: u64,
+    value: u32,
+) -> bool {
+    let rip = load_code(memory, &[0x89, 0x08]); // mov [rax], ecx
+    guest.rip = rip;
+    guest.regs[0] = CONSOLE_BASE + offset;
+    guest.regs[1] = u64::from(value);
+    let mut view = MemoryView::new(memory, EPT_PML4, guest.cr3, guest.paging);
+    handle_exit(
+        devices,
+        apic,
+        &mut view,
+        guest,
+        ExitClass::EptViolation,
+        0b010,
+        CONSOLE_BASE + offset,
+    )
+    .expect("no error")
+}
+
+/// Reads one console transport register through a replayed instruction.
+fn console_read(
+    devices: &mut Devices,
+    apic: &mut apic::LocalApic,
+    memory: &mut TestMemory,
+    guest: &mut TestGuest,
+    offset: u64,
+) -> u32 {
+    let rip = load_code(memory, &[0x8B, 0x08]); // mov ecx, [rax]
+    guest.rip = rip;
+    guest.regs[0] = CONSOLE_BASE + offset;
+    let mut view = MemoryView::new(memory, EPT_PML4, guest.cr3, guest.paging);
+    handle_exit(
+        devices,
+        apic,
+        &mut view,
+        guest,
+        ExitClass::EptViolation,
+        0b001,
+        CONSOLE_BASE + offset,
+    )
+    .expect("no error");
+    guest.regs[1] as u32
+}
+
+/// Programs a console queue through the transport registers.
+fn console_program_queue(
+    devices: &mut Devices,
+    apic: &mut apic::LocalApic,
+    memory: &mut TestMemory,
+    guest: &mut TestGuest,
+    queue: u32,
+) {
+    console_write(devices, apic, memory, guest, u64::from(virtio_console::reg::QUEUE_SEL), queue);
+    console_write(
+        devices,
+        apic,
+        memory,
+        guest,
+        u64::from(virtio_console::reg::QUEUE_NUM),
+        8,
+    );
+    console_write(
+        devices,
+        apic,
+        memory,
+        guest,
+        u64::from(virtio_console::reg::QUEUE_DESC_LOW),
+        CONSOLE_DESC as u32,
+    );
+    console_write(
+        devices,
+        apic,
+        memory,
+        guest,
+        u64::from(virtio_console::reg::QUEUE_AVAIL_LOW),
+        CONSOLE_AVAIL as u32,
+    );
+    console_write(
+        devices,
+        apic,
+        memory,
+        guest,
+        u64::from(virtio_console::reg::QUEUE_USED_LOW),
+        CONSOLE_USED as u32,
+    );
+    console_write(
+        devices,
+        apic,
+        memory,
+        guest,
+        u64::from(virtio_console::reg::QUEUE_READY),
+        1,
+    );
+}
+
+#[test]
+fn console_page_is_identified() {
+    assert_eq!(
+        emulate::device_page(CONSOLE_BASE + 0x50),
+        Some(DevicePage::Console)
+    );
+}
+
+#[test]
+fn console_registers_are_reachable_through_the_transport_page() {
+    let mut memory = machine();
+    let mut guest = TestGuest::new(CODE_PAGE);
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    assert_eq!(
+        console_read(&mut devices, &mut apic, &mut memory, &mut guest, u64::from(virtio_console::reg::MAGIC)),
+        virtio_console::MAGIC
+    );
+    assert_eq!(
+        console_read(
+            &mut devices,
+            &mut apic,
+            &mut memory,
+            &mut guest,
+            u64::from(virtio_console::reg::DEVICE_ID)
+        ),
+        virtio_console::DEVICE_ID
+    );
+}
+
+#[test]
+fn console_transmit_queue_is_serviced_by_the_kernel() {
+    let mut memory = machine();
+    let mut guest = TestGuest::new(CODE_PAGE);
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+
+    // Driver status: acknowledged, driver, features ok, DRIVER_OK.
+    console_write(
+        &mut devices,
+        &mut apic,
+        &mut memory,
+        &mut guest,
+        u64::from(virtio_console::reg::STATUS),
+        virtio_console::status::ACKNOWLEDGE
+            | virtio_console::status::DRIVER
+            | virtio_console::status::FEATURES_OK
+            | virtio_console::status::DRIVER_OK,
+    );
+    console_program_queue(
+        &mut devices,
+        &mut apic,
+        &mut memory,
+        &mut guest,
+        virtio_console::QUEUE_TX,
+    );
+
+    // Guest descriptor: buffer with "ok".
+    let descriptor = virtio::Descriptor {
+        addr: CONSOLE_BUFFER,
+        len: 2,
+        flags: 0,
+        next: 0,
+    };
+    memory.write_bytes(CONSOLE_DESC, &descriptor.encode());
+    memory.write_bytes(CONSOLE_BUFFER, b"ok");
+    memory.write_u64(CONSOLE_AVAIL, 0);
+    memory.write_bytes(CONSOLE_AVAIL + 4, &0u16.to_le_bytes());
+    memory.write_bytes(CONSOLE_AVAIL + 2, &1u16.to_le_bytes());
+
+    assert!(console_write(
+        &mut devices,
+        &mut apic,
+        &mut memory,
+        &mut guest,
+        u64::from(virtio_console::reg::QUEUE_NOTIFY),
+        virtio_console::QUEUE_TX,
+    ));
+    assert_eq!(devices.console.output(), b"ok");
+    assert_eq!(devices.console.drain_output(), b"ok");
+}
+
+#[test]
+fn console_receive_queue_reaches_the_guest_buffers() {
+    let mut memory = machine();
+    let mut guest = TestGuest::new(CODE_PAGE);
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+
+    console_write(
+        &mut devices,
+        &mut apic,
+        &mut memory,
+        &mut guest,
+        u64::from(virtio_console::reg::STATUS),
+        virtio_console::status::ACKNOWLEDGE
+            | virtio_console::status::DRIVER
+            | virtio_console::status::FEATURES_OK
+            | virtio_console::status::DRIVER_OK,
+    );
+    console_program_queue(
+        &mut devices,
+        &mut apic,
+        &mut memory,
+        &mut guest,
+        virtio_console::QUEUE_RX,
+    );
+
+    let descriptor = virtio::Descriptor {
+        addr: CONSOLE_BUFFER,
+        len: 8,
+        flags: virtio::DESC_F_WRITE,
+        next: 0,
+    };
+    memory.write_bytes(CONSOLE_DESC, &descriptor.encode());
+    memory.write_bytes(CONSOLE_AVAIL + 2, &1u16.to_le_bytes());
+    memory.write_bytes(CONSOLE_AVAIL + 4, &0u16.to_le_bytes());
+
+    devices.console.push_input(b"input");
+    assert!(console_write(
+        &mut devices,
+        &mut apic,
+        &mut memory,
+        &mut guest,
+        u64::from(virtio_console::reg::QUEUE_NOTIFY),
+        virtio_console::QUEUE_RX,
+    ));
+    assert_eq!(memory.slice(CONSOLE_BUFFER, 5), b"input");
+}
+
+#[test]
+fn console_queue_register_writes_are_visible_to_the_guest() {
+    let mut memory = machine();
+    let mut guest = TestGuest::new(CODE_PAGE);
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    console_program_queue(
+        &mut devices,
+        &mut apic,
+        &mut memory,
+        &mut guest,
+        virtio_console::QUEUE_TX,
+    );
+    assert_eq!(
+        console_read(
+            &mut devices,
+            &mut apic,
+            &mut memory,
+            &mut guest,
+            u64::from(virtio_console::reg::QUEUE_READY)
+        ),
+        1
+    );
+    assert_eq!(
+        console_read(
+            &mut devices,
+            &mut apic,
+            &mut memory,
+            &mut guest,
+            u64::from(virtio_console::reg::QUEUE_NUM)
+        ),
+        8
+    );
 }
