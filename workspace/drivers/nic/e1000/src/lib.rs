@@ -156,6 +156,22 @@ impl E1000Nic {
                 mac[5]
             );
 
+            // Program the unicast receive filter explicitly. A software reset
+            // (CTRL.RST above) does not reliably reload RAL0/RAH0 from the NVM
+            // on real PCH/LOM parts (I217/I218/I219, e1000e); only QEMU's 82540
+            // does. Left empty, the Address-Valid bit stays 0, so the NIC honours
+            // only RCTL.BAM (broadcast): DHCP succeeds while every unicast frame
+            // (ARP replies, ICMP echo, TCP) is silently dropped and the host is
+            // unreachable. Writing the station MAC with AV set fixes bare metal.
+            const RAH_AV: u32 = 1 << 31; // Address Valid
+            let ral = u32::from(mac[0])
+                | (u32::from(mac[1]) << 8)
+                | (u32::from(mac[2]) << 16)
+                | (u32::from(mac[3]) << 24);
+            let rah = u32::from(mac[4]) | (u32::from(mac[5]) << 8) | RAH_AV;
+            wr(mmio_base, regs::RAL0, ral);
+            wr(mmio_base, regs::RAH0, rah);
+
             // NOTE: VET (0x0008) and VFTA (0x5200+) writes are intentionally
             // skipped. On the 82540EM, offset 0x0008 is the read-only STATUS
             // register : writing VET there triggers a VERIFY assertion in
