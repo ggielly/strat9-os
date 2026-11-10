@@ -2295,13 +2295,28 @@ pub fn create_vcpu(world_id: u64, apic_id: u32) -> Result<u64, VcpuRegistryError
         id
     };
     // 2. Creates the vCPU's kernel task (ADR-4 model).
+    //
+    // Diagnostics: this path can be called from any task context (including a
+    // userspace syscall), and a silently dropped kernel task used to be
+    // indistinguishable from a hang. The three log lines below tell an operator
+    // exactly where a stuck `SYS_VMM_CREATE_VCPU` stopped.
+    log::info!(
+        "[s9vm] create_vcpu {}: spawning the vCPU kernel task",
+        id
+    );
     let task = match kthread::spawn("s9vm-vcpu", move || vcpu_task_main(world_id, id)) {
         Ok(task) => task,
         Err(_) => {
+            log::warn!("[s9vm] create_vcpu {}: kernel task spawn failed", id);
             let _ = remove_vcpu(id);
             return Err(VcpuRegistryError::Thread);
         }
     };
+    log::info!(
+        "[s9vm] create_vcpu {}: kernel task {} spawned",
+        id,
+        task.as_u64()
+    );
     // 3. Publishes the task identifier if the vCPU still exists.
     {
         let mut worlds = WORLDS.lock();
@@ -2309,6 +2324,7 @@ pub fn create_vcpu(world_id: u64, apic_id: u32) -> Result<u64, VcpuRegistryError
             world.vcpus[index].task = Some(task);
         }
     }
+    log::info!("[s9vm] create_vcpu {}: registered", id);
     Ok(id)
 }
 
