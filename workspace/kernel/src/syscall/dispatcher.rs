@@ -35,16 +35,16 @@
 //
 //
 
-use crate::ipc::{ChanId, PortId, RingId, SemId, channel, port, semaphore, shared_ring};
+use crate::ipc::{channel, port, semaphore, shared_ring, ChanId, PortId, RingId, SemId};
 
 use super::{
-    SyscallFrame, chan, debug, error::SyscallError, exec::sys_execve, fork::sys_fork, iommu,
-    ipc_port, ipc_ring, net, numbers::*, pci, process as proc_sys, semaphore as sem_handler,
-    transport, vmm, volume,
+    chan, debug, error::SyscallError, exec::sys_execve, fork::sys_fork, iommu, ipc_port, ipc_ring,
+    net, numbers::*, pci, process as proc_sys, semaphore as sem_handler, transport, vmm, volume,
+    SyscallFrame,
 };
 use crate::{
     async_io::syscall as async_sys,
-    capability::{CapId, CapPermissions, ResourceType, release_capability},
+    capability::{release_capability, CapId, CapPermissions, ResourceType},
     memory::{UserSliceRead, UserSliceWrite},
     process::current_task_clone,
     silo,
@@ -373,6 +373,8 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_VMM_VCPU_LIST => vmm::sys_vmm_vcpu_list(arg1, arg2, arg3),
         SYS_VMM_VCPU_REGS => vmm::sys_vmm_vcpu_regs(arg1, arg2),
         SYS_VMM_BOOT_PARAMS => vmm::sys_vmm_boot_params(arg1, arg2),
+        SYS_VMM_LOAD_MODULE => vmm::sys_vmm_load_module(arg1, arg2, arg3, arg4),
+        SYS_VMM_SET_CMDLINE => vmm::sys_vmm_set_cmdline(arg1, arg2, arg3),
 
         // Storage syscalls (600-699) ========================================
         SYS_VOLUME_READ => volume::sys_volume_read(arg1, arg2, arg3, arg4),

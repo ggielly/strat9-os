@@ -40,16 +40,23 @@
 //!   then executed: the guest prints its marker on the debug port and halts;
 //! - `acpi`: the guest discovers the firmware tables written by
 //!   [`crate::s9vm::vm::write_acpi`] (RSDP scan, checksum, XSDT walk, MADT
-//!   Local APIC count). This phase needs a registered vCPU, so it is deferred
-//!   to a kernel thread created at the `kthread` stage (see
-//!   [`s9vm_acpi_selftest`]) instead of running in the early bootstrap;
+//!   Local APIC count). It needs a registered vCPU, so it runs at the
+//!   `kthread` stage (see [`s9vm_acpi_selftest`]) on a **detached** vCPU
+//!   driven by a direct run loop; it is opt-in in the `2`/`all` mode through
+//!   `s9vm.selftest.deferred=1`;
 //! - `smp`: one world with two vCPUs, each with its own page tables, code page
 //!   and stack, driven through the kernel vCPU tasks (`request_run`,
 //!   `complete_exit`) in an interleaved order. It validates that the two vCPU
 //!   contexts (CR3, RIP, RSP, marker) are independent and persisted across
-//!   runs; like `acpi` it is deferred to the `kthread` stage (see
-//!   [`s9vm_smp_selftest`]);
-//! - `2`/`all`: every phase.
+//!   runs; it is enabled by `s9vm.selftest.deferred=1` or explicitly with
+//!   `s9vm.selftest=smp`;
+//! - `2`/`all`: the six bootstrap phases; `acpi` and `smp` are added by
+//!   `s9vm.selftest.deferred=1`.
+//!
+//! The task path used by `smp` (kernel threads created from a component,
+//! bounded `RUN` and destroy) has its own diagnostic,
+//! `s9vm.kthread_smoke=1`, which runs on hosts without VT-x and reports
+//! PASS/FAIL through the serial log.
 //!
 //! The guest state is the canonical 64-bit flat shape produced by
 //! [`GuestState::long_mode_64`]; it is entered once. Any exit the engine does
@@ -58,15 +65,15 @@
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
-use strat9_abi::vmm::{VMM_ABI_VERSION, VmmRegs, exit_kind};
+use strat9_abi::vmm::{exit_kind, VmmRegs, VMM_ABI_VERSION};
 
 use crate::{
     memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame},
     s9vm::{
         apic::LocalApic,
         caps::HwCaps,
-        emulate::{InterruptAction, interrupt_action},
-        exit::{ExitClass, ExitReason, reason_name},
+        emulate::{interrupt_action, InterruptAction},
+        exit::{reason_name, ExitClass, ExitReason},
         guest::GuestState,
         guestcode::{
             ACPI_CODE, ACPI_FAIL_MARKER, ACPI_MARKER, LOADER_CODE, LOADER_MARKER, SMP_CODE_0,
@@ -413,6 +420,10 @@ const SMP_LAYOUTS: [SmpLayout; 2] = [
     },
 ];
 
+/// Bounded wait for one smoke RUN (500 ms).
+const KTHREAD_SMOKE_RUN_NS: u64 = 500_000_000;
+/// Bounded wait for destroying the smoke world (2 s).
+const KTHREAD_SMOKE_DESTROY_NS: u64 = 2_000_000_000;
 /// Deferred request flag for the SMP phase (see [`s9vm_smp_selftest`]).
 static SMP_SELFTEST_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -2183,6 +2194,110 @@ fn run_acpi_in_world(caps: &HwCaps, world_id: u64) -> Result<AcpiReport, Selftes
     Ok(report)
 }
 
+/// Kthread-stage hook: vCPU kernel-task smoke test.
+///
+/// Enabled by `s9vm.kthread_smoke=1`. It proves the scheduling path used by a
+/// real guest: the world and its vCPU are created (`create_vcpu` spawns the
+/// kernel task from this kernel thread), a bounded RUN is requested (under a
+/// host without VT-x this completes with `HardwareNotReady`, which already
+/// proves the task was scheduled and executed), and the world is destroyed with
+/// a bounded wait. A silent task-drop in the scheduler shows up as RUN timeout
+/// or destroy timeout, with an explicit FAIL log instead of a silent hang.
+#[cfg(target_arch = "x86_64")]
+#[component::init_component(kthread, priority = 49)]
+fn s9vm_kthread_smoke() -> Result<(), component::ComponentInitError> {
+    // Read the option here, not at the early `s9vm_init` stage: this path must
+    // run on hosts without VT-x (QEMU TCG) where the engine activation is
+    // skipped, and the boot environment is still available at the kthread
+    // stage.
+    let requested = crate::boot_args()
+        .and_then(|args| args.env_get("s9vm.kthread_smoke"))
+        .map(|value| value == "1" || value == "true")
+        .unwrap_or(false);
+    if !requested {
+        return Ok(());
+    }
+    // The kthread stage still runs on the boot context, before the preemptive
+    // scheduler starts: blocking here would deadlock the boot. Spawn a task
+    // that runs once the scheduler is live; if this spawn is dropped, the
+    // QEMU boot test never sees the PASS marker (which is the diagnostic).
+    match crate::process::kthread::spawn("s9vm-kthread-smoke", run_kthread_smoke) {
+        Ok(task) => log::info!(
+            "[s9vm] kthread-smoke: runner task {} spawned (kthread stage)",
+            task.as_u64()
+        ),
+        Err(error) => log::warn!("[s9vm] kthread-smoke FAIL: cannot spawn runner ({})", error),
+    }
+    Ok(())
+}
+
+/// Body of the vCPU kernel-task smoke test.
+fn run_kthread_smoke() {
+    let Some(record) = vm::create(b"s9vm-kthread-smoke", 0) else {
+        log::warn!("[s9vm] kthread-smoke FAIL: cannot create the world");
+        return;
+    };
+    let world_id = record.id;
+    let vcpu = match vm::create_vcpu(world_id, 0) {
+        Ok(vcpu) => vcpu,
+        Err(error) => {
+            log::warn!(
+                "[s9vm] kthread-smoke FAIL: create_vcpu failed ({:?})",
+                error
+            );
+            let _ = vm::destroy_timeout(world_id, KTHREAD_SMOKE_DESTROY_NS);
+            return;
+        }
+    };
+    log::info!(
+        "[s9vm] kthread-smoke: world={} vcpu={} created (active_cpus={})",
+        world_id,
+        vcpu,
+        crate::s9vm::active_cpu_count()
+    );
+
+    // Let the freshly spawned task reach its wait loop (and let a sibling CPU
+    // pick it up if the scheduler placed it there).
+    for _ in 0..4 {
+        crate::process::sleep_current_task_ticks(1);
+    }
+    let alive = vm::vcpu_snapshots(world_id)
+        .map(|vcpus| vcpus.iter().any(|snapshot| snapshot.id == vcpu))
+        .unwrap_or(false);
+    if !alive {
+        log::warn!("[s9vm] kthread-smoke FAIL: vCPU disappeared after creation");
+        let _ = vm::destroy_timeout(world_id, KTHREAD_SMOKE_DESTROY_NS);
+        return;
+    }
+
+    // A RUN proves the task actually executes: under a host without VT-x the
+    // request completes with HardwareNotReady, which is the expected result
+    // here (TCG has no VMX). A timeout means the task was never scheduled.
+    let run = vm::request_run_timeout(vcpu, KTHREAD_SMOKE_RUN_NS);
+    let run_ok = matches!(run, Ok(()) | Err(vm::RunError::HardwareNotReady));
+    log::info!("[s9vm] kthread-smoke: bounded RUN completed ({:?})", run);
+
+    let started = crate::process::scheduler::ticks();
+    let destroyed = vm::destroy_timeout(world_id, KTHREAD_SMOKE_DESTROY_NS);
+    let elapsed = crate::process::scheduler::ticks().saturating_sub(started);
+    let destroyed_ok = destroyed.is_some();
+    if run_ok && destroyed_ok {
+        log::info!(
+            "[s9vm] kthread-smoke PASS: run={:?} destroy_ticks={} vcpu={}",
+            run,
+            elapsed,
+            vcpu
+        );
+    } else {
+        log::warn!(
+            "[s9vm] kthread-smoke FAIL: run={:?} destroyed={} destroy_ticks={}",
+            run,
+            destroyed_ok,
+            elapsed
+        );
+    }
+}
+
 /// Kthread-stage hook: runs the ACPI phase synchronously.
 ///
 /// The phase used to spawn its own kernel thread (to get a scheduler for a
@@ -2407,7 +2522,11 @@ fn run_smp_in_world(caps: &HwCaps, world_id: u64) -> Result<SmpReport, SelftestE
             // `request_run` wakes the vCPU kernel task; wait for it to publish
             // its exit before draining the queue (bounded wait: a stuck vCPU
             // turns into a diagnostic instead of a hang).
-            log::info!("[s9vm] smptest: vCPU {} round {} RUN requested", index, round);
+            log::info!(
+                "[s9vm] smptest: vCPU {} round {} RUN requested",
+                index,
+                round
+            );
             let _ = vm::wait_exit(vcpu, 2_000_000_000);
             let event = vm::pop_exit(world_id)
                 .map_err(|_| SelftestError::BadExit("smp exit queue empty after RUN"))?;
@@ -2659,9 +2778,11 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
         .unwrap_or(false);
     let all_phases = matches!(mode, "2" | "all");
     let acpi_phase = mode == "acpi" || (all_phases && deferred_enabled);
-    // The SMP phase drives registered vCPUs through their kernel tasks; it is
-    // still experimental and therefore only selected explicitly.
-    let smp_phase = mode == "smp";
+    // The SMP phase drives registered vCPUs through their kernel tasks. It is
+    // enabled with the other deferred phases now that the task path has a
+    // bounded RUN/destroy diagnostic (`s9vm.kthread_smoke`), and can still be
+    // selected explicitly.
+    let smp_phase = mode == "smp" || (all_phases && deferred_enabled);
     if all_phases && !deferred_enabled {
         log::info!(
             "[s9vm] deferred phases (acpi, smp) not requested; set \

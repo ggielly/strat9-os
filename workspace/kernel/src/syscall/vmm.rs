@@ -41,7 +41,7 @@
 
 use super::error::SyscallError;
 use crate::{
-    capability::{CapId, CapPermissions, ResourceType, get_capability_manager},
+    capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
     memory::{UserSliceRead, UserSliceWrite},
     process::current_task_clone,
     s9vm,
@@ -54,8 +54,9 @@ use crate::{
 };
 use alloc::vec;
 use strat9_abi::vmm::{
-    VMM_ABI_VERSION, VMM_LIST_MAX, VMM_NAME_MAX, VMM_VCPU_LIST_MAX, VmmCpuidPolicy, VmmImageInfo,
-    VmmInfo, VmmRegs, VmmVcpuInfo, VmmWorldEntry, VmmWorldStats, state, vcpu_flags,
+    state, vcpu_flags, VmmCpuidPolicy, VmmImageInfo, VmmInfo, VmmRegs, VmmVcpuInfo, VmmWorldEntry,
+    VmmWorldStats, VMM_ABI_VERSION, VMM_CMDLINE_MAX, VMM_LIST_MAX, VMM_MODULE_MAX_BYTES,
+    VMM_NAME_MAX, VMM_VCPU_LIST_MAX,
 };
 
 /// Maximum size of a structure read from user space.
@@ -713,6 +714,69 @@ pub fn sys_vmm_boot_params(vmm_handle: u64, gpa: u64) -> Result<u64, SyscallErro
     Ok(0)
 }
 
+/// SYS_VMM_LOAD_MODULE (591): loads a module/initrd blob into a world.
+///
+/// The bytes are copied out of the caller address space first (so a malformed
+/// pointer is rejected before any guest page is mapped), validated against the
+/// 64 MiB bound, then mapped read/write at the page-aligned `gpa` and copied
+/// verbatim. The world records at most four ranges; the range is published by
+/// `SYS_VMM_BOOT_PARAMS`. Returns 0.
+pub fn sys_vmm_load_module(
+    vmm_handle: u64,
+    gpa: u64,
+    module_ptr: u64,
+    module_len: u64,
+) -> Result<u64, SyscallError> {
+    let required = CapPermissions {
+        write: true,
+        ..CapPermissions::none()
+    };
+    let world = vmm_world(vmm_handle, required)?;
+    let caps = s9vm::detect().ok_or(SyscallError::NotSupported)?;
+    if module_len == 0 || module_len > VMM_MODULE_MAX_BYTES as u64 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if gpa % crate::s9vm::mmu::PAGE_SIZE != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let slice = UserSliceRead::new(module_ptr, module_len as usize)?;
+    let mut module = vec![0u8; module_len as usize];
+    if slice.copy_to(&mut module) != module_len as usize {
+        return Err(SyscallError::Fault);
+    }
+    vm::load_module(world, &caps, gpa, &module).map_err(map_vm_error)?;
+    Ok(0)
+}
+
+/// SYS_VMM_SET_CMDLINE (592): stores the guest kernel command line.
+///
+/// At most [`VMM_CMDLINE_MAX`] bytes are accepted; the command line is
+/// NUL-padded and not NUL-terminated. Returns the stored length, which is also
+/// what `SYS_VMM_BOOT_PARAMS` publishes to the guest.
+pub fn sys_vmm_set_cmdline(
+    vmm_handle: u64,
+    cmdline_ptr: u64,
+    cmdline_len: u64,
+) -> Result<u64, SyscallError> {
+    let required = CapPermissions {
+        write: true,
+        ..CapPermissions::none()
+    };
+    let world = vmm_world(vmm_handle, required)?;
+    if cmdline_len > VMM_CMDLINE_MAX as u64 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let mut cmdline = vec![0u8; cmdline_len as usize];
+    if cmdline_len != 0 {
+        let slice = UserSliceRead::new(cmdline_ptr, cmdline_len as usize)?;
+        if slice.copy_to(&mut cmdline) != cmdline_len as usize {
+            return Err(SyscallError::Fault);
+        }
+    }
+    let stored = vm::set_cmdline(world, &cmdline).map_err(map_vm_error)?;
+    Ok(stored as u64)
+}
+
 /// SYS_VMM_VCPU_LIST (588): enumerates the vCPUs of a world into a caller
 /// buffer.
 ///
@@ -941,12 +1005,23 @@ fn cpuid_policy_from_abi(request: &VmmCpuidPolicy) -> Result<CpuidPolicy, Syscal
         leaf1_edx: defaulted(request.leaf1_edx, defaults.leaf1_edx),
         extended1_ecx: defaulted(request.extended1_ecx, defaults.extended1_ecx),
         extended1_edx: defaulted(request.extended1_edx, defaults.extended1_edx),
+        // TSC leaves are not part of the ABI policy yet: a world publishes the
+        // host frequency through the engine defaults. See the report of the
+        // s9vm guest time-keeping task for the optional ABI extension.
+        tsc_ratio_denominator: defaults.tsc_ratio_denominator,
+        tsc_ratio_numerator: defaults.tsc_ratio_numerator,
+        crystal_hz: defaults.crystal_hz,
+        base_mhz: defaults.base_mhz,
     })
 }
 
 /// A zero ABI field means "keep the engine default".
 fn defaulted(value: u32, default: u32) -> u32 {
-    if value == 0 { default } else { value }
+    if value == 0 {
+        default
+    } else {
+        value
+    }
 }
 
 fn map_vm_error(error: VmError) -> SyscallError {
@@ -980,5 +1055,6 @@ fn map_run_error(error: vm::RunError) -> SyscallError {
         vm::RunError::ExitStorm => SyscallError::Again,
         vm::RunError::Busy => SyscallError::Again,
         vm::RunError::Paused => SyscallError::Again,
+        vm::RunError::Timeout => SyscallError::Again,
     }
 }

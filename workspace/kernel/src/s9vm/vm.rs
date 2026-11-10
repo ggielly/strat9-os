@@ -67,6 +67,12 @@ pub const MAX_WORLDS: usize = 64;
 pub const NAME_MAX: usize = 32;
 /// Maximum number of vCPUs per world (safety bound, before quotas).
 pub const MAX_VCPUS_PER_WORLD: usize = 32;
+/// Maximum number of guest modules/initrd ranges per world.
+pub const MAX_MODULES_PER_WORLD: usize = 4;
+/// Maximum size of one guest module copied through `SYS_VMM_LOAD_MODULE`.
+pub const MAX_MODULE_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum length of the guest command line stored by `SYS_VMM_SET_CMDLINE`.
+pub const CMDLINE_MAX: usize = 256;
 /// Default guest page quota (1 GiB).
 pub const DEFAULT_QUOTA_PAGES: u64 = 262_144;
 /// `RFLAGS.IF`: the guest is interruptible.
@@ -463,6 +469,21 @@ struct World {
     network_output: Vec<Vec<u8>>,
     /// Octets currently queued in `network_output` (bounded).
     network_output_bytes: usize,
+    /// Guest modules/initrd ranges (bounded, insertion order).
+    modules: Vec<GuestModule>,
+    /// Guest command line (NUL padded; `cmdline_len` is authoritative).
+    cmdline: [u8; CMDLINE_MAX],
+    /// Number of valid bytes in `cmdline`.
+    cmdline_len: usize,
+}
+
+/// One guest module/initrd range recorded for the boot-parameter block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuestModule {
+    /// Guest-physical base address.
+    pub base: u64,
+    /// Length in bytes.
+    pub len: u64,
 }
 
 /// Logical vCPU: opaque identifier, APIC id and ABI register block.
@@ -546,6 +567,9 @@ pub fn create(name: &[u8], silo_id: u32) -> Option<WorldRecord> {
             pending_frames: Vec::new(),
             network_output: Vec::new(),
             network_output_bytes: 0,
+            modules: Vec::new(),
+            cmdline: [0u8; CMDLINE_MAX],
+            cmdline_len: 0,
         },
     );
     Some(record)
@@ -561,6 +585,21 @@ pub fn create(name: &[u8], silo_id: u32) -> Option<WorldRecord> {
 /// the world: they are dropped with it, so no separate reset is needed and no
 /// snapshot can outlive the world (the snapshot is `Copy`).
 pub fn destroy(id: u64) -> Option<WorldRecord> {
+    destroy_inner(id, None)
+}
+
+/// Destroys a world, waiting at most `timeout_ns` for its vCPU tasks.
+///
+/// Returns `None` when the world does not exist, is already closing, or when a
+/// vCPU task did not finish within the budget. In the timeout case the world
+/// stays in the registry with `closing` set, so its memory is not freed while a
+/// task could still reference it; the caller should treat that as a defect and
+/// report it.
+pub fn destroy_timeout(id: u64, timeout_ns: u64) -> Option<WorldRecord> {
+    destroy_inner(id, Some(timeout_ns))
+}
+
+fn destroy_inner(id: u64, timeout_ns: Option<u64>) -> Option<WorldRecord> {
     // 1. Marks the world closed and wakes all vCPU tasks.
     let mut to_join: Vec<u64> = Vec::new();
     let mut wakers: Vec<Arc<WaitQueue>> = Vec::new();
@@ -585,7 +624,22 @@ pub fn destroy(id: u64) -> Option<WorldRecord> {
     }
     // 2. Waits for the vCPU tasks to exit, without holding the lock.
     for vcpu in to_join {
-        wait_vcpu_exited(vcpu);
+        let exited = match timeout_ns {
+            Some(timeout_ns) => wait_vcpu_exited_timeout(vcpu, timeout_ns),
+            None => {
+                wait_vcpu_exited(vcpu);
+                true
+            }
+        };
+        if !exited {
+            log::warn!(
+                "[s9vm] destroy: vCPU task {} did not exit within {} ns; world {} kept closing",
+                vcpu,
+                timeout_ns.unwrap_or(0),
+                id
+            );
+            return None;
+        }
     }
     // 3. Removes the world and frees the guest memory.
     let world = {
@@ -606,6 +660,32 @@ fn locate_slot(worlds: &mut BTreeMap<u64, World>, vcpu_id: u64) -> Option<(&mut 
         }
     }
     None
+}
+
+/// Waits at most `timeout_ns` for a vCPU's kernel task to finish.
+///
+/// Returns `false` on timeout. The world stays in the registry in that case;
+/// `destroy_inner` reports the defect instead of freeing memory a task could
+/// still reference.
+fn wait_vcpu_exited_timeout(vcpu_id: u64, timeout_ns: u64) -> bool {
+    let budget_ticks = (timeout_ns / crate::arch::timer::NS_PER_TICK).max(1);
+    let deadline = ticks().saturating_add(budget_ticks);
+    loop {
+        {
+            let mut worlds = WORLDS.lock();
+            let Some((world, index)) = locate_slot(&mut worlds, vcpu_id) else {
+                return true;
+            };
+            let slot = &world.vcpus[index];
+            if slot.exited || slot.task.is_none() {
+                return true;
+            }
+        }
+        if ticks() >= deadline {
+            return false;
+        }
+        sleep_current_task_ticks(1);
+    }
 }
 
 /// Waits for a vCPU's kernel task to finish (or for the vCPU to disappear from
@@ -913,6 +993,108 @@ pub fn load_image(
     })
 }
 
+/// Loads a guest module/initrd blob into a world's guest memory.
+///
+/// This is the initrd/module companion of [`load_image`]: the bytes are not
+/// parsed, they are mapped read/write at `gpa` and copied verbatim. `gpa` must
+/// be 4 KiB aligned, the blob must be non-empty and at most
+/// [`MAX_MODULE_BYTES`], and at most [`MAX_MODULES_PER_WORLD`] ranges can be
+/// recorded per world. The range is recorded for [`write_boot_params`].
+///
+/// Loading is not atomic: if the module table is full, or if the copy cannot
+/// translate a page, the pages already mapped stay in place (the world memory
+/// layer has no unmap primitive) and the caller should destroy the world.
+pub fn load_module(world_id: u64, caps: &HwCaps, gpa: u64, bytes: &[u8]) -> Result<(), VmError> {
+    if gpa % PAGE_SIZE != 0 || bytes.is_empty() || bytes.len() > MAX_MODULE_BYTES {
+        return Err(VmError::Map(MapError::InvalidRange));
+    }
+    let len = bytes.len() as u64;
+    if gpa.checked_add(len).is_none_or(|end| end > MAX_GPA) {
+        return Err(VmError::Map(MapError::InvalidRange));
+    }
+    {
+        let worlds = WORLDS.lock();
+        let world = worlds.get(&world_id).ok_or(VmError::Unknown)?;
+        if world.closing || world.modules.len() >= MAX_MODULES_PER_WORLD {
+            return Err(VmError::Map(MapError::InvalidRange));
+        }
+    }
+    let page_len = len.div_ceil(PAGE_SIZE) * PAGE_SIZE;
+    map_memory(world_id, caps, gpa, page_len, 0b011, 0)?;
+    let mut worlds = WORLDS.lock();
+    let world = worlds.get_mut(&world_id).ok_or(VmError::Unknown)?;
+    if world.closing || world.modules.len() >= MAX_MODULES_PER_WORLD {
+        return Err(VmError::Map(MapError::InvalidRange));
+    }
+    let memory = world
+        .memory
+        .as_ref()
+        .ok_or(VmError::Map(MapError::NotMapped))?;
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let page_offset = (offset as u64) & (PAGE_SIZE - 1);
+        let chunk = core::cmp::min(bytes.len() - offset, (PAGE_SIZE - page_offset) as usize);
+        let hpa = memory
+            .translate(gpa + offset as u64)
+            .ok_or(VmError::Map(MapError::NotMapped))?;
+        // SAFETY: `hpa` belongs to a frame reserved for this world and is
+        // mapped through the HHDM; `chunk` stays inside one page.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                bytes[offset..].as_ptr(),
+                crate::memory::phys_to_virt(hpa) as *mut u8,
+                chunk,
+            );
+        }
+        offset += chunk;
+    }
+    world.modules.push(GuestModule { base: gpa, len });
+    log::info!(
+        "[s9vm] module loaded at {:#x}: {} byte(s), {}/{} module(s)",
+        gpa,
+        len,
+        world.modules.len(),
+        MAX_MODULES_PER_WORLD
+    );
+    Ok(())
+}
+
+/// Stores the guest kernel command line for a world.
+///
+/// At most [`CMDLINE_MAX`] bytes are accepted. The buffer is NUL-padded and
+/// **not** NUL-terminated: its stored length is authoritative and is returned.
+pub fn set_cmdline(world_id: u64, bytes: &[u8]) -> Result<usize, VmError> {
+    if bytes.len() > CMDLINE_MAX {
+        return Err(VmError::Map(MapError::InvalidRange));
+    }
+    let mut worlds = WORLDS.lock();
+    let world = worlds.get_mut(&world_id).ok_or(VmError::Unknown)?;
+    if world.closing {
+        return Err(VmError::Unknown);
+    }
+    world.cmdline = [0u8; CMDLINE_MAX];
+    world.cmdline[..bytes.len()].copy_from_slice(bytes);
+    world.cmdline_len = bytes.len();
+    log::info!("[s9vm] command line stored: {} byte(s)", bytes.len());
+    Ok(bytes.len())
+}
+
+/// Modules recorded for a world, in insertion order.
+pub fn modules(world_id: u64) -> Option<Vec<GuestModule>> {
+    WORLDS
+        .lock()
+        .get(&world_id)
+        .map(|world| world.modules.clone())
+}
+
+/// Command line recorded for a world, with its authoritative length.
+pub fn cmdline(world_id: u64) -> Option<Vec<u8>> {
+    WORLDS
+        .lock()
+        .get(&world_id)
+        .map(|world| world.cmdline[..world.cmdline_len].to_vec())
+}
+
 /// Copies the file-backed bytes of one segment and zeroes its BSS.
 fn copy_segment(
     memory: &WorldMemory,
@@ -1004,6 +1186,8 @@ pub enum RunError {
     Busy,
     /// The world is paused.
     Paused,
+    /// The operation did not complete within the caller's budget.
+    Timeout,
 }
 
 impl From<VcpuError> for RunError {
@@ -1322,7 +1506,15 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                 // next iteration) delivers it through the interrupt-window
                 // path. The guest TSC offset is zero, so host time stamps are
                 // the guest's.
-                apic.advance(exit_cycles);
+                //
+                // APIC timer counts are bus ticks, not TSC cycles: the
+                // conversion uses the published host frequency when it is
+                // known (0 disables the scaling and keeps the raw-cycle
+                // approximation, documented in the timer model).
+                let tsc_hz = crate::s9vm::tsc::get()
+                    .map(|frequency| frequency.hz())
+                    .unwrap_or(0);
+                apic.advance_tsc(exit_cycles, tsc_hz);
                 apic.set_tsc(exit_tsc);
                 match run_result {
                     Ok(exit) => {
@@ -1824,6 +2016,18 @@ pub fn write_boot_params(world_id: u64, gpa: u64) -> Result<(), VmError> {
         )
         .map_err(|_| VmError::Map(MapError::InvalidRange))?;
 
+    // Initrd/module ranges and the command line are authoritative in the
+    // world registry: `SYS_VMM_LOAD_MODULE` and `SYS_VMM_SET_CMDLINE` fill
+    // them before this block is written.
+    for module in &world.modules {
+        params
+            .add_module(module.base, module.len)
+            .map_err(|_| VmError::Map(MapError::InvalidRange))?;
+    }
+    params
+        .set_cmdline(&world.cmdline[..world.cmdline_len])
+        .map_err(|_| VmError::Map(MapError::InvalidRange))?;
+
     // Builds the map from the world's own reservations, merging neighbours of
     // the same kind so that a fragmented map still fits in the fixed block.
     let mut pending: Option<(u64, u64, u32)> = None;
@@ -1872,9 +2076,11 @@ pub fn write_boot_params(world_id: u64, gpa: u64) -> Result<(), VmError> {
         );
     }
     log::info!(
-        "[s9vm] boot params at {:#x}: {} memory range(s), rsdp {:#x}",
+        "[s9vm] boot params at {:#x}: {} memory range(s), {} module(s), cmdline {} byte(s), rsdp {:#x}",
         gpa,
         params.memory_count(),
+        params.module_count(),
+        params.cmdline_len(),
         ACPI_GPA
     );
     Ok(())
@@ -2265,6 +2471,21 @@ fn cleanup_vcpu(vcpu_id: u64) {
 /// Only one `RUN` can be in flight per vCPU; a second concurrent call receives
 /// [`RunError::Busy`].
 pub fn request_run(vcpu_id: u64) -> Result<(), RunError> {
+    request_run_inner(vcpu_id, None)
+}
+
+/// Requests execution of a vCPU and waits at most `timeout_ns` for the end of
+/// that `RUN`.
+///
+/// Returns [`RunError::Timeout`] if the vCPU task did not complete the request
+/// within the budget. The request stays queued (`run_in_flight`), so a late
+/// completion still clears the slot; the caller must treat the timeout as a
+/// defect and must not issue another `RUN` before it completes.
+pub fn request_run_timeout(vcpu_id: u64, timeout_ns: u64) -> Result<(), RunError> {
+    request_run_inner(vcpu_id, Some(timeout_ns))
+}
+
+fn request_run_inner(vcpu_id: u64, timeout_ns: Option<u64>) -> Result<(), RunError> {
     let (run_wait, done_wait) = {
         let mut worlds = WORLDS.lock();
         let Some((world, index)) = locate_slot(&mut worlds, vcpu_id) else {
@@ -2290,6 +2511,30 @@ pub fn request_run(vcpu_id: u64) -> Result<(), RunError> {
         (Arc::clone(&slot.run_wait), Arc::clone(&slot.done_wait))
     };
     run_wait.wake_one();
+
+    if let Some(timeout_ns) = timeout_ns {
+        let budget_ticks = (timeout_ns / crate::arch::timer::NS_PER_TICK).max(1);
+        let deadline = ticks().saturating_add(budget_ticks);
+        loop {
+            {
+                let mut worlds = WORLDS.lock();
+                match locate_slot(&mut worlds, vcpu_id) {
+                    Some((world, index)) => {
+                        let slot = &mut world.vcpus[index];
+                        if slot.run_done {
+                            return slot.run_result.take().unwrap_or(Ok(()));
+                        }
+                    }
+                    None => return Err(RunError::UnknownVcpu),
+                }
+            }
+            if ticks() >= deadline {
+                return Err(RunError::Timeout);
+            }
+            sleep_current_task_ticks(1);
+        }
+    }
+
     done_wait
         .wait_until(|| {
             let mut worlds = WORLDS.lock();

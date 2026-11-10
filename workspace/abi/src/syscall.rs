@@ -1831,3 +1831,28 @@ pub const SYS_VMM_VCPU_REGS: usize = 589;
 /// Call it after `SYS_VMM_ACPI` (so the firmware tables are in place) and
 /// before `RUN`. Returns 0.
 pub const SYS_VMM_BOOT_PARAMS: usize = 590;
+
+/// Load a guest module/initrd blob into a world's guest memory.
+///
+/// `arg1` = VMM capability handle (write capability required),
+/// `arg2` = guest-physical base address (4 KiB aligned),
+/// `arg3` = user pointer to the bytes,
+/// `arg4` = length in bytes (non-zero, at most 64 MiB).
+///
+/// The range is mapped read/write and copied verbatim (the bytes are not
+/// parsed as ELF; use `SYS_VMM_LOAD_IMAGE` for the kernel image). At most four
+/// modules/ranges may be recorded per world. The range is published to the
+/// guest by `SYS_VMM_BOOT_PARAMS`. Returns 0.
+pub const SYS_VMM_LOAD_MODULE: usize = 591;
+
+/// Store the guest kernel command line.
+///
+/// `arg1` = VMM capability handle (write capability required),
+/// `arg2` = user pointer to the bytes,
+/// `arg3` = length in bytes (at most 256).
+///
+/// The bytes are copied into the world and NUL-padded; the stored length is
+/// authoritative (the command line is **not** NUL-terminated). The command
+/// line is published to the guest by `SYS_VMM_BOOT_PARAMS`. Returns the stored
+/// length.
+pub const SYS_VMM_SET_CMDLINE: usize = 592;

@@ -346,9 +346,34 @@ pub fn init() {
                 "[s9vm] ready ({} CPU activated)",
                 ACTIVE_CPUS.load(Ordering::Acquire)
             );
+            // Publish the host TSC frequency early so guest CPUID leaves
+            // 0x15/0x16 are meaningful from the first guest, and so the APIC
+            // timer conversion has a scale factor. The boot calibration is a
+            // nominal value (CPUID 0x15/0x16 or the PIT); a later lazy CPUID
+            // detection in `/dev/vmm` can only improve it (write-once cache).
+            publish_tsc_frequency();
             selftest::maybe_run_from_boot_env(&caps);
         }
         Err(error) => log::warn!("[s9vm] activation failed ({:?})", error),
+    }
+}
+
+/// Publishes the host TSC frequency in the `tsc` cache, once.
+fn publish_tsc_frequency() {
+    use crate::s9vm::tsc::TscFrequency;
+    if crate::s9vm::tsc::get().is_some() {
+        return;
+    }
+    let khz = crate::arch::x86_64::boot_timestamp::tsc_khz();
+    if khz == 0 {
+        return;
+    }
+    if let Some(frequency) = TscFrequency::from_hz(khz.saturating_mul(1_000)) {
+        crate::s9vm::tsc::set(frequency);
+        log::info!(
+            "[s9vm] TSC frequency: {} MHz (published to guest CPUID)",
+            frequency.hz() / 1_000_000
+        );
     }
 }
 

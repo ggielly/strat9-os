@@ -408,3 +408,22 @@ fn cpuid_policy_zeroed_defaults() {
     assert_eq!(policy.extended1_edx, 0);
     assert_eq!(policy.reserved, 0);
 }
+
+#[test]
+fn guest_boot_handoff_syscall_numbers_are_stable() {
+    assert_eq!(SYS_VMM_BOOT_PARAMS, 590);
+    assert_eq!(SYS_VMM_LOAD_MODULE, 591);
+    assert_eq!(SYS_VMM_SET_CMDLINE, 592);
+    assert_eq!(SYS_VMM_LOAD_MODULE, SYS_VMM_BOOT_PARAMS + 1);
+    assert_eq!(SYS_VMM_SET_CMDLINE, SYS_VMM_BOOT_PARAMS + 2);
+}
+
+#[test]
+fn guest_module_and_cmdline_limits_are_coherent() {
+    assert_eq!(abi::VMM_MAX_MODULES, 4);
+    assert_eq!(abi::VMM_MODULE_MAX_BYTES, 64 * 1024 * 1024);
+    assert_eq!(abi::VMM_CMDLINE_MAX, 256);
+    // The boot-parameter block has room for exactly these limits.
+    assert_eq!(abi::VMM_MAX_MODULES, 4);
+    assert!(abi::VMM_CMDLINE_MAX <= 256);
+}

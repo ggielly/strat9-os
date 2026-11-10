@@ -62,6 +62,13 @@ pub const VMM_LIST_MAX: usize = 64;
 /// the true total.
 pub const VMM_VCPU_LIST_MAX: usize = 32;
 
+/// Maximum number of initrd/module entries published in the boot parameters.
+pub const VMM_MAX_MODULES: usize = 4;
+/// Maximum size in bytes of one module copied by `SYS_VMM_LOAD_MODULE` (64 MiB).
+pub const VMM_MODULE_MAX_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum command-line length accepted by `SYS_VMM_SET_CMDLINE`.
+pub const VMM_CMDLINE_MAX: usize = 256;
+
 /// Register block shared between `SYS_VMM_SET_REGS` and `SYS_VMM_GET_REGS`.
 ///
 /// Size: 184 bytes. The order follows the usual save order
