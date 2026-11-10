@@ -44,6 +44,7 @@ use crate::{
         guest::GuestState,
         launch::{s9vm_enter_guest, s9vm_guest_exit, EnterFrame, S9VM_ENTER_FRAME_SIZE},
         mmu::{self, Perms, SecondLevel, TableMemory},
+        msr::{self, MsrModel},
     },
 };
 
@@ -320,30 +321,41 @@ pub mod msr_bitmap {
     pub const TSC_DEADLINE: u32 = 0x6E0;
 }
 
-/// Marks one MSR as intercepted (read and write) in the bitmap.
+/// Marks one MSR as intercepted (read and/or write) in the bitmap.
 fn set_msr_intercept(base: *mut u8, msr: u32, intercept_read: bool, intercept_write: bool) {
-    let index = msr as usize;
-    // Both bitmaps only cover the low 0x0000..0x1FFF range; the high range
-    // (0xC000_0000..) contains no intercepted MSR yet.
-    if index >= 0x2000 {
+    // The bitmap covers 0x0000..0x1FFF and 0xC000_0000..0xC000_1FFF.
+    let (offset, read_base, write_base) = if (msr as usize) < 0x2000 {
+        (msr as usize, msr_bitmap::READ_LOW, msr_bitmap::WRITE_LOW)
+    } else if (0xC000_0000..0xC000_2000).contains(&msr) {
+        (
+            (msr - 0xC000_0000) as usize,
+            msr_bitmap::READ_HIGH,
+            msr_bitmap::WRITE_HIGH,
+        )
+    } else {
         return;
-    }
-    let byte = index / 8;
-    let bit = 1u8 << (index % 8);
+    };
+    let byte = offset / 8;
+    let bit = 1u8 << (offset % 8);
     // SAFETY: `base` points to the 4 KiB bitmap owned by this vCPU and both
-    // offsets stay inside it (`index < 0x2000`).
+    // offsets stay inside it (`offset < 0x2000`).
     unsafe {
         if intercept_read {
-            *base.add(msr_bitmap::READ_LOW + byte) |= bit;
+            *base.add(read_base + byte) |= bit;
         }
         if intercept_write {
-            *base.add(msr_bitmap::WRITE_LOW + byte) |= bit;
+            *base.add(write_base + byte) |= bit;
         }
     }
 }
 
-/// Allocates the MSR bitmap of a vCPU and intercepts the x2APIC MSR window on
-/// both reads and writes.
+/// Allocates the MSR bitmap of a vCPU.
+///
+/// The modelled MSRs and the x2APIC window are intercepted on reads and
+/// writes. Every other MSR in both bitmap windows is intercepted on **writes**
+/// as well: an unmodelled `WRMSR` then exits to the kernel and is reported to
+/// policy, instead of modifying the host MSR file. Reads of unmodelled MSRs are
+/// left native (no host state corruption, only read-only information).
 ///
 /// The frame is deliberately leaked with the other vCPU resources (control
 /// block, host stack): a vCPU currently lives as long as its world.
@@ -358,11 +370,22 @@ fn alloc_msr_bitmap() -> Option<PhysFrame> {
     // SAFETY: the frame is exclusively owned by this vCPU and HHDM-mapped.
     unsafe {
         core::ptr::write_bytes(base, 0, msr_bitmap::BYTES);
+        for msr in msr::msr_intercept_list() {
+            set_msr_intercept(base, *msr, true, true);
+        }
         for msr in msr_bitmap::X2APIC_FIRST..=msr_bitmap::X2APIC_LAST {
             set_msr_intercept(base, msr, true, true);
         }
         // The TSC-deadline timer register is outside the x2APIC window.
         set_msr_intercept(base, msr_bitmap::TSC_DEADLINE, true, true);
+        // Default-deny writes in both windows: an unmodelled WRMSR must not
+        // reach the host MSR file.
+        for msr in 0..0x2000 {
+            set_msr_intercept(base, msr, false, true);
+        }
+        for msr in 0xC000_0000..0xC000_2000 {
+            set_msr_intercept(base, msr, false, true);
+        }
     }
     Some(frame)
 }
@@ -403,8 +426,11 @@ pub struct Vcpu {
     exit: Option<ExitInfo>,
     /// Preemption timer reload (counts) if the CPU supports it.
     preemption_timer: Option<u32>,
-    /// MSR bitmap intercepting the x2APIC MSR window, when supported.
+    /// MSR bitmap intercepting the modelled MSRs, the x2APIC window and all
+    /// unmodelled writes, when supported.
     msr_bitmap: Option<PhysFrame>,
+    /// Per-vCPU shadow of the modelled MSRs.
+    msr: MsrModel,
 }
 
 impl Vcpu {
@@ -436,6 +462,7 @@ impl Vcpu {
             exit: None,
             preemption_timer: None,
             msr_bitmap: None,
+            msr: MsrModel::new(),
         })
     }
 
@@ -766,6 +793,17 @@ impl Vcpu {
     /// The control block must be loaded.
     pub unsafe fn configure(&mut self, caps: &HwCaps, guest: &GuestState) -> Result<(), VcpuError> {
         self.guest = *guest;
+        // Seed the MSR shadows from the guest state supplied by policy. The
+        // runtime WRMSR path updates the shadows; the synchronous state/control
+        // block refresh is driven by [`Self::sync_msr_state`].
+        self.msr.set_efer(guest.efer);
+        self.msr.set_pat(guest.pat);
+        self.msr.set_segment_bases(guest.fs.base, guest.gs.base, 0);
+        self.msr.set_sysenter(
+            u64::from(guest.sysenter_cs),
+            guest.sysenter_esp,
+            guest.sysenter_eip,
+        );
         // The VMX preemption timer bounds the time a guest can run without
         // returning to the kernel: a guest that never exits cannot hold a
         // vCPU forever. The count rate comes from the capability MSR, so the
@@ -822,7 +860,8 @@ impl Vcpu {
                 self.control.write_u32(field::PLE_WINDOW, 60_000)?;
             }
             self.control.write_u64(field::TSC_OFFSET, 0)?;
-            self.control.write_u64(field::MSR_BITMAP, self.msr_bitmap_phys())?;
+            self.control
+                .write_u64(field::MSR_BITMAP, self.msr_bitmap_phys())?;
             self.control.write_u64(field::IO_BITMAP_A, 0)?;
             self.control.write_u64(field::IO_BITMAP_B, 0)?;
             self.control
@@ -997,8 +1036,7 @@ impl Vcpu {
         }
         let pin = caps.pin_allowed.apply(pin);
         let primary = primary_controls(caps, false);
-        let mut secondary =
-            bits::SECONDARY_ENABLE_EPT | bits::SECONDARY_UNRESTRICTED_GUEST;
+        let mut secondary = bits::SECONDARY_ENABLE_EPT | bits::SECONDARY_UNRESTRICTED_GUEST;
         if self.msr_bitmap.is_some() {
             secondary |= bits::SECONDARY_USE_MSR_BITMAPS;
         }
@@ -1147,6 +1185,54 @@ impl Vcpu {
     /// Current guest state (registers updated after the last exit).
     pub fn guest(&self) -> &GuestState {
         &self.guest
+    }
+
+    /// Per-vCPU MSR shadow state.
+    pub const fn msr(&self) -> &MsrModel {
+        &self.msr
+    }
+
+    /// Mutable per-vCPU MSR shadow state, for the replay path.
+    pub fn msr_mut(&mut self) -> &mut MsrModel {
+        &mut self.msr
+    }
+
+    /// Refreshes the guest state and control block from the MSR shadows.
+    ///
+    /// Must be called after a replayed `WRMSR` whose effect is
+    /// [`crate::s9vm::msr::MsrWrite::Efer`], `Pat`, `SegmentBase` or `State`,
+    /// before the next guest entry.
+    ///
+    /// # Safety
+    /// The control block must be loaded on the current CPU and the guest must
+    /// not be running.
+    pub unsafe fn sync_msr_state(&mut self) -> Result<(), VcpuError> {
+        let efer = self.msr.read(msr::IA32_EFER).unwrap_or(self.guest.efer);
+        let pat = self.msr.pat();
+        let fs_base = self.msr.fs_base();
+        let gs_base = self.msr.gs_base();
+        let (sysenter_cs, sysenter_esp, sysenter_eip) = self.msr.sysenter();
+        self.guest.efer = efer;
+        self.guest.pat = pat;
+        self.guest.fs.base = fs_base;
+        self.guest.gs.base = gs_base;
+        self.guest.sysenter_cs = sysenter_cs as u32;
+        self.guest.sysenter_esp = sysenter_esp;
+        self.guest.sysenter_eip = sysenter_eip;
+        // SAFETY: caller guarantees the block is loaded.
+        unsafe {
+            self.control.write_u64(field::GUEST_EFER, efer)?;
+            self.control.write_u64(field::GUEST_PAT, pat)?;
+            self.control.write_natural(field::GUEST_FS_BASE, fs_base)?;
+            self.control.write_natural(field::GUEST_GS_BASE, gs_base)?;
+            self.control
+                .write_u32(field::GUEST_SYSENTER_CS, sysenter_cs as u32)?;
+            self.control
+                .write_natural(field::GUEST_SYSENTER_ESP, sysenter_esp)?;
+            self.control
+                .write_natural(field::GUEST_SYSENTER_EIP, sysenter_eip)?;
+        }
+        Ok(())
     }
 
     /// Second-level pointer (`EPT_POINTER` value) given to this vCPU.

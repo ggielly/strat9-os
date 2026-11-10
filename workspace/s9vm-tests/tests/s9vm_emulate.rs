@@ -16,6 +16,8 @@ mod emulate;
 mod exit;
 #[path = "../../kernel/src/s9vm/ioapic.rs"]
 mod ioapic;
+#[path = "../../kernel/src/s9vm/msr.rs"]
+mod msr;
 #[path = "../../kernel/src/s9vm/pic.rs"]
 mod pic;
 #[path = "../../kernel/src/s9vm/virtio.rs"]

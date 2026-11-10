@@ -1347,6 +1347,16 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                                 Ok(true) => {
                                     timing.record(class, exit_cycles);
                                     handler_timing.record(handler_cycles);
+                                    // An emulated MSR write can change guest
+                                    // state fields the control block caches
+                                    // (EFER, PAT, FS/GS base, SYSENTER): push
+                                    // them back before the next entry.
+                                    if class == ExitClass::Msr {
+                                        // SAFETY: the control block is loaded
+                                        // and the guest is not running (we are
+                                        // in the exit handler).
+                                        let _ = hardware.sync_msr_state();
+                                    }
                                     if resumed >= MAX_RESUMED_EXITS {
                                         result = Err(RunError::ExitStorm);
                                         break;

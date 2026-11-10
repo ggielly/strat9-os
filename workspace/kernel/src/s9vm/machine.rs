@@ -115,6 +115,10 @@ impl GuestContext for VcpuGuest<'_> {
     fn paging(&self) -> bool {
         self.vcpu.paging_enabled()
     }
+
+    fn msr_model(&mut self) -> Option<&mut crate::s9vm::msr::MsrModel> {
+        Some(self.vcpu.msr_mut())
+    }
 }
 
 /// Device model, CPU description and emulation state of one world.

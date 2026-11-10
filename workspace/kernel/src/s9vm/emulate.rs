@@ -51,6 +51,7 @@ use super::{
     decode::{self, Decoded, MemoryAccess, PortAccess},
     exit::ExitClass,
     ioapic::IoApic,
+    msr::MsrModel,
     pic::Pic,
     virtio::QueueMemory,
     virtio_blk::VirtioBlk,
@@ -278,6 +279,17 @@ pub trait GuestContext {
     fn cr3(&self) -> u64;
     /// True if guest paging is active (long mode with `CR0.PG` set).
     fn paging(&self) -> bool;
+
+    /// Per-vCPU MSR shadow model, when the caller provides one.
+    ///
+    /// The default is `None`, which makes replayed `RDMSR`/`WRMSR` exits
+    /// unhandleable (`Ok(false)`): the caller must then report them to policy.
+    /// A caller that omits the model can never let an unmodelled guest MSR
+    /// write reach the host MSR file, because the MSR bitmap intercepts all
+    /// writes and this path fails closed.
+    fn msr_model(&mut self) -> Option<&mut MsrModel> {
+        None
+    }
 }
 
 /// A window on guest memory.
@@ -605,6 +617,14 @@ fn serve_port(devices: &mut Devices, guest: &mut dyn GuestContext, access: &Port
 /// exit tells us the guest executed the instruction. `IA32_TSC_DEADLINE`
 /// (`0x6E0`) is also routed to the local APIC timer even outside the x2APIC
 /// window, because it is the programming interface of the TSC-deadline mode.
+/// All other intercepted MSRs are replayed against the per-vCPU [`MsrModel`].
+///
+/// If the caller provides no model, or if the model rejects the access, the
+/// exit is **not** consumed: `Ok(false)` reports it to policy. This path never
+/// writes a host MSR, so an unmapped model fails closed. A modelled invalid
+/// value (for example a reserved `IA32_EFER` bit) is also reported to policy
+/// rather than injected as #GP here; the policy layer owns that decision.
+///
 /// `ECX` holds the MSR number, `EDX:EAX` the value (`rdmsr` writes them).
 fn handle_msr_exit(
     apic: &mut LocalApic,
@@ -618,9 +638,35 @@ fn handle_msr_exit(
     let msr = guest.gpr(1) as u32;
     let in_x2apic_window = (X2APIC_MSR_FIRST..=X2APIC_MSR_LAST).contains(&msr);
     let is_tsc_deadline = msr == TSC_DEADLINE_MSR;
+
     if !in_x2apic_window && !is_tsc_deadline {
-        return Ok(false);
+        if access.write {
+            let value = ((guest.gpr(2) & 0xFFFF_FFFF) << 32) | (guest.gpr(0) & 0xFFFF_FFFF);
+            let Some(model) = guest.msr_model() else {
+                return Ok(false);
+            };
+            if model.write(msr, value).is_err() {
+                return Ok(false);
+            }
+            // The caller refreshes the guest state/control block for the
+            // returned effect (`MsrWrite`) before the next entry.
+        } else {
+            let value = {
+                let Some(model) = guest.msr_model() else {
+                    return Ok(false);
+                };
+                match model.read(msr) {
+                    Ok(value) => value,
+                    Err(_) => return Ok(false),
+                }
+            };
+            write_register(guest, 0, 4, value & 0xFFFF_FFFF);
+            write_register(guest, 2, 4, value >> 32);
+        }
+        guest.set_rip(access.next_rip);
+        return Ok(true);
     }
+
     if in_x2apic_window {
         debug_assert!(x2apic::TPR <= msr);
     }
