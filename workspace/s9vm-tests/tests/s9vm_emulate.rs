@@ -25,7 +25,8 @@ mod virtio_console;
 
 use emulate::{
     handle_exit, interrupt_action, walk_guest, walk_second_level, DevicePage, Devices,
-    GuestContext, InterruptAction, MemoryView, PhysMemory, CONSOLE_BASE, IOAPIC_BASE,
+    GuestContext, InterruptAction, MemoryView, PhysMemory, CONSOLE_BASE, CONSOLE_IRQ_VECTOR,
+    IOAPIC_BASE,
 };
 use exit::ExitClass;
 
@@ -903,4 +904,71 @@ fn console_queue_register_writes_are_visible_to_the_guest() {
         ),
         8
     );
+}
+
+#[test]
+fn console_output_raises_the_console_vector() {
+    let mut memory = machine();
+    let mut guest = TestGuest::new(CODE_PAGE);
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+
+    console_write(
+        &mut devices,
+        &mut apic,
+        &mut memory,
+        &mut guest,
+        u64::from(virtio_console::reg::STATUS),
+        virtio_console::status::ACKNOWLEDGE
+            | virtio_console::status::DRIVER
+            | virtio_console::status::FEATURES_OK
+            | virtio_console::status::DRIVER_OK,
+    );
+    console_program_queue(
+        &mut devices,
+        &mut apic,
+        &mut memory,
+        &mut guest,
+        virtio_console::QUEUE_TX,
+    );
+
+    let descriptor = virtio::Descriptor {
+        addr: CONSOLE_BUFFER,
+        len: 2,
+        flags: 0,
+        next: 0,
+    };
+    memory.write_bytes(CONSOLE_DESC, &descriptor.encode());
+    memory.write_bytes(CONSOLE_BUFFER, b"hi");
+    memory.write_bytes(CONSOLE_AVAIL + 2, &1u16.to_le_bytes());
+    memory.write_bytes(CONSOLE_AVAIL + 4, &0u16.to_le_bytes());
+
+    console_write(
+        &mut devices,
+        &mut apic,
+        &mut memory,
+        &mut guest,
+        u64::from(virtio_console::reg::QUEUE_NOTIFY),
+        virtio_console::QUEUE_TX,
+    );
+    assert_eq!(devices.console.output(), b"hi");
+    assert_eq!(apic.pending_vector(), Some(CONSOLE_IRQ_VECTOR));
+}
+
+#[test]
+fn console_interrupt_is_only_raised_while_reported() {
+    let mut memory = machine();
+    let mut guest = TestGuest::new(CODE_PAGE);
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    // A plain register write must not raise the vector.
+    console_write(
+        &mut devices,
+        &mut apic,
+        &mut memory,
+        &mut guest,
+        u64::from(virtio_console::reg::QUEUE_SEL),
+        0,
+    );
+    assert_eq!(apic.pending_vector(), None);
 }

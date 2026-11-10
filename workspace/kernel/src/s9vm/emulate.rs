@@ -85,6 +85,13 @@ pub const APIC_BASE: u64 = 0xFEE0_0000;
 pub const IOAPIC_BASE: u64 = 0xFEC0_0000;
 /// Base of the virtio console transport page (virtio-mmio layout).
 pub const CONSOLE_BASE: u64 = 0xFEB0_0000;
+/// Interrupt vector used to signal the console.
+///
+/// The virtio-mmio transport does not define its own interrupt: the platform
+/// wires the device to an interrupt line. Until the policy layer routes device
+/// lines through the I/O APIC, the kernel uses a fixed vector, which keeps the
+/// device usable by a driver that programs the corresponding IDT entry.
+pub const CONSOLE_IRQ_VECTOR: u8 = 0x21;
 /// First and last MSR of the x2APIC window (`0x800..=0x8FF`).
 pub const X2APIC_MSR_FIRST: u32 = 0x800;
 pub const X2APIC_MSR_LAST: u32 = 0x8FF;
@@ -715,7 +722,15 @@ fn write_mmio(
     match page {
         DevicePage::Apic => apic.mmio_write(offset & 0xFFF, value),
         DevicePage::IoApic => devices.ioapic.mmio_write(offset & 0xFF, value),
-        DevicePage::Console => devices.console.write(offset as u32 & 0xFFF, value, view),
+        DevicePage::Console => {
+            devices.console.write(offset as u32 & 0xFFF, value, view);
+            // Any pending console interrupt is signalled through the vCPU's
+            // local APIC: the execution loop delivers it like any other
+            // vector (immediately, or when the interrupt window opens).
+            if devices.console.interrupt_status() != 0 {
+                apic.inject(CONSOLE_IRQ_VECTOR);
+            }
+        }
     }
 }
 
