@@ -50,8 +50,9 @@ use crate::{
         exit::ExitClass,
         exitqueue::ExitQueue,
         guest::{FixedBits, GuestState},
+        image::{Image, Segment},
         machine::Machine,
-        memmap::{perms_from_abi, GuestMap, MapError},
+        memmap::{perms_from_abi, GuestMap, MapError, MAX_GPA},
         mmu::{Perms as MmuPerms, PAGE_SIZE},
         vcpu::{ExitInfo, SecondLevelMemory, Vcpu, VcpuError},
     },
@@ -667,6 +668,170 @@ pub fn map_memory(
             Err(VmError::Unknown)
         }
     }
+}
+
+/// A guest image loaded into a world's guest memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadedImage {
+    /// Guest-physical entry point, relocated to the load base.
+    pub entry: u64,
+    /// Guest-physical base address where the image was loaded.
+    pub image_base: u64,
+    /// Lowest guest-physical address covered by the image (inclusive).
+    pub span_min: u64,
+    /// Highest guest-physical address covered by the image (exclusive).
+    pub span_max: u64,
+}
+
+impl LoadedImage {
+    /// Number of guest pages in the image span, holes included.
+    pub const fn span_pages(&self) -> u64 {
+        (self.span_max - self.span_min) / PAGE_SIZE
+    }
+}
+
+/// Loads an ELF64 guest image into a world's guest memory.
+///
+/// The image is parsed and validated by [`Image::parse`]; every `PT_LOAD`
+/// segment is then mapped through [`map_memory`] with its ELF permissions and
+/// default write-back memory type. The file-backed prefix of each segment is
+/// copied page by page into the pinned frames (GPA -> HPA -> HHDM) and the
+/// remaining bytes (BSS) are zeroed. Nothing is executed: the policy layer
+/// decides the initial registers.
+///
+/// `load_base_gpa` is the guest-physical address of the image base
+/// ([`Image::base_vaddr`]) and must be 4 KiB aligned; the image virtual
+/// addresses are relocated by the same delta. Loading is not atomic: if a
+/// later segment cannot be mapped, the segments already mapped stay in place
+/// and the world must be destroyed (the world memory layer has no unmap
+/// primitive yet). A malformed image is rejected before any mapping.
+pub fn load_image(
+    world_id: u64,
+    caps: &HwCaps,
+    image_bytes: &[u8],
+    load_base_gpa: u64,
+) -> Result<LoadedImage, VmError> {
+    let image = Image::parse(image_bytes).map_err(|error| {
+        log::warn!("[s9vm] guest image rejected ({:?})", error);
+        VmError::Map(MapError::InvalidRange)
+    })?;
+    if load_base_gpa % PAGE_SIZE != 0 {
+        return Err(VmError::Map(MapError::InvalidRange));
+    }
+    let (span_min, span_max) = image
+        .load_span(load_base_gpa)
+        .filter(|(_, end)| *end <= MAX_GPA)
+        .ok_or(VmError::Map(MapError::InvalidRange))?;
+    let entry = image
+        .entry_gpa(load_base_gpa)
+        .ok_or(VmError::Map(MapError::InvalidRange))?;
+    if !image.entry_is_mapped() {
+        log::warn!(
+            "[s9vm] guest image entry {:#x} is outside every loadable segment",
+            image.entry()
+        );
+    }
+
+    // 1. Maps the page-aligned footprint of every segment. `map_memory` keeps
+    //    the registry lock out of the frame allocation path.
+    for segment in image.segments() {
+        let gpa = image
+            .segment_gpa(load_base_gpa, segment)
+            .ok_or(VmError::Map(MapError::InvalidRange))?;
+        map_memory(
+            world_id,
+            caps,
+            gpa,
+            segment.page_len(),
+            segment.perms_bits(),
+            0,
+        )?;
+    }
+
+    // 2. Fills the frames: file-backed bytes, then the zero-filled tail. No
+    //    allocation happens here, so the registry lock can be held while the
+    //    guest memory is populated.
+    {
+        let mut worlds = WORLDS.lock();
+        let world = worlds.get_mut(&world_id).ok_or(VmError::Unknown)?;
+        let memory = world
+            .memory
+            .as_ref()
+            .ok_or(VmError::Map(MapError::NotMapped))?;
+        for segment in image.segments() {
+            copy_segment(memory, &image, segment, load_base_gpa)?;
+        }
+    }
+
+    log::info!(
+        "[s9vm] image loaded at {:#x}: {} segment(s), {} page(s), entry {:#x}",
+        load_base_gpa,
+        image.segment_count(),
+        image.total_pages(),
+        entry
+    );
+    Ok(LoadedImage {
+        entry,
+        image_base: load_base_gpa,
+        span_min,
+        span_max,
+    })
+}
+
+/// Copies the file-backed bytes of one segment and zeroes its BSS.
+fn copy_segment(
+    memory: &WorldMemory,
+    image: &Image<'_>,
+    segment: &Segment,
+    load_base_gpa: u64,
+) -> Result<(), VmError> {
+    let file_bytes = image
+        .bytes_for_segment(segment)
+        .ok_or(VmError::Map(MapError::NotMapped))?;
+    let page_gpa = image
+        .segment_gpa(load_base_gpa, segment)
+        .ok_or(VmError::Map(MapError::InvalidRange))?;
+    let page_start = segment.page_start();
+    let file_end_vaddr = segment.vaddr + segment.filesz;
+    let end_vaddr = segment.end_vaddr();
+    for index in 0..segment.page_count() {
+        let page_vaddr = page_start + index * PAGE_SIZE;
+        let page_end_vaddr = page_vaddr + PAGE_SIZE;
+        let hpa = memory
+            .translate(page_gpa + index * PAGE_SIZE)
+            .ok_or(VmError::Map(MapError::NotMapped))?;
+        let page_virt = crate::memory::phys_to_virt(hpa) as *mut u8;
+        // File-backed bytes of this page.
+        let copy_start = core::cmp::max(page_vaddr, segment.vaddr);
+        let copy_end = core::cmp::min(page_end_vaddr, file_end_vaddr);
+        if copy_start < copy_end {
+            let length = (copy_end - copy_start) as usize;
+            let source_offset = (copy_start - segment.vaddr) as usize;
+            let destination_offset = (copy_start - page_vaddr) as usize;
+            // SAFETY: the page is owned by this world and mapped by the HHDM;
+            // `length` bytes stay inside one page, and `source_offset` stays
+            // inside the file-backed slice of the segment.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    file_bytes.as_ptr().add(source_offset),
+                    page_virt.add(destination_offset),
+                    length,
+                );
+            }
+        }
+        // Zero-filled tail (BSS) of this page.
+        let zero_start = core::cmp::max(page_vaddr, file_end_vaddr);
+        let zero_end = core::cmp::min(page_end_vaddr, end_vaddr);
+        if zero_start < zero_end {
+            let length = (zero_end - zero_start) as usize;
+            let destination_offset = (zero_start - page_vaddr) as usize;
+            // SAFETY: same page as above; the zeroed range stays inside it.
+            unsafe {
+                core::ptr::write_bytes(page_virt.add(destination_offset), 0, length);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// vCPU layer errors.
