@@ -31,6 +31,7 @@ name = "s9vm-tests"
 version = "0.1.0"
 dependencies = [
  "strat9-abi",
+ "strat9-elf-core",
 ]
 
 [[package]]
@@ -47,6 +48,10 @@ dependencies = [
  "static_assertions",
  "zerocopy",
 ]
+
+[[package]]
+name = "strat9-elf-core"
+version = "0.1.0"
 
 [[package]]
 name = "syn"

@@ -363,8 +363,11 @@ fn rejects_truncated_program_header_table() {
 
 #[test]
 fn rejects_too_many_program_headers() {
+    // A well-formed table, but above the guest loader's policy limit.
     let mut bytes = simple();
-    put_u16(&mut bytes, 0x38, 129);
+    let count = 129usize;
+    bytes.resize(EHDR + count * PHDR, 0);
+    put_u16(&mut bytes, 0x38, count as u16);
     assert_eq!(
         Image::parse(&bytes).unwrap_err(),
         ImageError::TooManyProgramHeaders

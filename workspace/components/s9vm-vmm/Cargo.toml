@@ -13,3 +13,4 @@ path = "src/main.rs"
 [dependencies]
 strat9-syscall = { path = "../syscall", features = ["userspace"] }
 strat9-abi = { path = "../../abi" }
+strat9-elf-core = { workspace = true }

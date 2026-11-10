@@ -9,6 +9,7 @@ repository = "https://git.strat9-os.org/strat9-os/strat9-os.git"
 [workspace]
 members = [
     "workspace/abi",
+    "workspace/elf-core",
     "workspace/kernel",
     "workspace/bootloader",
     "workspace/drivers/bus",
@@ -57,6 +58,7 @@ resolver = "2"
 
 [workspace.dependencies]
 strat9-abi = { path = "workspace/abi" }
+strat9-elf-core = { path = "workspace/elf-core" }
 spin = "0.10.0"
 bitflags = "2.11.1"
 log = "0.4"

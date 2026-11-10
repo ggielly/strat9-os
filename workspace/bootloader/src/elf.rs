@@ -20,10 +20,23 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-use crate::memory_map::{page_allocation_size, PhysicalRange, PAGE_SIZE};
+//! Kernel image validation and loading for the UEFI bootloader.
+//!
+//! The generic ELF64 decoding lives in `strat9-elf-core` (shared with the
+//! kernel userland loader and the `s9vm` guest loader). This module adds the
+//! bootloader's own policy:
+//!
+//! - the kernel must be an `ET_EXEC` x86-64 image linked at the higher-half
+//!   base [`KERNEL_VIRT_BASE`];
+//! - its physical layout must follow its virtual layout, page for page;
+//! - it must fit the single 1 GiB page directory the higher-half mapper builds;
+//! - the entry point must point at file-backed instructions, not at a
+//!   zero-filled BSS tail.
 
-const PT_LOAD: u32 = 1;
-const PF_X: u32 = 1;
+use crate::memory_map::{page_allocation_size, PhysicalRange, PAGE_SIZE};
+use strat9_elf_core::{ElfError, Header, PF_MASK, PF_X, PT_DYNAMIC, PT_INTERP, PT_TLS};
+
+const PT_SHLIB: u32 = 5;
 const KERNEL_PHYS_BASE: u64 = 0x10_0000;
 pub const KERNEL_VIRT_BASE: u64 = 0xFFFF_FFFF_8000_0000;
 // The current higher-half mapper supplies one page directory (1 GiB).
@@ -51,37 +64,17 @@ pub struct Elf64Info {
 
 /// Validate a static x86-64 kernel completely, without touching physical memory.
 pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
-    if data.len() < 64 || &data[..4] != b"\x7fELF" {
-        return Err("invalid ELF header");
-    }
-    if data[4] != 2 || data[5] != 1 {
-        return Err("kernel must be ELF64 little-endian");
-    }
-    if data[6] != 1 || read_u32_le(data, 20) != 1 {
-        return Err("unsupported ELF version");
-    }
-    if read_u16_le(data, 16) != 2 || read_u16_le(data, 18) != 62 {
+    let header = Header::parse(data).map_err(ElfError::message)?;
+    if !header.is_exec() {
         return Err("kernel must be an x86-64 ET_EXEC image");
     }
-    if read_u16_le(data, 52) != 64 || read_u16_le(data, 54) != 56 {
-        return Err("unsupported ELF header sizes");
-    }
-    let phoff =
-        usize::try_from(read_u64_le(data, 32)).map_err(|_| "program header offset overflow")?;
-    let phnum = read_u16_le(data, 56) as usize;
-    if phnum == 0 || phnum > MAX_SEGMENTS || phoff < 64 {
+    let phnum = header.e_phnum as usize;
+    if phnum == 0 || phnum > MAX_SEGMENTS {
         return Err("invalid program header table");
-    }
-    let phend = phnum
-        .checked_mul(56)
-        .and_then(|size| phoff.checked_add(size))
-        .ok_or("program header table overflow")?;
-    if phend > data.len() {
-        return Err("truncated program header table");
     }
 
     let mut info = Elf64Info {
-        entry: read_u64_le(data, 24),
+        entry: header.e_entry,
         segments: [Segment {
             phys_addr: 0,
             virt_addr: 0,
@@ -96,64 +89,49 @@ pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
     };
     let mut previous_virt_end = KERNEL_VIRT_BASE;
     let mut executable_entry = false;
-    for index in 0..phnum {
-        let offset = phoff + index * 56; // Entire table checked above.
-        let p_type = read_u32_le(data, offset);
-        if matches!(p_type, 2 | 3 | 5 | 7) {
+    for phdr in header.program_headers(data) {
+        if matches!(
+            phdr.p_type,
+            PT_DYNAMIC | PT_INTERP | PT_TLS | PT_SHLIB
+        ) {
             return Err("dynamic linking, interpreter or TLS is unsupported for the kernel");
         }
-        if p_type != PT_LOAD {
+        if !phdr.is_load() {
             continue;
         }
-        let flags = read_u32_le(data, offset + 4);
-        let file_offset = read_u64_le(data, offset + 8);
-        let virt_addr = read_u64_le(data, offset + 16);
-        let physical = read_u64_le(data, offset + 24);
-        let file_size = read_u64_le(data, offset + 32);
-        let mem_size = read_u64_le(data, offset + 40);
-        let align = read_u64_le(data, offset + 48);
-        if file_size > mem_size {
-            return Err("ELF file size exceeds segment memory size");
-        }
-        if mem_size == 0 {
+        // A segment of zero memory size carries nothing: skip it before the
+        // format validation so a pure empty entry cannot fail the load.
+        if phdr.p_memsz == 0 {
             continue;
         }
-        if flags & !7 != 0 {
-            return Err("unsupported ELF segment flags");
-        }
-        if flags & 3 == 3 {
-            return Err("writable executable ELF segment is unsupported");
-        }
-        if align > 1 && (!align.is_power_of_two() || virt_addr % align != file_offset % align) {
+        let segment = phdr
+            .load_segment(data.len())
+            .map_err(ElfError::message)?
+            .ok_or("invalid loadable segment")?;
+        if phdr.p_align > 1 && phdr.p_vaddr % phdr.p_align != phdr.p_offset % phdr.p_align {
             return Err("invalid ELF segment alignment");
         }
-        if virt_addr % PAGE_SIZE != file_offset % PAGE_SIZE {
-            return Err("ELF segment file and virtual page offsets differ");
+        if segment.flags & !PF_MASK != 0 {
+            return Err("unsupported ELF segment flags");
         }
-        let virt_end = virt_addr
-            .checked_add(mem_size)
-            .ok_or("ELF virtual range overflow")?;
+        if segment.flags & (1 | 2) == (1 | 2) {
+            return Err("writable executable ELF segment is unsupported");
+        }
+        let virt_addr = segment.vaddr;
+        let virt_end = segment.end_vaddr();
         if virt_addr < previous_virt_end {
             return Err("ELF load segments overlap or are out of order");
         }
         if info.segment_count != 0
             && virt_addr / PAGE_SIZE == (previous_virt_end - 1) / PAGE_SIZE
-            && flags != info.segments[info.segment_count - 1].flags
+            && segment.flags != info.segments[info.segment_count - 1].flags
         {
             return Err("ELF segments with different permissions share a page");
         }
         if virt_end > KERNEL_VIRT_BASE + MAX_KERNEL_IMAGE_SIZE {
             return Err("ELF exceeds the supported kernel virtual window");
         }
-        // A pure BSS has no source bytes; its nominal file offset may be beyond EOF.
-        if file_size != 0 {
-            let file_end = file_offset
-                .checked_add(file_size)
-                .ok_or("ELF file range overflow")?;
-            if file_end > data.len() as u64 {
-                return Err("truncated ELF load segment");
-            }
-        }
+        let physical = phdr.p_paddr;
         let phys_addr = if physical >= KERNEL_VIRT_BASE {
             KERNEL_PHYS_BASE
                 .checked_add(physical - KERNEL_VIRT_BASE)
@@ -162,7 +140,7 @@ pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
             physical
         };
         let phys_end = phys_addr
-            .checked_add(mem_size)
+            .checked_add(segment.memsz)
             .ok_or("ELF physical range overflow")?;
         if info.segment_count == 0 {
             if virt_addr != KERNEL_VIRT_BASE || phys_addr == 0 || phys_addr % PAGE_SIZE != 0 {
@@ -178,16 +156,19 @@ pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
             return Err("ELF physical and virtual layouts disagree");
         }
         // Entry must point to actual instructions, not an executable zero-fill tail.
-        if flags & PF_X != 0 && info.entry >= virt_addr && info.entry - virt_addr < file_size {
+        if segment.flags & PF_X != 0
+            && info.entry >= virt_addr
+            && info.entry - virt_addr < segment.filesz
+        {
             executable_entry = true;
         }
         info.segments[info.segment_count] = Segment {
             phys_addr,
             virt_addr,
-            mem_size,
-            file_size,
-            file_offset,
-            flags,
+            mem_size: segment.memsz,
+            file_size: segment.filesz,
+            file_offset: segment.file_offset,
+            flags: segment.flags,
         };
         info.segment_count += 1;
         info.phys_end = phys_end;
@@ -282,14 +263,4 @@ impl Elf64Info {
         self.phys_end = destination.base + image_size;
         Ok(())
     }
-}
-
-fn read_u16_le(data: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap())
-}
-fn read_u32_le(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
-}
-fn read_u64_le(data: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
 }

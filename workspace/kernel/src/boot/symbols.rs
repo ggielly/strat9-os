@@ -27,6 +27,8 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use strat9_elf_core::{Header, Symbol};
+
 /// A single symbol entry: address, size, name offset in string table.
 #[derive(Clone, Copy)]
 struct KernelSymbol {
@@ -59,13 +61,15 @@ pub fn init() {
     #[cfg(not(target_arch = "x86_64"))]
     let elf_bytes: &[u8] = &[];
 
-    let elf = match xmas_elf::ElfFile::new(elf_bytes) {
-        Ok(e) => e,
+    let elf = match Header::parse(elf_bytes) {
+        Ok(header) => header,
         Err(_) => return,
     };
 
     // Find .strtab section
-    let strtab_data = find_section_data(&elf, ".strtab");
+    let Some(strtab_data) = section_data(&elf, elf_bytes, ".strtab") else {
+        return;
+    };
     if strtab_data.is_empty() {
         return;
     }
@@ -76,60 +80,31 @@ pub fn init() {
     }
 
     // Find .symtab section
-    let symtab_data = find_section_data(&elf, ".symtab");
+    let Some(symtab_data) = section_data(&elf, elf_bytes, ".symtab") else {
+        return;
+    };
     if symtab_data.is_empty() {
         return;
     }
 
-    // Parse symbol entries (each is 24 bytes for ELF64: st_name(4) + st_info(1) +
-    // st_other(1) + st_shndx(2) + st_value(8) + st_size(8))
-    let entry_size = 24;
-    let count = symtab_data.len() / entry_size;
+    // Parse symbol entries (shared ELF64 symbol decoder).
     let max = 8192;
     let mut n = 0usize;
 
-    for i in 0..count.min(max) {
-        let off = i * entry_size;
-        if off + entry_size > symtab_data.len() {
+    for symbol in Symbol::iter(symtab_data) {
+        if n == max {
             break;
         }
-        let st_name = u32::from_le_bytes([
-            symtab_data[off],
-            symtab_data[off + 1],
-            symtab_data[off + 2],
-            symtab_data[off + 3],
-        ]);
-        let st_value = u64::from_le_bytes([
-            symtab_data[off + 8],
-            symtab_data[off + 9],
-            symtab_data[off + 10],
-            symtab_data[off + 11],
-            symtab_data[off + 12],
-            symtab_data[off + 13],
-            symtab_data[off + 14],
-            symtab_data[off + 15],
-        ]);
-        let st_size = u64::from_le_bytes([
-            symtab_data[off + 16],
-            symtab_data[off + 17],
-            symtab_data[off + 18],
-            symtab_data[off + 19],
-            symtab_data[off + 20],
-            symtab_data[off + 21],
-            symtab_data[off + 22],
-            symtab_data[off + 23],
-        ]);
-
         // Skip undefined symbols (st_value == 0)
-        if st_value == 0 {
+        if symbol.value == 0 {
             continue;
         }
 
         unsafe {
             SYMBOLS[n] = KernelSymbol {
-                addr: st_value,
-                size: st_size,
-                name_offset: st_name,
+                addr: symbol.value,
+                size: symbol.size,
+                name_offset: symbol.name,
             };
         }
         n += 1;
@@ -145,12 +120,10 @@ pub fn init() {
     INITIALIZED.store(true, Ordering::Release);
 }
 
-/// Find a section's data by name in the ELF.
-fn find_section_data<'a>(elf: &xmas_elf::ElfFile<'a>, name: &str) -> &'a [u8] {
-    match elf.find_section_by_name(name) {
-        Some(section) => section.raw_data(elf),
-        None => &[],
-    }
+/// Find a section's data by name in the ELF image.
+fn section_data<'a>(header: &Header, file: &'a [u8], name: &str) -> Option<&'a [u8]> {
+    let section = header.find_section(file, name).ok().flatten()?;
+    section.data(file).ok()
 }
 
 /// Look up an address in the symbol table. Returns (name, offset_from_symbol).

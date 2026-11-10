@@ -21,5 +21,6 @@ publish = false
 
 [dependencies]
 strat9-abi = { path = "../abi" }
+strat9-elf-core = { path = "../elf-core" }
 
 [workspace]

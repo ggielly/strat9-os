@@ -28,6 +28,10 @@
 //! describe the guest-physical footprint of the image, the file-backed bytes
 //! and the zero-filled tail (BSS) of each segment.
 //!
+//! The generic ELF64 decoding is shared with the bootloader and the kernel
+//! userland loader (`strat9-elf-core`); this module only keeps the guest
+//! loading policy (footprint limits, relocation to guest-physical memory).
+//!
 //! This module is **pure**: it parses and validates the image bytes and
 //! computes the load plan (guest-physical span, per-segment page range,
 //! permissions) without allocating and without touching memory. The kernel
@@ -40,6 +44,8 @@
 //!
 //! Testable on the host (L2 tests).
 
+use strat9_elf_core::{ElfError, Header, ET_DYN, ET_EXEC, PF_R, PF_W, PF_X};
+
 /// Size of a base page (4 KiB); must match `s9vm::memmap::PAGE_SIZE`.
 pub const PAGE_SIZE: u64 = 4096;
 /// Maximum number of `PT_LOAD` segments in a guest image.
@@ -50,33 +56,6 @@ pub const MAX_PROGRAM_HEADERS: usize = 128;
 pub const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum guest-physical footprint of a loaded image (256 MiB).
 pub const MAX_LOAD_BYTES: u64 = 256 * 1024 * 1024;
-
-/// Size of the ELF64 header.
-const ELF_HEADER_SIZE: usize = 64;
-/// Size of one ELF64 program header.
-const PROGRAM_HEADER_SIZE: usize = 56;
-/// Program header type of a loadable segment.
-const PT_LOAD: u32 = 1;
-/// ELF type of a fixed-address executable.
-const ET_EXEC: u16 = 2;
-/// ELF type of a position-independent executable.
-const ET_DYN: u16 = 3;
-/// ELF machine of x86-64.
-const EM_X86_64: u16 = 62;
-/// ELF magic bytes.
-const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
-/// ELF class of 64-bit objects.
-const ELFCLASS64: u8 = 2;
-/// ELF data encoding of little-endian objects.
-const ELFDATA2LSB: u8 = 1;
-/// Current ELF version.
-const EV_CURRENT: u32 = 1;
-/// Segment flag: executable.
-const PF_X: u32 = 1;
-/// Segment flag: writable.
-const PF_W: u32 = 2;
-/// Segment flag: readable.
-const PF_R: u32 = 4;
 
 /// Kind of guest executable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,12 +81,15 @@ pub enum ImageError {
     BadIdentVersion,
     /// The header version is not 1.
     BadVersion,
-    /// `e_ehsize` is not [`ELF_HEADER_SIZE`] (64).
+    /// `e_ehsize` is not 64.
     BadHeaderSize,
-    /// `e_phentsize` is not [`PROGRAM_HEADER_SIZE`] (56).
+    /// `e_phentsize` is not 56.
     BadProgramHeaderSize,
     /// The program header table location is invalid.
     BadProgramHeaders,
+    /// The section header table is malformed (unused by the guest loader, but
+    /// rejected by the shared parser).
+    BadSectionHeaders,
     /// The program header table extends past the end of the file.
     TruncatedProgramHeaders,
     /// The program header count exceeds [`MAX_PROGRAM_HEADERS`].
@@ -255,63 +237,23 @@ impl<'a> Image<'a> {
     ///
     /// Never panics: every malformed input yields an [`ImageError`].
     pub fn parse(bytes: &'a [u8]) -> Result<Self, ImageError> {
-        if bytes.len() < ELF_HEADER_SIZE {
-            return Err(ImageError::TruncatedHeader);
-        }
-        if bytes[0..4] != ELF_MAGIC {
-            return Err(ImageError::BadMagic);
-        }
-        if bytes[4] != ELFCLASS64 {
-            return Err(ImageError::BadClass);
-        }
-        if bytes[5] != ELFDATA2LSB {
-            return Err(ImageError::BadEndianness);
-        }
-        if bytes[6] != EV_CURRENT as u8 {
-            return Err(ImageError::BadIdentVersion);
-        }
         if bytes.len() > MAX_IMAGE_BYTES {
             return Err(ImageError::ImageTooLarge);
         }
-        let kind = match get_u16(bytes, 0x10)? {
+        let header = Header::parse(bytes).map_err(map_elf_error)?;
+        let kind = match header.e_type {
             ET_EXEC => ImageKind::Exec,
             ET_DYN => ImageKind::Dynamic,
             _ => return Err(ImageError::UnsupportedType),
         };
-        if get_u16(bytes, 0x12)? != EM_X86_64 {
-            return Err(ImageError::UnsupportedMachine);
-        }
-        if get_u32(bytes, 0x14)? != EV_CURRENT {
-            return Err(ImageError::BadVersion);
-        }
-        if get_u16(bytes, 0x34)? as usize != ELF_HEADER_SIZE {
-            return Err(ImageError::BadHeaderSize);
-        }
-        if get_u16(bytes, 0x36)? as usize != PROGRAM_HEADER_SIZE {
-            return Err(ImageError::BadProgramHeaderSize);
-        }
-        let entry = get_u64(bytes, 0x18)?;
-        let phoff = get_u64(bytes, 0x20)?;
-        let phnum = get_u16(bytes, 0x38)? as usize;
+        let phnum = header.e_phnum as usize;
         if phnum == 0 {
             return Err(ImageError::NoLoadableSegments);
         }
         if phnum > MAX_PROGRAM_HEADERS {
             return Err(ImageError::TooManyProgramHeaders);
         }
-        let phoff = usize::try_from(phoff).map_err(|_| ImageError::BadProgramHeaders)?;
-        if phoff < ELF_HEADER_SIZE || phoff % 8 != 0 {
-            return Err(ImageError::BadProgramHeaders);
-        }
-        let table_len = phnum
-            .checked_mul(PROGRAM_HEADER_SIZE)
-            .ok_or(ImageError::TruncatedProgramHeaders)?;
-        let table_end = phoff
-            .checked_add(table_len)
-            .ok_or(ImageError::TruncatedProgramHeaders)?;
-        if table_end > bytes.len() {
-            return Err(ImageError::TruncatedProgramHeaders);
-        }
+        let entry = header.e_entry;
 
         let mut segments = [Segment::default(); MAX_SEGMENTS];
         let mut count = 0usize;
@@ -320,47 +262,26 @@ impl<'a> Image<'a> {
         let mut previous_vaddr: Option<u64> = None;
         let mut previous_page_end: Option<u64> = None;
 
-        for index in 0..phnum {
-            let offset = phoff + index * PROGRAM_HEADER_SIZE;
-            if get_u32(bytes, offset)? != PT_LOAD {
+        for phdr in header.program_headers(bytes) {
+            if !phdr.is_load() {
                 continue;
             }
-            let flags = get_u32(bytes, offset + 4)?;
-            let file_offset = get_u64(bytes, offset + 8)?;
-            let vaddr = get_u64(bytes, offset + 16)?;
-            let filesz = get_u64(bytes, offset + 32)?;
-            let memsz = get_u64(bytes, offset + 40)?;
-            let align = get_u64(bytes, offset + 48)?;
-
-            if memsz == 0 {
+            let Some(segment) = phdr.load_segment(bytes.len()).map_err(map_elf_error)? else {
                 return Err(ImageError::EmptySegment);
-            }
-            if filesz > memsz {
-                return Err(ImageError::FileSizeExceedsMemorySize);
-            }
-            let end = vaddr
-                .checked_add(memsz)
-                .ok_or(ImageError::SegmentOverflow)?;
-            let file_end = file_offset
-                .checked_add(filesz)
-                .ok_or(ImageError::SegmentOverflow)?;
-            if file_end > bytes.len() as u64 {
+            };
+            // The guest loader is stricter than the bootloader: even a pure BSS
+            // segment must have its nominal file offset inside the file.
+            if segment.filesz == 0 && segment.file_offset > bytes.len() as u64 {
                 return Err(ImageError::SegmentOutOfBounds);
             }
-            // ELF requires `p_vaddr % page == p_offset % page` for PT_LOAD.
-            if vaddr % PAGE_SIZE != file_offset % PAGE_SIZE {
-                return Err(ImageError::MisalignedSegment);
-            }
-            if align > 1 && !align.is_power_of_two() {
-                return Err(ImageError::BadSegmentAlignment);
-            }
-            let page_start = align_down(vaddr);
+            let page_start = align_down(segment.vaddr);
             if let Some(previous) = previous_vaddr {
-                if vaddr <= previous {
+                if segment.vaddr <= previous {
                     return Err(ImageError::UnorderedSegments);
                 }
             }
-            let page_end = align_up(end).ok_or(ImageError::SegmentOverflow)?;
+            let page_end =
+                align_up(segment.end_vaddr()).ok_or(ImageError::SegmentOverflow)?;
             if let Some(previous_end) = previous_page_end {
                 if page_start < previous_end {
                     return Err(ImageError::OverlappingSegments);
@@ -370,14 +291,14 @@ impl<'a> Image<'a> {
                 return Err(ImageError::TooManySegments);
             }
             segments[count] = Segment {
-                vaddr,
-                memsz,
-                filesz,
-                file_offset,
-                flags,
+                vaddr: segment.vaddr,
+                memsz: segment.memsz,
+                filesz: segment.filesz,
+                file_offset: segment.file_offset,
+                flags: segment.flags,
             };
             count += 1;
-            previous_vaddr = Some(vaddr);
+            previous_vaddr = Some(segment.vaddr);
             previous_page_end = Some(page_end);
             if base_vaddr.is_none() {
                 base_vaddr = Some(page_start);
@@ -495,6 +416,39 @@ impl<'a> Image<'a> {
     }
 }
 
+/// Maps a shared-parser error onto the guest image error space.
+fn map_elf_error(error: ElfError) -> ImageError {
+    match error {
+        ElfError::TruncatedHeader => ImageError::TruncatedHeader,
+        ElfError::BadMagic => ImageError::BadMagic,
+        ElfError::BadClass => ImageError::BadClass,
+        ElfError::BadEndianness => ImageError::BadEndianness,
+        ElfError::BadIdentVersion => ImageError::BadIdentVersion,
+        ElfError::BadVersion => ImageError::BadVersion,
+        ElfError::UnsupportedType => ImageError::UnsupportedType,
+        ElfError::UnsupportedMachine => ImageError::UnsupportedMachine,
+        ElfError::BadHeaderSize => ImageError::BadHeaderSize,
+        ElfError::BadProgramHeaderSize => ImageError::BadProgramHeaderSize,
+        ElfError::BadProgramHeaders => ImageError::BadProgramHeaders,
+        ElfError::TooManyProgramHeaders => ImageError::TooManyProgramHeaders,
+        ElfError::TruncatedProgramHeaders => ImageError::TruncatedProgramHeaders,
+        ElfError::EmptySegment => ImageError::EmptySegment,
+        ElfError::FileSizeExceedsMemorySize => ImageError::FileSizeExceedsMemorySize,
+        ElfError::SegmentOverflow => ImageError::SegmentOverflow,
+        ElfError::SegmentOutOfBounds => ImageError::SegmentOutOfBounds,
+        ElfError::MisalignedSegment => ImageError::MisalignedSegment,
+        ElfError::BadSegmentAlignment => ImageError::BadSegmentAlignment,
+        // Section headers are irrelevant to a guest image, but the shared
+        // parser still validates them when present.
+        ElfError::BadSectionHeaderSize
+        | ElfError::BadSectionHeaders
+        | ElfError::TruncatedSectionHeaders
+        | ElfError::BadSectionNameTable
+        | ElfError::BadSectionName
+        | ElfError::SectionOutOfBounds => ImageError::BadSectionHeaders,
+    }
+}
+
 /// Rounds `value` down to a 4 KiB boundary.
 const fn align_down(value: u64) -> u64 {
     value & !(PAGE_SIZE - 1)
@@ -505,30 +459,4 @@ fn align_up(value: u64) -> Option<u64> {
     value
         .checked_add(PAGE_SIZE - 1)
         .map(|rounded| align_down(rounded))
-}
-
-/// Reads a little-endian `u16` at `offset`.
-fn get_u16(bytes: &[u8], offset: usize) -> Result<u16, ImageError> {
-    let raw = bytes
-        .get(offset..offset + 2)
-        .ok_or(ImageError::TruncatedHeader)?;
-    Ok(u16::from_le_bytes([raw[0], raw[1]]))
-}
-
-/// Reads a little-endian `u32` at `offset`.
-fn get_u32(bytes: &[u8], offset: usize) -> Result<u32, ImageError> {
-    let raw = bytes
-        .get(offset..offset + 4)
-        .ok_or(ImageError::TruncatedHeader)?;
-    Ok(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
-}
-
-/// Reads a little-endian `u64` at `offset`.
-fn get_u64(bytes: &[u8], offset: usize) -> Result<u64, ImageError> {
-    let raw = bytes
-        .get(offset..offset + 8)
-        .ok_or(ImageError::TruncatedHeader)?;
-    Ok(u64::from_le_bytes([
-        raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
-    ]))
 }

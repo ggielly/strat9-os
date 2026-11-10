@@ -173,6 +173,8 @@ use strat9_abi::vmm::{
     VmmWorldStats, VMM_ABI_VERSION,
 };
 use strat9_syscall::{call, data::TimeSpec, error::Error, flag, number, CLOCK_MONOTONIC};
+use strat9_elf_core::build::ImageWriter;
+use strat9_elf_core::{ET_EXEC, PF_R, PF_W, PF_X};
 
 /// Clean PASS: the full policy cycle ran.
 const EXIT_PASS: usize = 0;
@@ -630,40 +632,9 @@ fn build_page_table_blob() -> &'static [u8] {
     &page_table_blob_buffer()[..PAGE_TABLE_BLOB_LEN]
 }
 
-/// Writes a little-endian `u16` at `offset`.
-fn put_u16(buffer: &mut [u8], offset: usize, value: u16) {
-    buffer[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
-}
-
-/// Writes a little-endian `u32` at `offset`.
-fn put_u32(buffer: &mut [u8], offset: usize, value: u32) {
-    buffer[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-}
-
 /// Writes a little-endian `u64` at `offset`.
 fn put_u64(buffer: &mut [u8], offset: usize, value: u64) {
     buffer[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-}
-
-/// Builds one `PT_LOAD` program header.
-fn put_program_header(
-    buffer: &mut [u8],
-    index: usize,
-    flags: u32,
-    file_offset: u64,
-    vaddr: u64,
-    file_size: u64,
-    mem_size: u64,
-) {
-    let base = 64 + index * 56;
-    put_u32(buffer, base, 1); // p_type = PT_LOAD
-    put_u32(buffer, base + 4, flags);
-    put_u64(buffer, base + 8, file_offset);
-    put_u64(buffer, base + 16, vaddr);
-    put_u64(buffer, base + 24, vaddr); // p_paddr
-    put_u64(buffer, base + 32, file_size);
-    put_u64(buffer, base + 40, mem_size);
-    put_u64(buffer, base + 48, 0x1000); // p_align
 }
 
 /// Builds the complete guest ELF image in the static buffer.
@@ -686,30 +657,28 @@ fn build_guest_image() -> &'static [u8] {
         *byte = 0;
     }
 
-    // ELF64 header.
-    image[0..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
-    image[4] = 2; // ELFCLASS64
-    image[5] = 1; // ELFDATA2LSB
-    image[6] = 1; // EV_CURRENT
-    put_u16(image, 0x10, 2); // e_type = ET_EXEC
-    put_u16(image, 0x12, 62); // e_machine = EM_X86_64
-    put_u32(image, 0x14, 1); // e_version
-    put_u64(image, 0x18, GUEST_ENTRY); // e_entry
-    put_u64(image, 0x20, 64); // e_phoff
-    put_u64(image, 0x28, 0); // e_shoff
-    put_u32(image, 0x30, 0); // e_flags
-    put_u16(image, 0x34, 64); // e_ehsize
-    put_u16(image, 0x36, 56); // e_phentsize
-    put_u16(image, 0x38, 2); // e_phnum
-    put_u16(image, 0x3A, 0); // e_shentsize
-    put_u16(image, 0x3C, 0); // e_shnum
-    put_u16(image, 0x3E, 0); // e_shstrndx
-
-    // Segment 1: page tables (file 0x1000 -> GPA 0x0000, 3 pages, RW).
-    put_program_header(image, 0, 0b110, 0x1000, 0x0000, 0x3000, 0x3000);
-    // Segment 2: code page + BSS stack page (file 0x4000 -> GPA 0x3000,
-    // 1 page file-backed, 2 pages of memory, RWX).
-    put_program_header(image, 1, 0b111, 0x4000, 0x3000, 0x1000, 0x2000);
+    // ELF64 file header and program header table (shared writer).
+    {
+        let mut builder = ImageWriter::new(&mut image[..], ET_EXEC, GUEST_ENTRY)
+            .expect("demo guest image: header fits");
+        // Segment 1: page tables (file 0x1000 -> GPA 0x0000, 3 pages, RW).
+        builder
+            .add_load(PF_R | PF_W, 0x1000, 0x0000, 0x3000, 0x3000, 0x1000)
+            .expect("demo guest image: page-table segment fits");
+        // Segment 2: code page + BSS stack page (file 0x4000 -> GPA 0x3000,
+        // 1 page file-backed, 2 pages of memory, RWX).
+        builder
+            .add_load(
+                PF_R | PF_W | PF_X,
+                0x4000,
+                0x3000,
+                0x1000,
+                0x2000,
+                0x1000,
+            )
+            .expect("demo guest image: code segment fits");
+        let _ = builder.finish();
+    }
 
     // Identity page tables: PML4[0] -> PDPT, PDPT[0] -> PD, PD[0] -> 2 MiB page.
     let table = 0x1000usize;

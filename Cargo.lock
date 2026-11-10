@@ -788,6 +788,7 @@ name = "s9vm-vmm"
 version = "0.1.0"
 dependencies = [
  "strat9-abi",
+ "strat9-elf-core",
  "strat9-syscall",
 ]
 
@@ -915,6 +916,7 @@ version = "0.1.0"
 dependencies = [
  "log",
  "strat9-abi",
+ "strat9-elf-core",
  "uefi",
  "x86_64",
 ]
@@ -935,6 +937,10 @@ version = "0.1.0"
 dependencies = [
  "strate-fs-abstraction",
 ]
+
+[[package]]
+name = "strat9-elf-core"
+version = "0.1.0"
 
 [[package]]
 name = "strat9-kernel"
@@ -964,10 +970,10 @@ dependencies = [
  "spin 0.10.1",
  "static_assertions",
  "strat9-abi",
+ "strat9-elf-core",
  "thiserror",
  "uart_16550",
  "x86_64",
- "xmas-elf",
  "zerocopy",
 ]
 
@@ -1393,21 +1399,6 @@ dependencies = [
  "rustversion",
  "volatile",
 ]
-
-[[package]]
-name = "xmas-elf"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18245fcbb8b3de8dd198ce7944fdd4096986fd6cd306b0fcfa27df817bd545d6"
-dependencies = [
- "zero",
-]
-
-[[package]]
-name = "zero"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2fe21bcc34ca7fe6dd56cc2cb1261ea59d6b93620215aefb5ea6032265527784"
 
 [[package]]
 name = "zerocopy"

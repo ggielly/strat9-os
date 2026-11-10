@@ -22,6 +22,8 @@ log = "0.4"
 
 # Re-use the ABI definitions from the kernel
 strat9-abi = { workspace = true }
+# Shared ELF64 parser (same implementation as the kernel loaders)
+strat9-elf-core = { workspace = true }
 
 [features]
 default = []

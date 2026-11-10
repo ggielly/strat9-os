@@ -72,9 +72,12 @@
 //! not expect is logged with its decoded reason so a failure is diagnosable on
 //! the target machine without rebuilding.
 
+use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use strat9_abi::vmm::{exit_kind, VmmRegs, VMM_ABI_VERSION};
+use strat9_elf_core::build::ImageWriter;
+use strat9_elf_core::{ET_EXEC, PF_R, PF_X};
 
 use crate::{
     memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame},
@@ -314,10 +317,6 @@ const LOADER_STACK_TOP: u64 = LOADER_GPA_STACK + 0x800;
 const LOADER_GUEST_PERMS: u32 = 7;
 /// Offset of the guest code inside the generated image.
 const LOADER_CODE_OFFSET: u64 = 0x100;
-/// Size of an ELF64 header.
-const ELF_HEADER_SIZE: usize = 64;
-/// Size of one ELF64 program header.
-const ELF_PROGRAM_HEADER_SIZE: usize = 56;
 
 // ACPI-discovery phase.
 //
@@ -1775,34 +1774,29 @@ fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
 /// the page (BSS).
 fn loader_image() -> Vec<u8> {
     let page_size = crate::s9vm::mmu::PAGE_SIZE;
-    let mut image = Vec::new();
-    image.resize(ELF_HEADER_SIZE + ELF_PROGRAM_HEADER_SIZE, 0);
-    image.resize(LOADER_CODE_OFFSET as usize, 0);
+    let code_offset = LOADER_CODE_OFFSET as usize;
+    // Payload: zero padding up to the code page offset, then the code bytes.
+    let mut image = vec![0u8; code_offset];
     image.extend_from_slice(LOADER_CODE);
     let file_size = image.len() as u64;
 
-    image[0..4].copy_from_slice(b"\x7fELF");
-    image[4] = 2; // ELFCLASS64
-    image[5] = 1; // ELFDATA2LSB
-    image[6] = 1; // EV_CURRENT
-    put_u16(&mut image, 0x10, 2); // e_type = ET_EXEC
-    put_u16(&mut image, 0x12, 62); // e_machine = EM_X86_64
-    put_u32(&mut image, 0x14, 1); // e_version = EV_CURRENT
-    put_u64(&mut image, 0x18, LOADER_IMAGE_BASE + LOADER_CODE_OFFSET); // e_entry
-    put_u64(&mut image, 0x20, ELF_HEADER_SIZE as u64); // e_phoff
-    put_u16(&mut image, 0x34, ELF_HEADER_SIZE as u16); // e_ehsize
-    put_u16(&mut image, 0x36, ELF_PROGRAM_HEADER_SIZE as u16); // e_phentsize
-    put_u16(&mut image, 0x38, 1); // e_phnum
-
-    let phdr = ELF_HEADER_SIZE;
-    put_u32(&mut image, phdr, 1); // p_type = PT_LOAD
-    put_u32(&mut image, phdr + 4, 5); // p_flags = PF_R | PF_X
-    put_u64(&mut image, phdr + 8, 0); // p_offset
-    put_u64(&mut image, phdr + 16, LOADER_IMAGE_BASE); // p_vaddr
-    put_u64(&mut image, phdr + 24, LOADER_IMAGE_BASE); // p_paddr
-    put_u64(&mut image, phdr + 32, file_size); // p_filesz
-    put_u64(&mut image, phdr + 40, page_size); // p_memsz (one page, BSS tail)
-    put_u64(&mut image, phdr + 48, page_size); // p_align
+    // File header and program header table, written by the shared builder.
+    {
+        let mut builder =
+            ImageWriter::new(&mut image, ET_EXEC, LOADER_IMAGE_BASE + LOADER_CODE_OFFSET)
+                .expect("static loader image: header fits");
+        builder
+            .add_load(
+                PF_R | PF_X,
+                0,
+                LOADER_IMAGE_BASE,
+                file_size,
+                page_size,
+                page_size,
+            )
+            .expect("static loader image: program header fits");
+        let _ = builder.finish();
+    }
     image
 }
 

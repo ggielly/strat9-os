@@ -1,0 +1,12 @@
+[package]
+name = "strat9-elf-core"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+description = "Shared pure ELF64/x86-64 parsing layer for strat9-os"
+
+[dependencies]
+
+[lints]
+workspace = true

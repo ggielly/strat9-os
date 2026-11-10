@@ -18,6 +18,7 @@ doctest = false
 
 [dependencies]
 strat9-abi = { path = "../abi" }
+strat9-elf-core = { path = "../elf-core" }
 strat9-syscall = { path = "../components/syscall" }
 crossbeam-queue = { version = "0.3.12", default-features = false, features = ["alloc"] }
 num_enum = { version = "0.7", default-features = false }

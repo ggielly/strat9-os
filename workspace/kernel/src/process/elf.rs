@@ -72,20 +72,18 @@ macro_rules! elf_trace {
 }
 
 // ---------------------------------------------------------------------------
-// ELF64 constants (relocation & dynamic tags : not covered by xmas-elf)
+// ELF64 file format
+//
+// Generic decoding is shared with the bootloader and the `s9vm` guest loader
+// (`strat9-elf-core`); this module only adds the userland loading policy.
+// Relocation and dynamic tags below are not covered by the shared layer.
 // ---------------------------------------------------------------------------
 
-const ET_EXEC: u16 = 2;
-const ET_DYN: u16 = 3;
-const PT_LOAD: u32 = 1;
-const PT_DYNAMIC: u32 = 2;
-const PT_INTERP: u32 = 3;
-const PT_TLS: u32 = 7;
-const PT_GNU_STACK: u32 = 0x6474_e551;
-const PT_GNU_RELRO: u32 = 0x6474_e552;
-const PF_X: u32 = 1;
-const PF_W: u32 = 2;
-const PF_R: u32 = 4;
+use strat9_elf_core::{
+    ElfError, Header, ProgramHeader, ET_DYN, ET_EXEC, PF_R, PF_W, PF_X, PT_DYNAMIC, PT_GNU_RELRO,
+    PT_GNU_STACK, PT_INTERP, PT_LOAD, PT_TLS, PROGRAM_HEADER_SIZE,
+};
+
 const DT_NULL: i64 = 0;
 const DT_RELA: i64 = 7;
 const DT_RELASZ: i64 = 8;
@@ -175,29 +173,11 @@ pub struct LoadedElfInfo {
 // ELF64 structures for kernel-internal use
 // ---------------------------------------------------------------------------
 
-/// Parsed ELF64 file header (copy-friendly, no borrows).
-#[derive(Debug, Clone, Copy)]
-struct Elf64Header {
-    e_type: u16,
-    e_entry: u64,
-    e_phoff: u64,
-    e_phentsize: u16,
-    e_phnum: u16,
-}
+/// Parsed ELF64 file header (shared, copy-friendly representation).
+type Elf64Header = Header;
 
-/// Parsed ELF64 program header (copy-friendly, packed for raw byte reading).
-#[repr(C, packed)]
-#[derive(Debug, Clone, Copy)]
-struct Elf64Phdr {
-    p_type: u32,
-    p_flags: u32,
-    p_offset: u64,
-    p_vaddr: u64,
-    p_paddr: u64,
-    p_filesz: u64,
-    p_memsz: u64,
-    p_align: u64,
-}
+/// Parsed ELF64 program header (shared, copy-friendly representation).
+type Elf64Phdr = ProgramHeader;
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
@@ -226,97 +206,26 @@ struct Elf64Sym {
 }
 
 // ---------------------------------------------------------------------------
-// Parsing (uses xmas-elf for header validation)
+// Parsing
 // ---------------------------------------------------------------------------
 
 /// Parse and validate the ELF64 file header from raw bytes.
 ///
-/// Uses `xmas-elf` for magic/class/machine/version validation, then copies
-/// the fields we need into a local `Copy` struct.
+/// The generic format validation (magic, class, endianness, machine, type,
+/// entry sizes, program header table bounds) is performed by the shared
+/// [`strat9_elf_core`] parser; this wrapper adds the userland policies: the
+/// entry point must be inside the user address range.
 fn parse_header(data: &[u8]) -> Result<Elf64Header, &'static str> {
-    let elf = xmas_elf::ElfFile::new(data).map_err(|e| {
-        log::error!("[elf] xmas_elf::ElfFile::new failed: {:?}", e);
-        "Invalid ELF header"
+    let header = Header::parse(data).map_err(|error| {
+        log::error!("[elf] Rejecting binary: {}", error);
+        error.message()
     })?;
-
-    let hdr = elf.header.pt2;
-
-    // Reject non-x86_64 binaries early.
-    let machine = hdr.machine().as_machine();
-    if machine != xmas_elf::header::Machine::X86_64 {
-        log::error!(
-            "[elf] Rejecting binary: machine={:?} (expected X86_64)",
-            machine
-        );
-        return Err("Not an x86_64 ELF binary");
-    }
-
-    // Type: executable or shared object (PIE/static PIE)
-    let e_type = hdr.type_().0;
-    if e_type != ET_EXEC && e_type != ET_DYN {
-        log::error!(
-            "[elf] Rejecting binary: e_type={} (expected ET_EXEC={} or ET_DYN={})",
-            e_type,
-            ET_EXEC,
-            ET_DYN
-        );
-        return Err("Unsupported ELF type (expected ET_EXEC or ET_DYN)");
-    }
-
-    let e_entry = hdr.entry_point();
     // Entry point must be canonical user space (for ET_DYN this is relative and
     // validated again after relocation). ET_EXEC with e_entry=0 is handled later.
-    if e_entry >= USER_ADDR_MAX {
+    if header.e_entry >= USER_ADDR_MAX {
         return Err("Entry point outside user address range");
     }
-
-    let e_phentsize = hdr.ph_entry_size();
-    let e_phoff = hdr.ph_offset();
-    let e_phnum = hdr.ph_count();
-
-    // Sanity check program headers.
-    // Compare against our packed Elf64Phdr (56 bytes = standard ELF64), not
-    // xmas_elf::ProgramHeader which may have padding due to #[repr(C)].
-    if e_phentsize as usize != core::mem::size_of::<Elf64Phdr>() {
-        log::error!(
-            "[elf] Rejecting binary: e_phentsize={} expected={}",
-            e_phentsize,
-            core::mem::size_of::<Elf64Phdr>()
-        );
-        return Err("Unexpected phentsize");
-    }
-
-    let ph_end = (e_phoff as usize)
-        .checked_add((e_phnum as usize) * (e_phentsize as usize))
-        .ok_or("Program header table overflows")?;
-    if ph_end > data.len() {
-        return Err("Program headers extend past file");
-    }
-
-    Ok(Elf64Header {
-        e_type,
-        e_entry,
-        e_phoff,
-        e_phentsize,
-        e_phnum,
-    })
-}
-
-/// Iterate over program headers in the ELF.
-fn program_headers<'a>(
-    data: &'a [u8],
-    header: &Elf64Header,
-) -> impl Iterator<Item = Elf64Phdr> + 'a {
-    let phoff = header.e_phoff as usize;
-    let phsize = header.e_phentsize as usize;
-    let phnum = header.e_phnum as usize;
-
-    (0..phnum).map(move |i| {
-        let offset = phoff + i * phsize;
-        // SAFETY: parse_header already validated that all program headers fit
-        // within `data`, and Elf64Phdr is packed (align 1).
-        unsafe { core::ptr::read_unaligned(data.as_ptr().add(offset) as *const Elf64Phdr) }
-    })
+    Ok(header)
 }
 
 /// Collects an exact-size-hint iterator into a `Vec`, failing cleanly on
@@ -2073,7 +1982,7 @@ fn load_interpreter(user_as: &AddressSpace, path: &str) -> Result<InterpreterIma
     let interp_data = read_elf_from_vfs(path)?;
     let interp_header = parse_header(&interp_data)?;
     let interp_phdrs: Vec<Elf64Phdr> =
-        try_collect_exact(program_headers(&interp_data, &interp_header))?;
+        try_collect_exact(interp_header.program_headers(&interp_data))?;
     if parse_interp_path(&interp_data, &interp_phdrs)?.is_some() {
         return Err("Nested PT_INTERP is not supported");
     }
@@ -2466,7 +2375,7 @@ fn load_elf_task_inner(
     }
     log::trace!("[trace][elf] load_elf_task user_as done");
 
-    let phdrs: Vec<Elf64Phdr> = try_collect_exact(program_headers(elf_data, &header))?;
+    let phdrs: Vec<Elf64Phdr> = try_collect_exact(header.program_headers(elf_data))?;
     let interp_path = parse_interp_path(elf_data, &phdrs)?;
     let (load_bias, entry) = compute_load_bias_and_entry(&user_as, &header, &phdrs)?;
     let phdr_vaddr = find_relocated_phdr_vaddr(&header, &phdrs, load_bias)?;
@@ -2577,7 +2486,7 @@ pub fn load_elf_image(
             return Err(e);
         }
     };
-    let phdrs: Vec<Elf64Phdr> = try_collect_exact(program_headers(elf_data, &header))?;
+    let phdrs: Vec<Elf64Phdr> = try_collect_exact(header.program_headers(elf_data))?;
     let interp_path = parse_interp_path(elf_data, &phdrs)?;
     let (load_bias, entry) = compute_load_bias_and_entry(user_as, &header, &phdrs)?;
     let phdr_vaddr = find_relocated_phdr_vaddr(&header, &phdrs, load_bias)?;
