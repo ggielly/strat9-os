@@ -1,5 +1,6 @@
+# =============================================================================
 # Strat9 OS Wi-Fi configuration for the Intel AX201 (CNVi) driver.
-#
+# =============================================================================
 # The file is embedded at /initfs/wifi.toml by tools/scripts/create-uefi-image.sh.
 # Set `enabled = true` once the values below match your access point.
 #
