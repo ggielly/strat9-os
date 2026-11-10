@@ -55,6 +55,7 @@ use crate::{
         emulate::{interrupt_action, InterruptAction},
         exit::{reason_name, ExitClass, ExitReason},
         guest::GuestState,
+        guestcode::{LOADER_CODE, LOADER_MARKER},
         machine::Machine,
         virtio,
         virtio_blk,
@@ -278,8 +279,6 @@ const LOADER_IMAGE_BASE: u64 = 0x1_0000;
 const LOADER_GPA_STACK: u64 = 0x2_0000;
 /// Initial guest stack pointer (inside the stack page).
 const LOADER_STACK_TOP: u64 = LOADER_GPA_STACK + 0x800;
-/// Byte written by the loaded guest on the debug port.
-const LOADER_MARKER: u8 = b'L';
 /// Guest memory permissions of the loader phase (read | write | execute).
 const LOADER_GUEST_PERMS: u32 = 7;
 /// Offset of the guest code inside the generated image.
@@ -288,9 +287,6 @@ const LOADER_CODE_OFFSET: u64 = 0x100;
 const ELF_HEADER_SIZE: usize = 64;
 /// Size of one ELF64 program header.
 const ELF_PROGRAM_HEADER_SIZE: usize = 56;
-/// Guest code of the loader phase: `mov al, 'L'`, `mov dx, 0xE9`,
-/// `out dx, al`, `hlt`.
-const LOADER_GUEST_CODE: &[u8] = &[0xB0, LOADER_MARKER, 0xBA, 0xE9, 0x00, 0xEE, 0xF4];
 
 /// Flat 64-bit code descriptor (selector `0x08`).
 ///
@@ -1555,7 +1551,7 @@ fn loader_image() -> Vec<u8> {
     let mut image = Vec::new();
     image.resize(ELF_HEADER_SIZE + ELF_PROGRAM_HEADER_SIZE, 0);
     image.resize(LOADER_CODE_OFFSET as usize, 0);
-    image.extend_from_slice(LOADER_GUEST_CODE);
+    image.extend_from_slice(LOADER_CODE);
     let file_size = image.len() as u64;
 
     image[0..4].copy_from_slice(b"\x7fELF");
@@ -1682,7 +1678,7 @@ fn run_loader_in_world(caps: &HwCaps, world_id: u64) -> Result<LoaderReport, Sel
     }
     // The copy and the zero-fill are observable through the world translation:
     // first opcode of the guest code, then one byte of the BSS tail.
-    if read_world_byte(world_id, loaded.entry)? != LOADER_GUEST_CODE[0] {
+    if read_world_byte(world_id, loaded.entry)? != LOADER_CODE[0] {
         return Err(SelftestError::BadExit("image data was not copied"));
     }
     if read_world_byte(world_id, LOADER_IMAGE_BASE + 0x800)? != 0 {
@@ -1746,13 +1742,19 @@ fn run_loader_in_world(caps: &HwCaps, world_id: u64) -> Result<LoaderReport, Sel
             ExitClass::ExternalInterrupt | ExitClass::InterruptWindow => {}
             ExitClass::PreemptionTimer => {}
             other => {
+                // Report enough context to tell a bad guest payload from a
+                // bad page table: how far the guest got (marker, I/O count) and
+                // where it faulted.
                 log::warn!(
                     "[s9vm] loader test: unexpected exit class={:?} reason={:#x} \
-                     qual={:#x} rip={:#x}",
+                     qual={:#x} rip={:#x} marker={:?} io={} total={}",
                     other,
                     exit.raw_reason,
                     exit.qualification,
-                    vcpu.guest().rip
+                    vcpu.guest().rip,
+                    report.marker,
+                    report.io_exits,
+                    report.total_exits
                 );
                 outcome = Err(SelftestError::BadExit("unexpected loader-test exit"));
                 break;

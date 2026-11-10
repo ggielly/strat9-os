@@ -58,6 +58,7 @@ pub mod emulate;
 pub mod exit;
 pub mod exitqueue;
 pub mod guest;
+pub mod guestcode;
 pub mod image;
 pub mod ioapic;
 pub mod launch;
