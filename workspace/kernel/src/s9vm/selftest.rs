@@ -102,8 +102,8 @@ const GPA_QUEUES: u64 = 0x6000;
 const GPA_CONSOLE_BUFFER: u64 = 0x7000;
 /// Bytes the guest sends to the console.
 const CONSOLE_TEXT: &[u8] = b"ok\n";
-/// Marker written to the debug port after the console notification.
-const CONSOLE_MARKER: u8 = b'C';
+/// Byte queued by the kernel and delivered through the receive queue.
+const CONSOLE_RX_BYTE: u8 = b'R';
 
 const CONSOLE_GPA_PML4: u64 = 0x0000;
 const CONSOLE_GPA_PDPT: u64 = 0x1000;
@@ -127,7 +127,7 @@ const CONSOLE_PD_MMIO_INDEX: usize = 0x1F5;
 const CONSOLE_GUEST_CODE: &[u8] = &[
     0xB8, 0x70, 0x00, 0xB0, 0xFE, // mov eax, CONSOLE_MMIO_BASE + 0x70 (STATUS)
     0xB9, 0x0F, 0x00, 0x00, 0x00, // mov ecx, ACK | DRIVER | FEATURES_OK | DRIVER_OK
-    0x89, 0x08, // mov [rax], ecx
+    0x89, 0x08, //
     0xB8, 0x30, 0x00, 0xB0, 0xFE, // mov eax, QUEUE_SEL
     0xB9, 0x01, 0x00, 0x00, 0x00, // mov ecx, 1 (transmit queue)
     0x89, 0x08, //
@@ -149,7 +149,30 @@ const CONSOLE_GUEST_CODE: &[u8] = &[
     0xB8, 0x50, 0x00, 0xB0, 0xFE, // mov eax, QUEUE_NOTIFY
     0xB9, 0x01, 0x00, 0x00, 0x00, // mov ecx, 1 (transmit queue)
     0x89, 0x08, //
-    0xB0, CONSOLE_MARKER, // mov al, marker
+    // Receive queue: separate tables in the queue page and a buffer at
+    // 0x7400. Its notification delivers the byte queued by the kernel.
+    0xB8, 0x30, 0x00, 0xB0, 0xFE, // mov eax, QUEUE_SEL
+    0xB9, 0x00, 0x00, 0x00, 0x00, // mov ecx, 0 (receive queue)
+    0x89, 0x08, //
+    0xB8, 0x38, 0x00, 0xB0, 0xFE, // mov eax, QUEUE_NUM
+    0xB9, 0x08, 0x00, 0x00, 0x00, // mov ecx, 8
+    0x89, 0x08, //
+    0xB8, 0x80, 0x00, 0xB0, 0xFE, // mov eax, QUEUE_DESC_LOW
+    0xB9, 0x00, 0x64, 0x00, 0x00, // mov ecx, GPA_QUEUES + 0x400
+    0x89, 0x08, //
+    0xB8, 0x90, 0x00, 0xB0, 0xFE, // mov eax, QUEUE_AVAIL_LOW
+    0xB9, 0x00, 0x65, 0x00, 0x00, // mov ecx, GPA_QUEUES + 0x500
+    0x89, 0x08, //
+    0xB8, 0xA0, 0x00, 0xB0, 0xFE, // mov eax, QUEUE_USED_LOW
+    0xB9, 0x00, 0x66, 0x00, 0x00, // mov ecx, GPA_QUEUES + 0x600
+    0x89, 0x08, //
+    0xB8, 0x44, 0x00, 0xB0, 0xFE, // mov eax, QUEUE_READY
+    0xB9, 0x01, 0x00, 0x00, 0x00, // mov ecx, 1
+    0x89, 0x08, //
+    0xB8, 0x50, 0x00, 0xB0, 0xFE, // mov eax, QUEUE_NOTIFY
+    0xB9, 0x00, 0x00, 0x00, 0x00, // mov ecx, 0 (receive queue)
+    0x89, 0x08, //
+    0x8A, 0x04, 0x25, 0x00, 0x74, 0x00, 0x00, // mov al, byte [0x7400]
     0xE6, 0xE9, // out 0xE9, al
     0xF4, // hlt
 ];
@@ -309,6 +332,17 @@ fn write_u64(frame: &PhysFrame, offset: usize, value: u64) {
     // SAFETY: the frame is 4 KiB and `offset` is a valid offset.
     unsafe {
         core::ptr::write_volatile(base.add(offset) as *mut u64, value);
+    }
+}
+
+/// Writes bytes at `offset` inside a frame through the HHDM.
+fn write_bytes_at(frame: &PhysFrame, offset: usize, bytes: &[u8]) {
+    let base = crate::memory::phys_to_virt(frame.start_address.as_u64()) as *mut u8;
+    // SAFETY: the frame is 4 KiB and `offset + bytes.len()` stays inside it.
+    unsafe {
+        for (index, byte) in bytes.iter().enumerate() {
+            core::ptr::write_volatile(base.add(offset + index), *byte);
+        }
     }
 }
 
@@ -829,12 +863,14 @@ pub struct ConsoleReport {
 
 /// Console transport test.
 ///
-/// The kernel prepares a transmit queue in guest memory (descriptor, available
-/// ring, buffer), the guest programs the virtio-mmio transport page and
-/// notifies the transmit queue, and the kernel device model must collect the
-/// buffer. This validates the whole EMUlATION path for a device page: EPT
+/// The kernel prepares a transmit queue (descriptor, available ring, buffer)
+/// **and** a receive queue in guest memory, and queues one input byte. The
+/// guest programs the transport page, notifies the transmit queue (the device
+/// must collect the buffer) and then the receive queue (the device must write
+/// the queued byte into the guest buffer). The guest reports that byte on the
+/// debug port. This validates both directions of the transport: EPT
 /// violation, instruction replay, register file, split-queue access to guest
-/// memory, and the output routing.
+/// memory, and the input/output routing.
 pub fn run_console(caps: &HwCaps) -> Result<ConsoleReport, SelftestError> {
     if !caps.can_run() {
         return Err(SelftestError::BadExit("platform cannot run"));
@@ -881,8 +917,20 @@ pub fn run_console(caps: &HwCaps) -> Result<ConsoleReport, SelftestError> {
         bytes
     };
     write_bytes(&queues, &descriptor);
-    // flags = 0, idx = 1, ring[0] = 0.
+    // flags = 0, idx = 1, ring[0] = 0 (transmit).
     write_u64(&queues, 0x100, 1 << 16);
+
+    // Receive queue: descriptor 0 at +0x400 points to the buffer at +0x7400
+    // and is device-writable; available ring at +0x500 publishes it.
+    let receive = [0u8; 16];
+    let mut receive = receive;
+    receive[..8].copy_from_slice(&(GPA_CONSOLE_BUFFER + 0x400).to_le_bytes());
+    receive[8..12].copy_from_slice(&16u32.to_le_bytes());
+    receive[12..14].copy_from_slice(&virtio::DESC_F_WRITE.to_le_bytes());
+    write_bytes(&queues, &[]);
+    write_bytes_at(&queues, 0x400, &receive);
+    write_u64(&queues, 0x500, 1 << 16);
+
     write_bytes(&buffer, CONSOLE_TEXT);
 
     let mut second_level = SecondLevelMemory::new().map_err(|_| SelftestError::Mmu)?;
@@ -923,6 +971,8 @@ pub fn run_console(caps: &HwCaps) -> Result<ConsoleReport, SelftestError> {
     }
 
     let mut machine = Machine::new();
+    // One byte is waiting in the console input queue before the guest starts.
+    machine.devices_mut().console.push_input(&[CONSOLE_RX_BYTE]);
     let mut apic = LocalApic::new(0);
     let mut report = ConsoleReport {
         total_exits: 0,
@@ -1005,7 +1055,7 @@ pub fn run_console(caps: &HwCaps) -> Result<ConsoleReport, SelftestError> {
     match outcome {
         Ok(())
             if report.halt_exits >= 1
-                && report.marker == Some(CONSOLE_MARKER)
+                && report.marker == Some(CONSOLE_RX_BYTE)
                 && report.output == CONSOLE_TEXT =>
         {
             Ok(report)
