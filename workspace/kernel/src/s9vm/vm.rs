@@ -1253,6 +1253,15 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                 let run_result = hardware.run();
                 let exit_tsc = core::arch::x86_64::_rdtsc();
                 let exit_cycles = exit_tsc.saturating_sub(entry_tsc);
+                // Advances the emulated local APIC timer by the time the guest
+                // spent running (one-shot/periodic) and publishes the current
+                // time stamp for the TSC-deadline mode. An expiry raises the
+                // LVT vector in the APIC; the injection loop below (and at the
+                // next iteration) delivers it through the interrupt-window
+                // path. The guest TSC offset is zero, so host time stamps are
+                // the guest's.
+                apic.advance(exit_cycles);
+                apic.set_tsc(exit_tsc);
                 match run_result {
                     Ok(exit) => {
                         let class = exit.class();
@@ -1261,7 +1270,10 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                         // the exit and policy is not involved.
                         if matches!(
                             class,
-                            ExitClass::IoPort | ExitClass::Msr | ExitClass::EptViolation
+                            ExitClass::IoPort
+                                | ExitClass::Msr
+                                | ExitClass::EptViolation
+                                | ExitClass::Cpuid
                         ) {
                             // Replay latency: handler cost only, without the
                             // guest time contained in `exit_cycles`.
@@ -2251,6 +2263,30 @@ pub fn vcpu_count(world_id: u64) -> Option<u32> {
         .lock()
         .get(&world_id)
         .map(|world| world.vcpus.len() as u32)
+}
+
+/// Sets the guest CPU description (CPUID policy) of a world.
+///
+/// The policy belongs to the world, not to a vCPU: the device model and the
+/// CPUID replay live in the world's `Machine`, so every vCPU of the world
+/// observes the same CPU. Returns `false` when the world does not exist.
+pub fn set_cpuid_policy(world_id: u64, policy: crate::s9vm::cpuid::CpuidPolicy) -> bool {
+    let mut worlds = WORLDS.lock();
+    match worlds.get_mut(&world_id) {
+        Some(world) => {
+            world.machine.set_cpuid_policy(policy);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Current guest CPU description (CPUID policy) of a world.
+pub fn cpuid_policy(world_id: u64) -> Option<crate::s9vm::cpuid::CpuidPolicy> {
+    WORLDS
+        .lock()
+        .get(&world_id)
+        .map(|world| world.machine.cpuid_policy())
 }
 
 /// Diagnostic detail for a world: mapped pages and translation of a GPA.

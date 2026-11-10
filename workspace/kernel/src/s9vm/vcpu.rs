@@ -312,6 +312,34 @@ pub mod msr_bitmap {
     pub const X2APIC_FIRST: u32 = 0x800;
     /// Last intercepted MSR (x2APIC window).
     pub const X2APIC_LAST: u32 = 0x8FF;
+    /// `IA32_TSC_DEADLINE`: the local APIC TSC-deadline timer register.
+    ///
+    /// It lives outside the x2APIC MSR window, so it must be intercepted
+    /// explicitly: otherwise the hardware consumes the write and the emulated
+    /// local APIC never sees the deadline.
+    pub const TSC_DEADLINE: u32 = 0x6E0;
+}
+
+/// Marks one MSR as intercepted (read and write) in the bitmap.
+fn set_msr_intercept(base: *mut u8, msr: u32, intercept_read: bool, intercept_write: bool) {
+    let index = msr as usize;
+    // Both bitmaps only cover the low 0x0000..0x1FFF range; the high range
+    // (0xC000_0000..) contains no intercepted MSR yet.
+    if index >= 0x2000 {
+        return;
+    }
+    let byte = index / 8;
+    let bit = 1u8 << (index % 8);
+    // SAFETY: `base` points to the 4 KiB bitmap owned by this vCPU and both
+    // offsets stay inside it (`index < 0x2000`).
+    unsafe {
+        if intercept_read {
+            *base.add(msr_bitmap::READ_LOW + byte) |= bit;
+        }
+        if intercept_write {
+            *base.add(msr_bitmap::WRITE_LOW + byte) |= bit;
+        }
+    }
 }
 
 /// Allocates the MSR bitmap of a vCPU and intercepts the x2APIC MSR window on
@@ -331,11 +359,10 @@ fn alloc_msr_bitmap() -> Option<PhysFrame> {
     unsafe {
         core::ptr::write_bytes(base, 0, msr_bitmap::BYTES);
         for msr in msr_bitmap::X2APIC_FIRST..=msr_bitmap::X2APIC_LAST {
-            let byte = (msr / 8) as usize;
-            let bit = 1u8 << (msr % 8);
-            *base.add(msr_bitmap::READ_LOW + byte) |= bit;
-            *base.add(msr_bitmap::WRITE_LOW + byte) |= bit;
+            set_msr_intercept(base, msr, true, true);
         }
+        // The TSC-deadline timer register is outside the x2APIC window.
+        set_msr_intercept(base, msr_bitmap::TSC_DEADLINE, true, true);
     }
     Some(frame)
 }
