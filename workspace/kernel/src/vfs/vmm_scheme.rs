@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! `/dev/vmm`: read-only user view of the s9vm engine.
+//! `/dev/vmm`: read-mostly user view of the s9vm engine.
 //!
 //! This scheme is the diagnostic mirror of the virtualization engine's
 //! internal state. It exposes **no control operation**: the creation,
@@ -31,14 +31,42 @@
 //!
 //! ```text
 //! /dev/vmm/
-//!   info           engine summary (snapshot taken at open)
-//!   worlds         list of worlds, one line per world
-//!   <id>/info      snapshot of a world
+//!   info               engine summary (snapshot taken at open)
+//!   worlds             list of worlds, one line per world
+//!   <id>/              directory: info, stats, exits, console
+//!   <id>/info          snapshot of a world
+//!   <id>/stats         snapshot of every world counter (pause, vCPUs, queue)
+//!   <id>/exits         exit-queue snapshot (pending count, never consumed)
+//!   <id>/console       console stream (read drains output, write queues input)
 //! ```
 //!
-//! Each file is a **snapshot** taken at open: reading is finite (EOF at the
-//! end) and never blocks. Opening the file again produces a new
-//! snapshot.
+//! # Read semantics
+//!
+//! Every file except `<id>/console` is a **snapshot** taken at open: reading
+//! is finite (EOF at the end) and never blocks. Opening the file again
+//! produces a new snapshot, which is also true for `<id>/stats` and
+//! `<id>/exits`: they report the counters and the queue depth observed at
+//! open time.
+//!
+//! `<id>/console` is a **stream**, not a snapshot. Each `read` drains the
+//! output the guest has produced since the previous read; a read that finds
+//! the buffer empty returns 0 (end of stream for that read, not a permanent
+//! end of file) and a later read can return data again. Opening the file does
+//! not reset or discard pending output. A `write` queues guest console input
+//! and returns the number of bytes accepted by the engine's bounded input
+//! queue, which may be smaller than the request; if the queue is full and
+//! nothing can be accepted, the write reports `EAGAIN` so a non-blocking
+//! front-end can retry later.
+//!
+//! # Exit queue ownership
+//!
+//! The exit queue is owned by the policy: it is consumed through
+//! `SYS_VMM_EXIT_HANDLER`. `<id>/exits` is therefore strictly non-consuming.
+//! The engine exposes no peek operation, so the snapshot reports the pending
+//! depth but cannot describe the oldest queued event; that text is reported as
+//! unavailable instead of consuming an event behind the policy's back.
+//!
+//! Unknown paths return [`SyscallError::NotFound`].
 
 use alloc::{collections::BTreeMap, string::String, sync::Arc};
 use core::{
@@ -66,10 +94,16 @@ const DEV_VMM: u64 = 13;
 /// Allocates open file identifiers.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Content of an open file: root or text snapshot.
+/// Content of an open file: root, world directory, text snapshot or stream.
 enum Kind {
+    /// Scheme root directory.
     Root,
+    /// Directory of one world (`<id>`).
+    WorldDir(u64),
+    /// Finite text snapshot taken at open.
     Text(String),
+    /// Live console of one world (read drains, write queues input).
+    Console { world_id: u64 },
 }
 
 struct VmmFile {
@@ -131,21 +165,40 @@ impl VmmScheme {
         text
     }
 
+    /// Writes every cumulative counter of one world.
+    ///
+    /// Uses only `core::fmt` integer formatting, so no intermediate buffer and
+    /// no arithmetic can overflow.
+    fn write_stats(text: &mut String, stats: &vm::WorldStats) {
+        let _ = writeln!(text, "runs={}", stats.runs);
+        let _ = writeln!(text, "policy_exits={}", stats.policy_exits);
+        let _ = writeln!(text, "emulated_exits={}", stats.emulated_exits);
+        let _ = writeln!(text, "emulated_io={}", stats.emulated_io);
+        let _ = writeln!(text, "emulated_mmio={}", stats.emulated_mmio);
+        let _ = writeln!(text, "emulated_msr={}", stats.emulated_msr);
+        let _ = writeln!(text, "injected_interrupts={}", stats.injected_interrupts);
+        let _ = writeln!(text, "windows_armed={}", stats.windows_armed);
+        let _ = writeln!(text, "timer_exits={}", stats.timer_exits);
+    }
+
     fn list_text() -> String {
         let mut text = String::new();
         for world in vm::list() {
             let name = core::str::from_utf8(world.name_slice()).unwrap_or("<non-utf8>");
             let stats = vm::stats(world.id).unwrap_or_default();
+            let pending = vm::exit_count(world.id).unwrap_or(0);
             let _ = writeln!(
                 text,
-                "world {} name={} silo={} state={} vcpus={} pages={} \
-                 runs={} emulated={} policy_exits={}",
+                "world {} name={} silo={} state={} paused={} vcpus={} pages={} \
+                 pending_exits={} runs={} emulated={} policy_exits={}",
                 world.id,
                 name,
                 world.silo_id,
                 world.state,
+                vm::is_paused(world.id),
                 world.vcpu_count,
                 world.mapped_pages,
+                pending,
                 stats.runs,
                 stats.emulated_exits,
                 stats.policy_exits
@@ -162,35 +215,153 @@ impl VmmScheme {
         let _ = writeln!(text, "name={}", name);
         let _ = writeln!(text, "silo={}", world.silo_id);
         let _ = writeln!(text, "state={}", world.state);
+        let _ = writeln!(text, "paused={}", vm::is_paused(world.id));
         let _ = writeln!(text, "vcpus={}", world.vcpu_count);
         let _ = writeln!(text, "pages={}", world.mapped_pages);
+        let _ = writeln!(
+            text,
+            "pending_exits={}",
+            vm::exit_count(world.id).unwrap_or(0)
+        );
         let stats = vm::stats(world.id).unwrap_or_default();
-        let _ = writeln!(text, "runs={}", stats.runs);
-        let _ = writeln!(text, "policy_exits={}", stats.policy_exits);
-        let _ = writeln!(text, "emulated_exits={}", stats.emulated_exits);
-        let _ = writeln!(text, "emulated_io={}", stats.emulated_io);
-        let _ = writeln!(text, "emulated_mmio={}", stats.emulated_mmio);
-        let _ = writeln!(text, "emulated_msr={}", stats.emulated_msr);
-        let _ = writeln!(text, "injected_interrupts={}", stats.injected_interrupts);
-        let _ = writeln!(text, "windows_armed={}", stats.windows_armed);
-        let _ = writeln!(text, "timer_exits={}", stats.timer_exits);
+        Self::write_stats(&mut text, &stats);
         Ok(text)
     }
 
+    /// Snapshot of every counter plus the lifecycle facts of one world.
+    fn stats_text(id: u64) -> Result<String, SyscallError> {
+        let world = vm::get(id).ok_or(SyscallError::NotFound)?;
+        let stats = vm::stats(id).ok_or(SyscallError::NotFound)?;
+        let name = core::str::from_utf8(world.name_slice()).unwrap_or("<non-utf8>");
+        let mut text = String::new();
+        let _ = writeln!(text, "world {}", world.id);
+        let _ = writeln!(text, "name={}", name);
+        let _ = writeln!(text, "silo={}", world.silo_id);
+        let _ = writeln!(text, "state={}", world.state);
+        let _ = writeln!(text, "paused={}", vm::is_paused(id));
+        let _ = writeln!(
+            text,
+            "vcpus={}",
+            vm::vcpu_count(id).unwrap_or(world.vcpu_count)
+        );
+        let _ = writeln!(text, "pages={}", world.mapped_pages);
+        let _ = writeln!(text, "exit_queue_depth={}", vm::exit_count(id).unwrap_or(0));
+        Self::write_stats(&mut text, &stats);
+        Ok(text)
+    }
+
+    /// Non-consuming snapshot of the exit queue of one world.
+    fn exits_text(id: u64) -> Result<String, SyscallError> {
+        if vm::get(id).is_none() {
+            return Err(SyscallError::NotFound);
+        }
+        let pending = vm::exit_count(id).ok_or(SyscallError::NotFound)?;
+        let mut text = String::new();
+        let _ = writeln!(text, "world={}", id);
+        let _ = writeln!(text, "pending={}", pending);
+        // The queue is policy-owned and the engine has no peek operation:
+        // describing the oldest event would require consuming it.
+        let _ = writeln!(
+            text,
+            "last_event=unavailable (queue owned by the policy consumer)"
+        );
+        Ok(text)
+    }
+
+    /// Resolves a non-directory path to the content of an open file.
     fn text_for_path(path: &str) -> Result<String, SyscallError> {
         match path {
             "info" => Ok(Self::engine_text()),
             "worlds" => Ok(Self::list_text()),
             _ => {
-                // `<id>/info`
-                if let Some(id_text) = path.strip_suffix("/info") {
+                if let Some((id_text, leaf)) = path.split_once('/') {
                     if let Ok(id) = id_text.parse::<u64>() {
-                        return Self::world_text(id);
+                        return match leaf {
+                            "info" => Self::world_text(id),
+                            "stats" => Self::stats_text(id),
+                            "exits" => Self::exits_text(id),
+                            _ => Err(SyscallError::NotFound),
+                        };
                     }
                 }
                 Err(SyscallError::NotFound)
             }
         }
+    }
+
+    /// Builds the open-file kind for a path.
+    ///
+    /// Directories are recognised here so that `<id>` can be listed; every
+    /// other path must be a known leaf or the open fails with `NotFound`.
+    fn kind_for_path(path: &str) -> Result<(Kind, FileFlags), SyscallError> {
+        if let Ok(id) = path.parse::<u64>() {
+            if vm::get(id).is_none() {
+                return Err(SyscallError::NotFound);
+            }
+            return Ok((Kind::WorldDir(id), FileFlags::DIRECTORY));
+        }
+        if let Some(id_text) = path.strip_suffix("/console") {
+            if let Ok(id) = id_text.parse::<u64>() {
+                if vm::get(id).is_none() {
+                    return Err(SyscallError::NotFound);
+                }
+                return Ok((Kind::Console { world_id: id }, FileFlags::DEVICE));
+            }
+        }
+        Ok((Kind::Text(Self::text_for_path(path)?), FileFlags::DEVICE))
+    }
+
+    /// Directory entries for the root or for one world.
+    fn dir_entries(kind: &Kind) -> Result<alloc::vec::Vec<DirEntry>, SyscallError> {
+        let mut entries = match kind {
+            Kind::Root => alloc::vec![
+                DirEntry {
+                    ino: 0,
+                    file_type: DT_DIR,
+                    name: String::from("<id>"),
+                },
+                DirEntry {
+                    ino: 0,
+                    file_type: DT_REG,
+                    name: String::from("info"),
+                },
+                DirEntry {
+                    ino: 0,
+                    file_type: DT_REG,
+                    name: String::from("worlds"),
+                },
+            ],
+            Kind::WorldDir(id) => {
+                if vm::get(*id).is_none() {
+                    return Err(SyscallError::NotFound);
+                }
+                alloc::vec![
+                    DirEntry {
+                        ino: 0,
+                        file_type: DT_REG,
+                        name: String::from("console"),
+                    },
+                    DirEntry {
+                        ino: 0,
+                        file_type: DT_REG,
+                        name: String::from("exits"),
+                    },
+                    DirEntry {
+                        ino: 0,
+                        file_type: DT_REG,
+                        name: String::from("info"),
+                    },
+                    DirEntry {
+                        ino: 0,
+                        file_type: DT_REG,
+                        name: String::from("stats"),
+                    },
+                ]
+            }
+            Kind::Text(_) | Kind::Console { .. } => return Err(SyscallError::NotADirectory),
+        };
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(entries)
     }
 }
 
@@ -216,7 +387,7 @@ impl Scheme for VmmScheme {
         let (kind, flags) = if path.is_empty() || path == "/" {
             (Kind::Root, FileFlags::DIRECTORY)
         } else {
-            (Kind::Text(Self::text_for_path(path)?), FileFlags::DEVICE)
+            Self::kind_for_path(path)?
         };
         let file_id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         self.files
@@ -237,17 +408,48 @@ impl Scheme for VmmScheme {
         let entry = files.get_mut(&file_id).ok_or(SyscallError::BadHandle)?;
         match &mut entry.kind {
             Kind::Root => Err(SyscallError::IsADirectory),
+            Kind::WorldDir(id) => {
+                // A world can be destroyed while its directory stays open.
+                if vm::get(*id).is_none() {
+                    return Err(SyscallError::NotFound);
+                }
+                Err(SyscallError::IsADirectory)
+            }
             Kind::Text(text) => {
                 let n = serve_text(text.as_bytes(), entry.cursor, buf);
                 entry.cursor += n as u64;
                 Ok(n)
             }
+            Kind::Console { world_id } => {
+                // Streaming read: drain what the guest produced since the last
+                // call. `0` means "nothing pending for this read", not a
+                // permanent end of file.
+                let world_id = *world_id;
+                vm::read_console_output(world_id, buf).map_err(|()| SyscallError::NotFound)
+            }
         }
     }
 
-    fn write(&self, _file_id: u64, _offset: u64, _buf: &[u8]) -> Result<usize, SyscallError> {
-        // Strictly read-only view: every write is refused.
-        Err(SyscallError::PermissionDenied)
+    fn write(&self, file_id: u64, _offset: u64, buf: &[u8]) -> Result<usize, SyscallError> {
+        let mut files = self.files.lock();
+        let entry = files.get_mut(&file_id).ok_or(SyscallError::BadHandle)?;
+        match &mut entry.kind {
+            Kind::Console { world_id } => {
+                let world_id = *world_id;
+                // Returns the number of bytes accepted by the bounded input
+                // queue; a short write means the queue is full. When nothing
+                // at all can be accepted, report `EAGAIN` so a non-blocking
+                // console front-end can retry later instead of spinning.
+                let accepted =
+                    vm::push_console_input(world_id, buf).map_err(|()| SyscallError::NotFound)?;
+                if accepted == 0 && !buf.is_empty() {
+                    return Err(SyscallError::Again);
+                }
+                Ok(accepted)
+            }
+            // Every other file is a read-only diagnostic snapshot.
+            Kind::Root | Kind::WorldDir(_) | Kind::Text(_) => Err(SyscallError::PermissionDenied),
+        }
     }
 
     fn close(&self, file_id: u64) -> Result<(), SyscallError> {
@@ -258,8 +460,8 @@ impl Scheme for VmmScheme {
     fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
         let files = self.files.lock();
         let entry = files.get(&file_id).ok_or(SyscallError::BadHandle)?;
-        let st = if matches!(entry.kind, Kind::Root) {
-            FileStat {
+        let st = match &entry.kind {
+            Kind::Root | Kind::WorldDir(_) => FileStat {
                 st_ino: file_id,
                 st_mode: 0o040555,
                 st_nlink: 2,
@@ -267,9 +469,17 @@ impl Scheme for VmmScheme {
                 st_blksize: 512,
                 st_blocks: 0,
                 ..FileStat::zeroed()
-            }
-        } else {
-            FileStat {
+            },
+            Kind::Console { .. } => FileStat {
+                st_ino: file_id,
+                st_mode: 0o020666,
+                st_nlink: 1,
+                st_size: 0,
+                st_blksize: 1,
+                st_blocks: 0,
+                ..FileStat::zeroed()
+            },
+            Kind::Text(_) => FileStat {
                 st_ino: file_id,
                 st_mode: 0o020444,
                 st_nlink: 1,
@@ -277,31 +487,15 @@ impl Scheme for VmmScheme {
                 st_blksize: 1,
                 st_blocks: 0,
                 ..FileStat::zeroed()
-            }
+            },
         };
         Ok(finalize_pseudo_stat(st, DEV_VMM, 1))
     }
 
-    fn readdir(&self, _file_id: u64) -> Result<alloc::vec::Vec<DirEntry>, SyscallError> {
-        let mut entries = alloc::vec![
-            DirEntry {
-                ino: 0,
-                file_type: DT_DIR,
-                name: String::from("<id>"),
-            },
-            DirEntry {
-                ino: 0,
-                file_type: DT_REG,
-                name: String::from("info"),
-            },
-            DirEntry {
-                ino: 0,
-                file_type: DT_REG,
-                name: String::from("worlds"),
-            },
-        ];
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(entries)
+    fn readdir(&self, file_id: u64) -> Result<alloc::vec::Vec<DirEntry>, SyscallError> {
+        let files = self.files.lock();
+        let entry = files.get(&file_id).ok_or(SyscallError::BadHandle)?;
+        Self::dir_entries(&entry.kind)
     }
 }
 
@@ -318,7 +512,9 @@ pub fn init_vmm_scheme() -> Result<(), SyscallError> {
     }
     match scheme_router::mount_scheme("vmm", "/dev/vmm") {
         Ok(()) => {
-            log::info!("[vmm] Scheme at /dev/vmm/ (info, worlds, <id>/info)");
+            log::info!(
+                "[vmm] Scheme at /dev/vmm/ (info, worlds, <id>/{{info,stats,exits,console}})"
+            );
             Ok(())
         }
         Err(SyscallError::AlreadyExists) => Ok(()),
