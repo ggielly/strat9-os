@@ -1817,3 +1817,17 @@ pub const SYS_VMM_VCPU_LIST: usize = 588;
 /// the same kernel register block, but this call belongs to the vCPU
 /// introspection pair `SYS_VMM_VCPU_LIST` / `SYS_VMM_VCPU_REGS`.
 pub const SYS_VMM_VCPU_REGS: usize = 589;
+
+// ── Block 590: s9vm guest boot hand-off ────────────────────────────────────
+
+/// Write the guest boot-parameter block (`s9vm/bootparams.rs`).
+///
+/// `arg1` = VMM capability handle (the same rights as `SYS_VMM_BOOT_INFO`),
+/// `arg2` = page-aligned guest-physical address of the 1024-byte block.
+///
+/// The block describes the world as the guest must see it: memory map
+/// (usable / reserved / ACPI-reclaimable / MMIO), ACPI RSDP address, console
+/// device, and boot flags. It is checksummed so the guest can validate it.
+/// Call it after `SYS_VMM_ACPI` (so the firmware tables are in place) and
+/// before `RUN`. Returns 0.
+pub const SYS_VMM_BOOT_PARAMS: usize = 590;

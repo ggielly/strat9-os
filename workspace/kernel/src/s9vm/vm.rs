@@ -1713,6 +1713,131 @@ pub fn vcpu_snapshots(world_id: u64) -> Option<Vec<VcpuSnapshot>> {
     )
 }
 
+/// Writes the guest boot-parameter block at `gpa`.
+///
+/// The 1024-byte block (`s9vm::bootparams`) is the hand-off structure a real
+/// operating-system guest expects: a physical memory map derived from the
+/// world's mapped regions, the ACPI RSDP address, the console device and the
+/// boot flags. `gpa` must be page aligned and already mapped in the world; the
+/// block is copied through the HHDM like the boot-information page.
+///
+/// Region classification: write-back RAM that does not overlap a device window
+/// is `USABLE`; anything mapped with a non-default memory type or overlapping
+/// the console/block/network/APIC windows is `MMIO`; the firmware window
+/// (`ACPI_GPA..ACPI_GPA + acpi::MAX_IMAGE_LEN`) is `ACPI_RECLAIMABLE`. Adjacent
+/// ranges of the same kind are merged; if more than the block capacity remain,
+/// the map is truncated (logged) rather than refusing to boot the guest.
+pub fn write_boot_params(world_id: u64, gpa: u64) -> Result<(), VmError> {
+    use crate::s9vm::{acpi, bootparams, emulate};
+
+    if gpa % PAGE_SIZE != 0 {
+        return Err(VmError::Map(MapError::InvalidRange));
+    }
+    let acpi_end = ACPI_GPA.saturating_add(acpi::MAX_IMAGE_LEN as u64);
+    let mut worlds = WORLDS.lock();
+    let world = worlds.get_mut(&world_id).ok_or(VmError::Unknown)?;
+    let memory = world
+        .memory
+        .as_ref()
+        .ok_or(VmError::Map(MapError::NotMapped))?;
+
+    let mut params = bootparams::BootParams::new();
+    params.set_rsdp(ACPI_GPA);
+    params.set_console(emulate::CONSOLE_BASE, emulate::CONSOLE_IRQ_LINE as u32);
+    params
+        .set_flags(
+            bootparams::flags::CONSOLE_PRESENT
+                | bootparams::flags::BLOCK_PRESENT
+                | bootparams::flags::NETWORK_PRESENT,
+        )
+        .map_err(|_| VmError::Map(MapError::InvalidRange))?;
+
+    // Builds the map from the world's own reservations, merging neighbours of
+    // the same kind so that a fragmented map still fits in the fixed block.
+    let mut pending: Option<(u64, u64, u32)> = None;
+    let mut truncated = false;
+    for region in memory.regions() {
+        let kind = classify_region(region, acpi_end);
+        match pending {
+            Some((base, len, current)) if current == kind && base + len == region.gpa => {
+                pending = Some((base, len + region.len, current));
+            }
+            Some((base, len, current)) => {
+                if params.add_memory(base, len, current).is_err() {
+                    truncated = true;
+                }
+                pending = Some((region.gpa, region.len, kind));
+            }
+            None => pending = Some((region.gpa, region.len, kind)),
+        }
+    }
+    if let Some((base, len, kind)) = pending {
+        if params.add_memory(base, len, kind).is_err() {
+            truncated = true;
+        }
+    }
+
+    let mut page = [0u8; bootparams::SIZE];
+    params.encode(&mut page);
+    let hpa = memory
+        .translate(gpa)
+        .ok_or(VmError::Map(MapError::NotMapped))?;
+    // SAFETY: `hpa` belongs to a frame reserved for this world, is mapped by
+    // the HHDM, and `SIZE` bytes stay inside one 4 KiB page.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            page.as_ptr(),
+            crate::memory::phys_to_virt(hpa) as *mut u8,
+            bootparams::SIZE,
+        );
+    }
+    drop(worlds);
+    if truncated {
+        log::warn!(
+            "[s9vm] boot params at {:#x}: memory map truncated to {} entries",
+            gpa,
+            bootparams::MAX_MEMORY_ENTRIES
+        );
+    }
+    log::info!(
+        "[s9vm] boot params at {:#x}: {} memory range(s), rsdp {:#x}",
+        gpa,
+        params.memory_count(),
+        ACPI_GPA
+    );
+    Ok(())
+}
+
+/// Classifies one world region for the guest boot-parameter memory map.
+fn classify_region(region: &crate::s9vm::memmap::Region, acpi_end: u64) -> u32 {
+    use crate::s9vm::{bootparams::memory_kind, emulate};
+
+    let end = region.end();
+    fn overlaps(start: u64, end: u64, other: u64, other_end: u64) -> bool {
+        start < other_end && other < end
+    }
+    // Device windows and MMIO-typed mappings are not ordinary RAM.
+    let device = [
+        (emulate::APIC_BASE, emulate::APIC_BASE + 0x1000),
+        (emulate::IOAPIC_BASE, emulate::IOAPIC_BASE + 0x1000),
+        (emulate::CONSOLE_BASE, emulate::CONSOLE_BASE + 0x1000),
+        (emulate::BLK_BASE, emulate::BLK_BASE + 0x1000),
+        (emulate::NET_BASE, emulate::NET_BASE + 0x1000),
+    ];
+    if region.memtype != 0
+        || device
+            .iter()
+            .any(|(start, end_device)| overlaps(region.gpa, end, *start, *end_device))
+    {
+        return memory_kind::MMIO;
+    }
+    // The firmware table image is reclaimable once the guest has parsed it.
+    if overlaps(region.gpa, end, ACPI_GPA, acpi_end) {
+        return memory_kind::ACPI_RECLAIMABLE;
+    }
+    memory_kind::USABLE
+}
+
 /// Queues a frame for the network device of a world.
 ///
 /// The frame is handed to the guest's receive queue at the next `RUN`; this is

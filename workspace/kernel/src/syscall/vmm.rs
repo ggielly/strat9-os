@@ -699,6 +699,20 @@ pub fn sys_vmm_acpi(vmm_handle: u64, gpa: u64) -> Result<u64, SyscallError> {
     Ok(0)
 }
 
+/// SYS_VMM_BOOT_PARAMS (590): writes the guest boot-parameter block.
+///
+/// The block is built from the world's mapped regions and its device model and
+/// copied into guest memory at `gpa` (page aligned). Returns 0.
+pub fn sys_vmm_boot_params(vmm_handle: u64, gpa: u64) -> Result<u64, SyscallError> {
+    let required = CapPermissions {
+        write: true,
+        ..CapPermissions::none()
+    };
+    let world = vmm_world(vmm_handle, required)?;
+    vm::write_boot_params(world, gpa).map_err(map_vm_error)?;
+    Ok(0)
+}
+
 /// SYS_VMM_VCPU_LIST (588): enumerates the vCPUs of a world into a caller
 /// buffer.
 ///
