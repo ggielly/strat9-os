@@ -53,6 +53,7 @@ use super::{
     ioapic::IoApic,
     pic::Pic,
     virtio::QueueMemory,
+    virtio_blk::VirtioBlk,
     virtio_console::VirtioConsole,
 };
 
@@ -85,6 +86,10 @@ pub const APIC_BASE: u64 = 0xFEE0_0000;
 pub const IOAPIC_BASE: u64 = 0xFEC0_0000;
 /// Base of the virtio console transport page (virtio-mmio layout).
 pub const CONSOLE_BASE: u64 = 0xFEB0_0000;
+/// Base of the virtio block transport page (virtio-mmio layout).
+pub const BLK_BASE: u64 = 0xFEB0_1000;
+/// Interrupt vector used to signal the block device.
+pub const BLK_IRQ_VECTOR: u8 = 0x22;
 /// Interrupt vector used to signal the console.
 ///
 /// The virtio-mmio transport does not define its own interrupt: the platform
@@ -423,6 +428,8 @@ pub struct Devices {
     pub ioapic: IoApic,
     /// Virtio console (MMIO transport page).
     pub console: VirtioConsole,
+    /// Virtio block device (MMIO transport page).
+    pub blk: VirtioBlk,
 }
 
 impl Devices {
@@ -432,6 +439,7 @@ impl Devices {
             pic: Pic::new(),
             ioapic: IoApic::new(0),
             console: VirtioConsole::new(),
+            blk: VirtioBlk::new(64 * 1024),
         }
     }
 
@@ -660,6 +668,8 @@ pub enum DevicePage {
     IoApic,
     /// Virtio console transport page.
     Console,
+    /// Virtio block transport page.
+    Blk,
 }
 
 /// Identifies the modeled device page containing `address`.
@@ -671,6 +681,8 @@ pub fn device_page(address: u64) -> Option<DevicePage> {
         Some(DevicePage::IoApic)
     } else if page == CONSOLE_BASE {
         Some(DevicePage::Console)
+    } else if page == BLK_BASE {
+        Some(DevicePage::Blk)
     } else {
         None
     }
@@ -707,6 +719,7 @@ fn read_mmio(devices: &Devices, apic: &LocalApic, page: DevicePage, offset: usiz
         DevicePage::Apic => apic.mmio_read(offset & 0xFFF),
         DevicePage::IoApic => devices.ioapic.mmio_read(offset & 0xFF),
         DevicePage::Console => devices.console.read(offset as u32 & 0xFFF),
+        DevicePage::Blk => devices.blk.read(offset as u32 & 0xFFF),
     }
 }
 
@@ -729,6 +742,12 @@ fn write_mmio(
             // vector (immediately, or when the interrupt window opens).
             if devices.console.interrupt_status() != 0 {
                 apic.inject(CONSOLE_IRQ_VECTOR);
+            }
+        }
+        DevicePage::Blk => {
+            devices.blk.write(offset as u32 & 0xFFF, value, view);
+            if devices.blk.interrupt_status() != 0 {
+                apic.inject(BLK_IRQ_VECTOR);
             }
         }
     }

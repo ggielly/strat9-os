@@ -65,6 +65,7 @@ pub mod pic;
 pub mod selftest;
 pub mod vcpu;
 pub mod virtio;
+pub mod virtio_blk;
 pub mod virtio_console;
 pub mod vm;
 

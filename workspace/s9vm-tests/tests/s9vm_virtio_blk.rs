@@ -1,0 +1,297 @@
+//! L2: virtio block device model (request queue, read/write/flush).
+
+extern crate alloc;
+
+#[path = "../../kernel/src/s9vm/virtio.rs"]
+mod virtio;
+#[path = "../../kernel/src/s9vm/virtio_blk.rs"]
+mod virtio_blk;
+
+use alloc::vec::Vec;
+use virtio::{Descriptor, QueueMemory, DESC_F_WRITE, DESCRIPTOR_SIZE};
+use virtio_blk::{
+    reg, request, request_status, status, VirtioBlk, DEVICE_ID, MAGIC, QUEUE_NUM_MAX, SECTOR_SIZE,
+    VERSION,
+};
+
+struct Memory {
+    bytes: Vec<u8>,
+}
+
+impl Memory {
+    fn new() -> Self {
+        Self {
+            bytes: alloc::vec![0u8; 0x8000],
+        }
+    }
+
+    fn write_bytes(&mut self, gpa: u64, bytes: &[u8]) {
+        self.write_gpa(gpa, bytes);
+    }
+
+    fn slice(&self, gpa: u64, len: usize) -> &[u8] {
+        &self.bytes[gpa as usize..gpa as usize + len]
+    }
+}
+
+impl QueueMemory for Memory {
+    fn read_gpa(&mut self, gpa: u64, out: &mut [u8]) -> bool {
+        let start = gpa as usize;
+        let Some(slice) = self.bytes.get(start..start + out.len()) else {
+            return false;
+        };
+        out.copy_from_slice(slice);
+        true
+    }
+
+    fn write_gpa(&mut self, gpa: u64, bytes: &[u8]) -> bool {
+        let start = gpa as usize;
+        let Some(slice) = self.bytes.get_mut(start..start + bytes.len()) else {
+            return false;
+        };
+        slice.copy_from_slice(bytes);
+        true
+    }
+}
+
+const DESC: u64 = 0x1000;
+const AVAIL: u64 = 0x2000;
+const USED: u64 = 0x3000;
+const HEADER: u64 = 0x4000;
+const DATA: u64 = 0x5000;
+const STATUS_BYTE: u64 = 0x6000;
+const QUEUE_SIZE: u16 = 8;
+
+fn write_descriptor(memory: &mut Memory, index: u16, descriptor: Descriptor) {
+    memory.write_bytes(DESC + u64::from(index) * DESCRIPTOR_SIZE, &descriptor.encode());
+}
+
+fn publish(memory: &mut Memory, count: u16) {
+    memory.write_u16(AVAIL + 2, count);
+}
+
+fn used_entry(memory: &Memory, index: u16) -> (u32, u32) {
+    let gpa = USED + 4 + u64::from(index) * 8;
+    let id = u32::from_le_bytes(memory.slice(gpa, 4).try_into().unwrap());
+    let len = u32::from_le_bytes(memory.slice(gpa + 4, 4).try_into().unwrap());
+    (id, len)
+}
+
+fn ready_device(memory: &mut Memory) -> VirtioBlk {
+    let mut device = VirtioBlk::new(16 * SECTOR_SIZE);
+    device.write(reg::QUEUE_SEL, 0, memory);
+    device.write(reg::QUEUE_NUM, u32::from(QUEUE_SIZE), memory);
+    device.write(reg::QUEUE_DESC_LOW, DESC as u32, memory);
+    device.write(reg::QUEUE_AVAIL_LOW, AVAIL as u32, memory);
+    device.write(reg::QUEUE_USED_LOW, USED as u32, memory);
+    device.write(reg::QUEUE_READY, 1, memory);
+    device.write(
+        reg::STATUS,
+        status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK | status::DRIVER_OK,
+        memory,
+    );
+    device
+}
+
+/// Builds a chain: header, one data descriptor, status byte.
+fn build_request(
+    memory: &mut Memory,
+    request_type: u32,
+    sector: u64,
+    data_len: u32,
+    data_writable: bool,
+) {
+    let mut header = [0u8; 16];
+    header[..4].copy_from_slice(&request_type.to_le_bytes());
+    header[8..].copy_from_slice(&sector.to_le_bytes());
+    memory.write_bytes(HEADER, &header);
+
+    write_descriptor(
+        memory,
+        0,
+        Descriptor {
+            addr: HEADER,
+            len: 16,
+            flags: virtio::DESC_F_NEXT,
+            next: 1,
+        },
+    );
+    write_descriptor(
+        memory,
+        1,
+        Descriptor {
+            addr: DATA,
+            len: data_len,
+            flags: virtio::DESC_F_NEXT
+                | if data_writable { DESC_F_WRITE } else { 0 },
+            next: 2,
+        },
+    );
+    write_descriptor(
+        memory,
+        2,
+        Descriptor {
+            addr: STATUS_BYTE,
+            len: 1,
+            flags: DESC_F_WRITE,
+            next: 0,
+        },
+    );
+    memory.write_u16(AVAIL + 4, 0);
+    publish(memory, 1);
+}
+
+#[test]
+fn transport_identity_is_advertised() {
+    let device = VirtioBlk::new(1024);
+    assert_eq!(device.read(reg::MAGIC), MAGIC);
+    assert_eq!(device.read(reg::VERSION), VERSION);
+    assert_eq!(device.read(reg::DEVICE_ID), DEVICE_ID);
+    assert_eq!(device.read(reg::QUEUE_NUM_MAX), u32::from(QUEUE_NUM_MAX));
+}
+
+#[test]
+fn config_space_reports_the_capacity() {
+    let device = VirtioBlk::new(16 * SECTOR_SIZE);
+    assert_eq!(device.sectors(), 16);
+    assert_eq!(device.read(reg::CONFIG), 16);
+    assert_eq!(device.read(reg::CONFIG + 4), 0);
+}
+
+#[test]
+fn read_request_copies_a_sector_into_guest_memory() {
+    let mut memory = Memory::new();
+    let mut device = ready_device(&mut memory);
+    device.write_sector(0, b"DISK DATA");
+    build_request(&mut memory, request::IN, 0, SECTOR_SIZE as u32, true);
+    device.write(reg::QUEUE_NOTIFY, 0, &mut memory);
+    assert_eq!(memory.slice(DATA, 9), b"DISK DATA");
+    assert_eq!(memory.slice(STATUS_BYTE, 1)[0], request_status::OK);
+    assert_eq!(used_entry(&memory, 0).0, 0);
+    assert_eq!(device.completed(), 1);
+    assert_ne!(
+        device.interrupt_status() & virtio_blk::interrupt::USED_RING,
+        0
+    );
+}
+
+#[test]
+fn write_request_updates_the_disk() {
+    let mut memory = Memory::new();
+    let mut device = ready_device(&mut memory);
+    memory.write_bytes(DATA, b"NEW DATA");
+    build_request(&mut memory, request::OUT, 0, 8, false);
+    device.write(reg::QUEUE_NOTIFY, 0, &mut memory);
+    assert_eq!(memory.slice(STATUS_BYTE, 1)[0], request_status::OK);
+    assert_eq!(&device.disk_mut()[..8], b"NEW DATA");
+}
+
+#[test]
+fn read_request_beyond_the_disk_reports_an_io_error() {
+    let mut memory = Memory::new();
+    let mut device = ready_device(&mut memory);
+    build_request(&mut memory, request::IN, 1_000_000, 16, true);
+    device.write(reg::QUEUE_NOTIFY, 0, &mut memory);
+    assert_eq!(memory.slice(STATUS_BYTE, 1)[0], request_status::IO_ERROR);
+    assert_eq!(device.last_status(), request_status::IO_ERROR);
+}
+
+#[test]
+fn unknown_request_type_reports_unsupported() {
+    let mut memory = Memory::new();
+    let mut device = ready_device(&mut memory);
+    build_request(&mut memory, 42, 0, 8, true);
+    device.write(reg::QUEUE_NOTIFY, 0, &mut memory);
+    assert_eq!(memory.slice(STATUS_BYTE, 1)[0], request_status::UNSUPPORTED);
+}
+
+#[test]
+fn flush_request_succeeds_without_data() {
+    let mut memory = Memory::new();
+    let mut device = ready_device(&mut memory);
+    // Chain: header + status only.
+    let mut header = [0u8; 16];
+    header[..4].copy_from_slice(&request::FLUSH.to_le_bytes());
+    memory.write_bytes(HEADER, &header);
+    write_descriptor(
+        &mut memory,
+        0,
+        Descriptor {
+            addr: HEADER,
+            len: 16,
+            flags: virtio::DESC_F_NEXT,
+            next: 1,
+        },
+    );
+    write_descriptor(
+        &mut memory,
+        1,
+        Descriptor {
+            addr: STATUS_BYTE,
+            len: 1,
+            flags: DESC_F_WRITE,
+            next: 0,
+        },
+    );
+    memory.write_u16(AVAIL + 4, 0);
+    publish(&mut memory, 1);
+    device.write(reg::QUEUE_NOTIFY, 0, &mut memory);
+    assert_eq!(memory.slice(STATUS_BYTE, 1)[0], request_status::OK);
+}
+
+#[test]
+fn queue_notification_is_ignored_before_driver_ok() {
+    let mut memory = Memory::new();
+    let mut device = VirtioBlk::new(16 * SECTOR_SIZE);
+    device.write(reg::QUEUE_SEL, 0, &mut memory);
+    device.write(reg::QUEUE_NUM, u32::from(QUEUE_SIZE), &mut memory);
+    device.write(reg::QUEUE_DESC_LOW, DESC as u32, &mut memory);
+    device.write(reg::QUEUE_AVAIL_LOW, AVAIL as u32, &mut memory);
+    device.write(reg::QUEUE_USED_LOW, USED as u32, &mut memory);
+    device.write(reg::QUEUE_READY, 1, &mut memory);
+    build_request(&mut memory, request::IN, 0, 16, true);
+    device.write(reg::QUEUE_NOTIFY, 0, &mut memory);
+    assert_eq!(device.completed(), 0);
+}
+
+#[test]
+fn features_use_the_selector() {
+    let mut memory = Memory::new();
+    let mut device = VirtioBlk::new(1024);
+    device.write(reg::DEVICE_FEATURES_SEL, 1, &mut memory);
+    assert_eq!(device.read(reg::DEVICE_FEATURES) & 1, 1);
+    device.write(reg::DRIVER_FEATURES_SEL, 1, &mut memory);
+    device.write(reg::DRIVER_FEATURES, 1, &mut memory);
+    assert_eq!(device.read(reg::DRIVER_FEATURES), 1);
+}
+
+#[test]
+fn interrupt_status_is_acknowledged() {
+    let mut memory = Memory::new();
+    let mut device = ready_device(&mut memory);
+    build_request(&mut memory, request::IN, 0, 16, true);
+    device.write(reg::QUEUE_NOTIFY, 0, &mut memory);
+    assert_ne!(device.interrupt_status(), 0);
+    device.write(reg::INTERRUPT_ACK, device.interrupt_status(), &mut memory);
+    assert_eq!(device.interrupt_status(), 0);
+}
+
+#[test]
+fn reset_clears_the_device() {
+    let mut memory = Memory::new();
+    let mut device = ready_device(&mut memory);
+    assert!(device.ready());
+    device.write(reg::STATUS, 0, &mut memory);
+    assert_eq!(device.status(), 0);
+    assert!(!device.ready());
+    assert!(!device.queue_ready());
+}
+
+#[test]
+fn invalid_queue_size_marks_the_device_failed() {
+    let mut memory = Memory::new();
+    let mut device = VirtioBlk::new(1024);
+    device.write(reg::QUEUE_SEL, 0, &mut memory);
+    device.write(reg::QUEUE_NUM, 3, &mut memory);
+    assert_ne!(device.status() & status::FAILED, 0);
+}

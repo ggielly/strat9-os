@@ -20,6 +20,8 @@ mod ioapic;
 mod pic;
 #[path = "../../kernel/src/s9vm/virtio.rs"]
 mod virtio;
+#[path = "../../kernel/src/s9vm/virtio_blk.rs"]
+mod virtio_blk;
 #[path = "../../kernel/src/s9vm/virtio_console.rs"]
 mod virtio_console;
 
@@ -639,18 +641,19 @@ const CONSOLE_AVAIL: u64 = 0xA000;
 const CONSOLE_USED: u64 = 0xB000;
 const CONSOLE_BUFFER: u64 = 0xC000;
 
-/// Writes one console transport register through a replayed instruction.
-fn console_write(
+/// Writes one MMIO register of a device page through a replayed instruction.
+fn mmio_write(
     devices: &mut Devices,
     apic: &mut apic::LocalApic,
     memory: &mut TestMemory,
     guest: &mut TestGuest,
+    base: u64,
     offset: u64,
     value: u32,
 ) -> bool {
     let rip = load_code(memory, &[0x89, 0x08]); // mov [rax], ecx
     guest.rip = rip;
-    guest.regs[0] = CONSOLE_BASE + offset;
+    guest.regs[0] = base + offset;
     guest.regs[1] = u64::from(value);
     let mut view = MemoryView::new(memory, EPT_PML4, guest.cr3, guest.paging);
     handle_exit(
@@ -660,22 +663,23 @@ fn console_write(
         guest,
         ExitClass::EptViolation,
         0b010,
-        CONSOLE_BASE + offset,
+        base + offset,
     )
     .expect("no error")
 }
 
-/// Reads one console transport register through a replayed instruction.
-fn console_read(
+/// Reads one MMIO register of a device page through a replayed instruction.
+fn mmio_read(
     devices: &mut Devices,
     apic: &mut apic::LocalApic,
     memory: &mut TestMemory,
     guest: &mut TestGuest,
+    base: u64,
     offset: u64,
 ) -> u32 {
     let rip = load_code(memory, &[0x8B, 0x08]); // mov ecx, [rax]
     guest.rip = rip;
-    guest.regs[0] = CONSOLE_BASE + offset;
+    guest.regs[0] = base + offset;
     let mut view = MemoryView::new(memory, EPT_PML4, guest.cr3, guest.paging);
     handle_exit(
         devices,
@@ -684,10 +688,33 @@ fn console_read(
         guest,
         ExitClass::EptViolation,
         0b001,
-        CONSOLE_BASE + offset,
+        base + offset,
     )
     .expect("no error");
     guest.regs[1] as u32
+}
+
+/// Writes one console transport register.
+fn console_write(
+    devices: &mut Devices,
+    apic: &mut apic::LocalApic,
+    memory: &mut TestMemory,
+    guest: &mut TestGuest,
+    offset: u64,
+    value: u32,
+) -> bool {
+    mmio_write(devices, apic, memory, guest, CONSOLE_BASE, offset, value)
+}
+
+/// Reads one console transport register.
+fn console_read(
+    devices: &mut Devices,
+    apic: &mut apic::LocalApic,
+    memory: &mut TestMemory,
+    guest: &mut TestGuest,
+    offset: u64,
+) -> u32 {
+    mmio_read(devices, apic, memory, guest, CONSOLE_BASE, offset)
 }
 
 /// Programs a console queue through the transport registers.
@@ -971,4 +998,126 @@ fn console_interrupt_is_only_raised_while_reported() {
         0,
     );
     assert_eq!(apic.pending_vector(), None);
+}
+
+// ---------------------------------------------------------------------------
+// virtio block transport page
+// ---------------------------------------------------------------------------
+
+const BLK_DESC: u64 = 0x9000;
+const BLK_AVAIL: u64 = 0xA000;
+const BLK_USED: u64 = 0xB000;
+const BLK_HEADER: u64 = 0xC000;
+const BLK_DATA: u64 = 0xD000;
+const BLK_STATUS: u64 = 0xE000;
+
+/// Programs the block request queue through the transport registers.
+fn blk_program_queue(
+    devices: &mut Devices,
+    apic: &mut apic::LocalApic,
+    memory: &mut TestMemory,
+    guest: &mut TestGuest,
+) {
+    for (offset, value) in [
+        (virtio_blk::reg::QUEUE_SEL, 0),
+        (virtio_blk::reg::QUEUE_NUM, 8),
+        (virtio_blk::reg::QUEUE_DESC_LOW, BLK_DESC as u32),
+        (virtio_blk::reg::QUEUE_AVAIL_LOW, BLK_AVAIL as u32),
+        (virtio_blk::reg::QUEUE_USED_LOW, BLK_USED as u32),
+        (virtio_blk::reg::QUEUE_READY, 1),
+    ] {
+        mmio_write(
+            devices,
+            apic,
+            memory,
+            guest,
+            emulate::BLK_BASE,
+            u64::from(offset),
+            value,
+        );
+    }
+}
+
+#[test]
+fn block_page_is_identified() {
+    assert_eq!(
+        emulate::device_page(emulate::BLK_BASE + 0x50),
+        Some(DevicePage::Blk)
+    );
+}
+
+#[test]
+fn block_read_request_is_served_through_the_transport_page() {
+    let mut memory = machine();
+    let mut guest = TestGuest::new(CODE_PAGE);
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+
+    mmio_write(
+        &mut devices,
+        &mut apic,
+        &mut memory,
+        &mut guest,
+        emulate::BLK_BASE,
+        u64::from(virtio_blk::reg::STATUS),
+        virtio_blk::status::ACKNOWLEDGE
+            | virtio_blk::status::DRIVER
+            | virtio_blk::status::FEATURES_OK
+            | virtio_blk::status::DRIVER_OK,
+    );
+    blk_program_queue(&mut devices, &mut apic, &mut memory, &mut guest);
+
+    // Disk: sector 0 starts with 'D'.
+    let mut sector = [0u8; 512];
+    sector[0] = b'D';
+    devices.blk.write_sector(0, &sector);
+
+    // Request: header (IN, sector 0), data buffer, status byte.
+    memory.write_u64(BLK_HEADER, u64::from(virtio_blk::request::IN));
+    memory.write_u64(BLK_HEADER + 8, 0);
+    let chain = [
+        virtio::Descriptor {
+            addr: BLK_HEADER,
+            len: 16,
+            flags: virtio::DESC_F_NEXT,
+            next: 1,
+        },
+        virtio::Descriptor {
+            addr: BLK_DATA,
+            len: 512,
+            flags: virtio::DESC_F_NEXT | virtio::DESC_F_WRITE,
+            next: 2,
+        },
+        virtio::Descriptor {
+            addr: BLK_STATUS,
+            len: 1,
+            flags: virtio::DESC_F_WRITE,
+            next: 0,
+        },
+    ];
+    for (index, descriptor) in chain.iter().enumerate() {
+        memory.write_bytes(
+            BLK_DESC + index as u64 * virtio::DESCRIPTOR_SIZE,
+            &descriptor.encode(),
+        );
+    }
+    memory.write_bytes(BLK_AVAIL + 2, &1u16.to_le_bytes());
+    memory.write_bytes(BLK_AVAIL + 4, &0u16.to_le_bytes());
+
+    mmio_write(
+        &mut devices,
+        &mut apic,
+        &mut memory,
+        &mut guest,
+        emulate::BLK_BASE,
+        u64::from(virtio_blk::reg::QUEUE_NOTIFY),
+        0,
+    );
+    assert_eq!(memory.slice(BLK_DATA, 1), b"D");
+    assert_eq!(memory.slice(BLK_STATUS, 1)[0], virtio_blk::request_status::OK);
+    assert_eq!(devices.blk.completed(), 1);
+    assert_eq!(
+        apic.pending_vector(),
+        Some(emulate::BLK_IRQ_VECTOR)
+    );
 }
