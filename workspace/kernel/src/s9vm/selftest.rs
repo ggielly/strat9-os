@@ -134,6 +134,8 @@ pub struct SelftestReport {
     pub emulated_exits: u32,
     /// Last value read by the guest from the PIC data port.
     pub pic_readback: Option<u8>,
+    /// Guest time slices that expired during the test.
+    pub timer_exits: u32,
     pub observed_byte: Option<u8>,
     /// Name of the guest-state variant that entered successfully.
     pub variant: &'static str,
@@ -225,6 +227,7 @@ fn run_guest(
         total_exits: 0,
         emulated_exits: 0,
         pic_readback: None,
+        timer_exits: 0,
         observed_byte: None,
         variant: "",
     };
@@ -302,6 +305,11 @@ fn run_guest(
             ExitClass::ExternalInterrupt | ExitClass::InterruptWindow => {
                 // At boot, host interrupts are masked: we simply
                 // resume the guest.
+            }
+            ExitClass::PreemptionTimer => {
+                // The guest time slice expired before the test finished: the
+                // test is short, so this only happens on a very slow host.
+                report.timer_exits += 1;
             }
             ExitClass::EntryFailure => {
                 // SAFETY: the control block is still loaded; diagnostic
@@ -619,6 +627,7 @@ pub fn run_interrupt(caps: &HwCaps) -> Result<InterruptReport, SelftestError> {
             ExitClass::InterruptWindow => {
                 report.window_exits += 1;
             }
+            ExitClass::PreemptionTimer => {}
             ExitClass::ExternalInterrupt => {}
             other => {
                 log::warn!(

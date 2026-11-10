@@ -340,6 +340,15 @@ fn alloc_msr_bitmap() -> Option<PhysFrame> {
     Some(frame)
 }
 
+/// Number of preemption-timer counts per guest time slice.
+///
+/// The count rate is encoded in `IA32_VMX_MISC` bits 4:0 (the timer counts at
+/// the TSC rate divided by a power of two), so this value translates to a
+/// different wall-clock delay per CPU. It is deliberately conservative: a
+/// guest gets a long enough slice to make progress, and still cannot run
+/// unbounded. The policy layer will tune it per world.
+pub const DEFAULT_PREEMPTION_TIMER_TICKS: u32 = 0x00FF_FFFF;
+
 /// Primary processor-based controls of a vCPU.
 ///
 /// `PROC_ACTIVATE_SECONDARY` is **not** optional: without it EPT is disabled
@@ -730,12 +739,16 @@ impl Vcpu {
     /// The control block must be loaded.
     pub unsafe fn configure(&mut self, caps: &HwCaps, guest: &GuestState) -> Result<(), VcpuError> {
         self.guest = *guest;
-        // VMX preemption timer is disabled until the hardware validation of
-        // the entry path succeeds: its field write was the only ignored
-        // instruction error, and a timer tick storm would mask entry
-        // failures.
-        let _ = caps;
-        self.preemption_timer = None;
+        // The VMX preemption timer bounds the time a guest can run without
+        // returning to the kernel: a guest that never exits cannot hold a
+        // vCPU forever. The count rate comes from the capability MSR, so the
+        // value below is a conservative slice (tuned by the policy layer
+        // later); the entry path is validated, so the timer can be enabled.
+        self.preemption_timer = if caps.preemption_timer {
+            Some(DEFAULT_PREEMPTION_TIMER_TICKS)
+        } else {
+            None
+        };
         // The MSR bitmap is created once, on the first configuration: it
         // intercepts the x2APIC MSRs so the kernel can model them. When the
         // processor does not allow the control, no bitmap is allocated and
@@ -951,7 +964,11 @@ impl Vcpu {
     }
 
     unsafe fn write_controls(&self, caps: &HwCaps) -> Result<(), VcpuError> {
-        let pin = caps.pin_allowed.apply(bits::PIN_EXTERNAL_INTERRUPT_EXITING);
+        let mut pin = bits::PIN_EXTERNAL_INTERRUPT_EXITING;
+        if self.preemption_timer.is_some() {
+            pin |= bits::PIN_PREEMPTION_TIMER;
+        }
+        let pin = caps.pin_allowed.apply(pin);
         let primary = primary_controls(caps, false);
         let mut secondary =
             bits::SECONDARY_ENABLE_EPT | bits::SECONDARY_UNRESTRICTED_GUEST;
