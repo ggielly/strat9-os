@@ -186,3 +186,99 @@ fn ioapic_out_of_range_pin_is_none() {
     assert!(ioapic.entry(PIN_COUNT).is_none());
     assert!(ioapic.vector_for_pin(PIN_COUNT).is_none());
 }
+
+#[test]
+fn ioapic_level_assert_sets_remote_irr_and_eoi_reinjects() {
+    let mut ioapic = IoApic::new(0);
+    ioapic.set_pin_mode(2, 0x50, false, true, false);
+    assert_eq!(ioapic.set_line_level(2, true), Some(0x50));
+    assert!(ioapic.remote_irr(2));
+    // Re-asserting while the interrupt is in service does not queue a second
+    // delivery.
+    assert_eq!(ioapic.set_line_level(2, true), None);
+    // EOI clears the remote IRR and re-raises because the line is still high.
+    assert_eq!(ioapic.eoi(0x50), Some(0x50));
+    assert!(ioapic.remote_irr(2));
+    // Deassert then EOI: nothing is re-injected.
+    assert_eq!(ioapic.set_line_level(2, false), None);
+    assert_eq!(ioapic.eoi(0x50), None);
+    assert!(!ioapic.remote_irr(2));
+}
+
+#[test]
+fn ioapic_level_deassert_before_eoi_does_not_reinject() {
+    let mut ioapic = IoApic::new(0);
+    ioapic.set_pin_mode(3, 0x51, false, true, false);
+    assert_eq!(ioapic.set_line_level(3, true), Some(0x51));
+    assert_eq!(ioapic.set_line_level(3, false), None);
+    assert_eq!(ioapic.eoi(0x51), None);
+    assert!(!ioapic.remote_irr(3));
+}
+
+#[test]
+fn ioapic_masked_level_is_recorded_and_raised_on_unmask() {
+    let mut ioapic = IoApic::new(0);
+    ioapic.set_pin_mode(4, 0x52, true, true, false);
+    assert_eq!(ioapic.set_line_level(4, true), None);
+    assert!(ioapic.line_asserted(4));
+    assert!(!ioapic.remote_irr(4));
+    // Unmask and re-evaluate: the already-asserted line is delivered.
+    ioapic.set_pin_mode(4, 0x52, false, true, false);
+    assert_eq!(ioapic.refresh_pin(4), Some(0x52));
+    assert!(ioapic.remote_irr(4));
+}
+
+#[test]
+fn ioapic_edge_line_is_not_reinjected_by_eoi() {
+    let mut ioapic = IoApic::new(0);
+    ioapic.set_pin_mode(5, 0x53, false, false, false);
+    assert_eq!(ioapic.set_line_level(5, true), Some(0x53));
+    // A second assertion at the same level is not a new edge.
+    assert_eq!(ioapic.set_line_level(5, true), None);
+    assert_eq!(ioapic.eoi(0x53), None);
+    assert!(!ioapic.remote_irr(5));
+}
+
+#[test]
+fn ioapic_trigger_polarity_and_delivery_bits_decode() {
+    let mut ioapic = IoApic::new(0);
+    // vector 0x60, level-triggered, active-low, NMI delivery.
+    write_entry(&mut ioapic, 6, 0x60 | (4 << 8) | (1 << 13) | (1 << 15), 0);
+    let entry = ioapic.entry(6).unwrap();
+    assert_eq!(entry.vector(), 0x60);
+    assert!(entry.level_triggered());
+    assert!(entry.active_low());
+    assert_eq!(entry.delivery_mode(), 4);
+    assert_eq!(ioapic.vector_for_pin(6), None);
+}
+
+#[test]
+fn ioapic_level_with_nonfixed_delivery_is_not_raised() {
+    let mut ioapic = IoApic::new(0);
+    write_entry(&mut ioapic, 7, 0x61 | (5 << 8) | (1 << 15), 0);
+    assert_eq!(ioapic.set_line_level(7, true), None);
+    assert!(!ioapic.remote_irr(7));
+}
+
+#[test]
+fn ioapic_eoi_only_clears_matching_vector() {
+    let mut ioapic = IoApic::new(0);
+    ioapic.set_pin_mode(8, 0x54, false, true, false);
+    assert_eq!(ioapic.set_line_level(8, true), Some(0x54));
+    assert_eq!(ioapic.eoi(0x55), None);
+    assert!(ioapic.remote_irr(8));
+    assert_eq!(ioapic.eoi(0x54), Some(0x54));
+}
+
+#[test]
+fn ioapic_adversarial_level_values_do_not_panic() {
+    let mut ioapic = IoApic::new(0);
+    for pin in 0..PIN_COUNT + 4 {
+        let _ = ioapic.set_line_level(pin, true);
+        let _ = ioapic.set_line_level(pin, false);
+        let _ = ioapic.refresh_pin(pin);
+        let _ = ioapic.eoi(pin as u8);
+    }
+    ioapic.set_pin_mode(0, 0xFF, false, true, true);
+    assert_eq!(ioapic.set_line_level(0, true), Some(0xFF));
+}

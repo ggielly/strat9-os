@@ -7,8 +7,21 @@
 //!
 //! This module only holds architectural state; it touches no hardware. The
 //! kernel calls [`IoApic::mmio_read`] / [`IoApic::mmio_write`] when it emulates
-//! the guest's I/O APIC page, and the routing layer later uses
-//! [`IoApic::entry`] to decide which vector and destination a pin produces.
+//! the guest's I/O APIC page, and the routing layer uses [`IoApic::entry`] and
+//! the level API to decide which vector and destination a pin produces.
+//!
+//! ## Level-triggered lines
+//!
+//! Each redirection entry decodes its trigger mode, polarity and delivery mode.
+//! For a **level-triggered, unmasked, fixed-delivery** pin, [`IoApic::set_line_level`]
+//! raises the vector once, sets the *remote IRR* bit of the entry, and keeps it
+//! set while the interrupt is in service. [`IoApic::eoi`] clears the remote IRR
+//! and re-raises the vector if the line is still asserted. An edge-triggered
+//! entry raises only on a 0->1 transition and is never re-raised by EOI.
+//!
+//! `set_line_level` takes the **logical assertion** (active level after the
+//! entry's polarity has been applied); the polarity bit is decoded and exposed
+//! for diagnostics and for callers that model the electrical line themselves.
 
 /// MMIO offset of the indirect register selector.
 pub const REG_SELECT: usize = 0x00;
@@ -85,6 +98,10 @@ pub struct IoApic {
     select: u32,
     /// Redirection table.
     redirection: [RedirectionEntry; PIN_COUNT],
+    /// Logical level currently asserted on each input pin.
+    line_level: [bool; PIN_COUNT],
+    /// Remote-IRR state: the vector was delivered and is awaiting EOI.
+    remote_irr: [bool; PIN_COUNT],
 }
 
 impl IoApic {
@@ -94,6 +111,8 @@ impl IoApic {
             id: apic_id,
             select: 0,
             redirection: [RedirectionEntry { raw: 1 << 16 }; PIN_COUNT],
+            line_level: [false; PIN_COUNT],
+            remote_irr: [false; PIN_COUNT],
         }
     }
 
@@ -125,6 +144,120 @@ impl IoApic {
                 raw |= 1 << 16;
             }
             self.redirection[pin] = RedirectionEntry { raw };
+        }
+    }
+
+    /// Programs `pin` with a vector, mask and trigger/polarity mode.
+    pub fn set_pin_mode(
+        &mut self,
+        pin: usize,
+        vector: u8,
+        masked: bool,
+        level_triggered: bool,
+        active_low: bool,
+    ) {
+        if pin < PIN_COUNT {
+            let mut raw = self.redirection[pin].raw & !0x1_FFFF;
+            raw |= u64::from(vector);
+            if level_triggered {
+                raw |= 1 << 15;
+            }
+            if active_low {
+                raw |= 1 << 13;
+            }
+            if masked {
+                raw |= 1 << 16;
+            }
+            self.redirection[pin] = RedirectionEntry { raw };
+        }
+    }
+
+    /// True if the logical level on `pin` is currently asserted.
+    pub const fn line_asserted(&self, pin: usize) -> bool {
+        pin < PIN_COUNT && self.line_level[pin]
+    }
+
+    /// Remote-IRR state of `pin` (set while its interrupt is in service).
+    pub const fn remote_irr(&self, pin: usize) -> bool {
+        pin < PIN_COUNT && self.remote_irr[pin]
+    }
+
+    /// Applies a logical line level to `pin`.
+    ///
+    /// For a level-triggered, unmasked, fixed-delivery pin, an asserted level
+    /// returns the vector to inject once; the remote-IRR bit is then held until
+    /// [`Self::eoi`]. An edge-triggered pin returns the vector only on a
+    /// 0 -> 1 transition. A masked pin records the level but returns nothing.
+    pub fn set_line_level(&mut self, pin: usize, asserted: bool) -> Option<u8> {
+        if pin >= PIN_COUNT {
+            return None;
+        }
+        let previous = self.line_level[pin];
+        self.line_level[pin] = asserted;
+        if !asserted {
+            return None;
+        }
+        let entry = self.redirection[pin];
+        if entry.masked() || entry.delivery_mode() != 0 || entry.vector() < 16 {
+            return None;
+        }
+        if entry.level_triggered() {
+            if self.remote_irr[pin] {
+                None
+            } else {
+                self.remote_irr[pin] = true;
+                Some(entry.vector())
+            }
+        } else if !previous {
+            Some(entry.vector())
+        } else {
+            None
+        }
+    }
+
+    /// Handles an EOI for `vector`.
+    ///
+    /// Clears the remote IRR of every level-triggered pin delivering that
+    /// vector. If such a pin is still asserted and unmasked, the vector is
+    /// returned to be injected again (level semantics); an edge-triggered pin
+    /// is never re-raised.
+    pub fn eoi(&mut self, vector: u8) -> Option<u8> {
+        let mut reinject = None;
+        for pin in 0..PIN_COUNT {
+            let entry = self.redirection[pin];
+            if entry.vector() != vector || !entry.level_triggered() {
+                continue;
+            }
+            self.remote_irr[pin] = false;
+            if self.line_level[pin] && !entry.masked() && entry.delivery_mode() == 0 {
+                self.remote_irr[pin] = true;
+                reinject = Some(vector);
+            }
+        }
+        reinject
+    }
+
+    /// Re-evaluates one pin after its redirection entry changed.
+    ///
+    /// Used after an I/O APIC register write that unmasks or reprograms a line
+    /// whose input is already asserted; returns the vector to inject, if any.
+    pub fn refresh_pin(&mut self, pin: usize) -> Option<u8> {
+        if pin >= PIN_COUNT || !self.line_level[pin] {
+            return None;
+        }
+        let entry = self.redirection[pin];
+        if entry.masked() || entry.delivery_mode() != 0 || entry.vector() < 16 {
+            return None;
+        }
+        if entry.level_triggered() {
+            if self.remote_irr[pin] {
+                None
+            } else {
+                self.remote_irr[pin] = true;
+                Some(entry.vector())
+            }
+        } else {
+            None
         }
     }
 

@@ -47,10 +47,10 @@
 //! supplies `PhysMemory` and `GuestContext` (see `machine.rs`).
 
 use super::{
-    apic::{x2apic, LocalApic, TSC_DEADLINE_MSR},
+    apic::{reg as apic_reg, x2apic, LocalApic, TSC_DEADLINE_MSR},
     decode::{self, Decoded, MemoryAccess, PortAccess},
     exit::ExitClass,
-    ioapic::IoApic,
+    ioapic::{IoApic, PIN_COUNT},
     msr::MsrModel,
     pic::Pic,
     virtio::QueueMemory,
@@ -458,6 +458,12 @@ impl Devices {
         ioapic.set_pin(CONSOLE_IRQ_LINE, CONSOLE_IRQ_VECTOR, false);
         ioapic.set_pin(BLK_IRQ_LINE, BLK_IRQ_VECTOR, false);
         ioapic.set_pin(NET_IRQ_LINE, NET_IRQ_VECTOR, false);
+        // Device interrupt lines are level-triggered (virtio asserts until the
+        // guest acknowledges the interrupt status): model the trigger mode so
+        // the remote-IRR/EOI path is exercised.
+        ioapic.set_pin_mode(CONSOLE_IRQ_LINE, CONSOLE_IRQ_VECTOR, false, true, false);
+        ioapic.set_pin_mode(BLK_IRQ_LINE, BLK_IRQ_VECTOR, false, true, false);
+        ioapic.set_pin_mode(NET_IRQ_LINE, NET_IRQ_VECTOR, false, true, false);
         Self {
             pic: Pic::new(),
             ioapic,
@@ -541,7 +547,7 @@ pub fn handle_exit(
             qualification,
             guest_physical_address,
         ),
-        ExitClass::Msr => handle_msr_exit(apic, view, guest),
+        ExitClass::Msr => handle_msr_exit(apic, devices, view, guest),
         _ => Ok(false),
     }
 }
@@ -628,6 +634,7 @@ fn serve_port(devices: &mut Devices, guest: &mut dyn GuestContext, access: &Port
 /// `ECX` holds the MSR number, `EDX:EAX` the value (`rdmsr` writes them).
 fn handle_msr_exit(
     apic: &mut LocalApic,
+    devices: &mut Devices,
     view: &mut MemoryView<'_>,
     guest: &mut dyn GuestContext,
 ) -> Result<bool, EmuError> {
@@ -670,6 +677,9 @@ fn handle_msr_exit(
     if in_x2apic_window {
         debug_assert!(x2apic::TPR <= msr);
     }
+    let eoi_vector = (access.write && in_x2apic_window && msr == x2apic::EOI)
+        .then(|| in_service_vector(apic))
+        .flatten();
     if access.write {
         let value = ((guest.gpr(2) & 0xFFFF_FFFF) << 32) | (guest.gpr(0) & 0xFFFF_FFFF);
         if is_tsc_deadline {
@@ -689,6 +699,11 @@ fn handle_msr_exit(
         // RDMSR replaces the low 32 bits of EDX and EAX only.
         write_register(guest, 0, 4, value & 0xFFFF_FFFF);
         write_register(guest, 2, 4, value >> 32);
+    }
+    if let Some(vector) = eoi_vector {
+        if let Some(reinject) = devices.ioapic.eoi(vector) {
+            apic.inject(reinject);
+        }
     }
     guest.set_rip(access.next_rip);
     Ok(true)
@@ -763,12 +778,71 @@ pub fn device_page(address: u64) -> Option<DevicePage> {
     }
 }
 
-/// Delivers a device interrupt through the I/O APIC redirection table.
+/// Base of the x86 APIC MSI address window.
+pub const MSI_ADDRESS_BASE: u64 = 0xFEE0_0000;
+/// Mask selecting the fixed MSI address prefix (bits 31:20).
+pub const MSI_ADDRESS_MASK: u64 = 0xFFF0_0000;
+
+/// Decodes an x86 MSI write into `(vector, destination APIC id)`.
 ///
-/// The guest owns the table: it can unmask a line, change its vector, or mask
-/// it again. A masked (or non-fixed) line is a no-op, exactly as on hardware.
-fn raise_device_irq(devices: &Devices, apic: &mut LocalApic, line: usize) {
-    if let Some(vector) = devices.ioapic.vector_for_pin(line) {
+/// Supported subset (the one a virtio-MSI driver emits):
+///
+/// - address: low 32 bits only, `0xFEE0_0000` prefix (bits 31:20 = `0xFEE`),
+///   destination APIC id in bits 19:12, and all low 12 bits zero (physical
+///   destination, no redirect hint); high 32 bits zero;
+/// - data: fixed delivery mode, edge trigger and no level/flag bits, i.e.
+///   everything above the low vector byte is zero; the vector must be a
+///   usable interrupt vector (`>= 16`).
+///
+/// Returns `None` for any other address/data combination; the caller then
+/// ignores the write instead of injecting a bogus vector.
+pub fn msi_write(address: u64, data: u32) -> Option<(u8, u8)> {
+    if address >> 32 != 0 || address & 0xFFF != 0 {
+        return None;
+    }
+    if address & MSI_ADDRESS_MASK != MSI_ADDRESS_BASE {
+        return None;
+    }
+    if data & 0xFFFF_FF00 != 0 {
+        return None;
+    }
+    let vector = (data & 0xFF) as u8;
+    if vector < 16 {
+        return None;
+    }
+    let destination = ((address >> 12) & 0xFF) as u8;
+    Some((vector, destination))
+}
+
+/// Delivers an MSI write directly to the local APIC (no I/O APIC involved).
+///
+/// Returns `true` when the address/data pair is in the supported subset and
+/// the vector was injected into the local IRR. The destination APIC id is
+/// decoded but there is a single modeled LAPIC, so it does not route.
+pub fn deliver_msi(apic: &mut LocalApic, address: u64, data: u32) -> bool {
+    match msi_write(address, data) {
+        Some((vector, _destination)) => {
+            apic.inject(vector);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Returns the highest in-service vector of the local APIC.
+fn in_service_vector(apic: &LocalApic) -> Option<u8> {
+    for index in (0..8usize).rev() {
+        let word = apic.mmio_read(apic_reg::ISR + index * 16);
+        if word != 0 {
+            return Some((index as u8) * 32 + (31 - word.leading_zeros() as u8));
+        }
+    }
+    None
+}
+
+/// Applies a logical level to a device line and injects the vector, if any.
+fn set_device_line(devices: &mut Devices, apic: &mut LocalApic, line: usize, asserted: bool) {
+    if let Some(vector) = devices.ioapic.set_line_level(line, asserted) {
         apic.inject(vector);
     }
 }
@@ -819,28 +893,44 @@ fn write_mmio(
     value: u32,
 ) {
     match page {
-        DevicePage::Apic => apic.mmio_write(offset & 0xFFF, value),
-        DevicePage::IoApic => devices.ioapic.mmio_write(offset & 0xFF, value),
+        DevicePage::Apic => {
+            let eoi_vector = (offset & 0xFFF == apic_reg::EOI)
+                .then(|| in_service_vector(apic))
+                .flatten();
+            apic.mmio_write(offset & 0xFFF, value);
+            if let Some(vector) = eoi_vector {
+                if let Some(reinject) = devices.ioapic.eoi(vector) {
+                    apic.inject(reinject);
+                }
+            }
+        }
+        DevicePage::IoApic => {
+            devices.ioapic.mmio_write(offset & 0xFF, value);
+            // A redirection entry may have been unmasked or reprogrammed while
+            // its input line was already asserted.
+            for pin in 0..PIN_COUNT {
+                if let Some(vector) = devices.ioapic.refresh_pin(pin) {
+                    apic.inject(vector);
+                }
+            }
+        }
         DevicePage::Console => {
             devices.console.write(offset as u32 & 0xFFF, value, view);
-            // Any pending console interrupt is signalled through the vCPU's
-            // local APIC: the execution loop delivers it like any other
-            // vector (immediately, or when the interrupt window opens).
-            if devices.console.interrupt_status() != 0 {
-                raise_device_irq(devices, apic, CONSOLE_IRQ_LINE);
-            }
+            // The line stays asserted until the guest acknowledges the virtio
+            // interrupt status; a level-triggered entry therefore re-raises on
+            // EOI while the status is still pending.
+            let asserted = devices.console.interrupt_status() != 0;
+            set_device_line(devices, apic, CONSOLE_IRQ_LINE, asserted);
         }
         DevicePage::Blk => {
             devices.blk.write(offset as u32 & 0xFFF, value, view);
-            if devices.blk.interrupt_status() != 0 {
-                raise_device_irq(devices, apic, BLK_IRQ_LINE);
-            }
+            let asserted = devices.blk.interrupt_status() != 0;
+            set_device_line(devices, apic, BLK_IRQ_LINE, asserted);
         }
         DevicePage::Net => {
             devices.net.write(offset as u32 & 0xFFF, value, view);
-            if devices.net.interrupt_status() != 0 {
-                raise_device_irq(devices, apic, NET_IRQ_LINE);
-            }
+            let asserted = devices.net.interrupt_status() != 0;
+            set_device_line(devices, apic, NET_IRQ_LINE, asserted);
         }
     }
 }

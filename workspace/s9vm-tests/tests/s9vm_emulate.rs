@@ -24,15 +24,15 @@ mod pic;
 mod virtio;
 #[path = "../../kernel/src/s9vm/virtio_blk.rs"]
 mod virtio_blk;
-#[path = "../../kernel/src/s9vm/virtio_net.rs"]
-mod virtio_net;
 #[path = "../../kernel/src/s9vm/virtio_console.rs"]
 mod virtio_console;
+#[path = "../../kernel/src/s9vm/virtio_net.rs"]
+mod virtio_net;
 
 use emulate::{
     handle_exit, interrupt_action, walk_guest, walk_second_level, DevicePage, Devices,
-    GuestContext, InterruptAction, MemoryView, PhysMemory, CONSOLE_BASE, CONSOLE_IRQ_LINE, CONSOLE_IRQ_VECTOR,
-    IOAPIC_BASE,
+    GuestContext, InterruptAction, MemoryView, PhysMemory, CONSOLE_BASE, CONSOLE_IRQ_LINE,
+    CONSOLE_IRQ_VECTOR, IOAPIC_BASE,
 };
 use exit::ExitClass;
 
@@ -601,10 +601,7 @@ fn unmodeled_x2apic_msr_is_left_to_policy() {
 
 #[test]
 fn interrupt_action_injects_when_the_guest_is_interruptible() {
-    assert_eq!(
-        interrupt_action(true, true, false),
-        InterruptAction::Inject
-    );
+    assert_eq!(interrupt_action(true, true, false), InterruptAction::Inject);
     // A window that is still armed is disarmed after the injection.
     assert_eq!(interrupt_action(true, true, true), InterruptAction::Inject);
 }
@@ -729,7 +726,14 @@ fn console_program_queue(
     guest: &mut TestGuest,
     queue: u32,
 ) {
-    console_write(devices, apic, memory, guest, u64::from(virtio_console::reg::QUEUE_SEL), queue);
+    console_write(
+        devices,
+        apic,
+        memory,
+        guest,
+        u64::from(virtio_console::reg::QUEUE_SEL),
+        queue,
+    );
     console_write(
         devices,
         apic,
@@ -787,7 +791,13 @@ fn console_registers_are_reachable_through_the_transport_page() {
     let mut devices = Devices::new();
     let mut apic = apic::LocalApic::new(0);
     assert_eq!(
-        console_read(&mut devices, &mut apic, &mut memory, &mut guest, u64::from(virtio_console::reg::MAGIC)),
+        console_read(
+            &mut devices,
+            &mut apic,
+            &mut memory,
+            &mut guest,
+            u64::from(virtio_console::reg::MAGIC)
+        ),
         virtio_console::MAGIC
     );
     assert_eq!(
@@ -1118,12 +1128,12 @@ fn block_read_request_is_served_through_the_transport_page() {
         0,
     );
     assert_eq!(memory.slice(BLK_DATA, 1), b"D");
-    assert_eq!(memory.slice(BLK_STATUS, 1)[0], virtio_blk::request_status::OK);
-    assert_eq!(devices.blk.completed(), 1);
     assert_eq!(
-        apic.pending_vector(),
-        Some(emulate::BLK_IRQ_VECTOR)
+        memory.slice(BLK_STATUS, 1)[0],
+        virtio_blk::request_status::OK
     );
+    assert_eq!(devices.blk.completed(), 1);
+    assert_eq!(apic.pending_vector(), Some(emulate::BLK_IRQ_VECTOR));
 }
 
 // ---------------------------------------------------------------------------
@@ -1239,7 +1249,12 @@ fn program_ioapic_entry(
 }
 
 /// Notifies the console transmit queue with one small buffer.
-fn console_send(memory: &mut TestMemory, devices: &mut Devices, apic: &mut apic::LocalApic, guest: &mut TestGuest) {
+fn console_send(
+    memory: &mut TestMemory,
+    devices: &mut Devices,
+    apic: &mut apic::LocalApic,
+    guest: &mut TestGuest,
+) {
     console_write(
         devices,
         apic,
@@ -1318,4 +1333,50 @@ fn masked_device_line_delivers_nothing() {
     );
     console_send(&mut memory, &mut devices, &mut apic, &mut guest);
     assert_eq!(apic.pending_vector(), None);
+}
+
+// MSI delivery model
+
+#[test]
+fn msi_decodes_vector_and_destination() {
+    let address = emulate::MSI_ADDRESS_BASE | (2 << 12);
+    assert_eq!(emulate::msi_write(address, 0x40), Some((0x40, 2)));
+    assert_eq!(emulate::msi_write(address, 0xFF), Some((0xFF, 2)));
+}
+
+#[test]
+fn msi_rejects_malformed_address_and_data() {
+    // Wrong base, non-zero low bits, high 32 bits, reserved data bits.
+    assert_eq!(emulate::msi_write(0xFEE0_0004, 0x40), None);
+    assert_eq!(emulate::msi_write(0xFEC0_0000, 0x40), None);
+    assert_eq!(emulate::msi_write(0x1_FEE0_0000, 0x40), None);
+    assert_eq!(
+        emulate::msi_write(emulate::MSI_ADDRESS_BASE, 0x1_0040),
+        None
+    );
+    assert_eq!(emulate::msi_write(emulate::MSI_ADDRESS_BASE, 0x0F), None);
+}
+
+#[test]
+fn msi_delivers_directly_to_the_local_apic() {
+    let mut apic = apic::LocalApic::new(0);
+    assert!(emulate::deliver_msi(
+        &mut apic,
+        emulate::MSI_ADDRESS_BASE | (3 << 12),
+        0x45
+    ));
+    assert_eq!(apic.pending_vector(), Some(0x45));
+    assert!(!emulate::deliver_msi(&mut apic, 0, 0x45));
+    assert_eq!(apic.pending_vector(), Some(0x45));
+}
+
+#[test]
+fn msi_adversarial_values_do_not_panic() {
+    let mut apic = apic::LocalApic::new(0);
+    for address in [0, 1, u64::MAX, 0xFEE0_0FFF, 0xFEEF_F000] {
+        for data in [0, 1, 0xFFFF_FFFF, 0x0000_00FF, 0x0000_0F00] {
+            let _ = emulate::msi_write(address, data);
+            let _ = emulate::deliver_msi(&mut apic, address, data);
+        }
+    }
 }
