@@ -1088,6 +1088,8 @@ struct GuestRunReport {
     exits: u32,
     /// Last decoded exit kind.
     last_kind: u32,
+    /// Guest-physical address of the last exit that reported one (0 otherwise).
+    last_gpa: u64,
     /// Debug bytes seen on port 0xE9 (first 16).
     seen: [u8; 16],
     /// Number of valid entries in `seen`.
@@ -1123,6 +1125,10 @@ fn complete_policy_exit(vcpu: u64, event: &VmmExitEvent) -> Result<(), Error> {
 ///   RIP advance 0: the hardware already advanced RIP for `OUT`/`IN`, and the
 ///   policy only consumes the side effect;
 /// * `HALT` → completed with value 0 / advance 0, then the loop stops;
+/// * `TRANSLATION` (guest touched a guest-physical address the world does not
+///   map) → the address and access type are logged, the exit is completed and
+///   the run aborts: a policy cannot create EPT mappings, so re-entering would
+///   only replay the fault;
 /// * any other exit (MMIO, MSR, exception, timer) → completed as a no-op
 ///   (value 0, advance 0). The real guest kernel only needs the debug port and
 ///   HLT; an unexpected exit class is logged and bounded by [`MAX_GUEST_EXITS`]
@@ -1133,6 +1139,7 @@ fn run_guest_policy_loop(world: u64, vcpu: u64) -> Result<GuestRunReport, Error>
         halt: false,
         exits: 0,
         last_kind: 0,
+        last_gpa: 0,
         seen: [0u8; 16],
         seen_len: 0,
         matched: 0,
@@ -1171,13 +1178,16 @@ fn run_guest_policy_loop(world: u64, vcpu: u64) -> Result<GuestRunReport, Error>
             }
             report.exits += 1;
             report.last_kind = event.kind;
+            report.last_gpa = event.gpa;
             log!(
-                "[s9vm-vmm] guest exit kind={} ({}) port={:#x} size={} value={:#x}",
+                "[s9vm-vmm] guest exit kind={} ({}) port={:#x} size={} value={:#x} gpa={:#x} flags={:#x}",
                 event.kind,
                 exit_kind_name(event.kind),
                 event.port,
                 event.size,
-                event.value
+                event.value,
+                event.gpa,
+                event.flags
             );
             if event.kind == exit_kind::IO_PORT && event.port == POLICY_PORT {
                 let byte = (event.value & 0xFF) as u8;
@@ -1198,6 +1208,31 @@ fn run_guest_policy_loop(world: u64, vcpu: u64) -> Result<GuestRunReport, Error>
                 report.halt = true;
                 log!("[s9vm-vmm] guest halted (HLT policy exit)");
             }
+            if event.kind == exit_kind::TRANSLATION {
+                // The guest used a guest-physical address the world does not
+                // map (and no device model claims). A policy cannot create EPT
+                // mappings, so re-entering would only replay the fault: report
+                // the address and abort cleanly.
+                log!(
+                    "[s9vm-vmm] guest accessed an unmapped guest-physical address {:#x} \
+                     (access flags={}), aborting the guest run",
+                    event.gpa,
+                    event.flags
+                );
+                complete_policy_exit(vcpu, &event)?;
+                report.pass = false;
+                log!(
+                    "[s9vm-vmm] run guest summary: exits={} markers={}/{} halted={} last_exit={} ({}) last_gpa={:#x}",
+                    report.exits,
+                    report.matched,
+                    GUEST_MARKERS.len(),
+                    report.halt,
+                    report.last_kind,
+                    exit_kind_name(report.last_kind),
+                    report.last_gpa
+                );
+                return Ok(report);
+            }
             complete_policy_exit(vcpu, &event)?;
             if report.halt || report.exits >= MAX_GUEST_EXITS {
                 break;
@@ -1207,13 +1242,14 @@ fn run_guest_policy_loop(world: u64, vcpu: u64) -> Result<GuestRunReport, Error>
 
     report.pass = report.halt && report.matched == GUEST_MARKERS.len();
     log!(
-        "[s9vm-vmm] guest summary: exits={} markers={}/{} halt={} last_exit={} ({})",
+        "[s9vm-vmm] guest summary: exits={} markers={}/{} halt={} last_exit={} ({}) last_gpa={:#x}",
         report.exits,
         report.matched,
         GUEST_MARKERS.len(),
         report.halt,
         report.last_kind,
-        exit_kind_name(report.last_kind)
+        exit_kind_name(report.last_kind),
+        report.last_gpa
     );
     if report.seen_len > 0 {
         let mut seen = LogBuf::new();

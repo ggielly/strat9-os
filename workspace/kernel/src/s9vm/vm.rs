@@ -1262,6 +1262,25 @@ fn regs_from_guest(guest: &GuestState, base: &VmmRegs) -> VmmRegs {
     }
 }
 
+/// Names the access type encoded in an EPT-violation qualification.
+///
+/// Bits 2:0 are read/write/execute; bit 8 tells whether the fault came from a
+/// guest-page-table walk (the GPA is then a page-table entry address, not the
+/// faulting linear address).
+pub(crate) fn ept_access_name(qualification: u64) -> &'static str {
+    let access = match qualification & 0x7 {
+        0b001 => "read",
+        0b010 => "write",
+        0b100 => "execute",
+        _ => "read/write",
+    };
+    if qualification & (1 << 8) != 0 {
+        "page-table walk"
+    } else {
+        access
+    }
+}
+
 fn event_from_exit(exit: &ExitInfo, vcpu_id: u64, guest_rax: u64) -> VmmExitEvent {
     let class = exit.class();
     let mut event = VmmExitEvent {
@@ -1427,7 +1446,26 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
     );
     guest
         .validate(&fixed, caps.unrestricted_guest)
-        .map_err(|_| RunError::InvalidGuestState)?;
+        .map_err(|error| {
+            // A rejected state would otherwise only surface as
+            // `InvalidGuestState` in the caller: name the failing check and the
+            // state fields, so a hardware run is diagnosable from the serial
+            // log alone.
+            log::warn!(
+                "[s9vm] vcpu {}: invalid guest state ({:?}): cr0={:#x} cr3={:#x} cr4={:#x} \
+                 efer={:#x} rip={:#x} rsp={:#x} rflags={:#x}",
+                vcpu_id,
+                error,
+                regs.cr0,
+                regs.cr3,
+                regs.cr4,
+                regs.efer,
+                regs.rip,
+                regs.rsp,
+                regs.rflags
+            );
+            RunError::InvalidGuestState
+        })?;
 
     // 3. Loads the control block, configures and executes.
     // SAFETY: VT-x is active on this CPU (checked above); the control block
@@ -1659,12 +1697,42 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                             if class == ExitClass::PreemptionTimer {
                                 stats.timer_exits += 1;
                             }
+                            // An EPT violation that reaches policy means the
+                            // guest touched a GPA the world does not map and
+                            // that no device model claims. Name the address,
+                            // the access type and the guest context: without
+                            // them the only visible symptom is a replayed
+                            // instruction or a later entry failure.
+                            if class == ExitClass::EptViolation {
+                                log::warn!(
+                                    "[s9vm] vcpu {}: EPT violation gpa={:#x} qual={:#x} \
+                                     access={} rip={:#x} cr3={:#x} rsp={:#x}",
+                                    vcpu_id,
+                                    exit.guest_physical_address,
+                                    exit.qualification,
+                                    ept_access_name(exit.qualification),
+                                    hardware.guest().rip,
+                                    hardware.guest().cr3,
+                                    hardware.guest().rsp
+                                );
+                            }
                             let event = event_from_exit(&exit, vcpu_id, hardware.guest().rax);
                             let _ = push_exit(world_id, event);
                         }
                         break;
                     }
                     Err(error) => {
+                        // A VM-entry failure ("VMfail") carries a hardware
+                        // instruction-error code; dump the guest-state fields
+                        // too, they are the only way to find the invalid one.
+                        if let VcpuError::VmFail(code) = error {
+                            log::error!(
+                                "[s9vm] vcpu {}: VM entry failed (instruction error {:#x}): {}",
+                                vcpu_id,
+                                code,
+                                hardware.guest_diagnostics()
+                            );
+                        }
                         result = Err(RunError::Hardware(error));
                         break;
                     }
