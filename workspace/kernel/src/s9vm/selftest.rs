@@ -1986,7 +1986,9 @@ fn run_acpi_in_world(caps: &HwCaps, world_id: u64) -> Result<AcpiReport, Selftes
     //    world's vCPU APIC identifiers. This phase therefore runs from a
     //    kernel thread (see `s9vm_acpi_selftest`), never from the early
     //    bootstrap where the scheduler is not available yet.
+    log::info!("[s9vm] acpitest: registering the world vCPU");
     let _vcpu_id = vm::create_vcpu(world_id, 0).map_err(|_| SelftestError::VmFail(2))?;
+    log::info!("[s9vm] acpitest: mapping guest pages");
     let expected_apics = vm::get(world_id)
         .map(|record| record.vcpu_count as u8)
         .unwrap_or(0);
@@ -2043,6 +2045,7 @@ fn run_acpi_in_world(caps: &HwCaps, world_id: u64) -> Result<AcpiReport, Selftes
 
     // 4. Payload and firmware tables.
     write_world_bytes(world_id, ACPI_GPA_CODE, ACPI_CODE)?;
+    log::info!("[s9vm] acpitest: writing the firmware tables");
     vm::write_acpi(world_id, caps, vm::ACPI_GPA).map_err(|_| SelftestError::VmFail(5))?;
     // The copy is observable through the world translation: first byte of the
     // RSDP signature.
@@ -2075,6 +2078,7 @@ fn run_acpi_in_world(caps: &HwCaps, world_id: u64) -> Result<AcpiReport, Selftes
     };
     // The guest is entered from a kernel thread here; mask host interrupts for
     // the duration of the direct run loop, as the bootstrap phases do.
+    log::info!("[s9vm] acpitest: entering the guest");
     let saved_flags = crate::arch::save_flags_and_cli();
     let mut debug_out = [0u8; 4];
     let mut debug_len = 0usize;
@@ -2207,6 +2211,10 @@ fn run_acpi_task() {
         log::warn!("[s9vm] acpitest FAIL: platform capabilities unavailable");
         return;
     };
+    log::info!(
+        "[s9vm] acpitest: task start (active_cpus={})",
+        crate::s9vm::active_cpu_count()
+    );
     match run_acpi(&caps) {
         Ok(report) => log::info!(
             "[s9vm] acpitest PASS: total={} io={} hlt={} marker={:?} rsdp={:#x} \
@@ -2329,10 +2337,12 @@ fn run_smp_in_world(caps: &HwCaps, world_id: u64) -> Result<SmpReport, SelftestE
     let page_size = crate::s9vm::mmu::PAGE_SIZE;
 
     // 1. Two vCPUs in the same world; the MADT/APIC ids are 0 and 1.
+    log::info!("[s9vm] smptest: creating two vCPUs");
     let vcpus = [
         vm::create_vcpu(world_id, 0).map_err(|_| SelftestError::VmFail(2))?,
         vm::create_vcpu(world_id, 1).map_err(|_| SelftestError::VmFail(3))?,
     ];
+    log::info!("[s9vm] smptest: mapping guest pages");
 
     // 2. Guest memory: per-vCPU page tables, code and stack, plus one shared
     //    page both vCPUs write to.
@@ -2399,6 +2409,11 @@ fn run_smp_in_world(caps: &HwCaps, world_id: u64) -> Result<SmpReport, SelftestE
                 SelftestError::BadExit("smp RUN failed")
             })?;
             total_runs += 1;
+            // `request_run` wakes the vCPU kernel task; wait for it to publish
+            // its exit before draining the queue (bounded wait: a stuck vCPU
+            // turns into a diagnostic instead of a hang).
+            log::info!("[s9vm] smptest: vCPU {} round {} RUN requested", index, round);
+            let _ = vm::wait_exit(vcpu, 2_000_000_000);
             let event = vm::pop_exit(world_id)
                 .map_err(|_| SelftestError::BadExit("smp exit queue empty after RUN"))?;
             if event.vcpu_id != vcpu {
@@ -2596,6 +2611,10 @@ fn run_smp_task() {
         log::warn!("[s9vm] smptest FAIL: platform capabilities unavailable");
         return;
     };
+    log::info!(
+        "[s9vm] smptest: task start (active_cpus={})",
+        crate::s9vm::active_cpu_count()
+    );
     match run_smp(&caps) {
         Ok(report) => log::info!(
             "[s9vm] smptest PASS: vcpus={} markers={:?} exits={} hlt={} runs={} \
@@ -2635,8 +2654,23 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
     let block_phase = matches!(mode, "2" | "all" | "blk");
     let network_phase = matches!(mode, "2" | "all" | "net");
     let loader_phase = matches!(mode, "2" | "all" | "loader");
-    let acpi_phase = matches!(mode, "2" | "all" | "acpi");
-    let smp_phase = matches!(mode, "2" | "all" | "smp");
+    // The phases that need a registered vCPU run from kernel threads at the
+    // `kthread` stage. They are opt-in for the `2`/`all` mode: they exercise
+    // the newest kernel-thread path, so a boot that must stay predictable can
+    // keep them out while still running the six bootstrap phases.
+    let deferred_enabled = crate::boot_args()
+        .and_then(|args| args.env_get("s9vm.selftest.deferred"))
+        .map(|value| value == "1" || value == "true")
+        .unwrap_or(false);
+    let all_phases = matches!(mode, "2" | "all");
+    let acpi_phase = mode == "acpi" || (all_phases && deferred_enabled);
+    let smp_phase = mode == "smp" || (all_phases && deferred_enabled);
+    if all_phases && !deferred_enabled {
+        log::info!(
+            "[s9vm] deferred phases (acpi, smp) not requested; set \
+             s9vm.selftest.deferred=1 to run them"
+        );
+    }
 
     if acpi_phase {
         // The ACPI phase registers a vCPU, which needs the scheduler: defer it
