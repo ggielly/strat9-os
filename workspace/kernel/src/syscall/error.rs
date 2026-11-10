@@ -80,7 +80,10 @@ pub enum SyscallError {
     #[error("Directory not empty")]
     NotEmpty = -39,
     #[error("Not supported")]
-    NotSupported = -52,
+    /// Linux `ENOTSUP`/`EOPNOTSUPP` is 95; the userspace ABI table uses the
+    /// Linux value, so the kernel error must carry the same number (it used to
+    /// be -52, which reached userspace as an unknown errno).
+    NotSupported = -95,
     #[error("Message too long")]
     MessageSize = -90,
     #[error("No buffer space available")]

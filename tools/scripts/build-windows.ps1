@@ -97,7 +97,6 @@ $Components = @(
     @{ Name = "strate-init"; Cwd = "workspace\components\strate-init" }
     @{ Name = "strate-console-admin"; Cwd = "workspace\components\strate-console-admin" }
     @{ Name = "s9vm-console"; Cwd = "workspace\components\s9vm-console" }
-    @{ Name = "s9vm-vmm"; Cwd = "workspace\components\s9vm-vmm"; TargetDir = (Join-Path $RootDir "target"); Env = @{ RUSTFLAGS = "-C relocation-model=static -C link-arg=-L../kernel -C link-arg=-T../user-linker.ld -C link-arg=-no-pie -C link-arg=-z -C link-arg=nostart-stop-gc -C code-model=kernel -C force-frame-pointers=yes" } }
     @{ Name = "s9vm-vmm"; Cwd = "workspace\components\s9vm-vmm" }
     @{ Name = "strate-net"; Cwd = "workspace\components\strate-net" }
     @{ Name = "strate-bus"; Cwd = "workspace\components\strate-bus" }
