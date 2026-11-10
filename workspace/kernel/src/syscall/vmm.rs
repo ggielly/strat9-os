@@ -41,11 +41,12 @@
 
 use super::error::SyscallError;
 use crate::{
-    capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
+    capability::{CapId, CapPermissions, ResourceType, get_capability_manager},
     memory::{UserSliceRead, UserSliceWrite},
     process::current_task_clone,
     s9vm,
     s9vm::{
+        cpuid::{self, CpuidPolicy},
         memmap::MapError,
         vm::{self, VmError},
     },
@@ -53,8 +54,8 @@ use crate::{
 };
 use alloc::vec;
 use strat9_abi::vmm::{
-    state, vcpu_flags, VmmImageInfo, VmmInfo, VmmRegs, VmmVcpuInfo, VmmWorldEntry, VmmWorldStats,
-    VMM_ABI_VERSION, VMM_LIST_MAX, VMM_NAME_MAX, VMM_VCPU_LIST_MAX,
+    VMM_ABI_VERSION, VMM_LIST_MAX, VMM_NAME_MAX, VMM_VCPU_LIST_MAX, VmmCpuidPolicy, VmmImageInfo,
+    VmmInfo, VmmRegs, VmmVcpuInfo, VmmWorldEntry, VmmWorldStats, state, vcpu_flags,
 };
 
 /// Maximum size of a structure read from user space.
@@ -384,6 +385,33 @@ pub fn sys_vmm_irq_wait(vcpu_handle: u64, timeout_ns: u64) -> Result<u64, Syscal
     Ok(u64::from(ready))
 }
 
+/// SYS_VMM_SET_CPUID_POLICY (573): replaces the guest CPU description of a
+/// world.
+///
+/// `arg1` is the world capability handle (write permission required) and
+/// `arg2` a pointer to a [`VmmCpuidPolicy`]. The policy belongs to the world
+/// and applies from the next guest entry: every vCPU of the world then
+/// observes the same CPU. A feature bit the engine refuses (nested
+/// virtualization) is silently cleared, and a zero numeric field or feature
+/// mask keeps the engine default, so a caller can tune only what it cares
+/// about.
+pub fn sys_vmm_set_cpuid_policy(vmm_handle: u64, policy_ptr: u64) -> Result<u64, SyscallError> {
+    let required = CapPermissions {
+        write: true,
+        ..CapPermissions::none()
+    };
+    let world = vmm_world(vmm_handle, required)?;
+    let request: VmmCpuidPolicy = read_struct(policy_ptr)?;
+    if request.abi_version != VMM_ABI_VERSION {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let policy = cpuid_policy_from_abi(&request)?;
+    if !vm::set_cpuid_policy(world, policy) {
+        return Err(SyscallError::NotFound);
+    }
+    Ok(0)
+}
+
 /// SYS_VMM_PAUSE (575): pauses a world.
 pub fn sys_vmm_pause(vmm_handle: u64) -> Result<u64, SyscallError> {
     let required = CapPermissions {
@@ -454,11 +482,7 @@ pub fn sys_vmm_exit_complete(
 const MAX_CONSOLE_IO: u64 = 64 * 1024;
 
 /// SYS_VMM_CONSOLE_INPUT (581): queues bytes for the guest console.
-pub fn sys_vmm_console_input(
-    vmm_handle: u64,
-    buf_ptr: u64,
-    len: u64,
-) -> Result<u64, SyscallError> {
+pub fn sys_vmm_console_input(vmm_handle: u64, buf_ptr: u64, len: u64) -> Result<u64, SyscallError> {
     let world = vmm_world(vmm_handle, VMM_OWNER)?;
     if len == 0 || len > MAX_CONSOLE_IO || buf_ptr == 0 {
         return Err(SyscallError::InvalidArgument);
@@ -861,6 +885,56 @@ pub fn mark_running(vmm_id: u64) -> bool {
 pub fn mark_stopped(vmm_id: u64) -> bool {
     vm::set_state(vmm_id, state::STOPPED)
 }
+/// Converts an ABI CPU description into the engine model.
+///
+/// Reserved words must be zero and the ABI version must match. Everything else
+/// is a tuning field: a zero value means "keep the engine default", so a caller
+/// can change only the masks or topology it cares about. Leaf ranges are
+/// bounded by the leaves the replay actually implements, and an out-of-range
+/// value is rejected rather than clamped so a caller never believes it hid a
+/// leaf that is in fact still answered.
+fn cpuid_policy_from_abi(request: &VmmCpuidPolicy) -> Result<CpuidPolicy, SyscallError> {
+    if request.flags != 0 || request.reserved != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if request.max_basic_leaf > cpuid::MAX_BASIC_LEAF {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if request.max_extended_leaf != 0
+        && (request.max_extended_leaf < cpuid::LEAF_EXTENDED_FEATURES
+            || request.max_extended_leaf > cpuid::MAX_EXTENDED_LEAF)
+    {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if request.family > 0xFF
+        || request.model > 0xFF
+        || request.stepping > 0xFF
+        || request.cores > 0xFF
+        || request.threads > 0xFF
+    {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let defaults = CpuidPolicy::new();
+    Ok(CpuidPolicy {
+        max_basic_leaf: defaulted(request.max_basic_leaf, defaults.max_basic_leaf),
+        max_extended_leaf: defaulted(request.max_extended_leaf, defaults.max_extended_leaf),
+        family: defaulted(request.family, defaults.family),
+        model: defaulted(request.model, defaults.model),
+        stepping: defaulted(request.stepping, defaults.stepping),
+        cores: defaulted(request.cores, defaults.cores),
+        threads: defaulted(request.threads, defaults.threads),
+        leaf1_ecx: defaulted(request.leaf1_ecx, defaults.leaf1_ecx),
+        leaf1_edx: defaulted(request.leaf1_edx, defaults.leaf1_edx),
+        extended1_ecx: defaulted(request.extended1_ecx, defaults.extended1_ecx),
+        extended1_edx: defaulted(request.extended1_edx, defaults.extended1_edx),
+    })
+}
+
+/// A zero ABI field means "keep the engine default".
+fn defaulted(value: u32, default: u32) -> u32 {
+    if value == 0 { default } else { value }
+}
+
 fn map_vm_error(error: VmError) -> SyscallError {
     match error {
         VmError::Unknown => SyscallError::NotFound,

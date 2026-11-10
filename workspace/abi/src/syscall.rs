@@ -1685,7 +1685,9 @@ pub const SYS_VMM_DESTROY_VCPU: usize = 571;
 /// Reserved: map an IOMMU domain into a world.
 pub const SYS_VMM_MAP_IOMMU: usize = 572;
 
-/// Reserved: set the CPUID policy of a world.
+/// Set the guest CPU description of a world. Arguments: VMM capability handle
+/// (write permission required), pointer to a [`strat9_abi::vmm::VmmCpuidPolicy`].
+/// The policy is per world and applies from the next guest entry.
 pub const SYS_VMM_SET_CPUID_POLICY: usize = 573;
 
 /// Reserved: read per-exit statistics.

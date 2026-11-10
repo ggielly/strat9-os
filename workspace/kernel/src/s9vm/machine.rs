@@ -35,9 +35,18 @@
 
 use super::{
     apic::LocalApic,
+    cpuid::CpuidPolicy,
     emulate::{self, Devices, EmuError, GuestContext, MemoryView, PhysMemory},
+    exit::ExitClass,
     vcpu::{ExitInfo, Vcpu},
 };
+
+/// Length in bytes of the `CPUID` instruction (`0F A2`).
+///
+/// The instruction has no operands and no prefixes that could change its
+/// length: on a CPUID exit the guest `RIP` points at the instruction itself, so
+/// replaying it means advancing `RIP` by exactly two bytes.
+const CPUID_INSTRUCTION_LEN: u64 = 2;
 
 /// Physical memory access through the higher-half direct map.
 ///
@@ -108,10 +117,16 @@ impl GuestContext for VcpuGuest<'_> {
     }
 }
 
-/// Device model and emulation state of one world.
+/// Device model, CPU description and emulation state of one world.
+///
+/// The CPUID policy is stored **per world**, not per vCPU: every vCPU of the
+/// world must observe the same processor, and a guest that migrates a thread
+/// between vCPUs must not see the feature set change under it. A future SMP
+/// extension may refine this into a per-vCPU policy.
 pub struct Machine {
     devices: Devices,
     memory: HhdmMemory,
+    cpuid: CpuidPolicy,
 }
 
 impl Machine {
@@ -120,7 +135,25 @@ impl Machine {
         Self {
             devices: Devices::new(),
             memory: HhdmMemory,
+            cpuid: CpuidPolicy::new(),
         }
+    }
+
+    /// Current guest CPU description.
+    pub fn cpuid_policy(&self) -> CpuidPolicy {
+        self.cpuid
+    }
+
+    /// Replaces the guest CPU description.
+    ///
+    /// The change applies to the next guest entry: while a vCPU is running, the
+    /// machine is moved out of the world registry, so a concurrent update
+    /// reaches the registry copy and is overwritten when the execution copy is
+    /// restored at the end of `RUN`. This is intentional and benign — the
+    /// policy is not meant to change mid-run, and the syscall reports success
+    /// for an existing world so the caller does not need to retry.
+    pub fn set_cpuid_policy(&mut self, policy: CpuidPolicy) {
+        self.cpuid = policy;
     }
 
     /// Device model (diagnostics and event routing by the kernel).
@@ -161,7 +194,11 @@ impl Machine {
     /// # Safety
     /// The control block must be loaded and the guest must not be running.
     pub unsafe fn service_devices(&mut self, vcpu: &mut Vcpu) {
-        let Self { devices, memory } = self;
+        let Self {
+            devices,
+            memory,
+            cpuid: _,
+        } = self;
         let mut view = MemoryView::new(
             memory,
             vcpu.second_level_pointer(),
@@ -189,7 +226,17 @@ impl Machine {
         apic: &mut LocalApic,
         exit: &ExitInfo,
     ) -> Result<bool, EmuError> {
-        let Self { devices, memory } = self;
+        // CPUID is fully replayed here: the guest must never observe the exit,
+        // and the answer depends only on the world's policy, not on memory.
+        if exit.class() == ExitClass::Cpuid {
+            self.replay_cpuid(vcpu);
+            return Ok(true);
+        }
+        let Self {
+            devices,
+            memory,
+            cpuid: _,
+        } = self;
         let mut view = MemoryView::new(
             memory,
             vcpu.second_level_pointer(),
@@ -206,6 +253,30 @@ impl Machine {
             exit.qualification,
             exit.guest_physical_address,
         )
+    }
+
+    /// Replays the intercepted `CPUID` instruction against the policy.
+    ///
+    /// Inputs are the architectural `EAX` (leaf) and `ECX` (subleaf) registers;
+    /// outputs are `EAX`, `EBX`, `ECX` and `EDX` in that order. The 32-bit
+    /// results are written through the 64-bit general-purpose registers, whose
+    /// upper halves are zeroed exactly like a hardware 32-bit destination.
+    /// `RIP` then advances past the fixed two-byte `0F A2` encoding.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`Machine::handle`]: the control block is loaded and
+    /// the guest is not running.
+    unsafe fn replay_cpuid(&self, vcpu: &mut Vcpu) {
+        let mut guest = VcpuGuest { vcpu };
+        let leaf = guest.gpr(0) as u32;
+        let subleaf = guest.gpr(1) as u32;
+        let result = self.cpuid.leaf(leaf, subleaf);
+        guest.set_gpr(0, u64::from(result[0]));
+        guest.set_gpr(3, u64::from(result[1]));
+        guest.set_gpr(1, u64::from(result[2]));
+        guest.set_gpr(2, u64::from(result[3]));
+        guest.set_rip(guest.rip().wrapping_add(CPUID_INSTRUCTION_LEN));
     }
 }
 

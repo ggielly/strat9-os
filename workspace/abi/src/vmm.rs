@@ -38,7 +38,11 @@
 /// Version 4 is append-only over version 3: it adds [`VmmVcpuInfo`] and the
 /// per-vCPU introspection syscalls (`SYS_VMM_VCPU_LIST`, `SYS_VMM_VCPU_REGS`)
 /// without changing any existing structure.
-pub const VMM_ABI_VERSION: u32 = 4;
+///
+/// Version 5 is append-only over version 4: it adds [`VmmCpuidPolicy`] and the
+/// `SYS_VMM_SET_CPUID_POLICY` (573) syscall that installs it. No existing
+/// structure changed.
+pub const VMM_ABI_VERSION: u32 = 5;
 
 /// Maximum number of registers exposed by [`VmmRegs`] (general-purpose registers).
 pub const VMM_REG_COUNT: usize = 16;
@@ -298,6 +302,60 @@ pub struct VmmVcpuInfo {
 static_assertions::assert_eq_size!(VmmVcpuInfo, [u8; 32]);
 static_assertions::const_assert_eq!(core::mem::align_of::<VmmVcpuInfo>(), 8);
 
+/// Guest CPU description installed by `SYS_VMM_SET_CPUID_POLICY` (573).
+///
+/// Size: 56 bytes, alignment 4. This is a **compact, mask-based** form: the
+/// vendor string and the brand string are fixed by the engine (they identify
+/// s9vm and never a real vendor), so a policy only carries the parts a caller
+/// may tune — leaf ranges, version signature, topology counts and feature
+/// masks.
+///
+/// The caller must set `abi_version` to [`VMM_ABI_VERSION`]; `flags` and
+/// `reserved` are reserved and must be zero (the kernel rejects any other
+/// value). A zero numeric field or feature mask keeps the engine default, so a
+/// caller may tune only what it cares about. A leaf range must fall inside the
+/// leaves the engine implements (an out-of-range value is rejected rather than
+/// silently clamped), and a feature bit the engine refuses — nested
+/// virtualization, for instance — is silently cleared.
+///
+/// The structure is per world: every vCPU of a world observes the same CPU.
+/// Replacing a policy applies to the next guest entry.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VmmCpuidPolicy {
+    /// ABI version of the structure ([`VMM_ABI_VERSION`]).
+    pub abi_version: u32,
+    /// Reserved, must be zero.
+    pub flags: u32,
+    /// Highest basic leaf, `CPUID.0:EAX` (0 = engine default).
+    pub max_basic_leaf: u32,
+    /// Highest extended leaf, `CPUID.0x8000_0000:EAX` (0 = engine default).
+    pub max_extended_leaf: u32,
+    /// Guest family (0 = engine default).
+    pub family: u32,
+    /// Guest model (0 = engine default).
+    pub model: u32,
+    /// Guest stepping (0 = engine default).
+    pub stepping: u32,
+    /// Physical cores per package (0 = engine default).
+    pub cores: u32,
+    /// Threads per core (0 = engine default).
+    pub threads: u32,
+    /// `CPUID.1:ECX` mask.
+    pub leaf1_ecx: u32,
+    /// `CPUID.1:EDX` mask.
+    pub leaf1_edx: u32,
+    /// `CPUID.0x8000_0001:ECX` mask.
+    pub extended1_ecx: u32,
+    /// `CPUID.0x8000_0001:EDX` mask.
+    pub extended1_edx: u32,
+    /// Reserved, must be zero.
+    pub reserved: u32,
+}
+
+static_assertions::assert_eq_size!(VmmCpuidPolicy, [u8; 56]);
+static_assertions::const_assert_eq!(core::mem::align_of::<VmmCpuidPolicy>(), 4);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,6 +370,7 @@ mod tests {
         assert_eq!(size_of::<VmmWorldStats>(), 96);
         assert_eq!(size_of::<VmmImageInfo>(), 40);
         assert_eq!(size_of::<VmmVcpuInfo>(), 32);
+        assert_eq!(size_of::<VmmCpuidPolicy>(), 56);
     }
 
     #[test]

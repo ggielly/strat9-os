@@ -22,8 +22,7 @@
 
 //! L2: s9vm ABI (constants, structure, version).
 
-use strat9_abi::syscall::*;
-use strat9_abi::vmm as abi;
+use strat9_abi::{syscall::*, vmm as abi};
 
 #[test]
 fn p0_syscall_numbers_are_distinct_and_in_range() {
@@ -85,8 +84,8 @@ fn p0_block_does_not_collide_with_iommu_block() {
 
 #[test]
 fn abi_version_is_current() {
-    // Version 4: append-only per-vCPU introspection over version 3.
-    assert_eq!(abi::VMM_ABI_VERSION, 4);
+    // Version 5: append-only CPUID policy over version 4.
+    assert_eq!(abi::VMM_ABI_VERSION, 5);
 }
 
 #[test]
@@ -275,10 +274,7 @@ fn world_stats_zeroed_defaults() {
 #[test]
 fn list_bound_matches_world_name_storage() {
     assert_eq!(abi::VMM_LIST_MAX, 64);
-    assert_eq!(
-        abi::VMM_NAME_MAX,
-        abi::VmmWorldEntry::default().name.len()
-    );
+    assert_eq!(abi::VMM_NAME_MAX, abi::VmmWorldEntry::default().name.len());
 }
 
 #[test]
@@ -357,3 +353,58 @@ fn vcpu_list_bound_matches_world_bound() {
     assert_eq!(abi::VMM_VCPU_LIST_MAX, 32);
 }
 
+#[test]
+fn cpuid_policy_syscall_numbers_are_stable() {
+    assert_eq!(SYS_VMM_SET_CPUID_POLICY, 573);
+    // Inside the s9vm block and before the world control calls.
+    assert!(SYS_VMM_SET_CPUID_POLICY < SYS_VMM_PAUSE);
+    assert!(SYS_VMM_SET_CPUID_POLICY < 590);
+}
+
+#[test]
+fn cpuid_policy_layout() {
+    use core::mem::{align_of, offset_of, size_of};
+
+    assert_eq!(size_of::<abi::VmmCpuidPolicy>(), 56);
+    assert_eq!(align_of::<abi::VmmCpuidPolicy>(), 4);
+
+    assert_eq!(offset_of!(abi::VmmCpuidPolicy, abi_version), 0);
+    assert_eq!(offset_of!(abi::VmmCpuidPolicy, flags), 4);
+    assert_eq!(offset_of!(abi::VmmCpuidPolicy, max_basic_leaf), 8);
+    assert_eq!(offset_of!(abi::VmmCpuidPolicy, max_extended_leaf), 12);
+    assert_eq!(offset_of!(abi::VmmCpuidPolicy, family), 16);
+    assert_eq!(offset_of!(abi::VmmCpuidPolicy, model), 20);
+    assert_eq!(offset_of!(abi::VmmCpuidPolicy, stepping), 24);
+    assert_eq!(offset_of!(abi::VmmCpuidPolicy, cores), 28);
+    assert_eq!(offset_of!(abi::VmmCpuidPolicy, threads), 32);
+    assert_eq!(offset_of!(abi::VmmCpuidPolicy, leaf1_ecx), 36);
+    assert_eq!(offset_of!(abi::VmmCpuidPolicy, leaf1_edx), 40);
+    assert_eq!(offset_of!(abi::VmmCpuidPolicy, extended1_ecx), 44);
+    assert_eq!(offset_of!(abi::VmmCpuidPolicy, extended1_edx), 48);
+    assert_eq!(offset_of!(abi::VmmCpuidPolicy, reserved), 52);
+
+    // No implicit padding: the last fixed field ends exactly at `size`.
+    assert_eq!(
+        offset_of!(abi::VmmCpuidPolicy, reserved) + 4,
+        size_of::<abi::VmmCpuidPolicy>()
+    );
+}
+
+#[test]
+fn cpuid_policy_zeroed_defaults() {
+    let policy = abi::VmmCpuidPolicy::default();
+    assert_eq!(policy.abi_version, 0);
+    assert_eq!(policy.flags, 0);
+    assert_eq!(policy.max_basic_leaf, 0);
+    assert_eq!(policy.max_extended_leaf, 0);
+    assert_eq!(policy.family, 0);
+    assert_eq!(policy.model, 0);
+    assert_eq!(policy.stepping, 0);
+    assert_eq!(policy.cores, 0);
+    assert_eq!(policy.threads, 0);
+    assert_eq!(policy.leaf1_ecx, 0);
+    assert_eq!(policy.leaf1_edx, 0);
+    assert_eq!(policy.extended1_ecx, 0);
+    assert_eq!(policy.extended1_edx, 0);
+    assert_eq!(policy.reserved, 0);
+}
