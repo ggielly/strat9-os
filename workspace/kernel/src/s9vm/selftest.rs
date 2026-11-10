@@ -90,8 +90,9 @@ const GPA_GDT: u64 = 0x7000;
 // Console phase.
 /// Guest-physical address of the virtio console transport page.
 const CONSOLE_MMIO_BASE: u64 = 0xFEB0_0000;
-/// Guest pages of the console phase: tables, code, stack, queues, buffer.
-const CONSOLE_GUEST_PAGES: u64 = 8;
+/// Guest pages of the console phase: tables, code, stack, queues, buffer and
+/// the second page directory that maps the MMIO window.
+const CONSOLE_GUEST_PAGES: u64 = 9;
 /// Guest-physical address of the queue page (descriptor table + rings).
 const GPA_QUEUES: u64 = 0x6000;
 /// Guest-physical address of the console buffer page.
@@ -107,6 +108,12 @@ const CONSOLE_GPA_PD: u64 = 0x2000;
 const CONSOLE_GPA_PT: u64 = 0x3000;
 const CONSOLE_GPA_CODE: u64 = 0x4000;
 const CONSOLE_GPA_STACK: u64 = 0x5000;
+/// Second page directory, reached through PML4/PDPT entry 3.
+const CONSOLE_GPA_PD_HIGH: u64 = 0x8000;
+/// 2 MiB-aligned start of the window containing the console transport page.
+const CONSOLE_GPA_MMIO_WINDOW: u64 = 0xFEA0_0000;
+/// Page-directory index of that window (0xFEA0_0000 >> 21, low 9 bits).
+const CONSOLE_PD_MMIO_INDEX: usize = 0x1F5;
 
 /// Guest code of the console phase.
 ///
@@ -755,11 +762,21 @@ pub fn run_console(caps: &HwCaps) -> Result<ConsoleReport, SelftestError> {
     let stack = alloc_frame()?;
     let queues = alloc_frame()?;
     let buffer = alloc_frame()?;
+    let pd_high = alloc_frame()?;
 
-    // Identity guest paging over the eight pages.
+    // Identity guest paging over the nine pages, plus a 2 MiB identity page
+    // covering the device MMIO window. Without it the guest would take a page
+    // fault (unmapped linear address) *before* the EPT violation that the
+    // transport emulation relies on, and with no IDT that is a triple fault.
     write_u64(&pml4, 0, CONSOLE_GPA_PDPT | 0x3);
     write_u64(&pdpt, 0, CONSOLE_GPA_PD | 0x3);
+    write_u64(&pdpt, 3, CONSOLE_GPA_PD_HIGH | 0x3);
     write_u64(&pd, 0, CONSOLE_GPA_PT | 0x3);
+    write_u64(
+        &pd_high,
+        CONSOLE_PD_MMIO_INDEX * 8,
+        CONSOLE_GPA_MMIO_WINDOW | 0x83, // present | read-write | 2 MiB page
+    );
     for page in 0..CONSOLE_GUEST_PAGES {
         let gpa = page * crate::s9vm::mmu::PAGE_SIZE;
         write_u64(&pt, page as usize * 8, gpa | 0x3);
@@ -792,6 +809,7 @@ pub fn run_console(caps: &HwCaps) -> Result<ConsoleReport, SelftestError> {
         (CONSOLE_GPA_STACK, &stack),
         (GPA_QUEUES, &queues),
         (GPA_CONSOLE_BUFFER, &buffer),
+        (CONSOLE_GPA_PD_HIGH, &pd_high),
     ];
     for (gpa, frame) in pages {
         second_level
@@ -879,9 +897,12 @@ pub fn run_console(caps: &HwCaps) -> Result<ConsoleReport, SelftestError> {
             ExitClass::PreemptionTimer => {}
             other => {
                 log::warn!(
-                    "[s9vm] console test: unexpected exit class={:?} reason={:#x} rip={:#x}",
+                    "[s9vm] console test: unexpected exit class={:?} reason={:#x} \
+                     qual={:#x} gpa={:#x} rip={:#x}",
                     other,
                     exit.raw_reason,
+                    exit.qualification,
+                    exit.guest_physical_address,
                     vcpu.guest().rip
                 );
                 outcome = Err(SelftestError::BadExit("unexpected console-test exit"));
