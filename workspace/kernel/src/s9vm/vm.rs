@@ -2106,6 +2106,30 @@ pub fn create_vcpu(world_id: u64, apic_id: u32) -> Result<u64, VcpuRegistryError
     Ok(id)
 }
 
+/// Registers a logical vCPU **without** spawning a kernel task.
+///
+/// The slot exists in the registry (so `write_acpi` can describe it, its
+/// register block can be read and `destroy` has nothing to join), but
+/// `request_run` is refused: there is no task to wake. Callers that use it
+/// drive the vCPU with a direct `Vcpu` loop, which keeps the in-kernel
+/// selftests independent from the scheduler.
+pub fn create_vcpu_detached(world_id: u64, apic_id: u32) -> Result<u64, VcpuRegistryError> {
+    let mut worlds = WORLDS.lock();
+    let world = worlds
+        .get_mut(&world_id)
+        .ok_or(VcpuRegistryError::WorldUnknown)?;
+    if world.closing {
+        return Err(VcpuRegistryError::WorldUnknown);
+    }
+    if world.vcpus.len() >= MAX_VCPUS_PER_WORLD {
+        return Err(VcpuRegistryError::Limit);
+    }
+    let id = NEXT_VCPU.fetch_add(1, Ordering::AcqRel);
+    world.vcpus.push(new_vcpu_slot(id, apic_id));
+    world.record.vcpu_count = world.vcpus.len() as u32;
+    Ok(id)
+}
+
 /// Destroys a logical vCPU. Returns `false` if it is unknown.
 ///
 /// The kernel task is stopped and joined before the entry is removed: the

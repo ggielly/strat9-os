@@ -196,23 +196,57 @@ impl GlobalSchedState {
         lockdep_release(LockRank::IdentityW);
 
         // Lock order: LOCAL (rank 4). Caller holds GLOBAL (rank 1).
-        lockdep_acquire(LockRank::Local, Some(cpu_index));
-        {
-            let class = self.class_table.class_for_task(&task);
-            if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_index].lock() {
-                local_cpu.class_rqs.enqueue(class, task);
-                local_cpu.need_resched = true;
+        //
+        // A CPU selected by the load balancer may not have a local scheduler
+        // yet (an application processor that has not been brought online, or a
+        // CPU whose scheduler is being reinitialised). Silently keeping the
+        // task in `all_tasks` without queueing it makes it **runnable but never
+        // scheduled**: a task waiting for it blocks forever. Fall back to the
+        // boot CPU, and report the situation instead of hanging.
+        let mut target_cpu = cpu_index;
+        let mut placed = false;
+        for attempt in [cpu_index, 0usize] {
+            lockdep_acquire(LockRank::Local, Some(attempt));
+            {
+                let mut guard = LOCAL_SCHEDULERS[attempt].lock();
+                if let Some(ref mut local_cpu) = *guard {
+                    let class = self.class_table.class_for_task(&task);
+                    local_cpu.class_rqs.enqueue(class, task.clone());
+                    local_cpu.need_resched = true;
+                    target_cpu = attempt;
+                    placed = true;
+                }
+            }
+            lockdep_release(LockRank::Local);
+            if placed {
+                break;
             }
         }
-        lockdep_release(LockRank::Local);
+        if !placed {
+            log::warn!(
+                "[sched] no local scheduler for task {} (preferred cpu {}): task not queued",
+                task_id.as_u64(),
+                cpu_index
+            );
+        } else if target_cpu != cpu_index {
+            self.task_cpu.insert(task_id, target_cpu);
+            task.home_cpu
+                .store(target_cpu, core::sync::atomic::Ordering::Relaxed);
+            log::warn!(
+                "[sched] preferred cpu {} has no scheduler for task {}: queued on cpu {}",
+                cpu_index,
+                task_id.as_u64(),
+                target_cpu
+            );
+        }
 
         sched_trace(format_args!(
             "enqueue task={} cpu={}",
             task_id.as_u64(),
-            cpu_index
+            target_cpu
         ));
-        if cpu_index != current_cpu_index() {
-            Some(cpu_index)
+        if target_cpu != current_cpu_index() {
+            Some(target_cpu)
         } else {
             None
         }

@@ -1987,7 +1987,7 @@ fn run_acpi_in_world(caps: &HwCaps, world_id: u64) -> Result<AcpiReport, Selftes
     //    kernel thread (see `s9vm_acpi_selftest`), never from the early
     //    bootstrap where the scheduler is not available yet.
     log::info!("[s9vm] acpitest: registering the world vCPU");
-    let _vcpu_id = vm::create_vcpu(world_id, 0).map_err(|_| SelftestError::VmFail(2))?;
+    let _vcpu_id = vm::create_vcpu_detached(world_id, 0).map_err(|_| SelftestError::VmFail(2))?;
     log::info!("[s9vm] acpitest: mapping guest pages");
     let expected_apics = vm::get(world_id)
         .map(|record| record.vcpu_count as u8)
@@ -2183,36 +2183,31 @@ fn run_acpi_in_world(caps: &HwCaps, world_id: u64) -> Result<AcpiReport, Selftes
     Ok(report)
 }
 
-/// Kthread-stage hook: runs the deferred ACPI phase.
+/// Kthread-stage hook: runs the ACPI phase synchronously.
 ///
-/// The phase needs a registered vCPU, which needs the scheduler (`create_vcpu`
-/// spawns a kernel task). It is therefore requested by
-/// [`maybe_run_from_boot_env`] during the early bootstrap and executed here,
-/// once the scheduler exists, in its own kernel thread.
+/// The phase used to spawn its own kernel thread (to get a scheduler for a
+/// registered vCPU). It now registers a **detached** vCPU (no kernel task) and
+/// drives it with a direct `Vcpu` loop, so it needs neither the scheduler nor
+/// a nested kernel thread: it runs synchronously in this hook and cannot leave
+/// a task waiting forever behind it.
 #[cfg(target_arch = "x86_64")]
 #[component::init_component(kthread, priority = 50)]
 fn s9vm_acpi_selftest() -> Result<(), component::ComponentInitError> {
     if !ACPI_SELFTEST_REQUESTED.swap(false, Ordering::AcqRel) {
         return Ok(());
     }
-    match crate::process::kthread::spawn("s9vm-acpi-selftest", run_acpi_task) {
-        Ok(_) => {}
-        Err(error) => log::warn!(
-            "[s9vm] acpitest FAIL: cannot spawn the guest task ({})",
-            error
-        ),
-    }
+    run_acpi_task();
     Ok(())
 }
 
-/// Body of the deferred ACPI selftest task.
+/// Body of the ACPI selftest (synchronous).
 fn run_acpi_task() {
     let Some(caps) = crate::s9vm::detect() else {
         log::warn!("[s9vm] acpitest FAIL: platform capabilities unavailable");
         return;
     };
     log::info!(
-        "[s9vm] acpitest: task start (active_cpus={})",
+        "[s9vm] acpitest: running (active_cpus={})",
         crate::s9vm::active_cpu_count()
     );
     match run_acpi(&caps) {
@@ -2664,7 +2659,9 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
         .unwrap_or(false);
     let all_phases = matches!(mode, "2" | "all");
     let acpi_phase = mode == "acpi" || (all_phases && deferred_enabled);
-    let smp_phase = mode == "smp" || (all_phases && deferred_enabled);
+    // The SMP phase drives registered vCPUs through their kernel tasks; it is
+    // still experimental and therefore only selected explicitly.
+    let smp_phase = mode == "smp";
     if all_phases && !deferred_enabled {
         log::info!(
             "[s9vm] deferred phases (acpi, smp) not requested; set \
@@ -2676,12 +2673,12 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
         // The ACPI phase registers a vCPU, which needs the scheduler: defer it
         // to the kthread stage instead of deadlocking the bootstrap.
         ACPI_SELFTEST_REQUESTED.store(true, Ordering::Release);
-        log::info!("[s9vm] ACPI-discovery test requested (deferred to kthread stage)");
+        log::info!("[s9vm] ACPI-discovery test requested (kthread stage)");
     }
     if smp_phase {
         // Same constraint as ACPI: two registered vCPUs require the scheduler.
         SMP_SELFTEST_REQUESTED.store(true, Ordering::Release);
-        log::info!("[s9vm] SMP (two-vCPU) test requested (deferred to kthread stage)");
+        log::info!("[s9vm] SMP (two-vCPU) test requested (kthread stage, experimental)");
     }
 
     if device_phase {
