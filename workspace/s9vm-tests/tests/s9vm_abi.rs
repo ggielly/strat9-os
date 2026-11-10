@@ -84,8 +84,8 @@ fn p0_block_does_not_collide_with_iommu_block() {
 }
 
 #[test]
-fn abi_version_is_one() {
-    assert_eq!(abi::VMM_ABI_VERSION, 1);
+fn abi_version_is_two() {
+    assert_eq!(abi::VMM_ABI_VERSION, 2);
 }
 
 #[test]
@@ -142,4 +142,128 @@ fn name_limit_matches_info_storage() {
 fn exit_complete_syscall_number_is_stable() {
     // Completes an exit emulated by the policy (value + RIP advance).
     assert_eq!(SYS_VMM_EXIT_COMPLETE, 580);
+}
+
+#[test]
+fn world_list_syscall_numbers_are_stable() {
+    assert_eq!(SYS_VMM_LIST, 584);
+    assert_eq!(SYS_VMM_STATS, 585);
+    assert_eq!(SYS_VMM_LIST, SYS_VMM_BOOT_INFO + 1);
+    assert_eq!(SYS_VMM_STATS, SYS_VMM_BOOT_INFO + 2);
+    // Still inside the s9vm block, before the storage block (600).
+    assert!(SYS_VMM_STATS > SYS_VMM_BOOT_INFO);
+    assert!(SYS_VMM_STATS < 600);
+}
+
+#[test]
+fn world_entry_layout() {
+    use core::mem::{align_of, offset_of, size_of};
+
+    assert_eq!(size_of::<abi::VmmWorldEntry>(), 72);
+    assert_eq!(align_of::<abi::VmmWorldEntry>(), 8);
+
+    assert_eq!(offset_of!(abi::VmmWorldEntry, abi_version), 0);
+    assert_eq!(offset_of!(abi::VmmWorldEntry, state), 4);
+    assert_eq!(offset_of!(abi::VmmWorldEntry, vmm_id), 8);
+    assert_eq!(offset_of!(abi::VmmWorldEntry, silo_id), 16);
+    assert_eq!(offset_of!(abi::VmmWorldEntry, vcpu_count), 20);
+    assert_eq!(offset_of!(abi::VmmWorldEntry, mapped_pages), 24);
+    assert_eq!(offset_of!(abi::VmmWorldEntry, name), 32);
+    assert_eq!(offset_of!(abi::VmmWorldEntry, name_len), 64);
+    assert_eq!(offset_of!(abi::VmmWorldEntry, reserved), 68);
+
+    // No implicit padding: the last fixed field ends exactly at `size`.
+    assert_eq!(
+        offset_of!(abi::VmmWorldEntry, reserved) + 4,
+        size_of::<abi::VmmWorldEntry>()
+    );
+}
+
+#[test]
+fn world_entry_zeroed_defaults() {
+    let entry = abi::VmmWorldEntry::default();
+    assert_eq!(entry.abi_version, 0);
+    assert_eq!(entry.state, 0);
+    assert_eq!(entry.vmm_id, 0);
+    assert_eq!(entry.silo_id, 0);
+    assert_eq!(entry.vcpu_count, 0);
+    assert_eq!(entry.mapped_pages, 0);
+    assert_eq!(entry.name_len, 0);
+    assert_eq!(entry.reserved, 0);
+    assert!(entry.name.iter().all(|byte| *byte == 0));
+    assert!(entry.name_slice().is_empty());
+}
+
+#[test]
+fn world_entry_name_truncation_invariants() {
+    let mut entry = abi::VmmWorldEntry {
+        name_len: abi::VMM_NAME_MAX as u32,
+        ..abi::VmmWorldEntry::default()
+    };
+    entry.name = [0xAB; abi::VMM_NAME_MAX];
+    assert_eq!(entry.name_slice().len(), abi::VMM_NAME_MAX);
+    assert!(entry.name_slice().iter().all(|byte| *byte == 0xAB));
+
+    // A forged over-long `name_len` must never index past the buffer.
+    entry.name_len = u32::MAX;
+    assert_eq!(entry.name_slice().len(), abi::VMM_NAME_MAX);
+
+    // A shorter name never exposes the zero padding.
+    entry.name_len = 5;
+    assert_eq!(entry.name_slice(), &[0xAB; 5]);
+    assert_eq!(entry.name.len(), abi::VMM_NAME_MAX);
+}
+
+#[test]
+fn world_stats_layout() {
+    use core::mem::{align_of, offset_of, size_of};
+
+    assert_eq!(size_of::<abi::VmmWorldStats>(), 96);
+    assert_eq!(align_of::<abi::VmmWorldStats>(), 8);
+
+    assert_eq!(offset_of!(abi::VmmWorldStats, abi_version), 0);
+    assert_eq!(offset_of!(abi::VmmWorldStats, paused), 4);
+    assert_eq!(offset_of!(abi::VmmWorldStats, vmm_id), 8);
+    assert_eq!(offset_of!(abi::VmmWorldStats, runs), 16);
+    assert_eq!(offset_of!(abi::VmmWorldStats, policy_exits), 24);
+    assert_eq!(offset_of!(abi::VmmWorldStats, emulated_exits), 32);
+    assert_eq!(offset_of!(abi::VmmWorldStats, emulated_io), 40);
+    assert_eq!(offset_of!(abi::VmmWorldStats, emulated_mmio), 48);
+    assert_eq!(offset_of!(abi::VmmWorldStats, emulated_msr), 56);
+    assert_eq!(offset_of!(abi::VmmWorldStats, injected_interrupts), 64);
+    assert_eq!(offset_of!(abi::VmmWorldStats, windows_armed), 72);
+    assert_eq!(offset_of!(abi::VmmWorldStats, timer_exits), 80);
+    assert_eq!(offset_of!(abi::VmmWorldStats, exits_pending), 88);
+    assert_eq!(
+        offset_of!(abi::VmmWorldStats, exits_pending) + 8,
+        size_of::<abi::VmmWorldStats>()
+    );
+}
+
+#[test]
+fn world_stats_zeroed_defaults() {
+    let stats = abi::VmmWorldStats::default();
+    assert_eq!(stats, abi::VmmWorldStats::default());
+    assert_eq!(stats.abi_version, 0);
+    assert_eq!(stats.paused, 0);
+    assert_eq!(stats.vmm_id, 0);
+    assert_eq!(stats.runs, 0);
+    assert_eq!(stats.policy_exits, 0);
+    assert_eq!(stats.emulated_exits, 0);
+    assert_eq!(stats.emulated_io, 0);
+    assert_eq!(stats.emulated_mmio, 0);
+    assert_eq!(stats.emulated_msr, 0);
+    assert_eq!(stats.injected_interrupts, 0);
+    assert_eq!(stats.windows_armed, 0);
+    assert_eq!(stats.timer_exits, 0);
+    assert_eq!(stats.exits_pending, 0);
+}
+
+#[test]
+fn list_bound_matches_world_name_storage() {
+    assert_eq!(abi::VMM_LIST_MAX, 64);
+    assert_eq!(
+        abi::VMM_NAME_MAX,
+        abi::VmmWorldEntry::default().name.len()
+    );
 }

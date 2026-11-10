@@ -20,14 +20,15 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — handlers for the `SYS_VMM_*` syscalls (ABI block 560–569).
+//! s9vm — handlers for the `SYS_VMM_*` syscalls (ABI block 560–585).
 //!
 //! P0 scope: management of the world registry (`CREATE`, `DESTROY`,
-//! `INFO`). The calls that depend on guest execution (`MAP_MEM`,
-//! `SET_REGS`, `RUN`, `INJECT_IRQ`, `EXIT_HANDLER`, `IRQ_WAIT`) returned
-//! `ENOSYS`: their implementation will come with the vCPU layer exposed to
-//! the user. The purpose of this step is to freeze the ABI and the routing
-//! without exposing an incomplete surface.
+//! `INFO`) and the execution surface driven by the injected exits. The
+//! appended P1 calls `LIST` (584) and `STATS` (585) expose the world registry
+//! and the cumulative engine counters without growing `VmmInfo`.
+//! The calls that depend on guest execution (`MAP_MEM`, `SET_REGS`, `RUN`,
+//! `INJECT_IRQ`, `EXIT_HANDLER`, `IRQ_WAIT`) are implemented by the vCPU
+//! layer; their ABI is frozen.
 //!
 //! Access control: `CREATE` requires silo administration; the other calls
 //! take a **capability handle** returned by `CREATE`
@@ -48,10 +49,19 @@ use crate::{
     silo,
 };
 use alloc::vec;
-use strat9_abi::vmm::{state, VmmInfo, VmmRegs};
+use strat9_abi::vmm::{
+    state, VmmInfo, VmmRegs, VmmWorldEntry, VmmWorldStats, VMM_ABI_VERSION, VMM_LIST_MAX,
+    VMM_NAME_MAX,
+};
 
 /// Maximum size of a structure read from user space.
 const MAX_STRUCT: usize = 192;
+
+/// Maximum number of entries written by one `SYS_VMM_LIST` call.
+///
+/// Mirrors [`VMM_LIST_MAX`] and the kernel world bound; clamping here keeps a
+/// single syscall bounded even if the caller passes a huge capacity.
+const MAX_LIST_ENTRIES: usize = VMM_LIST_MAX;
 
 /// Rights of a world creator: read, write, revoke.
 const VMM_OWNER: CapPermissions = CapPermissions {
@@ -467,6 +477,122 @@ pub fn sys_vmm_boot_info(vmm_handle: u64, gpa: u64) -> Result<u64, SyscallError>
         vm::VmError::Unknown => SyscallError::NotFound,
         _ => SyscallError::InvalidArgument,
     })?;
+    Ok(0)
+}
+
+/// Resolves the scope of a `SYS_VMM_LIST` call.
+///
+/// Returns `None` for a silo-administrator global listing (`handle == 0`),
+/// or `Some(silo_id)` when the caller holds a VMM capability: the listing is
+/// then restricted to the worlds owned by that world's silo. This keeps the
+/// call capability-gated while allowing a supervisor to enumerate its own
+/// worlds without knowing their opaque identifiers.
+fn list_scope(vmm_handle: u64) -> Result<Option<u32>, SyscallError> {
+    if vmm_handle == 0 {
+        require_control()?;
+        return Ok(None);
+    }
+    let required = CapPermissions {
+        read: true,
+        ..CapPermissions::none()
+    };
+    let world = vmm_world(vmm_handle, required)?;
+    let record = vm::get(world).ok_or(SyscallError::NotFound)?;
+    Ok(Some(record.silo_id))
+}
+
+/// SYS_VMM_LIST (584): enumerates worlds into a caller buffer.
+///
+/// Returns the total number of matching worlds. At most `capacity` entries
+/// are written, clamped to [`MAX_LIST_ENTRIES`]; the buffer range is
+/// overflow-checked before any copy. `capacity == 0` is a count query and
+/// accepts a null buffer.
+pub fn sys_vmm_list(vmm_handle: u64, entries_ptr: u64, capacity: u64) -> Result<u64, SyscallError> {
+    let scope = list_scope(vmm_handle)?;
+
+    let worlds: alloc::vec::Vec<vm::WorldRecord> = {
+        let all = vm::list();
+        match scope {
+            None => all,
+            Some(silo_id) => all
+                .into_iter()
+                .filter(|record| record.silo_id == silo_id)
+                .collect(),
+        }
+    };
+    let total = worlds.len();
+
+    if capacity == 0 {
+        // Count query: no buffer required, nothing is written.
+        return Ok(total as u64);
+    }
+    if entries_ptr == 0 {
+        return Err(SyscallError::Fault);
+    }
+
+    let requested = core::cmp::min(capacity, MAX_LIST_ENTRIES as u64) as usize;
+    let to_write = core::cmp::min(requested, total);
+    let entry_size = core::mem::size_of::<VmmWorldEntry>() as u64;
+
+    for (index, record) in worlds.iter().take(to_write).enumerate() {
+        // Bounded and overflow-checked: `index < MAX_LIST_ENTRIES` and
+        // `entry_size` is a small constant, but the base pointer is fully
+        // user-controlled.
+        let offset = (index as u64)
+            .checked_mul(entry_size)
+            .and_then(|delta| entries_ptr.checked_add(delta))
+            .ok_or(SyscallError::InvalidArgument)?;
+
+        let mut entry = VmmWorldEntry {
+            abi_version: VMM_ABI_VERSION,
+            state: record.state,
+            vmm_id: record.id,
+            silo_id: record.silo_id,
+            vcpu_count: record.vcpu_count,
+            mapped_pages: record.mapped_pages,
+            ..VmmWorldEntry::default()
+        };
+        let length = record.name_slice().len().min(VMM_NAME_MAX);
+        entry.name[..length].copy_from_slice(&record.name_slice()[..length]);
+        entry.name_len = length as u32;
+        write_struct(offset, &entry)?;
+    }
+
+    Ok(total as u64)
+}
+
+/// SYS_VMM_STATS (585): writes the cumulative counters of a world.
+///
+/// The capability check is the same as `INFO`: read access on the world
+/// handle. `exits_pending` is sampled atomically with respect to the event
+/// queue lock; the other counters are diagnostics and may be slightly stale.
+pub fn sys_vmm_stats(vmm_handle: u64, out_ptr: u64) -> Result<u64, SyscallError> {
+    let required = CapPermissions {
+        read: true,
+        ..CapPermissions::none()
+    };
+    let world = vmm_world(vmm_handle, required)?;
+    let record = vm::get(world).ok_or(SyscallError::NotFound)?;
+    let stats = vm::stats(world).ok_or(SyscallError::NotFound)?;
+    let exits_pending = vm::exit_count(world).ok_or(SyscallError::NotFound)?;
+    let paused = if vm::is_paused(world) { 1 } else { 0 };
+
+    let out = VmmWorldStats {
+        abi_version: VMM_ABI_VERSION,
+        paused,
+        vmm_id: record.id,
+        runs: stats.runs,
+        policy_exits: stats.policy_exits,
+        emulated_exits: stats.emulated_exits,
+        emulated_io: stats.emulated_io,
+        emulated_mmio: stats.emulated_mmio,
+        emulated_msr: stats.emulated_msr,
+        injected_interrupts: stats.injected_interrupts,
+        windows_armed: stats.windows_armed,
+        timer_exits: stats.timer_exits,
+        exits_pending: exits_pending as u64,
+    };
+    write_struct(out_ptr, &out)?;
     Ok(0)
 }
 

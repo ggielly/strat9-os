@@ -1729,3 +1729,31 @@ pub const SYS_VMM_CONSOLE_OUTPUT: usize = 582;
 /// guest-physical page address). Returns 0.
 pub const SYS_VMM_BOOT_INFO: usize = 583;
 
+// ── Block 584-585: s9vm world enumeration and statistics ──────────────────
+//
+// Append-only extension of the s9vm surface. The numbering continues after
+// BOOT_INFO (583); 586-599 remain free for future calls (for example a vCPU
+// state query). See `strat9_abi::vmm::VmmWorldEntry` and
+// `VmmWorldStats` for the structures.
+
+/// Enumerate worlds into a caller-provided buffer of
+/// [`strat9_abi::vmm::VmmWorldEntry`].
+///
+/// `arg1` = VMM capability handle: 0 lists every world and requires the silo
+/// administrator capability, a non-zero handle lists the worlds owned by the
+/// same silo as that world (read capability required).
+/// `arg2` = buffer pointer (may be 0 when `arg3 == 0` to query the count).
+/// `arg3` = capacity in entries, clamped to
+/// [`strat9_abi::vmm::VMM_LIST_MAX`].
+///
+/// Returns the **total** number of matching worlds. At most `arg3` entries
+/// are written; the difference against the return value tells the caller how
+/// many entries were not stored (0 means the buffer was large enough).
+pub const SYS_VMM_LIST: usize = 584;
+
+/// Read the cumulative counters of a world.
+///
+/// `arg1` = VMM capability handle (read capability required),
+/// `arg2` = pointer to [`strat9_abi::vmm::VmmWorldStats`]. Returns 0.
+pub const SYS_VMM_STATS: usize = 585;
+
