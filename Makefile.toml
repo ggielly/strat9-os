@@ -200,6 +200,7 @@ dependencies = [
     "strate-fs-ramfs-release",
     "strate-init-release",
     "strate-console-admin-release",
+    "s9vm-console-release",
     "strate-graphical-release",
     "strate-net-release",
     "strate-bus-release",
@@ -256,6 +257,7 @@ dependencies = [
     "strate-fs-ramfs-release",
     "strate-init-release",
     "strate-console-admin-release",
+    "s9vm-console-release",
     "strate-graphical-release",
     "strate-net-release",
     "strate-bus-release",
@@ -285,6 +287,7 @@ dependencies = [
     "strate-fs-ramfs-release",
     "strate-init-release",
     "strate-console-admin-release",
+    "s9vm-console-release",
     "strate-graphical-release",
     "strate-net-release",
     "strate-bus-release",
@@ -596,6 +599,7 @@ dependencies = [
     "strate-fs-ramfs-release",
     "strate-init-release",
     "strate-console-admin-release",
+    "s9vm-console-release",
     "strate-graphical-release",
     "strate-net-release",
     "strate-bus-release",
@@ -624,6 +628,7 @@ dependencies = [
     "strate-fs-ramfs-release",
     "strate-init-release",
     "strate-console-admin-release",
+    "s9vm-console-release",
     "strate-graphical-release",
     "strate-net-release",
     "strate-bus-release",
@@ -925,6 +930,21 @@ args = [
 [tasks.strate-console-admin-release]
 description = "Build console-admin silo (release)"
 cwd = "workspace/components/strate-console-admin"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.s9vm-console-release]
+description = "Build s9vm userspace console (release)"
+cwd = "workspace/components/s9vm-console"
 command = "cargo"
 args = [
     "build",

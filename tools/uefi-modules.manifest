@@ -2,6 +2,7 @@
 # base: required in every UEFI image; test: required when STRAT9_INCLUDE_TESTS=1.
 base strate-init strate-init-release
 base console-admin strate-console-admin-release
+base s9vm-console s9vm-console-release
 base strate-net-silo strate-net-release
 base strate-bus strate-bus-release
 base strate-bt strate-bt-release

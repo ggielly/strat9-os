@@ -85,6 +85,7 @@ $Components = @(
     @{ Name = "strate-fs-ramfs"; Cwd = "workspace\components\strate-fs-ramfs" }
     @{ Name = "strate-init"; Cwd = "workspace\components\strate-init" }
     @{ Name = "strate-console-admin"; Cwd = "workspace\components\strate-console-admin" }
+    @{ Name = "s9vm-console"; Cwd = "workspace\components\s9vm-console" }
     @{ Name = "strate-net"; Cwd = "workspace\components\strate-net" }
     @{ Name = "strate-bus"; Cwd = "workspace\components\strate-bus" }
     @{ Name = "strate-wasm"; Cwd = "workspace\components\strate-wasm" }
@@ -168,6 +169,7 @@ $Modules = @(
     @{ Src = "target\$Target\$ProfileDir\strate-fs-ramfs"; Dst = "initfs/strate-fs-ramfs" }
     @{ Src = "target\$Target\$ProfileDir\strate-init"; Dst = "initfs/init" }
     @{ Src = "target\$Target\$ProfileDir\console-admin"; Dst = "initfs/console-admin" }
+    @{ Src = "target\$Target\$ProfileDir\s9vm-console"; Dst = "initfs/s9vm-console" }
     @{ Src = "target\$Target\$ProfileDir\strate-net-silo"; Dst = "initfs/strate-net-silo" }
     @{ Src = "target\$Target\$ProfileDir\strate-net-silo"; Dst = "initfs/strate-net" }
     @{ Src = "target\$Target\$ProfileDir\strate-bus"; Dst = "initfs/strate-bus" }
