@@ -71,8 +71,9 @@
 //! 1. read `/initfs/s9vm-guest` (≤ 1 MiB) into a static buffer; if the file is
 //!    missing the built-in demo above runs instead (logged explicitly);
 //! 2. `SYS_VMM_CREATE "guest"` then `SYS_VMM_CREATE_VCPU` (APIC id 0);
-//! 3. `SYS_VMM_SET_CMDLINE` with the 54-byte command line
-//!    `console=ttyS0 root=/dev/vda rw init=/init s9vm.guest=1`;
+//! 3. `SYS_VMM_SET_CMDLINE` with the command line
+//!    `console=ttyS0 root=/dev/vda rw init=/init s9vm.guest=1 s9vm.initrd=1
+//!    initrd=s9vm-initrd`;
 //! 4. `SYS_VMM_LOAD_IMAGE` at `0x0010_0000` (the linked base, so no
 //!    relocation: `VmmImageInfo.entry` is used as `RIP`);
 //! 5. identity page tables loaded as a **raw blob** with
@@ -87,36 +88,50 @@
 //!    ```
 //!
 //!    (`CR3 = 0` makes the guest read the PML4 from GPA 0.)
-//! 6. `SYS_VMM_MAP_MEM` one page at GPA `0x8000` for the boot parameters,
-//!    `SYS_VMM_ACPI` at `0x000E_0000` (needs the vCPU and mapped memory), then
-//!    `SYS_VMM_BOOT_PARAMS` at `0x8000` (published after ACPI/cmdline/modules,
-//!    so the RSDP, command line and module ranges are final);
-//! 7. `SYS_VMM_SET_REGS`: `RIP = entry`, `RSP = 0` (the guest sets its stack),
-//!    `RDI = 0x8000`, `RFLAGS = 2`, `CR0 = 0x8001_0023`, `CR3 = 0`,
-//!    `CR4 = 0x26A0`, `EFER = 0xD01`;
-//! 8. `SYS_VMM_RUN` + `SYS_VMM_EXIT_HANDLER`/`SYS_VMM_EXIT_COMPLETE` loop,
-//!    bounded to 64 exits plus a 30 s watchdog. PASS requires the ordered
-//!    `G`, `M`, `A` bytes on debug port `0xE9` and a `HALT` exit. Completion
-//!    policy: I/O and HLT exits are completed with value 0 and RIP advance 0
-//!    (hardware already advanced RIP); any other exit class is logged and
-//!    completed as a no-op, so an unexpected exit only consumes the bounded
-//!    budget instead of wedging the policy;
-//! 9. teardown on every path: `SYS_VMM_DESTROY_VCPU` then `SYS_VMM_DESTROY`.
+//! 6. initrd archive loaded as a **second raw module** at GPA `0x0020_0000`:
+//!    `/initfs/s9vm-initrd` when the image builder staged one, otherwise a
+//!    built-in `newc` cpio archive (one placeholder `init` file). Both modules
+//!    are published to the guest by the boot-parameter block;
+//! 7. `SYS_VMM_MAP_MEM` one page at GPA `0x8000` for the boot parameters and
+//!    `SYS_VMM_ACPI` at `0x000E_0000` (needs the vCPU and mapped memory);
+//! 8. `SYS_VMM_LOAD_DISK` provisions the world virtio-blk device with
+//!    `/initfs/s9vm-disk` when staged, otherwise a 4 KiB built-in image whose
+//!    first sector carries the `S9VMDISK` label contract (magic at offset 0,
+//!    version, sector size, sector count, image length, `0x55AA` signature);
+//! 9. `SYS_VMM_BOOT_PARAMS` at `0x8000` (published after
+//!    ACPI/cmdline/modules/disk, so the RSDP, command line, module ranges and
+//!    block-device content are final);
+//! 10. `SYS_VMM_SET_REGS`: `RIP = entry`, `RSP = 0` (the guest sets its stack),
+//!     `RDI = 0x8000`, `RFLAGS = 2`, `CR0 = 0x8001_0023`, `CR3 = 0`,
+//!     `CR4 = 0x26A0`, `EFER = 0xD01`;
+//! 11. `SYS_VMM_RUN` + `SYS_VMM_EXIT_HANDLER`/`SYS_VMM_EXIT_COMPLETE` loop,
+//!     bounded to 64 exits plus a 30 s watchdog. PASS requires the ordered
+//!     `G`, `M`, `A` bytes on debug port `0xE9` and a `HALT` exit (extra bytes
+//!     emitted by newer guest kernels are ignored). Completion policy: I/O and
+//!     HLT exits are completed with value 0 and RIP advance 0 (hardware already
+//!     advanced RIP); any other exit class is logged and completed as a no-op,
+//!     so an unexpected exit only consumes the bounded budget instead of
+//!     wedging the policy;
+//! 12. teardown on every path: `SYS_VMM_DESTROY_VCPU` then `SYS_VMM_DESTROY`.
 //!
 //! Expected serial output on a VT-x host (Linux/KVM or nested VT-x):
 //!
 //! ```text
 //! [s9vm-vmm] found /initfs/s9vm-guest (N bytes): real guest mode
 //! [s9vm-vmm] ===== s9vm userspace policy (real guest, N bytes) =====
-//! [s9vm-vmm] guest 1/8: SYS_VMM_SET_CMDLINE (54 bytes)
-//! [s9vm-vmm] guest 2/8: SYS_VMM_LOAD_IMAGE (N bytes at gpa=0x100000)
-//! [s9vm-vmm] guest 3/8: SYS_VMM_LOAD_MODULE page tables (12288 bytes at gpa=0x0)
+//! [s9vm-vmm] guest 1/10: SYS_VMM_SET_CMDLINE (87 bytes)
+//! [s9vm-vmm] guest 2/10: SYS_VMM_LOAD_IMAGE (N bytes at gpa=0x100000)
+//! [s9vm-vmm] guest 3/10: SYS_VMM_LOAD_MODULE page tables (12288 bytes at gpa=0x0)
 //! [s9vm-vmm] page tables: PML4@0x0 -> PDPT@0x1000 -> PD@0x2000, identity leaves 0..0x400000 (2 MiB pages)
-//! [s9vm-vmm] guest 4/8: SYS_VMM_MAP_MEM boot params gpa=0x8000 len=0x1000
-//! [s9vm-vmm] guest 5/8: SYS_VMM_ACPI gpa=0xe0000
-//! [s9vm-vmm] guest 6/8: SYS_VMM_BOOT_PARAMS gpa=0x8000
-//! [s9vm-vmm] guest 7/8: SYS_VMM_SET_REGS rip=0x100000 rsp=0 rdi=0x8000
-//! [s9vm-vmm] guest 8/8: SYS_VMM_RUN + policy loop
+//! [s9vm-vmm] guest 4/10: SYS_VMM_LOAD_MODULE initrd (M bytes, built-in)
+//! [s9vm-vmm] initrd: M bytes at gpa=0x200000
+//! [s9vm-vmm] guest 5/10: SYS_VMM_MAP_MEM boot params gpa=0x8000 len=0x1000
+//! [s9vm-vmm] guest 6/10: SYS_VMM_ACPI gpa=0xe0000
+//! [s9vm-vmm] guest 7/10: SYS_VMM_LOAD_DISK (4096 bytes, built-in)
+//! [s9vm-vmm] disk: 4096 bytes (8 sectors), world device content provisioned
+//! [s9vm-vmm] guest 8/10: SYS_VMM_BOOT_PARAMS gpa=0x8000
+//! [s9vm-vmm] guest 9/10: SYS_VMM_SET_REGS rip=0x100000 rsp=0 rdi=0x8000
+//! [s9vm-vmm] guest 10/10: SYS_VMM_RUN + policy loop
 //! [s9vm-vmm] guest debug byte 0x47   (G)
 //! [s9vm-vmm] guest debug byte 0x4d   (M)
 //! [s9vm-vmm] guest debug byte 0x41   (A)
@@ -170,7 +185,7 @@ use core::{
 };
 use strat9_abi::vmm::{
     exit_kind, VmmExitEvent, VmmImageInfo, VmmInfo, VmmRegs, VmmVcpuInfo, VmmWorldEntry,
-    VmmWorldStats, VMM_ABI_VERSION,
+    VmmWorldStats, VMM_ABI_VERSION, VMM_DISK_SECTOR_SIZE,
 };
 use strat9_syscall::{call, data::TimeSpec, error::Error, flag, number, CLOCK_MONOTONIC};
 use strat9_elf_core::build::ImageWriter;
@@ -194,15 +209,28 @@ const WORLD_NAME: &[u8] = b"demo";
 
 /// Guest kernel image written to the initfs by the image builder.
 const PATH_GUEST_IMAGE: &str = "/initfs/s9vm-guest";
+/// Optional initrd archive staged by the image builder (`newc` cpio format).
+const PATH_INITRD: &str = "/initfs/s9vm-initrd";
+/// Optional boot disk image staged by the image builder (`S9VMDISK` label).
+const PATH_DISK_IMAGE: &str = "/initfs/s9vm-disk";
 /// Hard cap on the guest image size (1 MiB).
 const GUEST_IMAGE_MAX: usize = 1024 * 1024;
+/// Hard cap on the initrd archive size (64 KiB).
+const INITRD_MAX_BYTES: usize = 64 * 1024;
+/// Guest-physical address the initrd module is loaded at (inside the identity
+/// window, above the kernel image: `0x100000..0x103000`).
+const INITRD_GPA: u64 = 0x0020_0000;
+/// Size of the generated boot disk image: one sector for the label plus seven
+/// zero sectors, a valid sector-multiple content for the virtio-blk device.
+const DISK_IMAGE_LEN: usize = 4096;
 /// World name used by the real-guest mode.
 const GUEST_WORLD_NAME: &[u8] = b"guest";
 /// The guest kernel is an ET_EXEC image linked at 0x0010_0000; loading it at
 /// that guest-physical base keeps every linked address unchanged.
 const GUEST_IMAGE_GPA: u64 = 0x10_0000;
-/// Command line published to the guest (exactly 54 bytes).
-const GUEST_CMDLINE: &[u8; 54] = b"console=ttyS0 root=/dev/vda rw init=/init s9vm.guest=1";
+/// Command line published to the guest (at most 256 bytes).
+const GUEST_CMDLINE: &[u8] =
+    b"console=ttyS0 root=/dev/vda rw init=/init s9vm.guest=1 s9vm.initrd=1 initrd=s9vm-initrd";
 /// Raw identity page-table blob: PML4@0x0000, PDPT@0x1000, PD@0x2000.
 const PAGE_TABLE_BLOB_GPA: u64 = 0x0;
 const PAGE_TABLE_BLOB_LEN: usize = 0x3000;
@@ -400,6 +428,21 @@ fn vmm_load_module(world: u64, gpa: u64, bytes: &[u8]) -> Result<(), Error> {
     .map(|_| ())
 }
 
+/// `SYS_VMM_LOAD_DISK`: replace the world block-device image.
+fn vmm_load_disk(world: u64, image: &[u8]) -> Result<(), Error> {
+    // SAFETY: `image` is a live userspace buffer; the kernel copies it before
+    // returning.
+    unsafe {
+        strat9_syscall::syscall3(
+            number::SYS_VMM_LOAD_DISK,
+            world as usize,
+            image.as_ptr() as usize,
+            image.len(),
+        )
+    }
+    .map(|_| ())
+}
+
 /// `SYS_VMM_SET_CMDLINE`: store the guest kernel command line.
 fn vmm_set_cmdline(world: u64, bytes: &[u8]) -> Result<u64, Error> {
     // SAFETY: `bytes` is a live userspace buffer read by the kernel.
@@ -571,6 +614,10 @@ static mut GUEST_IMAGE: [u8; IMAGE_LEN] = [0u8; IMAGE_LEN];
 static mut GUEST_ELF: [u8; GUEST_IMAGE_MAX] = [0u8; GUEST_IMAGE_MAX];
 /// Raw identity page-table blob loaded at GPA 0 through `SYS_VMM_LOAD_MODULE`.
 static mut PAGE_TABLE_BLOB: [u8; PAGE_TABLE_BLOB_LEN] = [0u8; PAGE_TABLE_BLOB_LEN];
+/// Storage for the initrd archive loaded through `SYS_VMM_LOAD_MODULE`.
+static mut INITRD: [u8; INITRD_MAX_BYTES] = [0u8; INITRD_MAX_BYTES];
+/// Storage for the boot disk image loaded through `SYS_VMM_LOAD_DISK`.
+static mut DISK_IMAGE: [u8; DISK_IMAGE_LEN] = [0u8; DISK_IMAGE_LEN];
 
 /// Returns the writable guest-image buffer.
 fn guest_image_buffer() -> &'static mut [u8] {
@@ -600,6 +647,28 @@ fn page_table_blob_buffer() -> &'static mut [u8] {
         core::slice::from_raw_parts_mut(
             core::ptr::addr_of_mut!(PAGE_TABLE_BLOB) as *mut u8,
             PAGE_TABLE_BLOB_LEN,
+        )
+    }
+}
+
+/// Returns the writable initrd buffer.
+fn initrd_buffer() -> &'static mut [u8] {
+    // SAFETY: same single-threaded contract as `guest_image_buffer`.
+    unsafe {
+        core::slice::from_raw_parts_mut(
+            core::ptr::addr_of_mut!(INITRD) as *mut u8,
+            INITRD_MAX_BYTES,
+        )
+    }
+}
+
+/// Returns the writable boot disk image buffer.
+fn disk_image_buffer() -> &'static mut [u8] {
+    // SAFETY: same single-threaded contract as `guest_image_buffer`.
+    unsafe {
+        core::slice::from_raw_parts_mut(
+            core::ptr::addr_of_mut!(DISK_IMAGE) as *mut u8,
+            DISK_IMAGE_LEN,
         )
     }
 }
@@ -730,6 +799,119 @@ fn guest_registers() -> VmmRegs {
 }
 
 // ---------------------------------------------------------------------------
+// Boot assets: initrd archive and boot disk image
+// ---------------------------------------------------------------------------
+
+/// Length of a `newc` cpio header: six magic bytes and thirteen 8-digit
+/// hexadecimal fields.
+const CPIO_HEADER_LEN: usize = 110;
+
+/// Writes `value` as eight uppercase hexadecimal ASCII digits.
+fn write_hex8(out: &mut [u8], value: u32) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for (index, byte) in out.iter_mut().enumerate().take(8) {
+        *byte = HEX[((value >> (4 * (7 - index))) & 0xF) as usize];
+    }
+}
+
+/// Appends `bytes` at `offset`, NUL-terminated when `with_nul`, padded to a
+/// four-byte boundary. Returns the number of bytes written.
+fn append_padded(
+    out: &mut [u8],
+    offset: usize,
+    bytes: &[u8],
+    with_nul: bool,
+) -> Option<usize> {
+    let payload = bytes.len() + usize::from(with_nul);
+    let padded = payload.checked_add((4 - payload % 4) % 4)?;
+    let slice = out.get_mut(offset..offset.checked_add(padded)?)?;
+    slice[..bytes.len()].copy_from_slice(bytes);
+    Some(padded)
+}
+
+/// Writes one `newc` cpio entry (header, name, data) at the start of `out`.
+///
+/// Returns the number of bytes written, or `None` if `out` is too small.
+fn cpio_entry(out: &mut [u8], name: &[u8], data: &[u8], inode: u32) -> Option<usize> {
+    if out.len() < CPIO_HEADER_LEN {
+        return None;
+    }
+    out[..6].copy_from_slice(b"070701");
+    write_hex8(&mut out[6..14], inode);
+    write_hex8(&mut out[14..22], 0o100644); // mode: regular file, 0644
+    write_hex8(&mut out[22..30], 0); // uid
+    write_hex8(&mut out[30..38], 0); // gid
+    write_hex8(&mut out[38..46], 1); // nlink
+    write_hex8(&mut out[46..54], 0); // mtime
+    write_hex8(&mut out[54..62], data.len() as u32);
+    write_hex8(&mut out[62..70], 0); // devmajor
+    write_hex8(&mut out[70..78], 0); // devminor
+    write_hex8(&mut out[78..86], 0); // rdevmajor
+    write_hex8(&mut out[86..94], 0); // rdevminor
+    write_hex8(&mut out[94..102], (name.len() + 1) as u32);
+    write_hex8(&mut out[102..110], 0); // check
+
+    let mut cursor = CPIO_HEADER_LEN;
+    cursor = cursor.checked_add(append_padded(out, cursor, name, true)?)?;
+    cursor = cursor.checked_add(append_padded(out, cursor, data, false)?)?;
+    Some(cursor)
+}
+
+/// Builds the minimal initrd archive (`newc` cpio containing `init`).
+///
+/// A real archive format is used so the guest kernel can mount or extract it
+/// with a normal cpio reader; the payload is a placeholder script until the
+/// guest has an actual userland. Returns an empty slice if the static buffer
+/// cannot hold the archive (impossible with the current sizes, handled without
+/// panicking).
+fn build_initrd_archive() -> &'static [u8] {
+    let buffer = initrd_buffer();
+    for byte in buffer.iter_mut() {
+        *byte = 0;
+    }
+    let init_script: &[u8] = b"#!/bin/sh\nexit 0\n";
+    let entries: [(&[u8], &[u8], u32); 2] = [
+        (b"init", init_script, 1),
+        (b"TRAILER!!!", &[], 0),
+    ];
+    let mut cursor = 0usize;
+    for (name, data, inode) in entries {
+        let Some(written) = cpio_entry(&mut buffer[cursor..], name, data, inode) else {
+            return &initrd_buffer()[..0];
+        };
+        cursor += written;
+    }
+    &initrd_buffer()[..cursor]
+}
+
+/// Builds the boot disk image: one labeled sector followed by zero sectors.
+///
+/// The label documents the on-disk contract the guest block driver can rely on
+/// before it has a filesystem parser: magic, version, sector size, sector count
+/// and image length, with the classic `0x55AA` signature in the boot sector.
+fn build_disk_image() -> &'static [u8] {
+    let image = disk_image_buffer();
+    for byte in image.iter_mut() {
+        *byte = 0;
+    }
+    image[0..8].copy_from_slice(b"S9VMDISK");
+    put_u32(image, 8, 1); // label version
+    put_u32(image, 12, VMM_DISK_SECTOR_SIZE as u32);
+    put_u64(image, 16, (DISK_IMAGE_LEN / VMM_DISK_SECTOR_SIZE as usize) as u64);
+    put_u64(image, 24, DISK_IMAGE_LEN as u64);
+    let note: &[u8] = b"s9vm boot disk: label sector only (no filesystem yet)";
+    image[64..64 + note.len()].copy_from_slice(note);
+    image[510] = 0x55;
+    image[511] = 0xAA;
+    &disk_image_buffer()[..DISK_IMAGE_LEN]
+}
+
+/// Writes a little-endian `u32` at `offset`.
+fn put_u32(buffer: &mut [u8], offset: usize, value: u32) {
+    buffer[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+// ---------------------------------------------------------------------------
 // Real guest kernel mode (helpers)
 // ---------------------------------------------------------------------------
 
@@ -785,20 +967,18 @@ impl GuestLoadError {
     }
 }
 
-/// Reads `/initfs/s9vm-guest` into the static buffer (bounded to 1 MiB).
+/// Reads one small `/initfs` file into `buffer` (single bounded pass).
 ///
-/// The file is read in one pass with `EAGAIN`/`EINTR` retries; a file larger
-/// than the buffer is rejected rather than silently truncated because a
-/// truncated ELF would be rejected later with a useless error.
-fn load_guest_image() -> Result<GuestImageState, GuestLoadError> {
-    let fd = match call::open(PATH_GUEST_IMAGE, flag::O_RDONLY) {
+/// Returns `Ok(None)` when the entry is not staged: the kernel-backed
+/// `/initfs` scheme reports a missing entry as `BadHandle` (EBADF) instead of
+/// `NotFound`, and both mean "not staged". A file larger than `buffer` is
+/// rejected rather than silently truncated.
+fn read_initfs_file(path: &str, buffer: &mut [u8]) -> Result<Option<usize>, GuestLoadError> {
+    let fd = match call::open(path, flag::O_RDONLY) {
         Ok(fd) => fd,
-        // The kernel-backed `/initfs` scheme reports a missing entry as
-        // `BadHandle` (EBADF) instead of `NotFound`; both mean "not staged".
-        Err(Error::NotFound) | Err(Error::BadHandle) => return Ok(GuestImageState::Absent),
+        Err(Error::NotFound) | Err(Error::BadHandle) => return Ok(None),
         Err(error) => return Err(GuestLoadError::Open(error)),
     };
-    let buffer = guest_elf_buffer();
     let mut total = 0usize;
     let mut retries = 0u32;
     let result = loop {
@@ -806,7 +986,7 @@ fn load_guest_image() -> Result<GuestImageState, GuestLoadError> {
             // Buffer full: prove there is no extra byte, otherwise reject.
             let mut probe = [0u8; 1];
             match call::read(fd, &mut probe) {
-                Ok(0) => break Ok(GuestImageState::Present(total)),
+                Ok(0) => break Ok(Some(total)),
                 Ok(_) => break Err(GuestLoadError::TooLarge),
                 Err(error) if error.is_retryable() => {
                     retries += 1;
@@ -819,7 +999,7 @@ fn load_guest_image() -> Result<GuestImageState, GuestLoadError> {
             }
         }
         match call::read(fd, &mut buffer[total..]) {
-            Ok(0) => break Ok(GuestImageState::Present(total)),
+            Ok(0) => break Ok(Some(total)),
             Ok(count) => {
                 total += count;
                 retries = 0;
@@ -836,6 +1016,17 @@ fn load_guest_image() -> Result<GuestImageState, GuestLoadError> {
     };
     let _ = call::close(fd);
     result
+}
+
+/// Reads `/initfs/s9vm-guest` into the static buffer (bounded to 1 MiB).
+///
+/// A truncated ELF would be rejected later with a useless error, so an
+/// oversized file is rejected here.
+fn load_guest_image() -> Result<GuestImageState, GuestLoadError> {
+    match read_initfs_file(PATH_GUEST_IMAGE, guest_elf_buffer())? {
+        Some(len) => Ok(GuestImageState::Present(len)),
+        None => Ok(GuestImageState::Absent),
+    }
 }
 
 /// Logs the read-only enumeration fallback used when `SYS_VMM_CREATE` cannot
@@ -1039,11 +1230,13 @@ fn run_guest_policy_loop(world: u64, vcpu: u64) -> Result<GuestRunReport, Error>
 /// * `ACPI` needs the vCPU (the MADT describes its APIC ids) and must run
 ///   before `BOOT_PARAMS` (the boot block publishes the RSDP address);
 /// * `SET_CMDLINE`/`LOAD_MODULE` must run before `BOOT_PARAMS` (it publishes
-///   the command line and module ranges).
+///   the command line and module ranges);
+/// * `LOAD_DISK` only needs the world, but is issued before `BOOT_PARAMS` so
+///   the guest boots with its final block-device content.
 fn boot_real_guest(world: u64, vcpu: u64, image_len: usize) -> Result<bool, Error> {
-    // 1. Kernel command line (54 bytes, published by BOOT_PARAMS).
+    // 1. Kernel command line (published by BOOT_PARAMS).
     log!(
-        "[s9vm-vmm] guest 1/8: SYS_VMM_SET_CMDLINE ({} bytes)",
+        "[s9vm-vmm] guest 1/10: SYS_VMM_SET_CMDLINE ({} bytes)",
         GUEST_CMDLINE.len()
     );
     let stored = vmm_set_cmdline(world, GUEST_CMDLINE)?;
@@ -1054,7 +1247,7 @@ fn boot_real_guest(world: u64, vcpu: u64, image_len: usize) -> Result<bool, Erro
 
     // 2. Guest ELF at its linked guest-physical base (0x0010_0000).
     log!(
-        "[s9vm-vmm] guest 2/8: SYS_VMM_LOAD_IMAGE ({} bytes at gpa={:#x})",
+        "[s9vm-vmm] guest 2/10: SYS_VMM_LOAD_IMAGE ({} bytes at gpa={:#x})",
         image_len,
         GUEST_IMAGE_GPA
     );
@@ -1074,7 +1267,7 @@ fn boot_real_guest(world: u64, vcpu: u64, image_len: usize) -> Result<bool, Erro
 
     // 3. Identity page tables as a raw blob through LOAD_MODULE.
     log!(
-        "[s9vm-vmm] guest 3/8: SYS_VMM_LOAD_MODULE page tables ({} bytes at gpa={:#x})",
+        "[s9vm-vmm] guest 3/10: SYS_VMM_LOAD_MODULE page tables ({} bytes at gpa={:#x})",
         PAGE_TABLE_BLOB_LEN,
         PAGE_TABLE_BLOB_GPA
     );
@@ -1086,9 +1279,50 @@ fn boot_real_guest(world: u64, vcpu: u64, image_len: usize) -> Result<bool, Erro
         IDENTITY_WINDOW
     );
 
-    // 4. Guest boot-parameter page (mapped before BOOT_PARAMS writes it).
+    // 4. Initrd archive as a second raw module, published in the boot block.
+    let initrd = match read_initfs_file(PATH_INITRD, initrd_buffer()) {
+        Ok(Some(len)) => {
+            log!(
+                "[s9vm-vmm] guest 4/10: SYS_VMM_LOAD_MODULE initrd ({} bytes from {})",
+                len,
+                PATH_INITRD
+            );
+            &initrd_buffer()[..len]
+        }
+        Ok(None) => {
+            let built = build_initrd_archive();
+            log!(
+                "[s9vm-vmm] guest 4/10: SYS_VMM_LOAD_MODULE initrd ({} bytes, built-in)",
+                built.len()
+            );
+            built
+        }
+        Err(error) => {
+            // The archive is optional: a read failure must not prevent the
+            // guest from booting, so fall back to the built-in archive.
+            log!(
+                "[s9vm-vmm] WARNING: reading {} failed ({}: {}), using the built-in initrd",
+                PATH_INITRD,
+                error.name(),
+                error.errno()
+            );
+            build_initrd_archive()
+        }
+    };
+    if !initrd.is_empty() {
+        vmm_load_module(world, INITRD_GPA, initrd)?;
+        log!(
+            "[s9vm-vmm] initrd: {} bytes at gpa={:#x}",
+            initrd.len(),
+            INITRD_GPA
+        );
+    } else {
+        log!("[s9vm-vmm] WARNING: initrd archive could not be built, booting without it");
+    }
+
+    // 5. Guest boot-parameter page (mapped before BOOT_PARAMS writes it).
     log!(
-        "[s9vm-vmm] guest 4/8: SYS_VMM_MAP_MEM boot params gpa={:#x} len={:#x}",
+        "[s9vm-vmm] guest 5/10: SYS_VMM_MAP_MEM boot params gpa={:#x} len={:#x}",
         BOOT_PARAMS_GPA,
         BOOT_PARAMS_LEN
     );
@@ -1100,25 +1334,61 @@ fn boot_real_guest(world: u64, vcpu: u64, image_len: usize) -> Result<bool, Erro
         MEMTYPE_WRITEBACK,
     )?;
 
-    // 5. ACPI tables (needs the vCPU and a mapped world memory).
+    // 6. ACPI tables (needs the vCPU and a mapped world memory).
     log!(
-        "[s9vm-vmm] guest 5/8: SYS_VMM_ACPI gpa={:#x}",
+        "[s9vm-vmm] guest 6/10: SYS_VMM_ACPI gpa={:#x}",
         ACPI_WINDOW_GPA
     );
     vmm_acpi(world, ACPI_WINDOW_GPA)?;
 
-    // 6. Boot parameters (after ACPI, cmdline and modules).
+    // 7. Block-device content: a staged image when the builder provided one,
+    //    otherwise the built-in labelled disk.
+    let disk = match read_initfs_file(PATH_DISK_IMAGE, disk_image_buffer()) {
+        Ok(Some(len)) => {
+            log!(
+                "[s9vm-vmm] guest 7/10: SYS_VMM_LOAD_DISK ({} bytes from {})",
+                len,
+                PATH_DISK_IMAGE
+            );
+            &disk_image_buffer()[..len]
+        }
+        Ok(None) => {
+            let built = build_disk_image();
+            log!(
+                "[s9vm-vmm] guest 7/10: SYS_VMM_LOAD_DISK ({} bytes, built-in)",
+                built.len()
+            );
+            built
+        }
+        Err(error) => {
+            log!(
+                "[s9vm-vmm] WARNING: reading {} failed ({}: {}), using the built-in disk",
+                PATH_DISK_IMAGE,
+                error.name(),
+                error.errno()
+            );
+            build_disk_image()
+        }
+    };
+    vmm_load_disk(world, disk)?;
     log!(
-        "[s9vm-vmm] guest 6/8: SYS_VMM_BOOT_PARAMS gpa={:#x}",
+        "[s9vm-vmm] disk: {} bytes ({} sectors), world device content provisioned",
+        disk.len(),
+        disk.len() / VMM_DISK_SECTOR_SIZE as usize
+    );
+
+    // 8. Boot parameters (after ACPI, cmdline, modules and disk).
+    log!(
+        "[s9vm-vmm] guest 8/10: SYS_VMM_BOOT_PARAMS gpa={:#x}",
         BOOT_PARAMS_GPA
     );
     vmm_boot_params(world, BOOT_PARAMS_GPA)?;
 
-    // 7. Initial registers: long mode, identity tables at CR3=0, RSP=0 (the
+    // 9. Initial registers: long mode, identity tables at CR3=0, RSP=0 (the
     //    guest sets up its own stack in _start), RDI = guest-physical address of
     //    the boot-parameter block (the guest kernel ABI passes it in RDI).
     log!(
-        "[s9vm-vmm] guest 7/8: SYS_VMM_SET_REGS rip={:#x} rsp=0 rdi={:#x}",
+        "[s9vm-vmm] guest 9/10: SYS_VMM_SET_REGS rip={:#x} rsp=0 rdi={:#x}",
         image_info.entry,
         BOOT_PARAMS_GPA
     );
@@ -1128,8 +1398,8 @@ fn boot_real_guest(world: u64, vcpu: u64, image_len: usize) -> Result<bool, Erro
     regs.rdi = BOOT_PARAMS_GPA;
     vmm_set_regs(vcpu, &regs)?;
 
-    // 8. Run and drain policy exits.
-    log!("[s9vm-vmm] guest 8/8: SYS_VMM_RUN + policy loop");
+    // 10. Run and drain policy exits.
+    log!("[s9vm-vmm] guest 10/10: SYS_VMM_RUN + policy loop");
     let report = run_guest_policy_loop(world, vcpu)?;
     Ok(report.pass)
 }
