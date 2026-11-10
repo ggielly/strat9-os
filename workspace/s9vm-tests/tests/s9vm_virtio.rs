@@ -7,8 +7,9 @@ mod virtio;
 
 use alloc::vec::Vec;
 use virtio::{
-    Descriptor, QueueError, QueueMemory, SplitQueue, DESC_F_INDIRECT, DESC_F_NEXT, DESC_F_WRITE,
-    DESCRIPTOR_SIZE, MAX_QUEUE_SIZE,
+    apply_status, status, Descriptor, DeviceFeatures, FeatureError, QueueError, QueueMemory,
+    QueueNotify, QueueState, SplitQueue, DESCRIPTOR_SIZE, DESC_F_INDIRECT, DESC_F_NEXT,
+    DESC_F_WRITE, MAX_QUEUE_SIZE, VIRTIO_F_VERSION_1, VIRTQ_AVAIL_F_NO_INTERRUPT,
 };
 
 /// Identity-mapped guest memory backed by a byte vector.
@@ -154,7 +155,10 @@ fn pop_available_rejects_an_out_of_range_head() {
     let mut queue = queue();
     memory.write_u16(AVAIL_RING + 4, QUEUE_SIZE);
     publish_available(&mut memory, 1);
-    assert_eq!(queue.pop_available(&mut memory), Err(QueueError::BadDescriptor));
+    assert_eq!(
+        queue.pop_available(&mut memory),
+        Err(QueueError::BadDescriptor)
+    );
 }
 
 #[test]
@@ -356,7 +360,9 @@ fn used_ring_wraps_around() {
     let mut memory = memory();
     let mut queue = queue();
     for round in 0..(u32::from(QUEUE_SIZE) + 2) {
-        queue.push_used(&mut memory, (round % 8) as u16, round).expect("published");
+        queue
+            .push_used(&mut memory, (round % 8) as u16, round)
+            .expect("published");
     }
     let last = u32::from(QUEUE_SIZE) + 1;
     let slot = u64::from(last % u32::from(QUEUE_SIZE));
@@ -383,4 +389,120 @@ fn descriptor_addresses_follow_the_table_stride() {
         Some(DESC_TABLE + 3 * DESCRIPTOR_SIZE)
     );
     assert_eq!(queue.descriptor_gpa(QUEUE_SIZE), None);
+}
+
+// ---------------------------------------------------------------------------
+// Modern feature negotiation and status state machine.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn features_commit_the_intersection_of_the_two_masks() {
+    let version_1 = 1u64 << 32;
+    let mut features = DeviceFeatures::new(version_1 | 0x24);
+    assert_eq!(features.device(), version_1 | 0x24);
+    assert_eq!(features.negotiated(), 0);
+    features.write_driver_word(0, 0x24);
+    features.write_driver_word(1, 1);
+    assert_eq!(features.negotiate(), Ok(version_1 | 0x24));
+    assert_eq!(features.negotiated(), version_1 | 0x24);
+    assert!(features.version_1());
+    assert_eq!(features.read_device_word(1), 1);
+}
+
+#[test]
+fn features_reject_unsupported_bits() {
+    let mut features = DeviceFeatures::new(1u64 << 32);
+    features.write_driver_word(0, 1);
+    features.write_driver_word(1, 1);
+    assert_eq!(features.negotiate(), Err(FeatureError::Unsupported));
+}
+
+#[test]
+fn features_require_version_1_for_negotiating_drivers() {
+    let device = (1u64 << 32) | 0x24;
+    let mut features = DeviceFeatures::new(device);
+    features.write_driver_word(0, 0x24);
+    assert_eq!(features.negotiate(), Err(FeatureError::Version1Required));
+    // A driver that requests nothing is accepted as pre-negotiation driver.
+    let mut legacy = DeviceFeatures::new(device);
+    assert_eq!(legacy.negotiate(), Ok(0));
+    // Adding VERSION_1 makes the same request valid.
+    features.write_driver_word(1, 1);
+    assert_eq!(features.negotiate(), Ok(device));
+}
+
+#[test]
+fn queue_state_checks_size_alignment_and_readiness() {
+    let mut state = QueueState::default();
+    assert!(!state.is_ready());
+    assert_eq!(state.validate(), Err(QueueError::BadSize));
+    assert_eq!(state.split(), Err(QueueError::NotReady));
+    assert_eq!(state.set_num(0), Err(QueueError::BadSize));
+    assert_eq!(state.set_num(3), Err(QueueError::BadSize));
+    assert_eq!(state.set_num(MAX_QUEUE_SIZE + 1), Err(QueueError::BadSize));
+    state.set_num(8).expect("power-of-two size");
+    state.desc = DESC_TABLE + 1;
+    state.avail = AVAIL_RING;
+    state.used = USED_RING;
+    assert_eq!(state.validate(), Err(QueueError::BadAddress));
+    state.desc = DESC_TABLE;
+    state.avail = AVAIL_RING + 1;
+    assert_eq!(state.validate(), Err(QueueError::BadAddress));
+    state.avail = AVAIL_RING;
+    state.used = USED_RING + 2;
+    assert_eq!(state.validate(), Err(QueueError::BadAddress));
+    state.used = USED_RING;
+    state.validate().expect("aligned tables");
+    state.ready = true;
+    let queue = state.split().expect("ready queue");
+    assert_eq!(queue.size(), 8);
+}
+
+#[test]
+fn queue_notify_rejects_out_of_range_queues() {
+    assert_eq!(QueueNotify::new(0, 2).map(QueueNotify::index), Ok(0));
+    assert_eq!(QueueNotify::new(1, 2).map(QueueNotify::index), Ok(1));
+    assert_eq!(QueueNotify::new(2, 2), Err(QueueError::BadQueue));
+    assert!(QueueNotify::new(1, 2).expect("valid").is(1));
+}
+
+#[test]
+fn available_ring_reports_interrupt_suppression() {
+    let mut memory = memory();
+    let mut queue = queue();
+    assert_eq!(queue.no_interrupt_requested(&mut memory), Ok(false));
+    memory.write_u16(AVAIL_RING, VIRTQ_AVAIL_F_NO_INTERRUPT);
+    assert_eq!(queue.no_interrupt_requested(&mut memory), Ok(true));
+    memory.write_u16(AVAIL_RING, 0);
+    assert_eq!(queue.no_interrupt_requested(&mut memory), Ok(false));
+}
+
+#[test]
+fn status_state_machine_rejects_invalid_transitions() {
+    let device = (u64::from(VIRTIO_F_VERSION_1) << 32) | 0x24;
+    let mut features = DeviceFeatures::new(device);
+    // Unknown status bit.
+    let failed = apply_status(0, 0x100, &mut features);
+    assert_ne!(failed & status::FAILED, 0);
+    // DRIVER_OK without FEATURES_OK.
+    let failed = apply_status(
+        0,
+        status::ACKNOWLEDGE | status::DRIVER | status::DRIVER_OK,
+        &mut features,
+    );
+    assert_ne!(failed & status::FAILED, 0);
+    // Missing VERSION_1 while requesting a feature.
+    features.write_driver_word(0, 0x24);
+    let failed = apply_status(0, status::ACKNOWLEDGE | status::FEATURES_OK, &mut features);
+    assert_ne!(failed & status::FAILED, 0);
+    // Valid sequence.
+    features.write_driver_word(1, 1);
+    let ok = apply_status(
+        0,
+        status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK | status::DRIVER_OK,
+        &mut features,
+    );
+    assert_eq!(ok, 0x0F);
+    assert_eq!(ok & status::FAILED, 0);
+    assert!(features.negotiated() != 0);
 }

@@ -34,11 +34,14 @@
 //! - descriptor encoding/decoding (16 bytes: `addr`, `len`, `flags`, `next`);
 //! - available-ring consumption (`idx` and `ring[]`) with wrap-around;
 //! - chain walking, including one level of *indirect* descriptor tables;
-//! - used-ring completion (`id` + written length), with wrap-around.
+//! - used-ring completion (`id` + written length), with wrap-around;
+//! - modern feature negotiation ([`DeviceFeatures`]), device-status
+//!   transitions ([`apply_status`]) and queue-programming validation
+//!   ([`QueueState`], [`QueueNotify`]);
+//! - used-ring event suppression (`VIRTQ_AVAIL_F_NO_INTERRUPT`).
 //!
-//! Out of scope (deliberately): feature negotiation, interrupt suppression
-//! (`VIRTQ_AVAIL_F_NO_INTERRUPT`), and the "event" index. They are transport
-//! concerns and can be added without changing this core.
+//! The transport layer (MMIO page or PCI BAR) remains a thin register file on
+//! top of these primitives.
 
 use alloc::vec::Vec;
 
@@ -53,6 +56,172 @@ pub const DESC_F_INDIRECT: u16 = 4;
 /// Highest queue size accepted by the legacy interface.
 pub const MAX_QUEUE_SIZE: u16 = 32768;
 
+/// Available-ring flag: the driver does not want used-ring interrupts.
+pub const VIRTQ_AVAIL_F_NO_INTERRUPT: u16 = 1;
+/// Feature bit `VIRTIO_F_VERSION_1` (modern interface), bit 32 of the
+/// device/driver feature space.
+pub const VIRTIO_F_VERSION_1: u32 = 1;
+/// 64-bit mask of [`VIRTIO_F_VERSION_1`].
+const VERSION_1_MASK: u64 = 1u64 << 32;
+
+/// Device-status bits (virtio specification, transport independent).
+pub mod status {
+    /// Guest acknowledged the device.
+    pub const ACKNOWLEDGE: u32 = 1;
+    /// Guest knows how to drive the device.
+    pub const DRIVER: u32 = 2;
+    /// Guest finished driver initialization.
+    pub const DRIVER_OK: u32 = 4;
+    /// Guest accepted the feature set.
+    pub const FEATURES_OK: u32 = 8;
+    /// Device requests a reset (legacy alias of `DEVICE_NEEDS_RESET`).
+    pub const NEEDS_RESET: u32 = 64;
+    /// Device failed and must be reset.
+    pub const FAILED: u32 = 128;
+}
+
+/// Mask of every status bit the models understand.
+pub const STATUS_KNOWN: u32 = status::ACKNOWLEDGE
+    | status::DRIVER
+    | status::DRIVER_OK
+    | status::FEATURES_OK
+    | status::NEEDS_RESET
+    | status::FAILED;
+
+/// Feature-negotiation failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeatureError {
+    /// The driver requested a bit the device does not offer.
+    Unsupported,
+    /// A driver that negotiated features did not accept
+    /// [`VIRTIO_F_VERSION_1`].
+    Version1Required,
+}
+
+/// Modern feature negotiation state: device offer, driver request and the
+/// mask committed when the driver writes `FEATURES_OK`.
+///
+/// A driver that requests no feature bit at all is treated as a
+/// pre-negotiation driver: `FEATURES_OK` is accepted with an empty negotiated
+/// mask, so transports that predate feature negotiation keep working. As soon
+/// as the driver requests any bit, [`Self::negotiate`] enforces the device
+/// offer and [`VIRTIO_F_VERSION_1`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeviceFeatures {
+    device: u64,
+    driver: u64,
+    negotiated: u64,
+}
+
+impl DeviceFeatures {
+    /// Creates a negotiation state with the features offered by the device.
+    pub const fn new(device: u64) -> Self {
+        Self {
+            device,
+            driver: 0,
+            negotiated: 0,
+        }
+    }
+
+    /// Features offered by the device.
+    pub const fn device(&self) -> u64 {
+        self.device
+    }
+
+    /// Features requested by the driver (raw mask).
+    pub const fn driver(&self) -> u64 {
+        self.driver
+    }
+
+    /// Features committed at `FEATURES_OK` (`driver & device`).
+    pub const fn negotiated(&self) -> u64 {
+        self.negotiated
+    }
+
+    /// Updates one 32-bit half of the driver feature request.
+    pub fn write_driver_word(&mut self, select: u32, value: u32) {
+        if select == 0 {
+            self.driver = (self.driver & 0xFFFF_FFFF_0000_0000) | u64::from(value);
+        } else {
+            self.driver = (self.driver & 0xFFFF_FFFF) | (u64::from(value) << 32);
+        }
+        // A new request invalidates the previously committed mask.
+        self.negotiated = 0;
+    }
+
+    /// Reads one 32-bit half of the driver feature request.
+    pub fn read_driver_word(&self, select: u32) -> u32 {
+        feature_word(self.driver, select)
+    }
+
+    /// Reads one 32-bit half of the device feature offer.
+    pub fn read_device_word(&self, select: u32) -> u32 {
+        feature_word(self.device, select)
+    }
+
+    /// Validates the driver request and commits `driver & device`.
+    pub fn negotiate(&mut self) -> Result<u64, FeatureError> {
+        if self.driver & !self.device != 0 {
+            return Err(FeatureError::Unsupported);
+        }
+        if self.driver != 0 && self.driver & VERSION_1_MASK == 0 {
+            return Err(FeatureError::Version1Required);
+        }
+        self.negotiated = self.driver & self.device;
+        Ok(self.negotiated)
+    }
+
+    /// Drops the committed mask (driver cleared `FEATURES_OK`).
+    pub fn clear_negotiated(&mut self) {
+        self.negotiated = 0;
+    }
+
+    /// True if [`VIRTIO_F_VERSION_1`] was negotiated.
+    pub const fn version_1(&self) -> bool {
+        self.negotiated & VERSION_1_MASK != 0
+    }
+}
+
+/// One 32-bit half of a 64-bit feature mask.
+const fn feature_word(features: u64, select: u32) -> u32 {
+    if select == 0 {
+        features as u32
+    } else {
+        (features >> 32) as u32
+    }
+}
+
+/// Applies one guest write to the device-status register.
+///
+/// Returns the new status value. Any invalid write (unknown bit, unsupported
+/// feature request, missing [`VIRTIO_F_VERSION_1`], `DRIVER_OK` without
+/// `FEATURES_OK`) leaves the device in the `FAILED` state, as required by the
+/// specification. `written` is the full value the driver wrote, since the
+/// status register is cumulative.
+pub fn apply_status(current: u32, written: u32, features: &mut DeviceFeatures) -> u32 {
+    if written & !STATUS_KNOWN != 0 {
+        features.clear_negotiated();
+        return (current & !status::FEATURES_OK) | status::FAILED;
+    }
+    let mut next = written & !status::NEEDS_RESET;
+    if written & status::FAILED != 0 {
+        return next | status::FAILED;
+    }
+    if written & status::FEATURES_OK != 0 {
+        if current & status::FEATURES_OK == 0 && features.negotiate().is_err() {
+            features.clear_negotiated();
+            return (next & !status::FEATURES_OK) | status::FAILED;
+        }
+        next |= status::FEATURES_OK;
+    } else {
+        features.clear_negotiated();
+    }
+    if written & status::DRIVER_OK != 0 && next & status::FEATURES_OK == 0 {
+        return next | status::FAILED;
+    }
+    next
+}
+
 /// Queue configuration or access error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueError {
@@ -60,6 +229,10 @@ pub enum QueueError {
     BadSize,
     /// A table address is misaligned for its element size.
     BadAddress,
+    /// The queue was used before `QUEUE_READY` was set.
+    NotReady,
+    /// A queue index (notification or selection) is out of range.
+    BadQueue,
     /// A descriptor index is outside the table.
     BadDescriptor,
     /// A chain loops, is too long, or contains an invalid indirect table.
@@ -212,7 +385,9 @@ impl SplitQueue {
         memory: &mut M,
         index: u16,
     ) -> Result<Descriptor, QueueError> {
-        let gpa = self.descriptor_gpa(index).ok_or(QueueError::BadDescriptor)?;
+        let gpa = self
+            .descriptor_gpa(index)
+            .ok_or(QueueError::BadDescriptor)?;
         let mut bytes = [0u8; 16];
         if !memory.read_gpa(gpa, &mut bytes) {
             return Err(QueueError::Memory);
@@ -227,9 +402,7 @@ impl SplitQueue {
         &mut self,
         memory: &mut M,
     ) -> Result<Option<u16>, QueueError> {
-        let produced = memory
-            .read_u16(self.avail + 2)
-            .ok_or(QueueError::Memory)?;
+        let produced = memory.read_u16(self.avail + 2).ok_or(QueueError::Memory)?;
         if produced == self.last_avail {
             return Ok(None);
         }
@@ -347,5 +520,109 @@ impl SplitQueue {
         }
         self.last_used = next;
         Ok(())
+    }
+}
+
+/// Queue-programming state as written by the driver through the transport.
+///
+/// This mirrors the four queue registers (`QUEUE_NUM`, descriptor/available/
+/// used addresses and `QUEUE_READY`) and validates them before a
+/// [`SplitQueue`] view is built. It is shared by every virtio model so that
+/// size, power-of-two and alignment rules are enforced at one place.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QueueState {
+    /// Number of descriptors written to `QUEUE_NUM`.
+    pub num: u16,
+    /// Descriptor-table base (guest-physical).
+    pub desc: u64,
+    /// Available-ring base (guest-physical).
+    pub avail: u64,
+    /// Used-ring base (guest-physical).
+    pub used: u64,
+    /// `QUEUE_READY` was set by the driver.
+    pub ready: bool,
+}
+
+impl QueueState {
+    /// True once the driver marked the queue ready.
+    pub const fn is_ready(&self) -> bool {
+        self.ready
+    }
+
+    /// Records a new queue size.
+    ///
+    /// Rejects zero, non-power-of-two and sizes above [`MAX_QUEUE_SIZE`], and
+    /// clears `ready` because the queue must be re-programmed.
+    pub fn set_num(&mut self, num: u16) -> Result<(), QueueError> {
+        if num == 0 || num > MAX_QUEUE_SIZE || !num.is_power_of_two() {
+            return Err(QueueError::BadSize);
+        }
+        self.num = num;
+        self.ready = false;
+        Ok(())
+    }
+
+    /// Validates size and table alignments without requiring `ready`.
+    pub fn validate(&self) -> Result<(), QueueError> {
+        if self.num == 0 || self.num > MAX_QUEUE_SIZE || !self.num.is_power_of_two() {
+            return Err(QueueError::BadSize);
+        }
+        if self.desc % DESCRIPTOR_SIZE != 0 || self.avail % 2 != 0 || self.used % 4 != 0 {
+            return Err(QueueError::BadAddress);
+        }
+        Ok(())
+    }
+
+    /// Builds the [`SplitQueue`] view once the driver marked the queue ready.
+    pub fn split(&self) -> Result<SplitQueue, QueueError> {
+        if !self.ready {
+            return Err(QueueError::NotReady);
+        }
+        SplitQueue::new(self.num, self.desc, self.avail, self.used)
+    }
+}
+
+/// Validated value written to `QUEUE_NOTIFY`.
+///
+/// Every model accepts a bounded set of queues; constructing this value is the
+/// single place where an out-of-range notification is rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueNotify {
+    index: u32,
+}
+
+impl QueueNotify {
+    /// Validates `index` against the number of queues implemented by a device.
+    pub fn new(index: u32, queue_count: u32) -> Result<Self, QueueError> {
+        if index >= queue_count {
+            return Err(QueueError::BadQueue);
+        }
+        Ok(Self { index })
+    }
+
+    /// Queue index to service.
+    pub const fn index(self) -> u32 {
+        self.index
+    }
+
+    /// True if this notification targets `queue`.
+    pub const fn is(self, queue: u32) -> bool {
+        self.index == queue
+    }
+}
+
+impl SplitQueue {
+    /// Reads the available-ring flags word.
+    pub fn avail_flags<M: QueueMemory + ?Sized>(&self, memory: &mut M) -> Result<u16, QueueError> {
+        memory.read_u16(self.avail).ok_or(QueueError::Memory)
+    }
+
+    /// True when the driver set [`VIRTQ_AVAIL_F_NO_INTERRUPT`], i.e. it does
+    /// not want a used-ring interrupt for the buffers it has published.
+    pub fn no_interrupt_requested<M: QueueMemory + ?Sized>(
+        &self,
+        memory: &mut M,
+    ) -> Result<bool, QueueError> {
+        Ok(self.avail_flags(memory)? & VIRTQ_AVAIL_F_NO_INTERRUPT != 0)
     }
 }

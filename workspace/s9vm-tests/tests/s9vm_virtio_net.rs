@@ -8,9 +8,11 @@ mod virtio;
 mod virtio_net;
 
 use alloc::vec::Vec;
-use virtio::{Descriptor, QueueMemory, DESC_F_NEXT, DESC_F_WRITE, DESCRIPTOR_SIZE};
+use virtio::{
+    Descriptor, QueueMemory, DESCRIPTOR_SIZE, DESC_F_NEXT, DESC_F_WRITE, VIRTQ_AVAIL_F_NO_INTERRUPT,
+};
 use virtio_net::{
-    reg, status, VirtioNet, DEVICE_ID, MAGIC, MAC, NET_HDR_SIZE, QUEUE_NUM_MAX, VERSION,
+    reg, status, VirtioNet, DEVICE_ID, MAC, MAGIC, NET_HDR_SIZE, QUEUE_NUM_MAX, VERSION,
 };
 
 struct Memory {
@@ -60,7 +62,10 @@ const BUFFERS: u64 = 0x4000;
 const QUEUE_SIZE: u16 = 8;
 
 fn write_descriptor(memory: &mut Memory, index: u16, descriptor: Descriptor) {
-    memory.write_bytes(DESC + u64::from(index) * DESCRIPTOR_SIZE, &descriptor.encode());
+    memory.write_bytes(
+        DESC + u64::from(index) * DESCRIPTOR_SIZE,
+        &descriptor.encode(),
+    );
 }
 
 fn publish(memory: &mut Memory, count: u16) {
@@ -72,6 +77,10 @@ fn used_entry(memory: &Memory, index: u16) -> (u32, u32) {
     let id = u32::from_le_bytes(memory.slice(gpa, 4).try_into().unwrap());
     let len = u32::from_le_bytes(memory.slice(gpa + 4, 4).try_into().unwrap());
     (id, len)
+}
+
+fn used_count(memory: &Memory) -> u16 {
+    u16::from_le_bytes(memory.slice(USED + 2, 2).try_into().unwrap())
 }
 
 /// Programs one queue and marks the device ready.
@@ -145,10 +154,7 @@ fn transmit_strips_the_network_header() {
     device.write(reg::QUEUE_NOTIFY, virtio_net::QUEUE_TX, &mut memory);
     assert_eq!(device.output(), b"frame");
     assert_eq!(device.frames_sent(), 1);
-    assert_eq!(
-        used_entry(&memory, 0),
-        (0, (NET_HDR_SIZE + 5) as u32)
-    );
+    assert_eq!(used_entry(&memory, 0), (0, (NET_HDR_SIZE + 5) as u32));
 }
 
 #[test]
@@ -300,4 +306,150 @@ fn invalid_queue_size_marks_the_device_failed() {
     device.write(reg::QUEUE_SEL, 0, &mut memory);
     device.write(reg::QUEUE_NUM, 3, &mut memory);
     assert_ne!(device.status() & status::FAILED, 0);
+}
+
+// ---------------------------------------------------------------------------
+// MAC/STATUS features and link state.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mac_and_link_status_features_are_negotiated() {
+    let mut memory = Memory::new();
+    let mut device = VirtioNet::new();
+    device.write(reg::DRIVER_FEATURES_SEL, 0, &mut memory);
+    device.write(
+        reg::DRIVER_FEATURES,
+        virtio_net::feature_lo::MAC | virtio_net::feature_lo::STATUS,
+        &mut memory,
+    );
+    device.write(reg::DRIVER_FEATURES_SEL, 1, &mut memory);
+    device.write(
+        reg::DRIVER_FEATURES,
+        virtio_net::feature_hi::VERSION_1,
+        &mut memory,
+    );
+    device.write(
+        reg::STATUS,
+        status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK,
+        &mut memory,
+    );
+    assert!(device.features_ok());
+    assert!(device.mac_negotiated());
+    assert!(device.link_status_negotiated());
+    assert_eq!(
+        device.negotiated_features(),
+        u64::from(virtio_net::feature_lo::MAC)
+            | u64::from(virtio_net::feature_lo::STATUS)
+            | (u64::from(virtio_net::feature_hi::VERSION_1) << 32)
+    );
+}
+
+#[test]
+fn link_status_byte_reflects_the_link_state() {
+    let mut device = VirtioNet::new();
+    assert!(device.link_up());
+    assert_eq!(device.read(reg::CONFIG + 8) & 1, 1);
+    device.set_link_up(false);
+    assert!(!device.link_up());
+    assert_eq!(device.read(reg::CONFIG + 8), 0);
+    assert_ne!(device.interrupt_status(), 0);
+    device.set_link_up(true);
+    assert_eq!(device.read(reg::CONFIG + 8) & 1, 1);
+}
+
+#[test]
+fn link_down_blocks_rx_delivery() {
+    let mut memory = Memory::new();
+    let mut device = ready_device(&mut memory);
+    write_descriptor(
+        &mut memory,
+        0,
+        Descriptor {
+            addr: BUFFERS,
+            len: 64,
+            flags: DESC_F_WRITE,
+            next: 0,
+        },
+    );
+    memory.write_u16(AVAIL + 4, 0);
+    publish(&mut memory, 1);
+    device.push_frame(b"dropped");
+    device.set_link_up(false);
+    device.write(reg::QUEUE_NOTIFY, virtio_net::QUEUE_RX, &mut memory);
+    assert_eq!(device.frames_received(), 0);
+    assert_eq!(device.pending_frames(), 1);
+    assert_eq!(used_count(&memory), 0);
+    assert_eq!(device.service_rx(&mut memory), 0);
+}
+
+#[test]
+fn link_down_still_completes_transmit() {
+    let mut memory = Memory::new();
+    let mut device = ready_device(&mut memory);
+    device.set_link_up(false);
+    let mut packet = alloc::vec![0u8; NET_HDR_SIZE];
+    packet.extend_from_slice(b"frame");
+    memory.write_bytes(BUFFERS, &packet);
+    write_descriptor(
+        &mut memory,
+        0,
+        Descriptor {
+            addr: BUFFERS,
+            len: packet.len() as u32,
+            flags: 0,
+            next: 0,
+        },
+    );
+    memory.write_u16(AVAIL + 4, 0);
+    publish(&mut memory, 1);
+    device.write(reg::QUEUE_NOTIFY, virtio_net::QUEUE_TX, &mut memory);
+    assert_eq!(device.output(), b"frame");
+    assert_eq!(device.frames_sent(), 1);
+    assert_eq!(used_count(&memory), 1);
+}
+
+#[test]
+fn missing_version_1_fails_feature_negotiation() {
+    let mut memory = Memory::new();
+    let mut device = VirtioNet::new();
+    device.write(reg::DRIVER_FEATURES_SEL, 0, &mut memory);
+    device.write(
+        reg::DRIVER_FEATURES,
+        virtio_net::feature_lo::MAC,
+        &mut memory,
+    );
+    device.write(
+        reg::STATUS,
+        status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK,
+        &mut memory,
+    );
+    assert_ne!(device.status() & status::FAILED, 0);
+    assert!(!device.features_ok());
+}
+
+#[test]
+fn no_interrupt_flag_suppresses_the_rx_interrupt() {
+    let mut memory = Memory::new();
+    let mut device = ready_device(&mut memory);
+    write_descriptor(
+        &mut memory,
+        0,
+        Descriptor {
+            addr: BUFFERS,
+            len: 64,
+            flags: DESC_F_WRITE,
+            next: 0,
+        },
+    );
+    memory.write_u16(AVAIL + 4, 0);
+    memory.write_u16(AVAIL, VIRTQ_AVAIL_F_NO_INTERRUPT);
+    publish(&mut memory, 1);
+    device.push_frame(b"quiet");
+    device.write(reg::QUEUE_NOTIFY, virtio_net::QUEUE_RX, &mut memory);
+    assert_eq!(device.frames_received(), 1);
+    assert_ne!(device.interrupt_status() & virtio_net::interrupt::CONFIG, 0);
+    assert_eq!(
+        device.interrupt_status() & virtio_net::interrupt::USED_RING,
+        0
+    );
 }

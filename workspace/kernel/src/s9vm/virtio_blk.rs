@@ -36,7 +36,9 @@
 
 use alloc::{vec, vec::Vec};
 
-use super::virtio::{QueueMemory, SplitQueue};
+use super::virtio::{
+    apply_status, DeviceFeatures, QueueMemory, QueueNotify, QueueState, SplitQueue,
+};
 
 // ---------------------------------------------------------------------------
 // Transport registers (virtio-mmio, version 2).
@@ -100,6 +102,20 @@ pub mod interrupt {
     pub const CONFIG: u32 = 2;
 }
 
+/// Feature bits (low word).
+pub mod feature_lo {
+    /// The device is read-only.
+    pub const RO: u32 = 1 << 5;
+    /// The device supports `FLUSH` requests.
+    pub const FLUSH: u32 = 1 << 9;
+}
+
+/// Feature bits (high word).
+pub mod feature_hi {
+    /// Modern (version 1) virtio interface.
+    pub const VERSION_1: u32 = 1;
+}
+
 /// Request types.
 pub mod request {
     /// Read from the device into guest memory.
@@ -122,22 +138,11 @@ pub const QUEUE_REQUEST: u32 = 0;
 /// Size of the request header.
 pub const HEADER_SIZE: usize = 16;
 
-/// Programmed state of one split queue.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct QueueState {
-    num: u16,
-    desc: u64,
-    avail: u64,
-    used: u64,
-    ready: bool,
-}
-
 /// virtio block device.
 #[derive(Debug)]
 pub struct VirtioBlk {
     status: u32,
-    device_features: u64,
-    driver_features: u64,
+    features: DeviceFeatures,
     feature_select: u32,
     queue_select: u32,
     interrupt_status: u32,
@@ -145,19 +150,37 @@ pub struct VirtioBlk {
     queue: QueueState,
     queue_view: Option<SplitQueue>,
     disk: Vec<u8>,
+    read_only: bool,
     completed: u32,
     last_status: u8,
 }
 
 impl VirtioBlk {
-    /// Creates a zeroed disk of `capacity` bytes (rounded up to a sector).
+    /// Creates a writable zeroed disk of `capacity` bytes (rounded up to a
+    /// sector).
     pub fn new(capacity: usize) -> Self {
+        Self::with_mode(capacity, false)
+    }
+
+    /// Creates a read-only zeroed disk of `capacity` bytes.
+    ///
+    /// The `VIRTIO_BLK_F_RO` feature is offered so the driver knows the disk
+    /// cannot be written; write requests are rejected without touching it.
+    pub fn new_read_only(capacity: usize) -> Self {
+        Self::with_mode(capacity, true)
+    }
+
+    /// Shared constructor for both access modes.
+    fn with_mode(capacity: usize, read_only: bool) -> Self {
         let sectors = capacity.div_ceil(SECTOR_SIZE);
+        let mut device_features =
+            (u64::from(feature_hi::VERSION_1) << 32) | u64::from(feature_lo::FLUSH);
+        if read_only {
+            device_features |= u64::from(feature_lo::RO);
+        }
         Self {
             status: 0,
-            // Modern interface + flush support.
-            device_features: 1 << 32,
-            driver_features: 0,
+            features: DeviceFeatures::new(device_features),
             feature_select: 0,
             queue_select: 0,
             interrupt_status: 0,
@@ -165,9 +188,23 @@ impl VirtioBlk {
             queue: QueueState::default(),
             queue_view: None,
             disk: vec![0u8; sectors * SECTOR_SIZE],
+            read_only,
             completed: 0,
             last_status: request_status::OK,
         }
+    }
+
+    /// True if the device rejects write requests.
+    pub const fn read_only(&self) -> bool {
+        self.read_only
+    }
+
+    /// Switches the device access mode.
+    ///
+    /// The offered feature set is fixed at construction; this is meant for a
+    /// privileged kernel toggle after the guest has been stopped.
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
     }
 
     /// Number of 512-byte sectors.
@@ -183,10 +220,12 @@ impl VirtioBlk {
     /// Writes `data` at `sector`, zero-padding the last partial sector.
     pub fn write_sector(&mut self, sector: u64, data: &[u8]) -> bool {
         let start = (sector as usize) * SECTOR_SIZE;
-        let end = match start.checked_add(SECTOR_SIZE) {
-            Some(end) if end <= self.disk.len() => end,
-            _ => return false,
+        let Some(end) = start.checked_add(SECTOR_SIZE) else {
+            return false;
         };
+        if end > self.disk.len() {
+            return false;
+        }
         let length = core::cmp::min(data.len(), SECTOR_SIZE);
         self.disk[start..start + length].copy_from_slice(&data[..length]);
         true
@@ -197,14 +236,29 @@ impl VirtioBlk {
         self.status
     }
 
+    /// Driver feature bits requested so far (raw mask).
+    pub const fn driver_features(&self) -> u64 {
+        self.features.driver()
+    }
+
+    /// Feature mask committed when the driver accepted `FEATURES_OK`.
+    pub const fn negotiated_features(&self) -> u64 {
+        self.features.negotiated()
+    }
+
+    /// True once `FEATURES_OK` was accepted and the device is not failed.
+    pub const fn features_ok(&self) -> bool {
+        self.status & status::FEATURES_OK != 0 && self.status & status::FAILED == 0
+    }
+
     /// Interrupt status register.
     pub const fn interrupt_status(&self) -> u32 {
         self.interrupt_status
     }
 
-    /// True once the driver set `DRIVER_OK`.
+    /// True once the driver set `DRIVER_OK` on a non-failed device.
     pub const fn ready(&self) -> bool {
-        self.status & status::DRIVER_OK != 0
+        self.status & status::DRIVER_OK != 0 && self.status & status::FAILED == 0
     }
 
     /// Number of completed requests (diagnostics).
@@ -230,8 +284,8 @@ impl VirtioBlk {
             reg::VERSION => VERSION,
             reg::DEVICE_ID => DEVICE_ID,
             reg::VENDOR_ID => VENDOR_ID,
-            reg::DEVICE_FEATURES => self.feature_word(self.device_features),
-            reg::DRIVER_FEATURES => self.feature_word(self.driver_features),
+            reg::DEVICE_FEATURES => self.features.read_device_word(self.feature_select),
+            reg::DRIVER_FEATURES => self.features.read_driver_word(self.feature_select),
             reg::QUEUE_SEL => self.queue_select,
             reg::QUEUE_NUM_MAX => u32::from(QUEUE_NUM_MAX),
             reg::QUEUE_NUM => u32::from(self.queue.num),
@@ -252,33 +306,15 @@ impl VirtioBlk {
         }
     }
 
-    /// Low or high half of a feature word.
-    const fn feature_word(&self, features: u64) -> u32 {
-        if self.feature_select == 0 {
-            features as u32
-        } else {
-            (features >> 32) as u32
-        }
-    }
-
     /// Writes a 32-bit transport register.
     pub fn write<M: QueueMemory + ?Sized>(&mut self, offset: u32, value: u32, memory: &mut M) {
         match offset {
             reg::DEVICE_FEATURES_SEL | reg::DRIVER_FEATURES_SEL => self.feature_select = value & 1,
-            reg::DRIVER_FEATURES => {
-                if self.feature_select == 0 {
-                    self.driver_features =
-                        (self.driver_features & 0xFFFF_FFFF_0000_0000) | u64::from(value);
-                } else {
-                    self.driver_features =
-                        (self.driver_features & 0xFFFF_FFFF) | (u64::from(value) << 32);
-                }
-            }
+            reg::DRIVER_FEATURES => self.features.write_driver_word(self.feature_select, value),
             reg::QUEUE_SEL => self.queue_select = value & 1,
             reg::QUEUE_NUM => {
                 let num = value as u16;
-                if num != 0 && num.is_power_of_two() && num <= QUEUE_NUM_MAX {
-                    self.queue.num = num;
+                if num <= QUEUE_NUM_MAX && self.queue.set_num(num).is_ok() {
                     self.refresh_queue();
                 } else {
                     self.status |= status::FAILED;
@@ -306,7 +342,7 @@ impl VirtioBlk {
             reg::QUEUE_USED_HIGH => {
                 self.queue.used = (self.queue.used & 0xFFFF_FFFF) | (u64::from(value) << 32);
             }
-            reg::QUEUE_NOTIFY => self.notify(memory),
+            reg::QUEUE_NOTIFY => self.notify(value, memory),
             reg::INTERRUPT_ACK => self.interrupt_status &= !value,
             reg::STATUS => self.write_status(value),
             _ => {}
@@ -316,30 +352,29 @@ impl VirtioBlk {
     /// Handles a device-status write.
     fn write_status(&mut self, value: u32) {
         if value == 0 {
-            *self = Self::new(self.disk.len());
+            let sectors = self.disk.len();
+            *self = Self::with_mode(sectors, self.read_only);
             return;
         }
-        self.status = value & !status::NEEDS_RESET;
-        if value & status::FAILED != 0 {
-            self.status |= status::FAILED;
-        }
+        self.status = apply_status(self.status, value, &mut self.features);
     }
 
     /// Rebuilds the split-queue view after a queue register changed.
     fn refresh_queue(&mut self) {
-        self.queue_view = if self.queue.ready {
-            SplitQueue::new(self.queue.num, self.queue.desc, self.queue.avail, self.queue.used).ok()
-        } else {
-            None
-        };
+        self.queue_view = self.queue.split().ok();
     }
 
     /// Processes a queue notification.
-    fn notify<M: QueueMemory + ?Sized>(&mut self, memory: &mut M) {
+    fn notify<M: QueueMemory + ?Sized>(&mut self, queue: u32, memory: &mut M) {
         if !self.ready() {
             return;
         }
-        self.service_requests(memory);
+        let Ok(notify) = QueueNotify::new(queue, 1) else {
+            return;
+        };
+        if notify.is(QUEUE_REQUEST) {
+            self.service_requests(memory);
+        }
     }
 
     /// Serves the requests published by the driver.
@@ -366,14 +401,20 @@ impl VirtioBlk {
             }
             self.completed = self.completed.wrapping_add(1);
             completed += 1;
-            self.interrupt_status |= interrupt::USED_RING;
+            if !queue.no_interrupt_requested(memory).unwrap_or(false) {
+                self.interrupt_status |= interrupt::USED_RING;
+            }
         }
         self.queue_view = Some(queue);
         completed
     }
 
     /// Executes one descriptor chain. Returns the number of bytes written.
-    fn execute<M: QueueMemory + ?Sized>(&mut self, memory: &mut M, chain: &[super::virtio::Descriptor]) -> u32 {
+    fn execute<M: QueueMemory + ?Sized>(
+        &mut self,
+        memory: &mut M,
+        chain: &[super::virtio::Descriptor],
+    ) -> u32 {
         if chain.len() < 2 {
             self.last_status = request_status::IO_ERROR;
             return 0;
@@ -410,6 +451,15 @@ impl VirtioBlk {
         // protocol: header, data..., status). It must be device-writable.
         let status_descriptor = chain[chain.len() - 1];
         if !status_descriptor.writable() || status_descriptor.len < 1 {
+            self.last_status = request_status::IO_ERROR;
+            return 0;
+        }
+
+        // Read-only mode: a write request is rejected without inspecting the
+        // data buffers and without touching the disk. The status byte is still
+        // published so the driver can complete the request.
+        if self.read_only && request_type == request::OUT {
+            let _ = memory.write_gpa(status_descriptor.addr, &[request_status::IO_ERROR]);
             self.last_status = request_status::IO_ERROR;
             return 0;
         }
@@ -475,7 +525,10 @@ impl VirtioBlk {
         }
         let status_byte = if ok {
             request_status::OK
-        } else if request_type != request::IN && request_type != request::OUT && request_type != request::FLUSH {
+        } else if request_type != request::IN
+            && request_type != request::OUT
+            && request_type != request::FLUSH
+        {
             request_status::UNSUPPORTED
         } else {
             request_status::IO_ERROR

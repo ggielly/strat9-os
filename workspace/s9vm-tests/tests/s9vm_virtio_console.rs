@@ -8,7 +8,9 @@ mod virtio;
 mod virtio_console;
 
 use alloc::vec::Vec;
-use virtio::{Descriptor, QueueMemory, DESC_F_NEXT, DESC_F_WRITE, DESCRIPTOR_SIZE};
+use virtio::{
+    Descriptor, QueueMemory, DESCRIPTOR_SIZE, DESC_F_NEXT, DESC_F_WRITE, VIRTQ_AVAIL_F_NO_INTERRUPT,
+};
 use virtio_console::{reg, status, VirtioConsole, DEVICE_ID, MAGIC, QUEUE_NUM_MAX, VERSION};
 
 /// Identity-mapped guest memory backed by a byte vector.
@@ -59,7 +61,10 @@ const BUFFERS: u64 = 0x4000;
 const QUEUE_SIZE: u16 = 8;
 
 fn write_descriptor(memory: &mut Memory, index: u16, descriptor: Descriptor) {
-    memory.write_bytes(DESC + u64::from(index) * DESCRIPTOR_SIZE, &descriptor.encode());
+    memory.write_bytes(
+        DESC + u64::from(index) * DESCRIPTOR_SIZE,
+        &descriptor.encode(),
+    );
 }
 
 fn publish(memory: &mut Memory, count: u16) {
@@ -167,7 +172,10 @@ fn transmit_publishes_the_buffer_to_the_output() {
     device.write(reg::QUEUE_NOTIFY, virtio_console::QUEUE_TX, &mut memory);
     assert_eq!(device.output(), b"hello");
     assert_eq!(used_entry(&memory, 0), (0, 5));
-    assert_ne!(device.interrupt_status() & virtio_console::interrupt::USED_RING, 0);
+    assert_ne!(
+        device.interrupt_status() & virtio_console::interrupt::USED_RING,
+        0
+    );
 }
 
 #[test]
@@ -305,13 +313,19 @@ fn interrupt_status_is_acknowledged() {
     let mut memory = Memory::new();
     let mut device = ready_device(&mut memory);
     device.push_input(b"x");
-    assert_ne!(device.interrupt_status() & virtio_console::interrupt::CONFIG, 0);
+    assert_ne!(
+        device.interrupt_status() & virtio_console::interrupt::CONFIG,
+        0
+    );
     device.write(
         reg::INTERRUPT_ACK,
         virtio_console::interrupt::CONFIG,
         &mut memory,
     );
-    assert_eq!(device.interrupt_status() & virtio_console::interrupt::CONFIG, 0);
+    assert_eq!(
+        device.interrupt_status() & virtio_console::interrupt::CONFIG,
+        0
+    );
 }
 
 #[test]
@@ -346,4 +360,111 @@ fn output_can_be_drained() {
     device.write(reg::QUEUE_NOTIFY, virtio_console::QUEUE_TX, &mut memory);
     assert_eq!(device.drain_output(), b"drain me");
     assert!(device.output().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Feature negotiation and status state machine.
+// ---------------------------------------------------------------------------
+
+/// Requests both advertised feature halves and accepts `FEATURES_OK`.
+fn negotiate_all(memory: &mut Memory, device: &mut VirtioConsole) {
+    device.write(reg::DRIVER_FEATURES_SEL, 0, memory);
+    device.write(
+        reg::DRIVER_FEATURES,
+        virtio_console::feature_lo::CONSOLE_SIZE,
+        memory,
+    );
+    device.write(reg::DRIVER_FEATURES_SEL, 1, memory);
+    device.write(
+        reg::DRIVER_FEATURES,
+        virtio_console::feature_hi::VERSION_1,
+        memory,
+    );
+    device.write(
+        reg::STATUS,
+        status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK,
+        memory,
+    );
+}
+
+#[test]
+fn console_size_feature_is_negotiated() {
+    let mut memory = Memory::new();
+    let mut device = VirtioConsole::new();
+    negotiate_all(&mut memory, &mut device);
+    assert!(device.features_ok());
+    assert!(device.console_size_negotiated());
+    assert_eq!(
+        device.negotiated_features(),
+        u64::from(virtio_console::feature_lo::CONSOLE_SIZE)
+            | (u64::from(virtio_console::feature_hi::VERSION_1) << 32)
+    );
+    assert_eq!(device.cols(), virtio_console::COLS);
+    assert_eq!(device.rows(), virtio_console::ROWS);
+}
+
+#[test]
+fn unknown_status_bits_fail_the_device() {
+    let mut memory = Memory::new();
+    let mut device = VirtioConsole::new();
+    device.write(reg::STATUS, status::ACKNOWLEDGE | 0x100, &mut memory);
+    assert_ne!(device.status() & status::FAILED, 0);
+}
+
+#[test]
+fn driver_ok_requires_features_ok() {
+    let mut memory = Memory::new();
+    let mut device = VirtioConsole::new();
+    device.write(
+        reg::STATUS,
+        status::ACKNOWLEDGE | status::DRIVER | status::DRIVER_OK,
+        &mut memory,
+    );
+    assert_ne!(device.status() & status::FAILED, 0);
+    assert!(!device.ready());
+}
+
+#[test]
+fn missing_version_1_fails_feature_negotiation() {
+    let mut memory = Memory::new();
+    let mut device = VirtioConsole::new();
+    device.write(reg::DRIVER_FEATURES_SEL, 0, &mut memory);
+    device.write(
+        reg::DRIVER_FEATURES,
+        virtio_console::feature_lo::CONSOLE_SIZE,
+        &mut memory,
+    );
+    device.write(
+        reg::STATUS,
+        status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK,
+        &mut memory,
+    );
+    assert_ne!(device.status() & status::FAILED, 0);
+    assert!(!device.features_ok());
+}
+
+#[test]
+fn no_interrupt_flag_suppresses_the_used_interrupt() {
+    let mut memory = Memory::new();
+    let mut device = ready_device(&mut memory);
+    memory.write_bytes(BUFFERS, b"hi");
+    write_descriptor(
+        &mut memory,
+        0,
+        Descriptor {
+            addr: BUFFERS,
+            len: 2,
+            flags: 0,
+            next: 0,
+        },
+    );
+    memory.write_u16(AVAIL, VIRTQ_AVAIL_F_NO_INTERRUPT);
+    memory.write_u16(AVAIL + 4, 0);
+    publish(&mut memory, 1);
+    device.write(reg::QUEUE_NOTIFY, virtio_console::QUEUE_TX, &mut memory);
+    assert_eq!(device.output(), b"hi");
+    assert_eq!(
+        device.interrupt_status() & virtio_console::interrupt::USED_RING,
+        0
+    );
 }

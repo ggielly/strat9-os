@@ -36,7 +36,9 @@
 
 use alloc::{collections::VecDeque, vec::Vec};
 
-use super::virtio::{QueueMemory, SplitQueue};
+use super::virtio::{
+    apply_status, DeviceFeatures, QueueMemory, QueueNotify, QueueState, SplitQueue,
+};
 
 // ---------------------------------------------------------------------------
 // Transport registers (virtio-mmio, version 2).
@@ -127,29 +129,11 @@ pub const INPUT_CAPACITY: usize = 64 * 1024;
 /// Maximum number of output bytes buffered for the kernel.
 pub const OUTPUT_CAPACITY: usize = 64 * 1024;
 
-/// Programmed state of one split queue.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct QueueState {
-    num: u16,
-    desc: u64,
-    avail: u64,
-    used: u64,
-    ready: bool,
-}
-
-impl QueueState {
-    /// Rebuilds the split-queue view from the programmed addresses.
-    fn split(self) -> Result<SplitQueue, super::virtio::QueueError> {
-        SplitQueue::new(self.num, self.desc, self.avail, self.used)
-    }
-}
-
 /// virtio console device.
 #[derive(Debug)]
 pub struct VirtioConsole {
     status: u32,
-    device_features: u64,
-    driver_features: u64,
+    features: DeviceFeatures,
     feature_select: u32,
     queue_select: u32,
     interrupt_status: u32,
@@ -167,9 +151,9 @@ impl VirtioConsole {
     pub fn new() -> Self {
         Self {
             status: 0,
-            device_features: u64::from(feature_lo::CONSOLE_SIZE)
-                | (u64::from(feature_hi::VERSION_1) << 32),
-            driver_features: 0,
+            features: DeviceFeatures::new(
+                u64::from(feature_lo::CONSOLE_SIZE) | (u64::from(feature_hi::VERSION_1) << 32),
+            ),
             feature_select: 0,
             queue_select: 0,
             interrupt_status: 0,
@@ -188,9 +172,35 @@ impl VirtioConsole {
         self.status
     }
 
-    /// Negotiated driver feature bits.
+    /// Driver feature bits requested so far (raw mask).
     pub const fn driver_features(&self) -> u64 {
-        self.driver_features
+        self.features.driver()
+    }
+
+    /// Feature mask committed when the driver accepted `FEATURES_OK`.
+    pub const fn negotiated_features(&self) -> u64 {
+        self.features.negotiated()
+    }
+
+    /// True once `FEATURES_OK` was accepted and the device is not failed.
+    pub const fn features_ok(&self) -> bool {
+        self.status & status::FEATURES_OK != 0 && self.status & status::FAILED == 0
+    }
+
+    /// True if `VIRTIO_CONSOLE_F_SIZE` was negotiated, i.e. the driver may
+    /// read `cols`/`rows` from the config space.
+    pub const fn console_size_negotiated(&self) -> bool {
+        self.features.negotiated() & (feature_lo::CONSOLE_SIZE as u64) != 0
+    }
+
+    /// Console width exposed in the config space.
+    pub const fn cols(&self) -> u16 {
+        COLS
+    }
+
+    /// Console height exposed in the config space.
+    pub const fn rows(&self) -> u16 {
+        ROWS
     }
 
     /// Interrupt status register.
@@ -198,9 +208,9 @@ impl VirtioConsole {
         self.interrupt_status
     }
 
-    /// True once the driver set `DRIVER_OK`.
+    /// True once the driver set `DRIVER_OK` on a non-failed device.
     pub const fn ready(&self) -> bool {
-        self.status & status::DRIVER_OK != 0
+        self.status & status::DRIVER_OK != 0 && self.status & status::FAILED == 0
     }
 
     /// Bytes produced by the transmit queue and not yet drained.
@@ -246,8 +256,8 @@ impl VirtioConsole {
             reg::VERSION => VERSION,
             reg::DEVICE_ID => DEVICE_ID,
             reg::VENDOR_ID => VENDOR_ID,
-            reg::DEVICE_FEATURES => self.feature_word(self.device_features),
-            reg::DRIVER_FEATURES => self.feature_word(self.driver_features),
+            reg::DEVICE_FEATURES => self.features.read_device_word(self.feature_select),
+            reg::DRIVER_FEATURES => self.features.read_driver_word(self.feature_select),
             reg::QUEUE_SEL => self.queue_select,
             reg::QUEUE_NUM_MAX => u32::from(QUEUE_NUM_MAX),
             reg::QUEUE_NUM => u32::from(self.queue_state().num),
@@ -267,15 +277,6 @@ impl VirtioConsole {
         }
     }
 
-    /// Low or high half of a feature word, depending on `DEVICE_FEATURES_SEL`.
-    const fn feature_word(&self, features: u64) -> u32 {
-        if self.feature_select == 0 {
-            features as u32
-        } else {
-            (features >> 32) as u32
-        }
-    }
-
     /// Writes a 32-bit transport register.
     ///
     /// Writes that need queue processing (`QUEUE_NOTIFY`, `STATUS`) go through
@@ -283,20 +284,11 @@ impl VirtioConsole {
     pub fn write<M: QueueMemory + ?Sized>(&mut self, offset: u32, value: u32, memory: &mut M) {
         match offset {
             reg::DEVICE_FEATURES_SEL | reg::DRIVER_FEATURES_SEL => self.feature_select = value & 1,
-            reg::DRIVER_FEATURES => {
-                if self.feature_select == 0 {
-                    self.driver_features =
-                        (self.driver_features & 0xFFFF_FFFF_0000_0000) | u64::from(value);
-                } else {
-                    self.driver_features =
-                        (self.driver_features & 0xFFFF_FFFF) | (u64::from(value) << 32);
-                }
-            }
+            reg::DRIVER_FEATURES => self.features.write_driver_word(self.feature_select, value),
             reg::QUEUE_SEL => self.queue_select = value & 1,
             reg::QUEUE_NUM => {
                 let num = value as u16;
-                if num != 0 && num.is_power_of_two() && num <= QUEUE_NUM_MAX {
-                    self.queue_state_mut().num = num;
+                if num <= QUEUE_NUM_MAX && self.queue_state_mut().set_num(num).is_ok() {
                     self.refresh_queue();
                 } else {
                     self.status |= status::FAILED;
@@ -344,9 +336,9 @@ impl VirtioConsole {
             *self = Self::new();
             return;
         }
-        self.status = value & !status::NEEDS_RESET;
-        if value & status::FAILED != 0 {
-            self.status |= status::FAILED;
+        let next = apply_status(self.status, value, &mut self.features);
+        self.status = next;
+        if next & status::FAILED != 0 {
             return;
         }
         if value & status::DRIVER_OK != 0 {
@@ -357,12 +349,7 @@ impl VirtioConsole {
 
     /// Rebuilds the split-queue views after a queue register changed.
     fn refresh_queue(&mut self) {
-        let state = *self.queue_state();
-        let split = if state.ready {
-            state.split().ok()
-        } else {
-            None
-        };
+        let split = self.queue_state().split().ok();
         if self.queue_select == QUEUE_TX {
             self.tx_queue = split;
         } else {
@@ -393,7 +380,10 @@ impl VirtioConsole {
         if !self.ready() {
             return;
         }
-        match queue {
+        let Ok(notify) = QueueNotify::new(queue, 2) else {
+            return;
+        };
+        match notify.index() {
             QUEUE_RX => {
                 self.service_rx(memory);
             }
@@ -449,7 +439,9 @@ impl VirtioConsole {
             if queue.push_used(memory, head, written).is_err() {
                 break;
             }
-            self.interrupt_status |= interrupt::USED_RING;
+            if !queue.no_interrupt_requested(memory).unwrap_or(false) {
+                self.interrupt_status |= interrupt::USED_RING;
+            }
         }
         self.rx_queue = Some(queue);
         total
@@ -494,7 +486,9 @@ impl VirtioConsole {
             if queue.push_used(memory, head, written).is_err() {
                 break;
             }
-            self.interrupt_status |= interrupt::USED_RING;
+            if !queue.no_interrupt_requested(memory).unwrap_or(false) {
+                self.interrupt_status |= interrupt::USED_RING;
+            }
         }
         self.tx_queue = Some(queue);
         total

@@ -8,7 +8,7 @@ mod virtio;
 mod virtio_blk;
 
 use alloc::vec::Vec;
-use virtio::{Descriptor, QueueMemory, DESC_F_WRITE, DESCRIPTOR_SIZE};
+use virtio::{Descriptor, QueueMemory, DESCRIPTOR_SIZE, DESC_F_WRITE, VIRTQ_AVAIL_F_NO_INTERRUPT};
 use virtio_blk::{
     reg, request, request_status, status, VirtioBlk, DEVICE_ID, MAGIC, QUEUE_NUM_MAX, SECTOR_SIZE,
     VERSION,
@@ -63,7 +63,10 @@ const STATUS_BYTE: u64 = 0x6000;
 const QUEUE_SIZE: u16 = 8;
 
 fn write_descriptor(memory: &mut Memory, index: u16, descriptor: Descriptor) {
-    memory.write_bytes(DESC + u64::from(index) * DESCRIPTOR_SIZE, &descriptor.encode());
+    memory.write_bytes(
+        DESC + u64::from(index) * DESCRIPTOR_SIZE,
+        &descriptor.encode(),
+    );
 }
 
 fn publish(memory: &mut Memory, count: u16) {
@@ -77,8 +80,11 @@ fn used_entry(memory: &Memory, index: u16) -> (u32, u32) {
     (id, len)
 }
 
-fn ready_device(memory: &mut Memory) -> VirtioBlk {
-    let mut device = VirtioBlk::new(16 * SECTOR_SIZE);
+fn used_count(memory: &Memory) -> u16 {
+    u16::from_le_bytes(memory.slice(USED + 2, 2).try_into().unwrap())
+}
+
+fn ready_with(memory: &mut Memory, mut device: VirtioBlk) -> VirtioBlk {
     device.write(reg::QUEUE_SEL, 0, memory);
     device.write(reg::QUEUE_NUM, u32::from(QUEUE_SIZE), memory);
     device.write(reg::QUEUE_DESC_LOW, DESC as u32, memory);
@@ -91,6 +97,10 @@ fn ready_device(memory: &mut Memory) -> VirtioBlk {
         memory,
     );
     device
+}
+
+fn ready_device(memory: &mut Memory) -> VirtioBlk {
+    ready_with(memory, VirtioBlk::new(16 * SECTOR_SIZE))
 }
 
 /// Builds a chain: header, one data descriptor, status byte.
@@ -122,8 +132,7 @@ fn build_request(
         Descriptor {
             addr: DATA,
             len: data_len,
-            flags: virtio::DESC_F_NEXT
-                | if data_writable { DESC_F_WRITE } else { 0 },
+            flags: virtio::DESC_F_NEXT | if data_writable { DESC_F_WRITE } else { 0 },
             next: 2,
         },
     );
@@ -294,4 +303,101 @@ fn invalid_queue_size_marks_the_device_failed() {
     device.write(reg::QUEUE_SEL, 0, &mut memory);
     device.write(reg::QUEUE_NUM, 3, &mut memory);
     assert_ne!(device.status() & status::FAILED, 0);
+}
+
+// ---------------------------------------------------------------------------
+// FLUSH/RO features, config capacity and read-only behaviour.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn flush_and_read_only_features_are_offered() {
+    let mut memory = Memory::new();
+    let mut device = VirtioBlk::new(1024);
+    let low = device.read(reg::DEVICE_FEATURES);
+    assert_ne!(low & virtio_blk::feature_lo::FLUSH, 0);
+    assert_eq!(low & virtio_blk::feature_lo::RO, 0);
+    device.write(reg::DEVICE_FEATURES_SEL, 1, &mut memory);
+    assert_eq!(
+        device.read(reg::DEVICE_FEATURES),
+        virtio_blk::feature_hi::VERSION_1
+    );
+
+    let mut read_only = VirtioBlk::new_read_only(1024);
+    assert!(read_only.read_only());
+    assert_ne!(
+        read_only.read(reg::DEVICE_FEATURES) & virtio_blk::feature_lo::RO,
+        0
+    );
+}
+
+#[test]
+fn capacity_is_reported_in_512_byte_sectors() {
+    let device = VirtioBlk::new(3 * SECTOR_SIZE - 1);
+    assert_eq!(device.sectors(), 3);
+    assert_eq!(device.read(reg::CONFIG), 3);
+    assert_eq!(device.read(reg::CONFIG + 4), 0);
+    let big = VirtioBlk::new(2 * 1024);
+    assert_eq!(big.sectors(), 4);
+    assert_eq!(big.read(reg::CONFIG), 4);
+}
+
+#[test]
+fn read_only_device_rejects_out_requests_without_touching_the_disk() {
+    let mut memory = Memory::new();
+    let mut device = ready_with(&mut memory, VirtioBlk::new_read_only(16 * SECTOR_SIZE));
+    device.write_sector(0, b"SAFE");
+    memory.write_bytes(DATA, b"HACK");
+    build_request(&mut memory, request::OUT, 0, 4, false);
+    device.write(reg::QUEUE_NOTIFY, 0, &mut memory);
+    assert_eq!(memory.slice(STATUS_BYTE, 1)[0], request_status::IO_ERROR);
+    assert_eq!(device.last_status(), request_status::IO_ERROR);
+    assert_eq!(&device.disk_mut()[..4], b"SAFE");
+    assert_eq!(device.completed(), 1);
+}
+
+#[test]
+fn read_only_device_still_serves_read_requests() {
+    let mut memory = Memory::new();
+    let mut device = ready_with(&mut memory, VirtioBlk::new_read_only(16 * SECTOR_SIZE));
+    device.write_sector(0, b"DATA");
+    build_request(&mut memory, request::IN, 0, 4, true);
+    device.write(reg::QUEUE_NOTIFY, 0, &mut memory);
+    assert_eq!(memory.slice(DATA, 4), b"DATA");
+    assert_eq!(memory.slice(STATUS_BYTE, 1)[0], request_status::OK);
+}
+
+#[test]
+fn missing_version_1_fails_feature_negotiation() {
+    let mut memory = Memory::new();
+    let mut device = VirtioBlk::new(1024);
+    device.write(reg::DRIVER_FEATURES_SEL, 0, &mut memory);
+    device.write(
+        reg::DRIVER_FEATURES,
+        virtio_blk::feature_lo::FLUSH,
+        &mut memory,
+    );
+    device.write(
+        reg::STATUS,
+        status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK,
+        &mut memory,
+    );
+    assert_ne!(device.status() & status::FAILED, 0);
+    assert!(!device.features_ok());
+}
+
+#[test]
+fn no_interrupt_flag_suppresses_the_completion_interrupt() {
+    let mut memory = Memory::new();
+    let mut device = ready_device(&mut memory);
+    device.write_sector(0, b"QUIET");
+    build_request(&mut memory, request::IN, 0, 8, true);
+    memory.write_u16(AVAIL, VIRTQ_AVAIL_F_NO_INTERRUPT);
+    device.write(reg::QUEUE_NOTIFY, 0, &mut memory);
+    assert_eq!(memory.slice(STATUS_BYTE, 1)[0], request_status::OK);
+    assert_eq!(device.completed(), 1);
+    assert_eq!(used_count(&memory), 1);
+    assert_eq!(
+        device.interrupt_status() & virtio_blk::interrupt::USED_RING,
+        0
+    );
 }
