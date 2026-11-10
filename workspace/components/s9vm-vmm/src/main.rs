@@ -1512,6 +1512,7 @@ fn guest_marker_name(byte: u8) -> &'static str {
         b'A' => "ACPI RSDP ok",
         b'K' => "GDT/IDT/paging/cmdline ok",
         b'R' => "initrd module ok",
+        b'I' => "initrd archive ok",
         b'r' => "initrd not present",
         b'T' => "APIC timer ok",
         b't' => "APIC timer unavailable",

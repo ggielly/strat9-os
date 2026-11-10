@@ -84,6 +84,7 @@ policy completes it with the reported instruction length.
 | `M` (`0x4D`) | `memory_count > 0` |
 | `A` (`0x41`) | RSDP found, `rsdp_gpa` coherent, ACPI 1.0 checksum valid |
 | `R` (`0x52`) | initrd module present and starts with a cpio `newc` archive |
+| `I` (`0x49`) | the initrd archive walks cleanly (headers, names, data, trailer) |
 | `r` (`0x72`) | no initrd module (absent, malformed or not cpio) — non-fatal |
 | `K` (`0x4B`) | command line parsed, private GDT, IDT and page tables active |
 | `T` (`0x54`) | local APIC timer probe observed a count tick |
@@ -92,7 +93,8 @@ policy completes it with the reported instruction length.
 | `F` (`0x46`) + code | failure; the code is the failing step (see below) |
 | `P` (`0x50`) | Rust panic; the guest halts afterwards (no code) |
 
-Success sequence: `G`, `M`, `A`, `R`/`r`, `K`, `T`/`t`, then repeated `hlt`.
+Success sequence: `G`, `M`, `A`, `R`/`r`, `I` (only after `R`), `K`, `T`/`t`,
+then repeated `hlt`.
 Failure sequence: `F`, code, then `hlt`.
 
 Failure codes published after `F`:
@@ -134,7 +136,9 @@ Failure codes published after `F`:
    leaf for the local APIC window at `0xFEE0_0000`; `CR3` is switched to them.
    The policy-provided tables are only used for the switch itself;
 8. **initrd**: module entry #1 is dereferenced only inside the mapped identity
-   window; a cpio `newc` magic (`070701`) reports `R`, anything else `r`;
+   window; a cpio `newc` archive walks cleanly (`070701` headers, NUL-terminated
+   names, aligned data ranges, at least one entry and the `TRAILER!!!` record)
+   and reports `R` then `I`; anything else reports the non-fatal `r`;
 9. **local APIC timer**: reads `APIC_ID`/`APIC_VERSION`, checks that the version
    register is coherent, software-enables the APIC, programs a masked one-shot
    count (divide by 1, initial count `2_000`) and polls the read-only

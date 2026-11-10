@@ -146,6 +146,15 @@ const BP_MAGIC: u64 = 0x0000_5042_4D56_3953;
 const IDENTITY_WINDOW: u64 = 0x0040_0000;
 /// `cpio` "newc" ASCII magic, first bytes of an initrd archive.
 const CPIO_NEWC_MAGIC: [u8; 6] = *b"070701";
+/// Size of a `newc` cpio header: six magic bytes and thirteen 8-digit
+/// hexadecimal fields.
+const CPIO_HEADER_LEN: u64 = 110;
+/// Offset of the `namesize` field inside a `newc` cpio header.
+const CPIO_OFF_NAMESIZE: u64 = 94;
+/// Offset of the `filesize` field inside a `newc` cpio header.
+const CPIO_OFF_FILESIZE: u64 = 54;
+/// Maximum number of archive entries walked (safety bound).
+const CPIO_MAX_ENTRIES: u32 = 16;
 /// Expected guest-physical address of the ACPI RSDP.
 const RSDP_GPA: u64 = 0x000E_0000;
 /// End (exclusive) of the legacy BIOS window scanned for the RSDP.
@@ -533,10 +542,15 @@ pub unsafe extern "C" fn guest_main(boot_params_gpa: u64) -> ! {
     switch_page_tables(page_table_root);
 
     // 9. Initrd module (entry #1): report `R` when the block advertises a
-    //    cpio `newc` archive where it says it is, `r` otherwise. The archive
-    //    itself is consumed by a later stage; this only validates the hand-off.
+    //    cpio `newc` archive where it says it is, then `I` when the complete
+    //    archive can be walked (headers, names and data ranges all in bounds,
+    //    at least one entry and the `TRAILER!!!` record). An absent or
+    //    malformed archive reports the non-fatal lowercase `r` instead.
     if initrd_present(boot_params_gpa) {
         debug_write(b'R');
+        if cpio_archive_ok(boot_params_gpa) {
+            debug_write(b'I');
+        }
     } else {
         debug_write(b'r');
     }
@@ -722,6 +736,144 @@ unsafe fn initrd_present(boot_params_gpa: u64) -> bool {
         index += 1;
     }
     true
+}
+
+/// Walks the whole initrd archive and validates its framing.
+///
+/// Every offset is checked against the module length before it is dereferenced,
+/// so a truncated or hostile archive takes the non-fatal `r` path instead of
+/// faulting. Returns `true` only for an archive with at least one entry, valid
+/// name/data ranges and the `TRAILER!!!` record.
+///
+/// # Safety
+///
+/// The 1024 bytes at `boot_params_gpa` must be mapped and readable.
+unsafe fn cpio_archive_ok(boot_params_gpa: u64) -> bool {
+    if read_u32(boot_params_gpa, BP_OFF_MODULE_COUNT) < 2 {
+        return false;
+    }
+    let entry = MODULE_OFFSET + MODULE_ENTRY_SIZE;
+    let base = read_u64(boot_params_gpa, entry);
+    let len = read_u64(boot_params_gpa, entry + 8);
+    if base >= IDENTITY_WINDOW || len > IDENTITY_WINDOW - base {
+        return false;
+    }
+    // SAFETY: `base..base + len` is inside the identity window read above.
+    unsafe { cpio_walk(base, len) }
+}
+
+/// Walks one `newc` archive at `base..base + len`.
+///
+/// # Safety
+///
+/// The range must be mapped and readable.
+unsafe fn cpio_walk(base: u64, len: u64) -> bool {
+    let mut cursor = 0u64;
+    let mut entries = 0u32;
+    while entries < CPIO_MAX_ENTRIES {
+        let header_end = match cursor.checked_add(CPIO_HEADER_LEN) {
+            Some(end) if end <= len => end,
+            _ => return false,
+        };
+        if !cpio_magic_at(base, cursor) {
+            return false;
+        }
+        let Some(namesize) = cpio_field(base, cursor + CPIO_OFF_NAMESIZE) else {
+            return false;
+        };
+        let Some(filesize) = cpio_field(base, cursor + CPIO_OFF_FILESIZE) else {
+            return false;
+        };
+        if namesize == 0 || namesize > len {
+            return false;
+        }
+        let name_end = match header_end.checked_add(namesize) {
+            Some(end) if end <= len => end,
+            _ => return false,
+        };
+        // The name field is NUL-terminated inside `namesize`.
+        if read_u8(base, name_end - 1) != 0 {
+            return false;
+        }
+        let data_start = align4(name_end);
+        let data_end = match data_start.checked_add(filesize) {
+            Some(end) if end <= len => end,
+            _ => return false,
+        };
+        if cpio_name_eq(base, header_end, namesize, b"TRAILER!!!") {
+            return entries > 0;
+        }
+        entries += 1;
+        cursor = align4(data_end);
+    }
+    false
+}
+
+/// Checks that a `newc` magic starts at `offset`.
+///
+/// # Safety
+///
+/// `offset..offset + 6` must be inside the mapped archive.
+unsafe fn cpio_magic_at(base: u64, offset: u64) -> bool {
+    let mut index = 0u64;
+    while index < CPIO_NEWC_MAGIC.len() as u64 {
+        // SAFETY: the caller validated the header range before this call.
+        if read_u8(base, offset + index) != CPIO_NEWC_MAGIC[index as usize] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// Parses one 8-digit hexadecimal `newc` header field.
+///
+/// # Safety
+///
+/// `offset..offset + 8` must be inside the mapped archive.
+unsafe fn cpio_field(base: u64, offset: u64) -> Option<u64> {
+    let mut value = 0u64;
+    let mut index = 0u64;
+    while index < 8 {
+        // SAFETY: the caller validated the header range before this call.
+        let byte = read_u8(base, offset + index);
+        let digit = match byte {
+            b'0'..=b'9' => u64::from(byte - b'0'),
+            b'a'..=b'f' => u64::from(byte - b'a') + 10,
+            b'A'..=b'F' => u64::from(byte - b'A') + 10,
+            _ => return None,
+        };
+        value = value.checked_mul(16)?.checked_add(digit)?;
+        index += 1;
+    }
+    Some(value)
+}
+
+/// Compares a `newc` name field, including its NUL terminator, with `expected`.
+///
+/// # Safety
+///
+/// `offset..offset + namesize` must be inside the mapped archive.
+unsafe fn cpio_name_eq(base: u64, offset: u64, namesize: u64, expected: &[u8]) -> bool {
+    let wanted = expected.len() as u64 + 1;
+    if namesize != wanted {
+        return false;
+    }
+    let mut index = 0u64;
+    while index < expected.len() as u64 {
+        // SAFETY: the caller validated the name range before this call.
+        if read_u8(base, offset + index) != expected[index as usize] {
+            return false;
+        }
+        index += 1;
+    }
+    // The final byte is the NUL terminator checked by the caller.
+    true
+}
+
+/// Rounds `value` up to a four-byte boundary.
+const fn align4(value: u64) -> u64 {
+    (value + 3) & !3
 }
 
 /// Installs the private GDT and reloads every segment register.
