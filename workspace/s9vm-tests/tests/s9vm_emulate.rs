@@ -29,7 +29,7 @@ mod virtio_console;
 
 use emulate::{
     handle_exit, interrupt_action, walk_guest, walk_second_level, DevicePage, Devices,
-    GuestContext, InterruptAction, MemoryView, PhysMemory, CONSOLE_BASE, CONSOLE_IRQ_VECTOR,
+    GuestContext, InterruptAction, MemoryView, PhysMemory, CONSOLE_BASE, CONSOLE_IRQ_LINE, CONSOLE_IRQ_VECTOR,
     IOAPIC_BASE,
 };
 use exit::ExitClass;
@@ -1201,4 +1201,119 @@ fn network_frame_is_captured_through_the_transport_page() {
     assert_eq!(devices.net.output(), b"frame");
     assert_eq!(devices.net.frames_sent(), 1);
     assert_eq!(apic.pending_vector(), Some(emulate::NET_IRQ_VECTOR));
+}
+
+// ---------------------------------------------------------------------------
+// I/O APIC routing of device lines
+// ---------------------------------------------------------------------------
+
+/// Programs one I/O APIC redirection entry through the MMIO page.
+fn program_ioapic_entry(
+    devices: &mut Devices,
+    apic: &mut apic::LocalApic,
+    memory: &mut TestMemory,
+    guest: &mut TestGuest,
+    pin: u32,
+    low_word: u32,
+) {
+    mmio_write(
+        devices,
+        apic,
+        memory,
+        guest,
+        IOAPIC_BASE,
+        ioapic::REG_SELECT as u64,
+        ioapic::REDIRECTION_BASE + pin * 2,
+    );
+    mmio_write(
+        devices,
+        apic,
+        memory,
+        guest,
+        IOAPIC_BASE,
+        ioapic::REG_WINDOW as u64,
+        low_word,
+    );
+}
+
+/// Notifies the console transmit queue with one small buffer.
+fn console_send(memory: &mut TestMemory, devices: &mut Devices, apic: &mut apic::LocalApic, guest: &mut TestGuest) {
+    console_write(
+        devices,
+        apic,
+        memory,
+        guest,
+        u64::from(virtio_console::reg::STATUS),
+        virtio_console::status::ACKNOWLEDGE
+            | virtio_console::status::DRIVER
+            | virtio_console::status::FEATURES_OK
+            | virtio_console::status::DRIVER_OK,
+    );
+    console_program_queue(devices, apic, memory, guest, virtio_console::QUEUE_TX);
+    let descriptor = virtio::Descriptor {
+        addr: CONSOLE_BUFFER,
+        len: 1,
+        flags: 0,
+        next: 0,
+    };
+    memory.write_bytes(CONSOLE_DESC, &descriptor.encode());
+    memory.write_bytes(CONSOLE_BUFFER, b"x");
+    memory.write_bytes(CONSOLE_AVAIL + 2, &1u16.to_le_bytes());
+    memory.write_bytes(CONSOLE_AVAIL + 4, &0u16.to_le_bytes());
+    console_write(
+        devices,
+        apic,
+        memory,
+        guest,
+        u64::from(virtio_console::reg::QUEUE_NOTIFY),
+        virtio_console::QUEUE_TX,
+    );
+}
+
+#[test]
+fn device_line_defaults_to_the_console_vector() {
+    let mut memory = machine();
+    let mut guest = TestGuest::new(CODE_PAGE);
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    console_send(&mut memory, &mut devices, &mut apic, &mut guest);
+    assert_eq!(apic.pending_vector(), Some(CONSOLE_IRQ_VECTOR));
+}
+
+#[test]
+fn guest_can_remap_the_device_line() {
+    let mut memory = machine();
+    let mut guest = TestGuest::new(CODE_PAGE);
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    // Remap console line 16 to vector 0x40, unmasked.
+    program_ioapic_entry(
+        &mut devices,
+        &mut apic,
+        &mut memory,
+        &mut guest,
+        CONSOLE_IRQ_LINE as u32,
+        0x40,
+    );
+    console_send(&mut memory, &mut devices, &mut apic, &mut guest);
+    assert_eq!(apic.pending_vector(), Some(0x40));
+}
+
+#[test]
+fn masked_device_line_delivers_nothing() {
+    let mut memory = machine();
+    let mut guest = TestGuest::new(CODE_PAGE);
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    // Mask the console line: low word with bit 16 set.
+    program_ioapic_entry(
+        &mut devices,
+        &mut apic,
+        &mut memory,
+        &mut guest,
+        CONSOLE_IRQ_LINE as u32,
+        (1 << 16) | 0x21,
+    );
+    console_send(&mut memory, &mut devices, &mut apic, &mut guest);
+    assert_eq!(apic.pending_vector(), None);
 }

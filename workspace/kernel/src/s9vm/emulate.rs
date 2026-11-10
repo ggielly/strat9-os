@@ -95,6 +95,12 @@ pub const BLK_IRQ_VECTOR: u8 = 0x22;
 pub const NET_BASE: u64 = 0xFEB0_2000;
 /// Interrupt vector used to signal the network device.
 pub const NET_IRQ_VECTOR: u8 = 0x23;
+/// I/O APIC line wired to the console.
+pub const CONSOLE_IRQ_LINE: usize = 16;
+/// I/O APIC line wired to the block device.
+pub const BLK_IRQ_LINE: usize = 17;
+/// I/O APIC line wired to the network device.
+pub const NET_IRQ_LINE: usize = 18;
 /// Interrupt vector used to signal the console.
 ///
 /// The virtio-mmio transport does not define its own interrupt: the platform
@@ -441,10 +447,19 @@ pub struct Devices {
 
 impl Devices {
     /// Creates the device model.
+    ///
+    /// The I/O APIC redirection table is pre-programmed for the device lines
+    /// (`CONSOLE_IRQ_LINE`, `BLK_IRQ_LINE`, `NET_IRQ_LINE`) with the default
+    /// vectors and unmasked; the guest may reprogram them, and the kernel
+    /// reads the table when a device raises its line.
     pub fn new() -> Self {
+        let mut ioapic = IoApic::new(0);
+        ioapic.set_pin(CONSOLE_IRQ_LINE, CONSOLE_IRQ_VECTOR, false);
+        ioapic.set_pin(BLK_IRQ_LINE, BLK_IRQ_VECTOR, false);
+        ioapic.set_pin(NET_IRQ_LINE, NET_IRQ_VECTOR, false);
         Self {
             pic: Pic::new(),
-            ioapic: IoApic::new(0),
+            ioapic,
             console: VirtioConsole::new(),
             blk: VirtioBlk::new(64 * 1024),
             net: VirtioNet::new(),
@@ -700,6 +715,16 @@ pub fn device_page(address: u64) -> Option<DevicePage> {
     }
 }
 
+/// Delivers a device interrupt through the I/O APIC redirection table.
+///
+/// The guest owns the table: it can unmask a line, change its vector, or mask
+/// it again. A masked (or non-fixed) line is a no-op, exactly as on hardware.
+fn raise_device_irq(devices: &Devices, apic: &mut LocalApic, line: usize) {
+    if let Some(vector) = devices.ioapic.vector_for_pin(line) {
+        apic.inject(vector);
+    }
+}
+
 /// Applies one decoded memory access to a device page.
 fn serve_mmio(
     devices: &mut Devices,
@@ -754,19 +779,19 @@ fn write_mmio(
             // local APIC: the execution loop delivers it like any other
             // vector (immediately, or when the interrupt window opens).
             if devices.console.interrupt_status() != 0 {
-                apic.inject(CONSOLE_IRQ_VECTOR);
+                raise_device_irq(devices, apic, CONSOLE_IRQ_LINE);
             }
         }
         DevicePage::Blk => {
             devices.blk.write(offset as u32 & 0xFFF, value, view);
             if devices.blk.interrupt_status() != 0 {
-                apic.inject(BLK_IRQ_VECTOR);
+                raise_device_irq(devices, apic, BLK_IRQ_LINE);
             }
         }
         DevicePage::Net => {
             devices.net.write(offset as u32 & 0xFFF, value, view);
             if devices.net.interrupt_status() != 0 {
-                apic.inject(NET_IRQ_VECTOR);
+                raise_device_irq(devices, apic, NET_IRQ_LINE);
             }
         }
     }
