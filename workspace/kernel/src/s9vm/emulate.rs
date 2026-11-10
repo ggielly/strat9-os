@@ -47,7 +47,7 @@
 //! supplies `PhysMemory` and `GuestContext` (see `machine.rs`).
 
 use super::{
-    apic::{LocalApic, x2apic},
+    apic::{x2apic, LocalApic, TSC_DEADLINE_MSR},
     decode::{self, Decoded, MemoryAccess, PortAccess},
     exit::ExitClass,
     ioapic::IoApic,
@@ -175,10 +175,7 @@ pub fn walk_second_level<M: PhysMemory + ?Sized>(
     }
     if entry & LARGE_PAGE != 0 {
         // 1 GiB page: the whole address is taken from this entry.
-        return Some((
-            (entry & EPT_1G_ADDR_MASK) | (gpa & 0x3FFF_FFFF),
-            1 << 30,
-        ));
+        return Some(((entry & EPT_1G_ADDR_MASK) | (gpa & 0x3FFF_FFFF), 1 << 30));
     }
     let table = entry & EPT_ADDR_MASK;
 
@@ -196,7 +193,10 @@ pub fn walk_second_level<M: PhysMemory + ?Sized>(
     if entry & EPT_READ == 0 {
         return None;
     }
-    Some(((entry & EPT_ADDR_MASK) | (gpa & PAGE_OFFSET_MASK), PAGE_SIZE))
+    Some((
+        (entry & EPT_ADDR_MASK) | (gpa & PAGE_OFFSET_MASK),
+        PAGE_SIZE,
+    ))
 }
 
 /// Walks the guest page tables and returns the guest-physical address for the
@@ -295,12 +295,7 @@ pub struct MemoryView<'a> {
 
 impl<'a> MemoryView<'a> {
     /// Builds a view. `ept_root` is the `EPT_POINTER` value of the vCPU.
-    pub fn new(
-        memory: &'a mut dyn PhysMemory,
-        ept_root: u64,
-        cr3: u64,
-        paging: bool,
-    ) -> Self {
+    pub fn new(memory: &'a mut dyn PhysMemory, ept_root: u64, cr3: u64, paging: bool) -> Self {
         Self {
             memory,
             ept_root,
@@ -332,10 +327,7 @@ impl<'a> MemoryView<'a> {
                 out.len() - done,
                 (PAGE_SIZE - (address & PAGE_OFFSET_MASK)) as usize,
             );
-            if !self
-                .memory
-                .read_bytes(hpa, &mut out[done..done + chunk])
-            {
+            if !self.memory.read_bytes(hpa, &mut out[done..done + chunk]) {
                 return false;
             }
             done += chunk;
@@ -395,10 +387,7 @@ impl<'a> MemoryView<'a> {
                 bytes.len() - done,
                 (PAGE_SIZE - (address & PAGE_OFFSET_MASK)) as usize,
             );
-            if !self
-                .memory
-                .write_bytes(hpa, &bytes[done..done + chunk])
-            {
+            if !self.memory.write_bytes(hpa, &bytes[done..done + chunk]) {
                 return false;
             }
             done += chunk;
@@ -611,10 +600,12 @@ fn serve_port(devices: &mut Devices, guest: &mut dyn GuestContext, access: &Port
 
 /// Handles an `RDMSR`/`WRMSR` exit.
 ///
-/// Only the x2APIC window is modeled, and only when the guest actually uses
-/// the x2APIC interface: the kernel enables MSR bitmaps for `0x800..=0x8FF`,
-/// so the exit tells us the guest executed the instruction. `ECX` holds the
-/// MSR number, `EDX:EAX` the value (`rdmsr` writes them).
+/// The x2APIC window (`0x800..=0x8FF`) is modeled when the guest actually uses
+/// the x2APIC interface: the kernel enables MSR bitmaps for that window, so the
+/// exit tells us the guest executed the instruction. `IA32_TSC_DEADLINE`
+/// (`0x6E0`) is also routed to the local APIC timer even outside the x2APIC
+/// window, because it is the programming interface of the TSC-deadline mode.
+/// `ECX` holds the MSR number, `EDX:EAX` the value (`rdmsr` writes them).
 fn handle_msr_exit(
     apic: &mut LocalApic,
     view: &mut MemoryView<'_>,
@@ -625,17 +616,28 @@ fn handle_msr_exit(
     };
     // RCX (encoding order index 1) selects the MSR.
     let msr = guest.gpr(1) as u32;
-    if !(X2APIC_MSR_FIRST..=X2APIC_MSR_LAST).contains(&msr) {
+    let in_x2apic_window = (X2APIC_MSR_FIRST..=X2APIC_MSR_LAST).contains(&msr);
+    let is_tsc_deadline = msr == TSC_DEADLINE_MSR;
+    if !in_x2apic_window && !is_tsc_deadline {
         return Ok(false);
     }
-    debug_assert!(x2apic::TPR <= msr);
+    if in_x2apic_window {
+        debug_assert!(x2apic::TPR <= msr);
+    }
     if access.write {
         let value = ((guest.gpr(2) & 0xFFFF_FFFF) << 32) | (guest.gpr(0) & 0xFFFF_FFFF);
-        if !apic.x2apic_write(msr, value) {
+        if is_tsc_deadline {
+            apic.set_tsc_deadline(value);
+        } else if !apic.x2apic_write(msr, value) {
             return Ok(false);
         }
     } else {
-        let Some(value) = apic.x2apic_read(msr) else {
+        let value = if is_tsc_deadline {
+            Some(apic.tsc_deadline())
+        } else {
+            apic.x2apic_read(msr)
+        };
+        let Some(value) = value else {
             return Ok(false);
         };
         // RDMSR replaces the low 32 bits of EDX and EAX only.

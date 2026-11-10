@@ -25,7 +25,7 @@
 #[path = "../../kernel/src/s9vm/apic.rs"]
 mod apic;
 
-use apic::{delivery, reg, shorthand, x2apic, LocalApic, SVR_ENABLE, VERSION_VALUE};
+use apic::{delivery, reg, shorthand, x2apic, LocalApic, TimerMode, SVR_ENABLE, VERSION_VALUE};
 
 #[test]
 fn reset_state_is_architectural() {
@@ -164,4 +164,294 @@ fn priority_classes_follow_the_high_nibble() {
     assert_eq!(apic::priority_class(0x1F), 1);
     assert_eq!(apic::priority_class(0xF0), 0xF);
     assert_eq!(apic::priority_class(0xFF), 0xF);
+}
+
+/// Programs the LVT timer entry and then the initial count, like a guest.
+fn program_timer(apic: &mut LocalApic, mode: u32, vector: u8, masked: bool, initial: u32) {
+    let lvt = ((mode & 0x3) << apic::LVT_MODE_SHIFT)
+        | if masked { apic::LVT_MASK } else { 0 }
+        | u32::from(vector);
+    apic.mmio_write(reg::LVT_TIMER, lvt);
+    apic.mmio_write(reg::INITIAL_COUNT, initial);
+}
+
+#[test]
+fn timer_starts_disabled_and_ignores_advance() {
+    let mut apic = LocalApic::new(0);
+    assert!(!apic.timer_armed());
+    assert_eq!(apic.current_count(), 0);
+    assert_eq!(apic.timer_mode(), TimerMode::OneShot);
+    assert_eq!(apic.timer_vector(), 0);
+    apic.advance(u64::MAX);
+    assert!(!apic.timer_armed());
+    assert!(!apic.has_pending());
+}
+
+#[test]
+fn timer_programming_sequence_reports_state() {
+    let mut apic = LocalApic::new(0);
+    apic.mmio_write(reg::DIVIDE_CONFIG, 0xB); // divide by 1
+    program_timer(&mut apic, 0, 0x40, false, 10);
+    assert!(apic.timer_armed());
+    assert_eq!(apic.timer_mode(), TimerMode::OneShot);
+    assert_eq!(apic.timer_vector(), 0x40);
+    assert_eq!(apic.timer_divide(), 1);
+    assert_eq!(apic.current_count(), 10);
+    assert_eq!(apic.mmio_read(reg::CURRENT_COUNT), 10);
+}
+
+#[test]
+fn one_shot_expires_exactly_once() {
+    let mut apic = LocalApic::new(0);
+    apic.mmio_write(reg::DIVIDE_CONFIG, 0xB);
+    program_timer(&mut apic, 0, 0x40, false, 5);
+    apic.advance(4);
+    assert_eq!(apic.current_count(), 1);
+    assert!(!apic.has_pending());
+    apic.advance(1);
+    assert_eq!(apic.current_count(), 0);
+    assert!(!apic.timer_armed());
+    assert_eq!(apic.pending_vector(), Some(0x40));
+    assert_eq!(apic.service(), Some(0x40));
+    apic.eoi();
+    apic.advance(1000);
+    assert!(!apic.has_pending());
+    assert!(!apic.timer_armed());
+}
+
+#[test]
+fn divide_accumulates_sub_tick_remainders() {
+    let mut apic = LocalApic::new(0);
+    apic.mmio_write(reg::DIVIDE_CONFIG, 0); // divide by 2
+    program_timer(&mut apic, 0, 0x41, false, 10);
+    apic.advance(3); // one tick, one input unit kept as remainder
+    assert_eq!(apic.current_count(), 9);
+    apic.advance(1); // remainder + 1 completes a second tick
+    assert_eq!(apic.current_count(), 8);
+    assert!(!apic.has_pending());
+}
+
+#[test]
+fn periodic_reloads_and_raises_each_period() {
+    let mut apic = LocalApic::new(0);
+    apic.mmio_write(reg::DIVIDE_CONFIG, 0xB);
+    program_timer(&mut apic, 1, 0x42, false, 5);
+    apic.advance(5);
+    assert_eq!(apic.current_count(), 5);
+    assert!(apic.timer_armed());
+    assert_eq!(apic.pending_vector(), Some(0x42));
+    apic.service();
+    apic.eoi();
+    apic.advance(4);
+    assert_eq!(apic.current_count(), 1);
+    assert!(!apic.has_pending());
+    apic.advance(1);
+    assert_eq!(apic.pending_vector(), Some(0x42));
+    assert_eq!(apic.current_count(), 5);
+}
+
+#[test]
+fn periodic_large_advance_wraps_count_and_raises_once() {
+    let mut apic = LocalApic::new(0);
+    apic.mmio_write(reg::DIVIDE_CONFIG, 0xB);
+    program_timer(&mut apic, 1, 0x43, false, 4);
+    apic.advance(10); // 1 expiry at 4, then 6 more: 2 ticks into the next period
+    assert_eq!(apic.current_count(), 2);
+    assert!(apic.timer_armed());
+    assert_eq!(apic.pending_vector(), Some(0x43));
+}
+
+#[test]
+fn masked_one_shot_counts_but_does_not_raise() {
+    let mut apic = LocalApic::new(0);
+    apic.mmio_write(reg::DIVIDE_CONFIG, 0xB);
+    program_timer(&mut apic, 0, 0x44, true, 3);
+    apic.advance(3);
+    assert_eq!(apic.current_count(), 0);
+    assert!(!apic.timer_armed());
+    assert!(!apic.has_pending());
+}
+
+#[test]
+fn masked_periodic_reloads_without_raising() {
+    let mut apic = LocalApic::new(0);
+    apic.mmio_write(reg::DIVIDE_CONFIG, 0xB);
+    program_timer(&mut apic, 1, 0x45, true, 3);
+    apic.advance(3);
+    assert_eq!(apic.current_count(), 3);
+    assert!(apic.timer_armed());
+    assert!(!apic.has_pending());
+}
+
+#[test]
+fn initial_count_zero_disables_timer() {
+    let mut apic = LocalApic::new(0);
+    apic.mmio_write(reg::DIVIDE_CONFIG, 0xB);
+    program_timer(&mut apic, 1, 0x46, false, 5);
+    apic.mmio_write(reg::INITIAL_COUNT, 0);
+    assert!(!apic.timer_armed());
+    apic.advance(100);
+    assert!(!apic.has_pending());
+}
+
+#[test]
+fn divide_values_scale_elapsed_cycles() {
+    let cases = [
+        (0xBu32, 1u32, 92u32),
+        (0, 2, 96),
+        (1, 4, 98),
+        (2, 8, 99),
+        (3, 16, 100),
+        (8, 32, 100),
+        (9, 64, 100),
+        (10, 128, 100),
+    ];
+    for (config, divisor, expected) in cases {
+        let mut apic = LocalApic::new(0);
+        apic.mmio_write(reg::DIVIDE_CONFIG, config);
+        assert_eq!(apic.timer_divide(), divisor);
+        program_timer(&mut apic, 0, 0x47, false, 100);
+        apic.advance(8);
+        assert_eq!(apic.current_count(), expected);
+    }
+}
+
+#[test]
+fn divide_config_masks_reserved_bits() {
+    let mut apic = LocalApic::new(0);
+    apic.mmio_write(reg::DIVIDE_CONFIG, 0xFFFF_FFFF);
+    assert_eq!(apic.mmio_read(reg::DIVIDE_CONFIG), 0xB);
+    assert_eq!(apic.timer_divide(), 1);
+}
+
+#[test]
+fn current_count_reads_through_mmio_and_x2apic() {
+    let mut apic = LocalApic::new(0);
+    apic.mmio_write(reg::DIVIDE_CONFIG, 0xB);
+    program_timer(&mut apic, 0, 0x48, false, 10);
+    apic.advance(3);
+    assert_eq!(apic.mmio_read(reg::CURRENT_COUNT), 7);
+    assert_eq!(apic.x2apic_read(x2apic::CURRENT_COUNT), Some(7));
+}
+
+#[test]
+fn huge_counts_and_cycle_deltas_saturate() {
+    let mut apic = LocalApic::new(0);
+    apic.mmio_write(reg::DIVIDE_CONFIG, 0xB);
+    program_timer(&mut apic, 1, 0x49, false, u32::MAX);
+    apic.advance(u64::MAX);
+    assert!(apic.timer_armed());
+    assert!(apic.current_count() >= 1);
+    assert_eq!(apic.pending_vector(), Some(0x49));
+
+    let mut one_shot = LocalApic::new(0);
+    one_shot.mmio_write(reg::DIVIDE_CONFIG, 0);
+    program_timer(&mut one_shot, 0, 0x4A, false, u32::MAX);
+    one_shot.advance(u64::MAX);
+    assert_eq!(one_shot.current_count(), 0);
+    assert!(!one_shot.timer_armed());
+}
+
+#[test]
+fn reserved_lvt_modes_are_total() {
+    let mut apic = LocalApic::new(0);
+    // mode 3 is reserved; mask and vector bits are set to show they are ignored.
+    apic.mmio_write(reg::LVT_TIMER, 0xFFFF_FFFF);
+    apic.mmio_write(reg::INITIAL_COUNT, 42);
+    assert_eq!(apic.timer_mode(), TimerMode::Reserved);
+    assert!(!apic.timer_armed());
+    apic.advance(1000);
+    assert!(!apic.timer_armed());
+    assert!(!apic.has_pending());
+}
+
+#[test]
+fn tsc_deadline_fires_at_deadline() {
+    let mut apic = LocalApic::new(0);
+    apic.mmio_write(reg::LVT_TIMER, (2 << apic::LVT_MODE_SHIFT) | 0x50);
+    apic.set_tsc(1000);
+    apic.set_tsc_deadline(1100);
+    assert!(apic.timer_armed());
+    apic.advance(50);
+    assert!(!apic.has_pending());
+    apic.advance(49);
+    assert!(!apic.has_pending());
+    apic.advance(1);
+    assert!(!apic.timer_armed());
+    assert_eq!(apic.pending_vector(), Some(0x50));
+    apic.service();
+    apic.eoi();
+    apic.advance(10_000);
+    assert!(!apic.has_pending());
+    assert!(!apic.timer_armed());
+}
+
+#[test]
+fn tsc_deadline_past_fires_immediately_and_zero_disables() {
+    let mut apic = LocalApic::new(0);
+    apic.mmio_write(reg::LVT_TIMER, (2 << apic::LVT_MODE_SHIFT) | 0x51);
+    apic.set_tsc(200);
+    apic.set_tsc_deadline(100);
+    assert!(apic.tsc_deadline() == 100);
+    assert!(!apic.timer_armed());
+    assert_eq!(apic.pending_vector(), Some(0x51));
+    apic.set_tsc_deadline(0);
+    assert!(!apic.timer_armed());
+}
+
+#[test]
+fn masked_tsc_deadline_does_not_raise() {
+    let mut apic = LocalApic::new(0);
+    apic.mmio_write(
+        reg::LVT_TIMER,
+        (2 << apic::LVT_MODE_SHIFT) | apic::LVT_MASK | 0x52,
+    );
+    apic.set_tsc(0);
+    apic.set_tsc_deadline(10);
+    apic.advance(10);
+    assert!(!apic.timer_armed());
+    assert!(!apic.has_pending());
+}
+
+#[test]
+fn tsc_deadline_written_before_mode_is_armed_when_mode_is_selected() {
+    let mut apic = LocalApic::new(0);
+    apic.set_tsc(100);
+    // The MSR is written while the LVT entry is still in one-shot mode.
+    apic.set_tsc_deadline(150);
+    assert!(!apic.timer_armed());
+    // Selecting TSC-deadline mode applies the pending deadline.
+    apic.mmio_write(reg::LVT_TIMER, (2 << apic::LVT_MODE_SHIFT) | 0x53);
+    assert!(apic.timer_armed());
+    apic.advance(50);
+    assert_eq!(apic.pending_vector(), Some(0x53));
+    assert!(!apic.timer_armed());
+}
+
+#[test]
+fn timer_eoi_clears_the_in_service_vector() {
+    let mut apic = LocalApic::new(0);
+    apic.mmio_write(reg::DIVIDE_CONFIG, 0xB);
+    program_timer(&mut apic, 0, 0x60, false, 1);
+    apic.advance(1);
+    assert_eq!(apic.service(), Some(0x60));
+    assert!(apic.in_service());
+    apic.eoi();
+    assert!(!apic.in_service());
+}
+
+#[test]
+fn x2apic_timer_programming_and_count_read() {
+    let mut apic = LocalApic::new(0);
+    assert!(apic.x2apic_write(x2apic::DIVIDE_CONFIG, 0xB));
+    assert!(apic.x2apic_write(
+        x2apic::LVT_TIMER,
+        u64::from((1u32 << apic::LVT_MODE_SHIFT) | 0x61)
+    ));
+    assert!(apic.x2apic_write(x2apic::INITIAL_COUNT, 8));
+    apic.advance(3);
+    assert_eq!(apic.x2apic_read(x2apic::CURRENT_COUNT), Some(5));
+    apic.advance(5);
+    assert_eq!(apic.pending_vector(), Some(0x61));
+    assert_eq!(apic.x2apic_read(x2apic::CURRENT_COUNT), Some(8));
 }
