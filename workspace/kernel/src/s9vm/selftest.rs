@@ -1620,9 +1620,9 @@ fn read_world_byte(world_id: u64, gpa: u64) -> Result<u8, SelftestError> {
 /// bytes copied page by page (GPA -> HPA -> HHDM), zero-filled tail. The image
 /// is then entered exactly like the other phases: the guest writes its marker
 /// on the debug port and halts. The guest page tables are the canonical
-/// identity layout; the second-level tables used for the run translate the
-/// world's own frames (through the world's diagnostic translation), so the
-/// executed image is the one the loader produced.
+/// identity layout; the run uses the world's own second-level tables
+/// (`vm::second_level_pointer`), so the executed image and its EPT are exactly
+/// the ones `map_memory`/`load_image` produced.
 pub fn run_loader(caps: &HwCaps) -> Result<LoaderReport, SelftestError> {
     if !caps.can_run() {
         return Err(SelftestError::BadExit("platform cannot run"));
@@ -1689,24 +1689,10 @@ fn run_loader_in_world(caps: &HwCaps, world_id: u64) -> Result<LoaderReport, Sel
         return Err(SelftestError::BadExit("image BSS was not zeroed"));
     }
 
-    // 4. Second-level translation over the world's frames. The registry does
-    //    not expose its EPTP: the diagnostic translation of each page yields
-    //    the same HPAs, so the run uses exactly the frames the loader filled.
-    let mut second_level = SecondLevelMemory::new().map_err(|_| SelftestError::Mmu)?;
-    for gpa in [
-        LOADER_GPA_PML4,
-        LOADER_GPA_PDPT,
-        LOADER_GPA_PD,
-        LOADER_GPA_PT,
-        LOADER_IMAGE_BASE,
-        LOADER_GPA_STACK,
-    ] {
-        let hpa = vm::debug_translate(world_id, gpa).ok_or(SelftestError::Mmu)?;
-        second_level
-            .map_4k(gpa, hpa, crate::s9vm::mmu::Perms::read_write_execute())
-            .map_err(|_| SelftestError::Mmu)?;
-    }
-    let pointer = second_level.pointer(caps);
+    // 4. Uses the world's own second-level translation tables: the run must
+    //    exercise the EPT built by `map_memory` and the loader, not a copy.
+    let pointer =
+        vm::second_level_pointer(world_id, caps).map_err(|_| SelftestError::VmFail(4))?;
 
     // 5. Enters the loaded image: RIP is the relocated entry point returned by
     //    the loader, RSP points into the guest stack page.
@@ -1778,7 +1764,6 @@ fn run_loader_in_world(caps: &HwCaps, world_id: u64) -> Result<LoaderReport, Sel
     unsafe {
         let _ = vcpu.clear();
     }
-    second_level.destroy();
 
     match outcome {
         Ok(()) if report.halt_exits >= 1 && report.marker == Some(LOADER_MARKER) => Ok(report),

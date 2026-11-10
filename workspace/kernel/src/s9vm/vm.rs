@@ -1832,15 +1832,16 @@ pub fn timing(world_id: u64) -> Option<WorldTimingSnapshot> {
 
 /// Returns the second-level translation pointer (EPTP) of a world.
 ///
-/// The value is the control-block pointer the hardware uses to walk the guest
-/// physical address space; it is the world's real translation table, not a
-/// mirror. It stays valid as long as the world exists and its guest memory has
-/// not been destroyed, but it must be treated as an opaque, short-lived value:
-/// the registry lock is taken only for the lookup, so the caller must already
-/// synchronise with world destruction (or copy the value while the world is
-/// known to be alive, e.g. during a `RUN`). Returns [`VmError::Unknown`] when
-/// the world does not exist and [`VmError::Map`] with
-/// [`MapError::NotMapped`] when the world has no guest memory yet.
+/// The value is the pointer the control block uses to walk the guest physical
+/// address space; it is the world's real translation table, not a mirror. It
+/// stays valid as long as the world exists and its guest memory has not been
+/// destroyed (the tables are freed by `destroy`), so the caller must not cache
+/// it beyond the world's lifetime. The registry lock is taken briefly for the
+/// lookup and never across guest execution.
+///
+/// Returns [`VmError::Unknown`] when the world does not exist, and
+/// [`VmError::Map`] with [`MapError::NotMapped`] when the world has no guest
+/// memory yet.
 pub fn second_level_pointer(world_id: u64, caps: &HwCaps) -> Result<u64, VmError> {
     let worlds = WORLDS.lock();
     let world = worlds.get(&world_id).ok_or(VmError::Unknown)?;
