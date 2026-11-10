@@ -202,6 +202,7 @@ dependencies = [
     "strate-console-admin-release",
     "s9vm-console-release",
     "s9vm-vmm-release",
+    "s9vm-guest-release",
     "strate-graphical-release",
     "strate-net-release",
     "strate-bus-release",
@@ -260,6 +261,7 @@ dependencies = [
     "strate-console-admin-release",
     "s9vm-console-release",
     "s9vm-vmm-release",
+    "s9vm-guest-release",
     "strate-graphical-release",
     "strate-net-release",
     "strate-bus-release",
@@ -291,6 +293,7 @@ dependencies = [
     "strate-console-admin-release",
     "s9vm-console-release",
     "s9vm-vmm-release",
+    "s9vm-guest-release",
     "strate-graphical-release",
     "strate-net-release",
     "strate-bus-release",
@@ -604,6 +607,7 @@ dependencies = [
     "strate-console-admin-release",
     "s9vm-console-release",
     "s9vm-vmm-release",
+    "s9vm-guest-release",
     "strate-graphical-release",
     "strate-net-release",
     "strate-bus-release",
@@ -634,6 +638,7 @@ dependencies = [
     "strate-console-admin-release",
     "s9vm-console-release",
     "s9vm-vmm-release",
+    "s9vm-guest-release",
     "strate-graphical-release",
     "strate-net-release",
     "strate-bus-release",
@@ -977,6 +982,22 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
+[tasks.s9vm-guest-release]
+description = "Build the s9vm bare-metal guest kernel image (release)"
+cwd = "workspace/guest/s9vm-guest"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "--target-dir",
+    "../../../target",
+]
+# Standalone crate: its own linker script places the image at the guest
+# conventional 0x100000 load address. The path is relative to the crate
+# directory (cargo runs rustc there).
+env = { RUSTFLAGS = "-C relocation-model=static -C link-arg=-no-pie -C link-arg=-Ts9vm-guest.ld -C link-arg=--build-id=none" }
 [tasks.strate-graphical-release]
 description = "Build graphical display server (release)"
 cwd = "workspace/components/strate-graphical"

@@ -37,7 +37,7 @@
 use alloc::{vec, vec::Vec};
 
 use super::virtio::{
-    apply_status, DeviceFeatures, QueueMemory, QueueNotify, QueueState, SplitQueue,
+    DeviceFeatures, QueueMemory, QueueNotify, QueueState, SplitQueue, apply_status,
 };
 
 // ---------------------------------------------------------------------------

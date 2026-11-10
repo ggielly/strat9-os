@@ -98,6 +98,8 @@ $Components = @(
     @{ Name = "strate-console-admin"; Cwd = "workspace\components\strate-console-admin" }
     @{ Name = "s9vm-console"; Cwd = "workspace\components\s9vm-console" }
     @{ Name = "s9vm-vmm"; Cwd = "workspace\components\s9vm-vmm" }
+    # Bare-metal guest kernel image: standalone crate, own linker script at 0x100000.
+    @{ Name = "s9vm-guest"; Cwd = "workspace\guest\s9vm-guest"; TargetDir = (Join-Path $RootDir "target"); Env = @{ RUSTFLAGS = "-C relocation-model=static -C link-arg=-no-pie -C link-arg=-Ts9vm-guest.ld -C link-arg=--build-id=none" } }
     @{ Name = "strate-net"; Cwd = "workspace\components\strate-net" }
     @{ Name = "strate-bus"; Cwd = "workspace\components\strate-bus" }
     @{ Name = "strate-wasm"; Cwd = "workspace\components\strate-wasm" }
@@ -186,6 +188,7 @@ $Modules = @(
     @{ Src = "target\$Target\$ProfileDir\console-admin"; Dst = "initfs/console-admin" }
     @{ Src = "target\$Target\$ProfileDir\s9vm-console"; Dst = "initfs/s9vm-console" }
     @{ Src = "target\$Target\$ProfileDir\s9vm-vmm"; Dst = "initfs/s9vm-vmm" }
+    @{ Src = "target\$Target\$ProfileDir\s9vm-guest"; Dst = "initfs/s9vm-guest" }
     @{ Src = "target\$Target\$ProfileDir\strate-net-silo"; Dst = "initfs/strate-net-silo" }
     @{ Src = "target\$Target\$ProfileDir\strate-net-silo"; Dst = "initfs/strate-net" }
     @{ Src = "target\$Target\$ProfileDir\strate-bus"; Dst = "initfs/strate-bus" }

@@ -57,6 +57,79 @@
 //! jmp $             ; never reached
 //! ```
 //!
+//! # Real guest kernel mode (`/initfs/s9vm-guest`)
+//!
+//! When the image builder stages `/initfs/s9vm-guest`, the component boots it
+//! instead of the demo. The guest kernel is an `ET_EXEC` image linked at guest
+//! physical `0x0010_0000`; it expects to be entered in 64-bit long mode with
+//! `RDI` = guest-physical address of the boot-parameter block, identity-mapped
+//! memory for the first 4 MiB, `CR3 = 0`, and the debug-port protocol `G`,
+//! `M`, `A` followed by `hlt`.
+//!
+//! Boot sequence (all through the syscall surface):
+//!
+//! 1. read `/initfs/s9vm-guest` (≤ 1 MiB) into a static buffer; if the file is
+//!    missing the built-in demo above runs instead (logged explicitly);
+//! 2. `SYS_VMM_CREATE "guest"` then `SYS_VMM_CREATE_VCPU` (APIC id 0);
+//! 3. `SYS_VMM_SET_CMDLINE` with the 54-byte command line
+//!    `console=ttyS0 root=/dev/vda rw init=/init s9vm.guest=1`;
+//! 4. `SYS_VMM_LOAD_IMAGE` at `0x0010_0000` (the linked base, so no
+//!    relocation: `VmmImageInfo.entry` is used as `RIP`);
+//! 5. identity page tables loaded as a **raw blob** with
+//!    `SYS_VMM_LOAD_MODULE` at GPA 0 — this is the documented use of
+//!    `LOAD_MODULE` (verbatim bytes, not parsed as ELF):
+//!
+//!    ```text
+//!    0x0000  PML4[0] = 0x1000 | P|RW          -> PDPT
+//!    0x1000  PDPT[0] = 0x2000 | P|RW          -> PD
+//!    0x2000  PD[0]   = 0x0000_0000 | P|RW|PS  -> identity 0..2 MiB
+//!    0x2008  PD[1]   = 0x0020_0000 | P|RW|PS  -> identity 2..4 MiB
+//!    ```
+//!
+//!    (`CR3 = 0` makes the guest read the PML4 from GPA 0.)
+//! 6. `SYS_VMM_MAP_MEM` one page at GPA `0x8000` for the boot parameters,
+//!    `SYS_VMM_ACPI` at `0x000E_0000` (needs the vCPU and mapped memory), then
+//!    `SYS_VMM_BOOT_PARAMS` at `0x8000` (published after ACPI/cmdline/modules,
+//!    so the RSDP, command line and module ranges are final);
+//! 7. `SYS_VMM_SET_REGS`: `RIP = entry`, `RSP = 0` (the guest sets its stack),
+//!    `RDI = 0x8000`, `RFLAGS = 2`, `CR0 = 0x8001_0023`, `CR3 = 0`,
+//!    `CR4 = 0x26A0`, `EFER = 0xD01`;
+//! 8. `SYS_VMM_RUN` + `SYS_VMM_EXIT_HANDLER`/`SYS_VMM_EXIT_COMPLETE` loop,
+//!    bounded to 64 exits plus a 30 s watchdog. PASS requires the ordered
+//!    `G`, `M`, `A` bytes on debug port `0xE9` and a `HALT` exit. Completion
+//!    policy: I/O and HLT exits are completed with value 0 and RIP advance 0
+//!    (hardware already advanced RIP); any other exit class is logged and
+//!    completed as a no-op, so an unexpected exit only consumes the bounded
+//!    budget instead of wedging the policy;
+//! 9. teardown on every path: `SYS_VMM_DESTROY_VCPU` then `SYS_VMM_DESTROY`.
+//!
+//! Expected serial output on a VT-x host (Linux/KVM or nested VT-x):
+//!
+//! ```text
+//! [s9vm-vmm] found /initfs/s9vm-guest (N bytes): real guest mode
+//! [s9vm-vmm] ===== s9vm userspace policy (real guest, N bytes) =====
+//! [s9vm-vmm] guest 1/8: SYS_VMM_SET_CMDLINE (54 bytes)
+//! [s9vm-vmm] guest 2/8: SYS_VMM_LOAD_IMAGE (N bytes at gpa=0x100000)
+//! [s9vm-vmm] guest 3/8: SYS_VMM_LOAD_MODULE page tables (12288 bytes at gpa=0x0)
+//! [s9vm-vmm] page tables: PML4@0x0 -> PDPT@0x1000 -> PD@0x2000, identity leaves 0..0x400000 (2 MiB pages)
+//! [s9vm-vmm] guest 4/8: SYS_VMM_MAP_MEM boot params gpa=0x8000 len=0x1000
+//! [s9vm-vmm] guest 5/8: SYS_VMM_ACPI gpa=0xe0000
+//! [s9vm-vmm] guest 6/8: SYS_VMM_BOOT_PARAMS gpa=0x8000
+//! [s9vm-vmm] guest 7/8: SYS_VMM_SET_REGS rip=0x100000 rsp=0 rdi=0x8000
+//! [s9vm-vmm] guest 8/8: SYS_VMM_RUN + policy loop
+//! [s9vm-vmm] guest debug byte 0x47   (G)
+//! [s9vm-vmm] guest debug byte 0x4d   (M)
+//! [s9vm-vmm] guest debug byte 0x41   (A)
+//! [s9vm-vmm] guest halted (HLT policy exit)
+//! [s9vm-vmm] guest summary: exits=4 markers=3/3 halt=true last_exit=4 (halt)
+//! [s9vm-vmm] teardown: DESTROY_VCPU=ok DESTROY=ok
+//! [s9vm-vmm] RESULT: PASS (real guest: G/M/A + HLT)
+//! ```
+//!
+//! Without VT-x (TCG) `SYS_VMM_CREATE` returns `ENOTSUP` and the component
+//! reports `RESULT: SKIP`; without the SILO_ADMIN capability it reports
+//! `RESULT: BLOCKED`.
+//!
 //! # Expected serial output
 //!
 //! ```text
@@ -99,7 +172,7 @@ use strat9_abi::vmm::{
     exit_kind, VmmExitEvent, VmmImageInfo, VmmInfo, VmmRegs, VmmVcpuInfo, VmmWorldEntry,
     VmmWorldStats, VMM_ABI_VERSION,
 };
-use strat9_syscall::{call, error::Error, number};
+use strat9_syscall::{call, data::TimeSpec, error::Error, flag, number, CLOCK_MONOTONIC};
 
 /// Clean PASS: the full policy cycle ran.
 const EXIT_PASS: usize = 0;
@@ -112,6 +185,39 @@ const EXIT_BLOCKED: usize = 3;
 
 /// World name required by the demo.
 const WORLD_NAME: &[u8] = b"demo";
+
+// ---------------------------------------------------------------------------
+// Real guest kernel mode (`/initfs/s9vm-guest`)
+// ---------------------------------------------------------------------------
+
+/// Guest kernel image written to the initfs by the image builder.
+const PATH_GUEST_IMAGE: &str = "/initfs/s9vm-guest";
+/// Hard cap on the guest image size (1 MiB).
+const GUEST_IMAGE_MAX: usize = 1024 * 1024;
+/// World name used by the real-guest mode.
+const GUEST_WORLD_NAME: &[u8] = b"guest";
+/// The guest kernel is an ET_EXEC image linked at 0x0010_0000; loading it at
+/// that guest-physical base keeps every linked address unchanged.
+const GUEST_IMAGE_GPA: u64 = 0x10_0000;
+/// Command line published to the guest (exactly 54 bytes).
+const GUEST_CMDLINE: &[u8; 54] = b"console=ttyS0 root=/dev/vda rw init=/init s9vm.guest=1";
+/// Raw identity page-table blob: PML4@0x0000, PDPT@0x1000, PD@0x2000.
+const PAGE_TABLE_BLOB_GPA: u64 = 0x0;
+const PAGE_TABLE_BLOB_LEN: usize = 0x3000;
+/// Identity-mapped window covered by the blob (0..4 MiB, 2 MiB leaves).
+const IDENTITY_WINDOW: u64 = 0x40_0000;
+/// Guest boot-parameter block (one page) and the ACPI window.
+const BOOT_PARAMS_GPA: u64 = 0x8000;
+const BOOT_PARAMS_LEN: u64 = 0x1000;
+const ACPI_WINDOW_GPA: u64 = 0x000E_0000;
+/// Policy loop bounds for the real guest.
+const MAX_GUEST_EXITS: u32 = 64;
+const MAX_EMPTY_POLLS: u32 = 32;
+const GUEST_WATCHDOG_MS: u64 = 30_000;
+/// Debug-port protocol bytes the guest kernel must emit before halting.
+const GUEST_MARKERS: [u8; 3] = [b'G', b'M', b'A'];
+/// Bound on `EAGAIN` retries while reading a scheme file.
+const MAX_READ_RETRIES: u32 = 4096;
 /// Scratch guest RAM mapped through `SYS_VMM_MAP_MEM` (2 pages).
 const SCRATCH_GPA: u64 = 0x6000;
 const SCRATCH_LEN: u64 = 0x2000;
@@ -272,6 +378,54 @@ fn vmm_load_image(
     .map(|_| ())
 }
 
+/// `SYS_VMM_LOAD_MODULE`: copy a raw blob into guest memory at `gpa`.
+///
+/// This is the intended way to seed data the loader must not parse as ELF: the
+/// identity page-table blob is written this way (the kernel maps the range
+/// read/write and records it as a module, published by `SYS_VMM_BOOT_PARAMS`).
+fn vmm_load_module(world: u64, gpa: u64, bytes: &[u8]) -> Result<(), Error> {
+    // SAFETY: `bytes` is a live userspace buffer; the kernel copies it before
+    // returning.
+    unsafe {
+        strat9_syscall::syscall4(
+            number::SYS_VMM_LOAD_MODULE,
+            world as usize,
+            gpa as usize,
+            bytes.as_ptr() as usize,
+            bytes.len(),
+        )
+    }
+    .map(|_| ())
+}
+
+/// `SYS_VMM_SET_CMDLINE`: store the guest kernel command line.
+fn vmm_set_cmdline(world: u64, bytes: &[u8]) -> Result<u64, Error> {
+    // SAFETY: `bytes` is a live userspace buffer read by the kernel.
+    unsafe {
+        strat9_syscall::syscall3(
+            number::SYS_VMM_SET_CMDLINE,
+            world as usize,
+            bytes.as_ptr() as usize,
+            bytes.len(),
+        )
+    }
+    .map(|stored| stored as u64)
+}
+
+/// `SYS_VMM_ACPI`: write the guest firmware description tables.
+fn vmm_acpi(world: u64, gpa: u64) -> Result<(), Error> {
+    // SAFETY: plain integer arguments.
+    unsafe { strat9_syscall::syscall2(number::SYS_VMM_ACPI, world as usize, gpa as usize) }
+        .map(|_| ())
+}
+
+/// `SYS_VMM_BOOT_PARAMS`: write the guest boot-parameter block.
+fn vmm_boot_params(world: u64, gpa: u64) -> Result<(), Error> {
+    // SAFETY: plain integer arguments.
+    unsafe { strat9_syscall::syscall2(number::SYS_VMM_BOOT_PARAMS, world as usize, gpa as usize) }
+        .map(|_| ())
+}
+
 /// `SYS_VMM_SET_REGS`: write the vCPU register block.
 fn vmm_set_regs(vcpu: u64, regs: &VmmRegs) -> Result<(), Error> {
     // SAFETY: `regs` is a live userspace buffer read by the kernel.
@@ -409,8 +563,12 @@ fn vmm_exit_complete(vcpu: u64, value: u64, advance: u64) -> Result<(), Error> {
 // Guest image (ELF64 with identity page tables)
 // ---------------------------------------------------------------------------
 
-/// Storage for the generated guest image (kept out of the task stack).
+/// Storage for the generated demo guest image (kept out of the task stack).
 static mut GUEST_IMAGE: [u8; IMAGE_LEN] = [0u8; IMAGE_LEN];
+/// Storage for the edited guest kernel image read from `/initfs/s9vm-guest`.
+static mut GUEST_ELF: [u8; GUEST_IMAGE_MAX] = [0u8; GUEST_IMAGE_MAX];
+/// Raw identity page-table blob loaded at GPA 0 through `SYS_VMM_LOAD_MODULE`.
+static mut PAGE_TABLE_BLOB: [u8; PAGE_TABLE_BLOB_LEN] = [0u8; PAGE_TABLE_BLOB_LEN];
 
 /// Returns the writable guest-image buffer.
 fn guest_image_buffer() -> &'static mut [u8] {
@@ -420,6 +578,56 @@ fn guest_image_buffer() -> &'static mut [u8] {
     unsafe {
         core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(GUEST_IMAGE) as *mut u8, IMAGE_LEN)
     }
+}
+
+/// Returns the writable buffer that receives `/initfs/s9vm-guest`.
+fn guest_elf_buffer() -> &'static mut [u8] {
+    // SAFETY: same single-threaded contract as `guest_image_buffer`.
+    unsafe {
+        core::slice::from_raw_parts_mut(
+            core::ptr::addr_of_mut!(GUEST_ELF) as *mut u8,
+            GUEST_IMAGE_MAX,
+        )
+    }
+}
+
+/// Returns the writable identity page-table blob.
+fn page_table_blob_buffer() -> &'static mut [u8] {
+    // SAFETY: same single-threaded contract as `guest_image_buffer`.
+    unsafe {
+        core::slice::from_raw_parts_mut(
+            core::ptr::addr_of_mut!(PAGE_TABLE_BLOB) as *mut u8,
+            PAGE_TABLE_BLOB_LEN,
+        )
+    }
+}
+
+/// Builds the raw identity page-table blob for the guest kernel.
+///
+/// Layout (guest-physical, loaded verbatim at [`PAGE_TABLE_BLOB_GPA`] by
+/// `SYS_VMM_LOAD_MODULE`):
+///
+/// ```text
+/// 0x0000  PML4[0] = 0x1000 | P|RW          -> PDPT
+/// 0x1000  PDPT[0] = 0x2000 | P|RW          -> PD
+/// 0x2000  PD[0]   = 0x0000_0000 | P|RW|PS  -> identity 0..2 MiB
+/// 0x2008  PD[1]   = 0x0020_0000 | P|RW|PS  -> identity 2..4 MiB
+/// ```
+///
+/// The guest kernel is entered with `CR3 = 0`, so its first PML4 entry is read
+/// from GPA 0. The guest image itself lives at GPA 0x0010_0000 (inside the
+/// second 2 MiB leaf), while the blob, boot parameters (0x8000) and ACPI
+/// (0xE0000) all fall inside the first leaf.
+fn build_page_table_blob() -> &'static [u8] {
+    let blob = page_table_blob_buffer();
+    for byte in blob.iter_mut() {
+        *byte = 0;
+    }
+    put_u64(blob, 0x0000, GPA_PDPT | 0b11);
+    put_u64(blob, 0x1000, GPA_PD | 0b11);
+    put_u64(blob, 0x2000, 0x0 | 0b1000_0011);
+    put_u64(blob, 0x2008, 0x20_0000 | 0b1000_0011);
+    &page_table_blob_buffer()[..PAGE_TABLE_BLOB_LEN]
 }
 
 /// Writes a little-endian `u16` at `offset`.
@@ -553,6 +761,459 @@ fn guest_registers() -> VmmRegs {
 }
 
 // ---------------------------------------------------------------------------
+// Real guest kernel mode (helpers)
+// ---------------------------------------------------------------------------
+
+/// Returns a monotonic timestamp in milliseconds, or 0 when the clock is not
+/// available (the exit-count bound keeps the watchdog effective in that case).
+fn monotonic_ms() -> u64 {
+    let mut ts = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    match call::clock_gettime(CLOCK_MONOTONIC, &mut ts) {
+        Ok(_) => (ts.tv_sec.max(0) as u64)
+            .saturating_mul(1000)
+            .saturating_add((ts.tv_nsec.max(0) as u64) / 1_000_000),
+        Err(_) => 0,
+    }
+}
+
+/// State of the optional real-guest image file.
+enum GuestImageState {
+    /// File present, `n` bytes copied into the static buffer.
+    Present(usize),
+    /// File absent: the built-in demo is used.
+    Absent,
+}
+
+/// Failure while reading `/initfs/s9vm-guest`.
+enum GuestLoadError {
+    /// The file could not be opened for a reason other than absence.
+    Open(Error),
+    /// A read failed after the bounded retry budget.
+    Read(Error),
+    /// The image is larger than [`GUEST_IMAGE_MAX`].
+    TooLarge,
+}
+
+impl GuestLoadError {
+    /// Short reason used in logs.
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Open(_) => "open-failed",
+            Self::Read(_) => "read-failed",
+            Self::TooLarge => "image-too-large",
+        }
+    }
+
+    /// Underlying `errno` name when the failure came from a syscall.
+    fn errno(&self) -> &'static str {
+        match self {
+            Self::Open(error) | Self::Read(error) => error.name(),
+            Self::TooLarge => "E2BIG",
+        }
+    }
+}
+
+/// Reads `/initfs/s9vm-guest` into the static buffer (bounded to 1 MiB).
+///
+/// The file is read in one pass with `EAGAIN`/`EINTR` retries; a file larger
+/// than the buffer is rejected rather than silently truncated because a
+/// truncated ELF would be rejected later with a useless error.
+fn load_guest_image() -> Result<GuestImageState, GuestLoadError> {
+    let fd = match call::open(PATH_GUEST_IMAGE, flag::O_RDONLY) {
+        Ok(fd) => fd,
+        // The kernel-backed `/initfs` scheme reports a missing entry as
+        // `BadHandle` (EBADF) instead of `NotFound`; both mean "not staged".
+        Err(Error::NotFound) | Err(Error::BadHandle) => return Ok(GuestImageState::Absent),
+        Err(error) => return Err(GuestLoadError::Open(error)),
+    };
+    let buffer = guest_elf_buffer();
+    let mut total = 0usize;
+    let mut retries = 0u32;
+    let result = loop {
+        if total == buffer.len() {
+            // Buffer full: prove there is no extra byte, otherwise reject.
+            let mut probe = [0u8; 1];
+            match call::read(fd, &mut probe) {
+                Ok(0) => break Ok(GuestImageState::Present(total)),
+                Ok(_) => break Err(GuestLoadError::TooLarge),
+                Err(error) if error.is_retryable() => {
+                    retries += 1;
+                    if retries > MAX_READ_RETRIES {
+                        break Err(GuestLoadError::Read(error));
+                    }
+                    let _ = call::sched_yield();
+                }
+                Err(error) => break Err(GuestLoadError::Read(error)),
+            }
+        }
+        match call::read(fd, &mut buffer[total..]) {
+            Ok(0) => break Ok(GuestImageState::Present(total)),
+            Ok(count) => {
+                total += count;
+                retries = 0;
+            }
+            Err(error) if error.is_retryable() => {
+                retries += 1;
+                if retries > MAX_READ_RETRIES {
+                    break Err(GuestLoadError::Read(error));
+                }
+                let _ = call::sched_yield();
+            }
+            Err(error) => break Err(GuestLoadError::Read(error)),
+        }
+    };
+    let _ = call::close(fd);
+    result
+}
+
+/// Logs the read-only enumeration fallback used when `SYS_VMM_CREATE` cannot
+/// succeed (engine inactive or missing SILO_ADMIN capability).
+fn log_enumerate_fallback() {
+    let mut entries: [VmmWorldEntry; 4] = [VmmWorldEntry::default(); 4];
+    match vmm_list(0, &mut entries) {
+        Ok(total) => log!("[s9vm-vmm] LIST total={}", total),
+        Err(error) => log!("[s9vm-vmm] LIST failed: {}", log_errno(error)),
+    }
+    let mut vcpus: [VmmVcpuInfo; 4] = [VmmVcpuInfo::default(); 4];
+    match vmm_vcpu_list(0, &mut vcpus) {
+        Ok(total) => log!("[s9vm-vmm] VCPU_LIST total={}", total),
+        Err(error) => log!("[s9vm-vmm] VCPU_LIST failed: {}", log_errno(error)),
+    }
+}
+
+/// Creates a world, mapping the three documented creation outcomes to a stable
+/// exit code instead of a capability handle.
+fn create_world(name: &[u8]) -> Result<u64, usize> {
+    match vmm_create(name, 0) {
+        Ok(handle) => Ok(handle),
+        Err(Error::NotSupported) => {
+            log!("[s9vm-vmm] SYS_VMM_CREATE: ENOTSUP (VT-x not detected: engine inactive)");
+            log_enumerate_fallback();
+            log!("[s9vm-vmm] RESULT: SKIP (s9vm engine inactive: VT-x absent)");
+            Err(EXIT_SKIP)
+        }
+        Err(Error::PermissionDenied) => {
+            // `CREATE` calls `require_silo_admin()` first: a boot silo only
+            // receives SILO_ADMIN through the SILO_FLAG_ADMIN silo flag, which
+            // the boot chain does not set today. Report the access-control gap
+            // instead of a generic failure.
+            log!("[s9vm-vmm] SYS_VMM_CREATE: EPERM (SILO_ADMIN capability required)");
+            log_enumerate_fallback();
+            log!(
+                "[s9vm-vmm] RESULT: BLOCKED (boot silo lacks SILO_ADMIN; \
+                 see tools/scripts/ for the silo flags contract)"
+            );
+            Err(EXIT_BLOCKED)
+        }
+        Err(error) => {
+            log!(
+                "[s9vm-vmm] RESULT: FAIL (SYS_VMM_CREATE: {})",
+                log_errno(error)
+            );
+            Err(EXIT_FAIL)
+        }
+    }
+}
+
+/// Guest run report collected from the debug-port protocol.
+struct GuestRunReport {
+    /// `true` when the full `G`,`M`,`A` sequence was seen before a `HALT`.
+    pass: bool,
+    /// A `HALT` policy exit was handled.
+    halt: bool,
+    /// Number of policy exits handled.
+    exits: u32,
+    /// Last decoded exit kind.
+    last_kind: u32,
+    /// Debug bytes seen on port 0xE9 (first 8).
+    seen: [u8; 8],
+    /// Number of valid entries in `seen`.
+    seen_len: usize,
+    /// Number of expected markers matched in order.
+    matched: usize,
+}
+
+/// Runs the guest and drains its policy exits until it halts or a bound trips.
+///
+/// Completion policy:
+/// * `IO_PORT` (including the 0xE9 debug byte) → completed with value 0 and
+///   RIP advance 0: the hardware already advanced RIP for `OUT`/`IN`, and the
+///   policy only consumes the side effect;
+/// * `HALT` → completed with value 0 / advance 0, then the loop stops;
+/// * any other exit (MMIO, MSR, exception, timer) → completed as a no-op
+///   (value 0, advance 0). The real guest kernel only needs the debug port and
+///   HLT; an unexpected exit class is logged and bounded by [`MAX_GUEST_EXITS`]
+///   and the wall-clock watchdog instead of being emulated.
+fn run_guest_policy_loop(world: u64, vcpu: u64) -> Result<GuestRunReport, Error> {
+    let mut report = GuestRunReport {
+        pass: false,
+        halt: false,
+        exits: 0,
+        last_kind: 0,
+        seen: [0u8; 8],
+        seen_len: 0,
+        matched: 0,
+    };
+    let started = monotonic_ms();
+    let mut empty_polls = 0u32;
+
+    while report.exits < MAX_GUEST_EXITS && !report.halt {
+        if started != 0 && monotonic_ms().saturating_sub(started) > GUEST_WATCHDOG_MS {
+            log!(
+                "[s9vm-vmm] guest: watchdog timeout after {} ms",
+                GUEST_WATCHDOG_MS
+            );
+            break;
+        }
+        match vmm_run(vcpu) {
+            Ok(()) => {}
+            Err(Error::Again) => {
+                empty_polls += 1;
+                if empty_polls > MAX_EMPTY_POLLS {
+                    log!("[s9vm-vmm] guest: watchdog (no exit after RUN)");
+                    break;
+                }
+                let _ = call::sched_yield();
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+        empty_polls = 0;
+
+        // Drain every queued exit before re-entering the guest.
+        loop {
+            let mut event = VmmExitEvent::default();
+            if vmm_exit_handler(world, &mut event)? == 0 {
+                break;
+            }
+            report.exits += 1;
+            report.last_kind = event.kind;
+            log!(
+                "[s9vm-vmm] guest exit kind={} ({}) port={:#x} size={} value={:#x}",
+                event.kind,
+                exit_kind_name(event.kind),
+                event.port,
+                event.size,
+                event.value
+            );
+            if event.kind == exit_kind::IO_PORT && event.port == POLICY_PORT {
+                let byte = (event.value & 0xFF) as u8;
+                log!("[s9vm-vmm] guest debug byte 0x{:02x}", byte);
+                if report.seen_len < report.seen.len() {
+                    report.seen[report.seen_len] = byte;
+                    report.seen_len += 1;
+                }
+                if report.matched < GUEST_MARKERS.len() && byte == GUEST_MARKERS[report.matched] {
+                    report.matched += 1;
+                }
+            }
+            if event.kind == exit_kind::HALT {
+                report.halt = true;
+                log!("[s9vm-vmm] guest halted (HLT policy exit)");
+            }
+            vmm_exit_complete(vcpu, 0, 0)?;
+            if report.halt || report.exits >= MAX_GUEST_EXITS {
+                break;
+            }
+        }
+    }
+
+    report.pass = report.halt && report.matched == GUEST_MARKERS.len();
+    log!(
+        "[s9vm-vmm] guest summary: exits={} markers={}/{} halt={} last_exit={} ({})",
+        report.exits,
+        report.matched,
+        GUEST_MARKERS.len(),
+        report.halt,
+        report.last_kind,
+        exit_kind_name(report.last_kind)
+    );
+    if report.seen_len > 0 {
+        let mut seen = LogBuf::new();
+        let _ = seen.write_str("[s9vm-vmm] guest bytes seen:");
+        for index in 0..report.seen_len {
+            let _ = seen.write_fmt(format_args!(" 0x{:02x}", report.seen[index]));
+        }
+        let _ = call::debug_log(&seen.buf[..seen.len]);
+    }
+    Ok(report)
+}
+
+/// Boots the real guest image: boot sequence, registers and run loop.
+///
+/// Ordering matters on the kernel side:
+/// * `LOAD_IMAGE`/`LOAD_MODULE`/`MAP_MEM` must run before `ACPI` and
+///   `BOOT_PARAMS` (both need a mapped guest memory);
+/// * `ACPI` needs the vCPU (the MADT describes its APIC ids) and must run
+///   before `BOOT_PARAMS` (the boot block publishes the RSDP address);
+/// * `SET_CMDLINE`/`LOAD_MODULE` must run before `BOOT_PARAMS` (it publishes
+///   the command line and module ranges).
+fn boot_real_guest(world: u64, vcpu: u64, image_len: usize) -> Result<bool, Error> {
+    // 1. Kernel command line (54 bytes, published by BOOT_PARAMS).
+    log!(
+        "[s9vm-vmm] guest 1/8: SYS_VMM_SET_CMDLINE ({} bytes)",
+        GUEST_CMDLINE.len()
+    );
+    let stored = vmm_set_cmdline(world, GUEST_CMDLINE)?;
+    log!("[s9vm-vmm] SET_CMDLINE stored={}", stored);
+    if stored as usize != GUEST_CMDLINE.len() {
+        log!("[s9vm-vmm] WARNING: command line was not stored completely");
+    }
+
+    // 2. Guest ELF at its linked guest-physical base (0x0010_0000).
+    log!(
+        "[s9vm-vmm] guest 2/8: SYS_VMM_LOAD_IMAGE ({} bytes at gpa={:#x})",
+        image_len,
+        GUEST_IMAGE_GPA
+    );
+    let image = &guest_elf_buffer()[..image_len];
+    let mut image_info = VmmImageInfo::default();
+    vmm_load_image(world, GUEST_IMAGE_GPA, image, &mut image_info)?;
+    log!(
+        "[s9vm-vmm] LOAD_IMAGE entry={:#x} base={:#x} span={:#x}..{:#x}",
+        image_info.entry,
+        image_info.image_base,
+        image_info.span_min,
+        image_info.span_max
+    );
+    if image_info.entry == 0 {
+        log!("[s9vm-vmm] WARNING: image entry is 0 (unexpected for an ET_EXEC kernel)");
+    }
+
+    // 3. Identity page tables as a raw blob through LOAD_MODULE.
+    log!(
+        "[s9vm-vmm] guest 3/8: SYS_VMM_LOAD_MODULE page tables ({} bytes at gpa={:#x})",
+        PAGE_TABLE_BLOB_LEN,
+        PAGE_TABLE_BLOB_GPA
+    );
+    let blob = build_page_table_blob();
+    vmm_load_module(world, PAGE_TABLE_BLOB_GPA, blob)?;
+    log!(
+        "[s9vm-vmm] page tables: PML4@0x0 -> PDPT@0x1000 -> PD@0x2000, \
+         identity leaves 0..{:#x} (2 MiB pages)",
+        IDENTITY_WINDOW
+    );
+
+    // 4. Guest boot-parameter page (mapped before BOOT_PARAMS writes it).
+    log!(
+        "[s9vm-vmm] guest 4/8: SYS_VMM_MAP_MEM boot params gpa={:#x} len={:#x}",
+        BOOT_PARAMS_GPA,
+        BOOT_PARAMS_LEN
+    );
+    vmm_map_mem(
+        world,
+        BOOT_PARAMS_GPA,
+        BOOT_PARAMS_LEN,
+        PERM_READ_WRITE,
+        MEMTYPE_WRITEBACK,
+    )?;
+
+    // 5. ACPI tables (needs the vCPU and a mapped world memory).
+    log!(
+        "[s9vm-vmm] guest 5/8: SYS_VMM_ACPI gpa={:#x}",
+        ACPI_WINDOW_GPA
+    );
+    vmm_acpi(world, ACPI_WINDOW_GPA)?;
+
+    // 6. Boot parameters (after ACPI, cmdline and modules).
+    log!(
+        "[s9vm-vmm] guest 6/8: SYS_VMM_BOOT_PARAMS gpa={:#x}",
+        BOOT_PARAMS_GPA
+    );
+    vmm_boot_params(world, BOOT_PARAMS_GPA)?;
+
+    // 7. Initial registers: long mode, identity tables at CR3=0, RSP=0 (the
+    //    guest sets up its own stack in _start), RDI = guest-physical address of
+    //    the boot-parameter block (the guest kernel ABI passes it in RDI).
+    log!(
+        "[s9vm-vmm] guest 7/8: SYS_VMM_SET_REGS rip={:#x} rsp=0 rdi={:#x}",
+        image_info.entry,
+        BOOT_PARAMS_GPA
+    );
+    let mut regs = guest_registers();
+    regs.rip = image_info.entry;
+    regs.rsp = 0;
+    regs.rdi = BOOT_PARAMS_GPA;
+    vmm_set_regs(vcpu, &regs)?;
+
+    // 8. Run and drain policy exits.
+    log!("[s9vm-vmm] guest 8/8: SYS_VMM_RUN + policy loop");
+    let report = run_guest_policy_loop(world, vcpu)?;
+    Ok(report.pass)
+}
+
+/// Runs the real guest path and always tears the world down.
+///
+/// On every path the vCPU is destroyed first and the world second; teardown
+/// failures are logged but do not mask the boot result.
+fn run_guest_cycle(world: u64, image_len: usize) -> Result<bool, Error> {
+    let vcpu = match vmm_create_vcpu(world, 0) {
+        Ok(vcpu) => vcpu,
+        Err(error) => {
+            let _ = vmm_destroy(world);
+            log!("[s9vm-vmm] teardown: world destroyed (no vCPU)");
+            return Err(error);
+        }
+    };
+    log!("[s9vm-vmm] vcpu handle={}", vcpu);
+
+    let boot = boot_real_guest(world, vcpu, image_len);
+
+    let vcpu_destroy = vmm_destroy_vcpu(vcpu);
+    let world_destroy = vmm_destroy(world);
+    log!(
+        "[s9vm-vmm] teardown: DESTROY_VCPU={} DESTROY={}",
+        if vcpu_destroy.is_ok() { "ok" } else { "failed" },
+        if world_destroy.is_ok() {
+            "ok"
+        } else {
+            "failed"
+        }
+    );
+
+    match (boot, vcpu_destroy, world_destroy) {
+        (Err(error), _, _) => Err(error),
+        (Ok(_), Err(error), _) => Err(error),
+        (Ok(_), Ok(()), Err(error)) => Err(error),
+        (Ok(pass), Ok(()), Ok(())) => Ok(pass),
+    }
+}
+
+/// Real-guest mode entry point.
+fn run_guest_mode(image_len: usize) -> usize {
+    log!(
+        "[s9vm-vmm] ===== s9vm userspace policy (real guest, {} bytes) =====",
+        image_len
+    );
+    let world = match create_world(GUEST_WORLD_NAME) {
+        Ok(world) => world,
+        Err(code) => return code,
+    };
+    log!("[s9vm-vmm] world handle={} name='guest'", world);
+
+    match run_guest_cycle(world, image_len) {
+        Ok(true) => {
+            log!("[s9vm-vmm] RESULT: PASS (real guest: G/M/A + HLT)");
+            EXIT_PASS
+        }
+        Ok(false) => {
+            log!("[s9vm-vmm] RESULT: FAIL (real guest did not complete G/M/A + HLT)");
+            EXIT_FAIL
+        }
+        Err(error) => {
+            log!(
+                "[s9vm-vmm] RESULT: FAIL (real guest boot: {})",
+                log_errno(error)
+            );
+            EXIT_FAIL
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Policy helpers
 // ---------------------------------------------------------------------------
 
@@ -622,60 +1283,48 @@ fn run_policy_loop(world: u64, vcpu: u64) -> Result<(u32, bool, bool), Error> {
     Ok((policy_exits, debug_port_seen, halt_seen))
 }
 
-/// Runs the demo and returns the documented exit code.
+/// Component entry: real guest kernel when `/initfs/s9vm-guest` is staged,
+/// built-in demo otherwise.
 fn run() -> usize {
+    match load_guest_image() {
+        Ok(GuestImageState::Present(len)) => {
+            log!(
+                "[s9vm-vmm] found {} guest image ({} bytes): real guest mode",
+                PATH_GUEST_IMAGE,
+                len
+            );
+            run_guest_mode(len)
+        }
+        Ok(GuestImageState::Absent) => {
+            log!(
+                "[s9vm-vmm] {} not found: using the built-in demo guest",
+                PATH_GUEST_IMAGE
+            );
+            run_demo()
+        }
+        Err(error) => {
+            // Defensive: a read failure must not prevent the policy demo from
+            // running. Report the reason and fall back to the built-in guest.
+            log!(
+                "[s9vm-vmm] cannot read {} ({} / {}): using the built-in demo guest",
+                PATH_GUEST_IMAGE,
+                error.name(),
+                error.errno()
+            );
+            run_demo()
+        }
+    }
+}
+
+/// Runs the built-in demo guest and returns the documented exit code.
+fn run_demo() -> usize {
     log!("[s9vm-vmm] ===== s9vm userspace policy (demo) =====");
 
     // Step 1: create the world. `CREATE` is a silo-administration operation.
     log!("[s9vm-vmm] step 1/11: SYS_VMM_CREATE 'demo'");
-    let world = match vmm_create(WORLD_NAME, 0) {
-        Ok(handle) => handle,
-        Err(Error::NotSupported) => {
-            log!("[s9vm-vmm] SYS_VMM_CREATE: ENOTSUP (VT-x not detected: engine inactive)");
-            log!("[s9vm-vmm] fallback: enumerate worlds and vCPUs (count queries)");
-            let mut entries: [VmmWorldEntry; 4] = [VmmWorldEntry::default(); 4];
-            match vmm_list(0, &mut entries) {
-                Ok(total) => log!("[s9vm-vmm] LIST total={}", total),
-                Err(error) => log!("[s9vm-vmm] LIST failed: {}", log_errno(error)),
-            }
-            let mut vcpus: [VmmVcpuInfo; 4] = [VmmVcpuInfo::default(); 4];
-            match vmm_vcpu_list(0, &mut vcpus) {
-                Ok(total) => log!("[s9vm-vmm] VCPU_LIST total={}", total),
-                Err(error) => log!("[s9vm-vmm] VCPU_LIST failed: {}", log_errno(error)),
-            }
-            log!("[s9vm-vmm] RESULT: SKIP (s9vm engine inactive: VT-x absent)");
-            return EXIT_SKIP;
-        }
-        Err(Error::PermissionDenied) => {
-            // `CREATE` calls `require_silo_admin()` first: a boot silo only
-            // receives SILO_ADMIN through the SILO_FLAG_ADMIN silo flag, which
-            // the boot chain does not set today. Report the access-control gap
-            // instead of a generic failure, then still exercise the read-only
-            // enumeration calls (they require the same capability).
-            log!("[s9vm-vmm] SYS_VMM_CREATE: EPERM (SILO_ADMIN capability required)");
-            let mut entries: [VmmWorldEntry; 4] = [VmmWorldEntry::default(); 4];
-            match vmm_list(0, &mut entries) {
-                Ok(total) => log!("[s9vm-vmm] LIST total={}", total),
-                Err(error) => log!("[s9vm-vmm] LIST failed: {}", log_errno(error)),
-            }
-            let mut vcpus: [VmmVcpuInfo; 4] = [VmmVcpuInfo::default(); 4];
-            match vmm_vcpu_list(0, &mut vcpus) {
-                Ok(total) => log!("[s9vm-vmm] VCPU_LIST total={}", total),
-                Err(error) => log!("[s9vm-vmm] VCPU_LIST failed: {}", log_errno(error)),
-            }
-            log!(
-                "[s9vm-vmm] RESULT: BLOCKED (boot silo lacks SILO_ADMIN; \
-                 see tools/scripts/ for the silo flags contract)"
-            );
-            return EXIT_BLOCKED;
-        }
-        Err(error) => {
-            log!(
-                "[s9vm-vmm] RESULT: FAIL (SYS_VMM_CREATE: {})",
-                log_errno(error)
-            );
-            return EXIT_FAIL;
-        }
+    let world = match create_world(WORLD_NAME) {
+        Ok(world) => world,
+        Err(code) => return code,
     };
     log!("[s9vm-vmm] world handle={}", world);
 

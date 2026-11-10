@@ -1,0 +1,24 @@
+[package]
+name = "s9vm-guest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-3.0-or-later"
+description = "Bare-metal guest kernel image that validates the s9vm boot hand-off"
+
+# This image is a guest artifact, not part of the strat9-os host workspace: it
+# is built for x86_64-unknown-none and linked at a fixed guest-physical address.
+[workspace]
+
+[[bin]]
+name = "s9vm-guest"
+path = "src/main.rs"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true
+codegen-units = 1
