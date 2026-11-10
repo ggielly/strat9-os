@@ -34,7 +34,11 @@
 //!   increments the version.
 
 /// Version of the s9vm ABI. Increment on every structure change.
-pub const VMM_ABI_VERSION: u32 = 3;
+///
+/// Version 4 is append-only over version 3: it adds [`VmmVcpuInfo`] and the
+/// per-vCPU introspection syscalls (`SYS_VMM_VCPU_LIST`, `SYS_VMM_VCPU_REGS`)
+/// without changing any existing structure.
+pub const VMM_ABI_VERSION: u32 = 4;
 
 /// Maximum number of registers exposed by [`VmmRegs`] (general-purpose registers).
 pub const VMM_REG_COUNT: usize = 16;
@@ -44,6 +48,15 @@ pub const VMM_NAME_MAX: usize = 32;
 /// `SYS_VMM_LIST` call. A caller must size its buffer for at most this many
 /// [`VmmWorldEntry`] values; the kernel may return fewer.
 pub const VMM_LIST_MAX: usize = 64;
+/// Upper bound on the number of vCPU entries written by one
+/// `SYS_VMM_VCPU_LIST` call.
+///
+/// This mirrors the kernel bound on the number of vCPUs of a single world
+/// (32), which the kernel clamps `capacity` to. A listing scoped to one world
+/// therefore never needs more storage than this; a global listing (handle 0)
+/// may still report more vCPUs across several worlds, and the return value is
+/// the true total.
+pub const VMM_VCPU_LIST_MAX: usize = 32;
 
 /// Register block shared between `SYS_VMM_SET_REGS` and `SYS_VMM_GET_REGS`.
 ///
@@ -243,6 +256,48 @@ pub struct VmmImageInfo {
     pub span_max: u64,
 }
 
+/// Kind of [`VmmVcpuInfo::flags`] bits.
+///
+/// All other bits are reserved: the kernel zeroes them and a caller must
+/// ignore them.
+pub mod vcpu_flags {
+    /// A hardware context exists for this vCPU (at least one `RUN` started).
+    pub const HARDWARE_READY: u32 = 1 << 0;
+    /// A `RUN` request is pending or a guest entry is currently executing.
+    pub const EXECUTING: u32 = 1 << 1;
+    /// An NMI is pending delivery at the next guest entry.
+    pub const PENDING_NMI: u32 = 1 << 2;
+    /// Every defined bit; reserved bits are never set.
+    pub const ALL: u32 = HARDWARE_READY | EXECUTING | PENDING_NMI;
+}
+
+/// One vCPU entry returned by `SYS_VMM_VCPU_LIST` (588).
+///
+/// Size: 32 bytes, alignment 8. Entries are self-describing through
+/// `abi_version`; `reserved` is zeroed by the kernel and must be ignored by
+/// callers. `vmm_id` and `vcpu_id` are the same opaque identifiers that
+/// `VmmInfo`, `VmmExitEvent` and the vCPU capability handles refer to.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VmmVcpuInfo {
+    /// ABI version of the structure.
+    pub abi_version: u32,
+    /// [`vcpu_flags`] bits.
+    pub flags: u32,
+    /// Opaque identifier of the owning world (never 0).
+    pub vmm_id: u64,
+    /// Opaque identifier of the vCPU (never 0).
+    pub vcpu_id: u64,
+    /// Guest APIC identifier of this vCPU.
+    pub apic_id: u32,
+    /// Reserved, zeroed by the kernel.
+    pub reserved: u32,
+}
+
+// The wire layout is part of the ABI: fail the build if it drifts.
+static_assertions::assert_eq_size!(VmmVcpuInfo, [u8; 32]);
+static_assertions::const_assert_eq!(core::mem::align_of::<VmmVcpuInfo>(), 8);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +311,7 @@ mod tests {
         assert_eq!(size_of::<VmmWorldEntry>(), 72);
         assert_eq!(size_of::<VmmWorldStats>(), 96);
         assert_eq!(size_of::<VmmImageInfo>(), 40);
+        assert_eq!(size_of::<VmmVcpuInfo>(), 32);
     }
 
     #[test]

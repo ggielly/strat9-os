@@ -1732,9 +1732,10 @@ pub const SYS_VMM_BOOT_INFO: usize = 583;
 // ── Block 584-585: s9vm world enumeration and statistics ──────────────────
 //
 // Append-only extension of the s9vm surface. The numbering continues after
-// BOOT_INFO (583); 586-599 remain free for future calls (for example a vCPU
-// state query). See `strat9_abi::vmm::VmmWorldEntry` and
-// `VmmWorldStats` for the structures.
+// BOOT_INFO (583); 586-587 carry image loading and ACPI, 588-589 the per-vCPU
+// introspection pair, and 590-599 remain free for future calls. See
+// `strat9_abi::vmm::VmmWorldEntry`, `VmmWorldStats` and `VmmVcpuInfo` for the
+// structures.
 
 /// Enumerate worlds into a caller-provided buffer of
 /// [`strat9_abi::vmm::VmmWorldEntry`].
@@ -1782,3 +1783,35 @@ pub const SYS_VMM_LOAD_IMAGE: usize = 586;
 /// read-only when it is not already backed by guest memory. Returns 0.
 pub const SYS_VMM_ACPI: usize = 587;
 
+// ── Block 588-589: s9vm per-vCPU introspection ────────────────────────────
+//
+// Append-only extension of the s9vm surface. The pair completes the world
+// surface: `VMM_LIST` (584) enumerates worlds, `VCPU_LIST` (588) enumerates
+// their vCPUs, and `VCPU_REGS` (589) publishes the register block that
+// `GET_REGS` (564) already exposes, under a stable introspection number.
+
+/// Enumerate the vCPUs reachable through a VMM capability handle into a
+/// caller-provided buffer of [`strat9_abi::vmm::VmmVcpuInfo`].
+///
+/// `arg1` = VMM capability handle: 0 lists the vCPUs of every world and
+/// requires the silo administrator capability; a non-zero handle restricts the
+/// listing to that world's vCPUs (read capability required).
+/// `arg2` = buffer pointer (may be 0 when `arg3 == 0` to query the count).
+/// `arg3` = capacity in entries, clamped to
+/// [`strat9_abi::vmm::VMM_VCPU_LIST_MAX`].
+///
+/// Returns the **total** number of matching vCPUs. At most `arg3` entries are
+/// written; the difference against the return value tells the caller how many
+/// entries were not stored (0 means the buffer was large enough).
+pub const SYS_VMM_VCPU_LIST: usize = 588;
+
+/// Read the current register block of a vCPU.
+///
+/// `arg1` = VCPU capability handle (read capability required),
+/// `arg2` = pointer to a [`strat9_abi::vmm::VmmRegs`] that is filled with the
+/// live register block of that vCPU. Returns 0.
+///
+/// This is the append-only counterpart of `SYS_VMM_GET_REGS` (564): both read
+/// the same kernel register block, but this call belongs to the vCPU
+/// introspection pair `SYS_VMM_VCPU_LIST` / `SYS_VMM_VCPU_REGS`.
+pub const SYS_VMM_VCPU_REGS: usize = 589;

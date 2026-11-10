@@ -85,7 +85,8 @@ fn p0_block_does_not_collide_with_iommu_block() {
 
 #[test]
 fn abi_version_is_current() {
-    assert_eq!(abi::VMM_ABI_VERSION, 3);
+    // Version 4: append-only per-vCPU introspection over version 3.
+    assert_eq!(abi::VMM_ABI_VERSION, 4);
 }
 
 #[test]
@@ -279,3 +280,80 @@ fn list_bound_matches_world_name_storage() {
         abi::VmmWorldEntry::default().name.len()
     );
 }
+
+#[test]
+fn vcpu_syscall_numbers_are_stable() {
+    assert_eq!(SYS_VMM_VCPU_LIST, 588);
+    assert_eq!(SYS_VMM_VCPU_REGS, 589);
+    assert_eq!(SYS_VMM_VCPU_LIST, SYS_VMM_ACPI + 1);
+    assert_eq!(SYS_VMM_VCPU_REGS, SYS_VMM_ACPI + 2);
+    // Still inside the s9vm block, before the storage block (600).
+    assert!(SYS_VMM_VCPU_LIST > SYS_VMM_ACPI);
+    assert!(SYS_VMM_VCPU_REGS < 600);
+}
+
+#[test]
+fn vcpu_info_layout() {
+    use core::mem::{align_of, offset_of, size_of};
+
+    assert_eq!(size_of::<abi::VmmVcpuInfo>(), 32);
+    assert_eq!(align_of::<abi::VmmVcpuInfo>(), 8);
+
+    assert_eq!(offset_of!(abi::VmmVcpuInfo, abi_version), 0);
+    assert_eq!(offset_of!(abi::VmmVcpuInfo, flags), 4);
+    assert_eq!(offset_of!(abi::VmmVcpuInfo, vmm_id), 8);
+    assert_eq!(offset_of!(abi::VmmVcpuInfo, vcpu_id), 16);
+    assert_eq!(offset_of!(abi::VmmVcpuInfo, apic_id), 24);
+    assert_eq!(offset_of!(abi::VmmVcpuInfo, reserved), 28);
+
+    // No implicit padding: the last fixed field ends exactly at `size`.
+    assert_eq!(
+        offset_of!(abi::VmmVcpuInfo, reserved) + 4,
+        size_of::<abi::VmmVcpuInfo>()
+    );
+}
+
+#[test]
+fn vcpu_info_zeroed_defaults() {
+    let info = abi::VmmVcpuInfo::default();
+    assert_eq!(info.abi_version, 0);
+    assert_eq!(info.flags, 0);
+    assert_eq!(info.vmm_id, 0);
+    assert_eq!(info.vcpu_id, 0);
+    assert_eq!(info.apic_id, 0);
+    assert_eq!(info.reserved, 0);
+}
+
+#[test]
+fn vcpu_flags_are_distinct_bits() {
+    let flags = [
+        abi::vcpu_flags::HARDWARE_READY,
+        abi::vcpu_flags::EXECUTING,
+        abi::vcpu_flags::PENDING_NMI,
+    ];
+    assert_eq!(abi::vcpu_flags::HARDWARE_READY, 1 << 0);
+    assert_eq!(abi::vcpu_flags::EXECUTING, 1 << 1);
+    assert_eq!(abi::vcpu_flags::PENDING_NMI, 1 << 2);
+    // Every flag is a single, distinct bit...
+    for (index, flag) in flags.iter().enumerate() {
+        assert_eq!(flag.count_ones(), 1);
+        for (other_index, other) in flags.iter().enumerate() {
+            if index != other_index {
+                assert_eq!(flag & other, 0);
+            }
+        }
+    }
+    // ... and `ALL` is exactly their union, with no reserved bit set.
+    let union = flags.iter().fold(0u32, |all, flag| all | *flag);
+    assert_eq!(abi::vcpu_flags::ALL, union);
+    assert_eq!(abi::vcpu_flags::ALL & !0x7, 0);
+}
+
+#[test]
+fn vcpu_list_bound_matches_world_bound() {
+    // Mirrors the kernel `MAX_VCPUS_PER_WORLD` (32): a listing scoped to one
+    // world can never need more entries than this, and the kernel clamps the
+    // caller capacity to it.
+    assert_eq!(abi::VMM_VCPU_LIST_MAX, 32);
+}
+

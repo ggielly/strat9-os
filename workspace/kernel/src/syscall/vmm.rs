@@ -20,12 +20,15 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — handlers for the `SYS_VMM_*` syscalls (ABI block 560–585).
+//! s9vm — handlers for the `SYS_VMM_*` syscalls (ABI block 560–589).
 //!
 //! P0 scope: management of the world registry (`CREATE`, `DESTROY`,
 //! `INFO`) and the execution surface driven by the injected exits. The
 //! appended P1 calls `LIST` (584) and `STATS` (585) expose the world registry
-//! and the cumulative engine counters without growing `VmmInfo`.
+//! and the cumulative engine counters without growing `VmmInfo`; `LOAD_IMAGE`
+//! (586) and `ACPI` (587) prepare a guest, and the per-vCPU introspection pair
+//! `VCPU_LIST` (588) / `VCPU_REGS` (589) publishes the vCPU snapshot and
+//! register block.
 //! The calls that depend on guest execution (`MAP_MEM`, `SET_REGS`, `RUN`,
 //! `INJECT_IRQ`, `EXIT_HANDLER`, `IRQ_WAIT`) are implemented by the vCPU
 //! layer; their ABI is frozen.
@@ -50,8 +53,8 @@ use crate::{
 };
 use alloc::vec;
 use strat9_abi::vmm::{
-    state, VmmImageInfo, VmmInfo, VmmRegs, VmmWorldEntry, VmmWorldStats, VMM_ABI_VERSION,
-    VMM_LIST_MAX, VMM_NAME_MAX,
+    state, vcpu_flags, VmmImageInfo, VmmInfo, VmmRegs, VmmVcpuInfo, VmmWorldEntry, VmmWorldStats,
+    VMM_ABI_VERSION, VMM_LIST_MAX, VMM_NAME_MAX, VMM_VCPU_LIST_MAX,
 };
 
 /// Maximum size of a structure read from user space.
@@ -68,6 +71,18 @@ const MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 /// Mirrors [`VMM_LIST_MAX`] and the kernel world bound; clamping here keeps a
 /// single syscall bounded even if the caller passes a huge capacity.
 const MAX_LIST_ENTRIES: usize = VMM_LIST_MAX;
+
+/// Maximum number of entries written by one `SYS_VMM_VCPU_LIST` call.
+///
+/// Mirrors [`VMM_VCPU_LIST_MAX`] and the kernel per-world vCPU bound; clamping
+/// here keeps a single syscall bounded even if the caller passes a huge
+/// capacity.
+const MAX_VCPU_LIST_ENTRIES: usize = VMM_VCPU_LIST_MAX;
+
+// The ABI bound must mirror the engine bound: reporting more would need more
+// entries than a world can ever hold, and reporting fewer would truncate a
+// per-world listing.
+const _: () = assert!(VMM_VCPU_LIST_MAX == vm::MAX_VCPUS_PER_WORLD);
 
 /// Rights of a world creator: read, write, revoke.
 const VMM_OWNER: CapPermissions = CapPermissions {
@@ -658,6 +673,110 @@ pub fn sys_vmm_acpi(vmm_handle: u64, gpa: u64) -> Result<u64, SyscallError> {
     let caps = s9vm::detect().ok_or(SyscallError::NotSupported)?;
     vm::write_acpi(world, &caps, gpa).map_err(map_vm_error)?;
     Ok(0)
+}
+
+/// SYS_VMM_VCPU_LIST (588): enumerates the vCPUs of a world into a caller
+/// buffer.
+///
+/// `handle == 0` lists every world and requires the silo administrator
+/// capability; a non-zero handle restricts the listing to that world and
+/// requires read access on the VMM capability. The [`VmmVcpuInfo`] entries are
+/// built from [`vm::vcpu_snapshots`] before any user copy, so the engine lock
+/// is never held while faulting user memory.
+///
+/// Returns the total number of matching vCPUs. At most `capacity` entries are
+/// written, clamped to [`MAX_VCPU_LIST_ENTRIES`]; the buffer range is
+/// overflow-checked before any copy. `capacity == 0` is a count query and
+/// accepts a null buffer.
+pub fn sys_vmm_vcpu_list(
+    vmm_handle: u64,
+    entries_ptr: u64,
+    capacity: u64,
+) -> Result<u64, SyscallError> {
+    let (worlds, single) = if vmm_handle == 0 {
+        require_control()?;
+        (vm::list(), false)
+    } else {
+        let required = CapPermissions {
+            read: true,
+            ..CapPermissions::none()
+        };
+        let world = vmm_world(vmm_handle, required)?;
+        let record = vm::get(world).ok_or(SyscallError::NotFound)?;
+        (alloc::vec![record], true)
+    };
+
+    // Snapshot every vCPU first: the engine lock is released before the user
+    // copy, which may fault.
+    let mut snapshots: alloc::vec::Vec<(u64, vm::VcpuSnapshot)> = alloc::vec::Vec::new();
+    for record in &worlds {
+        let Some(vcpus) = vm::vcpu_snapshots(record.id) else {
+            if single {
+                return Err(SyscallError::NotFound);
+            }
+            // The world disappeared between the enumeration and the
+            // snapshot: a global listing simply skips it.
+            continue;
+        };
+        for vcpu in vcpus {
+            snapshots.push((record.id, vcpu));
+        }
+    }
+    let total = snapshots.len();
+
+    if capacity == 0 {
+        // Count query: no buffer required, nothing is written.
+        return Ok(total as u64);
+    }
+    if entries_ptr == 0 {
+        return Err(SyscallError::Fault);
+    }
+
+    let requested = core::cmp::min(capacity, MAX_VCPU_LIST_ENTRIES as u64) as usize;
+    let to_write = core::cmp::min(requested, total);
+    let entry_size = core::mem::size_of::<VmmVcpuInfo>() as u64;
+
+    for (index, (vmm_id, snapshot)) in snapshots.iter().take(to_write).enumerate() {
+        // Bounded and overflow-checked: `index < MAX_VCPU_LIST_ENTRIES` and
+        // `entry_size` is a small constant, but the base pointer is fully
+        // user-controlled.
+        let offset = (index as u64)
+            .checked_mul(entry_size)
+            .and_then(|delta| entries_ptr.checked_add(delta))
+            .ok_or(SyscallError::InvalidArgument)?;
+
+        let mut flags = 0u32;
+        if snapshot.hardware_ready {
+            flags |= vcpu_flags::HARDWARE_READY;
+        }
+        if snapshot.executing {
+            flags |= vcpu_flags::EXECUTING;
+        }
+        if snapshot.pending_nmi {
+            flags |= vcpu_flags::PENDING_NMI;
+        }
+        let entry = VmmVcpuInfo {
+            abi_version: VMM_ABI_VERSION,
+            flags,
+            vmm_id: *vmm_id,
+            vcpu_id: snapshot.id,
+            apic_id: snapshot.apic_id,
+            reserved: 0,
+        };
+        write_struct(offset, &entry)?;
+    }
+
+    Ok(total as u64)
+}
+
+/// SYS_VMM_VCPU_REGS (589): reads a vCPU's live register block.
+///
+/// Shares the handle/capability path and the copy helper of
+/// [`sys_vmm_get_regs`] (564) instead of duplicating them; the distinct call
+/// number keeps the vCPU introspection pair (`VCPU_LIST` / `VCPU_REGS`)
+/// append-only.
+pub fn sys_vmm_vcpu_regs(vcpu_handle: u64, regs_ptr: u64) -> Result<u64, SyscallError> {
+    sys_vmm_get_regs(vcpu_handle, regs_ptr)
 }
 
 /// SYS_VMM_INFO (569): snapshot of a world, or global summary if `vmm_id = 0`.
