@@ -45,6 +45,7 @@ members = [
     "workspace/components/musl-compat",
     "workspace/components/strate-console",
     "workspace/components/s9vm-console",
+    "workspace/components/s9vm-vmm",
     "workspace/components/strate-iommu",
     "workspace/components/bt/strate-bt",
 ]

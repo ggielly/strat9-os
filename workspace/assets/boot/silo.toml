@@ -20,6 +20,17 @@ binary = "/initfs/s9vm-console"
 type = "elf"
 
 [[silos]]
+name = "s9vm-vmm"
+family = "SYS"
+mode = "700"
+sid = 42
+admin = true
+[[silos.strates]]
+name = "s9vm-vmm"
+binary = "/initfs/s9vm-vmm"
+type = "elf"
+
+[[silos]]
 name = "bus"
 family = "DRV"
 mode = "076"

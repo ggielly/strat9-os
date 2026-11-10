@@ -1,0 +1,15 @@
+[package]
+name = "s9vm-vmm"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+description = "s9vm userspace policy demo: creates a world, runs a tiny guest and drains its exits through the SYS_VMM_* syscalls."
+
+[[bin]]
+name = "s9vm-vmm"
+path = "src/main.rs"
+
+[dependencies]
+strat9-syscall = { path = "../syscall", features = ["userspace"] }
+strat9-abi = { path = "../../abi" }

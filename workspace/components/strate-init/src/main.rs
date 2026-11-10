@@ -164,6 +164,12 @@ struct SiloDef {
     sid: u32,
     family: String,
     mode: String,
+    /// Grants the silo administrator capability (SILO_FLAG_ADMIN).
+    ///
+    /// Checked by SYS_VMM_CREATE and a few other privileged calls. It is
+    /// only granted through the boot configuration, never inferred from
+    /// the family or the mode.
+    admin: bool,
     graphics_enabled: bool,
     graphics_mode: String,
     graphics_read_only: bool,
@@ -216,7 +222,8 @@ fn parse_config(data: &str) -> Vec<SiloDef> {
                 sid: 42,
                 family: String::from("USR"),
                 mode: String::from("000"),
-                graphics_enabled: false,
+                admin: false,
+    graphics_enabled: false,
                 graphics_mode: String::new(),
                 graphics_read_only: false,
                 graphics_max_sessions: 0,
@@ -250,6 +257,7 @@ fn parse_config(data: &str) -> Vec<SiloDef> {
                         "sid" => s.sid = val.parse().unwrap_or(42),
                         "family" => s.family = String::from(val),
                         "mode" => s.mode = String::from(val),
+                        "admin" => s.admin = parse_toml_bool(val),
                         "graphics_enabled" => s.graphics_enabled = parse_toml_bool(val),
                         "graphics_mode" => s.graphics_mode = String::from(val),
                         "graphics_read_only" => s.graphics_read_only = parse_toml_bool(val),
@@ -322,7 +330,8 @@ fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
             sid: 42,
             family: String::from("DRV"),
             mode: String::from("076"),
-            graphics_enabled: false,
+            admin: false,
+    graphics_enabled: false,
             graphics_mode: String::new(),
             graphics_read_only: false,
             graphics_max_sessions: 0,
@@ -350,7 +359,8 @@ fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
             sid: 42,
             family: String::from("NET"),
             mode: String::from("076"),
-            graphics_enabled: false,
+            admin: false,
+    graphics_enabled: false,
             graphics_mode: String::new(),
             graphics_read_only: false,
             graphics_max_sessions: 0,
@@ -378,7 +388,8 @@ fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
             sid: 42,
             family: String::from("NET"),
             mode: String::from("076"),
-            graphics_enabled: false,
+            admin: false,
+    graphics_enabled: false,
             graphics_mode: String::new(),
             graphics_read_only: false,
             graphics_max_sessions: 0,
@@ -503,6 +514,7 @@ fn merge_wasm_test_overlay(silos: &mut Vec<SiloDef>) {
 // EXECUTION LOGIC
 // ---------------------------------------------------------------------------
 
+const SILO_FLAG_ADMIN: u64 = 1 << 0;
 const SILO_FLAG_GRAPHICS: u64 = 1 << 1;
 const SILO_FLAG_WEBRTC_NATIVE: u64 = 1 << 2;
 const SILO_FLAG_GRAPHICS_READ_ONLY: u64 = 1 << 3;
@@ -655,6 +667,12 @@ fn boot_silos(mut silos: Vec<SiloDef>) {
         log(")\n");
 
         let mut flags = 0u64;
+        // Administrator capability: explicit opt-in from the boot config. It
+        // is what `SYS_VMM_CREATE` and other privileged calls check; it is
+        // never inferred from the family or the mode.
+        if s_def.admin {
+            flags |= SILO_FLAG_ADMIN;
+        }
         let graphics_mode = s_def.graphics_mode.as_str();
         if s_def.graphics_enabled {
             flags |= SILO_FLAG_GRAPHICS;

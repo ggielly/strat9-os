@@ -784,6 +784,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "s9vm-vmm"
+version = "0.1.0"
+dependencies = [
+ "strat9-abi",
+ "strat9-syscall",
+]
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

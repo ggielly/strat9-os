@@ -35,8 +35,16 @@ function Step([string]$Name) {
     Write-Host "`n=== $Name ===" -ForegroundColor Cyan
 }
 
-function CargoBuild([string]$Cwd, [string[]]$ExtraArgs = @()) {
+function CargoBuild([string]$Cwd, [string[]]$ExtraArgs = @(), [string]$TargetDir = "", [hashtable]$Env = @{}) {
     $Args = @("build", "--target", $Target) + $CargoProfile.Split(" ") + $ExtraArgs
+    if ($TargetDir) { $Args += @("--target-dir", $TargetDir) }
+    # Optional per-component environment (e.g. RUSTFLAGS for a standalone
+    # package that does not inherit workspace/components/.cargo/config.toml).
+    $SavedEnv = @{}
+    foreach ($Key in $Env.Keys) {
+        $SavedEnv[$Key] = [Environment]::GetEnvironmentVariable($Key)
+        Set-Item -Path "Env:$Key" -Value $Env[$Key]
+    }
     Push-Location $Cwd
     try {
         & cargo $Args 2>&1 | ForEach-Object { Write-Host $_ }
@@ -44,6 +52,9 @@ function CargoBuild([string]$Cwd, [string[]]$ExtraArgs = @()) {
     }
     finally {
         Pop-Location
+        foreach ($Key in $Env.Keys) {
+            [Environment]::SetEnvironmentVariable($Key, $SavedEnv[$Key])
+        }
     }
 }
 
@@ -86,6 +97,8 @@ $Components = @(
     @{ Name = "strate-init"; Cwd = "workspace\components\strate-init" }
     @{ Name = "strate-console-admin"; Cwd = "workspace\components\strate-console-admin" }
     @{ Name = "s9vm-console"; Cwd = "workspace\components\s9vm-console" }
+    @{ Name = "s9vm-vmm"; Cwd = "workspace\components\s9vm-vmm"; TargetDir = (Join-Path $RootDir "target"); Env = @{ RUSTFLAGS = "-C relocation-model=static -C link-arg=-L../kernel -C link-arg=-T../user-linker.ld -C link-arg=-no-pie -C link-arg=-z -C link-arg=nostart-stop-gc -C code-model=kernel -C force-frame-pointers=yes" } }
+    @{ Name = "s9vm-vmm"; Cwd = "workspace\components\s9vm-vmm" }
     @{ Name = "strate-net"; Cwd = "workspace\components\strate-net" }
     @{ Name = "strate-bus"; Cwd = "workspace\components\strate-bus" }
     @{ Name = "strate-wasm"; Cwd = "workspace\components\strate-wasm" }
@@ -109,7 +122,10 @@ $Skipped = @()
 foreach ($Comp in $Components) {
     Write-Host "  Building $($Comp.Name)..." -NoNewline
     try {
-        CargoBuild (Join-Path $RootDir $Comp.Cwd)
+        $BuildArgs = @{ Cwd = (Join-Path $RootDir $Comp.Cwd) }
+        if ($Comp.ContainsKey("TargetDir")) { $BuildArgs.TargetDir = $Comp.TargetDir }
+        if ($Comp.ContainsKey("Env")) { $BuildArgs.Env = $Comp.Env }
+        CargoBuild @BuildArgs
         Write-Host " OK" -ForegroundColor Green
     }
     catch {
@@ -170,6 +186,7 @@ $Modules = @(
     @{ Src = "target\$Target\$ProfileDir\strate-init"; Dst = "initfs/init" }
     @{ Src = "target\$Target\$ProfileDir\console-admin"; Dst = "initfs/console-admin" }
     @{ Src = "target\$Target\$ProfileDir\s9vm-console"; Dst = "initfs/s9vm-console" }
+    @{ Src = "target\$Target\$ProfileDir\s9vm-vmm"; Dst = "initfs/s9vm-vmm" }
     @{ Src = "target\$Target\$ProfileDir\strate-net-silo"; Dst = "initfs/strate-net-silo" }
     @{ Src = "target\$Target\$ProfileDir\strate-net-silo"; Dst = "initfs/strate-net" }
     @{ Src = "target\$Target\$ProfileDir\strate-bus"; Dst = "initfs/strate-bus" }
