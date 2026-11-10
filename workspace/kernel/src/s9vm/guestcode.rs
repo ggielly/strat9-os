@@ -29,6 +29,11 @@
 //! memory and faults far away from the real problem, which is expensive to
 //! diagnose on hardware.
 //!
+//! The `guestos` phase payload is deliberately **not** stored here: it is
+//! assembled at run time by [`crate::s9vm::guestprog::guestos`], so every
+//! instruction is a typed encoding that the host tests re-decode. The arrays
+//! below remain hand-written for the phases that predate the assembler.
+//!
 //! # Loader payload
 //!
 //! [`LOADER_CODE`] is the guest program of the image-loader phase: publish the

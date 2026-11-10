@@ -27,8 +27,12 @@
 
 extern crate alloc;
 
+#[path = "../../kernel/src/s9vm/bootparams.rs"]
+mod bootparams;
 #[path = "../../kernel/src/s9vm/decode.rs"]
 mod decode;
+#[path = "../../kernel/src/s9vm/guestcode.rs"]
+mod guestcode;
 #[path = "../../kernel/src/s9vm/guestprog.rs"]
 mod guestprog;
 
@@ -436,4 +440,248 @@ fn error_names_are_stable() {
         .name(),
         "length-mismatch"
     );
+}
+
+#[test]
+fn mov_abs_to_reg32_uses_a_sib_absolute_address() {
+    let mut program = GuestProgram::new();
+    program.mov_abs_to_reg32(0x000E_0000, Reg::RAX).unwrap();
+    assert_eq!(
+        program.emit_bytes(),
+        &[0x8B, 0x04, 0x25, 0x00, 0x00, 0x0E, 0x00]
+    );
+
+    program.clear();
+    program.mov_abs_to_reg32(0x000E_0000, Reg::R8).unwrap();
+    assert_eq!(
+        program.emit_bytes(),
+        &[0x44, 0x8B, 0x04, 0x25, 0x00, 0x00, 0x0E, 0x00]
+    );
+    assert_eq!(program.validate_with_decoder(), Ok(()));
+
+    assert_eq!(
+        program.mov_abs_to_reg32(0x1_0000_0000, Reg::RAX),
+        Err(GuestProgError::AddressOutOfRange(0x1_0000_0000))
+    );
+}
+
+#[test]
+fn mov_qword_from_ptr_encodes_register_indirect_loads() {
+    let mut program = GuestProgram::new();
+    program.mov_qword_from_ptr(Reg::RBX, Reg::RAX).unwrap();
+    assert_eq!(program.emit_bytes(), &[0x48, 0x8B, 0x03]);
+
+    program.clear();
+    program.mov_qword_from_ptr(Reg::RBP, Reg::RDX).unwrap();
+    assert_eq!(program.emit_bytes(), &[0x48, 0x8B, 0x55, 0x00]);
+
+    program.clear();
+    program.mov_qword_from_ptr(Reg::RSP, Reg::RCX).unwrap();
+    assert_eq!(program.emit_bytes(), &[0x48, 0x8B, 0x0C, 0x24]);
+
+    program.clear();
+    program.mov_qword_from_ptr(Reg::R8, Reg::RAX).unwrap();
+    assert_eq!(program.emit_bytes(), &[0x49, 0x8B, 0x00]);
+    assert_eq!(program.validate_with_decoder(), Ok(()));
+}
+
+#[test]
+fn mov_qword_regs_encodes_register_transfers() {
+    let mut program = GuestProgram::new();
+    program.mov_qword_regs(Reg::RDX, Reg::RBX).unwrap();
+    assert_eq!(program.emit_bytes(), &[0x48, 0x89, 0xDA]);
+
+    program.clear();
+    program.mov_qword_regs(Reg::R8, Reg::R9).unwrap();
+    assert_eq!(program.emit_bytes(), &[0x4D, 0x89, 0xC8]);
+}
+
+#[test]
+fn cmp_qword_regs_encodes_the_left_operand_as_r_m() {
+    let mut program = GuestProgram::new();
+    program.cmp_qword_regs(Reg::RAX, Reg::RDX).unwrap();
+    assert_eq!(program.emit_bytes(), &[0x48, 0x39, 0xD0]);
+
+    program.clear();
+    program.cmp_qword_regs(Reg::RBX, Reg::R8).unwrap();
+    assert_eq!(program.emit_bytes(), &[0x4C, 0x39, 0xC3]);
+}
+
+#[test]
+fn cmp_dword_imm32_encodes_group_seven() {
+    let mut program = GuestProgram::new();
+    program.cmp_dword_imm32(Reg::RAX, 0).unwrap();
+    assert_eq!(program.emit_bytes(), &[0x81, 0xF8, 0x00, 0x00, 0x00, 0x00]);
+
+    program.clear();
+    program.cmp_dword_imm32(Reg::R8, 0x1234_5678).unwrap();
+    assert_eq!(
+        program.emit_bytes(),
+        &[0x41, 0x81, 0xF8, 0x78, 0x56, 0x34, 0x12]
+    );
+}
+
+#[test]
+fn add_qword_imm8_encodes_a_sign_extended_immediate() {
+    let mut program = GuestProgram::new();
+    program.add_qword_imm8(Reg::RBX, 16).unwrap();
+    assert_eq!(program.emit_bytes(), &[0x48, 0x83, 0xC3, 0x10]);
+
+    program.clear();
+    program.add_qword_imm8(Reg::RDX, 1).unwrap();
+    assert_eq!(program.emit_bytes(), &[0x48, 0x83, 0xC2, 0x01]);
+}
+
+#[test]
+fn add_byte_ptr_to_accumulator_encodes_the_rsdp_sum_step() {
+    let mut program = GuestProgram::new();
+    program.add_byte_ptr_to_accumulator(Reg::RDX).unwrap();
+    assert_eq!(program.emit_bytes(), &[0x02, 0x02]);
+}
+
+#[test]
+fn more_conditional_branches_validate_their_displacement() {
+    let mut program = GuestProgram::new();
+    program.jne_short(5).unwrap();
+    assert_eq!(program.emit_bytes(), &[0x75, 0x05]);
+    program.clear();
+    program.jb_short(-3).unwrap();
+    assert_eq!(program.emit_bytes(), &[0x72, 0xFD]);
+
+    assert_eq!(
+        program.jne_short(200),
+        Err(GuestProgError::DisplacementOutOfRange(200))
+    );
+    assert_eq!(
+        program.jb_short(-200),
+        Err(GuestProgError::DisplacementOutOfRange(-200))
+    );
+}
+
+#[test]
+fn forward_branches_are_resolved_after_their_target_is_known() {
+    let mut program = GuestProgram::new();
+    let patch = program.je_short_placeholder().unwrap();
+    program.nop().unwrap();
+    program.nop().unwrap();
+    let target = program.offset();
+    program.resolve_short_branch(patch, target).unwrap();
+    assert_eq!(program.emit_bytes(), &[0x74, 0x02, 0x90, 0x90]);
+
+    // A target beyond the signed 8-bit range is refused, and the byte is left
+    // untouched.
+    let patch = program.jne_short_placeholder().unwrap();
+    for _ in 0..200 {
+        program.nop().unwrap();
+    }
+    let before = program.emit_bytes()[patch.offset() + 1];
+    assert_eq!(
+        program.resolve_short_branch(patch, program.offset()),
+        Err(GuestProgError::BranchTargetOutOfRange)
+    );
+    assert_eq!(program.emit_bytes()[patch.offset() + 1], before);
+    assert_eq!(
+        program.resolve_short_branch(patch, usize::MAX),
+        Err(GuestProgError::BranchTargetOutOfRange)
+    );
+}
+
+#[test]
+fn guestos_payload_is_validated_by_the_decoder() {
+    let payload = guestprog::guestos::build_payload(&guestos_layout()).unwrap();
+    assert_eq!(payload.validate_with_decoder(), Ok(()));
+    assert!(payload.len() > 0);
+    assert!(payload.len() < MAX_PROGRAM_BYTES);
+    assert_eq!(payload.emit_bytes().last(), Some(&0xF4));
+}
+
+#[test]
+fn guestos_layout_is_checked() {
+    let valid = guestos_layout();
+    assert_eq!(valid.validate(), Ok(()));
+
+    let mut layout = valid;
+    layout.boot_params_gpa = 0x6001;
+    assert_eq!(layout.validate(), Err(GuestProgError::InvalidLayout));
+
+    let mut layout = valid;
+    layout.acpi_gpa = 0xE0008;
+    assert_eq!(layout.validate(), Err(GuestProgError::InvalidLayout));
+
+    let mut layout = valid;
+    layout.scan_end_gpa = layout.scan_start_gpa;
+    assert_eq!(layout.validate(), Err(GuestProgError::InvalidLayout));
+
+    let mut layout = valid;
+    layout.scan_start_gpa = 0x2_0000;
+    layout.scan_end_gpa = 0x2_1000;
+    assert_eq!(layout.validate(), Err(GuestProgError::InvalidLayout));
+
+    let mut layout = valid;
+    layout.boot_params_gpa = u64::from(u32::MAX) + 1;
+    assert_eq!(layout.validate(), Err(GuestProgError::InvalidLayout));
+}
+
+#[test]
+fn guestos_payload_reports_the_expected_markers_and_steps() {
+    let payload = guestprog::guestos::build_payload(&guestos_layout()).unwrap();
+    let bytes = payload.emit_bytes();
+    assert_eq!(guestprog::guestos::STATUS_OK, 5);
+    assert_eq!(guestprog::guestos::failure_step::ALL.len(), 5);
+
+    // Every failure stub is marker, step, out, hlt and is exactly nine bytes.
+    let mut stubs = 0usize;
+    for index in 0..bytes.len().saturating_sub(2) {
+        if bytes[index] != 0xB0 || bytes[index + 1] != guestprog::guestos::FAIL_MARKER {
+            continue;
+        }
+        stubs += 1;
+        let end = index + guestprog::guestos::FAIL_STUB_LEN;
+        assert!(end <= bytes.len(), "truncated failure stub at {}", index);
+        let stub = &bytes[index..end];
+        assert_eq!(stub[0], 0xB0);
+        assert_eq!(stub[1], guestprog::guestos::FAIL_MARKER);
+        assert_eq!(stub[2..4], [0xE6, 0xE9]);
+        assert_eq!(stub[4], 0xB0);
+        assert!(
+            guestprog::guestos::failure_step::ALL.contains(&stub[5]),
+            "unexpected failure step {}",
+            stub[5]
+        );
+        assert_eq!(stub[6..8], [0xE6, 0xE9]);
+        assert_eq!(stub[8], 0xF4);
+        // Guarded stubs are jumped over by a 9-byte conditional branch; the
+        // scan-exhaustion stub is reached by falling through `jb`.
+        if bytes[index - 2] == 0x72 {
+            continue;
+        }
+        assert!(
+            matches!(bytes[index - 2], 0x74 | 0x75),
+            "stub at {} is not guarded (opcode {:#x})",
+            index,
+            bytes[index - 2]
+        );
+        assert_eq!(bytes[index - 1], 9);
+    }
+    // One stub per guard (magic, three counts, RSDP field, RSDP address) plus
+    // the scan-exhaustion stub and the checksum stub.
+    assert_eq!(stubs, 8);
+
+    // Success tail: marker, status, cmdline length, memory count, halt.
+    let success = bytes
+        .windows(4)
+        .position(|window| window == [0xB0, guestprog::guestos::PASS_MARKER, 0xE6, 0xE9])
+        .expect("success marker must be emitted");
+    assert_eq!(bytes[success + 4], 0xB0);
+    assert_eq!(bytes[success + 5], guestprog::guestos::STATUS_OK);
+    assert_eq!(bytes[success + 6..success + 8], [0xE6, 0xE9]);
+}
+
+fn guestos_layout() -> guestprog::guestos::GuestOsLayout {
+    guestprog::guestos::GuestOsLayout {
+        boot_params_gpa: 0x6000,
+        acpi_gpa: 0x000E_0000,
+        scan_start_gpa: 0x000E_0000,
+        scan_end_gpa: 0x0010_0000,
+    }
 }

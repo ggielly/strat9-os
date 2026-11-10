@@ -50,8 +50,17 @@
 //!   contexts (CR3, RIP, RSP, marker) are independent and persisted across
 //!   runs; it is enabled by `s9vm.selftest.deferred=1` or explicitly with
 //!   `s9vm.selftest=smp`;
-//! - `2`/`all`: the six bootstrap phases; `acpi` and `smp` are added by
-//!   `s9vm.selftest.deferred=1`.
+//! - `guestos`: a guest "OS bootstrap": the phase stores a command line and one
+//!   module, writes the ACPI tables and the boot-parameter block (magic
+//!   `S9VMBP`, memory map, `rsdp_gpa`, counts), then runs a payload built with
+//!   [`crate::s9vm::guestprog::guestos`] that validates the block, scans the
+//!   legacy window for `RSD PTR `, checks the ACPI 1.0 checksum and reports
+//!   `b'O'` plus a status byte on the debug port. It registers a **detached**
+//!   vCPU (no scheduler) and runs synchronously at the `kthread` stage; it is
+//!   enabled by `s9vm.selftest.deferred=1` or explicitly with
+//!   `s9vm.selftest=guestos`;
+//! - `2`/`all`: the six bootstrap phases; `acpi`, `smp` and `guestos` are added
+//!   by `s9vm.selftest.deferred=1`.
 //!
 //! The task path used by `smp` (kernel threads created from a component,
 //! bounded `RUN` and destroy) has its own diagnostic,
@@ -65,20 +74,22 @@
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
-use strat9_abi::vmm::{exit_kind, VmmRegs, VMM_ABI_VERSION};
+use strat9_abi::vmm::{VMM_ABI_VERSION, VmmRegs, exit_kind};
 
 use crate::{
     memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame},
     s9vm::{
         apic::LocalApic,
+        bootparams,
         caps::HwCaps,
-        emulate::{interrupt_action, InterruptAction},
-        exit::{reason_name, ExitClass, ExitReason},
+        emulate::{InterruptAction, interrupt_action},
+        exit::{ExitClass, ExitReason, reason_name},
         guest::GuestState,
         guestcode::{
             ACPI_CODE, ACPI_FAIL_MARKER, ACPI_MARKER, LOADER_CODE, LOADER_MARKER, SMP_CODE_0,
             SMP_CODE_1, SMP_HLT_OFFSET, SMP_MARKERS, SMP_OUT_INSTRUCTION_LEN, SMP_SHARED_GPA,
         },
+        guestprog::guestos,
         machine::Machine,
         vcpu::{SecondLevelMemory, Vcpu, VcpuError},
         virtio, virtio_blk, virtio_net, vm,
@@ -343,6 +354,58 @@ const ACPI_MAX_EXITS: u32 = 64;
 
 /// Deferred request flag for the ACPI phase (see [`s9vm_acpi_selftest`]).
 static ACPI_SELFTEST_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+// Guest-OS bootstrap phase.
+//
+// The guest behaves like the first stage of a real operating system: it reads
+// the boot-parameter block written by `vm::write_boot_params`, checks that the
+// fields a kernel needs are populated, discovers the ACPI RSDP in the legacy
+// BIOS window and verifies its checksum. Its payload is built with
+// `guestprog::guestos` (typed, decoder-validated encodings) instead of a
+// hand-written byte array. The phase registers a **detached** vCPU (required by
+// `write_acpi`, which describes it in the MADT) and drives it with a direct run
+// loop, so it needs neither the scheduler nor a kernel thread.
+/// Guest-physical address of the page-table root.
+const GUESTOS_GPA_PML4: u64 = 0x0000;
+/// Guest-physical address of the page-directory pointer table.
+const GUESTOS_GPA_PDPT: u64 = 0x1000;
+/// Guest-physical address of the page directory.
+const GUESTOS_GPA_PD: u64 = 0x2000;
+/// Guest-physical address of the page table (identity maps 0..2 MiB).
+const GUESTOS_GPA_PT: u64 = 0x3000;
+/// Guest-physical page holding the bootstrap payload.
+const GUESTOS_GPA_CODE: u64 = 0x4000;
+/// Guest-physical page used as the guest stack.
+const GUESTOS_GPA_STACK: u64 = 0x5000;
+/// Initial guest stack pointer (inside the stack page).
+const GUESTOS_STACK_TOP: u64 = GUESTOS_GPA_STACK + 0x800;
+/// Guest-physical page holding the 1024-byte boot-parameter block.
+const GUESTOS_GPA_BOOT_PARAMS: u64 = 0x6000;
+/// Guest-physical page the initrd/module blob is loaded at.
+const GUESTOS_GPA_MODULE: u64 = 0x7000;
+/// Guest memory permissions of the page tables, the payload and the stack.
+const GUESTOS_GUEST_PERMS: u32 = 7;
+/// First guest-physical address of the RSDP scan window.
+const GUESTOS_SCAN_START: u64 = vm::ACPI_GPA;
+/// End (exclusive) of the RSDP scan window.
+const GUESTOS_SCAN_END: u64 = 0x10_0000;
+/// Number of 4 KiB guest pages in the scan window.
+const GUESTOS_SCAN_PAGES: u64 =
+    (GUESTOS_SCAN_END - GUESTOS_SCAN_START) / crate::s9vm::mmu::PAGE_SIZE;
+/// Read-only guest permissions of the scan window.
+const GUESTOS_SCAN_PERMS: u32 = 1;
+/// Command line stored by the phase before the boot block is written.
+const GUESTOS_CMDLINE: &[u8] = b"console=serial s9vm.selftest=guestos root=/dev/vda1 ro";
+/// Small initrd/module blob stored by the phase (never parsed).
+const GUESTOS_MODULE: &[u8] = b"\x7fELF-s9vm-module";
+/// Maximum number of exits driven for the guest-OS phase (safety bound).
+const GUESTOS_MAX_EXITS: u32 = 128;
+/// Maximum number of debug-port bytes collected from the guest.
+const GUESTOS_DEBUG_BYTES: usize = 8;
+
+/// Deferred request flag for the guest-OS phase (see
+/// [`s9vm_guestos_selftest`]).
+static GUESTOS_SELFTEST_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 // SMP (multi-vCPU) phase.
 //
@@ -1771,6 +1834,25 @@ fn read_world_byte(world_id: u64, gpa: u64) -> Result<u8, SelftestError> {
     Ok(unsafe { core::ptr::read_volatile(page) })
 }
 
+/// Reads `out.len()` bytes at `gpa` in a world; the range must stay inside one
+/// guest page.
+fn read_world_bytes(world_id: u64, gpa: u64, out: &mut [u8]) -> Result<(), SelftestError> {
+    let page_size = crate::s9vm::mmu::PAGE_SIZE as usize;
+    let offset = (gpa as usize) & (page_size - 1);
+    if out.len() > page_size || offset + out.len() > page_size {
+        return Err(SelftestError::BadExit("read crosses a page boundary"));
+    }
+    let page = world_page(world_id, gpa)?;
+    // SAFETY: the page belongs to a world reserved for this test, is mapped by
+    // the HHDM, and the bounds check above keeps the read inside the page.
+    unsafe {
+        for (index, byte) in out.iter_mut().enumerate() {
+            *byte = core::ptr::read_volatile(page.add(index));
+        }
+    }
+    Ok(())
+}
+
 /// Writes `bytes` at the start of the guest page at `gpa` in a world.
 fn write_world_bytes(world_id: u64, gpa: u64, bytes: &[u8]) -> Result<(), SelftestError> {
     let page_size = crate::s9vm::mmu::PAGE_SIZE as usize;
@@ -2341,6 +2423,336 @@ fn run_acpi_task() {
     }
 }
 
+/// Report of the guest-OS bootstrap phase.
+pub struct GuestOsReport {
+    pub total_exits: u32,
+    pub io_exits: u32,
+    pub halt_exits: u32,
+    /// First byte written by the guest on the debug port (`b'O'` on success).
+    pub marker: Option<u8>,
+    /// Second byte: the validation count on success, the failure step otherwise.
+    pub status: Option<u8>,
+    /// `cmdline_len` the guest read from the boot-parameter block.
+    pub guest_cmdline_len: Option<u8>,
+    /// `memory_count` the guest read from the boot-parameter block.
+    pub guest_memory_count: Option<u8>,
+    /// `cmdline_len` decoded by the kernel from the same block.
+    pub cmdline_len: u32,
+    /// `memory_count` decoded by the kernel from the same block.
+    pub memory_count: u32,
+    /// Number of initrd/module entries decoded by the kernel.
+    pub module_count: u32,
+    /// ACPI RSDP guest-physical address advertised by the block.
+    pub rsdp: u64,
+}
+
+/// Guest-OS bootstrap test.
+///
+/// Creates a fresh world with one **detached** vCPU (no kernel task), maps the
+/// guest page tables, payload, stack and boot-parameter page, stores a command
+/// line and one module, writes the firmware tables and the boot-parameter
+/// block, then runs the payload built by
+/// [`crate::s9vm::guestprog::guestos::build_payload`] with the world's own
+/// second-level tables.
+///
+/// The world is destroyed on every path.
+pub fn run_guestos(caps: &HwCaps) -> Result<GuestOsReport, SelftestError> {
+    if !caps.can_run() {
+        return Err(SelftestError::BadExit("platform cannot run"));
+    }
+    let record = vm::create(b"s9vm-guestos", 0).ok_or(SelftestError::VmFail(1))?;
+    let result = run_guestos_in_world(caps, record.id);
+    let _ = vm::destroy(record.id);
+    result
+}
+
+/// Body of the guest-OS phase; the caller owns and destroys the world.
+fn run_guestos_in_world(caps: &HwCaps, world_id: u64) -> Result<GuestOsReport, SelftestError> {
+    let page_size = crate::s9vm::mmu::PAGE_SIZE;
+
+    // 1. A detached vCPU is enough: `write_acpi` builds the MADT from the
+    //    registered vCPU identifiers, and the phase drives the vCPU itself.
+    log::info!("[s9vm] guestostest: registering the world vCPU");
+    let _vcpu_id = vm::create_vcpu_detached(world_id, 0).map_err(|_| SelftestError::VmFail(2))?;
+
+    // 2. Guest memory: page tables, payload, stack, boot-parameter page, and
+    //    the read-only legacy scan window.
+    log::info!("[s9vm] guestostest: mapping guest pages");
+    for gpa in [
+        GUESTOS_GPA_PML4,
+        GUESTOS_GPA_PDPT,
+        GUESTOS_GPA_PD,
+        GUESTOS_GPA_PT,
+        GUESTOS_GPA_CODE,
+        GUESTOS_GPA_STACK,
+        GUESTOS_GPA_BOOT_PARAMS,
+    ] {
+        vm::map_memory(world_id, caps, gpa, page_size, GUESTOS_GUEST_PERMS, 0)
+            .map_err(|_| SelftestError::VmFail(3))?;
+    }
+    vm::map_memory(
+        world_id,
+        caps,
+        GUESTOS_SCAN_START,
+        GUESTOS_SCAN_PAGES * page_size,
+        GUESTOS_SCAN_PERMS,
+        0,
+    )
+    .map_err(|_| SelftestError::VmFail(4))?;
+
+    // 3. Identity guest paging: one page table maps the first 2 MiB, which
+    //    covers the tables, the payload, the stack, the boot block and the
+    //    scan window.
+    write_world_u64(world_id, GUESTOS_GPA_PML4, 0, GUESTOS_GPA_PDPT | 0x3)?;
+    write_world_u64(world_id, GUESTOS_GPA_PDPT, 0, GUESTOS_GPA_PD | 0x3)?;
+    write_world_u64(world_id, GUESTOS_GPA_PD, 0, GUESTOS_GPA_PT | 0x3)?;
+    for gpa in [
+        GUESTOS_GPA_PML4,
+        GUESTOS_GPA_PDPT,
+        GUESTOS_GPA_PD,
+        GUESTOS_GPA_PT,
+        GUESTOS_GPA_CODE,
+        GUESTOS_GPA_STACK,
+        GUESTOS_GPA_BOOT_PARAMS,
+    ] {
+        let index = (gpa / page_size) as usize;
+        write_world_u64(world_id, GUESTOS_GPA_PT, index * 8, gpa | 0x3)?;
+    }
+    for page in 0..GUESTOS_SCAN_PAGES {
+        let gpa = GUESTOS_SCAN_START + page * page_size;
+        let index = (gpa / page_size) as usize;
+        write_world_u64(world_id, GUESTOS_GPA_PT, index * 8, gpa | 0x3)?;
+    }
+
+    // 4. Command line and initrd/module: `write_boot_params` copies both into
+    //    the block, so the guest can check that they are non-zero.
+    log::info!("[s9vm] guestostest: storing the command line and one module");
+    let cmdline_len =
+        vm::set_cmdline(world_id, GUESTOS_CMDLINE).map_err(|_| SelftestError::VmFail(5))?;
+    log::info!(
+        "[s9vm] guestostest: command line stored ({} byte(s))",
+        cmdline_len
+    );
+    vm::load_module(world_id, caps, GUESTOS_GPA_MODULE, GUESTOS_MODULE)
+        .map_err(|_| SelftestError::VmFail(6))?;
+    if read_world_byte(world_id, GUESTOS_GPA_MODULE)? != GUESTOS_MODULE[0] {
+        return Err(SelftestError::BadExit("guestos module was not copied"));
+    }
+
+    // 5. Firmware tables (the RSDP the guest scans for) then the hand-off
+    //    block.
+    log::info!("[s9vm] guestostest: writing the firmware tables and boot block");
+    vm::write_acpi(world_id, caps, vm::ACPI_GPA).map_err(|_| SelftestError::VmFail(7))?;
+    if read_world_byte(world_id, vm::ACPI_GPA)? != b'R' {
+        return Err(SelftestError::BadExit("guestos ACPI image was not copied"));
+    }
+    vm::write_boot_params(world_id, GUESTOS_GPA_BOOT_PARAMS)
+        .map_err(|_| SelftestError::VmFail(8))?;
+
+    // 6. Kernel-side decode of the same block: the guest report is compared
+    //    against an independent read of guest memory, not against the values
+    //    the kernel believes it wrote.
+    let mut block = [0u8; bootparams::SIZE];
+    read_world_bytes(world_id, GUESTOS_GPA_BOOT_PARAMS, &mut block)?;
+    let params = bootparams::BootParams::decode(&block).map_err(|error| {
+        log::warn!("[s9vm] guestostest FAIL: boot block: {:?}", error);
+        SelftestError::BadExit("guestos boot block is invalid")
+    })?;
+    if params.cmdline_len() != GUESTOS_CMDLINE.len()
+        || params.memory_count() == 0
+        || params.module_count() != 1
+        || params.rsdp_gpa() != vm::ACPI_GPA
+    {
+        log::warn!(
+            "[s9vm] guestostest FAIL: block fields cmdline={} expected={} mem={} \
+             modules={} rsdp={:#x}",
+            params.cmdline_len(),
+            GUESTOS_CMDLINE.len(),
+            params.memory_count(),
+            params.module_count(),
+            params.rsdp_gpa()
+        );
+        return Err(SelftestError::BadExit("guestos boot block fields"));
+    }
+
+    // 7. Payload built with the typed assembler.
+    let layout = guestos::GuestOsLayout {
+        boot_params_gpa: GUESTOS_GPA_BOOT_PARAMS,
+        acpi_gpa: vm::ACPI_GPA,
+        scan_start_gpa: GUESTOS_SCAN_START,
+        scan_end_gpa: GUESTOS_SCAN_END,
+    };
+    let payload = guestos::build_payload(&layout).map_err(|error| {
+        log::warn!("[s9vm] guestostest FAIL: payload build: {:?}", error);
+        SelftestError::BadExit("guestos payload build failed")
+    })?;
+    if payload.len() > page_size as usize {
+        return Err(SelftestError::BadExit("guestos payload crosses a page"));
+    }
+    write_world_bytes(world_id, GUESTOS_GPA_CODE, payload.emit_bytes())?;
+
+    // 8. Uses the world's own second-level translation tables.
+    let pointer = vm::second_level_pointer(world_id, caps).map_err(|_| SelftestError::VmFail(9))?;
+
+    // 9. Enters the payload; the stack lives in its own identity-mapped page.
+    let guest = GuestState::long_mode_64(GUESTOS_GPA_CODE, GUESTOS_STACK_TOP, GUESTOS_GPA_PML4);
+    let mut vcpu = Vcpu::new(caps, pointer)?;
+    // SAFETY: VT-x is active on this CPU (checked by the caller), the control
+    // block was just created for this vCPU and no other CPU runs it.
+    unsafe {
+        vcpu.load()?;
+        vcpu.configure_host()?;
+        vcpu.configure(caps, &guest)?;
+    }
+
+    let mut report = GuestOsReport {
+        total_exits: 0,
+        io_exits: 0,
+        halt_exits: 0,
+        marker: None,
+        status: None,
+        guest_cmdline_len: None,
+        guest_memory_count: None,
+        cmdline_len: params.cmdline_len() as u32,
+        memory_count: params.memory_count() as u32,
+        module_count: params.module_count() as u32,
+        rsdp: params.rsdp_gpa(),
+    };
+    log::info!("[s9vm] guestostest: entering the guest");
+    let saved_flags = crate::arch::save_flags_and_cli();
+    let mut debug_out = [0u8; GUESTOS_DEBUG_BYTES];
+    let mut debug_len = 0usize;
+    let mut outcome: Result<(), SelftestError> = Ok(());
+    for _ in 0..GUESTOS_MAX_EXITS {
+        // SAFETY: `run` contract (control block loaded, IRQs disabled).
+        let exit = match unsafe { vcpu.run() } {
+            Ok(exit) => exit,
+            Err(error) => {
+                outcome = Err(SelftestError::from(error));
+                break;
+            }
+        };
+        report.total_exits += 1;
+        match ExitReason::decode(exit.raw_reason).class() {
+            ExitClass::IoPort => {
+                report.io_exits += 1;
+                let port = ((exit.qualification >> 16) & 0xFFFF) as u16;
+                if port == TEST_PORT && debug_len < debug_out.len() {
+                    debug_out[debug_len] = (vcpu.guest().rax & 0xFF) as u8;
+                    debug_len += 1;
+                }
+                // SAFETY: the control block is loaded and the guest is
+                // inactive (we are in the exit handler).
+                if let Err(error) = unsafe { vcpu.advance_rip(u64::from(exit.instruction_length)) }
+                {
+                    outcome = Err(SelftestError::from(error));
+                    break;
+                }
+            }
+            ExitClass::Halt => {
+                report.halt_exits += 1;
+                break;
+            }
+            ExitClass::ExternalInterrupt | ExitClass::InterruptWindow => {}
+            ExitClass::PreemptionTimer => {}
+            other => {
+                log::warn!(
+                    "[s9vm] guestos test: unexpected exit class={:?} reason={:#x} \
+                     qual={:#x} rip={:#x} marker={:?} io={} total={}",
+                    other,
+                    exit.raw_reason,
+                    exit.qualification,
+                    vcpu.guest().rip,
+                    report.marker,
+                    report.io_exits,
+                    report.total_exits
+                );
+                outcome = Err(SelftestError::BadExit("unexpected guestos-test exit"));
+                break;
+            }
+        }
+    }
+    crate::arch::restore_flags(saved_flags);
+
+    // SAFETY: the vCPU is no longer active.
+    unsafe {
+        let _ = vcpu.clear();
+    }
+
+    if let Err(error) = outcome {
+        return Err(error);
+    }
+    report.marker = debug_out.first().copied().filter(|_| debug_len > 0);
+    report.status = if debug_len > 1 {
+        Some(debug_out[1])
+    } else {
+        None
+    };
+    if debug_len > 2 {
+        report.guest_cmdline_len = Some(debug_out[2]);
+    }
+    if debug_len > 3 {
+        report.guest_memory_count = Some(debug_out[3]);
+    }
+
+    if report.halt_exits == 0 {
+        log::warn!(
+            "[s9vm] guestostest FAIL: guest never halted marker={:?} io={} total={}",
+            report.marker,
+            report.io_exits,
+            report.total_exits
+        );
+        return Err(SelftestError::BadExit("guestos guest did not halt"));
+    }
+    if report.marker == Some(guestos::FAIL_MARKER) {
+        log::warn!(
+            "[s9vm] guestostest FAIL: guest rejected step {:?} io={} total={}",
+            report.status,
+            report.io_exits,
+            report.total_exits
+        );
+        return Err(SelftestError::BadExit("guestos guest reported a failure"));
+    }
+    if report.marker != Some(guestos::PASS_MARKER) {
+        log::warn!(
+            "[s9vm] guestostest FAIL: marker={:?} expected={} io={} total={}",
+            report.marker,
+            guestos::PASS_MARKER,
+            report.io_exits,
+            report.total_exits
+        );
+        return Err(SelftestError::BadExit("guestos guest did not report PASS"));
+    }
+    if report.status != Some(guestos::STATUS_OK) {
+        log::warn!(
+            "[s9vm] guestostest FAIL: status={:?} expected={} io={} total={}",
+            report.status,
+            guestos::STATUS_OK,
+            report.io_exits,
+            report.total_exits
+        );
+        return Err(SelftestError::BadExit(
+            "guestos guest reported a bad status",
+        ));
+    }
+    if report.guest_cmdline_len != Some(report.cmdline_len as u8)
+        || report.guest_memory_count != Some(report.memory_count as u8)
+    {
+        log::warn!(
+            "[s9vm] guestostest FAIL: guest read cmdline={:?} mem={:?}, kernel decoded \
+             cmdline={} mem={}",
+            report.guest_cmdline_len,
+            report.guest_memory_count,
+            report.cmdline_len,
+            report.memory_count
+        );
+        return Err(SelftestError::BadExit(
+            "guestos guest read different block fields",
+        ));
+    }
+    Ok(report)
+}
+
 /// Report of the SMP (multi-vCPU) phase.
 pub struct SmpReport {
     /// Number of vCPUs in the world (always 2 for this phase).
@@ -2747,15 +3159,63 @@ fn run_smp_task() {
     }
 }
 
+/// Kthread-stage hook: runs the guest-OS bootstrap phase synchronously.
+///
+/// The phase registers a **detached** vCPU and drives it with a direct `Vcpu`
+/// loop, so it does not need the scheduler; it runs at this stage because the
+/// firmware and boot-parameter writers expect a live boot environment.
+#[cfg(target_arch = "x86_64")]
+#[component::init_component(kthread, priority = 52)]
+fn s9vm_guestos_selftest() -> Result<(), component::ComponentInitError> {
+    if !GUESTOS_SELFTEST_REQUESTED.swap(false, Ordering::AcqRel) {
+        return Ok(());
+    }
+    run_guestos_task();
+    Ok(())
+}
+
+/// Body of the guest-OS selftest (synchronous).
+fn run_guestos_task() {
+    let Some(caps) = crate::s9vm::detect() else {
+        log::warn!("[s9vm] guestostest FAIL: platform capabilities unavailable");
+        return;
+    };
+    log::info!(
+        "[s9vm] guestostest: running (active_cpus={})",
+        crate::s9vm::active_cpu_count()
+    );
+    match run_guestos(&caps) {
+        Ok(report) => log::info!(
+            "[s9vm] guestostest PASS: total={} io={} hlt={} marker={:?} magic=ok \
+             mem={} cmdline={} rsdp={:#x} status={:?} modules={} guest_cmdline={:?} \
+             guest_mem={:?}",
+            report.total_exits,
+            report.io_exits,
+            report.halt_exits,
+            report.marker,
+            report.memory_count,
+            report.cmdline_len,
+            report.rsdp,
+            report.status,
+            report.module_count,
+            report.guest_cmdline_len,
+            report.guest_memory_count
+        ),
+        Err(error) => log::warn!("[s9vm] guestostest FAIL: {:?}", error),
+    }
+}
+
 ///
 /// Does nothing if VT-x is not active. Never panics.
 ///
-/// The ACPI phase needs the scheduler (it registers a vCPU), so when requested
-/// it is deferred to the `kthread` stage through [`s9vm_acpi_selftest`]; the
-/// other phases run here, during the early bootstrap.
+/// The ACPI, SMP and guest-OS phases need a registered vCPU or a live boot
+/// environment, so when requested they are deferred to the `kthread` stage
+/// through [`s9vm_acpi_selftest`], [`s9vm_smp_selftest`] and
+/// [`s9vm_guestos_selftest`]; the other phases run here, during the early
+/// bootstrap.
 pub fn maybe_run_from_boot_env(caps: &HwCaps) {
     // Value: 1/true = device fast path; 2/all = every phase; irq, console,
-    // blk, net, loader, acpi = one phase only.
+    // blk, net, loader, acpi, smp, guestos = one phase only.
     let mode = crate::boot_args()
         .and_then(|args| args.env_get("s9vm.selftest"))
         .unwrap_or("");
@@ -2783,9 +3243,13 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
     // bounded RUN/destroy diagnostic (`s9vm.kthread_smoke`), and can still be
     // selected explicitly.
     let smp_phase = mode == "smp" || (all_phases && deferred_enabled);
+    // The guest-OS bootstrap phase registers a detached vCPU and drives it
+    // directly (no scheduler), but it is deferred with the other
+    // firmware-hand-off phases so the default boot keeps its six phases.
+    let guestos_phase = mode == "guestos" || (all_phases && deferred_enabled);
     if all_phases && !deferred_enabled {
         log::info!(
-            "[s9vm] deferred phases (acpi, smp) not requested; set \
+            "[s9vm] deferred phases (acpi, smp, guestos) not requested; set \
              s9vm.selftest.deferred=1 to run them"
         );
     }
@@ -2800,6 +3264,10 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
         // Same constraint as ACPI: two registered vCPUs require the scheduler.
         SMP_SELFTEST_REQUESTED.store(true, Ordering::Release);
         log::info!("[s9vm] SMP (two-vCPU) test requested (kthread stage, experimental)");
+    }
+    if guestos_phase {
+        GUESTOS_SELFTEST_REQUESTED.store(true, Ordering::Release);
+        log::info!("[s9vm] guest-OS bootstrap test requested (kthread stage)");
     }
 
     if device_phase {
