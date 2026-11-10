@@ -47,9 +47,30 @@
 //! read-only current count (`0x390`) and the divide configuration (`0x3E0`).
 //! Counts are expressed in **APIC timer units**: one unit is one tick of the
 //! APIC bus clock after the divide configuration has been applied. The model
-//! is pure, so it cannot read the bus clock: the kernel advances it with the
-//! time elapsed between guest entries through [`LocalApic::advance`], passing
-//! the elapsed cycle count in the same unit.
+//! is pure, so it cannot read the bus clock. Two helpers exist:
+//!
+//! - [`LocalApic::advance`] is the raw model helper: the caller passes elapsed
+//!   time already expressed in APIC timer input units (bus ticks before the
+//!   divide) and the model TSC advances by the same value;
+//! - [`LocalApic::advance_tsc`] is the host-facing helper: the caller passes
+//!   host TSC cycles and the TSC frequency, and the model converts them to
+//!   APIC input ticks with the configured nominal bus frequency
+//!   ([`DEFAULT_APIC_BUS_HZ`], overridable with
+//!   [`LocalApic::set_apic_bus_hz`]) before applying the divide. The model TSC
+//!   used by TSC-deadline mode always advances by the raw TSC cycles.
+//!
+//! Conversion formula: `bus_ticks = tsc_cycles * bus_hz / tsc_hz`, computed
+//! with a remainder carried across calls so that a slow bus clock does not
+//! lose ticks; the count-based timer then divides `bus_ticks` by the
+//! architectural divide value. Arithmetic saturates, and a zero `tsc_hz` or a
+//! zero bus frequency disables the count conversion instead of dividing by
+//! zero.
+//!
+//! The real APIC bus clock is not discoverable from the model, so the guest
+//! timer period remains **approximate**: it is correct to the extent that the
+//! nominal bus frequency matches the host. This limitation is what
+//! [`DEFAULT_APIC_BUS_HZ`] documents; a caller that knows the host bus clock
+//! must configure it explicitly.
 //!
 //! Supported modes:
 //!
@@ -129,6 +150,15 @@ pub const SVR_ENABLE: u32 = 1 << 8;
 /// `IA32_TSC_DEADLINE` MSR used by the LVT TSC-deadline timer mode.
 pub const TSC_DEADLINE_MSR: u32 = 0x6E0;
 
+/// Default nominal APIC timer bus frequency, in hertz.
+///
+/// The architectural APIC bus clock is not discoverable from the pure model,
+/// so s9vm uses a documented nominal policy: 100 MHz, the common PC-chipset
+/// APIC bus frequency. The guest timer period is exact only to the extent that
+/// this nominal value matches the host; a caller that knows the real bus clock
+/// overrides it with [`LocalApic::set_apic_bus_hz`].
+pub const DEFAULT_APIC_BUS_HZ: u64 = 100_000_000;
+
 /// LVT timer mask bit (bit 16 of the LVT timer entry).
 pub const LVT_MASK: u32 = 1 << 16;
 /// LVT timer mode field (bits 18:17).
@@ -196,6 +226,10 @@ pub struct LocalApic {
     timer_armed: bool,
     /// Sub-tick remainder of the divide scaling, in APIC timer input units.
     timer_fraction: u64,
+    /// Nominal APIC timer bus frequency used by [`LocalApic::advance_tsc`].
+    apic_bus_hz: u64,
+    /// Remainder of the TSC-to-bus-tick conversion, in TSC cycles.
+    tsc_fraction: u64,
     /// Monotonic model TSC, advanced by [`LocalApic::advance`].
     tsc: u64,
     /// Absolute TSC-deadline value written to `IA32_TSC_DEADLINE`.
@@ -222,6 +256,8 @@ impl LocalApic {
             divide_config: 0,
             timer_armed: false,
             timer_fraction: 0,
+            apic_bus_hz: DEFAULT_APIC_BUS_HZ,
+            tsc_fraction: 0,
             tsc: 0,
             tsc_deadline: 0,
             tsc_deadline_armed: false,
@@ -423,12 +459,17 @@ impl LocalApic {
 
     /// Advances the timer by `cycles` APIC timer input units.
     ///
-    /// The caller passes the elapsed time since the previous call (for
-    /// example the TSC delta measured around a guest entry). Count-based
-    /// modes divide it by the configured divide value and decrement the
-    /// current count; TSC-deadline mode compares the model TSC with the
-    /// programmed deadline. Expiry raises the LVT vector through the IRR,
-    /// except when the LVT entry is masked.
+    /// The caller passes the elapsed time already expressed in APIC timer
+    /// input units (bus ticks before the divide). Count-based modes divide it
+    /// by the configured divide value and decrement the current count;
+    /// TSC-deadline mode compares the model TSC with the programmed deadline.
+    /// Expiry raises the LVT vector through the IRR, except when the LVT entry
+    /// is masked.
+    ///
+    /// This is the raw model helper, kept for tests and for callers that
+    /// already work in bus ticks. A caller holding host TSC cycles and a TSC
+    /// frequency must use [`Self::advance_tsc`], which performs the
+    /// conversion.
     pub fn advance(&mut self, cycles: u64) {
         self.tsc = self.tsc.saturating_add(cycles);
         if self.tsc_deadline_armed && self.tsc >= self.tsc_deadline {
@@ -440,6 +481,66 @@ impl LocalApic {
         match self.timer_mode() {
             TimerMode::OneShot | TimerMode::Periodic => self.advance_count(cycles),
             TimerMode::TscDeadline | TimerMode::Reserved => self.timer_armed = false,
+        }
+    }
+
+    /// Nominal APIC timer bus frequency, in hertz.
+    pub const fn apic_bus_hz(&self) -> u64 {
+        self.apic_bus_hz
+    }
+
+    /// Changes the nominal APIC timer bus frequency.
+    ///
+    /// The conversion remainder is reset because its unit depends on the bus
+    /// frequency. A zero value disables the count-based conversion of
+    /// [`Self::advance_tsc`] (the model TSC still advances).
+    pub fn set_apic_bus_hz(&mut self, bus_hz: u64) {
+        self.apic_bus_hz = bus_hz;
+        self.tsc_fraction = 0;
+    }
+
+    /// Advances the model by host TSC `cycles`, converting to APIC ticks.
+    ///
+    /// `tsc_hz` is the host TSC frequency in hertz. The count-based timer is
+    /// decremented by:
+    ///
+    /// `bus_ticks = (cycles * apic_bus_hz + remainder) / tsc_hz`
+    ///
+    /// where `remainder` is carried across calls so that the average
+    /// conversion rate stays exact even when a call spans less than one bus
+    /// tick. The model TSC used by TSC-deadline mode advances by the raw
+    /// `cycles`, without conversion: a deadline is an absolute TSC value.
+    ///
+    /// A zero `tsc_hz` or a zero bus frequency disables the count conversion
+    /// (the model TSC still advances and deadlines are still detected), so a
+    /// caller without a detected frequency degrades gracefully instead of
+    /// dividing by zero. Arithmetic saturates.
+    pub fn advance_tsc(&mut self, cycles: u64, tsc_hz: u64) {
+        self.tsc = self.tsc.saturating_add(cycles);
+        if self.tsc_deadline_armed && self.tsc >= self.tsc_deadline {
+            self.expire_tsc_deadline();
+        }
+        if !self.timer_armed {
+            return;
+        }
+        match self.timer_mode() {
+            TimerMode::OneShot | TimerMode::Periodic => {
+                if tsc_hz == 0 || self.apic_bus_hz == 0 {
+                    return;
+                }
+                let numerator = u128::from(cycles)
+                    .saturating_mul(u128::from(self.apic_bus_hz))
+                    .saturating_add(u128::from(self.tsc_fraction));
+                let bus_ticks = numerator / u128::from(tsc_hz);
+                self.tsc_fraction = (numerator % u128::from(tsc_hz)) as u64;
+                let bus_ticks = if bus_ticks > u128::from(u64::MAX) {
+                    u64::MAX
+                } else {
+                    bus_ticks as u64
+                };
+                self.advance_count(bus_ticks);
+            }
+            TimerMode::TscDeadline | TimerMode::Reserved => {}
         }
     }
 

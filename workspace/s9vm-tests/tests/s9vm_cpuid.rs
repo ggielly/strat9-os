@@ -27,12 +27,16 @@
 
 #[path = "../../kernel/src/s9vm/cpuid.rs"]
 mod cpuid;
+#[path = "../../kernel/src/s9vm/tsc.rs"]
+mod tsc;
 
 use cpuid::{
-    BRAND, BRAND_LEN, CpuidPolicy, DEFAULT_LEAF1_EDX, Feature, LEAF_EXTENDED_FEATURES,
-    LEAF_EXTENDED_MAX, MAX_BASIC_LEAF, MAX_EXTENDED_LEAF, VENDOR, VENDOR_LEN, extended1_ecx,
-    extended1_edx, leaf1_ecx, leaf1_edx,
+    extended1_ecx, extended1_edx, leaf1_ecx, leaf1_edx, CpuidPolicy, Feature, BRAND, BRAND_LEN,
+    DEFAULT_LEAF1_EDX, INVARIANT_TSC_BIT, LEAF_BASE_FREQUENCY, LEAF_EXTENDED_FEATURES,
+    LEAF_EXTENDED_FREQUENCY, LEAF_EXTENDED_MAX, LEAF_TSC_RATIO, MAX_BASIC_LEAF, MAX_EXTENDED_LEAF,
+    VENDOR, VENDOR_LEN,
 };
+use tsc::TscFrequency;
 
 /// Reassembles the 12-byte vendor string from `CPUID.0`
 /// (`EBX`, `EDX`, `ECX` order).
@@ -400,4 +404,88 @@ fn replay_is_deterministic_and_total() {
             assert_eq!(first, CpuidPolicy::default().leaf(leaf, subleaf));
         }
     }
+}
+
+#[test]
+fn tsc_ratio_leaf_publishes_policy_fields() {
+    let mut policy = CpuidPolicy::new();
+    policy.tsc_ratio_denominator = 5;
+    policy.tsc_ratio_numerator = 12;
+    policy.crystal_hz = 1_000_000_000;
+    // Architectural order: EAX = denominator, EBX = numerator, ECX = crystal.
+    assert_eq!(policy.leaf(LEAF_TSC_RATIO, 0), [5, 12, 1_000_000_000, 0]);
+}
+
+#[test]
+fn tsc_base_frequency_leaf_publishes_mhz() {
+    let mut policy = CpuidPolicy::new();
+    policy.base_mhz = 2400;
+    assert_eq!(policy.leaf(LEAF_BASE_FREQUENCY, 0), [2400, 0, 0, 0]);
+}
+
+#[test]
+fn tsc_leaves_default_to_zero_without_host_frequency() {
+    // No test in this binary publishes a host frequency in the global cache,
+    // so the zero-policy fallback must read as "not published".
+    let policy = CpuidPolicy::default();
+    assert_eq!(policy.leaf(LEAF_TSC_RATIO, 0), [0; 4]);
+    assert_eq!(policy.leaf(LEAF_BASE_FREQUENCY, 0), [0; 4]);
+}
+
+#[test]
+fn tsc_leaves_can_be_filled_from_a_frequency() {
+    let frequency = TscFrequency::from_hz(2_400_000_000).expect("2.4 GHz is plausible");
+    let mut policy = CpuidPolicy::new();
+    policy.set_tsc_frequency(frequency);
+
+    // 2.4 GHz / 1 GHz = 12 / 5: the guest computes the exact frequency.
+    assert_eq!(policy.leaf(LEAF_TSC_RATIO, 0), [5, 12, 1_000_000_000, 0]);
+    assert_eq!(policy.leaf(LEAF_BASE_FREQUENCY, 0), [2400, 0, 0, 0]);
+
+    // The published values are consistent with the helper they came from.
+    let leaves = frequency.cpuid_leaves();
+    assert_eq!(policy.crystal_hz, leaves.crystal_hz);
+    assert_eq!(policy.tsc_ratio_numerator, leaves.ratio_numerator);
+    assert_eq!(policy.tsc_ratio_denominator, leaves.ratio_denominator);
+    assert_eq!(policy.base_mhz, leaves.base_mhz);
+}
+
+#[test]
+fn invariant_tsc_bit_is_advertised() {
+    let policy = CpuidPolicy::default();
+    let result = policy.leaf(LEAF_EXTENDED_FREQUENCY, 0);
+    assert_eq!(result, [0, 0, 0, INVARIANT_TSC_BIT]);
+    assert_ne!(result[3] & (1 << 8), 0);
+    // The CPUID model and the timing model agree on the published bit.
+    assert_eq!(INVARIANT_TSC_BIT, tsc::INVARIANT_TSC_BIT);
+    // No other bit is published: no power-management claims.
+    assert_eq!(result[3] & !INVARIANT_TSC_BIT, 0);
+
+    // And the leaf is reachable inside the advertised extended range.
+    assert!(MAX_EXTENDED_LEAF >= LEAF_EXTENDED_FREQUENCY);
+    assert_ne!(policy.leaf(LEAF_EXTENDED_FREQUENCY, 0), [0; 4]);
+}
+
+#[test]
+fn tsc_leaves_are_within_the_advertised_basic_range() {
+    assert!(MAX_BASIC_LEAF >= LEAF_TSC_RATIO);
+    assert!(MAX_BASIC_LEAF >= LEAF_BASE_FREQUENCY);
+    // Both leaves are answered even when their content is zero: a guest must
+    // not depend on the range check to know they exist.
+    let policy = CpuidPolicy::new();
+    let mut low = CpuidPolicy::new();
+    low.max_basic_leaf = LEAF_TSC_RATIO - 1;
+    assert_eq!(policy.leaf(LEAF_TSC_RATIO, 0), [0; 4]);
+    assert_eq!(low.leaf(LEAF_TSC_RATIO, 0), [0; 4]);
+}
+
+#[test]
+fn partial_tsc_policy_falls_back() {
+    // A ratio without a crystal is not usable: the guest would divide by an
+    // unknown crystal, so the leaf must not publish it.
+    let mut policy = CpuidPolicy::new();
+    policy.tsc_ratio_denominator = 5;
+    policy.tsc_ratio_numerator = 12;
+    policy.crystal_hz = 0;
+    assert_eq!(policy.leaf(LEAF_TSC_RATIO, 0), [0; 4]);
 }

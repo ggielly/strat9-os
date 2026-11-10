@@ -228,3 +228,72 @@ fn cache_is_write_once_and_converts() {
     set(other);
     assert_eq!(get(), Some(frequency));
 }
+
+#[test]
+fn cpuid_leaves_are_exact_for_common_frequencies() {
+    // The guest computes crystal * numerator / denominator; every one of
+    // these common TSC frequencies has an exact 32-bit representation.
+    for hz in [
+        100_000_000u64,
+        1_500_000_000,
+        2_400_000_000,
+        2_500_000_000,
+        2_900_000_000,
+        3_000_000_000,
+        10_000_000_000,
+    ] {
+        let frequency = TscFrequency::from_hz(hz).expect("plausible");
+        let leaves = frequency.cpuid_leaves();
+        assert_ne!(leaves.ratio_denominator, 0, "hz={}", hz);
+        assert_ne!(leaves.ratio_numerator, 0, "hz={}", hz);
+        assert_ne!(leaves.crystal_hz, 0, "hz={}", hz);
+        let published = u128::from(leaves.crystal_hz) * u128::from(leaves.ratio_numerator)
+            / u128::from(leaves.ratio_denominator);
+        assert_eq!(published, u128::from(hz), "hz={} leaves={:?}", hz, leaves);
+        assert_eq!(leaves.base_mhz, (hz / 1_000_000) as u32);
+    }
+}
+
+#[test]
+fn cpuid_leaves_publish_2_4_ghz_as_12_over_5() {
+    let frequency = TscFrequency::from_hz(2_400_000_000).expect("plausible");
+    let leaves = frequency.cpuid_leaves();
+    assert_eq!(leaves.ratio_denominator, 5);
+    assert_eq!(leaves.ratio_numerator, 12);
+    assert_eq!(leaves.crystal_hz, 1_000_000_000);
+    assert_eq!(leaves.base_mhz, 2400);
+}
+
+#[test]
+fn cpuid_leaves_fall_back_to_megahertz_precision() {
+    // 2^32 + 1: coprime with 1 GHz, so the exact numerator does not fit in
+    // 32 bits. The published frequency is truncated to 4294 MHz, less than
+    // 0.1 % below the real value.
+    let hz = 4_294_967_297u64;
+    let frequency = TscFrequency::from_hz(hz).expect("plausible");
+    let leaves = frequency.cpuid_leaves();
+    assert_eq!(leaves.ratio_denominator, 1);
+    assert_eq!(leaves.crystal_hz, tsc::CPUID_FALLBACK_CRYSTAL_HZ);
+    assert_eq!(leaves.ratio_numerator, 4294);
+    assert_eq!(leaves.base_mhz, 4294);
+    let published = 4_294_000_000u64;
+    let error = hz - published;
+    assert!(error * 1_000 < hz, "relative error must stay below 0.1 %");
+}
+
+#[test]
+fn cpuid_leaves_are_total_across_the_bounds() {
+    for hz in [MIN_HZ, MAX_HZ, MIN_HZ + 1, MAX_HZ - 1] {
+        let frequency = TscFrequency::from_hz(hz).expect("plausible");
+        let leaves = frequency.cpuid_leaves();
+        assert_ne!(leaves.ratio_denominator, 0);
+        assert_ne!(leaves.ratio_numerator, 0);
+        assert_ne!(leaves.crystal_hz, 0);
+        // The guest's computed value never exceeds the plausibility bounds by
+        // more than the documented fallback precision.
+        let published = u128::from(leaves.crystal_hz) * u128::from(leaves.ratio_numerator)
+            / u128::from(leaves.ratio_denominator);
+        assert!(published <= u128::from(MAX_HZ));
+        assert!(published + 1_000_000 > u128::from(MIN_HZ));
+    }
+}

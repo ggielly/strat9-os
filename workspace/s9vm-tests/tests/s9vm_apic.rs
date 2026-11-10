@@ -25,7 +25,10 @@
 #[path = "../../kernel/src/s9vm/apic.rs"]
 mod apic;
 
-use apic::{delivery, reg, shorthand, x2apic, LocalApic, TimerMode, SVR_ENABLE, VERSION_VALUE};
+use apic::{
+    delivery, reg, shorthand, x2apic, LocalApic, TimerMode, DEFAULT_APIC_BUS_HZ, SVR_ENABLE,
+    VERSION_VALUE,
+};
 
 #[test]
 fn reset_state_is_architectural() {
@@ -454,4 +457,96 @@ fn x2apic_timer_programming_and_count_read() {
     apic.advance(5);
     assert_eq!(apic.pending_vector(), Some(0x61));
     assert_eq!(apic.x2apic_read(x2apic::CURRENT_COUNT), Some(8));
+}
+
+#[test]
+fn default_apic_bus_frequency_is_the_documented_policy() {
+    let apic = LocalApic::new(0);
+    assert_eq!(apic.apic_bus_hz(), DEFAULT_APIC_BUS_HZ);
+    assert_eq!(DEFAULT_APIC_BUS_HZ, 100_000_000);
+}
+
+#[test]
+fn advance_tsc_scales_tsc_cycles_to_bus_ticks() {
+    // 3 GHz host TSC, 100 MHz APIC bus, divide by 1.
+    // 3_000_000 cycles = 1 ms = 100_000 bus ticks.
+    let mut apic = LocalApic::new(0);
+    apic.mmio_write(reg::DIVIDE_CONFIG, 0xB);
+    program_timer(&mut apic, 0, 0x70, false, 1_000_000);
+    apic.advance_tsc(3_000_000, 3_000_000_000);
+    assert_eq!(apic.current_count(), 900_000);
+    assert!(apic.timer_armed());
+
+    // The same number of raw APIC input ticks would have expired the timer:
+    // this is exactly the unit bug the conversion fixes.
+    let mut raw = LocalApic::new(0);
+    raw.mmio_write(reg::DIVIDE_CONFIG, 0xB);
+    program_timer(&mut raw, 0, 0x70, false, 1_000_000);
+    raw.advance(3_000_000);
+    assert_eq!(raw.current_count(), 0);
+    assert!(!raw.timer_armed());
+}
+
+#[test]
+fn advance_tsc_uses_the_configured_bus_frequency() {
+    // 2.4 GHz TSC with a 24 MHz core-crystal bus: 2_400_000 cycles = 1 ms =
+    // 24_000 bus ticks.
+    let mut apic = LocalApic::new(0);
+    apic.mmio_write(reg::DIVIDE_CONFIG, 0xB);
+    apic.set_apic_bus_hz(24_000_000);
+    assert_eq!(apic.apic_bus_hz(), 24_000_000);
+    program_timer(&mut apic, 0, 0x71, false, 1_000_000);
+    apic.advance_tsc(2_400_000, 2_400_000_000);
+    assert_eq!(apic.current_count(), 976_000);
+}
+
+#[test]
+fn advance_tsc_carries_the_conversion_remainder() {
+    // 10 TSC cycles at 3 GHz = 10/30 of a bus tick; three calls make one tick.
+    let mut apic = LocalApic::new(0);
+    apic.mmio_write(reg::DIVIDE_CONFIG, 0xB);
+    program_timer(&mut apic, 0, 0x72, false, 1_000_000);
+    apic.advance_tsc(10, 3_000_000_000);
+    apic.advance_tsc(10, 3_000_000_000);
+    assert_eq!(apic.current_count(), 1_000_000);
+    apic.advance_tsc(10, 3_000_000_000);
+    assert_eq!(apic.current_count(), 999_999);
+}
+
+#[test]
+fn advance_tsc_zero_inputs_are_safe() {
+    let mut apic = LocalApic::new(0);
+    apic.mmio_write(reg::DIVIDE_CONFIG, 0xB);
+    program_timer(&mut apic, 0, 0x73, false, 1_000_000);
+    // Unknown TSC frequency: no conversion, no panic, no count change.
+    apic.advance_tsc(1_000_000, 0);
+    assert_eq!(apic.current_count(), 1_000_000);
+    // Zero bus frequency: same behaviour.
+    apic.set_apic_bus_hz(0);
+    apic.advance_tsc(1_000_000, 3_000_000_000);
+    assert_eq!(apic.current_count(), 1_000_000);
+}
+
+#[test]
+fn advance_tsc_saturates_on_huge_deltas() {
+    let mut apic = LocalApic::new(0);
+    apic.mmio_write(reg::DIVIDE_CONFIG, 0xB);
+    program_timer(&mut apic, 0, 0x74, false, u32::MAX);
+    // 1 Hz TSC: the product saturates instead of overflowing.
+    apic.advance_tsc(u64::MAX, 1);
+    assert_eq!(apic.current_count(), 0);
+    assert!(!apic.timer_armed());
+    assert_eq!(apic.pending_vector(), Some(0x74));
+}
+
+#[test]
+fn advance_tsc_keeps_tsc_deadline_in_tsc_units() {
+    // TSC-deadline mode uses absolute TSC values, never the bus conversion:
+    // 1500 TSC cycles must expire a deadline of 1000 even at a slow bus.
+    let mut apic = LocalApic::new(0);
+    apic.mmio_write(reg::LVT_TIMER, (2 << apic::LVT_MODE_SHIFT) | 0x75);
+    apic.set_tsc_deadline(1000);
+    apic.advance_tsc(1500, 100_000_000);
+    assert!(!apic.timer_armed());
+    assert_eq!(apic.pending_vector(), Some(0x75));
 }

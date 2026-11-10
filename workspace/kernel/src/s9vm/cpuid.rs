@@ -40,10 +40,13 @@
 //! | `0x0000_0007` | structured extended features: zero |
 //! | `0x0000_000B` | topology enumeration (SMT + core levels) |
 //! | `0x0000_000D` | XSAVE state: zero (XSAVE is not advertised) |
+//! | `0x0000_0015` | TSC/core-crystal ratio and crystal frequency |
+//! | `0x0000_0016` | nominal base frequency, in MHz |
 //! | `0x0000_001F` | extended topology enumeration (same topology) |
 //! | `0x8000_0000` | max extended leaf |
 //! | `0x8000_0001` | extended features (NX, long mode, `SYSCALL`, `RDTSCP`) |
 //! | `0x8000_0002..=0x8000_0004` | 48-byte processor brand string |
+//! | `0x8000_0007` | invariant TSC bit (always set: the TSC is never offset) |
 //! | `0x8000_0008` | physical/virtual address sizes |
 //!
 //! Every other leaf — including the `0x4000_0000` hypervisor range — returns
@@ -61,7 +64,11 @@
 //!   zeroed.
 //! - **Deterministic and total**: [`CpuidPolicy::leaf`] is a pure function of
 //!   its arguments and the policy. It never panics, never blocks and returns
-//!   the same four words for the same inputs.
+//!   the same four words for the same inputs. The single documented exception
+//!   is the host fallback of the TSC leaves (`0x15`, `0x16`): when the policy
+//!   fields are zero, the host frequency cache of [`crate::s9vm::tsc`] is read
+//!   (it is immutable after detection); once a caller publishes explicit
+//!   leaves the replay is again a pure function of the policy.
 //! - **Coherent feature set**: only bits that the implementation can actually
 //!   honour are set by default. XSAVE/OSXSAVE, AVX and the `leaf 0x0000_0007`
 //!   features are deliberately absent because their instructions and
@@ -76,6 +83,14 @@
 //! APIC id parameter). Until then [`CpuidPolicy::cores`] and
 //! [`CpuidPolicy::threads`] only shape the counts advertised by leaves
 //! `0x0000_000B`, `0x0000_001F` and `0x8000_0008`.
+//!
+//! The TSC leaves assume an **invariant host TSC**: s9vm never offsets or
+//! scales the time-stamp counter, so the guest TSC is the host TSC. On a host
+//! without an invariant TSC the guest clock would drift with the P-state; the
+//! invariant bit is nevertheless published because s9vm itself cannot violate
+//! that property any further (it adds no offset and no scaling).
+
+use super::tsc::TscFrequency;
 
 // --- Identity --------------------------------------------------------------
 
@@ -128,12 +143,26 @@ pub const LEAF_STRUCTURED_FEATURES: u32 = 0x0000_0007;
 pub const LEAF_TOPOLOGY: u32 = 0x0000_000B;
 /// `CPUID.0xD`: XSAVE state components.
 pub const LEAF_XSAVE: u32 = 0x0000_000D;
+/// `CPUID.0x15`: TSC/core-crystal ratio and core-crystal frequency.
+pub const LEAF_TSC_RATIO: u32 = 0x0000_0015;
+/// `CPUID.0x16`: nominal processor base frequency.
+pub const LEAF_BASE_FREQUENCY: u32 = 0x0000_0016;
 /// `CPUID.0x1F`: extended topology enumeration.
 pub const LEAF_TOPOLOGY_V2: u32 = 0x0000_001F;
 /// `CPUID.0x8000_0000`: max extended leaf.
 pub const LEAF_EXTENDED_MAX: u32 = 0x8000_0000;
 /// `CPUID.0x8000_0001`: extended feature bits.
 pub const LEAF_EXTENDED_FEATURES: u32 = 0x8000_0001;
+/// `CPUID.0x8000_0007`: invariant TSC and advanced power management.
+///
+/// Only the invariant-TSC bit is published: s9vm adds no TSC offset and no
+/// scaling, so the guest TSC is the host TSC.
+pub const LEAF_EXTENDED_FREQUENCY: u32 = 0x8000_0007;
+/// Bit 8 of `CPUID.0x8000_0007:EDX`: the TSC is invariant.
+///
+/// Kept in sync with [`crate::s9vm::tsc::INVARIANT_TSC_BIT`]; duplicated here
+/// so the CPUID model stays readable without a cross-module constant.
+pub const INVARIANT_TSC_BIT: u32 = 1 << 8;
 /// First brand string leaf (`0x8000_0002`); the brand spans three leaves.
 pub const LEAF_BRAND: u32 = 0x8000_0002;
 /// `CPUID.0x8000_0008`: address size information.
@@ -333,6 +362,17 @@ pub struct CpuidPolicy {
     pub extended1_ecx: u32,
     /// Raw `CPUID.0x8000_0001:EDX` mask.
     pub extended1_edx: u32,
+    /// `CPUID.0x15:EAX` — TSC/core-crystal ratio denominator.
+    ///
+    /// Zero publishes the host value from the [`crate::s9vm::tsc`] cache, or
+    /// nothing when the host frequency is unknown.
+    pub tsc_ratio_denominator: u32,
+    /// `CPUID.0x15:EBX` — TSC/core-crystal ratio numerator.
+    pub tsc_ratio_numerator: u32,
+    /// `CPUID.0x15:ECX` — core-crystal frequency, in hertz.
+    pub crystal_hz: u32,
+    /// `CPUID.0x16:EAX` — nominal base frequency, in megahertz.
+    pub base_mhz: u32,
 }
 
 impl CpuidPolicy {
@@ -353,7 +393,25 @@ impl CpuidPolicy {
             leaf1_edx: DEFAULT_LEAF1_EDX,
             extended1_ecx: DEFAULT_EXTENDED1_ECX,
             extended1_edx: DEFAULT_EXTENDED1_EDX,
+            tsc_ratio_denominator: 0,
+            tsc_ratio_numerator: 0,
+            crystal_hz: 0,
+            base_mhz: 0,
         }
+    }
+
+    /// Publishes `frequency` in CPUID leaves `0x15` and `0x16`.
+    ///
+    /// The four fields are filled from
+    /// [`TscFrequency::cpuid_leaves`](crate::s9vm::tsc::TscFrequency::cpuid_leaves).
+    /// A caller that leaves them at zero keeps the host-derived fallback, which
+    /// is the right default for a world that should see the real host TSC.
+    pub fn set_tsc_frequency(&mut self, frequency: TscFrequency) {
+        let leaves = frequency.cpuid_leaves();
+        self.tsc_ratio_denominator = leaves.ratio_denominator;
+        self.tsc_ratio_numerator = leaves.ratio_numerator;
+        self.crystal_hz = leaves.crystal_hz;
+        self.base_mhz = leaves.base_mhz;
     }
 
     /// Number of logical processors per package, clamped to the 8-bit
@@ -463,6 +521,8 @@ impl CpuidPolicy {
                 LEAF_STRUCTURED_FEATURES => [0; 4],
                 LEAF_TOPOLOGY | LEAF_TOPOLOGY_V2 => self.topology_leaf(subleaf),
                 LEAF_XSAVE => [0; 4],
+                LEAF_TSC_RATIO => self.tsc_ratio_leaf(),
+                LEAF_BASE_FREQUENCY => self.base_frequency_leaf(),
                 _ => [0; 4],
             };
         }
@@ -477,6 +537,7 @@ impl CpuidPolicy {
         }
         match leaf {
             LEAF_EXTENDED_FEATURES => self.extended_features_leaf(),
+            LEAF_EXTENDED_FREQUENCY => self.extended_frequency_leaf(),
             LEAF_BRAND..=0x8000_0004 => self.brand_leaf(leaf),
             LEAF_EXTENDED_ADDRESS_SIZES => self.address_sizes_leaf(),
             _ => [0; 4],
@@ -518,6 +579,61 @@ impl CpuidPolicy {
     fn extended_features_leaf(&self) -> [u32; 4] {
         // EAX and EBX are reserved in this leaf.
         [0, 0, self.effective_extended1_ecx(), self.extended1_edx]
+    }
+
+    /// `CPUID.0x15`: TSC/core-crystal ratio and crystal frequency.
+    ///
+    /// The policy fields win when they form a usable ratio (non-zero
+    /// denominator, numerator and crystal). Otherwise the host frequency cache
+    /// is consulted, so a guest sees the real host TSC frequency even when the
+    /// policy was not explicitly tuned; when neither source is available the
+    /// leaf reads as zero and the guest falls back to leaf `0x16` or to
+    /// calibration.
+    fn tsc_ratio_leaf(&self) -> [u32; 4] {
+        if self.tsc_ratio_denominator != 0 && self.tsc_ratio_numerator != 0 && self.crystal_hz != 0
+        {
+            return [
+                self.tsc_ratio_denominator,
+                self.tsc_ratio_numerator,
+                self.crystal_hz,
+                0,
+            ];
+        }
+        match super::tsc::get() {
+            Some(frequency) => {
+                let leaves = frequency.cpuid_leaves();
+                [
+                    leaves.ratio_denominator,
+                    leaves.ratio_numerator,
+                    leaves.crystal_hz,
+                    0,
+                ]
+            }
+            None => [0; 4],
+        }
+    }
+
+    /// `CPUID.0x16`: nominal base frequency in `EAX` (megahertz).
+    ///
+    /// The policy field wins; otherwise the host frequency cache is truncated
+    /// to megahertz. Zero means "not published".
+    fn base_frequency_leaf(&self) -> [u32; 4] {
+        if self.base_mhz != 0 {
+            return [self.base_mhz, 0, 0, 0];
+        }
+        match super::tsc::get() {
+            Some(frequency) => [frequency.cpuid_leaves().base_mhz, 0, 0, 0],
+            None => [0; 4],
+        }
+    }
+
+    /// `CPUID.0x8000_0007`: invariant TSC bit in `EDX`.
+    ///
+    /// Only bit 8 is set: the guest TSC is the host TSC, s9vm never offsets or
+    /// scales it, so the invariant-TSC guarantee is published unconditionally.
+    /// Advanced power-management bits are not advertised.
+    fn extended_frequency_leaf(&self) -> [u32; 4] {
+        [0, 0, 0, INVARIANT_TSC_BIT]
     }
 
     /// `CPUID.0x8000_0002..=0x8000_0004`: one quarter of the brand string.

@@ -176,6 +176,102 @@ impl TscFrequency {
     }
 }
 
+/// CPUID leaves that publish a [`TscFrequency`] to a guest.
+///
+/// These are the raw register values a CPUID replay returns:
+///
+/// | Field | Register | Meaning |
+/// |---|---|---|
+/// | [`ratio_denominator`](Self::ratio_denominator) | `0x15:EAX` | denominator of the TSC/crystal ratio |
+/// | [`ratio_numerator`](Self::ratio_numerator) | `0x15:EBX` | numerator of the TSC/crystal ratio |
+/// | [`crystal_hz`](Self::crystal_hz) | `0x15:ECX` | core-crystal frequency, in Hz |
+/// | [`base_mhz`](Self::base_mhz) | `0x16:EAX` | nominal base frequency, in MHz |
+///
+/// A guest computes `TSC_HZ = crystal_hz * ratio_numerator / ratio_denominator`
+/// and, when leaf `0x15` is unusable, falls back to `base_mhz * 1_000_000`.
+/// A zeroed value therefore means "not published"; it is the default of
+/// [`crate::s9vm::cpuid::CpuidPolicy`] and is replaced either by an explicit
+/// policy or by the host frequency cache.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CpuidTscLeaves {
+    /// `CPUID.0x15:EAX` — ratio denominator (never zero in a valid value).
+    pub ratio_denominator: u32,
+    /// `CPUID.0x15:EBX` — ratio numerator (never zero in a valid value).
+    pub ratio_numerator: u32,
+    /// `CPUID.0x15:ECX` — core-crystal frequency, in hertz.
+    pub crystal_hz: u32,
+    /// `CPUID.0x16:EAX` — nominal base frequency, in megahertz.
+    pub base_mhz: u32,
+}
+
+/// Crystal frequency used to build an exact ratio, in hertz.
+///
+/// One gigahertz fits in a `u32` and, being `2^9 * 5^9`, reduces most TSC
+/// frequencies (which are usually multiples of 100 MHz) to a small exact
+/// numerator. The guest computes `crystal_hz * numerator / denominator`, so an
+/// exact reduction gives the exact frequency.
+pub const CPUID_CRYSTAL_HZ: u32 = 1_000_000_000;
+
+/// Crystal frequency of the approximate fallback representation, in hertz.
+///
+/// Used only when the exact 1 GHz representation does not fit the 32-bit
+/// numerator (frequencies above about 4.29 GHz whose value is coprime with
+/// 1 GHz). The published frequency is then truncated to the nearest lower
+/// megahertz, an error below 1 MHz.
+pub const CPUID_FALLBACK_CRYSTAL_HZ: u32 = 1_000_000;
+
+impl TscFrequency {
+    /// Derives the CPUID leaves that publish this frequency to a guest.
+    ///
+    /// The representation is exact whenever `hz / gcd(hz, 1 GHz)` fits in 32
+    /// bits, which covers every frequency up to about 4.29 GHz and many higher
+    /// ones (for example 10 GHz reduces to `10/1`). Otherwise the frequency is
+    /// published with a 1 MHz crystal and a numerator truncated to the lower
+    /// megahertz: the guest then computes a frequency off by less than 1 MHz,
+    /// that is less than 0.001 % at 3 GHz.
+    ///
+    /// `base_mhz` is always the truncated megahertz value, as leaf `0x16`
+    /// specifies an integer number of megahertz. A guest that has both leaves
+    /// can cross-check them.
+    pub fn cpuid_leaves(self) -> CpuidTscLeaves {
+        let crystal = u64::from(CPUID_CRYSTAL_HZ);
+        let divisor = greatest_common_divisor(self.hz, crystal);
+        let numerator = self.hz / divisor;
+        let denominator = crystal / divisor;
+        let base_mhz = self.mhz();
+        if numerator <= u64::from(u32::MAX) && denominator <= u64::from(u32::MAX) {
+            CpuidTscLeaves {
+                ratio_denominator: denominator as u32,
+                ratio_numerator: numerator as u32,
+                crystal_hz: CPUID_CRYSTAL_HZ,
+                base_mhz: base_mhz.min(u64::from(u32::MAX)) as u32,
+            }
+        } else {
+            let megahertz = base_mhz.min(u64::from(u32::MAX)) as u32;
+            CpuidTscLeaves {
+                ratio_denominator: 1,
+                ratio_numerator: megahertz,
+                crystal_hz: CPUID_FALLBACK_CRYSTAL_HZ,
+                base_mhz: megahertz,
+            }
+        }
+    }
+}
+
+/// Greatest common divisor of two non-zero values (Euclid).
+fn greatest_common_divisor(mut left: u64, mut right: u64) -> u64 {
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    if left == 0 {
+        1
+    } else {
+        left
+    }
+}
+
 /// Computes the frequency from CPUID leaf `0x15`, if the crystal is reported.
 ///
 /// Returns `None` when the ratio is absent (`EAX == 0` or `EBX == 0`) or when
