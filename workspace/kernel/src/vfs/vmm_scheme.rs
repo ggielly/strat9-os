@@ -33,9 +33,10 @@
 //! /dev/vmm/
 //!   info               engine summary (snapshot taken at open)
 //!   worlds             list of worlds, one line per world
-//!   <id>/              directory: info, stats, exits, vcpus, console, disk
+//!   <id>/              directory: info, stats, timing, exits, vcpus, console, disk
 //!   <id>/info          snapshot of a world
 //!   <id>/stats         snapshot of every world counter (pause, vCPUs, queue)
+//!   <id>/timing        exit-latency and exit-rate aggregates (TSC cycles)
 //!   <id>/exits         exit-queue snapshot (pending count + oldest event peek)
 //!   <id>/vcpus         per-vCPU diagnostic snapshot
 //!   <id>/console       console stream (read drains output, write queues input)
@@ -264,6 +265,33 @@ impl VmmScheme {
         Ok(text)
     }
 
+    /// Timing snapshot of one world (exit latency and rate aggregates).
+    ///
+    /// Cycles are time-stamp counter ticks on the CPU that ran the vCPU; the
+    /// reader must convert them with the host's TSC frequency. See the timing
+    /// module documentation for what each class means and why asynchronous
+    /// exits include the preceding guest time slice.
+    fn timing_text(id: u64) -> Result<String, SyscallError> {
+        let world = vm::get(id).ok_or(SyscallError::NotFound)?;
+        let timing = vm::timing(id).ok_or(SyscallError::NotFound)?;
+        let mut text = String::new();
+        let _ = writeln!(text, "world {}", world.id);
+        let _ = writeln!(text, "exits={}", timing.exits);
+        let _ = writeln!(text, "mean_cycles={}", timing.mean_cycles);
+        let _ = writeln!(text, "p95_cycles={}", timing.p95_cycles);
+        let _ = writeln!(text, "min_cycles={}", timing.min_cycles);
+        let _ = writeln!(text, "max_cycles={}", timing.max_cycles);
+        let _ = writeln!(text, "window={}", timing.window);
+        let _ = writeln!(text, "peak_window={}", timing.peak_window);
+        let _ = writeln!(text, "handler_samples={}", timing.handler_samples);
+        let _ = writeln!(text, "handler_mean_cycles={}", timing.handler_mean_cycles);
+        let _ = writeln!(text, "handler_p95_cycles={}", timing.handler_p95_cycles);
+        for (index, count) in timing.per_class.iter().enumerate() {
+            let _ = writeln!(text, "class_{}={}", index, count);
+        }
+        Ok(text)
+    }
+
     /// Human-readable name of an ABI exit kind.
     fn exit_kind_name(kind: u32) -> &'static str {
         match kind {
@@ -406,6 +434,7 @@ impl VmmScheme {
                         return match leaf {
                             "info" => Self::world_text(id),
                             "stats" => Self::stats_text(id),
+                            "timing" => Self::timing_text(id),
                             "exits" => Self::exits_text(id),
                             "vcpus" => Self::vcpus_text(id),
                             _ => Err(SyscallError::NotFound),
@@ -496,6 +525,11 @@ impl VmmScheme {
                         ino: 0,
                         file_type: DT_REG,
                         name: String::from("stats"),
+                    },
+                    DirEntry {
+                        ino: 0,
+                        file_type: DT_REG,
+                        name: String::from("timing"),
                     },
                     DirEntry {
                         ino: 0,
