@@ -601,9 +601,15 @@ pub fn run_interrupt(caps: &HwCaps) -> Result<InterruptReport, SelftestError> {
             ExitClass::ExternalInterrupt => {}
             other => {
                 log::warn!(
-                    "[s9vm] interrupt test: unexpected exit class={:?} rip={:#x}",
+                    "[s9vm] interrupt test: unexpected exit class={:?} reason={:#x} \
+                     qual={:#x} intr={:#x} rflags={:#x} rip={:#x} window={}",
                     other,
-                    vcpu.guest().rip
+                    exit.raw_reason,
+                    exit.qualification,
+                    exit.interrupt_info,
+                    vcpu.guest().rflags,
+                    vcpu.guest().rip,
+                    window_armed
                 );
                 outcome = Err(SelftestError::BadExit("unexpected interrupt-test exit"));
                 break;

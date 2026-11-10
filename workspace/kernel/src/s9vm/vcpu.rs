@@ -340,6 +340,22 @@ fn alloc_msr_bitmap() -> Option<PhysFrame> {
     Some(frame)
 }
 
+/// Primary processor-based controls of a vCPU.
+///
+/// `PROC_ACTIVATE_SECONDARY` is **not** optional: without it EPT is disabled
+/// and the guest addresses host-physical memory, which triple-faults it at the
+/// first instruction. Every rewrite of the primary controls must go through
+/// this helper so the invariant cannot be lost.
+fn primary_controls(caps: &HwCaps, window_exiting: bool) -> u32 {
+    let mut primary = crate::s9vm::caps::control_bits::PROC_ACTIVATE_SECONDARY
+        | bits::PRIMARY_HLT_EXITING
+        | bits::PRIMARY_UNCONDITIONAL_IO_EXITING;
+    if window_exiting {
+        primary |= bits::PRIMARY_INTERRUPT_WINDOW_EXITING;
+    }
+    caps.primary_proc_allowed.apply(primary)
+}
+
 /// A vCPU: resources, guest state and control block.
 pub struct Vcpu {
     control: ControlBlock,
@@ -936,11 +952,7 @@ impl Vcpu {
 
     unsafe fn write_controls(&self, caps: &HwCaps) -> Result<(), VcpuError> {
         let pin = caps.pin_allowed.apply(bits::PIN_EXTERNAL_INTERRUPT_EXITING);
-        let primary = caps.primary_proc_allowed.apply(
-            crate::s9vm::caps::control_bits::PROC_ACTIVATE_SECONDARY
-                | bits::PRIMARY_HLT_EXITING
-                | bits::PRIMARY_UNCONDITIONAL_IO_EXITING,
-        );
+        let primary = primary_controls(caps, false);
         let mut secondary =
             bits::SECONDARY_ENABLE_EPT | bits::SECONDARY_UNRESTRICTED_GUEST;
         if self.msr_bitmap.is_some() {
@@ -1153,11 +1165,7 @@ impl Vcpu {
         caps: &HwCaps,
         enabled: bool,
     ) -> Result<bool, VcpuError> {
-        let mut primary = bits::PRIMARY_HLT_EXITING | bits::PRIMARY_UNCONDITIONAL_IO_EXITING;
-        if enabled {
-            primary |= bits::PRIMARY_INTERRUPT_WINDOW_EXITING;
-        }
-        let primary = caps.primary_proc_allowed.apply(primary);
+        let primary = primary_controls(caps, enabled);
         if enabled && primary & bits::PRIMARY_INTERRUPT_WINDOW_EXITING == 0 {
             return Ok(false);
         }
