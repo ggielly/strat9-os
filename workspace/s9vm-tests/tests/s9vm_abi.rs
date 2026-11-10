@@ -85,7 +85,7 @@ fn p0_block_does_not_collide_with_iommu_block() {
 #[test]
 fn abi_version_is_current() {
     // Version 6: append-only IOMMU mapping surface over version 5.
-    assert_eq!(abi::VMM_ABI_VERSION, 6);
+    assert_eq!(abi::VMM_ABI_VERSION, 7);
 }
 
 #[test]

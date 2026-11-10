@@ -936,6 +936,26 @@ struct GuestRunReport {
     matched: usize,
 }
 
+/// Completes one policy exit, applying the guest RIP advance the hardware did
+/// not perform.
+///
+/// For an `OUT` I/O-port exit the engine leaves `GUEST_RIP` at the faulting
+/// instruction, so the policy must advance it by the reported instruction
+/// length; an `IN` exit additionally needs a value (there is no device behind
+/// the policy port, so read back `0xFF`). Every other exit is completed as a
+/// no-op.
+fn complete_policy_exit(vcpu: u64, event: &VmmExitEvent) -> Result<(), Error> {
+    match event.kind {
+        exit_kind::IO_PORT => {
+            let direction_in = event.flags & 1 != 0;
+            let value = if direction_in { 0xFF } else { 0 };
+            let advance = u64::from(event.instruction_length).max(1);
+            vmm_exit_complete(vcpu, value, advance)
+        }
+        _ => vmm_exit_complete(vcpu, 0, 0),
+    }
+}
+
 /// Runs the guest and drains its policy exits until it halts or a bound trips.
 ///
 /// Completion policy:
@@ -1014,7 +1034,7 @@ fn run_guest_policy_loop(world: u64, vcpu: u64) -> Result<GuestRunReport, Error>
                 report.halt = true;
                 log!("[s9vm-vmm] guest halted (HLT policy exit)");
             }
-            vmm_exit_complete(vcpu, 0, 0)?;
+            complete_policy_exit(vcpu, &event)?;
             if report.halt || report.exits >= MAX_GUEST_EXITS {
                 break;
             }
@@ -1273,7 +1293,7 @@ fn run_policy_loop(world: u64, vcpu: u64) -> Result<(u32, bool, bool), Error> {
                 // I/O instructions already advanced RIP in hardware; other
                 // exits are completed without advancing (the guest enters at a
                 // fresh instruction after this demo).
-                vmm_exit_complete(vcpu, 0, 0)?;
+            complete_policy_exit(vcpu, &event)?;
                 if halt_seen {
                     break;
                 }

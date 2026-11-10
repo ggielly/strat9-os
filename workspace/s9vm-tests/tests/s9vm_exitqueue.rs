@@ -40,7 +40,7 @@ fn event(seq: u64) -> VmmExitEvent {
         flags: 0,
         value: seq,
         port: 0xE9,
-        reserved: 0,
+        instruction_length: 0,
     }
 }
 

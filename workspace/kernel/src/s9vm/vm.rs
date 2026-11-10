@@ -1262,7 +1262,7 @@ fn regs_from_guest(guest: &GuestState, base: &VmmRegs) -> VmmRegs {
     }
 }
 
-fn event_from_exit(exit: &ExitInfo, vcpu_id: u64) -> VmmExitEvent {
+fn event_from_exit(exit: &ExitInfo, vcpu_id: u64, guest_rax: u64) -> VmmExitEvent {
     let class = exit.class();
     let mut event = VmmExitEvent {
         abi_version: strat9_abi::vmm::VMM_ABI_VERSION,
@@ -1277,8 +1277,19 @@ fn event_from_exit(exit: &ExitInfo, vcpu_id: u64) -> VmmExitEvent {
             event.kind = exit_kind::IO_PORT;
             event.port = ((qualification >> 16) & 0xFFFF) as u32;
             event.size = ((qualification & 0x7) + 1) as u32;
-            // Bit 3: 0 = OUT, 1 = IN.
-            event.flags = ((qualification >> 3) & 1) as u32;
+            // Bit 3: 0 = OUT, 1 = IN. For an OUT the policy needs the data the
+            // guest wrote, otherwise every debug-port byte reads as zero.
+            let direction_in = (qualification >> 3) & 1 != 0;
+            event.flags = u32::from(direction_in);
+            if !direction_in {
+                let width = u64::from(event.size.min(8));
+                let mask = if width == 8 {
+                    u64::MAX
+                } else {
+                    (1u64 << (width * 8)) - 1
+                };
+                event.value = guest_rax & mask;
+            }
         }
         ExitClass::Halt => {
             event.kind = exit_kind::HALT;
@@ -1300,6 +1311,9 @@ fn event_from_exit(exit: &ExitInfo, vcpu_id: u64) -> VmmExitEvent {
             event.flags = exit.raw_reason;
         }
     }
+    // A policy-driven I/O replay must advance the guest RIP itself: the
+    // hardware leaves GUEST_RIP at the faulting instruction for port exits.
+    event.instruction_length = exit.instruction_length;
     event
 }
 
@@ -1645,7 +1659,7 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                             if class == ExitClass::PreemptionTimer {
                                 stats.timer_exits += 1;
                             }
-                            let event = event_from_exit(&exit, vcpu_id);
+                            let event = event_from_exit(&exit, vcpu_id, hardware.guest().rax);
                             let _ = push_exit(world_id, event);
                         }
                         break;

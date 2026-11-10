@@ -46,7 +46,7 @@
 /// Version 6 is append-only over version 5: it adds [`VmmIommuMap`] and the
 /// `SYS_VMM_MAP_IOMMU` (572) syscall that programs the per-world device
 /// translation domain. No existing structure changed.
-pub const VMM_ABI_VERSION: u32 = 6;
+pub const VMM_ABI_VERSION: u32 = 7;
 
 /// Maximum number of registers exposed by [`VmmRegs`] (general-purpose registers).
 pub const VMM_REG_COUNT: usize = 16;
@@ -194,10 +194,20 @@ pub struct VmmExitEvent {
     pub size: u32,
     pub flags: u32,
     /// Value read or to be written for MMIO/PIO.
+    ///
+    /// For an `OUT` I/O-port exit it is the data the guest wrote (already
+    /// truncated to `size`), so the policy can consume it without reading the
+    /// vCPU registers. For an `IN` exit it is zero and the policy supplies the
+    /// value through `SYS_VMM_EXIT_COMPLETE`.
     pub value: u64,
     /// I/O port for [`exit_kind::IO_PORT`].
     pub port: u32,
-    pub reserved: u32,
+    /// Length in bytes of the faulting instruction.
+    ///
+    /// A policy must advance the guest RIP by this value when completing an
+    /// I/O-port exit (the hardware leaves `GUEST_RIP` at the instruction).
+    /// Zero when not applicable.
+    pub instruction_length: u32,
 }
 
 /// One world entry returned by `SYS_VMM_LIST` (584).

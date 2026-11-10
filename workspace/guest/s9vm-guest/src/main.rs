@@ -47,9 +47,11 @@
 //!
 //! # Debug protocol (port `0xE9`)
 //!
-//! One byte per `out 0xE9, al`. The engine replays those exits in the kernel
-//! (the debug port is part of the fast-path device model), so the policy only
-//! sees the guest `hlt`.
+//! One byte per `out 0xE9, al`. Port `0xE9` is **not** part of the engine's
+//! in-kernel fast path: each write is a policy exit whose
+//! `VmmExitEvent.instruction_length` and `value` fields carry the instruction
+//! length and the byte written (ABI v7), and the policy completes the exit
+//! with the matching RIP advance.
 //!
 //! | Byte | Meaning |
 //! |---|---|
