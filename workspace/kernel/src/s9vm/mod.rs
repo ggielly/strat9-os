@@ -63,6 +63,7 @@ pub mod guest;
 pub mod guestcode;
 pub mod image;
 pub mod ioapic;
+pub mod iommu;
 pub mod launch;
 pub mod machine;
 pub mod memmap;
