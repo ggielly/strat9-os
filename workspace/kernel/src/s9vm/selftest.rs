@@ -78,10 +78,21 @@ const PIC_DATA_PORT: u16 = 0x21;
 const PIC_READBACK: u8 = 0xFF;
 
 // Interrupt-delivery phase.
-/// Guest pages for the interrupt test: the first six, plus the IDT page.
-const IRQ_GUEST_PAGES: u64 = 7;
+/// Guest pages for the interrupt test: the first six, plus IDT and GDT pages.
+const IRQ_GUEST_PAGES: u64 = 8;
 /// Guest-physical address of the IDT page (page 6).
 const GPA_IDT: u64 = 0x6000;
+/// Guest-physical address of the GDT page (page 7).
+const GPA_GDT: u64 = 0x7000;
+
+/// Flat 64-bit code descriptor (selector `0x08`).
+///
+/// Interrupt delivery reloads `CS` from the gate selector, which requires the
+/// code-segment descriptor to exist in the GDT: without a GDT the delivery
+/// raises `#GP`, and with no handler for `#GP` the guest triple-faults.
+const GDT_CODE64: u64 = 0x00AF_9A00_0000_FFFF;
+/// Flat data descriptor (selector `0x10`).
+const GDT_DATA: u64 = 0x00CF_9200_0000_FFFF;
 /// Vector delivered by the kernel.
 const IRQ_VECTOR: u8 = 0x20;
 /// Byte written by the interrupt handler to the debug port.
@@ -456,8 +467,9 @@ pub fn run_interrupt(caps: &HwCaps) -> Result<InterruptReport, SelftestError> {
     let stack = alloc_frame()?;
     let pt = alloc_frame()?;
     let idt = alloc_frame()?;
+    let gdt = alloc_frame()?;
 
-    // Identity guest paging over the seven pages.
+    // Identity guest paging over the eight pages.
     write_u64(&pml4, 0, GPA_PDPT | 0x3);
     write_u64(&pdpt, 0, GPA_PD | 0x3);
     write_u64(&pd, 0, GPA_PT | 0x3);
@@ -479,6 +491,10 @@ pub fn run_interrupt(caps: &HwCaps) -> Result<InterruptReport, SelftestError> {
     write_u64(&idt, entry_offset, low);
     write_u64(&idt, entry_offset + 8, high);
 
+    // Minimal GDT: null, 64-bit code (0x08), flat data (0x10).
+    write_u64(&gdt, 8, GDT_CODE64);
+    write_u64(&gdt, 16, GDT_DATA);
+
     // Second-level translation.
     let mut second_level = SecondLevelMemory::new().map_err(|_| SelftestError::Mmu)?;
     let pages = [
@@ -489,6 +505,7 @@ pub fn run_interrupt(caps: &HwCaps) -> Result<InterruptReport, SelftestError> {
         (GPA_STACK, &stack),
         (GPA_PT, &pt),
         (GPA_IDT, &idt),
+        (GPA_GDT, &gdt),
     ];
     for (gpa, frame) in pages {
         second_level
@@ -506,6 +523,10 @@ pub fn run_interrupt(caps: &HwCaps) -> Result<InterruptReport, SelftestError> {
     let mut guest = GuestState::long_mode_64(ENTRY_POINT, STACK_TOP, GPA_PML4);
     guest.idtr_base = GPA_IDT;
     guest.idtr_limit = u32::from(IRQ_VECTOR) * 16 + 15;
+    // Interrupt delivery reloads CS from the gate selector, which reads the
+    // code-segment descriptor from the GDT.
+    guest.gdtr_base = GPA_GDT;
+    guest.gdtr_limit = 16 + 7;
 
     let mut vcpu = Vcpu::new(caps, pointer)?;
     // SAFETY: VT-x is active on this CPU (checked above), interrupts are
