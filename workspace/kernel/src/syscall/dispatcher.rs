@@ -364,6 +364,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_VMM_EXIT_COMPLETE => vmm::sys_vmm_exit_complete(arg1, arg2, arg3),
         SYS_VMM_CONSOLE_INPUT => vmm::sys_vmm_console_input(arg1, arg2, arg3),
         SYS_VMM_CONSOLE_OUTPUT => vmm::sys_vmm_console_output(arg1, arg2, arg3),
+        SYS_VMM_BOOT_INFO => vmm::sys_vmm_boot_info(arg1, arg2),
 
         // Storage syscalls (600-699) ========================================
         SYS_VOLUME_READ => volume::sys_volume_read(arg1, arg2, arg3, arg4),

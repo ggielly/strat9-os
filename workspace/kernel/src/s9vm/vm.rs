@@ -292,6 +292,11 @@ impl WorldMemory {
         self.second_level.translate(gpa)
     }
 
+    /// Reserved guest-physical ranges, in address order.
+    pub fn regions(&self) -> impl Iterator<Item = &crate::s9vm::memmap::Region> {
+        self.map.regions()
+    }
+
     /// Value of the translation pointer (EPTP) for the control block.
     pub fn second_level_pointer(&self, caps: &HwCaps) -> u64 {
         self.second_level.pointer(caps)
@@ -1097,6 +1102,69 @@ pub fn read_console_output(world_id: u64, out: &mut [u8]) -> Result<usize, ()> {
     out[..count].copy_from_slice(&world.console_output[..count]);
     world.console_output.drain(..count);
     Ok(count)
+}
+
+/// Writes the guest boot-information page of a world at `gpa`.
+///
+/// The page describes the memory ranges reserved for the world and the virtual
+/// devices of its machine (MMIO base, I/O APIC line, device-specific value).
+/// `gpa` must be page aligned and mapped in the world.
+pub fn write_boot_info(world_id: u64, gpa: u64) -> Result<(), VmError> {
+    use crate::s9vm::{bootinfo, emulate};
+    if gpa % PAGE_SIZE != 0 {
+        return Err(VmError::Map(MapError::InvalidRange));
+    }
+    let mut worlds = WORLDS.lock();
+    let world = worlds.get_mut(&world_id).ok_or(VmError::Unknown)?;
+    let memory = world
+        .memory
+        .as_ref()
+        .ok_or(VmError::Map(MapError::NotMapped))?;
+    let mut info = bootinfo::BootInfo::new();
+    for region in memory.regions() {
+        info.add_memory(region.gpa, region.len, bootinfo::memory_kind::RAM);
+    }
+    info.flags = bootinfo::flags::COMPLETE;
+    let devices = world.machine.devices();
+    if info.add_device(
+        bootinfo::device_kind::CONSOLE,
+        emulate::CONSOLE_IRQ_LINE as u32,
+        emulate::CONSOLE_BASE,
+        0,
+    ) {
+        info.flags |= bootinfo::flags::HAS_CONSOLE;
+    }
+    if info.add_device(
+        bootinfo::device_kind::BLOCK,
+        emulate::BLK_IRQ_LINE as u32,
+        emulate::BLK_BASE,
+        devices.blk.sectors(),
+    ) {
+        info.flags |= bootinfo::flags::HAS_BLOCK;
+    }
+    if info.add_device(
+        bootinfo::device_kind::NETWORK,
+        emulate::NET_IRQ_LINE as u32,
+        emulate::NET_BASE,
+        0,
+    ) {
+        info.flags |= bootinfo::flags::HAS_NETWORK;
+    }
+    let mut page = [0u8; bootinfo::SIZE];
+    info.encode(&mut page);
+    let hpa = memory
+        .translate(gpa)
+        .ok_or(VmError::Map(MapError::NotMapped))?;
+    // SAFETY: `hpa` belongs to a frame reserved for this world and is mapped by
+    // the HHDM; `SIZE` bytes stay inside the page.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            page.as_ptr(),
+            crate::memory::phys_to_virt(hpa) as *mut u8,
+            bootinfo::SIZE,
+        );
+    }
+    Ok(())
 }
 
 /// Queues a frame for the network device of a world.

@@ -460,6 +460,16 @@ pub fn sys_vmm_console_output(
     Ok(count as u64)
 }
 
+/// SYS_VMM_BOOT_INFO (583): writes the guest boot-information page.
+pub fn sys_vmm_boot_info(vmm_handle: u64, gpa: u64) -> Result<u64, SyscallError> {
+    let world = vmm_world(vmm_handle, VMM_OWNER)?;
+    vm::write_boot_info(world, gpa).map_err(|error| match error {
+        vm::VmError::Unknown => SyscallError::NotFound,
+        _ => SyscallError::InvalidArgument,
+    })?;
+    Ok(0)
+}
+
 /// SYS_VMM_INFO (569): snapshot of a world, or global summary if `vmm_id = 0`.
 pub fn sys_vmm_info(vmm_handle: u64, out_ptr: u64) -> Result<u64, SyscallError> {
     let mut info = VmmInfo {

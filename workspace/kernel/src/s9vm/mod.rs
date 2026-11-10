@@ -49,6 +49,7 @@
 //! logs `virtualisation inactive`.
 
 pub mod apic;
+pub mod bootinfo;
 pub mod caps;
 pub mod control;
 pub mod decode;

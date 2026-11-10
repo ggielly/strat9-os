@@ -1725,4 +1725,7 @@ pub const SYS_VMM_CONSOLE_INPUT: usize = 581;
 /// Drains console output bytes (`arg1` = world handle, `arg2` = buffer,
 /// `arg3` = capacity). Returns the number of bytes copied.
 pub const SYS_VMM_CONSOLE_OUTPUT: usize = 582;
+/// Writes the guest boot-information page (`arg1` = world handle, `arg2` =
+/// guest-physical page address). Returns 0.
+pub const SYS_VMM_BOOT_INFO: usize = 583;
 
