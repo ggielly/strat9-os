@@ -1088,8 +1088,8 @@ struct GuestRunReport {
     exits: u32,
     /// Last decoded exit kind.
     last_kind: u32,
-    /// Debug bytes seen on port 0xE9 (first 8).
-    seen: [u8; 8],
+    /// Debug bytes seen on port 0xE9 (first 16).
+    seen: [u8; 16],
     /// Number of valid entries in `seen`.
     seen_len: usize,
     /// Number of expected markers matched in order.
@@ -1133,7 +1133,7 @@ fn run_guest_policy_loop(world: u64, vcpu: u64) -> Result<GuestRunReport, Error>
         halt: false,
         exits: 0,
         last_kind: 0,
-        seen: [0u8; 8],
+        seen: [0u8; 16],
         seen_len: 0,
         matched: 0,
     };
@@ -1181,7 +1181,11 @@ fn run_guest_policy_loop(world: u64, vcpu: u64) -> Result<GuestRunReport, Error>
             );
             if event.kind == exit_kind::IO_PORT && event.port == POLICY_PORT {
                 let byte = (event.value & 0xFF) as u8;
-                log!("[s9vm-vmm] guest debug byte 0x{:02x}", byte);
+                log!(
+                    "[s9vm-vmm] guest debug byte 0x{:02x} ({})",
+                    byte,
+                    guest_marker_name(byte)
+                );
                 if report.seen_len < report.seen.len() {
                     report.seen[report.seen_len] = byte;
                     report.seen_len += 1;
@@ -1492,6 +1496,29 @@ fn exit_kind_name(kind: u32) -> &'static str {
         exit_kind::EXCEPTION => "exception",
         exit_kind::PREEMPTION_TIMER => "preemption_timer",
         _ => "other",
+    }
+}
+
+/// Returns the meaning of a guest debug-port byte.
+///
+/// Bytes `G`, `M`, `A` are the mandatory boot markers; the others are the
+/// optional progress markers newer guest kernels emit (private GDT/IDT,
+/// paging, APIC probe, initrd, failure and panic paths). Unknown bytes are
+/// reported as `unknown` so a protocol mismatch is visible in the log.
+fn guest_marker_name(byte: u8) -> &'static str {
+    match byte {
+        b'G' => "boot params magic ok",
+        b'M' => "memory map ok",
+        b'A' => "ACPI RSDP ok",
+        b'K' => "GDT/IDT/paging/cmdline ok",
+        b'R' => "initrd module ok",
+        b'r' => "initrd not present",
+        b'T' => "APIC timer ok",
+        b't' => "APIC timer unavailable",
+        b'F' => "failure (next byte is the code)",
+        b'E' => "exception (next byte is the vector)",
+        b'P' => "panic",
+        _ => "unknown",
     }
 }
 
