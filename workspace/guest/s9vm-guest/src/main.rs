@@ -173,6 +173,26 @@ const GDT_CODE_SELECTOR: u16 = 0x08;
 const GDT_DATA_SELECTOR: u16 = 0x10;
 /// Number of entries of the private GDT.
 const GDT_ENTRIES: usize = 3;
+/// Null descriptor (entry 0).
+const GDT_NULL: u64 = 0;
+/// Flat 64-bit code descriptor (entry 1, selector `0x08`): present, DPL 0,
+/// type `0xA`, `L = 1`, `D = 0`, `G = 1`.
+const GDT_CODE: u64 = 0x00AF_9A00_0000_FFFF;
+/// Flat data descriptor (entry 2, selector `0x10`): present, DPL 0, type `0x2`,
+/// `D/B = 1` (ignored in 64-bit mode), `G = 1`.
+const GDT_DATA: u64 = 0x00CF_9200_0000_FFFF;
+
+/// Private GDT storage.
+///
+/// It **must be writable**: loading a segment descriptor makes the processor
+/// set that descriptor's *accessed* bit, which is a memory write. A GDT placed
+/// in a read-only segment makes `lretq`/`mov ss` fault on the descriptor
+/// address (observed as an EPT violation on write, not a guest page fault).
+/// The table therefore lives in `.bss` and is filled at boot.
+#[repr(C, align(16))]
+struct Gdt([u64; GDT_ENTRIES]);
+/// The private GDT itself.
+static mut GDT: Gdt = Gdt([GDT_NULL; GDT_ENTRIES]);
 
 // Interrupt descriptor table.
 /// Number of gates of the private IDT (exceptions plus the legacy IRQ range).
@@ -267,8 +287,6 @@ struct DescriptorTablePointer {
 }
 
 extern "C" {
-    /// Private GDT built by `global_asm!` (flat code/data descriptors).
-    static s9vm_guest_gdt: [u64; GDT_ENTRIES];
     /// Addresses of the exception stubs, indexed by vector.
     static s9vm_guest_exception_table: [u64; EXCEPTION_VECTORS];
     /// Common stub used for vectors without a dedicated handler.
@@ -392,13 +410,6 @@ s9vm_exception_spurious:
 
     .section .rodata, "a"
     .balign 16
-    .globl s9vm_guest_gdt
-s9vm_guest_gdt:
-    .quad 0x0000000000000000          /* null descriptor */
-    .quad 0x00AF9A000000FFFF          /* flat 64-bit code, selector 0x08 */
-    .quad 0x00CF92000000FFFF          /* flat data, selector 0x10 */
-
-    .balign 8
     .globl s9vm_guest_exception_table
 s9vm_guest_exception_table:
     .quad s9vm_exception_0
@@ -878,17 +889,29 @@ const fn align4(value: u64) -> u64 {
 
 /// Installs the private GDT and reloads every segment register.
 ///
+/// The table is filled here (it lives in `.bss`, not in `.rodata`, because a
+/// descriptor load writes the accessed bit into the entry), then loaded with
+/// `lgdt` and a far return that reloads `CS`.
+///
 /// # Safety
 ///
-/// Called once, after the GDT image has been linked; the selectors `0x08` and
-/// `0x10` must be the code and data descriptors defined by the image.
+/// Called once, before any segment is loaded from the private GDT; the
+/// selectors `0x08` and `0x10` must be the code and data descriptors written
+/// below.
 unsafe fn install_gdt() {
+    let gdt = addr_of_mut!(GDT).cast::<u64>();
+    // SAFETY: the `.bss` GDT has GDT_ENTRIES slots and the descriptors are the
+    // canonical flat 64-bit code/data pair named by the selectors.
+    unsafe {
+        write_volatile(gdt.add(1), GDT_CODE);
+        write_volatile(gdt.add(2), GDT_DATA);
+    }
     let pointer = DescriptorTablePointer {
         limit: (GDT_ENTRIES * 8 - 1) as u16,
-        base: addr_of!(s9vm_guest_gdt) as u64,
+        base: gdt as u64,
     };
-    // SAFETY: `pointer` describes the linked GDT; the far return lands on the
-    // next instruction with CS/SS/DS/ES/FS/GS reloaded from it.
+    // SAFETY: `pointer` describes the GDT just filled; the far return lands on
+    // the next instruction with CS/SS/DS/ES/FS/GS reloaded from it.
     unsafe {
         s9vm_load_gdt(&pointer);
     }

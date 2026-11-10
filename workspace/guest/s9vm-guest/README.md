@@ -125,8 +125,12 @@ Failure codes published after `F`:
 4. **command line**: bounded by `cmdline_len` and validated as printable ASCII
    separated by spaces; the argument count is computed;
 5. **private GDT**: three descriptors (null, flat 64-bit code `0x08`, flat data
-   `0x10`), loaded with `lgdt` and a far return that reloads `CS`; `SS`, `DS`,
-   `ES`, `FS` and `GS` are reloaded from the data selector;
+   `0x10`), filled at boot in **`.bss`**, loaded with `lgdt` and a far return
+   that reloads `CS`; `SS`, `DS`, `ES`, `FS` and `GS` are reloaded from the
+   data selector. The GDT **must be writable**: loading a descriptor sets its
+   *accessed* bit, which is a write to the descriptor entry — a read-only GDT
+   makes `lretq`/`mov ss` fault (observed as an EPT violation on the
+   descriptor address);
 6. **private IDT**: 128 gates; vectors 0..31 have dedicated exception stubs,
    the rest share a spurious stub. Each stub pushes its vector and calls the
    common Rust handler, which publishes `E` + vector and halts. Interrupts stay
@@ -191,21 +195,22 @@ $ readelf -h target/x86_64-unknown-none/release/s9vm-guest
 
 $ readelf -l target/x86_64-unknown-none/release/s9vm-guest
   LOAD  0x0000000000001000 0x0000000000100000 0x0000000000100000
-        0x00000000000007b3 0x00000000000007b3  R E   0x1000
+        0x0000000000000b53 0x0000000000000b53  R E   0x1000
   LOAD  0x0000000000002000 0x0000000000101000 0x0000000000101000
-        0x0000000000000118 0x0000000000000118  R     0x1000
+        0x0000000000000100 0x0000000000000100  R     0x1000
   LOAD  0x0000000000003000 0x0000000000102000 0x0000000000102000
-        0x0000000000000000 0x0000000000008800  RW    0x1000
+        0x0000000000000000 0x0000000000008820  RW    0x1000
 ```
 
 Expectations:
 
 - `e_type == ET_EXEC` (2), `e_machine == EM_X86_64`;
 - `e_entry` inside `0x0010_0000..0x0011_0000` (currently exactly `0x100000`);
-- three `PT_LOAD` segments: `.text` `R E` at `0x100000`, `.rodata` `R` (GDT and
-  exception stub table) at `0x101000`, `.bss` `RW` at `0x102000`. `.bss` is
-  34 KiB: 16 KiB stack, four 4 KiB page tables and the 2 KiB IDT; the whole
-  loaded footprint is 11 pages (`0x100000..0x10B000`);
+- three `PT_LOAD` segments: `.text` `R E` at `0x100000`, `.rodata` `R`
+  (exception stub table only) at `0x101000`, `.bss` `RW` at `0x102000`.
+  `.bss` is 34 KiB: 16 KiB stack, four 4 KiB page tables, the 2 KiB IDT and the
+  32-byte GDT; the whole loaded footprint is 11 pages
+  (`0x100000..0x10B000`);
 - **no page overlap between segments** and `p_vaddr % 4096 == p_offset % 4096`
   for every `PT_LOAD`: the kernel guest loader rejects both violations;
 - no `DYNAMIC`/`INTERP` entry (fully self-contained image);
@@ -234,3 +239,5 @@ policy is expected to report `G`, `M`, `A`, `R`/`r`, `K`, `T`/`t` and the
   other access faults into the `E` handler;
 - no return path: `guest_main` ends in a `hlt` loop (the panic handler publishes
   `P` before halting).
+
+
