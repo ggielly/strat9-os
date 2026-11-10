@@ -2252,22 +2252,6 @@ pub fn vcpu_count(world_id: u64) -> Option<u32> {
         .map(|world| world.vcpus.len() as u32)
 }
 
-/// Second-level translation pointer (EPTP) of a world.
-///
-/// This is the value the control block uses as its second-level pointer. It is
-/// only valid while the world lives (the tables are freed by `destroy`); the
-/// caller must not cache it beyond the world's lifetime. The registry lock is
-/// taken briefly and never across guest execution.
-pub fn second_level_pointer(world_id: u64, caps: &HwCaps) -> Result<u64, VmError> {
-    let worlds = WORLDS.lock();
-    let world = worlds.get(&world_id).ok_or(VmError::Unknown)?;
-    let memory = world
-        .memory
-        .as_ref()
-        .ok_or(VmError::Map(MapError::NotMapped))?;
-    Ok(memory.second_level_pointer(caps))
-}
-
 /// Diagnostic detail for a world: mapped pages and translation of a GPA.
 pub fn debug_translate(id: u64, gpa: u64) -> Option<u64> {
     let memory_ref = {
