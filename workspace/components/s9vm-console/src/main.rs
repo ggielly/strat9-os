@@ -22,23 +22,54 @@
 
 //! s9vm-console: userspace front-end of the s9vm virtualization subsystem.
 //!
-//! The component is a pure reader of the `/dev/vmm` diagnostic scheme and a
-//! relay for the guest console:
+//! The component reads the `/dev/vmm` diagnostic scheme, mirrors the guest
+//! console and exposes one management action:
 //!
 //! 1. read `/dev/vmm/info` and `/dev/vmm/worlds` (engine summary and world
 //!    list);
 //! 2. print the snapshot of the first world found: `/dev/vmm/<id>/info`,
-//!    `/dev/vmm/<id>/stats` and `/dev/vmm/<id>/exits`; a missing snapshot file
-//!    is reported as `not available` instead of being fatal, because those
-//!    files are produced by the kernel side and may lag behind this component;
+//!    `/dev/vmm/<id>/stats`, `/dev/vmm/<id>/timing` (exit counters and
+//!    latencies in TSC cycles), `/dev/vmm/<id>/vcpus` (per-vCPU state) and
+//!    `/dev/vmm/<id>/exits`; `/dev/vmm-net/<id>/info` (device, MAC, link
+//!    status) is shown when the network mirror exposes that world. A missing
+//!    snapshot file is reported as `not available` instead of being fatal,
+//!    because those files are produced by the kernel side and may lag behind
+//!    this component;
 //! 3. attach to `/dev/vmm/<id>/console` and relay bytes in both directions:
 //!    guest output to stdout (file descriptor 1, backed by `/dev/console`),
 //!    keyboard input to the console file. The console descriptor is opened
 //!    with `O_NONBLOCK`: `EAGAIN` means "nothing to do right now", so the loop
-//!    yields and retries instead of blocking.
+//!    yields and retries instead of blocking;
+//! 4. on demand, send a `pause` then `resume` command to
+//!    `/dev/vmm/<id>/control` (see "Key bindings" below).
+//!
+//! # Key bindings
+//!
+//! While the console is attached, the keyboard byte `p` (0x70) or Ctrl-P
+//! (0x10) is **not** forwarded to the guest: it writes `pause` immediately
+//! followed by `resume` to `<id>/control`. This short management pulse lets an
+//! operator observe the world suspended and running again without stopping the
+//! relay. The mapping is deliberately a single byte so it works on the raw
+//! `/dev/input/kbd` stream. If the control file is missing (older kernel) or
+//! the engine refuses the command, the failure is reported on stdout and the
+//! relay continues: it is never fatal and never changes the exit code.
+//!
+//! Every other byte is forwarded unchanged to the guest console. Ctrl-D on
+//! stdin (when stdin is the input source) detaches and exits with code 0.
+//!
+//! # Control protocol
+//!
+//! `<id>/control` is write-only and accepts the exact text commands `pause`
+//! and `resume`, trailing whitespace ignored; the kernel returns the number of
+//! bytes consumed, `InvalidArgument` for any other text and `NotFound` once
+//! the world is gone. This component only uses that file for the pulse above;
+//! lifecycle operations stay with the `SYS_VMM_*` syscalls.
+//!
+//! # Input
 //!
 //! Input comes from `/dev/input/kbd` when available (the kernel console is
-//! write-only) and falls back to stdin otherwise.
+//! write-only) and falls back to stdin otherwise; both are read non-blocking
+//! with the same `EAGAIN`-tolerant helper. No extra syscall is added.
 //!
 //! # Exit codes
 //!
@@ -49,6 +80,9 @@
 //! | 2    | no world listed by `/dev/vmm/worlds`                          |
 //! | 3    | console attachment failed, or the world disappeared           |
 //! | 4    | fatal console I/O error                                       |
+//!
+//! Control-pulse failures are reported on stdout only; they do not change the
+//! exit code of an otherwise healthy relay.
 
 #![no_std]
 #![no_main]
@@ -57,12 +91,7 @@ use core::{
     fmt::{self, Write as _},
     panic::PanicInfo,
 };
-use strat9_syscall::{
-    call,
-    data::TimeSpec,
-    error::Error,
-    flag,
-};
+use strat9_syscall::{call, data::TimeSpec, error::Error, flag};
 
 /// Snapshot of the engine state (kernel-generated text).
 const PATH_INFO: &str = "/dev/vmm/info";
@@ -70,6 +99,15 @@ const PATH_INFO: &str = "/dev/vmm/info";
 const PATH_WORLDS: &str = "/dev/vmm/worlds";
 /// Keyboard input scheme; the kernel console itself is write-only.
 const PATH_INPUT: &str = "/dev/input/kbd";
+
+/// Command sent to `<id>/control` to suspend the world.
+const CONTROL_PAUSE: &[u8] = b"pause";
+/// Command sent to `<id>/control` to resume the world.
+const CONTROL_RESUME: &[u8] = b"resume";
+/// Keyboard byte that triggers the pause/resume management pulse.
+const KEY_CONTROL_PULSE: u8 = b'p';
+/// Ctrl-P alternative for the management pulse.
+const KEY_CONTROL_PULSE_CTRL: u8 = 0x10;
 
 /// File descriptor of the component stdout (bound to `/dev/console`).
 const STDOUT_FD: usize = 1;
@@ -291,6 +329,72 @@ fn console_path(id: u64, buffer: &mut TextBuf) -> bool {
     write!(buffer, "/dev/vmm/{id}/console").is_ok()
 }
 
+/// Prints one `/dev/vmm/<id>/<leaf>` snapshot.
+///
+/// Building the path cannot realistically fail (the buffer is larger than any
+/// `<id>`); a failure is silently ignored as "nothing to display".
+fn dump_world_file(world_id: u64, leaf: &str, title: &str) {
+    let mut path = TextBuf::new();
+    if write!(&mut path, "/dev/vmm/{world_id}/{leaf}").is_ok() {
+        dump_snapshot(title, path.as_str());
+    }
+}
+
+/// Sends one `pause` + `resume` pulse to `/dev/vmm/<id>/control`.
+///
+/// The action is best-effort: a missing control file (older kernel) or an
+/// engine refusal is reported on stdout and never aborts the console relay.
+fn control_pulse(world_id: u64) {
+    let mut output = out();
+    let mut path = TextBuf::new();
+    if write!(&mut path, "/dev/vmm/{world_id}/control").is_err() {
+        let _ = writeln!(output, "[s9vm-console] control: path too long");
+        return;
+    }
+    let control_path = path.as_str();
+    let fd = match call::open(control_path, flag::O_WRONLY) {
+        Ok(fd) => fd,
+        Err(Error::NotFound) => {
+            let _ = writeln!(
+                output,
+                "[s9vm-console] control: {control_path} not available"
+            );
+            return;
+        }
+        Err(error) => {
+            let _ = writeln!(
+                output,
+                "[s9vm-console] control: cannot open {control_path} ({})",
+                error.name()
+            );
+            return;
+        }
+    };
+    // Two separate writes: the kernel consumes one command per write.
+    let paused = write_all(fd, CONTROL_PAUSE);
+    let resumed = write_all(fd, CONTROL_RESUME);
+    let _ = call::close(fd);
+    match (paused, resumed) {
+        (Ok(()), Ok(())) => {
+            let _ = writeln!(output, "[s9vm-console] control: pause/resume pulse sent");
+        }
+        (Err(error), _) => {
+            let _ = writeln!(
+                output,
+                "[s9vm-console] control: pause failed ({})",
+                error.name()
+            );
+        }
+        (_, Err(error)) => {
+            let _ = writeln!(
+                output,
+                "[s9vm-console] control: resume failed ({})",
+                error.name()
+            );
+        }
+    }
+}
+
 /// Opens the keyboard input scheme, or stdin when it is unavailable.
 fn open_input() -> usize {
     match call::open(PATH_INPUT, flag::O_RDONLY | flag::O_NONBLOCK) {
@@ -311,6 +415,15 @@ fn print_banner() {
         "============================================================"
     );
     let _ = writeln!(output, "[s9vm-console] strat9-os: s9vm world console");
+    let _ = writeln!(
+        output,
+        "[s9vm-console] keys: 'p' or Ctrl-P = pause/resume pulse (<id>/control); \
+         Ctrl-D = detach"
+    );
+    let _ = writeln!(
+        output,
+        "[s9vm-console] snapshots: info, stats, timing, vcpus, exits, vmm-net info"
+    );
     let _ = writeln!(
         output,
         "[s9vm-console] exit codes: 0=stdin EOF, 1=/dev/vmm unavailable, \
@@ -392,27 +505,18 @@ fn run() -> usize {
     };
     let _ = writeln!(output, "[s9vm-console] selected world {world_id}");
 
-    // 3. Diagnostic snapshots. Files may not exist yet: keep going.
-    let mut path = TextBuf::new();
-    if write!(&mut path, "/dev/vmm/{world_id}/info").is_err() {
-        return EXIT_VMM_UNAVAILABLE;
+    // 3. Diagnostic snapshots. Files may not exist yet: keep going. Order is
+    //    stable for humans: identity, counters, timing, vCPUs, exit queue and
+    //    finally the guest network identity when the network mirror is mounted.
+    dump_world_file(world_id, "info", "world");
+    dump_world_file(world_id, "stats", "stats");
+    dump_world_file(world_id, "timing", "timing");
+    dump_world_file(world_id, "vcpus", "vcpus");
+    dump_world_file(world_id, "exits", "exits");
+    let mut net_path = TextBuf::new();
+    if write!(&mut net_path, "/dev/vmm-net/{world_id}/info").is_ok() {
+        dump_snapshot("net", net_path.as_str());
     }
-    let info_path = path.as_str();
-    dump_snapshot("world", info_path);
-
-    let mut path = TextBuf::new();
-    if write!(&mut path, "/dev/vmm/{world_id}/stats").is_err() {
-        return EXIT_VMM_UNAVAILABLE;
-    }
-    let stats_path = path.as_str();
-    dump_snapshot("stats", stats_path);
-
-    let mut path = TextBuf::new();
-    if write!(&mut path, "/dev/vmm/{world_id}/exits").is_err() {
-        return EXIT_VMM_UNAVAILABLE;
-    }
-    let exits_path = path.as_str();
-    dump_snapshot("exits", exits_path);
 
     // 4. Console relay.
     let mut console = TextBuf::new();
@@ -444,7 +548,10 @@ fn run() -> usize {
         output,
         "[s9vm-console] attached to world {world_id} ({console_path}); input fd {input_fd}"
     );
-    let _ = writeln!(output, "[s9vm-console] press Ctrl-D on stdin to detach");
+    let _ = writeln!(
+        output,
+        "[s9vm-console] press 'p' or Ctrl-P for a pause/resume pulse, Ctrl-D to detach"
+    );
 
     let mut console_buf = [0u8; IO_CHUNK];
     let mut input_buf = [0u8; INPUT_CHUNK];
@@ -490,7 +597,23 @@ fn run() -> usize {
             }
             Ok(count) => {
                 activity = true;
-                if let Err(error) = write_all(console_fd, &input_buf[..count]) {
+                // Management bytes are consumed locally; every other byte is
+                // forwarded to the guest in a single write.
+                let mut forwarded = [0u8; INPUT_CHUNK];
+                let mut forwarded_len = 0usize;
+                for &byte in &input_buf[..count] {
+                    if byte == KEY_CONTROL_PULSE || byte == KEY_CONTROL_PULSE_CTRL {
+                        control_pulse(world_id);
+                    } else if forwarded_len < INPUT_CHUNK {
+                        forwarded[forwarded_len] = byte;
+                        forwarded_len += 1;
+                    }
+                }
+                if forwarded_len == 0 {
+                    let _ = call::sched_yield();
+                    continue;
+                }
+                if let Err(error) = write_all(console_fd, &forwarded[..forwarded_len]) {
                     if error == Error::Again {
                         // Guest input queue is full: drop this chunk, keep the
                         // console attached.

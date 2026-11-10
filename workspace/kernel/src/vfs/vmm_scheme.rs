@@ -20,12 +20,14 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! `/dev/vmm`: read-mostly user view of the s9vm engine.
+//! `/dev/vmm`: read-mostly user view of the s9vm engine, plus one minimal
+//! control file.
 //!
 //! This scheme is the diagnostic mirror of the virtualization engine's
-//! internal state. It exposes **no control operation**: the creation,
-//! configuration and execution of worlds go exclusively through the
-//! `SYS_VMM_*` syscalls and their capabilities.
+//! internal state. Lifecycle operations (create, configure, run, destroy)
+//! remain exclusive to the `SYS_VMM_*` syscalls and their capabilities; the
+//! single write path below only reproduces the pause/resume transitions the
+//! engine already exposes to a privileged mirror reader.
 //!
 //! # Contents
 //!
@@ -33,7 +35,7 @@
 //! /dev/vmm/
 //!   info               engine summary (snapshot taken at open)
 //!   worlds             list of worlds, one line per world
-//!   <id>/              directory: info, stats, timing, exits, vcpus, console, disk
+//!   <id>/              directory: info, stats, timing, exits, vcpus, console, disk, control
 //!   <id>/info          snapshot of a world
 //!   <id>/stats         snapshot of every world counter (pause, vCPUs, queue)
 //!   <id>/timing        exit-latency and exit-rate aggregates (TSC cycles)
@@ -41,14 +43,37 @@
 //!   <id>/vcpus         per-vCPU diagnostic snapshot
 //!   <id>/console       console stream (read drains output, write queues input)
 //!   <id>/disk          raw block-device view (byte-addressed, read/write)
+//!   <id>/control       write-only text command file (`pause`, `resume`)
 //! ```
+//!
+//! # Control semantics (capability-free by design)
+//!
+//! `<id>/control` is a **write-only** device file that accepts exactly two
+//! text commands, with trailing ASCII whitespace ignored:
+//!
+//! * `pause`  — sets the world's paused flag (`vm::pause`);
+//! * `resume` — clears it (`vm::resume`).
+//!
+//! Each successful `write` returns the number of bytes consumed (the full
+//! command buffer, whitespace included). An unknown command is rejected with
+//! [`SyscallError::InvalidArgument`]; a world destroyed after the file was
+//! opened yields [`SyscallError::NotFound`]; `read` is refused with
+//! [`SyscallError::PermissionDenied`].
+//!
+//! This file is deliberately **capability-free**: it is only reachable through
+//! the kernel-provided `/dev/vmm` mirror, and it can neither create, start,
+//! configure nor destroy a world. The `SYS_VMM_*` syscalls remain authoritative
+//! for lifecycle operations, so a future command added here must similarly
+//! stay within a diagnostic/pause-resume scope and must never bypass the
+//! syscall capability checks.
 //!
 //! # Read semantics
 //!
-//! Every file except `<id>/console` and `<id>/disk` is a **snapshot** taken at
-//! open: reading is finite (EOF at the end) and never blocks. Opening the file
-//! again produces a new snapshot, which is also true for `<id>/stats`,
-//! `<id>/exits` and `<id>/vcpus`: they report the state observed at open time.
+//! Every file except `<id>/console`, `<id>/disk` and the write-only
+//! `<id>/control` is a **snapshot** taken at open: reading is finite (EOF at
+//! the end) and never blocks. Opening the file again produces a new snapshot,
+//! which is also true for `<id>/stats`, `<id>/exits` and `<id>/vcpus`: they
+//! report the state observed at open time.
 //!
 //! `<id>/console` is a **stream**, not a snapshot. Each `read` drains the
 //! output the guest has produced since the previous read; a read that finds
@@ -106,8 +131,8 @@ const DEV_VMM: u64 = 13;
 /// Allocates open file identifiers.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Content of an open file: root, world directory, text snapshot, stream or
-/// raw block device.
+/// Content of an open file: root, world directory, text snapshot, stream,
+/// raw block device or write-only control file.
 enum Kind {
     /// Scheme root directory.
     Root,
@@ -119,6 +144,8 @@ enum Kind {
     Console { world_id: u64 },
     /// Raw block device of one world, addressed by byte offset in `cursor`.
     Disk { world_id: u64 },
+    /// Write-only text command file of one world (`pause` / `resume`).
+    Control { world_id: u64 },
 }
 
 struct VmmFile {
@@ -423,6 +450,20 @@ impl VmmScheme {
         Ok(done)
     }
 
+    /// Parses one `<id>/control` command buffer.
+    ///
+    /// Trailing ASCII whitespace is ignored, so `"pause\n"` sent by a console
+    /// front-end is accepted. The command vocabulary is ASCII and closed:
+    /// invalid UTF-8 and any other text are [`SyscallError::InvalidArgument`].
+    fn control_command(buf: &[u8]) -> Result<&'static str, SyscallError> {
+        let text = core::str::from_utf8(buf).map_err(|_| SyscallError::InvalidArgument)?;
+        match text.trim_end_matches(|c: char| c.is_ascii_whitespace()) {
+            "pause" => Ok("pause"),
+            "resume" => Ok("resume"),
+            _ => Err(SyscallError::InvalidArgument),
+        }
+    }
+
     /// Resolves a non-directory path to the content of an open file.
     fn text_for_path(path: &str) -> Result<String, SyscallError> {
         match path {
@@ -463,6 +504,14 @@ impl VmmScheme {
                     return Err(SyscallError::NotFound);
                 }
                 return Ok((Kind::Console { world_id: id }, FileFlags::DEVICE));
+            }
+        }
+        if let Some(id_text) = path.strip_suffix("/control") {
+            if let Ok(id) = id_text.parse::<u64>() {
+                if vm::get(id).is_none() {
+                    return Err(SyscallError::NotFound);
+                }
+                return Ok((Kind::Control { world_id: id }, FileFlags::DEVICE));
             }
         }
         if let Some(id_text) = path.strip_suffix("/disk") {
@@ -509,6 +558,11 @@ impl VmmScheme {
                     DirEntry {
                         ino: 0,
                         file_type: DT_REG,
+                        name: String::from("control"),
+                    },
+                    DirEntry {
+                        ino: 0,
+                        file_type: DT_REG,
                         name: String::from("disk"),
                     },
                     DirEntry {
@@ -538,7 +592,7 @@ impl VmmScheme {
                     },
                 ]
             }
-            Kind::Text(_) | Kind::Console { .. } | Kind::Disk { .. } => {
+            Kind::Text(_) | Kind::Console { .. } | Kind::Disk { .. } | Kind::Control { .. } => {
                 return Err(SyscallError::NotADirectory)
             }
         };
@@ -615,6 +669,8 @@ impl Scheme for VmmScheme {
                 entry.cursor += n as u64;
                 Ok(n)
             }
+            // `<id>/control` is write-only: no read path exists.
+            Kind::Control { .. } => Err(SyscallError::PermissionDenied),
         }
     }
 
@@ -643,6 +699,31 @@ impl Scheme for VmmScheme {
                 let n = Self::disk_write_at(world_id, entry.cursor, buf)?;
                 entry.cursor += n as u64;
                 Ok(n)
+            }
+            Kind::Control { world_id } => {
+                let world_id = *world_id;
+                // A zero-length write carries no command: accept it as a
+                // conventional no-op instead of rejecting it as unknown text.
+                if buf.is_empty() {
+                    return Ok(0);
+                }
+                // Check existence first so a destroyed world reports NotFound
+                // even when the command text is also invalid.
+                if vm::get(world_id).is_none() {
+                    return Err(SyscallError::NotFound);
+                }
+                let command = Self::control_command(buf)?;
+                let outcome = match command {
+                    "pause" => vm::pause(world_id),
+                    _ => vm::resume(world_id),
+                };
+                // The engine reports `VmError::Unknown` for a world that
+                // vanished or is closing; both map to NotFound here.
+                outcome.map_err(|_| SyscallError::NotFound)?;
+                log::info!("[vmm] world {} control: {}", world_id, command);
+                // Report the whole command buffer as consumed, including the
+                // trailing whitespace that was ignored.
+                Ok(buf.len())
             }
             // Every other file is a read-only diagnostic snapshot.
             Kind::Root | Kind::WorldDir(_) | Kind::Text(_) => Err(SyscallError::PermissionDenied),
@@ -689,6 +770,16 @@ impl Scheme for VmmScheme {
                 st_blocks: 0,
                 ..FileStat::zeroed()
             },
+            // Write-only device: no read permission for the owner either.
+            Kind::Control { .. } => FileStat {
+                st_ino: file_id,
+                st_mode: 0o020200,
+                st_nlink: 1,
+                st_size: 0,
+                st_blksize: 1,
+                st_blocks: 0,
+                ..FileStat::zeroed()
+            },
             Kind::Text(_) => FileStat {
                 st_ino: file_id,
                 st_mode: 0o020444,
@@ -724,7 +815,7 @@ pub fn init_vmm_scheme() -> Result<(), SyscallError> {
         Ok(()) => {
             log::info!(
                 "[vmm] Scheme at /dev/vmm/ \
-                 (info, worlds, <id>/{{info,stats,exits,vcpus,console,disk}})"
+                 (info, worlds, <id>/{{info,stats,timing,exits,vcpus,console,disk,control}})"
             );
             Ok(())
         }
