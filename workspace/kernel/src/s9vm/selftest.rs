@@ -770,7 +770,7 @@ pub fn run_console(caps: &HwCaps) -> Result<ConsoleReport, SelftestError> {
     // transport emulation relies on, and with no IDT that is a triple fault.
     write_u64(&pml4, 0, CONSOLE_GPA_PDPT | 0x3);
     write_u64(&pdpt, 0, CONSOLE_GPA_PD | 0x3);
-    write_u64(&pdpt, 3, CONSOLE_GPA_PD_HIGH | 0x3);
+    write_u64(&pdpt, 3 * 8, CONSOLE_GPA_PD_HIGH | 0x3);
     write_u64(&pd, 0, CONSOLE_GPA_PT | 0x3);
     write_u64(
         &pd_high,
