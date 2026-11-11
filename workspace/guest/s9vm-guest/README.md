@@ -89,6 +89,8 @@ policy completes it with the reported instruction length.
 | `K` (`0x4B`) | command line parsed, private GDT, IDT and page tables active |
 | `T` (`0x54`) | local APIC timer probe observed a count tick |
 | `t` (`0x74`) | no coherent local APIC timer — non-fatal |
+| `C` (`0x43`) | virtio-console accepted and consumed the greeting |
+| `c` (`0x63`) | no console, or it did not acknowledge — non-fatal |
 | `E` (`0x45`) + vector | CPU exception caught by the private IDT; then halt |
 | `F` (`0x46`) + code | failure; the code is the failing step (see below) |
 | `P` (`0x50`) | Rust panic; the guest halts afterwards (no code) |
@@ -136,9 +138,10 @@ Failure codes published after `F`:
    common Rust handler, which publishes `E` + vector and halts. Interrupts stay
    disabled (`IF = 0`, no `sti`);
 7. **private page tables**: 4-level tables in `.bss` (page-aligned), `PML4[0]`
-   → `PDPT`, two 2 MiB identity leaves covering `0..4 MiB`, plus one 2 MiB
-   leaf for the local APIC window at `0xFEE0_0000`; `CR3` is switched to them.
-   The policy-provided tables are only used for the switch itself;
+   → `PDPT`, two 2 MiB identity leaves covering `0..4 MiB`, plus 2 MiB leaves
+   for the device windows (`0xFEA0_0000` virtio-mmio, `0xFEC0_0000` I/O APIC,
+   `0xFEE0_0000` local APIC); `CR3` is switched to them. The policy-provided
+   tables are only used for the switch itself;
 8. **initrd**: module entry #1 is dereferenced only inside the mapped identity
    window; a cpio `newc` archive walks cleanly (`070701` headers, NUL-terminated
    names, aligned data ranges, at least one entry and the `TRAILER!!!` record)
@@ -147,14 +150,20 @@ Failure codes published after `F`:
    register is coherent, software-enables the APIC, programs a masked one-shot
    count (divide by 1, initial count `2_000`) and polls the read-only
    current count until it moves; a tick reports `T`, an incoherent window
-   reports `t`. No interrupt is enabled and no ISR is needed.
+   reports `t`. No interrupt is enabled and no ISR is needed;
+10. **virtio-console**: completes the modern virtio-mmio handshake (magic,
+    version 2, device id 3, `VIRTIO_F_VERSION_1`, status machine), programs the
+    transmit split queue in `.bss`, publishes the greeting through one
+    device-readable descriptor, notifies the queue and polls the used ring
+    (no interrupt requested). Success reports `C`, any absent/uncooperative
+    device reports the non-fatal `c`.
 
-The engine models the local APIC page as a device page: the second-level
-translation intentionally leaves it unmapped, so an access raises a violation
-that the kernel device model replays. The guest therefore probes the window
-through its own page tables; if the window is not coherently modeled (for
-example, backed by plain RAM by a different policy) it takes the non-fatal `t`
-path without faulting.
+The engine models the local APIC and virtio device pages as device pages: the
+second-level translation intentionally leaves them unmapped, so an access
+raises a violation that the kernel device model replays. The guest therefore
+maps those windows in its own page tables and drives them through normal MMIO;
+if a window is not coherently modeled (for example, backed by plain RAM by a
+different policy) it takes the non-fatal `t`/`c` path without faulting.
 
 ## Build
 
@@ -195,11 +204,11 @@ $ readelf -h target/x86_64-unknown-none/release/s9vm-guest
 
 $ readelf -l target/x86_64-unknown-none/release/s9vm-guest
   LOAD  0x0000000000001000 0x0000000000100000 0x0000000000100000
-        0x0000000000000b53 0x0000000000000b53  R E   0x1000
+        0x0000000000000e93 0x0000000000000e93  R E   0x1000
   LOAD  0x0000000000002000 0x0000000000101000 0x0000000000101000
         0x0000000000000100 0x0000000000000100  R     0x1000
   LOAD  0x0000000000003000 0x0000000000102000 0x0000000000102000
-        0x0000000000000000 0x0000000000008820  RW    0x1000
+        0x0000000000000000 0x0000000000008950  RW    0x1000
 ```
 
 Expectations:
@@ -208,9 +217,9 @@ Expectations:
 - `e_entry` inside `0x0010_0000..0x0011_0000` (currently exactly `0x100000`);
 - three `PT_LOAD` segments: `.text` `R E` at `0x100000`, `.rodata` `R`
   (exception stub table only) at `0x101000`, `.bss` `RW` at `0x102000`.
-  `.bss` is 34 KiB: 16 KiB stack, four 4 KiB page tables, the 2 KiB IDT and the
-  32-byte GDT; the whole loaded footprint is 11 pages
-  (`0x100000..0x10B000`);
+  `.bss` is 34 KiB: 16 KiB stack, four 4 KiB page tables, the 2 KiB IDT, the
+  32-byte GDT and the virtio-console queue buffers; the whole loaded footprint
+  is 11 pages (`0x100000..0x10B000`);
 - **no page overlap between segments** and `p_vaddr % 4096 == p_offset % 4096`
   for every `PT_LOAD`: the kernel guest loader rejects both violations;
 - no `DYNAMIC`/`INTERP` entry (fully self-contained image);
@@ -239,5 +248,7 @@ policy is expected to report `G`, `M`, `A`, `R`/`r`, `K`, `T`/`t` and the
   other access faults into the `E` handler;
 - no return path: `guest_main` ends in a `hlt` loop (the panic handler publishes
   `P` before halting).
+
+
 
 

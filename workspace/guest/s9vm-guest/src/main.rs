@@ -75,14 +75,16 @@
 //! | `b'K'` | command line parsed, private GDT/IDT and page tables active |
 //! | `b'T'` | local APIC timer probe observed a count tick |
 //! | `b't'` | no coherent local APIC timer (non-fatal) |
+//! | `b'C'` | virtio-console accepted and consumed the greeting message |
+//! | `b'c'` | no console device, or it did not acknowledge (non-fatal) |
 //! | `b'E'` + vector | CPU exception caught by the private IDT; then halt |
 //! | `b'F'` + code | failure; the next byte is a [`failure`] code |
 //! | `b'P'` | Rust panic (the next byte is not emitted; the guest halts) |
 //!
-//! Success sequence: `G`, `M`, `A`, then `R`/`r` (initrd), `K` (kernel tables
-//! up) and `T`/`t` (timer probe), then one `hlt` at a time forever. A failure
-//! emits `F`, its code, then halts; an exception after the IDT is installed
-//! emits `E`, the vector, then halts.
+//! Success sequence: `G`, `M`, `A`, `R`/`r` (initrd), `K` (kernel tables up),
+//! `T`/`t` (timer probe) and `C`/`c` (virtio-console text output), then one
+//! `hlt` at a time forever. A failure emits `F`, its code, then halts; an
+//! exception after the IDT is installed emits `E`, the vector, then halts.
 
 #![no_std]
 #![no_main]
@@ -92,6 +94,8 @@ use core::{
     panic::PanicInfo,
     ptr::{addr_of, addr_of_mut, read_volatile, write_volatile},
 };
+
+mod virtio_console;
 
 /// Guest-physical address the image is linked and loaded at.
 pub const LINK_ADDRESS: u64 = 0x0010_0000;
@@ -107,6 +111,8 @@ const BP_OFF_MAGIC: u64 = 0x000;
 const BP_OFF_VERSION: u64 = 0x008;
 /// Block size, `u32`.
 const BP_OFF_SIZE: u64 = 0x00C;
+/// Boot flags, `u32` (which devices the world exposes).
+const BP_OFF_FLAGS: u64 = 0x010;
 /// Memory-map entry count, `u32` (max 32).
 const BP_OFF_MEMORY_COUNT: u64 = 0x014;
 /// Initrd/module entry count, `u32` (max 4).
@@ -115,8 +121,15 @@ const BP_OFF_MODULE_COUNT: u64 = 0x018;
 const BP_OFF_CMDLINE_LEN: u64 = 0x01C;
 /// ACPI RSDP guest-physical address, `u64`.
 const BP_OFF_RSDP_GPA: u64 = 0x020;
+/// Console virtio-mmio transport base, `u64`.
+const BP_OFF_CONSOLE_MMIO: u64 = 0x028;
+/// Console I/O APIC line, `u32`.
+const BP_OFF_CONSOLE_IRQ: u64 = 0x030;
 /// Checksum byte of the whole block, `u8` (the block sums to zero mod 256).
 const BP_OFF_CHECKSUM: u64 = 0x034;
+
+/// Boot flag: a virtio-console device is present on this world.
+const BP_FLAG_CONSOLE: u32 = 1;
 
 /// Total size of the boot-parameter block.
 const BP_SIZE: u64 = 1024;
@@ -215,7 +228,14 @@ const PAGE_LARGE: u64 = 1 << 7;
 const LARGE_PAGE_SIZE: u64 = 0x0020_0000;
 /// Page-directory-pointer-table index of the 3..4 GiB window.
 const APIC_PDPT_INDEX: usize = 3;
-/// Page-directory index of the local APIC page inside the 3..4 GiB window.
+/// Page-directory index of the virtio-mmio device pages (`0xFE B0_0000`:
+/// console `0xFEB0_0000`, block `0xFEB0_1000`, network `0xFEB0_2000`) inside
+/// the 3..4 GiB window. The leaf starts at `0xFEA0_0000`.
+const VIRTIO_PD_INDEX: usize = 0x1F5;
+/// Page-directory index of the I/O APIC page (`0xFEC0_0000`); the leaf starts
+/// at `0xFEC0_0000`.
+const IOAPIC_PD_INDEX: usize = 0x1F6;
+/// Page-directory index of the local APIC page (`0xFEE0_0000`).
 const APIC_PD_INDEX: usize = 0x1F7;
 
 // Local APIC.
@@ -575,8 +595,31 @@ pub unsafe extern "C" fn guest_main(boot_params_gpa: u64) -> ! {
         debug_write(b't');
     }
 
+    // 11. Real text output: drive the virtio-console transmit queue published
+    //     in the boot block. This is the first device the kernel drives end to
+    //     end (transport handshake, split queue, notify, used ring). The
+    //     result is non-fatal: `C` when the device consumed the message, `c`
+    //     when the console is absent or did not acknowledge.
+    let flags = read_u32(boot_params_gpa, BP_OFF_FLAGS);
+    if flags & BP_FLAG_CONSOLE != 0 {
+        let console_base = read_u64(boot_params_gpa, BP_OFF_CONSOLE_MMIO);
+        // The device IRQ line is published too, but this driver polls the used
+        // ring: the guest has no ISR and never enables interrupts.
+        let _console_irq = read_u32(boot_params_gpa, BP_OFF_CONSOLE_IRQ);
+        // SAFETY: the console transport page is part of the device window
+        // mapped by the private page tables; the driver validates the device
+        // identity before touching any queue.
+        let sent = unsafe { virtio_console::transmit(console_base, CONSOLE_GREETING) };
+        debug_write(if sent { b'C' } else { b'c' });
+    } else {
+        debug_write(b'c');
+    }
+
     halt_forever()
 }
+
+/// Message the guest kernel sends on the virtio-console once it is up.
+const CONSOLE_GREETING: &[u8] = b"s9vm-guest: virtio-console online\n";
 
 /// Reports a failure step then halts forever.
 fn fail(code: u8) -> ! {
@@ -1011,11 +1054,21 @@ unsafe fn build_page_tables() -> u64 {
             pd_low.add(1),
             LARGE_PAGE_SIZE | PAGE_PRESENT | PAGE_WRITE | PAGE_LARGE,
         );
-        // Local APIC MMIO window (engine-modeled device page): the kernel
-        // device model serves it through a second-level violation.
+        // Device pages (virtio-mmio, I/O APIC and local APIC): the engine
+        // models them and serves every access through a second-level
+        // violation, so the guest only needs the guest page tables to accept
+        // the 3..4 GiB window.
         write_volatile(
             pdpt.add(APIC_PDPT_INDEX),
             pd_high_address | PAGE_PRESENT | PAGE_WRITE,
+        );
+        write_volatile(
+            pd_high.add(VIRTIO_PD_INDEX),
+            0xFEA0_0000 | PAGE_PRESENT | PAGE_WRITE | PAGE_LARGE,
+        );
+        write_volatile(
+            pd_high.add(IOAPIC_PD_INDEX),
+            0xFEC0_0000 | PAGE_PRESENT | PAGE_WRITE | PAGE_LARGE,
         );
         write_volatile(
             pd_high.add(APIC_PD_INDEX),
