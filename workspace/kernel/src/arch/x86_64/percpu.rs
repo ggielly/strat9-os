@@ -401,10 +401,16 @@ pub fn preempt_enable() {
     }
     if next == 0 {
         // Leaving the critical section with no nested guards left: honour any
-        // reschedule requested while preemption was disabled. `maybe_preempt`
-        // re-checks `is_preemptible()` (now true) and takes the scheduler lock
-        // with `try_lock_no_irqsave`, so this cannot deadlock or recurse.
-        crate::process::scheduler::maybe_preempt();
+        // reschedule requested while preemption was disabled. Only do so when
+        // IRQs are enabled on this CPU: a `PreemptDisabled` guard can be
+        // dropped from inside an `IrqDisabled` critical section (page-fault
+        // handler, spinlock protecting shared state), and switching tasks
+        // there would leave the outgoing task holding a lock the next task
+        // may need on the same CPU (self-deadlock). The pending reschedule
+        // stays recorded and is serviced at the next safe point.
+        if crate::arch::interrupts_enabled() {
+            crate::process::scheduler::maybe_preempt();
+        }
     }
 }
 
