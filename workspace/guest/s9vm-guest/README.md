@@ -89,7 +89,9 @@ policy completes it with the reported instruction length.
 | `K` (`0x4B`) | command line parsed, private GDT, IDT and page tables active |
 | `T` (`0x54`) | local APIC timer probe observed a count tick |
 | `t` (`0x74`) | no coherent local APIC timer — non-fatal |
-| `C` (`0x43`) | virtio-console accepted and consumed the greeting |
+| `N` (`0x4E`) | initrd `init` entry extracted and queued for the console |
+| `n` (`0x6E`) | no initrd `init` entry extracted — non-fatal |
+| `C` (`0x43`) | virtio-console accepted and consumed the message |
 | `c` (`0x63`) | no console, or it did not acknowledge — non-fatal |
 | `D` (`0x44`) | virtio-block read sector 0 and the `S9VMDISK` label matches |
 | `d` (`0x64`) | no block device, or the request/label failed — non-fatal |
@@ -98,7 +100,8 @@ policy completes it with the reported instruction length.
 | `P` (`0x50`) | Rust panic; the guest halts afterwards (no code) |
 
 Success sequence: `G`, `M`, `A`, `R`/`r`, `I` (only after `R`), `K`, `T`/`t`,
-`C`/`c` (console), `D`/`d` (block), then repeated `hlt`.
+`N`/`n` (initrd init), `C`/`c` (console), `D`/`d` (block), then repeated
+`hlt`.
 Failure sequence: `F`, code, then `hlt`.
 
 Failure codes published after `F`:
@@ -147,7 +150,11 @@ Failure codes published after `F`:
 8. **initrd**: module entry #1 is dereferenced only inside the mapped identity
    window; a cpio `newc` archive walks cleanly (`070701` headers, NUL-terminated
    names, aligned data ranges, at least one entry and the `TRAILER!!!` record)
-   and reports `R` then `I`; anything else reports the non-fatal `r`;
+   and reports `R` then `I`; anything else reports the non-fatal `r`. The
+   `init` entry is then **extracted** (bounded, revalidated) and its content is
+   appended to the console message, which reports `N` (or non-fatal `n` when
+   there is no such entry): this proves the guest reads the staged initrd, not
+   just its framing;
 9. **local APIC timer**: reads `APIC_ID`/`APIC_VERSION`, checks that the version
    register is coherent, software-enables the APIC, programs a masked one-shot
    count (divide by 1, initial count `2_000`) and polls the read-only
@@ -212,13 +219,13 @@ $ readelf -h target/x86_64-unknown-none/release/s9vm-guest
 
 $ readelf -l target/x86_64-unknown-none/release/s9vm-guest
   LOAD  0x0000000000001000 0x0000000000100000 0x0000000000100000
-        0x0000000000001295 0x0000000000001295  R E   0x1000
+        0x00000000000016b5 0x00000000000016b5  R E   0x1000
   LOAD  0x0000000000003000 0x0000000000102000 0x0000000000102000
         0x0000000000000100 0x0000000000000100  R     0x1000
   LOAD  0x0000000000004000 0x0000000000103000 0x0000000000103000
-        0x0000000000000008 0x0000000000000008  RW    0x1000
+        0x0000000000000010 0x0000000000000010  RW    0x1000
   LOAD  0x0000000000005000 0x0000000000104000 0x0000000000104000
-        0x0000000000000000 0x0000000000008c60  RW    0x1000
+        0x0000000000000000 0x0000000000008ca0  RW    0x1000
 ```
 
 Expectations:
@@ -259,6 +266,7 @@ policy is expected to report `G`, `M`, `A`, `R`/`r`, `K`, `T`/`t` and the
   other access faults into the `E` handler;
 - no return path: `guest_main` ends in a `hlt` loop (the panic handler publishes
   `P` before halting).
+
 
 
 

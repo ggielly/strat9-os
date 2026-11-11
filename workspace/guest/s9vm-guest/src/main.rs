@@ -75,6 +75,8 @@
 //! | `b'K'` | command line parsed, private GDT/IDT and page tables active |
 //! | `b'T'` | local APIC timer probe observed a count tick |
 //! | `b't'` | no coherent local APIC timer (non-fatal) |
+//! | `b'N'` | initrd `init` entry extracted and queued for console output |
+//! | `b'n'` | no initrd `init` entry extracted (non-fatal) |
 //! | `b'C'` | virtio-console accepted and consumed the greeting message |
 //! | `b'c'` | no console device, or it did not acknowledge (non-fatal) |
 //! | `b'D'` | virtio-block read sector 0 and validated the `S9VMDISK` label |
@@ -84,10 +86,10 @@
 //! | `b'P'` | Rust panic (the next byte is not emitted; the guest halts) |
 //!
 //! Success sequence: `G`, `M`, `A`, `R`/`r` (initrd), `K` (kernel tables up),
-//! `T`/`t` (timer probe), `C`/`c` (virtio-console text output) and `D`/`d`
-//! (virtio-block read), then one `hlt` at a time forever. A failure emits `F`,
-//! its code, then halts; an exception after the IDT is installed emits `E`,
-//! the vector, then halts.
+//! `T`/`t` (timer probe), `N`/`n` (initrd `init` extracted), `C`/`c`
+//! (virtio-console text output) and `D`/`d` (virtio-block read), then one
+//! `hlt` at a time forever. A failure emits `F`, its code, then halts; an
+//! exception after the IDT is installed emits `E`, the vector, then halts.
 
 #![no_std]
 #![no_main]
@@ -602,11 +604,46 @@ pub unsafe extern "C" fn guest_main(boot_params_gpa: u64) -> ! {
         debug_write(b't');
     }
 
-    // 11. Real text output: drive the virtio-console transmit queue published
-    //     in the boot block. This is the first device the kernel drives end to
-    //     end (transport handshake, split queue, notify, used ring). The
-    //     result is non-fatal: `C` when the device consumed the message, `c`
-    //     when the console is absent or did not acknowledge.
+    // 11. Initrd consumption: extract the `init` entry of the `newc` archive
+    //     the policy staged and append it to the console message, proving the
+    //     guest can actually read the initrd payload (not only validate its
+    //     framing). `N` on success, non-fatal `n` otherwise.
+    let mut message = [0u8; CONSOLE_MESSAGE_MAX];
+    let mut message_len = 0usize;
+    while message_len < CONSOLE_GREETING.len() {
+        message[message_len] = CONSOLE_GREETING[message_len];
+        message_len += 1;
+    }
+    let mut initrd_init = 0usize;
+    if initrd_present(boot_params_gpa) {
+        let prefix = CONSOLE_INITRD_PREFIX;
+        let payload_start = message_len + prefix.len();
+        // SAFETY: the boot block and the module range were validated above;
+        // `cpio_init_payload` revalidates every archive bound before reading,
+        // and the destination slice is inside `message`.
+        let found = unsafe {
+            cpio_init_payload(
+                boot_params_gpa,
+                &mut message[payload_start..payload_start + CONSOLE_INIT_MAX],
+            )
+        };
+        if let Some(size) = found {
+            let mut index = 0usize;
+            while index < prefix.len() {
+                message[message_len + index] = prefix[index];
+                index += 1;
+            }
+            message_len += prefix.len() + size;
+            initrd_init = size;
+        }
+    }
+    debug_write(if initrd_init > 0 { b'N' } else { b'n' });
+
+    // 12. Real text output: drive the virtio-console transmit queue published
+    //     in the boot block. The message carries the greeting and, when an
+    //     initrd `init` entry was found, its content. Proves the full path
+    //     guest -> split queue -> device model -> kernel console log.
+    //     `C` when the device consumed the message, `c` otherwise (non-fatal).
     let flags = read_u32(boot_params_gpa, BP_OFF_FLAGS);
     let console_base = read_u64(boot_params_gpa, BP_OFF_CONSOLE_MMIO);
     if flags & BP_FLAG_CONSOLE != 0 {
@@ -616,13 +653,13 @@ pub unsafe extern "C" fn guest_main(boot_params_gpa: u64) -> ! {
         // SAFETY: the console transport page is part of the device window
         // mapped by the private page tables; the driver validates the device
         // identity before touching any queue.
-        let sent = unsafe { virtio_console::transmit(console_base, CONSOLE_GREETING) };
+        let sent = unsafe { virtio_console::transmit(console_base, &message[..message_len]) };
         debug_write(if sent { b'C' } else { b'c' });
     } else {
         debug_write(b'c');
     }
 
-    // 12. Block device: read sector 0 and verify the `S9VMDISK` label the
+    // 13. Block device: read sector 0 and verify the `S9VMDISK` label the
     //     userspace policy provisioned. Proves the full request path guest ->
     //     split queue -> device model -> backing image. Non-fatal: `D` on
     //     success, `d` otherwise.
@@ -642,8 +679,15 @@ pub unsafe extern "C" fn guest_main(boot_params_gpa: u64) -> ! {
     halt_forever()
 }
 
-/// Message the guest kernel sends on the virtio-console once it is up.
+/// Message prefix the guest kernel sends once the console is up (followed by
+/// the initrd `init` content when available).
 const CONSOLE_GREETING: &[u8] = b"s9vm-guest: virtio-console online\n";
+/// Prefix prepended to the initrd `init` content in the console message.
+const CONSOLE_INITRD_PREFIX: &[u8] = b"initrd init: ";
+/// Maximum size of the console message the guest builds.
+const CONSOLE_MESSAGE_MAX: usize = 128;
+/// Maximum number of initrd `init` bytes echoed on the console.
+const CONSOLE_INIT_MAX: usize = 64;
 
 /// Reports a failure step then halts forever.
 fn fail(code: u8) -> ! {
@@ -827,17 +871,129 @@ unsafe fn initrd_present(boot_params_gpa: u64) -> bool {
 ///
 /// The 1024 bytes at `boot_params_gpa` must be mapped and readable.
 unsafe fn cpio_archive_ok(boot_params_gpa: u64) -> bool {
-    if read_u32(boot_params_gpa, BP_OFF_MODULE_COUNT) < 2 {
+    // SAFETY: caller contract.
+    let Some((base, len)) = (unsafe { initrd_module(boot_params_gpa) }) else {
         return false;
+    };
+    // SAFETY: `base..base + len` is inside the identity window (validated by
+    // `initrd_module`).
+    unsafe { cpio_walk(base, len) }
+}
+
+/// One validated `newc` archive entry.
+struct CpioEntry {
+    /// Offset of the NUL-terminated name inside the archive.
+    name_offset: u64,
+    /// Size of the name field, including its NUL terminator.
+    name_size: u64,
+    /// Offset of the file data inside the archive.
+    data_offset: u64,
+    /// Size of the file data in bytes.
+    data_size: u64,
+    /// Offset of the next entry (after alignment padding).
+    next: u64,
+}
+
+/// Reads and validates one `newc` entry at `cursor`.
+///
+/// Returns `None` for a malformed or out-of-bounds entry; the caller decides
+/// whether that is fatal (whole-archive walk) or simply "not found".
+///
+/// # Safety
+///
+/// `cursor..` must be inside the mapped archive of `len` bytes.
+unsafe fn cpio_read_entry(base: u64, cursor: u64, len: u64) -> Option<CpioEntry> {
+    let header_end = match cursor.checked_add(CPIO_HEADER_LEN) {
+        Some(end) if end <= len => end,
+        _ => return None,
+    };
+    // SAFETY: the caller guarantees the archive range is mapped.
+    if !unsafe { cpio_magic_at(base, cursor) } {
+        return None;
+    }
+    // SAFETY: the header range was validated above.
+    let namesize = unsafe { cpio_field(base, cursor + CPIO_OFF_NAMESIZE) }?;
+    let filesize = unsafe { cpio_field(base, cursor + CPIO_OFF_FILESIZE) }?;
+    if namesize == 0 || namesize > len {
+        return None;
+    }
+    let name_end = match header_end.checked_add(namesize) {
+        Some(end) if end <= len => end,
+        _ => return None,
+    };
+    // The name field is NUL-terminated inside `namesize`.
+    // SAFETY: the name range was validated above.
+    if unsafe { read_u8(base, name_end - 1) } != 0 {
+        return None;
+    }
+    let data_offset = align4(name_end);
+    let data_end = match data_offset.checked_add(filesize) {
+        Some(end) if end <= len => end,
+        _ => return None,
+    };
+    Some(CpioEntry {
+        name_offset: header_end,
+        name_size: namesize,
+        data_offset,
+        data_size: filesize,
+        next: align4(data_end),
+    })
+}
+
+/// Returns the guest-physical range of the initrd module (module entry #1).
+///
+/// # Safety
+///
+/// The 1024 bytes at `boot_params_gpa` must be mapped and readable.
+unsafe fn initrd_module(boot_params_gpa: u64) -> Option<(u64, u64)> {
+    if read_u32(boot_params_gpa, BP_OFF_MODULE_COUNT) < 2 {
+        return None;
     }
     let entry = MODULE_OFFSET + MODULE_ENTRY_SIZE;
     let base = read_u64(boot_params_gpa, entry);
     let len = read_u64(boot_params_gpa, entry + 8);
     if base >= IDENTITY_WINDOW || len > IDENTITY_WINDOW - base {
-        return false;
+        return None;
     }
-    // SAFETY: `base..base + len` is inside the identity window read above.
-    unsafe { cpio_walk(base, len) }
+    Some((base, len))
+}
+
+/// Copies the data of the `init` entry of the initrd archive into `out`.
+///
+/// Returns the number of bytes copied, or `None` when the archive is absent,
+/// malformed, has no regular `init` entry or the entry does not fit in `out`.
+///
+/// # Safety
+///
+/// The 1024 bytes at `boot_params_gpa` and the module range must be mapped.
+unsafe fn cpio_init_payload(boot_params_gpa: u64, out: &mut [u8]) -> Option<usize> {
+    let (base, len) = unsafe { initrd_module(boot_params_gpa) }?;
+    let mut cursor = 0u64;
+    let mut entries = 0u32;
+    while entries < CPIO_MAX_ENTRIES {
+        // SAFETY: the module range was validated against the identity window.
+        let entry = unsafe { cpio_read_entry(base, cursor, len) }?;
+        // SAFETY: the name range was validated by `cpio_read_entry`.
+        if unsafe { cpio_name_eq(base, entry.name_offset, entry.name_size, b"init") } {
+            if entry.data_size == 0 || entry.data_size > out.len() as u64 {
+                return None;
+            }
+            let mut index = 0u64;
+            while index < entry.data_size {
+                // SAFETY: the data range was validated by `cpio_read_entry`.
+                out[index as usize] = unsafe { read_u8(base, entry.data_offset + index) };
+                index += 1;
+            }
+            return Some(entry.data_size as usize);
+        }
+        // SAFETY: the name range was validated by `cpio_read_entry`.
+        if unsafe { cpio_name_eq(base, entry.name_offset, entry.name_size, b"TRAILER!!!") } {
+            return None;
+        }
+        entries += 1;
+        cursor = entry.next;
+    }
+    None
 }
 
 /// Walks one `newc` archive at `base..base + len`.
@@ -849,40 +1005,16 @@ unsafe fn cpio_walk(base: u64, len: u64) -> bool {
     let mut cursor = 0u64;
     let mut entries = 0u32;
     while entries < CPIO_MAX_ENTRIES {
-        let header_end = match cursor.checked_add(CPIO_HEADER_LEN) {
-            Some(end) if end <= len => end,
-            _ => return false,
-        };
-        if !cpio_magic_at(base, cursor) {
-            return false;
-        }
-        let Some(namesize) = cpio_field(base, cursor + CPIO_OFF_NAMESIZE) else {
+        // SAFETY: the caller guarantees the archive range is mapped.
+        let Some(entry) = (unsafe { cpio_read_entry(base, cursor, len) }) else {
             return false;
         };
-        let Some(filesize) = cpio_field(base, cursor + CPIO_OFF_FILESIZE) else {
-            return false;
-        };
-        if namesize == 0 || namesize > len {
-            return false;
-        }
-        let name_end = match header_end.checked_add(namesize) {
-            Some(end) if end <= len => end,
-            _ => return false,
-        };
-        // The name field is NUL-terminated inside `namesize`.
-        if read_u8(base, name_end - 1) != 0 {
-            return false;
-        }
-        let data_start = align4(name_end);
-        let data_end = match data_start.checked_add(filesize) {
-            Some(end) if end <= len => end,
-            _ => return false,
-        };
-        if cpio_name_eq(base, header_end, namesize, b"TRAILER!!!") {
+        // SAFETY: the name range was validated by `cpio_read_entry`.
+        if unsafe { cpio_name_eq(base, entry.name_offset, entry.name_size, b"TRAILER!!!") } {
             return entries > 0;
         }
         entries += 1;
-        cursor = align4(data_end);
+        cursor = entry.next;
     }
     false
 }

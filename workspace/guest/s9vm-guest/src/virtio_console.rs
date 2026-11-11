@@ -50,7 +50,7 @@ const QUEUE_TX: u32 = 1;
 /// Queue size used by this driver (power of two, at most `QUEUE_NUM_MAX`).
 const QUEUE_SIZE: u16 = 8;
 /// Number of bytes the transmit buffer can hold.
-pub const MAX_MESSAGE: usize = 64;
+pub const MAX_MESSAGE: usize = 128;
 /// Bounded number of used-ring polls after a notify.
 const USED_POLLS: u32 = 64;
 
