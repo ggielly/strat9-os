@@ -521,6 +521,27 @@ pub const fn interrupt_action(
     }
 }
 
+/// "Blocking by STI" bit of `GUEST_INTERRUPTIBILITY_INFO`.
+pub const INTERRUPTIBILITY_STI_BLOCKING: u32 = 1 << 0;
+/// "Blocking by MOV SS" bit of `GUEST_INTERRUPTIBILITY_INFO`.
+pub const INTERRUPTIBILITY_MOV_SS_BLOCKING: u32 = 1 << 1;
+
+/// True if a pending external interrupt can be delivered in this guest state.
+///
+/// `rflags_if` mirrors `RFLAGS.IF` and `interruptibility` the control-block
+/// `GUEST_INTERRUPTIBILITY_INFO` field. Delivery is inhibited while the guest
+/// is blocked by `STI` or by `MOV SS`: injecting a vector during that window
+/// makes the processor drop it — VM-entry interruption delivery is suppressed,
+/// but the vector was already taken out of the APIC, so it is lost. The
+/// execution loop must arm interrupt-window exiting instead, so the vector is
+/// injected as soon as the shadow clears.
+pub const fn interrupt_deliverable(rflags_if: bool, interruptibility: u32) -> bool {
+    rflags_if
+        && interruptibility
+            & (INTERRUPTIBILITY_STI_BLOCKING | INTERRUPTIBILITY_MOV_SS_BLOCKING)
+            == 0
+}
+
 /// Tries to consume an exit by replaying the faulting instruction.
 ///
 /// Returns `Ok(true)` when the exit was fully handled and the guest state has

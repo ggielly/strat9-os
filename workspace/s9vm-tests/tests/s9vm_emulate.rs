@@ -30,9 +30,10 @@ mod virtio_console;
 mod virtio_net;
 
 use emulate::{
-    handle_exit, interrupt_action, walk_guest, walk_second_level, DevicePage, Devices,
-    GuestContext, InterruptAction, MemoryView, PhysMemory, CONSOLE_BASE, CONSOLE_IRQ_LINE,
-    CONSOLE_IRQ_VECTOR, IOAPIC_BASE,
+    handle_exit, interrupt_action, interrupt_deliverable, walk_guest, walk_second_level,
+    DevicePage, Devices, GuestContext, InterruptAction, MemoryView, PhysMemory, CONSOLE_BASE,
+    CONSOLE_IRQ_LINE, CONSOLE_IRQ_VECTOR, INTERRUPTIBILITY_MOV_SS_BLOCKING,
+    INTERRUPTIBILITY_STI_BLOCKING, IOAPIC_BASE,
 };
 use exit::ExitClass;
 
@@ -631,6 +632,33 @@ fn interrupt_action_disarms_the_window_when_nothing_is_pending() {
     );
     assert_eq!(interrupt_action(false, true, false), InterruptAction::None);
     assert_eq!(interrupt_action(false, false, false), InterruptAction::None);
+}
+
+#[test]
+fn interrupt_deliverable_rejects_the_sti_and_mov_ss_shadows() {
+    // IF = 0: nothing can be delivered whatever the shadow bits say.
+    assert!(!interrupt_deliverable(false, 0));
+    assert!(!interrupt_deliverable(false, 0b01));
+
+    // IF = 1 and no shadow: deliverable.
+    assert!(interrupt_deliverable(true, 0));
+    // Only the low two bits matter; the upper bits are reserved / unrelated.
+    assert!(interrupt_deliverable(true, 0b1100));
+
+    // Blocking by STI: the vector must wait for the shadow to clear, otherwise
+    // VM-entry interruption delivery silently discards it after the APIC
+    // already moved it to the in-service register.
+    assert!(!interrupt_deliverable(true, INTERRUPTIBILITY_STI_BLOCKING));
+    // Blocking by MOV SS, same rule.
+    assert!(!interrupt_deliverable(
+        true,
+        INTERRUPTIBILITY_MOV_SS_BLOCKING
+    ));
+    // Both set is rejected too.
+    assert!(!interrupt_deliverable(
+        true,
+        INTERRUPTIBILITY_STI_BLOCKING | INTERRUPTIBILITY_MOV_SS_BLOCKING
+    ));
 }
 
 // ---------------------------------------------------------------------------

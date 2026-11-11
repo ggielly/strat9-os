@@ -47,7 +47,7 @@ use crate::{
     s9vm::{
         apic::LocalApic,
         caps::HwCaps,
-        emulate::{InterruptAction, interrupt_action},
+        emulate::{InterruptAction, interrupt_action, interrupt_deliverable},
         exit::ExitClass,
         exitqueue::ExitQueue,
         guest::{FixedBits, GuestState},
@@ -1547,11 +1547,24 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                 // highest-priority deliverable vector is injected when the
                 // guest is interruptible; otherwise the interrupt window is
                 // armed so that the vector is delivered as soon as the guest
-                // enables interrupts. The window control is disarmed as soon
-                // as it is no longer needed, otherwise the processor would
-                // exit after every single instruction in the guest.
-                let interruptible = hardware.guest().rflags & RFLAGS_IF != 0;
+                // becomes ready. The window control is disarmed as soon as it
+                // is no longer needed, otherwise the processor would exit
+                // after every single instruction in the guest.
                 let pending = apic.pending_vector();
+                let mut interruptible = hardware.guest().rflags & RFLAGS_IF != 0;
+                if interruptible && pending.is_some() {
+                    // RFLAGS.IF alone is not enough: blocking by STI or by
+                    // MOV SS suppresses VM-entry interruption delivery, and the
+                    // vector would be discarded after being taken out of the
+                    // APIC. Read the interruptibility state before injecting.
+                    match hardware.interruptibility() {
+                        Ok(state) => interruptible = interrupt_deliverable(true, state),
+                        Err(error) => {
+                            result = Err(RunError::Hardware(error));
+                            break;
+                        }
+                    }
+                }
                 match interrupt_action(pending.is_some(), interruptible, window_armed) {
                     InterruptAction::Inject => {
                         if let Some(vector) = pending {
@@ -1628,6 +1641,32 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                 match run_result {
                     Ok(exit) => {
                         let class = exit.class();
+                        // A triple fault or an entry-state rejection is a
+                        // guest crash: policy only receives an `other` event
+                        // without the registers, so name the state here. The
+                        // guest-physical-address field of such an exit is a
+                        // leftover of the previous exit and must not be read.
+                        if matches!(class, ExitClass::TripleFault | ExitClass::EntryFailure) {
+                            let guest = hardware.guest();
+                            log::error!(
+                                "[s9vm] vcpu {}: guest {} rip={:#x} rsp={:#x} rflags={:#x} \
+                                 cr0={:#x} cr3={:#x} cr4={:#x} efer={:#x} info={:#x}",
+                                vcpu_id,
+                                if class == ExitClass::TripleFault {
+                                    "triple fault"
+                                } else {
+                                    "entry failure"
+                                },
+                                guest.rip,
+                                guest.rsp,
+                                guest.rflags,
+                                guest.cr0,
+                                guest.cr3,
+                                guest.cr4,
+                                guest.efer,
+                                exit.interrupt_info
+                            );
+                        }
                         // Kernel fast path: accesses to the modeled devices
                         // are replayed in place, so the guest never observes
                         // the exit and policy is not involved.

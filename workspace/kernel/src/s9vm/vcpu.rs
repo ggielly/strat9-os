@@ -1197,6 +1197,19 @@ impl Vcpu {
         self.launched
     }
 
+    /// Reads the guest interruptibility state from the control block.
+    ///
+    /// Bits 0 and 1 report "blocking by STI" and "blocking by MOV SS": an
+    /// external interrupt must not be injected while either is set, the
+    /// processor would drop it.
+    ///
+    /// # Safety
+    /// The control block must be loaded on the current CPU.
+    pub unsafe fn interruptibility(&self) -> Result<u32, VcpuError> {
+        // SAFETY: caller guarantees the block is loaded; 32-bit field.
+        unsafe { Ok(self.control.read_u32(field::GUEST_INTERRUPTIBILITY_INFO)?) }
+    }
+
     /// Reads the guest architectural state that the ABI register block cannot
     /// carry back from the control block.
     ///

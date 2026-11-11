@@ -83,7 +83,7 @@ use crate::{
         apic::LocalApic,
         bootparams,
         caps::HwCaps,
-        emulate::{interrupt_action, InterruptAction},
+        emulate::{interrupt_action, interrupt_deliverable, InterruptAction},
         exit::{reason_name, ExitClass, ExitReason},
         guest::GuestState,
         guestcode::{
@@ -998,9 +998,20 @@ pub fn run_interrupt(caps: &HwCaps) -> Result<InterruptReport, SelftestError> {
     let mut outcome: Result<(), SelftestError> = Ok(());
 
     for _ in 0..32 {
-        // Same delivery policy as the execution loop.
-        let interruptible = vcpu.guest().rflags & (1 << 9) != 0;
+        // Same delivery policy as the execution loop: RFLAGS.IF plus the
+        // interruptibility state (blocking by STI/MOV SS suppresses delivery).
         let pending = apic.pending_vector();
+        let mut interruptible = vcpu.guest().rflags & (1 << 9) != 0;
+        if interruptible && pending.is_some() {
+            // SAFETY: block loaded, guest inactive.
+            match unsafe { vcpu.interruptibility() } {
+                Ok(state) => interruptible = interrupt_deliverable(true, state),
+                Err(error) => {
+                    outcome = Err(SelftestError::from(error));
+                    break;
+                }
+            }
+        }
         match interrupt_action(pending.is_some(), interruptible, window_armed) {
             InterruptAction::Inject => {
                 if let Some(vector) = pending {
