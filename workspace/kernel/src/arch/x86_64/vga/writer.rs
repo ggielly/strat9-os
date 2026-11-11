@@ -89,6 +89,8 @@ pub struct VgaWriter {
     /// Scrollback ring-buffer.
     pub(crate) sb: ScrollbackBuffer,
     pub(crate) scroll_offset: usize,
+    /// Absolute line target for the eased wheel scroll (`None` when idle).
+    pub(crate) scroll_anim_target: Option<usize>,
     /// Last scrollbar geometry `(total, scroll_offset, view_rows)`.
     /// `usize::MAX` forces the next draw to repaint the whole strip.
     sb_cache: (usize, usize, usize),
@@ -326,6 +328,7 @@ impl VgaWriter {
             },
             sb: ScrollbackBuffer::new(),
             scroll_offset: 0,
+            scroll_anim_target: None,
             sb_cache: (usize::MAX, 0, 0),
             console_cells: Vec::new(),
             console_dirty_cells: Vec::new(),
@@ -407,6 +410,7 @@ impl VgaWriter {
         };
         self.sb = ScrollbackBuffer::new();
         self.scroll_offset = 0;
+        self.scroll_anim_target = None;
         self.sb_cache = (usize::MAX, 0, 0);
         self.console_cells = alloc::vec![SbCell { ch: ' ', fg: self.fg, bg: self.bg }; cols * rows];
         self.console_dirty_cells = alloc::vec![false; cols * rows];
@@ -2149,24 +2153,30 @@ impl VgaWriter {
             }
             self.mark_dirty_rect(pixel_x, pixel_y, gw, gh);
         } else {
-            if self.fmt.bpp == 32 {
-                // Stage each glyph row in a small stack buffer, then emit one
-                // sequential bulk store. A glyph is 8..16 pixels wide, so this
-                // turns 128 scattered volatile stores per cell into a handful
-                // of contiguous 32..64-byte writes.
-                let mut row = [0u32; 32];
-                let pitch = self.can().pitch;
-                // Clip to the right edge: a glyph drawn at the last column
-                // must not spill into the next row's pixels.
-                let w = gw
-                    .min(row.len())
-                    .min(self.can().width.saturating_sub(pixel_x));
-                let base = self.can().addr;
-                for gy in 0..gh {
-                    if self.pixel_offset(pixel_x, pixel_y + gy).is_none() {
-                        continue;
-                    }
-                    for gx in 0..w {
+            // Direct (no back buffer): stage each glyph row in a small stack
+            // buffer and emit one sequential wide store (8-byte writes via
+            // `fastfb::store_row`) when the whole row lands inside the clip
+            // and the framebuffer. Partially clipped rows keep the per-pixel
+            // path so clipping stays exact; a glyph is 8..16 px wide, so this
+            // turns a whole cell into a handful of contiguous stores.
+            const MAX_GLYPH_W: usize = 32;
+            let bpp_bytes = self.fmt.bpp as usize / 8;
+            let stride_ok = bpp_bytes == 3 || bpp_bytes == 4;
+            let pitch = self.can().pitch;
+            let fw = self.can().width;
+            let fh = self.can().height;
+            let base = self.can().addr;
+            let clip_x2 = self.clip.x.saturating_add(self.clip.w).min(fw);
+            let clip_y2 = self.clip.y.saturating_add(self.clip.h).min(fh);
+            let full_x = gw <= MAX_GLYPH_W
+                && stride_ok
+                && pixel_x >= self.clip.x
+                && pixel_x.saturating_add(gw) <= clip_x2;
+            let mut row = [0u32; MAX_GLYPH_W];
+            for gy in 0..gh {
+                let y = pixel_y + gy;
+                if full_x && y >= self.clip.y && y < clip_y2 {
+                    for gx in 0..gw {
                         let idx = gy * gw + gx;
                         row[gx] = if idx < glyph_pixels && unsafe { *mask_ptr.add(idx) } != 0 {
                             fg
@@ -2174,30 +2184,29 @@ impl VgaWriter {
                             bg
                         };
                     }
-                    let off = (pixel_y + gy) * pitch + pixel_x * 4;
-                    let ops = self.can().ops;
-                    // SAFETY: `off` is inside the row (checked by pixel_offset)
-                    // and `w` pixels fit from pixel_x because the back-buffer
-                    // branch is only skipped at the very edge.
-                    unsafe { (ops.blit)(base.add(off) as *mut u32, row.as_ptr(), w) };
-                }
-                self.hw_fence();
-            } else {
-                for gy in 0..gh {
+                    let off = y * pitch + pixel_x * bpp_bytes;
+                    // SAFETY: the row and span were checked to lie inside the
+                    // clip and the mapped framebuffer above.
+                    unsafe {
+                        crate::arch::x86_64::vga::fastfb::store_row(
+                            base.add(off),
+                            bpp_bytes,
+                            &row[..gw],
+                        );
+                    }
+                } else {
                     for gx in 0..gw {
                         let idx = gy * gw + gx;
-                        if idx >= glyph_pixels {
-                            continue;
-                        }
-                        let color = if unsafe { *mask_ptr.add(idx) } != 0 {
+                        let color = if idx < glyph_pixels && unsafe { *mask_ptr.add(idx) } != 0 {
                             fg
                         } else {
                             bg
                         };
-                        self.put_pixel_raw(pixel_x + gx, pixel_y + gy, color);
+                        self.put_pixel_raw(pixel_x + gx, y, color);
                     }
                 }
             }
+            self.hw_fence();
         }
     }
 
@@ -2396,12 +2405,36 @@ impl VgaWriter {
             return;
         }
 
-        for col in 0..cell_count {
-            let px = col.saturating_mul(glyph_w);
-            let cell = unsafe { &*row_ptr.add(col) };
+        // Direct (no back buffer): rasterize cells one by one, but emit runs of
+        // blank cells as a single background row-fill instead of a glyph each.
+        let mut col = 0usize;
+        while col < cell_count {
+            let cell = unsafe { *row_ptr.add(col) };
             let (draw_fg, draw_bg) =
                 self.selection_colors_for_cell(virt_row, col, cell.fg, cell.bg);
-            self.draw_glyph_at_pixel(px, py, cell.ch, draw_fg, draw_bg);
+            if cell.ch == ' ' {
+                let start = col;
+                col += 1;
+                while col < cell_count {
+                    let next = unsafe { *row_ptr.add(col) };
+                    let (_, next_bg) =
+                        self.selection_colors_for_cell(virt_row, col, next.fg, next.bg);
+                    if next.ch != ' ' || next_bg != draw_bg {
+                        break;
+                    }
+                    col += 1;
+                }
+                self.fill_text_span_bg(
+                    start * glyph_w,
+                    py,
+                    (col - start) * glyph_w,
+                    glyph_h,
+                    draw_bg,
+                );
+                continue;
+            }
+            self.draw_glyph_at_pixel(col * glyph_w, py, cell.ch, draw_fg, draw_bg);
+            col += 1;
         }
         if text_w > used_width {
             self.fill_text_span_bg(used_width, py, text_w - used_width, glyph_h, self.bg);
@@ -3081,6 +3114,7 @@ impl VgaWriter {
         if !self.enabled {
             return;
         }
+        self.scroll_anim_target = None;
         let total = self.sb.rows.len() + 1;
         let max_off = total.saturating_sub(self.rows);
         let new = (self.scroll_offset + lines).min(max_off);
@@ -3096,6 +3130,7 @@ impl VgaWriter {
         if !self.enabled {
             return;
         }
+        self.scroll_anim_target = None;
         let new = self.scroll_offset.saturating_sub(lines);
         if new == self.scroll_offset {
             return;
@@ -3104,8 +3139,55 @@ impl VgaWriter {
         self.request_present_input();
     }
 
+    /// Request an eased scroll of `lines` (positive = history back, offset grows).
+    ///
+    /// Only stores the absolute target; [`Self::tick_scroll_anim`] applies it
+    /// one line per tick so the mouse wheel glides instead of jumping. Used by
+    /// the wheel only: keyboard, scrollbar and shell scrolling stay instant.
+    pub(crate) fn request_scroll_delta(&mut self, lines: isize) {
+        if !self.enabled || lines == 0 {
+            return;
+        }
+        let total = self.sb.rows.len() + 1;
+        let max_off = total.saturating_sub(self.rows);
+        let current = self.scroll_anim_target.unwrap_or(self.scroll_offset);
+        let target = (current as isize)
+            .saturating_add(lines)
+            .clamp(0, max_off as isize) as usize;
+        self.scroll_anim_target = if target == self.scroll_offset {
+            None
+        } else {
+            Some(target)
+        };
+    }
+
+    /// Advance the eased wheel scroll by one line.
+    ///
+    /// Returns `true` when the view moved, so the frame presenter can publish
+    /// it. A wheel notch of `LINES_PER_NOTCH` lines settles in that many ticks.
+    pub(crate) fn tick_scroll_anim(&mut self) -> bool {
+        let Some(target) = self.scroll_anim_target else {
+            return false;
+        };
+        if target == self.scroll_offset {
+            self.scroll_anim_target = None;
+            return false;
+        }
+        let next = if target > self.scroll_offset {
+            self.scroll_offset + 1
+        } else {
+            self.scroll_offset - 1
+        };
+        if next == target {
+            self.scroll_anim_target = None;
+        }
+        self.set_scroll_offset_and_render(next);
+        true
+    }
+
     /// Immediately return to the live (bottom) view.
     pub fn scroll_to_live(&mut self) {
+        self.scroll_anim_target = None;
         if self.scroll_offset == 0 {
             return;
         }
@@ -3118,6 +3200,7 @@ impl VgaWriter {
         if !self.enabled {
             return;
         }
+        self.scroll_anim_target = None;
         let sb_x = self.can().width.saturating_sub(SCROLLBAR_W);
         if px_x < sb_x {
             return;
@@ -3151,6 +3234,7 @@ impl VgaWriter {
         if !self.enabled {
             return;
         }
+        self.scroll_anim_target = None;
         let text_h = self.text_area_height();
         if text_h <= 1 {
             return;

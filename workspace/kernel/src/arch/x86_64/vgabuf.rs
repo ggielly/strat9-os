@@ -135,19 +135,57 @@ fn vgabuf_flush_all_direct() {
 }
 
 /// One render opportunity per timer tick, independent of commands/status I/O.
+///
+/// The console task owns the writer for this whole tick: it drains the mouse
+/// input ring first, then a bounded batch of log lines, then presents once.
 pub extern "C" fn console_task_main() -> ! {
     CONSOLE_TASK_ACTIVE.store(true, Ordering::Release);
+    let mut input_state = crate::shell::vga_input::InputState::new();
     let mut last_tick = u64::MAX;
     loop {
         let tick = crate::process::scheduler::ticks();
         if tick != last_tick {
             last_tick = tick;
-            if !crate::debug_cfg::is_quiet() {
-                vgabuf_flush_to_framebuffer();
-            }
+            console_render_tick(&mut input_state);
         }
         // Rendering is tick-paced; sleep so this worker does not spin between
         // frames and compete with interactive tasks.
         crate::process::sleep_current_task_ticks(1);
+    }
+}
+
+/// Single writer acquisition per tick: apply deferred mouse input, drain a
+/// bounded log batch, then present once. If the lock is busy, retry next tick.
+fn console_render_tick(input_state: &mut crate::shell::vga_input::InputState) {
+    if !crate::arch::x86_64::vga::is_available() {
+        vgabuf_drain_discard();
+        crate::shell::vga_input::discard();
+        return;
+    }
+    let Some(mut writer) = crate::arch::x86_64::vga::VGA_WRITER.try_lock() else {
+        return;
+    };
+
+    let mut applied = crate::shell::vga_input::take_pending();
+    // Apply every tick (not only when the flag was set) so a deferred visual
+    // still drains when the pointer stops moving while the button is held.
+    applied |= crate::shell::vga_input::apply_input(&mut *writer, input_state);
+    if !crate::debug_cfg::is_quiet() {
+        for _ in 0..FLUSH_BATCH {
+            let Some(line) = QUEUE.pop() else {
+                break;
+            };
+            write_line(&mut *writer, &line);
+            applied = true;
+        }
+    }
+
+    // Eased wheel scroll: advance at most one line per tick, then present.
+    applied |= writer.tick_scroll_anim();
+
+    if applied {
+        writer.flush_display();
+    } else {
+        writer.present_if_due(false);
     }
 }
