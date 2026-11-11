@@ -419,18 +419,147 @@ pub(crate) static FIRST_PREEMPT_LOGGED: [AtomicBool; crate::arch::percpu::MAX_CP
 const STEAL_IMBALANCE_MIN: usize = 2;
 const STEAL_COOLDOWN_TICKS: u64 = 2;
 
-/// Performs the active cpu count operation.
+/// Number of CPUs that are currently online.
+///
+/// **This is a COUNT, not an index bound.** CPU indices are sparse (an AP that
+/// failed to boot may own a registered index that is not online), so callers
+/// must not iterate `0..active_cpu_count()` when touching per-CPU state. Use
+/// [`cpu_is_online`] and iterate `0..crate::arch::percpu::MAX_CPUS` instead.
 #[inline]
 pub(crate) fn active_cpu_count() -> usize {
-    crate::arch::smp::cpu_count()
-        .max(1)
-        .min(crate::arch::percpu::MAX_CPUS)
+    crate::arch::percpu::online_count().max(1)
 }
 
 /// Performs the cpu is valid operation.
 #[inline]
 fn cpu_is_valid(cpu: usize) -> bool {
     cpu < crate::arch::percpu::MAX_CPUS
+}
+
+/// True iff `cpu` is in range and currently online.
+#[inline]
+pub(crate) fn cpu_is_online(cpu: usize) -> bool {
+    cpu < crate::arch::percpu::MAX_CPUS && crate::arch::percpu::is_online(cpu)
+}
+
+/// True iff `cpu` is online and its local scheduler has been created.
+///
+/// Acquires the per-CPU scheduler lock, so this must not be called from IRQ
+/// context; use [`scheduler_ready_try`] there.
+#[inline]
+pub(crate) fn cpu_has_scheduler(cpu: usize) -> bool {
+    cpu_is_online(cpu) && LOCAL_SCHEDULERS[cpu].lock().is_some()
+}
+
+/// Non-blocking [`cpu_has_scheduler`] for IRQ context (contention == not ready).
+#[inline]
+pub(crate) fn scheduler_ready_try(cpu: usize) -> bool {
+    cpu_is_online(cpu)
+        && LOCAL_SCHEDULERS[cpu]
+            .try_lock_no_irqsave()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false)
+}
+
+/// Least-loaded online CPU that has an initialized local scheduler.
+///
+/// Returns 0 if no scheduler is visible yet (the BSP is always online and no
+/// caller may hand out a sparse dead slot); enqueue paths still tolerate
+/// `None` schedulers during earliest boot.
+pub(crate) fn least_loaded_online_cpu() -> usize {
+    let mut buf = [0usize; crate::arch::percpu::MAX_CPUS];
+    let count = crate::arch::percpu::online_cpu_indices(&mut buf);
+    let mut best = 0usize;
+    let mut best_load = usize::MAX;
+    let mut found = false;
+    for &cpu in &buf[..count] {
+        lockdep_acquire(LockRank::Local, Some(cpu));
+        let load = LOCAL_SCHEDULERS[cpu]
+            .lock()
+            .as_ref()
+            .map(|c| c.class_rqs.runnable_len());
+        lockdep_release(LockRank::Local);
+        if let Some(load) = load {
+            found = true;
+            if load < best_load {
+                best = cpu;
+                best_load = load;
+            }
+        }
+    }
+    if found {
+        best
+    } else {
+        0
+    }
+}
+
+/// Choose a CPU for a ready task.
+///
+/// Preference order matches the historical placement policy: `last` (cache
+/// warmth) when online, initialized and lightly loaded; then `home` when
+/// online and initialized; then the least-loaded online CPU. Never returns a
+/// non-online slot.
+pub(crate) fn placement_cpu(last: usize, home: usize) -> usize {
+    if cpu_is_online(last) {
+        lockdep_acquire(LockRank::Local, Some(last));
+        let light = LOCAL_SCHEDULERS[last]
+            .lock()
+            .as_ref()
+            .map(|c| c.class_rqs.runnable_len() <= 2)
+            .unwrap_or(false);
+        lockdep_release(LockRank::Local);
+        if light {
+            return last;
+        }
+    }
+    if cpu_has_scheduler(home) {
+        return home;
+    }
+    least_loaded_online_cpu()
+}
+
+/// IRQ-safe variant of [`placement_cpu`]: never blocks; contention counts as
+/// unusable and falls through to the next candidate.
+pub(crate) fn placement_cpu_try(last: usize, home: usize) -> usize {
+    if cpu_is_online(last) {
+        if let Some(guard) = LOCAL_SCHEDULERS[last].try_lock_no_irqsave() {
+            let light = guard
+                .as_ref()
+                .map(|c| c.class_rqs.runnable_len() <= 2)
+                .unwrap_or(false);
+            drop(guard);
+            if light {
+                return last;
+            }
+        }
+    }
+    if scheduler_ready_try(home) {
+        return home;
+    }
+    let mut buf = [0usize; crate::arch::percpu::MAX_CPUS];
+    let count = crate::arch::percpu::online_cpu_indices(&mut buf);
+    let mut best = 0usize;
+    let mut best_load = usize::MAX;
+    let mut found = false;
+    for &cpu in &buf[..count] {
+        if let Some(guard) = LOCAL_SCHEDULERS[cpu].try_lock_no_irqsave() {
+            let load = guard.as_ref().map(|c| c.class_rqs.runnable_len());
+            drop(guard);
+            if let Some(load) = load {
+                found = true;
+                if load < best_load {
+                    best = cpu;
+                    best_load = load;
+                }
+            }
+        }
+    }
+    if found {
+        best
+    } else {
+        0
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -477,7 +606,10 @@ pub fn cpu_usage_snapshot() -> CpuUsageSnapshot {
     let cpu_count = active_cpu_count();
     let mut total_ticks = [0u64; crate::arch::percpu::MAX_CPUS];
     let mut idle_ticks = [0u64; crate::arch::percpu::MAX_CPUS];
-    for i in 0..cpu_count {
+    for i in 0..crate::arch::percpu::MAX_CPUS {
+        if !cpu_is_online(i) {
+            continue;
+        }
         total_ticks[i] = CPU_TOTAL_TICKS[i].load(Ordering::Relaxed);
         idle_ticks[i] = CPU_IDLE_TICKS[i].load(Ordering::Relaxed);
     }
@@ -500,7 +632,10 @@ pub fn scheduler_metrics_snapshot() -> SchedulerMetricsSnapshot {
     let mut steal_in_count = [0u64; crate::arch::percpu::MAX_CPUS];
     let mut steal_out_count = [0u64; crate::arch::percpu::MAX_CPUS];
     let mut try_lock_fail_count = [0u64; crate::arch::percpu::MAX_CPUS];
-    for i in 0..cpu_count {
+    for i in 0..crate::arch::percpu::MAX_CPUS {
+        if !cpu_is_online(i) {
+            continue;
+        }
         rt_runtime_ticks[i] = CPU_RT_RUNTIME_TICKS[i].load(Ordering::Relaxed);
         fair_runtime_ticks[i] = CPU_FAIR_RUNTIME_TICKS[i].load(Ordering::Relaxed);
         idle_runtime_ticks[i] = CPU_IDLE_TICKS[i].load(Ordering::Relaxed);
@@ -527,8 +662,10 @@ pub fn scheduler_metrics_snapshot() -> SchedulerMetricsSnapshot {
 
 /// Performs the reset scheduler metrics operation.
 pub fn reset_scheduler_metrics() {
-    let cpu_count = active_cpu_count();
-    for i in 0..cpu_count {
+    for i in 0..crate::arch::percpu::MAX_CPUS {
+        if !cpu_is_online(i) {
+            continue;
+        }
         CPU_RT_RUNTIME_TICKS[i].store(0, Ordering::Relaxed);
         CPU_FAIR_RUNTIME_TICKS[i].store(0, Ordering::Relaxed);
         CPU_IDLE_TICKS[i].store(0, Ordering::Relaxed);

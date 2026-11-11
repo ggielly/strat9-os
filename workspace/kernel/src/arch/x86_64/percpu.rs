@@ -324,42 +324,87 @@ pub fn get_cpu_count() -> usize {
 /// Increment the preemption-disable depth for the current CPU.
 /// When depth > 0, the scheduler will not preempt this CPU.
 ///
-/// Safe to call from any Ring-0 context **after** `init_gs_base` has run on
-/// this CPU.  If called before GS is initialised (early boot), `current_cpu_index`
-/// returns 0, which is always the BSP slot.  On the BSP itself that is correct;
-/// on an AP before its GS base is set the call is a no-op because the AP's
-/// scheduler is not yet running : incrementing slot 0 would be wrong, so we
-/// verify the GS index matches the slot we are about to touch.
+/// The counter lives at `gs:[PREEMPT_COUNT_OFFSET]`, so the increment is a
+/// single GS-relative instruction: an IRQ arriving just before it cannot make
+/// the task migrate and bump *another* CPU's counter (the segment base is
+/// resolved for whichever task/CPU actually executes the `inc`).
+///
+/// Early boot is a no-op: before `init_gs_base` the GS base is 0, so the
+/// instruction would fault. APs call `init_gs_base` before any preempt op.
 #[inline]
 pub fn preempt_disable() {
-    let idx = current_cpu_index();
-    // SAFETY: idx is clamped to [0, MAX_CPUS-1] by current_cpu_index().
-    // Additional guard: if GS is not yet set on this CPU, cpu_index will be
-    // the BSP's slot (0).  Skip if the slot's stored cpu_index disagrees with
-    // idx : that means GS isn't set here yet.
-    if PERCPU[idx].arch.cpu_index.load(Ordering::Relaxed) as usize == idx {
-        PERCPU[idx].preempt_count.fetch_add(1, Ordering::Relaxed);
+    if !BSP_GS_INITIALIZED.load(Ordering::Acquire) {
+        return;
+    }
+    // SAFETY: GS base points at `PERCPU[current].arch` (offset 24 is the
+    // preempt_count field, guaranteed by the layout asserts above). Prereq
+    // `BSP_GS_INITIALIZED` => every CPU running kernel code has GS set.
+    // `inc` on a GS-relative u32 is atomic wrt task migration.
+    unsafe {
+        core::arch::asm!(
+            "inc dword ptr gs:[{off}]",
+            off = const PREEMPT_COUNT_OFFSET,
+            options(nostack),
+        );
     }
 }
 
 /// Decrement the preemption-disable depth for the current CPU.
 /// Must be paired with exactly one prior call to `preempt_disable`.
 ///
-/// Includes an underflow guard: if the counter is already 0 (mismatched call),
-/// the decrement is skipped and a warning is emitted rather than letting u32
-/// wrap to u32::MAX and disabling the scheduler permanently.
+/// Read/decrement/re-read are all GS-relative. A single `dec` cannot be split
+/// by a task migration (interrupts may nest, but the current task cannot switch
+/// while the instruction executes), so the counter always belongs to the
+/// executing CPU even if an IRQ fires between the surrounding statements.
+///
+/// Underflow guard: if the counter is already 0 (mismatched call), the
+/// decrement is skipped and a warning is emitted rather than letting u32 wrap
+/// to u32::MAX and disabling the scheduler permanently.
+///
+/// When the depth reaches 0, a reschedule that was requested while preemption
+/// was disabled is serviced immediately via `maybe_preempt()`; otherwise the
+/// request would sit pending until the next timer tick.
 #[inline]
 pub fn preempt_enable() {
-    let idx = current_cpu_index();
-    if PERCPU[idx].arch.cpu_index.load(Ordering::Relaxed) as usize == idx {
-        // Load first: prevent wrapping from 0 to u32::MAX.
-        let prev = PERCPU[idx].preempt_count.load(Ordering::Relaxed);
-        if prev > 0 {
-            PERCPU[idx].preempt_count.fetch_sub(1, Ordering::Relaxed);
-        } else {
-            // Mismatched preempt_enable : log and leave count at 0.
-            log::warn!("preempt_enable: underflow on CPU {} (mismatched call)", idx);
-        }
+    if !BSP_GS_INITIALIZED.load(Ordering::Acquire) {
+        return;
+    }
+    let prev: u32;
+    // SAFETY: see `preempt_disable`; the field is a plain u32 in the arch
+    // block and the GS base is valid on this CPU.
+    unsafe {
+        core::arch::asm!(
+            "mov {p:e}, dword ptr gs:[{off}]",
+            p = out(reg) prev,
+            off = const PREEMPT_COUNT_OFFSET,
+            options(nostack, readonly),
+        );
+    }
+    if prev == 0 {
+        // Mismatched preempt_enable : log and leave count at 0.
+        log::warn!(
+            "preempt_enable: underflow on CPU {} (mismatched call)",
+            current_cpu_index()
+        );
+        return;
+    }
+    let next: u32;
+    // SAFETY: as above. `dec` is a single GS-relative read-modify-write.
+    unsafe {
+        core::arch::asm!(
+            "dec dword ptr gs:[{off}]",
+            "mov {n:e}, dword ptr gs:[{off}]",
+            n = out(reg) next,
+            off = const PREEMPT_COUNT_OFFSET,
+            options(nostack),
+        );
+    }
+    if next == 0 {
+        // Leaving the critical section with no nested guards left: honour any
+        // reschedule requested while preemption was disabled. `maybe_preempt`
+        // re-checks `is_preemptible()` (now true) and takes the scheduler lock
+        // with `try_lock_no_irqsave`, so this cannot deadlock or recurse.
+        crate::process::scheduler::maybe_preempt();
     }
 }
 
@@ -371,7 +416,7 @@ pub fn is_preemptible() -> bool {
     if PERCPU[idx].arch.cpu_index.load(Ordering::Relaxed) as usize != idx {
         return true; // Early boot: no scheduler active, preemption is allowed.
     }
-    PERCPU[idx].preempt_count.load(Ordering::Relaxed) == 0
+    PERCPU[idx].arch.preempt_count.load(Ordering::Relaxed) == 0
 }
 
 /// Get the APIC ID for a given CPU index, or `None` if not present.

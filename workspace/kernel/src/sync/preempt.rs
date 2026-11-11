@@ -44,7 +44,9 @@
 //!
 //! Guards can be nested: each `PreemptGuard::new()` increments the per-CPU
 //! preemption depth and each `drop` decrements it. Preemption is re-enabled
-//! only when the depth reaches 0.
+//! only when the depth reaches 0; at that point a reschedule requested during
+//! the critical section is serviced immediately (deferred-preemption call in
+//! `percpu::preempt_enable`).
 
 use crate::arch::percpu;
 
