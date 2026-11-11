@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-use super::{active_cpu_count, runtime_ops::finish_switch, *};
+use super::{runtime_ops::finish_switch, *};
 use crate::{memory::UserSliceWrite, sync::FixedQueue};
 
 const PENDING_SILO_CLEANUPS_CAPACITY: usize = 256;

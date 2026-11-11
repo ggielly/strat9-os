@@ -198,32 +198,9 @@ pub(super) fn check_wake_deadlines(current_time_ns: u64) {
                 // --- CPU placement: prefer last_cpu, then home_cpu ---
                 let last = blocked_task.last_cpu.load(Ordering::Relaxed);
                 let home = blocked_task.home_cpu.load(Ordering::Relaxed);
-                let n = active_cpu_count();
-                let cpu = if last < n {
-                    // Use try_lock to avoid blocking in IRQ context.
-                    let last_ok = LOCAL_SCHEDULERS[last]
-                        .try_lock_no_irqsave()
-                        .and_then(|guard| {
-                            let ok = guard
-                                .as_ref()
-                                .map(|c| c.class_rqs.runnable_len() <= 2)
-                                .unwrap_or(false);
-                            drop(guard);
-                            Some(ok)
-                        })
-                        .unwrap_or(false);
-                    if last_ok {
-                        last
-                    } else if home < n {
-                        home
-                    } else {
-                        0
-                    }
-                } else if home < n {
-                    home
-                } else {
-                    0
-                };
+                // IRQ context: non-blocking placement that never selects an
+                // offline/sparse slot.
+                let cpu = super::placement_cpu_try(last, home);
                 let class = {
                     use crate::process::sched::SchedClassId;
                     match blocked_task.sched_policy() {
