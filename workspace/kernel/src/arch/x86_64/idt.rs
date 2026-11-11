@@ -892,15 +892,13 @@ extern "x86-interrupt" fn non_maskable_interrupt_handler(stack_frame: InterruptS
             crate::arch::x86_64::hlt();
         }
     }
-    crate::serial_force_println!(
-        "[NMI] rip={:#x} cs={:#x}",
-        stack_frame.instruction_pointer.as_u64(),
-        stack_frame.code_segment.0
-    );
-    crate::arch::x86_64::cli();
-    loop {
-        crate::arch::x86_64::hlt();
-    }
+    // Unexpected NMI (watchdog, PMU, spurious SERR, ...): log and resume.
+    // Halting here would silently kill a healthy CPU. The SwapGsGuard drop
+    // restores user GS on the normal return path.
+    let rip = stack_frame.instruction_pointer.as_u64();
+    let cs = stack_frame.code_segment.0;
+    crate::serial_force_println!("[NMI] rip={:#x} cs={:#x}", rip, cs);
+    log::warn!("[NMI] unexpected NMI rip={:#x} cs={:#x}", rip, cs);
 }
 
 /// Performs the page fault handler operation.

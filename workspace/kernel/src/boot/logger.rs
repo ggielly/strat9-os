@@ -81,76 +81,56 @@ impl log::Log for SerialLogger {
                 record.args()
             ));
 
-            // 1b. Live VGA debug (early boot): write directly to framebuffer
-            //     via vga_debug_write.  This bypasses VGA_WRITER and works
-            //     before the scheduler / status_line_task are running.
-            //     Controlled by debug_cfg::VGA_DEBUG_LIVE toggle.
-            if crate::debug_cfg::is_vga_debug_live() && crate::arch::vga::is_available() {
-                let mut line_buf = [0u8; 256];
-                let mut lpos = 0usize;
-                use core::fmt::Write;
-                struct LineWriter<'a> {
-                    buf: &'a mut [u8],
-                    pos: &'a mut usize,
+            // 1b. Console sink: exactly one of live or buffered, never both.
+            //     Live draws directly through the writer (early boot, before
+            //     the scheduler / console-render task run); the buffered path
+            //     feeds the lock-free vgabuf drained by console-render.
+            let mut line_buf = [0u8; 256];
+            let mut lpos = 0usize;
+            use core::fmt::Write;
+            struct LineWriter<'a> {
+                buf: &'a mut [u8],
+                pos: &'a mut usize,
+            }
+            impl Write for LineWriter<'_> {
+                fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                    let bytes = s.as_bytes();
+                    let remaining = self.buf.len().saturating_sub(*self.pos);
+                    let n = bytes.len().min(remaining);
+                    self.buf[*self.pos..*self.pos + n].copy_from_slice(&bytes[..n]);
+                    *self.pos += n;
+                    Ok(())
                 }
-                impl Write for LineWriter<'_> {
-                    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-                        let bytes = s.as_bytes();
-                        let remaining = self.buf.len().saturating_sub(*self.pos);
-                        let n = bytes.len().min(remaining);
-                        self.buf[*self.pos..*self.pos + n].copy_from_slice(&bytes[..n]);
-                        *self.pos += n;
-                        Ok(())
-                    }
-                }
-                let _ = write!(
-                    LineWriter {
-                        buf: &mut line_buf,
-                        pos: &mut lpos
-                    },
-                    "[{}] {}",
-                    record.level(),
-                    record.args(),
-                );
-                if lpos > 0 {
-                    if let Ok(s) = core::str::from_utf8(&line_buf[..lpos]) {
-                        crate::arch::vga::vga_debug_writeln(s);
-                    }
+            }
+            let _ = write!(
+                LineWriter {
+                    buf: &mut line_buf,
+                    pos: &mut lpos
+                },
+                "[{}] {}\n",
+                record.level(),
+                record.args(),
+            );
+
+            let mut live_drawn = false;
+            if lpos > 0 && crate::debug_cfg::is_vga_debug_live() {
+                if let Ok(line) = core::str::from_utf8(&line_buf[..lpos]) {
+                    live_drawn = crate::arch::vga::try_with_writer(|w| {
+                        w.write_bytes(line);
+                        w.present_if_due(!crate::arch::vgabuf::console_task_active());
+                    })
+                    .is_some();
                 }
             }
 
-            // 2. VGA ring buffer : lock-free enqueue.
+            // 2. VGA ring buffer : only when the live draw did not happen.
             //    Controlled by debug_cfg::VGA_DEBUG_BUFFER toggle.
-            if crate::debug_cfg::is_vga_debug_buffer() && crate::arch::vga::is_available() {
-                let mut vbuf = [0u8; crate::arch::vgabuf::VGABUF_LINE_LEN];
-                let mut vpos = 0usize;
-                use core::fmt::Write;
-                struct VgaBufWriter<'a> {
-                    buf: &'a mut [u8],
-                    pos: &'a mut usize,
-                }
-                impl Write for VgaBufWriter<'_> {
-                    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-                        let bytes = s.as_bytes();
-                        let remaining = self.buf.len().saturating_sub(*self.pos);
-                        let n = bytes.len().min(remaining);
-                        self.buf[*self.pos..*self.pos + n].copy_from_slice(&bytes[..n]);
-                        *self.pos += n;
-                        Ok(())
-                    }
-                }
-                let _ = write!(
-                    VgaBufWriter {
-                        buf: &mut vbuf,
-                        pos: &mut vpos
-                    },
-                    "[{}] {}\n",
-                    record.level(),
-                    record.args(),
-                );
-                if vpos > 0 {
-                    crate::arch::vgabuf::vgabuf_write(&vbuf[..vpos]);
-                }
+            if !live_drawn
+                && lpos > 0
+                && crate::debug_cfg::is_vga_debug_buffer()
+                && crate::arch::vga::is_available()
+            {
+                crate::arch::vgabuf::vgabuf_write(&line_buf[..lpos]);
             }
         }
     }

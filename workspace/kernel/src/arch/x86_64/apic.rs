@@ -354,20 +354,75 @@ pub fn eoi() {
     }
 }
 
+/// ICR low bit 12: delivery status (1 = send pending, 0 = idle).
+const ICR_DELIVERY_PENDING: u32 = 1 << 12;
+/// Bounded poll budget for the ICR delivery-pending bit.
+const ICR_POLL_LIMIT: u32 = 1_000_000;
+
+/// Wait until the ICR delivery-pending bit clears.
+///
+/// Returns `false` if the bit stayed set for `ICR_POLL_LIMIT` iterations.
+///
+/// # Safety
+/// APIC must be initialized (base address valid and mapped).
+unsafe fn wait_icr_idle() -> bool {
+    for _ in 0..ICR_POLL_LIMIT {
+        // SAFETY: caller guarantees APIC is initialized.
+        if read_reg(REG_ICR_LOW) & ICR_DELIVERY_PENDING == 0 {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    false
+}
+
 /// Send an IPI with a pre-built ICR low value to a specific APIC destination.
 ///
 /// `icr_low` must contain delivery mode/vector/flags in xAPIC layout.
+///
+/// In xAPIC mode the whole destination+command sequence runs with IRQs
+/// disabled on the current CPU, so an IPI issued from an interrupt handler
+/// cannot interleave between the `REG_ICR_HIGH` and `REG_ICR_LOW` writes and
+/// corrupt the destination. The delivery-pending bit (ICR low bit 12) is
+/// polled before the writes (never start a send while the previous one is
+/// still pending) and after them (do not return before the send is accepted),
+/// with a bounded iteration budget: on timeout a single warning is logged and
+/// the function continues rather than hanging.
+///
+/// In x2APIC mode a single MSR write is issued, which is synchronous and
+/// already serialized by the CPU, so no polling is required.
 pub fn send_ipi_raw(target_apic_id: u32, icr_low: u32) {
-    unsafe {
-        if APIC_X2_MODE.load(Ordering::Relaxed) {
-            // x2APIC: single MSR write, synchronous (CPU blocks until dispatched).
+    if APIC_X2_MODE.load(Ordering::Relaxed) {
+        // x2APIC: single MSR write, synchronous (CPU blocks until dispatched).
+        // SAFETY: APIC is initialized when IPIs are sent.
+        unsafe {
             super::wrmsr(0x830, ((target_apic_id as u64) << 32) | icr_low as u64);
-        } else {
-            // xAPIC: two-step MMIO write (destination high, then command low).
+        }
+        return;
+    }
+
+    // xAPIC: two-step MMIO write (destination high, then command low).
+    // IRQs are disabled for the whole sequence so no interrupt handler can
+    // insert a competing ICR write between the two registers.
+    crate::sync::with_irqs_disabled(|_| {
+        // SAFETY: APIC is initialized when IPIs are sent; IRQs are disabled.
+        unsafe {
+            if !wait_icr_idle() {
+                log::warn!(
+                    "LAPIC: ICR still pending before send to APIC ID {}",
+                    target_apic_id
+                );
+            }
             write_reg(REG_ICR_HIGH, target_apic_id << 24);
             write_reg(REG_ICR_LOW, icr_low);
+            if !wait_icr_idle() {
+                log::warn!(
+                    "LAPIC: ICR did not complete for send to APIC ID {}",
+                    target_apic_id
+                );
+            }
         }
-    }
+    });
 }
 
 /// Send a "reschedule now" IPI to the CPU identified by `target_apic_id`.

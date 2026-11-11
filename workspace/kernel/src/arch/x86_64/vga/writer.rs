@@ -82,6 +82,8 @@ pub struct VgaWriter {
     pub(crate) glyph_mask_cache: Vec<u8>,
     pub(crate) unicode_map: Vec<(u32, usize)>,
     pub(crate) status_bar_height: usize,
+    /// Reserved boot HUD band height (progress label + bar). Zero once boot ends.
+    pub(crate) hud_height: usize,
     pub(crate) clip: ClipRect,
 
     /// Scrollback ring-buffer.
@@ -312,6 +314,7 @@ impl VgaWriter {
             glyph_mask_cache: Vec::new(),
             unicode_map: Vec::new(),
             status_bar_height: 0,
+            hud_height: 0,
             clip: ClipRect {
                 x: 0,
                 y: 0,
@@ -349,7 +352,8 @@ impl VgaWriter {
             return false;
         };
         let status_bar_height = font_info.glyph_h;
-        let text_height = fb_height.saturating_sub(status_bar_height);
+        let hud_height = super::boot_progress::band_height(fb_height, font_info.glyph_h);
+        let text_height = fb_height.saturating_sub(status_bar_height + hud_height);
         let cols = fb_width / font_info.glyph_w;
         let rows = text_height / font_info.glyph_h;
         if cols == 0 || rows == 0 {
@@ -390,6 +394,7 @@ impl VgaWriter {
         // gradient, so derive the missing blocks from █ at native metrics.
         self.synthesize_block_glyphs();
         self.status_bar_height = status_bar_height;
+        self.hud_height = hud_height;
         self.clip = ClipRect {
             x: 0,
             y: 0,
@@ -546,7 +551,157 @@ impl VgaWriter {
 
     /// Performs the text area height operation.
     pub(crate) fn text_area_height(&self) -> usize {
-        self.can().height.saturating_sub(self.status_bar_height)
+        self.rows * self.font_info.glyph_h
+    }
+
+    /// Reserves (or releases, with `h == 0`) the boot HUD band and rebuilds
+    /// the text grid to fill the remaining space.
+    ///
+    /// Called once after the final boot bar to hand the whole screen back to
+    /// the text console. Must run outside IRQ context: it reallocates.
+    pub(crate) fn set_hud_height(&mut self, h: usize) {
+        if !self.enabled || self.hud_height == h {
+            return;
+        }
+        let gh = self.font_info.glyph_h;
+        let cols = self.cols;
+        if gh == 0 || cols == 0 {
+            return;
+        }
+        let text_height = self
+            .can()
+            .height
+            .saturating_sub(self.status_bar_height + h);
+        let rows = text_height / gh;
+        if rows == 0 {
+            return;
+        }
+        self.hud_height = h;
+        self.rows = rows;
+        self.console_cells = alloc::vec![SbCell { ch: ' ', fg: self.fg, bg: self.bg }; cols * rows];
+        self.console_dirty_cells = alloc::vec![false; cols * rows];
+        self.console_row_head = 0;
+        self.console_pending_scroll = 0;
+        self.console_pending = false;
+        if self.row >= rows {
+            self.row = rows - 1;
+        }
+        if self.col >= cols {
+            self.col = cols - 1;
+        }
+        // Clear the released band (between the new text bottom and the status bar).
+        let text_bottom = rows * gh;
+        let clear_bottom = self.can().height.saturating_sub(self.status_bar_height);
+        if clear_bottom > text_bottom {
+            let w = self.can().width;
+            let color = self.unpack_color(self.bg);
+            self.fill_rect(0, text_bottom, w, clear_bottom - text_bottom, color);
+        }
+        self.render_viewport_full();
+    }
+
+    /// Repaint the reserved HUD band after a full-screen clear erased it.
+    fn repaint_hud(&mut self) {
+        let mut buf = [0u8; 96];
+        if let Some((step, label)) = super::boot_progress::last_render(&mut buf) {
+            self.draw_boot_progress(step, label);
+        }
+    }
+
+    /// Draw the reserved boot HUD band (label strip + progress bar) in one
+    /// pass under the writer lock, then present it immediately.
+    pub(crate) fn draw_boot_progress(&mut self, step: usize, label: &str) {
+        if !self.enabled || self.hud_height == 0 {
+            return;
+        }
+        let total = super::boot_progress::TOTAL;
+        let step = step.min(total);
+        super::boot_progress::remember(step, label);
+
+        let saved_clip = self.clip;
+        self.reset_clip_rect();
+        let (prev_draw_to_back, prev_track_dirty) = self.begin_viewport_render();
+
+        let w = self.width();
+        let h = self.height();
+        let gh = self.font_info.glyph_h;
+        let l = super::boot_progress::layout(w, h, gh, self.status_bar_height);
+
+        // Clear the whole band first: no residual bar fragments after a redraw.
+        let bg = self.unpack_color(self.bg);
+        self.fill_rect(0, l.band_y, w, l.band_h, bg);
+        self.fill_rect(
+            l.bar_x,
+            l.label_y,
+            l.bar_w,
+            gh,
+            super::boot_progress::LABEL_BG,
+        );
+
+        let mut buf = [0u8; 96];
+        let mut len = super::boot_progress::fmt_prefix(&mut buf, step, total);
+        let bytes = label.as_bytes();
+        let mut n = bytes.len().min(buf.len().saturating_sub(len));
+        while n > 0 && !label.is_char_boundary(n) {
+            n -= 1;
+        }
+        buf[len..len + n].copy_from_slice(&bytes[..n]);
+        len += n;
+
+        let text = core::str::from_utf8(&buf[..len]).unwrap_or("");
+        // Clip the label at a character boundary: `draw_text_at` only clips at
+        // the screen edge, so an over-long label would spill past the bar.
+        let char_cap = (l.bar_w / self.font_info.glyph_w.max(1)).max(1);
+        let mut end = text.len();
+        for (count, (idx, _)) in text.char_indices().enumerate() {
+            if count == char_cap {
+                end = idx;
+                break;
+            }
+        }
+        let text = &text[..end];
+        self.draw_text_at(
+            l.bar_x,
+            l.label_y,
+            text,
+            super::boot_progress::LABEL_FG,
+            super::boot_progress::LABEL_BG,
+        );
+
+        self.fill_rect(
+            l.bar_x,
+            l.bar_y,
+            l.bar_w,
+            l.bar_h,
+            super::boot_progress::TRACK,
+        );
+        let fill_w = l.bar_w.saturating_mul(step) / total.max(1);
+        if fill_w > 0 {
+            self.fill_rect(
+                l.bar_x,
+                l.bar_y,
+                fill_w,
+                l.bar_h,
+                super::boot_progress::FILL,
+            );
+        }
+        self.draw_rect(
+            l.bar_x,
+            l.bar_y,
+            l.bar_w,
+            l.bar_h,
+            super::boot_progress::BORDER,
+        );
+
+        // The bar is the boot-time freeze witness: never throttle it.
+        self.present_inner(true);
+
+        {
+            let canvas = self.canm();
+            canvas.draw_to_back = prev_draw_to_back;
+            canvas.track_dirty = prev_track_dirty;
+        }
+        self.clip = saved_clip;
     }
 
     /// Performs the enabled operation.
@@ -736,7 +891,7 @@ impl VgaWriter {
         self.present_inner(false);
     }
 
-    fn present_inner(&mut self, force: bool) {
+    pub(crate) fn present_inner(&mut self, force: bool) {
         if !self.enabled {
             return;
         }
@@ -767,6 +922,7 @@ impl VgaWriter {
 
         // Early return: nothing dirty to present
         if track_dirty && self.can().dirty.len == 0 {
+            self.canm().present_pending = false;
             return;
         }
 
@@ -910,9 +1066,7 @@ impl VgaWriter {
         if !self.draw_to_back_buffer() {
             // Direct mode (no back buffer, e.g. a driver that scans out the
             // same surface): rasterize pending cells, there is nothing to copy.
-            if self.can().track_dirty {
-                self.present_inner(false);
-            }
+            self.render_pending_console();
             return;
         }
         self.canm().present_pending = true;
@@ -1297,6 +1451,7 @@ impl VgaWriter {
             self.mark_dirty_rect(0, 0, fw, fh);
             self.col = 0;
             self.row = 0;
+            self.repaint_hud();
             return;
         }
 
@@ -1320,6 +1475,7 @@ impl VgaWriter {
         }
         self.col = 0;
         self.row = 0;
+        self.repaint_hud();
     }
 
     /// Performs the clear operation.
@@ -2565,8 +2721,21 @@ impl VgaWriter {
                 self.col = 0;
                 self.row += 1;
             }
-            '\r' => self.col = 0,
-            '\t' => self.col = (self.col + 4) & !3,
+            '\r' => {
+                // Blank the rest of the line before returning the carriage.
+                while self.col < self.cols {
+                    self.queue_console_glyph(' ');
+                    self.col += 1;
+                }
+                self.col = 0;
+            }
+            '\t' => {
+                let stop = ((self.col + 4) & !3).min(self.cols);
+                while self.col < stop {
+                    self.queue_console_glyph(' ');
+                    self.col += 1;
+                }
+            }
             '\u{8}' => {
                 if self.col > 0 {
                     self.col -= 1;
@@ -2594,31 +2763,38 @@ impl VgaWriter {
     /// Call `flush_display()` after a batch of writes to present.
     pub(crate) fn write_bytes(&mut self, s: &str) {
         self.begin_viewport_render();
-        // Skip basic ANSI escape sequences to avoid rendering control garbage.
-        let bytes = s.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            let b = bytes[i];
-            if b == 0x1B {
-                // ESC : skip CSI sequences: ESC [ ... final_byte
-                if i + 1 < bytes.len() && bytes[i + 1] == b'[' {
-                    i += 2;
-                    while i < bytes.len() {
-                        let c = bytes[i];
-                        i += 1;
-                        if c >= b'@' && c <= b'~' {
-                            break;
+        // Decode UTF-8 properly; swallow ANSI control sequences instead of
+        // rendering their bytes as glyphs.
+        let mut chars = s.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                match chars.next() {
+                    // CSI: ESC [ ... final byte in @..~
+                    Some('[') => {
+                        for c in chars.by_ref() {
+                            if c >= '@' && c <= '~' {
+                                break;
+                            }
                         }
                     }
-                } else {
-                    i += 1;
+                    // OSC: ESC ] ... BEL or ESC \
+                    Some(']') => {
+                        while let Some(c) = chars.next() {
+                            if c == '\u{7}' {
+                                break;
+                            }
+                            if c == '\u{1b}' {
+                                let _ = chars.next();
+                                break;
+                            }
+                        }
+                    }
+                    // Two-byte escape or lone ESC: drop both.
+                    Some(_) | None => {}
                 }
                 continue;
             }
-            // Safe: ASCII bytes 0x20..=0x7E are valid single-char UTF-8.
-            let ch = b as char;
             self.write_char(ch);
-            i += 1;
         }
         if self.draw_to_back_buffer() && (self.console_pending || self.can().dirty.len != 0) {
             self.canm().present_pending = true;

@@ -41,15 +41,21 @@ static VGA_DEBUG_MAX_COL: core::sync::atomic::AtomicUsize = core::sync::atomic::
 /// Maximum rows available on the current framebuffer (cached).
 static VGA_DEBUG_MAX_ROW: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
+/// Serializes COL/ROW mutation so concurrent writers cannot interleave cells.
+static VGA_DEBUG_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
 /// Initialise or re-initialise the live debug writer's geometry.
 /// Called automatically from `vga::init()`.
 pub fn vga_debug_init(fb_width: usize, fb_height: usize) {
     let cols = fb_width / 8; // panic_font_8x16 glyph width
     let rows = fb_height / 16; // panic_font_8x16 glyph height
     let status_rows = 1; // reserve 1 row for status bar
+    // Exclude the boot HUD band too: the overlay must never paint the bar.
+    let hud_px = super::boot_progress::band_height(fb_height, 16);
+    let hud_rows = hud_px.div_ceil(16);
     VGA_DEBUG_MAX_COL.store(cols, core::sync::atomic::Ordering::Relaxed);
     VGA_DEBUG_MAX_ROW.store(
-        rows.saturating_sub(status_rows),
+        rows.saturating_sub(status_rows + hud_rows),
         core::sync::atomic::Ordering::Relaxed,
     );
     VGA_DEBUG_COL.store(0, core::sync::atomic::Ordering::Relaxed);
@@ -75,7 +81,6 @@ fn vga_debug_scroll() {
     }
 
     let fb = fb_addr as *mut u8;
-    let max_col = VGA_DEBUG_MAX_COL.load(core::sync::atomic::Ordering::Relaxed);
     let line_bytes = 16 * pitch; // one text row in bytes
     let total = (max_row - 1) * line_bytes; // all rows except the first
     let bg = panic_pack_rgb(fmt, 0x12, 0x16, 0x1E);
@@ -88,21 +93,20 @@ fn vga_debug_scroll() {
         super::fastfb::copy_forward(fb, fb.add(line_bytes), total);
         // Fill the newly exposed last line.
         let clear = fb.add((max_row - 1) * line_bytes);
-        vga_debug_fill_line(clear, pitch, max_col, bpp_bytes, bg);
+        let line_pixels = if bpp_bytes > 0 { pitch / bpp_bytes } else { 0 };
+        vga_debug_fill_line(clear, pitch, line_pixels, bpp_bytes, bg);
         super::fastfb::fence();
     }
 }
 
 /// Fill a single text line (16 pixel rows) with a solid colour.
-/// `max_col` is the number of character columns (each 8px wide).
 unsafe fn vga_debug_fill_line(
     base: *mut u8,
     pitch: usize,
-    max_col: usize,
+    fill_pixels: usize,
     bpp_bytes: usize,
     color: u32,
 ) {
-    let fill_pixels = max_col * 8; // visible pixel width only
     for row in 0..16 {
         super::fastfb::fill_pixels(base.add(row * pitch), bpp_bytes, color, fill_pixels);
     }
@@ -180,6 +184,10 @@ pub fn vga_debug_write(s: &str) {
     if fb_addr == 0 {
         return;
     }
+    // Try-lock only: this path is an early/panic fallback and must never wedge.
+    let Some(_guard) = VGA_DEBUG_LOCK.try_lock() else {
+        return;
+    };
 
     let pitch = PANIC_FB_PITCH.load(core::sync::atomic::Ordering::Relaxed) as usize;
     let max_col = VGA_DEBUG_MAX_COL.load(core::sync::atomic::Ordering::Relaxed);
