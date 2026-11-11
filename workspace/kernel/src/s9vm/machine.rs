@@ -216,10 +216,11 @@ impl Machine {
     ///
     /// Called by the execution loop once per VM exit with the measured TSC
     /// delta. The 8254 counts at its nominal 1.193182 MHz and raises its IRQ0
-    /// line when channel 0 expires; the CMOS RTC only needs whole seconds (its
-    /// calendar is computed from the accumulated UNIX time). `tsc_hz == 0`
-    /// means the host frequency is unknown: the raw cycle count is used, the
-    /// documented degradation of the timer model.
+    /// line when channel 0 expires; the CMOS RTC advances its calendar and
+    /// raises its interrupt line when a programmed event (periodic, update
+    /// ended or alarm) occurs and the corresponding status-B enable bit is
+    /// set. `tsc_hz == 0` means the host frequency is unknown: the raw cycle
+    /// count is used, the documented degradation of the timer model.
     pub fn advance_time(&mut self, apic: &mut LocalApic, cycles: u64, tsc_hz: u64) {
         let pit_ticks = if tsc_hz == 0 {
             cycles
@@ -231,13 +232,24 @@ impl Machine {
         if pit_ticks > 0 && self.devices.pit.advance(pit_ticks) {
             pulse_device_line(&mut self.devices, apic, isa_gsi(pit::IRQ_LINE));
         }
-        let seconds = if tsc_hz == 0 {
-            cycles / 1_000_000_000
+        // Split the elapsed time into whole seconds and the remainder in the
+        // 32.768 kHz reference ticks the CMOS periodic phase consumes.
+        let (seconds, sub_second_ticks) = if tsc_hz == 0 {
+            (cycles / 1_000_000_000, 0)
         } else {
-            cycles / tsc_hz
+            let seconds = cycles / tsc_hz;
+            let remainder = cycles % tsc_hz;
+            let ticks = u128::from(remainder) * u128::from(crate::s9vm::rtc::REFERENCE_HZ)
+                / u128::from(tsc_hz);
+            (seconds, u64::try_from(ticks).unwrap_or(0))
         };
-        if seconds > 0 {
-            self.devices.rtc.advance(seconds);
+        if seconds > 0 || sub_second_ticks > 0 {
+            let events = self.devices.rtc.advance_events(seconds, sub_second_ticks);
+            if (events.periodic || events.update_ended || events.alarm)
+                && self.devices.rtc.irq_asserted()
+            {
+                pulse_device_line(&mut self.devices, apic, isa_gsi(crate::s9vm::rtc::IRQ_LINE));
+            }
         }
     }
 

@@ -41,7 +41,7 @@ use alloc::vec::Vec;
 use guestpt::{GuestPageTables, PtPerms, ENTRY_COUNT};
 use linuxboot::{
     align_up, page_table_budget, plan, LayoutError, LayoutRequest, BOOT_PARAMS_GPA,
-    BOOT_PARAMS_SIZE, CMDLINE_GPA, CMDLINE_MAX, HIGH_LOAD_BASE, INITRD_ALIGN, LOW_IDENTITY_END,
+    BOOT_GDT_GPA, BOOT_PARAMS_SIZE, CMDLINE_GPA, CMDLINE_MAX, HIGH_LOAD_BASE, INITRD_ALIGN, LOW_IDENTITY_END,
     LOW_MEMORY_END, PAGE_TABLES_GPA, STACK_GUARD_END, STACK_TOP,
 };
 use mmu::{TableMemory, PAGE_SIZE};
@@ -101,6 +101,7 @@ fn typical_layout_places_every_object() {
     assert_eq!(layout.kernel_base, 0x0020_0000);
     assert_eq!(layout.kernel_end, 0x0020_0000 + 8 * 1024 * 1024);
     assert_eq!(layout.boot_params_gpa, BOOT_PARAMS_GPA);
+    assert_eq!(layout.gdt_gpa, BOOT_GDT_GPA);
     assert_eq!(layout.cmdline_gpa, CMDLINE_GPA);
     assert_eq!(layout.page_tables_gpa, PAGE_TABLES_GPA);
     assert_eq!(layout.stack_top, STACK_TOP);

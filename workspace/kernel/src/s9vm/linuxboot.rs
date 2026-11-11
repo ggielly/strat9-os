@@ -66,6 +66,13 @@ use super::guestpt::{IdentityRange, PtPerms};
 pub const BOOT_PARAMS_GPA: u64 = 0x0001_0000;
 /// Size of the boot parameter page.
 pub const BOOT_PARAMS_SIZE: u64 = 0x1000;
+/// Guest-physical address of the descriptor table the entry contract requires.
+///
+/// The 64-bit boot protocol enters the kernel with `CS = 0x10` and
+/// `DS = ES = SS = 0x18`; the loader installs a three-entry flat GDT for those
+/// selectors before installing its own. The table lives in low memory, below
+/// the boot parameter page.
+pub const BOOT_GDT_GPA: u64 = 0x0000_6000;
 /// End of the conventional low range (first 640 KiB usable).
 pub const LOW_MEMORY_END: u64 = 0x0009_FC00;
 /// End of the identity-mapped low range (page aligned, covers the EBDA hole).
@@ -118,6 +125,8 @@ pub struct BootLayout {
     pub kernel_end: u64,
     /// Guest-physical address of the boot parameter page.
     pub boot_params_gpa: u64,
+    /// Guest-physical address of the entry-contract GDT.
+    pub gdt_gpa: u64,
     /// Guest-physical address of the command line string.
     pub cmdline_gpa: u64,
     /// Length of the command line, including the terminating NUL.
@@ -248,6 +257,7 @@ pub fn plan(request: &LayoutRequest) -> Result<BootLayout, LayoutError> {
         kernel_base,
         kernel_end,
         boot_params_gpa: BOOT_PARAMS_GPA,
+        gdt_gpa: BOOT_GDT_GPA,
         cmdline_gpa: CMDLINE_GPA,
         cmdline_len: request.cmdline_len,
         page_tables_gpa: PAGE_TABLES_GPA,
@@ -259,6 +269,7 @@ pub fn plan(request: &LayoutRequest) -> Result<BootLayout, LayoutError> {
         identity,
     };
     debug_assert!(layout.covers(BOOT_PARAMS_GPA, BOOT_PARAMS_SIZE));
+    debug_assert!(layout.covers(BOOT_GDT_GPA, 0x1000));
     debug_assert!(layout.covers(CMDLINE_GPA, request.cmdline_len));
     debug_assert!(layout.covers(PAGE_TABLES_GPA, page_table_pages * 0x1000));
     Ok(layout)

@@ -117,6 +117,42 @@ pub const fn unusable_access_rights() -> u32 {
     AR_UNUSABLE
 }
 
+/// Code selector the 64-bit boot protocol requires (`__BOOT_CS`).
+pub const BOOT_CS_SELECTOR: u16 = 0x10;
+/// Data selector the 64-bit boot protocol requires (`__BOOT_DS`).
+pub const BOOT_DS_SELECTOR: u16 = 0x18;
+
+/// GDT the loader installs before entering a 64-bit boot-protocol kernel.
+///
+/// Three entries, all flat: the null descriptor, the 4 GiB executable/readable
+/// 64-bit code descriptor at selector `0x10`, and the 4 GiB read/write data
+/// descriptor at selector `0x18`. The encodings are the conventional ones
+/// (`0x00AF_9A00_0000_FFFF` and `0x00CF_9200_0000_FFFF`): present, DPL 0,
+/// code/data, code has `L = 1`, both have `G = 1`.
+pub const BOOT_GDT: [u64; 3] = [
+    0,
+    0x00AF_9A00_0000_FFFF,
+    0x00CF_9200_0000_FFFF,
+];
+/// Byte limit of [`BOOT_GDT`].
+pub const BOOT_GDT_LIMIT: u32 = (BOOT_GDT.len() * 8 - 1) as u32;
+
+/// Little-endian bytes of [`BOOT_GDT`], ready to copy to guest memory.
+pub const fn boot_gdt_bytes() -> [u8; 24] {
+    let mut bytes = [0u8; 24];
+    let mut entry = 0;
+    while entry < BOOT_GDT.len() {
+        let value = BOOT_GDT[entry].to_le_bytes();
+        let mut index = 0;
+        while index < 8 {
+            bytes[entry * 8 + index] = value[index];
+            index += 1;
+        }
+        entry += 1;
+    }
+    bytes
+}
+
 /// Segment descriptor as stored in the control block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Segment {
@@ -329,6 +365,56 @@ impl GuestState {
     /// True if the state requests 64-bit long mode.
     pub const fn is_long_mode(&self) -> bool {
         (self.cr0 & CR0_PG) != 0 && (self.efer & EFER_LME) != 0
+    }
+
+    /// Entry state required by the 64-bit boot protocol.
+    ///
+    /// The protocol enters the kernel in 64-bit mode with paging enabled, an
+    /// identity mapping covering the loaded image and the boot objects, a GDT
+    /// whose selectors are `__BOOT_CS(0x10)` and `__BOOT_DS(0x18)`, interrupts
+    /// disabled, and `%rsi` holding the boot parameter page address. The kernel
+    /// installs its own descriptor tables immediately, but the first
+    /// instructions run with the loader's segments, so the control block must
+    /// carry them: this constructor is the only difference from
+    /// [`Self::long_mode_64`], which keeps the engine's historical `CS=0x08`
+    /// and `SS=0x10` layout for the s9vm guest kernel.
+    ///
+    /// `gdt_base`/`gdt_limit` describe the table in guest memory returned by
+    /// [`boot_gdt_bytes`]; `boot_params_gpa` is the boot parameter page.
+    pub const fn boot_protocol_64(
+        entry: u64,
+        stack_top: u64,
+        cr3: u64,
+        boot_params_gpa: u64,
+        gdt_base: u64,
+        gdt_limit: u32,
+    ) -> Self {
+        let mut state = Self::long_mode_64(entry, stack_top, cr3);
+        // %rsi carries the boot parameter page to the kernel entry point.
+        state.rsi = boot_params_gpa;
+        // Interrupts are disabled at entry (the kernel enables them when its
+        // IDT is installed).
+        state.rflags = 0x2;
+        state.cs = Segment {
+            selector: 0x10,
+            base: 0,
+            limit: 0xFFFF_FFFF,
+            access_rights: long_code_access_rights(0) | AR_GRANULARITY,
+        };
+        let data = Segment {
+            selector: 0x18,
+            base: 0,
+            limit: 0xFFFF_FFFF,
+            access_rights: data_access_rights(0) | AR_DEFAULT_BIG | AR_GRANULARITY,
+        };
+        state.ds = data;
+        state.es = data;
+        state.ss = data;
+        state.gdtr_base = gdt_base;
+        state.gdtr_limit = gdt_limit;
+        state.idtr_base = 0;
+        state.idtr_limit = 0;
+        state
     }
 
     /// True if the state is in real mode (PE = 0).

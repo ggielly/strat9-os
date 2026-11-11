@@ -82,18 +82,22 @@ use crate::{
     s9vm::{
         apic::LocalApic,
         bootparams,
+        bzimage,
         caps::HwCaps,
         emulate::{interrupt_action, interrupt_deliverable, InterruptAction},
         exit::{reason_name, ExitClass, ExitReason},
         guest::GuestState,
         guestcode::{
-            ACPI_CODE, ACPI_FAIL_MARKER, ACPI_MARKER, LOADER_CODE, LOADER_MARKER, SMP_CODE_0,
+            ACPI_CODE, ACPI_MARKER, LOADER_CODE, LOADER_MARKER, SMP_CODE_0,
             SMP_CODE_1, SMP_HLT_OFFSET, SMP_MARKERS, SMP_OUT_INSTRUCTION_LEN, SMP_SHARED_GPA,
         },
         guestprog::guestos,
+        guestpt::GuestPageTables,
+        linuxboot,
         machine::Machine,
         vcpu::{SecondLevelMemory, Vcpu, VcpuError},
         virtio, virtio_blk, virtio_net, vm,
+        zeropage,
     },
 };
 
@@ -2094,6 +2098,342 @@ fn run_loader_in_world(caps: &HwCaps, world_id: u64) -> Result<LoaderReport, Sel
     }
 }
 
+/// Report of the boot-protocol loader dry run.
+pub struct BootProtocolReport {
+    /// Guest-physical address the protected-mode image was copied to.
+    pub kernel_base: u64,
+    /// Length of the copied protected-mode part.
+    pub kernel_bytes: u64,
+    /// `init_size` window the kernel needs.
+    pub init_size: u64,
+    /// Guest-physical address of the 64-bit entry point.
+    pub entry: u64,
+    /// Guest-physical address of the boot parameter page.
+    pub boot_params_gpa: u64,
+    /// Guest-physical address of the command line.
+    pub cmdline_gpa: u64,
+    /// Guest-physical address of the entry-contract GDT.
+    pub gdt_gpa: u64,
+    /// Number of 4 KiB tables the guest page tables use.
+    pub table_pages: u64,
+    /// Number of identity ranges handed to the guest.
+    pub identity_ranges: usize,
+}
+
+/// Builds a minimal boot-protocol image in kernel memory.
+///
+/// Layout: one boot sector, four setup sectors (`setup_sects = 4`), then a
+/// 64 KiB protected-mode body. The setup header carries the fields a loader
+/// reads: `HdrS`, the boot flag, protocol 2.15, `LOADED_HIGH`, the 64-bit entry
+/// (`XLF_KERNEL_64`), a relocatable image with a 2 MiB alignment and an 8 MiB
+/// `init_size`. The body starts with the bytes the 64-bit entry point would
+/// execute; the dry run checks they landed at `entry = base + 0x200`.
+fn boot_protocol_image() -> Vec<u8> {
+    const SETUP_SECTORS: u8 = 4;
+    const PROTECTED_MODE_LEN: usize = 64 * 1024;
+    const HEADER_VERSION: u16 = 0x020F;
+    const INIT_SIZE: u32 = 8 * 1024 * 1024;
+    const KERNEL_ALIGNMENT: u32 = 2 * 1024 * 1024;
+
+    let setup_bytes = (usize::from(SETUP_SECTORS) + 1) * bzimage::SECTOR_SIZE;
+    let mut image = vec![0u8; setup_bytes + PROTECTED_MODE_LEN];
+    // Setup header (boot protocol offsets).
+    image[0x1F1] = SETUP_SECTORS;
+    put_u16(&mut image, 0x1FE, bzimage::BOOT_FLAG);
+    put_u32(&mut image, 0x202, bzimage::HEADER_MAGIC);
+    put_u16(&mut image, 0x206, HEADER_VERSION);
+    image[0x210] = 0xFF; // type_of_loader: undefined
+    image[0x211] = bzimage::LOADED_HIGH | 0x80; // LOADED_HIGH | CAN_USE_HEAP
+    put_u32(&mut image, 0x214, bzimage::DEFAULT_CODE32_START as u32);
+    put_u32(&mut image, 0x22C, zeropage::DEFAULT_INITRD_ADDR_MAX); // initrd_addr_max
+    put_u32(&mut image, 0x230, KERNEL_ALIGNMENT);
+    image[0x234] = 1; // relocatable
+    image[0x235] = 12; // min_alignment: 4 KiB
+    put_u16(&mut image, 0x236, bzimage::XLF_KERNEL_64);
+    put_u32(&mut image, 0x238, zeropage::DEFAULT_CMDLINE_SIZE);
+    put_u32(&mut image, 0x23C, bzimage::SUBARCH_PC);
+    put_u64(&mut image, 0x258, bzimage::DEFAULT_CODE32_START);
+    put_u32(&mut image, 0x260, INIT_SIZE);
+    // Protected-mode body: a deterministic pattern with the entry bytes at
+    // offset 0x200 (the 64-bit entry is the loaded base plus 0x200).
+    for (index, byte) in image[setup_bytes..].iter_mut().enumerate() {
+        *byte = (index & 0xFF) as u8;
+    }
+    image[setup_bytes + bzimage::ENTRY_OFFSET_64 as usize] = 0xFA; // cli
+    image[setup_bytes + bzimage::ENTRY_OFFSET_64 as usize + 1] = 0xF4; // hlt
+    image
+}
+
+/// Page-table provider writing the guest tables straight into world memory.
+///
+/// The tables are allocated from the low-memory reservation computed by the
+/// layout planner and reached through the world's second-level translation
+/// (the same path the loader uses for the image), so the dry run exercises the
+/// exact memory path a real boot would.
+struct WorldTables {
+    world_id: u64,
+    next: u64,
+    end: u64,
+    frames: Vec<u64>,
+}
+
+impl WorldTables {
+    fn new(world_id: u64, start: u64, pages: u64) -> Self {
+        Self {
+            world_id,
+            next: start,
+            end: start + pages * crate::s9vm::mmu::PAGE_SIZE,
+            frames: Vec::new(),
+        }
+    }
+
+    fn page(&self, table: u64) -> Option<*mut u8> {
+        world_page(self.world_id, table).ok()
+    }
+}
+
+impl crate::s9vm::mmu::TableMemory for WorldTables {
+    fn alloc_table(&mut self) -> Option<u64> {
+        let page_size = crate::s9vm::mmu::PAGE_SIZE;
+        if self.next + page_size > self.end {
+            return None;
+        }
+        let table = self.next;
+        self.next += page_size;
+        self.frames.push(table);
+        let page = self.page(table)?;
+        // SAFETY: the page belongs to the world, is mapped by the HHDM and is
+        // a full 4 KiB frame; zeroing it is the provider contract.
+        unsafe {
+            core::ptr::write_bytes(page, 0, page_size as usize);
+        }
+        Some(table)
+    }
+
+    fn free_table(&mut self, _table: u64) {
+        // The world owns the frames: destroying the world releases them and
+        // the second-level mapping at once.
+    }
+
+    fn read_entry(&self, table: u64, index: usize) -> u64 {
+        match self.page(table) {
+            Some(page) => {
+                // SAFETY: the index is bounded by the table format (512
+                // entries) and the page is a full frame.
+                unsafe { core::ptr::read_volatile(page.add(index * 8) as *const u64) }
+            }
+            None => 0,
+        }
+    }
+
+    fn write_entry(&mut self, table: u64, index: usize, value: u64) {
+        if let Some(page) = self.page(table) {
+            // SAFETY: same invariant as `read_entry`.
+            unsafe {
+                core::ptr::write_volatile(page.add(index * 8) as *mut u64, value);
+            }
+        }
+    }
+}
+
+/// Writes `bytes` at `gpa` across page boundaries in a world.
+fn write_world_range(world_id: u64, gpa: u64, bytes: &[u8]) -> Result<(), SelftestError> {
+    let page_size = crate::s9vm::mmu::PAGE_SIZE as usize;
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let current = gpa + offset as u64;
+        let in_page = (current as usize) & (page_size - 1);
+        let chunk = (page_size - in_page).min(bytes.len() - offset);
+        let page = world_page(world_id, current & !(page_size as u64 - 1))?;
+        // SAFETY: the page belongs to the world, is mapped by the HHDM, and
+        // `chunk` keeps the write inside the page.
+        unsafe {
+            for index in 0..chunk {
+                core::ptr::write_volatile(page.add(in_page + index), bytes[offset + index]);
+            }
+        }
+        offset += chunk;
+    }
+    Ok(())
+}
+
+/// Reads `out.len()` bytes at `gpa` across page boundaries in a world.
+fn read_world_range(world_id: u64, gpa: u64, out: &mut [u8]) -> Result<(), SelftestError> {
+    let page_size = crate::s9vm::mmu::PAGE_SIZE as usize;
+    let mut offset = 0;
+    while offset < out.len() {
+        let current = gpa + offset as u64;
+        let in_page = (current as usize) & (page_size - 1);
+        let chunk = (page_size - in_page).min(out.len() - offset);
+        let page = world_page(world_id, current & !(page_size as u64 - 1))?;
+        // SAFETY: same invariant as `write_world_range`.
+        unsafe {
+            for index in 0..chunk {
+                out[offset + index] = core::ptr::read_volatile(page.add(in_page + index));
+            }
+        }
+        offset += chunk;
+    }
+    Ok(())
+}
+
+/// Boot-protocol loader dry run: no VT-x, no guest entry.
+///
+/// Runs the whole 64-bit boot preparation — parse the image, plan the memory
+/// layout, map the guest memory, copy the protected-mode part, build the boot
+/// parameter page with its e820 map, install the command line and the entry
+/// GDT, build the guest page tables through the world translation — then
+/// verifies the result from the world memory and tears the world down.
+///
+/// It is the deterministic regression of the boot path on any host, and the
+/// last checkpoint before the same sequence is entered on VT-x hardware.
+pub fn run_boot_protocol_dry(caps: &HwCaps) -> Result<BootProtocolReport, SelftestError> {
+    let record = vm::create(b"s9vm-boot-dry", 0).ok_or(SelftestError::VmFail(1))?;
+    let result = boot_protocol_dry_in_world(caps, record.id);
+    let _ = vm::destroy(record.id);
+    result
+}
+
+/// Body of the boot-protocol dry run; the caller owns and destroys the world.
+fn boot_protocol_dry_in_world(
+    caps: &HwCaps,
+    world_id: u64,
+) -> Result<BootProtocolReport, SelftestError> {
+    const RAM_BYTES: u64 = 64 * 1024 * 1024;
+    const CMDLINE: &[u8] = b"console=ttyS0\0";
+
+    // 1. Read and validate the image, then plan the layout from its header.
+    let image = boot_protocol_image();
+    let parsed = match bzimage::BzImage::parse(&image) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            log::warn!("[s9vm] bootdry: image parse error {error:?}");
+            return Err(SelftestError::BadExit("image rejected"));
+        }
+    };
+    let request = linuxboot::LayoutRequest {
+        ram_bytes: RAM_BYTES,
+        pref_address: parsed.pref_address(),
+        kernel_alignment: parsed.kernel_alignment(),
+        init_size: u64::from(parsed.init_size()),
+        relocatable: parsed.relocatable(),
+        initrd_bytes: 0,
+        cmdline_len: CMDLINE.len() as u64,
+    };
+    let layout = match linuxboot::plan(&request) {
+        Ok(layout) => layout,
+        Err(error) => {
+            log::warn!("[s9vm] bootdry: layout error {error:?}");
+            return Err(SelftestError::BadExit("boot layout rejected"));
+        }
+    };
+    let plan = match parsed.load_plan(layout.kernel_base) {
+        Ok(plan) => plan,
+        Err(error) => {
+            log::warn!("[s9vm] bootdry: image plan error {error:?}");
+            return Err(SelftestError::BadExit("image plan rejected"));
+        }
+    };
+    if plan.runtime_start != layout.kernel_base
+        || plan.entry_gpa() != layout.entry_gpa()
+        || plan.init_size != parsed.init_size()
+    {
+        return Err(SelftestError::BadExit("layout and image plan disagree"));
+    }
+
+    // 2. Guest memory: the low range holding every boot object, and the
+    //    kernel window the entry contract requires to be identity mapped.
+    let page_size = crate::s9vm::mmu::PAGE_SIZE;
+    let window = (u64::from(parsed.init_size()) + page_size - 1) & !(page_size - 1);
+    vm::map_memory(world_id, caps, 0, linuxboot::LOW_IDENTITY_END, LOADER_GUEST_PERMS, 0)
+        .map_err(|_| SelftestError::VmFail(2))?;
+    vm::map_memory(world_id, caps, layout.kernel_base, window, LOADER_GUEST_PERMS, 0)
+        .map_err(|_| SelftestError::VmFail(3))?;
+
+    // 3. Entry-contract GDT and command line.
+    write_world_range(world_id, layout.gdt_gpa, &crate::s9vm::guest::boot_gdt_bytes())?;
+    write_world_range(world_id, layout.cmdline_gpa, CMDLINE)?;
+
+    // 4. Boot parameter page: e820 map, header copy, pointers.
+    let header =
+        zeropage::KernelHeader::parse(&image).map_err(|_| SelftestError::BadExit("bad header"))?;
+    let mut boot_params = zeropage::ZeroPage::boot_params_for(layout.cmdline_gpa, RAM_BYTES)
+        .map_err(|_| SelftestError::BadExit("boot params rejected"))?;
+    boot_params = boot_params.with_kernel_header(header).with_loader_id(0xFF);
+    boot_params
+        .set_cmdline(layout.cmdline_gpa, CMDLINE.len() as u32)
+        .map_err(|_| SelftestError::BadExit("command line rejected"))?;
+    let mut boot_params_bytes = vec![0u8; zeropage::BOOT_PARAMS_SIZE];
+    boot_params
+        .write(&mut boot_params_bytes)
+        .map_err(|_| SelftestError::BadExit("boot params write rejected"))?;
+    write_world_range(world_id, layout.boot_params_gpa, &boot_params_bytes)?;
+
+    // 5. Copy the protected-mode kernel to its load address.
+    write_world_range(world_id, layout.kernel_base, parsed.protected_mode())?;
+
+    // 6. Guest page tables, built through the world translation.
+    let mut tables = WorldTables::new(world_id, layout.page_tables_gpa, layout.page_table_pages);
+    let page_tables = GuestPageTables::build(&mut tables, &layout.identity)
+        .map_err(|_| SelftestError::BadExit("guest page tables rejected"))?;
+
+    // 7. Verify the plan from guest memory: the entry bytes, the boot
+    //    parameters, the command line and the mapping of every boot object.
+    let mut entry_bytes = [0u8; 2];
+    read_world_range(world_id, layout.entry_gpa(), &mut entry_bytes)?;
+    let body = parsed.protected_mode();
+    let entry_index = bzimage::ENTRY_OFFSET_64 as usize;
+    if entry_bytes != [body[entry_index], body[entry_index + 1]] {
+        log::warn!(
+            "[s9vm] bootdry: entry bytes {entry_bytes:x?} expected {:x?} \
+             (entry={:#x} body_len={} setup={} base={:#x})",
+            [body[entry_index], body[entry_index + 1]],
+            layout.entry_gpa(),
+            body.len(),
+            parsed.setup_bytes(),
+            layout.kernel_base
+        );
+        return Err(SelftestError::BadExit("entry bytes were not copied"));
+    }
+    let mut magic = [0u8; 4];
+    read_world_range(world_id, layout.boot_params_gpa + 0x202, &mut magic)?;
+    if magic != bzimage::HEADER_MAGIC.to_le_bytes() {
+        return Err(SelftestError::BadExit("boot params header was not written"));
+    }
+    let mut cmdline = [0u8; 4];
+    read_world_range(world_id, layout.cmdline_gpa, &mut cmdline)?;
+    if &cmdline != b"cons" {
+        return Err(SelftestError::BadExit("command line was not written"));
+    }
+    for address in [
+        layout.boot_params_gpa,
+        layout.cmdline_gpa,
+        layout.gdt_gpa,
+        layout.page_tables_gpa,
+        layout.entry_gpa(),
+        layout.kernel_base,
+    ] {
+        let (physical, leaf) = page_tables
+            .translate(&tables, address)
+            .ok_or(SelftestError::BadExit("boot object is not identity mapped"))?;
+        if physical != address || leaf & 1 == 0 {
+            return Err(SelftestError::BadExit("guest mapping is wrong"));
+        }
+    }
+
+    Ok(BootProtocolReport {
+        kernel_base: layout.kernel_base,
+        kernel_bytes: plan.kernel_bytes,
+        init_size: u64::from(plan.init_size),
+        entry: layout.entry_gpa(),
+        boot_params_gpa: layout.boot_params_gpa,
+        cmdline_gpa: layout.cmdline_gpa,
+        gdt_gpa: layout.gdt_gpa,
+        table_pages: page_tables.table_count() as u64,
+        identity_ranges: layout.identity.len(),
+    })
+}
+
 /// Report of the ACPI-discovery phase.
 pub struct AcpiReport {
     pub total_exits: u32,
@@ -3402,19 +3742,47 @@ fn run_guestos_task() {
     }
 }
 
-/// Runs the VT-x-free loader dry run when the boot configuration asks for it.
+/// Runs a VT-x-free dry run when the boot configuration asks for it.
 ///
-/// `s9vm.selftest=loader_dry` exercises the world memory mapping, the kernel
-/// ELF loader (copy + BSS zero-fill) and the world teardown **without entering
-/// a guest**, so it works on hosts where VT-x is unavailable and turns the
-/// loader's frame bookkeeping into a deterministic smoke test. It is called
-/// before the VT-x detection in [`crate::s9vm::init`], with a default
-/// capability set (the world memory layer does not depend on the hardware
-/// controls).
+/// Two modes are accepted:
+///
+/// - `s9vm.selftest=loader_dry` exercises the world memory mapping, the kernel
+///   ELF loader (copy + BSS zero-fill) and the world teardown;
+/// - `s9vm.selftest=linux_dry` exercises the whole 64-bit boot preparation:
+///   image parse, layout plan, guest memory mapping, protected-mode copy, boot
+///   parameter page with its e820 map, command line, entry GDT and the guest
+///   page tables built through the world translation.
+///
+/// Neither enters a guest, so both work on hosts where VT-x is unavailable and
+/// turn the boot path into a deterministic smoke test. They are called before
+/// the VT-x detection in [`crate::s9vm::init`], with a default capability set
+/// (the world memory layer does not depend on the hardware controls).
 pub fn maybe_run_loader_dry_from_boot_env() {
     let mode = crate::boot_args()
         .and_then(|args| args.env_get("s9vm.selftest"))
         .unwrap_or("");
+    if mode == "linux_dry" {
+        log::info!("[s9vm] boot-protocol dry run requested (no VT-x required)");
+        let caps = HwCaps::default();
+        match run_boot_protocol_dry(&caps) {
+            Ok(report) => log::info!(
+                "[s9vm] bootdry PASS: kernel={:#x} bytes={} init_size={} entry={:#x} \
+                 params={:#x} cmdline={:#x} gdt={:#x} tables={} ranges={} \
+                 (parse + layout + zero page + guest tables, no guest entry)",
+                report.kernel_base,
+                report.kernel_bytes,
+                report.init_size,
+                report.entry,
+                report.boot_params_gpa,
+                report.cmdline_gpa,
+                report.gdt_gpa,
+                report.table_pages,
+                report.identity_ranges
+            ),
+            Err(error) => log::warn!("[s9vm] bootdry FAIL: {:?}", error),
+        }
+        return;
+    }
     if mode != "loader_dry" {
         return;
     }
