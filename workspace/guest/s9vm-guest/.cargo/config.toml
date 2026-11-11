@@ -9,6 +9,11 @@
 rustflags = [
     "-C",
     "relocation-model=static",
+    # The local APIC timer interrupt stub calls Rust from an interrupt context:
+    # the interrupted code must not keep live values in the x86-64 red zone,
+    # because the CPU frame and the saved registers are pushed below RSP.
+    "-C",
+    "no-redzone=yes",
     "-C",
     "link-arg=-no-pie",
     "-C",

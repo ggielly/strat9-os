@@ -141,6 +141,40 @@ pub unsafe fn begin(bus: Bus) {
     }
 }
 
+/// Negotiates the modern interface plus the requested low-word feature bits.
+///
+/// The requested bits are masked with the device-offered mask, so a driver can
+/// pass the optional features it understands without probing the device
+/// itself. Returns `false` when the device does not offer
+/// [`FEATURE_HI_VERSION_1`] or rejects `FEATURES_OK`.
+///
+/// # Safety
+///
+/// The transport page must be mapped writable.
+pub unsafe fn negotiate(bus: Bus, low_features: u32) -> bool {
+    // SAFETY: caller contract.
+    unsafe {
+        bus.write(REG_DEVICE_FEATURES_SEL, 0);
+        let offered_low = bus.read(REG_DEVICE_FEATURES);
+        bus.write(REG_DEVICE_FEATURES_SEL, 1);
+        let offered_high = bus.read(REG_DEVICE_FEATURES);
+        if offered_high & FEATURE_HI_VERSION_1 == 0 {
+            return false;
+        }
+        bus.write(REG_DRIVER_FEATURES_SEL, 0);
+        bus.write(REG_DRIVER_FEATURES, low_features & offered_low);
+        bus.write(REG_DRIVER_FEATURES_SEL, 1);
+        bus.write(REG_DRIVER_FEATURES, FEATURE_HI_VERSION_1);
+        bus.write(REG_DRIVER_FEATURES_SEL, 0);
+        bus.write(REG_DEVICE_FEATURES_SEL, 0);
+        bus.write(
+            REG_STATUS,
+            STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK,
+        );
+        bus.read(REG_STATUS) & STATUS_FEATURES_OK != 0
+    }
+}
+
 /// Negotiates `VIRTIO_F_VERSION_1` and validates `FEATURES_OK`.
 ///
 /// Returns `false` when the device does not offer the modern interface or
@@ -151,23 +185,7 @@ pub unsafe fn begin(bus: Bus) {
 /// The transport page must be mapped writable.
 pub unsafe fn negotiate_version_1(bus: Bus) -> bool {
     // SAFETY: caller contract.
-    unsafe {
-        bus.write(REG_DEVICE_FEATURES_SEL, 1);
-        let offered = bus.read(REG_DEVICE_FEATURES);
-        if offered & FEATURE_HI_VERSION_1 == 0 {
-            return false;
-        }
-        bus.write(REG_DRIVER_FEATURES_SEL, 1);
-        bus.write(REG_DRIVER_FEATURES, FEATURE_HI_VERSION_1);
-        bus.write(REG_DRIVER_FEATURES_SEL, 0);
-        bus.write(REG_DRIVER_FEATURES, 0);
-        bus.write(REG_DEVICE_FEATURES_SEL, 0);
-        bus.write(
-            REG_STATUS,
-            STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK,
-        );
-        bus.read(REG_STATUS) & STATUS_FEATURES_OK != 0
-    }
+    unsafe { negotiate(bus, 0) }
 }
 
 /// Programs one split queue (`index`, `size` entries) and marks it ready.

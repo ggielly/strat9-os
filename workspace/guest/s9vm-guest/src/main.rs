@@ -35,7 +35,10 @@
 //! 3. a private IDT (128 gates) whose exception stubs reach a common handler;
 //! 4. private 4-level page tables with 2 MiB identity leaves over the first
 //!    4 MiB, activated by switching `CR3`;
-//! 5. a non-fatal local APIC timer probe that observes the first count tick.
+//! 5. a local APIC timer count probe and a bounded interrupt-delivery probe
+//!    (private IDT gate, assembly ISR, EOI and `iretq`);
+//! 6. the boot-parameter-driven device drivers: virtio-console text output,
+//!    virtio-block label read and virtio-network frame transmit.
 //!
 //! # Boot contract
 //!
@@ -43,7 +46,8 @@
 //!
 //! - 64-bit long mode, paging enabled with an identity mapping of
 //!   `0x0000_0000..0x0040_0000` (`CR3 = 0`, 2 MiB page-directory leaves);
-//! - no IDT: interrupts are not expected and the guest never executes `sti`;
+//! - no IDT: the guest installs its own; interrupts are enabled only for the
+//!   bounded timer-interrupt probe and disabled again afterwards;
 //! - `RDI` = guest-physical address of the `S9VMBP` boot-parameter block
 //!   (`workspace/kernel/src/s9vm/bootparams.rs`);
 //! - the ACPI RSDP table at guest-physical `0x000E_0000`;
@@ -83,16 +87,20 @@
 //! | `b'c'` | no console device, or it did not acknowledge (non-fatal) |
 //! | `b'D'` | virtio-block read sector 0 and validated the `S9VMDISK` label |
 //! | `b'd'` | no block device, or the request/label failed (non-fatal) |
+//! | `b'V'` | local APIC timer interrupt delivered through the private IDT |
+//! | `b'v'` | no timer interrupt observed (non-fatal) |
+//! | `b'X'` | virtio-net transmit queue consumed the Ethernet frame |
+//! | `b'x'` | no network device, or the transmit failed (non-fatal) |
 //! | `b'E'` + vector | CPU exception caught by the private IDT; then halt |
 //! | `b'F'` + code | failure; the next byte is a [`failure`] code |
 //! | `b'P'` | Rust panic (the next byte is not emitted; the guest halts) |
 //!
 //! Success sequence: `G`, `M`, `A`, `R`/`r` (initrd), `K` (kernel tables up),
 //! `T`/`t` (timer probe), `N`/`n` (initrd `init` extracted), `S`/`s` (ACPI
-//! tables), `C`/`c` (virtio-console text output) and `D`/`d` (virtio-block
-//! read), then one `hlt` at a time forever. A failure emits `F`, its code,
-//! then halts; an exception after the IDT is installed emits `E`, the vector,
-//! then halts.
+//! tables), `C`/`c` (virtio-console text output), `D`/`d` (virtio-block read),
+//! `V`/`v` (timer interrupt) and `X`/`x` (virtio-net transmit), then one `hlt`
+//! at a time forever. A failure emits `F`, its code, then halts; an exception
+//! after the IDT is installed emits `E`, the vector, then halts.
 
 #![no_std]
 #![no_main]
@@ -101,11 +109,13 @@ use core::{
     arch::{asm, global_asm},
     panic::PanicInfo,
     ptr::{addr_of, addr_of_mut, read_volatile, write_volatile},
+    sync::atomic::{AtomicU32, Ordering},
 };
 
 mod virtio;
 mod virtio_blk;
 mod virtio_console;
+mod virtio_net;
 
 /// Guest-physical address the image is linked and loaded at.
 pub const LINK_ADDRESS: u64 = 0x0010_0000;
@@ -142,6 +152,8 @@ const BP_OFF_CHECKSUM: u64 = 0x034;
 const BP_FLAG_CONSOLE: u32 = 1;
 /// Boot flag: a virtio-block device is present on this world.
 const BP_FLAG_BLOCK: u32 = 2;
+/// Boot flag: a virtio-network device is present on this world.
+const BP_FLAG_NETWORK: u32 = 4;
 
 /// Total size of the boot-parameter block.
 const BP_SIZE: u64 = 1024;
@@ -286,6 +298,21 @@ const APIC_LVT_MASKED: u32 = 1 << 16;
 const APIC_LVT_VECTOR: u32 = 0x20;
 /// Divide-configuration encoding `0b1011` = divide by 1.
 const APIC_DIVIDE_BY_1: u32 = 0xB;
+/// End-of-interrupt register offset.
+const APIC_EOI: u64 = 0x0B0;
+/// In-request register block: first offset of the eight 32-bit words.
+const APIC_IRR_FIRST: u64 = 0x200;
+/// Number of 32-bit words in the in-request register block.
+const APIC_IRR_WORDS: u64 = 8;
+/// Vector delivered by the local APIC timer (legacy IRQ0 remap).
+const TIMER_VECTOR: u8 = 0x20;
+/// Initial one-shot count of the interrupt probe: one bus tick expires it.
+const TIMER_IRQ_INITIAL: u32 = 1;
+/// Maximum number of current-count polls while waiting for the interrupt.
+///
+/// Each poll is one replayed device exit that advances the emulated timer; the
+/// bound also keeps the probe well below the engine's `MAX_RESUMED_EXITS`.
+const TIMER_IRQ_POLLS: u32 = 32;
 /// Initial one-shot count.
 ///
 /// Small on purpose: the engine converts host TSC cycles to APIC bus ticks, so
@@ -334,6 +361,8 @@ extern "C" {
     static s9vm_guest_exception_table: [u64; EXCEPTION_VECTORS];
     /// Common stub used for vectors without a dedicated handler.
     fn s9vm_exception_spurious();
+    /// Local APIC timer interrupt stub (vector `0x20`).
+    fn s9vm_timer_isr();
     /// Loads `GDTR` and reloads `CS`/`SS`/`DS`/`ES`/`FS`/`GS`.
     fn s9vm_load_gdt(gdtr: *const DescriptorTablePointer);
     /// Page-table root built in `.bss`.
@@ -450,6 +479,50 @@ s9vm_exception_spurious:
     push 0xFF
     jmp s9vm_exception_common
     .size s9vm_exception_spurious, . - s9vm_exception_spurious
+
+    /* Local APIC timer interrupt stub (vector 0x20). The interrupt gate
+       cleared IF; save all 15 general-purpose registers, call the Rust
+       handler and resume the interrupted context with iretq. RBX keeps the
+       saved frame pointer while the stack is aligned for the Rust call. */
+    .type s9vm_timer_isr, @function
+    .globl s9vm_timer_isr
+s9vm_timer_isr:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rbx, rsp
+    and rsp, -16
+    call s9vm_timer_handler
+    mov rsp, rbx
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    iretq
+    .size s9vm_timer_isr, . - s9vm_timer_isr
 
     .section .rodata, "a"
     .balign 16
@@ -729,6 +802,28 @@ pub unsafe extern "C" fn guest_main(boot_params_gpa: u64) -> ! {
     } else {
         debug_write(b'd');
     }
+
+    // 15. Interrupt delivery: program the local APIC timer one-shot with the
+    //     timer vector, enable interrupts for a bounded wait, and let the
+    //     private IDT gate and its assembly stub run the Rust handler. This
+    //     proves the full path kernel injection -> IDT -> ISR -> EOI -> iretq.
+    //     `V` when the handler observed a tick, non-fatal `v` otherwise.
+    let timer_tick = unsafe { probe_timer_interrupt() };
+    debug_write(if timer_tick { b'V' } else { b'v' });
+
+    // 16. Network device: transmit one Ethernet frame through the virtio-net
+    //     transmit queue (device id 1 at console base + two 4 KiB pages, by
+    //     engine device-model convention). `X` when the device consumed the
+    //     frame, non-fatal `x` otherwise.
+    let mut net_sent = false;
+    if flags & BP_FLAG_NETWORK != 0 {
+        let net_base = console_base + virtio_net::BASE_OFFSET_FROM_CONSOLE;
+        // SAFETY: the network transport page is part of the device window
+        // mapped by the private page tables; the driver probes the device
+        // identity before touching any queue.
+        net_sent = unsafe { virtio_net::transmit(net_base) };
+    }
+    debug_write(if net_sent { b'X' } else { b'x' });
 
     halt_forever()
 }
@@ -1172,14 +1267,15 @@ unsafe fn install_gdt() {
 
 /// Installs the private IDT with one gate per vector.
 ///
-/// Vectors `0..=31` use their exception stub; the rest use the spurious stub.
-/// Interrupts are never enabled, so the IRQ range only needs to be present and
-/// diagnosable.
+/// Vectors `0..=31` use their exception stub, vector `0x20` (local APIC timer)
+/// has a dedicated interrupt stub and the remaining vectors use the spurious
+/// stub. Interrupts are only enabled for the bounded timer-interrupt probe, so
+/// the polling drivers never take a device IRQ.
 ///
 /// # Safety
 ///
-/// Called once; the exception stubs and the `.bss` IDT must be linked and the
-/// code selector must match the private GDT.
+/// Called once; the stubs and the `.bss` IDT must be linked and the code
+/// selector must match the private GDT.
 unsafe fn install_idt() {
     let idt = addr_of_mut!(__s9vm_guest_idt).cast::<u64>();
     for index in 0..IDT_ENTRIES * 2 {
@@ -1198,6 +1294,10 @@ unsafe fn install_idt() {
     for vector in EXCEPTION_VECTORS..IDT_ENTRIES {
         write_idt_entry(idt, vector, spurious);
     }
+    // Dedicated gate for the timer interrupt: the exception range stays
+    // unchanged and the remaining vectors keep the spurious stub.
+    let timer = s9vm_timer_isr as *const () as usize as u64;
+    write_idt_entry(idt, usize::from(TIMER_VECTOR), timer);
     let pointer = DescriptorTablePointer {
         limit: (IDT_ENTRIES * 16 - 1) as u16,
         base: idt as u64,
@@ -1349,6 +1449,107 @@ unsafe fn probe_apic_timer() -> bool {
     }
     mmio_write32(APIC_BASE + APIC_INITIAL_COUNT, 0);
     false
+}
+
+/// Number of local APIC timer interrupts delivered to the private ISR.
+static TIMER_TICKS: AtomicU32 = AtomicU32::new(0);
+
+/// Local APIC timer interrupt handler (vector [`TIMER_VECTOR`]).
+///
+/// Called by the assembly stub, which saved all general-purpose registers and
+/// aligned the stack. The handler counts the tick and acknowledges the
+/// interrupt through the local APIC end-of-interrupt register; the stub then
+/// restores the registers and resumes the interrupted context with `iretq`.
+/// Kept minimal and panic-free: it must not touch anything the interrupted
+/// code owns beyond the atomic counter.
+#[no_mangle]
+pub extern "C" fn s9vm_timer_handler() {
+    TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: the local APIC page is mapped by the private page tables; the EOI
+    // write clears the in-service bit of the delivered vector.
+    unsafe {
+        mmio_write32(APIC_BASE + APIC_EOI, 0);
+    }
+}
+
+/// True when the local APIC in-request register block is empty.
+///
+/// The eight IRR words are read through the modeled device window, so the
+/// check also proves the APIC page is reachable. Used before enabling
+/// interrupts: a foreign pending vector must not be delivered through the
+/// exception stubs.
+///
+/// # Safety
+///
+/// The local APIC page must be mapped by the active page tables.
+unsafe fn apic_irr_empty() -> bool {
+    let mut index = 0u64;
+    while index < APIC_IRR_WORDS {
+        // SAFETY: the local APIC page is mapped; the IRR block is 0x200..0x280.
+        let word = unsafe { mmio_read32(APIC_BASE + APIC_IRR_FIRST + index * 0x10) };
+        if word != 0 {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// Probes interrupt delivery through the private IDT and page tables.
+///
+/// Programs the local APIC timer as an unmasked one-shot with vector
+/// [`TIMER_VECTOR`], enables interrupts for a bounded wait, and expects the
+/// assembly stub to run the Rust handler (which counts the tick and writes
+/// EOI). The timer model only advances when the guest exits to the kernel, so
+/// the wait loop reads the read-only current count: each read is a replayed
+/// device access (one exit) that advances the timer. With a one-tick initial
+/// count the first such advance expires the timer; the kernel then injects the
+/// vector because `IF` is set. Interrupts are disabled again before returning.
+///
+/// Returns `false` for an absent or incoherent APIC, a foreign pending vector,
+/// or a timer that never fires (non-fatal for the caller).
+///
+/// # Safety
+///
+/// The APIC page, the private IDT gate and the interrupt stack must be ready;
+/// called once, from the boot thread.
+unsafe fn probe_timer_interrupt() -> bool {
+    let version = mmio_read32(APIC_BASE + APIC_VERSION);
+    if version == 0 || version == u32::MAX || (version >> 16) & 0xFF == 0 {
+        return false;
+    }
+    if !unsafe { apic_irr_empty() } {
+        return false;
+    }
+    let svr = mmio_read32(APIC_BASE + APIC_SVR);
+    mmio_write32(APIC_BASE + APIC_SVR, svr | APIC_SVR_ENABLE);
+    // One-shot mode (mode bits 18:17 = 0), unmasked: the expiry raises
+    // TIMER_VECTOR. The divide by 1 keeps the conversion to one bus tick.
+    mmio_write32(APIC_BASE + APIC_LVT_TIMER, u32::from(TIMER_VECTOR));
+    mmio_write32(APIC_BASE + APIC_DIVIDE_CONFIG, APIC_DIVIDE_BY_1);
+    mmio_write32(APIC_BASE + APIC_INITIAL_COUNT, TIMER_IRQ_INITIAL);
+    // SAFETY: the timer gate is installed in the IDT and the current stack is
+    // the kernel stack; interrupts stay enabled only for the bounded wait.
+    unsafe {
+        asm!("sti", options(nostack));
+    }
+    let mut polls = 0u32;
+    while polls < TIMER_IRQ_POLLS {
+        // One emulated device exit per iteration: this is what advances the
+        // APIC timer model and eventually lets the kernel inject the vector.
+        let _ = mmio_read32(APIC_BASE + APIC_CURRENT_COUNT);
+        if TIMER_TICKS.load(Ordering::Relaxed) != 0 {
+            break;
+        }
+        core::hint::spin_loop();
+        polls += 1;
+    }
+    // SAFETY: interrupts are masked again before returning to the caller.
+    unsafe {
+        asm!("cli", options(nostack));
+    }
+    mmio_write32(APIC_BASE + APIC_INITIAL_COUNT, 0);
+    TIMER_TICKS.load(Ordering::Relaxed) != 0
 }
 
 /// Reads one 32-bit MMIO register at `address`.
