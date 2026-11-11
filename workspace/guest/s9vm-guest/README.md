@@ -15,6 +15,7 @@ workspace/guest/s9vm-guest/
 ├── Cargo.toml            # standalone no_std crate (empty [workspace])
 ├── s9vm-guest.ld         # link script: fixed 0x100000 load address, _start
 ├── src/main.rs           # _start (global_asm!), guest_main, GDT/IDT/paging
+├── src/guest_acpi.rs    # pure ACPI window parser (shared with host tests)
 ├── src/virtio.rs         # shared virtio-mmio v2 transport helpers
 ├── src/virtio_console.rs # virtio-console transmit driver
 ├── src/virtio_blk.rs     # virtio-block read driver
@@ -257,7 +258,7 @@ $ readelf -h target/x86_64-unknown-none/release/s9vm-guest
   Entry point address:               0x100000
 
 $ readelf -lW target/x86_64-unknown-none/release/s9vm-guest
-  LOAD  0x001000 0x0000000000100000 0x0000000000100000 0x002455 0x002455 R E 0x1000
+  LOAD  0x001000 0x0000000000100000 0x0000000000100000 0x0026e5 0x0026e5 R E 0x1000
   LOAD  0x004000 0x0000000000103000 0x0000000000103000 0x00010a 0x00010a R   0x1000
   LOAD  0x005000 0x0000000000104000 0x0000000000104000 0x000010 0x000010 RW  0x1000
   LOAD  0x006000 0x0000000000105000 0x0000000000105000 0x000000 0x008dd0 RW  0x1000
@@ -307,6 +308,7 @@ policy is expected to report `G`, `M`, `A`, `R`/`r`, `K`, `T`/`t`, `N`/`n`,
   handler;
 - no return path: `guest_main` ends in a `hlt` loop (the panic handler publishes
   `P` before halting).
+
 
 
 

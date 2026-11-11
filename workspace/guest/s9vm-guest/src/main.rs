@@ -112,6 +112,7 @@ use core::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
+mod guest_acpi;
 mod virtio;
 mod virtio_blk;
 mod virtio_console;
@@ -181,17 +182,6 @@ const BP_MAGIC: u64 = 0x0000_5042_4D56_3953;
 /// End (exclusive) of the identity mapping shared by the policy and the
 /// private page tables: the only window a guest pointer may be read from.
 const IDENTITY_WINDOW: u64 = 0x0040_0000;
-/// ACPI RSDP revision field offset.
-const RSDP_REVISION: u64 = 15;
-/// ACPI RSDP RSDT address field offset (32-bit, ACPI 1.0).
-const RSDP_RSDT: u64 = 16;
-/// ACPI RSDP XSDT address field offset (64-bit, ACPI 2.0+).
-const RSDP_XSDT: u64 = 24;
-/// Length of the common ACPI table header (`signature`, `length`, `revision`,
-/// `checksum`, OEM fields).
-const ACPI_HEADER_LEN: u64 = 36;
-/// Maximum number of root tables walked by the guest.
-const ACPI_MAX_TABLES: u32 = 16;
 /// `cpio` "newc" ASCII magic, first bytes of an initrd archive.
 const CPIO_NEWC_MAGIC: [u8; 6] = *b"070701";
 /// Size of a `newc` cpio header: six magic bytes and thirteen 8-digit
@@ -203,16 +193,6 @@ const CPIO_OFF_NAMESIZE: u64 = 94;
 const CPIO_OFF_FILESIZE: u64 = 54;
 /// Maximum number of archive entries walked (safety bound).
 const CPIO_MAX_ENTRIES: u32 = 16;
-/// Expected guest-physical address of the ACPI RSDP.
-const RSDP_GPA: u64 = 0x000E_0000;
-/// End (exclusive) of the legacy BIOS window scanned for the RSDP.
-const RSDP_SCAN_END: u64 = 0x0010_0000;
-/// RSDP candidates are 16-byte aligned.
-const RSDP_ALIGN: u64 = 16;
-/// ACPI 1.0 checksum covers the first 20 bytes of the RSDP.
-const RSDP_CHECKSUM_LEN: u64 = 20;
-/// `"RSD PTR "` read as a little-endian `u64`.
-const RSDP_SIGNATURE: u64 = u64::from_le_bytes(*b"RSD PTR ");
 
 // Global descriptor table.
 /// Selector of the flat 64-bit code descriptor.
@@ -636,14 +616,20 @@ pub unsafe extern "C" fn guest_main(boot_params_gpa: u64) -> ! {
 
     // 5. The advertised RSDP pointer is the address the firmware image lives
     //    at, the signature is really there and its ACPI 1.0 checksum is valid.
+    //    The whole firmware window is exposed as a slice so the exact
+    //    discovery algorithm is shared with the host tests (`guest_acpi`).
     let rsdp_gpa = read_u64(boot_params_gpa, BP_OFF_RSDP_GPA);
-    if rsdp_gpa != RSDP_GPA {
+    if rsdp_gpa != guest_acpi::WINDOW_BASE {
         fail(failure::RSDP_FIELD);
     }
-    let Some(found) = find_rsdp() else {
+    // SAFETY: the policy maps the whole ACPI window read-only for the guest.
+    let acpi_window: &'static [u8] = unsafe {
+        core::slice::from_raw_parts(guest_acpi::WINDOW_BASE as *const u8, guest_acpi::WINDOW_LEN)
+    };
+    let Some(found) = guest_acpi::find_rsdp(acpi_window) else {
         fail(failure::RSDP_SCAN);
     };
-    if found != rsdp_gpa || !acpi_checksum_ok(found) {
+    if guest_acpi::WINDOW_BASE + found as u64 != rsdp_gpa {
         fail(failure::CHECKSUM);
     }
     debug_write(b'A');
@@ -734,30 +720,39 @@ pub unsafe extern "C" fn guest_main(boot_params_gpa: u64) -> ! {
     let mut acpi_message = [0u8; CONSOLE_MESSAGE_MAX];
     let mut acpi_message_len = 0usize;
     let mut acpi_found = false;
-    if let Some(info) = unsafe { acpi_scan() } {
-        push_bytes(&mut acpi_message, &mut acpi_message_len, b"acpi: ");
-        push_bytes(
-            &mut acpi_message,
-            &mut acpi_message_len,
-            if info.xsdt { b"XSDT " } else { b"RSDT " },
-        );
-        push_decimal(&mut acpi_message, &mut acpi_message_len, info.tables);
-        push_bytes(&mut acpi_message, &mut acpi_message_len, b" tables madt=");
-        push_decimal(
-            &mut acpi_message,
-            &mut acpi_message_len,
-            u32::from(info.madt),
-        );
-        push_bytes(&mut acpi_message, &mut acpi_message_len, b" facp=");
-        push_decimal(
-            &mut acpi_message,
-            &mut acpi_message_len,
-            u32::from(info.fadt),
-        );
-        push_bytes(&mut acpi_message, &mut acpi_message_len, b"\n");
-        acpi_found = info.madt;
+    match guest_acpi::scan(acpi_window) {
+        Ok(info) => {
+            push_bytes(&mut acpi_message, &mut acpi_message_len, b"acpi: ");
+            push_bytes(
+                &mut acpi_message,
+                &mut acpi_message_len,
+                if info.xsdt { b"XSDT " } else { b"RSDT " },
+            );
+            push_decimal(&mut acpi_message, &mut acpi_message_len, info.tables);
+            push_bytes(&mut acpi_message, &mut acpi_message_len, b" tables madt=");
+            push_decimal(
+                &mut acpi_message,
+                &mut acpi_message_len,
+                u32::from(info.madt),
+            );
+            push_bytes(&mut acpi_message, &mut acpi_message_len, b" facp=");
+            push_decimal(
+                &mut acpi_message,
+                &mut acpi_message_len,
+                u32::from(info.fadt),
+            );
+            push_bytes(&mut acpi_message, &mut acpi_message_len, b"\n");
+            acpi_found = info.madt;
+            debug_write(b'S');
+        }
+        Err(error) => {
+            // `s` followed by the typed failure code, so a hardware run is
+            // diagnosable without a rebuild.
+            debug_write(b's');
+            debug_write(error.code());
+        }
     }
-    debug_write(if acpi_found { b'S' } else { b's' });
+    let _ = acpi_found;
 
     // 13. Real text output: drive the virtio-console transmit queue published
     //     in the boot block. Two messages are sent through the same queue: the
@@ -1639,176 +1634,6 @@ unsafe fn read_u32(base: u64, offset: u64) -> u32 {
 unsafe fn read_u64(base: u64, offset: u64) -> u64 {
     // SAFETY: caller guarantees the address is mapped and readable.
     unsafe { read_volatile((base + offset) as *const u64) }
-}
-
-/// Scans the legacy BIOS window for the `RSD PTR ` signature.
-///
-/// # Safety
-///
-/// The policy maps `RSDP_GPA..RSDP_SCAN_END` read-only for the guest.
-unsafe fn find_rsdp() -> Option<u64> {
-    let mut address = RSDP_GPA;
-    while address < RSDP_SCAN_END {
-        // SAFETY: every candidate is 8-byte aligned and inside the window.
-        let word = unsafe { read_volatile(address as *const u64) };
-        if word == RSDP_SIGNATURE {
-            return Some(address);
-        }
-        address += RSDP_ALIGN;
-    }
-    None
-}
-
-/// Checks the ACPI 1.0 byte checksum of the RSDP at `rsdp`.
-///
-/// # Safety
-///
-/// The 20 bytes at `rsdp` must be mapped and readable.
-unsafe fn acpi_checksum_ok(rsdp: u64) -> bool {
-    let mut sum = 0u8;
-    let mut index = 0u64;
-    while index < RSDP_CHECKSUM_LEN {
-        // SAFETY: the checksum range is inside the mapped RSDP page.
-        let byte = unsafe { read_volatile((rsdp + index) as *const u8) };
-        sum = sum.wrapping_add(byte);
-        index += 1;
-    }
-    sum == 0
-}
-
-/// Summary of the ACPI tables the guest discovered.
-struct AcpiInfo {
-    /// Number of root-table entries whose target header validates.
-    tables: u32,
-    /// A MADT (`APIC`) table was found and validated.
-    madt: bool,
-    /// A FADT (`FACP`) table was found and validated.
-    fadt: bool,
-    /// The root table was the 64-bit XSDT (ACPI 2.0+).
-    xsdt: bool,
-}
-
-/// Compares the four-byte ACPI signature at `address`.
-///
-/// # Safety
-///
-/// `address..address + 4` must be mapped and readable.
-unsafe fn acpi_signature_eq(address: u64, signature: &[u8; 4]) -> bool {
-    let mut index = 0u64;
-    while index < 4 {
-        // SAFETY: caller contract.
-        if read_u8(address, index) != signature[index as usize] {
-            return false;
-        }
-        index += 1;
-    }
-    true
-}
-
-/// Validates one ACPI table header inside the firmware window.
-///
-/// Returns the declared table length when the header is inside the mapped
-/// window, the length covers the header, and the byte checksum is zero.
-///
-/// # Safety
-///
-/// The ACPI window `RSDP_GPA..RSDP_SCAN_END` must be mapped and readable.
-unsafe fn acpi_table_ok(address: u64) -> Option<u32> {
-    let end = address.checked_add(ACPI_HEADER_LEN)?;
-    if address < RSDP_GPA || end > RSDP_SCAN_END {
-        return None;
-    }
-    // SAFETY: the header range was validated above.
-    let length = u64::from(read_u32(address, 4));
-    let table_end = address.checked_add(length)?;
-    if length < ACPI_HEADER_LEN || table_end > RSDP_SCAN_END {
-        return None;
-    }
-    let mut sum = 0u8;
-    let mut index = 0u64;
-    while index < length {
-        // SAFETY: the whole table is inside the mapped window.
-        sum = sum.wrapping_add(read_u8(address, index));
-        index += 1;
-    }
-    if sum != 0 {
-        return None;
-    }
-    Some(length as u32)
-}
-
-/// Discovers the ACPI tables the policy wrote: RSDP -> XSDT/RSDT -> tables.
-///
-/// Every pointer is validated (`acpi_table_ok`) before use, so a malformed or
-/// truncated firmware image yields `None` instead of a fault.
-///
-/// # Safety
-///
-/// The legacy firmware window `RSDP_GPA..RSDP_SCAN_END` must be mapped and
-/// readable.
-unsafe fn acpi_scan() -> Option<AcpiInfo> {
-    // SAFETY: caller contract; `find_rsdp` scans the mapped window.
-    let rsdp = unsafe { find_rsdp() }?;
-    // SAFETY: the RSDP is inside the mapped window.
-    let revision = unsafe { read_u8(rsdp, RSDP_REVISION) };
-    let (root, entry_size, xsdt) = if revision >= 2 {
-        // SAFETY: the XSDT pointer field is inside the mapped RSDP.
-        let address = unsafe { read_u64(rsdp, RSDP_XSDT) };
-        if address != 0 {
-            (address, 8u64, true)
-        } else {
-            // SAFETY: same as above, 32-bit legacy field.
-            (u64::from(unsafe { read_u32(rsdp, RSDP_RSDT) }), 4u64, false)
-        }
-    } else {
-        // SAFETY: same as above, 32-bit legacy field.
-        (u64::from(unsafe { read_u32(rsdp, RSDP_RSDT) }), 4u64, false)
-    };
-    if root == 0 {
-        return None;
-    }
-    // SAFETY: caller contract; the root address is validated by
-    // `acpi_table_ok` before any dereference.
-    let root_len = unsafe { acpi_table_ok(root) }?;
-    // SAFETY: the root table header was validated above.
-    let expected: &[u8; 4] = if xsdt { b"XSDT" } else { b"RSDT" };
-    if !unsafe { acpi_signature_eq(root, expected) } {
-        return None;
-    }
-    let entries = (u64::from(root_len) - ACPI_HEADER_LEN) / entry_size;
-    let mut info = AcpiInfo {
-        tables: 0,
-        madt: false,
-        fadt: false,
-        xsdt,
-    };
-    let limit = entries.min(u64::from(ACPI_MAX_TABLES));
-    let mut index = 0u64;
-    while index < limit {
-        let entry = root + ACPI_HEADER_LEN + index * entry_size;
-        // SAFETY: `entry` is inside the validated root table.
-        let table = if xsdt {
-            unsafe { read_u64(entry, 0) }
-        } else {
-            u64::from(unsafe { read_u32(entry, 0) })
-        };
-        if table != 0 {
-            // SAFETY: the target is validated by `acpi_table_ok`.
-            if unsafe { acpi_table_ok(table) }.is_some() {
-                // SAFETY: the table header was validated above.
-                if unsafe { acpi_signature_eq(table, b"APIC") } {
-                    info.madt = true;
-                }
-                // SAFETY: same table header.
-                if unsafe { acpi_signature_eq(table, b"FACP") } {
-                    info.fadt = true;
-                }
-                info.tables += 1;
-            }
-        }
-        index += 1;
-    }
-    Some(info)
 }
 
 /// Appends `bytes` to a fixed message buffer, refusing to overflow.

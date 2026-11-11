@@ -33,7 +33,7 @@
 //! absent, not the expected kind or not modern yields `false` instead of a
 //! fault.
 
-use core::ptr::{read_volatile, write_volatile};
+use core::ptr::write_volatile;
 
 /// Transport register offsets (virtio-mmio, version 2).
 pub const REG_MAGIC: u64 = 0x000;
@@ -97,9 +97,22 @@ impl Bus {
     ///
     /// `base` must be mapped readable by the active page tables.
     pub unsafe fn read(self, offset: u64) -> u32 {
+        let value: u32;
+        // A plain 32-bit load is emitted on purpose: a `read_volatile` could be
+        // fused by the compiler into a read-modify instruction such as
+        // `testl $imm, [mem]`, whose opcode the engine's replay decoder does
+        // not model, turning the device access into an unhandled exit.
         // SAFETY: caller guarantees the mapping; every offset used by the
         // drivers is inside the 4 KiB transport page.
-        unsafe { read_volatile((self.base + offset) as *const u32) }
+        unsafe {
+            core::arch::asm!(
+                "mov {value:e}, dword ptr [{address}]",
+                address = in(reg) self.base + offset,
+                value = out(reg) value,
+                options(nostack),
+            );
+        }
+        value
     }
 
     /// Writes a 32-bit transport register.
@@ -108,8 +121,16 @@ impl Bus {
     ///
     /// `base` must be mapped writable by the active page tables.
     pub unsafe fn write(self, offset: u64, value: u32) {
+        // Plain 32-bit store for the same reason as [`Self::read`].
         // SAFETY: same contract as `read`.
-        unsafe { write_volatile((self.base + offset) as *mut u32, value) };
+        unsafe {
+            core::arch::asm!(
+                "mov dword ptr [{address}], {value:e}",
+                address = in(reg) self.base + offset,
+                value = in(reg) value,
+                options(nostack),
+            );
+        }
     }
 }
 
