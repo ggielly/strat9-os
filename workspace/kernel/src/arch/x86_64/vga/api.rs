@@ -273,6 +273,20 @@ pub fn init(
         fb_addr
     };
 
+    log::info!(
+        "[vga] fb {}x{} pitch={} bpp={} rgb_sizes={}/{}/{} rgb_shifts={}/{}/{}",
+        fb_width,
+        fb_height,
+        pitch,
+        bpp,
+        red_size,
+        green_size,
+        blue_size,
+        red_shift,
+        green_shift,
+        blue_shift
+    );
+
     let mut writer = VGA_WRITER.lock();
     if writer.configure(
         fb_virt as *mut u8,

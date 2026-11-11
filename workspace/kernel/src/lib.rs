@@ -1565,6 +1565,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
         // In lite mode there is no fallback drawer, so the buffered path must
         // still take over (it is the only writer).
         crate::debug_cfg::set_vga_debug_live(false);
+        // One full viewport pass reclaims any text damage left pending by the
+        // live path now that the buffered console owns the screen.
+        crate::arch::x86_64::vga::with_writer(|w| w.render_viewport_full());
     }
     #[cfg(feature = "selftest")]
     {
@@ -1586,6 +1589,9 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     crate::e9_mark!(b'H');
     boot_milestone!("Boot complete ! Now entering in scheduler");
     boot_bar(11, "ready");
+    // Boot finished: release the HUD band so the text console owns the screen.
+    #[cfg(target_arch = "x86_64")]
+    crate::arch::x86_64::vga::with_writer(|w| w.set_hud_height(0));
     arch::speaker::beep_startup();
     serial_println!("[init] Boot complete. Starting preemptive scheduler...");
     vga_println!("[OK] Starting multitasking (preemptive)");

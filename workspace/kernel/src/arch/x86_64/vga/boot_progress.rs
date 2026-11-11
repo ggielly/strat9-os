@@ -33,6 +33,7 @@
 
 use super::api;
 use crate::framebuffer::RgbColor;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Total number of boot milestones. Must match the highest ordinal passed by
 /// the call sites in `kernel_main` / `init_apic_subsystem`.
@@ -40,73 +41,99 @@ pub const TOTAL: usize = 11;
 
 // Light / pastel palette (the user asked for clair/pastel).
 /// Empty part of the track: soft lavender grey.
-const TRACK: RgbColor = RgbColor::new(0xDD, 0xDD, 0xEC);
+pub(crate) const TRACK: RgbColor = RgbColor::new(0xDD, 0xDD, 0xEC);
 /// Completed part: pastel mint green.
-const FILL: RgbColor = RgbColor::new(0xA8, 0xE6, 0xCF);
+pub(crate) const FILL: RgbColor = RgbColor::new(0xA8, 0xE6, 0xCF);
 /// Thin border around the track: muted grey.
-const BORDER: RgbColor = RgbColor::new(0xB5, 0xB5, 0xC8);
+pub(crate) const BORDER: RgbColor = RgbColor::new(0xB5, 0xB5, 0xC8);
 /// Label text: muted slate on a near-white strip.
-const LABEL_FG: RgbColor = RgbColor::new(0x4A, 0x4A, 0x5E);
-const LABEL_BG: RgbColor = RgbColor::new(0xF2, 0xF0, 0xF7);
+pub(crate) const LABEL_FG: RgbColor = RgbColor::new(0x4A, 0x4A, 0x5E);
+pub(crate) const LABEL_BG: RgbColor = RgbColor::new(0xF2, 0xF0, 0xF7);
+
+/// Reserved pixel height of the HUD band: label strip + gap + bar + padding.
+pub fn band_height(_h: usize, gh: usize) -> usize {
+    gh + 4 + gh.max(10) + 6
+}
+
+/// Shared HUD geometry: the writer reserves exactly this band and the bar
+/// draws into it, so the console text and the bar can never overlap.
+pub struct Layout {
+    pub band_y: usize,
+    pub band_h: usize,
+    pub label_y: usize,
+    pub bar_x: usize,
+    pub bar_y: usize,
+    pub bar_w: usize,
+    pub bar_h: usize,
+}
+
+/// Computes the HUD band layout for a `w`×`h` framebuffer.
+pub fn layout(w: usize, h: usize, gh: usize, status_h: usize) -> Layout {
+    let band_h = band_height(h, gh);
+    let band_y = h.saturating_sub(status_h + band_h);
+    let margin = (w / 20).max(8);
+    let bar_h = gh.max(10);
+    Layout {
+        band_y,
+        band_h,
+        label_y: band_y + 2,
+        bar_x: margin,
+        bar_y: band_y + 2 + gh + 2,
+        bar_w: w.saturating_sub(2 * margin),
+        bar_h,
+    }
+}
+
+// Last rendered milestone, replayed after a full-screen clear.
+static HAS_LAST: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static LAST_STEP: AtomicUsize = AtomicUsize::new(0);
+static LAST_LABEL: spin::Mutex<([u8; 64], usize)> = spin::Mutex::new(([0u8; 64], 0));
+
+/// Remember the last drawn milestone so `clear_with()` can repaint it.
+pub(crate) fn remember(step: usize, label: &str) {
+    let bytes = label.as_bytes();
+    let mut n = bytes.len().min(64);
+    while n > 0 && !label.is_char_boundary(n) {
+        n -= 1;
+    }
+    if let Some(mut guard) = LAST_LABEL.try_lock() {
+        guard.0[..n].copy_from_slice(&bytes[..n]);
+        guard.1 = n;
+    }
+    LAST_STEP.store(step, Ordering::Relaxed);
+    HAS_LAST.store(true, Ordering::Relaxed);
+}
+
+/// Copy the last drawn milestone into `buf` and return it.
+pub(crate) fn last_render<'a>(buf: &'a mut [u8; 96]) -> Option<(usize, &'a str)> {
+    if !HAS_LAST.load(Ordering::Relaxed) {
+        return None;
+    }
+    let n = {
+        let guard = LAST_LABEL.try_lock()?;
+        let (bytes, len) = &*guard;
+        let n = (*len).min(buf.len());
+        buf[..n].copy_from_slice(&bytes[..n]);
+        n
+    };
+    let text = core::str::from_utf8(&buf[..n]).ok()?;
+    Some((LAST_STEP.load(Ordering::Relaxed), text))
+}
 
 /// Draws the bar at `step`/[`TOTAL`] with a short stage label.
 ///
-/// Redraws the whole widget each call, so console scrolling between milestones
-/// never leaves it half-erased: at any milestone the bar is clean, and on a
-/// freeze the last rendered state persists.
+/// All drawing happens in a single writer lock (`draw_boot_progress`), so the
+/// bar is repainted atomically and never interleaves with console text.
 pub fn render(step: usize, label: &str) {
     if !api::is_available() {
         return;
     }
-    let screen_w = api::width();
-    let screen_h = api::height();
-    if screen_w == 0 || screen_h == 0 {
-        return;
-    }
     let step = step.min(TOTAL);
-
-    // Geometry: a wide bar sitting a little above the bottom edge.
-    let margin = (screen_w / 20).max(8);
-    let bar_w = screen_w.saturating_sub(margin * 2);
-    if bar_w == 0 {
-        return;
-    }
-    let bar_h = (screen_h / 50).max(10);
-    let bar_x = margin;
-    let bar_y = screen_h.saturating_sub(bar_h + screen_h / 16);
-
-    // Label strip above the bar, cleared first so a shorter label cannot leave
-    // tail characters from a previous, longer one.
-    let (_, glyph_h) = api::glyph_size();
-    let glyph_h = if glyph_h == 0 { 16 } else { glyph_h };
-    let label_y = bar_y.saturating_sub(glyph_h + 4);
-    api::fill_rect(bar_x, label_y, bar_w, glyph_h, LABEL_BG);
-
-    // Build "[step/TOTAL] label" without allocation.
-    let mut buf = [0u8; 64];
-    let mut len = fmt_prefix(&mut buf, step, TOTAL);
-    for &byte in label.as_bytes() {
-        if len >= buf.len() {
-            break;
-        }
-        buf[len] = byte;
-        len += 1;
-    }
-    if let Ok(text) = core::str::from_utf8(&buf[..len]) {
-        api::draw_text_at(bar_x, label_y, text, LABEL_FG, LABEL_BG);
-    }
-
-    // Track, filled portion, border.
-    api::fill_rect(bar_x, bar_y, bar_w, bar_h, TRACK);
-    let fill_w = bar_w.saturating_mul(step) / TOTAL;
-    if fill_w > 0 {
-        api::fill_rect(bar_x, bar_y, fill_w, bar_h, FILL);
-    }
-    api::draw_rect(bar_x, bar_y, bar_w, bar_h, BORDER);
+    let _ = api::with_writer(|w| w.draw_boot_progress(step, label));
 }
 
 /// Writes `"[step/total] "` into `buf`, returning the number of bytes written.
-fn fmt_prefix(buf: &mut [u8; 64], step: usize, total: usize) -> usize {
+pub(crate) fn fmt_prefix(buf: &mut [u8], step: usize, total: usize) -> usize {
     let mut len = 0;
     push(buf, &mut len, b'[');
     len = push_usize(buf, len, step);
@@ -117,14 +144,14 @@ fn fmt_prefix(buf: &mut [u8; 64], step: usize, total: usize) -> usize {
     len
 }
 
-fn push(buf: &mut [u8; 64], len: &mut usize, byte: u8) {
+fn push(buf: &mut [u8], len: &mut usize, byte: u8) {
     if *len < buf.len() {
         buf[*len] = byte;
         *len += 1;
     }
 }
 
-fn push_usize(buf: &mut [u8; 64], mut len: usize, mut value: usize) -> usize {
+fn push_usize(buf: &mut [u8], mut len: usize, mut value: usize) -> usize {
     let mut digits = [0u8; 20];
     let mut count = 0;
     if value == 0 {
