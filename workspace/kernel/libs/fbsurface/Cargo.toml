@@ -1,0 +1,16 @@
+[package]
+name = "fbsurface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Contiguous framebuffer surfaces for strat9: geometry, pixel formats and monomorphised fill/blit/blend"
+
+[lib]
+name = "fbsurface"
+path = "src/lib.rs"
+
+[dependencies]
+
+[lints]
+workspace = true
