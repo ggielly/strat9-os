@@ -930,15 +930,20 @@ pub extern "C" fn smp_main() -> ! {
     apic::init_ap();
 
     // ── Phase 3: signal online ──
-    // Publish the online bit (SeqCst handshake with the BSP boot-window close),
-    // then confirm we are still inside the boot window. If the BSP already
-    // closed it, revoke our own bit and halt: joining now would race the BSP's
-    // scheduler initialization.
-    let _ = percpu::mark_online_by_apic(apic_id);
+    // Boot-window handshake. Check before publishing: if the BSP already
+    // closed the window, do not publish at all. Publishing then clearing would
+    // let the BSP count a CPU that immediately disappears, which could make the
+    // rendezvous barrier wait forever.
     if BOOT_WINDOW_CLOSED.load(Ordering::SeqCst) {
-        percpu::clear_online(cpu_index);
         halt_forever();
     }
+    // Publish with a SeqCst OR (inside mark_online_by_apic) so it is ordered
+    // against the BSP's SeqCst close + online_count() read.
+    let _ = percpu::mark_online_by_apic(apic_id);
+    // If the window closed concurrently, the BSP may or may not have counted
+    // us. Either way, participate in the rendezvous (an extra arrival is
+    // harmless) and halt *after* it without joining the scheduler too late.
+    let late = BOOT_WINDOW_CLOSED.load(Ordering::SeqCst);
     BOOTED_CORES.fetch_add(1, Ordering::Release);
 
     crate::serial_force_println!(
@@ -952,9 +957,12 @@ pub extern "C" fn smp_main() -> ! {
     }
     rendezvous_barrier();
 
-    // The BSP may have revoked our online bit while closing the window (we
-    // lost the publication race); do not enter the scheduler in that case.
-    if !percpu::is_online(cpu_index) {
+    // The BSP may have revoked our online bit while closing the window, or we
+    // may have lost the publication race. Retire this AP now that the barrier
+    // is satisfied: clearing online after the rendezvous is safe and keeps the
+    // scheduler's online view accurate.
+    if late || !percpu::is_online(cpu_index) {
+        percpu::clear_online(cpu_index);
         halt_forever();
     }
 
