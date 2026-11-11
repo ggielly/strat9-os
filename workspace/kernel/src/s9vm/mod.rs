@@ -319,6 +319,10 @@ pub fn init() {
         log::info!("[s9vm] disabled by configuration");
         return;
     }
+    // VT-x-free diagnostic: the loader dry run only needs world memory and the
+    // kernel ELF loader, so it runs on any host (the full loader phase needs
+    // VT-x for the guest entry).
+    selftest::maybe_run_loader_dry_from_boot_env();
     let Some(caps) = detect() else {
         log::info!(
             "[s9vm] VT-x absent — virtualization inactive ({})",

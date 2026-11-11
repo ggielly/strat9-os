@@ -724,12 +724,40 @@ pub const fn metadata_size_for(ram_size: u64) -> u64 {
 
 static METADATA_BASE_VIRT: AtomicU64 = AtomicU64::new(0);
 static METADATA_FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Total RAM the array was planned for (diagnostics; kept even when the
+/// allocation fails so a late frame-metadata panic is self-explanatory).
+static METADATA_PLAN_TOTAL_RAM: AtomicU64 = AtomicU64::new(0);
+/// Byte size the array was planned for (diagnostics).
+static METADATA_PLAN_BYTES: AtomicU64 = AtomicU64::new(0);
+/// Copy of the base written at initialization, kept apart from
+/// [`METADATA_BASE_VIRT`] as a corruption canary: a late panic that reports a
+/// zero base while this copy is non-zero proves that the live field (or the
+/// whole `.bss` page holding it) was overwritten after boot.
+static METADATA_INIT_BASE: AtomicU64 = AtomicU64::new(0);
+
+/// Snapshot of the frame-metadata state for diagnostics.
+///
+/// Returns `(base, frame_count, init_base, planned_total_ram, planned_bytes)`.
+/// `base == 0` means the array is unavailable; `init_base != 0` with
+/// `base == 0` means the live field was clobbered after initialization.
+pub fn metadata_snapshot() -> (u64, u64, u64, u64, u64) {
+    (
+        METADATA_BASE_VIRT.load(Ordering::Acquire),
+        METADATA_FRAME_COUNT.load(Ordering::Acquire),
+        METADATA_INIT_BASE.load(Ordering::Acquire),
+        METADATA_PLAN_TOTAL_RAM.load(Ordering::Acquire),
+        METADATA_PLAN_BYTES.load(Ordering::Acquire),
+    )
+}
 
 /// Initialize the global metadata array for all physical frames.
 pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
     crate::e9_mark!(b'X');
     let frame_count = (total_ram / PAGE_SIZE) + if total_ram % PAGE_SIZE == 0 { 0 } else { 1 };
     crate::e9_mark!(b'Y');
+    let bytes = frame_count * FRAME_META_SIZE as u64;
+    METADATA_PLAN_TOTAL_RAM.store(total_ram, Ordering::Release);
+    METADATA_PLAN_BYTES.store(bytes, Ordering::Release);
     if frame_count == 0 {
         METADATA_BASE_VIRT.store(0, Ordering::Release);
         METADATA_FRAME_COUNT.store(0, Ordering::Release);
@@ -747,7 +775,6 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
     // Function-pointer vtables (non-zero bits) remain FORBIDDEN until the
     // identity-vtable issue is fixed : enforced by keeping vtable = 0 on all
     // slots (MetaSlot::new) and by reset_with_free_list_meta.
-    let bytes = frame_count * FRAME_META_SIZE as u64;
     // Metadata is written immediately, before map_all_ram can extend the HHDM.
     // Verify actual reachability even when entered through another boot path.
     let phys = match boot_alloc.try_alloc_accessible(bytes as usize, 64) {
@@ -755,7 +782,7 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
         None => {
             // Cannot back the metadata: keep it disabled (get_meta_slot will
             // panic with a clear message rather than corrupt memory).
-            crate::serial_force_println!("[frame] metadata alloc failed: need {} bytes", bytes);
+            log::error!("[frame] metadata alloc failed: need {bytes} bytes (total_ram={total_ram:#x})");
             METADATA_BASE_VIRT.store(0, Ordering::Release);
             METADATA_FRAME_COUNT.store(0, Ordering::Release);
             return;
@@ -812,6 +839,8 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
     }
     METADATA_BASE_VIRT.store(virt, Ordering::Release);
     METADATA_FRAME_COUNT.store(frame_count, Ordering::Release);
+    METADATA_INIT_BASE.store(virt, Ordering::Release);
+    log::info!("[frame] metadata ready: base={virt:#x} frames={frame_count} bytes={bytes}");
     crate::serial_force_println!(
         "[frame] metadata array @ {:#x} ({} frames, {} bytes)",
         virt,
@@ -883,7 +912,22 @@ pub fn invoke_vtable_on_last_ref(phys: PhysAddr) {
 pub fn get_meta_slot(phys: PhysAddr) -> &'static MetaSlot {
     let base = METADATA_BASE_VIRT.load(Ordering::Acquire);
     let frame_count = METADATA_FRAME_COUNT.load(Ordering::Acquire);
-    assert!(base != 0, "frame metadata array is not initialized");
+    if base == 0 {
+        // Self-explanatory panic: the frame metadata is required by the typed
+        // frame API (`Frame::allocate`, the buddy free lists, ...), so a zero
+        // base means the kernel cannot track frames. Report the plan recorded
+        // at boot and the corruption canary: `init_base != 0` with `base == 0`
+        // proves the live field was overwritten *after* initialization.
+        let init_base = METADATA_INIT_BASE.load(Ordering::Acquire);
+        let total_ram = METADATA_PLAN_TOTAL_RAM.load(Ordering::Acquire);
+        let bytes = METADATA_PLAN_BYTES.load(Ordering::Acquire);
+        panic!(
+            "frame metadata array is not initialized (phys={:#x}, \
+             frame_count={frame_count}, init_base={init_base:#x}, \
+             planned_total_ram={total_ram:#x}, planned_bytes={bytes})",
+            phys.as_u64()
+        );
+    }
 
     let pfn = phys.as_u64() / PAGE_SIZE;
     assert!(pfn < frame_count, "frame metadata access out of bounds");
@@ -975,3 +1019,4 @@ pub trait FrameAllocator {
         self.alloc(0, token)
     }
 }
+

@@ -1896,8 +1896,43 @@ pub fn run_loader(caps: &HwCaps) -> Result<LoaderReport, SelftestError> {
     result
 }
 
-/// Body of the loader phase; the caller owns and destroys the world.
-fn run_loader_in_world(caps: &HwCaps, world_id: u64) -> Result<LoaderReport, SelftestError> {
+/// Loader phase without the guest entry.
+///
+/// Runs exactly the loader memory path of [`run_loader`] (world memory
+/// mapping, guest page tables, [`vm::load_image`] with its copy and BSS
+/// zero-fill, the post-load checks, then the world teardown) but stops before
+/// the `Vcpu` is created. It therefore needs **no VT-x**: it is the diagnostic
+/// of choice to check the frame/world bookkeeping of the loader on any host,
+/// and it names a regression in that path from the serial log alone.
+pub fn run_loader_dry(caps: &HwCaps) -> Result<LoaderReport, SelftestError> {
+    let record = vm::create(b"s9vm-loader-dry", 0).ok_or(SelftestError::VmFail(1))?;
+    let result = loader_dry_in_world(caps, record.id);
+    let _ = vm::destroy(record.id);
+    result
+}
+
+/// Body of the dry loader phase; the caller owns and destroys the world.
+fn loader_dry_in_world(caps: &HwCaps, world_id: u64) -> Result<LoaderReport, SelftestError> {
+    let loaded = prepare_loader_world(caps, world_id)?;
+    Ok(LoaderReport {
+        total_exits: 0,
+        io_exits: 0,
+        halt_exits: 0,
+        marker: None,
+        entry: loaded.entry,
+        image_base: loaded.image_base,
+        pages: loaded.span_pages(),
+    })
+}
+
+/// Maps the loader test's world memory, installs the guest page tables and
+/// loads the ELF image, checking the copy and the BSS zero-fill.
+///
+/// Shared by the full loader phase and the VT-x-free dry run.
+fn prepare_loader_world(
+    caps: &HwCaps,
+    world_id: u64,
+) -> Result<vm::LoadedImage, SelftestError> {
     let page_size = crate::s9vm::mmu::PAGE_SIZE;
 
     // 1. Guest memory backing the page tables and the stack. The image pages
@@ -1950,13 +1985,31 @@ fn run_loader_in_world(caps: &HwCaps, world_id: u64) -> Result<LoaderReport, Sel
     if read_world_byte(world_id, LOADER_IMAGE_BASE + 0x800)? != 0 {
         return Err(SelftestError::BadExit("image BSS was not zeroed"));
     }
+    Ok(loaded)
+}
 
-    // 4. Uses the world's own second-level translation tables: the run must
-    //    exercise the EPT built by `map_memory` and the loader, not a copy.
+/// Body of the loader phase; the caller owns and destroys the world.
+fn run_loader_in_world(caps: &HwCaps, world_id: u64) -> Result<LoaderReport, SelftestError> {
+    let loaded = prepare_loader_world(caps, world_id)?;
+
+    // Uses the world's own second-level translation tables: the run must
+    // exercise the EPT built by `map_memory` and the loader, not a copy.
     let pointer = vm::second_level_pointer(world_id, caps).map_err(|_| SelftestError::VmFail(4))?;
 
-    // 5. Enters the loaded image: RIP is the relocated entry point returned by
-    //    the loader, RSP points into the guest stack page.
+    // The vCPU allocation is the first typed frame allocation of this phase
+    // (the buddy allocator itself only seeds segment bitmaps during boot):
+    // report the frame-metadata state right before it, so a "not initialized"
+    // panic is attributable to the boot plan or to a post-boot clobber.
+    let (meta_base, meta_frames, meta_init, plan_ram, plan_bytes) =
+        crate::memory::frame::metadata_snapshot();
+    log::info!(
+        "[s9vm] loadertest: creating the vCPU (metadata base={meta_base:#x} \
+         frames={meta_frames} init={meta_init:#x} plan_ram={plan_ram:#x} \
+         plan_bytes={plan_bytes})"
+    );
+
+    // Enters the loaded image: RIP is the relocated entry point returned by
+    // the loader, RSP points into the guest stack page.
     let guest = GuestState::long_mode_64(loaded.entry, LOADER_STACK_TOP, LOADER_GPA_PML4);
     let mut vcpu = Vcpu::new(caps, pointer)?;
     // SAFETY: VT-x is active on this CPU (checked by the caller), interrupts
@@ -3349,6 +3402,36 @@ fn run_guestos_task() {
     }
 }
 
+/// Runs the VT-x-free loader dry run when the boot configuration asks for it.
+///
+/// `s9vm.selftest=loader_dry` exercises the world memory mapping, the kernel
+/// ELF loader (copy + BSS zero-fill) and the world teardown **without entering
+/// a guest**, so it works on hosts where VT-x is unavailable and turns the
+/// loader's frame bookkeeping into a deterministic smoke test. It is called
+/// before the VT-x detection in [`crate::s9vm::init`], with a default
+/// capability set (the world memory layer does not depend on the hardware
+/// controls).
+pub fn maybe_run_loader_dry_from_boot_env() {
+    let mode = crate::boot_args()
+        .and_then(|args| args.env_get("s9vm.selftest"))
+        .unwrap_or("");
+    if mode != "loader_dry" {
+        return;
+    }
+    log::info!("[s9vm] image-loader dry run requested (no VT-x required)");
+    let caps = HwCaps::default();
+    match run_loader_dry(&caps) {
+        Ok(report) => log::info!(
+            "[s9vm] loaderdry PASS: entry={:#x} base={:#x} pages={} \
+             (world memory + loader, no guest entry)",
+            report.entry,
+            report.image_base,
+            report.pages
+        ),
+        Err(error) => log::warn!("[s9vm] loaderdry FAIL: {:?}", error),
+    }
+}
+
 ///
 /// Does nothing if VT-x is not active. Never panics.
 ///
@@ -3366,6 +3449,16 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
     if mode.is_empty() || mode == "0" || mode == "false" {
         return;
     }
+    // Frame-metadata state at the start of the phase sequence: the typed frame
+    // API (`Vcpu::new`, process page tables) panics with a clear message when
+    // the array is unavailable, and this line tells whether it was already
+    // missing at the start of the selftests or lost later.
+    let (meta_base, meta_frames, meta_init, plan_ram, plan_bytes) =
+        crate::memory::frame::metadata_snapshot();
+    log::info!(
+        "[s9vm] selftest start: metadata base={meta_base:#x} frames={meta_frames} \
+         init={meta_init:#x} plan_ram={plan_ram:#x} plan_bytes={plan_bytes}"
+    );
     let device_phase = matches!(mode, "1" | "true" | "2" | "all");
     let interrupt_phase = matches!(mode, "2" | "all" | "irq");
     let console_phase = matches!(mode, "2" | "all" | "console");
