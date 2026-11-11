@@ -77,14 +77,17 @@
 //! | `b't'` | no coherent local APIC timer (non-fatal) |
 //! | `b'C'` | virtio-console accepted and consumed the greeting message |
 //! | `b'c'` | no console device, or it did not acknowledge (non-fatal) |
+//! | `b'D'` | virtio-block read sector 0 and validated the `S9VMDISK` label |
+//! | `b'd'` | no block device, or the request/label failed (non-fatal) |
 //! | `b'E'` + vector | CPU exception caught by the private IDT; then halt |
 //! | `b'F'` + code | failure; the next byte is a [`failure`] code |
 //! | `b'P'` | Rust panic (the next byte is not emitted; the guest halts) |
 //!
 //! Success sequence: `G`, `M`, `A`, `R`/`r` (initrd), `K` (kernel tables up),
-//! `T`/`t` (timer probe) and `C`/`c` (virtio-console text output), then one
-//! `hlt` at a time forever. A failure emits `F`, its code, then halts; an
-//! exception after the IDT is installed emits `E`, the vector, then halts.
+//! `T`/`t` (timer probe), `C`/`c` (virtio-console text output) and `D`/`d`
+//! (virtio-block read), then one `hlt` at a time forever. A failure emits `F`,
+//! its code, then halts; an exception after the IDT is installed emits `E`,
+//! the vector, then halts.
 
 #![no_std]
 #![no_main]
@@ -95,6 +98,8 @@ use core::{
     ptr::{addr_of, addr_of_mut, read_volatile, write_volatile},
 };
 
+mod virtio;
+mod virtio_blk;
 mod virtio_console;
 
 /// Guest-physical address the image is linked and loaded at.
@@ -130,6 +135,8 @@ const BP_OFF_CHECKSUM: u64 = 0x034;
 
 /// Boot flag: a virtio-console device is present on this world.
 const BP_FLAG_CONSOLE: u32 = 1;
+/// Boot flag: a virtio-block device is present on this world.
+const BP_FLAG_BLOCK: u32 = 2;
 
 /// Total size of the boot-parameter block.
 const BP_SIZE: u64 = 1024;
@@ -601,8 +608,8 @@ pub unsafe extern "C" fn guest_main(boot_params_gpa: u64) -> ! {
     //     result is non-fatal: `C` when the device consumed the message, `c`
     //     when the console is absent or did not acknowledge.
     let flags = read_u32(boot_params_gpa, BP_OFF_FLAGS);
+    let console_base = read_u64(boot_params_gpa, BP_OFF_CONSOLE_MMIO);
     if flags & BP_FLAG_CONSOLE != 0 {
-        let console_base = read_u64(boot_params_gpa, BP_OFF_CONSOLE_MMIO);
         // The device IRQ line is published too, but this driver polls the used
         // ring: the guest has no ISR and never enables interrupts.
         let _console_irq = read_u32(boot_params_gpa, BP_OFF_CONSOLE_IRQ);
@@ -613,6 +620,23 @@ pub unsafe extern "C" fn guest_main(boot_params_gpa: u64) -> ! {
         debug_write(if sent { b'C' } else { b'c' });
     } else {
         debug_write(b'c');
+    }
+
+    // 12. Block device: read sector 0 and verify the `S9VMDISK` label the
+    //     userspace policy provisioned. Proves the full request path guest ->
+    //     split queue -> device model -> backing image. Non-fatal: `D` on
+    //     success, `d` otherwise.
+    if flags & BP_FLAG_BLOCK != 0 {
+        // Transport pages are consecutive: console base + one 4 KiB page is
+        // the block device (engine device-model convention).
+        let block_base = console_base + virtio_blk::BASE_OFFSET_FROM_CONSOLE;
+        // SAFETY: the block transport page is part of the device window mapped
+        // by the private page tables; the driver validates the device identity
+        // and the request status.
+        let labelled = unsafe { virtio_blk::read_disk_label(block_base) };
+        debug_write(if labelled { b'D' } else { b'd' });
+    } else {
+        debug_write(b'd');
     }
 
     halt_forever()

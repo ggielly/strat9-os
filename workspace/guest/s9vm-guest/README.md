@@ -91,12 +91,14 @@ policy completes it with the reported instruction length.
 | `t` (`0x74`) | no coherent local APIC timer — non-fatal |
 | `C` (`0x43`) | virtio-console accepted and consumed the greeting |
 | `c` (`0x63`) | no console, or it did not acknowledge — non-fatal |
+| `D` (`0x44`) | virtio-block read sector 0 and the `S9VMDISK` label matches |
+| `d` (`0x64`) | no block device, or the request/label failed — non-fatal |
 | `E` (`0x45`) + vector | CPU exception caught by the private IDT; then halt |
 | `F` (`0x46`) + code | failure; the code is the failing step (see below) |
 | `P` (`0x50`) | Rust panic; the guest halts afterwards (no code) |
 
 Success sequence: `G`, `M`, `A`, `R`/`r`, `I` (only after `R`), `K`, `T`/`t`,
-then repeated `hlt`.
+`C`/`c` (console), `D`/`d` (block), then repeated `hlt`.
 Failure sequence: `F`, code, then `hlt`.
 
 Failure codes published after `F`:
@@ -156,14 +158,20 @@ Failure codes published after `F`:
     transmit split queue in `.bss`, publishes the greeting through one
     device-readable descriptor, notifies the queue and polls the used ring
     (no interrupt requested). Success reports `C`, any absent/uncooperative
-    device reports the non-fatal `c`.
+    device reports the non-fatal `c`;
+11. **virtio-block**: same transport handshake for device id 2, programs the
+    request queue and submits the three-descriptor virtio-block request chain
+    (16-byte `IN` header for sector 0, 512-byte device-writable data buffer,
+    status byte), then checks the completion status and the `S9VMDISK` label
+    the userspace policy provisions with `SYS_VMM_LOAD_DISK`. Success reports
+    `D`, a missing/failed device reports the non-fatal `d`.
 
 The engine models the local APIC and virtio device pages as device pages: the
 second-level translation intentionally leaves them unmapped, so an access
 raises a violation that the kernel device model replays. The guest therefore
 maps those windows in its own page tables and drives them through normal MMIO;
 if a window is not coherently modeled (for example, backed by plain RAM by a
-different policy) it takes the non-fatal `t`/`c` path without faulting.
+different policy) it takes the non-fatal `t`/`c`/`d` path without faulting.
 
 ## Build
 
@@ -204,27 +212,30 @@ $ readelf -h target/x86_64-unknown-none/release/s9vm-guest
 
 $ readelf -l target/x86_64-unknown-none/release/s9vm-guest
   LOAD  0x0000000000001000 0x0000000000100000 0x0000000000100000
-        0x0000000000000e93 0x0000000000000e93  R E   0x1000
-  LOAD  0x0000000000002000 0x0000000000101000 0x0000000000101000
-        0x0000000000000100 0x0000000000000100  R     0x1000
+        0x0000000000001295 0x0000000000001295  R E   0x1000
   LOAD  0x0000000000003000 0x0000000000102000 0x0000000000102000
-        0x0000000000000000 0x0000000000008950  RW    0x1000
+        0x0000000000000100 0x0000000000000100  R     0x1000
+  LOAD  0x0000000000004000 0x0000000000103000 0x0000000000103000
+        0x0000000000000008 0x0000000000000008  RW    0x1000
+  LOAD  0x0000000000005000 0x0000000000104000 0x0000000000104000
+        0x0000000000000000 0x0000000000008c60  RW    0x1000
 ```
 
 Expectations:
 
 - `e_type == ET_EXEC` (2), `e_machine == EM_X86_64`;
 - `e_entry` inside `0x0010_0000..0x0011_0000` (currently exactly `0x100000`);
-- three `PT_LOAD` segments: `.text` `R E` at `0x100000`, `.rodata` `R`
-  (exception stub table only) at `0x101000`, `.bss` `RW` at `0x102000`.
-  `.bss` is 34 KiB: 16 KiB stack, four 4 KiB page tables, the 2 KiB IDT, the
-  32-byte GDT and the virtio-console queue buffers; the whole loaded footprint
-  is 11 pages (`0x100000..0x10B000`);
+- four `PT_LOAD` segments: `.text` `R E` at `0x100000` (two pages once both
+  drivers are linked), `.rodata` `R` (exception stub table) at `0x102000`,
+  a small `.data` `RW` page at `0x103000` and `.bss` `RW` at `0x104000`
+  (34 KiB: 16 KiB stack, four 4 KiB page tables, the 2 KiB IDT, the 32-byte
+  GDT, the virtio-console and virtio-block queue buffers); the whole loaded
+  footprint is 13 pages (`0x100000..0x10D000`);
 - **no page overlap between segments** and `p_vaddr % 4096 == p_offset % 4096`
   for every `PT_LOAD`: the kernel guest loader rejects both violations;
 - no `DYNAMIC`/`INTERP` entry (fully self-contained image);
-- file size around 15 KiB (symbol table included), loaded memory footprint
-  44 KiB.
+- file size around 24 KiB (symbol table included), loaded memory footprint
+  52 KiB.
 
 `_start` is the first byte of the executable segment and `guest_main` follows
 in the same page. The code is position-independent inside the image: `_start`
