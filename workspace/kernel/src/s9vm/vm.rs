@@ -37,7 +37,7 @@
 //! No policy is decided here: access checks are done by the syscall layer
 //! (capabilities).
 
-use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::{
@@ -554,7 +554,12 @@ pub struct VcpuSlot {
 }
 
 /// Global world registry.
-static WORLDS: SpinLock<BTreeMap<u64, World>> = SpinLock::new(BTreeMap::new());
+/// Registry type: worlds are **boxed** so that creating or destroying one does
+/// not move the (large) World value through the kernel stack. The early
+/// bootstrap runs on an 8 KiB stack; a stack-sized move there is a page fault.
+type WorldMap = BTreeMap<u64, Box<World>>;
+
+static WORLDS: SpinLock<WorldMap> = SpinLock::new(BTreeMap::new());
 /// Next identifier (1 = first world; 0 is reserved for the global summary).
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -575,7 +580,7 @@ pub fn create(name: &[u8], silo_id: u32) -> Option<WorldRecord> {
     let record = WorldRecord::new(id, name, silo_id);
     worlds.insert(
         id,
-        World {
+        Box::new(World {
             record,
             memory: None,
             vcpus: Vec::new(),
@@ -596,7 +601,7 @@ pub fn create(name: &[u8], silo_id: u32) -> Option<WorldRecord> {
             cmdline_len: 0,
             iommu: IommuModel::new(),
             iommu_domain: None,
-        },
+        }),
     );
     Some(record)
 }
@@ -686,7 +691,7 @@ fn destroy_inner(id: u64, timeout_ns: Option<u64>) -> Option<WorldRecord> {
 }
 
 /// Finds a world and the index of a vCPU in that world.
-fn locate_slot(worlds: &mut BTreeMap<u64, World>, vcpu_id: u64) -> Option<(&mut World, usize)> {
+fn locate_slot(worlds: &mut WorldMap, vcpu_id: u64) -> Option<(&mut World, usize)> {
     for world in worlds.values_mut() {
         if let Some(index) = world.vcpus.iter().position(|slot| slot.id == vcpu_id) {
             return Some((world, index));
@@ -3550,10 +3555,11 @@ pub fn pending_irq(vcpu_id: u64) -> Option<u8> {
 }
 
 /// Finds the world owning a vCPU (excluding closing worlds).
-fn vcpu_world_mut(worlds: &mut BTreeMap<u64, World>, vcpu_id: u64) -> Option<&mut World> {
+fn vcpu_world_mut(worlds: &mut WorldMap, vcpu_id: u64) -> Option<&mut World> {
     worlds
         .values_mut()
         .find(|world| !world.closing && world.vcpus.iter().any(|slot| slot.id == vcpu_id))
+        .map(Box::as_mut)
 }
 
 /// Writes a vCPU's register block.
@@ -3635,7 +3641,7 @@ pub fn debug_translate(id: u64, gpa: u64) -> Option<u64> {
 
 /// Frees all entries (tests and kernel shutdown).
 pub fn clear() {
-    let worlds: BTreeMap<u64, World> = {
+    let worlds: WorldMap = {
         let mut guard = WORLDS.lock();
         core::mem::take(&mut *guard)
     };
