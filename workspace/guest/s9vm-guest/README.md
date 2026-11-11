@@ -94,19 +94,19 @@ policy completes it with the reported instruction length.
 | `r` (`0x72`) | no initrd module (absent, malformed or not cpio) — non-fatal |
 | `K` (`0x4B`) | command line parsed, private GDT, IDT and page tables active |
 | `T` (`0x54`) | local APIC timer probe observed a count tick |
-| `t` (`0x74`) | no coherent local APIC timer — non-fatal |
+| `t` (`0x74`) + code | no coherent local APIC timer — non-fatal |
 | `N` (`0x4E`) | initrd `init` entry extracted and queued for the console |
 | `n` (`0x6E`) | no initrd `init` entry extracted — non-fatal |
 | `S` (`0x53`) | ACPI RSDP -> XSDT/RSDT -> MADT walked and validated |
-| `s` (`0x73`) | ACPI root table or MADT invalid — non-fatal |
+| `s` (`0x73`) + code | ACPI root table or MADT invalid — non-fatal |
 | `C` (`0x43`) | virtio-console accepted and consumed the message |
-| `c` (`0x63`) | no console, or it did not acknowledge — non-fatal |
+| `c` (`0x63`) + code | no console, or it did not acknowledge — non-fatal |
 | `D` (`0x44`) | virtio-block read sector 0 and the `S9VMDISK` label matches |
-| `d` (`0x64`) | no block device, or the request/label failed — non-fatal |
+| `d` (`0x64`) + code | no block device, or the request/label failed — non-fatal |
 | `V` (`0x56`) | local APIC timer interrupt delivered through the private IDT |
-| `v` (`0x76`) | no timer interrupt observed — non-fatal |
+| `v` (`0x76`) + code | no timer interrupt observed — non-fatal |
 | `X` (`0x58`) | virtio-net transmit queue consumed the Ethernet frame |
-| `x` (`0x78`) | no network device, or the transmit failed — non-fatal |
+| `x` (`0x78`) + code | no network device, or the transmit failed — non-fatal |
 | `E` (`0x45`) + vector | CPU exception caught by the private IDT; then halt |
 | `F` (`0x46`) + code | failure; the code is the failing step (see below) |
 | `P` (`0x50`) | Rust panic; the guest halts afterwards (no code) |
@@ -130,6 +130,38 @@ Failure codes published after `F`:
 | 7 | command line out of bounds or not printable ASCII |
 | 8 | a private page table is not page aligned |
 | 9 | block header inconsistent (version, size or block checksum) |
+
+Diagnostic codes published after a **non-fatal** marker (small binary values,
+never an ASCII marker, so the marker stream stays unambiguous):
+
+| Marker | Code | Meaning |
+|---|---|---|
+| `t` | 1 | local APIC version register absent or incoherent |
+| `t` | 2 | the polling timer count never moved |
+| `s` | 1..6 | ACPI walker error (`guest_acpi::AcpiError`) |
+| `c` | 0 | console not advertised by the boot block |
+| `c` | 1..4 | transport probe / feature / queue / `DRIVER_OK` step failed |
+| `c` | 5 | message empty or larger than 128 bytes |
+| `c` | 6 | the device never consumed the message (used ring unchanged) |
+| `d` | 0 | block device not advertised by the boot block |
+| `d` | 1 | transport does not report device id 2 |
+| `d` | 2 | `VIRTIO_F_VERSION_1` not negotiated |
+| `d` | 3 | request queue could not be programmed |
+| `d` | 4 | device rejected `DRIVER_OK` |
+| `d` | 5 | device never completed the request (used ring unchanged) |
+| `d` | 6 | device reported a non-zero request status |
+| `d` | 7 | sector 0 does not start with the `S9VMDISK` label |
+| `v` | 1 | local APIC version register absent or incoherent |
+| `v` | 3 | the in-request register block was not empty before `sti` |
+| `v` | 4 | no timer interrupt was delivered (poll budget exhausted) |
+| `x` | 0 | network device not advertised by the boot block |
+| `x` | 1..4 | transport probe / feature / queue / `DRIVER_OK` step failed |
+| `x` | 5 | the device never consumed the descriptor |
+| `x` | 6 | the device reported an unexpected used length |
+
+The policy logs each of these as
+`[s9vm-vmm] guest failure marker=<marker> code=<n>`, which makes a hardware run
+diagnosable without rebuilding the guest.
 
 ## What the guest validates
 

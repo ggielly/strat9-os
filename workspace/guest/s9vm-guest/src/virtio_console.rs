@@ -54,6 +54,24 @@ pub const MAX_MESSAGE: usize = 128;
 /// Bounded number of used-ring polls after a notify.
 const USED_POLLS: u32 = 64;
 
+/// Failure reasons of [`Console::init`] and [`Console::send`], published on the
+/// debug port right after the non-fatal `c` marker (small binary codes, never
+/// an ASCII marker, so the marker stream stays unambiguous).
+pub mod failure {
+    /// The transport does not report the console device id.
+    pub const DEVICE_ID: u8 = 1;
+    /// `VIRTIO_F_VERSION_1` could not be negotiated.
+    pub const FEATURES: u8 = 2;
+    /// The transmit queue could not be programmed.
+    pub const QUEUE: u8 = 3;
+    /// The device rejected the `DRIVER_OK` status.
+    pub const DRIVER_OK: u8 = 4;
+    /// The message is empty or larger than [`MAX_MESSAGE`].
+    pub const MESSAGE_SIZE: u8 = 5;
+    /// The device never consumed the message (used ring unchanged).
+    pub const COMPLETION: u8 = 6;
+}
+
 /// Descriptor table: `QUEUE_SIZE` entries of 16 bytes.
 #[repr(C, align(16))]
 struct DescriptorTable([u8; 16 * QUEUE_SIZE as usize]);
@@ -81,29 +99,30 @@ impl Console {
     /// Initializes the console transport, its status machine, feature
     /// negotiation and the transmit queue.
     ///
-    /// Returns `None` when the device is absent, is not a console, rejects
-    /// `VIRTIO_F_VERSION_1` or cannot program the queue.
+    /// Returns the [`failure`] code of the step that failed when the device is
+    /// absent, is not a console, rejects `VIRTIO_F_VERSION_1` or cannot program
+    /// the queue.
     ///
     /// # Safety
     ///
     /// `base` must be the guest-physical address of the console transport page,
     /// mapped readable and writable by the active guest page tables.
-    pub unsafe fn init(base: u64) -> Option<Self> {
+    pub unsafe fn init(base: u64) -> Result<Self, u8> {
         let bus = Bus::at(base);
         // SAFETY: caller contract.
         unsafe {
             if !virtio::probe(bus, DEVICE_ID) {
-                return None;
+                return Err(failure::DEVICE_ID);
             }
             virtio::begin(bus);
             if !virtio::negotiate_version_1(bus) {
-                return None;
+                return Err(failure::FEATURES);
             }
             let desc_gpa = addr_of!(DESCRIPTORS) as u64;
             let avail_gpa = addr_of!(AVAILABLE) as u64;
             let used_gpa = addr_of!(USED) as u64;
             if !virtio::setup_queue(bus, QUEUE_TX, QUEUE_SIZE, desc_gpa, avail_gpa, used_gpa) {
-                return None;
+                return Err(failure::QUEUE);
             }
             core::ptr::write_bytes(
                 addr_of_mut!(DESCRIPTORS).cast::<u8>(),
@@ -121,24 +140,25 @@ impl Console {
                 4 + 8 * QUEUE_SIZE as usize,
             );
             if !virtio::driver_ok(bus) {
-                return None;
+                return Err(failure::DRIVER_OK);
             }
         }
-        Some(Self { bus, sent: 0 })
+        Ok(Self { bus, sent: 0 })
     }
 
     /// Sends one message and waits (bounded) for the device to consume it.
     ///
-    /// Returns `false` when the message is empty/oversized, the device status
-    /// failed or the used ring did not advance within the poll budget.
+    /// Returns the [`failure`] code of the step that failed (oversized or empty
+    /// message, device status failed, used ring unchanged within the poll
+    /// budget).
     ///
     /// # Safety
     ///
     /// The console transport page and the queue buffers must stay mapped for
     /// the device model to read them.
-    pub unsafe fn send(&mut self, bytes: &[u8]) -> bool {
+    pub unsafe fn send(&mut self, bytes: &[u8]) -> Result<(), u8> {
         if bytes.is_empty() || bytes.len() > MAX_MESSAGE {
-            return false;
+            return Err(failure::MESSAGE_SIZE);
         }
         // SAFETY: `MESSAGE` is `MAX_MESSAGE` bytes and the length was checked.
         unsafe {
@@ -173,12 +193,12 @@ impl Console {
             while polls < USED_POLLS {
                 if read_volatile(used.add(2).cast::<u16>()) == want {
                     self.sent = want;
-                    return true;
+                    return Ok(());
                 }
                 core::hint::spin_loop();
                 polls += 1;
             }
         }
-        false
+        Err(failure::COMPLETION)
     }
 }

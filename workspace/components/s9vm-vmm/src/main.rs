@@ -1146,6 +1146,10 @@ fn run_guest_policy_loop(world: u64, vcpu: u64) -> Result<GuestRunReport, Error>
     };
     let started = monotonic_ms();
     let mut empty_polls = 0u32;
+    // Last printable marker published by the guest: a small binary code that
+    // follows one names the optional step that failed, in the guest's own
+    // vocabulary (the codes are listed in the guest README).
+    let mut last_marker = 0u8;
 
     while report.exits < MAX_GUEST_EXITS && !report.halt {
         if started != 0 && monotonic_ms().saturating_sub(started) > GUEST_WATCHDOG_MS {
@@ -1191,11 +1195,24 @@ fn run_guest_policy_loop(world: u64, vcpu: u64) -> Result<GuestRunReport, Error>
             );
             if event.kind == exit_kind::IO_PORT && event.port == POLICY_PORT {
                 let byte = (event.value & 0xFF) as u8;
-                log!(
-                    "[s9vm-vmm] guest debug byte 0x{:02x} ({})",
-                    byte,
-                    guest_marker_name(byte)
-                );
+                if byte < 0x20 {
+                    log!(
+                        "[s9vm-vmm] guest failure marker={} code={}",
+                        if last_marker == 0 {
+                            '?'
+                        } else {
+                            last_marker as char
+                        },
+                        byte
+                    );
+                } else {
+                    log!(
+                        "[s9vm-vmm] guest debug byte 0x{:02x} ({})",
+                        byte,
+                        guest_marker_name(byte)
+                    );
+                    last_marker = byte;
+                }
                 if report.seen_len < report.seen.len() {
                     report.seen[report.seen_len] = byte;
                     report.seen_len += 1;
@@ -1556,6 +1573,14 @@ fn guest_marker_name(byte: u8) -> &'static str {
         b's' => "ACPI tables unavailable",
         b'T' => "APIC timer ok",
         b't' => "APIC timer unavailable",
+        b'C' => "virtio-console output ok",
+        b'c' => "virtio-console unavailable",
+        b'D' => "virtio-block label ok",
+        b'd' => "virtio-block unavailable",
+        b'V' => "timer interrupt observed",
+        b'v' => "timer interrupt not observed",
+        b'X' => "virtio-net frame transmitted",
+        b'x' => "virtio-net unavailable",
         b'F' => "failure (next byte is the code)",
         b'E' => "exception (next byte is the vector)",
         b'P' => "panic",

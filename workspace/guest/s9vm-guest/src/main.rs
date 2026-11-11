@@ -305,6 +305,10 @@ const APIC_TIMER_INITIAL: u32 = 2_000;
 /// so a silent timer reports `t` instead of exhausting the exit budget.
 const APIC_TIMER_POLLS: u32 = 32;
 
+/// Failure code published after a non-fatal device marker (`c`, `d`, `x`) when
+/// the boot-parameter block does not advertise the device at all.
+const DEVICE_NOT_ADVERTISED: u8 = 0;
+
 /// Failure codes published after `b'F'`.
 mod failure {
     /// The boot-parameter block does not start with `S9VMBP`.
@@ -671,10 +675,12 @@ pub unsafe extern "C" fn guest_main(boot_params_gpa: u64) -> ! {
 
     // 10. Non-fatal local APIC timer probe: program a one-shot count and wait
     //     for the model to show progress. Interrupts stay disabled.
-    if probe_apic_timer() {
-        debug_write(b'T');
-    } else {
-        debug_write(b't');
+    match probe_apic_timer() {
+        Ok(()) => debug_write(b'T'),
+        Err(code) => {
+            debug_write(b't');
+            debug_write(code);
+        }
     }
 
     // 11. Initrd consumption: extract the `init` entry of the `newc` archive
@@ -759,10 +765,10 @@ pub unsafe extern "C" fn guest_main(boot_params_gpa: u64) -> ! {
     //     greeting (with the initrd `init` content when available) and the ACPI
     //     summary. Proves the full path guest -> split queue -> device model ->
     //     kernel console log. `C` when the device consumed every message, `c`
-    //     otherwise (non-fatal).
+    //     followed by a failure code otherwise (non-fatal).
     let flags = read_u32(boot_params_gpa, BP_OFF_FLAGS);
     let console_base = read_u64(boot_params_gpa, BP_OFF_CONSOLE_MMIO);
-    let mut console_ok = false;
+    let mut console_error = None;
     if flags & BP_FLAG_CONSOLE != 0 {
         // The device IRQ line is published too, but this driver polls the used
         // ring: the guest has no ISR and never enables interrupts.
@@ -770,21 +776,38 @@ pub unsafe extern "C" fn guest_main(boot_params_gpa: u64) -> ! {
         // SAFETY: the console transport page is part of the device window
         // mapped by the private page tables; the driver validates the device
         // identity before touching any queue.
-        if let Some(mut console) = unsafe { virtio_console::Console::init(console_base) } {
-            if unsafe { console.send(&message[..message_len]) } {
-                console_ok = true;
-                if acpi_message_len > 0 {
-                    console_ok = unsafe { console.send(&acpi_message[..acpi_message_len]) };
+        match unsafe { virtio_console::Console::init(console_base) } {
+            Ok(mut console) => {
+                match unsafe { console.send(&message[..message_len]) } {
+                    Ok(()) => {
+                        if acpi_message_len > 0 {
+                            if let Err(code) =
+                                unsafe { console.send(&acpi_message[..acpi_message_len]) }
+                            {
+                                console_error = Some(code);
+                            }
+                        }
+                    }
+                    Err(code) => console_error = Some(code),
                 }
             }
+            Err(code) => console_error = Some(code),
+        }
+    } else {
+        console_error = Some(DEVICE_NOT_ADVERTISED);
+    }
+    match console_error {
+        None => debug_write(b'C'),
+        Some(code) => {
+            debug_write(b'c');
+            debug_write(code);
         }
     }
-    debug_write(if console_ok { b'C' } else { b'c' });
 
     // 14. Block device: read sector 0 and verify the `S9VMDISK` label the
     //     userspace policy provisioned. Proves the full request path guest ->
     //     split queue -> device model -> backing image. Non-fatal: `D` on
-    //     success, `d` otherwise.
+    //     success, otherwise `d` followed by the failure code.
     if flags & BP_FLAG_BLOCK != 0 {
         // Transport pages are consecutive: console base + one 4 KiB page is
         // the block device (engine device-model convention).
@@ -792,33 +815,52 @@ pub unsafe extern "C" fn guest_main(boot_params_gpa: u64) -> ! {
         // SAFETY: the block transport page is part of the device window mapped
         // by the private page tables; the driver validates the device identity
         // and the request status.
-        let labelled = unsafe { virtio_blk::read_disk_label(block_base) };
-        debug_write(if labelled { b'D' } else { b'd' });
+        match unsafe { virtio_blk::read_disk_label(block_base) } {
+            Ok(()) => debug_write(b'D'),
+            Err(code) => {
+                debug_write(b'd');
+                debug_write(code);
+            }
+        }
     } else {
         debug_write(b'd');
+        debug_write(DEVICE_NOT_ADVERTISED);
     }
 
     // 15. Interrupt delivery: program the local APIC timer one-shot with the
     //     timer vector, enable interrupts for a bounded wait, and let the
     //     private IDT gate and its assembly stub run the Rust handler. This
     //     proves the full path kernel injection -> IDT -> ISR -> EOI -> iretq.
-    //     `V` when the handler observed a tick, non-fatal `v` otherwise.
-    let timer_tick = unsafe { probe_timer_interrupt() };
-    debug_write(if timer_tick { b'V' } else { b'v' });
+    //     `V` when the handler observed a tick, otherwise `v` followed by the
+    //     failure code (non-fatal).
+    match probe_timer_interrupt() {
+        Ok(()) => debug_write(b'V'),
+        Err(code) => {
+            debug_write(b'v');
+            debug_write(code);
+        }
+    }
 
     // 16. Network device: transmit one Ethernet frame through the virtio-net
     //     transmit queue (device id 1 at console base + two 4 KiB pages, by
     //     engine device-model convention). `X` when the device consumed the
-    //     frame, non-fatal `x` otherwise.
-    let mut net_sent = false;
-    if flags & BP_FLAG_NETWORK != 0 {
+    //     frame, otherwise `x` followed by the failure code (non-fatal).
+    let net_error = if flags & BP_FLAG_NETWORK != 0 {
         let net_base = console_base + virtio_net::BASE_OFFSET_FROM_CONSOLE;
         // SAFETY: the network transport page is part of the device window
         // mapped by the private page tables; the driver probes the device
         // identity before touching any queue.
-        net_sent = unsafe { virtio_net::transmit(net_base) };
+        unsafe { virtio_net::transmit(net_base) }.err()
+    } else {
+        Some(DEVICE_NOT_ADVERTISED)
+    };
+    match net_error {
+        None => debug_write(b'X'),
+        Some(code) => {
+            debug_write(b'x');
+            debug_write(code);
+        }
     }
-    debug_write(if net_sent { b'X' } else { b'x' });
 
     halt_forever()
 }
@@ -1406,17 +1448,20 @@ unsafe fn switch_page_tables(root: u64) {
 /// current count until it moves, bounded by [`APIC_TIMER_POLLS`]. The timer is
 /// masked and interrupts stay disabled: no ISR is required.
 ///
+/// Returns `Ok(())` when the count moved, otherwise the [`apic_failure`] code
+/// of the check that failed (published after the non-fatal `t` marker).
+///
 /// # Safety
 ///
 /// The local APIC page must be mapped by the active page tables (the private
 /// tables map it); no other CPU state is modified.
-unsafe fn probe_apic_timer() -> bool {
+unsafe fn probe_apic_timer() -> Result<(), u8> {
     let apic_id = mmio_read32(APIC_BASE + APIC_ID);
     let version = mmio_read32(APIC_BASE + APIC_VERSION);
     // Integrated xAPIC: non-zero version, non-zero "max LVT entry" field.
     // A window backed by plain RAM or an absent model reads 0/all ones.
     if version == 0 || version == u32::MAX || (version >> 16) & 0xFF == 0 {
-        return false;
+        return Err(apic_failure::VERSION);
     }
     let _ = apic_id;
     // Software-enable the local APIC before programming the timer.
@@ -1438,12 +1483,26 @@ unsafe fn probe_apic_timer() -> bool {
             // report success; the TSC is read to show that time really passed.
             let _elapsed = read_tsc().wrapping_sub(tsc_start);
             mmio_write32(APIC_BASE + APIC_INITIAL_COUNT, 0);
-            return true;
+            return Ok(());
         }
         poll += 1;
     }
     mmio_write32(APIC_BASE + APIC_INITIAL_COUNT, 0);
-    false
+    Err(apic_failure::COUNT)
+}
+
+/// Failure reasons of the local-APIC probes, published on the debug port right
+/// after the non-fatal `t`/`v` markers (small binary codes, never an ASCII
+/// marker, so the marker stream stays unambiguous).
+mod apic_failure {
+    /// The APIC version register is absent or incoherent.
+    pub const VERSION: u8 = 1;
+    /// The one-shot count never moved (polling timer probe).
+    pub const COUNT: u8 = 2;
+    /// The interrupt-request block was not empty before enabling interrupts.
+    pub const IRR: u8 = 3;
+    /// No timer interrupt was observed (interrupt-delivery probe).
+    pub const TICK: u8 = 4;
 }
 
 /// Number of local APIC timer interrupts delivered to the private ISR.
@@ -1501,20 +1560,20 @@ unsafe fn apic_irr_empty() -> bool {
 /// count the first such advance expires the timer; the kernel then injects the
 /// vector because `IF` is set. Interrupts are disabled again before returning.
 ///
-/// Returns `false` for an absent or incoherent APIC, a foreign pending vector,
-/// or a timer that never fires (non-fatal for the caller).
+/// Returns `Ok(())` when the handler observed a tick, otherwise the
+/// [`apic_failure`] code of the check that failed (published after `v`).
 ///
 /// # Safety
 ///
 /// The APIC page, the private IDT gate and the interrupt stack must be ready;
 /// called once, from the boot thread.
-unsafe fn probe_timer_interrupt() -> bool {
+unsafe fn probe_timer_interrupt() -> Result<(), u8> {
     let version = mmio_read32(APIC_BASE + APIC_VERSION);
     if version == 0 || version == u32::MAX || (version >> 16) & 0xFF == 0 {
-        return false;
+        return Err(apic_failure::VERSION);
     }
     if !unsafe { apic_irr_empty() } {
-        return false;
+        return Err(apic_failure::IRR);
     }
     let svr = mmio_read32(APIC_BASE + APIC_SVR);
     mmio_write32(APIC_BASE + APIC_SVR, svr | APIC_SVR_ENABLE);
@@ -1544,7 +1603,11 @@ unsafe fn probe_timer_interrupt() -> bool {
         asm!("cli", options(nostack));
     }
     mmio_write32(APIC_BASE + APIC_INITIAL_COUNT, 0);
-    TIMER_TICKS.load(Ordering::Relaxed) != 0
+    if TIMER_TICKS.load(Ordering::Relaxed) != 0 {
+        Ok(())
+    } else {
+        Err(apic_failure::TICK)
+    }
 }
 
 /// Reads one 32-bit MMIO register at `address`.

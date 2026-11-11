@@ -75,6 +75,24 @@ const PAYLOAD: &[u8] = b"s9vm-guest: virtio-net tx";
 /// Bounded number of used-ring polls after a notify.
 const USED_POLLS: u32 = 64;
 
+/// Failure reasons of [`transmit`], published on the debug port right after the
+/// non-fatal `x` marker (small binary codes, never an ASCII marker, so the
+/// marker stream stays unambiguous).
+pub mod failure {
+    /// The transport does not report the network device id.
+    pub const DEVICE_ID: u8 = 1;
+    /// Feature negotiation failed.
+    pub const FEATURES: u8 = 2;
+    /// The transmit queue could not be programmed.
+    pub const QUEUE: u8 = 3;
+    /// The device rejected the `DRIVER_OK` status.
+    pub const DRIVER_OK: u8 = 4;
+    /// The device never consumed the descriptor (used ring unchanged).
+    pub const COMPLETION: u8 = 5;
+    /// The device reported a used length different from the packet size.
+    pub const LENGTH: u8 = 6;
+}
+
 /// Descriptor table: `QUEUE_SIZE` entries of 16 bytes.
 #[repr(C, align(16))]
 struct DescriptorTable([u8; 16 * QUEUE_SIZE as usize]);
@@ -93,20 +111,21 @@ static mut PACKET: [u8; PACKET_SIZE] = [0; PACKET_SIZE];
 
 /// Transmits one Ethernet frame through the virtio-net transmit queue.
 ///
-/// Returns `true` only when the device acknowledged the handshake, consumed
-/// the descriptor and reported a non-zero used length.
+/// Returns `Ok(())` only when the device acknowledged the handshake, consumed
+/// the descriptor and reported the expected used length; otherwise returns the
+/// [`failure`] code of the step that failed.
 ///
 /// # Safety
 ///
 /// `base` must be the guest-physical address of the network transport page,
 /// mapped readable and writable by the active guest page tables.
-pub unsafe fn transmit(base: u64) -> bool {
+pub unsafe fn transmit(base: u64) -> Result<(), u8> {
     let bus = Bus::at(base);
 
     // 1. Transport and device identity.
     // SAFETY: caller contract.
     if !unsafe { virtio::probe(bus, DEVICE_ID) } {
-        return false;
+        return Err(failure::DEVICE_ID);
     }
 
     // 2. Status machine and feature negotiation. The MAC feature is optional:
@@ -117,7 +136,7 @@ pub unsafe fn transmit(base: u64) -> bool {
     unsafe {
         virtio::begin(bus);
         if !virtio::negotiate(bus, FEATURE_MAC) {
-            return false;
+            return Err(failure::FEATURES);
         }
     }
 
@@ -127,7 +146,7 @@ pub unsafe fn transmit(base: u64) -> bool {
     let used_gpa = addr_of!(USED) as u64;
     // SAFETY: caller contract; the tables are page-aligned `.bss` buffers.
     if !unsafe { virtio::setup_queue(bus, QUEUE_TX, QUEUE_SIZE, desc_gpa, avail_gpa, used_gpa) } {
-        return false;
+        return Err(failure::QUEUE);
     }
 
     // 4. Build the packet and publish it.
@@ -183,7 +202,7 @@ pub unsafe fn transmit(base: u64) -> bool {
     // SAFETY: caller contract.
     unsafe {
         if !virtio::driver_ok(bus) {
-            return false;
+            return Err(failure::DRIVER_OK);
         }
         virtio::notify(bus, QUEUE_TX);
         let used = addr_of!(USED).cast::<u8>();
@@ -196,13 +215,16 @@ pub unsafe fn transmit(base: u64) -> bool {
             polls += 1;
         }
         if polls == USED_POLLS {
-            return false;
+            return Err(failure::COMPLETION);
         }
         // The device completed the descriptor; a non-zero length means it
         // collected the whole packet (header stripped on the device side).
         // Used-ring layout: flags (0), idx (2), entry id (4), entry len (8).
-        read_volatile(used.add(8).cast::<u32>()) == PACKET_SIZE as u32
+        if read_volatile(used.add(8).cast::<u32>()) != PACKET_SIZE as u32 {
+            return Err(failure::LENGTH);
+        }
     }
+    Ok(())
 }
 
 /// Fills [`PACKET`] with a zeroed network header followed by a minimal
