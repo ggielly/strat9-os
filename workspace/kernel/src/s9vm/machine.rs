@@ -251,6 +251,19 @@ impl Machine {
                 pulse_device_line(&mut self.devices, apic, isa_gsi(crate::s9vm::rtc::IRQ_LINE));
             }
         }
+        // The high-precision event timer counts at its nominal 14.31818 MHz.
+        // Its interrupt lines are not routed yet: the counter is what a guest
+        // reads as a time source, and the timer events are recorded in the
+        // interrupt status register for a guest that polls it.
+        let hpet_ticks = if tsc_hz == 0 {
+            cycles
+        } else {
+            let numerator = u128::from(cycles) * u128::from(crate::s9vm::hpet::FREQUENCY_HZ);
+            u64::try_from(numerator / u128::from(tsc_hz)).unwrap_or(u64::MAX)
+        };
+        if hpet_ticks > 0 {
+            let _ = self.devices.hpet.advance_ticks(hpet_ticks);
+        }
     }
 
     /// Takes the frames the guest transmitted on the virtio network device.

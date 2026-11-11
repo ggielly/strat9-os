@@ -52,6 +52,7 @@ use super::{
     exit::ExitClass,
     ioapic::{IoApic, PIN_COUNT},
     msr::MsrModel,
+    hpet::{self, Hpet},
     pci::{self, PciHostBridge},
     pic::Pic,
     pit::{self, Pit},
@@ -500,6 +501,8 @@ pub struct Devices {
     /// PCI host bridge: configuration mechanism #1 and the virtio functions
     /// the guest discovers through it (no MSI generation yet).
     pub pci: PciHostBridge,
+    /// High-precision event timer (MMIO page at `0xFED0_0000`).
+    pub hpet: Hpet,
     /// Virtio console (MMIO transport page).
     pub console: VirtioConsole,
     /// Virtio block device (MMIO transport page).
@@ -551,6 +554,7 @@ impl Devices {
             rtc: CmosRtc::new(),
             uart: Uart::new(),
             pci,
+            hpet: Hpet::new(),
             console: VirtioConsole::new(),
             blk: VirtioBlk::new(64 * 1024),
             net: VirtioNet::new(),
@@ -935,10 +939,6 @@ fn handle_mmio_exit(
     let Decoded::Memory(access) = view.fetch(guest)? else {
         return Ok(false);
     };
-    // Only plain register/memory transfers of 1, 2 or 4 bytes are modeled.
-    if !matches!(access.size, 1 | 2 | 4) {
-        return Ok(false);
-    }
     let Some(page) = device_page(address) else {
         // A PCI function BAR is not a fixed device page: resolve it through
         // the bridge's live placement map, which only contains the BARs the
@@ -949,11 +949,44 @@ fn handle_mmio_exit(
         guest.set_rip(access.next_rip);
         return Ok(true);
     };
+    // The HPET has 64-bit registers: serve it before the 32-bit merge path.
+    if page == DevicePage::Hpet {
+        if !serve_hpet(devices, guest, &access) {
+            return Ok(false);
+        }
+        guest.set_rip(access.next_rip);
+        return Ok(true);
+    }
+    // Only plain register/memory transfers of 1, 2 or 4 bytes are modeled.
+    if !matches!(access.size, 1 | 2 | 4) {
+        return Ok(false);
+    }
     if !serve_mmio(devices, apic, view, guest, page, &access) {
         return Ok(false);
     }
     guest.set_rip(access.next_rip);
     Ok(true)
+}
+
+/// Applies one decoded memory access to the high-precision event timer.
+///
+/// The model exposes 32- and 64-bit registers; an unaligned access or any other
+/// width is outside the subset and is reported to policy.
+fn serve_hpet(devices: &mut Devices, guest: &mut dyn GuestContext, access: &MemoryAccess) -> bool {
+    let offset = (access.address & PAGE_OFFSET_MASK) as u16;
+    if access.address % u64::from(access.size) != 0 {
+        return false;
+    }
+    if access.write {
+        let value = guest.gpr(access.register);
+        devices.hpet.write(offset, access.size, value)
+    } else {
+        let Some(value) = devices.hpet.read(offset, access.size) else {
+            return false;
+        };
+        write_register(guest, access.register, access.size, value);
+        true
+    }
 }
 
 /// Applies one decoded memory access to a PCI function BAR.
@@ -994,6 +1027,8 @@ pub enum DevicePage {
     Blk,
     /// Virtio network transport page.
     Net,
+    /// High-precision event timer page.
+    Hpet,
 }
 
 /// Identifies the modeled device page containing `address`.
@@ -1009,6 +1044,8 @@ pub fn device_page(address: u64) -> Option<DevicePage> {
         Some(DevicePage::Blk)
     } else if page == NET_BASE {
         Some(DevicePage::Net)
+    } else if page == hpet::BASE_GPA {
+        Some(DevicePage::Hpet)
     } else {
         None
     }
@@ -1171,6 +1208,8 @@ fn read_mmio(devices: &Devices, apic: &LocalApic, page: DevicePage, offset: usiz
         DevicePage::Console => devices.console.read(offset as u32 & 0xFFF),
         DevicePage::Blk => devices.blk.read(offset as u32 & 0xFFF),
         DevicePage::Net => devices.net.read(offset as u32 & 0xFFF),
+        // The HPET has 32/64-bit registers and is served before this path.
+        DevicePage::Hpet => 0,
     }
 }
 
@@ -1223,6 +1262,8 @@ fn write_mmio(
             let asserted = devices.net.interrupt_status() != 0;
             set_device_line(devices, apic, NET_IRQ_LINE, asserted);
         }
+        // The HPET has 32/64-bit registers and is served before this path.
+        DevicePage::Hpet => {}
     }
 }
 

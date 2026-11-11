@@ -16,6 +16,8 @@ mod decode;
 mod emulate;
 #[path = "../../kernel/src/s9vm/exit.rs"]
 mod exit;
+#[path = "../../kernel/src/s9vm/hpet.rs"]
+mod hpet;
 #[path = "../../kernel/src/s9vm/ioapic.rs"]
 mod ioapic;
 #[path = "../../kernel/src/s9vm/msr.rs"]
@@ -1933,4 +1935,87 @@ fn pci_virtio_bar_can_be_sized_and_placed_by_the_guest() {
         devices.pci.memory_map().find(0xFE00_0000).map(|w| w.size),
         Some(pci::VIRTIO_BAR_SIZE)
     );
+}
+// ---------------------------------------------------------------------------
+// High-precision event timer (MMIO page at 0xFED0_0000).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_hpet_page_is_a_modeled_device_page() {
+    assert_eq!(
+        emulate::device_page(hpet::BASE_GPA),
+        Some(emulate::DevicePage::Hpet)
+    );
+    assert_eq!(
+        emulate::device_page(hpet::BASE_GPA + hpet::MMIO_SIZE as u64 - 4),
+        Some(emulate::DevicePage::Hpet)
+    );
+    assert_eq!(
+        emulate::device_page(hpet::BASE_GPA + 0x1000),
+        None
+    );
+}
+
+#[test]
+fn hpet_capability_register_is_readable_through_the_device_page() {
+    let mut memory = machine();
+    let rip = load_code(&mut memory, &[0x48, 0x8B, 0x08]); // mov rcx, [rax]
+    let mut guest = TestGuest::new(rip);
+    guest.regs[0] = hpet::BASE_GPA + u64::from(hpet::CAPS_ID);
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    let mut view = view(&mut memory, &guest);
+    let handled = handle_exit(
+        &mut devices,
+        &mut apic,
+        &mut view,
+        &mut guest,
+        ExitClass::EptViolation,
+        0b011,
+        hpet::BASE_GPA + u64::from(hpet::CAPS_ID),
+    )
+    .expect("emulated");
+    assert!(handled);
+    assert_eq!(guest.regs[1], devices.hpet.caps().encode());
+}
+
+#[test]
+fn hpet_configuration_and_counter_are_visible_to_the_guest() {
+    let mut memory = machine();
+    let rip = load_code(&mut memory, &[0x89, 0x08]); // mov [rax], ecx
+    let mut guest = TestGuest::new(rip);
+    guest.regs[0] = hpet::BASE_GPA + u64::from(hpet::CONFIG);
+    guest.regs[1] = u64::from(hpet::CONFIG_ENABLE);
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    let mut config_view = view(&mut memory, &guest);
+    assert!(handle_exit(
+        &mut devices,
+        &mut apic,
+        &mut config_view,
+        &mut guest,
+        ExitClass::EptViolation,
+        0b001,
+        hpet::BASE_GPA + u64::from(hpet::CONFIG),
+    )
+    .expect("emulated"));
+    assert!(devices.hpet.enabled());
+    // The counter advances with the device time base and reads back 64-bit.
+    devices.hpet.advance_ticks(1000);
+    assert_eq!(devices.hpet.counter(), 1000);
+    let rip = load_code(&mut memory, &[0x48, 0x8B, 0x08]); // mov rcx, [rax]
+    guest.rip = rip;
+    guest.regs[0] = hpet::BASE_GPA + u64::from(hpet::COUNTER);
+    let mut counter_view = view(&mut memory, &guest);
+    assert!(handle_exit(
+        &mut devices,
+        &mut apic,
+        &mut counter_view,
+        &mut guest,
+        ExitClass::EptViolation,
+        0b011,
+        hpet::BASE_GPA + u64::from(hpet::COUNTER),
+    )
+    .expect("emulated"));
+    assert_eq!(guest.regs[1], 1000);
 }

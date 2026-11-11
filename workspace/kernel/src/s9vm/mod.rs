@@ -64,6 +64,7 @@ pub mod guest;
 pub mod guestcode;
 pub mod guestprog;
 pub mod guestpt;
+pub mod hpet;
 pub mod image;
 pub mod ioapic;
 pub mod iommu;
