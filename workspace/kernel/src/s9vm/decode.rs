@@ -101,6 +101,9 @@ pub struct MemoryAccess {
     ///
     /// For plain `mov` this equals [`Self::size`]; for `movzx`/`movsx` it is
     /// the destination operand size while `size` remains the memory width.
+    /// Zero marks a read-only probe (`test`/`cmp` with a memory operand): the
+    /// value is consumed by the instruction itself and must not be written back
+    /// to any register.
     pub register_size: u8,
     /// Immediate source for `mov r/m, imm`; `None` for register transfers.
     ///
@@ -416,6 +419,104 @@ where
             };
             decode_immediate_move(operand, size, value, rip, index)
         }
+        // test r/m8, r8 / test r/m, r (0x84/0x85): read-only memory probe
+        0x84 | 0x85 => {
+            let size = operand_size(opcode == 0x84, rex, prefixes.operand_size_override);
+            let (operand, next) = decode_modrm(
+                bytes,
+                index,
+                rip,
+                rex,
+                prefixes.address_size_override,
+                0,
+                &register,
+            )?;
+            decode_read_only_memory(operand, size, None, rip, next)
+        }
+        // cmp r/m8, r8 / cmp r/m, r (0x38/0x39): read-only memory probe
+        0x38 | 0x39 => {
+            let size = operand_size(opcode == 0x38, rex, prefixes.operand_size_override);
+            let (operand, next) = decode_modrm(
+                bytes,
+                index,
+                rip,
+                rex,
+                prefixes.address_size_override,
+                0,
+                &register,
+            )?;
+            decode_read_only_memory(operand, size, None, rip, next)
+        }
+        // cmp r8, r/m8 / cmp r, r/m (0x3A/0x3B): the memory operand is the
+        // source, so the access is a read-only probe as well.
+        0x3A | 0x3B => {
+            let size = operand_size(opcode == 0x3A, rex, prefixes.operand_size_override);
+            let (operand, next) = decode_modrm(
+                bytes,
+                index,
+                rip,
+                rex,
+                prefixes.address_size_override,
+                0,
+                &register,
+            )?;
+            decode_read_only_memory(operand, size, None, rip, next)
+        }
+        // test r/m, imm (0xF6 /0 byte, 0xF7 /0 word/dword/qword): read-only
+        0xF6 | 0xF7 => {
+            let size = operand_size(opcode == 0xF6, rex, prefixes.operand_size_override);
+            let immediate_size = if size == 8 { 4 } else { size };
+            let (operand, mut after_modrm) = decode_modrm(
+                bytes,
+                index,
+                rip,
+                rex,
+                prefixes.address_size_override,
+                usize::from(immediate_size),
+                &register,
+            )?;
+            if !matches!(operand, ModRmOperand::Memory { reg: 0, .. }) {
+                return Err(DecodeError::Unsupported);
+            }
+            let value = if size == 8 {
+                u64::from(read_u32(bytes, &mut after_modrm)?)
+            } else {
+                read_immediate(bytes, &mut after_modrm, size)?
+            };
+            decode_read_only_memory(operand, size, Some(value), rip, after_modrm)
+        }
+        // cmp r/m, imm: 0x80 (/7, imm8), 0x81 (/7, imm16/32) and 0x83 (/7,
+        // imm8 sign-extended). Only the read-only CMP form is modeled.
+        0x80 | 0x81 | 0x83 => {
+            let size = operand_size(opcode == 0x80, rex, prefixes.operand_size_override);
+            let immediate_size = if opcode == 0x83 {
+                1
+            } else if opcode == 0x80 {
+                1
+            } else if size == 8 {
+                4
+            } else {
+                size
+            };
+            let (operand, mut after_modrm) = decode_modrm(
+                bytes,
+                index,
+                rip,
+                rex,
+                prefixes.address_size_override,
+                usize::from(immediate_size),
+                &register,
+            )?;
+            if !matches!(operand, ModRmOperand::Memory { reg: 7, .. }) {
+                return Err(DecodeError::Unsupported);
+            }
+            let value = if opcode == 0x83 || opcode == 0x80 {
+                u64::from(read_u8(bytes, &mut after_modrm)?)
+            } else {
+                read_immediate(bytes, &mut after_modrm, size)?
+            };
+            decode_read_only_memory(operand, size, Some(value), rip, after_modrm)
+        }
         // in al/ax/eax, imm8
         0xE4 | 0xE5 => {
             let port = u16::from(read_u8(bytes, &mut index)?);
@@ -552,6 +653,34 @@ fn register_move(
         value,
         next_rip: rip.wrapping_add(index as u64),
     })
+}
+
+/// Builds a read-only memory probe (`test`/`cmp` with a memory operand).
+///
+/// Such an instruction reads the device register but has no destination to
+/// write the value to: `register_size` is 0 so the replay path performs the
+/// device read and discards the result. A register-form probe cannot target a
+/// device page and is reported as unsupported.
+fn decode_read_only_memory(
+    operand: ModRmOperand,
+    size: u8,
+    immediate: Option<u64>,
+    rip: u64,
+    index: usize,
+) -> Result<Decoded, DecodeError> {
+    match operand {
+        ModRmOperand::Memory { address, .. } => Ok(Decoded::Memory(MemoryAccess {
+            address,
+            size,
+            write: false,
+            register: 0,
+            register_size: 0,
+            immediate,
+            extension: Extension::None,
+            next_rip: rip.wrapping_add(index as u64),
+        })),
+        ModRmOperand::Register { .. } => Err(DecodeError::Unsupported),
+    }
 }
 
 /// Builds a `mov r/m, imm` result once the ModRM operand and immediate are known.

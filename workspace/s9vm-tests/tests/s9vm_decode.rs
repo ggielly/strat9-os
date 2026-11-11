@@ -740,3 +740,69 @@ fn rejects_other_two_byte_opcodes() {
         Err(DecodeError::Unsupported)
     );
 }
+
+#[test]
+fn decodes_test_memory_immediate_as_read_only_probe() {
+    // 41 f7 44 24 10 01 00 00 00 : testl $1, 0x10(%r12)
+    // This is the exact instruction a guest compiler emits when it fuses a
+    // volatile MMIO load with a feature-bit test; the replay path must see a
+    // read of the device register and must not write any GPR.
+    let mut values = [0u64; 16];
+    values[12] = 0x40_0000;
+    let access = memory(decode_with_regs(
+        &[0x41, 0xF7, 0x44, 0x24, 0x10, 0x01, 0x00, 0x00, 0x00],
+        0x101156,
+        &values,
+    ).unwrap());
+    assert_eq!(access.address, 0x40_0010);
+    assert_eq!(access.size, 4);
+    assert!(!access.write);
+    assert_eq!(access.register_size, 0);
+    assert_eq!(access.immediate, Some(1));
+    assert_eq!(access.next_rip, 0x101156 + 9);
+}
+
+#[test]
+fn decodes_cmp_memory_operand_as_read_only_probe() {
+    // 39 08 : cmp [rax], ecx
+    let mut values = [0u64; 16];
+    values[0] = 0x5_0000;
+    let access = memory(decode_with_regs(&[0x39, 0x08], 0x1000, &values).unwrap());
+    assert_eq!(access.address, 0x5_0000);
+    assert_eq!(access.size, 4);
+    assert!(!access.write);
+    assert_eq!(access.register_size, 0);
+
+    // 83 38 01 : cmp dword [rax], 1
+    let access = memory(decode_with_regs(&[0x83, 0x38, 0x01], 0x2000, &values).unwrap());
+    assert_eq!(access.address, 0x5_0000);
+    assert!(!access.write);
+    assert_eq!(access.register_size, 0);
+    assert_eq!(access.immediate, Some(1));
+    assert_eq!(access.next_rip, 0x2003);
+}
+
+#[test]
+fn decodes_byte_test_and_cmp_memory_probes() {
+    // f6 00 01 : test byte [rax], 1
+    let mut values = [0u64; 16];
+    values[0] = 0xE_0000;
+    let access = memory(decode_with_regs(&[0xF6, 0x00, 0x01], 0x3000, &values).unwrap());
+    assert_eq!(access.size, 1);
+    assert_eq!(access.register_size, 0);
+    // 80 38 01 : cmp byte [rax], 1
+    let access = memory(decode_with_regs(&[0x80, 0x38, 0x01], 0x4000, &values).unwrap());
+    assert_eq!(access.size, 1);
+    assert_eq!(access.register_size, 0);
+}
+
+#[test]
+fn rejects_read_only_probes_on_registers_and_non_cmp_immediate_groups() {
+    // 85 c9 : test ecx, ecx (no memory operand)
+    assert_eq!(decode_with(&[0x85, 0xC9], 0x1000), Err(DecodeError::Unsupported));
+    // 81 00 01 00 00 00 : add dword [rax], 1 (group /0 is not read-only)
+    assert_eq!(
+        decode_with(&[0x81, 0x00, 0x01, 0x00, 0x00, 0x00], 0x2000),
+        Err(DecodeError::Unsupported)
+    );
+}

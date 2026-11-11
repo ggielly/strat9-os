@@ -867,7 +867,12 @@ fn serve_mmio(
     } else {
         let word = read_mmio(devices, apic, page, offset);
         let value = (u64::from(word) >> shift) & mask;
-        write_register(guest, access.register, access.size, value);
+        // `register_size == 0` marks a read-only probe (`test`/`cmp` with a
+        // memory operand): the device read and its side effects happen, but
+        // there is no destination register to update.
+        if access.register_size != 0 {
+            write_register(guest, access.register, access.size, value);
+        }
     }
     true
 }

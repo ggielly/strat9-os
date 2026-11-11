@@ -2348,9 +2348,16 @@ fn run_kthread_smoke() {
 
     // A RUN proves the task actually executes: under a host without VT-x the
     // request completes with HardwareNotReady, which is the expected result
-    // here (TCG has no VMX). A timeout means the task was never scheduled.
+    // here (TCG has no VMX). With VT-x active the smoke world has no mapped
+    // guest memory (the smoke test only exercises the scheduling path), so
+    // the request completes with NoMemory once the task reached `run_vcpu`;
+    // both outcomes prove the vCPU task was scheduled and executed. A timeout
+    // means the task was never scheduled.
     let run = vm::request_run_timeout(vcpu, KTHREAD_SMOKE_RUN_NS);
-    let run_ok = matches!(run, Ok(()) | Err(vm::RunError::HardwareNotReady));
+    let run_ok = matches!(
+        run,
+        Ok(()) | Err(vm::RunError::HardwareNotReady) | Err(vm::RunError::NoMemory)
+    );
     log::info!("[s9vm] kthread-smoke: bounded RUN completed ({:?})", run);
 
     let started = crate::process::scheduler::ticks();
