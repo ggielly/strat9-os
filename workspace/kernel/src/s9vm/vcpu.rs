@@ -1187,6 +1187,117 @@ impl Vcpu {
         &self.guest
     }
 
+    /// True once the guest has actually been entered.
+    ///
+    /// Only then does the control block hold the architectural state the guest
+    /// produced itself (descriptor tables, segments, MSRs): a vCPU that failed
+    /// before its first entry must still be initialised from the ABI register
+    /// block, not from the control block.
+    pub fn entered(&self) -> bool {
+        self.launched
+    }
+
+    /// Reads the guest architectural state that the ABI register block cannot
+    /// carry back from the control block.
+    ///
+    /// The processor saves the complete guest state in the control block on
+    /// every VM exit; the kernel only updates the ABI-visible fields. This
+    /// reads the descriptor tables, the segment registers and the MSRs back so
+    /// that a policy round trip (`RUN` → exit → policy → `RUN`) does not
+    /// rewrite them with the boot defaults. Skipping it made the first
+    /// interrupt delivered after such a round trip triple-fault the guest:
+    /// the control block reloaded `IDTR` with a zero limit, so the vector
+    /// could not be delivered.
+    ///
+    /// # Safety
+    /// The control block must be loaded on the current CPU and the guest must
+    /// not be running.
+    pub unsafe fn refresh_system_state(&mut self) -> Result<(), VcpuError> {
+        // SAFETY: caller guarantees the block is loaded and the guest inactive.
+        unsafe {
+            self.guest.gdtr_base = self.control.read_natural(field::GUEST_GDTR_BASE)?;
+            self.guest.gdtr_limit = self.control.read_u32(field::GUEST_GDTR_LIMIT)?;
+            self.guest.idtr_base = self.control.read_natural(field::GUEST_IDTR_BASE)?;
+            self.guest.idtr_limit = self.control.read_u32(field::GUEST_IDTR_LIMIT)?;
+            self.guest.es = self.read_segment(
+                field::GUEST_ES_SELECTOR,
+                field::GUEST_ES_BASE,
+                field::GUEST_ES_LIMIT,
+                field::GUEST_ES_ACCESS_RIGHTS,
+            )?;
+            self.guest.cs = self.read_segment(
+                field::GUEST_CS_SELECTOR,
+                field::GUEST_CS_BASE,
+                field::GUEST_CS_LIMIT,
+                field::GUEST_CS_ACCESS_RIGHTS,
+            )?;
+            self.guest.ss = self.read_segment(
+                field::GUEST_SS_SELECTOR,
+                field::GUEST_SS_BASE,
+                field::GUEST_SS_LIMIT,
+                field::GUEST_SS_ACCESS_RIGHTS,
+            )?;
+            self.guest.ds = self.read_segment(
+                field::GUEST_DS_SELECTOR,
+                field::GUEST_DS_BASE,
+                field::GUEST_DS_LIMIT,
+                field::GUEST_DS_ACCESS_RIGHTS,
+            )?;
+            self.guest.fs = self.read_segment(
+                field::GUEST_FS_SELECTOR,
+                field::GUEST_FS_BASE,
+                field::GUEST_FS_LIMIT,
+                field::GUEST_FS_ACCESS_RIGHTS,
+            )?;
+            self.guest.gs = self.read_segment(
+                field::GUEST_GS_SELECTOR,
+                field::GUEST_GS_BASE,
+                field::GUEST_GS_LIMIT,
+                field::GUEST_GS_ACCESS_RIGHTS,
+            )?;
+            self.guest.ldtr = self.read_segment(
+                field::GUEST_LDTR_SELECTOR,
+                field::GUEST_LDTR_BASE,
+                field::GUEST_LDTR_LIMIT,
+                field::GUEST_LDTR_ACCESS_RIGHTS,
+            )?;
+            self.guest.tr = self.read_segment(
+                field::GUEST_TR_SELECTOR,
+                field::GUEST_TR_BASE,
+                field::GUEST_TR_LIMIT,
+                field::GUEST_TR_ACCESS_RIGHTS,
+            )?;
+            self.guest.pat = self.control.read_u64(field::GUEST_PAT)?;
+            self.guest.dr7 = self.control.read_natural(field::GUEST_DR7)?;
+            self.guest.sysenter_cs = self.control.read_u32(field::GUEST_SYSENTER_CS)?;
+            self.guest.sysenter_esp = self.control.read_natural(field::GUEST_SYSENTER_ESP)?;
+            self.guest.sysenter_eip = self.control.read_natural(field::GUEST_SYSENTER_EIP)?;
+        }
+        Ok(())
+    }
+
+    /// Reads one segment register from the control block.
+    ///
+    /// # Safety
+    /// The control block must be loaded on the current CPU.
+    unsafe fn read_segment(
+        &self,
+        selector_field: u32,
+        base_field: u32,
+        limit_field: u32,
+        access_rights_field: u32,
+    ) -> Result<crate::s9vm::guest::Segment, VcpuError> {
+        // SAFETY: caller guarantees the block is loaded; widths match.
+        unsafe {
+            Ok(crate::s9vm::guest::Segment {
+                selector: self.control.read_u16(selector_field)?,
+                base: self.control.read_natural(base_field)?,
+                limit: self.control.read_u32(limit_field)?,
+                access_rights: self.control.read_u32(access_rights_field)?,
+            })
+        }
+    }
+
     /// Per-vCPU MSR shadow state.
     pub const fn msr(&self) -> &MsrModel {
         &self.msr

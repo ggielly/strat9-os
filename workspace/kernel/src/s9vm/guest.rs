@@ -336,6 +336,51 @@ impl GuestState {
         (self.cr0 & CR0_PE) == 0
     }
 
+    /// Imports the architectural state a policy register block cannot carry.
+    ///
+    /// The ABI register block describes the general-purpose registers, RIP,
+    /// RSP, RFLAGS, CR0/CR3/CR4 and EFER of a vCPU; it has no room for the
+    /// descriptor tables, the segment registers or the MSRs a guest loads for
+    /// itself from inside the world. The kernel therefore rebuilds the guest
+    /// state from that block at the start of every `RUN`, which would reset
+    /// the tables and segments to their boot defaults and make the next
+    /// interrupt or far control transfer fault.
+    ///
+    /// `source` is the state read back from the processor (the control block
+    /// keeps it across VM exits). Only the fields the policy cannot express
+    /// are copied: everything the caller sets keeps the value it already has.
+    pub fn import_system_state(&mut self, source: &Self) {
+        // A policy change of execution mode invalidates the segment/table
+        // snapshot (the constructors provide the matching defaults); only
+        // import the hardware state when the mode is unchanged.
+        if self.is_long_mode() != source.is_long_mode() {
+            return;
+        }
+        // Segment registers: a guest can reload them from its own GDT (selector
+        // and, in long mode, the cached limit/access rights follow).
+        self.es = source.es;
+        self.cs = source.cs;
+        self.ss = source.ss;
+        self.ds = source.ds;
+        self.fs = source.fs;
+        self.gs = source.gs;
+        self.ldtr = source.ldtr;
+        self.tr = source.tr;
+        // Descriptor tables: the bases and limits the guest installed.
+        self.gdtr_base = source.gdtr_base;
+        self.gdtr_limit = source.gdtr_limit;
+        self.idtr_base = source.idtr_base;
+        self.idtr_limit = source.idtr_limit;
+        // State the guest may write through an intercepted MSR: the replay
+        // updates the shadow and the control block, so the processor value is
+        // authoritative here.
+        self.pat = source.pat;
+        self.dr7 = source.dr7;
+        self.sysenter_cs = source.sysenter_cs;
+        self.sysenter_esp = source.sysenter_esp;
+        self.sysenter_eip = source.sysenter_eip;
+    }
+
     /// Builds a guest state from an ABI register block.
     ///
     /// Long mode is selected if `EFER.LME` and `CR0.PG` are both

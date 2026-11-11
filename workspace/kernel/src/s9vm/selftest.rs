@@ -3013,15 +3013,20 @@ fn run_smp_in_world(caps: &HwCaps, world_id: u64) -> Result<SmpReport, SelftestE
                 continue;
             }
             if crate::process::scheduler::ticks() >= deadline_ticks {
+                // Name the state of both vCPU tasks: a missing exit is either a
+                // failed run (the error is published) or a task that never ran
+                // (the request is still marked in flight).
+                let states = [vm::run_completion(vcpus[0]), vm::run_completion(vcpus[1])];
                 log::warn!(
                     "[s9vm] smp test: round {} exit timeout collected={} exits={:?} \
-                         hlt={} overlap={} cpus={}",
+                         hlt={} overlap={} cpus={} states={:?}",
                     round,
                     collected,
                     exits_per_vcpu,
                     hlt,
                     overlap_observed,
-                    scheduler_cpus
+                    scheduler_cpus,
+                    states
                 );
                 return Err(SelftestError::BadExit("smp exit timeout"));
             }

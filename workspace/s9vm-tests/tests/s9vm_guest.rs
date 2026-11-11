@@ -295,4 +295,64 @@ fn long_mode_guest_cr4_has_vmxe() {
     assert_ne!(state.cr4 & CR4_PAE, 0);
 }
 
+#[test]
+fn import_system_state_preserves_guest_loaded_tables() {
+    // The policy register block cannot carry the descriptor tables, segments or
+    // MSRs: a resumed vCPU must keep the values the guest installed inside the
+    // world, or the first interrupt after a policy round trip faults (zero
+    // IDTR limit → triple fault).
+    let mut boot = GuestState::long_mode_64(0x1000, 0x2000, 0x3000);
+    let mut hardware = boot;
+    hardware.gdtr_base = 0x10_C000;
+    hardware.gdtr_limit = 0x2F;
+    hardware.idtr_base = 0x10_D000;
+    hardware.idtr_limit = 0x7FF;
+    hardware.cs = Segment {
+        selector: 0x08,
+        base: 0,
+        limit: 0xFFFF_FFFF,
+        access_rights: long_code_access_rights(0),
+    };
+    hardware.ds = Segment {
+        selector: 0x10,
+        base: 0,
+        limit: 0xFFFF_FFFF,
+        access_rights: data_access_rights(0) | AR_DEFAULT_BIG | 0x8000,
+    };
+    hardware.pat = 0x0007_0406_0007_0406;
+    hardware.sysenter_cs = 0x10;
+    hardware.sysenter_esp = 0x20_0000;
+    hardware.sysenter_eip = 0x10_1000;
+
+    // The ABI rebuild resets everything to the boot defaults; importing the
+    // hardware snapshot must restore exactly the guest-owned fields.
+    boot.import_system_state(&hardware);
+    assert_eq!(boot.gdtr_base, 0x10_C000);
+    assert_eq!(boot.gdtr_limit, 0x2F);
+    assert_eq!(boot.idtr_base, 0x10_D000);
+    assert_eq!(boot.idtr_limit, 0x7FF);
+    assert_eq!(boot.cs, hardware.cs);
+    assert_eq!(boot.ds, hardware.ds);
+    assert_eq!(boot.pat, hardware.pat);
+    assert_eq!(boot.sysenter_cs, hardware.sysenter_cs);
+    assert_eq!(boot.sysenter_esp, hardware.sysenter_esp);
+    assert_eq!(boot.sysenter_eip, hardware.sysenter_eip);
+
+    // Policy-visible state keeps the ABI values, not the hardware ones.
+    boot.rip = 0x1_2345; // as a policy `SET_REGS` would
+    boot.rflags = 0x2 | (1 << 9);
+    assert_eq!(boot.rip, 0x1_2345);
+    assert_eq!(boot.rflags, 0x2 | (1 << 9));
+    assert_eq!(boot.cr3, hardware.cr3);
+
+    // A mode change invalidates the snapshot instead of mixing incompatible
+    // segment defaults.
+    let mut real = GuestState::real_mode(0x1000, 0x2000);
+    real.import_system_state(&hardware);
+    assert_eq!(real.gdtr_limit, 0);
+
+    // The imported state is still valid for entry.
+    assert_eq!(boot.validate(&permissive(), true), Ok(()));
+}
+
 

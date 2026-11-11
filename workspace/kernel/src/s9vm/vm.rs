@@ -1441,8 +1441,15 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
     // time slice, and a "slice" is one `run_vcpu` call, whether or not the
     // guest actually entered (hardware setup failures included).
     timing.advance_window();
+    // True when this call resumes a vCPU the guest already ran on: the control
+    // block then holds the architectural state the guest produced (descriptor
+    // tables, segments, MSRs) and it must not be reset by the ABI rebuild.
+    let mut resumed = false;
     let mut hardware = match hardware {
-        Some(hardware) => hardware,
+        Some(existing) => {
+            resumed = existing.entered();
+            existing
+        }
         None => Vcpu::new(caps, pointer)?,
     };
 
@@ -1489,9 +1496,24 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
             result = Err(RunError::Hardware(error));
         } else if let Err(error) = hardware.configure_host() {
             result = Err(RunError::Hardware(error));
-        } else if let Err(error) = hardware.configure(caps, &guest) {
-            result = Err(RunError::Hardware(error));
-        } else if pending_nmi {
+        } else if resumed {
+            // The guest may have loaded its own GDT/IDT and segments since the
+            // previous entry; the processor saved them in the control block on
+            // the last exit. Import them before the ABI rebuild writes the boot
+            // defaults back: a policy round trip must be transparent for the
+            // guest, otherwise the first interrupt after it cannot be
+            // delivered (zero IDTR limit → triple fault).
+            match hardware.refresh_system_state() {
+                Ok(()) => guest.import_system_state(hardware.guest()),
+                Err(error) => result = Err(RunError::Hardware(error)),
+            }
+        }
+        if result.is_ok() {
+            if let Err(error) = hardware.configure(caps, &guest) {
+                result = Err(RunError::Hardware(error));
+            }
+        }
+        if result.is_ok() && pending_nmi {
             // The NMI takes priority over a pending external interrupt.
             if let Err(error) = hardware.inject_nmi() {
                 result = Err(RunError::Hardware(error));
@@ -3235,6 +3257,19 @@ pub fn wait_run_complete(vcpu_id: u64, timeout_ns: u64) -> Result<(), RunError> 
         }
         sleep_current_task_ticks(1);
     }
+}
+
+/// Diagnostic state of the last `RUN` of a vCPU.
+///
+/// Returns `(done, in_flight, result)`. The result is `Some` as soon as the
+/// vCPU task published the outcome of the run, so a caller that observes a
+/// missing exit can distinguish "the run failed" from "the task never ran":
+/// without it the only visible symptom is a timeout.
+pub fn run_completion(vcpu_id: u64) -> Option<(bool, bool, Option<Result<(), RunError>>)> {
+    let mut worlds = WORLDS.lock();
+    let (world, index) = locate_slot(&mut worlds, vcpu_id)?;
+    let slot = &world.vcpus[index];
+    Some((slot.run_done, slot.run_in_flight, slot.run_result))
 }
 
 /// Requests execution of a vCPU and **blocks** the caller until the end of
