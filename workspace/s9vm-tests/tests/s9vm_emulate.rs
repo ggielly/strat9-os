@@ -1603,3 +1603,158 @@ fn uart_interrupt_line_is_level_triggered_on_the_ioapic() {
     );
 }
 
+
+// ---------------------------------------------------------------------------
+// Legacy interrupt delivery through the 8259 pair (PIC mode).
+// ---------------------------------------------------------------------------
+
+/// Programs the 8259 pair like an operating system does: master vector base
+/// 0x20, slave 0x28, cascade on IRQ2, every line unmasked. The reset vector
+/// base (0x08) is below the processor's reserved vector range, so a delivered
+/// vector would never be accepted by the local APIC.
+fn init_legacy_pic(devices: &mut Devices) {
+    devices.pic.write(pic::port::MASTER_COMMAND, 0x11);
+    devices.pic.write(pic::port::MASTER_DATA, 0x20);
+    devices.pic.write(pic::port::MASTER_DATA, 0x04);
+    devices.pic.write(pic::port::MASTER_DATA, 0x01);
+    devices.pic.write(pic::port::SLAVE_COMMAND, 0x11);
+    devices.pic.write(pic::port::SLAVE_DATA, 0x28);
+    devices.pic.write(pic::port::SLAVE_DATA, 0x02);
+    devices.pic.write(pic::port::SLAVE_DATA, 0x01);
+    devices.pic.write(pic::port::MASTER_DATA, 0x00);
+    devices.pic.write(pic::port::SLAVE_DATA, 0x00);
+}
+
+#[test]
+fn gsi_to_isa_line_reverses_the_madt_overrides() {
+    // IRQ0 is wired to GSI2 (8254 cascade), IRQ9 to GSI9; the rest is the
+    // identity. GSIs above the ISA range have no 8259 line.
+    assert_eq!(emulate::gsi_isa_irq(emulate::isa_gsi(0)), Some(0));
+    assert_eq!(emulate::gsi_isa_irq(emulate::isa_gsi(9)), Some(9));
+    // IRQ2 is the 8259 cascade: it has no device and its identity GSI2 is the
+    // same pin the MADT override gives to IRQ0, so it cannot round-trip. Every
+    // line that a device can actually raise does.
+    for irq in [1u8, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15] {
+        assert_eq!(
+            emulate::gsi_isa_irq(emulate::isa_gsi(irq)),
+            Some(irq),
+            "IRQ{irq} must round-trip through its GSI"
+        );
+    }
+    assert_eq!(emulate::gsi_isa_irq(16), None);
+    assert_eq!(emulate::gsi_isa_irq(64), None);
+}
+
+#[test]
+fn a_timer_expiry_reaches_the_8259_pair_in_pic_mode() {
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    init_legacy_pic(&mut devices);
+    mask_ioapic_pins(&mut devices);
+    // The 8254 channel-0 line is GSI2 on a PC: the pair must acknowledge IRQ0
+    // and the vector must reach the local APIC.
+    emulate::pulse_device_line(&mut devices, &mut apic, emulate::isa_gsi(pit::IRQ_LINE));
+    assert_eq!(devices.pic.master().isr(), 0x01);
+    assert_eq!(devices.pic.master().irr(), 0x00);
+    assert_eq!(apic.pending_vector(), Some(0x20));
+}
+
+#[test]
+fn the_guest_end_of_interrupt_releases_the_8259_in_service_register() {
+    let mut memory = machine();
+    let rip = load_code(&mut memory, &[0xE6, 0x20]); // out 0x20, al (non-specific EOI)
+    let mut guest = TestGuest::new(rip);
+    guest.regs[0] = 0x20;
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    init_legacy_pic(&mut devices);
+    mask_ioapic_pins(&mut devices);
+    emulate::pulse_device_line(&mut devices, &mut apic, emulate::isa_gsi(pit::IRQ_LINE));
+    assert_eq!(devices.pic.master().isr(), 0x01);
+    assert!(replay_port(
+        &mut memory,
+        &mut guest,
+        &mut devices,
+        &mut apic,
+        pic::port::MASTER_COMMAND,
+        false
+    ));
+    assert_eq!(devices.pic.master().isr(), 0x00);
+}
+
+#[test]
+fn a_masked_8259_line_is_latched_and_delivered_on_unmask() {
+    let mut memory = machine();
+    let rip = load_code(&mut memory, &[0xE6, 0x21]); // out 0x21, al (mask write)
+    let mut guest = TestGuest::new(rip);
+    guest.regs[0] = 0x00; // unmask every master line
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    init_legacy_pic(&mut devices);
+    mask_ioapic_pins(&mut devices);
+    devices.pic.write(pic::port::MASTER_DATA, 0xFF); // mask everything
+    emulate::pulse_device_line(&mut devices, &mut apic, emulate::isa_gsi(pit::IRQ_LINE));
+    assert_eq!(apic.pending_vector(), None, "a masked line must not deliver");
+    assert_eq!(devices.pic.master().isr(), 0x00);
+    // Unmasking through the port path makes the pending request deliverable.
+    assert!(replay_port(
+        &mut memory,
+        &mut guest,
+        &mut devices,
+        &mut apic,
+        pic::port::MASTER_DATA,
+        false
+    ));
+    assert_eq!(apic.pending_vector(), Some(0x20));
+    assert_eq!(devices.pic.master().isr(), 0x01);
+}
+
+#[test]
+fn a_level_line_is_not_acknowledged_twice_while_in_service() {
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    init_legacy_pic(&mut devices);
+    mask_ioapic_pins(&mut devices);
+    let line = emulate::isa_gsi(uart::IRQ_LINE);
+    emulate::set_device_line(&mut devices, &mut apic, line, true);
+    assert_eq!(devices.pic.master().isr(), 1 << uart::IRQ_LINE);
+    assert_eq!(devices.pic.master().irr(), 0x00);
+    assert_eq!(apic.pending_vector(), Some(0x24));
+    // The line stays high: a second evaluation must not create a second
+    // in-service request, because the guest has not acknowledged the first.
+    emulate::set_device_line(&mut devices, &mut apic, line, true);
+    assert_eq!(devices.pic.master().isr(), 1 << uart::IRQ_LINE);
+    assert_eq!(apic.pending_vector(), Some(0x24));
+    // The pair is edge-triggered by default: deasserting the line leaves both
+    // the in-service bit and the latched edge to the guest, exactly like the
+    // real ladder (the edge is acknowledged, not the level).
+    emulate::set_device_line(&mut devices, &mut apic, line, false);
+    assert_eq!(devices.pic.master().isr(), 1 << uart::IRQ_LINE);
+    assert_eq!(devices.pic.master().irr(), 1 << uart::IRQ_LINE);
+}
+
+#[test]
+fn a_slave_line_is_delivered_through_the_cascade_in_pic_mode() {
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    init_legacy_pic(&mut devices);
+    mask_ioapic_pins(&mut devices);
+    // The CMOS clock is ISA IRQ8, on the slave chip.
+    emulate::pulse_device_line(&mut devices, &mut apic, emulate::isa_gsi(rtc::IRQ_LINE));
+    assert_eq!(devices.pic.master().isr(), 1 << pic::CASCADE_IRQ);
+    assert_eq!(devices.pic.slave().isr(), 0x01);
+    assert_eq!(apic.pending_vector(), Some(0x28));
+}
+/// Masks every I/O APIC pin, as firmware does before an operating system picks
+/// its interrupt mode. The model pre-programs the device pins unmasked so a
+/// guest that follows the MADT works without a routing policy; a guest that
+/// keeps the legacy pair must see the 8259 path alone.
+fn mask_ioapic_pins(devices: &mut Devices) {
+    for pin in 0..ioapic::PIN_COUNT {
+        let vector = devices
+            .ioapic
+            .vector_for_pin(pin)
+            .unwrap_or(emulate::PIT_IRQ_VECTOR);
+        devices.ioapic.set_pin(pin, vector, true);
+    }
+}

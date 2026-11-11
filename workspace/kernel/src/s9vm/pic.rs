@@ -112,8 +112,16 @@ impl Chip {
     }
 
     /// Lowers (deasserts) one IRQ line.
+    ///
+    /// In level-triggered mode the request exists while the line is high, so
+    /// deasserting it withdraws a request that was not acknowledged yet. In
+    /// edge-triggered mode — the PC default — the request was latched by the
+    /// rising edge and stays in the `IRR` until the processor acknowledges it,
+    /// even if the line is already low again: a device pulse must not be lost
+    /// because it was serviced later (masked line, or a guest that has not
+    /// unmasked the pair yet).
     pub fn lower(&mut self, irq: u8) {
-        if irq < 8 {
+        if irq < 8 && self.level_triggered {
             self.irr &= !(1 << irq);
         }
     }

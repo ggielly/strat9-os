@@ -144,6 +144,25 @@ pub fn isa_gsi(irq: u8) -> usize {
     usize::from(irq)
 }
 
+/// ISA interrupt line wired to a global system interrupt.
+///
+/// Inverse of [`isa_gsi`]: a device raises a *pin* (a GSI) and the 8259 pair is
+/// programmed with the *ISA IRQ* numbers, so the model needs the reverse
+/// mapping to drive both interrupt controllers. GSIs above the ISA range
+/// (16..) have no 8259 line and return `None`.
+pub fn gsi_isa_irq(gsi: usize) -> Option<u8> {
+    for entry in &super::acpi::ISA_OVERRIDES {
+        if entry.gsi as usize == gsi {
+            return Some(entry.irq_source);
+        }
+    }
+    if gsi < 16 {
+        Some(gsi as u8)
+    } else {
+        None
+    }
+}
+
 /// Emulation error. Any error means "not emulated here": the caller reports
 /// the exit to policy, exactly as if this module did not exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -678,6 +697,10 @@ fn serve_port(
         if access.write {
             let value = (guest.gpr(access.register) & 0xFF) as u8;
             devices.pic.write(access.port, value);
+            // Unmasking a line or ending an interrupt can make a pending
+            // request deliverable: re-evaluate the cascade immediately so the
+            // guest sees it without waiting for another device event.
+            flush_pic(devices, apic);
         } else {
             let Some(value) = devices.pic.read(access.port) else {
                 return false;
@@ -979,6 +1002,12 @@ fn in_service_vector(apic: &LocalApic) -> Option<u8> {
 }
 
 /// Applies a logical level to a device line and injects the vector, if any.
+///
+/// A device pin is wired to the I/O APIC and, on a PC chipset, to the 8259 pair
+/// as well. Both controllers are driven so a guest that keeps the legacy pair
+/// (or that has not reprogrammed the I/O APIC yet) still receives the
+/// interrupt; the 8259 only delivers when it is initialised and unmasked, so a
+/// guest in APIC mode — which masks the pair — is unaffected.
 pub(crate) fn set_device_line(
     devices: &mut Devices,
     apic: &mut LocalApic,
@@ -986,6 +1015,34 @@ pub(crate) fn set_device_line(
     asserted: bool,
 ) {
     if let Some(vector) = devices.ioapic.set_line_level(line, asserted) {
+        apic.inject(vector);
+    }
+    let Some(irq) = gsi_isa_irq(line) else {
+        return;
+    };
+    if asserted {
+        devices.pic.raise(irq);
+        flush_pic(devices, apic);
+    } else {
+        devices.pic.lower(irq);
+    }
+}
+
+/// Delivers at most one pending 8259 request to the local APIC.
+///
+/// The 8259 asserts its `INT` output while a request is pending; the processor
+/// acknowledges it during the interrupt cycle, which is the moment the model
+/// must move the request from the `IRR` to the `ISR` and hand the vector to the
+/// local APIC. Only one vector is taken per call: the local APIC `IRR` is what
+/// queues the rest, and taking more would acknowledge requests the guest has
+/// not seen yet. Delivery is skipped while a request is already in service, so
+/// a level-triggered line that stays high cannot be acknowledged twice before
+/// the guest end-of-interrupt.
+pub(crate) fn flush_pic(devices: &mut Devices, apic: &mut LocalApic) {
+    if devices.pic.master().isr() != 0 || devices.pic.slave().isr() != 0 {
+        return;
+    }
+    if let Some(vector) = devices.pic.acknowledge() {
         apic.inject(vector);
     }
 }
