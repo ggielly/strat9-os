@@ -516,3 +516,61 @@ fn every_table_checksum_sums_to_zero() {
     assert_eq!(checksum(&bytes[..acpi::RSDP_LEN]), 0, "RSDP");
     assert!(image.len <= acpi::MAX_IMAGE_LEN);
 }
+
+#[test]
+fn xsdt_and_rsdt_list_the_serial_console_table() {
+    let ids = [0u8];
+    let builder = AcpiBuilder::new(BASE, &ids);
+    let (bytes, image) = encode(&builder);
+    // XSDT: FADT, MADT, SPCR in order.
+    let xsdt = image.xsdt_offset;
+    assert_eq!(
+        u64::from_le_bytes(bytes[xsdt + 52..xsdt + 60].try_into().unwrap()),
+        BASE + image.spcr_offset as u64,
+        "the SPCR must be reachable through the XSDT"
+    );
+    // The legacy RSDT view lists it too.
+    let rsdt = image.rsdt_offset.expect("legacy RSDT present");
+    assert_eq!(
+        u32::from_le_bytes(bytes[rsdt + 44..rsdt + 48].try_into().unwrap()),
+        (BASE + image.spcr_offset as u64) as u32
+    );
+}
+
+#[test]
+fn spcr_describes_the_modeled_com1_uart() {
+    let ids = [0u8];
+    let builder = AcpiBuilder::new(BASE, &ids);
+    let (bytes, image) = encode(&builder);
+    let offset = image.spcr_offset;
+    assert_eq!(&bytes[offset..offset + 4], b"SPCR");
+    assert_eq!(u32_at(&bytes, offset + 4) as usize, acpi::SPCR_LEN);
+    assert_eq!(bytes[offset + 8], acpi::SPCR_REVISION);
+    // Interface type and generic address structure (system I/O, byte access).
+    assert_eq!(bytes[offset + 36], acpi::SPCR_INTERFACE_16550);
+    assert_eq!(bytes[offset + 40], 1);
+    assert_eq!(bytes[offset + 41], 8);
+    assert_eq!(bytes[offset + 43], 1);
+    assert_eq!(
+        u64::from_le_bytes(bytes[offset + 44..offset + 52].try_into().unwrap()),
+        u64::from(acpi::SPCR_COM1_PORT)
+    );
+    // Interrupt: through the I/O APIC on the COM1 global system interrupt.
+    assert_eq!(bytes[offset + 52], acpi::SPCR_INTERRUPT_IOAPIC);
+    assert_eq!(
+        u32_at(&bytes, offset + 54),
+        acpi::SPCR_COM1_GSI,
+        "the SPCR must name the same GSI as the MADT wiring"
+    );
+    assert_eq!(bytes[offset + 58], acpi::SPCR_BAUD_115200);
+    assert_eq!(checksum(&bytes[offset..offset + acpi::SPCR_LEN]), 0);
+}
+
+#[test]
+fn fadt_advertises_the_rtc_century_register() {
+    let ids = [0u8];
+    let builder = AcpiBuilder::new(BASE, &ids);
+    let (bytes, image) = encode(&builder);
+    // FADT: CENTURY byte at offset 0x6C.
+    assert_eq!(bytes[image.fadt_offset + 0x6C], 0x32);
+}

@@ -81,9 +81,9 @@ pub const RSDP_LEN: usize = 36;
 /// Length of a standard ACPI system description table header.
 pub const SDT_HEADER_LEN: usize = 36;
 /// Length of the XSDT: header plus one 64-bit pointer per listed table.
-pub const XSDT_LEN: usize = SDT_HEADER_LEN + 2 * 8;
+pub const XSDT_LEN: usize = SDT_HEADER_LEN + 3 * 8;
 /// Length of the RSDT v1 view: header plus one 32-bit pointer per table.
-pub const RSDT_LEN: usize = SDT_HEADER_LEN + 2 * 4;
+pub const RSDT_LEN: usize = SDT_HEADER_LEN + 3 * 4;
 /// Length of the FADT revision 6 layout.
 pub const FADT_LEN: usize = 276;
 /// Length of the MADT fixed header.
@@ -113,6 +113,30 @@ pub const MADT_REVISION: u8 = 5;
 pub const DSDT_SIGNATURE: &[u8; 4] = b"DSDT";
 /// Revision of the emitted DSDT (ACPI 2.0 names).
 pub const DSDT_REVISION: u8 = 2;
+/// Signature of the serial port console redirection table.
+pub const SPCR_SIGNATURE: &[u8; 4] = b"SPCR";
+/// Revision of the emitted SPCR (ACPI 6.x layout).
+pub const SPCR_REVISION: u8 = 2;
+/// Length of the SPCR table.
+pub const SPCR_LEN: usize = 80;
+/// SPCR interface type: 8250/16550-compatible UART.
+pub const SPCR_INTERFACE_16550: u8 = 0;
+/// SPCR interrupt type: the line is delivered through the I/O APIC.
+pub const SPCR_INTERRUPT_IOAPIC: u8 = 1;
+/// SPCR baud-rate selector: 115200 baud.
+pub const SPCR_BAUD_115200: u8 = 4;
+/// SPCR parity selector: none.
+pub const SPCR_PARITY_NONE: u8 = 0;
+/// SPCR stop-bit selector: one stop bit.
+pub const SPCR_STOP_ONE: u8 = 1;
+/// SPCR flow-control selector: none.
+pub const SPCR_FLOW_NONE: u8 = 0;
+/// SPCR terminal type: VT-100 (the value used by PC firmware).
+pub const SPCR_TERMINAL_VT100: u8 = 0;
+/// COM1 I/O port exposed through the SPCR programming interface.
+pub const SPCR_COM1_PORT: u16 = 0x3F8;
+/// Global system interrupt COM1 is wired to (ISA IRQ4, identity-mapped).
+pub const SPCR_COM1_GSI: u32 = 4;
 
 /// OEM id written in every table header (six ASCII bytes).
 pub const OEM_ID: &[u8; 6] = b"S9VM  ";
@@ -185,8 +209,8 @@ pub const FADT_FLAGS: u32 = FADT_FLAG_WBINVD | FADT_FLAG_RESET_REG_SUP;
 pub const P_LVL2_LATENCY: u16 = 101;
 /// FADT `P_LVL3_LAT` value meaning "C3 not supported".
 pub const P_LVL3_LATENCY: u16 = 1001;
-/// FADT `CENTURY` value: no RTC century register is exposed.
-pub const RTC_CENTURY: u8 = 0;
+/// FADT `CENTURY` value: the CMOS RTC exposes its century byte at 0x32.
+pub const RTC_CENTURY: u8 = 0x32;
 /// FADT `IAPC_BOOT_ARCH` value: no legacy 8042 or MSI support advertised.
 pub const IAPC_BOOT_ARCH: u16 = 0;
 /// Minimum decoded AML: `Scope (\_SB) {}`.
@@ -273,6 +297,8 @@ pub struct AcpiLayout {
     pub fadt_offset: usize,
     /// Offset of the MADT.
     pub madt_offset: usize,
+    /// Offset of the SPCR (serial console redirection).
+    pub spcr_offset: usize,
     /// Offset of the RSDT v1 view, when one is emitted.
     pub rsdt_offset: Option<usize>,
     /// Offset of the DSDT.
@@ -292,6 +318,8 @@ pub struct AcpiImage {
     pub fadt_offset: usize,
     /// Offset of the MADT.
     pub madt_offset: usize,
+    /// Offset of the SPCR (serial console redirection).
+    pub spcr_offset: usize,
     /// Offset of the RSDT v1 view, when one is emitted.
     pub rsdt_offset: Option<usize>,
     /// Offset of the DSDT.
@@ -307,6 +335,7 @@ impl AcpiImage {
             xsdt_offset: layout.xsdt_offset,
             fadt_offset: layout.fadt_offset,
             madt_offset: layout.madt_offset,
+            spcr_offset: layout.spcr_offset,
             rsdt_offset: layout.rsdt_offset,
             dsdt_offset: layout.dsdt_offset,
         }
@@ -406,6 +435,8 @@ impl<'a> AcpiBuilder<'a> {
         let offset = fadt_offset + FADT_LEN;
         let madt_offset = align_up(offset, TABLE_ALIGN);
         let offset = madt_offset + madt_len;
+        let spcr_offset = align_up(offset, TABLE_ALIGN);
+        let offset = spcr_offset + SPCR_LEN;
         let (rsdt_offset, offset) = if self.legacy_rsdt {
             let rsdt_offset = align_up(offset, TABLE_ALIGN);
             (Some(rsdt_offset), rsdt_offset + RSDT_LEN)
@@ -435,6 +466,7 @@ impl<'a> AcpiBuilder<'a> {
             xsdt_offset,
             fadt_offset,
             madt_offset,
+            spcr_offset,
             rsdt_offset,
             dsdt_offset,
         })
@@ -471,6 +503,7 @@ impl<'a> AcpiBuilder<'a> {
         self.write_xsdt(buffer, &layout);
         self.write_fadt(buffer, &layout);
         self.write_madt(buffer, &layout);
+        self.write_spcr(buffer, &layout);
         if let Some(rsdt_offset) = layout.rsdt_offset {
             self.write_rsdt(buffer, &layout, rsdt_offset);
         }
@@ -504,7 +537,7 @@ impl<'a> AcpiBuilder<'a> {
         buffer[offset + 32] = 0u8.wrapping_sub(extended);
     }
 
-    /// Writes the XSDT listing the FADT and the MADT.
+    /// Writes the XSDT listing the FADT, the MADT and the SPCR.
     fn write_xsdt(&self, buffer: &mut [u8], layout: &AcpiLayout) {
         let offset = layout.xsdt_offset;
         write_sdt_header(buffer, offset, XSDT_SIGNATURE, XSDT_LEN, XSDT_REVISION);
@@ -518,10 +551,15 @@ impl<'a> AcpiBuilder<'a> {
             offset + SDT_HEADER_LEN + 8,
             address(self.base_gpa, layout.madt_offset),
         );
+        put_u64(
+            buffer,
+            offset + SDT_HEADER_LEN + 16,
+            address(self.base_gpa, layout.spcr_offset),
+        );
         seal_table(buffer, offset, XSDT_LEN);
     }
 
-    /// Writes the legacy RSDT v1 view listing the FADT and the MADT.
+    /// Writes the legacy RSDT v1 view listing the FADT, the MADT and the SPCR.
     fn write_rsdt(&self, buffer: &mut [u8], layout: &AcpiLayout, rsdt_offset: usize) {
         write_sdt_header(buffer, rsdt_offset, RSDT_SIGNATURE, RSDT_LEN, RSDT_REVISION);
         put_u32(
@@ -533,6 +571,11 @@ impl<'a> AcpiBuilder<'a> {
             buffer,
             rsdt_offset + SDT_HEADER_LEN + 4,
             address(self.base_gpa, layout.madt_offset) as u32,
+        );
+        put_u32(
+            buffer,
+            rsdt_offset + SDT_HEADER_LEN + 8,
+            address(self.base_gpa, layout.spcr_offset) as u32,
         );
         seal_table(buffer, rsdt_offset, RSDT_LEN);
     }
@@ -681,6 +724,40 @@ impl<'a> AcpiBuilder<'a> {
         seal_table(buffer, offset, length);
     }
 
+    /// Writes the SPCR: the serial console redirection description.
+    ///
+    /// ACPI-aware kernels use it to bring up an early console (`earlycon`)
+    /// before any driver probing: it names the 16550-compatible COM1 at
+    /// [`SPCR_COM1_PORT`] with its I/O APIC global system interrupt, the baud
+    /// rate and the line parameters. The guest serial model is
+    /// byte-compatible with it.
+    fn write_spcr(&self, buffer: &mut [u8], layout: &AcpiLayout) {
+        let offset = layout.spcr_offset;
+        write_sdt_header(buffer, offset, SPCR_SIGNATURE, SPCR_LEN, SPCR_REVISION);
+        put_u8(buffer, offset + 36, SPCR_INTERFACE_16550);
+        // 37..39: reserved.
+        // 40: generic address structure of the register file.
+        put_u8(buffer, offset + 40, 1); // address space: system I/O
+        put_u8(buffer, offset + 41, 8); // register bit width
+        put_u8(buffer, offset + 42, 0); // register bit offset
+        put_u8(buffer, offset + 43, 1); // access size: byte
+        put_u64(buffer, offset + 44, u64::from(SPCR_COM1_PORT));
+        // 52: interrupt type, 53: IRQ (8259 only), 54..57: GSI.
+        put_u8(buffer, offset + 52, SPCR_INTERRUPT_IOAPIC);
+        put_u8(buffer, offset + 53, 0);
+        put_u32(buffer, offset + 54, SPCR_COM1_GSI);
+        // 58: baud rate, 59: parity, 60: stop bits, 61: flow control.
+        put_u8(buffer, offset + 58, SPCR_BAUD_115200);
+        put_u8(buffer, offset + 59, SPCR_PARITY_NONE);
+        put_u8(buffer, offset + 60, SPCR_STOP_ONE);
+        put_u8(buffer, offset + 61, SPCR_FLOW_NONE);
+        // 62: terminal type, 63: language (0 = complete/ASCII).
+        put_u8(buffer, offset + 62, SPCR_TERMINAL_VT100);
+        put_u8(buffer, offset + 63, 0);
+        // 64..: PCI device/vendor/bus/device/function/flags/segment, no device.
+        seal_table(buffer, offset, SPCR_LEN);
+    }
+
     /// Writes the DSDT holding the minimal AML namespace.
     fn write_dsdt(&self, buffer: &mut [u8], layout: &AcpiLayout) {
         let offset = layout.dsdt_offset;
@@ -774,3 +851,4 @@ fn put_u32(buffer: &mut [u8], offset: usize, value: u32) {
 fn put_u64(buffer: &mut [u8], offset: usize, value: u64) {
     put_bytes(buffer, offset, &value.to_le_bytes());
 }
+

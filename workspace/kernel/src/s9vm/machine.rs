@@ -36,8 +36,11 @@
 use super::{
     apic::LocalApic,
     cpuid::CpuidPolicy,
-    emulate::{self, Devices, EmuError, GuestContext, MemoryView, PhysMemory},
+    emulate::{
+        self, isa_gsi, pulse_device_line, Devices, EmuError, GuestContext, MemoryView, PhysMemory,
+    },
     exit::ExitClass,
+    pit,
     vcpu::{ExitInfo, Vcpu},
 };
 
@@ -121,6 +124,20 @@ impl GuestContext for VcpuGuest<'_> {
     }
 }
 
+/// Host wall-clock time, when the host RTC driver can provide it.
+///
+/// The guest CMOS clock starts at the UNIX epoch if the host has no readable
+/// RTC; the model is also printable/patchable by the guest, so a missing host
+/// clock is not an error.
+fn host_unix_time() -> Option<u64> {
+    let seconds = crate::hardware::timer::rtc::get_timestamp();
+    if seconds == 0 {
+        None
+    } else {
+        Some(seconds)
+    }
+}
+
 /// Device model, CPU description and emulation state of one world.
 ///
 /// The CPUID policy is stored **per world**, not per vCPU: every vCPU of the
@@ -136,8 +153,15 @@ pub struct Machine {
 impl Machine {
     /// Creates the machine of a world.
     pub fn new() -> Self {
+        let mut devices = Devices::new();
+        // Seed the guest CMOS clock with the host wall-clock time when the
+        // host RTC driver can read it; a guest that needs the date (boot
+        // logging, TLS) then sees the real time instead of the UNIX epoch.
+        if let Some(seconds) = host_unix_time() {
+            devices.rtc.set_unix_time(seconds);
+        }
         Self {
-            devices: Devices::new(),
+            devices,
             memory: HhdmMemory,
             cpuid: CpuidPolicy::new(),
         }
@@ -173,6 +197,48 @@ impl Machine {
     /// Takes the bytes the guest wrote to the virtio console.
     pub fn drain_console(&mut self) -> alloc::vec::Vec<u8> {
         self.devices.console.drain_output()
+    }
+
+    /// Takes the bytes the guest wrote to the legacy COM1 UART.
+    pub fn drain_serial(&mut self) -> alloc::vec::Vec<u8> {
+        self.devices.uart.drain_output()
+    }
+
+    /// Queues bytes on the guest's COM1 receive path.
+    ///
+    /// The receive FIFO is bounded by the model; the number of bytes accepted
+    /// is returned so a console front-end can retry the rest later.
+    pub fn push_serial_input(&mut self, bytes: &[u8]) -> usize {
+        self.devices.uart.push_input(bytes)
+    }
+
+    /// Advances the legacy time base by the host time the guest consumed.
+    ///
+    /// Called by the execution loop once per VM exit with the measured TSC
+    /// delta. The 8254 counts at its nominal 1.193182 MHz and raises its IRQ0
+    /// line when channel 0 expires; the CMOS RTC only needs whole seconds (its
+    /// calendar is computed from the accumulated UNIX time). `tsc_hz == 0`
+    /// means the host frequency is unknown: the raw cycle count is used, the
+    /// documented degradation of the timer model.
+    pub fn advance_time(&mut self, apic: &mut LocalApic, cycles: u64, tsc_hz: u64) {
+        let pit_ticks = if tsc_hz == 0 {
+            cycles
+        } else {
+            let numerator = u128::from(cycles) * u128::from(pit::FREQUENCY_HZ);
+            let ticks = numerator / u128::from(tsc_hz);
+            u64::try_from(ticks).unwrap_or(u64::MAX)
+        };
+        if pit_ticks > 0 && self.devices.pit.advance(pit_ticks) {
+            pulse_device_line(&mut self.devices, apic, isa_gsi(pit::IRQ_LINE));
+        }
+        let seconds = if tsc_hz == 0 {
+            cycles / 1_000_000_000
+        } else {
+            cycles / tsc_hz
+        };
+        if seconds > 0 {
+            self.devices.rtc.advance(seconds);
+        }
     }
 
     /// Takes the frames the guest transmitted on the virtio network device.

@@ -71,7 +71,10 @@ pub mod memmap;
 pub mod mmu;
 pub mod msr;
 pub mod pic;
+pub mod pit;
+pub mod rtc;
 pub mod selftest;
+pub mod uart;
 pub mod timing;
 pub mod tsc;
 pub mod vcpu;
@@ -403,3 +406,4 @@ pub fn activation_region(cpu: usize) -> Option<u64> {
 /// of the translation module.
 const _: () = assert!(crate::s9vm::memmap::PAGE_SIZE == crate::s9vm::mmu::PAGE_SIZE);
 const _: () = assert!(crate::s9vm::memmap::MAX_GPA == crate::s9vm::mmu::MAX_GPA);
+

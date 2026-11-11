@@ -53,6 +53,9 @@ use super::{
     ioapic::{IoApic, PIN_COUNT},
     msr::MsrModel,
     pic::Pic,
+    pit::{self, Pit},
+    rtc::{self, CmosRtc},
+    uart::{self, Uart},
     virtio::QueueMemory,
     virtio_blk::VirtioBlk,
     virtio_console::VirtioConsole,
@@ -117,6 +120,29 @@ pub const X2APIC_MSR_LAST: u32 = 0x8FF;
 pub const PIC_BASE_PORT: u16 = 0x20;
 /// POST/delay diagnostic port: writes are discarded, reads return zero.
 pub const POST_PORT: u16 = 0x80;
+
+/// Interrupt vector the I/O APIC delivers for the 8254 timer line.
+pub const PIT_IRQ_VECTOR: u8 = 0x20;
+/// Interrupt vector the I/O APIC delivers for the COM1 line.
+pub const UART_IRQ_VECTOR: u8 = 0x24;
+/// Interrupt vector the I/O APIC delivers for the RTC line.
+pub const RTC_IRQ_VECTOR: u8 = 0x28;
+
+/// Global system interrupt an ISA interrupt line is wired to.
+///
+/// The MADT's interrupt source overrides describe the non-identity wiring
+/// (notably `IRQ0 -> GSI2` for the 8254 cascade); every other line is
+/// identity-mapped. Raising a device line on the I/O APIC must use the GSI,
+/// not the ISA number, or a guest that follows the firmware tables never
+/// receives the interrupt.
+pub fn isa_gsi(irq: u8) -> usize {
+    for entry in &super::acpi::ISA_OVERRIDES {
+        if entry.irq_source == irq {
+            return entry.gsi as usize;
+        }
+    }
+    usize::from(irq)
+}
 
 /// Emulation error. Any error means "not emulated here": the caller reports
 /// the exit to policy, exactly as if this module did not exist.
@@ -438,6 +464,12 @@ pub struct Devices {
     pub pic: Pic,
     /// I/O APIC (MMIO page).
     pub ioapic: IoApic,
+    /// 8254 programmable interval timer (legacy ports 0x40..=0x43).
+    pub pit: Pit,
+    /// MC146818 CMOS real-time clock (ports 0x70/0x71).
+    pub rtc: CmosRtc,
+    /// 16550A serial port, COM1 (ports 0x3F8..=0x3FF).
+    pub uart: Uart,
     /// Virtio console (MMIO transport page).
     pub console: VirtioConsole,
     /// Virtio block device (MMIO transport page).
@@ -464,9 +496,22 @@ impl Devices {
         ioapic.set_pin_mode(CONSOLE_IRQ_LINE, CONSOLE_IRQ_VECTOR, false, true, false);
         ioapic.set_pin_mode(BLK_IRQ_LINE, BLK_IRQ_VECTOR, false, true, false);
         ioapic.set_pin_mode(NET_IRQ_LINE, NET_IRQ_VECTOR, false, true, false);
+        // Legacy devices, on the global system interrupts the MADT advertises
+        // (IRQ0 -> GSI2 for the 8254 cascade, IRQ4 serial, IRQ8 RTC). A guest
+        // that does not reprogram the redirection table still receives them;
+        // any real OS overrides these entries with its own policy.
+        let pit_pin = isa_gsi(pit::IRQ_LINE);
+        ioapic.set_pin_mode(pit_pin, PIT_IRQ_VECTOR, false, false, false);
+        let uart_pin = isa_gsi(uart::IRQ_LINE);
+        ioapic.set_pin_mode(uart_pin, UART_IRQ_VECTOR, false, true, false);
+        let rtc_pin = isa_gsi(rtc::IRQ_LINE);
+        ioapic.set_pin_mode(rtc_pin, RTC_IRQ_VECTOR, false, true, false);
         Self {
             pic: Pic::new(),
             ioapic,
+            pit: Pit::new(),
+            rtc: CmosRtc::new(),
+            uart: Uart::new(),
             console: VirtioConsole::new(),
             blk: VirtioBlk::new(64 * 1024),
             net: VirtioNet::new(),
@@ -474,8 +519,12 @@ impl Devices {
     }
 
     /// True if the port belongs to a device modeled here.
-    pub const fn handles_port(port: u16) -> bool {
-        Pic::handles_port(port) || port == POST_PORT
+    pub fn handles_port(port: u16) -> bool {
+        Pic::handles_port(port)
+            || port == POST_PORT
+            || pit::handles_port(port)
+            || rtc::handles_port(port)
+            || uart::handles_port(port)
     }
 }
 
@@ -559,7 +608,7 @@ pub fn handle_exit(
     guest_physical_address: u64,
 ) -> Result<bool, EmuError> {
     match class {
-        ExitClass::IoPort => handle_port_exit(devices, view, guest, qualification),
+        ExitClass::IoPort => handle_port_exit(devices, apic, view, guest, qualification),
         ExitClass::EptViolation => handle_mmio_exit(
             devices,
             apic,
@@ -576,6 +625,7 @@ pub fn handle_exit(
 /// Handles an I/O instruction exit (`IN`/`OUT`).
 fn handle_port_exit(
     devices: &mut Devices,
+    apic: &mut LocalApic,
     view: &mut MemoryView<'_>,
     guest: &mut dyn GuestContext,
     qualification: u64,
@@ -602,7 +652,7 @@ fn handle_port_exit(
     if access.port != port || access.size != size || access.write == is_in {
         return Ok(false);
     }
-    if !serve_port(devices, guest, &access) {
+    if !serve_port(devices, apic, guest, &access) {
         return Ok(false);
     }
     guest.set_rip(access.next_rip);
@@ -610,7 +660,16 @@ fn handle_port_exit(
 }
 
 /// Applies one decoded port access to the device model.
-fn serve_port(devices: &mut Devices, guest: &mut dyn GuestContext, access: &PortAccess) -> bool {
+///
+/// Byte-wide legacy devices (8259, 8254, CMOS RTC, 16550) are served here;
+/// device interrupt lines are re-evaluated after the access so a guest that
+/// unmasks an interrupt sees it without another exit.
+fn serve_port(
+    devices: &mut Devices,
+    apic: &mut LocalApic,
+    guest: &mut dyn GuestContext,
+    access: &PortAccess,
+) -> bool {
     if Pic::handles_port(access.port) {
         // The 8259A pair is byte-wide; a wider access is not PC-compatible.
         if access.size != 1 {
@@ -625,6 +684,64 @@ fn serve_port(devices: &mut Devices, guest: &mut dyn GuestContext, access: &Port
             };
             write_register(guest, access.register, access.size, u64::from(value));
         }
+        return true;
+    }
+    if pit::handles_port(access.port) {
+        // The 8254 is byte-wide.
+        if access.size != 1 {
+            return false;
+        }
+        let offset = u32::from(access.port - pit::BASE_PORT);
+        if access.write {
+            let value = (guest.gpr(access.register) & 0xFF) as u8;
+            devices.pit.write(offset, value);
+        } else {
+            let value = devices.pit.read(offset);
+            write_register(guest, access.register, access.size, u64::from(value));
+        }
+        return true;
+    }
+    if rtc::handles_port(access.port) {
+        // The CMOS index/data ports are byte-wide.
+        if access.size != 1 {
+            return false;
+        }
+        if access.port == rtc::INDEX_PORT {
+            if access.write {
+                devices.rtc.write_index((guest.gpr(access.register) & 0xFF) as u8);
+            } else {
+                // The index port is write-only on the real chip.
+                write_register(guest, access.register, access.size, 0xFF);
+            }
+        } else if access.write {
+            devices.rtc.write_data((guest.gpr(access.register) & 0xFF) as u8);
+        } else {
+            let value = devices.rtc.read_data();
+            write_register(guest, access.register, access.size, u64::from(value));
+        }
+        return true;
+    }
+    if uart::handles_port(access.port) {
+        // COM1 is byte-wide.
+        if access.size != 1 {
+            return false;
+        }
+        let offset = u32::from(access.port - uart::BASE_PORT);
+        if access.write {
+            let value = (guest.gpr(access.register) & 0xFF) as u8;
+            devices.uart.write(offset, value);
+        } else {
+            let value = devices.uart.read(offset);
+            write_register(guest, access.register, access.size, u64::from(value));
+        }
+        // The UART interrupt line is level-triggered: it stays asserted until
+        // the driver services the source, so mirror the model's line state.
+        set_device_line(
+            devices,
+            apic,
+            isa_gsi(uart::IRQ_LINE),
+            devices.uart.irq_asserted(),
+        );
         return true;
     }
     if access.port == POST_PORT {
@@ -862,10 +979,26 @@ fn in_service_vector(apic: &LocalApic) -> Option<u8> {
 }
 
 /// Applies a logical level to a device line and injects the vector, if any.
-fn set_device_line(devices: &mut Devices, apic: &mut LocalApic, line: usize, asserted: bool) {
+pub(crate) fn set_device_line(
+    devices: &mut Devices,
+    apic: &mut LocalApic,
+    line: usize,
+    asserted: bool,
+) {
     if let Some(vector) = devices.ioapic.set_line_level(line, asserted) {
         apic.inject(vector);
     }
+}
+
+/// Raises then lowers `pin` on the I/O APIC, delivering exactly one edge.
+///
+/// Used by the 8254 timer, whose channel-0 expiry is a pulse: an edge-triggered
+/// redirection entry accepts it on the rising transition only, and a
+/// level-triggered entry latches it in the remote-IRR and is serviced by the
+/// guest's EOI.
+pub fn pulse_device_line(devices: &mut Devices, apic: &mut LocalApic, pin: usize) {
+    set_device_line(devices, apic, pin, true);
+    set_device_line(devices, apic, pin, false);
 }
 
 /// Applies one decoded memory access to a device page.
@@ -978,3 +1111,4 @@ const fn width_mask(size: u64) -> u64 {
         _ => u64::MAX,
     }
 }
+

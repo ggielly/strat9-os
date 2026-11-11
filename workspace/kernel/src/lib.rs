@@ -64,6 +64,7 @@ pub mod log_ring;
 pub mod memory;
 pub mod namespace;
 pub mod process;
+pub mod rtc_math;
 pub mod shell;
 pub mod silo;
 pub mod sync;

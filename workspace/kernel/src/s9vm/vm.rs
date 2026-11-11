@@ -1638,6 +1638,10 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                     .unwrap_or(0);
                 apic.advance_tsc(exit_cycles, tsc_hz);
                 apic.set_tsc(exit_tsc);
+                // Legacy time base: the 8254 counts down and raises IRQ0, the
+                // CMOS RTC advances by whole seconds. Same "advance on exit"
+                // model as the local APIC timer, documented in those models.
+                machine.advance_time(&mut apic, exit_cycles, tsc_hz);
                 match run_result {
                     Ok(exit) => {
                         let class = exit.class();
@@ -1747,6 +1751,18 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                                                 .unwrap_or("<binary data>")
                                         );
                                         push_console_output(&mut console_output, &output);
+                                    }
+                                    // Legacy COM1 output (a kernel that uses the
+                                    // 8250 instead of virtio-console): same
+                                    // routing, tagged so both are visible.
+                                    let serial = machine.drain_serial();
+                                    if !serial.is_empty() {
+                                        log::info!(
+                                            "[s9vm] serial: {}",
+                                            core::str::from_utf8(&serial)
+                                                .unwrap_or("<binary data>")
+                                        );
+                                        push_console_output(&mut console_output, &serial);
                                     }
                                     continue;
                                 }

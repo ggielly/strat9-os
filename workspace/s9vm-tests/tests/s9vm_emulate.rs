@@ -6,6 +6,8 @@
 
 extern crate alloc;
 
+#[path = "../../kernel/src/s9vm/acpi.rs"]
+mod acpi;
 #[path = "../../kernel/src/s9vm/apic.rs"]
 mod apic;
 #[path = "../../kernel/src/s9vm/decode.rs"]
@@ -20,6 +22,14 @@ mod ioapic;
 mod msr;
 #[path = "../../kernel/src/s9vm/pic.rs"]
 mod pic;
+#[path = "../../kernel/src/s9vm/pit.rs"]
+mod pit;
+#[path = "../../kernel/src/rtc_math.rs"]
+mod rtc_math;
+#[path = "../../kernel/src/s9vm/rtc.rs"]
+mod rtc;
+#[path = "../../kernel/src/s9vm/uart.rs"]
+mod uart;
 #[path = "../../kernel/src/s9vm/virtio.rs"]
 mod virtio;
 #[path = "../../kernel/src/s9vm/virtio_blk.rs"]
@@ -495,7 +505,11 @@ fn modeled_ports_are_advertised() {
     assert!(Devices::handles_port(0xA1));
     assert!(Devices::handles_port(0x80));
     assert!(!Devices::handles_port(0xE9));
-    assert!(!Devices::handles_port(0x3F8));
+    // Legacy platform devices are modeled in-kernel: COM1, the 8254 and the
+    // CMOS RTC are replayed instead of being reported to policy.
+    assert!(Devices::handles_port(0x3F8));
+    assert!(Devices::handles_port(0x43));
+    assert!(Devices::handles_port(0x70));
 }
 
 #[test]
@@ -1408,3 +1422,184 @@ fn msi_adversarial_values_do_not_panic() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Legacy platform devices (8254 timer, 16550 COM1, CMOS RTC) on the port path.
+// ---------------------------------------------------------------------------
+
+/// Replays one port access on the synthetic machine.
+fn replay_port(
+    memory: &mut TestMemory,
+    guest: &mut TestGuest,
+    devices: &mut Devices,
+    apic: &mut apic::LocalApic,
+    port: u16,
+    is_in: bool,
+) -> bool {
+    let qualification = (u64::from(port) << 16) | if is_in { 0x8 } else { 0 };
+    let mut view = view(memory, guest);
+    handle_exit(
+        devices,
+        apic,
+        &mut view,
+        guest,
+        ExitClass::IoPort,
+        qualification,
+        0,
+    )
+    .expect("emulated port access")
+}
+
+#[test]
+fn legacy_device_ports_are_claimed() {
+    // COM1 is above 0xFF: the guest reaches it through DX (`out dx, al`).
+    assert!(Devices::handles_port(uart::BASE_PORT));
+    assert!(Devices::handles_port(uart::BASE_PORT + 7));
+    assert!(Devices::handles_port(pit::BASE_PORT));
+    assert!(Devices::handles_port(pit::BASE_PORT + 3));
+    assert!(Devices::handles_port(rtc::INDEX_PORT));
+    assert!(Devices::handles_port(rtc::DATA_PORT));
+    assert!(!Devices::handles_port(0xE9));
+    assert!(!Devices::handles_port(uart::BASE_PORT + 8));
+}
+
+#[test]
+fn uart_write_reaches_the_model_and_advances_rip() {
+    let mut memory = machine();
+    let rip = load_code(&mut memory, &[0xEE]); // out dx, al
+    let mut guest = TestGuest::new(rip);
+    guest.regs[0] = u64::from(b'A');
+    guest.regs[2] = u64::from(uart::BASE_PORT); // DX
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    assert!(replay_port(
+        &mut memory,
+        &mut guest,
+        &mut devices,
+        &mut apic,
+        uart::BASE_PORT,
+        false
+    ));
+    assert_eq!(devices.uart.drain_output(), b"A");
+    assert_eq!(guest.rip, rip + 1);
+}
+
+#[test]
+fn uart_status_read_reports_a_ready_transmitter() {
+    let mut memory = machine();
+    let rip = load_code(&mut memory, &[0xEC]); // in al, dx
+    let mut guest = TestGuest::new(rip);
+    guest.regs[0] = 0xFFFF_FFFF_FFFF_0000;
+    guest.regs[2] = u64::from(uart::BASE_PORT + 5); // DX = LSR
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    assert!(replay_port(
+        &mut memory,
+        &mut guest,
+        &mut devices,
+        &mut apic,
+        uart::BASE_PORT + 5,
+        true
+    ));
+    // THR empty and transmitter empty; only AL changes.
+    assert_eq!(guest.regs[0] & 0xFF, 0x60);
+    assert_eq!(guest.regs[0] & !0xFF, 0xFFFF_FFFF_FFFF_0000);
+    assert_eq!(guest.rip, rip + 1);
+}
+
+#[test]
+fn pit_programming_reaches_the_model() {
+    let mut memory = machine();
+    let rip = load_code(&mut memory, &[0xE6, 0x43, 0xE6, 0x40, 0xE6, 0x40]);
+    let mut guest = TestGuest::new(rip);
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    // Mode/command register: channel 0, lo/hi access, mode 3, binary.
+    for (offset, value) in [(0u16, 0x36u64), (1, 0x00), (2, 0x10)] {
+        guest.regs[0] = value;
+        let port = if offset == 0 { 0x43 } else { 0x40 };
+        assert!(replay_port(
+            &mut memory,
+            &mut guest,
+            &mut devices,
+            &mut apic,
+            port,
+            false
+        ));
+    }
+    // Count 0x1000: the periodic output pulses once per period.
+    assert!(!devices.pit.advance(1));
+    assert!(devices.pit.advance(0x1000));
+    assert_eq!(guest.rip, rip + 6);
+}
+
+#[test]
+fn rtc_index_and_data_reads_return_the_calendar() {
+    let mut memory = machine();
+    let rip = load_code(&mut memory, &[0xE6, 0x70, 0xE4, 0x71]);
+    let mut guest = TestGuest::new(rip);
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    devices.rtc.set_unix_time(1);
+    // Select register 0 (seconds) through the index port.
+    guest.regs[0] = 0;
+    assert!(replay_port(
+        &mut memory,
+        &mut guest,
+        &mut devices,
+        &mut apic,
+        0x70,
+        false
+    ));
+    // Read it through the data port: BCD seconds of epoch + 1 s.
+    guest.regs[0] = 0xFFFF_FFFF_FFFF_0000;
+    assert!(replay_port(
+        &mut memory,
+        &mut guest,
+        &mut devices,
+        &mut apic,
+        0x71,
+        true
+    ));
+    assert_eq!(guest.regs[0] & 0xFF, 0x01);
+    assert_eq!(guest.rip, rip + 4);
+}
+
+#[test]
+fn uart_interrupt_line_is_level_triggered_on_the_ioapic() {
+    let mut memory = machine();
+    let rip = load_code(&mut memory, &[0xEE, 0xEE]); // out dx, al twice (IER)
+    let mut guest = TestGuest::new(rip);
+    guest.regs[2] = u64::from(uart::BASE_PORT + 1);
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    // Receive-data interrupt enabled, then input arrives: the model asserts
+    // its line and the dispatch injects the pre-programmed COM1 vector.
+    guest.regs[0] = 0x01;
+    assert!(replay_port(
+        &mut memory,
+        &mut guest,
+        &mut devices,
+        &mut apic,
+        uart::BASE_PORT + 1,
+        false
+    ));
+    assert!(!devices.uart.irq_asserted());
+    devices.uart.push_input(b"x");
+    assert!(replay_port(
+        &mut memory,
+        &mut guest,
+        &mut devices,
+        &mut apic,
+        uart::BASE_PORT + 1,
+        false
+    ));
+    assert!(devices.uart.irq_asserted());
+    assert_eq!(
+        apic.pending_vector(),
+        Some(emulate::UART_IRQ_VECTOR),
+        "the dispatch must inject the pre-programmed COM1 vector"
+    );
+}
+

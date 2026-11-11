@@ -32,6 +32,7 @@
 #![allow(dead_code)]
 
 use crate::arch::io::{inb, outb};
+use crate::rtc_math;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -101,61 +102,35 @@ impl RtcDateTime {
 
     /// Convert to Unix timestamp (seconds since 1970-01-01 00:00:00 UTC)
     pub fn to_timestamp(&self) -> u64 {
-        let mut year = self.year as i64;
-        let mut month = self.month as i64;
-        let day = self.day as i64;
-        let hour = self.hour as i64;
-        let minute = self.minute as i64;
-        let second = self.second as i64;
-
-        // Adjust for months starting from March
-        if month <= 2 {
-            year -= 1;
-            month += 12;
-        }
-
-        // Calculate days since epoch (Howard Hinnant algorithm)
-        let days =
-            365 * year + year / 4 - year / 100 + year / 400 + (153 * (month - 3) + 2) / 5 + day
-                - 1
-                - 719468;
-
-        // Convert to seconds
-        (days * 86400 + hour * 3600 + minute * 60 + second) as u64
+        rtc_math::unix_from_civil(
+            i64::from(self.year),
+            u32::from(self.month),
+            u32::from(self.day),
+            self.hour,
+            self.minute,
+            self.second,
+        )
     }
 
     /// Convert a Unix timestamp (seconds since 1970-01-01 00:00:00 UTC) to a
     /// civil date.
     ///
-    /// Inverse of [`RtcDateTime::to_timestamp`], same algorithm run backwards, so
-    /// the two cannot disagree about leap years. Callers that only want to
+    /// Inverse of [`RtcDateTime::to_timestamp`], same shared algorithm ([`crate::rtc_math`]),
+    /// so the two cannot disagree about leap years. Callers that only want to
     /// display a file timestamp (the shell's `ls -l`) use this instead of
     /// re-deriving calendar arithmetic with a fixed-length year.
     pub fn from_timestamp(timestamp: u64) -> Self {
-        let secs = timestamp as i64;
-        let days = secs.div_euclid(86400);
-        let rem = secs.rem_euclid(86400);
-
-        // Shift the year to start in March so leap days land at the end.
-        let z = days + 719468;
-        let era = z.div_euclid(146097);
-        let doe = z.rem_euclid(146097);
-        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-        let y = yoe + era * 400;
-        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-        let mp = (5 * doy + 2) / 153;
-        let d = doy - (153 * mp + 2) / 5 + 1;
-        let m = if mp < 10 { mp + 3 } else { mp - 9 };
-
+        let (year, month, day, hour, minute, second, weekday) =
+            rtc_math::civil_from_unix(timestamp);
         Self {
-            second: (rem % 60) as u8,
-            minute: ((rem / 60) % 60) as u8,
-            hour: (rem / 3600) as u8,
-            weekday: (days + 4).rem_euclid(7) as u8, // 1970-01-01 was a Thursday
-            day: d as u8,
-            month: m as u8,
-            year: if m <= 2 { (y + 1) as u16 } else { y as u16 },
-            century: (((if m <= 2 { y + 1 } else { y }) / 100) + 1) as u16,
+            second,
+            minute,
+            hour,
+            weekday,
+            day: day as u8,
+            month: month as u8,
+            year: year as u16,
+            century: ((year / 100) + 1) as u16,
         }
     }
 
@@ -219,18 +194,13 @@ fn cmos_write(reg: u8, value: u8) {
     }
 }
 
-/// Convert BCD to binary
-fn bcd_to_binary(bcd: u8) -> u8 {
-    (bcd & 0x0F) + ((bcd / 16) * 10)
-}
-
 /// Performs the detect century register operation.
 fn detect_century_register(use_binary: bool) -> u8 {
     if let Some(fadt) = crate::acpi::get_fadt() {
         let reg = fadt.century;
         if reg != 0 {
             let raw = cmos_read(reg);
-            let val = if use_binary { raw } else { bcd_to_binary(raw) };
+            let val = if use_binary { raw } else { rtc_math::bcd_to_binary(raw) };
             if (19..=21).contains(&val) {
                 return reg;
             }
@@ -239,7 +209,7 @@ fn detect_century_register(use_binary: bool) -> u8 {
 
     for &reg in CENTURY_REG_CANDIDATES {
         let raw = cmos_read(reg);
-        let val = if use_binary { raw } else { bcd_to_binary(raw) };
+        let val = if use_binary { raw } else { rtc_math::bcd_to_binary(raw) };
         if (19..=21).contains(&val) {
             return reg;
         }
@@ -317,15 +287,15 @@ fn read_rtc_time() -> RtcDateTime {
     };
     let pm_bit = raw.hour & 0x80;
     if !use_binary {
-        raw.second = bcd_to_binary(raw.second);
-        raw.minute = bcd_to_binary(raw.minute);
-        raw.hour = bcd_to_binary(raw.hour & 0x7F);
-        raw.weekday = bcd_to_binary(raw.weekday);
-        raw.day = bcd_to_binary(raw.day);
-        raw.month = bcd_to_binary(raw.month);
-        raw.year = bcd_to_binary(raw.year);
+        raw.second = rtc_math::bcd_to_binary(raw.second);
+        raw.minute = rtc_math::bcd_to_binary(raw.minute);
+        raw.hour = rtc_math::bcd_to_binary(raw.hour & 0x7F);
+        raw.weekday = rtc_math::bcd_to_binary(raw.weekday);
+        raw.day = rtc_math::bcd_to_binary(raw.day);
+        raw.month = rtc_math::bcd_to_binary(raw.month);
+        raw.year = rtc_math::bcd_to_binary(raw.year);
         if raw.century != 0 {
-            raw.century = bcd_to_binary(raw.century);
+            raw.century = rtc_math::bcd_to_binary(raw.century);
         }
     }
 
@@ -493,3 +463,5 @@ pub fn set_periodic_interrupt(enable: bool) {
 pub fn uptime_secs() -> u64 {
     RTC_LAST_TICK.load(Ordering::Relaxed)
 }
+
+
