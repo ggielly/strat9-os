@@ -306,7 +306,11 @@ fn boot_kernel() -> BootResult<()> {
     // before the loader defaults and therefore override them. This is how a
     // machine is switched to `console.mode=lite` (or `serial`) without
     // rebuilding: edit the file on the ESP.
-    const MAX_BOOT_CONFIG: usize = 2048;
+    //
+    // 4 KiB: the shipped validation profiles (`s9vm-selftest.cfg`, ~2.6 KiB
+    // with its commented phase list) and `strat9.cfg` must fit without losing
+    // the active lines at the end of the file.
+    const MAX_BOOT_CONFIG: usize = 4096;
     let mut boot_cfg = alloc::vec::Vec::new();
     match volume.open(
         cstr16!("\\boot\\strat9.cfg"),
