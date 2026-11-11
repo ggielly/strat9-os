@@ -137,6 +137,42 @@ fn rejects_reserved_rflags_bits() {
     let mut state = GuestState::long_mode_64(0x1000, 0x2000, 0x3000);
     state.rflags = 0x2 | (1 << 3); // bit 3 reserved
     assert_eq!(state.validate(&permissive(), true), Err(GuestError::BadRflags));
+
+    // RF (bit 16) is a legitimate flag, not a reserved bit: it must be
+    // accepted. Regression for the guest boot failure where RF=1 was rejected
+    // as BadRflags (rflags=0x10206).
+    let mut state = GuestState::long_mode_64(0x1000, 0x2000, 0x3000);
+    state.rflags = 0x2 | (1 << 16);
+    assert_eq!(state.validate(&permissive(), true), Ok(()));
+
+    // VM (bit 17, virtual-8086) is reserved in IA-32e mode and must be
+    // rejected there.
+    let mut state = GuestState::long_mode_64(0x1000, 0x2000, 0x3000);
+    state.rflags = 0x2 | (1 << 17);
+    assert_eq!(state.validate(&permissive(), true), Err(GuestError::BadRflags));
+
+    // First high reserved bit (bit 22): the 63:22 range must be rejected.
+    let mut state = GuestState::long_mode_64(0x1000, 0x2000, 0x3000);
+    state.rflags = 0x2 | (1 << 22);
+    assert_eq!(state.validate(&permissive(), true), Err(GuestError::BadRflags));
+}
+
+#[test]
+fn long_mode_accepts_unusable_data_segments() {
+    // In IA-32e mode DS/ES are ignored by the processor and may be unusable.
+    // The base/limit checks must be skipped for them: a non-zero base and a
+    // non-full limit on an unusable segment must NOT be rejected.
+    let unusable = Segment {
+        selector: 0,
+        base: 0xDEAD_BEEF,
+        limit: 0x1234,
+        access_rights: unusable_access_rights(),
+    };
+    let mut state = GuestState::long_mode_64(0x1000, 0x2000, 0x3000);
+    state.ds = unusable;
+    state.es = unusable;
+    assert!(state.ds.is_unusable());
+    assert_eq!(state.validate(&permissive(), true), Ok(()));
 }
 
 #[test]
@@ -153,6 +189,56 @@ fn rejects_bad_interruptibility_state() {
     assert_eq!(
         state.validate(&permissive(), true),
         Err(GuestError::BadInterruptibility)
+    );
+
+    // Blocking by STI (bit 0) and by MOV-SS (bit 1) cannot both be set.
+    let mut state = GuestState::long_mode_64(0x1000, 0x2000, 0x3000);
+    state.rflags = 0x2 | (1 << 9); // IF = 1 so STI blocking is otherwise legal
+    state.interruptibility = 0b11;
+    assert_eq!(
+        state.validate(&permissive(), true),
+        Err(GuestError::BadInterruptibility)
+    );
+
+    // Blocking by STI requires RFLAGS.IF = 1.
+    let mut state = GuestState::long_mode_64(0x1000, 0x2000, 0x3000);
+    state.rflags = 0x2; // IF = 0
+    state.interruptibility = 0b01;
+    assert_eq!(
+        state.validate(&permissive(), true),
+        Err(GuestError::BadInterruptibility)
+    );
+
+    // STI blocking with IF = 1 is accepted.
+    let mut state = GuestState::long_mode_64(0x1000, 0x2000, 0x3000);
+    state.rflags = 0x2 | (1 << 9);
+    state.interruptibility = 0b01;
+    assert_eq!(state.validate(&permissive(), true), Ok(()));
+}
+
+#[test]
+fn long_mode_accepts_unusable_stack_segment() {
+    // In IA-32e mode SS is ignored by the processor and may be unusable.
+    let mut state = GuestState::long_mode_64(0x1000, 0x2000, 0x3000);
+    state.ss = Segment {
+        selector: 0,
+        base: 0,
+        limit: 0,
+        access_rights: unusable_access_rights(),
+    };
+    assert!(state.ss.is_unusable());
+    assert_eq!(state.validate(&permissive(), true), Ok(()));
+
+    // In protected mode (no long mode) an unusable SS is still rejected.
+    let mut state = GuestState::long_mode_64(0x1000, 0x2000, 0x3000);
+    state.cr0 &= !CR0_PG; // drop paging -> not long mode, still PE = 1
+    state.efer &= !(EFER_LME | EFER_LMA);
+    state.ss.access_rights = unusable_access_rights();
+    assert!(!state.is_long_mode());
+    assert!(!state.is_real_mode());
+    assert_eq!(
+        state.validate(&permissive(), true),
+        Err(GuestError::BadStackSegment)
     );
 }
 

@@ -450,7 +450,15 @@ impl GuestState {
             if !self.cs.is_long_code() || self.cs.access_rights & AR_DEFAULT_BIG != 0 {
                 return Err(GuestError::BadLongCodeSegment);
             }
+            // In IA-32e mode the base/limit checks only apply to usable
+            // segments: the processor ignores DS/ES/SS entirely, and a guest
+            // may legitimately leave them unusable. Skipping them avoids a
+            // spurious SegmentLimitNotFull. CS is always usable here (its
+            // long-code check above would have rejected an unusable CS).
             for segment in [self.cs, self.ss, self.ds, self.es] {
+                if segment.is_unusable() {
+                    continue;
+                }
                 if segment.base != 0 {
                     return Err(GuestError::SegmentBaseNotZero);
                 }
@@ -464,13 +472,38 @@ impl GuestState {
         if self.rflags & 0x2 == 0 {
             return Err(GuestError::BadRflags);
         }
-        const RFLAGS_RESERVED: u64 = (1 << 3) | (1 << 5) | (1 << 15) | (1 << 16) | (1 << 17);
+        // Architectural reserved bits (SDM Vol. 3 §27.3.1.4): bits 3, 5, 15 and
+        // 63:22 must be zero. RF (bit 16) is a legitimate flag and must NOT be
+        // rejected; VM (bit 17) is checked separately because it is only
+        // reserved conditionally.
+        // `!0x003F_FFFF` is bits 63:22 (0x003F_FFFF = bits 21:0).
+        const RFLAGS_RESERVED: u64 = (1 << 3) | (1 << 5) | (1 << 15) | !0x003F_FFFF;
         if self.rflags & RFLAGS_RESERVED != 0 {
             return Err(GuestError::BadRflags);
         }
+        // VM (bit 17, virtual-8086) must be clear when entering IA-32e mode or
+        // when CR0.PE = 0; otherwise the processor rejects the entry.
+        const RFLAGS_VM: u64 = 1 << 17;
+        if self.rflags & RFLAGS_VM != 0 && (self.is_long_mode() || self.is_real_mode()) {
+            return Err(GuestError::BadRflags);
+        }
 
-        // Interruptibility: only bits 0-3 are defined.
+        // Interruptibility (SDM Vol. 3 §27.3.1.5): only bits 0-3 are defined.
         if self.interruptibility & !0xF != 0 {
+            return Err(GuestError::BadInterruptibility);
+        }
+        // Blocking by STI (bit 0) and blocking by MOV-SS (bit 1) are mutually
+        // exclusive: the processor rejects an entry with both set.
+        const STI_BLOCKING: u32 = 1 << 0;
+        const MOV_SS_BLOCKING: u32 = 1 << 1;
+        if self.interruptibility & STI_BLOCKING != 0 && self.interruptibility & MOV_SS_BLOCKING != 0
+        {
+            return Err(GuestError::BadInterruptibility);
+        }
+        // Blocking by STI requires interrupts to be enabled (RFLAGS.IF = 1);
+        // otherwise there is nothing for STI to have deferred.
+        const RFLAGS_IF: u64 = 1 << 9;
+        if self.interruptibility & STI_BLOCKING != 0 && self.rflags & RFLAGS_IF == 0 {
             return Err(GuestError::BadInterruptibility);
         }
 
@@ -479,8 +512,10 @@ impl GuestState {
             return Err(GuestError::NotActive);
         }
 
-        // Stack: SS must be usable if RSP is used.
-        if self.ss.is_unusable() {
+        // Stack: in protected/real mode SS must be usable, since RSP is pushed
+        // through it. In IA-32e (long) mode the processor ignores SS, so a
+        // guest may legitimately leave it unusable.
+        if !self.is_long_mode() && self.ss.is_unusable() {
             return Err(GuestError::BadStackSegment);
         }
 
