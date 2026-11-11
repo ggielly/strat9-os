@@ -860,7 +860,127 @@ pub unsafe extern "C" fn guest_main(boot_params_gpa: u64) -> ! {
         }
     }
 
+    // 17. Legacy serial console: emit one line on the in-kernel 16550 model
+    //     (COM1) and verify the transmitter reports ready through the line
+    //     status register. This is the console path a stock x86 kernel uses
+    //     before any PCI/virtio driver loads: `W` on success, `w` + code
+    //     otherwise (non-fatal).
+    let uart_error = unsafe { serial_probe() }.err();
+    match uart_error {
+        None => debug_write(b'W'),
+        Some(code) => {
+            debug_write(b'w');
+            debug_write(code);
+        }
+    }
+
+    // 18. CMOS clock: read the seconds register through the index/data ports
+    //     and check it decodes as a BCD or binary second. Proves the in-kernel
+    //     MC146818 model answers a guest: `Z` on success, `z` + code otherwise.
+    let rtc_error = unsafe { rtc_probe() }.err();
+    match rtc_error {
+        None => debug_write(b'Z'),
+        Some(code) => {
+            debug_write(b'z');
+            debug_write(code);
+        }
+    }
+
     halt_forever()
+}
+
+/// COM1 data port (the UART's register file starts here).
+const UART_DATA_PORT: u16 = 0x3F8;
+/// COM1 line-status register offset from the data port.
+const UART_LSR_OFFSET: u16 = 5;
+/// LSR bit: transmit holding register empty.
+const UART_LSR_THRE: u8 = 1 << 5;
+/// Line written to the legacy serial console.
+const UART_MESSAGE: &[u8] = b"s9vm-guest: legacy uart online\n";
+/// CMOS index/data ports.
+const CMOS_INDEX_PORT: u16 = 0x70;
+const CMOS_DATA_PORT: u16 = 0x71;
+/// CMOS seconds register.
+const CMOS_SECONDS: u8 = 0x00;
+
+/// Failure codes published after the non-fatal serial/clock markers.
+mod platform_failure {
+    /// A transmitted byte was not accepted (transmitter never became ready).
+    pub const UART_STATUS: u8 = 1;
+    /// The CMOS seconds register did not decode as a valid second.
+    pub const RTC_SECONDS: u8 = 2;
+}
+
+/// Writes one line on the legacy COM1 UART and checks the transmitter status.
+///
+/// # Safety
+///
+/// Port I/O only: the engine replays `out`/`in` against the kernel's 16550
+/// model, no memory is touched.
+unsafe fn serial_probe() -> Result<(), u8> {
+    let mut index = 0usize;
+    while index < UART_MESSAGE.len() {
+        // SAFETY: port I/O, replayed by the engine.
+        unsafe {
+            asm!(
+                "out dx, al",
+                in("dx") UART_DATA_PORT,
+                in("al") UART_MESSAGE[index],
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        index += 1;
+    }
+    let mut status: u8;
+    // SAFETY: port I/O, replayed by the engine; the LSR is read-only.
+    unsafe {
+        asm!(
+            "in al, dx",
+            in("dx") UART_DATA_PORT + UART_LSR_OFFSET,
+            out("al") status,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    if status & UART_LSR_THRE == 0 {
+        return Err(platform_failure::UART_STATUS);
+    }
+    Ok(())
+}
+
+/// Reads the CMOS seconds register and validates its encoding.
+///
+/// # Safety
+///
+/// Port I/O only: the engine replays `out`/`in` against the kernel's CMOS
+/// model, no memory is touched.
+unsafe fn rtc_probe() -> Result<(), u8> {
+    // SAFETY: port I/O, replayed by the engine (index port then data port).
+    unsafe {
+        asm!(
+            "out dx, al",
+            in("dx") CMOS_INDEX_PORT,
+            in("al") CMOS_SECONDS,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    let mut raw: u8;
+    // SAFETY: port I/O, replayed by the engine; the data port is read-only here.
+    unsafe {
+        asm!(
+            "in al, dx",
+            in("dx") CMOS_DATA_PORT,
+            out("al") raw,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    // The model is in BCD/24h mode by default: high nibble is the tens digit
+    // (0..=5), low nibble the ones digit (0..=9).
+    let tens = raw >> 4;
+    let ones = raw & 0x0F;
+    if tens > 5 || ones > 9 {
+        return Err(platform_failure::RTC_SECONDS);
+    }
+    Ok(())
 }
 
 /// Message prefix the guest kernel sends once the console is up (followed by

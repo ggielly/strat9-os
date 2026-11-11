@@ -107,6 +107,10 @@ policy completes it with the reported instruction length.
 | `v` (`0x76`) + code | no timer interrupt observed — non-fatal |
 | `X` (`0x58`) | virtio-net transmit queue consumed the Ethernet frame |
 | `x` (`0x78`) + code | no network device, or the transmit failed — non-fatal |
+| `W` (`0x57`) | legacy COM1 UART accepted a line and reports the transmitter ready |
+| `w` (`0x77`) + code | the legacy UART is absent or never became ready — non-fatal |
+| `Z` (`0x5A`) | CMOS RTC seconds register read and decoded |
+| `z` (`0x7A`) + code | the CMOS clock model returned an invalid second — non-fatal |
 | `E` (`0x45`) + vector | CPU exception caught by the private IDT; then halt |
 | `F` (`0x46`) + code | failure; the code is the failing step (see below) |
 | `P` (`0x50`) | Rust panic; the guest halts afterwards (no code) |
@@ -114,7 +118,7 @@ policy completes it with the reported instruction length.
 Success sequence: `G`, `M`, `A`, `R`/`r`, `I` (only after `R`), `K`, `T`/`t`,
 `N`/`n` (initrd init), `S`/`s` (ACPI tables), `C`/`c` (console),
 `D`/`d` (block), `V`/`v` (timer interrupt), `X`/`x` (virtio-net transmit),
-then repeated `hlt`.
+`W`/`w` (legacy COM1 UART), `Z`/`z` (CMOS clock), then repeated `hlt`.
 Failure sequence: `F`, code, then `hlt`.
 
 Failure codes published after `F`:
@@ -158,6 +162,8 @@ never an ASCII marker, so the marker stream stays unambiguous):
 | `x` | 1..4 | transport probe / feature / queue / `DRIVER_OK` step failed |
 | `x` | 5 | the device never consumed the descriptor |
 | `x` | 6 | the device reported an unexpected used length |
+| `w` | 1 | the legacy UART never reported the transmitter ready |
+| `z` | 2 | the CMOS seconds register did not decode as a valid second |
 
 The policy logs each of these as
 `[s9vm-vmm] guest failure marker=<marker> code=<n>`, which makes a hardware run
@@ -243,13 +249,24 @@ diagnosable without rebuilding the guest.
     requests no interrupt, notifies and polls the used ring, then checks the
     used length. Success reports `X`, a missing/failed device the non-fatal
     `x`.
+15. **legacy COM1 UART**: writes one line through `out dx, al` (DX = `0x3F8`;
+    the kernel replays the port access against its in-kernel 16550 model) and
+    reads the line-status register (`0x3FD`) to check `THRE`. This is the
+    console path a stock x86 kernel uses before any PCI driver loads. Success
+    reports `W`, otherwise the non-fatal `w` + code;
+16. **CMOS clock**: selects the seconds register through the index port
+    (`0x70`) and reads it back through the data port (`0x71`), checking that it
+    decodes as a valid BCD second. Proves the in-kernel MC146818 model answers
+    a guest. Success reports `Z`, otherwise the non-fatal `z` + code.
 
-The engine models the local APIC and virtio device pages as device pages: the
-second-level translation intentionally leaves them unmapped, so an access
-raises a violation that the kernel device model replays. The guest therefore
-maps those windows in its own page tables and drives them through normal MMIO;
-if a window is not coherently modeled (for example, backed by plain RAM by a
-different policy) it takes the non-fatal `t`/`c`/`d`/`v`/`x`/`s` path without
+The engine models the local APIC, the legacy 8254/16550/CMOS ports, and the
+virtio device pages: MMIO windows are left unmapped in the second-level
+translation so an access raises a violation that the kernel device model
+replays; port I/O is decoded and replayed the same way. The guest therefore
+maps the MMIO windows in its own page tables and drives them through normal
+MMIO, while the legacy devices are reached with plain `in`/`out`. If a window
+is not coherently modeled (for example, backed by plain RAM by a different
+policy) it takes the non-fatal `t`/`c`/`d`/`v`/`w`/`x`/`z`/`s` path without
 faulting.
 
 ## Build
