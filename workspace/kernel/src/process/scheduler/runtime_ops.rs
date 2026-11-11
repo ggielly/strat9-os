@@ -58,20 +58,27 @@ pub fn sleep_current_task_ticks(ticks: u64) {
 
 /// Initialize the scheduler
 pub fn init_scheduler() {
-    // Build scheduler state only for CPUs that are actually online. Using the
-    // registered per-CPU count here can strand runnable tasks on AP slots that
-    // never reached the scheduler gate.
-    let cpu_count = crate::arch::smp::cpu_count().max(1);
+    // Build scheduler state only for CPUs that are actually online. Indexing
+    // `0..cpu_count` is wrong: CPU indices are sparse, so that range can
+    // include offline slots and omit live ones.
+    let mut online = [0usize; crate::arch::percpu::MAX_CPUS];
+    let mut cpu_count = crate::arch::percpu::online_cpu_indices(&mut online);
+    if cpu_count == 0 {
+        // The BSP (0) is always online; keep the scheduler usable if the mask
+        // is not published yet.
+        online[0] = 0;
+        cpu_count = 1;
+    }
     crate::serial_println!(
-        "[trace][sched] init_scheduler enter cpu_count={}",
+        "[trace][sched] init_scheduler enter online_cpus={}",
         cpu_count
     );
     // Build the scheduler outside the global scheduler lock to avoid
     // lock-order inversions (`GLOBAL_SCHED_STATE -> allocator`) during task/stack
     // allocation in `GlobalSchedState::new`.
     let new_sched = GlobalSchedState::new();
-    // Initialize per-CPU scheduler state for each active CPU.
-    for i in 0..cpu_count {
+    // Initialize per-CPU scheduler state for each online CPU.
+    for &i in &online[..cpu_count] {
         let cpu_sched = super::core_impl::create_cpu_scheduler(i);
         *LOCAL_SCHEDULERS[i].lock() = Some(cpu_sched);
     }
@@ -217,11 +224,26 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
                 crate::e9_println!("BD first_task cpu={} waited={}", cpu_index, wait_iters);
             }
             drop(scheduler);
-            // Pick first task via LOCAL per-CPU state.
-            let idx = if cpu_index < active_cpu_count() {
+            // Pick first task via LOCAL per-CPU state. CPU indices are sparse:
+            // never assume `cpu_index` is backed by a scheduler slot.
+            let idx = if super::cpu_has_scheduler(cpu_index) {
                 cpu_index
-            } else {
+            } else if super::cpu_has_scheduler(0) {
+                log::error!(
+                    "[sched] schedule_on_cpu: cpu {} is offline or uninitialized; falling back to cpu 0",
+                    cpu_index
+                );
                 0
+            } else {
+                // No usable scheduler anywhere: halt this CPU instead of
+                // spinning forever on a dead slot.
+                log::error!(
+                    "[sched] schedule_on_cpu: no online CPU has a scheduler (cpu={})",
+                    cpu_index
+                );
+                loop {
+                    crate::arch::hlt();
+                }
             };
 
             crate::e9_mark!(b'M');
@@ -233,11 +255,14 @@ pub fn schedule_on_cpu(cpu_index: usize) -> ! {
             if let Some(ref mut cpu) = *local {
                 break super::core_impl::pick_next_task_local(cpu, idx);
             }
-            // LOCAL not ready yet : drop and spin.
+            // LOCAL not ready yet : drop and spin, but never silently.
             drop(local);
             wait_iters = wait_iters.saturating_add(1);
             if wait_iters == 1 || (wait_iters % 1_000_000 == 0 && wait_iters > 0) {
-                crate::e9_println!("BD-WAIT-LOCAL cpu={} iters={}", cpu_index, wait_iters);
+                log::error!(
+                    "[sched] schedule_on_cpu: cpu {} scheduler slot empty; retrying",
+                    idx
+                );
             }
             core::hint::spin_loop();
             continue;
@@ -946,8 +971,10 @@ pub fn configure_class_table(table: crate::process::sched::SchedClassTable) -> b
         if let Some(ref mut sched) = *scheduler {
             let prev = sched.class_table;
             sched.class_table = table;
-            let n = active_cpu_count();
-            for cpu_idx in 0..n {
+            for cpu_idx in 0..crate::arch::percpu::MAX_CPUS {
+                if !super::cpu_is_online(cpu_idx) {
+                    continue;
+                }
                 lockdep_acquire(LockRank::Local, Some(cpu_idx));
                 if let Some(ref mut local_cpu) = *LOCAL_SCHEDULERS[cpu_idx].lock() {
                     local_cpu.class_table = table;
@@ -993,8 +1020,10 @@ pub fn log_state(label: &str) {
             steal[0].as_str(),
             steal[1].as_str()
         );
-        let n = active_cpu_count();
-        for cpu_id in 0..n {
+        for cpu_id in 0..crate::arch::percpu::MAX_CPUS {
+            if !super::cpu_is_online(cpu_id) {
+                continue;
+            }
             use crate::process::sched::SchedClassRq;
             let local_guard = LOCAL_SCHEDULERS[cpu_id].lock();
             if let Some(ref cpu) = *local_guard {
@@ -1022,8 +1051,10 @@ pub fn log_state(label: &str) {
 
     // Deferred work metrics (lock-free, read after GLOBAL_SCHED_STATE is released).
     let dw = super::deferred_work::metrics_snapshot();
-    let n = active_cpu_count();
-    for cpu_id in 0..n {
+    for cpu_id in 0..crate::arch::percpu::MAX_CPUS {
+        if !super::cpu_is_online(cpu_id) {
+            continue;
+        }
         log::info!(
             "[sched][state] label={} cpu={} dwork_raised={} dwork_processed={}",
             label,
@@ -1074,7 +1105,10 @@ pub fn state_snapshot() -> SchedulerStateSnapshot {
             out.pick_order = *sched.class_table.pick_order();
             out.steal_order = *sched.class_table.steal_order();
             out.blocked_tasks = super::BLOCKED_TASKS.lock().len();
-            for i in 0..cpu_count {
+            for i in 0..crate::arch::percpu::MAX_CPUS {
+                if !super::cpu_is_online(i) {
+                    continue;
+                }
                 let local_guard = LOCAL_SCHEDULERS[i].lock();
                 if let Some(ref cpu) = *local_guard {
                     out.current_task[i] = cpu

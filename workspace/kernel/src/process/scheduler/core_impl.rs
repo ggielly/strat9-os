@@ -327,32 +327,7 @@ impl GlobalSchedState {
                 // --- CPU placement: prefer last_cpu (cache warmth), then home_cpu ---
                 let last = task.last_cpu.load(Ordering::Relaxed);
                 let home = task.home_cpu.load(Ordering::Relaxed);
-                let n = active_cpu_count();
-
-                // Try last_cpu first: valid, online, and reasonably loaded.
-                let cpu_index = if last < n {
-                    let last_ok = {
-                        lockdep_acquire(LockRank::Local, Some(last));
-                        let ok = LOCAL_SCHEDULERS[last]
-                            .lock()
-                            .as_ref()
-                            .map(|c| c.class_rqs.runnable_len() <= 2)
-                            .unwrap_or(false);
-                        lockdep_release(LockRank::Local);
-                        ok
-                    };
-                    if last_ok {
-                        last
-                    } else if home < n {
-                        home
-                    } else {
-                        0
-                    }
-                } else if home < n {
-                    home
-                } else {
-                    0
-                };
+                let cpu_index = super::placement_cpu(last, home);
 
                 let class = {
                     use crate::process::sched::SchedClassId;

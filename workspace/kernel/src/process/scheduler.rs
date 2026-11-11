@@ -1153,7 +1153,10 @@ pub(crate) fn validate_scheduler_invariants() {
         alloc::collections::BTreeSet::new();
 
     // 1. Each CPU has at most one current_task; no task is current on two CPUs.
-    for cpu_idx in 0..n {
+    for cpu_idx in 0..crate::arch::percpu::MAX_CPUS {
+        if !cpu_is_online(cpu_idx) {
+            continue;
+        }
         let guard = match LOCAL_SCHEDULERS[cpu_idx].try_lock() {
             Some(g) => g,
             None => return, // Lock contended, skip validation.
@@ -1185,8 +1188,8 @@ pub(crate) fn validate_scheduler_invariants() {
                 match state {
                     Some(TaskState::Ready) | Some(TaskState::Running) => {
                         assert!(
-                            cpu_idx < n,
-                            "scheduler invariant: task_cpu[{}] = {} but cpu_count = {}",
+                            cpu_is_online(cpu_idx),
+                            "scheduler invariant: task_cpu[{}] = {} but that CPU is not online (online_count = {})",
                             tid.as_u64(),
                             cpu_idx,
                             n

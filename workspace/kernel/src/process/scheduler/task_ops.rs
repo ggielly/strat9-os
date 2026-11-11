@@ -793,33 +793,7 @@ pub fn wake_task(id: TaskId) -> bool {
             // --- CPU placement: prefer last_cpu, then home_cpu ---
             let last = task.last_cpu.load(core::sync::atomic::Ordering::Relaxed);
             let home = task.home_cpu.load(core::sync::atomic::Ordering::Relaxed);
-            let n = crate::arch::smp::cpu_count()
-                .max(1)
-                .min(crate::arch::percpu::MAX_CPUS);
-
-            let cpu_index = if last < n {
-                let last_ok = {
-                    lockdep_acquire(LockRank::Local, Some(last));
-                    let ok = LOCAL_SCHEDULERS[last]
-                        .lock()
-                        .as_ref()
-                        .map(|c| c.class_rqs.runnable_len() <= 2)
-                        .unwrap_or(false);
-                    lockdep_release(LockRank::Local);
-                    ok
-                };
-                if last_ok {
-                    last
-                } else if home < n {
-                    home
-                } else {
-                    0
-                }
-            } else if home < n {
-                home
-            } else {
-                0
-            };
+            let cpu_index = super::placement_cpu(last, home);
 
             let class = {
                 use crate::process::sched::SchedClassId;
@@ -926,12 +900,14 @@ pub fn suspend_task(id: TaskId) -> bool {
     let mut ipi_to_cpu: Option<usize> = None;
 
     let my_cpu = current_cpu_index();
-    let n = active_cpu_count();
 
     // Path 1: Check if the task is the current task on any CPU.
     // Lock order: LOCAL (read-only probe) → release → BLOCKED → LOCAL (yield).
     // The first LOCAL is acquired and released before BLOCKED; no nesting.
-    for ci in 0..n {
+    for ci in 0..crate::arch::percpu::MAX_CPUS {
+        if !super::cpu_is_online(ci) {
+            continue;
+        }
         lockdep_acquire(LockRank::Local, Some(ci));
         let task_id_on_cpu = LOCAL_SCHEDULERS[ci]
             .lock()
@@ -972,7 +948,10 @@ pub fn suspend_task(id: TaskId) -> bool {
     // Lock order: LOCAL (remove from queue) → release → BLOCKED (insert).
     // No nesting: LOCAL is fully released before BLOCKED is acquired.
     if !suspended {
-        for ci in 0..n {
+        for ci in 0..crate::arch::percpu::MAX_CPUS {
+            if !super::cpu_is_online(ci) {
+                continue;
+            }
             lockdep_acquire(LockRank::Local, Some(ci));
             let removed = {
                 let mut local = LOCAL_SCHEDULERS[ci].lock();
@@ -1045,27 +1024,7 @@ pub fn resume_task(id: TaskId) -> bool {
             // --- CPU placement: prefer last_cpu, then home_cpu ---
             let last = task.last_cpu.load(core::sync::atomic::Ordering::Relaxed);
             let home = task.home_cpu.load(core::sync::atomic::Ordering::Relaxed);
-            let n = crate::arch::smp::cpu_count()
-                .max(1)
-                .min(crate::arch::percpu::MAX_CPUS);
-            let cpu_index = if last < n {
-                let last_ok = LOCAL_SCHEDULERS[last]
-                    .lock()
-                    .as_ref()
-                    .map(|c| c.class_rqs.runnable_len() <= 2)
-                    .unwrap_or(false);
-                if last_ok {
-                    last
-                } else if home < n {
-                    home
-                } else {
-                    0
-                }
-            } else if home < n {
-                home
-            } else {
-                0
-            };
+            let cpu_index = super::placement_cpu(last, home);
 
             let class = {
                 use crate::process::sched::SchedClassId;
@@ -1143,9 +1102,11 @@ pub fn kill_task(id: TaskId) -> bool {
             let my_cpu = current_cpu_index();
 
             // Check if the task is the current task on any CPU.
-            let n = active_cpu_count();
             let mut running_hit: Option<(usize, Arc<Task>)> = None;
-            for ci in 0..n {
+            for ci in 0..crate::arch::percpu::MAX_CPUS {
+                if !super::cpu_is_online(ci) {
+                    continue;
+                }
                 lockdep_acquire(LockRank::Local, Some(ci));
                 let hit = LOCAL_SCHEDULERS[ci].lock().as_ref().and_then(|cpu| {
                     cpu.current_task
@@ -1223,7 +1184,10 @@ pub fn kill_task(id: TaskId) -> bool {
             // Remove from ready queues.
             if !killed {
                 let mut removed_from_ready = false;
-                for ci in 0..n {
+                for ci in 0..crate::arch::percpu::MAX_CPUS {
+                    if !super::cpu_is_online(ci) {
+                        continue;
+                    }
                     lockdep_acquire(LockRank::Local, Some(ci));
                     let removed = {
                         let mut local = LOCAL_SCHEDULERS[ci].lock();
