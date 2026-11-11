@@ -444,6 +444,12 @@ pub fn sys_vmm_set_cpuid_policy(vmm_handle: u64, policy_ptr: u64) -> Result<u64,
 ///
 /// Never returns a host physical address: the translation is kernel-side
 /// only.
+///
+/// When the host VT-d backend is ready, the kernel also mirrors the mapping
+/// into the host shadow tables (best effort, after the world registry lock is
+/// released). Backend absence or a hardware programming failure is logged and
+/// does **not** change the syscall result: the software model is
+/// authoritative.
 pub fn sys_vmm_map_iommu(vmm_handle: u64, req_ptr: u64) -> Result<u64, SyscallError> {
     let required = CapPermissions {
         write: true,

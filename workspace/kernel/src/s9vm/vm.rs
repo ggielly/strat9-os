@@ -38,32 +38,33 @@
 //! (capabilities).
 
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::{
+    hardware::iommu::{DmaProt, Domain as HardwareIommuDomain, FaultPolicy, MappingKind, Sbdf},
     memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame},
-    process::{kthread, scheduler::ticks, sleep_current_task_ticks, TaskId},
+    process::{TaskId, kthread, scheduler::ticks, sleep_current_task_ticks},
     s9vm::{
         apic::LocalApic,
         caps::HwCaps,
-        emulate::{interrupt_action, InterruptAction},
+        emulate::{InterruptAction, interrupt_action},
         exit::ExitClass,
         exitqueue::ExitQueue,
         guest::{FixedBits, GuestState},
         image::{Image, Segment},
         iommu::{DeviceId, DomainId, IommuError, IommuModel},
         machine::Machine,
-        memmap::{contiguous_2m_aligned, perms_from_abi, plan_map, GuestMap, MapError, MAX_GPA},
-        mmu::{Perms as MmuPerms, PAGE_SIZE},
-        timing::{ExitLatencyHistogram, WorldTiming, EXIT_LATENCY_BUCKETS},
+        memmap::{GuestMap, MAX_GPA, MapError, contiguous_2m_aligned, perms_from_abi, plan_map},
+        mmu::{PAGE_SIZE, Perms as MmuPerms},
+        timing::{EXIT_LATENCY_BUCKETS, ExitLatencyHistogram, WorldTiming},
         vcpu::{ExitInfo, SecondLevelMemory, Vcpu, VcpuError},
         virtio_blk::VirtioBlk,
     },
     sync::{SpinLock, WaitQueue},
 };
 use strat9_abi::vmm::{
-    exit_kind, VmmExitEvent, VmmRegs, VMM_DISK_DEFAULT_BYTES, VMM_DISK_MAX_BYTES,
-    VMM_DISK_SECTOR_SIZE, VMM_IOMMU_MAX_MAP_BYTES,
+    VMM_DISK_DEFAULT_BYTES, VMM_DISK_MAX_BYTES, VMM_DISK_SECTOR_SIZE, VMM_IOMMU_MAX_MAP_BYTES,
+    VmmExitEvent, VmmRegs, exit_kind,
 };
 
 /// Maximum number of simultaneous worlds (safety bound).
@@ -673,6 +674,9 @@ fn destroy_inner(id: u64, timeout_ns: Option<u64>) -> Option<WorldRecord> {
     };
     // The IOMMU model owns no frame, but its domains and device bindings must
     // not outlive the world: drop them explicitly before the guest frames.
+    // The host VT-d mirror domains are released first (outside the registry
+    // lock), which clears their hardware shadow mappings.
+    release_host_iommu_domains(id);
     world.iommu.destroy();
     world.iommu_domain = None;
     if let Some(memory) = world.memory.take() {
@@ -2490,6 +2494,227 @@ fn iommu_domain(world: &mut World) -> Result<DomainId, IommuError> {
     }
 }
 
+// ----------------------------------------------------------------------------
+// Host VT-d mirroring (best effort, software model stays authoritative)
+// ----------------------------------------------------------------------------
+
+/// One host-side mirror segment, collected while the registry lock is held.
+///
+/// The collection is bounded by the model quota (`MAX_ENTRIES_PER_DOMAIN`), so
+/// the vector cannot grow without bound.
+struct HostIommuSegment {
+    iova: u64,
+    phys: u64,
+    len: u64,
+    kind: MappingKind,
+}
+
+/// Host IOMMU domains, one per `(world, PCI function)`.
+///
+/// The registry lock and this lock are **never** held together: the table is
+/// only used to find or park an `Arc`, and the hardware IOMMU layer (which has
+/// its own locks) is called after it has been released.
+static IOMMU_HOST_DOMAINS: SpinLock<BTreeMap<(u64, u32), Arc<HardwareIommuDomain>>> =
+    SpinLock::new(BTreeMap::new());
+
+/// One-shot note when the host backend is not ready (feature disabled, no
+/// DMAR, or activation not validated). The software model keeps working.
+static IOMMU_BACKEND_NOTED: AtomicBool = AtomicBool::new(false);
+
+/// Records (once) that host mirroring is disabled.
+fn note_iommu_backend_unavailable() {
+    if !IOMMU_BACKEND_NOTED.swap(true, Ordering::Relaxed) {
+        log::info!(
+            "[s9vm] iommu: host VT-d backend not ready; host mirroring disabled, \
+             software model only"
+        );
+    }
+}
+
+/// True when the authoritative host backend is ready for mirroring.
+fn iommu_host_ready() -> bool {
+    crate::arch::iommu::backend().is_ready()
+}
+
+/// Translates the model permissions into VT-d DMA rights.
+///
+/// `Perms::read`/`write` describe what the **device** may do with the mapped
+/// memory: read becomes `DmaProt::READ`, write becomes `DmaProt::WRITE`.
+/// Execute has no meaning for a DMA translation and is ignored. A mapping with
+/// neither read nor write (execute-only) becomes `DmaProt::NONE`; the hardware
+/// leaf is installed but the device cannot access it.
+fn iommu_dma_prot(perms: MmuPerms) -> DmaProt {
+    let mut bits = 0u8;
+    if perms.read {
+        bits |= DmaProt::READ.bits();
+    }
+    if perms.write {
+        bits |= DmaProt::WRITE.bits();
+    }
+    match DmaProt::from_bits(bits) {
+        Some(prot) => prot,
+        None => DmaProt::NONE,
+    }
+}
+
+/// Returns (creating it on first use) the host VT-d domain of one PCI
+/// function assigned to a world.
+///
+/// Each successful acquisition takes one logical reference on the hardware
+/// domain; it is released by [`release_host_iommu_domains`] at world teardown.
+fn host_iommu_domain(world_id: u64, sbdf: Sbdf) -> Option<Arc<HardwareIommuDomain>> {
+    let key = (world_id, sbdf.to_u32());
+    if let Some(domain) = IOMMU_HOST_DOMAINS.lock().get(&key) {
+        return Some(Arc::clone(domain));
+    }
+    let domain = match crate::hardware::iommu::domain_for_owned(sbdf, None, FaultPolicy::Log) {
+        Ok(domain) => domain,
+        Err(error) => {
+            log::warn!(
+                "[s9vm] iommu: host domain for world={} {} unavailable: {:?}",
+                world_id,
+                sbdf,
+                error
+            );
+            return None;
+        }
+    };
+    let mut map = IOMMU_HOST_DOMAINS.lock();
+    if let Some(existing) = map.get(&key) {
+        let existing = Arc::clone(existing);
+        drop(map);
+        // Another request created the domain first: drop our extra logical
+        // reference and use the registered one.
+        let _ = crate::hardware::iommu::release_domain(&domain);
+        return Some(existing);
+    }
+    map.insert(key, Arc::clone(&domain));
+    Some(domain)
+}
+
+/// Mirrors model segments into the host VT-d backend.
+///
+/// Called **without** the world registry lock. Best effort: a missing/not-ready
+/// backend disables mirroring with a one-time log; a hardware failure is
+/// logged with the world, device, IOVA and keeps the software model semantics
+/// (the syscall still succeeds).
+fn mirror_host_map(world_id: u64, device: u32, segments: &[HostIommuSegment], perms: MmuPerms) {
+    if segments.is_empty() {
+        return;
+    }
+    if !iommu_host_ready() {
+        note_iommu_backend_unavailable();
+        return;
+    }
+    let sbdf = Sbdf::from_u32(device);
+    let Some(domain) = host_iommu_domain(world_id, sbdf) else {
+        return;
+    };
+    let prot = iommu_dma_prot(perms);
+    let backend = crate::arch::iommu::backend();
+    // One hardware mapping per model leaf: the granularity must stay exactly
+    // aligned with the software model so a later (possibly partial) unmap can
+    // never leave a wider hardware mapping installed than the model allows.
+    for segment in segments {
+        match domain.map_kind(segment.iova, segment.phys, segment.len, prot, segment.kind) {
+            Ok(()) => {}
+            Err(crate::hardware::iommu::IommuError::BackendNotReady) => {
+                note_iommu_backend_unavailable();
+                return;
+            }
+            Err(error) => log::warn!(
+                "[s9vm] iommu: host map failed world={} device={} iova={:#x} \
+                 len={:#x} kind={:?}: {:?}",
+                world_id,
+                sbdf,
+                segment.iova,
+                segment.len,
+                segment.kind,
+                error
+            ),
+        }
+    }
+    // One invalidation for the whole batch (the per-leaf backend calls may
+    // already flush when translation is active).
+    backend.invalidate_domain(domain.id());
+}
+
+/// Removes a range from the host mirror of one device.
+///
+/// Called **without** the world registry lock; best effort like
+/// [`mirror_host_map`]. When no host domain exists for the pair the call is a
+/// no-op (the mirror was never installed or the backend was not ready).
+fn mirror_host_unmap(world_id: u64, device: u32, iova: u64, len: u64) {
+    if !iommu_host_ready() {
+        return;
+    }
+    let sbdf = Sbdf::from_u32(device);
+    let key = (world_id, sbdf.to_u32());
+    let domain = match IOMMU_HOST_DOMAINS.lock().get(&key) {
+        Some(domain) => Arc::clone(domain),
+        None => return,
+    };
+    let backend = crate::arch::iommu::backend();
+    match domain.unmap(iova, len) {
+        Ok(_pages) => backend.invalidate_domain(domain.id()),
+        Err(crate::hardware::iommu::IommuError::NotMapped) => {
+            // The mirror may be partial after an earlier best-effort failure;
+            // the software model remains authoritative.
+            log::debug!(
+                "[s9vm] iommu: host unmap found no mirror world={} device={} \
+                 iova={:#x} len={:#x}",
+                world_id,
+                sbdf,
+                iova,
+                len
+            );
+        }
+        Err(error) => log::warn!(
+            "[s9vm] iommu: host unmap failed world={} device={} iova={:#x} \
+             len={:#x}: {:?}",
+            world_id,
+            sbdf,
+            iova,
+            len,
+            error
+        ),
+    }
+}
+
+/// Releases every host VT-d domain owned by a world.
+///
+/// Called from `destroy_inner` after the world has been removed from the
+/// registry and **without** the registry lock. The domains are torn down first
+/// (their mappings are cleared and unmapped from the hardware shadow tables),
+/// then their logical reference is dropped.
+fn release_host_iommu_domains(world_id: u64) {
+    let domains: Vec<Arc<HardwareIommuDomain>> = {
+        let mut map = IOMMU_HOST_DOMAINS.lock();
+        let keys: Vec<(u64, u32)> = map
+            .keys()
+            .filter(|(world, _)| *world == world_id)
+            .copied()
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| map.remove(&key))
+            .collect()
+    };
+    for domain in domains {
+        if !crate::hardware::iommu::release_domain(&domain) {
+            // A lingering logical reference would keep the hardware domain
+            // alive: force the teardown rather than leaking a translation
+            // domain for a destroyed world.
+            log::warn!(
+                "[s9vm] iommu: world {} host domain {} still referenced; \
+                 forcing teardown",
+                world_id,
+                domain.id().raw()
+            );
+            let _ = crate::hardware::iommu::teardown(domain.id());
+        }
+    }
+}
+
 /// Maps an IOVA range of a world to the host frames backing its guest memory.
 ///
 /// Contract:
@@ -2503,6 +2728,17 @@ fn iommu_domain(world: &mut World) -> Result<DomainId, IommuError> {
 /// - All-or-nothing: on any error the leaves installed by this call are
 ///   removed before returning.
 ///
+/// When the host VT-d backend is ready (`arch::iommu::backend().is_ready()`),
+/// the same leaves are mirrored into the host shadow tables **after** the
+/// registry lock is released: one `hardware::iommu::Domain` per
+/// `(world, PCI function)`, `map_kind` with 4 KiB / 2 MiB matching the model
+/// leaf and `DmaProt` derived from `perms`, followed by a domain invalidation.
+/// The mirror is best effort: a missing/not-ready backend disables it with a
+/// one-time log, and a hardware failure is logged with world/device/IOVA while
+/// the software model (authoritative) and the syscall result are unchanged.
+/// Mappings created before the backend becomes ready are not retroactively
+/// mirrored.
+///
 /// Returns the number of 4 KiB pages covered. The host physical addresses are
 /// never returned to the caller.
 pub fn iommu_map(
@@ -2514,99 +2750,125 @@ pub fn iommu_map(
     device: u32,
 ) -> Result<u64, IommuError> {
     validate_iommu_range(iova, len, require_2m)?;
-    let mut worlds = WORLDS.lock();
-    let world = worlds.get_mut(&world_id).ok_or(IommuError::UnknownDomain)?;
-    let domain = iommu_domain(world)?;
-    let memory = world.memory.as_ref().ok_or(IommuError::NotMapped)?;
     let pages = len / IOMMU_PAGE_SIZE;
+    // Host mirror segments are collected under the registry lock (the model
+    // quota bounds their number) and installed after it is released, so the
+    // hardware IOMMU layer is never called with the registry lock held.
+    let mirror_capacity =
+        core::cmp::min(pages, crate::s9vm::iommu::MAX_ENTRIES_PER_DOMAIN as u64) as usize;
+    let mut mirror: Vec<HostIommuSegment> = Vec::with_capacity(mirror_capacity);
+    {
+        let mut worlds = WORLDS.lock();
+        let world = worlds.get_mut(&world_id).ok_or(IommuError::UnknownDomain)?;
+        let domain = iommu_domain(world)?;
+        let memory = world.memory.as_ref().ok_or(IommuError::NotMapped)?;
 
-    if require_2m {
-        let leaves = len / IOMMU_LARGE_PAGE_SIZE;
-        let mut done = 0u64;
-        for leaf in 0..leaves {
-            let base = iova + leaf * IOMMU_LARGE_PAGE_SIZE;
-            let hpa = match memory.translate(base) {
-                Some(hpa) => hpa,
-                None => {
+        if require_2m {
+            let leaves = len / IOMMU_LARGE_PAGE_SIZE;
+            let mut done = 0u64;
+            for leaf in 0..leaves {
+                let base = iova + leaf * IOMMU_LARGE_PAGE_SIZE;
+                let hpa = match memory.translate(base) {
+                    Some(hpa) => hpa,
+                    None => {
+                        if done > 0 {
+                            let _ =
+                                world
+                                    .iommu
+                                    .unmap_2m(domain, iova, done * IOMMU_LARGE_PAGE_SIZE);
+                        }
+                        return Err(IommuError::NotMapped);
+                    }
+                };
+                if hpa % IOMMU_LARGE_PAGE_SIZE != 0 {
                     if done > 0 {
                         let _ = world
                             .iommu
                             .unmap_2m(domain, iova, done * IOMMU_LARGE_PAGE_SIZE);
                     }
-                    return Err(IommuError::NotMapped);
+                    return Err(IommuError::InvalidRange);
                 }
-            };
-            if hpa % IOMMU_LARGE_PAGE_SIZE != 0 {
-                if done > 0 {
-                    let _ = world
+                // A 2 MiB leaf needs a physically contiguous block: verify
+                // every 4 KiB page of the block maps to the expected
+                // contiguous HPA.
+                let block_pages = IOMMU_LARGE_PAGE_SIZE / IOMMU_PAGE_SIZE;
+                for sub in 1..block_pages {
+                    let gpa = base + sub * IOMMU_PAGE_SIZE;
+                    if memory.translate(gpa) != Some(hpa + sub * IOMMU_PAGE_SIZE) {
+                        if done > 0 {
+                            let _ =
+                                world
+                                    .iommu
+                                    .unmap_2m(domain, iova, done * IOMMU_LARGE_PAGE_SIZE);
+                        }
+                        return Err(IommuError::NotMapped);
+                    }
+                }
+                if let Err(error) =
+                    world
                         .iommu
-                        .unmap_2m(domain, iova, done * IOMMU_LARGE_PAGE_SIZE);
-                }
-                return Err(IommuError::InvalidRange);
-            }
-            // A 2 MiB leaf needs a physically contiguous block: verify every
-            // 4 KiB page of the block maps to the expected contiguous HPA.
-            let block_pages = IOMMU_LARGE_PAGE_SIZE / IOMMU_PAGE_SIZE;
-            for sub in 1..block_pages {
-                let gpa = base + sub * IOMMU_PAGE_SIZE;
-                if memory.translate(gpa) != Some(hpa + sub * IOMMU_PAGE_SIZE) {
+                        .map_2m(domain, base, hpa, IOMMU_LARGE_PAGE_SIZE, perms)
+                {
                     if done > 0 {
                         let _ = world
                             .iommu
                             .unmap_2m(domain, iova, done * IOMMU_LARGE_PAGE_SIZE);
                     }
-                    return Err(IommuError::NotMapped);
+                    return Err(error);
                 }
+                mirror.push(HostIommuSegment {
+                    iova: base,
+                    phys: hpa,
+                    len: IOMMU_LARGE_PAGE_SIZE,
+                    kind: MappingKind::Page2M,
+                });
+                done += 1;
             }
-            if let Err(error) = world
-                .iommu
-                .map_2m(domain, base, hpa, IOMMU_LARGE_PAGE_SIZE, perms)
-            {
-                if done > 0 {
-                    let _ = world
-                        .iommu
-                        .unmap_2m(domain, iova, done * IOMMU_LARGE_PAGE_SIZE);
-                }
-                return Err(error);
-            }
-            done += 1;
-        }
-    } else {
-        let mut done = 0u64;
-        for page in 0..pages {
-            let gpa = iova + page * IOMMU_PAGE_SIZE;
-            let hpa = match memory.translate(gpa) {
-                Some(hpa) => hpa,
-                None => {
+        } else {
+            let mut done = 0u64;
+            for page in 0..pages {
+                let gpa = iova + page * IOMMU_PAGE_SIZE;
+                let hpa = match memory.translate(gpa) {
+                    Some(hpa) => hpa,
+                    None => {
+                        if done > 0 {
+                            let _ = world.iommu.unmap(domain, iova, done * IOMMU_PAGE_SIZE);
+                        }
+                        return Err(IommuError::NotMapped);
+                    }
+                };
+                if let Err(error) = world.iommu.map(domain, gpa, hpa, IOMMU_PAGE_SIZE, perms) {
                     if done > 0 {
                         let _ = world.iommu.unmap(domain, iova, done * IOMMU_PAGE_SIZE);
                     }
-                    return Err(IommuError::NotMapped);
+                    return Err(error);
                 }
-            };
-            if let Err(error) = world.iommu.map(domain, gpa, hpa, IOMMU_PAGE_SIZE, perms) {
-                if done > 0 {
-                    let _ = world.iommu.unmap(domain, iova, done * IOMMU_PAGE_SIZE);
+                mirror.push(HostIommuSegment {
+                    iova: gpa,
+                    phys: hpa,
+                    len: IOMMU_PAGE_SIZE,
+                    kind: MappingKind::Page4K,
+                });
+                done += 1;
+            }
+        }
+
+        // Bind the device to the world domain. Binding twice to the same
+        // domain is idempotent; any other failure rolls the mapping back.
+        match world.iommu.bind_device(domain, DeviceId(device)) {
+            Ok(()) | Err(IommuError::AlreadyBound) => {}
+            Err(error) => {
+                if require_2m {
+                    let _ = world.iommu.unmap_2m(domain, iova, len);
+                } else {
+                    let _ = world.iommu.unmap(domain, iova, len);
                 }
                 return Err(error);
             }
-            done += 1;
         }
     }
-
-    // Bind the device to the world domain. Binding twice to the same domain
-    // is idempotent; any other failure rolls the mapping back.
-    match world.iommu.bind_device(domain, DeviceId(device)) {
-        Ok(()) | Err(IommuError::AlreadyBound) => {}
-        Err(error) => {
-            if require_2m {
-                let _ = world.iommu.unmap_2m(domain, iova, len);
-            } else {
-                let _ = world.iommu.unmap(domain, iova, len);
-            }
-            return Err(error);
-        }
-    }
+    // Registry lock released: mirror into the host VT-d backend, best effort.
+    mirror_host_map(world_id, device, &mirror, perms);
     Ok(pages)
 }
 
@@ -2615,6 +2877,9 @@ pub fn iommu_map(
 /// The range must have been installed by [`iommu_map`] with the same leaf
 /// size. When the domain becomes empty the device is unbound. Returns the
 /// number of 4 KiB pages removed.
+///
+/// The software model is updated under the registry lock; the host VT-d
+/// mirror is removed afterwards, without the lock, best effort.
 pub fn iommu_unmap(
     world_id: u64,
     iova: u64,
@@ -2623,20 +2888,24 @@ pub fn iommu_unmap(
     device: u32,
 ) -> Result<u64, IommuError> {
     validate_iommu_range(iova, len, require_2m)?;
-    let mut worlds = WORLDS.lock();
-    let world = worlds.get_mut(&world_id).ok_or(IommuError::UnknownDomain)?;
-    if world.closing {
-        return Err(IommuError::UnknownDomain);
-    }
-    let domain = world.iommu_domain.ok_or(IommuError::NotMapped)?;
-    let pages = if require_2m {
-        world.iommu.unmap_2m(domain, iova, len)?
-    } else {
-        world.iommu.unmap(domain, iova, len)?
+    let pages = {
+        let mut worlds = WORLDS.lock();
+        let world = worlds.get_mut(&world_id).ok_or(IommuError::UnknownDomain)?;
+        if world.closing {
+            return Err(IommuError::UnknownDomain);
+        }
+        let domain = world.iommu_domain.ok_or(IommuError::NotMapped)?;
+        let pages = if require_2m {
+            world.iommu.unmap_2m(domain, iova, len)?
+        } else {
+            world.iommu.unmap(domain, iova, len)?
+        };
+        if world.iommu.mapped_entries(domain) == Some(0) {
+            let _ = world.iommu.unbind_device(DeviceId(device));
+        }
+        pages
     };
-    if world.iommu.mapped_entries(domain) == Some(0) {
-        let _ = world.iommu.unbind_device(DeviceId(device));
-    }
+    mirror_host_unmap(world_id, device, iova, len);
     Ok(pages)
 }
 
