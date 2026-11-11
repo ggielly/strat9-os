@@ -41,7 +41,7 @@
 
 use core::ptr::{addr_of, addr_of_mut, read_volatile};
 
-use crate::virtio::{self, Bus, AVAIL_F_NO_INTERRUPT};
+use crate::virtio::{self, Bus, Transport, AVAIL_F_NO_INTERRUPT};
 
 /// Device id of a console.
 pub const DEVICE_ID: u32 = 3;
@@ -86,44 +86,54 @@ struct UsedRing([u8; 4 + 8 * QUEUE_SIZE as usize]);
 static mut DESCRIPTORS: DescriptorTable = DescriptorTable([0; 16 * QUEUE_SIZE as usize]);
 static mut AVAILABLE: AvailRing = AvailRing([0; 4 + 2 * QUEUE_SIZE as usize]);
 static mut USED: UsedRing = UsedRing([0; 4 + 8 * QUEUE_SIZE as usize]);
-static mut MESSAGE: [u8; MAX_MESSAGE] = [0; MAX_MESSAGE];
+static mut MESSAGE: virtio::Aligned<MAX_MESSAGE> = virtio::Aligned([0; MAX_MESSAGE]);
 
 /// An initialized virtio-console transmit path.
-pub struct Console {
-    bus: Bus,
+pub struct Console<T: Transport> {
+    bus: T,
     /// Number of messages already consumed by the device.
     sent: u16,
 }
 
-impl Console {
-    /// Initializes the console transport, its status machine, feature
-    /// negotiation and the transmit queue.
-    ///
-    /// Returns the [`failure`] code of the step that failed when the device is
-    /// absent, is not a console, rejects `VIRTIO_F_VERSION_1` or cannot program
-    /// the queue.
+impl Console<Bus> {
+    /// Initializes the console transport of the device page at `base`.
     ///
     /// # Safety
     ///
     /// `base` must be the guest-physical address of the console transport page,
     /// mapped readable and writable by the active guest page tables.
     pub unsafe fn init(base: u64) -> Result<Self, u8> {
-        let bus = Bus::at(base);
-        // SAFETY: caller contract.
+        Self::init_with(Bus::at(base))
+    }
+}
+
+impl<T: Transport> Console<T> {
+    /// Initializes the console transport, its status machine, feature
+    /// negotiation and the transmit queue on an already constructed transport.
+    ///
+    /// Returns the [`failure`] code of the step that failed when the device is
+    /// absent, is not a console, rejects `VIRTIO_F_VERSION_1` or cannot program
+    /// the queue.
+    pub fn init_with(bus: T) -> Result<Self, u8> {
+        if !virtio::probe(&bus, DEVICE_ID) {
+            return Err(failure::DEVICE_ID);
+        }
+        virtio::begin(&bus);
+        if !virtio::negotiate_version_1(&bus) {
+            return Err(failure::FEATURES);
+        }
+        let desc_gpa = addr_of!(DESCRIPTORS) as u64;
+        let avail_gpa = addr_of!(AVAILABLE) as u64;
+        let used_gpa = addr_of!(USED) as u64;
+        // SAFETY: the tables are page-aligned `.bss` buffers the device model
+        // can address (identity mapped in the guest).
+        if !unsafe { virtio::setup_queue(&bus, QUEUE_TX, QUEUE_SIZE, desc_gpa, avail_gpa, used_gpa) }
+        {
+            return Err(failure::QUEUE);
+        }
+        // SAFETY: the three tables are `.bss` objects of exactly the sizes
+        // written here.
         unsafe {
-            if !virtio::probe(bus, DEVICE_ID) {
-                return Err(failure::DEVICE_ID);
-            }
-            virtio::begin(bus);
-            if !virtio::negotiate_version_1(bus) {
-                return Err(failure::FEATURES);
-            }
-            let desc_gpa = addr_of!(DESCRIPTORS) as u64;
-            let avail_gpa = addr_of!(AVAILABLE) as u64;
-            let used_gpa = addr_of!(USED) as u64;
-            if !virtio::setup_queue(bus, QUEUE_TX, QUEUE_SIZE, desc_gpa, avail_gpa, used_gpa) {
-                return Err(failure::QUEUE);
-            }
             core::ptr::write_bytes(
                 addr_of_mut!(DESCRIPTORS).cast::<u8>(),
                 0,
@@ -139,9 +149,9 @@ impl Console {
                 0,
                 4 + 8 * QUEUE_SIZE as usize,
             );
-            if !virtio::driver_ok(bus) {
-                return Err(failure::DRIVER_OK);
-            }
+        }
+        if !virtio::driver_ok(&bus) {
+            return Err(failure::DRIVER_OK);
         }
         Ok(Self { bus, sent: 0 })
     }
@@ -151,12 +161,7 @@ impl Console {
     /// Returns the [`failure`] code of the step that failed (oversized or empty
     /// message, device status failed, used ring unchanged within the poll
     /// budget).
-    ///
-    /// # Safety
-    ///
-    /// The console transport page and the queue buffers must stay mapped for
-    /// the device model to read them.
-    pub unsafe fn send(&mut self, bytes: &[u8]) -> Result<(), u8> {
+    pub fn send(&mut self, bytes: &[u8]) -> Result<(), u8> {
         if bytes.is_empty() || bytes.len() > MAX_MESSAGE {
             return Err(failure::MESSAGE_SIZE);
         }
@@ -184,10 +189,12 @@ impl Console {
             virtio::write_u16(avail, 0, AVAIL_F_NO_INTERRUPT);
             virtio::write_u16(avail, 4 + slot as usize * 2, descriptor);
             virtio::write_u16(avail, 2, self.sent.wrapping_add(1));
+        }
+        virtio::notify(&self.bus, QUEUE_TX);
 
-            virtio::notify(self.bus, QUEUE_TX);
-
-            let want = self.sent.wrapping_add(1);
+        let want = self.sent.wrapping_add(1);
+        // SAFETY: `USED` is a `.bss` buffer of the size read here.
+        unsafe {
             let used = addr_of!(USED).cast::<u8>();
             let mut polls = 0u32;
             while polls < USED_POLLS {
@@ -202,3 +209,4 @@ impl Console {
         Err(failure::COMPLETION)
     }
 }
+

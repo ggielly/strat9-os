@@ -42,7 +42,7 @@
 
 use core::ptr::{addr_of, addr_of_mut, read_volatile};
 
-use crate::virtio::{self, Bus, AVAIL_F_NO_INTERRUPT, DESC_F_NEXT, DESC_F_WRITE};
+use crate::virtio::{self, Bus, Transport, AVAIL_F_NO_INTERRUPT, DESC_F_NEXT, DESC_F_WRITE};
 
 /// Device id of a block device.
 pub const DEVICE_ID: u32 = 2;
@@ -100,11 +100,11 @@ static mut DESCRIPTORS: DescriptorTable = DescriptorTable([0; 16 * QUEUE_SIZE as
 static mut AVAILABLE: AvailRing = AvailRing([0; 4 + 2 * QUEUE_SIZE as usize]);
 static mut USED: UsedRing = UsedRing([0; 4 + 8 * QUEUE_SIZE as usize]);
 /// Request header: `type: u32`, `reserved: u32`, `sector: u64`.
-static mut HEADER: [u8; 16] = [0; 16];
+static mut HEADER: virtio::Aligned<16> = virtio::Aligned([0; 16]);
 /// Data buffer of the read request.
-static mut DATA: [u8; SECTOR_SIZE] = [0; SECTOR_SIZE];
+static mut DATA: virtio::Aligned<SECTOR_SIZE> = virtio::Aligned([0; SECTOR_SIZE]);
 /// Request status byte written back by the device.
-static mut REQUEST_STATUS: [u8; 1] = [0; 1];
+static mut REQUEST_STATUS: virtio::Aligned<1> = virtio::Aligned([0; 1]);
 
 /// Reads sector 0 and validates the `S9VMDISK` label.
 ///
@@ -117,32 +117,32 @@ static mut REQUEST_STATUS: [u8; 1] = [0; 1];
 /// `base` must be the guest-physical address of the block transport page,
 /// mapped readable and writable by the active guest page tables.
 pub unsafe fn read_disk_label(base: u64) -> Result<(), u8> {
-    let bus = Bus::at(base);
+    read_disk_label_with(Bus::at(base))
+}
 
+/// Same as [`read_disk_label`], on an already constructed transport (the form
+/// the host contract tests drive against the kernel block-device model).
+pub fn read_disk_label_with<T: Transport>(bus: T) -> Result<(), u8> {
     // 1. Transport and device identity.
-    // SAFETY: caller contract.
-    if !unsafe { virtio::probe(bus, DEVICE_ID) } {
+    if !virtio::probe(&bus, DEVICE_ID) {
         return Err(failure::DEVICE_ID);
     }
 
     // 2. Status machine and feature negotiation.
-    // SAFETY: caller contract.
-    unsafe {
-        virtio::begin(bus);
-        if !virtio::negotiate_version_1(bus) {
-            return Err(failure::FEATURES);
-        }
+    virtio::begin(&bus);
+    if !virtio::negotiate_version_1(&bus) {
+        return Err(failure::FEATURES);
     }
 
     // 3. Request queue tables.
     let desc_gpa = addr_of!(DESCRIPTORS) as u64;
     let avail_gpa = addr_of!(AVAILABLE) as u64;
     let used_gpa = addr_of!(USED) as u64;
-    // SAFETY: caller contract; the tables are page-aligned `.bss` buffers with
-    // the alignment the transport requires.
+    // SAFETY: the tables are page-aligned `.bss` buffers with the alignment
+    // the transport requires.
     if !unsafe {
         virtio::setup_queue(
-            bus,
+            &bus,
             QUEUE_REQUEST,
             QUEUE_SIZE,
             desc_gpa,
@@ -209,12 +209,13 @@ pub unsafe fn read_disk_label(base: u64) -> Result<(), u8> {
     }
 
     // 5. DRIVER_OK, notify queue 0, poll the used ring.
-    // SAFETY: caller contract.
+    if !virtio::driver_ok(&bus) {
+        return Err(failure::DRIVER_OK);
+    }
+    virtio::notify(&bus, QUEUE_REQUEST);
+    // SAFETY: `USED`, `REQUEST_STATUS` and `DATA` are `.bss` objects of the
+    // sizes read here.
     unsafe {
-        if !virtio::driver_ok(bus) {
-            return Err(failure::DRIVER_OK);
-        }
-        virtio::notify(bus, QUEUE_REQUEST);
         let used = addr_of!(USED).cast::<u8>();
         let mut polls = 0u32;
         while polls < USED_POLLS {
@@ -242,3 +243,4 @@ pub unsafe fn read_disk_label(base: u64) -> Result<(), u8> {
     }
     Ok(())
 }
+

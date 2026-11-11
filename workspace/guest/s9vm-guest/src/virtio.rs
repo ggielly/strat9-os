@@ -85,6 +85,32 @@ pub struct Bus {
     base: u64,
 }
 
+/// A virtio-mmio register file.
+///
+/// The production implementation is [`Bus`], whose accesses are plain `mov`
+/// instructions replayed by the engine. The trait exists so the host tests can
+/// run the very same driver logic against the kernel device models with no
+/// hardware: each driver is generic over the transport.
+pub trait Transport {
+    /// Reads a 32-bit transport register.
+    fn read(&self, offset: u64) -> u32;
+    /// Writes a 32-bit transport register.
+    fn write(&self, offset: u64, value: u32);
+}
+
+impl Transport for Bus {
+    fn read(&self, offset: u64) -> u32 {
+        // SAFETY: constructing a `Bus` is unsafe and promises the page is
+        // mapped; every offset used by the drivers is inside the 4 KiB page.
+        unsafe { Bus::read(*self, offset) }
+    }
+
+    fn write(&self, offset: u64, value: u32) {
+        // SAFETY: same contract as `read`.
+        unsafe { Bus::write(*self, offset, value) }
+    }
+}
+
 impl Bus {
     /// Creates a transport handle for the page at `base`.
     pub const fn at(base: u64) -> Self {
@@ -135,31 +161,17 @@ impl Bus {
 }
 
 /// Probes the transport magic/version and the expected device id.
-///
-/// # Safety
-///
-/// The transport page must be mapped.
-pub unsafe fn probe(bus: Bus, device_id: u32) -> bool {
-    // SAFETY: caller contract.
-    unsafe {
-        bus.read(REG_MAGIC) == MAGIC_VALUE
-            && bus.read(REG_VERSION) == VERSION_VALUE
-            && bus.read(REG_DEVICE_ID) == device_id
-    }
+pub fn probe<T: Transport>(bus: &T, device_id: u32) -> bool {
+    bus.read(REG_MAGIC) == MAGIC_VALUE
+        && bus.read(REG_VERSION) == VERSION_VALUE
+        && bus.read(REG_DEVICE_ID) == device_id
 }
 
 /// Starts the device-status machine: `ACKNOWLEDGE`, then `DRIVER`.
-///
-/// # Safety
-///
-/// The transport page must be mapped writable.
-pub unsafe fn begin(bus: Bus) {
-    // SAFETY: caller contract.
-    unsafe {
-        bus.write(REG_STATUS, 0);
-        bus.write(REG_STATUS, STATUS_ACKNOWLEDGE);
-        bus.write(REG_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER);
-    }
+pub fn begin<T: Transport>(bus: &T) {
+    bus.write(REG_STATUS, 0);
+    bus.write(REG_STATUS, STATUS_ACKNOWLEDGE);
+    bus.write(REG_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER);
 }
 
 /// Negotiates the modern interface plus the requested low-word feature bits.
@@ -168,45 +180,33 @@ pub unsafe fn begin(bus: Bus) {
 /// pass the optional features it understands without probing the device
 /// itself. Returns `false` when the device does not offer
 /// [`FEATURE_HI_VERSION_1`] or rejects `FEATURES_OK`.
-///
-/// # Safety
-///
-/// The transport page must be mapped writable.
-pub unsafe fn negotiate(bus: Bus, low_features: u32) -> bool {
-    // SAFETY: caller contract.
-    unsafe {
-        bus.write(REG_DEVICE_FEATURES_SEL, 0);
-        let offered_low = bus.read(REG_DEVICE_FEATURES);
-        bus.write(REG_DEVICE_FEATURES_SEL, 1);
-        let offered_high = bus.read(REG_DEVICE_FEATURES);
-        if offered_high & FEATURE_HI_VERSION_1 == 0 {
-            return false;
-        }
-        bus.write(REG_DRIVER_FEATURES_SEL, 0);
-        bus.write(REG_DRIVER_FEATURES, low_features & offered_low);
-        bus.write(REG_DRIVER_FEATURES_SEL, 1);
-        bus.write(REG_DRIVER_FEATURES, FEATURE_HI_VERSION_1);
-        bus.write(REG_DRIVER_FEATURES_SEL, 0);
-        bus.write(REG_DEVICE_FEATURES_SEL, 0);
-        bus.write(
-            REG_STATUS,
-            STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK,
-        );
-        bus.read(REG_STATUS) & STATUS_FEATURES_OK != 0
+pub fn negotiate<T: Transport>(bus: &T, low_features: u32) -> bool {
+    bus.write(REG_DEVICE_FEATURES_SEL, 0);
+    let offered_low = bus.read(REG_DEVICE_FEATURES);
+    bus.write(REG_DEVICE_FEATURES_SEL, 1);
+    let offered_high = bus.read(REG_DEVICE_FEATURES);
+    if offered_high & FEATURE_HI_VERSION_1 == 0 {
+        return false;
     }
+    bus.write(REG_DRIVER_FEATURES_SEL, 0);
+    bus.write(REG_DRIVER_FEATURES, low_features & offered_low);
+    bus.write(REG_DRIVER_FEATURES_SEL, 1);
+    bus.write(REG_DRIVER_FEATURES, FEATURE_HI_VERSION_1);
+    bus.write(REG_DRIVER_FEATURES_SEL, 0);
+    bus.write(REG_DEVICE_FEATURES_SEL, 0);
+    bus.write(
+        REG_STATUS,
+        STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK,
+    );
+    bus.read(REG_STATUS) & STATUS_FEATURES_OK != 0
 }
 
 /// Negotiates `VIRTIO_F_VERSION_1` and validates `FEATURES_OK`.
 ///
 /// Returns `false` when the device does not offer the modern interface or
 /// rejects the feature request.
-///
-/// # Safety
-///
-/// The transport page must be mapped writable.
-pub unsafe fn negotiate_version_1(bus: Bus) -> bool {
-    // SAFETY: caller contract.
-    unsafe { negotiate(bus, 0) }
+pub fn negotiate_version_1<T: Transport>(bus: &T) -> bool {
+    negotiate(bus, 0)
 }
 
 /// Programs one split queue (`index`, `size` entries) and marks it ready.
@@ -217,67 +217,61 @@ pub unsafe fn negotiate_version_1(bus: Bus) -> bool {
 ///
 /// # Safety
 ///
-/// The transport page must be mapped writable and the queue tables must be
-/// mapped for the device model to read and write them.
-pub unsafe fn setup_queue(
-    bus: Bus,
+/// The queue tables must be mapped for the device model to read and write
+/// them.
+pub unsafe fn setup_queue<T: Transport>(
+    bus: &T,
     index: u32,
     size: u16,
     desc: u64,
     avail: u64,
     used: u64,
 ) -> bool {
-    // SAFETY: caller contract.
-    unsafe {
-        bus.write(REG_QUEUE_SEL, index);
-        if bus.read(REG_QUEUE_NUM_MAX) < u32::from(size) {
-            return false;
-        }
-        bus.write(REG_QUEUE_NUM, u32::from(size));
-        bus.write(REG_QUEUE_DESC_LOW, desc as u32);
-        bus.write(REG_QUEUE_DESC_HIGH, (desc >> 32) as u32);
-        bus.write(REG_QUEUE_AVAIL_LOW, avail as u32);
-        bus.write(REG_QUEUE_AVAIL_HIGH, (avail >> 32) as u32);
-        bus.write(REG_QUEUE_USED_LOW, used as u32);
-        bus.write(REG_QUEUE_USED_HIGH, (used >> 32) as u32);
-        bus.write(REG_QUEUE_READY, 1);
-        true
+    bus.write(REG_QUEUE_SEL, index);
+    if bus.read(REG_QUEUE_NUM_MAX) < u32::from(size) {
+        return false;
     }
+    bus.write(REG_QUEUE_NUM, u32::from(size));
+    bus.write(REG_QUEUE_DESC_LOW, desc as u32);
+    bus.write(REG_QUEUE_DESC_HIGH, (desc >> 32) as u32);
+    bus.write(REG_QUEUE_AVAIL_LOW, avail as u32);
+    bus.write(REG_QUEUE_AVAIL_HIGH, (avail >> 32) as u32);
+    bus.write(REG_QUEUE_USED_LOW, used as u32);
+    bus.write(REG_QUEUE_USED_HIGH, (used >> 32) as u32);
+    bus.write(REG_QUEUE_READY, 1);
+    true
 }
 
 /// Sets `DRIVER_OK` and checks that the device did not fail.
-///
-/// # Safety
-///
-/// The transport page must be mapped writable.
-pub unsafe fn driver_ok(bus: Bus) -> bool {
-    // SAFETY: caller contract.
-    unsafe {
-        bus.write(
-            REG_STATUS,
-            STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK,
-        );
-        bus.read(REG_STATUS) & STATUS_FAILED == 0
-    }
+pub fn driver_ok<T: Transport>(bus: &T) -> bool {
+    bus.write(
+        REG_STATUS,
+        STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK,
+    );
+    bus.read(REG_STATUS) & STATUS_FAILED == 0
 }
 
 /// Notifies the device that a queue has new entries.
-///
-/// # Safety
-///
-/// The transport page must be mapped writable.
-pub unsafe fn notify(bus: Bus, index: u32) {
-    // SAFETY: caller contract.
-    unsafe {
-        bus.write(REG_QUEUE_NOTIFY, index);
-    }
+pub fn notify<T: Transport>(bus: &T, index: u32) {
+    bus.write(REG_QUEUE_NOTIFY, index);
 }
+
+/// A byte buffer with an explicit alignment.
+///
+/// The queue tables and the request buffers are addressed both as structures
+/// (`u16`/`u32`/`u64` fields written through [`write_u16`] and friends) and as
+/// raw bytes. A plain `[u8; N]` only has alignment 1, so the linker is free to
+/// place it anywhere and the typed writes would be unaligned; every such
+/// buffer is declared as `Aligned<N>` instead.
+#[repr(C, align(16))]
+pub struct Aligned<const N: usize>(pub [u8; N]);
 
 /// Writes a little-endian `u64` at `offset` inside `base`.
 ///
 /// # Safety
 ///
-/// `base + offset .. base + offset + 8` must be mapped writable.
+/// `base + offset .. base + offset + 8` must be mapped writable and 8-byte
+/// aligned.
 pub unsafe fn write_u64(base: *mut u8, offset: usize, value: u64) {
     // SAFETY: caller contract.
     unsafe { write_volatile(base.add(offset).cast::<u64>(), value) };
@@ -287,7 +281,8 @@ pub unsafe fn write_u64(base: *mut u8, offset: usize, value: u64) {
 ///
 /// # Safety
 ///
-/// `base + offset .. base + offset + 4` must be mapped writable.
+/// `base + offset .. base + offset + 4` must be mapped writable and 4-byte
+/// aligned.
 pub unsafe fn write_u32(base: *mut u8, offset: usize, value: u32) {
     // SAFETY: caller contract.
     unsafe { write_volatile(base.add(offset).cast::<u32>(), value) };
@@ -297,8 +292,10 @@ pub unsafe fn write_u32(base: *mut u8, offset: usize, value: u32) {
 ///
 /// # Safety
 ///
-/// `base + offset .. base + offset + 2` must be mapped writable.
+/// `base + offset .. base + offset + 2` must be mapped writable and 2-byte
+/// aligned.
 pub unsafe fn write_u16(base: *mut u8, offset: usize, value: u16) {
     // SAFETY: caller contract.
     unsafe { write_volatile(base.add(offset).cast::<u16>(), value) };
 }
+

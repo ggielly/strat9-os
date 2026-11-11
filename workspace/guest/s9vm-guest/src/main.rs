@@ -778,12 +778,10 @@ pub unsafe extern "C" fn guest_main(boot_params_gpa: u64) -> ! {
         // identity before touching any queue.
         match unsafe { virtio_console::Console::init(console_base) } {
             Ok(mut console) => {
-                match unsafe { console.send(&message[..message_len]) } {
+                match console.send(&message[..message_len]) {
                     Ok(()) => {
                         if acpi_message_len > 0 {
-                            if let Err(code) =
-                                unsafe { console.send(&acpi_message[..acpi_message_len]) }
-                            {
+                            if let Err(code) = console.send(&acpi_message[..acpi_message_len]) {
                                 console_error = Some(code);
                             }
                         }

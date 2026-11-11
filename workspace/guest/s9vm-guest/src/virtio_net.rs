@@ -44,7 +44,7 @@
 
 use core::ptr::{addr_of, addr_of_mut, read_volatile};
 
-use crate::virtio::{self, Bus, AVAIL_F_NO_INTERRUPT};
+use crate::virtio::{self, Bus, Transport, AVAIL_F_NO_INTERRUPT};
 
 /// Device id of a network device.
 pub const DEVICE_ID: u32 = 1;
@@ -107,7 +107,7 @@ static mut DESCRIPTORS: DescriptorTable = DescriptorTable([0; 16 * QUEUE_SIZE as
 static mut AVAILABLE: AvailRing = AvailRing([0; 4 + 2 * QUEUE_SIZE as usize]);
 static mut USED: UsedRing = UsedRing([0; 4 + 8 * QUEUE_SIZE as usize]);
 /// One packet: zeroed network header then the Ethernet frame.
-static mut PACKET: [u8; PACKET_SIZE] = [0; PACKET_SIZE];
+static mut PACKET: virtio::Aligned<PACKET_SIZE> = virtio::Aligned([0; PACKET_SIZE]);
 
 /// Transmits one Ethernet frame through the virtio-net transmit queue.
 ///
@@ -120,11 +120,14 @@ static mut PACKET: [u8; PACKET_SIZE] = [0; PACKET_SIZE];
 /// `base` must be the guest-physical address of the network transport page,
 /// mapped readable and writable by the active guest page tables.
 pub unsafe fn transmit(base: u64) -> Result<(), u8> {
-    let bus = Bus::at(base);
+    transmit_with(Bus::at(base))
+}
 
+/// Same as [`transmit`], on an already constructed transport (the form the
+/// host contract tests drive against the kernel network-device model).
+pub fn transmit_with<T: Transport>(bus: T) -> Result<(), u8> {
     // 1. Transport and device identity.
-    // SAFETY: caller contract.
-    if !unsafe { virtio::probe(bus, DEVICE_ID) } {
+    if !virtio::probe(&bus, DEVICE_ID) {
         return Err(failure::DEVICE_ID);
     }
 
@@ -132,20 +135,18 @@ pub unsafe fn transmit(base: u64) -> Result<(), u8> {
     //    when offered it is negotiated and the configuration space supplies the
     //    destination address, otherwise the driver falls back to the address
     //    the engine model advertises.
-    // SAFETY: caller contract.
-    unsafe {
-        virtio::begin(bus);
-        if !virtio::negotiate(bus, FEATURE_MAC) {
-            return Err(failure::FEATURES);
-        }
+    virtio::begin(&bus);
+    if !virtio::negotiate(&bus, FEATURE_MAC) {
+        return Err(failure::FEATURES);
     }
 
     // 3. Transmit queue tables.
     let desc_gpa = addr_of!(DESCRIPTORS) as u64;
     let avail_gpa = addr_of!(AVAILABLE) as u64;
     let used_gpa = addr_of!(USED) as u64;
-    // SAFETY: caller contract; the tables are page-aligned `.bss` buffers.
-    if !unsafe { virtio::setup_queue(bus, QUEUE_TX, QUEUE_SIZE, desc_gpa, avail_gpa, used_gpa) } {
+    // SAFETY: the tables are page-aligned `.bss` buffers the device model can
+    // address (identity mapped in the guest).
+    if !unsafe { virtio::setup_queue(&bus, QUEUE_TX, QUEUE_SIZE, desc_gpa, avail_gpa, used_gpa) } {
         return Err(failure::QUEUE);
     }
 
@@ -169,21 +170,25 @@ pub unsafe fn transmit(base: u64) -> Result<(), u8> {
             0,
             4 + 8 * QUEUE_SIZE as usize,
         );
+    }
 
-        // Device MAC from the configuration space (feature negotiated above).
-        let low = bus.read(REG_CONFIG);
-        let high = bus.read(REG_CONFIG + 4);
-        let mut destination = FALLBACK_MAC;
-        if low != 0 || high != 0 {
-            destination[0] = low as u8;
-            destination[1] = (low >> 8) as u8;
-            destination[2] = (low >> 16) as u8;
-            destination[3] = (low >> 24) as u8;
-            destination[4] = high as u8;
-            destination[5] = (high >> 8) as u8;
-        }
-        build_frame(&destination);
+    // Device MAC from the configuration space (feature negotiated above).
+    let low = bus.read(REG_CONFIG);
+    let high = bus.read(REG_CONFIG + 4);
+    let mut destination = FALLBACK_MAC;
+    if low != 0 || high != 0 {
+        destination[0] = low as u8;
+        destination[1] = (low >> 8) as u8;
+        destination[2] = (low >> 16) as u8;
+        destination[3] = (low >> 24) as u8;
+        destination[4] = high as u8;
+        destination[5] = (high >> 8) as u8;
+    }
+    build_frame_safe(&destination);
 
+    // SAFETY: the descriptor table and the available ring are `.bss` objects
+    // of the sizes written here.
+    unsafe {
         // Descriptor 0: whole packet, device-readable and unchained.
         let desc = addr_of_mut!(DESCRIPTORS).cast::<u8>();
         virtio::write_u64(desc, 0, addr_of!(PACKET) as u64);
@@ -199,12 +204,12 @@ pub unsafe fn transmit(base: u64) -> Result<(), u8> {
     }
 
     // 5. DRIVER_OK, notify queue 1, poll the used ring.
-    // SAFETY: caller contract.
+    if !virtio::driver_ok(&bus) {
+        return Err(failure::DRIVER_OK);
+    }
+    virtio::notify(&bus, QUEUE_TX);
+    // SAFETY: `USED` is a `.bss` object of the size read here.
     unsafe {
-        if !virtio::driver_ok(bus) {
-            return Err(failure::DRIVER_OK);
-        }
-        virtio::notify(bus, QUEUE_TX);
         let used = addr_of!(USED).cast::<u8>();
         let mut polls = 0u32;
         while polls < USED_POLLS {
@@ -229,12 +234,8 @@ pub unsafe fn transmit(base: u64) -> Result<(), u8> {
 
 /// Fills [`PACKET`] with a zeroed network header followed by a minimal
 /// Ethernet frame addressed to `destination`.
-///
-/// # Safety
-///
-/// `PACKET` is a `.bss` buffer of exactly [`PACKET_SIZE`] bytes.
-unsafe fn build_frame(destination: &[u8; 6]) {
-    // SAFETY: the write ranges below are inside `PACKET`.
+fn build_frame_safe(destination: &[u8; 6]) {
+    // SAFETY: the write ranges below are inside the `.bss` buffer `PACKET`.
     unsafe {
         let packet = addr_of_mut!(PACKET).cast::<u8>();
         core::ptr::write_bytes(packet, 0, PACKET_SIZE);
@@ -260,3 +261,4 @@ unsafe fn build_frame(destination: &[u8; 6]) {
         }
     }
 }
+
