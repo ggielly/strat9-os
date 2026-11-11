@@ -23,16 +23,16 @@
 //! Virtio-console transmit driver (virtio-mmio v2, one split queue).
 //!
 //! The engine models a virtio-console device at the transport base published
-//! in the `S9VMBP` boot-parameter block (`console_mmio_base`). This driver
-//! performs the smallest complete handshake a kernel needs for real text
-//! output:
+//! in the `S9VMBP` boot-parameter block (`console_mmio_base`). A [`Console`]
+//! performs the handshake once, then sends any number of messages through the
+//! same transmit queue:
 //!
 //! 1. probe the transport and `device_id = 3` (console) through [`virtio`];
 //! 2. run the status machine and negotiate `VIRTIO_F_VERSION_1`;
 //! 3. program the transmit queue (`queue 1`) in `.bss` buffers (identity
 //!    mapped, so their virtual addresses are their guest-physical addresses);
-//! 4. publish one device-readable descriptor pointing at the message, request
-//!    no interrupt, notify the queue and poll the used ring until the device
+//! 4. publish one device-readable descriptor per message, request no
+//!    interrupt, notify the queue and poll the used ring until the device
 //!    reports the buffer as consumed.
 //!
 //! Interrupts stay disabled: the available ring sets
@@ -49,7 +49,7 @@ pub const DEVICE_ID: u32 = 3;
 const QUEUE_TX: u32 = 1;
 /// Queue size used by this driver (power of two, at most `QUEUE_NUM_MAX`).
 const QUEUE_SIZE: u16 = 8;
-/// Number of bytes the transmit buffer can hold.
+/// Number of bytes one message can carry.
 pub const MAX_MESSAGE: usize = 128;
 /// Bounded number of used-ring polls after a notify.
 const USED_POLLS: u32 = 64;
@@ -70,101 +70,115 @@ static mut AVAILABLE: AvailRing = AvailRing([0; 4 + 2 * QUEUE_SIZE as usize]);
 static mut USED: UsedRing = UsedRing([0; 4 + 8 * QUEUE_SIZE as usize]);
 static mut MESSAGE: [u8; MAX_MESSAGE] = [0; MAX_MESSAGE];
 
-/// Transmits `bytes` through the virtio-console transmit queue.
-///
-/// Returns `true` only when the device acknowledged the handshake and the used
-/// ring reports the buffer as consumed. A device that is absent, not a console,
-/// rejects `VIRTIO_F_VERSION_1` or never consumes the buffer yields `false`
-/// (the caller publishes a non-fatal marker).
-///
-/// # Safety
-///
-/// `base` must be the guest-physical address of the console transport page,
-/// mapped readable and writable by the active guest page tables.
-pub unsafe fn transmit(base: u64, bytes: &[u8]) -> bool {
-    if bytes.is_empty() || bytes.len() > MAX_MESSAGE {
-        return false;
-    }
-    let bus = Bus::at(base);
+/// An initialized virtio-console transmit path.
+pub struct Console {
+    bus: Bus,
+    /// Number of messages already consumed by the device.
+    sent: u16,
+}
 
-    // 1. Transport and device identity.
-    // SAFETY: caller contract.
-    if !unsafe { virtio::probe(bus, DEVICE_ID) } {
-        return false;
-    }
-
-    // 2. Status machine and feature negotiation.
-    // SAFETY: caller contract.
-    unsafe {
-        virtio::begin(bus);
-        if !virtio::negotiate_version_1(bus) {
-            return false;
-        }
-    }
-
-    // 3. Transmit queue: descriptor table, available ring and used ring.
-    let desc_gpa = addr_of!(DESCRIPTORS) as u64;
-    let avail_gpa = addr_of!(AVAILABLE) as u64;
-    let used_gpa = addr_of!(USED) as u64;
-    // SAFETY: caller contract; the tables are page-aligned `.bss` buffers with
-    // the alignment the transport requires.
-    if !unsafe { virtio::setup_queue(bus, QUEUE_TX, QUEUE_SIZE, desc_gpa, avail_gpa, used_gpa) } {
-        return false;
-    }
-
-    // 4. One device-readable descriptor carrying the message.
-    // SAFETY: the tables are `.bss` buffers of exactly the sizes zeroed here,
-    // `MESSAGE` is large enough (checked above) and the descriptor fields are
-    // the split-virtqueue layout.
-    unsafe {
-        core::ptr::write_bytes(
-            addr_of_mut!(DESCRIPTORS).cast::<u8>(),
-            0,
-            16 * QUEUE_SIZE as usize,
-        );
-        core::ptr::write_bytes(
-            addr_of_mut!(AVAILABLE).cast::<u8>(),
-            0,
-            4 + 2 * QUEUE_SIZE as usize,
-        );
-        core::ptr::write_bytes(
-            addr_of_mut!(USED).cast::<u8>(),
-            0,
-            4 + 8 * QUEUE_SIZE as usize,
-        );
-        core::ptr::copy_nonoverlapping(
-            bytes.as_ptr(),
-            addr_of_mut!(MESSAGE).cast::<u8>(),
-            bytes.len(),
-        );
-        let message_gpa = addr_of!(MESSAGE) as u64;
-        let desc = addr_of_mut!(DESCRIPTORS).cast::<u8>();
-        virtio::write_u64(desc, 0, message_gpa);
-        virtio::write_u32(desc, 8, bytes.len() as u32);
-        virtio::write_u16(desc, 12, 0); // device-readable, no chain
-        virtio::write_u16(desc, 14, 0);
-        let avail = addr_of_mut!(AVAILABLE).cast::<u8>();
-        virtio::write_u16(avail, 0, AVAIL_F_NO_INTERRUPT);
-        virtio::write_u16(avail, 2, 1);
-        virtio::write_u16(avail, 4, 0);
-    }
-
-    // 5. DRIVER_OK, notify queue 1, poll the used ring.
-    // SAFETY: caller contract.
-    unsafe {
-        if !virtio::driver_ok(bus) {
-            return false;
-        }
-        virtio::notify(bus, QUEUE_TX);
-        let used = addr_of!(USED).cast::<u8>();
-        let mut polls = 0u32;
-        while polls < USED_POLLS {
-            if read_volatile(used.add(2).cast::<u16>()) != 0 {
-                return true;
+impl Console {
+    /// Initializes the console transport, its status machine, feature
+    /// negotiation and the transmit queue.
+    ///
+    /// Returns `None` when the device is absent, is not a console, rejects
+    /// `VIRTIO_F_VERSION_1` or cannot program the queue.
+    ///
+    /// # Safety
+    ///
+    /// `base` must be the guest-physical address of the console transport page,
+    /// mapped readable and writable by the active guest page tables.
+    pub unsafe fn init(base: u64) -> Option<Self> {
+        let bus = Bus::at(base);
+        // SAFETY: caller contract.
+        unsafe {
+            if !virtio::probe(bus, DEVICE_ID) {
+                return None;
             }
-            core::hint::spin_loop();
-            polls += 1;
+            virtio::begin(bus);
+            if !virtio::negotiate_version_1(bus) {
+                return None;
+            }
+            let desc_gpa = addr_of!(DESCRIPTORS) as u64;
+            let avail_gpa = addr_of!(AVAILABLE) as u64;
+            let used_gpa = addr_of!(USED) as u64;
+            if !virtio::setup_queue(bus, QUEUE_TX, QUEUE_SIZE, desc_gpa, avail_gpa, used_gpa) {
+                return None;
+            }
+            core::ptr::write_bytes(
+                addr_of_mut!(DESCRIPTORS).cast::<u8>(),
+                0,
+                16 * QUEUE_SIZE as usize,
+            );
+            core::ptr::write_bytes(
+                addr_of_mut!(AVAILABLE).cast::<u8>(),
+                0,
+                4 + 2 * QUEUE_SIZE as usize,
+            );
+            core::ptr::write_bytes(
+                addr_of_mut!(USED).cast::<u8>(),
+                0,
+                4 + 8 * QUEUE_SIZE as usize,
+            );
+            if !virtio::driver_ok(bus) {
+                return None;
+            }
         }
+        Some(Self { bus, sent: 0 })
     }
-    false
+
+    /// Sends one message and waits (bounded) for the device to consume it.
+    ///
+    /// Returns `false` when the message is empty/oversized, the device status
+    /// failed or the used ring did not advance within the poll budget.
+    ///
+    /// # Safety
+    ///
+    /// The console transport page and the queue buffers must stay mapped for
+    /// the device model to read them.
+    pub unsafe fn send(&mut self, bytes: &[u8]) -> bool {
+        if bytes.is_empty() || bytes.len() > MAX_MESSAGE {
+            return false;
+        }
+        // SAFETY: `MESSAGE` is `MAX_MESSAGE` bytes and the length was checked.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                addr_of_mut!(MESSAGE).cast::<u8>(),
+                bytes.len(),
+            );
+        }
+        let descriptor = self.sent % QUEUE_SIZE;
+        let slot = self.sent % QUEUE_SIZE;
+        let message_gpa = addr_of!(MESSAGE) as u64;
+        // SAFETY: the tables are `.bss` buffers of the sizes used here; the
+        // queue indices stay below `QUEUE_SIZE`.
+        unsafe {
+            let desc = addr_of_mut!(DESCRIPTORS).cast::<u8>();
+            virtio::write_u64(desc, descriptor as usize * 16, message_gpa);
+            virtio::write_u32(desc, descriptor as usize * 16 + 8, bytes.len() as u32);
+            virtio::write_u16(desc, descriptor as usize * 16 + 12, 0); // device-readable
+            virtio::write_u16(desc, descriptor as usize * 16 + 14, 0); // no chain
+
+            let avail = addr_of_mut!(AVAILABLE).cast::<u8>();
+            virtio::write_u16(avail, 0, AVAIL_F_NO_INTERRUPT);
+            virtio::write_u16(avail, 4 + slot as usize * 2, descriptor);
+            virtio::write_u16(avail, 2, self.sent.wrapping_add(1));
+
+            virtio::notify(self.bus, QUEUE_TX);
+
+            let want = self.sent.wrapping_add(1);
+            let used = addr_of!(USED).cast::<u8>();
+            let mut polls = 0u32;
+            while polls < USED_POLLS {
+                if read_volatile(used.add(2).cast::<u16>()) == want {
+                    self.sent = want;
+                    return true;
+                }
+                core::hint::spin_loop();
+                polls += 1;
+            }
+        }
+        false
+    }
 }

@@ -91,6 +91,8 @@ policy completes it with the reported instruction length.
 | `t` (`0x74`) | no coherent local APIC timer — non-fatal |
 | `N` (`0x4E`) | initrd `init` entry extracted and queued for the console |
 | `n` (`0x6E`) | no initrd `init` entry extracted — non-fatal |
+| `S` (`0x53`) | ACPI RSDP -> XSDT/RSDT -> MADT walked and validated |
+| `s` (`0x73`) | ACPI root table or MADT invalid — non-fatal |
 | `C` (`0x43`) | virtio-console accepted and consumed the message |
 | `c` (`0x63`) | no console, or it did not acknowledge — non-fatal |
 | `D` (`0x44`) | virtio-block read sector 0 and the `S9VMDISK` label matches |
@@ -100,8 +102,8 @@ policy completes it with the reported instruction length.
 | `P` (`0x50`) | Rust panic; the guest halts afterwards (no code) |
 
 Success sequence: `G`, `M`, `A`, `R`/`r`, `I` (only after `R`), `K`, `T`/`t`,
-`N`/`n` (initrd init), `C`/`c` (console), `D`/`d` (block), then repeated
-`hlt`.
+`N`/`n` (initrd init), `S`/`s` (ACPI tables), `C`/`c` (console),
+`D`/`d` (block), then repeated `hlt`.
 Failure sequence: `F`, code, then `hlt`.
 
 Failure codes published after `F`:
@@ -171,14 +173,21 @@ Failure codes published after `F`:
     (16-byte `IN` header for sector 0, 512-byte device-writable data buffer,
     status byte), then checks the completion status and the `S9VMDISK` label
     the userspace policy provisions with `SYS_VMM_LOAD_DISK`. Success reports
-    `D`, a missing/failed device reports the non-fatal `d`.
+    `D`, a missing/failed device reports the non-fatal `d`;
+12. **ACPI discovery**: walks `RSDP -> XSDT (or RSDT) -> tables`, validating
+    every table header (signature, declared length inside the mapped firmware
+    window, byte checksum) before dereferencing it, and summarises the result
+    (`acpi: XSDT <n> tables madt=<0/1> facp=<0/1>`) in the console stream.
+    Success reports `S` when the root table and the MADT are valid, otherwise
+    the non-fatal `s`.
 
 The engine models the local APIC and virtio device pages as device pages: the
 second-level translation intentionally leaves them unmapped, so an access
 raises a violation that the kernel device model replays. The guest therefore
 maps those windows in its own page tables and drives them through normal MMIO;
 if a window is not coherently modeled (for example, backed by plain RAM by a
-different policy) it takes the non-fatal `t`/`c`/`d` path without faulting.
+different policy) it takes the non-fatal `t`/`c`/`d`/`s` path without
+faulting.
 
 ## Build
 
@@ -219,9 +228,9 @@ $ readelf -h target/x86_64-unknown-none/release/s9vm-guest
 
 $ readelf -l target/x86_64-unknown-none/release/s9vm-guest
   LOAD  0x0000000000001000 0x0000000000100000 0x0000000000100000
-        0x00000000000016b5 0x00000000000016b5  R E   0x1000
+        0x0000000000001d55 0x0000000000001d55  R E   0x1000
   LOAD  0x0000000000003000 0x0000000000102000 0x0000000000102000
-        0x0000000000000100 0x0000000000000100  R     0x1000
+        0x000000000000010a 0x000000000000010a  R     0x1000
   LOAD  0x0000000000004000 0x0000000000103000 0x0000000000103000
         0x0000000000000010 0x0000000000000010  RW    0x1000
   LOAD  0x0000000000005000 0x0000000000104000 0x0000000000104000
@@ -266,6 +275,7 @@ policy is expected to report `G`, `M`, `A`, `R`/`r`, `K`, `T`/`t` and the
   other access faults into the `E` handler;
 - no return path: `guest_main` ends in a `hlt` loop (the panic handler publishes
   `P` before halting).
+
 
 
 

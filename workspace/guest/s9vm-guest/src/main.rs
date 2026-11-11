@@ -77,6 +77,8 @@
 //! | `b't'` | no coherent local APIC timer (non-fatal) |
 //! | `b'N'` | initrd `init` entry extracted and queued for console output |
 //! | `b'n'` | no initrd `init` entry extracted (non-fatal) |
+//! | `b'S'` | ACPI RSDP -> XSDT/RSDT -> MADT walked and validated |
+//! | `b's'` | ACPI root table or MADT invalid (non-fatal) |
 //! | `b'C'` | virtio-console accepted and consumed the greeting message |
 //! | `b'c'` | no console device, or it did not acknowledge (non-fatal) |
 //! | `b'D'` | virtio-block read sector 0 and validated the `S9VMDISK` label |
@@ -86,10 +88,11 @@
 //! | `b'P'` | Rust panic (the next byte is not emitted; the guest halts) |
 //!
 //! Success sequence: `G`, `M`, `A`, `R`/`r` (initrd), `K` (kernel tables up),
-//! `T`/`t` (timer probe), `N`/`n` (initrd `init` extracted), `C`/`c`
-//! (virtio-console text output) and `D`/`d` (virtio-block read), then one
-//! `hlt` at a time forever. A failure emits `F`, its code, then halts; an
-//! exception after the IDT is installed emits `E`, the vector, then halts.
+//! `T`/`t` (timer probe), `N`/`n` (initrd `init` extracted), `S`/`s` (ACPI
+//! tables), `C`/`c` (virtio-console text output) and `D`/`d` (virtio-block
+//! read), then one `hlt` at a time forever. A failure emits `F`, its code,
+//! then halts; an exception after the IDT is installed emits `E`, the vector,
+//! then halts.
 
 #![no_std]
 #![no_main]
@@ -166,6 +169,17 @@ const BP_MAGIC: u64 = 0x0000_5042_4D56_3953;
 /// End (exclusive) of the identity mapping shared by the policy and the
 /// private page tables: the only window a guest pointer may be read from.
 const IDENTITY_WINDOW: u64 = 0x0040_0000;
+/// ACPI RSDP revision field offset.
+const RSDP_REVISION: u64 = 15;
+/// ACPI RSDP RSDT address field offset (32-bit, ACPI 1.0).
+const RSDP_RSDT: u64 = 16;
+/// ACPI RSDP XSDT address field offset (64-bit, ACPI 2.0+).
+const RSDP_XSDT: u64 = 24;
+/// Length of the common ACPI table header (`signature`, `length`, `revision`,
+/// `checksum`, OEM fields).
+const ACPI_HEADER_LEN: u64 = 36;
+/// Maximum number of root tables walked by the guest.
+const ACPI_MAX_TABLES: u32 = 16;
 /// `cpio` "newc" ASCII magic, first bytes of an initrd archive.
 const CPIO_NEWC_MAGIC: [u8; 6] = *b"070701";
 /// Size of a `newc` cpio header: six magic bytes and thirteen 8-digit
@@ -639,13 +653,48 @@ pub unsafe extern "C" fn guest_main(boot_params_gpa: u64) -> ! {
     }
     debug_write(if initrd_init > 0 { b'N' } else { b'n' });
 
-    // 12. Real text output: drive the virtio-console transmit queue published
-    //     in the boot block. The message carries the greeting and, when an
-    //     initrd `init` entry was found, its content. Proves the full path
-    //     guest -> split queue -> device model -> kernel console log.
-    //     `C` when the device consumed the message, `c` otherwise (non-fatal).
+    // 12. ACPI discovery: walk the RSDP -> XSDT/RSDT -> tables the policy
+    //     wrote (validating every header and checksum inside the mapped
+    //     window) and summarise the result. `S` when the root table and the
+    //     MADT are valid, non-fatal `s` otherwise. The summary is echoed on
+    //     the console below.
+    let mut acpi_message = [0u8; CONSOLE_MESSAGE_MAX];
+    let mut acpi_message_len = 0usize;
+    let mut acpi_found = false;
+    if let Some(info) = unsafe { acpi_scan() } {
+        push_bytes(&mut acpi_message, &mut acpi_message_len, b"acpi: ");
+        push_bytes(
+            &mut acpi_message,
+            &mut acpi_message_len,
+            if info.xsdt { b"XSDT " } else { b"RSDT " },
+        );
+        push_decimal(&mut acpi_message, &mut acpi_message_len, info.tables);
+        push_bytes(&mut acpi_message, &mut acpi_message_len, b" tables madt=");
+        push_decimal(
+            &mut acpi_message,
+            &mut acpi_message_len,
+            u32::from(info.madt),
+        );
+        push_bytes(&mut acpi_message, &mut acpi_message_len, b" facp=");
+        push_decimal(
+            &mut acpi_message,
+            &mut acpi_message_len,
+            u32::from(info.fadt),
+        );
+        push_bytes(&mut acpi_message, &mut acpi_message_len, b"\n");
+        acpi_found = info.madt;
+    }
+    debug_write(if acpi_found { b'S' } else { b's' });
+
+    // 13. Real text output: drive the virtio-console transmit queue published
+    //     in the boot block. Two messages are sent through the same queue: the
+    //     greeting (with the initrd `init` content when available) and the ACPI
+    //     summary. Proves the full path guest -> split queue -> device model ->
+    //     kernel console log. `C` when the device consumed every message, `c`
+    //     otherwise (non-fatal).
     let flags = read_u32(boot_params_gpa, BP_OFF_FLAGS);
     let console_base = read_u64(boot_params_gpa, BP_OFF_CONSOLE_MMIO);
+    let mut console_ok = false;
     if flags & BP_FLAG_CONSOLE != 0 {
         // The device IRQ line is published too, but this driver polls the used
         // ring: the guest has no ISR and never enables interrupts.
@@ -653,13 +702,18 @@ pub unsafe extern "C" fn guest_main(boot_params_gpa: u64) -> ! {
         // SAFETY: the console transport page is part of the device window
         // mapped by the private page tables; the driver validates the device
         // identity before touching any queue.
-        let sent = unsafe { virtio_console::transmit(console_base, &message[..message_len]) };
-        debug_write(if sent { b'C' } else { b'c' });
-    } else {
-        debug_write(b'c');
+        if let Some(mut console) = unsafe { virtio_console::Console::init(console_base) } {
+            if unsafe { console.send(&message[..message_len]) } {
+                console_ok = true;
+                if acpi_message_len > 0 {
+                    console_ok = unsafe { console.send(&acpi_message[..acpi_message_len]) };
+                }
+            }
+        }
     }
+    debug_write(if console_ok { b'C' } else { b'c' });
 
-    // 13. Block device: read sector 0 and verify the `S9VMDISK` label the
+    // 14. Block device: read sector 0 and verify the `S9VMDISK` label the
     //     userspace policy provisioned. Proves the full request path guest ->
     //     split queue -> device model -> backing image. Non-fatal: `D` on
     //     success, `d` otherwise.
@@ -1419,6 +1473,183 @@ unsafe fn acpi_checksum_ok(rsdp: u64) -> bool {
         index += 1;
     }
     sum == 0
+}
+
+/// Summary of the ACPI tables the guest discovered.
+struct AcpiInfo {
+    /// Number of root-table entries whose target header validates.
+    tables: u32,
+    /// A MADT (`APIC`) table was found and validated.
+    madt: bool,
+    /// A FADT (`FACP`) table was found and validated.
+    fadt: bool,
+    /// The root table was the 64-bit XSDT (ACPI 2.0+).
+    xsdt: bool,
+}
+
+/// Compares the four-byte ACPI signature at `address`.
+///
+/// # Safety
+///
+/// `address..address + 4` must be mapped and readable.
+unsafe fn acpi_signature_eq(address: u64, signature: &[u8; 4]) -> bool {
+    let mut index = 0u64;
+    while index < 4 {
+        // SAFETY: caller contract.
+        if read_u8(address, index) != signature[index as usize] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// Validates one ACPI table header inside the firmware window.
+///
+/// Returns the declared table length when the header is inside the mapped
+/// window, the length covers the header, and the byte checksum is zero.
+///
+/// # Safety
+///
+/// The ACPI window `RSDP_GPA..RSDP_SCAN_END` must be mapped and readable.
+unsafe fn acpi_table_ok(address: u64) -> Option<u32> {
+    let end = address.checked_add(ACPI_HEADER_LEN)?;
+    if address < RSDP_GPA || end > RSDP_SCAN_END {
+        return None;
+    }
+    // SAFETY: the header range was validated above.
+    let length = u64::from(read_u32(address, 4));
+    let table_end = address.checked_add(length)?;
+    if length < ACPI_HEADER_LEN || table_end > RSDP_SCAN_END {
+        return None;
+    }
+    let mut sum = 0u8;
+    let mut index = 0u64;
+    while index < length {
+        // SAFETY: the whole table is inside the mapped window.
+        sum = sum.wrapping_add(read_u8(address, index));
+        index += 1;
+    }
+    if sum != 0 {
+        return None;
+    }
+    Some(length as u32)
+}
+
+/// Discovers the ACPI tables the policy wrote: RSDP -> XSDT/RSDT -> tables.
+///
+/// Every pointer is validated (`acpi_table_ok`) before use, so a malformed or
+/// truncated firmware image yields `None` instead of a fault.
+///
+/// # Safety
+///
+/// The legacy firmware window `RSDP_GPA..RSDP_SCAN_END` must be mapped and
+/// readable.
+unsafe fn acpi_scan() -> Option<AcpiInfo> {
+    // SAFETY: caller contract; `find_rsdp` scans the mapped window.
+    let rsdp = unsafe { find_rsdp() }?;
+    // SAFETY: the RSDP is inside the mapped window.
+    let revision = unsafe { read_u8(rsdp, RSDP_REVISION) };
+    let (root, entry_size, xsdt) = if revision >= 2 {
+        // SAFETY: the XSDT pointer field is inside the mapped RSDP.
+        let address = unsafe { read_u64(rsdp, RSDP_XSDT) };
+        if address != 0 {
+            (address, 8u64, true)
+        } else {
+            // SAFETY: same as above, 32-bit legacy field.
+            (u64::from(unsafe { read_u32(rsdp, RSDP_RSDT) }), 4u64, false)
+        }
+    } else {
+        // SAFETY: same as above, 32-bit legacy field.
+        (u64::from(unsafe { read_u32(rsdp, RSDP_RSDT) }), 4u64, false)
+    };
+    if root == 0 {
+        return None;
+    }
+    // SAFETY: caller contract; the root address is validated by
+    // `acpi_table_ok` before any dereference.
+    let root_len = unsafe { acpi_table_ok(root) }?;
+    // SAFETY: the root table header was validated above.
+    let expected: &[u8; 4] = if xsdt { b"XSDT" } else { b"RSDT" };
+    if !unsafe { acpi_signature_eq(root, expected) } {
+        return None;
+    }
+    let entries = (u64::from(root_len) - ACPI_HEADER_LEN) / entry_size;
+    let mut info = AcpiInfo {
+        tables: 0,
+        madt: false,
+        fadt: false,
+        xsdt,
+    };
+    let limit = entries.min(u64::from(ACPI_MAX_TABLES));
+    let mut index = 0u64;
+    while index < limit {
+        let entry = root + ACPI_HEADER_LEN + index * entry_size;
+        // SAFETY: `entry` is inside the validated root table.
+        let table = if xsdt {
+            unsafe { read_u64(entry, 0) }
+        } else {
+            u64::from(unsafe { read_u32(entry, 0) })
+        };
+        if table != 0 {
+            // SAFETY: the target is validated by `acpi_table_ok`.
+            if unsafe { acpi_table_ok(table) }.is_some() {
+                // SAFETY: the table header was validated above.
+                if unsafe { acpi_signature_eq(table, b"APIC") } {
+                    info.madt = true;
+                }
+                // SAFETY: same table header.
+                if unsafe { acpi_signature_eq(table, b"FACP") } {
+                    info.fadt = true;
+                }
+                info.tables += 1;
+            }
+        }
+        index += 1;
+    }
+    Some(info)
+}
+
+/// Appends `bytes` to a fixed message buffer, refusing to overflow.
+fn push_bytes(buffer: &mut [u8], length: &mut usize, bytes: &[u8]) -> bool {
+    let Some(end) = length.checked_add(bytes.len()) else {
+        return false;
+    };
+    if end > buffer.len() {
+        return false;
+    }
+    buffer[*length..end].copy_from_slice(bytes);
+    *length = end;
+    true
+}
+
+/// Appends an unsigned decimal number to a fixed message buffer.
+fn push_decimal(buffer: &mut [u8], length: &mut usize, mut value: u32) -> bool {
+    let mut digits = [0u8; 10];
+    let mut count = 0usize;
+    if value == 0 {
+        digits[0] = b'0';
+        count = 1;
+    } else {
+        while value > 0 && count < digits.len() {
+            digits[count] = b'0' + (value % 10) as u8;
+            value /= 10;
+            count += 1;
+        }
+    }
+    let Some(end) = length.checked_add(count) else {
+        return false;
+    };
+    if end > buffer.len() {
+        return false;
+    }
+    let mut index = 0usize;
+    while index < count {
+        buffer[*length + index] = digits[count - 1 - index];
+        index += 1;
+    }
+    *length = end;
+    true
 }
 
 /// Panic handler: publish `b'P'` on the debug port, then halt forever.
