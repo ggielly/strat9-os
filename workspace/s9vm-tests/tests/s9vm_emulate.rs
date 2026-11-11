@@ -20,6 +20,8 @@ mod exit;
 mod ioapic;
 #[path = "../../kernel/src/s9vm/msr.rs"]
 mod msr;
+#[path = "../../kernel/src/s9vm/pci.rs"]
+mod pci;
 #[path = "../../kernel/src/s9vm/pic.rs"]
 mod pic;
 #[path = "../../kernel/src/s9vm/pit.rs"]
@@ -1757,4 +1759,178 @@ fn mask_ioapic_pins(devices: &mut Devices) {
             .unwrap_or(emulate::PIT_IRQ_VECTOR);
         devices.ioapic.set_pin(pin, vector, true);
     }
+}
+// ---------------------------------------------------------------------------
+// PCI configuration mechanism #1 (host bridge + virtio functions).
+// ---------------------------------------------------------------------------
+
+/// Replays one port access of an explicit width (the generic helper above is
+/// byte-wide, which is what the legacy devices use).
+fn replay_port_sized(
+    memory: &mut TestMemory,
+    guest: &mut TestGuest,
+    devices: &mut Devices,
+    apic: &mut apic::LocalApic,
+    port: u16,
+    is_in: bool,
+    size: u8,
+) -> bool {
+    let qualification = (u64::from(port) << 16)
+        | if is_in { 0x8 } else { 0 }
+        | u64::from(size.saturating_sub(1));
+    let mut view = view(memory, guest);
+    handle_exit(
+        devices,
+        apic,
+        &mut view,
+        guest,
+        ExitClass::IoPort,
+        qualification,
+        0,
+    )
+    .expect("emulated port access")
+}
+
+/// Writes the 32-bit CAM register (port 0xCF8) from EAX.
+fn pci_write_cam(
+    memory: &mut TestMemory,
+    guest: &mut TestGuest,
+    devices: &mut Devices,
+    apic: &mut apic::LocalApic,
+    value: u32,
+) {
+    let rip = load_code(memory, &[0xEF]); // out dx, eax
+    guest.rip = rip;
+    guest.regs[0] = u64::from(value);
+    guest.regs[2] = u64::from(pci::CONFIG_ADDRESS);
+    assert!(replay_port_sized(
+        memory,
+        guest,
+        devices,
+        apic,
+        pci::CONFIG_ADDRESS,
+        false,
+        4
+    ));
+}
+
+/// Reads one configuration dword (port 0xCFC) into EAX.
+fn pci_read_data(
+    memory: &mut TestMemory,
+    guest: &mut TestGuest,
+    devices: &mut Devices,
+    apic: &mut apic::LocalApic,
+) -> u32 {
+    let rip = load_code(memory, &[0xED]); // in eax, dx
+    guest.rip = rip;
+    guest.regs[2] = u64::from(pci::CONFIG_DATA);
+    assert!(replay_port_sized(
+        memory,
+        guest,
+        devices,
+        apic,
+        pci::CONFIG_DATA,
+        true,
+        4
+    ));
+    guest.regs[0] as u32
+}
+
+#[test]
+fn pci_configuration_ports_are_claimed() {
+    assert!(emulate::handles_pci_port(pci::CONFIG_ADDRESS));
+    assert!(emulate::handles_pci_port(pci::CONFIG_DATA + 3));
+    assert!(!emulate::handles_pci_port(pci::CONFIG_ADDRESS - 1));
+    assert!(!emulate::handles_pci_port(pci::CONFIG_DATA + 4));
+    assert!(Devices::handles_port(pci::CONFIG_ADDRESS));
+    assert!(Devices::handles_port(pci::CONFIG_DATA));
+}
+
+#[test]
+fn pci_host_bridge_answers_its_identity() {
+    let mut memory = machine();
+    let rip = load_code(&mut memory, &[0xED]);
+    let mut guest = TestGuest::new(rip);
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    // Enable, bus 0, device 0, function 0, register 0.
+    pci_write_cam(&mut memory, &mut guest, &mut devices, &mut apic, 0x8000_0000);
+    let identity = pci_read_data(&mut memory, &mut guest, &mut devices, &mut apic);
+    assert_eq!(identity & 0xFFFF, pci::HOST_BRIDGE_VENDOR_ID as u32);
+    assert_eq!(identity >> 16, pci::HOST_BRIDGE_DEVICE_ID as u32);
+}
+
+#[test]
+fn pci_virtio_functions_are_visible_on_bus_zero() {
+    let mut memory = machine();
+    let rip = load_code(&mut memory, &[0xED]);
+    let mut guest = TestGuest::new(rip);
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    for (slot, device_type) in [
+        (emulate::PCI_CONSOLE_SLOT, pci::virtio_device_type::CONSOLE),
+        (emulate::PCI_BLK_SLOT, pci::virtio_device_type::BLOCK),
+        (emulate::PCI_NET_SLOT, pci::virtio_device_type::NET),
+    ] {
+        let cam = 0x8000_0000u32 | (u32::from(slot) << 11);
+        pci_write_cam(&mut memory, &mut guest, &mut devices, &mut apic, cam);
+        let identity = pci_read_data(&mut memory, &mut guest, &mut devices, &mut apic);
+        assert_eq!(
+            identity & 0xFFFF,
+            pci::VIRTIO_VENDOR_ID as u32,
+            "slot {slot} must expose the virtio vendor id"
+        );
+        assert_eq!(
+            identity >> 16,
+            u32::from(pci::VIRTIO_MODERN_DEVICE_ID_BASE + u16::from(device_type)),
+            "slot {slot} must expose the modern virtio device id"
+        );
+    }
+}
+
+#[test]
+fn pci_disabled_cam_reads_all_ones() {
+    let mut memory = machine();
+    let rip = load_code(&mut memory, &[0xED]);
+    let mut guest = TestGuest::new(rip);
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    // Without the enable bit the bridge answers as if the bus floated.
+    pci_write_cam(&mut memory, &mut guest, &mut devices, &mut apic, 0);
+    assert_eq!(
+        pci_read_data(&mut memory, &mut guest, &mut devices, &mut apic),
+        0xFFFF_FFFF
+    );
+}
+
+#[test]
+fn pci_virtio_bar_can_be_sized_and_placed_by_the_guest() {
+    let mut memory = machine();
+    let rip = load_code(&mut memory, &[0xEF, 0xED]);
+    let mut guest = TestGuest::new(rip);
+    let mut devices = Devices::new();
+    let mut apic = apic::LocalApic::new(0);
+    // Console function BAR0 (offset 0x10).
+    let cam = 0x8000_0000u32 | (u32::from(emulate::PCI_CONSOLE_SLOT) << 11) | 0x10;
+    pci_write_cam(&mut memory, &mut guest, &mut devices, &mut apic, cam);
+    // Program a 64-bit memory BAR at 0xFE00_0000.
+    let rip = load_code(&mut memory, &[0xEF]);
+    guest.rip = rip;
+    guest.regs[0] = 0xFE00_0000;
+    guest.regs[2] = u64::from(pci::CONFIG_DATA);
+    assert!(replay_port_sized(
+        &mut memory,
+        &mut guest,
+        &mut devices,
+        &mut apic,
+        pci::CONFIG_DATA,
+        false,
+        4
+    ));
+    let placed = devices.pci.memory_map().windows().len();
+    assert!(placed >= 1, "the programmed BAR must appear in the map");
+    assert_eq!(
+        devices.pci.memory_map().find(0xFE00_0000).map(|w| w.size),
+        Some(pci::VIRTIO_BAR_SIZE)
+    );
 }

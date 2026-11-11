@@ -52,6 +52,7 @@ use super::{
     exit::ExitClass,
     ioapic::{IoApic, PIN_COUNT},
     msr::MsrModel,
+    pci::{self, PciHostBridge},
     pic::Pic,
     pit::{self, Pit},
     rtc::{self, CmosRtc},
@@ -474,6 +475,13 @@ impl QueueMemory for MemoryView<'_> {
     }
 }
 
+/// PCI device slots used by the modeled virtio functions (bus 0).
+pub const PCI_CONSOLE_SLOT: u8 = 2;
+/// PCI slot of the block function.
+pub const PCI_BLK_SLOT: u8 = 3;
+/// PCI slot of the network function.
+pub const PCI_NET_SLOT: u8 = 4;
+
 /// Device model owned by a world: the chipset devices shared by all its
 /// vCPUs. The local APIC is per-vCPU and lives in the vCPU slot; the exit
 /// handlers receive it separately.
@@ -489,6 +497,9 @@ pub struct Devices {
     pub rtc: CmosRtc,
     /// 16550A serial port, COM1 (ports 0x3F8..=0x3FF).
     pub uart: Uart,
+    /// PCI host bridge: configuration mechanism #1 and the virtio functions
+    /// the guest discovers through it (no MSI generation yet).
+    pub pci: PciHostBridge,
     /// Virtio console (MMIO transport page).
     pub console: VirtioConsole,
     /// Virtio block device (MMIO transport page).
@@ -525,12 +536,21 @@ impl Devices {
         ioapic.set_pin_mode(uart_pin, UART_IRQ_VECTOR, false, true, false);
         let rtc_pin = isa_gsi(rtc::IRQ_LINE);
         ioapic.set_pin_mode(rtc_pin, RTC_IRQ_VECTOR, false, true, false);
+        // PCI: one host bridge and one virtio function per modeled device. The
+        // BARs start unprogrammed (the guest assigns them, as it does on real
+        // firmware), so an MMIO window only becomes visible once the guest has
+        // written the base address.
+        let mut pci = PciHostBridge::new();
+        let _ = pci.add_virtio(PCI_CONSOLE_SLOT, pci::virtio_device_type::CONSOLE);
+        let _ = pci.add_virtio(PCI_BLK_SLOT, pci::virtio_device_type::BLOCK);
+        let _ = pci.add_virtio(PCI_NET_SLOT, pci::virtio_device_type::NET);
         Self {
             pic: Pic::new(),
             ioapic,
             pit: Pit::new(),
             rtc: CmosRtc::new(),
             uart: Uart::new(),
+            pci,
             console: VirtioConsole::new(),
             blk: VirtioBlk::new(64 * 1024),
             net: VirtioNet::new(),
@@ -544,7 +564,14 @@ impl Devices {
             || pit::handles_port(port)
             || rtc::handles_port(port)
             || uart::handles_port(port)
+            || handles_pci_port(port)
     }
+}
+
+/// True if `port` is one of the PCI configuration mechanism #1 registers.
+pub fn handles_pci_port(port: u16) -> bool {
+    (pci::CONFIG_ADDRESS..pci::CONFIG_ADDRESS + 4).contains(&port)
+        || (pci::CONFIG_DATA..pci::CONFIG_DATA + 4).contains(&port)
 }
 
 impl Default for Devices {
@@ -767,6 +794,23 @@ fn serve_port(
         );
         return true;
     }
+    if handles_pci_port(access.port) {
+        // Configuration mechanism #1: one 32-bit CAM register and one 32-bit
+        // data register. The model also accepts byte and word accesses on the
+        // data register (some early probes use them).
+        if access.write {
+            let value = guest.gpr(access.register) as u32;
+            if !devices.pci.io_write(access.port, access.size, value) {
+                return false;
+            }
+        } else {
+            let Some(value) = devices.pci.io_read(access.port, access.size) else {
+                return false;
+            };
+            write_register(guest, access.register, access.size, u64::from(value));
+        }
+        return true;
+    }
     if access.port == POST_PORT {
         // Diagnostic port: writes are discarded, reads return zero.
         if !access.write {
@@ -888,10 +932,6 @@ fn handle_mmio_exit(
     if (qualification >> 3) & 0x1 != 0 {
         return Ok(false);
     }
-    let Some(page) = device_page(address) else {
-        return Ok(false);
-    };
-
     let Decoded::Memory(access) = view.fetch(guest)? else {
         return Ok(false);
     };
@@ -899,11 +939,46 @@ fn handle_mmio_exit(
     if !matches!(access.size, 1 | 2 | 4) {
         return Ok(false);
     }
+    let Some(page) = device_page(address) else {
+        // A PCI function BAR is not a fixed device page: resolve it through
+        // the bridge's live placement map, which only contains the BARs the
+        // guest programmed.
+        if !serve_pci_mmio(devices, guest, &access) {
+            return Ok(false);
+        }
+        guest.set_rip(access.next_rip);
+        return Ok(true);
+    };
     if !serve_mmio(devices, apic, view, guest, page, &access) {
         return Ok(false);
     }
     guest.set_rip(access.next_rip);
     Ok(true)
+}
+
+/// Applies one decoded memory access to a PCI function BAR.
+///
+/// The access must be naturally aligned for its size: the configuration and
+/// transport windows are made of 32-bit registers, and a misaligned access is
+/// outside the modeled subset (the exit is reported to policy).
+fn serve_pci_mmio(
+    devices: &mut Devices,
+    guest: &mut dyn GuestContext,
+    access: &MemoryAccess,
+) -> bool {
+    if access.address % u64::from(access.size) != 0 {
+        return false;
+    }
+    if access.write {
+        let value = guest.gpr(access.register) as u32;
+        devices.pci.mmio_write(access.address, access.size, value)
+    } else {
+        let Some(value) = devices.pci.mmio_read(access.address, access.size) else {
+            return false;
+        };
+        write_register(guest, access.register, access.size, u64::from(value));
+        true
+    }
 }
 
 /// Device page targeted by a guest-physical address.

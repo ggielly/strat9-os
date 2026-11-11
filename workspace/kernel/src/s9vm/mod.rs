@@ -73,6 +73,7 @@ pub mod machine;
 pub mod memmap;
 pub mod mmu;
 pub mod msr;
+pub mod pci;
 pub mod pic;
 pub mod pit;
 pub mod rtc;
