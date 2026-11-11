@@ -27,14 +27,19 @@
 //!
 //! This implementation uses a per-CPU mailbox system inspired by Asterinas :
 //! 1. Each CPU has its own queue of pending TLB operations.
-//! 2. The initiator pushes an operation into each target's queue.
+//! 2. The initiator pushes an operation into each target's queue and allocates
+//!    a monotonically increasing request generation (`TLB_REQ`).
 //! 3. The initiator sends a TLB shootdown IPI to all targets.
-//! 4. The targets process their own queue and set an ACK flag.
-//! 5. The initiator waits for all ACK flags to become true.
+//! 4. Each target drains its queue and publishes the highest generation it has
+//!    completed into `TLB_DONE`.
+//! 5. The initiator waits until every target's `TLB_DONE` reaches the
+//!    generation it allocated.
 //!
-//! This avoids global lock contention and race conditions on global counters.
+//! Generation counters avoid the lost/stale acknowledgement race of a per-CPU
+//! boolean: an initiator cannot observe "done" for an operation still queued,
+//! and a concurrent shootdown cannot clobber another's acknowledgement.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::VirtAddr;
 
 use crate::sync::SpinLock;
@@ -121,9 +126,20 @@ pub const TLB_RANGE_THRESHOLD_PAGES: usize = 64;
 static TLB_QUEUES: [SpinLock<TlbQueue>; crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { SpinLock::new(TlbQueue::new()) }; crate::arch::x86_64::percpu::MAX_CPUS];
 
-/// Global array of per-CPU acknowledgement flags.
-static TLB_ACKS: [AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] =
-    [const { AtomicBool::new(true) }; crate::arch::x86_64::percpu::MAX_CPUS];
+/// Per-CPU generation of the last request pushed into that CPU's mailbox.
+///
+/// The counter is bumped under the mailbox lock at the same time the matching
+/// operation is queued, so the receiver always observes a consistent
+/// `(queue, TLB_REQ)` pair.
+static TLB_REQ: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
+
+/// Per-CPU generation of the last request whose operations have been executed.
+///
+/// Only ever advanced with `fetch_max`, so it is monotonic and can never claim
+/// completion of a generation that has not been processed.
+static TLB_DONE: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
 
 /// Initialize TLB shootdown system.
 pub fn init() {
@@ -170,6 +186,14 @@ pub fn local_range(start: VirtAddr, end: VirtAddr) {
         let addr = start + (i * 4096);
         unsafe { invlpg(addr) };
     }
+}
+
+/// Flush all TLB entries on the current CPU only.
+///
+/// Public wrapper around the internal CR3-reload flush so other subsystems can
+/// invalidate the whole local TLB without a shootdown.
+pub fn flush_local_all() {
+    unsafe { flush_tlb_all() };
 }
 
 /// Invalidate a range of pages on all CPUs.
@@ -238,14 +262,16 @@ fn dispatch_op(op: TlbOp) {
         return;
     }
 
-    // `queued` tracks only the APIC IDs that were successfully pushed to a
-    // mailbox queue.  We must not send an IPI to, or wait for an ACK from,
-    // an AP whose queue was skipped : doing so would either waste cycles or
-    // spin-wait forever on an ACK that was never cleared.
-    let mut queued = [0u32; crate::arch::x86_64::percpu::MAX_CPUS];
+    // `(apic_id, cpu_idx, seq)` for each target that was successfully queued.
+    // An IPI is sent, and an acknowledgement awaited, only for entries here :
+    // sending to, or waiting on, an AP whose queue was skipped would waste
+    // cycles or spin forever.
+    let mut queued = [(0u32, 0usize, 0u64); crate::arch::x86_64::percpu::MAX_CPUS];
     let mut queued_count = 0usize;
 
-    // 1. Push op to each target's mailbox and clear their ACK.
+    // 1. Push the op into each target's mailbox and allocate a request
+    //    generation.  The push and the counter bump are done under the mailbox
+    //    lock so the receiver observes a consistent (queue, TLB_REQ) pair.
     for i in 0..count {
         let apic_id = targets[i];
         // cpu_index_by_apic can return None if the AP went offline between
@@ -261,12 +287,14 @@ fn dispatch_op(op: TlbOp) {
                 continue;
             }
         };
-        let mut queue = TLB_QUEUES[cpu_idx].lock();
-        queue.push(op);
-        TLB_ACKS[cpu_idx].store(false, Ordering::Release);
-        drop(queue);
-        // Record as a successfully-queued target.
-        queued[queued_count] = apic_id;
+        let seq;
+        {
+            let mut queue = TLB_QUEUES[cpu_idx].lock();
+            queue.push(op);
+            seq = TLB_REQ[cpu_idx].fetch_add(1, Ordering::AcqRel) + 1;
+            drop(queue);
+        }
+        queued[queued_count] = (apic_id, cpu_idx, seq);
         queued_count += 1;
     }
 
@@ -276,70 +304,105 @@ fn dispatch_op(op: TlbOp) {
 
     // 2. Send IPI only to targets that actually received a queued op.
     for i in 0..queued_count {
-        send_tlb_ipi(queued[i]);
+        send_tlb_ipi(queued[i].0);
     }
 
-    // 3. Wait for ACKs from the same set.
+    // 3. Wait for each target to acknowledge its own generation.
     wait_for_acks(&queued[..queued_count]);
 }
 
 /// IPI handler for TLB shootdown (called on receiving CPU).
 pub extern "C" fn tlb_shootdown_ipi_handler() {
+    // Drain until the mailbox stays empty across a lock acquisition, then EOI
+    // once for the whole batch.  Looping is required: an operation pushed after
+    // a batch copy but before the matching `TLB_DONE` update must still run.
+    drain_local_queue();
+    crate::arch::x86_64::apic::eoi();
+}
+
+/// Drain and execute this CPU's TLB mailbox.
+///
+/// Repeats until the mailbox is observed empty under the lock.  For each batch
+/// the ops are copied and cleared and the current request generation is read
+/// under the *same* lock hold, so `req` covers exactly the ops copied (any
+/// concurrent push is serialized behind the lock).  The generation is then
+/// published with `fetch_max`, which is monotonic.
+///
+/// Returns `true` if at least one operation was executed.  Does **not** send
+/// EOI, so it can be reused from the shootdown wait loop.
+fn drain_local_queue() -> bool {
     let cpu_idx = current_cpu_index();
+    let mut processed_any = false;
 
-    // 1. Take all pending ops from our mailbox.
-    let mut local_ops = [TlbOp::NONE; 16];
-    let count = {
-        let mut queue = TLB_QUEUES[cpu_idx].lock();
-        let c = queue.count;
-        for i in 0..c {
-            local_ops[i] = queue.ops[i];
-        }
-        queue.clear();
-        c
-    };
-
-    // 2. Perform the operations.
-    for i in 0..count {
-        let op = &local_ops[i];
-        match op.kind {
-            TlbShootdownKind::None => {}
-            TlbShootdownKind::SinglePage => {
-                unsafe { invlpg(VirtAddr::new(op.vaddr_start)) };
+    loop {
+        let mut local_ops = [TlbOp::NONE; 16];
+        let count;
+        let req;
+        {
+            let mut queue = TLB_QUEUES[cpu_idx].lock();
+            if queue.count == 0 {
+                // Empty: read TLB_REQ under the lock so the empty observation
+                // is ordered after any concurrent push, then stop.
+                let _ = TLB_REQ[cpu_idx].load(Ordering::Acquire);
+                drop(queue);
+                break;
             }
-            TlbShootdownKind::Range => {
-                let start = op.vaddr_start;
-                let end = op.vaddr_end;
-                // Guard: corrupt TlbOp must not underflow in release build.
-                // Also cap to TLB_RANGE_THRESHOLD_PAGES for defense-in-depth:
-                // the sender already guarantees this, but a stale or malformed
-                // op must not spend thousands of invlpg cycles on the receiver.
-                if end > start {
-                    let page_count = (end - start) / 4096;
-                    if page_count > TLB_RANGE_THRESHOLD_PAGES as u64 {
-                        unsafe { flush_tlb_all() };
-                    } else {
-                        for j in 0..page_count {
-                            let addr = VirtAddr::new(start + j * 4096);
-                            unsafe { invlpg(addr) };
+            count = queue.count;
+            for i in 0..count {
+                local_ops[i] = queue.ops[i];
+            }
+            queue.clear();
+            // Same critical section as the copy/clear: a dispatcher cannot bump
+            // TLB_REQ between the clear and this load, so `req` is exactly the
+            // generation of the ops we just copied.
+            req = TLB_REQ[cpu_idx].load(Ordering::Acquire);
+            drop(queue);
+        }
+
+        // Perform the operations.
+        for i in 0..count {
+            let op = &local_ops[i];
+            match op.kind {
+                TlbShootdownKind::None => {}
+                TlbShootdownKind::SinglePage => {
+                    unsafe { invlpg(VirtAddr::new(op.vaddr_start)) };
+                }
+                TlbShootdownKind::Range => {
+                    let start = op.vaddr_start;
+                    let end = op.vaddr_end;
+                    // Guard: corrupt TlbOp must not underflow in release build.
+                    // Also cap to TLB_RANGE_THRESHOLD_PAGES for defense-in-depth:
+                    // the sender already guarantees this, but a stale or malformed
+                    // op must not spend thousands of invlpg cycles on the receiver.
+                    if end > start {
+                        let page_count = (end - start) / 4096;
+                        if page_count > TLB_RANGE_THRESHOLD_PAGES as u64 {
+                            unsafe { flush_tlb_all() };
+                        } else {
+                            for j in 0..page_count {
+                                let addr = VirtAddr::new(start + j * 4096);
+                                unsafe { invlpg(addr) };
+                            }
                         }
+                    } else {
+                        unsafe { flush_tlb_all() };
                     }
-                } else {
+                }
+                TlbShootdownKind::Full => {
                     unsafe { flush_tlb_all() };
                 }
             }
-            TlbShootdownKind::Full => {
-                unsafe { flush_tlb_all() };
-            }
         }
+
+        // Publish completion of this generation.  `fetch_max` keeps the counter
+        // monotonic even if a newer generation was somehow already published.
+        TLB_DONE[cpu_idx].fetch_max(req, Ordering::Release);
+        processed_any = true;
     }
 
-    // 3. Signal completion.
-    TLB_ACKS[cpu_idx].store(true, Ordering::Release);
-
-    // 4. Send EOI.
-    crate::arch::x86_64::apic::eoi();
+    processed_any
 }
+
 
 /// Invalidate a single TLB entry (local CPU only).
 #[inline]
@@ -383,29 +446,39 @@ fn collect_tlb_targets(targets: &mut [u32]) -> usize {
     count
 }
 
-/// Wait for ACKs from specific APIC IDs.
-fn wait_for_acks(targets: &[u32]) {
+/// Wait for generation acknowledgements from the given targets.
+///
+/// Each entry is `(apic_id, cpu_idx, seq)` captured at queue time.  While
+/// waiting, this CPU services its *own* mailbox if a request is pending :
+/// otherwise two initiators with interrupts disabled would spin forever, each
+/// waiting for the other's IPI handler that can never run.
+fn wait_for_acks(targets: &[(u32, usize, u64)]) {
     const MAX_WAIT_CYCLES: usize = 10_000_000;
-    for &apic_id in targets {
-        // Use if-let: if the APIC ID is gone (AP offline after we sent the IPI)
-        // there is nothing to wait for : skip rather than panic in kernel context.
-        let cpu_idx = match crate::arch::x86_64::percpu::cpu_index_by_apic(apic_id) {
-            Some(idx) => idx,
-            None => {
-                log::warn!("TLB wait_acks: APIC {} disappeared, skipping", apic_id);
-                continue;
-            }
-        };
+    let my_cpu = current_cpu_index();
+
+    for &(_apic_id, cpu_idx, seq) in targets {
         let mut success = false;
         for _ in 0..MAX_WAIT_CYCLES {
-            if TLB_ACKS[cpu_idx].load(Ordering::Acquire) {
+            if TLB_DONE[cpu_idx].load(Ordering::Acquire) >= seq {
                 success = true;
                 break;
+            }
+            // Break the two-initiator deadlock: if a shootdown aimed at us is
+            // sitting in our mailbox, execute it now.
+            if TLB_REQ[my_cpu].load(Ordering::Acquire)
+                > TLB_DONE[my_cpu].load(Ordering::Acquire)
+            {
+                drain_local_queue();
             }
             core::hint::spin_loop();
         }
         if !success {
-            log::warn!("TLB shootdown timeout on CPU {}", cpu_idx);
+            panic!(
+                "TLB shootdown timeout: cpu={} expected seq={} observed done={}",
+                cpu_idx,
+                seq,
+                TLB_DONE[cpu_idx].load(Ordering::Acquire),
+            );
         }
     }
 }

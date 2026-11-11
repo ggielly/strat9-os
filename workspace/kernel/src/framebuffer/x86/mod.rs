@@ -45,28 +45,30 @@ pub fn detect_and_init_ops() -> FramebufferOps {
         .get_feature_info()
         .map_or(false, |info| info.has_sse41());
 
-    let has_ssse3 = cpuid
-        .get_feature_info()
-        .map_or(false, |info| info.has_ssse3());
-
     let has_sse2 = cpuid
         .get_feature_info()
         .map_or(false, |info| info.has_sse2());
 
     if has_sse41 || has_sse2 {
-        // convert_bgr_to_argb requires SSSE3 (pshufb). Without it, use the scalar path.
-        let convert: crate::framebuffer::FnConvert = if has_ssse3 {
-            sse2::convert_bgr_to_argb_sse2
-        } else {
-            generic::convert_bgr_to_argb_generic
-        };
+        // `_mm_loadu_si128` / `_mm_storeu_si128` are NOT inlined on this target:
+        // the pinned nightly compiles `x86_64-unknown-none` with `+soft-float`,
+        // so `__m128i` cannot travel in XMM registers and the intrinsics become
+        // out-of-line helpers. Those helpers are miscompiled: they copy the
+        // vector byte by byte and drop one lane (observed: 0x0011EE33 stored as
+        // 0x00110033, i.e. the green channel). Every op that *loads* pixels
+        // therefore uses the scalar/memcpy path; only `fill` (broadcast constant
+        // store, no vector load) keeps the SSE2 implementation.
+        //
+        // Restore the SSE2 blit/blend/convert once the toolchain lowers the
+        // 128-bit load/store intrinsics correctly (same underlying issue as the
+        // disabled `_mm_stream_si128` paths below).
         FramebufferOps {
             fill: sse2::fill_sse2,
-            blit: sse2::blit_sse2,
-            blend: sse2::blend_sse2,
-            convert,
+            blit: generic::blit_generic,
+            blend: generic::blend_generic,
+            convert: generic::convert_bgr_to_argb_generic,
             fill_nt: sse2::fill_nt_sse2,
-            blit_nt: sse2::blit_nt_sse2,
+            blit_nt: generic::blit_nt_generic,
         }
     } else {
         FramebufferOps {

@@ -27,15 +27,16 @@
 //! mode switch, then jumps directly to `smp_main` in Rust.
 //!
 //! Data layout after the trampoline code (written by BSP, read by AP):
-//!   offset +0: PML4 physical address (CR3)
-//!   offset +8: kernel stack top virtual address (RSP)
+//!   offset +0:  PML4 physical address (CR3)
+//!   offset +8:  legacy kernel stack top virtual address (first AP only)
+//!   offset +16: virtual address of `AP_STACK_TOPS` (per-APIC stack table)
 //!
 //! Synchronization: AP increments `BOOTED_CORES` after finishing per-CPU init.
 //! BSP spins until all expected APs are online.
 
 use core::{
     arch::global_asm,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
 use alloc::{vec, vec::Vec};
@@ -53,6 +54,16 @@ use crate::{
 /// Physical address where the SMP trampoline is copied.
 pub const TRAMPOLINE_PHYS_ADDR: u64 = 0x8000;
 
+/// Maximum APIC ID (0..=255) addressable by the per-AP stack table.
+const MAX_APIC_IDS: usize = 256;
+
+/// Per-APIC-ID kernel stack top, read by the 64-bit trampoline stub.
+///
+/// Each AP indexes this table with its own APIC ID, so a late AP can never
+/// pick up another AP's stack from a single shared slot. A zero entry means
+/// "no stack assigned": the stub halts rather than using address 0.
+static AP_STACK_TOPS: [AtomicU64; MAX_APIC_IDS] = [const { AtomicU64::new(0) }; MAX_APIC_IDS];
+
 /// Number of booted cores (starts at 1 for BSP).
 static BOOTED_CORES: AtomicUsize = AtomicUsize::new(1);
 /// Counter for synchronization barriers.
@@ -64,6 +75,10 @@ static AP_SCHED_GATE_OPEN: AtomicBool = AtomicBool::new(false);
 /// AP ACK: set to apic_id by each AP at start of smp_main(), BSP waits for it.
 /// Sentinel usize::MAX means "no ACK yet" (avoids collision with APIC ID 0).
 static AP_REACHED_RUST: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// Set by the BSP once the AP boot window is closed. An AP that publishes its
+/// online bit after this becomes `true` revokes it and halts instead of joining
+/// the scheduler too late (after `init_scheduler` has already run on the BSP).
+static BOOT_WINDOW_CLOSED: AtomicBool = AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // Trampoline: 16-bit => 32-bit => 64-bit mode switch.
@@ -87,8 +102,9 @@ static AP_REACHED_RUST: AtomicUsize = AtomicUsize::new(usize::MAX);
 // GDTR. Without this embedded GDT data, the AP loads garbage and triple-faults.
 //
 // Data area (at smp_trampoline_end, written by BSP via HHDM):
-//   +0 u64: CR3 (PML4 physical address)
-//   +8 u64: RSP (kernel stack top virtual address)
+//   +0  u64: CR3 (PML4 physical address)
+//   +8  u64: legacy RSP (kernel stack top virtual address)
+//   +16 u64: virtual address of AP_STACK_TOPS (indexed by APIC ID)
 // ---------------------------------------------------------------------------
 #[cfg(target_arch = "x86_64")]
 global_asm!(
@@ -264,9 +280,24 @@ smp_trampoline_32:
 .align 32
 .code64
 smp_trampoline_64:
-    # Load kernel stack pointer
-    mov rsp, [SMP_VAR_ADDR + 8]
-
+    # Resolve this AP's kernel stack from the per-APIC stack table *before*
+    # using the stack. RSP is not yet valid here (the AP is in a reset-like
+    # state), so RBX is preserved across CPUID in R8 rather than by push/pop.
+    mov r8, rbx
+    mov eax, 1
+    cpuid
+    mov ecx, ebx                    # EBX[31:24] = initial APIC ID
+    mov rbx, r8
+    shr ecx, 24
+    and ecx, 0xff
+    mov rsp, [SMP_VAR_ADDR + 16]    # table base (virtual address)
+    mov rsp, [rsp + rcx*8]          # AP_STACK_TOPS[apic_id]
+    test rsp, rsp
+    jnz 7f
+8:  cli
+    hlt                             # no stack assigned: stop this AP
+    jmp 8b
+7:
     # We arrive via `jmp`, not `call`, so no return address was pushed. The
     # SysV ABI requires RSP % 16 == 8 *at function entry* (it is 16-aligned at
     # the call site, minus the 8-byte return address). Stack tops are page
@@ -311,10 +342,42 @@ unsafe extern "C" {
     fn smp_pm_setup();
 }
 
-/// Busy-wait for the given number of microseconds (very rough).
+/// Busy-wait for the given number of microseconds.
+///
+/// Uses the TSC when its frequency is known (it is seeded to a conservative
+/// default before calibration). Falls back to the old `io_wait` loop only if
+/// no frequency is available at all.
 fn udelay(us: u32) {
-    for _ in 0..us {
-        io_wait();
+    let khz = crate::arch::x86_64::boot_timestamp::tsc_khz();
+    if khz == 0 {
+        for _ in 0..us {
+            io_wait();
+        }
+        return;
+    }
+    let ticks = (us as u64).saturating_mul(khz) / 1_000;
+    let start = crate::arch::x86_64::rdtsc();
+    while crate::arch::x86_64::rdtsc().wrapping_sub(start) < ticks {
+        core::hint::spin_loop();
+    }
+}
+
+/// Convert a duration in milliseconds to TSC ticks, or 0 when unknown.
+fn tsc_ticks_for_ms(ms: u64) -> u64 {
+    let khz = crate::arch::x86_64::boot_timestamp::tsc_khz();
+    if khz == 0 {
+        return 0;
+    }
+    khz.saturating_mul(ms)
+}
+
+/// Halt this CPU forever (interrupts disabled). Used to retire an AP that
+/// arrived outside the boot window or was not registered.
+fn halt_forever() -> ! {
+    loop {
+        unsafe {
+            core::arch::asm!("cli", "hlt", options(nomem, nostack, preserves_flags));
+        }
     }
 }
 
@@ -346,8 +409,9 @@ fn ensure_identity_mapping(phys_start: u64, length: usize) -> Result<(), &'stati
 /// Copy the trampoline to physical address 0x8000 and write the data area.
 ///
 /// Data area layout (at smp_trampoline_end):
-///   +0: CR3 (PML4 physical address)
-///   +8: RSP (kernel stack top virtual address)
+///   +0:  CR3 (PML4 physical address)
+///   +8:  legacy RSP (kernel stack top of the first AP)
+///   +16: virtual address of the per-APIC stack table (`AP_STACK_TOPS`)
 ///
 /// After writing, performs WBINVD to flush the cache hierarchy to RAM.
 /// This is essential on real hardware: the BSP writes the trampoline via
@@ -359,7 +423,7 @@ fn copy_trampoline(cr3_phys: u64, stack_top_virt: u64) -> Result<(), &'static st
     let tramp_len = (smp_trampoline_end as *const u8 as usize)
         .saturating_sub(smp_trampoline as *const u8 as usize);
 
-    if tramp_len + 16 > 4096 {
+    if tramp_len + 24 > 4096 {
         return Err("SMP: trampoline exceeds its reserved page");
     }
     // The 16-bit prologue jumps to hard-coded physical addresses (0x8040) and
@@ -390,7 +454,7 @@ fn copy_trampoline(cr3_phys: u64, stack_top_virt: u64) -> Result<(), &'static st
     if stack_top_virt & 0xF != 0 {
         return Err("SMP: AP kernel stack top is not 16-byte aligned");
     }
-    ensure_identity_mapping(TRAMPOLINE_PHYS_ADDR, tramp_len + 16)?;
+    ensure_identity_mapping(TRAMPOLINE_PHYS_ADDR, tramp_len + 24)?;
 
     let tramp_virt = memory::phys_to_virt(TRAMPOLINE_PHYS_ADDR) as *mut u8;
 
@@ -400,8 +464,10 @@ fn copy_trampoline(cr3_phys: u64, stack_top_virt: u64) -> Result<(), &'static st
         let data = tramp_virt.add(tramp_len) as *mut u64;
         // +0: CR3
         core::ptr::write_volatile(data, cr3_phys);
-        // +8: RSP (stack top virtual address)
+        // +8: legacy RSP (stack top virtual address)
         core::ptr::write_volatile(data.add(1), stack_top_virt);
+        // +16: per-APIC stack table base (virtual address)
+        core::ptr::write_volatile(data.add(2), AP_STACK_TOPS.as_ptr() as u64);
 
         // SFENCE + WBINVD: ensure all stores reach RAM before the AP starts.
         core::arch::asm!("sfence");
@@ -496,10 +562,13 @@ pub fn broadcast_panic_halt() {
     if !apic::is_initialized() {
         return;
     }
-    // SMI delivery mode (0b100 << 8), all-excluding-self shorthand (0b11 << 18).
-    // Level bit = 0 (reserved for SMI mode per Intel SDM Vol. 3A Table 10-1).
+    // NMI delivery mode (0b100 << 8), all-excluding-self shorthand (0b11 << 18).
+    // Level bit = 0 (reserved for NMI mode per Intel SDM Vol. 3A Table 10-1).
     let icr_low = (0b11 << 18) | (0b100 << 8);
     apic::send_ipi_raw(0, icr_low);
+    // xAPIC: poll the delivery-pending bit so the NMI is actually dispatched.
+    // x2APIC: the MSR write is synchronous and wait_delivery() is a no-op.
+    wait_delivery();
 }
 
 /// Wait at a synchronization barrier until all expected CPUs arrive.
@@ -539,6 +608,7 @@ pub fn init() -> Result<usize, &'static str> {
     BOOTED_CORES.store(1, Ordering::Release);
     SYNC_BARRIER.store(0, Ordering::Release);
     BARRIER_TARGET.store(0, Ordering::Release);
+    BOOT_WINDOW_CLOSED.store(false, Ordering::SeqCst);
 
     let madt_info = madt::parse_madt().ok_or("MADT not available")?;
     let bsp_apic_id = apic::lapic_id();
@@ -612,6 +682,9 @@ pub fn init() -> Result<usize, &'static str> {
         }
 
         stack_tops[apic_id as usize] = stack_top;
+        // Publish this AP's stack into the per-APIC table read by the 64-bit
+        // stub, so a late AP can never observe another AP's stack.
+        AP_STACK_TOPS[apic_id as usize].store(stack_top, Ordering::Release);
 
         let cpu_index =
             percpu::register_cpu(apic_id).ok_or("SMP: exceeded MAX_CPUS for per-CPU data")?;
@@ -621,10 +694,9 @@ pub fn init() -> Result<usize, &'static str> {
         expected += 1;
     }
 
-    // Copy trampoline and write data area (CR3 + first AP's stack top).
-    // All APs share the same CR3; each gets its own stack from stack_tops.
-    // We write the first target's stack top; subsequent APs will use their
-    // own stack (set up in smp_main via percpu::kernel_stack_top).
+    // Copy trampoline and write the shared data area. All APs share the same
+    // CR3; each AP resolves its own stack from AP_STACK_TOPS using its APIC ID.
+    // The legacy +8 slot is kept for the first target only (diagnostic/back-compat).
     let first_stack_top = targets
         .first()
         .and_then(|id| stack_tops.get(*id as usize))
@@ -638,9 +710,10 @@ pub fn init() -> Result<usize, &'static str> {
         first_stack_top,
     );
 
-    // Send INIT + single SIPI to each AP, one at a time.
-    // Critical: each AP must consume the trampoline RSP before we overwrite
-    // it for the next AP. We wait for AP_REACHED_RUST ack after each SIPI.
+    // Send INIT + SIPI to each AP, one at a time. Each AP resolves its own
+    // stack from AP_STACK_TOPS, so the shared data area is never rewritten
+    // between targets. We still wait for AP_REACHED_RUST before booting the
+    // next AP to keep the console/APIC sequencing deterministic.
     crate::serial_println!(
         "[smp] init: sending INIT+SIPI to {} APs (sequential)",
         targets.len(),
@@ -648,59 +721,92 @@ pub fn init() -> Result<usize, &'static str> {
     for apic_id in &targets {
         AP_REACHED_RUST.store(usize::MAX, Ordering::Release);
 
-        // Write this AP's stack pointer into the trampoline data area.
-        if let Some(stack_top) = stack_tops.get(*apic_id as usize) {
-            let tramp_len = (smp_trampoline_end as *const u8 as usize)
-                .saturating_sub(smp_trampoline as *const u8 as usize);
-            let data = memory::phys_to_virt(TRAMPOLINE_PHYS_ADDR) as *mut u64;
-            unsafe {
-                // +8: RSP
-                core::ptr::write_volatile(data.add(tramp_len / 8 + 1), *stack_top);
-            }
-        }
-
         send_init_sipi(*apic_id);
 
-        // Wait for this AP to reach Rust and consume the stack pointer
-        // before we modify the slot for the next AP.
+        // Wait for this AP to reach Rust (100 ms TSC deadline).
+        let start = crate::arch::x86_64::rdtsc();
+        let budget = tsc_ticks_for_ms(100);
+        let mut acked = false;
         let mut spin: u64 = 0;
-        const ACK_TIMEOUT: u64 = 500_000_000;
-        while AP_REACHED_RUST.load(Ordering::Acquire) != *apic_id as usize && spin < ACK_TIMEOUT {
+        const ACK_SPIN_FALLBACK: u64 = 500_000_000;
+        loop {
+            if AP_REACHED_RUST.load(Ordering::Acquire) == *apic_id as usize {
+                acked = true;
+                break;
+            }
+            if budget != 0 {
+                if crate::arch::x86_64::rdtsc().wrapping_sub(start) >= budget {
+                    break;
+                }
+            } else if spin >= ACK_SPIN_FALLBACK {
+                break;
+            } else {
+                spin = spin.saturating_add(1);
+            }
             core::hint::spin_loop();
-            spin = spin.saturating_add(1);
         }
-        if spin >= ACK_TIMEOUT {
+        if !acked {
             crate::serial_println!(
                 "[smp] init: WARNING AP {} did not ACK within timeout",
                 apic_id
             );
+            // Revoke this AP's stack slot and stop it with an INIT assert so it
+            // cannot join later on a stale/shared stack.
+            AP_STACK_TOPS[*apic_id as usize].store(0, Ordering::Release);
+            send_ipi(*apic_id, 0xC500);
         } else {
             crate::serial_println!("[smp] init: AP {} ACKed (rust reached)", apic_id);
         }
     }
 
-    // Wait for APs to come online (they increment BOOTED_CORES in smp_main).
+    // Wait for APs to publish themselves online. `online_count()` counts only
+    // CPU indices that actually reached phase 3, unlike BOOTED_CORES (kept as
+    // a diagnostic counter only).
+    let start = crate::arch::x86_64::rdtsc();
+    let budget = tsc_ticks_for_ms(2000);
+    let mut last_log = 0u64;
     let mut spins: u64 = 0;
-    const MAX_SPINS: u64 = 200_000_000;
     crate::serial_println!("[smp] init: waiting for APs (expected={})...", expected,);
-    while BOOTED_CORES.load(Ordering::Acquire) < expected && spins < MAX_SPINS {
-        if spins > 0 && spins % 50_000_000 == 0 {
-            crate::serial_println!(
-                "[smp] init: waiting... online={} expected={} spins={}",
-                BOOTED_CORES.load(Ordering::Acquire),
-                expected,
-                spins,
-            );
+    loop {
+        if percpu::online_count() >= expected {
+            break;
+        }
+        if budget != 0 {
+            let elapsed = crate::arch::x86_64::rdtsc().wrapping_sub(start);
+            if elapsed >= budget {
+                break;
+            }
+            // Periodic diagnostics, bounded to one line every 500 ms.
+            if elapsed.wrapping_sub(last_log) >= tsc_ticks_for_ms(500) {
+                last_log = elapsed;
+                crate::serial_println!(
+                    "[smp] init: waiting... online={} expected={} elapsed_ms={}",
+                    percpu::online_count(),
+                    expected,
+                    elapsed / crate::arch::x86_64::boot_timestamp::tsc_khz().max(1),
+                );
+            }
+        } else {
+            // No TSC frequency: bounded spin fallback.
+            const MAX_SPINS: u64 = 200_000_000;
+            if spins >= MAX_SPINS {
+                break;
+            }
+            spins = spins.saturating_add(1);
         }
         core::hint::spin_loop();
-        spins = spins.saturating_add(1);
     }
-    let online = BOOTED_CORES.load(Ordering::Acquire);
+
+    // Close the boot window. Any AP that publishes its online bit after this
+    // point revokes it and halts (see smp_main), so the count below is
+    // authoritative: it cannot grow once we read it back.
+    BOOT_WINDOW_CLOSED.store(true, Ordering::SeqCst);
+    let online = percpu::online_count();
     crate::serial_println!(
-        "[smp] init: AP wait done: online={} expected={} spins={}",
+        "[smp] init: AP wait done: online={} expected={} booted_cores={}",
         online,
         expected,
-        spins,
+        BOOTED_CORES.load(Ordering::Acquire),
     );
     if online < expected {
         crate::serial_println!(
@@ -741,13 +847,10 @@ pub fn init() -> Result<usize, &'static str> {
 #[unsafe(no_mangle)]
 pub extern "C" fn smp_main() -> ! {
     // Read APIC ID first : needed to find our per-CPU state.
-    // Use raw port output since serial mutex isn't initialized yet.
+    // Diagnostics use the raw E9 port path (no UART lock, no reprogramming).
     let apic_id: u32;
     {
-        use core::fmt::Write;
-        let mut port = unsafe { uart_16550::SerialPort::new(0x3F8) };
-        port.init();
-        let _ = port.write_fmt(format_args!("[smp][ap] entered smp_main\n"));
+        crate::serial_force_println!("[smp][ap] entered smp_main");
         // CPUID leaf 1 EBX[31:24] = initial APIC ID.
         // rbx is LLVM-reserved, so save/restore it manually.
         let apic_id_raw: u32;
@@ -764,27 +867,27 @@ pub extern "C" fn smp_main() -> ! {
             );
         }
         apic_id = apic_id_raw >> 24;
-        let _ = port.write_fmt(format_args!("[smp][ap] cpuid apic_id={}\n", apic_id));
+        crate::serial_force_println!("[smp][ap] cpuid apic_id={}", apic_id);
     }
 
-    // Signal BSP that this AP has reached Rust and consumed the trampoline RSP.
+    // Signal BSP that this AP has reached Rust and consumed its stack.
     // Must happen immediately : before any per-CPU init that might fail.
     AP_REACHED_RUST.store(apic_id as usize, Ordering::Release);
+
+    // The BSP closes the boot window once it stops accepting new APs. An AP
+    // arriving after that must not touch per-CPU/scheduler state.
+    if BOOT_WINDOW_CLOSED.load(Ordering::SeqCst) {
+        halt_forever();
+    }
 
     let cpu_index = match percpu::cpu_index_by_apic(apic_id) {
         Some(idx) => idx,
         None => {
-            {
-                use core::fmt::Write;
-                let mut port = unsafe { uart_16550::SerialPort::new(0x3F8) };
-                let _ = port.write_fmt(format_args!(
-                    "[smp][ap] ERROR: apic_id={} not registered, halting\n",
-                    apic_id
-                ));
-            }
-            loop {
-                core::hint::spin_loop();
-            }
+            crate::serial_force_println!(
+                "[smp][ap] ERROR: apic_id={} not registered, halting",
+                apic_id
+            );
+            halt_forever();
         }
     };
 
@@ -806,12 +909,11 @@ pub extern "C" fn smp_main() -> ! {
         let expected = crate::arch::x86_64::cpuid::host_default_xcr0_fast();
         let actual = crate::arch::x86_64::xgetbv(0);
         if actual != expected {
-            use core::fmt::Write;
-            let mut port = unsafe { uart_16550::SerialPort::new(0x3F8) };
-            let _ = port.write_fmt(format_args!(
-                "[smp][ap] WARNING: XCR0 mismatch! expected={:#x} actual={:#x}\n",
-                expected, actual
-            ));
+            crate::serial_force_println!(
+                "[smp][ap] WARNING: XCR0 mismatch! expected={:#x} actual={:#x}",
+                expected,
+                actual
+            );
         }
     }
 
@@ -828,23 +930,33 @@ pub extern "C" fn smp_main() -> ! {
     apic::init_ap();
 
     // ── Phase 3: signal online ──
+    // Publish the online bit (SeqCst handshake with the BSP boot-window close),
+    // then confirm we are still inside the boot window. If the BSP already
+    // closed it, revoke our own bit and halt: joining now would race the BSP's
+    // scheduler initialization.
     let _ = percpu::mark_online_by_apic(apic_id);
+    if BOOT_WINDOW_CLOSED.load(Ordering::SeqCst) {
+        percpu::clear_online(cpu_index);
+        halt_forever();
+    }
     BOOTED_CORES.fetch_add(1, Ordering::Release);
 
-    {
-        use core::fmt::Write;
-        let mut port = unsafe { uart_16550::SerialPort::new(0x3F8) };
-        let _ = port.write_fmt(format_args!(
-            "[smp][ap] cpu_index={} online, waiting for barrier\n",
-            cpu_index
-        ));
-    }
+    crate::serial_force_println!(
+        "[smp][ap] cpu_index={} online, waiting for barrier",
+        cpu_index
+    );
 
     // AP spins until BSP publishes the barrier target.
     while BARRIER_TARGET.load(Ordering::Acquire) == 0 {
         core::hint::spin_loop();
     }
     rendezvous_barrier();
+
+    // The BSP may have revoked our online bit while closing the window (we
+    // lost the publication race); do not enter the scheduler in that case.
+    if !percpu::is_online(cpu_index) {
+        halt_forever();
+    }
 
     crate::serial_println!("[trace][ap] cpu_index={} entering scheduler", cpu_index);
 

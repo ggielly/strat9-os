@@ -723,6 +723,7 @@ pub fn maybe_preempt_from_interrupt(
             cpu.need_resched = true;
         }
         if cpu.current_task.is_none() || !cpu.need_resched {
+            lockdep_release(LockRank::Local);
             return None;
         }
 
@@ -731,6 +732,7 @@ pub fn maybe_preempt_from_interrupt(
             None => {
                 #[cfg(target_arch = "x86_64")]
                 crate::e9_mark!(b'X');
+                lockdep_release(LockRank::Local);
                 return None;
             }
         };
@@ -776,6 +778,7 @@ pub fn maybe_preempt_from_interrupt(
                 let class = cpu.class_table.class_for_task(&next);
                 cpu.class_rqs.enqueue(class, next);
                 let current_fpu = current.fpu_state.get() as *mut u8;
+                lockdep_release(LockRank::Local);
                 return Some(crate::arch::idt::InterruptReturnDecision {
                     next_rsp: 0,
                     old_fpu: current_fpu,
@@ -843,6 +846,7 @@ pub fn maybe_preempt_from_interrupt(
                 }
                 // Abort switch: return current task's FPU area for save/restore.
                 let current_fpu = current.fpu_state.get() as *mut u8;
+                lockdep_release(LockRank::Local);
                 return Some(crate::arch::idt::InterruptReturnDecision {
                     next_rsp: 0,
                     old_fpu: current_fpu,

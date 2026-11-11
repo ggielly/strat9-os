@@ -435,14 +435,12 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         }
     }
 
-    // Fast signal-pending hint: check the per-CPU flag set by `send_signal`
-    // when a signal targets the task currently running on this CPU. This
-    // avoids the expensive scheduler lock + Arc::clone when no signal is
-    // pending (the common case : +99.99% of syscalls).
-    //
-    // Cross-CPU signals (rare) are handled on the target's next syscall, or
-    // by the explicit `has_pending_signals()` check in blocking syscalls.
-    if crate::arch::percpu::test_and_clear_signal_pending_current() {
+    // Signal delivery gate. The per-CPU `signal_pending` flag is only a
+    // cheap hint: always clear it so it cannot be inherited by the next task
+    // scheduled on this CPU. The authoritative check is the CURRENT task's
+    // pending set, which covers cross-CPU signals and preempted-task hints.
+    let hinted = crate::arch::percpu::test_and_clear_signal_pending_current();
+    if hinted || crate::process::signal::has_pending_signals() {
         crate::process::signal::deliver_pending_signal(frame);
     }
 

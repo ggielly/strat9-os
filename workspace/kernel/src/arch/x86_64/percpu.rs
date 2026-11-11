@@ -116,6 +116,12 @@ impl PerCpu {
 }
 
 static CPU_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Bitmask of CPU indices that are currently online (MAX_CPUS = 32 bits).
+///
+/// Indices are assigned in MADT order at registration time, *before* an AP is
+/// known to have booted, so the set of online indices can be sparse. Consumers
+/// must iterate this mask instead of assuming `0..cpu_count()` is all online.
+static ONLINE_MASK: AtomicU64 = AtomicU64::new(0);
 static PERCPU: [PerCpu; MAX_CPUS] = [const { PerCpu::new() }; MAX_CPUS];
 
 /// Set to `true` once the BSP has called `init_gs_base`.
@@ -141,6 +147,8 @@ pub fn init_boot_cpu(apic_id: u32) -> usize {
     cpu.arch.cpu_index.store(0, Ordering::Release);
     cpu.tlb_ready.store(false, Ordering::Release);
     CPU_COUNT.store(1, Ordering::Release);
+    // BSP is always online; publish via the handshake mask as well.
+    ONLINE_MASK.fetch_or(1, Ordering::SeqCst);
     0
 }
 
@@ -164,6 +172,10 @@ pub fn register_cpu(apic_id: u32) -> Option<usize> {
 }
 
 /// Mark a CPU as online by APIC ID.
+///
+/// Publication uses a `SeqCst` OR on `ONLINE_MASK` so it forms a handshake with
+/// the BSP's `SeqCst` boot-window close: the BSP either observes this CPU as
+/// online, or this CPU observes the closed window and revokes its own bit.
 pub fn mark_online_by_apic(apic_id: u32) -> Option<usize> {
     for (idx, cpu) in PERCPU.iter().enumerate() {
         if cpu.present.load(Ordering::Acquire) && cpu.apic_id.load(Ordering::Acquire) == apic_id {
@@ -171,10 +183,55 @@ pub fn mark_online_by_apic(apic_id: u32) -> Option<usize> {
             cpu.tlb_ready.store(false, Ordering::Release);
             // Re-confirm index in arch block (no-op if already set, safe to repeat).
             cpu.arch.cpu_index.store(idx as u64, Ordering::Release);
+            ONLINE_MASK.fetch_or(1u64 << idx, Ordering::SeqCst);
             return Some(idx);
         }
     }
     None
+}
+
+/// Returns `true` iff CPU `index` is present and currently published online.
+pub fn is_online(index: usize) -> bool {
+    if index >= MAX_CPUS {
+        return false;
+    }
+    if !PERCPU[index].present.load(Ordering::Acquire) {
+        return false;
+    }
+    ONLINE_MASK.load(Ordering::Acquire) & (1u64 << index) != 0
+}
+
+/// Number of currently online CPUs (popcount of the online mask).
+pub fn online_count() -> usize {
+    ONLINE_MASK.load(Ordering::Acquire).count_ones() as usize
+}
+
+/// Revoke the online bit for `index` (used by an AP that lost the boot race).
+pub fn clear_online(index: usize) {
+    if index >= MAX_CPUS {
+        return;
+    }
+    ONLINE_MASK.fetch_and(!(1u64 << index), Ordering::SeqCst);
+    PERCPU[index].online.store(false, Ordering::Release);
+}
+
+/// Fill `out` with online CPU indices in ascending order; returns the count.
+///
+/// Indices are sparse: callers must not assume the first `count` slots of
+/// `0..cpu_count()` are the online ones.
+pub fn online_cpu_indices(out: &mut [usize]) -> usize {
+    let mask = ONLINE_MASK.load(Ordering::Acquire);
+    let mut count = 0;
+    for idx in 0..MAX_CPUS {
+        if mask & (1u64 << idx) != 0 && is_online(idx) {
+            if count == out.len() {
+                break;
+            }
+            out[count] = idx;
+            count += 1;
+        }
+    }
+    count
 }
 
 /// Set the per-CPU kernel stack top for the given CPU index.
@@ -397,9 +454,16 @@ pub fn percpu() -> &'static [PerCpu; MAX_CPUS] {
 }
 
 /// Mark current CPU as ready to handle TLB shootdown IPIs.
+///
+/// Ordering matters: publish readiness with `Release`, then a `SeqCst` fence,
+/// then flush the local TLB. Any page-table modification made before
+/// readiness was published is guaranteed visible and flushed before the CPU
+/// can acknowledge a shootdown.
 pub fn mark_tlb_ready_current() {
     let idx = current_cpu_index();
     PERCPU[idx].tlb_ready.store(true, Ordering::Release);
+    core::sync::atomic::fence(Ordering::SeqCst);
+    crate::arch::x86_64::tlb::flush_local_all();
 }
 
 /// Returns true iff CPU `index` is online and ready for TLB shootdown.
