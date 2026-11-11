@@ -498,3 +498,34 @@ fn load_disk_image_writes_remain_visible_through_sectors() {
     assert_eq!(memory.slice(STATUS_BYTE, 1)[0], request_status::OK);
     assert_eq!(memory.slice(DATA, 2 * SECTOR_SIZE), &image[..]);
 }
+
+#[test]
+fn device_reset_keeps_the_backing_store() {
+    // A driver starts its handshake by writing 0 to the device status (virtio
+    // reset). The policy provisions the disk with `SYS_VMM_LOAD_DISK` before
+    // the guest runs, so the reset must not erase the backing store: a real
+    // block device keeps its medium. Regression for the guest block driver
+    // reading zeros after its own `begin()` (the `d` marker observed on a
+    // hardware run).
+    let mut memory = Memory::new();
+    let mut device = VirtioBlk::new(16 * SECTOR_SIZE);
+    assert!(device.write_sector(0, b"S9VMDISK"));
+    // Driver handshake: reset, ACKNOWLEDGE, DRIVER, FEATURES_OK, queue, DRIVER_OK.
+    device.write(reg::STATUS, 0, &mut memory);
+    device.write(reg::STATUS, status::ACKNOWLEDGE, &mut memory);
+    device.write(
+        reg::STATUS,
+        status::ACKNOWLEDGE | status::DRIVER,
+        &mut memory,
+    );
+    device.write(
+        reg::STATUS,
+        status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK,
+        &mut memory,
+    );
+    let mut device = ready_with(&mut memory, device);
+    build_request(&mut memory, request::IN, 0, SECTOR_SIZE as u32, true);
+    device.write(reg::QUEUE_NOTIFY, 0, &mut memory);
+    assert_eq!(memory.slice(DATA, 8), b"S9VMDISK");
+    assert_eq!(memory.slice(STATUS_BYTE, 1)[0], request_status::OK);
+}

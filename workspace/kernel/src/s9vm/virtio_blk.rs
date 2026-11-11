@@ -352,8 +352,18 @@ impl VirtioBlk {
     /// Handles a device-status write.
     fn write_status(&mut self, value: u32) {
         if value == 0 {
-            let sectors = self.disk.len();
-            *self = Self::with_mode(sectors, self.read_only);
+            // Device reset (virtio specification): the transport, the feature
+            // negotiation and the queue state return to their initial values,
+            // but the **backing store is persistent**. A real block device
+            // does not erase its medium when the driver resets it, and the
+            // policy provisions the disk with `SYS_VMM_LOAD_DISK` before the
+            // guest runs: wiping it here made the guest read zeros after its
+            // own handshake (observed as the block driver's label mismatch).
+            let sectors = self.sectors();
+            let read_only = self.read_only;
+            let disk = core::mem::take(&mut self.disk);
+            *self = Self::with_mode(sectors as usize * SECTOR_SIZE, read_only);
+            self.disk = disk;
             return;
         }
         self.status = apply_status(self.status, value, &mut self.features);

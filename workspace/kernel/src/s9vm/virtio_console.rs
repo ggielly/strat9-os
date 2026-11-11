@@ -332,8 +332,15 @@ impl VirtioConsole {
     /// Handles a device-status write.
     fn write_status<M: QueueMemory + ?Sized>(&mut self, value: u32, memory: &mut M) {
         if value == 0 {
-            // Device reset: the driver must reprogram the queues.
+            // Device reset: the driver must reprogram the queues. Bytes the
+            // guest already transmitted are kept on the host side (the kernel
+            // has not read them yet) and so is the input the kernel queued
+            // before the reset: they belong to the host, not to the transport.
+            let input = core::mem::take(&mut self.input);
+            let output = core::mem::take(&mut self.output);
             *self = Self::new();
+            self.input = input;
+            self.output = output;
             return;
         }
         let next = apply_status(self.status, value, &mut self.features);

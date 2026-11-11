@@ -381,7 +381,21 @@ impl VirtioNet {
     /// Handles a device-status write.
     fn write_status<M: QueueMemory + ?Sized>(&mut self, value: u32, memory: &mut M) {
         if value == 0 {
+            // Device reset: the driver must reprogram the queues. Frames the
+            // guest already transmitted stay delivered on the host side, the
+            // link state belongs to the physical device and the counters are
+            // diagnostics: none of them are transport state.
+            let output = core::mem::take(&mut self.output);
+            let output_frames = core::mem::take(&mut self.output_frames);
+            let frames_sent = self.frames_sent;
+            let frames_received = self.frames_received;
+            let link_up = self.link_up;
             *self = Self::new();
+            self.output = output;
+            self.output_frames = output_frames;
+            self.frames_sent = frames_sent;
+            self.frames_received = frames_received;
+            self.link_up = link_up;
             return;
         }
         let next = apply_status(self.status, value, &mut self.features);
