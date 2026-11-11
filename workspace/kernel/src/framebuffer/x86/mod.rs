@@ -55,20 +55,21 @@ pub fn detect_and_init_ops() -> FramebufferOps {
         // so `__m128i` cannot travel in XMM registers and the intrinsics become
         // out-of-line helpers. Those helpers are miscompiled: they copy the
         // vector byte by byte and drop one lane (observed: 0x0011EE33 stored as
-        // 0x00110033, i.e. the green channel). Every op that *loads* pixels
-        // therefore uses the scalar/memcpy path; only `fill` (broadcast constant
-        // store, no vector load) keeps the SSE2 implementation.
+        // 0x00110033, i.e. the green channel). Ops that *load* pixels therefore
+        // avoid 128-bit intrinsics: `fill` is a broadcast constant store with no
+        // vector load, and `blit`/`blit_nt` use `rep movsq` (8-byte stores).
+        // `blend`/`convert` stay on the scalar path.
         //
         // Restore the SSE2 blit/blend/convert once the toolchain lowers the
         // 128-bit load/store intrinsics correctly (same underlying issue as the
         // disabled `_mm_stream_si128` paths below).
         FramebufferOps {
             fill: sse2::fill_sse2,
-            blit: generic::blit_generic,
+            blit: sse2::blit_q,
             blend: generic::blend_generic,
             convert: generic::convert_bgr_to_argb_generic,
             fill_nt: sse2::fill_nt_sse2,
-            blit_nt: generic::blit_nt_generic,
+            blit_nt: sse2::blit_q,
         }
     } else {
         FramebufferOps {

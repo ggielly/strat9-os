@@ -93,6 +93,25 @@ impl DirtyRect {
         self.y1.saturating_sub(self.y0)
     }
 
+    pub fn area(self) -> u64 {
+        self.width() as u64 * self.height() as u64
+    }
+
+    pub fn union(self, other: DirtyRect) -> DirtyRect {
+        if !self.is_valid() {
+            return other;
+        }
+        if !other.is_valid() {
+            return self;
+        }
+        DirtyRect {
+            x0: self.x0.min(other.x0),
+            y0: self.y0.min(other.y0),
+            x1: self.x1.max(other.x1),
+            y1: self.y1.max(other.y1),
+        }
+    }
+
     pub fn include(&mut self, x: u32, y: u32, w: u32, h: u32) {
         if w == 0 || h == 0 {
             return;
@@ -125,7 +144,7 @@ impl DirtyRect {
     }
 }
 
-pub const MAX_DIRTY_RECTS: usize = 8;
+pub const MAX_DIRTY_RECTS: usize = 16;
 
 #[derive(Clone, Copy)]
 pub struct DirtyRectSet {
@@ -174,7 +193,19 @@ impl DirtyRectSet {
             self.len += 1;
             return;
         }
-        self.rects[0].include(next.x0, next.y0, next.width(), next.height());
+        // Full: merge into the rectangle that grows the least, so one far-off
+        // rect cannot drag the whole presented area to the screen corner.
+        let mut best = 0;
+        let mut best_cost = u64::MAX;
+        for i in 0..self.len {
+            let union = self.rects[i].union(next);
+            let cost = union.area().saturating_sub(self.rects[i].area());
+            if cost < best_cost {
+                best_cost = cost;
+                best = i;
+            }
+        }
+        self.rects[best] = self.rects[best].union(next);
     }
 
     pub fn iter(&self) -> DirtyRectIter<'_> {
@@ -647,6 +678,15 @@ impl CanvasBuffer {
                     regions[region_count] = (r.x0, r.y0, r.width(), r.height());
                     region_count += 1;
                 }
+            }
+            // Small rect lists are cheaper only while they stay small: once the
+            // damage covers most of the panel, one contiguous copy beats many
+            // short blits (and avoids re-presenting the same pixels).
+            let fb_area = self.width as u64 * self.height as u64;
+            let dirty_area: u64 = self.dirty.iter().map(|r| r.area()).sum();
+            if fb_area != 0 && dirty_area.saturating_mul(10) > fb_area.saturating_mul(6) {
+                regions[0] = (0, 0, self.width as u32, self.height as u32);
+                region_count = 1;
             }
         } else {
             regions[0] = (0, 0, self.width as u32, self.height as u32);

@@ -89,6 +89,9 @@ pub struct VgaWriter {
     /// Scrollback ring-buffer.
     pub(crate) sb: ScrollbackBuffer,
     pub(crate) scroll_offset: usize,
+    /// Last scrollbar geometry `(total, scroll_offset, view_rows)`.
+    /// `usize::MAX` forces the next draw to repaint the whole strip.
+    sb_cache: (usize, usize, usize),
 
     // Live text damage is stored as cells, not repeatedly rasterized pixels.
     // Rows form a ring: scrolling only rotates the head and clears one row.
@@ -323,6 +326,7 @@ impl VgaWriter {
             },
             sb: ScrollbackBuffer::new(),
             scroll_offset: 0,
+            sb_cache: (usize::MAX, 0, 0),
             console_cells: Vec::new(),
             console_dirty_cells: Vec::new(),
             console_row_head: 0,
@@ -403,6 +407,7 @@ impl VgaWriter {
         };
         self.sb = ScrollbackBuffer::new();
         self.scroll_offset = 0;
+        self.sb_cache = (usize::MAX, 0, 0);
         self.console_cells = alloc::vec![SbCell { ch: ' ', fg: self.fg, bg: self.bg }; cols * rows];
         self.console_dirty_cells = alloc::vec![false; cols * rows];
         self.console_row_head = 0;
@@ -580,6 +585,7 @@ impl VgaWriter {
         self.rows = rows;
         self.console_cells = alloc::vec![SbCell { ch: ' ', fg: self.fg, bg: self.bg }; cols * rows];
         self.console_dirty_cells = alloc::vec![false; cols * rows];
+        self.sb_cache = (usize::MAX, 0, 0);
         self.console_row_head = 0;
         self.console_pending_scroll = 0;
         self.console_pending = false;
@@ -1050,6 +1056,10 @@ impl VgaWriter {
                 .fetch_add(region.w.saturating_mul(region.h) as u64, Ordering::Relaxed);
         }
 
+        // The mouse sprite is an overlay: draw it after the blit so the dirty
+        // rects above only carry clean back-buffer pixels.
+        self.overlay_mouse_cursor(&regions[..region_count]);
+
         PRESENTED_FRAMES.fetch_add(1, Ordering::Relaxed);
         self.clear_dirty();
         self.canm().present_pending = false;
@@ -1074,6 +1084,17 @@ impl VgaWriter {
         self.present_if_due(crate::process::scheduler::ticks() == 0);
     }
 
+    /// Present immediately: used by input-driven updates (mouse, wheel, drag,
+    /// selection) whose damaged area is small. Never throttled.
+    pub(crate) fn request_present_input(&mut self) {
+        if !self.draw_to_back_buffer() {
+            self.render_pending_console();
+            return;
+        }
+        self.canm().present_pending = true;
+        self.present_inner(true);
+    }
+
     pub(crate) fn present_if_due(&mut self, force: bool) {
         if !self.canm().present_pending || !self.draw_to_back_buffer() {
             return;
@@ -1087,30 +1108,15 @@ impl VgaWriter {
 
     // Mouse cursor ====================
 
-    /// Performs the mc save hw operation.
-    /// Uses read_pixel_packed (back-buffer aware) instead of read_hw_pixel_packed.
-    pub(crate) fn mc_save_hw(&mut self) {
-        let x = self.cursor.mc_x;
-        let y = self.cursor.mc_y;
-        let fw = self.can().width;
-        let fh = self.can().height;
-        for cy in 0..CURSOR_H {
-            for cx in 0..CURSOR_W {
-                let px = x + cx as i32;
-                let py = y + cy as i32;
-                if px < 0 || py < 0 || px as usize >= fw || py as usize >= fh {
-                    self.cursor.mc_save[cy * CURSOR_W + cx] = 0;
-                    continue;
-                }
-                self.cursor.mc_save[cy * CURSOR_W + cx] =
-                    self.read_pixel_packed(px as usize, py as usize);
-            }
-        }
+    /// Mark the sprite's framebuffer rect for repaint from the back buffer.
+    fn mark_cursor_rect(&mut self, x: i32, y: i32) {
+        let x = x.max(0) as usize;
+        let y = y.max(0) as usize;
+        self.mark_dirty_rect(x, y, CURSOR_W, CURSOR_H);
     }
 
-    /// Performs the mc draw hw operation.
-    /// Uses put_pixel_raw (back-buffer aware) instead of write_hw_pixel_packed.
-    pub(crate) fn mc_draw_hw(&mut self) {
+    /// Draw the sprite straight to the panel (early-boot direct mode only).
+    fn draw_mouse_cursor_direct(&mut self) {
         let x = self.cursor.mc_x;
         let y = self.cursor.mc_y;
         let black = self.pack_color(RgbColor::BLACK);
@@ -1134,34 +1140,71 @@ impl VgaWriter {
                 self.put_pixel_raw(px as usize, py as usize, color);
             }
         }
+        self.hw_fence();
     }
 
-    /// Performs the mc erase hw operation.
-    /// Uses put_pixel_raw (back-buffer aware) instead of write_hw_pixel_packed.
-    pub(crate) fn mc_erase_hw(&mut self) {
+    /// Overlay the mouse sprite on the framebuffer regions just presented.
+    ///
+    /// The sprite is never part of the back buffer, so a move only damages the
+    /// old and new rects; after the blit copies the clean pixels, the sprite is
+    /// merged row-by-row with the back buffer and written with wide stores.
+    /// `shortcut: direct (no-back-buffer) mode cannot erase the old sprite;`
+    /// `revisit if the mouse is ever enabled before double buffering.`
+    fn overlay_mouse_cursor(&mut self, regions: &[ClipRect]) {
+        if !self.cursor.mc_visible || !self.draw_to_back_buffer() {
+            return;
+        }
+        let fw = self.can().width;
+        let fh = self.can().height;
         let x = self.cursor.mc_x;
         let y = self.cursor.mc_y;
-        for cy in 0..CURSOR_H {
-            for cx in 0..CURSOR_W {
-                if CURSOR_PIXELS[cy * CURSOR_W + cx] == 0 {
-                    continue;
-                }
-                let px = x + cx as i32;
-                let py = y + cy as i32;
-                if px < 0
-                    || py < 0
-                    || px as usize >= self.can().width
-                    || py as usize >= self.can().height
-                {
-                    continue;
-                }
-                self.put_pixel_raw(
-                    px as usize,
-                    py as usize,
-                    self.cursor.mc_save[cy * CURSOR_W + cx],
+        let x0 = x.max(0) as usize;
+        let y0 = y.max(0) as usize;
+        let x1 = (x as i64 + CURSOR_W as i64).clamp(0, fw as i64) as usize;
+        let y1 = (y as i64 + CURSOR_H as i64).clamp(0, fh as i64) as usize;
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        // Only paint when the cursor rect intersects a region we just copied.
+        if !regions
+            .iter()
+            .any(|r| x0 < r.x + r.w && x1 > r.x && y0 < r.y + r.h && y1 > r.y)
+        {
+            return;
+        }
+        let Some(buf) = self.can().back_buffer.as_ref() else {
+            return;
+        };
+        let fb_addr = self.can().addr;
+        let pitch = self.can().pitch;
+        let bpp_bytes = (self.fmt.bpp as usize) / 8;
+        let black = self.pack_color(RgbColor::BLACK);
+        let white = self.pack_color(RgbColor::WHITE);
+        let n = x1 - x0;
+        for py in y0..y1 {
+            let sy = (py as i32 - y) as usize;
+            let mut row = [0u32; CURSOR_W];
+            for (i, px) in (x0..x1).enumerate() {
+                let sx = (px as i32 - x) as usize;
+                let p = CURSOR_PIXELS[sy * CURSOR_W + sx];
+                row[i] = if p == 0 {
+                    buf[py * fw + px]
+                } else if p == 1 {
+                    black
+                } else {
+                    white
+                };
+            }
+            // SAFETY: row `py`, columns `x0..x1` are inside the mapped row.
+            unsafe {
+                crate::arch::x86_64::vga::fastfb::store_row(
+                    fb_addr.add(py * pitch + x0 * bpp_bytes),
+                    bpp_bytes,
+                    &row[..n],
                 );
             }
         }
+        self.hw_fence();
     }
 
     /// Updates mouse cursor.
@@ -1170,27 +1213,38 @@ impl VgaWriter {
             return;
         }
         if self.cursor.mc_visible && self.cursor.mc_x == x && self.cursor.mc_y == y {
-            self.present_if_due(false);
             return;
         }
-        if self.cursor.mc_visible {
-            self.mc_erase_hw();
+        if self.draw_to_back_buffer() {
+            if self.cursor.mc_visible {
+                self.mark_cursor_rect(self.cursor.mc_x, self.cursor.mc_y);
+            }
+            self.cursor.mc_x = x;
+            self.cursor.mc_y = y;
+            self.cursor.mc_visible = true;
+            self.mark_cursor_rect(x, y);
+            self.request_present_input();
+            return;
         }
+        // Direct mode: no back buffer to repaint the old rect from.
         self.cursor.mc_x = x;
         self.cursor.mc_y = y;
-        self.mc_save_hw();
-        self.mc_draw_hw();
         self.cursor.mc_visible = true;
-        self.request_present();
+        self.draw_mouse_cursor_direct();
     }
 
     /// Performs the hide mouse cursor operation.
     pub fn hide_mouse_cursor(&mut self) {
-        if self.cursor.mc_visible {
-            self.mc_erase_hw();
+        if !self.cursor.mc_visible {
+            return;
+        }
+        if self.draw_to_back_buffer() {
+            self.mark_cursor_rect(self.cursor.mc_x, self.cursor.mc_y);
+            self.cursor.mc_visible = false;
+            self.request_present_input();
+        } else {
             self.cursor.mc_visible = false;
         }
-        self.request_present();
     }
 
     pub(crate) fn text_cursor_rect(&self) -> Option<(usize, usize, usize, usize)> {
@@ -1241,6 +1295,7 @@ impl VgaWriter {
                 self.put_pixel_raw(x + cx, y + cy, self.cursor.tc_color);
             }
         }
+        self.mark_dirty_rect(x, y, w, h);
     }
 
     /// Erase text cursor (restore saved pixels). Uses put_pixel_raw (back-buffer aware).
@@ -1259,6 +1314,7 @@ impl VgaWriter {
                 );
             }
         }
+        self.mark_dirty_rect(x, y, restore_w, restore_h);
     }
 
     pub(crate) fn draw_text_cursor_overlay(&mut self, color: RgbColor) {
@@ -1369,9 +1425,22 @@ impl VgaWriter {
             if row == self.sel_end_row && col == self.sel_end_col {
                 return;
             }
+            let old_end = self.sel_end_row;
             self.sel_end_row = row;
             self.sel_end_col = col;
-            self.render_viewport_full();
+            // Only the arm between the old and new selection ends changes;
+            // repaint just those visible rows instead of the whole viewport.
+            let (_, _, view_start, view_end, _) = self.visible_virtual_bounds();
+            if view_end > view_start {
+                let lo = old_end.min(row).max(view_start);
+                let hi = old_end.max(row).min(view_end - 1);
+                if lo <= hi {
+                    let (prev_draw, prev_track) = self.begin_viewport_render();
+                    self.redraw_visible_rows(lo - view_start, hi - lo + 1);
+                    self.end_viewport_render(prev_draw, prev_track);
+                }
+            }
+            self.request_present_input();
         }
     }
 
@@ -1439,6 +1508,7 @@ impl VgaWriter {
         self.console_pending = false;
         self.console_pending_scroll = 0;
         self.console_dirty_cells.fill(false);
+        self.sb_cache = (usize::MAX, 0, 0);
         let packed = self.pack_color(color);
         let canvas = self.can();
         let (fw, fh) = (canvas.width, canvas.height);
@@ -1554,6 +1624,9 @@ impl VgaWriter {
     }
 
     /// Performs the put pixel raw operation.
+    ///
+    /// Does not mark damage: bulk callers (`draw_line`, `draw_rect`, sprite
+    /// blits, glyphs, `fill_rect`) mark their bounding box once.
     pub(crate) fn put_pixel_raw(&mut self, x: usize, y: usize, color: u32) {
         if !self.enabled {
             return;
@@ -1569,7 +1642,6 @@ impl VgaWriter {
             if let Some(buf) = self.canm().back_buffer.as_mut() {
                 buf[y * fw + x] = color;
             }
-            self.mark_dirty_rect(x, y, 1, 1);
             return;
         }
         let _ = canvas;
@@ -1580,6 +1652,7 @@ impl VgaWriter {
     pub fn draw_pixel(&mut self, x: usize, y: usize, color: RgbColor) {
         self.render_pending_console();
         self.put_pixel_raw(x, y, self.pack_color(color));
+        self.mark_dirty_rect(x, y, 1, 1);
     }
 
     /// Performs the draw pixel alpha operation.
@@ -1595,6 +1668,7 @@ impl VgaWriter {
         }
         if alpha == 255 {
             self.put_pixel_raw(x, y, self.pack_color(color));
+            self.mark_dirty_rect(x, y, 1, 1);
             return;
         }
         let dst = self.unpack_color(self.read_pixel_packed(x, y));
@@ -1606,6 +1680,7 @@ impl VgaWriter {
             ((color.b as u16 * a + dst.b as u16 * inv + 127) / 255) as u8,
         );
         self.put_pixel_raw(x, y, self.pack_color(blended));
+        self.mark_dirty_rect(x, y, 1, 1);
     }
 
     /// Performs the draw line operation.
@@ -1637,6 +1712,11 @@ impl VgaWriter {
                 y += sy;
             }
         }
+        let bx0 = x0.min(x1).max(0) as usize;
+        let by0 = y0.min(y1).max(0) as usize;
+        let bx1 = x0.max(x1).max(0) as usize;
+        let by1 = y0.max(y1).max(0) as usize;
+        self.mark_dirty_rect(bx0, by0, bx1 - bx0 + 1, by1 - by0 + 1);
     }
 
     /// Performs the draw rect operation.
@@ -1939,6 +2019,7 @@ impl VgaWriter {
                 }
             }
         }
+        self.mark_dirty_rect(sx, sy, sw, sh);
         true
     }
 
@@ -2831,11 +2912,7 @@ impl VgaWriter {
         }
         // Clear first: drawing primitives below may call this ordering barrier.
         self.console_pending = false;
-        let mouse_visible = self.cursor.mc_visible;
         let text_visible = self.cursor.tc_visible;
-        if mouse_visible {
-            self.mc_erase_hw();
-        }
         if text_visible {
             self.text_cursor_erase_hw();
         }
@@ -2870,10 +2947,6 @@ impl VgaWriter {
             self.text_cursor_save_hw();
             self.text_cursor_draw_hw();
         }
-        if mouse_visible {
-            self.mc_save_hw();
-            self.mc_draw_hw();
-        }
     }
 
     // =============================================================
@@ -2899,6 +2972,9 @@ impl VgaWriter {
     }
 
     /// Draw (or refresh) the scrollbar strip on the right edge of the text area.
+    ///
+    /// Only the union of the old and new thumb boxes is repainted, and nothing
+    /// is touched at all while `(total, offset, rows)` is unchanged.
     pub(crate) fn draw_scrollbar_inner(&mut self) {
         if !self.enabled || self.can().width == 0 {
             return;
@@ -2907,37 +2983,58 @@ impl VgaWriter {
         if text_h == 0 {
             return;
         }
+
+        fn geometry(total: usize, offset: usize, view_rows: usize, text_h: usize) -> (usize, usize, bool) {
+            if total <= view_rows {
+                // Not enough content to scroll: full-height thumb with border.
+                return (0, text_h, true);
+            }
+            let max_offset = total - view_rows;
+            let thumb_h = ((text_h * view_rows) / total).max(6).min(text_h);
+            let avail = text_h.saturating_sub(thumb_h);
+            // offset 0 = thumb at bottom; max_offset = thumb at top
+            let thumb_y = if offset == 0 || avail == 0 {
+                avail
+            } else {
+                avail - (avail * offset / max_offset)
+            };
+            (thumb_y, thumb_h, false)
+        }
+
+        let total = self.sb.rows.len() + 1; // +1 accounts for current partial row
+        let key = (total, self.scroll_offset, self.rows);
+        if key == self.sb_cache {
+            return;
+        }
+        let old_key = core::mem::replace(&mut self.sb_cache, key);
+
         let sb_x = self.can().width.saturating_sub(SCROLLBAR_W);
         let sb_w = SCROLLBAR_W;
-        let total = self.sb.rows.len() + 1; // +1 accounts for current partial row
         let track_color = self.unpack_color(self.fmt.pack_rgb(0x22, 0x28, 0x38));
         let thumb_color = self.unpack_color(self.fmt.pack_rgb(0x58, 0x72, 0xA0));
         let thumb_hi_color = self.unpack_color(self.fmt.pack_rgb(0x80, 0xA0, 0xC8));
 
-        if total <= self.rows {
-            // Not enough content to scroll: full-height thumb with border.
-            self.fill_rect(sb_x, 0, sb_w, text_h, track_color);
+        // Sentinel (never drawn) or same geometry class: cover the whole strip.
+        let (old_y, old_h) = if old_key.0 == usize::MAX {
+            (0, text_h)
+        } else {
+            let (y, h, _) = geometry(old_key.0, old_key.1, old_key.2, text_h);
+            (y, h)
+        };
+        let (new_y, new_h, new_full) = geometry(total, self.scroll_offset, self.rows, text_h);
+
+        let top = old_y.min(new_y);
+        let bottom = (old_y + old_h).max(new_y + new_h).min(text_h);
+        if bottom > top {
+            // Erase the union of old/new thumb boxes back to the track.
+            self.fill_rect(sb_x, top, sb_w, bottom - top, track_color);
+        }
+        if new_full {
             if sb_w > 2 && text_h > 2 {
                 self.fill_rect(sb_x + 1, 1, sb_w - 2, text_h - 2, thumb_hi_color);
             }
-            return;
-        }
-
-        let max_offset = total.saturating_sub(self.rows);
-        let thumb_h = ((text_h * self.rows) / total).max(6);
-        let avail = text_h.saturating_sub(thumb_h);
-        // offset 0 = thumb at bottom; max_offset = thumb at top
-        let thumb_y = if self.scroll_offset == 0 || avail == 0 {
-            avail // = text_h - thumb_h (bottom)
-        } else {
-            avail - (avail * self.scroll_offset / max_offset)
-        };
-
-        // Draw track background
-        self.fill_rect(sb_x, 0, sb_w, text_h, track_color);
-        // Draw thumb
-        if thumb_h > 0 && thumb_h < text_h {
-            self.fill_rect(sb_x, thumb_y, sb_w, thumb_h, thumb_color);
+        } else if new_h > 0 && new_h < text_h {
+            self.fill_rect(sb_x, new_y, sb_w, new_h, thumb_color);
         }
     }
 
@@ -2986,7 +3083,12 @@ impl VgaWriter {
         }
         let total = self.sb.rows.len() + 1;
         let max_off = total.saturating_sub(self.rows);
-        self.set_scroll_offset_and_render((self.scroll_offset + lines).min(max_off));
+        let new = (self.scroll_offset + lines).min(max_off);
+        if new == self.scroll_offset {
+            return;
+        }
+        self.set_scroll_offset_and_render(new);
+        self.request_present_input();
     }
 
     /// Scroll the view down (forward, toward live) by `lines` lines.
@@ -2994,7 +3096,12 @@ impl VgaWriter {
         if !self.enabled {
             return;
         }
-        self.set_scroll_offset_and_render(self.scroll_offset.saturating_sub(lines));
+        let new = self.scroll_offset.saturating_sub(lines);
+        if new == self.scroll_offset {
+            return;
+        }
+        self.set_scroll_offset_and_render(new);
+        self.request_present_input();
     }
 
     /// Immediately return to the live (bottom) view.
@@ -3027,7 +3134,12 @@ impl VgaWriter {
         // py = 0 => top = oldest = max_offset; py = text_h - 1 => bottom = 0
         let py = px_y.min(text_h - 1);
         let offset = max_off * (text_h - 1 - py) / (text_h - 1);
-        self.set_scroll_offset_and_render(offset.min(max_off));
+        let offset = offset.min(max_off);
+        if offset == self.scroll_offset {
+            return;
+        }
+        self.set_scroll_offset_and_render(offset);
+        self.request_present_input();
     }
 
     /// Drag the scrollbar thumb to vertical pixel `px_y`.
@@ -3051,7 +3163,12 @@ impl VgaWriter {
         // py = 0 -> top = oldest = max_offset; py = text_h - 1 -> bottom = 0
         let py = px_y.min(text_h - 1);
         let offset = max_off * (text_h - 1 - py) / (text_h - 1);
-        self.set_scroll_offset_and_render(offset.min(max_off));
+        let offset = offset.min(max_off);
+        if offset == self.scroll_offset {
+            return;
+        }
+        self.set_scroll_offset_and_render(offset);
+        self.request_present_input();
     }
 
     /// Returns `true` if the pixel coordinates fall within the scrollbar strip.

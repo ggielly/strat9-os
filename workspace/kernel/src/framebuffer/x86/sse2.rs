@@ -62,6 +62,40 @@ pub unsafe fn blit_sse2(dst: *mut u32, src: *const u32, count: usize) {
     }
 }
 
+/// 32-bit bulk copy using the string engine (`rep movsq`, 8-byte stores).
+///
+/// The pinned nightly miscompiles the 128-bit load/store intrinsics on
+/// `x86_64-unknown-none` (see `x86/mod.rs`), so bulk copies must not use
+/// vectors. `rep movsq` is the fastest portable wide copy here and, unlike
+/// `copy_nonoverlapping`, it does not depend on vector lowering.
+///
+/// # Safety
+/// `dst` must be valid for `count` u32 writes and `src` for `count` reads;
+/// the ranges must not overlap.
+#[inline(never)]
+pub unsafe fn blit_q(dst: *mut u32, src: *const u32, count: usize) {
+    if count == 0 {
+        return;
+    }
+    let qwords = count / 2;
+    if qwords != 0 {
+        core::arch::asm!(
+            "rep movsq",
+            inout("rcx") qwords => _,
+            inout("rdi") dst => _,
+            inout("rsi") src => _,
+            options(nostack, preserves_flags),
+        );
+    }
+    // Odd pixel: `rep movsq` copied whole 8-byte groups only.
+    if count & 1 != 0 {
+        core::ptr::write_unaligned(
+            dst.add(count - 1),
+            core::ptr::read_unaligned(src.add(count - 1)),
+        );
+    }
+}
+
 // === Streaming (non-temporal) store entry points ===========================
 // The pinned nightly `1.100.0-nightly (2026-07-20)` cannot lower
 // `_mm_stream_si128` (movntdq) for `x86_64-unknown-none`: the target emits

@@ -22,12 +22,12 @@
 
 //! Cursor manager for the framebuffer terminal.
 //!
-//! Owns the mouse-cursor and text-cursor state (position, visibility, saved
-//! pixels) and provides methods to save/restore/draw them directly to the
-//! hardware framebuffer via [`CanvasBuffer`].
+//! Owns the mouse-cursor and text-cursor state and provides methods to
+//! save/restore/draw the text cursor directly to the hardware framebuffer via
+//! [`CanvasBuffer`]. The mouse cursor is a present-time overlay in
+//! `writer.rs`; only its state lives here.
 
-use super::types::PixelFormat;
-use crate::framebuffer::{CanvasBuffer, RgbColor};
+use crate::framebuffer::CanvasBuffer;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -67,7 +67,7 @@ pub(crate) const CURSOR_PIXELS: [u8; CURSOR_W * CURSOR_H] = [
 
 /// Holds all cursor-related state for the framebuffer terminal.
 ///
-/// **Mouse cursor** – a small arrow sprite that can be saved/restored/drawn.
+/// **Mouse cursor** – state only; the sprite is an overlay drawn at present.
 /// **Text cursor** – a blinking underline / block that follows the text input
 /// position.
 pub(crate) struct CursorManager {
@@ -75,8 +75,6 @@ pub(crate) struct CursorManager {
     pub mc_x: i32,
     pub mc_y: i32,
     pub mc_visible: bool,
-    pub mc_dirty: bool,
-    pub mc_save: [u32; CURSOR_W * CURSOR_H],
 
     // -- Text cursor --------------------------------------------------------
     pub tc_col: usize,
@@ -96,8 +94,6 @@ impl CursorManager {
             mc_x: 0,
             mc_y: 0,
             mc_visible: false,
-            mc_dirty: false,
-            mc_save: [0u32; CURSOR_W * CURSOR_H],
             tc_col: 0,
             tc_row: 0,
             tc_w: 0,
@@ -106,105 +102,6 @@ impl CursorManager {
             tc_dirty: false,
             tc_color: 0,
             tc_save: [0u32; TEXT_CURSOR_MAX_DIM * TEXT_CURSOR_MAX_DIM],
-        }
-    }
-
-    // ========================================================================
-    // Mouse cursor
-    // ========================================================================
-
-    /// Save the pixels under the mouse cursor into `mc_save`.
-    /// Sets `mc_dirty = true` so `present()` will redraw.
-    pub fn mc_save_hw(&mut self, canvas: &CanvasBuffer) {
-        self.mc_dirty = true;
-        let x = self.mc_x;
-        let y = self.mc_y;
-        for cy in 0..CURSOR_H {
-            for cx in 0..CURSOR_W {
-                let px = x + cx as i32;
-                let py = y + cy as i32;
-                if px < 0 || py < 0 || px as usize >= canvas.width || py as usize >= canvas.height {
-                    self.mc_save[cy * CURSOR_W + cx] = 0;
-                    continue;
-                }
-                self.mc_save[cy * CURSOR_W + cx] = canvas.read_hw_pixel(px as usize, py as usize);
-            }
-        }
-    }
-
-    /// Draw the mouse cursor sprite onto the hardware framebuffer.
-    pub fn mc_draw_hw(&mut self, canvas: &mut CanvasBuffer, fmt: &PixelFormat) {
-        let x = self.mc_x;
-        let y = self.mc_y;
-        let black = fmt.pack_rgb(RgbColor::BLACK.r, RgbColor::BLACK.g, RgbColor::BLACK.b);
-        let white = fmt.pack_rgb(RgbColor::WHITE.r, RgbColor::WHITE.g, RgbColor::WHITE.b);
-        for cy in 0..CURSOR_H {
-            for cx in 0..CURSOR_W {
-                let p = CURSOR_PIXELS[cy * CURSOR_W + cx];
-                if p == 0 {
-                    continue;
-                }
-                let px = x + cx as i32;
-                let py = y + cy as i32;
-                if px < 0 || py < 0 || px as usize >= canvas.width || py as usize >= canvas.height {
-                    continue;
-                }
-                let color = if p == 1 { black } else { white };
-                canvas.write_hw_pixel(px as usize, py as usize, color);
-            }
-        }
-    }
-
-    /// Erase the mouse cursor by restoring the saved pixels.
-    /// Sets `mc_dirty = true` so the next `present()` flushes the change.
-    pub fn mc_erase_hw(&mut self, canvas: &mut CanvasBuffer) {
-        self.mc_dirty = true;
-        let x = self.mc_x;
-        let y = self.mc_y;
-        for cy in 0..CURSOR_H {
-            for cx in 0..CURSOR_W {
-                if CURSOR_PIXELS[cy * CURSOR_W + cx] == 0 {
-                    continue;
-                }
-                let px = x + cx as i32;
-                let py = y + cy as i32;
-                if px < 0 || py < 0 || px as usize >= canvas.width || py as usize >= canvas.height {
-                    continue;
-                }
-                canvas.write_hw_pixel(px as usize, py as usize, self.mc_save[cy * CURSOR_W + cx]);
-            }
-        }
-    }
-
-    /// Update mouse cursor position (save old area, redraw at new position).
-    pub fn update_mouse_cursor(
-        &mut self,
-        x: i32,
-        y: i32,
-        canvas: &mut CanvasBuffer,
-        fmt: &PixelFormat,
-    ) -> bool {
-        let moved = self.mc_visible && (self.mc_x != x || self.mc_y != y);
-        let needs_redraw = !self.mc_visible || moved;
-
-        if moved {
-            self.mc_erase_hw(canvas);
-        }
-        if needs_redraw {
-            self.mc_x = x;
-            self.mc_y = y;
-            self.mc_save_hw(canvas);
-            self.mc_draw_hw(canvas, fmt);
-            self.mc_visible = true;
-        }
-        needs_redraw
-    }
-
-    /// Hide the mouse cursor.
-    pub fn hide_mouse_cursor(&mut self, canvas: &mut CanvasBuffer) {
-        if self.mc_visible {
-            self.mc_erase_hw(canvas);
-            self.mc_visible = false;
         }
     }
 

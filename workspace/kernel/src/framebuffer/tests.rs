@@ -293,4 +293,24 @@ mod test {
         assert_eq!(hw[4], SENTINEL, "second row is not dirty");
         assert_eq!(hw[7], SENTINEL);
     }
+
+    #[test]
+    fn test_dirty_rect_overflow_merges_with_least_growth() {
+        let mut set = DirtyRectSet::empty();
+        for i in 0..MAX_DIRTY_RECTS {
+            set.include(i as u32 * 100, 0, 10, 10);
+        }
+        assert_eq!(set.len, MAX_DIRTY_RECTS);
+
+        // A far-away rect must merge into the slot that grows the least
+        // (the right-most one), not blindly into `rects[0]`.
+        set.include(5000, 5000, 10, 10);
+        assert_eq!(set.len, MAX_DIRTY_RECTS);
+        let last = set.rects[MAX_DIRTY_RECTS - 1];
+        assert_eq!(last.x1, 5010);
+        assert_eq!(last.y1, 5010);
+        // The original first rect is still there, untouched.
+        assert_eq!(set.rects[0].x0, 0);
+        assert_eq!(set.rects[0].x1, 10);
+    }
 }

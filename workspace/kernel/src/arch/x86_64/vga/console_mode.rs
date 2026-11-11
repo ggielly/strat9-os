@@ -67,9 +67,12 @@ static PRESENT_INTERVAL_TICKS: AtomicU32 = AtomicU32::new(0);
 /// Timer tick rate, matching `PRESENT_MIN_TICKS` in the framebuffer layer.
 const TIMER_HZ: u32 = 100;
 
-/// Default console refresh rate. A text console does not need more, and every
-/// frame is a full-width dirty-region copy to the panel.
-const DEFAULT_FPS: u32 = 14;
+/// Default console refresh rate.
+///
+/// `TIMER_HZ / 50 = 2 ticks`, so a present is due every 2 scheduler ticks.
+/// Anything above 50 FPS needs a faster timer: 60+ would compute an interval
+/// of 1 tick and run at the 100 Hz timer rate instead.
+const DEFAULT_FPS: u32 = 50;
 
 impl ConsoleMode {
     /// Stable name for logs and `/proc`-style reporting.
@@ -142,7 +145,7 @@ pub fn select(args: &KernelArgs) -> ConsoleMode {
 pub fn present_min_ticks() -> u64 {
     let configured = PRESENT_INTERVAL_TICKS.load(Ordering::Relaxed);
     if configured == 0 {
-        // Not selected yet: keep the historical 14 FPS behaviour.
+        // Not selected yet: use the compile-time default cadence.
         (TIMER_HZ / DEFAULT_FPS) as u64
     } else {
         configured as u64
