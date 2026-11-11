@@ -11,6 +11,7 @@ members = [
     "workspace/abi",
     "workspace/elf-core",
     "workspace/kernel",
+    "workspace/kernel/libs/fbsurface",
     "workspace/bootloader",
     "workspace/drivers/bus",
     "workspace/drivers/nic/net-core",
@@ -59,6 +60,7 @@ resolver = "2"
 [workspace.dependencies]
 strat9-abi = { path = "workspace/abi" }
 strat9-elf-core = { path = "workspace/elf-core" }
+fbsurface = { path = "workspace/kernel/libs/fbsurface" }
 spin = "0.10.0"
 bitflags = "2.11.1"
 log = "0.4"

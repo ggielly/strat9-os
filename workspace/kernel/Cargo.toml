@@ -56,6 +56,7 @@ uart_16550 = "0.4"
 fdt = "0.1"
 strat9-abi = { workspace = true }
 strat9-elf-core = { workspace = true }
+fbsurface = { workspace = true }
 ####
 # strat9 components
 component = { path = "libs/component" }

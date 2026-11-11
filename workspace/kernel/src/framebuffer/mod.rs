@@ -25,8 +25,10 @@ use alloc::vec::Vec;
 pub mod fpu;
 pub mod generic;
 pub mod gpu;
+pub mod surface;
 
 pub use fpu::FpuGuard;
+pub use surface::{surface_from_fb, KernelOps, Presenter, Surface};
 
 #[cfg(test)]
 pub mod tests;
