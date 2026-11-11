@@ -72,12 +72,10 @@
 //! not expect is logged with its decoded reason so a failure is diagnosable on
 //! the target machine without rebuilding.
 
-use alloc::vec;
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 use strat9_abi::vmm::{exit_kind, VmmRegs, VMM_ABI_VERSION};
-use strat9_elf_core::build::ImageWriter;
-use strat9_elf_core::{ET_EXEC, PF_R, PF_X};
+use strat9_elf_core::{build::ImageWriter, ET_EXEC, PF_R, PF_X};
 
 use crate::{
     memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame},
@@ -2779,6 +2777,8 @@ pub struct SmpReport {
     pub wall_cycles: u64,
     /// True when both RUN requests were queued back-to-back in every round.
     pub requested_together: bool,
+    /// Number of RUNs executed by each vCPU task.
+    pub runs_per_vcpu: [u64; 2],
 }
 
 /// Builds the ABI register block that starts one SMP vCPU.
@@ -2850,19 +2850,19 @@ fn smp_write_page_tables(
 /// The world (and its vCPU tasks) is destroyed on every path.
 /// SMP (multi-vCPU) test: two vCPUs executed concurrently when possible.
 ///
-/// The phase queues both RUN requests through a zero-budget
-/// `vm::request_run_timeout` (there is no non-blocking `request_run`), then
-/// collects both policy exits from the shared queue. Expected serial line on a
-/// host with working VT-x:
+/// The phase queues both RUN requests through `vm::request_run_async` (kernel
+/// internal, non-blocking), then collects both policy exits from the shared
+/// queue. Expected serial line on a host with working VT-x and more than one
+/// scheduler CPU:
 ///
 /// ```text
 /// [s9vm] smptest PASS: vcpus=2 ... concurrent=<bool> cpus=<n> \
-///     requested_together=true wall_cycles=<cycles>
+///     requested_together=true wall_cycles=<cycles> runs_per_vcpu=[2, 2]
 /// ```
 ///
-/// `concurrent=true` requires both tasks to be observed executing together
-/// **and** more than one scheduler CPU; a single-CPU scheduler legitimately
-/// reports `false` (both RUNs are queued but serialized).
+/// `concurrent=true` requires both vCPUs to be observed with `in_guest` set at
+/// the same time **and** more than one scheduler CPU; a single-CPU scheduler
+/// legitimately reports `false` (both RUNs are queued but serialized).
 pub fn run_smp(caps: &HwCaps) -> Result<SmpReport, SelftestError> {
     if !caps.can_run() {
         return Err(SelftestError::BadExit("platform cannot run"));
@@ -2924,20 +2924,18 @@ fn run_smp_in_world(caps: &HwCaps, world_id: u64) -> Result<SmpReport, SelftestE
         })?;
     }
 
-    // 4. Concurrent execution attempt. There is no non-blocking `request_run`
-    //    in `vm`; a zero-budget `request_run_timeout` only queues the RUN and
-    //    returns `Timeout`, which lets both vCPU tasks be runnable at the same
-    //    time. The exits are then collected from the shared queue, and the
-    //    snapshot sampled while waiting records whether both tasks were
-    //    observed executing together. On a single-CPU scheduler both requests
-    //    are queued but only one task runs at a time: that is reported as
-    //    `concurrent=false` instead of being claimed as overlap.
+    // 4. Concurrent execution. `request_run_async` posts the RUN and returns
+    //    immediately, so both vCPU tasks are runnable at the same time. The
+    //    exits are then collected from the shared queue while snapshots are
+    //    sampled: `in_guest` on both vCPUs is the actual overlap evidence
+    //    (unlike `executing`, which only says the request is queued).
     let scheduler_cpus = crate::arch::smp::cpu_count().max(1) as u32;
     let mut markers: [Option<u8>; 2] = [None; 2];
     let mut exits_per_vcpu: [u32; 2] = [0; 2];
     let mut hlt = 0u32;
     let mut total_runs = 0u32;
     let mut concurrent = false;
+    let mut overlap_observed = false;
     let mut requested_together = false;
     let mut wall_cycles = 0u64;
     for round in 0..2u32 {
@@ -2947,8 +2945,8 @@ fn run_smp_in_world(caps: &HwCaps, world_id: u64) -> Result<SmpReport, SelftestE
             if total_runs >= SMP_MAX_RUNS {
                 return Err(SelftestError::BadExit("smp RUN budget exhausted"));
             }
-            match vm::request_run_timeout(*vcpu, 0) {
-                Ok(()) | Err(vm::RunError::Timeout) => requested[index] = true,
+            match vm::request_run_async(*vcpu) {
+                Ok(()) => requested[index] = true,
                 Err(error) => {
                     log::warn!(
                         "[s9vm] smp test: vCPU {} round {} async RUN failed: {:?} \
@@ -2981,8 +2979,8 @@ fn run_smp_in_world(caps: &HwCaps, world_id: u64) -> Result<SmpReport, SelftestE
         let mut collected = 0usize;
         while collected < 2 {
             if let Some(snapshots) = vm::vcpu_snapshots(world_id) {
-                if snapshots.len() == 2 && snapshots.iter().all(|snapshot| snapshot.executing) {
-                    concurrent = true;
+                if snapshots.len() == 2 && snapshots.iter().all(|snapshot| snapshot.in_guest) {
+                    overlap_observed = true;
                 }
             }
             if vm::exit_count(world_id).unwrap_or(0) > 0 {
@@ -3010,12 +3008,13 @@ fn run_smp_in_world(caps: &HwCaps, world_id: u64) -> Result<SmpReport, SelftestE
             if crate::process::scheduler::ticks() >= deadline_ticks {
                 log::warn!(
                     "[s9vm] smp test: round {} exit timeout collected={} exits={:?} \
-                         hlt={} concurrent={}",
+                         hlt={} overlap={} cpus={}",
                     round,
                     collected,
                     exits_per_vcpu,
                     hlt,
-                    concurrent
+                    overlap_observed,
+                    scheduler_cpus
                 );
                 return Err(SelftestError::BadExit("smp exit timeout"));
             }
@@ -3072,22 +3071,23 @@ fn run_smp_in_world(caps: &HwCaps, world_id: u64) -> Result<SmpReport, SelftestE
             }
         }
 
-        // The vCPU task clears `run_in_flight` just after publishing the exit;
-        // wait for that before the next round so the next request is accepted.
+        // The vCPU task publishes `run_done` just after the exit; wait for it
+        // with the bounded async-completion helper before the next round.
         for vcpu in vcpus {
-            if !smp_wait_vcpu_idle(world_id, vcpu, SMP_EXIT_TIMEOUT_NS) {
+            if let Err(error) = vm::wait_run_complete(vcpu, SMP_EXIT_TIMEOUT_NS) {
                 log::warn!(
-                    "[s9vm] smp test: vCPU {} did not become idle after round {}",
+                    "[s9vm] smp test: vCPU {} did not complete round {}: {:?}",
                     vcpu,
-                    round
+                    round,
+                    error
                 );
-                return Err(SelftestError::BadExit("smp vCPU stayed busy"));
+                return Err(SelftestError::BadExit("smp vCPU run not completed"));
             }
         }
     }
     // Real overlap needs more than one scheduler CPU; with one CPU the two
     // tasks are runnable together but serialized by the scheduler.
-    concurrent = concurrent && scheduler_cpus > 1 && requested_together;
+    concurrent = overlap_observed && scheduler_cpus > 1 && requested_together;
 
     // 5. Markers: the shared page is the authoritative trace (written by the
     //    guest before the exit), and each vCPU context must also still hold
@@ -3143,8 +3143,9 @@ fn run_smp_in_world(caps: &HwCaps, world_id: u64) -> Result<SmpReport, SelftestE
         ));
     }
 
-    // 6. APIC identifiers and engine counters.
+    // 6. APIC identifiers, per-vCPU run counters and engine counters.
     let mut apic_ids = [0u32; 2];
+    let mut runs_per_vcpu = [0u64; 2];
     {
         let snapshots = vm::vcpu_snapshots(world_id)
             .ok_or(SelftestError::BadExit("smp world snapshots missing"))?;
@@ -3154,10 +3155,24 @@ fn run_smp_in_world(caps: &HwCaps, world_id: u64) -> Result<SmpReport, SelftestE
         apic_ids[0] = snapshots[0].apic_id;
         apic_ids[1] = snapshots[1].apic_id;
         apic_ids.sort_unstable();
+        for (index, vcpu) in vcpus.iter().enumerate() {
+            runs_per_vcpu[index] = snapshots
+                .iter()
+                .find(|snapshot| snapshot.id == *vcpu)
+                .map(|snapshot| snapshot.runs)
+                .unwrap_or(0);
+        }
     }
     if apic_ids != [0, 1] {
         log::warn!("[s9vm] smp test: unexpected APIC ids {:?}", apic_ids);
         return Err(SelftestError::BadExit("smp unexpected APIC ids"));
+    }
+    if runs_per_vcpu != [2, 2] {
+        log::warn!(
+            "[s9vm] smp test: per-vCPU runs {:?} expected [2, 2] (total stats runs pending)",
+            runs_per_vcpu
+        );
+        return Err(SelftestError::BadExit("smp per-vCPU run counters mismatch"));
     }
 
     let stats = vm::stats(world_id).ok_or(SelftestError::BadExit("smp stats missing"))?;
@@ -3206,35 +3221,8 @@ fn run_smp_in_world(caps: &HwCaps, world_id: u64) -> Result<SmpReport, SelftestE
         scheduler_cpus,
         wall_cycles,
         requested_together,
+        runs_per_vcpu,
     })
-}
-
-/// Waits, with a bound, until a vCPU's RUN request has been fully retired.
-///
-/// `request_run_timeout(.., 0)` returns while the RUN is still in flight; the
-/// vCPU task clears `run_in_flight` just after publishing the exit, so the next
-/// round must wait for that transition before requesting again.
-fn smp_wait_vcpu_idle(world_id: u64, vcpu: u64, timeout_ns: u64) -> bool {
-    let budget_ticks = (timeout_ns / crate::arch::timer::NS_PER_TICK).max(1);
-    let deadline = crate::process::scheduler::ticks().saturating_add(budget_ticks);
-    loop {
-        if let Some(snapshots) = vm::vcpu_snapshots(world_id) {
-            if snapshots
-                .iter()
-                .find(|snapshot| snapshot.id == vcpu)
-                .map(|snapshot| !snapshot.executing)
-                .unwrap_or(true)
-            {
-                return true;
-            }
-        } else {
-            return true;
-        }
-        if crate::process::scheduler::ticks() >= deadline {
-            return false;
-        }
-        crate::process::sleep_current_task_ticks(1);
-    }
 }
 
 /// Kthread-stage hook: runs the deferred SMP phase.
@@ -3272,7 +3260,7 @@ fn run_smp_task() {
         Ok(report) => log::info!(
             "[s9vm] smptest PASS: vcpus={} markers={:?} exits={} hlt={} runs={} \
              apic_ids={:?} rips={:?} rsps={:?} cr3s={:?} concurrent={} cpus={} \
-             requested_together={} wall_cycles={}",
+             requested_together={} wall_cycles={} runs_per_vcpu={:?}",
             report.vcpus,
             report.markers,
             report.exits,
@@ -3285,7 +3273,8 @@ fn run_smp_task() {
             report.concurrent,
             report.scheduler_cpus,
             report.requested_together,
-            report.wall_cycles
+            report.wall_cycles,
+            report.runs_per_vcpu
         ),
         Err(error) => log::warn!("[s9vm] smptest FAIL: {:?}", error),
     }

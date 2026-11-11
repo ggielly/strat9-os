@@ -42,28 +42,28 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
     memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame},
-    process::{TaskId, kthread, scheduler::ticks, sleep_current_task_ticks},
+    process::{kthread, scheduler::ticks, sleep_current_task_ticks, TaskId},
     s9vm::{
         apic::LocalApic,
         caps::HwCaps,
-        emulate::{InterruptAction, interrupt_action},
+        emulate::{interrupt_action, InterruptAction},
         exit::ExitClass,
         exitqueue::ExitQueue,
         guest::{FixedBits, GuestState},
         image::{Image, Segment},
         iommu::{DeviceId, DomainId, IommuError, IommuModel},
         machine::Machine,
-        memmap::{GuestMap, MAX_GPA, MapError, contiguous_2m_aligned, perms_from_abi, plan_map},
-        mmu::{PAGE_SIZE, Perms as MmuPerms},
-        timing::{EXIT_LATENCY_BUCKETS, ExitLatencyHistogram, WorldTiming},
+        memmap::{contiguous_2m_aligned, perms_from_abi, plan_map, GuestMap, MapError, MAX_GPA},
+        mmu::{Perms as MmuPerms, PAGE_SIZE},
+        timing::{ExitLatencyHistogram, WorldTiming, EXIT_LATENCY_BUCKETS},
         vcpu::{ExitInfo, SecondLevelMemory, Vcpu, VcpuError},
         virtio_blk::VirtioBlk,
     },
     sync::{SpinLock, WaitQueue},
 };
 use strat9_abi::vmm::{
-    VMM_DISK_DEFAULT_BYTES, VMM_DISK_MAX_BYTES, VMM_DISK_SECTOR_SIZE, VMM_IOMMU_MAX_MAP_BYTES,
-    VmmExitEvent, VmmRegs, exit_kind,
+    exit_kind, VmmExitEvent, VmmRegs, VMM_DISK_DEFAULT_BYTES, VMM_DISK_MAX_BYTES,
+    VMM_DISK_SECTOR_SIZE, VMM_IOMMU_MAX_MAP_BYTES,
 };
 
 /// Maximum number of simultaneous worlds (safety bound).
@@ -536,6 +536,10 @@ pub struct VcpuSlot {
     run_in_flight: bool,
     /// The last requested `RUN` is finished.
     run_done: bool,
+    /// The vCPU task is currently inside `execute_one_run` (guest mode).
+    in_guest: bool,
+    /// Number of `RUN`s executed by this vCPU task.
+    runs: u64,
     /// Result of the last `RUN` (valid when `run_done`).
     run_result: Option<Result<(), RunError>>,
     /// Shutdown requested (vCPU or world destruction).
@@ -768,6 +772,8 @@ fn new_vcpu_slot(id: u64, apic_id: u32) -> VcpuSlot {
         run_requested: false,
         run_in_flight: false,
         run_done: false,
+        in_guest: false,
+        runs: 0,
         run_result: None,
         shutdown: false,
         exited: false,
@@ -2118,6 +2124,10 @@ pub struct VcpuSnapshot {
     pub hardware_ready: bool,
     /// `true` while a `RUN` request is pending or executing.
     pub executing: bool,
+    /// `true` while the vCPU task is inside guest execution (VM entry/exits).
+    pub in_guest: bool,
+    /// Number of `RUN`s completed by this vCPU task.
+    pub runs: u64,
     /// `true` when an NMI is pending delivery.
     pub pending_nmi: bool,
 }
@@ -2135,6 +2145,8 @@ pub fn vcpu_snapshots(world_id: u64) -> Option<Vec<VcpuSnapshot>> {
                 apic_id: slot.apic_id,
                 hardware_ready: slot.hardware.is_some(),
                 executing: slot.run_requested || slot.run_in_flight,
+                in_guest: slot.in_guest,
+                runs: slot.runs,
                 pending_nmi: slot.pending_nmi,
             })
             .collect(),
@@ -2794,6 +2806,12 @@ fn vcpu_task_main(world_id: u64, vcpu_id: u64) {
             break;
         }
 
+        {
+            let mut worlds = WORLDS.lock();
+            if let Some((world, index)) = locate_slot(&mut worlds, vcpu_id) {
+                world.vcpus[index].in_guest = true;
+            }
+        }
         let result = execute_one_run(vcpu_id);
         // Diagnostics: one line per RUN tells an operator whether the vCPU
         // task executed at all (a missing line means the task never ran; an
@@ -2809,6 +2827,8 @@ fn vcpu_task_main(world_id: u64, vcpu_id: u64) {
                 return;
             };
             let slot = &mut world.vcpus[index];
+            slot.in_guest = false;
+            slot.runs = slot.runs.saturating_add(1);
             slot.run_done = true;
             slot.run_in_flight = false;
             slot.run_result = Some(result);
@@ -2880,6 +2900,74 @@ fn cleanup_vcpu(vcpu_id: u64) {
     done_wait.wake_all();
 }
 
+/// Posts a `RUN` request without waiting for the vCPU task.
+///
+/// The request is marked in the slot, the vCPU kernel task is woken, and the
+/// call returns immediately. The caller must collect completion with
+/// [`wait_run_complete`] (or observe the exit queue). Only one `RUN` may be in
+/// flight per vCPU; a second request before completion returns
+/// [`RunError::Busy`].
+///
+/// This is the kernel-internal primitive used by the SMP selftest to queue two
+/// vCPUs back-to-back and measure real overlap; it has no ABI/syscall surface.
+pub fn request_run_async(vcpu_id: u64) -> Result<(), RunError> {
+    let run_wait = {
+        let mut worlds = WORLDS.lock();
+        let Some((world, index)) = locate_slot(&mut worlds, vcpu_id) else {
+            return Err(RunError::UnknownVcpu);
+        };
+        if world.closing {
+            return Err(RunError::UnknownVcpu);
+        }
+        if world.paused {
+            return Err(RunError::Paused);
+        }
+        let slot = &mut world.vcpus[index];
+        if slot.shutdown || slot.task.is_none() {
+            return Err(RunError::UnknownVcpu);
+        }
+        if slot.run_in_flight || slot.run_requested {
+            return Err(RunError::Busy);
+        }
+        slot.run_in_flight = true;
+        slot.run_requested = true;
+        slot.run_done = false;
+        slot.run_result = None;
+        Arc::clone(&slot.run_wait)
+    };
+    run_wait.wake_one();
+    Ok(())
+}
+
+/// Waits, at most `timeout_ns`, for a previously posted `RUN` to complete.
+///
+/// Returns the result published by the vCPU task (`Ok` or a `RunError`), or
+/// [`RunError::Timeout`] when the task did not finish within the budget. The
+/// timed-out request stays in flight; the caller must not post another `RUN`
+/// until it completes.
+pub fn wait_run_complete(vcpu_id: u64, timeout_ns: u64) -> Result<(), RunError> {
+    let budget_ticks = (timeout_ns / crate::arch::timer::NS_PER_TICK).max(1);
+    let deadline = ticks().saturating_add(budget_ticks);
+    loop {
+        {
+            let mut worlds = WORLDS.lock();
+            match locate_slot(&mut worlds, vcpu_id) {
+                Some((world, index)) => {
+                    let slot = &mut world.vcpus[index];
+                    if slot.run_done {
+                        return slot.run_result.take().unwrap_or(Ok(()));
+                    }
+                }
+                None => return Err(RunError::UnknownVcpu),
+            }
+        }
+        if ticks() >= deadline {
+            return Err(RunError::Timeout);
+        }
+        sleep_current_task_ticks(1);
+    }
+}
+
 /// Requests execution of a vCPU and **blocks** the caller until the end of
 /// that `RUN` (at most one policy exit).
 ///
@@ -2897,7 +2985,8 @@ pub fn request_run(vcpu_id: u64) -> Result<(), RunError> {
 /// completion still clears the slot; the caller must treat the timeout as a
 /// defect and must not issue another `RUN` before it completes.
 pub fn request_run_timeout(vcpu_id: u64, timeout_ns: u64) -> Result<(), RunError> {
-    request_run_inner(vcpu_id, Some(timeout_ns))
+    request_run_async(vcpu_id)?;
+    wait_run_complete(vcpu_id, timeout_ns)
 }
 
 fn request_run_inner(vcpu_id: u64, timeout_ns: Option<u64>) -> Result<(), RunError> {
