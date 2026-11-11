@@ -34,13 +34,18 @@ pub const MAX_CPUS: usize = 32;
 /// Note: cpu_index is at offset 0 (8 bytes).
 pub const USER_RSP_OFFSET: usize = 8;
 pub const KERNEL_RSP_OFFSET: usize = 16;
+pub const PREEMPT_COUNT_OFFSET: usize = 24;
 
 /// Minimal per-CPU block accessed from assembly via GS base.
 ///
 /// **Layout invariant** (`#[repr(C)]`):
-/// - `cpu_index` at offset  0 (8 bytes) : read by assembly as `gs:[0]`
-/// - `user_rsp`  at offset  8 (8 bytes)
-/// - `kernel_rsp` at offset 16 (8 bytes)
+/// - `cpu_index`    at offset  0 (8 bytes) : read by assembly as `gs:[0]`
+/// - `user_rsp`     at offset  8 (8 bytes)
+/// - `kernel_rsp`   at offset 16 (8 bytes)
+/// - `preempt_count` at offset 24 (4 bytes) : touched by `inc`/`dec`/`mov`
+///   through `gs:[24]`, so a single GS-relative instruction always hits the
+///   executing CPU's own counter even if an IRQ migrates the task between two
+///   Rust statements.
 ///
 /// `AtomicU64` is `#[repr(C, align(8))]` and has the same size/alignment as
 /// `u64`, so the offsets declared in `USER_RSP_OFFSET`/`KERNEL_RSP_OFFSET` are
@@ -56,10 +61,19 @@ pub struct PerCpuArch {
     pub cpu_index: AtomicU64, // offset 0 : read by assembly: `mov rax, gs:[0]`
     pub user_rsp: AtomicU64,   // offset 8
     pub kernel_rsp: AtomicU64, // offset 16
+    /// Preemption-disable depth counter (offset 24).
+    ///
+    /// Lives in the arch block so it is reachable GS-relative: `inc`/`dec`
+    /// through `gs:[PREEMPT_COUNT_OFFSET]` are atomic with respect to task
+    /// migration (the segment base is re-read for the executing CPU).
+    pub preempt_count: AtomicU32, // offset 24
 }
 
 const _: () = assert!(core::mem::offset_of!(PerCpuArch, user_rsp) == USER_RSP_OFFSET);
 const _: () = assert!(core::mem::offset_of!(PerCpuArch, kernel_rsp) == KERNEL_RSP_OFFSET);
+const _: () = assert!(
+    core::mem::offset_of!(PerCpuArch, preempt_count) == PREEMPT_COUNT_OFFSET
+);
 
 /// Per-CPU state.
 #[repr(C)]
@@ -70,9 +84,6 @@ pub struct PerCpu {
     apic_id: AtomicU32,
     kernel_stack_top: AtomicU64,
     tlb_ready: AtomicBool,
-    /// Preemption-disable depth counter.
-    /// When > 0, `maybe_preempt()` and `yield_task()` are no-ops on this CPU.
-    pub preempt_count: AtomicU32,
     /// Fast signal-pending hint for the current CPU.
     ///
     /// Set by `send_signal` when a signal targets the task currently running
@@ -93,13 +104,13 @@ impl PerCpu {
                 cpu_index: AtomicU64::new(0),
                 user_rsp: AtomicU64::new(0),
                 kernel_rsp: AtomicU64::new(0),
+                preempt_count: AtomicU32::new(0),
             },
             present: AtomicBool::new(false),
             online: AtomicBool::new(false),
             apic_id: AtomicU32::new(0),
             kernel_stack_top: AtomicU64::new(0),
             tlb_ready: AtomicBool::new(false),
-            preempt_count: AtomicU32::new(0),
             signal_pending: AtomicU32::new(0),
         }
     }

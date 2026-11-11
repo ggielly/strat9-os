@@ -833,10 +833,15 @@ pub fn init() -> Result<usize, &'static str> {
         }
     }
 
-    // Publish barrier target so APs can proceed.
+    // Publish barrier target so APs can proceed. `online` is only an upper
+    // bound for the barrier: an AP that lost the boot-window race still
+    // arrives here before halting, so the target is always met.
     BARRIER_TARGET.store(online, Ordering::Release);
     rendezvous_barrier();
 
+    // Every AP has now completed its publication/revocation decision, so this
+    // snapshot is final and cannot disagree with the scheduler's online view.
+    let online = percpu::online_count();
     Ok(online)
 }
 
