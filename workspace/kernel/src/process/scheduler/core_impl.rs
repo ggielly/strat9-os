@@ -467,17 +467,25 @@ impl GlobalSchedState {
     ///    has strictly lower load, fall back to unrestricted search.
     /// 3. Unrestricted: pick the globally least-loaded CPU.
     fn select_cpu_for_task(&self, task: &Task) -> usize {
-        let n = active_cpu_count();
-        let all_idle = (0..n).all(|i| {
+        // Only online CPUs participate; a sparse/dead slot must be ignored
+        // rather than counted as idle (or as busy).
+        let mut all_idle = true;
+        for i in 0..crate::arch::percpu::MAX_CPUS {
+            if !super::cpu_is_online(i) {
+                continue;
+            }
             lockdep_acquire(LockRank::Local, Some(i));
-            let result = LOCAL_SCHEDULERS[i]
+            let idle = LOCAL_SCHEDULERS[i]
                 .lock()
                 .as_ref()
                 .map(|cpu| cpu.current_task.is_none())
-                .unwrap_or(true);
+                .unwrap_or(false);
             lockdep_release(LockRank::Local);
-            result
-        });
+            if !idle {
+                all_idle = false;
+                break;
+            }
+        }
         if all_idle {
             if crate::process::scheduler_verbose_enabled() {
                 crate::serial_println!("[trace][sched] select_cpu_for_task early-boot best=0");
@@ -495,7 +503,10 @@ impl GlobalSchedState {
         let mut best_aff_last = None; // best among those matching last_cpu
         let mut best_aff_last_load = usize::MAX;
 
-        for idx in 0..n {
+        for idx in 0..crate::arch::percpu::MAX_CPUS {
+            if !super::cpu_is_online(idx) {
+                continue;
+            }
             let eligible = if has_affinity {
                 (affinity & (1u64 << idx)) != 0
             } else {
@@ -563,7 +574,10 @@ impl GlobalSchedState {
         // Pass 2 (fallback): unrestricted least-loaded.
         let mut best = 0usize;
         let mut best_load = usize::MAX;
-        for idx in 0..n {
+        for idx in 0..crate::arch::percpu::MAX_CPUS {
+            if !super::cpu_is_online(idx) {
+                continue;
+            }
             lockdep_acquire(LockRank::Local, Some(idx));
             let load = {
                 let guard = LOCAL_SCHEDULERS[idx].lock();
@@ -676,14 +690,13 @@ fn steal_task_inner(
 ) -> Option<Arc<Task>> {
     let sched = scheduler.as_mut()?;
 
-    let n = active_cpu_count();
     let my_load = cpu.class_rqs.runnable_len();
 
     let mut best_cpu = None;
     let mut best_load = 0usize;
 
-    for i in 0..n {
-        if i == cpu_index {
+    for i in 0..crate::arch::percpu::MAX_CPUS {
+        if i == cpu_index || !super::cpu_is_online(i) {
             continue;
         }
         // try_lock_no_irqsave: returns immediately if contended (no deadlock).

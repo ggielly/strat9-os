@@ -352,10 +352,10 @@ pub fn preempt_disable() {
 /// Decrement the preemption-disable depth for the current CPU.
 /// Must be paired with exactly one prior call to `preempt_disable`.
 ///
-/// Read/decrement/re-read are all GS-relative. A single `dec` cannot be split
-/// by a task migration (interrupts may nest, but the current task cannot switch
-/// while the instruction executes), so the counter always belongs to the
-/// executing CPU even if an IRQ fires between the surrounding statements.
+/// The decrement is a single `lock xadd` on `gs:[PREEMPT_COUNT_OFFSET]`, which
+/// atomically returns the old value and subtracts one: an IRQ cannot migrate
+/// the task between the read and the write, so the counter always belongs to
+/// the CPU that actually executes the instruction.
 ///
 /// Underflow guard: if the counter is already 0 (mismatched call), the
 /// decrement is skipped and a warning is emitted rather than letting u32 wrap
@@ -369,36 +369,36 @@ pub fn preempt_enable() {
     if !BSP_GS_INITIALIZED.load(Ordering::Acquire) {
         return;
     }
-    let prev: u32;
+    // Single atomic read-modify-write: `lock xadd` returns the old value in
+    // `prev` and subtracts one in the same uninterruptible operation, so an
+    // IRQ cannot migrate the task between the read and the write.
+    let mut prev: u32 = u32::MAX; // -1
     // SAFETY: see `preempt_disable`; the field is a plain u32 in the arch
     // block and the GS base is valid on this CPU.
     unsafe {
         core::arch::asm!(
-            "mov {p:e}, dword ptr gs:[{off}]",
-            p = out(reg) prev,
+            "lock xadd dword ptr gs:[{off}], {p:e}",
+            p = inout(reg) prev,
             off = const PREEMPT_COUNT_OFFSET,
-            options(nostack, readonly),
+            options(nostack),
         );
     }
     if prev == 0 {
-        // Mismatched preempt_enable : log and leave count at 0.
+        // Mismatched preempt_enable : undo the wrap (u32::MAX -> 0) and log.
+        unsafe {
+            core::arch::asm!(
+                "inc dword ptr gs:[{off}]",
+                off = const PREEMPT_COUNT_OFFSET,
+                options(nostack),
+            );
+        }
         log::warn!(
             "preempt_enable: underflow on CPU {} (mismatched call)",
             current_cpu_index()
         );
         return;
     }
-    let next: u32;
-    // SAFETY: as above. `dec` is a single GS-relative read-modify-write.
-    unsafe {
-        core::arch::asm!(
-            "dec dword ptr gs:[{off}]",
-            "mov {n:e}, dword ptr gs:[{off}]",
-            n = out(reg) next,
-            off = const PREEMPT_COUNT_OFFSET,
-            options(nostack),
-        );
-    }
+    let next = prev - 1;
     if next == 0 {
         // Leaving the critical section with no nested guards left: honour any
         // reschedule requested while preemption was disabled. Only do so when

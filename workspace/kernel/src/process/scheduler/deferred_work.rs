@@ -307,7 +307,10 @@ pub fn metrics_snapshot() -> DeferredWorkMetrics {
     let mut raised = [0u32; crate::arch::percpu::MAX_CPUS];
     let mut processed = [0u32; crate::arch::percpu::MAX_CPUS];
     let mut pending = [0u32; crate::arch::percpu::MAX_CPUS];
-    for i in 0..n {
+    for i in 0..crate::arch::percpu::MAX_CPUS {
+        if !super::cpu_is_online(i) {
+            continue;
+        }
         raised[i] = DEFERRED_WORK[i].raised_count.load(Ordering::Relaxed);
         processed[i] = DEFERRED_WORK[i].processed_count.load(Ordering::Relaxed);
         pending[i] = DEFERRED_WORK[i].pending.load(Ordering::Relaxed);
@@ -322,8 +325,10 @@ pub fn metrics_snapshot() -> DeferredWorkMetrics {
 
 /// Reset deferred work metrics.
 pub fn reset_metrics() {
-    let n = super::active_cpu_count();
-    for i in 0..n {
+    for i in 0..crate::arch::percpu::MAX_CPUS {
+        if !super::cpu_is_online(i) {
+            continue;
+        }
         DEFERRED_WORK[i].raised_count.store(0, Ordering::Relaxed);
         DEFERRED_WORK[i].processed_count.store(0, Ordering::Relaxed);
     }
