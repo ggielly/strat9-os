@@ -23,9 +23,9 @@
 //! Contiguous framebuffer surfaces for strat9.
 //!
 //! This crate is the single internal API for pixel buffers: one geometry
-//! type, one pixel format, one damage model, one clipping rule. It has no
-//! allocator and no OS dependency, so it builds for the kernel *and* runs
-//! its tests on the host:
+//! type, one pixel format, one damage model, one clipping rule. It has no OS
+//! dependency (and no allocator unless you use [`OwnedSurface`]), so it
+//! builds for the kernel *and* runs its tests on the host:
 //!
 //! ```text
 //! cargo test -p fbsurface
@@ -40,6 +40,11 @@
 //! | [`PixelOps`], [`ScalarOps`] | raw 32-bit primitives, monomorphised |
 //! | [`Canvas`] | validated surface: fill, blit, blend, convert, damage |
 //! | [`View`], [`Source`] | read-only surface and the sealed copy source |
+//! | [`OwnedSurface`] | heap 32 bpp back buffer with persistent damage |
+//!
+//! `Canvas` borrows caller memory or points at MMIO; `OwnedSurface` owns a
+//! `Vec<u32>` and builds a temporary `Canvas` for each drawing call, which
+//! keeps the borrow checker in charge of the storage lifetime.
 //!
 //! The kernel adapter lives in `strat9-kernel`'s `framebuffer::surface`:
 //! it implements [`PixelOps`] over the existing SSE2 backend and returns an
@@ -50,23 +55,27 @@
 //!
 //! No text, fonts, widgets, Z-order, windows or presentation policy. No
 //! trait objects: the storage is a pointer plus a pitch, and the backend is
-//! a type parameter. No implicit allocation and no implicit format
-//! conversion: [`Canvas::blit`] refuses mismatched layouts, and
-//! [`Canvas::convert_from`] is the one place that re-encodes pixels.
+//! a type parameter. No implicit allocation (except [`OwnedSurface`]) and no
+//! implicit format conversion: [`Canvas::blit`] refuses mismatched layouts,
+//! and [`Canvas::convert_from`] is the one place that re-encodes pixels.
 
 #![cfg_attr(not(test), no_std)]
 #![deny(unsafe_op_in_unsafe_fn)]
+
+extern crate alloc;
 
 pub mod canvas;
 pub mod format;
 pub mod geom;
 pub mod ops;
+pub mod owned;
 pub mod view;
 
 pub use canvas::{Canvas, Error};
 pub use format::{Format, Packed, Rgb};
 pub use geom::{Dims, Rect, RectSet, DEFAULT_SET_CAPACITY};
 pub use ops::{blend_word, NoGuard, PixelGuard, PixelOps, ScalarOps};
+pub use owned::OwnedSurface;
 pub use view::{Source, View};
 
 /// Maximum number of damage rectangles tracked by default.

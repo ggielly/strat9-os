@@ -72,6 +72,8 @@ pub enum Error {
     EmptySurface,
     /// A layout the drawing backends do not implement (anything but 24/32 bpp).
     UnsupportedFormat { bits_per_pixel: u8 },
+    /// Masks, shifts and width do not form a usable layout.
+    InvalidFormat,
     /// `pitch < width * bytes_per_pixel`.
     PitchTooSmall { pitch: usize, required: usize },
     /// The backing store is shorter than `pitch * height`.
@@ -91,6 +93,7 @@ impl core::fmt::Display for Error {
             Error::UnsupportedFormat { bits_per_pixel } => {
                 write!(f, "unsupported format: {bits_per_pixel} bpp")
             }
+            Error::InvalidFormat => f.write_str("invalid pixel format"),
             Error::PitchTooSmall { pitch, required } => {
                 write!(f, "pitch {pitch} is smaller than one row ({required})")
             }
@@ -133,7 +136,7 @@ pub struct Canvas<'a, O: PixelOps = ScalarOps> {
 // allowed.
 unsafe impl<O: PixelOps + Send> Send for Canvas<'_, O> {}
 
-impl core::fmt::Debug for Canvas<'_, ScalarOps> {
+impl<O: PixelOps> core::fmt::Debug for Canvas<'_, O> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Canvas")
             .field("dims", &self.dims)
@@ -314,7 +317,7 @@ impl<'a, O: PixelOps> Canvas<'a, O> {
     /// Take the accumulated damage, leaving the set empty.
     #[inline]
     pub fn take_dirty(&mut self) -> RectSet<DEFAULT_SET_CAPACITY> {
-        core::mem::replace(&mut self.dirty, RectSet::empty())
+        core::mem::take(&mut self.dirty)
     }
 
     #[inline]
@@ -360,44 +363,74 @@ impl<'a, O: PixelOps> Canvas<'a, O> {
         unsafe { self.base.add(y as usize * self.pitch) }
     }
 
-    /// Read a pixel without volatile semantics. Coordinates must be inside
-    /// the surface.
+    /// Read a pixel. Coordinates must be inside the surface.
+    ///
+    /// Volatile on a write-combining (MMIO) surface: the value may have been
+    /// changed by the device since the last cached load.
     #[inline]
     fn read_raw(&self, x: u32, y: u32) -> u32 {
         let ptr = self.row_ptr(y);
         match self.format.bytes_per_pixel() {
             4 => {
                 // SAFETY: in bounds, 4-byte aligned surface.
-                unsafe { (ptr.add(x as usize * 4) as *const u32).read_unaligned() }
+                unsafe {
+                    let p = ptr.add(x as usize * 4) as *const u32;
+                    if self.wc {
+                        core::ptr::read_volatile(p)
+                    } else {
+                        p.read_unaligned()
+                    }
+                }
             }
             3 => {
                 // SAFETY: in bounds; 24 bpp has no alignment requirement.
                 unsafe {
                     let p = ptr.add(x as usize * 3);
-                    p.read() as u32 | (p.add(1).read() as u32) << 8 | (p.add(2).read() as u32) << 16
+                    if self.wc {
+                        core::ptr::read_volatile(p) as u32
+                            | (core::ptr::read_volatile(p.add(1)) as u32) << 8
+                            | (core::ptr::read_volatile(p.add(2)) as u32) << 16
+                    } else {
+                        p.read() as u32
+                            | (p.add(1).read() as u32) << 8
+                            | (p.add(2).read() as u32) << 16
+                    }
                 }
             }
             _ => 0,
         }
     }
 
-    /// Write a pixel without volatile semantics. Coordinates must be inside
-    /// the surface.
+    /// Write a pixel. Coordinates must be inside the surface. Volatile on a
+    /// write-combining (MMIO) surface.
     #[inline]
     fn write_raw(&mut self, x: u32, y: u32, value: u32) {
         let ptr = self.row_ptr(y);
         match self.format.bytes_per_pixel() {
             4 => {
                 // SAFETY: in bounds, 4-byte aligned surface.
-                unsafe { (ptr.add(x as usize * 4) as *mut u32).write_unaligned(value) }
+                unsafe {
+                    let p = ptr.add(x as usize * 4) as *mut u32;
+                    if self.wc {
+                        core::ptr::write_volatile(p, value)
+                    } else {
+                        p.write_unaligned(value)
+                    }
+                }
             }
             3 => {
                 // SAFETY: in bounds; 24 bpp has no alignment requirement.
                 unsafe {
                     let p = ptr.add(x as usize * 3);
-                    p.write(value as u8);
-                    p.add(1).write((value >> 8) as u8);
-                    p.add(2).write((value >> 16) as u8);
+                    if self.wc {
+                        core::ptr::write_volatile(p, value as u8);
+                        core::ptr::write_volatile(p.add(1), (value >> 8) as u8);
+                        core::ptr::write_volatile(p.add(2), (value >> 16) as u8);
+                    } else {
+                        p.write(value as u8);
+                        p.add(1).write((value >> 8) as u8);
+                        p.add(2).write((value >> 16) as u8);
+                    }
                 }
             }
             _ => {}
@@ -487,15 +520,9 @@ impl<'a, O: PixelOps> Canvas<'a, O> {
             3 => {
                 let y_end = clipped.bottom();
                 for y in clipped.y..y_end {
-                    let row = self.row_ptr(y);
                     for x in clipped.x..clipped.right() {
-                        // SAFETY: in bounds.
-                        unsafe {
-                            let p = row.add(x as usize * 3);
-                            p.write(value as u8);
-                            p.add(1).write((value >> 8) as u8);
-                            p.add(2).write((value >> 16) as u8);
-                        }
+                        // Honors the write-combining flag per byte.
+                        self.write_raw(x, y, value);
                     }
                 }
             }
@@ -539,32 +566,65 @@ impl<'a, O: PixelOps> Canvas<'a, O> {
         let guard = self.ops.guard();
         match self.format.bytes_per_pixel() {
             4 => {
-                for row in 0..d.h {
-                    let dst_row = self.row_ptr(d.y + row);
-                    let src_row = src.row_ptr(sy + row);
-                    // SAFETY: both rectangles were clipped to their
-                    // surfaces; the rows hold at least `d.w` pixels.
+                // One contiguous copy when both rectangles span a full row
+                // of their surface: this is the common full-frame present.
+                if self.is_contiguous(d, sx, src) {
+                    let dst_ptr = self.row_ptr(d.y) as *mut u32;
+                    // SAFETY: `sy + d.h <= src.dims().h` by `map_rect`.
+                    let src_ptr = unsafe { src.row_ptr(sy) } as *const u32;
+                    let count = d.area() as usize;
+                    // SAFETY: both buffers hold `count` pixels.
                     unsafe {
-                        let dst_ptr = dst_row.add(d.x as usize * 4) as *mut u32;
-                        let src_ptr = src_row.add(sx as usize * 4) as *const u32;
                         if self.wc {
-                            self.ops.blit_nt(dst_ptr, src_ptr, d.w as usize);
+                            self.ops.blit_nt(dst_ptr, src_ptr, count);
                         } else {
-                            self.ops.blit(dst_ptr, src_ptr, d.w as usize);
+                            self.ops.blit(dst_ptr, src_ptr, count);
+                        }
+                    }
+                } else {
+                    for row in 0..d.h {
+                        let dst_row = self.row_ptr(d.y + row);
+                        // SAFETY: `sy + row < src.dims().h` by `map_rect`.
+                        let src_row = unsafe { src.row_ptr(sy + row) };
+                        // SAFETY: both rectangles were clipped to their
+                        // surfaces; the rows hold at least `d.w` pixels.
+                        unsafe {
+                            let dst_ptr = dst_row.add(d.x as usize * 4) as *mut u32;
+                            let src_ptr = src_row.add(sx as usize * 4) as *const u32;
+                            if self.wc {
+                                self.ops.blit_nt(dst_ptr, src_ptr, d.w as usize);
+                            } else {
+                                self.ops.blit(dst_ptr, src_ptr, d.w as usize);
+                            }
                         }
                     }
                 }
             }
             3 => {
-                for row in 0..d.h {
-                    let dst_row = self.row_ptr(d.y + row);
-                    let src_row = src.row_ptr(sy + row);
-                    // SAFETY: in bounds; the byte ranges are disjoint
-                    // because `src` and `self` cannot alias by borrow rules.
-                    unsafe {
-                        let dst_ptr = dst_row.add(d.x as usize * 3);
-                        let src_ptr = src_row.add(sx as usize * 3);
-                        core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, d.w as usize * 3);
+                if self.wc {
+                    // Per-byte volatile copies: a MMIO 24 bpp scanout must
+                    // not be written through cached stores.
+                    for row in 0..d.h {
+                        let y = d.y + row;
+                        for x in 0..d.w {
+                            // SAFETY: clipped to both surfaces.
+                            let packed = unsafe { src.read_raw(sx + x, sy + row) };
+                            self.write_raw(d.x + x, y, packed);
+                        }
+                    }
+                } else {
+                    for row in 0..d.h {
+                        let dst_row = self.row_ptr(d.y + row);
+                        // SAFETY: `sy + row < src.dims().h` by `map_rect`.
+                        let src_row = unsafe { src.row_ptr(sy + row) };
+                        // SAFETY: in bounds; the byte ranges are disjoint
+                        // because `src` and `self` cannot alias by borrow
+                        // rules.
+                        unsafe {
+                            let dst_ptr = dst_row.add(d.x as usize * 3);
+                            let src_ptr = src_row.add(sx as usize * 3);
+                            core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, d.w as usize * 3);
+                        }
                     }
                 }
             }
@@ -578,8 +638,9 @@ impl<'a, O: PixelOps> Canvas<'a, O> {
 
     /// Blend an optional constant alpha.
     ///
-    /// With `alpha == 255` this is a plain copy; with `alpha == 0` it is a
-    /// no-op that still records damage. The blend is per byte of the native
+    /// With `alpha == 255` this is a plain copy; with `alpha == 0` the
+    /// destination is unchanged, so the call returns `None` without touching
+    /// the surface or recording damage. The blend is per byte of the native
     /// word, matching the kernel's `FramebufferOps::blend`.
     pub fn blend_rect<S: Source + ?Sized>(
         &mut self,
@@ -603,17 +664,41 @@ impl<'a, O: PixelOps> Canvas<'a, O> {
         let guard = self.ops.guard();
         match self.format.bytes_per_pixel() {
             4 => {
-                for row in 0..d.h {
-                    let dst_row = self.row_ptr(d.y + row);
-                    let src_row = src.row_ptr(sy + row);
-                    // SAFETY: clipped to both surfaces.
+                if self.is_contiguous(d, sx, src) {
+                    let dst_ptr = self.row_ptr(d.y) as *mut u32;
+                    // SAFETY: `sy + d.h <= src.dims().h` by `map_rect`.
+                    let src_ptr = unsafe { src.row_ptr(sy) } as *const u32;
+                    let count = d.area() as usize;
+                    // SAFETY: both buffers hold `count` pixels.
                     unsafe {
-                        let dst_ptr = dst_row.add(d.x as usize * 4) as *mut u32;
-                        let src_ptr = src_row.add(sx as usize * 4) as *const u32;
                         if alpha == 255 {
-                            self.ops.blit(dst_ptr, src_ptr, d.w as usize);
+                            if self.wc {
+                                self.ops.blit_nt(dst_ptr, src_ptr, count);
+                            } else {
+                                self.ops.blit(dst_ptr, src_ptr, count);
+                            }
                         } else {
-                            self.ops.blend(dst_ptr, src_ptr, alpha, d.w as usize);
+                            self.ops.blend(dst_ptr, src_ptr, alpha, count);
+                        }
+                    }
+                } else {
+                    for row in 0..d.h {
+                        let dst_row = self.row_ptr(d.y + row);
+                        // SAFETY: `sy + row < src.dims().h` by `map_rect`.
+                        let src_row = unsafe { src.row_ptr(sy + row) };
+                        // SAFETY: clipped to both surfaces.
+                        unsafe {
+                            let dst_ptr = dst_row.add(d.x as usize * 4) as *mut u32;
+                            let src_ptr = src_row.add(sx as usize * 4) as *const u32;
+                            if alpha == 255 {
+                                if self.wc {
+                                    self.ops.blit_nt(dst_ptr, src_ptr, d.w as usize);
+                                } else {
+                                    self.ops.blit(dst_ptr, src_ptr, d.w as usize);
+                                }
+                            } else {
+                                self.ops.blend(dst_ptr, src_ptr, alpha, d.w as usize);
+                            }
                         }
                     }
                 }
@@ -624,7 +709,8 @@ impl<'a, O: PixelOps> Canvas<'a, O> {
                 for row in 0..d.h {
                     let y = d.y + row;
                     for x in 0..d.w {
-                        let s = src.read_raw(sx + x, sy + row);
+                        // SAFETY: clipped to both surfaces.
+                        let s = unsafe { src.read_raw(sx + x, sy + row) };
                         let dpx = self.read_raw(d.x + x, y);
                         self.write_raw(d.x + x, y, blend_word(dpx, s, a, inv));
                     }
@@ -660,7 +746,8 @@ impl<'a, O: PixelOps> Canvas<'a, O> {
         let dst_format = self.format;
         for row in 0..d.h {
             for x in 0..d.w {
-                let packed = src.read_raw(sx + x, sy + row);
+                // SAFETY: clipped to both surfaces.
+                let packed = unsafe { src.read_raw(sx + x, sy + row) };
                 let converted = dst_format.convert(src_format, Packed::raw(packed));
                 self.write_raw(d.x + x, d.y + row, converted.value());
             }
@@ -684,6 +771,18 @@ impl<'a, O: PixelOps> Canvas<'a, O> {
             self,
             bounds,
         )
+    }
+
+    /// True when `d` spans a full row of both surfaces and both pitches have
+    /// no padding, so the whole block is contiguous in memory.
+    fn is_contiguous<S: Source + ?Sized>(&self, d: Rect, sx: u32, src: &S) -> bool {
+        let src_dims = src.dims();
+        self.pitch == self.dims.w as usize * 4
+            && src.pitch() == src_dims.w as usize * 4
+            && d.x == 0
+            && sx == 0
+            && d.w == self.dims.w
+            && d.w == src_dims.w
     }
 
     /// Map a requested copy onto the destination and source surfaces.
@@ -724,6 +823,9 @@ pub(crate) fn validate(dims: Dims, pitch: usize, format: Format) -> Result<(), E
             bits_per_pixel: format.bits_per_pixel(),
         });
     }
+    if !format.is_valid() {
+        return Err(Error::InvalidFormat);
+    }
     let row = (dims.w as usize)
         .checked_mul(format.bytes_per_pixel())
         .ok_or(Error::Overflow)?;
@@ -732,6 +834,12 @@ pub(crate) fn validate(dims: Dims, pitch: usize, format: Format) -> Result<(), E
             pitch,
             required: row,
         });
+    }
+    // The 32 bpp backends write `u32` words, so every row must start on a
+    // 4-byte boundary. A base alignment check alone is not enough: an
+    // odd pitch would leave row 1 unaligned.
+    if format.bits_per_pixel() == 32 && !pitch.is_multiple_of(4) {
+        return Err(Error::Unaligned);
     }
     required_len(pitch, dims)?;
     Ok(())
@@ -742,7 +850,7 @@ pub(crate) fn required_len(pitch: usize, dims: Dims) -> Result<usize, Error> {
 }
 
 pub(crate) fn validate_alignment(base: usize, format: Format) -> Result<(), Error> {
-    if format.bits_per_pixel() == 32 && base % 4 != 0 {
+    if format.bits_per_pixel() == 32 && !base.is_multiple_of(4) {
         return Err(Error::Unaligned);
     }
     Ok(())
@@ -918,6 +1026,55 @@ mod tests {
     }
 
     #[test]
+    fn rgb888_blit_clips_at_the_edge() {
+        let mut src_buf = [0u8; 2 * 2 * 3];
+        for (i, byte) in src_buf.iter_mut().enumerate() {
+            *byte = i as u8 + 1;
+        }
+        let mut dst_buf = [0u8; 4 * 4 * 3];
+        {
+            let src = Canvas::new(&mut src_buf, Dims::new(2, 2), 6, Format::RGB888).unwrap();
+            let mut dst = Canvas::new(&mut dst_buf, Dims::new(4, 4), 12, Format::RGB888).unwrap();
+            let written = dst
+                .blit(Rect::new(3, 3, 2, 2), &src, Rect::new(0, 0, 2, 2))
+                .unwrap();
+            assert_eq!(written, Some(Rect::new(3, 3, 1, 1)));
+        }
+        let dst_off = (3 * 4 + 3) * 3;
+        assert_eq!(&dst_buf[dst_off..dst_off + 3], &src_buf[0..3]);
+    }
+
+    #[test]
+    fn blend_alpha_zero_is_a_noop() {
+        let mut src_px = Pixels::new(2, 2);
+        let mut dst_px = Pixels::new(2, 2);
+        {
+            let mut src =
+                Canvas::new(src_px.bytes(), Dims::new(2, 2), 8, Format::XRGB8888).unwrap();
+            src.fill(Format::XRGB8888.white());
+            let mut dst =
+                Canvas::new(dst_px.bytes(), Dims::new(2, 2), 8, Format::XRGB8888).unwrap();
+            assert_eq!(
+                dst.blend_rect(Rect::new(0, 0, 2, 2), &src, Rect::new(0, 0, 2, 2), 0)
+                    .unwrap(),
+                None
+            );
+            assert!(dst.dirty().is_empty());
+        }
+        assert!(dst_px.words.iter().all(|&w| w == 0));
+    }
+
+    #[test]
+    fn constructor_rejects_an_invalid_format() {
+        let mut pixels = Pixels::new(2, 2);
+        let bad = Format::from_masks(32, 0x00FF_0000, 8, 0, 0, 0, 0);
+        assert_eq!(
+            Canvas::new(pixels.bytes(), Dims::new(2, 2), 8, bad).unwrap_err(),
+            Error::InvalidFormat
+        );
+    }
+
+    #[test]
     fn convert_from_changes_layout() {
         let mut src_px = Pixels::new(2, 2);
         let mut dst_px = Pixels::new(2, 2);
@@ -980,6 +1137,18 @@ mod tests {
             Canvas::new(unaligned, Dims::new(2, 2), 8, Format::XRGB8888).unwrap_err(),
             Error::Unaligned
         );
+    }
+
+    #[test]
+    fn constructor_rejects_an_unaligned_32bpp_pitch() {
+        let mut pixels = Pixels::new(4, 4);
+        // Base is 4-byte aligned, but a pitch of 10 puts row 1 at +10.
+        assert_eq!(
+            Canvas::new(pixels.bytes(), Dims::new(2, 2), 10, Format::XRGB8888).unwrap_err(),
+            Error::Unaligned
+        );
+        // A multiple of 4 is accepted.
+        assert!(Canvas::new(pixels.bytes(), Dims::new(2, 2), 12, Format::XRGB8888).is_ok());
     }
 
     #[test]

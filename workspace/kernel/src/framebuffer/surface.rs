@@ -61,7 +61,7 @@
 
 use core::ptr::NonNull;
 
-use fbsurface::{Canvas, Dims, Format, PixelGuard, PixelOps, Rect, RectSet};
+use fbsurface::{Canvas, Dims, Format, OwnedSurface, PixelGuard, PixelOps, Rect, RectSet, Source};
 
 use crate::framebuffer::{FpuGuard, FramebufferOps, MAX_DIRTY_RECTS, PRESENT_MIN_TICKS};
 
@@ -278,44 +278,122 @@ impl<'a> Presenter<'a> {
     /// limiter suppressed the frame, or when nothing was damaged). The
     /// caller keeps ownership of `back`; its damage set is cleared.
     ///
-    /// Both surfaces must share the same format. A mismatch is treated as
-    /// "no damage" rather than panicking: presentation must never take the
-    /// kernel down, and the old code had the same failure mode (silently
-    /// swapped channels).
+    /// Both surfaces must share the same format. On a mismatch the frame is
+    /// skipped **without consuming the damage**, rather than panicking or
+    /// silently swapping channels: presentation must never take the kernel
+    /// down.
     pub fn present(&mut self, now_ticks: u64, back: &mut Surface<'_>) -> RectSet<MAX_DIRTY_RECTS> {
-        if self.presented && now_ticks.saturating_sub(self.last_present_tick) < self.min_ticks {
+        if !self.due(now_ticks) || !self.format_matches(back) {
             return RectSet::empty();
         }
 
-        let mut damage = back.take_dirty();
-        damage.include_set(self.canvas.dirty());
+        let damage = back.take_dirty();
+        // Writes made directly through `canvas_mut` are already on screen.
+        // Adding them to the blit set would copy the back buffer over them
+        // (a cursor drawn on the scanout would disappear), so forget them.
         self.canvas.clear_dirty();
-        if damage.is_empty() {
-            return damage;
+        self.flush(now_ticks, &damage, back)
+    }
+
+    /// Same contract as [`Self::present`], for a heap back buffer.
+    pub fn present_owned(
+        &mut self,
+        now_ticks: u64,
+        back: &mut OwnedSurface<KernelOps>,
+    ) -> RectSet<MAX_DIRTY_RECTS> {
+        if !self.due(now_ticks) || !self.format_matches(&*back) {
+            return RectSet::empty();
         }
 
-        for rect in damage.iter() {
-            // A format mismatch cannot happen with a well-formed caller;
-            // skip the rectangle instead of panicking if it does.
-            let _ = self.canvas.blit(rect, back, rect);
-        }
-        self.canvas.fence();
-        self.last_present_tick = now_ticks;
-        self.presented = true;
-        damage
+        let damage = back.take_dirty();
+        // See `present`: direct scanout writes must not be overwritten.
+        self.canvas.clear_dirty();
+        self.flush(now_ticks, &damage, &*back)
     }
 
     /// Present the whole surface, ignoring damage. Used on the first frame,
     /// after a resolution change, or when coming back from a blank screen.
     pub fn present_full(&mut self, now_ticks: u64, back: &mut Surface<'_>) {
-        let bounds = self.canvas.bounds();
-        let _ = self
-            .canvas
-            .blit(bounds, back, Rect::new(0, 0, bounds.w, bounds.h));
-        self.canvas.fence();
+        if !self.format_matches(&*back) {
+            return;
+        }
+        self.full(&*back);
         back.clear_dirty();
         self.canvas.clear_dirty();
         self.last_present_tick = now_ticks;
         self.presented = true;
+    }
+
+    /// Same contract as [`Self::present_full`], for a heap back buffer.
+    pub fn present_full_owned(&mut self, now_ticks: u64, back: &mut OwnedSurface<KernelOps>) {
+        if !self.format_matches(&*back) {
+            return;
+        }
+        self.full(&*back);
+        back.clear_dirty();
+        self.canvas.clear_dirty();
+        self.last_present_tick = now_ticks;
+        self.presented = true;
+    }
+
+    /// True when the refresh floor allows a flush now.
+    fn due(&self, now_ticks: u64) -> bool {
+        !self.presented || now_ticks.saturating_sub(self.last_present_tick) >= self.min_ticks
+    }
+
+    fn format_matches<S: Source + ?Sized>(&self, back: &S) -> bool {
+        self.canvas.format().compatible(back.format())
+    }
+
+    /// Common tail of both `present` paths: choose full-frame or per-rect
+    /// presentation, flush the write-combining stores and update the clock.
+    fn flush<S: Source + ?Sized>(
+        &mut self,
+        now_ticks: u64,
+        damage: &RectSet<MAX_DIRTY_RECTS>,
+        back: &S,
+    ) -> RectSet<MAX_DIRTY_RECTS> {
+        if damage.is_empty() {
+            return *damage;
+        }
+
+        // Small rect lists are cheaper only while they stay small: once the
+        // damage covers most of the panel, one contiguous copy beats many
+        // short blits. This mirrors the old `CanvasBuffer::present` heuristic.
+        let canvas_area = self.canvas.dims().area();
+        if canvas_area != 0
+            && damage.total_area().saturating_mul(10) > canvas_area.saturating_mul(6)
+        {
+            self.full(back);
+        } else {
+            self.blit_damage(damage, back);
+        }
+
+        // Both paths write through `self.canvas`, which records damage of its
+        // own. Those pixels are now on screen.
+        self.canvas.clear_dirty();
+        self.canvas.fence();
+        self.last_present_tick = now_ticks;
+        self.presented = true;
+        *damage
+    }
+
+    /// Copy one rectangle of `back` per damage entry.
+    fn blit_damage<S: Source + ?Sized>(&mut self, damage: &RectSet<MAX_DIRTY_RECTS>, back: &S) {
+        for rect in damage.iter() {
+            let _ = self.canvas.blit(rect, back, rect);
+        }
+    }
+
+    /// Copy the whole overlap between the scanout and `back`.
+    fn full<S: Source + ?Sized>(&mut self, back: &S) {
+        let dst = self.canvas.bounds();
+        let src = Rect::new(0, 0, back.dims().w, back.dims().h);
+        let rect = dst.intersect(src);
+        if rect.is_empty() {
+            return;
+        }
+        let _ = self.canvas.blit(rect, back, rect);
+        self.canvas.fence();
     }
 }

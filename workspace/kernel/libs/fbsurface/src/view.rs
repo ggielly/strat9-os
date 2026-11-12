@@ -53,16 +53,31 @@ pub unsafe trait Source {
     fn dims(&self) -> Dims;
     fn format(&self) -> Format;
 
-    /// Pointer to the first pixel of row `y`. `y` must be in bounds.
-    fn row_ptr(&self, y: u32) -> *const u8;
+    /// Bytes per row.
+    ///
+    /// Safe to call on its own: it is only used to detect a contiguous
+    /// buffer for the multi-row fast path, never to index memory.
+    fn pitch(&self) -> usize;
+
+    /// Pointer to the first pixel of row `y`.
+    ///
+    /// # Safety
+    ///
+    /// `y` must be in `0..dims().h`.
+    unsafe fn row_ptr(&self, y: u32) -> *const u8;
 
     /// Read one pixel with no volatile semantics.
     ///
     /// Defaulted so both `Canvas` and `View` share the exact same decoding
-    /// rules. `x` and `y` must be in bounds.
+    /// rules.
+    ///
+    /// # Safety
+    ///
+    /// `x` and `y` must be inside the surface.
     #[inline]
-    fn read_raw(&self, x: u32, y: u32) -> u32 {
-        let ptr = self.row_ptr(y);
+    unsafe fn read_raw(&self, x: u32, y: u32) -> u32 {
+        // SAFETY: forwarded from the caller.
+        let ptr = unsafe { self.row_ptr(y) };
         let format = self.format();
         // SAFETY: the trait contract guarantees the row is readable and
         // `x` is in bounds; 32 bpp surfaces are 4-byte aligned by
@@ -94,7 +109,14 @@ unsafe impl<O: crate::ops::PixelOps> Source for Canvas<'_, O> {
     }
 
     #[inline]
-    fn row_ptr(&self, y: u32) -> *const u8 {
+    fn pitch(&self) -> usize {
+        Canvas::pitch(self)
+    }
+
+    #[inline]
+    unsafe fn row_ptr(&self, y: u32) -> *const u8 {
+        // `y` is in bounds per the trait contract; the canvas row pointer is
+        // valid for the borrow.
         Canvas::row_ptr(self, y) as *const u8
     }
 }
@@ -111,8 +133,9 @@ pub struct View<'a> {
     _borrow: PhantomData<&'a [u8]>,
 }
 
-// The view is a shared borrow of immutable pixels, so it can cross CPUs as
-// long as the backing bytes are `Sync`.
+// A `View` only reads, so sharing it cannot tear a pixel. `View::from_raw`
+// requires the backing memory to be safe to read from any CPU the view is
+// sent to; a thread-local or per-CPU mapping must not be wrapped in a `View`.
 unsafe impl Send for View<'_> {}
 unsafe impl Sync for View<'_> {}
 
@@ -149,7 +172,8 @@ impl<'a> View<'a> {
     /// # Safety
     ///
     /// `base` must be readable for `pitch * height` bytes for the whole
-    /// lifetime `'a`.
+    /// lifetime `'a`, and the memory must stay valid if the view is sent to
+    /// another CPU (`View` is `Send + Sync`).
     pub unsafe fn from_raw(
         base: *const u8,
         dims: Dims,
@@ -244,7 +268,12 @@ unsafe impl Source for View<'_> {
     }
 
     #[inline]
-    fn row_ptr(&self, y: u32) -> *const u8 {
+    fn pitch(&self) -> usize {
+        self.pitch
+    }
+
+    #[inline]
+    unsafe fn row_ptr(&self, y: u32) -> *const u8 {
         // SAFETY: `y < height` by the trait contract, and the backing store
         // holds `pitch * height` bytes.
         unsafe { self.base.add(y as usize * self.pitch) }

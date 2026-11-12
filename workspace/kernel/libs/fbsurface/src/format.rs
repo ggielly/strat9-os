@@ -178,9 +178,40 @@ impl Format {
     #[inline]
     pub const fn is_xrgb8888(self) -> bool {
         self.bits_per_pixel == 32
+            && self.red_mask == 0x00FF_0000
+            && self.green_mask == 0x0000_FF00
+            && self.blue_mask == 0x0000_00FF
             && self.red_shift == 16
             && self.green_shift == 8
             && self.blue_shift == 0
+    }
+
+    /// Whether the masks, shifts and width form a usable layout.
+    ///
+    /// [`Self::from_masks`] is public so a driver can pass its reported
+    /// layout through; this is the check that stops a malformed one from
+    /// reaching the pixel backends (shift overflow, mask wider than the
+    /// pixel, overlapping channels, or a shift that does not match the
+    /// mask).
+    pub const fn is_valid(self) -> bool {
+        if self.bits_per_pixel == 0 || self.bits_per_pixel > 32 {
+            return false;
+        }
+        if !mask_fits(self.red_mask, self.bits_per_pixel)
+            || !mask_fits(self.green_mask, self.bits_per_pixel)
+            || !mask_fits(self.blue_mask, self.bits_per_pixel)
+        {
+            return false;
+        }
+        if self.red_mask & self.green_mask != 0
+            || self.red_mask & self.blue_mask != 0
+            || self.green_mask & self.blue_mask != 0
+        {
+            return false;
+        }
+        channel_is_valid(self.red_mask, self.red_shift)
+            && channel_is_valid(self.green_mask, self.green_shift)
+            && channel_is_valid(self.blue_mask, self.blue_shift)
     }
 
     /// Two formats are compatible when a bulk copy can move raw words
@@ -257,6 +288,30 @@ impl Default for Format {
     }
 }
 
+/// A mask must not use bits above the pixel width.
+const fn mask_fits(mask: u32, bits_per_pixel: u8) -> bool {
+    bits_per_pixel >= 32 || (mask >> bits_per_pixel) == 0
+}
+
+/// A channel is a contiguous run of ones at exactly `shift`. An empty mask
+/// has no shift, and any other shift would make [`Format::pack`] overflow.
+const fn channel_is_valid(mask: u32, shift: u8) -> bool {
+    // Even an empty channel must keep its shift in range: `pack` still
+    // evaluates `value << shift` before masking it away.
+    if shift >= 32 {
+        return false;
+    }
+    if mask == 0 {
+        return true;
+    }
+    if mask.trailing_zeros() != shift as u32 {
+        return false;
+    }
+    let run = mask >> shift;
+    // 2^n - 1, n >= 1.
+    run != 0 && (run & run.wrapping_add(1)) == 0
+}
+
 /// Extract one channel and scale it to 8 bits.
 const fn channel_to_u8(px: u32, mask: u32, shift: u8) -> u8 {
     if mask == 0 {
@@ -323,6 +378,22 @@ mod tests {
         assert_eq!(Format::XRGB8888.convert(Format::XRGB8888, p), p);
         assert!(Format::XRGB8888.compatible(Format::XRGB8888));
         assert!(!Format::XRGB8888.compatible(Format::RGB888));
+    }
+
+    #[test]
+    fn invalid_layouts_are_rejected() {
+        assert!(Format::XRGB8888.is_valid());
+        assert!(Format::BGRX8888.is_valid());
+        assert!(Format::RGB888.is_valid());
+        assert!(Format::RGB565.is_valid());
+        // Shift that does not match the mask.
+        assert!(!Format::from_masks(32, 0x00FF_0000, 8, 0, 0, 0, 0).is_valid());
+        // Shift out of range: `pack` would overflow.
+        assert!(!Format::from_masks(32, 0, 0, 0, 0, 0, 40).is_valid());
+        // Channel wider than the pixel.
+        assert!(!Format::from_masks(24, 0xFF00_0000, 16, 0, 0, 0, 0).is_valid());
+        // Overlapping channels.
+        assert!(!Format::from_masks(32, 0x0000_FF00, 8, 0x0000_0F00, 8, 0, 0).is_valid());
     }
 
     #[test]

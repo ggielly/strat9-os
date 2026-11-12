@@ -280,7 +280,10 @@ impl<const N: usize> RectSet<N> {
     }
 
     /// Insert every rectangle of another set.
-    pub fn include_set(&mut self, other: &RectSet<N>) {
+    ///
+    /// The capacities may differ: this keeps callers such as the kernel
+    /// `Presenter` from silently depending on two constants staying equal.
+    pub fn include_set<const M: usize>(&mut self, other: &RectSet<M>) {
         for r in other.iter() {
             self.include(r);
         }
@@ -488,6 +491,18 @@ mod tests {
         set.clear();
         assert!(set.is_empty());
         assert_eq!(set.bounds(), Rect::EMPTY);
+    }
+
+    #[test]
+    fn sets_with_different_capacities_merge() {
+        let mut dst = RectSet::<4>::empty();
+        let mut src = RectSet::<2>::empty();
+        src.include(Rect::new(0, 0, 4, 4));
+        src.include(Rect::new(8, 0, 4, 4));
+        dst.include_set(&src);
+        assert_eq!(dst.len(), 2);
+        dst.include_set(&RectSet::<8>::empty());
+        assert_eq!(dst.len(), 2);
     }
 
     #[test]
