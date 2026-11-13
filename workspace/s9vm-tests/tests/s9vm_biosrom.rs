@@ -207,9 +207,14 @@ fn vector_list_is_sorted_unique_and_complete() {
     assert!(VECTORS.contains(&0x10));
     assert!(VECTORS.contains(&0x13));
     assert!(VECTORS.contains(&0x16));
+    // Reboot and ROM-BASIC vectors: a boot sector that cannot load its kernel
+    // calls int 19h/int 18h; without a stub it jumps through the zeroed IVT
+    // entry and executes garbage at 0000:0000.
+    assert!(VECTORS.contains(&0x18));
+    assert!(VECTORS.contains(&0x19));
     assert!(VECTORS.contains(&0x1A));
     assert!(VECTORS.contains(&0x1C));
-    assert_eq!(VECTORS.len(), 20);
+    assert_eq!(VECTORS.len(), 22);
     for pair in VECTORS.windows(2) {
         assert!(pair[0] < pair[1], "vectors must be strictly sorted");
     }

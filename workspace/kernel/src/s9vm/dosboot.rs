@@ -1109,6 +1109,24 @@ fn run_freedos_in_world(
                 {
                     let vector = (port - biosrom::BIOS_PORT_BASE) as u8;
                     let mut registers = read_bios_registers(vcpu.guest());
+                    // The boot sector reboots (`int 19h`) or enters ROM BASIC
+                    // (`int 18h`) when it cannot load the kernel. Both vectors
+                    // now reach the BIOS stubs; turning them into a clean
+                    // abort avoids jumping into the zeroed IVT entry and
+                    // executing garbage at 0000:0000.
+                    if vector == 0x18 || vector == 0x19 {
+                        let text = bios::read_text(&mut memory);
+                        log::warn!(
+                            "[s9vm] freedostest: guest requested a reboot (int {:#04x}) \
+                             after {} BIOS call(s); text={:?}",
+                            vector,
+                            report.bios_calls,
+                            text
+                        );
+                        outcome = Err(DosError::BadExit("guest requested reboot"));
+                        break;
+                    }
+                    let request = (registers.ax, registers.bx, registers.cx, registers.dx);
                     let _ = bios_state.handle(vector, &mut registers, &mut memory, &mut world_disk);
                     write_bios_registers(&mut vcpu, &registers);
                     if let Err(error) = write_scratch(&mut memory, &registers) {
@@ -1116,6 +1134,24 @@ fn run_freedos_in_world(
                         break;
                     }
                     report.bios_calls += 1;
+                    // Trace the first calls: the FreeDOS boot sector prints
+                    // "Error!" after a failed INT 13h, and the exact AH/CHS
+                    // request plus the returned AX is what identifies the
+                    // missing BIOS behaviour.
+                    if report.bios_calls <= 48 {
+                        log::info!(
+                            "[s9vm] freedostest: BIOS int {:#04x} ah={:#04x} in ax={:#06x} \
+                             bx={:#06x} cx={:#06x} dx={:#06x} -> ax={:#06x} flags={:#06x}",
+                            vector,
+                            (request.0 >> 8) as u8,
+                            request.0,
+                            request.1,
+                            request.2,
+                            request.3,
+                            registers.ax,
+                            registers.flags
+                        );
+                    }
                     if let Err(error) = advance_past_exit(&mut vcpu, &exit) {
                         outcome = Err(error);
                         break;

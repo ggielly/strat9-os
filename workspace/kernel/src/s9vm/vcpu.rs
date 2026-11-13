@@ -1489,10 +1489,13 @@ impl Vcpu {
         let mut pin = current & !bits::PIN_EXTERNAL_INTERRUPT_EXITING;
         if enabled {
             pin |= bits::PIN_EXTERNAL_INTERRUPT_EXITING;
-        }
-        let pin = caps.pin_allowed.apply(pin);
-        if enabled && pin & bits::PIN_EXTERNAL_INTERRUPT_EXITING == 0 {
-            return Ok(false);
+            // Only the enabling path consults the capability masks: clearing a
+            // control must not be undone by a "must be one" mask (the bits were
+            // already validated when the control word was first written).
+            pin = caps.pin_allowed.apply(pin);
+            if pin & bits::PIN_EXTERNAL_INTERRUPT_EXITING == 0 {
+                return Ok(false);
+            }
         }
         // SAFETY: caller contract.
         unsafe {
