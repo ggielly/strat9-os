@@ -326,6 +326,7 @@ s9vm_guest_exit:
     mov [rdi + S9VM_F_RCX], rcx
     mov [rdi + S9VM_F_RDX], rdx
     mov [rdi + S9VM_F_RSI], rsi
+    mov [rdi + S9VM_F_RBP], rbp
     mov [rdi + S9VM_F_R8],  r8
     mov [rdi + S9VM_F_R9],  r9
     mov [rdi + S9VM_F_R10], r10

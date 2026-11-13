@@ -601,11 +601,13 @@ pub const fn make_eptp(root_phys: u64, memory_type: u8, four_levels: bool, ad: b
 }
 
 /// Invalidates the second-level translations for a given context
-/// (`invept` type 1, single context). Does nothing if the CPU has no `invept`.
+/// (`invept` type 1, single context).
 ///
 /// # Safety
-/// The CPU must be in VT-x root mode and the second-level translation must no
-/// longer be used by an active guest.
+/// The caller must guarantee that the CPU is in VT-x root mode **and** that
+/// `caps.invept` is set: this function emits `INVEPT` unconditionally and does
+/// not probe support. The second-level translation must also no longer be used
+/// by an active guest.
 pub unsafe fn invalidate_second_level(eptp: u64) {
     let descriptor = [eptp, 0u64];
     // SAFETY: `invept` reads 16 bytes from memory (local descriptor).

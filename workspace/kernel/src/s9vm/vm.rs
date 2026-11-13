@@ -1240,15 +1240,6 @@ impl From<VcpuError> for RunError {
 /// control back to policy (protection against an interrupt storm).
 const MAX_RESUMED_EXITS: u32 = 64;
 
-/// Consecutive host-interrupt exits tolerated inside one RUN before pin-based
-/// external-interrupt exiting is cleared for the rest of the RUN.
-///
-/// The guest runs with host interrupts disabled, so a pending host interrupt
-/// is not delivered while it executes; without this bound every VM entry would
-/// exit immediately (the pending interrupt is still pending) and the RUN would
-/// livelock until the storm bound trips.
-const MAX_HOST_IRQ_EXITS: u32 = 8;
-
 /// True if an exit can be resumed immediately by the kernel.
 const fn is_resumable(class: ExitClass) -> bool {
     matches!(
@@ -1505,6 +1496,14 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
     let mut result = Ok(());
     stats.runs += 1;
     unsafe {
+        // Drop any cached second-level translation for this world before the
+        // next entry: a world can be torn down and its EPT root frame reused,
+        // and stale translations tagged by the same EPTP would expose frames
+        // that now belong to another world. The RUN always executes with VT-x
+        // active on this CPU, which INVEPT requires.
+        if caps.invept {
+            crate::s9vm::control::invalidate_second_level(hardware.second_level_pointer());
+        }
         let _ = hardware.clear();
         if let Err(error) = hardware.load() {
             result = Err(RunError::Hardware(error));
@@ -1559,15 +1558,11 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
             // `InterruptWindow` after every entry and eventually be reported as
             // an exit storm. Start every RUN from a known, disarmed state.
             let _ = hardware.set_interrupt_window_exiting(caps, false);
-            // Same reasoning for external-interrupt exiting: the loop may have
-            // disabled it after a host-interrupt burst below.
+            // Re-arm external-interrupt exiting in case a previous RUN left it
+            // disabled: every host IRQ must exit so it is serviced in the STI
+            // window and never delivered through the guest IDT.
             let _ = hardware.set_external_interrupt_exiting(caps, true);
             let mut resumed = 0u32;
-            // Consecutive host-interrupt exits in this RUN. The guest runs with
-            // host interrupts disabled, so a pending interrupt is never
-            // delivered while the guest executes; past this bound the control
-            // is cleared for the rest of the RUN.
-            let mut host_irq_burst = 0u32;
             // True while interrupt-window exiting is armed in the control
             // block: the guest has a pending vector but interrupts disabled.
             let mut window_armed = false;
@@ -1812,19 +1807,15 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                         // failures remain distinguishable from ordinary exits.
                         timing.record_exit(exit.reason, exit_cycles);
                         // A host interrupt that arrives while the guest runs is
-                        // exited but cannot be delivered (host interrupts are
-                        // disabled during the RUN). Left alone, the pending
-                        // vector makes every entry exit again and the RUN
-                        // livelocks. Do not charge those exits to the guest
-                        // storm bound: clear external-interrupt exiting after a
-                        // short burst so the guest makes progress, and let the
-                        // vCPU task service the interrupt when it returns to
-                        // the scheduler.
+                        // exited but cannot be delivered with host interrupts
+                        // disabled. Open a one-instruction STI window so the
+                        // host services it; the vector never reaches the guest
+                        // IDT and the LAPIC ISR is acknowledged normally.
                         if class == ExitClass::ExternalInterrupt {
-                            host_irq_burst += 1;
-                            if host_irq_burst == MAX_HOST_IRQ_EXITS {
-                                let _ = hardware.set_external_interrupt_exiting(caps, false);
-                            }
+                            // The host services the pending IRQ in a short STI
+                            // window; the vector is never delivered into the
+                            // guest.
+                            crate::s9vm::vcpu::service_pending_host_interrupts();
                             continue;
                         }
                         if is_resumable(class) && resumed < MAX_RESUMED_EXITS {
@@ -1890,6 +1881,15 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
             }
         }
     }
+
+    // The VMCS must not stay current on this CPU after the RUN: the vCPU can be
+    // resumed on another CPU, and a current VMCS blocks VMPTRLD/VMCLEAR there.
+    if caps.invept {
+        unsafe {
+            crate::s9vm::control::invalidate_second_level(hardware.second_level_pointer());
+        }
+    }
+    let _ = unsafe { hardware.clear() };
 
     // 4. Reloads the registers from the post-execution guest state and puts
     //    the hardware context back into the registry if the world still
@@ -3273,6 +3273,15 @@ fn execute_one_run(vcpu_id: u64) -> Result<(), RunError> {
         return Err(RunError::HardwareNotReady);
     }
     let caps = crate::s9vm::detect().ok_or(RunError::HardwareNotReady)?;
+    // Pin the task to this CPU for the whole RUN. The VMCS is loaded (VMPTRLD)
+    // on one CPU and cleared (VMCLEAR) at the end of the RUN on that same CPU.
+    // The STI window opened by `service_pending_host_interrupts` lets the
+    // timer interrupt run; without this guard it could preempt and migrate the
+    // task, leaving the VMCS active on the old CPU and skipping the final
+    // VMCLEAR there. The guard also makes the per-CPU activation check below
+    // race-free. Interrupts stay masked outside the STI window, so this does
+    // not lengthen the time other tasks wait on this CPU.
+    let _pin = crate::sync::preempt::PreemptGuard::new();
     // VT-x activation is **per CPU**: the vCPU kernel task can be scheduled on
     // a CPU that has never executed `VMXON` (activation at boot only enables
     // the boot CPU). Running a guest there would execute VMX instructions

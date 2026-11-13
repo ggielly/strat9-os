@@ -107,6 +107,25 @@ use crate::s9vm::{
     vm,
 };
 
+/// Restores the interrupt flag on drop, including early-error paths.
+struct IrqOff {
+    flags: u64,
+}
+
+impl IrqOff {
+    fn new() -> Self {
+        Self {
+            flags: crate::arch::save_flags_and_cli(),
+        }
+    }
+}
+
+impl Drop for IrqOff {
+    fn drop(&mut self) {
+        crate::arch::restore_flags(self.flags);
+    }
+}
+
 /// Guest permissions for the low-memory and ROM mappings (read/write/exec).
 const DOS_GUEST_PERMS: u32 = 7;
 /// First guest-physical address mapped as conventional memory.
@@ -206,6 +225,26 @@ pub struct DosReport {
     pub preemption_slices: u32,
 }
 
+impl DosReport {
+    /// Creates an empty report for a run over `disk_sectors` sectors.
+    fn new(disk_sectors: u64) -> Self {
+        Self {
+            boot_sector_gpa: u64::from(biosrom::BOOT_SECTOR_GPA),
+            marker: None,
+            text: String::new(),
+            total_exits: 0,
+            io_exits: 0,
+            bios_calls: 0,
+            halt_exits: 0,
+            disk_sectors,
+            entry: u64::from(biosrom::BOOT_SECTOR_GPA),
+            timed_out: false,
+            external_interrupts: 0,
+            preemption_slices: 0,
+        }
+    }
+}
+
 /// Execution budget of one FreeDOS boot attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunLimits {
@@ -288,6 +327,13 @@ fn require_real_mode(caps: &HwCaps, label: &str) -> Result<(), DosError> {
         log::warn!("[s9vm] {}: unrestricted guest mode is unavailable", label);
         return Err(DosError::Unsupported);
     }
+    if !caps.preemption_timer {
+        log::warn!(
+            "[s9vm] {}: the preemption timer is unavailable (no bounded guest time)",
+            label
+        );
+        return Err(DosError::Unsupported);
+    }
     Ok(())
 }
 
@@ -332,7 +378,6 @@ pub fn run_freedos_with_limits(caps: &HwCaps, limits: RunLimits) -> Result<DosRe
     result
 }
 
-/// Body of a full DOS boot; the caller owns and destroys the world.
 /// Logs the guest architectural state around a failed VM entry.
 ///
 /// A VM-entry failure only reports the opaque reason `0x21` ("invalid guest
@@ -374,19 +419,28 @@ fn log_guest_state(vcpu: &Vcpu, label: &str) {
     );
 }
 
+/// Body of a full DOS boot; the caller owns and destroys the world.
 fn run_dos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError> {
     let disk_sectors = map_and_load(caps, world_id)?;
     install_artefacts(world_id)?;
     let mut memory = WorldMemory::new(world_id);
 
     // Detached vCPU: the run loop drives it directly, no scheduler.
-    let _vcpu_id = vm::create_vcpu_detached(world_id, 0).map_err(|_| DosError::VmFail(5))?;
     let pointer = vm::second_level_pointer(world_id, caps).map_err(|_| DosError::VmFail(6))?;
     let mut vcpu = Vcpu::new(caps, pointer)?;
     let guest = GuestState::real_mode(
         u64::from(biosrom::BOOT_SECTOR_GPA),
         u64::from(biosrom::BOOT_STACK_TOP),
     );
+    // Pin the task to this CPU before the VMCS is loaded: the STI window of
+    // `service_pending_host_interrupts` lets the timer interrupt run, and
+    // without this guard it could migrate the task while the VMCS is active on
+    // this CPU, so the final VMCLEAR would run on the wrong one. Declared
+    // before `_irq` so interrupts are restored first on every return path.
+    let _pin = crate::sync::preempt::PreemptGuard::new();
+    // Keep host interrupts disabled for the whole run; the guard restores them
+    // on every return path.
+    let _irq = IrqOff::new();
     // SAFETY: VT-x is active on this CPU (checked by the caller), interrupts
     // are disabled around the whole phase, and this control block is only used
     // by this task.
@@ -401,25 +455,27 @@ fn run_dos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError>
         guest.rip
     );
 
-    let mut report = DosReport {
-        boot_sector_gpa: u64::from(biosrom::BOOT_SECTOR_GPA),
-        marker: None,
-        text: String::new(),
-        total_exits: 0,
-        io_exits: 0,
-        bios_calls: 0,
-        halt_exits: 0,
-        disk_sectors,
-        entry: u64::from(biosrom::BOOT_SECTOR_GPA),
-        timed_out: false,
-        external_interrupts: 0,
-        preemption_slices: 0,
-    };
+    let mut report = DosReport::new(disk_sectors);
     let mut world_disk = WorldDisk::new(world_id, disk_sectors);
     let mut bios_state = bios::BiosState::new();
-    let saved_flags = crate::arch::save_flags_and_cli();
     let mut outcome: Result<(), DosError> = Ok(());
+    let tsc_hz = crate::s9vm::tsc::get().map_or(FALLBACK_TSC_HZ, |frequency| frequency.hz());
+    // Wall-clock origin of the run: the guest loop keeps host interrupts
+    // disabled, so an unbounded attempt would freeze the whole system.
+    let start_tsc = unsafe { core::arch::x86_64::_rdtsc() };
     for _ in 0..MAX_DOS_EXITS {
+        // SAFETY: same contract as the origin read.
+        let now = unsafe { core::arch::x86_64::_rdtsc() };
+        let elapsed_ns =
+            u128::from(now.wrapping_sub(start_tsc)) * 1_000_000_000 / u128::from(tsc_hz.max(1));
+        if elapsed_ns >= 10_000_000_000 {
+            log::info!(
+                "[s9vm] dostest: time budget reached after {} exit(s)",
+                report.total_exits
+            );
+            report.timed_out = true;
+            break;
+        }
         // SAFETY: `run` contract: block loaded, IRQs disabled, configured.
         let exit = match unsafe { vcpu.run() } {
             Ok(exit) => exit,
@@ -434,12 +490,21 @@ fn run_dos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError>
             ExitClass::IoPort => {
                 report.io_exits += 1;
                 let port = ((exit.qualification >> 16) & 0xFFFF) as u16;
-                if port == DEBUG_PORT {
+                // The debug port is a marker only for a non-string OUT; other
+                // accesses fall through to normal port handling.
+                if port == DEBUG_PORT
+                    && exit.qualification & 0x30 == 0
+                    && exit.qualification & 0x08 == 0
+                {
                     report.marker = Some((vcpu.guest().rax & 0xFF) as u8);
                     break;
                 }
                 if (biosrom::BIOS_PORT_BASE..=biosrom::BIOS_PORT_BASE + 0xFF).contains(&port) {
                     let vector = (port - biosrom::BIOS_PORT_BASE) as u8;
+                    // Refresh the segment registers: an INT call changes
+                    // ES/DS/SS and the ROM handler relies on them.
+                    // SAFETY: block loaded, guest inactive (exit handler).
+                    unsafe { vcpu.refresh_system_state() }.map_err(DosError::Run)?;
                     let mut registers = read_bios_registers(vcpu.guest());
                     let _ = bios_state.handle(vector, &mut registers, &mut memory, &mut world_disk);
                     write_bios_registers(&mut vcpu, &registers);
@@ -460,23 +525,10 @@ fn run_dos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError>
                 report.external_interrupts += 1;
                 // The guest runs with host interrupts disabled: a pending host
                 // interrupt makes every VM entry exit immediately, so the run
-                // spins without executing any guest code (no BIOS call, no
-                // text). After a short burst, stop taking external-interrupt
-                // exits for the rest of the run; the interrupt is serviced
-                // when the caller returns to the scheduler.
-                if report.external_interrupts == 8 {
-                    // SAFETY: block loaded, guest inactive.
-                    match unsafe { vcpu.set_external_interrupt_exiting(caps, false) } {
-                        Ok(_) => log::info!(
-                            "[s9vm] dosboot: host interrupt pending, \
-                             external-interrupt exiting disabled"
-                        ),
-                        Err(error) => log::warn!(
-                            "[s9vm] dosboot: cannot disable external-interrupt exiting: {:?}",
-                            error
-                        ),
-                    }
-                }
+                // spins without executing any guest code. Open a one-instruction
+                // window so the host services the IRQ; the vector is never
+                // delivered into the guest.
+                crate::s9vm::vcpu::service_pending_host_interrupts();
             }
             ExitClass::InterruptWindow => {}
             ExitClass::PreemptionTimer => {
@@ -507,7 +559,11 @@ fn run_dos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError>
             }
         }
     }
-    crate::arch::restore_flags(saved_flags);
+    // The local vCPU is not stored in the registry: unload the control block
+    // so `Drop` can release its frames on this CPU.
+    unsafe {
+        let _ = vcpu.clear();
+    }
     outcome?;
 
     if report.total_exits >= MAX_DOS_EXITS {
@@ -690,29 +746,36 @@ impl WorldMemory {
     /// linear, so a page split is unnecessary, but the access stays byte-wise
     /// and volatile like the guest-physical one.
     fn read_physical(&mut self, phys: u64, out: &mut [u8]) -> bool {
-        for (index, byte) in out.iter_mut().enumerate() {
-            let Some(address) = phys.checked_add(index as u64) else {
-                return false;
-            };
-            // SAFETY: `phys` comes from a table walk over frames this kernel
-            // allocated for the world; the direct map covers all of them.
-            unsafe {
-                *byte = core::ptr::read_volatile(crate::memory::phys_to_virt(address) as *const u8);
-            }
+        let Some(end) = phys.checked_add(out.len() as u64) else {
+            return false;
+        };
+        let _ = end;
+        // SAFETY: `phys` comes from a table walk over frames this kernel
+        // allocated for the world; the direct map is linear and covers all of
+        // them, so the whole range is one contiguous slice.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                crate::memory::phys_to_virt(phys) as *const u8,
+                out.as_mut_ptr(),
+                out.len(),
+            );
         }
         true
     }
 
     /// Writes `bytes` at host-physical address `phys`.
     fn write_physical(&mut self, phys: u64, bytes: &[u8]) -> bool {
-        for (index, byte) in bytes.iter().enumerate() {
-            let Some(address) = phys.checked_add(index as u64) else {
-                return false;
-            };
-            // SAFETY: same invariant as `read_physical`.
-            unsafe {
-                core::ptr::write_volatile(crate::memory::phys_to_virt(address) as *mut u8, *byte);
-            }
+        let Some(end) = phys.checked_add(bytes.len() as u64) else {
+            return false;
+        };
+        let _ = end;
+        // SAFETY: same invariant as `read_physical`.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                crate::memory::phys_to_virt(phys) as *mut u8,
+                bytes.len(),
+            );
         }
         true
     }
@@ -932,6 +995,12 @@ fn write_bios_registers(vcpu: &mut Vcpu, registers: &bios::BiosRegisters) {
             vcpu.set_guest_gpr(register, (previous & !0xFFFF) | u64::from(value));
         }
     }
+    // Real-mode segment bases follow the selectors (`selector << 4`): make
+    // ES/DS/SS current for INT 13h ES:BX, DAP DS:SI and INT 10h ES:BP.
+    // SAFETY: block loaded, guest inactive (exit handler).
+    unsafe {
+        let _ = vcpu.set_guest_segments(registers.cs, registers.ds, registers.es, registers.ss);
+    }
 }
 
 /// Publishes the CF/ZF result of a BIOS call in the scratch byte.
@@ -995,13 +1064,21 @@ fn run_freedos_in_world(
     let mut memory = WorldMemory::new(world_id);
 
     // Detached vCPU: the run loop drives it directly, no scheduler.
-    let _vcpu_id = vm::create_vcpu_detached(world_id, 0).map_err(|_| DosError::VmFail(5))?;
     let pointer = vm::second_level_pointer(world_id, caps).map_err(|_| DosError::VmFail(6))?;
     let mut vcpu = Vcpu::new(caps, pointer)?;
     let guest = GuestState::real_mode(
         u64::from(biosrom::BOOT_SECTOR_GPA),
         u64::from(biosrom::BOOT_STACK_TOP),
     );
+    // Pin the task to this CPU before the VMCS is loaded: the STI window of
+    // `service_pending_host_interrupts` lets the timer interrupt run, and
+    // without this guard it could migrate the task while the VMCS is active on
+    // this CPU, so the final VMCLEAR would run on the wrong one. Declared
+    // before `_irq` so interrupts are restored first on every return path.
+    let _pin = crate::sync::preempt::PreemptGuard::new();
+    // Keep host interrupts disabled for the whole run; the guard restores them
+    // on every return path.
+    let _irq = IrqOff::new();
     // SAFETY: VT-x is active on this CPU (checked by the caller), interrupts
     // are disabled around the whole phase, and this control block is only used
     // by this task.
@@ -1016,20 +1093,7 @@ fn run_freedos_in_world(
         guest.rip
     );
 
-    let mut report = DosReport {
-        boot_sector_gpa: u64::from(biosrom::BOOT_SECTOR_GPA),
-        marker: None,
-        text: String::new(),
-        total_exits: 0,
-        io_exits: 0,
-        bios_calls: 0,
-        halt_exits: 0,
-        disk_sectors,
-        entry: u64::from(biosrom::BOOT_SECTOR_GPA),
-        timed_out: false,
-        external_interrupts: 0,
-        preemption_slices: 0,
-    };
+    let mut report = DosReport::new(disk_sectors);
     let mut world_disk = WorldDisk::new(world_id, disk_sectors);
     let mut bios_state = bios::BiosState::new();
     // Chipset model of this world plus the local APIC its legacy devices signal
@@ -1042,7 +1106,6 @@ fn run_freedos_in_world(
     // names it in the log instead of only showing an exit counter.
     let mut unhandled_seen: [u16; 8] = [0; 8];
     let mut unhandled_seen_len = 0usize;
-    let saved_flags = crate::arch::save_flags_and_cli();
     // Wall-clock origin of the run: the shell-facing budget is measured from
     // here, independently of the exit counter.
     let start_tsc = unsafe { core::arch::x86_64::_rdtsc() };
@@ -1051,6 +1114,18 @@ fn run_freedos_in_world(
     let mut published_ticks: u32 = 0;
     let mut outcome: Result<(), DosError> = Ok(());
     for _ in 0..limits.max_exits {
+        // Deliver a pending APIC vector while the guest is running, so a busy
+        // wait still receives PIT IRQ0 (INT 08h/1Ch) instead of only on HLT.
+        if let Some(vector) = apic.pending_vector() {
+            let deliverable = vcpu.guest().rflags & (1 << 9) != 0
+                && unsafe { vcpu.interruptibility() }
+                    .map(|state| state & 0b11 == 0)
+                    .unwrap_or(false);
+            if deliverable {
+                unsafe { vcpu.inject_interrupt(vector) }.map_err(DosError::Run)?;
+                let _ = apic.service();
+            }
+        }
         // One device-time advance per exit, measured from the host TSC.
         // SAFETY: same contract as the first read.
         let now = unsafe { core::arch::x86_64::_rdtsc() };
@@ -1093,7 +1168,12 @@ fn run_freedos_in_world(
             ExitClass::IoPort => {
                 report.io_exits += 1;
                 let port = ((exit.qualification >> 16) & 0xFFFF) as u16;
-                if port == DEBUG_PORT {
+                // The debug port is a marker only for a non-string OUT; other
+                // accesses fall through to normal port handling.
+                if port == DEBUG_PORT
+                    && exit.qualification & 0x30 == 0
+                    && exit.qualification & 0x08 == 0
+                {
                     let marker = (vcpu.guest().rax & 0xFF) as u8;
                     report.marker = Some(marker);
                     if marker == SUCCESS_MARKER {
@@ -1108,6 +1188,15 @@ fn run_freedos_in_world(
                 } else if (biosrom::BIOS_PORT_BASE..=biosrom::BIOS_PORT_BASE + 0xFF).contains(&port)
                 {
                     let vector = (port - biosrom::BIOS_PORT_BASE) as u8;
+                    // Refresh the segment registers: an INT call changes
+                    // ES/DS/SS and the ROM handler relies on them.
+                    // SAFETY: block loaded, guest inactive (exit handler).
+                    if let Err(error) =
+                        unsafe { vcpu.refresh_system_state() }.map_err(DosError::Run)
+                    {
+                        outcome = Err(error);
+                        break;
+                    }
                     let mut registers = read_bios_registers(vcpu.guest());
                     // The boot sector reboots (`int 19h`) or enters ROM BASIC
                     // (`int 18h`) when it cannot load the kernel. Both vectors
@@ -1192,6 +1281,22 @@ fn run_freedos_in_world(
                                 vcpu.guest().rip
                             );
                         }
+                        // An unhandled `in` returns all ones: the accumulator
+                        // is the modelled destination (`in al,dx` is the common
+                        // probe form).
+                        if direction_in {
+                            let size = ((exit.qualification & 0x7) + 1) as u8;
+                            let mask: u64 = match size {
+                                1 => 0xFF,
+                                2 => 0xFFFF,
+                                _ => 0xFFFF_FFFF,
+                            };
+                            let previous = vcpu.guest().rax;
+                            // SAFETY: block loaded, guest inactive.
+                            unsafe {
+                                vcpu.set_guest_gpr(0, (previous & !mask) | mask);
+                            }
+                        }
                         if let Err(error) = advance_past_exit(&mut vcpu, &exit) {
                             outcome = Err(error);
                             break;
@@ -1233,11 +1338,22 @@ fn run_freedos_in_world(
                 // a genuine dead end.
                 let interruptible = vcpu.guest().rflags & (1 << 9) != 0;
                 if interruptible && report.halt_exits <= MAX_HALT_RECOVERY {
+                    // Advance RIP first: `advance_rip` also clears the STI /
+                    // MOV-SS shadow so the injected vector is deliverable.
+                    if let Err(error) = advance_past_exit(&mut vcpu, &exit) {
+                        outcome = Err(error);
+                        break;
+                    }
+                    let from_apic = apic.pending_vector();
+                    let vector = from_apic.unwrap_or(0x08);
                     // SAFETY: block loaded, guest inactive (exit handler).
-                    if let Err(error) = unsafe { vcpu.inject_interrupt(0x08) } {
+                    if let Err(error) = unsafe { vcpu.inject_interrupt(vector) } {
                         log::warn!("[s9vm] freedostest: cannot inject timer: {:?}", error);
                         outcome = Err(DosError::Run(error));
                         break;
+                    }
+                    if from_apic.is_some() {
+                        let _ = apic.service();
                     }
                 } else {
                     log::warn!(
@@ -1254,23 +1370,10 @@ fn run_freedos_in_world(
                 report.external_interrupts += 1;
                 // The guest runs with host interrupts disabled: a pending host
                 // interrupt makes every VM entry exit immediately, so the run
-                // spins without executing any guest code (no BIOS call, no
-                // text). After a short burst, stop taking external-interrupt
-                // exits for the rest of the run; the interrupt is serviced
-                // when the caller returns to the scheduler.
-                if report.external_interrupts == 8 {
-                    // SAFETY: block loaded, guest inactive.
-                    match unsafe { vcpu.set_external_interrupt_exiting(caps, false) } {
-                        Ok(_) => log::info!(
-                            "[s9vm] dosboot: host interrupt pending, \
-                             external-interrupt exiting disabled"
-                        ),
-                        Err(error) => log::warn!(
-                            "[s9vm] dosboot: cannot disable external-interrupt exiting: {:?}",
-                            error
-                        ),
-                    }
-                }
+                // spins without executing any guest code. Open a one-instruction
+                // window so the host services the IRQ; the vector is never
+                // delivered into the guest.
+                crate::s9vm::vcpu::service_pending_host_interrupts();
             }
             ExitClass::InterruptWindow => {}
             ExitClass::PreemptionTimer => {
@@ -1302,7 +1405,11 @@ fn run_freedos_in_world(
             }
         }
     }
-    crate::arch::restore_flags(saved_flags);
+    // The local vCPU is not stored in the registry: unload the control block
+    // so `Drop` can release its frames on this CPU.
+    unsafe {
+        let _ = vcpu.clear();
+    }
     outcome?;
     if unhandled_ports != 0 {
         log::info!(
@@ -1361,20 +1468,7 @@ fn run_dos_dry_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosEr
     install_artefacts(world_id)?;
     let mut memory = WorldMemory::new(world_id);
     verify_installation(&mut memory, disk_sectors)?;
-    Ok(DosReport {
-        boot_sector_gpa: u64::from(biosrom::BOOT_SECTOR_GPA),
-        marker: None,
-        text: String::new(),
-        total_exits: 0,
-        io_exits: 0,
-        bios_calls: 0,
-        halt_exits: 0,
-        disk_sectors,
-        entry: u64::from(biosrom::BOOT_SECTOR_GPA),
-        timed_out: false,
-        external_interrupts: 0,
-        preemption_slices: 0,
-    })
+    Ok(DosReport::new(disk_sectors))
 }
 
 /// Checks every artefact written by [`install_artefacts`] in world memory.
@@ -1486,20 +1580,7 @@ fn run_freedos_dry_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, D
     install_freedos_artefacts(world_id)?;
     let mut memory = WorldMemory::new(world_id);
     verify_freedos_installation(&mut memory, disk_sectors)?;
-    Ok(DosReport {
-        boot_sector_gpa: u64::from(biosrom::BOOT_SECTOR_GPA),
-        marker: None,
-        text: String::new(),
-        total_exits: 0,
-        io_exits: 0,
-        bios_calls: 0,
-        halt_exits: 0,
-        disk_sectors,
-        entry: u64::from(biosrom::BOOT_SECTOR_GPA),
-        timed_out: false,
-        external_interrupts: 0,
-        preemption_slices: 0,
-    })
+    Ok(DosReport::new(disk_sectors))
 }
 
 /// Checks every artefact written by [`install_freedos_artefacts`].
