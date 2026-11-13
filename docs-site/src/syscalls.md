@@ -548,6 +548,7 @@ Volumes are addressed in **512-byte sectors**, not byte offsets.
 | 810 | `SYS_SILO_UNVEIL` | `path_ptr, path_len, rights_bits` | `0` | OK | Reveal a path. Rights are an `UnveilRights` **bitmask**, not a `"rwx"` string |
 | 811 | `SYS_SILO_ENTER_SANDBOX` | : | `0` | OK | Enter sandbox mode (irreversible) |
 | 812 | `SYS_SILO_RENAME` | `handle: u64, label_ptr, label_len` | `0` | OK | Rename a silo |
+| 814 | `SYS_SILO_DESTROY` | `handle: u64` | silo id | OK | Destroy a quiescent silo and free its module. Requires the silo admin capability |
 
 `SYS_SILO_UNVEIL` limits: path ≤ 1024 bytes, at most 128 unveil rules (`ENOBUFS` beyond that). Re-unveiling an existing path only ever **narrows** the rights.
 
