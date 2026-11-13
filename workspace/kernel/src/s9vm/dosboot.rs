@@ -266,6 +266,47 @@ pub fn run_freedos(caps: &HwCaps) -> Result<DosReport, DosError> {
 }
 
 /// Body of a full DOS boot; the caller owns and destroys the world.
+/// Logs the guest architectural state around a failed VM entry.
+///
+/// A VM-entry failure only reports the opaque reason `0x21` ("invalid guest
+/// state"): the field the processor rejected is not named anywhere, so the
+/// values the kernel wrote are the only usable diagnostic. Kept next to the
+/// run loops so both the demo and the FreeDOS paths can call it.
+fn log_guest_state(vcpu: &Vcpu, label: &str) {
+    let guest = vcpu.guest();
+    log::warn!(
+        "[s9vm] {}: entry-failure guest state: cr0={:#x} cr3={:#x} cr4={:#x} \
+         efer={:#x} rflags={:#x} rip={:#x} rsp={:#x}",
+        label,
+        guest.cr0,
+        guest.cr3,
+        guest.cr4,
+        guest.efer,
+        guest.rflags,
+        guest.rip,
+        guest.rsp
+    );
+    log::warn!(
+        "[s9vm] {}: cs(sel={:#x} base={:#x} lim={:#x} ar={:#x}) \
+         ss(lim={:#x} ar={:#x}) tr(sel={:#x} lim={:#x} ar={:#x}) \
+         gdtr(base={:#x} lim={:#x}) idtr(base={:#x} lim={:#x})",
+        label,
+        guest.cs.selector,
+        guest.cs.base,
+        guest.cs.limit,
+        guest.cs.access_rights,
+        guest.ss.limit,
+        guest.ss.access_rights,
+        guest.tr.selector,
+        guest.tr.limit,
+        guest.tr.access_rights,
+        guest.gdtr_base,
+        guest.gdtr_limit,
+        guest.idtr_base,
+        guest.idtr_limit
+    );
+}
+
 fn run_dos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError> {
     let disk_sectors = map_and_load(caps, world_id)?;
     install_artefacts(world_id)?;
@@ -354,6 +395,9 @@ fn run_dos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError>
                     exit.raw_reason,
                     exit.qualification
                 );
+                if matches!(other, ExitClass::EntryFailure | ExitClass::TripleFault) {
+                    log_guest_state(&vcpu, "dostest");
+                }
                 outcome = Err(DosError::BadExit("unexpected exit"));
                 break;
             }
@@ -1029,6 +1073,9 @@ fn run_freedos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosEr
                     exit.reason.reason,
                     vcpu.guest().rip
                 );
+                if matches!(other, ExitClass::EntryFailure | ExitClass::TripleFault) {
+                    log_guest_state(&vcpu, "freedostest");
+                }
                 outcome = Err(DosError::BadExit("unexpected exit"));
                 break;
             }

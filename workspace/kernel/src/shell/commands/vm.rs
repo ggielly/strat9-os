@@ -279,12 +279,87 @@ fn cmd_test(dry: bool) -> Result<(), ShellError> {
         }
         Err(error) => {
             shell_println!("vm: test VM FAIL: {:?}", error);
+            shell_println!("vm: run `vm diag` for the pre-entry checks and capability masks.");
             Err(ShellError::ExecutionFailed)
         }
     }
 }
 
-const VM_USAGE: &str = "Usage: vm <list|info <id>|start <id>|stop <id>|pause <id>|resume <id>|console <id>|send <id> <text>|test [dry]>";
+/// `vm diag` — everything needed to debug a VM-entry failure.
+///
+/// A hardware "invalid guest state" does not name the rejected field. This
+/// command prints the capability masks the kernel validates against, replays
+/// the same pre-entry checks on the real-mode and long-mode boot presets, and
+/// reports the rule that fails (the engine itself logs the same check before
+/// every entry).
+fn cmd_diag() -> Result<(), ShellError> {
+    let caps = crate::s9vm::detect().unwrap_or_default();
+    shell_println!(
+        "engine: detected={} can_run={} unrestricted_guest={} ept={} ept_2mb={} \
+         ept_1gb={} vpid={} preemption_timer={}",
+        crate::s9vm::detected(),
+        caps.can_run(),
+        caps.unrestricted_guest,
+        caps.ept,
+        caps.ept_2mb,
+        caps.ept_1gb,
+        caps.vpid,
+        caps.preemption_timer
+    );
+    if !crate::s9vm::detected() {
+        shell_println!(
+            "fixed masks: unavailable (VT-x is not exposed here; the presets cannot be checked \
+             against real capability masks)"
+        );
+        shell_println!("worlds in the registry: {}", crate::s9vm::vm::count());
+        return Ok(());
+    }
+    shell_println!(
+        "fixed masks: cr0_0={:#x} cr0_1={:#x} cr4_0={:#x} cr4_1={:#x}",
+        caps.cr0_fixed0,
+        caps.cr0_fixed1,
+        caps.cr4_fixed0,
+        caps.cr4_fixed1
+    );
+    let fixed = crate::s9vm::guest::FixedBits::new(
+        caps.cr0_fixed0,
+        caps.cr0_fixed1,
+        caps.cr4_fixed0,
+        caps.cr4_fixed1,
+    );
+    let presets = [
+        (
+            "real-mode  (FreeDOS/DOS, rip=0x7c00)",
+            crate::s9vm::guest::GuestState::real_mode(0x7c00, 0x7c00),
+        ),
+        (
+            "long-mode  (s9vm guest kernel, rip=0x100000)",
+            crate::s9vm::guest::GuestState::long_mode_64(0x100000, 0x200000, 0x1000),
+        ),
+    ];
+    for (label, state) in presets {
+        match state.validate(&fixed, caps.unrestricted_guest) {
+            Ok(()) => shell_println!("{}: guest state VALID", label),
+            Err(error) => shell_println!("{}: guest state INVALID: {:?}", label, error),
+        }
+        shell_println!(
+            "  cr0={:#x} cr4={:#x} efer={:#x} rflags={:#x} tr.ar={:#x} tr.lim={:#x} \
+             gdtr.lim={:#x} idtr.lim={:#x}",
+            state.cr0,
+            state.cr4,
+            state.efer,
+            state.rflags,
+            state.tr.access_rights,
+            state.tr.limit,
+            state.gdtr_limit,
+            state.idtr_limit
+        );
+    }
+    shell_println!("worlds in the registry: {}", crate::s9vm::vm::count());
+    Ok(())
+}
+
+const VM_USAGE: &str = "Usage: vm <list|info <id>|start <id>|stop <id>|pause <id>|resume <id>|console <id>|send <id> <text>|test [dry]|diag>";
 
 /// `vm` — manage the s9vm worlds through the `/dev/vmm` scheme.
 pub fn cmd_vm(args: &[String]) -> Result<(), ShellError> {
@@ -327,6 +402,7 @@ pub fn cmd_vm(args: &[String]) -> Result<(), ShellError> {
             }
         },
         "test" => cmd_test(args.get(1).map(|arg| arg.as_str()) == Some("dry")),
+        "diag" | "debug" => cmd_diag(),
         "help" | "-h" | "--help" => {
             shell_println!("{}", VM_USAGE);
             shell_println!("  The command is a client of the /dev/vmm scheme:");
@@ -335,7 +411,8 @@ pub fn cmd_vm(args: &[String]) -> Result<(), ShellError> {
             shell_println!("    /dev/vmm/<id>/control       (write: start | stop | pause | resume)");
             shell_println!(
                 "  `vm test` boots the bundled FreeDOS 1.4 floppy (needs VT-x; `vm test dry` \
-                 checks the image without VT-x)."
+                 checks the image without VT-x); `vm diag` prints the capability masks and \
+                 replays the pre-entry guest-state checks."
             );
             Ok(())
         }

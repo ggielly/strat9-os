@@ -281,7 +281,13 @@ impl GuestState {
             rip: entry,
             rsp: stack_top,
             rflags: 0x2,
-            cr0: 0,
+            // `CR0.NE` is mandatory on every VM-entry path (it is set in the
+            // fixed-0 mask on the CPUs that require it, and the 64-bit guests
+            // already carry it): leaving CR0 at zero made the processor reject
+            // the first real-mode VM entry with "invalid guest state". PE and
+            // PG stay clear, which is what the unrestricted-guest control
+            // allows in real mode.
+            cr0: CR0_NE,
             cr3: 0,
             // CR4 is architecturally irrelevant in real mode, but the VMX
             // entry checks validate it against the CR4 fixed-bit MSRs, which

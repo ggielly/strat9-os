@@ -89,6 +89,8 @@ pub enum VcpuError {
     VmFail(u32),
     /// The guest is already launched and resumption is not permitted.
     AlreadyLaunched,
+    /// The guest state fails the architectural pre-entry checks.
+    InvalidGuestState(crate::s9vm::guest::GuestError),
     /// The EPT could not be built.
     Translation(mmu::MmuError),
     /// Unreadable exit state.
@@ -792,6 +794,29 @@ impl Vcpu {
     /// # Safety
     /// The control block must be loaded.
     pub unsafe fn configure(&mut self, caps: &HwCaps, guest: &GuestState) -> Result<(), VcpuError> {
+        // Architectural pre-entry checks. The hardware rejects an invalid
+        // guest state with an opaque "VM entry with invalid guest state" and
+        // does not name the field, so check the same invariants first and
+        // report the rule that failed (this is what made the first real-mode
+        // FreeDOS entry hard to diagnose).
+        let fixed = crate::s9vm::guest::FixedBits::new(
+            caps.cr0_fixed0,
+            caps.cr0_fixed1,
+            caps.cr4_fixed0,
+            caps.cr4_fixed1,
+        );
+        if let Err(error) = guest.validate(&fixed, caps.unrestricted_guest) {
+            log::warn!(
+                "[s9vm] guest state rejected before entry: {:?} \
+                 (cr0={:#x} cr4={:#x} efer={:#x} rflags={:#x})",
+                error,
+                guest.cr0,
+                guest.cr4,
+                guest.efer,
+                guest.rflags
+            );
+            return Err(VcpuError::InvalidGuestState(error));
+        }
         self.guest = *guest;
         // Seed the MSR shadows from the guest state supplied by policy. The
         // runtime WRMSR path updates the shadows; the synchronous state/control
