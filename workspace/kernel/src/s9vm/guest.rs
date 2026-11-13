@@ -283,7 +283,12 @@ impl GuestState {
             rflags: 0x2,
             cr0: 0,
             cr3: 0,
-            cr4: 0,
+            // CR4 is architecturally irrelevant in real mode, but the VMX
+            // entry checks validate it against the CR4 fixed-bit MSRs, which
+            // impose CR4.VMXE while the VMX operation is active (the same bit
+            // the 64-bit guests carry). Omitting it makes VM entry fail with
+            // "invalid guest state".
+            cr4: CR4_VMXE,
             efer: 0,
             dr7: 0x400,
             pat: 0x0007_0406_0007_0406,
@@ -297,7 +302,10 @@ impl GuestState {
                 selector: 0,
                 base: 0,
                 limit: 0xFFFF,
-                access_rights: protected_code_access_rights(0),
+                // Real-mode code segment: present, DPL 0, execute/read,
+                // accessed, 16-bit default (the D/B bit stays clear, as the
+                // processor expects outside protected/IA-32e mode).
+                access_rights: 0xB | AR_CODE_DATA | AR_PRESENT,
             },
             ss: Segment {
                 selector: 0,
@@ -311,8 +319,18 @@ impl GuestState {
                 limit: 0xFFFF,
                 access_rights: data_access_rights(0),
             },
-            fs: Segment::unusable(),
-            gs: Segment::unusable(),
+            fs: Segment {
+                selector: 0,
+                base: 0,
+                limit: 0xFFFF,
+                access_rights: data_access_rights(0),
+            },
+            gs: Segment {
+                selector: 0,
+                base: 0,
+                limit: 0xFFFF,
+                access_rights: data_access_rights(0),
+            },
             ldtr: Segment::unusable(),
             tr: Segment {
                 selector: 0,
@@ -320,10 +338,13 @@ impl GuestState {
                 limit: 0xFFFF,
                 access_rights: 0x8B, // type 0xB (busy 32-bit TSS), present
             },
+            // Real mode does not use the descriptor tables, but the
+            // processor requires their limits to be 0xFFFF when the guest is
+            // not in IA-32e mode (the BIOS sets them that way).
             gdtr_base: 0,
-            gdtr_limit: 0,
+            gdtr_limit: 0xFFFF,
             idtr_base: 0,
-            idtr_limit: 0,
+            idtr_limit: 0xFFFF,
             sysenter_cs: 0,
             sysenter_esp: 0,
             sysenter_eip: 0,
@@ -548,11 +569,30 @@ impl GuestState {
     /// MSRs read at boot. `unrestricted_guest` indicates whether real
     /// mode without VM86 is available.
     pub fn validate(&self, caps: &FixedBits, unrestricted_guest: bool) -> Result<(), GuestError> {
-        // CR0: the fixed bits are imposed by the architecture.
+        // Real mode (PE = 0) needs the "unrestricted guest" control: without
+        // it the processor only accepts protected-mode guests. Paging is also
+        // impossible without protection, so `CR0.PG` must stay clear.
+        if self.is_real_mode() {
+            if !unrestricted_guest {
+                return Err(GuestError::RealModeRestricted);
+            }
+            if self.cr0 & CR0_PG != 0 {
+                return Err(GuestError::Cr0FixedBit);
+            }
+        }
+        // CR0: the fixed bits are imposed by the architecture. With the
+        // unrestricted-guest control the processor permits PE = 0 and PG = 0
+        // in real mode, so the corresponding fixed-0 bits are not enforced
+        // there (they are on every other path).
+        let cr0_fixed0 = if self.is_real_mode() && unrestricted_guest {
+            caps.cr0_fixed0 & !(CR0_PE | CR0_PG)
+        } else {
+            caps.cr0_fixed0
+        };
         if self.cr0 & !caps.cr0_fixed1 != 0 {
             return Err(GuestError::Cr0FixedBit);
         }
-        if self.cr0 & caps.cr0_fixed0 != caps.cr0_fixed0 {
+        if self.cr0 & cr0_fixed0 != cr0_fixed0 {
             return Err(GuestError::Cr0RequiredBit);
         }
         if self.cr4 & !caps.cr4_fixed1 != 0 {
@@ -560,11 +600,6 @@ impl GuestState {
         }
         if self.cr4 & caps.cr4_fixed0 != caps.cr4_fixed0 {
             return Err(GuestError::Cr4RequiredBit);
-        }
-
-        // Real mode (PE = 0): requires the unrestricted guest.
-        if self.is_real_mode() && !unrestricted_guest {
-            return Err(GuestError::RealModeRestricted);
         }
 
         // Long mode: EFER.LME requests paging, and CS must be in long mode.

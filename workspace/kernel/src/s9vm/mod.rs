@@ -50,6 +50,8 @@
 
 pub mod acpi;
 pub mod apic;
+pub mod bios;
+pub mod biosrom;
 pub mod bootinfo;
 pub mod caps;
 pub mod bootparams;
@@ -57,6 +59,7 @@ pub mod bzimage;
 pub mod control;
 pub mod cpuid;
 pub mod decode;
+pub mod dosboot;
 pub mod emulate;
 pub mod exit;
 pub mod exitqueue;

@@ -829,6 +829,18 @@ impl Vcpu {
         unsafe {
             self.write_guest_state(guest)?;
             self.write_controls(caps)?;
+            // The entry controls are computed for a 64-bit guest; a real-mode
+            // or 32-bit protected-mode guest must be entered with the IA-32e
+            // entry control clear, otherwise `VMLAUNCH` fails and the guest
+            // never runs.
+            if !guest.is_long_mode() {
+                let entry = self
+                    .control
+                    .read_u32(field::ENTRY_CONTROLS)
+                    .unwrap_or(0)
+                    & !bits::ENTRY_IA32E_MODE;
+                self.control.write_u32(field::ENTRY_CONTROLS, entry)?;
+            }
             self.control
                 .write_u64(field::GUEST_VMCS_LINK_POINTER, u64::MAX)?;
             self.control.write_u32(field::EXCEPTION_BITMAP, 0)?;

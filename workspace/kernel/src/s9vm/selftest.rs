@@ -59,6 +59,10 @@
 //!   vCPU (no scheduler) and runs synchronously at the `kthread` stage; it is
 //!   enabled by `s9vm.selftest.deferred=1` or explicitly with
 //!   `s9vm.selftest=guestos`;
+//! - `dos`: a real-mode 16-bit DOS-class guest booted through the BIOS model
+//!   (INT 10h/13h/16h/1Ah), with a 1.44 MiB demo disk; it needs VT-x and the
+//!   unrestricted-guest control. `dos_dry` performs and verifies the whole
+//!   preparation without VT-x;
 //! - `2`/`all`: the six bootstrap phases; `acpi`, `smp` and `guestos` are added
 //!   by `s9vm.selftest.deferred=1`.
 //!
@@ -93,6 +97,7 @@ use crate::{
         },
         guestprog::guestos,
         guestpt::GuestPageTables,
+        dosboot,
         linuxboot,
         machine::Machine,
         vcpu::{SecondLevelMemory, Vcpu, VcpuError},
@@ -3783,6 +3788,21 @@ pub fn maybe_run_loader_dry_from_boot_env() {
         }
         return;
     }
+    if mode == "dos_dry" {
+        log::info!("[s9vm] DOS boot dry run requested (no VT-x required)");
+        let caps = HwCaps::default();
+        match dosboot::run_dos_dry(&caps) {
+            Ok(report) => log::info!(
+                "[s9vm] dosdry PASS: boot={:#x} entry={:#x} sectors={} \
+                 (low memory + BIOS ROM + IVT/BDA + boot sector + disk, no guest entry)",
+                report.boot_sector_gpa,
+                report.entry,
+                report.disk_sectors
+            ),
+            Err(error) => log::warn!("[s9vm] dosdry FAIL: {:?}", error),
+        }
+        return;
+    }
     if mode != "loader_dry" {
         return;
     }
@@ -3833,6 +3853,11 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
     let block_phase = matches!(mode, "2" | "all" | "blk");
     let network_phase = matches!(mode, "2" | "all" | "net");
     let loader_phase = matches!(mode, "2" | "all" | "loader");
+    // The DOS phase boots a real-mode 16-bit guest through the BIOS model. It
+    // needs VT-x (real-mode entry) and the `unrestricted guest` control; on a
+    // host without them the phase reports SKIP, and `dos_dry` covers the whole
+    // preparation without VT-x.
+    let dos_phase = mode == "dos";
     // The phases that need a registered vCPU run from kernel threads at the
     // `kthread` stage. They are opt-in for the `2`/`all` mode: they exercise
     // the newest kernel-thread path, so a boot that must stay predictable can
@@ -3971,6 +3996,30 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
                 report.marker
             ),
             Err(error) => log::warn!("[s9vm] loadertest FAIL: {:?}", error),
+        }
+    }
+
+    if dos_phase {
+        log::info!("[s9vm] DOS real-mode boot requested (VT-x required)");
+        match dosboot::run_dos(caps) {
+            Ok(report) => log::info!(
+                "[s9vm] dostest PASS: boot={:#x} entry={:#x} marker={:?} exits={} \
+                 io={} bios={} hlt={} sectors={} text={:?}",
+                report.boot_sector_gpa,
+                report.entry,
+                report.marker,
+                report.total_exits,
+                report.io_exits,
+                report.bios_calls,
+                report.halt_exits,
+                report.disk_sectors,
+                report.text
+            ),
+            Err(dosboot::DosError::Unsupported) => log::warn!(
+                "[s9vm] dostest SKIP: real-mode entry needs VT-x and the \
+                 unrestricted-guest control"
+            ),
+            Err(error) => log::warn!("[s9vm] dostest FAIL: {:?}", error),
         }
     }
 }

@@ -106,8 +106,10 @@ fn long_mode_requires_zero_bases_and_full_limits() {
 
 #[test]
 fn fixed_cr_bits_are_enforced() {
-    // CR0: bit 0 mandatory, bit 31 forbidden.
-    let caps = FixedBits::new(1 << 0, !(1 << 31), 0, u64::MAX);
+    // CR0: bit 5 (NE) mandatory, bit 31 (PG) forbidden. PE and PG are relaxed
+    // in real mode with unrestricted guest (see the test below), so a bit that
+    // is enforced on every path is used here.
+    let caps = FixedBits::new(1 << 5, !(1 << 31), 0, u64::MAX);
     let mut state = GuestState::real_mode(0, 0x1000);
     state.cr0 = 0;
     assert_eq!(
@@ -126,6 +128,27 @@ fn fixed_cr_bits_are_enforced() {
         state.validate(&caps, true),
         Err(GuestError::Cr4RequiredBit)
     );
+}
+
+#[test]
+fn real_mode_relaxes_pe_and_pg_fixed_bits_only_with_unrestricted_guest() {
+    // The processor advertises PE and PG as CR0 fixed-0 bits, yet a real-mode
+    // guest must enter with both clear: the unrestricted-guest control lifts
+    // exactly those two requirements.
+    let caps = FixedBits::new((1 << 0) | (1 << 5) | (1 << 31), u64::MAX, 0, u64::MAX);
+    let mut state = GuestState::real_mode(0, 0x1000);
+    // NE stays mandatory even in real mode.
+    state.cr0 = 1 << 5;
+    assert_eq!(state.validate(&caps, true), Ok(()));
+    // Without the unrestricted-guest control real mode is rejected outright.
+    assert_eq!(
+        state.validate(&caps, false),
+        Err(GuestError::RealModeRestricted)
+    );
+    // PG must still be clear: the relaxation is not a licence to set it.
+    let mut state = GuestState::real_mode(0, 0x1000);
+    state.cr0 = (1 << 5) | (1 << 31);
+    assert_eq!(state.validate(&caps, true), Err(GuestError::Cr0FixedBit));
 }
 
 #[test]
@@ -349,7 +372,7 @@ fn import_system_state_preserves_guest_loaded_tables() {
     // segment defaults.
     let mut real = GuestState::real_mode(0x1000, 0x2000);
     real.import_system_state(&hardware);
-    assert_eq!(real.gdtr_limit, 0);
+    assert_eq!(real.gdtr_limit, 0xFFFF);
 
     // The imported state is still valid for entry.
     assert_eq!(boot.validate(&permissive(), true), Ok(()));
