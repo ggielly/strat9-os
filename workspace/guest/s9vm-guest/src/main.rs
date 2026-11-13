@@ -822,7 +822,11 @@ pub unsafe extern "C" fn guest_main(boot_params_gpa: u64) -> ! {
         }
     } else {
         debug_write(b'd');
-        debug_write(DEVICE_NOT_ADVERTISED);
+        // Diagnostic: echo the device-flag word the guest actually read from
+        // the boot-parameter block, instead of the generic "not advertised"
+        // code. A kernel-side flags/readback log then pins the discrepancy on
+        // the writer or on this reader without another rebuild.
+        debug_write(flags as u8);
     }
 
     // 15. Interrupt delivery: program the local APIC timer one-shot with the
@@ -850,7 +854,7 @@ pub unsafe extern "C" fn guest_main(boot_params_gpa: u64) -> ! {
         // identity before touching any queue.
         unsafe { virtio_net::transmit(net_base) }.err()
     } else {
-        Some(DEVICE_NOT_ADVERTISED)
+        Some((flags & 0xFF) as u8)
     };
     match net_error {
         None => debug_write(b'X'),
