@@ -183,6 +183,41 @@ pub struct DosReport {
     pub disk_sectors: u64,
     /// Entry instruction pointer given to the guest (`0x7C00`).
     pub entry: u64,
+    /// `true` when the run stopped on its wall-clock budget instead of
+    /// reaching the success marker. The shell-facing runner reports this
+    /// instead of hanging: the guest loop runs with interrupts disabled, so an
+    /// unbounded boot attempt would freeze the whole system.
+    pub timed_out: bool,
+}
+
+/// Execution budget of one FreeDOS boot attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunLimits {
+    /// Maximum number of guest exits.
+    pub max_exits: u32,
+    /// Maximum wall-clock duration in nanoseconds (0 = no time limit).
+    pub max_nanoseconds: u64,
+}
+
+impl RunLimits {
+    /// Budget of the boot-time selftest: generous, because a failure there is
+    /// reported once during boot and never blocks an operator.
+    pub const SELFTEST: Self = Self {
+        max_exits: MAX_FREEDOS_EXITS,
+        max_nanoseconds: 10_000_000_000,
+    };
+    /// Budget of `vm test` from the shell: the guest loop keeps interrupts
+    /// disabled, so the attempt is bounded to a short, predictable pause.
+    pub const SHELL: Self = Self {
+        max_exits: 120_000,
+        max_nanoseconds: 2_000_000_000,
+    };
+}
+
+impl Default for RunLimits {
+    fn default() -> Self {
+        Self::SELFTEST
+    }
 }
 
 /// Errors reported by the DOS boot runner.
@@ -258,9 +293,28 @@ pub fn run_dos(caps: &HwCaps) -> Result<DosReport, DosError> {
 /// report carries the `K` marker written by the AUTOEXEC program and the VGA
 /// text produced by the boot, which must contain the FreeDOS banner.
 pub fn run_freedos(caps: &HwCaps) -> Result<DosReport, DosError> {
+    let report = run_freedos_with_limits(caps, RunLimits::SELFTEST)?;
+    if report.timed_out {
+        log::warn!("[s9vm] freedostest: boot did not complete within the budget");
+        return Err(DosError::BadExit("FreeDOS boot timed out"));
+    }
+    verify_freedos(&report)?;
+    Ok(report)
+}
+
+/// Boots the FreeDOS floppy under an explicit execution budget.
+///
+/// Used by the shell-facing `vm test` command: the guest loop runs with host
+/// interrupts disabled (the VM-entry contract), so an unbounded attempt would
+/// freeze the whole system. The report carries `timed_out = true` when the
+/// budget stopped the run; the world is destroyed on every path.
+pub fn run_freedos_with_limits(
+    caps: &HwCaps,
+    limits: RunLimits,
+) -> Result<DosReport, DosError> {
     require_real_mode(caps, "freedostest")?;
     let record = vm::create(b"s9vm-freedos", 0).ok_or(DosError::VmFail(1))?;
-    let result = run_freedos_in_world(caps, record.id);
+    let result = run_freedos_in_world(caps, record.id, limits);
     let _ = vm::destroy(record.id);
     result
 }
@@ -343,6 +397,7 @@ fn run_dos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError>
         halt_exits: 0,
         disk_sectors,
         entry: u64::from(biosrom::BOOT_SECTOR_GPA),
+        timed_out: false,
     };
     let mut world_disk = WorldDisk::new(world_id, disk_sectors);
     let mut bios_state = bios::BiosState::new();
@@ -881,7 +936,11 @@ fn verify_demo(report: &DosReport) -> Result<(), DosError> {
 ///   counted and skipped: DOS probes a lot of absent legacy hardware.
 /// - an EPT violation on a modeled device page (local APIC, I/O APIC, HPET,
 ///   virtio BAR) is replayed the same way; any other violation fails the run.
-fn run_freedos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError> {
+fn run_freedos_in_world(
+    caps: &HwCaps,
+    world_id: u64,
+    limits: RunLimits,
+) -> Result<DosReport, DosError> {
     let disk_sectors = map_and_load_freedos(caps, world_id)?;
     install_freedos_artefacts(world_id)?;
     let mut memory = WorldMemory::new(world_id);
@@ -917,6 +976,7 @@ fn run_freedos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosEr
         halt_exits: 0,
         disk_sectors,
         entry: u64::from(biosrom::BOOT_SECTOR_GPA),
+        timed_out: false,
     };
     let mut world_disk = WorldDisk::new(world_id, disk_sectors);
     let mut bios_state = bios::BiosState::new();
@@ -927,19 +987,34 @@ fn run_freedos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosEr
     let tsc_hz = crate::s9vm::tsc::get().map_or(FALLBACK_TSC_HZ, |frequency| frequency.hz());
     let mut unhandled_ports: u32 = 0;
     let saved_flags = crate::arch::save_flags_and_cli();
-    // SAFETY: `rdtsc` is unconditionally available on the x86-64 hosts this
-    // kernel runs on; it only reads a counter.
-    let mut last_tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    // Wall-clock origin of the run: the shell-facing budget is measured from
+    // here, independently of the exit counter.
+    let start_tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    let mut last_tsc = start_tsc;
     let mut total_cycles: u64 = 0;
     let mut published_ticks: u32 = 0;
     let mut outcome: Result<(), DosError> = Ok(());
-    for _ in 0..MAX_FREEDOS_EXITS {
+    for _ in 0..limits.max_exits {
         // One device-time advance per exit, measured from the host TSC.
         // SAFETY: same contract as the first read.
         let now = unsafe { core::arch::x86_64::_rdtsc() };
         let delta = now.wrapping_sub(last_tsc);
         last_tsc = now;
         total_cycles = total_cycles.wrapping_add(delta);
+        // Wall-clock budget: the loop keeps host interrupts disabled (VM-entry
+        // contract), so an unbounded attempt would freeze the whole system.
+        if limits.max_nanoseconds != 0 {
+            let elapsed_ns = u128::from(now.wrapping_sub(start_tsc)) * 1_000_000_000
+                / u128::from(tsc_hz.max(1));
+            if elapsed_ns >= u128::from(limits.max_nanoseconds) {
+                log::info!(
+                    "[s9vm] freedostest: time budget reached after {} exit(s)",
+                    report.total_exits
+                );
+                report.timed_out = true;
+                break;
+            }
+        }
         machine.advance_time(&mut apic, delta, tsc_hz);
         // 18.2 Hz BIOS tick: `ticks` is the cumulative count derived from the
         // host cycles (182 / 10 per second). `advance_ticks` accumulates, so
@@ -1089,7 +1164,8 @@ fn run_freedos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosEr
             unhandled_ports
         );
     }
-    if report.total_exits >= MAX_FREEDOS_EXITS {
+    if report.total_exits >= limits.max_exits {
+        report.timed_out = true;
         let text = bios::read_text(&mut memory);
         log::warn!(
             "[s9vm] freedostest: exit budget exhausted (marker {:?}, {} text characters, \
@@ -1098,10 +1174,8 @@ fn run_freedos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosEr
             text.len(),
             vcpu.guest().rip
         );
-        return Err(DosError::BadExit("exit budget exhausted"));
     }
     report.text = bios::read_text(&mut memory);
-    verify_freedos(&report)?;
     Ok(report)
 }
 
@@ -1151,6 +1225,7 @@ fn run_dos_dry_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosEr
         halt_exits: 0,
         disk_sectors,
         entry: u64::from(biosrom::BOOT_SECTOR_GPA),
+        timed_out: false,
     })
 }
 
@@ -1273,6 +1348,7 @@ fn run_freedos_dry_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, D
         halt_exits: 0,
         disk_sectors,
         entry: u64::from(biosrom::BOOT_SECTOR_GPA),
+        timed_out: false,
     })
 }
 

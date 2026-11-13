@@ -233,7 +233,18 @@ fn cmd_send(id: u64, words: &[String]) -> Result<(), ShellError> {
 }
 
 /// `vm test [dry]` — boot the built-in FreeDOS 1.4 test world.
-fn cmd_test(dry: bool) -> Result<(), ShellError> {
+fn cmd_test(args: &[String]) -> Result<(), ShellError> {
+    let dry = args.first().map(|arg| arg.as_str()) == Some("dry");
+    // Operator-controlled time budget, clamped so a typo cannot freeze the
+    // system for an unbounded time. The guest loop keeps interrupts disabled.
+    let seconds = if dry {
+        0
+    } else {
+        args.first()
+            .and_then(|arg| arg.parse::<u64>().ok())
+            .unwrap_or(2)
+            .clamp(1, 10)
+    };
     // The dry run only installs the image in a world: it works without VT-x,
     // so it must not be skipped when detection reports no hardware support.
     let caps = crate::s9vm::detect().unwrap_or_default();
@@ -257,12 +268,39 @@ fn cmd_test(dry: bool) -> Result<(), ShellError> {
         shell_println!("vm: test VM skipped: the platform cannot run a guest");
         return Ok(());
     }
-    shell_println!("vm: booting the FreeDOS 1.4 test world (VT-x)…");
-    match crate::s9vm::dosboot::run_freedos(&caps) {
+    shell_println!(
+        "vm: booting the FreeDOS 1.4 test world (VT-x, bounded to {} s: the guest loop runs \
+         with interrupts disabled, so the attempt cannot freeze the system)…",
+        seconds
+    );
+    let limits = crate::s9vm::dosboot::RunLimits {
+        max_exits: crate::s9vm::dosboot::RunLimits::SHELL.max_exits,
+        max_nanoseconds: seconds.saturating_mul(1_000_000_000),
+    };
+    match crate::s9vm::dosboot::run_freedos_with_limits(&caps, limits) {
+        Ok(report) if report.timed_out => {
+            shell_println!(
+                "vm: test VM INCOMPLETE (bounded run): marker={:?} exits={} bios={} hlt={} \
+                 sectors={}",
+                report.marker.map(|byte| byte as char),
+                report.total_exits,
+                report.bios_calls,
+                report.halt_exits,
+                report.disk_sectors
+            );
+            shell_println!("vm: the attempt was stopped by its time/exit budget; run `vm test`");
+            shell_println!("    again, or `vm test dry` to check the image without VT-x.");
+            if !report.text.is_empty() {
+                shell_println!("vm: guest text so far:\n{}", report.text.trim_end());
+            }
+            Ok(())
+        }
         Ok(report) => {
             let marker = report.marker.map(|byte| byte as char).unwrap_or('?');
+            let booted = report.marker == Some(b'K') && report.text.contains("FreeDOS");
             shell_println!(
-                "vm: test VM PASS: marker={} exits={} io={} bios={} hlt={} sectors={}",
+                "vm: test VM {}: marker={} exits={} io={} bios={} hlt={} sectors={}",
+                if booted { "PASS" } else { "FAIL" },
                 marker,
                 report.total_exits,
                 report.io_exits,
@@ -271,7 +309,12 @@ fn cmd_test(dry: bool) -> Result<(), ShellError> {
                 report.disk_sectors
             );
             shell_println!("vm: guest text:\n{}", report.text.trim_end());
-            Ok(())
+            if booted {
+                Ok(())
+            } else {
+                shell_println!("vm: run `vm diag` for the pre-entry checks and capability masks.");
+                Err(ShellError::ExecutionFailed)
+            }
         }
         Err(crate::s9vm::dosboot::DosError::Unsupported) => {
             shell_println!("vm: test VM skipped: real-mode entry needs VT-x and unrestricted guest");
@@ -359,7 +402,7 @@ fn cmd_diag() -> Result<(), ShellError> {
     Ok(())
 }
 
-const VM_USAGE: &str = "Usage: vm <list|info <id>|start <id>|stop <id>|pause <id>|resume <id>|console <id>|send <id> <text>|test [dry]|diag>";
+const VM_USAGE: &str = "Usage: vm <list|info <id>|start <id>|stop <id>|pause <id>|resume <id>|console <id>|send <id> <text>|test [dry|seconds]|diag>";
 
 /// `vm` — manage the s9vm worlds through the `/dev/vmm` scheme.
 pub fn cmd_vm(args: &[String]) -> Result<(), ShellError> {
@@ -401,7 +444,7 @@ pub fn cmd_vm(args: &[String]) -> Result<(), ShellError> {
                 Err(ShellError::InvalidArguments)
             }
         },
-        "test" => cmd_test(args.get(1).map(|arg| arg.as_str()) == Some("dry")),
+        "test" => cmd_test(&args[1..]),
         "diag" | "debug" => cmd_diag(),
         "help" | "-h" | "--help" => {
             shell_println!("{}", VM_USAGE);
@@ -410,9 +453,10 @@ pub fn cmd_vm(args: &[String]) -> Result<(), ShellError> {
             shell_println!("    /dev/vmm/control            (write: start <id> | stop <id>)");
             shell_println!("    /dev/vmm/<id>/control       (write: start | stop | pause | resume)");
             shell_println!(
-                "  `vm test` boots the bundled FreeDOS 1.4 floppy (needs VT-x; `vm test dry` \
-                 checks the image without VT-x); `vm diag` prints the capability masks and \
-                 replays the pre-entry guest-state checks."
+                "  `vm test [dry|seconds]` boots the bundled FreeDOS 1.4 floppy with a bounded \
+                 time budget (VT-x needed; `vm test dry` checks the image without VT-x); \
+                 `vm diag` prints the capability masks and replays the pre-entry guest-state \
+                 checks."
             );
             Ok(())
         }
