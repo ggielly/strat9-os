@@ -278,29 +278,43 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
         max_nanoseconds: seconds.saturating_mul(1_000_000_000),
     };
     match crate::s9vm::dosboot::run_freedos_with_limits(&caps, limits) {
-        Ok(report) if report.timed_out => {
-            shell_println!(
-                "vm: test VM INCOMPLETE (bounded run): marker={:?} exits={} bios={} hlt={} \
-                 sectors={}",
-                report.marker.map(|byte| byte as char),
-                report.total_exits,
-                report.bios_calls,
-                report.halt_exits,
-                report.disk_sectors
-            );
-            shell_println!("vm: the attempt was stopped by its time/exit budget; run `vm test`");
-            shell_println!("    again, or `vm test dry` to check the image without VT-x.");
-            if !report.text.is_empty() {
-                shell_println!("vm: guest text so far:\n{}", report.text.trim_end());
-            }
-            Ok(())
-        }
         Ok(report) => {
-            let marker = report.marker.map(|byte| byte as char).unwrap_or('?');
             let booted = report.marker == Some(b'K') && report.text.contains("FreeDOS");
+            let marker = report.marker.map(|byte| byte as char);
+            if booted {
+                shell_println!(
+                    "vm: test VM PASS: marker={} exits={} io={} bios={} hlt={} sectors={}",
+                    marker.unwrap_or('?'),
+                    report.total_exits,
+                    report.io_exits,
+                    report.bios_calls,
+                    report.halt_exits,
+                    report.disk_sectors
+                );
+                shell_println!("vm: guest text:\n{}", report.text.trim_end());
+                return Ok(());
+            }
+            if report.timed_out {
+                shell_println!(
+                    "vm: test VM INCOMPLETE (bounded run): marker={:?} exits={} bios={} hlt={} \
+                     sectors={}",
+                    marker,
+                    report.total_exits,
+                    report.bios_calls,
+                    report.halt_exits,
+                    report.disk_sectors
+                );
+                shell_println!(
+                    "vm: the attempt was stopped by its time/exit budget (`vm test <1..10>` \
+                     for a longer run); no world is left behind."
+                );
+                if !report.text.is_empty() {
+                    shell_println!("vm: guest text so far:\n{}", report.text.trim_end());
+                }
+                return Ok(());
+            }
             shell_println!(
-                "vm: test VM {}: marker={} exits={} io={} bios={} hlt={} sectors={}",
-                if booted { "PASS" } else { "FAIL" },
+                "vm: test VM FAIL: marker={:?} exits={} io={} bios={} hlt={} sectors={}",
                 marker,
                 report.total_exits,
                 report.io_exits,
@@ -309,12 +323,8 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
                 report.disk_sectors
             );
             shell_println!("vm: guest text:\n{}", report.text.trim_end());
-            if booted {
-                Ok(())
-            } else {
-                shell_println!("vm: run `vm diag` for the pre-entry checks and capability masks.");
-                Err(ShellError::ExecutionFailed)
-            }
+            shell_println!("vm: run `vm diag` for the pre-entry checks and capability masks.");
+            Err(ShellError::ExecutionFailed)
         }
         Err(crate::s9vm::dosboot::DosError::Unsupported) => {
             shell_println!("vm: test VM skipped: real-mode entry needs VT-x and unrestricted guest");
