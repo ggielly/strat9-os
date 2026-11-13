@@ -74,17 +74,36 @@
 //! pass on every host, while [`run_dos`] only passes on hardware exposing VT-x
 //! with unrestricted guest mode.
 //!
+//! # FreeDOS 1.4 boot
+//!
+//! [`run_freedos`] boots the real FreeDOS 1.4 boot floppy bundled with the
+//! kernel ([`freedos_image`]) in an equivalent world. Only the boot sector is
+//! copied to `0x7C00`: FreeDOS loads its kernel and command interpreter from
+//! the emulated floppy through `INT 13h`, which is exactly the path this runner
+//! is meant to exercise. The guest additionally needs the window above 1 MiB
+//! (`0x100000..0x120000`) for its A20 probe, and the legacy ports it scans are
+//! replayed by the kernel device model ([`emulate::handle_exit`]) so unmapped
+//! legacy hardware never fails the boot. Success is the `K` marker written by
+//! the AUTOEXEC program plus the `FreeDOS` banner in the VGA text buffer.
+//! [`run_freedos_dry`] is the VT-x-free regression: it installs the image and
+//! verifies every artefact (disk capacity, boot signature, OEM name, boot
+//! sector copy, `INT 10h` vector, BDA words, zeroed video buffer) through the
+//! world translation.
+//!
 //! This module is `no_std` (`core` + `alloc`) and never panics on guest
 //! behaviour: every failure is a [`DosError`].
 
 use alloc::string::String;
 
 use crate::s9vm::{
+    apic::LocalApic,
     bios, biosrom,
     caps::HwCaps,
-    exit::ExitClass,
+    emulate,
+    exit::{reason_name, ExitClass},
     guest::GuestState,
-    vcpu::{Vcpu, VcpuError},
+    machine::Machine,
+    vcpu::{ExitInfo, Vcpu, VcpuError},
     vm,
 };
 
@@ -92,8 +111,13 @@ use crate::s9vm::{
 const DOS_GUEST_PERMS: u32 = 7;
 /// First guest-physical address mapped as conventional memory.
 const LOW_MEMORY_BASE: u64 = 0;
-/// End of the mapped conventional low memory (video memory included).
-const LOW_MEMORY_END: u64 = 0xC0000;
+/// End of the mapped conventional low memory.
+///
+/// Covers the conventional 640 KiB, the VGA aperture (`0xA0000..0xC0000`) and
+/// the option-ROM/video-BIOS scan window (`0xC0000..0xF0000`): a DOS-class
+/// guest reads that window while scanning for expansion ROMs, and an unmapped
+/// read there would abort the boot.
+const LOW_MEMORY_END: u64 = 0xF0000;
 /// First address of the mapped BIOS ROM window.
 const ROM_WINDOW_BASE: u64 = 0xF0000;
 /// End of the mapped BIOS ROM window.
@@ -108,6 +132,29 @@ const DEBUG_PORT: u16 = biosrom::DEMO_DEBUG_PORT;
 const SUCCESS_MARKER: u8 = biosrom::DEMO_SUCCESS_MARKER;
 /// One page of guest memory, in bytes.
 const PAGE_SIZE: u32 = 4096;
+/// First guest-physical address of the window above 1 MiB.
+///
+/// FreeDOS probes the A20 gate and keeps kernel scratch data there, so the
+/// window must be mapped for the boot to proceed.
+const HIGH_MEMORY_BASE: u64 = 0x10_0000;
+/// End of the window above 1 MiB.
+const HIGH_MEMORY_END: u64 = 0x12_0000;
+/// Upper bound on guest exits for one FreeDOS boot.
+///
+/// A real DOS boot runs far more instructions than the synthetic demo: the
+/// budget is five times larger, and a guest that reaches it is reported as
+/// stuck with its current marker and screen state.
+const MAX_FREEDOS_EXITS: u32 = 500_000;
+/// Capacity of the FreeDOS boot floppy, in 512-byte sectors (1.44 MiB).
+const FREEDOS_DISK_SECTORS: u64 = 2880;
+/// Offset of the OEM name inside a DOS boot sector.
+const OEM_NAME_OFFSET: usize = 3;
+/// OEM name stored in the FreeDOS boot sector (`format.com` default).
+const FREEDOS_OEM_NAME: &[u8] = b"FRDOS5.1";
+/// Offset of the `0x55AA` signature inside a boot sector (GPA `0x7DFE`).
+const BOOT_SIGNATURE_OFFSET: u32 = 0x1FE;
+/// Host TSC frequency assumed when the platform never detected one (1 GHz).
+const FALLBACK_TSC_HZ: u64 = 1_000_000_000;
 
 /// Result of a successful DOS boot attempt.
 #[derive(Debug)]
@@ -155,25 +202,59 @@ impl From<VcpuError> for DosError {
     }
 }
 
+/// Returns the FreeDOS 1.4 boot floppy bundled with the kernel.
+///
+/// The image is the official 1.44 MiB Floppy Edition boot disk
+/// (`144m/x86BOOT.img`), patched so that `FDCONFIG.SYS`/`FDAUTO.BAT` boot
+/// deterministically and run a COM program that writes the `K` success marker
+/// on the debug port. Provenance, patch and checksums are documented in
+/// `workspace/assets/disks/README.md`. The image is compiled into the kernel:
+/// the boot does not depend on any external file.
+pub fn freedos_image() -> &'static [u8] {
+    include_bytes!("../../../assets/disks/freedos-1.4-boot.img")
+}
+
+/// Checks the platform can enter real mode and drive the device fast path.
+///
+/// `label` is the selftest mode name used in the diagnostics, so each caller
+/// keeps its own log prefix.
+fn require_real_mode(caps: &HwCaps, label: &str) -> Result<(), DosError> {
+    if !caps.can_run() {
+        log::warn!("[s9vm] {}: platform cannot run (VT-x unavailable)", label);
+        return Err(DosError::Unsupported);
+    }
+    if !caps.ept {
+        log::warn!("[s9vm] {}: EPT is unavailable", label);
+        return Err(DosError::Unsupported);
+    }
+    if !caps.unrestricted_guest {
+        log::warn!("[s9vm] {}: unrestricted guest mode is unavailable", label);
+        return Err(DosError::Unsupported);
+    }
+    Ok(())
+}
+
 /// Runs the DOS-class demo in a fresh world (requires VT-x).
 ///
 /// Returns a [`DosReport`] with the marker, the VGA text and the exit counters.
 /// The world is destroyed on every path, including errors.
 pub fn run_dos(caps: &HwCaps) -> Result<DosReport, DosError> {
-    if !caps.can_run() {
-        log::warn!("[s9vm] dostest: platform cannot run (VT-x unavailable)");
-        return Err(DosError::Unsupported);
-    }
-    if !caps.ept {
-        log::warn!("[s9vm] dostest: EPT is unavailable");
-        return Err(DosError::Unsupported);
-    }
-    if !caps.unrestricted_guest {
-        log::warn!("[s9vm] dostest: unrestricted guest mode is unavailable");
-        return Err(DosError::Unsupported);
-    }
+    require_real_mode(caps, "dostest")?;
     let record = vm::create(b"s9vm-dos", 0).ok_or(DosError::VmFail(1))?;
     let result = run_dos_in_world(caps, record.id);
+    let _ = vm::destroy(record.id);
+    result
+}
+
+/// Boots the FreeDOS 1.4 floppy in a fresh world (requires VT-x).
+///
+/// The world is destroyed on every path, including errors. On success the
+/// report carries the `K` marker written by the AUTOEXEC program and the VGA
+/// text produced by the boot, which must contain the FreeDOS banner.
+pub fn run_freedos(caps: &HwCaps) -> Result<DosReport, DosError> {
+    require_real_mode(caps, "freedostest")?;
+    let record = vm::create(b"s9vm-freedos", 0).ok_or(DosError::VmFail(1))?;
+    let result = run_freedos_in_world(caps, record.id);
     let _ = vm::destroy(record.id);
     result
 }
@@ -287,6 +368,15 @@ fn run_dos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError>
 ///
 /// Returns the block-device capacity in sectors.
 fn map_and_load(caps: &HwCaps, world_id: u64) -> Result<u64, DosError> {
+    map_low_windows(caps, world_id)?;
+    let image = biosrom::demo_disk_image();
+    vm::load_disk(world_id, &image).map_err(|_| DosError::VmFail(4))
+}
+
+/// Maps the conventional low memory and the BIOS ROM window.
+///
+/// The step numbers are the historical ones of [`run_dos`].
+fn map_low_windows(caps: &HwCaps, world_id: u64) -> Result<(), DosError> {
     vm::map_memory(
         world_id,
         caps,
@@ -304,9 +394,31 @@ fn map_and_load(caps: &HwCaps, world_id: u64) -> Result<u64, DosError> {
         DOS_GUEST_PERMS,
         0,
     )
-    .map_err(|_| DosError::VmFail(3))?;
-    let image = biosrom::demo_disk_image();
-    vm::load_disk(world_id, &image).map_err(|_| DosError::VmFail(4))
+    .map(|_| ())
+    .map_err(|_| DosError::VmFail(3))
+}
+
+/// Maps the window above 1 MiB (A20 probe and kernel scratch).
+fn map_high_window(caps: &HwCaps, world_id: u64) -> Result<(), DosError> {
+    vm::map_memory(
+        world_id,
+        caps,
+        HIGH_MEMORY_BASE,
+        HIGH_MEMORY_END - HIGH_MEMORY_BASE,
+        DOS_GUEST_PERMS,
+        0,
+    )
+    .map(|_| ())
+    .map_err(|_| DosError::VmFail(7))
+}
+
+/// Maps the three windows used by FreeDOS and loads its boot floppy.
+///
+/// Returns the block-device capacity in sectors.
+fn map_and_load_freedos(caps: &HwCaps, world_id: u64) -> Result<u64, DosError> {
+    map_low_windows(caps, world_id)?;
+    map_high_window(caps, world_id)?;
+    vm::load_disk(world_id, freedos_image()).map_err(|_| DosError::VmFail(8))
 }
 
 /// Installs the ROM stubs/IVT/BDA and copies the demo boot sector.
@@ -315,6 +427,22 @@ fn install_artefacts(world_id: u64) -> Result<(), DosError> {
     biosrom::install(&mut memory, &biosrom::VECTORS).map_err(|_| DosError::Memory)?;
     let boot_sector = biosrom::demo_boot_sector();
     if !biosrom::RomMemory::write(&mut memory, biosrom::BOOT_SECTOR_GPA, &boot_sector) {
+        return Err(DosError::Memory);
+    }
+    Ok(())
+}
+
+/// Installs the ROM stubs/IVT/BDA and copies the FreeDOS boot sector.
+///
+/// Only sector 0 is copied. FreeDOS loads its kernel and the rest of its image
+/// from the emulated floppy through `INT 13h`; pre-copying anything else would
+/// hide a disk-path failure instead of exercising it.
+fn install_freedos_artefacts(world_id: u64) -> Result<(), DosError> {
+    let mut memory = WorldMemory::new(world_id);
+    biosrom::install(&mut memory, &biosrom::VECTORS).map_err(|_| DosError::Memory)?;
+    let image = freedos_image();
+    let boot_sector = image.get(..biosrom::SECTOR_SIZE).ok_or(DosError::Memory)?;
+    if !biosrom::RomMemory::write(&mut memory, biosrom::BOOT_SECTOR_GPA, boot_sector) {
         return Err(DosError::Memory);
     }
     Ok(())
@@ -399,6 +527,41 @@ impl WorldMemory {
         let hpa = vm::debug_translate(self.world_id, linear)?;
         Some(crate::memory::phys_to_virt(hpa) as *mut u8)
     }
+
+    /// Reads `out.len()` bytes at host-physical address `phys`.
+    ///
+    /// The device fast path receives addresses that the second-level walk has
+    /// **already** resolved, so they must not go through [`vm::debug_translate`]
+    /// a second time: the higher-half direct map is the correct window. It is
+    /// linear, so a page split is unnecessary, but the access stays byte-wise
+    /// and volatile like the guest-physical one.
+    fn read_physical(&mut self, phys: u64, out: &mut [u8]) -> bool {
+        for (index, byte) in out.iter_mut().enumerate() {
+            let Some(address) = phys.checked_add(index as u64) else {
+                return false;
+            };
+            // SAFETY: `phys` comes from a table walk over frames this kernel
+            // allocated for the world; the direct map covers all of them.
+            unsafe {
+                *byte = core::ptr::read_volatile(crate::memory::phys_to_virt(address) as *const u8);
+            }
+        }
+        true
+    }
+
+    /// Writes `bytes` at host-physical address `phys`.
+    fn write_physical(&mut self, phys: u64, bytes: &[u8]) -> bool {
+        for (index, byte) in bytes.iter().enumerate() {
+            let Some(address) = phys.checked_add(index as u64) else {
+                return false;
+            };
+            // SAFETY: same invariant as `read_physical`.
+            unsafe {
+                core::ptr::write_volatile(crate::memory::phys_to_virt(address) as *mut u8, *byte);
+            }
+        }
+        true
+    }
 }
 
 impl biosrom::RomMemory for WorldMemory {
@@ -408,6 +571,23 @@ impl biosrom::RomMemory for WorldMemory {
 
     fn read(&mut self, linear: u32, out: &mut [u8]) -> bool {
         self.read_bytes(linear, out)
+    }
+}
+
+/// Physical view of the world for the device fast path.
+///
+/// [`emulate::MemoryView`] resolves a guest address through the second-level
+/// tables and then asks [`emulate::PhysMemory`] for the resulting host-physical
+/// bytes. The adapter therefore uses the direct-map accessors: forwarding to
+/// the guest-physical `read_bytes`/`write_bytes` would translate the address a
+/// second time (as if it were a GPA) and silently break every replayed access.
+impl emulate::PhysMemory for WorldMemory {
+    fn read_bytes(&mut self, phys: u64, out: &mut [u8]) -> bool {
+        self.read_physical(phys, out)
+    }
+
+    fn write_bytes(&mut self, phys: u64, bytes: &[u8]) -> bool {
+        self.write_physical(phys, bytes)
     }
 }
 
@@ -432,6 +612,98 @@ impl bios::BiosMemory for WorldMemory {
     fn write(&mut self, linear: u32, bytes: &[u8]) -> bool {
         self.write_bytes(linear, bytes)
     }
+}
+
+/// [`emulate::GuestContext`] backed by the vCPU of the FreeDOS loop.
+///
+/// The guest is a real-mode guest, so `CR3` is irrelevant and paging is off.
+/// The MSR shadow model is left at its trait default (`None`): a replayed
+/// `RDMSR`/`WRMSR` that reaches this adapter fails closed instead of touching
+/// a host MSR.
+struct VcpuGuest<'a> {
+    vcpu: &'a mut Vcpu,
+}
+
+impl<'a> VcpuGuest<'a> {
+    const fn new(vcpu: &'a mut Vcpu) -> Self {
+        Self { vcpu }
+    }
+}
+
+impl emulate::GuestContext for VcpuGuest<'_> {
+    fn gpr(&self, register: u8) -> u64 {
+        self.vcpu.guest_gpr(register)
+    }
+
+    fn set_gpr(&mut self, register: u8, value: u64) {
+        // SAFETY: the guest is inactive while an exit is serviced (we are in
+        // the exit handler, before the next VM entry) and the control block is
+        // loaded on this CPU.
+        unsafe {
+            self.vcpu.set_guest_gpr(register, value);
+        }
+    }
+
+    fn rip(&self) -> u64 {
+        self.vcpu.guest().rip
+    }
+
+    fn set_rip(&mut self, rip: u64) {
+        // SAFETY: same contract as `set_gpr`.
+        unsafe {
+            self.vcpu.set_guest_rip(rip);
+        }
+    }
+
+    fn cr3(&self) -> u64 {
+        0
+    }
+
+    fn paging(&self) -> bool {
+        false
+    }
+}
+
+/// Tries to consume an exit in the kernel device model.
+///
+/// The view reuses the world's second-level pointer, with paging disabled and
+/// `CR3 = 0`, which is the real-mode address space of the guest. Returns `true`
+/// when the instruction was fully replayed and the guest state advanced;
+/// `false` means the access is outside the modeled device subset and the caller
+/// must decide what to do with it.
+fn run_device_fast_path(
+    memory: &mut WorldMemory,
+    vcpu: &mut Vcpu,
+    ept_root: u64,
+    devices: &mut emulate::Devices,
+    apic: &mut LocalApic,
+    class: ExitClass,
+    qualification: u64,
+    guest_physical_address: u64,
+) -> bool {
+    let mut view = emulate::MemoryView::new(memory, ept_root, 0, false);
+    let mut guest = VcpuGuest::new(vcpu);
+    matches!(
+        emulate::handle_exit(
+            devices,
+            apic,
+            &mut view,
+            &mut guest,
+            class,
+            qualification,
+            guest_physical_address
+        ),
+        Ok(true)
+    )
+}
+
+/// Advances the guest RIP past an exit that was not consumed.
+///
+/// Calls [`Vcpu::advance_rip`] so the resumed guest does not re-execute the
+/// faulting instruction forever.
+fn advance_past_exit(vcpu: &mut Vcpu, exit: &ExitInfo) -> Result<(), DosError> {
+    // SAFETY: block loaded, guest inactive (exit handler).
+    unsafe { vcpu.advance_rip(u64::from(exit.instruction_length)) }.map_err(DosError::Run)
 }
 
 /// Block-device adapter over the world's virtio-blk image.
@@ -540,6 +812,234 @@ fn verify_demo(report: &DosReport) -> Result<(), DosError> {
     }
     if !report.text.contains("STAGE2 OK") {
         return Err(DosError::BadExit("missing stage2 banner"));
+    }
+    Ok(())
+}
+
+/// Body of a full FreeDOS boot; the caller owns and destroys the world.
+///
+/// # Exit routing
+///
+/// - `0x00E9` is the success port: the marker is recorded and `K` stops the
+///   loop. Any other value is a progress/debug byte, skipped like an
+///   unmodelled `out`.
+/// - `0xE000..=0xE0FF` are the BIOS stubs installed by [`biosrom`]: the vector
+///   is decoded from the port and serviced by [`bios::BiosState`].
+/// - every other port is offered to the kernel device model first
+///   ([`emulate::handle_exit`]) so the 8259/8254/CMOS/COM1/PCI probes FreeDOS
+///   performs are replayed instead of failing the boot. A port nobody models is
+///   counted and skipped: DOS probes a lot of absent legacy hardware.
+/// - an EPT violation on a modeled device page (local APIC, I/O APIC, HPET,
+///   virtio BAR) is replayed the same way; any other violation fails the run.
+fn run_freedos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError> {
+    let disk_sectors = map_and_load_freedos(caps, world_id)?;
+    install_freedos_artefacts(world_id)?;
+    let mut memory = WorldMemory::new(world_id);
+
+    // Detached vCPU: the run loop drives it directly, no scheduler.
+    let _vcpu_id = vm::create_vcpu_detached(world_id, 0).map_err(|_| DosError::VmFail(5))?;
+    let pointer = vm::second_level_pointer(world_id, caps).map_err(|_| DosError::VmFail(6))?;
+    let mut vcpu = Vcpu::new(caps, pointer)?;
+    let guest = GuestState::real_mode(
+        u64::from(biosrom::BOOT_SECTOR_GPA),
+        u64::from(biosrom::BOOT_STACK_TOP),
+    );
+    // SAFETY: VT-x is active on this CPU (checked by the caller), interrupts
+    // are disabled around the whole phase, and this control block is only used
+    // by this task.
+    unsafe {
+        vcpu.load()?;
+        vcpu.configure_host()?;
+        vcpu.configure(caps, &guest)?;
+    }
+    log::info!(
+        "[s9vm] freedostest: entering real-mode guest at {:#x}",
+        guest.rip
+    );
+
+    let mut report = DosReport {
+        boot_sector_gpa: u64::from(biosrom::BOOT_SECTOR_GPA),
+        marker: None,
+        text: String::new(),
+        total_exits: 0,
+        io_exits: 0,
+        bios_calls: 0,
+        halt_exits: 0,
+        disk_sectors,
+        entry: u64::from(biosrom::BOOT_SECTOR_GPA),
+    };
+    let mut world_disk = WorldDisk::new(world_id, disk_sectors);
+    let mut bios_state = bios::BiosState::new();
+    // Chipset model of this world plus the local APIC its legacy devices signal
+    // through, exactly like the other kernel guest phases.
+    let mut machine = Machine::new();
+    let mut apic = LocalApic::new(0);
+    let tsc_hz = crate::s9vm::tsc::get().map_or(FALLBACK_TSC_HZ, |frequency| frequency.hz());
+    let mut unhandled_ports: u32 = 0;
+    let saved_flags = crate::arch::save_flags_and_cli();
+    // SAFETY: `rdtsc` is unconditionally available on the x86-64 hosts this
+    // kernel runs on; it only reads a counter.
+    let mut last_tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    let mut total_cycles: u64 = 0;
+    let mut published_ticks: u32 = 0;
+    let mut outcome: Result<(), DosError> = Ok(());
+    for _ in 0..MAX_FREEDOS_EXITS {
+        // One device-time advance per exit, measured from the host TSC.
+        // SAFETY: same contract as the first read.
+        let now = unsafe { core::arch::x86_64::_rdtsc() };
+        let delta = now.wrapping_sub(last_tsc);
+        last_tsc = now;
+        total_cycles = total_cycles.wrapping_add(delta);
+        machine.advance_time(&mut apic, delta, tsc_hz);
+        // 18.2 Hz BIOS tick: `ticks` is the cumulative count derived from the
+        // host cycles (182 / 10 per second). `advance_ticks` accumulates, so
+        // only the difference with the previously published value is added.
+        let ticks = (u128::from(total_cycles) * 182 / (u128::from(tsc_hz) * 10)) as u32;
+        bios_state.advance_ticks(ticks.wrapping_sub(published_ticks));
+        published_ticks = ticks;
+
+        // SAFETY: `run` contract: block loaded, IRQs disabled, configured.
+        let exit = match unsafe { vcpu.run() } {
+            Ok(exit) => exit,
+            Err(error) => {
+                log::warn!("[s9vm] freedostest: run failed: {:?}", error);
+                outcome = Err(DosError::Run(error));
+                break;
+            }
+        };
+        report.total_exits += 1;
+        match exit.class() {
+            ExitClass::IoPort => {
+                report.io_exits += 1;
+                let port = ((exit.qualification >> 16) & 0xFFFF) as u16;
+                if port == DEBUG_PORT {
+                    let marker = (vcpu.guest().rax & 0xFF) as u8;
+                    report.marker = Some(marker);
+                    if marker == SUCCESS_MARKER {
+                        break;
+                    }
+                    // Any other marker is informational: skip the `out` and
+                    // keep booting (FreeDOS may report progress bytes).
+                    if let Err(error) = advance_past_exit(&mut vcpu, &exit) {
+                        outcome = Err(error);
+                        break;
+                    }
+                } else if (biosrom::BIOS_PORT_BASE..=biosrom::BIOS_PORT_BASE + 0xFF).contains(&port)
+                {
+                    let vector = (port - biosrom::BIOS_PORT_BASE) as u8;
+                    let mut registers = read_bios_registers(vcpu.guest());
+                    let _ = bios_state.handle(vector, &mut registers, &mut memory, &mut world_disk);
+                    write_bios_registers(&mut vcpu, &registers);
+                    if let Err(error) = write_scratch(&mut memory, &registers) {
+                        outcome = Err(error);
+                        break;
+                    }
+                    report.bios_calls += 1;
+                    if let Err(error) = advance_past_exit(&mut vcpu, &exit) {
+                        outcome = Err(error);
+                        break;
+                    }
+                } else {
+                    // Kernel device model first: FreeDOS programs the PIC, the
+                    // PIT and the CMOS, and probes many absent legacy ports.
+                    let consumed = run_device_fast_path(
+                        &mut memory,
+                        &mut vcpu,
+                        pointer,
+                        machine.devices_mut(),
+                        &mut apic,
+                        ExitClass::IoPort,
+                        exit.qualification,
+                        0,
+                    );
+                    if !consumed {
+                        unhandled_ports += 1;
+                        if let Err(error) = advance_past_exit(&mut vcpu, &exit) {
+                            outcome = Err(error);
+                            break;
+                        }
+                    }
+                }
+            }
+            ExitClass::EptViolation => {
+                let consumed = run_device_fast_path(
+                    &mut memory,
+                    &mut vcpu,
+                    pointer,
+                    machine.devices_mut(),
+                    &mut apic,
+                    ExitClass::EptViolation,
+                    exit.qualification,
+                    exit.guest_physical_address,
+                );
+                if !consumed {
+                    log::warn!(
+                        "[s9vm] freedostest: unexpected ept violation at gpa {:#x} \
+                         (rip {:#x}, qualification {:#x})",
+                        exit.guest_physical_address,
+                        vcpu.guest().rip,
+                        exit.qualification
+                    );
+                    outcome = Err(DosError::BadExit("unexpected ept violation"));
+                    break;
+                }
+            }
+            ExitClass::Halt => {
+                report.halt_exits += 1;
+                break;
+            }
+            ExitClass::ExternalInterrupt
+            | ExitClass::InterruptWindow
+            | ExitClass::PreemptionTimer => {}
+            other => {
+                log::warn!(
+                    "[s9vm] freedostest: unexpected exit {:?} ({} / reason {:#x}, rip {:#x})",
+                    other,
+                    reason_name(exit.reason.reason),
+                    exit.reason.reason,
+                    vcpu.guest().rip
+                );
+                outcome = Err(DosError::BadExit("unexpected exit"));
+                break;
+            }
+        }
+    }
+    crate::arch::restore_flags(saved_flags);
+    outcome?;
+    if unhandled_ports != 0 {
+        log::info!(
+            "[s9vm] freedostest: {} unmodeled legacy port accesses ignored",
+            unhandled_ports
+        );
+    }
+    if report.total_exits >= MAX_FREEDOS_EXITS {
+        let text = bios::read_text(&mut memory);
+        log::warn!(
+            "[s9vm] freedostest: exit budget exhausted (marker {:?}, {} text characters, \
+             rip {:#x})",
+            report.marker,
+            text.len(),
+            vcpu.guest().rip
+        );
+        return Err(DosError::BadExit("exit budget exhausted"));
+    }
+    report.text = bios::read_text(&mut memory);
+    verify_freedos(&report)?;
+    Ok(report)
+}
+
+/// Verifies the FreeDOS output: the AUTOEXEC marker and the boot banner.
+fn verify_freedos(report: &DosReport) -> Result<(), DosError> {
+    if report.marker != Some(SUCCESS_MARKER) {
+        log::warn!("[s9vm] freedostest: unexpected marker {:?}", report.marker);
+        return Err(DosError::BadExit("missing FreeDOS success marker"));
+    }
+    if !report.text.contains("FreeDOS") {
+        log::warn!(
+            "[s9vm] freedostest: FreeDOS banner missing from the VGA text ({} characters)",
+            report.text.len()
+        );
+        return Err(DosError::BadExit("missing FreeDOS banner"));
     }
     Ok(())
 }
@@ -661,6 +1161,137 @@ fn verify_installation(memory: &mut WorldMemory, disk_sectors: u64) -> Result<()
     }
     if sector != boot {
         return Err(DosError::BadExit("disk boot sector differs"));
+    }
+    Ok(())
+}
+
+/// Runs the installation half of the FreeDOS boot **without VT-x**.
+///
+/// Creates a world, maps the low/ROM/1 MiB windows, loads the bundled FreeDOS
+/// floppy, installs the BIOS stubs/IVT/BDA and copies only the boot sector,
+/// then verifies every artefact through the world translation before destroying
+/// the world. The report has an empty text and no marker: it proves the
+/// memory-side contract of the boot, and is the deterministic regression on
+/// TCG.
+pub fn run_freedos_dry(caps: &HwCaps) -> Result<DosReport, DosError> {
+    let record = vm::create(b"s9vm-freedos-dry", 0).ok_or(DosError::VmFail(1))?;
+    let result = run_freedos_dry_in_world(caps, record.id);
+    let _ = vm::destroy(record.id);
+    result
+}
+
+/// Body of the VT-x-free FreeDOS dry run; the caller owns the world.
+fn run_freedos_dry_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError> {
+    let disk_sectors = map_and_load_freedos(caps, world_id)?;
+    install_freedos_artefacts(world_id)?;
+    let mut memory = WorldMemory::new(world_id);
+    verify_freedos_installation(&mut memory, disk_sectors)?;
+    Ok(DosReport {
+        boot_sector_gpa: u64::from(biosrom::BOOT_SECTOR_GPA),
+        marker: None,
+        text: String::new(),
+        total_exits: 0,
+        io_exits: 0,
+        bios_calls: 0,
+        halt_exits: 0,
+        disk_sectors,
+        entry: u64::from(biosrom::BOOT_SECTOR_GPA),
+    })
+}
+
+/// Checks every artefact written by [`install_freedos_artefacts`].
+///
+/// All reads go through the world translation, so a mapping that silently
+/// landed on the wrong frame is caught here. The checks are the contract the
+/// selftest mode `freedos_dry` reports on:
+///
+/// 1. the block device has the 2880 sectors of a 1.44 MiB floppy and exposes
+///    the image's first sector;
+/// 2. `0x7C00` holds a byte-for-byte copy of image bytes `0..512`, with the
+///    `0x55AA` signature at `0x7DFE` and the `FRDOS5.1` OEM name at offset 3;
+/// 3. `IVT[0x10]` points into the `0xF000` ROM segment (at the `INT 10h` stub);
+/// 4. the BDA reports the one-floppy 80x25 machine FreeDOS expects
+///    (equipment `0x0021`, 640 KiB);
+/// 5. the VGA text buffer is still zeroed (nothing has run yet);
+/// 6. the window above 1 MiB is mapped and readable.
+fn verify_freedos_installation(
+    memory: &mut WorldMemory,
+    disk_sectors: u64,
+) -> Result<(), DosError> {
+    let image = freedos_image();
+    if disk_sectors != FREEDOS_DISK_SECTORS {
+        return Err(DosError::BadExit("unexpected FreeDOS disk capacity"));
+    }
+    if image.len() as u64 != FREEDOS_DISK_SECTORS * biosrom::SECTOR_SIZE as u64 {
+        return Err(DosError::BadExit("unexpected FreeDOS image size"));
+    }
+    // The boot sector is the only part of the image copied to guest memory.
+    let mut copied = [0u8; biosrom::SECTOR_SIZE];
+    if !biosrom::RomMemory::read(memory, biosrom::BOOT_SECTOR_GPA, &mut copied) {
+        return Err(DosError::Mmu);
+    }
+    if copied != image[..biosrom::SECTOR_SIZE] {
+        return Err(DosError::BadExit("FreeDOS boot sector copy differs"));
+    }
+    // Signature at 0x7DFE (0x7C00 + 0x1FE).
+    let mut signature = [0u8; 2];
+    if !biosrom::RomMemory::read(
+        memory,
+        biosrom::BOOT_SECTOR_GPA + BOOT_SIGNATURE_OFFSET,
+        &mut signature,
+    ) {
+        return Err(DosError::Mmu);
+    }
+    if signature != [0x55, 0xAA] {
+        return Err(DosError::BadExit("FreeDOS boot signature missing"));
+    }
+    let oem_end = OEM_NAME_OFFSET + FREEDOS_OEM_NAME.len();
+    if copied[OEM_NAME_OFFSET..oem_end] != FREEDOS_OEM_NAME[..] {
+        return Err(DosError::BadExit("unexpected FreeDOS OEM name"));
+    }
+    // IVT entry for INT 10h points at the per-vector ROM stub in segment F000.
+    let Some(entry) = memory.dword(biosrom::IVT_BASE + 0x10 * 4) else {
+        return Err(DosError::Mmu);
+    };
+    let offset = (entry & 0xFFFF) as u16;
+    let segment = (entry >> 16) as u16;
+    if segment != biosrom::ROM_SEGMENT || offset != biosrom::stub_offset(0x10) {
+        return Err(DosError::BadExit("INT 10h vector is not installed"));
+    }
+    // BDA: equipment word and memory size.
+    if memory.word(biosrom::BDA_EQUIPMENT) != Some(biosrom::EQUIPMENT_VALUE) {
+        return Err(DosError::BadExit("BDA equipment word is wrong"));
+    }
+    if memory.word(biosrom::BDA_MEMORY_SIZE) != Some(biosrom::MEMORY_SIZE_VALUE) {
+        return Err(DosError::BadExit("BDA memory size is wrong"));
+    }
+    // VGA text buffer starts zeroed: no guest has run yet.
+    let mut video = [0xFFu8; 320];
+    if !biosrom::RomMemory::read(memory, biosrom::VIDEO_BASE, &mut video) {
+        return Err(DosError::Mmu);
+    }
+    if video.iter().any(|byte| *byte != 0) {
+        return Err(DosError::BadExit("video buffer is not zeroed"));
+    }
+    // The block device exposes the FreeDOS image; sector 0 is its boot sector.
+    let mut sector = [0u8; biosrom::SECTOR_SIZE];
+    let mut world_disk = WorldDisk::new(memory.world_id, disk_sectors);
+    if !bios::BiosDisk::read_sector(&mut world_disk, 0, &mut sector) {
+        return Err(DosError::BadExit("disk sector 0 unreadable"));
+    }
+    if sector != copied {
+        return Err(DosError::BadExit("disk boot sector differs"));
+    }
+    // The A20 / 1 MiB window is mapped: probe it through the translation.
+    let probe: [u8; 4] = [0x5A, 0xA5, 0x00, 0xFF];
+    let mut readback = [0u8; 4];
+    if !biosrom::RomMemory::write(memory, HIGH_MEMORY_BASE as u32, &probe)
+        || !biosrom::RomMemory::read(memory, HIGH_MEMORY_BASE as u32, &mut readback)
+    {
+        return Err(DosError::Mmu);
+    }
+    if readback != probe {
+        return Err(DosError::BadExit("high memory window is not writable"));
     }
     Ok(())
 }

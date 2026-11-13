@@ -62,7 +62,9 @@
 //! - `dos`: a real-mode 16-bit DOS-class guest booted through the BIOS model
 //!   (INT 10h/13h/16h/1Ah), with a 1.44 MiB demo disk; it needs VT-x and the
 //!   unrestricted-guest control. `dos_dry` performs and verifies the whole
-//!   preparation without VT-x;
+//!   preparation without VT-x; `freedos` boots the real FreeDOS 1.4 floppy
+//!   (`assets/disks/freedos-1.4-boot.img`) and `freedos_dry` verifies its
+//!   installation without VT-x;
 //! - `2`/`all`: the six bootstrap phases; `acpi`, `smp` and `guestos` are added
 //!   by `s9vm.selftest.deferred=1`.
 //!
@@ -3803,6 +3805,22 @@ pub fn maybe_run_loader_dry_from_boot_env() {
         }
         return;
     }
+    if mode == "freedos_dry" {
+        log::info!("[s9vm] FreeDOS boot dry run requested (no VT-x required)");
+        let caps = HwCaps::default();
+        match dosboot::run_freedos_dry(&caps) {
+            Ok(report) => log::info!(
+                "[s9vm] freedosdry PASS: boot={:#x} entry={:#x} sectors={} \
+                 (low memory + BIOS ROM + IVT/BDA + FreeDOS boot sector + disk, \
+                 no guest entry)",
+                report.boot_sector_gpa,
+                report.entry,
+                report.disk_sectors
+            ),
+            Err(error) => log::warn!("[s9vm] freedosdry FAIL: {:?}", error),
+        }
+        return;
+    }
     if mode != "loader_dry" {
         return;
     }
@@ -3858,6 +3876,10 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
     // host without them the phase reports SKIP, and `dos_dry` covers the whole
     // preparation without VT-x.
     let dos_phase = mode == "dos";
+    // FreeDOS 1.4 boot through the same BIOS model, from the real boot floppy
+    // shipped under `assets/disks/`. It also needs VT-x and the
+    // `unrestricted guest` control; `freedos_dry` covers the preparation.
+    let freedos_phase = mode == "freedos";
     // The phases that need a registered vCPU run from kernel threads at the
     // `kthread` stage. They are opt-in for the `2`/`all` mode: they exercise
     // the newest kernel-thread path, so a boot that must stay predictable can
@@ -4020,6 +4042,30 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
                  unrestricted-guest control"
             ),
             Err(error) => log::warn!("[s9vm] dostest FAIL: {:?}", error),
+        }
+    }
+
+    if freedos_phase {
+        log::info!("[s9vm] FreeDOS real-mode boot requested (VT-x required)");
+        match dosboot::run_freedos(caps) {
+            Ok(report) => log::info!(
+                "[s9vm] freedostest PASS: boot={:#x} entry={:#x} marker={:?} exits={} \
+                 io={} bios={} hlt={} sectors={} text={:?}",
+                report.boot_sector_gpa,
+                report.entry,
+                report.marker,
+                report.total_exits,
+                report.io_exits,
+                report.bios_calls,
+                report.halt_exits,
+                report.disk_sectors,
+                report.text
+            ),
+            Err(dosboot::DosError::Unsupported) => log::warn!(
+                "[s9vm] freedostest SKIP: real-mode entry needs VT-x and the \
+                 unrestricted-guest control"
+            ),
+            Err(error) => log::warn!("[s9vm] freedostest FAIL: {:?}", error),
         }
     }
 }
