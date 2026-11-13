@@ -1543,6 +1543,13 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                 pending_frames.clear();
             }
             machine.service_devices(&mut hardware);
+            // Interrupt-window exiting is control-block state and survives a
+            // RUN, while `window_armed` below only tracks the current one: a
+            // previous RUN that ended on a policy exit can leave the window
+            // armed. An interruptible guest would then exit with
+            // `InterruptWindow` after every entry and eventually be reported as
+            // an exit storm. Start every RUN from a known, disarmed state.
+            let _ = hardware.set_interrupt_window_exiting(caps, false);
             let mut resumed = 0u32;
             // True while interrupt-window exiting is armed in the control
             // block: the guest has a pending vector but interrupts disabled.
@@ -1707,6 +1714,15 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                                         let _ = hardware.sync_msr_state();
                                     }
                                     if resumed >= MAX_RESUMED_EXITS {
+                                        log::warn!(
+                                            "[s9vm] vcpu {}: exit storm after {} replayed \
+                                             exits (class {:?}, rip {:#x}, pending_irq {:?})",
+                                            vcpu_id,
+                                            resumed,
+                                            class,
+                                            hardware.guest().rip,
+                                            apic.pending_vector()
+                                        );
                                         result = Err(RunError::ExitStorm);
                                         break;
                                     }
@@ -1783,6 +1799,15 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                             continue;
                         }
                         if is_resumable(class) {
+                            log::warn!(
+                                "[s9vm] vcpu {}: exit storm after {} resumable exits \
+                                 (class {:?}, rip {:#x}, pending_irq {:?})",
+                                vcpu_id,
+                                resumed,
+                                class,
+                                hardware.guest().rip,
+                                apic.pending_vector()
+                            );
                             result = Err(RunError::ExitStorm);
                         } else {
                             stats.policy_exits += 1;
@@ -2329,6 +2354,18 @@ pub fn write_boot_params(world_id: u64, gpa: u64) -> Result<(), VmError> {
             bootparams::SIZE,
         );
     }
+    // Read the device flags back from guest memory: a guest that reports a
+    // device as "not advertised" can then be distinguished from a wrong
+    // boot-parameter block on the writer side.
+    let mut flags_readback = [0u8; 4];
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            (crate::memory::phys_to_virt(hpa) as *const u8).add(bootparams::OFF_FLAGS),
+            flags_readback.as_mut_ptr(),
+            flags_readback.len(),
+        );
+    }
+    let flags_readback = u32::from_le_bytes(flags_readback);
     drop(worlds);
     if truncated {
         log::warn!(
@@ -2338,8 +2375,11 @@ pub fn write_boot_params(world_id: u64, gpa: u64) -> Result<(), VmError> {
         );
     }
     log::info!(
-        "[s9vm] boot params at {:#x}: {} memory range(s), {} module(s), cmdline {} byte(s), rsdp {:#x}",
+        "[s9vm] boot params at {:#x}: flags {:#x} (readback {:#x}), {} memory range(s), \
+         {} module(s), cmdline {} byte(s), rsdp {:#x}",
         gpa,
+        params.flags(),
+        flags_readback,
         params.memory_count(),
         params.module_count(),
         params.cmdline_len(),
@@ -3169,6 +3209,10 @@ fn vcpu_task_main(world_id: u64, vcpu_id: u64) {
         // error here is the reason the guest stopped).
         match &result {
             Ok(()) => log::info!("[s9vm] vcpu task {}: run executed", vcpu_id),
+            Err(RunError::NoMemory) => log::info!(
+                "[s9vm] vcpu task {}: run skipped (the world has no guest memory)",
+                vcpu_id
+            ),
             Err(error) => log::warn!("[s9vm] vcpu task {}: run failed ({:?})", vcpu_id, error),
         }
 
