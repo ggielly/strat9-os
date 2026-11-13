@@ -22,8 +22,8 @@
 
 //! Host tests for the shared ELF64 parser and image writer.
 
-use strat9_elf_core::build::{BuildError, ImageWriter};
 use strat9_elf_core::{
+    build::{BuildError, ImageWriter},
     ElfError, Header, LoadSegment, ProgramHeader, SectionHeader, Symbol, ELF_HEADER_SIZE, ET_DYN,
     ET_EXEC, EV_CURRENT, PF_R, PF_W, PF_X, PROGRAM_HEADER_SIZE, PT_LOAD,
 };
@@ -165,10 +165,7 @@ fn rejects_bad_load_segments() {
         Err(ElfError::MisalignedSegment)
     );
 
-    let alignment = ProgramHeader {
-        p_align: 3,
-        ..base
-    };
+    let alignment = ProgramHeader { p_align: 3, ..base };
     assert_eq!(
         alignment.load_segment(file_len),
         Err(ElfError::BadSegmentAlignment)
@@ -269,9 +266,7 @@ fn writer_reports_small_buffers() {
     let mut header_only = [0u8; ELF_HEADER_SIZE];
     let mut writer = ImageWriter::new(&mut header_only, ET_EXEC, 0).unwrap();
     assert_eq!(
-        writer
-            .add_load(PF_R, 0, 0, 0, 0x1000, 0x1000)
-            .unwrap_err(),
+        writer.add_load(PF_R, 0, 0, 0, 0x1000, 0x1000).unwrap_err(),
         BuildError::BufferTooSmall
     );
 }
@@ -300,7 +295,9 @@ fn image_with_symbols() -> Vec<u8> {
 
     let mut image = vec![0u8; sections_offset + 4 * 64];
     let mut writer = ImageWriter::new(&mut image, ET_EXEC, 0x10_0000).unwrap();
-    writer.add_load(PF_R | PF_X, 0, 0x10_0000, 0x200, 0x200, 0x1000).unwrap();
+    writer
+        .add_load(PF_R | PF_X, 0, 0x10_0000, 0x200, 0x200, 0x1000)
+        .unwrap();
     let end = writer.finish();
     assert!(end <= names_offset);
 
@@ -314,13 +311,14 @@ fn image_with_symbols() -> Vec<u8> {
     image[0x3C..0x3E].copy_from_slice(&4u16.to_le_bytes());
     image[0x3E..0x40].copy_from_slice(&1u16.to_le_bytes());
 
-    let put = |image: &mut Vec<u8>, index: usize, name: u32, kind: u32, offset: usize, size: usize| {
-        let base = sections_offset + index * 64;
-        image[base..base + 4].copy_from_slice(&name.to_le_bytes());
-        image[base + 4..base + 8].copy_from_slice(&kind.to_le_bytes());
-        image[base + 24..base + 32].copy_from_slice(&(offset as u64).to_le_bytes());
-        image[base + 32..base + 40].copy_from_slice(&(size as u64).to_le_bytes());
-    };
+    let put =
+        |image: &mut Vec<u8>, index: usize, name: u32, kind: u32, offset: usize, size: usize| {
+            let base = sections_offset + index * 64;
+            image[base..base + 4].copy_from_slice(&name.to_le_bytes());
+            image[base + 4..base + 8].copy_from_slice(&kind.to_le_bytes());
+            image[base + 24..base + 32].copy_from_slice(&(offset as u64).to_le_bytes());
+            image[base + 32..base + 40].copy_from_slice(&(size as u64).to_le_bytes());
+        };
     put(&mut image, 0, 0, 0, 0, 0);
     put(&mut image, 1, 1, 3, names_offset, names.len()); // .shstrtab
     put(&mut image, 2, 11, 3, strings_offset, strings.len()); // .strtab
@@ -338,10 +336,7 @@ fn finds_sections_and_symbols() {
 
     let shstrtab = header.section_header(&image, 1).unwrap();
     assert!(shstrtab.is_strtab());
-    assert_eq!(
-        header.section_name(&image, 1).unwrap(),
-        ".shstrtab"
-    );
+    assert_eq!(header.section_name(&image, 1).unwrap(), ".shstrtab");
     let symtab = header.find_section(&image, ".symtab").unwrap().unwrap();
     assert!(symtab.is_symtab());
 

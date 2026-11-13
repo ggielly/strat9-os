@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — virtio network device (pure model, MMIO transport).
+//! s9vm : virtio network device (pure model, MMIO transport).
 //!
 //! Two split queues (`0` = receive, `1` = transmit). Every buffer starts with
 //! the `virtio_net_hdr` (10 bytes in the modern interface); the device strips

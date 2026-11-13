@@ -403,7 +403,6 @@ fn drain_local_queue() -> bool {
     processed_any
 }
 
-
 /// Invalidate a single TLB entry (local CPU only).
 #[inline]
 unsafe fn invlpg(vaddr: VirtAddr) {
@@ -465,9 +464,7 @@ fn wait_for_acks(targets: &[(u32, usize, u64)]) {
             }
             // Break the two-initiator deadlock: if a shootdown aimed at us is
             // sitting in our mailbox, execute it now.
-            if TLB_REQ[my_cpu].load(Ordering::Acquire)
-                > TLB_DONE[my_cpu].load(Ordering::Acquire)
-            {
+            if TLB_REQ[my_cpu].load(Ordering::Acquire) > TLB_DONE[my_cpu].load(Ordering::Acquire) {
                 drain_local_queue();
             }
             core::hint::spin_loop();

@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — virtio block device (pure model, MMIO transport).
+//! s9vm : virtio block device (pure model, MMIO transport).
 //!
 //! Single request queue (`0`): each request is a descriptor chain made of
 //!
@@ -37,7 +37,7 @@
 use alloc::{vec, vec::Vec};
 
 use super::virtio::{
-    DeviceFeatures, QueueMemory, QueueNotify, QueueState, SplitQueue, apply_status,
+    apply_status, DeviceFeatures, QueueMemory, QueueNotify, QueueState, SplitQueue,
 };
 
 // ---------------------------------------------------------------------------

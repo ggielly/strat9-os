@@ -206,7 +206,9 @@ impl ElfError {
             Self::FileSizeExceedsMemorySize => "segment file size exceeds memory size",
             Self::SegmentOverflow => "segment address or size overflow",
             Self::SegmentOutOfBounds => "segment data outside the file",
-            Self::MisalignedSegment => "segment virtual address and file offset are not page congruent",
+            Self::MisalignedSegment => {
+                "segment virtual address and file offset are not page congruent"
+            }
             Self::BadSegmentAlignment => "invalid segment alignment",
         }
     }
@@ -424,9 +426,7 @@ impl Header {
             .section_header(file, self.e_shstrndx as usize)?
             .data(file)?;
         let start = section.sh_name as usize;
-        let tail = names
-            .get(start..)
-            .ok_or(ElfError::BadSectionName)?;
+        let tail = names.get(start..).ok_or(ElfError::BadSectionName)?;
         let len = tail
             .iter()
             .position(|byte| *byte == 0)
@@ -677,9 +677,7 @@ impl SectionHeader {
     pub fn data<'a>(&self, file: &'a [u8]) -> Result<&'a [u8], ElfError> {
         let start = usize::try_from(self.sh_offset).map_err(|_| ElfError::SectionOutOfBounds)?;
         let len = usize::try_from(self.sh_size).map_err(|_| ElfError::SectionOutOfBounds)?;
-        let end = start
-            .checked_add(len)
-            .ok_or(ElfError::SectionOutOfBounds)?;
+        let end = start.checked_add(len).ok_or(ElfError::SectionOutOfBounds)?;
         file.get(start..end).ok_or(ElfError::SectionOutOfBounds)
     }
 

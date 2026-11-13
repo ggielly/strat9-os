@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — virtio split-queue core (pure).
+//! s9vm : virtio split-queue core (pure).
 //!
 //! A virtio device exchanges buffers with its driver through a *split
 //! virtqueue*: a descriptor table, an available ring (driver → device) and a

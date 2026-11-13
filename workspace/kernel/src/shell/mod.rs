@@ -35,10 +35,10 @@ mod mouse;
 pub mod output;
 #[cfg(target_arch = "x86_64")]
 pub use mouse::mouse_task_main;
-#[cfg(target_arch = "x86_64")]
-pub mod vga_input;
 pub mod parser;
 pub mod scripting;
+#[cfg(target_arch = "x86_64")]
+pub mod vga_input;
 
 use commands::CommandRegistry;
 use output::{print_char, print_prompt, print_text};

@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — in-kernel emulation of a minimal guest device set.
+//! s9vm : in-kernel emulation of a minimal guest device set.
 //!
 //! Every access a guest makes to the legacy PIC pair, to the local APIC page
 //! or to the I/O APIC page causes a VM exit. Reporting those exits to policy
@@ -50,9 +50,9 @@ use super::{
     apic::{reg as apic_reg, x2apic, LocalApic, TSC_DEADLINE_MSR},
     decode::{self, Decoded, MemoryAccess, PortAccess},
     exit::ExitClass,
+    hpet::{self, Hpet},
     ioapic::{IoApic, PIN_COUNT},
     msr::MsrModel,
-    hpet::{self, Hpet},
     pci::{self, PciHostBridge},
     pic::Pic,
     pit::{self, Pit},
@@ -84,7 +84,7 @@ const GUEST_1G_ADDR_MASK: u64 = 0x000F_FFFF_C000_0000;
 const LARGE_PAGE: u64 = 1 << 7;
 /// Present bit of a guest table entry.
 const GUEST_PRESENT: u64 = 1 << 0;
-/// Readable EPT entry (bit 0) — an EPT walk only succeeds on readable memory.
+/// Readable EPT entry (bit 0) : an EPT walk only succeeds on readable memory.
 const EPT_READ: u64 = 1 << 0;
 
 /// Base of the local APIC page in the conventional guest memory map.
@@ -630,14 +630,13 @@ pub const INTERRUPTIBILITY_MOV_SS_BLOCKING: u32 = 1 << 1;
 /// `rflags_if` mirrors `RFLAGS.IF` and `interruptibility` the control-block
 /// `GUEST_INTERRUPTIBILITY_INFO` field. Delivery is inhibited while the guest
 /// is blocked by `STI` or by `MOV SS`: injecting a vector during that window
-/// makes the processor drop it — VM-entry interruption delivery is suppressed,
+/// makes the processor drop it : VM-entry interruption delivery is suppressed,
 /// but the vector was already taken out of the APIC, so it is lost. The
 /// execution loop must arm interrupt-window exiting instead, so the vector is
 /// injected as soon as the shadow clears.
 pub const fn interrupt_deliverable(rflags_if: bool, interruptibility: u32) -> bool {
     rflags_if
-        && interruptibility
-            & (INTERRUPTIBILITY_STI_BLOCKING | INTERRUPTIBILITY_MOV_SS_BLOCKING)
+        && interruptibility & (INTERRUPTIBILITY_STI_BLOCKING | INTERRUPTIBILITY_MOV_SS_BLOCKING)
             == 0
 }
 
@@ -762,13 +761,17 @@ fn serve_port(
         }
         if access.port == rtc::INDEX_PORT {
             if access.write {
-                devices.rtc.write_index((guest.gpr(access.register) & 0xFF) as u8);
+                devices
+                    .rtc
+                    .write_index((guest.gpr(access.register) & 0xFF) as u8);
             } else {
                 // The index port is write-only on the real chip.
                 write_register(guest, access.register, access.size, 0xFF);
             }
         } else if access.write {
-            devices.rtc.write_data((guest.gpr(access.register) & 0xFF) as u8);
+            devices
+                .rtc
+                .write_data((guest.gpr(access.register) & 0xFF) as u8);
         } else {
             let value = devices.rtc.read_data();
             write_register(guest, access.register, access.size, u64::from(value));
@@ -1119,7 +1122,7 @@ fn in_service_vector(apic: &LocalApic) -> Option<u8> {
 /// as well. Both controllers are driven so a guest that keeps the legacy pair
 /// (or that has not reprogrammed the I/O APIC yet) still receives the
 /// interrupt; the 8259 only delivers when it is initialised and unmasked, so a
-/// guest in APIC mode — which masks the pair — is unaffected.
+/// guest in APIC mode : which masks the pair : is unaffected.
 pub(crate) fn set_device_line(
     devices: &mut Devices,
     apic: &mut LocalApic,
@@ -1284,4 +1287,3 @@ const fn width_mask(size: u64) -> u64 {
         _ => u64::MAX,
     }
 }
-

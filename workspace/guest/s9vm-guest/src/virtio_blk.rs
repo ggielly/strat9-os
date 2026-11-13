@@ -32,9 +32,9 @@
 //! 1. probe the transport and `device_id = 2` (block) through [`virtio`];
 //! 2. run the status machine and negotiate `VIRTIO_F_VERSION_1`;
 //! 3. program the request queue (`queue 0`) in `.bss` buffers;
-//! 4. publish the virtio-block request chain — 16-byte header (`type = IN`,
+//! 4. publish the virtio-block request chain : 16-byte header (`type = IN`,
 //!    `sector`), one 512-byte device-writable data descriptor and one status
-//!    byte — request no interrupt, notify and poll the used ring;
+//!    byte : request no interrupt, notify and poll the used ring;
 //! 5. accept the read only when the status byte is `OK` and the data starts
 //!    with the `S9VMDISK` magic.
 //!

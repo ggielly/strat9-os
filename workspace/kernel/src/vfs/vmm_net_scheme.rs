@@ -83,8 +83,8 @@ use crate::{
 
 use super::{
     scheme::{
-        DT_DIR, DT_REG, DirEntry, DynScheme, FileFlags, FileStat, OpenFlags, OpenResult, Scheme,
-        finalize_pseudo_stat,
+        finalize_pseudo_stat, DirEntry, DynScheme, FileFlags, FileStat, OpenFlags, OpenResult,
+        Scheme, DT_DIR, DT_REG,
     },
     scheme_router,
 };

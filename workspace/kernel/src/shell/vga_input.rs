@@ -32,8 +32,10 @@
 //! each turn is published as one unit (a single `tail` store) so the renderer
 //! never observes a half-written turn.
 
-use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 /// Ring slot count. One slot is reserved to distinguish full from empty, so
 /// the usable capacity is `INPUT_RING_CAPACITY - 1` (63) commands.
@@ -321,10 +323,8 @@ fn render_pending(
     if !has_pending_visual(state) {
         return false;
     }
-    let render_due =
-        ticks.saturating_sub(state.last_mouse_render_tick) >= MOUSE_RENDER_MIN_TICKS;
-    let drag_due =
-        ticks.saturating_sub(state.last_scrollbar_drag_tick) >= SCROLLBAR_DRAG_MIN_TICKS;
+    let render_due = ticks.saturating_sub(state.last_mouse_render_tick) >= MOUSE_RENDER_MIN_TICKS;
+    let drag_due = ticks.saturating_sub(state.last_scrollbar_drag_tick) >= SCROLLBAR_DRAG_MIN_TICKS;
     if !(render_due || pressed || released) {
         return false;
     }

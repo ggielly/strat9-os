@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — MC146818-compatible CMOS real-time clock model for guests.
+//! s9vm : MC146818-compatible CMOS real-time clock model for guests.
 //!
 //! A PC-compatible guest reads the wall clock through two I/O ports: the
 //! **index port** (`0x70`) selects one of 128 CMOS registers (bit 7 gates the
@@ -343,7 +343,7 @@ impl CmosRtc {
     ///
     /// `seconds` is whole host seconds; `sub_second_ticks` is an additional
     /// fraction expressed in **32.768 kHz reference-clock ticks**
-    /// ([`REFERENCE_HZ`]) — typically `elapsed_ticks / 32768` remainders passed
+    /// ([`REFERENCE_HZ`]) : typically `elapsed_ticks / 32768` remainders passed
     /// by a caller that only has a finer-grained clock. The two are added and
     /// the sub-second remainder is carried across calls, so repeated calls with
     /// small tick counts do not drift.
@@ -437,7 +437,7 @@ impl CmosRtc {
     /// True while the interrupt request line is asserted.
     ///
     /// Computed, not stored: the OR of the event flags whose enable bit is set
-    /// in status B — exactly the `IRQF` bit that a status-C read returns.
+    /// in status B : exactly the `IRQF` bit that a status-C read returns.
     pub const fn irq_asserted(&self) -> bool {
         let enabled = self.status_b;
         (self.status_c & status_c::PERIODIC != 0 && enabled & status_b::PERIODIC_INTERRUPT != 0)

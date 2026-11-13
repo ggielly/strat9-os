@@ -27,26 +27,26 @@
 //! drives a complete world lifecycle through the syscall surface, without any
 //! kernel-side helper:
 //!
-//! 1. `SYS_VMM_CREATE` — a world named `demo` owned by silo id 0;
-//! 2. `SYS_VMM_LIST` — enumerate worlds and find `demo`;
-//! 3. `SYS_VMM_MAP_MEM` — two scratch guest pages (RAM, R/W) at GPA
+//! 1. `SYS_VMM_CREATE` : a world named `demo` owned by silo id 0;
+//! 2. `SYS_VMM_LIST` : enumerate worlds and find `demo`;
+//! 3. `SYS_VMM_MAP_MEM` : two scratch guest pages (RAM, R/W) at GPA
 //!    `0x0000_6000`;
-//! 4. `SYS_VMM_CREATE_VCPU` — one vCPU (APIC id 0);
-//! 5. `SYS_VMM_LOAD_IMAGE` — a self-contained ELF64 image built in this
+//! 4. `SYS_VMM_CREATE_VCPU` : one vCPU (APIC id 0);
+//! 5. `SYS_VMM_LOAD_IMAGE` : a self-contained ELF64 image built in this
 //!    component (see [`build_guest_image`]) at GPA 0: identity page tables in
 //!    guest memory (PML4/PDPT/PD, 2 MiB page), one RX/RW segment holding the
 //!    guest code, one BSS stack page. Nothing is executed by the loader;
-//! 6. `SYS_VMM_SET_REGS` / `SYS_VMM_VCPU_REGS` — 64-bit flat long mode
+//! 6. `SYS_VMM_SET_REGS` / `SYS_VMM_VCPU_REGS` : 64-bit flat long mode
 //!    (`CR0`, `CR3 = 0`, `CR4`, `EFER`), `RIP = 0x3000`, `RSP = 0x4800`;
-//! 7. `SYS_VMM_BOOT_INFO` — the guest boot-information page (best effort);
-//! 8. `SYS_VMM_INFO` / `SYS_VMM_STATS` / `SYS_VMM_VCPU_LIST` — introspection;
+//! 7. `SYS_VMM_BOOT_INFO` : the guest boot-information page (best effort);
+//! 8. `SYS_VMM_INFO` / `SYS_VMM_STATS` / `SYS_VMM_VCPU_LIST` : introspection;
 //! 9. `SYS_VMM_PAUSE` / `SYS_VMM_RUN` (expects `EAGAIN` while paused) /
 //!    `SYS_VMM_RESUME`;
-//! 10. `SYS_VMM_RUN` + `SYS_VMM_EXIT_HANDLER` / `SYS_VMM_EXIT_COMPLETE` — the
+//! 10. `SYS_VMM_RUN` + `SYS_VMM_EXIT_HANDLER` / `SYS_VMM_EXIT_COMPLETE` : the
 //!     policy loop answers the guest `out 0xE9` I/O exit (the kernel device
 //!     model does not model port 0xE9, so it reaches the policy) and the final
 //!     `hlt` exit;
-//! 11. `SYS_VMM_DESTROY_VCPU` / `SYS_VMM_DESTROY` — clean teardown.
+//! 11. `SYS_VMM_DESTROY_VCPU` / `SYS_VMM_DESTROY` : clean teardown.
 //!
 //! The guest payload is:
 //!
@@ -77,7 +77,7 @@
 //! 4. `SYS_VMM_LOAD_IMAGE` at `0x0010_0000` (the linked base, so no
 //!    relocation: `VmmImageInfo.entry` is used as `RIP`);
 //! 5. identity page tables loaded as a **raw blob** with
-//!    `SYS_VMM_LOAD_MODULE` at GPA 0 — this is the documented use of
+//!    `SYS_VMM_LOAD_MODULE` at GPA 0 : this is the documented use of
 //!    `LOAD_MODULE` (verbatim bytes, not parsed as ELF):
 //!
 //!    ```text
@@ -187,9 +187,8 @@ use strat9_abi::vmm::{
     exit_kind, VmmExitEvent, VmmImageInfo, VmmInfo, VmmRegs, VmmVcpuInfo, VmmWorldEntry,
     VmmWorldStats, VMM_ABI_VERSION, VMM_DISK_SECTOR_SIZE,
 };
+use strat9_elf_core::{build::ImageWriter, ET_EXEC, PF_R, PF_W, PF_X};
 use strat9_syscall::{call, data::TimeSpec, error::Error, flag, number, CLOCK_MONOTONIC};
-use strat9_elf_core::build::ImageWriter;
-use strat9_elf_core::{ET_EXEC, PF_R, PF_W, PF_X};
 
 /// Clean PASS: the full policy cycle ran.
 const EXIT_PASS: usize = 0;
@@ -737,14 +736,7 @@ fn build_guest_image() -> &'static [u8] {
         // Segment 2: code page + BSS stack page (file 0x4000 -> GPA 0x3000,
         // 1 page file-backed, 2 pages of memory, RWX).
         builder
-            .add_load(
-                PF_R | PF_W | PF_X,
-                0x4000,
-                0x3000,
-                0x1000,
-                0x2000,
-                0x1000,
-            )
+            .add_load(PF_R | PF_W | PF_X, 0x4000, 0x3000, 0x1000, 0x2000, 0x1000)
             .expect("demo guest image: code segment fits");
         let _ = builder.finish();
     }
@@ -816,12 +808,7 @@ fn write_hex8(out: &mut [u8], value: u32) {
 
 /// Appends `bytes` at `offset`, NUL-terminated when `with_nul`, padded to a
 /// four-byte boundary. Returns the number of bytes written.
-fn append_padded(
-    out: &mut [u8],
-    offset: usize,
-    bytes: &[u8],
-    with_nul: bool,
-) -> Option<usize> {
+fn append_padded(out: &mut [u8], offset: usize, bytes: &[u8], with_nul: bool) -> Option<usize> {
     let payload = bytes.len() + usize::from(with_nul);
     let padded = payload.checked_add((4 - payload % 4) % 4)?;
     let slice = out.get_mut(offset..offset.checked_add(padded)?)?;
@@ -870,10 +857,7 @@ fn build_initrd_archive() -> &'static [u8] {
         *byte = 0;
     }
     let init_script: &[u8] = b"#!/bin/sh\nexit 0\n";
-    let entries: [(&[u8], &[u8], u32); 2] = [
-        (b"init", init_script, 1),
-        (b"TRAILER!!!", &[], 0),
-    ];
+    let entries: [(&[u8], &[u8], u32); 2] = [(b"init", init_script, 1), (b"TRAILER!!!", &[], 0)];
     let mut cursor = 0usize;
     for (name, data, inode) in entries {
         let Some(written) = cpio_entry(&mut buffer[cursor..], name, data, inode) else {
@@ -897,7 +881,11 @@ fn build_disk_image() -> &'static [u8] {
     image[0..8].copy_from_slice(b"S9VMDISK");
     put_u32(image, 8, 1); // label version
     put_u32(image, 12, VMM_DISK_SECTOR_SIZE as u32);
-    put_u64(image, 16, (DISK_IMAGE_LEN / VMM_DISK_SECTOR_SIZE as usize) as u64);
+    put_u64(
+        image,
+        16,
+        (DISK_IMAGE_LEN / VMM_DISK_SECTOR_SIZE as usize) as u64,
+    );
     put_u64(image, 24, DISK_IMAGE_LEN as u64);
     let note: &[u8] = b"s9vm boot disk: label sector only (no filesystem yet)";
     image[64..64 + note.len()].copy_from_slice(note);
@@ -1649,7 +1637,7 @@ fn run_policy_loop(world: u64, vcpu: u64) -> Result<(u32, bool, bool), Error> {
                 // I/O instructions already advanced RIP in hardware; other
                 // exits are completed without advancing (the guest enters at a
                 // fresh instruction after this demo).
-            complete_policy_exit(vcpu, &event)?;
+                complete_policy_exit(vcpu, &event)?;
                 if halt_seen {
                     break;
                 }

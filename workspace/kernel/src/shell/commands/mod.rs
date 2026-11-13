@@ -35,12 +35,12 @@ pub mod ps;
 pub mod sys;
 pub mod timer;
 pub mod top;
-#[cfg(target_arch = "x86_64")]
-pub mod vmtop;
 pub mod util;
 pub mod vfs;
 #[cfg(target_arch = "x86_64")]
 pub mod vm;
+#[cfg(target_arch = "x86_64")]
+pub mod vmtop;
 
 use super::ShellError;
 use alloc::{collections::BTreeMap, string::String};

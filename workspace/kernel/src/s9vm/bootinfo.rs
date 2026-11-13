@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — guest boot information page.
+//! s9vm : guest boot information page.
 //!
 //! A world starts with a guest that must be told what its machine looks like:
 //! which memory ranges are usable, which virtual devices exist, where their
@@ -189,14 +189,20 @@ impl BootInfo {
         put_u32(out, 0x014, u32::from(self.memory_count));
         put_u32(out, 0x018, u32::from(self.device_count));
         let memory_base = 0x020;
-        for (index, entry) in self.memory[..usize::from(self.memory_count)].iter().enumerate() {
+        for (index, entry) in self.memory[..usize::from(self.memory_count)]
+            .iter()
+            .enumerate()
+        {
             let offset = memory_base + index * 24;
             put_u64(out, offset, entry.base);
             put_u64(out, offset + 8, entry.len);
             put_u32(out, offset + 16, entry.kind);
         }
         let device_base = memory_base + MAX_MEMORY_ENTRIES * 24;
-        for (index, entry) in self.devices[..usize::from(self.device_count)].iter().enumerate() {
+        for (index, entry) in self.devices[..usize::from(self.device_count)]
+            .iter()
+            .enumerate()
+        {
             let offset = device_base + index * 24;
             put_u32(out, offset, entry.kind);
             put_u32(out, offset + 4, entry.irq_line);

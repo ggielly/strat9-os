@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — decoding of hardware exits (VM-exits).
+//! s9vm : decoding of hardware exits (VM-exits).
 //!
 //! Pure module: it turns the raw `EXIT_REASON` value (and the associated
 //! information fields) into usable structures, with no hardware access.

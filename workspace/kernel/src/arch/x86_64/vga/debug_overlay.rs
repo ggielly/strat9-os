@@ -50,7 +50,7 @@ pub fn vga_debug_init(fb_width: usize, fb_height: usize) {
     let cols = fb_width / 8; // panic_font_8x16 glyph width
     let rows = fb_height / 16; // panic_font_8x16 glyph height
     let status_rows = 1; // reserve 1 row for status bar
-    // Exclude the boot HUD band too: the overlay must never paint the bar.
+                         // Exclude the boot HUD band too: the overlay must never paint the bar.
     let hud_px = super::boot_progress::band_height(fb_height, 16);
     let hud_rows = hud_px.div_ceil(16);
     VGA_DEBUG_MAX_COL.store(cols, core::sync::atomic::Ordering::Relaxed);

@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — time-stamp counter frequency model.
+//! s9vm : time-stamp counter frequency model.
 //!
 //! The s9vm timing aggregates are expressed in time-stamp counter (TSC)
 //! cycles. Converting them to nanoseconds requires the TSC frequency, which is
@@ -52,8 +52,8 @@
 //!
 //! # Cache
 //!
-//! The frequency is detected once — by the platform initialisation, or lazily
-//! by the first diagnostic read when no value was published yet — and stored
+//! The frequency is detected once : by the platform initialisation, or lazily
+//! by the first diagnostic read when no value was published yet : and stored
 //! with [`set`]; diagnostics then use [`get`] or [`cycles_to_ns`] and never
 //! execute CPUID again. The cache is **write-once** (the first `set` wins): the
 //! TSC frequency cannot change while the kernel runs, and a concurrent second
@@ -194,13 +194,13 @@ impl TscFrequency {
 /// policy or by the host frequency cache.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CpuidTscLeaves {
-    /// `CPUID.0x15:EAX` — ratio denominator (never zero in a valid value).
+    /// `CPUID.0x15:EAX` : ratio denominator (never zero in a valid value).
     pub ratio_denominator: u32,
-    /// `CPUID.0x15:EBX` — ratio numerator (never zero in a valid value).
+    /// `CPUID.0x15:EBX` : ratio numerator (never zero in a valid value).
     pub ratio_numerator: u32,
-    /// `CPUID.0x15:ECX` — core-crystal frequency, in hertz.
+    /// `CPUID.0x15:ECX` : core-crystal frequency, in hertz.
     pub crystal_hz: u32,
-    /// `CPUID.0x16:EAX` — nominal base frequency, in megahertz.
+    /// `CPUID.0x16:EAX` : nominal base frequency, in megahertz.
     pub base_mhz: u32,
 }
 

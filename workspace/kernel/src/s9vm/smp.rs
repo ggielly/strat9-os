@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — guest SMP bring-up model.
+//! s9vm : guest SMP bring-up model.
 //!
 //! Pure module: it models the architectural side of multiprocessor bring-up
 //! for the virtual machine: the local APIC interrupt command register (ICR),

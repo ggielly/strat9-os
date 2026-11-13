@@ -229,7 +229,7 @@ impl SchedClassRq for RealTimeClassRq {
             return Some(task);
         }
 
-        // All RT tasks degraded — let Fair class handle scheduling.
+        // All RT tasks degraded : let Fair class handle scheduling.
         None
     }
 

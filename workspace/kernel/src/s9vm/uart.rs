@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — 16550A-compatible UART device (pure model, COM1).
+//! s9vm : 16550A-compatible UART device (pure model, COM1).
 //!
 //! The guest sees the eight-byte register window of a COM1 16550A at
 //! [`BASE_PORT`]. The kernel bridges the model onto the host: bytes written to

@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — x86 boot-protocol zero page (`struct boot_params`) builder.
+//! s9vm : x86 boot-protocol zero page (`struct boot_params`) builder.
 //!
 //! A 64-bit x86 kernel entered by a boot loader expects a 4 KiB control page at
 //! guest-physical [`BOOT_PARAMS_GPA`] (`0x0001_0000`), the so-called **zero

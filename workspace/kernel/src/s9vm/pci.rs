@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — guest-visible PCI host bridge (pure model).
+//! s9vm : guest-visible PCI host bridge (pure model).
 //!
 //! The guest discovers and drives its virtual devices through a conventional
 //! PCI host bridge: configuration mechanism #1 on ports [`CONFIG_ADDRESS`] and

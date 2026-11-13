@@ -1,4 +1,4 @@
-//! s9vm — pure model of the guest I/O APIC.
+//! s9vm : pure model of the guest I/O APIC.
 //!
 //! A PC-compatible guest discovers an I/O APIC through ACPI and drives it
 //! through two MMIO registers: `IOREGSEL` (offset `0x00`) selects an indirect

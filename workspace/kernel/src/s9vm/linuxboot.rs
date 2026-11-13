@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — guest-physical layout of a 64-bit boot-protocol guest.
+//! s9vm : guest-physical layout of a 64-bit boot-protocol guest.
 //!
 //! Loading a 64-bit kernel is not only a parser problem: the boot loader must
 //! place several objects at addresses the kernel will find, keep them from
@@ -276,11 +276,7 @@ pub fn plan(request: &LayoutRequest) -> Result<BootLayout, LayoutError> {
 }
 
 /// Chooses the kernel load address.
-fn kernel_base(
-    request: &LayoutRequest,
-    align: u64,
-    ram_top: u64,
-) -> Result<u64, LayoutError> {
+fn kernel_base(request: &LayoutRequest, align: u64, ram_top: u64) -> Result<u64, LayoutError> {
     let preferred = if request.pref_address == 0 {
         HIGH_LOAD_BASE
     } else {

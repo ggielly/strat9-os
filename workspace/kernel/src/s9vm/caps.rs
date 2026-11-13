@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — decoding of hardware virtualization capabilities (Intel VT-x).
+//! s9vm : decoding of hardware virtualization capabilities (Intel VT-x).
 //!
 //! This module is **pure**: it reads no MSR itself, it receives a
 //! snapshot (`MsrSnapshot`) read by the kernel layer (`s9vm::mod`). It is

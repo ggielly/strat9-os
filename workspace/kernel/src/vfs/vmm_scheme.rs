@@ -53,8 +53,8 @@
 //! `<id>/control` is a **write-only** device file that accepts exactly two
 //! text commands, with trailing ASCII whitespace ignored:
 //!
-//! * `pause`  — sets the world's paused flag (`vm::pause`);
-//! * `resume` — clears it (`vm::resume`).
+//! * `pause`  : sets the world's paused flag (`vm::pause`);
+//! * `resume` : clears it (`vm::resume`).
 //!
 //! Each successful `write` returns the number of bytes consumed (the full
 //! command buffer, whitespace included). An unknown command is rejected with
@@ -556,10 +556,10 @@ impl VmmScheme {
     ///
     /// The grammar is a verb followed by a world identifier:
     ///
-    /// * `start <id>`  — resume the world and post one `RUN` on every vCPU
+    /// * `start <id>`  : resume the world and post one `RUN` on every vCPU
     ///   that has a kernel task (the attached policy drains its exits);
-    /// * `stop <id>`   — pause the world (`vm::pause`);
-    /// * `pause <id>` / `resume <id>` — the same transitions by their
+    /// * `stop <id>`   : pause the world (`vm::pause`);
+    /// * `pause <id>` / `resume <id>` : the same transitions by their
     ///   historical names.
     ///
     /// The file is deliberately still **not** a lifecycle syscall: it cannot

@@ -20,12 +20,12 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — hardware smoke test of the engine.
+//! s9vm : hardware smoke test of the engine.
 //!
 //! Goal: run minimal guests (64-bit long mode, EPT enabled, page tables built
-//! by the kernel) that exercise the full path — guest tables and second-level
+//! by the kernel) that exercise the full path : guest tables and second-level
 //! tables, control-block load, guest entry, exits, kernel fast paths and clean
-//! shutdown — without panicking: a failure is logged and boot continues.
+//! shutdown : without panicking: a failure is logged and boot continues.
 //!
 //! Phases, selected by the boot option `s9vm.selftest`:
 //!
@@ -87,24 +87,22 @@ use crate::{
     memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame},
     s9vm::{
         apic::LocalApic,
-        bootparams,
-        bzimage,
+        bootparams, bzimage,
         caps::HwCaps,
+        dosboot,
         emulate::{interrupt_action, interrupt_deliverable, InterruptAction},
         exit::{reason_name, ExitClass, ExitReason},
         guest::GuestState,
         guestcode::{
-            ACPI_CODE, ACPI_MARKER, LOADER_CODE, LOADER_MARKER, SMP_CODE_0,
-            SMP_CODE_1, SMP_HLT_OFFSET, SMP_MARKERS, SMP_OUT_INSTRUCTION_LEN, SMP_SHARED_GPA,
+            ACPI_CODE, ACPI_MARKER, LOADER_CODE, LOADER_MARKER, SMP_CODE_0, SMP_CODE_1,
+            SMP_HLT_OFFSET, SMP_MARKERS, SMP_OUT_INSTRUCTION_LEN, SMP_SHARED_GPA,
         },
         guestprog::guestos,
         guestpt::GuestPageTables,
-        dosboot,
         linuxboot,
         machine::Machine,
         vcpu::{SecondLevelMemory, Vcpu, VcpuError},
-        virtio, virtio_blk, virtio_net, vm,
-        zeropage,
+        virtio, virtio_blk, virtio_net, vm, zeropage,
     },
 };
 
@@ -1940,10 +1938,7 @@ fn loader_dry_in_world(caps: &HwCaps, world_id: u64) -> Result<LoaderReport, Sel
 /// loads the ELF image, checking the copy and the BSS zero-fill.
 ///
 /// Shared by the full loader phase and the VT-x-free dry run.
-fn prepare_loader_world(
-    caps: &HwCaps,
-    world_id: u64,
-) -> Result<vm::LoadedImage, SelftestError> {
+fn prepare_loader_world(caps: &HwCaps, world_id: u64) -> Result<vm::LoadedImage, SelftestError> {
     let page_size = crate::s9vm::mmu::PAGE_SIZE;
 
     // 1. Guest memory backing the page tables and the stack. The image pages
@@ -2286,10 +2281,10 @@ fn read_world_range(world_id: u64, gpa: u64, out: &mut [u8]) -> Result<(), Selft
 
 /// Boot-protocol loader dry run: no VT-x, no guest entry.
 ///
-/// Runs the whole 64-bit boot preparation — parse the image, plan the memory
+/// Runs the whole 64-bit boot preparation : parse the image, plan the memory
 /// layout, map the guest memory, copy the protected-mode part, build the boot
 /// parameter page with its e820 map, install the command line and the entry
-/// GDT, build the guest page tables through the world translation — then
+/// GDT, build the guest page tables through the world translation : then
 /// verifies the result from the world memory and tears the world down.
 ///
 /// It is the deterministic regression of the boot path on any host, and the
@@ -2352,13 +2347,31 @@ fn boot_protocol_dry_in_world(
     //    kernel window the entry contract requires to be identity mapped.
     let page_size = crate::s9vm::mmu::PAGE_SIZE;
     let window = (u64::from(parsed.init_size()) + page_size - 1) & !(page_size - 1);
-    vm::map_memory(world_id, caps, 0, linuxboot::LOW_IDENTITY_END, LOADER_GUEST_PERMS, 0)
-        .map_err(|_| SelftestError::VmFail(2))?;
-    vm::map_memory(world_id, caps, layout.kernel_base, window, LOADER_GUEST_PERMS, 0)
-        .map_err(|_| SelftestError::VmFail(3))?;
+    vm::map_memory(
+        world_id,
+        caps,
+        0,
+        linuxboot::LOW_IDENTITY_END,
+        LOADER_GUEST_PERMS,
+        0,
+    )
+    .map_err(|_| SelftestError::VmFail(2))?;
+    vm::map_memory(
+        world_id,
+        caps,
+        layout.kernel_base,
+        window,
+        LOADER_GUEST_PERMS,
+        0,
+    )
+    .map_err(|_| SelftestError::VmFail(3))?;
 
     // 3. Entry-contract GDT and command line.
-    write_world_range(world_id, layout.gdt_gpa, &crate::s9vm::guest::boot_gdt_bytes())?;
+    write_world_range(
+        world_id,
+        layout.gdt_gpa,
+        &crate::s9vm::guest::boot_gdt_bytes(),
+    )?;
     write_world_range(world_id, layout.cmdline_gpa, CMDLINE)?;
 
     // 4. Boot parameter page: e820 map, header copy, pointers.

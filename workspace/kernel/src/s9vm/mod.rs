@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — bare-metal virtualization system of strat9-os.
+//! s9vm : bare-metal virtualization system of strat9-os.
 //!
 //! # Principle
 //!
@@ -53,9 +53,9 @@ pub mod apic;
 pub mod bios;
 pub mod biosrom;
 pub mod bootinfo;
-pub mod caps;
 pub mod bootparams;
 pub mod bzimage;
+pub mod caps;
 pub mod control;
 pub mod cpuid;
 pub mod decode;
@@ -83,16 +83,16 @@ pub mod pit;
 pub mod rtc;
 pub mod selftest;
 pub mod smp;
-pub mod uart;
 pub mod timing;
 pub mod tsc;
+pub mod uart;
 pub mod vcpu;
-pub mod zeropage;
 pub mod virtio;
 pub mod virtio_blk;
 pub mod virtio_console;
 pub mod virtio_net;
 pub mod vm;
+pub mod zeropage;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
@@ -338,7 +338,7 @@ pub fn init() {
     selftest::maybe_run_loader_dry_from_boot_env();
     let Some(caps) = detect() else {
         log::info!(
-            "[s9vm] VT-x absent — virtualization inactive ({})",
+            "[s9vm] VT-x absent : virtualization inactive ({})",
             unavailable_reason()
         );
         return;
@@ -349,7 +349,7 @@ pub fn init() {
         Ok(()) => {}
         Err(error) => {
             log::warn!(
-                "[s9vm] platform unusable ({:?}) — virtualization inactive",
+                "[s9vm] platform unusable ({:?}) : virtualization inactive",
                 error
             );
             return;
@@ -416,4 +416,3 @@ pub fn activation_region(cpu: usize) -> Option<u64> {
 /// of the translation module.
 const _: () = assert!(crate::s9vm::memmap::PAGE_SIZE == crate::s9vm::mmu::PAGE_SIZE);
 const _: () = assert!(crate::s9vm::memmap::MAX_GPA == crate::s9vm::mmu::MAX_GPA);
-

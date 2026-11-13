@@ -20,14 +20,14 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! L2: s9vm guest image loader — ELF64 parser and load plan.
+//! L2: s9vm guest image loader : ELF64 parser and load plan.
 
 #![allow(dead_code)]
 
 #[path = "../../kernel/src/s9vm/image.rs"]
 mod image;
 
-use image::{Image, ImageError, ImageKind, Segment, MAX_SEGMENTS, PAGE_SIZE};
+use image::{Image, ImageError, ImageKind, MAX_SEGMENTS, PAGE_SIZE, Segment};
 
 const ET_EXEC: u16 = 2;
 const ET_DYN: u16 = 3;

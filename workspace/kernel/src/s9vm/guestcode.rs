@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — machine-code payloads used by the host-side smoke tests.
+//! s9vm : machine-code payloads used by the host-side smoke tests.
 //!
 //! The payloads live in a pure module so they can be **decoded by the kernel's
 //! own instruction decoder in a host test**, not only executed on a machine

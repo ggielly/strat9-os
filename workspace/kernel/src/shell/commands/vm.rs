@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! `vm` — command-line manager for s9vm worlds.
+//! `vm` : command-line manager for s9vm worlds.
 //!
 //! The command is a thin **scheme client**: every operation goes through the
 //! `/dev/vmm` VFS scheme, exactly like a userspace component would, instead of
@@ -43,8 +43,10 @@
 //! is what a management front-end needs once the world exists.
 
 use super::ShellError;
-use crate::shell_println;
-use crate::vfs::{self, OpenFlags};
+use crate::{
+    shell_println,
+    vfs::{self, OpenFlags},
+};
 use alloc::{
     format,
     string::{String, ToString},
@@ -105,11 +107,14 @@ fn state_name(state: u32) -> &'static str {
 
 /// Extracts `key=value` from one `world …` line.
 fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
-    line.split_ascii_whitespace()
-        .find_map(|token| token.strip_prefix(key).and_then(|rest| rest.strip_prefix('=')))
+    line.split_ascii_whitespace().find_map(|token| {
+        token
+            .strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix('='))
+    })
 }
 
-/// `vm list` — table of the worlds the kernel registry still owns.
+/// `vm list` : table of the worlds the kernel registry still owns.
 fn cmd_list() -> Result<(), ShellError> {
     let text = read_file(&format!("{VMM_ROOT}/worlds"))?;
     let mut rows = 0usize;
@@ -163,7 +168,7 @@ fn cmd_list() -> Result<(), ShellError> {
     Ok(())
 }
 
-/// `vm info <id>` — snapshot of one world from the scheme.
+/// `vm info <id>` : snapshot of one world from the scheme.
 fn cmd_info(id: u64) -> Result<(), ShellError> {
     for leaf in ["info", "stats", "vcpus", "timing"] {
         shell_println!("--- {}:{}/{} ---", VMM_ROOT, id, leaf);
@@ -175,7 +180,7 @@ fn cmd_info(id: u64) -> Result<(), ShellError> {
     Ok(())
 }
 
-/// `vm start <id>` / `vm stop <id>` — root control file.
+/// `vm start <id>` / `vm stop <id>` : root control file.
 fn cmd_control(verb: &str, id: u64) -> Result<(), ShellError> {
     match write_text(&format!("{VMM_ROOT}/control"), &format!("{verb} {id}\n")) {
         Ok(_) => {
@@ -183,13 +188,17 @@ fn cmd_control(verb: &str, id: u64) -> Result<(), ShellError> {
             Ok(())
         }
         Err(_) => {
-            shell_println!("vm: {} world {}: failed (unknown world or scheme error)", verb, id);
+            shell_println!(
+                "vm: {} world {}: failed (unknown world or scheme error)",
+                verb,
+                id
+            );
             Err(ShellError::ExecutionFailed)
         }
     }
 }
 
-/// `vm pause|resume <id>` — per-world control file.
+/// `vm pause|resume <id>` : per-world control file.
 fn cmd_world_control(verb: &str, id: u64) -> Result<(), ShellError> {
     match write_text(&format!("{VMM_ROOT}/{id}/control"), &format!("{verb}\n")) {
         Ok(_) => {
@@ -203,10 +212,12 @@ fn cmd_world_control(verb: &str, id: u64) -> Result<(), ShellError> {
     }
 }
 
-/// `vm console <id>` — drain the guest console stream.
+/// `vm console <id>` : drain the guest console stream.
 fn cmd_console(id: u64) -> Result<(), ShellError> {
     match read_file(&format!("{VMM_ROOT}/{id}/console")) {
-        Ok(text) if text.is_empty() => shell_println!("vm: world {}: no console output pending", id),
+        Ok(text) if text.is_empty() => {
+            shell_println!("vm: world {}: no console output pending", id)
+        }
         Ok(text) => shell_println!("{}", text.trim_end()),
         Err(_) => {
             shell_println!("vm: world {}: console unavailable", id);
@@ -216,7 +227,7 @@ fn cmd_console(id: u64) -> Result<(), ShellError> {
     Ok(())
 }
 
-/// `vm send <id> <text…>` — queue guest console input.
+/// `vm send <id> <text…>` : queue guest console input.
 fn cmd_send(id: u64, words: &[String]) -> Result<(), ShellError> {
     let mut text = words.join(" ");
     text.push('\n');
@@ -232,7 +243,7 @@ fn cmd_send(id: u64, words: &[String]) -> Result<(), ShellError> {
     }
 }
 
-/// `vm test [dry]` — boot the built-in FreeDOS 1.4 test world.
+/// `vm test [dry]` : boot the built-in FreeDOS 1.4 test world.
 fn cmd_test(args: &[String]) -> Result<(), ShellError> {
     let dry = args.first().map(|arg| arg.as_str()) == Some("dry");
     // Operator-controlled time budget, clamped so a typo cannot freeze the
@@ -331,7 +342,9 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
             Err(ShellError::ExecutionFailed)
         }
         Err(crate::s9vm::dosboot::DosError::Unsupported) => {
-            shell_println!("vm: test VM skipped: real-mode entry needs VT-x and unrestricted guest");
+            shell_println!(
+                "vm: test VM skipped: real-mode entry needs VT-x and unrestricted guest"
+            );
             Ok(())
         }
         Err(error) => {
@@ -342,7 +355,7 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
     }
 }
 
-/// `vm diag` — everything needed to debug a VM-entry failure.
+/// `vm diag` : everything needed to debug a VM-entry failure.
 ///
 /// A hardware "invalid guest state" does not name the rejected field. This
 /// command prints the capability masks the kernel validates against, replays
@@ -418,7 +431,7 @@ fn cmd_diag() -> Result<(), ShellError> {
 
 const VM_USAGE: &str = "Usage: vm <list|info <id>|start <id>|stop <id>|pause <id>|resume <id>|console <id>|send <id> <text>|test [dry|seconds]|diag>";
 
-/// `vm` — manage the s9vm worlds through the `/dev/vmm` scheme.
+/// `vm` : manage the s9vm worlds through the `/dev/vmm` scheme.
 pub fn cmd_vm(args: &[String]) -> Result<(), ShellError> {
     let sub = args.first().map(|arg| arg.as_str()).unwrap_or("list");
     match sub {
@@ -463,9 +476,13 @@ pub fn cmd_vm(args: &[String]) -> Result<(), ShellError> {
         "help" | "-h" | "--help" => {
             shell_println!("{}", VM_USAGE);
             shell_println!("  The command is a client of the /dev/vmm scheme:");
-            shell_println!("    /dev/vmm/worlds, /dev/vmm/<id>/{{info,stats,vcpus,timing,console}}");
+            shell_println!(
+                "    /dev/vmm/worlds, /dev/vmm/<id>/{{info,stats,vcpus,timing,console}}"
+            );
             shell_println!("    /dev/vmm/control            (write: start <id> | stop <id>)");
-            shell_println!("    /dev/vmm/<id>/control       (write: start | stop | pause | resume)");
+            shell_println!(
+                "    /dev/vmm/<id>/control       (write: start | stop | pause | resume)"
+            );
             shell_println!(
                 "  `vm test [dry|seconds]` boots the bundled FreeDOS 1.4 floppy with a bounded \
                  time budget (VT-x needed; `vm test dry` checks the image without VT-x); \

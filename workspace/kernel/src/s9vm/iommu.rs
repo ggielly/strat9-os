@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — device address translation (IOMMU model).
+//! s9vm : device address translation (IOMMU model).
 //!
 //! **Pure** module: a software model of the translation unit that a
 //! device-assignment backend will program. It is deliberately independent of

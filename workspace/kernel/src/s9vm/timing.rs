@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — pure timing and exit-latency measurement.
+//! s9vm : pure timing and exit-latency measurement.
 //!
 //! This module performs **no hardware access**: every sample is supplied by
 //! the caller (time-stamp counter cycles, nanoseconds, or any other monotonic

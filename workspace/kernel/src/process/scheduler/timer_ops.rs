@@ -225,7 +225,7 @@ pub(super) fn check_wake_deadlines(current_time_ns: u64) {
                                 ipi_targets[cpu] = true;
                             }
                         } else {
-                            // CPU slot not initialized — drop the task.
+                            // CPU slot not initialized : drop the task.
                             if drop_count < BATCH {
                                 deferred_drops[drop_count] = Some(blocked_task);
                                 drop_count += 1;
@@ -235,7 +235,7 @@ pub(super) fn check_wake_deadlines(current_time_ns: u64) {
                         drop(guard);
                     }
                     None => {
-                        // LOCAL lock contended — re-insert into BLOCKED_TASKS
+                        // LOCAL lock contended : re-insert into BLOCKED_TASKS
                         // so the next tick retries this wake.
                         blocked_task.set_state(TaskState::Blocked);
                         blocked.insert(id, blocked_task);

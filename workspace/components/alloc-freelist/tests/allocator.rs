@@ -68,7 +68,7 @@ fn alignment_requests_are_honored() {
 #[test]
 fn zero_sized_and_min_block_handling() {
     unsafe {
-        // Zero-size requests still return a usable unique pointer or null —
+        // Zero-size requests still return a usable unique pointer or null :
         // but must never crash. The freelist enforces MIN_BLOCK_SIZE.
         let layout = Layout::from_size_align(0, 8).unwrap();
         let p = ALLOC.alloc(layout);

@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — ABI structures of the virtualization system.
+//! s9vm : ABI structures of the virtualization system.
 //!
 //! All structures are `#[repr(C)]`, versioned by
 //! [`VMM_ABI_VERSION`] and fixed-size. The identifiers (`vmm_id`,
@@ -346,7 +346,7 @@ static_assertions::const_assert_eq!(core::mem::align_of::<VmmVcpuInfo>(), 8);
 /// Size: 56 bytes, alignment 4. This is a **compact, mask-based** form: the
 /// vendor string and the brand string are fixed by the engine (they identify
 /// s9vm and never a real vendor), so a policy only carries the parts a caller
-/// may tune — leaf ranges, version signature, topology counts and feature
+/// may tune : leaf ranges, version signature, topology counts and feature
 /// masks.
 ///
 /// The caller must set `abi_version` to [`VMM_ABI_VERSION`]; `flags` and
@@ -354,8 +354,8 @@ static_assertions::const_assert_eq!(core::mem::align_of::<VmmVcpuInfo>(), 8);
 /// value). A zero numeric field or feature mask keeps the engine default, so a
 /// caller may tune only what it cares about. A leaf range must fall inside the
 /// leaves the engine implements (an out-of-range value is rejected rather than
-/// silently clamped), and a feature bit the engine refuses — nested
-/// virtualization, for instance — is silently cleared.
+/// silently clamped), and a feature bit the engine refuses : nested
+/// virtualization, for instance : is silently cleared.
 ///
 /// The structure is per world: every vCPU of a world observes the same CPU.
 /// Replacing a policy applies to the next guest entry.

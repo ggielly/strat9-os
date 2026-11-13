@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — bare-metal guest kernel image.
+//! s9vm : bare-metal guest kernel image.
 //!
 //! This is the smallest real "guest OS" that runs under s9vm: a fixed-address
 //! x86-64 ELF image loaded by `SYS_VMM_LOAD_IMAGE` and entered in 64-bit long

@@ -35,9 +35,7 @@
 //!
 //! Available in `no_std` and without allocation (callers own the buffer).
 
-use crate::{
-    ELF_HEADER_SIZE, EM_X86_64, EV_CURRENT, PF_MASK, PROGRAM_HEADER_SIZE, PT_LOAD,
-};
+use crate::{ELF_HEADER_SIZE, EM_X86_64, EV_CURRENT, PF_MASK, PROGRAM_HEADER_SIZE, PT_LOAD};
 
 /// Canonical file offset of the program header table written by this module.
 pub const DEFAULT_PROGRAM_HEADER_OFFSET: usize = ELF_HEADER_SIZE;

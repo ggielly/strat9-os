@@ -12,7 +12,7 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.
+ * along with strat9-os. If not, see <https://www.gnu.org/licenses/>.workspace/kernel/src/s9vm/dosboot.rs
  *
  * Website: https://www.strat9-os.org
  * Repository: https://github.com/strat9-os/strat9-os
@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — vCPU: state, control block configuration, entry/exit.
+//! s9vm : vCPU: state, control block configuration, entry/exit.
 //!
 //! A `Vcpu` is the guest execution unit. It owns:
 //! - a hardware control block ([`ControlBlock`]);
@@ -859,10 +859,7 @@ impl Vcpu {
             // entry control clear, otherwise `VMLAUNCH` fails and the guest
             // never runs.
             if !guest.is_long_mode() {
-                let entry = self
-                    .control
-                    .read_u32(field::ENTRY_CONTROLS)
-                    .unwrap_or(0)
+                let entry = self.control.read_u32(field::ENTRY_CONTROLS).unwrap_or(0)
                     & !bits::ENTRY_IA32E_MODE;
                 self.control.write_u32(field::ENTRY_CONTROLS, entry)?;
             }

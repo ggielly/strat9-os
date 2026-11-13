@@ -24,11 +24,11 @@
 //!
 //! Each boot milestone calls [`render`] with its ordinal; the bar fills
 //! proportionally and shows the current stage label. If the boot freezes, the
-//! bar simply stops growing at the last completed stage — a zero-cost visual
+//! bar simply stops growing at the last completed stage : a zero-cost visual
 //! "where did it hang" on hardware with no serial port (the target X13 case).
 //!
 //! All drawing goes through the guarded VGA primitives, so every call made
-//! before the framebuffer console is up — or under `console.mode=serial` — is a
+//! before the framebuffer console is up : or under `console.mode=serial` : is a
 //! silent no-op. No allocation, no locks of our own: safe at any boot stage.
 
 use super::api;

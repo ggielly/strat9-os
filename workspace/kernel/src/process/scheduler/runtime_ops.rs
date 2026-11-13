@@ -995,7 +995,7 @@ pub fn configure_class_table(table: crate::process::sched::SchedClassTable) -> b
     }; // GLOBAL released here
     lockdep_release(LockRank::Global);
     restore_flags(saved_flags);
-    // IPIs sent after all locks released — never under a scheduler lock.
+    // IPIs sent after all locks released : never under a scheduler lock.
     for (cpu, send) in ipi_targets.iter().copied().enumerate() {
         if send {
             send_resched_ipi_to_cpu(cpu);

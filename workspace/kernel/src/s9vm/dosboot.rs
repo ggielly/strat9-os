@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — DOS-class real-mode guest runner.
+//! s9vm : DOS-class real-mode guest runner.
 //!
 //! This module boots a classic 16-bit real-mode boot image **inside an s9vm
 //! world**, using the firmware surface built by [`biosrom`] (IVT, BDA, ROM
@@ -324,10 +324,7 @@ pub fn run_freedos(caps: &HwCaps) -> Result<DosReport, DosError> {
 /// interrupts disabled (the VM-entry contract), so an unbounded attempt would
 /// freeze the whole system. The report carries `timed_out = true` when the
 /// budget stopped the run; the world is destroyed on every path.
-pub fn run_freedos_with_limits(
-    caps: &HwCaps,
-    limits: RunLimits,
-) -> Result<DosReport, DosError> {
+pub fn run_freedos_with_limits(caps: &HwCaps, limits: RunLimits) -> Result<DosReport, DosError> {
     require_real_mode(caps, "freedostest")?;
     let record = vm::create(b"s9vm-freedos", 0).ok_or(DosError::VmFail(1))?;
     let result = run_freedos_in_world(caps, record.id, limits);
@@ -1063,8 +1060,8 @@ fn run_freedos_in_world(
         // Wall-clock budget: the loop keeps host interrupts disabled (VM-entry
         // contract), so an unbounded attempt would freeze the whole system.
         if limits.max_nanoseconds != 0 {
-            let elapsed_ns = u128::from(now.wrapping_sub(start_tsc)) * 1_000_000_000
-                / u128::from(tsc_hz.max(1));
+            let elapsed_ns =
+                u128::from(now.wrapping_sub(start_tsc)) * 1_000_000_000 / u128::from(tsc_hz.max(1));
             if elapsed_ns >= u128::from(limits.max_nanoseconds) {
                 log::info!(
                     "[s9vm] freedostest: time budget reached after {} exit(s)",

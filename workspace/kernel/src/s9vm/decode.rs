@@ -20,11 +20,11 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — minimal x86-64 instruction decoder for exit emulation.
+//! s9vm : minimal x86-64 instruction decoder for exit emulation.
 //!
 //! When a guest exit is a fault that must be emulated (MMIO, EPT violation,
 //! port I/O), the kernel needs three pieces of information: the access width,
-//! the direction (read/write), and — for MMIO — the effective address and the
+//! the direction (read/write), and : for MMIO : the effective address and the
 //! destination/source general-purpose register. This module decodes just
 //! enough x86-64 to answer those questions for the forms a device model
 //! actually sees:

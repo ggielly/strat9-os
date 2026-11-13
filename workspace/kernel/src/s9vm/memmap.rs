@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — guest memory map (GPA).
+//! s9vm : guest memory map (GPA).
 //!
 //! **Pure** module: it holds the set of guest physical address ranges
 //! reserved for a world (overlaps, alignment, quotas, page accounting)

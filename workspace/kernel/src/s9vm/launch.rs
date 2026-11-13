@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — guest entry/exit trampoline.
+//! s9vm : guest entry/exit trampoline.
 //!
 //! The only reliable way to enter the guest is an assembly routine
 //! that honors the hardware contract:

@@ -24,10 +24,10 @@
 //!
 //! Two implementations:
 //!
-//! * [`SharedNetDevice`] — drives the kernel `NetQueue` region directly.
+//! * [`SharedNetDevice`] : drives the kernel `NetQueue` region directly.
 //!   RX/TX descriptors are read/written in mapped memory; no syscall and no
 //!   copy between the kernel and the stack.
-//! * [`LegacyNetDevice`] — the original `SYS_NET_RECV` / `SYS_NET_SEND`
+//! * [`LegacyNetDevice`] : the original `SYS_NET_RECV` / `SYS_NET_SEND`
 //!   copy path, kept as a fallback when the shared region cannot be mapped.
 //!
 //! The `Device` trait is implemented once for the [`NetDevice`] enum so the

@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — real-mode BIOS ROM stubs, low-memory layout and demo boot image.
+//! s9vm : real-mode BIOS ROM stubs, low-memory layout and demo boot image.
 //!
 //! A DOS-class guest needs the classic 16-bit firmware surface: an interrupt
 //! vector table, a BIOS data area, ROM interrupt stubs and a bootable disk

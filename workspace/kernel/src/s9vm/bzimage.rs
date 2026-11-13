@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — boot-protocol image ("bzImage") parser and load plan.
+//! s9vm : boot-protocol image ("bzImage") parser and load plan.
 //!
 //! A boot-protocol image is the classic x86 operating-system image: a real-mode
 //! *setup* part followed by a *protected-mode* part (the compressed kernel).

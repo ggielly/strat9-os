@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! Deferred work queue — softirq-equivalent for Strat9-OS.
+//! Deferred work queue : softirq-equivalent for Strat9-OS.
 //!
 //! Moves heavy tick processing out of the hardirq handler into safe
 //! execution contexts (post-switch, idle loop, syscall return).
@@ -29,15 +29,15 @@
 //!
 //! Each CPU has a lock-free `AtomicU32` bitmask of pending work items.
 //! The hardirq timer handler calls `raise_deferred_work()` which sets bits
-//! atomically — no locks, no allocation, O(1) cost.
+//! atomically : no locks, no allocation, O(1) cost.
 //!
 //! Processing happens at safe points where IRQs may be re-enabled and
 //! scheduler locks can be acquired without deadlock:
 //!
-//! - `finish_switch()` — after cooperative context switch completes
-//! - `finish_interrupt_switch()` — after interrupt-driven switch completes
-//! - `idle_task_main()` — idle loop before HLT
-//! - `maybe_preempt()` — at preemption entry (for work raised during IRQ)
+//! - `finish_switch()` : after cooperative context switch completes
+//! - `finish_interrupt_switch()` : after interrupt-driven switch completes
+//! - `idle_task_main()` : idle loop before HLT
+//! - `maybe_preempt()` : at preemption entry (for work raised during IRQ)
 //!
 //! # What stays in hardirq
 //!
@@ -48,8 +48,8 @@
 //!
 //! # What moves to deferred
 //!
-//! - `tick_all_timers()` — interval timer processing
-//! - `check_wake_deadlines()` — deadline-based wakeups
+//! - `tick_all_timers()` : interval timer processing
+//! - `check_wake_deadlines()` : deadline-based wakeups
 //! - Per-task Fair class accounting (runnable_len, tick_update_wait)
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};

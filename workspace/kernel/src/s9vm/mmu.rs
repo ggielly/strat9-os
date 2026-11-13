@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — second-level translation (hardware page tables).
+//! s9vm : second-level translation (hardware page tables).
 //!
 //! The module builds and walks the tables that translate guest physical
 //! addresses (GPA) to host physical addresses (HPA), following the Intel

@@ -31,8 +31,10 @@
 
 #![allow(dead_code)]
 
-use crate::arch::io::{inb, outb};
-use crate::rtc_math;
+use crate::{
+    arch::io::{inb, outb},
+    rtc_math,
+};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -200,7 +202,11 @@ fn detect_century_register(use_binary: bool) -> u8 {
         let reg = fadt.century;
         if reg != 0 {
             let raw = cmos_read(reg);
-            let val = if use_binary { raw } else { rtc_math::bcd_to_binary(raw) };
+            let val = if use_binary {
+                raw
+            } else {
+                rtc_math::bcd_to_binary(raw)
+            };
             if (19..=21).contains(&val) {
                 return reg;
             }
@@ -209,7 +215,11 @@ fn detect_century_register(use_binary: bool) -> u8 {
 
     for &reg in CENTURY_REG_CANDIDATES {
         let raw = cmos_read(reg);
-        let val = if use_binary { raw } else { rtc_math::bcd_to_binary(raw) };
+        let val = if use_binary {
+            raw
+        } else {
+            rtc_math::bcd_to_binary(raw)
+        };
         if (19..=21).contains(&val) {
             return reg;
         }
@@ -463,5 +473,3 @@ pub fn set_periodic_interrupt(enable: bool) {
 pub fn uptime_secs() -> u64 {
     RTC_LAST_TICK.load(Ordering::Relaxed)
 }
-
-

@@ -108,7 +108,7 @@ pub struct CpuInfo {
     /// (CPUID.(0D,0):EDX:EAX). Capability bitmap, not a maximum value.
     pub supported_xcr0: u64,
     /// XSAVE area size (bytes) for the components enabled in XCR0 at
-    /// detect() time (CPUID.(0D,0):EBX). Depends on the OS-enabled state —
+    /// detect() time (CPUID.(0D,0):EBX). Depends on the OS-enabled state :
     /// use [`xsave_size_for_xcr0`] for arbitrary masks.
     pub xsave_size_current: usize,
     /// XSAVE area size (bytes) required if every supported component were

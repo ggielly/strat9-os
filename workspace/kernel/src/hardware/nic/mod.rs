@@ -475,7 +475,7 @@ pub fn list_interfaces() -> Vec<String> {
 }
 
 /// Call `poll()` on every registered NIC (watchdog + link check).
-/// Safe from deferred-work / idle / syscall-return contexts only —
+/// Safe from deferred-work / idle / syscall-return contexts only :
 /// not from the hardirq swapgs window.
 pub fn poll_all() {
     {

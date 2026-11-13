@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — guest state and validation before entry.
+//! s9vm : guest state and validation before entry.
 //!
 //! **Pure** module: it describes the state of a guest processor (general
 //! registers, control registers, segments, system tables) and checks the
@@ -71,7 +71,7 @@ pub const CR4_SMAP: u64 = 1 << 21;
 pub const EFER_SCE: u64 = 1 << 0;
 /// Bit `EFER.LME` (long mode enable).
 pub const EFER_LME: u64 = 1 << 8;
-/// Bit `EFER.LMA` (long mode active — set by the CPU, not by the host).
+/// Bit `EFER.LMA` (long mode active : set by the CPU, not by the host).
 pub const EFER_LMA: u64 = 1 << 10;
 /// Bit `EFER.NXE`.
 pub const EFER_NXE: u64 = 1 << 11;
@@ -93,7 +93,7 @@ pub const AR_GRANULARITY: u32 = 1 << 15;
 /// Access rights of a read/write data segment, kernel (DPL 0).
 ///
 /// Type 3 = read/write **accessed**. The accessed bit (bit 0 of the type) is
-/// mandatory on every usable SS/DS/ES at VM entry — type 2 is refused with
+/// mandatory on every usable SS/DS/ES at VM entry : type 2 is refused with
 /// "invalid guest state".
 pub const fn data_access_rights(dpl: u8) -> u32 {
     0x3 | AR_CODE_DATA | AR_PRESENT | (((dpl as u32) & 3) << 5)
@@ -129,11 +129,7 @@ pub const BOOT_DS_SELECTOR: u16 = 0x18;
 /// descriptor at selector `0x18`. The encodings are the conventional ones
 /// (`0x00AF_9A00_0000_FFFF` and `0x00CF_9200_0000_FFFF`): present, DPL 0,
 /// code/data, code has `L = 1`, both have `G = 1`.
-pub const BOOT_GDT: [u64; 3] = [
-    0,
-    0x00AF_9A00_0000_FFFF,
-    0x00CF_9200_0000_FFFF,
-];
+pub const BOOT_GDT: [u64; 3] = [0, 0x00AF_9A00_0000_FFFF, 0x00CF_9200_0000_FFFF];
 /// Byte limit of [`BOOT_GDT`].
 pub const BOOT_GDT_LIMIT: u32 = (BOOT_GDT.len() * 8 - 1) as u32;
 

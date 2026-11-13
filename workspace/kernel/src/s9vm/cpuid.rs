@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — guest CPU description (CPUID model).
+//! s9vm : guest CPU description (CPUID model).
 //!
 //! The guest never executes the host `CPUID` instruction: the exit is
 //! intercepted and replayed in the kernel from a [`CpuidPolicy`]. This module
@@ -49,7 +49,7 @@
 //! | `0x8000_0007` | invariant TSC bit (always set: the TSC is never offset) |
 //! | `0x8000_0008` | physical/virtual address sizes |
 //!
-//! Every other leaf — including the `0x4000_0000` hypervisor range — returns
+//! Every other leaf : including the `0x4000_0000` hypervisor range : returns
 //! zeros. A guest probing an unimplemented feature therefore sees it as absent
 //! instead of reading stale or host-derived values.
 //!
@@ -362,16 +362,16 @@ pub struct CpuidPolicy {
     pub extended1_ecx: u32,
     /// Raw `CPUID.0x8000_0001:EDX` mask.
     pub extended1_edx: u32,
-    /// `CPUID.0x15:EAX` — TSC/core-crystal ratio denominator.
+    /// `CPUID.0x15:EAX` : TSC/core-crystal ratio denominator.
     ///
     /// Zero publishes the host value from the [`crate::s9vm::tsc`] cache, or
     /// nothing when the host frequency is unknown.
     pub tsc_ratio_denominator: u32,
-    /// `CPUID.0x15:EBX` — TSC/core-crystal ratio numerator.
+    /// `CPUID.0x15:EBX` : TSC/core-crystal ratio numerator.
     pub tsc_ratio_numerator: u32,
-    /// `CPUID.0x15:ECX` — core-crystal frequency, in hertz.
+    /// `CPUID.0x15:ECX` : core-crystal frequency, in hertz.
     pub crystal_hz: u32,
-    /// `CPUID.0x16:EAX` — nominal base frequency, in megahertz.
+    /// `CPUID.0x16:EAX` : nominal base frequency, in megahertz.
     pub base_mhz: u32,
 }
 

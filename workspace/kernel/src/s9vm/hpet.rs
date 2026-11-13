@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — pure model of the guest High Precision Event Timer (HPET).
+//! s9vm : pure model of the guest High Precision Event Timer (HPET).
 //!
 //! This module models the architectural state of one HPET block: the
 //! capabilities/ID register, the main counter, the configuration and status
@@ -229,9 +229,7 @@ impl Timer {
 
     /// Configuration value as read by the guest (read-only bits included).
     const fn read_config(&self) -> u32 {
-        (self.config & TIMER_WRITABLE)
-            | TIMER_PERIODIC_CAPABLE
-            | TIMER_64BIT_CAPABLE
+        (self.config & TIMER_WRITABLE) | TIMER_PERIODIC_CAPABLE | TIMER_64BIT_CAPABLE
     }
 }
 

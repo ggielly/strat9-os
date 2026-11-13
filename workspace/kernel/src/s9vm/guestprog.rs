@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — guest program builder (tiny assembler for in-kernel test payloads).
+//! s9vm : guest program builder (tiny assembler for in-kernel test payloads).
 //!
 //! The guest payloads of the smoke tests used to be hand-written byte arrays.
 //! One of them encoded `mov dx, 0xE9` as `BA E9 00`, which in 64-bit mode is
@@ -105,8 +105,8 @@
 //!
 //! Payloads are built at run time into a `Vec<u8>`; the current `const`
 //! payloads of [`super::guestcode`] cannot switch to it verbatim (a `const`
-//! evaluable builder would be needed). The loader and SMP payloads — and the
-//! success/failure tails of the ACPI payload — are fully expressible with this
+//! evaluable builder would be needed). The loader and SMP payloads : and the
+//! success/failure tails of the ACPI payload : are fully expressible with this
 //! API today.
 
 use alloc::vec::Vec;
@@ -753,7 +753,7 @@ impl GuestProgram {
     /// the emitted length; any decode failure or mismatch is a
     /// [`GuestProgError`]. Instructions outside the decoder's subset (`hlt`,
     /// `cli`/`sti`, `nop`, short jumps and `cmp`) are skipped by their recorded
-    /// length — this is what lets a payload end with `hlt`. An empty program is
+    /// length : this is what lets a payload end with `hlt`. An empty program is
     /// valid.
     pub fn validate_with_decoder(&self) -> Result<(), GuestProgError> {
         let mut rip = 0u64;
@@ -892,7 +892,11 @@ impl GuestProgram {
 /// no-op.
 const fn rex_byte(w: bool, r: bool, x: bool, b: bool) -> Option<u8> {
     let byte = 0x40 | ((w as u8) << 3) | ((r as u8) << 2) | ((x as u8) << 1) | (b as u8);
-    if byte == 0x40 { None } else { Some(byte) }
+    if byte == 0x40 {
+        None
+    } else {
+        Some(byte)
+    }
 }
 
 /// Guest-OS bootstrap payload: validate the hand-off block and find ACPI.

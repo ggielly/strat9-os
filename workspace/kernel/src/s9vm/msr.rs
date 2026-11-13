@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — modelled guest MSRs (interception policy and shadow state).
+//! s9vm : modelled guest MSRs (interception policy and shadow state).
 //!
 //! A guest that executes `WRMSR` without interception modifies the **host**
 //! MSR file. Several MSRs are per-vCPU architectural state (`IA32_EFER`,

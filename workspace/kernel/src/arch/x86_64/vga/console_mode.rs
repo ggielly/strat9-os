@@ -24,14 +24,14 @@
 //!
 //! The framebuffer console has two very different cost profiles:
 //!
-//! * `Full` — the complete graphical console: decorative boot art, status
+//! * `Full` : the complete graphical console: decorative boot art, status
 //!   bar, scrollback scrollbar, mouse/text cursors, dirty-rect double
 //!   buffering. This is what interactive use (`top`, panels, TUI) expects.
-//! * `Lite` — a deliberately boring, DOS-like text console: no decoration,
+//! * `Lite` : a deliberately boring, DOS-like text console: no decoration,
 //!   no status bar, no cursor sprites, no scrollbar, no graphical UI. Every
 //!   line of text still reaches the screen, but the only pixels written are
 //!   glyph cells, and scrolling is a single bulk row move.
-//! * `Serial` — no framebuffer touches at all: `/dev/display` stays absent
+//! * `Serial` : no framebuffer touches at all: `/dev/display` stays absent
 //!   and everything is logged to COM1. On a laptop this makes boot as fast
 //!   as the hardware allows, and debugging happens over a USB-serial adapter
 //!   (or QEMU `-serial file:`).
@@ -98,7 +98,7 @@ impl ConsoleMode {
     }
 }
 
-/// `CPUID.01H:ECX[31]` — a hypervisor is present.
+/// `CPUID.01H:ECX[31]` : a hypervisor is present.
 fn hypervisor_present() -> bool {
     let (_, _, ecx, _) = crate::arch::x86_64::cpuid(1, 0);
     ecx & (1 << 31) != 0

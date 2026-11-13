@@ -782,7 +782,9 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
         None => {
             // Cannot back the metadata: keep it disabled (get_meta_slot will
             // panic with a clear message rather than corrupt memory).
-            log::error!("[frame] metadata alloc failed: need {bytes} bytes (total_ram={total_ram:#x})");
+            log::error!(
+                "[frame] metadata alloc failed: need {bytes} bytes (total_ram={total_ram:#x})"
+            );
             METADATA_BASE_VIRT.store(0, Ordering::Release);
             METADATA_FRAME_COUNT.store(0, Ordering::Release);
             return;
@@ -1019,4 +1021,3 @@ pub trait FrameAllocator {
         self.alloc(0, token)
     }
 }
-

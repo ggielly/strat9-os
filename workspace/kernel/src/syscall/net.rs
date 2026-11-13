@@ -24,9 +24,9 @@
 //!
 //! Two data planes coexist:
 //!
-//! * **legacy copy path** — `SYS_NET_SEND` / `SYS_NET_RECV` copy one frame
+//! * **legacy copy path** : `SYS_NET_SEND` / `SYS_NET_RECV` copy one frame
 //!   through a 2 KiB stack buffer.  Kept for compatibility and for bring-up;
-//! * **shared queue path** — `SYS_NET_QUEUE_MAP` maps the `NetQueue` region
+//! * **shared queue path** : `SYS_NET_QUEUE_MAP` maps the `NetQueue` region
 //!   into the networking strate, which then drives the descriptor rings
 //!   directly (`SYS_NET_KICK` / `SYS_NET_EVENT_WAIT`).
 //!
@@ -188,11 +188,11 @@ pub fn sys_net_register() -> Result<u64, SyscallError> {
 /// `SYS_NET_INFO`: query interface information.
 ///
 /// `info_type`:
-/// * 0 — MAC address (6 bytes)
-/// * 1 — `NetLinkInfo`
-/// * 2 — MTU (`u32`)
-/// * 3 — link up (`u8`)
-/// * 4 — queue count (`u32`)
+/// * 0 : MAC address (6 bytes)
+/// * 1 : `NetLinkInfo`
+/// * 2 : MTU (`u32`)
+/// * 3 : link up (`u8`)
+/// * 4 : queue count (`u32`)
 pub fn sys_net_info(info_type: u64, buf_ptr: u64) -> Result<u64, SyscallError> {
     let dev = default_nic(CapPermissions {
         read: true,

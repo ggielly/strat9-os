@@ -1493,7 +1493,7 @@ pub fn init() {
     // Two outcomes are expected and silent:
     //   - AlreadyExists : framebuffer init already mounted it;
     //   - BadHandle     : the "display" scheme is not registered yet, which is
-    //                     the normal case here — framebuffer init runs later and
+    //                     the normal case here : framebuffer init runs later and
     //                     performs the authoritative register + mount.
     // Anything else is a real failure worth a warning.
     match mount_scheme("display", "/dev/display") {

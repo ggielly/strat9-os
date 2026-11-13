@@ -20,10 +20,10 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! `vmtop` — s9vm virtual-machine monitor.
+//! `vmtop` : s9vm virtual-machine monitor.
 //!
 //! A deliberately small TUI in the spirit of [`super::top`]: it answers the two
-//! questions an operator asks about a running virtualisation engine —
+//! questions an operator asks about a running virtualisation engine :
 //!
 //! * **is the engine alive?** (VT-x detected, active CPUs, number of worlds);
 //! * **does my VM still exist?** Every world lives in the *kernel* registry,
@@ -42,9 +42,11 @@
 #[cfg(target_arch = "x86_64")]
 use super::top::{Strat9RatatuiBackend, TuiGuard};
 use super::*;
-use crate::arch::timer::TIMER_HZ;
-use crate::shell_println;
-use crate::s9vm::vm::{self, VcpuSnapshot, WorldStats, WorldTimingSnapshot};
+use crate::{
+    arch::timer::TIMER_HZ,
+    s9vm::vm::{self, VcpuSnapshot, WorldStats, WorldTimingSnapshot},
+    shell_println,
+};
 use alloc::{format, string::String, vec, vec::Vec};
 use ratatui::{
     layout::{Constraint, Direction, Layout},
@@ -162,10 +164,7 @@ fn state_of_caps() -> String {
             None => format!("engine: active ({active} cpu(s))"),
         }
     } else {
-        format!(
-            "engine: inactive ({})",
-            crate::s9vm::unavailable_reason()
-        )
+        format!("engine: inactive ({})", crate::s9vm::unavailable_reason())
     }
 }
 
@@ -280,10 +279,7 @@ fn details_lines(row: Option<&WorldRow>, ticks: u64) -> Vec<Line<'static>> {
     // the world instead of inventing an age.
     lines.push(Line::from(vec![
         Span::styled("observed:    ", Style::default().fg(DIM)),
-        Span::raw(format!(
-            "{}s of kernel uptime",
-            ticks / TIMER_HZ.max(1)
-        )),
+        Span::raw(format!("{}s of kernel uptime", ticks / TIMER_HZ.max(1))),
         Span::styled("   exit_count=", Style::default().fg(DIM)),
         Span::raw(format!(
             "{}",
@@ -382,8 +378,11 @@ fn render(
     }
     frame.render_stateful_widget(table, vertical[1], state);
 
-    let details = Paragraph::new(details_lines(rows.get(selected), ticks))
-        .block(Block::default().borders(Borders::ALL).title(" selected world "));
+    let details = Paragraph::new(details_lines(rows.get(selected), ticks)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" selected world "),
+    );
     frame.render_widget(details, vertical[2]);
 
     let footer = Paragraph::new(Line::from(vec![
@@ -397,7 +396,7 @@ fn render(
     frame.render_widget(footer, vertical[3]);
 }
 
-/// `vmtop` — live monitor of the s9vm worlds held by the kernel.
+/// `vmtop` : live monitor of the s9vm worlds held by the kernel.
 #[cfg(target_arch = "x86_64")]
 pub fn cmd_vmtop(_args: &[alloc::string::String]) -> Result<(), ShellError> {
     if crate::arch::x86_64::vga::is_lite() {

@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! `top` — system monitor.
+//! `top` : system monitor.
 //!
 //! Layout inspiration: rrtop (small panels, sparklines, big numbers) for the
 //! metrics half, vtui (inventory tree with fold/unfold and a details pane) for
@@ -30,10 +30,10 @@
 //! framebuffer console through [`Strat9RatatuiBackend`].
 //!
 //! Data sources are kernel-side (no `/proc` round-trip for the metrics):
-//! * `process::cpu_usage_snapshot()` — per-CPU total/idle ticks (lock-free).
-//! * `process::scheduler_metrics_snapshot()` — per-class runtime + counters.
-//! * `process::get_all_tasks()` — tasks, states and per-task tick counters.
-//! * `/proc/silos` (fallback: `silo::list_silos_snapshot()`) — inventory.
+//! * `process::cpu_usage_snapshot()` : per-CPU total/idle ticks (lock-free).
+//! * `process::scheduler_metrics_snapshot()` : per-class runtime + counters.
+//! * `process::get_all_tasks()` : tasks, states and per-task tick counters.
+//! * `/proc/silos` (fallback: `silo::list_silos_snapshot()`) : inventory.
 
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod ratatui_backend;

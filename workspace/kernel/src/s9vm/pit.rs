@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — pure model of the Intel 8254/8253 programmable interval timer.
+//! s9vm : pure model of the Intel 8254/8253 programmable interval timer.
 //!
 //! This module models the minimal architectural state of the three PIT
 //! channels and their mode/command register. It **touches no hardware**: the

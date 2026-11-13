@@ -20,13 +20,13 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — kernel bridge between a vCPU and the pure emulation layer.
+//! s9vm : kernel bridge between a vCPU and the pure emulation layer.
 //!
 //! [`crate::s9vm::emulate`] is written against two abstractions:
 //! [`PhysMemory`] (physical memory access) and [`GuestContext`] (general
 //! registers, instruction pointer, `CR3`, paging state). This module supplies
-//! the kernel implementations — the higher-half direct map for physical
-//! memory, the vCPU's entry frame and control block for the guest context —
+//! the kernel implementations : the higher-half direct map for physical
+//! memory, the vCPU's entry frame and control block for the guest context :
 //! and exposes [`Machine`], the per-world object that the exit loops call.
 //!
 //! Keeping the bridge separate from the model means the model stays pure and
@@ -177,7 +177,7 @@ impl Machine {
     /// The change applies to the next guest entry: while a vCPU is running, the
     /// machine is moved out of the world registry, so a concurrent update
     /// reaches the registry copy and is overwritten when the execution copy is
-    /// restored at the end of `RUN`. This is intentional and benign — the
+    /// restored at the end of `RUN`. This is intentional and benign : the
     /// policy is not meant to change mid-run, and the syscall reports success
     /// for an existing world so the caller does not need to retry.
     pub fn set_cpuid_policy(&mut self, policy: CpuidPolicy) {

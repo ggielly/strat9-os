@@ -25,7 +25,7 @@
 //! Two very different components need the same arithmetic: the **host** CMOS
 //! driver ([`crate::hardware::timer::rtc`]), which reads the real MC146818 and
 //! converts its registers to and from UNIX time, and the **s9vm guest RTC
-//! device model** ([`crate::s9vm::rtc`]), which does the opposite — it computes
+//! device model** ([`crate::s9vm::rtc`]), which does the opposite : it computes
 //! the register values a guest reads from an emulated chip. Keeping one copy of
 //! the Howard Hinnant civil-date algorithm and of the BCD conversions in a
 //! neutral, dependency-free module guarantees the two cannot disagree about
@@ -137,14 +137,7 @@ pub const fn civil_from_unix(seconds: u64) -> (u64, u32, u32, u8, u8, u8, u8) {
 /// The inverse of [`civil_from_unix`]; out-of-range fields are clamped to a
 /// valid date (month/day to the month's length) instead of panicking, so a
 /// caller reading a partially initialised structure cannot trap the kernel.
-pub fn unix_from_civil(
-    year: i64,
-    month: u32,
-    day: u32,
-    hour: u8,
-    minute: u8,
-    second: u8,
-) -> u64 {
+pub fn unix_from_civil(year: i64, month: u32, day: u32, hour: u8, minute: u8, second: u8) -> u64 {
     let month = month.clamp(1, 12);
     let days_in = days_in_month(year as u32, month);
     let day = day.clamp(1, days_in.max(1)) as i64;
@@ -154,8 +147,8 @@ pub fn unix_from_civil(
         y -= 1;
         m += 12;
     }
-    let days = 365 * y + y / 4 - y / 100 + y / 400 + (153 * (m - 3) + 2) / 5 + day - 1
-        - CIVIL_EPOCH_SHIFT;
+    let days =
+        365 * y + y / 4 - y / 100 + y / 400 + (153 * (m - 3) + 2) / 5 + day - 1 - CIVIL_EPOCH_SHIFT;
     let seconds = days * SECONDS_PER_DAY as i64
         + i64::from(hour.min(23)) * 3600
         + i64::from(minute.min(59)) * 60
@@ -166,4 +159,3 @@ pub fn unix_from_civil(
         seconds as u64
     }
 }
-

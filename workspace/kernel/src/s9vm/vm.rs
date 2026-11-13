@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — registry of virtual worlds and guest memory.
+//! s9vm : registry of virtual worlds and guest memory.
 //!
 //! This layer keeps the world registry (opaque identifier, name, owning silo,
 //! state) and owns, for each world, its guest memory: pinned frames, GPA map
@@ -43,28 +43,28 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::{
     hardware::iommu::{DmaProt, Domain as HardwareIommuDomain, FaultPolicy, MappingKind, Sbdf},
     memory::frame::{FrameAllocOptions, FramePurpose, PhysFrame},
-    process::{TaskId, kthread, scheduler::ticks, sleep_current_task_ticks},
+    process::{kthread, scheduler::ticks, sleep_current_task_ticks, TaskId},
     s9vm::{
         apic::LocalApic,
         caps::HwCaps,
-        emulate::{InterruptAction, interrupt_action, interrupt_deliverable},
+        emulate::{interrupt_action, interrupt_deliverable, InterruptAction},
         exit::ExitClass,
         exitqueue::ExitQueue,
         guest::{FixedBits, GuestState},
         image::{Image, Segment},
         iommu::{DeviceId, DomainId, IommuError, IommuModel},
         machine::Machine,
-        memmap::{GuestMap, MAX_GPA, MapError, contiguous_2m_aligned, perms_from_abi, plan_map},
-        mmu::{PAGE_SIZE, Perms as MmuPerms},
-        timing::{EXIT_LATENCY_BUCKETS, ExitLatencyHistogram, WorldTiming},
+        memmap::{contiguous_2m_aligned, perms_from_abi, plan_map, GuestMap, MapError, MAX_GPA},
+        mmu::{Perms as MmuPerms, PAGE_SIZE},
+        timing::{ExitLatencyHistogram, WorldTiming, EXIT_LATENCY_BUCKETS},
         vcpu::{ExitInfo, SecondLevelMemory, Vcpu, VcpuError},
         virtio_blk::VirtioBlk,
     },
     sync::{SpinLock, WaitQueue},
 };
 use strat9_abi::vmm::{
-    VMM_DISK_DEFAULT_BYTES, VMM_DISK_MAX_BYTES, VMM_DISK_SECTOR_SIZE, VMM_IOMMU_MAX_MAP_BYTES,
-    VmmExitEvent, VmmRegs, exit_kind,
+    exit_kind, VmmExitEvent, VmmRegs, VMM_DISK_DEFAULT_BYTES, VMM_DISK_MAX_BYTES,
+    VMM_DISK_SECTOR_SIZE, VMM_IOMMU_MAX_MAP_BYTES,
 };
 
 /// Maximum number of simultaneous worlds (safety bound).

@@ -24,7 +24,7 @@
 //!
 //! `IpcScheme` blocking request/reply paths are excluded (they hit the
 //! host-panic reply shim); everything else : pseudo-stat finalization,
-//! the KernelScheme static-file registry, and the global scheme router —
+//! the KernelScheme static-file registry, and the global scheme router :
 //! is exercised for real.
 
 use kernel_l2_tests::vfs::{

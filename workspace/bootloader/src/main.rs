@@ -1011,9 +1011,9 @@ fn select_framebuffer() -> graphics::Framebuffer {
 /// Write a byte to COM1, bounding the transmit-ready wait.
 ///
 /// The status poll used to be an unbounded `loop`. If the emulated UART
-/// never reports THR-empty — which happens when the port has not finished
+/// never reports THR-empty : which happens when the port has not finished
 /// being reprogrammed after `ExitBootServices`, or when QEMU tears the
-/// device down — the bootloader hangs here forever with no way to report it.
+/// device down : the bootloader hangs here forever with no way to report it.
 /// Dropping the byte after a bounded wait keeps the handoff moving.
 unsafe fn write_com1_byte(byte: u8) {
     const LSR: u16 = 0x3F8 + 5;

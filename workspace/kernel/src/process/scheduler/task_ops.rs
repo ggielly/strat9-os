@@ -890,7 +890,7 @@ pub fn clear_task_wake_deadline(id: TaskId) -> bool {
 /// First path (current task): re-acquires LOCAL only for yield_cpu_local,
 /// after BLOCKED has been released.
 /// Ready-queue path: acquires LOCAL to remove, releases it, then acquires
-/// BLOCKED to insert — this is safe because LOCAL is fully released before
+/// BLOCKED to insert : this is safe because LOCAL is fully released before
 /// BLOCKED is acquired (no nesting).
 pub fn suspend_task(id: TaskId) -> bool {
     let saved_flags = save_flags_and_cli();
@@ -1143,7 +1143,7 @@ pub fn kill_task(id: TaskId) -> bool {
                     drop(identity);
                 }
                 // reparent_children needs a separate identity write since it
-                // also needs sched.zombies check — but we can merge if we
+                // also needs sched.zombies check : but we can merge if we
                 // pass a pre-built identity. For now keep separate.
                 let (parent, ipi_death) = {
                     lockdep_acquire(LockRank::IdentityW, None);

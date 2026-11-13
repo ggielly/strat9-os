@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — processor control block (guest/host state structure).
+//! s9vm : processor control block (guest/host state structure).
 //!
 //! This module provides:
 //! - field encoding (16, 32, 64 bits and "natural") according to the SDM;

@@ -1,4 +1,4 @@
-//! s9vm — pure model of the guest 8259A programmable interrupt controller.
+//! s9vm : pure model of the guest 8259A programmable interrupt controller.
 //!
 //! A PC-compatible guest expects two cascaded 8259A chips (master on ports
 //! `0x20`/`0x21`, slave on `0xA0`/`0xA1`). This module models the
@@ -115,7 +115,7 @@ impl Chip {
     ///
     /// In level-triggered mode the request exists while the line is high, so
     /// deasserting it withdraws a request that was not acknowledged yet. In
-    /// edge-triggered mode — the PC default — the request was latched by the
+    /// edge-triggered mode : the PC default : the request was latched by the
     /// rising edge and stays in the `IRR` until the processor acknowledges it,
     /// even if the line is already low again: a device pulse must not be lost
     /// because it was serviced later (masked line, or a guest that has not

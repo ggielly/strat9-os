@@ -37,7 +37,7 @@
 //! /bus/<driver>/reg/<hex>   -> read/write a driver register
 //!                              (NOTE: on software-defined buses without a
 //!                              register file, e.g. `moxtet`, `reg/<idx>` is
-//!                              a logical slot index, not an MMIO offset —
+//!                              a logical slot index, not an MMIO offset :
 //!                              see `moxtet::Moxtet` docs)
 //! /bus/<driver>/<child>     -> child-device info (if the driver reports any)
 //! ```

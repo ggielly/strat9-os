@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — bounded exit event queue.
+//! s9vm : bounded exit event queue.
 //!
 //! Each world has an event queue (fixed size) that the execution layer
 //! fills and that the policy consumes via

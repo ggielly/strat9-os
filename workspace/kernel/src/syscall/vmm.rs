@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — handlers for the `SYS_VMM_*` syscalls (ABI block 560–589).
+//! s9vm : handlers for the `SYS_VMM_*` syscalls (ABI block 560–589).
 //!
 //! P0 scope: management of the world registry (`CREATE`, `DESTROY`,
 //! `INFO`) and the execution surface driven by the injected exits. The
@@ -41,7 +41,7 @@
 
 use super::error::SyscallError;
 use crate::{
-    capability::{CapId, CapPermissions, ResourceType, get_capability_manager},
+    capability::{get_capability_manager, CapId, CapPermissions, ResourceType},
     memory::{UserSliceRead, UserSliceWrite},
     process::current_task_clone,
     s9vm,
@@ -55,10 +55,10 @@ use crate::{
 };
 use alloc::vec;
 use strat9_abi::vmm::{
-    VMM_ABI_VERSION, VMM_CMDLINE_MAX, VMM_DISK_MAX_BYTES, VMM_DISK_SECTOR_SIZE,
-    VMM_IOMMU_MAX_MAP_BYTES, VMM_LIST_MAX, VMM_MODULE_MAX_BYTES, VMM_NAME_MAX, VMM_VCPU_LIST_MAX,
-    VmmCpuidPolicy, VmmImageInfo, VmmInfo, VmmIommuMap, VmmRegs, VmmVcpuInfo, VmmWorldEntry,
-    VmmWorldStats, iommu_flags, state, vcpu_flags,
+    iommu_flags, state, vcpu_flags, VmmCpuidPolicy, VmmImageInfo, VmmInfo, VmmIommuMap, VmmRegs,
+    VmmVcpuInfo, VmmWorldEntry, VmmWorldStats, VMM_ABI_VERSION, VMM_CMDLINE_MAX,
+    VMM_DISK_MAX_BYTES, VMM_DISK_SECTOR_SIZE, VMM_IOMMU_MAX_MAP_BYTES, VMM_LIST_MAX,
+    VMM_MODULE_MAX_BYTES, VMM_NAME_MAX, VMM_VCPU_LIST_MAX,
 };
 
 /// Maximum size of a structure read from user space.
@@ -1178,7 +1178,11 @@ fn cpuid_policy_from_abi(request: &VmmCpuidPolicy) -> Result<CpuidPolicy, Syscal
 
 /// A zero ABI field means "keep the engine default".
 fn defaulted(value: u32, default: u32) -> u32 {
-    if value == 0 { default } else { value }
+    if value == 0 {
+        default
+    } else {
+        value
+    }
 }
 
 fn map_vm_error(error: VmError) -> SyscallError {

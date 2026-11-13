@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — guest image format and loading plan.
+//! s9vm : guest image format and loading plan.
 //!
 //! A guest image is a static, little-endian ELF64 executable for x86-64:
 //! `ET_EXEC` linked at a fixed virtual address, or `ET_DYN` relocatable at a
@@ -280,8 +280,7 @@ impl<'a> Image<'a> {
                     return Err(ImageError::UnorderedSegments);
                 }
             }
-            let page_end =
-                align_up(segment.end_vaddr()).ok_or(ImageError::SegmentOverflow)?;
+            let page_end = align_up(segment.end_vaddr()).ok_or(ImageError::SegmentOverflow)?;
             if let Some(previous_end) = previous_page_end {
                 if page_start < previous_end {
                     return Err(ImageError::OverlappingSegments);

@@ -138,7 +138,7 @@ pub fn init_cpu(cpu_index: usize) {
         // but reload ES/FS to a known kernel data selector to avoid any
         // descriptor-dependent access (#GP on the first ES-relative string op).
         // GS keeps its per-CPU base (IA32_GS_BASE); only the selector is
-        // refreshed — the base is MSR-controlled and must not be clobbered.
+        // refreshed : the base is MSR-controlled and must not be clobbered.
         ES::set_reg(kernel_data);
         FS::set_reg(kernel_data);
 

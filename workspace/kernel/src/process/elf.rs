@@ -80,8 +80,8 @@ macro_rules! elf_trace {
 // ---------------------------------------------------------------------------
 
 use strat9_elf_core::{
-    ElfError, Header, ProgramHeader, ET_DYN, ET_EXEC, PF_R, PF_W, PF_X, PT_DYNAMIC, PT_GNU_RELRO,
-    PT_GNU_STACK, PT_INTERP, PT_LOAD, PT_TLS, PROGRAM_HEADER_SIZE,
+    ElfError, Header, ProgramHeader, ET_DYN, ET_EXEC, PF_R, PF_W, PF_X, PROGRAM_HEADER_SIZE,
+    PT_DYNAMIC, PT_GNU_RELRO, PT_GNU_STACK, PT_INTERP, PT_LOAD, PT_TLS,
 };
 
 const DT_NULL: i64 = 0;
@@ -2469,8 +2469,8 @@ fn load_elf_task_inner(
 /// [`crate::syscall::exec`] does), and it does *not* build a Task struct.
 ///
 /// The shared image-loading steps now live in single-purpose helpers used by
-/// both paths — [`load_pt_load_segments`], [`apply_relro`],
-/// [`load_interpreter`] and [`stack_is_executable`] — so a loader-side fix
+/// both paths : [`load_pt_load_segments`], [`apply_relro`],
+/// [`load_interpreter`] and [`stack_is_executable`] : so a loader-side fix
 /// only has to be made once.  The remaining divergence is the TLS block:
 /// `load_elf_task_inner` allocates it via [`setup_tls_block`] while this
 /// function only reports the segment's geometry through

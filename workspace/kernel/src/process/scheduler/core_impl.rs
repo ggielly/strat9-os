@@ -790,7 +790,7 @@ pub(super) fn pick_next_task_local(cpu: &mut SchedulerCpu, cpu_index: usize) -> 
     let next = if let Some(next) = cpu.class_rqs.pick_next(&cpu.class_table) {
         next
     } else {
-        // Step 3: local queues empty — try work-stealing before idle.
+        // Step 3: local queues empty : try work-stealing before idle.
         if let Some(stolen) = steal_task_local(cpu, cpu_index) {
             stolen
         } else {

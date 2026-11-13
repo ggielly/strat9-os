@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — guest boot parameters (firmware hand-off block).
+//! s9vm : guest boot parameters (firmware hand-off block).
 //!
 //! [`bootinfo`](crate::s9vm::bootinfo) is the compact s9vm-specific boot page.
 //! A real operating-system guest needs a richer hand-off: the physical memory

@@ -236,7 +236,7 @@ pub fn check_authorization(responder: TaskId, target: TaskId) -> Result<(), Deli
 ///
 /// `responder` must match the `waiting_on` server recorded when the target
 /// issued its call (`SYS_IPC_CALL` records the port owner). Replies from
-/// any other task are rejected with [`DeliverError::NotResponder`] —
+/// any other task are rejected with [`DeliverError::NotResponder`] :
 /// otherwise any process able to guess a blocked task id could inject
 /// forged responses into its RPCs.
 pub fn deliver_reply(

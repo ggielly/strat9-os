@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — pure PC BIOS service model for a real-mode DOS-class guest.
+//! s9vm : pure PC BIOS service model for a real-mode DOS-class guest.
 //!
 //! This module implements the software half of the classic firmware surface:
 //! it takes the guest register file captured at a BIOS interrupt, performs the

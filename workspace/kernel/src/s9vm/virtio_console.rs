@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — virtio console device (pure model, MMIO transport).
+//! s9vm : virtio console device (pure model, MMIO transport).
 //!
 //! The device exposes the modern virtio-mmio register file (version 2) for a
 //! console: two split queues (`0` = receive, `1` = transmit), a small config

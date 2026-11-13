@@ -90,10 +90,7 @@ pub fn parse_elf64(data: &[u8]) -> Result<Elf64Info, &'static str> {
     let mut previous_virt_end = KERNEL_VIRT_BASE;
     let mut executable_entry = false;
     for phdr in header.program_headers(data) {
-        if matches!(
-            phdr.p_type,
-            PT_DYNAMIC | PT_INTERP | PT_TLS | PT_SHLIB
-        ) {
+        if matches!(phdr.p_type, PT_DYNAMIC | PT_INTERP | PT_TLS | PT_SHLIB) {
             return Err("dynamic linking, interpreter or TLS is unsupported for the kernel");
         }
         if !phdr.is_load() {

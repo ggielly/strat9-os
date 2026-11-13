@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — pure model of the guest local APIC (xAPIC / x2APIC).
+//! s9vm : pure model of the guest local APIC (xAPIC / x2APIC).
 //!
 //! This module models the minimal architectural state of a local APIC: MMIO
 //! registers (4 KiB page), x2APIC registers (MSRs), IRR/ISR, priority (TPR/PPR),

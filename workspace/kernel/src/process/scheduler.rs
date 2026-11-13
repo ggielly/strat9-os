@@ -25,7 +25,7 @@
 //! Implements a per-CPU, multi-class, SMP scheduler for Strat9-OS with support
 //! for cooperative and preemptive multitasking.
 //!
-//! ## Scheduler locking contract — mandatory total order
+//! ## Scheduler locking contract : mandatory total order
 //!
 //! ```text
 //!   GLOBAL_SCHED_STATE                        (rank 1)
@@ -138,17 +138,17 @@ impl SchedState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum LockRank {
-    /// GLOBAL_SCHED_STATE — rank 1.
+    /// GLOBAL_SCHED_STATE : rank 1.
     Global = 1,
-    /// SCHED_IDENTITY write — rank 2.
+    /// SCHED_IDENTITY write : rank 2.
     IdentityW = 2,
-    /// SCHED_IDENTITY read — rank 2R (must not chain to scheduler locks).
+    /// SCHED_IDENTITY read : rank 2R (must not chain to scheduler locks).
     IdentityR = 3,
-    /// BLOCKED_TASKS — rank 3.
+    /// BLOCKED_TASKS : rank 3.
     Blocked = 4,
-    /// LOCAL_SCHEDULERS[cpu] — rank 4.
+    /// LOCAL_SCHEDULERS[cpu] : rank 4.
     Local = 5,
-    /// Task/Process internal — rank 5.
+    /// Task/Process internal : rank 5.
     TaskInternal = 6,
 }
 
@@ -757,7 +757,7 @@ pub(crate) fn take_force_resched_hint(cpu: usize) -> bool {
     }
 }
 
-/// Global scheduler state — rank 1 (root) in the total lock order.
+/// Global scheduler state : rank 1 (root) in the total lock order.
 ///
 /// This is the root lock.  It may precede all other scheduler locks but must
 /// **never** be acquired from a path that already holds a LOCAL, BLOCKED, or
@@ -996,7 +996,7 @@ struct SchedulerCpu {
     class_table: crate::process::sched::SchedClassTable,
 }
 
-/// Per-CPU local scheduler locks — rank 4 in the total lock order.
+/// Per-CPU local scheduler locks : rank 4 in the total lock order.
 ///
 /// Acquired after `GLOBAL_SCHED_STATE`, `SCHED_IDENTITY`, and `BLOCKED_TASKS`.
 /// **Never** hold two LOCAL locks simultaneously.
@@ -1006,7 +1006,7 @@ struct SchedulerCpu {
 pub(crate) static LOCAL_SCHEDULERS: [SpinLock<Option<SchedulerCpu>>;
     crate::arch::percpu::MAX_CPUS] = [const { SpinLock::new(None) }; crate::arch::percpu::MAX_CPUS];
 
-/// Blocked tasks registry — rank 3 in the total lock order.
+/// Blocked tasks registry : rank 3 in the total lock order.
 ///
 /// `BLOCKED_TASKS` must be acquired **after** `GLOBAL_SCHED_STATE` and
 /// `SCHED_IDENTITY` (write), and **before** `LOCAL_SCHEDULERS[cpu]`.
@@ -1016,7 +1016,7 @@ pub(crate) static LOCAL_SCHEDULERS: [SpinLock<Option<SchedulerCpu>>;
 pub(crate) static BLOCKED_TASKS: SpinLock<BTreeMap<TaskId, Arc<Task>>> =
     SpinLock::new(BTreeMap::new());
 
-/// Identity maps — rank 2 (write) / 2R (read) in the total lock order.
+/// Identity maps : rank 2 (write) / 2R (read) in the total lock order.
 ///
 /// `SCHED_IDENTITY` write is acquired after `GLOBAL_SCHED_STATE` and before
 /// `BLOCKED_TASKS` or `LOCAL_SCHEDULERS[cpu]`.

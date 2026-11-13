@@ -577,10 +577,7 @@ impl VgaWriter {
         if gh == 0 || cols == 0 {
             return;
         }
-        let text_height = self
-            .can()
-            .height
-            .saturating_sub(self.status_bar_height + h);
+        let text_height = self.can().height.saturating_sub(self.status_bar_height + h);
         let rows = text_height / gh;
         if rows == 0 {
             return;
@@ -3017,7 +3014,12 @@ impl VgaWriter {
             return;
         }
 
-        fn geometry(total: usize, offset: usize, view_rows: usize, text_h: usize) -> (usize, usize, bool) {
+        fn geometry(
+            total: usize,
+            offset: usize,
+            view_rows: usize,
+            text_h: usize,
+        ) -> (usize, usize, bool) {
             if total <= view_rows {
                 // Not enough content to scroll: full-height thumb with border.
                 return (0, text_h, true);

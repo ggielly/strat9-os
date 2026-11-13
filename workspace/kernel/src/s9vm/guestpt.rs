@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — guest page tables for a 64-bit guest entry.
+//! s9vm : guest page tables for a 64-bit guest entry.
 //!
 //! A 64-bit guest is entered with paging already enabled: the processor
 //! translates every guest-linear access through the guest's own four-level
@@ -50,7 +50,7 @@
 //! Overlapping ranges are rejected ([`PtError::Conflict`]) rather than merged:
 //! the boot mapping is a small, known set, and silently picking one of two
 //! permissions would hide a loader bug. Addresses must be canonical in the
-//! 48-bit sense — the guest kernel is entered in 4-level paging mode.
+//! 48-bit sense : the guest kernel is entered in 4-level paging mode.
 //!
 //! Testable on the host (L2 tests).
 

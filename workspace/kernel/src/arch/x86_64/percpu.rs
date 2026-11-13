@@ -71,9 +71,7 @@ pub struct PerCpuArch {
 
 const _: () = assert!(core::mem::offset_of!(PerCpuArch, user_rsp) == USER_RSP_OFFSET);
 const _: () = assert!(core::mem::offset_of!(PerCpuArch, kernel_rsp) == KERNEL_RSP_OFFSET);
-const _: () = assert!(
-    core::mem::offset_of!(PerCpuArch, preempt_count) == PREEMPT_COUNT_OFFSET
-);
+const _: () = assert!(core::mem::offset_of!(PerCpuArch, preempt_count) == PREEMPT_COUNT_OFFSET);
 
 /// Per-CPU state.
 #[repr(C)]
@@ -373,8 +371,8 @@ pub fn preempt_enable() {
     // `prev` and subtracts one in the same uninterruptible operation, so an
     // IRQ cannot migrate the task between the read and the write.
     let mut prev: u32 = u32::MAX; // -1
-    // SAFETY: see `preempt_disable`; the field is a plain u32 in the arch
-    // block and the GS base is valid on this CPU.
+                                  // SAFETY: see `preempt_disable`; the field is a plain u32 in the arch
+                                  // block and the GS base is valid on this CPU.
     unsafe {
         core::arch::asm!(
             "lock xadd dword ptr gs:[{off}], {p:e}",

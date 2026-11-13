@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! s9vm — static ACPI tables presented to guests.
+//! s9vm : static ACPI tables presented to guests.
 //!
 //! A guest discovers the machine it runs on through firmware description
 //! tables: the `RSDP` points at the `XSDT`, which lists the `FADT` and the
@@ -851,4 +851,3 @@ fn put_u32(buffer: &mut [u8], offset: usize, value: u32) {
 fn put_u64(buffer: &mut [u8], offset: usize, value: u64) {
     put_bytes(buffer, offset, &value.to_le_bytes());
 }
-
