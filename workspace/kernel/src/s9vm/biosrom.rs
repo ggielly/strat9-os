@@ -219,11 +219,11 @@ pub const ROM_STUB_BASE: u16 = 0x0100;
 /// First I/O port used to report an interrupt: `port = base + vector`.
 pub const BIOS_PORT_BASE: u16 = 0xE000;
 /// Spacing between two per-vector stubs in the ROM.
-pub const STUB_STRIDE: u16 = 0x08;
+pub const STUB_STRIDE: u16 = 0x10;
 /// Length of one per-vector stub: `mov dx, port` (3) + `jmp tail` (3).
-pub const MAX_STUB_LEN: u16 = 6;
+pub const MAX_STUB_LEN: u16 = 11;
 /// ROM offset of the shared stub tail (after the 256 per-vector stubs).
-pub const ROM_SHARED_TAIL: u16 = 0x0900;
+pub const ROM_SHARED_TAIL: u16 = 0x1100;
 /// Upper bound on the shared tail length, so the tail stays inside the ROM.
 pub const MAX_SHARED_TAIL_LEN: u16 = 0x80;
 /// Offset inside the stacked interrupt frame where the shared tail patches the
@@ -373,9 +373,14 @@ pub fn is_supported_vector(vector: u8) -> bool {
 
 /// Encodes the per-vector real-mode stub for `vector`.
 ///
-/// The stub only loads the debug port into `DX` and jumps to the shared tail
-/// ([`shared_tail_bytes`]), which performs the `OUT` and patches the caller's
-/// stacked `FLAGS`. The encoding is exactly [`MAX_STUB_LEN`] bytes.
+/// The stub must not destroy the registers the BIOS service uses: it pushes the
+/// caller `AX` and `DX` (the kernel reads them back from the guest stack at the
+/// `OUT` exit), loads the debug port into `DX`, moves the command byte (`AH`)
+/// into `AL` for the `OUT`, then jumps to the shared tail
+/// ([`shared_tail_bytes`]) which drops the saved registers, restores the
+/// kernel-written results and patches the caller's stacked `FLAGS`.
+///
+/// The encoding is at most [`MAX_STUB_LEN`] bytes.
 pub fn stub_bytes(vector: u8) -> Vec<u8> {
     let port = bios_port(vector);
     let port_lo = (port & 0xFF) as u8;
@@ -387,41 +392,44 @@ pub fn stub_bytes(vector: u8) -> Vec<u8> {
     let displacement = (u32::from(ROM_SHARED_TAIL) as i32 - next as i32) as i16;
     let rel = displacement.to_le_bytes();
     vec![
+        0x50, // push ax (the BIOS command is in AH)
+        0x52, // push dx (drive/head for INT 13h, page for INT 10h)
+        0x88, 0xE0, // mov al, ah (send the command as the OUT byte)
         0xBA, port_lo, port_hi, // mov dx, port
+        0xEE, // out dx, al
         0xE9, rel[0], rel[1], // jmp shared_tail
     ]
 }
 
 /// Encodes the shared stub tail installed at [`ROM_SHARED_TAIL`].
 ///
-/// The tail echoes the incoming `AL` on the port already loaded in `DX`, then
+/// The `OUT` already happened in the stub; on entry the caller `DX` and `AX`
+/// are saved on the guest stack and the kernel has overwritten the guest `AX`
+/// (and possibly `DX`) with the BIOS result. The tail drops the saved values,
 /// patches only the caller's stacked `FLAGS` from the scratch byte at
-/// [`SCRATCH_GPA`] (bit 0 -> `CF`, bit 1 -> `ZF`) and returns with `iret`.
-/// Every register is preserved, including the values the kernel wrote into the
-/// guest register file at the `OUT` exit (`AX`, `AX`/`AH`, `CX`/`DX`, ...), so
-/// BIOS calls really return their results. Only 8- and 16-bit instructions are
-/// used.
+/// [`SCRATCH_GPA`] (bit 0 -> `CF`, bit 1 -> `ZF`) and returns with `iret`, so
+/// the BIOS return values written by the kernel reach the guest.
 pub fn shared_tail_bytes() -> Vec<u8> {
     let flags = TAIL_FLAGS_OFFSET as u8;
     vec![
-        0xEE, // out dx, al
+        0x83, 0xC4, 0x04, // add sp, 4 (drop the saved DX and AX)
+        0x50, // push ax (kernel result)
+        0x55, // push bp
         0x1E, // push ds
         0x6A, 0x00, // push 0
         0x1F, // pop ds
-        0x50, // push ax
-        0x55, // push bp
         0x89, 0xE5, // mov bp, sp
         0xA0, 0x00, 0x05, // mov al, [0x0500]
         0xA8, 0x01, // test al, 1
         0x74, 0x06, // jz clear_cf
-        0x83, 0x4E, flags, 0x01, // or word [bp+flags], 0x0001 (imm8 sign-extended)
+        0x83, 0x4E, flags, 0x01, // or word [bp+flags], 0x0001
         0xEB, 0x04, // jmp zf
-        0x83, 0x66, flags, 0xFE, // and word [bp+flags], 0xFFFE (imm8 = -2)
+        0x83, 0x66, flags, 0xFE, // and word [bp+flags], 0xFFFE
         0xA8, 0x02, // test al, 2
         0x74, 0x06, // jz clear_zf
         0x83, 0x4E, flags, 0x40, // or word [bp+flags], 0x0040
         0xEB, 0x04, // jmp done
-        0x83, 0x66, flags, 0xBF, // and word [bp+flags], 0xFFBF (imm8 = -65)
+        0x83, 0x66, flags, 0xBF, // and word [bp+flags], 0xFFBF
         0x5D, // pop bp
         0x58, // pop ax
         0x1F, // pop ds

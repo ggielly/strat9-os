@@ -505,7 +505,7 @@ fn run_dos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError>
                     // ES/DS/SS and the ROM handler relies on them.
                     // SAFETY: block loaded, guest inactive (exit handler).
                     unsafe { vcpu.refresh_system_state() }.map_err(DosError::Run)?;
-                    let mut registers = read_bios_registers(vcpu.guest());
+                    let mut registers = read_bios_call_registers(&vcpu, &mut memory);
                     let _ = bios_state.handle(vector, &mut registers, &mut memory, &mut world_disk);
                     write_bios_registers(&mut vcpu, &registers);
                     write_scratch(&mut memory, &registers)?;
@@ -971,8 +971,36 @@ fn read_bios_registers(guest: &GuestState) -> bios::BiosRegisters {
     registers
 }
 
-/// Writes the registers updated by the firmware model back to the vCPU.
+/// Reads the BIOS call registers, recovering the caller `AX`/`DX`.
 ///
+/// The per-vector stub must use `DX` and `AL` to reach the kernel, so the
+/// architectural register file at the `OUT` exit no longer holds the caller
+/// values. The stub pushed them first; at the exit the guest stack still holds
+/// `[SP] = saved DX` and `[SP + 2] = saved AX`. Recovering them is what makes
+/// INT 10h/INT 13h see the real page/drive/count/character instead of the stub
+/// port number in `DX`.
+fn read_bios_call_registers(vcpu: &Vcpu, memory: &mut WorldMemory) -> bios::BiosRegisters {
+    let mut registers = read_bios_registers(vcpu.guest());
+    let guest = vcpu.guest();
+    let stack = guest
+        .ss
+        .base
+        .wrapping_add(u64::from(guest.rsp as u16)) as u32;
+    let mut read_word = |memory: &mut WorldMemory, offset: u32| -> Option<u16> {
+        let lo = bios::BiosMemory::read_u8(memory, stack.wrapping_add(offset))?;
+        let hi = bios::BiosMemory::read_u8(memory, stack.wrapping_add(offset + 1))?;
+        Some(u16::from_le_bytes([lo, hi]))
+    };
+    if let Some(dx) = read_word(memory, 0) {
+        registers.dx = dx;
+    }
+    if let Some(ax) = read_word(memory, 2) {
+        registers.ax = ax;
+    }
+    registers
+}
+
+/// Writes the registers updated by the firmware model back to the vCPU.
 /// GPRs live in the entry frame until the next VM entry, so
 /// [`Vcpu::set_guest_gpr`] is exactly the write-back path the trampoline reads.
 fn write_bios_registers(vcpu: &mut Vcpu, registers: &bios::BiosRegisters) {
@@ -1197,7 +1225,7 @@ fn run_freedos_in_world(
                         outcome = Err(error);
                         break;
                     }
-                    let mut registers = read_bios_registers(vcpu.guest());
+                    let mut registers = read_bios_call_registers(&vcpu, &mut memory);
                     // The boot sector reboots (`int 19h`) or enters ROM BASIC
                     // (`int 18h`) when it cannot load the kernel. Both vectors
                     // now reach the BIOS stubs; turning them into a clean

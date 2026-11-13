@@ -163,9 +163,9 @@ fn layout_constants_match_the_low_memory_map() {
     assert_eq!(ROM_LEN, 0x8000);
     assert_eq!(ROM_STUB_BASE, 0x0100);
     assert_eq!(BIOS_PORT_BASE, 0xE000);
-    assert_eq!(STUB_STRIDE, 0x08);
-    assert_eq!(MAX_STUB_LEN, 6);
-    assert_eq!(ROM_SHARED_TAIL, 0x0900);
+    assert_eq!(STUB_STRIDE, 0x10);
+    assert_eq!(MAX_STUB_LEN, 11);
+    assert_eq!(ROM_SHARED_TAIL, 0x1100);
     assert_eq!(MAX_SHARED_TAIL_LEN, 0x80);
     assert_eq!(TAIL_FLAGS_OFFSET, 0x0A);
 }
@@ -188,7 +188,7 @@ fn regions_do_not_overlap() {
 #[test]
 fn stub_area_and_tail_fit_inside_the_rom() {
     let stub_area_end = u32::from(ROM_STUB_BASE) + 256 * u32::from(STUB_STRIDE);
-    assert_eq!(stub_area_end, 0x0900);
+    assert_eq!(stub_area_end, 0x1100);
     assert_eq!(stub_area_end, u32::from(ROM_SHARED_TAIL));
     // The highest per-vector stub plus its length stays below the tail.
     let last = u32::from(stub_offset(0xFF)) + u32::from(MAX_STUB_LEN);
@@ -232,9 +232,9 @@ fn ports_and_offsets_follow_the_formula() {
     assert_eq!(bios_port(0x10), 0xE010);
     assert_eq!(bios_port(0xFF), 0xE0FF);
     assert_eq!(stub_offset(0x00), 0x0100);
-    assert_eq!(stub_offset(0x10), 0x0180);
-    assert_eq!(stub_offset(0xFF), 0x08F8);
-    assert_eq!(stub_gpa(0x10), ROM_BASE + 0x0180);
+    assert_eq!(stub_offset(0x10), 0x0200);
+    assert_eq!(stub_offset(0xFF), 0x10F0);
+    assert_eq!(stub_gpa(0x10), ROM_BASE + 0x0200);
     assert_eq!(shared_tail_gpa(), ROM_BASE + u32::from(ROM_SHARED_TAIL));
 }
 
@@ -243,9 +243,12 @@ fn ports_and_offsets_follow_the_formula() {
 // ---------------------------------------------------------------------------
 
 /// Resolves the `jmp rel16` of a per-vector stub back to a ROM offset.
+///
+/// Stub layout: `push ax` (1), `push dx` (1), `mov al, ah` (2), `mov dx, port`
+/// (3), `out dx, al` (1), `jmp rel16` (3): the displacement is at bytes 9..11.
 fn stub_jump_target(vector: u8) -> u16 {
     let stub = stub_bytes(vector);
-    let displacement = i16::from_le_bytes([stub[4], stub[5]]);
+    let displacement = i16::from_le_bytes([stub[9], stub[10]]);
     let next = stub_offset(vector) + MAX_STUB_LEN;
     (i32::from(next) + i32::from(displacement)) as u16
 }
@@ -253,18 +256,20 @@ fn stub_jump_target(vector: u8) -> u16 {
 #[test]
 fn stub_for_vector_0x10_has_the_expected_encoding() {
     let stub = stub_bytes(0x10);
-    assert_eq!(stub.len(), 6);
+    assert_eq!(stub.len(), 11);
     assert_eq!(stub.len(), usize::from(MAX_STUB_LEN));
-    // MOV DX, 0xE010: the port identifies the vector.
-    assert_eq!(&stub[0..3], &[0xBA, 0x10, 0xE0]);
-    // JMP rel16 to the shared tail.
-    assert_eq!(stub[3], 0xE9);
-    // 0x0900 - (0x0180 + 6) = 0x077A.
-    assert_eq!(&stub[3..6], &[0xE9, 0x7A, 0x07]);
+    // Save the caller AX (BIOS command in AH) and DX (page/drive), then send
+    // AH as the OUT byte on the vector port 0xE010.
+    assert_eq!(&stub[0..4], &[0x50, 0x52, 0x88, 0xE0]);
+    assert_eq!(&stub[4..7], &[0xBA, 0x10, 0xE0]);
+    assert_eq!(stub[7], 0xEE);
+    // JMP rel16 to the shared tail: 0x1100 - (0x0200 + 11) = 0x0EF5.
+    assert_eq!(stub[8], 0xE9);
+    assert_eq!(&stub[8..11], &[0xE9, 0xF5, 0x0E]);
     assert_eq!(stub_jump_target(0x10), ROM_SHARED_TAIL);
-    // The tail performs the OUT and the flag patch; the per-vector stub does
-    // not touch any other register.
-    assert!(!contains(&stub, &[0xEE]));
+    // The OUT moved into the stub (it needs the caller's AH); the tail keeps
+    // the flag patch.
+    assert_eq!(stub.iter().filter(|byte| **byte == 0xEE).count(), 1);
 }
 
 #[test]
@@ -272,8 +277,8 @@ fn stub_port_immediate_matches_each_vector() {
     for vector in 0..=255u8 {
         let stub = stub_bytes(vector);
         let port = bios_port(vector);
-        assert_eq!(&stub[0..3], &[0xBA, (port & 0xFF) as u8, (port >> 8) as u8]);
-        assert_eq!(stub[3], 0xE9);
+        assert_eq!(&stub[4..7], &[0xBA, (port & 0xFF) as u8, (port >> 8) as u8]);
+        assert_eq!(stub[8], 0xE9);
         assert_eq!(stub_jump_target(vector), ROM_SHARED_TAIL);
     }
 }
@@ -283,7 +288,7 @@ fn every_stub_is_bounded_and_jumps_to_the_tail() {
     for vector in 0..=255u8 {
         let stub = stub_bytes(vector);
         assert!(stub.len() <= usize::from(MAX_STUB_LEN));
-        assert_eq!(stub.len(), 6);
+        assert_eq!(stub.len(), 11);
         assert_eq!(stub_jump_target(vector), ROM_SHARED_TAIL);
     }
 }
@@ -308,20 +313,22 @@ fn stub_bytes_are_deterministic_and_vector_specific() {
     let second = stub_bytes(0x13);
     assert_eq!(first, second);
     assert_ne!(stub_bytes(0x10), stub_bytes(0x13));
-    assert_eq!(stub_bytes(0x13)[1], 0x13);
-    assert_eq!(stub_bytes(0x10)[1], 0x10);
+    // Byte 5 is the low half of the port immediate: 0xE013 / 0xE010.
+    assert_eq!(stub_bytes(0x13)[5], 0x13);
+    assert_eq!(stub_bytes(0x10)[5], 0x10);
 }
 
 #[test]
 fn tail_frame_offset_matches_the_push_sequence() {
-    // Stack at tail entry: [SP]=IP, [SP+2]=CS, [SP+4]=FLAGS.
-    // push ds (2) -> push 0/pop ds (net 0) -> push ax (2) -> push bp (2):
-    // BP = SP - 6, so FLAGS sits at BP + 4 + 6 = BP + 0x0A.
+    // Stack at tail entry: [SP]=saved DX, [SP+2]=saved AX, [SP+4]=IP,
+    // [SP+6]=CS, [SP+8]=FLAGS. The tail drops the two saved words, pushes the
+    // kernel result (AX), BP and DS, then frames: [BP]=DS, [BP+2]=BP,
+    // [BP+4]=AX, [BP+6]=IP, [BP+8]=CS, [BP+0x0A]=FLAGS.
     assert_eq!(TAIL_FLAGS_OFFSET, 0x0A);
     let tail = shared_tail_bytes();
     assert_eq!(
-        &tail[1..9],
-        &[0x1E, 0x6A, 0x00, 0x1F, 0x50, 0x55, 0x89, 0xE5]
+        &tail[0..11],
+        &[0x83, 0xC4, 0x04, 0x50, 0x55, 0x1E, 0x6A, 0x00, 0x1F, 0x89, 0xE5]
     );
 }
 
@@ -329,32 +336,29 @@ fn tail_frame_offset_matches_the_push_sequence() {
 fn shared_tail_returns_with_iret_and_uses_no_pusha() {
     let tail = shared_tail_bytes();
     assert!(tail.len() <= usize::from(MAX_SHARED_TAIL_LEN));
-    assert_eq!(tail.len(), 44);
-    // The tail starts by reporting the vector and ends with IRET.
-    assert_eq!(tail[0], 0xEE);
+    assert_eq!(tail.len(), 46);
+    // The tail starts by dropping the stub's saved DX/AX and ends with IRET.
+    assert_eq!(&tail[0..3], &[0x83, 0xC4, 0x04]);
     assert_eq!(*tail.last().expect("tail"), 0xCF);
     // `safe-registers` fix: no PUSHA/POPA (which would discard the values the
     // kernel writes into the register file at the OUT exit).
     assert!(!tail.contains(&0x60));
     assert!(!tail.contains(&0x61));
-    // The exact byte encoding (asserted in the next test) only uses 8/16-bit
-    // instructions and 16-bit register operands, so the upper halves of the
-    // 32-bit registers are never touched.
 }
 
 #[test]
 fn shared_tail_preserves_the_caller_registers() {
-    // Byte-for-byte encoding contract: the tail only uses PUSH/POP for DS, AX
-    // and BP, reads AL for the scratch byte and patches the stacked FLAGS.
-    // Nothing else is written, so every register the kernel updates at the OUT
-    // exit (AX, BX, CX, DX, SI, DI, ...) reaches the caller unchanged.
+    // Byte-for-byte encoding contract. The stub saved the caller DX/AX on the
+    // guest stack (the kernel re-reads them there); the tail drops those two
+    // words, keeps the kernel-written AX, patches only the stacked FLAGS and
+    // returns through IRET. Every other register is untouched.
     let expected: &[u8] = &[
-        0xEE, // out dx, al
+        0x83, 0xC4, 0x04, // add sp, 4 (drop saved DX, AX)
+        0x50, // push ax (kernel result)
+        0x55, // push bp
         0x1E, // push ds
         0x6A, 0x00, // push 0
         0x1F, // pop ds
-        0x50, // push ax
-        0x55, // push bp
         0x89, 0xE5, // mov bp, sp
         0xA0, 0x00, 0x05, // mov al, [0x0500]
         0xA8, 0x01, // test al, 1
@@ -376,7 +380,7 @@ fn shared_tail_preserves_the_caller_registers() {
     // Push/pop balance for every register the tail touches.
     assert!(contains(&shared_tail_bytes(), &[0x1E]));
     assert!(contains(&shared_tail_bytes(), &[0x1F]));
-    assert!(contains(&shared_tail_bytes(), &[0x50, 0x55, 0x89, 0xE5]));
+    assert!(contains(&shared_tail_bytes(), &[0x83, 0xC4, 0x04, 0x50]));
     assert!(contains(&shared_tail_bytes(), &[0x5D, 0x58, 0x1F, 0xCF]));
 }
 
