@@ -12,6 +12,8 @@ mod acpi;
 mod apic;
 #[path = "../../kernel/src/s9vm/decode.rs"]
 mod decode;
+#[path = "../../kernel/src/s9vm/dma.rs"]
+mod dma;
 #[path = "../../kernel/src/s9vm/emulate.rs"]
 mod emulate;
 #[path = "../../kernel/src/s9vm/exit.rs"]
@@ -20,6 +22,8 @@ mod exit;
 mod hpet;
 #[path = "../../kernel/src/s9vm/ioapic.rs"]
 mod ioapic;
+#[path = "../../kernel/src/s9vm/keyboard.rs"]
+mod keyboard;
 #[path = "../../kernel/src/s9vm/msr.rs"]
 mod msr;
 #[path = "../../kernel/src/s9vm/pci.rs"]
@@ -34,6 +38,8 @@ mod rtc_math;
 mod rtc;
 #[path = "../../kernel/src/s9vm/uart.rs"]
 mod uart;
+#[path = "../../kernel/src/s9vm/vga.rs"]
+mod vga;
 #[path = "../../kernel/src/s9vm/virtio.rs"]
 mod virtio;
 #[path = "../../kernel/src/s9vm/virtio_blk.rs"]

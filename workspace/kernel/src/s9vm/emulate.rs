@@ -49,15 +49,18 @@
 use super::{
     apic::{reg as apic_reg, x2apic, LocalApic, TSC_DEADLINE_MSR},
     decode::{self, Decoded, MemoryAccess, PortAccess},
+    dma::{self, Dma},
     exit::ExitClass,
     hpet::{self, Hpet},
     ioapic::{IoApic, PIN_COUNT},
+    keyboard::{self, KeyboardController},
     msr::MsrModel,
     pci::{self, PciHostBridge},
     pic::Pic,
     pit::{self, Pit},
     rtc::{self, CmosRtc},
     uart::{self, Uart},
+    vga::{self, Vga},
     virtio::QueueMemory,
     virtio_blk::VirtioBlk,
     virtio_console::VirtioConsole,
@@ -498,6 +501,12 @@ pub struct Devices {
     pub rtc: CmosRtc,
     /// 16550A serial port, COM1 (ports 0x3F8..=0x3FF).
     pub uart: Uart,
+    /// 8042 keyboard controller (ports 0x60/0x64).
+    pub keyboard: KeyboardController,
+    /// VGA register file and status port (0x3B0..=0x3DF).
+    pub vga: Vga,
+    /// 8237 DMA controller register files (0x00..=0x0F, 0x81..=0x8F, 0xC0..=0xDF).
+    pub dma: Dma,
     /// PCI host bridge: configuration mechanism #1 and the virtio functions
     /// the guest discovers through it (no MSI generation yet).
     pub pci: PciHostBridge,
@@ -553,6 +562,9 @@ impl Devices {
             pit: Pit::new(),
             rtc: CmosRtc::new(),
             uart: Uart::new(),
+            keyboard: KeyboardController::new(),
+            vga: Vga::new(),
+            dma: Dma::new(),
             pci,
             hpet: Hpet::new(),
             console: VirtioConsole::new(),
@@ -568,6 +580,9 @@ impl Devices {
             || pit::handles_port(port)
             || rtc::handles_port(port)
             || uart::handles_port(port)
+            || keyboard::handles_port(port)
+            || vga::handles_port(port)
+            || dma::handles_port(port)
             || handles_pci_port(port)
     }
 }
@@ -799,6 +814,57 @@ fn serve_port(
             isa_gsi(uart::IRQ_LINE),
             devices.uart.irq_asserted(),
         );
+        return true;
+    }
+    if keyboard::handles_port(access.port) {
+        // The 8042 is byte-wide.
+        if access.size != 1 {
+            return false;
+        }
+        if access.write {
+            devices
+                .keyboard
+                .write(access.port, (guest.gpr(access.register) & 0xFF) as u8);
+        } else {
+            let Some(value) = devices.keyboard.read(access.port) else {
+                return false;
+            };
+            write_register(guest, access.register, access.size, u64::from(value));
+        }
+        return true;
+    }
+    if vga::handles_port(access.port) {
+        // VGA registers are byte-wide.
+        if access.size != 1 {
+            return false;
+        }
+        if access.write {
+            devices
+                .vga
+                .write(access.port, (guest.gpr(access.register) & 0xFF) as u8);
+        } else {
+            let Some(value) = devices.vga.read(access.port) else {
+                return false;
+            };
+            write_register(guest, access.register, access.size, u64::from(value));
+        }
+        return true;
+    }
+    if dma::handles_port(access.port) {
+        // The 8237 register files are byte-wide.
+        if access.size != 1 {
+            return false;
+        }
+        if access.write {
+            devices
+                .dma
+                .write(access.port, (guest.gpr(access.register) & 0xFF) as u8);
+        } else {
+            let Some(value) = devices.dma.read(access.port) else {
+                return false;
+            };
+            write_register(guest, access.register, access.size, u64::from(value));
+        }
         return true;
     }
     if handles_pci_port(access.port) {
