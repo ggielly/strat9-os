@@ -219,6 +219,7 @@ const GOLDEN_SYSCALLS: &[(&str, usize)] = &[
     ("SYS_SILO_ENTER_SANDBOX", SYS_SILO_ENTER_SANDBOX),
     ("SYS_SILO_RENAME", SYS_SILO_RENAME),
     ("SYS_SILO_START_NAMED", SYS_SILO_START_NAMED),
+    ("SYS_SILO_DESTROY", SYS_SILO_DESTROY),
     ("SYS_ABI_VERSION", SYS_ABI_VERSION),
     ("SYS_PCI_RESCAN", SYS_PCI_RESCAN),
     ("SYS_NET_OPEN", SYS_NET_OPEN),
@@ -288,7 +289,7 @@ fn syscall_table_is_exhaustive() {
     // table, this count check fails and forces a conscious review.
     assert_eq!(
         GOLDEN_SYSCALLS.len(),
-        205,
+        206,
         "golden table out of sync: add new SYS_* consts AND their pinned values"
     );
 }

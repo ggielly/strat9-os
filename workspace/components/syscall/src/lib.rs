@@ -1487,6 +1487,16 @@ pub mod call {
         unsafe { syscall1(number::SYS_SILO_KILL, silo_id) }
     }
 
+    /// Destroy a silo and release the resources it owns.
+    ///
+    /// The silo must be quiescent: no running task may remain, and it must not
+    /// be in the running state. The kernel removes it from the silo table and
+    /// drops its attached module. Returns the destroyed SID. Requires the silo
+    /// admin capability.
+    pub fn silo_destroy(silo_id: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_SILO_DESTROY, silo_id) }
+    }
+
     /// Dequeue the next event from a silo's event queue.
     ///
     /// Returns the raw event value, or `Err(Error::Again)` if empty.

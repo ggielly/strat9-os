@@ -1614,6 +1614,16 @@ pub const SYS_SILO_RENAME: usize = 812;
 /// Existing SYS_SILO_START remains a one-argument syscall.
 pub const SYS_SILO_START_NAMED: usize = 813;
 
+/// Destroy a silo and release everything it owns.
+///
+/// - `silo_handle`: capability handle of the silo to destroy
+///
+/// The silo must be quiescent: it must not be running, and no task of it may
+/// remain. The kernel removes it from the silo table, drops its attached
+/// module from the module registry and returns the destroyed SID. Requires the
+/// silo admin capability.
+pub const SYS_SILO_DESTROY: usize = 814;
+
 // ── Block 900: ABI Introspection ────────────────────────────────────────────
 
 /// Query the ABI version.

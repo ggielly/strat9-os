@@ -40,11 +40,21 @@ use strat9_syscall::{
     number,
 };
 pub mod fmt;
-use fmt::log_u32;
+use fmt::{log_hex_bytes, log_u32};
 
 const EAGAIN: usize = 11;
 const MAX_READ_BYTES: usize = 64 * 1024 * 1024;
 const MAX_READ_EAGAIN: usize = 256;
+/// `sid` value the shipped configuration uses to request automatic allocation.
+///
+/// It is kept as a sentinel (instead of removing the key) so the boot files
+/// stay readable and the kernel-visible SID is always allocated by this
+/// process.
+const SID_AUTO: u32 = 42;
+/// First SID handed out to a system-family silo (`SYS`, `DRV`, `FS`, `NET`).
+const SID_SYSTEM_FIRST: u32 = 100;
+/// First SID handed out to a user-family silo (`WASM`, `USR`).
+const SID_USER_FIRST: u32 = 1000;
 
 // ---------------------------------------------------------------------------
 // GLOBAL ALLOCATOR (BUMP + BRK)
@@ -70,60 +80,65 @@ fn alloc_error(_layout: Layout) -> ! {
 
 use phf::phf_map;
 
-static FAMILY_PROFILES: phf::Map<&'static str, SiloMode> = phf_map! {
-    "SYS"  => SiloMode(0o777), // SYS family has no restrictions
-    "DRV"  => SiloMode(0o076), // DRV can do anything except SYS operations
-    "FS"   => SiloMode(0o076), // FS can do anything except SYS operations
-    "NET"  => SiloMode(0o076), // NET can do anything except SYS operations
-    "WASM" => SiloMode(0o006), // WASM can only do NET and FS operations
+/// Static description of a silo family.
+///
+/// Both values the boot process needs are kept in the same entry: the numeric
+/// identifier published in [`SiloConfig::family`], and the maximum
+/// [`SiloMode`] a member of the family may request. They used to live in two
+/// independent tables, which could silently diverge.
+struct FamilyProfile {
+    /// Family identifier expected by the kernel ABI.
+    id: u8,
+    /// Highest operations mode a silo of this family may be granted.
+    ceiling: SiloMode,
+}
+
+static FAMILY_PROFILES: phf::Map<&'static str, FamilyProfile> = phf_map! {
+    "SYS"  => FamilyProfile { id: 0, ceiling: SiloMode(0o777) }, // no restriction
+    "DRV"  => FamilyProfile { id: 1, ceiling: SiloMode(0o076) }, // anything except SYS
+    "FS"   => FamilyProfile { id: 2, ceiling: SiloMode(0o076) }, // anything except SYS
+    "NET"  => FamilyProfile { id: 3, ceiling: SiloMode(0o076) }, // anything except SYS
+    "WASM" => FamilyProfile { id: 4, ceiling: SiloMode(0o006) }, // NET and FS only
+    "USR"  => FamilyProfile { id: 5, ceiling: SiloMode(0o004) }, // read only
 };
 
-/// Returns the maximum `SiloMode` ceiling for a given family name.
-/// Unknown families get the least-privileged default (`USR` / 0o004).
-fn get_family_profile(name: &str) -> SiloMode {
-    FAMILY_PROFILES
-        .get(name)
-        .copied()
-        .unwrap_or(SiloMode(0o004))
+/// Returns the profile of `name`, or `None` for an unknown family.
+fn get_family_profile(name: &str) -> Option<&'static FamilyProfile> {
+    FAMILY_PROFILES.get(name)
 }
 
 // ---------------------------------------------------------------------------
 // Utils
 // ---------------------------------------------------------------------------
 
-/// Formatting helpers (no heap allocation).
-
-/// Implements log.
+/// Writes `msg` to the kernel debug log.
 fn log(msg: &str) {
     let _ = call::debug_log(msg.as_bytes());
 }
 
-/// Log a static prefix followed by a name/suffix without heap allocation.
-
 /// Reads file.
+///
+/// Returns an error when the file is larger than [`MAX_READ_BYTES`] instead of
+/// silently truncating it: a truncated ELF blob must never reach
+/// `SYS_MODULE_LOAD`.
 fn read_file(path: &str) -> Result<Vec<u8>, &'static str> {
     let fd = call::openat(0, path, 0x1, 0).map_err(|_| "open failed")?;
     let mut out = Vec::new();
 
-    let mut chunk = [0u8; 8192]; //8k temp buffer, to avoid large stack usage
-    // 64k bug here
+    let mut chunk = [0u8; 8192]; // 8 KiB scratch buffer, keeps the stack small
 
     let mut eagain = 0usize;
     loop {
-        if out.len() >= MAX_READ_BYTES {
-            break;
-        }
         match call::read(fd as usize, &mut chunk) {
             Ok(0) => break,
             Ok(n) => {
-                let remain = MAX_READ_BYTES.saturating_sub(out.len());
-                let take = core::cmp::min(n, remain);
-                out.extend_from_slice(&chunk[..take]);
-                eagain = 0;
-                if take < n {
-                    log("[init] read_file: truncated at MAX_READ_BYTES\n");
-                    break;
+                if out.len() + n > MAX_READ_BYTES {
+                    let _ = call::close(fd as usize);
+                    log("[init] read_file: file exceeds MAX_READ_BYTES\n");
+                    return Err("file too large");
                 }
+                out.extend_from_slice(&chunk[..n]);
+                eagain = 0;
             }
             Err(e) if e.to_errno() == EAGAIN => {
                 eagain += 1;
@@ -155,20 +170,42 @@ struct StrateDef {
     target: String,
 }
 
+impl Default for StrateDef {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            binary: String::new(),
+            stype: String::from("elf"),
+            target: String::from("default"),
+        }
+    }
+}
+
+/// SID requested by the configuration.
+#[derive(Clone, PartialEq, Eq)]
+enum SidChoice {
+    /// `SID_AUTO`: allocate the next free SID of the family range.
+    Auto,
+    /// Explicit SID; rejected when it is already taken.
+    Fixed(u32),
+    /// The configured value is not a number; the silo must be skipped.
+    Invalid(String),
+}
+
 // silo definition as parsed from config, before validation and transformation into SiloConfig
 // This is the structure for the TOML config.
 #[derive(Clone)]
 struct SiloDef {
     name: String,
     label: Option<String>,
-    sid: u32,
+    sid: SidChoice,
     family: String,
     mode: String,
     /// Grants the silo administrator capability (SILO_FLAG_ADMIN).
     ///
     /// Checked by SYS_VMM_CREATE and a few other privileged calls. It is
     /// only granted through the boot configuration, never inferred from
-    /// the family or the mode.
+    /// the family or the mode, and only accepted for the `SYS` family.
     admin: bool,
     graphics_enabled: bool,
     graphics_mode: String,
@@ -184,125 +221,230 @@ struct SiloDef {
     strates: Vec<StrateDef>,
 }
 
-/// Parses config.
+impl Default for SiloDef {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            label: None,
+            sid: SidChoice::Auto,
+            family: String::from("USR"),
+            mode: String::from("000"),
+            admin: false,
+            graphics_enabled: false,
+            graphics_mode: String::new(),
+            graphics_read_only: false,
+            graphics_max_sessions: 0,
+            graphics_session_ttl_sec: 0,
+            graphics_turn_policy: String::from("auto"),
+            dma_max_domains: 0,
+            dma_max_bytes: 0,
+            dma_iova_base: 0,
+            dma_iova_limit: 0,
+            dma_fault_policy: 0,
+            strates: Vec::new(),
+        }
+    }
+}
+
+impl SiloDef {
+    /// Builds the fallback definition of a mandatory silo.
+    ///
+    /// The fallback is deliberately identical to the entry the UEFI image
+    /// ships, so a missing configuration key cannot change the machine.
+    fn fallback(name: &str, family: &str, strate: &str, binary: &str) -> Self {
+        Self {
+            name: String::from(name),
+            family: String::from(family),
+            mode: String::from("076"),
+            strates: alloc::vec![StrateDef {
+                name: String::from(strate),
+                binary: String::from(binary),
+                ..StrateDef::default()
+            }],
+            ..Self::default()
+        }
+    }
+}
+
+/// Removes a TOML inline comment, ignoring `#` inside quoted strings.
+fn strip_comment(line: &str) -> &str {
+    let mut in_basic_string = false;
+    let mut in_literal_string = false;
+    let mut escaped = false;
+    for (index, ch) in line.char_indices() {
+        match ch {
+            '\\' if in_basic_string => escaped = !escaped,
+            '"' if !in_literal_string => {
+                if !escaped {
+                    in_basic_string = !in_basic_string;
+                }
+                escaped = false;
+            }
+            '\'' if !in_basic_string => in_literal_string = !in_literal_string,
+            '#' if !in_basic_string && !in_literal_string => return &line[..index],
+            _ => escaped = false,
+        }
+    }
+    line
+}
+
+/// Extracts the value of a `key = value` line.
+///
+/// Basic (`"..."`) and literal (`'...'`) strings are unquoted; anything else is
+/// taken verbatim. Returns `None` for an unterminated string so the caller can
+/// report the mistake instead of using half a value. Escape sequences are not
+/// decoded: this configuration only carries identifiers, paths and numbers.
+fn parse_value(raw: &str) -> Option<&str> {
+    let raw = raw.trim();
+    if let Some(rest) = raw.strip_prefix('"') {
+        let mut escaped = false;
+        for (index, ch) in rest.char_indices() {
+            match ch {
+                '\\' => escaped = !escaped,
+                '"' if !escaped => return Some(&rest[..index]),
+                _ => escaped = false,
+            }
+        }
+        None
+    } else if let Some(rest) = raw.strip_prefix('\'') {
+        rest.find('\'').map(|end| &rest[..end])
+    } else {
+        Some(raw)
+    }
+}
+
+/// Parses the silo configuration.
+///
+/// Supported constructs are `[[silos]]`, `[[silos.strates]]`, `key = value`,
+/// inline comments and blank lines. Every `[[silos.strates]]` starts a new
+/// strate; keys are only applied to the section that owns them. Unknown
+/// sections and misplaced tables are reported and ignored instead of leaking
+/// into the current silo.
 fn parse_config(data: &str) -> Vec<SiloDef> {
     #[derive(Clone, Copy)]
     enum Section {
+        /// Keys belong to the current silo.
         Silo,
+        /// Keys belong to the last `[[silos.strates]]` of the current silo.
         Strate,
+        /// Keys are ignored (unknown or misplaced section).
+        Ignored,
     }
 
-    /// Implements push default strate.
-    fn push_default_strate(silo: &mut SiloDef) {
-        silo.strates.push(StrateDef {
-            name: String::new(),
-            binary: String::new(),
-            stype: String::from("elf"),
-            target: String::from("default"),
-        });
-    }
-
-    let mut silos = Vec::new();
+    let mut silos: Vec<SiloDef> = Vec::new();
     let mut current_silo: Option<SiloDef> = None;
     let mut section = Section::Silo;
 
     for raw_line in data.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        let line = strip_comment(raw_line).trim();
+        if line.is_empty() {
             continue;
         }
 
         if line == "[[silos]]" {
-            if let Some(s) = current_silo.take() {
-                silos.push(s);
+            if let Some(silo) = current_silo.take() {
+                silos.push(silo);
             }
-            current_silo = Some(SiloDef {
-                name: String::new(),
-                label: None,
-                sid: 42,
-                family: String::from("USR"),
-                mode: String::from("000"),
-                admin: false,
-    graphics_enabled: false,
-                graphics_mode: String::new(),
-                graphics_read_only: false,
-                graphics_max_sessions: 0,
-                graphics_session_ttl_sec: 0,
-                graphics_turn_policy: String::from("auto"),
-                dma_max_domains: 0,
-                dma_max_bytes: 0,
-                dma_iova_base: 0,
-                dma_iova_limit: 0,
-                dma_fault_policy: 0,
-                strates: Vec::new(),
-            });
+            current_silo = Some(SiloDef::default());
             section = Section::Silo;
             continue;
         }
 
         if line == "[[silos.strates]]" {
-            section = Section::Strate;
+            match current_silo.as_mut() {
+                Some(silo) => {
+                    // One TOML table, one strate: a new table always starts a
+                    // new definition instead of overwriting the previous one.
+                    silo.strates.push(StrateDef::default());
+                    section = Section::Strate;
+                }
+                None => {
+                    log("[init] config: [[silos.strates]] before any [[silos]], ignored\n");
+                    section = Section::Ignored;
+                }
+            }
             continue;
         }
 
-        if let Some(idx) = line.find('=') {
-            let key = line[..idx].trim();
-            let val = line[idx + 1..].trim().trim_matches('"');
+        if line.starts_with('[') {
+            log("[init] config: unsupported section '");
+            log(line);
+            log("', its keys are ignored\n");
+            section = Section::Ignored;
+            continue;
+        }
 
-            if let Some(ref mut s) = current_silo {
-                match section {
-                    Section::Silo => match key {
-                        "name" => s.name = String::from(val),
-                        "label" => s.label = Some(String::from(val)),
-                        "sid" => s.sid = val.parse().unwrap_or(42),
-                        "family" => s.family = String::from(val),
-                        "mode" => s.mode = String::from(val),
-                        "admin" => s.admin = parse_toml_bool(val),
-                        "graphics_enabled" => s.graphics_enabled = parse_toml_bool(val),
-                        "graphics_mode" => s.graphics_mode = String::from(val),
-                        "graphics_read_only" => s.graphics_read_only = parse_toml_bool(val),
-                        "graphics_max_sessions" => {
-                            s.graphics_max_sessions = val.parse().unwrap_or(0)
-                        }
-                        "graphics_session_ttl_sec" => {
-                            s.graphics_session_ttl_sec = val.parse().unwrap_or(0)
-                        }
-                        "graphics_turn_policy" => s.graphics_turn_policy = String::from(val),
-                        "dma_max_domains" => s.dma_max_domains = val.parse().unwrap_or(0),
-                        "dma_max_bytes" => s.dma_max_bytes = parse_u64_auto(val).unwrap_or(0),
-                        "dma_iova_base" => s.dma_iova_base = parse_u64_auto(val).unwrap_or(0),
-                        "dma_iova_limit" => s.dma_iova_limit = parse_u64_auto(val).unwrap_or(0),
-                        "dma_fault_policy" => {
-                            s.dma_fault_policy = match val {
-                                "log" => 0,
-                                "notify" => 1,
-                                "kill" => 2,
-                                "panic" => 3,
-                                _ => val.parse().unwrap_or(0),
-                            }
-                        }
+        let Some(idx) = line.find('=') else {
+            continue;
+        };
+        let key = line[..idx].trim();
+        let Some(val) = parse_value(&line[idx + 1..]) else {
+            log("[init] config: unterminated string for key '");
+            log(key);
+            log("', ignored\n");
+            continue;
+        };
+
+        let Some(silo) = current_silo.as_mut() else {
+            log("[init] config: key '");
+            log(key);
+            log("' outside any [[silos]], ignored\n");
+            continue;
+        };
+
+        match section {
+            Section::Silo => match key {
+                "name" => silo.name = String::from(val),
+                "label" => silo.label = Some(String::from(val)),
+                "sid" => {
+                    silo.sid = match val.parse::<u32>() {
+                        Ok(SID_AUTO) => SidChoice::Auto,
+                        Ok(sid) => SidChoice::Fixed(sid),
+                        Err(_) => SidChoice::Invalid(String::from(val)),
+                    }
+                }
+                "family" => silo.family = String::from(val),
+                "mode" => silo.mode = String::from(val),
+                "admin" => silo.admin = parse_toml_bool(val),
+                "graphics_enabled" => silo.graphics_enabled = parse_toml_bool(val),
+                "graphics_mode" => silo.graphics_mode = String::from(val),
+                "graphics_read_only" => silo.graphics_read_only = parse_toml_bool(val),
+                "graphics_max_sessions" => silo.graphics_max_sessions = val.parse().unwrap_or(0),
+                "graphics_session_ttl_sec" => {
+                    silo.graphics_session_ttl_sec = val.parse().unwrap_or(0)
+                }
+                "graphics_turn_policy" => silo.graphics_turn_policy = String::from(val),
+                "dma_max_domains" => silo.dma_max_domains = val.parse().unwrap_or(0),
+                "dma_max_bytes" => silo.dma_max_bytes = parse_u64_auto(val).unwrap_or(0),
+                "dma_iova_base" => silo.dma_iova_base = parse_u64_auto(val).unwrap_or(0),
+                "dma_iova_limit" => silo.dma_iova_limit = parse_u64_auto(val).unwrap_or(0),
+                "dma_fault_policy" => {
+                    silo.dma_fault_policy = match val {
+                        "log" => 0,
+                        "notify" => 1,
+                        "kill" => 2,
+                        "panic" => 3,
+                        _ => val.parse().unwrap_or(0),
+                    }
+                }
+                _ => {}
+            },
+            Section::Strate => {
+                if let Some(strate) = silo.strates.last_mut() {
+                    match key {
+                        "name" => strate.name = String::from(val),
+                        "binary" => strate.binary = String::from(val),
+                        "type" => strate.stype = String::from(val),
+                        "target_strate" => strate.target = String::from(val),
                         _ => {}
-                    },
-                    Section::Strate => {
-                        if s.strates.is_empty() {
-                            push_default_strate(s);
-                        }
-                        if let Some(strate) = s.strates.last_mut() {
-                            match key {
-                                "name" => strate.name = String::from(val),
-                                "binary" => strate.binary = String::from(val),
-                                "type" => strate.stype = String::from(val),
-                                "target_strate" => strate.target = String::from(val),
-                                _ => {}
-                            }
-                        }
                     }
                 }
             }
+            Section::Ignored => {}
         }
     }
-    if let Some(s) = current_silo {
-        silos.push(s);
+    if let Some(silo) = current_silo {
+        silos.push(silo);
     }
     silos
 }
@@ -324,155 +466,77 @@ fn ensure_required_silos(mut silos: Vec<SiloDef>) -> Vec<SiloDef> {
 
     if !has_bus {
         log("[init] Missing mandatory silo 'bus' in config, adding fallback\n");
-        silos.push(SiloDef {
-            name: String::from("bus"),
-            label: None,
-            sid: 42,
-            family: String::from("DRV"),
-            mode: String::from("076"),
-            admin: false,
-    graphics_enabled: false,
-            graphics_mode: String::new(),
-            graphics_read_only: false,
-            graphics_max_sessions: 0,
-            graphics_session_ttl_sec: 0,
-            graphics_turn_policy: String::from("auto"),
-            dma_max_domains: 0,
-            dma_max_bytes: 0,
-            dma_iova_base: 0,
-            dma_iova_limit: 0,
-            dma_fault_policy: 0,
-            strates: alloc::vec![StrateDef {
-                name: String::from("strate-bus"),
-                binary: String::from("/initfs/strate-bus"),
-                stype: String::from("elf"),
-                target: String::from("default"),
-            }],
-        });
+        silos.push(SiloDef::fallback(
+            "bus",
+            "DRV",
+            "strate-bus",
+            "/initfs/strate-bus",
+        ));
     }
 
     if !has_network {
         log("[init] Missing mandatory silo 'network' in config, adding fallback\n");
-        silos.push(SiloDef {
-            name: String::from("network"),
-            label: None,
-            sid: 42,
-            family: String::from("NET"),
-            mode: String::from("076"),
-            admin: false,
-    graphics_enabled: false,
-            graphics_mode: String::new(),
-            graphics_read_only: false,
-            graphics_max_sessions: 0,
-            graphics_session_ttl_sec: 0,
-            graphics_turn_policy: String::from("auto"),
-            dma_max_domains: 0,
-            dma_max_bytes: 0,
-            dma_iova_base: 0,
-            dma_iova_limit: 0,
-            dma_fault_policy: 0,
-            strates: alloc::vec![StrateDef {
-                name: String::from("strate-net"),
-                binary: String::from("/initfs/strate-net-silo"),
-                stype: String::from("elf"),
-                target: String::from("default"),
-            }],
-        });
+        silos.push(SiloDef::fallback(
+            "network",
+            "NET",
+            "strate-net",
+            "/initfs/strate-net-silo",
+        ));
     }
 
     if !has_dhcp {
         log("[init] Missing mandatory silo 'dhcp-client' in config, adding fallback\n");
-        silos.push(SiloDef {
-            name: String::from("dhcp-client"),
-            label: None,
-            sid: 42,
-            family: String::from("NET"),
-            mode: String::from("076"),
-            admin: false,
-    graphics_enabled: false,
-            graphics_mode: String::new(),
-            graphics_read_only: false,
-            graphics_max_sessions: 0,
-            graphics_session_ttl_sec: 0,
-            graphics_turn_policy: String::from("auto"),
-            dma_max_domains: 0,
-            dma_max_bytes: 0,
-            dma_iova_base: 0,
-            dma_iova_limit: 0,
-            dma_fault_policy: 0,
-            strates: alloc::vec![StrateDef {
-                name: String::from("dhcp-client"),
-                binary: String::from("/initfs/dhcp-client"),
-                stype: String::from("elf"),
-                target: String::from("default"),
-            }],
-        });
+        silos.push(SiloDef::fallback(
+            "dhcp-client",
+            "NET",
+            "dhcp-client",
+            "/initfs/dhcp-client",
+        ));
     }
 
     silos
 }
 
-/// Returns the parsed default silo config, parsed once and cached
-fn get_default_silos() -> &'static Vec<SiloDef> {
-    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    static ONCE: AtomicBool = AtomicBool::new(false);
-    static PTR: AtomicUsize = AtomicUsize::new(0);
-
-    // SAFETY: single-threaded at boot; ONCE gates exactly one initialization
-    unsafe {
-        if !ONCE.load(Ordering::Acquire) {
-            let b = alloc::boxed::Box::new(parse_config(DEFAULT_SILO_TOML));
-            let leaked: &'static Vec<SiloDef> = alloc::boxed::Box::leak(b);
-            let ptr = leaked as *const Vec<SiloDef> as usize;
-            PTR.store(ptr, Ordering::Release);
-            ONCE.store(true, Ordering::Release);
-            leaked
-        } else {
-            let ptr = PTR.load(Ordering::Relaxed) as *const Vec<SiloDef>;
-            &*ptr
-        }
-    }
+/// Returns the parsed default silo config.
+///
+/// The function runs at most once per boot (when `/initfs/silo.toml` is
+/// missing or unusable), so it simply parses the embedded copy: there is no
+/// cache to synchronise and no leaked allocation.
+fn default_silos() -> Vec<SiloDef> {
+    parse_config(DEFAULT_SILO_TOML)
 }
 
 /// Implements load primary silos.
 fn load_primary_silos() -> Vec<SiloDef> {
     log("[init] load_primary_silos: begin\n");
-    match read_file("/initfs/silo.toml") {
+    let parsed = match read_file("/initfs/silo.toml") {
         Ok(data_vec) => match core::str::from_utf8(&data_vec) {
             Ok(data_str) => {
                 log("[init] load_primary_silos: parse /initfs/silo.toml\n");
-                let parsed = parse_config(data_str);
-                if parsed.is_empty() {
-                    log("[init] Empty /initfs/silo.toml, using embedded defaults\n");
-                    let defaults = get_default_silos().clone();
-                    log("[init] load_primary_silos: parsed embedded defaults count=");
-                    log_u32(defaults.len() as u32);
-                    log("\n");
-                    defaults
-                } else {
-                    log("[init] load_primary_silos: parsed file count=");
-                    log_u32(parsed.len() as u32);
-                    log("\n");
-                    parsed
-                }
+                parse_config(data_str)
             }
             Err(_) => {
                 log("[init] Invalid UTF-8 in /initfs/silo.toml, using embedded defaults\n");
-                let defaults = get_default_silos().clone();
-                log("[init] load_primary_silos: parsed embedded defaults count=");
-                log_u32(defaults.len() as u32);
-                log("\n");
-                defaults
+                Vec::new()
             }
         },
         Err(_) => {
             log("[init] Missing /initfs/silo.toml, using embedded defaults\n");
-            let defaults = get_default_silos().clone();
-            log("[init] load_primary_silos: parsed embedded defaults count=");
-            log_u32(defaults.len() as u32);
-            log("\n");
-            defaults
+            Vec::new()
         }
+    };
+    if parsed.is_empty() {
+        log("[init] Empty or unusable /initfs/silo.toml, using embedded defaults\n");
+        let defaults = default_silos();
+        log("[init] load_primary_silos: parsed embedded defaults count=");
+        log_u32(defaults.len() as u32);
+        log("\n");
+        defaults
+    } else {
+        log("[init] load_primary_silos: parsed file count=");
+        log_u32(parsed.len() as u32);
+        log("\n");
+        parsed
     }
 }
 
@@ -520,18 +584,14 @@ const SILO_FLAG_WEBRTC_NATIVE: u64 = 1 << 2;
 const SILO_FLAG_GRAPHICS_READ_ONLY: u64 = 1 << 3;
 const SILO_FLAG_WEBRTC_TURN_FORCE: u64 = 1 << 4;
 
-/// Implements family to id.
-fn family_to_id(name: &str) -> Option<u8> {
-    match name {
-        "SYS" => Some(0),
-        "DRV" => Some(1),
-        "FS" => Some(2),
-        "NET" => Some(3),
-        "WASM" => Some(4),
-        "USR" => Some(5),
-        _ => None,
-    }
-}
+/// Status reported when the wasm runtime cannot be reached.
+const WASM_STATUS_CONNECT: u32 = 0xffff_0000;
+/// Status reported when the `load` IPC call itself fails.
+const WASM_STATUS_LOAD: u32 = 0xffff_0001;
+/// Status reported when the `run` IPC call itself fails.
+const WASM_STATUS_RUN: u32 = 0xffff_0002;
+/// Status reported when the wasm path does not fit in the IPC framing.
+const WASM_STATUS_PATH_TOO_LONG: u32 = 0xffff_0003;
 
 /// Parses mode octal.
 fn parse_mode_octal(s: &str) -> Option<u16> {
@@ -582,36 +642,208 @@ fn connect_wasm_service(path: &str) -> Result<usize, &'static str> {
     Err("ipc_connect timeout")
 }
 
+/// Closes an IPC port when it goes out of scope.
+///
+/// A failed `ipc_call` used to `?` out of [`run_wasm_app`] before the explicit
+/// `handle_close`, leaking the port for the rest of the boot.
+struct PortGuard(usize);
+
+impl Drop for PortGuard {
+    fn drop(&mut self) {
+        let _ = call::handle_close(self.0);
+    }
+}
+
 /// Implements run wasm app.
 fn run_wasm_app(service_path: &str, wasm_path: &str) -> Result<(), u32> {
-    let port = connect_wasm_service(service_path).map_err(|_| 0xffff0000u32)?;
+    let port = connect_wasm_service(service_path).map_err(|_| WASM_STATUS_CONNECT)?;
+    // The port is released on every return path, including the early ones.
+    let port = PortGuard(port);
 
-    let mut load = IpcMessage::new(0x100);
     let bytes = wasm_path.as_bytes();
-    let n = core::cmp::min(bytes.len(), load.payload.len().saturating_sub(1));
+    // The path length travels in a single byte, so anything longer than 255
+    // bytes cannot be framed: report it instead of sending a truncated length.
+    if bytes.len() > u8::MAX as usize {
+        return Err(WASM_STATUS_PATH_TOO_LONG);
+    }
+    let mut load = IpcMessage::new(0x100);
+    let n = bytes.len();
     load.payload[0] = n as u8;
     if n > 0 {
-        load.payload[1..1 + n].copy_from_slice(&bytes[..n]);
+        load.payload[1..1 + n].copy_from_slice(bytes);
     }
-    let load_status = ipc_call_status(port, &mut load).map_err(|_| 0xffff0001u32)?;
+    let load_status = ipc_call_status(port.0, &mut load).map_err(|_| WASM_STATUS_LOAD)?;
     if load_status != 0 {
-        let _ = call::handle_close(port);
         return Err(load_status);
     }
 
     let mut run = IpcMessage::new(0x102);
-    let run_status = ipc_call_status(port, &mut run).map_err(|_| 0xffff0002u32)?;
-    let _ = call::handle_close(port);
+    let run_status = ipc_call_status(port.0, &mut run).map_err(|_| WASM_STATUS_RUN)?;
     if run_status != 0 {
         return Err(run_status);
     }
     Ok(())
 }
 
+/// Loads module bytes into the kernel module registry.
+fn load_module(ptr: usize, len: usize) -> Option<usize> {
+    match unsafe { strat9_syscall::syscall2(number::SYS_MODULE_LOAD, ptr, len) } {
+        Ok(handle) => Some(handle),
+        Err(_) => None,
+    }
+}
+
+/// Attaches `module_handle` to the silo and starts the strate by name.
+///
+/// Returns the started pid, and logs the reason on failure.
+fn attach_and_start(silo_handle: usize, strate: &StrateDef, module_handle: usize) -> Option<usize> {
+    if let Err(e) = call::silo_attach_module(silo_handle, module_handle) {
+        log("[init] silo_attach_module failed: ");
+        log(e.name());
+        log("\n");
+        return None;
+    }
+    match call::silo_start_named(silo_handle, &strate.name) {
+        Ok(pid) => Some(pid),
+        Err(e) => {
+            log("[init] silo_start failed: ");
+            log(e.name());
+            log("\n");
+            None
+        }
+    }
+}
+
+/// Loads, attaches and starts one ELF (or wasm runtime) strate.
+///
+/// Both module sources converge here: a binary under `/initfs` is loaded by
+/// path, any other path is read by this process and loaded as a blob. Only
+/// the source of the bytes differs. A module that cannot be attached or
+/// started is unloaded immediately, so a failed launch does not leak the
+/// blob. Returns the module handle and the started pid, both needed by the
+/// supervisor to restart this exact strate.
+fn start_elf_strate(silo_handle: usize, strate: &StrateDef) -> Option<(usize, usize)> {
+    let module_handle = if strate.binary.starts_with("/initfs/") {
+        log("[init]     module path ");
+        log(&strate.binary);
+        log("\n");
+        match load_module(strate.binary.as_ptr() as usize, strate.binary.len()) {
+            Some(handle) => handle,
+            None => {
+                log("[init] module_load failed for ");
+                log(&strate.binary);
+                log("\n");
+                return None;
+            }
+        }
+    } else {
+        let data = match read_file(&strate.binary) {
+            Ok(data) => data,
+            Err(_) => {
+                log("[init] failed to read binary ");
+                log(&strate.binary);
+                log("\n");
+                return None;
+            }
+        };
+        if data.len() < 4 {
+            log("[init]     module too small size=");
+            log_u32(data.len() as u32);
+            log("\n");
+            return None;
+        }
+        log("[init]     module magic ");
+        log_hex_bytes(&data[..4]);
+        log(" size=");
+        log_u32(data.len() as u32);
+        log("\n");
+        match load_module(data.as_ptr() as usize, data.len()) {
+            Some(handle) => handle,
+            None => {
+                log("[init] module_load failed for ");
+                log(&strate.binary);
+                log("\n");
+                return None;
+            }
+        }
+    };
+
+    // The blob is loaded from here on: release it if the strate cannot run.
+    match attach_and_start(silo_handle, strate, module_handle) {
+        Some(pid) => Some((module_handle, pid)),
+        None => {
+            let _ = call::module_unload(module_handle);
+            let _ = call::handle_close(module_handle);
+            None
+        }
+    }
+}
+
+/// Claims the SID of one silo definition.
+///
+/// Automatic allocation walks past every SID the configuration pins explicitly
+/// and every SID already handed out, so the kernel never answers
+/// `AlreadyExists` for a SID this process could have avoided. Returns `None`
+/// when the requested SID is unusable or already taken: the caller then skips
+/// the silo with a diagnostic.
+fn claim_sid(
+    choice: &SidChoice,
+    system_range: bool,
+    next_system: &mut u32,
+    next_user: &mut u32,
+    fixed_sids: &[u32],
+    used_sids: &mut Vec<u32>,
+    name: &str,
+) -> Option<u32> {
+    match choice {
+        SidChoice::Invalid(raw) => {
+            log("[init] CONFIG ERROR: invalid sid '");
+            log(raw);
+            log("' for silo ");
+            log(name);
+            log(", skipped\n");
+            None
+        }
+        SidChoice::Fixed(sid) => {
+            if used_sids.contains(sid) {
+                log("[init] CONFIG ERROR: sid ");
+                log_u32(*sid);
+                log(" is already used, silo ");
+                log(name);
+                log(" skipped\n");
+                return None;
+            }
+            used_sids.push(*sid);
+            Some(*sid)
+        }
+        SidChoice::Auto => {
+            let next = if system_range { next_system } else { next_user };
+            let mut sid = *next;
+            while used_sids.contains(&sid) || fixed_sids.contains(&sid) {
+                sid += 1;
+            }
+            *next = sid + 1;
+            used_sids.push(sid);
+            Some(sid)
+        }
+    }
+}
+
 /// Implements boot silos.
 fn boot_silos(mut silos: Vec<SiloDef>) {
-    let mut next_sys_sid = 100u32;
-    let mut next_usr_sid = 1000u32;
+    let mut next_system_sid = SID_SYSTEM_FIRST;
+    let mut next_user_sid = SID_USER_FIRST;
+    // SIDs the configuration pins explicitly: automatic allocation must not
+    // take one of them, even when the explicit silo is created later in the
+    // list.
+    let mut fixed_sids: Vec<u32> = Vec::new();
+    for silo in &silos {
+        if let SidChoice::Fixed(sid) = silo.sid {
+            fixed_sids.push(sid);
+        }
+    }
+    // SIDs handed out during this boot, explicit or automatic.
+    let mut used_sids: Vec<u32> = Vec::new();
 
     // Move "bus" to front (must launch first for PCI discovery),
     // preserving relative order of all other silos.
@@ -623,41 +855,58 @@ fn boot_silos(mut silos: Vec<SiloDef>) {
     }
 
     for s_def in silos {
-        let requested_mode = parse_mode_octal(&s_def.mode).unwrap_or(0);
-        let max_mode = get_family_profile(&s_def.family);
+        let Some(family) = get_family_profile(&s_def.family) else {
+            log("[init] Invalid family '");
+            log(&s_def.family);
+            log("' for silo ");
+            log(&s_def.name);
+            log(", skipped\n");
+            continue;
+        };
+
+        let requested_mode = match parse_mode_octal(&s_def.mode) {
+            Some(mode) => mode,
+            None => {
+                log("[init] CONFIG ERROR: invalid mode '");
+                log(&s_def.mode);
+                log("' for silo ");
+                log(&s_def.name);
+                log(", skipped\n");
+                continue;
+            }
+        };
+
+        // Administrator capability: explicit opt-in from the boot config. It
+        // is what `SYS_VMM_CREATE` and other privileged calls check; it is
+        // never inferred from the family or the mode, and it is only accepted
+        // for the SYS family.
+        if s_def.admin && s_def.family != "SYS" {
+            log("[init] SECURITY VIOLATION: admin requested for non-SYS silo ");
+            log(&s_def.name);
+            log(", skipped\n");
+            continue;
+        }
 
         // Policy Validation
-        if !SiloMode(requested_mode).is_subset_of(&max_mode) {
+        if !SiloMode(requested_mode).is_subset_of(&family.ceiling) {
             log("[init] SECURITY VIOLATION: silo ");
             log(&s_def.name);
             log(" exceeds family ceiling\n");
             continue;
         }
-        let family_id = match family_to_id(&s_def.family) {
-            Some(id) => id,
-            None => {
-                log("[init] Invalid family for silo ");
-                log(&s_def.name);
-                log("\n");
-                continue;
-            }
-        };
 
-        let final_sid = if s_def.sid == 42 {
-            match family_id {
-                0 | 1 | 2 | 3 => {
-                    let id = next_sys_sid;
-                    next_sys_sid += 1;
-                    id
-                }
-                _ => {
-                    let id = next_usr_sid;
-                    next_usr_sid += 1;
-                    id
-                }
-            }
-        } else {
-            s_def.sid
+        // SYS, DRV, FS and NET allocate from the system range; WASM and USR
+        // from the user range.
+        let Some(final_sid) = claim_sid(
+            &s_def.sid,
+            family.id <= 3,
+            &mut next_system_sid,
+            &mut next_user_sid,
+            &fixed_sids,
+            &mut used_sids,
+            &s_def.name,
+        ) else {
+            continue;
         };
 
         log("[init] Creating Silo: ");
@@ -667,9 +916,8 @@ fn boot_silos(mut silos: Vec<SiloDef>) {
         log(")\n");
 
         let mut flags = 0u64;
-        // Administrator capability: explicit opt-in from the boot config. It
-        // is what `SYS_VMM_CREATE` and other privileged calls check; it is
-        // never inferred from the family or the mode.
+        // The admin policy check above already restricted the opt-in to the
+        // SYS family.
         if s_def.admin {
             flags |= SILO_FLAG_ADMIN;
         }
@@ -689,7 +937,7 @@ fn boot_silos(mut silos: Vec<SiloDef>) {
         let mut config = SiloConfig::zero();
         config.sid = final_sid;
         config.mode = requested_mode;
-        config.family = family_id;
+        config.family = family.id;
         config.flags = flags;
         config.graphics_max_sessions = if s_def.graphics_enabled {
             if s_def.graphics_max_sessions == 0 {
@@ -733,14 +981,14 @@ fn boot_silos(mut silos: Vec<SiloDef>) {
             }
         }
 
+        let mut runtime_targets: Vec<(String, String)> = Vec::new();
+        let mut active_strates = 0u32;
+
         if s_def.strates.is_empty() {
             log("[init] No strates declared for silo ");
             log(&s_def.name);
             log("\n");
-            continue;
         }
-
-        let mut runtime_targets: Vec<(String, String)> = Vec::new();
 
         for str_def in s_def.strates {
             match str_def.stype.as_str() {
@@ -748,101 +996,12 @@ fn boot_silos(mut silos: Vec<SiloDef>) {
                     log("[init]   -> Strate: ");
                     log(&str_def.name);
                     log("\n");
-                    if str_def.binary.starts_with("/initfs/") {
-                        log("[init]     module path ");
-                        log(&str_def.binary);
-                        log("\n");
-                        let mod_h = match unsafe {
-                            strat9_syscall::syscall2(
-                                number::SYS_MODULE_LOAD,
-                                str_def.binary.as_ptr() as usize,
-                                str_def.binary.len(),
-                            )
-                        } {
-                            Ok(h) => h,
-                            Err(_) => {
-                                log("[init] module_load failed for ");
-                                log(&str_def.binary);
-                                log("\n");
-                                continue;
-                            }
-                        };
-                        if let Err(e) = call::silo_attach_module(silo_handle, mod_h) {
-                            log("[init] silo_attach_module failed: ");
-                            log(e.name());
-                            log("\n");
-                            continue;
+                    if let Some((module_handle, pid)) = start_elf_strate(silo_handle, &str_def) {
+                        register_supervised(&str_def.name, pid as u64, silo_handle, module_handle);
+                        if str_def.stype == "wasm-runtime" {
+                            runtime_targets.push((str_def.name.clone(), str_def.target.clone()));
                         }
-                        match call::silo_start_named(silo_handle, &str_def.name) {
-                            Err(e) => {
-                                log("[init] silo_start failed: ");
-                                log(e.name());
-                                log("\n");
-                            }
-                            Ok(pid) => {
-                                register_supervised(&str_def.name, pid as u64, silo_handle);
-                                if str_def.stype == "wasm-runtime" {
-                                    runtime_targets
-                                        .push((str_def.name.clone(), str_def.target.clone()));
-                                }
-                            }
-                        }
-                        continue;
-                    }
-                    if let Ok(data) = read_file(&str_def.binary) {
-                        if data.len() >= 4 {
-                            log("[init]     module magic ");
-                            log_u32(data[0] as u32);
-                            log_u32(data[1] as u32);
-                            log_u32(data[2] as u32);
-                            log_u32(data[3] as u32);
-                            log(" size=");
-                            log_u32(data.len() as u32);
-                            log("\n");
-                        } else {
-                            log("[init]     module too small size=");
-                            log_u32(data.len() as u32);
-                            log("\n");
-                        }
-                        let mod_h = match unsafe {
-                            strat9_syscall::syscall2(
-                                number::SYS_MODULE_LOAD,
-                                data.as_ptr() as usize,
-                                data.len(),
-                            )
-                        } {
-                            Ok(h) => h,
-                            Err(_) => {
-                                log("[init] module_load failed for ");
-                                log(&str_def.binary);
-                                log("\n");
-                                continue;
-                            }
-                        };
-                        if let Err(e) = call::silo_attach_module(silo_handle, mod_h) {
-                            log("[init] silo_attach_module failed: ");
-                            log(e.name());
-                            log("\n");
-                            continue;
-                        }
-                        match call::silo_start_named(silo_handle, &str_def.name) {
-                            Err(e) => {
-                                log("[init] silo_start failed: ");
-                                log(e.name());
-                                log("\n");
-                            }
-                            Ok(pid) => {
-                                register_supervised(&str_def.name, pid as u64, silo_handle);
-                                if str_def.stype == "wasm-runtime" {
-                                    runtime_targets
-                                        .push((str_def.name.clone(), str_def.target.clone()));
-                                }
-                            }
-                        }
-                    } else {
-                        log("[init] failed to read binary ");
-                        log(&str_def.binary);
-                        log("\n");
+                        active_strates += 1;
                     }
                 }
                 "wasm-app" => {
@@ -873,6 +1032,7 @@ fn boot_silos(mut silos: Vec<SiloDef>) {
                             log("[init]     wasm app started: ");
                             log(&str_def.binary);
                             log("\n");
+                            active_strates += 1;
                         }
                         Err(code) => {
                             log("[init]     wasm app failed: status=0x");
@@ -885,8 +1045,30 @@ fn boot_silos(mut silos: Vec<SiloDef>) {
                         }
                     }
                 }
-                _ => {}
+                other => {
+                    log("[init]   -> Strate '");
+                    log(&str_def.name);
+                    log("': unknown type '");
+                    log(other);
+                    log("', ignored\n");
+                }
             }
+        }
+
+        // A silo whose strates all failed must not stay open: a task-less
+        // `Ready` silo (and the module it still references) would be kept for
+        // the rest of the boot. Destroy it, then release our handle.
+        if active_strates == 0 {
+            log("[init] No active strate in silo ");
+            log(&s_def.name);
+            log(", destroying it\n");
+            if let Err(e) = call::silo_destroy(silo_handle) {
+                log("[init] silo_destroy failed: ");
+                log(e.name());
+                log(", stopping it instead\n");
+                let _ = call::silo_stop(silo_handle);
+            }
+            let _ = call::handle_close(silo_handle);
         }
     }
 }
@@ -906,47 +1088,71 @@ struct SupervisedChild {
     pid: u64,
     /// Silo handle, kept so a crashed strate can be restarted in place.
     silo_handle: usize,
+    /// Module handle of this strate.
+    ///
+    /// A silo only stores one `module_id`, and every `silo_attach_module`
+    /// overwrites it: without this handle a restart in a silo that hosts
+    /// several strates would start the last attached binary instead of the
+    /// one that crashed.
+    module_handle: usize,
     health: StrateHealth,
     restart_count: u16,
 }
 
 impl SupervisedChild {
-    fn from_name(name: &str, pid: u64, silo_handle: usize) -> Self {
+    fn from_name(name: &str, pid: u64, silo_handle: usize, module_handle: usize) -> Self {
         let mut buf = [0u8; 32];
-        let n = core::cmp::min(name.len(), 32);
+        // Truncate on a character boundary: cutting in the middle of a
+        // multi-byte character would make `name_str` unsound.
+        let mut n = core::cmp::min(name.len(), buf.len());
+        while n > 0 && !name.is_char_boundary(n) {
+            n -= 1;
+        }
         buf[..n].copy_from_slice(&name.as_bytes()[..n]);
         Self {
             name: buf,
             name_len: n as u8,
             pid,
             silo_handle,
+            module_handle,
             health: StrateHealth::Ready,
             restart_count: 0,
         }
     }
 
     fn name_str(&self) -> &str {
+        // SAFETY: `from_name` only copies a prefix that ends on a UTF-8
+        // character boundary of a valid `&str`.
         unsafe { core::str::from_utf8_unchecked(&self.name[..self.name_len as usize]) }
     }
 }
 
-static mut SUPERVISED: [Option<SupervisedChild>; 16] = [
-    None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-];
-static mut SUPERVISED_COUNT: usize = 0;
-const SUPERVISED_CAPACITY: usize = 16;
+/// Number of strates the supervisor can watch.
+///
+/// The shipped configuration already declares a dozen strates and the wasm
+/// test overlay adds more; the table is therefore sized for `silo.toml` plus a
+/// comfortable margin instead of silently dropping strates over the old 16.
+const SUPERVISED_CAPACITY: usize = 64;
 
-fn register_supervised(name: &str, pid: u64, silo_handle: usize) {
+static mut SUPERVISED: [Option<SupervisedChild>; SUPERVISED_CAPACITY] =
+    [const { None }; SUPERVISED_CAPACITY];
+static mut SUPERVISED_COUNT: usize = 0;
+
+fn register_supervised(name: &str, pid: u64, silo_handle: usize, module_handle: usize) {
     unsafe {
         if SUPERVISED_COUNT < SUPERVISED_CAPACITY {
             let sup = &mut *core::ptr::addr_of_mut!(SUPERVISED);
-            sup[SUPERVISED_COUNT] = Some(SupervisedChild::from_name(name, pid, silo_handle));
+            sup[SUPERVISED_COUNT] = Some(SupervisedChild::from_name(
+                name,
+                pid,
+                silo_handle,
+                module_handle,
+            ));
             SUPERVISED_COUNT += 1;
         } else {
             log("[init] WARN: SUPERVISED_CAPACITY exhausted, strate '");
             log(name);
             log("' pid=");
-            #[allow(unused_unsafe)]
             log_u32(pid as u32);
             log(" not supervised\n");
         }
@@ -980,15 +1186,26 @@ fn supervisor_loop() -> ! {
                                 log_u32(child.restart_count as u32);
                                 log(")\n");
 
-                                // Hot-restart in place: the silo and its
-                                // module are already loaded, so `silo_start`
-                                // re-creates the task.  The replacement
-                                // strate re-binds its namespace path; the
-                                // mount takeover in `ipc_bind_port` makes
-                                // that atomic.
+                                // Hot-restart in place: re-attach *this*
+                                // strate's module (a silo keeps a single
+                                // `module_id` slot, so the last attach wins)
+                                // and start it under its own instance name.
+                                // The replacement strate re-binds its
+                                // namespace path; the mount takeover in
+                                // `ipc_bind_port` makes that atomic.
                                 if child.restart_count < 3 {
                                     child.restart_count += 1;
-                                    match call::silo_start(child.silo_handle) {
+                                    let restarted = match call::silo_attach_module(
+                                        child.silo_handle,
+                                        child.module_handle,
+                                    ) {
+                                        Ok(_) => call::silo_start_named(
+                                            child.silo_handle,
+                                            child.name_str(),
+                                        ),
+                                        Err(e) => Err(e),
+                                    };
+                                    match restarted {
                                         Ok(new_pid) => {
                                             child.pid = new_pid as u64;
                                             child.health = StrateHealth::Ready;

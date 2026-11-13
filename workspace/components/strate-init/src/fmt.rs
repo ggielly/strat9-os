@@ -48,3 +48,22 @@ pub fn log_u32(mut value: u32) {
 
     log(s);
 }
+
+/// Format up to a handful of bytes as `0xNN NN ...` (uppercase hex) and write
+/// the result via `log()`.
+///
+/// Used for binary headers: printing four magic bytes as a decimal
+/// concatenation (`127697670`) hides the actual signature.
+pub fn log_hex_bytes(bytes: &[u8]) {
+    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+
+    log("0x");
+    for (index, byte) in bytes.iter().enumerate() {
+        if index != 0 {
+            log(" ");
+        }
+        let pair = [DIGITS[(byte >> 4) as usize], DIGITS[(byte & 0x0F) as usize]];
+        // SAFETY: both bytes come from the ASCII digit table above.
+        log(unsafe { core::str::from_utf8_unchecked(&pair) });
+    }
+}

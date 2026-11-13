@@ -1774,9 +1774,22 @@ pub fn kernel_start_silo(selector: &str) -> Result<u32, SyscallError> {
 
 /// Performs the kernel destroy silo operation.
 pub fn kernel_destroy_silo(selector: &str) -> Result<u32, SyscallError> {
-    let (silo_id, module_id) = {
+    let silo_id = {
+        let mgr = SILO_MANAGER.lock();
+        resolve_selector_to_silo_id(selector, &mgr)?
+    };
+    destroy_quiescent_silo(silo_id)
+}
+
+/// Removes a quiescent silo and drops the module blob it owns.
+///
+/// Shared by the selector-based kernel path and the handle-based syscall.
+/// The silo is re-checked under the manager lock, so a concurrent state change
+/// between a selector/handle lookup and this call can only make it fail with
+/// `NotFound` or `InvalidArgument`, never destroy a running silo.
+fn destroy_quiescent_silo(silo_id: u32) -> Result<u32, SyscallError> {
+    let module_id = {
         let mut mgr = SILO_MANAGER.lock();
-        let silo_id = resolve_selector_to_silo_id(selector, &mgr)?;
         let module_id = {
             let silo = mgr.get(silo_id)?;
             if !silo.tasks.is_empty() {
@@ -1790,13 +1803,24 @@ pub fn kernel_destroy_silo(selector: &str) -> Result<u32, SyscallError> {
             silo.module_id
         };
         let _ = mgr.silos.remove(&silo_id);
-        (silo_id, module_id)
+        module_id
     };
-    if let Some(mid) = module_id {
-        let mut reg = MODULE_REGISTRY.lock();
-        let _ = reg.remove(mid);
+    if let Some(module_id) = module_id {
+        let mut registry = MODULE_REGISTRY.lock();
+        let _ = registry.remove(module_id);
     }
     Ok(silo_id)
+}
+
+/// Performs the sys silo destroy operation.
+///
+/// Handle-based counterpart of [`kernel_destroy_silo`]: init tears down a silo
+/// it created but could not bring up, so the kernel does not keep an empty
+/// silo (and its module blob) for the rest of the boot.
+pub fn sys_silo_destroy(handle: u64) -> Result<u64, SyscallError> {
+    require_silo_admin()?;
+    let silo_id = resolve_silo_handle(handle, CapPermissions::read_write())?;
+    Ok(u64::from(destroy_quiescent_silo(silo_id)?))
 }
 
 /// Performs the kernel rename silo label operation.
