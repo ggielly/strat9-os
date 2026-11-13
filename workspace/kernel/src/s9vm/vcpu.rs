@@ -42,7 +42,7 @@ use crate::{
         control::{field, ControlBlock, ControlError},
         exit::{ExitClass, ExitReason},
         guest::GuestState,
-        launch::{s9vm_enter_guest, s9vm_guest_exit, EnterFrame, S9VM_ENTER_FRAME_SIZE},
+        launch::{s9vm_enter_guest, s9vm_guest_exit, EnterFrame},
         mmu::{self, Perms, SecondLevel, TableMemory},
         msr::{self, MsrModel},
     },
@@ -56,8 +56,14 @@ pub mod bits {
     pub const EXIT_LOAD_IA32_EFER: u32 = 1 << 21;
     /// Entry control: the guest runs in 64-bit mode (IA-32e).
     pub const ENTRY_IA32E_MODE: u32 = 1 << 9;
+    /// Entry control: reload the guest IA32_PAT.
+    pub const ENTRY_LOAD_IA32_PAT: u32 = 1 << 14;
     /// Entry control: reload the guest IA32_EFER (required in 64-bit mode).
     pub const ENTRY_LOAD_IA32_EFER: u32 = 1 << 15;
+    /// Exit control: save the guest IA32_PAT.
+    pub const EXIT_SAVE_IA32_PAT: u32 = 1 << 18;
+    /// Exit control: reload the host IA32_PAT.
+    pub const EXIT_LOAD_IA32_PAT: u32 = 1 << 19;
     /// Primary control: exit on `hlt`.
     pub const PRIMARY_HLT_EXITING: u32 = 1 << 7;
     /// Primary control: unconditional exit on every I/O instruction (`in`/`out`).
@@ -91,6 +97,9 @@ pub enum VcpuError {
     AlreadyLaunched,
     /// The guest state fails the architectural pre-entry checks.
     InvalidGuestState(crate::s9vm::guest::GuestError),
+    /// An interrupt is not deliverable through VM entry: `RFLAGS.IF` is clear,
+    /// or the guest is inside an interrupt shadow (STI / MOV SS).
+    InterruptNotDeliverable,
     /// The EPT could not be built.
     Translation(mmu::MmuError),
     /// Unreadable exit state.
@@ -381,13 +390,10 @@ fn alloc_msr_bitmap() -> Option<PhysFrame> {
         // The TSC-deadline timer register is outside the x2APIC window.
         set_msr_intercept(base, msr_bitmap::TSC_DEADLINE, true, true);
         // Default-deny writes in both windows: an unmodelled WRMSR must not
-        // reach the host MSR file.
-        for msr in 0..0x2000 {
-            set_msr_intercept(base, msr, false, true);
-        }
-        for msr in 0xC000_0000..0xC000_2000 {
-            set_msr_intercept(base, msr, false, true);
-        }
+        // reach the host MSR file. Only the write bitmaps are filled; the
+        // modelled/x2APIC/TSC-deadline read bits set above stay intact.
+        core::ptr::write_bytes(base.add(msr_bitmap::WRITE_LOW), 0xFF, 1024);
+        core::ptr::write_bytes(base.add(msr_bitmap::WRITE_HIGH), 0xFF, 1024);
     }
     Some(frame)
 }
@@ -396,9 +402,9 @@ fn alloc_msr_bitmap() -> Option<PhysFrame> {
 ///
 /// The count rate is encoded in `IA32_VMX_MISC` bits 4:0 (the timer counts at
 /// the TSC rate divided by a power of two), so this value translates to a
-/// different wall-clock delay per CPU. It is deliberately conservative: a
-/// guest gets a long enough slice to make progress, and still cannot run
-/// unbounded. The policy layer will tune it per world.
+/// different wall-clock delay per CPU (roughly 0.1–0.5 s). It is deliberately
+/// conservative: a guest gets a long enough slice to make progress, and still
+/// cannot run unbounded. The policy layer will tune it per world.
 pub const DEFAULT_PREEMPTION_TIMER_TICKS: u32 = 0x00FF_FFFF;
 
 /// Primary processor-based controls of a vCPU.
@@ -420,6 +426,8 @@ fn primary_controls(caps: &HwCaps, window_exiting: bool) -> u32 {
 /// A vCPU: resources, guest state and control block.
 pub struct Vcpu {
     control: ControlBlock,
+    /// Physical frame backing `control` (freed on drop).
+    control_frame: PhysFrame,
     host_stack: HostStack,
     frame: EnterFrame,
     guest: GuestState,
@@ -439,23 +447,33 @@ impl Vcpu {
     /// Creates the resources of a vCPU (control block and host stack).
     pub fn new(caps: &HwCaps, second_level_pointer: u64) -> Result<Self, VcpuError> {
         let revision = caps.control_block_revision;
-        let frame = crate::sync::with_irqs_disabled(|token| {
+        // Allocate the host stack first: a failure here must not leak the
+        // control-block frame, which is owned by the vCPU from now on.
+        let host_stack = HostStack::allocate()?;
+        let frame = match crate::sync::with_irqs_disabled(|token| {
             FrameAllocOptions::new()
-                .purpose(FramePurpose::PageTable)
+                .purpose(FramePurpose::KernelData)
                 .allocate(token)
-        })
-        .map_err(|_| VcpuError::OutOfMemory)?;
+        }) {
+            Ok(frame) => frame,
+            Err(_) => {
+                crate::sync::with_irqs_disabled(|token| {
+                    crate::memory::buddy::free(token, host_stack.frame, 2);
+                });
+                return Err(VcpuError::OutOfMemory);
+            }
+        };
         let phys = frame.start_address.as_u64();
-        // The control block frame must exist before the descriptor is created;
-        // it is deliberately "leaked" (owned by the vCPU).
+        // SAFETY: the frame is exclusive to this vCPU, 4 KiB, covered by the
+        // HHDM, and `prepare_region` zeroes it before the control block is used.
         let control = unsafe { ControlBlock::new(phys, revision) };
         // SAFETY: the frame is exclusive, covered by the HHDM and is 4 KiB.
         unsafe {
             control.prepare_region(crate::memory::phys_to_virt(phys) as *mut u8);
         }
-        let host_stack = HostStack::allocate()?;
         Ok(Self {
             control,
+            control_frame: frame,
             host_stack,
             frame: EnterFrame::zeroed(),
             guest: GuestState::real_mode(0, 0),
@@ -604,6 +622,16 @@ impl Vcpu {
     /// # Safety
     /// The control block must be loaded and the guest inactive.
     pub unsafe fn inject_interrupt(&self, vector: u8) -> Result<(), VcpuError> {
+        // Reject an injection the processor would drop: the guest must have
+        // interrupts enabled and must not be inside an interrupt shadow.
+        if self.guest.rflags & (1 << 9) == 0 {
+            return Err(VcpuError::InterruptNotDeliverable);
+        }
+        // SAFETY: caller guarantees the block is loaded.
+        let state = unsafe { self.control.read_u32(field::GUEST_INTERRUPTIBILITY_INFO)? };
+        if state & 0b11 != 0 {
+            return Err(VcpuError::InterruptNotDeliverable);
+        }
         unsafe {
             self.control.write_u32(
                 field::ENTRY_INTERRUPT_INFO,
@@ -618,10 +646,16 @@ impl Vcpu {
     /// # Safety
     /// The control block must be loaded and the guest must not be active.
     pub unsafe fn advance_rip(&mut self, bytes: u64) -> Result<(), VcpuError> {
-        self.guest.rip = self.guest.rip.wrapping_add(bytes);
+        let mut rip = self.guest.rip.wrapping_add(bytes);
+        if self.guest.is_real_mode() {
+            // IP wraps within the 16-bit code segment in real mode.
+            rip &= 0xFFFF;
+        }
+        self.guest.rip = rip;
         unsafe {
-            self.control
-                .write_natural(field::GUEST_RIP, self.guest.rip)?;
+            self.control.write_natural(field::GUEST_RIP, rip)?;
+            // The emulated instruction completed: no interrupt shadow remains.
+            self.clear_interrupt_shadow()?;
         }
         Ok(())
     }
@@ -700,7 +734,10 @@ impl Vcpu {
             let gs_base = crate::arch::x86_64::rdmsr(0xC000_0101);
             self.control.write_natural(field::HOST_FS_BASE, fs_base)?;
             self.control.write_natural(field::HOST_GS_BASE, gs_base)?;
-            self.control.write_u32(field::HOST_SYSENTER_CS, cs as u32)?;
+            self.control.write_u32(
+                field::HOST_SYSENTER_CS,
+                crate::arch::x86_64::rdmsr(0x174) as u32,
+            )?;
             self.control
                 .write_natural(field::HOST_SYSENTER_ESP, crate::arch::x86_64::rdmsr(0x175))?;
             self.control
@@ -841,8 +878,8 @@ impl Vcpu {
         };
         // The MSR bitmap is created once, on the first configuration: it
         // intercepts the x2APIC MSRs so the kernel can model them. When the
-        // processor does not allow the control, no bitmap is allocated and
-        // the guest reaches the MSRs natively.
+        // processor does not allow SECONDARY_USE_MSR_BITMAPS, no bitmap is
+        // allocated and every RDMSR/WRMSR exits to the kernel natively.
         if self.msr_bitmap.is_none()
             && caps
                 .secondary_proc_allowed
@@ -859,8 +896,7 @@ impl Vcpu {
             // entry control clear, otherwise `VMLAUNCH` fails and the guest
             // never runs.
             if !guest.is_long_mode() {
-                let entry = self.control.read_u32(field::ENTRY_CONTROLS).unwrap_or(0)
-                    & !bits::ENTRY_IA32E_MODE;
+                let entry = self.control.read_u32(field::ENTRY_CONTROLS)? & !bits::ENTRY_IA32E_MODE;
                 self.control.write_u32(field::ENTRY_CONTROLS, entry)?;
             }
             self.control
@@ -933,7 +969,6 @@ impl Vcpu {
                 rflags: guest.rflags,
                 ..EnterFrame::zeroed()
             };
-            let _ = S9VM_ENTER_FRAME_SIZE;
 
             // Control and state registers.
             self.control.write_natural(field::GUEST_CR0, guest.cr0)?;
@@ -954,10 +989,16 @@ impl Vcpu {
             // entry failures on nested setups.
             self.control.write_u64(field::GUEST_DEBUGCTL, 0)?;
             self.control.write_u64(field::GUEST_PERF_GLOBAL_CTRL, 0)?;
-            self.control.write_u64(field::GUEST_PDPTE0, 0)?;
-            self.control.write_u64(field::GUEST_PDPTE1, 0)?;
-            self.control.write_u64(field::GUEST_PDPTE2, 0)?;
-            self.control.write_u64(field::GUEST_PDPTE3, 0)?;
+            // Zero the PDPTEs only when the guest is not using PAE paging:
+            // with PAE the processor loads them from the guest's CR3.
+            if (guest.cr4 & crate::s9vm::guest::CR4_PAE) == 0
+                || (guest.cr0 & crate::s9vm::guest::CR0_PG) == 0
+            {
+                self.control.write_u64(field::GUEST_PDPTE0, 0)?;
+                self.control.write_u64(field::GUEST_PDPTE1, 0)?;
+                self.control.write_u64(field::GUEST_PDPTE2, 0)?;
+                self.control.write_u64(field::GUEST_PDPTE3, 0)?;
+            }
             self.control.write_u64(
                 field::GUEST_PENDING_DEBUG_EXCEPTIONS,
                 guest.pending_debug_exceptions,
@@ -1075,12 +1116,15 @@ impl Vcpu {
             secondary |= bits::SECONDARY_USE_MSR_BITMAPS;
         }
         let secondary = caps.secondary_proc_allowed.apply(secondary);
-        let exit = caps
-            .exit_allowed
-            .apply(bits::EXIT_HOST_ADDR_SPACE_SIZE | bits::EXIT_LOAD_IA32_EFER);
+        let exit = caps.exit_allowed.apply(
+            bits::EXIT_HOST_ADDR_SPACE_SIZE
+                | bits::EXIT_LOAD_IA32_EFER
+                | bits::EXIT_SAVE_IA32_PAT
+                | bits::EXIT_LOAD_IA32_PAT,
+        );
         let entry = caps
             .entry_allowed
-            .apply(bits::ENTRY_IA32E_MODE | bits::ENTRY_LOAD_IA32_EFER);
+            .apply(bits::ENTRY_IA32E_MODE | bits::ENTRY_LOAD_IA32_EFER | bits::ENTRY_LOAD_IA32_PAT);
         // SAFETY: block loaded; 16-bit widths for the controls.
         unsafe {
             self.control.write_u32(field::PIN_BASED_CONTROLS, pin)?;
@@ -1106,7 +1150,7 @@ impl Vcpu {
             // Re-armed on every entry: each guest time slice is bounded,
             // including after an internal resumption.
             unsafe {
-                let _ = self.control.write_u32(field::VMX_PREEMPTION_TIMER, ticks);
+                self.control.write_u32(field::VMX_PREEMPTION_TIMER, ticks)?;
             }
         }
         // SAFETY: caller contract; the trampoline restores the host state.
@@ -1149,8 +1193,18 @@ impl Vcpu {
             if let Ok(efer) = self.control.read_u64(field::GUEST_EFER) {
                 self.guest.efer = efer;
             }
+            // Recompute the IA-32e entry control from the actual guest state:
+            // a guest that enabled long mode itself must be entered in 64-bit
+            // mode even if it was configured without it.
+            let mut entry = self.control.read_u32(field::ENTRY_CONTROLS)?;
+            if self.guest.is_long_mode() {
+                entry |= bits::ENTRY_IA32E_MODE;
+            } else {
+                entry &= !bits::ENTRY_IA32E_MODE;
+            }
+            self.control.write_u32(field::ENTRY_CONTROLS, entry)?;
         }
-        self.update_guest_from_exit(&exit);
+        self.update_guest_from_exit();
         self.exit = Some(exit);
         Ok(exit)
     }
@@ -1188,11 +1242,25 @@ impl Vcpu {
                 .read_u32(field::EXIT_INSTRUCTION_INFO)
                 .unwrap_or(0);
             info.entry_failed = reason.entry_failed;
+            // Re-inject an event that was interrupted (e.g. by an EPT
+            // violation) and not consumed by the exit itself. Exceptions and
+            // triple/entry failures are handled by the exit path.
+            if info.has_vectoring_event()
+                && !matches!(
+                    info.class(),
+                    ExitClass::ExceptionOrNmi | ExitClass::TripleFault | ExitClass::EntryFailure
+                )
+            {
+                self.control
+                    .write_u32(field::ENTRY_INTERRUPT_INFO, info.vectoring_info)?;
+                self.control
+                    .write_u32(field::ENTRY_EXCEPTION_ERROR_CODE, info.vectoring_error)?;
+            }
             Ok(info)
         }
     }
 
-    fn update_guest_from_exit(&mut self, exit: &ExitInfo) {
+    fn update_guest_from_exit(&mut self) {
         self.guest.rax = self.frame.rax;
         self.guest.rbx = self.frame.rbx;
         self.guest.rcx = self.frame.rcx;
@@ -1208,7 +1276,6 @@ impl Vcpu {
         self.guest.r13 = self.frame.r13;
         self.guest.r14 = self.frame.r14;
         self.guest.r15 = self.frame.r15;
-        let _ = exit;
     }
 
     /// Last observed exit.
@@ -1400,7 +1467,7 @@ impl Vcpu {
 
     /// True if the guest runs with paging enabled.
     pub fn paging_enabled(&self) -> bool {
-        self.guest.is_long_mode()
+        (self.guest.cr0 & crate::s9vm::guest::CR0_PG) != 0
     }
 
     /// Reads a guest general-purpose register.
@@ -1508,7 +1575,7 @@ impl Vcpu {
     /// kernel. A guest that polls guest memory (for instance the BIOS tick
     /// counter in the BDA) never causes an exit on its own: without a short
     /// preemption slice such a guest is stopped only by the default slice,
-    /// which is several seconds.
+    /// which is the long default slice.
     pub fn set_preemption_timer_ticks(&mut self, ticks: u32) {
         if self.preemption_timer.is_some() {
             self.preemption_timer = Some(ticks);
@@ -1532,7 +1599,90 @@ impl Vcpu {
         // SAFETY: caller contract.
         unsafe {
             let _ = self.control.write_natural(field::GUEST_RIP, rip);
+            // The instruction that caused the exit has completed: drop any
+            // STI / MOV-SS shadow it may have left behind.
+            let _ = self.clear_interrupt_shadow();
         }
+    }
+
+    /// Clears the STI / MOV-SS interrupt shadow bits of the guest.
+    ///
+    /// # Safety
+    /// The control block must be loaded and the guest inactive.
+    unsafe fn clear_interrupt_shadow(&self) -> Result<(), VcpuError> {
+        let field = field::GUEST_INTERRUPTIBILITY_INFO;
+        let state = unsafe { self.control.read_u32(field)? };
+        if state & 0b11 != 0 {
+            unsafe {
+                self.control.write_u32(field, state & !0b11)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Writes the four data/code segment selectors back into the control block.
+    /// Real-mode guests only: each base is recomputed as `selector << 4`.
+    ///
+    /// # Safety
+    /// The control block must be loaded and the guest inactive.
+    pub unsafe fn set_guest_segments(
+        &mut self,
+        cs: u16,
+        ds: u16,
+        es: u16,
+        ss: u16,
+    ) -> Result<(), VcpuError> {
+        let pairs = [
+            (field::GUEST_CS_SELECTOR, field::GUEST_CS_BASE, cs),
+            (field::GUEST_DS_SELECTOR, field::GUEST_DS_BASE, ds),
+            (field::GUEST_ES_SELECTOR, field::GUEST_ES_BASE, es),
+            (field::GUEST_SS_SELECTOR, field::GUEST_SS_BASE, ss),
+        ];
+        for (selector_field, base_field, selector) in pairs {
+            unsafe {
+                self.control.write_u16(selector_field, selector)?;
+                self.control
+                    .write_natural(base_field, u64::from(selector) << 4)?;
+            }
+        }
+        self.guest.cs.selector = cs;
+        self.guest.cs.base = u64::from(cs) << 4;
+        self.guest.ds.selector = ds;
+        self.guest.ds.base = u64::from(ds) << 4;
+        self.guest.es.selector = es;
+        self.guest.es.base = u64::from(es) << 4;
+        self.guest.ss.selector = ss;
+        self.guest.ss.base = u64::from(ss) << 4;
+        Ok(())
+    }
+}
+
+impl Drop for Vcpu {
+    fn drop(&mut self) {
+        // VMCLEAR is only safe when the control block is loaded and VT-x is
+        // active on this CPU. A RUN always clears the VMCS before returning, so
+        // the usual case here is "not loaded": the frames can then be freed.
+        // If the clear fails, leak rather than reuse a VMCS the processor may
+        // still have cached.
+        if !self.control.is_loaded() {
+            crate::sync::with_irqs_disabled(|token| {
+                crate::memory::free_frame(token, self.control_frame);
+                crate::memory::buddy::free(token, self.host_stack.frame, 2);
+                if let Some(frame) = self.msr_bitmap.take() {
+                    crate::memory::free_frame(token, frame);
+                }
+            });
+        }
+    }
+}
+
+/// Opens a one-instruction window so a pending host interrupt can be
+/// delivered to the host while the vCPU loop keeps interrupts disabled.
+pub fn service_pending_host_interrupts() {
+    // SAFETY: interrupts are re-disabled on the next instruction; the exit
+    // handler owns no lock that the interrupt path can take.
+    unsafe {
+        core::arch::asm!("sti; nop; cli", options(nostack));
     }
 }
 
