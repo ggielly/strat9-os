@@ -145,6 +145,14 @@ const HIGH_MEMORY_END: u64 = 0x12_0000;
 /// budget is five times larger, and a guest that reaches it is reported as
 /// stuck with its current marker and screen state.
 const MAX_FREEDOS_EXITS: u32 = 500_000;
+
+/// Preemption-timer slice used by the DOS/FreeDOS runners.
+///
+/// The default slice (0x00FF_FFFF) is several seconds: a guest that polls
+/// guest memory (BDA tick counter, disk status in RAM) never exits by itself
+/// and would appear frozen. A short slice returns control often enough to
+/// advance the device/BIOS time base and to honour the run budget.
+const PREEMPTION_SLICE_TICKS: u32 = 32_768;
 /// Upper bound on timer ticks injected to recover a `hlt`-idle guest.
 ///
 /// A DOS-class boot waits for a handful of timer ticks at most (disk motor,
@@ -192,6 +200,10 @@ pub struct DosReport {
     /// every VM entry exit immediately while interrupts are disabled; the
     /// runner disables that exit after a short burst so the guest progresses.
     pub external_interrupts: u32,
+    /// Preemption-timer slices observed. With a short slice (see
+    /// [`PREEMPTION_SLICE_TICKS`]) they sequence the guest time base for a
+    /// guest that polls memory instead of causing exits.
+    pub preemption_slices: u32,
 }
 
 /// Execution budget of one FreeDOS boot attempt.
@@ -385,6 +397,7 @@ fn run_dos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError>
         vcpu.load()?;
         vcpu.configure_host()?;
         vcpu.configure(caps, &guest)?;
+        vcpu.set_preemption_timer_ticks(PREEMPTION_SLICE_TICKS);
     }
     log::info!(
         "[s9vm] dostest: entering real-mode guest at {:#x}",
@@ -403,6 +416,7 @@ fn run_dos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError>
         entry: u64::from(biosrom::BOOT_SECTOR_GPA),
         timed_out: false,
         external_interrupts: 0,
+        preemption_slices: 0,
     };
     let mut world_disk = WorldDisk::new(world_id, disk_sectors);
     let mut bios_state = bios::BiosState::new();
@@ -467,7 +481,20 @@ fn run_dos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError>
                     }
                 }
             }
-            ExitClass::InterruptWindow | ExitClass::PreemptionTimer => {}
+            ExitClass::InterruptWindow => {}
+            ExitClass::PreemptionTimer => {
+                report.preemption_slices += 1;
+                // One line per 64 slices names where a memory-polling guest
+                // spends its time (such a guest produces no exits of its own).
+                if report.preemption_slices % 64 == 1 {
+                    log::info!(
+                        "[s9vm] dosboot: slice {} rip={:#x} rflags={:#x}",
+                        report.preemption_slices,
+                        vcpu.guest().rip,
+                        vcpu.guest().rflags
+                    );
+                }
+            }
             other => {
                 log::warn!(
                     "[s9vm] dostest: unexpected exit class {:?} (reason {:#x}, qualification {:#x})",
@@ -985,6 +1012,7 @@ fn run_freedos_in_world(
         vcpu.load()?;
         vcpu.configure_host()?;
         vcpu.configure(caps, &guest)?;
+        vcpu.set_preemption_timer_ticks(PREEMPTION_SLICE_TICKS);
     }
     log::info!(
         "[s9vm] freedostest: entering real-mode guest at {:#x}",
@@ -1003,6 +1031,7 @@ fn run_freedos_in_world(
         entry: u64::from(biosrom::BOOT_SECTOR_GPA),
         timed_out: false,
         external_interrupts: 0,
+        preemption_slices: 0,
     };
     let mut world_disk = WorldDisk::new(world_id, disk_sectors);
     let mut bios_state = bios::BiosState::new();
@@ -1210,7 +1239,20 @@ fn run_freedos_in_world(
                     }
                 }
             }
-            ExitClass::InterruptWindow | ExitClass::PreemptionTimer => {}
+            ExitClass::InterruptWindow => {}
+            ExitClass::PreemptionTimer => {
+                report.preemption_slices += 1;
+                // One line per 64 slices names where a memory-polling guest
+                // spends its time (such a guest produces no exits of its own).
+                if report.preemption_slices % 64 == 1 {
+                    log::info!(
+                        "[s9vm] dosboot: slice {} rip={:#x} rflags={:#x}",
+                        report.preemption_slices,
+                        vcpu.guest().rip,
+                        vcpu.guest().rflags
+                    );
+                }
+            }
             other => {
                 log::warn!(
                     "[s9vm] freedostest: unexpected exit {:?} ({} / reason {:#x}, rip {:#x})",
@@ -1298,6 +1340,7 @@ fn run_dos_dry_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosEr
         entry: u64::from(biosrom::BOOT_SECTOR_GPA),
         timed_out: false,
         external_interrupts: 0,
+        preemption_slices: 0,
     })
 }
 
@@ -1422,6 +1465,7 @@ fn run_freedos_dry_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, D
         entry: u64::from(biosrom::BOOT_SECTOR_GPA),
         timed_out: false,
         external_interrupts: 0,
+        preemption_slices: 0,
     })
 }
 

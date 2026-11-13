@@ -1504,6 +1504,20 @@ impl Vcpu {
         Ok(enabled)
     }
 
+    /// Re-arms the VMX preemption timer with a different slice length.
+    ///
+    /// The value is written on every VM entry by [`Self::run`], so a shorter
+    /// slice bounds how long a guest can execute without returning to the
+    /// kernel. A guest that polls guest memory (for instance the BIOS tick
+    /// counter in the BDA) never causes an exit on its own: without a short
+    /// preemption slice such a guest is stopped only by the default slice,
+    /// which is several seconds.
+    pub fn set_preemption_timer_ticks(&mut self, ticks: u32) {
+        if self.preemption_timer.is_some() {
+            self.preemption_timer = Some(ticks);
+        }
+    }
+
     /// Physical address of the MSR bitmap (0 when not used).
     pub fn msr_bitmap_phys(&self) -> u64 {
         self.msr_bitmap
