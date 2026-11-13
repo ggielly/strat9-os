@@ -699,12 +699,12 @@ fn memory_label(snapshot: &TopSnapshot) -> String {
 /// `cmd_top` used to enable double buffering and only restore it at the end of
 /// the render loop; any early `?` left the shell writing into a back buffer
 /// that is never presented (blank console until reboot).
-struct TuiGuard {
+pub(crate) struct TuiGuard {
     was_double_buffer: bool,
 }
 
 impl TuiGuard {
-    fn enter() -> Option<Self> {
+    pub(crate) fn enter() -> Option<Self> {
         if !vga::is_available() {
             return None;
         }

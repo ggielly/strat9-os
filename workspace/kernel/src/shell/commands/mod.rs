@@ -35,6 +35,8 @@ pub mod ps;
 pub mod sys;
 pub mod timer;
 pub mod top;
+#[cfg(target_arch = "x86_64")]
+pub mod vmtop;
 pub mod util;
 pub mod vfs;
 
@@ -128,6 +130,8 @@ impl CommandRegistry {
         #[cfg(target_arch = "x86_64")]
         registry.register("gfx-demo", gfx::cmd_gfx_demo);
         registry.register("top", top::cmd_top);
+        #[cfg(target_arch = "x86_64")]
+        registry.register("vmtop", vmtop::cmd_vmtop);
         registry.register("timer", timer::cmd_timer);
 
         // Testing

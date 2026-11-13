@@ -694,9 +694,27 @@ script = ['''
 bash tools/scripts/create-iso-uefi.sh
 ''']
 
+[tasks.s9vm-graphical-image]
+description = "Build the s9vm UEFI image with the graphical console (console.mode=full)"
+dependencies = ["uefi-image-release"]
+env = { STRAT9_IMAGE_BASENAME = "s9vm-gui", STRAT9_PROFILE = "release", STRAT9_MODULE_PROFILE = "release", STRAT9_INCLUDE_TESTS = "0", STRAT9_BOOT_CONFIG = "workspace/assets/boot/s9vm-graphical.cfg" }
+script_runner = "@shell"
+script = ['''
+bash tools/scripts/create-uefi-image.sh
+''']
+
+[tasks.s9vm-graphical-iso]
+description = "Build the s9vm graphical validation ISO (framebuffer console, s9vm.selftest=2)"
+dependencies = ["s9vm-graphical-image"]
+env = { STRAT9_IMAGE_BASENAME = "s9vm-gui" }
+script_runner = "@shell"
+script = ['''
+bash tools/scripts/create-iso-uefi.sh
+''']
+
 [tasks.run-s9vm-iso]
-description = "Boot the s9vm ISO in QEMU; with /dev/kvm the guest receives VT-x/EPT"
-dependencies = ["s9vm-iso"]
+description = "Boot the s9vm ISO in QEMU with its graphical console; with /dev/kvm the guest receives VT-x/EPT"
+dependencies = ["s9vm-graphical-iso"]
 script_runner = "@shell"
 script = [
     '''
@@ -719,6 +737,14 @@ else
         echo "Check: id -nG | tr ' ' '\n' | grep -x kvm"
     fi
 fi
+# The image boots with console.mode=full: the QEMU window shows the real
+# framebuffer console (boot art, status bar, shell, `top`/`vmtop`). The serial
+# line stays attached to the terminal as a log, it is not the console anymore.
+if [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+    echo "WARNING: no DISPLAY/WAYLAND_DISPLAY: the QEMU GTK window cannot open." >&2
+    echo "         Run this from a graphical session, or use the serial tests" >&2
+    echo "         (cargo make test-s9vm / qemu-boot-test.ps1)." >&2
+fi
 [ -f build/OVMF_VARS.fd ] || cp /usr/share/OVMF/OVMF_VARS_4M.fd build/OVMF_VARS.fd
 ${QEMU} \
     -accel "$qemu_accel" \
@@ -728,7 +754,9 @@ ${QEMU} \
     -m 2G \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive if=pflash,format=raw,file=build/OVMF_VARS.fd \
-    -cdrom build/s9vm-test-uefi.iso \
+    -cdrom build/s9vm-gui-uefi.iso \
+    -vga std \
+    -display gtk,grab-on-hover=off,zoom-to-fit=on \
     -serial stdio \
     -no-reboot
 ''',
