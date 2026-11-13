@@ -39,6 +39,8 @@ pub mod top;
 pub mod vmtop;
 pub mod util;
 pub mod vfs;
+#[cfg(target_arch = "x86_64")]
+pub mod vm;
 
 use super::ShellError;
 use alloc::{collections::BTreeMap, string::String};
@@ -132,6 +134,8 @@ impl CommandRegistry {
         registry.register("top", top::cmd_top);
         #[cfg(target_arch = "x86_64")]
         registry.register("vmtop", vmtop::cmd_vmtop);
+        #[cfg(target_arch = "x86_64")]
+        registry.register("vm", vm::cmd_vm);
         registry.register("timer", timer::cmd_timer);
 
         // Testing

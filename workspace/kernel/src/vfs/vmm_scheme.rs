@@ -35,6 +35,7 @@
 //! /dev/vmm/
 //!   info               engine summary (snapshot taken at open)
 //!   worlds             list of worlds, one line per world
+//!   control            write-only root command file (start/stop/pause/resume <id>)
 //!   <id>/              directory: info, stats, timing, exits, vcpus, console, disk, control
 //!   <id>/info          snapshot of a world
 //!   <id>/stats         snapshot of every world counter (pause, vCPUs, queue)
@@ -62,11 +63,18 @@
 //! [`SyscallError::PermissionDenied`].
 //!
 //! This file is deliberately **capability-free**: it is only reachable through
-//! the kernel-provided `/dev/vmm` mirror, and it can neither create, start,
-//! configure nor destroy a world. The `SYS_VMM_*` syscalls remain authoritative
-//! for lifecycle operations, so a future command added here must similarly
-//! stay within a diagnostic/pause-resume scope and must never bypass the
+//! the kernel-provided `/dev/vmm` mirror, and it can neither create, configure
+//! nor destroy a world. The `SYS_VMM_*` syscalls remain authoritative for
+//! lifecycle operations, so a future command added here must similarly stay
+//! within a diagnostic/pause-resume/run-request scope and must never bypass the
 //! syscall capability checks.
+//!
+//! `/control` (the scheme root's write-only file) is the management front-end
+//! entry point: `start <id>` resumes the world and posts one `RUN` on every
+//! vCPU that has a kernel task, `stop <id>` pauses it, and `pause <id>` /
+//! `resume <id>` are the same transitions by their historical names. It still
+//! only drives the existing pause/resume state machine and the `RUN` request;
+//! creation, configuration and destruction stay on the `SYS_VMM_*` syscalls.
 //!
 //! # Read semantics
 //!
@@ -137,6 +145,8 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 enum Kind {
     /// Scheme root directory.
     Root,
+    /// Write-only root control file (`start <id>`, `stop <id>`, …).
+    RootControl,
     /// Directory of one world (`<id>`).
     WorldDir(u64),
     /// Finite text snapshot taken at open.
@@ -536,10 +546,73 @@ impl VmmScheme {
     fn control_command(buf: &[u8]) -> Result<&'static str, SyscallError> {
         let text = core::str::from_utf8(buf).map_err(|_| SyscallError::InvalidArgument)?;
         match text.trim_end_matches(|c: char| c.is_ascii_whitespace()) {
-            "pause" => Ok("pause"),
-            "resume" => Ok("resume"),
+            "pause" | "stop" => Ok("pause"),
+            "resume" | "start" => Ok("resume"),
             _ => Err(SyscallError::InvalidArgument),
         }
+    }
+
+    /// Parses one `/dev/vmm/control` command buffer.
+    ///
+    /// The grammar is a verb followed by a world identifier:
+    ///
+    /// * `start <id>`  — resume the world and post one `RUN` on every vCPU
+    ///   that has a kernel task (the attached policy drains its exits);
+    /// * `stop <id>`   — pause the world (`vm::pause`);
+    /// * `pause <id>` / `resume <id>` — the same transitions by their
+    ///   historical names.
+    ///
+    /// The file is deliberately still **not** a lifecycle syscall: it cannot
+    /// create, configure or destroy a world, and it does not bypass the
+    /// `SYS_VMM_*` capability checks. It only exposes the pause/resume state
+    /// machine the engine already has, plus the initial `RUN` request that a
+    /// management front-end needs to make a configured world execute.
+    fn root_control_command(buf: &[u8]) -> Result<(), SyscallError> {
+        let text = core::str::from_utf8(buf).map_err(|_| SyscallError::InvalidArgument)?;
+        let mut parts = text.split_ascii_whitespace();
+        let verb = parts.next().ok_or(SyscallError::InvalidArgument)?;
+        let id: u64 = parts
+            .next()
+            .ok_or(SyscallError::InvalidArgument)?
+            .parse()
+            .map_err(|_| SyscallError::InvalidArgument)?;
+        if parts.next().is_some() {
+            return Err(SyscallError::InvalidArgument);
+        }
+        if vm::get(id).is_none() {
+            return Err(SyscallError::NotFound);
+        }
+        match verb {
+            "start" => {
+                vm::resume(id).map_err(|_| SyscallError::NotFound)?;
+                if let Some(vcpus) = vm::vcpu_snapshots(id) {
+                    for slot in vcpus {
+                        // A vCPU without a kernel task (`Busy`, detached) is
+                        // not an error: the management front-end only asks for
+                        // the world to be scheduled, it does not own a policy.
+                        if let Err(error) = vm::request_run_async(slot.id) {
+                            log::debug!(
+                                "[vmm] world {}: vCPU {} start ignored ({:?})",
+                                id,
+                                slot.id,
+                                error
+                            );
+                        }
+                    }
+                }
+                log::info!("[vmm] world {} control: start", id);
+            }
+            "stop" | "pause" => {
+                vm::pause(id).map_err(|_| SyscallError::NotFound)?;
+                log::info!("[vmm] world {} control: pause", id);
+            }
+            "resume" => {
+                vm::resume(id).map_err(|_| SyscallError::NotFound)?;
+                log::info!("[vmm] world {} control: resume", id);
+            }
+            _ => return Err(SyscallError::InvalidArgument),
+        }
+        Ok(())
     }
 
     /// Resolves a non-directory path to the content of an open file.
@@ -570,6 +643,9 @@ impl VmmScheme {
     /// Directories are recognised here so that `<id>` can be listed; every
     /// other path must be a known leaf or the open fails with `NotFound`.
     fn kind_for_path(path: &str) -> Result<(Kind, FileFlags), SyscallError> {
+        if path == "control" {
+            return Ok((Kind::RootControl, FileFlags::DEVICE));
+        }
         if let Ok(id) = path.parse::<u64>() {
             if vm::get(id).is_none() {
                 return Err(SyscallError::NotFound);
@@ -611,6 +687,11 @@ impl VmmScheme {
                     ino: 0,
                     file_type: DT_DIR,
                     name: String::from("<id>"),
+                },
+                DirEntry {
+                    ino: 0,
+                    file_type: DT_REG,
+                    name: String::from("control"),
                 },
                 DirEntry {
                     ino: 0,
@@ -670,9 +751,11 @@ impl VmmScheme {
                     },
                 ]
             }
-            Kind::Text(_) | Kind::Console { .. } | Kind::Disk { .. } | Kind::Control { .. } => {
-                return Err(SyscallError::NotADirectory)
-            }
+            Kind::Text(_)
+            | Kind::Console { .. }
+            | Kind::Disk { .. }
+            | Kind::Control { .. }
+            | Kind::RootControl => return Err(SyscallError::NotADirectory),
         };
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(entries)
@@ -749,6 +832,8 @@ impl Scheme for VmmScheme {
             }
             // `<id>/control` is write-only: no read path exists.
             Kind::Control { .. } => Err(SyscallError::PermissionDenied),
+            // The root control file is write-only too.
+            Kind::RootControl => Err(SyscallError::PermissionDenied),
         }
     }
 
@@ -805,6 +890,13 @@ impl Scheme for VmmScheme {
             }
             // Every other file is a read-only diagnostic snapshot.
             Kind::Root | Kind::WorldDir(_) | Kind::Text(_) => Err(SyscallError::PermissionDenied),
+            Kind::RootControl => {
+                if buf.is_empty() {
+                    return Ok(0);
+                }
+                Self::root_control_command(buf)?;
+                Ok(buf.len())
+            }
         }
     }
 
@@ -849,7 +941,7 @@ impl Scheme for VmmScheme {
                 ..FileStat::zeroed()
             },
             // Write-only device: no read permission for the owner either.
-            Kind::Control { .. } => FileStat {
+            Kind::Control { .. } | Kind::RootControl => FileStat {
                 st_ino: file_id,
                 st_mode: 0o020200,
                 st_nlink: 1,
