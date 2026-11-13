@@ -283,12 +283,13 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
             let marker = report.marker.map(|byte| byte as char);
             if booted {
                 shell_println!(
-                    "vm: test VM PASS: marker={} exits={} io={} bios={} hlt={} sectors={}",
+                    "vm: test VM PASS: marker={} exits={} io={} bios={} hlt={} ext={} sectors={}",
                     marker.unwrap_or('?'),
                     report.total_exits,
                     report.io_exits,
                     report.bios_calls,
                     report.halt_exits,
+                    report.external_interrupts,
                     report.disk_sectors
                 );
                 shell_println!("vm: guest text:\n{}", report.text.trim_end());
@@ -296,12 +297,14 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
             }
             if report.timed_out {
                 shell_println!(
-                    "vm: test VM INCOMPLETE (bounded run): marker={:?} exits={} bios={} hlt={} \
-                     sectors={}",
+                    "vm: test VM INCOMPLETE (bounded run): marker={:?} exits={} io={} bios={} \
+                     hlt={} ext={} sectors={}",
                     marker,
                     report.total_exits,
+                    report.io_exits,
                     report.bios_calls,
                     report.halt_exits,
+                    report.external_interrupts,
                     report.disk_sectors
                 );
                 shell_println!(
@@ -314,12 +317,13 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
                 return Ok(());
             }
             shell_println!(
-                "vm: test VM FAIL: marker={:?} exits={} io={} bios={} hlt={} sectors={}",
+                "vm: test VM FAIL: marker={:?} exits={} io={} bios={} hlt={} ext={} sectors={}",
                 marker,
                 report.total_exits,
                 report.io_exits,
                 report.bios_calls,
                 report.halt_exits,
+                report.external_interrupts,
                 report.disk_sectors
             );
             shell_println!("vm: guest text:\n{}", report.text.trim_end());

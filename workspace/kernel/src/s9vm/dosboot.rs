@@ -188,6 +188,10 @@ pub struct DosReport {
     /// instead of hanging: the guest loop runs with interrupts disabled, so an
     /// unbounded boot attempt would freeze the whole system.
     pub timed_out: bool,
+    /// Host external-interrupt exits observed. A pending host interrupt makes
+    /// every VM entry exit immediately while interrupts are disabled; the
+    /// runner disables that exit after a short burst so the guest progresses.
+    pub external_interrupts: u32,
 }
 
 /// Execution budget of one FreeDOS boot attempt.
@@ -398,6 +402,7 @@ fn run_dos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError>
         disk_sectors,
         entry: u64::from(biosrom::BOOT_SECTOR_GPA),
         timed_out: false,
+        external_interrupts: 0,
     };
     let mut world_disk = WorldDisk::new(world_id, disk_sectors);
     let mut bios_state = bios::BiosState::new();
@@ -440,9 +445,29 @@ fn run_dos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError>
                 report.halt_exits += 1;
                 break;
             }
-            ExitClass::ExternalInterrupt
-            | ExitClass::InterruptWindow
-            | ExitClass::PreemptionTimer => {}
+            ExitClass::ExternalInterrupt => {
+                report.external_interrupts += 1;
+                // The guest runs with host interrupts disabled: a pending host
+                // interrupt makes every VM entry exit immediately, so the run
+                // spins without executing any guest code (no BIOS call, no
+                // text). After a short burst, stop taking external-interrupt
+                // exits for the rest of the run; the interrupt is serviced
+                // when the caller returns to the scheduler.
+                if report.external_interrupts == 8 {
+                    // SAFETY: block loaded, guest inactive.
+                    match unsafe { vcpu.set_external_interrupt_exiting(caps, false) } {
+                        Ok(_) => log::info!(
+                            "[s9vm] dosboot: host interrupt pending, \
+                             external-interrupt exiting disabled"
+                        ),
+                        Err(error) => log::warn!(
+                            "[s9vm] dosboot: cannot disable external-interrupt exiting: {:?}",
+                            error
+                        ),
+                    }
+                }
+            }
+            ExitClass::InterruptWindow | ExitClass::PreemptionTimer => {}
             other => {
                 log::warn!(
                     "[s9vm] dostest: unexpected exit class {:?} (reason {:#x}, qualification {:#x})",
@@ -977,6 +1002,7 @@ fn run_freedos_in_world(
         disk_sectors,
         entry: u64::from(biosrom::BOOT_SECTOR_GPA),
         timed_out: false,
+        external_interrupts: 0,
     };
     let mut world_disk = WorldDisk::new(world_id, disk_sectors);
     let mut bios_state = bios::BiosState::new();
@@ -986,6 +1012,10 @@ fn run_freedos_in_world(
     let mut apic = LocalApic::new(0);
     let tsc_hz = crate::s9vm::tsc::get().map_or(FALLBACK_TSC_HZ, |frequency| frequency.hz());
     let mut unhandled_ports: u32 = 0;
+    // First distinct unmodeled ports, so a guest that spins on one legacy port
+    // names it in the log instead of only showing an exit counter.
+    let mut unhandled_seen: [u16; 8] = [0; 8];
+    let mut unhandled_seen_len = 0usize;
     let saved_flags = crate::arch::save_flags_and_cli();
     // Wall-clock origin of the run: the shell-facing budget is measured from
     // here, independently of the exit counter.
@@ -1079,6 +1109,27 @@ fn run_freedos_in_world(
                     );
                     if !consumed {
                         unhandled_ports += 1;
+                        let port = ((exit.qualification >> 16) & 0xFFFF) as u16;
+                        let direction_in = exit.qualification & 1 != 0;
+                        let mut known = false;
+                        for slot in &unhandled_seen[..unhandled_seen_len] {
+                            if *slot == port {
+                                known = true;
+                                break;
+                            }
+                        }
+                        if !known {
+                            if unhandled_seen_len < unhandled_seen.len() {
+                                unhandled_seen[unhandled_seen_len] = port;
+                                unhandled_seen_len += 1;
+                            }
+                            log::info!(
+                                "[s9vm] freedostest: unhandled legacy port {:#x} ({}) rip {:#x}",
+                                port,
+                                if direction_in { "in" } else { "out" },
+                                vcpu.guest().rip
+                            );
+                        }
                         if let Err(error) = advance_past_exit(&mut vcpu, &exit) {
                             outcome = Err(error);
                             break;
@@ -1137,9 +1188,29 @@ fn run_freedos_in_world(
                     break;
                 }
             }
-            ExitClass::ExternalInterrupt
-            | ExitClass::InterruptWindow
-            | ExitClass::PreemptionTimer => {}
+            ExitClass::ExternalInterrupt => {
+                report.external_interrupts += 1;
+                // The guest runs with host interrupts disabled: a pending host
+                // interrupt makes every VM entry exit immediately, so the run
+                // spins without executing any guest code (no BIOS call, no
+                // text). After a short burst, stop taking external-interrupt
+                // exits for the rest of the run; the interrupt is serviced
+                // when the caller returns to the scheduler.
+                if report.external_interrupts == 8 {
+                    // SAFETY: block loaded, guest inactive.
+                    match unsafe { vcpu.set_external_interrupt_exiting(caps, false) } {
+                        Ok(_) => log::info!(
+                            "[s9vm] dosboot: host interrupt pending, \
+                             external-interrupt exiting disabled"
+                        ),
+                        Err(error) => log::warn!(
+                            "[s9vm] dosboot: cannot disable external-interrupt exiting: {:?}",
+                            error
+                        ),
+                    }
+                }
+            }
+            ExitClass::InterruptWindow | ExitClass::PreemptionTimer => {}
             other => {
                 log::warn!(
                     "[s9vm] freedostest: unexpected exit {:?} ({} / reason {:#x}, rip {:#x})",
@@ -1226,6 +1297,7 @@ fn run_dos_dry_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosEr
         disk_sectors,
         entry: u64::from(biosrom::BOOT_SECTOR_GPA),
         timed_out: false,
+        external_interrupts: 0,
     })
 }
 
@@ -1349,6 +1421,7 @@ fn run_freedos_dry_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, D
         disk_sectors,
         entry: u64::from(biosrom::BOOT_SECTOR_GPA),
         timed_out: false,
+        external_interrupts: 0,
     })
 }
 
