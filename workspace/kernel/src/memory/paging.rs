@@ -494,7 +494,10 @@ pub fn ensure_framebuffer_range_wc(phys_base: u64, size: u64) {
 
     #[cfg(target_arch = "x86_64")]
     {
-        use crate::x86_crate_shim::structures::paging::mapper::FlagUpdateError;
+        use crate::x86_crate_shim::structures::paging::{
+            mapper::{MappedFrame, TranslateResult},
+            PageSize, Size1GiB, Size2MiB,
+        };
 
         if size == 0 || !is_initialized() {
             return;
@@ -548,22 +551,61 @@ pub fn ensure_framebuffer_range_wc(phys_base: u64, size: u64) {
                     }
                 }
             } else {
+                // The bootloader often maps the HHDM with 2 MiB / 1 GiB leaves.
+                // Retype a huge leaf as a whole when it lies entirely inside
+                // the framebuffer; otherwise leave it alone (it also covers
+                // unrelated memory) and skip to its end with a single warning.
+                let huge_size = match mapper.translate(virt) {
+                    TranslateResult::Mapped {
+                        frame: MappedFrame::Size2MiB(_),
+                        ..
+                    } => Some(Size2MiB::SIZE),
+                    TranslateResult::Mapped {
+                        frame: MappedFrame::Size1GiB(_),
+                        ..
+                    } => Some(Size1GiB::SIZE),
+                    _ => None,
+                };
+
+                if let Some(huge) = huge_size {
+                    let huge_start = p & !(huge - 1);
+                    let huge_end = huge_start.saturating_add(huge);
+                    if huge_start >= start && huge_end <= end {
+                        let res = if huge == Size2MiB::SIZE {
+                            let hp = Page::<Size2MiB>::containing_address(virt);
+                            // SAFETY: the leaf exists and lies entirely inside
+                            // the framebuffer; only its cache policy changes.
+                            unsafe { mapper.update_flags(hp, flags) }.map(|f| f.flush())
+                        } else {
+                            let hp = Page::<Size1GiB>::containing_address(virt);
+                            // SAFETY: as above, for a 1 GiB leaf.
+                            unsafe { mapper.update_flags(hp, flags) }.map(|f| f.flush())
+                        };
+                        match res {
+                            Ok(()) => updated_count += huge / page_size,
+                            Err(_) => log::error!(
+                                "ensure_framebuffer_range_wc: failed to update huge page {:#x}",
+                                huge_start
+                            ),
+                        }
+                    } else {
+                        log::warn!(
+                            "ensure_framebuffer_range_wc: huge page {:#x}..{:#x} extends \
+                             outside the framebuffer; WC not applied",
+                            huge_start,
+                            huge_end
+                        );
+                    }
+                    p = huge_end;
+                    continue;
+                }
+
                 // SAFETY: the mapping exists and the flags only change cache
                 // policy; the caller is wiring a framebuffer under its lock.
                 match unsafe { mapper.update_flags(page, flags) } {
                     Ok(flush) => {
                         flush.flush();
                         updated_count += 1;
-                    }
-                    Err(FlagUpdateError::ParentEntryHugePage) => {
-                        // The range is covered by a 2 MiB / 1 GiB leaf owned by
-                        // the bootloader. Splitting it is out of scope; leave
-                        // its cache policy untouched and report it.
-                        log::warn!(
-                            "ensure_framebuffer_range_wc: {:#x} is part of a huge page; \
-                             WC not applied",
-                            p
-                        );
                     }
                     Err(_) => {
                         log::error!("ensure_framebuffer_range_wc: failed to update {:#x}", p);
