@@ -145,6 +145,12 @@ const HIGH_MEMORY_END: u64 = 0x12_0000;
 /// budget is five times larger, and a guest that reaches it is reported as
 /// stuck with its current marker and screen state.
 const MAX_FREEDOS_EXITS: u32 = 500_000;
+/// Upper bound on timer ticks injected to recover a `hlt`-idle guest.
+///
+/// A DOS-class boot waits for a handful of timer ticks at most (disk motor,
+/// delay loops); a guest that keeps halting after this many recoveries is
+/// stuck and the run fails.
+const MAX_HALT_RECOVERY: u32 = 10_000;
 /// Capacity of the FreeDOS boot floppy, in 512-byte sectors (1.44 MiB).
 const FREEDOS_DISK_SECTORS: u64 = 2880;
 /// Offset of the OEM name inside a DOS boot sector.
@@ -986,7 +992,31 @@ fn run_freedos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosEr
             }
             ExitClass::Halt => {
                 report.halt_exits += 1;
-                break;
+                // A real DOS-class guest idles with `sti; hlt` while it waits
+                // for the 18.2 Hz timer tick, which PC firmware delivers as
+                // vector `0x08`. The runner plays the timer's role: inject the
+                // tick and continue, otherwise the very first idle wait would
+                // stall the boot. The injection is only valid when the guest
+                // is interruptible; a halted guest with interrupts disabled is
+                // a genuine dead end.
+                let interruptible = vcpu.guest().rflags & (1 << 9) != 0;
+                if interruptible && report.halt_exits <= MAX_HALT_RECOVERY {
+                    // SAFETY: block loaded, guest inactive (exit handler).
+                    if let Err(error) = unsafe { vcpu.inject_interrupt(0x08) } {
+                        log::warn!("[s9vm] freedostest: cannot inject timer: {:?}", error);
+                        outcome = Err(DosError::Run(error));
+                        break;
+                    }
+                } else {
+                    log::warn!(
+                        "[s9vm] freedostest: guest halted (interruptible={}, halt exits {}, \
+                         marker {:?})",
+                        interruptible,
+                        report.halt_exits,
+                        report.marker
+                    );
+                    break;
+                }
             }
             ExitClass::ExternalInterrupt
             | ExitClass::InterruptWindow
