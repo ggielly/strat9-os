@@ -1236,6 +1236,26 @@ fn run_guest_policy_loop(world: u64, vcpu: u64) -> Result<GuestRunReport, Error>
                     event.gpa,
                     event.flags
                 );
+                // The faulting address alone does not say whether the guest
+                // used a bad pointer or its page tables were corrupted; the
+                // register block does. `rip`/`cr3`/`r12` are the most useful
+                // when the fault happens inside a table walk.
+                let mut regs = VmmRegs::default();
+                if vmm_vcpu_regs(vcpu, &mut regs).is_ok() {
+                    log!(
+                        "[s9vm-vmm] guest regs on abort: rip={:#x} rsp={:#x} cr3={:#x} \
+                         r12={:#x} r13={:#x} r14={:#x} r15={:#x} rsi={:#x} rdi={:#x}",
+                        regs.rip,
+                        regs.rsp,
+                        regs.cr3,
+                        regs.r12,
+                        regs.r13,
+                        regs.r14,
+                        regs.r15,
+                        regs.rsi,
+                        regs.rdi
+                    );
+                }
                 complete_policy_exit(vcpu, &event)?;
                 report.pass = false;
                 log!(

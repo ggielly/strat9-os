@@ -1443,6 +1443,42 @@ impl Vcpu {
         Ok(enabled)
     }
 
+    /// Enables or disables pin-based external-interrupt exiting.
+    ///
+    /// The engine runs the guest with host interrupts disabled, so an
+    /// interrupt that arrives while the guest executes cannot be delivered to
+    /// the host interrupt handler. With external-interrupt exiting enabled,
+    /// that pending interrupt makes *every* VM entry exit immediately, which
+    /// livelocks the RUN until the exit storm bound trips. The execution loop
+    /// clears the control after a burst so the guest can make progress; the
+    /// pending interrupt is serviced when the vCPU task returns to the
+    /// scheduler. The preemption-timer bit of the same control word is
+    /// preserved.
+    ///
+    /// # Safety
+    /// The control block must be loaded and the guest must not be active.
+    pub unsafe fn set_external_interrupt_exiting(
+        &mut self,
+        caps: &HwCaps,
+        enabled: bool,
+    ) -> Result<bool, VcpuError> {
+        // SAFETY: caller contract.
+        let current = unsafe { self.control.read_u32(field::PIN_BASED_CONTROLS)? };
+        let mut pin = current & !bits::PIN_EXTERNAL_INTERRUPT_EXITING;
+        if enabled {
+            pin |= bits::PIN_EXTERNAL_INTERRUPT_EXITING;
+        }
+        let pin = caps.pin_allowed.apply(pin);
+        if enabled && pin & bits::PIN_EXTERNAL_INTERRUPT_EXITING == 0 {
+            return Ok(false);
+        }
+        // SAFETY: caller contract.
+        unsafe {
+            self.control.write_u32(field::PIN_BASED_CONTROLS, pin)?;
+        }
+        Ok(enabled)
+    }
+
     /// Physical address of the MSR bitmap (0 when not used).
     pub fn msr_bitmap_phys(&self) -> u64 {
         self.msr_bitmap

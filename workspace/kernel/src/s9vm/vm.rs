@@ -1240,6 +1240,15 @@ impl From<VcpuError> for RunError {
 /// control back to policy (protection against an interrupt storm).
 const MAX_RESUMED_EXITS: u32 = 64;
 
+/// Consecutive host-interrupt exits tolerated inside one RUN before pin-based
+/// external-interrupt exiting is cleared for the rest of the RUN.
+///
+/// The guest runs with host interrupts disabled, so a pending host interrupt
+/// is not delivered while it executes; without this bound every VM entry would
+/// exit immediately (the pending interrupt is still pending) and the RUN would
+/// livelock until the storm bound trips.
+const MAX_HOST_IRQ_EXITS: u32 = 8;
+
 /// True if an exit can be resumed immediately by the kernel.
 const fn is_resumable(class: ExitClass) -> bool {
     matches!(
@@ -1550,7 +1559,15 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
             // `InterruptWindow` after every entry and eventually be reported as
             // an exit storm. Start every RUN from a known, disarmed state.
             let _ = hardware.set_interrupt_window_exiting(caps, false);
+            // Same reasoning for external-interrupt exiting: the loop may have
+            // disabled it after a host-interrupt burst below.
+            let _ = hardware.set_external_interrupt_exiting(caps, true);
             let mut resumed = 0u32;
+            // Consecutive host-interrupt exits in this RUN. The guest runs with
+            // host interrupts disabled, so a pending interrupt is never
+            // delivered while the guest executes; past this bound the control
+            // is cleared for the rest of the RUN.
+            let mut host_irq_burst = 0u32;
             // True while interrupt-window exiting is armed in the control
             // block: the guest has a pending vector but interrupts disabled.
             let mut window_armed = false;
@@ -1794,6 +1811,22 @@ pub fn run_vcpu(vcpu_id: u64, caps: &HwCaps) -> Result<(), RunError> {
                         // decoded reason is recorded so that guest entry
                         // failures remain distinguishable from ordinary exits.
                         timing.record_exit(exit.reason, exit_cycles);
+                        // A host interrupt that arrives while the guest runs is
+                        // exited but cannot be delivered (host interrupts are
+                        // disabled during the RUN). Left alone, the pending
+                        // vector makes every entry exit again and the RUN
+                        // livelocks. Do not charge those exits to the guest
+                        // storm bound: clear external-interrupt exiting after a
+                        // short burst so the guest makes progress, and let the
+                        // vCPU task service the interrupt when it returns to
+                        // the scheduler.
+                        if class == ExitClass::ExternalInterrupt {
+                            host_irq_burst += 1;
+                            if host_irq_burst == MAX_HOST_IRQ_EXITS {
+                                let _ = hardware.set_external_interrupt_exiting(caps, false);
+                            }
+                            continue;
+                        }
                         if is_resumable(class) && resumed < MAX_RESUMED_EXITS {
                             resumed += 1;
                             continue;
