@@ -14,19 +14,27 @@ s9vm world and signals success to the kernel selftest.
 | Member | `144m/x86BOOT.img` |
 | Original size | 1 474 560 bytes (1.44 MiB, FAT12, 80×2×18×512) |
 | Original SHA-256 | `552f7cbb0625960c050a3e682a4d2121cc2ffdfa9dc9d592ccd49edf179333dc` |
-| Patched SHA-256 | `cce511dbda59a585206451378344910b5c9329869705e3066d9fd548de951e4c` |
+| Patched SHA-256 | `c75964ca584741a0207fd120a9d35bf9986089deb3c0f1d5688583de6efcd83d` |
 
 ## Patch (deterministic)
 
-The image is a byte-for-byte copy of the official boot disk with three FAT12
-entries rewritten in place (no cluster added, no FAT change):
+The image is the byte-for-byte official boot disk with three FAT12 entries
+rewritten in place (no cluster added, no FAT change). It is reproducible:
+
+```bash
+python scripts/patch-freedos-boot-image.py <copy of x86BOOT.img>
+```
+
+The script verifies the official SHA-256, rewrites the three payloads, prints
+the resulting hash and is idempotent.
 
 1. `\FDCONFIG.SYS` (cluster 96) — the multilingual boot menu (`MENU …` and
    `MENUDEFAULT=1,10`) is replaced by the plain configuration directives and a
    direct `SHELL=` line, so the boot is deterministic and does not wait for a
-   keyboard/menu timeout:
+   keyboard/menu timeout. There is deliberately **no** `@echo off` line: that is
+   a batch directive, and the FreeDOS kernel reports
+   `CONFIG.SYS error in line 0` and echoes the line when it finds one here.
    ```
-   @echo off
    !COUNTRY=001,858:\FREEDOS\BIN\COUNTRY.SYS
    !LASTDRIVE=Z
    !BUFFERS=20
@@ -40,8 +48,8 @@ entries rewritten in place (no cluster added, no FAT change):
    ECHO FreeDOS 1.4 booted under s9vm
    S9VMK.COM
    ```
-3. `\SETUP.BAT` is renamed to `\S9VMK.COM` (same cluster, size 9) and its first
-   cluster holds a 9-byte COM program:
+3. `\SETUP.BAT` is renamed to `\S9VMK.COM` (same cluster, its long-name entry is
+   dropped) and its first cluster holds an 8-byte COM program:
    ```
    B0 4B        mov al, 0x4B      ; 'K'
    BA E9 00     mov dx, 0x00E9    ; s9vm debug port
@@ -64,9 +72,8 @@ FreeDOS kernel and `COMMAND.COM`. Only two text files are replaced:
    DIR
    S9VMK.COM
    ```
-2. `\FDCONFIG.SYS` — same directives as above, but **without** the invalid
-   `@echo off` line, which FreeDOS' CONFIG.SYS parser reports as
-   `CONFIG.SYS error in line 0`:
+2. `\FDCONFIG.SYS` — the very same plain directives as the selftest image (the
+   two images share this file; only `FDAUTO.BAT` differs):
    ```
    !COUNTRY=001,858:\FREEDOS\BIN\COUNTRY.SYS
    !LASTDRIVE=Z
@@ -92,6 +99,10 @@ selftest image).
 * QEMU + SeaBIOS, TCG, headless: booting this image on a floppy controller and
   capturing port `0xE9` with `-debugcon file:…` yields exactly `K` (FreeDOS
   kernel loaded, `COMMAND.COM` started, `FDAUTO.BAT` executed, COM program ran).
+  Re-checked after the FDCONFIG.SYS fix (image `c75964ca…`).
+* s9vm on VT-x: `vm test 10` boots the floppy for real — the VGA text shows the
+  FreeDOS kernel banner, `FreeCom 0.86`, the two `s9vm` ECHO lines and the `K`
+  marker (`PASS`, 4 538 exits / 4 360 BIOS calls / `int=0`).
 * s9vm: `s9vm.selftest=freedos_dry` verifies the image installation without
   VT-x; `s9vm.selftest=freedos` boots it for real on a VT-x host and expects the
   VGA text to contain `FreeDOS` plus the `K` marker.
