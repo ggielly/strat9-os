@@ -359,6 +359,31 @@ impl Selection {
         Ok(selection)
     }
 
+    /// Parses an `init.target=` / `init.disable=` selection from a kernel
+    /// command line.
+    ///
+    /// Tokens are separated by NUL or whitespace. Unrelated kernel keys are
+    /// ignored; repeated `init.target=` uses the last value and repeated
+    /// `init.disable=` lists are unioned (duplicates dropped).
+    pub fn from_kernel_cmdline(spec: &str) -> Selection {
+        let mut selection = Selection::default();
+        for token in spec.split(|c: char| c == '\0' || c.is_whitespace()) {
+            if let Some(value) = token.strip_prefix("init.target=") {
+                if let Some(profile) = Profile::from_name(value) {
+                    selection.profile = profile;
+                }
+            } else if let Some(value) = token.strip_prefix("init.disable=") {
+                for name in value.split(',') {
+                    let name = name.trim();
+                    if !name.is_empty() && !selection.disabled.iter().any(|d| d == name) {
+                        selection.disabled.push(String::from(name));
+                    }
+                }
+            }
+        }
+        selection
+    }
+
     /// True when `name` is explicitly disabled.
     pub fn is_disabled(&self, name: &str) -> bool {
         self.disabled.iter().any(|d| d == name)

@@ -63,6 +63,7 @@ pub mod kaslr;
 pub mod log_ring;
 pub mod memory;
 pub mod namespace;
+pub mod power;
 pub mod process;
 pub mod rtc_math;
 pub mod shell;

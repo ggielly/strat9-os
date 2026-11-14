@@ -231,6 +231,10 @@ pub unsafe extern "C" fn kmain(args_ptr: u64) -> ! {
         hlt_loop();
     }
 
+    // Snapshot the boot command line before boot memory is reused; it is
+    // served later by `SYS_GETCMDLINE`.
+    crate::boot::cmdline::set(args.cmdline_bytes());
+
     // KernelArgs points to the retained on-disk ELF bytes in boot memory.
     // kernel_elf_bytes() applies the HHDM offset once it has been installed.
     unsafe {

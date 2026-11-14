@@ -435,6 +435,8 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
             Ok(((strat9_abi::ABI_VERSION_MAJOR as u64) << 16)
                 | (strat9_abi::ABI_VERSION_MINOR as u64))
         }
+        SYS_GETCMDLINE => crate::boot::cmdline::sys_getcmdline(arg1, arg2),
+        SYS_REBOOT => crate::power::sys_reboot(arg1),
         _ => {
             log::warn!("Unknown syscall: {} (0x{:x})", syscall_num, syscall_num);
             Err(SyscallError::NotImplemented)

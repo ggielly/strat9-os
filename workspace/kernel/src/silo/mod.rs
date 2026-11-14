@@ -2420,9 +2420,15 @@ pub fn sys_silo_create(config_ptr: u64) -> Result<u64, SyscallError> {
     require_silo_admin()?;
     let config = read_user_config(config_ptr)?;
     config.validate()?;
+    let (granted_caps, granted_resources) = collect_granted(&config)?;
 
     let mut mgr = SILO_MANAGER.lock();
     let id = mgr.create_silo(&config)?;
+    {
+        let silo = mgr.get_mut(id.sid)?;
+        silo.granted_caps = granted_caps;
+        silo.granted_resources = granted_resources;
+    }
     drop(mgr);
 
     let cap = get_capability_manager().create_capability(
@@ -2437,13 +2443,11 @@ pub fn sys_silo_create(config_ptr: u64) -> Result<u64, SyscallError> {
     Ok(cap_id.as_u64())
 }
 
-/// Performs the sys silo config operation.
-pub fn sys_silo_config(handle: u64, res_ptr: u64) -> Result<u64, SyscallError> {
-    require_silo_admin()?;
-    let config = read_user_config(res_ptr)?;
-    config.validate()?;
-    let family = decode_family(config.family)?;
-
+/// Validates and collects the `caps_ptr`/`caps_len` grant list of `config`
+/// against the caller's capabilities.
+fn collect_granted(
+    config: &SiloConfig,
+) -> Result<(HVec<u64, 64>, HVec<GrantedResource, 32>), SyscallError> {
     let mut granted_caps = HVec::<u64, 64>::new();
     let mut granted_resources = HVec::<GrantedResource, 32>::new();
     if config.caps_len > 0 {
@@ -2479,6 +2483,17 @@ pub fn sys_silo_config(handle: u64, res_ptr: u64) -> Result<u64, SyscallError> {
             );
         }
     }
+    Ok((granted_caps, granted_resources))
+}
+
+/// Performs the sys silo config operation.
+pub fn sys_silo_config(handle: u64, res_ptr: u64) -> Result<u64, SyscallError> {
+    require_silo_admin()?;
+    let config = read_user_config(res_ptr)?;
+    config.validate()?;
+    let family = decode_family(config.family)?;
+
+    let (granted_caps, granted_resources) = collect_granted(&config)?;
 
     let sid = resolve_silo_handle(handle, CapPermissions::read_write())?;
     let mut mgr = SILO_MANAGER.lock();

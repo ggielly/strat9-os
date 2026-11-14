@@ -39,6 +39,9 @@ pub mod assembly;
 /// KernelArgs structures shared between bootloader and kernel
 pub mod entry;
 
+/// Boot command line snapshot served by `SYS_GETCMDLINE`.
+pub mod cmdline;
+
 /// Physical boot-module validation and initfs address conversion.
 pub mod modules;
 
