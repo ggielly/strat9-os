@@ -4,15 +4,20 @@
 //! legacy guest depends on (idle keyboard status, retrace polling, register
 //! round-trips, port ownership) so a regression is caught without VT-x.
 
+extern crate alloc;
+
 #[path = "../../kernel/src/s9vm/dma.rs"]
 mod dma;
 #[path = "../../kernel/src/s9vm/keyboard.rs"]
 mod keyboard;
+#[path = "../../kernel/src/s9vm/pic.rs"]
+mod pic;
 #[path = "../../kernel/src/s9vm/vga.rs"]
 mod vga;
 
 use dma::Dma;
 use keyboard::KeyboardController;
+use pic::Pic;
 use vga::Vga;
 
 #[test]
@@ -162,4 +167,123 @@ fn dma_channel_two_decodes_the_floppy_programming_sequence() {
     let channel = model.channel(dma::FLOPPY_CHANNEL).expect("channel 2");
     assert_eq!(channel.physical_address(), 0x0000_7E00);
     assert_eq!(channel.count, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Host keyboard input (8042 scancode queue)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn keyboard_queues_host_scancodes_and_reports_the_buffer_full() {
+    let mut controller = KeyboardController::new();
+    assert!(!controller.has_scancode());
+
+    assert!(controller.push_scancode(0x1E)); // 'a' make
+    assert!(controller.has_scancode());
+    assert_eq!(controller.pending_scancodes(), 1);
+    // Status bit 0 ("output buffer full") is what a DOS driver polls.
+    assert_eq!(controller.read(keyboard::STATUS_PORT).expect("status") & 0x01, 1);
+    assert_eq!(controller.read(keyboard::DATA_PORT), Some(0x1E));
+    assert!(!controller.has_scancode());
+    assert_eq!(controller.read(keyboard::STATUS_PORT).expect("status") & 0x01, 0);
+}
+
+#[test]
+fn keyboard_controller_replies_come_before_scancodes() {
+    // A real 8042 has a single output buffer: a controller reply queued first
+    // (the ACK of a keyboard command) is read before the next scancode.
+    let mut controller = KeyboardController::new();
+    controller.write(keyboard::DATA_PORT, 0xF2); // read ID -> ACK then two ID bytes
+    assert!(controller.push_scancode(0x1E));
+    assert_eq!(controller.read(keyboard::DATA_PORT), Some(0xFA));
+    assert_eq!(controller.read(keyboard::DATA_PORT), Some(0xAB));
+    assert_eq!(controller.read(keyboard::DATA_PORT), Some(0x83));
+    assert_eq!(controller.read(keyboard::DATA_PORT), Some(0x1E));
+}
+
+#[test]
+fn keyboard_scancode_queue_is_bounded() {
+    let mut controller = KeyboardController::new();
+    for index in 0..keyboard::INPUT_CAPACITY {
+        assert!(controller.push_scancode(index as u8), "byte {index}");
+    }
+    assert!(!controller.push_scancode(0xFF), "queue must be full");
+    assert_eq!(
+        controller.pending_scancodes() as usize,
+        keyboard::INPUT_CAPACITY
+    );
+    // Draining one byte frees exactly one slot.
+    assert_eq!(controller.read(keyboard::DATA_PORT), Some(0));
+    assert!(controller.push_scancode(0xFE));
+}
+
+#[test]
+fn text_becomes_us_layout_make_and_break_scancodes() {
+    let mut codes = Vec::new();
+    keyboard::text_to_scancodes(b"aA\r", &mut codes);
+    assert_eq!(
+        codes,
+        vec![
+            0x1E, 0x9E, // a: make, break
+            0x2A, 0x1E, 0x9E, 0xAA, // A: shift down, a, a break, shift up
+            0x1C, 0x9C, // Enter
+        ]
+    );
+
+    // Symbols that need shift are bracketed by the shift press/release.
+    let mut codes = Vec::new();
+    keyboard::text_to_scancodes(b"!?", &mut codes);
+    assert_eq!(codes, vec![0x2A, 0x02, 0x82, 0xAA, 0x2A, 0x35, 0xB5, 0xAA]);
+
+    // Characters a PC keyboard cannot type are skipped, not encoded blindly.
+    let mut codes = Vec::new();
+    keyboard::text_to_scancodes(b"a\x07b", &mut codes);
+    assert_eq!(codes, vec![0x1E, 0x9E, 0x30, 0xB0]);
+}
+
+// ---------------------------------------------------------------------------
+// 8259 pair in firmware-handoff state
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pic_hands_over_the_vectors_a_bios_leaves() {
+    let mut pic = Pic::bios_default();
+    assert_eq!(pic.master().vector_base(), 0x08);
+    assert_eq!(pic.slave().vector_base(), 0x70);
+    // Timer (IR0) and keyboard (IR1) are live, everything else is masked.
+    assert_eq!(pic.master().mask(), 0xF8);
+
+    pic.raise(0);
+    assert!(pic.has_pending());
+    assert_eq!(pic.acknowledge(), Some(0x08));
+    assert!(!pic.has_pending(), "the timer request is now in service");
+    // The in-service register blocks a second delivery until the EOI.
+    pic.raise(0);
+    assert_eq!(pic.acknowledge(), None);
+    pic.eoi();
+    assert_eq!(pic.acknowledge(), Some(0x08));
+
+    // Leave the timer request out of service before checking the keyboard.
+    pic.eoi();
+    pic.raise(1);
+    assert_eq!(pic.acknowledge(), Some(0x09));
+
+    // A slave device is delivered through the cascade with its own vector once
+    // the guest unmasks its line on the slave chip.
+    pic.eoi();
+    pic.write(pic::port::SLAVE_DATA, 0xFE);
+    pic.raise(8);
+    assert_eq!(pic.acknowledge(), Some(0x70));
+}
+
+#[test]
+fn pic_reads_back_its_masks_for_the_guest() {
+    let mut pic = Pic::bios_default();
+    assert_eq!(pic.read(pic::port::MASTER_DATA), Some(0xF8));
+    assert_eq!(pic.read(pic::port::SLAVE_DATA), Some(0xFF));
+    // OCW1: the guest unmasks IRQ0 only.
+    pic.write(pic::port::MASTER_DATA, 0xFE);
+    assert_eq!(pic.read(pic::port::MASTER_DATA), Some(0xFE));
+    pic.raise(0);
+    assert_eq!(pic.acknowledge(), Some(0x08));
 }

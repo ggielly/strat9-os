@@ -148,8 +148,20 @@ impl Chip {
     }
 
     /// Masked request with the highest priority (lowest IRQ number), if any.
+    ///
+    /// Fixed-priority arbitration: while a request is in service, only a
+    /// strictly higher-priority request may be acknowledged. Without this rule
+    /// the runner would deliver the same `IRQ0` again before the guest has run
+    /// its handler's `EOI`, nesting interrupts the real 8259 would mask.
     fn highest_pending(&self) -> Option<u8> {
-        let eligible = self.irr & !self.imr;
+        let mut eligible = self.irr & !self.imr & !self.isr;
+        if eligible == 0 {
+            return None;
+        }
+        if self.isr != 0 {
+            let in_service = self.isr.trailing_zeros() as u8;
+            eligible &= (1u8 << in_service) - 1;
+        }
         if eligible == 0 {
             None
         } else {
@@ -293,13 +305,13 @@ impl Pic {
     /// Pair in the state a PC firmware hands to the boot sector.
     ///
     /// The master is initialised to vectors `0x08..=0x0F` with the timer
-    /// (`IR0`) and keyboard (`IR1`) lines unmasked, exactly like a BIOS that
-    /// keeps the 18.2 Hz tick running for the boot loader; the slave is
-    /// initialised to vectors `0x70..=0x77` and stays fully masked until the
+    /// (`IR0`), keyboard (`IR1`) and cascade (`IR2`) lines unmasked, exactly like
+    /// a BIOS that keeps the 18.2 Hz tick running for the boot loader; the slave
+    /// is initialised to vectors `0x70..=0x77` and stays fully masked until the
     /// guest enables a device on it.
     pub const fn bios_default() -> Self {
         Self {
-            master: Chip::programmed(0x08, 0xFC),
+            master: Chip::programmed(0x08, 0xF8),
             slave: Chip::programmed(0x70, 0xFF),
         }
     }

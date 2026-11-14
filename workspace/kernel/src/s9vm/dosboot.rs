@@ -125,6 +125,7 @@ use crate::s9vm::{
     exit::{reason_name, ExitClass},
     firmware,
     guest::GuestState,
+    keyboard,
     machine::Machine,
     vcpu::{ExitInfo, Vcpu, VcpuError},
     vm,
@@ -285,6 +286,16 @@ pub struct DosReport {
     /// the zeroed IVT entry at `0000:0000`; the runner logs the faulting
     /// `CS:IP` and aborts on a CPU exception or a runaway count.
     pub unhandled_interrupts: u32,
+    /// Platform interrupts delivered to the guest through the 8259 pair
+    /// (`IRQ0` timer, `IRQ1` keyboard, ...). Real hardware interrupts, unlike
+    /// [`Self::bios_calls`], do not cost one exit each.
+    pub interrupts_delivered: u32,
+    /// Platform interrupts that reached the firmware ROM stub while the guest
+    /// had not installed its own handler yet; the runner acknowledges them at
+    /// the stub exit, like the real BIOS handler does.
+    pub interrupts_serviced: u32,
+    /// Scancodes typed by the host into the 8042 and read by the guest.
+    pub scancodes_typed: u32,
 }
 
 impl DosReport {
@@ -304,6 +315,9 @@ impl DosReport {
             external_interrupts: 0,
             preemption_slices: 0,
             unhandled_interrupts: 0,
+            interrupts_delivered: 0,
+            interrupts_serviced: 0,
+            scancodes_typed: 0,
         }
     }
 }
@@ -315,6 +329,11 @@ pub struct RunLimits {
     pub max_exits: u32,
     /// Maximum wall-clock duration in nanoseconds (0 = no time limit).
     pub max_nanoseconds: u64,
+    /// Stop as soon as the guest writes the success marker.
+    ///
+    /// `false` keeps the guest running after the marker so typed keys can be
+    /// executed at the DOS prompt; the run then ends on its time budget.
+    pub stop_at_marker: bool,
 }
 
 impl RunLimits {
@@ -323,12 +342,14 @@ impl RunLimits {
     pub const SELFTEST: Self = Self {
         max_exits: MAX_FREEDOS_EXITS,
         max_nanoseconds: 10_000_000_000,
+        stop_at_marker: true,
     };
     /// Budget of `vm test` from the shell: the guest loop keeps interrupts
     /// disabled, so the attempt is bounded to a short, predictable pause.
     pub const SHELL: Self = Self {
         max_exits: 120_000,
         max_nanoseconds: 2_000_000_000,
+        stop_at_marker: true,
     };
 }
 
@@ -1218,6 +1239,97 @@ fn deliver_legacy_interrupt(vcpu: &mut Vcpu, devices: &mut emulate::Devices) -> 
     unsafe { vcpu.inject_interrupt(vector) }.is_ok()
 }
 
+/// Host text waiting to be typed into a DOS guest.
+///
+/// The text is translated to PS/2 set-1 scancodes once, then handed to the 8042
+/// model only after the guest owns `INT 9` and has unmasked `IRQ1`: before that
+/// the guest is still probing the controller and could mistake a scancode for a
+/// command reply.
+struct KeyboardFeed {
+    scancodes: Vec<u8>,
+    next: usize,
+}
+
+impl KeyboardFeed {
+    fn new(keys: &[u8]) -> Self {
+        let mut scancodes = Vec::new();
+        if !keys.is_empty() {
+            keyboard::text_to_scancodes(keys, &mut scancodes);
+        }
+        Self { scancodes, next: 0 }
+    }
+
+    /// Scancodes not handed to the controller yet.
+    fn remaining(&self) -> usize {
+        self.scancodes.len().saturating_sub(self.next)
+    }
+
+    /// Queues up to `limit` scancodes; returns how many were accepted.
+    fn fill(&mut self, controller: &mut keyboard::KeyboardController, limit: usize) -> usize {
+        let mut sent = 0;
+        while sent < limit && self.next < self.scancodes.len() {
+            if !controller.push_scancode(self.scancodes[self.next]) {
+                break;
+            }
+            self.next += 1;
+            sent += 1;
+        }
+        sent
+    }
+}
+
+/// True when the guest has installed its own handler for `vector`.
+///
+/// The firmware ROM stub is the initial owner of every serviced vector; the
+/// first time the guest rewrites the IVT entry it owns the vector from then on.
+fn guest_owns_vector(memory: &mut WorldMemory, vector: u8) -> bool {
+    let entry = biosrom::IVT_BASE + u32::from(vector) * 4;
+    let read_word = |memory: &mut WorldMemory, offset: u32| -> Option<u16> {
+        let lo = bios::BiosMemory::read_u8(memory, offset)?;
+        let hi = bios::BiosMemory::read_u8(memory, offset + 1)?;
+        Some(u16::from_le_bytes([lo, hi]))
+    };
+    let (Some(offset), Some(segment)) = (read_word(memory, entry), read_word(memory, entry + 2))
+    else {
+        return false;
+    };
+    offset != biosrom::stub_offset(vector) || segment != biosrom::ROM_SEGMENT
+}
+
+/// Delivers pending platform interrupts and types host keys into a DOS guest.
+///
+/// Called before each guest entry and on a `hlt` exit. Returns `true` when a
+/// vector was injected: the guest should be resumed instead of being treated as
+/// idle.
+fn pump_dos_interrupts(
+    vcpu: &mut Vcpu,
+    devices: &mut emulate::Devices,
+    memory: &mut WorldMemory,
+    feed: &mut KeyboardFeed,
+    report: &mut DosReport,
+) -> Result<bool, DosError> {
+    // Keyboard: type only when the guest's own `INT 9` handler is installed and
+    // `IRQ1` is unmasked; the guest may reprogram the mask at any time.
+    if feed.remaining() != 0
+        && guest_owns_vector(memory, 0x09)
+        && devices.pic.master().mask() & 0x02 == 0
+    {
+        report.scancodes_typed += feed.fill(&mut devices.keyboard, 8) as u32;
+    }
+    // `IRQ1` follows the controller output buffer: a real 8042 keeps the line
+    // high while a scancode waits to be read.
+    if devices.keyboard.has_scancode() {
+        devices.pic.raise(1);
+    } else {
+        devices.pic.lower(1);
+    }
+    if deliver_legacy_interrupt(vcpu, devices) {
+        report.interrupts_delivered += 1;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 /// Advances the guest RIP past an exit that was not consumed.
 ///
 /// Calls [`Vcpu::advance_rip`] so the resumed guest does not re-execute the
@@ -1319,6 +1431,39 @@ fn read_interrupt_frame(vcpu: &Vcpu, memory: &mut WorldMemory) -> Option<(u16, u
     let cs = read_word(memory, 4)?;
     let flags = read_word(memory, 6)?;
     Some((ip, cs, flags))
+}
+
+/// Restores the interrupted code's `CF`/`ZF` through the stub scratch byte.
+///
+/// The shared stub tail patches the stacked `FLAGS` word from the scratch byte
+/// (`CF` = bit 0, `ZF` = bit 1). That byte is the firmware *return* status for a
+/// software `INT`, but for a hardware interrupt the same stacked word is the
+/// interrupted code's `FLAGS`: clearing its `CF`/`ZF` would corrupt a guest
+/// loop that was interrupted in the middle of a comparison. Mirroring the
+/// stacked bits back leaves the guest's flags untouched.
+fn preserve_interrupted_flags(
+    vcpu: &Vcpu,
+    memory: &mut WorldMemory,
+) -> Result<(), DosError> {
+    let guest = vcpu.guest();
+    let stack = guest.ss.base.wrapping_add(u64::from(guest.rsp as u16)) as u32;
+    // Stub frame: [SP] = saved DX, [SP + 2] = saved AX, [SP + 4] = IP,
+    // [SP + 6] = CS, [SP + 8] = interrupted FLAGS.
+    let flags_address = stack.wrapping_add(8);
+    let lo = bios::BiosMemory::read_u8(memory, flags_address).ok_or(DosError::Memory)?;
+    let hi = bios::BiosMemory::read_u8(memory, flags_address + 1).ok_or(DosError::Memory)?;
+    let flags = u16::from_le_bytes([lo, hi]);
+    let mut scratch = 0u8;
+    if flags & 0x0001 != 0 {
+        scratch |= 1;
+    }
+    if flags & 0x0040 != 0 {
+        scratch |= 2;
+    }
+    if !biosrom::RomMemory::write(memory, biosrom::SCRATCH_GPA, &[scratch]) {
+        return Err(DosError::Memory);
+    }
+    Ok(())
 }
 
 /// Writes the registers updated by the firmware model back to the vCPU.
@@ -1555,6 +1700,11 @@ fn run_freedos_in_world(
     let mut total_cycles: u64 = 0;
     let mut published_ticks: u32 = 0;
     let mut outcome: Result<(), DosError> = Ok(());
+    // True while an interrupt is already posted in the VM-entry interruption
+    // information field: a second injection before the guest runs would
+    // overwrite it and silently lose the first request (the 8259 already
+    // acknowledged it).
+    let mut entry_injected = false;
     for _ in 0..limits.max_exits {
         // Deliver a pending interrupt while the guest is running. The stub
         // path uses the local APIC (vectors >= 0x10). A real firmware owns the
@@ -1620,19 +1770,24 @@ fn run_freedos_in_world(
             published_ticks = ticks;
             // The device time base has just raised its lines: deliver whatever
             // the 8259 pair latched, and type the next host keys once the guest
-            // owns the keyboard interrupt.
-            if let Err(error) = pump_dos_interrupts(
-                &mut vcpu,
-                machine.devices_mut(),
-                &mut memory,
-                &mut keyboard_feed,
-                &mut report,
-            ) {
-                outcome = Err(error);
-                break;
+            // owns the keyboard interrupt. A vector already posted for this
+            // entry is left alone: the field holds one interruption.
+            if !entry_injected {
+                match pump_dos_interrupts(
+                    &mut vcpu,
+                    machine.devices_mut(),
+                    &mut memory,
+                    &mut keyboard_feed,
+                    &mut report,
+                ) {
+                    Ok(injected) => entry_injected = injected,
+                    Err(error) => {
+                        outcome = Err(error);
+                        break;
+                    }
+                }
             }
         }
-
         // SAFETY: `run` contract: block loaded, IRQs disabled, configured.
         let exit = match unsafe { vcpu.run() } {
             Ok(exit) => exit,
@@ -1642,6 +1797,8 @@ fn run_freedos_in_world(
                 break;
             }
         };
+        // The entry consumed any posted interruption.
+        entry_injected = false;
         report.total_exits += 1;
         match exit.class() {
             ExitClass::IoPort => {
@@ -1666,7 +1823,7 @@ fn run_freedos_in_world(
                 {
                     let marker = (vcpu.guest().rax & 0xFF) as u8;
                     report.marker = Some(marker);
-                    if marker == SUCCESS_MARKER {
+                    if marker == SUCCESS_MARKER && limits.stop_at_marker {
                         break;
                     }
                     // Any other marker is informational: skip the `out` and
@@ -1708,19 +1865,24 @@ fn run_freedos_in_world(
                     let request = (registers.ax, registers.bx, registers.cx, registers.dx);
                     let _ = bios_state.handle(vector, &mut registers, &mut memory, &mut world_disk);
                     write_bios_registers(&mut vcpu, &registers);
-                    if let Err(error) = write_scratch(&mut memory, &registers) {
-                        outcome = Err(error);
-                        break;
-                    }
                     // A platform interrupt (`IRQ0..IRQ7`, master vectors
                     // `0x08..=0x0F`, or the slave's `0x70..=0x77`) reaches the
                     // firmware stub while the guest has not installed its own
-                    // handler yet. The real BIOS handler ends with an EOI, so
-                    // the request must leave the 8259 in-service register here
-                    // or the line would never be delivered again.
-                    if matches!(vector, 0x08..=0x0F | 0x70..=0x77) {
+                    // handler yet. Its stacked FLAGS are the interrupted code's
+                    // flags (keep them) and the real BIOS handler ends with an
+                    // EOI, so the request must leave the 8259 in-service
+                    // register here or the line would never be delivered again.
+                    let platform_irq = matches!(vector, 0x08..=0x0F | 0x70..=0x77);
+                    if platform_irq {
+                        if let Err(error) = preserve_interrupted_flags(&vcpu, &mut memory) {
+                            outcome = Err(error);
+                            break;
+                        }
                         machine.devices_mut().pic.eoi();
                         report.interrupts_serviced += 1;
+                    } else if let Err(error) = write_scratch(&mut memory, &registers) {
+                        outcome = Err(error);
+                        break;
                     }
                     report.bios_calls += 1;
                     // Trace the first calls: the FreeDOS boot sector prints
@@ -1923,7 +2085,10 @@ fn run_freedos_in_world(
                         &mut keyboard_feed,
                         &mut report,
                     ) {
-                        Ok(true) => continue,
+                        Ok(true) => {
+                            entry_injected = true;
+                            continue;
+                        }
                         Ok(false) => {}
                         Err(error) => {
                             outcome = Err(error);

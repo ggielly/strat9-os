@@ -243,7 +243,35 @@ fn cmd_send(id: u64, words: &[String]) -> Result<(), ShellError> {
     }
 }
 
-/// `vm test [seabios|hello] [dry|seconds]` : boot a FreeDOS test world.
+/// Expands the escape sequences accepted in `vm test keys=<text>`.
+///
+/// The shell already splits arguments on spaces, so a caller writes the keys it
+/// wants to type with `\r` for Enter, `\t` for Tab, `\e` for Escape and `\\`
+/// for a literal backslash.
+fn unescape_keys(text: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(text.len());
+    let mut chars = text.bytes();
+    while let Some(byte) = chars.next() {
+        if byte != b'\\' {
+            bytes.push(byte);
+            continue;
+        }
+        match chars.next() {
+            Some(b'r') | Some(b'n') => bytes.push(b'\r'),
+            Some(b't') => bytes.push(b'\t'),
+            Some(b'e') => bytes.push(0x1b),
+            Some(b'\\') => bytes.push(b'\\'),
+            Some(other) => {
+                bytes.push(b'\\');
+                bytes.push(other);
+            }
+            None => bytes.push(b'\\'),
+        }
+    }
+    bytes
+}
+
+/// `vm test [seabios|hello] [dry|seconds] [keys=<text>]` : boot a FreeDOS test world.
 fn cmd_test(args: &[String]) -> Result<(), ShellError> {
     // Accept the switches in any order: `vm test 5`, `vm test seabios 10` and
     // `vm test dry` all work. An unrecognised word is reported instead of being
@@ -252,7 +280,12 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
     let mut hello = false;
     let mut dry = false;
     let mut seconds: Option<u64> = None;
+    let mut keys: Vec<u8> = Vec::new();
     for arg in args {
+        if let Some(text) = arg.strip_prefix("keys=") {
+            keys = unescape_keys(text);
+            continue;
+        }
         match arg.as_str() {
             "seabios" => seabios = true,
             "hello" => hello = true,
@@ -260,7 +293,8 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
             _ => match arg.parse::<u64>() {
                 Ok(value) => seconds = Some(value),
                 Err(_) => shell_println!(
-                    "vm: ignoring unknown argument `{}` (usage: `vm test [seabios|hello] [dry|seconds]`)",
+                    "vm: ignoring unknown argument `{}` (usage: `vm test [seabios|hello] \
+                     [dry|seconds] [keys=<text>]`)",
                     arg
                 ),
             },
@@ -328,13 +362,15 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
     let limits = crate::s9vm::dosboot::RunLimits {
         max_exits: crate::s9vm::dosboot::RunLimits::SHELL.max_exits,
         max_nanoseconds: seconds.saturating_mul(1_000_000_000),
+        // Typed keys run after the marker: keep the guest alive to the budget.
+        stop_at_marker: keys.is_empty(),
     };
     let result = if hello {
         crate::s9vm::dosboot::run_freedos_hello_with_limits(&caps, limits)
     } else if seabios {
         crate::s9vm::dosboot::run_freedos_seabios_with_limits(&caps, limits)
     } else {
-        crate::s9vm::dosboot::run_freedos_with_limits(&caps, limits)
+        crate::s9vm::dosboot::run_freedos_with_limits_and_keys(&caps, limits, &keys)
     };
     match result {
         Ok(report) => {
@@ -345,7 +381,7 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
             if booted {
                 shell_println!(
                     "vm: test VM PASS: marker={} exits={} io={} bios={} hlt={} ext={} int={} \
-                     sectors={}",
+                     irq={} keys={} sectors={}",
                     marker.unwrap_or('?'),
                     report.total_exits,
                     report.io_exits,
@@ -353,6 +389,27 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
                     report.halt_exits,
                     report.external_interrupts,
                     report.unhandled_interrupts,
+                    report.interrupts_delivered,
+                    report.scancodes_typed,
+                    report.disk_sectors
+                );
+                shell_println!("vm: guest text:\n{}", report.text.trim_end());
+                return Ok(());
+            }
+            // With typed keys the runner continues past the marker to its time
+            // budget, so success is the marker plus the boot text.
+            if !keys.is_empty() && report.marker == Some(b'K') && report.text.contains("FreeDOS") {
+                shell_println!(
+                    "vm: test VM PASS (bounded run with typed keys): exits={} io={} bios={} \
+                     hlt={} ext={} int={} irq={} keys={} sectors={}",
+                    report.total_exits,
+                    report.io_exits,
+                    report.bios_calls,
+                    report.halt_exits,
+                    report.external_interrupts,
+                    report.unhandled_interrupts,
+                    report.interrupts_delivered,
+                    report.scancodes_typed,
                     report.disk_sectors
                 );
                 shell_println!("vm: guest text:\n{}", report.text.trim_end());
@@ -361,7 +418,7 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
             if report.timed_out {
                 shell_println!(
                     "vm: test VM INCOMPLETE (bounded run): marker={:?} exits={} io={} bios={} \
-                     hlt={} ext={} int={} sectors={}",
+                     hlt={} ext={} int={} irq={} keys={} sectors={}",
                     marker,
                     report.total_exits,
                     report.io_exits,
@@ -369,6 +426,8 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
                     report.halt_exits,
                     report.external_interrupts,
                     report.unhandled_interrupts,
+                    report.interrupts_delivered,
+                    report.scancodes_typed,
                     report.disk_sectors
                 );
                 shell_println!(
@@ -382,7 +441,7 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
             }
             shell_println!(
                 "vm: test VM FAIL: marker={:?} exits={} io={} bios={} hlt={} ext={} int={} \
-                 sectors={}",
+                 irq={} keys={} sectors={}",
                 marker,
                 report.total_exits,
                 report.io_exits,
@@ -390,6 +449,8 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
                 report.halt_exits,
                 report.external_interrupts,
                 report.unhandled_interrupts,
+                report.interrupts_delivered,
+                report.scancodes_typed,
                 report.disk_sectors
             );
             shell_println!("vm: guest text:\n{}", report.text.trim_end());
@@ -484,7 +545,7 @@ fn cmd_diag() -> Result<(), ShellError> {
     Ok(())
 }
 
-const VM_USAGE: &str = "Usage: vm <list|info <id>|start <id>|stop <id>|pause <id>|resume <id>|console <id>|send <id> <text>|test [seabios|hello] [dry|seconds]|diag>";
+const VM_USAGE: &str = "Usage: vm <list|info <id>|start <id>|stop <id>|pause <id>|resume <id>|console <id>|send <id> <text>|test [seabios|hello] [dry|seconds] [keys=<text>]|diag>";
 
 /// `vm` : manage the s9vm worlds through the `/dev/vmm` scheme.
 pub fn cmd_vm(args: &[String]) -> Result<(), ShellError> {
