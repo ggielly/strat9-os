@@ -130,5 +130,10 @@ pub const ENOBUFS: usize = 105;
 /// Connection timed out (network or device timeout).
 pub const ETIMEDOUT: usize = 110;
 
+/// Operation canceled (async operation cancelled by `SYS_ASYNC_CANCEL`).
+///
+/// Matches Linux x86_64 `ECANCELED == 125`.
+pub const ECANCELED: usize = 125;
+
 /// Connection refused (no listener on target port).
 pub const ECONNREFUSED: usize = 111;

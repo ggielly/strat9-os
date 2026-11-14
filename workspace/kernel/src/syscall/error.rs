@@ -90,6 +90,8 @@ pub enum SyscallError {
     QueueFull = -105,
     #[error("Connection timed out")]
     TimedOut = -110,
+    #[error("Operation canceled")]
+    Canceled = -125,
 }
 
 impl SyscallError {
@@ -142,6 +144,7 @@ impl SyscallError {
             SyscallError::MessageSize => "EMSGSIZE",
             SyscallError::QueueFull => "ENOBUFS",
             SyscallError::TimedOut => "ETIMEDOUT",
+            SyscallError::Canceled => "ECANCELED",
         }
     }
 }

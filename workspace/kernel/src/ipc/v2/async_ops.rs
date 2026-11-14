@@ -69,6 +69,10 @@ enum Kind {
     Recv,
     /// `NotifWait`: word is zero.
     NotifWait,
+    /// `EpCall`: the enqueue itself would block (full queue or exhausted
+    /// quota). Holds the `*MsgBuf` request and response descriptors until
+    /// `call_submit` commits, then becomes `Call`.
+    CallSubmit { req: u64, resp: u64 },
     /// `EpCall`: committed, waiting for the reply.
     Call { slot: Arc<CallSlot>, resp: MsgBuf },
 }
@@ -107,13 +111,22 @@ fn finished(result: Result<u64, SyscallError>) -> Attempt {
 
 const NONBLOCK: u64 = IPC_NONBLOCK as u64;
 
-fn attempt(process: &Process, op: &Parked) -> Attempt {
+fn attempt(process: &Process, op: &mut Parked) -> Attempt {
+    if let Kind::CallSubmit { req, resp } = &op.kind {
+        let (req, resp) = (*req, *resp);
+        match sys::call_submit(process, op.handle, req, resp, WaitSpec::NONBLOCK) {
+            Ok((slot, resp)) => op.kind = Kind::Call { slot, resp },
+            Err(SyscallError::Again) => return Attempt::Pending,
+            Err(error) => return Attempt::Done(errno(error)),
+        }
+    }
     match &op.kind {
         Kind::Send => finished(sys::sys_ep_send(process, op.handle, op.addr, NONBLOCK, 0)),
         Kind::Recv => finished(sys::sys_ep_recv(process, op.handle, op.addr, NONBLOCK, 0)),
         Kind::NotifWait => finished(sys::sys_notif_wait(
             process, op.handle, op.addr, NONBLOCK, 0,
         )),
+        Kind::CallSubmit { .. } => unreachable!("converted to Kind::Call above"),
         Kind::Call { slot, resp } => {
             let state = *slot.state.lock();
             match state {
@@ -169,14 +182,14 @@ pub fn submit(
         kind: Kind::Send,
     };
     let first = match opcode {
-        OP_EP_SEND => attempt(process, &op),
+        OP_EP_SEND => attempt(process, &mut op),
         OP_EP_RECV => {
             op.kind = Kind::Recv;
-            attempt(process, &op)
+            attempt(process, &mut op)
         }
         OP_NOTIF_WAIT => {
             op.kind = Kind::NotifWait;
-            attempt(process, &op)
+            attempt(process, &mut op)
         }
         // A reply never blocks (§6.2 rule 5).
         OP_EP_REPLY => Attempt::Done(match sys::sys_ep_reply(process, handle, addr) {
@@ -185,15 +198,11 @@ pub fn submit(
         }),
         OP_EP_CALL => {
             // `MsgCall { req, resp }`: req at `addr`, resp right after it.
-            let resp_ptr = addr + size_of::<MsgBuf>() as u64;
-            // The enqueue itself is non-blocking (EAGAIN on a full queue).
-            match sys::call_submit(process, handle, addr, resp_ptr, WaitSpec::NONBLOCK) {
-                Ok((slot, resp)) => {
-                    op.kind = Kind::Call { slot, resp };
-                    attempt(process, &op)
-                }
-                Err(error) => Attempt::Done(errno(error)),
-            }
+            op.kind = Kind::CallSubmit {
+                req: addr,
+                resp: addr + size_of::<MsgBuf>() as u64,
+            };
+            attempt(process, &mut op)
         }
         _ => unreachable!("opcode validated above"),
     };
@@ -229,8 +238,8 @@ pub fn poll(process: &Process, ring_id: u64) -> u32 {
 
     let mut completed = 0;
     let mut still = Vec::new();
-    for op in mine {
-        match attempt(process, &op) {
+    for mut op in mine {
+        match attempt(process, &mut op) {
             Attempt::Done(res) => {
                 push_completion(op.ring_id, op.user_data, res, 0);
                 completed += 1;
@@ -267,6 +276,35 @@ pub fn notify_event() {
             ring.wq.wake_all();
         }
     }
+}
+
+/// Cancel the parked operation of `ring_id` whose `user_data == target`.
+///
+/// The cancelled operation's CQE reports `-ECANCELED`; a `Kind::Call` that was
+/// already committed is abandoned exactly like a signal on the sync path
+/// (`abandon_call`, §6.2), so a late reply releases its capabilities instead
+/// of leaking them. `Kind::CallSubmit` holds no resources yet.
+///
+/// Returns `Err(NotFound)` when no such parked operation exists (including the
+/// benign race where `poll` already took it).
+pub fn cancel(ring_id: u64, target: u64) -> Result<(), SyscallError> {
+    let op = {
+        let mut parked = PARKED.lock();
+        match parked
+            .iter()
+            .position(|op| op.ring_id == ring_id && op.user_data == target)
+        {
+            Some(index) => parked.remove(index),
+            None => return Err(SyscallError::NotFound),
+        }
+    };
+    PARKED_COUNT.fetch_sub(1, Ordering::AcqRel);
+    // No lock held across `abandon_call` or the completion push.
+    if let Kind::Call { slot, .. } = op.kind {
+        endpoint::abandon_call(&slot);
+    }
+    push_completion(ring_id, target, errno(SyscallError::Canceled), 0);
+    Ok(())
 }
 
 /// Drop every parked operation of a destroyed ring. Pending calls are

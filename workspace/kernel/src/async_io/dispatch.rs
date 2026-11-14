@@ -300,6 +300,16 @@ fn dispatch_one(
             }
         }
 
+        // Cancel a parked operation by target token (`addr`), io_uring convention.
+        op if op == AsyncOp::Cancel as u8 => {
+            let res = match crate::ipc::v2::async_ops::cancel(ring_id, sqe.addr) {
+                Ok(()) => 0,
+                Err(error) => error as i64 as i32,
+            };
+            push_completion_for_ring(ring, sqe.user_data, res, 0);
+            Ok(DispatchOutcome::CompletedInline)
+        }
+
         // Unknown opcode
         _ => Err(EINVAL),
     }

@@ -32,8 +32,9 @@
 //!
 //! The registry only owns bookkeeping. Mapping an object into an address
 //! space still goes through [`crate::memory::address_space::AddressSpace`],
-//! and callers that export it must use the charge-once policy
-//! (`SiloCharge::AlreadyCharged`) so the same frames are not billed twice.
+//! which charges the mapping silo for the VMA length; `munmap` and teardown
+//! always refund that length, so the mapping must be charged even when the
+//! backing was already accounted to its owner.
 //!
 //! Deliberately minimal: no POSIX `posix_typed_mem_open` ABI yet, no
 //! per-object lock (the registry lock is enough for `register`/`lookup`);
