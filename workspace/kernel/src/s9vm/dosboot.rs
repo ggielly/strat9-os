@@ -1488,10 +1488,7 @@ fn read_interrupt_frame(vcpu: &Vcpu, memory: &mut WorldMemory) -> Option<(u16, u
 /// interrupted code's `FLAGS`: clearing its `CF`/`ZF` would corrupt a guest
 /// loop that was interrupted in the middle of a comparison. Mirroring the
 /// stacked bits back leaves the guest's flags untouched.
-fn preserve_interrupted_flags(
-    vcpu: &Vcpu,
-    memory: &mut WorldMemory,
-) -> Result<(), DosError> {
+fn preserve_interrupted_flags(vcpu: &Vcpu, memory: &mut WorldMemory) -> Result<(), DosError> {
     let guest = vcpu.guest();
     let stack = guest.ss.base.wrapping_add(u64::from(guest.rsp as u16)) as u32;
     // Stub frame: [SP] = saved DX, [SP + 2] = saved AX, [SP + 4] = IP,
@@ -1615,7 +1612,10 @@ fn configure_dos_machine(machine: &mut Machine, firmware: FirmwareKind, image: &
     // QEMU-mode SeaBIOS reads its default boot order from CMOS: the low nibble
     // of 0x3D is the first device (1 = floppy), and 0x38 bit 0 would skip the
     // boot-sector signature check (it stays clear).
-    machine.devices_mut().rtc.set_ram(firmware::CMOS_BOOTFLAG1, 0);
+    machine
+        .devices_mut()
+        .rtc
+        .set_ram(firmware::CMOS_BOOTFLAG1, 0);
     machine
         .devices_mut()
         .rtc
@@ -1810,7 +1810,10 @@ pub fn dos_run(caps: &HwCaps, limits: RunLimits) -> Result<DosReport, DosError> 
 
 /// Current VGA text of the open session.
 pub fn dos_text() -> Option<String> {
-    let world_id = DOS_SESSION.lock().as_ref().map(|session| session.world_id)?;
+    let world_id = DOS_SESSION
+        .lock()
+        .as_ref()
+        .map(|session| session.world_id)?;
     let mut memory = WorldMemory::new(world_id);
     Some(bios::read_text(&mut memory))
 }
@@ -2391,12 +2394,7 @@ fn run_freedos_in_world(
                         let image = machine.devices_mut().blk.disk_mut();
                         let sectors = (image.len() / biosrom::SECTOR_SIZE) as u64;
                         let mut disk = MachineDisk { image, sectors };
-                        let _ = bios_state.handle(
-                            vector,
-                            &mut registers,
-                            &mut memory,
-                            &mut disk,
-                        );
+                        let _ = bios_state.handle(vector, &mut registers, &mut memory, &mut disk);
                     }
                     write_bios_registers(&mut vcpu, &registers);
                     // A platform interrupt (`IRQ0..IRQ7`, master vectors
@@ -2472,8 +2470,8 @@ fn run_freedos_in_world(
                     // forever, so the run stops with the diagnostic. A software
                     // vector (>= 0x20) may be a guest calling a service it has
                     // not installed yet: it returns and the count bounds a loop.
-                    let fatal = vector <= 0x1F
-                        || report.unhandled_interrupts >= MAX_UNHANDLED_INTERRUPTS;
+                    let fatal =
+                        vector <= 0x1F || report.unhandled_interrupts >= MAX_UNHANDLED_INTERRUPTS;
                     if fatal {
                         outcome = Err(DosError::BadExit("unhandled guest interrupt"));
                         break;
@@ -2971,7 +2969,12 @@ fn verify_installation(memory: &mut WorldMemory, disk_sectors: u64) -> Result<()
 /// memory-side contract of the boot, and is the deterministic regression on
 /// TCG.
 pub fn run_freedos_dry(caps: &HwCaps) -> Result<DosReport, DosError> {
-    run_freedos_dry_with(caps, FirmwareKind::Stub, freedos_image(), b"s9vm-freedos-dry")
+    run_freedos_dry_with(
+        caps,
+        FirmwareKind::Stub,
+        freedos_image(),
+        b"s9vm-freedos-dry",
+    )
 }
 
 /// Verifies the Hello/DIR demo image **without VT-x**.

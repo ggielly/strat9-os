@@ -347,11 +347,7 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
     shell_println!(
         "vm: booting the FreeDOS {} world with {} (VT-x, bounded to {} s: the guest \
          loop runs with interrupts disabled, so the attempt cannot freeze the system)…",
-        if hello {
-            "Hello/DIR demo"
-        } else {
-            "1.4 test"
-        },
+        if hello { "Hello/DIR demo" } else { "1.4 test" },
         if hello || seabios {
             "SeaBIOS"
         } else {

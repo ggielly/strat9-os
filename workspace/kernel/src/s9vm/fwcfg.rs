@@ -164,10 +164,7 @@ impl FwCfg {
     /// returns `0`, like QEMU (the guest treats those bytes as counts).
     pub fn read_byte(&mut self) -> u8 {
         let value = if self.selector == FILE_DIR {
-            self.directory_bytes
-                .get(self.cursor)
-                .copied()
-                .unwrap_or(0)
+            self.directory_bytes.get(self.cursor).copied().unwrap_or(0)
         } else if let Some((_, data)) = self.legacy.iter().find(|(key, _)| *key == self.selector) {
             data.get(self.cursor).copied().unwrap_or(0)
         } else if let Some(file) = self.files.iter().find(|file| file.select == self.selector) {

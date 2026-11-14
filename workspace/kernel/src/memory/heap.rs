@@ -1023,7 +1023,14 @@ pub fn dump_diagnostics() {
                     frag[zi][order] = zone.fragmentation_score(order as u8, zones[zi].cached_pages);
                 }
             }
-            (total_pages, allocated_pages, zones, zone_count, free_heads, frag)
+            (
+                total_pages,
+                allocated_pages,
+                zones,
+                zone_count,
+                free_heads,
+                frag,
+            )
         })
     } else {
         buddy_locked = true;

@@ -319,13 +319,13 @@ impl BuddyAllocator {
 
             let pool_start =
                 boot_alloc::alloc_bytes_accessible_topdown(needed_bytes, PAGE_SIZE as usize)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "Buddy allocator: unable to reserve {} bytes for zone {:?} bitmaps",
-                        needed_bytes, self.zones[zi].zone_type
-                    )
-                })
-                .as_u64();
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Buddy allocator: unable to reserve {} bytes for zone {:?} bitmaps",
+                            needed_bytes, self.zones[zi].zone_type
+                        )
+                    })
+                    .as_u64();
             crate::e9_mark!(b'B');
             let pool_end = pool_start.saturating_add(reserved_bytes);
             self.bitmap_pool[zi] = (pool_start, pool_end);
