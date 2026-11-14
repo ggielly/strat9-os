@@ -127,6 +127,10 @@ impl<T: ?Sized, G: Guardian> SpinLock<T, G> {
                 );
                 spins = 0;
             }
+            // A CPU spinning here with IRQs disabled cannot run its TLB
+            // shootdown IPI handler; service the local mailbox so an initiator
+            // waiting on us does not time out (see tlb::service_pending_local).
+            crate::arch::service_pending_tlb_local();
             core::hint::spin_loop();
         }
         self.owner_cpu.store(this_cpu, Ordering::Relaxed);

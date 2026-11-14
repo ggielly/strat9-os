@@ -144,11 +144,15 @@ impl FrameList {
 
     fn get(&self, index: usize) -> PhysFrame {
         debug_assert!(index < self.len);
+        // SAFETY: `index < len` (debug-asserted) and `ptr` addresses `len`
+        // initialised `PhysFrame`s in storage owned by `self`.
         unsafe { *self.ptr.add(index) }
     }
 
     fn set(&mut self, index: usize, frame: PhysFrame) {
         debug_assert!(index < self.len);
+        // SAFETY: `index < len` (debug-asserted), `&mut self` gives exclusive
+        // access, and `ptr` addresses `len` writable `PhysFrame` slots.
         unsafe { *self.ptr.add(index) = frame };
     }
 
@@ -699,6 +703,8 @@ pub fn init() {
     crate::sync::with_irqs_disabled(|token| {
         ensure_kernel_subtree_ready(token);
         let mut guard = VMALLOC.lock();
+        // SAFETY: `guard` holds the VMALLOC lock for exclusive access and
+        // `token` proves IRQs are disabled.
         if let Err(e) = unsafe { guard.ensure_arena_ready(token) } {
             serial_println!(
                 "[vmalloc] init: ensure_arena_ready failed ({:?}) : vmalloc will retry on first use",
@@ -724,6 +730,8 @@ pub fn diag_snapshot() -> Option<VmallocDiagSnapshot> {
     // lists. This is acceptable for shell/debug telemetry, but should not be
     // used on allocator hot paths.
     let (free_extents, largest_free, node_pool_free) = unsafe {
+        // SAFETY: `guard` holds the VMALLOC lock, so the free lists and node
+        // pool are stable for the duration of the traversal.
         (
             vm.free_extent_count(),
             vm.largest_free_extent_pages(),
@@ -819,6 +827,9 @@ pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, 
 
     let mut guard = VMALLOC.lock();
     let vm = &mut *guard;
+    // SAFETY: `guard` holds the VMALLOC lock for exclusive access, `token`
+    // proves IRQs are disabled, and all raw-node pointers come from the
+    // allocator's own metadata pool.
     unsafe {
         if let Err(error) = vm.ensure_arena_ready(token) {
             for i in 0..pages {
@@ -916,10 +927,16 @@ pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) -> bool {
     }
 
     // Phase 1 : unmap and collect under VMALLOC lock.
-    let (frames, range_start, range_end) = {
+    // The freed extent is deliberately NOT returned to the free list here: the
+    // virtual range must stay unavailable until the TLB flush in phase 2 has
+    // completed, otherwise another CPU could reuse it while stale translations
+    // still point at the old physical frames.
+    let (frames, node, range_start, range_end) = {
         let mut guard = VMALLOC.lock();
         let vm = &mut *guard;
 
+        // SAFETY: `guard` holds the VMALLOC lock for exclusive access; `node`
+        // is a raw pointer owned by the allocator's metadata pool.
         unsafe {
             let node = vm.take_alloc_node_by_addr(addr);
             if node.is_null() {
@@ -944,8 +961,7 @@ pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) -> bool {
 
             vm.alloc_count = vm.alloc_count.saturating_sub(1);
             vm.allocated_pages = vm.allocated_pages.saturating_sub(page_count);
-            vm.insert_free_node_merge(node);
-            (frames, range_start, range_end)
+            (frames, node, range_start, range_end)
         }
     }; // Phase 1 end : VMALLOC lock released here.
 
@@ -953,7 +969,18 @@ pub fn vfree(ptr: *mut u8, token: &IrqDisabledToken) -> bool {
     // All remote CPUs can freely enter vmalloc/vfree while processing the IPI.
     shootdown_range(range_start.as_u64(), range_end.as_u64());
 
-    // Phase 3 : return physical frames to the buddy allocator.
+    // Phase 3a : return the virtual extent to the free list now that no CPU can
+    // still translate the old pages.  `node` was detached in phase 1 and owns
+    // vmalloc metadata storage that stays valid across the lock release.
+    {
+        let mut guard = VMALLOC.lock();
+        // SAFETY: `node` was removed from the allocation list by
+        // `take_alloc_node_by_addr` in phase 1 and is re-inserted exactly once
+        // here; it is otherwise unreachable until this point.
+        unsafe { (&mut *guard).insert_free_node_merge(node) };
+    }
+
+    // Phase 3b : return physical frames to the buddy allocator.
     for i in 0..frames.len {
         crate::memory::free_frame(token, frames.get(i));
     }
@@ -1052,6 +1079,8 @@ pub fn live_allocations_snapshot(out: &mut [VmallocLiveAllocationSnapshot]) -> u
     let mut count = 0usize;
     let mut cur = vm.alloc_head;
     while !cur.is_null() && count < out.len() {
+        // SAFETY: `cur` is a live node in the allocation list, and the VMALLOC
+        // lock held by `guard` keeps the list stable during traversal.
         let node = unsafe { &*cur };
         out[count] = VmallocLiveAllocationSnapshot {
             seq: node.attr.alloc_seq,
@@ -1093,6 +1122,8 @@ pub fn is_live_allocation(ptr: *mut u8) -> Option<bool> {
     let start_page = ((addr - VMALLOC_VIRT_START) / 4096) as usize;
     let mut cur = vm.alloc_head;
     while !cur.is_null() {
+        // SAFETY: `cur` is a live node in the allocation list, and the VMALLOC
+        // lock held by `guard` keeps the list stable during traversal.
         let node = unsafe { &*cur };
         if node.start_page == start_page {
             return Some(true);
@@ -1119,6 +1150,8 @@ pub fn dump_diagnostics() {
     let peak_pages = VMALLOC_PEAK_PAGES.load(AtomicOrdering::Relaxed);
     let total_seq = VMALLOC_ALLOC_SEQ.load(AtomicOrdering::Relaxed);
     let (free_extents, largest_free, node_pool_free) = unsafe {
+        // SAFETY: `guard` holds the VMALLOC lock, so the free lists and node
+        // pool are stable for the duration of the traversal.
         (
             vm.free_extent_count(),
             vm.largest_free_extent_pages(),

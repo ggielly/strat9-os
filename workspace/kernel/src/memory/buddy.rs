@@ -274,7 +274,7 @@ impl BuddyAllocator {
 
             let bytes = segment_count.saturating_mul(mem::size_of::<ZoneSegment>());
             let storage_phys =
-                boot_alloc::alloc_bytes_accessible(bytes, mem::align_of::<ZoneSegment>())
+                boot_alloc::alloc_bytes_accessible_topdown(bytes, mem::align_of::<ZoneSegment>())
                     .unwrap_or_else(|| {
                         panic!(
                             "Buddy allocator: unable to reserve {} bytes for {:?} segment table",
@@ -282,6 +282,8 @@ impl BuddyAllocator {
                         )
                     })
                     .as_u64();
+            // SAFETY: `storage_phys` was just allocated for exactly `bytes`,
+            // HHDM-mapped, and zeroing `bytes` bytes stays within it.
             unsafe {
                 ptr::write_bytes(phys_to_virt(storage_phys) as *mut u8, 0, bytes);
             }
@@ -315,7 +317,8 @@ impl BuddyAllocator {
             }
             crate::e9_mark!(b'A');
 
-            let pool_start = boot_alloc::alloc_bytes_accessible(needed_bytes, PAGE_SIZE as usize)
+            let pool_start =
+                boot_alloc::alloc_bytes_accessible_topdown(needed_bytes, PAGE_SIZE as usize)
                 .unwrap_or_else(|| {
                     panic!(
                         "Buddy allocator: unable to reserve {} bytes for zone {:?} bitmaps",
@@ -333,6 +336,8 @@ impl BuddyAllocator {
             let count = (pool_end - pool_start) as usize;
             crate::e9_mark!(b'C');
             for i in 0..count {
+                // SAFETY: `i < count`, and `dst` addresses the `count`-byte
+                // bitmap pool just reserved and HHDM-mapped.
                 unsafe {
                     core::ptr::write_volatile(dst.add(i), 0);
                 }
@@ -517,6 +522,8 @@ impl BuddyAllocator {
                         zone.zone_type, num_bytes, pool_end.saturating_sub(cursor),
                     );
                     segment.pageblock_tags = phys_to_virt(cursor) as *mut u8;
+                    // SAFETY: `pageblock_tags` points into the bitmap pool with
+                    // `pageblock_count` bytes reserved (asserted above).
                     unsafe {
                         ptr::write_bytes(
                             segment.pageblock_tags,
@@ -1303,6 +1310,8 @@ impl BuddyAllocator {
         }
         let idx = Self::pageblock_index(segment, phys);
         debug_assert!(idx < segment.pageblock_count);
+        // SAFETY: `pageblock_tags` is non-null with `pageblock_count > 0` and
+        // `idx < pageblock_count` (debug-asserted).
         unsafe { Self::decode_pageblock_tag(*segment.pageblock_tags.add(idx)) }
     }
 
@@ -1333,6 +1342,8 @@ impl BuddyAllocator {
         );
 
         for idx in start_idx..=end_idx {
+            // SAFETY: `idx` stays within `pageblock_count` (asserted above),
+            // so this writes reserved pageblock tag storage.
             unsafe {
                 *segment.pageblock_tags.add(idx) = migratetype as u8;
             }
@@ -1347,6 +1358,8 @@ impl BuddyAllocator {
                 continue;
             }
             for idx in 0..segment.pageblock_count {
+                // SAFETY: `idx < pageblock_count` and the tags pointer is
+                // non-null (checked above).
                 let migratetype =
                     unsafe { Self::decode_pageblock_tag(*segment.pageblock_tags.add(idx)) };
                 counts[migratetype.index()] = counts[migratetype.index()].saturating_add(1);
@@ -2205,6 +2218,27 @@ fn refill_local_cache(
         Err(AllocError::OutOfMemory) => (global.alloc_with_migratetype(0, migratetype)?, 0),
         Err(e) => return Err(e),
     };
+
+    // When a full refill block is not entirely cacheable for this migratetype,
+    // splitting it into 16 order-0 pages individually would push the
+    // non-cacheable remainder through `free_phys_batch` one page at a time
+    // (and can overflow the overflow array). Return the whole block as a
+    // single order-0 allocation instead. Partial-span is treated
+    // conservatively: test both the first and last page.
+    if order == LOCAL_CACHE_REFILL_ORDER {
+        let base_phys = base.start_address.as_u64();
+        let refill_frames = 1usize << order;
+        let last_phys = base_phys + ((refill_frames - 1) as u64) * PAGE_SIZE;
+        let fully_cacheable = is_cacheable_phys_for(base_phys, migratetype)
+            && is_cacheable_phys_for(last_phys, migratetype);
+        if !fully_cacheable {
+            global.free(base, order);
+            let f0 = global.alloc_with_migratetype(0, migratetype)?;
+            global.unlock();
+            return Ok(f0);
+        }
+    }
+
     global.unlock();
 
     let frame_count = 1usize << order;
@@ -2290,6 +2324,18 @@ fn alloc_order0_cached(migratetype: Migratetype) -> Result<PhysFrame, AllocError
 
     if let Some(frame) = steal_from_other_caches(cpu_idx, migratetype) {
         return Ok(frame);
+    }
+
+    // Avoid a premature OOM when the caller's migratetype caches are empty but
+    // the other class still holds idle frames. Never hold the global lock while
+    // probing local caches, so this stays after the `global.unlock()` above.
+    for other in crate::memory::zone::Migratetype::ALL {
+        if other == migratetype {
+            continue;
+        }
+        if let Some(frame) = steal_from_other_caches(cpu_idx, other) {
+            return Ok(frame);
+        }
     }
 
     global.alloc_with_migratetype(0, migratetype)
@@ -2427,6 +2473,29 @@ pub fn alloc_migratetype(
 /// `_token` is a compile-time proof that interrupts are disabled on the calling CPU.
 pub fn free(_token: &IrqDisabledToken, frame: PhysFrame, order: u8) {
     let migratetype = BuddyAllocator::block_migratetype(frame.start_address.as_u64());
+
+    // Public free-entry guard only: internal drain/spill paths
+    // (`free_phys_batch`, `drain_local_caches_*`) legitimately re-free frames
+    // already flagged FREE, so the check is NOT added to the trait impl or
+    // `free_order0_cached`. Do not check refcount: `mark_block_allocated`
+    // leaves REFCOUNT_UNUSED on live buddy blocks.
+    let meta = get_meta(frame.start_address);
+    if meta.get_flags() & crate::memory::frame::frame_flags::FREE != 0 {
+        panic!(
+            "buddy: double free of frame {:#x} order {}",
+            frame.start_address.as_u64(),
+            order
+        );
+    }
+    if meta.get_order() != order {
+        panic!(
+            "buddy: free order mismatch frame {:#x}: meta={} arg={}",
+            frame.start_address.as_u64(),
+            meta.get_order(),
+            order
+        );
+    }
+
     if order == 0 {
         free_order0_cached(frame, migratetype);
     } else {

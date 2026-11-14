@@ -235,6 +235,8 @@ impl SlabState {
 
     /// Allocate one buddy page, write a `SlabPageHeader` at its base, carve
     /// the remaining space into blocks, and prepend the page to `partial_pages[ci]`.
+    // SAFETY: caller holds the slab lock with IRQs disabled; the page came
+    // from the buddy allocator and is HHDM-mapped for a full 4 KiB.
     unsafe fn refill(&mut self, ci: usize, token: &crate::sync::IrqDisabledToken) {
         debug_assert!(
             !crate::arch::interrupts_enabled(),
@@ -298,6 +300,8 @@ impl SlabState {
 
     /// Pop one block from the first partial page for class `ci`.
     /// Calls `refill` when the partial list is empty.  Returns null on OOM.
+    // SAFETY: caller holds the slab lock; headers and free lists are only
+    // mutated under it.
     unsafe fn alloc_block(&mut self, ci: usize, token: &crate::sync::IrqDisabledToken) -> *mut u8 {
         if self.partial_pages[ci].is_null() {
             self.refill(ci, token);
@@ -379,6 +383,8 @@ impl SlabState {
 
     /// Return `ptr` to its slab page and reclaim the page to the buddy
     /// allocator if it becomes fully empty.
+    // SAFETY: caller holds the slab lock; `ptr` came from this allocator and
+    // its page header is intact.
     unsafe fn dealloc_block(
         &mut self,
         ptr: *mut u8,
@@ -435,6 +441,8 @@ impl SlabState {
     }
 
     /// Unlink `page` from `partial_pages[ci]`.  O(n) in partial-list length.
+    // SAFETY: caller holds the slab lock; `page` is a valid SlabPageHeader
+    // linked in this class's partial list.
     unsafe fn remove_from_partial(&mut self, page: *mut SlabPageHeader, ci: usize) {
         if self.partial_pages[ci] == page {
             self.partial_pages[ci] = (*page).next_partial;
@@ -638,6 +646,8 @@ pub fn slab_blocks_per_page(ci: usize) -> usize {
 /// shell/debug validation, not for allocator hot paths.
 pub fn slab_page_in_partial_list(ci: usize, page_base: u64) -> Option<bool> {
     let mut guard = SLAB_ALLOC.try_lock()?;
+    // SAFETY: we hold the slab lock; walking the partial list through raw
+    // pointers is safe because the list is only mutated under that lock.
     Some(guard.with_mut_and_token(|s, _| unsafe {
         let mut cur = s.partial_pages[ci];
         while !cur.is_null() {
@@ -806,33 +816,41 @@ fn log_common_oom_header(layout: Layout, effective: usize) {
 }
 
 fn log_buddy_snapshot() -> Option<(usize, usize, usize)> {
-    if let Some(guard) = crate::memory::buddy::get_allocator().try_lock() {
-        if let Some(alloc) = guard.as_ref() {
+    // Phase 1: read the allocator stats and release the buddy lock BEFORE any
+    // heap allocation (`String::from` / `write!` / `serial_println!`), so no
+    // allocation happens while the guard is live.
+    let snapshot = if let Some(guard) = crate::memory::buddy::get_allocator().try_lock() {
+        guard.as_ref().map(|alloc| {
             let (total_pages, allocated_pages) = alloc.page_totals();
             let free_pages = total_pages.saturating_sub(allocated_pages);
             let fail_counts = crate::memory::buddy::buddy_alloc_fail_counts_snapshot();
+            (total_pages, allocated_pages, free_pages, fail_counts)
+        })
+    } else {
+        crate::serial_println!("[heap][oom] buddy: allocator locked");
+        return None;
+    };
+    // Guard dropped here.
 
-            crate::serial_println!(
-                "[heap][oom] buddy: total={} alloc={} free={}",
-                total_pages,
-                allocated_pages,
-                free_pages
-            );
-
-            let mut fail_line = alloc::string::String::from("[heap][oom] buddy_fail_by_order:");
-            for (i, &count) in fail_counts.iter().enumerate() {
-                use core::fmt::Write;
-                let _ = write!(fail_line, " o{}={} ", i, count);
-            }
-            crate::serial_println!("{}", fail_line);
-            return Some((total_pages, allocated_pages, free_pages));
-        }
+    let Some((total_pages, allocated_pages, free_pages, fail_counts)) = snapshot else {
         crate::serial_println!("[heap][oom] buddy: allocator uninitialized");
         return None;
-    }
+    };
 
-    crate::serial_println!("[heap][oom] buddy: allocator locked");
-    None
+    crate::serial_println!(
+        "[heap][oom] buddy: total={} alloc={} free={}",
+        total_pages,
+        allocated_pages,
+        free_pages
+    );
+
+    let mut fail_line = alloc::string::String::from("[heap][oom] buddy_fail_by_order:");
+    for (i, &count) in fail_counts.iter().enumerate() {
+        use core::fmt::Write;
+        let _ = write!(fail_line, " o{}={} ", i, count);
+    }
+    crate::serial_println!("{}", fail_line);
+    Some((total_pages, allocated_pages, free_pages))
 }
 
 fn log_heap_failure_policy(layout: Layout) {
@@ -970,80 +988,109 @@ fn alloc_error_handler(layout: Layout) -> ! {
 pub fn dump_diagnostics() {
     crate::serial_println!("[heap][diag] === Heap Diagnostics ===");
 
-    // Buddy allocator stats
-    if let Some(guard) = crate::memory::buddy::get_allocator().try_lock() {
-        if let Some(alloc) = guard.as_ref() {
+    // Buddy allocator stats.
+    //
+    // Snapshot everything needed into stack arrays while the try_lock guard is
+    // held, then drop it BEFORE formatting: no `alloc::`/`String` allocation
+    // may happen under the buddy guard.
+    let buddy_locked;
+    let buddy_stats = if let Some(guard) = crate::memory::buddy::get_allocator().try_lock() {
+        buddy_locked = false;
+        guard.as_ref().map(|alloc| {
             let (total_pages, allocated_pages) = alloc.page_totals();
             let mut zones =
                 [crate::memory::buddy::ZoneStats::empty(); crate::memory::zone::ZoneType::COUNT];
             let zone_count = alloc.zone_snapshot(&mut zones);
-            crate::serial_println!(
-                "[heap][diag] buddy: total={} pages, allocated={} pages, free={} pages",
-                total_pages,
-                allocated_pages,
-                total_pages.saturating_sub(allocated_pages)
-            );
-
-            for info in zones.iter().take(zone_count) {
-                crate::serial_println!(
-                    "[heap][diag] zone={:?} state={:?} managed={} present={} reserved={} free={} cached={} cu/cm={}/{} avail={} segments={}/{} pageblocks=u{}/m{} u_free={} m_free={} watermarks={}/{}/{} reserve={} largest_order={:?}",
-                    info.zone_type,
-                    info.pressure(),
-                    info.managed_pages,
-                    info.present_pages,
-                    info.reserved_pages,
-                    info.free_pages,
-                    info.cached_pages,
-                    info.cached_unmovable_pages,
-                    info.cached_movable_pages,
-                    info.available_after_reserve_pages(),
-                    info.segment_count,
-                    info.segment_capacity,
-                    info.unmovable_pageblocks,
-                    info.movable_pageblocks,
-                    info.unmovable_free_pages,
-                    info.movable_free_pages,
-                    info.watermark_min,
-                    info.watermark_low,
-                    info.watermark_high,
-                    info.lowmem_reserve_pages,
-                    info.largest_free_order
-                );
-            }
-
-            // Per-zone free list heads by migratetype.
+            let mut free_heads = [[(0usize, 0usize); crate::memory::zone::MAX_ORDER + 1];
+                crate::memory::zone::ZoneType::COUNT];
+            let mut frag = [[0usize; crate::memory::zone::MAX_ORDER + 1];
+                crate::memory::zone::ZoneType::COUNT];
             for zi in 0..zone_count {
                 let zone = alloc.get_zone(zi);
-                let info = zones[zi];
-                let mut line = alloc::string::String::from("[heap][diag] ");
-                use core::fmt::Write;
-                let _ = write!(line, "zone={:?} free_heads:", zone.zone_type);
                 for order in 0..=crate::memory::zone::MAX_ORDER {
-                    let unmovable = zone.free_list_count_for(
-                        order as u8,
-                        crate::memory::zone::Migratetype::Unmovable,
+                    free_heads[zi][order] = (
+                        zone.free_list_count_for(
+                            order as u8,
+                            crate::memory::zone::Migratetype::Unmovable,
+                        ),
+                        zone.free_list_count_for(
+                            order as u8,
+                            crate::memory::zone::Migratetype::Movable,
+                        ),
                     );
-                    let movable = zone.free_list_count_for(
-                        order as u8,
-                        crate::memory::zone::Migratetype::Movable,
-                    );
-                    if unmovable > 0 || movable > 0 {
-                        let _ = write!(line, " o{}=u{}/m{} ", order, unmovable, movable);
-                    }
                 }
-                crate::serial_println!("{}", line);
-
-                let mut frag = alloc::string::String::from("[heap][diag] ");
-                let _ = write!(frag, "zone={:?} frag:", zone.zone_type);
                 for order in 1..=crate::memory::zone::MAX_ORDER {
-                    let score = zone.fragmentation_score(order as u8, info.cached_pages);
-                    let _ = write!(frag, " o{}={}%", order, score);
+                    frag[zi][order] = zone.fragmentation_score(order as u8, zones[zi].cached_pages);
                 }
-                crate::serial_println!("{}", frag);
             }
-        }
+            (total_pages, allocated_pages, zones, zone_count, free_heads, frag)
+        })
     } else {
+        buddy_locked = true;
+        None
+    };
+    // Guard (if any) dropped here.
+
+    if buddy_locked {
         crate::serial_println!("[heap][diag] buddy: allocator locked (retry later)");
+    } else if let Some((total_pages, allocated_pages, zones, zone_count, free_heads, frag)) =
+        buddy_stats
+    {
+        crate::serial_println!(
+            "[heap][diag] buddy: total={} pages, allocated={} pages, free={} pages",
+            total_pages,
+            allocated_pages,
+            total_pages.saturating_sub(allocated_pages)
+        );
+
+        for info in zones.iter().take(zone_count) {
+            crate::serial_println!(
+                "[heap][diag] zone={:?} state={:?} managed={} present={} reserved={} free={} cached={} cu/cm={}/{} avail={} segments={}/{} pageblocks=u{}/m{} u_free={} m_free={} watermarks={}/{}/{} reserve={} largest_order={:?}",
+                info.zone_type,
+                info.pressure(),
+                info.managed_pages,
+                info.present_pages,
+                info.reserved_pages,
+                info.free_pages,
+                info.cached_pages,
+                info.cached_unmovable_pages,
+                info.cached_movable_pages,
+                info.available_after_reserve_pages(),
+                info.segment_count,
+                info.segment_capacity,
+                info.unmovable_pageblocks,
+                info.movable_pageblocks,
+                info.unmovable_free_pages,
+                info.movable_free_pages,
+                info.watermark_min,
+                info.watermark_low,
+                info.watermark_high,
+                info.lowmem_reserve_pages,
+                info.largest_free_order
+            );
+        }
+
+        // Per-zone free list heads by migratetype.
+        for zi in 0..zone_count {
+            let info = zones[zi];
+            let mut line = alloc::string::String::from("[heap][diag] ");
+            use core::fmt::Write;
+            let _ = write!(line, "zone={:?} free_heads:", info.zone_type);
+            for order in 0..=crate::memory::zone::MAX_ORDER {
+                let (unmovable, movable) = free_heads[zi][order];
+                if unmovable > 0 || movable > 0 {
+                    let _ = write!(line, " o{}=u{}/m{} ", order, unmovable, movable);
+                }
+            }
+            crate::serial_println!("{}", line);
+
+            let mut frag_line = alloc::string::String::from("[heap][diag] ");
+            let _ = write!(frag_line, "zone={:?} frag:", info.zone_type);
+            for order in 1..=crate::memory::zone::MAX_ORDER {
+                let _ = write!(frag_line, " o{}={}%", order, frag[zi][order]);
+            }
+            crate::serial_println!("{}", frag_line);
+        }
     }
 
     // Buddy failure counts
