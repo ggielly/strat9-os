@@ -33,7 +33,10 @@ fn feed_translates_text_into_the_same_scancodes_as_the_keyboard_model() {
     for &code in &expected {
         assert_eq!(controller.read(keyboard::DATA_PORT), Some(code));
     }
-    assert_eq!(controller.read(keyboard::DATA_PORT), None);
+    // The model replies with a zero byte once the queue is empty, like the
+    // controller's idle data-port read.
+    assert!(!controller.has_scancode());
+    assert_eq!(controller.read(keyboard::DATA_PORT), Some(0));
 }
 
 #[test]
@@ -88,8 +91,12 @@ fn fill_stops_at_the_controller_capacity_and_resumes_later() {
     let total = feed.scancodes.len();
     assert!(accepted > 0 && accepted < total, "accepted {accepted}/{total}");
     assert_eq!(feed.fill(&mut controller, 4096), 0, "queue is still full");
-    // Draining the controller lets the remaining scancodes through.
-    while controller.read(keyboard::DATA_PORT).is_some() {}
+    // Draining the controller lets the remaining scancodes through. The data
+    // port never reports `None` (it answers zero when idle), so the queue
+    // length is the stop condition.
+    while controller.has_scancode() {
+        let _ = controller.read(keyboard::DATA_PORT);
+    }
     assert!(feed.fill(&mut controller, 4096) > 0);
 }
 
