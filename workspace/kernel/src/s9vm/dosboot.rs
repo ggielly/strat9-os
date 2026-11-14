@@ -700,7 +700,15 @@ fn run_firmware_with_limits(
 ) -> Result<DosReport, DosError> {
     require_real_mode(caps, firmware.label())?;
     let record = vm::create(world_name, 0).ok_or(DosError::VmFail(1))?;
-    let result = run_freedos_in_world(caps, record.id, limits, firmware, image, keys, None);
+    let result = run_freedos_in_world(
+        caps,
+        record.id,
+        limits,
+        firmware,
+        image,
+        KeyboardFeed::new(keys),
+        None,
+    );
     let _ = vm::destroy(record.id);
     result
 }
@@ -1372,18 +1380,41 @@ struct KeyboardFeed {
 
 impl KeyboardFeed {
     fn new(keys: &[u8]) -> Self {
-        let mut scancodes = Vec::new();
-        let mut pairs = Vec::new();
-        for &byte in keys {
-            if let Some(pair) = keyboard::keystroke_for(byte, &mut scancodes) {
-                pairs.push(pair);
-            }
+        let mut feed = Self::empty();
+        feed.extend(keys);
+        feed
+    }
+
+    /// A feed with nothing queued.
+    fn empty() -> Self {
+        Self {
+            scancodes: Vec::new(),
+            next: 0,
+            keys: Vec::new(),
+            next_key: 0,
         }
+    }
+
+    /// Continues a previous slice from exactly where it stopped.
+    ///
+    /// The 8042 and the firmware buffer consume at different rates, so both
+    /// remainders are carried: rebuilding from the original text would re-type
+    /// keys the guest already received.
+    fn from_pending(scancodes: Vec<u8>, keys: Vec<(u8, u8)>) -> Self {
         Self {
             scancodes,
             next: 0,
-            keys: pairs,
+            keys,
             next_key: 0,
+        }
+    }
+
+    /// Appends more host text to the queue.
+    fn extend(&mut self, text: &[u8]) {
+        for &byte in text {
+            if let Some(pair) = keyboard::keystroke_for(byte, &mut self.scancodes) {
+                self.keys.push(pair);
+            }
         }
     }
 
@@ -1839,8 +1870,10 @@ pub struct DosSession {
     vcpu: Option<Vcpu>,
     /// BIOS model state (video mode, cursor, keyboard buffer, tick count).
     bios_state: bios::BiosState,
-    /// Scancodes typed by the host but not delivered to the guest yet.
-    pending_keys: Vec<u8>,
+    /// Scancodes typed by the host but not accepted by the 8042 model yet.
+    pending_scancodes: Vec<u8>,
+    /// `(scan, ASCII)` pairs the firmware keyboard buffer has not received yet.
+    pending_buffer_keys: Vec<(u8, u8)>,
     /// Number of slices entered since the session was opened.
     slices: u32,
     /// Autoexec marker seen by any slice.
@@ -1935,7 +1968,8 @@ fn dos_open_prepared(
             image,
             vcpu: Some(vcpu),
             bios_state: bios::BiosState::new(),
-            pending_keys: Vec::new(),
+            pending_scancodes: Vec::new(),
+            pending_buffer_keys: Vec::new(),
             slices: 0,
             marker_seen: false,
             last_exits: 0,
@@ -1967,7 +2001,7 @@ pub fn dos_status() -> Option<DosSessionStatus> {
         world_id: session.world_id,
         slices: session.slices,
         marker_seen: session.marker_seen,
-        pending_keys: session.pending_keys.len(),
+        pending_keys: session.pending_scancodes.len() + session.pending_buffer_keys.len(),
         last_exits: session.last_exits,
         last_irq: session.last_irq,
         last_keys: session.last_keys,
@@ -1985,16 +2019,21 @@ pub fn dos_run(caps: &HwCaps, limits: RunLimits) -> Result<DosReport, DosError> 
         None => return Err(DosError::BadExit("no DOS session: run `vm dos open` first")),
     };
     let world_id = session.world_id;
-    let mut keys = session.pending_keys.clone();
-    keys.extend_from_slice(&vm::take_console_input(world_id));
-    session.pending_keys.clear();
+    // Continue exactly where the previous slice stopped for each keyboard
+    // consumer, then append whatever the console queued since (the same path
+    // as `vm send`).
+    let mut keyboard_feed = KeyboardFeed::from_pending(
+        core::mem::take(&mut session.pending_scancodes),
+        core::mem::take(&mut session.pending_buffer_keys),
+    );
+    keyboard_feed.extend(&vm::take_console_input(world_id));
     let result = run_freedos_in_world(
         caps,
         world_id,
         limits,
         session.firmware,
         session.image,
-        &keys,
+        keyboard_feed,
         Some(&mut session),
     );
     if session.vcpu.is_some() {
@@ -2245,6 +2284,33 @@ pub fn run_freedos_session_dry(caps: &HwCaps) -> Result<(), DosError> {
                 "up arrow did not produce the extended scan sequence",
             ));
         }
+        // Slice hand-over: the two keyboard consumers stop at different
+        // points, so both remainders must be carried verbatim. Rebuilding the
+        // feed from the original text would re-type keys the guest already
+        // received (that bug made multi-slice typing unreliable).
+        let mut partial = KeyboardFeed::new(b"ab");
+        partial.next = 1;
+        partial.next_key = 1;
+        let expected_scancodes = partial.scancodes[1..].to_vec();
+        let expected_keys = partial.keys[1..].to_vec();
+        let mut resumed = KeyboardFeed::from_pending(
+            partial.scancodes[1..].to_vec(),
+            partial.keys[1..].to_vec(),
+        );
+        if resumed.scancodes != expected_scancodes
+            || resumed.keys != expected_keys
+            || resumed.remaining() == 0
+        {
+            let _ = vm::store_machine(world_id, machine);
+            return Err(DosError::BadExit(
+                "keyboard remainders did not survive the slice hand-over",
+            ));
+        }
+        resumed.extend(b"c");
+        if resumed.keys.last() != Some(&(0, b'c')) || resumed.next != 0 || resumed.next_key != 0 {
+            let _ = vm::store_machine(world_id, machine);
+            return Err(DosError::BadExit("resumed keyboard feed did not accept new text"));
+        }
         let mut feed = KeyboardFeed::new(&[0x80]);
         if feed.fill_bios(&mut bios_state, 1) != 1
             || bios_state.keyboard.back() != Some(&(0x48, 0))
@@ -2410,7 +2476,7 @@ fn run_freedos_in_world(
     limits: RunLimits,
     firmware: FirmwareKind,
     image: &'static [u8],
-    keys: &[u8],
+    keyboard_feed: KeyboardFeed,
     session: Option<&mut DosSession>,
 ) -> Result<DosReport, DosError> {
     // Timestamp origin of the whole launch, before the first world mapping.
@@ -2515,8 +2581,9 @@ fn run_freedos_in_world(
         report.boot_sector_gpa = u64::from(firmware::RESET_LINEAR);
         report.entry = u64::from(firmware::RESET_LINEAR);
     }
-    // Host text typed into the guest keyboard once the guest owns `INT 9`.
-    let mut keyboard_feed = KeyboardFeed::new(keys);
+    // Host keys typed into the guest keyboard once the guest owns `INT 9`.
+    // A resumed slice starts from the previous slice's remainders.
+    let mut keyboard_feed = keyboard_feed;
     let mut apic = LocalApic::new(0);
     let mut unhandled_ports: u32 = 0;
     // First distinct unmodeled ports, so a guest that spins on one legacy port
@@ -3123,7 +3190,8 @@ fn run_freedos_in_world(
     if let Some(session) = session.as_deref_mut() {
         session.vcpu = Some(vcpu);
         session.bios_state = bios_state;
-        session.pending_keys = keyboard_feed.scancodes[keyboard_feed.next..].to_vec();
+        session.pending_scancodes = keyboard_feed.scancodes[keyboard_feed.next..].to_vec();
+        session.pending_buffer_keys = keyboard_feed.keys[keyboard_feed.next_key..].to_vec();
         session.slices = session.slices.saturating_add(1);
         session.marker_seen |= report.marker == Some(SUCCESS_MARKER);
         session.last_exits = report.total_exits;
@@ -3131,13 +3199,13 @@ fn run_freedos_in_world(
         session.last_keys = report.scancodes_typed;
         // Explain a slice where the host keys never reached the guest: the
         // two gates are the guest's own INT 9 handler and the 8259 mask.
-        if !session.pending_keys.is_empty() {
+        if !session.pending_scancodes.is_empty() || !session.pending_buffer_keys.is_empty() {
             let owns = guest_owns_vector(&mut memory, 0x09);
             let masked = machine.devices().pic.master().mask() & 0x02 != 0;
             log::warn!(
                 "[s9vm] {}: {} host scancode(s) not typed (guest INT 9 owner: {}, IRQ1 masked: {})",
                 firmware.label(),
-                session.pending_keys.len(),
+                session.pending_scancodes.len() + session.pending_buffer_keys.len(),
                 owns,
                 masked
             );
