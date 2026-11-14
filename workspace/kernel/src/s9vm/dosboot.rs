@@ -2172,6 +2172,48 @@ pub fn run_freedos_session_dry(caps: &HwCaps) -> Result<(), DosError> {
             let _ = vm::store_machine(world_id, machine);
             return Err(DosError::BadExit("IRQ1 was not latched in the 8259"));
         }
+        // Extended keys: an arrow reaches the guest as an `0xE0`-prefixed pair
+        // on the 8042, and as a `(scan code, 0)` entry in the firmware buffer.
+        let mut drained = 0usize;
+        while machine.devices_mut().keyboard.read(keyboard::DATA_PORT).is_some() {
+            drained += 1;
+            if drained > 64 {
+                break;
+            }
+        }
+        let mut feed = KeyboardFeed::new(&[0x80]); // the kernel `KEY_UP` byte
+        if service_keyboard(
+            machine.devices_mut(),
+            &mut memory,
+            &mut feed,
+            &mut bios_state,
+        ) == 0
+        {
+            let _ = vm::store_machine(world_id, machine);
+            return Err(DosError::BadExit("extended key was not typed"));
+        }
+        let mut sequence = Vec::new();
+        while let Some(byte) = machine.devices_mut().keyboard.read(keyboard::DATA_PORT) {
+            sequence.push(byte);
+            if sequence.len() >= 4 {
+                break;
+            }
+        }
+        if sequence != [0xE0, 0x48, 0xE0, 0xC8] {
+            let _ = vm::store_machine(world_id, machine);
+            return Err(DosError::BadExit(
+                "up arrow did not produce the extended scan sequence",
+            ));
+        }
+        let mut feed = KeyboardFeed::new(&[0x80]);
+        if feed.fill_bios(&mut bios_state, 1) != 1
+            || bios_state.keyboard.back() != Some(&(0x48, 0))
+        {
+            let _ = vm::store_machine(world_id, machine);
+            return Err(DosError::BadExit(
+                "up arrow did not reach the firmware keyboard buffer",
+            ));
+        }
         let _ = vm::store_machine(world_id, machine);
         Ok(())
     })();
