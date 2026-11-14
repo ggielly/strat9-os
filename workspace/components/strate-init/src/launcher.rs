@@ -28,6 +28,7 @@
 //! a failed launch does not leak the blob. `supervisor` restarts a strate from
 //! the returned [`Launched::module_handle`], so the caller must keep it.
 
+use init_config::Sha256Digest;
 use strat9_syscall::{call, data::IpcMessage, number};
 
 use crate::{
@@ -148,16 +149,63 @@ fn attach_and_start(silo_handle: usize, name: &str, module_handle: usize) -> Opt
     }
 }
 
+/// Verifies `data` against the digest declared for `path`.
+///
+/// A mismatch is fatal for the launch: loading unverified bytes is never
+/// preferable to refusing to run. On success the digest is logged as verified
+/// (`sha256 ok`), never as trusted before this point.
+fn verify(path: &str, expected: Sha256Digest, data: &[u8]) -> bool {
+    let actual = init_config::sha256(data);
+    if actual != *expected.as_bytes() {
+        log("[init] INTEGRITY: sha256 mismatch for ");
+        log(path);
+        log(" expected=");
+        log(&expected.as_str());
+        log(" actual=");
+        log(&init_config::sha256_hex(&actual));
+        log("\n");
+        return false;
+    }
+    log("[init] sha256 ok ");
+    log(path);
+    log("\n");
+    true
+}
+
 /// Loads, attaches and starts one ELF (or wasm runtime) strate.
 ///
 /// Both module sources converge here: a binary under `/initfs` is loaded by
-/// path, any other path is read by this process and loaded as a blob. Only
-/// the source of the bytes differs. A module that cannot be attached or
-/// started is unloaded immediately, so a failed launch does not leak the
-/// blob. Returns the module handle and the started pid, both needed by the
-/// supervisor to restart this exact strate.
-pub fn launch_module(silo_handle: usize, name: &str, binary: &str) -> Option<Launched> {
+/// path, any other path is read by this process and loaded as a blob. When
+/// `expected_sha256` is set the bytes are hashed and compared before the load:
+/// an `/initfs` module is read only to compute the digest and the buffer is
+/// dropped before the kernel loads it by path, while a blob is verified in
+/// place. A module that cannot be attached or started is unloaded immediately,
+/// so a failed launch does not leak the blob. Returns the module handle and the
+/// started pid, both needed by the supervisor to restart this exact strate.
+pub fn launch_module(
+    silo_handle: usize,
+    name: &str,
+    binary: &str,
+    expected_sha256: Option<Sha256Digest>,
+) -> Option<Launched> {
     let module_handle = if binary.starts_with("/initfs/") {
+        if let Some(expected) = expected_sha256 {
+            // Read only to hash; the kernel still loads the module by path.
+            let data = match read_file(binary) {
+                Ok(data) => data,
+                Err(_) => {
+                    log("[init] INTEGRITY: cannot read ");
+                    log(binary);
+                    log("\n");
+                    return None;
+                }
+            };
+            let verified = verify(binary, expected, &data);
+            drop(data);
+            if !verified {
+                return None;
+            }
+        }
         log("[init]     module path ");
         log(binary);
         log("\n");
@@ -191,6 +239,11 @@ pub fn launch_module(silo_handle: usize, name: &str, binary: &str) -> Option<Lau
         log(" size=");
         log_u32(data.len() as u32);
         log("\n");
+        if let Some(expected) = expected_sha256 {
+            if !verify(binary, expected, &data) {
+                return None;
+            }
+        }
         match load_module(data.as_ptr() as usize, data.len()) {
             Some(handle) => handle,
             None => {

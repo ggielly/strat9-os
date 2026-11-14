@@ -82,16 +82,17 @@ pub struct PerCpu {
     apic_id: AtomicU32,
     kernel_stack_top: AtomicU64,
     tlb_ready: AtomicBool,
-    /// Fast signal-pending hint for the current CPU.
+    /// Fast signal-pending hint for the current CPU, tagged with the target
+    /// task id.
     ///
-    /// Set by `send_signal` when a signal targets the task currently running
-    /// on this CPU. Checked by the syscall dispatcher to avoid the expensive
-    /// `current_task_clone()` + scheduler lock when no signal is pending.
+    /// Encoding: `(task_id << 1) | 1`; `0` means "no hint". Tagging lets the
+    /// syscall dispatcher attribute the hint to a specific task instead of
+    /// re-checking whatever task happens to be running on this CPU.
     ///
-    /// AtomicU32 (not AtomicBool) for better cache-line performance.
-    ///
-    /// NOTE TODO : the extra bits are reserved for future fast-pending flags.
-    pub signal_pending: AtomicU32,
+    /// Set by `send_signal` when a signal targets the task last seen on this
+    /// CPU. Checked by the syscall dispatcher to avoid the expensive
+    /// `current_task_id_try()` + scheduler lock when no signal is pending.
+    pub signal_pending: AtomicU64,
 }
 
 impl PerCpu {
@@ -109,7 +110,7 @@ impl PerCpu {
             apic_id: AtomicU32::new(0),
             kernel_stack_top: AtomicU64::new(0),
             tlb_ready: AtomicBool::new(false),
-            signal_pending: AtomicU32::new(0),
+            signal_pending: AtomicU64::new(0),
         }
     }
 
@@ -540,23 +541,83 @@ pub fn tlb_ready(index: usize) -> bool {
 
 // ========== Fast signal-pending hint ==========
 
-/// Set the `signal_pending` flag for the current CPU.
-///
-/// Called by `send_signal` when a signal targets the task running on this CPU.
-/// The syscall dispatcher checks this flag to avoid the expensive scheduler
-/// lock when no signal is pending.
+/// Encode a task id into the tagged hint word (bit 0 set = valid hint).
 #[inline]
-pub fn set_signal_pending_current() {
-    let idx = current_cpu_index();
-    PERCPU[idx].signal_pending.store(1, Ordering::Release);
+const fn encode_signal_hint(task_id: u64) -> u64 {
+    (task_id << 1) | 1
 }
 
-/// Test and clear the `signal_pending` flag for the current CPU.
-///
-/// Returns `true` if a signal was marked pending since the last check.
-/// This is a one-shot check : the flag is cleared atomically.
+/// Decode a tagged hint word back to a task id.
 #[inline]
-pub fn test_and_clear_signal_pending_current() -> bool {
+const fn decode_signal_hint(word: u64) -> Option<u64> {
+    if word & 1 != 0 {
+        Some(word >> 1)
+    } else {
+        None
+    }
+}
+
+/// Set the tagged `signal_pending` hint for an explicit CPU.
+///
+/// Bounds-checked: a stale/invalid CPU index is silently ignored rather than
+/// panicking. Called by `send_signal` for a task whose `last_cpu` is online.
+#[inline]
+pub fn set_signal_pending_for_cpu(cpu: usize, task_id: u64) {
+    if let Some(slot) = PERCPU.get(cpu) {
+        slot.signal_pending
+            .store(encode_signal_hint(task_id), Ordering::Release);
+    }
+}
+
+/// Set the tagged `signal_pending` hint for the current CPU.
+#[inline]
+pub fn set_signal_pending_current_for_task(task_id: u64) {
     let idx = current_cpu_index();
-    PERCPU[idx].signal_pending.swap(0, Ordering::AcqRel) != 0
+    PERCPU[idx]
+        .signal_pending
+        .store(encode_signal_hint(task_id), Ordering::Release);
+}
+
+/// Take and clear the tagged hint for the current CPU.
+///
+/// Returns the task id the hint refers to, or `None` when the hint is empty.
+/// This is a one-shot check: the word is cleared atomically so it cannot be
+/// inherited by the next task scheduled on this CPU.
+#[inline]
+pub fn take_signal_hint_current() -> Option<u64> {
+    let idx = current_cpu_index();
+    decode_signal_hint(PERCPU[idx].signal_pending.swap(0, Ordering::AcqRel))
+}
+
+/// Restore a previously taken hint for the current CPU.
+///
+/// Uses a CAS that only succeeds when the slot is still empty, so a hint
+/// concurrently armed for a different task is never overwritten.
+#[inline]
+pub fn restore_signal_hint_current(task_id: u64) {
+    let idx = current_cpu_index();
+    let _ = PERCPU[idx].signal_pending.compare_exchange(
+        0,
+        encode_signal_hint(task_id),
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    );
+}
+
+/// Clear any signal hint referring to `task_id` on every CPU.
+///
+/// Called when a task dies so a stale tag cannot force the scheduler-lock
+/// fallback path on an unrelated CPU. Bounded scan (MAX_CPUS slots); the CAS
+/// only clears the slot if it still holds this task's tag, so a concurrently
+/// armed hint for another task is preserved.
+pub fn clear_signal_hint_for_task(task_id: u64) {
+    let packed = encode_signal_hint(task_id);
+    for slot in PERCPU.iter() {
+        let _ = slot.signal_pending.compare_exchange(
+            packed,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
 }

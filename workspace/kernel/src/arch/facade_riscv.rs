@@ -84,9 +84,26 @@ pub mod percpu {
     pub fn tlb_ready(_index: usize) -> bool {
         true
     }
-    pub fn set_signal_pending_current() {}
-    pub fn test_and_clear_signal_pending_current() -> bool {
-        false
+    pub fn set_signal_pending_current_for_task(_task_id: u64) {}
+    pub fn set_signal_pending_for_cpu(_cpu: usize, _task_id: u64) {}
+    pub fn take_signal_hint_current() -> Option<u64> {
+        None
+    }
+    pub fn restore_signal_hint_current(_task_id: u64) {}
+    pub fn clear_signal_hint_for_task(_task_id: u64) {}
+    pub fn is_online(index: usize) -> bool {
+        index == 0
+    }
+    pub fn online_count() -> usize {
+        1
+    }
+    pub fn online_cpu_indices(out: &mut [usize]) -> usize {
+        if out.is_empty() {
+            0
+        } else {
+            out[0] = 0;
+            1
+        }
     }
     pub fn apic_id_by_cpu_index(index: usize) -> Option<u32> {
         if index == 0 {

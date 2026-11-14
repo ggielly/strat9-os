@@ -40,19 +40,22 @@ pub mod model;
 pub mod parse;
 pub mod plan;
 pub mod policy;
+pub mod sha256;
 pub mod validate;
 
 pub use model::{
-    Diagnostic, Dma, Family, FaultPolicy, Graphics, Mode, Sid, SiloDef, StrateDef, StrateKind,
-    StrateRef, SID_AUTO_SENTINEL, SID_SYSTEM_FIRST, SID_USER_FIRST,
+    Diagnostic, Dma, Family, FaultPolicy, Grant, GrantKind, Graphics, Mode, PciAddress, Policy,
+    Profile, Selection, ServicePath, Sha256Digest, Sid, SiloDef, StrateDef, StrateKind, StrateRef,
+    DEFAULT_ADMIN_ALLOW, SID_AUTO_SENTINEL, SID_SYSTEM_FIRST, SID_USER_FIRST,
 };
 pub use parse::{parse_config, ParsedConfig};
 pub use plan::{
-    build_plan, ensure_required_silos, merge_overlay, reorder_bus_first, BootPlan, PlannedKind,
-    PlannedSilo, PlannedStrate,
+    build_plan, build_plan_with_policy, build_plan_with_reserved, ensure_required_silos,
+    merge_overlay, BootPlan, PlannedKind, PlannedSilo, PlannedStrate,
 };
 pub use policy::{classify, Backoff, ExitKind, RestartBudget, RestartPolicy};
-pub use validate::{validate_silo, Validated};
+pub use sha256::{hex as sha256_hex, sha256};
+pub use validate::{validate_silo, validate_silo_with_allowlist, Validated};
 
 #[cfg(test)]
 mod tests;

@@ -73,16 +73,23 @@ impl CpuId {
     }
 
     /// Returns the number of CPUs in the system
+    ///
+    /// On x86_64 this is the number of currently online CPUs. CPU indices are
+    /// sparse, so this count is not an upper bound for index scanning.
     pub fn num_cpus() -> usize {
-        crate::arch::percpu::get_cpu_count()
+        #[cfg(target_arch = "x86_64")]
+        {
+            crate::arch::percpu::online_count().max(1)
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            crate::arch::percpu::get_cpu_count().max(1)
+        }
     }
 
     /// Returns an iterator over all CPUs
     pub fn iter() -> CpuIter {
-        CpuIter {
-            current: 0,
-            end: Self::num_cpus(),
-        }
+        CpuIter { next: 0 }
     }
 }
 
@@ -107,10 +114,12 @@ impl core::fmt::Display for CpuId {
     }
 }
 
-/// Iterator over all CPUs
+/// Iterator over all online CPUs
+///
+/// CPU indices may be sparse, so this scans the full `0..MAX_CPUS` index space
+/// and yields only slots that are currently online.
 pub struct CpuIter {
-    current: usize,
-    end: usize,
+    next: usize,
 }
 
 impl Iterator for CpuIter {
@@ -118,12 +127,26 @@ impl Iterator for CpuIter {
 
     /// Performs the next operation.
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current < self.end {
-            let cpu = CpuId::new(self.current);
-            self.current += 1;
-            Some(cpu)
-        } else {
+        #[cfg(target_arch = "x86_64")]
+        {
+            while self.next < crate::arch::percpu::MAX_CPUS {
+                let idx = self.next;
+                self.next += 1;
+                if crate::arch::percpu::is_online(idx) {
+                    return Some(CpuId::new(idx));
+                }
+            }
             None
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            if self.next < CpuId::num_cpus() {
+                let cpu = CpuId::new(self.next);
+                self.next += 1;
+                Some(cpu)
+            } else {
+                None
+            }
         }
     }
 }

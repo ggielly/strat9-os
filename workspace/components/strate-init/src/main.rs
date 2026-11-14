@@ -36,9 +36,11 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::{alloc::Layout, panic::PanicInfo};
 use init_config::{
-    BootPlan, Diagnostic, PlannedKind, SiloDef, build_plan, merge_overlay, parse_config,
+    BootPlan, Diagnostic, PlannedKind, PlannedSilo, Policy, Selection, SiloDef,
+    build_plan_with_policy, build_plan_with_reserved, merge_overlay, parse_config,
 };
 use strat9_syscall::{call, data::SiloConfig};
+mod control;
 pub mod fmt;
 mod launcher;
 mod supervisor;
@@ -133,13 +135,16 @@ fn read_file(path: &str) -> Result<Vec<u8>, &'static str> {
 const DEFAULT_SILO_TOML: &str = include_str!("../../../assets/boot/silo.toml");
 
 /// Parses the embedded default silo config.
-fn default_silos() -> (Vec<SiloDef>, Vec<Diagnostic>) {
-    let parsed = parse_config(DEFAULT_SILO_TOML);
-    (parsed.silos, parsed.diagnostics)
+fn default_silos() -> init_config::ParsedConfig {
+    parse_config(DEFAULT_SILO_TOML)
 }
 
 /// Loads the primary silo config, falling back to the embedded defaults.
-fn load_primary_silos() -> (Vec<SiloDef>, Vec<Diagnostic>) {
+///
+/// The parsed `[policy]` section is returned with the silos so the same
+/// admin allowlist and target/profile selection drive the plan and later
+/// `reload` calls.
+fn load_primary_silos() -> (Vec<SiloDef>, Vec<Diagnostic>, Policy) {
     log("[init] load_primary_silos: begin\n");
     let parsed = match read_file("/initfs/silo.toml") {
         Ok(data_vec) => match core::str::from_utf8(&data_vec) {
@@ -163,17 +168,70 @@ fn load_primary_silos() -> (Vec<SiloDef>, Vec<Diagnostic>) {
             log("[init] load_primary_silos: parsed file count=");
             log_u32(parsed.silos.len() as u32);
             log("\n");
-            (parsed.silos, parsed.diagnostics)
+            (parsed.silos, parsed.diagnostics, parsed.policy)
         }
         _ => {
             log("[init] Empty or unusable /initfs/silo.toml, using embedded defaults\n");
-            let (silos, diagnostics) = default_silos();
+            let parsed = default_silos();
             log("[init] load_primary_silos: parsed embedded defaults count=");
-            log_u32(silos.len() as u32);
+            log_u32(parsed.silos.len() as u32);
             log("\n");
-            (silos, diagnostics)
+            (parsed.silos, parsed.diagnostics, parsed.policy)
         }
     }
+}
+
+/// Applies `/initfs/init.target` over the configured selection.
+///
+/// The file's first non-empty line is a `Selection` spec; on any error the
+/// configured policy is kept unchanged.
+fn apply_init_target(policy: &mut Policy) {
+    let data = match read_file("/initfs/init.target") {
+        Ok(data) => data,
+        Err(_) => return,
+    };
+    let text = match core::str::from_utf8(&data) {
+        Ok(text) => text,
+        Err(_) => {
+            log("[init] CONFIG ERROR: init.target: invalid UTF-8\n");
+            return;
+        }
+    };
+    let spec = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    match Selection::from_spec(spec) {
+        Ok(selection) => {
+            policy.selection.profile = selection.profile;
+            for name in selection.disabled {
+                if !policy.selection.is_disabled(&name) {
+                    policy.selection.disabled.push(name);
+                }
+            }
+            log("[init] target=");
+            log(policy.selection.profile.as_str());
+            log(" disable=");
+            log_u32(policy.selection.disabled.len() as u32);
+            log("\n");
+        }
+        Err(e) => {
+            log("[init] CONFIG ERROR: init.target: ");
+            log(&e);
+            log("\n");
+        }
+    }
+}
+
+///
+/// `reserved` holds the SIDs of live children so a reload cannot hand one of
+/// them to a newly added silo. Shared by `_start` and the `/srv/init` `reload`
+/// command so both apply the same parse, overlay merge and policy rules.
+pub(crate) fn rebuild_plan(reserved: &[u32]) -> BootPlan {
+    let (mut silos, mut diagnostics, policy) = load_primary_silos();
+    diagnostics.extend(merge_wasm_test_overlay(&mut silos));
+    build_plan_with_reserved(silos, diagnostics, policy, reserved)
 }
 
 /// Merges `/initfs/wasm-test.toml` silos that are not already declared.
@@ -264,107 +322,155 @@ fn build_silo_config(silo: &init_config::PlannedSilo) -> SiloConfig {
     config
 }
 
+/// Waits until `path` resolves through `ipc_connect`, with bounded backoff.
+///
+/// Probes with a closed handle immediately: connecting is the readiness signal,
+/// not a handle we intend to keep. Backoff doubles from 10 ms to 250 ms and the
+/// total wait is capped at ~10 s.
+fn wait_for_service(path: &str) -> bool {
+    let mut delay = 10u32;
+    let mut waited = 0u32;
+    loop {
+        if let Ok(handle) = call::ipc_connect(path.as_bytes()) {
+            let _ = call::handle_close(handle);
+            return true;
+        }
+        if waited >= 10_000 {
+            return false;
+        }
+        supervisor::sleep_ms(delay);
+        waited += delay;
+        delay = (delay * 2).min(250);
+    }
+}
+
 /// Implements boot silos.
 fn boot_silos(plan: BootPlan, supervised: &mut Vec<supervisor::SupervisedChild>) {
     for s_def in plan.silos {
-        log("[init] Creating Silo: ");
-        log(&s_def.name);
-        log(" (SID=");
-        log_u32(s_def.sid);
-        log(")\n");
+        boot_silo(s_def, supervised);
+    }
+}
 
-        let config = build_silo_config(&s_def);
-
-        let silo_handle = match call::silo_create((&config as *const SiloConfig) as usize) {
-            Ok(h) => h,
-            Err(e) => {
-                log("[init] silo_create failed: ");
-                log(e.name());
-                log("\n");
-                continue;
-            }
-        };
-
-        if let Some(ref lbl) = s_def.label {
-            if let Err(e) = call::silo_rename(silo_handle, lbl.as_ptr() as usize, lbl.len()) {
-                log("[init] silo_rename failed: ");
-                log(e.name());
-                log("\n");
-            }
-        }
-
-        let mut active_strates = 0u32;
-
-        if s_def.strates.is_empty() {
-            log("[init] No strates declared for silo ");
+/// Creates and starts every strate of one planned silo.
+///
+/// A silo whose `requires` service is not reachable within the readiness budget
+/// is skipped: `init-config` already dropped its dependents from the plan.
+/// Reused by `boot_silos` and the `/srv/init` `reload` command.
+pub(crate) fn boot_silo(s_def: PlannedSilo, supervised: &mut Vec<supervisor::SupervisedChild>) {
+    for path in &s_def.requires {
+        if !wait_for_service(path.as_str()) {
+            log("[init] DEGRADED: silo ");
             log(&s_def.name);
+            log(" missing required service ");
+            log(path.as_str());
+            log(", skipping\n");
+            return;
+        }
+    }
+
+    log("[init] Creating Silo: ");
+    log(&s_def.name);
+    log(" (SID=");
+    log_u32(s_def.sid);
+    log(")\n");
+
+    let config = build_silo_config(&s_def);
+
+    let silo_handle = match call::silo_create((&config as *const SiloConfig) as usize) {
+        Ok(h) => h,
+        Err(e) => {
+            log("[init] silo_create failed: ");
+            log(e.name());
+            log("\n");
+            return;
+        }
+    };
+
+    if let Some(ref lbl) = s_def.label {
+        if let Err(e) = call::silo_rename(silo_handle, lbl.as_ptr() as usize, lbl.len()) {
+            log("[init] silo_rename failed: ");
+            log(e.name());
             log("\n");
         }
+    }
 
-        for str_def in s_def.strates {
-            match str_def.kind {
-                PlannedKind::Elf | PlannedKind::WasmRuntime => {
-                    log("[init]   -> Strate: ");
-                    log(&str_def.name);
-                    log("\n");
-                    if let Some(launched) =
-                        launcher::launch_module(silo_handle, &str_def.name, &str_def.binary)
-                    {
-                        supervisor::register(
-                            supervised,
-                            &str_def.name,
-                            launched.pid,
-                            silo_handle,
-                            launched.module_handle,
-                            str_def.restart,
-                            str_def.critical,
-                            str_def.max_restarts,
-                        );
+    let mut active_strates = 0u32;
+
+    if s_def.strates.is_empty() {
+        log("[init] No strates declared for silo ");
+        log(&s_def.name);
+        log("\n");
+    }
+
+    for str_def in s_def.strates {
+        match str_def.kind {
+            PlannedKind::Elf | PlannedKind::WasmRuntime => {
+                log("[init]   -> Strate: ");
+                log(&str_def.name);
+                log("\n");
+                if let Some(launched) = launcher::launch_module(
+                    silo_handle,
+                    &str_def.name,
+                    &str_def.binary,
+                    str_def.sha256,
+                ) {
+                    supervisor::register(
+                        supervised,
+                        &str_def.name,
+                        launched.pid,
+                        s_def.sid,
+                        silo_handle,
+                        launched.module_handle,
+                        &s_def.name,
+                        s_def.admin,
+                        str_def.restart,
+                        str_def.critical,
+                        str_def.max_restarts,
+                    );
+                    active_strates += 1;
+                }
+            }
+            PlannedKind::WasmApp { service_label } => {
+                log("[init]   -> Wasm-App: ");
+                log(&str_def.name);
+                log("\n");
+                // `init-config` already resolved the runtime service label.
+                let service_path = alloc::format!("/srv/strate-wasm/{}", service_label);
+                match launcher::run_wasm_app(&service_path, &str_def.binary) {
+                    Ok(()) => {
+                        log("[init]     wasm app started: ");
+                        log(&str_def.binary);
+                        log("\n");
                         active_strates += 1;
                     }
-                }
-                PlannedKind::WasmApp { service_label } => {
-                    log("[init]   -> Wasm-App: ");
-                    log(&str_def.name);
-                    log("\n");
-                    // `init-config` already resolved the runtime service label.
-                    let service_path = alloc::format!("/srv/strate-wasm/{}", service_label);
-                    match launcher::run_wasm_app(&service_path, &str_def.binary) {
-                        Ok(()) => {
-                            log("[init]     wasm app started: ");
-                            log(&str_def.binary);
-                            log("\n");
-                            active_strates += 1;
-                        }
-                        Err(code) => {
-                            log("[init]     wasm app failed: status=0x");
-                            log_u32(code);
-                            log(" (service=");
-                            log(&service_path);
-                            log(", path=");
-                            log(&str_def.binary);
-                            log(")\n");
-                        }
+                    Err(code) => {
+                        log("[init]     wasm app failed: status=0x");
+                        log_u32(code);
+                        log(" (service=");
+                        log(&service_path);
+                        log(", path=");
+                        log(&str_def.binary);
+                        log(")\n");
                     }
                 }
             }
         }
+    }
 
-        // A silo whose strates all failed must not stay open: a task-less
-        // `Ready` silo (and the module it still references) would be kept for
-        // the rest of the boot. Destroy it, then release our handle.
-        if active_strates == 0 {
-            log("[init] No active strate in silo ");
-            log(&s_def.name);
-            log(", destroying it\n");
-            if let Err(e) = call::silo_destroy(silo_handle) {
-                log("[init] silo_destroy failed: ");
-                log(e.name());
-                log(", stopping it instead\n");
-                let _ = call::silo_stop(silo_handle);
-            }
-            let _ = call::handle_close(silo_handle);
+    // A silo whose strates all failed must not stay open: a task-less
+    // `Ready` silo (and the module it still references) would be kept for
+    // the rest of the boot. Destroy it, then release our handle.
+    if active_strates == 0 {
+        log("[init] No active strate in silo ");
+        log(&s_def.name);
+        log(", destroying it\n");
+        if let Err(e) = call::silo_destroy(silo_handle) {
+            log("[init] silo_destroy failed: ");
+            log(e.name());
+            log(", stopping it instead\n");
+            let _ = call::silo_stop(silo_handle);
         }
+        let _ = call::handle_close(silo_handle);
     }
 }
 
@@ -373,19 +479,26 @@ fn boot_silos(plan: BootPlan, supervised: &mut Vec<supervisor::SupervisedChild>)
 pub unsafe extern "C" fn _start() -> ! {
     log("[init] Strat9 hierarchical boot starting\n");
     log("[init] Stage: load primary silos\n");
-    let (mut silos, mut diagnostics) = load_primary_silos();
+    let (mut silos, mut diagnostics, mut policy) = load_primary_silos();
+    log("[init] Stage: apply init.target\n");
+    apply_init_target(&mut policy);
     log("[init] Stage: merge wasm overlay\n");
     diagnostics.extend(merge_wasm_test_overlay(&mut silos));
     log("[init] Stage: ensure required silos\n");
-    let plan = build_plan(silos, diagnostics);
+    let plan = build_plan_with_policy(silos, diagnostics, policy);
     for diagnostic in &plan.diagnostics {
         log_diagnostic(diagnostic);
     }
     log("[init] Stage: boot silos\n");
     let mut supervised = Vec::with_capacity(supervisor::CAPACITY);
+    // The plan is already in dependency order: the supervisor reuses it to stop
+    // children in reverse order on shutdown.
+    let plan_order: Vec<alloc::string::String> =
+        plan.silos.iter().map(|s| s.name.clone()).collect();
     boot_silos(plan, &mut supervised);
     log("[init] Boot complete.\n");
-    supervisor::run(supervised);
+    let control_port = control::init_port();
+    supervisor::run(supervised, control_port, plan_order);
 }
 
 #[panic_handler]

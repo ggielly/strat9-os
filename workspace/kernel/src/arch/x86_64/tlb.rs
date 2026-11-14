@@ -45,6 +45,10 @@ use x86_64::VirtAddr;
 use crate::sync::SpinLock;
 
 /// Type of TLB shootdown operation.
+///
+/// Ordered by strength for [`TlbQueue::push`]'s queue-full collapse :
+/// `FlushCaches > Full > Range > SinglePage > None`.  A stronger kind
+/// subsumes every weaker one, so promoting to it never loses an operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TlbShootdownKind {
     /// No pending shootdown.
@@ -55,6 +59,32 @@ enum TlbShootdownKind {
     Range,
     /// Flush all TLB entries (full CR3 reload).
     Full,
+    /// Write back and invalidate all CPU caches (`wbinvd`) as well as the TLB.
+    /// Used after a PAT / memory-type change so no CPU keeps stale cache lines
+    /// for the same physical memory under the old type.
+    FlushCaches,
+}
+
+impl TlbShootdownKind {
+    /// Strength rank; higher subsumes lower.
+    fn strength(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::SinglePage => 1,
+            Self::Range => 2,
+            Self::Full => 3,
+            Self::FlushCaches => 4,
+        }
+    }
+
+    /// The stronger of two kinds (never downgrades).
+    fn max(self, other: Self) -> Self {
+        if other.strength() > self.strength() {
+            other
+        } else {
+            self
+        }
+    }
 }
 
 /// A single TLB operation.
@@ -71,6 +101,41 @@ impl TlbOp {
         vaddr_start: 0,
         vaddr_end: 0,
     };
+}
+
+/// Collapse a full queue plus the incoming op into one op that subsumes all of
+/// them.
+///
+/// The strongest kind wins (`FlushCaches > Full > Range > SinglePage`).  When
+/// the result is a ranged invalidation the address range is the conservative
+/// union of every queued page/range (extra pages are harmless, missing pages
+/// are not).  `Full` and `FlushCaches` ignore the range.
+fn promote(queued: &[TlbOp], incoming: TlbOp) -> TlbOp {
+    let mut kind = incoming.kind;
+    let mut start = u64::MAX;
+    let mut end = 0u64;
+
+    for op in queued.iter().copied().chain(core::iter::once(incoming)) {
+        kind = kind.max(op.kind);
+        if matches!(op.kind, TlbShootdownKind::SinglePage | TlbShootdownKind::Range) {
+            start = start.min(op.vaddr_start);
+            end = end.max(op.vaddr_end);
+        }
+    }
+
+    if matches!(kind, TlbShootdownKind::SinglePage | TlbShootdownKind::Range) {
+        TlbOp {
+            kind,
+            vaddr_start: start,
+            vaddr_end: end,
+        }
+    } else {
+        TlbOp {
+            kind,
+            vaddr_start: 0,
+            vaddr_end: 0,
+        }
+    }
 }
 
 /// Per-CPU queue of pending TLB operations.
@@ -92,12 +157,11 @@ impl TlbQueue {
             self.ops[self.count] = op;
             self.count += 1;
         } else {
-            // Queue full: upgrade to a full flush to be safe.
-            self.ops[0] = TlbOp {
-                kind: TlbShootdownKind::Full,
-                vaddr_start: 0,
-                vaddr_end: 0,
-            };
+            // Queue full: collapse everything (including this op) into the
+            // strongest operation so no request is silently dropped.  If any
+            // queued op is a cache flush, the collapse must stay a cache
+            // flush, since it is the superset of a TLB flush here.
+            self.ops[0] = promote(&self.ops[..self.count], op);
             self.count = 1;
         }
     }
@@ -284,6 +348,24 @@ pub fn shootdown_all() {
     dispatch_op(op);
 }
 
+/// Flush all CPU caches on every CPU (`wbinvd` + IPI).
+///
+/// Required after a PAT / memory-type change : a page's memory type lives in
+/// the page tables, but existing cache lines retain the type they were filled
+/// under.  A TLB flush alone leaves those stale lines in place, so every CPU
+/// must also invalidate its caches.  [`dispatch_op`] is a no-op until the APIC
+/// is up, which is fine during early boot when this CPU is the only one running.
+pub fn shootdown_caches() {
+    // Flush this CPU first, then ask the others to do the same.
+    unsafe { wbinvd() };
+
+    dispatch_op(TlbOp {
+        kind: TlbShootdownKind::FlushCaches,
+        vaddr_start: 0,
+        vaddr_end: 0,
+    });
+}
+
 /// Internal helper to dispatch an operation to target CPUs.
 fn dispatch_op(op: TlbOp) {
     if !crate::arch::x86_64::apic::is_initialized() {
@@ -425,6 +507,10 @@ fn drain_local_queue() -> bool {
                 TlbShootdownKind::Full => {
                     unsafe { flush_tlb_all() };
                 }
+                TlbShootdownKind::FlushCaches => {
+                    // Superset of Full: invalidate caches and the TLB.
+                    unsafe { wbinvd() };
+                }
             }
         }
 
@@ -449,6 +535,15 @@ unsafe fn flush_tlb_all() {
     use x86_64::registers::control::Cr3;
     let (frame, flags) = Cr3::read();
     Cr3::write(frame, flags);
+}
+
+/// Write back and invalidate all CPU caches (`wbinvd`, local CPU only).
+///
+/// Serializing and very expensive, but the only architectural way to drop
+/// cache lines whose memory type just changed underneath them.
+#[inline]
+unsafe fn wbinvd() {
+    core::arch::asm!("wbinvd", options(nostack));
 }
 
 /// Send TLB IPI.
@@ -481,34 +576,71 @@ fn collect_tlb_targets(targets: &mut [u32]) -> usize {
 
 /// Wait for generation acknowledgements from the given targets.
 ///
-/// Each entry is `(apic_id, cpu_idx, seq)` captured at queue time.  While
-/// waiting, this CPU services its *own* mailbox if a request is pending :
-/// otherwise two initiators with interrupts disabled would spin forever, each
-/// waiting for the other's IPI handler that can never run.
+/// Each entry is `(apic_id, cpu_idx, seq)` captured at queue time.  The wait is
+/// bounded by a 10 ms TSC deadline rather than a fixed spin count, so a fast
+/// CPU is not forced to spin far longer than intended.  While waiting, this
+/// CPU services its *own* mailbox if a request is pending : otherwise two
+/// initiators with interrupts disabled would spin forever, each waiting for the
+/// other's IPI handler that can never run.
+///
+/// An IPI can be lost (e.g. the target is in a long IRQ-off section when the
+/// APIC coalesces the edge), so if half the budget elapses without an ack the
+/// IPI is re-sent once.  Only a full-budget expiry panics.
 fn wait_for_acks(targets: &[(u32, usize, u64)]) {
-    const MAX_WAIT_CYCLES: usize = 10_000_000;
+    const TIMEOUT_MS: u64 = 10;
+    // Cycles to spin when the TSC frequency is not yet known (tsc_khz() == 0).
+    const FALLBACK_SPINS: u64 = 10_000_000;
+
+    // TSC ticks for the deadline: tsc_khz() is kHz, so 1 ms == tsc_khz ticks.
+    let tsc_khz = crate::arch::x86_64::boot_timestamp::tsc_khz();
+    let budget = tsc_khz.saturating_mul(TIMEOUT_MS);
+    let retry_at = budget / 2;
     let my_cpu = current_cpu_index();
 
-    for &(_apic_id, cpu_idx, seq) in targets {
+    for &(apic_id, cpu_idx, seq) in targets {
+        let start = crate::arch::x86_64::rdtsc();
+        let mut retried = false;
+        let mut spun: u64 = 0;
         let mut success = false;
-        for _ in 0..MAX_WAIT_CYCLES {
+
+        loop {
             if TLB_DONE[cpu_idx].load(Ordering::Acquire) >= seq {
                 success = true;
                 break;
             }
+
             // Break the two-initiator deadlock: if a shootdown aimed at us is
             // sitting in our mailbox, execute it now.
             if TLB_REQ[my_cpu].load(Ordering::Acquire) > TLB_DONE[my_cpu].load(Ordering::Acquire) {
                 drain_local_queue();
             }
+
+            if budget == 0 {
+                // No TSC deadline available: bounded spin fallback.
+                spun += 1;
+                if spun >= FALLBACK_SPINS {
+                    break;
+                }
+            } else {
+                let elapsed = crate::arch::x86_64::rdtsc().wrapping_sub(start);
+                if elapsed >= budget {
+                    break;
+                }
+                if !retried && elapsed >= retry_at {
+                    send_tlb_ipi(apic_id);
+                    retried = true;
+                }
+            }
             core::hint::spin_loop();
         }
+
         if !success {
             panic!(
-                "TLB shootdown timeout: cpu={} expected seq={} observed done={}",
+                "TLB shootdown timeout: cpu={} seq={} done={} retried={}",
                 cpu_idx,
                 seq,
                 TLB_DONE[cpu_idx].load(Ordering::Acquire),
+                retried,
             );
         }
     }

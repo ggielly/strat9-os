@@ -628,6 +628,14 @@ pub fn ensure_framebuffer_range_wc(phys_base: u64, size: u64) {
                 end,
             );
         }
+
+        // A memory-type change needs more than a TLB flush: CPUs may still
+        // hold cache lines for the same physical memory filled under the old
+        // (WB) type. WBINVD on every CPU drops them; a TLB flush alone would
+        // leave the stale lines in place.
+        if updated_count > 0 {
+            crate::arch::x86_64::tlb::shootdown_caches();
+        }
     }
 }
 

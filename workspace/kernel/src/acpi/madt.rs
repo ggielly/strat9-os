@@ -63,6 +63,17 @@ pub struct MadtLocalApic {
     pub flags: u32,
 }
 
+/// MADT Local x2APIC entry (Type 9)
+#[derive(Copy, Clone, Debug, FromBytes)]
+#[repr(C, packed)]
+pub struct MadtLocalX2Apic {
+    _header: EntryRecord,
+    _reserved: u16,
+    pub x2apic_id: u32,
+    pub flags: u32,
+    pub processor_uid: u32,
+}
+
 /// MADT I/O APIC entry (Type 1)
 #[derive(Copy, Clone, Debug, FromBytes)]
 #[repr(C, packed)]
@@ -110,7 +121,7 @@ pub struct MadtInfo {
 #[derive(Clone, Copy, Debug)]
 pub struct LocalApicEntry {
     pub processor: u8,
-    pub apic_id: u8,
+    pub apic_id: u32,
     pub flags: u32,
 }
 
@@ -220,8 +231,33 @@ pub fn parse_madt() -> Option<MadtInfo> {
                     } else {
                         info.local_apics[info.local_apic_count] = Some(LocalApicEntry {
                             processor: entry.processor,
-                            apic_id: entry.apic_id,
+                            apic_id: entry.apic_id as u32,
                             flags: entry.flags,
+                        });
+                        info.local_apic_count += 1;
+                    }
+                }
+            }
+            9 => {
+                if info.local_apic_count < info.local_apics.len() {
+                    let entry = unsafe { &*(offset as *const MadtLocalX2Apic) };
+                    // Copy the packed fields out before use: taking a reference
+                    // to a field of a `#[repr(C, packed)]` struct is UB.
+                    let x2apic_id = entry.x2apic_id;
+                    let processor_uid = entry.processor_uid;
+                    let flags = entry.flags;
+                    // Same enable semantics as Type 0: bit 0 set = enabled.
+                    if flags & 1 == 0 {
+                        log::info!(
+                            "MADT: skipping disabled Local x2APIC id={} processor={}",
+                            x2apic_id,
+                            processor_uid,
+                        );
+                    } else {
+                        info.local_apics[info.local_apic_count] = Some(LocalApicEntry {
+                            processor: processor_uid as u8,
+                            apic_id: x2apic_id,
+                            flags,
                         });
                         info.local_apic_count += 1;
                     }

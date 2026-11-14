@@ -457,13 +457,26 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         }
     }
 
-    // Signal delivery gate. The per-CPU `signal_pending` flag is only a
-    // cheap hint: always clear it so it cannot be inherited by the next task
-    // scheduled on this CPU. The authoritative check is the CURRENT task's
-    // pending set, which covers cross-CPU signals and preempted-task hints.
-    let hinted = crate::arch::percpu::test_and_clear_signal_pending_current();
-    if hinted || crate::process::signal::has_pending_signals() {
-        crate::process::signal::deliver_pending_signal(frame);
+    // Signal delivery gate. The per-CPU `signal_pending` word is a tagged,
+    // one-shot hint: `(task_id << 1) | 1`, with 0 meaning "no hint". The
+    // common path (empty hint) performs a single atomic swap and takes NO
+    // scheduler lock. Only when a hint is present do we resolve the current
+    // task id (non-blocking try-lock) and check the authoritative pending set.
+    // A mismatch (hint for another task) is restored so that task still sees
+    // it when it runs here.
+    if let Some(hint_id) = crate::arch::percpu::take_signal_hint_current() {
+        match crate::process::current_task_id_try() {
+            Some(cur) if cur.as_u64() == hint_id => {
+                if crate::process::signal::has_pending_signals() {
+                    crate::process::signal::deliver_pending_signal(frame);
+                    // Re-arm if more signals remain: only one hint is stored.
+                    if crate::process::signal::has_pending_signals() {
+                        crate::arch::percpu::set_signal_pending_current_for_task(hint_id);
+                    }
+                }
+            }
+            _ => crate::arch::percpu::restore_signal_hint_current(hint_id),
+        }
     }
 
     frame.rax
