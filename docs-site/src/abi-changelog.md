@@ -30,8 +30,9 @@ syscalls 270–283 are implemented but unreleased (§16 of the specification).
 
 - **Added:** syscalls 270–285 (endpoints, mint, call/reply, notifications,
   namespace bind/lookup, memory objects), 286–289 reserved; errno
-  `EMSGSIZE = 90`; `MsgHeader`, `CapXfer`, `MsgBuf`, `MsgCall`,
-  `RingHeader`; `AsyncOp` 13–17; generation-tagged handle encoding.
+  `EMSGSIZE = 90` and `ECANCELED = 125`; `MsgHeader`, `CapXfer`, `MsgBuf`,
+  `MsgCall`, `RingHeader`; `AsyncOp` 13–17 and `Cancel` 254;
+  generation-tagged handle encoding.
 - **Changed:** `SYS_HANDLE_DUPLICATE` takes a `rights` mask.
 - **Removed:** syscalls 200–208, 210–211, 220–224, 230–234, 260–264,
   105–107 and 4 (`SYS_HANDLE_GRANT`); `AsyncOp` 10–12; the fixed 1 KiB

@@ -292,7 +292,7 @@ The ABI header describes event notification on a file descriptor. The kernel imp
 |---|---------|-------------|--------|--------|-------------|
 | 250 | `SYS_ASYNC_SETUP` | `entries: u64, flags: u64` | ring id | OK | Create a submission/completion ring with `entries` slots |
 | 251 | `SYS_ASYNC_ENTER` | `ring_id, to_submit, min_complete, flags` | completed count | OK | Submit entries and block until `min_complete` completions |
-| 252 | `SYS_ASYNC_CANCEL` | `ring_id, user_data, flags` | : | **Stub** | Always returns `ENOSYS` |
+| 252 | `SYS_ASYNC_CANCEL` | `ring_id, user_data, flags` | `0` | OK | Cancel the parked operation whose `user_data` matches; its CQE reports `-ECANCELED`. Returns `ENOENT` when no parked operation matches |
 | 253 | `SYS_ASYNC_MAP` | `ring_id: u64, out_ptr: u64` | `0` | OK | Map the ring into userspace and write its layout to `out_ptr` |
 | 254 | `SYS_ASYNC_DESTROY` | `ring_id: u64, flags: u64` | `0` | OK | Destroy the ring |
 
@@ -655,7 +655,7 @@ The number is defined in `strat9_abi::syscall` but the dispatcher has no arm for
 
 - **`SYS_POLL` / `SYS_PPOLL`** — `timeout` is ignored in both; the dispatcher maps `SYS_PPOLL` onto `sys_poll(fds_ptr, nfds, 0)`, discarding the timespec and the signal mask.
 - **`SYS_IOCTL` (443)** — a stub that always returns `ENOTTY`. No TTY or driver-specific ioctl exists.
-- **`SYS_ASYNC_CANCEL` (252)** — always returns `ENOSYS`.
+- **`SYS_ASYNC_CANCEL` (252)** — cancels a parked operation by `user_data` and returns `0`; a committed call is abandoned like a signal on the sync path, and a late reply releases its capabilities instead of leaking. Returns `ENOENT` when no parked operation matches. Only IPC v2 parked operations (opcodes 13–17) are cancellable; other async backends are not.
 - **`SYS_NULL` (0)** — returns the magic value `0x57A79`, not `0`.
 - **`SYS_PROC_EXECVE` (315)** — refuses (`ENOTSUP`) when the calling process has more than one thread.
 - **`SYS_PROC_WAITPID` (310)** — accepts only `WNOHANG`; `WUNTRACED` / `WCONTINUED` give `EINVAL`.

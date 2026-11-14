@@ -1298,10 +1298,11 @@ impl AddressSpace {
 
     /// Maps shared physical blocks with optional stable mapping identities.
     ///
-    /// Charges the target address space's silo for the mapping length. For an
-    /// exported region whose frames are already accounted by their owner, use
-    /// [`Self::map_shared_handles_with_cap_ids_charged`] with
-    /// [`SiloCharge::AlreadyCharged`] so the same pages are not counted twice.
+    /// Charges the target address space's silo for the mapping length. Every
+    /// VMA is refunded by `munmap`/teardown, so all production mapping paths
+    /// charge; [`Self::map_shared_handles_with_cap_ids_charged`] and
+    /// [`SiloCharge::AlreadyCharged`] exist only for callers that already
+    /// charged the same length elsewhere.
     pub fn map_shared_handles_with_cap_ids(
         &self,
         start: u64,

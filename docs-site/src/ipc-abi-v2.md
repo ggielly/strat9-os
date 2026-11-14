@@ -498,17 +498,39 @@ Rules (implemented once, in the `strat9-ring` crate, host-tested):
 
 ## 10. N3: synchronous fast path
 
-N3 is no longer a CR3-only migration. It is an **implementation property of
-`call` and `reply_recv`**, invisible in the ABI:
+N3 is an **implementation property of `call` and `reply_recv`**, invisible in
+the ABI: nothing in the interface selects or reports it, and the exchange is
+exactly the one defined in §3.
 
-- When a `call` finds a server thread blocked in `recv` on the same
-  endpoint, the scheduler switches **directly** to that thread on the
-  current CPU (no run-queue round trip), donating the caller's remaining
-  time slice and priority (the server runs at `max(server, caller)`).
-- `reply_recv` performs the inverse switch.
-- The switch is a full thread switch: TSS `rsp0`, per-CPU GS data, FPU
-  state and CR3/PCID go through the normal scheduler path.
-- `ipc/n3.rs` (shared frame, IPI, watchdog, naked trampoline) is removed.
+Normative behaviour:
+
+- A `call` whose enqueue succeeds on an endpoint carrying
+  `EP_FLAG_FASTPATH` wakes the server thread on the caller's CPU:
+  `Endpoint::push` uses `recv_waitq.wake_one_here()` instead of `wake_one()`.
+- The reply is the mirror: `deliver_reply` uses `slot.waitq.wake_one_here()`
+  for a fastpath call, so the caller is woken on the replier's CPU.
+- `wake_one_here` enqueues the woken task on the calling CPU
+  (`wake_task_here` → `wake_task_with(id, true)`), so no IPI is sent.
+- Placement still respects the task's affinity mask: the local CPU is used
+  only when `affinity_mask == 0` or the CPU bit is set; otherwise the task
+  falls back to `placement_cpu(last, home)`. Affinity is never overridden.
+- No run-queue round trip is incurred when affinity allows the local CPU,
+  but the wakeup remains an ordinary scheduler wakeup: the task leaves
+  `BLOCKED_TASKS`, is enqueued into its scheduler class's run queue on that
+  CPU, and `need_resched` is set.
+- The switch is a full thread switch through the normal scheduler path: TSS
+  `rsp0`, per-CPU GS data, FPU state and CR3/PCID.
+
+**Non-goal of N3 in this ABI: time-slice and priority donation.** The server
+keeps its own priority and scheduling budget; N3 only chooses the CPU on which
+the woken thread is queued. The kernel has no scheduler primitive for
+donation (`Task` carries `priority`, `rt_budget_remaining` and `sched_policy`;
+nothing decrements a budget in favour of a peer), and a partial
+re-implementation inside IPC would break fairness accounting.
+
+The legacy MMU-migration machinery in `ipc/n3.rs` (shared frame, migration
+IPI, watchdog, naked trampoline) is not used by `call`/`reply_recv`; the file
+still exists and remains wired to the MMU transport.
 
 N1 remains the Rust-typed kernel-internal channel family (`channel::<T>`,
 NIC ↔ scheduler mailbox). It is not part of the ABI.
@@ -633,10 +655,11 @@ processes only inside messages.
 | `EMSGSIZE` | **90** (new) | Receive buffers too small; required sizes written back |
 | `ENOSPC` | 28 | Receiver handle table full |
 | `ENOMEM` | 12 | Silo IPC quota or kernel memory exhausted |
-| `ENOENT` | 2 | `NS_LOOKUP` path not bound |
+| `ENOENT` | 2 | `NS_LOOKUP` path not bound; `Cancel` target not parked |
 | `EEXIST` | 17 | `NS_BIND` path bound and not replaceable |
+| `ECANCELED` | **125** (new) | `Cancel` outcome of the cancelled operation's CQE |
 
-`EMSGSIZE = 90` matches Linux x86_64, like `ENOTSUP`.
+`EMSGSIZE = 90` and `ECANCELED = 125` match Linux x86_64, like `ENOTSUP`.
 
 ### 13.2 Removed in 1.0
 
@@ -663,7 +686,7 @@ processes only inside messages.
 | **2 — ABI 1.0 syscalls** | `strat9_abi::ipc_v2` types and constants, syscalls 270–285, errno 90; kernel keeps v1 behind the `ipc-v1` feature while `init` and the strates migrate | `abi/tests/ipc_v2_layout.rs`, `kernel-l2-tests`, syscall fuzzing |
 | **3 — N2** | MemObject, `strat9_abi::ipc_ring`, `strat9-ring` crate; migrate `strate-net` | Reproducible TSC benchmark (none exists today) |
 | **4 — Async + quotas** | `AsyncOp` 13–17, `SiloIpcAccount` | Async L2 tests |
-| **5 — N3 and removal** | Direct switch on `call`/`reply_recv`; delete `n3.rs`, `port.rs`, `reply.rs`, `channel.rs` (`SyncChan`), `lockfree_ring.rs`, `shared_ring.rs`, `semaphore.rs` and the `ipc-v1` feature; bump `ABI_VERSION_MAJOR` to 1 | Round-trip `call` benchmark |
+| **5 — N3 and removal** | Directed wakeup on `call`/`reply_recv` (§10); delete `n3.rs`, `port.rs`, `reply.rs`, `channel.rs` (`SyncChan`), `lockfree_ring.rs`, `shared_ring.rs`, `semaphore.rs` and the `ipc-v1` feature; bump `ABI_VERSION_MAJOR` to 1 | Round-trip `call` benchmark |
 
 ### Required ABI tests (`workspace/abi/tests/ipc_v2_layout.rs`)
 
@@ -690,7 +713,7 @@ processes only inside messages.
 | Message consumed before handle transfer or buffer checks complete | `sys_ipc_recv` | All-or-nothing delivery, `EMSGSIZE` (§4.5) |
 | Quotas: non-atomic reserve, port quota never released, release by non-owner, reset by `fork` | `ipc/quota.rs`, `syscall/chan.rs` | Silo accounts released by object `Drop` (§12) |
 | N2 notification no-ops; consumer never woken | `ipc/lockfree_ring.rs` | Shared-memory ring + Notification (§9) |
-| N3 CR3-only migration (send currently always fails with `InvalidRip`) | `ipc/n3.rs` | Direct thread switch (§10) |
+| N3 CR3-only migration (send currently always fails with `InvalidRip`) | `ipc/n3.rs` | Directed wakeup on the caller's CPU (§10) |
 | Transport to any silo id without authorisation | `sys_transport_create` | Removed; authority from handles, tier matrix as policy (§10) |
 | Global reusable ids (`PortId`, `ChanId`, `RingId`) | registries | Generation-tagged per-process handles (§3.1) |
 
@@ -700,10 +723,13 @@ processes only inside messages.
 
 Last verified: 2026-11-14 (`cargo check` for `x86_64-unknown-none`, with and without `--features selftest`, exit 0;
 `cargo test -p strat9-abi` (incl. `ipc_v2_layout`) and `cargo test -p strat9-ipc-core` green).
+Runtime validation is still pending: the `selftest` kernel does not reach
+the orchestrator (see below), so every line of this table is verified by
+compilation, review and the host model only.
 
 | Piece | Where | State |
 |---|---|---|
-| Handle encoding, rights, message structs, `RingHeader`, errno 90, syscall numbers | `workspace/abi/src/ipc_v2.rs` | implemented, layout-pinned by `abi/tests/ipc_v2_layout.rs` |
+| Handle encoding, rights, message structs, `RingHeader`, errno 90/125, syscall numbers | `workspace/abi/src/ipc_v2.rs` | implemented, layout-pinned by `abi/tests/ipc_v2_layout.rs` |
 | Generation handle table, `(index, gen)`, 256-handle cap, fork inheritance | `kernel/src/ipc/v2/handle.rs` | implemented |
 | Endpoint, queue depth, bound notifications, close-on-last-RECV | `kernel/src/ipc/v2/endpoint.rs` | implemented |
 | Reply object, single use, generation, close-without-reply ⇒ `EPIPE` | `kernel/src/ipc/v2/endpoint.rs` | implemented |
@@ -713,11 +739,11 @@ Last verified: 2026-11-14 (`cargo check` for `x86_64-unknown-none`, with and wit
 | 277 `EP_BIND_NOTIF`, 278 `NOTIF_CREATE`, 279 `NOTIF_SIGNAL`, 280 `NOTIF_WAIT` | `kernel/src/syscall/ipc_v2.rs` | implemented |
 | 281 `NS_BIND`, 282 `NS_LOOKUP`, 283 `NS_UNBIND` | `kernel/src/syscall/ipc_v2.rs`, `kernel/src/namespace/v2.rs` | implemented; owned entries, no side effects, `LOOKUP` yields SEND-only badged handles |
 | 284 `MEMOBJ_CREATE`, 285 `MEMOBJ_MAP` | `kernel/src/ipc/v2/memobj.rs`, `syscall/ipc_v2.rs` | implemented on the frame-ownership machinery of `SharedRing` (`allocate_ring`, no global registry): one owner reference per frame held by the object, a fresh mapping identity per page per mapping, so a frame is freed only when the object and every mapping are gone; size ≤ `MEMOBJ_MAX_SIZE` (64 MiB), `prot` ⊆ `MEM_*` rights |
-| `AsyncOp` 13–17 | `kernel/src/ipc/v2/async_ops.rs`, `async_io/{dispatch,syscall,ring}.rs` | implemented: submission and retries run in the ring owner's context; blocking operations are parked and retried by `SYS_ASYNC_ENTER` when an IPC event kicks the ring (`Ring::ipc_kick`); `EpCall` shares `call_submit`/`call_finish` with the sync path; ring destruction abandons pending calls |
+| `AsyncOp` 13–17, `Cancel` 254 | `kernel/src/ipc/v2/async_ops.rs`, `async_io/{dispatch,syscall,ring}.rs` | implemented: submission and retries run in the ring owner's context; every operation that would block (full queue or quota for `EpSend`/`EpCall` enqueue, empty queue for `EpRecv`, zero word for `NotifWait`) is parked and retried by `SYS_ASYNC_ENTER` when an IPC event kicks the ring (`Ring::ipc_kick`); `EpCall` shares `call_submit`/`call_finish` with the sync path; ring destruction abandons pending calls; `Cancel` (SQE 254 and `SYS_ASYNC_CANCEL`) removes a parked operation by `user_data`, posts `-ECANCELED` for it and abandons a committed call like a signal (§6.2) |
 | `SiloIpcAccount` (§12) | `kernel/src/silo/memory_account.rs`, `kernel/src/ipc/v2/quota.rs` | implemented: counters live beside the silo memory budget and are reached through the caller's address space (no registry lock); RAII charges in endpoints, notifications, queued messages (sender silo) and MemObjects, released in `Drop`; a blocking sender waits on the quota, `IPC_NONBLOCK` gets `EAGAIN` |
 | Timeouts (`timeout_ns != 0`) | `kernel/src/sync/waitqueue.rs` (`wait_until_deadline`), `syscall/ipc_v2.rs` | implemented on the scheduler's `wake_deadline_ns` (the `nanosleep` mechanism); `ETIMEDOUT`; resolution one tick (10 ms); a `call` deadline covers enqueue + reply |
 | Receive reservation (§4.5) | `endpoint.rs` (`pop` → `PopOutcome::NeedSlots`), `syscall/ipc_v2.rs` | implemented: slot count checked against the reservation in the dequeue critical section, retry loop, no nested locks |
-| N3 fast path (§10) | `process/scheduler/task_ops.rs` (`wake_task_here`), `WaitQueue::wake_one_here`, `endpoint.rs` | implemented as **directed wakeup** on `EP_FLAG_FASTPATH` endpoints: the call wakes the server on the caller's CPU (no IPI, affinity respected) and the reply wakes the caller on the server's CPU. Full scheduling-context donation is not implemented (see below) |
+| N3 fast path (§10) | `process/scheduler/task_ops.rs` (`wake_task_here`), `WaitQueue::wake_one_here`, `endpoint.rs` | implemented as the normative **directed wakeup** of §10: on `EP_FLAG_FASTPATH` endpoints the call wakes the server on the caller's CPU (no IPI, affinity respected, fallback to last/home CPU otherwise) and the reply wakes the caller on the server's CPU; the switch goes through the normal scheduler path. Time-slice and priority donation is a §10 non-goal (no scheduler primitive) |
 | Executable model of the state machines | `workspace/ipc-core` | 27 host tests, deterministic stress; loom interleaving not run |
 | In-kernel runtime tests | `kernel/src/ipc/v2/selftest.rs` (task `ipc-v2-test`, selftest orchestrator) | reservation, `EMSGSIZE`, timeouts, sender wakeup, call states, quotas, MemObject; compiled; **not yet observed passing**: the `selftest` debug kernel does not reach the orchestrator (see below) |
 
@@ -743,6 +769,22 @@ Defects fixed on 2026-11-14 after the first implementation pass:
   growing by one entry per call; it is now pruned amortised in
   `register_call`.
 
+Subsequent correctness pass (2026-11-14):
+
+- **`EpCall` did not park.** A submission whose enqueue returned `EAGAIN`
+  (full queue or exhausted quota) completed with `-EAGAIN` instead of being
+  parked. `Kind::CallSubmit` now retries `call_submit` non-blockingly and
+  promotes to `Kind::Call` on commit, so every operation that would block is
+  parked and retried by `SYS_ASYNC_ENTER`.
+- **Quota refund asymmetry.** `SYS_MEM_REGION_MAP` mapped with
+  `SiloCharge::AlreadyCharged` while `munmap` refunded the length
+  unconditionally, so a silo could map shared pages for free and have real
+  bytes credited back. The mapping now charges (`SiloCharge::Charge`), like
+  `mmap` and MemObject.
+- **`Cancel` was a stub.** SQE 254 and `SYS_ASYNC_CANCEL` now cancel a parked
+  operation by `user_data`, post `-ECANCELED` (`errno 125`) for it, and
+  abandon a committed call so a late reply releases its capabilities.
+
 Runtime test status: the selftest harness exists (`process/selftest.rs`,
 `cargo make kernel-test`) but its build was broken by unrelated code (two
 `x86_64::VirtAddr` paths, and a call into the orphaned
@@ -755,18 +797,21 @@ tests run as soon as that boot path is fixed.
 Remaining known differences from the normative text:
 
 1. Timeout resolution is the scheduler tick (10 ms), not nanoseconds.
-2. §10 asks for time-slice and priority donation on `call`; the kernel does a
-   directed wakeup (same CPU, no IPI) but the local scheduler class still
-   decides when the server runs. Donation needs a scheduling-context
-   primitive the scheduler does not have.
-3. MemObject accounting: the backing is charged to the creator at
-   `SYS_MEMOBJ_CREATE` **and** each mapping is charged as a virtual region to
-   the mapping silo, because `munmap` always refunds the mapping length (an
-   uncharged mapping would let the refund credit bytes never charged). The
-   same refund asymmetry affects `SYS_MEM_REGION_MAP` (`memory/region_cap.rs`,
-   `SiloCharge::AlreadyCharged`) and is outside IPC v2.
-4. The v1 IPC syscalls and `AsyncOp` 10–12 are still dispatched (`ipc-v1`
+2. MemObject accounting charges twice by design: the backing is charged to
+   the creator at `SYS_MEMOBJ_CREATE`, and each mapping is charged as a
+   virtual region to the mapping silo, because `munmap` and address-space
+   teardown always refund the mapping length. `SYS_MEM_REGION_MAP`
+   (`memory/region_cap.rs`) now follows the same rule (`SiloCharge::Charge`,
+   previously `AlreadyCharged` while the refund stayed unconditional, which
+   let a silo map exported pages for free and then have real bytes refunded).
+   No production mapping path is uncharged, so no refund can credit bytes
+   that were never charged.
+3. The v1 IPC syscalls and `AsyncOp` 10–12 are still dispatched (`ipc-v1`
    removal is the last step of Phase 5).
+
+N3 does not donate CPU time or priority: §10 defines directed wakeup as the
+normative behaviour and states donation as a non-goal, because the scheduler
+has no primitive to transfer a budget between tasks.
 
 §8 `PROXY`: enforced on receive. A handle carrying `EP_MINT` delivered to a
 task whose silo lacks `RegistryMode::PROXY` (or is sandboxed) is installed

@@ -169,10 +169,16 @@ pub fn sys_async_enter(
 }
 
 /// SYS_ASYNC_CANCEL(ring_id: u64, user_data: u64, flags: u32) => result: u64
-pub fn sys_async_cancel(ring_id: u64, _user_data: u64, _flags: u64) -> Result<u64, SyscallError> {
+pub fn sys_async_cancel(ring_id: u64, user_data: u64, flags: u64) -> Result<u64, SyscallError> {
     let _ = require_owned_ring_by_id(ring_id)?;
 
-    Err(SyscallError::NotImplemented)
+    if flags != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    crate::ipc::v2::async_ops::cancel(ring_id, user_data)?;
+
+    Ok(0)
 }
 
 /// SYS_ASYNC_DESTROY(ring_id: u64, flags: u32) => result: u64

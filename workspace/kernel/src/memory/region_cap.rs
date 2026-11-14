@@ -296,7 +296,9 @@ impl MemoryRegionRegistry {
                     effective_flags,
                     entry.vma_type,
                     entry.page_size,
-                    SiloCharge::AlreadyCharged,
+                    // The refund path always credits the VMA length, so every
+                    // mapping must be charged; matches `mmap` and MemObject.
+                    SiloCharge::Charge,
                 )
                 .map(|_| (base, entry.size))
                 .map_err(|_| RegionCapError::OutOfMemory)
