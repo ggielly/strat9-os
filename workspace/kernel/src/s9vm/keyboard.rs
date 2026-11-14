@@ -56,8 +56,12 @@ const PS2_ID: [u8; 2] = [0xAB, 0x83];
 
 /// Controller command: read configuration byte.
 const CTL_READ_CONFIG: u8 = 0x20;
+/// Controller command: write configuration byte (next data byte).
+const CTL_WRITE_CONFIG: u8 = 0x60;
 /// Controller command: write output port (next data byte goes there).
 const CTL_WRITE_OUTPUT_PORT: u8 = 0xD1;
+/// Controller command: write auxiliary device (next data byte).
+const CTL_WRITE_AUX: u8 = 0xD4;
 /// Controller command: controller self-test.
 const CTL_SELFTEST: u8 = 0xAA;
 /// Controller command: keyboard interface test.
@@ -87,6 +91,9 @@ pub struct KeyboardController {
     /// Next data-port write goes to the controller output port, not the
     /// keyboard (set by command `0xD1`).
     output_port_write: bool,
+    /// Next data-port write is a controller parameter (config/aux), not a
+    /// keyboard command, so it must not produce a keyboard ACK.
+    controller_data: bool,
 }
 
 impl KeyboardController {
@@ -97,6 +104,7 @@ impl KeyboardController {
             output_len: 0,
             last_command: 0,
             output_port_write: false,
+            controller_data: false,
         }
     }
 
@@ -148,6 +156,11 @@ impl KeyboardController {
             self.output_port_write = false;
             return;
         }
+        if self.controller_data {
+            // Configuration byte or auxiliary-device byte: no keyboard ACK.
+            self.controller_data = false;
+            return;
+        }
         self.push(PS2_ACK);
         match value {
             KBD_RESET => self.push(PS2_SELFTEST_OK),
@@ -163,6 +176,7 @@ impl KeyboardController {
     fn write_command(&mut self, value: u8) {
         self.last_command = value;
         self.output_port_write = value == CTL_WRITE_OUTPUT_PORT;
+        self.controller_data = matches!(value, CTL_WRITE_CONFIG | CTL_WRITE_AUX);
         match value {
             CTL_SELFTEST => self.push(0x55),
             CTL_KBD_TEST => self.push(0x00),

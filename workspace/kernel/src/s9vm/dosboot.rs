@@ -115,7 +115,7 @@
 //! This module is `no_std` (`core` + `alloc`) and never panics on guest
 //! behaviour: every failure is a [`DosError`].
 
-use alloc::{string::String, vec};
+use alloc::{string::String, vec, vec::Vec};
 
 use crate::s9vm::{
     apic::LocalApic,
@@ -147,6 +147,18 @@ impl Drop for IrqOff {
     fn drop(&mut self) {
         crate::arch::restore_flags(self.flags);
     }
+}
+
+/// Host milliseconds elapsed since `start`, from the TSC.
+///
+/// The DOS/SeaBIOS runner keeps host interrupts disabled, so wall-clock
+/// helpers that depend on interrupts are unusable; the TSC is the only
+/// monotonic source available inside the phase.
+fn elapsed_millis(start: u64, tsc_hz: u64) -> u64 {
+    // SAFETY: RDTSC is a plain read of the architectural counter.
+    let now = unsafe { core::arch::x86_64::_rdtsc() };
+    let cycles = now.wrapping_sub(start);
+    (u128::from(cycles) * 1000 / u128::from(tsc_hz.max(1))) as u64
 }
 
 /// Guest permissions for the low-memory and ROM mappings (read/write/exec).
@@ -1284,8 +1296,23 @@ fn run_freedos_in_world(
     limits: RunLimits,
     firmware: FirmwareKind,
 ) -> Result<DosReport, DosError> {
+    // Timestamp origin of the whole launch, before the first world mapping.
+    // The run budget has its own origin later; this one measures preparation
+    // (mapping, firmware copy, vCPU setup) as well as execution.
+    let launch_tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    let tsc_hz = crate::s9vm::tsc::get().map_or(FALLBACK_TSC_HZ, |frequency| frequency.hz());
     let disk_sectors = map_and_load_freedos(caps, world_id, firmware)?;
+    log::info!(
+        "[s9vm] {}: memory + disk ready at {} ms",
+        firmware.label(),
+        elapsed_millis(launch_tsc, tsc_hz)
+    );
     install_freedos_artefacts(world_id, firmware)?;
+    log::info!(
+        "[s9vm] {}: firmware installed at {} ms",
+        firmware.label(),
+        elapsed_millis(launch_tsc, tsc_hz)
+    );
     let mut memory = WorldMemory::new(world_id);
 
     // Detached vCPU: the run loop drives it directly, no scheduler.
@@ -1331,14 +1358,15 @@ fn run_freedos_in_world(
         });
     }
     log::info!(
-        "[s9vm] {}: entering {} guest at {:#x}",
+        "[s9vm] {}: entering {} guest at {:#x} ({} ms)",
         firmware.label(),
         if firmware.is_seabios() {
             "real-firmware"
         } else {
             "real-mode"
         },
-        guest.rip
+        guest.rip,
+        elapsed_millis(launch_tsc, tsc_hz)
     );
 
     let mut report = DosReport::new(disk_sectors);
@@ -1387,14 +1415,13 @@ fn run_freedos_in_world(
             .set_ram(firmware::CMOS_BOOTFLAG2, firmware::BOOT_ORDER_FLOPPY_FIRST);
     }
     let mut apic = LocalApic::new(0);
-    let tsc_hz = crate::s9vm::tsc::get().map_or(FALLBACK_TSC_HZ, |frequency| frequency.hz());
     let mut unhandled_ports: u32 = 0;
     // First distinct unmodeled ports, so a guest that spins on one legacy port
     // names it in the log instead of only showing an exit counter.
     let mut unhandled_seen: [u16; 8] = [0; 8];
     let mut unhandled_seen_len = 0usize;
     // Most-accessed I/O ports, to name a firmware polling loop in the log.
-    let mut port_top: [(u16, u32); 8] = [(0, 0); 8];
+    let mut port_top: Vec<(u16, u32)> = Vec::new();
     // Wall-clock origin of the run: the shell-facing budget is measured from
     // here, independently of the exit counter.
     let start_tsc = unsafe { core::arch::x86_64::_rdtsc() };
@@ -1434,12 +1461,26 @@ fn run_freedos_in_world(
                 u128::from(now.wrapping_sub(start_tsc)) * 1_000_000_000 / u128::from(tsc_hz.max(1));
             if elapsed_ns >= u128::from(limits.max_nanoseconds) {
                 log::info!(
-                    "[s9vm] freedostest: time budget reached after {} exit(s)",
+                    "[s9vm] {}: time budget reached at {} ms after {} exit(s)",
+                    firmware.label(),
+                    elapsed_millis(launch_tsc, tsc_hz),
                     report.total_exits
                 );
                 report.timed_out = true;
                 break;
             }
+        }
+        if report.total_exits != 0 && report.total_exits % 4096 == 0 {
+            log::info!(
+                "[s9vm] {}: progress exit={} t={} ms io={} preempt={} hlt={} rip={:#x}",
+                firmware.label(),
+                report.total_exits,
+                elapsed_millis(launch_tsc, tsc_hz),
+                report.io_exits,
+                report.preemption_slices,
+                report.halt_exits,
+                vcpu.guest().rip
+            );
         }
         machine.advance_time(&mut apic, delta, tsc_hz);
         if !firmware.is_seabios() {
@@ -1476,9 +1517,7 @@ fn run_freedos_in_world(
                     }
                 }
                 if !counted {
-                    if let Some(slot) = port_top.iter_mut().find(|slot| slot.1 == 0) {
-                        *slot = (port, 1);
-                    }
+                    port_top.push((port, 1));
                 }
                 // The debug port is a marker only for a non-string OUT; other
                 // accesses fall through to normal port handling.
@@ -1817,8 +1856,9 @@ fn run_freedos_in_world(
                 String::from_utf8_lossy(&serial)
             );
         }
-        for (port, count) in port_top {
-            if count != 0 {
+        port_top.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        for (port, count) in port_top.iter().take(16) {
+            if *count != 0 {
                 log::info!(
                     "[s9vm] {}: port {:#06x}: {} access(es)",
                     firmware.label(),
@@ -1828,11 +1868,12 @@ fn run_freedos_in_world(
             }
         }
         log::info!(
-            "[s9vm] {}: io={} preempt={} hlt={}",
+            "[s9vm] {}: io={} preempt={} hlt={} total={} ms",
             firmware.label(),
             report.io_exits,
             report.preemption_slices,
-            report.halt_exits
+            report.halt_exits,
+            elapsed_millis(launch_tsc, tsc_hz)
         );
     }
     outcome?;
