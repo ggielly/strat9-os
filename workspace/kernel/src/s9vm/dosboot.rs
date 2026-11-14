@@ -305,6 +305,15 @@ pub struct DosReport {
     pub interrupts_serviced: u32,
     /// Scancodes typed by the host into the 8042 and read by the guest.
     pub scancodes_typed: u32,
+    /// Platform interrupts delivered per vector (`0x08` timer, `0x09` keyboard).
+    ///
+    /// One counter per vector, because "the timer ticks but the keyboard never
+    /// arrives" is the difference between a masking problem and a delivery one.
+    pub vectors_delivered: [u32; 32],
+    /// Delivery attempts that found the guest with `IF` clear.
+    pub skipped_interrupts_disabled: u32,
+    /// Delivery attempts refused because the guest was in an interrupt shadow.
+    pub skipped_blocked: u32,
     /// Host wall-clock time the guest actually ran, in nanoseconds.
     ///
     /// Measured from the TSC over the slices, so it excludes the kernel's own
@@ -385,6 +394,9 @@ impl DosReport {
             interrupts_delivered: 0,
             interrupts_serviced: 0,
             scancodes_typed: 0,
+            vectors_delivered: [0; 32],
+            skipped_interrupts_disabled: 0,
+            skipped_blocked: 0,
             elapsed_nanoseconds: 0,
             port_calls: Vec::new(),
         }
@@ -1339,24 +1351,41 @@ fn run_device_fast_path(
 /// legacy firmware needs for `INT 08h` (timer) and `INT 0Eh` (floppy). The
 /// request is only acknowledged once the guest can take it, else it stays in
 /// the `IRR` for the next attempt.
+/// Outcome of one legacy-interrupt delivery attempt.
+///
+/// The refusals are named instead of collapsed into `None`: a guest that keeps
+/// `IF` clear while polling the keyboard never receives `IRQ1`, and telling
+/// that apart from "the 8259 has nothing pending" is what diagnoses a keyboard
+/// that never answers on hardware.
+enum Delivery {
+    /// The vector was posted in the VM-entry interrupt information field.
+    Delivered(u8),
+    /// No request was pending, or the firmware is not using the 8259.
+    NoRequest,
+    /// The guest runs with `RFLAGS.IF` clear.
+    InterruptsDisabled,
+    /// The guest is in an STI/MOV-SS interrupt shadow.
+    Blocked,
+}
+
 fn deliver_legacy_interrupt(
     vcpu: &mut Vcpu,
     devices: &mut emulate::Devices,
-) -> Result<Option<u8>, DosError> {
+) -> Result<Delivery, DosError> {
     if !devices.legacy_pic() || !devices.pic.has_pending() {
-        return Ok(None);
+        return Ok(Delivery::NoRequest);
     }
     if vcpu.guest().rflags & (1 << 9) == 0 {
-        return Ok(None);
+        return Ok(Delivery::InterruptsDisabled);
     }
     let deliverable = unsafe { vcpu.interruptibility() }
         .map(|state| state & 0b11 == 0)
         .unwrap_or(false);
     if !deliverable {
-        return Ok(None);
+        return Ok(Delivery::Blocked);
     }
     let Some(vector) = devices.pic.acknowledge() else {
-        return Ok(None);
+        return Ok(Delivery::NoRequest);
     };
     // SAFETY: block loaded, guest inactive (exit handler), and the interrupt
     // is deliverable (checked above).
@@ -1366,7 +1395,7 @@ fn deliver_legacy_interrupt(
     // it would lose the interrupt for good and the in-service bit would block
     // every lower-priority line, which looks like a guest that hangs in `hlt`.
     match unsafe { vcpu.inject_interrupt(vector) } {
-        Ok(()) => Ok(Some(vector)),
+        Ok(()) => Ok(Delivery::Delivered(vector)),
         Err(error) => Err(DosError::Run(error)),
     }
 }
@@ -1414,8 +1443,18 @@ fn pump_dos_interrupts(
     report: &mut DosReport,
 ) -> Result<bool, DosError> {
     report.scancodes_typed += service_keyboard(devices, memory, feed, bios_state);
-    if let Some(vector) = deliver_legacy_interrupt(vcpu, devices)? {
+    let outcome = deliver_legacy_interrupt(vcpu, devices)?;
+    match outcome {
+        Delivery::Delivered(_) => {}
+        Delivery::NoRequest => {}
+        Delivery::InterruptsDisabled => {
+            report.skipped_interrupts_disabled += 1;
+        }
+        Delivery::Blocked => report.skipped_blocked += 1,
+    }
+    if let Delivery::Delivered(vector) = outcome {
         report.interrupts_delivered += 1;
+        report.vectors_delivered[usize::from(vector & 0x1F)] += 1;
         // Name the first deliveries: a guest that never takes them (masked
         // line, handler missing) is otherwise indistinguishable from one that
         // simply idles.
@@ -2120,6 +2159,18 @@ fn log_session_diagnostics(report: &DosReport, stage: &str) {
         report.interrupts_delivered,
         report.scancodes_typed,
         report.halt_exits
+    );
+    log::info!(
+        "[s9vm] freedos-session {}: interrupts irq08={} irq09={} other={} skipped_if={} \
+         skipped_blocked={}",
+        stage,
+        report.vectors_delivered[0x08],
+        report.vectors_delivered[0x09],
+        report.interrupts_delivered
+            .saturating_sub(report.vectors_delivered[0x08])
+            .saturating_sub(report.vectors_delivered[0x09]),
+        report.skipped_interrupts_disabled,
+        report.skipped_blocked
     );
     if !report.port_calls.is_empty() {
         log::info!(
@@ -3146,7 +3197,10 @@ fn run_freedos_in_world(
                         // Prefer the pending 8259 request (timer 0x08 or FDC
                         // 0x0E); fall back to the timer so a `yield()` with no
                         // armed time base still makes progress.
-                        if deliver_legacy_interrupt(&mut vcpu, machine.devices_mut())?.is_some() {
+                        if matches!(
+                            deliver_legacy_interrupt(&mut vcpu, machine.devices_mut())?,
+                            Delivery::Delivered(_)
+                        ) {
                             continue;
                         }
                         if let Err(error) = unsafe { vcpu.inject_interrupt(0x08) } {
@@ -3237,7 +3291,7 @@ fn run_freedos_in_world(
                     // firmware entered its wait loop: a level-triggered 8259
                     // request stays in the IRR until then, so the floppy ISR
                     // cannot race `floppy_wait_irq`'s flag clear.
-                    deliver_legacy_interrupt(&mut vcpu, machine.devices_mut())?;
+                    let _ = deliver_legacy_interrupt(&mut vcpu, machine.devices_mut())?;
                 }
             }
             ExitClass::Cpuid => {
