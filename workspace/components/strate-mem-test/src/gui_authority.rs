@@ -80,7 +80,12 @@ fn a1_a2_badge(ctx: &mut Ctx) {
     log(" parent_pid=");
     log_u64(call::getpid().unwrap_or(0) as u64);
     log("\n");
-    check(ctx, "A1 kernel overwrites forged sender", parent_sender != FORGED, "");
+    check(
+        ctx,
+        "A1 kernel overwrites forged sender",
+        parent_sender != FORGED,
+        "",
+    );
 
     // A2: a forked child inherits the same capability. Same sender value?
     let child = match call::fork() {
@@ -118,7 +123,12 @@ fn a3_a5_grant(ctx: &mut Ctx) {
 
     // A3a: nonexistent PID.
     let r = call::handle_grant(h, 0x7fff_fff0);
-    check(ctx, "A3 grant to nonexistent pid is refused", r.is_err(), "");
+    check(
+        ctx,
+        "A3 grant to nonexistent pid is refused",
+        r.is_err(),
+        "",
+    );
 
     // A3b: reaped child.
     let (rd, wr) = match call::pipe() {
@@ -187,7 +197,11 @@ fn a3_a5_grant(ctx: &mut Ctx) {
             "no incarnation check in sys_handle_grant",
         );
     } else {
-        inconclusive(ctx, "A5 PID reuse", "no reuse of the reaped PID in 400 forks");
+        inconclusive(
+            ctx,
+            "A5 PID reuse",
+            "no reuse of the reaped PID in 400 forks",
+        );
     }
 }
 

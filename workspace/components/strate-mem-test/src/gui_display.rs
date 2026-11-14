@@ -89,13 +89,13 @@ fn d4_child() -> ! {
         call::exit(10)
     };
     // SAFETY: shared mapping of one framebuffer page, written once below.
-    let Ok(addr) = (unsafe {
-        syscall6(number::SYS_MMAP, 0, PAGE_SIZE, PROT_RW, MAP_SHARED, fd, 0)
-    }) else {
+    let Ok(addr) =
+        (unsafe { syscall6(number::SYS_MMAP, 0, PAGE_SIZE, PROT_RW, MAP_SHARED, fd, 0) })
+    else {
         call::exit(11)
     };
     let _ = call::close(fd); // releases the ownership reference
-    // SAFETY: mapping established above; a fault here is the experiment's answer.
+                             // SAFETY: mapping established above; a fault here is the experiment's answer.
     unsafe { core::ptr::write_volatile(addr as *mut u8, 0x01) };
     call::exit(0)
 }
@@ -118,14 +118,25 @@ fn d4(ctx: &mut Ctx) {
             "mapping outlives ownership; a former owner can write the screen",
         ),
         Some(Exit::Signal(s)) => {
-            gap(ctx, "D4 old writable mapping still works after handle close", false, "write faulted");
+            gap(
+                ctx,
+                "D4 old writable mapping still works after handle close",
+                false,
+                "write faulted",
+            );
             log("[gui_display] info signal=");
             log_u64(s as u64);
             log("\n");
         }
-        Some(Exit::Code(c)) => {
-            inconclusive(ctx, "D4", if c == 10 { "open failed" } else { "mmap failed" })
-        }
+        Some(Exit::Code(c)) => inconclusive(
+            ctx,
+            "D4",
+            if c == 10 {
+                "open failed"
+            } else {
+                "mmap failed"
+            },
+        ),
         None => inconclusive(ctx, "D4", "reap failed"),
     }
 }
@@ -181,13 +192,23 @@ fn d123(ctx: &mut Ctx) {
         check(ctx, "open /dev/display/damage", false, "");
         return;
     };
-    check(ctx, "owner can present (DMG2, 0 rects)", present_probe(dmg) == 0, "");
+    check(
+        ctx,
+        "owner can present (DMG2, 0 rects)",
+        present_probe(dmg) == 0,
+        "",
+    );
 
     let (Ok((p2c_r, p2c_w)), Ok((c2p_r, c2p_w))) = (call::pipe(), call::pipe()) else {
         check(ctx, "pipes", false, "");
         return;
     };
-    let (p2c_r, p2c_w, c2p_r, c2p_w) = (p2c_r as usize, p2c_w as usize, c2p_r as usize, c2p_w as usize);
+    let (p2c_r, p2c_w, c2p_r, c2p_w) = (
+        p2c_r as usize,
+        p2c_w as usize,
+        c2p_r as usize,
+        c2p_w as usize,
+    );
     let child = match call::fork() {
         Ok(0) => {
             let _ = call::close(p2c_w);
@@ -223,7 +244,9 @@ fn d123(ctx: &mut Ctx) {
         w2 == Some(1),
         match w2 {
             Some(0) => "ownership transferred",
-            Some(1) => "OWNER_PID stays the closed owner: the screen is unusable until all handles close",
+            Some(1) => {
+                "OWNER_PID stays the closed owner: the screen is unusable until all handles close"
+            }
             _ => "unexpected result",
         },
     );

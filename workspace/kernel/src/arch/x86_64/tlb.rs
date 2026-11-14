@@ -117,7 +117,10 @@ fn promote(queued: &[TlbOp], incoming: TlbOp) -> TlbOp {
 
     for op in queued.iter().copied().chain(core::iter::once(incoming)) {
         kind = kind.max(op.kind);
-        if matches!(op.kind, TlbShootdownKind::SinglePage | TlbShootdownKind::Range) {
+        if matches!(
+            op.kind,
+            TlbShootdownKind::SinglePage | TlbShootdownKind::Range
+        ) {
             start = start.min(op.vaddr_start);
             end = end.max(op.vaddr_end);
         }

@@ -34,7 +34,10 @@
 //! Other changes fall back to a positional diff. It is pure (`alloc` only) so
 //! the host tests can drive it without a guest.
 
-use alloc::{string::{String, ToString}, vec::Vec};
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 
 /// Lines of `text` with trailing blanks removed.
 ///

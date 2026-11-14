@@ -27,10 +27,10 @@
 //! instance and the layout switch.
 
 use spin::Mutex;
+use strat9_keymap::Decoder;
 pub use strat9_keymap::{
     KeyBytes, Layout, KEY_DOWN, KEY_END, KEY_HOME, KEY_LEFT, KEY_RIGHT, KEY_UP,
 };
-use strat9_keymap::Decoder;
 
 /// Global decoder, shared by the PS/2 IRQ and the USB HID injection path.
 static DECODER: Mutex<Decoder> = Mutex::new(Decoder::new(Layout::Azerty));

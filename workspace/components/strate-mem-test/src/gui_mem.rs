@@ -54,7 +54,9 @@ const MAP_ANON: usize = 1 << 5;
 
 /// Byte expected at `i` before anyone writes a marker (sparse seed).
 fn seed(i: usize) -> u8 {
-    (i as u8).wrapping_mul(7).wrapping_add((i / PAGE_SIZE) as u8)
+    (i as u8)
+        .wrapping_mul(7)
+        .wrapping_add((i / PAGE_SIZE) as u8)
 }
 
 fn marker_first(page: usize) -> u8 {
@@ -73,7 +75,10 @@ unsafe fn fill(base: usize) {
     }
     for p in 0..PAGES {
         core::ptr::write_volatile((base + p * PAGE_SIZE) as *mut u8, marker_first(p));
-        core::ptr::write_volatile((base + p * PAGE_SIZE + PAGE_SIZE - 1) as *mut u8, marker_last(p));
+        core::ptr::write_volatile(
+            (base + p * PAGE_SIZE + PAGE_SIZE - 1) as *mut u8,
+            marker_last(p),
+        );
     }
 }
 
@@ -198,12 +203,7 @@ fn importer_a(from_parent: usize, to_parent: usize, parent_pid: usize) -> ! {
 ///
 /// SAFETY: caller guarantees a readable LEN-byte mapping at `base`.
 unsafe fn verify_ignoring_edits(base: usize) -> usize {
-    let edited = [
-        PAGE_SIZE + 1,
-        LEN - 2,
-        2 * PAGE_SIZE + 3,
-        3 * PAGE_SIZE + 9,
-    ];
+    let edited = [PAGE_SIZE + 1, LEN - 2, 2 * PAGE_SIZE + 3, 3 * PAGE_SIZE + 9];
     let mut bad = 0;
     for i in 0..LEN {
         if edited.contains(&i) {
@@ -248,7 +248,12 @@ fn scenario_a(ctx: &mut Ctx) {
         check(ctx, "pipes", false, "pipe() failed");
         return;
     };
-    let (p2c_r, p2c_w, c2p_r, c2p_w) = (p2c_r as usize, p2c_w as usize, c2p_r as usize, c2p_w as usize);
+    let (p2c_r, p2c_w, c2p_r, c2p_w) = (
+        p2c_r as usize,
+        p2c_w as usize,
+        c2p_r as usize,
+        c2p_w as usize,
+    );
     let parent_pid = call::getpid().unwrap_or(0);
 
     let child = match call::fork() {
@@ -268,7 +273,12 @@ fn scenario_a(ctx: &mut Ctx) {
 
     // Grant by PID (the only primitive that exists today).
     let Ok(child_h) = call::handle_grant(h, child) else {
-        check(ctx, "handle_grant(region, child pid)", false, "grant failed");
+        check(
+            ctx,
+            "handle_grant(region, child pid)",
+            false,
+            "grant failed",
+        );
         return;
     };
     check(ctx, "handle_grant(region, child pid)", true, "");
@@ -279,7 +289,16 @@ fn scenario_a(ctx: &mut Ctx) {
     check(ctx, "M1 child mapped and verified all 5 pages", ready, "");
     if !ready {
         let e = reap(child);
-        check(ctx, "child exit", false, if e.is_some() { "child died early" } else { "reap failed" });
+        check(
+            ctx,
+            "child exit",
+            false,
+            if e.is_some() {
+                "child died early"
+            } else {
+                "reap failed"
+            },
+        );
         return;
     }
     let child_addr = recv_u64(c2p_r).unwrap_or(0);
@@ -316,12 +335,22 @@ fn scenario_a(ctx: &mut Ctx) {
     // Parent -> child direction.
     unsafe { core::ptr::write_volatile((base + 2 * PAGE_SIZE + 3) as *mut u8, 0x6A) };
     let _ = send_u8(p2c_w, C_GO2);
-    check(ctx, "M1 parent writes visible to child", recv_u8(c2p_r) == Some(R_ACK2), "");
+    check(
+        ctx,
+        "M1 parent writes visible to child",
+        recv_u8(c2p_r) == Some(R_ACK2),
+        "",
+    );
 
     // M3: parent drops its own write permission; does the child still write?
     // SAFETY: SYS_MPROTECT on the parent's own mapping.
     let rc = unsafe { syscall6(number::SYS_MPROTECT, base, LEN, PROT_READ, 0, 0, 0) };
-    check(ctx, "parent mprotect(READ) on exported region", rc.is_ok(), "");
+    check(
+        ctx,
+        "parent mprotect(READ) on exported region",
+        rc.is_ok(),
+        "",
+    );
     let _ = send_u8(p2c_w, C_GO3);
     let ack3 = recv_u8(c2p_r) == Some(R_ACK3);
     gap(
@@ -390,7 +419,9 @@ fn scenario_b(ctx: &mut Ctx) {
 }
 
 fn exporter_b(res_w: usize) -> ! {
-    let Some(base) = anon_map() else { call::exit(1) };
+    let Some(base) = anon_map() else {
+        call::exit(1)
+    };
     // SAFETY: fresh RW mapping.
     unsafe { fill(base) };
     let Ok(h) = call::mem_region_export(base) else {
@@ -399,7 +430,12 @@ fn exporter_b(res_w: usize) -> ! {
     let (Ok((p2c_r, p2c_w)), Ok((c2p_r, c2p_w))) = (call::pipe(), call::pipe()) else {
         call::exit(3)
     };
-    let (p2c_r, p2c_w, c2p_r, c2p_w) = (p2c_r as usize, p2c_w as usize, c2p_r as usize, c2p_w as usize);
+    let (p2c_r, p2c_w, c2p_r, c2p_w) = (
+        p2c_r as usize,
+        p2c_w as usize,
+        c2p_r as usize,
+        c2p_w as usize,
+    );
     let importer = match call::fork() {
         Ok(0) => {
             // Importer: must NOT keep the write end of p2c, or EOF never comes.
@@ -416,7 +452,7 @@ fn exporter_b(res_w: usize) -> ! {
                 call::exit(12);
             }
             let _ = send_u8(c2p_w, 1); // mapped
-            // Wait for exporter death: EOF on p2c.
+                                       // Wait for exporter death: EOF on p2c.
             let _ = recv_u8(p2c_r);
             sleep_ms(100); // let process teardown run
             let bad = unsafe { verify(addr) };

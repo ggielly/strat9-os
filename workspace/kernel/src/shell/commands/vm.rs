@@ -545,7 +545,11 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
                     Ok(())
                 }
                 Err(error) => {
-                    shell_println!("vm: cannot open the DOS session: {:?} ({})", error, error.hint());
+                    shell_println!(
+                        "vm: cannot open the DOS session: {:?} ({})",
+                        error,
+                        error.hint()
+                    );
                     Err(ShellError::ExecutionFailed)
                 }
             }
@@ -652,8 +656,7 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
                 shell_println!("vm: DOS session needs VT-x and unrestricted guest");
                 return Ok(());
             }
-            match dosboot::dos_open(&caps, dosboot::FirmwareKind::Stub, dosboot::freedos_image())
-            {
+            match dosboot::dos_open(&caps, dosboot::FirmwareKind::Stub, dosboot::freedos_image()) {
                 Ok(id) => {
                     shell_println!(
                         "vm: DOS session reset on world {id}{}",
@@ -694,11 +697,7 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
                     Ok(())
                 }
                 Err(error) => {
-                    shell_println!(
-                        "vm: DOS session FAIL: {:?} ({})",
-                        error,
-                        error.hint()
-                    );
+                    shell_println!("vm: DOS session FAIL: {:?} ({})", error, error.hint());
                     Err(ShellError::ExecutionFailed)
                 }
             }
@@ -823,9 +822,7 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
                 print_screen_changes(&screen, &current);
                 screen = current;
             }
-            shell_println!(
-                "vm: DOS console detached; the session stays open for `vm dos run`"
-            );
+            shell_println!("vm: DOS console detached; the session stays open for `vm dos run`");
             Ok(())
         }
         "state" | "diag" => match dosboot::dos_machine_state() {

@@ -87,7 +87,11 @@ pub fn log_hex(value: u64) {
     let mut buf = [0u8; 16];
     for i in 0..16 {
         let nib = ((value >> ((15 - i) * 4)) & 0xF) as u8;
-        buf[i] = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+        buf[i] = if nib < 10 {
+            b'0' + nib
+        } else {
+            b'a' + nib - 10
+        };
     }
     log("0x");
     // SAFETY: the buffer only holds ASCII hex digits written above.

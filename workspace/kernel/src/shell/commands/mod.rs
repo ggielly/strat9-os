@@ -32,13 +32,13 @@ pub mod mem;
 pub mod net;
 pub mod proc;
 pub mod ps;
+#[cfg(target_arch = "x86_64")]
+pub mod screendiff;
 pub mod sys;
 pub mod timer;
 pub mod top;
 pub mod util;
 pub mod vfs;
-#[cfg(target_arch = "x86_64")]
-pub mod screendiff;
 pub mod vm;
 #[cfg(target_arch = "x86_64")]
 pub mod vmtop;

@@ -613,11 +613,8 @@ pub fn restore_signal_hint_current(task_id: u64) {
 pub fn clear_signal_hint_for_task(task_id: u64) {
     let packed = encode_signal_hint(task_id);
     for slot in PERCPU.iter() {
-        let _ = slot.signal_pending.compare_exchange(
-            packed,
-            0,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+        let _ =
+            slot.signal_pending
+                .compare_exchange(packed, 0, Ordering::AcqRel, Ordering::Acquire);
     }
 }

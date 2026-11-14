@@ -2212,7 +2212,8 @@ fn log_session_diagnostics(report: &DosReport, stage: &str) {
         stage,
         report.vectors_delivered[0x08],
         report.vectors_delivered[0x09],
-        report.interrupts_delivered
+        report
+            .interrupts_delivered
             .saturating_sub(report.vectors_delivered[0x08])
             .saturating_sub(report.vectors_delivered[0x09]),
         report.skipped_interrupts_disabled,
@@ -2337,9 +2338,7 @@ pub fn run_freedos_session_selftest(caps: &HwCaps) -> Result<(), DosError> {
             );
             return Err(DosError::BadExit("typed copy/type did not round-trip"));
         }
-        log::info!(
-            "[s9vm] freedos-session: copy wrote the file and `type` read it back"
-        );
+        log::info!("[s9vm] freedos-session: copy wrote the file and `type` read it back");
         Ok(())
     })();
     let _ = dos_close();
@@ -2368,7 +2367,8 @@ pub fn run_freedos_session_dry(caps: &HwCaps) -> Result<(), DosError> {
         // `vm console` path: the screen snapshot is stored then drained.
         vm::set_console_output(world_id, b"screen").map_err(|()| DosError::VmFail(9))?;
         let mut buffer = [0u8; 16];
-        let read = vm::read_console_output(world_id, &mut buffer).map_err(|()| DosError::VmFail(9))?;
+        let read =
+            vm::read_console_output(world_id, &mut buffer).map_err(|()| DosError::VmFail(9))?;
         if &buffer[..read] != b"screen" {
             return Err(DosError::BadExit("console output did not round-trip"));
         }
@@ -2448,7 +2448,9 @@ pub fn run_freedos_session_dry(caps: &HwCaps) -> Result<(), DosError> {
         );
         if typed_late == 0 {
             let _ = vm::store_machine(world_id, machine);
-            return Err(DosError::BadExit("keys not typed after the guest owned INT 9"));
+            return Err(DosError::BadExit(
+                "keys not typed after the guest owned INT 9",
+            ));
         }
         if !machine.devices().keyboard.has_scancode() {
             let _ = vm::store_machine(world_id, machine);
@@ -2461,7 +2463,12 @@ pub fn run_freedos_session_dry(caps: &HwCaps) -> Result<(), DosError> {
         // Extended keys: an arrow reaches the guest as an `0xE0`-prefixed pair
         // on the 8042, and as a `(scan code, 0)` entry in the firmware buffer.
         let mut drained = 0usize;
-        while machine.devices_mut().keyboard.read(keyboard::DATA_PORT).is_some() {
+        while machine
+            .devices_mut()
+            .keyboard
+            .read(keyboard::DATA_PORT)
+            .is_some()
+        {
             drained += 1;
             if drained > 64 {
                 break;
@@ -2528,8 +2535,7 @@ pub fn run_freedos_session_dry(caps: &HwCaps) -> Result<(), DosError> {
             ));
         }
         let mut feed = KeyboardFeed::new(&[strat9_keymap::KEY_UP]);
-        if feed.fill_bios(&mut bios_state, 1) != 1
-            || bios_state.keyboard.back() != Some(&(0x48, 0))
+        if feed.fill_bios(&mut bios_state, 1) != 1 || bios_state.keyboard.back() != Some(&(0x48, 0))
         {
             let _ = vm::store_machine(world_id, machine);
             return Err(DosError::BadExit(
@@ -2706,9 +2712,12 @@ pub fn run_freedos_prepare_dry(caps: &HwCaps) -> Result<(), DosError> {
         // request register. An unprogrammed 8254 never fires, which is exactly
         // what leaves a DOS guest polling the BIOS instead of taking ticks.
         {
-            let tsc_hz = crate::s9vm::tsc::get().map_or(FALLBACK_TSC_HZ, |frequency| frequency.hz());
+            let tsc_hz =
+                crate::s9vm::tsc::get().map_or(FALLBACK_TSC_HZ, |frequency| frequency.hz());
             let mut apic = LocalApic::new(0);
-            prepared.machine.advance_time(&mut apic, tsc_hz / 10, tsc_hz);
+            prepared
+                .machine
+                .advance_time(&mut apic, tsc_hz / 10, tsc_hz);
             if prepared.machine.devices().pic.master().irr() & 0x01 == 0 {
                 return Err(DosError::BadExit("the 8254 does not raise IRQ0"));
             }
@@ -2779,29 +2788,28 @@ fn run_freedos_in_world(
     // disk and its vCPU: only a fresh boot prepares those. The second-level
     // tables are fetched *after* the world is mapped: a freshly created world
     // has none until `map_and_load_freedos` allocates them.
-    let (disk_sectors, mut vcpu, mut bios_state, mut machine, pointer) =
-        if let Some(session) = session.as_deref_mut() {
-            let pointer =
-                vm::second_level_pointer(world_id, caps).map_err(|_| DosError::VmFail(6))?;
-            let vcpu = session
-                .vcpu
-                .take()
-                .ok_or(DosError::BadExit("DOS session without a vCPU"))?;
-            let machine = vm::take_machine(world_id).ok_or(DosError::VmFail(7))?;
-            let bios_state = core::mem::replace(&mut session.bios_state, bios::BiosState::new());
-            let disk_sectors = session.disk_sectors;
-            (disk_sectors, vcpu, bios_state, machine, pointer)
-        } else {
-            let prepared =
-                prepare_dos_world(caps, world_id, firmware, image, launch_tsc, tsc_hz)?;
-            (
-                prepared.disk_sectors,
-                prepared.vcpu,
-                bios::BiosState::new(),
-                prepared.machine,
-                prepared.pointer,
-            )
-        };
+    let (disk_sectors, mut vcpu, mut bios_state, mut machine, pointer) = if let Some(session) =
+        session.as_deref_mut()
+    {
+        let pointer = vm::second_level_pointer(world_id, caps).map_err(|_| DosError::VmFail(6))?;
+        let vcpu = session
+            .vcpu
+            .take()
+            .ok_or(DosError::BadExit("DOS session without a vCPU"))?;
+        let machine = vm::take_machine(world_id).ok_or(DosError::VmFail(7))?;
+        let bios_state = core::mem::replace(&mut session.bios_state, bios::BiosState::new());
+        let disk_sectors = session.disk_sectors;
+        (disk_sectors, vcpu, bios_state, machine, pointer)
+    } else {
+        let prepared = prepare_dos_world(caps, world_id, firmware, image, launch_tsc, tsc_hz)?;
+        (
+            prepared.disk_sectors,
+            prepared.vcpu,
+            bios::BiosState::new(),
+            prepared.machine,
+            prepared.pointer,
+        )
+    };
     let mut memory = WorldMemory::new(world_id);
     // Pin the task to this CPU before the VMCS is loaded: the STI window of
     // `service_pending_host_interrupts` lets the timer interrupt run, and
@@ -3289,8 +3297,7 @@ fn run_freedos_in_world(
                     // guest idled before the 8254 raised a tick), synthesise a
                     // timer request so it is delivered through the 8259 and
                     // acknowledged by the firmware stub like a real one.
-                    if machine.devices_mut().legacy_pic() && !machine.devices().pic.has_pending()
-                    {
+                    if machine.devices_mut().legacy_pic() && !machine.devices().pic.has_pending() {
                         machine.devices_mut().pic.raise(0);
                     }
                     match pump_dos_interrupts(

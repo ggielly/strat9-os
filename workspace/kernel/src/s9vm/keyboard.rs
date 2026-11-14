@@ -416,12 +416,12 @@ pub const SCANCODE_EXTENDED: u8 = 0xE0;
 /// buffer with a zero ASCII byte, which is how `INT 16h` reports an arrow.
 pub const fn extended_scan(key: u8) -> Option<u8> {
     match key {
-        strat9_keymap::KEY_UP => Some(0x48), // up
-        strat9_keymap::KEY_DOWN => Some(0x50), // down
-        strat9_keymap::KEY_LEFT => Some(0x4B), // left
+        strat9_keymap::KEY_UP => Some(0x48),    // up
+        strat9_keymap::KEY_DOWN => Some(0x50),  // down
+        strat9_keymap::KEY_LEFT => Some(0x4B),  // left
         strat9_keymap::KEY_RIGHT => Some(0x4D), // right
-        strat9_keymap::KEY_HOME => Some(0x47), // home
-        strat9_keymap::KEY_END => Some(0x4F), // end
+        strat9_keymap::KEY_HOME => Some(0x47),  // home
+        strat9_keymap::KEY_END => Some(0x4F),   // end
         _ => None,
     }
 }
