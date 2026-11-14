@@ -1649,8 +1649,16 @@ fn verify_demo(report: &DosReport) -> Result<(), DosError> {
 /// polling the BIOS.
 fn configure_dos_machine(machine: &mut Machine, firmware: FirmwareKind, image: &'static [u8]) {
     if !firmware.is_seabios() {
-        machine.devices_mut().set_legacy_pic(true);
-        machine.devices_mut().pic = crate::s9vm::pic::Pic::bios_default();
+        let devices = machine.devices_mut();
+        devices.set_legacy_pic(true);
+        devices.pic = crate::s9vm::pic::Pic::bios_default();
+        // A PC firmware hands the boot sector a running 18.2 Hz tick: channel 0
+        // of the 8254 in mode 3 with a divisor of 65536. The model starts
+        // unprogrammed and would never raise IRQ0 otherwise, leaving the guest
+        // with polling only (DOS derives its clock and INT 8 from this tick).
+        devices.pit.write(3, 0x36); // channel 0, lo/hi byte, mode 3, binary
+        devices.pit.write(0, 0x00); // divisor low
+        devices.pit.write(0, 0x00); // divisor high -> 65536
         return;
     }
     let config = firmware::FirmwareConfig::freedos();
@@ -2136,6 +2144,18 @@ pub fn run_freedos_prepare_dry(caps: &HwCaps) -> Result<(), DosError> {
             return Err(DosError::BadExit("missing second-level pointer"));
         }
         let mut prepared = prepared;
+        // The firmware must hand the guest a running 18.2 Hz tick: advance the
+        // device time base by 0.1 s of host time and require IRQ0 in the 8259
+        // request register. An unprogrammed 8254 never fires, which is exactly
+        // what leaves a DOS guest polling the BIOS instead of taking ticks.
+        {
+            let tsc_hz = crate::s9vm::tsc::get().map_or(FALLBACK_TSC_HZ, |frequency| frequency.hz());
+            let mut apic = LocalApic::new(0);
+            prepared.machine.advance_time(&mut apic, tsc_hz / 10, tsc_hz);
+            if prepared.machine.devices().pic.master().irr() & 0x01 == 0 {
+                return Err(DosError::BadExit("the 8254 does not raise IRQ0"));
+            }
+        }
         {
             let image_bytes = prepared.machine.devices_mut().blk.disk_mut();
             let sectors = (image_bytes.len() / biosrom::SECTOR_SIZE) as u64;
