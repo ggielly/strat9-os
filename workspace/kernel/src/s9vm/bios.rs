@@ -404,14 +404,23 @@ pub trait BiosMemory {
 
 /// Synthetic block-device access used by `INT 13h`.
 ///
-/// Sector numbers are linear block addresses. The model never writes to the
-/// device: `INT 13h AH=03` and `AH=43h` report it as write-protected.
+/// Sector numbers are linear block addresses. A read-only medium (the default)
+/// keeps `INT 13h AH=03`/`AH=43h` reporting write-protected; a backend that can
+/// persist writes overrides [`BiosDisk::write_sector`].
 pub trait BiosDisk {
     /// Number of 512-byte sectors available.
     fn sectors(&self) -> u64;
 
     /// Reads one sector into `out`. Returns `false` on a backend error.
     fn read_sector(&mut self, sector: u64, out: &mut [u8; 512]) -> bool;
+
+    /// Writes one sector from `data`.
+    ///
+    /// The default implementation reports a read-only medium.
+    fn write_sector(&mut self, sector: u64, data: &[u8; 512]) -> bool {
+        let _ = (sector, data);
+        false
+    }
 }
 
 /// CHS geometry used to decode and report disk addresses.
@@ -851,7 +860,46 @@ impl BiosState {
                     Err(status) => fail_ah(regs, status),
                 }
             }
-            0x03 => fail_ah(regs, DISK_STATUS_WRITE_PROTECTED),
+            0x03 => {
+                let Some(_hard) = drive_kind(regs.dx as u8) else {
+                    return fail_ah(regs, DISK_STATUS_MEDIA_NOT_FOUND);
+                };
+                let count = (regs.ax & 0xFF) as u64;
+                let sector = (regs.cx & 0x3F) as u8;
+                let cyl = ((regs.cx >> 8) & 0xFF) | (((regs.cx >> 6) & 0x03) << 8);
+                let head = (regs.dx >> 8) as u8;
+                let Some(lba) = self.disk.lba(cyl, head, sector) else {
+                    return fail_ah(regs, DISK_STATUS_SECTOR_NOT_FOUND);
+                };
+                let buffer = linear_address(regs.es, regs.bx);
+                match write_sectors(mem, disk, lba, count, buffer) {
+                    Ok(()) => {
+                        set_ah(regs, DISK_STATUS_OK);
+                        Completion::OK
+                    }
+                    Err(status) => fail_ah(regs, status),
+                }
+            }
+            0x05 => {
+                let Some(_hard) = drive_kind(regs.dx as u8) else {
+                    return fail_ah(regs, DISK_STATUS_MEDIA_NOT_FOUND);
+                };
+                let count = u64::from(regs.ax & 0xFF);
+                let table = linear_address(regs.es, regs.bx);
+                match self.format_track(mem, disk, count, table) {
+                    Ok(()) => {
+                        set_ah(regs, DISK_STATUS_OK);
+                        Completion::OK
+                    }
+                    Err(status) => fail_ah(regs, status),
+                }
+            }
+            0x09 | 0x0C | 0x0D | 0x0E | 0x0F => {
+                // Initialise, seek, reset and sector-buffer services: the
+                // synthetic controller is always ready and has no seek latency.
+                set_ah(regs, DISK_STATUS_OK);
+                Completion::OK
+            }
             0x08 => {
                 let Some(hard) = drive_kind(regs.dx as u8) else {
                     return fail_ah(regs, DISK_STATUS_MEDIA_NOT_FOUND);
@@ -913,9 +961,69 @@ impl BiosState {
                     Err(status) => fail_ah(regs, status),
                 }
             }
-            0x43 => fail_ah(regs, DISK_STATUS_WRITE_PROTECTED),
+            0x43 => {
+                let dap = linear_address(regs.ds, regs.si);
+                let Some(size) = mem.read_u8(dap) else {
+                    return fail_ah(regs, DISK_STATUS_INVALID_FUNCTION);
+                };
+                if size != DAP_SIZE {
+                    return fail_ah(regs, DISK_STATUS_INVALID_FUNCTION);
+                }
+                let Some(count) = read_u16(mem, dap + 2) else {
+                    return fail_ah(regs, DISK_STATUS_INVALID_FUNCTION);
+                };
+                let Some(offset) = read_u16(mem, dap + 4) else {
+                    return fail_ah(regs, DISK_STATUS_INVALID_FUNCTION);
+                };
+                let Some(segment) = read_u16(mem, dap + 6) else {
+                    return fail_ah(regs, DISK_STATUS_INVALID_FUNCTION);
+                };
+                let Some(lba) = read_u64(mem, dap + 8) else {
+                    return fail_ah(regs, DISK_STATUS_INVALID_FUNCTION);
+                };
+                let buffer = linear_address(segment, offset);
+                match write_sectors(mem, disk, lba, u64::from(count), buffer) {
+                    Ok(()) => {
+                        set_ah(regs, DISK_STATUS_OK);
+                        Completion::OK
+                    }
+                    Err(status) => fail_ah(regs, status),
+                }
+            }
             _ => fail_ah(regs, DISK_STATUS_INVALID_FUNCTION),
         }
+    }
+
+    /// `INT 13h AH=05h`: formats a track.
+    ///
+    /// `table` points at the classic four-byte record per sector (cylinder,
+    /// head, sector, size code). Every described sector is zero-filled through
+    /// the block backend, which is the state a freshly formatted FAT volume
+    /// expects. A read-only backend fails with the write-protected status.
+    fn format_track(
+        &self,
+        mem: &mut impl BiosMemory,
+        disk: &mut dyn BiosDisk,
+        count: u64,
+        table: u32,
+    ) -> Result<(), u8> {
+        let zero = [0u8; SECTOR_SIZE];
+        for index in 0..count {
+            let entry = table + (index as u32) * 4;
+            let cyl = u16::from(mem.read_u8(entry).ok_or(DISK_STATUS_SECTOR_NOT_FOUND)?);
+            let head = mem.read_u8(entry + 1).ok_or(DISK_STATUS_SECTOR_NOT_FOUND)?;
+            let sector = mem.read_u8(entry + 2).ok_or(DISK_STATUS_SECTOR_NOT_FOUND)?;
+            let Some(lba) = self.disk.lba(cyl, head, sector) else {
+                return Err(DISK_STATUS_SECTOR_NOT_FOUND);
+            };
+            if lba >= disk.sectors() {
+                return Err(DISK_STATUS_SECTOR_NOT_FOUND);
+            }
+            if !disk.write_sector(lba, &zero) {
+                return Err(DISK_STATUS_WRITE_PROTECTED);
+            }
+        }
+        Ok(())
     }
 
     /// `INT 15h`: system services.
@@ -1079,6 +1187,41 @@ fn read_sectors(
             if !mem.write_u8(address as u32, *byte) {
                 return Err(DISK_STATUS_SECTOR_NOT_FOUND);
             }
+        }
+    }
+    Ok(())
+}
+
+/// Writes `count` sectors from a guest buffer, one sector at a time.
+///
+/// Mirrors [`read_sectors`]: the guest buffer is read byte by byte so an
+/// unmapped page fails the call instead of touching host memory.
+fn write_sectors(
+    mem: &mut impl BiosMemory,
+    disk: &mut dyn BiosDisk,
+    lba: u64,
+    count: u64,
+    buffer: u32,
+) -> Result<(), u8> {
+    let mut sector = [0u8; SECTOR_SIZE];
+    let total = disk.sectors();
+    for index in 0..count {
+        let current = lba.checked_add(index).ok_or(DISK_STATUS_SECTOR_NOT_FOUND)?;
+        if current >= total {
+            return Err(DISK_STATUS_SECTOR_NOT_FOUND);
+        }
+        let base = u64::from(buffer) + index * SECTOR_SIZE as u64;
+        for (offset, slot) in sector.iter_mut().enumerate() {
+            let address = base + offset as u64;
+            if address > u64::from(u32::MAX) {
+                return Err(DISK_STATUS_SECTOR_NOT_FOUND);
+            }
+            *slot = mem
+                .read_u8(address as u32)
+                .ok_or(DISK_STATUS_SECTOR_NOT_FOUND)?;
+        }
+        if !disk.write_sector(current, &sector) {
+            return Err(DISK_STATUS_WRITE_PROTECTED);
         }
     }
     Ok(())

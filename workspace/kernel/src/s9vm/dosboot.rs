@@ -1365,6 +1365,18 @@ impl bios::BiosDisk for WorldDisk {
             Err(()) => false,
         }
     }
+
+    fn write_sector(&mut self, sector: u64, data: &[u8; biosrom::SECTOR_SIZE]) -> bool {
+        if sector >= self.sectors {
+            return false;
+        }
+        // The writes land in the world's block device: a guest that formats or
+        // installs keeps its changes for the rest of the world's life.
+        match vm::write_disk(self.world_id, sector, data) {
+            Ok(written) => written == data.len(),
+            Err(()) => false,
+        }
+    }
 }
 
 /// Reads the guest registers into the firmware-model structure.

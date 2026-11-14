@@ -15,7 +15,9 @@ use bios::{
     BiosState, DiskGeometry, BDA_BASE, BDA_CHAR_HEIGHT, BDA_COLUMNS, BDA_CRTC_PORT, BDA_CURSOR,
     BDA_EBDA_SEGMENT, BDA_EQUIPMENT, BDA_KEYBOARD_HEAD, BDA_KEYBOARD_TAIL, BDA_MEMORY_SIZE,
     BDA_PAGE, BDA_ROWS, BDA_TICK_COUNT, BDA_VIDEO_MODE, DISK_STATUS_INVALID_FUNCTION,
-    DISK_STATUS_MEDIA_NOT_FOUND, DISK_STATUS_SECTOR_NOT_FOUND, DISK_STATUS_WRITE_PROTECTED,
+    DISK_STATUS_MEDIA_NOT_FOUND, DISK_STATUS_OK, DISK_STATUS_SECTOR_NOT_FOUND,
+    DISK_STATUS_WRITE_PROTECTED,
+    DAP_SIZE,
     EQUIPMENT_WORD, EXTENSIONS_SIGNATURE, FLOPPY_1440, FLOPPY_TOTAL_SECTORS, HARD_DISK_GEOMETRY,
     KEY_BUFFER_BYTES, KEY_BUFFER_CAPACITY, MEMORY_SIZE_KIB, PRINTER_STATUS, SCRATCH_CF,
     SCRATCH_GPA, SCRATCH_ZF, STATUS_INVALID_FUNCTION, STATUS_NOT_SUPPORTED, TEXT_COLUMNS,
@@ -116,6 +118,10 @@ impl BiosMemory for TestMemory {
 struct TestDisk {
     sectors: u64,
     fail_from: Option<u64>,
+    /// Sectors written by the guest, in order.
+    writes: Vec<(u64, [u8; 512])>,
+    /// True for a read-only medium (the trait default).
+    read_only: bool,
 }
 
 impl TestDisk {
@@ -123,6 +129,8 @@ impl TestDisk {
         Self {
             sectors: FLOPPY_TOTAL_SECTORS,
             fail_from: None,
+            writes: Vec::new(),
+            read_only: false,
         }
     }
 
@@ -130,6 +138,8 @@ impl TestDisk {
         Self {
             sectors,
             fail_from: None,
+            writes: Vec::new(),
+            read_only: false,
         }
     }
 }
@@ -144,6 +154,14 @@ impl BiosDisk for TestDisk {
             return false;
         }
         out.fill((sector & 0xFF) as u8);
+        true
+    }
+
+    fn write_sector(&mut self, sector: u64, data: &[u8; 512]) -> bool {
+        if self.read_only || sector >= self.sectors {
+            return false;
+        }
+        self.writes.push((sector, *data));
         true
     }
 }
@@ -1066,14 +1084,127 @@ fn disk_read_with_an_unmapped_buffer_fails_without_panicking() {
 }
 
 #[test]
-fn disk_writes_are_rejected_as_write_protected() {
+fn disk_write_on_a_read_only_medium_is_write_protected() {
     let mut fixture = Fixture::new();
+    fixture.disk.read_only = true;
     let mut regs = BiosRegisters::new();
     regs.ax = 0x0301;
+    regs.cx = 0x0001;
+    regs.es = 0;
+    regs.bx = 0x8000;
     assert_eq!(fixture.call(0x13, &mut regs), BiosOutcome::Handled);
     assert!(fixture.carry());
     assert_eq!(ah(&regs), DISK_STATUS_WRITE_PROTECTED);
+    assert!(fixture.disk.writes.is_empty());
     assert_eq!(fixture.scratch(), SCRATCH_CF);
+}
+
+// ---------------------------------------------------------------------------
+// INT 13h: CHS / DAP writes and track format
+// ---------------------------------------------------------------------------
+
+#[test]
+fn disk_writes_a_sector_from_the_guest_buffer() {
+    let mut fixture = Fixture::new();
+    fixture.mem.fill(0x8000, 512, 0x5A);
+    let mut regs = BiosRegisters::new();
+    regs.ax = 0x0301; // AH=03h, one sector
+    regs.cx = 0x0002; // cylinder 0, sector 2 -> LBA 1
+    regs.dx = 0x0000; // head 0, drive 0
+    regs.es = 0;
+    regs.bx = 0x8000;
+    assert_eq!(fixture.call(0x13, &mut regs), BiosOutcome::Handled);
+    assert!(!fixture.carry());
+    assert_eq!(ah(&regs), DISK_STATUS_OK);
+    assert_eq!(fixture.disk.writes.len(), 1);
+    let (lba, data) = &fixture.disk.writes[0];
+    assert_eq!(*lba, 1);
+    assert!(data.iter().all(|byte| *byte == 0x5A));
+}
+
+#[test]
+fn disk_writes_multiple_sectors_back_to_back() {
+    let mut fixture = Fixture::new();
+    fixture.mem.fill(0x8000, 2 * 512, 0x77);
+    let mut regs = BiosRegisters::new();
+    regs.ax = 0x0302; // two sectors
+    regs.cx = 0x0001; // start at sector 1 -> LBA 0
+    regs.es = 0;
+    regs.bx = 0x8000;
+    assert_eq!(fixture.call(0x13, &mut regs), BiosOutcome::Handled);
+    assert!(!fixture.carry());
+    let lbas: Vec<u64> = fixture.disk.writes.iter().map(|(lba, _)| *lba).collect();
+    assert_eq!(lbas, vec![0, 1]);
+}
+
+#[test]
+fn disk_write_past_the_geometry_reports_sector_not_found() {
+    let mut fixture = Fixture::new();
+    let mut regs = BiosRegisters::new();
+    regs.ax = 0x0301;
+    regs.cx = 0x5001; // cylinder 80: outside the floppy geometry
+    regs.es = 0;
+    regs.bx = 0x8000;
+    assert_eq!(fixture.call(0x13, &mut regs), BiosOutcome::Handled);
+    assert!(fixture.carry());
+    assert_eq!(ah(&regs), DISK_STATUS_SECTOR_NOT_FOUND);
+    assert!(fixture.disk.writes.is_empty());
+}
+
+#[test]
+fn disk_extended_write_uses_the_address_packet() {
+    let mut fixture = Fixture::new();
+    fixture.mem.fill(0x8000, 2 * 512, 0x33);
+    write_dap(&mut fixture.mem, 0x9000, DAP_SIZE, 2, 0x8000, 0, 3);
+    let mut regs = BiosRegisters::new();
+    regs.ax = 0x4300; // extended write
+    regs.ds = 0;
+    regs.si = 0x9000;
+    assert_eq!(fixture.call(0x13, &mut regs), BiosOutcome::Handled);
+    assert!(!fixture.carry());
+    assert_eq!(ah(&regs), DISK_STATUS_OK);
+    let lbas: Vec<u64> = fixture.disk.writes.iter().map(|(lba, _)| *lba).collect();
+    assert_eq!(lbas, vec![3, 4]);
+}
+
+#[test]
+fn disk_format_track_zeroes_the_sectors_of_the_table() {
+    let mut fixture = Fixture::new();
+    // Three sector descriptors: cylinder 0, head 0, sectors 1..3, 512 bytes.
+    let mut table = [0u8; 12];
+    for (index, byte) in table.chunks_mut(4).enumerate() {
+        byte[2] = (index + 1) as u8; // sector
+        byte[3] = 2; // size code for 512 bytes
+    }
+    fixture.mem.set_bytes(0x9000, &table);
+    let mut regs = BiosRegisters::new();
+    regs.ax = 0x0503; // format track, three sectors
+    regs.cx = 0x0000; // cylinder 0
+    regs.dx = 0x0000; // head 0, drive 0
+    regs.es = 0;
+    regs.bx = 0x9000;
+    assert_eq!(fixture.call(0x13, &mut regs), BiosOutcome::Handled);
+    assert!(!fixture.carry());
+    assert_eq!(ah(&regs), DISK_STATUS_OK);
+    let lbas: Vec<u64> = fixture.disk.writes.iter().map(|(lba, _)| *lba).collect();
+    assert_eq!(lbas, vec![0, 1, 2]);
+    assert!(fixture
+        .disk
+        .writes
+        .iter()
+        .all(|(_, data)| data.iter().all(|byte| *byte == 0)));
+}
+
+#[test]
+fn disk_seek_reset_and_buffer_services_complete() {
+    for function in [0x0900u16, 0x0C00, 0x0D00, 0x0E00, 0x0F00] {
+        let mut fixture = Fixture::new();
+        let mut regs = BiosRegisters::new();
+        regs.ax = function;
+        assert_eq!(fixture.call(0x13, &mut regs), BiosOutcome::Handled);
+        assert!(!fixture.carry(), "function {function:#06x}");
+        assert_eq!(ah(&regs), DISK_STATUS_OK);
+    }
 }
 
 #[test]
@@ -1262,13 +1393,31 @@ fn extended_read_from_an_unmapped_packet_fails() {
 }
 
 #[test]
-fn extended_write_is_rejected_as_write_protected() {
+fn extended_write_needs_a_valid_address_packet() {
     let mut fixture = Fixture::new();
     let mut regs = BiosRegisters::new();
     regs.ax = 0x4300;
+    // DS:SI points at zeroes: a size byte of 0 is not a valid DAP.
+    assert_eq!(fixture.call(0x13, &mut regs), BiosOutcome::Handled);
+    assert!(fixture.carry());
+    assert_eq!(ah(&regs), DISK_STATUS_INVALID_FUNCTION);
+    assert!(fixture.disk.writes.is_empty());
+}
+
+#[test]
+fn extended_write_on_a_read_only_medium_is_write_protected() {
+    let mut fixture = Fixture::new();
+    fixture.disk.read_only = true;
+    fixture.mem.fill(0x8000, 512, 0x11);
+    write_dap(&mut fixture.mem, 0x9000, DAP_SIZE, 1, 0x8000, 0, 5);
+    let mut regs = BiosRegisters::new();
+    regs.ax = 0x4300;
+    regs.ds = 0;
+    regs.si = 0x9000;
     assert_eq!(fixture.call(0x13, &mut regs), BiosOutcome::Handled);
     assert!(fixture.carry());
     assert_eq!(ah(&regs), DISK_STATUS_WRITE_PROTECTED);
+    assert!(fixture.disk.writes.is_empty());
 }
 
 // ---------------------------------------------------------------------------
