@@ -1123,7 +1123,15 @@ fn serve_port(
     guest: &mut dyn GuestContext,
     access: &PortAccess,
 ) -> bool {
-    if Pic::handles_port(access.port) {
+    // Classify the port once. `handle_port_exit` and `handle_string_port`
+    // already called `Devices::handles_port`, so probing every device model
+    // again here re-derived the same answer on every legacy exit — the table is
+    // now the only source of that decision.
+    let kind = match port_kind(access.port) {
+        Some(kind) => kind,
+        None => return false,
+    };
+    if kind == PortKind::Pic {
         // The 8259A pair is byte-wide; a wider access is not PC-compatible.
         if access.size != 1 {
             return false;
@@ -1143,7 +1151,7 @@ fn serve_port(
         }
         return true;
     }
-    if pit::handles_port(access.port) {
+    if kind == PortKind::Pit {
         // The 8254 is byte-wide.
         if access.size != 1 {
             return false;
@@ -1158,7 +1166,7 @@ fn serve_port(
         }
         return true;
     }
-    if rtc::handles_port(access.port) {
+    if kind == PortKind::Rtc {
         // The CMOS index/data ports are byte-wide.
         if access.size != 1 {
             return false;
@@ -1182,7 +1190,7 @@ fn serve_port(
         }
         return true;
     }
-    if uart::handles_port(access.port) {
+    if kind == PortKind::Uart {
         // COM1 is byte-wide.
         if access.size != 1 {
             return false;
@@ -1205,7 +1213,7 @@ fn serve_port(
         );
         return true;
     }
-    if keyboard::handles_port(access.port) {
+    if kind == PortKind::Keyboard {
         // The 8042 is byte-wide.
         if access.size != 1 {
             return false;
@@ -1222,7 +1230,7 @@ fn serve_port(
         }
         return true;
     }
-    if vga::handles_port(access.port) {
+    if kind == PortKind::Vga {
         // VGA registers are byte-wide.
         if access.size != 1 {
             return false;
@@ -1239,7 +1247,7 @@ fn serve_port(
         }
         return true;
     }
-    if dma::handles_port(access.port) {
+    if kind == PortKind::Dma {
         // The 8237 register files are byte-wide.
         if access.size != 1 {
             return false;
@@ -1256,7 +1264,7 @@ fn serve_port(
         }
         return true;
     }
-    if fdc::handles_port(access.port) {
+    if kind == PortKind::Fdc {
         // The 82077 interface is byte-wide.
         if access.size != 1 {
             return false;
@@ -1285,7 +1293,7 @@ fn serve_port(
         }
         return true;
     }
-    if system::handles_port(access.port) {
+    if kind == PortKind::System {
         // The system-control ports are byte-wide.
         if access.size != 1 {
             return false;
@@ -1302,7 +1310,7 @@ fn serve_port(
         }
         return true;
     }
-    if fwcfg::handles_port(access.port) {
+    if kind == PortKind::FwCfg {
         if access.port == fwcfg::CTL_PORT {
             // The selector is written with `outw` by SeaBIOS; accept a byte
             // access too, like the QEMU device.
@@ -1336,7 +1344,7 @@ fn serve_port(
         }
         return true;
     }
-    if handles_pci_port(access.port) {
+    if kind == PortKind::Pci {
         // Configuration mechanism #1: one 32-bit CAM register and one 32-bit
         // data register. The model also accepts byte and word accesses on the
         // data register (some early probes use them).
@@ -1353,14 +1361,14 @@ fn serve_port(
         }
         return true;
     }
-    if access.port == POST_PORT {
+    if kind == PortKind::Post {
         // Diagnostic port: writes are discarded, reads return zero.
         if !access.write {
             write_register(guest, access.register, access.size, 0);
         }
         return true;
     }
-    if access.port == DEBUG_PORT {
+    if kind == PortKind::Debug {
         // QEMU debug console: keep the firmware's `dprintf` output for the
         // runner diagnostics; reads return zero.
         if access.write {
