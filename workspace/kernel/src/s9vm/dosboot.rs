@@ -1988,13 +1988,14 @@ fn run_freedos_in_world(
     let tsc_hz = crate::s9vm::tsc::get().map_or(FALLBACK_TSC_HZ, |frequency| frequency.hz());
     let mut session = session;
     let resuming = session.is_some();
-    // Second-level tables of the world: needed by the device fast path whether
-    // the world is freshly prepared or resumed.
-    let pointer = vm::second_level_pointer(world_id, caps).map_err(|_| DosError::VmFail(6))?;
     // A resumed session already owns its mapped world, its firmware image, its
-    // disk and its vCPU: only a fresh boot prepares those.
-    let (disk_sectors, mut vcpu, mut bios_state, mut machine) =
+    // disk and its vCPU: only a fresh boot prepares those. The second-level
+    // tables are fetched *after* the world is mapped: a freshly created world
+    // has none until `map_and_load_freedos` allocates them.
+    let (disk_sectors, mut vcpu, mut bios_state, mut machine, pointer) =
         if let Some(session) = session.as_deref_mut() {
+            let pointer =
+                vm::second_level_pointer(world_id, caps).map_err(|_| DosError::VmFail(6))?;
             let vcpu = session
                 .vcpu
                 .take()
@@ -2002,7 +2003,7 @@ fn run_freedos_in_world(
             let machine = vm::take_machine(world_id).ok_or(DosError::VmFail(7))?;
             let bios_state = core::mem::replace(&mut session.bios_state, bios::BiosState::new());
             let disk_sectors = session.disk_sectors;
-            (disk_sectors, vcpu, bios_state, machine)
+            (disk_sectors, vcpu, bios_state, machine, pointer)
         } else {
             let disk_sectors = map_and_load_freedos(caps, world_id, firmware, image)?;
             log::info!(
@@ -2016,6 +2017,8 @@ fn run_freedos_in_world(
                 firmware.label(),
                 elapsed_millis(launch_tsc, tsc_hz)
             );
+            let pointer =
+                vm::second_level_pointer(world_id, caps).map_err(|_| DosError::VmFail(6))?;
             // Detached vCPU: the run loop drives it directly, no scheduler.
             let vcpu = Vcpu::new(caps, pointer)?;
             // The stub-firmware world keeps its device model in the registry
@@ -2028,7 +2031,7 @@ fn run_freedos_in_world(
                 vm::take_machine(world_id).ok_or(DosError::VmFail(7))?
             };
             configure_dos_machine(&mut machine, firmware, image);
-            (disk_sectors, vcpu, bios::BiosState::new(), machine)
+            (disk_sectors, vcpu, bios::BiosState::new(), machine, pointer)
         };
     let mut memory = WorldMemory::new(world_id);
     // Pin the task to this CPU before the VMCS is loaded: the STI window of
