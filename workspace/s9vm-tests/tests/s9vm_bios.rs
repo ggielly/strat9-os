@@ -1197,6 +1197,78 @@ fn disk_format_track_zeroes_the_sectors_of_the_table() {
 }
 
 #[test]
+fn disk_full_format_sequence_rewrites_every_sector_and_verifies() {
+    // What `FORMAT` does on a 1.44 MB floppy: one AH=05h call per track with an
+    // 18-entry descriptor table, then the boot sector through AH=03h, then a
+    // verification pass. Driving the whole medium proves the BIOS model can
+    // back a real formatter, not just a single track.
+    let mut fixture = Fixture::new();
+    let mut regs = BiosRegisters::new();
+    for cyl in 0..80u16 {
+        for head in 0..2u8 {
+            let mut table = [0u8; 18 * 4];
+            for (index, entry) in table.chunks_mut(4).enumerate() {
+                // Each descriptor carries its own cylinder, head, sector and
+                // size code, so the table decides the addresses formatted.
+                entry[0] = cyl as u8;
+                entry[1] = head;
+                entry[2] = (index + 1) as u8; // sector, one-based
+                entry[3] = 2; // size code for 512 bytes
+            }
+            fixture.mem.set_bytes(0x9000, &table);
+            regs = BiosRegisters::new();
+            regs.ax = 0x0512; // format track, 18 sectors
+            regs.cx = ((cyl & 0xFF) << 8) | (((cyl >> 8) & 0x03) << 6);
+            regs.dx = (u16::from(head) << 8) | 0x00;
+            regs.es = 0;
+            regs.bx = 0x9000;
+            assert_eq!(fixture.call(0x13, &mut regs), BiosOutcome::Handled);
+            assert!(
+                !fixture.carry(),
+                "format failed at cylinder {cyl} head {head}"
+            );
+        }
+    }
+    // Every sector of the medium was zero-filled, in linear order.
+    assert_eq!(fixture.disk.writes.len() as u64, FLOPPY_TOTAL_SECTORS);
+    let lbas: Vec<u64> = fixture.disk.writes.iter().map(|(lba, _)| *lba).collect();
+    assert_eq!(lbas, (0..FLOPPY_TOTAL_SECTORS).collect::<Vec<u64>>());
+    assert!(fixture
+        .disk
+        .writes
+        .iter()
+        .all(|(_, data)| data.iter().all(|byte| *byte == 0)));
+
+    // Install a boot sector, then verify the whole first track through AH=04h.
+    let mut boot = [0u8; 512];
+    boot[0] = 0xEB;
+    boot[1] = 0x3C;
+    boot[2] = 0x90;
+    boot[510] = 0x55;
+    boot[511] = 0xAA;
+    fixture.mem.set_bytes(0x8000, &boot);
+    let mut regs = BiosRegisters::new();
+    regs.ax = 0x0301;
+    regs.cx = 0x0001;
+    regs.es = 0;
+    regs.bx = 0x8000;
+    assert_eq!(fixture.call(0x13, &mut regs), BiosOutcome::Handled);
+    assert!(!fixture.carry());
+    let (lba, data) = fixture.disk.writes.last().expect("boot sector written");
+    assert_eq!(*lba, 0);
+    assert_eq!(data[510], 0x55);
+    assert_eq!(data[511], 0xAA);
+
+    let mut regs = BiosRegisters::new();
+    regs.ax = 0x0412; // verify 18 sectors of cylinder 0, head 0
+    regs.cx = 0x0001;
+    regs.dx = 0x0000;
+    assert_eq!(fixture.call(0x13, &mut regs), BiosOutcome::Handled);
+    assert!(!fixture.carry());
+    assert_eq!(ah(&regs), DISK_STATUS_OK);
+}
+
+#[test]
 fn disk_seek_reset_and_buffer_services_complete() {
     for function in [0x0900u16, 0x0C00, 0x0D00, 0x0E00, 0x0F00] {
         let mut fixture = Fixture::new();
