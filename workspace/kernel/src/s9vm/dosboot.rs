@@ -189,6 +189,8 @@ const SEABIOS_HIGH_MEMORY_END: u64 = 0x40_0000;
 /// A 256 KiB SeaBIOS image occupies `0xC0000..0x100000`; its first 64 KiB are
 /// zero padding where the VGA option ROM is installed.
 const SEABIOS_ROM_WINDOW_BASE: u64 = 0xC_0000;
+/// Top-of-4GiB alias of the BIOS ROM used by the reset vector and high code.
+const SEABIOS_ROM_ALIAS_BASE: u64 = 0xFFFC_0000;
 /// Upper bound on guest exits for one FreeDOS boot.
 ///
 /// A real DOS boot runs far more instructions than the synthetic demo: the
@@ -709,8 +711,21 @@ fn map_low_windows(caps: &HwCaps, world_id: u64, firmware: FirmwareKind) -> Resu
         DOS_GUEST_PERMS,
         0,
     )
-    .map(|_| ())
-    .map_err(|_| DosError::VmFail(3))
+    .map_err(|_| DosError::VmFail(3))?;
+    if firmware.is_seabios() {
+        // PC firmware is also visible at the top of the 4 GiB address space;
+        // SeaBIOS' high code and the reset vector run from that alias. The
+        // pages are shared with the low ROM window, not copied.
+        vm::alias_memory(
+            world_id,
+            SEABIOS_ROM_ALIAS_BASE,
+            rom_window_base,
+            ROM_WINDOW_END - rom_window_base,
+            DOS_GUEST_PERMS,
+        )
+        .map_err(|_| DosError::VmFail(3))?;
+    }
+    Ok(())
 }
 
 /// Maps the window above 1 MiB (A20 probe, allocator and firmware tables).
@@ -1019,6 +1034,10 @@ impl emulate::GuestContext for VcpuGuest<'_> {
         self.vcpu.guest().ds.base
     }
 
+    fn cs_base(&self) -> u64 {
+        self.vcpu.guest().cs.base
+    }
+
     fn msr_model(&mut self) -> Option<&mut crate::s9vm::msr::MsrModel> {
         // SeaBIOS executes `RDMSR`/`WRMSR` during POST; the model keeps those
         // guest-local instead of touching a host MSR.
@@ -1044,6 +1063,11 @@ fn run_device_fast_path(
     guest_physical_address: u64,
     instruction_length: u32,
 ) -> bool {
+    // Segment bases drive instruction fetch (`CS.base + IP`) and string I/O
+    // (`ES`/`DS`). They may have changed since the last exit (option ROM far
+    // jumps, mode switches), so refresh them before decoding the instruction.
+    // SAFETY: block loaded, guest inactive (exit handler).
+    let _ = unsafe { vcpu.refresh_system_state() };
     let mut view = emulate::MemoryView::new(memory, ept_root, 0, false);
     let mut guest = VcpuGuest::new(vcpu);
     matches!(
@@ -1762,6 +1786,14 @@ fn run_freedos_in_world(
         let _ = vcpu.clear();
     }
     if firmware.is_seabios() {
+        let debug_con = machine.devices_mut().drain_debug_con();
+        if !debug_con.is_empty() {
+            log::info!(
+                "[s9vm] {}: firmware debugcon: {}",
+                firmware.label(),
+                String::from_utf8_lossy(&debug_con)
+            );
+        }
         let serial = machine.drain_serial();
         if !serial.is_empty() {
             log::info!(
@@ -2128,6 +2160,15 @@ fn verify_seabios_installation(
     }
     if reset[0] != 0xEA || reset[3] != 0x00 || reset[4] != 0xF0 {
         return Err(DosError::BadExit("SeaBIOS reset vector differs"));
+    }
+    // The top-of-4GiB alias must expose the same bytes: the reset vector is
+    // fetched at 0xFFFFFFF0 and SeaBIOS' high code runs from this window.
+    let mut alias_reset = [0u8; firmware::RESET_VECTOR_LEN];
+    if !biosrom::RomMemory::read(memory, 0xFFFF_FFF0, &mut alias_reset) {
+        return Err(DosError::Mmu);
+    }
+    if alias_reset != reset {
+        return Err(DosError::BadExit("SeaBIOS high alias differs"));
     }
     let mut option = vec![0u8; rom_info.len as usize];
     if !biosrom::RomMemory::read(memory, rom_info.base, &mut option) {

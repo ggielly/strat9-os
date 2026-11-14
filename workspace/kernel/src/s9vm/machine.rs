@@ -131,6 +131,10 @@ impl GuestContext for VcpuGuest<'_> {
         self.vcpu.guest().ds.base
     }
 
+    fn cs_base(&self) -> u64 {
+        self.vcpu.guest().cs.base
+    }
+
     fn msr_model(&mut self) -> Option<&mut crate::s9vm::msr::MsrModel> {
         Some(self.vcpu.msr_mut())
     }

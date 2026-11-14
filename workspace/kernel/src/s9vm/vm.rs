@@ -396,6 +396,60 @@ impl WorldMemory {
         Ok(pages)
     }
 
+    /// Maps a GPA range as an **alias** of already-mapped guest memory.
+    ///
+    /// The source pages are translated through the second-level tables and the
+    /// destination GPA is mapped to the same host frames; no frame is
+    /// allocated or freed. This is how the PC maps the BIOS ROM at both
+    /// `0xC0000` and the top-of-4GiB alias (`0xFFFC0000`) that the reset
+    /// vector and SeaBIOS' high code use.
+    pub fn alias(
+        &mut self,
+        gpa: u64,
+        source_gpa: u64,
+        len: u64,
+        perms_bits: u32,
+    ) -> Result<u64, VmError> {
+        if len == 0
+            || gpa % PAGE_SIZE != 0
+            || source_gpa % PAGE_SIZE != 0
+            || len % PAGE_SIZE != 0
+        {
+            return Err(VmError::Map(crate::s9vm::memmap::MapError::InvalidRange));
+        }
+        self.map.reserve(gpa, len, perms_bits, 0)?;
+        let decoded = perms_from_abi(perms_bits);
+        let perms = MmuPerms {
+            read: decoded.read,
+            write: decoded.write,
+            execute: decoded.execute,
+        };
+        let pages = len / PAGE_SIZE;
+        let mut installed: Vec<u64> = Vec::with_capacity(pages as usize);
+        for index in 0..pages {
+            let source = source_gpa + index * PAGE_SIZE;
+            let Some(hpa) = self.second_level.translate(source) else {
+                self.rollback_alias(&installed, gpa);
+                return Err(VmError::Map(crate::s9vm::memmap::MapError::InvalidRange));
+            };
+            let target = gpa + index * PAGE_SIZE;
+            if let Err(error) = self.second_level.map_4k(target, hpa, perms) {
+                self.rollback_alias(&installed, gpa);
+                return Err(VmError::Translation(error));
+            }
+            installed.push(target);
+        }
+        Ok(pages)
+    }
+
+    /// Undoes an alias mapping without touching the source frames.
+    fn rollback_alias(&mut self, installed: &[u64], gpa: u64) {
+        for target in installed.iter().rev() {
+            let _ = self.second_level.unmap_4k(*target);
+        }
+        self.map.remove(gpa);
+    }
+
     /// Undoes installed mappings and frees every frame of a failed `map`.
     ///
     /// Mappings are torn down in reverse installation order; 2 MiB leaves use
@@ -908,6 +962,50 @@ pub fn map_memory(
         Slot::Empty => WorldMemory::new(DEFAULT_QUOTA_PAGES)?,
     };
     let result = memory.map(caps, gpa, len, perms_bits, memtype);
+    let mut worlds = WORLDS.lock();
+    match worlds.get_mut(&id) {
+        Some(world) => {
+            if result.is_ok() {
+                world.record.mapped_pages = memory.pages();
+            }
+            world.memory = Some(memory);
+            result
+        }
+        None => {
+            drop(worlds);
+            memory.destroy();
+            Err(VmError::Unknown)
+        }
+    }
+}
+
+/// Maps a GPA range as an alias of an existing range in a world.
+///
+/// Frames are shared with the source range: no allocation and no extra free.
+pub fn alias_memory(
+    id: u64,
+    gpa: u64,
+    source_gpa: u64,
+    len: u64,
+    perms_bits: u32,
+) -> Result<u64, VmError> {
+    enum Slot {
+        Existing(WorldMemory),
+        Empty,
+    }
+    let slot = {
+        let mut worlds = WORLDS.lock();
+        let world = worlds.get_mut(&id).ok_or(VmError::Unknown)?;
+        match world.memory.take() {
+            Some(memory) => Slot::Existing(memory),
+            None => Slot::Empty,
+        }
+    };
+    let mut memory = match slot {
+        Slot::Existing(memory) => memory,
+        Slot::Empty => WorldMemory::new(DEFAULT_QUOTA_PAGES)?,
+    };
+    let result = memory.alias(gpa, source_gpa, len, perms_bits);
     let mut worlds = WORLDS.lock();
     match worlds.get_mut(&id) {
         Some(world) => {

@@ -46,6 +46,8 @@
 //! replay and device behaviour are all covered by host tests. The kernel
 //! supplies `PhysMemory` and `GuestContext` (see `machine.rs`).
 
+use alloc::vec::Vec;
+
 use super::{
     apic::{reg as apic_reg, x2apic, LocalApic, TSC_DEADLINE_MSR},
     decode::{self, Decoded, MemoryAccess, PortAccess},
@@ -128,6 +130,8 @@ pub const X2APIC_MSR_LAST: u32 = 0x8FF;
 pub const PIC_BASE_PORT: u16 = 0x20;
 /// POST/delay diagnostic port: writes are discarded, reads return zero.
 pub const POST_PORT: u16 = 0x80;
+/// QEMU debug console port (`-debugcon`): SeaBIOS' `dprintf` output.
+pub const DEBUG_PORT: u16 = 0x402;
 
 /// Interrupt vector the I/O APIC delivers for the 8254 timer line.
 pub const PIT_IRQ_VECTOR: u8 = 0x20;
@@ -348,6 +352,11 @@ pub trait GuestContext {
         0
     }
 
+    /// Base of the `CS` segment (instruction fetch).
+    fn cs_base(&self) -> u64 {
+        0
+    }
+
     /// Per-vCPU MSR shadow model, when the caller provides one.
     ///
     /// The default is `None`, which makes replayed `RDMSR`/`WRMSR` exits
@@ -477,12 +486,17 @@ impl<'a> MemoryView<'a> {
 
     /// Fetches and decodes the instruction at the guest instruction pointer.
     fn fetch(&mut self, guest: &dyn GuestContext) -> Result<Decoded, EmuError> {
-        let rip = guest.rip();
+        let ip = guest.rip();
+        // Instruction fetch is `CS.base + IP` in real and 16-bit protected
+        // mode. SeaBIOS' 16-bit code runs with `CS.base = 0xF0000`, so reading
+        // at RIP alone would decode bytes from the wrong address.
+        let linear = guest.cs_base().wrapping_add(ip);
         let mut bytes = [0u8; decode::MAX_INSTRUCTION];
-        if !self.read(rip, &mut bytes) {
+        if !self.read(linear, &mut bytes) {
             return Err(EmuError::Unmapped);
         }
-        decode::decode(&bytes, rip, |register| guest.gpr(register))
+        // The decoder's `next_rip` is an IP offset, not a linear address.
+        decode::decode(&bytes, ip, |register| guest.gpr(register))
             .map_err(|_| EmuError::BadInstruction)
     }
 }
@@ -531,6 +545,8 @@ pub struct Devices {
     pub system: SystemControl,
     /// QEMU `fw_cfg` selector/data pair.
     pub fw_cfg: FwCfg,
+    /// SeaBIOS `dprintf` output captured from the QEMU debug port `0x402`.
+    debug_con: Vec<u8>,
     /// PCI host bridge: configuration mechanism #1 and the virtio functions
     /// the guest discovers through it (no MSI generation yet).
     pub pci: PciHostBridge,
@@ -628,6 +644,7 @@ impl Devices {
             fdc: FloppyController::new(),
             system: SystemControl::new(),
             fw_cfg: FwCfg::new(),
+            debug_con: Vec::new(),
             pci,
             hpet: Hpet::new(),
             console: VirtioConsole::new(),
@@ -647,6 +664,11 @@ impl Devices {
     /// ROM under `vgaroms/vgabios-stdvga.bin`).
     pub fn add_fw_cfg_file(&mut self, name: &str, data: &[u8]) {
         let _ = self.fw_cfg.add_file(name, data);
+    }
+
+    /// Takes the bytes the firmware wrote to the QEMU debug console.
+    pub fn drain_debug_con(&mut self) -> Vec<u8> {
+        core::mem::take(&mut self.debug_con)
     }
 
     /// Selects legacy 8259 interrupt delivery (see the field documentation).
@@ -678,6 +700,7 @@ impl Devices {
     pub fn handles_port(port: u16) -> bool {
         Pic::handles_port(port)
             || port == POST_PORT
+            || port == DEBUG_PORT
             || pit::handles_port(port)
             || rtc::handles_port(port)
             || uart::handles_port(port)
@@ -1222,6 +1245,18 @@ fn serve_port(
     if access.port == POST_PORT {
         // Diagnostic port: writes are discarded, reads return zero.
         if !access.write {
+            write_register(guest, access.register, access.size, 0);
+        }
+        return true;
+    }
+    if access.port == DEBUG_PORT {
+        // QEMU debug console: keep the firmware's `dprintf` output for the
+        // runner diagnostics; reads return zero.
+        if access.write {
+            devices
+                .debug_con
+                .push((guest.gpr(access.register) & 0xFF) as u8);
+        } else {
             write_register(guest, access.register, access.size, 0);
         }
         return true;
