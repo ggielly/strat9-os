@@ -1393,6 +1393,8 @@ fn run_freedos_in_world(
     // names it in the log instead of only showing an exit counter.
     let mut unhandled_seen: [u16; 8] = [0; 8];
     let mut unhandled_seen_len = 0usize;
+    // Most-accessed I/O ports, to name a firmware polling loop in the log.
+    let mut port_top: [(u16, u32); 8] = [(0, 0); 8];
     // Wall-clock origin of the run: the shell-facing budget is measured from
     // here, independently of the exit counter.
     let start_tsc = unsafe { core::arch::x86_64::_rdtsc() };
@@ -1465,6 +1467,19 @@ fn run_freedos_in_world(
             ExitClass::IoPort => {
                 report.io_exits += 1;
                 let port = ((exit.qualification >> 16) & 0xFFFF) as u16;
+                let mut counted = false;
+                for slot in &mut port_top {
+                    if slot.0 == port {
+                        slot.1 = slot.1.saturating_add(1);
+                        counted = true;
+                        break;
+                    }
+                }
+                if !counted {
+                    if let Some(slot) = port_top.iter_mut().find(|slot| slot.1 == 0) {
+                        *slot = (port, 1);
+                    }
+                }
                 // The debug port is a marker only for a non-string OUT; other
                 // accesses fall through to normal port handling.
                 if port == DEBUG_PORT
@@ -1802,6 +1817,23 @@ fn run_freedos_in_world(
                 String::from_utf8_lossy(&serial)
             );
         }
+        for (port, count) in port_top {
+            if count != 0 {
+                log::info!(
+                    "[s9vm] {}: port {:#06x}: {} access(es)",
+                    firmware.label(),
+                    port,
+                    count
+                );
+            }
+        }
+        log::info!(
+            "[s9vm] {}: io={} preempt={} hlt={}",
+            firmware.label(),
+            report.io_exits,
+            report.preemption_slices,
+            report.halt_exits
+        );
     }
     outcome?;
     if unhandled_ports != 0 {
