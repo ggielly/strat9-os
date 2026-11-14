@@ -126,6 +126,7 @@ use crate::s9vm::{
     firmware,
     guest::GuestState,
     keyboard,
+    keyfeed::KeyboardFeed,
     machine::Machine,
     vcpu::{ExitInfo, Vcpu, VcpuError},
     vm,
@@ -1359,100 +1360,6 @@ fn deliver_legacy_interrupt(vcpu: &mut Vcpu, devices: &mut emulate::Devices) -> 
     match unsafe { vcpu.inject_interrupt(vector) } {
         Ok(()) => Some(vector),
         Err(_) => None,
-    }
-}
-
-/// Host text waiting to be typed into a DOS guest.
-///
-/// The text is translated to PS/2 set-1 scancodes once, then handed to the 8042
-/// model only after the guest owns `INT 9` and has unmasked `IRQ1`: before that
-/// the guest is still probing the controller and could mistake a scancode for a
-/// command reply. Each typed byte also yields the `(scan, ASCII)` pair the
-/// firmware keyboard buffer has to hold, which is the path of a guest that kept
-/// `INT 16h` at the firmware.
-struct KeyboardFeed {
-    scancodes: Vec<u8>,
-    next: usize,
-    /// `(scan code, ASCII)` of the same keys, for the firmware buffer.
-    keys: Vec<(u8, u8)>,
-    next_key: usize,
-}
-
-impl KeyboardFeed {
-    fn new(keys: &[u8]) -> Self {
-        let mut feed = Self::empty();
-        feed.extend(keys);
-        feed
-    }
-
-    /// A feed with nothing queued.
-    fn empty() -> Self {
-        Self {
-            scancodes: Vec::new(),
-            next: 0,
-            keys: Vec::new(),
-            next_key: 0,
-        }
-    }
-
-    /// Continues a previous slice from exactly where it stopped.
-    ///
-    /// The 8042 and the firmware buffer consume at different rates, so both
-    /// remainders are carried: rebuilding from the original text would re-type
-    /// keys the guest already received.
-    fn from_pending(scancodes: Vec<u8>, keys: Vec<(u8, u8)>) -> Self {
-        Self {
-            scancodes,
-            next: 0,
-            keys,
-            next_key: 0,
-        }
-    }
-
-    /// Appends more host text to the queue.
-    fn extend(&mut self, text: &[u8]) {
-        for &byte in text {
-            if let Some(pair) = keyboard::keystroke_for(byte, &mut self.scancodes) {
-                self.keys.push(pair);
-            }
-        }
-    }
-
-    /// Keys not handed to the guest yet, whichever path serves it.
-    fn remaining(&self) -> usize {
-        self.scancodes
-            .len()
-            .saturating_sub(self.next)
-            .max(self.keys.len().saturating_sub(self.next_key))
-    }
-
-    /// Queues up to `limit` scancodes; returns how many were accepted.
-    fn fill(&mut self, controller: &mut keyboard::KeyboardController, limit: usize) -> usize {
-        let mut sent = 0;
-        while sent < limit && self.next < self.scancodes.len() {
-            if !controller.push_scancode(self.scancodes[self.next]) {
-                break;
-            }
-            self.next += 1;
-            sent += 1;
-        }
-        sent
-    }
-
-    /// Pushes up to `limit` keys into the firmware keyboard buffer.
-    ///
-    /// This is the path of a guest that did not install its own `INT 9`: its
-    /// `INT 16h` calls still reach the firmware model, so the keys have to
-    /// appear where that service reads them.
-    fn fill_bios(&mut self, bios: &mut bios::BiosState, limit: usize) -> usize {
-        let mut sent = 0;
-        while sent < limit && self.next_key < self.keys.len() {
-            let (scan, ascii) = self.keys[self.next_key];
-            bios.push_scan_key(scan, ascii);
-            self.next_key += 1;
-            sent += 1;
-        }
-        sent
     }
 }
 

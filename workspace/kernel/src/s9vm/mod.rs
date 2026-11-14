@@ -76,6 +76,7 @@ pub mod image;
 pub mod ioapic;
 pub mod iommu;
 pub mod keyboard;
+pub mod keyfeed;
 pub mod launch;
 pub mod linuxboot;
 pub mod machine;
