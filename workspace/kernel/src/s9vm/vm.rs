@@ -410,11 +410,7 @@ impl WorldMemory {
         len: u64,
         perms_bits: u32,
     ) -> Result<u64, VmError> {
-        if len == 0
-            || gpa % PAGE_SIZE != 0
-            || source_gpa % PAGE_SIZE != 0
-            || len % PAGE_SIZE != 0
-        {
+        if len == 0 || gpa % PAGE_SIZE != 0 || source_gpa % PAGE_SIZE != 0 || len % PAGE_SIZE != 0 {
             return Err(VmError::Map(crate::s9vm::memmap::MapError::InvalidRange));
         }
         self.map.reserve(gpa, len, perms_bits, 0)?;

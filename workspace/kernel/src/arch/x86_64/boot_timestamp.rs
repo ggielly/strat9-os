@@ -28,11 +28,20 @@
 //! Before APIC timer calibration the TSC frequency is unknown, so we
 //! use a conservative default (2 GHz).  Call `calibrate()` once the
 //! real frequency is known to get accurate readings.
+//!
+//! Recalibration is *continuous*: the time already elapsed (computed with
+//! the previous frequency) is frozen into `BASE_US` and the TSC reference is
+//! moved to "now".  Without this, switching from the 2 GHz default to the
+//! measured frequency rescales the whole boot history and timestamps jump
+//! backwards (e.g. 9.5 s -> 4.8 s on a 4 GHz CPU).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// TSC value captured at kernel entry.
 static BOOT_TSC: AtomicU64 = AtomicU64::new(0);
+
+/// Microseconds already elapsed at `BOOT_TSC` (accumulated across recalibrations).
+static BASE_US: AtomicU64 = AtomicU64::new(0);
 
 /// TSC frequency in KHz.  Default 2_000_000 KHz (= 2 GHz) until calibrated.
 static TSC_KHZ: AtomicU64 = AtomicU64::new(2_000_000);
@@ -61,9 +70,23 @@ pub fn calibrate(known_interval_ns: u64, tsc_delta: u64) {
 pub fn calibrate_khz(khz: u64) {
     // Sanity check: reject absurdly low frequencies (< 100 MHz).
     const MIN_SANE_KHZ: u64 = 100_000;
-    if khz >= MIN_SANE_KHZ {
-        TSC_KHZ.store(khz, Ordering::Relaxed);
+    if khz < MIN_SANE_KHZ {
+        return;
     }
+    let boot = BOOT_TSC.load(Ordering::Relaxed);
+    if boot != 0 {
+        // Freeze the time elapsed so far with the old frequency, then rebase
+        // the TSC reference so that the new frequency only applies from now.
+        // Called on the BSP before APs are started, so readers cannot observe
+        // a torn (BASE_US, BOOT_TSC, TSC_KHZ) triple in practice.
+        let now = super::rdtsc();
+        let old_khz = TSC_KHZ.load(Ordering::Relaxed).max(1);
+        let elapsed_us = BASE_US.load(Ordering::Relaxed)
+            + now.wrapping_sub(boot).saturating_mul(1_000) / old_khz;
+        BASE_US.store(elapsed_us, Ordering::Relaxed);
+        BOOT_TSC.store(now, Ordering::Relaxed);
+    }
+    TSC_KHZ.store(khz, Ordering::Relaxed);
 }
 
 /// TSC ticks elapsed since `init()`.
@@ -79,11 +102,7 @@ fn elapsed_tsc() -> u64 {
 /// Milliseconds elapsed since kernel entry.
 #[inline]
 pub fn elapsed_ms() -> u64 {
-    let khz = TSC_KHZ.load(Ordering::Relaxed);
-    if khz == 0 {
-        return 0;
-    }
-    elapsed_tsc() / khz
+    elapsed_us() / 1_000
 }
 
 /// Microseconds elapsed since kernel entry.
@@ -94,7 +113,7 @@ pub fn elapsed_us() -> u64 {
         return 0;
     }
     // tsc / (khz / 1000) = tsc * 1000 / khz
-    elapsed_tsc().saturating_mul(1_000) / khz
+    BASE_US.load(Ordering::Relaxed) + elapsed_tsc().saturating_mul(1_000) / khz
 }
 
 /// Current TSC frequency in KHz (for external conversions).

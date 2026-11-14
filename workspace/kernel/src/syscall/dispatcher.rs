@@ -266,9 +266,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_NS_LOOKUP => with_proc(|p| ipc_v2::sys_ns_lookup(p, arg1, arg2, arg3)),
         SYS_NS_UNBIND => with_proc(|p| ipc_v2::sys_ns_unbind(p, arg1, arg2)),
         SYS_MEMOBJ_CREATE => with_proc(|p| ipc_v2::sys_memobj_create(p, arg1, arg2)),
-        SYS_MEMOBJ_MAP => {
-            with_proc(|p| ipc_v2::sys_memobj_map(p, arg1, arg2, arg3, arg4, arg5))
-        }
+        SYS_MEMOBJ_MAP => with_proc(|p| ipc_v2::sys_memobj_map(p, arg1, arg2, arg3, arg4, arg5)),
         n if SYS_IPC_V2_RESERVED.contains(&n) => Err(SyscallError::NotImplemented),
 
         // PCI syscalls ======================================================

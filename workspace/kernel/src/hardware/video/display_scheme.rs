@@ -51,13 +51,13 @@ use crate::{
         },
         Framebuffer,
     },
+    sync::RwLock,
     syscall::error::SyscallError,
     vfs::scheme::{
         finalize_pseudo_stat, DirEntry, FileFlags, FileStat, MmapFrames, OpenFlags, OpenResult,
         Scheme, DEV_CHAR_FS, DT_CHR, DT_REG,
     },
 };
-use crate::sync::RwLock;
 use alloc::{collections::BTreeMap, format, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
