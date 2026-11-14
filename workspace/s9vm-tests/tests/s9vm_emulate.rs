@@ -10,6 +10,8 @@ extern crate alloc;
 mod acpi;
 #[path = "../../kernel/src/s9vm/apic.rs"]
 mod apic;
+#[path = "../../kernel/src/s9vm/bios.rs"]
+mod bios;
 #[path = "../../kernel/src/s9vm/decode.rs"]
 mod decode;
 #[path = "../../kernel/src/s9vm/dma.rs"]
@@ -2162,4 +2164,136 @@ fn scalar_port_exit_does_not_decode_the_instruction() {
     assert!(handled);
     assert_eq!(guest.rip, 0x1002);
     assert_eq!(devices.pic.master().mask(), 0xFF);
+}
+
+// ---------------------------------------------------------------------------
+// Legacy keyboard chain: 8042 -> guest INT 9 -> BDA ring -> firmware INT 16h
+// ---------------------------------------------------------------------------
+
+/// Adapter presenting the [`TestMemory`] byte vector as BIOS linear memory.
+struct BiosLinearMemory<'a> {
+    memory: &'a mut TestMemory,
+}
+
+impl bios::BiosMemory for BiosLinearMemory<'_> {
+    fn read_u8(&mut self, linear: u32) -> Option<u8> {
+        let mut byte = [0u8; 1];
+        self.read(linear, &mut byte).then_some(byte[0])
+    }
+
+    fn write_u8(&mut self, linear: u32, value: u8) -> bool {
+        self.write(linear, &[value])
+    }
+
+    fn read(&mut self, linear: u32, out: &mut [u8]) -> bool {
+        self.memory.read_bytes(u64::from(linear), out)
+    }
+
+    fn write(&mut self, linear: u32, bytes: &[u8]) -> bool {
+        let start = linear as usize;
+        let Some(end) = start.checked_add(bytes.len()) else {
+            return false;
+        };
+        if end > self.memory.bytes.len() {
+            return false;
+        }
+        self.memory.write_bytes(u64::from(linear), bytes);
+        true
+    }
+}
+
+/// Disk backend with no medium: `INT 16h` never touches it.
+struct NoDisk;
+
+impl bios::BiosDisk for NoDisk {
+    fn sectors(&self) -> u64 {
+        0
+    }
+
+    fn read_sector(&mut self, _sector: u64, _out: &mut [u8; 512]) -> bool {
+        false
+    }
+}
+
+#[test]
+fn dos_keyboard_chain_delivers_a_typed_key_through_the_bda_ring() {
+    // A real BIOS lets DOS keep `INT 16h` (the vector still points at the
+    // firmware), so the scancode path the guest actually runs is:
+    // 8042 data port -> DOS `INT 9` copies scan+ASCII into the BDA ring ->
+    // firmware `INT 16h` consumes that ring. Each half was tested alone; this
+    // test drives the whole chain with the bytes a DOS handler writes.
+    let mut codes = alloc::vec::Vec::new();
+    keyboard::text_to_scancodes(b"d", &mut codes);
+    let make = codes[0];
+    assert_eq!(make, 0x20, "make code of `d`");
+
+    let mut memory = machine();
+    let mut guest = TestGuest::new(0x1000);
+    let mut devices = Devices::new();
+    assert!(devices.keyboard.push_scancode(make));
+    // The 8042 latches IRQ1; `service_keyboard` raises the line and the guest
+    // `INT 9` handler is what reads the data port.
+    devices.pic.raise(1);
+
+    // `IN AL, 0x60`: byte access, direction IN (bit 3), instruction length 2.
+    {
+        let mut view = view(&mut memory, &guest);
+        let qualification = (u64::from(0x60u16) << 16) | 0x08;
+        assert!(
+            handle_exit_with_length(
+                &mut devices,
+                &mut apic::LocalApic::new(0),
+                &mut view,
+                &mut guest,
+                ExitClass::IoPort,
+                qualification,
+                0,
+                2,
+            )
+            .expect("replayed")
+        );
+    }
+    assert_eq!(guest.regs[0] & 0xFF, u64::from(make));
+    assert_eq!(guest.rip, 0x1002);
+    assert!(!devices.keyboard.has_scancode(), "the port read consumed it");
+
+    // DOS `INT 9`: store scan/ASCII at the tail entry and advance the tail.
+    use bios::BiosMemory as _;
+    let mut memory = BiosLinearMemory {
+        memory: &mut memory,
+    };
+    bios::initialise_bda(&mut memory);
+    assert!(memory.write(bios::BDA_KEY_BUFFER, &[make, b'd']));
+    // head = first slot + 2 (one entry queued), tail = first slot.
+    assert!(memory.write(
+        bios::BDA_KEYBOARD_HEAD,
+        &(bios::KEY_BUFFER_FIRST_OFFSET + 2).to_le_bytes()
+    ));
+    assert!(memory.write(
+        bios::BDA_KEYBOARD_TAIL,
+        &bios::KEY_BUFFER_FIRST_OFFSET.to_le_bytes()
+    ));
+
+    // Firmware `INT 16h AH=00` must return exactly the queued key.
+    let mut state = bios::BiosState::new();
+    let mut registers = bios::BiosRegisters::new();
+    let mut disk = NoDisk;
+    let _ = state.handle(0x16, &mut registers, &mut memory, &mut disk);
+    assert_eq!(
+        registers.ax,
+        (u16::from(make) << 8) | u16::from(b'd'),
+        "INT 16h returned the ring entry"
+    );
+    let tail = {
+        let bytes = memory.memory.slice(u64::from(bios::BDA_KEYBOARD_TAIL), 2);
+        u16::from_le_bytes([bytes[0], bytes[1]])
+    };
+    assert_eq!(tail, bios::KEY_BUFFER_FIRST_OFFSET + 2, "tail advanced");
+
+    // A second read finds the ring empty: AX = 0 and ZF set in the scratch byte.
+    let mut registers = bios::BiosRegisters::new();
+    let _ = state.handle(0x16, &mut registers, &mut memory, &mut disk);
+    assert_eq!(registers.ax, 0);
+    let scratch = memory.memory.slice(u64::from(bios::SCRATCH_GPA), 1)[0];
+    assert_eq!(scratch & bios::SCRATCH_ZF, bios::SCRATCH_ZF);
 }
