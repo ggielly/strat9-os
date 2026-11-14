@@ -42,16 +42,22 @@
 //! panicking kernel never steals the framebuffer back from the display
 //! server. That invariant is unchanged by this module.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 /// Number of writable display handles currently held by userspace.
 static STRATE_OWNERS: AtomicUsize = AtomicUsize::new(0);
 
+/// PID that took the framebuffer on the 0 -> 1 ownership transition (0 = none).
+static OWNER_PID: AtomicU32 = AtomicU32::new(0);
+
 /// Mark the framebuffer as owned by a userspace display server.
 ///
-/// Called by the display scheme when a writable screen handle is opened.
-pub fn acquire_strate() {
-    STRATE_OWNERS.fetch_add(1, Ordering::SeqCst);
+/// Called by the display scheme when a writable screen handle is opened. The
+/// first owner records its PID so damage/clear writes can be attributed.
+pub fn acquire_strate(pid: u32) {
+    if STRATE_OWNERS.fetch_add(1, Ordering::SeqCst) == 0 {
+        OWNER_PID.store(pid, Ordering::SeqCst);
+    }
 }
 
 /// Release one userspace display ownership reference.
@@ -67,10 +73,20 @@ pub fn release_strate() {
             Ordering::SeqCst,
             Ordering::SeqCst,
         ) {
-            Ok(_) => return,
+            Ok(_) => {
+                if current == 1 {
+                    OWNER_PID.store(0, Ordering::SeqCst);
+                }
+                return;
+            }
             Err(observed) => current = observed,
         }
     }
+}
+
+/// PID of the current framebuffer owner, or 0 when the kernel owns it.
+pub fn strate_owner_pid() -> u32 {
+    OWNER_PID.load(Ordering::SeqCst)
 }
 
 /// Returns true while at least one userspace display owner exists.

@@ -101,7 +101,7 @@ pub fn is_available() -> bool {
 ///
 /// Cursor management is deferred to `present()` to avoid +/-1280 pixel ops per call.
 pub fn with_writer<R>(f: impl FnOnce(&mut VgaWriter) -> R) -> Option<R> {
-    if !is_available() {
+    if !is_available() || !crate::display_state::kernel_fb_allowed() {
         return None;
     }
     let mut writer = VGA_WRITER.lock();
@@ -113,7 +113,7 @@ pub fn with_writer<R>(f: impl FnOnce(&mut VgaWriter) -> R) -> Option<R> {
 ///
 /// Cursor management is deferred to `present()` to avoid ~1280 pixel ops per call.
 pub fn try_with_writer<R>(f: impl FnOnce(&mut VgaWriter) -> R) -> Option<R> {
-    if !is_available() {
+    if !is_available() || !crate::display_state::kernel_fb_allowed() {
         return None;
     }
     let mut writer = VGA_WRITER.try_lock()?;
@@ -569,7 +569,7 @@ pub fn end_frame() {
 
 /// Performs the present operation.
 pub fn present() {
-    if !is_available() {
+    if !is_available() || !crate::display_state::kernel_fb_allowed() {
         return;
     }
     VGA_WRITER.lock().present();
@@ -982,7 +982,7 @@ pub fn set_console_defer_present(defer: bool) {
 /// Request console rasterization and presentation at the next eligible tick.
 /// The console-render task also services the final fragment when output stops.
 pub fn flush_display() {
-    if !is_available() {
+    if !is_available() || !crate::display_state::kernel_fb_allowed() {
         return;
     }
     VGA_WRITER.lock().flush_display();

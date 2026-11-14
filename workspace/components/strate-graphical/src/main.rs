@@ -843,19 +843,9 @@ pub extern "C" fn _start() -> ! {
     }
     log(&format!("[display-server] screen: {}x{} bpp={}", w, h, bpp));
 
-    // Step 2: Clear display
-    log("[display-server] step 2: clearing display...");
-    match call::open("/dev/display/clear", 2) {
-        Ok(fd) => {
-            let _ = call::write(fd, b"clear");
-            let _ = call::close(fd);
-            log("[display-server]   display cleared");
-        }
-        Err(e) => log(&format!("[display-server]   clear failed: {:?}", e)),
-    }
-
-    // Step 3: Open display framebuffer
-    log("[display-server] step 3: opening /dev/display/0.0...");
+    // Step 2: Open display framebuffer. This takes framebuffer ownership, so
+    // it must happen before clear/damage writes are permitted.
+    log("[display-server] step 2: opening /dev/display/0.0...");
     let dfd = match call::open("/dev/display/0.0", 2) {
         Ok(fd) => {
             log(&format!("[display-server]   display fd={}", fd));
@@ -873,6 +863,17 @@ pub extern "C" fn _start() -> ! {
             }
         }
     };
+
+    // Step 3: Clear display (now that this process owns the framebuffer)
+    log("[display-server] step 3: clearing display...");
+    match call::open("/dev/display/clear", 2) {
+        Ok(fd) => {
+            let _ = call::write(fd, b"clear");
+            let _ = call::close(fd);
+            log("[display-server]   display cleared");
+        }
+        Err(e) => log(&format!("[display-server]   clear failed: {:?}", e)),
+    }
 
     // Step 4: Open input devices
     log("[display-server] step 4: opening input devices...");
@@ -941,7 +942,7 @@ pub extern "C" fn _start() -> ! {
 
     // Step 5b: open the damage handle (the screen fd only accepts pixels;
     // "present"/"x,y,w,h" commands go through /dev/display/damage).
-    let dmg_fd = match call::open("/dev/display/damage", 0) {
+    let dmg_fd = match call::open("/dev/display/damage", 2) {
         Ok(fd) => {
             log(&format!("[display-server]   damage fd={}", fd));
             fd

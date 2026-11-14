@@ -56,7 +56,7 @@ use crate::{
     sync::with_irqs_disabled,
 };
 
-use super::framebuffer::PixelFormat;
+use super::framebuffer::{FramebufferSource, PixelFormat};
 
 /// Dirty region for partial screen updates.
 #[derive(Debug, Clone, Copy, Default)]
@@ -247,6 +247,8 @@ impl HeapScreen {
             }
 
             let va = memory::phys_to_virt(frame.start_address.as_u64());
+            // SAFETY: `frame` was just allocated, so `va` is the valid HHDM
+            // mapping of one full page; zeroing 4096 bytes stays in that page.
             unsafe { core::ptr::write_bytes(va as *mut u8, 0, 4096) };
             pages.push(frame);
             owner_caps.push(owner_cap);
@@ -302,6 +304,8 @@ impl HeapScreen {
             };
             let in_page = (offset + done) % 4096;
             let chunk = core::cmp::min(len - done, 4096 - in_page);
+            // SAFETY: `dst` is caller-provided storage for `len` bytes and
+            // `src` points into a live page for at least `chunk` bytes.
             unsafe {
                 core::ptr::copy_nonoverlapping(src, dst.add(done), chunk);
             }
@@ -363,6 +367,8 @@ impl DisplayScreen for HeapScreen {
             };
             let va = memory::phys_to_virt(frame.start_address.as_u64());
             let chunk = core::cmp::min(n - done, 4096 - in_page);
+            // SAFETY: `src` is a slice of at least `n` bytes, and `va` is the
+            // valid HHDM page mapping; `chunk` never crosses the page end.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     src.as_ptr().add(done),
@@ -386,6 +392,8 @@ impl DisplayScreen for HeapScreen {
             };
             let va = memory::phys_to_virt(frame.start_address.as_u64());
             let chunk = core::cmp::min(n - done, 4096 - in_page);
+            // SAFETY: `va` is the valid HHDM mapping of the page holding this
+            // offset, and `chunk` is bounded to the rest of that page.
             unsafe {
                 core::ptr::write_bytes((va as *mut u8).wrapping_add(in_page), value, chunk);
             }
@@ -405,6 +413,9 @@ impl DisplayScreen for HeapScreen {
         for row in 0..d.height as usize {
             let src_off = (d.y as usize + row) * self.stride as usize + d.x as usize * bpp_bytes;
             let dst_off = (d.y as usize + row) * dst_stride + d.x as usize * bpp_bytes;
+            // SAFETY: `dst` is the caller's framebuffer/HHDM destination with
+            // at least `dst_stride * height` bytes, and `row_bytes` fits inside
+            // one clipped row starting at `dst_off`.
             self.copy_out(src_off, unsafe { dst.add(dst_off) }, row_bytes);
         }
     }
@@ -490,6 +501,33 @@ impl GraphicsAdapter for SimpleDisplayAdapter {
             damage,
             bpp_bytes,
         );
+
+        // VirtIO scans out from its own resource: the memcpy above only
+        // updates memory, so ask the GPU to transfer + flush the damage.
+        if super::framebuffer::Framebuffer::source() == FramebufferSource::VirtioGpu {
+            let d = damage.clip(self.fb_width, self.fb_height);
+            if d.is_valid() {
+                if let Some(gpu) = crate::hardware::virtio::gpu::get_gpu() {
+                    if gpu.using_external_backing() {
+                        let _ = gpu.present_scanout_rect(d.x, d.y, d.width, d.height);
+                    } else {
+                        // SAFETY: `fb_virt` is the live CPU draw buffer of
+                        // `fb_stride * fb_height` bytes, and `d` is clipped to
+                        // the framebuffer bounds above.
+                        let _ = unsafe {
+                            gpu.present_from_linear(
+                                self.fb_virt as *const u8,
+                                self.fb_stride,
+                                d.x,
+                                d.y,
+                                d.width,
+                                d.height,
+                            )
+                        };
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -88,6 +88,12 @@ pub use scheme_router::{
 
 use crate::memory::{UserSliceRead, UserSliceWrite};
 
+/// Largest device frame copied atomically (one `scheme.write` call).
+///
+/// Device protocols (Screen, DMG2) treat one user write as one message; the
+/// 4 KiB chunk loop below would split larger frames and corrupt their headers.
+const MAX_ATOMIC_DEVICE_WRITE: u64 = 64 * 1024 * 1024;
+
 // Re-export AT_FDCWD from the ABI so VFS callers can use it.
 pub use crate::syscall::numbers::AT_FDCWD;
 
@@ -795,6 +801,25 @@ pub fn sys_write(fd: u32, buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallErro
                 total_written += n;
             }
             return Ok(total_written as u64);
+        }
+    }
+
+    // Device frames must reach the scheme in one piece: copy the complete
+    // user buffer and issue a single write instead of the 4 KiB chunk loop.
+    if buf_len <= MAX_ATOMIC_DEVICE_WRITE {
+        if let Some(task) = current_task_clone() {
+            // SAFETY: syscall context; the fd table belongs to the current task.
+            let fd_table = unsafe { &*task.process.fd_table.get() };
+            if let Ok(file) = fd_table.get(fd) {
+                let flags = file.flags();
+                if flags.contains(FileFlags::DEVICE) && flags.contains(FileFlags::CHUNK_WRITE) {
+                    let user = UserSliceRead::new(buf_ptr, buf_len as usize)?;
+                    let mut kbuf = alloc::vec![0u8; buf_len as usize];
+                    user.copy_to(&mut kbuf);
+                    let n = write(fd, &kbuf)?;
+                    return Ok(n as u64);
+                }
+            }
         }
     }
 

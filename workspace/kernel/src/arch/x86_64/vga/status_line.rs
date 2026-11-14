@@ -389,7 +389,7 @@ fn try_status_line_snapshot() -> Option<(
 
 /// Performs the maybe refresh system status line operation.
 pub fn maybe_refresh_system_status_line(theme: UiTheme) {
-    if !is_available() || super::is_lite() {
+    if !is_available() || super::is_lite() || !crate::display_state::kernel_fb_allowed() {
         return;
     }
 

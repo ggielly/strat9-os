@@ -58,20 +58,18 @@ use crate::{
     },
 };
 use alloc::{collections::BTreeMap, format, string::String, sync::Arc, vec::Vec};
+use crate::sync::RwLock;
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::{Once, RwLock};
 
 const MAX_HANDLES: usize = 64;
-/// Maximum bytes copied by one snapshot read. Keeps a single syscall bounded
-/// and lets the lock be released between chunks.
-const MAX_SNAPSHOT_READ: usize = 64 * 1024;
 
 /// SIMD pixel-ingest ops for the Screen write path (RGB888 wire format ->
 /// screen format). Detected once on first use; falls back to scalar
 /// implementations when no SIMD extension is available.
 fn fb_ops() -> crate::framebuffer::FramebufferOps {
-    static OPS: Once<crate::framebuffer::FramebufferOps> = Once::new();
-    *OPS.call_once(crate::framebuffer::FramebufferOps::detect)
+    static OPS: core::sync::OnceLock<crate::framebuffer::FramebufferOps> =
+        core::sync::OnceLock::new();
+    *OPS.get_or_init(crate::framebuffer::FramebufferOps::detect)
 }
 
 #[derive(Clone, Debug)]
@@ -84,11 +82,9 @@ enum Handle {
     /// ownership: a writable handle hands the framebuffer from the kernel to
     /// the display strate, and the matching close hands it back.
     Screen(u32, Arc<RwLock<HeapScreen>>, bool),
-    /// Bounded, explicit screenshot stream for a display (raw native pixels).
-    ///
-    /// `writable` is required for reads: a plain READ-only open (`cat`) is
-    /// refused so the console cannot be flooded by accident.
-    Snapshot(u32, bool),
+    /// Stable screenshot copy of a display's surface (raw native pixels),
+    /// captured once at open time.
+    Snapshot(Option<Arc<Vec<u8>>>),
     Damage,
     Clear,
 }
@@ -114,31 +110,57 @@ impl DisplayScheme {
     }
 
     /// Get or create the offscreen buffer for a display.
-    fn get_or_create_screen(&self, display_id: u32) -> Arc<RwLock<HeapScreen>> {
-        let screens = self.screens.read();
-        if let Some(screen) = screens.get(&display_id) {
-            return screen.clone();
+    ///
+    /// `None` for displays that do not exist, so an unknown `/dev/display/N.M`
+    /// cannot silently allocate a large surface.
+    fn get_or_create_screen(&self, display_id: u32) -> Option<Arc<RwLock<HeapScreen>>> {
+        if let Some(screen) = self.screens.read().get(&display_id) {
+            return Some(screen.clone());
         }
-        drop(screens);
 
-        // Create new screen for this display.
         let (w, h) = get_adapter_for_display(display_id as usize)
-            .map(|(a, local_id)| a.display_size(local_id))
-            .unwrap_or((800, 600));
+            .map(|(a, local_id)| a.display_size(local_id))?;
+        if w == 0 || h == 0 {
+            return None;
+        }
 
         // Keep the bootloader/GPU native layout (masks and shifts), not just
         // the depth: a GOP can expose RGB masks instead of the common XRGB
         // order, and copying raw bytes would swap red and blue.
         let format = Framebuffer::info().map(|i| i.format).unwrap_or_default();
 
-        let screen = Arc::new(RwLock::new(HeapScreen::new_with_format(
+        // Build the candidate outside the lock: allocating its frames may
+        // block or preempt, and must not run under `screens.write()`.
+        let candidate = Arc::new(RwLock::new(HeapScreen::new_with_format(
             w,
             h,
             format.bits_per_pixel,
             format,
         )));
-        self.screens.write().insert(display_id, screen.clone());
-        screen
+
+        // Re-check under the write lock and keep the first screen published;
+        // a losing candidate is simply dropped.
+        let mut screens = self.screens.write();
+        if let Some(screen) = screens.get(&display_id) {
+            return Some(screen.clone());
+        }
+        screens.insert(display_id, candidate.clone());
+        Some(candidate)
+    }
+
+    /// Copy a display's whole surface into a stable byte vector.
+    fn snapshot_screen(screen: &Arc<RwLock<HeapScreen>>) -> Arc<Vec<u8>> {
+        let scr = screen.read();
+        let mut data = alloc::vec![0u8; scr.size()];
+        let n = scr.read_into(0, &mut data);
+        data.truncate(n);
+        Arc::new(data)
+    }
+
+    /// True when the caller took framebuffer ownership (it may present/clear).
+    fn caller_owns_display() -> bool {
+        let owner = crate::display_state::strate_owner_pid();
+        owner != 0 && crate::process::current_task_clone().map(|t| t.pid) == Some(owner)
     }
 
     /// Parse "display_id.screen_id" path to global display_id.
@@ -148,8 +170,11 @@ impl DisplayScheme {
             return None;
         }
         let display_id: u32 = parts[0].parse().ok()?;
-        let _screen_id: u32 = parts[1].parse().ok()?;
+        let screen_id: u32 = parts[1].parse().ok()?;
         // For now, screen_id is always 0 (single screen per display).
+        if screen_id != 0 {
+            return None;
+        }
         Some(display_id)
     }
 }
@@ -172,18 +197,22 @@ impl Scheme for DisplayScheme {
         } else if path == "clear" {
             Handle::Clear
         } else if path == "snapshot" {
-            let _ = self.get_or_create_screen(0);
-            Handle::Snapshot(0, flags.contains(OpenFlags::WRITE))
+            let screen = self.get_or_create_screen(0).ok_or(SyscallError::NotFound)?;
+            Handle::Snapshot(Some(Self::snapshot_screen(&screen)))
         } else if let Some(prefix) = path.strip_suffix(".snapshot") {
             let display_id: u32 = prefix
                 .split('.')
                 .next()
                 .and_then(|id| id.parse().ok())
                 .ok_or(SyscallError::NotFound)?;
-            let _ = self.get_or_create_screen(display_id);
-            Handle::Snapshot(display_id, flags.contains(OpenFlags::WRITE))
+            let screen = self
+                .get_or_create_screen(display_id)
+                .ok_or(SyscallError::NotFound)?;
+            Handle::Snapshot(Some(Self::snapshot_screen(&screen)))
         } else if let Some(display_id) = Self::parse_display_path(path) {
-            let screen = self.get_or_create_screen(display_id);
+            let screen = self
+                .get_or_create_screen(display_id)
+                .ok_or(SyscallError::NotFound)?;
             Handle::Screen(display_id, screen, flags.contains(OpenFlags::WRITE))
         } else {
             return Err(SyscallError::NotFound);
@@ -192,7 +221,10 @@ impl Scheme for DisplayScheme {
         // A writable screen handle transfers framebuffer ownership from the
         // kernel boot console to the userspace display strate.
         if let Handle::Screen(_, _, true) = &handle {
-            crate::display_state::acquire_strate();
+            let pid = crate::process::current_task_clone()
+                .map(|t| t.pid)
+                .unwrap_or(0);
+            crate::display_state::acquire_strate(pid);
         }
 
         self.handles.write().insert(id, handle.clone());
@@ -285,26 +317,15 @@ impl Scheme for DisplayScheme {
                 let scr = screen.read();
                 Ok(scr.read_into(offset as usize, buf))
             }
-            Handle::Snapshot(display_id, writable) => {
-                // Explicit bounded capture stream. READ-only opens are denied
-                // so `cat snapshot` cannot flood the terminal either.
-                if !*writable {
-                    return Err(SyscallError::PermissionDenied);
-                }
-                let screen = self
-                    .screens
-                    .read()
-                    .get(display_id)
-                    .cloned()
-                    .ok_or(SyscallError::NotFound)?;
-                let scr = screen.read();
+            Handle::Snapshot(data) => {
+                let data = data.as_deref().ok_or(SyscallError::NotFound)?;
                 let start = offset as usize;
-                if start >= scr.size() {
+                if start >= data.len() {
                     return Ok(0);
                 }
-                let max = core::cmp::min(buf.len(), MAX_SNAPSHOT_READ);
-                let n = core::cmp::min(max, scr.size() - start);
-                Ok(scr.read_into(start, &mut buf[..n]))
+                let n = core::cmp::min(buf.len(), data.len() - start);
+                buf[..n].copy_from_slice(&data[start..start + n]);
+                Ok(n)
             }
             Handle::Damage | Handle::Clear => Err(SyscallError::PermissionDenied),
         }
@@ -390,6 +411,9 @@ impl Scheme for DisplayScheme {
                         if format.is_xrgb8888() {
                             // SIMD BGR888 -> XRGB8888 (pshufb-based, handles
                             // unaligned edges with a scalar tail).
+                            // SAFETY: `row32` holds exactly `w` aligned u32
+                            // slots; the loop guard guarantees `w * 3` readable
+                            // bytes at `pixels.as_ptr().add(off)`.
                             unsafe {
                                 (fb_ops().convert)(row32.as_mut_ptr(), pixels.as_ptr().add(off), w);
                             }
@@ -401,6 +425,8 @@ impl Scheme for DisplayScheme {
                                 row32[i] = format.pack_rgb(pixels[s + 2], pixels[s + 1], pixels[s]);
                             }
                         }
+                        // SAFETY: `row32` is `w` initialized u32 words, i.e.
+                        // exactly `dst_row_bytes` valid bytes, and is aligned.
                         let bytes = unsafe {
                             core::slice::from_raw_parts(row32.as_ptr() as *const u8, dst_row_bytes)
                         };
@@ -426,6 +452,10 @@ impl Scheme for DisplayScheme {
                 Ok(buf.len())
             }
             Handle::Damage => {
+                // Only the process that took framebuffer ownership may present.
+                if !Self::caller_owns_display() {
+                    return Err(SyscallError::PermissionDenied);
+                }
                 // Binary protocol (preferred):
                 //   "DMG2" | count u16le | display u16le | (x,y,w,h) u16le * count
                 // One syscall can present several disjoint rectangles.
@@ -519,23 +549,27 @@ impl Scheme for DisplayScheme {
                 Ok(buf.len())
             }
             Handle::Clear => {
-                // Clear all offscreen buffers to black.
-                let screens = self.screens.read();
-                for (_, screen_arc) in screens.iter() {
-                    let mut scr = screen_arc.write();
-                    let size = scr.stride() as usize * scr.height() as usize;
-                    scr.fill_bytes(0, size, 0);
+                // Only the process that took framebuffer ownership may clear.
+                if !Self::caller_owns_display() {
+                    return Err(SyscallError::PermissionDenied);
                 }
-                // Also clear the onscreen framebuffers.
+                // Zero each registered offscreen surface and present it.
+                // Displays without a registered screen are skipped: never
+                // allocate a throwaway surface just to clear it.
                 let total = total_display_count();
                 for i in 0..total {
-                    if let Some((adapter, local_id)) = get_adapter_for_display(i) {
-                        let fb = adapter.create_framebuffer(
-                            adapter.display_size(local_id).0,
-                            adapter.display_size(local_id).1,
-                        );
-                        adapter.update_plane(local_id, &fb, Damage::full(fb.width(), fb.height()));
-                    }
+                    let display_id = i as u32;
+                    let Some(screen) = self.screens.read().get(&display_id).cloned() else {
+                        continue;
+                    };
+                    let Some((adapter, local_id)) = get_adapter_for_display(i) else {
+                        continue;
+                    };
+                    let mut scr = screen.write();
+                    let size = scr.stride() as usize * scr.height() as usize;
+                    scr.fill_bytes(0, size, 0);
+                    let damage = Damage::full(scr.width(), scr.height());
+                    adapter.update_plane(local_id, &*scr, damage);
                 }
                 Ok(buf.len())
             }
@@ -610,13 +644,8 @@ impl Scheme for DisplayScheme {
                 DEV_CHAR_FS,
                 2 + *did as u64,
             ),
-            Handle::Snapshot(did, _) => {
-                let size = self
-                    .screens
-                    .read()
-                    .get(did)
-                    .map(|screen| screen.read().size())
-                    .unwrap_or(0);
+            Handle::Snapshot(data) => {
+                let size = data.as_ref().map(|d| d.len()).unwrap_or(0);
                 finalize_pseudo_stat(
                     FileStat {
                         st_ino: 0x102,

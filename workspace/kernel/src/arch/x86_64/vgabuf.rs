@@ -63,7 +63,7 @@ fn write_line(writer: &mut impl core::fmt::Write, line: &Line) {
 /// Render a bounded batch. Retrying pending presents also displays the last
 /// keyboard echo/log fragment when no subsequent message arrives.
 pub fn vgabuf_flush_to_framebuffer() {
-    if !crate::arch::x86_64::vga::is_available() {
+    if !crate::arch::x86_64::vga::is_available() || !crate::display_state::kernel_fb_allowed() {
         vgabuf_drain_discard();
         return;
     }
@@ -94,7 +94,7 @@ fn vgabuf_drain_discard() {
 }
 
 pub fn vgabuf_flush_all() {
-    if !crate::arch::x86_64::vga::is_available() {
+    if !crate::arch::x86_64::vga::is_available() || !crate::display_state::kernel_fb_allowed() {
         vgabuf_drain_discard();
         return;
     }
@@ -112,6 +112,10 @@ pub fn vgabuf_flush_all() {
 }
 
 fn vgabuf_flush_all_direct() {
+    if !crate::display_state::kernel_fb_allowed() {
+        vgabuf_drain_discard();
+        return;
+    }
     // Own the bytes until drawing completes; released slots may immediately be
     // reused on another CPU. Limit scratch storage to about 4 KiB in panic context.
     const MAX_LINES: usize = 16;
@@ -157,7 +161,7 @@ pub extern "C" fn console_task_main() -> ! {
 /// Single writer acquisition per tick: apply deferred mouse input, drain a
 /// bounded log batch, then present once. If the lock is busy, retry next tick.
 fn console_render_tick(input_state: &mut crate::shell::vga_input::InputState) {
-    if !crate::arch::x86_64::vga::is_available() {
+    if !crate::arch::x86_64::vga::is_available() || !crate::display_state::kernel_fb_allowed() {
         vgabuf_drain_discard();
         crate::shell::vga_input::discard();
         return;
