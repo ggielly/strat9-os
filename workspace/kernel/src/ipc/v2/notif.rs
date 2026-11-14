@@ -22,7 +22,7 @@
 
 //! Notification objects (IPC ABI v2, §7).
 
-use super::endpoint::Endpoint;
+use super::{endpoint::Endpoint, quota::IpcCharge};
 use crate::{
     sync::{SpinLock, WaitQueue},
     syscall::error::SyscallError,
@@ -38,16 +38,24 @@ pub struct Notification {
     word: AtomicU64,
     waitq: WaitQueue,
     bound: SpinLock<Option<Arc<Endpoint>>>,
+    /// Creator-silo notification count (§12), released with the object.
+    _charge: Option<IpcCharge>,
 }
 
 impl Notification {
-    /// Create a notification.
+    /// Create an uncharged notification (kernel-internal use).
     pub fn create() -> Arc<Notification> {
+        Self::create_charged(None)
+    }
+
+    /// Create a notification paid for by `charge`.
+    pub fn create_charged(charge: Option<IpcCharge>) -> Arc<Notification> {
         Arc::new(Notification {
             id: NEXT_NOTIF_ID.fetch_add(1, Ordering::Relaxed),
             word: AtomicU64::new(0),
             waitq: WaitQueue::new(),
             bound: SpinLock::new(None),
+            _charge: charge,
         })
     }
 
@@ -76,7 +84,14 @@ impl Notification {
             }
         }
         self.waitq.wake_one();
+        super::async_ops::notify_event();
         Ok(())
+    }
+
+    /// Non-blocking read-and-clear (async path); `None` when no bit is set.
+    pub fn take(&self) -> Option<u64> {
+        let bits = self.word.swap(0, Ordering::Acquire);
+        (bits != 0).then_some(bits)
     }
 
     /// Wait for non-zero bits, atomically read and clear them.

@@ -85,7 +85,8 @@ pub use scheduler::{
     set_process_group, set_task_sched_policy, set_task_wake_deadline,
     set_verbose as set_scheduler_verbose, sleep_current_task_ticks,
     state_snapshot as scheduler_state_snapshot, suspend_task, task_count, try_wait_child,
-    verbose_enabled as scheduler_verbose_enabled, wake_task, yield_task, CpuUsageSnapshot,
+    verbose_enabled as scheduler_verbose_enabled, wake_task, wake_task_here, yield_task,
+    CpuUsageSnapshot,
     SchedulerMetricsSnapshot, SchedulerStateSnapshot, WaitChildResult,
 };
 pub use signal::{has_pending_signals, send_signal, Signal, SignalSet};

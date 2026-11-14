@@ -42,15 +42,19 @@ pub enum ObjRef {
     Reply(Arc<CallSlot>),
     /// Notification object.
     Notif(Arc<Notification>),
+    /// Memory object.
+    Mem(Arc<super::memobj::MemObject>),
 }
 
 impl ObjRef {
     /// `ObjType` written into a received `CapXfer::mode` (§4.2).
     pub fn obj_type(&self) -> u32 {
+        use strat9_abi::ipc_v2::{OBJ_ENDPOINT, OBJ_MEMOBJ, OBJ_NOTIFICATION, OBJ_REPLY};
         match self {
-            ObjRef::Endpoint(_) => 1,
-            ObjRef::Reply(_) => 2,
-            ObjRef::Notif(_) => 3,
+            ObjRef::Endpoint(_) => OBJ_ENDPOINT,
+            ObjRef::Reply(_) => OBJ_REPLY,
+            ObjRef::Notif(_) => OBJ_NOTIFICATION,
+            ObjRef::Mem(_) => OBJ_MEMOBJ,
         }
     }
 }

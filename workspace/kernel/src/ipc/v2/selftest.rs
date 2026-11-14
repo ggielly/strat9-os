@@ -34,7 +34,9 @@
 //! 4. a sender blocked on a full queue is woken when a receiver dequeues;
 //! 5. call state machine: a reply is visible as soon as the call is `Done`,
 //!    `abandon_call` reclaims a reply that raced with cancellation, and a
-//!    reply to a cancelled call fails with `EPIPE`.
+//!    reply to a cancelled call fails with `EPIPE`;
+//! 6. silo IPC quotas: limits enforced and released on drop;
+//! 7. MemObject allocation and size rounding.
 //!
 //! Each check prints `[ipc-v2] ok|FAIL <name>`; the task exits with the
 //! number of failures as its exit code.
@@ -84,6 +86,7 @@ fn message(data_len: u32, caps: Vec<OwnedCap>) -> InFlight {
         data: vec![0xA5; data_len as usize],
         caps,
         call: None,
+        charge: Default::default(),
     }
 }
 
@@ -96,7 +99,7 @@ fn notif_cap() -> OwnedCap {
 }
 
 fn new_endpoint(depth: u32) -> Option<Arc<Endpoint>> {
-    let ep = Endpoint::create(depth, 0, 0).ok();
+    let ep = Endpoint::create(depth, 0, 0, None).ok();
     check(ep.is_some(), "endpoint create");
     ep
 }
@@ -180,13 +183,18 @@ fn test_timeouts() {
     let notif = Notification::create();
     let deadline = scheduler_clock_ns() + SHORT_TIMEOUT_NS;
     check(
-        matches!(notif.wait(false, Some(deadline)), Err(SyscallError::TimedOut))
-            && scheduler_clock_ns() >= deadline,
+        matches!(
+            notif.wait(false, Some(deadline)),
+            Err(SyscallError::TimedOut)
+        ) && scheduler_clock_ns() >= deadline,
         "notification wait times out at the deadline",
     );
     let _ = notif.signal(0b101);
     check(
-        matches!(notif.wait(false, Some(scheduler_clock_ns() + SHORT_TIMEOUT_NS)), Ok(0b101)),
+        matches!(
+            notif.wait(false, Some(scheduler_clock_ns() + SHORT_TIMEOUT_NS)),
+            Ok(0b101)
+        ),
         "signalled notification returns its bits before the deadline",
     );
 }
@@ -258,7 +266,10 @@ fn reply_payload() -> ReplyPayload {
 fn test_call_states() {
     // Reply visible as soon as the call is Done.
     let slot = CallSlot::new(0, None, MsgBuf::default());
-    check(endpoint::mark_received(&slot), "queued call becomes Received");
+    check(
+        endpoint::mark_received(&slot),
+        "queued call becomes Received",
+    );
     let gen = slot.gen.load(Ordering::Acquire);
     check(
         endpoint::deliver_reply(&slot, gen, reply_payload()).is_ok(),
@@ -289,6 +300,54 @@ fn test_call_states() {
     );
 }
 
+/// 6. Silo IPC quotas: limit enforced, released on drop (§12).
+fn test_quotas() {
+    use super::quota::IpcCharge;
+    use crate::silo::{IpcResource, SiloMemoryAccount};
+    use strat9_abi::ipc_v2::MEMOBJ_MAX_SIZE;
+    let account = Arc::new(SiloMemoryAccount::new(0));
+    let mut held = Vec::new();
+    for _ in 0..256 {
+        match IpcCharge::try_new(&account, IpcResource::Endpoints, 1) {
+            Some(c) => held.push(c),
+            None => break,
+        }
+    }
+    check(held.len() == 256, "256 endpoints charged");
+    check(
+        IpcCharge::try_new(&account, IpcResource::Endpoints, 1).is_none(),
+        "257th endpoint refused",
+    );
+    drop(held);
+    check(
+        account.ipc().used(IpcResource::Endpoints) == 0,
+        "endpoint charges released on drop",
+    );
+    let big = IpcCharge::try_new(&account, IpcResource::QueuedBytes, 1024 * 1024);
+    check(big.is_some(), "1 MiB of queued bytes charged");
+    check(
+        IpcCharge::try_new(&account, IpcResource::QueuedBytes, 1).is_none(),
+        "queued bytes beyond 1 MiB refused",
+    );
+    drop(big);
+    check(
+        super::memobj::page_round(0).is_err()
+            && super::memobj::page_round(MEMOBJ_MAX_SIZE + 1).is_err(),
+        "MemObject size bounds enforced",
+    );
+}
+
+/// 7. MemObject allocation and size rounding.
+fn test_memobj() {
+    match super::memobj::MemObject::create(5000, None) {
+        Ok(obj) => check(
+            obj.size() == 8192,
+            "MemObject of 5000 bytes rounds to 2 pages",
+        ),
+        Err(_) => check(false, "MemObject of 5000 bytes rounds to 2 pages"),
+    }
+}
+
 extern "C" fn ipc_v2_main() -> ! {
     crate::serial_println!("[ipc-v2] start");
     FAILURES.store(0, Ordering::Relaxed);
@@ -298,6 +357,8 @@ extern "C" fn ipc_v2_main() -> ! {
     test_timeouts();
     test_sender_wakeup();
     test_call_states();
+    test_quotas();
+    test_memobj();
 
     let failures = FAILURES.load(Ordering::Relaxed);
     if failures == 0 {

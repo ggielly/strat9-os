@@ -129,6 +129,21 @@ fn ensure_registry(guard: &mut Option<BTreeMap<RingId, Arc<SharedRing>>>) {
 
 /// Creates ring.
 pub fn create_ring(size: usize) -> Result<RingId, RingError> {
+    let ring = Arc::new(allocate_ring(size)?);
+    let id = RingId(NEXT_RING_ID.fetch_add(1, Ordering::Relaxed));
+    let mut reg = RINGS.lock();
+    ensure_registry(&mut *reg);
+    reg.as_mut().unwrap().insert(id, ring);
+    Ok(id)
+}
+
+/// Allocate zeroed, ownership-registered frames without publishing them in
+/// the global ring registry. Used by IPC v2 memory objects, whose lifetime
+/// is held by handles and mappings rather than by a global id.
+///
+/// The frames stay alive while the returned object (its owner references)
+/// or any mapping (its own per-mapping references) exists.
+pub fn allocate_ring(size: usize) -> Result<SharedRing, RingError> {
     if size == 0 {
         return Err(RingError::InvalidSize);
     }
@@ -159,7 +174,6 @@ pub fn create_ring(size: usize) -> Result<RingId, RingError> {
         return Err(RingError::Alloc);
     }
 
-    let id = RingId(NEXT_RING_ID.fetch_add(1, Ordering::Relaxed));
     let owner_cap_ids = (0..page_count)
         .map(|_| allocate_mapping_cap_id())
         .collect::<Vec<_>>();
@@ -186,17 +200,12 @@ pub fn create_ring(size: usize) -> Result<RingId, RingError> {
         }
     }
 
-    let ring = Arc::new(SharedRing {
+    Ok(SharedRing {
         size,
         frames,
         owner_cap_ids,
         mapping_cap_ids,
-    });
-
-    let mut reg = RINGS.lock();
-    ensure_registry(&mut *reg);
-    reg.as_mut().unwrap().insert(id, ring);
-    Ok(id)
+    })
 }
 
 /// Returns ring.

@@ -699,7 +699,7 @@ processes only inside messages.
 ## 16. Implementation status
 
 Last verified: 2026-11-14 (`cargo check` for `x86_64-unknown-none`, with and without `--features selftest`, exit 0;
-`cargo test -p strat9-abi` and `cargo test -p strat9-ipc-core` green).
+`cargo test -p strat9-abi` (incl. `ipc_v2_layout`) and `cargo test -p strat9-ipc-core` green).
 
 | Piece | Where | State |
 |---|---|---|
@@ -712,14 +712,14 @@ Last verified: 2026-11-14 (`cargo check` for `x86_64-unknown-none`, with and wit
 | 273 `EP_CALL`, 274 `EP_RECV`, 275 `EP_REPLY`, 276 `EP_REPLY_RECV` | `kernel/src/syscall/ipc_v2.rs` | implemented; reply copied out in the caller's context |
 | 277 `EP_BIND_NOTIF`, 278 `NOTIF_CREATE`, 279 `NOTIF_SIGNAL`, 280 `NOTIF_WAIT` | `kernel/src/syscall/ipc_v2.rs` | implemented |
 | 281 `NS_BIND`, 282 `NS_LOOKUP`, 283 `NS_UNBIND` | `kernel/src/syscall/ipc_v2.rs`, `kernel/src/namespace/v2.rs` | implemented; owned entries, no side effects, `LOOKUP` yields SEND-only badged handles |
-| 284 `MEMOBJ_CREATE`, 285 `MEMOBJ_MAP` | — | **pending (Phase 3)**; routed to `ENOSYS` |
-| `AsyncOp` 13–17 | — | **pending (Phase 4)**; opcodes not dispatched |
-| `SiloIpcAccount` (§12) | — | **pending (Phase 4)**; endpoints record `owner_silo` but no counter is charged |
+| 284 `MEMOBJ_CREATE`, 285 `MEMOBJ_MAP` | `kernel/src/ipc/v2/memobj.rs`, `syscall/ipc_v2.rs` | implemented on the frame-ownership machinery of `SharedRing` (`allocate_ring`, no global registry): one owner reference per frame held by the object, a fresh mapping identity per page per mapping, so a frame is freed only when the object and every mapping are gone; size ≤ `MEMOBJ_MAX_SIZE` (64 MiB), `prot` ⊆ `MEM_*` rights |
+| `AsyncOp` 13–17 | `kernel/src/ipc/v2/async_ops.rs`, `async_io/{dispatch,syscall,ring}.rs` | implemented: submission and retries run in the ring owner's context; blocking operations are parked and retried by `SYS_ASYNC_ENTER` when an IPC event kicks the ring (`Ring::ipc_kick`); `EpCall` shares `call_submit`/`call_finish` with the sync path; ring destruction abandons pending calls |
+| `SiloIpcAccount` (§12) | `kernel/src/silo/memory_account.rs`, `kernel/src/ipc/v2/quota.rs` | implemented: counters live beside the silo memory budget and are reached through the caller's address space (no registry lock); RAII charges in endpoints, notifications, queued messages (sender silo) and MemObjects, released in `Drop`; a blocking sender waits on the quota, `IPC_NONBLOCK` gets `EAGAIN` |
 | Timeouts (`timeout_ns != 0`) | `kernel/src/sync/waitqueue.rs` (`wait_until_deadline`), `syscall/ipc_v2.rs` | implemented on the scheduler's `wake_deadline_ns` (the `nanosleep` mechanism); `ETIMEDOUT`; resolution one tick (10 ms); a `call` deadline covers enqueue + reply |
 | Receive reservation (§4.5) | `endpoint.rs` (`pop` → `PopOutcome::NeedSlots`), `syscall/ipc_v2.rs` | implemented: slot count checked against the reservation in the dequeue critical section, retry loop, no nested locks |
-| Direct switch on `call` (§10) | — | **pending (Phase 5)**; `EP_FLAG_FASTPATH` is accepted and ignored |
+| N3 fast path (§10) | `process/scheduler/task_ops.rs` (`wake_task_here`), `WaitQueue::wake_one_here`, `endpoint.rs` | implemented as **directed wakeup** on `EP_FLAG_FASTPATH` endpoints: the call wakes the server on the caller's CPU (no IPI, affinity respected) and the reply wakes the caller on the server's CPU. Full scheduling-context donation is not implemented (see below) |
 | Executable model of the state machines | `workspace/ipc-core` | 27 host tests, deterministic stress; loom interleaving not run |
-| In-kernel runtime tests | `kernel/src/ipc/v2/selftest.rs` (task `ipc-v2-test`, selftest orchestrator) | written and compiled; **not yet observed passing**: the `selftest` debug kernel does not reach the orchestrator (see below) |
+| In-kernel runtime tests | `kernel/src/ipc/v2/selftest.rs` (task `ipc-v2-test`, selftest orchestrator) | reservation, `EMSGSIZE`, timeouts, sender wakeup, call states, quotas, MemObject; compiled; **not yet observed passing**: the `selftest` debug kernel does not reach the orchestrator (see below) |
 
 Defects fixed on 2026-11-14 after the first implementation pass:
 
@@ -754,11 +754,23 @@ tests run as soon as that boot path is fixed.
 
 Remaining known differences from the normative text:
 
-1. §12 quotas are not charged.
-2. `NS_BIND` does not yet enforce the §8 rule that a silo holding a foreign
-   `EP_MINT` needs `RegistryMode::PROXY`; `IPC_MINT` is only obtainable from a
-   handle that already carries `EP_MINT`.
-3. Timeout resolution is the scheduler tick (10 ms), not nanoseconds.
+1. Timeout resolution is the scheduler tick (10 ms), not nanoseconds.
+2. §10 asks for time-slice and priority donation on `call`; the kernel does a
+   directed wakeup (same CPU, no IPI) but the local scheduler class still
+   decides when the server runs. Donation needs a scheduling-context
+   primitive the scheduler does not have.
+3. MemObject accounting: the backing is charged to the creator at
+   `SYS_MEMOBJ_CREATE` **and** each mapping is charged as a virtual region to
+   the mapping silo, because `munmap` always refunds the mapping length (an
+   uncharged mapping would let the refund credit bytes never charged). The
+   same refund asymmetry affects `SYS_MEM_REGION_MAP` (`memory/region_cap.rs`,
+   `SiloCharge::AlreadyCharged`) and is outside IPC v2.
+4. The v1 IPC syscalls and `AsyncOp` 10–12 are still dispatched (`ipc-v1`
+   removal is the last step of Phase 5).
+
+§8 `PROXY`: enforced on receive. A handle carrying `EP_MINT` delivered to a
+task whose silo lacks `RegistryMode::PROXY` (or is sandboxed) is installed
+without `EP_MINT`; silo admin and tasks outside any silo keep it.
 
 ---
 

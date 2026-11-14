@@ -249,6 +249,24 @@ pub const MEM_EXEC: u32 = 1 << 10;
 /// May be mapped at all.
 pub const MEM_MAP: u32 = 1 << 11;
 
+/// `SYS_MEMOBJ_MAP` protection: readable (POSIX `PROT_READ`).
+pub const MEMOBJ_PROT_READ: u32 = 1;
+/// `SYS_MEMOBJ_MAP` protection: writable (POSIX `PROT_WRITE`).
+pub const MEMOBJ_PROT_WRITE: u32 = 2;
+/// `SYS_MEMOBJ_MAP` protection: executable (POSIX `PROT_EXEC`).
+pub const MEMOBJ_PROT_EXEC: u32 = 4;
+/// Largest MemObject `SYS_MEMOBJ_CREATE` accepts (64 MiB).
+pub const MEMOBJ_MAX_SIZE: u64 = 64 * 1024 * 1024;
+
+/// `ObjType` values reported in a received `CapXfer::mode` (§2).
+pub const OBJ_ENDPOINT: u32 = 1;
+/// Reply object.
+pub const OBJ_REPLY: u32 = 2;
+/// Notification object.
+pub const OBJ_NOTIFICATION: u32 = 3;
+/// Memory object.
+pub const OBJ_MEMOBJ: u32 = 4;
+
 /// Default endpoint queue depth when `SYS_EP_CREATE` is passed `0`.
 pub const EP_DEFAULT_QUEUE_DEPTH: u32 = 16;
 /// Maximum endpoint queue depth.

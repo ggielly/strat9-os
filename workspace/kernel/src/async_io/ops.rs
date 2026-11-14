@@ -52,6 +52,16 @@ pub enum AsyncOp {
     IpcRecv = 11,
     /// IPC: combined send + recv (reply channel).
     IpcCall = 12,
+    /// IPC v2: send on an endpoint handle (`sqe.off`), `*MsgBuf` in `addr`.
+    EpSend = 13,
+    /// IPC v2: call; `*MsgCall` in `addr`. CQE when the reply is copied out.
+    EpCall = 14,
+    /// IPC v2: receive; CQE `res` = message kind.
+    EpRecv = 15,
+    /// IPC v2: reply on a Reply handle; never blocks.
+    EpReply = 16,
+    /// IPC v2: notification wait; bits written to `*u64` in `addr`.
+    NotifWait = 17,
 
     /// Poll: add an fd to the epoll set.
     PollAdd = 20,

@@ -78,6 +78,9 @@ pub struct Ring {
     pub cq_order: u8,
     /// Wait queue for tasks blocked on this ring.
     pub wq: crate::sync::WaitQueue,
+    /// Set by IPC v2 events when this ring has parked IPC operations; makes a
+    /// blocked `SYS_ASYNC_ENTER` return to retry them (`ipc::v2::async_ops`).
+    pub ipc_kick: AtomicU32,
 }
 
 impl Ring {
@@ -153,6 +156,7 @@ impl Ring {
             sq_order,
             cq_order,
             wq: crate::sync::WaitQueue::new(),
+            ipc_kick: AtomicU32::new(0),
         });
 
         let id = ring.id;
@@ -347,6 +351,10 @@ pub fn destroy_ring(id: u64) -> Result<(), RingError> {
     let mut guard = RING_REGISTRY.lock();
     if let Some(pos) = guard.iter().position(|r| r.id == id) {
         let ring = guard.remove(pos);
+        drop(guard);
+        // Parked IPC v2 operations die with the ring (pending calls are
+        // abandoned so late replies release their capabilities).
+        crate::ipc::v2::async_ops::drop_ring(id);
         ring.destroy();
         ring.wq.wake_all();
         crate::hardware::storage::ahci::discard_deferred_async_read_completions(id);

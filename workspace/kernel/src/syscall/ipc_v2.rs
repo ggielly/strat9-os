@@ -33,16 +33,18 @@ use crate::{
             ReplyPayload,
         },
         handle::{Entry, HandleTable, ObjRef},
+        memobj::MemObject,
         notif::Notification,
+        quota::{self, charge_message},
         register_call,
     },
     memory::userslice::{UserPod, UserSliceRead, UserSliceReadWrite, UserSliceWrite},
     namespace::v2 as ns_v2,
     process::{current_task_clone, process::Process},
     silo::{
-        current_task_sandboxed, enforce_path_for_current_task,
+        current_task_may_proxy, current_task_sandboxed, enforce_path_for_current_task,
         enforce_registry_bind_for_current_task, enforce_registry_lookup_for_current_task,
-        require_silo_admin, try_silo_id_for_task,
+        require_silo_admin, try_silo_id_for_task, IpcResource,
     },
     sync::scheduler_clock_ns,
     syscall::error::SyscallError,
@@ -51,9 +53,10 @@ use alloc::{string::String, sync::Arc, vec::Vec};
 use core::mem::size_of;
 use strat9_abi::ipc_v2::{
     CapXfer, Handle, MsgBuf, MsgHeader, EP_FLAG_FASTPATH, EP_FLAG_SENDER_SILO, EP_MINT, EP_RECV,
-    EP_SEND, EP_XFER, GENERIC_RIGHTS_MASK, IPC_MAX_CAPS, IPC_MAX_DATA, IPC_NONBLOCK, MSG_KIND_CALL,
-    MSG_KIND_REPLY, MSG_KIND_SEND, NOTIF_MINT, NOTIF_SIGNAL, NOTIF_WAIT, RIGHTS_SAME,
-    RIGHT_DUPLICATE, RIGHT_INSPECT, RIGHT_TRANSFER, RIGHT_WAIT, XFER_COPY, XFER_MOVE,
+    EP_SEND, EP_XFER, GENERIC_RIGHTS_MASK, IPC_MAX_CAPS, IPC_MAX_DATA, IPC_NONBLOCK, MEM_MAP,
+    MEM_READ, MEM_WRITE, MSG_KIND_CALL, MSG_KIND_REPLY, MSG_KIND_SEND, NOTIF_MINT, NOTIF_SIGNAL,
+    NOTIF_WAIT, RIGHTS_SAME, RIGHT_DUPLICATE, RIGHT_INSPECT, RIGHT_TRANSFER, RIGHT_WAIT, XFER_COPY,
+    XFER_MOVE,
 };
 
 // SAFETY: `MsgBuf` is `#[repr(C)]` and contains only integers; every bit
@@ -113,11 +116,19 @@ fn caller_is_silo_admin() -> bool {
 
 /// Blocking policy of one syscall, from the common `flags`/`timeout_ns` pair.
 #[derive(Clone, Copy)]
-struct WaitSpec {
+pub(crate) struct WaitSpec {
     /// `IPC_NONBLOCK`: never block, `EAGAIN` instead.
-    nonblock: bool,
+    pub(crate) nonblock: bool,
     /// Absolute deadline on [`scheduler_clock_ns`], or `None` (no timeout).
-    deadline_ns: Option<u64>,
+    pub(crate) deadline_ns: Option<u64>,
+}
+
+impl WaitSpec {
+    /// Never block (async ring submissions).
+    pub(crate) const NONBLOCK: WaitSpec = WaitSpec {
+        nonblock: true,
+        deadline_ns: None,
+    };
 }
 
 /// Parse the common `flags`/`timeout_ns` pair (§13).
@@ -292,11 +303,17 @@ fn install_caps(
     caps: Vec<OwnedCap>,
 ) -> Result<Vec<(Handle, u32, u32)>, SyscallError> {
     let total = caps.len();
+    // §8: without `RegistryMode::PROXY`, a silo cannot hold a foreign
+    // `EP_MINT`; it is stripped on the way in (the handle stays usable).
+    let may_proxy = total == 0 || current_task_may_proxy();
     let mut table = process.ipc_v2.lock();
     let mut installed = Vec::with_capacity(total);
     let mut iter = caps.into_iter();
     while let Some(cap) = iter.next() {
-        let rights = cap.rights;
+        let rights = match cap.obj {
+            ObjRef::Endpoint(_) if !may_proxy => cap.rights & !EP_MINT,
+            _ => cap.rights,
+        };
         let obj_type = cap.obj.obj_type();
         match table.insert(rights, cap.obj.clone(), cap.badge) {
             Some(handle) => installed.push((handle, rights, obj_type)),
@@ -350,7 +367,8 @@ pub fn sys_ep_create(process: &Process, depth: u64, flags: u64) -> Result<u64, S
     let owner_silo = current_task_clone()
         .and_then(|task| try_silo_id_for_task(&task))
         .unwrap_or(0);
-    let ep = Endpoint::create(depth as u32, flags as u16, owner_silo)?;
+    let charge = quota::charge_object(process, IpcResource::Endpoints)?;
+    let ep = Endpoint::create(depth as u32, flags as u16, owner_silo, charge)?;
     let handle = process.ipc_v2.lock().insert(
         EP_RECV | EP_MINT | RIGHT_WAIT | RIGHT_INSPECT,
         ObjRef::Endpoint(ep.clone()),
@@ -394,7 +412,7 @@ pub fn sys_ipc_mint(
                 NOTIF_SIGNAL | (rights & GENERIC_RIGHTS_MASK & entry.rights),
             )
         }
-        ObjRef::Reply(_) => return Err(SyscallError::BadHandle),
+        ObjRef::Reply(_) | ObjRef::Mem(_) => return Err(SyscallError::BadHandle),
     };
     let handle = table
         .insert(new_rights, obj, badge)
@@ -443,6 +461,13 @@ pub fn sys_ep_send(
     header.sender_silo = sender_silo;
     header.ncaps = built.len() as u16;
 
+    let charge = charge_message(
+        process,
+        message_bytes(&header),
+        built.len() as u64,
+        wait.nonblock,
+        wait.deadline_ns,
+    )?;
     let mut inflight_caps = Vec::with_capacity(built.len());
     for b in &built {
         inflight_caps.push(b.cap.clone());
@@ -452,6 +477,7 @@ pub fn sys_ep_send(
         data,
         caps: inflight_caps,
         call: None,
+        charge,
     };
     retain_built(&built);
     if let Err(error) = ep.push(msg, wait.nonblock, wait.deadline_ns) {
@@ -460,6 +486,11 @@ pub fn sys_ep_send(
     }
     commit_moves(process, &built);
     Ok(0)
+}
+
+/// Queue accounting size of a message (§12): header + data.
+fn message_bytes(header: &MsgHeader) -> u64 {
+    size_of::<MsgHeader>() as u64 + u64::from(header.data_len)
 }
 
 /// SYS_EP_CALL (273).
@@ -472,6 +503,44 @@ pub fn sys_ep_call(
     timeout_ns: u64,
 ) -> Result<u64, SyscallError> {
     let wait = parse_common(flags, timeout_ns)?;
+    let (slot, resp) = call_submit(process, send_h, req_ptr, resp_ptr, wait)?;
+
+    // `IPC_NONBLOCK` only governs the enqueue: once committed, a call always
+    // waits for its reply (bounded by the deadline, if any).
+    let outcome = slot.waitq.wait_until_deadline(wait.deadline_ns, || {
+        let state = *slot.state.lock();
+        match state {
+            CallState::Done => Some(Ok(())),
+            CallState::Cancelled => Some(Err(SyscallError::Pipe)),
+            // A signal interrupts a blocking call and cancels it (§6.2).
+            _ if crate::process::signal::has_pending_signals() => {
+                Some(Err(SyscallError::Interrupted))
+            }
+            _ => None,
+        }
+    });
+    let outcome = outcome.unwrap_or(Err(SyscallError::TimedOut));
+    if let Err(error) = outcome {
+        if matches!(error, SyscallError::Interrupted | SyscallError::TimedOut) {
+            // Cancels a queued/received call; if the reply raced in (`Done`),
+            // reclaims its capabilities instead of leaking them (§6.2).
+            endpoint::abandon_call(&slot);
+        }
+        return Err(error);
+    }
+    call_finish(process, &slot, &resp)
+}
+
+/// Validate and enqueue a call (first half of `SYS_EP_CALL`, shared with the
+/// async `EpCall` opcode). Returns the linked call slot and the validated
+/// response descriptor; the reply is collected by [`call_finish`].
+pub(crate) fn call_submit(
+    process: &Process,
+    send_h: u64,
+    req_ptr: u64,
+    resp_ptr: u64,
+    wait: WaitSpec,
+) -> Result<(Arc<CallSlot>, MsgBuf), SyscallError> {
     let (entry, ep) = endpoint_handle(process, send_h, EP_SEND)?;
 
     let req = read_msg_buf(req_ptr)?;
@@ -514,8 +583,19 @@ pub fn sys_ep_call(
     header.sender_silo = sender_silo;
     header.ncaps = built.len() as u16;
 
+    let charge = charge_message(
+        process,
+        message_bytes(&header),
+        built.len() as u64,
+        wait.nonblock,
+        wait.deadline_ns,
+    )?;
     let caller = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let slot = Arc::new(CallSlot::new(ep.id(), Some(caller.id), resp));
+    if ep.flags as u32 & EP_FLAG_FASTPATH != 0 {
+        slot.fastpath
+            .store(true, core::sync::atomic::Ordering::Release);
+    }
     register_call(&slot);
 
     let mut inflight_caps = Vec::with_capacity(built.len());
@@ -527,6 +607,7 @@ pub fn sys_ep_call(
         data,
         caps: inflight_caps,
         call: Some(slot.clone()),
+        charge,
     };
     retain_built(&built);
     if let Err(error) = ep.push(msg, wait.nonblock, wait.deadline_ns) {
@@ -535,31 +616,19 @@ pub fn sys_ep_call(
         return Err(error);
     }
     commit_moves(process, &built);
+    Ok((slot, resp))
+}
 
-    // `IPC_NONBLOCK` only governs the enqueue: once committed, a call always
-    // waits for its reply (bounded by the deadline, if any).
-    let outcome = slot.waitq.wait_until_deadline(wait.deadline_ns, || {
-        let state = *slot.state.lock();
-        match state {
-            CallState::Done => Some(Ok(())),
-            CallState::Cancelled => Some(Err(SyscallError::Pipe)),
-            // A signal interrupts a blocking call and cancels it (§6.2).
-            _ if crate::process::signal::has_pending_signals() => {
-                Some(Err(SyscallError::Interrupted))
-            }
-            _ => None,
-        }
-    });
-    let outcome = outcome.unwrap_or(Err(SyscallError::TimedOut));
-    if let Err(error) = outcome {
-        if matches!(error, SyscallError::Interrupted | SyscallError::TimedOut) {
-            // Cancels a queued/received call; if the reply raced in (`Done`),
-            // reclaims its capabilities instead of leaking them (§6.2).
-            endpoint::abandon_call(&slot);
-        }
-        return Err(error);
-    }
-
+/// Collect the reply of a completed call (second half of `SYS_EP_CALL`).
+///
+/// Must run in the **caller's** context (its address space receives the
+/// copy-out). The slot must be `Done` or `Cancelled`.
+pub(crate) fn call_finish(
+    process: &Process,
+    slot: &CallSlot,
+    resp: &MsgBuf,
+) -> Result<u64, SyscallError> {
+    let resp = *resp;
     let payload = slot.reply.lock().take().ok_or(SyscallError::Pipe)?;
     // Reserve the reply capability slots before installing (§4.5 step 3).
     let reserved = payload.caps.len();
@@ -659,7 +728,11 @@ pub fn sys_ep_recv(
         data,
         caps,
         call,
+        charge,
     } = item;
+    // The message left the queue: release the sender's quota now, outside
+    // every endpoint lock (this may wake senders blocked on the quota).
+    drop(charge);
 
     // From here the message is dequeued; the reservation makes the installs
     // below unable to fail for capacity. This keeps delivery all-or-nothing.
@@ -805,7 +878,8 @@ pub fn sys_notif_create(process: &Process, flags: u64) -> Result<u64, SyscallErr
     if flags & !IPC_NONBLOCK != 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    let notif = Notification::create();
+    let charge = quota::charge_object(process, IpcResource::Notifications)?;
+    let notif = Notification::create_charged(charge);
     let handle = process
         .ipc_v2
         .lock()
@@ -908,4 +982,59 @@ pub fn sys_ns_unbind(
     let path = read_ns_path(path_ptr, path_len)?;
     ns_v2::unbind(&path, current_silo_id(), caller_is_silo_admin())?;
     Ok(0)
+}
+
+/// SYS_MEMOBJ_CREATE (284): allocate a zeroed memory object (§9.1).
+///
+/// `size` is rounded up to whole pages and bounded by `MEMOBJ_MAX_SIZE`;
+/// `flags` must be zero. The backing is charged to the caller's silo memory
+/// budget before any frame is allocated.
+pub fn sys_memobj_create(process: &Process, size: u64, flags: u64) -> Result<u64, SyscallError> {
+    if flags != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let size = crate::ipc::v2::memobj::page_round(size)?;
+    let charge = quota::charge_memory(process, size)?;
+    let obj = Arc::new(MemObject::create(size, charge)?);
+    let handle = process
+        .ipc_v2
+        .lock()
+        .insert(
+            MEM_READ | MEM_WRITE | MEM_MAP | RIGHT_TRANSFER | RIGHT_DUPLICATE | RIGHT_INSPECT,
+            ObjRef::Mem(obj),
+            0,
+        )
+        .ok_or(SyscallError::NoSpace)?;
+    Ok(handle.raw())
+}
+
+/// SYS_MEMOBJ_MAP (285): map a page-aligned window of a memory object.
+///
+/// `prot` (`MEMOBJ_PROT_*`) must be covered by the handle's `MEM_*` rights.
+/// Returns the mapped address; unmapping uses `SYS_MUNMAP`.
+pub fn sys_memobj_map(
+    process: &Process,
+    mem_h: u64,
+    addr_hint: u64,
+    offset: u64,
+    len: u64,
+    prot: u64,
+) -> Result<u64, SyscallError> {
+    let (rights, obj) = {
+        let table = process.ipc_v2.lock();
+        let entry = table.resolve(Handle::from_raw(mem_h), MEM_MAP)?;
+        match &entry.obj {
+            ObjRef::Mem(obj) => (entry.rights, obj.clone()),
+            _ => return Err(SyscallError::BadHandle),
+        }
+    };
+    let prot = u32::try_from(prot).map_err(|_| SyscallError::InvalidArgument)?;
+    obj.map(
+        &process.address_space_arc(),
+        rights,
+        addr_hint,
+        offset,
+        len,
+        prot,
+    )
 }

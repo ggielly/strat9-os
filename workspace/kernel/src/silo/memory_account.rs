@@ -26,6 +26,109 @@ use crate::{sync::SpinLock, syscall::error::SyscallError};
 
 pub(crate) struct SiloMemoryAccount {
     budget: SpinLock<MemoryBudget>,
+    /// IPC v2 object and in-flight counters of the same silo (§12).
+    ipc: SiloIpcAccount,
+}
+
+/// IPC v2 resource limits per silo (spec §12).
+pub(crate) mod ipc_limits {
+    /// Live endpoints created by the silo.
+    pub const ENDPOINTS: u64 = 256;
+    /// Live notifications created by the silo.
+    pub const NOTIFICATIONS: u64 = 256;
+    /// Bytes (header + data) of messages queued by the silo's senders.
+    pub const QUEUED_BYTES: u64 = 1024 * 1024;
+    /// Handles carried by messages queued by the silo's senders.
+    pub const INFLIGHT_HANDLES: u64 = 1024;
+}
+
+/// One IPC v2 resource counted by [`SiloIpcAccount`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IpcResource {
+    Endpoints,
+    Notifications,
+    QueuedBytes,
+    InflightHandles,
+}
+
+/// Lock-free IPC v2 counters of one silo (spec §12).
+///
+/// Charged by the IPC layer through RAII guards (`ipc::v2::quota::IpcCharge`)
+/// and released in their `Drop`, so dequeue, endpoint close and process death
+/// all release uniformly. `waitq` wakes senders blocked on the queued-bytes /
+/// in-flight-handle limits.
+pub(crate) struct SiloIpcAccount {
+    counters: [core::sync::atomic::AtomicU64; 4],
+    pub(crate) waitq: crate::sync::WaitQueue,
+}
+
+impl SiloIpcAccount {
+    const fn new() -> Self {
+        use core::sync::atomic::AtomicU64;
+        Self {
+            counters: [
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+            ],
+            waitq: crate::sync::WaitQueue::new(),
+        }
+    }
+
+    fn slot(res: IpcResource) -> (usize, u64) {
+        match res {
+            IpcResource::Endpoints => (0, ipc_limits::ENDPOINTS),
+            IpcResource::Notifications => (1, ipc_limits::NOTIFICATIONS),
+            IpcResource::QueuedBytes => (2, ipc_limits::QUEUED_BYTES),
+            IpcResource::InflightHandles => (3, ipc_limits::INFLIGHT_HANDLES),
+        }
+    }
+
+    /// Charge `amount`; `false` (nothing charged) when it would exceed the limit.
+    pub(crate) fn try_charge(&self, res: IpcResource, amount: u64) -> bool {
+        use core::sync::atomic::Ordering;
+        if amount == 0 {
+            return true;
+        }
+        let (index, limit) = Self::slot(res);
+        self.counters[index]
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(amount).filter(|next| *next <= limit)
+            })
+            .is_ok()
+    }
+
+    /// Release `amount` previously charged and wake blocked senders.
+    pub(crate) fn release(&self, res: IpcResource, amount: u64) {
+        if amount == 0 {
+            return;
+        }
+        self.release_quiet(res, amount);
+        if matches!(res, IpcResource::QueuedBytes | IpcResource::InflightHandles) {
+            self.waitq.wake_all();
+        }
+    }
+
+    /// Release without waking `waitq`: for rollbacks evaluated under the
+    /// wait-queue lock itself.
+    pub(crate) fn release_quiet(&self, res: IpcResource, amount: u64) {
+        use core::sync::atomic::Ordering;
+        if amount == 0 {
+            return;
+        }
+        let (index, _) = Self::slot(res);
+        let _ = self.counters[index].try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            debug_assert!(used >= amount, "IPC quota released more than charged");
+            Some(used.saturating_sub(amount))
+        });
+    }
+
+    /// Current usage of `res`.
+    pub(crate) fn used(&self, res: IpcResource) -> u64 {
+        let (index, _) = Self::slot(res);
+        self.counters[index].load(core::sync::atomic::Ordering::Acquire)
+    }
 }
 
 impl core::fmt::Debug for SiloMemoryAccount {
@@ -86,7 +189,13 @@ impl SiloMemoryAccount {
     pub(crate) fn new(max: u64) -> Self {
         Self {
             budget: SpinLock::new(MemoryBudget { used: 0, max }),
+            ipc: SiloIpcAccount::new(),
         }
+    }
+
+    /// IPC v2 counters of this silo.
+    pub(crate) fn ipc(&self) -> &SiloIpcAccount {
+        &self.ipc
     }
 
     pub(crate) fn charge(&self, bytes: u64) -> Result<(), SyscallError> {
