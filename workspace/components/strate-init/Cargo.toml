@@ -10,7 +10,7 @@ authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
 # Strat9 Kernel integration
 strat9-syscall = { path = "../syscall", features = ["userspace"] }
 alloc-freelist = { path = "../alloc-freelist" }
-phf = { version = "0.13", default-features = false, features = ["macros"] }
+init-config = { path = "../init-config" }
 
 [features]
 default = []
