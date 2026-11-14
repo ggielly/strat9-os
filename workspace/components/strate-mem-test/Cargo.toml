@@ -21,5 +21,17 @@ path = "src/mem_region.rs"
 name = "test_mem_region_proc"
 path = "src/mem_region_proc.rs"
 
+[[bin]]
+name = "test_gui_mem"
+path = "src/gui_mem.rs"
+
+[[bin]]
+name = "test_gui_authority"
+path = "src/gui_authority.rs"
+
+[[bin]]
+name = "test_gui_display"
+path = "src/gui_display.rs"
+
 [dependencies]
 strat9-syscall = { path = "../syscall", features = ["userspace"] }
