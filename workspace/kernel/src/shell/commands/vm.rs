@@ -571,6 +571,40 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
                     Ok(())
                 }
                 Err(error) => {
+                    // A DOS `reboot` is a request, not a fault: honour it by
+                    // starting a fresh session for the same firmware and image,
+                    // which is what the operator asked the guest to do. The
+                    // world and its disk are recreated, so nothing partial from
+                    // the interrupted boot survives.
+                    if matches!(
+                        error,
+                        dosboot::DosError::BadExit("guest requested reset")
+                            | dosboot::DosError::BadExit("guest requested reboot")
+                    ) {
+                        let _ = dosboot::dos_close();
+                        match dosboot::dos_open(
+                            &caps,
+                            dosboot::FirmwareKind::Stub,
+                            dosboot::freedos_image(),
+                        ) {
+                            Ok(id) => {
+                                shell_println!(
+                                    "vm: the guest asked for a reset: DOS session rebooted on \
+                                     world {id}"
+                                );
+                                return Ok(());
+                            }
+                            Err(error) => {
+                                shell_println!(
+                                    "vm: the guest asked for a reset but the session could not be \
+                                     reopened: {:?} ({})",
+                                    error,
+                                    error.hint()
+                                );
+                                return Err(ShellError::ExecutionFailed);
+                            }
+                        }
+                    }
                     shell_println!("vm: DOS slice failed: {:?} ({})", error, error.hint());
                     Err(ShellError::ExecutionFailed)
                 }
