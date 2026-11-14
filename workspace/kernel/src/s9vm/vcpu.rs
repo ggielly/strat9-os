@@ -1437,6 +1437,39 @@ impl Vcpu {
         &mut self.msr
     }
 
+    /// Refreshes only the segments the exit replay and the BIOS adapter read.
+    ///
+    /// [`Self::refresh_system_state`] costs about fifty `VMREAD`s (ten segment
+    /// registers with four fields each, the descriptor tables, the task
+    /// register and three MSR selectors). Legacy port exits are about 98 % of a
+    /// DOS boot, and the code that runs between two exits reads the four
+    /// general segments only: the selector and base of `CS`/`DS`/`ES`/`SS`.
+    /// An instruction fetch needs `CS.base`, string transfers need
+    /// `DS.base`/`ES.base`, the interrupt frame sits at `SS.base + SP`, and the
+    /// BIOS adapter keeps the real-mode selectors of all four.
+    ///
+    /// Limits, access rights, the descriptor tables, the task register and the
+    /// MSR selectors are still refreshed in full at slice boundaries, which is
+    /// where they are pushed back into the control block.
+    ///
+    /// # Safety
+    /// The control block must be loaded on the current CPU and the guest
+    /// inactive (exit handler).
+    pub unsafe fn refresh_segment_state(&mut self) -> Result<(), VcpuError> {
+        // SAFETY: caller guarantees the block is loaded; widths match.
+        unsafe {
+            self.guest.cs.selector = self.control.read_u16(field::GUEST_CS_SELECTOR)?;
+            self.guest.cs.base = self.control.read_natural(field::GUEST_CS_BASE)?;
+            self.guest.ds.selector = self.control.read_u16(field::GUEST_DS_SELECTOR)?;
+            self.guest.ds.base = self.control.read_natural(field::GUEST_DS_BASE)?;
+            self.guest.es.selector = self.control.read_u16(field::GUEST_ES_SELECTOR)?;
+            self.guest.es.base = self.control.read_natural(field::GUEST_ES_BASE)?;
+            self.guest.ss.selector = self.control.read_u16(field::GUEST_SS_SELECTOR)?;
+            self.guest.ss.base = self.control.read_natural(field::GUEST_SS_BASE)?;
+        }
+        Ok(())
+    }
+
     /// Refreshes the guest state and control block from the MSR shadows.
     ///
     /// Must be called after a replayed `WRMSR` whose effect is

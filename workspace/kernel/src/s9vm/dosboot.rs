@@ -779,10 +779,14 @@ fn run_dos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError>
                 }
                 if (biosrom::BIOS_PORT_BASE..=biosrom::BIOS_PORT_BASE + 0xFF).contains(&port) {
                     let vector = (port - biosrom::BIOS_PORT_BASE) as u8;
-                    // Refresh the segment registers: an INT call changes
-                    // ES/DS/SS and the ROM handler relies on them.
+                    // Refresh the segments an interrupt frame changes: the ROM
+                    // stub runs `pop`/`iret`, so `CS`/`DS`/`ES`/`SS` may differ
+                    // from the previous exit, and the BIOS adapter marshals all
+                    // four selectors plus the `SS.base + SP` frame. This is the
+                    // dominant exit path (one per BIOS call), so it refreshes
+                    // the four segments instead of the whole guest state.
                     // SAFETY: block loaded, guest inactive (exit handler).
-                    unsafe { vcpu.refresh_system_state() }.map_err(DosError::Run)?;
+                    unsafe { vcpu.refresh_segment_state() }.map_err(DosError::Run)?;
                     let mut registers = read_bios_call_registers(&vcpu, &mut memory);
                     let _ = bios_state.handle(vector, &mut registers, &mut memory, &mut world_disk);
                     write_bios_registers(&mut vcpu, &registers);
@@ -1248,8 +1252,11 @@ fn run_device_fast_path(
     // Segment bases drive instruction fetch (`CS.base + IP`) and string I/O
     // (`ES`/`DS`). They may have changed since the last exit (option ROM far
     // jumps, mode switches), so refresh them before decoding the instruction.
+    // The replay reads nothing else from the guest state, and this runs on
+    // every legacy exit, so only those three fields are fetched from the
+    // control block.
     // SAFETY: block loaded, guest inactive (exit handler).
-    let _ = unsafe { vcpu.refresh_system_state() };
+    let _ = unsafe { vcpu.refresh_segment_state() };
     let mut view = emulate::MemoryView::new(memory, ept_root, 0, false);
     let mut guest = VcpuGuest::new(vcpu);
     matches!(
