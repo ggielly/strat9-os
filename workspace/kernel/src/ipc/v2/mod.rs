@@ -27,6 +27,7 @@
 pub mod endpoint;
 pub mod handle;
 pub mod notif;
+pub mod selftest;
 
 pub use handle::{Entry, HandleTable, ObjRef, MAX_HANDLES};
 
@@ -38,15 +39,25 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use endpoint::{cancel_call, CallSlot};
+use endpoint::{abandon_call, cancel_call, CallSlot};
 
 /// Weak registry of live call slots so task/endpoint death can cancel calls
 /// without ever touching another address space.
 static CALL_SLOTS: SpinLock<Vec<Weak<CallSlot>>> = SpinLock::new(Vec::new());
 
 /// Register a call slot for exit/endpoint cleanup.
+///
+/// Dead entries are otherwise pruned only by the exit/close scans, so a
+/// long-lived client calling in a loop would grow the registry by one entry
+/// per call. Pruning whenever the length reaches a power of two keeps it
+/// proportional to the number of live calls at amortised O(1) per call.
 pub fn register_call(slot: &Arc<CallSlot>) {
-    CALL_SLOTS.lock().push(Arc::downgrade(slot));
+    let mut guard = CALL_SLOTS.lock();
+    let len = guard.len();
+    if len >= 64 && len.is_power_of_two() {
+        guard.retain(|weak| weak.strong_count() > 0);
+    }
+    guard.push(Arc::downgrade(slot));
 }
 
 fn collect_calls<F: Fn(&CallSlot) -> bool>(filter: F) -> Vec<Arc<CallSlot>> {
@@ -70,7 +81,9 @@ fn collect_calls<F: Fn(&CallSlot) -> bool>(filter: F) -> Vec<Arc<CallSlot>> {
 pub fn cleanup_for_task(task_id: TaskId) {
     let slots = collect_calls(|slot| *slot.caller.lock() == Some(task_id));
     for slot in slots {
-        cancel_call(&slot);
+        // The caller is gone: a reply already stored (`Done`) will never be
+        // copied out, so its capabilities must be released too.
+        abandon_call(&slot);
     }
 }
 

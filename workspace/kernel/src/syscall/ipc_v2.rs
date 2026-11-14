@@ -29,7 +29,8 @@
 use crate::{
     ipc::v2::{
         endpoint::{
-            self, CallSlot, CallState, Endpoint, InFlight, OwnedCap, RecvItem, ReplyPayload,
+            self, CallSlot, CallState, Endpoint, InFlight, OwnedCap, PopOutcome, RecvItem,
+            ReplyPayload,
         },
         handle::{Entry, HandleTable, ObjRef},
         notif::Notification,
@@ -43,6 +44,7 @@ use crate::{
         enforce_registry_bind_for_current_task, enforce_registry_lookup_for_current_task,
         require_silo_admin, try_silo_id_for_task,
     },
+    sync::scheduler_clock_ns,
     syscall::error::SyscallError,
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
@@ -109,17 +111,36 @@ fn caller_is_silo_admin() -> bool {
     require_silo_admin().is_ok()
 }
 
-/// Parse the common `flags`/`timeout_ns` pair. Returns `IPC_NONBLOCK`.
-fn parse_common(flags: u64, timeout_ns: u64) -> Result<bool, SyscallError> {
+/// Blocking policy of one syscall, from the common `flags`/`timeout_ns` pair.
+#[derive(Clone, Copy)]
+struct WaitSpec {
+    /// `IPC_NONBLOCK`: never block, `EAGAIN` instead.
+    nonblock: bool,
+    /// Absolute deadline on [`scheduler_clock_ns`], or `None` (no timeout).
+    deadline_ns: Option<u64>,
+}
+
+/// Parse the common `flags`/`timeout_ns` pair (§13).
+///
+/// `timeout_ns == 0` means no timeout. `IPC_NONBLOCK` takes precedence over
+/// `timeout_ns`. The deadline is computed once, at syscall entry, so a
+/// `call` is bounded as a whole (send + wait for the reply), as §6.2 states.
+/// Resolution is one scheduler tick.
+fn parse_common(flags: u64, timeout_ns: u64) -> Result<WaitSpec, SyscallError> {
     let flags = flags as u32;
     if flags & !IPC_NONBLOCK != 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    if timeout_ns != 0 {
-        // TODO(v2-timeouts): the kernel has no native timeout facility yet.
-        return Err(SyscallError::NotSupported);
-    }
-    Ok(flags & IPC_NONBLOCK != 0)
+    let nonblock = flags & IPC_NONBLOCK != 0;
+    let deadline_ns = if nonblock || timeout_ns == 0 {
+        None
+    } else {
+        Some(scheduler_clock_ns().saturating_add(timeout_ns))
+    };
+    Ok(WaitSpec {
+        nonblock,
+        deadline_ns,
+    })
 }
 
 fn read_msg_buf(ptr: u64) -> Result<MsgBuf, SyscallError> {
@@ -389,7 +410,7 @@ pub fn sys_ep_send(
     flags: u64,
     timeout_ns: u64,
 ) -> Result<u64, SyscallError> {
-    let nonblock = parse_common(flags, timeout_ns)?;
+    let wait = parse_common(flags, timeout_ns)?;
     let (entry, ep) = endpoint_handle(process, send_h, EP_SEND)?;
 
     let buf = read_msg_buf(buf_ptr)?;
@@ -433,7 +454,7 @@ pub fn sys_ep_send(
         call: None,
     };
     retain_built(&built);
-    if let Err(error) = ep.push(msg, nonblock) {
+    if let Err(error) = ep.push(msg, wait.nonblock, wait.deadline_ns) {
         release_built(&built);
         return Err(error);
     }
@@ -450,7 +471,7 @@ pub fn sys_ep_call(
     flags: u64,
     timeout_ns: u64,
 ) -> Result<u64, SyscallError> {
-    let nonblock = parse_common(flags, timeout_ns)?;
+    let wait = parse_common(flags, timeout_ns)?;
     let (entry, ep) = endpoint_handle(process, send_h, EP_SEND)?;
 
     let req = read_msg_buf(req_ptr)?;
@@ -508,14 +529,16 @@ pub fn sys_ep_call(
         call: Some(slot.clone()),
     };
     retain_built(&built);
-    if let Err(error) = ep.push(msg, nonblock) {
+    if let Err(error) = ep.push(msg, wait.nonblock, wait.deadline_ns) {
         release_built(&built);
         endpoint::cancel_call(&slot);
         return Err(error);
     }
     commit_moves(process, &built);
 
-    let outcome = slot.waitq.wait_until(|| {
+    // `IPC_NONBLOCK` only governs the enqueue: once committed, a call always
+    // waits for its reply (bounded by the deadline, if any).
+    let outcome = slot.waitq.wait_until_deadline(wait.deadline_ns, || {
         let state = *slot.state.lock();
         match state {
             CallState::Done => Some(Ok(())),
@@ -527,9 +550,12 @@ pub fn sys_ep_call(
             _ => None,
         }
     });
+    let outcome = outcome.unwrap_or(Err(SyscallError::TimedOut));
     if let Err(error) = outcome {
-        if matches!(error, SyscallError::Interrupted) {
-            endpoint::cancel_call(&slot);
+        if matches!(error, SyscallError::Interrupted | SyscallError::TimedOut) {
+            // Cancels a queued/received call; if the reply raced in (`Done`),
+            // reclaims its capabilities instead of leaking them (§6.2).
+            endpoint::abandon_call(&slot);
         }
         return Err(error);
     }
@@ -569,7 +595,7 @@ pub fn sys_ep_recv(
     flags: u64,
     timeout_ns: u64,
 ) -> Result<u64, SyscallError> {
-    let nonblock = parse_common(flags, timeout_ns)?;
+    let wait = parse_common(flags, timeout_ns)?;
     let (_, ep) = endpoint_handle(process, recv_h, EP_RECV)?;
     let buf = read_msg_buf(buf_ptr)?;
 
@@ -582,32 +608,50 @@ pub fn sys_ep_recv(
         let len = buf.caps_cap.min(IPC_MAX_CAPS as u32) as usize * size_of::<CapXfer>();
         UserSliceWrite::new(buf.caps, len)?;
     }
-    // Size the receiver's handle-table reservation from the head without
-    // dequeuing anything (§4.5 step 3): `ncaps` plus one for a Reply handle.
-    let plan = ep.peek_plan();
-    let needed = plan.map_or(0, |p| p.ncaps as usize + usize::from(p.has_call));
+    // Reserve handle-table slots for the message we are about to take
+    // (§4.5 step 3): `ncaps` plus one for a Reply handle. The peek is only a
+    // first guess; `pop` re-checks the head against `needed` under the
+    // endpoint lock, in the same critical section as the dequeue, and asks
+    // for more (`NeedSlots`) if the head changed meanwhile (another receiver
+    // thread took it, or the queue was empty and we blocked). The table lock
+    // is never held across `pop`, so no lock is nested.
+    let mut needed = ep
+        .peek_plan()
+        .map_or(0, |p| p.ncaps as usize + usize::from(p.has_call));
     process.ipc_v2.lock().reserve(needed)?;
-    // Include our own reservation in the slots `pop` sees, so its capacity
-    // check never rejects a message we already reserved room for.
-    let free_slots = {
-        let table = process.ipc_v2.lock();
-        table.free_slots() + needed
-    };
-    let item = match ep.pop(buf.data_cap, buf.caps_cap, nonblock, free_slots) {
-        Ok(item) => item,
-        Err(SyscallError::MessageSize) => {
-            process.ipc_v2.lock().release_reservation(needed);
-            if let Some((data_len, ncaps)) = ep.head_requirements() {
-                let mut required = MsgHeader::default();
-                required.data_len = data_len;
-                required.ncaps = ncaps;
-                let _ = header_slice.write_val(&required);
+    let item = loop {
+        match ep.pop(
+            buf.data_cap,
+            buf.caps_cap,
+            wait.nonblock,
+            needed,
+            wait.deadline_ns,
+        ) {
+            Ok(PopOutcome::Item(item)) => break item,
+            Ok(PopOutcome::NeedSlots(more)) => {
+                // `more > needed` by construction. Grow the reservation; if the
+                // table cannot hold it, the message stays queued (`ENOSPC`).
+                let mut table = process.ipc_v2.lock();
+                if let Err(error) = table.reserve(more - needed) {
+                    table.release_reservation(needed);
+                    return Err(error);
+                }
+                needed = more;
             }
-            return Err(SyscallError::MessageSize);
-        }
-        Err(error) => {
-            process.ipc_v2.lock().release_reservation(needed);
-            return Err(error);
+            Err(SyscallError::MessageSize) => {
+                process.ipc_v2.lock().release_reservation(needed);
+                if let Some((data_len, ncaps)) = ep.head_requirements() {
+                    let mut required = MsgHeader::default();
+                    required.data_len = data_len;
+                    required.ncaps = ncaps;
+                    let _ = header_slice.write_val(&required);
+                }
+                return Err(SyscallError::MessageSize);
+            }
+            Err(error) => {
+                process.ipc_v2.lock().release_reservation(needed);
+                return Err(error);
+            }
         }
     };
     let RecvItem {
@@ -789,9 +833,9 @@ pub fn sys_notif_wait(
     flags: u64,
     timeout_ns: u64,
 ) -> Result<u64, SyscallError> {
-    let nonblock = parse_common(flags, timeout_ns)?;
+    let wait = parse_common(flags, timeout_ns)?;
     let (_, notif) = notification_handle(process, notif_h, NOTIF_WAIT)?;
-    let bits = notif.wait(nonblock)?;
+    let bits = notif.wait(wait.nonblock, wait.deadline_ns)?;
     UserSliceReadWrite::new(out_ptr, size_of::<u64>())?.write_val(&bits)?;
     Ok(0)
 }

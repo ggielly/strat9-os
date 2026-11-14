@@ -161,6 +161,15 @@ pub struct RecvItem {
     pub call: Option<Arc<CallSlot>>,
 }
 
+/// Result of [`Endpoint::pop`].
+pub enum PopOutcome {
+    /// A message (or bound-notification signal) was dequeued.
+    Item(RecvItem),
+    /// The head needs this many handle slots, more than the caller reserved.
+    /// Nothing was dequeued.
+    NeedSlots(usize),
+}
+
 /// Shape of the endpoint head, used to size a handle-table reservation before
 /// dequeuing (§4.5 step 3).
 #[derive(Clone, Copy)]
@@ -213,9 +222,17 @@ impl Endpoint {
     }
 
     /// Push a message, blocking while the queue is full unless `nonblock`.
-    pub fn push(&self, msg: InFlight, nonblock: bool) -> Result<(), SyscallError> {
+    ///
+    /// `deadline_ns` (absolute, [`crate::sync::scheduler_clock_ns`]) bounds the
+    /// wait; on expiry nothing is committed and `ETIMEDOUT` is returned.
+    pub fn push(
+        &self,
+        msg: InFlight,
+        nonblock: bool,
+        deadline_ns: Option<u64>,
+    ) -> Result<(), SyscallError> {
         let mut msg = Some(msg);
-        let outcome = self.send_waitq.wait_until(|| {
+        let outcome = self.send_waitq.wait_until_deadline(deadline_ns, || {
             let mut state = self.state.lock();
             if !state.alive {
                 return Some(Err(SyscallError::Pipe));
@@ -236,6 +253,7 @@ impl Endpoint {
             }
             None
         });
+        let outcome = outcome.unwrap_or(Err(SyscallError::TimedOut));
         if outcome.is_ok() {
             self.recv_waitq.wake_one();
         }
@@ -244,20 +262,35 @@ impl Endpoint {
 
     /// Pop a message or a pending bound-notification signal.
     ///
-    /// `free_slots` is the receiver's remaining handle capacity; the message
-    /// is not dequeued when its capabilities (plus a Reply handle) do not fit.
+    /// `reserved` is the number of handle-table slots the receiver has
+    /// **already reserved**. The handle count of the head (`ncaps` plus one
+    /// for a Reply) is compared with it under the endpoint lock, in the same
+    /// critical section as the dequeue:
+    ///
+    /// - if it fits, the message is dequeued: every install that follows is
+    ///   covered by the reservation, so delivery is all-or-nothing (§4.5);
+    /// - if not, nothing is dequeued and [`PopOutcome::NeedSlots`] reports the
+    ///   exact count; the caller grows its reservation (outside this lock)
+    ///   and retries.
+    ///
+    /// This replaces a peek-then-pop sizing that a second receiver thread,
+    /// or a message arriving while the receiver was blocked on an empty
+    /// queue, could invalidate. No lock is nested: the handle-table lock is
+    /// never taken under the endpoint lock (handle removal takes them in the
+    /// opposite order).
     pub fn pop(
         &self,
         data_cap: u32,
         caps_cap: u32,
         nonblock: bool,
-        free_slots: usize,
-    ) -> Result<RecvItem, SyscallError> {
-        self.recv_waitq.wait_until(|| {
+        reserved: usize,
+        deadline_ns: Option<u64>,
+    ) -> Result<PopOutcome, SyscallError> {
+        let outcome = self.recv_waitq.wait_until_deadline(deadline_ns, || {
             let mut state = self.state.lock();
             if state.pending_bits != 0 {
                 let bits = core::mem::take(&mut state.pending_bits);
-                return Some(Ok(RecvItem {
+                return Some(Ok(PopOutcome::Item(RecvItem {
                     header: MsgHeader {
                         kind: MSG_KIND_NOTIF,
                         badge: bits,
@@ -266,15 +299,19 @@ impl Endpoint {
                     data: Vec::new(),
                     caps: Vec::new(),
                     call: None,
-                }));
+                })));
             }
             if let Some(head) = state.queue.front() {
-                let needed = head.caps.len() + usize::from(head.call.is_some());
                 if head.header.data_len > data_cap || head.caps.len() > caps_cap as usize {
                     return Some(Err(SyscallError::MessageSize));
                 }
-                if needed > free_slots || head.caps.len() > IPC_MAX_CAPS {
-                    return Some(Err(SyscallError::NoSpace));
+                if head.caps.len() > IPC_MAX_CAPS {
+                    // Unreachable: senders are bounded by IPC_MAX_CAPS.
+                    return Some(Err(SyscallError::InvalidArgument));
+                }
+                let needed = head.caps.len() + usize::from(head.call.is_some());
+                if needed > reserved {
+                    return Some(Ok(PopOutcome::NeedSlots(needed)));
                 }
                 let mut item = state.queue.pop_front().expect("head present");
                 if let Some(call) = item.call.take() {
@@ -282,12 +319,12 @@ impl Endpoint {
                         item.call = Some(call);
                     }
                 }
-                return Some(Ok(RecvItem {
+                return Some(Ok(PopOutcome::Item(RecvItem {
                     header: item.header,
                     data: item.data,
                     caps: item.caps,
                     call: item.call,
-                }));
+                })));
             }
             if !state.alive {
                 return Some(Err(SyscallError::Pipe));
@@ -301,7 +338,14 @@ impl Endpoint {
                 return Some(Err(SyscallError::Again));
             }
             None
-        })
+        });
+        let outcome = outcome.unwrap_or(Err(SyscallError::TimedOut));
+        if matches!(outcome, Ok(PopOutcome::Item(_))) {
+            // A queue slot may have been freed: let one blocked sender retry.
+            // Woken outside the receive wait-queue lock (no nested wakes).
+            self.send_waitq.wake_one();
+        }
+        outcome
     }
 
     /// `(data_len, ncaps)` of the queued head, without dequeuing it.
@@ -392,6 +436,10 @@ pub fn mark_received(slot: &CallSlot) -> bool {
 }
 
 /// Cancel a call: bump the generation and wake the caller.
+///
+/// Used by the server side (Reply handle dropped, endpoint closed) and by
+/// teardown. A caller abandoning its own call must use
+/// [`abandon_call`], which also reclaims a reply that raced with it.
 pub fn cancel_call(slot: &CallSlot) {
     let mut state = slot.state.lock();
     if matches!(*state, CallState::Queued | CallState::Received) {
@@ -402,16 +450,47 @@ pub fn cancel_call(slot: &CallSlot) {
     slot.waitq.wake_all();
 }
 
+/// Caller-side cancellation after `EINTR` / `ETIMEDOUT`.
+///
+/// Between the caller deciding to give up and taking the state lock, the
+/// server may already have replied (`Done`). That reply will never be copied
+/// out, so its capabilities are released here instead of leaking with the
+/// slot (each one may hold an endpoint's last `EP_RECV` reference).
+pub fn abandon_call(slot: &CallSlot) {
+    let late = {
+        let mut state = slot.state.lock();
+        match *state {
+            CallState::Queued | CallState::Received => {
+                *state = CallState::Cancelled;
+                slot.gen.fetch_add(1, Ordering::AcqRel);
+                None
+            }
+            CallState::Done => {
+                *state = CallState::Cancelled;
+                slot.reply.lock().take()
+            }
+            CallState::Cancelled => None,
+        }
+    };
+    if let Some(payload) = late {
+        release_caps(payload.caps);
+    }
+    slot.waitq.wake_all();
+}
+
 /// Deliver a reply into a call slot. The copy to userspace happens later, in
 /// the caller's own context.
+///
+/// The payload is stored **before** the state becomes `Done`, both under the
+/// state lock: a caller that observes `Done` always finds the payload.
 pub fn deliver_reply(slot: &CallSlot, gen: u32, payload: ReplyPayload) -> Result<(), SyscallError> {
     let mut state = slot.state.lock();
     match *state {
         CallState::Queued => Err(SyscallError::InvalidArgument),
         CallState::Received if slot.gen.load(Ordering::Acquire) == gen => {
+            *slot.reply.lock() = Some(payload);
             *state = CallState::Done;
             drop(state);
-            *slot.reply.lock() = Some(payload);
             slot.waitq.wake_one();
             Ok(())
         }

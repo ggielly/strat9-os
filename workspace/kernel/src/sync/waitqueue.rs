@@ -67,15 +67,27 @@
 //! queue, so a userspace-reachable waiter count can never trigger a panic.
 //! Registration (`Vec::push`) may allocate under the waiters lock, but only
 //! in task context : never in an IRQ : and `wake_one`/`wake_all` never
-//! allocate. Native timeouts are not yet implemented (Phase 0 follow-up);
-//! externally woken waiters are removed by their own `retain` on return and
-//! `wake_one` skips stale (already-unblocked) entries.
+//! allocate. Externally woken waiters are removed by their own `retain` on
+//! return and `wake_one` skips stale (already-unblocked) entries.
+//!
+//! Timeouts: [`WaitQueue::wait_until_deadline`] arms the task's
+//! `wake_deadline_ns` (the mechanism `nanosleep` uses); the timer tick wakes
+//! the task once the deadline passes. Resolution is one scheduler tick.
 
 use crate::{
     process::{block_current_task, current_task_id, wake_task, TaskId},
     sync::SpinLock,
 };
 use alloc::vec::Vec;
+
+/// Monotonic time on the clock `check_wake_deadlines` compares against.
+///
+/// Deadlines passed to [`WaitQueue::wait_until_deadline`] must be expressed on
+/// this clock, otherwise the timer wake and the expiry check disagree.
+#[inline]
+pub fn scheduler_clock_ns() -> u64 {
+    crate::process::scheduler::ticks().saturating_mul(crate::arch::timer::NS_PER_TICK)
+}
 
 //  WaitQueue ========================================
 
@@ -142,13 +154,48 @@ impl WaitQueue {
     /// # Panics
     ///
     /// Panics if called outside of a task context (no current task).
-    pub fn wait_until<F, T>(&self, mut condition: F) -> T
+    pub fn wait_until<F, T>(&self, condition: F) -> T
+    where
+        F: FnMut() -> Option<T>,
+    {
+        match self.wait_until_deadline(None, condition) {
+            Some(value) => value,
+            // `wait_until_deadline` only returns `None` when a deadline is set.
+            None => unreachable!("wait_until_deadline(None, ..) timed out"),
+        }
+    }
+
+    /// Like [`wait_until`](Self::wait_until), but gives up at `deadline_ns`.
+    ///
+    /// `deadline_ns` is absolute, on the scheduler clock
+    /// (`ticks() * NS_PER_TICK`, the clock `check_wake_deadlines` compares
+    /// against). `None` waits forever.
+    ///
+    /// Returns `Some(value)` as soon as `condition()` yields a value, or
+    /// `None` once the deadline has passed. The condition is always evaluated
+    /// one last time after the deadline, under the waiters lock, so an event
+    /// that raced with the timeout is never lost: a caller that gets `None`
+    /// knows the condition was still false at expiry.
+    ///
+    /// The timeout reuses the scheduler's `wake_deadline_ns` mechanism (the
+    /// one `nanosleep` relies on): the timer tick wakes blocked tasks whose
+    /// deadline has passed, so resolution is one scheduler tick.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside of a task context (no current task).
+    pub fn wait_until_deadline<F, T>(&self, deadline_ns: Option<u64>, mut condition: F) -> Option<T>
     where
         F: FnMut() -> Option<T>,
     {
         let id = current_task_id().expect("WaitQueue::wait_until called with no current task");
+        // Only needed to arm the deadline; looked up once.
+        let task = match deadline_ns {
+            Some(_) => crate::process::current_task_clone(),
+            None => None,
+        };
 
-        loop {
+        let outcome = loop {
             // Hold the waiters lock while evaluating the condition so that a
             // concurrent wake_one() either:
             //   (a) finds us in the waiter list and calls wake_task() : which
@@ -162,7 +209,16 @@ impl WaitQueue {
                 if let Some(value) = condition() {
                     // Drop any registration left from a previous iteration.
                     waiters.retain(|&w| w != id);
-                    return value;
+                    break Some(value);
+                }
+
+                // Deadline passed and the condition is still false (checked
+                // just above, under the lock): time out.
+                if let Some(deadline) = deadline_ns {
+                    if scheduler_clock_ns() >= deadline {
+                        waiters.retain(|&w| w != id);
+                        break None;
+                    }
                 }
 
                 // Condition not yet met: register ourselves as a waiter while
@@ -173,6 +229,15 @@ impl WaitQueue {
                 }
             } // waiters lock released here
 
+            // Arm the timer wake before every sleep: any wake (wake_task,
+            // timer expiry) clears `wake_deadline_ns`. If the timer scan runs
+            // before we are in BLOCKED_TASKS it misses us, but the next tick
+            // finds the already-expired deadline and wakes us then.
+            if let (Some(deadline), Some(task)) = (deadline_ns, task.as_ref()) {
+                task.wake_deadline_ns
+                    .store(deadline, core::sync::atomic::Ordering::Relaxed);
+            }
+
             // Sleep until woken.  If wake_task() already fired (racing with
             // the lock drop above), the scheduler's wake_pending flag ensures
             // block_current_task() returns immediately.
@@ -181,7 +246,14 @@ impl WaitQueue {
             // Remove ourselves in case we were woken externally rather than
             // popped by wake_one/wake_all, then re-evaluate the condition.
             self.waiters.lock().retain(|&w| w != id);
+        };
+
+        // Never leave a stale deadline armed for an unrelated later block.
+        if let Some(task) = task.as_ref() {
+            task.wake_deadline_ns
+                .store(0, core::sync::atomic::Ordering::Relaxed);
         }
+        outcome
     }
 
     /// Wake the first waiting task (FIFO order).
