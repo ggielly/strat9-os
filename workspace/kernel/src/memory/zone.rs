@@ -127,9 +127,14 @@ impl BuddyBitmap {
     /// Toggle a bit and return its new value.
     #[inline]
     pub fn toggle(&self, idx: usize) -> bool {
+        if self.is_empty() || idx >= self.num_bits {
+            return false;
+        }
         debug_assert!(idx < self.num_bits);
         let byte_idx = idx >> 3;
         let mask = 1u8 << (idx & 7);
+        // SAFETY: `is_empty` and `idx < num_bits` were checked above, so the
+        // byte index stays within the externally owned bitmap storage.
         unsafe {
             let byte = self.data.add(byte_idx);
             let new_val = *byte ^ mask;
@@ -146,15 +151,20 @@ impl BuddyBitmap {
         }
         let byte_idx = idx >> 3;
         let mask = 1u8 << (idx & 7);
+        // SAFETY: bounds were checked above, so the byte index is in-bounds.
         unsafe { (*self.data.add(byte_idx) & mask) != 0 }
     }
 
     /// Performs the set operation.
     #[inline]
     pub fn set(&self, idx: usize) {
+        if self.is_empty() || idx >= self.num_bits {
+            return;
+        }
         debug_assert!(idx < self.num_bits);
         let byte_idx = idx >> 3;
         let mask = 1u8 << (idx & 7);
+        // SAFETY: bounds were checked above, so the byte index is in-bounds.
         unsafe {
             *self.data.add(byte_idx) |= mask;
         }
@@ -163,9 +173,13 @@ impl BuddyBitmap {
     /// Performs the clear operation.
     #[inline]
     pub fn clear(&self, idx: usize) {
+        if self.is_empty() || idx >= self.num_bits {
+            return;
+        }
         debug_assert!(idx < self.num_bits);
         let byte_idx = idx >> 3;
         let mask = 1u8 << (idx & 7);
+        // SAFETY: bounds were checked above, so the byte index is in-bounds.
         unsafe {
             *self.data.add(byte_idx) &= !mask;
         }
@@ -342,6 +356,9 @@ impl Zone {
         if self.segment_capacity == 0 || self.segments.is_null() {
             &[]
         } else {
+            // SAFETY: `segments` points to `segment_capacity` contiguous
+            // `ZoneSegment` values allocated for the zone lifetime (non-null
+            // checked above).
             unsafe { slice::from_raw_parts(self.segments, self.segment_capacity) }
         }
     }
@@ -352,6 +369,7 @@ impl Zone {
         if self.segment_capacity == 0 || self.segments.is_null() {
             &mut []
         } else {
+            // SAFETY: as in `segments`, and `&mut self` guarantees exclusive access.
             unsafe { slice::from_raw_parts_mut(self.segments, self.segment_capacity) }
         }
     }

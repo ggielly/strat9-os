@@ -81,12 +81,16 @@ pub struct BuddyFrameAllocator;
 #[cfg(target_arch = "x86_64")]
 unsafe impl X86FrameAllocator<Size4KiB> for BuddyFrameAllocator {
     fn allocate_frame(&mut self) -> Option<X86PhysFrame<Size4KiB>> {
-        // SAFETY: `BuddyFrameAllocator` is only ever called from within
-        // `OffsetPageTable` during page-table operations.  Those occur either
-        // during single-threaded early boot, or while the caller holds a lock
-        // that disables IRQs (e.g. the scheduler SpinLock, the AddressSpace
-        // lock).  IRQs are therefore guaranteed to be disabled.
-        let token = unsafe { crate::sync::IrqDisabledToken::token_from_trusted_context() };
+        // `with_irqs_disabled` produces a real `IrqDisabledToken`, saving and
+        // restoring RFLAGS, so it is correct even when the caller already holds
+        // IRQs disabled (e.g. during early boot or under a scheduler/AddressSpace
+        // lock).
+        let frame = crate::sync::with_irqs_disabled(|token| {
+            FrameAllocOptions::new()
+                .purpose(FramePurpose::PageTable)
+                .allocate(token)
+        })
+        .ok()?;
 
         // `PageTable` purpose enforces:
         //  - `zeroed = true` unconditionally (cannot be overridden by callers).
@@ -94,11 +98,6 @@ unsafe impl X86FrameAllocator<Size4KiB> for BuddyFrameAllocator {
         //  - `FrameMeta::refcount` set to 1 with `Release` ordering after
         //    zeroing, so any `Acquire` load of the refcount observes a clean
         //    frame.
-        let frame = FrameAllocOptions::new()
-            .purpose(FramePurpose::PageTable)
-            .allocate(&token)
-            .ok()?;
-
         X86PhysFrame::from_start_address(frame.start_address).ok()
     }
 }

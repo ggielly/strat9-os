@@ -31,6 +31,17 @@ pub mod riscv64;
 /// Architecture-neutral IOMMU backend interface (discovery + activation).
 pub mod iommu;
 
+/// Service this CPU's pending TLB shootdown mailbox from ordinary context.
+///
+/// Called from the `SpinLock::lock` spin loop so a CPU stuck spinning with
+/// IRQs disabled can still complete shootdowns targeted at it. On x86_64 this
+/// forwards to the TLB shootdown backend; on other architectures there is no
+/// mailbox and it is a no-op.
+pub fn service_pending_tlb_local() {
+    #[cfg(target_arch = "x86_64")]
+    x86_64::tlb::service_pending_local();
+}
+
 #[cfg(target_arch = "x86_64")]
 pub mod facade;
 

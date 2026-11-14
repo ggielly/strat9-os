@@ -238,6 +238,67 @@ impl BootAllocator {
         None
     }
 
+    /// Top-down variant of [`Self::try_alloc_accessible`] for permanent boot
+    /// metadata: scans regions from the highest index downward and places each
+    /// allocation at the top of the chosen region. A region rejected by any of
+    /// the same checks as `try_alloc_accessible` falls through to the next
+    /// lower region in the same scan.
+    pub fn try_alloc_accessible_topdown(&mut self, size: usize, align: usize) -> Option<PhysAddr> {
+        if crate::debug_cfg::is_quiet() {
+            crate::e9_mark!(b'a');
+        }
+        if size == 0 {
+            return Some(PhysAddr::new(0));
+        }
+
+        let align = normalize_align(align) as u64;
+        let size = align_up(size as u64, PAGE_SIZE);
+
+        let mut idx = self.len;
+        while idx > 0 {
+            idx -= 1;
+            let region = self.regions[idx];
+            if region.is_empty() {
+                continue;
+            }
+
+            // Align the END down as requested: allocate `size` bytes at the
+            // highest aligned start such that the block still fits.
+            let candidate = match region.end.checked_sub(size) {
+                Some(v) => v,
+                None => continue,
+            };
+            let alloc_start = align_down(candidate, align);
+            let alloc_end = alloc_start.saturating_add(size);
+            if alloc_start < region.start || alloc_end > region.end {
+                continue;
+            }
+
+            if self.accessible_limit != 0 && alloc_end > self.accessible_limit {
+                continue;
+            }
+
+            if !crate::memory::paging::is_hhdm_range_mapped_now(alloc_start, size) {
+                continue;
+            }
+
+            self.consume_region(idx, alloc_start, alloc_end);
+            return Some(PhysAddr::new(alloc_start));
+        }
+
+        let stats = self.stats();
+        serial_println!(
+            "[boot_alloc] try_alloc_accessible_topdown failed: requested={} aligned={} largest_region={} regions={} total_free={} accessible_limit={:#x}",
+            size as usize,
+            align as usize,
+            stats.largest_region_bytes as usize,
+            stats.region_count,
+            stats.total_free_bytes as usize
+            ,stats.accessible_limit
+        );
+        None
+    }
+
     pub fn snapshot_free_regions(&self, out: &mut [MemoryRegion]) -> usize {
         let count = core::cmp::min(self.len, out.len());
         for (dst, region) in out.iter_mut().zip(self.regions.iter()).take(count) {
@@ -494,6 +555,28 @@ static REBUILD_CALL_COUNT: core::sync::atomic::AtomicUsize =
 static PROTECTED_RANGES: SpinLock<[Option<(u64, u64)>; MAX_PROTECTED_RANGES]> =
     SpinLock::new([None; MAX_PROTECTED_RANGES]);
 
+/// Lock-free mirror of [`PROTECTED_RANGES`] for hot buddy alloc/free paths.
+/// Refreshed by [`set_protected_ranges`] / [`reset_protected_ranges`] so reads
+/// never touch the spinlock. `PROTECTED_RANGES_CACHE_GEN` is a seqlock word:
+/// odd while publishing, even when stable.
+static PROTECTED_RANGES_CACHE_BASE: [core::sync::atomic::AtomicU64; MAX_PROTECTED_RANGES] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_PROTECTED_RANGES];
+static PROTECTED_RANGES_CACHE_SIZE: [core::sync::atomic::AtomicU64; MAX_PROTECTED_RANGES] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_PROTECTED_RANGES];
+static PROTECTED_RANGES_CACHE_GEN: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+fn publish_protected_ranges_cache(ranges: &[Option<(u64, u64)>]) {
+    use core::sync::atomic::Ordering;
+    PROTECTED_RANGES_CACHE_GEN.fetch_add(1, Ordering::AcqRel);
+    for idx in 0..MAX_PROTECTED_RANGES {
+        let (base, size) = ranges.get(idx).copied().flatten().unwrap_or((0, 0));
+        PROTECTED_RANGES_CACHE_BASE[idx].store(base, Ordering::Relaxed);
+        PROTECTED_RANGES_CACHE_SIZE[idx].store(size, Ordering::Relaxed);
+    }
+    PROTECTED_RANGES_CACHE_GEN.fetch_add(1, Ordering::Release);
+}
+
 pub fn init_boot_allocator(regions: &[MemoryRegion]) {
     crate::e9_println!("IBA enter");
     let mut guard = BOOT_ALLOCATOR.lock();
@@ -519,6 +602,13 @@ pub fn alloc_bytes_accessible(size: usize, align: usize) -> Option<PhysAddr> {
     BOOT_ALLOCATOR.lock().try_alloc_accessible(size, align)
 }
 
+/// Top-down variant of [`alloc_bytes_accessible`] for permanent metadata.
+pub fn alloc_bytes_accessible_topdown(size: usize, align: usize) -> Option<PhysAddr> {
+    BOOT_ALLOCATOR
+        .lock()
+        .try_alloc_accessible_topdown(size, align)
+}
+
 pub fn snapshot_free_regions(out: &mut [MemoryRegion]) -> usize {
     BOOT_ALLOCATOR.lock().snapshot_free_regions(out)
 }
@@ -540,28 +630,47 @@ pub fn alloc_stack(size: usize) -> Option<u64> {
 }
 
 pub fn set_protected_ranges(ranges: &[Option<(u64, u64)>]) {
-    let mut protected = PROTECTED_RANGES.lock();
-    *protected = [None; MAX_PROTECTED_RANGES];
-    for (dst, src) in protected.iter_mut().zip(ranges.iter().copied()) {
-        *dst = src;
+    {
+        let mut protected = PROTECTED_RANGES.lock();
+        *protected = [None; MAX_PROTECTED_RANGES];
+        for (dst, src) in protected.iter_mut().zip(ranges.iter().copied()) {
+            *dst = src;
+        }
     }
+    // Refresh the lock-free mirror so buddy alloc/free sees the new table
+    // without ordering assumptions relative to init.
+    publish_protected_ranges_cache(ranges);
 }
 
 pub fn reset_protected_ranges() {
     *PROTECTED_RANGES.lock() = [None; MAX_PROTECTED_RANGES];
+    publish_protected_ranges_cache(&[]);
 }
 
 pub(crate) fn protected_ranges_snapshot() -> [Option<(u64, u64)>; MAX_PROTECTED_RANGES] {
-    crate::e9_mark!(b'p');
-    let guard = PROTECTED_RANGES.lock();
-    crate::e9_mark!(b'q');
-    // Avoid large struct copy (512 bytes) which generates a memcpy call
-    // that resolves to an identity-mapped address → #UD.
+    use core::sync::atomic::Ordering;
+    // Lock-free seqlock read of the cached mirror: never takes the
+    // PROTECTED_RANGES spinlock on the alloc/free hot path.
     let mut result = [None; MAX_PROTECTED_RANGES];
-    for (dst, src) in result.iter_mut().zip(guard.iter()) {
-        *dst = *src;
+    loop {
+        let gen_start = PROTECTED_RANGES_CACHE_GEN.load(Ordering::Acquire);
+        if gen_start & 1 != 0 {
+            continue;
+        }
+        for idx in 0..MAX_PROTECTED_RANGES {
+            let base = PROTECTED_RANGES_CACHE_BASE[idx].load(Ordering::Relaxed);
+            let size = PROTECTED_RANGES_CACHE_SIZE[idx].load(Ordering::Relaxed);
+            result[idx] = if base == 0 && size == 0 {
+                None
+            } else {
+                Some((base, size))
+            };
+        }
+        let gen_end = PROTECTED_RANGES_CACHE_GEN.load(Ordering::Acquire);
+        if gen_start == gen_end {
+            break;
+        }
     }
-    crate::e9_mark!(b'r');
     result
 }
 

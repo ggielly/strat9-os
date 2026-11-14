@@ -777,7 +777,7 @@ pub fn init_metadata_array(total_ram: u64, boot_alloc: &mut BootAllocator) {
     // slots (MetaSlot::new) and by reset_with_free_list_meta.
     // Metadata is written immediately, before map_all_ram can extend the HHDM.
     // Verify actual reachability even when entered through another boot path.
-    let phys = match boot_alloc.try_alloc_accessible(bytes as usize, 64) {
+    let phys = match boot_alloc.try_alloc_accessible_topdown(bytes as usize, 64) {
         Some(p) => p.as_u64(),
         None => {
             // Cannot back the metadata: keep it disabled (get_meta_slot will

@@ -39,7 +39,7 @@
 //! boolean: an initiator cannot observe "done" for an operation still queued,
 //! and a concurrent shootdown cannot clobber another's acknowledgement.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use x86_64::VirtAddr;
 
 use crate::sync::SpinLock;
@@ -140,6 +140,40 @@ static TLB_REQ: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
 /// completion of a generation that has not been processed.
 static TLB_DONE: [AtomicU64; crate::arch::x86_64::percpu::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::x86_64::percpu::MAX_CPUS];
+
+/// Per-CPU reentrancy guard for [`service_pending_local`].
+///
+/// Prevents a nested drain (e.g. the mailbox lock's own `SpinLock::lock` loop
+/// calling back into service) from self-deadlocking on `TLB_QUEUES`.
+static SERVICE_IN_PROGRESS: [AtomicBool; crate::arch::x86_64::percpu::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; crate::arch::x86_64::percpu::MAX_CPUS];
+
+/// Service this CPU's TLB mailbox from ordinary (non-IPI) context.
+///
+/// Intended for the `SpinLock::lock` spin loop: a CPU spinning with IRQs
+/// disabled never runs its IPI handler, so an initiator waiting in
+/// [`wait_for_acks`] would time out. Draining here lets the spinner complete
+/// shootdowns targeted at it, breaking the initiator/target deadlock.
+///
+/// Cheap when nothing is pending (two Acquire loads) and safe to call
+/// repeatedly; reentrancy is guarded per-CPU. Does not take any lock the
+/// caller could already hold: it acquires only this CPU's mailbox lock, which
+/// the caller does not own.
+pub fn service_pending_local() {
+    let cpu_idx = current_cpu_index();
+    if TLB_REQ[cpu_idx].load(Ordering::Acquire) <= TLB_DONE[cpu_idx].load(Ordering::Acquire) {
+        return;
+    }
+    // Reentrancy guard: never nest a drain on the same CPU.
+    if SERVICE_IN_PROGRESS[cpu_idx]
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    drain_local_queue();
+    SERVICE_IN_PROGRESS[cpu_idx].store(false, Ordering::Release);
+}
 
 /// Initialize TLB shootdown system.
 pub fn init() {
