@@ -57,8 +57,8 @@ use crate::{
         Scheme, DEV_CHAR_FS, DT_CHR, DT_REG,
     },
 };
-use alloc::{collections::BTreeMap, format, string::String, sync::Arc, vec::Vec};
 use crate::sync::RwLock;
+use alloc::{collections::BTreeMap, format, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_HANDLES: usize = 64;
@@ -67,9 +67,12 @@ const MAX_HANDLES: usize = 64;
 /// screen format). Detected once on first use; falls back to scalar
 /// implementations when no SIMD extension is available.
 fn fb_ops() -> crate::framebuffer::FramebufferOps {
-    static OPS: core::sync::OnceLock<crate::framebuffer::FramebufferOps> =
-        core::sync::OnceLock::new();
-    *OPS.get_or_init(crate::framebuffer::FramebufferOps::detect)
+    // `core::sync::OnceLock` is std-only on the pinned nightly, so the
+    // once-only detection is guarded by an IRQ-safe spinlock instead.
+    static OPS: crate::sync::SpinLock<Option<crate::framebuffer::FramebufferOps>> =
+        crate::sync::SpinLock::new(None);
+    *OPS.lock()
+        .get_or_insert_with(crate::framebuffer::FramebufferOps::detect)
 }
 
 #[derive(Clone, Debug)]
@@ -403,6 +406,9 @@ impl Scheme for DisplayScheme {
                     row24 = alloc::vec![0u8; dst_row_bytes];
                 }
 
+                // Resolve the SIMD ops once per frame instead of taking the
+                // detection lock on every row.
+                let ops = fb_ops();
                 let mut off = 0usize;
                 let mut py = y;
                 while py < screen_h && off + src_row_bytes <= pixels.len() {
@@ -415,7 +421,7 @@ impl Scheme for DisplayScheme {
                             // slots; the loop guard guarantees `w * 3` readable
                             // bytes at `pixels.as_ptr().add(off)`.
                             unsafe {
-                                (fb_ops().convert)(row32.as_mut_ptr(), pixels.as_ptr().add(off), w);
+                                (ops.convert)(row32.as_mut_ptr(), pixels.as_ptr().add(off), w);
                             }
                         } else {
                             // Rare GOP layout (RGB masks, BGRX, ...): pack
