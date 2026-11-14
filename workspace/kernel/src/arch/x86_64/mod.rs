@@ -34,7 +34,6 @@ pub mod ioapic;
 pub mod iommu;
 pub mod keyboard;
 pub mod keyboard_layout;
-pub mod keyboard_us;
 pub mod mouse;
 pub mod msi;
 pub mod pat;

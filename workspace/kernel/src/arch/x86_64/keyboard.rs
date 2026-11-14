@@ -51,7 +51,12 @@ struct KeyboardBuffer {
     inner: Mutex<KeyboardBufferInner>,
 }
 
+/// Decoded text (UTF-8 + `KEY_*`), consumed by the kernel shell and `/dev/input/text`.
 static KEYBOARD_BUFFER: KeyboardBuffer = KeyboardBuffer::new();
+
+/// Raw PS/2 set-1 scancodes (including `0xE0` prefixes), consumed through
+/// `/dev/input/kbd` by the userspace input server / console.
+static RAW_BUFFER: KeyboardBuffer = KeyboardBuffer::new();
 
 /// Number of characters dropped due to buffer overflow.
 /// Incremented atomically in IRQ context, safe to read from any context.
@@ -69,16 +74,17 @@ impl KeyboardBuffer {
     }
 
     /// Called exclusively from IRQ context (IF=0 already).
-    pub fn push(&self, ch: u8) {
+    pub fn push(&self, ch: u8) -> bool {
         let mut g = self.inner.lock();
         let tail = g.tail;
         g.buf[tail] = ch;
         g.tail = (tail + 1) % KEYBOARD_BUFFER_SIZE;
-        // Buffer full: drop oldest character and count it.
+        // Buffer full: drop the oldest byte.
         if g.head == g.tail {
             g.head = (g.head + 1) % KEYBOARD_BUFFER_SIZE;
-            LOST_KEY_COUNT.fetch_add(1, Ordering::Relaxed);
+            return true;
         }
+        false
     }
 
     /// Called from task context. Interrupts disabled before lock acquisition.
@@ -117,7 +123,23 @@ pub fn add_to_buffer(ch: u8) {
     if ch == 0x03 {
         crate::shell::SHELL_INTERRUPTED.store(true, Ordering::Relaxed);
     }
-    KEYBOARD_BUFFER.push(ch);
+    push_text(ch);
+}
+
+fn push_text(ch: u8) {
+    if KEYBOARD_BUFFER.push(ch) {
+        LOST_KEY_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Record a raw scancode byte (called from IRQ context, or with IRQs off).
+pub fn add_raw(scancode: u8) {
+    RAW_BUFFER.push(scancode);
+}
+
+/// Get a raw scancode byte (non-blocking, task context only).
+pub fn read_raw() -> Option<u8> {
+    RAW_BUFFER.pop()
 }
 
 /// Get a character from the keyboard buffer (non-blocking, task context only).
@@ -144,13 +166,18 @@ pub fn reset_lost_key_count() {
 ///
 /// Must be called from task context. Converts scancode to character via
 /// the current layout and pushes to the buffer if applicable.
-pub fn inject_hid_scancode(scancode: u8, pressed: bool) {
+pub fn inject_hid_scancode(scancode: u8, extended: bool, pressed: bool) {
     let raw = if pressed { scancode } else { scancode | 0x80 };
-    if let Some(ch) = super::keyboard_layout::handle_scancode_raw(raw) {
-        let saved = super::save_flags_and_cli();
-        KEYBOARD_BUFFER.push(ch);
-        super::restore_flags(saved);
+    let saved = super::save_flags_and_cli();
+    if extended {
+        add_raw(0xE0);
+        let _ = super::keyboard_layout::handle_scancode_raw(0xE0);
     }
+    add_raw(raw);
+    for &ch in super::keyboard_layout::handle_scancode_raw(raw).as_bytes() {
+        push_text(ch);
+    }
+    super::restore_flags(saved);
 }
 
 // Re-export special key constants for consumers (e.g. shell/commands/top)

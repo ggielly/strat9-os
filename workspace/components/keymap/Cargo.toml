@@ -1,0 +1,11 @@
+[package]
+name = "strat9-keymap"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+description = "Shared keyboard decoding for strat9-os: PS/2 set-1 scancodes to UTF-8 (AZERTY/QWERTY, AltGr, dead keys)."
+
+[lib]
+name = "strat9_keymap"
+path = "src/lib.rs"

@@ -998,11 +998,16 @@ dependencies = [
  "static_assertions",
  "strat9-abi",
  "strat9-elf-core",
+ "strat9-keymap",
  "thiserror",
  "uart_16550",
  "x86_64",
  "zerocopy",
 ]
+
+[[package]]
+name = "strat9-keymap"
+version = "0.1.0"
 
 [[package]]
 name = "strat9-syscall"
@@ -1037,6 +1042,7 @@ name = "strate-console"
 version = "0.1.0"
 dependencies = [
  "alloc-freelist",
+ "strat9-keymap",
  "strat9-syscall",
  "vte",
 ]
@@ -1100,6 +1106,7 @@ dependencies = [
 name = "strate-input"
 version = "0.1.0"
 dependencies = [
+ "strat9-keymap",
  "strat9-syscall",
 ]
 

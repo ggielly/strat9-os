@@ -238,12 +238,10 @@ pub mod mouse_ready_marker {}
 
 pub mod keyboard {
     pub fn inject_hid_scancode(_sc: u8) {}
-    pub const KEY_LEFT: u8 = 0x82;
-    pub const KEY_RIGHT: u8 = 0x83;
-    pub const KEY_UP: u8 = 0x80;
-    pub const KEY_DOWN: u8 = 0x81;
-    pub const KEY_HOME: u8 = 0x84;
-    pub const KEY_END: u8 = 0x85;
+    pub use strat9_keymap::{KEY_DOWN, KEY_END, KEY_HOME, KEY_LEFT, KEY_RIGHT, KEY_UP};
+    pub fn read_raw() -> Option<u8> {
+        None
+    }
     pub fn init() {}
     pub fn read_char() -> Option<u8> {
         crate::arch::serial::getc()

@@ -2252,7 +2252,8 @@ extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
     // Feed scancode + TSC low bits into the entropy pool.
     crate::entropy::add_entropy(1, (raw as u64) ^ super::rdtsc());
 
-    if let Some(ch) = super::keyboard_layout::handle_scancode_raw(raw) {
+    crate::arch::x86_64::keyboard::add_raw(raw);
+    for &ch in super::keyboard_layout::handle_scancode_raw(raw).as_bytes() {
         crate::arch::x86_64::keyboard::add_to_buffer(ch);
     }
 

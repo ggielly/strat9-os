@@ -38,6 +38,7 @@ members = [
     "workspace/components/init-config",
     "workspace/components/strate-init",
     "workspace/components/strate-console-admin",
+    "workspace/components/keymap",
     "workspace/components/strate-input",
     "workspace/components/strate-graphical",
     "workspace/components/netutils/dhcp-client",

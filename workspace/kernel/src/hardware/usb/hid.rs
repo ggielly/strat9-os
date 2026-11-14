@@ -48,7 +48,10 @@ const MOUSE_REPORT_SIZE: usize = 4;
 
 #[derive(Clone, Copy, Debug)]
 pub struct KeyEvent {
+    /// PS/2 set-1 make code (without the 0x80 break bit).
     pub keycode: u8,
+    /// Preceded by an 0xE0 prefix (arrows, right Ctrl/Alt, ...).
+    pub extended: bool,
     pub pressed: bool,
     pub modifiers: u8,
 }
@@ -59,25 +62,6 @@ pub struct MouseEvent {
     pub dy: i8,
     pub dz: i8,
     pub buttons: u8,
-}
-
-const USB_TO_PS2: [u8; 128] = [
-    0x00, 0x00, 0x00, 0x00, 0x1C, 0x32, 0x21, 0x23, 0x1D, 0x24, 0x2B, 0x34, 0x33, 0x43, 0x35, 0x0E,
-    0x15, 0x16, 0x17, 0x1C, 0x18, 0x19, 0x14, 0x1A, 0x1B, 0x1D, 0x1E, 0x21, 0x22, 0x23, 0x24, 0x2B,
-    0x29, 0x2F, 0x2E, 0x30, 0x20, 0x31, 0x32, 0x33, 0x2C, 0x2D, 0x11, 0x12, 0x13, 0x3F, 0x3E, 0x46,
-    0x45, 0x5D, 0x4C, 0x36, 0x4A, 0x55, 0x37, 0x4E, 0x57, 0x5E, 0x5C, 0x41, 0x52, 0x4D, 0x4B, 0x5B,
-    0x5A, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77,
-    0x78, 0x79, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F, 0x80, 0x81, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-];
-
-fn usb_to_ps2(keycode: u8) -> u8 {
-    if keycode < USB_TO_PS2.len() as u8 {
-        USB_TO_PS2[keycode as usize]
-    } else {
-        0x00
-    }
 }
 
 pub struct HidKeyboard {
@@ -130,16 +114,33 @@ impl HidKeyboard {
             return;
         }
         let modifiers = report[0];
+        let old_modifiers = self.last_report[0];
+
+        // Modifier bits -> set-1 keys (so Shift/Ctrl/AltGr reach the decoder).
+        for (mask, key) in strat9_keymap::hid::HID_MODIFIERS {
+            let Some((extended, keycode)) = key else {
+                continue;
+            };
+            let (was, is) = (old_modifiers & mask != 0, modifiers & mask != 0);
+            if was != is {
+                self.event_queue.push(KeyEvent {
+                    keycode,
+                    extended,
+                    pressed: is,
+                    modifiers,
+                });
+            }
+        }
 
         for i in 2..8 {
-            let keycode = report[i];
-            if keycode == 0 {
+            let usage = report[i];
+            if usage == 0 || self.last_report[2..8].contains(&usage) {
                 continue;
             }
-            let was_pressed = self.last_report[2..8].contains(&keycode);
-            if !was_pressed {
+            if let Some((extended, keycode)) = strat9_keymap::hid::usage_to_set1(usage) {
                 self.event_queue.push(KeyEvent {
-                    keycode: usb_to_ps2(keycode),
+                    keycode,
+                    extended,
                     pressed: true,
                     modifiers,
                 });
@@ -147,19 +148,21 @@ impl HidKeyboard {
         }
 
         for i in 2..8 {
-            let keycode = self.last_report[i];
-            if keycode != 0 && !report[2..8].contains(&keycode) {
+            let usage = self.last_report[i];
+            if usage == 0 || report[2..8].contains(&usage) {
+                continue;
+            }
+            if let Some((extended, keycode)) = strat9_keymap::hid::usage_to_set1(usage) {
                 self.event_queue.push(KeyEvent {
-                    keycode: usb_to_ps2(keycode),
+                    keycode,
+                    extended,
                     pressed: false,
                     modifiers,
                 });
             }
         }
 
-        for i in 0..8 {
-            self.last_report[i] = report[i];
-        }
+        self.last_report.copy_from_slice(&report[..KBD_REPORT_SIZE]);
     }
 
     pub fn is_modifier_pressed(&self, modifier: u8) -> bool {
@@ -169,7 +172,7 @@ impl HidKeyboard {
     pub fn drain_into_unified(&mut self) {
         for ev in self.event_queue.drain(..) {
             #[cfg(target_arch = "x86_64")]
-            keyboard::inject_hid_scancode(ev.keycode, ev.pressed);
+            keyboard::inject_hid_scancode(ev.keycode, ev.extended, ev.pressed);
             #[cfg(not(target_arch = "x86_64"))]
             if ev.pressed {
                 keyboard::inject_hid_scancode(ev.keycode);

@@ -50,7 +50,7 @@
 //! followed by `resume` to `<id>/control`. This short management pulse lets an
 //! operator observe the world suspended and running again without stopping the
 //! relay. The mapping is deliberately a single byte so it works on the raw
-//! `/dev/input/kbd` stream. If the control file is missing (older kernel) or
+//! `/dev/input/text` stream. If the control file is missing (older kernel) or
 //! the engine refuses the command, the failure is reported on stdout and the
 //! relay continues: it is never fatal and never changes the exit code.
 //!
@@ -67,7 +67,7 @@
 //!
 //! # Input
 //!
-//! Input comes from `/dev/input/kbd` when available (the kernel console is
+//! Input comes from `/dev/input/text` when available (the kernel console is
 //! write-only) and falls back to stdin otherwise; both are read non-blocking
 //! with the same `EAGAIN`-tolerant helper. No extra syscall is added.
 //!
@@ -98,7 +98,7 @@ const PATH_INFO: &str = "/dev/vmm/info";
 /// One line per existing world.
 const PATH_WORLDS: &str = "/dev/vmm/worlds";
 /// Keyboard input scheme; the kernel console itself is write-only.
-const PATH_INPUT: &str = "/dev/input/kbd";
+const PATH_INPUT: &str = "/dev/input/text";
 
 /// Command sent to `<id>/control` to suspend the world.
 const CONTROL_PAUSE: &[u8] = b"pause";

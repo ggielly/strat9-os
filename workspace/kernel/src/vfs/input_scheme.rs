@@ -20,10 +20,12 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! Input scheme : exposes raw keyboard and mouse events to userspace.
+//! Input scheme : exposes keyboard and mouse events to userspace.
 //!
-//! Mounted at `/dev/input`. Provides two virtual files:
-//!   `/dev/input/kbd`  : raw keyboard scancodes (1 byte per event)
+//! Mounted at `/dev/input`. Provides three virtual files:
+//!   `/dev/input/kbd`   : raw PS/2 set-1 scancodes (1 byte per event, `0xE0`
+//!                        prefixes included, bit 7 = release)
+//!   `/dev/input/text`  : kernel-decoded text (UTF-8 plus `strat9_keymap::KEY_*`)
 //!   `/dev/input/mouse` : raw mouse events (7 bytes per event)
 //!
 //! The scheme reads from the kernel-internal ring buffers (keyboard.rs,
@@ -44,6 +46,7 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// File IDs for the two virtual input devices.
 const KBD_FILE_ID: u64 = 1;
 const MOUSE_FILE_ID: u64 = 2;
+const TEXT_FILE_ID: u64 = 3;
 
 pub struct InputScheme;
 
@@ -58,6 +61,7 @@ impl Scheme for InputScheme {
         let file_id = match path {
             "kbd" | "keyboard" => KBD_FILE_ID,
             "mouse" => MOUSE_FILE_ID,
+            "text" => TEXT_FILE_ID,
             "" | "/" => {
                 return Ok(OpenResult {
                     file_id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
@@ -75,16 +79,23 @@ impl Scheme for InputScheme {
         })
     }
 
-    /// Read raw keyboard scancodes.
+    /// Read raw keyboard scancodes (`kbd`) or decoded text (`text`).
     ///
-    /// Each byte is a PS/2 set-1 scancode. Bit 7 set = key released.
-    /// The Input Server in userspace handles layout translation.
+    /// `kbd`: each byte is a PS/2 set-1 scancode, bit 7 set = key released;
+    /// the Input Server in userspace handles layout translation.
+    /// `text`: bytes already translated by the kernel layout.
     fn read(&self, file_id: u64, _offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
         match file_id {
-            KBD_FILE_ID => {
+            KBD_FILE_ID | TEXT_FILE_ID => {
+                let raw = file_id == KBD_FILE_ID;
                 let mut count = 0;
                 for slot in buf.iter_mut() {
-                    match crate::arch::keyboard::read_char() {
+                    let next = if raw {
+                        crate::arch::keyboard::read_raw()
+                    } else {
+                        crate::arch::keyboard::read_char()
+                    };
+                    match next {
                         Some(ch) => {
                             *slot = ch;
                             count += 1;
@@ -130,7 +141,7 @@ impl Scheme for InputScheme {
 
     fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
         let (mode, size) = match file_id {
-            KBD_FILE_ID => (0o020000 | 0o444, 0u64), // S_IFCHR | r--r--r--
+            KBD_FILE_ID | TEXT_FILE_ID => (0o020000 | 0o444, 0u64), // S_IFCHR | r--r--r--
             MOUSE_FILE_ID => (0o020000 | 0o444, 0u64),
             _ => (0o040555, 0u64), // directory
         };
@@ -155,6 +166,11 @@ impl Scheme for InputScheme {
                 ino: KBD_FILE_ID,
                 file_type: super::scheme::DT_CHR,
                 name: String::from("kbd"),
+            },
+            DirEntry {
+                ino: TEXT_FILE_ID,
+                file_type: super::scheme::DT_CHR,
+                name: String::from("text"),
             },
             DirEntry {
                 ino: MOUSE_FILE_ID,

@@ -2467,7 +2467,7 @@ pub fn run_freedos_session_dry(caps: &HwCaps) -> Result<(), DosError> {
                 break;
             }
         }
-        let mut feed = KeyboardFeed::new(&[0x80]); // the kernel `KEY_UP` byte
+        let mut feed = KeyboardFeed::new(&[strat9_keymap::KEY_UP]);
         if service_keyboard(
             machine.devices_mut(),
             &mut memory,
@@ -2527,7 +2527,7 @@ pub fn run_freedos_session_dry(caps: &HwCaps) -> Result<(), DosError> {
                 "the resumed feed did not type the appended key on the 8042 path",
             ));
         }
-        let mut feed = KeyboardFeed::new(&[0x80]);
+        let mut feed = KeyboardFeed::new(&[strat9_keymap::KEY_UP]);
         if feed.fill_bios(&mut bios_state, 1) != 1
             || bios_state.keyboard.back() != Some(&(0x48, 0))
         {

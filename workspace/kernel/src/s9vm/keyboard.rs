@@ -411,17 +411,17 @@ pub const SCANCODE_EXTENDED: u8 = 0xE0;
 /// Extended scan code of one key the rest of the system reports above `0x7F`.
 ///
 /// The kernel keyboard driver yields single bytes for the special keys (see
-/// `arch::x86_64::keyboard::{KEY_UP, …}`). A PC sends those as `0xE0` followed
+/// `strat9_keymap::{KEY_UP, …}`). A PC sends those as `0xE0` followed
 /// by the code below, and a DOS `INT 9` handler stores them in the keyboard
 /// buffer with a zero ASCII byte, which is how `INT 16h` reports an arrow.
 pub const fn extended_scan(key: u8) -> Option<u8> {
     match key {
-        0x80 => Some(0x48), // up
-        0x81 => Some(0x50), // down
-        0x82 => Some(0x4B), // left
-        0x83 => Some(0x4D), // right
-        0x84 => Some(0x47), // home
-        0x85 => Some(0x4F), // end
+        strat9_keymap::KEY_UP => Some(0x48), // up
+        strat9_keymap::KEY_DOWN => Some(0x50), // down
+        strat9_keymap::KEY_LEFT => Some(0x4B), // left
+        strat9_keymap::KEY_RIGHT => Some(0x4D), // right
+        strat9_keymap::KEY_HOME => Some(0x47), // home
+        strat9_keymap::KEY_END => Some(0x4F), // end
         _ => None,
     }
 }

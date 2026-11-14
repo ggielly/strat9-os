@@ -60,6 +60,7 @@ fbsurface = { workspace = true }
 ####
 # strat9 components
 component = { path = "libs/component" }
+strat9-keymap = { path = "../components/keymap" }
 net-core = { path = "../drivers/nic/net-core" }
 nic-buffers = { path = "../drivers/nic/nic-buffers" }
 nic-queues = { path = "../drivers/nic/nic-queues" }
