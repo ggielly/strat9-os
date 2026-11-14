@@ -2100,6 +2100,67 @@ pub fn dos_close() -> bool {
 /// checks that the floppy was listed. This exercises the whole interactive
 /// path without an operator: 8259 delivery, the 8042 keyboard, the resumed
 /// vCPU and the writable disk model.
+/// Logs one selftest slice: its performance figures and the machine state.
+///
+/// The hardware selftest is the only place where the whole path runs for real,
+/// so a failing step has to leave enough behind to diagnose it: the exit rate
+/// and busiest ports, which side owns `INT 9`/`INT 16h`, the 8259 masks and
+/// in-service register, the 8042 queue and the BDA keyboard ring.
+fn log_session_diagnostics(report: &DosReport, stage: &str) {
+    log::info!(
+        "[s9vm] freedos-session {}: exits={} rate={}/s io={} bios={} irq={} keys={} hlt={}",
+        stage,
+        report.total_exits,
+        report.exits_per_second(),
+        report.io_exits,
+        report.bios_calls,
+        report.interrupts_delivered,
+        report.scancodes_typed,
+        report.halt_exits
+    );
+    if !report.port_calls.is_empty() {
+        log::info!(
+            "[s9vm] freedos-session {}: top ports {}",
+            stage,
+            report.port_summary()
+        );
+    }
+    match dos_machine_state() {
+        Ok(state) => log::info!(
+            "[s9vm] freedos-session {}: cs:ip={:04x}:{:04x} int9={} int16={} pic \
+             imr={:#04x} irr={:#04x} isr={:#04x} 8042={} pit={} bda={:#06x}/{:#06x} \
+             pending_keys={}+{}",
+            stage,
+            state.cs,
+            state.ip,
+            if state.guest_owns_int9 {
+                "guest"
+            } else {
+                "firmware"
+            },
+            if state.guest_owns_int16 {
+                "guest"
+            } else {
+                "firmware"
+            },
+            state.pic_master_imr,
+            state.pic_master_irr,
+            state.pic_master_isr,
+            state.controller_scancodes,
+            state.pit_irq_level,
+            state.bda_head,
+            state.bda_tail,
+            state.pending_scancodes,
+            state.pending_buffer_keys
+        ),
+        Err(error) => log::warn!(
+            "[s9vm] freedos-session {}: machine state unavailable: {:?}",
+            stage,
+            error
+        ),
+    }
+}
+
 pub fn run_freedos_session_selftest(caps: &HwCaps) -> Result<(), DosError> {
     let world_id = dos_open(caps, FirmwareKind::Stub, freedos_image())?;
     let result = (|| -> Result<(), DosError> {
@@ -2111,6 +2172,7 @@ pub fn run_freedos_session_selftest(caps: &HwCaps) -> Result<(), DosError> {
             stop_at_marker: true,
         };
         let report = dos_run(caps, boot_limits)?;
+        log_session_diagnostics(&report, "boot");
         if !report.text.contains("FreeDOS") {
             return Err(DosError::BadExit("boot banner missing"));
         }
@@ -2129,6 +2191,7 @@ pub fn run_freedos_session_selftest(caps: &HwCaps) -> Result<(), DosError> {
             stop_at_marker: false,
         };
         let report = dos_run(caps, shell_limits)?;
+        log_session_diagnostics(&report, "typed dir");
         if !report.text.contains("FDAUTO") {
             log::warn!(
                 "[s9vm] freedos-session: screen after typed `dir`:\n{}",
@@ -2164,6 +2227,7 @@ pub fn run_freedos_session_selftest(caps: &HwCaps) -> Result<(), DosError> {
             stop_at_marker: false,
         };
         let report = dos_run(caps, write_limits)?;
+        log_session_diagnostics(&report, "typed copy/type");
         if !report.text.contains("!COUNTRY") {
             log::warn!(
                 "[s9vm] freedos-session: screen after typed copy/type:\n{}",
