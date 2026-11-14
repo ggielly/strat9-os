@@ -47,6 +47,22 @@ fn keyboard_controller_accepts_commands_and_stays_idle() {
 }
 
 #[test]
+fn keyboard_controller_answers_the_self_tests() {
+    let mut controller = KeyboardController::new();
+    controller.write(keyboard::STATUS_PORT, 0xAA); // controller self-test
+    let status = controller.read(keyboard::STATUS_PORT).expect("status");
+    assert_ne!(status & 0x01, 0, "output buffer full");
+    assert_eq!(controller.read(keyboard::DATA_PORT), Some(0x55));
+
+    controller.write(keyboard::STATUS_PORT, 0xAB); // keyboard interface test
+    assert_eq!(controller.read(keyboard::DATA_PORT), Some(0x00));
+
+    controller.write(keyboard::DATA_PORT, 0xFF); // keyboard reset
+    assert_eq!(controller.read(keyboard::DATA_PORT), Some(0xFA));
+    assert_eq!(controller.read(keyboard::DATA_PORT), Some(0xAA));
+}
+
+#[test]
 fn vga_status_port_always_reaches_retrace() {
     let mut model = Vga::new();
     assert!(vga::handles_port(0x3D4));
