@@ -890,6 +890,29 @@ impl BiosState {
                     Err(status) => fail_ah(regs, status),
                 }
             }
+            0x04 => {
+                // Verify sectors: the track and sector addresses must exist on
+                // the medium, but there is no data transfer. DOS issues this
+                // after every write when verification is on, and formatters use
+                // it to validate the volume they just created.
+                let Some(_hard) = drive_kind(regs.dx as u8) else {
+                    return fail_ah(regs, DISK_STATUS_MEDIA_NOT_FOUND);
+                };
+                let count = (regs.ax & 0xFF) as u64;
+                let sector = (regs.cx & 0x3F) as u8;
+                let cyl = ((regs.cx >> 8) & 0xFF) | (((regs.cx >> 6) & 0x03) << 8);
+                let head = (regs.dx >> 8) as u8;
+                let Some(lba) = self.disk.lba(cyl, head, sector) else {
+                    return fail_ah(regs, DISK_STATUS_SECTOR_NOT_FOUND);
+                };
+                match verify_sectors(disk, lba, count) {
+                    Ok(()) => {
+                        set_ah(regs, DISK_STATUS_OK);
+                        Completion::OK
+                    }
+                    Err(status) => fail_ah(regs, status),
+                }
+            }
             0x05 => {
                 let Some(_hard) = drive_kind(regs.dx as u8) else {
                     return fail_ah(regs, DISK_STATUS_MEDIA_NOT_FOUND);
@@ -935,6 +958,28 @@ impl BiosState {
                     return fail_ah(regs, DISK_STATUS_MEDIA_NOT_FOUND);
                 };
                 set_ah(regs, if hard { 3 } else { 2 });
+                Completion::OK
+            }
+            0x16 => {
+                // Detect disk change. The modelled medium never changes
+                // underneath the guest, so a known drive reports "no change"
+                // instead of the "general failure" DOS shows for an
+                // unsupported service on removable media.
+                let Some(_hard) = drive_kind(regs.dx as u8) else {
+                    return fail_ah(regs, DISK_STATUS_MEDIA_NOT_FOUND);
+                };
+                regs.ax &= 0xFF00;
+                set_ah(regs, DISK_STATUS_OK);
+                Completion::OK
+            }
+            0x17 => {
+                // Set DASD type. The medium type is fixed by the modelled drive
+                // (1.44 MB floppy), so the request is accepted as a no-op; DOS
+                // uses it before formatting a fixed disk.
+                let Some(_hard) = drive_kind(regs.dx as u8) else {
+                    return fail_ah(regs, DISK_STATUS_MEDIA_NOT_FOUND);
+                };
+                set_ah(regs, DISK_STATUS_OK);
                 Completion::OK
             }
             0x41 => {
@@ -1210,6 +1255,23 @@ fn drive_kind(drive: u8) -> Option<bool> {
 /// Computes a real-mode linear address from a segment and an offset.
 pub const fn linear_address(segment: u16, offset: u16) -> u32 {
     (segment as u32) * 16 + offset as u32
+}
+
+/// Checks that `count` sectors starting at `lba` exist on the medium.
+///
+/// `INT 13h AH=04h` verifies addresses without transferring data: the synthetic
+/// controller has no latent media errors, so an in-range request succeeds. DOS
+/// issues it after each write when verification is enabled, and formatters use
+/// it to check the volume they just created.
+fn verify_sectors(disk: &mut dyn BiosDisk, lba: u64, count: u64) -> Result<(), u8> {
+    let total = disk.sectors();
+    for index in 0..count {
+        let current = lba.checked_add(index).ok_or(DISK_STATUS_SECTOR_NOT_FOUND)?;
+        if current >= total {
+            return Err(DISK_STATUS_SECTOR_NOT_FOUND);
+        }
+    }
+    Ok(())
 }
 
 /// Reads one sector after another into a guest buffer.

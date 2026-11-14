@@ -1209,10 +1209,81 @@ fn disk_seek_reset_and_buffer_services_complete() {
 }
 
 #[test]
+fn disk_verify_accepts_in_range_sectors_without_transferring_data() {
+    let mut fixture = Fixture::new();
+    fixture.mem.fill(0x8000, 512, 0x33);
+    let mut regs = BiosRegisters::new();
+    regs.ax = 0x0403; // AH=04h verify, three sectors
+    regs.cx = 0x0002; // cylinder 0, sector 2 -> LBA 1
+    regs.es = 0;
+    regs.bx = 0x8000;
+    assert_eq!(fixture.call(0x13, &mut regs), BiosOutcome::Handled);
+    assert!(!fixture.carry());
+    assert_eq!(ah(&regs), DISK_STATUS_OK);
+    // Verification neither writes the medium nor touches the guest buffer.
+    assert!(fixture.disk.writes.is_empty());
+    assert!(fixture.mem.data[0x8000..0x8000 + 512]
+        .iter()
+        .all(|byte| *byte == 0x33));
+}
+
+#[test]
+fn disk_verify_past_the_medium_reports_sector_not_found() {
+    let mut fixture = Fixture::new();
+    let mut regs = BiosRegisters::new();
+    regs.ax = 0x0402; // verify two sectors
+    // Last sector of the floppy: LBA 2879, so the second one is out of range.
+    regs.cx = 0x4F12; // cylinder 79, sector 18
+    regs.dx = 0x0100; // head 1, drive 0
+    assert_eq!(fixture.call(0x13, &mut regs), BiosOutcome::Handled);
+    assert!(fixture.carry());
+    assert_eq!(ah(&regs), DISK_STATUS_SECTOR_NOT_FOUND);
+}
+
+#[test]
+fn disk_verify_on_an_unknown_drive_reports_media_not_found() {
+    let mut fixture = Fixture::new();
+    let mut regs = BiosRegisters::new();
+    regs.ax = 0x0401;
+    regs.cx = 0x0001;
+    regs.dx = 0x0001; // drive 1 is not modelled
+    assert_eq!(fixture.call(0x13, &mut regs), BiosOutcome::Handled);
+    assert!(fixture.carry());
+    assert_eq!(ah(&regs), DISK_STATUS_MEDIA_NOT_FOUND);
+}
+
+#[test]
+fn disk_change_line_and_dasd_type_are_accepted() {
+    for function in [0x1600u16, 0x1700] {
+        let mut fixture = Fixture::new();
+        let mut regs = BiosRegisters::new();
+        regs.ax = function;
+        regs.dx = 0x0000; // floppy
+        assert_eq!(fixture.call(0x13, &mut regs), BiosOutcome::Handled);
+        assert!(!fixture.carry(), "function {function:#06x}");
+        assert_eq!(ah(&regs), DISK_STATUS_OK);
+        if function == 0x1600 {
+            // "No change" is reported in AL.
+            assert_eq!(regs.ax & 0xFF, 0);
+        }
+    }
+    // An absent drive is still an error for both services.
+    for function in [0x1600u16, 0x1700] {
+        let mut fixture = Fixture::new();
+        let mut regs = BiosRegisters::new();
+        regs.ax = function;
+        regs.dx = 0x0002;
+        assert_eq!(fixture.call(0x13, &mut regs), BiosOutcome::Handled);
+        assert!(fixture.carry(), "function {function:#06x}");
+        assert_eq!(ah(&regs), DISK_STATUS_MEDIA_NOT_FOUND);
+    }
+}
+
+#[test]
 fn disk_unknown_function_reports_invalid_function() {
     let mut fixture = Fixture::new();
     let mut regs = BiosRegisters::new();
-    regs.ax = 0x0400;
+    regs.ax = 0x0600; // AH=06h is not modelled
     assert_eq!(fixture.call(0x13, &mut regs), BiosOutcome::Handled);
     assert!(fixture.carry());
     assert_eq!(ah(&regs), DISK_STATUS_INVALID_FUNCTION);
