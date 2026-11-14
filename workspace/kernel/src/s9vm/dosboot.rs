@@ -262,6 +262,14 @@ pub struct DosReport {
     pub io_exits: u32,
     /// BIOS interrupts forwarded to the firmware model.
     pub bios_calls: u32,
+    /// Per-vector BIOS call counts, indexed by `vector & 0x1F`.
+    ///
+    /// The guest's handler ownership shows in these counts: while FreeDOS has
+    /// its own keyboard/timer handlers installed, `INT 16h`/`INT 8` reach the
+    /// firmware stub only if the guest still chains to it (or never replaced
+    /// it), which decides whether host keys must go through the 8042 or the
+    /// firmware keyboard buffer.
+    pub vector_calls: [u32; 32],
     /// Guest `hlt` exits observed.
     pub halt_exits: u32,
     /// Capacity of the world's block device, in 512-byte sectors.
@@ -299,6 +307,25 @@ pub struct DosReport {
 }
 
 impl DosReport {
+    /// Compact `08=… 09=… 10=… 13=… 15=… 16=… 1a=…` view of the BIOS calls.
+    ///
+    /// A dominant `16` after the shell prompt proves the guest still calls the
+    /// firmware keyboard service (keys then belong in the firmware buffer),
+    /// while a near-zero `16` means the guest owns the keyboard path (keys go
+    /// through the 8042 and IRQ1).
+    pub fn vector_summary(&self) -> alloc::string::String {
+        use alloc::format;
+        let mut out = alloc::string::String::new();
+        for vector in [0x08u8, 0x09, 0x10, 0x13, 0x15, 0x16, 0x1A] {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            let count = self.vector_calls[usize::from(vector & 0x1F)];
+            out.push_str(&format!("{:02x}={}", vector, count));
+        }
+        out
+    }
+
     /// Creates an empty report for a run over `disk_sectors` sectors.
     fn new(disk_sectors: u64) -> Self {
         Self {
@@ -308,6 +335,7 @@ impl DosReport {
             total_exits: 0,
             io_exits: 0,
             bios_calls: 0,
+            vector_calls: [0; 32],
             halt_exits: 0,
             disk_sectors,
             entry: u64::from(biosrom::BOOT_SECTOR_GPA),
@@ -760,6 +788,7 @@ fn run_dos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError>
                     write_bios_registers(&mut vcpu, &registers);
                     write_scratch(&mut memory, &registers)?;
                     report.bios_calls += 1;
+                    report.vector_calls[usize::from(vector & 0x1F)] += 1;
                 }
                 // SAFETY: block loaded, guest inactive: advance past the I/O
                 // instruction so the resume does not repeat it.
@@ -2530,6 +2559,7 @@ fn run_freedos_in_world(
                         break;
                     }
                     report.bios_calls += 1;
+                    report.vector_calls[usize::from(vector & 0x1F)] += 1;
                     // Trace the first calls: the FreeDOS boot sector prints
                     // "Error!" after a failed INT 13h, and the exact AH/CHS
                     // request plus the returned AX is what identifies the

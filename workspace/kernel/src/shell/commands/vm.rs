@@ -389,6 +389,7 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
                     report.scancodes_typed,
                     report.disk_sectors
                 );
+                shell_println!("vm: BIOS vectors: {}", report.vector_summary());
                 shell_println!("vm: guest text:\n{}", report.text.trim_end());
                 return Ok(());
             }
@@ -408,6 +409,7 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
                     report.scancodes_typed,
                     report.disk_sectors
                 );
+                shell_println!("vm: BIOS vectors: {}", report.vector_summary());
                 shell_println!("vm: guest text:\n{}", report.text.trim_end());
                 return Ok(());
             }
@@ -430,6 +432,7 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
                     "vm: the attempt was stopped by its time/exit budget (`vm test <1..10>` \
                      for a longer run); no world is left behind."
                 );
+                shell_println!("vm: BIOS vectors: {}", report.vector_summary());
                 if !report.text.is_empty() {
                     shell_println!("vm: guest text so far:\n{}", report.text.trim_end());
                 }
