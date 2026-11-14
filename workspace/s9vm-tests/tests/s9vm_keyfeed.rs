@@ -55,7 +55,7 @@ fn feed_keeps_one_buffer_entry_per_key_with_its_ascii() {
 fn feed_translates_an_extended_key_for_both_consumers() {
     // `0x80` is the kernel's up-arrow byte: the 8042 sees the `0xE0`-prefixed
     // make/break pair and the firmware buffer sees the scan code alone.
-    let mut feed = KeyboardFeed::new(&[0x80]);
+    let mut feed = KeyboardFeed::new(&[strat9_keymap::KEY_UP]);
     let mut controller = KeyboardController::new();
     assert_eq!(feed.fill(&mut controller, 8), 4);
     let mut sequence = Vec::new();
@@ -64,7 +64,7 @@ fn feed_translates_an_extended_key_for_both_consumers() {
     }
     assert_eq!(sequence, alloc::vec![0xE0, 0x48, 0xE0, 0xC8]);
 
-    let mut feed = KeyboardFeed::new(&[0x80]);
+    let mut feed = KeyboardFeed::new(&[strat9_keymap::KEY_UP]);
     let mut state = BiosState::new();
     assert_eq!(feed.fill_bios(&mut state, 8), 1);
     assert_eq!(state.keyboard.pop_front(), Some((0x48, 0)));

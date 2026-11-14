@@ -499,23 +499,15 @@ fn print_dos_performance(report: &crate::s9vm::dosboot::DosReport) {
     }
 }
 
-/// Prints the lines of `current` that differ from `previous`.
+/// Prints the lines of `current` that have to appear after `previous`.
 ///
-/// The DOS screen is a fixed text grid, so comparing line by line keeps the
-/// interactive console readable: after a `DIR`, the prompt and the listing are
-/// printed instead of the whole 25-line screen.
+/// The diff lives in [`super::screendiff`] because a positional comparison is
+/// wrong as soon as the guest scrolls: the DOS prompt is on the last row, so
+/// pressing Enter scrolls the screen and every row index shifts. The diff
+/// recognises that case and prints only the new bottom lines.
 fn print_screen_changes(previous: &str, current: &str) {
-    let mut before = previous.lines();
-    for line in current.lines() {
-        let old = before.next().unwrap_or("");
-        if old == line {
-            continue;
-        }
-        let trimmed = line.trim_end();
-        if trimmed.is_empty() {
-            continue;
-        }
-        shell_println!("{trimmed}");
+    for line in super::screendiff::changed_lines(previous, current) {
+        shell_println!("{line}");
     }
 }
 

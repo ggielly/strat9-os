@@ -22,5 +22,9 @@ publish = false
 [dependencies]
 strat9-abi = { path = "../abi" }
 strat9-elf-core = { path = "../elf-core" }
+# The s9vm keyboard model maps the kernel's special-key bytes (`KEY_UP`, ...)
+# to PS/2 extended scancodes, and those constants live in the shared keymap
+# crate both the kernel and the userspace input server use.
+strat9-keymap = { path = "../components/keymap" }
 
 [workspace]

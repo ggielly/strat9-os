@@ -300,11 +300,18 @@ fn extended_keys_produce_prefixed_scancodes_and_a_scan_only_buffer_entry() {
     // sends them as an `0xE0` prefix plus the code, and the BIOS keyboard
     // buffer stores the scan code with a zero ASCII byte.
     let mut codes = alloc::vec::Vec::new();
-    let pair = keyboard::keystroke_for(0x80, &mut codes).expect("up arrow is typeable");
+    let pair = keyboard::keystroke_for(strat9_keymap::KEY_UP, &mut codes)
+        .expect("up arrow is typeable");
     assert_eq!(pair, (0x48, 0));
     assert_eq!(codes, alloc::vec![0xE0, 0x48, 0xE0, 0xC8]);
 
-    for (key, scan) in [(0x81u8, 0x50u8), (0x82, 0x4B), (0x83, 0x4D), (0x84, 0x47), (0x85, 0x4F)] {
+    for (key, scan) in [
+        (strat9_keymap::KEY_DOWN, 0x50u8),
+        (strat9_keymap::KEY_LEFT, 0x4B),
+        (strat9_keymap::KEY_RIGHT, 0x4D),
+        (strat9_keymap::KEY_HOME, 0x47),
+        (strat9_keymap::KEY_END, 0x4F),
+    ] {
         let mut codes = alloc::vec::Vec::new();
         assert_eq!(keyboard::keystroke_for(key, &mut codes), Some((scan, 0)));
         assert_eq!(codes.len(), 4, "make and break of key {key:#04x}");

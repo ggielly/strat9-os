@@ -32,6 +32,7 @@ version = "0.1.0"
 dependencies = [
  "strat9-abi",
  "strat9-elf-core",
+ "strat9-keymap",
 ]
 
 [[package]]
@@ -51,6 +52,10 @@ dependencies = [
 
 [[package]]
 name = "strat9-elf-core"
+version = "0.1.0"
+
+[[package]]
+name = "strat9-keymap"
 version = "0.1.0"
 
 [[package]]
