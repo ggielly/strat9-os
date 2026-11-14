@@ -35,6 +35,7 @@ members = [
     "workspace/components/strate-wasm",
     "workspace/components/strate-webrtc",
     "workspace/components/strate-fs-ramfs",
+    "workspace/components/init-config",
     "workspace/components/strate-init",
     "workspace/components/strate-console-admin",
     "workspace/components/strate-input",

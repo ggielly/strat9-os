@@ -1,0 +1,13 @@
+[package]
+name = "init-config"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+description = "Pure, host-testable boot configuration parser, validator and planner for Strat9"
+
+[lib]
+name = "init_config"
+path = "src/lib.rs"
+
+[dependencies]
