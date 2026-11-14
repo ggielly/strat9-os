@@ -479,7 +479,7 @@ fn write_bytes(path: &str, bytes: &[u8]) -> Result<usize, ShellError> {
     written
 }
 
-/// `vm dos <open [seabios]|run [seconds] [keys=<text>]|text|close>` : live DOS session.
+/// `vm dos <open [seabios]|run [seconds] [keys=<text>]|info|text|close>` : live DOS session.
 ///
 /// The DOS world stays mapped between commands: `vm dos run` enters it for a
 /// bounded slice, `vm send <id> <text>` queues keyboard input for the next
@@ -563,6 +563,26 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
                 }
             }
         }
+        "info" | "status" => match dosboot::dos_status() {
+            Some(status) => {
+                shell_println!(
+                    "vm: DOS session on world {}: slices={} marker={} pending_keys={} \
+                     last: exits={} irq={} keys={}",
+                    status.world_id,
+                    status.slices,
+                    status.marker_seen,
+                    status.pending_keys,
+                    status.last_exits,
+                    status.last_irq,
+                    status.last_keys
+                );
+                Ok(())
+            }
+            None => {
+                shell_println!("vm: no DOS session: run `vm dos open` first");
+                Err(ShellError::ExecutionFailed)
+            }
+        },
         "text" | "screen" => match dosboot::dos_text() {
             Some(text) => {
                 shell_println!("{}", text.trim_end());
@@ -584,7 +604,7 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
         }
         _ => {
             shell_println!(
-                "Usage: vm dos <open [seabios]|run [seconds] [keys=<text>]|text|close>"
+                "Usage: vm dos <open [seabios]|run [seconds] [keys=<text>]|info|text|close>"
             );
             Err(ShellError::InvalidArguments)
         }

@@ -1640,6 +1640,33 @@ pub struct DosSession {
     bios_state: bios::BiosState,
     /// Scancodes typed by the host but not delivered to the guest yet.
     pending_keys: Vec<u8>,
+    /// Number of slices entered since the session was opened.
+    slices: u32,
+    /// Autoexec marker seen by any slice.
+    marker_seen: bool,
+    /// Notable counters of the last slice, for `vm dos info`.
+    last_exits: u32,
+    last_irq: u32,
+    last_keys: u32,
+}
+
+/// Snapshot of a live DOS session, for the shell.
+#[derive(Debug, Clone, Copy)]
+pub struct DosSessionStatus {
+    /// World holding the session.
+    pub world_id: u64,
+    /// Slices entered so far.
+    pub slices: u32,
+    /// True once the AUTOEXEC marker was observed.
+    pub marker_seen: bool,
+    /// Scancodes still waiting to be typed.
+    pub pending_keys: usize,
+    /// Guest exits of the last slice.
+    pub last_exits: u32,
+    /// Platform interrupts delivered in the last slice.
+    pub last_irq: u32,
+    /// Scancodes typed in the last slice.
+    pub last_keys: u32,
 }
 
 // SAFETY: a session is only touched by the shell task, and its control block is
@@ -1690,6 +1717,11 @@ pub fn dos_open(
             vcpu: Some(vcpu),
             bios_state: bios::BiosState::new(),
             pending_keys: Vec::new(),
+            slices: 0,
+            marker_seen: false,
+            last_exits: 0,
+            last_irq: 0,
+            last_keys: 0,
         })
     })();
     match setup {
@@ -1707,6 +1739,20 @@ pub fn dos_open(
 /// World identifier of the open session, if any.
 pub fn dos_world_id() -> Option<u64> {
     DOS_SESSION.lock().as_ref().map(|session| session.world_id)
+}
+
+/// Snapshot of the open session, if any.
+pub fn dos_status() -> Option<DosSessionStatus> {
+    let session = DOS_SESSION.lock();
+    session.as_ref().map(|session| DosSessionStatus {
+        world_id: session.world_id,
+        slices: session.slices,
+        marker_seen: session.marker_seen,
+        pending_keys: session.pending_keys.len(),
+        last_exits: session.last_exits,
+        last_irq: session.last_irq,
+        last_keys: session.last_keys,
+    })
 }
 
 /// Runs the live DOS session for one bounded slice and returns its report.
@@ -2104,6 +2150,12 @@ fn run_freedos_in_world(
                     let marker = (vcpu.guest().rax & 0xFF) as u8;
                     report.marker = Some(marker);
                     if marker == SUCCESS_MARKER && limits.stop_at_marker {
+                        // Advance past the `out` before stopping: a live
+                        // session resumes this vCPU, and leaving RIP on the
+                        // marker would replay it in the next slice.
+                        if let Err(error) = advance_past_exit(&mut vcpu, &exit) {
+                            outcome = Err(error);
+                        }
                         break;
                     }
                     // Any other marker is informational: skip the `out` and
@@ -2552,6 +2604,24 @@ fn run_freedos_in_world(
         session.vcpu = Some(vcpu);
         session.bios_state = bios_state;
         session.pending_keys = keyboard_feed.scancodes[keyboard_feed.next..].to_vec();
+        session.slices = session.slices.saturating_add(1);
+        session.marker_seen |= report.marker == Some(SUCCESS_MARKER);
+        session.last_exits = report.total_exits;
+        session.last_irq = report.interrupts_delivered;
+        session.last_keys = report.scancodes_typed;
+        // Explain a slice where the host keys never reached the guest: the
+        // two gates are the guest's own INT 9 handler and the 8259 mask.
+        if !session.pending_keys.is_empty() {
+            let owns = guest_owns_vector(&mut memory, 0x09);
+            let masked = machine.devices().pic.master().mask() & 0x02 != 0;
+            log::warn!(
+                "[s9vm] {}: {} host scancode(s) not typed (guest INT 9 owner: {}, IRQ1 masked: {})",
+                firmware.label(),
+                session.pending_keys.len(),
+                owns,
+                masked
+            );
+        }
         let _ = vm::store_machine(world_id, machine);
     }
     outcome?;
