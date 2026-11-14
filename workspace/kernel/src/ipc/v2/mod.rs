@@ -20,13 +20,16 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! Kernel core of IPC ABI v2: generation handles, endpoints, reply targets
-//! and notifications (§3–§7). Namespace, MemObject and async opcodes are out
-//! of scope and return `ENOSYS`.
+//! Kernel core of IPC ABI v2: generation handles, endpoints, reply targets,
+//! notifications, memory objects, silo quotas and async-ring operations
+//! (§3–§12). The namespace table lives in `crate::namespace::v2`.
 
+pub mod async_ops;
 pub mod endpoint;
 pub mod handle;
+pub mod memobj;
 pub mod notif;
+pub mod quota;
 pub mod selftest;
 
 pub use handle::{Entry, HandleTable, ObjRef, MAX_HANDLES};

@@ -230,6 +230,28 @@ fn dispatch_one(
             Ok(DispatchOutcome::InFlight)
         }
 
+        // IPC ABI v2 (13–17): endpoint send/call/recv/reply, notification wait.
+        //   sqe.off  = handle, sqe.addr = MsgBuf / MsgCall / *u64,
+        //   sqe.len  = descriptor size (versions it).
+        // Runs in the ring owner's context (SYS_ASYNC_ENTER is owner-only).
+        op @ 13..=17 => {
+            let task = crate::process::current_task_clone().ok_or(EIO)?;
+            match crate::ipc::v2::async_ops::submit(
+                &task.process,
+                ring_id,
+                op,
+                sqe.off,
+                sqe.addr,
+                sqe.len,
+                sqe.user_data,
+            )? {
+                crate::ipc::v2::async_ops::Submitted::Completed => {
+                    Ok(DispatchOutcome::CompletedInline)
+                }
+                crate::ipc::v2::async_ops::Submitted::InFlight => Ok(DispatchOutcome::InFlight),
+            }
+        }
+
         // Storage read : submit async AHCI/NVMe read, CQE arrives via the IRQ
         op if op == AsyncOp::StorageRead as u8 => {
             let port_idx = sqe.fd as u8;

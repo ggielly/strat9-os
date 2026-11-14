@@ -26,7 +26,7 @@
 //! to create and manage silos. Policy lives in userspace (silo admin).
 
 mod memory_account;
-pub(crate) use memory_account::SiloMemoryAccount;
+pub(crate) use memory_account::{IpcResource, SiloMemoryAccount};
 
 use crate::{
     capability::{get_capability_manager, CapId, CapPermissions, Capability, ResourceType},
@@ -3198,6 +3198,25 @@ pub fn enforce_registry_bind_for_current_task() -> Result<(), SyscallError> {
 }
 
 /// Performs the enforce registry lookup for current task operation.
+/// Whether the calling task may hold a foreign `EP_MINT` right (§8 of the IPC
+/// v2 spec): silo admin, a task outside any silo (kernel/boot), or a silo with
+/// `RegistryMode::PROXY` that is not sandboxed.
+pub fn current_task_may_proxy() -> bool {
+    let Some(task) = current_task_clone() else {
+        return true;
+    };
+    if is_admin_task(&task) {
+        return true;
+    }
+    let mgr = SILO_MANAGER.lock();
+    let Some(silo_id) = mgr.silo_for_task(task.id) else {
+        return true;
+    };
+    mgr.get(silo_id)
+        .map(|silo| !silo.sandboxed && silo.mode.registry.contains(RegistryMode::PROXY))
+        .unwrap_or(false)
+}
+
 pub fn enforce_registry_lookup_for_current_task() -> Result<(), SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     if is_admin_task(&task) {

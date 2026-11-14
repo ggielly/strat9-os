@@ -777,6 +777,22 @@ pub fn block_current_task() {
 /// the task's `wake_pending` flag so that `block_current_task()` will see
 /// the pending wakeup and return immediately without actually blocking.
 pub fn wake_task(id: TaskId) -> bool {
+    wake_task_with(id, false)
+}
+
+/// Like [`wake_task`], but place the woken task on the **calling** CPU when
+/// its affinity allows it (directed wakeup).
+///
+/// Used by the IPC v2 call fast path (N3, spec §10): the server is enqueued
+/// on the caller's CPU, without an IPI, and runs as soon as the caller
+/// blocks waiting for the reply; the reply wakes the caller back the same
+/// way. This is a placement hint, not a scheduling-context donation: the
+/// local scheduler class still decides when the woken task runs.
+pub fn wake_task_here(id: TaskId) -> bool {
+    wake_task_with(id, true)
+}
+
+fn wake_task_with(id: TaskId, here: bool) -> bool {
     let saved_flags = save_flags_and_cli();
 
     // --- Primary path: task is in BLOCKED_TASKS ---
@@ -790,10 +806,20 @@ pub fn wake_task(id: TaskId) -> bool {
         if let Some(task) = blocked.remove(&id) {
             task.set_state(TaskState::Ready);
 
-            // --- CPU placement: prefer last_cpu, then home_cpu ---
+            // --- CPU placement: directed (this CPU), else last_cpu, then home_cpu ---
             let last = task.last_cpu.load(core::sync::atomic::Ordering::Relaxed);
             let home = task.home_cpu.load(core::sync::atomic::Ordering::Relaxed);
-            let cpu_index = super::placement_cpu(last, home);
+            let here_cpu = current_cpu_index();
+            let affinity = task
+                .affinity_mask
+                .load(core::sync::atomic::Ordering::Relaxed);
+            let here_allowed =
+                affinity == 0 || (here_cpu < 64 && affinity & (1u64 << here_cpu) != 0);
+            let cpu_index = if here && here_allowed {
+                here_cpu
+            } else {
+                super::placement_cpu(last, home)
+            };
 
             let class = {
                 use crate::process::sched::SchedClassId;

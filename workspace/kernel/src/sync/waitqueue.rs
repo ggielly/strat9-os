@@ -256,6 +256,23 @@ impl WaitQueue {
         outcome
     }
 
+    /// Like [`wake_one`](Self::wake_one), but enqueue the woken task on the
+    /// calling CPU when its affinity allows (directed wakeup, IPC v2 N3).
+    pub fn wake_one_here(&self) -> bool {
+        loop {
+            let id = {
+                let mut waiters = self.waiters.lock();
+                if waiters.is_empty() {
+                    return false;
+                }
+                waiters.remove(0)
+            };
+            if crate::process::wake_task_here(id) {
+                return true;
+            }
+        }
+    }
+
     /// Wake the first waiting task (FIFO order).
     ///
     /// Returns `true` if a task was successfully woken, `false` if the queue

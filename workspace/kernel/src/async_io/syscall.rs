@@ -123,24 +123,46 @@ pub fn sys_async_enter(
     // Drain up to `min_complete` completions.  The caller wants at least
     // that many, so if fewer are available we block below.  Passing  `min_complete` as the "max" argument to `drain_completions` is correct.
     // We never need more than `min_complete` in one round and the blocking path will loop via `wait_until` if needed.
+    // Retry parked IPC v2 operations in this (owner) context; any that
+    // complete post their CQE before the drain below.
+    let task = crate::process::current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    crate::ipc::v2::async_ops::poll(&task.process, ring_id);
+
     let mut completed = complete::drain_completions(ring_id, min_complete);
 
-    // If caller asked for more completions than available, block and wait
-    if completed == 0 && min_complete > 0 {
-        completed = ring.wq.wait_until(|| {
+    // If caller asked for more completions than available, block and wait.
+    // An IPC v2 event (`ipc_kick`) ends the wait without a completion so the
+    // parked operations are retried here, outside the wait-queue lock.
+    while completed == 0 && min_complete > 0 {
+        let woke = ring.wq.wait_until(|| {
             if ring.destroyed.load(core::sync::atomic::Ordering::Acquire) != 0 {
-                return Some(0);
+                return Some(Some(0));
             }
 
             crate::hardware::storage::ahci::flush_deferred_async_read_completions(ring_id);
 
             let ready = complete::drain_completions(ring_id, min_complete);
             if ready > 0 {
-                Some(ready)
-            } else {
-                None
+                return Some(Some(ready));
             }
+            if ring.ipc_kick.swap(0, core::sync::atomic::Ordering::AcqRel) != 0 {
+                return Some(None);
+            }
+            if crate::process::signal::has_pending_signals() {
+                return Some(Some(0));
+            }
+            None
         });
+        match woke {
+            Some(n) => {
+                completed = n;
+                break;
+            }
+            None => {
+                crate::ipc::v2::async_ops::poll(&task.process, ring_id);
+                completed = complete::drain_completions(ring_id, min_complete);
+            }
+        }
     }
 
     Ok(completed as u64)

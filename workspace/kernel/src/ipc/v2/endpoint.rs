@@ -22,7 +22,11 @@
 
 //! Endpoint and reply-target objects (IPC ABI v2, §5 and §6).
 
-use super::{handle::ObjRef, notif::Notification};
+use super::{
+    handle::ObjRef,
+    notif::Notification,
+    quota::{InFlightCharge, IpcCharge},
+};
 use crate::{
     process::TaskId,
     sync::{SpinLock, WaitQueue},
@@ -31,7 +35,8 @@ use crate::{
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use strat9_abi::ipc_v2::{
-    CapXfer, MsgBuf, MsgHeader, EP_DEFAULT_QUEUE_DEPTH, EP_RECV, IPC_MAX_CAPS, MSG_KIND_NOTIF,
+    CapXfer, MsgBuf, MsgHeader, EP_DEFAULT_QUEUE_DEPTH, EP_FLAG_FASTPATH, EP_RECV, IPC_MAX_CAPS,
+    MSG_KIND_NOTIF,
 };
 
 /// Monotonic endpoint id. Internal only; never exposed to userspace.
@@ -58,6 +63,9 @@ pub struct InFlight {
     pub caps: Vec<OwnedCap>,
     /// Reply target when `header.kind == MSG_KIND_CALL`.
     pub call: Option<Arc<CallSlot>>,
+    /// Sender-silo quota (queued bytes + in-flight handles), released when
+    /// the message leaves the queue or is destroyed (§12).
+    pub charge: InFlightCharge,
 }
 
 /// Endpoint state protected by the endpoint lock.
@@ -91,6 +99,8 @@ pub struct Endpoint {
     pub send_waitq: WaitQueue,
     /// Receivers blocked on an empty queue.
     pub recv_waitq: WaitQueue,
+    /// Creator-silo endpoint count (§12), released with the object.
+    _charge: Option<IpcCharge>,
 }
 
 /// Call lifecycle (§6.2).
@@ -122,6 +132,8 @@ pub struct CallSlot {
     pub endpoint_id: u64,
     /// Response buffers validated at call time.
     pub resp: MsgBuf,
+    /// N3 directed wakeup (§10): wake the caller on the replier's CPU.
+    pub fastpath: core::sync::atomic::AtomicBool,
 }
 
 impl CallSlot {
@@ -135,6 +147,7 @@ impl CallSlot {
             caller: SpinLock::new(caller),
             endpoint_id,
             resp,
+            fastpath: core::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -157,6 +170,9 @@ pub struct RecvItem {
     pub data: Vec<u8>,
     /// Transferable capabilities (not yet installed).
     pub caps: Vec<OwnedCap>,
+    /// Sender quota of the dequeued message. Carried out of the endpoint
+    /// lock so its release (which wakes blocked senders) runs unlocked.
+    pub charge: InFlightCharge,
     /// Reply target for `MSG_KIND_CALL`.
     pub call: Option<Arc<CallSlot>>,
 }
@@ -184,7 +200,12 @@ pub struct PeekPlan {
 
 impl Endpoint {
     /// Create an endpoint.
-    pub fn create(depth: u32, flags: u16, owner_silo: u32) -> Result<Arc<Endpoint>, SyscallError> {
+    pub fn create(
+        depth: u32,
+        flags: u16,
+        owner_silo: u32,
+        charge: Option<IpcCharge>,
+    ) -> Result<Arc<Endpoint>, SyscallError> {
         let depth = if depth == 0 {
             EP_DEFAULT_QUEUE_DEPTH
         } else {
@@ -208,6 +229,7 @@ impl Endpoint {
             recv_refs: AtomicU32::new(1),
             send_waitq: WaitQueue::new(),
             recv_waitq: WaitQueue::new(),
+            _charge: charge,
         }))
     }
 
@@ -231,6 +253,9 @@ impl Endpoint {
         nonblock: bool,
         deadline_ns: Option<u64>,
     ) -> Result<(), SyscallError> {
+        // N3 (§10): a call on a FASTPATH endpoint wakes the server on this
+        // CPU, so it runs as soon as the caller blocks for the reply.
+        let directed = msg.call.is_some() && u32::from(self.flags) & EP_FLAG_FASTPATH != 0;
         let mut msg = Some(msg);
         let outcome = self.send_waitq.wait_until_deadline(deadline_ns, || {
             let mut state = self.state.lock();
@@ -253,9 +278,17 @@ impl Endpoint {
             }
             None
         });
+        // On failure the message (with its quota charge) drops here, outside
+        // every lock.
+        drop(msg);
         let outcome = outcome.unwrap_or(Err(SyscallError::TimedOut));
         if outcome.is_ok() {
-            self.recv_waitq.wake_one();
+            if directed {
+                self.recv_waitq.wake_one_here();
+            } else {
+                self.recv_waitq.wake_one();
+            }
+            super::async_ops::notify_event();
         }
         outcome
     }
@@ -299,6 +332,7 @@ impl Endpoint {
                     data: Vec::new(),
                     caps: Vec::new(),
                     call: None,
+                    charge: InFlightCharge::default(),
                 })));
             }
             if let Some(head) = state.queue.front() {
@@ -324,6 +358,7 @@ impl Endpoint {
                     data: item.data,
                     caps: item.caps,
                     call: item.call,
+                    charge: item.charge,
                 })));
             }
             if !state.alive {
@@ -344,6 +379,7 @@ impl Endpoint {
             // A queue slot may have been freed: let one blocked sender retry.
             // Woken outside the receive wait-queue lock (no nested wakes).
             self.send_waitq.wake_one();
+            super::async_ops::notify_event();
         }
         outcome
     }
@@ -404,6 +440,7 @@ impl Endpoint {
         self.send_waitq.wake_all();
         self.recv_waitq.wake_all();
         super::cancel_calls_for_endpoint(self.id);
+        super::async_ops::notify_event();
     }
 
     /// Bind a notification to this endpoint.
@@ -448,6 +485,7 @@ pub fn cancel_call(slot: &CallSlot) {
     }
     drop(state);
     slot.waitq.wake_all();
+    super::async_ops::notify_event();
 }
 
 /// Caller-side cancellation after `EINTR` / `ETIMEDOUT`.
@@ -491,7 +529,13 @@ pub fn deliver_reply(slot: &CallSlot, gen: u32, payload: ReplyPayload) -> Result
             *slot.reply.lock() = Some(payload);
             *state = CallState::Done;
             drop(state);
-            slot.waitq.wake_one();
+            if slot.fastpath.load(Ordering::Acquire) {
+                // N3 (§10): resume the caller on the replier's CPU.
+                slot.waitq.wake_one_here();
+            } else {
+                slot.waitq.wake_one();
+            }
+            super::async_ops::notify_event();
             Ok(())
         }
         _ => Err(SyscallError::Pipe),

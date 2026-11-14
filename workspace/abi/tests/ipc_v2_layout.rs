@@ -277,3 +277,20 @@ fn emsgsize_is_90_and_unique() {
         assert_ne!(EMSGSIZE, e, "EMSGSIZE collides with errno {e}");
     }
 }
+
+#[test]
+fn memobj_and_object_type_constants_are_pinned() {
+    use strat9_abi::ipc_v2::*;
+    assert_eq!(OBJ_ENDPOINT, 1);
+    assert_eq!(OBJ_REPLY, 2);
+    assert_eq!(OBJ_NOTIFICATION, 3);
+    assert_eq!(OBJ_MEMOBJ, 4);
+    // POSIX-compatible protection bits.
+    assert_eq!(
+        (MEMOBJ_PROT_READ, MEMOBJ_PROT_WRITE, MEMOBJ_PROT_EXEC),
+        (1, 2, 4)
+    );
+    assert_eq!(MEMOBJ_MAX_SIZE, 64 * 1024 * 1024);
+    // MemObject rights live in the type-specific byte (§3.2).
+    assert_eq!(MEM_READ | MEM_WRITE | MEM_EXEC | MEM_MAP, 0xF00);
+}
