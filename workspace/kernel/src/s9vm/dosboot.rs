@@ -1305,8 +1305,19 @@ impl KeyboardFeed {
     }
 }
 
-/// True when the guest has installed its own handler for `vector`.
+/// Points the `INT 9` vector at a synthetic guest handler.
 ///
+/// The dry selftest uses it to simulate "DOS installed its keyboard driver":
+/// only then may host keys be typed into the 8042.
+fn claim_int9_vector(memory: &mut WorldMemory) -> bool {
+    let entry = biosrom::IVT_BASE + 4 * 0x09;
+    let mut bytes = [0u8; 4];
+    bytes[..2].copy_from_slice(&0x5678u16.to_le_bytes());
+    bytes[2..].copy_from_slice(&0x1234u16.to_le_bytes());
+    biosrom::RomMemory::write(memory, entry, &bytes)
+}
+
+/// True when the guest has installed its own handler for `vector`.
 /// The firmware ROM stub is the initial owner of every serviced vector; the
 /// first time the guest rewrites the IVT entry it owns the vector from then on.
 fn guest_owns_vector(memory: &mut WorldMemory, vector: u8) -> bool {
@@ -1335,26 +1346,39 @@ fn pump_dos_interrupts(
     feed: &mut KeyboardFeed,
     report: &mut DosReport,
 ) -> Result<bool, DosError> {
-    // Keyboard: type only when the guest's own `INT 9` handler is installed and
-    // `IRQ1` is unmasked; the guest may reprogram the mask at any time.
-    if feed.remaining() != 0
-        && guest_owns_vector(memory, 0x09)
-        && devices.pic.master().mask() & 0x02 == 0
-    {
-        report.scancodes_typed += feed.fill(&mut devices.keyboard, 8) as u32;
-    }
-    // `IRQ1` follows the controller output buffer: a real 8042 keeps the line
-    // high while a scancode waits to be read.
-    if devices.keyboard.has_scancode() {
-        devices.pic.raise(1);
-    } else {
-        devices.pic.lower(1);
-    }
+    report.scancodes_typed += service_keyboard(devices, memory, feed);
     if deliver_legacy_interrupt(vcpu, devices) {
         report.interrupts_delivered += 1;
         return Ok(true);
     }
     Ok(false)
+}
+
+/// Types the next host keys when the guest is ready for them.
+///
+/// Keys are handed to the 8042 only once the guest installed its own `INT 9`
+/// handler and left `IRQ1` unmasked: before that the guest is still probing the
+/// controller and could mistake a scancode for a command reply. `IRQ1` then
+/// follows the controller output buffer, as on a real 8042. Returns how many
+/// scancodes were accepted.
+fn service_keyboard(
+    devices: &mut emulate::Devices,
+    memory: &mut WorldMemory,
+    feed: &mut KeyboardFeed,
+) -> u32 {
+    let mut typed = 0;
+    if feed.remaining() != 0
+        && guest_owns_vector(memory, 0x09)
+        && devices.pic.master().mask() & 0x02 == 0
+    {
+        typed = feed.fill(&mut devices.keyboard, 8) as u32;
+    }
+    if devices.keyboard.has_scancode() {
+        devices.pic.raise(1);
+    } else {
+        devices.pic.lower(1);
+    }
+    typed
 }
 
 /// Advances the guest RIP past an exit that was not consumed.
@@ -1979,6 +2003,36 @@ pub fn run_freedos_session_dry(caps: &HwCaps) -> Result<(), DosError> {
         if dos_text().is_none() {
             return Err(DosError::BadExit("VGA text unavailable"));
         }
+        // Keyboard gating of a real slice: host keys must not reach the 8042
+        // while the guest still points INT 9 at the firmware stub, and must be
+        // typed (with IRQ1 latched) once the guest owns the vector and left
+        // the line unmasked.
+        let mut machine = vm::take_machine(world_id).ok_or(DosError::VmFail(7))?;
+        let mut memory = WorldMemory::new(world_id);
+        let mut feed = KeyboardFeed::new(b"dir\n");
+        let typed_early = service_keyboard(machine.devices_mut(), &mut memory, &mut feed);
+        if typed_early != 0 {
+            let _ = vm::store_machine(world_id, machine);
+            return Err(DosError::BadExit("keys typed before the guest owned INT 9"));
+        }
+        if !claim_int9_vector(&mut memory) {
+            let _ = vm::store_machine(world_id, machine);
+            return Err(DosError::Mmu);
+        }
+        let typed_late = service_keyboard(machine.devices_mut(), &mut memory, &mut feed);
+        if typed_late == 0 {
+            let _ = vm::store_machine(world_id, machine);
+            return Err(DosError::BadExit("keys not typed after the guest owned INT 9"));
+        }
+        if !machine.devices().keyboard.has_scancode() {
+            let _ = vm::store_machine(world_id, machine);
+            return Err(DosError::BadExit("scancodes did not reach the 8042"));
+        }
+        if !machine.devices().pic.has_pending() {
+            let _ = vm::store_machine(world_id, machine);
+            return Err(DosError::BadExit("IRQ1 was not latched in the 8259"));
+        }
+        let _ = vm::store_machine(world_id, machine);
         Ok(())
     })();
     if !dos_close() {
