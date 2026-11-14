@@ -30,14 +30,15 @@ extern crate alloc;
 mod biosrom;
 
 use biosrom::{
-    bios_port, chs_to_lba, demo_boot_sector, demo_disk_image, demo_stage2, install,
-    is_supported_vector, lba_to_chs, rom_image, shared_tail_bytes, shared_tail_gpa, stub_bytes,
-    stub_gpa, stub_offset, write_bda, write_ivt, RomError, RomMemory, BDA_BASE, BDA_CHAR_HEIGHT,
-    BDA_COLUMNS, BDA_CRTC_PORT, BDA_CURSOR, BDA_EBDA_SEGMENT, BDA_EQUIPMENT, BDA_MEMORY_SIZE,
-    BDA_ROWS, BDA_TICK_COUNT, BDA_VIDEO_MODE, BIOS_PORT_BASE, BOOT_SECTOR_GPA, BOOT_STACK_TOP,
+    bios_port, chs_to_lba, demo_boot_sector, demo_disk_image, demo_stage2, fault_port,
+    fault_stub_bytes, fault_vector, install, is_supported_vector, lba_to_chs, rom_image,
+    shared_tail_bytes, shared_tail_gpa, stub_bytes, stub_gpa, stub_offset, write_all_ivt,
+    write_bda, write_ivt, RomError, RomMemory, BDA_BASE, BDA_CHAR_HEIGHT, BDA_COLUMNS,
+    BDA_CRTC_PORT, BDA_CURSOR, BDA_EBDA_SEGMENT, BDA_EQUIPMENT, BDA_MEMORY_SIZE, BDA_ROWS,
+    BDA_TICK_COUNT, BDA_VIDEO_MODE, BIOS_PORT_BASE, BOOT_SECTOR_GPA, BOOT_STACK_TOP,
     CHAR_HEIGHT_VALUE, COLUMNS_VALUE, CRTC_PORT_VALUE, CURSOR_VALUE, DEMO_BANNER, DEMO_DEBUG_PORT,
     DEMO_ERROR, DEMO_FAILURE_MARKER, DEMO_STAGE2_BANNER, DEMO_SUCCESS_MARKER, EBDA_SEGMENT_VALUE,
-    EQUIPMENT_VALUE, FLOPPY_BYTES, FLOPPY_CYLINDERS, FLOPPY_HEADS, FLOPPY_SECTORS,
+    EQUIPMENT_VALUE, FAULT_PORT_BASE, FLOPPY_BYTES, FLOPPY_CYLINDERS, FLOPPY_HEADS, FLOPPY_SECTORS,
     FLOPPY_TOTAL_SECTORS, IVT_BASE, MAX_SHARED_TAIL_LEN, MAX_STUB_LEN, MEMORY_SIZE_VALUE, ROM_BASE,
     ROM_LEN, ROM_SEGMENT, ROM_SHARED_TAIL, ROM_STUB_BASE, ROWS_VALUE, SCRATCH_GPA, SECTOR_SIZE,
     STUB_STRIDE, TAIL_FLAGS_OFFSET, TICK_COUNT_VALUE, VECTORS, VIDEO_BASE, VIDEO_MODE_VALUE,
@@ -371,17 +372,20 @@ fn shared_tail_preserves_the_caller_registers() {
         0x83, 0x4E, 0x0A, 0x40, // or word [bp+0x0A], 0x0040
         0xEB, 0x04, // jmp
         0x83, 0x66, 0x0A, 0xBF, // and word [bp+0x0A], 0xFFBF
-        0x5D, // pop bp
-        0x58, // pop ax
-        0x1F, // pop ds
+        0x1F, // pop ds (restore the caller DS)
+        0x5D, // pop bp (restore the caller BP)
+        0x58, // pop ax (restore the kernel-written AX)
         0xCF, // iret
     ];
     assert_eq!(shared_tail_bytes(), expected);
-    // Push/pop balance for every register the tail touches.
+    // Push/pop balance for every register the tail touches: the pushes are
+    // AX, BP, DS, so the pops must be DS, BP, AX (LIFO). Getting this order
+    // wrong hands the caller the wrong DS/BP/AX and a DOS boot sector then
+    // reads its data through a garbage segment.
     assert!(contains(&shared_tail_bytes(), &[0x1E]));
     assert!(contains(&shared_tail_bytes(), &[0x1F]));
     assert!(contains(&shared_tail_bytes(), &[0x83, 0xC4, 0x04, 0x50]));
-    assert!(contains(&shared_tail_bytes(), &[0x5D, 0x58, 0x1F, 0xCF]));
+    assert!(contains(&shared_tail_bytes(), &[0x1F, 0x5D, 0x58, 0xCF]));
 }
 
 #[test]
@@ -401,6 +405,62 @@ fn shared_tail_patches_the_stacked_flags_with_the_scratch_bits() {
     // The tail patches exactly one word (the stacked FLAGS) and does not
     // return through the interrupt frame more than once.
     assert_eq!(tail.iter().filter(|byte| **byte == 0xCF).count(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Catch-all stubs for vectors with no firmware service
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fault_ports_are_distinct_from_bios_ports_and_map_back() {
+    // The two ranges must not overlap: a port exit is decoded with one compare.
+    assert_eq!(FAULT_PORT_BASE, BIOS_PORT_BASE + 0x100);
+    for vector in [0x00u8, 0x01, 0x1F, 0x20, 0x7F, 0xFF] {
+        let port = fault_port(vector);
+        assert_eq!(port, FAULT_PORT_BASE + u16::from(vector));
+        assert_eq!(fault_vector(port), Some(vector));
+    }
+    assert_eq!(fault_vector(BIOS_PORT_BASE + 0x10), None);
+    assert_eq!(fault_vector(FAULT_PORT_BASE - 1), None);
+    assert_eq!(fault_vector(FAULT_PORT_BASE + 0x100), None);
+}
+
+#[test]
+fn fault_stub_reports_the_vector_and_returns_without_clobbering_dx() {
+    let stub = fault_stub_bytes(0x21);
+    // push dx; mov dx, 0xE121; out dx, al; pop dx; iret
+    assert_eq!(
+        stub,
+        vec![0x52, 0xBA, 0x21, 0xE1, 0xEE, 0x5A, 0xCF]
+    );
+    assert!(stub.len() <= usize::from(MAX_STUB_LEN));
+    // Every vector gets a distinct port, so the kernel can name the vector.
+    assert_ne!(fault_stub_bytes(0x21), fault_stub_bytes(0x22));
+}
+
+#[test]
+fn install_gives_unsupported_vectors_the_catch_all_handler() {
+    let mut mem = memory();
+    install(&mut mem, &VECTORS).expect("install");
+    for vector in [0x00u8, 0x01, 0x20, 0x2F, 0xFF] {
+        assert!(!is_supported_vector(vector));
+        let entry = IVT_BASE + u32::from(vector) * 4;
+        assert_eq!(mem.u16_at(entry), stub_offset(vector));
+        assert_eq!(mem.u16_at(entry + 2), ROM_SEGMENT);
+        let stub = fault_stub_bytes(vector);
+        assert_eq!(mem.bytes_at(stub_gpa(vector), stub.len()), &stub[..]);
+    }
+}
+
+#[test]
+fn write_all_ivt_fills_every_vector() {
+    let mut mem = memory();
+    write_all_ivt(&mut mem, &VECTORS).expect("ivt");
+    for vector in 0..=u8::MAX {
+        let entry = IVT_BASE + u32::from(vector) * 4;
+        assert_eq!(mem.u16_at(entry), stub_offset(vector), "vector {vector:#04x}");
+        assert_eq!(mem.u16_at(entry + 2), ROM_SEGMENT);
+    }
 }
 // ---------------------------------------------------------------------------
 // IVT / BDA / install
@@ -515,11 +575,18 @@ fn install_reports_write_failures() {
 }
 
 #[test]
-fn install_with_no_vectors_only_writes_the_bda() {
+fn install_with_no_vectors_still_gives_every_vector_a_handler() {
     let mut mem = memory();
     install(&mut mem, &[]).expect("install");
     assert_eq!(mem.u16_at(BDA_EQUIPMENT), EQUIPMENT_VALUE);
-    assert_eq!(mem.u16_at(IVT_BASE), 0);
+    // No serviced stub exists, so every vector points at its catch-all handler.
+    for vector in [0x00u8, 0x20, 0xFF] {
+        let entry = IVT_BASE + u32::from(vector) * 4;
+        assert_eq!(mem.u16_at(entry), stub_offset(vector));
+        assert_eq!(mem.u16_at(entry + 2), ROM_SEGMENT);
+        let stub = fault_stub_bytes(vector);
+        assert_eq!(mem.bytes_at(stub_gpa(vector), stub.len()), &stub[..]);
+    }
 }
 
 #[test]
@@ -535,11 +602,16 @@ fn rom_image_contains_the_stubs_and_the_tail() {
     let tail = shared_tail_bytes();
     let tail_offset = usize::from(ROM_SHARED_TAIL);
     assert_eq!(&rom[tail_offset..tail_offset + tail.len()], &tail[..]);
+    // Vectors with no service get a catch-all stub in the same table.
+    let fault = fault_stub_bytes(0x20);
+    let fault_offset = usize::from(stub_offset(0x20));
+    assert_eq!(&rom[fault_offset..fault_offset + fault.len()], &fault[..]);
     // Bytes outside every stub and the tail stay zero.
     assert_eq!(rom[0], 0);
-    let after_last_stub = usize::from(stub_offset(0x4A)) + usize::from(MAX_STUB_LEN);
-    assert_eq!(rom[after_last_stub], 0);
-    assert_eq!(rom[after_last_stub + 1], 0);
+    let tail_end = tail_offset + tail.len();
+    for byte in &rom[tail_end..tail_end + 16] {
+        assert_eq!(*byte, 0);
+    }
 }
 
 #[test]

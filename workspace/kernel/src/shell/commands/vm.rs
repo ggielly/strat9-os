@@ -245,18 +245,31 @@ fn cmd_send(id: u64, words: &[String]) -> Result<(), ShellError> {
 
 /// `vm test [seabios] [dry|seconds]` : boot the built-in FreeDOS 1.4 world.
 fn cmd_test(args: &[String]) -> Result<(), ShellError> {
-    let seabios = args.first().map(|arg| arg.as_str()) == Some("seabios");
-    let args = if seabios { &args[1..] } else { args };
-    let dry = args.first().map(|arg| arg.as_str()) == Some("dry");
+    // Accept the switches in any order: `vm test 5`, `vm test seabios 10` and
+    // `vm test dry` all work. An unrecognised word is reported instead of being
+    // silently dropped, which used to turn `vm test dosbox 5` into a 2 s run.
+    let mut seabios = false;
+    let mut dry = false;
+    let mut seconds: Option<u64> = None;
+    for arg in args {
+        match arg.as_str() {
+            "seabios" => seabios = true,
+            "dry" => dry = true,
+            _ => match arg.parse::<u64>() {
+                Ok(value) => seconds = Some(value),
+                Err(_) => shell_println!(
+                    "vm: ignoring unknown argument `{}` (usage: `vm test [seabios] [dry|seconds]`)",
+                    arg
+                ),
+            },
+        }
+    }
     // Operator-controlled time budget, clamped so a typo cannot freeze the
     // system for an unbounded time. The guest loop keeps interrupts disabled.
     let seconds = if dry {
         0
     } else {
-        args.first()
-            .and_then(|arg| arg.parse::<u64>().ok())
-            .unwrap_or(2)
-            .clamp(1, 10)
+        seconds.unwrap_or(2).clamp(1, 10)
     };
     // The dry run only installs the image in a world: it works without VT-x,
     // so it must not be skipped when detection reports no hardware support.
@@ -312,13 +325,15 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
             let marker = report.marker.map(|byte| byte as char);
             if booted {
                 shell_println!(
-                    "vm: test VM PASS: marker={} exits={} io={} bios={} hlt={} ext={} sectors={}",
+                    "vm: test VM PASS: marker={} exits={} io={} bios={} hlt={} ext={} int={} \
+                     sectors={}",
                     marker.unwrap_or('?'),
                     report.total_exits,
                     report.io_exits,
                     report.bios_calls,
                     report.halt_exits,
                     report.external_interrupts,
+                    report.unhandled_interrupts,
                     report.disk_sectors
                 );
                 shell_println!("vm: guest text:\n{}", report.text.trim_end());
@@ -327,13 +342,14 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
             if report.timed_out {
                 shell_println!(
                     "vm: test VM INCOMPLETE (bounded run): marker={:?} exits={} io={} bios={} \
-                     hlt={} ext={} sectors={}",
+                     hlt={} ext={} int={} sectors={}",
                     marker,
                     report.total_exits,
                     report.io_exits,
                     report.bios_calls,
                     report.halt_exits,
                     report.external_interrupts,
+                    report.unhandled_interrupts,
                     report.disk_sectors
                 );
                 shell_println!(
@@ -346,13 +362,15 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
                 return Ok(());
             }
             shell_println!(
-                "vm: test VM FAIL: marker={:?} exits={} io={} bios={} hlt={} ext={} sectors={}",
+                "vm: test VM FAIL: marker={:?} exits={} io={} bios={} hlt={} ext={} int={} \
+                 sectors={}",
                 marker,
                 report.total_exits,
                 report.io_exits,
                 report.bios_calls,
                 report.halt_exits,
                 report.external_interrupts,
+                report.unhandled_interrupts,
                 report.disk_sectors
             );
             shell_println!("vm: guest text:\n{}", report.text.trim_end());

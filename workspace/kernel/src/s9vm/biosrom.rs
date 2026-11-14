@@ -50,9 +50,19 @@
 //! | `0xF0000..0xF8000` | BIOS ROM image (`F000:0000`, [`ROM_BASE`]) |
 //!
 //! The ROM image is 32 KiB at segment `F000`. The per-vector stubs live at
-//! `F000:0100 + vector * 0x08` (six bytes each; all 256 stubs end at
-//! `F000:0900`) and the shared tail every stub jumps to is at `F000:0900`,
-//! followed by the rest of the free ROM area.
+//! `F000:0100 + vector * 0x10` (at most [`MAX_STUB_LEN`] bytes each; all 256
+//! stubs end at `F000:1100`) and the shared tail every serviced stub jumps to
+//! is at `F000:1100`, followed by the rest of the free ROM area.
+//!
+//! # Vectors with no firmware service
+//!
+//! A real firmware installs a handler for *every* vector: leaving an entry at
+//! `0000:0000` makes the CPU execute the interrupt vector table itself, so any
+//! stray `INT`, CPU exception or spurious IRQ becomes an unexplained jump to
+//! zero. [`install`] therefore fills the remaining vectors with
+//! [`fault_stub_bytes`], which reports the vector on port
+//! [`FAULT_PORT_BASE`]` + vector` and returns with `IRET`: the kernel logs the
+//! event with the faulting `CS:IP` and decides whether the run must stop.
 //!
 //! # Per-vector stub disassembly (vector `0x10`, port `0xE010`)
 //!
@@ -65,7 +75,7 @@
 //! 0x03    E9 xx xx     jmp 0x0900             shared tail (relative)
 //! ```
 //!
-//! # Shared tail disassembly (`F000:0900`, 44 bytes)
+//! # Shared tail disassembly (`F000:1100`, 46 bytes)
 //!
 //! Entry state (the `INT` instruction already pushed the interrupt frame):
 //! `[SP] = IP`, `[SP+2] = CS`, `[SP+4] = FLAGS`; `DX` holds the port chosen by
@@ -96,11 +106,15 @@
 //! 0x1E    83 4E 0A 40        or word [bp+0x0A], 0x0040
 //! 0x22    EB 04              jmp 0x28
 //! 0x24    83 66 0A BF        and word [bp+0x0A], 0xFFBF
-//! 0x28    5D                 pop bp
-//! 0x29    58                 pop ax                          restore the returned AX
-//! 0x2A    1F                 pop ds                          restore the caller DS
+//! 0x28    1F                 pop ds                          restore the caller DS
+//! 0x29    5D                 pop bp                          restore the caller BP
+//! 0x2A    58                 pop ax                          restore the kernel-written AX
 //! 0x2B    CF                 iret
 //! ```
+//!
+//! The three pushes (`AX`, `BP`, `DS`) are undone in reverse order: the caller
+//! `DS` and `BP` must come back exactly as the guest left them, because a DOS
+//! guest keeps its data in `DS` and its frame in `BP` across a BIOS call.
 //!
 //! Scratch byte semantics: bit 0 = carry flag, bit 1 = zero flag; every other
 //! bit is ignored. Only 8- and 16-bit instructions are used, so the upper halves
@@ -224,6 +238,9 @@ pub const STUB_STRIDE: u16 = 0x10;
 pub const MAX_STUB_LEN: u16 = 11;
 /// ROM offset of the shared stub tail (after the 256 per-vector stubs).
 pub const ROM_SHARED_TAIL: u16 = 0x1100;
+/// First I/O port used to report an interrupt that has no firmware service:
+/// `port = base + vector`.
+pub const FAULT_PORT_BASE: u16 = 0xE100;
 /// Upper bound on the shared tail length, so the tail stays inside the ROM.
 pub const MAX_SHARED_TAIL_LEN: u16 = 0x80;
 /// Offset inside the stacked interrupt frame where the shared tail patches the
@@ -396,7 +413,7 @@ pub fn stub_bytes(vector: u8) -> Vec<u8> {
         0x52, // push dx (drive/head for INT 13h, page for INT 10h)
         0x88, 0xE0, // mov al, ah (send the command as the OUT byte)
         0xBA, port_lo, port_hi, // mov dx, port
-        0xEE, // out dx, al
+        0xEE,    // out dx, al
         0xE9, rel[0], rel[1], // jmp shared_tail
     ]
 }
@@ -430,10 +447,46 @@ pub fn shared_tail_bytes() -> Vec<u8> {
         0x83, 0x4E, flags, 0x40, // or word [bp+flags], 0x0040
         0xEB, 0x04, // jmp done
         0x83, 0x66, flags, 0xBF, // and word [bp+flags], 0xFFBF
-        0x5D, // pop bp
-        0x58, // pop ax
-        0x1F, // pop ds
+        0x1F, // pop ds (restore the caller DS)
+        0x5D, // pop bp (restore the caller BP)
+        0x58, // pop ax (restore the kernel-written AX)
         0xCF, // iret
+    ]
+}
+
+/// I/O port that reports an unhandled guest interrupt `vector` to the host.
+pub const fn fault_port(vector: u8) -> u16 {
+    FAULT_PORT_BASE + vector as u16
+}
+
+/// Decodes a [`FAULT_PORT_BASE`] port back to the interrupt vector it reports.
+///
+/// Returns `None` for any other port, so the kernel can test a port exit with
+/// one call before treating it as a firmware event.
+pub const fn fault_vector(port: u16) -> Option<u8> {
+    if port >= FAULT_PORT_BASE && port < FAULT_PORT_BASE + 0x100 {
+        Some((port - FAULT_PORT_BASE) as u8)
+    } else {
+        None
+    }
+}
+
+/// Encodes the catch-all stub installed for a vector with no firmware service.
+///
+/// The stub saves `DX`, loads the fault port, reports the vector and returns
+/// with `IRET`. `AL` is not modified, so the guest sees no register change from
+/// an event it did not ask for; the reported port alone identifies the vector.
+/// The encoding is at most [`MAX_STUB_LEN`] bytes.
+pub fn fault_stub_bytes(vector: u8) -> Vec<u8> {
+    let port = fault_port(vector);
+    vec![
+        0x52, // push dx (the caller DX must survive)
+        0xBA,
+        (port & 0xFF) as u8,
+        (port >> 8) as u8, // mov dx, port
+        0xEE,              // out dx, al
+        0x5A,              // pop dx
+        0xCF,              // iret
     ]
 }
 
@@ -445,6 +498,23 @@ pub fn write_ivt(mem: &mut impl RomMemory, vectors: &[u8]) -> Result<(), RomErro
     for &vector in vectors {
         if !is_supported_vector(vector) {
             return Err(RomError::UnsupportedVector(vector));
+        }
+        let entry = IVT_BASE + u32::from(vector) * 4;
+        let offset = stub_offset(vector);
+        if !mem.write_u16(entry, offset) || !mem.write_u16(entry + 2, ROM_SEGMENT) {
+            return Err(RomError::WriteFailed);
+        }
+    }
+    Ok(())
+}
+
+/// Writes one IVT entry for every vector: the serviced ones point at their
+/// BIOS stub, the others at their [`fault_stub_bytes`] catch-all handler.
+pub fn write_all_ivt(mem: &mut impl RomMemory, vectors: &[u8]) -> Result<(), RomError> {
+    write_ivt(mem, vectors)?;
+    for vector in 0..=u8::MAX {
+        if vectors.contains(&vector) {
+            continue;
         }
         let entry = IVT_BASE + u32::from(vector) * 4;
         let offset = stub_offset(vector);
@@ -487,6 +557,10 @@ pub fn write_bda(mem: &mut impl RomMemory) -> Result<(), RomError> {
 /// [`shared_tail_gpa`], the IVT entries point at the per-vector stubs and the
 /// BDA/EBDA fields are initialised for a 640 KiB machine. The scratch byte is
 /// left untouched: the host sets it before each interrupt.
+///
+/// Every vector outside `vectors` receives a [`fault_stub_bytes`] handler, so a
+/// stray `INT`, a CPU exception or a spurious IRQ is reported to the kernel
+/// instead of jumping through the zeroed IVT entry at `0000:0000`.
 pub fn install(mem: &mut impl RomMemory, vectors: &[u8]) -> Result<(), RomError> {
     for &vector in vectors {
         if !is_supported_vector(vector) {
@@ -497,11 +571,20 @@ pub fn install(mem: &mut impl RomMemory, vectors: &[u8]) -> Result<(), RomError>
             return Err(RomError::WriteFailed);
         }
     }
+    for vector in 0..=u8::MAX {
+        if vectors.contains(&vector) {
+            continue;
+        }
+        let stub = fault_stub_bytes(vector);
+        if !mem.write(stub_gpa(vector), &stub) {
+            return Err(RomError::WriteFailed);
+        }
+    }
     let tail = shared_tail_bytes();
     if !mem.write(shared_tail_gpa(), &tail) {
         return Err(RomError::WriteFailed);
     }
-    write_ivt(mem, vectors)?;
+    write_all_ivt(mem, vectors)?;
     write_bda(mem)
 }
 
@@ -522,6 +605,14 @@ pub fn rom_image(vectors: &[u8]) -> Result<Vec<u8>, RomError> {
             return Err(RomError::UnsupportedVector(vector));
         }
         let stub = stub_bytes(vector);
+        let offset = stub_offset(vector) as usize;
+        rom[offset..offset + stub.len()].copy_from_slice(&stub);
+    }
+    for vector in 0..=u8::MAX {
+        if vectors.contains(&vector) {
+            continue;
+        }
+        let stub = fault_stub_bytes(vector);
         let offset = stub_offset(vector) as usize;
         rom[offset..offset + stub.len()].copy_from_slice(&stub);
     }

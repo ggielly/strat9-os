@@ -229,6 +229,12 @@ const SEABIOS_PREEMPTION_SLICE_TICKS: u32 = 1 << 20;
 /// delay loops); a guest that keeps halting after this many recoveries is
 /// stuck and the run fails.
 const MAX_HALT_RECOVERY: u32 = 10_000;
+/// Upper bound on software interrupts reported by the catch-all ROM stub.
+///
+/// A hardware interrupt or a CPU exception aborts the run on its first
+/// occurrence; a software vector (`>= 0x20`) only returns, so this bound stops a
+/// guest that keeps calling a service it never installed.
+const MAX_UNHANDLED_INTERRUPTS: u32 = 32;
 /// Capacity of the FreeDOS boot floppy, in 512-byte sectors (1.44 MiB).
 const FREEDOS_DISK_SECTORS: u64 = 2880;
 /// Offset of the OEM name inside a DOS boot sector.
@@ -274,6 +280,11 @@ pub struct DosReport {
     /// [`PREEMPTION_SLICE_TICKS`]) they sequence the guest time base for a
     /// guest that polls memory instead of causing exits.
     pub preemption_slices: u32,
+    /// Interrupts the guest raised on a vector with no firmware service. The
+    /// catch-all ROM stub reports them instead of letting the CPU jump through
+    /// the zeroed IVT entry at `0000:0000`; the runner logs the faulting
+    /// `CS:IP` and aborts on a CPU exception or a runaway count.
+    pub unhandled_interrupts: u32,
 }
 
 impl DosReport {
@@ -292,6 +303,7 @@ impl DosReport {
             timed_out: false,
             external_interrupts: 0,
             preemption_slices: 0,
+            unhandled_interrupts: 0,
         }
     }
 }
@@ -1208,6 +1220,26 @@ fn read_bios_call_registers(vcpu: &Vcpu, memory: &mut WorldMemory) -> bios::Bios
     registers
 }
 
+/// Reads the `CS:IP` and `FLAGS` of a guest interrupt frame from its stack.
+///
+/// The catch-all ROM stub pushes `DX` before reporting the vector, so at the
+/// `OUT` exit the frame sits at `SS:SP+2` (`IP`), `SS:SP+4` (`CS`) and
+/// `SS:SP+6` (`FLAGS`). Returns `None` when the stack is not readable, which
+/// makes the caller log the vector without a faulting address.
+fn read_interrupt_frame(vcpu: &Vcpu, memory: &mut WorldMemory) -> Option<(u16, u16, u16)> {
+    let guest = vcpu.guest();
+    let stack = guest.ss.base.wrapping_add(u64::from(guest.rsp as u16)) as u32;
+    let mut read_word = |memory: &mut WorldMemory, offset: u32| -> Option<u16> {
+        let lo = bios::BiosMemory::read_u8(memory, stack.wrapping_add(offset))?;
+        let hi = bios::BiosMemory::read_u8(memory, stack.wrapping_add(offset + 1))?;
+        Some(u16::from_le_bytes([lo, hi]))
+    };
+    let ip = read_word(memory, 2)?;
+    let cs = read_word(memory, 4)?;
+    let flags = read_word(memory, 6)?;
+    Some((ip, cs, flags))
+}
+
 /// Writes the registers updated by the firmware model back to the vCPU.
 /// GPRs live in the entry frame until the next VM entry, so
 /// [`Vcpu::set_guest_gpr`] is exactly the write-back path the trampoline reads.
@@ -1591,6 +1623,47 @@ fn run_freedos_in_world(
                             registers.ax,
                             registers.flags
                         );
+                    }
+                    if let Err(error) = advance_past_exit(&mut vcpu, &exit) {
+                        outcome = Err(error);
+                        break;
+                    }
+                } else if let Some(vector) = biosrom::fault_vector(port) {
+                    // The catch-all ROM stub: the guest took an interrupt whose
+                    // vector has no firmware service. Reporting the faulting
+                    // `CS:IP` is what turns a silent jump through the zeroed
+                    // IVT entry into an actionable diagnostic.
+                    report.unhandled_interrupts += 1;
+                    let frame = read_interrupt_frame(&vcpu, &mut memory);
+                    match frame {
+                        Some((ip, cs, flags)) => log::warn!(
+                            "[s9vm] {}: unhandled interrupt {:#04x} at {:#06x}:{:#04x} \
+                             flags={:#06x} after {} BIOS call(s)",
+                            firmware.label(),
+                            vector,
+                            cs,
+                            ip,
+                            flags,
+                            report.bios_calls
+                        ),
+                        None => log::warn!(
+                            "[s9vm] {}: unhandled interrupt {:#04x} (frame unavailable) \
+                             after {} BIOS call(s)",
+                            firmware.label(),
+                            vector,
+                            report.bios_calls
+                        ),
+                    }
+                    // A CPU exception or a platform interrupt has no DOS owner:
+                    // continuing would re-enter the same faulting instruction
+                    // forever, so the run stops with the diagnostic. A software
+                    // vector (>= 0x20) may be a guest calling a service it has
+                    // not installed yet: it returns and the count bounds a loop.
+                    let fatal = vector <= 0x1F
+                        || report.unhandled_interrupts >= MAX_UNHANDLED_INTERRUPTS;
+                    if fatal {
+                        outcome = Err(DosError::BadExit("unhandled guest interrupt"));
+                        break;
                     }
                     if let Err(error) = advance_past_exit(&mut vcpu, &exit) {
                         outcome = Err(error);
