@@ -65,8 +65,8 @@ const MAX_BATCH: usize = 32;
 fn nic_capability(handle: u64, required: CapPermissions) -> Result<usize, SyscallError> {
     silo::enforce_cap_for_current_task(handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    // SAFETY: the capability table is owned by the current process and the
-    // syscall runs with exclusive access to its own task.
+    // SAFETY: the table is internally synchronized; a shared reference is
+    // sound across threads.
     let caps = unsafe { &*task.process.capabilities.get() };
     let cap = caps
         .get_with_permissions(CapId::from_raw(handle), required)
@@ -83,7 +83,7 @@ fn nic_capability(handle: u64, required: CapPermissions) -> Result<usize, Syscal
 /// from the registry, so this variant does not call `get_device_by_resource`.
 fn nic_cap_present(required: CapPermissions) -> Result<(), SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    // SAFETY: the capability table belongs to the current process.
+    // SAFETY: the table is internally synchronized.
     let caps = unsafe { &*task.process.capabilities.get() };
     caps.find_by_type_with_permissions(ResourceType::Nic, required)
         .map(|_| ())
@@ -95,7 +95,7 @@ fn default_nic(
     required: CapPermissions,
 ) -> Result<alloc::sync::Arc<dyn nic::NetworkDevice>, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    // SAFETY: same argument as above.
+    // SAFETY: the table is internally synchronized.
     let caps = unsafe { &*task.process.capabilities.get() };
     let cap = caps
         .find_by_type_with_permissions(ResourceType::Nic, required)
@@ -148,8 +148,8 @@ pub fn sys_net_open() -> Result<u64, SyscallError> {
     }
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    // SAFETY: the capability table belongs to the current process.
-    let caps = unsafe { &mut *task.process.capabilities.get() };
+    // SAFETY: the table is internally synchronized.
+    let caps = unsafe { &*task.process.capabilities.get() };
 
     // Idempotent: return the existing capability if already opened.
     let required = CapPermissions::read_write();

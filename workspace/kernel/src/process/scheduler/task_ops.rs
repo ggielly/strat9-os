@@ -1387,9 +1387,16 @@ fn reparent_children(
 /// accessible from any global map (all_tasks, current_task, etc.).
 fn queue_silo_cleanup(task_id: TaskId) {
     let mut guard = PENDING_SILO_CLEANUPS.lock();
-    guard
-        .push_back(task_id)
-        .unwrap_or_else(|_| panic!("pending silo cleanup queue overflow"));
+    // Last-resort trade-off: if the deferred queue is full we drop the entry
+    // (log only) instead of panicking the kernel when many tasks die at once.
+    // The authoritative silo map entry remains until `on_task_terminated` runs,
+    // so this never corrupts silo membership accounting.
+    if let Err(_) = guard.push_back(task_id) {
+        log::error!(
+            "[silo] pending cleanup queue full; task {} cleanup deferred/dropped",
+            task_id.as_u64()
+        );
+    }
 }
 
 pub fn flush_deferred_silo_cleanups() {
@@ -1426,10 +1433,13 @@ pub(crate) fn cleanup_task_resources(task: &Arc<Task>) {
 
     unsafe {
         (&mut *task.process.fd_table.get()).close_all();
-        let capabilities = (&mut *task.process.capabilities.get()).take_all();
+        let capabilities = (&*task.process.capabilities.get()).take_all();
         for capability in &capabilities {
             crate::capability::release_capability(capability, Some(task.id));
         }
+        // Drop the lock-free silo cache: the authoritative map entry is
+        // removed asynchronously by `on_task_terminated`.
+        task.silo_id.store(0, Ordering::Relaxed);
     }
 
     let as_ref = task.process.address_space_arc();

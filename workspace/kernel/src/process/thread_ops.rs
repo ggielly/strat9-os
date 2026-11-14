@@ -282,6 +282,7 @@ fn build_user_thread_task(
         euid: core::sync::atomic::AtomicU32::new(parent.euid.load(Ordering::Relaxed)),
         gid: core::sync::atomic::AtomicU32::new(parent.gid.load(Ordering::Relaxed)),
         egid: core::sync::atomic::AtomicU32::new(parent.egid.load(Ordering::Relaxed)),
+        silo_id: core::sync::atomic::AtomicU32::new(0),
         state: core::sync::atomic::AtomicU8::new(crate::process::TaskState::Ready as u8),
         priority: parent.priority,
         context: SyncUnsafeCell::new(context),

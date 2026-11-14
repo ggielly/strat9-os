@@ -62,7 +62,7 @@ pub fn sys_ipc_create_port(_flags: u64) -> Result<u64, SyscallError> {
             revoke: false,
         },
     );
-    let cap_id = unsafe { (&mut *task.process.capabilities.get()).insert(cap) };
+    let cap_id = unsafe { (&*task.process.capabilities.get()).insert(cap) };
     Ok(cap_id.as_u64())
 }
 
@@ -149,13 +149,13 @@ pub fn sys_ipc_recv(port_handle: u64, msg_ptr: u64) -> Result<u64, SyscallError>
     if msg.flags != 0 {
         let sender_id = crate::process::TaskId::from_u64(msg.sender);
         let sender = crate::process::get_task_by_id(sender_id).ok_or(SyscallError::BadHandle)?;
-        let sender_caps = unsafe { &mut *sender.process.capabilities.get() };
+        let sender_caps = unsafe { &*sender.process.capabilities.get() };
         let dup = sender_caps
             .duplicate(CapId::from_raw(msg.flags as u64))
             .ok_or(SyscallError::PermissionDenied)?;
 
         let receiver = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-        let receiver_caps = unsafe { &mut *receiver.process.capabilities.get() };
+        let receiver_caps = unsafe { &*receiver.process.capabilities.get() };
         let new_id = super::dispatcher::insert_capability_with_retention(receiver_caps, dup)?;
         if new_id.as_u64() > u32::MAX as u64 {
             return Err(SyscallError::InvalidArgument);
@@ -205,13 +205,13 @@ pub fn sys_ipc_try_recv(port_handle: u64, msg_ptr: u64) -> Result<u64, SyscallEr
     if msg.flags != 0 {
         let sender_id = crate::process::TaskId::from_u64(msg.sender);
         let sender = crate::process::get_task_by_id(sender_id).ok_or(SyscallError::BadHandle)?;
-        let sender_caps = unsafe { &mut *sender.process.capabilities.get() };
+        let sender_caps = unsafe { &*sender.process.capabilities.get() };
         let dup = sender_caps
             .duplicate(CapId::from_raw(msg.flags as u64))
             .ok_or(SyscallError::PermissionDenied)?;
 
         let receiver = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-        let receiver_caps = unsafe { &mut *receiver.process.capabilities.get() };
+        let receiver_caps = unsafe { &*receiver.process.capabilities.get() };
         let new_id = super::dispatcher::insert_capability_with_retention(receiver_caps, dup)?;
         if new_id.as_u64() > u32::MAX as u64 {
             return Err(SyscallError::InvalidArgument);
@@ -256,7 +256,7 @@ pub fn sys_ipc_connect(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError
             revoke: false,
         },
     );
-    let cap_id = unsafe { (&mut *task.process.capabilities.get()).insert(cap) };
+    let cap_id = unsafe { (&*task.process.capabilities.get()).insert(cap) };
     Ok(cap_id.as_u64())
 }
 
@@ -343,13 +343,13 @@ pub fn sys_ipc_reply(msg_ptr: u64) -> Result<u64, SyscallError> {
     // Handle transfer (only after authorization succeeds).
     if msg.flags != 0 {
         let sender = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-        let sender_caps = unsafe { &mut *sender.process.capabilities.get() };
+        let sender_caps = unsafe { &*sender.process.capabilities.get() };
         let dup = sender_caps
             .duplicate(CapId::from_raw(msg.flags as u64))
             .ok_or(SyscallError::PermissionDenied)?;
 
         let receiver = crate::process::get_task_by_id(target).ok_or(SyscallError::BadHandle)?;
-        let receiver_caps = unsafe { &mut *receiver.process.capabilities.get() };
+        let receiver_caps = unsafe { &*receiver.process.capabilities.get() };
         let new_id = super::dispatcher::insert_capability_with_retention(receiver_caps, dup)?;
         if new_id.as_u64() > u32::MAX as u64 {
             return Err(SyscallError::InvalidArgument);
@@ -435,7 +435,7 @@ pub fn sys_ipc_bind_port(
                 volume_resource,
                 volume_perms,
             );
-            let task_caps = unsafe { &mut *task.process.capabilities.get() };
+            let task_caps = unsafe { &*task.process.capabilities.get() };
             let id = task_caps.insert(volume_cap);
             let _ = silo::register_current_task_granted_resource(
                 ResourceType::Volume,

@@ -2111,6 +2111,7 @@ fn event_kind_str(kind: silo::SiloEventKind) -> &'static str {
         silo::SiloEventKind::Crashed => "Crashed",
         silo::SiloEventKind::Paused => "Paused",
         silo::SiloEventKind::Resumed => "Resumed",
+        silo::SiloEventKind::Updated => "Updated",
     }
 }
 

@@ -580,7 +580,7 @@ impl TransportManager {
                 let receiver_task = all_tasks
                     .iter()
                     .find(|t| {
-                        crate::silo::try_silo_id_for_task(t.id).map_or(false, |sid| sid == _pair.1)
+                        crate::silo::try_silo_id_for_task(t).map_or(false, |sid| sid == _pair.1)
                     })
                     .cloned()
                     .ok_or(IpcError::Disconnected)?;

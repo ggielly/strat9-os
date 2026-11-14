@@ -2192,6 +2192,7 @@ fn build_ring3_task(params: Ring3TaskParams<'_>) -> Result<Arc<Task>, &'static s
         euid: core::sync::atomic::AtomicU32::new(0),
         gid: core::sync::atomic::AtomicU32::new(0),
         egid: core::sync::atomic::AtomicU32::new(0),
+        silo_id: core::sync::atomic::AtomicU32::new(0),
         state: core::sync::atomic::AtomicU8::new(TaskState::Ready as u8),
         priority: TaskPriority::Normal,
         context: SyncUnsafeCell::new(context),
@@ -2250,7 +2251,7 @@ fn build_ring3_task(params: Ring3TaskParams<'_>) -> Result<Arc<Task>, &'static s
     // Seed capabilities into the new task (before scheduling).
     let mut bootstrap_handle: Option<u64> = None;
     if !seed_caps.is_empty() {
-        let caps = unsafe { &mut *task.process.capabilities.get() };
+        let caps = unsafe { &*task.process.capabilities.get() };
         for cap in seed_caps {
             let id = caps.insert(cap.clone());
             if bootstrap_handle.is_none()

@@ -104,6 +104,9 @@ impl SiloMemoryAccount {
 
     pub(crate) fn release(&self, bytes: u64) {
         let mut budget = self.budget.lock();
+        // Release-in-race stays non-panicking, but a double free must be caught
+        // in debug builds instead of silently underflowing usage.
+        debug_assert!(budget.used >= bytes, "silo memory double release");
         budget.used = budget.used.saturating_sub(bytes);
     }
 

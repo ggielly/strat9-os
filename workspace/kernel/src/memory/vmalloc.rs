@@ -558,7 +558,7 @@ fn capture_attr(size: usize, caller: &'static Location<'static>) -> VmallocAttr 
             let tid = task.tid;
             // Non-blocking: if SILO_MANAGER is held by an outer frame on this
             // CPU, we just record silo_id=0 rather than risk a deadlock.
-            let silo_id = crate::silo::try_silo_id_for_task(task.id).unwrap_or(0);
+            let silo_id = crate::silo::try_silo_id_for_task(&task).unwrap_or(0);
             (task_id, pid, tid, silo_id)
         }
         // No scheduler running yet, or per-CPU lock is contended.
