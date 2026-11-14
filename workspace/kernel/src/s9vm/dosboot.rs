@@ -408,6 +408,33 @@ impl From<VcpuError> for DosError {
     }
 }
 
+impl DosError {
+    /// One-line operator hint for the failing step.
+    ///
+    /// The numeric `VmFail` codes identify a single call site of the runner;
+    /// naming it here turns "vm: test VM FAIL: VmFail(6)" into an actionable
+    /// message without reading the kernel log.
+    pub fn hint(&self) -> &'static str {
+        match self {
+            DosError::VmFail(1) => "creating the world failed (registry or memory exhausted)",
+            DosError::VmFail(2) => "the world vanished while its device model was stored back",
+            DosError::VmFail(6) => {
+                "the world has no second-level tables yet (mapping order regression)"
+            }
+            DosError::VmFail(7) => "the device model was missing from the world",
+            DosError::VmFail(8) => "loading the floppy image into the world failed",
+            DosError::VmFail(9) => "the world console queue is unavailable",
+            DosError::Unsupported => {
+                "the platform cannot enter real mode (VT-x or unrestricted guest missing)"
+            }
+            DosError::Mmu | DosError::Memory => "guest memory translation failed",
+            DosError::BadExit(_) => "the guest stopped with an unexpected result",
+            DosError::Run(_) => "a vCPU operation failed (see the kernel log)",
+            DosError::VmFail(_) => "a VM operation failed (see the kernel log)",
+        }
+    }
+}
+
 /// Returns the FreeDOS 1.4 boot floppy bundled with the kernel.
 ///
 /// The image is the official 1.44 MiB Floppy Edition boot disk

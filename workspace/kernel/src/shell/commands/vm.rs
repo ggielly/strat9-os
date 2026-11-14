@@ -460,7 +460,7 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
             Ok(())
         }
         Err(error) => {
-            shell_println!("vm: test VM FAIL: {:?}", error);
+            shell_println!("vm: test VM FAIL: {:?} ({})", error, error.hint());
             shell_println!("vm: run `vm diag` for the pre-entry checks and capability masks.");
             Err(ShellError::ExecutionFailed)
         }
@@ -475,7 +475,7 @@ fn write_bytes(path: &str, bytes: &[u8]) -> Result<usize, ShellError> {
     written
 }
 
-/// `vm dos <open [seabios]|run [seconds] [keys=<text>]|info|text|close>` : live DOS session.
+/// `vm dos <open [seabios]|run [seconds] [keys=<text>]|info|text|reset|close>` : live DOS session.
 ///
 /// The DOS world stays mapped between commands: `vm dos run` enters it for a
 /// bounded slice, `vm send <id> <text>` queues keyboard input for the next
@@ -507,7 +507,7 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
                     Ok(())
                 }
                 Err(error) => {
-                    shell_println!("vm: cannot open the DOS session: {:?}", error);
+                    shell_println!("vm: cannot open the DOS session: {:?} ({})", error, error.hint());
                     Err(ShellError::ExecutionFailed)
                 }
             }
@@ -554,7 +554,32 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
                     Ok(())
                 }
                 Err(error) => {
-                    shell_println!("vm: DOS slice failed: {:?}", error);
+                    shell_println!("vm: DOS slice failed: {:?} ({})", error, error.hint());
+                    Err(ShellError::ExecutionFailed)
+                }
+            }
+        }
+        "reset" | "reboot" => {
+            let had = dosboot::dos_close();
+            if !caps.can_run() {
+                shell_println!("vm: DOS session needs VT-x and unrestricted guest");
+                return Ok(());
+            }
+            match dosboot::dos_open(&caps, dosboot::FirmwareKind::Stub, dosboot::freedos_image())
+            {
+                Ok(id) => {
+                    shell_println!(
+                        "vm: DOS session reset on world {id}{}",
+                        if had { "" } else { " (no previous session)" }
+                    );
+                    Ok(())
+                }
+                Err(error) => {
+                    shell_println!(
+                        "vm: cannot reset the DOS session: {:?} ({})",
+                        error,
+                        error.hint()
+                    );
                     Err(ShellError::ExecutionFailed)
                 }
             }
@@ -600,7 +625,7 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
         }
         _ => {
             shell_println!(
-                "Usage: vm dos <open [seabios]|run [seconds] [keys=<text>]|info|text|close>"
+                "Usage: vm dos <open [seabios]|run [seconds] [keys=<text>]|info|text|reset|close>"
             );
             Err(ShellError::InvalidArguments)
         }
