@@ -431,7 +431,12 @@ pub struct Vcpu {
     host_stack: HostStack,
     frame: EnterFrame,
     guest: GuestState,
+    /// `VMLAUNCH` (false) vs `VMRESUME` (true); reset by every `VMCLEAR`.
     launched: bool,
+    /// The guest completed at least one entry. Unlike `launched`, survives the
+    /// `VMCLEAR` that ends every RUN: it tells the next RUN that the control
+    /// block holds guest-produced state (GDTR/IDTR, segments) to import.
+    entered: bool,
     second_level_pointer: u64,
     exit: Option<ExitInfo>,
     /// Preemption timer reload (counts) if the CPU supports it.
@@ -478,6 +483,7 @@ impl Vcpu {
             frame: EnterFrame::zeroed(),
             guest: GuestState::real_mode(0, 0),
             launched: false,
+            entered: false,
             second_level_pointer,
             exit: None,
             preemption_timer: None,
@@ -1167,6 +1173,7 @@ impl Vcpu {
             return Err(VcpuError::VmFail(code));
         }
         self.launched = true;
+        self.entered = true;
         // SAFETY: block loaded; reading the exit fields.
         let exit = unsafe { self.read_exit()? };
         // Retrieves the post-exit guest state kept in the block.
@@ -1295,7 +1302,7 @@ impl Vcpu {
     /// before its first entry must still be initialised from the ABI register
     /// block, not from the control block.
     pub fn entered(&self) -> bool {
-        self.launched
+        self.entered
     }
 
     /// Reads the guest interruptibility state from the control block.
