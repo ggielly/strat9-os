@@ -1933,11 +1933,23 @@ fn load_pt_load_segments(
 }
 
 /// Mark the `PT_GNU_RELRO` range read-only, once relocations are applied.
+///
+/// RELRO is a dynamic-linking concept: it protects the relocation targets
+/// (`.got`, `.data.rel.ro`, ...) after the loader has fixed them up.  A static
+/// `ET_EXEC` image has no `PT_DYNAMIC`, nothing relocates at run time, and
+/// tools still emit a `PT_GNU_RELRO` program header whose range can cover
+/// ordinary writable `.data` (lld does exactly that for the component linker
+/// script, which puts `.got` inside `.data`).  Honouring it there turns the
+/// first write to a global into a fatal protection fault, so RELRO is applied
+/// only when the image really carries dynamic information.
 fn apply_relro(
     user_as: &AddressSpace,
     phdrs: &[Elf64Phdr],
     load_bias: u64,
 ) -> Result<(), &'static str> {
+    if !phdrs.iter().any(|ph| ph.p_type == PT_DYNAMIC) {
+        return Ok(());
+    }
     let Some(relro) = phdrs.iter().find(|ph| ph.p_type == PT_GNU_RELRO) else {
         return Ok(());
     };
