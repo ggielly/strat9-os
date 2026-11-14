@@ -35,7 +35,7 @@
 //! | `vm pause/resume <id>` | `<id>/control` | the pause/resume transitions |
 //! | `vm console <id>` | `<id>/console` (read) | drain the guest console |
 //! | `vm send <id> <text>` | `<id>/console` (write) | queue guest console input |
-//! | `vm test [seabios] [dry\|seconds]` | `dosboot` | boot the built-in FreeDOS 1.4 test world (stub or SeaBIOS firmware) |
+//! | `vm test [seabios\|hello] [dry\|seconds]` | `dosboot` | boot the FreeDOS test/demo world (stub, SeaBIOS or Hello/DIR image) |
 //!
 //! `vm start` cannot create or configure a world: creation remains the job of
 //! the `SYS_VMM_*` syscalls and their capability checks (for instance the
@@ -243,22 +243,24 @@ fn cmd_send(id: u64, words: &[String]) -> Result<(), ShellError> {
     }
 }
 
-/// `vm test [seabios] [dry|seconds]` : boot the built-in FreeDOS 1.4 world.
+/// `vm test [seabios|hello] [dry|seconds]` : boot a FreeDOS test world.
 fn cmd_test(args: &[String]) -> Result<(), ShellError> {
     // Accept the switches in any order: `vm test 5`, `vm test seabios 10` and
     // `vm test dry` all work. An unrecognised word is reported instead of being
     // silently dropped, which used to turn `vm test dosbox 5` into a 2 s run.
     let mut seabios = false;
+    let mut hello = false;
     let mut dry = false;
     let mut seconds: Option<u64> = None;
     for arg in args {
         match arg.as_str() {
             "seabios" => seabios = true,
+            "hello" => hello = true,
             "dry" => dry = true,
             _ => match arg.parse::<u64>() {
                 Ok(value) => seconds = Some(value),
                 Err(_) => shell_println!(
-                    "vm: ignoring unknown argument `{}` (usage: `vm test [seabios] [dry|seconds]`)",
+                    "vm: ignoring unknown argument `{}` (usage: `vm test [seabios|hello] [dry|seconds]`)",
                     arg
                 ),
             },
@@ -279,7 +281,9 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
         return Ok(());
     }
     if dry {
-        let result = if seabios {
+        let result = if hello {
+            crate::s9vm::dosboot::run_freedos_hello_dry(&caps)
+        } else if seabios {
             crate::s9vm::dosboot::run_freedos_seabios_dry(&caps)
         } else {
             crate::s9vm::dosboot::run_freedos_dry(&caps)
@@ -287,7 +291,13 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
         match result {
             Ok(report) => shell_println!(
                 "vm: test VM (dry{}) PASS: boot/reset={:#x} entry={:#x} sectors={}",
-                if seabios { ", seabios" } else { "" },
+                if hello {
+                    ", hello"
+                } else if seabios {
+                    ", seabios"
+                } else {
+                    ""
+                },
                 report.boot_sector_gpa,
                 report.entry,
                 report.disk_sectors
@@ -301,9 +311,14 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
         return Ok(());
     }
     shell_println!(
-        "vm: booting the FreeDOS 1.4 test world with {} (VT-x, bounded to {} s: the guest \
+        "vm: booting the FreeDOS {} world with {} (VT-x, bounded to {} s: the guest \
          loop runs with interrupts disabled, so the attempt cannot freeze the system)…",
-        if seabios {
+        if hello {
+            "Hello/DIR demo"
+        } else {
+            "1.4 test"
+        },
+        if hello || seabios {
             "SeaBIOS"
         } else {
             "the s9vm stub firmware"
@@ -314,14 +329,18 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
         max_exits: crate::s9vm::dosboot::RunLimits::SHELL.max_exits,
         max_nanoseconds: seconds.saturating_mul(1_000_000_000),
     };
-    let result = if seabios {
+    let result = if hello {
+        crate::s9vm::dosboot::run_freedos_hello_with_limits(&caps, limits)
+    } else if seabios {
         crate::s9vm::dosboot::run_freedos_seabios_with_limits(&caps, limits)
     } else {
         crate::s9vm::dosboot::run_freedos_with_limits(&caps, limits)
     };
     match result {
         Ok(report) => {
-            let booted = report.marker == Some(b'K') && report.text.contains("FreeDOS");
+            let booted = report.marker == Some(b'K')
+                && report.text.contains("FreeDOS")
+                && (!hello || report.text.contains("Hello world, from FreeDOS"));
             let marker = report.marker.map(|byte| byte as char);
             if booted {
                 shell_println!(
@@ -465,7 +484,7 @@ fn cmd_diag() -> Result<(), ShellError> {
     Ok(())
 }
 
-const VM_USAGE: &str = "Usage: vm <list|info <id>|start <id>|stop <id>|pause <id>|resume <id>|console <id>|send <id> <text>|test [seabios] [dry|seconds]|diag>";
+const VM_USAGE: &str = "Usage: vm <list|info <id>|start <id>|stop <id>|pause <id>|resume <id>|console <id>|send <id> <text>|test [seabios|hello] [dry|seconds]|diag>";
 
 /// `vm` : manage the s9vm worlds through the `/dev/vmm` scheme.
 pub fn cmd_vm(args: &[String]) -> Result<(), ShellError> {
@@ -520,11 +539,11 @@ pub fn cmd_vm(args: &[String]) -> Result<(), ShellError> {
                 "    /dev/vmm/<id>/control       (write: start | stop | pause | resume)"
             );
             shell_println!(
-                "  `vm test [seabios] [dry|seconds]` boots the bundled FreeDOS 1.4 floppy with a \
-                 bounded time budget: the s9vm stub firmware by default, or SeaBIOS/SeaVGABIOS \
-                 with `seabios` (VT-x needed; `vm test [seabios] dry` checks the installation \
-                 without VT-x); `vm diag` prints the capability masks and replays the pre-entry \
-                 guest-state checks."
+                "  `vm test [seabios|hello] [dry|seconds]` boots the bundled FreeDOS floppy with a \
+                 bounded time budget: the s9vm stub firmware by default, SeaBIOS/SeaVGABIOS with \
+                 `seabios`, or the Hello/DIR demo image with `hello` (VT-x needed; `vm test \
+                 [seabios|hello] dry` checks the installation without VT-x); `vm diag` prints \
+                 the capability masks and replays the pre-entry guest-state checks."
             );
             Ok(())
         }

@@ -3821,6 +3821,21 @@ pub fn maybe_run_loader_dry_from_boot_env() {
         }
         return;
     }
+    if mode == "freedos_hello_dry" {
+        log::info!("[s9vm] FreeDOS Hello/DIR dry run requested (no VT-x required)");
+        let caps = HwCaps::default();
+        match dosboot::run_freedos_hello_dry(&caps) {
+            Ok(report) => log::info!(
+                "[s9vm] freedos-hello-dry PASS: boot={:#x} entry={:#x} sectors={} \
+                 (Hello/DIR image installed, no guest entry)",
+                report.boot_sector_gpa,
+                report.entry,
+                report.disk_sectors
+            ),
+            Err(error) => log::warn!("[s9vm] freedos-hello-dry FAIL: {:?}", error),
+        }
+        return;
+    }
     if mode == "freedos_seabios_dry" {
         log::info!("[s9vm] FreeDOS/SeaBIOS dry run requested (no VT-x required)");
         let caps = HwCaps::default();
@@ -3912,6 +3927,7 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
     // `unrestricted guest` control; `freedos_dry` covers the preparation.
     let freedos_phase = mode == "freedos";
     let freedos_seabios_phase = mode == "freedos_seabios";
+    let freedos_hello_phase = mode == "freedos_hello";
     // The phases that need a registered vCPU run from kernel threads at the
     // `kthread` stage. They are opt-in for the `2`/`all` mode: they exercise
     // the newest kernel-thread path, so a boot that must stay predictable can
@@ -4121,6 +4137,28 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
                  unrestricted-guest control"
             ),
             Err(error) => log::warn!("[s9vm] freedos-seabios FAIL: {:?}", error),
+        }
+    }
+
+    if freedos_hello_phase {
+        log::info!("[s9vm] FreeDOS Hello/DIR boot requested (VT-x required)");
+        match dosboot::run_freedos_hello(caps) {
+            Ok(report) => log::info!(
+                "[s9vm] freedos-hello PASS: reset={:#x} marker={:?} exits={} io={} \
+                 hlt={} sectors={} text={:?}",
+                report.entry,
+                report.marker,
+                report.total_exits,
+                report.io_exits,
+                report.halt_exits,
+                report.disk_sectors,
+                report.text
+            ),
+            Err(dosboot::DosError::Unsupported) => log::warn!(
+                "[s9vm] freedos-hello SKIP: real-mode entry needs VT-x and the \
+                 unrestricted-guest control"
+            ),
+            Err(error) => log::warn!("[s9vm] freedos-hello FAIL: {:?}", error),
         }
     }
 }

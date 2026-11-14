@@ -399,6 +399,24 @@ pub fn freedos_image() -> &'static [u8] {
     include_bytes!("../../../assets/disks/freedos-1.4-boot.img")
 }
 
+/// FreeDOS 1.4 demo image: prints a greeting and lists the floppy contents.
+///
+/// Same official boot disk, with `FDAUTO.BAT` replaced by:
+///
+/// ```text
+/// @ECHO OFF
+/// ECHO Hello world, from FreeDOS
+/// DIR
+/// S9VMK.COM
+/// ```
+///
+/// and the `@echo off` line removed from `FDCONFIG.SYS` (FreeDOS' CONFIG.SYS
+/// parser rejects it). `S9VMK.COM` still writes the `K` marker, so the runner
+/// can stop at the end of the batch.
+pub fn freedos_hello_image() -> &'static [u8] {
+    include_bytes!("../../../assets/disks/freedos-hello.img")
+}
+
 /// Checks the platform can enter real mode and drive the device fast path.
 ///
 /// `label` is the selftest mode name used in the diagnostics, so each caller
@@ -449,7 +467,7 @@ pub fn run_freedos(caps: &HwCaps) -> Result<DosReport, DosError> {
         log::warn!("[s9vm] freedostest: boot did not complete within the budget");
         return Err(DosError::BadExit("FreeDOS boot timed out"));
     }
-    verify_freedos(&report)?;
+    verify_freedos(&report, "FreeDOS")?;
     Ok(report)
 }
 
@@ -460,7 +478,13 @@ pub fn run_freedos(caps: &HwCaps) -> Result<DosReport, DosError> {
 /// freeze the whole system. The report carries `timed_out = true` when the
 /// budget stopped the run; the world is destroyed on every path.
 pub fn run_freedos_with_limits(caps: &HwCaps, limits: RunLimits) -> Result<DosReport, DosError> {
-    run_firmware_with_limits(caps, limits, FirmwareKind::Stub)
+    run_firmware_with_limits(
+        caps,
+        limits,
+        FirmwareKind::Stub,
+        freedos_image(),
+        b"s9vm-freedos",
+    )
 }
 
 /// Boots the FreeDOS floppy with the real SeaBIOS firmware (requires VT-x).
@@ -474,7 +498,7 @@ pub fn run_freedos_seabios(caps: &HwCaps) -> Result<DosReport, DosError> {
         log::warn!("[s9vm] freedos-seabios: boot did not complete within the budget");
         return Err(DosError::BadExit("FreeDOS SeaBIOS boot timed out"));
     }
-    verify_freedos(&report)?;
+    verify_freedos(&report, "FreeDOS")?;
     Ok(report)
 }
 
@@ -483,22 +507,57 @@ pub fn run_freedos_seabios_with_limits(
     caps: &HwCaps,
     limits: RunLimits,
 ) -> Result<DosReport, DosError> {
-    run_firmware_with_limits(caps, limits, FirmwareKind::SeaBios)
+    run_firmware_with_limits(
+        caps,
+        limits,
+        FirmwareKind::SeaBios,
+        freedos_image(),
+        b"s9vm-freedos-seabios",
+    )
 }
 
-/// Common entry point of the two FreeDOS firmware paths.
+/// Boots the **Hello/DIR demo image** with SeaBIOS (requires VT-x).
+///
+/// Success is the `K` marker plus the exact greeting and the `DIR` listing of
+/// `FDAUTO.BAT`, which proves the batch executed and the filesystem was read.
+pub fn run_freedos_hello(caps: &HwCaps) -> Result<DosReport, DosError> {
+    let report = run_freedos_hello_with_limits(caps, RunLimits::SELFTEST)?;
+    if report.timed_out {
+        log::warn!("[s9vm] freedos-hello: boot did not complete within the budget");
+        return Err(DosError::BadExit("FreeDOS hello boot timed out"));
+    }
+    verify_freedos(&report, "Hello world, from FreeDOS")?;
+    if !report.text.contains("FDAUTO") {
+        return Err(DosError::BadExit("DIR listing missing FDAUTO.BAT"));
+    }
+    Ok(report)
+}
+
+/// Boots the Hello/DIR demo image with SeaBIOS under an explicit budget.
+pub fn run_freedos_hello_with_limits(
+    caps: &HwCaps,
+    limits: RunLimits,
+) -> Result<DosReport, DosError> {
+    run_firmware_with_limits(
+        caps,
+        limits,
+        FirmwareKind::SeaBios,
+        freedos_hello_image(),
+        b"s9vm-freedos-hello",
+    )
+}
+
+/// Common entry point of the FreeDOS firmware paths.
 fn run_firmware_with_limits(
     caps: &HwCaps,
     limits: RunLimits,
     firmware: FirmwareKind,
+    image: &'static [u8],
+    world_name: &'static [u8],
 ) -> Result<DosReport, DosError> {
     require_real_mode(caps, firmware.label())?;
-    let name = match firmware {
-        FirmwareKind::Stub => b"s9vm-freedos".as_slice(),
-        FirmwareKind::SeaBios => b"s9vm-freedos-seabios".as_slice(),
-    };
-    let record = vm::create(name, 0).ok_or(DosError::VmFail(1))?;
-    let result = run_freedos_in_world(caps, record.id, limits, firmware);
+    let record = vm::create(world_name, 0).ok_or(DosError::VmFail(1))?;
+    let result = run_freedos_in_world(caps, record.id, limits, firmware, image);
     let _ = vm::destroy(record.id);
     result
 }
@@ -777,10 +836,11 @@ fn map_and_load_freedos(
     caps: &HwCaps,
     world_id: u64,
     firmware: FirmwareKind,
+    image: &'static [u8],
 ) -> Result<u64, DosError> {
     map_low_windows(caps, world_id, firmware)?;
     map_high_window(caps, world_id, firmware)?;
-    vm::load_disk(world_id, freedos_image()).map_err(|_| DosError::VmFail(8))
+    vm::load_disk(world_id, image).map_err(|_| DosError::VmFail(8))
 }
 
 /// Installs the ROM stubs/IVT/BDA and copies the demo boot sector.
@@ -801,7 +861,11 @@ fn install_artefacts(world_id: u64) -> Result<(), DosError> {
 /// through `INT 13h`, and pre-copying anything else would hide a disk-path
 /// failure. The SeaBIOS path installs the real BIOS and its VGA option ROM;
 /// SeaBIOS loads the boot sector itself.
-fn install_freedos_artefacts(world_id: u64, firmware: FirmwareKind) -> Result<(), DosError> {
+fn install_freedos_artefacts(
+    world_id: u64,
+    firmware: FirmwareKind,
+    image: &'static [u8],
+) -> Result<(), DosError> {
     let mut memory = WorldMemory::new(world_id);
     if firmware.is_seabios() {
         firmware::install_seabios(&mut memory, firmware::FirmwareConfig::freedos()).map_err(
@@ -816,7 +880,6 @@ fn install_freedos_artefacts(world_id: u64, firmware: FirmwareKind) -> Result<()
         return Ok(());
     }
     biosrom::install(&mut memory, &biosrom::VECTORS).map_err(|_| DosError::Memory)?;
-    let image = freedos_image();
     let boot_sector = image.get(..biosrom::SECTOR_SIZE).ok_or(DosError::Memory)?;
     if !biosrom::RomMemory::write(&mut memory, biosrom::BOOT_SECTOR_GPA, boot_sector) {
         return Err(DosError::Memory);
@@ -1327,19 +1390,20 @@ fn run_freedos_in_world(
     world_id: u64,
     limits: RunLimits,
     firmware: FirmwareKind,
+    image: &'static [u8],
 ) -> Result<DosReport, DosError> {
     // Timestamp origin of the whole launch, before the first world mapping.
     // The run budget has its own origin later; this one measures preparation
     // (mapping, firmware copy, vCPU setup) as well as execution.
     let launch_tsc = unsafe { core::arch::x86_64::_rdtsc() };
     let tsc_hz = crate::s9vm::tsc::get().map_or(FALLBACK_TSC_HZ, |frequency| frequency.hz());
-    let disk_sectors = map_and_load_freedos(caps, world_id, firmware)?;
+    let disk_sectors = map_and_load_freedos(caps, world_id, firmware, image)?;
     log::info!(
         "[s9vm] {}: memory + disk ready at {} ms",
         firmware.label(),
         elapsed_millis(launch_tsc, tsc_hz)
     );
-    install_freedos_artefacts(world_id, firmware)?;
+    install_freedos_artefacts(world_id, firmware, image)?;
     log::info!(
         "[s9vm] {}: firmware installed at {} ms",
         firmware.label(),
@@ -1421,7 +1485,7 @@ fn run_freedos_in_world(
         let config = firmware::FirmwareConfig::freedos();
         let (extmem_low, extmem_high) = config.extmem_cmos();
         machine.devices_mut().set_legacy_pic(true);
-        machine.devices_mut().load_floppy(freedos_image());
+        machine.devices_mut().load_floppy(image);
         machine
             .devices_mut()
             .add_fw_cfg_file("vgaroms/vgabios-stdvga.bin", firmware::seabios_vga_rom());
@@ -1971,15 +2035,16 @@ fn run_freedos_in_world(
     Ok(report)
 }
 
-/// Verifies the FreeDOS output: the AUTOEXEC marker and the boot banner.
-fn verify_freedos(report: &DosReport) -> Result<(), DosError> {
+/// Verifies the FreeDOS output: the AUTOEXEC marker and the expected text.
+fn verify_freedos(report: &DosReport, expected: &str) -> Result<(), DosError> {
     if report.marker != Some(SUCCESS_MARKER) {
         log::warn!("[s9vm] freedostest: unexpected marker {:?}", report.marker);
         return Err(DosError::BadExit("missing FreeDOS success marker"));
     }
-    if !report.text.contains("FreeDOS") {
+    if !report.text.contains(expected) {
         log::warn!(
-            "[s9vm] freedostest: FreeDOS banner missing from the VGA text ({} characters)",
+            "[s9vm] freedostest: expected {:?} missing from the VGA text ({} characters)",
+            expected,
             report.text.len()
         );
         return Err(DosError::BadExit("missing FreeDOS banner"));
@@ -2107,7 +2172,20 @@ fn verify_installation(memory: &mut WorldMemory, disk_sectors: u64) -> Result<()
 /// memory-side contract of the boot, and is the deterministic regression on
 /// TCG.
 pub fn run_freedos_dry(caps: &HwCaps) -> Result<DosReport, DosError> {
-    run_freedos_dry_with(caps, FirmwareKind::Stub)
+    run_freedos_dry_with(caps, FirmwareKind::Stub, freedos_image(), b"s9vm-freedos-dry")
+}
+
+/// Verifies the Hello/DIR demo image **without VT-x**.
+///
+/// The stub path is used because it also verifies the disk image installation
+/// (boot sector copy, OEM name, capacity); the real boot uses SeaBIOS.
+pub fn run_freedos_hello_dry(caps: &HwCaps) -> Result<DosReport, DosError> {
+    run_freedos_dry_with(
+        caps,
+        FirmwareKind::Stub,
+        freedos_hello_image(),
+        b"s9vm-freedos-hello-dry",
+    )
 }
 
 /// Installs the real SeaBIOS firmware and its VGA option ROM **without VT-x**.
@@ -2118,16 +2196,22 @@ pub fn run_freedos_dry(caps: &HwCaps) -> Result<DosReport, DosError> {
 /// MiB high window. This is the deterministic regression for the real-firmware
 /// path on hosts without VT-x.
 pub fn run_freedos_seabios_dry(caps: &HwCaps) -> Result<DosReport, DosError> {
-    run_freedos_dry_with(caps, FirmwareKind::SeaBios)
+    run_freedos_dry_with(
+        caps,
+        FirmwareKind::SeaBios,
+        freedos_image(),
+        b"s9vm-freedos-seabios-dry",
+    )
 }
 
-fn run_freedos_dry_with(caps: &HwCaps, firmware: FirmwareKind) -> Result<DosReport, DosError> {
-    let name = match firmware {
-        FirmwareKind::Stub => b"s9vm-freedos-dry".as_slice(),
-        FirmwareKind::SeaBios => b"s9vm-freedos-seabios-dry".as_slice(),
-    };
+fn run_freedos_dry_with(
+    caps: &HwCaps,
+    firmware: FirmwareKind,
+    image: &'static [u8],
+    name: &'static [u8],
+) -> Result<DosReport, DosError> {
     let record = vm::create(name, 0).ok_or(DosError::VmFail(1))?;
-    let result = run_freedos_dry_in_world(caps, record.id, firmware);
+    let result = run_freedos_dry_in_world(caps, record.id, firmware, image);
     let _ = vm::destroy(record.id);
     result
 }
@@ -2137,12 +2221,13 @@ fn run_freedos_dry_in_world(
     caps: &HwCaps,
     world_id: u64,
     firmware: FirmwareKind,
+    image: &'static [u8],
 ) -> Result<DosReport, DosError> {
-    let disk_sectors = map_and_load_freedos(caps, world_id, firmware)?;
-    install_freedos_artefacts(world_id, firmware)?;
+    let disk_sectors = map_and_load_freedos(caps, world_id, firmware, image)?;
+    install_freedos_artefacts(world_id, firmware, image)?;
     let mut memory = WorldMemory::new(world_id);
     match firmware {
-        FirmwareKind::Stub => verify_freedos_installation(&mut memory, disk_sectors)?,
+        FirmwareKind::Stub => verify_freedos_installation(&mut memory, disk_sectors, image)?,
         FirmwareKind::SeaBios => verify_seabios_installation(&mut memory, disk_sectors)?,
     }
     let mut report = DosReport::new(disk_sectors);
@@ -2171,8 +2256,8 @@ fn run_freedos_dry_in_world(
 fn verify_freedos_installation(
     memory: &mut WorldMemory,
     disk_sectors: u64,
+    image: &'static [u8],
 ) -> Result<(), DosError> {
-    let image = freedos_image();
     if disk_sectors != FREEDOS_DISK_SECTORS {
         return Err(DosError::BadExit("unexpected FreeDOS disk capacity"));
     }

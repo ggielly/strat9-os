@@ -52,6 +52,41 @@ entries rewritten in place (no cluster added, no FAT change):
 `S9VMK.COM` writes the success marker `K` that the kernel DOS runner
 (`s9vm/dosboot.rs`) and the QEMU `-debugcon` verification both watch for.
 
+## Hello/DIR demo image
+
+`freedos-hello.img` is derived from the same official boot disk and keeps the
+FreeDOS kernel and `COMMAND.COM`. Only two text files are replaced:
+
+1. `\FDAUTO.BAT`:
+   ```
+   @ECHO OFF
+   ECHO Hello world, from FreeDOS
+   DIR
+   S9VMK.COM
+   ```
+2. `\FDCONFIG.SYS` — same directives as above, but **without** the invalid
+   `@echo off` line, which FreeDOS' CONFIG.SYS parser reports as
+   `CONFIG.SYS error in line 0`:
+   ```
+   !COUNTRY=001,858:\FREEDOS\BIN\COUNTRY.SYS
+   !LASTDRIVE=Z
+   !BUFFERS=20
+   !FILES=40
+   SHELL=\FREEDOS\BIN\COMMAND.COM \FREEDOS\BIN /E:2048 /P=\FDAUTO.BAT
+   ```
+
+`S9VMK.COM` is unchanged, so the run still ends on the `K` marker after `DIR`
+has printed the root directory. Boot it with `vm test hello` or
+`s9vm.selftest=freedos_hello`; the dry regression is
+`s9vm.selftest=freedos_hello_dry`.
+
+| Image | Size | SHA-256 |
+|---|---|---|
+| `freedos-hello.img` | 1 474 560 bytes | `c84188150531f3566fd548156dbd316c96dc2dfa2779f1f0800d66bd1b03adab` |
+
+The original `freedos-1.4-boot.img` is untouched (still the marker-oriented
+selftest image).
+
 ## Verification
 
 * QEMU + SeaBIOS, TCG, headless: booting this image on a floppy controller and
