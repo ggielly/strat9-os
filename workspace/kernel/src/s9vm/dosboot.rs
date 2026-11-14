@@ -1760,6 +1760,60 @@ pub fn dos_close() -> bool {
     true
 }
 
+/// Boot-time selftest of the live DOS session.
+///
+/// Boots the floppy through [`dos_open`]/[`dos_run`], types `dir` through the
+/// world console queue (the same path as `vm send`), runs a second slice and
+/// checks that the floppy was listed. This exercises the whole interactive
+/// path without an operator: 8259 delivery, the 8042 keyboard, the resumed
+/// vCPU and the writable disk model.
+pub fn run_freedos_session_selftest(caps: &HwCaps) -> Result<(), DosError> {
+    let world_id = dos_open(caps, FirmwareKind::Stub, freedos_image())?;
+    let result = (|| -> Result<(), DosError> {
+        // First slice: stop at the AUTOEXEC marker, which is the proof the
+        // boot reached the DOS prompt.
+        let boot_limits = RunLimits {
+            max_exits: MAX_FREEDOS_EXITS,
+            max_nanoseconds: 15_000_000_000,
+            stop_at_marker: true,
+        };
+        let report = dos_run(caps, boot_limits)?;
+        if !report.text.contains("FreeDOS") {
+            return Err(DosError::BadExit("boot banner missing"));
+        }
+        if report.marker != Some(SUCCESS_MARKER) {
+            log::warn!(
+                "[s9vm] freedos-session: no AUTOEXEC marker after boot (text {} characters)",
+                report.text.len()
+            );
+            return Err(DosError::BadExit("boot did not reach the DOS prompt"));
+        }
+        // Type `dir` at the prompt: the console queue is the `vm send` path.
+        vm::push_console_input(world_id, b"dir\n").map_err(|()| DosError::VmFail(9))?;
+        let shell_limits = RunLimits {
+            max_exits: MAX_FREEDOS_EXITS,
+            max_nanoseconds: 4_000_000_000,
+            stop_at_marker: false,
+        };
+        let report = dos_run(caps, shell_limits)?;
+        if !report.text.contains("FDAUTO") {
+            log::warn!(
+                "[s9vm] freedos-session: screen after typed `dir`:\n{}",
+                report.text
+            );
+            return Err(DosError::BadExit("typed `dir` did not list the floppy"));
+        }
+        log::info!(
+            "[s9vm] freedos-session: typed keys={} irq={} and the floppy listed",
+            report.scancodes_typed,
+            report.interrupts_delivered
+        );
+        Ok(())
+    })();
+    let _ = dos_close();
+    result
+}
+
 /// Body of a full FreeDOS boot; the caller owns and destroys the world.
 ///
 /// # Exit routing

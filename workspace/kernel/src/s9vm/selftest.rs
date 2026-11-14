@@ -3928,6 +3928,11 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
     let freedos_phase = mode == "freedos";
     let freedos_seabios_phase = mode == "freedos_seabios";
     let freedos_hello_phase = mode == "freedos_hello";
+    // Live DOS session: boots through the session API, types `dir` through the
+    // console queue and checks the listing. This is the interactive path
+    // (resumed vCPU, 8259 delivery, 8042 keyboard) exercised without an
+    // operator.
+    let freedos_session_phase = mode == "freedos_session";
     // The phases that need a registered vCPU run from kernel threads at the
     // `kthread` stage. They are opt-in for the `2`/`all` mode: they exercise
     // the newest kernel-thread path, so a boot that must stay predictable can
@@ -4159,6 +4164,21 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
                  unrestricted-guest control"
             ),
             Err(error) => log::warn!("[s9vm] freedos-hello FAIL: {:?}", error),
+        }
+    }
+
+    if freedos_session_phase {
+        log::info!("[s9vm] FreeDOS live session requested (VT-x required)");
+        match dosboot::run_freedos_session_selftest(caps) {
+            Ok(()) => log::info!(
+                "[s9vm] freedos-session PASS: booted to the prompt and typed `dir` over the \
+                 session console"
+            ),
+            Err(dosboot::DosError::Unsupported) => log::warn!(
+                "[s9vm] freedos-session SKIP: real-mode entry needs VT-x and the \
+                 unrestricted-guest control"
+            ),
+            Err(error) => log::warn!("[s9vm] freedos-session FAIL: {:?}", error),
         }
     }
 }

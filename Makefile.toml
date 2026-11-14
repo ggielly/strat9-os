@@ -1327,3 +1327,53 @@ args = [
     "-Z",
     "build-std-features=compiler-builtins-mem",
 ]
+
+[tasks.s9vm-dos-session-image]
+description = "Build the UEFI image that boots the live FreeDOS session selftest"
+dependencies = ["uefi-image-release"]
+env = { STRAT9_IMAGE_BASENAME = "s9vm-dos-session", STRAT9_PROFILE = "release", STRAT9_MODULE_PROFILE = "release", STRAT9_INCLUDE_TESTS = "0", STRAT9_BOOT_CONFIG = "workspace/assets/boot/s9vm-dos-session.cfg" }
+script_runner = "@shell"
+script = ['''
+bash tools/scripts/create-uefi-image.sh
+''']
+
+[tasks.s9vm-dos-session-iso]
+description = "Build the live FreeDOS session validation ISO (serial console, s9vm.selftest=freedos_session)"
+dependencies = ["s9vm-dos-session-image"]
+env = { STRAT9_IMAGE_BASENAME = "s9vm-dos-session" }
+script_runner = "@shell"
+script = ['''
+bash tools/scripts/create-iso-uefi.sh
+''']
+
+[tasks.run-s9vm-dos-session-iso]
+description = "Boot the live FreeDOS session ISO in QEMU (serial); with /dev/kvm the session selftest runs for real"
+dependencies = ["s9vm-dos-session-iso"]
+script_runner = "@shell"
+script = [
+    '''
+qemu_accel=tcg
+qemu_cpu=qemu64
+if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+    qemu_accel=kvm
+    qemu_cpu=host,+vmx
+    echo "QEMU acceleration: KVM (VT-x/EPT exposed via -cpu host,+vmx)"
+else
+    echo "QEMU acceleration: TCG (no VT-x: the session selftest is skipped)"
+fi
+# Serial-only image: the PASS/FAIL line of the session selftest goes to stdio.
+[ -f build/OVMF_VARS.fd ] || cp /usr/share/OVMF/OVMF_VARS_4M.fd build/OVMF_VARS.fd
+${QEMU} \
+    -accel "$qemu_accel" \
+    -machine q35 \
+    -cpu "$qemu_cpu" \
+    -smp 2 \
+    -m 2G \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=build/OVMF_VARS.fd \
+    -cdrom build/s9vm-dos-session-uefi.iso \
+    -display none \
+    -serial stdio \
+    -no-reboot
+''',
+]
