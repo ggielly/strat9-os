@@ -2037,6 +2037,53 @@ pub fn push_console_input(world_id: u64, bytes: &[u8]) -> Result<usize, ()> {
     Ok(count)
 }
 
+/// Takes the console input queued for a world.
+///
+/// A DOS world has no virtio console: its runner turns these host bytes into
+/// PS/2 scancodes and types them into the guest keyboard, so `vm send <id>`
+/// drives the DOS prompt of a live session.
+pub fn take_console_input(world_id: u64) -> Vec<u8> {
+    let mut worlds = WORLDS.lock();
+    match worlds.get_mut(&world_id) {
+        Some(world) => core::mem::take(&mut world.pending_console_input),
+        None => Vec::new(),
+    }
+}
+
+/// Replaces the console-output snapshot of a world.
+///
+/// A DOS world has no virtio console, so its runner publishes the current VGA
+/// text here: a following `vm console <id>` then shows the screen.
+pub fn set_console_output(world_id: u64, bytes: &[u8]) -> Result<(), ()> {
+    let mut worlds = WORLDS.lock();
+    let world = worlds.get_mut(&world_id).ok_or(())?;
+    world.console_output.clear();
+    push_console_output(&mut world.console_output, bytes);
+    Ok(())
+}
+
+/// Takes the device model out of a world.
+///
+/// The DOS session runner keeps it while the guest runs, so the 8259/8254/8042
+/// and the block device keep their state between two shell commands.
+pub fn take_machine(world_id: u64) -> Option<Machine> {
+    let mut worlds = WORLDS.lock();
+    let world = worlds.get_mut(&world_id)?;
+    Some(core::mem::replace(&mut world.machine, Machine::new()))
+}
+
+/// Puts the device model back into its world. Returns `false` if it vanished.
+pub fn store_machine(world_id: u64, machine: Machine) -> bool {
+    let mut worlds = WORLDS.lock();
+    match worlds.get_mut(&world_id) {
+        Some(world) => {
+            world.machine = machine;
+            true
+        }
+        None => false,
+    }
+}
+
 /// Drains console output of a world into `out`.
 ///
 /// Returns the number of bytes copied (0 when nothing is pending).

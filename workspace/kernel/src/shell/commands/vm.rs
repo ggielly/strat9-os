@@ -471,6 +471,123 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
     }
 }
 
+/// Writes raw bytes to a scheme device file.
+fn write_bytes(path: &str, bytes: &[u8]) -> Result<usize, ShellError> {
+    let fd = vfs::open(path, OpenFlags::WRITE).map_err(|_| ShellError::ExecutionFailed)?;
+    let written = vfs::write(fd, bytes).map_err(|_| ShellError::ExecutionFailed);
+    let _ = vfs::close(fd);
+    written
+}
+
+/// `vm dos <open [seabios]|run [seconds] [keys=<text>]|text|close>` : live DOS session.
+///
+/// The DOS world stays mapped between commands: `vm dos run` enters it for a
+/// bounded slice, `vm send <id> <text>` queues keyboard input for the next
+/// slice and `vm console <id>` shows the screen the last slice produced.
+fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
+    use crate::s9vm::dosboot;
+    let sub = args.first().map(|arg| arg.as_str()).unwrap_or("run");
+    let caps = crate::s9vm::detect().unwrap_or_default();
+    match sub {
+        "open" | "boot" => {
+            if !caps.can_run() {
+                shell_println!("vm: DOS session needs VT-x and unrestricted guest");
+                return Ok(());
+            }
+            let firmware = if args.iter().skip(1).any(|arg| arg == "seabios") {
+                dosboot::FirmwareKind::SeaBios
+            } else {
+                dosboot::FirmwareKind::Stub
+            };
+            match dosboot::dos_open(&caps, firmware, dosboot::freedos_image()) {
+                Ok(id) => {
+                    shell_println!(
+                        "vm: DOS session open on world {id}: `vm dos run`, `vm send {id} <text>`, \
+                         `vm console {id}`, `vm dos close`"
+                    );
+                    Ok(())
+                }
+                Err(error) => {
+                    shell_println!("vm: cannot open the DOS session: {:?}", error);
+                    Err(ShellError::ExecutionFailed)
+                }
+            }
+        }
+        "run" | "resume" => {
+            let Some(id) = dosboot::dos_world_id() else {
+                shell_println!("vm: no DOS session: run `vm dos open` first");
+                return Err(ShellError::ExecutionFailed);
+            };
+            let mut seconds = 2u64;
+            let mut keys: Vec<u8> = Vec::new();
+            for arg in args.iter().skip(1) {
+                if let Some(text) = arg.strip_prefix("keys=") {
+                    keys = unescape_keys(text);
+                } else if let Ok(value) = arg.parse::<u64>() {
+                    seconds = value;
+                }
+            }
+            if !keys.is_empty() {
+                // Same path as `vm send`: the runner types the queued bytes at
+                // the next entry.
+                let _ = write_bytes(&format!("{VMM_ROOT}/{id}/console"), &keys);
+            }
+            let limits = dosboot::RunLimits {
+                max_exits: dosboot::RunLimits::SHELL.max_exits,
+                max_nanoseconds: seconds.clamp(1, 10).saturating_mul(1_000_000_000),
+                stop_at_marker: false,
+            };
+            match dosboot::dos_run(&caps, limits) {
+                Ok(report) => {
+                    shell_println!(
+                        "vm: DOS slice: exits={} io={} bios={} hlt={} irq={} keys={} marker={:?}",
+                        report.total_exits,
+                        report.io_exits,
+                        report.bios_calls,
+                        report.halt_exits,
+                        report.interrupts_delivered,
+                        report.scancodes_typed,
+                        report.marker.map(|byte| byte as char)
+                    );
+                    if !report.text.is_empty() {
+                        shell_println!("vm: screen:\n{}", report.text.trim_end());
+                    }
+                    Ok(())
+                }
+                Err(error) => {
+                    shell_println!("vm: DOS slice failed: {:?}", error);
+                    Err(ShellError::ExecutionFailed)
+                }
+            }
+        }
+        "text" | "screen" => match dosboot::dos_text() {
+            Some(text) => {
+                shell_println!("{}", text.trim_end());
+                Ok(())
+            }
+            None => {
+                shell_println!("vm: no DOS session: run `vm dos open` first");
+                Err(ShellError::ExecutionFailed)
+            }
+        },
+        "close" | "stop" => {
+            if dosboot::dos_close() {
+                shell_println!("vm: DOS session closed");
+                Ok(())
+            } else {
+                shell_println!("vm: no DOS session to close");
+                Ok(())
+            }
+        }
+        _ => {
+            shell_println!(
+                "Usage: vm dos <open [seabios]|run [seconds] [keys=<text>]|text|close>"
+            );
+            Err(ShellError::InvalidArguments)
+        }
+    }
+}
+
 /// `vm diag` : everything needed to debug a VM-entry failure.
 ///
 /// A hardware "invalid guest state" does not name the rejected field. This
@@ -545,7 +662,7 @@ fn cmd_diag() -> Result<(), ShellError> {
     Ok(())
 }
 
-const VM_USAGE: &str = "Usage: vm <list|info <id>|start <id>|stop <id>|pause <id>|resume <id>|console <id>|send <id> <text>|test [seabios|hello] [dry|seconds] [keys=<text>]|diag>";
+const VM_USAGE: &str = "Usage: vm <list|info <id>|start <id>|stop <id>|pause <id>|resume <id>|console <id>|send <id> <text>|test [seabios|hello] [dry|seconds] [keys=<text>]|dos <open|run|text|close>|diag>";
 
 /// `vm` : manage the s9vm worlds through the `/dev/vmm` scheme.
 pub fn cmd_vm(args: &[String]) -> Result<(), ShellError> {
@@ -588,6 +705,7 @@ pub fn cmd_vm(args: &[String]) -> Result<(), ShellError> {
             }
         },
         "test" => cmd_test(&args[1..]),
+        "dos" => cmd_dos(&args[1..]),
         "diag" | "debug" => cmd_diag(),
         "help" | "-h" | "--help" => {
             shell_println!("{}", VM_USAGE);

@@ -596,7 +596,7 @@ fn run_firmware_with_limits(
 ) -> Result<DosReport, DosError> {
     require_real_mode(caps, firmware.label())?;
     let record = vm::create(world_name, 0).ok_or(DosError::VmFail(1))?;
-    let result = run_freedos_in_world(caps, record.id, limits, firmware, image, keys);
+    let result = run_freedos_in_world(caps, record.id, limits, firmware, image, keys, None);
     let _ = vm::destroy(record.id);
     result
 }
@@ -1340,6 +1340,41 @@ fn advance_past_exit(vcpu: &mut Vcpu, exit: &ExitInfo) -> Result<(), DosError> {
 }
 
 /// Block-device adapter over the world's virtio-blk image.
+/// Block-device adapter over the machine copy the DOS runner holds.
+///
+/// The runner takes the world's device model out of the registry while it runs
+/// (a live session keeps it between commands), so the disk image lives in that
+/// copy: the BIOS call borrows the image for its duration.
+struct MachineDisk<'a> {
+    image: &'a mut [u8],
+    sectors: u64,
+}
+
+impl bios::BiosDisk for MachineDisk<'_> {
+    fn sectors(&self) -> u64 {
+        self.sectors
+    }
+
+    fn read_sector(&mut self, sector: u64, out: &mut [u8; biosrom::SECTOR_SIZE]) -> bool {
+        if sector >= self.sectors {
+            return false;
+        }
+        let start = (sector as usize) * biosrom::SECTOR_SIZE;
+        out.copy_from_slice(&self.image[start..start + biosrom::SECTOR_SIZE]);
+        true
+    }
+
+    fn write_sector(&mut self, sector: u64, data: &[u8; biosrom::SECTOR_SIZE]) -> bool {
+        if sector >= self.sectors {
+            return false;
+        }
+        let start = (sector as usize) * biosrom::SECTOR_SIZE;
+        self.image[start..start + biosrom::SECTOR_SIZE].copy_from_slice(data);
+        true
+    }
+}
+
+/// Block-device adapter over the registry copy of a world's disk.
 struct WorldDisk {
     world_id: u64,
     sectors: u64,
@@ -1545,6 +1580,186 @@ fn verify_demo(report: &DosReport) -> Result<(), DosError> {
     Ok(())
 }
 
+/// Applies the firmware-specific device configuration to a DOS machine.
+///
+/// The SeaBIOS world uses the legacy PC device set: no PCI virtio functions, a
+/// floppy loaded into the controller and the CMOS fields the firmware reads.
+/// The stub-firmware world is a PC clone whose 8259 pair is programmed the way
+/// a firmware leaves it, so the guest receives real `IRQ0`/`IRQ1` instead of
+/// polling the BIOS.
+fn configure_dos_machine(machine: &mut Machine, firmware: FirmwareKind, image: &'static [u8]) {
+    if !firmware.is_seabios() {
+        machine.devices_mut().set_legacy_pic(true);
+        machine.devices_mut().pic = crate::s9vm::pic::Pic::bios_default();
+        return;
+    }
+    let config = firmware::FirmwareConfig::freedos();
+    let (extmem_low, extmem_high) = config.extmem_cmos();
+    machine.devices_mut().set_legacy_pic(true);
+    machine.devices_mut().load_floppy(image);
+    machine
+        .devices_mut()
+        .add_fw_cfg_file("vgaroms/vgabios-stdvga.bin", firmware::seabios_vga_rom());
+    machine
+        .devices_mut()
+        .rtc
+        .set_ram(firmware::CMOS_FLOPPY_TYPE, config.cmos_floppy_type);
+    machine
+        .devices_mut()
+        .rtc
+        .set_ram(firmware::CMOS_EXTMEM_LOW, extmem_low);
+    machine
+        .devices_mut()
+        .rtc
+        .set_ram(firmware::CMOS_EXTMEM_HIGH, extmem_high);
+    // QEMU-mode SeaBIOS reads its default boot order from CMOS: the low nibble
+    // of 0x3D is the first device (1 = floppy), and 0x38 bit 0 would skip the
+    // boot-sector signature check (it stays clear).
+    machine.devices_mut().rtc.set_ram(firmware::CMOS_BOOTFLAG1, 0);
+    machine
+        .devices_mut()
+        .rtc
+        .set_ram(firmware::CMOS_BOOTFLAG2, firmware::BOOT_ORDER_FLOPPY_FIRST);
+}
+
+/// A DOS world kept alive between two shell commands.
+///
+/// The engine is synchronous: `vm dos run` enters the guest for a bounded
+/// slice, returns to the shell, and the next command resumes the same machine.
+/// Keeping the vCPU, the device model and the BIOS state makes the prompt
+/// interactive without a background task: `vm send <id> <text>` queues keys
+/// between two runs and `vm console <id>` shows the screen the last run left.
+pub struct DosSession {
+    world_id: u64,
+    disk_sectors: u64,
+    firmware: FirmwareKind,
+    image: &'static [u8],
+    /// Control block of the session vCPU; `None` only after an internal error.
+    vcpu: Option<Vcpu>,
+    /// BIOS model state (video mode, cursor, keyboard buffer, tick count).
+    bios_state: bios::BiosState,
+    /// Scancodes typed by the host but not delivered to the guest yet.
+    pending_keys: Vec<u8>,
+}
+
+// SAFETY: a session is only touched by the shell task, and its control block is
+// cleared (VMCLEAR) before the session is stored, so no CPU-local VT-x state
+// survives a migration of that task to another core.
+unsafe impl Send for DosSession {}
+
+static DOS_SESSION: crate::sync::SpinLock<Option<DosSession>> = crate::sync::SpinLock::new(None);
+
+/// Opens a live DOS world for the interactive `vm dos` commands.
+///
+/// The world is created, its memory mapped, the floppy attached and the
+/// firmware installed now; the guest is not entered until [`dos_run`].
+pub fn dos_open(
+    caps: &HwCaps,
+    firmware: FirmwareKind,
+    image: &'static [u8],
+) -> Result<u64, DosError> {
+    require_real_mode(caps, firmware.label())?;
+    if DOS_SESSION.lock().is_some() {
+        return Err(DosError::BadExit("a DOS session is already open"));
+    }
+    let record = vm::create(b"s9vm-dos-session", 0).ok_or(DosError::VmFail(1))?;
+    let world_id = record.id;
+    let setup = (|| -> Result<DosSession, DosError> {
+        let disk_sectors = map_and_load_freedos(caps, world_id, firmware, image)?;
+        install_freedos_artefacts(world_id, firmware, image)?;
+        let pointer = vm::second_level_pointer(world_id, caps).map_err(|_| DosError::VmFail(6))?;
+        let vcpu = Vcpu::new(caps, pointer)?;
+        let mut machine = vm::take_machine(world_id).ok_or(DosError::VmFail(7))?;
+        configure_dos_machine(&mut machine, firmware, image);
+        if !vm::store_machine(world_id, machine) {
+            return Err(DosError::VmFail(2));
+        }
+        Ok(DosSession {
+            world_id,
+            disk_sectors,
+            firmware,
+            image,
+            vcpu: Some(vcpu),
+            bios_state: bios::BiosState::new(),
+            pending_keys: Vec::new(),
+        })
+    })();
+    match setup {
+        Ok(session) => {
+            *DOS_SESSION.lock() = Some(session);
+            Ok(world_id)
+        }
+        Err(error) => {
+            let _ = vm::destroy(world_id);
+            Err(error)
+        }
+    }
+}
+
+/// World identifier of the open session, if any.
+pub fn dos_world_id() -> Option<u64> {
+    DOS_SESSION.lock().as_ref().map(|session| session.world_id)
+}
+
+/// Runs the live DOS session for one bounded slice and returns its report.
+///
+/// Console input queued by `vm send <id> <text>` is typed into the guest
+/// keyboard, and the VGA text the run produced becomes the world's console
+/// output, so a following `vm console <id>` shows the screen.
+pub fn dos_run(caps: &HwCaps, limits: RunLimits) -> Result<DosReport, DosError> {
+    let mut session = match DOS_SESSION.lock().take() {
+        Some(session) => session,
+        None => return Err(DosError::BadExit("no DOS session: run `vm dos open` first")),
+    };
+    let world_id = session.world_id;
+    let mut keys = session.pending_keys.clone();
+    keys.extend_from_slice(&vm::take_console_input(world_id));
+    session.pending_keys.clear();
+    let result = run_freedos_in_world(
+        caps,
+        world_id,
+        limits,
+        session.firmware,
+        session.image,
+        &keys,
+        Some(&mut session),
+    );
+    if session.vcpu.is_some() {
+        *DOS_SESSION.lock() = Some(session);
+    } else {
+        // The run failed before the vCPU was returned: keep the world from
+        // leaking into the registry while its session is gone.
+        let _ = vm::destroy(world_id);
+    }
+    let report = result?;
+    let _ = vm::set_console_output(world_id, report.text.as_bytes());
+    Ok(report)
+}
+
+/// Current VGA text of the open session.
+pub fn dos_text() -> Option<String> {
+    let world_id = DOS_SESSION.lock().as_ref().map(|session| session.world_id)?;
+    let mut memory = WorldMemory::new(world_id);
+    Some(bios::read_text(&mut memory))
+}
+
+/// Closes the live session and destroys its world.
+pub fn dos_close() -> bool {
+    let Some(mut session) = DOS_SESSION.lock().take() else {
+        return false;
+    };
+    if let Some(mut vcpu) = session.vcpu.take() {
+        // The control block was cleared at the end of the last slice.
+        // SAFETY: VT-x is active while the shell runs; clear is a no-op when
+        // the block is already unloaded.
+        unsafe {
+            let _ = vcpu.clear();
+        }
+    }
+    let _ = vm::destroy(session.world_id);
+    true
+}
+
 /// Body of a full FreeDOS boot; the caller owns and destroys the world.
 ///
 /// # Exit routing
@@ -1567,46 +1782,50 @@ fn run_freedos_in_world(
     firmware: FirmwareKind,
     image: &'static [u8],
     keys: &[u8],
+    session: Option<&mut DosSession>,
 ) -> Result<DosReport, DosError> {
     // Timestamp origin of the whole launch, before the first world mapping.
     // The run budget has its own origin later; this one measures preparation
     // (mapping, firmware copy, vCPU setup) as well as execution.
     let launch_tsc = unsafe { core::arch::x86_64::_rdtsc() };
     let tsc_hz = crate::s9vm::tsc::get().map_or(FALLBACK_TSC_HZ, |frequency| frequency.hz());
-    let disk_sectors = map_and_load_freedos(caps, world_id, firmware, image)?;
-    log::info!(
-        "[s9vm] {}: memory + disk ready at {} ms",
-        firmware.label(),
-        elapsed_millis(launch_tsc, tsc_hz)
-    );
-    install_freedos_artefacts(world_id, firmware, image)?;
-    log::info!(
-        "[s9vm] {}: firmware installed at {} ms",
-        firmware.label(),
-        elapsed_millis(launch_tsc, tsc_hz)
-    );
-    let mut memory = WorldMemory::new(world_id);
-
-    // Detached vCPU: the run loop drives it directly, no scheduler.
+    let mut session = session;
+    let resuming = session.is_some();
+    // Second-level tables of the world: needed by the device fast path whether
+    // the world is freshly prepared or resumed.
     let pointer = vm::second_level_pointer(world_id, caps).map_err(|_| DosError::VmFail(6))?;
-    let mut vcpu = Vcpu::new(caps, pointer)?;
-    let guest = match firmware {
-        FirmwareKind::Stub => GuestState::real_mode(
-            u64::from(biosrom::BOOT_SECTOR_GPA),
-            u64::from(biosrom::BOOT_STACK_TOP),
-        ),
-        FirmwareKind::SeaBios => {
-            // Architectural reset state: `CS=F000`, `IP=FFF0` (linear
-            // `0xFFFF0`), which is the far jump at the end of the BIOS image.
-            let mut state = GuestState::real_mode(
-                u64::from(firmware::RESET_IP),
-                u64::from(biosrom::BOOT_STACK_TOP),
+    // A resumed session already owns its mapped world, its firmware image, its
+    // disk and its vCPU: only a fresh boot prepares those.
+    let (disk_sectors, mut vcpu, mut bios_state, mut machine) =
+        if let Some(session) = session.as_deref_mut() {
+            let vcpu = session
+                .vcpu
+                .take()
+                .ok_or(DosError::BadExit("DOS session without a vCPU"))?;
+            let machine = vm::take_machine(world_id).ok_or(DosError::VmFail(7))?;
+            let bios_state = core::mem::replace(&mut session.bios_state, bios::BiosState::new());
+            let disk_sectors = session.disk_sectors;
+            (disk_sectors, vcpu, bios_state, machine)
+        } else {
+            let disk_sectors = map_and_load_freedos(caps, world_id, firmware, image)?;
+            log::info!(
+                "[s9vm] {}: memory + disk ready at {} ms",
+                firmware.label(),
+                elapsed_millis(launch_tsc, tsc_hz)
             );
-            state.cs.selector = firmware::RESET_SEGMENT;
-            state.cs.base = u64::from(firmware::RESET_SEGMENT) << 4;
-            state
-        }
-    };
+            install_freedos_artefacts(world_id, firmware, image)?;
+            log::info!(
+                "[s9vm] {}: firmware installed at {} ms",
+                firmware.label(),
+                elapsed_millis(launch_tsc, tsc_hz)
+            );
+            // Detached vCPU: the run loop drives it directly, no scheduler.
+            let vcpu = Vcpu::new(caps, pointer)?;
+            let mut machine = vm::take_machine(world_id).ok_or(DosError::VmFail(7))?;
+            configure_dos_machine(&mut machine, firmware, image);
+            (disk_sectors, vcpu, bios::BiosState::new(), machine)
+        };
+    let mut memory = WorldMemory::new(world_id);
     // Pin the task to this CPU before the VMCS is loaded: the STI window of
     // `service_pending_host_interrupts` lets the timer interrupt run, and
     // without this guard it could migrate the task while the VMCS is active on
@@ -1622,7 +1841,34 @@ fn run_freedos_in_world(
     unsafe {
         vcpu.load()?;
         vcpu.configure_host()?;
-        vcpu.configure(caps, &guest)?;
+        if vcpu.entered() {
+            // The guest already ran on this control block: import the
+            // architectural state the processor saved on the last exit and
+            // reconfigure from it, so a resumed session continues exactly
+            // where the previous slice stopped (same rule as the RUN path).
+            vcpu.refresh_system_state()?;
+            let guest = *vcpu.guest();
+            vcpu.configure(caps, &guest)?;
+        } else {
+            let guest = match firmware {
+                FirmwareKind::Stub => GuestState::real_mode(
+                    u64::from(biosrom::BOOT_SECTOR_GPA),
+                    u64::from(biosrom::BOOT_STACK_TOP),
+                ),
+                FirmwareKind::SeaBios => {
+                    // Architectural reset state: `CS=F000`, `IP=FFF0` (linear
+                    // `0xFFFF0`), the far jump at the end of the BIOS image.
+                    let mut state = GuestState::real_mode(
+                        u64::from(firmware::RESET_IP),
+                        u64::from(biosrom::BOOT_STACK_TOP),
+                    );
+                    state.cs.selector = firmware::RESET_SEGMENT;
+                    state.cs.base = u64::from(firmware::RESET_SEGMENT) << 4;
+                    state
+                }
+            };
+            vcpu.configure(caps, &guest)?;
+        }
         vcpu.set_preemption_timer_ticks(if firmware.is_seabios() {
             SEABIOS_PREEMPTION_SLICE_TICKS
         } else {
@@ -1630,14 +1876,15 @@ fn run_freedos_in_world(
         });
     }
     log::info!(
-        "[s9vm] {}: entering {} guest at {:#x} ({} ms)",
+        "[s9vm] {}: {} {} guest at {:#x} ({} ms)",
         firmware.label(),
+        if resuming { "resuming" } else { "entering" },
         if firmware.is_seabios() {
             "real-firmware"
         } else {
             "real-mode"
         },
-        guest.rip,
+        vcpu.guest().rip,
         elapsed_millis(launch_tsc, tsc_hz)
     );
 
@@ -1645,55 +1892,6 @@ fn run_freedos_in_world(
     if firmware.is_seabios() {
         report.boot_sector_gpa = u64::from(firmware::RESET_LINEAR);
         report.entry = u64::from(firmware::RESET_LINEAR);
-    }
-    let mut world_disk = WorldDisk::new(world_id, disk_sectors);
-    let mut bios_state = bios::BiosState::new();
-    // Chipset model of this world plus the local APIC its legacy devices signal
-    // through, exactly like the other kernel guest phases. The SeaBIOS world
-    // uses the legacy PC device set: no PCI virtio functions, and ISA
-    // interrupts delivered through the 8259 pair.
-    let mut machine = if firmware.is_seabios() {
-        Machine::new_legacy()
-    } else {
-        Machine::new()
-    };
-    if !firmware.is_seabios() {
-        // The stub-firmware world is a PC clone: the 8259 pair is programmed
-        // the way a firmware leaves it (vectors 0x08/0x70, timer and keyboard
-        // lines live), so the guest receives real `IRQ0`/`IRQ1` instead of
-        // polling the BIOS. The runner pumps those requests; see
-        // [`pump_dos_interrupts`].
-        machine.devices_mut().set_legacy_pic(true);
-        machine.devices_mut().pic = crate::s9vm::pic::Pic::bios_default();
-    }
-    if firmware.is_seabios() {
-        let config = firmware::FirmwareConfig::freedos();
-        let (extmem_low, extmem_high) = config.extmem_cmos();
-        machine.devices_mut().set_legacy_pic(true);
-        machine.devices_mut().load_floppy(image);
-        machine
-            .devices_mut()
-            .add_fw_cfg_file("vgaroms/vgabios-stdvga.bin", firmware::seabios_vga_rom());
-        machine
-            .devices_mut()
-            .rtc
-            .set_ram(firmware::CMOS_FLOPPY_TYPE, config.cmos_floppy_type);
-        machine
-            .devices_mut()
-            .rtc
-            .set_ram(firmware::CMOS_EXTMEM_LOW, extmem_low);
-        machine
-            .devices_mut()
-            .rtc
-            .set_ram(firmware::CMOS_EXTMEM_HIGH, extmem_high);
-        // QEMU-mode SeaBIOS reads its default boot order from CMOS: the low
-        // nibble of 0x3D is the first device (1 = floppy), and 0x38 bit 0
-        // would skip the boot-sector signature check (it stays clear).
-        machine.devices_mut().rtc.set_ram(firmware::CMOS_BOOTFLAG1, 0);
-        machine
-            .devices_mut()
-            .rtc
-            .set_ram(firmware::CMOS_BOOTFLAG2, firmware::BOOT_ORDER_FLOPPY_FIRST);
     }
     // Host text typed into the guest keyboard once the guest owns `INT 9`.
     let mut keyboard_feed = KeyboardFeed::new(keys);
@@ -1875,7 +2073,21 @@ fn run_freedos_in_world(
                         break;
                     }
                     let request = (registers.ax, registers.bx, registers.cx, registers.dx);
-                    let _ = bios_state.handle(vector, &mut registers, &mut memory, &mut world_disk);
+                    {
+                        // The machine is held by this runner, so the disk
+                        // adapter borrows its image instead of going through
+                        // the registry (which holds a placeholder while the
+                        // session runs).
+                        let image = machine.devices_mut().blk.disk_mut();
+                        let sectors = (image.len() / biosrom::SECTOR_SIZE) as u64;
+                        let mut disk = MachineDisk { image, sectors };
+                        let _ = bios_state.handle(
+                            vector,
+                            &mut registers,
+                            &mut memory,
+                            &mut disk,
+                        );
+                    }
                     write_bios_registers(&mut vcpu, &registers);
                     // A platform interrupt (`IRQ0..IRQ7`, master vectors
                     // `0x08..=0x0F`, or the slave's `0x70..=0x77`) reaches the
@@ -2223,6 +2435,9 @@ fn run_freedos_in_world(
     unsafe {
         let _ = vcpu.clear();
     }
+    // Entry state of the run that just ended, used by the budget diagnostics
+    // below and by the session hand-over.
+    let final_rip = vcpu.guest().rip;
     if firmware.is_seabios() {
         let debug_con = machine.devices_mut().drain_debug_con();
         if !debug_con.is_empty() {
@@ -2260,6 +2475,15 @@ fn run_freedos_in_world(
             elapsed_millis(launch_tsc, tsc_hz)
         );
     }
+    // Hand the machine back to a live session (or drop it with the world of a
+    // fresh boot). The vCPU is stored only after its control block was
+    // cleared, so the session can be resumed from another task or core.
+    if let Some(session) = session.as_deref_mut() {
+        session.vcpu = Some(vcpu);
+        session.bios_state = bios_state;
+        session.pending_keys = keyboard_feed.scancodes[keyboard_feed.next..].to_vec();
+        let _ = vm::store_machine(world_id, machine);
+    }
     outcome?;
     if unhandled_ports != 0 {
         log::info!(
@@ -2275,7 +2499,7 @@ fn run_freedos_in_world(
              rip {:#x})",
             report.marker,
             text.len(),
-            vcpu.guest().rip
+            final_rip
         );
     }
     report.text = bios::read_text(&mut memory);
