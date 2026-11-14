@@ -199,6 +199,12 @@ fn keyboard_controller_replies_come_before_scancodes() {
     assert_eq!(controller.read(keyboard::DATA_PORT), Some(0xAB));
     assert_eq!(controller.read(keyboard::DATA_PORT), Some(0x83));
     assert_eq!(controller.read(keyboard::DATA_PORT), Some(0x1E));
+    // The diagnostics distinguish what the guest actually read: three replies
+    // and one scancode here. A driver that never reads `0x60` stays at zero,
+    // which is how a hardware run is diagnosed from the model side.
+    assert_eq!(controller.data_reads(), 4);
+    assert_eq!(controller.reply_reads(), 3);
+    assert_eq!(controller.scancode_reads(), 1);
 }
 
 #[test]

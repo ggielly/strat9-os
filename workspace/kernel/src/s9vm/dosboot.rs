@@ -126,7 +126,7 @@ use crate::s9vm::{
     firmware,
     guest::GuestState,
     keyboard,
-    keyfeed::KeyboardFeed,
+    keyfeed::{Key, KeyboardFeed},
     machine::Machine,
     vcpu::{ExitInfo, Vcpu, VcpuError},
     vm,
@@ -1785,10 +1785,12 @@ pub struct DosSession {
     vcpu: Option<Vcpu>,
     /// BIOS model state (video mode, cursor, keyboard buffer, tick count).
     bios_state: bios::BiosState,
-    /// Scancodes typed by the host but not accepted by the 8042 model yet.
-    pending_scancodes: Vec<u8>,
-    /// `(scan, ASCII)` pairs the firmware keyboard buffer has not received yet.
-    pending_buffer_keys: Vec<(u8, u8)>,
+    /// Keys typed by the host but not delivered to the guest yet.
+    ///
+    /// Whole keys, because the 8042 and the firmware buffer consume the same
+    /// stream through one cursor: storing the two views separately left a
+    /// phantom remainder in whichever view was not used.
+    pending_keys: Vec<Key>,
     /// Number of slices entered since the session was opened.
     slices: u32,
     /// Autoexec marker seen by any slice.
@@ -1883,8 +1885,7 @@ fn dos_open_prepared(
             image,
             vcpu: Some(vcpu),
             bios_state: bios::BiosState::new(),
-            pending_scancodes: Vec::new(),
-            pending_buffer_keys: Vec::new(),
+            pending_keys: Vec::new(),
             slices: 0,
             marker_seen: false,
             last_exits: 0,
@@ -1916,7 +1917,7 @@ pub fn dos_status() -> Option<DosSessionStatus> {
         world_id: session.world_id,
         slices: session.slices,
         marker_seen: session.marker_seen,
-        pending_keys: session.pending_scancodes.len() + session.pending_buffer_keys.len(),
+        pending_keys: session.pending_keys.len(),
         last_exits: session.last_exits,
         last_irq: session.last_irq,
         last_keys: session.last_keys,
@@ -1937,10 +1938,8 @@ pub struct DosMachineState {
     pub slices: u32,
     /// True once the AUTOEXEC marker was observed.
     pub marker_seen: bool,
-    /// Scancodes waiting for the 8042.
-    pub pending_scancodes: usize,
-    /// Keyboard-buffer entries waiting for the firmware service.
-    pub pending_buffer_keys: usize,
+    /// Keys waiting to be typed into the guest, whichever path serves them.
+    pub pending_keys: usize,
     /// True when the guest installed its own `INT 9` handler.
     pub guest_owns_int9: bool,
     /// True when the guest installed its own `INT 16h` handler.
@@ -1959,6 +1958,12 @@ pub struct DosMachineState {
     pub pic_slave_imr: u8,
     /// Scancodes queued inside the 8042 model.
     pub controller_scancodes: u8,
+    /// Number of data-port reads the guest performed on the 8042.
+    pub controller_reads: u32,
+    /// Of those reads, how many were answered from the controller reply queue.
+    pub controller_reply_reads: u32,
+    /// Of those reads, how many were answered from the host scancode queue.
+    pub controller_scancode_reads: u32,
     /// True while the 8254 keeps `IRQ0` asserted.
     pub pit_irq_level: bool,
     /// BDA keyboard-ring head offset (`0x041A`).
@@ -1981,8 +1986,7 @@ pub fn dos_machine_state() -> Result<DosMachineState, DosError> {
         .as_ref()
         .map(|vcpu| (vcpu.guest().cs.selector, vcpu.guest().rip as u16))
         .unwrap_or((0, 0));
-    let pending_scancodes = session.pending_scancodes.len();
-    let pending_buffer_keys = session.pending_buffer_keys.len();
+    let pending_keys = session.pending_keys.len();
     let slices = session.slices;
     let marker_seen = session.marker_seen;
     // The device model lives in the registry between slices, so it has to be
@@ -1995,8 +1999,7 @@ pub fn dos_machine_state() -> Result<DosMachineState, DosError> {
         world_id,
         slices,
         marker_seen,
-        pending_scancodes,
-        pending_buffer_keys,
+        pending_keys,
         guest_owns_int9,
         guest_owns_int16,
         cs,
@@ -2006,6 +2009,9 @@ pub fn dos_machine_state() -> Result<DosMachineState, DosError> {
         pic_master_isr: machine.devices().pic.master().isr(),
         pic_slave_imr: machine.devices().pic.slave().mask(),
         controller_scancodes: machine.devices().keyboard.pending_scancodes(),
+        controller_reads: machine.devices().keyboard.data_reads(),
+        controller_reply_reads: machine.devices().keyboard.reply_reads(),
+        controller_scancode_reads: machine.devices().keyboard.scancode_reads(),
         pit_irq_level: machine.devices().pit.irq_level(),
         bda_head: read_bda_word(&mut memory, bios::BDA_KEYBOARD_HEAD),
         bda_tail: read_bda_word(&mut memory, bios::BDA_KEYBOARD_TAIL),
@@ -2040,10 +2046,7 @@ pub fn dos_run(caps: &HwCaps, limits: RunLimits) -> Result<DosReport, DosError> 
     // Continue exactly where the previous slice stopped for each keyboard
     // consumer, then append whatever the console queued since (the same path
     // as `vm send`).
-    let mut keyboard_feed = KeyboardFeed::from_pending(
-        core::mem::take(&mut session.pending_scancodes),
-        core::mem::take(&mut session.pending_buffer_keys),
-    );
+    let mut keyboard_feed = KeyboardFeed::from_pending(core::mem::take(&mut session.pending_keys));
     keyboard_feed.extend(&vm::take_console_input(world_id));
     let result = run_freedos_in_world(
         caps,
@@ -2128,8 +2131,8 @@ fn log_session_diagnostics(report: &DosReport, stage: &str) {
     match dos_machine_state() {
         Ok(state) => log::info!(
             "[s9vm] freedos-session {}: cs:ip={:04x}:{:04x} int9={} int16={} pic \
-             imr={:#04x} irr={:#04x} isr={:#04x} 8042={} pit={} bda={:#06x}/{:#06x} \
-             pending_keys={}+{}",
+             imr={:#04x} irr={:#04x} isr={:#04x} 8042={} reads={} (replies {}, scancodes {}) \
+             pit={} bda={:#06x}/{:#06x} pending_keys={}",
             stage,
             state.cs,
             state.ip,
@@ -2147,11 +2150,13 @@ fn log_session_diagnostics(report: &DosReport, stage: &str) {
             state.pic_master_irr,
             state.pic_master_isr,
             state.controller_scancodes,
+            state.controller_reads,
+            state.controller_reply_reads,
+            state.controller_scancode_reads,
             state.pit_irq_level,
             state.bda_head,
             state.bda_tail,
-            state.pending_scancodes,
-            state.pending_buffer_keys
+            state.pending_keys
         ),
         Err(error) => log::warn!(
             "[s9vm] freedos-session {}: machine state unavailable: {:?}",
@@ -2366,32 +2371,41 @@ pub fn run_freedos_session_dry(caps: &HwCaps) -> Result<(), DosError> {
                 "up arrow did not produce the extended scan sequence",
             ));
         }
-        // Slice hand-over: the two keyboard consumers stop at different
-        // points, so both remainders must be carried verbatim. Rebuilding the
-        // feed from the original text would re-type keys the guest already
-        // received (that bug made multi-slice typing unreliable).
+        // Slice hand-over: whole keys are carried, so a make/break pair cannot
+        // be split and a key the guest already received is never replayed. The
+        // two consumers are alternatives (8042 once the guest owns `INT 9`,
+        // firmware buffer before that), which is why one cursor serves both.
         let mut partial = KeyboardFeed::new(b"ab");
-        partial.next = 1;
-        partial.next_key = 1;
-        let expected_scancodes = partial.scancodes[1..].to_vec();
-        let expected_keys = partial.keys[1..].to_vec();
-        let mut resumed = KeyboardFeed::from_pending(
-            partial.scancodes[1..].to_vec(),
-            partial.keys[1..].to_vec(),
-        );
-        if resumed.scancodes != expected_scancodes
-            || resumed.keys != expected_keys
-            || resumed.remaining() == 0
+        let mut controller = keyboard::KeyboardController::new();
+        if partial.fill(&mut controller, 2) != 2 || partial.remaining() != 1 {
+            let _ = vm::store_machine(world_id, machine);
+            return Err(DosError::BadExit(
+                "the 8042 path did not stop on a whole key",
+            ));
+        }
+        let mut resumed = KeyboardFeed::from_pending(partial.remaining_keys());
+        if resumed.remaining() != 1 {
+            let _ = vm::store_machine(world_id, machine);
+            return Err(DosError::BadExit(
+                "the keyboard hand-over did not carry the remaining key",
+            ));
+        }
+        // The same remaining key can be served by either consumer.
+        if resumed.fill_bios(&mut bios_state, 1) != 1
+            || bios_state.keyboard.back() != Some(&(0, b'b'))
         {
             let _ = vm::store_machine(world_id, machine);
             return Err(DosError::BadExit(
-                "keyboard remainders did not survive the slice hand-over",
+                "the resumed key did not reach the firmware buffer",
             ));
         }
         resumed.extend(b"c");
-        if resumed.keys.last() != Some(&(0, b'c')) || resumed.next != 0 || resumed.next_key != 0 {
+        let mut controller = keyboard::KeyboardController::new();
+        if resumed.remaining() != 1 || resumed.fill(&mut controller, 8) != 2 {
             let _ = vm::store_machine(world_id, machine);
-            return Err(DosError::BadExit("resumed keyboard feed did not accept new text"));
+            return Err(DosError::BadExit(
+                "the resumed feed did not type the appended key on the 8042 path",
+            ));
         }
         let mut feed = KeyboardFeed::new(&[0x80]);
         if feed.fill_bios(&mut bios_state, 1) != 1
@@ -3345,8 +3359,7 @@ fn run_freedos_in_world(
     if let Some(session) = session.as_deref_mut() {
         session.vcpu = Some(vcpu);
         session.bios_state = bios_state;
-        session.pending_scancodes = keyboard_feed.scancodes[keyboard_feed.next..].to_vec();
-        session.pending_buffer_keys = keyboard_feed.keys[keyboard_feed.next_key..].to_vec();
+        session.pending_keys = keyboard_feed.remaining_keys();
         session.slices = session.slices.saturating_add(1);
         session.marker_seen |= report.marker == Some(SUCCESS_MARKER);
         session.last_exits = report.total_exits;
@@ -3354,15 +3367,22 @@ fn run_freedos_in_world(
         session.last_keys = report.scancodes_typed;
         // Explain a slice where the host keys never reached the guest: the
         // two gates are the guest's own INT 9 handler and the 8259 mask.
-        if !session.pending_scancodes.is_empty() || !session.pending_buffer_keys.is_empty() {
+        if !session.pending_keys.is_empty() {
             let owns = guest_owns_vector(&mut memory, 0x09);
             let masked = machine.devices().pic.master().mask() & 0x02 != 0;
             log::warn!(
-                "[s9vm] {}: {} host scancode(s) not typed (guest INT 9 owner: {}, IRQ1 masked: {})",
+                "[s9vm] {}: {} host key(s) not typed (guest INT 9 owner: {}, IRQ1 masked: {}, \
+                 8042 queued: {}, 8042 reads: {} (replies {}, scancodes {}), BDA tail: \
+                 {:#06x})",
                 firmware.label(),
-                session.pending_scancodes.len() + session.pending_buffer_keys.len(),
+                session.pending_keys.len(),
                 owns,
-                masked
+                masked,
+                machine.devices().keyboard.pending_scancodes(),
+                machine.devices().keyboard.data_reads(),
+                machine.devices().keyboard.reply_reads(),
+                machine.devices().keyboard.scancode_reads(),
+                read_bda_word(&mut memory, bios::BDA_KEYBOARD_TAIL)
             );
         }
         let _ = vm::store_machine(world_id, machine);

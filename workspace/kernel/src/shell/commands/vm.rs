@@ -841,14 +841,11 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
                 // One read-only snapshot of the machine, so a failing hardware
                 // run can be diagnosed without hunting through the kernel log.
                 shell_println!(
-                    "vm: DOS state on world {}: slices={} marker={} pending_keys={} \
-                     (scancodes={} buffer={})",
+                    "vm: DOS state on world {}: slices={} marker={} pending_keys={}",
                     state.world_id,
                     state.slices,
                     state.marker_seen,
-                    state.pending_scancodes + state.pending_buffer_keys,
-                    state.pending_scancodes,
-                    state.pending_buffer_keys
+                    state.pending_keys
                 );
                 shell_println!(
                     "vm: guest {:04x}:{:04x}  INT 9 owner={}  INT 16h owner={}",
@@ -873,9 +870,12 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
                     state.pic_slave_imr
                 );
                 shell_println!(
-                    "vm: 8042 queued={}  PIT IRQ0={}  BDA head={:#06x} tail={:#06x} \
-                     cursor=({}, {})",
+                    "vm: 8042 queued={} reads={} (replies {}, scancodes {})  PIT IRQ0={}  \
+                     BDA head={:#06x} tail={:#06x} cursor=({}, {})",
                     state.controller_scancodes,
+                    state.controller_reads,
+                    state.controller_reply_reads,
+                    state.controller_scancode_reads,
                     state.pit_irq_level,
                     state.bda_head,
                     state.bda_tail,

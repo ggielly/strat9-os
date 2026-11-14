@@ -109,6 +109,15 @@ pub struct KeyboardController {
     input_len: u8,
     /// Last command written to port `0x64`.
     last_command: u8,
+    /// Number of data-port reads the guest performed (diagnostics only).
+    ///
+    /// A guest that queues scancodes but never reads `0x60` is the difference
+    /// between "the interrupt never arrived" and "the handler read the port".
+    data_reads: u32,
+    /// Reads of `0x60` answered from the controller reply queue (diagnostics).
+    reply_reads: u32,
+    /// Reads of `0x60` answered from the host scancode queue (diagnostics).
+    scancode_reads: u32,
     /// Next data-port write goes to the controller output port, not the
     /// keyboard (set by command `0xD1`).
     output_port_write: bool,
@@ -126,6 +135,9 @@ impl KeyboardController {
             input: [0; INPUT_CAPACITY],
             input_len: 0,
             last_command: 0,
+            data_reads: 0,
+            reply_reads: 0,
+            scancode_reads: 0,
             output_port_write: false,
             controller_data: false,
         }
@@ -159,11 +171,14 @@ impl KeyboardController {
     pub fn read(&mut self, port: u16) -> Option<u8> {
         match port {
             DATA_PORT => {
+                self.data_reads = self.data_reads.saturating_add(1);
                 if self.output_len != 0 {
                     let value = self.output[0];
+                    self.reply_reads = self.reply_reads.saturating_add(1);
                     self.pop_front();
                     Some(value)
                 } else if self.input_len != 0 {
+                    self.scancode_reads = self.scancode_reads.saturating_add(1);
                     // The host reuses the same output buffer for scancodes: a
                     // real controller only has one byte path to the guest.
                     let value = self.input[0];
@@ -185,6 +200,21 @@ impl KeyboardController {
             STATUS_PORT => self.write_command(value),
             _ => {}
         }
+    }
+
+    /// Number of data-port reads observed so far (diagnostics only).
+    pub const fn data_reads(&self) -> u32 {
+        self.data_reads
+    }
+
+    /// Reads of `0x60` answered from the controller reply queue.
+    pub const fn reply_reads(&self) -> u32 {
+        self.reply_reads
+    }
+
+    /// Reads of `0x60` answered from the host scancode queue.
+    pub const fn scancode_reads(&self) -> u32 {
+        self.scancode_reads
     }
 
     /// Last command written to the status port (diagnostics).

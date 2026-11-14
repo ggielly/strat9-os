@@ -22,18 +22,21 @@
 
 //! Host keystrokes waiting to be typed into a DOS guest.
 //!
-//! The text is translated to PS/2 set-1 scancodes once, then handed to the 8042
-//! model only after the guest owns `INT 9` and has unmasked `IRQ1`: before that
-//! the guest is still probing the controller and could mistake a scancode for a
-//! command reply. Each typed byte also yields the `(scan, ASCII)` pair the
-//! firmware keyboard buffer has to hold, which is the path of a guest that kept
-//! `INT 16h` at the firmware.
+//! A key has two encodings, and a PC guest consumes exactly one of them:
 //!
-//! The two consumers advance at different rates (the 8042 sees make *and* break
-//! codes, the buffer sees one entry per key), so the feed is also the unit that
-//! carries a slice hand-over: [`KeyboardFeed::from_pending`] resumes from the
-//! exact remainders of the previous slice instead of re-typing text the guest
-//! already received.
+//! - the 8042 data port yields PS/2 set-1 scancodes (make/break, with a shift
+//!   bracket for shifted characters and the `0xE0` prefix for arrows), which the
+//!   guest's own `INT 9` handler reads;
+//! - the firmware keyboard buffer holds `(scan code, ASCII)` pairs, which a guest
+//!   that kept `INT 16h` at the firmware reads.
+//!
+//! The queue therefore stores whole keys, not bytes: the cursor is one key
+//! index shared by both views. That matters because the two consumers are never
+//! both fed — the runner types into the 8042 only once the guest owns `INT 9`,
+//! and into the buffer before that. Advancing only one view used to leave a
+//! phantom remainder in the other (a hardware run reported "4 keys not typed"
+//! for keys that had all reached the 8042) and would have re-typed the same keys
+//! after a restart.
 //!
 //! The module is pure — it only touches the keyboard and BIOS models — which is
 //! what lets the host tests drive it without VT-x.
@@ -42,16 +45,52 @@ use alloc::vec::Vec;
 
 use super::{bios, keyboard};
 
-/// Host text waiting to be typed into a DOS guest, in both consumer views.
+/// One queued key, in the encodings the two PC consumers expect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Key {
+    /// Scancode bytes the 8042 must receive (2 or 4 bytes).
+    pub(crate) bytes: [u8; 4],
+    /// Number of valid bytes in [`Self::bytes`].
+    pub(crate) len: u8,
+    /// Scan code the firmware keyboard buffer stores.
+    pub(crate) scan: u8,
+    /// ASCII byte the firmware keyboard buffer stores (0 for extended keys).
+    pub(crate) ascii: u8,
+}
+
+impl Key {
+    /// Translates one host byte into its two encodings.
+    ///
+    /// `None` means the byte cannot be typed on a PC keyboard (a control byte
+    /// other than the named ones), so it is skipped instead of typed as garbage.
+    fn build(byte: u8) -> Option<Self> {
+        let mut scratch = Vec::new();
+        let (scan, ascii) = keyboard::keystroke_for(byte, &mut scratch)?;
+        if scratch.len() > 4 {
+            return None;
+        }
+        let mut bytes = [0u8; 4];
+        bytes[..scratch.len()].copy_from_slice(&scratch);
+        Some(Self {
+            bytes,
+            len: scratch.len() as u8,
+            scan,
+            ascii,
+        })
+    }
+
+    /// Number of scancode bytes this key occupies on the 8042 path.
+    pub const fn scancode_len(&self) -> usize {
+        self.len as usize
+    }
+}
+
+/// Host text waiting to be typed into a DOS guest.
 pub struct KeyboardFeed {
-    /// Scancodes for the 8042 data port, in order, with make/break pairs.
-    pub(crate) scancodes: Vec<u8>,
-    /// Next scancode [`Self::fill`] hands to the controller.
-    pub(crate) next: usize,
-    /// `(scan code, ASCII)` of the same keys, for the firmware buffer.
-    pub(crate) keys: Vec<(u8, u8)>,
-    /// Next entry [`Self::fill_bios`] pushes into the firmware buffer.
-    pub(crate) next_key: usize,
+    /// Keys still to deliver, in order; the front has not been consumed yet.
+    keys: Vec<Key>,
+    /// Index of the next key to deliver (shared by both consumer views).
+    next: usize,
 }
 
 impl KeyboardFeed {
@@ -63,73 +102,79 @@ impl KeyboardFeed {
     }
 
     /// A feed with nothing queued.
-    pub fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self {
-            scancodes: Vec::new(),
-            next: 0,
             keys: Vec::new(),
-            next_key: 0,
+            next: 0,
         }
     }
 
     /// Continues a previous slice from exactly where it stopped.
     ///
-    /// The 8042 and the firmware buffer consume at different rates, so both
-    /// remainders are carried: rebuilding from the original text would re-type
-    /// keys the guest already received.
-    pub fn from_pending(scancodes: Vec<u8>, keys: Vec<(u8, u8)>) -> Self {
-        Self {
-            scancodes,
-            next: 0,
-            keys,
-            next_key: 0,
-        }
+    /// Whole keys are stored, so a slice hand-over cannot split a make/break
+    /// pair or replay a key the guest already received.
+    pub fn from_pending(keys: Vec<Key>) -> Self {
+        Self { keys, next: 0 }
     }
 
     /// Appends more host text to the queue.
     pub fn extend(&mut self, text: &[u8]) {
         for &byte in text {
-            if let Some(pair) = keyboard::keystroke_for(byte, &mut self.scancodes) {
-                self.keys.push(pair);
+            if let Some(key) = Key::build(byte) {
+                self.keys.push(key);
             }
         }
     }
 
-    /// Keys not handed to the guest yet, whichever path serves it.
-    ///
-    /// This counts scancode bytes, so it is an upper bound on the number of
-    /// keys still waiting; it is only used to decide whether anything is left.
+    /// Keys not handed to the guest yet.
     pub fn remaining(&self) -> usize {
-        self.scancodes
-            .len()
-            .saturating_sub(self.next)
-            .max(self.keys.len().saturating_sub(self.next_key))
+        self.keys.len().saturating_sub(self.next)
     }
 
-    /// Queues up to `limit` scancodes; returns how many were accepted.
+    /// Copies the keys a slice hand-over must carry to the next slice.
+    pub fn remaining_keys(&self) -> Vec<Key> {
+        self.keys[self.next..].to_vec()
+    }
+
+    /// Queues whole keys on the 8042 path; returns how many scancode bytes were
+    /// accepted.
+    ///
+    /// A key is only started when the controller has room for all of its bytes,
+    /// so the guest never sees half of a make/break pair, and `limit` (a byte
+    /// budget) can never split a key either.
     pub fn fill(&mut self, controller: &mut keyboard::KeyboardController, limit: usize) -> usize {
-        let mut sent = 0;
-        while sent < limit && self.next < self.scancodes.len() {
-            if !controller.push_scancode(self.scancodes[self.next]) {
+        let mut sent = 0usize;
+        while self.next < self.keys.len() {
+            let key = self.keys[self.next];
+            let need = key.scancode_len();
+            if sent + need > limit {
                 break;
             }
+            if usize::from(controller.pending_scancodes()) + need > keyboard::INPUT_CAPACITY {
+                break;
+            }
+            for byte in &key.bytes[..need] {
+                if !controller.push_scancode(*byte) {
+                    return sent;
+                }
+            }
+            sent += need;
             self.next += 1;
-            sent += 1;
         }
         sent
     }
 
-    /// Pushes up to `limit` keys into the firmware keyboard buffer.
+    /// Pushes whole keys into the firmware keyboard buffer.
     ///
     /// This is the path of a guest that did not install its own `INT 9`: its
     /// `INT 16h` calls still reach the firmware model, so the keys have to
     /// appear where that service reads them.
     pub fn fill_bios(&mut self, bios: &mut bios::BiosState, limit: usize) -> usize {
         let mut sent = 0;
-        while sent < limit && self.next_key < self.keys.len() {
-            let (scan, ascii) = self.keys[self.next_key];
-            bios.push_scan_key(scan, ascii);
-            self.next_key += 1;
+        while sent < limit && self.next < self.keys.len() {
+            let key = self.keys[self.next];
+            bios.push_scan_key(key.scan, key.ascii);
+            self.next += 1;
             sent += 1;
         }
         sent

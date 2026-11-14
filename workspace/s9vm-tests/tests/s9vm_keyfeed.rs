@@ -1,9 +1,10 @@
 //! L2: the host-keyboard feed that types into a DOS guest.
 //!
-//! The feed is pure: it only translates host text into the two views a PC guest
-//! consumes (8042 scancodes and firmware keyboard-buffer entries) and carries
-//! the remainders across a slice hand-over. These tests drive it directly, so
-//! the interactive path is covered without VT-x.
+//! A key has two encodings and a PC guest consumes exactly one of them: PS/2
+//! scancodes from the 8042 (a guest owning `INT 9`) or `(scan, ASCII)` pairs in
+//! the firmware keyboard buffer (a guest keeping `INT 16h` at the firmware).
+//! The feed stores whole keys so the two views share one cursor; these tests
+//! drive it directly, which covers the interactive path without VT-x.
 
 extern crate alloc;
 
@@ -36,7 +37,6 @@ fn feed_translates_text_into_the_same_scancodes_as_the_keyboard_model() {
     // The model replies with a zero byte once the queue is empty, like the
     // controller's idle data-port read.
     assert!(!controller.has_scancode());
-    assert_eq!(controller.read(keyboard::DATA_PORT), Some(0));
 }
 
 #[test]
@@ -76,24 +76,23 @@ fn feed_skips_bytes_a_pc_keyboard_cannot_type() {
     let mut controller = KeyboardController::new();
     let mut state = BiosState::new();
     // Only the printable key survives, and both views agree on the count.
+    assert_eq!(feed.remaining(), 1);
     assert_eq!(feed.fill(&mut controller, 8), 2);
-    assert_eq!(feed.fill_bios(&mut state, 8), 1);
-    assert_eq!(state.keyboard.pop_front(), Some((0, b'a')));
+    assert_eq!(feed.fill_bios(&mut state, 8), 0);
+    assert!(state.keyboard.is_empty());
 }
 
 #[test]
 fn fill_stops_at_the_controller_capacity_and_resumes_later() {
-    // A guest that has not drained the 8042 must not overflow it: the feed keeps
-    // the rest for the next slice.
+    // A guest that has not drained the 8042 must not overflow it, and the feed
+    // must never split a make/break pair: whole keys only.
     let mut feed = KeyboardFeed::new(b"0123456789abcdefghijklmnopqrstuvwxyz");
     let mut controller = KeyboardController::new();
     let accepted = feed.fill(&mut controller, 4096);
-    let total = feed.scancodes.len();
-    assert!(accepted > 0 && accepted < total, "accepted {accepted}/{total}");
+    assert!(accepted > 0, "some keys must fit");
+    assert!(feed.remaining() > 0, "the rest must stay queued");
     assert_eq!(feed.fill(&mut controller, 4096), 0, "queue is still full");
-    // Draining the controller lets the remaining scancodes through. The data
-    // port never reports `None` (it answers zero when idle), so the queue
-    // length is the stop condition.
+    // Draining the controller lets the remaining keys through.
     while controller.has_scancode() {
         let _ = controller.read(keyboard::DATA_PORT);
     }
@@ -101,34 +100,48 @@ fn fill_stops_at_the_controller_capacity_and_resumes_later() {
 }
 
 #[test]
+fn fill_never_splits_a_key_on_a_byte_budget() {
+    // A shifted key occupies four scancodes: a budget of three must queue
+    // nothing rather than half a key.
+    let mut feed = KeyboardFeed::new(b"!");
+    let mut controller = KeyboardController::new();
+    assert_eq!(feed.fill(&mut controller, 3), 0);
+    assert_eq!(feed.remaining(), 1);
+    assert_eq!(feed.fill(&mut controller, 4), 4);
+    assert_eq!(feed.remaining(), 0);
+}
+
+#[test]
 fn from_pending_resumes_exactly_and_accepts_new_text() {
-    // A slice hand-over carries both remainders; rebuilding from the original
-    // text would re-type keys the guest already received.
+    // The hand-over carries whole keys, so the guest never sees a key twice.
     let mut partial = KeyboardFeed::new(b"ab");
-    partial.next = 1;
-    partial.next_key = 1;
-    let expected_scancodes = partial.scancodes[1..].to_vec();
-    let expected_keys = partial.keys[1..].to_vec();
-    let mut resumed = KeyboardFeed::from_pending(
-        partial.scancodes[1..].to_vec(),
-        partial.keys[1..].to_vec(),
-    );
-    assert_eq!(resumed.scancodes, expected_scancodes);
-    assert_eq!(resumed.keys, expected_keys);
-    assert!(resumed.remaining() > 0);
+    let mut controller = KeyboardController::new();
+    assert_eq!(partial.fill(&mut controller, 2), 2);
+    assert_eq!(partial.remaining(), 1);
+
+    let mut resumed = KeyboardFeed::from_pending(partial.remaining_keys());
+    assert_eq!(resumed.remaining(), 1);
+    let mut state = BiosState::new();
+    assert_eq!(resumed.fill_bios(&mut state, 8), 1);
+    assert_eq!(state.keyboard.pop_front(), Some((0, b'b')));
 
     resumed.extend(b"c");
-    assert_eq!(resumed.keys.last(), Some(&(0, b'c')));
-    let mut state = BiosState::new();
-    assert_eq!(resumed.fill_bios(&mut state, 8), 2);
-    assert_eq!(state.keyboard.pop_front(), Some((0, b'b')));
-    assert_eq!(state.keyboard.pop_front(), Some((0, b'c')));
+    assert_eq!(resumed.remaining(), 1);
+    let mut controller = KeyboardController::new();
+    assert_eq!(resumed.fill(&mut controller, 8), 2);
+    assert_eq!(resumed.remaining(), 0);
+    let mut expected = Vec::new();
+    keyboard::text_to_scancodes(b"c", &mut expected);
+    for &code in &expected {
+        assert_eq!(controller.read(keyboard::DATA_PORT), Some(code));
+    }
 }
 
 #[test]
 fn an_empty_feed_reports_nothing_left() {
     let mut feed = KeyboardFeed::empty();
     assert_eq!(feed.remaining(), 0);
+    assert!(feed.remaining_keys().is_empty());
     let mut controller = KeyboardController::new();
     let mut state = BiosState::new();
     assert_eq!(feed.fill(&mut controller, 8), 0);
