@@ -1245,25 +1245,28 @@ fn run_device_fast_path(
 /// legacy firmware needs for `INT 08h` (timer) and `INT 0Eh` (floppy). The
 /// request is only acknowledged once the guest can take it, else it stays in
 /// the `IRR` for the next attempt.
-fn deliver_legacy_interrupt(vcpu: &mut Vcpu, devices: &mut emulate::Devices) -> bool {
+fn deliver_legacy_interrupt(vcpu: &mut Vcpu, devices: &mut emulate::Devices) -> Option<u8> {
     if !devices.legacy_pic() || !devices.pic.has_pending() {
-        return false;
+        return None;
     }
     if vcpu.guest().rflags & (1 << 9) == 0 {
-        return false;
+        return None;
     }
     let deliverable = unsafe { vcpu.interruptibility() }
         .map(|state| state & 0b11 == 0)
         .unwrap_or(false);
     if !deliverable {
-        return false;
+        return None;
     }
     let Some(vector) = devices.pic.acknowledge() else {
-        return false;
+        return None;
     };
     // SAFETY: block loaded, guest inactive (exit handler), and the interrupt
     // is deliverable (checked above).
-    unsafe { vcpu.inject_interrupt(vector) }.is_ok()
+    match unsafe { vcpu.inject_interrupt(vector) } {
+        Ok(()) => Some(vector),
+        Err(_) => None,
+    }
 }
 
 /// Host text waiting to be typed into a DOS guest.
@@ -1347,8 +1350,18 @@ fn pump_dos_interrupts(
     report: &mut DosReport,
 ) -> Result<bool, DosError> {
     report.scancodes_typed += service_keyboard(devices, memory, feed);
-    if deliver_legacy_interrupt(vcpu, devices) {
+    if let Some(vector) = deliver_legacy_interrupt(vcpu, devices) {
         report.interrupts_delivered += 1;
+        // Name the first deliveries: a guest that never takes them (masked
+        // line, handler missing) is otherwise indistinguishable from one that
+        // simply idles.
+        if report.interrupts_delivered <= 8 {
+            log::info!(
+                "[s9vm] dosboot: interrupt {:#04x} delivered to the guest (#{})",
+                vector,
+                report.interrupts_delivered
+            );
+        }
         return Ok(true);
     }
     Ok(false)
@@ -1380,7 +1393,6 @@ fn service_keyboard(
     }
     typed
 }
-
 /// Advances the guest RIP past an exit that was not consumed.
 ///
 /// Calls [`Vcpu::advance_rip`] so the resumed guest does not re-execute the
@@ -2674,7 +2686,7 @@ fn run_freedos_in_world(
                         // Prefer the pending 8259 request (timer 0x08 or FDC
                         // 0x0E); fall back to the timer so a `yield()` with no
                         // armed time base still makes progress.
-                        if deliver_legacy_interrupt(&mut vcpu, machine.devices_mut()) {
+                        if deliver_legacy_interrupt(&mut vcpu, machine.devices_mut()).is_some() {
                             continue;
                         }
                         if let Err(error) = unsafe { vcpu.inject_interrupt(0x08) } {
@@ -2690,7 +2702,14 @@ fn run_freedos_in_world(
                     }
                     // Stub-firmware world: the 8259 pair owns the legacy
                     // vectors, so a pending timer or keyboard request is what
-                    // wakes the guest from `hlt`.
+                    // wakes the guest from `hlt`. If nothing is pending (the
+                    // guest idled before the 8254 raised a tick), synthesise a
+                    // timer request so it is delivered through the 8259 and
+                    // acknowledged by the firmware stub like a real one.
+                    if machine.devices_mut().legacy_pic() && !machine.devices().pic.has_pending()
+                    {
+                        machine.devices_mut().pic.raise(0);
+                    }
                     match pump_dos_interrupts(
                         &mut vcpu,
                         machine.devices_mut(),
