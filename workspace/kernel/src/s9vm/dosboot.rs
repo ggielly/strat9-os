@@ -1400,16 +1400,21 @@ fn deliver_legacy_interrupt(
     }
 }
 
-/// Points the `INT 9` vector at a synthetic guest handler.
+/// Points one interrupt vector at a synthetic guest handler.
 ///
-/// The dry selftest uses it to simulate "DOS installed its keyboard driver":
-/// only then may host keys be typed into the 8042.
-fn claim_int9_vector(memory: &mut WorldMemory) -> bool {
-    let entry = biosrom::IVT_BASE + 4 * 0x09;
+/// The dry selftest uses it to simulate "the guest installed this handler":
+/// `INT 9` decides the 8042 path, `INT 16h` decides who reads the key.
+fn claim_vector(memory: &mut WorldMemory, vector: u8) -> bool {
+    let entry = biosrom::IVT_BASE + 4 * u32::from(vector);
     let mut bytes = [0u8; 4];
     bytes[..2].copy_from_slice(&0x5678u16.to_le_bytes());
     bytes[2..].copy_from_slice(&0x1234u16.to_le_bytes());
     biosrom::RomMemory::write(memory, entry, &bytes)
+}
+
+/// Points the `INT 9` vector at a synthetic guest handler.
+fn claim_int9_vector(memory: &mut WorldMemory) -> bool {
+    claim_vector(memory, 0x09)
 }
 
 /// True when the guest has installed its own handler for `vector`.
@@ -1518,21 +1523,27 @@ fn service_keyboard(
     feed: &mut KeyboardFeed,
     bios: &mut bios::BiosState,
 ) -> u32 {
-    let guest_owns = guest_owns_vector(memory, 0x09);
+    let owns_int9 = guest_owns_vector(memory, 0x09);
+    let owns_int16 = guest_owns_vector(memory, 0x16);
+    // Which consumer actually reads the key decides where the key belongs.
+    //
+    // A guest that installed both handlers reads the BDA ring that its own
+    // `INT 9` fills from the 8042, so the controller + IRQ1 path is canonical.
+    // A guest that left `INT 16h` at the firmware (FreeDOS does) is served by
+    // the firmware keyboard buffer; pushing scancodes into a controller whose
+    // handler may never run is exactly how typed keys disappeared on hardware.
+    let use_controller = owns_int9 && owns_int16;
     let mut typed = 0;
     if feed.remaining() != 0 {
-        if guest_owns {
+        if use_controller {
             if devices.pic.master().mask() & 0x02 == 0 {
                 typed = feed.fill(&mut devices.keyboard, 8) as u32;
             }
         } else {
-            // The guest never replaced `INT 9`, so its keyboard service is the
-            // firmware one: the keys belong in the BIOS buffer, not in the
-            // 8042 (nothing would read the controller).
-            typed = feed.fill_bios(bios, 2) as u32;
+            typed = feed.fill_bios(bios, 8) as u32;
         }
     }
-    if guest_owns {
+    if use_controller {
         if devices.keyboard.has_scancode() {
             devices.pic.raise(1);
         } else {
@@ -2400,11 +2411,34 @@ pub fn run_freedos_session_dry(caps: &HwCaps) -> Result<(), DosError> {
             }
         }
         bios_state.keyboard.clear();
+        // A guest that owns `INT 9` but keeps `INT 16h` at the firmware is the
+        // FreeDOS configuration: its keys must land in the firmware buffer,
+        // because that is the service COMMAND.COM reads them from.
+        if !claim_vector(&mut memory, 0x16) {
+            let _ = vm::store_machine(world_id, machine);
+            return Err(DosError::Mmu);
+        }
+        let mut feed = KeyboardFeed::new(b"x");
+        if service_keyboard(
+            machine.devices_mut(),
+            &mut memory,
+            &mut feed,
+            &mut bios_state,
+        ) == 0
+            || machine.devices().keyboard.has_scancode()
+            || bios_state.keyboard.back() != Some(&(0, b'x'))
+        {
+            let _ = vm::store_machine(world_id, machine);
+            return Err(DosError::BadExit(
+                "a guest keeping INT 16h at the firmware was not fed its buffer",
+            ));
+        }
+        bios_state.keyboard.clear();
         if !claim_int9_vector(&mut memory) {
             let _ = vm::store_machine(world_id, machine);
             return Err(DosError::Mmu);
         }
-        // Once the guest owns `INT 9`, keys go to the 8042 and latch IRQ1.
+        // With both handlers owned, keys go to the 8042 and latch IRQ1.
         let mut feed = KeyboardFeed::new(b"dir\n");
         let typed_late = service_keyboard(
             machine.devices_mut(),
