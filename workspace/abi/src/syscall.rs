@@ -462,6 +462,69 @@ pub const SYS_TRANSPORT_CLOSE: usize = 263;
 /// Returns the transport level, capacity, and performance statistics.
 pub const SYS_TRANSPORT_INFO: usize = 264;
 
+// ── Block 270-289: IPC v2 ───────────────────────────────────────────────────
+//
+// Authority comes from handles (§1); each syscall takes at most six arguments.
+// See `docs-site/src/ipc-abi-v2.md` §13.
+
+/// Create an endpoint. Args: `queue_depth, flags`. Returns a RECV handle.
+pub const SYS_EP_CREATE: usize = 270;
+
+/// Mint a badged handle. Args: `handle, badge, rights`. Returns a new handle.
+pub const SYS_IPC_MINT: usize = 271;
+
+/// Send a message. Args: `send_h, *MsgBuf, flags, timeout_ns`. Returns `0`.
+pub const SYS_EP_SEND: usize = 272;
+
+/// Synchronous call. Args: `send_h, *MsgBuf req, *MsgBuf resp, flags,
+/// timeout_ns`. Returns `0`.
+pub const SYS_EP_CALL: usize = 273;
+
+/// Receive a message. Args: `recv_h, *MsgBuf, flags, timeout_ns`. Returns `kind`.
+pub const SYS_EP_RECV: usize = 274;
+
+/// Reply to a call. Args: `reply_h, *MsgBuf`. Returns `0`.
+pub const SYS_EP_REPLY: usize = 275;
+
+/// Reply then receive. Args: `reply_h, *MsgBuf reply, recv_h, *MsgBuf recv,
+/// flags, timeout_ns`. Returns `kind`.
+pub const SYS_EP_REPLY_RECV: usize = 276;
+
+/// Bind a notification to an endpoint. Args: `recv_h, notif_h`. Returns `0`.
+pub const SYS_EP_BIND_NOTIF: usize = 277;
+
+/// Create a notification. Args: `flags`. Returns a handle with
+/// `NOTIF_SIGNAL | NOTIF_WAIT | NOTIF_MINT`.
+pub const SYS_NOTIF_CREATE: usize = 278;
+
+/// Signal a notification. Args: `notif_h, bits`. Returns `0`.
+pub const SYS_NOTIF_SIGNAL: usize = 279;
+
+/// Wait on a notification. Args: `notif_h, *u64 out_bits, flags,
+/// timeout_ns`. Returns `0`.
+pub const SYS_NOTIF_WAIT: usize = 280;
+
+/// Bind an endpoint in the namespace. Args: `ep_h, path_ptr, path_len,
+/// flags`. Returns `0`.
+pub const SYS_NS_BIND: usize = 281;
+
+/// Look up a namespace path. Args: `path_ptr, path_len, rights`. Returns a
+/// SEND handle.
+pub const SYS_NS_LOOKUP: usize = 282;
+
+/// Unbind a namespace path. Args: `path_ptr, path_len`. Returns `0`.
+pub const SYS_NS_UNBIND: usize = 283;
+
+/// Create a memory object. Args: `size, flags`. Returns a handle.
+pub const SYS_MEMOBJ_CREATE: usize = 284;
+
+/// Map a memory object. Args: `mem_h, addr_hint, offset, len, prot`.
+/// Returns the mapped address.
+pub const SYS_MEMOBJ_MAP: usize = 285;
+
+/// Reserved IPC v2 syscalls 286-289; the kernel returns `ENOSYS`.
+pub const SYS_IPC_V2_RESERVED: [usize; 4] = [286, 287, 288, 289];
+
 // ── Block 300-399: Process / Thread Management ──────────────────────────────
 
 /// Terminate the current process with an exit code.

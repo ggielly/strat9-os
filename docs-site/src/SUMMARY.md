@@ -7,6 +7,7 @@
 - [Boot Sequence](boot-sequence.md)
 - [IPC Mechanisms](ipc-mechanisms.md)
 - [IPC Transport Architecture](architecture-ipc-access-levels.md)
+- [IPC ABI v2 Specification (draft)](ipc-abi-v2.md)
 - [Driver Model](driver-model.md)
 - [ABI Overview](abi.md)
 - [ABI Changelog](abi-changelog.md)

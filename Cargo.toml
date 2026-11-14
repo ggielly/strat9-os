@@ -10,6 +10,7 @@ repository = "https://git.strat9-os.org/strat9-os/strat9-os.git"
 members = [
     "workspace/abi",
     "workspace/elf-core",
+    "workspace/ipc-core",
     "workspace/kernel",
     "workspace/kernel/libs/fbsurface",
     "workspace/bootloader",

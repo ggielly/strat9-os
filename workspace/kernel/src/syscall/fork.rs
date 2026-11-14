@@ -286,6 +286,9 @@ fn build_child_task(
                     .load(core::sync::atomic::Ordering::Relaxed),
             ),
             ipc_quota: crate::ipc::quota::IpcQuota::new(),
+            // IPC v2 handles are per-process: copy objects/rights/generations
+            // and take an extra reference for every inherited EP_RECV entry.
+            ipc_v2: crate::sync::SpinLock::new(parent.process.ipc_v2.lock().fork_clone()),
         }),
         // POSIX: pending signals are NOT inherited by the child.
         pending_signals: SignalSet::new(),

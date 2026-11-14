@@ -106,6 +106,11 @@ pub const ENOTEMPTY: usize = 39;
 /// Too many levels of symbolic links (symlink loop detected).
 pub const ELOOP: usize = 40;
 
+/// Message too long (IPC v2: receive buffers too small; required sizes are
+/// written back). Matches Linux x86_64 `EMSGSIZE == 90`, like `ENOTSUP`.
+/// See `docs-site/src/ipc-abi-v2.md` §13.1.
+pub const EMSGSIZE: usize = 90;
+
 /// Not supported (operation not supported by this filesystem/device).
 ///
 /// Aligned with Linux x86_64 where `ENOTSUP == EOPNOTSUPP == 95`, so that

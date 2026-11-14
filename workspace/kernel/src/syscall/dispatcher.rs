@@ -39,8 +39,8 @@ use crate::ipc::{channel, port, semaphore, shared_ring, ChanId, PortId, RingId, 
 
 use super::{
     chan, debug, error::SyscallError, exec::sys_execve, fork::sys_fork, iommu, ipc_port, ipc_ring,
-    net, numbers::*, pci, process as proc_sys, semaphore as sem_handler, transport, vmm, volume,
-    SyscallFrame,
+    ipc_v2, net, numbers::*, pci, process as proc_sys, semaphore as sem_handler, transport, vmm,
+    volume, SyscallFrame,
 };
 use crate::{
     async_io::syscall as async_sys,
@@ -127,7 +127,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
 
     let result = match syscall_num {
         SYS_NULL => sys_null(),
-        SYS_HANDLE_DUPLICATE => sys_handle_duplicate(arg1),
+        SYS_HANDLE_DUPLICATE => sys_handle_duplicate(arg1, arg2),
         SYS_HANDLE_CLOSE => sys_handle_close(arg1),
         SYS_HANDLE_WAIT => sys_handle_wait(arg1, arg2),
         SYS_HANDLE_GRANT => sys_handle_grant(arg1, arg2),
@@ -247,6 +247,26 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_TRANSPORT_RECV => transport::sys_transport_recv(arg1, arg2, arg3),
         SYS_TRANSPORT_CLOSE => transport::sys_transport_close(arg1),
         SYS_TRANSPORT_INFO => transport::sys_transport_info(arg1, arg2),
+
+        // IPC ABI v2 (270-280) ==============================================
+        SYS_EP_CREATE => with_proc(|p| ipc_v2::sys_ep_create(p, arg1, arg2)),
+        SYS_IPC_MINT => with_proc(|p| ipc_v2::sys_ipc_mint(p, arg1, arg2, arg3)),
+        SYS_EP_SEND => with_proc(|p| ipc_v2::sys_ep_send(p, arg1, arg2, arg3, arg4)),
+        SYS_EP_CALL => with_proc(|p| ipc_v2::sys_ep_call(p, arg1, arg2, arg3, arg4, arg5)),
+        SYS_EP_RECV => with_proc(|p| ipc_v2::sys_ep_recv(p, arg1, arg2, arg3, arg4)),
+        SYS_EP_REPLY => with_proc(|p| ipc_v2::sys_ep_reply(p, arg1, arg2)),
+        SYS_EP_REPLY_RECV => {
+            with_proc(|p| ipc_v2::sys_ep_reply_recv(p, arg1, arg2, arg3, arg4, arg5, frame.r9))
+        }
+        SYS_EP_BIND_NOTIF => with_proc(|p| ipc_v2::sys_ep_bind_notif(p, arg1, arg2)),
+        SYS_NOTIF_CREATE => with_proc(|p| ipc_v2::sys_notif_create(p, arg1)),
+        SYS_NOTIF_SIGNAL => with_proc(|p| ipc_v2::sys_notif_signal(p, arg1, arg2)),
+        SYS_NOTIF_WAIT => with_proc(|p| ipc_v2::sys_notif_wait(p, arg1, arg2, arg3, arg4)),
+        SYS_NS_BIND => with_proc(|p| ipc_v2::sys_ns_bind(p, arg1, arg2, arg3, arg4)),
+        SYS_NS_LOOKUP => with_proc(|p| ipc_v2::sys_ns_lookup(p, arg1, arg2, arg3)),
+        SYS_NS_UNBIND => with_proc(|p| ipc_v2::sys_ns_unbind(p, arg1, arg2)),
+        SYS_MEMOBJ_CREATE | SYS_MEMOBJ_MAP => Err(SyscallError::NotImplemented),
+        n if SYS_IPC_V2_RESERVED.contains(&n) => Err(SyscallError::NotImplemented),
 
         // PCI syscalls ======================================================
         SYS_PCI_ENUM => pci::sys_pci_enum(arg1, arg2, arg3),
@@ -464,14 +484,38 @@ fn sys_null() -> Result<u64, SyscallError> {
     Ok(0x57A79)
 }
 
-/// SYS_HANDLE_CLOSE (2): Close a handle. Stub : always succeeds.
-fn sys_handle_close(_handle: u64) -> Result<u64, SyscallError> {
-    crate::silo::enforce_cap_for_current_task(_handle)?;
+/// Run a v2 IPC handler with the current process.
+fn with_proc<F>(f: F) -> Result<u64, SyscallError>
+where
+    F: FnOnce(&crate::process::process::Process) -> Result<u64, SyscallError>,
+{
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    f(&task.process)
+}
+
+/// SYS_HANDLE_CLOSE (2): Close a handle.
+///
+/// Applies to v2 handles (§13) as well as v1 `CapId`s. A v2 handle is a
+/// generation-tagged table entry, not a `CapId`, so the v2 table is tried
+/// before the v1 capability gate; `HandleTable::remove` already applied the
+/// object-side effects.
+fn sys_handle_close(handle: u64) -> Result<u64, SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    match task
+        .process
+        .ipc_v2
+        .lock()
+        .remove(strat9_abi::ipc_v2::Handle::from_raw(handle))
+    {
+        Ok(_entry) => return Ok(0),
+        Err(SyscallError::BadHandle) => {}
+        Err(error) => return Err(error),
+    }
+    crate::silo::enforce_cap_for_current_task(handle)?;
     let caps = unsafe { &*task.process.capabilities.get() };
-    if let Some(cap) = caps.remove(CapId::from_raw(_handle)) {
+    if let Some(cap) = caps.remove(CapId::from_raw(handle)) {
         release_capability(&cap, Some(task.id));
-        log::trace!("syscall: HANDLE_CLOSE({})", _handle);
+        log::trace!("syscall: HANDLE_CLOSE({})", handle);
         Ok(0)
     } else {
         Err(SyscallError::BadHandle)
@@ -508,10 +552,29 @@ pub(crate) fn insert_capability_with_retention(
     Ok(id)
 }
 
-/// SYS_HANDLE_DUPLICATE (1): duplicate a handle (grant required).
-fn sys_handle_duplicate(handle: u64) -> Result<u64, SyscallError> {
-    crate::silo::enforce_cap_for_current_task(handle)?;
+/// SYS_HANDLE_DUPLICATE (1): duplicate a handle.
+///
+/// `rights` is the v2 rights mask (`RIGHTS_SAME` keeps all, otherwise
+/// `requested & source`). It also applies to v2 handles (§13); the v1 path
+/// ignores it and keeps its grant semantics.
+fn sys_handle_duplicate(handle: u64, rights: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    {
+        let mut table = task.process.ipc_v2.lock();
+        match table.resolve(
+            strat9_abi::ipc_v2::Handle::from_raw(handle),
+            strat9_abi::ipc_v2::RIGHT_DUPLICATE,
+        ) {
+            Ok(_) => {
+                let dup =
+                    table.duplicate(strat9_abi::ipc_v2::Handle::from_raw(handle), rights as u32)?;
+                return Ok(dup.raw());
+            }
+            Err(SyscallError::BadHandle) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    crate::silo::enforce_cap_for_current_task(handle)?;
     let caps = unsafe { &*task.process.capabilities.get() };
     let dup = caps
         .duplicate(CapId::from_raw(handle))
@@ -762,11 +825,43 @@ fn resource_type_code(rt: ResourceType) -> u32 {
 
 /// Performs the sys handle info operation.
 fn sys_handle_info(handle: u64, out_ptr: u64) -> Result<u64, SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    // v2 handles (§13): report effective rights and object type. The object
+    // type code is offset by 100 to stay clear of the v1 `ResourceType` codes.
+    let v2_entry = {
+        let table = task.process.ipc_v2.lock();
+        table.resolve(
+            strat9_abi::ipc_v2::Handle::from_raw(handle),
+            strat9_abi::ipc_v2::RIGHT_INSPECT,
+        )
+    };
+    match v2_entry {
+        Ok(entry) => {
+            if out_ptr == 0 {
+                return Err(SyscallError::Fault);
+            }
+            let info = HandleInfoAbi {
+                resource_type: 100 + entry.obj.obj_type(),
+                permissions: entry.rights,
+                resource: 0,
+            };
+            let user = UserSliceWrite::new(out_ptr, core::mem::size_of::<HandleInfoAbi>())?;
+            let bytes = unsafe {
+                core::slice::from_raw_parts(
+                    &info as *const HandleInfoAbi as *const u8,
+                    core::mem::size_of::<HandleInfoAbi>(),
+                )
+            };
+            user.copy_from(bytes);
+            return Ok(0);
+        }
+        Err(SyscallError::BadHandle) => {}
+        Err(error) => return Err(error),
+    }
     crate::silo::enforce_cap_for_current_task(handle)?;
     if out_ptr == 0 {
         return Err(SyscallError::Fault);
     }
-    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &*task.process.capabilities.get() };
     let cap = caps
         .get(CapId::from_raw(handle))

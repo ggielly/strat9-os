@@ -947,6 +947,10 @@ name = "strat9-elf-core"
 version = "0.1.0"
 
 [[package]]
+name = "strat9-ipc-core"
+version = "0.1.0"
+
+[[package]]
 name = "strat9-kernel"
 version = "0.1.0"
 dependencies = [

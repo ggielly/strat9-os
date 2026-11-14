@@ -1597,6 +1597,24 @@ pub fn current_task_silo_label() -> Option<String> {
     silo.strate_label.as_deref().map(String::from)
 }
 
+/// Whether the calling task belongs to a sandboxed silo (§8).
+///
+/// Admin tasks and tasks with no silo are not sandboxed; this mirrors the
+/// sandbox rejection paths in [`enforce_registry_bind_for_current_task`].
+pub fn current_task_sandboxed() -> bool {
+    let Some(task) = current_task_clone() else {
+        return false;
+    };
+    if is_admin_task(&task) {
+        return false;
+    }
+    let mgr = SILO_MANAGER.lock();
+    let Some(silo_id) = mgr.silo_for_task(task.id) else {
+        return false;
+    };
+    mgr.get(silo_id).map(|silo| silo.sandboxed).unwrap_or(false)
+}
+
 /// Family of the silo owning the calling task.
 ///
 /// Used by resource-acquisition syscalls (network, PCI, …) to apply a
@@ -3173,6 +3191,27 @@ pub fn enforce_registry_bind_for_current_task() -> Result<(), SyscallError> {
         return Err(SyscallError::PermissionDenied);
     }
     if silo.mode.registry.contains(RegistryMode::BIND) {
+        Ok(())
+    } else {
+        Err(SyscallError::PermissionDenied)
+    }
+}
+
+/// Performs the enforce registry lookup for current task operation.
+pub fn enforce_registry_lookup_for_current_task() -> Result<(), SyscallError> {
+    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    if is_admin_task(&task) {
+        return Ok(());
+    }
+    let mgr = SILO_MANAGER.lock();
+    let silo_id = mgr
+        .silo_for_task(task.id)
+        .ok_or(SyscallError::PermissionDenied)?;
+    let silo = mgr.get(silo_id)?;
+    if silo.sandboxed {
+        return Err(SyscallError::PermissionDenied);
+    }
+    if silo.mode.registry.contains(RegistryMode::LOOKUP) {
         Ok(())
     } else {
         Err(SyscallError::PermissionDenied)

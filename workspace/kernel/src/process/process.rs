@@ -66,6 +66,9 @@ pub struct Process {
 
     /// Per-process IPC resource quotas (channels, queue slots, bytes).
     pub ipc_quota: IpcQuota,
+
+    /// IPC ABI v2 generation-tagged handle table.
+    pub ipc_v2: SpinLock<crate::ipc::v2::HandleTable>,
 }
 
 impl Process {
@@ -85,6 +88,7 @@ impl Process {
             cwd_fd: AtomicU64::new(u64::MAX),
             umask: AtomicU32::new(0o022),
             ipc_quota: IpcQuota::new(),
+            ipc_v2: SpinLock::new(crate::ipc::v2::HandleTable::new()),
         }
     }
 

@@ -1,0 +1,20 @@
+[package]
+name = "strat9-ipc-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Scheduler-independent executable model of the IPC v2 endpoint state machine"
+
+[dependencies]
+
+# No external dependencies: this crate must stay offline-clean and build in a
+# freestanding (no_std) context. `loom`-based interleaving exploration is a
+# follow-up, to be added only once the crate is vendored in-tree and `loom`
+# is reachable without network access.
+[features]
+default = []
+
+[lints]
+workspace = true

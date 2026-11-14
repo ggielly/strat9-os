@@ -94,23 +94,10 @@ pub fn sys_ipc_send(port_handle: u64, msg_ptr: u64) -> Result<u64, SyscallError>
     // P1 fix: inject capability badge instead of raw task ID.
     msg.sender = cap.badge;
 
-    if msg.flags == 0 {
-        if let Some((sid, _label, _mem_used, _mem_min, _mem_max)) =
-            silo::silo_info_for_task(task.id)
-        {
-            if let Some(snapshot) = silo::list_silos_snapshot()
-                .into_iter()
-                .find(|s| s.id == sid)
-            {
-                let structured_label = crate::ipc::message::IpcLabel {
-                    tier: snapshot.tier as u8,
-                    family: 5,
-                    compartment: sid as u16,
-                };
-                msg.flags = unsafe { core::mem::transmute(structured_label) };
-            }
-        }
-    }
+    // `msg.flags` is user protocol data only. It is deliberately not used to
+    // carry a security label: the field otherwise acquires three incompatible
+    // meanings (user flags, capability handle, label), which caused ordinary
+    // sends to be interpreted as capability transfers on receive.
 
     let port_id = PortId::from_u64(cap.resource as u64);
     let port_obj = port::get_port(port_id).ok_or(SyscallError::BadHandle)?;

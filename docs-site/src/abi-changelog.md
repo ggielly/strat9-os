@@ -16,11 +16,28 @@ independent from the syscall `ABI_VERSION_*` above. The kernel refuses to
 boot when it does not match exactly.
 
 | Version | Change |
-|---|---|
+| --- | --- |
 | 2 | First documented handoff (`KernelArgs`, framebuffer, modules) |
 | 3 | Framebuffer channel masks |
 | 4 | BSS virtual range fields |
 | 5 | `MemoryKind::Bad` (4) and `MemoryKind::AcpiNvs` (5); layout unchanged (132 bytes) |
+
+## Planned: ABI 1.0 : IPC v2
+
+Incompatible change, hence a **major** bump (`ABI_VERSION_MAJOR = 1`).
+Specified in [IPC ABI v2 Specification](./ipc-abi-v2.md); the types and
+syscalls 270–283 are implemented but unreleased (§16 of the specification).
+
+- **Added:** syscalls 270–285 (endpoints, mint, call/reply, notifications,
+  namespace bind/lookup, memory objects), 286–289 reserved; errno
+  `EMSGSIZE = 90`; `MsgHeader`, `CapXfer`, `MsgBuf`, `MsgCall`,
+  `RingHeader`; `AsyncOp` 13–17; generation-tagged handle encoding.
+- **Changed:** `SYS_HANDLE_DUPLICATE` takes a `rights` mask.
+- **Removed:** syscalls 200–208, 210–211, 220–224, 230–234, 260–264,
+  105–107 and 4 (`SYS_HANDLE_GRANT`); `AsyncOp` 10–12; the fixed 1 KiB
+  `IpcMessage`.
+- **Transition:** the kernel keeps the 0.x IPC behind an `ipc-v1` feature
+  until `init` and the strates are migrated (phase 2 of the plan).
 
 <!-- AUTO-ABI-CHANGELOG:START -->
 
@@ -86,7 +103,7 @@ See:
 The boot struct is versioned on its own counter, not on `ABI_VERSION_*`.
 
 | Version | Struct | Size | Notes |
-|---------|--------|------|-------|
+| --------- | -------- | ------ | ------- |
 | 2 | `KernelArgs` | 132 B | Superseded. Still described in `workspace/bootloader/README.md` |
 | 3 | `KernelArgs` | 132 B | Superseded |
 | **4** (`STRAT9_BOOT_ABI_VERSION`) | `KernelArgs` | **132 B** | Current. Adds `bss_virt_base` / `bss_virt_size`, drops the `stack_base` / `stack_size` fields in favour of passing the stack in registers to `paging::context_switch` |

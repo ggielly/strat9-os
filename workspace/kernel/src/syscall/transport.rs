@@ -48,26 +48,42 @@ pub(crate) static TRANSPORT_MANAGER: TransportManager = TransportManager::new();
 /// SYS_TRANSPORT_CREATE: create a transport between the caller's silo and `dst_silo`.
 ///
 /// `config_flags` low 4 bits encode the desired minimum `TransportLevel`:
-///   1 = TypeSafe, 2 = LockFree, 3 = Mmu.  0 = use default (LockFree).
-/// Bits 8..=23 encode `ring_capacity` (0 = default 256).
+///   1 = TypeSafe, 2 = LockFree.  0 = use default (LockFree).
+///   3 = Mmu is rejected (see below); any other non-zero value is invalid.
+/// Bits 8..=23 encode `ring_capacity` (0 = default 256, max 4096).
+///
+/// Security (Phase 0): the N3 `TransportLevel::Mmu` path is rejected
+/// unconditionally. Only the CR3 is migrated on that path while TSS/GS/FPU
+/// and scheduler context stay wrong, so it is unsafe to expose. The N3 code
+/// remains in place but is unreachable from this syscall.
 pub fn sys_transport_create(dst_silo_val: u64, config_flags: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let src_silo_id = silo::try_silo_id_for_task(&task).ok_or(SyscallError::BadHandle)?;
     let src_silo = SiloId::new(src_silo_id);
     let dst_silo = SiloId::new(dst_silo_val as u32);
 
+    // Cross-silo transports require the silo admin capability. This is a
+    // Phase 0 stopgap; per-endpoint capability authorization replaces it in
+    // ABI v2.
+    if src_silo_id != dst_silo_val as u32 && crate::silo::require_silo_admin().is_err() {
+        return Err(SyscallError::PermissionDenied);
+    }
+
     // Decode config_flags: bits [3:0] = min_level, bits [23:8] = ring_capacity.
     let level_raw = (config_flags & 0xF) as u8;
     let min_level = match level_raw {
+        0 => TransportLevel::LockFree, // default
         1 => TransportLevel::TypeSafe,
         2 => TransportLevel::LockFree,
-        3 => TransportLevel::Mmu,
-        _ => TransportLevel::LockFree, // default
+        3 => return Err(SyscallError::NotSupported), // Mmu rejected unconditionally
+        _ => return Err(SyscallError::InvalidArgument),
     };
     let ring_capacity = {
         let cap = ((config_flags >> 8) & 0xFFFF) as u32;
         if cap == 0 {
             256
+        } else if cap > 4096 {
+            return Err(SyscallError::InvalidArgument);
         } else {
             cap
         }
@@ -89,6 +105,7 @@ pub fn sys_transport_create(dst_silo_val: u64, config_flags: u64) -> Result<u64,
         CapPermissions::read_write(),
     );
 
+    // SAFETY: the capability table is internally synchronized.
     let caps = unsafe { &*task.process.capabilities.get() };
     let cap_id = caps.insert(cap);
 
@@ -98,6 +115,7 @@ pub fn sys_transport_create(dst_silo_val: u64, config_flags: u64) -> Result<u64,
 /// SYS_TRANSPORT_SEND: send a message on a transport handle.
 pub fn sys_transport_send(handle: u64, buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    // SAFETY: the capability table is internally synchronized.
     let caps = unsafe { &*task.process.capabilities.get() };
 
     let cap = caps
@@ -106,6 +124,13 @@ pub fn sys_transport_send(handle: u64, buf_ptr: u64, buf_len: u64) -> Result<u64
 
     if cap.resource_type != ResourceType::IpcTransport {
         return Err(SyscallError::BadHandle);
+    }
+
+    // Bound the message size to avoid an unbounded kernel allocation driven
+    // by a syscall argument.
+    const MAX_MSG_LEN: u64 = 64 * 1024;
+    if buf_len == 0 || buf_len > MAX_MSG_LEN {
+        return Err(SyscallError::InvalidArgument);
     }
 
     let len = buf_len as usize;
@@ -131,6 +156,7 @@ pub fn sys_transport_send(handle: u64, buf_ptr: u64, buf_len: u64) -> Result<u64
 /// SYS_TRANSPORT_RECV: receive a message from a transport handle.
 pub fn sys_transport_recv(handle: u64, buf_ptr: u64, buf_len: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    // SAFETY: the capability table is internally synchronized.
     let caps = unsafe { &*task.process.capabilities.get() };
 
     let cap = caps
@@ -170,6 +196,7 @@ pub fn sys_transport_close(handle: u64) -> Result<u64, SyscallError> {
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let cap_id = CapId::from_raw(handle);
+    // SAFETY: the capability table is internally synchronized.
     let caps = unsafe { &*task.process.capabilities.get() };
     if let Some(cap) = caps.remove(cap_id) {
         release_capability(&cap, Some(task.id));
@@ -183,6 +210,7 @@ pub fn sys_transport_close(handle: u64) -> Result<u64, SyscallError> {
 /// SYS_TRANSPORT_INFO: query transport level and statistics.
 pub fn sys_transport_info(handle: u64, out_ptr: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    // SAFETY: the capability table is internally synchronized.
     let caps = unsafe { &*task.process.capabilities.get() };
 
     let _cap = caps

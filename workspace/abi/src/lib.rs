@@ -37,6 +37,7 @@ pub mod ip;
 pub mod ipc;
 pub mod ipc_codec;
 pub mod ipc_payload;
+pub mod ipc_v2;
 pub mod net;
 pub mod syscall;
 pub mod vmm;

@@ -1417,6 +1417,8 @@ pub fn flush_deferred_silo_cleanups() {
 
 pub(crate) fn cleanup_task_resources(task: &Arc<Task>) {
     crate::ipc::port::cleanup_ports_for_task(task.id);
+    // Cancel calls owned by this task; a late server reply must fail EPIPE.
+    crate::ipc::v2::cleanup_for_task(task.id);
     queue_silo_cleanup(task.id);
 
     // Kernel-owned user stack (/thread/create): reclaim if not already done
@@ -1430,6 +1432,9 @@ pub(crate) fn cleanup_task_resources(task: &Arc<Task>) {
     if !is_last_process_ref {
         return;
     }
+
+    // Last reference to the process: release every v2 handle it holds.
+    crate::ipc::v2::cleanup_process(&task.process);
 
     unsafe {
         (&mut *task.process.fd_table.get()).close_all();

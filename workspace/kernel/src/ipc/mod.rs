@@ -73,6 +73,7 @@ pub mod semaphore;
 pub mod shared_ring;
 pub mod test;
 pub mod transport;
+pub mod v2;
 
 pub use channel::{
     channel, create_channel, destroy_channel, get_channel, ChanId, ChannelError, Receiver, Sender,

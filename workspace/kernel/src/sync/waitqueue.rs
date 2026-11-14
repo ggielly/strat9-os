@@ -60,13 +60,22 @@
 //! A higher-level wrapper that stores the condition closure alongside the
 //! queue, inspired by Theseus's `wait_condition` crate. Useful when the
 //! same condition is shared across multiple call sites.
+//!
+//! ## Phase 0 notes
+//!
+//! Waiters are stored in an unbounded [`Vec`] rather than a fixed-capacity
+//! queue, so a userspace-reachable waiter count can never trigger a panic.
+//! Registration (`Vec::push`) may allocate under the waiters lock, but only
+//! in task context : never in an IRQ : and `wake_one`/`wake_all` never
+//! allocate. Native timeouts are not yet implemented (Phase 0 follow-up);
+//! externally woken waiters are removed by their own `retain` on return and
+//! `wake_one` skips stale (already-unblocked) entries.
 
 use crate::{
     process::{block_current_task, current_task_id, wake_task, TaskId},
-    sync::{FixedQueue, SpinLock},
+    sync::SpinLock,
 };
-
-const WAITQUEUE_CAPACITY: usize = 256;
+use alloc::vec::Vec;
 
 //  WaitQueue ========================================
 
@@ -75,14 +84,14 @@ const WAITQUEUE_CAPACITY: usize = 256;
 /// See the [module documentation](self) for usage notes and the lost-wakeup
 /// guarantee.
 pub struct WaitQueue {
-    waiters: SpinLock<FixedQueue<TaskId, WAITQUEUE_CAPACITY>>,
+    waiters: SpinLock<Vec<TaskId>>,
 }
 
 impl WaitQueue {
     /// Create a new empty wait queue.
     pub const fn new() -> Self {
         WaitQueue {
-            waiters: SpinLock::new(FixedQueue::new()),
+            waiters: SpinLock::new(Vec::new()),
         }
     }
 
@@ -104,14 +113,19 @@ impl WaitQueue {
         // block_current_task() has not been reached yet.
         {
             let mut waiters = self.waiters.lock();
-            waiters
-                .push_back(id)
-                .expect("WaitQueue waiter queue overflow");
+            if !waiters.contains(&id) {
+                waiters.push(id);
+            }
         }
 
         // Block : returns when wake_task(id) is called (or immediately if
         // wake_pending was already set by a racing wake_one()).
         block_current_task();
+
+        // Remove ourselves: we may have been woken externally (signal, direct
+        // wake_task, timeout) without having been popped by wake_one/wake_all,
+        // which would otherwise leave a stale entry.
+        self.waiters.lock().retain(|&w| w != id);
     }
 
     /// Block the calling task until `condition()` returns `Some(T)`.
@@ -146,14 +160,17 @@ impl WaitQueue {
                 let mut waiters = self.waiters.lock();
 
                 if let Some(value) = condition() {
+                    // Drop any registration left from a previous iteration.
+                    waiters.retain(|&w| w != id);
                     return value;
                 }
 
                 // Condition not yet met: register ourselves as a waiter while
                 // the lock is still held, preventing a wakeup from being missed.
-                waiters
-                    .push_back(id)
-                    .expect("WaitQueue waiter queue overflow");
+                // Dedupe to survive spurious wakeups.
+                if !waiters.contains(&id) {
+                    waiters.push(id);
+                }
             } // waiters lock released here
 
             // Sleep until woken.  If wake_task() already fired (racing with
@@ -161,40 +178,47 @@ impl WaitQueue {
             // block_current_task() returns immediately.
             block_current_task();
 
-            // Woken : re-evaluate the condition at the top of the loop.
+            // Remove ourselves in case we were woken externally rather than
+            // popped by wake_one/wake_all, then re-evaluate the condition.
+            self.waiters.lock().retain(|&w| w != id);
         }
     }
 
     /// Wake the first waiting task (FIFO order).
     ///
     /// Returns `true` if a task was successfully woken, `false` if the queue
-    /// was empty.
+    /// was empty or contained only stale entries. Stale entries (tasks that
+    /// were already unblocked externally) are skipped rather than consuming a
+    /// wakeup.
     pub fn wake_one(&self) -> bool {
-        let id = {
-            let mut waiters = self.waiters.lock();
-            waiters.pop_front()
-        };
+        loop {
+            let id = {
+                let mut waiters = self.waiters.lock();
+                if waiters.is_empty() {
+                    return false;
+                }
+                waiters.remove(0)
+            };
 
-        if let Some(id) = id {
-            wake_task(id)
-        } else {
-            false
+            if wake_task(id) {
+                return true;
+            }
+            // Stale / no longer blocked: try the next entry.
         }
     }
 
     /// Wake all waiting tasks.
     ///
-    /// Returns the number of tasks that were woken.
+    /// Returns the number of tasks that were actually woken.
     pub fn wake_all(&self) -> usize {
         let mut count = 0;
         loop {
             let id = {
                 let mut waiters = self.waiters.lock();
-                waiters.pop_front()
-            };
-
-            let Some(id) = id else {
-                break;
+                if waiters.is_empty() {
+                    break;
+                }
+                waiters.remove(0)
             };
 
             if wake_task(id) {
@@ -202,6 +226,15 @@ impl WaitQueue {
             }
         }
         count
+    }
+
+    /// Remove `id` from the waiter list if present.
+    ///
+    /// Used for external cancellation (signal, timeout, direct wake) so a
+    /// task that never re-enters `wait`/`wait_until` does not leave a stale
+    /// entry behind.
+    pub fn remove(&self, id: TaskId) {
+        self.waiters.lock().retain(|&w| w != id);
     }
 
     /// Returns the number of tasks currently registered in this queue.

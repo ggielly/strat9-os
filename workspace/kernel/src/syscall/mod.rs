@@ -46,6 +46,7 @@ pub mod futex;
 pub mod iommu;
 pub mod ipc_port;
 pub mod ipc_ring;
+pub mod ipc_v2;
 pub mod mmap;
 pub mod net;
 pub mod numbers;

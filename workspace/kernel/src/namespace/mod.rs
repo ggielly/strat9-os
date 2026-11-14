@@ -24,6 +24,8 @@
 //!
 //! Maps path prefixes to IPC ports for scheme dispatch.
 
+pub mod v2;
+
 use crate::{sync::SpinLock, syscall::error::SyscallError};
 use alloc::{
     collections::BTreeMap,

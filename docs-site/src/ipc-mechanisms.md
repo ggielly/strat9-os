@@ -1,5 +1,12 @@
 # IPC Mechanisms
 
+> **Superseded by design.** This page describes the IPC code as it exists
+> today (ABI 0.x). Its replacement — endpoints, single-use reply handles,
+> notifications, memory objects and a scheduler-level N3 fast path — is
+> specified in [IPC ABI v2 Specification](./ipc-abi-v2.md) (draft, not yet
+> implemented). Section 15 of that page lists the defects of the mechanisms
+> below that motivate the change.
+
 Strat9 OS provides a **3-level hybrid IPC transport model**. A central `TransportManager` picks a transport per silo pair from a static tier matrix, overridable by a caller-supplied minimum level.
 
 > **Naming.** The code does not use `N1`/`N2`/`N3` as identifiers — those labels appear in module names and comments only. The real enum is `TransportLevel { TypeSafe = 1, LockFree = 2, Mmu = 3 }` (`kernel/src/ipc/transport.rs:23-32`). This page keeps the N1/N2/N3 labels for continuity with the design docs, but every claim below is checked against the implementation.
