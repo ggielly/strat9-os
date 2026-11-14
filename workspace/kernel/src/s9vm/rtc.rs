@@ -550,6 +550,21 @@ impl CmosRtc {
         }
     }
 
+    /// Writes a CMOS RAM byte directly, without going through the index and
+    /// data ports.
+    ///
+    /// Firmware configuration (floppy drive types at `0x10`, extended-memory
+    /// size at `0x30`/`0x31`) is planted this way before the guest starts; the
+    /// guest may overwrite it through the normal ports afterwards.
+    pub fn set_ram(&mut self, register: u8, value: u8) {
+        self.ram[usize::from(register)] = value;
+    }
+
+    /// Reads a CMOS RAM byte directly.
+    pub fn ram(&self, register: u8) -> u8 {
+        self.ram[usize::from(register)]
+    }
+
     /// Raises interrupt flags in status register C.
     ///
     /// The device model calls this when an external event must be latched; the

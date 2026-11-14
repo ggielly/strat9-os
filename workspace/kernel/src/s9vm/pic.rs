@@ -333,6 +333,19 @@ impl Pic {
         }
     }
 
+    /// True when a request would be acknowledged by [`Self::acknowledge`].
+    ///
+    /// This is the non-destructive form used by a runner that wants to check
+    /// the guest interrupt state before taking the request out of the `IRR`.
+    pub fn has_pending(&self) -> bool {
+        let master = self.master.irr & !self.master.imr;
+        if master & !(1 << CASCADE_IRQ) != 0 {
+            return true;
+        }
+        let slave = self.slave.irr & !self.slave.imr;
+        slave != 0 && self.master.imr & (1 << CASCADE_IRQ) == 0
+    }
+
     /// Accepts the highest-priority request across both chips.
     ///
     /// The slave is serviced through the master's cascade input, so a pending

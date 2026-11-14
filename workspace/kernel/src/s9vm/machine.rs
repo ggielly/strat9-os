@@ -119,6 +119,18 @@ impl GuestContext for VcpuGuest<'_> {
         self.vcpu.paging_enabled()
     }
 
+    fn rflags(&self) -> u64 {
+        self.vcpu.guest().rflags
+    }
+
+    fn es_base(&self) -> u64 {
+        self.vcpu.guest().es.base
+    }
+
+    fn ds_base(&self) -> u64 {
+        self.vcpu.guest().ds.base
+    }
+
     fn msr_model(&mut self) -> Option<&mut crate::s9vm::msr::MsrModel> {
         Some(self.vcpu.msr_mut())
     }
@@ -153,7 +165,19 @@ pub struct Machine {
 impl Machine {
     /// Creates the machine of a world.
     pub fn new() -> Self {
-        let mut devices = Devices::new();
+        Self::with_devices(Devices::new())
+    }
+
+    /// Creates the machine of a legacy PC: no PCI virtio functions.
+    ///
+    /// Used by worlds that boot a real firmware (SeaBIOS) from a floppy: the
+    /// firmware enumerates PCI and would otherwise attach its own virtio
+    /// drivers to the s9vm functions.
+    pub fn new_legacy() -> Self {
+        Self::with_devices(Devices::new_legacy())
+    }
+
+    fn with_devices(mut devices: Devices) -> Self {
         // Seed the guest CMOS clock with the host wall-clock time when the
         // host RTC driver can read it; a guest that needs the date (boot
         // logging, TLS) then sees the real time instead of the UNIX epoch.
@@ -339,7 +363,7 @@ impl Machine {
             vcpu.paging_enabled(),
         );
         let mut guest = VcpuGuest { vcpu };
-        emulate::handle_exit(
+        emulate::handle_exit_with_length(
             devices,
             apic,
             &mut view,
@@ -347,6 +371,7 @@ impl Machine {
             exit.class(),
             exit.qualification,
             exit.guest_physical_address,
+            exit.instruction_length,
         )
     }
 

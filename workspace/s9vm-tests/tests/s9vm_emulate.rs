@@ -18,6 +18,10 @@ mod dma;
 mod emulate;
 #[path = "../../kernel/src/s9vm/exit.rs"]
 mod exit;
+#[path = "../../kernel/src/s9vm/fdc.rs"]
+mod fdc;
+#[path = "../../kernel/src/s9vm/fwcfg.rs"]
+mod fwcfg;
 #[path = "../../kernel/src/s9vm/hpet.rs"]
 mod hpet;
 #[path = "../../kernel/src/s9vm/ioapic.rs"]
@@ -36,6 +40,8 @@ mod pit;
 mod rtc_math;
 #[path = "../../kernel/src/s9vm/rtc.rs"]
 mod rtc;
+#[path = "../../kernel/src/s9vm/system.rs"]
+mod system;
 #[path = "../../kernel/src/s9vm/uart.rs"]
 mod uart;
 #[path = "../../kernel/src/s9vm/vga.rs"]
@@ -50,9 +56,9 @@ mod virtio_console;
 mod virtio_net;
 
 use emulate::{
-    handle_exit, interrupt_action, interrupt_deliverable, walk_guest, walk_second_level,
-    DevicePage, Devices, GuestContext, InterruptAction, MemoryView, PhysMemory, CONSOLE_BASE,
-    CONSOLE_IRQ_LINE, CONSOLE_IRQ_VECTOR, INTERRUPTIBILITY_MOV_SS_BLOCKING,
+    handle_exit, handle_exit_with_length, interrupt_action, interrupt_deliverable, walk_guest,
+    walk_second_level, DevicePage, Devices, GuestContext, InterruptAction, MemoryView, PhysMemory,
+    CONSOLE_BASE, CONSOLE_IRQ_LINE, CONSOLE_IRQ_VECTOR, INTERRUPTIBILITY_MOV_SS_BLOCKING,
     INTERRUPTIBILITY_STI_BLOCKING, IOAPIC_BASE,
 };
 use exit::ExitClass;
@@ -307,6 +313,41 @@ fn in_from_pic_data_port_returns_the_programmed_mask() {
     assert!(handled);
     // Only AL is written: the upper bits of RAX are preserved.
     assert_eq!(guest.regs[0], 0xFFFF_FFFF_FFFF_0042);
+    assert_eq!(guest.rip, rip + 2);
+}
+
+#[test]
+fn repeated_insb_reads_the_fw_cfg_signature_into_guest_memory() {
+    let mut memory = machine();
+    // `rep insb` (F3 6C); the decoder is bypassed for string I/O, but RIP and
+    // the instruction length still describe it.
+    let rip = load_code(&mut memory, &[0xF3, 0x6C]);
+    let mut guest = TestGuest::new(rip);
+    guest.regs[7] = DATA_PAGE; // ES:DI
+    guest.regs[1] = 4; // RCX
+    let mut devices = Devices::new();
+    devices.fw_cfg.select(fwcfg::SIGNATURE);
+    // size-1 = 0, direction IN = bit 3, string = bit 4, repeated = bit 5.
+    let qualification =
+        (u64::from(fwcfg::DATA_PORT) << 16) | 0x08 | 0x10 | 0x20;
+    let mut view = view(&mut memory, &guest);
+    let handled = handle_exit_with_length(
+        &mut devices,
+        &mut apic::LocalApic::new(0),
+        &mut view,
+        &mut guest,
+        ExitClass::IoPort,
+        qualification,
+        0,
+        2,
+    )
+    .expect("string I/O");
+    assert!(handled);
+    let mut signature = [0u8; 4];
+    assert!(view.read(DATA_PAGE, &mut signature));
+    assert_eq!(&signature, b"QEMU");
+    assert_eq!(guest.regs[7], DATA_PAGE + 4);
+    assert_eq!(guest.regs[1], 0);
     assert_eq!(guest.rip, rip + 2);
 }
 

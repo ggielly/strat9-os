@@ -119,3 +119,31 @@ fn dma_registers_round_trip_and_ignore_the_post_port() {
     assert_eq!(model.read(0xD0), Some(0x7F));
     assert_eq!(model.read(0x10), None);
 }
+
+#[test]
+fn dma_channel_two_decodes_the_floppy_programming_sequence() {
+    // The exact sequence SeaBIOS uses in `dma_floppy`: mask, clear flip-flop,
+    // address low/high, clear flip-flop, count low/high, mode, page, unmask.
+    let mut model = Dma::new();
+    model.write(0x0A, 0x06); // mask channel 2
+    model.write(0x0C, 0x00); // clear flip-flop
+    model.write(0x04, 0x00); // address low
+    model.write(0x04, 0x7C); // address high -> 0x7C00
+    model.write(0x0C, 0x00); // clear flip-flop
+    model.write(0x05, 0xFF); // count low
+    model.write(0x05, 0x01); // count high -> 0x01FF (512 bytes)
+    model.write(0x0B, 0x46); // single mode, increment, read (device -> memory)
+    model.write(0x81, 0x00); // page 0
+    model.write(0x0A, 0x02); // unmask channel 2
+
+    let channel = model.channel(dma::FLOPPY_CHANNEL).expect("channel 2");
+    assert_eq!(channel.physical_address(), 0x0000_7C00);
+    assert_eq!(channel.remaining(), 512);
+    assert!(!channel.masked);
+    assert!(!channel.is_write(), "0x46 is a read transfer");
+
+    model.complete(dma::FLOPPY_CHANNEL, 512);
+    let channel = model.channel(dma::FLOPPY_CHANNEL).expect("channel 2");
+    assert_eq!(channel.physical_address(), 0x0000_7E00);
+    assert_eq!(channel.count, 0);
+}

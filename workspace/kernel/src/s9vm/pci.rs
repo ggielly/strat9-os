@@ -127,6 +127,10 @@ pub mod class_code {
 pub const HOST_BRIDGE_VENDOR_ID: u16 = 0x8086;
 /// Conventional host bridge device identifier.
 pub const HOST_BRIDGE_DEVICE_ID: u16 = 0x1237;
+/// PCI subsystem vendor reported on the host bridge: Red Hat / QEMU.
+pub const QEMU_SUBSYSTEM_VENDOR_ID: u16 = 0x1AF4;
+/// PCI subsystem identifier reported on the host bridge: QEMU virtual machine.
+pub const QEMU_SUBSYSTEM_ID: u16 = 0x1100;
 /// PCI vendor identifier of a virtio device.
 pub const VIRTIO_VENDOR_ID: u16 = 0x1AF4;
 /// Modern virtio PCI device identifier base (`0x1040 + device type`).
@@ -1386,6 +1390,16 @@ impl PciFunction {
             HOST_BRIDGE_DEVICE_ID,
             class_code::HOST_BRIDGE,
         );
+        // QEMU-compatible subsystem identity: SeaBIOS' `qemu_detect()` only
+        // enables the `fw_cfg` path when the northbridge reports the Red Hat /
+        // QEMU subsystem pair. Without it the firmware ignores the interface
+        // and never deploys the VGA option ROM.
+        function
+            .config
+            .write_u16(config::SUBSYSTEM_VENDOR_ID, QEMU_SUBSYSTEM_VENDOR_ID);
+        function
+            .config
+            .write_u16(config::SUBSYSTEM_ID, QEMU_SUBSYSTEM_ID);
         function.kind = FunctionKind::HostBridge;
         function
     }

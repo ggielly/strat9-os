@@ -90,10 +90,32 @@
 //! sector copy, `INT 10h` vector, BDA words, zeroed video buffer) through the
 //! world translation.
 //!
+//! # SeaBIOS boot
+//!
+//! [`run_freedos_seabios`] boots the same floppy with the real SeaBIOS 1.17.0
+//! and SeaVGABIOS images embedded by [`firmware`]. The guest starts at the
+//! architectural reset vector (`F000:FFF0`), runs the firmware's own POST and
+//! `INT 13h`, and drives the emulated chipset instead of calling back into the
+//! kernel:
+//!
+//! - the 82077AA controller ([`crate::s9vm::fdc`]) and DMA channel 2 move the
+//!   sectors;
+//! - the 8259 pair delivers `INT 08h` (timer) and `INT 0Eh` (floppy) as
+//!   exception-class vectors, which the run loop injects directly because the
+//!   local APIC never delivers vectors below `0x10`;
+//! - CMOS `0x10` advertises one 1.44 MiB drive and `0x30`/`0x31` advertise the
+//!   3 MiB of extended memory (a 4 MiB machine);
+//! - no stub IVT/BDA is installed: SeaBIOS builds them during POST.
+//!
+//! [`run_freedos_seabios_dry`] verifies the BIOS/option-ROM placement and the
+//! 4 MiB window without VT-x. The same [`firmware`] installer is independent of
+//! FreeDOS: another world only has to map the windows and call
+//! [`firmware::install`] with its own image and [`firmware::FirmwareConfig`].
+//!
 //! This module is `no_std` (`core` + `alloc`) and never panics on guest
 //! behaviour: every failure is a [`DosError`].
 
-use alloc::string::String;
+use alloc::{string::String, vec};
 
 use crate::s9vm::{
     apic::LocalApic,
@@ -101,6 +123,7 @@ use crate::s9vm::{
     caps::HwCaps,
     emulate,
     exit::{reason_name, ExitClass},
+    firmware,
     guest::GuestState,
     machine::Machine,
     vcpu::{ExitInfo, Vcpu, VcpuError},
@@ -128,16 +151,13 @@ impl Drop for IrqOff {
 
 /// Guest permissions for the low-memory and ROM mappings (read/write/exec).
 const DOS_GUEST_PERMS: u32 = 7;
-/// First guest-physical address mapped as conventional memory.
+/// First address of the mapped conventional low memory.
 const LOW_MEMORY_BASE: u64 = 0;
-/// End of the mapped conventional low memory.
+/// First address of the mapped BIOS ROM window (stub firmware).
 ///
-/// Covers the conventional 640 KiB, the VGA aperture (`0xA0000..0xC0000`) and
-/// the option-ROM/video-BIOS scan window (`0xC0000..0xF0000`): a DOS-class
-/// guest reads that window while scanning for expansion ROMs, and an unmapped
-/// read there would abort the boot.
-const LOW_MEMORY_END: u64 = 0xF0000;
-/// First address of the mapped BIOS ROM window.
+/// The stub ROM is a 32 KiB image at `0xF0000`; the option-ROM scan window
+/// below it (`0xC0000..0xF0000`) is part of the low mapping, so a DOS-class
+/// guest can read it while scanning for expansion ROMs.
 const ROM_WINDOW_BASE: u64 = 0xF0000;
 /// End of the mapped BIOS ROM window.
 const ROM_WINDOW_END: u64 = 0x100000;
@@ -158,6 +178,17 @@ const PAGE_SIZE: u32 = 4096;
 const HIGH_MEMORY_BASE: u64 = 0x10_0000;
 /// End of the window above 1 MiB.
 const HIGH_MEMORY_END: u64 = 0x12_0000;
+/// End of the window above 1 MiB for a real firmware.
+///
+/// SeaBIOS derives `RamSize` from CMOS (4 MiB in the FreeDOS configuration)
+/// and may place ACPI tables or allocator scratch above 1 MiB, so the whole
+/// advertised range must be mapped.
+const SEABIOS_HIGH_MEMORY_END: u64 = 0x40_0000;
+/// First address of the BIOS ROM window used by a real firmware.
+///
+/// A 256 KiB SeaBIOS image occupies `0xC0000..0x100000`; its first 64 KiB are
+/// zero padding where the VGA option ROM is installed.
+const SEABIOS_ROM_WINDOW_BASE: u64 = 0xC_0000;
 /// Upper bound on guest exits for one FreeDOS boot.
 ///
 /// A real DOS boot runs far more instructions than the synthetic demo: the
@@ -172,6 +203,12 @@ const MAX_FREEDOS_EXITS: u32 = 500_000;
 /// and would appear frozen. A short slice returns control often enough to
 /// advance the device/BIOS time base and to honour the run budget.
 const PREEMPTION_SLICE_TICKS: u32 = 32_768;
+/// Preemption-timer slice of the SeaBIOS runner.
+///
+/// Legacy IRQs are delivered on preemption exits (the floppy ISR must not run
+/// before SeaBIOS clears its BDA flag), so a slightly longer slice reduces the
+/// exit count without adding perceptible interrupt latency.
+const SEABIOS_PREEMPTION_SLICE_TICKS: u32 = 1 << 20;
 /// Upper bound on timer ticks injected to recover a `hlt`-idle guest.
 ///
 /// A DOS-class boot waits for a handful of timer ticks at most (disk motor,
@@ -275,6 +312,32 @@ impl Default for RunLimits {
     }
 }
 
+/// Firmware the FreeDOS test world boots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirmwareKind {
+    /// The s9vm 16-bit stub ROM: `INT` calls exit through port `0xE0xx` and the
+    /// kernel services them ([`bios`]).
+    Stub,
+    /// A real SeaBIOS ROM: the guest runs the firmware's own `INT 10h`/`13h`
+    /// code and drives the emulated chipset (FDC, DMA, PIC, PIT, VGA).
+    SeaBios,
+}
+
+impl FirmwareKind {
+    /// Diagnostics tag of the run.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Stub => "freedostest",
+            Self::SeaBios => "freedos-seabios",
+        }
+    }
+
+    /// True for the real-firmware path.
+    pub const fn is_seabios(self) -> bool {
+        matches!(self, Self::SeaBios)
+    }
+}
+
 /// Errors reported by the DOS boot runner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DosError {
@@ -371,9 +434,45 @@ pub fn run_freedos(caps: &HwCaps) -> Result<DosReport, DosError> {
 /// freeze the whole system. The report carries `timed_out = true` when the
 /// budget stopped the run; the world is destroyed on every path.
 pub fn run_freedos_with_limits(caps: &HwCaps, limits: RunLimits) -> Result<DosReport, DosError> {
-    require_real_mode(caps, "freedostest")?;
-    let record = vm::create(b"s9vm-freedos", 0).ok_or(DosError::VmFail(1))?;
-    let result = run_freedos_in_world(caps, record.id, limits);
+    run_firmware_with_limits(caps, limits, FirmwareKind::Stub)
+}
+
+/// Boots the FreeDOS floppy with the real SeaBIOS firmware (requires VT-x).
+///
+/// Unlike [`run_freedos`], the guest does not call back into the kernel for
+/// `INT 10h`/`INT 13h`: SeaBIOS and SeaVGABIOS run their own 16-bit code and
+/// drive the emulated FDC, DMA, PIC, PIT and VGA models instead.
+pub fn run_freedos_seabios(caps: &HwCaps) -> Result<DosReport, DosError> {
+    let report = run_freedos_seabios_with_limits(caps, RunLimits::SELFTEST)?;
+    if report.timed_out {
+        log::warn!("[s9vm] freedos-seabios: boot did not complete within the budget");
+        return Err(DosError::BadExit("FreeDOS SeaBIOS boot timed out"));
+    }
+    verify_freedos(&report)?;
+    Ok(report)
+}
+
+/// Boots the FreeDOS floppy with SeaBIOS under an explicit budget.
+pub fn run_freedos_seabios_with_limits(
+    caps: &HwCaps,
+    limits: RunLimits,
+) -> Result<DosReport, DosError> {
+    run_firmware_with_limits(caps, limits, FirmwareKind::SeaBios)
+}
+
+/// Common entry point of the two FreeDOS firmware paths.
+fn run_firmware_with_limits(
+    caps: &HwCaps,
+    limits: RunLimits,
+    firmware: FirmwareKind,
+) -> Result<DosReport, DosError> {
+    require_real_mode(caps, firmware.label())?;
+    let name = match firmware {
+        FirmwareKind::Stub => b"s9vm-freedos".as_slice(),
+        FirmwareKind::SeaBios => b"s9vm-freedos-seabios".as_slice(),
+    };
+    let record = vm::create(name, 0).ok_or(DosError::VmFail(1))?;
+    let result = run_freedos_in_world(caps, record.id, limits, firmware);
     let _ = vm::destroy(record.id);
     result
 }
@@ -578,20 +677,26 @@ fn run_dos_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError>
 ///
 /// Returns the block-device capacity in sectors.
 fn map_and_load(caps: &HwCaps, world_id: u64) -> Result<u64, DosError> {
-    map_low_windows(caps, world_id)?;
+    map_low_windows(caps, world_id, FirmwareKind::Stub)?;
     let image = biosrom::demo_disk_image();
     vm::load_disk(world_id, &image).map_err(|_| DosError::VmFail(4))
 }
 
 /// Maps the conventional low memory and the BIOS ROM window.
 ///
-/// The step numbers are the historical ones of [`run_dos`].
-fn map_low_windows(caps: &HwCaps, world_id: u64) -> Result<(), DosError> {
+/// The step numbers are the historical ones of [`run_dos`]. A real firmware
+/// needs the BIOS window to start at `0xC0000` (256 KiB image and its VGA
+/// option ROM); the stub ROM only uses `0xF0000..0x100000`.
+fn map_low_windows(caps: &HwCaps, world_id: u64, firmware: FirmwareKind) -> Result<(), DosError> {
+    let rom_window_base = match firmware {
+        FirmwareKind::Stub => ROM_WINDOW_BASE,
+        FirmwareKind::SeaBios => SEABIOS_ROM_WINDOW_BASE,
+    };
     vm::map_memory(
         world_id,
         caps,
         LOW_MEMORY_BASE,
-        LOW_MEMORY_END - LOW_MEMORY_BASE,
+        rom_window_base - LOW_MEMORY_BASE,
         DOS_GUEST_PERMS,
         0,
     )
@@ -599,8 +704,8 @@ fn map_low_windows(caps: &HwCaps, world_id: u64) -> Result<(), DosError> {
     vm::map_memory(
         world_id,
         caps,
-        ROM_WINDOW_BASE,
-        ROM_WINDOW_END - ROM_WINDOW_BASE,
+        rom_window_base,
+        ROM_WINDOW_END - rom_window_base,
         DOS_GUEST_PERMS,
         0,
     )
@@ -608,13 +713,17 @@ fn map_low_windows(caps: &HwCaps, world_id: u64) -> Result<(), DosError> {
     .map_err(|_| DosError::VmFail(3))
 }
 
-/// Maps the window above 1 MiB (A20 probe and kernel scratch).
-fn map_high_window(caps: &HwCaps, world_id: u64) -> Result<(), DosError> {
+/// Maps the window above 1 MiB (A20 probe, allocator and firmware tables).
+fn map_high_window(caps: &HwCaps, world_id: u64, firmware: FirmwareKind) -> Result<(), DosError> {
+    let end = match firmware {
+        FirmwareKind::Stub => HIGH_MEMORY_END,
+        FirmwareKind::SeaBios => SEABIOS_HIGH_MEMORY_END,
+    };
     vm::map_memory(
         world_id,
         caps,
         HIGH_MEMORY_BASE,
-        HIGH_MEMORY_END - HIGH_MEMORY_BASE,
+        end - HIGH_MEMORY_BASE,
         DOS_GUEST_PERMS,
         0,
     )
@@ -625,9 +734,13 @@ fn map_high_window(caps: &HwCaps, world_id: u64) -> Result<(), DosError> {
 /// Maps the three windows used by FreeDOS and loads its boot floppy.
 ///
 /// Returns the block-device capacity in sectors.
-fn map_and_load_freedos(caps: &HwCaps, world_id: u64) -> Result<u64, DosError> {
-    map_low_windows(caps, world_id)?;
-    map_high_window(caps, world_id)?;
+fn map_and_load_freedos(
+    caps: &HwCaps,
+    world_id: u64,
+    firmware: FirmwareKind,
+) -> Result<u64, DosError> {
+    map_low_windows(caps, world_id, firmware)?;
+    map_high_window(caps, world_id, firmware)?;
     vm::load_disk(world_id, freedos_image()).map_err(|_| DosError::VmFail(8))
 }
 
@@ -642,13 +755,27 @@ fn install_artefacts(world_id: u64) -> Result<(), DosError> {
     Ok(())
 }
 
-/// Installs the ROM stubs/IVT/BDA and copies the FreeDOS boot sector.
+/// Installs the firmware and copies the FreeDOS boot sector when needed.
 ///
-/// Only sector 0 is copied. FreeDOS loads its kernel and the rest of its image
-/// from the emulated floppy through `INT 13h`; pre-copying anything else would
-/// hide a disk-path failure instead of exercising it.
-fn install_freedos_artefacts(world_id: u64) -> Result<(), DosError> {
+/// The stub path installs the ROM stubs/IVT/BDA and copies only sector 0:
+/// FreeDOS loads its kernel and the rest of its image from the emulated floppy
+/// through `INT 13h`, and pre-copying anything else would hide a disk-path
+/// failure. The SeaBIOS path installs the real BIOS and its VGA option ROM;
+/// SeaBIOS loads the boot sector itself.
+fn install_freedos_artefacts(world_id: u64, firmware: FirmwareKind) -> Result<(), DosError> {
     let mut memory = WorldMemory::new(world_id);
+    if firmware.is_seabios() {
+        firmware::install_seabios(&mut memory, firmware::FirmwareConfig::freedos()).map_err(
+            |error| {
+                log::warn!(
+                    "[s9vm] freedos-seabios: firmware install failed: {}",
+                    error.as_str()
+                );
+                DosError::Memory
+            },
+        )?;
+        return Ok(());
+    }
     biosrom::install(&mut memory, &biosrom::VECTORS).map_err(|_| DosError::Memory)?;
     let image = freedos_image();
     let boot_sector = image.get(..biosrom::SECTOR_SIZE).ok_or(DosError::Memory)?;
@@ -879,6 +1006,24 @@ impl emulate::GuestContext for VcpuGuest<'_> {
     fn paging(&self) -> bool {
         false
     }
+
+    fn rflags(&self) -> u64 {
+        self.vcpu.guest().rflags
+    }
+
+    fn es_base(&self) -> u64 {
+        self.vcpu.guest().es.base
+    }
+
+    fn ds_base(&self) -> u64 {
+        self.vcpu.guest().ds.base
+    }
+
+    fn msr_model(&mut self) -> Option<&mut crate::s9vm::msr::MsrModel> {
+        // SeaBIOS executes `RDMSR`/`WRMSR` during POST; the model keeps those
+        // guest-local instead of touching a host MSR.
+        Some(self.vcpu.msr_mut())
+    }
 }
 
 /// Tries to consume an exit in the kernel device model.
@@ -897,21 +1042,51 @@ fn run_device_fast_path(
     class: ExitClass,
     qualification: u64,
     guest_physical_address: u64,
+    instruction_length: u32,
 ) -> bool {
     let mut view = emulate::MemoryView::new(memory, ept_root, 0, false);
     let mut guest = VcpuGuest::new(vcpu);
     matches!(
-        emulate::handle_exit(
+        emulate::handle_exit_with_length(
             devices,
             apic,
             &mut view,
             &mut guest,
             class,
             qualification,
-            guest_physical_address
+            guest_physical_address,
+            instruction_length
         ),
         Ok(true)
     )
+}
+
+/// Delivers one pending 8259 request straight into the guest.
+///
+/// `vcpu.inject_interrupt` performs a VM-entry event injection, which is not
+/// filtered by the local APIC's "vector >= 0x10" rule: that is exactly what a
+/// legacy firmware needs for `INT 08h` (timer) and `INT 0Eh` (floppy). The
+/// request is only acknowledged once the guest can take it, else it stays in
+/// the `IRR` for the next attempt.
+fn deliver_legacy_interrupt(vcpu: &mut Vcpu, devices: &mut emulate::Devices) -> bool {
+    if !devices.legacy_pic() || !devices.pic.has_pending() {
+        return false;
+    }
+    if vcpu.guest().rflags & (1 << 9) == 0 {
+        return false;
+    }
+    let deliverable = unsafe { vcpu.interruptibility() }
+        .map(|state| state & 0b11 == 0)
+        .unwrap_or(false);
+    if !deliverable {
+        return false;
+    }
+    let Some(vector) = devices.pic.acknowledge() else {
+        return false;
+    };
+    // SAFETY: block loaded, guest inactive (exit handler), and the interrupt
+    // is deliverable (checked above).
+    unsafe { vcpu.inject_interrupt(vector) }.is_ok()
 }
 
 /// Advances the guest RIP past an exit that was not consumed.
@@ -982,10 +1157,7 @@ fn read_bios_registers(guest: &GuestState) -> bios::BiosRegisters {
 fn read_bios_call_registers(vcpu: &Vcpu, memory: &mut WorldMemory) -> bios::BiosRegisters {
     let mut registers = read_bios_registers(vcpu.guest());
     let guest = vcpu.guest();
-    let stack = guest
-        .ss
-        .base
-        .wrapping_add(u64::from(guest.rsp as u16)) as u32;
+    let stack = guest.ss.base.wrapping_add(u64::from(guest.rsp as u16)) as u32;
     let mut read_word = |memory: &mut WorldMemory, offset: u32| -> Option<u16> {
         let lo = bios::BiosMemory::read_u8(memory, stack.wrapping_add(offset))?;
         let hi = bios::BiosMemory::read_u8(memory, stack.wrapping_add(offset + 1))?;
@@ -1086,18 +1258,32 @@ fn run_freedos_in_world(
     caps: &HwCaps,
     world_id: u64,
     limits: RunLimits,
+    firmware: FirmwareKind,
 ) -> Result<DosReport, DosError> {
-    let disk_sectors = map_and_load_freedos(caps, world_id)?;
-    install_freedos_artefacts(world_id)?;
+    let disk_sectors = map_and_load_freedos(caps, world_id, firmware)?;
+    install_freedos_artefacts(world_id, firmware)?;
     let mut memory = WorldMemory::new(world_id);
 
     // Detached vCPU: the run loop drives it directly, no scheduler.
     let pointer = vm::second_level_pointer(world_id, caps).map_err(|_| DosError::VmFail(6))?;
     let mut vcpu = Vcpu::new(caps, pointer)?;
-    let guest = GuestState::real_mode(
-        u64::from(biosrom::BOOT_SECTOR_GPA),
-        u64::from(biosrom::BOOT_STACK_TOP),
-    );
+    let guest = match firmware {
+        FirmwareKind::Stub => GuestState::real_mode(
+            u64::from(biosrom::BOOT_SECTOR_GPA),
+            u64::from(biosrom::BOOT_STACK_TOP),
+        ),
+        FirmwareKind::SeaBios => {
+            // Architectural reset state: `CS=F000`, `IP=FFF0` (linear
+            // `0xFFFF0`), which is the far jump at the end of the BIOS image.
+            let mut state = GuestState::real_mode(
+                u64::from(firmware::RESET_IP),
+                u64::from(biosrom::BOOT_STACK_TOP),
+            );
+            state.cs.selector = firmware::RESET_SEGMENT;
+            state.cs.base = u64::from(firmware::RESET_SEGMENT) << 4;
+            state
+        }
+    };
     // Pin the task to this CPU before the VMCS is loaded: the STI window of
     // `service_pending_host_interrupts` lets the timer interrupt run, and
     // without this guard it could migrate the task while the VMCS is active on
@@ -1114,19 +1300,68 @@ fn run_freedos_in_world(
         vcpu.load()?;
         vcpu.configure_host()?;
         vcpu.configure(caps, &guest)?;
-        vcpu.set_preemption_timer_ticks(PREEMPTION_SLICE_TICKS);
+        vcpu.set_preemption_timer_ticks(if firmware.is_seabios() {
+            SEABIOS_PREEMPTION_SLICE_TICKS
+        } else {
+            PREEMPTION_SLICE_TICKS
+        });
     }
     log::info!(
-        "[s9vm] freedostest: entering real-mode guest at {:#x}",
+        "[s9vm] {}: entering {} guest at {:#x}",
+        firmware.label(),
+        if firmware.is_seabios() {
+            "real-firmware"
+        } else {
+            "real-mode"
+        },
         guest.rip
     );
 
     let mut report = DosReport::new(disk_sectors);
+    if firmware.is_seabios() {
+        report.boot_sector_gpa = u64::from(firmware::RESET_LINEAR);
+        report.entry = u64::from(firmware::RESET_LINEAR);
+    }
     let mut world_disk = WorldDisk::new(world_id, disk_sectors);
     let mut bios_state = bios::BiosState::new();
     // Chipset model of this world plus the local APIC its legacy devices signal
-    // through, exactly like the other kernel guest phases.
-    let mut machine = Machine::new();
+    // through, exactly like the other kernel guest phases. The SeaBIOS world
+    // uses the legacy PC device set: no PCI virtio functions, and ISA
+    // interrupts delivered through the 8259 pair.
+    let mut machine = if firmware.is_seabios() {
+        Machine::new_legacy()
+    } else {
+        Machine::new()
+    };
+    if firmware.is_seabios() {
+        let config = firmware::FirmwareConfig::freedos();
+        let (extmem_low, extmem_high) = config.extmem_cmos();
+        machine.devices_mut().set_legacy_pic(true);
+        machine.devices_mut().load_floppy(freedos_image());
+        machine
+            .devices_mut()
+            .add_fw_cfg_file("vgaroms/vgabios-stdvga.bin", firmware::seabios_vga_rom());
+        machine
+            .devices_mut()
+            .rtc
+            .set_ram(firmware::CMOS_FLOPPY_TYPE, config.cmos_floppy_type);
+        machine
+            .devices_mut()
+            .rtc
+            .set_ram(firmware::CMOS_EXTMEM_LOW, extmem_low);
+        machine
+            .devices_mut()
+            .rtc
+            .set_ram(firmware::CMOS_EXTMEM_HIGH, extmem_high);
+        // QEMU-mode SeaBIOS reads its default boot order from CMOS: the low
+        // nibble of 0x3D is the first device (1 = floppy), and 0x38 bit 0
+        // would skip the boot-sector signature check (it stays clear).
+        machine.devices_mut().rtc.set_ram(firmware::CMOS_BOOTFLAG1, 0);
+        machine
+            .devices_mut()
+            .rtc
+            .set_ram(firmware::CMOS_BOOTFLAG2, firmware::BOOT_ORDER_FLOPPY_FIRST);
+    }
     let mut apic = LocalApic::new(0);
     let tsc_hz = crate::s9vm::tsc::get().map_or(FALLBACK_TSC_HZ, |frequency| frequency.hz());
     let mut unhandled_ports: u32 = 0;
@@ -1142,16 +1377,22 @@ fn run_freedos_in_world(
     let mut published_ticks: u32 = 0;
     let mut outcome: Result<(), DosError> = Ok(());
     for _ in 0..limits.max_exits {
-        // Deliver a pending APIC vector while the guest is running, so a busy
-        // wait still receives PIT IRQ0 (INT 08h/1Ch) instead of only on HLT.
-        if let Some(vector) = apic.pending_vector() {
-            let deliverable = vcpu.guest().rflags & (1 << 9) != 0
-                && unsafe { vcpu.interruptibility() }
-                    .map(|state| state & 0b11 == 0)
-                    .unwrap_or(false);
-            if deliverable {
-                unsafe { vcpu.inject_interrupt(vector) }.map_err(DosError::Run)?;
-                let _ = apic.service();
+        // Deliver a pending interrupt while the guest is running. The stub
+        // path uses the local APIC (vectors >= 0x10). A real firmware owns the
+        // 8259 vectors (0x08..=0x0F), which the runner injects itself; the
+        // injection is deferred to a preemption/HLT exit because the floppy
+        // ISR must not run before SeaBIOS' `floppy_wait_irq` has cleared its
+        // BDA flag (a real controller completes the command asynchronously).
+        if !firmware.is_seabios() {
+            if let Some(vector) = apic.pending_vector() {
+                let deliverable = vcpu.guest().rflags & (1 << 9) != 0
+                    && unsafe { vcpu.interruptibility() }
+                        .map(|state| state & 0b11 == 0)
+                        .unwrap_or(false);
+                if deliverable {
+                    unsafe { vcpu.inject_interrupt(vector) }.map_err(DosError::Run)?;
+                    let _ = apic.service();
+                }
             }
         }
         // One device-time advance per exit, measured from the host TSC.
@@ -1175,12 +1416,16 @@ fn run_freedos_in_world(
             }
         }
         machine.advance_time(&mut apic, delta, tsc_hz);
-        // 18.2 Hz BIOS tick: `ticks` is the cumulative count derived from the
-        // host cycles (182 / 10 per second). `advance_ticks` accumulates, so
-        // only the difference with the previously published value is added.
-        let ticks = (u128::from(total_cycles) * 182 / (u128::from(tsc_hz) * 10)) as u32;
-        bios_state.advance_ticks(ticks.wrapping_sub(published_ticks));
-        published_ticks = ticks;
+        if !firmware.is_seabios() {
+            // 18.2 Hz BIOS tick: `ticks` is the cumulative count derived from
+            // the host cycles (182 / 10 per second). `advance_ticks`
+            // accumulates, so only the difference with the previously
+            // published value is added. A real firmware increments the BDA
+            // counter from its own IRQ0 handler, so it must not be done twice.
+            let ticks = (u128::from(total_cycles) * 182 / (u128::from(tsc_hz) * 10)) as u32;
+            bios_state.advance_ticks(ticks.wrapping_sub(published_ticks));
+            published_ticks = ticks;
+        }
 
         // SAFETY: `run` contract: block loaded, IRQs disabled, configured.
         let exit = match unsafe { vcpu.run() } {
@@ -1285,6 +1530,7 @@ fn run_freedos_in_world(
                         ExitClass::IoPort,
                         exit.qualification,
                         0,
+                        exit.instruction_length,
                     );
                     if !consumed {
                         unhandled_ports += 1;
@@ -1330,6 +1576,14 @@ fn run_freedos_in_world(
                             break;
                         }
                     }
+                    if machine.devices_mut().system.take_reset() {
+                        log::warn!(
+                            "[s9vm] {}: guest requested a machine reset",
+                            firmware.label()
+                        );
+                        outcome = Err(DosError::BadExit("guest requested reset"));
+                        break;
+                    }
                 }
             }
             ExitClass::EptViolation => {
@@ -1342,6 +1596,7 @@ fn run_freedos_in_world(
                     ExitClass::EptViolation,
                     exit.qualification,
                     exit.guest_physical_address,
+                    0,
                 );
                 if !consumed {
                     log::warn!(
@@ -1371,6 +1626,24 @@ fn run_freedos_in_world(
                     if let Err(error) = advance_past_exit(&mut vcpu, &exit) {
                         outcome = Err(error);
                         break;
+                    }
+                    if firmware.is_seabios() {
+                        // Prefer the pending 8259 request (timer 0x08 or FDC
+                        // 0x0E); fall back to the timer so a `yield()` with no
+                        // armed time base still makes progress.
+                        if deliver_legacy_interrupt(&mut vcpu, machine.devices_mut()) {
+                            continue;
+                        }
+                        if let Err(error) = unsafe { vcpu.inject_interrupt(0x08) } {
+                            log::warn!(
+                                "[s9vm] {}: cannot inject timer: {:?}",
+                                firmware.label(),
+                                error
+                            );
+                            outcome = Err(DosError::Run(error));
+                            break;
+                        }
+                        continue;
                     }
                     let from_apic = apic.pending_vector();
                     let vector = from_apic.unwrap_or(0x08);
@@ -1416,6 +1689,56 @@ fn run_freedos_in_world(
                         vcpu.guest().rflags
                     );
                 }
+                if firmware.is_seabios() {
+                    // The only delivery point guaranteed to be *after* the
+                    // firmware entered its wait loop: a level-triggered 8259
+                    // request stays in the IRR until then, so the floppy ISR
+                    // cannot race `floppy_wait_irq`'s flag clear.
+                    let _ = deliver_legacy_interrupt(&mut vcpu, machine.devices_mut());
+                }
+            }
+            ExitClass::Cpuid => {
+                // CPUID is replayed from the world policy. SeaBIOS probes the
+                // processor during POST; the stub path never executed CPUID.
+                // SAFETY: block loaded, guest inactive.
+                if !matches!(
+                    unsafe { machine.handle(&mut vcpu, &mut apic, &exit) },
+                    Ok(true)
+                ) {
+                    log::warn!(
+                        "[s9vm] {}: unreplayed CPUID leaf {:#x}",
+                        firmware.label(),
+                        vcpu.guest().rax as u32
+                    );
+                    outcome = Err(DosError::BadExit("unhandled cpuid"));
+                    break;
+                }
+            }
+            ExitClass::Msr => {
+                // RDMSR/WRMSR are served by the per-vCPU MSR shadow (MTRRs are
+                // not advertised, so SeaBIOS skips its MTRR setup; the model
+                // accepts the architectural selectors it does touch).
+                let consumed = run_device_fast_path(
+                    &mut memory,
+                    &mut vcpu,
+                    pointer,
+                    machine.devices_mut(),
+                    &mut apic,
+                    ExitClass::Msr,
+                    exit.qualification,
+                    0,
+                    0,
+                );
+                if !consumed {
+                    log::warn!(
+                        "[s9vm] {}: unhandled MSR access (reason {:#x}, rip {:#x})",
+                        firmware.label(),
+                        exit.reason.reason,
+                        vcpu.guest().rip
+                    );
+                    outcome = Err(DosError::BadExit("unhandled msr"));
+                    break;
+                }
             }
             other => {
                 log::warn!(
@@ -1437,6 +1760,16 @@ fn run_freedos_in_world(
     // so `Drop` can release its frames on this CPU.
     unsafe {
         let _ = vcpu.clear();
+    }
+    if firmware.is_seabios() {
+        let serial = machine.drain_serial();
+        if !serial.is_empty() {
+            log::info!(
+                "[s9vm] {}: firmware serial: {}",
+                firmware.label(),
+                String::from_utf8_lossy(&serial)
+            );
+        }
     }
     outcome?;
     if unhandled_ports != 0 {
@@ -1596,19 +1929,50 @@ fn verify_installation(memory: &mut WorldMemory, disk_sectors: u64) -> Result<()
 /// memory-side contract of the boot, and is the deterministic regression on
 /// TCG.
 pub fn run_freedos_dry(caps: &HwCaps) -> Result<DosReport, DosError> {
-    let record = vm::create(b"s9vm-freedos-dry", 0).ok_or(DosError::VmFail(1))?;
-    let result = run_freedos_dry_in_world(caps, record.id);
+    run_freedos_dry_with(caps, FirmwareKind::Stub)
+}
+
+/// Installs the real SeaBIOS firmware and its VGA option ROM **without VT-x**.
+///
+/// The same world mapping as the boot path is exercised, then every firmware
+/// artefact is read back through the world translation: the 256 KiB BIOS at
+/// `0xC0000`, its reset vector, the option ROM in its zero prefix, and the 4
+/// MiB high window. This is the deterministic regression for the real-firmware
+/// path on hosts without VT-x.
+pub fn run_freedos_seabios_dry(caps: &HwCaps) -> Result<DosReport, DosError> {
+    run_freedos_dry_with(caps, FirmwareKind::SeaBios)
+}
+
+fn run_freedos_dry_with(caps: &HwCaps, firmware: FirmwareKind) -> Result<DosReport, DosError> {
+    let name = match firmware {
+        FirmwareKind::Stub => b"s9vm-freedos-dry".as_slice(),
+        FirmwareKind::SeaBios => b"s9vm-freedos-seabios-dry".as_slice(),
+    };
+    let record = vm::create(name, 0).ok_or(DosError::VmFail(1))?;
+    let result = run_freedos_dry_in_world(caps, record.id, firmware);
     let _ = vm::destroy(record.id);
     result
 }
 
 /// Body of the VT-x-free FreeDOS dry run; the caller owns the world.
-fn run_freedos_dry_in_world(caps: &HwCaps, world_id: u64) -> Result<DosReport, DosError> {
-    let disk_sectors = map_and_load_freedos(caps, world_id)?;
-    install_freedos_artefacts(world_id)?;
+fn run_freedos_dry_in_world(
+    caps: &HwCaps,
+    world_id: u64,
+    firmware: FirmwareKind,
+) -> Result<DosReport, DosError> {
+    let disk_sectors = map_and_load_freedos(caps, world_id, firmware)?;
+    install_freedos_artefacts(world_id, firmware)?;
     let mut memory = WorldMemory::new(world_id);
-    verify_freedos_installation(&mut memory, disk_sectors)?;
-    Ok(DosReport::new(disk_sectors))
+    match firmware {
+        FirmwareKind::Stub => verify_freedos_installation(&mut memory, disk_sectors)?,
+        FirmwareKind::SeaBios => verify_seabios_installation(&mut memory, disk_sectors)?,
+    }
+    let mut report = DosReport::new(disk_sectors);
+    if firmware.is_seabios() {
+        report.boot_sector_gpa = u64::from(firmware::RESET_LINEAR);
+        report.entry = u64::from(firmware::RESET_LINEAR);
+    }
+    Ok(report)
 }
 
 /// Checks every artefact written by [`install_freedos_artefacts`].
@@ -1704,6 +2068,99 @@ fn verify_freedos_installation(
     }
     if readback != probe {
         return Err(DosError::BadExit("high memory window is not writable"));
+    }
+    Ok(())
+}
+
+/// Checks every artefact written by the SeaBIOS installation.
+///
+/// The contract the selftest mode `freedos_seabios_dry` reports on:
+///
+/// 1. the block device still exposes the 2880-sector FreeDOS floppy;
+/// 2. the 256 KiB BIOS is at `0xC0000`, with the `FAR JMP F000:xxxx` reset
+///    vector at `0xFFFF0`; the first 64 KiB are zero padding shared with the
+///    VGA option ROM (the comparison accounts for that overlap);
+/// 3. the VGA option ROM is at `0xC0000`, with its `0x55AA` signature, size
+///    code and zero modulo-256 checksum;
+/// 4. no stub IVT entry was installed (SeaBIOS builds its own);
+/// 5. the VGA text buffer is zeroed;
+/// 6. the full advertised 4 MiB window is mapped and writable.
+fn verify_seabios_installation(
+    memory: &mut WorldMemory,
+    disk_sectors: u64,
+) -> Result<(), DosError> {
+    if disk_sectors != FREEDOS_DISK_SECTORS {
+        return Err(DosError::BadExit("unexpected FreeDOS disk capacity"));
+    }
+    let image = firmware::seabios_image();
+    let info =
+        firmware::validate_bios(image).map_err(|_| DosError::BadExit("invalid SeaBIOS image"))?;
+    let rom = firmware::seabios_vga_rom();
+    let rom_info = firmware::validate_option_rom(rom)
+        .map_err(|_| DosError::BadExit("invalid VGA option ROM"))?;
+    let mut readback = vec![0u8; image.len()];
+    if !biosrom::RomMemory::read(memory, info.base, &mut readback) {
+        return Err(DosError::Mmu);
+    }
+    // The VGA option ROM is installed in the BIOS image's zero-filled prefix;
+    // compare the shared range against the ROM and the rest against the BIOS.
+    let overlap = rom_info.base >= info.base
+        && rom_info.base + rom_info.len <= info.base + image.len() as u32;
+    let overlap_start = if overlap {
+        (rom_info.base - info.base) as usize
+    } else {
+        usize::MAX
+    };
+    let overlap_end = overlap_start.saturating_add(rom_info.len as usize);
+    for (index, byte) in readback.iter().enumerate() {
+        let expected = if index >= overlap_start && index < overlap_end {
+            rom[index - overlap_start]
+        } else {
+            image[index]
+        };
+        if *byte != expected {
+            return Err(DosError::BadExit("SeaBIOS image copy differs"));
+        }
+    }
+    let mut reset = [0u8; firmware::RESET_VECTOR_LEN];
+    if !biosrom::RomMemory::read(memory, firmware::RESET_LINEAR, &mut reset) {
+        return Err(DosError::Mmu);
+    }
+    if reset[0] != 0xEA || reset[3] != 0x00 || reset[4] != 0xF0 {
+        return Err(DosError::BadExit("SeaBIOS reset vector differs"));
+    }
+    let mut option = vec![0u8; rom_info.len as usize];
+    if !biosrom::RomMemory::read(memory, rom_info.base, &mut option) {
+        return Err(DosError::Mmu);
+    }
+    if option != rom[..rom_info.len as usize] {
+        return Err(DosError::BadExit("VGA option ROM copy differs"));
+    }
+    // No stub firmware was installed: SeaBIOS owns the IVT.
+    if memory.dword(biosrom::IVT_BASE + 0x10 * 4) != Some(0) {
+        return Err(DosError::BadExit("stub IVT leaked into the SeaBIOS world"));
+    }
+    let mut video = [0xFFu8; 320];
+    if !biosrom::RomMemory::read(memory, biosrom::VIDEO_BASE, &mut video) {
+        return Err(DosError::Mmu);
+    }
+    if video.iter().any(|byte| *byte != 0) {
+        return Err(DosError::BadExit("video buffer is not zeroed"));
+    }
+    // Probe the top of the advertised 4 MiB range: SeaBIOS may place its
+    // allocator and tables anywhere inside it.
+    let probe_address = (SEABIOS_HIGH_MEMORY_END - 4) as u32;
+    let probe: [u8; 4] = [0x5A, 0xA5, 0x00, 0xFF];
+    let mut readback = [0u8; 4];
+    if !biosrom::RomMemory::write(memory, probe_address, &probe)
+        || !biosrom::RomMemory::read(memory, probe_address, &mut readback)
+    {
+        return Err(DosError::Mmu);
+    }
+    if readback != probe {
+        return Err(DosError::BadExit(
+            "SeaBIOS high memory window is not writable",
+        ));
     }
     Ok(())
 }

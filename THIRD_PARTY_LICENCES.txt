@@ -18,6 +18,8 @@ nasm-rs: 0.2.5, "Apache-2.0 OR MIT", by, "Allen Goodman <allen@goodman.io>|Gavin
 raw-cpuid: 10.7.0, "MIT", by, "Gerd Zellweger <mail@gerdzellweger.com>"
 rustversion: 1.0.22, "Apache-2.0 OR MIT", by, "David Tolnay <dtolnay@gmail.com>"
 scopeguard: 1.2.0, "Apache-2.0 OR MIT", by, "bluss"
+SeaBIOS: 1.17.0, "LGPL-3.0-or-later", by, "Kevin O'Connor and contributors"
+SeaVGABIOS: 1.17.0, "LGPL-3.0-or-later", by, "Kevin O'Connor and contributors"
 shlex: 1.3.0, "Apache-2.0 OR MIT", by, "comex <comexk@gmail.com>|Fenhl <fenhl@fenhl.net>|Adrian Taylor <adetaylor@chromium.org>|Alex Touchet <alextouchet@outlook.com>|Daniel Parks <dp+git@oxidized.org>|Garrett Berg <googberg@gmail.com>"
 silo-test: 0.1.0, "GPL-3.0", by, "N/A"
 spin: 0.9.8, "MIT", by, "Mathijs van de Nes <git@mathijs.vd-nes.nl>|John Ericson <git@JohnEricson.me>|Joshua Barretto <joshua.s.barretto@gmail.com>"

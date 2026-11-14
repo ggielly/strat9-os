@@ -51,6 +51,8 @@ use super::{
     decode::{self, Decoded, MemoryAccess, PortAccess},
     dma::{self, Dma},
     exit::ExitClass,
+    fdc::{self, FloppyController},
+    fwcfg::{self, FwCfg},
     hpet::{self, Hpet},
     ioapic::{IoApic, PIN_COUNT},
     keyboard::{self, KeyboardController},
@@ -59,6 +61,7 @@ use super::{
     pic::Pic,
     pit::{self, Pit},
     rtc::{self, CmosRtc},
+    system::{self, SystemControl},
     uart::{self, Uart},
     vga::{self, Vga},
     virtio::QueueMemory,
@@ -330,6 +333,21 @@ pub trait GuestContext {
     /// True if guest paging is active (long mode with `CR0.PG` set).
     fn paging(&self) -> bool;
 
+    /// Guest `RFLAGS`. The direction flag drives string-I/O addressing.
+    fn rflags(&self) -> u64 {
+        0
+    }
+
+    /// Base of the `ES` segment (destination of `INS`).
+    fn es_base(&self) -> u64 {
+        0
+    }
+
+    /// Base of the `DS` segment (source of `OUTS`).
+    fn ds_base(&self) -> u64 {
+        0
+    }
+
     /// Per-vCPU MSR shadow model, when the caller provides one.
     ///
     /// The default is `None`, which makes replayed `RDMSR`/`WRMSR` exits
@@ -507,6 +525,12 @@ pub struct Devices {
     pub vga: Vga,
     /// 8237 DMA controller register files (0x00..=0x0F, 0x81..=0x8F, 0xC0..=0xDF).
     pub dma: Dma,
+    /// 82077AA floppy controller and its 1.44 MiB drive.
+    pub fdc: FloppyController,
+    /// Chipset system-control ports (`0x92` A20, `0xCF9` reset).
+    pub system: SystemControl,
+    /// QEMU `fw_cfg` selector/data pair.
+    pub fw_cfg: FwCfg,
     /// PCI host bridge: configuration mechanism #1 and the virtio functions
     /// the guest discovers through it (no MSI generation yet).
     pub pci: PciHostBridge,
@@ -518,6 +542,24 @@ pub struct Devices {
     pub blk: VirtioBlk,
     /// Virtio network device (MMIO transport page).
     pub net: VirtioNet,
+    /// Deliver ISA interrupt lines to the 8259 pair only.
+    ///
+    /// A PC firmware (SeaBIOS, a DOS ROM) installs its `INT 08h`/`INT 0Eh`
+    /// handlers and expects the legacy vectors `0x08..=0x0F`. The local-APIC
+    /// delivery path reserves vectors below `0x10`, so such a guest needs the
+    /// runner to acknowledge the 8259 and inject the programmed vector itself.
+    /// When this flag is set, [`set_device_line`] no longer injects the I/O
+    /// APIC vector and [`flush_pic`] leaves the request in the `IRR` for the
+    /// runner.
+    legacy_pic: bool,
+    /// One-shot delay before the next legacy IRQ delivery.
+    ///
+    /// The floppy controller completes a command instantly in the model, while
+    /// real hardware takes long enough for SeaBIOS to enter `floppy_wait_irq`
+    /// and clear its BDA flag before the interrupt arrives. One preemption
+    /// interval of grace reproduces that ordering; the request stays in the
+    /// 8259 `IRR` meanwhile.
+    legacy_irq_grace: u8,
 }
 
 impl Devices {
@@ -528,6 +570,22 @@ impl Devices {
     /// vectors and unmasked; the guest may reprogram them, and the kernel
     /// reads the table when a device raises its line.
     pub fn new() -> Self {
+        Self::new_with_virtio(true)
+    }
+
+    /// Creates the device model of a **legacy PC** with no PCI virtio
+    /// functions.
+    ///
+    /// A real firmware enumerates every PCI function and attaches the drivers
+    /// it knows; the s9vm virtio functions are modern virtio-pci devices, but
+    /// their BARs and capabilities are not needed to boot a floppy. Keeping
+    /// them out of the SeaBIOS world removes an entire probe path from the
+    /// firmware boot.
+    pub fn new_legacy() -> Self {
+        Self::new_with_virtio(false)
+    }
+
+    fn new_with_virtio(virtio: bool) -> Self {
         let mut ioapic = IoApic::new(0);
         ioapic.set_pin(CONSOLE_IRQ_LINE, CONSOLE_IRQ_VECTOR, false);
         ioapic.set_pin(BLK_IRQ_LINE, BLK_IRQ_VECTOR, false);
@@ -553,9 +611,11 @@ impl Devices {
         // firmware), so an MMIO window only becomes visible once the guest has
         // written the base address.
         let mut pci = PciHostBridge::new();
-        let _ = pci.add_virtio(PCI_CONSOLE_SLOT, pci::virtio_device_type::CONSOLE);
-        let _ = pci.add_virtio(PCI_BLK_SLOT, pci::virtio_device_type::BLOCK);
-        let _ = pci.add_virtio(PCI_NET_SLOT, pci::virtio_device_type::NET);
+        if virtio {
+            let _ = pci.add_virtio(PCI_CONSOLE_SLOT, pci::virtio_device_type::CONSOLE);
+            let _ = pci.add_virtio(PCI_BLK_SLOT, pci::virtio_device_type::BLOCK);
+            let _ = pci.add_virtio(PCI_NET_SLOT, pci::virtio_device_type::NET);
+        }
         Self {
             pic: Pic::new(),
             ioapic,
@@ -565,12 +625,53 @@ impl Devices {
             keyboard: KeyboardController::new(),
             vga: Vga::new(),
             dma: Dma::new(),
+            fdc: FloppyController::new(),
+            system: SystemControl::new(),
+            fw_cfg: FwCfg::new(),
             pci,
             hpet: Hpet::new(),
             console: VirtioConsole::new(),
             blk: VirtioBlk::new(64 * 1024),
             net: VirtioNet::new(),
+            legacy_pic: false,
+            legacy_irq_grace: 0,
         }
+    }
+
+    /// Loads the floppy image the controller serves.
+    pub fn load_floppy(&mut self, image: &[u8]) {
+        self.fdc.load_image(image);
+    }
+
+    /// Registers a `fw_cfg` file for the firmware (for example a VGA option
+    /// ROM under `vgaroms/vgabios-stdvga.bin`).
+    pub fn add_fw_cfg_file(&mut self, name: &str, data: &[u8]) {
+        let _ = self.fw_cfg.add_file(name, data);
+    }
+
+    /// Selects legacy 8259 interrupt delivery (see the field documentation).
+    pub fn set_legacy_pic(&mut self, enabled: bool) {
+        self.legacy_pic = enabled;
+    }
+
+    /// True when legacy 8259 delivery is selected.
+    pub const fn legacy_pic(&self) -> bool {
+        self.legacy_pic
+    }
+
+    /// Delays the next legacy IRQ delivery by one preemption interval.
+    pub fn defer_legacy_irq(&mut self) {
+        self.legacy_irq_grace = 1;
+    }
+
+    /// Consumes one legacy-IRQ grace interval. Returns true while delivery
+    /// must still be postponed.
+    pub fn legacy_irq_deferred(&mut self) -> bool {
+        if self.legacy_irq_grace == 0 {
+            return false;
+        }
+        self.legacy_irq_grace = 0;
+        true
     }
 
     /// True if the port belongs to a device modeled here.
@@ -583,6 +684,9 @@ impl Devices {
             || keyboard::handles_port(port)
             || vga::handles_port(port)
             || dma::handles_port(port)
+            || fdc::handles_port(port)
+            || system::handles_port(port)
+            || fwcfg::handles_port(port)
             || handles_pci_port(port)
     }
 }
@@ -671,8 +775,38 @@ pub fn handle_exit(
     qualification: u64,
     guest_physical_address: u64,
 ) -> Result<bool, EmuError> {
+    handle_exit_with_length(
+        devices,
+        apic,
+        view,
+        guest,
+        class,
+        qualification,
+        guest_physical_address,
+        0,
+    )
+}
+
+/// [`handle_exit`] with the instruction length needed by string port I/O.
+pub fn handle_exit_with_length(
+    devices: &mut Devices,
+    apic: &mut LocalApic,
+    view: &mut MemoryView<'_>,
+    guest: &mut dyn GuestContext,
+    class: ExitClass,
+    qualification: u64,
+    guest_physical_address: u64,
+    instruction_length: u32,
+) -> Result<bool, EmuError> {
     match class {
-        ExitClass::IoPort => handle_port_exit(devices, apic, view, guest, qualification),
+        ExitClass::IoPort => handle_port_exit(
+            devices,
+            apic,
+            view,
+            guest,
+            qualification,
+            instruction_length,
+        ),
         ExitClass::EptViolation => handle_mmio_exit(
             devices,
             apic,
@@ -686,6 +820,13 @@ pub fn handle_exit(
     }
 }
 
+/// Maximum elements moved in one replayed `INS`/`OUTS` instruction.
+///
+/// A firmware file transfer is at most a few hundred KiB; a guest asking for
+/// billions of iterations would stall the host inside a single exit (the run
+/// loop only regains control between instructions).
+const MAX_STRING_IO_ELEMENTS: u64 = 1 << 20;
+
 /// Handles an I/O instruction exit (`IN`/`OUT`).
 fn handle_port_exit(
     devices: &mut Devices,
@@ -693,16 +834,26 @@ fn handle_port_exit(
     view: &mut MemoryView<'_>,
     guest: &mut dyn GuestContext,
     qualification: u64,
+    instruction_length: u32,
 ) -> Result<bool, EmuError> {
     // Exit qualification: bits 2:0 = size - 1, bit 3 = direction (1 = IN),
     // bits 5:4 = string/repeated, bits 31:16 = port.
     let string = (qualification >> 4) & 0x1 != 0;
     let repeated = (qualification >> 5) & 0x1 != 0;
-    if string || repeated {
-        return Ok(false);
-    }
     let port = ((qualification >> 16) & 0xFFFF) as u16;
-    if !Devices::handles_port(port) {
+    if string {
+        return handle_string_port(
+            devices,
+            apic,
+            view,
+            guest,
+            port,
+            qualification,
+            repeated,
+            instruction_length,
+        );
+    }
+    if repeated || !Devices::handles_port(port) {
         return Ok(false);
     }
     let size = ((qualification & 0x7) + 1) as u8;
@@ -716,10 +867,113 @@ fn handle_port_exit(
     if access.port != port || access.size != size || access.write == is_in {
         return Ok(false);
     }
-    if !serve_port(devices, apic, guest, &access) {
+    if !serve_port(devices, apic, view, guest, &access) {
         return Ok(false);
     }
     guest.set_rip(access.next_rip);
+    Ok(true)
+}
+
+/// Handles a repeated or single `INS`/`OUTS` string transfer.
+///
+/// String port I/O is the transport of the QEMU `fw_cfg` interface: SeaBIOS
+/// reads firmware files with `rep insb`, so the replay must move `RCX`
+/// elements between the port and `ES:DI`/`DS:SI`, honouring the direction flag.
+/// The port itself is served by the normal device model, one element at a
+/// time, so side effects (a serial byte, a `fw_cfg` cursor) happen in order.
+fn handle_string_port(
+    devices: &mut Devices,
+    apic: &mut LocalApic,
+    view: &mut MemoryView<'_>,
+    guest: &mut dyn GuestContext,
+    port: u16,
+    qualification: u64,
+    repeated: bool,
+    instruction_length: u32,
+) -> Result<bool, EmuError> {
+    if !Devices::handles_port(port) {
+        return Ok(false);
+    }
+    let size = ((qualification & 0x7) + 1) as u8;
+    if !matches!(size, 1 | 2 | 4) {
+        return Ok(false);
+    }
+    let is_in = (qualification >> 3) & 0x1 != 0;
+    let mut remaining = if repeated { guest.gpr(1) } else { 1 };
+    if remaining > MAX_STRING_IO_ELEMENTS {
+        return Ok(false);
+    }
+    let negative = guest.rflags() & (1 << 10) != 0;
+    let step = i64::from(size) * if negative { -1 } else { 1 };
+    let base = if is_in {
+        guest.es_base()
+    } else {
+        guest.ds_base()
+    };
+    let mut index = if is_in { guest.gpr(7) } else { guest.gpr(6) };
+
+    while remaining != 0 {
+        let address = base.wrapping_add(index);
+        if is_in {
+            let mut value = 0u64;
+            if port == fwcfg::DATA_PORT {
+                if size != 1 {
+                    return Ok(false);
+                }
+                value = u64::from(devices.fw_cfg.read_byte());
+            } else {
+                let access = PortAccess {
+                    port,
+                    size,
+                    write: false,
+                    register: 0,
+                    next_rip: guest.rip(),
+                };
+                if !serve_port(devices, apic, view, guest, &access) {
+                    return Ok(false);
+                }
+                value = guest.gpr(0);
+            }
+            let bytes = value.to_le_bytes();
+            if !view.write(address, &bytes[..usize::from(size)]) {
+                return Ok(false);
+            }
+        } else {
+            let mut bytes = [0u8; 8];
+            if !view.read(address, &mut bytes[..usize::from(size)]) {
+                return Ok(false);
+            }
+            let previous = guest.gpr(0);
+            let mask: u64 = match size {
+                1 => 0xFF,
+                2 => 0xFFFF,
+                _ => 0xFFFF_FFFF,
+            };
+            let value = u64::from_le_bytes(bytes);
+            guest.set_gpr(0, (previous & !mask) | (value & mask));
+            let access = PortAccess {
+                port,
+                size,
+                write: true,
+                register: 0,
+                next_rip: guest.rip(),
+            };
+            if !serve_port(devices, apic, view, guest, &access) {
+                return Ok(false);
+            }
+        }
+        index = (index as i64).wrapping_add(step) as u64;
+        remaining -= 1;
+    }
+    if is_in {
+        guest.set_gpr(7, index);
+    } else {
+        guest.set_gpr(6, index);
+    }
+    if repeated {
+        guest.set_gpr(1, 0);
+    }
+    guest.set_rip(guest.rip().wrapping_add(u64::from(instruction_length)));
     Ok(true)
 }
 
@@ -731,6 +985,7 @@ fn handle_port_exit(
 fn serve_port(
     devices: &mut Devices,
     apic: &mut LocalApic,
+    view: &mut MemoryView<'_>,
     guest: &mut dyn GuestContext,
     access: &PortAccess,
 ) -> bool {
@@ -867,6 +1122,86 @@ fn serve_port(
         }
         return true;
     }
+    if fdc::handles_port(access.port) {
+        // The 82077 interface is byte-wide.
+        if access.size != 1 {
+            return false;
+        }
+        if access.write {
+            let event = devices
+                .fdc
+                .write(access.port, (guest.gpr(access.register) & 0xFF) as u8);
+            match event {
+                fdc::FdcEvent::None => {}
+                fdc::FdcEvent::Irq => {
+                    devices.fdc.take_irq();
+                    devices.pic.raise(fdc::IRQ_LINE);
+                }
+                fdc::FdcEvent::Transfer(transfer) => {
+                    perform_floppy_dma(devices, view, transfer);
+                    devices.fdc.take_irq();
+                    devices.pic.raise(fdc::IRQ_LINE);
+                }
+            }
+        } else {
+            let Some(value) = devices.fdc.read(access.port) else {
+                return false;
+            };
+            write_register(guest, access.register, access.size, u64::from(value));
+        }
+        return true;
+    }
+    if system::handles_port(access.port) {
+        // The system-control ports are byte-wide.
+        if access.size != 1 {
+            return false;
+        }
+        if access.write {
+            devices
+                .system
+                .write(access.port, (guest.gpr(access.register) & 0xFF) as u8);
+        } else {
+            let Some(value) = devices.system.read(access.port) else {
+                return false;
+            };
+            write_register(guest, access.register, access.size, u64::from(value));
+        }
+        return true;
+    }
+    if fwcfg::handles_port(access.port) {
+        if access.port == fwcfg::CTL_PORT {
+            // The selector is written with `outw` by SeaBIOS; accept a byte
+            // access too, like the QEMU device.
+            if access.size > 2 {
+                return false;
+            }
+            if access.write {
+                devices
+                    .fw_cfg
+                    .select((guest.gpr(access.register) & 0xFFFF) as u16);
+            } else {
+                write_register(
+                    guest,
+                    access.register,
+                    access.size,
+                    u64::from(devices.fw_cfg.selector()),
+                );
+            }
+            return true;
+        }
+        if access.size != 1 {
+            return false;
+        }
+        if access.write {
+            devices
+                .fw_cfg
+                .write_byte((guest.gpr(access.register) & 0xFF) as u8);
+        } else {
+            let value = devices.fw_cfg.read_byte();
+            write_register(guest, access.register, access.size, u64::from(value));
+        }
+        return true;
+    }
     if handles_pci_port(access.port) {
         // Configuration mechanism #1: one 32-bit CAM register and one 32-bit
         // data register. The model also accepts byte and word accesses on the
@@ -892,6 +1227,46 @@ fn serve_port(
         return true;
     }
     false
+}
+
+/// Performs the DMA channel-2 transfer a floppy command requested.
+///
+/// The controller decoded the CHS parameters and queued its result bytes; the
+/// physical transfer is the caller's job. The 8237 channel gives the 24-bit
+/// address and the byte count (minus one); a firmware transfer is always
+/// sector-aligned and never crosses a 64 KiB boundary, which SeaBIOS verifies
+/// before programming the channel.
+fn perform_floppy_dma(
+    devices: &mut Devices,
+    view: &mut MemoryView<'_>,
+    transfer: fdc::FdcTransfer,
+) {
+    let Some(channel) = devices.dma.channel(dma::FLOPPY_CHANNEL) else {
+        return;
+    };
+    let address = channel.physical_address() as u64;
+    let capacity = channel
+        .remaining()
+        .min(u32::from(transfer.sectors) * fdc::SECTOR_SIZE as u32);
+    let mut sector = [0u8; fdc::SECTOR_SIZE];
+    let mut done: u32 = 0;
+    for index in 0..u32::from(transfer.sectors) {
+        if done + fdc::SECTOR_SIZE as u32 > capacity {
+            break;
+        }
+        let lba = transfer.lba + u64::from(index);
+        let offset = address + u64::from(done);
+        let moved = if transfer.write {
+            view.read_physical(offset, &mut sector) && devices.fdc.write_sector(lba, &sector)
+        } else {
+            devices.fdc.read_sector(lba, &mut sector) && view.write_physical(offset, &sector)
+        };
+        if !moved {
+            break;
+        }
+        done += fdc::SECTOR_SIZE as u32;
+    }
+    devices.dma.complete(dma::FLOPPY_CHANNEL, done);
 }
 
 /// Handles an `RDMSR`/`WRMSR` exit.
@@ -1195,6 +1570,19 @@ pub(crate) fn set_device_line(
     line: usize,
     asserted: bool,
 ) {
+    if devices.legacy_pic {
+        // A legacy firmware owns the 8259 vectors (`0x08..=0x0F`), which the
+        // local APIC never delivers. Drive the pair only; the runner
+        // acknowledges it and injects the programmed vector directly.
+        if let Some(irq) = gsi_isa_irq(line) {
+            if asserted {
+                devices.pic.raise(irq);
+            } else {
+                devices.pic.lower(irq);
+            }
+        }
+        return;
+    }
     if let Some(vector) = devices.ioapic.set_line_level(line, asserted) {
         apic.inject(vector);
     }
@@ -1220,6 +1608,11 @@ pub(crate) fn set_device_line(
 /// a level-triggered line that stays high cannot be acknowledged twice before
 /// the guest end-of-interrupt.
 pub(crate) fn flush_pic(devices: &mut Devices, apic: &mut LocalApic) {
+    if devices.legacy_pic {
+        // The legacy runner owns delivery: it must see the request in the IRR
+        // to inject the `0x08..=0x0F` vector itself.
+        return;
+    }
     if devices.pic.master().isr() != 0 || devices.pic.slave().isr() != 0 {
         return;
     }
