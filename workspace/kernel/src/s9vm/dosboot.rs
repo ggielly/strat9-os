@@ -1442,15 +1442,50 @@ fn pump_dos_interrupts(
     bios_state: &mut bios::BiosState,
     report: &mut DosReport,
 ) -> Result<bool, DosError> {
-    report.scancodes_typed += service_keyboard(devices, memory, feed, bios_state);
+    let typed = service_keyboard(devices, memory, feed, bios_state);
+    if typed != 0 && report.scancodes_typed == 0 {
+        // First push of the slice: name the gate that allowed it and the state
+        // of the interrupt path at that moment. This is the line that says
+        // whether the keys were ever offered to the guest.
+        log::info!(
+            "[s9vm] dosboot: typing {} scancode(s): INT 9 owner={} IRQ1 masked={} \
+             guest IF={} 8042 queued={}",
+            typed,
+            guest_owns_vector(memory, 0x09),
+            devices.pic.master().mask() & 0x02 != 0,
+            vcpu.guest().rflags & (1 << 9) != 0,
+            devices.keyboard.pending_scancodes()
+        );
+    }
+    report.scancodes_typed += typed;
     let outcome = deliver_legacy_interrupt(vcpu, devices)?;
     match outcome {
         Delivery::Delivered(_) => {}
         Delivery::NoRequest => {}
         Delivery::InterruptsDisabled => {
+            if report.skipped_interrupts_disabled == 0 {
+                log::info!(
+                    "[s9vm] dosboot: IRQ delivery refused: guest IF is clear \
+                     (imr={:#04x} isr={:#04x} 8042 queued={})",
+                    devices.pic.master().mask(),
+                    devices.pic.master().isr(),
+                    devices.keyboard.pending_scancodes()
+                );
+            }
             report.skipped_interrupts_disabled += 1;
         }
-        Delivery::Blocked => report.skipped_blocked += 1,
+        Delivery::Blocked => {
+            if report.skipped_blocked == 0 {
+                log::info!(
+                    "[s9vm] dosboot: IRQ delivery refused: interrupt shadow \
+                     (imr={:#04x} isr={:#04x} 8042 queued={})",
+                    devices.pic.master().mask(),
+                    devices.pic.master().isr(),
+                    devices.keyboard.pending_scancodes()
+                );
+            }
+            report.skipped_blocked += 1;
+        }
     }
     if let Delivery::Delivered(vector) = outcome {
         report.interrupts_delivered += 1;
