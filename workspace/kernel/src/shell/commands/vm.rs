@@ -755,6 +755,9 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
                         b'\r' | b'\n' => text.push(b'\r'),
                         0x08 | 0x7F => text.push(0x08),
                         0x20..=0x7E => text.push(byte),
+                        // Arrows/Home/End reach the guest as extended PS/2
+                        // scan codes, which is what DOS command editing needs.
+                        0x80..=0x85 => text.push(byte),
                         _ => {}
                     }
                 }

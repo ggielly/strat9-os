@@ -1319,31 +1319,31 @@ fn deliver_legacy_interrupt(vcpu: &mut Vcpu, devices: &mut emulate::Devices) -> 
 /// The text is translated to PS/2 set-1 scancodes once, then handed to the 8042
 /// model only after the guest owns `INT 9` and has unmasked `IRQ1`: before that
 /// the guest is still probing the controller and could mistake a scancode for a
-/// command reply.
+/// command reply. Each typed byte also yields the `(scan, ASCII)` pair the
+/// firmware keyboard buffer has to hold, which is the path of a guest that kept
+/// `INT 16h` at the firmware.
 struct KeyboardFeed {
     scancodes: Vec<u8>,
     next: usize,
-    /// Printable ASCII of the same text, for the firmware keyboard buffer.
-    ascii: Vec<u8>,
-    next_ascii: usize,
+    /// `(scan code, ASCII)` of the same keys, for the firmware buffer.
+    keys: Vec<(u8, u8)>,
+    next_key: usize,
 }
 
 impl KeyboardFeed {
     fn new(keys: &[u8]) -> Self {
         let mut scancodes = Vec::new();
-        if !keys.is_empty() {
-            keyboard::text_to_scancodes(keys, &mut scancodes);
+        let mut pairs = Vec::new();
+        for &byte in keys {
+            if let Some(pair) = keyboard::keystroke_for(byte, &mut scancodes) {
+                pairs.push(pair);
+            }
         }
-        let ascii = keys
-            .iter()
-            .copied()
-            .filter(|byte| keyboard::ascii_keystroke(*byte).is_some())
-            .collect();
         Self {
             scancodes,
             next: 0,
-            ascii,
-            next_ascii: 0,
+            keys: pairs,
+            next_key: 0,
         }
     }
 
@@ -1352,7 +1352,7 @@ impl KeyboardFeed {
         self.scancodes
             .len()
             .saturating_sub(self.next)
-            .max(self.ascii.len().saturating_sub(self.next_ascii))
+            .max(self.keys.len().saturating_sub(self.next_key))
     }
 
     /// Queues up to `limit` scancodes; returns how many were accepted.
@@ -1375,9 +1375,10 @@ impl KeyboardFeed {
     /// appear where that service reads them.
     fn fill_bios(&mut self, bios: &mut bios::BiosState, limit: usize) -> usize {
         let mut sent = 0;
-        while sent < limit && self.next_ascii < self.ascii.len() {
-            bios.push_key(self.ascii[self.next_ascii]);
-            self.next_ascii += 1;
+        while sent < limit && self.next_key < self.keys.len() {
+            let (scan, ascii) = self.keys[self.next_key];
+            bios.push_scan_key(scan, ascii);
+            self.next_key += 1;
             sent += 1;
         }
         sent

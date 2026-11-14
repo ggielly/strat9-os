@@ -375,6 +375,55 @@ pub fn text_to_scancodes(text: &[u8], out: &mut alloc::vec::Vec<u8>) {
     }
 }
 
+/// Prefix of an extended PS/2 set-1 scan code (arrows, Home/End, keypad).
+pub const SCANCODE_EXTENDED: u8 = 0xE0;
+
+/// Extended scan code of one key the rest of the system reports above `0x7F`.
+///
+/// The kernel keyboard driver yields single bytes for the special keys (see
+/// `arch::x86_64::keyboard::{KEY_UP, …}`). A PC sends those as `0xE0` followed
+/// by the code below, and a DOS `INT 9` handler stores them in the keyboard
+/// buffer with a zero ASCII byte, which is how `INT 16h` reports an arrow.
+pub const fn extended_scan(key: u8) -> Option<u8> {
+    match key {
+        0x80 => Some(0x48), // up
+        0x81 => Some(0x50), // down
+        0x82 => Some(0x4B), // left
+        0x83 => Some(0x4D), // right
+        0x84 => Some(0x47), // home
+        0x85 => Some(0x4F), // end
+        _ => None,
+    }
+}
+
+/// Appends the scancodes that type one byte, and returns the firmware-buffer
+/// entry it produces.
+///
+/// Printable and named ASCII bytes get the same sequence [`text_to_scancodes`]
+/// produces. The special keys above `0x7F` get an `0xE0`-prefixed make/break
+/// pair and a buffer entry with a zero ASCII byte. `None` means the byte cannot
+/// be typed on a PC keyboard.
+pub fn keystroke_for(byte: u8, out: &mut alloc::vec::Vec<u8>) -> Option<(u8, u8)> {
+    if let Some(scan) = extended_scan(byte) {
+        out.push(SCANCODE_EXTENDED);
+        out.push(scan);
+        out.push(SCANCODE_EXTENDED);
+        out.push(scan | SCANCODE_BREAK);
+        return Some((scan, 0));
+    }
+    let stroke = ascii_keystroke(byte)?;
+    if stroke.shift {
+        out.push(SCANCODE_LEFT_SHIFT);
+    }
+    out.push(stroke.scancode);
+    out.push(stroke.scancode | SCANCODE_BREAK);
+    if stroke.shift {
+        out.push(SCANCODE_LEFT_SHIFT | SCANCODE_BREAK);
+    }
+    // Line feeds never reach DOS: `INT 16h` reports Enter as CR.
+    Some((0, if byte == b'\n' { b'\r' } else { byte }))
+}
+
 impl Default for KeyboardController {
     fn default() -> Self {
         Self::new()

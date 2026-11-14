@@ -287,3 +287,32 @@ fn pic_reads_back_its_masks_for_the_guest() {
     pic.raise(0);
     assert_eq!(pic.acknowledge(), Some(0x08));
 }
+
+#[test]
+fn extended_keys_produce_prefixed_scancodes_and_a_scan_only_buffer_entry() {
+    // Arrows, Home and End reach the kernel as single bytes above 0x7F. A PC
+    // sends them as an `0xE0` prefix plus the code, and the BIOS keyboard
+    // buffer stores the scan code with a zero ASCII byte.
+    let mut codes = alloc::vec::Vec::new();
+    let pair = keyboard::keystroke_for(0x80, &mut codes).expect("up arrow is typeable");
+    assert_eq!(pair, (0x48, 0));
+    assert_eq!(codes, alloc::vec![0xE0, 0x48, 0xE0, 0xC8]);
+
+    for (key, scan) in [(0x81u8, 0x50u8), (0x82, 0x4B), (0x83, 0x4D), (0x84, 0x47), (0x85, 0x4F)] {
+        let mut codes = alloc::vec::Vec::new();
+        assert_eq!(keyboard::keystroke_for(key, &mut codes), Some((scan, 0)));
+        assert_eq!(codes.len(), 4, "make and break of key {key:#04x}");
+    }
+
+    // A printable byte keeps the sequence `text_to_scancodes` produces and is
+    // reported with its ASCII byte and a zero scan code.
+    let mut codes = alloc::vec::Vec::new();
+    let pair = keyboard::keystroke_for(b'd', &mut codes).expect("d is typeable");
+    assert_eq!(pair, (0, b'd'));
+    let mut expected = alloc::vec::Vec::new();
+    keyboard::text_to_scancodes(b"d", &mut expected);
+    assert_eq!(codes, expected);
+
+    // Bytes a PC keyboard cannot type are rejected instead of silently typed.
+    assert!(keyboard::keystroke_for(0x07, &mut alloc::vec::Vec::new()).is_none());
+}

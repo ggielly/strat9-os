@@ -1721,6 +1721,23 @@ fn keyboard_model_queue_is_used_when_the_guest_has_no_ring() {
 }
 
 #[test]
+fn keyboard_queue_preserves_an_extended_key_scan_code() {
+    // Extended keys are queued as `(scan code, 0)`: `INT 16h` must return the
+    // scan code in AH with a zero ASCII byte, which is how DOS recognises an
+    // arrow key.
+    let mut fixture = Fixture::new();
+    fixture.state.push_scan_key(0x48, 0);
+    let mut regs = BiosRegisters::new();
+    assert_eq!(fixture.call(0x16, &mut regs), BiosOutcome::Handled);
+    assert_eq!(regs.ax, 0x4800);
+    assert!(!fixture.zero());
+    // The entry is consumed like any other key.
+    let mut regs = BiosRegisters::new();
+    assert_eq!(fixture.call(0x16, &mut regs), BiosOutcome::Handled);
+    assert!(fixture.zero());
+}
+
+#[test]
 fn keyboard_queue_is_bounded_and_drops_the_overflow() {
     let mut fixture = Fixture::new();
     for key in 0..(KEY_BUFFER_CAPACITY as u8 + 4) {

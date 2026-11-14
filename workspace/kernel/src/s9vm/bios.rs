@@ -504,7 +504,13 @@ pub struct BiosState {
     /// Timer tick counter (nominally 18.2 Hz).
     pub ticks: u32,
     /// Keys waiting for `INT 16h`, oldest first.
-    pub keyboard: VecDeque<u8>,
+    /// Queued (scan code, ASCII) pairs, the layout INT 16h returns.
+    ///
+    /// A printable key carries its ASCII byte with a zero scan code until a
+    /// guest handler fills the BDA ring; an extended key (arrows, Home/End)
+    /// carries the scan code with a zero ASCII byte, which is exactly what a
+    /// PC keyboard buffer holds.
+    pub keyboard: VecDeque<(u8, u8)>,
     /// CHS geometry reported to the guest.
     pub disk: DiskGeometry,
     /// RTC hour, binary, 0..=23 by convention.
@@ -537,8 +543,17 @@ impl BiosState {
     /// The queue is bounded by [`KEY_BUFFER_CAPACITY`]; keys arriving when it
     /// is full are dropped, like a real keyboard controller overrun.
     pub fn push_key(&mut self, ascii: u8) {
+        self.push_scan_key(0, ascii);
+    }
+
+    /// Queues the `(scan code, ASCII)` pair `INT 16h` returns.
+    ///
+    /// A guest `INT 9` handler stores this pair in the BDA ring, so the runner
+    /// feeds extended keys (arrows, Home/End) through the same bounded queue:
+    /// they carry the scan code and a zero ASCII byte.
+    pub fn push_scan_key(&mut self, scan: u8, ascii: u8) {
         if self.keyboard.len() < KEY_BUFFER_CAPACITY {
-            self.keyboard.push_back(ascii);
+            self.keyboard.push_back((scan, ascii));
         }
     }
 
@@ -1154,9 +1169,9 @@ impl BiosState {
             }
         }
         if consume {
-            self.keyboard.pop_front().map(|ascii| (0, ascii))
+            self.keyboard.pop_front()
         } else {
-            self.keyboard.front().map(|&ascii| (0, ascii))
+            self.keyboard.front().copied()
         }
     }
 
