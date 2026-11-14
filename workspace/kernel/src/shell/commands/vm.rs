@@ -494,11 +494,14 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
                 shell_println!("vm: DOS session needs VT-x and unrestricted guest");
                 return Ok(());
             }
-            let firmware = if args.iter().skip(1).any(|arg| arg == "seabios") {
-                dosboot::FirmwareKind::SeaBios
-            } else {
-                dosboot::FirmwareKind::Stub
-            };
+            if args.iter().skip(1).any(|arg| arg == "seabios") {
+                shell_println!(
+                    "vm: live sessions resume the stub firmware; use `vm test seabios` for the \
+                     real-BIOS boot"
+                );
+                return Err(ShellError::InvalidArguments);
+            }
+            let firmware = dosboot::FirmwareKind::Stub;
             match dosboot::dos_open(&caps, firmware, dosboot::freedos_image()) {
                 Ok(id) => {
                     shell_println!(

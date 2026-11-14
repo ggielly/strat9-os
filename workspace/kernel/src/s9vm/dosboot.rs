@@ -1659,6 +1659,14 @@ pub fn dos_open(
     image: &'static [u8],
 ) -> Result<u64, DosError> {
     require_real_mode(caps, firmware.label())?;
+    if firmware.is_seabios() {
+        // A live session resumes the vCPU of the stub firmware; the SeaBIOS
+        // boot path builds its own legacy machine and is covered by
+        // `vm test seabios`.
+        return Err(DosError::BadExit(
+            "live session supports the stub firmware only",
+        ));
+    }
     if DOS_SESSION.lock().is_some() {
         return Err(DosError::BadExit("a DOS session is already open"));
     }
@@ -1875,7 +1883,15 @@ fn run_freedos_in_world(
             );
             // Detached vCPU: the run loop drives it directly, no scheduler.
             let vcpu = Vcpu::new(caps, pointer)?;
-            let mut machine = vm::take_machine(world_id).ok_or(DosError::VmFail(7))?;
+            // The stub-firmware world keeps its device model in the registry
+            // (the disk image is loaded there); the SeaBIOS world builds the
+            // legacy PC device set itself, because it must not see the virtio
+            // PCI functions the firmware would try to drive.
+            let mut machine = if firmware.is_seabios() {
+                Machine::new_legacy()
+            } else {
+                vm::take_machine(world_id).ok_or(DosError::VmFail(7))?
+            };
             configure_dos_machine(&mut machine, firmware, image);
             (disk_sectors, vcpu, bios::BiosState::new(), machine)
         };
