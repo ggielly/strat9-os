@@ -23,7 +23,7 @@
 #![no_std]
 
 pub const ABI_VERSION_MAJOR: u16 = 0;
-pub const ABI_VERSION_MINOR: u16 = 1;
+pub const ABI_VERSION_MINOR: u16 = 2;
 
 /// Packed return format for `SYS_ABI_VERSION`: `(major << 16) | minor`.
 pub const ABI_VERSION_PACKED: u32 = ((ABI_VERSION_MAJOR as u32) << 16) | (ABI_VERSION_MINOR as u32);

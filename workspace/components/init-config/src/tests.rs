@@ -1002,6 +1002,46 @@ fn selection_spec_parses_target_and_disable() {
     assert!(Selection::from_spec("bogus=1").is_err());
 }
 
+#[test]
+fn kernel_cmdline_nul_separated_key_value() {
+    let selection =
+        Selection::from_kernel_cmdline("console=ttyS0\0init.target=minimal\0init.disable=telnet");
+    assert_eq!(selection.profile, Profile::Minimal);
+    assert_eq!(selection.disabled, vec![String::from("telnet")]);
+}
+
+#[test]
+fn kernel_cmdline_target_minimal() {
+    let selection = Selection::from_kernel_cmdline("quiet init.target=minimal loglevel=3");
+    assert_eq!(selection.profile, Profile::Minimal);
+    assert!(selection.disabled.is_empty());
+}
+
+#[test]
+fn kernel_cmdline_repeated_disable_unions_and_dedups() {
+    let selection =
+        Selection::from_kernel_cmdline("init.disable=telnet,web init.disable=web,webrtc");
+    assert_eq!(
+        selection.disabled,
+        vec![
+            String::from("telnet"),
+            String::from("web"),
+            String::from("webrtc")
+        ]
+    );
+}
+
+#[test]
+fn kernel_cmdline_ignores_unrelated_tokens() {
+    let selection =
+        Selection::from_kernel_cmdline("console=ttyS0 root=/dev/vda init.target=rescue noise");
+    assert_eq!(selection.profile, Profile::Rescue);
+    assert!(selection.disabled.is_empty());
+    // Unknown profile values are ignored, not fatal.
+    let selection = Selection::from_kernel_cmdline("init.target=nope");
+    assert_eq!(selection.profile, Profile::Full);
+}
+
 // ---------------------------------------------------------------------------
 // TOML array / list parsing
 // ---------------------------------------------------------------------------

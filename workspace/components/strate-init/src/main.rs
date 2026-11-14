@@ -224,6 +224,58 @@ fn apply_init_target(policy: &mut Policy) {
     }
 }
 
+/// True when the kernel command line explicitly selects a boot profile.
+fn cmdline_sets_target(cmdline: &str) -> bool {
+    cmdline
+        .split(|c: char| c == '\0' || c.is_whitespace())
+        .any(|token| token.starts_with("init.target="))
+}
+
+/// Applies `init.target=` / `init.disable=` from the kernel command line.
+///
+/// Runs after `/initfs/init.target` so precedence is kernel cmdline >
+/// `/initfs/init.target` > `[policy] target`. A kernel `target` overrides only
+/// when explicitly present; `disable` lists are always unioned. Unrelated
+/// kernel keys are ignored.
+fn apply_kernel_cmdline(policy: &mut Policy) {
+    let mut buf = [0u8; 2048];
+    let n = match call::getcmdline(&mut buf) {
+        Ok(n) => n,
+        Err(e) => {
+            log("[init] cmdline: read failed: ");
+            log(e.name());
+            log("\n");
+            return;
+        }
+    };
+    let len = n.min(buf.len());
+    let cmdline = match core::str::from_utf8(&buf[..len]) {
+        Ok(text) => text,
+        Err(_) => {
+            log("[init] cmdline: invalid UTF-8, ignored\n");
+            return;
+        }
+    };
+
+    let selection = Selection::from_kernel_cmdline(cmdline);
+    if !cmdline_sets_target(cmdline) && selection.disabled.is_empty() {
+        return;
+    }
+    if cmdline_sets_target(cmdline) {
+        policy.selection.profile = selection.profile;
+    }
+    for name in selection.disabled {
+        if !policy.selection.is_disabled(&name) {
+            policy.selection.disabled.push(name);
+        }
+    }
+    log("[init] cmdline target=");
+    log(policy.selection.profile.as_str());
+    log(" disable=");
+    log_u32(policy.selection.disabled.len() as u32);
+    log("\n");
+}
+
 ///
 /// `reserved` holds the SIDs of live children so a reload cannot hand one of
 /// them to a newly added silo. Shared by `_start` and the `/srv/init` `reload`
@@ -482,12 +534,23 @@ pub unsafe extern "C" fn _start() -> ! {
     let (mut silos, mut diagnostics, mut policy) = load_primary_silos();
     log("[init] Stage: apply init.target\n");
     apply_init_target(&mut policy);
+    log("[init] Stage: apply kernel cmdline\n");
+    apply_kernel_cmdline(&mut policy);
     log("[init] Stage: merge wasm overlay\n");
     diagnostics.extend(merge_wasm_test_overlay(&mut silos));
     log("[init] Stage: ensure required silos\n");
     let plan = build_plan_with_policy(silos, diagnostics, policy);
     for diagnostic in &plan.diagnostics {
         log_diagnostic(diagnostic);
+    }
+    for silo in &plan.silos {
+        if !silo.grants.is_empty() {
+            log("[init] GRANTS: ");
+            log(&silo.name);
+            log(" declares ");
+            log_u32(silo.grants.len() as u32);
+            log(" grant(s) (validated; not enforced)\n");
+        }
     }
     log("[init] Stage: boot silos\n");
     let mut supervised = Vec::with_capacity(supervisor::CAPACITY);

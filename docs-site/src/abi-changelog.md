@@ -45,8 +45,19 @@ syscalls 270–283 are implemented but unreleased (§16 of the specification).
 ## Current version
 
 - `ABI_VERSION_MAJOR = 0`
-- `ABI_VERSION_MINOR = 1`
-- Packed: `0.1`
+- `ABI_VERSION_MINOR = 2`
+- Packed: `0.2`
+
+### 0.2 : 2026-11-14
+
+Additive, wire-compatible change:
+
+- **Added:** `SYS_GETCMDLINE` (901) copies the boot command line to a user
+  buffer and returns its full length; `SYS_REBOOT` (902) reboots (`how = 0`) or
+  powers off (`how = 1`) the machine, requiring the silo admin capability.
+- **Changed:** `SYS_SILO_CREATE` now honours the existing `caps_ptr`/`caps_len`
+  grant list in `SiloConfig`, matching `SYS_SILO_CONFIG`. No struct layout
+  change.
 
 See:
 

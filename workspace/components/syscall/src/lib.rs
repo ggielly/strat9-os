@@ -1552,6 +1552,22 @@ pub mod call {
         Ok(((raw >> 16) as u16, raw as u16))
     }
 
+    /// Read the kernel boot command line.
+    ///
+    /// Copies up to `buf.len()` bytes into `buf` and returns the full command
+    /// line length. The bytes are not NUL-terminated; the return value lets the
+    /// caller detect truncation.
+    pub fn getcmdline(buf: &mut [u8]) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_GETCMDLINE, buf.as_mut_ptr() as usize, buf.len()) }
+    }
+
+    /// Reboot (`how == 0`) or power off (`how == 1`) the machine.
+    ///
+    /// Only returns on failure.
+    pub fn reboot(how: u32) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_REBOOT, how as usize) }
+    }
+
     // ========================================================================
     // Async I/O ring buffer (block 250-254)
     // ========================================================================

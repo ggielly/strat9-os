@@ -1698,6 +1698,23 @@ pub const SYS_SILO_DESTROY: usize = 814;
 /// before making syscalls.
 pub const SYS_ABI_VERSION: usize = 900;
 
+/// Read the kernel boot command line.
+///
+/// - `buf_ptr`: user buffer to receive the command line bytes
+/// - `buf_len`: capacity of `buf_ptr` in bytes
+///
+/// Returns the full command line length (like `snprintf`), even when it is
+/// larger than `buf_len`. Copies `min(len, buf_len)` bytes; the bytes are not
+/// required to be NUL-terminated.
+pub const SYS_GETCMDLINE: usize = 901;
+
+/// Reboot or power off the machine.
+///
+/// - `how`: `0` = reboot, `1` = power off
+///
+/// Returns only on failure; any other `how` value returns `-EINVAL`.
+pub const SYS_REBOOT: usize = 902;
+
 // ── Block 560-569: s9vm virtualization (P0 surface) ────────────────────────
 //
 // The block 537-599 is free; 520-536 is used by the IOMMU. The P0 surface is

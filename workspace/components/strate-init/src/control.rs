@@ -36,8 +36,8 @@
 //! * `start <name>` / `stop <name>` / `restart <name>` — mutate one child.
 //! * `reload` — re-read `/initfs/silo.toml`, rebuild the plan and apply the
 //!   silo add/remove diff (running silos are not reconfigured in place).
-//! * `shutdown` — stop every child in reverse plan order, then idle.
-//! * `reboot` — reserved; replies that it is unsupported.
+//! * `shutdown` — stop every child in reverse plan order, then power off.
+//! * `reboot` — stop every child in reverse plan order, then reset.
 //!
 //! # Authorization (approximation)
 //!
@@ -225,13 +225,30 @@ pub fn handle(children: &mut Vec<SupervisedChild>, order: &mut Vec<String>, msg:
         }
         "shutdown" => {
             supervisor::shutdown_all(children, order);
-            reply("shutting down\n");
-            log("[init] shutdown complete\n");
+            reply("powering off\n");
+            log("[init] shutdown complete, powering off\n");
+            if let Err(e) = call::reboot(1) {
+                log("[init] shutdown: reboot(1) failed: ");
+                log(e.name());
+                log("\n");
+            }
             loop {
                 supervisor::sleep_ms(1000);
             }
         }
-        "reboot" => reply("not supported (no SYS_REBOOT)\n"),
+        "reboot" => {
+            supervisor::shutdown_all(children, order);
+            reply("rebooting\n");
+            log("[init] reboot requested, resetting\n");
+            if let Err(e) = call::reboot(0) {
+                log("[init] reboot: reboot(0) failed: ");
+                log(e.name());
+                log("\n");
+            }
+            loop {
+                supervisor::sleep_ms(1000);
+            }
+        }
         "" => reply("empty command\n"),
         _ => reply("unknown command\n"),
     }
