@@ -519,7 +519,7 @@ fn print_screen_changes(previous: &str, current: &str) {
     }
 }
 
-/// `vm dos <open [seabios]|run [seconds] [keys=<text>]|console|info|text|selftest|reset|close>` : live DOS session.
+/// `vm dos <open [seabios]|run [seconds] [keys=<text>]|console|info|state|text|selftest|reset|close>` : live DOS session.
 ///
 /// The DOS world stays mapped between commands: `vm dos console` keeps the
 /// guest running in short slices while host keystrokes are typed into it (the
@@ -836,6 +836,59 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
             );
             Ok(())
         }
+        "state" | "diag" => match dosboot::dos_machine_state() {
+            Ok(state) => {
+                // One read-only snapshot of the machine, so a failing hardware
+                // run can be diagnosed without hunting through the kernel log.
+                shell_println!(
+                    "vm: DOS state on world {}: slices={} marker={} pending_keys={} \
+                     (scancodes={} buffer={})",
+                    state.world_id,
+                    state.slices,
+                    state.marker_seen,
+                    state.pending_scancodes + state.pending_buffer_keys,
+                    state.pending_scancodes,
+                    state.pending_buffer_keys
+                );
+                shell_println!(
+                    "vm: guest {:04x}:{:04x}  INT 9 owner={}  INT 16h owner={}",
+                    state.cs,
+                    state.ip,
+                    if state.guest_owns_int9 {
+                        "guest"
+                    } else {
+                        "firmware"
+                    },
+                    if state.guest_owns_int16 {
+                        "guest"
+                    } else {
+                        "firmware"
+                    }
+                );
+                shell_println!(
+                    "vm: 8259 master imr={:#04x} irr={:#04x} isr={:#04x}  slave imr={:#04x}",
+                    state.pic_master_imr,
+                    state.pic_master_irr,
+                    state.pic_master_isr,
+                    state.pic_slave_imr
+                );
+                shell_println!(
+                    "vm: 8042 queued={}  PIT IRQ0={}  BDA head={:#06x} tail={:#06x} \
+                     cursor=({}, {})",
+                    state.controller_scancodes,
+                    state.pit_irq_level,
+                    state.bda_head,
+                    state.bda_tail,
+                    state.bda_cursor >> 8,
+                    state.bda_cursor & 0xFF
+                );
+                Ok(())
+            }
+            Err(error) => {
+                shell_println!("vm: DOS state unavailable: {:?} ({})", error, error.hint());
+                Err(ShellError::ExecutionFailed)
+            }
+        },
         "text" | "screen" => match dosboot::dos_text() {
             Some(text) => {
                 shell_println!("{}", text.trim_end());
@@ -857,7 +910,7 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
         }
         _ => {
             shell_println!(
-                "Usage: vm dos <open [seabios]|run [seconds] [keys=<text>]|console|info|text|selftest|reset|close>"
+                "Usage: vm dos <open [seabios]|run [seconds] [keys=<text>]|console|info|state|text|selftest|reset|close>"
             );
             Err(ShellError::InvalidArguments)
         }

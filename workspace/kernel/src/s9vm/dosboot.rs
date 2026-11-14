@@ -1915,6 +1915,109 @@ pub fn dos_status() -> Option<DosSessionStatus> {
     })
 }
 
+/// Read-only snapshot of a live session for `vm dos state`.
+///
+/// This is the diagnostic that a failing hardware run needs: it names, in one
+/// place, which side owns each interrupt vector, whether the 8259 still masks
+/// the lines the guest expects, how much keyboard input is still queued, and
+/// where the guest stopped. Every field is observed, none is inferred.
+#[derive(Debug, Clone, Copy)]
+pub struct DosMachineState {
+    /// World holding the session.
+    pub world_id: u64,
+    /// Slices entered so far.
+    pub slices: u32,
+    /// True once the AUTOEXEC marker was observed.
+    pub marker_seen: bool,
+    /// Scancodes waiting for the 8042.
+    pub pending_scancodes: usize,
+    /// Keyboard-buffer entries waiting for the firmware service.
+    pub pending_buffer_keys: usize,
+    /// True when the guest installed its own `INT 9` handler.
+    pub guest_owns_int9: bool,
+    /// True when the guest installed its own `INT 16h` handler.
+    pub guest_owns_int16: bool,
+    /// Guest `CS` selector and instruction pointer at the end of the slice.
+    pub cs: u16,
+    /// Guest instruction pointer at the end of the slice.
+    pub ip: u16,
+    /// 8259 master interrupt mask register.
+    pub pic_master_imr: u8,
+    /// 8259 master interrupt request register.
+    pub pic_master_irr: u8,
+    /// 8259 master in-service register.
+    pub pic_master_isr: u8,
+    /// 8259 slave interrupt mask register.
+    pub pic_slave_imr: u8,
+    /// Scancodes queued inside the 8042 model.
+    pub controller_scancodes: u8,
+    /// True while the 8254 keeps `IRQ0` asserted.
+    pub pit_irq_level: bool,
+    /// BDA keyboard-ring head offset (`0x041A`).
+    pub bda_head: u16,
+    /// BDA keyboard-ring tail offset (`0x041C`).
+    pub bda_tail: u16,
+    /// BDA cursor position (page 0), hi byte = row, lo byte = column.
+    pub bda_cursor: u16,
+}
+
+/// Reads the state of the live session without changing it.
+pub fn dos_machine_state() -> Result<DosMachineState, DosError> {
+    let guard = DOS_SESSION.lock();
+    let Some(session) = guard.as_ref() else {
+        return Err(DosError::BadExit("no DOS session: run `vm dos open` first"));
+    };
+    let world_id = session.world_id;
+    let (cs, ip) = session
+        .vcpu
+        .as_ref()
+        .map(|vcpu| (vcpu.guest().cs.selector, vcpu.guest().rip as u16))
+        .unwrap_or((0, 0));
+    let pending_scancodes = session.pending_scancodes.len();
+    let pending_buffer_keys = session.pending_buffer_keys.len();
+    let slices = session.slices;
+    let marker_seen = session.marker_seen;
+    // The device model lives in the registry between slices, so it has to be
+    // taken out to be observed and then handed straight back.
+    let mut machine = vm::take_machine(world_id).ok_or(DosError::VmFail(7))?;
+    let mut memory = WorldMemory::new(world_id);
+    let guest_owns_int9 = guest_owns_vector(&mut memory, 0x09);
+    let guest_owns_int16 = guest_owns_vector(&mut memory, 0x16);
+    let state = DosMachineState {
+        world_id,
+        slices,
+        marker_seen,
+        pending_scancodes,
+        pending_buffer_keys,
+        guest_owns_int9,
+        guest_owns_int16,
+        cs,
+        ip,
+        pic_master_imr: machine.devices().pic.master().mask(),
+        pic_master_irr: machine.devices().pic.master().irr(),
+        pic_master_isr: machine.devices().pic.master().isr(),
+        pic_slave_imr: machine.devices().pic.slave().mask(),
+        controller_scancodes: machine.devices().keyboard.pending_scancodes(),
+        pit_irq_level: machine.devices().pit.irq_level(),
+        bda_head: read_bda_word(&mut memory, bios::BDA_KEYBOARD_HEAD),
+        bda_tail: read_bda_word(&mut memory, bios::BDA_KEYBOARD_TAIL),
+        bda_cursor: read_bda_word(&mut memory, bios::BDA_CURSOR),
+    };
+    vm::store_machine(world_id, machine);
+    Ok(state)
+}
+
+/// Reads one 16-bit BDA field (`0` when it is not readable).
+fn read_bda_word(memory: &mut WorldMemory, address: u32) -> u16 {
+    let (Some(low), Some(high)) = (
+        bios::BiosMemory::read_u8(memory, address),
+        bios::BiosMemory::read_u8(memory, address + 1),
+    ) else {
+        return 0;
+    };
+    u16::from_le_bytes([low, high])
+}
+
 /// Runs the live DOS session for one bounded slice and returns its report.
 ///
 /// Console input queued by `vm send <id> <text>` is typed into the guest
@@ -2228,6 +2331,21 @@ pub fn run_freedos_session_dry(caps: &HwCaps) -> Result<(), DosError> {
             ));
         }
         let _ = vm::store_machine(world_id, machine);
+        // `vm dos state` observes the same machine the slices run: it must name
+        // the guest `INT 9` owner, the 8259 mask the firmware installed, and the
+        // untouched keyboard ring.
+        let state = dos_machine_state()?;
+        if state.world_id != world_id
+            || !state.guest_owns_int9
+            || state.pic_master_imr & 0b100 != 0
+            || state.bda_head != bios::KEY_BUFFER_FIRST_OFFSET
+            || state.bda_tail != bios::KEY_BUFFER_FIRST_OFFSET
+            || state.bda_cursor != 0
+        {
+            return Err(DosError::BadExit(
+                "vm dos state did not describe the dry session",
+            ));
+        }
         Ok(())
     })();
     if !dos_close() {
