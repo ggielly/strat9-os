@@ -53,7 +53,7 @@ pub fn sys_ipc_ring_create(size: u64) -> Result<u64, SyscallError> {
             revoke: true,
         },
     );
-    let cap_id = unsafe { (&mut *task.process.capabilities.get()).insert(cap) };
+    let cap_id = unsafe { (&*task.process.capabilities.get()).insert(cap) };
     Ok(cap_id.as_u64())
 }
 

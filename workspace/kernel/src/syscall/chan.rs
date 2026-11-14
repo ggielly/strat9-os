@@ -62,7 +62,7 @@ pub fn sys_chan_create(capacity: u64) -> Result<u64, SyscallError> {
         id => id,
     };
 
-    let caps = unsafe { &mut *task.process.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     let cap_id = crate::capability::CapId::new();
     let chan_cap = crate::capability::Capability {
         id: cap_id,
@@ -206,7 +206,7 @@ pub fn sys_chan_close(handle: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let caps = unsafe { &mut *task.process.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     let cap = caps
         .get(CapId::from_raw(handle))
         .ok_or(SyscallError::BadHandle)?;

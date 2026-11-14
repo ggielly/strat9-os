@@ -154,6 +154,7 @@ pub fn create_user_test_task() {
         euid: core::sync::atomic::AtomicU32::new(0),
         gid: core::sync::atomic::AtomicU32::new(0),
         egid: core::sync::atomic::AtomicU32::new(0),
+        silo_id: core::sync::atomic::AtomicU32::new(0),
         state: core::sync::atomic::AtomicU8::new(TaskState::Ready as u8),
         priority: TaskPriority::Normal,
         context: SyncUnsafeCell::new(context),

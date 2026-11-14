@@ -52,7 +52,7 @@ pub(crate) static TRANSPORT_MANAGER: TransportManager = TransportManager::new();
 /// Bits 8..=23 encode `ring_capacity` (0 = default 256).
 pub fn sys_transport_create(dst_silo_val: u64, config_flags: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let src_silo_id = silo::try_silo_id_for_task(task.id).ok_or(SyscallError::BadHandle)?;
+    let src_silo_id = silo::try_silo_id_for_task(&task).ok_or(SyscallError::BadHandle)?;
     let src_silo = SiloId::new(src_silo_id);
     let dst_silo = SiloId::new(dst_silo_val as u32);
 
@@ -89,11 +89,8 @@ pub fn sys_transport_create(dst_silo_val: u64, config_flags: u64) -> Result<u64,
         CapPermissions::read_write(),
     );
 
-    let mut caps = unsafe { (*task.process.capabilities.get()).clone() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     let cap_id = caps.insert(cap);
-    unsafe {
-        *task.process.capabilities.get() = caps;
-    }
 
     Ok(cap_id.as_u64())
 }
@@ -173,7 +170,7 @@ pub fn sys_transport_close(handle: u64) -> Result<u64, SyscallError> {
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let cap_id = CapId::from_raw(handle);
-    let caps = unsafe { &mut *task.process.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     if let Some(cap) = caps.remove(cap_id) {
         release_capability(&cap, Some(task.id));
         log::trace!("transport_close: handle={}", handle);

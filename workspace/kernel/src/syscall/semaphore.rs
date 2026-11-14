@@ -89,7 +89,7 @@ pub fn sys_sem_create(initial: u64) -> Result<u64, SyscallError> {
             revoke: true,
         },
     );
-    let cap_id = unsafe { (&mut *task.process.capabilities.get()).insert(cap) };
+    let cap_id = unsafe { (&*task.process.capabilities.get()).insert(cap) };
     Ok(cap_id.as_u64())
 }
 
@@ -139,7 +139,7 @@ pub fn sys_sem_post(handle: u64) -> Result<u64, SyscallError> {
 pub fn sys_sem_close(handle: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let caps = unsafe { &mut *task.process.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     let cap = caps
         .get(CapId::from_raw(handle))
         .ok_or(SyscallError::BadHandle)?;

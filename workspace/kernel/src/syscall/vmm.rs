@@ -133,7 +133,7 @@ fn install_handle(
     // SAFETY: the task's capability table is protected by the
     // `CapabilityTable` API; the pattern is identical to the other kernel
     // handle creations.
-    let id = unsafe { (&mut *task.process.capabilities.get()).insert(capability) };
+    let id = unsafe { (&*task.process.capabilities.get()).insert(capability) };
     Ok(id.as_u64())
 }
 
@@ -147,7 +147,7 @@ fn resolve_handle(
         return Err(SyscallError::InvalidArgument);
     }
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    // SAFETY: read under the protection of `CapabilityTable`.
+    // SAFETY: the table is internally synchronized.
     let capabilities = unsafe { &*task.process.capabilities.get() };
     let capability = capabilities
         .get_with_permissions(CapId::from_raw(handle), required)
@@ -164,8 +164,9 @@ fn revoke_handle(handle: u64) {
     let Some(task) = current_task_clone() else {
         return;
     };
-    // SAFETY: mutation under the protection of `CapabilityTable`.
-    let mut capabilities = unsafe { &mut *task.process.capabilities.get() };
+    // SAFETY: access under the protection of `CapabilityTable`; it is
+    // internally synchronized.
+    let capabilities = unsafe { &*task.process.capabilities.get() };
     let _ = capabilities.remove(CapId::from_raw(handle));
 }
 

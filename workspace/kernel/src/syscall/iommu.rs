@@ -78,8 +78,8 @@ fn domain_from_handle(
 ) -> Result<Arc<iommu::Domain>, SyscallError> {
     silo::enforce_cap_for_current_task(handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    // SAFETY: the capability table belongs to the current process and this
-    // syscall has exclusive access to its own task.
+    // SAFETY: the table is internally synchronized; a shared reference is
+    // sound even when other threads of the process access their own table.
     let caps = unsafe { &*task.process.capabilities.get() };
     let cap = caps
         .get(CapId::from_raw(handle))
@@ -252,8 +252,8 @@ pub fn sys_iommu_domain_create(sbdf_raw: u64) -> Result<u64, SyscallError> {
         CapPermissions::read_write(),
         DmaRights::all(),
     );
-    // SAFETY: as above: the table is owned by the calling process.
-    let handle = unsafe { (&mut *task.process.capabilities.get()).insert(cap) };
+    // SAFETY: as above: the table is internally synchronized.
+    let handle = unsafe { (&*task.process.capabilities.get()).insert(cap) };
     Ok(handle.as_u64())
 }
 

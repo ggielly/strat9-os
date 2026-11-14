@@ -468,7 +468,7 @@ fn sys_null() -> Result<u64, SyscallError> {
 fn sys_handle_close(_handle: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(_handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let caps = unsafe { &mut *task.process.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     if let Some(cap) = caps.remove(CapId::from_raw(_handle)) {
         release_capability(&cap, Some(task.id));
         log::trace!("syscall: HANDLE_CLOSE({})", _handle);
@@ -479,7 +479,7 @@ fn sys_handle_close(_handle: u64) -> Result<u64, SyscallError> {
 }
 
 pub(crate) fn insert_capability_with_retention(
-    caps: &mut crate::capability::CapabilityTable,
+    caps: &crate::capability::CapabilityTable,
     cap: crate::capability::Capability,
 ) -> Result<CapId, SyscallError> {
     let id = caps.insert(cap);
@@ -512,7 +512,7 @@ pub(crate) fn insert_capability_with_retention(
 fn sys_handle_duplicate(handle: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let caps = unsafe { &mut *task.process.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
     let dup = caps
         .duplicate(CapId::from_raw(handle))
         .ok_or(SyscallError::PermissionDenied)?;
@@ -692,7 +692,7 @@ fn sys_handle_grant(handle: u64, target_pid: u64) -> Result<u64, SyscallError> {
     };
 
     let target = crate::process::get_task_by_pid(pid).ok_or(SyscallError::NotFound)?;
-    let target_caps = unsafe { &mut *target.process.capabilities.get() };
+    let target_caps = unsafe { &*target.process.capabilities.get() };
     let new_id = insert_capability_with_retention(target_caps, granted)?;
     Ok(new_id.as_u64())
 }
@@ -701,7 +701,7 @@ fn sys_handle_grant(handle: u64, target_pid: u64) -> Result<u64, SyscallError> {
 fn sys_handle_revoke(handle: u64) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
-    let caps = unsafe { &mut *task.process.capabilities.get() };
+    let caps = unsafe { &*task.process.capabilities.get() };
 
     {
         let cap = caps

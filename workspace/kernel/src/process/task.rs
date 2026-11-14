@@ -271,6 +271,12 @@ pub struct Task {
     pub gid: AtomicU32,
     /// effective group id.
     pub egid: AtomicU32,
+    /// Silo membership cache (0 = not in a silo; silo ids are 1-based).
+    ///
+    /// The SILO_MANAGER `task_to_silo` map remains the authoritative record;
+    /// this atomic is a lock-free cache for accounting and transport paths
+    /// that must not block on `SILO_MANAGER`.
+    pub silo_id: AtomicU32,
     /// Current state of the task. Stored as AtomicU8 for lock-free cross-CPU visibility.
     /// Use `get_state()` / `set_state()` for typed access.
     pub state: AtomicU8,
@@ -1048,6 +1054,7 @@ impl Task {
             euid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             egid: AtomicU32::new(0),
+            silo_id: AtomicU32::new(0),
             state: AtomicU8::new(TaskState::Ready as u8),
             priority,
             context: SyncUnsafeCell::new(context),
@@ -1130,6 +1137,7 @@ impl Task {
             euid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             egid: AtomicU32::new(0),
+            silo_id: AtomicU32::new(0),
             state: AtomicU8::new(TaskState::Ready as u8),
             priority,
             context: SyncUnsafeCell::new(context),

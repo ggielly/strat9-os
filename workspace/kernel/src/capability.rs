@@ -146,6 +146,31 @@ impl CapPermissions {
             revoke: true,
         }
     }
+
+    /// True when every right in `self` is also present in `other`.
+    pub const fn is_subset_of(&self, other: &Self) -> bool {
+        (!self.read || other.read)
+            && (!self.write || other.write)
+            && (!self.execute || other.execute)
+            && (!self.grant || other.grant)
+            && (!self.revoke || other.revoke)
+    }
+
+    /// Rights present in both `self` and `other` (per-field AND).
+    pub const fn intersection(&self, other: &Self) -> Self {
+        CapPermissions {
+            read: self.read && other.read,
+            write: self.write && other.write,
+            execute: self.execute && other.execute,
+            grant: self.grant && other.grant,
+            revoke: self.revoke && other.revoke,
+        }
+    }
+
+    /// True when no right is enabled.
+    pub const fn is_none(&self) -> bool {
+        !self.read && !self.write && !self.execute && !self.grant && !self.revoke
+    }
 }
 
 /// DMA rights carried by an IOMMU-related capability.
@@ -241,17 +266,20 @@ pub struct Capability {
     pub dma: DmaRights,
 }
 
-/// Table of capabilities for a process
+/// Table of capabilities for a process.
+///
+/// All access goes through `&self`; the map is protected by an internal
+/// spinlock so that multi-threaded processes can share the table safely.
 pub struct CapabilityTable {
     /// Mapping from capability ID to capability
-    capabilities: BTreeMap<CapId, Capability>,
+    capabilities: SpinLock<BTreeMap<CapId, Capability>>,
 }
 
 impl Clone for CapabilityTable {
     /// Performs the clone operation.
     fn clone(&self) -> Self {
         Self {
-            capabilities: self.capabilities.clone(),
+            capabilities: SpinLock::new(self.capabilities.lock().clone()),
         }
     }
 }
@@ -260,46 +288,60 @@ impl CapabilityTable {
     /// Create a new empty capability table
     pub fn new() -> Self {
         CapabilityTable {
-            capabilities: BTreeMap::new(),
+            capabilities: SpinLock::new(BTreeMap::new()),
         }
     }
 
     /// Insert a capability into the table
-    pub fn insert(&mut self, cap: Capability) -> CapId {
+    pub fn insert(&self, cap: Capability) -> CapId {
         let id = cap.id;
+        // The global manager never calls back into a capability table, so it
+        // is safe to register before taking the table lock; the table lock is
+        // never held across a manager call.
         get_capability_manager().register_capability(cap.clone());
-        self.capabilities.insert(id, cap);
+        self.capabilities.lock().insert(id, cap);
         id
     }
 
     /// Remove a capability from the table
-    pub fn remove(&mut self, id: CapId) -> Option<Capability> {
-        let removed = self.capabilities.remove(&id);
+    pub fn remove(&self, id: CapId) -> Option<Capability> {
+        let removed = self.capabilities.lock().remove(&id);
         if removed.is_some() {
             let _ = get_capability_manager().revoke_capability(id);
         }
         removed
     }
 
-    /// Get a reference to a capability (no permission check).
-    pub fn get(&self, id: CapId) -> Option<&Capability> {
-        self.capabilities.get(&id)
+    /// Get an owned copy of a capability (no permission check).
+    pub fn get(&self, id: CapId) -> Option<Capability> {
+        self.capabilities.lock().get(&id).cloned()
     }
 
     /// Revoke all capabilities in this table and clear it.
     /// Does not allocate memory.
-    pub fn revoke_all(&mut self) {
+    pub fn revoke_all(&self) {
         let capabilities = self.take_all();
+        // Release after the table lock is dropped: `release_capability`
+        // takes the global manager lock and may destroy resources.
         for capability in &capabilities {
             release_capability(capability, None);
         }
     }
 
     /// Removes and returns every capability in this table.
-    pub fn take_all(&mut self) -> Vec<Capability> {
-        core::mem::take(&mut self.capabilities)
+    pub fn take_all(&self) -> Vec<Capability> {
+        core::mem::take(&mut *self.capabilities.lock())
             .into_values()
             .collect()
+    }
+
+    /// Replace the contents of this table with `other`'s.
+    ///
+    /// Used to publish a prepared table without writing the whole object
+    /// through a raw pointer.
+    pub fn replace(&self, mut other: CapabilityTable) {
+        let replacement = core::mem::take(other.capabilities.get_mut());
+        *self.capabilities.lock() = replacement;
     }
 
     /// Check whether any capability of the given resource type has required permissions.
@@ -308,7 +350,7 @@ impl CapabilityTable {
         resource_type: ResourceType,
         required: CapPermissions,
     ) -> bool {
-        self.capabilities.values().any(|cap| {
+        self.capabilities.lock().values().any(|cap| {
             cap.resource_type == resource_type
                 && (!required.read || cap.permissions.read)
                 && (!required.write || cap.permissions.write)
@@ -325,7 +367,7 @@ impl CapabilityTable {
         resource: usize,
         required: CapPermissions,
     ) -> bool {
-        self.capabilities.values().any(|cap| {
+        self.capabilities.lock().values().any(|cap| {
             cap.resource_type == resource_type
                 && cap.resource == resource
                 && (!required.read || cap.permissions.read)
@@ -344,50 +386,35 @@ impl CapabilityTable {
         &self,
         resource_type: ResourceType,
         required: CapPermissions,
-    ) -> Option<&Capability> {
-        self.capabilities.values().find(|cap| {
-            cap.resource_type == resource_type
-                && (!required.read || cap.permissions.read)
-                && (!required.write || cap.permissions.write)
-                && (!required.execute || cap.permissions.execute)
-                && (!required.grant || cap.permissions.grant)
-                && (!required.revoke || cap.permissions.revoke)
-        })
+    ) -> Option<Capability> {
+        self.capabilities
+            .lock()
+            .values()
+            .find(|cap| {
+                cap.resource_type == resource_type
+                    && (!required.read || cap.permissions.read)
+                    && (!required.write || cap.permissions.write)
+                    && (!required.execute || cap.permissions.execute)
+                    && (!required.grant || cap.permissions.grant)
+                    && (!required.revoke || cap.permissions.revoke)
+            })
+            .cloned()
     }
 
-    /// Get a reference to a capability if it exists and has the required permissions
-    pub fn get_with_permissions(&self, id: CapId, required: CapPermissions) -> Option<&Capability> {
-        self.capabilities.get(&id).filter(|cap| {
-            // Check if the capability has all required permissions
-            (!required.read || cap.permissions.read)
-                && (!required.write || cap.permissions.write)
-                && (!required.execute || cap.permissions.execute)
-                && (!required.grant || cap.permissions.grant)
-                && (!required.revoke || cap.permissions.revoke)
-        })
-    }
-
-    /// Get a mutable reference to a capability if it exists and has the required permissions
-    pub fn get_mut_with_permissions(
-        &mut self,
-        id: CapId,
-        required: CapPermissions,
-    ) -> Option<&mut Capability> {
-        if let Some(cap) = self.capabilities.get_mut(&id) {
-            // Check if the capability has all required permissions
-            if (!required.read || cap.permissions.read)
-                && (!required.write || cap.permissions.write)
-                && (!required.execute || cap.permissions.execute)
-                && (!required.grant || cap.permissions.grant)
-                && (!required.revoke || cap.permissions.revoke)
-            {
-                Some(cap)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+    /// Get an owned copy of a capability if it exists and has the required permissions
+    pub fn get_with_permissions(&self, id: CapId, required: CapPermissions) -> Option<Capability> {
+        self.capabilities
+            .lock()
+            .get(&id)
+            .filter(|cap| {
+                // Check if the capability has all required permissions
+                (!required.read || cap.permissions.read)
+                    && (!required.write || cap.permissions.write)
+                    && (!required.execute || cap.permissions.execute)
+                    && (!required.grant || cap.permissions.grant)
+                    && (!required.revoke || cap.permissions.revoke)
+            })
+            .cloned()
     }
 
     /// Duplicate a capability (grant permission required).
@@ -395,23 +422,20 @@ impl CapabilityTable {
     /// The new capability inherits the same badge as the original.
     /// Use [`duplicate_with_badge`] when delegating to assign a custom badge
     /// that identifies the delegation chain to the receiver.
-    pub fn duplicate(&mut self, id: CapId) -> Option<Capability> {
-        if let Some(cap) = self.capabilities.get(&id) {
-            if cap.permissions.grant {
-                Some(Capability {
-                    id: CapId::new(),
-                    resource_type: cap.resource_type,
-                    permissions: cap.permissions,
-                    resource: cap.resource,
-                    badge: cap.badge,
-                    dma: cap.dma,
-                })
-            } else {
-                None
-            }
-        } else {
-            None
+    pub fn duplicate(&self, id: CapId) -> Option<Capability> {
+        let caps = self.capabilities.lock();
+        let cap = caps.get(&id)?;
+        if !cap.permissions.grant {
+            return None;
         }
+        Some(Capability {
+            id: CapId::new(),
+            resource_type: cap.resource_type,
+            permissions: cap.permissions,
+            resource: cap.resource,
+            badge: cap.badge,
+            dma: cap.dma,
+        })
     }
 
     /// Duplicate a capability with a custom badge (grant permission required).
@@ -420,23 +444,20 @@ impl CapabilityTable {
     /// the receiver a badge the receiver can use to distinguish senders.
     /// The `new_badge` value is injected by the kernel : the sender cannot
     /// override it at send time.
-    pub fn duplicate_with_badge(&mut self, id: CapId, new_badge: u64) -> Option<Capability> {
-        if let Some(cap) = self.capabilities.get(&id) {
-            if cap.permissions.grant {
-                Some(Capability {
-                    id: CapId::new(),
-                    resource_type: cap.resource_type,
-                    permissions: cap.permissions,
-                    resource: cap.resource,
-                    badge: new_badge,
-                    dma: cap.dma,
-                })
-            } else {
-                None
-            }
-        } else {
-            None
+    pub fn duplicate_with_badge(&self, id: CapId, new_badge: u64) -> Option<Capability> {
+        let caps = self.capabilities.lock();
+        let cap = caps.get(&id)?;
+        if !cap.permissions.grant {
+            return None;
         }
+        Some(Capability {
+            id: CapId::new(),
+            resource_type: cap.resource_type,
+            permissions: cap.permissions,
+            resource: cap.resource,
+            badge: new_badge,
+            dma: cap.dma,
+        })
     }
 }
 
@@ -576,6 +597,41 @@ static CAPABILITY_MANAGER: Once<CapabilityManager> = Once::new();
 /// Get a reference to the global capability manager
 pub fn get_capability_manager() -> &'static CapabilityManager {
     CAPABILITY_MANAGER.call_once(CapabilityManager::new)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intersection_narrows_to_grant_ceiling() {
+        let requested = CapPermissions::read_write();
+        let granted = CapPermissions {
+            read: true,
+            write: false,
+            execute: false,
+            grant: true,
+            revoke: false,
+        };
+        let narrowed = requested.intersection(&granted);
+        assert!(narrowed.read);
+        assert!(!narrowed.write);
+        assert!(narrowed.grant);
+        assert!(narrowed.is_subset_of(&granted));
+    }
+
+    #[test]
+    fn disjoint_permissions_intersect_to_none() {
+        let read = CapPermissions {
+            read: true,
+            ..CapPermissions::none()
+        };
+        let write = CapPermissions {
+            write: true,
+            ..CapPermissions::none()
+        };
+        assert!(read.intersection(&write).is_none());
+    }
 }
 
 /// Releases a capability and cleans up the underlying resource.
