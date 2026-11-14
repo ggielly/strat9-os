@@ -3867,6 +3867,18 @@ pub fn maybe_run_loader_dry_from_boot_env() {
         }
         return;
     }
+    if mode == "freedos_prepare_dry" {
+        log::info!("[s9vm] FreeDOS boot-preparation dry run requested (no VT-x required)");
+        let caps = HwCaps::default();
+        match dosboot::run_freedos_prepare_dry(&caps) {
+            Ok(()) => log::info!(
+                "[s9vm] freedos-prepare-dry PASS: world mapped with its second-level tables, \
+                 firmware and disk installed, INT 13h adapter reads and writes (no guest entry)"
+            ),
+            Err(error) => log::warn!("[s9vm] freedos-prepare-dry FAIL: {:?}", error),
+        }
+        return;
+    }
     if mode == "freedos_session_dry" {
         log::info!("[s9vm] FreeDOS live-session dry run requested (no VT-x required)");
         let caps = HwCaps::default();

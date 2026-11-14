@@ -1957,6 +1957,120 @@ pub fn run_freedos_session_dry(caps: &HwCaps) -> Result<(), DosError> {
     result
 }
 
+/// A DOS world prepared for its first guest entry.
+struct PreparedDosWorld {
+    disk_sectors: u64,
+    vcpu: Vcpu,
+    machine: Machine,
+    pointer: u64,
+}
+
+/// Prepares a fresh DOS world for its first entry.
+///
+/// The order matters: the world mapping allocates the second-level tables the
+/// vCPU needs, and the disk image is loaded into the registry's device model
+/// before that model is taken. The dry selftest calls this same function
+/// without entering the guest, so an ordering regression is caught on a host
+/// without VT-x.
+fn prepare_dos_world(
+    caps: &HwCaps,
+    world_id: u64,
+    firmware: FirmwareKind,
+    image: &'static [u8],
+    launch_tsc: u64,
+    tsc_hz: u64,
+) -> Result<PreparedDosWorld, DosError> {
+    let disk_sectors = map_and_load_freedos(caps, world_id, firmware, image)?;
+    log::info!(
+        "[s9vm] {}: memory + disk ready at {} ms",
+        firmware.label(),
+        elapsed_millis(launch_tsc, tsc_hz)
+    );
+    install_freedos_artefacts(world_id, firmware, image)?;
+    log::info!(
+        "[s9vm] {}: firmware installed at {} ms",
+        firmware.label(),
+        elapsed_millis(launch_tsc, tsc_hz)
+    );
+    let pointer = vm::second_level_pointer(world_id, caps).map_err(|_| DosError::VmFail(6))?;
+    // Detached vCPU: the run loop drives it directly, no scheduler.
+    let vcpu = Vcpu::new(caps, pointer)?;
+    // The stub-firmware world keeps its device model in the registry (the disk
+    // image is loaded there); the SeaBIOS world builds the legacy PC device set
+    // itself, because it must not see the virtio PCI functions the firmware
+    // would try to drive.
+    let mut machine = if firmware.is_seabios() {
+        Machine::new_legacy()
+    } else {
+        vm::take_machine(world_id).ok_or(DosError::VmFail(7))?
+    };
+    configure_dos_machine(&mut machine, firmware, image);
+    Ok(PreparedDosWorld {
+        disk_sectors,
+        vcpu,
+        machine,
+        pointer,
+    })
+}
+
+/// Dry selftest of the fresh-boot preparation (no VT-x required).
+///
+/// Runs exactly the preparation a real boot runs, then checks what the exit
+/// path depends on: the mapped world has its second-level tables, the disk has
+/// the floppy geometry, and the `INT 13h` adapter can read the boot sector and
+/// round-trip a written sector through the machine the runner holds.
+pub fn run_freedos_prepare_dry(caps: &HwCaps) -> Result<(), DosError> {
+    let launch_tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    let tsc_hz = crate::s9vm::tsc::get().map_or(FALLBACK_TSC_HZ, |frequency| frequency.hz());
+    let record = vm::create(b"s9vm-freedos-prepare-dry", 0).ok_or(DosError::VmFail(1))?;
+    let world_id = record.id;
+    let result = (|| -> Result<(), DosError> {
+        let prepared = prepare_dos_world(
+            caps,
+            world_id,
+            FirmwareKind::Stub,
+            freedos_image(),
+            launch_tsc,
+            tsc_hz,
+        )?;
+        if prepared.disk_sectors != FREEDOS_DISK_SECTORS {
+            return Err(DosError::BadExit("unexpected disk capacity"));
+        }
+        if prepared.pointer == 0 {
+            return Err(DosError::BadExit("missing second-level pointer"));
+        }
+        let mut prepared = prepared;
+        {
+            let image_bytes = prepared.machine.devices_mut().blk.disk_mut();
+            let sectors = (image_bytes.len() / biosrom::SECTOR_SIZE) as u64;
+            let mut disk = MachineDisk {
+                image: image_bytes,
+                sectors,
+            };
+            let mut sector = [0u8; biosrom::SECTOR_SIZE];
+            if !bios::BiosDisk::read_sector(&mut disk, 0, &mut sector) {
+                return Err(DosError::BadExit("adapter cannot read sector 0"));
+            }
+            if sector[..] != freedos_image()[..biosrom::SECTOR_SIZE] {
+                return Err(DosError::BadExit("adapter read the wrong boot sector"));
+            }
+            let pattern = [0xA5u8; biosrom::SECTOR_SIZE];
+            if !bios::BiosDisk::write_sector(&mut disk, 1, &pattern) {
+                return Err(DosError::BadExit("adapter cannot write sector 1"));
+            }
+            let mut readback = [0u8; biosrom::SECTOR_SIZE];
+            if !bios::BiosDisk::read_sector(&mut disk, 1, &mut readback) || readback != pattern {
+                return Err(DosError::BadExit("adapter write did not round-trip"));
+            }
+        }
+        // Drop the vCPU before the world: its control block was never loaded.
+        drop(prepared);
+        Ok(())
+    })();
+    let _ = vm::destroy(world_id);
+    result
+}
+
 /// Body of a full FreeDOS boot; the caller owns and destroys the world.
 ///
 /// # Exit routing
@@ -2005,33 +2119,15 @@ fn run_freedos_in_world(
             let disk_sectors = session.disk_sectors;
             (disk_sectors, vcpu, bios_state, machine, pointer)
         } else {
-            let disk_sectors = map_and_load_freedos(caps, world_id, firmware, image)?;
-            log::info!(
-                "[s9vm] {}: memory + disk ready at {} ms",
-                firmware.label(),
-                elapsed_millis(launch_tsc, tsc_hz)
-            );
-            install_freedos_artefacts(world_id, firmware, image)?;
-            log::info!(
-                "[s9vm] {}: firmware installed at {} ms",
-                firmware.label(),
-                elapsed_millis(launch_tsc, tsc_hz)
-            );
-            let pointer =
-                vm::second_level_pointer(world_id, caps).map_err(|_| DosError::VmFail(6))?;
-            // Detached vCPU: the run loop drives it directly, no scheduler.
-            let vcpu = Vcpu::new(caps, pointer)?;
-            // The stub-firmware world keeps its device model in the registry
-            // (the disk image is loaded there); the SeaBIOS world builds the
-            // legacy PC device set itself, because it must not see the virtio
-            // PCI functions the firmware would try to drive.
-            let mut machine = if firmware.is_seabios() {
-                Machine::new_legacy()
-            } else {
-                vm::take_machine(world_id).ok_or(DosError::VmFail(7))?
-            };
-            configure_dos_machine(&mut machine, firmware, image);
-            (disk_sectors, vcpu, bios::BiosState::new(), machine, pointer)
+            let prepared =
+                prepare_dos_world(caps, world_id, firmware, image, launch_tsc, tsc_hz)?;
+            (
+                prepared.disk_sectors,
+                prepared.vcpu,
+                bios::BiosState::new(),
+                prepared.machine,
+                prepared.pointer,
+            )
         };
     let mut memory = WorldMemory::new(world_id);
     // Pin the task to this CPU before the VMCS is loaded: the STI window of
