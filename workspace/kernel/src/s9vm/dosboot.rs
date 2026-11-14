@@ -456,6 +456,15 @@ impl DosError {
                 "the platform cannot enter real mode (VT-x or unrestricted guest missing)"
             }
             DosError::Mmu | DosError::Memory => "guest memory translation failed",
+            // A DOS `reboot` (or the 8042 reset command) is a normal guest
+            // request, not a failure: name the command that honours it instead
+            // of leaving the operator with "unexpected result".
+            DosError::BadExit("guest requested reset") => {
+                "the guest asked for a machine reset; `vm dos reset` reboots it"
+            }
+            DosError::BadExit("guest requested reboot") => {
+                "the guest asked for a reboot; `vm dos reset` reboots it"
+            }
             DosError::BadExit(_) => "the guest stopped with an unexpected result",
             DosError::Run(_) => "a vCPU operation failed (see the kernel log)",
             DosError::VmFail(_) => "a VM operation failed (see the kernel log)",
