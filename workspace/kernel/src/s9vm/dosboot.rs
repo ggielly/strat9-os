@@ -1857,10 +1857,43 @@ pub fn run_freedos_session_selftest(caps: &HwCaps) -> Result<(), DosError> {
             );
             return Err(DosError::BadExit("typed `dir` did not list the floppy"));
         }
+        // The keys reached the guest through IRQ1 and the 8042, and the timer
+        // vector was delivered too: that is wave 1 proven end to end.
+        if report.scancodes_typed == 0 {
+            return Err(DosError::BadExit("typed keys never reached the guest"));
+        }
+        if report.interrupts_delivered == 0 {
+            return Err(DosError::BadExit("no platform interrupt was delivered"));
+        }
         log::info!(
             "[s9vm] freedos-session: typed keys={} irq={} and the floppy listed",
             report.scancodes_typed,
             report.interrupts_delivered
+        );
+        // Third slice: copy a file on the floppy and type it back. The write
+        // goes through `INT 13h AH=03h` (wave 2) and the read-back proves the
+        // sectors really changed: the FDCONFIG text never appeared on screen
+        // during the boot.
+        vm::push_console_input(
+            world_id,
+            b"copy a:\\fdconfig.sys a:\\s9vmchk.txt\ntype a:\\s9vmchk.txt\n",
+        )
+        .map_err(|()| DosError::VmFail(9))?;
+        let write_limits = RunLimits {
+            max_exits: MAX_FREEDOS_EXITS,
+            max_nanoseconds: 6_000_000_000,
+            stop_at_marker: false,
+        };
+        let report = dos_run(caps, write_limits)?;
+        if !report.text.contains("!COUNTRY") {
+            log::warn!(
+                "[s9vm] freedos-session: screen after typed copy/type:\n{}",
+                report.text
+            );
+            return Err(DosError::BadExit("typed copy/type did not round-trip"));
+        }
+        log::info!(
+            "[s9vm] freedos-session: copy wrote the file and `type` read it back"
         );
         Ok(())
     })();

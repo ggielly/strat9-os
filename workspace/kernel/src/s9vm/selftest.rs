@@ -4171,8 +4171,8 @@ pub fn maybe_run_from_boot_env(caps: &HwCaps) {
         log::info!("[s9vm] FreeDOS live session requested (VT-x required)");
         match dosboot::run_freedos_session_selftest(caps) {
             Ok(()) => log::info!(
-                "[s9vm] freedos-session PASS: booted to the prompt and typed `dir` over the \
-                 session console"
+                "[s9vm] freedos-session PASS: booted to the prompt, typed `dir` and round-tripped a \
+                 file over the session console"
             ),
             Err(dosboot::DosError::Unsupported) => log::warn!(
                 "[s9vm] freedos-session SKIP: real-mode entry needs VT-x and the \
