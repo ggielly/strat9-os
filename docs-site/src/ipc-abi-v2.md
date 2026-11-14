@@ -698,7 +698,7 @@ processes only inside messages.
 
 ## 16. Implementation status
 
-Last verified: 2026-11-14 (`cargo check` for `x86_64-unknown-none` exit 0;
+Last verified: 2026-11-14 (`cargo check` for `x86_64-unknown-none`, with and without `--features selftest`, exit 0;
 `cargo test -p strat9-abi` and `cargo test -p strat9-ipc-core` green).
 
 | Piece | Where | State |
@@ -715,22 +715,50 @@ Last verified: 2026-11-14 (`cargo check` for `x86_64-unknown-none` exit 0;
 | 284 `MEMOBJ_CREATE`, 285 `MEMOBJ_MAP` | — | **pending (Phase 3)**; routed to `ENOSYS` |
 | `AsyncOp` 13–17 | — | **pending (Phase 4)**; opcodes not dispatched |
 | `SiloIpcAccount` (§12) | — | **pending (Phase 4)**; endpoints record `owner_silo` but no counter is charged |
-| Timeouts (`timeout_ns != 0`) | — | **pending**; returns `ENOTSUP` until the kernel has a timer-wheel wake |
+| Timeouts (`timeout_ns != 0`) | `kernel/src/sync/waitqueue.rs` (`wait_until_deadline`), `syscall/ipc_v2.rs` | implemented on the scheduler's `wake_deadline_ns` (the `nanosleep` mechanism); `ETIMEDOUT`; resolution one tick (10 ms); a `call` deadline covers enqueue + reply |
+| Receive reservation (§4.5) | `endpoint.rs` (`pop` → `PopOutcome::NeedSlots`), `syscall/ipc_v2.rs` | implemented: slot count checked against the reservation in the dequeue critical section, retry loop, no nested locks |
 | Direct switch on `call` (§10) | — | **pending (Phase 5)**; `EP_FLAG_FASTPATH` is accepted and ignored |
 | Executable model of the state machines | `workspace/ipc-core` | 27 host tests, deterministic stress; loom interleaving not run |
+| In-kernel runtime tests | `kernel/src/ipc/v2/selftest.rs` (task `ipc-v2-test`, selftest orchestrator) | written and compiled; **not yet observed passing**: the `selftest` debug kernel does not reach the orchestrator (see below) |
+
+Defects fixed on 2026-11-14 after the first implementation pass:
+
+- **Receive reservation race.** The reservation was sized from a peek taken
+  before `pop`; it was stale whenever the receiver blocked on an empty queue
+  (reservation 0, then a message with handles arrives) or another receiver
+  thread took the head. Now `pop` compares the head with the reservation
+  under the endpoint lock and returns `NeedSlots(n)` without dequeuing.
+- **Senders never woken.** `send_waitq` was only woken by `close`, so a sender
+  blocked on a full queue stayed blocked after a receiver dequeued. `pop` now
+  wakes one sender.
+- **Reply visible before its payload.** `deliver_reply` set `Done` before
+  storing the payload; a caller on another CPU could see `Done`, find no
+  payload and return `EPIPE`. The payload is now stored first, under the same
+  lock.
+- **Late reply leaked.** A reply arriving between a caller's `EINTR` /
+  `ETIMEDOUT` (or death) and its cancellation stayed in the slot with its
+  handles (possibly an endpoint's last `EP_RECV`). `abandon_call` reclaims and
+  releases it.
+- **Call registry growth.** `CALL_SLOTS` was pruned only by exit/close scans,
+  growing by one entry per call; it is now pruned amortised in
+  `register_call`.
+
+Runtime test status: the selftest harness exists (`process/selftest.rs`,
+`cargo make kernel-test`) but its build was broken by unrelated code (two
+`x86_64::VirtAddr` paths, and a call into the orphaned
+`shell/commands/util/selftest.rs`, now skipped). With it compiling, the debug
+`selftest` kernel still stops during `nic_init` **before** the orchestrator,
+at `HEAD` as well (e1000e: `vmalloc KernelMapFailed` panic; with
+`-nic none`: hang at "Scanning for network devices"). The IPC v2 runtime
+tests run as soon as that boot path is fixed.
 
 Remaining known differences from the normative text:
 
-1. §13 says `timeout_ns` is honoured; it is not yet, and the error is
-   `ENOTSUP` rather than `ETIMEDOUT`.
-2. §4.5 requires the receiver's handle slots to be reserved before the
-   dequeue. The kernel does this with an explicit reservation counter, but a
-   second receiver thread in the same process can still change the queue head
-   between the peek and the dequeue; the reservation is sized from the peek.
-3. §12 quotas are not charged.
-4. `NS_BIND` does not yet enforce the §8 rule that a silo holding a foreign
+1. §12 quotas are not charged.
+2. `NS_BIND` does not yet enforce the §8 rule that a silo holding a foreign
    `EP_MINT` needs `RegistryMode::PROXY`; `IPC_MINT` is only obtainable from a
    handle that already carries `EP_MINT`.
+3. Timeout resolution is the scheduler tick (10 ms), not nanoseconds.
 
 ---
 

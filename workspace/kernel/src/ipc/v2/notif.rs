@@ -80,7 +80,10 @@ impl Notification {
     }
 
     /// Wait for non-zero bits, atomically read and clear them.
-    pub fn wait(&self, nonblock: bool) -> Result<u64, SyscallError> {
+    ///
+    /// `deadline_ns` (absolute, [`crate::sync::scheduler_clock_ns`]) bounds the
+    /// whole wait, including retries after another waiter took the bits.
+    pub fn wait(&self, nonblock: bool, deadline_ns: Option<u64>) -> Result<u64, SyscallError> {
         loop {
             let bits = self.word.swap(0, Ordering::Acquire);
             if bits != 0 {
@@ -89,7 +92,7 @@ impl Notification {
             if nonblock {
                 return Err(SyscallError::Again);
             }
-            let outcome = self.waitq.wait_until(|| {
+            let outcome = self.waitq.wait_until_deadline(deadline_ns, || {
                 if self.word.load(Ordering::Acquire) != 0 {
                     Some(Ok(()))
                 } else if crate::process::signal::has_pending_signals() {
@@ -99,7 +102,7 @@ impl Notification {
                     None
                 }
             });
-            outcome?;
+            outcome.unwrap_or(Err(SyscallError::TimedOut))?;
         }
     }
 

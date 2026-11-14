@@ -188,6 +188,10 @@ extern "C" fn selftest_orchestrator() -> ! {
     let _ = wait_task_exit("ipc-sem-poster", 2_000);
     let _ = wait_task_exit("ipc-04-05-test", 3_000);
 
+    crate::ipc::v2::selftest::create_ipc_v2_test_task();
+    let _ = wait_task_exit("ipc-v2-sender", 3_000);
+    let _ = wait_task_exit("ipc-v2-test", 3_000);
+
     crate::process::vfs_stat_test::create_vfs_stat_test_task();
     let _ = wait_task_exit("vfs-stat-test", 3_000);
 
@@ -215,8 +219,12 @@ extern "C" fn selftest_orchestrator() -> ! {
     //  Pure logic behind the shell tool and utility commands: the argument
     //  parsers, the grep line splitter, the NTP reply validator, the
     //  environment grammar and the shared output formatters.
-    crate::shell::commands::util::create_shell_util_test_task();
-    let _ = wait_task_exit("shell-util-test", 3_000);
+    // Disabled: `shell/commands/util/selftest.rs` is not declared as a module
+    // and tests helpers (`parse_grep_options`, `validate_ntp_response`,
+    // `EnvOp`, `format_pci_address`, ...) that the current util/hw modules do
+    // not define, so this call broke the whole `selftest` build. Re-enable
+    // once that file and the util refactor it targets are reconciled.
+    crate::serial_println!("[selftest] SKIP shell-util-test (orphaned test module)");
 
     let strate_ok = run_strate_lifecycle_e2e();
     if strate_ok {
