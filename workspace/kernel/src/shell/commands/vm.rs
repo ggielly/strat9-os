@@ -475,7 +475,7 @@ fn write_bytes(path: &str, bytes: &[u8]) -> Result<usize, ShellError> {
     written
 }
 
-/// `vm dos <open [seabios]|run [seconds] [keys=<text>]|info|text|reset|close>` : live DOS session.
+/// `vm dos <open [seabios]|run [seconds] [keys=<text>]|info|text|selftest|reset|close>` : live DOS session.
 ///
 /// The DOS world stays mapped between commands: `vm dos run` enters it for a
 /// bounded slice, `vm send <id> <text>` queues keyboard input for the next
@@ -584,6 +584,38 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
                 }
             }
         }
+        "selftest" | "check" => {
+            // One command that proves the interactive path end to end: boot
+            // to the prompt, type `dir`, then copy a file and read it back.
+            if !caps.can_run() {
+                shell_println!(
+                    "vm: DOS session selftest needs VT-x and unrestricted guest ({})",
+                    crate::s9vm::dosboot::DosError::Unsupported.hint()
+                );
+                return Ok(());
+            }
+            let _ = dosboot::dos_close();
+            shell_println!(
+                "vm: DOS session selftest: boot + typed `dir` + disk round-trip (about 20 s)…"
+            );
+            match dosboot::run_freedos_session_selftest(&caps) {
+                Ok(()) => {
+                    shell_println!(
+                        "vm: DOS session PASS: prompt reached, keys typed, file copied and read \
+                         back"
+                    );
+                    Ok(())
+                }
+                Err(error) => {
+                    shell_println!(
+                        "vm: DOS session FAIL: {:?} ({})",
+                        error,
+                        error.hint()
+                    );
+                    Err(ShellError::ExecutionFailed)
+                }
+            }
+        }
         "info" | "status" => match dosboot::dos_status() {
             Some(status) => {
                 shell_println!(
@@ -625,7 +657,7 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
         }
         _ => {
             shell_println!(
-                "Usage: vm dos <open [seabios]|run [seconds] [keys=<text>]|info|text|reset|close>"
+                "Usage: vm dos <open [seabios]|run [seconds] [keys=<text>]|info|text|selftest|reset|close>"
             );
             Err(ShellError::InvalidArguments)
         }
