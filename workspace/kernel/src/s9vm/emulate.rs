@@ -864,7 +864,41 @@ fn handle_port_exit(
     let string = (qualification >> 4) & 0x1 != 0;
     let repeated = (qualification >> 5) & 0x1 != 0;
     let port = ((qualification >> 16) & 0xFFFF) as u16;
-    if string {
+    // Some processors/VMM combinations report `rep insb`/`rep insw` with the
+    // string bits clear. Recognise the encoding itself so the transfer is not
+    // replayed one byte per exit (SeaBIOS reads the VGA ROM with `rep insb`).
+    let mut op = [0u8; 3];
+    if view.read(guest.cs_base().wrapping_add(guest.rip()), &mut op) {
+        let mut index = 0usize;
+        let rep = op[0] == 0xF3;
+        if rep {
+            index += 1;
+        }
+        let mut size = 1u8;
+        if index < op.len() && op[index] == 0x66 {
+            size = 2;
+            index += 1;
+        }
+        if index < op.len() && matches!(op[index], 0x6C..=0x6F) {
+            let is_in = matches!(op[index], 0x6C | 0x6D);
+            let synthesized = (qualification & !0x3F)
+                | u64::from(size - 1)
+                | (u64::from(is_in) << 3)
+                | 0x10
+                | if rep { 0x20 } else { 0 };
+            return handle_string_port(
+                devices,
+                apic,
+                view,
+                guest,
+                port,
+                synthesized,
+                rep,
+                instruction_length,
+            );
+        }
+    }
+    if string || repeated {
         return handle_string_port(
             devices,
             apic,
@@ -876,7 +910,7 @@ fn handle_port_exit(
             instruction_length,
         );
     }
-    if repeated || !Devices::handles_port(port) {
+    if !Devices::handles_port(port) {
         return Ok(false);
     }
     let size = ((qualification & 0x7) + 1) as u8;
@@ -996,7 +1030,12 @@ fn handle_string_port(
     if repeated {
         guest.set_gpr(1, 0);
     }
-    guest.set_rip(guest.rip().wrapping_add(u64::from(instruction_length)));
+    let length = if instruction_length == 0 {
+        2
+    } else {
+        instruction_length
+    };
+    guest.set_rip(guest.rip().wrapping_add(u64::from(length)));
     Ok(true)
 }
 

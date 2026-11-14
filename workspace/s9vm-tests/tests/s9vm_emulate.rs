@@ -352,6 +352,39 @@ fn repeated_insb_reads_the_fw_cfg_signature_into_guest_memory() {
 }
 
 #[test]
+fn rep_insb_is_recognised_even_without_string_qualification_bits() {
+    let mut memory = machine();
+    let rip = load_code(&mut memory, &[0xF3, 0x6C]);
+    let mut guest = TestGuest::new(rip);
+    guest.regs[7] = DATA_PAGE;
+    guest.regs[1] = 4;
+    let mut devices = Devices::new();
+    devices.fw_cfg.select(fwcfg::SIGNATURE);
+    // Only the port is reported: bits 4/5 (string/repeated) are clear, as some
+    // VMMs do for `rep insb`.
+    let qualification = u64::from(fwcfg::DATA_PORT) << 16;
+    let mut view = view(&mut memory, &guest);
+    let handled = handle_exit_with_length(
+        &mut devices,
+        &mut apic::LocalApic::new(0),
+        &mut view,
+        &mut guest,
+        ExitClass::IoPort,
+        qualification,
+        0,
+        2,
+    )
+    .expect("string I/O");
+    assert!(handled);
+    let mut signature = [0u8; 4];
+    assert!(view.read(DATA_PAGE, &mut signature));
+    assert_eq!(&signature, b"QEMU");
+    assert_eq!(guest.regs[7], DATA_PAGE + 4);
+    assert_eq!(guest.regs[1], 0);
+    assert_eq!(guest.rip, rip + 2);
+}
+
+#[test]
 fn unmodeled_port_is_left_to_policy() {
     let mut memory = machine();
     let rip = load_code(&mut memory, &[0xE6, 0xE9]);
