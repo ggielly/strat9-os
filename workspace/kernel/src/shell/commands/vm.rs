@@ -551,6 +551,20 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
                         report.scancodes_typed,
                         report.marker.map(|byte| byte as char)
                     );
+                    // Which firmware services the guest actually called: this
+                    // is what distinguishes "the guest never reached INT 16h"
+                    // from "it called it and got nothing" when a slice fails on
+                    // real hardware.
+                    if report.bios_calls != 0 {
+                        shell_println!("vm: BIOS vectors: {}", report.vector_summary());
+                    }
+                    if report.unhandled_interrupts != 0 {
+                        shell_println!(
+                            "vm: {} unserviced interrupt(s): check the kernel log for the \
+                             vector that faulted",
+                            report.unhandled_interrupts
+                        );
+                    }
                     if !report.text.is_empty() {
                         shell_println!("vm: screen:\n{}", report.text.trim_end());
                     }
