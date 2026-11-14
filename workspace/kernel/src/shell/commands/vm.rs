@@ -478,11 +478,33 @@ fn write_bytes(path: &str, bytes: &[u8]) -> Result<usize, ShellError> {
     written
 }
 
-/// `vm dos <open [seabios]|run [seconds] [keys=<text>]|info|text|selftest|reset|close>` : live DOS session.
+/// Prints the lines of `current` that differ from `previous`.
 ///
-/// The DOS world stays mapped between commands: `vm dos run` enters it for a
-/// bounded slice, `vm send <id> <text>` queues keyboard input for the next
-/// slice and `vm console <id>` shows the screen the last slice produced.
+/// The DOS screen is a fixed text grid, so comparing line by line keeps the
+/// interactive console readable: after a `DIR`, the prompt and the listing are
+/// printed instead of the whole 25-line screen.
+fn print_screen_changes(previous: &str, current: &str) {
+    let mut before = previous.lines();
+    for line in current.lines() {
+        let old = before.next().unwrap_or("");
+        if old == line {
+            continue;
+        }
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            continue;
+        }
+        shell_println!("{trimmed}");
+    }
+}
+
+/// `vm dos <open [seabios]|run [seconds] [keys=<text>]|console|info|text|selftest|reset|close>` : live DOS session.
+///
+/// The DOS world stays mapped between commands: `vm dos console` keeps the
+/// guest running in short slices while host keystrokes are typed into it (the
+/// interactive path), `vm dos run` enters it for one bounded slice, `vm send
+/// <id> <text>` queues keyboard input for the next slice and `vm console <id>`
+/// shows the screen the last slice produced.
 fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
     use crate::s9vm::dosboot;
     let sub = args.first().map(|arg| arg.as_str()).unwrap_or("run");
@@ -504,8 +526,8 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
             match dosboot::dos_open(&caps, firmware, dosboot::freedos_image()) {
                 Ok(id) => {
                     shell_println!(
-                        "vm: DOS session open on world {id}: `vm dos run`, `vm send {id} <text>`, \
-                         `vm console {id}`, `vm dos close`"
+                        "vm: DOS session open on world {id}: `vm dos console`, `vm dos run`, \
+                         `vm send {id} <text>`, `vm console {id}`, `vm dos close`"
                     );
                     Ok(())
                 }
@@ -687,6 +709,108 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
                 Err(ShellError::ExecutionFailed)
             }
         },
+        "console" | "attach" => {
+            // Interactive console: host keystrokes are handed to the guest
+            // between short slices and the screen changes are printed as they
+            // happen. The shell's line editor is not active here, so the bytes
+            // come straight from the task-context keyboard queue.
+            let Some(mut id) = dosboot::dos_world_id() else {
+                shell_println!("vm: no DOS session: run `vm dos open` first");
+                return Err(ShellError::ExecutionFailed);
+            };
+            shell_println!(
+                "vm: DOS console on world {id}: type at the DOS prompt, Ctrl-C returns to the \
+                 shell"
+            );
+            // An optional duration bounds the loop for scripted use; without it
+            // the console runs until Ctrl-C.
+            let mut seconds = 0u64;
+            for arg in args.iter().skip(1) {
+                if let Ok(value) = arg.parse::<u64>() {
+                    seconds = value;
+                }
+            }
+            let slice_ns = 150_000_000u64;
+            let max_slices = if seconds == 0 {
+                u64::MAX
+            } else {
+                seconds.saturating_mul(1_000_000_000) / slice_ns
+            };
+            let mut slices = 0u64;
+            let mut screen = dosboot::dos_text().unwrap_or_default();
+            print_screen_changes("", &screen);
+            loop {
+                if slices >= max_slices {
+                    break;
+                }
+                slices += 1;
+                let mut text: Vec<u8> = Vec::new();
+                let mut interrupted = false;
+                while let Some(byte) = crate::arch::x86_64::keyboard::read_char() {
+                    match byte {
+                        0x03 => {
+                            interrupted = true;
+                            break;
+                        }
+                        b'\r' | b'\n' => text.push(b'\r'),
+                        0x08 | 0x7F => text.push(0x08),
+                        0x20..=0x7E => text.push(byte),
+                        _ => {}
+                    }
+                }
+                if interrupted {
+                    break;
+                }
+                if !text.is_empty() {
+                    let _ = write_bytes(&format!("{VMM_ROOT}/{id}/console"), &text);
+                }
+                let limits = dosboot::RunLimits {
+                    max_exits: dosboot::RunLimits::SHELL.max_exits,
+                    max_nanoseconds: slice_ns,
+                    stop_at_marker: false,
+                };
+                match dosboot::dos_run(&caps, limits) {
+                    Ok(_) => {}
+                    Err(dosboot::DosError::BadExit("guest requested reset"))
+                    | Err(dosboot::DosError::BadExit("guest requested reboot")) => {
+                        // A DOS `reboot` is honoured in place, like the slice
+                        // path does: a fresh session for the same image.
+                        let _ = dosboot::dos_close();
+                        match dosboot::dos_open(
+                            &caps,
+                            dosboot::FirmwareKind::Stub,
+                            dosboot::freedos_image(),
+                        ) {
+                            Ok(reopened) => {
+                                id = reopened;
+                                shell_println!("vm: the guest rebooted on world {id}");
+                                screen.clear();
+                            }
+                            Err(error) => {
+                                shell_println!(
+                                    "vm: the guest rebooted but the session could not be \
+                                     reopened: {:?} ({})",
+                                    error,
+                                    error.hint()
+                                );
+                                return Err(ShellError::ExecutionFailed);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        shell_println!("vm: DOS console stopped: {:?} ({})", error, error.hint());
+                        return Err(ShellError::ExecutionFailed);
+                    }
+                }
+                let current = dosboot::dos_text().unwrap_or_default();
+                print_screen_changes(&screen, &current);
+                screen = current;
+            }
+            shell_println!(
+                "vm: DOS console detached; the session stays open for `vm dos run`"
+            );
+            Ok(())
+        }
         "text" | "screen" => match dosboot::dos_text() {
             Some(text) => {
                 shell_println!("{}", text.trim_end());
@@ -708,7 +832,7 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
         }
         _ => {
             shell_println!(
-                "Usage: vm dos <open [seabios]|run [seconds] [keys=<text>]|info|text|selftest|reset|close>"
+                "Usage: vm dos <open [seabios]|run [seconds] [keys=<text>]|console|info|text|selftest|reset|close>"
             );
             Err(ShellError::InvalidArguments)
         }
