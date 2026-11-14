@@ -79,6 +79,27 @@ impl Chip {
         }
     }
 
+    /// Creates a chip already programmed the way PC firmware leaves it.
+    ///
+    /// `vector_base` is the ICW2 value (`0x08` for the master, `0x70` for the
+    /// slave) and `imr` the mask a booting DOS machine runs with.
+    pub const fn programmed(vector_base: u8, imr: u8) -> Self {
+        Self {
+            irr: 0,
+            isr: 0,
+            imr,
+            vector_base,
+            single: false,
+            level_triggered: false,
+            needs_icw4: false,
+            init_step: 0,
+            ocw3_selected: false,
+            read_isr: false,
+            poll_mode: false,
+            special_mask: false,
+        }
+    }
+
     /// True while the initialisation sequence is in progress.
     pub const fn initializing(&self) -> bool {
         self.init_step != 0
@@ -266,6 +287,20 @@ impl Pic {
         Self {
             master: Chip::new(),
             slave: Chip::new(),
+        }
+    }
+
+    /// Pair in the state a PC firmware hands to the boot sector.
+    ///
+    /// The master is initialised to vectors `0x08..=0x0F` with the timer
+    /// (`IR0`) and keyboard (`IR1`) lines unmasked, exactly like a BIOS that
+    /// keeps the 18.2 Hz tick running for the boot loader; the slave is
+    /// initialised to vectors `0x70..=0x77` and stays fully masked until the
+    /// guest enables a device on it.
+    pub const fn bios_default() -> Self {
+        Self {
+            master: Chip::programmed(0x08, 0xFC),
+            slave: Chip::programmed(0x70, 0xFF),
         }
     }
 

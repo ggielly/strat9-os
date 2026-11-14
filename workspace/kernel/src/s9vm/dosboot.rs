@@ -478,12 +478,27 @@ pub fn run_freedos(caps: &HwCaps) -> Result<DosReport, DosError> {
 /// freeze the whole system. The report carries `timed_out = true` when the
 /// budget stopped the run; the world is destroyed on every path.
 pub fn run_freedos_with_limits(caps: &HwCaps, limits: RunLimits) -> Result<DosReport, DosError> {
+    run_freedos_with_limits_and_keys(caps, limits, &[])
+}
+
+/// Boots the FreeDOS floppy and types `keys` at the guest keyboard.
+///
+/// `keys` is host text in ASCII: it is translated into PS/2 set-1 scancodes and
+/// delivered through the 8042 model once the guest owns `INT 9` and unmasks
+/// `IRQ1`, so a DOS kernel sees a real keyboard instead of the BIOS polling
+/// path. Used by the shell-facing `vm test keys=<text>` to drive the guest.
+pub fn run_freedos_with_limits_and_keys(
+    caps: &HwCaps,
+    limits: RunLimits,
+    keys: &[u8],
+) -> Result<DosReport, DosError> {
     run_firmware_with_limits(
         caps,
         limits,
         FirmwareKind::Stub,
         freedos_image(),
         b"s9vm-freedos",
+        keys,
     )
 }
 
@@ -513,6 +528,7 @@ pub fn run_freedos_seabios_with_limits(
         FirmwareKind::SeaBios,
         freedos_image(),
         b"s9vm-freedos-seabios",
+        &[],
     )
 }
 
@@ -544,6 +560,7 @@ pub fn run_freedos_hello_with_limits(
         FirmwareKind::SeaBios,
         freedos_hello_image(),
         b"s9vm-freedos-hello",
+        &[],
     )
 }
 
@@ -554,10 +571,11 @@ fn run_firmware_with_limits(
     firmware: FirmwareKind,
     image: &'static [u8],
     world_name: &'static [u8],
+    keys: &[u8],
 ) -> Result<DosReport, DosError> {
     require_real_mode(caps, firmware.label())?;
     let record = vm::create(world_name, 0).ok_or(DosError::VmFail(1))?;
-    let result = run_freedos_in_world(caps, record.id, limits, firmware, image);
+    let result = run_freedos_in_world(caps, record.id, limits, firmware, image, keys);
     let _ = vm::destroy(record.id);
     result
 }
@@ -1391,6 +1409,7 @@ fn run_freedos_in_world(
     limits: RunLimits,
     firmware: FirmwareKind,
     image: &'static [u8],
+    keys: &[u8],
 ) -> Result<DosReport, DosError> {
     // Timestamp origin of the whole launch, before the first world mapping.
     // The run budget has its own origin later; this one measures preparation
@@ -1481,6 +1500,15 @@ fn run_freedos_in_world(
     } else {
         Machine::new()
     };
+    if !firmware.is_seabios() {
+        // The stub-firmware world is a PC clone: the 8259 pair is programmed
+        // the way a firmware leaves it (vectors 0x08/0x70, timer and keyboard
+        // lines live), so the guest receives real `IRQ0`/`IRQ1` instead of
+        // polling the BIOS. The runner pumps those requests; see
+        // [`pump_dos_interrupts`].
+        machine.devices_mut().set_legacy_pic(true);
+        machine.devices_mut().pic = crate::s9vm::pic::Pic::bios_default();
+    }
     if firmware.is_seabios() {
         let config = firmware::FirmwareConfig::freedos();
         let (extmem_low, extmem_high) = config.extmem_cmos();
@@ -1510,6 +1538,8 @@ fn run_freedos_in_world(
             .rtc
             .set_ram(firmware::CMOS_BOOTFLAG2, firmware::BOOT_ORDER_FLOPPY_FIRST);
     }
+    // Host text typed into the guest keyboard once the guest owns `INT 9`.
+    let mut keyboard_feed = KeyboardFeed::new(keys);
     let mut apic = LocalApic::new(0);
     let mut unhandled_ports: u32 = 0;
     // First distinct unmodeled ports, so a guest that spins on one legacy port
@@ -1588,6 +1618,19 @@ fn run_freedos_in_world(
             let ticks = (u128::from(total_cycles) * 182 / (u128::from(tsc_hz) * 10)) as u32;
             bios_state.advance_ticks(ticks.wrapping_sub(published_ticks));
             published_ticks = ticks;
+            // The device time base has just raised its lines: deliver whatever
+            // the 8259 pair latched, and type the next host keys once the guest
+            // owns the keyboard interrupt.
+            if let Err(error) = pump_dos_interrupts(
+                &mut vcpu,
+                machine.devices_mut(),
+                &mut memory,
+                &mut keyboard_feed,
+                &mut report,
+            ) {
+                outcome = Err(error);
+                break;
+            }
         }
 
         // SAFETY: `run` contract: block loaded, IRQs disabled, configured.
@@ -1668,6 +1711,16 @@ fn run_freedos_in_world(
                     if let Err(error) = write_scratch(&mut memory, &registers) {
                         outcome = Err(error);
                         break;
+                    }
+                    // A platform interrupt (`IRQ0..IRQ7`, master vectors
+                    // `0x08..=0x0F`, or the slave's `0x70..=0x77`) reaches the
+                    // firmware stub while the guest has not installed its own
+                    // handler yet. The real BIOS handler ends with an EOI, so
+                    // the request must leave the 8259 in-service register here
+                    // or the line would never be delivered again.
+                    if matches!(vector, 0x08..=0x0F | 0x70..=0x77) {
+                        machine.devices_mut().pic.eoi();
+                        report.interrupts_serviced += 1;
                     }
                     report.bios_calls += 1;
                     // Trace the first calls: the FreeDOS boot sector prints
@@ -1859,6 +1912,23 @@ fn run_freedos_in_world(
                             break;
                         }
                         continue;
+                    }
+                    // Stub-firmware world: the 8259 pair owns the legacy
+                    // vectors, so a pending timer or keyboard request is what
+                    // wakes the guest from `hlt`.
+                    match pump_dos_interrupts(
+                        &mut vcpu,
+                        machine.devices_mut(),
+                        &mut memory,
+                        &mut keyboard_feed,
+                        &mut report,
+                    ) {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(error) => {
+                            outcome = Err(error);
+                            break;
+                        }
                     }
                     let from_apic = apic.pending_vector();
                     let vector = from_apic.unwrap_or(0x08);
