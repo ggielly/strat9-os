@@ -134,14 +134,84 @@ pub fn tlb_ready(index: usize) -> bool {
         .map_or(false, |slot| slot.tlb_ready.load(Ordering::Acquire) != 0)
 }
 
-pub fn set_signal_pending_current() {
-    let index = current_cpu_index();
-    PERCPU[index].signal_pending.store(1, Ordering::Release);
+/// Returns `true` iff CPU `index` is online (single-CPU RISC-V: index 0).
+pub fn is_online(index: usize) -> bool {
+    index == 0
 }
 
-pub fn test_and_clear_signal_pending_current() -> bool {
+/// Number of currently online CPUs (single-CPU RISC-V).
+pub fn online_count() -> usize {
+    1
+}
+
+/// Fill `out` with online CPU indices; returns the count (single-CPU RISC-V).
+pub fn online_cpu_indices(out: &mut [usize]) -> usize {
+    if out.is_empty() {
+        0
+    } else {
+        out[0] = 0;
+        1
+    }
+}
+
+#[inline]
+const fn encode_signal_hint(task_id: u64) -> u64 {
+    (task_id << 1) | 1
+}
+
+#[inline]
+const fn decode_signal_hint(word: u64) -> Option<u64> {
+    if word & 1 != 0 {
+        Some(word >> 1)
+    } else {
+        None
+    }
+}
+
+/// Set the tagged `signal_pending` hint for an explicit CPU (bounds-checked).
+pub fn set_signal_pending_for_cpu(cpu: usize, task_id: u64) {
+    if let Some(slot) = PERCPU.get(cpu) {
+        slot.signal_pending
+            .store(encode_signal_hint(task_id), Ordering::Release);
+    }
+}
+
+/// Set the tagged `signal_pending` hint for the current CPU.
+pub fn set_signal_pending_current_for_task(task_id: u64) {
     let index = current_cpu_index();
-    PERCPU[index].signal_pending.swap(0, Ordering::Acquire) != 0
+    PERCPU[index]
+        .signal_pending
+        .store(encode_signal_hint(task_id), Ordering::Release);
+}
+
+/// Take and clear the tagged hint for the current CPU.
+pub fn take_signal_hint_current() -> Option<u64> {
+    let index = current_cpu_index();
+    decode_signal_hint(PERCPU[index].signal_pending.swap(0, Ordering::AcqRel))
+}
+
+/// Restore a taken hint, only if the slot is still empty.
+pub fn restore_signal_hint_current(task_id: u64) {
+    let index = current_cpu_index();
+    let _ = PERCPU[index].signal_pending.compare_exchange(
+        0,
+        encode_signal_hint(task_id),
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    );
+}
+
+/// Clear any signal hint referring to `task_id` on every CPU.
+pub fn clear_signal_hint_for_task(task_id: u64) {
+    let packed = encode_signal_hint(task_id);
+    for slot in PERCPU.iter() {
+        let _ = slot.signal_pending.compare_exchange(
+            packed,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
 }
 
 fn activate_cpu(cpu_index: usize) -> usize {

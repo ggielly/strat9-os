@@ -101,6 +101,9 @@ pub fn exit_current_task(exit_code: i32) -> ! {
                     p
                 };
                 let _ = sched.clear_task_wake_deadline_locked(current_id);
+                // Drop any per-CPU signal hint still tagged with this task so
+                // it cannot force the scheduler-lock fallback on another CPU.
+                crate::arch::percpu::clear_signal_hint_for_task(current_id.as_u64());
                 current.set_state(TaskState::Dead);
                 sched.task_cpu.remove(&current_id);
                 {
@@ -1152,6 +1155,7 @@ pub fn kill_task(id: TaskId) -> bool {
             if let Some((ci, current)) = running_hit {
                 let task_pid = current.pid;
                 let _ = sched.clear_task_wake_deadline_locked(id);
+                crate::arch::percpu::clear_signal_hint_for_task(id.as_u64());
                 current.set_state(TaskState::Dead);
                 sched.task_cpu.remove(&id);
                 // Single identity write: unregister + reparent + remove parent.
@@ -1233,6 +1237,7 @@ pub fn kill_task(id: TaskId) -> bool {
                     let _ = sched.clear_task_wake_deadline_locked(id);
                     if let Some(task) = sched.remove_all_task_locked(id) {
                         let task_pid = task.pid;
+                        crate::arch::percpu::clear_signal_hint_for_task(id.as_u64());
                         task.set_state(TaskState::Dead);
                         cleanup_task_resources(&task);
                         sched.task_cpu.remove(&id);
@@ -1266,6 +1271,7 @@ pub fn kill_task(id: TaskId) -> bool {
                     lockdep_release(LockRank::Blocked);
                     let task_pid = task.pid;
                     let _ = sched.clear_task_wake_deadline_locked(id);
+                    crate::arch::percpu::clear_signal_hint_for_task(id.as_u64());
                     task.set_state(TaskState::Dead);
                     cleanup_task_resources(&task);
                     let _ = sched.remove_all_task_locked(id);

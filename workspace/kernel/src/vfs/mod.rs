@@ -1395,7 +1395,7 @@ pub fn init() {
         let host = crate::arch::cpuid::host();
         // VFS initializes before SMP/percpu registration is complete.
         // Expose at least 1 CPU (BSP) instead of showing 0.
-        let cpu_count = crate::arch::percpu::get_cpu_count().max(1);
+        let cpu_count = crate::arch::percpu::online_count().max(1);
 
         let count_s = Box::leak(
             alloc::format!("{}\n", cpu_count)

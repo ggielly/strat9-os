@@ -46,15 +46,19 @@ use crate::{fmt::log_u32, log};
 pub const CAPACITY: usize = 64;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum StrateHealth {
+pub(crate) enum StrateHealth {
     Ready,
     Failed,
 }
 
 /// One child process under supervision.
 pub struct SupervisedChild {
-    name: String,
-    pid: u64,
+    pub(crate) name: String,
+    pub(crate) pid: u64,
+    /// SID of the owning silo, reused as reserved SID set on reload.
+    pub(crate) sid: u32,
+    /// Name of the silo this strate belongs to, used by `reload` and shutdown.
+    pub(crate) silo: String,
     /// Silo handle, kept so a crashed strate can be restarted in place.
     silo_handle: usize,
     /// Module handle of this strate.
@@ -64,8 +68,15 @@ pub struct SupervisedChild {
     /// several strates would start the last attached binary instead of the
     /// one that crashed.
     module_handle: usize,
-    health: StrateHealth,
-    restart_count: u32,
+    /// True when the owning silo was configured with `admin = true`.
+    ///
+    /// `/srv/init` uses this to approximate authorization for mutating
+    /// commands; a real capability check needs a kernel pid→silo query.
+    pub(crate) admin: bool,
+    pub(crate) health: StrateHealth,
+    pub(crate) restart_count: u32,
+    /// Last observed exit status, reported by the `status` command.
+    pub(crate) last_exit: Option<ExitKind>,
     /// When the current instance was started, used for the stability reset.
     spawned_at_ms: u64,
     /// Timestamps (ms) of the restarts recorded in the current window.
@@ -80,8 +91,11 @@ impl SupervisedChild {
     fn new(
         name: &str,
         pid: u64,
+        sid: u32,
         silo_handle: usize,
         module_handle: usize,
+        silo: &str,
+        admin: bool,
         restart: RestartPolicy,
         critical: bool,
         max_restarts: u8,
@@ -89,10 +103,14 @@ impl SupervisedChild {
         Self {
             name: String::from(name),
             pid,
+            sid,
+            silo: String::from(silo),
             silo_handle,
             module_handle,
+            admin,
             health: StrateHealth::Ready,
             restart_count: 0,
+            last_exit: None,
             spawned_at_ms: now_ms(),
             restart_times: Vec::new(),
             backoff: Backoff::new(),
@@ -111,8 +129,11 @@ pub fn register(
     children: &mut Vec<SupervisedChild>,
     name: &str,
     pid: usize,
+    sid: u32,
     silo_handle: usize,
     module_handle: usize,
+    silo: &str,
+    admin: bool,
     restart: RestartPolicy,
     critical: bool,
     max_restarts: u8,
@@ -121,8 +142,11 @@ pub fn register(
         children.push(SupervisedChild::new(
             name,
             pid as u64,
+            sid,
             silo_handle,
             module_handle,
+            silo,
+            admin,
             restart,
             critical,
             max_restarts,
@@ -149,7 +173,7 @@ fn now_ms() -> u64 {
 }
 
 /// Sleeps for `ms` milliseconds.
-fn sleep_ms(ms: u32) {
+pub(crate) fn sleep_ms(ms: u32) {
     let req = TimeSpec {
         tv_sec: (ms / 1000) as i64,
         tv_nsec: ((ms % 1000) as i64) * 1_000_000,
@@ -196,6 +220,8 @@ fn handle_exit(children: &mut [SupervisedChild], pid: u64, status: i32) {
         log("' changed state (not an exit), ignored\n");
         return;
     }
+
+    child.last_exit = Some(kind);
 
     log("[init] Supervisor: strate '");
     log(&child.name);
@@ -255,11 +281,7 @@ fn handle_exit(children: &mut [SupervisedChild], pid: u64, status: i32) {
     // single `module_id` slot, so the last attach wins) and start it under
     // its own instance name. The replacement strate re-binds its namespace
     // path; the mount takeover in `ipc_bind_port` makes that atomic.
-    let restarted = match call::silo_attach_module(child.silo_handle, child.module_handle) {
-        Ok(_) => call::silo_start_named(child.silo_handle, &child.name),
-        Err(e) => Err(e),
-    };
-    match restarted {
+    match relaunch(child) {
         Ok(new_pid) => {
             child.pid = new_pid as u64;
             child.health = StrateHealth::Ready;
@@ -271,27 +293,102 @@ fn handle_exit(children: &mut [SupervisedChild], pid: u64, status: i32) {
             log("\n");
         }
         Err(e) => {
+            child.health = StrateHealth::Failed;
             log("[init] Supervisor: restart failed: ");
-            log(e.name());
+            log(e);
             log("\n");
         }
     }
 }
 
-/// Blocking watch loop. Never returns: `init` is PID 1.
-pub fn run(mut children: Vec<SupervisedChild>) -> ! {
+/// Re-attaches a child's own module and starts it under its instance name.
+fn relaunch(child: &mut SupervisedChild) -> Result<usize, &'static str> {
+    call::silo_attach_module(child.silo_handle, child.module_handle).map_err(|e| e.name())?;
+    call::silo_start_named(child.silo_handle, &child.name).map_err(|e| e.name())
+}
+
+/// Starts a supervised child that is currently down.
+pub fn start_child(children: &mut [SupervisedChild], name: &str) -> Result<usize, &'static str> {
+    let Some(child) = children.iter_mut().find(|c| c.name == name) else {
+        return Err("no such strate");
+    };
+    if child.pid != 0 {
+        return Err("already running");
+    }
+    match relaunch(child) {
+        Ok(pid) => {
+            child.pid = pid as u64;
+            child.health = StrateHealth::Ready;
+            child.spawned_at_ms = now_ms();
+            Ok(pid)
+        }
+        Err(e) => {
+            child.health = StrateHealth::Failed;
+            Err(e)
+        }
+    }
+}
+
+/// Stops one child: `silo_stop`, a 500 ms grace window, then `silo_kill`.
+fn stop_silo_child(child: &mut SupervisedChild) {
+    if child.pid != 0 {
+        let _ = call::silo_stop(child.silo_handle);
+        sleep_ms(500);
+        let _ = call::silo_kill(child.silo_handle);
+    }
+    // Zeroing the pid keeps the restart policy from reviving an operator stop
+    // and makes the `wasm app failed`/`run` reaper ignore the pending zombie
+    // instead of restarting it.
+    child.pid = 0;
+    child.health = StrateHealth::Failed;
+}
+
+/// Stops the child named `name`, if supervised.
+pub fn stop_child(children: &mut [SupervisedChild], name: &str) -> Result<(), &'static str> {
+    let Some(child) = children.iter_mut().find(|c| c.name == name) else {
+        return Err("no such strate");
+    };
+    stop_silo_child(child);
+    Ok(())
+}
+
+/// Stops every child belonging to `silo_name`.
+pub fn stop_silo(children: &mut [SupervisedChild], silo_name: &str) {
+    for child in children.iter_mut().filter(|c| c.silo == silo_name) {
+        stop_silo_child(child);
+    }
+}
+
+/// Stops every child, following the plan order in reverse.
+pub fn shutdown_all(children: &mut [SupervisedChild], order: &[String]) {
+    for silo in order.iter().rev() {
+        stop_silo(children, silo);
+    }
+}
+
+/// Supervisor loop multiplexing reaping and `/srv/init` requests.
+///
+/// The control port is drained first so an operator can act between reaps,
+/// then `waitpid` polls non-blocking, then the loop sleeps 5 ms when idle.
+pub fn run(
+    mut children: Vec<SupervisedChild>,
+    control_port: usize,
+    mut plan_order: Vec<String>,
+) -> ! {
     log("[init] Supervisor: entering watch loop\n");
     loop {
-        let mut wstatus: i32 = 0;
-        // Optimal blocking waitpid (0 instead of WNOHANG) : blocks without
-        // CPU-spinning or sched_yield.
-        match call::waitpid(-1, Some(&mut wstatus), 0) {
-            Ok(pid) if pid > 0 => handle_exit(&mut children, pid as u64, wstatus),
-            _ => {
-                // If waitpid fails or is interrupted, yield briefly to avoid
-                // hard lockups; sleeping is the default.
-                let _ = call::sched_yield();
+        if control_port != 0 {
+            let mut msg = strat9_syscall::data::IpcMessage::new(0);
+            while call::ipc_try_recv(control_port, &mut msg).is_ok() {
+                crate::control::handle(&mut children, &mut plan_order, &msg);
+                msg = strat9_syscall::data::IpcMessage::new(0);
             }
+        }
+
+        let mut wstatus: i32 = 0;
+        match call::waitpid(-1, Some(&mut wstatus), call::WNOHANG) {
+            Ok(pid) if pid > 0 => handle_exit(&mut children, pid as u64, wstatus),
+            _ => sleep_ms(5),
         }
     }
 }

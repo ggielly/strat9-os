@@ -128,12 +128,13 @@ impl ProcScheme {
     #[cfg(target_arch = "x86_64")]
     fn get_cpuinfo(&self) -> String {
         let mut output = String::new();
-        let cpu_count = crate::arch::percpu::get_cpu_count();
+        let mut indices = [0usize; crate::arch::percpu::MAX_CPUS];
+        let n = crate::arch::percpu::online_cpu_indices(&mut indices);
         let host = crate::arch::cpuid::host();
         let flags = crate::arch::cpuid::features_to_flags_string(host.features);
         let has_fpu = host.features.contains(crate::arch::cpuid::CpuFeatures::FPU);
 
-        for i in 0..cpu_count {
+        for &i in &indices[..n] {
             let _ = writeln!(output, "processor\t: {}", i);
             let _ = writeln!(output, "vendor_id\t: {}", host.vendor_string());
             let _ = writeln!(output, "cpu family\t: {}", host.family);

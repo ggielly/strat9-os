@@ -136,7 +136,6 @@ struct StrateRowData {
 }
 
 struct TopSnapshot {
-    cpu_count: usize,
     total_pages: usize,
     used_pages: usize,
     tasks: Vec<TaskRowData>,
@@ -239,7 +238,6 @@ fn strates_to_rows(mut strates: Vec<(String, Vec<String>)>) -> Vec<StrateRowData
 }
 
 fn collect_snapshot() -> TopSnapshot {
-    let cpu_count = crate::arch::percpu::cpu_count();
     let (total_pages, used_pages) = {
         let guard = crate::memory::buddy::get_allocator().lock();
         guard.as_ref().map(|a| a.page_totals()).unwrap_or((0, 0))
@@ -291,7 +289,6 @@ fn collect_snapshot() -> TopSnapshot {
     });
 
     TopSnapshot {
-        cpu_count,
         total_pages,
         used_pages,
         tasks,
@@ -317,12 +314,13 @@ fn compute_cpu_usage_window(
     prev: &crate::process::CpuUsageSnapshot,
     now: &crate::process::CpuUsageSnapshot,
 ) -> CpuUsageWindow {
-    let cpu_count = now.cpu_count.min(crate::arch::percpu::MAX_CPUS);
+    let mut idxs = [0usize; crate::arch::percpu::MAX_CPUS];
+    let n = crate::arch::percpu::online_cpu_indices(&mut idxs);
     let mut ratios = [0.0f64; crate::arch::percpu::MAX_CPUS];
     let mut sum = 0.0;
     let mut window_ticks = 0u64;
 
-    for i in 0..cpu_count {
+    for &i in &idxs[..n] {
         let delta_total = now.total_ticks[i].saturating_sub(prev.total_ticks[i]);
         let delta_idle = now.idle_ticks[i].saturating_sub(prev.idle_ticks[i]);
         window_ticks = window_ticks.max(delta_total);
@@ -338,10 +336,10 @@ fn compute_cpu_usage_window(
 
     CpuUsageWindow {
         per_cpu_ratio: ratios,
-        avg_ratio: if cpu_count == 0 {
+        avg_ratio: if n == 0 {
             0.0
         } else {
-            (sum / cpu_count as f64).clamp(0.0, 1.0)
+            (sum / n as f64).clamp(0.0, 1.0)
         },
         window_ticks,
     }
@@ -364,7 +362,8 @@ fn compute_scheduler_metrics_window(
     prev: &crate::process::SchedulerMetricsSnapshot,
     now: &crate::process::SchedulerMetricsSnapshot,
 ) -> SchedulerMetricsWindow {
-    let cpu_count = now.cpu_count.min(crate::arch::percpu::MAX_CPUS);
+    let mut idxs = [0usize; crate::arch::percpu::MAX_CPUS];
+    let n = crate::arch::percpu::online_cpu_indices(&mut idxs);
     let mut rt_delta = 0u64;
     let mut fair_delta = 0u64;
     let mut idle_delta = 0u64;
@@ -374,7 +373,7 @@ fn compute_scheduler_metrics_window(
     let mut steal_out_delta = 0u64;
     let mut deferred_raised_delta = 0u32;
     let mut deferred_processed_delta = 0u32;
-    for i in 0..cpu_count {
+    for &i in &idxs[..n] {
         rt_delta = rt_delta
             .saturating_add(now.rt_runtime_ticks[i].saturating_sub(prev.rt_runtime_ticks[i]));
         fair_delta = fair_delta
@@ -797,7 +796,9 @@ fn render_cpu_panel(frame: &mut ratatui::Frame<'_>, view: &View<'_>, area: ratat
         return;
     }
 
-    let gauges = view.snapshot.cpu_count.min(MAX_CPU_GAUGES);
+    let mut idxs = [0usize; crate::arch::percpu::MAX_CPUS];
+    let online = crate::arch::percpu::online_cpu_indices(&mut idxs);
+    let gauges = online.min(MAX_CPU_GAUGES);
     // One row for the history sparkline, the rest for per-CPU bars.
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -823,9 +824,9 @@ fn render_cpu_panel(frame: &mut ratatui::Frame<'_>, view: &View<'_>, area: ratat
         .constraints(constraints)
         .split(rows[1]);
 
-    for i in 0..gauges {
+    for (slot, &i) in idxs[..gauges].iter().enumerate() {
         let ratio = view.cpu.per_cpu_ratio[i];
-        let row = cpu_rows[i];
+        let row = cpu_rows[slot];
         // Label on the left, bar on the right: a Gauge's own title would steal
         // the only line available for the bar.
         let split = Layout::default()
@@ -858,7 +859,7 @@ fn render_cpu_panel(frame: &mut ratatui::Frame<'_>, view: &View<'_>, area: ratat
         if split[3].width > 2 {
             frame.render_widget(
                 Sparkline::default()
-                    .data(view.history.cpu_series(i).iter().copied())
+                    .data(view.history.cpu_series(slot).iter().copied())
                     .max(100)
                     .bar_set(SPARK_SET)
                     .style(Style::default().fg(load_color(ratio))),
@@ -910,7 +911,6 @@ fn render_sched_panel(
 ) {
     let s = &view.snapshot.scheduler;
     let w = view.sched;
-    let cpu_count = s.cpu_count.min(crate::arch::percpu::MAX_CPUS);
     let mut lines: Vec<Line> = Vec::new();
 
     lines.push(Line::from(vec![
@@ -952,7 +952,9 @@ fn render_sched_panel(
     // One compact line per CPU, so a 4+ CPU box is fully visible (the previous
     // implementation hard-coded cpu0 and cpu1).
     let mut cpu_line: Vec<Span> = Vec::new();
-    for i in 0..cpu_count {
+    let mut idxs = [0usize; crate::arch::percpu::MAX_CPUS];
+    let n = crate::arch::percpu::online_cpu_indices(&mut idxs);
+    for &i in &idxs[..n] {
         cpu_line.push(Span::styled(
             format!(
                 "c{}:{}/{}/{}{} ",
@@ -1393,10 +1395,18 @@ pub fn cmd_top(_args: &[alloc::string::String]) -> Result<(), ShellError> {
         });
 
         let mem_pct = pct_u16(memory_ratio(&snapshot)) as u64;
+        // History series are stored densely by online order, so map the sparse
+        // per-CPU ratios into that order before pushing.
+        let mut idxs = [0usize; crate::arch::percpu::MAX_CPUS];
+        let n = crate::arch::percpu::online_cpu_indices(&mut idxs);
+        let mut online_ratios = [0.0f64; crate::arch::percpu::MAX_CPUS];
+        for (slot, &i) in idxs[..n].iter().enumerate() {
+            online_ratios[slot] = cpu_window.per_cpu_ratio[i];
+        }
         history.push(
             pct_u16(cpu_window.avg_ratio) as u64,
             mem_pct,
-            &cpu_window.per_cpu_ratio[..snapshot.cpu_count.min(crate::arch::percpu::MAX_CPUS)],
+            &online_ratios[..n],
         );
 
         tree.refresh(&snapshot);

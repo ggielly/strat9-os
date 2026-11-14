@@ -706,20 +706,25 @@ pub fn send_signal(
     pending.add(signal);
 
     // Fast-path hint: if the signal targets the task currently running on
-    // this CPU, set the per-CPU `signal_pending` flag so the syscall
+    // this CPU, set the tagged per-CPU `signal_pending` hint so the syscall
     // dispatcher can cheaply detect it via `gs:[...]` without taking the
-    // scheduler lock. For a task on another CPU, send a reschedule IPI so it
-    // is not delayed until its next syscall. A spurious IPI is harmless
-    // (the handler is idempotent); `last_cpu` may be stale, so treat any
-    // unexpected value as "no target" rather than panicking.
+    // scheduler lock. For a task living on another (online) CPU, tag that
+    // CPU's hint and send a reschedule IPI so it is not delayed until its
+    // next syscall. A spurious IPI is harmless (the handler is idempotent);
+    // `last_cpu` may be stale, so treat any unexpected value as "no target"
+    // rather than panicking.
+    let target_id = target.as_u64();
     if crate::process::current_task_id() == Some(target) {
-        crate::arch::percpu::set_signal_pending_current();
+        crate::arch::percpu::set_signal_pending_current_for_task(target_id);
     } else {
         let last = task.last_cpu.load(core::sync::atomic::Ordering::Relaxed);
         if last != usize::MAX && last != crate::arch::percpu::current_cpu_index() {
-            if crate::arch::apic::is_initialized() {
-                if let Some(apic_id) = crate::arch::percpu::apic_id_by_cpu_index(last) {
-                    crate::arch::apic::send_resched_ipi(apic_id);
+            if crate::arch::percpu::is_online(last) {
+                crate::arch::percpu::set_signal_pending_for_cpu(last, target_id);
+                if crate::arch::apic::is_initialized() {
+                    if let Some(apic_id) = crate::arch::percpu::apic_id_by_cpu_index(last) {
+                        crate::arch::apic::send_resched_ipi(apic_id);
+                    }
                 }
             }
         }

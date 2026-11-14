@@ -31,8 +31,8 @@ use alloc::{format, string::String, vec::Vec};
 
 use crate::{
     model::{
-        Diagnostic, Family, FaultPolicy, Mode, Sid, SiloDef, StrateDef, StrateKind, StrateRef,
-        SID_AUTO_SENTINEL,
+        Diagnostic, Family, FaultPolicy, Grant, Mode, Policy, Profile, ServicePath, Sha256Digest,
+        Sid, SiloDef, StrateDef, StrateKind, StrateRef, SID_AUTO_SENTINEL,
     },
     policy::RestartPolicy,
 };
@@ -42,6 +42,8 @@ use crate::{
 pub struct ParsedConfig {
     pub silos: Vec<SiloDef>,
     pub diagnostics: Vec<Diagnostic>,
+    /// The `[policy]` section (defaults when absent).
+    pub policy: Policy,
 }
 
 /// Parses the silo configuration.
@@ -52,6 +54,8 @@ pub fn parse_config(data: &str) -> ParsedConfig {
         Silo,
         /// Keys belong to the last `[[silos.strates]]` of the current silo.
         Strate,
+        /// Keys belong to the top-level `[policy]` table.
+        Policy,
         /// Keys are ignored (unknown or misplaced section).
         Ignored,
     }
@@ -102,6 +106,11 @@ pub fn parse_config(data: &str) -> ParsedConfig {
             continue;
         }
 
+        if line == "[policy]" {
+            section = Section::Policy;
+            continue;
+        }
+
         if line.starts_with('[') {
             out.diagnostics.push(Diagnostic::new(
                 line_no,
@@ -125,6 +134,34 @@ pub fn parse_config(data: &str) -> ParsedConfig {
             ));
             continue;
         };
+
+        if let Section::Policy = section {
+            match key {
+                "admin_allow" => {
+                    out.policy.admin_allow =
+                        split_list(val).into_iter().map(String::from).collect();
+                }
+                "target" => match Profile::from_name(val) {
+                    Some(profile) => out.policy.selection.profile = profile,
+                    None => out.diagnostics.push(Diagnostic::new(
+                        line_no,
+                        format!("config: unknown policy target '{}', ignored\n", val),
+                    )),
+                },
+                "disable" => {
+                    for name in split_list(val) {
+                        if !out.policy.selection.is_disabled(name) {
+                            out.policy.selection.disabled.push(String::from(name));
+                        }
+                    }
+                }
+                other => out.diagnostics.push(Diagnostic::new(
+                    line_no,
+                    format!("config: unknown policy key '{}', ignored\n", other),
+                )),
+            }
+            continue;
+        }
 
         let Some(silo) = current_silo.as_mut() else {
             out.diagnostics.push(Diagnostic::new(
@@ -170,6 +207,23 @@ pub fn parse_config(data: &str) -> ParsedConfig {
                 },
                 "critical" => silo.critical = parse_toml_bool(val),
                 "max_restarts" => silo.max_restarts = val.parse().unwrap_or(3),
+                "provides" => {
+                    silo.provides = service_list(val, line_no, "provides", &mut out.diagnostics)
+                }
+                "requires" => {
+                    silo.requires = service_list(val, line_no, "requires", &mut out.diagnostics)
+                }
+                "sha256" => match Sha256Digest::parse(val) {
+                    Some(digest) => silo.sha256 = Some(digest),
+                    None => out.diagnostics.push(Diagnostic::new(
+                        line_no,
+                        format!(
+                            "config: invalid sha256 '{}' for silo {}, ignored\n",
+                            val, silo.name
+                        ),
+                    )),
+                },
+                "grants" => silo.grants = grant_list(val, line_no, &mut out.diagnostics),
                 _ => {}
             },
             Section::Strate => {
@@ -185,11 +239,30 @@ pub fn parse_config(data: &str) -> ParsedConfig {
                                 *runtime = current_target.clone();
                             }
                         }
+                        "provides" => {
+                            strate.provides =
+                                service_list(val, line_no, "provides", &mut out.diagnostics)
+                        }
+                        "requires" => {
+                            strate.requires =
+                                service_list(val, line_no, "requires", &mut out.diagnostics)
+                        }
+                        "sha256" => match Sha256Digest::parse(val) {
+                            Some(digest) => strate.sha256 = Some(digest),
+                            None => out.diagnostics.push(Diagnostic::new(
+                                line_no,
+                                format!(
+                                    "config: invalid sha256 '{}' for strate {}, ignored\n",
+                                    val, strate.name
+                                ),
+                            )),
+                        },
+                        "grants" => strate.grants = grant_list(val, line_no, &mut out.diagnostics),
                         _ => {}
                     }
                 }
             }
-            Section::Ignored => {}
+            Section::Policy | Section::Ignored => {}
         }
     }
 
@@ -269,4 +342,57 @@ fn parse_u64_auto(s: &str) -> Option<u64> {
     } else {
         s.parse().ok()
     }
+}
+
+/// Splits a value that is either a TOML array (`["/a", "/b"]`) or a
+/// comma/space separated list into bare, unquoted tokens.
+fn split_list(raw: &str) -> Vec<&str> {
+    let raw = raw.trim();
+    let inner = raw
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(raw);
+    inner
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .map(|token| token.trim().trim_matches('"').trim_matches('\''))
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+/// Parses a list of service paths, reporting each invalid entry.
+fn service_list(
+    raw: &str,
+    line: usize,
+    key: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Vec<ServicePath> {
+    let mut out = Vec::new();
+    for token in split_list(raw) {
+        match ServicePath::parse(token) {
+            Some(path) => out.push(path),
+            None => diagnostics.push(Diagnostic::new(
+                line,
+                format!(
+                    "config: invalid service path '{}' for key '{}', ignored\n",
+                    token, key
+                ),
+            )),
+        }
+    }
+    out
+}
+
+/// Parses a list of grants, reporting each unknown/malformed entry.
+fn grant_list(raw: &str, line: usize, diagnostics: &mut Vec<Diagnostic>) -> Vec<Grant> {
+    let mut out = Vec::new();
+    for token in split_list(raw) {
+        match Grant::parse(token) {
+            Some(grant) => out.push(grant),
+            None => diagnostics.push(Diagnostic::new(
+                line,
+                format!("config: unknown grant '{}', ignored\n", token),
+            )),
+        }
+    }
+    out
 }

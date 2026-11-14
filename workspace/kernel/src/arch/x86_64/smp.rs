@@ -39,7 +39,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 use x86_64::{
     structures::paging::{Page, PageTableFlags, PhysFrame, Size4KiB},
     PhysAddr, VirtAddr,
@@ -54,8 +54,10 @@ use crate::{
 /// Physical address where the SMP trampoline is copied.
 pub const TRAMPOLINE_PHYS_ADDR: u64 = 0x8000;
 
-/// Maximum APIC ID (0..=255) addressable by the per-AP stack table.
-const MAX_APIC_IDS: usize = 256;
+/// Maximum APIC ID (0..=4095) addressable by the per-AP stack table.
+/// x2APIC IDs can exceed 255, so the table spans 16 KiB of `AtomicU64`
+/// entries (32 KiB .bss); IDs above this are simply skipped.
+const MAX_APIC_IDS: usize = 4096;
 
 /// Per-APIC-ID kernel stack top, read by the 64-bit trampoline stub.
 ///
@@ -283,13 +285,41 @@ smp_trampoline_64:
     # Resolve this AP's kernel stack from the per-APIC stack table *before*
     # using the stack. RSP is not yet valid here (the AP is in a reset-like
     # state), so RBX is preserved across CPUID in R8 rather than by push/pop.
-    mov r8, rbx
+    #
+    # APIC ID may be up to 32 bits on x2APIC systems: prefer the x2APIC ID
+    # from leaf 0x1F/0xB (EDX) and fall back to leaf 1 EBX[31:24] otherwise.
+    mov r8, rbx                     # preserve RBX across CPUID
+    xor eax, eax
+    cpuid                           # EAX = max basic CPUID leaf
+    cmp eax, 0x1f
+    jae .Lapic_leaf_1f
+    cmp eax, 0x0b
+    jae .Lapic_leaf_0b
+    jmp .Lapic_leaf_1
+.Lapic_leaf_1f:
+    mov eax, 0x1f
+    xor ecx, ecx
+    cpuid                           # EDX = x2APIC ID
+    test edx, edx
+    jnz .Lapic_have_id
+    jmp .Lapic_leaf_1
+.Lapic_leaf_0b:
+    mov eax, 0x0b
+    xor ecx, ecx
+    cpuid                           # EDX = x2APIC ID
+    test edx, edx
+    jnz .Lapic_have_id
+    jmp .Lapic_leaf_1
+.Lapic_leaf_1:
     mov eax, 1
+    xor ecx, ecx
     cpuid
-    mov ecx, ebx                    # EBX[31:24] = initial APIC ID
-    mov rbx, r8
-    shr ecx, 24
-    and ecx, 0xff
+    mov edx, ebx                    # EBX[31:24] = initial APIC ID
+    shr edx, 24
+.Lapic_have_id:
+    mov rbx, r8                     # restore RBX
+    mov ecx, edx                    # ECX = APIC ID
+    and ecx, 0xfff                  # mask to table index range
     mov rsp, [SMP_VAR_ADDR + 16]    # table base (virtual address)
     mov rsp, [rsp + rcx*8]          # AP_STACK_TOPS[apic_id]
     test rsp, rsp
@@ -590,10 +620,12 @@ fn rendezvous_barrier() {
 
 /// Boot Application Processors.
 ///
-/// AP kernel stack frames are allocated from the buddy allocator during this
-/// function and intentionally leaked (never freed). The allocation happens
-/// once at boot while only the BSP is online, so there is no lock contention
-/// and no risk of heap exhaustion under concurrent pressure.
+/// AP kernel stacks are allocated from the vmalloc arena during this function
+/// and intentionally leaked (never freed): the guard page's backing frame is
+/// released by `unmap_page`, while the remaining pages stay mapped forever.
+/// The allocation happens once at boot while only the BSP is online, so there
+/// is no lock contention and no risk of heap exhaustion under concurrent
+/// pressure.
 ///
 /// If CPU hotplug is added in the future, stack allocation must be moved to
 /// a sleepable context (e.g. `Mutex`-protected) to avoid heap allocation
@@ -628,6 +660,15 @@ pub fn init() -> Result<usize, &'static str> {
     let mut max_apic_id: usize = 0;
     for i in 0..madt_info.local_apic_count {
         if let Some(ref entry) = madt_info.local_apics[i] {
+            let apic_id = entry.apic_id as usize;
+            if apic_id >= MAX_APIC_IDS {
+                log::warn!(
+                    "SMP: APIC id {} exceeds MAX_APIC_IDS ({}), skipping",
+                    apic_id,
+                    MAX_APIC_IDS
+                );
+                continue;
+            }
             crate::serial_println!(
                 "[smp]   APIC[{}]: id={} proc={} flags={:#x} {}",
                 i,
@@ -640,11 +681,12 @@ pub fn init() -> Result<usize, &'static str> {
                     ""
                 },
             );
-            max_apic_id = max_apic_id.max(entry.apic_id as usize);
+            max_apic_id = max_apic_id.max(apic_id);
         }
     }
+    crate::serial_println!("[smp] init: max APIC id seen = {}", max_apic_id);
 
-    let mut stack_tops: Vec<u64> = vec![0; max_apic_id + 1];
+    let mut stack_tops = [0u64; MAX_APIC_IDS];
     let cr3_phys = crate::memory::paging::kernel_l4_phys().as_u64();
     let mut targets: Vec<u32> = Vec::new();
     let mut expected: usize = 1;
@@ -659,35 +701,72 @@ pub fn init() -> Result<usize, &'static str> {
             continue;
         }
 
-        // Allocate AP kernel stack from the buddy allocator.
-        let stack_size = crate::process::task::Task::DEFAULT_STACK_SIZE;
-        let pages = (stack_size + 4095) / 4096;
-        let order = pages.next_power_of_two().trailing_zeros() as u8;
-        let frame = crate::sync::with_irqs_disabled(|token| {
-            crate::memory::allocate_phys_contiguous(token, order)
-        })
-        .map_err(|_| "SMP: failed to allocate AP stack from buddy")?;
-        let stack_phys = frame.start_address.as_u64();
-        let stack_virt = crate::memory::phys_to_virt(stack_phys);
-
-        // Zero the stack.
-        unsafe { core::ptr::write_bytes(stack_virt as *mut u8, 0, stack_size) };
-
-        // Stack grows downward: top = base_virt + size.
-        let stack_top = stack_virt.saturating_add(stack_size as u64);
-
-        if apic_id as usize >= stack_tops.len() {
-            log::warn!("SMP: APIC id {} out of stack array range", apic_id);
+        // Skip IDs the per-AP stack table cannot address: no stack slot, no
+        // SIPI. Only allocate after this check to avoid leaking a stack for an
+        // AP we can never boot.
+        if apic_id as usize >= MAX_APIC_IDS {
+            log::warn!(
+                "SMP: APIC id {} exceeds MAX_APIC_IDS ({}), skipping AP",
+                apic_id,
+                MAX_APIC_IDS
+            );
             continue;
         }
+
+        // Allocate the AP kernel stack from the vmalloc arena. vmalloc gives a
+        // virtually contiguous, page-by-page mapping, which is what lets us
+        // leave a non-present guard page below the usable stack: an overflow
+        // then faults instead of silently corrupting the physically adjacent
+        // frames that a buddy/HHDM stack would touch. Physical contiguity is
+        // unnecessary because the stack is only ever reached through its
+        // virtual mapping, and the range lives in the shared kernel L4 subtree
+        // (mapped NX, which is fine for a data stack).
+        let stack_size = crate::process::task::Task::DEFAULT_STACK_SIZE;
+        let total = stack_size + 4096;
+        let raw = crate::sync::with_irqs_disabled(|token| {
+            crate::memory::allocate_kernel_virtual(total, token)
+        })
+        .map_err(|_| "SMP: failed to allocate AP stack from vmalloc")?;
+
+        // The first page is the guard: unmap it so an overflow past the bottom
+        // of the stack raises a page fault rather than touching live memory.
+        // `unmap_page` releases the guard page's backing frame; the rest of the
+        // range stays mapped forever (the stack is intentionally leaked).
+        let guard_page = Page::<Size4KiB>::containing_address(VirtAddr::new(raw as u64));
+        crate::memory::paging::unmap_page(guard_page)
+            .map_err(|_| "SMP: failed to unmap AP stack guard page")?;
+
+        // The usable stack sits directly above the guard page and grows
+        // downward toward it.
+        let stack_base = raw as u64 + 4096;
+        let stack_top = stack_base + stack_size as u64;
+
+        // Zero only the usable range; the guard page is already unmapped.
+        unsafe { core::ptr::write_bytes(stack_base as *mut u8, 0, stack_size) };
 
         stack_tops[apic_id as usize] = stack_top;
         // Publish this AP's stack into the per-APIC table read by the 64-bit
         // stub, so a late AP can never observe another AP's stack.
         AP_STACK_TOPS[apic_id as usize].store(stack_top, Ordering::Release);
 
-        let cpu_index =
-            percpu::register_cpu(apic_id).ok_or("SMP: exceeded MAX_CPUS for per-CPU data")?;
+        // Exceeding MAX_CPUS must not abort the whole bring-up: skip this AP
+        // (no SIPI) and keep booting the remaining ones. The stack allocated
+        // above is intentionally leaked, like every other AP stack.
+        let cpu_index = match percpu::register_cpu(apic_id) {
+            Some(index) => index,
+            None => {
+                log::error!(
+                    "SMP: APIC id {} exceeds MAX_CPUS (per-CPU registration full), skipping AP",
+                    apic_id
+                );
+                crate::serial_println!(
+                    "[smp] init: APIC id {} exceeds MAX_CPUS, skipping AP",
+                    apic_id
+                );
+                AP_STACK_TOPS[apic_id as usize].store(0, Ordering::Release);
+                continue;
+            }
+        };
         percpu::set_kernel_stack_top(cpu_index, stack_top);
 
         targets.push(apic_id);
@@ -823,26 +902,48 @@ pub fn init() -> Result<usize, &'static str> {
 
     log::info!("SMP: {} cores online (expected {})", online, expected);
 
-    if online == expected {
-        if let Err(error) =
-            crate::memory::paging::set_trampoline_execution(TRAMPOLINE_PHYS_ADDR, false)
-        {
-            // A legacy boot path can provide a huge identity leaf. Never revoke
-            // execution of unrelated addresses when retiring the trampoline.
-            log::warn!("SMP: cannot retire trampoline execution: {}", error);
-        }
-    }
-
     // Publish barrier target so APs can proceed. `online` is only an upper
     // bound for the barrier: an AP that lost the boot-window race still
     // arrives here before halting, so the target is always met.
     BARRIER_TARGET.store(online, Ordering::Release);
     rendezvous_barrier();
 
+    // Retire the trampoline unconditionally once every AP has left it. A
+    // legacy boot path can provide a huge identity leaf; never revoke
+    // execution of unrelated addresses when that happens (log and tolerate).
+    if let Err(error) = crate::memory::paging::set_trampoline_execution(TRAMPOLINE_PHYS_ADDR, false)
+    {
+        log::warn!("SMP: cannot retire trampoline execution: {}", error);
+    }
+
     // Every AP has now completed its publication/revocation decision, so this
     // snapshot is final and cannot disagree with the scheduler's online view.
     let online = percpu::online_count();
     Ok(online)
+}
+
+/// Read this CPU's APIC ID via CPUID, mirroring the trampoline stub.
+///
+/// Prefer the 32-bit x2APIC ID from leaf 0x1F (if supported) or 0xB (EDX,
+/// subleaf 0), falling back to leaf 1 EBX[31:24]. Must not use
+/// `apic::lapic_id()` before `apic::init_ap()`: x2APIC MSRs may still be
+/// disabled on the AP at this point.
+fn read_apic_id_cpuid() -> u32 {
+    use core::arch::x86_64::{__cpuid, __cpuid_count};
+
+    let max_leaf = unsafe { __cpuid(0) }.eax;
+    if max_leaf >= 0x1F {
+        let id = unsafe { __cpuid_count(0x1F, 0) }.edx;
+        if id != 0 {
+            return id;
+        }
+    } else if max_leaf >= 0xB {
+        let id = unsafe { __cpuid_count(0xB, 0) }.edx;
+        if id != 0 {
+            return id;
+        }
+    }
+    unsafe { __cpuid(1) }.ebx >> 24
 }
 
 /// First Rust function executed on APs after the trampoline.
@@ -856,22 +957,7 @@ pub extern "C" fn smp_main() -> ! {
     let apic_id: u32;
     {
         crate::serial_force_println!("[smp][ap] entered smp_main");
-        // CPUID leaf 1 EBX[31:24] = initial APIC ID.
-        // rbx is LLVM-reserved, so save/restore it manually.
-        let apic_id_raw: u32;
-        unsafe {
-            core::arch::asm!(
-                "push rbx",
-                "cpuid",
-                "mov {val:e}, ebx",
-                "pop rbx",
-                val = out(reg) apic_id_raw,
-                in("eax") 1u32,
-                out("ecx") _,
-                out("edx") _,
-            );
-        }
-        apic_id = apic_id_raw >> 24;
+        apic_id = read_apic_id_cpuid();
         crate::serial_force_println!("[smp][ap] cpuid apic_id={}", apic_id);
     }
 

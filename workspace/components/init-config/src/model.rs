@@ -27,9 +27,9 @@
 //! `SiloMode`) are deliberately **not** referenced: this crate stays free of
 //! `strat9-syscall` so it can be unit tested on the host.
 
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{format, string::String, vec, vec::Vec};
 
-use crate::policy::RestartPolicy;
+use crate::{policy::RestartPolicy, sha256};
 
 /// `sid` value the shipped configuration uses to request automatic allocation.
 ///
@@ -78,6 +78,317 @@ impl Mode {
     pub fn parse_octal(s: &str) -> Option<Mode> {
         let trimmed = s.strip_prefix("0o").unwrap_or(s);
         u16::from_str_radix(trimmed, 8).ok().map(Mode)
+    }
+}
+
+/// A service endpoint path published or consumed through the dependency graph.
+///
+/// It is intentionally a thin wrapper around the raw string: the boot
+/// configuration only guarantees a small, filesystem-like shape (absolute,
+/// non-empty, no whitespace, bounded length).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ServicePath(pub String);
+
+impl ServicePath {
+    /// Maximum accepted length in bytes.
+    pub const MAX_LEN: usize = 128;
+
+    /// Parses and validates a service path, rejecting empty, relative,
+    /// whitespace-containing or over-long values.
+    pub fn parse(s: &str) -> Option<ServicePath> {
+        if s.is_empty() || s.len() > Self::MAX_LEN {
+            return None;
+        }
+        if !s.starts_with('/') || s.chars().any(|c| c.is_whitespace()) {
+            return None;
+        }
+        Some(ServicePath(String::from(s)))
+    }
+
+    /// The raw path text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A SHA-256 digest declared for a strate binary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sha256Digest([u8; 32]);
+
+impl Sha256Digest {
+    /// Parses exactly 64 hexadecimal characters (either case).
+    pub fn parse(s: &str) -> Option<Sha256Digest> {
+        if s.len() != 64 {
+            return None;
+        }
+        let mut bytes = [0u8; 32];
+        let raw = s.as_bytes();
+        for i in 0..32 {
+            let hi = hex_val(raw[i * 2])?;
+            let lo = hex_val(raw[i * 2 + 1])?;
+            bytes[i] = (hi << 4) | lo;
+        }
+        Some(Sha256Digest(bytes))
+    }
+
+    /// The digest bytes.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Lowercase hexadecimal representation.
+    pub fn as_str(&self) -> String {
+        sha256::hex(&self.0)
+    }
+
+    /// True when the digest of `bytes` equals this declared digest.
+    pub fn matches(&self, bytes: &[u8]) -> bool {
+        sha256::sha256(bytes) == self.0
+    }
+}
+
+fn hex_val(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// PCI address in `bb:dd.f` hexadecimal form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PciAddress {
+    pub bus: u8,
+    pub device: u8,
+    pub function: u8,
+}
+
+impl PciAddress {
+    /// Parses `bb:dd.f` (hex bus, hex device, hex function).
+    pub fn parse(s: &str) -> Option<PciAddress> {
+        let (bus, rest) = s.split_once(':')?;
+        let (device, function) = rest.split_once('.')?;
+        let bus = u8::from_str_radix(bus, 16).ok()?;
+        let device = u8::from_str_radix(device, 16).ok()?;
+        let function = u8::from_str_radix(function, 16).ok()?;
+        if device > 0x1f || function > 0x07 {
+            return None;
+        }
+        Some(PciAddress {
+            bus,
+            device,
+            function,
+        })
+    }
+}
+
+impl core::fmt::Display for PciAddress {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:02x}:{:02x}.{}", self.bus, self.device, self.function)
+    }
+}
+
+/// The resource a [`Grant`] hands to a silo.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GrantKind {
+    /// A filesystem/service path, either read-only or read-write.
+    Path { service: ServicePath, write: bool },
+    /// A hardware interrupt line.
+    Irq(u32),
+    /// A PCI function.
+    Pci(PciAddress),
+    /// A DMA byte budget.
+    Dma(u64),
+}
+
+/// One resource grant declared on a silo or strate table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Grant {
+    pub kind: GrantKind,
+}
+
+impl Grant {
+    /// Parses one grant token.
+    ///
+    /// Accepted forms: `path:/abs:ro`, `path:/abs:rw`, `/abs` (read-only),
+    /// `/abs:rw`, `irq:<n>`, `pci:<bb:dd.f>`, `dma:<size>` where `<size>` is a
+    /// bare byte count or a `K`/`M`/`G` suffixed value. Returns `None` for an
+    /// unknown prefix or malformed value so the parser can emit a diagnostic.
+    pub fn parse(token: &str) -> Option<Grant> {
+        let token = token.trim();
+        if let Some(rest) = token.strip_prefix("irq:") {
+            return rest.parse::<u32>().ok().map(|n| Grant {
+                kind: GrantKind::Irq(n),
+            });
+        }
+        if let Some(rest) = token.strip_prefix("pci:") {
+            return PciAddress::parse(rest).map(|a| Grant {
+                kind: GrantKind::Pci(a),
+            });
+        }
+        if let Some(rest) = token.strip_prefix("dma:") {
+            return parse_size(rest).map(|n| Grant {
+                kind: GrantKind::Dma(n),
+            });
+        }
+        if let Some(rest) = token.strip_prefix("path:") {
+            return parse_path_grant(rest);
+        }
+        if token.starts_with('/') {
+            return parse_path_grant(token);
+        }
+        None
+    }
+
+    /// Canonical textual form, used in diagnostics.
+    pub fn as_str(&self) -> String {
+        match &self.kind {
+            GrantKind::Path { service, write } => {
+                format!(
+                    "path:{}:{}",
+                    service.as_str(),
+                    if *write { "rw" } else { "ro" }
+                )
+            }
+            GrantKind::Irq(n) => format!("irq:{}", n),
+            GrantKind::Pci(a) => format!("pci:{}", a),
+            GrantKind::Dma(n) => format!("dma:{}", n),
+        }
+    }
+}
+
+fn parse_path_grant(s: &str) -> Option<Grant> {
+    let (path, write) = if let Some(p) = s.strip_suffix(":rw") {
+        (p, true)
+    } else if let Some(p) = s.strip_suffix(":ro") {
+        (p, false)
+    } else {
+        (s, false)
+    };
+    ServicePath::parse(path).map(|service| Grant {
+        kind: GrantKind::Path { service, write },
+    })
+}
+
+/// Parses a size with an optional `K`/`M`/`G` (binary) suffix.
+fn parse_size(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let mut chars = s.chars();
+    let last = chars.next_back()?;
+    let (digits, multiplier) = match last {
+        'K' | 'k' => (&s[..s.len() - 1], 1024u64),
+        'M' | 'm' => (&s[..s.len() - 1], 1024u64 * 1024),
+        'G' | 'g' => (&s[..s.len() - 1], 1024u64 * 1024 * 1024),
+        _ => (s, 1u64),
+    };
+    digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(multiplier))
+}
+
+/// Boot profile selected by the target machine.
+///
+/// * `Full` — everything the configuration declares.
+/// * `Minimal` — keeps the system families `SYS`, `DRV`, `FS` and `NET`.
+/// * `Rescue` — keeps `SYS` plus the silos named in the admin allowlist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Profile {
+    #[default]
+    Full,
+    Minimal,
+    Rescue,
+}
+
+impl Profile {
+    /// Parses a profile name (case-insensitive).
+    pub fn from_name(s: &str) -> Option<Profile> {
+        match s.to_ascii_lowercase().as_str() {
+            "full" => Some(Profile::Full),
+            "minimal" => Some(Profile::Minimal),
+            "rescue" => Some(Profile::Rescue),
+            _ => None,
+        }
+    }
+
+    /// Canonical name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Profile::Full => "full",
+            Profile::Minimal => "minimal",
+            Profile::Rescue => "rescue",
+        }
+    }
+}
+
+/// Per-boot target/profile selection.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Selection {
+    pub profile: Profile,
+    /// Silo names to drop regardless of profile.
+    pub disabled: Vec<String>,
+}
+
+impl Selection {
+    /// Parses a compact command-line style selection such as
+    /// `"target=full disable=telnet,webrtc"`.
+    ///
+    /// `target=`/`profile=` set the profile; `disable=` appends a comma
+    /// separated list of silo names. An unknown token or profile is an error.
+    pub fn from_spec(spec: &str) -> Result<Selection, String> {
+        let mut selection = Selection::default();
+        for token in spec.split_whitespace() {
+            if let Some(value) = token
+                .strip_prefix("target=")
+                .or_else(|| token.strip_prefix("profile="))
+            {
+                selection.profile = Profile::from_name(value)
+                    .ok_or_else(|| format!("unknown profile '{}'", value))?;
+            } else if let Some(value) = token.strip_prefix("disable=") {
+                for name in value.split(',') {
+                    let name = name.trim();
+                    if !name.is_empty() && !selection.disabled.iter().any(|d| d == name) {
+                        selection.disabled.push(String::from(name));
+                    }
+                }
+            } else {
+                return Err(format!("unknown selection token '{}'", token));
+            }
+        }
+        Ok(selection)
+    }
+
+    /// True when `name` is explicitly disabled.
+    pub fn is_disabled(&self, name: &str) -> bool {
+        self.disabled.iter().any(|d| d == name)
+    }
+}
+
+/// Administrator allowlist shipped with the image.
+///
+/// Keeping `s9vm-vmm` here preserves the historic boot configuration: its
+/// `admin = true` silo must keep working when no `[policy]` section is given.
+pub const DEFAULT_ADMIN_ALLOW: &[&str] = &["s9vm-vmm"];
+
+/// The `[policy]` section.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Policy {
+    /// Names allowed to set `admin = true` on a SYS silo.
+    pub admin_allow: Vec<String>,
+    /// Target/profile selection.
+    pub selection: Selection,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self {
+            admin_allow: DEFAULT_ADMIN_ALLOW
+                .iter()
+                .map(|s| String::from(*s))
+                .collect(),
+            selection: Selection::default(),
+        }
     }
 }
 
@@ -288,6 +599,14 @@ pub struct StrateDef {
     /// a wasm app it names the runtime strate.
     pub target: StrateRef,
     pub kind: StrateKind,
+    /// Service paths this strate publishes.
+    pub provides: Vec<ServicePath>,
+    /// Service paths this strate consumes.
+    pub requires: Vec<ServicePath>,
+    /// Optional expected binary digest.
+    pub sha256: Option<Sha256Digest>,
+    /// Resource grants declared on this strate.
+    pub grants: Vec<Grant>,
 }
 
 impl Default for StrateDef {
@@ -298,6 +617,10 @@ impl Default for StrateDef {
             binary: String::new(),
             target: StrateRef::default(),
             kind: StrateKind::Elf,
+            provides: Vec::new(),
+            requires: Vec::new(),
+            sha256: None,
+            grants: Vec::new(),
         }
     }
 }
@@ -323,6 +646,14 @@ pub struct SiloDef {
     /// Maximum restarts admitted within the intensity window.
     pub max_restarts: u8,
     pub strates: Vec<StrateDef>,
+    /// Service paths published by the silo (aggregated with its strates).
+    pub provides: Vec<ServicePath>,
+    /// Service paths consumed by the silo (aggregated with its strates).
+    pub requires: Vec<ServicePath>,
+    /// Optional expected binary digest for the silo's main strate.
+    pub sha256: Option<Sha256Digest>,
+    /// Resource grants declared on the silo table.
+    pub grants: Vec<Grant>,
 }
 
 impl Default for SiloDef {
@@ -341,6 +672,10 @@ impl Default for SiloDef {
             critical: false,
             max_restarts: 3,
             strates: Vec::new(),
+            provides: Vec::new(),
+            requires: Vec::new(),
+            sha256: None,
+            grants: Vec::new(),
         }
     }
 }
