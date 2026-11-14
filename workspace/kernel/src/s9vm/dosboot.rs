@@ -1339,27 +1339,35 @@ fn run_device_fast_path(
 /// legacy firmware needs for `INT 08h` (timer) and `INT 0Eh` (floppy). The
 /// request is only acknowledged once the guest can take it, else it stays in
 /// the `IRR` for the next attempt.
-fn deliver_legacy_interrupt(vcpu: &mut Vcpu, devices: &mut emulate::Devices) -> Option<u8> {
+fn deliver_legacy_interrupt(
+    vcpu: &mut Vcpu,
+    devices: &mut emulate::Devices,
+) -> Result<Option<u8>, DosError> {
     if !devices.legacy_pic() || !devices.pic.has_pending() {
-        return None;
+        return Ok(None);
     }
     if vcpu.guest().rflags & (1 << 9) == 0 {
-        return None;
+        return Ok(None);
     }
     let deliverable = unsafe { vcpu.interruptibility() }
         .map(|state| state & 0b11 == 0)
         .unwrap_or(false);
     if !deliverable {
-        return None;
+        return Ok(None);
     }
     let Some(vector) = devices.pic.acknowledge() else {
-        return None;
+        return Ok(None);
     };
     // SAFETY: block loaded, guest inactive (exit handler), and the interrupt
     // is deliverable (checked above).
+    //
+    // The 8259 has already moved the request from the request register to the
+    // in-service register, so a failed injection must fail the slice: swallowing
+    // it would lose the interrupt for good and the in-service bit would block
+    // every lower-priority line, which looks like a guest that hangs in `hlt`.
     match unsafe { vcpu.inject_interrupt(vector) } {
-        Ok(()) => Some(vector),
-        Err(_) => None,
+        Ok(()) => Ok(Some(vector)),
+        Err(error) => Err(DosError::Run(error)),
     }
 }
 
@@ -1406,7 +1414,7 @@ fn pump_dos_interrupts(
     report: &mut DosReport,
 ) -> Result<bool, DosError> {
     report.scancodes_typed += service_keyboard(devices, memory, feed, bios_state);
-    if let Some(vector) = deliver_legacy_interrupt(vcpu, devices) {
+    if let Some(vector) = deliver_legacy_interrupt(vcpu, devices)? {
         report.interrupts_delivered += 1;
         // Name the first deliveries: a guest that never takes them (masked
         // line, handler missing) is otherwise indistinguishable from one that
@@ -3002,7 +3010,7 @@ fn run_freedos_in_world(
                         // Prefer the pending 8259 request (timer 0x08 or FDC
                         // 0x0E); fall back to the timer so a `yield()` with no
                         // armed time base still makes progress.
-                        if deliver_legacy_interrupt(&mut vcpu, machine.devices_mut()).is_some() {
+                        if deliver_legacy_interrupt(&mut vcpu, machine.devices_mut())?.is_some() {
                             continue;
                         }
                         if let Err(error) = unsafe { vcpu.inject_interrupt(0x08) } {
@@ -3093,7 +3101,7 @@ fn run_freedos_in_world(
                     // firmware entered its wait loop: a level-triggered 8259
                     // request stays in the IRR until then, so the floppy ISR
                     // cannot race `floppy_wait_irq`'s flag clear.
-                    let _ = deliver_legacy_interrupt(&mut vcpu, machine.devices_mut());
+                    deliver_legacy_interrupt(&mut vcpu, machine.devices_mut())?;
                 }
             }
             ExitClass::Cpuid => {
