@@ -11,3 +11,7 @@ name = "init_config"
 path = "src/lib.rs"
 
 [dependencies]
+# Audited SHA-256 (RustCrypto). `force-soft` keeps the software backend and
+# avoids the x86 SHA-NI intrinsics, so the crate builds for the component
+# target (`x86_64-unknown-none`, no_std) with no runtime CPU detection.
+sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
