@@ -19,7 +19,7 @@ fn signature_and_data_cursor() {
     cfg.select(SIGNATURE);
     let signature: Vec<u8> = (0..4).map(|_| cfg.read_byte()).collect();
     assert_eq!(signature, b"QEMU");
-    assert_eq!(cfg.read_byte(), 0xFF, "reads past the blob return 0xFF");
+    assert_eq!(cfg.read_byte(), 0, "reads past the blob return 0, like QEMU");
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn file_payload_is_returned_byte_by_byte() {
     cfg.select(select);
     let read: Vec<u8> = (0..rom.len()).map(|_| cfg.read_byte()).collect();
     assert_eq!(read, rom);
-    assert_eq!(cfg.read_byte(), 0xFF);
+    assert_eq!(cfg.read_byte(), 0);
 }
 
 #[test]
@@ -72,6 +72,20 @@ fn legacy_counts_are_zero_not_ff() {
     assert_eq!(cfg.read_byte(), 0);
     cfg.select(fwcfg::NUMA);
     for _ in 0..8 {
+        assert_eq!(cfg.read_byte(), 0);
+    }
+    // `qemu_cfg_legacy` reads a u32 e820 count and loops over it.
+    cfg.select(fwcfg::E820_TABLE);
+    for _ in 0..4 {
+        assert_eq!(cfg.read_byte(), 0);
+    }
+}
+
+#[test]
+fn unknown_selector_reads_zero() {
+    let mut cfg = FwCfg::new();
+    cfg.select(0x7FFF);
+    for _ in 0..4 {
         assert_eq!(cfg.read_byte(), 0);
     }
 }

@@ -34,9 +34,11 @@
 //! pre-installed ROM would be wiped; a `fw_cfg` file is the QEMU-compatible
 //! way to hand it over.
 //!
-//! The legacy entries SeaBIOS reads unconditionally (NUMA/ACPI/SMBIOS
-//! counts, CPU counts, boot-menu flags) are populated with zero counts; a
-//! value of `0xFF` for those would make its parser loop over garbage.
+//! The legacy entries SeaBIOS reads unconditionally (NUMA/ACPI/SMBIOS/e820
+//! counts, CPU counts, boot-menu flags) are populated with zero counts. Like
+//! QEMU, an unknown selector or a read past the end of a blob returns `0`:
+//! SeaBIOS uses those bytes as loop counts, so `0xFF` would make it read
+//! billions of entries (`QEMU_CFG_E820_TABLE` = 0xFFFF_FFFF entries).
 
 use alloc::{vec, vec::Vec};
 
@@ -69,6 +71,8 @@ pub const ACPI_TABLES: u16 = 0x8000;
 pub const SMBIOS_ENTRIES: u16 = 0x8001;
 /// `QEMU_CFG_IRQ0_OVERRIDE` (arch-local).
 pub const IRQ0_OVERRIDE: u16 = 0x8002;
+/// `QEMU_CFG_E820_TABLE` (arch-local): `u32` count, then 20-byte entries.
+pub const E820_TABLE: u16 = 0x8003;
 
 /// First selector assigned to a user file.
 pub const FIRST_FILE_SELECT: u16 = 0x20;
@@ -118,6 +122,7 @@ impl FwCfg {
             (ACPI_TABLES, 0u16.to_le_bytes().to_vec()),
             (SMBIOS_ENTRIES, 0u16.to_le_bytes().to_vec()),
             (IRQ0_OVERRIDE, 0u8.to_le_bytes().to_vec()),
+            (E820_TABLE, 0u32.to_le_bytes().to_vec()),
         ];
         let mut cfg = Self {
             selector: 0,
@@ -156,19 +161,19 @@ impl FwCfg {
     /// Reads the next data byte and advances the cursor.
     ///
     /// An unknown selector, or a read past the end of the selected blob,
-    /// returns `0xFF` like an absent device.
+    /// returns `0`, like QEMU (the guest treats those bytes as counts).
     pub fn read_byte(&mut self) -> u8 {
         let value = if self.selector == FILE_DIR {
             self.directory_bytes
                 .get(self.cursor)
                 .copied()
-                .unwrap_or(0xFF)
+                .unwrap_or(0)
         } else if let Some((_, data)) = self.legacy.iter().find(|(key, _)| *key == self.selector) {
-            data.get(self.cursor).copied().unwrap_or(0xFF)
+            data.get(self.cursor).copied().unwrap_or(0)
         } else if let Some(file) = self.files.iter().find(|file| file.select == self.selector) {
-            file.data.get(self.cursor).copied().unwrap_or(0xFF)
+            file.data.get(self.cursor).copied().unwrap_or(0)
         } else {
-            0xFF
+            0
         };
         self.cursor = self.cursor.saturating_add(1);
         value

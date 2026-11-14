@@ -1132,7 +1132,8 @@ fn disk_parameters_for_the_floppy_geometry() {
     assert_eq!(regs.cx & 0x3F, 18);
     assert_eq!((regs.cx >> 6) & 0x03, 0);
     assert_eq!((regs.dx >> 8) as u8, 1);
-    assert_eq!(regs.dx as u8, 2);
+    assert_eq!(regs.dx as u8, 1, "DL = number of floppy drives");
+    assert_eq!(regs.bx as u8, 4, "BL = 1.44 MB drive type");
     assert_eq!(regs.es, 0);
     assert_eq!(regs.di, 0);
 }
@@ -1150,7 +1151,7 @@ fn disk_parameters_for_a_fixed_disk() {
     assert_eq!(regs.cx & 0x3F, 63);
     assert_eq!((regs.cx >> 6) & 0x03, 3);
     assert_eq!((regs.dx >> 8) as u8, 15);
-    assert_eq!(regs.dx as u8, 3);
+    assert_eq!(regs.dx as u8, 1, "DL = number of fixed disks");
 }
 
 #[test]

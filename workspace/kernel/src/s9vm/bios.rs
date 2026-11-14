@@ -861,7 +861,12 @@ impl BiosState {
                 regs.cx = ((cylinders & 0xFF) << 8)
                     | (self.disk.sectors_per_track as u16 & 0x3F)
                     | (((cylinders >> 8) & 0x03) << 6);
-                regs.dx = (heads as u16) << 8 | if hard { 3 } else { 2 };
+                // DL is the number of drives of the requested class, not the
+                // AH=15h type code: one modelled drive per class. A larger
+                // count makes DOS probe absent drives (0x81, 0x82, ...).
+                regs.dx = (heads as u16) << 8 | 1;
+                // BL: CMOS drive type for floppies (4 = 1.44 MB), 0 for disks.
+                regs.bx = (regs.bx & 0xFF00) | if hard { 0 } else { 4 };
                 regs.es = 0;
                 regs.di = 0;
                 set_ah(regs, DISK_STATUS_OK);
