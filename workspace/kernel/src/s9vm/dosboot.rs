@@ -1307,6 +1307,9 @@ fn deliver_legacy_interrupt(vcpu: &mut Vcpu, devices: &mut emulate::Devices) -> 
 struct KeyboardFeed {
     scancodes: Vec<u8>,
     next: usize,
+    /// Printable ASCII of the same text, for the firmware keyboard buffer.
+    ascii: Vec<u8>,
+    next_ascii: usize,
 }
 
 impl KeyboardFeed {
@@ -1315,12 +1318,25 @@ impl KeyboardFeed {
         if !keys.is_empty() {
             keyboard::text_to_scancodes(keys, &mut scancodes);
         }
-        Self { scancodes, next: 0 }
+        let ascii = keys
+            .iter()
+            .copied()
+            .filter(|byte| keyboard::ascii_keystroke(*byte).is_some())
+            .collect();
+        Self {
+            scancodes,
+            next: 0,
+            ascii,
+            next_ascii: 0,
+        }
     }
 
-    /// Scancodes not handed to the controller yet.
+    /// Keys not handed to the guest yet, whichever path serves it.
     fn remaining(&self) -> usize {
-        self.scancodes.len().saturating_sub(self.next)
+        self.scancodes
+            .len()
+            .saturating_sub(self.next)
+            .max(self.ascii.len().saturating_sub(self.next_ascii))
     }
 
     /// Queues up to `limit` scancodes; returns how many were accepted.
@@ -1331,6 +1347,21 @@ impl KeyboardFeed {
                 break;
             }
             self.next += 1;
+            sent += 1;
+        }
+        sent
+    }
+
+    /// Pushes up to `limit` keys into the firmware keyboard buffer.
+    ///
+    /// This is the path of a guest that did not install its own `INT 9`: its
+    /// `INT 16h` calls still reach the firmware model, so the keys have to
+    /// appear where that service reads them.
+    fn fill_bios(&mut self, bios: &mut bios::BiosState, limit: usize) -> usize {
+        let mut sent = 0;
+        while sent < limit && self.next_ascii < self.ascii.len() {
+            bios.push_key(self.ascii[self.next_ascii]);
+            self.next_ascii += 1;
             sent += 1;
         }
         sent
@@ -1376,9 +1407,10 @@ fn pump_dos_interrupts(
     devices: &mut emulate::Devices,
     memory: &mut WorldMemory,
     feed: &mut KeyboardFeed,
+    bios_state: &mut bios::BiosState,
     report: &mut DosReport,
 ) -> Result<bool, DosError> {
-    report.scancodes_typed += service_keyboard(devices, memory, feed);
+    report.scancodes_typed += service_keyboard(devices, memory, feed, bios_state);
     if let Some(vector) = deliver_legacy_interrupt(vcpu, devices) {
         report.interrupts_delivered += 1;
         // Name the first deliveries: a guest that never takes them (masked
@@ -1407,16 +1439,28 @@ fn service_keyboard(
     devices: &mut emulate::Devices,
     memory: &mut WorldMemory,
     feed: &mut KeyboardFeed,
+    bios: &mut bios::BiosState,
 ) -> u32 {
+    let guest_owns = guest_owns_vector(memory, 0x09);
     let mut typed = 0;
-    if feed.remaining() != 0
-        && guest_owns_vector(memory, 0x09)
-        && devices.pic.master().mask() & 0x02 == 0
-    {
-        typed = feed.fill(&mut devices.keyboard, 8) as u32;
+    if feed.remaining() != 0 {
+        if guest_owns {
+            if devices.pic.master().mask() & 0x02 == 0 {
+                typed = feed.fill(&mut devices.keyboard, 8) as u32;
+            }
+        } else {
+            // The guest never replaced `INT 9`, so its keyboard service is the
+            // firmware one: the keys belong in the BIOS buffer, not in the
+            // 8042 (nothing would read the controller).
+            typed = feed.fill_bios(bios, 2) as u32;
+        }
     }
-    if devices.keyboard.has_scancode() {
-        devices.pic.raise(1);
+    if guest_owns {
+        if devices.keyboard.has_scancode() {
+            devices.pic.raise(1);
+        } else {
+            devices.pic.lower(1);
+        }
     } else {
         devices.pic.lower(1);
     }
@@ -2058,17 +2102,47 @@ pub fn run_freedos_session_dry(caps: &HwCaps) -> Result<(), DosError> {
         // the line unmasked.
         let mut machine = vm::take_machine(world_id).ok_or(DosError::VmFail(7))?;
         let mut memory = WorldMemory::new(world_id);
+        let mut bios_state = bios::BiosState::new();
         let mut feed = KeyboardFeed::new(b"dir\n");
-        let typed_early = service_keyboard(machine.devices_mut(), &mut memory, &mut feed);
-        if typed_early != 0 {
+        // Before the guest owns `INT 9` its keyboard service is the firmware
+        // one: the keys must land in the BIOS buffer, not in the 8042.
+        let typed_early = service_keyboard(
+            machine.devices_mut(),
+            &mut memory,
+            &mut feed,
+            &mut bios_state,
+        );
+        if typed_early == 0 || bios_state.keyboard.is_empty() {
             let _ = vm::store_machine(world_id, machine);
-            return Err(DosError::BadExit("keys typed before the guest owned INT 9"));
+            return Err(DosError::BadExit(
+                "keys did not reach the firmware keyboard buffer",
+            ));
         }
+        // The firmware service returns them (AL = ASCII, like INT 16h AH=00).
+        {
+            let mut registers = bios::BiosRegisters::new();
+            let image = machine.devices_mut().blk.disk_mut();
+            let sectors = (image.len() / biosrom::SECTOR_SIZE) as u64;
+            let mut disk = MachineDisk { image, sectors };
+            let _ = bios_state.handle(0x16, &mut registers, &mut memory, &mut disk);
+            if registers.ax as u8 != b'd' {
+                let _ = vm::store_machine(world_id, machine);
+                return Err(DosError::BadExit("INT 16h did not return the queued key"));
+            }
+        }
+        bios_state.keyboard.clear();
         if !claim_int9_vector(&mut memory) {
             let _ = vm::store_machine(world_id, machine);
             return Err(DosError::Mmu);
         }
-        let typed_late = service_keyboard(machine.devices_mut(), &mut memory, &mut feed);
+        // Once the guest owns `INT 9`, keys go to the 8042 and latch IRQ1.
+        let mut feed = KeyboardFeed::new(b"dir\n");
+        let typed_late = service_keyboard(
+            machine.devices_mut(),
+            &mut memory,
+            &mut feed,
+            &mut bios_state,
+        );
         if typed_late == 0 {
             let _ = vm::store_machine(world_id, machine);
             return Err(DosError::BadExit("keys not typed after the guest owned INT 9"));
@@ -2437,6 +2511,7 @@ fn run_freedos_in_world(
                     machine.devices_mut(),
                     &mut memory,
                     &mut keyboard_feed,
+                    &mut bios_state,
                     &mut report,
                 ) {
                     Ok(injected) => entry_injected = injected,
@@ -2765,6 +2840,7 @@ fn run_freedos_in_world(
                         machine.devices_mut(),
                         &mut memory,
                         &mut keyboard_feed,
+                        &mut bios_state,
                         &mut report,
                     ) {
                         Ok(true) => {
