@@ -2099,3 +2099,67 @@ fn hpet_configuration_and_counter_are_visible_to_the_guest() {
     .expect("emulated"));
     assert_eq!(guest.regs[1], 1000);
 }
+// ---------------------------------------------------------------------------
+// I/O port dispatch table
+// ---------------------------------------------------------------------------
+
+#[test]
+fn port_dispatcher_agrees_with_every_device_model() {
+    // The table replaces a chain of per-model probes: it must claim exactly the
+    // ports those probes claimed, otherwise a legacy access would silently fall
+    // through to policy or be replayed by the wrong model.
+    for port in 0..=u16::MAX {
+        let expected = pic::Pic::handles_port(port)
+            || port == emulate::POST_PORT
+            || port == emulate::DEBUG_PORT
+            || pit::handles_port(port)
+            || rtc::handles_port(port)
+            || uart::handles_port(port)
+            || keyboard::handles_port(port)
+            || vga::handles_port(port)
+            || dma::handles_port(port)
+            || fdc::handles_port(port)
+            || system::handles_port(port)
+            || fwcfg::handles_port(port)
+            || emulate::handles_pci_port(port);
+        assert_eq!(
+            emulate::port_kind(port).is_some(),
+            expected,
+            "port {port:#06x}"
+        );
+        assert_eq!(Devices::handles_port(port), expected, "port {port:#06x}");
+    }
+    // `0xCF9` lives inside the PCI configuration window and is the reset port.
+    assert_eq!(emulate::port_kind(0xCF9), Some(emulate::PortKind::System));
+    assert_eq!(emulate::port_kind(0xCF8), Some(emulate::PortKind::Pci));
+    // The DOS `0xE9` marker port is not part of the device model.
+    assert_eq!(emulate::port_kind(0xE9), None);
+}
+
+#[test]
+fn scalar_port_exit_does_not_decode_the_instruction() {
+    // The fast path takes size, direction and port from the exit qualification
+    // and advances RIP by the reported instruction length. RIP points at zeroed
+    // memory here: decoding it would produce a different length or fail.
+    let mut memory = machine();
+    let mut guest = TestGuest::new(0x1000);
+    guest.regs[0] = 0xFF;
+    let mut devices = Devices::new();
+    let mut view = view(&mut memory, &guest);
+    // OUT to the PIC data port, byte access, instruction length 2.
+    let qualification = u64::from(0x21u16) << 16;
+    let handled = handle_exit_with_length(
+        &mut devices,
+        &mut apic::LocalApic::new(0),
+        &mut view,
+        &mut guest,
+        ExitClass::IoPort,
+        qualification,
+        0,
+        2,
+    )
+    .expect("emulated");
+    assert!(handled);
+    assert_eq!(guest.rip, 0x1002);
+    assert_eq!(devices.pic.master().mask(), 0xFF);
+}

@@ -698,23 +698,71 @@ impl Devices {
 
     /// True if the port belongs to a device modeled here.
     pub fn handles_port(port: u16) -> bool {
-        Pic::handles_port(port)
-            || port == POST_PORT
-            || port == DEBUG_PORT
-            || pit::handles_port(port)
-            || rtc::handles_port(port)
-            || uart::handles_port(port)
-            || keyboard::handles_port(port)
-            || vga::handles_port(port)
-            || dma::handles_port(port)
-            || fdc::handles_port(port)
-            || system::handles_port(port)
-            || fwcfg::handles_port(port)
-            || handles_pci_port(port)
+        port_kind(port).is_some()
     }
 }
 
 /// True if `port` is one of the PCI configuration mechanism #1 registers.
+/// Device class serving one legacy I/O port.
+///
+/// The kernel classifies an exiting port once, instead of asking every device
+/// model in turn whether the port belongs to it. The table is also what keeps
+/// the two overlapping legacy ranges unambiguous: the system-control port
+/// `0xCF9` lives inside the PCI configuration window and must win.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortKind {
+    /// Cascaded 8259A pair.
+    Pic,
+    /// 8254 programmable interval timer.
+    Pit,
+    /// MC146818 CMOS clock.
+    Rtc,
+    /// 16550A serial port.
+    Uart,
+    /// 8042 keyboard controller.
+    Keyboard,
+    /// VGA register file.
+    Vga,
+    /// 8237 DMA controller pair.
+    Dma,
+    /// 82077 floppy controller.
+    Fdc,
+    /// A20 and reset control.
+    System,
+    /// QEMU firmware configuration interface.
+    FwCfg,
+    /// PCI configuration mechanism #1.
+    Pci,
+    /// Platform POST diagnostic port.
+    Post,
+    /// Firmware debug console port.
+    Debug,
+}
+
+/// Classifies one legacy I/O port (`None` when no device model serves it).
+pub const fn port_kind(port: u16) -> Option<PortKind> {
+    match port {
+        0x20 | 0x21 | 0xA0 | 0xA1 => Some(PortKind::Pic),
+        0x40..=0x43 => Some(PortKind::Pit),
+        0x70 | 0x71 => Some(PortKind::Rtc),
+        0x3F8..=0x3FF => Some(PortKind::Uart),
+        0x60 | 0x64 => Some(PortKind::Keyboard),
+        // 0x3B0..=0x3BF (mono) and 0x3C0..=0x3DF (colour) are adjacent.
+        0x3B0..=0x3DF => Some(PortKind::Vga),
+        0x00..=0x0F | 0x81..=0x8F | 0xC0..=0xDF => Some(PortKind::Dma),
+        0x3F0..=0x3F5 | 0x3F7 => Some(PortKind::Fdc),
+        // `0xCF9` is inside the PCI window below: it must be matched first.
+        0x92 | 0xCF9 => Some(PortKind::System),
+        0x510 | 0x511 => Some(PortKind::FwCfg),
+        0xCF8..=0xCFF => Some(PortKind::Pci),
+        0x80 => Some(PortKind::Post),
+        // QEMU firmware debug console (not the DOS `0xE9` marker port, which
+        // the DOS runner intercepts before the device model).
+        0x402 => Some(PortKind::Debug),
+        _ => None,
+    }
+}
+
 pub fn handles_pci_port(port: u16) -> bool {
     (pci::CONFIG_ADDRESS..pci::CONFIG_ADDRESS + 4).contains(&port)
         || (pci::CONFIG_DATA..pci::CONFIG_DATA + 4).contains(&port)
@@ -864,40 +912,6 @@ fn handle_port_exit(
     let string = (qualification >> 4) & 0x1 != 0;
     let repeated = (qualification >> 5) & 0x1 != 0;
     let port = ((qualification >> 16) & 0xFFFF) as u16;
-    // Some processors/VMM combinations report `rep insb`/`rep insw` with the
-    // string bits clear. Recognise the encoding itself so the transfer is not
-    // replayed one byte per exit (SeaBIOS reads the VGA ROM with `rep insb`).
-    let mut op = [0u8; 3];
-    if view.read(guest.cs_base().wrapping_add(guest.rip()), &mut op) {
-        let mut index = 0usize;
-        let rep = op[0] == 0xF3;
-        if rep {
-            index += 1;
-        }
-        let mut size = 1u8;
-        if index < op.len() && op[index] == 0x66 {
-            size = 2;
-            index += 1;
-        }
-        if index < op.len() && matches!(op[index], 0x6C..=0x6F) {
-            let is_in = matches!(op[index], 0x6C | 0x6D);
-            let synthesized = (qualification & !0x3F)
-                | u64::from(size - 1)
-                | (u64::from(is_in) << 3)
-                | 0x10
-                | if rep { 0x20 } else { 0 };
-            return handle_string_port(
-                devices,
-                apic,
-                view,
-                guest,
-                port,
-                synthesized,
-                rep,
-                instruction_length,
-            );
-        }
-    }
     if string || repeated {
         return handle_string_port(
             devices,
@@ -910,20 +924,78 @@ fn handle_port_exit(
             instruction_length,
         );
     }
+    // Some processors/VMM combinations report `rep insb`/`rep insw` with the
+    // string bits clear. That quirk is what the firmware file transfer depends
+    // on (SeaBIOS reads the VGA ROM through `fw_cfg` with `rep insb`), so the
+    // encoding is only inspected for that data port. Every other scalar
+    // access is described completely by the exit qualification: inspecting the
+    // instruction bytes here would fetch and decode them on every legacy port
+    // exit, which is the dominant cost of a DOS boot.
+    if port == fwcfg::DATA_PORT {
+        let mut op = [0u8; 3];
+        if view.read(guest.cs_base().wrapping_add(guest.rip()), &mut op) {
+            let mut index = 0usize;
+            let rep = op[0] == 0xF3;
+            if rep {
+                index += 1;
+            }
+            let mut size = 1u8;
+            if index < op.len() && op[index] == 0x66 {
+                size = 2;
+                index += 1;
+            }
+            if index < op.len() && matches!(op[index], 0x6C..=0x6F) {
+                let is_in = matches!(op[index], 0x6C | 0x6D);
+                let synthesized = (qualification & !0x3F)
+                    | u64::from(size - 1)
+                    | (u64::from(is_in) << 3)
+                    | 0x10
+                    | if rep { 0x20 } else { 0 };
+                return handle_string_port(
+                    devices,
+                    apic,
+                    view,
+                    guest,
+                    port,
+                    synthesized,
+                    rep,
+                    instruction_length,
+                );
+            }
+        }
+    }
     if !Devices::handles_port(port) {
         return Ok(false);
     }
     let size = ((qualification & 0x7) + 1) as u8;
-    let is_in = (qualification >> 3) & 0x1 != 0;
-
-    let Decoded::Port(access) = view.fetch(guest)? else {
-        return Ok(false);
-    };
-    // The decoded instruction must agree with the exit qualification;
-    // otherwise the encoding is outside the modeled subset.
-    if access.port != port || access.size != size || access.write == is_in {
+    if !matches!(size, 1 | 2 | 4) {
         return Ok(false);
     }
+    let is_in = (qualification >> 3) & 0x1 != 0;
+    if instruction_length == 0 {
+        // No usable instruction length (some callers synthesise exits): fall
+        // back to decoding the instruction so the guest still advances.
+        let Decoded::Port(access) = view.fetch(guest)? else {
+            return Ok(false);
+        };
+        if access.port != port || access.size != size || access.write == is_in {
+            return Ok(false);
+        }
+        if !serve_port(devices, apic, view, guest, &access) {
+            return Ok(false);
+        }
+        guest.set_rip(access.next_rip);
+        return Ok(true);
+    }
+    // Scalar IN/OUT always uses the accumulator; the qualification gives the
+    // size and direction, so no instruction decode is needed.
+    let access = PortAccess {
+        port,
+        size,
+        write: !is_in,
+        register: 0,
+        next_rip: guest.rip().wrapping_add(u64::from(instruction_length)),
+    };
     if !serve_port(devices, apic, view, guest, &access) {
         return Ok(false);
     }
