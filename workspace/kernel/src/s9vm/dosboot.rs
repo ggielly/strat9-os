@@ -304,6 +304,19 @@ pub struct DosReport {
     pub interrupts_serviced: u32,
     /// Scancodes typed by the host into the 8042 and read by the guest.
     pub scancodes_typed: u32,
+    /// Host wall-clock time the guest actually ran, in nanoseconds.
+    ///
+    /// Measured from the TSC over the slices, so it excludes the kernel's own
+    /// bookkeeping between runs. It is what [`Self::exits_per_second`] divides
+    /// by, and the figure to compare between two runs of the same image.
+    pub elapsed_nanoseconds: u64,
+    /// Most-accessed legacy I/O ports of the run, `(port, accesses)`, sorted by
+    /// decreasing count.
+    ///
+    /// This is the attribution the performance work needs: a legacy DOS boot
+    /// spends almost all its exits on a handful of ports (PIC, PIT, VGA status,
+    /// keyboard), so the list names where a coalescing change would pay off.
+    pub port_calls: Vec<(u16, u32)>,
 }
 
 impl DosReport {
@@ -322,6 +335,31 @@ impl DosReport {
             }
             let count = self.vector_calls[usize::from(vector & 0x1F)];
             out.push_str(&format!("{:02x}={}", vector, count));
+        }
+        out
+    }
+
+    /// Guest exits per second of guest run time (`0` when nothing was timed).
+    ///
+    /// The exit rate is the figure the port dispatch work is measured on: it
+    /// only moves when the per-exit cost moves, so two runs of the same image
+    /// on the same machine can be compared directly.
+    pub fn exits_per_second(&self) -> u64 {
+        if self.elapsed_nanoseconds == 0 {
+            return 0;
+        }
+        u64::from(self.total_exits).saturating_mul(1_000_000_000) / self.elapsed_nanoseconds
+    }
+
+    /// Compact `3d5=… 3da=…` view of the most-accessed legacy ports.
+    pub fn port_summary(&self) -> alloc::string::String {
+        use alloc::format;
+        let mut out = alloc::string::String::new();
+        for (port, count) in self.port_calls.iter().take(8) {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(&format!("{port:#06x}={count}"));
         }
         out
     }
@@ -346,6 +384,8 @@ impl DosReport {
             interrupts_delivered: 0,
             interrupts_serviced: 0,
             scancodes_typed: 0,
+            elapsed_nanoseconds: 0,
+            port_calls: Vec::new(),
         }
     }
 }
@@ -3068,6 +3108,15 @@ fn run_freedos_in_world(
             elapsed_millis(launch_tsc, tsc_hz)
         );
     }
+    // Operator-facing performance attribution: the histogram names the ports the
+    // exit cost is spent on and the exit rate makes a regression visible across
+    // runs. Both come from the loop's own accounting, so they cost nothing.
+    report.elapsed_nanoseconds =
+        (u128::from(total_cycles) * 1_000_000_000 / u128::from(tsc_hz.max(1))) as u64;
+    port_top.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    port_top.truncate(8);
+    report.port_calls = port_top;
+
     // Hand the machine back to a live session (or drop it with the world of a
     // fresh boot). The vCPU is stored only after its control block was
     // cleared, so the session can be resumed from another task or core.

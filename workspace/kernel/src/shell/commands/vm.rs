@@ -390,6 +390,7 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
                     report.disk_sectors
                 );
                 shell_println!("vm: BIOS vectors: {}", report.vector_summary());
+                print_dos_performance(&report);
                 shell_println!("vm: guest text:\n{}", report.text.trim_end());
                 return Ok(());
             }
@@ -410,6 +411,7 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
                     report.disk_sectors
                 );
                 shell_println!("vm: BIOS vectors: {}", report.vector_summary());
+                print_dos_performance(&report);
                 shell_println!("vm: guest text:\n{}", report.text.trim_end());
                 return Ok(());
             }
@@ -433,6 +435,7 @@ fn cmd_test(args: &[String]) -> Result<(), ShellError> {
                      for a longer run); no world is left behind."
                 );
                 shell_println!("vm: BIOS vectors: {}", report.vector_summary());
+                print_dos_performance(&report);
                 if !report.text.is_empty() {
                     shell_println!("vm: guest text so far:\n{}", report.text.trim_end());
                 }
@@ -476,6 +479,24 @@ fn write_bytes(path: &str, bytes: &[u8]) -> Result<usize, ShellError> {
     let written = vfs::write(fd, bytes).map_err(|_| ShellError::ExecutionFailed);
     let _ = vfs::close(fd);
     written
+}
+
+/// Prints the exit rate and the most-accessed legacy ports of a DOS run.
+///
+/// These are the figures the port-dispatch work is measured on: the rate only
+/// moves when the per-exit cost moves, and the histogram says which ports the
+/// exit cost is spent on (a coalescing change has to aim at the top entries).
+fn print_dos_performance(report: &crate::s9vm::dosboot::DosReport) {
+    if report.elapsed_nanoseconds != 0 {
+        shell_println!(
+            "vm: guest ran {} ms at {} exits/s",
+            report.elapsed_nanoseconds / 1_000_000,
+            report.exits_per_second()
+        );
+    }
+    if !report.port_calls.is_empty() {
+        shell_println!("vm: top ports: {}", report.port_summary());
+    }
 }
 
 /// Prints the lines of `current` that differ from `previous`.
@@ -580,6 +601,7 @@ fn cmd_dos(args: &[String]) -> Result<(), ShellError> {
                     if report.bios_calls != 0 {
                         shell_println!("vm: BIOS vectors: {}", report.vector_summary());
                     }
+                    print_dos_performance(&report);
                     if report.unhandled_interrupts != 0 {
                         shell_println!(
                             "vm: {} unserviced interrupt(s): check the kernel log for the \
