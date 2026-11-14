@@ -670,6 +670,14 @@ impl Vcpu {
     /// # Safety
     /// No guest must be active on this vCPU.
     pub unsafe fn clear(&mut self) -> Result<(), VcpuError> {
+        // A block that was never loaded (or already cleared) has no VMCS state
+        // in the processor. Executing VMCLEAR then would fault on a host where
+        // VT-x is not even enabled (a dry run opens a vCPU without entering
+        // it), and it has nothing to flush on a VT-x host either.
+        if !self.control.is_loaded() {
+            self.launched = false;
+            return Ok(());
+        }
         // SAFETY: caller contract.
         unsafe { self.control.clear()? };
         self.launched = false;

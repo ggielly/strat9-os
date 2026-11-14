@@ -3867,6 +3867,18 @@ pub fn maybe_run_loader_dry_from_boot_env() {
         }
         return;
     }
+    if mode == "freedos_session_dry" {
+        log::info!("[s9vm] FreeDOS live-session dry run requested (no VT-x required)");
+        let caps = HwCaps::default();
+        match dosboot::run_freedos_session_dry(&caps) {
+            Ok(()) => log::info!(
+                "[s9vm] freedos-session-dry PASS: world mapped, image installed, console input/\
+                 output and VGA text round-tripped (no guest entry)"
+            ),
+            Err(error) => log::warn!("[s9vm] freedos-session-dry FAIL: {:?}", error),
+        }
+        return;
+    }
     if mode != "loader_dry" {
         return;
     }

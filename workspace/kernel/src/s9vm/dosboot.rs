@@ -1686,6 +1686,24 @@ pub fn dos_open(
     image: &'static [u8],
 ) -> Result<u64, DosError> {
     require_real_mode(caps, firmware.label())?;
+    dos_open_prepared(caps, firmware, image)
+}
+
+/// Opens a live DOS world without requiring the platform to enter a guest.
+///
+/// Used by the `freedos_session_dry` selftest: it validates the world mapping,
+/// the disk/image installation, the session bookkeeping and the console
+/// plumbing on a host without VT-x. Entering the guest still needs
+/// [`dos_open`].
+pub fn dos_open_dry(caps: &HwCaps, image: &'static [u8]) -> Result<u64, DosError> {
+    dos_open_prepared(caps, FirmwareKind::Stub, image)
+}
+
+fn dos_open_prepared(
+    caps: &HwCaps,
+    firmware: FirmwareKind,
+    image: &'static [u8],
+) -> Result<u64, DosError> {
     if firmware.is_seabios() {
         // A live session resumes the vCPU of the stub firmware; the SeaBIOS
         // boot path builds its own legacy machine and is covered by
@@ -1898,6 +1916,44 @@ pub fn run_freedos_session_selftest(caps: &HwCaps) -> Result<(), DosError> {
         Ok(())
     })();
     let _ = dos_close();
+    result
+}
+
+/// Dry selftest of the live-session plumbing (no VT-x required).
+///
+/// Opens a session without entering the guest, then checks the parts a real
+/// slice depends on: the world mapping and image installation, the session
+/// bookkeeping, the console input queue behind `vm send`, the console output
+/// snapshot behind `vm console`, and the VGA text reader behind `vm dos text`.
+pub fn run_freedos_session_dry(caps: &HwCaps) -> Result<(), DosError> {
+    let world_id = dos_open_dry(caps, freedos_image())?;
+    let result = (|| -> Result<(), DosError> {
+        let session = dos_status().ok_or(DosError::BadExit("session not registered"))?;
+        if session.world_id != world_id || session.slices != 0 {
+            return Err(DosError::BadExit("unexpected initial session state"));
+        }
+        // `vm send` path: bytes are queued on the world and taken by a slice.
+        vm::push_console_input(world_id, b"dir\n").map_err(|()| DosError::VmFail(9))?;
+        let queued = vm::take_console_input(world_id);
+        if queued != b"dir\n" {
+            return Err(DosError::BadExit("console input queue did not round-trip"));
+        }
+        // `vm console` path: the screen snapshot is stored then drained.
+        vm::set_console_output(world_id, b"screen").map_err(|()| DosError::VmFail(9))?;
+        let mut buffer = [0u8; 16];
+        let read = vm::read_console_output(world_id, &mut buffer).map_err(|()| DosError::VmFail(9))?;
+        if &buffer[..read] != b"screen" {
+            return Err(DosError::BadExit("console output did not round-trip"));
+        }
+        // `vm dos text` path: VGA text is readable through the world mapping.
+        if dos_text().is_none() {
+            return Err(DosError::BadExit("VGA text unavailable"));
+        }
+        Ok(())
+    })();
+    if !dos_close() {
+        return Err(DosError::BadExit("session did not close"));
+    }
     result
 }
 
