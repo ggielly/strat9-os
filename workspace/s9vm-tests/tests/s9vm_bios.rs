@@ -19,7 +19,8 @@ use bios::{
     DISK_STATUS_WRITE_PROTECTED,
     DAP_SIZE,
     EQUIPMENT_WORD, EXTENSIONS_SIGNATURE, FLOPPY_1440, FLOPPY_TOTAL_SECTORS, HARD_DISK_GEOMETRY,
-    KEY_BUFFER_BYTES, KEY_BUFFER_CAPACITY, MEMORY_SIZE_KIB, PRINTER_STATUS, SCRATCH_CF,
+    BDA_KEY_BUFFER, KEY_BUFFER_BYTES, KEY_BUFFER_CAPACITY, KEY_BUFFER_FIRST_OFFSET,
+    MEMORY_SIZE_KIB, PRINTER_STATUS, SCRATCH_CF,
     SCRATCH_GPA, SCRATCH_ZF, STATUS_INVALID_FUNCTION, STATUS_NOT_SUPPORTED, TEXT_COLUMNS,
     TEXT_ROWS, VIDEO_BASE, VIDEO_LEN,
 };
@@ -381,8 +382,8 @@ fn initialise_bda_writes_dos_fields() {
     assert_eq!(mem.u16_at(BDA_EBDA_SEGMENT), 0x9FC0);
     assert_eq!(mem.u16_at(BDA_EQUIPMENT), EQUIPMENT_WORD);
     assert_eq!(mem.u16_at(BDA_MEMORY_SIZE), MEMORY_SIZE_KIB);
-    assert_eq!(mem.u16_at(BDA_KEYBOARD_HEAD), 0);
-    assert_eq!(mem.u16_at(BDA_KEYBOARD_TAIL), 0);
+    assert_eq!(mem.u16_at(BDA_KEYBOARD_HEAD), KEY_BUFFER_FIRST_OFFSET);
+    assert_eq!(mem.u16_at(BDA_KEYBOARD_TAIL), KEY_BUFFER_FIRST_OFFSET);
     assert_eq!(mem.u32_at(BDA_TICK_COUNT), 0);
     assert_eq!(mem.u8_at(BDA_VIDEO_MODE), 3);
     assert_eq!(mem.u16_at(BDA_COLUMNS), 80);
@@ -1520,20 +1521,60 @@ fn keyboard_unknown_function_fails() {
 }
 
 #[test]
-fn keyboard_queue_publishes_head_and_tail_in_the_bda() {
+fn keyboard_service_consumes_the_guest_ring() {
+    // DOS's INT 9 handler stores [scan][ascii] at the ring head; INT 16h must
+    // return AH=scan, AL=ascii and advance the tail (0x1E-based offsets).
+    let mut fixture = Fixture::new();
+    fixture
+        .mem
+        .set_bytes(BDA_KEY_BUFFER, &[0x1E, b'a', 0x30, b'b']);
+    fixture
+        .mem
+        .set_bytes(BDA_KEYBOARD_HEAD, &0x0022u16.to_le_bytes());
+    fixture
+        .mem
+        .set_bytes(BDA_KEYBOARD_TAIL, &KEY_BUFFER_FIRST_OFFSET.to_le_bytes());
+
+    let mut regs = BiosRegisters::new();
+    assert_eq!(fixture.call(0x16, &mut regs), BiosOutcome::Handled);
+    assert_eq!(regs.ax, 0x1E61, "AH=scan 0x1E, AL='a'");
+    assert!(!fixture.zero());
+    assert_eq!(fixture.mem.u16_at(BDA_KEYBOARD_TAIL), 0x0020);
+
+    // Peek returns the next entry without consuming it.
+    let mut regs = BiosRegisters::new();
+    regs.ax = 0x0100;
+    assert_eq!(fixture.call(0x16, &mut regs), BiosOutcome::Handled);
+    assert_eq!(regs.ax, 0x3062);
+    assert_eq!(fixture.mem.u16_at(BDA_KEYBOARD_TAIL), 0x0020);
+
+    let mut regs = BiosRegisters::new();
+    assert_eq!(fixture.call(0x16, &mut regs), BiosOutcome::Handled);
+    assert_eq!(regs.ax, 0x3062);
+    assert_eq!(fixture.mem.u16_at(BDA_KEYBOARD_TAIL), 0x0022);
+}
+
+#[test]
+fn keyboard_model_queue_is_used_when_the_guest_has_no_ring() {
+    // Fallback path: the firmware owns the keyboard (the guest never installed
+    // INT 9), so the model queue is the only producer. No scancode is modelled
+    // on that path, so AH stays 0.
     let mut fixture = Fixture::new();
     fixture.state.push_key(b'1');
     fixture.state.push_key(b'2');
     let mut regs = BiosRegisters::new();
-    regs.ax = 0x0100;
     assert_eq!(fixture.call(0x16, &mut regs), BiosOutcome::Handled);
-    assert_eq!(fixture.mem.u16_at(BDA_KEYBOARD_HEAD), 0);
-    assert_eq!(fixture.mem.u16_at(BDA_KEYBOARD_TAIL), 4);
-
-    let mut regs = BiosRegisters::new();
-    assert_eq!(fixture.call(0x16, &mut regs), BiosOutcome::Handled);
-    assert_eq!(fixture.call(0x16, &mut regs), BiosOutcome::Handled);
-    assert_eq!(fixture.mem.u16_at(BDA_KEYBOARD_TAIL), 0);
+    assert_eq!(regs.ax, 0x0031);
+    assert_eq!(fixture.state.keyboard.len(), 1);
+    // The guest ring is left untouched by the fallback.
+    assert_eq!(
+        fixture.mem.u16_at(BDA_KEYBOARD_HEAD),
+        KEY_BUFFER_FIRST_OFFSET
+    );
+    assert_eq!(
+        fixture.mem.u16_at(BDA_KEYBOARD_TAIL),
+        KEY_BUFFER_FIRST_OFFSET
+    );
 }
 
 #[test]
@@ -1546,8 +1587,7 @@ fn keyboard_queue_is_bounded_and_drops_the_overflow() {
     let mut regs = BiosRegisters::new();
     regs.ax = 0x0100;
     assert_eq!(fixture.call(0x16, &mut regs), BiosOutcome::Handled);
-    assert_eq!(fixture.mem.u16_at(BDA_KEYBOARD_TAIL), KEY_BUFFER_BYTES);
-    assert_eq!(fixture.mem.u16_at(BDA_KEYBOARD_TAIL), 32);
+    assert_eq!(al(&regs), 0);
 }
 
 // ---------------------------------------------------------------------------

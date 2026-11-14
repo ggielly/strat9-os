@@ -192,6 +192,14 @@ pub const SPACE: u8 = 0x20;
 pub const KEY_BUFFER_CAPACITY: usize = 16;
 /// Size of the BDA-visible keyboard ring, in bytes.
 pub const KEY_BUFFER_BYTES: u16 = 32;
+/// First slot offset of the BDA keyboard ring.
+///
+/// The BDA head/tail words (`0x41A`/`0x41C`) hold offsets relative to the BDA
+/// base, so the first entry of the ring sits at `0x41E` and the values wrap
+/// inside `0x1E..=0x3E`, exactly as a PC firmware leaves them.
+pub const KEY_BUFFER_FIRST_OFFSET: u16 = 0x1E;
+/// Guest-physical base of the BDA keyboard ring entries.
+pub const BDA_KEY_BUFFER: u32 = 0x041E;
 
 /// Guest-physical base of text-mode video memory.
 pub const VIDEO_BASE: u32 = 0xB8000;
@@ -566,7 +574,7 @@ impl BiosState {
             }
             0x13 => Some(self.disk_service(regs, mem, disk)),
             0x15 => Some(self.system_service(regs)),
-            0x16 => Some(self.keyboard_service(regs)),
+            0x16 => Some(self.keyboard_service(regs, mem)),
             0x17 => Some(self.printer_service(regs)),
             0x1A => Some(self.time_service(regs)),
             _ => None,
@@ -606,9 +614,11 @@ impl BiosState {
             (self.cursor_row as u16) << 8 | self.cursor_col as u16,
         );
         let _ = write_u32(mem, BDA_TICK_COUNT, self.ticks);
-        let queued = (self.keyboard.len() * 2).min(KEY_BUFFER_BYTES as usize) as u16;
-        let _ = write_u16(mem, BDA_KEYBOARD_HEAD, 0);
-        let _ = write_u16(mem, BDA_KEYBOARD_TAIL, queued);
+        // The keyboard ring (head/tail at 0x41A/0x41C, entries at 0x41E) is
+        // maintained by whoever owns the keyboard: once the guest installs its
+        // own `INT 9` handler, DOS fills it and the firmware `INT 16h` service
+        // consumes it. Republishing it from the model queue here would reset
+        // the ring on every unrelated BIOS call (every INT 10h/INT 13h).
     }
 
     /// Clamps and stores the text cursor.
@@ -1038,12 +1048,22 @@ impl BiosState {
         }
     }
 
-    /// `INT 16h`: keyboard services, polling only.
-    fn keyboard_service(&mut self, regs: &mut BiosRegisters) -> Completion {
+    /// `INT 16h`: keyboard services.
+    ///
+    /// The ring at `0x41E` is the interface DOS uses: its own `INT 9` handler
+    /// translates each scancode and stores it there (head/tail at
+    /// `0x41A`/`0x41C`), and the firmware service is expected to consume it.
+    /// The model queue is only a fallback for a guest that never installed its
+    /// own handler (there the firmware is the only producer).
+    fn keyboard_service(
+        &mut self,
+        regs: &mut BiosRegisters,
+        mem: &mut impl BiosMemory,
+    ) -> Completion {
         match (regs.ax >> 8) as u8 {
-            0x00 => match self.keyboard.pop_front() {
-                Some(key) => {
-                    regs.ax = (regs.ax & 0xFF00) | key as u16;
+            0x00 => match self.take_key(mem, true) {
+                Some((scan, ascii)) => {
+                    regs.ax = (u16::from(scan) << 8) | u16::from(ascii);
                     Completion::with_zero(false)
                 }
                 None => {
@@ -1051,9 +1071,9 @@ impl BiosState {
                     Completion::with_zero(true)
                 }
             },
-            0x01 => match self.keyboard.front() {
-                Some(&key) => {
-                    regs.ax = (regs.ax & 0xFF00) | key as u16;
+            0x01 => match self.take_key(mem, false) {
+                Some((scan, ascii)) => {
+                    regs.ax = (u16::from(scan) << 8) | u16::from(ascii);
                     Completion::with_zero(false)
                 }
                 None => {
@@ -1062,11 +1082,44 @@ impl BiosState {
                 }
             },
             0x02 => {
+                // Shift status lives in the BDA (`0x417`); the model keeps no
+                // shift state, so report "no shift held".
                 regs.ax &= 0xFF00;
                 Completion::OK
             }
             _ => fail_ah(regs, STATUS_INVALID_FUNCTION),
         }
+    }
+
+    /// Returns the next key from the guest ring, then from the model queue.
+    ///
+    /// `consume` advances the ring tail by one entry (two bytes) or pops the
+    /// model queue; a peek reads without changing either.
+    fn take_key(&mut self, mem: &mut impl BiosMemory, consume: bool) -> Option<(u8, u8)> {
+        if let Some((head, tail)) = self.keyboard_ring(mem) {
+            if head != tail {
+                let offset = ring_offset(tail)?;
+                let scan = mem.read_u8(BDA_KEY_BUFFER + u32::from(offset))?;
+                let ascii = mem.read_u8(BDA_KEY_BUFFER + u32::from(offset) + 1)?;
+                if consume {
+                    let next = KEY_BUFFER_FIRST_OFFSET + ((offset + 2) & (KEY_BUFFER_BYTES - 1));
+                    let _ = write_u16(mem, BDA_KEYBOARD_TAIL, next);
+                }
+                return Some((scan, ascii));
+            }
+        }
+        if consume {
+            self.keyboard.pop_front().map(|ascii| (0, ascii))
+        } else {
+            self.keyboard.front().map(|&ascii| (0, ascii))
+        }
+    }
+
+    /// Reads the guest keyboard ring head/tail words.
+    fn keyboard_ring(&self, mem: &mut impl BiosMemory) -> Option<(u16, u16)> {
+        let head = read_u16(mem, BDA_KEYBOARD_HEAD)?;
+        let tail = read_u16(mem, BDA_KEYBOARD_TAIL)?;
+        Some((head, tail))
     }
 
     /// `INT 17h`: printer services (accepted, output discarded).
@@ -1227,6 +1280,20 @@ fn write_sectors(
     Ok(())
 }
 
+/// Decodes a BDA keyboard ring offset.
+///
+/// A PC firmware keeps the head/tail words as offsets inside the BDA
+/// (`0x1E..=0x3E`); a guest that kept the older `0..0x20` convention is also
+/// accepted, which keeps the model usable from either producer.
+fn ring_offset(value: u16) -> Option<u16> {
+    if value >= KEY_BUFFER_FIRST_OFFSET && value < KEY_BUFFER_FIRST_OFFSET + KEY_BUFFER_BYTES {
+        Some(value - KEY_BUFFER_FIRST_OFFSET)
+    } else if value < KEY_BUFFER_BYTES {
+        Some(value)
+    } else {
+        None
+    }
+}
 /// Reads a little-endian `u16` from guest memory.
 fn read_u16(mem: &mut impl BiosMemory, address: u32) -> Option<u16> {
     let mut bytes = [0u8; 2];
@@ -1347,8 +1414,10 @@ pub fn initialise_bda(mem: &mut impl BiosMemory) {
     let _ = write_u16(mem, BDA_EBDA_SEGMENT, EBDA_SEGMENT);
     let _ = write_u16(mem, BDA_EQUIPMENT, EQUIPMENT_WORD);
     let _ = write_u16(mem, BDA_MEMORY_SIZE, MEMORY_SIZE_KIB);
-    let _ = write_u16(mem, BDA_KEYBOARD_HEAD, 0);
-    let _ = write_u16(mem, BDA_KEYBOARD_TAIL, 0);
+    // A PC firmware leaves the keyboard ring empty: head == tail == the first
+    // slot offset (0x1E), the convention DOS continues from.
+    let _ = write_u16(mem, BDA_KEYBOARD_HEAD, KEY_BUFFER_FIRST_OFFSET);
+    let _ = write_u16(mem, BDA_KEYBOARD_TAIL, KEY_BUFFER_FIRST_OFFSET);
     let _ = mem.write_u8(BDA_VIDEO_MODE, DEFAULT_VIDEO_MODE);
     let _ = write_u16(mem, BDA_COLUMNS, DEFAULT_COLUMNS);
     let _ = write_u16(mem, BDA_CURSOR, 0);

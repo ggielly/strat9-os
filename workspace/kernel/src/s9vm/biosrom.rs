@@ -290,6 +290,12 @@ pub const FLOPPY_TOTAL_SECTORS: u64 = 2_880;
 pub const BDA_EQUIPMENT: u32 = 0x0410;
 /// BDA field: conventional memory size in KiB (low 16 bits).
 pub const BDA_MEMORY_SIZE: u32 = 0x0413;
+/// BDA field: keyboard buffer head offset.
+pub const BDA_KEYBOARD_HEAD: u32 = 0x041A;
+/// BDA field: keyboard buffer tail offset.
+pub const BDA_KEYBOARD_TAIL: u32 = 0x041C;
+/// First slot offset a PC firmware leaves in the keyboard ring head/tail.
+pub const KEY_BUFFER_FIRST_OFFSET: u16 = 0x1E;
 /// BDA field: extended BIOS data area segment.
 pub const BDA_EBDA_SEGMENT: u32 = 0x040E;
 /// BDA field: current video mode.
@@ -539,6 +545,13 @@ pub fn write_bda(mem: &mut impl RomMemory) -> Result<(), RomError> {
         if !mem.write_u16(address, value) {
             return Err(RomError::WriteFailed);
         }
+    }
+    // Empty keyboard ring in the PC convention (head == tail == 0x1E): DOS's
+    // `INT 9` handler fills it and the firmware `INT 16h` service consumes it.
+    if !mem.write_u16(BDA_KEYBOARD_HEAD, KEY_BUFFER_FIRST_OFFSET)
+        || !mem.write_u16(BDA_KEYBOARD_TAIL, KEY_BUFFER_FIRST_OFFSET)
+    {
+        return Err(RomError::WriteFailed);
     }
     if !mem.write(BDA_VIDEO_MODE, &[VIDEO_MODE_VALUE])
         || !mem.write(BDA_ROWS, &[ROWS_VALUE])
