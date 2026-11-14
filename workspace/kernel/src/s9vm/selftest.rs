@@ -3885,7 +3885,7 @@ pub fn maybe_run_loader_dry_from_boot_env() {
         match dosboot::run_freedos_session_dry(&caps) {
             Ok(()) => log::info!(
                 "[s9vm] freedos-session-dry PASS: world mapped, image installed, console input/\
-                 output and VGA text round-tripped (no guest entry)"
+                 output and VGA text round-tripped, disk write persisted (no guest entry)"
             ),
             Err(error) => log::warn!("[s9vm] freedos-session-dry FAIL: {:?}", error),
         }

@@ -2338,6 +2338,64 @@ pub fn run_freedos_session_dry(caps: &HwCaps) -> Result<(), DosError> {
                 "up arrow did not reach the firmware keyboard buffer",
             ));
         }
+        // Writable disk through the firmware path, on the world's own device
+        // model: the guest side writes the last sector with INT 13h AH=03h, the
+        // runner stores the model back, and a read through AH=02h must return
+        // the same bytes. This is the wave-2 promise - the guest can persist
+        // data - proved without a guest entry. The last sector is used because
+        // it is outside the FAT and boot area of the bundled image.
+        let pattern = *b"S9VM-DISK-WRITE";
+        if !bios::BiosMemory::write(&mut memory, 0x8000, &pattern) {
+            let _ = vm::store_machine(world_id, machine);
+            return Err(DosError::BadExit("disk test buffer is not writable"));
+        }
+        {
+            let image = machine.devices_mut().blk.disk_mut();
+            let sectors = (image.len() / biosrom::SECTOR_SIZE) as u64;
+            let mut disk = MachineDisk { image, sectors };
+            let mut registers = bios::BiosRegisters::new();
+            registers.ax = 0x0301; // write one sector
+            registers.cx = 0x4F12; // cylinder 79, sector 18 -> last LBA
+            registers.dx = 0x0100; // head 1, drive 0
+            registers.es = 0;
+            registers.bx = 0x8000;
+            let _ = bios_state.handle(0x13, &mut registers, &mut memory, &mut disk);
+            if registers.flags & 0x0001 != 0 {
+                let _ = vm::store_machine(world_id, machine);
+                return Err(DosError::BadExit("INT 13h AH=03h refused the write"));
+            }
+        }
+        // Round trip through the registry: the stored model must hold the bytes.
+        let _ = vm::store_machine(world_id, machine);
+        let mut machine = vm::take_machine(world_id).ok_or(DosError::VmFail(7))?;
+        let zeros = vec![0u8; pattern.len()];
+        if !bios::BiosMemory::write(&mut memory, 0x9000, &zeros) {
+            let _ = vm::store_machine(world_id, machine);
+            return Err(DosError::BadExit("disk test read buffer is not writable"));
+        }
+        {
+            let image = machine.devices_mut().blk.disk_mut();
+            let sectors = (image.len() / biosrom::SECTOR_SIZE) as u64;
+            let mut disk = MachineDisk { image, sectors };
+            let mut registers = bios::BiosRegisters::new();
+            registers.ax = 0x0201; // read one sector
+            registers.cx = 0x4F12;
+            registers.dx = 0x0100;
+            registers.es = 0;
+            registers.bx = 0x9000;
+            let _ = bios_state.handle(0x13, &mut registers, &mut memory, &mut disk);
+            if registers.flags & 0x0001 != 0 {
+                let _ = vm::store_machine(world_id, machine);
+                return Err(DosError::BadExit("INT 13h AH=02h refused the read"));
+            }
+        }
+        let mut read_back = vec![0u8; pattern.len()];
+        if !bios::BiosMemory::read(&mut memory, 0x9000, &mut read_back) || read_back != pattern {
+            let _ = vm::store_machine(world_id, machine);
+            return Err(DosError::BadExit(
+                "the sector written through INT 13h did not survive the registry",
+            ));
+        }
         let _ = vm::store_machine(world_id, machine);
         // `vm dos state` observes the same machine the slices run: it must name
         // the guest `INT 9` owner, the 8259 mask the firmware installed, and the
