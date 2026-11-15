@@ -558,10 +558,11 @@ Volumes are addressed in **512-byte sectors**, not byte offsets.
 
 | # | Syscall | Kernel args | Return | Status | Description |
 |---|---------|-------------|--------|--------|-------------|
-| 900 | `SYS_ABI_VERSION` | : | `(major << 16) \| minor` | OK | Returns `0x0000_0002` for the current `0.2` ABI |
+| 900 | `SYS_ABI_VERSION` | : | `(major << 16) \| minor` | OK | Returns `0x0000_0004` for the current `0.4` ABI |
 | 901 | `SYS_GETCMDLINE` | `buf_ptr: u64, buf_len: u64` | full cmdline length | OK | Copies `min(len, buf_len)` boot command-line bytes; not NUL-terminated |
 | 902 | `SYS_REBOOT` | `how: u64` | : | OK | `0` = reboot, `1` = power off; requires the silo admin capability |
 | 903 | `SYS_SILO_GRANT` | `silo_handle: u64, desc_ptr: u64, count: u64` | `0` | OK | Applies 1–32 `SiloGrantDesc { kind, access, id, len, _reserved }` (32 bytes) granting PATH/IRQ/PCI/DMA access; requires the silo admin capability |
+| 904 | `SYS_SILO_GRANT_RESET` | `silo_handle: u64` | `0` | OK | Clears all grants of an editable silo so it can replace them; admin-only. `EINVAL` while `Running`/`Paused` |
 
 ---
 

@@ -137,6 +137,14 @@ pub fn add_raw(scancode: u8) {
     RAW_BUFFER.push(scancode);
 }
 
+/// Drop every pending raw scancode (task context only).
+///
+/// Called when `/dev/input/kbd` is opened so a new reader does not replay
+/// keystrokes typed before it existed.
+pub fn flush_raw() {
+    while RAW_BUFFER.pop().is_some() {}
+}
+
 /// Get a raw scancode byte (non-blocking, task context only).
 pub fn read_raw() -> Option<u8> {
     RAW_BUFFER.pop()

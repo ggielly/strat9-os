@@ -55,8 +55,6 @@ pub(crate) enum StrateHealth {
 pub struct SupervisedChild {
     pub(crate) name: String,
     pub(crate) pid: u64,
-    /// SID of the owning silo, reused as reserved SID set on reload.
-    pub(crate) sid: u32,
     /// Name of the silo this strate belongs to, used by `reload` and shutdown.
     pub(crate) silo: String,
     /// Silo handle, kept so a crashed strate can be restarted in place.
@@ -91,7 +89,6 @@ impl SupervisedChild {
     fn new(
         name: &str,
         pid: u64,
-        sid: u32,
         silo_handle: usize,
         module_handle: usize,
         silo: &str,
@@ -103,7 +100,6 @@ impl SupervisedChild {
         Self {
             name: String::from(name),
             pid,
-            sid,
             silo: String::from(silo),
             silo_handle,
             module_handle,
@@ -119,6 +115,11 @@ impl SupervisedChild {
             budget: RestartBudget::with_max(max_restarts),
         }
     }
+
+    /// Module handle of this strate, used by `reload` to unload it.
+    pub(crate) fn module_handle(&self) -> usize {
+        self.module_handle
+    }
 }
 
 /// Adds a launched strate to the supervision set.
@@ -129,7 +130,6 @@ pub fn register(
     children: &mut Vec<SupervisedChild>,
     name: &str,
     pid: usize,
-    sid: u32,
     silo_handle: usize,
     module_handle: usize,
     silo: &str,
@@ -142,7 +142,6 @@ pub fn register(
         children.push(SupervisedChild::new(
             name,
             pid as u64,
-            sid,
             silo_handle,
             module_handle,
             silo,
@@ -374,13 +373,14 @@ pub fn run(
     mut children: Vec<SupervisedChild>,
     control_port: usize,
     mut plan_order: Vec<String>,
+    mut runtimes: Vec<crate::SiloRuntime>,
 ) -> ! {
     log("[init] Supervisor: entering watch loop\n");
     loop {
         if control_port != 0 {
             let mut msg = strat9_syscall::data::IpcMessage::new(0);
             while call::ipc_try_recv(control_port, &mut msg).is_ok() {
-                crate::control::handle(&mut children, &mut plan_order, &msg);
+                crate::control::handle(&mut children, &mut plan_order, &mut runtimes, &msg);
                 msg = strat9_syscall::data::IpcMessage::new(0);
             }
         }

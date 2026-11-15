@@ -33,7 +33,7 @@ extern crate alloc;
 // `launcher.rs` and child supervision in `supervisor.rs`.
 //
 
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 use core::{alloc::Layout, panic::PanicInfo};
 use init_config::{
     BootPlan, Diagnostic, PlannedKind, PlannedSilo, Policy, Selection, SiloDef,
@@ -402,10 +402,22 @@ fn wait_for_service(path: &str) -> bool {
     }
 }
 
+/// Runtime binding of one planned silo, preserved after boot.
+pub(crate) struct SiloRuntime {
+    pub name: String,
+    pub sid: u32,
+    pub handle: usize,
+    pub desired: PlannedSilo,
+}
+
 /// Implements boot silos.
-fn boot_silos(plan: BootPlan, supervised: &mut Vec<supervisor::SupervisedChild>) {
+fn boot_silos(
+    plan: BootPlan,
+    supervised: &mut Vec<supervisor::SupervisedChild>,
+    runtimes: &mut Vec<SiloRuntime>,
+) {
     for s_def in plan.silos {
-        boot_silo(s_def, supervised);
+        boot_silo(s_def, supervised, runtimes);
     }
 }
 
@@ -459,90 +471,40 @@ fn grant_descriptors(grants: &[init_config::Grant]) -> (Vec<SiloGrantDesc>, Vec<
     (descs, buffers)
 }
 
-/// Creates and starts every strate of one planned silo.
+/// Applies `grants` to an editable silo.
 ///
-/// A silo whose `requires` service is not reachable within the readiness budget
-/// is skipped: `init-config` already dropped its dependents from the plan.
-/// Reused by `boot_silos` and the `/srv/init` `reload` command.
-pub(crate) fn boot_silo(s_def: PlannedSilo, supervised: &mut Vec<supervisor::SupervisedChild>) {
-    for path in &s_def.requires {
-        if !wait_for_service(path.as_str()) {
-            log("[init] DEGRADED: silo ");
-            log(&s_def.name);
-            log(" missing required service ");
-            log(path.as_str());
-            log(", skipping\n");
-            return;
-        }
+/// The path buffers stay alive until `silo_grant` returns. Returns the kernel
+/// error name on failure so the caller can decide whether to keep the silo.
+fn apply_grants(silo_handle: usize, grants: &[init_config::Grant]) -> Result<(), &'static str> {
+    if grants.is_empty() {
+        return Ok(());
     }
-
-    log("[init] Creating Silo: ");
-    log(&s_def.name);
-    log(" (SID=");
-    log_u32(s_def.sid);
-    log(")\n");
-
-    let config = build_silo_config(&s_def);
-
-    let silo_handle = match call::silo_create((&config as *const SiloConfig) as usize) {
-        Ok(h) => h,
-        Err(e) => {
-            log("[init] silo_create failed: ");
-            log(e.name());
-            log("\n");
-            return;
-        }
-    };
-
-    // Apply declared grants before any strate is attached or started. With the
-    // kernel's deny-by-default-when-declared rule, a silo whose grants failed to
-    // apply must not run: it would silently run unrestricted.
-    if !s_def.grants.is_empty() {
-        let (descs, _buffers) = grant_descriptors(&s_def.grants);
-        match call::silo_grant(silo_handle, &descs) {
-            // The syscall returns 0 on success; report the descriptor count.
-            Ok(_) => {
-                log("[init] GRANTS: ");
-                log(&s_def.name);
-                log(" applied ");
-                log_u32(descs.len() as u32);
-                log("\n");
-                if s_def
-                    .grants
-                    .iter()
-                    .any(|g| matches!(g.kind, init_config::GrantKind::Irq(_)))
-                {
-                    log(
-                        "[init] NOTE: irq grants are stored by the kernel but no subsystem consumes them yet\n",
-                    );
-                }
-            }
-            Err(e) => {
-                log("[init] silo_grant failed: ");
-                log(&s_def.name);
-                log(" ");
-                log(e.name());
-                log("\n");
-                if let Err(e) = call::silo_destroy(silo_handle) {
-                    log("[init] silo_destroy failed: ");
-                    log(e.name());
-                    log(", stopping it instead\n");
-                    let _ = call::silo_stop(silo_handle);
-                }
-                let _ = call::handle_close(silo_handle);
-                return;
-            }
-        }
+    let (descs, _buffers) = grant_descriptors(grants);
+    // The syscall returns 0 on success; report the descriptor count.
+    call::silo_grant(silo_handle, &descs).map_err(|e| e.name())?;
+    log("[init] GRANTS: applied ");
+    log_u32(descs.len() as u32);
+    log("\n");
+    if grants
+        .iter()
+        .any(|g| matches!(g.kind, init_config::GrantKind::Irq(_)))
+    {
+        log(
+            "[init] NOTE: irq grants are stored by the kernel but no subsystem consumes them yet\n",
+        );
     }
+    Ok(())
+}
 
-    if let Some(ref lbl) = s_def.label {
-        if let Err(e) = call::silo_rename(silo_handle, lbl.as_ptr() as usize, lbl.len()) {
-            log("[init] silo_rename failed: ");
-            log(e.name());
-            log("\n");
-        }
-    }
-
+/// Starts every strate of `s_def` inside `silo_handle`.
+///
+/// Returns the number of strates that became active and registers each
+/// launched module with the supervisor. Shared by boot and in-place reload.
+fn start_strates(
+    silo_handle: usize,
+    s_def: &PlannedSilo,
+    supervised: &mut Vec<supervisor::SupervisedChild>,
+) -> u32 {
     let mut active_strates = 0u32;
 
     if s_def.strates.is_empty() {
@@ -551,8 +513,8 @@ pub(crate) fn boot_silo(s_def: PlannedSilo, supervised: &mut Vec<supervisor::Sup
         log("\n");
     }
 
-    for str_def in s_def.strates {
-        match str_def.kind {
+    for str_def in &s_def.strates {
+        match &str_def.kind {
             PlannedKind::Elf | PlannedKind::WasmRuntime => {
                 log("[init]   -> Strate: ");
                 log(&str_def.name);
@@ -567,7 +529,6 @@ pub(crate) fn boot_silo(s_def: PlannedSilo, supervised: &mut Vec<supervisor::Sup
                         supervised,
                         &str_def.name,
                         launched.pid,
-                        s_def.sid,
                         silo_handle,
                         launched.module_handle,
                         &s_def.name,
@@ -606,6 +567,78 @@ pub(crate) fn boot_silo(s_def: PlannedSilo, supervised: &mut Vec<supervisor::Sup
         }
     }
 
+    active_strates
+}
+
+/// Creates and starts every strate of one planned silo.
+///
+/// A silo whose `requires` service is not reachable within the readiness budget
+/// is skipped: `init-config` already dropped its dependents from the plan.
+/// Returns the silo handle when at least one strate became active, and records
+/// the binding in `runtimes` so a later `reload` can reconfigure it in place.
+pub(crate) fn boot_silo(
+    s_def: PlannedSilo,
+    supervised: &mut Vec<supervisor::SupervisedChild>,
+    runtimes: &mut Vec<SiloRuntime>,
+) -> Option<usize> {
+    for path in &s_def.requires {
+        if !wait_for_service(path.as_str()) {
+            log("[init] DEGRADED: silo ");
+            log(&s_def.name);
+            log(" missing required service ");
+            log(path.as_str());
+            log(", skipping\n");
+            return None;
+        }
+    }
+
+    log("[init] Creating Silo: ");
+    log(&s_def.name);
+    log(" (SID=");
+    log_u32(s_def.sid);
+    log(")\n");
+
+    let config = build_silo_config(&s_def);
+
+    let silo_handle = match call::silo_create((&config as *const SiloConfig) as usize) {
+        Ok(h) => h,
+        Err(e) => {
+            log("[init] silo_create failed: ");
+            log(e.name());
+            log("\n");
+            return None;
+        }
+    };
+
+    // Apply declared grants before any strate is attached or started. With the
+    // kernel's deny-by-default-when-declared rule, a silo whose grants failed to
+    // apply must not run: it would silently run unrestricted.
+    if let Err(e) = apply_grants(silo_handle, &s_def.grants) {
+        log("[init] silo_grant failed: ");
+        log(&s_def.name);
+        log(" ");
+        log(e);
+        log("\n");
+        if let Err(e) = call::silo_destroy(silo_handle) {
+            log("[init] silo_destroy failed: ");
+            log(e.name());
+            log(", stopping it instead\n");
+            let _ = call::silo_stop(silo_handle);
+        }
+        let _ = call::handle_close(silo_handle);
+        return None;
+    }
+
+    if let Some(ref lbl) = s_def.label {
+        if let Err(e) = call::silo_rename(silo_handle, lbl.as_ptr() as usize, lbl.len()) {
+            log("[init] silo_rename failed: ");
+            log(e.name());
+            log("\n");
+        }
+    }
+
+    let active_strates = start_strates(silo_handle, &s_def, supervised);
+
     // A silo whose strates all failed must not stay open: a task-less
     // `Ready` silo (and the module it still references) would be kept for
     // the rest of the boot. Destroy it, then release our handle.
@@ -620,7 +653,42 @@ pub(crate) fn boot_silo(s_def: PlannedSilo, supervised: &mut Vec<supervisor::Sup
             let _ = call::silo_stop(silo_handle);
         }
         let _ = call::handle_close(silo_handle);
+        return None;
     }
+
+    runtimes.push(SiloRuntime {
+        name: s_def.name.clone(),
+        sid: s_def.sid,
+        handle: silo_handle,
+        desired: s_def,
+    });
+    Some(silo_handle)
+}
+
+/// Reconfigures an existing (stopped) silo in place and restarts its strates.
+///
+/// `s_def` must carry the live SID (the reload path forces it). Config and the
+/// grant set are replaced on the same handle; no silo is created or destroyed.
+/// Returns the number of strates that became active.
+pub(crate) fn reconfigure_silo(
+    handle: usize,
+    s_def: &PlannedSilo,
+    supervised: &mut Vec<supervisor::SupervisedChild>,
+) -> Result<u32, &'static str> {
+    let config = build_silo_config(s_def);
+    call::silo_config(handle, (&config as *const SiloConfig) as usize).map_err(|e| e.name())?;
+    call::silo_grant_reset(handle).map_err(|e| e.name())?;
+    apply_grants(handle, &s_def.grants)?;
+
+    if let Some(ref lbl) = s_def.label {
+        if let Err(e) = call::silo_rename(handle, lbl.as_ptr() as usize, lbl.len()) {
+            log("[init] silo_rename failed: ");
+            log(e.name());
+            log("\n");
+        }
+    }
+
+    Ok(start_strates(handle, s_def, supervised))
 }
 
 #[unsafe(no_mangle)]
@@ -655,10 +723,11 @@ pub unsafe extern "C" fn _start() -> ! {
     // children in reverse order on shutdown.
     let plan_order: Vec<alloc::string::String> =
         plan.silos.iter().map(|s| s.name.clone()).collect();
-    boot_silos(plan, &mut supervised);
+    let mut runtimes = Vec::new();
+    boot_silos(plan, &mut supervised, &mut runtimes);
     log("[init] Boot complete.\n");
     let control_port = control::init_port();
-    supervisor::run(supervised, control_port, plan_order);
+    supervisor::run(supervised, control_port, plan_order, runtimes);
 }
 
 #[panic_handler]

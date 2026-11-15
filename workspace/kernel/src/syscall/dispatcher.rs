@@ -430,6 +430,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_SILO_RENAME => silo::sys_silo_rename(arg1, arg2, arg3),
         SYS_SILO_DESTROY => silo::sys_silo_destroy(arg1),
         SYS_SILO_GRANT => silo::sys_silo_grant(arg1, arg2, arg3),
+        SYS_SILO_GRANT_RESET => silo::sys_silo_grant_reset(arg1),
 
         // Architecture-specific (900-999) =========================================
         SYS_ABI_VERSION => {

@@ -1472,6 +1472,14 @@ pub mod call {
         }
     }
 
+    /// Clear every grant of a silo so a stopped silo can replace its set.
+    ///
+    /// Admin-only; rejected with `InvalidArgument` while the silo is running
+    /// or paused.
+    pub fn silo_grant_reset(silo_handle: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_SILO_GRANT_RESET, silo_handle) }
+    }
+
     /// Attach a loaded kernel module to a silo.
     pub fn silo_attach_module(silo_id: usize, module_id: usize) -> error::Result<usize> {
         unsafe { syscall2(number::SYS_SILO_ATTACH_MODULE, silo_id, module_id) }

@@ -242,6 +242,7 @@ pub mod keyboard {
     pub fn read_raw() -> Option<u8> {
         None
     }
+    pub fn flush_raw() {}
     pub fn init() {}
     pub fn read_char() -> Option<u8> {
         crate::arch::serial::getc()

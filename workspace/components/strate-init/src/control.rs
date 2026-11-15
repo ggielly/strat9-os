@@ -35,7 +35,10 @@
 //! * `status <name>` — the `list` line plus `last=<exit kind>`.
 //! * `start <name>` / `stop <name>` / `restart <name>` — mutate one child.
 //! * `reload` — re-read `/initfs/silo.toml`, rebuild the plan and apply the
-//!   silo add/remove diff (running silos are not reconfigured in place).
+//!   add/remove diff. A running silo whose plan changed is reconfigured in
+//!   place: it is stopped, the new config and grant set are applied to the
+//!   same silo handle, then its strates are restarted. Zero-downtime is not
+//!   possible without task migration, so the silo is briefly down.
 //! * `shutdown` — stop every child in reverse plan order, then power off.
 //! * `reboot` — stop every child in reverse plan order, then reset.
 //!
@@ -50,7 +53,7 @@
 
 use alloc::{format, string::String, vec::Vec};
 
-use init_config::ExitKind;
+use init_config::{ExitKind, PlannedSilo};
 use strat9_syscall::{call, data::IpcMessage};
 
 use crate::{
@@ -123,8 +126,26 @@ fn authorized(children: &[SupervisedChild], sender: u64) -> bool {
     children.iter().any(|c| c.pid == sender && c.admin)
 }
 
+/// Unloads the module of every child owned by `silo_name`.
+///
+/// Errors are ignored: the silo is being torn down or reconfigured and a
+/// module that is already gone is not a failure.
+fn unload_modules(children: &[SupervisedChild], silo_name: &str) {
+    for child in children.iter().filter(|c| c.silo == silo_name) {
+        let handle = child.module_handle();
+        if handle != 0 {
+            let _ = call::module_unload(handle);
+        }
+    }
+}
+
 /// Handles one request message. Replies are sent from here.
-pub fn handle(children: &mut Vec<SupervisedChild>, order: &mut Vec<String>, msg: &IpcMessage) {
+pub fn handle(
+    children: &mut Vec<SupervisedChild>,
+    order: &mut Vec<String>,
+    runtimes: &mut Vec<crate::SiloRuntime>,
+    msg: &IpcMessage,
+) {
     if msg.msg_type != REQUEST_MSG_TYPE {
         return;
     }
@@ -197,31 +218,128 @@ pub fn handle(children: &mut Vec<SupervisedChild>, order: &mut Vec<String>, msg:
             Err(e) => reply(&format!("restart failed: {}\n", e)),
         },
         "reload" => {
-            let reserved: Vec<u32> = children.iter().map(|child| child.sid).collect();
+            // Every runtime reserves its SID even when it has no live child,
+            // so a new silo cannot be allocated a SID still in use.
+            let reserved: Vec<u32> = runtimes.iter().map(|r| r.sid).collect();
             let plan = crate::rebuild_plan(&reserved);
-            let new_names: Vec<String> = plan.silos.iter().map(|s| s.name.clone()).collect();
 
+            // Pass 1: classify each runtime as removed or changed. Removals are
+            // applied immediately; changed silos are stopped in pass 2.
+            let mut removed = 0;
+            let mut changed: Vec<(usize, PlannedSilo)> = Vec::new();
+            let mut i = 0;
+            while i < runtimes.len() {
+                let name = runtimes[i].name.clone();
+                let new_def = plan
+                    .silos
+                    .iter()
+                    .find(|s| s.name == name && !s.strates.is_empty())
+                    .map(|def| {
+                        let mut new_def = def.clone();
+                        // The live SID wins: reconfiguration never re-keys a silo.
+                        new_def.sid = runtimes[i].sid;
+                        new_def
+                    });
+
+                match new_def {
+                    Some(new_def) => {
+                        if runtimes[i].desired != new_def {
+                            changed.push((i, new_def));
+                        }
+                        i += 1;
+                    }
+                    None => {
+                        // Absent from the plan, or a plan silo with no strates.
+                        supervisor::stop_silo(children, &name);
+                        unload_modules(children, &name);
+                        children.retain(|child| child.silo != name);
+                        let handle = runtimes[i].handle;
+                        if let Err(e) = call::silo_destroy(handle) {
+                            log("[init] silo_destroy failed: ");
+                            log(e.name());
+                            log(", stopping it instead\n");
+                            let _ = call::silo_stop(handle);
+                        }
+                        let _ = call::handle_close(handle);
+                        runtimes.remove(i);
+                        removed += 1;
+                    }
+                }
+            }
+
+            // Pass 2 (reverse): stop every changed silo before any restart, so
+            // dependents are down while their providers are reconfigured.
+            for (idx, _) in changed.iter().rev() {
+                let name = runtimes[*idx].name.clone();
+                log("[init] reconfigure: ");
+                log(&name);
+                log(" (stopped, applying plan)\n");
+                supervisor::stop_silo(children, &name);
+                unload_modules(children, &name);
+                children.retain(|child| child.silo != name);
+            }
+
+            // Pass 3 (forward): apply the new config and grants to the same
+            // handle and restart the strates. A failure leaves the silo stopped.
+            let mut reconfigured = 0;
+            let mut failed = 0;
+            // Runtimes whose new plan started no strate at all: destroy them
+            // after the loop so the `changed` indices stay valid.
+            let mut dead: Vec<usize> = Vec::new();
+            for (idx, new_def) in &changed {
+                let name = runtimes[*idx].name.clone();
+                match crate::reconfigure_silo(runtimes[*idx].handle, new_def, children) {
+                    Ok(0) => {
+                        log("[init] reconfigure: ");
+                        log(&name);
+                        log(" started no strate, destroying it\n");
+                        let handle = runtimes[*idx].handle;
+                        if let Err(e) = call::silo_destroy(handle) {
+                            log("[init] silo_destroy failed: ");
+                            log(e.name());
+                            log(", stopping it instead\n");
+                            let _ = call::silo_stop(handle);
+                        }
+                        let _ = call::handle_close(handle);
+                        dead.push(*idx);
+                        failed += 1;
+                    }
+                    Ok(_) => {
+                        runtimes[*idx].desired = new_def.clone();
+                        reconfigured += 1;
+                    }
+                    Err(e) => {
+                        log("[init] reconfigure failed: ");
+                        log(&name);
+                        log(" ");
+                        log(e);
+                        log("\n");
+                        failed += 1;
+                    }
+                }
+            }
+            for idx in dead.iter().rev() {
+                runtimes.remove(*idx);
+            }
+
+            // Silos in the plan with no runtime are new.
             let mut added = 0;
             for silo in &plan.silos {
-                if !order.iter().any(|name| name == &silo.name) {
-                    crate::boot_silo(silo.clone(), children);
+                if silo.strates.is_empty() || runtimes.iter().any(|r| r.name == silo.name) {
+                    continue;
+                }
+                let before = runtimes.len();
+                crate::boot_silo(silo.clone(), children, runtimes);
+                if runtimes.len() > before {
                     added += 1;
                 }
             }
 
-            let mut removed = 0;
-            for name in order.iter() {
-                if !new_names.iter().any(|new| new == name) {
-                    supervisor::stop_silo(children, name);
-                    removed += 1;
-                }
-            }
-
-            // A running silo keeps its old SID, handles and strates: applying
-            // changed fields in place would require a reconfigure syscall.
-            log("[init] reload: running silos are not reconfigured in place\n");
-            *order = new_names;
-            reply(&format!("reload: added={} removed={}\n", added, removed));
+            *order = plan.silos.iter().map(|s| s.name.clone()).collect();
+            reply(&format!(
+                "reload: added={} removed={} reconfigured={} failed={}\n",
+                added, removed, reconfigured, failed
+            ));
         }
         "shutdown" => {
             supervisor::shutdown_all(children, order);

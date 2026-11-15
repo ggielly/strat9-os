@@ -258,6 +258,7 @@ const GOLDEN_SYSCALLS: &[(&str, usize)] = &[
     ("SYS_PCI_MSI_ALLOC", SYS_PCI_MSI_ALLOC),
     ("SYS_PCI_MSI_FREE", SYS_PCI_MSI_FREE),
     ("SYS_SILO_GRANT", SYS_SILO_GRANT),
+    ("SYS_SILO_GRANT_RESET", SYS_SILO_GRANT_RESET),
 ];
 
 #[test]
@@ -274,6 +275,7 @@ fn syscall_numbers_are_pinned() {
     assert_eq!(SYS_GETCMDLINE, 901);
     assert_eq!(SYS_REBOOT, 902);
     assert_eq!(SYS_SILO_GRANT, 903);
+    assert_eq!(SYS_SILO_GRANT_RESET, 904);
 }
 
 #[test]
@@ -313,7 +315,7 @@ fn syscall_table_is_exhaustive() {
     // table, this count check fails and forces a conscious review.
     assert_eq!(
         GOLDEN_SYSCALLS.len(),
-        209,
+        210,
         "golden table out of sync: add new SYS_* consts AND their pinned values"
     );
 }

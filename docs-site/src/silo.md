@@ -129,6 +129,39 @@ silos. PATH write grants require a family whose registry ceiling includes
 `BIND` (`SYS`, `DRV`, `FS`, `NET`); `WASM` and `USR` may only receive
 read-only PATH grants. Violations return `PermissionDenied`.
 
+Grants are additive: `SYS_SILO_GRANT` cannot remove an existing entry. To
+replace a silo's grant set, stop it and call
+`SYS_SILO_GRANT_RESET(handle)`, which empties every grant; reapply the new
+set with `SYS_SILO_GRANT` before restarting. This is the path used by live
+`reload` reconfiguration. Reset is admin-only and accepted only in editable
+states (`Created`, `Ready`, `Stopped`, `Crashed`); a `Running` or `Paused` silo
+returns `EINVAL`.
+
+---
+
+## Live reload
+
+`/srv/init reload` re-reads the boot configuration and reconciles the running
+set. A silo whose validated plan changed is reconfigured **in place** on its
+existing handle and SID; it is never recreated:
+
+1. Stop the silo's strates (`SYS_SILO_STOP`, then `SYS_SILO_KILL` after the
+   grace window), reverse plan order, and unload their modules.
+2. Apply the new `SiloConfig` with `SYS_SILO_CONFIG` and replace the grant set
+   by calling `SYS_SILO_GRANT_RESET` followed by `SYS_SILO_GRANT`.
+3. Restart the declared strates on the same silo handle.
+
+A silo is "changed" when any plan field other than its SID differs from the
+last applied plan; its SID is always forced to the live value, so a silo is
+never re-keyed by a reload. A plan entry with no strates is treated as a
+removal. Removal stops the silo, unloads its modules and destroys it;
+reconfiguration failure leaves the silo stopped and is reported as `failed`
+rather than silently keeping the old configuration.
+
+Zero-downtime is **not** provided: without task migration the silo is briefly
+down between stop and restart, and running connections are re-established by
+the restarted strates.
+
 ---
 
 ## Octal mode (pledge/unveil)

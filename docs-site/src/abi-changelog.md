@@ -45,8 +45,18 @@ syscalls 270–283 are implemented but unreleased (§16 of the specification).
 ## Current version
 
 - `ABI_VERSION_MAJOR = 0`
-- `ABI_VERSION_MINOR = 3`
-- Packed: `0.3`
+- `ABI_VERSION_MINOR = 4`
+- Packed: `0.4`
+
+### 0.4 : 2026-11-15
+
+Additive, wire-compatible change:
+
+- **Added:** `SYS_SILO_GRANT_RESET` (904) clears the grant set of a silo,
+  letting a stopped (`Created`, `Ready`, `Stopped`, `Crashed`) silo replace its
+  PATH/IRQ/PCI/DMA grants before restart. Admin-only; a running or paused silo
+  is rejected with `EINVAL`. No existing struct layout or syscall number
+  changed.
 
 ### 0.3 : 2026-11-15
 

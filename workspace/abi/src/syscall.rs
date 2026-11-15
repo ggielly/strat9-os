@@ -1726,6 +1726,17 @@ pub const SYS_REBOOT: usize = 902;
 /// grant of a kind keeps the previous unrestricted behavior.
 pub const SYS_SILO_GRANT: usize = 903;
 
+/// Clear the grant set of a silo.
+///
+/// - `silo_handle`: silo capability handle (read/write, admin required)
+///
+/// Admin-only. Empties every PATH/IRQ/PCI/DMA grant previously applied with
+/// [`SYS_SILO_GRANT`], so a stopped silo can replace its grant set before it
+/// is restarted. Only valid while the silo has no live tasks: the silo must be
+/// `Created`, `Ready`, `Stopped` or `Crashed`; a `Running` or `Paused` silo
+/// returns `-EINVAL`.
+pub const SYS_SILO_GRANT_RESET: usize = 904;
+
 // ── Block 560-569: s9vm virtualization (P0 surface) ────────────────────────
 //
 // The block 537-599 is free; 520-536 is used by the IOMMU. The P0 surface is

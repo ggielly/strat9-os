@@ -71,6 +71,10 @@ impl Scheme for InputScheme {
             }
             _ => return Err(SyscallError::NotFound),
         };
+        if file_id == KBD_FILE_ID {
+            // A new raw reader must not replay stale keystrokes.
+            crate::arch::keyboard::flush_raw();
+        }
 
         Ok(OpenResult {
             file_id,

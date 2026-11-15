@@ -47,7 +47,7 @@ pub struct BootPlan {
 }
 
 /// A silo that survived validation, with its SID assigned.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlannedSilo {
     pub name: String,
     pub label: Option<String>,

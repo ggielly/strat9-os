@@ -1008,6 +1008,11 @@ struct SiloManager {
 const SILO_EVENTS_CAPACITY: usize = 256;
 
 impl Silo {
+    /// Drop every grant applied to this silo.
+    fn clear_grants(&mut self) {
+        self.grants.clear();
+    }
+
     /// Add a grant, merging write access into an existing matching entry.
     fn add_grant(&mut self, entry: GrantEntry) -> Result<(), SyscallError> {
         for existing in self.grants.iter_mut() {
@@ -2639,6 +2644,36 @@ pub fn sys_silo_grant(silo_handle: u64, desc_ptr: u64, count: u64) -> Result<u64
     for entry in entries {
         silo.add_grant(entry)?;
     }
+    Ok(0)
+}
+
+/// Clears the grant set of a silo so it can be replaced before restart.
+///
+/// Admin-only and editable-state only: a silo with live tasks (`Running` or
+/// `Paused`) rejects the reset with `InvalidArgument`.
+pub fn sys_silo_grant_reset(silo_handle: u64) -> Result<u64, SyscallError> {
+    require_silo_admin()?;
+    let sid = resolve_silo_handle(silo_handle, CapPermissions::read_write())?;
+    let mut mgr = SILO_MANAGER.lock();
+    let silo = mgr.get_mut(sid)?;
+
+    let editable = matches!(
+        silo.state,
+        SiloState::Created | SiloState::Ready | SiloState::Stopped | SiloState::Crashed
+    );
+    if !editable {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    silo.clear_grants();
+    mgr.push_event(SiloEvent {
+        silo_id: sid as u64,
+        kind: SiloEventKind::Updated,
+        _pad: 0,
+        data0: 0,
+        data1: 0,
+        tick: crate::process::scheduler::ticks(),
+    });
     Ok(0)
 }
 
