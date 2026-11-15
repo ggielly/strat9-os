@@ -31,8 +31,9 @@
 
 use strat9_abi::{
     data::{
-        FileStat, IpcMessage, Stat, TimeSpec, IPC_MESSAGE_ALIGN, IPC_MESSAGE_SIZE,
-        IPC_PAYLOAD_CAPACITY,
+        FileStat, IpcMessage, SiloGrantDesc, Stat, TimeSpec, IPC_MESSAGE_ALIGN, IPC_MESSAGE_SIZE,
+        IPC_PAYLOAD_CAPACITY, SILO_GRANT_ACCESS_WRITE, SILO_GRANT_DMA, SILO_GRANT_IRQ,
+        SILO_GRANT_PATH, SILO_GRANT_PCI,
     },
     errno,
     ipc::IPC_HANDSHAKE_MAGIC,
@@ -256,6 +257,7 @@ const GOLDEN_SYSCALLS: &[(&str, usize)] = &[
     ("SYS_IOMMU_RESERVED", SYS_IOMMU_RESERVED),
     ("SYS_PCI_MSI_ALLOC", SYS_PCI_MSI_ALLOC),
     ("SYS_PCI_MSI_FREE", SYS_PCI_MSI_FREE),
+    ("SYS_SILO_GRANT", SYS_SILO_GRANT),
 ];
 
 #[test]
@@ -271,6 +273,24 @@ fn syscall_numbers_are_pinned() {
     assert_eq!(SYS_ABI_VERSION, 900);
     assert_eq!(SYS_GETCMDLINE, 901);
     assert_eq!(SYS_REBOOT, 902);
+    assert_eq!(SYS_SILO_GRANT, 903);
+}
+
+#[test]
+fn silo_grant_desc_layout_is_pinned() {
+    assert_eq!(core::mem::size_of::<SiloGrantDesc>(), 32);
+    assert_eq!(core::mem::align_of::<SiloGrantDesc>(), 8);
+    assert_eq!(core::mem::offset_of!(SiloGrantDesc, kind), 0);
+    assert_eq!(core::mem::offset_of!(SiloGrantDesc, access), 4);
+    assert_eq!(core::mem::offset_of!(SiloGrantDesc, id), 8);
+    assert_eq!(core::mem::offset_of!(SiloGrantDesc, len), 16);
+    assert_eq!(core::mem::offset_of!(SiloGrantDesc, _reserved), 24);
+
+    assert_eq!(SILO_GRANT_PATH, 1);
+    assert_eq!(SILO_GRANT_IRQ, 2);
+    assert_eq!(SILO_GRANT_PCI, 3);
+    assert_eq!(SILO_GRANT_DMA, 4);
+    assert_eq!(SILO_GRANT_ACCESS_WRITE, 1);
 }
 
 #[test]
@@ -293,7 +313,7 @@ fn syscall_table_is_exhaustive() {
     // table, this count check fails and forces a conscious review.
     assert_eq!(
         GOLDEN_SYSCALLS.len(),
-        208,
+        209,
         "golden table out of sync: add new SYS_* consts AND their pinned values"
     );
 }

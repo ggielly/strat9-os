@@ -45,8 +45,19 @@ syscalls 270–283 are implemented but unreleased (§16 of the specification).
 ## Current version
 
 - `ABI_VERSION_MAJOR = 0`
-- `ABI_VERSION_MINOR = 2`
-- Packed: `0.2`
+- `ABI_VERSION_MINOR = 3`
+- Packed: `0.3`
+
+### 0.3 : 2026-11-15
+
+Additive, wire-compatible change:
+
+- **Added:** `SYS_SILO_GRANT` (903) applies an array of `SiloGrantDesc`
+  (32 bytes, align 8) to a silo, granting per-subsystem PATH/IRQ/PCI/DMA
+  access. Enforcement is deny-by-default once a silo declares a grant of a
+  kind; silos with no grant of that kind keep the previous behavior.
+- **Added:** `SiloGrantDesc` and its `SILO_GRANT_*` / `SILO_GRANT_ACCESS_*`
+  constants. No existing struct layout or syscall number changed.
 
 ### 0.2 : 2026-11-14
 

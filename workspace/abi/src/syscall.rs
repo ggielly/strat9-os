@@ -1715,6 +1715,17 @@ pub const SYS_GETCMDLINE: usize = 901;
 /// Returns only on failure; any other `how` value returns `-EINVAL`.
 pub const SYS_REBOOT: usize = 902;
 
+/// Grant per-subsystem access to a silo.
+///
+/// - `silo_handle`: silo capability handle (read/write, admin required)
+/// - `desc_ptr`: user pointer to an array of [`SiloGrantDesc`]
+/// - `count`: number of descriptors (1..=32)
+///
+/// Each descriptor grants PATH, IRQ, PCI or DMA access. Enforcement is
+/// deny-by-default once a silo declares a grant of that kind; a silo with no
+/// grant of a kind keeps the previous unrestricted behavior.
+pub const SYS_SILO_GRANT: usize = 903;
+
 // ── Block 560-569: s9vm virtualization (P0 surface) ────────────────────────
 //
 // The block 537-599 is free; 520-536 is used by the IOMMU. The P0 surface is

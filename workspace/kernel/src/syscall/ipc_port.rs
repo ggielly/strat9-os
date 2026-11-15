@@ -225,6 +225,7 @@ pub fn sys_ipc_connect(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError
     let bytes = user.read_to_vec();
     let path = core::str::from_utf8(&bytes).map_err(SyscallError::from)?;
 
+    silo::grant::check_current_task_path(path, false)?;
     let (port_raw, _remaining) = crate::namespace::resolve(path).ok_or(SyscallError::NotFound)?;
     let port_id = PortId::from_u64(port_raw);
     if port::get_port(port_id).is_none() {
@@ -369,6 +370,8 @@ pub fn sys_ipc_bind_port(
     let user = UserSliceRead::new(path_ptr, path_len as usize)?;
     let bytes = user.read_to_vec();
     let path = core::str::from_utf8(&bytes).map_err(SyscallError::from)?;
+
+    silo::grant::check_current_task_path(path, true)?;
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &*task.process.capabilities.get() };

@@ -28,6 +28,7 @@ use super::error::SyscallError;
 use crate::{
     arch::pci,
     memory::{UserSliceRead, UserSliceWrite},
+    silo,
 };
 
 /// PCI match flags for probe criteria.
@@ -137,9 +138,20 @@ pub fn sys_pci_enum(
     };
 
     let devices = pci::probe_all(criteria);
+    let pci_filter = silo::grant::current_task_pci_filter();
     let count = core::cmp::min(devices.len(), max_entries);
     let mut out = alloc::vec::Vec::<PciDeviceInfoAbi>::with_capacity(count);
-    for dev in devices.into_iter().take(count) {
+    for dev in devices.into_iter() {
+        if let Some(ids) = &pci_filter {
+            let packed =
+                silo::grant::packed_pci(dev.address.bus, dev.address.device, dev.address.function);
+            if !ids.contains(&packed) {
+                continue;
+            }
+        }
+        if out.len() >= max_entries {
+            break;
+        }
         out.push(PciDeviceInfoAbi {
             address: PciAddressAbi {
                 bus: dev.address.bus,
@@ -179,6 +191,7 @@ pub fn sys_pci_rescan() -> Result<u64, SyscallError> {
 /// SYS_PCI_CFG_READ: read from PCI configuration space.
 pub fn sys_pci_cfg_read(addr_ptr: u64, offset: u64, width: u64) -> Result<u64, SyscallError> {
     let dev_addr = read_pci_address(addr_ptr)?;
+    silo::grant::check_current_task_pci(dev_addr.bus, dev_addr.device, dev_addr.function)?;
     let off = u8::try_from(offset).map_err(|_| SyscallError::InvalidArgument)?;
     let w = u8::try_from(width).map_err(|_| SyscallError::InvalidArgument)?;
     if !matches!(w, 1 | 2 | 4) {
@@ -210,6 +223,7 @@ pub fn sys_pci_cfg_write(
     value: u64,
 ) -> Result<u64, SyscallError> {
     let dev_addr = read_pci_address(addr_ptr)?;
+    silo::grant::check_current_task_pci(dev_addr.bus, dev_addr.device, dev_addr.function)?;
     let off = u8::try_from(offset).map_err(|_| SyscallError::InvalidArgument)?;
     let w = u8::try_from(width).map_err(|_| SyscallError::InvalidArgument)?;
     if !matches!(w, 1 | 2 | 4) {

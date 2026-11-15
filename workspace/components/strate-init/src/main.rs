@@ -39,7 +39,13 @@ use init_config::{
     BootPlan, Diagnostic, PlannedKind, PlannedSilo, Policy, Selection, SiloDef,
     build_plan_with_policy, build_plan_with_reserved, merge_overlay, parse_config,
 };
-use strat9_syscall::{call, data::SiloConfig};
+use strat9_syscall::{
+    call,
+    data::{
+        SILO_GRANT_ACCESS_WRITE, SILO_GRANT_DMA, SILO_GRANT_IRQ, SILO_GRANT_PATH, SILO_GRANT_PCI,
+        SiloConfig, SiloGrantDesc,
+    },
+};
 mod control;
 pub mod fmt;
 mod launcher;
@@ -403,6 +409,56 @@ fn boot_silos(plan: BootPlan, supervised: &mut Vec<supervisor::SupervisedChild>)
     }
 }
 
+/// Converts declared grants into wire descriptors.
+///
+/// Path grants need their bytes to stay alive until the syscall returns, so the
+/// caller keeps the returned buffer vector in scope.
+fn grant_descriptors(grants: &[init_config::Grant]) -> (Vec<SiloGrantDesc>, Vec<Vec<u8>>) {
+    let mut descs = Vec::with_capacity(grants.len());
+    let mut buffers: Vec<Vec<u8>> = Vec::new();
+    for grant in grants {
+        let desc = match &grant.kind {
+            init_config::GrantKind::Path { service, write } => {
+                let bytes = service.as_str().as_bytes().to_vec();
+                let desc = SiloGrantDesc {
+                    kind: SILO_GRANT_PATH,
+                    access: if *write { SILO_GRANT_ACCESS_WRITE } else { 0 },
+                    id: bytes.as_ptr() as u64,
+                    len: bytes.len() as u64,
+                    _reserved: 0,
+                };
+                buffers.push(bytes);
+                desc
+            }
+            init_config::GrantKind::Irq(line) => SiloGrantDesc {
+                kind: SILO_GRANT_IRQ,
+                access: 0,
+                id: *line as u64,
+                len: 0,
+                _reserved: 0,
+            },
+            init_config::GrantKind::Pci(addr) => SiloGrantDesc {
+                kind: SILO_GRANT_PCI,
+                access: 0,
+                id: ((addr.bus as u64) << 16)
+                    | ((addr.device as u64) << 8)
+                    | (addr.function as u64),
+                len: 0,
+                _reserved: 0,
+            },
+            init_config::GrantKind::Dma(bytes) => SiloGrantDesc {
+                kind: SILO_GRANT_DMA,
+                access: 0,
+                id: *bytes,
+                len: 0,
+                _reserved: 0,
+            },
+        };
+        descs.push(desc);
+    }
+    (descs, buffers)
+}
+
 /// Creates and starts every strate of one planned silo.
 ///
 /// A silo whose `requires` service is not reachable within the readiness budget
@@ -437,6 +493,47 @@ pub(crate) fn boot_silo(s_def: PlannedSilo, supervised: &mut Vec<supervisor::Sup
             return;
         }
     };
+
+    // Apply declared grants before any strate is attached or started. With the
+    // kernel's deny-by-default-when-declared rule, a silo whose grants failed to
+    // apply must not run: it would silently run unrestricted.
+    if !s_def.grants.is_empty() {
+        let (descs, _buffers) = grant_descriptors(&s_def.grants);
+        match call::silo_grant(silo_handle, &descs) {
+            // The syscall returns 0 on success; report the descriptor count.
+            Ok(_) => {
+                log("[init] GRANTS: ");
+                log(&s_def.name);
+                log(" applied ");
+                log_u32(descs.len() as u32);
+                log("\n");
+                if s_def
+                    .grants
+                    .iter()
+                    .any(|g| matches!(g.kind, init_config::GrantKind::Irq(_)))
+                {
+                    log(
+                        "[init] NOTE: irq grants are stored by the kernel but no subsystem consumes them yet\n",
+                    );
+                }
+            }
+            Err(e) => {
+                log("[init] silo_grant failed: ");
+                log(&s_def.name);
+                log(" ");
+                log(e.name());
+                log("\n");
+                if let Err(e) = call::silo_destroy(silo_handle) {
+                    log("[init] silo_destroy failed: ");
+                    log(e.name());
+                    log(", stopping it instead\n");
+                    let _ = call::silo_stop(silo_handle);
+                }
+                let _ = call::handle_close(silo_handle);
+                return;
+            }
+        }
+    }
 
     if let Some(ref lbl) = s_def.label {
         if let Err(e) = call::silo_rename(silo_handle, lbl.as_ptr() as usize, lbl.len()) {
@@ -549,7 +646,7 @@ pub unsafe extern "C" fn _start() -> ! {
             log(&silo.name);
             log(" declares ");
             log_u32(silo.grants.len() as u32);
-            log(" grant(s) (validated; not enforced)\n");
+            log(" grant(s)\n");
         }
     }
     log("[init] Stage: boot silos\n");

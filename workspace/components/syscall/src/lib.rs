@@ -1455,6 +1455,23 @@ pub mod call {
         unsafe { syscall2(number::SYS_SILO_CONFIG, silo_id, config_ptr) }
     }
 
+    /// Grant per-subsystem access (PATH/IRQ/PCI/DMA) to a silo.
+    ///
+    /// An empty slice is a no-op and does not enter the kernel.
+    pub fn silo_grant(silo_handle: usize, grants: &[data::SiloGrantDesc]) -> error::Result<usize> {
+        if grants.is_empty() {
+            return Ok(0);
+        }
+        unsafe {
+            syscall3(
+                number::SYS_SILO_GRANT,
+                silo_handle,
+                grants.as_ptr() as usize,
+                grants.len(),
+            )
+        }
+    }
+
     /// Attach a loaded kernel module to a silo.
     pub fn silo_attach_module(silo_id: usize, module_id: usize) -> error::Result<usize> {
         unsafe { syscall2(number::SYS_SILO_ATTACH_MODULE, silo_id, module_id) }

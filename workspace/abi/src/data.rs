@@ -68,6 +68,41 @@ pub const IPC_FILE_FLAG_CHUNK_READ: u32 = 1 << 4;
 /// Directory entry flag: supports chunked writes.
 pub const IPC_FILE_FLAG_CHUNK_WRITE: u32 = 1 << 5;
 
+// ── Silo grants ─────────────────────────────────────────────────────────────
+
+/// `SiloGrantDesc.kind`: grant access to a namespace path subtree.
+pub const SILO_GRANT_PATH: u32 = 1;
+/// `SiloGrantDesc.kind`: grant access to an interrupt line.
+pub const SILO_GRANT_IRQ: u32 = 2;
+/// `SiloGrantDesc.kind`: grant access to a PCI function.
+pub const SILO_GRANT_PCI: u32 = 3;
+/// `SiloGrantDesc.kind`: grant a DMA byte budget.
+pub const SILO_GRANT_DMA: u32 = 4;
+/// `SiloGrantDesc.access`: write access is allowed (PATH only).
+pub const SILO_GRANT_ACCESS_WRITE: u32 = 1;
+
+/// One grant descriptor passed to `SYS_SILO_GRANT`.
+///
+/// - PATH: `id` = user pointer to UTF-8 path, `len` = byte length,
+///   `access & SILO_GRANT_ACCESS_WRITE` = write allowed.
+/// - IRQ: `id` = interrupt line.
+/// - PCI: `id = (bus << 16) | (device << 8) | function`.
+/// - DMA: `id` = byte budget, `len` = 0.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SiloGrantDesc {
+    /// Grant kind (`SILO_GRANT_*`).
+    pub kind: u32,
+    /// Access flags (`SILO_GRANT_ACCESS_*`).
+    pub access: u32,
+    /// Kind-specific identifier.
+    pub id: u64,
+    /// Kind-specific length (PATH byte length).
+    pub len: u64,
+    /// Reserved, must be zero.
+    pub _reserved: u64,
+}
+
 // ── SiloMode ────────────────────────────────────────────────────────────────
 
 /// 9-bit octal silo permission mode (3 control + 3 hardware + 3 registry).
@@ -689,6 +724,7 @@ assert_abi_struct!(Map, 32, 8);
 assert_abi_struct!(FileStat, 112, 8);
 assert_abi_struct!(IpcMessage, IPC_MESSAGE_SIZE, IPC_MESSAGE_ALIGN);
 assert_abi_struct!(SiloConfig, 176, 8);
+assert_abi_struct!(SiloGrantDesc, 32, 8);
 assert_abi_struct!(TimeSpec, 16, 8);
 assert_abi_struct!(HandleInfo, 16, 8);
 assert_abi_struct!(MemoryRegionInfo, 24, 8);

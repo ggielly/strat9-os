@@ -104,6 +104,33 @@ SiloConfig {
 
 ---
 
+## Grants (`SYS_SILO_GRANT`)
+
+`SYS_SILO_GRANT(handle, desc_ptr, count)` applies 1–32 `SiloGrantDesc`
+(32 bytes each) to an editable silo (`Created`, `Ready`, `Stopped`,
+`Crashed`). Descriptor kinds:
+
+| Kind | `id` | `len` | Meaning |
+|------|------|-------|---------|
+| `PATH` (1) | user pointer to UTF-8 path | byte length ≤ 1024 | Path subtree access; `access & 1` allows writes |
+| `IRQ` (2) | interrupt line | 0 | Interrupt access |
+| `PCI` (3) | `(bus << 16) \| (device << 8) \| function` | — | Exact PCI function access |
+| `DMA` (4) | byte budget | 0 | DMA byte budget (summed) |
+
+Enforcement is **deny-by-default per kind**: a silo with no PATH grant can
+connect to any namespace path; once a PATH grant exists, only the exact path
+or its subtree is allowed, and binding/writing needs a writable grant.
+`SYS_PCI_ENUM` filters to PCI-granted functions; `SYS_PCI_CFG_READ/WRITE`
+enforce exact addresses; DMA quotas become `min(config, sum(grants))`.
+Admin tasks and tasks outside a silo are unrestricted.
+
+**Family ceiling:** IRQ/PCI/DMA grants are accepted only for `SYS` and `DRV`
+silos. PATH write grants require a family whose registry ceiling includes
+`BIND` (`SYS`, `DRV`, `FS`, `NET`); `WASM` and `USR` may only receive
+read-only PATH grants. Violations return `PermissionDenied`.
+
+---
+
 ## Octal mode (pledge/unveil)
 
 Access control uses an `OctalMode` with three permission groups, encoded as a 12-bit octal value:

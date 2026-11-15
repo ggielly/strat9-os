@@ -27,6 +27,8 @@
 
 mod memory_account;
 pub(crate) use memory_account::{IpcResource, SiloMemoryAccount};
+pub mod grant;
+use grant::GrantEntry;
 
 use crate::{
     capability::{get_capability_manager, CapId, CapPermissions, Capability, ResourceType},
@@ -873,6 +875,7 @@ struct Silo {
     tasks: HVec<TaskId, 64>,
     granted_caps: HVec<u64, 64>,
     granted_resources: HVec<GrantedResource, 32>,
+    grants: HVec<GrantEntry, 32>,
     unveil_rules: HVec<UnveilRule, 128>,
     sandboxed: bool,
     /// OpenBSD `pledge`/`unveil` semantics: once set, no new rules.
@@ -1004,6 +1007,19 @@ struct SiloManager {
 
 const SILO_EVENTS_CAPACITY: usize = 256;
 
+impl Silo {
+    /// Add a grant, merging write access into an existing matching entry.
+    fn add_grant(&mut self, entry: GrantEntry) -> Result<(), SyscallError> {
+        for existing in self.grants.iter_mut() {
+            if existing.same_subject(&entry) {
+                existing.merge_from(&entry);
+                return Ok(());
+            }
+        }
+        self.grants.push(entry).map_err(|_| SyscallError::NoSpace)
+    }
+}
+
 impl SiloManager {
     /// Creates a new instance.
     const fn new() -> Self {
@@ -1055,6 +1071,7 @@ impl SiloManager {
             tasks: HVec::new(),
             granted_caps: HVec::new(),
             granted_resources: HVec::new(),
+            grants: HVec::new(),
             unveil_rules: HVec::new(),
             sandboxed: false,
             unveil_locked: false,
@@ -1654,7 +1671,7 @@ pub fn current_task_dma_quota() -> Option<DmaQuota> {
     let silo = mgr.get(sid).ok()?;
     Some(DmaQuota {
         max_domains: silo.config.dma_max_domains,
-        max_bytes: silo.config.dma_max_bytes,
+        max_bytes: grant::dma_limit(silo.grants.as_slice(), silo.config.dma_max_bytes),
         iova_base: silo.config.dma_iova_base,
         iova_limit: silo.config.dma_iova_limit,
         fault_policy: crate::hardware::iommu::FaultPolicy::from_raw(silo.config.dma_fault_policy),
@@ -1868,6 +1885,7 @@ pub fn kernel_spawn_strate(
             tasks: HVec::new(),
             granted_caps: HVec::new(),
             granted_resources: HVec::new(),
+            grants: HVec::new(),
             unveil_rules: HVec::new(),
             sandboxed: false,
             unveil_locked: false,
@@ -2136,6 +2154,7 @@ pub fn register_boot_strate_task(task_id: TaskId, label: &str) -> Result<u32, Sy
             },
             granted_caps: HVec::new(),
             granted_resources: HVec::new(),
+            grants: HVec::new(),
             unveil_rules: HVec::new(),
             sandboxed: false,
             unveil_locked: false,
@@ -2539,6 +2558,87 @@ pub fn sys_silo_config(handle: u64, res_ptr: u64) -> Result<u64, SyscallError> {
     silo.flags = config.flags as u32;
     silo.granted_caps = granted_caps;
     silo.granted_resources = granted_resources;
+    Ok(0)
+}
+
+/// Whether a silo family may be granted hardware access (IRQ/PCI/DMA).
+fn family_allows_hardware_grants(family: StrateFamily) -> bool {
+    matches!(family, StrateFamily::SYS | StrateFamily::DRV)
+}
+
+/// Whether a silo family may be granted writable PATH access.
+///
+/// Mirrors the family mode ceiling (`Family::ceiling()` in init-config):
+/// registry `BIND` (octal `0o002`) is present for SYS/DRV/FS/NET but not for
+/// WASM/USR, whose registry ceiling is `LOOKUP` only.
+fn family_allows_path_write(family: StrateFamily) -> bool {
+    matches!(
+        family,
+        StrateFamily::SYS | StrateFamily::DRV | StrateFamily::FS | StrateFamily::NET
+    )
+}
+
+/// Performs the sys silo grant operation.
+pub fn sys_silo_grant(silo_handle: u64, desc_ptr: u64, count: u64) -> Result<u64, SyscallError> {
+    require_silo_admin()?;
+    if count == 0 || count > 32 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    const DESC_SIZE: usize = core::mem::size_of::<strat9_abi::data::SiloGrantDesc>();
+    let byte_len = (count as usize)
+        .checked_mul(DESC_SIZE)
+        .ok_or(SyscallError::InvalidArgument)?;
+    let user = UserSliceRead::new(desc_ptr, byte_len)?;
+    let bytes = user.read_to_vec();
+
+    let mut entries = Vec::with_capacity(count as usize);
+    for chunk in bytes.chunks_exact(DESC_SIZE) {
+        // SAFETY: chunk is exactly DESC_SIZE bytes copied from userspace.
+        let desc = unsafe {
+            core::ptr::read_unaligned(chunk.as_ptr() as *const strat9_abi::data::SiloGrantDesc)
+        };
+        let path_bytes = if desc.kind == strat9_abi::data::SILO_GRANT_PATH {
+            if desc.len == 0 || desc.len > grant::MAX_GRANT_PATH_LEN as u64 {
+                return Err(SyscallError::InvalidArgument);
+            }
+            let path_user = UserSliceRead::new(desc.id, desc.len as usize)?;
+            Some(path_user.read_to_vec())
+        } else {
+            None
+        };
+        entries.push(grant::parse_desc(&desc, path_bytes.as_deref())?);
+    }
+
+    let sid = resolve_silo_handle(silo_handle, CapPermissions::read_write())?;
+    let mut mgr = SILO_MANAGER.lock();
+    let silo = mgr.get_mut(sid)?;
+
+    let editable = matches!(
+        silo.state,
+        SiloState::Created | SiloState::Ready | SiloState::Stopped | SiloState::Crashed
+    );
+    if !editable {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    for entry in &entries {
+        match entry.kind() {
+            grant::GrantKind::Path => {
+                if entry.write() && !family_allows_path_write(silo.family) {
+                    return Err(SyscallError::PermissionDenied);
+                }
+            }
+            grant::GrantKind::Irq | grant::GrantKind::Pci | grant::GrantKind::Dma => {
+                if !family_allows_hardware_grants(silo.family) {
+                    return Err(SyscallError::PermissionDenied);
+                }
+            }
+        }
+    }
+
+    for entry in entries {
+        silo.add_grant(entry)?;
+    }
     Ok(0)
 }
 
