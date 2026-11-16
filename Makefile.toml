@@ -326,18 +326,31 @@ script = [
 # Prefer hardware virtualization when this user can access KVM.
 # Keep an explicit software fallback for hosts without it.
 qemu_accel=tcg
+qemu_cpu=qemu64
 if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     qemu_accel=kvm
-    echo "QEMU acceleration: KVM"
+    # `+vmx` forces VT-x exposure even if the host CPU model omits it; QEMU
+    # refuses cleanly when the outer hypervisor does not provide nested VT-x.
+    qemu_cpu=host,+vmx
+    echo "QEMU acceleration: KVM (VT-x/EPT exposed via -cpu host,+vmx)"
+    if [ -r /sys/module/kvm_intel/parameters/nested ]; then
+        echo "KVM nested: $(cat /sys/module/kvm_intel/parameters/nested)"
+    fi
 else
-    echo "QEMU acceleration: TCG (/dev/kvm unavailable; expose KVM to the host/container for hardware acceleration)"
+    echo "QEMU acceleration: TCG (no VT-x; hardware acceleration unavailable)"
+    if [ -e /dev/kvm ]; then
+        echo "/dev/kvm exists but is not accessible to this user."
+        echo "Fix: sudo usermod -aG kvm "$USER"   (then log out and back in)"
+        echo "Check: id -nG | tr ' ' '\n' | grep -x kvm"
+        echo "Or run through the kvm group: sg kvm -c 'cargo make run-gui-smp-release'"
+    fi
 fi
 # OVMF writes to its NVRAM store; boot from a scratch copy so the packaged file stays pristine.
 [ -f build/OVMF_VARS.fd ] || cp /usr/share/OVMF/OVMF_VARS_4M.fd build/OVMF_VARS.fd
 ${QEMU} \
     -accel "$qemu_accel" \
     -machine q35 \
-    -cpu qemu64 \
+    -cpu "$qemu_cpu" \
     -smp 1 \
     -m 2G \
     -debugcon file:build/qemu-debugcon.log \

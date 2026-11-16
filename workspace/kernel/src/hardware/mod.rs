@@ -65,16 +65,8 @@ pub fn init() {
     timer::init();
     crate::arch::speaker::beep_phase(11); // Timer
 
-    // USB/BT before the storage probe: the X13 storage driver resets the
-    // machine, so Bluetooth must attach and log first. The timer/APIC is
-    // already up so the xHCI MSI line is valid.
-    log::info!("****************************************");
-    log::info!("*** USB/BT EARLY (before storage) ***");
-    log::info!("****************************************");
-    usb::init();
-    crate::arch::speaker::beep_phase(12); // USB
-    log::info!("*** USB/BT EARLY INIT DONE ***");
-    log::info!("****************************************");
+    // USB is initialized by its own component (`usb_init`) in the hardware
+    // stage, not here: no early USB/Bluetooth probe before storage.
 
     if crate::debug_cfg::STORAGE_ENABLED {
         storage::init();

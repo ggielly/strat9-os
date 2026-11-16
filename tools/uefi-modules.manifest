@@ -26,4 +26,7 @@ test test_mem strate-mem-test-release
 test test_mem_stressed strate-mem-test-release
 test test_mem_region strate-mem-test-release
 test test_mem_region_proc strate-mem-test-release
+test test_gui_mem strate-mem-test-release
+test test_gui_authority strate-mem-test-release
+test test_gui_display strate-mem-test-release
 base s9vm-guest s9vm-guest-release

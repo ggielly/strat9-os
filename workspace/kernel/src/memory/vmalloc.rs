@@ -857,7 +857,12 @@ pub(crate) fn vmalloc(size: usize, token: &IrqDisabledToken) -> Result<*mut u8, 
             let page_virt = virt_base + (i as u64 * 4096);
             let page = Page::containing_address(VirtAddr::new(page_virt));
             let x86_frame = X86PhysFrame::<Size4KiB>::containing_address(frame.start_address);
-            if map_page_kernel(page, x86_frame, page_flags).is_err() {
+            if let Err(map_err) = map_page_kernel(page, x86_frame, page_flags) {
+                serial_println!(
+                    "[vmalloc] map_page_kernel failed: va=0x{:x} err={}",
+                    page_virt,
+                    map_err
+                );
                 for j in 0..i {
                     let pv = virt_base + (j as u64 * 4096);
                     let pg = Page::containing_address(VirtAddr::new(pv));

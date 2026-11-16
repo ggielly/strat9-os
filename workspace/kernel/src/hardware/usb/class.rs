@@ -67,7 +67,9 @@ pub fn enumerate_device(
         // 0xE0 = wireless; 0xEF = miscellaneous with an Interface Association
         // (MediaTek MT7921 reports 0xEF at device level, HCI on the interface);
         // 0x00 = composite. Other classes are not Bluetooth.
-        0xE0 | 0xEF | 0x00 => btusb::enumerate_device(controller, port, slot_id, dev_desc),
+        0xE0 | 0xEF | 0x00 if crate::debug_cfg::BT_ENABLED => {
+            btusb::enumerate_device(controller, port, slot_id, dev_desc)
+        }
         _ => {}
     }
 }

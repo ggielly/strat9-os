@@ -910,10 +910,6 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // before VGA init so quiet_mode can suppress early debug output).
     boot::config::apply_kernel_config();
 
-    // Initialize the vmalloc arena (VM-backed large heap allocations)
-    memory::vmalloc::init();
-    serial_println!("[init] Vmalloc arena ready.");
-
     debug_assert!(
         !arch::interrupts_enabled(),
         "interrupts must be disabled after buddy allocator init"
@@ -945,6 +941,12 @@ pub unsafe fn kernel_main(args: *const boot::entry::KernelArgs) -> ! {
     // Map all RAM into HHDM to ensure buddy/heap allocations are accessible.
     // VMware bootloader HHDM may be sparse, causing PF on new heap pages.
     memory::paging::map_all_ram(&mmap_work[..mmap_work_len]);
+
+    // Initialize the vmalloc arena (VM-backed large heap allocations).
+    // Must run after `paging::init`: the bootstrap mapping uses
+    // `map_page_kernel`, which refuses to run while paging is uninitialised.
+    memory::vmalloc::init();
+    serial_println!("[init] Vmalloc arena ready.");
 
     // Console rendering mode: `console.mode=full|lite|serial` from the boot
     // environment (see `/boot/strat9.cfg`). Selected before any framebuffer

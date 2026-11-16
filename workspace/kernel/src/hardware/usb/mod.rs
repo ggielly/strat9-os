@@ -75,36 +75,39 @@ pub fn init() {
     uhci::init();
     crate::e9_mark!(b'U');
 
-    // Bluetooth HCI transport. Enumeration already probed every device through
-    // `class::enumerate_device`; this only announces readiness.
-    btusb::init();
-    log::info!("****************************************");
-    log::info!(
-        "*** USB/BT EARLY: HCI ATTACHED = {} ***",
-        btusb::is_present()
-    );
-    log::info!("****************************************");
+    // Bluetooth HCI transport. Disabled: this path breaks boot.
+    if crate::debug_cfg::BT_ENABLED {
+        // Enumeration already probed every device through
+        // `class::enumerate_device`; this only announces readiness.
+        btusb::init();
+        log::info!("****************************************");
+        log::info!(
+            "*** USB/BT EARLY: HCI ATTACHED = {} ***",
+            btusb::is_present()
+        );
+        log::info!("****************************************");
 
-    // Compact summary of every xHCI controller + the BT device, then pause so
-    // the lines can be photographed on real hardware.
-    let count = xhci::controller_count();
-    log::info!("*** xHCI SUMMARY: {} controller(s) ***", count);
-    for i in 0..count {
-        if let Some(controller) = xhci::get_controller(i) {
-            let ports = crate::sync::with_irqs_disabled(|_| controller.lock().port_count());
-            log::info!("*** xHCI[{}] ports={} ***", i, ports);
+        // Compact summary of every xHCI controller + the BT device, then pause
+        // so the lines can be photographed on real hardware.
+        let count = xhci::controller_count();
+        log::info!("*** xHCI SUMMARY: {} controller(s) ***", count);
+        for i in 0..count {
+            if let Some(controller) = xhci::get_controller(i) {
+                let ports = crate::sync::with_irqs_disabled(|_| controller.lock().port_count());
+                log::info!("*** xHCI[{}] ports={} ***", i, ports);
+            }
         }
-    }
-    match btusb::attached_ids() {
-        Some((vid, pid)) => log::info!("*** BT DEVICE {:04x}:{:04x} ***", vid, pid),
-        None => log::info!("*** BT DEVICE: none ***"),
-    }
-    log::info!("****************************************");
-    log::info!("*** USB/BT SUMMARY ABOVE - PAUSE ***");
-    log::info!("*** press a key (or wait) to continue ***");
-    log::info!("****************************************");
-    if crate::debug_cfg::USB_BOOT_PAUSE {
-        boot_pause();
+        match btusb::attached_ids() {
+            Some((vid, pid)) => log::info!("*** BT DEVICE {:04x}:{:04x} ***", vid, pid),
+            None => log::info!("*** BT DEVICE: none ***"),
+        }
+        log::info!("****************************************");
+        log::info!("*** USB/BT SUMMARY ABOVE - PAUSE ***");
+        log::info!("*** press a key (or wait) to continue ***");
+        log::info!("****************************************");
+        if crate::debug_cfg::USB_BOOT_PAUSE {
+            boot_pause();
+        }
     }
 
     // Initialize HID drivers after controllers are ready

@@ -147,6 +147,9 @@ impl CommandRegistry {
         registry.register("test_mem_region", sys::cmd_test_mem_region);
         registry.register("test_mem_region_proc", sys::cmd_test_mem_region_proc);
         registry.register("test_exec", sys::cmd_test_exec);
+        registry.register("test_gui_mem", sys::cmd_test_gui_mem);
+        registry.register("test_gui_authority", sys::cmd_test_gui_authority);
+        registry.register("test_gui_display", sys::cmd_test_gui_display);
         registry.register("wasm-run", sys::cmd_wasm_run);
 
         registry

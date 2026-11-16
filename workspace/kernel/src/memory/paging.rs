@@ -246,9 +246,18 @@ pub fn map_page_kernel(
     let mut allocator = BuddyFrameAllocator;
 
     unsafe {
+        use crate::x86_crate_shim::structures::paging::mapper::MapToError;
         mapper
             .map_to(page, frame, flags, &mut allocator)
-            .map_err(|_| "Failed to map page (kernel)")?
+            .map_err(|e| match e {
+                MapToError::ParentEntryHugePage => "Failed to map page (kernel): parent huge page",
+                MapToError::PageAlreadyMapped(_) => {
+                    "Failed to map page (kernel): page already mapped"
+                }
+                MapToError::FrameAllocationFailed => {
+                    "Failed to map page (kernel): frame allocation failed"
+                }
+            })?
             .flush();
     }
     Ok(())
