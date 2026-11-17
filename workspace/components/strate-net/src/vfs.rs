@@ -788,3 +788,132 @@ impl NetworkStrate {
         reply_ok(msg.sender)
     }
 }
+
+// ===========================================================================
+// STAT / READDIR
+// ===========================================================================
+
+/// Entries of the `/net` root: `(name, is_dir)`. Nested names such as
+/// `ip6/address` are reachable by path but not listed flat.
+const NET_ROOT_ENTRIES: &[(&str, bool)] = &[
+    ("ip", false),
+    ("address", false),
+    ("prefix", false),
+    ("netmask", false),
+    ("broadcast", false),
+    ("gateway", false),
+    ("route", false),
+    ("routes", false),
+    ("dns", false),
+    ("dhcp", false),
+    ("resolve", false),
+    ("ping", false),
+    ("tcp", false),
+    ("udp", false),
+    ("ip6", false),
+];
+
+impl NetworkStrate {
+    /// `OPCODE_STAT`: metadata for an open handle.
+    pub(crate) fn handle_stat(&mut self, msg: &IpcMessage) -> IpcMessage {
+        use strat9_abi::ipc_payload::{parse_stat_request, StatReply};
+
+        let Some(fid) = parse_stat_request(&msg.payload) else {
+            return IpcMessage::error_reply(msg.sender, -22);
+        };
+        if !self.is_owner(fid, msg.sender) {
+            return IpcMessage::error_reply(msg.sender, -9); // EBADF
+        }
+        let Some(path) = self.open_handles.get(&fid).map(|h| h.path.clone()) else {
+            return IpcMessage::error_reply(msg.sender, -9);
+        };
+
+        let is_socket = self.tcp_listeners.contains_key(&fid)
+            || self.tcp_connections.contains_key(&fid)
+            || self.udp_bound.contains_key(&fid)
+            || self.udp_connections.contains_key(&fid);
+        let (mode, nlink, size) = if path.is_empty() {
+            (0o040555u32, 2u32, 0u64)
+        } else if is_socket {
+            (0o140666, 1, 0)
+        } else {
+            // Info files are generated on demand: report the current length.
+            let size = self
+                .generate_content(fid, &path)
+                .map(|c| c.len() as u64)
+                .unwrap_or(0);
+            let writable = path.starts_with("ping")
+                || path.starts_with("dhcp/")
+                || path.starts_with("resolve/");
+            (if writable { 0o100666 } else { 0o100444 }, 1, size)
+        };
+
+        let now = (strate_net::syscalls::clock_gettime_ns().unwrap_or(0) / 1_000_000_000) as i64;
+        let mut reply = IpcMessage::new(IpcMessage::REPLY_MSG_TYPE);
+        reply.sender = msg.sender;
+        StatReply {
+            status: 0,
+            mode,
+            nlink,
+            uid: 0,
+            gid: 0,
+            blksize: 4096,
+            ino: fid,
+            size,
+            blocks: (size + 511) / 512,
+            atime: now,
+            mtime: now,
+            ctime: now,
+        }
+        .encode_into(&mut reply.payload);
+        reply
+    }
+
+    /// `OPCODE_READDIR`: list the `/net` root.
+    ///
+    /// Reply: `status @ 0..4`, `next_cursor @ 4..6` (`u16::MAX` = done),
+    /// `count @ 6`, `used_bytes @ 7`, then `count` records of
+    /// `ino u64 | type u8 | name_len u8 | name`.
+    pub(crate) fn handle_readdir(&mut self, msg: &IpcMessage) -> IpcMessage {
+        const DT_REG: u8 = 8;
+        const DT_DIR: u8 = 4;
+
+        let fid = message_file_id(msg);
+        if !self.is_owner(fid, msg.sender) {
+            return IpcMessage::error_reply(msg.sender, -9);
+        }
+        match self.open_handles.get(&fid) {
+            Some(h) if h.path.is_empty() => {}
+            Some(_) => return IpcMessage::error_reply(msg.sender, -20), // ENOTDIR
+            None => return IpcMessage::error_reply(msg.sender, -9),
+        }
+        let cursor = u16::from_le_bytes([msg.payload[8], msg.payload[9]]) as usize;
+
+        let mut reply = IpcMessage::new(IpcMessage::REPLY_MSG_TYPE);
+        reply.sender = msg.sender;
+        let mut offset = 8usize;
+        let mut count = 0u8;
+        let mut next = cursor;
+        // `used_bytes` is a single byte on the wire: keep the chunk <= 255.
+        while next < NET_ROOT_ENTRIES.len() {
+            let (name, is_dir) = NET_ROOT_ENTRIES[next];
+            let rec = 10 + name.len();
+            if offset - 8 + rec > 255 {
+                break;
+            }
+            reply.payload[offset..offset + 8].copy_from_slice(&((next + 1) as u64).to_le_bytes());
+            reply.payload[offset + 8] = if is_dir { DT_DIR } else { DT_REG };
+            reply.payload[offset + 9] = name.len() as u8;
+            reply.payload[offset + 10..offset + 10 + name.len()].copy_from_slice(name.as_bytes());
+            offset += rec;
+            count += 1;
+            next += 1;
+        }
+        let next_cursor = if next >= NET_ROOT_ENTRIES.len() { u16::MAX } else { next as u16 };
+        reply.payload[0..4].copy_from_slice(&0u32.to_le_bytes());
+        reply.payload[4..6].copy_from_slice(&next_cursor.to_le_bytes());
+        reply.payload[6] = count;
+        reply.payload[7] = (offset - 8) as u8;
+        reply
+    }
+}

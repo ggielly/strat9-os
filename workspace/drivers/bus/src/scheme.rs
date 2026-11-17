@@ -47,8 +47,9 @@ use strat9_syscall::{
     call,
     data::{
         DT_DIR, DT_REG, IPC_FILE_FLAG_DIRECTORY, IpcMessage, OPCODE_CLOSE, OPCODE_OPEN,
-        OPCODE_READ, OPCODE_READDIR, OPCODE_WRITE, OpenRequest, PCI_MATCH_DEVICE_ID,
-        PCI_MATCH_VENDOR_ID, PciAddress, PciDeviceInfo, PciProbeCriteria,
+        OPCODE_READ, OPCODE_READDIR, OPCODE_STAT, OPCODE_WRITE, OpenRequest, PCI_MATCH_DEVICE_ID,
+        PCI_MATCH_VENDOR_ID, PciAddress, PciDeviceInfo, PciProbeCriteria, StatReply,
+        parse_stat_request,
     },
     error::{EBADF, EINVAL, EIO, ENOENT, ENOMEM, ENOSYS, ENOTDIR},
 };
@@ -843,6 +844,60 @@ impl BusSchemeServer {
         reply
     }
 
+    // === Stat ================================================================
+
+    /// `OPCODE_STAT`: metadata for an open handle.
+    ///
+    /// Directory-ness mirrors `handle_open`/`handle_readdir`; everything under
+    /// `/bus` is read-only except the driver control files.
+    fn handle_stat(&self, sender: u64, payload: &[u8]) -> IpcMessage {
+        let Some(file_id) = parse_stat_request(payload) else {
+            return Self::err_reply(sender, EINVAL);
+        };
+        let handle = match self.handles.get(&file_id) {
+            Some(h) if h.owner == sender => h,
+            _ => return Self::err_reply(sender, EBADF),
+        };
+        let (is_dir, writable) = match &handle.kind {
+            HandleKind::Root => (true, false),
+            HandleKind::Pci(p) => (
+                p == PCI_PREFIX || p == "pci/find" || p == "pci/cfg",
+                p == "pci/rescan",
+            ),
+            HandleKind::Driver { sub_path, .. } => (
+                sub_path.is_empty() || sub_path == DRV_FIREWALL_DIR,
+                sub_path == DRV_SUSPEND || sub_path == DRV_RESUME,
+            ),
+        };
+        let mode = match (is_dir, writable) {
+            (true, _) => 0o040555u32,
+            (false, true) => 0o100644,
+            (false, false) => 0o100444,
+        };
+        let mut ts = strat9_syscall::data::TimeSpec { tv_sec: 0, tv_nsec: 0 };
+        let now = match call::clock_gettime(0, &mut ts) {
+            Ok(_) => ts.tv_sec,
+            Err(_) => 0,
+        };
+        let mut reply = Self::ok_reply(sender);
+        StatReply {
+            status: 0,
+            mode,
+            nlink: if is_dir { 2 } else { 1 },
+            uid: 0,
+            gid: 0,
+            blksize: 4096,
+            ino: file_id,
+            size: 0,
+            blocks: 0,
+            atime: now,
+            mtime: now,
+            ctime: now,
+        }
+        .encode_into(&mut reply.payload);
+        reply
+    }
+
     // === Serve ================================================================
 
     /// Dispatches one request and returns the reply message.
@@ -859,6 +914,7 @@ impl BusSchemeServer {
             OPCODE_WRITE => self.handle_write(sender, &payload_buf),
             OPCODE_CLOSE => self.handle_close(sender, &payload_buf),
             OPCODE_READDIR => self.handle_readdir(sender, &payload_buf),
+            OPCODE_STAT => self.handle_stat(sender, &payload_buf),
             _ => Self::err_reply(sender, ENOSYS),
         }
     }

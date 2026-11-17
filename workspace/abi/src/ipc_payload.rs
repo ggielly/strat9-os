@@ -105,6 +105,24 @@ pub const OPCODE_UNLINK: u32 = 0x07;
 pub const OPCODE_BULK_SETUP: u32 = 0x09;
 /// Wire `msg_type` for a bulk-ring teardown request.
 pub const OPCODE_BULK_TEARDOWN: u32 = 0x0A;
+/// Wire `msg_type` for a stat request (`ino @ 0..8`; reply: [`StatReply`]).
+pub const OPCODE_STAT: u32 = 0x0B;
+/// Wire `msg_type` for a rename request ([`encode_path_pair`] framing).
+pub const OPCODE_RENAME: u32 = 0x0C;
+/// Wire `msg_type` for a change-mode-by-path request ([`CreateRequest`] framing).
+pub const OPCODE_CHMOD: u32 = 0x0D;
+/// Wire `msg_type` for a hard-link request ([`encode_path_pair`] framing,
+/// `old` = existing path, `new` = new link path).
+pub const OPCODE_LINK: u32 = 0x0E;
+/// Wire `msg_type` for a change-mode-by-handle request (`ino @ 0..8`,
+/// `mode @ 8..12`). Note `0x10` is taken by the bootstrap handshake.
+pub const OPCODE_FCHMOD: u32 = 0x11;
+
+/// Status a server returns for an opcode it does not implement.
+///
+/// The kernel maps this (and legacy `EINVAL` for stat) to "not supported" so
+/// it can fall back (synthesized stat, copy+unlink for `mv`, ...).
+pub const STATUS_ENOSYS: u32 = 38;
 
 /// Encode a bulk-ring setup request.
 ///
@@ -630,3 +648,152 @@ pub struct TcpConnectReply {
 }
 assert_payload_size!(TcpConnectReply);
 static_assertions::assert_eq_size!(TcpConnectReply, [u8; 16]);
+
+// ===========================================================================
+// STAT / RENAME / LINK / CHMOD payloads
+// ===========================================================================
+
+/// Stat request: `ino @ 0..8`.
+pub fn encode_stat_request(ino: u64) -> IpcMessage {
+    let mut msg = IpcMessage::new(OPCODE_STAT);
+    msg.payload[0..8].copy_from_slice(&ino.to_le_bytes());
+    msg
+}
+
+/// Stat reply (what a scheme server returns for [`OPCODE_STAT`]).
+///
+/// Wire layout (72 bytes, little endian):
+/// `status @ 0..4`, `mode @ 4..8`, `nlink @ 8..12`, `uid @ 12..16`,
+/// `gid @ 16..20`, `blksize @ 20..24`, `ino @ 24..32`, `size @ 32..40`,
+/// `blocks @ 40..48`, `atime @ 48..56`, `mtime @ 56..64`, `ctime @ 64..72`
+/// (times are signed seconds since the Unix epoch).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StatReply {
+    /// Status code: 0 = success.
+    pub status: u32,
+    /// File type + permission bits (`S_IFMT | 0o7777`).
+    pub mode: u32,
+    /// Hard link count.
+    pub nlink: u32,
+    /// Owner user id.
+    pub uid: u32,
+    /// Owner group id.
+    pub gid: u32,
+    /// Preferred I/O block size.
+    pub blksize: u32,
+    /// Inode number.
+    pub ino: u64,
+    /// Size in bytes.
+    pub size: u64,
+    /// Allocated 512-byte blocks.
+    pub blocks: u64,
+    /// Last access time (seconds).
+    pub atime: i64,
+    /// Last modification time (seconds).
+    pub mtime: i64,
+    /// Last status change time (seconds).
+    pub ctime: i64,
+}
+
+impl StatReply {
+    /// Size of the encoded reply in bytes.
+    pub const WIRE_SIZE: usize = 72;
+
+    /// Parse a STAT reply payload. Returns `None` if truncated.
+    pub fn parse(p: &[u8]) -> Option<Self> {
+        if p.len() < Self::WIRE_SIZE {
+            return None;
+        }
+        let u32_at = |o: usize| u32::from_le_bytes([p[o], p[o + 1], p[o + 2], p[o + 3]]);
+        let u64_at = |o: usize| {
+            u64::from_le_bytes([
+                p[o],
+                p[o + 1],
+                p[o + 2],
+                p[o + 3],
+                p[o + 4],
+                p[o + 5],
+                p[o + 6],
+                p[o + 7],
+            ])
+        };
+        Some(Self {
+            status: u32_at(0),
+            mode: u32_at(4),
+            nlink: u32_at(8),
+            uid: u32_at(12),
+            gid: u32_at(16),
+            blksize: u32_at(20),
+            ino: u64_at(24),
+            size: u64_at(32),
+            blocks: u64_at(40),
+            atime: u64_at(48) as i64,
+            mtime: u64_at(56) as i64,
+            ctime: u64_at(64) as i64,
+        })
+    }
+
+    /// Encode this reply into `payload[0..72]` (payload must be >= 72 bytes).
+    pub fn encode_into(&self, p: &mut [u8]) {
+        p[0..4].copy_from_slice(&self.status.to_le_bytes());
+        p[4..8].copy_from_slice(&self.mode.to_le_bytes());
+        p[8..12].copy_from_slice(&self.nlink.to_le_bytes());
+        p[12..16].copy_from_slice(&self.uid.to_le_bytes());
+        p[16..20].copy_from_slice(&self.gid.to_le_bytes());
+        p[20..24].copy_from_slice(&self.blksize.to_le_bytes());
+        p[24..32].copy_from_slice(&self.ino.to_le_bytes());
+        p[32..40].copy_from_slice(&self.size.to_le_bytes());
+        p[40..48].copy_from_slice(&self.blocks.to_le_bytes());
+        p[48..56].copy_from_slice(&self.atime.to_le_bytes());
+        p[56..64].copy_from_slice(&self.mtime.to_le_bytes());
+        p[64..72].copy_from_slice(&self.ctime.to_le_bytes());
+    }
+}
+
+/// Parse the handle of a STAT request.
+pub fn parse_stat_request(payload: &[u8]) -> Option<u64> {
+    Some(u64::from_le_bytes(payload.get(0..8)?.try_into().ok()?))
+}
+
+/// Encode a two-path request (RENAME / LINK) into a fresh [`IpcMessage`].
+///
+/// Wire layout: `a_len @ 0..2`, `b_len @ 2..4`, `a @ 4..`, `b @ 4+a_len..`.
+/// Returns `None` if both paths do not fit the inline capacity.
+pub fn encode_path_pair(msg_type: u32, a: &str, b: &str) -> Option<IpcMessage> {
+    if 4 + a.len() + b.len() > IpcMessage::PAYLOAD_CAPACITY {
+        return None;
+    }
+    let mut msg = IpcMessage::new(msg_type);
+    msg.payload[0..2].copy_from_slice(&(a.len() as u16).to_le_bytes());
+    msg.payload[2..4].copy_from_slice(&(b.len() as u16).to_le_bytes());
+    msg.payload[4..4 + a.len()].copy_from_slice(a.as_bytes());
+    msg.payload[4 + a.len()..4 + a.len() + b.len()].copy_from_slice(b.as_bytes());
+    Some(msg)
+}
+
+/// Parse a two-path request: `(a, b)`.
+pub fn parse_path_pair(payload: &[u8]) -> Option<(&str, &str)> {
+    if payload.len() < 4 {
+        return None;
+    }
+    let a_len = u16::from_le_bytes([payload[0], payload[1]]) as usize;
+    let b_len = u16::from_le_bytes([payload[2], payload[3]]) as usize;
+    let a = crate::ipc_codec::get_str(payload, 4, a_len)?;
+    let b = crate::ipc_codec::get_str(payload, 4 + a_len, b_len)?;
+    Some((a, b))
+}
+
+/// Encode a change-mode-by-handle request.
+pub fn encode_fchmod(ino: u64, mode: u32) -> IpcMessage {
+    let mut msg = IpcMessage::new(OPCODE_FCHMOD);
+    msg.payload[0..8].copy_from_slice(&ino.to_le_bytes());
+    msg.payload[8..12].copy_from_slice(&mode.to_le_bytes());
+    msg
+}
+
+/// Parse a change-mode-by-handle request: `(ino, mode)`.
+pub fn parse_fchmod(payload: &[u8]) -> Option<(u64, u32)> {
+    let ino = u64::from_le_bytes(payload.get(0..8)?.try_into().ok()?);
+    let mode = u32::from_le_bytes(payload.get(8..12)?.try_into().ok()?);
+    Some((ino, mode))
+}

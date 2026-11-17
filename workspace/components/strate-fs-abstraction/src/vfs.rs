@@ -353,6 +353,17 @@ pub trait VfsFileSystem: Send + Sync {
         Err(FsError::ReadOnly)
     }
 
+    /// Sets the permission bits of an inode (`mode & 0o7777`; the file-type
+    /// bits are preserved by the implementation).
+    ///
+    /// # Arguments
+    /// * `ino` - Inode to modify
+    /// * `mode` - New permission bits
+    fn set_mode(&self, ino: u64, mode: u32) -> FsResult<()> {
+        let _ = (ino, mode);
+        Err(FsError::ReadOnly)
+    }
+
     // =========================================================================
     // Cache Management
     // =========================================================================

@@ -42,7 +42,7 @@ use state::NetworkStrate;
 use strat9_abi::net::{NetEvent, NetQueueHeader, NetQueueMap};
 use strate_net::{
     syscalls::*, IpcMessage, OPCODE_BULK_SETUP, OPCODE_BULK_TEARDOWN, OPCODE_CLOSE, OPCODE_OPEN,
-    OPCODE_READ, OPCODE_WRITE,
+    OPCODE_READ, OPCODE_READDIR, OPCODE_STAT, OPCODE_WRITE,
 };
 
 alloc_freelist::define_freelist_brk_allocator!(
@@ -191,7 +191,12 @@ impl NetworkStrate {
                     OPCODE_CLOSE => self.handle_close(&msg),
                     OPCODE_BULK_SETUP => self.handle_bulk_setup(&msg),
                     OPCODE_BULK_TEARDOWN => self.handle_bulk_teardown(&msg),
-                    _ => IpcMessage::error_reply(msg.sender, -22),
+                    OPCODE_STAT => self.handle_stat(&msg),
+                    OPCODE_READDIR => self.handle_readdir(&msg),
+                    // Optional opcodes this server does not implement
+                    // (RENAME/LINK/CHMOD/FCHMOD/...): ENOSYS lets the kernel
+                    // fall back instead of reporting a bogus EINVAL.
+                    _ => IpcMessage::error_reply(msg.sender, -38),
                 };
                 let _ = call::ipc_reply(&reply);
             }

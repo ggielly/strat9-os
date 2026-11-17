@@ -47,9 +47,11 @@ pub use strat9_abi::data::{
 use strat9_abi::{
     ipc_codec::{get_u32, put_u16, put_u16_len_prefixed},
     ipc_payload::{
-        encode_bulk_setup, encode_bulk_teardown, CloseRequest, CreateRequest, OpenReply,
-        OpenRequest, ReadReply, ReadRequest, WriteRequest, OPCODE_CLOSE, OPCODE_CREATE_DIR,
-        OPCODE_CREATE_FILE, OPCODE_OPEN, OPCODE_READ, OPCODE_READDIR, OPCODE_UNLINK, OPCODE_WRITE,
+        encode_bulk_setup, encode_bulk_teardown, encode_fchmod, encode_path_pair,
+        encode_stat_request, CloseRequest, CreateRequest, OpenReply, OpenRequest, ReadReply,
+        ReadRequest, StatReply, WriteRequest, OPCODE_CHMOD, OPCODE_CLOSE, OPCODE_CREATE_DIR,
+        OPCODE_CREATE_FILE, OPCODE_LINK, OPCODE_OPEN, OPCODE_READ, OPCODE_READDIR, OPCODE_RENAME,
+        OPCODE_STAT, OPCODE_UNLINK, OPCODE_WRITE,
     },
 };
 
@@ -414,6 +416,12 @@ impl IpcScheme {
 /// Upper bound for non-streaming scheme IPC (open, close, readdir, ...).
 const META_CALL_TIMEOUT_NS: u64 = 15_000_000_000;
 
+/// Upper bound for data transfers (`read`/`write`). Much longer than the
+/// metadata bound because a server may legitimately take a while (slow disk,
+/// large chunked transfer), but a wedged server must not freeze its clients
+/// forever either.
+const IO_CALL_TIMEOUT_NS: u64 = 120_000_000_000;
+
 impl IpcScheme {
     /// Perform a synchronous IPC call: send `msg` to the server port and block
     /// the current task until the server calls `ipc_reply`.  This mirrors
@@ -423,15 +431,16 @@ impl IpcScheme {
     /// Bounded by [`META_CALL_TIMEOUT_NS`]: open/close/readdir/create/... are
     /// never supposed to block, so a server that is dead, wedged or never
     /// recv's (e.g. it panicked after binding its mount) yields `ETIMEDOUT`
-    /// instead of freezing the caller forever. Data transfers that may block
-    /// by design (`read`/`write`) use [`Self::call_blocking`].
+    /// instead of freezing the caller forever. Data transfers (`read`/`write`)
+    /// use [`Self::call_blocking`], which has a longer bound.
     fn call(&self, msg: IpcMessage) -> Result<IpcMessage, SyscallError> {
         self.call_inner(msg, Some(META_CALL_TIMEOUT_NS))
     }
 
-    /// Same as [`Self::call`] but waits for the reply without a time limit.
+    /// Same as [`Self::call`] with the longer data-transfer bound
+    /// ([`IO_CALL_TIMEOUT_NS`]).
     fn call_blocking(&self, msg: IpcMessage) -> Result<IpcMessage, SyscallError> {
-        self.call_inner(msg, None)
+        self.call_inner(msg, Some(IO_CALL_TIMEOUT_NS))
     }
 
     fn call_inner(
@@ -482,6 +491,61 @@ impl IpcScheme {
     fn bulk_for(&self, file_id: u64) -> Option<Arc<BulkHandle>> {
         self.bulk.lock().get(&file_id).cloned()
     }
+
+    /// Status of a reply to an optional operation: a server that does not
+    /// know the opcode (legacy `EINVAL` for unknown opcodes, or `ENOSYS`)
+    /// maps to `NotImplemented` so callers can fall back (e.g. `mv` across
+    /// mounts becomes copy + unlink).
+    fn status_or_unsupported(reply: &IpcMessage) -> Result<(), SyscallError> {
+        match Self::parse_status(reply) {
+            Err(SyscallError::InvalidArgument) => Err(SyscallError::NotImplemented),
+            other => other,
+        }
+    }
+
+    /// Shared body of RENAME / LINK.
+    fn path_pair_op(&self, opcode: u32, a: &str, b: &str) -> Result<(), SyscallError> {
+        let msg = encode_path_pair(opcode, a, b).ok_or(SyscallError::InvalidArgument)?;
+        let reply = self.call(msg)?;
+        Self::status_or_unsupported(&reply)
+    }
+
+    /// Metadata derived from the open-time reply (directory flag + size),
+    /// used when the server has no `OPCODE_STAT`.
+    fn synthesized_stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
+        let flags = self
+            .open_file_flags
+            .lock()
+            .get(&file_id)
+            .copied()
+            .ok_or(SyscallError::BadHandle)?;
+        let size = self
+            .open_file_sizes
+            .lock()
+            .get(&file_id)
+            .copied()
+            .flatten()
+            .unwrap_or(0);
+        let is_dir = flags.contains(FileFlags::DIRECTORY);
+        let (mode, nlink, size) = if is_dir {
+            (0o040755, 2, 0)
+        } else {
+            (0o100644, 1, size)
+        };
+        Ok(finalize_pseudo_stat(
+            FileStat {
+                st_ino: file_id,
+                st_mode: mode,
+                st_nlink: nlink,
+                st_size: size,
+                st_blksize: 4096,
+                st_blocks: (size + 511) / 512,
+                ..FileStat::zeroed()
+            },
+            DEV_IPC_BASE + self.port_id.as_u64(),
+            0,
+        ))
+    }
 }
 
 impl Scheme for IpcScheme {
@@ -518,46 +582,66 @@ impl Scheme for IpcScheme {
         })
     }
 
-    /// Metadata synthesized from what the server reported at open time.
+    /// Metadata for an open handle.
     ///
-    /// The userspace scheme protocol has no STAT opcode, so without this every
-    /// `stat`/`ls -l` on a served scheme (`/net`, `/bus`, ext4/xfs strates...)
-    /// failed with ENOSYS. The server only tells us whether the handle is a
-    /// directory and, optionally, its size; everything else gets neutral
-    /// defaults. A real STAT opcode can later override this per server.
+    /// Asks the server (`OPCODE_STAT`). Servers that predate the opcode
+    /// answer `EINVAL`/`ENOSYS`; for those the metadata is synthesized from
+    /// what the server reported at open time (directory flag and size), with
+    /// neutral permissions.
     fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
-        let flags = self
-            .open_file_flags
-            .lock()
-            .get(&file_id)
-            .copied()
-            .ok_or(SyscallError::BadHandle)?;
-        let size = self
-            .open_file_sizes
-            .lock()
-            .get(&file_id)
-            .copied()
-            .flatten()
-            .unwrap_or(0);
-        let is_dir = flags.contains(FileFlags::DIRECTORY);
-        let (mode, nlink, size) = if is_dir {
-            (0o040755, 2, 0)
-        } else {
-            (0o100644, 1, size)
-        };
-        Ok(finalize_pseudo_stat(
-            FileStat {
-                st_ino: file_id,
-                st_mode: mode,
-                st_nlink: nlink,
-                st_size: size,
-                st_blksize: 4096,
-                st_blocks: (size + 511) / 512,
-                ..FileStat::zeroed()
-            },
-            DEV_IPC_BASE + self.port_id.as_u64(),
-            0,
-        ))
+        let reply = self.call(encode_stat_request(file_id))?;
+        match Self::parse_status(&reply) {
+            Ok(()) => {
+                let st = StatReply::parse(&reply.payload).ok_or(SyscallError::IoError)?;
+                let secs = |s: i64| strat9_abi::data::TimeSpec {
+                    tv_sec: s,
+                    tv_nsec: 0,
+                };
+                Ok(FileStat {
+                    st_dev: DEV_IPC_BASE + self.port_id.as_u64(),
+                    st_ino: st.ino,
+                    st_mode: st.mode,
+                    st_nlink: st.nlink,
+                    st_uid: st.uid,
+                    st_gid: st.gid,
+                    st_rdev: 0,
+                    st_size: st.size,
+                    st_blksize: if st.blksize == 0 { 4096 } else { st.blksize as u64 },
+                    st_blocks: st.blocks,
+                    st_atime: secs(st.atime),
+                    st_mtime: secs(st.mtime),
+                    st_ctime: secs(st.ctime),
+                })
+            }
+            Err(SyscallError::InvalidArgument) | Err(SyscallError::NotImplemented) => {
+                self.synthesized_stat(file_id)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Rename/move an entry within this scheme (`OPCODE_RENAME`).
+    fn rename(&self, old_path: &str, new_path: &str) -> Result<(), SyscallError> {
+        self.path_pair_op(OPCODE_RENAME, old_path, new_path)
+    }
+
+    /// Create a hard link (`OPCODE_LINK`).
+    fn link(&self, old_path: &str, new_path: &str) -> Result<(), SyscallError> {
+        self.path_pair_op(OPCODE_LINK, old_path, new_path)
+    }
+
+    /// Change permission bits by path (`OPCODE_CHMOD`).
+    fn chmod(&self, path: &str, mode: u32) -> Result<(), SyscallError> {
+        let msg = CreateRequest::encode(OPCODE_CHMOD, mode, path)
+            .ok_or(SyscallError::InvalidArgument)?;
+        let reply = self.call(msg)?;
+        Self::status_or_unsupported(&reply)
+    }
+
+    /// Change permission bits by handle (`OPCODE_FCHMOD`).
+    fn fchmod(&self, file_id: u64, mode: u32) -> Result<(), SyscallError> {
+        let reply = self.call(encode_fchmod(file_id, mode))?;
+        Self::status_or_unsupported(&reply)
     }
 
     /// Performs the read operation.

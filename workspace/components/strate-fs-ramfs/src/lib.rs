@@ -412,13 +412,16 @@ impl VfsFileSystem for RamFileSystem {
         match &*guard {
             RamNode::File { data, mode } => {
                 info.size = data.len() as u64;
+                info.blocks = (info.size + 511) / 512;
                 info.file_type = VfsFileType::RegularFile;
                 info.mode = *mode;
+                info.nlink = 1;
             }
             RamNode::Directory { mode, .. } => {
                 info.size = 0;
                 info.file_type = VfsFileType::Directory;
                 info.mode = *mode;
+                info.nlink = 2;
             }
         }
         Ok(info)
@@ -827,6 +830,18 @@ impl VfsFileSystem for RamFileSystem {
         Ok(())
     }
 
+    /// Changes the permission bits, preserving the file-type bits.
+    fn set_mode(&self, ino: u64, mode: u32) -> FsResult<()> {
+        let node = self.get_node(ino)?;
+        let mut guard = node.node.lock();
+        let slot = match &mut *guard {
+            RamNode::File { mode, .. } => mode,
+            RamNode::Directory { mode, .. } => mode,
+        };
+        *slot = (*slot & !0o7777) | (mode & 0o7777);
+        Ok(())
+    }
+
     /// Implements readlink.
     fn readlink(&self, _ino: u64) -> FsResult<String> {
         Err(FsError::NotSupported)
@@ -849,5 +864,61 @@ pub fn split_path(path: &str) -> (&str, &str) {
         }
     } else {
         ("/", path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fs_with_file() -> (RamFileSystem, u64) {
+        let fs = RamFileSystem::new();
+        let root = fs.root_inode();
+        let info = fs.create_file(root, "a.txt", 0o644).unwrap();
+        (fs, info.ino)
+    }
+
+    #[test]
+    fn stat_reports_links_and_blocks() {
+        let (fs, ino) = fs_with_file();
+        fs.write(ino, 0, &[7u8; 700]).unwrap();
+        let st = fs.stat(ino).unwrap();
+        assert_eq!(st.size, 700);
+        assert_eq!(st.blocks, 2);
+        assert_eq!(st.nlink, 1);
+        assert_eq!(fs.stat(fs.root_inode()).unwrap().nlink, 2);
+    }
+
+    #[test]
+    fn set_mode_keeps_file_type_bits() {
+        let (fs, ino) = fs_with_file();
+        fs.set_mode(ino, 0o600).unwrap();
+        assert_eq!(fs.stat(ino).unwrap().mode, 0o100600);
+        // Type bits in the request are ignored.
+        fs.set_mode(ino, 0o040755).unwrap();
+        assert_eq!(fs.stat(ino).unwrap().mode, 0o100755);
+        let root = fs.root_inode();
+        fs.set_mode(root, 0o700).unwrap();
+        assert_eq!(fs.stat(root).unwrap().mode, 0o040700);
+        assert!(fs.set_mode(9999, 0o600).is_err());
+    }
+
+    #[test]
+    fn rename_moves_entry() {
+        let (fs, ino) = fs_with_file();
+        let root = fs.root_inode();
+        fs.rename(
+            root,
+            "a.txt",
+            root,
+            "b.txt",
+            RenameFlags {
+                replace_if_exists: true,
+                ..RenameFlags::default()
+            },
+        )
+        .unwrap();
+        assert!(fs.lookup(root, "a.txt").is_err());
+        assert_eq!(fs.lookup(root, "b.txt").unwrap().ino, ino);
     }
 }

@@ -66,6 +66,8 @@ static COMMANDS: &[Cmd] = &[
     cmd("rmdir", "<dir...>", "remove empty directories", cmd_rmdir),
     cmd("mv", "<src> <dst>", "move / rename", cmd_mv),
     cmd("cp", "[-r] <src> <dst>", "copy files / directories", cmd_cp),
+    cmd("chmod", "<octal-mode> <path...>", "change permission bits", cmd_chmod),
+    cmd("ln", "<existing> <link>", "create a hard link", cmd_ln),
     cmd("write", "<file> <text...>", "overwrite a file with text", cmd_write),
     cmd("append", "<file> <text...>", "append text to a file", cmd_append),
     cmd("echo", "[-n] [text...]", "print text (supports > and >>)", cmd_echo),
@@ -1117,6 +1119,32 @@ fn cmd_mv(sess: &mut Session, out: &mut Out, args: &[String]) {
             }
         }
         Err(e) => path_err(out, "mv", &src, e),
+    }
+}
+
+fn cmd_chmod(sess: &mut Session, out: &mut Out, args: &[String]) {
+    if args.len() < 2 {
+        return usage(out, "chmod");
+    }
+    let Ok(mode) = usize::from_str_radix(&args[0], 8) else {
+        return out.error("chmod", format_args!("invalid octal mode '{}'", args[0]));
+    };
+    for a in &args[1..] {
+        let path = sys::resolve(&sess.cwd, a);
+        if let Err(e) = sys::chmod(&path, mode & 0o7777) {
+            path_err(out, "chmod", &path, e);
+        }
+    }
+}
+
+fn cmd_ln(sess: &mut Session, out: &mut Out, args: &[String]) {
+    if args.len() != 2 {
+        return usage(out, "ln");
+    }
+    let old = sys::resolve(&sess.cwd, &args[0]);
+    let new = dest_path(&old, sys::resolve(&sess.cwd, &args[1]));
+    if let Err(e) = sys::link(&old, &new) {
+        path_err(out, "ln", &new, e);
     }
 }
 

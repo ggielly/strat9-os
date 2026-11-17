@@ -38,7 +38,7 @@ use strat9_syscall::{
     error::{EBADF, EINVAL, ENOSYS},
     *,
 };
-use strate_fs_abstraction::{FsError, VfsFileSystem, VfsFileType};
+use strate_fs_abstraction::{FsError, RenameFlags, VfsFileSystem, VfsFileType};
 use strate_fs_ramfs::{split_path, RamFileSystem};
 
 #[global_allocator]
@@ -80,7 +80,9 @@ const OPEN_TRUNCATE: u32 = 1 << 3;
 const OPEN_DIRECTORY: u32 = 1 << 5;
 
 use strat9_syscall::data::{
-    IpcMessage, IPC_FILE_FLAG_CHUNK_READ, IPC_FILE_FLAG_CHUNK_WRITE, IPC_FILE_FLAG_DIRECTORY,
+    parse_fchmod, parse_path_pair, parse_stat_request, CreateRequest, IpcMessage, StatReply,
+    IPC_FILE_FLAG_CHUNK_READ, IPC_FILE_FLAG_CHUNK_WRITE, IPC_FILE_FLAG_DIRECTORY, OPCODE_CHMOD,
+    OPCODE_FCHMOD, OPCODE_RENAME, OPCODE_STAT,
 };
 
 struct StrateRamServer {
@@ -478,6 +480,101 @@ impl StrateRamServer {
         }
     }
 
+    /// `OPCODE_STAT`: metadata of an inode the sender has open.
+    fn handle_stat(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
+        let Some(ino) = parse_stat_request(payload) else {
+            return Self::err_reply(sender, EINVAL as u32);
+        };
+        if !self.open_sessions.contains_key(&(sender, ino)) {
+            return Self::err_reply(sender, EBADF as u32);
+        }
+        match self.fs.stat(ino) {
+            Ok(info) => {
+                let mut reply = Self::ok_reply(sender);
+                StatReply {
+                    status: 0,
+                    mode: info.mode,
+                    nlink: info.nlink,
+                    uid: info.uid,
+                    gid: info.gid,
+                    blksize: 4096,
+                    ino: info.ino,
+                    size: info.size,
+                    blocks: info.blocks,
+                    atime: info.atime.secs,
+                    mtime: info.mtime.secs,
+                    ctime: info.ctime.secs,
+                }
+                .encode_into(&mut reply.payload);
+                reply
+            }
+            Err(err) => Self::err_reply(sender, Self::fs_status(err)),
+        }
+    }
+
+    /// `OPCODE_RENAME`: move/rename within this filesystem, replacing an
+    /// existing non-directory target like POSIX `rename(2)`.
+    fn handle_rename(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
+        let Some((old, new)) = parse_path_pair(payload) else {
+            return Self::err_reply(sender, EINVAL as u32);
+        };
+        let (old_parent, old_name) = match Self::split_nonempty_leaf(old) {
+            Ok(v) => v,
+            Err(code) => return Self::err_reply(sender, code),
+        };
+        let (new_parent, new_name) = match Self::split_nonempty_leaf(new) {
+            Ok(v) => v,
+            Err(code) => return Self::err_reply(sender, code),
+        };
+        let res = (|| {
+            let op = self.fs.resolve_path_internal(old_parent)?;
+            let np = self.fs.resolve_path_internal(new_parent)?;
+            self.fs.rename(
+                op,
+                old_name,
+                np,
+                new_name,
+                RenameFlags {
+                    replace_if_exists: true,
+                    ..RenameFlags::default()
+                },
+            )
+        })();
+        match res {
+            Ok(()) => Self::ok_reply(sender),
+            Err(err) => Self::err_reply(sender, Self::fs_status(err)),
+        }
+    }
+
+    /// `OPCODE_CHMOD`: change permission bits by path.
+    fn handle_chmod(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
+        let Some((mode, path)) = CreateRequest::parse(payload) else {
+            return Self::err_reply(sender, EINVAL as u32);
+        };
+        let res = self
+            .fs
+            .resolve_path_internal(path)
+            .and_then(|ino| self.fs.set_mode(ino, mode));
+        match res {
+            Ok(()) => Self::ok_reply(sender),
+            Err(err) => Self::err_reply(sender, Self::fs_status(err)),
+        }
+    }
+
+    /// `OPCODE_FCHMOD`: change permission bits of an inode the sender has open.
+    fn handle_fchmod(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
+        let Some((ino, mode)) = parse_fchmod(payload) else {
+            return Self::err_reply(sender, EINVAL as u32);
+        };
+        if !self.open_sessions.contains_key(&(sender, ino)) {
+            return Self::err_reply(sender, EBADF as u32);
+        }
+        match self.fs.set_mode(ino, mode) {
+            Ok(()) => Self::ok_reply(sender),
+            Err(err) => Self::err_reply(sender, Self::fs_status(err)),
+        }
+    }
+
     /// Implements handle readdir.
     fn handle_readdir(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
         let ino = match Self::read_u64(payload, 0) {
@@ -584,6 +681,12 @@ impl StrateRamServer {
                 OPCODE_CREATE_FILE => self.handle_create(msg.sender, &msg.payload, false),
                 OPCODE_CREATE_DIR => self.handle_create(msg.sender, &msg.payload, true),
                 OPCODE_READDIR => self.handle_readdir(msg.sender, &msg.payload),
+                OPCODE_STAT => self.handle_stat(msg.sender, &msg.payload),
+                OPCODE_RENAME => self.handle_rename(msg.sender, &msg.payload),
+                OPCODE_CHMOD => self.handle_chmod(msg.sender, &msg.payload),
+                OPCODE_FCHMOD => self.handle_fchmod(msg.sender, &msg.payload),
+                // OPCODE_LINK: RamFS inodes carry no link count, so hard links
+                // are not supported (ENOSYS lets the kernel report it).
                 _ => Self::err_reply(msg.sender, ENOSYS as u32),
             };
             let _ = call::ipc_reply(&reply);

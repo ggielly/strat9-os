@@ -345,9 +345,7 @@ static mut SERVER: Option<Server<DisplayBackend>> = None;
 fn main_loop(server_port: usize, display: Screen) -> ! {
     // SAFETY: single-threaded process, initialised once before the loop and
     // never aliased: `server` below is the only reference.
-    log_text(b"display-server: init backend");
     let mut backend = DisplayBackend::new(display);
-    log_text(b"display-server: init core");
     unsafe {
         *core::ptr::addr_of_mut!(SERVER) = Some(Server::new(backend));
     }
@@ -368,53 +366,12 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
                 Err(_) => break,
             }
             served += 1;
-            log_text(b"display-server: rx");
 
             let Some((opcode, len)) = frame_shape(&msg.payload) else {
                 log_text(b"display-server: bad frame");
                 continue;
             };
             let peer = PeerId::new(msg.sender);
-            if opcode == Opcode::COMMIT.value() {
-                if let Ok((header, body)) =
-                    Header::decode_message(&msg.payload[..len])
-                {
-                    if let Ok(Body::Commit(c)) =
-                        Body::decode(header.opcode, header.object_id, body)
-                    {
-                        if let Some(session) = server.session_of(peer) {
-                            let surface = server
-                                .core()
-                                .surface(session, SurfaceId::from_raw(header.object_id));
-                            let buffer = server
-                                .core()
-                                .buffer(session, BufferId::from_raw(c.buffer));
-                            let mut line = Line { buffer: [0; 192], len: 0 };
-                            let state = match buffer.as_ref().map(|b| b.state) {
-                                Ok(BufferState::Available) => 0,
-                                Ok(BufferState::ImportPending) => 1,
-                                Ok(BufferState::Current) => 2,
-                                Ok(BufferState::Ready) => 3,
-                                Ok(BufferState::Allocating) => 4,
-                                Ok(BufferState::Retired) => 5,
-                                Err(_) => 6,
-                            };
-                            let _ = line.write_fmt(format_args!(
-                                "display-server: commit buf={} ack={} id={} rects={} state={} credit={} cfg={}",
-                                c.buffer,
-                                c.ack_serial,
-                                c.commit_id,
-                                c.rect_count,
-                                state,
-                                surface.as_ref().map(|s| s.credit).unwrap_or(9),
-                                surface.as_ref().map(|s| s.configure_serial).unwrap_or(9),
-                            ));
-                            let _ = call::write(2, &line.buffer[..line.len]);
-                            let _ = call::write(2, b"\n");
-                        }
-                    }
-                }
-            }
             let mut slot = peer_slot(&peers, peer);
 
             if slot.is_none() {
@@ -460,6 +417,26 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
             }
         }
 
+        iterations = iterations.wrapping_add(1);
+        if iterations % 128 == 0 {
+            // Liveness: a destroyed client port fails the zero-timeout wait;
+            // a live empty port reports WRITABLE.
+            for index in 0..MAX_PEERS {
+                let Some((peer, port)) = peers[index]
+                    .as_ref()
+                    .map(|(peer, transport)| (*peer, transport.port))
+                else {
+                    continue;
+                };
+                if call::handle_wait_timeout(port, 0).is_err() {
+                    log_text(b"display-server: peer gone");
+                    let _ = server.disconnect(peer);
+                    if let Some((_, mut transport)) = peers[index].take() {
+                        transport.close();
+                    }
+                }
+            }
+        }
         if served == 0 {
             let request = TimeSpec {
                 tv_sec: 0,

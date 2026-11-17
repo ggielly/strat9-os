@@ -189,6 +189,26 @@ pub fn rmdir(path: &str) -> Res<()> {
         .map(|_| ())
 }
 
+pub fn chmod(path: &str, mode: usize) -> Res<()> {
+    // SAFETY: pointer/length describe a live `&str` for the whole call.
+    unsafe { strat9_syscall::syscall3(number::SYS_CHMOD, path.as_ptr() as usize, path.len(), mode) }
+        .map(|_| ())
+}
+
+pub fn link(old: &str, new: &str) -> Res<()> {
+    // SAFETY: both pointer/length pairs describe live `&str`s for the call.
+    unsafe {
+        strat9_syscall::syscall4(
+            number::SYS_LINK,
+            old.as_ptr() as usize,
+            old.len(),
+            new.as_ptr() as usize,
+            new.len(),
+        )
+    }
+    .map(|_| ())
+}
+
 pub fn rename(old: &str, new: &str) -> Res<()> {
     // SAFETY: both pointer/length pairs describe live `&str`s for the call.
     unsafe {

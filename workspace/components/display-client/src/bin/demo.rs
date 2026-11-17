@@ -146,6 +146,25 @@ pub extern "C" fn _start() -> ! {
     }
 
     log(b"[display-demo] animation done\n");
+    // Resize: create a new surface with a different geometry, present one
+    // full frame, then destroy the old surface. This exercises surface
+    // creation/destruction, quota refund and the second surface slot.
+    if let Some(resized) = create_surface(&mut client, 400, 240) {
+        if let Some(mut buffer) = alloc_view(&mut client, resized, 400, 240) {
+            fill_gradient(&mut buffer.buffer);
+            draw_square_at(&mut buffer.buffer, 24, 24);
+            commit_id += 1;
+            if let Some(result) = client.commit(resized, buffer.buffer.id, &[], true, serial, commit_id) {
+                if let Some(frame) = result.frame {
+                    serial = frame.serial;
+                }
+            }
+            log(b"[display-demo] resized frame presented\n");
+            let _ = client.destroy_surface(surface);
+            let _ = client.destroy_buffer(buffer.buffer.id);
+            log(b"[display-demo] resized surface closed\n");
+        }
+    }
     finish(client)
 }
 

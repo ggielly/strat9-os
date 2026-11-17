@@ -620,7 +620,8 @@ pub(super) fn cmd_mv_impl(args: &[String]) -> Result<(), ShellError> {
             shell_println!("mv: {} -> {}", src, dst);
             return Ok(());
         }
-        Err(crate::syscall::error::SyscallError::NotSupported) => {
+        Err(crate::syscall::error::SyscallError::NotSupported)
+        | Err(crate::syscall::error::SyscallError::NotImplemented) => {
             // Cross-mount: fallback to cp + rm
         }
         Err(e) => {

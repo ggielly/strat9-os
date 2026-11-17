@@ -28,3 +28,9 @@ pub use strat9_abi::data::*;
 pub use strat9_abi::ipc_payload::{
     OpenRequest, WriteRequest, OPCODE_CLOSE, OPCODE_OPEN, OPCODE_READ, OPCODE_READDIR, OPCODE_WRITE,
 };
+
+// STAT / RENAME / LINK / CHMOD scheme opcodes and payload helpers.
+pub use strat9_abi::ipc_payload::{
+    parse_fchmod, parse_path_pair, parse_stat_request, CreateRequest, StatReply, OPCODE_CHMOD,
+    OPCODE_FCHMOD, OPCODE_LINK, OPCODE_RENAME, OPCODE_STAT,
+};
