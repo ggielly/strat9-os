@@ -132,8 +132,27 @@ impl Clone for HandleKind {
     }
 }
 
+/// `(seconds, nanoseconds)` of `CLOCK_REALTIME`; `(0, 0)` when the clock is
+/// unavailable (e.g. host-side tests).
+type Stamp = (i64, u32);
+
+fn clock_now() -> Stamp {
+    let mut ts = strat9_syscall::data::TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    match call::clock_gettime(0, &mut ts) {
+        Ok(_) => (ts.tv_sec, ts.tv_nsec.clamp(0, 999_999_999) as u32),
+        Err(_) => (0, 0),
+    }
+}
+
 struct OpenHandle {
     kind: HandleKind,
+    /// When the handle was opened (reported as the change time).
+    opened_at: Stamp,
+    /// Last read / readdir on this handle (reported as the access time).
+    last_access: core::cell::Cell<Stamp>,
     /// PID/TID of the process that opened this handle.
     ///
     /// All subsequent operations on the handle must come from the same
@@ -149,6 +168,8 @@ pub struct BusSchemeServer {
     drivers: Vec<(String, Box<dyn BusDriver>)>,
     port_handle: u64,
     handles: BTreeMap<u64, OpenHandle>,
+    /// When the server started: the change time of the (static) tree.
+    started_at: Stamp,
     next_id: u64,
     pci_cache: Vec<PciDeviceInfo>,
     /// Rendered `pci/find/<vid>/<did>` results, keyed by (vendor, device).
@@ -178,6 +199,7 @@ impl BusSchemeServer {
             drivers,
             port_handle,
             handles: BTreeMap::new(),
+            started_at: clock_now(),
             next_id: 1,
             pci_cache: Vec::new(),
             find_cache: BTreeMap::new(),
@@ -412,9 +434,14 @@ impl BusSchemeServer {
 
         self.handles.insert(
             file_id,
-            OpenHandle {
-                kind,
-                owner: sender,
+            {
+                let now = clock_now();
+                OpenHandle {
+                    kind,
+                    opened_at: now,
+                    last_access: core::cell::Cell::new(now),
+                    owner: sender,
+                }
             },
         );
 
@@ -441,6 +468,9 @@ impl BusSchemeServer {
         let Some(kind) = handle_kind else {
             return Self::err_reply(sender, EBADF);
         };
+        if let Some(h) = self.handles.get(&file_id) {
+            h.last_access.set(clock_now());
+        }
 
         let content = self.generate_read_content(&kind, offset as usize);
         // Use the full remaining payload capacity (240 - 8 header bytes),
@@ -751,6 +781,7 @@ impl BusSchemeServer {
             Some(h) if h.owner == sender => h,
             _ => return Self::err_reply(sender, EBADF),
         };
+        handle.last_access.set(clock_now());
 
         let entries: Vec<(u64, u8, String)> = match &handle.kind {
             HandleKind::Root => {
@@ -874,11 +905,12 @@ impl BusSchemeServer {
             (false, true) => 0o100644,
             (false, false) => 0o100444,
         };
-        let mut ts = strat9_syscall::data::TimeSpec { tv_sec: 0, tv_nsec: 0 };
-        let now = match call::clock_gettime(0, &mut ts) {
-            Ok(_) => ts.tv_sec,
-            Err(_) => 0,
-        };
+        // Directories only change when drivers are (un)registered, i.e. at
+        // server start; files are rendered live on every read.
+        let now = clock_now();
+        let mtime = if is_dir { self.started_at } else { now };
+        let atime = handle.last_access.get();
+        let ctime = self.started_at.min(handle.opened_at);
         let mut reply = Self::ok_reply(sender);
         StatReply {
             status: 0,
@@ -890,9 +922,12 @@ impl BusSchemeServer {
             ino: file_id,
             size: 0,
             blocks: 0,
-            atime: now,
-            mtime: now,
-            ctime: now,
+            atime: atime.0,
+            mtime: mtime.0,
+            ctime: ctime.0,
+            atime_nsec: atime.1,
+            mtime_nsec: mtime.1,
+            ctime_nsec: ctime.1,
         }
         .encode_into(&mut reply.payload);
         reply

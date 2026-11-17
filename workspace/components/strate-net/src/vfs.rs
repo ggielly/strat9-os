@@ -313,6 +313,9 @@ impl NetworkStrate {
         if !self.is_owner(file_id, msg.sender) {
             return IpcMessage::error_reply(msg.sender, -9); // EBADF
         }
+        if let Some(h) = self.open_handles.get_mut(&file_id) {
+            h.accessed_at = strate_net::syscalls::realtime();
+        }
 
         if requested > IpcMessage::READ_INLINE_CAPACITY {
             if let Some(reply) = self.bulk_read_tcp(msg.sender, file_id, requested) {
@@ -824,7 +827,11 @@ impl NetworkStrate {
         if !self.is_owner(fid, msg.sender) {
             return IpcMessage::error_reply(msg.sender, -9); // EBADF
         }
-        let Some(path) = self.open_handles.get(&fid).map(|h| h.path.clone()) else {
+        let Some((path, opened_at, accessed_at)) = self
+            .open_handles
+            .get(&fid)
+            .map(|h| (h.path.clone(), h.opened_at, h.accessed_at))
+        else {
             return IpcMessage::error_reply(msg.sender, -9);
         };
 
@@ -848,7 +855,10 @@ impl NetworkStrate {
             (if writable { 0o100666 } else { 0o100444 }, 1, size)
         };
 
-        let now = (strate_net::syscalls::clock_gettime_ns().unwrap_or(0) / 1_000_000_000) as i64;
+        // The root listing is static (changes with the handle, i.e. never);
+        // info files and sockets reflect live state, so they are "modified now".
+        let now = strate_net::syscalls::realtime();
+        let mtime = if path.is_empty() { opened_at } else { now };
         let mut reply = IpcMessage::new(IpcMessage::REPLY_MSG_TYPE);
         reply.sender = msg.sender;
         StatReply {
@@ -861,9 +871,12 @@ impl NetworkStrate {
             ino: fid,
             size,
             blocks: (size + 511) / 512,
-            atime: now,
-            mtime: now,
-            ctime: now,
+            atime: accessed_at.0,
+            mtime: mtime.0,
+            ctime: opened_at.0,
+            atime_nsec: accessed_at.1,
+            mtime_nsec: mtime.1,
+            ctime_nsec: opened_at.1,
         }
         .encode_into(&mut reply.payload);
         reply
@@ -888,6 +901,9 @@ impl NetworkStrate {
             None => return IpcMessage::error_reply(msg.sender, -9),
         }
         let cursor = u16::from_le_bytes([msg.payload[8], msg.payload[9]]) as usize;
+        if let Some(h) = self.open_handles.get_mut(&fid) {
+            h.accessed_at = strate_net::syscalls::realtime();
+        }
 
         let mut reply = IpcMessage::new(IpcMessage::REPLY_MSG_TYPE);
         reply.sender = msg.sender;

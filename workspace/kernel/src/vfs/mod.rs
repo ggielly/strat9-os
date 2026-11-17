@@ -1186,6 +1186,57 @@ pub fn sys_chmod(path_ptr: u64, path_len: u64, mode: u64) -> Result<u64, Syscall
     Ok(0)
 }
 
+/// Set access/modification times of a path. See [`Scheme::utimens`].
+pub fn utimens(
+    path: &str,
+    atime: scheme::TimeSpec,
+    mtime: scheme::TimeSpec,
+) -> Result<(), SyscallError> {
+    let (scheme, relative_path) = mount::resolve(path)?;
+    scheme.utimens(&relative_path, atime, mtime)
+}
+
+/// SYS_UTIMENSAT (469): Set file access and modification times by path.
+///
+/// `times_ptr` points to `[TimeSpec; 2]` (atime, mtime); `0` means "both now".
+pub fn sys_utimensat(
+    path_ptr: u64,
+    path_len: u64,
+    times_ptr: u64,
+    flags: u64,
+) -> Result<u64, SyscallError> {
+    use scheme::{UTIME_NOW, UTIME_OMIT};
+    if flags != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let abs = resolve_for_syscall(path_ptr, path_len, false, true, false)?;
+
+    let now = |ns: u32| scheme::TimeSpec {
+        tv_sec: 0,
+        tv_nsec: ns as i64,
+    };
+    let (atime, mtime) = if times_ptr == 0 {
+        (now(UTIME_NOW), now(UTIME_NOW))
+    } else {
+        let sz = core::mem::size_of::<scheme::TimeSpec>();
+        let a = UserSliceRead::new(times_ptr, sz)?
+            .read_val::<scheme::TimeSpec>()
+            .map_err(|_| SyscallError::Fault)?;
+        let m = UserSliceRead::new(times_ptr.checked_add(sz as u64).ok_or(SyscallError::Fault)?, sz)?
+            .read_val::<scheme::TimeSpec>()
+            .map_err(|_| SyscallError::Fault)?;
+        for t in [&a, &m] {
+            let special = t.tv_nsec == UTIME_NOW as i64 || t.tv_nsec == UTIME_OMIT as i64;
+            if !special && !(0..1_000_000_000).contains(&t.tv_nsec) {
+                return Err(SyscallError::InvalidArgument);
+            }
+        }
+        (a, m)
+    };
+    utimens(&abs, atime, mtime)?;
+    Ok(0)
+}
+
 /// SYS_TRUNCATE (454): Truncate file to given length.
 pub fn sys_truncate(path_ptr: u64, path_len: u64, length: u64) -> Result<u64, SyscallError> {
     let abs = resolve_for_syscall(path_ptr, path_len, false, true, false)?;

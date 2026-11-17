@@ -61,7 +61,8 @@ static COMMANDS: &[Cmd] = &[
     cmd("stat", "<path...>", "file metadata", cmd_stat),
     cmd("tree", "[-a] [-L depth] [path]", "directory tree", cmd_tree),
     cmd("mkdir", "[-p] <dir...>", "create directories", cmd_mkdir),
-    cmd("touch", "<file...>", "create empty files", cmd_touch),
+    cmd("touch", "[-t unix-secs] <file...>", "create files / update their timestamps", cmd_touch),
+    cmd("date", "", "current UTC date and time", cmd_date),
     cmd("rm", "[-r] [-f] <path...>", "remove files / directories", cmd_rm),
     cmd("rmdir", "<dir...>", "remove empty directories", cmd_rmdir),
     cmd("mv", "<src> <dst>", "move / rename", cmd_mv),
@@ -800,7 +801,7 @@ fn cmd_stat(sess: &mut Session, out: &mut Out, args: &[String]) {
                     0o140000 => "socket",
                     _ => "unknown",
                 };
-                let rows: [(&str, String); 9] = [
+                let rows: [(&str, String); 10] = [
                     ("File", path.clone()),
                     ("Type", String::from(kind)),
                     ("Size", alloc::format!("{} bytes ({} blocks)", st.st_size, st.st_blocks)),
@@ -811,8 +812,9 @@ fn cmd_stat(sess: &mut Session, out: &mut Out, args: &[String]) {
                     ("Links", alloc::format!("{}", st.st_nlink)),
                     ("Inode", alloc::format!("{}", st.st_ino)),
                     ("Owner", alloc::format!("uid={} gid={}", st.st_uid, st.st_gid)),
-                    ("Modify", sys::format_time(st.st_mtime.tv_sec)),
-                    ("Access", sys::format_time(st.st_atime.tv_sec)),
+                    ("Access", sys::format_time_full(st.st_atime.tv_sec, st.st_atime.tv_nsec)),
+                    ("Modify", sys::format_time_full(st.st_mtime.tv_sec, st.st_mtime.tv_nsec)),
+                    ("Change", sys::format_time_full(st.st_ctime.tv_sec, st.st_ctime.tv_nsec)),
                 ];
                 for (k, v) in rows {
                     out.styled(Style::Head, &alloc::format!("  {:<7}", k));
@@ -942,21 +944,54 @@ fn cmd_mkdir(sess: &mut Session, out: &mut Out, args: &[String]) {
 }
 
 fn cmd_touch(sess: &mut Session, out: &mut Out, args: &[String]) {
-    if args.is_empty() {
+    // `-t <unix-secs>` sets atime and mtime explicitly; otherwise "now".
+    let mut explicit: Option<i64> = None;
+    let mut files: Vec<&String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "-t" {
+            i += 1;
+            match args.get(i).and_then(|v| v.parse::<i64>().ok()) {
+                Some(v) => explicit = Some(v),
+                None => return usage(out, "touch"),
+            }
+        } else {
+            files.push(&args[i]);
+        }
+        i += 1;
+    }
+    if files.is_empty() {
         return usage(out, "touch");
     }
-    for a in args {
+    let times = explicit.map(|s| {
+        let t = strat9_syscall::data::TimeSpec { tv_sec: s, tv_nsec: 0 };
+        [t, t]
+    });
+    for a in files {
         let path = sys::resolve(&sess.cwd, a);
-        if sys::stat(&path).is_ok() {
-            continue;
-        }
-        match sys::open(&path, OpenFlags::WRITE | OpenFlags::CREATE) {
-            Ok(fd) => {
-                let _ = call::close(fd);
+        if sys::stat(&path).is_err() {
+            match sys::open(&path, OpenFlags::WRITE | OpenFlags::CREATE) {
+                Ok(fd) => {
+                    let _ = call::close(fd);
+                }
+                Err(e) => {
+                    path_err(out, "touch", &path, e);
+                    continue;
+                }
             }
-            Err(e) => path_err(out, "touch", &path, e),
+            if times.is_none() {
+                continue; // freshly created: already stamped "now"
+            }
+        }
+        if let Err(e) = sys::utimens(&path, times) {
+            path_err(out, "touch", &path, e);
         }
     }
+}
+
+fn cmd_date(_: &mut Session, out: &mut Out, _: &[String]) {
+    let t = sys::now();
+    let _ = write!(out, "{} UTC\n", sys::format_time_full(t.tv_sec, t.tv_nsec));
 }
 
 fn remove_tree(out: &mut Out, path: &str) -> Result<(), Error> {

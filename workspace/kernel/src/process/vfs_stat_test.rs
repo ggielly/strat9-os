@@ -29,7 +29,7 @@ use alloc::{format, string::String};
 
 use crate::{
     process::{scheduler::ticks, Task, TaskPriority},
-    syscall::time::current_time_ns,
+    syscall::time::realtime_ns as current_time_ns,
     vfs,
 };
 

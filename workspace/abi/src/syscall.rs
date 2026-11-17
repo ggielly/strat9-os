@@ -1484,6 +1484,18 @@ pub const SYS_READLINKAT: usize = 467;
 /// that `SYS_ACCESS` can have when paths are resolved relative to CWD.
 pub const SYS_FACCESSAT: usize = 468;
 
+/// Set file access/modification timestamps by path (`utimensat`-like).
+///
+/// - `path_ptr`: pointer to the file path
+/// - `path_len`: length of the path
+/// - `times_ptr`: pointer to `[TimeSpec; 2]` (`atime`, `mtime`), or `0` to set
+///   both to the current time. A `tv_nsec` of `UTIME_NOW` / `UTIME_OMIT`
+///   (see `ipc_payload`) selects "now" / "leave unchanged" for that entry.
+/// - `flags`: currently unused, pass 0
+///
+/// The change time (`ctime`) is always set to the current time.
+pub const SYS_UTIMENSAT: usize = 469;
+
 // ── Block 500-599: Time / Alarms ────────────────────────────────────────────
 
 /// Get the current time of a clock.

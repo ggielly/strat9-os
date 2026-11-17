@@ -326,6 +326,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_OPENAT => crate::vfs::sys_openat(arg1, arg2, arg3, arg4),
         SYS_FSTATAT => crate::vfs::sys_fstatat(arg1, arg2, arg3, arg5),
         SYS_FACCESSAT => crate::vfs::sys_faccessat(arg1, arg2, arg3, arg4, frame.r8),
+        SYS_UTIMENSAT => crate::vfs::sys_utimensat(arg1, arg2, arg3, arg4),
 
         // Network syscalls (470-489) ========================================
         SYS_NET_RECV => net::sys_net_recv(arg1, arg2),

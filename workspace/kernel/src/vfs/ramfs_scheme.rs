@@ -105,7 +105,7 @@ struct RamState {
 impl RamState {
     /// Performs the now ns operation.
     fn now_ns() -> u64 {
-        crate::syscall::time::current_time_ns()
+        crate::syscall::time::realtime_ns()
     }
 
     /// Performs the current ids operation.
@@ -314,8 +314,8 @@ impl Scheme for RamfsScheme {
             if let Some(ino) = st.lookup(path) {
                 // Entry already exists : succeed (POSIX O_CREAT without O_EXCL).
                 let inode = st.inodes.get_mut(&ino).ok_or(SyscallError::IoError)?;
+                // POSIX: open() never updates atime; read/readdir do.
                 if inode.is_dir() {
-                    inode.atime_ns = now;
                     return Ok(OpenResult {
                         file_id: ino,
                         size: Some(0),
@@ -329,7 +329,6 @@ impl Scheme for RamfsScheme {
                     inode.mtime_ns = now;
                     inode.ctime_ns = now;
                 }
-                inode.atime_ns = now;
                 let size = inode.byte_size();
                 return Ok(OpenResult {
                     file_id: ino,
@@ -375,10 +374,10 @@ impl Scheme for RamfsScheme {
 
         // Normal open (no O_CREAT).
         let mut st = self.state.lock();
-        let now = RamState::now_ns();
+        // No atime update here: `stat`/`ls -l` open the path too, and merely
+        // looking at a file must not change its access time.
         let ino = st.lookup(path).ok_or(SyscallError::NotFound)?;
         let inode = st.inodes.get_mut(&ino).ok_or(SyscallError::IoError)?;
-        inode.atime_ns = now;
 
         if inode.is_dir() {
             Ok(OpenResult {
@@ -778,6 +777,36 @@ impl Scheme for RamfsScheme {
         let inode = st.inodes.get_mut(&ino).ok_or(SyscallError::NotFound)?;
         let type_bits = inode.mode & 0o170_000;
         inode.mode = type_bits | (mode & 0o7777);
+        inode.ctime_ns = now;
+        Ok(())
+    }
+
+    //  utimens =============================
+
+    /// Sets atime/mtime (`UTIME_NOW` / `UTIME_OMIT` honoured); ctime = now.
+    fn utimens(
+        &self,
+        path: &str,
+        atime: strat9_abi::data::TimeSpec,
+        mtime: strat9_abi::data::TimeSpec,
+    ) -> Result<(), SyscallError> {
+        use strat9_abi::ipc_payload::{UTIME_NOW, UTIME_OMIT};
+        let path = path.trim_matches('/');
+        let mut st = self.state.lock();
+        let now = RamState::now_ns();
+        let ino = st.lookup(path).ok_or(SyscallError::NotFound)?;
+        let inode = st.inodes.get_mut(&ino).ok_or(SyscallError::NotFound)?;
+        let resolve = |t: strat9_abi::data::TimeSpec, current: u64| -> u64 {
+            match t.tv_nsec {
+                n if n == UTIME_NOW as i64 => now,
+                n if n == UTIME_OMIT as i64 => current,
+                n => (t.tv_sec.max(0) as u64)
+                    .saturating_mul(1_000_000_000)
+                    .saturating_add(n.max(0) as u64),
+            }
+        };
+        inode.atime_ns = resolve(atime, inode.atime_ns);
+        inode.mtime_ns = resolve(mtime, inode.mtime_ns);
         inode.ctime_ns = now;
         Ok(())
     }

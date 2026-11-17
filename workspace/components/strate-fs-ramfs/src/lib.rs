@@ -76,19 +76,59 @@ enum RamNode {
     },
 }
 
+/// POSIX timestamps of one inode.
+#[derive(Clone, Copy)]
+struct InodeTimes {
+    atime: VfsTimestamp,
+    mtime: VfsTimestamp,
+    ctime: VfsTimestamp,
+    /// Birth time (never changes after creation).
+    crtime: VfsTimestamp,
+}
+
 struct RamInode {
     node: Mutex<RamNode>,
     open_count: AtomicU32,
+    /// Lock order: always `node` first, then `times` (never the reverse).
+    times: Mutex<InodeTimes>,
 }
 
 impl RamInode {
-    /// Creates a new instance.
-    fn new(node: RamNode) -> Self {
+    /// Creates a new instance; all four timestamps start at `now`.
+    fn new(node: RamNode, now: VfsTimestamp) -> Self {
         Self {
             node: Mutex::new(node),
             open_count: AtomicU32::new(0),
+            times: Mutex::new(InodeTimes {
+                atime: now,
+                mtime: now,
+                ctime: now,
+                crtime: now,
+            }),
         }
     }
+
+    /// Stamp the selected timestamps with `now`.
+    fn touch(&self, now: VfsTimestamp, atime: bool, mtime: bool, ctime: bool) {
+        let mut t = self.times.lock();
+        if atime {
+            t.atime = now;
+        }
+        if mtime {
+            t.mtime = now;
+        }
+        if ctime {
+            t.ctime = now;
+        }
+    }
+}
+
+/// Source of wall-clock time for inode timestamps.
+pub type ClockFn = fn() -> VfsTimestamp;
+
+/// Clock used until the host installs a real one: everything is stamped 0.
+fn zero_clock() -> VfsTimestamp {
+    VfsTimestamp::new(0, 0)
 }
 
 pub struct RamFileSystem {
@@ -98,15 +138,25 @@ pub struct RamFileSystem {
     /// Bytes of file data currently stored across all inodes (budget guard
     /// against exhausting the shared server heap).
     total_data_bytes: AtomicU64,
+    /// Wall-clock source for atime/mtime/ctime/birth time.
+    clock: ClockFn,
 }
 
 impl RamFileSystem {
-    /// Creates a new instance.
+    /// Creates a new instance with no clock (all timestamps are 0).
     pub fn new() -> Self {
-        let root = Arc::new(RamInode::new(RamNode::Directory {
-            entries: BTreeMap::new(),
-            mode: 0o040755,
-        }));
+        Self::with_clock(zero_clock)
+    }
+
+    /// Creates a filesystem whose inode timestamps come from `clock`.
+    pub fn with_clock(clock: ClockFn) -> Self {
+        let root = Arc::new(RamInode::new(
+            RamNode::Directory {
+                entries: BTreeMap::new(),
+                mode: 0o040755,
+            },
+            clock(),
+        ));
         let mut inodes = BTreeMap::new();
         inodes.insert(2, root); // Standard root inode is 2
 
@@ -115,7 +165,13 @@ impl RamFileSystem {
             next_inode: AtomicU64::new(10), // Start user inodes at 10
             capabilities: FsCapabilities::writable_linux(),
             total_data_bytes: AtomicU64::new(0),
+            clock,
         }
+    }
+
+    /// Current time according to the installed clock.
+    fn now(&self) -> VfsTimestamp {
+        (self.clock)()
     }
 
     /// Validates a directory entry name.
@@ -149,7 +205,7 @@ impl RamFileSystem {
     /// The loop is bounded in practice: with a 2 MiB heap the map can never
     /// hold 2^64 entries.
     fn allocate_inode(&self, node: RamNode) -> u64 {
-        let inode = Arc::new(RamInode::new(node));
+        let inode = Arc::new(RamInode::new(node, self.now()));
         loop {
             let id = self.next_inode.fetch_add(1, Ordering::SeqCst);
             if id == 0 || id == 2 {
@@ -424,6 +480,11 @@ impl VfsFileSystem for RamFileSystem {
                 info.nlink = 2;
             }
         }
+        let t = *node.times.lock();
+        info.atime = t.atime;
+        info.mtime = t.mtime;
+        info.ctime = t.ctime;
+        info.crtime = Some(t.crtime);
         Ok(info)
     }
 
@@ -454,6 +515,7 @@ impl VfsFileSystem for RamFileSystem {
                     .min(data.len());
                 let count = end - start;
                 buf[..count].copy_from_slice(&data[start..end]);
+                node.touch(self.now(), true, false, false);
                 Ok(count)
             }
             _ => Err(FsError::IsADirectory),
@@ -493,6 +555,7 @@ impl VfsFileSystem for RamFileSystem {
                         .fetch_add(growth as u64, Ordering::AcqRel);
                 }
                 file_data[start..end].copy_from_slice(data);
+                node.touch(self.now(), false, true, true);
                 Ok(data.len())
             }
             _ => Err(FsError::IsADirectory),
@@ -526,6 +589,7 @@ impl VfsFileSystem for RamFileSystem {
                         offset: 0,
                     });
                 }
+                node.touch(self.now(), true, false, false);
                 Ok(result)
             }
             _ => Err(FsError::NotADirectory),
@@ -562,6 +626,7 @@ impl VfsFileSystem for RamFileSystem {
                 }
                 entries.insert(name.to_string(), new_ino);
                 drop(guard);
+                parent.touch(self.now(), false, true, true);
                 self.stat(new_ino)
             }
             _ => {
@@ -601,6 +666,7 @@ impl VfsFileSystem for RamFileSystem {
                 }
                 entries.insert(name.to_string(), new_ino);
                 drop(guard);
+                parent.touch(self.now(), false, true, true);
                 self.stat(new_ino)
             }
             _ => {
@@ -656,6 +722,7 @@ impl VfsFileSystem for RamFileSystem {
                 _ => return Err(FsError::NotADirectory),
             }
         }
+        parent.touch(self.now(), false, true, true);
         self.collect_if_detached(child_ino)?;
         Ok(())
     }
@@ -773,6 +840,12 @@ impl VfsFileSystem for RamFileSystem {
                     }
                 }
                 drop(guard);
+                let now = self.now();
+                old_parent_node.touch(now, false, true, true);
+                new_parent_node.touch(now, false, true, true);
+                if let Ok(moved) = self.get_node(moved_ino) {
+                    moved.touch(now, false, false, true);
+                }
                 if let Some(existing_ino) = replaced_for_gc {
                     self.collect_if_detached(existing_ino)?;
                 }
@@ -813,6 +886,7 @@ impl VfsFileSystem for RamFileSystem {
                         self.total_data_bytes.fetch_sub(freed, Ordering::AcqRel);
                     }
                 }
+                node.touch(self.now(), false, true, true);
                 Ok(())
             }
             _ => Err(FsError::IsADirectory),
@@ -823,10 +897,20 @@ impl VfsFileSystem for RamFileSystem {
     fn set_times(
         &self,
         ino: u64,
-        _atime: Option<VfsTimestamp>,
-        _mtime: Option<VfsTimestamp>,
+        atime: Option<VfsTimestamp>,
+        mtime: Option<VfsTimestamp>,
     ) -> FsResult<()> {
-        let _ = self.get_node(ino)?;
+        let node = self.get_node(ino)?;
+        let now = self.now();
+        let mut t = node.times.lock();
+        if let Some(a) = atime {
+            t.atime = a;
+        }
+        if let Some(m) = mtime {
+            t.mtime = m;
+        }
+        // Changing timestamps is itself an inode change.
+        t.ctime = now;
         Ok(())
     }
 
@@ -839,6 +923,7 @@ impl VfsFileSystem for RamFileSystem {
             RamNode::Directory { mode, .. } => mode,
         };
         *slot = (*slot & !0o7777) | (mode & 0o7777);
+        node.touch(self.now(), false, false, true);
         Ok(())
     }
 
@@ -920,5 +1005,110 @@ mod tests {
         .unwrap();
         assert!(fs.lookup(root, "a.txt").is_err());
         assert_eq!(fs.lookup(root, "b.txt").unwrap().ino, ino);
+    }
+
+    // --- timestamps ---------------------------------------------------------
+
+    use core::sync::atomic::AtomicI64;
+
+    static TICK: AtomicI64 = AtomicI64::new(1_000);
+
+    /// Strictly increasing fake clock (each call returns a later second).
+    fn fake_clock() -> VfsTimestamp {
+        VfsTimestamp::new(TICK.fetch_add(1, Ordering::SeqCst), 0)
+    }
+
+    fn timed_fs() -> (RamFileSystem, u64) {
+        let fs = RamFileSystem::with_clock(fake_clock);
+        let root = fs.root_inode();
+        let ino = fs.create_file(root, "f", 0o644).unwrap().ino;
+        (fs, ino)
+    }
+
+    #[test]
+    fn create_stamps_all_times_and_dirties_parent() {
+        let fs = RamFileSystem::with_clock(fake_clock);
+        let root = fs.root_inode();
+        let before = fs.stat(root).unwrap();
+        let st = fs.create_file(root, "f", 0o644).unwrap();
+        assert!(st.atime.secs > 0);
+        assert_eq!(st.atime, st.mtime);
+        assert_eq!(st.mtime, st.ctime);
+        assert_eq!(st.crtime, Some(st.ctime));
+        let after = fs.stat(root).unwrap();
+        assert!(after.mtime.secs > before.mtime.secs, "parent mtime");
+        assert!(after.ctime.secs > before.ctime.secs, "parent ctime");
+    }
+
+    #[test]
+    fn write_updates_mtime_ctime_read_updates_atime() {
+        let (fs, ino) = timed_fs();
+        let s0 = fs.stat(ino).unwrap();
+        fs.write(ino, 0, b"hello").unwrap();
+        let s1 = fs.stat(ino).unwrap();
+        assert!(s1.mtime.secs > s0.mtime.secs);
+        assert!(s1.ctime.secs > s0.ctime.secs);
+        assert_eq!(s1.atime, s0.atime, "write must not touch atime");
+        assert_eq!(s1.crtime, s0.crtime, "birth time never changes");
+
+        let mut buf = [0u8; 5];
+        fs.read(ino, 0, &mut buf).unwrap();
+        let s2 = fs.stat(ino).unwrap();
+        assert!(s2.atime.secs > s1.atime.secs);
+        assert_eq!(s2.mtime, s1.mtime, "read must not touch mtime");
+    }
+
+    #[test]
+    fn truncate_and_chmod_update_times() {
+        let (fs, ino) = timed_fs();
+        let s0 = fs.stat(ino).unwrap();
+        fs.set_size(ino, 10).unwrap();
+        let s1 = fs.stat(ino).unwrap();
+        assert!(s1.mtime.secs > s0.mtime.secs && s1.ctime.secs > s0.ctime.secs);
+        fs.set_mode(ino, 0o600).unwrap();
+        let s2 = fs.stat(ino).unwrap();
+        assert!(s2.ctime.secs > s1.ctime.secs);
+        assert_eq!(s2.mtime, s1.mtime, "chmod changes ctime only");
+    }
+
+    #[test]
+    fn set_times_applies_values_and_bumps_ctime() {
+        let (fs, ino) = timed_fs();
+        let s0 = fs.stat(ino).unwrap();
+        fs.set_times(ino, Some(VfsTimestamp::new(5, 0)), Some(VfsTimestamp::new(7, 0)))
+            .unwrap();
+        let s1 = fs.stat(ino).unwrap();
+        assert_eq!((s1.atime.secs, s1.mtime.secs), (5, 7));
+        assert!(s1.ctime.secs > s0.ctime.secs);
+        // `None` keeps the current value.
+        fs.set_times(ino, None, Some(VfsTimestamp::new(9, 0))).unwrap();
+        let s2 = fs.stat(ino).unwrap();
+        assert_eq!((s2.atime.secs, s2.mtime.secs), (5, 9));
+    }
+
+    #[test]
+    fn rename_and_unlink_dirty_the_parents() {
+        let fs = RamFileSystem::with_clock(fake_clock);
+        let root = fs.root_inode();
+        let d = fs.create_directory(root, "d", 0o755).unwrap().ino;
+        let f = fs.create_file(root, "f", 0o644).unwrap().ino;
+        let (r0, d0) = (fs.stat(root).unwrap(), fs.stat(d).unwrap());
+        let f0 = fs.stat(f).unwrap();
+        fs.rename(root, "f", d, "g", RenameFlags::default()).unwrap();
+        let (r1, d1, f1) = (fs.stat(root).unwrap(), fs.stat(d).unwrap(), fs.stat(f).unwrap());
+        assert!(r1.mtime.secs > r0.mtime.secs, "old parent");
+        assert!(d1.mtime.secs > d0.mtime.secs, "new parent");
+        assert!(f1.ctime.secs > f0.ctime.secs, "moved inode ctime");
+        assert_eq!(f1.mtime, f0.mtime, "rename keeps the file mtime");
+
+        fs.unlink(d, "g", f).unwrap();
+        assert!(fs.stat(d).unwrap().mtime.secs > d1.mtime.secs, "unlink dirties parent");
+    }
+
+    #[test]
+    fn default_clock_is_zero() {
+        let fs = RamFileSystem::new();
+        let st = fs.stat(fs.root_inode()).unwrap();
+        assert_eq!(st.mtime.secs, 0);
     }
 }

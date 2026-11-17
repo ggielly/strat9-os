@@ -39,6 +39,8 @@ use alloc::{
     vec::Vec,
 };
 
+pub use strat9_abi::data::TimeSpec;
+pub use strat9_abi::ipc_payload::{UTIME_NOW, UTIME_OMIT};
 pub use strat9_abi::data::{
     FileStat, DT_BLK, DT_CHR, DT_DIR, DT_FIFO, DT_LNK, DT_REG, DT_SOCK, DT_UNKNOWN,
     IPC_FILE_FLAG_APPEND, IPC_FILE_FLAG_CHUNK_READ, IPC_FILE_FLAG_CHUNK_WRITE,
@@ -48,7 +50,7 @@ use strat9_abi::{
     ipc_codec::{get_u32, put_u16, put_u16_len_prefixed},
     ipc_payload::{
         encode_bulk_setup, encode_bulk_teardown, encode_fchmod, encode_path_pair,
-        encode_stat_request, CloseRequest, CreateRequest, OpenReply, OpenRequest, ReadReply,
+        encode_stat_request, encode_utimens, CloseRequest, CreateRequest, OpenReply, OpenRequest, ReadReply,
         ReadRequest, StatReply, WriteRequest, OPCODE_CHMOD, OPCODE_CLOSE, OPCODE_CREATE_DIR,
         OPCODE_CREATE_FILE, OPCODE_LINK, OPCODE_OPEN, OPCODE_READ, OPCODE_READDIR, OPCODE_RENAME,
         OPCODE_STAT, OPCODE_UNLINK, OPCODE_WRITE,
@@ -240,6 +242,16 @@ pub trait Scheme: Send + Sync {
         Err(SyscallError::NotImplemented)
     }
 
+    /// Set the access and modification times of a path.
+    ///
+    /// Each entry's `tv_nsec` may be [`UTIME_NOW`] ("current time") or
+    /// [`UTIME_OMIT`] ("leave unchanged"). The change time is always set to
+    /// the current time by the filesystem.
+    fn utimens(&self, path: &str, atime: TimeSpec, mtime: TimeSpec) -> Result<(), SyscallError> {
+        let _ = (path, atime, mtime);
+        Err(SyscallError::NotImplemented)
+    }
+
     /// Change permission bits on an open file handle.
     fn fchmod(&self, file_id: u64, mode: u32) -> Result<(), SyscallError> {
         let _ = (file_id, mode);
@@ -299,7 +311,7 @@ pub const DEV_IPC_BASE: u64 = 0x100;
 /// Finalize pseudo-filesystem stats with a stable device identity and
 /// synthetic timestamps.
 pub fn finalize_pseudo_stat(mut st: FileStat, st_dev: u64, st_rdev: u64) -> FileStat {
-    let now = strat9_abi::data::TimeSpec::from_nanos(crate::syscall::time::current_time_ns());
+    let now = strat9_abi::data::TimeSpec::from_nanos(crate::syscall::time::realtime_ns());
     st.st_dev = st_dev;
     st.st_rdev = st_rdev;
     st.st_atime = now;
@@ -593,9 +605,9 @@ impl Scheme for IpcScheme {
         match Self::parse_status(&reply) {
             Ok(()) => {
                 let st = StatReply::parse(&reply.payload).ok_or(SyscallError::IoError)?;
-                let secs = |s: i64| strat9_abi::data::TimeSpec {
+                let ts = |s: i64, ns: u32| strat9_abi::data::TimeSpec {
                     tv_sec: s,
-                    tv_nsec: 0,
+                    tv_nsec: ns as i64,
                 };
                 Ok(FileStat {
                     st_dev: DEV_IPC_BASE + self.port_id.as_u64(),
@@ -608,9 +620,9 @@ impl Scheme for IpcScheme {
                     st_size: st.size,
                     st_blksize: if st.blksize == 0 { 4096 } else { st.blksize as u64 },
                     st_blocks: st.blocks,
-                    st_atime: secs(st.atime),
-                    st_mtime: secs(st.mtime),
-                    st_ctime: secs(st.ctime),
+                    st_atime: ts(st.atime, st.atime_nsec),
+                    st_mtime: ts(st.mtime, st.mtime_nsec),
+                    st_ctime: ts(st.ctime, st.ctime_nsec),
                 })
             }
             Err(SyscallError::InvalidArgument) | Err(SyscallError::NotImplemented) => {
@@ -634,6 +646,18 @@ impl Scheme for IpcScheme {
     fn chmod(&self, path: &str, mode: u32) -> Result<(), SyscallError> {
         let msg = CreateRequest::encode(OPCODE_CHMOD, mode, path)
             .ok_or(SyscallError::InvalidArgument)?;
+        let reply = self.call(msg)?;
+        Self::status_or_unsupported(&reply)
+    }
+
+    /// Set timestamps by path (`OPCODE_UTIMENS`).
+    fn utimens(&self, path: &str, atime: TimeSpec, mtime: TimeSpec) -> Result<(), SyscallError> {
+        let msg = encode_utimens(
+            path,
+            (atime.tv_sec, atime.tv_nsec as u32),
+            (mtime.tv_sec, mtime.tv_nsec as u32),
+        )
+        .ok_or(SyscallError::InvalidArgument)?;
         let reply = self.call(msg)?;
         Self::status_or_unsupported(&reply)
     }

@@ -197,6 +197,7 @@ const GOLDEN_SYSCALLS: &[(&str, usize)] = &[
     ("SYS_MKDIRAT", SYS_MKDIRAT),
     ("SYS_READLINKAT", SYS_READLINKAT),
     ("SYS_FACCESSAT", SYS_FACCESSAT),
+        ("SYS_UTIMENSAT", SYS_UTIMENSAT),
     ("SYS_CLOCK_GETTIME", SYS_CLOCK_GETTIME),
     ("SYS_NANOSLEEP", SYS_NANOSLEEP),
     ("SYS_CLOCK_NANOSLEEP", SYS_CLOCK_NANOSLEEP),
@@ -317,7 +318,7 @@ fn syscall_table_is_exhaustive() {
     // table, this count check fails and forces a conscious review.
     assert_eq!(
         GOLDEN_SYSCALLS.len(),
-        212,
+        213,
         "golden table out of sync: add new SYS_* consts AND their pinned values"
     );
 }

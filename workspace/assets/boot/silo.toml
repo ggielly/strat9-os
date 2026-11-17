@@ -88,6 +88,17 @@ type = "elf"
 probe_mode = "full"
 
 [[silos]]
+name = "ramfs"
+family = "FS"
+mode = "076"
+sid = 42
+provides = ["/ram", "/srv/strate-fs-ramfs/default"]
+[[silos.strates]]
+name = "strate-fs-ramfs"
+binary = "/initfs/strate-fs-ramfs"
+type = "elf"
+
+[[silos]]
 name = "iommu"
 family = "SYS"
 mode = "716"

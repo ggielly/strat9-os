@@ -31,6 +31,7 @@ pub use strat9_abi::ipc_payload::{
 
 // STAT / RENAME / LINK / CHMOD scheme opcodes and payload helpers.
 pub use strat9_abi::ipc_payload::{
-    parse_fchmod, parse_path_pair, parse_stat_request, CreateRequest, StatReply, OPCODE_CHMOD,
-    OPCODE_FCHMOD, OPCODE_LINK, OPCODE_RENAME, OPCODE_STAT,
+    encode_utimens, parse_fchmod, parse_path_pair, parse_stat_request, parse_utimens,
+    CreateRequest, StatReply, WireTime, OPCODE_CHMOD, OPCODE_FCHMOD, OPCODE_LINK, OPCODE_RENAME,
+    OPCODE_STAT, OPCODE_UTIMENS, UTIME_NOW, UTIME_OMIT,
 };

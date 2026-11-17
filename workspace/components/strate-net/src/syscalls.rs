@@ -64,6 +64,20 @@ pub fn clock_gettime_ns() -> Result<u64> {
         .saturating_add(ts.tv_nsec as u64))
 }
 
+/// Wall-clock time (`CLOCK_REALTIME`) as `(seconds, nanoseconds)` since the
+/// Unix epoch, or `(0, 0)` if the clock is unavailable. Used for file
+/// timestamps only; protocol timers use [`clock_gettime_ns`] (monotonic).
+pub fn realtime() -> (i64, u32) {
+    let mut ts = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    match call::clock_gettime(0 /* CLOCK_REALTIME */, &mut ts) {
+        Ok(_) => (ts.tv_sec, ts.tv_nsec.clamp(0, 999_999_999) as u32),
+        Err(_) => (0, 0),
+    }
+}
+
 /// Implements nanosleep.
 pub fn nanosleep(req: &TimeSpec) -> Result<()> {
     unsafe {

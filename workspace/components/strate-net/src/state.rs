@@ -133,11 +133,18 @@ pub(crate) struct OpenedFile {
     /// Server-side base of the optional bulk ring (0 = none).
     pub(crate) bulk_base: u64,
     pub(crate) bulk_len: usize,
+    /// `(sec, nsec)` when the handle was opened (reported as ctime).
+    pub(crate) opened_at: (i64, u32),
+    /// `(sec, nsec)` of the last read / readdir (reported as atime).
+    pub(crate) accessed_at: (i64, u32),
 }
 
 impl OpenedFile {
     pub(crate) fn new(path: &str) -> Self {
+        let now = strate_net::syscalls::realtime();
         Self {
+            opened_at: now,
+            accessed_at: now,
             path: String::from(path),
             cached_content: None,
             read_spill: None,

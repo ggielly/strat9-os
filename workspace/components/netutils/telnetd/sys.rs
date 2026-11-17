@@ -209,6 +209,24 @@ pub fn link(old: &str, new: &str) -> Res<()> {
     .map(|_| ())
 }
 
+/// Set atime/mtime. `None` = both "now" (like `touch`).
+pub fn utimens(path: &str, times: Option<[TimeSpec; 2]>) -> Res<()> {
+    let ptr = times.as_ref().map_or(0, |t| t.as_ptr() as usize);
+    // SAFETY: `path` and (when present) `times` outlive the call; the kernel
+    // validates both user pointers.
+    unsafe {
+        strat9_syscall::syscall4(number::SYS_UTIMENSAT, path.as_ptr() as usize, path.len(), ptr, 0)
+    }
+    .map(|_| ())
+}
+
+/// Wall-clock time (`CLOCK_REALTIME`).
+pub fn now() -> TimeSpec {
+    let mut ts = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    let _ = call::clock_gettime(0, &mut ts);
+    ts
+}
+
 pub fn rename(old: &str, new: &str) -> Res<()> {
     // SAFETY: both pointer/length pairs describe live `&str`s for the call.
     unsafe {
@@ -316,6 +334,23 @@ pub fn format_time(secs: i64) -> String {
     let rem = secs.rem_euclid(86_400);
     let (y, m, d) = civil_from_days(days);
     alloc::format!("{:04}-{:02}-{:02} {:02}:{:02}", y, m, d, rem / 3600, (rem % 3600) / 60)
+}
+
+/// `YYYY-MM-DD HH:MM:SS.nnnnnnnnn` (UTC) for a timestamp.
+pub fn format_time_full(secs: i64, nsec: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    alloc::format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:09}",
+        y,
+        m,
+        d,
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60,
+        nsec.clamp(0, 999_999_999)
+    )
 }
 
 /// `drwxr-xr-x` style mode string.

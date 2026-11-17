@@ -133,7 +133,11 @@ pub fn cmd_ntpdate(args: &[String]) -> Result<(), ShellError> {
         Ok((unix_secs, unix_nanos)) => {
             shell_println!("  server: {}", format_ipv4(&server_ip));
             shell_println!("  unix:   {}.{:09} UTC", unix_secs, unix_nanos);
-            shell_println!("  note: kernel realtime clock set is not implemented yet");
+            let ns = unix_secs
+                .saturating_mul(1_000_000_000)
+                .saturating_add(unix_nanos as u64);
+            crate::syscall::time::set_realtime_ns(ns);
+            shell_println!("  kernel realtime clock set");
             Ok(())
         }
         Err(_) => {

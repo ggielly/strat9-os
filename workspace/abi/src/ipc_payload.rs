@@ -118,6 +118,16 @@ pub const OPCODE_LINK: u32 = 0x0E;
 /// `mode @ 8..12`). Note `0x10` is taken by the bootstrap handshake.
 pub const OPCODE_FCHMOD: u32 = 0x11;
 
+/// Wire `msg_type` for a set-timestamps-by-path request ([`encode_utimens`]).
+pub const OPCODE_UTIMENS: u32 = 0x12;
+
+/// `tv_nsec` value meaning "set this timestamp to the current time"
+/// (POSIX `UTIME_NOW`).
+pub const UTIME_NOW: u32 = (1 << 30) - 1;
+/// `tv_nsec` value meaning "leave this timestamp unchanged"
+/// (POSIX `UTIME_OMIT`).
+pub const UTIME_OMIT: u32 = (1 << 30) - 2;
+
 /// Status a server returns for an opcode it does not implement.
 ///
 /// The kernel maps this (and legacy `EINVAL` for stat) to "not supported" so
@@ -666,7 +676,10 @@ pub fn encode_stat_request(ino: u64) -> IpcMessage {
 /// `status @ 0..4`, `mode @ 4..8`, `nlink @ 8..12`, `uid @ 12..16`,
 /// `gid @ 16..20`, `blksize @ 20..24`, `ino @ 24..32`, `size @ 32..40`,
 /// `blocks @ 40..48`, `atime @ 48..56`, `mtime @ 56..64`, `ctime @ 64..72`
-/// (times are signed seconds since the Unix epoch).
+/// (times are signed seconds since the Unix epoch), then the optional
+/// sub-second parts `atime_nsec @ 72..76`, `mtime_nsec @ 76..80`,
+/// `ctime_nsec @ 80..84`. A server that stops at 72 bytes (or leaves the
+/// tail zeroed) simply has whole-second precision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StatReply {
     /// Status code: 0 = success.
@@ -693,11 +706,19 @@ pub struct StatReply {
     pub mtime: i64,
     /// Last status change time (seconds).
     pub ctime: i64,
+    /// Nanosecond part of `atime` (0..1_000_000_000).
+    pub atime_nsec: u32,
+    /// Nanosecond part of `mtime`.
+    pub mtime_nsec: u32,
+    /// Nanosecond part of `ctime`.
+    pub ctime_nsec: u32,
 }
 
 impl StatReply {
-    /// Size of the encoded reply in bytes.
+    /// Minimum size of an encoded reply in bytes (whole-second times).
     pub const WIRE_SIZE: usize = 72;
+    /// Size including the sub-second tail.
+    pub const WIRE_SIZE_NSEC: usize = 84;
 
     /// Parse a STAT reply payload. Returns `None` if truncated.
     pub fn parse(p: &[u8]) -> Option<Self> {
@@ -730,10 +751,15 @@ impl StatReply {
             atime: u64_at(48) as i64,
             mtime: u64_at(56) as i64,
             ctime: u64_at(64) as i64,
+            // Optional tail: absent => whole-second precision. Clamp so a
+            // buggy server cannot produce an out-of-range TimeSpec.
+            atime_nsec: if p.len() >= Self::WIRE_SIZE_NSEC { u32_at(72).min(999_999_999) } else { 0 },
+            mtime_nsec: if p.len() >= Self::WIRE_SIZE_NSEC { u32_at(76).min(999_999_999) } else { 0 },
+            ctime_nsec: if p.len() >= Self::WIRE_SIZE_NSEC { u32_at(80).min(999_999_999) } else { 0 },
         })
     }
 
-    /// Encode this reply into `payload[0..72]` (payload must be >= 72 bytes).
+    /// Encode this reply into `payload[0..84]` (payload must be >= 84 bytes).
     pub fn encode_into(&self, p: &mut [u8]) {
         p[0..4].copy_from_slice(&self.status.to_le_bytes());
         p[4..8].copy_from_slice(&self.mode.to_le_bytes());
@@ -747,6 +773,9 @@ impl StatReply {
         p[48..56].copy_from_slice(&self.atime.to_le_bytes());
         p[56..64].copy_from_slice(&self.mtime.to_le_bytes());
         p[64..72].copy_from_slice(&self.ctime.to_le_bytes());
+        p[72..76].copy_from_slice(&self.atime_nsec.to_le_bytes());
+        p[76..80].copy_from_slice(&self.mtime_nsec.to_le_bytes());
+        p[80..84].copy_from_slice(&self.ctime_nsec.to_le_bytes());
     }
 }
 
@@ -796,4 +825,40 @@ pub fn parse_fchmod(payload: &[u8]) -> Option<(u64, u32)> {
     let ino = u64::from_le_bytes(payload.get(0..8)?.try_into().ok()?);
     let mode = u32::from_le_bytes(payload.get(8..12)?.try_into().ok()?);
     Some((ino, mode))
+}
+
+/// A `(seconds, nanoseconds)` timestamp; `nanoseconds` may be
+/// [`UTIME_NOW`] or [`UTIME_OMIT`] in a [`OPCODE_UTIMENS`] request.
+pub type WireTime = (i64, u32);
+
+/// Encode a set-timestamps request.
+///
+/// Wire layout: `atime_sec @ 0..8`, `atime_nsec @ 8..12`, `mtime_nsec @ 12..16`,
+/// `mtime_sec @ 16..24`, `path_len @ 24..26`, `path @ 26..`.
+pub fn encode_utimens(path: &str, atime: WireTime, mtime: WireTime) -> Option<IpcMessage> {
+    if 26 + path.len() > IpcMessage::PAYLOAD_CAPACITY {
+        return None;
+    }
+    let mut msg = IpcMessage::new(OPCODE_UTIMENS);
+    msg.payload[0..8].copy_from_slice(&atime.0.to_le_bytes());
+    msg.payload[8..12].copy_from_slice(&atime.1.to_le_bytes());
+    msg.payload[12..16].copy_from_slice(&mtime.1.to_le_bytes());
+    msg.payload[16..24].copy_from_slice(&mtime.0.to_le_bytes());
+    msg.payload[24..26].copy_from_slice(&(path.len() as u16).to_le_bytes());
+    msg.payload[26..26 + path.len()].copy_from_slice(path.as_bytes());
+    Some(msg)
+}
+
+/// Parse a set-timestamps request: `(path, atime, mtime)`.
+pub fn parse_utimens(p: &[u8]) -> Option<(&str, WireTime, WireTime)> {
+    if p.len() < 26 {
+        return None;
+    }
+    let a_sec = i64::from_le_bytes(p[0..8].try_into().ok()?);
+    let a_nsec = u32::from_le_bytes(p[8..12].try_into().ok()?);
+    let m_nsec = u32::from_le_bytes(p[12..16].try_into().ok()?);
+    let m_sec = i64::from_le_bytes(p[16..24].try_into().ok()?);
+    let len = u16::from_le_bytes(p[24..26].try_into().ok()?) as usize;
+    let path = crate::ipc_codec::get_str(p, 26, len)?;
+    Some((path, (a_sec, a_nsec), (m_sec, m_nsec)))
 }

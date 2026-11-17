@@ -22,7 +22,7 @@
 
 //! Time-related syscalls: clock_gettime, nanosleep, clock_nanosleep
 
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 
 use crate::{
     memory::userslice::{UserSliceRead, UserSliceReadWrite},
@@ -52,6 +52,76 @@ pub fn current_time_ns() -> u64 {
     crate::process::scheduler::ticks() * 10_000_000 // 10ms = 10,000,000 ns
 }
 
+// ============================================================================
+// Wall clock (CLOCK_REALTIME)
+// ============================================================================
+
+/// `0` = not initialised, `1` = one CPU is reading the RTC, `2` = ready.
+static WALL_STATE: AtomicU8 = AtomicU8::new(0);
+/// `realtime - monotonic`, in nanoseconds (Unix epoch based).
+static WALL_OFFSET_NS: AtomicI64 = AtomicI64::new(0);
+
+/// Whether the CMOS fields describe a believable date. A never-programmed
+/// CMOS reads back as zeroes / 0xFF, which `to_timestamp` happily turns into
+/// an instant that *looks* valid, so the fields must be checked first.
+fn rtc_plausible(dt: &crate::hardware::timer::rtc::RtcDateTime) -> bool {
+    (1..=12).contains(&dt.month)
+        && (1..=31).contains(&dt.day)
+        && dt.hour <= 23
+        && dt.minute <= 59
+        && dt.second <= 60
+        && (2000..=2100).contains(&dt.year)
+}
+
+/// Seed the wall clock from the RTC the first time it is needed.
+fn ensure_wall_clock() {
+    if WALL_STATE.load(Ordering::Acquire) == 2 {
+        return;
+    }
+    if WALL_STATE
+        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return; // another CPU is initialising; offset 0 until it is done
+    }
+    let mono = current_time_ns() as i64;
+    // The first caller is usually the VFS at early boot, long before
+    // `rtc::init()` runs, so read the CMOS directly rather than waiting for
+    // `is_available()`: the read only needs port I/O. A CMOS that was never
+    // programmed (or a platform with stubbed port I/O) fails the plausibility
+    // check and leaves the clock on uptime.
+    let dt = crate::hardware::timer::rtc::get_datetime();
+    if rtc_plausible(&dt) {
+        let unix_ns = (dt.to_timestamp() as i64).saturating_mul(1_000_000_000);
+        WALL_OFFSET_NS.store(unix_ns - mono, Ordering::Release);
+    }
+    WALL_STATE.store(2, Ordering::Release);
+}
+
+/// Current wall-clock time in nanoseconds since the Unix epoch.
+///
+/// Backed by the RTC (read once, then advanced by the monotonic tick
+/// counter) and adjustable with [`set_realtime_ns`] (e.g. `ntpdate`). With no
+/// usable RTC it degrades to uptime, i.e. the previous behaviour.
+pub fn realtime_ns() -> u64 {
+    ensure_wall_clock();
+    let off = WALL_OFFSET_NS.load(Ordering::Acquire);
+    (current_time_ns() as i64).saturating_add(off).max(0) as u64
+}
+
+/// `realtime - monotonic` offset in nanoseconds.
+fn wall_offset_ns() -> i64 {
+    ensure_wall_clock();
+    WALL_OFFSET_NS.load(Ordering::Acquire)
+}
+
+/// Step the wall clock to `unix_ns` nanoseconds since the Unix epoch.
+pub fn set_realtime_ns(unix_ns: u64) {
+    let mono = current_time_ns() as i64;
+    WALL_OFFSET_NS.store((unix_ns as i64) - mono, Ordering::Release);
+    WALL_STATE.store(2, Ordering::Release);
+}
+
 /// SYS_CLOCK_GETTIME: Get current time for the specified clock.
 ///
 /// # Arguments
@@ -70,14 +140,13 @@ pub fn sys_clock_gettime(clock_id: u32, tp_ptr: u64) -> Result<u64, SyscallError
         return Err(SyscallError::Fault);
     }
 
-    // Currently we only support CLOCK_MONOTONIC and CLOCK_REALTIME (both return same time)
-    // In the future, CLOCK_REALTIME could be backed by an RTC
-    match clock_id {
-        CLOCK_MONOTONIC | CLOCK_REALTIME => {}
+    // CLOCK_MONOTONIC counts from boot; CLOCK_REALTIME is the RTC-backed
+    // wall clock (Unix epoch).
+    let now_ns = match clock_id {
+        CLOCK_MONOTONIC => current_time_ns(),
+        CLOCK_REALTIME => realtime_ns(),
         _ => return Err(SyscallError::InvalidArgument),
-    }
-
-    let now_ns = current_time_ns();
+    };
     let ts = TimeSpec::from_nanos(now_ns);
 
     let user = UserSliceReadWrite::new(tp_ptr, core::mem::size_of::<TimeSpec>())?;
@@ -223,8 +292,17 @@ pub fn sys_clock_nanosleep(
 
     // Compute the wake deadline
     let wake_deadline_ns = if (flags & TIMER_ABSTIME) != 0 {
-        // Absolute mode: request value IS the deadline
-        let deadline = req.to_nanos();
+        // Absolute mode: request value IS the deadline. Wake deadlines run on
+        // the monotonic scheduler clock, so shift a wall-clock request back.
+        let mut deadline = req.to_nanos();
+        if clock_id == CLOCK_REALTIME {
+            let off = wall_offset_ns();
+            deadline = if off >= 0 {
+                deadline.saturating_sub(off as u64)
+            } else {
+                deadline.saturating_add(off.unsigned_abs())
+            };
+        }
         // If the deadline is in the past, return immediately (success per POSIX)
         if deadline <= current_ns {
             return Ok(0);

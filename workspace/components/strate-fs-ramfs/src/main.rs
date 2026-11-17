@@ -38,7 +38,7 @@ use strat9_syscall::{
     error::{EBADF, EINVAL, ENOSYS},
     *,
 };
-use strate_fs_abstraction::{FsError, RenameFlags, VfsFileSystem, VfsFileType};
+use strate_fs_abstraction::{FsError, RenameFlags, VfsFileSystem, VfsFileType, VfsTimestamp};
 use strate_fs_ramfs::{split_path, RamFileSystem};
 
 #[global_allocator]
@@ -80,10 +80,23 @@ const OPEN_TRUNCATE: u32 = 1 << 3;
 const OPEN_DIRECTORY: u32 = 1 << 5;
 
 use strat9_syscall::data::{
-    parse_fchmod, parse_path_pair, parse_stat_request, CreateRequest, IpcMessage, StatReply,
-    IPC_FILE_FLAG_CHUNK_READ, IPC_FILE_FLAG_CHUNK_WRITE, IPC_FILE_FLAG_DIRECTORY, OPCODE_CHMOD,
-    OPCODE_FCHMOD, OPCODE_RENAME, OPCODE_STAT,
+    parse_fchmod, parse_path_pair, parse_stat_request, parse_utimens, CreateRequest, IpcMessage,
+    StatReply, IPC_FILE_FLAG_CHUNK_READ, IPC_FILE_FLAG_CHUNK_WRITE, IPC_FILE_FLAG_DIRECTORY,
+    OPCODE_CHMOD, OPCODE_FCHMOD, OPCODE_RENAME, OPCODE_STAT, OPCODE_UTIMENS, UTIME_NOW,
+    UTIME_OMIT,
 };
+
+/// Wall-clock source (`CLOCK_REALTIME`) for inode timestamps.
+fn real_clock() -> VfsTimestamp {
+    let mut ts = strat9_syscall::data::TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    match call::clock_gettime(0, &mut ts) {
+        Ok(_) => VfsTimestamp::new(ts.tv_sec, ts.tv_nsec.clamp(0, 999_999_999) as u32),
+        Err(_) => VfsTimestamp::new(0, 0),
+    }
+}
 
 struct StrateRamServer {
     fs: RamFileSystem,
@@ -107,7 +120,7 @@ impl StrateRamServer {
     /// Creates a new instance.
     fn new() -> Self {
         Self {
-            fs: RamFileSystem::new(),
+            fs: RamFileSystem::with_clock(real_clock),
             alias_label: None,
             bootstrap_done: false,
             open_sessions: BTreeMap::new(),
@@ -504,6 +517,9 @@ impl StrateRamServer {
                     atime: info.atime.secs,
                     mtime: info.mtime.secs,
                     ctime: info.ctime.secs,
+                    atime_nsec: info.atime.nsecs,
+                    mtime_nsec: info.mtime.nsecs,
+                    ctime_nsec: info.ctime.nsecs,
                 }
                 .encode_into(&mut reply.payload);
                 reply
@@ -555,6 +571,34 @@ impl StrateRamServer {
             .fs
             .resolve_path_internal(path)
             .and_then(|ino| self.fs.set_mode(ino, mode));
+        match res {
+            Ok(()) => Self::ok_reply(sender),
+            Err(err) => Self::err_reply(sender, Self::fs_status(err)),
+        }
+    }
+
+    /// `OPCODE_UTIMENS`: set atime/mtime by path (`UTIME_NOW` / `UTIME_OMIT`
+    /// honoured). The change time is stamped by the filesystem.
+    fn handle_utimens(&mut self, sender: u64, payload: &[u8]) -> IpcMessage {
+        let Some((path, atime, mtime)) = parse_utimens(payload) else {
+            return Self::err_reply(sender, EINVAL as u32);
+        };
+        let resolve = |(sec, nsec): (i64, u32)| -> core::result::Result<Option<VfsTimestamp>, u32> {
+            match nsec {
+                UTIME_OMIT => Ok(None),
+                UTIME_NOW => Ok(Some(real_clock())),
+                n if n < 1_000_000_000 => Ok(Some(VfsTimestamp::new(sec, n))),
+                _ => Err(EINVAL as u32),
+            }
+        };
+        let (a, m) = match (resolve(atime), resolve(mtime)) {
+            (Ok(a), Ok(m)) => (a, m),
+            (Err(code), _) | (_, Err(code)) => return Self::err_reply(sender, code),
+        };
+        let res = self
+            .fs
+            .resolve_path_internal(path)
+            .and_then(|ino| self.fs.set_times(ino, a, m));
         match res {
             Ok(()) => Self::ok_reply(sender),
             Err(err) => Self::err_reply(sender, Self::fs_status(err)),
@@ -685,6 +729,7 @@ impl StrateRamServer {
                 OPCODE_RENAME => self.handle_rename(msg.sender, &msg.payload),
                 OPCODE_CHMOD => self.handle_chmod(msg.sender, &msg.payload),
                 OPCODE_FCHMOD => self.handle_fchmod(msg.sender, &msg.payload),
+                OPCODE_UTIMENS => self.handle_utimens(msg.sender, &msg.payload),
                 // OPCODE_LINK: RamFS inodes carry no link count, so hard links
                 // are not supported (ENOSYS lets the kernel report it).
                 _ => Self::err_reply(msg.sender, ENOSYS as u32),
