@@ -22,7 +22,7 @@
 
 //! Minimal Jalon 4 display client: gradient surface + bouncing square.
 //!
-//! Connects to `/srv/display`, creates one 320x200 XRGB8888 surface, presents
+//! Connects to `/srv/vasistas`, creates one 320x200 XRGB8888 surface, presents
 //! a full frame, then animates a 16x16 white square for 120 frames using
 //! damage-rect commits. Handles `CONFIGURE` by allocating a new buffer and
 //! `CLOSE_REQUEST` by closing the session.
@@ -38,8 +38,8 @@
 
 use core::panic::PanicInfo;
 
-use display_client::{Client, Event};
-use display_protocol::Rect;
+use lucarne::{Client, Event};
+use vasistas_protocol::Rect;
 use strat9_syscall::{call, data::TimeSpec};
 
 const WIDTH: u32 = 320;
@@ -52,35 +52,35 @@ const FRAMES: u32 = 120;
 const CONNECT_TIMEOUT_NS: u64 = 100_000_000;
 
 struct View {
-    buffer: display_client::Buffer,
+    buffer: lucarne::Buffer,
     width: u32,
     height: u32,
 }
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    log(b"[display-demo] waiting for /srv/display\n");
+    log(b"[lucarne-demo] waiting for /srv/vasistas\n");
     let mut client = loop {
-        match Client::connect(b"/srv/display", CONNECT_TIMEOUT_NS) {
+        match Client::connect(b"/srv/vasistas", CONNECT_TIMEOUT_NS) {
             Some(client) => break client,
             None => sleep_ms(50),
         }
     };
-    log(b"[display-demo] connected\n");
+    log(b"[lucarne-demo] connected\n");
     log_pid(client.pid());
 
     let surface = match create_surface(&mut client, WIDTH, HEIGHT) {
         Some(surface) => surface,
-        None => fatal(b"[display-demo] create_surface failed\n"),
+        None => fatal(b"[lucarne-demo] create_surface failed\n"),
     };
 
     let mut view = match alloc_view(&mut client, surface, WIDTH, HEIGHT) {
         Some(view) => view,
-        None => fatal(b"[display-demo] alloc_buffer failed\n"),
+        None => fatal(b"[lucarne-demo] alloc_buffer failed\n"),
     };
     let mut other = match alloc_view(&mut client, surface, WIDTH, HEIGHT) {
         Some(view) => view,
-        None => fatal(b"[display-demo] second alloc_buffer failed\n"),
+        None => fatal(b"[lucarne-demo] second alloc_buffer failed\n"),
     };
     fill_gradient(&mut view.buffer);
     draw_square_at(&mut view.buffer, 8, 8);
@@ -94,13 +94,13 @@ pub extern "C" fn _start() -> ! {
             if let Some(frame) = result.frame {
                 serial = frame.serial;
                 if !frame.present_submitted() {
-                    log(b"[display-demo] first frame not submitted\n");
+                    log(b"[lucarne-demo] first frame not submitted\n");
                 }
             }
         }
-        None => fatal(b"[display-demo] first commit failed\n"),
+        None => fatal(b"[lucarne-demo] first commit failed\n"),
     }
-    log(b"[display-demo] first frame presented\n");
+    log(b"[lucarne-demo] first frame presented\n");
 
     let mut x = 8i32;
     let mut y = 8i32;
@@ -147,12 +147,12 @@ pub extern "C" fn _start() -> ! {
                     core::mem::swap(&mut view, &mut other);
                 }
             }
-            None => log(b"[display-demo] commit failed\n"),
+            None => log(b"[lucarne-demo] commit failed\n"),
         }
         sleep_ms(16);
     }
 
-    log(b"[display-demo] animation done\n");
+    log(b"[lucarne-demo] animation done\n");
     // Resize: create a new surface with a different geometry, present one
     // full frame, then destroy the old surface. This exercises surface
     // creation/destruction, quota refund and the second surface slot.
@@ -166,13 +166,13 @@ pub extern "C" fn _start() -> ! {
                     serial = frame.serial;
                 }
             }
-            log(b"[display-demo] resized frame presented\n");
+            log(b"[lucarne-demo] resized frame presented\n");
             // The resized buffer is the surface's current image: destroying it
             // first is BAD_STATE. Destroy the old surface (retires its two
             // buffers) and the resized surface (retires its current buffer).
             let _ = client.destroy_surface(surface);
             let _ = client.destroy_surface(resized);
-            log(b"[display-demo] resized surface closed\n");
+            log(b"[lucarne-demo] resized surface closed\n");
         }
     }
     finish(client)
@@ -190,7 +190,7 @@ fn fatal(message: &[u8]) -> ! {
 
 fn create_surface(client: &mut Client, width: u32, height: u32) -> Option<u64> {
     for _ in 0..100 {
-        if let Some(surface) = client.create_surface(width, height, b"display-demo") {
+        if let Some(surface) = client.create_surface(width, height, b"lucarne-demo") {
             return Some(surface);
         }
         sleep_ms(10);
@@ -223,10 +223,10 @@ fn handle_event(
 ) -> bool {
     match event {
         Event::Configure { serial: configure_serial, width, height, .. } => {
-            log(b"[display-demo] configure\n");
+            log(b"[lucarne-demo] configure\n");
             let old_id = view.buffer.id;
             let Some(mut buffer) = client.alloc_buffer(surface, width, height, width * 4) else {
-                log(b"[display-demo] resize alloc failed\n");
+                log(b"[lucarne-demo] resize alloc failed\n");
                 return false;
             };
             fill_gradient(&mut buffer);
@@ -248,11 +248,11 @@ fn handle_event(
             true
         }
         Event::CloseRequest { .. } => {
-            log(b"[display-demo] close requested\n");
+            log(b"[lucarne-demo] close requested\n");
             false
         }
         Event::Error { .. } => {
-            log(b"[display-demo] server error event\n");
+            log(b"[lucarne-demo] server error event\n");
             true
         }
         _ => true,
@@ -285,7 +285,7 @@ fn bounce(x: &mut i32, y: &mut i32, dx: &mut i32, dy: &mut i32, width: u32, heig
     }
 }
 
-fn fill_gradient(buffer: &mut display_client::Buffer) {
+fn fill_gradient(buffer: &mut lucarne::Buffer) {
     let width = buffer.width as usize;
     let height = buffer.height as usize;
     let stride = buffer.stride as usize;
@@ -299,7 +299,7 @@ fn fill_gradient(buffer: &mut display_client::Buffer) {
     }
 }
 
-fn fill_gradient_rect(buffer: &mut display_client::Buffer, x: i32, y: i32, w: u32, h: u32) {
+fn fill_gradient_rect(buffer: &mut lucarne::Buffer, x: i32, y: i32, w: u32, h: u32) {
     let width = buffer.width as i32;
     let height = buffer.height as i32;
     let stride = buffer.stride as usize;
@@ -317,7 +317,7 @@ fn fill_gradient_rect(buffer: &mut display_client::Buffer, x: i32, y: i32, w: u3
     }
 }
 
-fn draw_square_at(buffer: &mut display_client::Buffer, x: i32, y: i32) {
+fn draw_square_at(buffer: &mut lucarne::Buffer, x: i32, y: i32) {
     let width = buffer.width as i32;
     let height = buffer.height as i32;
     let stride = buffer.stride as usize;
@@ -350,7 +350,7 @@ fn sleep_ms(ms: u64) {
 }
 
 fn log_pid(pid: u32) {
-    let prefix = b"[display-demo] pid=";
+    let prefix = b"[lucarne-demo] pid=";
     let mut line = [0u8; 40];
     let mut len = prefix.len();
     line[..len].copy_from_slice(prefix);
@@ -381,5 +381,5 @@ fn log(text: &[u8]) {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    call::handle_panic("display-demo", info)
+    call::handle_panic("lucarne-demo", info)
 }

@@ -1562,20 +1562,20 @@ pub fn init() {
         log::info!("[VFS] Mounted /dev (block-device scheme)");
     }
 
-    // Display scheme (/dev/display) : registered by the framebuffer init, but
+    // Display scheme (/dev/vasistas) : registered by the framebuffer init, but
     // mount it here as a safety net (ordering between FB and VFS init is not
     // guaranteed, and a duplicate mount is harmless).
     //
     // Two outcomes are expected and silent:
     //   - AlreadyExists : framebuffer init already mounted it;
-    //   - BadHandle     : the "display" scheme is not registered yet, which is
+    //   - BadHandle     : the "vasistas" scheme is not registered yet, which is
     //                     the normal case here : framebuffer init runs later and
     //                     performs the authoritative register + mount.
     // Anything else is a real failure worth a warning.
-    match mount_scheme("display", "/dev/display") {
-        Ok(()) => log::info!("[VFS] Mounted /dev/display (display scheme)"),
+    match mount_scheme("vasistas", "/dev/vasistas") {
+        Ok(()) => log::info!("[VFS] Mounted /dev/vasistas (vasistas scheme)"),
         Err(SyscallError::AlreadyExists) | Err(SyscallError::BadHandle) => {}
-        Err(e) => log::warn!("[VFS] /dev/display not mounted: {:?}", e),
+        Err(e) => log::warn!("[VFS] /dev/vasistas not mounted: {:?}", e),
     }
 
     // Console scheme (/dev/console) : backs stdin/stdout/stderr for ELF processes

@@ -26,8 +26,8 @@
 //! `COMMIT` and pixel quota rules of Annexe A.4/A.6 of
 //! `docs/GUI_AUDIT_2026-11.md`. It owns no pixels and performs no wire
 //! encoding: surfaces, buffers and regions are metadata, and the backend
-//! supplies regions and presentation. `display-protocol` supplies the
-//! decoded [`Commit`](display_protocol::Commit) body and the damage
+//! supplies regions and presentation. `vasistas-protocol` supplies the
+//! decoded [`Commit`](vasistas_protocol::Commit) body and the damage
 //! rectangles.
 //!
 //! No allocation, fixed capacities, deterministic results. The only `unsafe`
@@ -68,7 +68,7 @@ pub const MAX_BUFFERS_PER_SURFACE: usize = 4;
 pub const PIXEL_QUOTA_BYTES: usize = 8 * 1024 * 1024;
 
 /// Maximum rectangles in one commit (A.4).
-pub const MAX_RECTS: usize = display_protocol::MAX_RECTS;
+pub const MAX_RECTS: usize = vasistas_protocol::MAX_RECTS;
 
 /// Maximum buffer regions awaiting an explicit backend free.
 ///
@@ -81,10 +81,10 @@ pub const MAX_RECTS: usize = display_protocol::MAX_RECTS;
 pub const MAX_RETIRED_REGIONS: usize = MAX_SESSIONS * MAX_BUFFERS_PER_SESSION;
 
 /// Maximum surface dimension accepted by `CREATE_SURFACE` (A.3.1).
-pub const MAX_SURFACE_DIM: u32 = display_protocol::constants::MAX_SURFACE_DIM;
+pub const MAX_SURFACE_DIM: u32 = vasistas_protocol::constants::MAX_SURFACE_DIM;
 
 /// Maximum surface title length in bytes (A.3.1).
-pub const MAX_TITLE: usize = display_protocol::constants::MAX_TITLE;
+pub const MAX_TITLE: usize = vasistas_protocol::constants::MAX_TITLE;
 
 /// The only format of protocol v1: `XRGB8888` (A.3.1).
-pub const FORMAT_XRGB8888: u32 = display_protocol::constants::FORMAT_XRGB8888;
+pub const FORMAT_XRGB8888: u32 = vasistas_protocol::constants::FORMAT_XRGB8888;

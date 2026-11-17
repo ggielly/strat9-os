@@ -24,7 +24,7 @@
 //!
 //! [`Server`] owns the [`DisplayCore`] metadata machine and the fixed
 //! peer-to-session table. [`Server::handle`] takes one complete wire message
-//! from one peer, decodes it with `display-protocol`, dispatches it to the
+//! from one peer, decodes it with `vasistas-protocol`, dispatches it to the
 //! core, and writes every reply through a [`Transport`]. One call produces
 //! zero or more complete messages (header included); the transport never sees
 //! a partial frame.
@@ -81,7 +81,7 @@
 
 use core::{mem::MaybeUninit, ptr};
 
-use display_protocol::{
+use vasistas_protocol::{
     constants::{
         ERROR_BAD_FLAGS, ERROR_BAD_FORMAT, ERROR_BAD_LENGTH, ERROR_BAD_OBJECT, ERROR_BAD_STATE,
         ERROR_INTERNAL, ERROR_NO_CREDIT, ERROR_QUOTA, ERROR_UNSUPPORTED,
@@ -749,7 +749,7 @@ fn core_code(error: CoreError) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use display_protocol::{Rect, FEATURES_KNOWN, FLAG_FULL_DAMAGE};
+    use vasistas_protocol::{Rect, FEATURES_KNOWN, FLAG_FULL_DAMAGE};
     use std::vec::Vec;
 
     use crate::backend::RegionHandle;
@@ -892,7 +892,7 @@ mod tests {
                 features: FEATURES_KNOWN,
                 pid: HELLO_PID,
                 name: b"client",
-                path: b"/srv/display",
+                path: b"/srv/vasistas",
             },
         );
         server.handle(peer, &message, transport).expect("hello");
@@ -1015,13 +1015,13 @@ mod tests {
         commit_id: u64,
         request_id: u64,
     ) -> Vec<u8> {
-        let commit = display_protocol::Commit {
+        let commit = vasistas_protocol::Commit {
             buffer,
             ack_serial,
             commit_id,
             flags: FLAG_FULL_DAMAGE,
             rect_count: 0,
-            rects: [Rect::default(); display_protocol::MAX_RECTS],
+            rects: [Rect::default(); vasistas_protocol::MAX_RECTS],
         };
         frame(Opcode::COMMIT, surface, request_id, &Body::Commit(commit))
     }

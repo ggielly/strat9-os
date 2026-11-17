@@ -27,9 +27,9 @@
 //! - [`SharedPixels`]: bounded reads of client shared memory into a private
 //!   copy, with no long-lived `&[u8]` over the client mapping (§7).
 //! - [`encode`]: the exact `DMG2` presentation message the kernel parses in
-//!   `workspace/kernel/src/hardware/video/display_scheme.rs`.
+//!   `workspace/kernel/src/hardware/video/vasistas_scheme.rs`.
 //!
-//! The `/dev/display` adapter itself (`display_scheme_backend`), the private
+//! The `/dev/vasistas` adapter itself (`vasistas_scheme_backend`), the private
 //! backbuffer and composition are deliberately out of scope here.
 //!
 //! # Backend contract
@@ -37,11 +37,11 @@
 //! **One writer.** Only the display server calls the backend. `present` never
 //! allocates, never blocks on a client and never retains the `&[Rect]` or any
 //! pixel slice past the call. The server is the single process that owns
-//! `/dev/display`; the standalone console is not a concurrent writer.
+//! `/dev/vasistas`; the standalone console is not a concurrent writer.
 //!
 //! **Lifecycle.** `DisplayCore::allocate_buffer` → backend allocates the region
 //! and imports it for the client; `commit` validates the metadata and installs
-//! the buffer; the server copies the commit's [`display_protocol::Rect`] damage
+//! the buffer; the server copies the commit's [`vasistas_protocol::Rect`] damage
 //! from client
 //! mapping into its private backbuffer with [`SharedPixels::copy_damage`],
 //! encodes it with [`encode`], calls `present`, then `frame_done` returns

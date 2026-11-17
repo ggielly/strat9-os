@@ -234,33 +234,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "display-backend"
-version = "0.1.0"
-dependencies = [
- "display-core",
- "display-protocol",
-]
-
-[[package]]
-name = "display-client"
-version = "0.1.0"
-dependencies = [
- "display-protocol",
- "strat9-syscall",
-]
-
-[[package]]
-name = "display-core"
-version = "0.1.0"
-dependencies = [
- "display-protocol",
-]
-
-[[package]]
-name = "display-protocol"
-version = "0.1.0"
-
-[[package]]
 name = "driver-net-proto"
 version = "0.1.0"
 
@@ -574,6 +547,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef9ac18847474e638e3702b76c65d4eb93428471a74778ef0f1be711717f89b5"
 dependencies = [
  "hashbrown 0.17.1",
+]
+
+[[package]]
+name = "lucarne"
+version = "0.1.0"
+dependencies = [
+ "strat9-syscall",
+ "vasistas-protocol",
 ]
 
 [[package]]
@@ -1099,16 +1080,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "strate-display"
-version = "0.1.0"
-dependencies = [
- "display-backend",
- "display-core",
- "display-protocol",
- "strat9-syscall",
-]
-
-[[package]]
 name = "strate-fs-abstraction"
 version = "0.1.0"
 dependencies = [
@@ -1410,6 +1381,35 @@ name = "unicode-width"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
+
+[[package]]
+name = "vasistas"
+version = "0.1.0"
+dependencies = [
+ "strat9-syscall",
+ "vasistas-backend",
+ "vasistas-core",
+ "vasistas-protocol",
+]
+
+[[package]]
+name = "vasistas-backend"
+version = "0.1.0"
+dependencies = [
+ "vasistas-core",
+ "vasistas-protocol",
+]
+
+[[package]]
+name = "vasistas-core"
+version = "0.1.0"
+dependencies = [
+ "vasistas-protocol",
+]
+
+[[package]]
+name = "vasistas-protocol"
+version = "0.1.0"
 
 [[package]]
 name = "version_check"

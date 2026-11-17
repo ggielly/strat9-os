@@ -33,7 +33,7 @@
 
 use core::{mem::MaybeUninit, ptr};
 
-use display_protocol::{Commit, Rect, FLAG_FULL_DAMAGE};
+use vasistas_protocol::{Commit, Rect, FLAG_FULL_DAMAGE};
 
 use crate::{
     backend::{Backend, RegionHandle},
@@ -1044,7 +1044,7 @@ impl<B: Backend> Drop for DisplayCore<B> {
 mod tests {
     use super::*;
     use crate::{RegionHandle, MAX_RECTS, MAX_SESSIONS, PIXEL_QUOTA_BYTES};
-    use display_protocol::{FLAG_FULL_DAMAGE, MAX_RECTS as PROTOCOL_MAX_RECTS};
+    use vasistas_protocol::{FLAG_FULL_DAMAGE, MAX_RECTS as PROTOCOL_MAX_RECTS};
 
     #[derive(Default)]
     struct Fake {

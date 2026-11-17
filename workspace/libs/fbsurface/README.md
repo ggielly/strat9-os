@@ -97,7 +97,7 @@ its own backend and a caller cannot drop damage by accident. It replaces
    needs a QEMU boot test.
 3. `hardware/video/framebuffer.rs`: `Framebuffer::canvas` becomes a
    `Presenter`, the three construction sites become `Presenter::from_fb`.
-4. `display_scheme.rs` (`/dev/display`): the BGR888→native conversion moves
+4. `vasistas_scheme.rs` (`/dev/vasistas`): the BGR888→native conversion moves
    from `CanvasBuffer::blit_rect` to `Canvas::convert_from`, which is the bug
    class the old code could not catch.
 5. `graphics_adapter.rs`: `HeapScreen`/`Damage` go away with R12 (display

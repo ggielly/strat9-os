@@ -51,7 +51,7 @@
 //! hold by construction. The lower bound of the end coordinate cannot
 //! underflow (`i32::MIN` plus a non-negative `u32` is `>= i32::MIN`).
 //! Negative origins are *not* rejected here: whether a rect must be clipped to
-//! the surface is an acceptance policy for `display-core`, not a wire-format
+//! the surface is an acceptance policy for `vasistas-core`, not a wire-format
 //! rule. A violating rect yields [`DecodeError::Overflow`], both on decode and
 //! on encode.
 

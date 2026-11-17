@@ -31,7 +31,7 @@
 //!   no status bar, no cursor sprites, no scrollbar, no graphical UI. Every
 //!   line of text still reaches the screen, but the only pixels written are
 //!   glyph cells, and scrolling is a single bulk row move.
-//! * `Serial` : no framebuffer touches at all: `/dev/display` stays absent
+//! * `Serial` : no framebuffer touches at all: `/dev/vasistas` stays absent
 //!   and everything is logged to COM1. On a laptop this makes boot as fast
 //!   as the hardware allows, and debugging happens over a USB-serial adapter
 //!   (or QEMU `-serial file:`).

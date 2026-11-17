@@ -23,7 +23,7 @@
 //! `DMG2` presentation encoding.
 //!
 //! Exact encoder for the binary damage protocol the kernel parses in
-//! `workspace/kernel/src/hardware/video/display_scheme.rs` (`Handle::Damage`):
+//! `workspace/kernel/src/hardware/video/vasistas_scheme.rs` (`Handle::Damage`):
 //!
 //! ```text
 //! "DMG2" | count u16le | display_id u16le | count * { x u16le, y u16le, w u16le, h u16le }
@@ -34,7 +34,7 @@
 //! such a record: it rejects empty rects instead, so a successful encode maps
 //! to exactly one presented rectangle per input rect.
 
-use display_protocol::{Rect, MAX_RECTS};
+use vasistas_protocol::{Rect, MAX_RECTS};
 
 /// Fixed header size: magic, count, display id.
 pub const DMG2_HEADER: usize = 8;
@@ -113,7 +113,7 @@ mod tests {
         Rect { x, y, w, h }
     }
 
-    /// Mirrors the kernel decoder in `display_scheme.rs` (Handle::Damage).
+    /// Mirrors the kernel decoder in `vasistas_scheme.rs` (Handle::Damage).
     fn kernel_parse(buf: &[u8]) -> Option<(u16, Vec<Rect>)> {
         if buf.len() < DMG2_HEADER || !buf.starts_with(b"DMG2") {
             return None;

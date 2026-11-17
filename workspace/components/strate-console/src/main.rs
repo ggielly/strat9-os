@@ -76,7 +76,7 @@ pub extern "C" fn _start() -> ! {
     let mut rend = match Renderer::open() {
         Some(r) => r,
         None => {
-            let _ = call::debug_log(b"[console] FATAL: cannot open /dev/display/0.0\n");
+            let _ = call::debug_log(b"[console] FATAL: cannot open /dev/vasistas/0.0\n");
             loop {
                 let _ = call::sched_yield();
             }

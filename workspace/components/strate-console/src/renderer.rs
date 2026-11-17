@@ -22,8 +22,8 @@
 
 //! Console renderer: glyph cache/atlas, per-row damage batching, present.
 //!
-//! Output goes to `/dev/display/0.0`; presentation is requested through
-//! `/dev/display/damage` with the binary `DMG2` protocol (a list of
+//! Output goes to `/dev/vasistas/0.0`; presentation is requested through
+//! `/dev/vasistas/damage` with the binary `DMG2` protocol (a list of
 //! rectangles), so a frame costs at most one present syscall.
 //!
 //! Text is rendered in RAM into 8x16 tiles cached per (codepoint, fg, bg) and
@@ -52,7 +52,7 @@ static FONT_8X16: [[u8; 16]; 95] = include!("font_data.rs");
 
 pub struct Renderer {
     fb_fd: usize,
-    /// /dev/display/damage : binary DMG2 present commands.
+    /// /dev/vasistas/damage : binary DMG2 present commands.
     dmg_fd: usize,
     _fb_width: usize,
     _fb_height: usize,
@@ -126,15 +126,15 @@ impl GlyphCache {
 impl Renderer {
     pub fn open() -> Option<Self> {
         // 0x2 = OpenFlags::WRITE (Strat9 native flags, not POSIX).
-        let fd = call::openat(0, "/dev/display/0.0", 0x2, 0).ok()?;
-        let dmg_fd = match call::openat(0, "/dev/display/damage", 0x2, 0) {
+        let fd = call::openat(0, "/dev/vasistas/0.0", 0x2, 0).ok()?;
+        let dmg_fd = match call::openat(0, "/dev/vasistas/damage", 0x2, 0) {
             Ok(fd) => fd,
             Err(_) => {
-                let _ = call::debug_log(b"[console] FATAL: cannot open /dev/display/damage\n");
+                let _ = call::debug_log(b"[console] FATAL: cannot open /dev/vasistas/damage\n");
                 return None;
             }
         };
-        let info_fd = call::openat(0, "/dev/display/info", 0x1, 0).ok()?;
+        let info_fd = call::openat(0, "/dev/vasistas/info", 0x1, 0).ok()?;
         let mut info_buf = [0u8; 256];
         let _ = call::read(info_fd, &mut info_buf);
         let _ = call::close(info_fd);

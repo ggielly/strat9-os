@@ -23,7 +23,7 @@
 //! Client side of the strat9-os native display server (`displayd`).
 //!
 //! [`Client::connect`] creates a private event port, binds it to
-//! `/srv/display/c/<pid>`, connects to the server path and sends one `HELLO`
+//! `/srv/vasistas/c/<pid>`, connects to the server path and sends one `HELLO`
 //! whose `path` is the event port path. All replies and spontaneous events
 //! arrive on that port, so the client never uses `ipc_call`/`ipc_reply`.
 //!
@@ -47,7 +47,7 @@ extern crate std;
 
 use core::slice;
 
-use display_protocol::{
+use vasistas_protocol::{
     constants::FRAME_DONE_PRESENT_SUBMITTED, Body, Commit, Header, Opcode, Rect,
     FEATURE_PRESENT_FEEDBACK, FLAG_FULL_DAMAGE, FORMAT_XRGB8888, HEADER_LEN, IMPORT_OK,
     MAX_MESSAGE_BYTES, MAX_RECTS,
@@ -60,7 +60,7 @@ use strat9_syscall::{
 };
 
 /// Namespace prefix of the per-client display event ports.
-pub const CLIENT_PATH_PREFIX: &[u8] = b"/srv/display/c/";
+pub const CLIENT_PATH_PREFIX: &[u8] = b"/srv/vasistas/c/";
 /// Maximum length of the per-client event path.
 pub const CLIENT_PATH_MAX: usize = 64;
 
@@ -306,7 +306,7 @@ impl Client {
         let event = match call::ipc_create_port(0) {
             Ok(event) => event,
             Err(error) => {
-                let _ = call::write(2, b"display-client: create_port failed: ");
+                let _ = call::write(2, b"lucarne: create_port failed: ");
                 let _ = call::write(2, error.name().as_bytes());
                 let _ = call::write(2, b"\n");
                 return None;
@@ -330,7 +330,7 @@ impl Client {
         };
         let bound_path = &path[..path_len as usize];
         if call::ipc_bind_port(event, bound_path).is_err() {
-            Self::debug(b"display-client: bind event path failed");
+            Self::debug(b"lucarne: bind event path failed");
             close_handle(event);
             return None;
         }
@@ -338,7 +338,7 @@ impl Client {
         let server = match call::ipc_connect(server_path) {
             Ok(server) => server,
             Err(_) => {
-                Self::debug(b"display-client: connect server failed");
+                Self::debug(b"lucarne: connect server failed");
                 let _ = call::ipc_unbind_port(bound_path);
                 close_handle(event);
                 return None;
@@ -351,16 +351,16 @@ impl Client {
             0,
             1,
             &Body::Hello {
-                major: display_protocol::VERSION_MAJOR,
-                minor: display_protocol::VERSION_MINOR,
+                major: vasistas_protocol::VERSION_MAJOR,
+                minor: vasistas_protocol::VERSION_MINOR,
                 features: FEATURE_PRESENT_FEEDBACK,
                 pid,
-                name: b"demo",
+                name: b"lucarne-demo",
                 path: bound_path,
             },
         );
         if !hello_ok {
-            Self::debug(b"display-client: HELLO send failed");
+            Self::debug(b"lucarne: HELLO send failed");
             let _ = call::ipc_unbind_port(bound_path);
             close_handle(server);
             close_handle(event);
@@ -393,7 +393,7 @@ impl Client {
                 None => break,
             }
         }
-        Self::debug(b"display-client: WELCOME timeout");
+        Self::debug(b"lucarne: WELCOME timeout");
         client.cleanup();
         None
     }
@@ -524,7 +524,7 @@ impl Client {
                         // buffer back instead of leaking them.
                         release_mapping(mapping);
                         self.destroy_buffer(buffer);
-                        Self::debug(b"display-client: mapping table full");
+                        Self::debug(b"lucarne: mapping table full");
                         return None;
                     }
                     if !self.import_ok(buffer) {
@@ -591,7 +591,7 @@ impl Client {
         }
 
         let Some(request) = self.request(Opcode::COMMIT, surface, &Body::Commit(commit)) else {
-            Self::debug(b"display-client: commit send failed");
+            Self::debug(b"lucarne: commit send failed");
             return None;
         };
         let deadline = now_ns().saturating_add(REQUEST_TIMEOUT_NS);
@@ -600,11 +600,11 @@ impl Client {
         for _ in 0..MATCH_TRIES {
             let now = now_ns();
             if now >= deadline {
-                Self::debug(b"display-client: commit timeout");
+                Self::debug(b"lucarne: commit timeout");
                 return None;
             }
             let Some((header, event)) = self.frame(deadline - now) else {
-                Self::debug(b"display-client: commit recv failed");
+                Self::debug(b"lucarne: commit recv failed");
                 return None;
             };
             match event {
@@ -627,14 +627,14 @@ impl Client {
                     return if failed { None } else { Some(result) };
                 }
                 Event::Error { .. } if header.request_id == request => {
-                    Self::debug(b"display-client: commit rejected");
+                    Self::debug(b"lucarne: commit rejected");
                     return None;
                 }
                 Event::Error { .. } => failed = true,
                 _ => {}
             }
         }
-        Self::debug(b"display-client: commit no ack");
+        Self::debug(b"lucarne: commit no ack");
         None
     }
 
@@ -784,7 +784,7 @@ impl Client {
     }
 }
 
-/// Format `/srv/display/c/<pid>` into `out` without allocating.
+/// Format `/srv/vasistas/c/<pid>` into `out` without allocating.
 pub(crate) fn client_path(pid: u32, out: &mut [u8; CLIENT_PATH_MAX]) -> Option<u8> {
     let mut digits = [0u8; 10];
     let mut count = 0usize;
@@ -999,11 +999,11 @@ mod tests {
     fn path_is_formatted_without_alloc() {
         let mut buf = [0u8; CLIENT_PATH_MAX];
         let len = client_path(0, &mut buf).unwrap();
-        assert_eq!(&buf[..len as usize], b"/srv/display/c/0");
+        assert_eq!(&buf[..len as usize], b"/srv/vasistas/c/0");
         let len = client_path(1234, &mut buf).unwrap();
-        assert_eq!(&buf[..len as usize], b"/srv/display/c/1234");
+        assert_eq!(&buf[..len as usize], b"/srv/vasistas/c/1234");
         let len = client_path(u32::MAX, &mut buf).unwrap();
-        assert_eq!(&buf[..len as usize], b"/srv/display/c/4294967295");
+        assert_eq!(&buf[..len as usize], b"/srv/vasistas/c/4294967295");
         assert!(len as usize <= CLIENT_PATH_MAX);
     }
 
@@ -1018,8 +1018,8 @@ mod tests {
                 minor: 0,
                 features: FEATURE_PRESENT_FEEDBACK,
                 pid: 42,
-                name: b"demo",
-                path: b"/srv/display/c/42",
+                name: b"lucarne-demo",
+                path: b"/srv/vasistas/c/42",
             },
         );
         let (header, body) = Header::decode_message(&message).unwrap();
@@ -1033,8 +1033,8 @@ mod tests {
                 minor: 0,
                 features: FEATURE_PRESENT_FEEDBACK,
                 pid: 42,
-                name: b"demo",
-                path: b"/srv/display/c/42",
+                name: b"lucarne-demo",
+                path: b"/srv/vasistas/c/42",
             }
         );
     }
@@ -1181,14 +1181,14 @@ mod tests {
             6,
             4,
             &Body::Error {
-                code: display_protocol::ERROR_BAD_OBJECT,
+                code: vasistas_protocol::ERROR_BAD_OBJECT,
                 detail: &[],
             },
         );
         assert_eq!(
             decode_frame(&message).unwrap().1,
             Event::Error {
-                code: display_protocol::ERROR_BAD_OBJECT,
+                code: vasistas_protocol::ERROR_BAD_OBJECT,
                 object: 6,
             }
         );
@@ -1229,14 +1229,14 @@ mod tests {
             5,
             0,
             &Body::CloseRequest {
-                reason: display_protocol::CLOSE_REASON_REQUESTED,
+                reason: vasistas_protocol::CLOSE_REASON_REQUESTED,
             },
         );
         assert_eq!(
             decode_frame(&message).unwrap().1,
             Event::CloseRequest {
                 surface: 5,
-                reason: display_protocol::CLOSE_REASON_REQUESTED,
+                reason: vasistas_protocol::CLOSE_REASON_REQUESTED,
             }
         );
     }

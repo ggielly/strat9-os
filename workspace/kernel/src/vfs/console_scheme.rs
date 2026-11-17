@@ -23,7 +23,7 @@
 use alloc::{string::String, sync::Arc};
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::{display_state, sync::SpinLock, syscall::error::SyscallError};
+use crate::{vasistas_state, sync::SpinLock, syscall::error::SyscallError};
 
 use super::{
     fd::FileDescriptorTable,
@@ -79,7 +79,7 @@ impl ConsoleBackend for SerialBackend {
 
 /// VGA text/framebuffer backend, boot-only.
 ///
-/// Gated by [`display_state::kernel_fb_allowed`]: as soon as a display
+/// Gated by [`vasistas_state::kernel_fb_allowed`]: as soon as a display
 /// server owns the screen, the kernel stops drawing and keeps serial only.
 /// This replaces the old unconditional `vga_print!` call and its TODO.
 struct VgaBackend;
@@ -90,7 +90,7 @@ impl ConsoleBackend for VgaBackend {
     }
 
     fn available(&self) -> bool {
-        crate::arch::vga::is_available() && display_state::kernel_fb_allowed()
+        crate::arch::vga::is_available() && vasistas_state::kernel_fb_allowed()
     }
 
     fn write(&self, buf: &[u8]) {
@@ -121,8 +121,8 @@ fn backends() -> [&'static dyn ConsoleBackend; 2] {
 /// - Writes always go to serial (debug / panic / early boot).
 /// - Before a userspace display server takes ownership, writes also go to
 ///   the kernel framebuffer (VGA/GOP) through the boot console.
-/// - Once `/dev/display/<id>.<screen>` is opened for writing, the display
-///   strate owns the framebuffer (`display_state::strate_owned()`); kernel
+/// - Once `/dev/vasistas/<id>.<screen>` is opened for writing, the display
+///   Vasistas owns the framebuffer (`vasistas_state::vasistas_owned()`); kernel
 ///   output becomes serial-only until that handle is closed.
 ///
 /// `read()` never returns keyboard bytes: input is owned by

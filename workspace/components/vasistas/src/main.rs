@@ -22,11 +22,11 @@
 
 //! Native display server for strat9-os (jalon 4 of `docs/GUI_AUDIT_2026-11.md`).
 //!
-//! Binds `/srv/display`, owns the screen exclusively (K5) and serves the
-//! `display-core` state machine: clients send `HELLO` on the server port and
+//! Binds `/srv/vasistas`, owns the screen exclusively (K5) and serves the
+//! `vasistas-core` state machine: clients send `HELLO` on the server port and
 //! receive every reply on the event port named in `HELLO.path` (A.1).
 //!
-//! This binary is the only module that knows `/dev/display` and `DMG2`:
+//! This binary is the only module that knows `/dev/vasistas` and `DMG2`:
 //!
 //! - `allocate` maps an anonymous page-aligned region, exports it with
 //!   `mem_region_export` and grants it to the client's `HELLO` pid.
@@ -43,7 +43,7 @@
 //! Protocol v1 has no `CONFIGURE` *request*: `CONFIGURE` is a server event and
 //! the only producer would be a backend-driven resize. The server therefore
 //! never invents one; a client resizes by creating a new surface, as
-//! `display-demo` does. The core exposes `set_configure` for a future
+//! `lucarne-demo` does. The core exposes `set_configure` for a future
 //! backend-driven path.
 //!
 //! Fixed capacities, no global allocator, no panic on wire input.
@@ -53,9 +53,9 @@
 
 use core::{fmt::Write as _, panic::PanicInfo, slice};
 
-use display_backend::{encode, encoded_len, SharedPixels};
-use display_core::{Backend, PeerId, RegionHandle, Server, SurfaceId, Transport};
-use display_protocol::{Body, Header, Opcode, Rect, HEADER_LEN, MAX_RECTS};
+use vasistas_backend::{encode, encoded_len, SharedPixels};
+use vasistas_core::{Backend, PeerId, RegionHandle, Server, SurfaceId, Transport};
+use vasistas_protocol::{Body, Header, Opcode, Rect, HEADER_LEN, MAX_RECTS};
 use strat9_syscall::{
     call,
     data::{IpcMessage, TimeSpec},
@@ -64,7 +64,7 @@ use strat9_syscall::{
 };
 
 /// Server namespace path (A.1).
-const SERVER_PATH: &[u8] = b"/srv/display";
+const SERVER_PATH: &[u8] = b"/srv/vasistas";
 /// Concurrent clients accepted by the adapter's transport table.
 const MAX_PEERS: usize = 8;
 /// Live pixel regions (A.6: 8 sessions x 16 buffers).
@@ -110,7 +110,7 @@ struct Screen {
     damage_fd: usize,
 }
 
-/// `display_core::Backend` over `/dev/display` and `DMG2`.
+/// `vasistas_core::Backend` over `/dev/vasistas` and `DMG2`.
 struct DisplayBackend {
     screen: Screen,
     regions: [Option<Region>; MAX_REGIONS],
@@ -183,14 +183,14 @@ impl Backend for DisplayBackend {
             if let Some(guard) = guard {
                 let _ = unsafe { call::funmap(guard, PAGE_SIZE) };
             }
-            log_text(b"display-server: buffer mmap failed");
+            log_text(b"vasistas: buffer mmap failed");
             ()
         })?;
         if let Some(guard) = guard {
             let _ = unsafe { call::funmap(guard, PAGE_SIZE) };
         }
         if addr == 0 {
-            log_text(b"display-server: buffer mmap null");
+            log_text(b"vasistas: buffer mmap null");
             return Err(());
         }
         // The export walk requires every page to have an effective mapping:
@@ -202,7 +202,7 @@ impl Backend for DisplayBackend {
         let export = match call::mem_region_export(addr) {
             Ok(export) => export,
             Err(error) => {
-                let _ = call::write(2, b"display-server: export failed: ");
+                let _ = call::write(2, b"vasistas: export failed: ");
                 let _ = call::write(2, error.name().as_bytes());
                 let _ = call::write(2, b"\n");
                 let _ = unsafe { call::funmap(addr, len) };
@@ -251,13 +251,13 @@ impl Backend for DisplayBackend {
         let region = match self.region(handle) {
             Some(region) => *region,
             None => {
-                log_text(b"display-server: present: region missing");
+                log_text(b"vasistas: present: region missing");
                 return Err(());
             }
         };
         if region.width > self.screen.width || region.height > self.screen.height {
             log(&format_args!(
-                "display-server: present: region {}x{} exceeds screen {}x{}",
+                "vasistas: present: region {}x{} exceeds screen {}x{}",
                 region.width, region.height, self.screen.width, self.screen.height
             ));
             return Err(());
@@ -269,7 +269,7 @@ impl Backend for DisplayBackend {
         let pixels = SharedPixels::new(source, region.width, region.height, region.stride).map_err(
             |error| {
                 log(&format_args!(
-                    "display-server: present: SharedPixels {:?} addr={:#x} len={} {}x{} stride={}",
+                    "vasistas: present: SharedPixels {:?} addr={:#x} len={} {}x{} stride={}",
                     error, region.addr, source_len, region.width, region.height, region.stride
                 ));
                 ()
@@ -282,7 +282,7 @@ impl Backend for DisplayBackend {
         pixels
             .copy_damage(damage, backbuffer, self.screen.stride)
             .map_err(|_| {
-                log_text(b"display-server: present: copy_damage failed");
+                log_text(b"vasistas: present: copy_damage failed");
                 ()
             })?;
 
@@ -309,11 +309,11 @@ impl Backend for DisplayBackend {
             return Err(());
         }
         let len = encode(0, damage, &mut message).map_err(|_| {
-            log_text(b"display-server: present: dmg2 encode failed");
+            log_text(b"vasistas: present: dmg2 encode failed");
             ()
         })?;
         call::write(self.screen.damage_fd, &message[..len]).map_err(|error| {
-            let _ = call::write(2, b"display-server: present: damage write failed: ");
+            let _ = call::write(2, b"vasistas: present: damage write failed: ");
             let _ = call::write(2, error.name().as_bytes());
             let _ = call::write(2, b"\n");
             ()
@@ -344,7 +344,7 @@ impl Transport for PeerTransport {
         if let Ok((header, body)) = Header::decode_message(message) {
             if header.opcode == Opcode::ERROR.value() {
                 if let Ok(Body::Error { code, .. }) = Body::decode(header.opcode, header.object_id, body) {
-                    let _ = call::write(2, b"display-server: wire ERROR code=");
+                    let _ = call::write(2, b"vasistas: wire ERROR code=");
                     let mut line = Line { buffer: [0; 192], len: 0 };
                     let _ = line.write_fmt(format_args!("{}\n", code));
                     let _ = call::write(2, &line.buffer[..line.len]);
@@ -374,7 +374,7 @@ impl Transport for PeerTransport {
         match call::handle_grant(server_region as usize, client_pid as usize) {
             Ok(handle) => Some(handle as u64),
             Err(error) => {
-                let _ = call::write(2, b"display-server: grant failed: ");
+                let _ = call::write(2, b"vasistas: grant failed: ");
                 let _ = call::write(2, error.name().as_bytes());
                 let _ = call::write(2, b"\n");
                 None
@@ -400,7 +400,7 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
     };
     let mut peers: [Option<(PeerId, PeerTransport)>; MAX_PEERS] = [const { None }; MAX_PEERS];
     let mut iterations: u64 = 0;
-    log_text(b"display-server: loop");
+    log_text(b"vasistas: loop");
 
     loop {
         let mut served = 0usize;
@@ -416,7 +416,7 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
             served += 1;
 
             let Some((opcode, len)) = frame_shape(&msg.payload) else {
-                log_text(b"display-server: bad frame");
+                log_text(b"vasistas: bad frame");
                 continue;
             };
             let peer = PeerId::new(msg.sender);
@@ -429,10 +429,10 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
                     continue;
                 }
                 let Some(client_port) = connect_event_port(&msg.payload[HEADER_LEN..len]) else {
-                    log_text(b"display-server: HELLO event port connect failed");
+                    log_text(b"vasistas: HELLO event port connect failed");
                     continue;
                 };
-                log_text(b"display-server: HELLO accepted");
+                log_text(b"vasistas: HELLO accepted");
                 slot = peers.iter().position(|entry| entry.is_none());
                 let Some(slot) = slot else {
                     // No adapter slot: let the core answer `ERROR QUOTA` on
@@ -464,7 +464,7 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
             if gone {
                 let stats = server.core().stats();
                 log(&format_args!(
-                    "display-server: drop peer dead={} session={} sessions={} surfaces={} buffers={} used_bytes={}",
+                    "vasistas: drop peer dead={} session={} sessions={} surfaces={} buffers={} used_bytes={}",
                     dead,
                     server.session_of(peer).is_some(),
                     stats.sessions,
@@ -503,14 +503,14 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
                 };
                 let wait = call::handle_wait_timeout(port, 0);
                 if wait.is_err() {
-                    log(&format_args!("display-server: peer gone"));
+                    log(&format_args!("vasistas: peer gone"));
                     let _ = server.disconnect(peer);
                     if let Some((_, mut transport)) = peers[index].take() {
                         transport.close();
                     }
                     let stats = server.core().stats();
                     log(&format_args!(
-                        "display-server: peer gone disconnect: sessions={} surfaces={} buffers={} used_bytes={}",
+                        "vasistas: peer gone disconnect: sessions={} surfaces={} buffers={} used_bytes={}",
                         stats.sessions, stats.surfaces, stats.buffers, stats.used_bytes
                     ));
                 }
@@ -528,7 +528,7 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
         if iterations % LOG_EVERY == 0 {
             let stats = server.core().stats();
             log(&format_args!(
-                "display-server: sessions={} surfaces={} buffers={} used_bytes={}",
+                "vasistas: sessions={} surfaces={} buffers={} used_bytes={}",
                 stats.sessions, stats.surfaces, stats.buffers, stats.used_bytes
             ));
         }
@@ -542,7 +542,7 @@ fn frame_shape(payload: &[u8]) -> Option<(u16, usize)> {
         return None;
     }
     if u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]])
-        != display_protocol::MAGIC
+        != vasistas_protocol::MAGIC
     {
         return None;
     }
@@ -568,9 +568,9 @@ fn connect_event_port(body: &[u8]) -> Option<usize> {
     }
 }
 
-/// Read the screen geometry from `/dev/display/info`.
+/// Read the screen geometry from `/dev/vasistas/info`.
 fn read_screen_info() -> Option<(u32, u32, u8, u32, u8, u8, u8)> {
-    let fd = call::open("/dev/display/info", 0).ok()?;
+    let fd = call::open("/dev/vasistas/info", 0).ok()?;
     let mut buffer = [0u8; 256];
     let count = call::read(fd, &mut buffer).ok()?;
     let _ = call::close(fd);
@@ -619,7 +619,7 @@ fn open_screen() -> Screen {
         read_screen_info().unwrap_or((800, 600, 32, 800 * 4, 16, 8, 0));
     if bpp != 32 || (red_shift, green_shift, blue_shift) != (16, 8, 0) {
         log(&format_args!(
-            "display-server: unsupported screen bpp={} shifts={}/{}/{}",
+            "vasistas: unsupported screen bpp={} shifts={}/{}/{}",
             bpp, red_shift, green_shift, blue_shift
         ));
         halt();
@@ -629,27 +629,27 @@ fn open_screen() -> Screen {
         .filter(|size| *size != 0)
         .unwrap_or(0);
     if size == 0 {
-        log_text(b"display-server: invalid screen geometry");
+        log_text(b"vasistas: invalid screen geometry");
         halt();
     }
     log(&format_args!(
-        "display-server: screen {}x{} bpp={} stride={}",
+        "vasistas: screen {}x{} bpp={} stride={}",
         width, height, bpp, stride
     ));
 
     let display_fd = open_exclusive();
     // K5: only the owner may clear.
-    match call::open("/dev/display/clear", 2) {
+    match call::open("/dev/vasistas/clear", 2) {
         Ok(fd) => {
             let _ = call::write(fd, b"clear");
             let _ = call::close(fd);
         }
-        Err(_) => log_text(b"display-server: clear failed"),
+        Err(_) => log_text(b"vasistas: clear failed"),
     }
-    let damage_fd = match call::open("/dev/display/damage", 2) {
+    let damage_fd = match call::open("/dev/vasistas/damage", 2) {
         Ok(fd) => fd,
         Err(_) => {
-            log_text(b"display-server: FATAL: /dev/display/damage unavailable");
+            log_text(b"vasistas: FATAL: /dev/vasistas/damage unavailable");
             halt();
         }
     };
@@ -666,7 +666,7 @@ fn open_screen() -> Screen {
     } {
         Ok(addr) if addr != 0 => addr,
         _ => {
-            log_text(b"display-server: FATAL: framebuffer mmap failed");
+            log_text(b"vasistas: FATAL: framebuffer mmap failed");
             halt();
         }
     };
@@ -685,12 +685,12 @@ fn open_screen() -> Screen {
     } {
         Ok(addr) if addr != 0 => addr,
         _ => {
-            log_text(b"display-server: FATAL: backbuffer mmap failed");
+            log_text(b"vasistas: FATAL: backbuffer mmap failed");
             halt();
         }
     };
     log(&format_args!(
-        "display-server: framebuffer mapped ({} bytes), backbuffer mapped",
+        "vasistas: framebuffer mapped ({} bytes), backbuffer mapped",
         size
     ));
     Screen {
@@ -704,7 +704,7 @@ fn open_screen() -> Screen {
     }
 }
 
-/// Open `/dev/display/0.0` for writing, retrying while another owner (or the
+/// Open `/dev/vasistas/0.0` for writing, retrying while another owner (or the
 /// boot console) still holds it.
 fn open_exclusive() -> usize {
     let request = TimeSpec {
@@ -714,20 +714,20 @@ fn open_exclusive() -> usize {
     let mut remaining = TimeSpec::zero();
     let mut logged = false;
     loop {
-        match call::open("/dev/display/0.0", 2) {
+        match call::open("/dev/vasistas/0.0", 2) {
             Ok(fd) => {
-                log_text(b"display-server: screen owned (K5)");
+                log_text(b"vasistas: screen owned (K5)");
                 return fd;
             }
             Err(Error::Busy) => {
                 if !logged {
-                    log_text(b"display-server: /dev/display/0.0 busy, waiting");
+                    log_text(b"vasistas: /dev/vasistas/0.0 busy, waiting");
                     logged = true;
                 }
                 let _ = call::nanosleep(&request, &mut remaining);
             }
             Err(_) => {
-                log_text(b"display-server: FATAL: cannot open /dev/display/0.0");
+                log_text(b"vasistas: FATAL: cannot open /dev/vasistas/0.0");
                 halt();
             }
         }
@@ -774,28 +774,28 @@ fn log(args: &core::fmt::Arguments<'_>) {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    log_text(b"display-server: strate-display v0.1.0");
+    log_text(b"vasistas: vasistas v0.1.0");
     log(&format_args!(
-        "display-server: pid={}",
+        "vasistas: pid={}",
         call::getpid().unwrap_or(0)
     ));
     let screen = open_screen();
     let server_port = match call::ipc_create_port(0) {
         Ok(port) => port,
         Err(_) => {
-            log_text(b"display-server: FATAL: ipc_create_port failed");
+            log_text(b"vasistas: FATAL: ipc_create_port failed");
             halt();
         }
     };
     if call::ipc_bind_port(server_port, SERVER_PATH).is_err() {
-        log_text(b"display-server: FATAL: cannot bind /srv/display");
+        log_text(b"vasistas: FATAL: cannot bind /srv/vasistas");
         halt();
     }
-    log_text(b"display-server: bound /srv/display");
+    log_text(b"vasistas: bound /srv/vasistas");
     main_loop(server_port, screen)
 }
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    call::handle_panic("display-server", info)
+    call::handle_panic("vasistas", info)
 }

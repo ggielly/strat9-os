@@ -111,7 +111,7 @@ fn vma_flags_to_prot(flags: VmaFlags) -> u32 {
 
 /// Map the frames of a scheme-backed surface into the caller (`MAP_SHARED`).
 ///
-/// Used by `/dev/display/<id>.<screen>`: the display scheme owns the
+/// Used by `/dev/vasistas/<id>.<screen>`: the display scheme owns the
 /// frame-backed surface and exposes its physical pages through
 /// `Scheme::mmap_frames`. The mapping is writable by the display client, so
 /// pixels are written once, with no per-frame copy into the kernel.

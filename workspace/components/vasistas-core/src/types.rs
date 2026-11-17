@@ -22,7 +22,7 @@
 
 //! Object metadata: opaque ids, buffer/surface/session records and damage.
 
-use display_protocol::Rect;
+use vasistas_protocol::Rect;
 
 use crate::{
     backend::RegionHandle, MAX_BUFFERS_PER_SESSION, MAX_RECTS, MAX_SESSIONS,

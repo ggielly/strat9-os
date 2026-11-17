@@ -22,9 +22,9 @@
 
 //! GUI audit, proof 3 - display ownership transfer.
 //!
-//! PRECONDITION: no userspace process holds `/dev/display/0.0` writable
+//! PRECONDITION: no userspace process holds `/dev/vasistas/0.0` writable
 //! (boot without `strate-console` / `strate-graphical` on the display, or
-//! stop them first). The binary checks `owner=kernel` in `/dev/display/info`
+//! stop them first). The binary checks `owner=kernel` in `/dev/vasistas/info`
 //! and reports INCONCLUSIVE otherwise.
 //!
 //! It touches the first page of the framebuffer (pixel row 0) only.
@@ -37,7 +37,7 @@
 //!       take it and present (no stale `OWNER_PID`)?
 //! * D4  After the handle is closed, can an old writable mapping still write
 //!       the live (new-generation) screen?
-//! * D5  Can any process open `/dev/display/snapshot`?
+//! * D5  Can any process open `/dev/vasistas/snapshot`?
 
 #![no_std]
 #![no_main]
@@ -85,7 +85,7 @@ fn open_class(path: &str, flags: u32) -> u8 {
 }
 
 fn kernel_owns_display() -> Option<bool> {
-    let fd = call::open("/dev/display/info", O_RDONLY).ok()?;
+    let fd = call::open("/dev/vasistas/info", O_RDONLY).ok()?;
     let mut buf = [0u8; 512];
     let n = call::read(fd, &mut buf).ok()?;
     let _ = call::close(fd);
@@ -97,7 +97,7 @@ fn kernel_owns_display() -> Option<bool> {
 /// Child body for D4: map the screen, close the handle, write through the map.
 /// Exit 0 = the write survived the close; killed by a signal = mapping revoked.
 fn d4_child() -> ! {
-    let Ok(fd) = call::open("/dev/display/0.0", O_RDWR) else {
+    let Ok(fd) = call::open("/dev/vasistas/0.0", O_RDWR) else {
         call::exit(10)
     };
     // SAFETY: shared mapping of one framebuffer page, written once below.
@@ -128,11 +128,11 @@ fn d4(ctx: &mut Ctx) {
         // writable (new generation) and snapshot it: the parent owns the
         // display, so the snapshot path is allowed.
         Some(Exit::Code(0)) => {
-            let Ok(h) = call::open("/dev/display/0.0", O_RDWR) else {
+            let Ok(h) = call::open("/dev/vasistas/0.0", O_RDWR) else {
                 inconclusive(ctx, "D4", "reopen failed");
                 return;
             };
-            let snap = call::open("/dev/display/snapshot", O_RDONLY);
+            let snap = call::open("/dev/vasistas/snapshot", O_RDONLY);
             let mut first = [0u8; 1];
             let n = match snap {
                 Ok(fd) => {
@@ -178,9 +178,9 @@ fn d4(ctx: &mut Ctx) {
 }
 
 fn d5(ctx: &mut Ctx) {
-    section(ctx, "D5: /dev/display/snapshot access");
+    section(ctx, "D5: /dev/vasistas/snapshot access");
     let child = match call::fork() {
-        Ok(0) => match call::open("/dev/display/snapshot", O_RDONLY) {
+        Ok(0) => match call::open("/dev/vasistas/snapshot", O_RDONLY) {
             Ok(fd) => {
                 let _ = call::close(fd);
                 call::exit(0)
@@ -219,8 +219,8 @@ fn d123_child(to_parent: usize, from_parent: usize) -> ! {
     // D1: a second writable open must be refused with EBUSY while the parent
     // owns the screen. `open_class` closes the handle if it unexpectedly
     // succeeded, so the child holds no ownership when D3 runs.
-    let h2_class = open_class("/dev/display/0.0", O_RDWR);
-    let dmg = call::open("/dev/display/damage", O_RDWR);
+    let h2_class = open_class("/dev/vasistas/0.0", O_RDWR);
+    let dmg = call::open("/dev/vasistas/damage", O_RDWR);
     let w1 = match dmg {
         Ok(fd) => present_probe(fd),
         Err(_) => 2,
@@ -232,7 +232,7 @@ fn d123_child(to_parent: usize, from_parent: usize) -> ! {
     // D3: the owner is gone, so the kernel owns the display again and this
     // process can take ownership. Read info first, then open writable.
     let owner_kernel = kernel_owns_display().unwrap_or(false);
-    let h3 = call::open("/dev/display/0.0", O_RDWR);
+    let h3 = call::open("/dev/vasistas/0.0", O_RDWR);
     let w2 = match (&h3, dmg) {
         (Ok(_), Ok(fd)) => present_probe(fd),
         _ => 2,
@@ -244,12 +244,12 @@ fn d123_child(to_parent: usize, from_parent: usize) -> ! {
 
 fn d123(ctx: &mut Ctx) {
     section(ctx, "D1-D3: exclusivity and presentation rights");
-    let Ok(h1) = call::open("/dev/display/0.0", O_RDWR) else {
-        check(ctx, "open /dev/display/0.0 writable", false, "");
+    let Ok(h1) = call::open("/dev/vasistas/0.0", O_RDWR) else {
+        check(ctx, "open /dev/vasistas/0.0 writable", false, "");
         return;
     };
-    let Ok(dmg) = call::open("/dev/display/damage", O_RDWR) else {
-        check(ctx, "open /dev/display/damage", false, "");
+    let Ok(dmg) = call::open("/dev/vasistas/damage", O_RDWR) else {
+        check(ctx, "open /dev/vasistas/damage", false, "");
         return;
     };
     check(
@@ -344,7 +344,7 @@ pub extern "C" fn _start() -> ! {
             "precondition",
             "a userspace process already owns the display; stop it and rerun",
         ),
-        None => inconclusive(&mut ctx, "precondition", "cannot read /dev/display/info"),
+        None => inconclusive(&mut ctx, "precondition", "cannot read /dev/vasistas/info"),
     }
     call::exit(summary(&ctx))
 }

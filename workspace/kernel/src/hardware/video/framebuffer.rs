@@ -994,9 +994,9 @@ pub fn init() {
         FramebufferSource::None => log::warn!("[FB] No framebuffer available"),
     }
 
-    // Register /dev/display/ scheme
+    // Register /dev/vasistas/ scheme
     if Framebuffer::is_available() {
-        if let Err(e) = super::display_scheme::register_display_scheme() {
+        if let Err(e) = super::vasistas_scheme::register_vasistas_scheme() {
             log::warn!("[FB] Failed to register display scheme: {:?}", e);
         }
     }

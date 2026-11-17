@@ -231,7 +231,7 @@ The transport itself is `hardware/virtio/common.rs`.
 | Thermal | `kernel/src/hardware/thermal.rs` | Present |
 | Embedded controller | `kernel/src/hardware/ec.rs` | Present |
 | Bus drivers | `workspace/drivers/bus/` (`strat9-bus-drivers`) | 8 SoC bus drivers with their own host test suite |
-| Display scheme | `kernel/src/hardware/video/{display_scheme,graphics_adapter}.rs` | Userspace-facing |
+| Display scheme | `kernel/src/hardware/video/{vasistas_scheme,graphics_adapter}.rs` | Userspace-facing |
 
 ---
 

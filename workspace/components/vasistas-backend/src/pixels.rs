@@ -31,7 +31,7 @@
 //! the next protocol step; no `&[u8]` over shared memory outlives the call that
 //! needed it.
 
-use display_protocol::Rect;
+use vasistas_protocol::Rect;
 
 /// Pixel-view or copy failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,8 +152,8 @@ impl<'a> SharedPixels<'a> {
     ) -> Result<DamageStats, PixelError> {
         // A.4 caps one commit at 32 rectangles. Reject larger lists here too:
         // this API is the server's only pixel path and must stay bounded even
-        // if a caller bypasses display-core validation.
-        if damage.len() > display_protocol::MAX_RECTS {
+        // if a caller bypasses vasistas-core validation.
+        if damage.len() > vasistas_protocol::MAX_RECTS {
             return Err(PixelError::Overflow);
         }
         // Validation pass: no destination writes before every rect is valid.
@@ -560,7 +560,7 @@ mod tests {
     fn copy_damage_rejects_more_than_protocol_rects() {
         let src = source(8, 8, 32);
         let view = SharedPixels::new(&src, 8, 8, 32).unwrap();
-        let rects = [rect(0, 0, 1, 1); display_protocol::MAX_RECTS + 1];
+        let rects = [rect(0, 0, 1, 1); vasistas_protocol::MAX_RECTS + 1];
         let mut dst = vec![0u8; 8 * 32];
         assert_eq!(
             view.copy_damage(&rects, &mut dst, 32),

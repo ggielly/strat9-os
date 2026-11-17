@@ -32,25 +32,25 @@ binary = "/initfs/console-admin"
 type = "elf"
 
 [[silos]]
-name = "display"
+name = "vasistas"
 family = "SYS"
 mode = "706"
 sid = 42
-provides = ["/srv/display"]
+provides = ["/srv/vasistas"]
 [[silos.strates]]
-name = "display-server"
-binary = "/initfs/display-server"
+name = "vasistas"
+binary = "/initfs/vasistas"
 type = "elf"
 
 [[silos]]
-name = "display-demo"
+name = "lucarne-demo"
 family = "SYS"
 mode = "706"
 sid = 42
-requires = ["/srv/display"]
+requires = ["/srv/vasistas"]
 [[silos.strates]]
-name = "display-demo"
-binary = "/initfs/display-demo"
+name = "lucarne-demo"
+binary = "/initfs/lucarne-demo"
 type = "elf"
 
 [[silos]]

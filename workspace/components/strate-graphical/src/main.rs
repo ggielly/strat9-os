@@ -24,7 +24,7 @@
 //!
 //! A Haiku-like Window Server that runs in a silo.
 //! Manages windows with decorations, composites to framebuffer via
-//! the /dev/display/ kernel scheme, and routes input.
+//! the /dev/vasistas/ kernel scheme, and routes input.
 
 #![no_std]
 #![no_main]
@@ -55,7 +55,7 @@ static ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
-    let _ = call::debug_log(b"[display-server] OOM\n");
+    let _ = call::debug_log(b"[graphical-server] OOM\n");
     loop {
         core::hint::spin_loop();
     }
@@ -90,7 +90,7 @@ impl Color {
 }
 
 // ============================================================================
-// Offscreen buffer : composites here, then flushes to /dev/display/0.0
+// Offscreen buffer : composites here, then flushes to /dev/vasistas/0.0
 // ============================================================================
 
 struct Buffer {
@@ -798,11 +798,11 @@ fn log(s: &str) {
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     log("========================================");
-    log("[display-server] strate-graphical v0.1.0");
+    log("[graphical-server] strate-graphical v0.1.0");
     log("========================================");
 
     // Step 1: Read screen info
-    log("[display-server] step 1: reading /dev/display/info...");
+    log("[graphical-server] step 1: reading /dev/vasistas/info...");
     let mut w = 800u32;
     let mut h = 600u32;
     let mut bpp = 32u8;
@@ -810,14 +810,14 @@ pub extern "C" fn _start() -> ! {
     let mut red_shift = 16u8;
     let mut green_shift = 8u8;
     let mut blue_shift = 0u8;
-    match call::open("/dev/display/info", 0) {
+    match call::open("/dev/vasistas/info", 0) {
         Ok(fd) => {
-            log(&format!("[display-server]   opened info fd={}", fd));
+            log(&format!("[graphical-server]   opened info fd={}", fd));
             let mut ibuf = [0u8; 256];
             match call::read(fd, &mut ibuf) {
                 Ok(n) => {
                     let info = core::str::from_utf8(&ibuf[..n]).unwrap_or("");
-                    log(&format!("[display-server]   info: \"{}\"", info));
+                    log(&format!("[graphical-server]   info: \"{}\"", info));
                     for p in info.split_whitespace() {
                         if let Some(v) = p.strip_prefix("width=") {
                             w = v.parse().unwrap_or(800);
@@ -836,32 +836,32 @@ pub extern "C" fn _start() -> ! {
                         }
                     }
                 }
-                Err(e) => log(&format!("[display-server]   read info failed: {:?}", e)),
+                Err(e) => log(&format!("[graphical-server]   read info failed: {:?}", e)),
             }
             let _ = call::close(fd);
         }
         Err(e) => log(&format!(
-            "[display-server]   open info failed: {:?} (using defaults)",
+            "[graphical-server]   open info failed: {:?} (using defaults)",
             e
         )),
     }
-    log(&format!("[display-server] screen: {}x{} bpp={}", w, h, bpp));
+    log(&format!("[graphical-server] screen: {}x{} bpp={}", w, h, bpp));
 
     // Step 2: Open display framebuffer. This takes framebuffer ownership, so
     // it must happen before clear/damage writes are permitted.
-    log("[display-server] step 2: opening /dev/display/0.0...");
-    let dfd = match call::open("/dev/display/0.0", 2) {
+    log("[graphical-server] step 2: opening /dev/vasistas/0.0...");
+    let dfd = match call::open("/dev/vasistas/0.0", 2) {
         Ok(fd) => {
-            log(&format!("[display-server]   display fd={}", fd));
+            log(&format!("[graphical-server]   display fd={}", fd));
             fd
         }
         Err(e) => {
             log(&format!(
-                "[display-server] FATAL: cannot open /dev/display/0.0: {:?}",
+                "[graphical-server] FATAL: cannot open /dev/vasistas/0.0: {:?}",
                 e
             ));
-            log("[display-server]   Is the display scheme mounted?");
-            log("[display-server]   Check: ls /dev/display/");
+            log("[graphical-server]   Is the display scheme mounted?");
+            log("[graphical-server]   Check: ls /dev/vasistas/");
             loop {
                 core::hint::spin_loop();
             }
@@ -869,20 +869,20 @@ pub extern "C" fn _start() -> ! {
     };
 
     // Step 3: Clear display (now that this process owns the framebuffer)
-    log("[display-server] step 3: clearing display...");
-    match call::open("/dev/display/clear", 2) {
+    log("[graphical-server] step 3: clearing display...");
+    match call::open("/dev/vasistas/clear", 2) {
         Ok(fd) => {
             let _ = call::write(fd, b"clear");
             let _ = call::close(fd);
-            log("[display-server]   display cleared");
+            log("[graphical-server]   display cleared");
         }
-        Err(e) => log(&format!("[display-server]   clear failed: {:?}", e)),
+        Err(e) => log(&format!("[graphical-server]   clear failed: {:?}", e)),
     }
 
     // Step 4: Subscribe to inputd. Retry because the input server may start
     // after the display server; only the client path is used, never
     // /dev/input/*.
-    log("[display-server] step 4: subscribing to inputd...");
+    log("[graphical-server] step 4: subscribing to inputd...");
     let mut input = {
         let mut logged = false;
         loop {
@@ -890,7 +890,7 @@ pub extern "C" fn _start() -> ! {
                 break client;
             }
             if !logged {
-                log("[display-server]   waiting for inputd (/srv/input)...");
+                log("[graphical-server]   waiting for inputd (/srv/input)...");
                 logged = true;
             }
             let req = TimeSpec {
@@ -905,11 +905,11 @@ pub extern "C" fn _start() -> ! {
         }
     };
     input.request_focus();
-    log("[display-server]   inputd subscription ready");
+    log("[graphical-server]   inputd subscription ready");
 
     // Step 5: map the display surface (zero-copy) or fall back to an
     // offscreen buffer written through the scheme.
-    log("[display-server] step 5: mapping framebuffer...");
+    log("[graphical-server] step 5: mapping framebuffer...");
     let bpp_b = bpp as usize / 8;
     if stride == 0 {
         stride = w as usize * bpp_b;
@@ -934,7 +934,7 @@ pub extern "C" fn _start() -> ! {
     let (fb_ptr, is_mapped) = match mapped {
         Some(addr) => {
             log(&format!(
-                "[display-server]   mapped {} bytes at {:#x}",
+                "[graphical-server]   mapped {} bytes at {:#x}",
                 fb_sz, addr
             ));
             (addr as *mut u8, true)
@@ -942,7 +942,7 @@ pub extern "C" fn _start() -> ! {
         None => {
             fb_fallback = vec![0u8; fb_sz];
             log(&format!(
-                "[display-server]   mmap unavailable, fallback {} bytes ({}x{}x{})",
+                "[graphical-server]   mmap unavailable, fallback {} bytes ({}x{}x{})",
                 fb_sz, w, h, bpp_b
             ));
             (fb_fallback.as_mut_ptr(), false)
@@ -950,15 +950,15 @@ pub extern "C" fn _start() -> ! {
     };
 
     // Step 5b: open the damage handle (the screen fd only accepts pixels;
-    // "present"/"x,y,w,h" commands go through /dev/display/damage).
-    let dmg_fd = match call::open("/dev/display/damage", 2) {
+    // "present"/"x,y,w,h" commands go through /dev/vasistas/damage).
+    let dmg_fd = match call::open("/dev/vasistas/damage", 2) {
         Ok(fd) => {
-            log(&format!("[display-server]   damage fd={}", fd));
+            log(&format!("[graphical-server]   damage fd={}", fd));
             fd
         }
         Err(e) => {
             log(&format!(
-                "[display-server] FATAL: cannot open /dev/display/damage: {:?}",
+                "[graphical-server] FATAL: cannot open /dev/vasistas/damage: {:?}",
                 e
             ));
             loop {
@@ -986,24 +986,24 @@ pub extern "C" fn _start() -> ! {
     let mut srv = Server::new(buf, w, h);
 
     // Step 6: Create demo windows
-    log("[display-server] step 6: creating demo windows...");
+    log("[graphical-server] step 6: creating demo windows...");
     srv.create_win(60, 60, 350, 220, "File Manager", Color::new(240, 240, 245));
     srv.create_win(140, 140, 300, 200, "Terminal", Color::new(20, 20, 30));
     srv.create_win(220, 220, 320, 240, "Strat9-OS", Color::new(235, 235, 240));
     log(&format!(
-        "[display-server]   {} windows created",
+        "[graphical-server]   {} windows created",
         srv.wins.len()
     ));
 
     // Step 7: First composite and present
-    log("[display-server] step 7: initial composite...");
+    log("[graphical-server] step 7: initial composite...");
     srv.composite();
     present_full(dfd as u32, dmg_fd as u32, &srv.buf, &mut packet_scratch);
     prev_frame.copy_from_slice(unsafe { core::slice::from_raw_parts(srv.buf.ptr, fb_sz) });
-    log("[display-server]   initial frame presented");
+    log("[graphical-server]   initial frame presented");
 
-    log("[display-server] === entering main loop ===");
-    log(&format!("[display-server] inputd=ready display={}", dfd));
+    log("[graphical-server] === entering main loop ===");
+    log(&format!("[graphical-server] inputd=ready display={}", dfd));
 
     let mut frame_count: u64 = 0;
     let mut skipped_frames: u64 = 0;
@@ -1093,7 +1093,7 @@ pub extern "C" fn _start() -> ! {
         frame_count += 1;
         if frame_count % 500 == 0 {
             log(&format!(
-                "[display-server] frames={} idle-skips={}",
+                "[graphical-server] frames={} idle-skips={}",
                 frame_count, skipped_frames
             ));
         }

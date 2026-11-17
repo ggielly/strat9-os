@@ -30,7 +30,7 @@
 //! ```text
 //! ┌─────────────────────────────────────────────────┐
 //! │                GraphicsScheme                   │
-//! │  /dev/display/0.0  /dev/display/0.1  ...        │
+//! │  /dev/vasistas/0.0  /dev/vasistas/0.1  ...        │
 //! ├─────────────────────────────────────────────────┤
 //! │              GraphicsAdapter impl               │
 //! │  display_count() => N displays                   │

@@ -205,8 +205,8 @@ dependencies = [
     "s9vm-console-release",
     "s9vm-vmm-release",
     "s9vm-guest-release",
-    "strate-display-release",
-    "display-client-release",
+    "vasistas-release",
+    "lucarne-release",
     "strate-net-release",
     "strate-bus-release",
     "strate-iommu-release",
@@ -266,8 +266,8 @@ dependencies = [
     "s9vm-console-release",
     "s9vm-vmm-release",
     "s9vm-guest-release",
-    "strate-display-release",
-    "display-client-release",
+    "vasistas-release",
+    "lucarne-release",
     "strate-net-release",
     "strate-bus-release",
     "strate-iommu-release",
@@ -300,8 +300,8 @@ dependencies = [
     "s9vm-console-release",
     "s9vm-vmm-release",
     "s9vm-guest-release",
-    "strate-display-release",
-    "display-client-release",
+    "vasistas-release",
+    "lucarne-release",
     "strate-net-release",
     "strate-bus-release",
     "strate-iommu-release",
@@ -696,8 +696,8 @@ dependencies = [
     "s9vm-console-release",
     "s9vm-vmm-release",
     "s9vm-guest-release",
-    "strate-display-release",
-    "display-client-release",
+    "vasistas-release",
+    "lucarne-release",
     "strate-net-release",
     "strate-bus-release",
     "strate-iommu-release",
@@ -729,8 +729,8 @@ dependencies = [
     "s9vm-console-release",
     "s9vm-vmm-release",
     "s9vm-guest-release",
-    "strate-display-release",
-    "display-client-release",
+    "vasistas-release",
+    "lucarne-release",
     "strate-net-release",
     "strate-bus-release",
     "strate-iommu-release",
@@ -1147,9 +1147,9 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
-[tasks.strate-display-release]
-description = "Build the native display server (release)"
-cwd = "workspace/components/strate-display"
+[tasks.vasistas-release]
+description = "Build the Vasistas display server (release)"
+cwd = "workspace/components/vasistas"
 command = "cargo"
 args = [
     "build",
@@ -1162,9 +1162,9 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
-[tasks.display-client-release]
-description = "Build the display demo client (release)"
-cwd = "workspace/components/display-client"
+[tasks.lucarne-release]
+description = "Build the Lucarne demo client (release)"
+cwd = "workspace/components/lucarne"
 command = "cargo"
 args = [
     "build",

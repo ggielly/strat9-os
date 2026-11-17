@@ -27,7 +27,7 @@
 //! the damage accumulated since the previous presentation.
 
 use crate::types::SurfaceId;
-use display_protocol::Rect;
+use vasistas_protocol::Rect;
 
 /// Opaque handle to a backend-allocated pixel region.
 ///

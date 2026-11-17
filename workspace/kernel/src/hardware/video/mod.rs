@@ -26,10 +26,10 @@
 //! - Framebuffer abstraction (UEFI bootloader or VirtIO GPU)
 //! - Basic 2D drawing primitives
 //! - Double buffering support
-//! - `/dev/display/` VFS scheme (display.vesa)
+//! - `/dev/vasistas/` VFS scheme (display.vesa)
 //! - Graphics adapter trait for multi-display support
 
-pub mod display_scheme;
+pub mod vasistas_scheme;
 pub mod framebuffer;
 pub mod graphics_adapter;
 

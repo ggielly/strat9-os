@@ -20,7 +20,7 @@
  * Copyright (C) 2023-26 Guillaume Gielly
  */
 
-//! Display VFS scheme : exposes framebuffer as `/dev/display/`.
+//! Display VFS scheme : exposes framebuffer as `/dev/vasistas/`.
 //!
 //! Modeled after Redox OS `vesad` + `driver-graphics` but implemented
 //! as a kernel scheme with `GraphicsAdapter` support for multi-display.
@@ -35,7 +35,7 @@
 //! # Multi-display
 //!
 //! ```text
-//! /dev/display/
+//! /dev/vasistas/
 //! ├── info
 //! ├── 0.0          ← display 0, screen 0 (primary)
 //! ├── 0.1          ← display 0, screen 1 (secondary, if present)
@@ -114,7 +114,7 @@ impl DisplayScheme {
 
     /// Get or create the offscreen buffer for a display.
     ///
-    /// `None` for displays that do not exist, so an unknown `/dev/display/N.M`
+    /// `None` for displays that do not exist, so an unknown `/dev/vasistas/N.M`
     /// cannot silently allocate a large surface.
     fn get_or_create_screen(&self, display_id: u32) -> Option<Arc<RwLock<HeapScreen>>> {
         if let Some(screen) = self.screens.read().get(&display_id) {
@@ -162,7 +162,7 @@ impl DisplayScheme {
 
     /// True when the caller took framebuffer ownership (it may present/clear).
     fn caller_owns_display() -> bool {
-        let owner = crate::display_state::strate_owner_pid();
+        let owner = crate::vasistas_state::vasistas_owner_pid();
         owner != 0 && crate::process::current_task_clone().map(|t| t.pid) == Some(owner)
     }
 
@@ -235,7 +235,7 @@ impl Scheme for DisplayScheme {
             let pid = crate::process::current_task_clone()
                 .map(|t| t.pid)
                 .unwrap_or(0);
-            if !crate::display_state::try_acquire_strate(pid) {
+            if !crate::vasistas_state::try_acquire_vasistas(pid) {
                 return Err(SyscallError::Busy);
             }
         }
@@ -291,7 +291,7 @@ impl Scheme for DisplayScheme {
                         s.push_str(&format!("display.{}.{}x{}\n", i, w, h));
                     }
                 }
-                s.push_str(&format!("owner={}\n", crate::display_state::owner_name()));
+                s.push_str(&format!("owner={}\n", crate::vasistas_state::owner_name()));
                 if let Some(info) = Framebuffer::info() {
                     let bpp = info.format.bits_per_pixel;
                     // Offscreen surfaces are tightly packed (`width * bpp/8`);
@@ -320,7 +320,7 @@ impl Scheme for DisplayScheme {
             }
             Handle::Screen(_display_id, screen, writable) => {
                 // A display surface is a pixel device, not a byte stream.
-                // `cat /dev/display/0.0` would otherwise dump megabytes of
+                // `cat /dev/vasistas/0.0` would otherwise dump megabytes of
                 // binary (including XOFF/escape bytes) into the console and
                 // make the terminal appear frozen. Only a writable handle
                 // (display server, console, screenshot tool) may read pixels.
@@ -599,8 +599,8 @@ impl Scheme for DisplayScheme {
         // zeroed `HeapScreen`, so stale mappings of the old frames cannot write
         // into the live screen.
         if let Some(Handle::Screen(display_id, _, true)) = removed {
-            crate::display_state::release_strate();
-            if !crate::display_state::strate_owned() {
+            crate::vasistas_state::release_vasistas();
+            if !crate::vasistas_state::vasistas_owned() {
                 self.screens.write().remove(&display_id);
             }
         }
@@ -747,21 +747,21 @@ impl Scheme for DisplayScheme {
     }
 }
 
-/// Register the display scheme at `/dev/display/`.
-pub fn register_display_scheme() -> Result<(), SyscallError> {
+/// Register the display scheme at `/dev/vasistas/`.
+pub fn register_vasistas_scheme() -> Result<(), SyscallError> {
     // Validate the pixel layout once: a malformed mask set would silently
     // swap channels or drop pixels on every present.
     if let Some(info) = Framebuffer::info() {
         let f = info.format;
         if f.bits_per_pixel != 32 && f.bits_per_pixel != 24 {
             log::warn!(
-                "[display] unsupported {} bpp framebuffer; expecting 24 or 32",
+                "[vasistas] unsupported {} bpp framebuffer; expecting 24 or 32",
                 f.bits_per_pixel
             );
         }
         if f.red_mask == 0 || f.green_mask == 0 || f.blue_mask == 0 {
             log::warn!(
-                "[display] incomplete RGB masks (r={:#x} g={:#x} b={:#x}); colours may be wrong",
+                "[vasistas] incomplete RGB masks (r={:#x} g={:#x} b={:#x}); colours may be wrong",
                 f.red_mask,
                 f.green_mask,
                 f.blue_mask
@@ -775,10 +775,10 @@ pub fn register_display_scheme() -> Result<(), SyscallError> {
     }
 
     let scheme = Arc::new(DisplayScheme::new());
-    crate::vfs::scheme_router::register_scheme("display", scheme)?;
-    crate::vfs::scheme_router::mount_scheme("display", "/dev/display")?;
+    crate::vfs::scheme_router::register_scheme("vasistas", scheme)?;
+    crate::vfs::scheme_router::mount_scheme("vasistas", "/dev/vasistas")?;
     log::info!(
-        "[display] Scheme at /dev/display/ ({} display(s))",
+        "[vasistas] Scheme at /dev/vasistas/ ({} display(s))",
         total_display_count()
     );
     Ok(())

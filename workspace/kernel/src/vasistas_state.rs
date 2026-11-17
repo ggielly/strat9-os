@@ -26,14 +26,14 @@
 //!
 //! ```text
 //!   Boot        : kernel owns the framebuffer (boot console, logs)
-//!   StrateOwned : a userspace display server owns it (via /dev/display)
+//!   VasistasOwned : a userspace display server owns it (via /dev/vasistas)
 //! ```
 //!
 //! The console scheme consults [`kernel_fb_allowed`] before writing to the
 //! framebuffer, so kernel logs do not race the display server once it has
 //! taken over. Serial output is never gated.
 //!
-//! Ownership is exclusive: at most one writable `/dev/display/<id>.<screen>`
+//! Ownership is exclusive: at most one writable `/dev/vasistas/<id>.<screen>`
 //! handle may exist at a time. The display server keeps its handle open for
 //! its whole lifetime; a crash closes it and gives the framebuffer back to the
 //! kernel, so the next process can take over.
@@ -45,7 +45,7 @@
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 /// Number of writable display handles currently held by userspace.
-static STRATE_OWNERS: AtomicUsize = AtomicUsize::new(0);
+static VASISTAS_OWNERS: AtomicUsize = AtomicUsize::new(0);
 
 /// PID that took the framebuffer on the 0 -> 1 ownership transition (0 = none).
 static OWNER_PID: AtomicU32 = AtomicU32::new(0);
@@ -56,8 +56,8 @@ static OWNER_PID: AtomicU32 = AtomicU32::new(0);
 /// Returns false when a userspace display server already owns the screen; the
 /// caller must refuse the open and close no reference. On success the owner's
 /// PID is recorded so damage/clear writes can be attributed.
-pub fn try_acquire_strate(pid: u32) -> bool {
-    if STRATE_OWNERS
+pub fn try_acquire_vasistas(pid: u32) -> bool {
+    if VASISTAS_OWNERS
         .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()
     {
@@ -72,10 +72,10 @@ pub fn try_acquire_strate(pid: u32) -> bool {
 ///
 /// Called by the display scheme when a writable screen handle is closed.
 /// The last release hands the framebuffer back to the kernel (boot console).
-pub fn release_strate() {
-    let mut current = STRATE_OWNERS.load(Ordering::SeqCst);
+pub fn release_vasistas() {
+    let mut current = VASISTAS_OWNERS.load(Ordering::SeqCst);
     while current != 0 {
-        match STRATE_OWNERS.compare_exchange_weak(
+        match VASISTAS_OWNERS.compare_exchange_weak(
             current,
             current - 1,
             Ordering::SeqCst,
@@ -93,13 +93,13 @@ pub fn release_strate() {
 }
 
 /// PID of the current framebuffer owner, or 0 when the kernel owns it.
-pub fn strate_owner_pid() -> u32 {
+pub fn vasistas_owner_pid() -> u32 {
     OWNER_PID.load(Ordering::SeqCst)
 }
 
 /// Returns true while at least one userspace display owner exists.
-pub fn strate_owned() -> bool {
-    STRATE_OWNERS.load(Ordering::SeqCst) != 0
+pub fn vasistas_owned() -> bool {
+    VASISTAS_OWNERS.load(Ordering::SeqCst) != 0
 }
 
 /// Returns true if the kernel may draw on the framebuffer.
@@ -107,13 +107,13 @@ pub fn strate_owned() -> bool {
 /// False as soon as a display server owns the screen; the kernel keeps
 /// logging to serial only.
 pub fn kernel_fb_allowed() -> bool {
-    !strate_owned()
+    !vasistas_owned()
 }
 
-/// Human-readable owner name, for `/dev/display/info`.
+/// Human-readable owner name, for `/dev/vasistas/info`.
 pub fn owner_name() -> &'static str {
-    if strate_owned() {
-        "strate"
+    if vasistas_owned() {
+        "vasistas"
     } else {
         "kernel"
     }
