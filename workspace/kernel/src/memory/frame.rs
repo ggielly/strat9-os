@@ -269,17 +269,7 @@ impl FrameAllocOptions {
         // SAFETY: `phys_to_virt(phys)` is a valid HHDM address covering exactly
         // `PAGE_SIZE` bytes.  The buddy allocator guarantees we have exclusive
         // ownership of these bytes for the duration of this function.
-        crate::memory::heap::trace_phys_log(b'A', phys, self.purpose_flags as u64);
         if self.zeroed {
-            // A live slab page must never come back from the buddy allocator:
-            // the slab still owns the blocks inside it.
-            if crate::memory::heap::slab_page_is_live(phys, 0) {
-                crate::serial_println!(
-                    "\x1b[1;31m[buddy] ALLOC OF LIVE SLAB PAGE: phys={:#x}\x1b[0m",
-                    phys
-                );
-                crate::memory::heap::dump_backtrace();
-            }
             unsafe {
                 ptr::write_bytes(
                     crate::memory::phys_to_virt(phys) as *mut u8,
