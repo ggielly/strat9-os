@@ -33,10 +33,10 @@
 //! framebuffer, so kernel logs do not race the display server once it has
 //! taken over. Serial output is never gated.
 //!
-//! Ownership is reference-counted: one acquisition per writable
-//! `/dev/display/<id>.<screen>` handle. The display server keeps its handle
-//! open for its whole lifetime; a crash closes it and gives the framebuffer
-//! back to the kernel.
+//! Ownership is exclusive: at most one writable `/dev/display/<id>.<screen>`
+//! handle may exist at a time. The display server keeps its handle open for
+//! its whole lifetime; a crash closes it and gives the framebuffer back to the
+//! kernel, so the next process can take over.
 //!
 //! Panic output deliberately stays serial-only (see `boot::panic`), so a
 //! panicking kernel never steals the framebuffer back from the display
@@ -50,13 +50,21 @@ static STRATE_OWNERS: AtomicUsize = AtomicUsize::new(0);
 /// PID that took the framebuffer on the 0 -> 1 ownership transition (0 = none).
 static OWNER_PID: AtomicU32 = AtomicU32::new(0);
 
-/// Mark the framebuffer as owned by a userspace display server.
+/// Try to take exclusive framebuffer ownership for `pid`.
 ///
-/// Called by the display scheme when a writable screen handle is opened. The
-/// first owner records its PID so damage/clear writes can be attributed.
-pub fn acquire_strate(pid: u32) {
-    if STRATE_OWNERS.fetch_add(1, Ordering::SeqCst) == 0 {
+/// Called by the display scheme when a writable screen handle is opened.
+/// Returns false when a userspace display server already owns the screen; the
+/// caller must refuse the open and close no reference. On success the owner's
+/// PID is recorded so damage/clear writes can be attributed.
+pub fn try_acquire_strate(pid: u32) -> bool {
+    if STRATE_OWNERS
+        .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
         OWNER_PID.store(pid, Ordering::SeqCst);
+        true
+    } else {
+        false
     }
 }
 

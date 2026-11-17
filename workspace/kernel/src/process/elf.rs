@@ -122,7 +122,7 @@ pub const USER_ADDR_MAX: u64 = crate::memory::userslice::USER_SPACE_END;
 ///
 /// This is the *default*: the loader accepts a per-process stack size via
 /// [`load_and_run_elf_with_stack`] (issue #64).
-pub const USER_STACK_PAGES: usize = 16;
+pub const USER_STACK_PAGES: usize = 32;
 /// Lower bound on a per-process user stack (4 pages = 16 KiB): the boot
 /// stack layout alone (argv/envp/auxv + guard margins) needs at least one
 /// page, and tiny stacks would fault immediately.

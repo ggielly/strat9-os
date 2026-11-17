@@ -1,0 +1,13 @@
+[package]
+name = "display-protocol"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+description = "Wire encoding/decoding for the strat9-os native display protocol v1 (Annexe A of docs/GUI_AUDIT_2026-11.md)."
+
+[lib]
+name = "display_protocol"
+path = "src/lib.rs"
+
+[dependencies]

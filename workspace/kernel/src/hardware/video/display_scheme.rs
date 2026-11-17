@@ -200,9 +200,15 @@ impl Scheme for DisplayScheme {
         } else if path == "clear" {
             Handle::Clear
         } else if path == "snapshot" {
+            if !Self::caller_owns_display() {
+                return Err(SyscallError::PermissionDenied);
+            }
             let screen = self.get_or_create_screen(0).ok_or(SyscallError::NotFound)?;
             Handle::Snapshot(Some(Self::snapshot_screen(&screen)))
         } else if let Some(prefix) = path.strip_suffix(".snapshot") {
+            if !Self::caller_owns_display() {
+                return Err(SyscallError::PermissionDenied);
+            }
             let display_id: u32 = prefix
                 .split('.')
                 .next()
@@ -222,12 +228,16 @@ impl Scheme for DisplayScheme {
         };
 
         // A writable screen handle transfers framebuffer ownership from the
-        // kernel boot console to the userspace display strate.
+        // kernel boot console to the userspace display strate. Only one such
+        // handle may exist at a time: refuse the open (and keep the handle out
+        // of the table) while an owner is already present.
         if let Handle::Screen(_, _, true) = &handle {
             let pid = crate::process::current_task_clone()
                 .map(|t| t.pid)
                 .unwrap_or(0);
-            crate::display_state::acquire_strate(pid);
+            if !crate::display_state::try_acquire_strate(pid) {
+                return Err(SyscallError::Busy);
+            }
         }
 
         self.handles.write().insert(id, handle.clone());
@@ -584,10 +594,15 @@ impl Scheme for DisplayScheme {
 
     fn close(&self, fid: u64) -> Result<(), SyscallError> {
         let removed = self.handles.write().remove(&fid);
-        // A writable screen handle held a display ownership reference; the
-        // last one gives the framebuffer back to the kernel boot console.
-        if matches!(removed, Some(Handle::Screen(_, _, true))) {
+        // A writable screen handle owned the framebuffer. Once the owner is
+        // gone, drop its cached surface too: the next owner allocates a fresh,
+        // zeroed `HeapScreen`, so stale mappings of the old frames cannot write
+        // into the live screen.
+        if let Some(Handle::Screen(display_id, _, true)) = removed {
             crate::display_state::release_strate();
+            if !crate::display_state::strate_owned() {
+                self.screens.write().remove(&display_id);
+            }
         }
         Ok(())
     }

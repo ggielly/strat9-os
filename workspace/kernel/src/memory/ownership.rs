@@ -58,6 +58,8 @@ pub struct OwnerEntry {
     pub caps: SmallVec<[CapId; 4]>,
     /// Temporary non-capability pins held while publishing or revoking a mapping.
     pub transient_refs: u32,
+    /// Block was exported as a shared region and must not be COW-cloned.
+    pub shared: bool,
 }
 
 /// Errors returned by the ownership layer.
@@ -151,6 +153,7 @@ impl OwnershipTable {
                 refcount: 1,
                 caps: smallvec![cap_id],
                 transient_refs: 0,
+                shared: false,
             },
         );
         Self::sync_meta(handle, 1);
@@ -177,6 +180,7 @@ impl OwnershipTable {
                     refcount: 1,
                     caps: smallvec![cap_id],
                     transient_refs: 0,
+                    shared: false,
                 },
             );
             Self::sync_meta(handle, 1);
@@ -309,6 +313,22 @@ impl OwnershipTable {
     /// Returns a snapshot of the ownership entry for the given block.
     pub fn get(&self, handle: BlockHandle) -> Option<OwnerEntry> {
         self.entries.lock().get(&handle).cloned()
+    }
+
+    /// Marks a block as exported/shared so COW cloning keeps it writable and shared.
+    pub fn mark_shared(&self, handle: BlockHandle) -> Result<(), OwnerError> {
+        let mut entries = self.entries.lock();
+        let entry = entries.get_mut(&handle).ok_or(OwnerError::NotFound)?;
+        entry.shared = true;
+        Ok(())
+    }
+
+    /// Returns whether the block was marked as exported/shared.
+    pub fn is_shared(&self, handle: BlockHandle) -> bool {
+        self.entries
+            .lock()
+            .get(&handle)
+            .is_some_and(|entry| entry.shared)
     }
 
     /// Returns the live handle whose base physical address matches `base`, if any.

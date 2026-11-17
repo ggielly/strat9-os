@@ -79,6 +79,17 @@ pub const SYS_HANDLE_REVOKE: usize = 5;
 /// Returns `0` on success, `-EBADF` if the handle is invalid.
 pub const SYS_HANDLE_INFO: usize = 6;
 
+/// Wait for readiness on many handles / file descriptors at once.
+///
+/// - `list_ptr`: pointer to an array of `WaitSource` structs
+/// - `count`: number of entries (1..=64)
+/// - `timeout_ns`: maximum wait time in nanoseconds (0 = non-blocking probe,
+///   `u64::MAX` = infinite)
+///
+/// Returns the index of the first ready entry (its `revents` field is
+/// written back), or `-ETIMEDOUT` when the timeout expires.
+pub const SYS_HANDLE_WAIT_MANY: usize = 7;
+
 // ── Block 100-199: Memory Management ────────────────────────────────────────
 
 /// Map a memory region into the process address space.
@@ -253,6 +264,15 @@ pub const SYS_IPC_TRY_RECV: usize = 207;
 ///
 /// Returns a new handle to the connected port, or `-ENOENT` if not found.
 pub const SYS_IPC_CONNECT: usize = 208;
+
+/// Non-blocking send to an IPC port.
+///
+/// - `port_handle`: capability handle of the target port
+/// - `msg_ptr`: pointer to the message data
+///
+/// Returns `0` if the message was queued. Never blocks: returns `-EAGAIN` when
+/// the port's message queue (16 slots) is full.
+pub const SYS_IPC_TRY_SEND: usize = 209;
 
 /// Create a shared ring buffer for zero-copy IPC.
 ///

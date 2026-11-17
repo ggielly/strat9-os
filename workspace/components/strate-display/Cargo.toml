@@ -1,0 +1,19 @@
+[package]
+name = "strate-display"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+description = "Native display server for strat9-os: /srv/display, private backbuffer, DisplayBackend over /dev/display and DMG2 (jalon 4)."
+
+[[bin]]
+name = "display-server"
+path = "src/main.rs"
+# Freestanding no_std/no_main image: it cannot link the host test harness.
+test = false
+
+[dependencies]
+display-core = { path = "../display-core" }
+display-protocol = { path = "../display-protocol" }
+display-backend = { path = "../display-backend" }
+strat9-syscall = { path = "../syscall", features = ["userspace"] }

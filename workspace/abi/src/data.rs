@@ -186,6 +186,35 @@ impl TimeSpec {
     }
 }
 
+// ── Wait sources (SYS_HANDLE_WAIT_MANY) ─────────────────────────────────────
+
+/// `WaitSource.kind`: `id` is a capability handle.
+pub const WAIT_SOURCE_HANDLE: u32 = 0;
+/// `WaitSource.kind`: `id` is a file descriptor (ports use handles, pipes fds).
+pub const WAIT_SOURCE_FD: u32 = 1;
+
+/// `WaitSource.events` / `revents`: readable (bit 0).
+pub const WAIT_EVENT_READABLE: u32 = 1 << 0;
+/// `WaitSource.events` / `revents`: writable (bit 1).
+pub const WAIT_EVENT_WRITABLE: u32 = 1 << 1;
+
+/// One entry of the `SYS_HANDLE_WAIT_MANY` list.
+///
+/// `waiter` fills `kind`, `events` and `id`; the kernel writes `revents` back
+/// for the ready entry it reports. Layout: 24 bytes, no padding.
+#[derive(Debug, Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+#[repr(C)]
+pub struct WaitSource {
+    /// `WAIT_SOURCE_HANDLE` or `WAIT_SOURCE_FD`.
+    pub kind: u32,
+    /// Requested `WAIT_EVENT_*` bits.
+    pub events: u32,
+    /// Handle or file descriptor, depending on `kind`.
+    pub id: u64,
+    /// Returned `WAIT_EVENT_*` bits (written by the kernel).
+    pub revents: u64,
+}
+
 // ── Stat (legacy, kept for compat) ─────────────────────────────────────────
 
 /// Legacy stat structure (120 bytes). Prefer [`FileStat`] for new code.

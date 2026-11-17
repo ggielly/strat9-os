@@ -70,6 +70,26 @@ pub fn exit_current_task(exit_code: i32) -> ! {
         // while still the running task so the address space is current on
         // this CPU; idempotent with the cleanup_task_resources path.
         crate::process::thread_ops::reclaim_kernel_user_stack(&task);
+
+        // -- descriptors (POSIX: closed when the last thread exits) --
+        // The fd table is shared by the whole thread group, so only the last
+        // thread may close it. Closing here (not at reap) releases pipe ends
+        // so peers waiting for EOF can proceed while we are still a zombie.
+        if crate::process::get_task_ids_in_tgid(task.tgid).len() <= 1 {
+            // SAFETY: last thread of the process; no other thread can
+            // concurrently access the shared descriptor table.
+            unsafe { (&mut *task.process.fd_table.get()).close_all() };
+
+            // -- IPC ports served by this process --
+            // Tear them down now, not when the parent finally reaps the
+            // zombie: a scheme server that exits (or panics) while its
+            // parent never calls wait() would otherwise leave its mount
+            // pointing at a live-looking port that nobody serves, and every
+            // client of that scheme (`ls /bus`, `stat /net`, ...) would block
+            // forever. Queued/pending callers get an error reply instead.
+            // Idempotent with `cleanup_task_resources` at reap time.
+            crate::ipc::port::cleanup_ports_for_task(task.id);
+        }
     }
 
     let cpu_index = current_cpu_index();

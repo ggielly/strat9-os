@@ -2234,8 +2234,11 @@ impl AddressSpace {
                 let mut new_flags = mapping.flags;
                 let is_writable = mapping.flags.contains(PageTableFlags::WRITABLE);
                 const COW_BIT: PageTableFlags = PageTableFlags::BIT_9;
+                let shared = crate::memory::ownership_table().is_shared(mapping.handle);
 
-                if is_writable {
+                // Exported/shared blocks stay writable and shared across fork: neither
+                // the parent nor the child gets write-protected or COW-marked.
+                if is_writable && !shared {
                     new_flags.remove(PageTableFlags::WRITABLE);
                     new_flags.insert(COW_BIT);
 

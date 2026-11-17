@@ -53,6 +53,13 @@ members = [
     "workspace/components/s9vm-vmm",
     "workspace/components/strate-iommu",
     "workspace/components/bt/strate-bt",
+    "workspace/components/display-protocol",
+    "workspace/components/input-protocol",
+    "workspace/components/input-client",
+    "workspace/components/display-core",
+    "workspace/components/display-backend",
+    "workspace/components/display-client",
+    "workspace/components/strate-display",
 ]
 exclude = [
     "workspace/components/strate-fs-xfs", # Missing fs-abstraction dependency : TODO
@@ -69,6 +76,7 @@ bitflags = "2.11.1"
 log = "0.4"
 zerocopy = { version = "0.8.40", features = ["derive"] }
 endian-num = { version = "0.2", default-features = false }
+display-protocol = { path = "workspace/components/display-protocol" }
 
 [workspace.lints.rust]
 dangling_pointers_from_temporaries = "deny"

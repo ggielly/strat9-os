@@ -49,13 +49,13 @@
 //! (0x10) is **not** forwarded to the guest: it writes `pause` immediately
 //! followed by `resume` to `<id>/control`. This short management pulse lets an
 //! operator observe the world suspended and running again without stopping the
-//! relay. The mapping is deliberately a single byte so it works on the raw
-//! `/dev/input/text` stream. If the control file is missing (older kernel) or
+//! relay. The mapping is deliberately a single byte so it works on the decoded
+//! `inputd` text stream. If the control file is missing (older kernel) or
 //! the engine refuses the command, the failure is reported on stdout and the
 //! relay continues: it is never fatal and never changes the exit code.
 //!
-//! Every other byte is forwarded unchanged to the guest console. Ctrl-D on
-//! stdin (when stdin is the input source) detaches and exits with code 0.
+//! Every other byte is forwarded unchanged to the guest console. Ctrl-D in the
+//! decoded text stream detaches and exits with code 0.
 //!
 //! # Control protocol
 //!
@@ -67,15 +67,23 @@
 //!
 //! # Input
 //!
-//! Input comes from `/dev/input/text` when available (the kernel console is
-//! write-only) and falls back to stdin otherwise; both are read non-blocking
-//! with the same `EAGAIN`-tolerant helper. No extra syscall is added.
+//! Input comes from `inputd` via `input-client`: only `INPUT_EVENT_TEXT`
+//! records are consumed (control bytes such as `p`, Ctrl-P and Ctrl-D arrive
+//! inside the decoded text). The client is opened with a retry loop because
+//! `inputd` may start after this component. The component no longer opens any
+//! `/dev/input/*` device. No extra syscall is added.
+//!
+//! Focus: this component deliberately does **not** call `request_focus()`,
+//! neither at startup nor on attach. It must never steal focus from the rescue
+//! console; it keeps receiving text only while the server focuses it (i.e.
+//! while it is the default first subscriber). There is no separate
+//! "VM console active" point that would justify taking focus.
 //!
 //! # Exit codes
 //!
 //! | Code | Meaning                                                      |
 //! |------|--------------------------------------------------------------|
-//! | 0    | clean shutdown: stdin reached end of file                     |
+//! | 0    | clean shutdown: Ctrl-D detached from the console               |
 //! | 1    | `/dev/vmm/info` or `/dev/vmm/worlds` unavailable              |
 //! | 2    | no world listed by `/dev/vmm/worlds`                          |
 //! | 3    | console attachment failed, or the world disappeared           |
@@ -92,13 +100,13 @@ use core::{
     panic::PanicInfo,
 };
 use strat9_syscall::{call, data::TimeSpec, error::Error, flag};
+use input_client::{Client, Poll};
+use input_protocol::{INPUT_EVENT_TEXT, INPUT_TEXT_LEN};
 
 /// Snapshot of the engine state (kernel-generated text).
 const PATH_INFO: &str = "/dev/vmm/info";
 /// One line per existing world.
 const PATH_WORLDS: &str = "/dev/vmm/worlds";
-/// Keyboard input scheme; the kernel console itself is write-only.
-const PATH_INPUT: &str = "/dev/input/text";
 
 /// Command sent to `<id>/control` to suspend the world.
 const CONTROL_PAUSE: &[u8] = b"pause";
@@ -108,13 +116,13 @@ const CONTROL_RESUME: &[u8] = b"resume";
 const KEY_CONTROL_PULSE: u8 = b'p';
 /// Ctrl-P alternative for the management pulse.
 const KEY_CONTROL_PULSE_CTRL: u8 = 0x10;
+/// Ctrl-D: detach from the guest console and exit cleanly.
+const KEY_DETACH: u8 = 0x04;
 
 /// File descriptor of the component stdout (bound to `/dev/console`).
 const STDOUT_FD: usize = 1;
-/// File descriptor of the component stdin.
-const STDIN_FD: usize = 0;
 
-/// Clean shutdown (stdin end of file).
+/// Clean shutdown (detached with Ctrl-D).
 const EXIT_OK: usize = 0;
 /// `/dev/vmm` scheme or its base files are unavailable.
 const EXIT_VMM_UNAVAILABLE: usize = 1;
@@ -129,8 +137,6 @@ const EXIT_IO_ERROR: usize = 4;
 const SNAPSHOT_MAX: usize = 4096;
 /// Size of one console-output chunk.
 const IO_CHUNK: usize = 512;
-/// Size of one keyboard-input chunk.
-const INPUT_CHUNK: usize = 64;
 /// Idle sleep between two polling rounds, in milliseconds.
 const IDLE_SLEEP_MS: u64 = 5;
 /// Bound on consecutive retryable errors before a read/write gives up.
@@ -395,11 +401,22 @@ fn control_pulse(world_id: u64) {
     }
 }
 
-/// Opens the keyboard input scheme, or stdin when it is unavailable.
-fn open_input() -> usize {
-    match call::open(PATH_INPUT, flag::O_RDONLY | flag::O_NONBLOCK) {
-        Ok(fd) => fd,
-        Err(_) => STDIN_FD,
+/// Subscribes to `inputd`, retrying until it is up.
+///
+/// `inputd` may be started after this component; the retry is unbounded but
+/// yields the CPU between attempts so it never spins. No focus is requested:
+/// see the module docs.
+fn open_input() -> Client {
+    let mut logged = false;
+    loop {
+        if let Some(client) = Client::open(1) {
+            return client;
+        }
+        if !logged {
+            let _ = writeln!(out(), "[s9vm-console] waiting for inputd (/srv/input)...");
+            logged = true;
+        }
+        sleep_ms(IDLE_SLEEP_MS);
     }
 }
 
@@ -543,10 +560,10 @@ fn run() -> usize {
             return EXIT_CONSOLE_UNAVAILABLE;
         }
     };
-    let input_fd = open_input();
+    let mut input = open_input();
     let _ = writeln!(
         output,
-        "[s9vm-console] attached to world {world_id} ({console_path}); input fd {input_fd}"
+        "[s9vm-console] attached to world {world_id} ({console_path}); input: inputd"
     );
     let _ = writeln!(
         output,
@@ -554,7 +571,6 @@ fn run() -> usize {
     );
 
     let mut console_buf = [0u8; IO_CHUNK];
-    let mut input_buf = [0u8; INPUT_CHUNK];
     loop {
         let mut activity = false;
 
@@ -587,53 +603,61 @@ fn run() -> usize {
             }
         }
 
-        // Keyboard input -> guest console. EAGAIN means "no key yet".
-        match call::read(input_fd, &mut input_buf) {
-            Ok(0) => {
-                if input_fd == STDIN_FD {
-                    let _ = writeln!(output, "[s9vm-console] stdin closed; detaching");
-                    return EXIT_OK;
+        // Keyboard input -> guest console. Only TEXT records carry bytes;
+        // KEY/pointer records are ignored.
+        loop {
+            match input.poll() {
+                Poll::Batch(batch) => {
+                    activity = true;
+                    for record in batch.records() {
+                        if record.event.event_type != INPUT_EVENT_TEXT {
+                            continue;
+                        }
+                        let len = (record.event.value.max(0) as usize).min(INPUT_TEXT_LEN);
+                        // Management bytes are consumed locally; every other
+                        // byte is forwarded to the guest.
+                        let mut forwarded = [0u8; INPUT_TEXT_LEN];
+                        let mut forwarded_len = 0usize;
+                        for &byte in &record.text[..len] {
+                            if byte == KEY_CONTROL_PULSE || byte == KEY_CONTROL_PULSE_CTRL {
+                                control_pulse(world_id);
+                            } else if byte == KEY_DETACH {
+                                let _ = writeln!(
+                                    output,
+                                    "[s9vm-console] Ctrl-D; detaching"
+                                );
+                                return EXIT_OK;
+                            } else if forwarded_len < INPUT_TEXT_LEN {
+                                forwarded[forwarded_len] = byte;
+                                forwarded_len += 1;
+                            }
+                        }
+                        if forwarded_len == 0 {
+                            continue;
+                        }
+                        if let Err(error) = write_all(console_fd, &forwarded[..forwarded_len]) {
+                            if error == Error::Again {
+                                // Guest input queue is full: drop this chunk,
+                                // keep the console attached.
+                                continue;
+                            }
+                            if error == Error::NotFound {
+                                let _ =
+                                    writeln!(output, "[s9vm-console] world {world_id} disappeared");
+                                return EXIT_CONSOLE_UNAVAILABLE;
+                            }
+                            let _ = writeln!(
+                                output,
+                                "[s9vm-console] console write failed ({})",
+                                error.name()
+                            );
+                            return EXIT_IO_ERROR;
+                        }
+                    }
                 }
+                Poll::Reset { .. } => break,
+                Poll::Empty | Poll::Error => break,
             }
-            Ok(count) => {
-                activity = true;
-                // Management bytes are consumed locally; every other byte is
-                // forwarded to the guest in a single write.
-                let mut forwarded = [0u8; INPUT_CHUNK];
-                let mut forwarded_len = 0usize;
-                for &byte in &input_buf[..count] {
-                    if byte == KEY_CONTROL_PULSE || byte == KEY_CONTROL_PULSE_CTRL {
-                        control_pulse(world_id);
-                    } else if forwarded_len < INPUT_CHUNK {
-                        forwarded[forwarded_len] = byte;
-                        forwarded_len += 1;
-                    }
-                }
-                if forwarded_len == 0 {
-                    let _ = call::sched_yield();
-                    continue;
-                }
-                if let Err(error) = write_all(console_fd, &forwarded[..forwarded_len]) {
-                    if error == Error::Again {
-                        // Guest input queue is full: drop this chunk, keep the
-                        // console attached.
-                        continue;
-                    }
-                    if error == Error::NotFound {
-                        let _ = writeln!(output, "[s9vm-console] world {world_id} disappeared");
-                        return EXIT_CONSOLE_UNAVAILABLE;
-                    }
-                    let _ = writeln!(
-                        output,
-                        "[s9vm-console] console write failed ({})",
-                        error.name()
-                    );
-                    return EXIT_IO_ERROR;
-                }
-            }
-            Err(error) if error.is_retryable() => {}
-            Err(Error::NotATty) => {}
-            Err(_) => {}
         }
 
         if activity {

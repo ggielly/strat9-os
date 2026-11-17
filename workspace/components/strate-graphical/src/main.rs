@@ -34,7 +34,11 @@ extern crate alloc;
 
 use alloc::{format, vec, vec::Vec};
 use core::{alloc::Layout, panic::PanicInfo};
-use strat9_syscall::{call, number, syscall6};
+use strat9_syscall::{call, data::TimeSpec, number, syscall6};
+use input_client::{Client, Poll};
+use input_protocol::{
+    INPUT_EVENT_POINTER_AXIS, INPUT_EVENT_POINTER_BUTTON, INPUT_EVENT_POINTER_MOTION,
+};
 
 // ---------------------------------------------------------------------------
 // Global allocator (bump + brk)
@@ -875,28 +879,33 @@ pub extern "C" fn _start() -> ! {
         Err(e) => log(&format!("[display-server]   clear failed: {:?}", e)),
     }
 
-    // Step 4: Open input devices
-    log("[display-server] step 4: opening input devices...");
-    let kfd = match call::open("/dev/input/kbd", 0) {
-        Ok(fd) => {
-            log(&format!("[display-server]   kbd fd={}", fd));
-            fd
-        }
-        Err(e) => {
-            log(&format!("[display-server]   kbd not available: {:?}", e));
-            0
+    // Step 4: Subscribe to inputd. Retry because the input server may start
+    // after the display server; only the client path is used, never
+    // /dev/input/*.
+    log("[display-server] step 4: subscribing to inputd...");
+    let mut input = {
+        let mut logged = false;
+        loop {
+            if let Some(client) = Client::open(1) {
+                break client;
+            }
+            if !logged {
+                log("[display-server]   waiting for inputd (/srv/input)...");
+                logged = true;
+            }
+            let req = TimeSpec {
+                tv_sec: 0,
+                tv_nsec: 20_000_000,
+            };
+            let mut rem = TimeSpec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            let _ = call::nanosleep(&req, &mut rem);
         }
     };
-    let mfd = match call::open("/dev/input/mouse", 0) {
-        Ok(fd) => {
-            log(&format!("[display-server]   mouse fd={}", fd));
-            fd
-        }
-        Err(e) => {
-            log(&format!("[display-server]   mouse not available: {:?}", e));
-            0
-        }
-    };
+    input.request_focus();
+    log("[display-server]   inputd subscription ready");
 
     // Step 5: map the display surface (zero-copy) or fall back to an
     // offscreen buffer written through the scheme.
@@ -994,56 +1003,49 @@ pub extern "C" fn _start() -> ! {
     log("[display-server]   initial frame presented");
 
     log("[display-server] === entering main loop ===");
-    log(&format!(
-        "[display-server] kbd={} mouse={} display={}",
-        kfd, mfd, dfd
-    ));
+    log(&format!("[display-server] inputd=ready display={}", dfd));
 
-    // Input buffers
-    let mut kb = [0u8; 64];
-    let mut mb = [0u8; 56];
     let mut frame_count: u64 = 0;
     let mut skipped_frames: u64 = 0;
     // Event-driven redraw: only composite + present when something changed.
-    // (Raw keyboard scancodes do not alter the display today; mouse events
-    // and window operations do.)
+    // (KEY/TEXT records do not alter the display today; pointer events and
+    // window operations do.)
     let mut need_redraw = false;
 
     // Main loop
     loop {
-        let mut had_mouse = false;
+        let mut had_input = false;
 
-        // Read keyboard
-        if kfd != 0 {
-            if let Ok(n) = call::read(kfd, &mut kb) {
-                for &sc in &kb[..n] {
-                    let _ = sc;
-                }
-            }
-        }
-
-        // Read mouse
-        if mfd != 0 {
-            if let Ok(n) = call::read(mfd, &mut mb) {
-                let mut i = 0;
-                while i + 7 <= n {
-                    had_mouse = true;
-                    let dx = mb[i] as i16 | ((mb[i + 1] as i16) << 8);
-                    let dy = mb[i + 2] as i16 | ((mb[i + 3] as i16) << 8);
-                    let new_btns = mb[i + 5];
-                    let changed = new_btns ^ srv.btns;
-                    srv.mouse_move(dx, dy);
-                    for b in 0..3u8 {
-                        if changed & (1 << b) != 0 {
-                            srv.mouse_btn(b, new_btns & (1 << b) != 0);
+        // Drain inputd batches. Only pointer records drive the compositor.
+        loop {
+            match input.poll() {
+                Poll::Batch(batch) => {
+                    for record in batch.records() {
+                        let event = record.event;
+                        match event.event_type {
+                            INPUT_EVENT_POINTER_MOTION => {
+                                had_input = true;
+                                // value = dx, code = dy (as i16).
+                                srv.mouse_move(event.value as i16, event.code as i16);
+                            }
+                            INPUT_EVENT_POINTER_BUTTON => {
+                                had_input = true;
+                                srv.mouse_btn(event.code as u8, event.value != 0);
+                            }
+                            // The server has no scroll path yet: vertical
+                            // wheel deltas are acknowledged and ignored.
+                            INPUT_EVENT_POINTER_AXIS => {}
+                            // KEY/TEXT/ENTER/LEAVE/FOCUS: ignored here.
+                            _ => {}
                         }
                     }
-                    i += 7;
                 }
+                Poll::Reset { .. } => break,
+                Poll::Empty | Poll::Error => break,
             }
         }
 
-        if had_mouse {
+        if had_input {
             need_redraw = true;
         }
 

@@ -57,6 +57,8 @@ pub enum SyscallError {
     AccessDenied = -13,
     #[error("Bad address")]
     Fault = -14,
+    #[error("Device or resource busy")]
+    Busy = -16,
     #[error("File exists")]
     AlreadyExists = -17,
     #[error("Invalid argument")]
@@ -129,6 +131,7 @@ impl SyscallError {
             SyscallError::OutOfMemory => "ENOMEM",
             SyscallError::AccessDenied => "EACCES",
             SyscallError::Fault => "EFAULT",
+            SyscallError::Busy => "EBUSY",
             SyscallError::AlreadyExists => "EEXIST",
             SyscallError::InvalidArgument => "EINVAL",
             SyscallError::NotADirectory => "ENOTDIR",

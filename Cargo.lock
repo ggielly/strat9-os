@@ -234,6 +234,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "display-backend"
+version = "0.1.0"
+dependencies = [
+ "display-core",
+ "display-protocol",
+]
+
+[[package]]
+name = "display-client"
+version = "0.1.0"
+dependencies = [
+ "display-protocol",
+ "strat9-syscall",
+]
+
+[[package]]
+name = "display-core"
+version = "0.1.0"
+dependencies = [
+ "display-protocol",
+]
+
+[[package]]
+name = "display-protocol"
+version = "0.1.0"
+
+[[package]]
 name = "driver-net-proto"
 version = "0.1.0"
 
@@ -410,6 +437,18 @@ version = "0.1.0"
 dependencies = [
  "sha2",
 ]
+
+[[package]]
+name = "input-client"
+version = "0.1.0"
+dependencies = [
+ "input-protocol",
+ "strat9-syscall",
+]
+
+[[package]]
+name = "input-protocol"
+version = "0.1.0"
 
 [[package]]
 name = "instability"
@@ -797,6 +836,8 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 name = "s9vm-console"
 version = "0.1.0"
 dependencies = [
+ "input-client",
+ "input-protocol",
  "strat9-syscall",
 ]
 
@@ -1042,7 +1083,8 @@ name = "strate-console"
 version = "0.1.0"
 dependencies = [
  "alloc-freelist",
- "strat9-keymap",
+ "input-client",
+ "input-protocol",
  "strat9-syscall",
  "vte",
 ]
@@ -1051,6 +1093,18 @@ dependencies = [
 name = "strate-console-admin"
 version = "0.1.0"
 dependencies = [
+ "input-client",
+ "input-protocol",
+ "strat9-syscall",
+]
+
+[[package]]
+name = "strate-display"
+version = "0.1.0"
+dependencies = [
+ "display-backend",
+ "display-core",
+ "display-protocol",
  "strat9-syscall",
 ]
 
@@ -1090,6 +1144,8 @@ name = "strate-graphical"
 version = "0.1.0"
 dependencies = [
  "alloc-freelist",
+ "input-client",
+ "input-protocol",
  "strat9-syscall",
 ]
 
@@ -1106,6 +1162,7 @@ dependencies = [
 name = "strate-input"
 version = "0.1.0"
 dependencies = [
+ "input-protocol",
  "strat9-keymap",
  "strat9-syscall",
 ]

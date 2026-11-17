@@ -97,6 +97,33 @@ fn epipe_reply() -> IpcMessage {
 /// calls `deliver_reply`.  Returns the reply message; returns an EPIPE error
 /// if the slot was removed while waiting (server died).
 pub fn wait_for_reply(task_id: TaskId, waiting_on: TaskId) -> IpcMessage {
+    match wait_for_reply_deadline(task_id, waiting_on, None) {
+        Some(msg) => msg,
+        // `None` only happens when a deadline was supplied.
+        None => epipe_reply(),
+    }
+}
+
+/// Like [`wait_for_reply`], but gives up after `timeout_ns`.
+///
+/// Returns `None` on timeout. The reply slot is removed first, so a late
+/// reply from the server is rejected instead of being delivered to a task
+/// that has already moved on. Used for VFS metadata calls: a scheme server
+/// that is dead, wedged or never recv's must not block its clients forever.
+pub fn wait_for_reply_timeout(
+    task_id: TaskId,
+    waiting_on: TaskId,
+    timeout_ns: u64,
+) -> Option<IpcMessage> {
+    let deadline = crate::sync::scheduler_clock_ns().saturating_add(timeout_ns);
+    wait_for_reply_deadline(task_id, waiting_on, Some(deadline))
+}
+
+fn wait_for_reply_deadline(
+    task_id: TaskId,
+    waiting_on: TaskId,
+    deadline_ns: Option<u64>,
+) -> Option<IpcMessage> {
     let waitq = {
         let mut registry = REPLIES.lock();
         let slot = registry.slots.entry(task_id).or_insert_with(|| ReplySlot {
@@ -111,12 +138,12 @@ pub fn wait_for_reply(task_id: TaskId, waiting_on: TaskId) -> IpcMessage {
         match &slot.target {
             ReplyTarget::Sync { waitq, .. } => waitq.clone(),
             ReplyTarget::AsyncRing { .. } => {
-                return epipe_reply();
+                return Some(epipe_reply());
             }
         }
     };
 
-    let msg = waitq.wait_until(|| {
+    let msg = waitq.wait_until_deadline(deadline_ns, || {
         // P2 fix: check for pending signals to avoid livelock.
         if crate::process::signal::has_pending_signals() {
             return Some(epipe_reply());

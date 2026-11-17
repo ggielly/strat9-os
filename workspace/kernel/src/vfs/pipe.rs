@@ -401,4 +401,28 @@ impl Scheme for PipeScheme {
         let len = pipe.inner.lock().len;
         Ok(len as u64)
     }
+
+    /// Report readiness: the read end is readable when non-empty or the
+    /// writer is gone (EOF); the write end is writable while it has room and
+    /// the reader is still open.
+    fn poll(&self, file_id: u64, events: u32) -> Result<u64, SyscallError> {
+        use strat9_abi::data::{WAIT_EVENT_READABLE, WAIT_EVENT_WRITABLE};
+
+        let pipe = self.get_pipe(file_id)?;
+        let inner = pipe.inner.lock();
+        let mut revents = 0u64;
+        if Self::is_read_end(file_id) {
+            if events & WAIT_EVENT_READABLE != 0
+                && (inner.available_read() > 0 || inner.write_closed)
+            {
+                revents |= WAIT_EVENT_READABLE as u64;
+            }
+        } else if events & WAIT_EVENT_WRITABLE != 0
+            && inner.available_write() > 0
+            && !inner.read_closed
+        {
+            revents |= WAIT_EVENT_WRITABLE as u64;
+        }
+        Ok(revents)
+    }
 }

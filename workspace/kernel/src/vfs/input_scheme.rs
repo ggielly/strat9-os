@@ -35,18 +35,31 @@
 
 use crate::syscall::error::SyscallError;
 use alloc::{string::String, vec, vec::Vec};
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::scheme::{
     finalize_pseudo_stat, DirEntry, FileFlags, FileStat, OpenFlags, OpenResult, Scheme, DEV_INPUT,
 };
 
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+/// Directory file IDs start past the three device IDs so that `close` on a
+/// directory handle never maps onto a device claim (see `close` below).
+static NEXT_ID: AtomicU64 = AtomicU64::new(4);
 
 /// File IDs for the two virtual input devices.
 const KBD_FILE_ID: u64 = 1;
 const MOUSE_FILE_ID: u64 = 2;
 const TEXT_FILE_ID: u64 = 3;
+
+/// Exclusive-reader claims. `kbd` and `text` share the keyboard stream, so they
+/// share one claim; `mouse` has its own.
+static KBD_CLAIMED: AtomicBool = AtomicBool::new(false);
+static MOUSE_CLAIMED: AtomicBool = AtomicBool::new(false);
+
+fn claim(flag: &AtomicBool) -> Result<(), SyscallError> {
+    flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map(|_| ())
+        .map_err(|_| SyscallError::Busy)
+}
 
 pub struct InputScheme;
 
@@ -71,6 +84,11 @@ impl Scheme for InputScheme {
             }
             _ => return Err(SyscallError::NotFound),
         };
+        match file_id {
+            KBD_FILE_ID | TEXT_FILE_ID => claim(&KBD_CLAIMED)?,
+            MOUSE_FILE_ID => claim(&MOUSE_CLAIMED)?,
+            _ => {}
+        }
         if file_id == KBD_FILE_ID {
             // A new raw reader must not replay stale keystrokes.
             crate::arch::keyboard::flush_raw();
@@ -139,7 +157,12 @@ impl Scheme for InputScheme {
         Err(SyscallError::PermissionDenied) // Input is read-only
     }
 
-    fn close(&self, _file_id: u64) -> Result<(), SyscallError> {
+    fn close(&self, file_id: u64) -> Result<(), SyscallError> {
+        match file_id {
+            KBD_FILE_ID | TEXT_FILE_ID => KBD_CLAIMED.store(false, Ordering::Release),
+            MOUSE_FILE_ID => MOUSE_CLAIMED.store(false, Ordering::Release),
+            _ => {}
+        }
         Ok(())
     }
 

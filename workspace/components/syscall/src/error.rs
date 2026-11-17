@@ -56,6 +56,8 @@ pub enum Error {
     AccessDenied = EACCES,
     #[error("Bad address")]
     Fault = EFAULT,
+    #[error("Device or resource busy")]
+    Busy = EBUSY,
     #[error("File exists")]
     AlreadyExists = EEXIST,
     #[error("Not a directory")]
@@ -143,6 +145,7 @@ impl Error {
             Error::OutOfMemory => "ENOMEM",
             Error::AccessDenied => "EACCES",
             Error::Fault => "EFAULT",
+            Error::Busy => "EBUSY",
             Error::AlreadyExists => "EEXIST",
             Error::NotADirectory => "ENOTDIR",
             Error::IsADirectory => "EISDIR",

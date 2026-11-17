@@ -178,6 +178,8 @@ fn importer_a(from_parent: usize, to_parent: usize, parent_pid: usize) -> ! {
     // Parent wrote 0x6A at page 2 offset 3.
     let seen = unsafe { core::ptr::read_volatile((addr + 2 * PAGE_SIZE + 3) as *const u8) };
     if seen != 0x6A {
+        // Report the observed byte so the parent can print it before aborting.
+        let _ = send_u8(to_parent, seen);
         call::exit(21);
     }
     let _ = send_u8(to_parent, R_ACK2);
@@ -334,13 +336,23 @@ fn scenario_a(ctx: &mut Ctx) {
 
     // Parent -> child direction.
     unsafe { core::ptr::write_volatile((base + 2 * PAGE_SIZE + 3) as *mut u8, 0x6A) };
+    let readback = unsafe { core::ptr::read_volatile((base + 2 * PAGE_SIZE + 3) as *const u8) };
     let _ = send_u8(p2c_w, C_GO2);
-    check(
-        ctx,
-        "M1 parent writes visible to child",
-        recv_u8(c2p_r) == Some(R_ACK2),
-        "",
-    );
+    let ack2 = recv_u8(c2p_r);
+    if ack2 != Some(R_ACK2) {
+        log("[gui_mem] info parent_readback=");
+        log_u64(readback as u64);
+        log(" child_observed=");
+        match ack2 {
+            Some(v) => log_u64(v as u64),
+            None => log("EOF"),
+        }
+        log("\n");
+        check(ctx, "M1 parent writes visible to child", false, "");
+        let _ = reap(child);
+        return;
+    }
+    check(ctx, "M1 parent writes visible to child", true, "");
 
     // M3: parent drops its own write permission; does the child still write?
     // SAFETY: SYS_MPROTECT on the parent's own mapping.

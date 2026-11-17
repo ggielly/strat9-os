@@ -1,4 +1,15 @@
 [[silos]]
+name = "inputd"
+family = "SYS"
+mode = "706"
+sid = 42
+provides = ["/srv/input"]
+[[silos.strates]]
+name = "inputd"
+binary = "/initfs/input-server"
+type = "elf"
+
+[[silos]]
 name = "bt"
 family = "DRV"
 mode = "076"
@@ -11,19 +22,43 @@ type = "elf"
 [[silos]]
 name = "console-admin"
 family = "SYS"
-mode = "700"
+mode = "706"
 sid = 42
 cpu_features = "sse2"
+requires = ["/srv/input"]
 [[silos.strates]]
 name = "console-admin"
 binary = "/initfs/console-admin"
 type = "elf"
 
 [[silos]]
+name = "display"
+family = "SYS"
+mode = "706"
+sid = 42
+provides = ["/srv/display"]
+[[silos.strates]]
+name = "display-server"
+binary = "/initfs/display-server"
+type = "elf"
+
+[[silos]]
+name = "display-demo"
+family = "SYS"
+mode = "706"
+sid = 42
+requires = ["/srv/display"]
+[[silos.strates]]
+name = "display-demo"
+binary = "/initfs/display-demo"
+type = "elf"
+
+[[silos]]
 name = "s9vm-console"
 family = "SYS"
-mode = "700"
+mode = "706"
 sid = 42
+requires = ["/srv/input"]
 [[silos.strates]]
 name = "s9vm-console"
 binary = "/initfs/s9vm-console"

@@ -1,0 +1,15 @@
+[package]
+name = "display-backend"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+description = "Narrow display backend contract: bounded shared-pixel reads and DMG2 presentation encoding for the strat9-os display server (jalon 4 of docs/GUI_AUDIT_2026-11.md)."
+
+[lib]
+name = "display_backend"
+path = "src/lib.rs"
+
+[dependencies]
+display-protocol = { path = "../display-protocol" }
+display-core = { path = "../display-core" }

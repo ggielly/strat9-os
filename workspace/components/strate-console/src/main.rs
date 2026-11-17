@@ -83,12 +83,24 @@ pub extern "C" fn _start() -> ! {
         }
     };
 
+    // inputd may start after us: retry the subscription instead of failing.
     let mut kbd = match InputHandler::open() {
         Some(k) => k,
         None => {
-            let _ = call::debug_log(b"[console] FATAL: cannot open /dev/input/kbd\n");
+            let _ = call::debug_log(b"[console] waiting for inputd (/srv/input)...\n");
             loop {
-                let _ = call::sched_yield();
+                let req = TimeSpec {
+                    tv_sec: 0,
+                    tv_nsec: 20_000_000,
+                };
+                let mut rem = TimeSpec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                };
+                let _ = call::nanosleep(&req, &mut rem);
+                if let Some(k) = InputHandler::open() {
+                    break k;
+                }
             }
         }
     };
@@ -112,16 +124,13 @@ pub extern "C" fn _start() -> ! {
 
     let mut cursor_visible = true;
     let mut next_blink_ms = now_ms() + CURSOR_BLINK_MS;
-    let mut raw = [0u8; 64];
     let mut input = [0u8; 64];
 
     loop {
         let mut dirty = false;
 
-        // One syscall per scancode burst, then translate the whole batch.
-        // `read_raw` is non-blocking, so an empty read means idle.
-        let raw_n = kbd.read_raw(&mut raw);
-        let text_n = kbd.translate(&raw[..raw_n], &mut input);
+        // Drain the input client; text bytes are already decoded UTF-8.
+        let text_n = kbd.read_text(&mut input);
         if text_n > 0 && term.process_bytes(&input[..text_n]) {
             dirty = true;
         }
@@ -146,8 +155,8 @@ pub extern "C" fn _start() -> ! {
             );
             let _ = call::sched_yield();
         } else {
-            // No blocking poll() on /dev/input/kbd is exposed yet, so sleep
-            // briefly instead of spinning; rendering stays damage-driven.
+            // input-client poll is non-blocking, so sleep briefly when idle
+            // instead of spinning; rendering stays damage-driven.
             let req = TimeSpec {
                 tv_sec: 0,
                 tv_nsec: IDLE_SLEEP_NS,

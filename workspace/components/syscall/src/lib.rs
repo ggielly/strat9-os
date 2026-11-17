@@ -804,6 +804,24 @@ pub mod call {
         unsafe { syscall2(number::SYS_HANDLE_WAIT, handle, timeout_ns) }
     }
 
+    /// Wait for readiness on handles and fds at once (`SYS_HANDLE_WAIT_MANY`).
+    ///
+    /// Returns the index of the first ready entry (its `revents` is written
+    /// back), or `Err(Error::TimedOut)` when `timeout_ns` expires.
+    pub fn handle_wait_many(
+        sources: &mut [data::WaitSource],
+        timeout_ns: u64,
+    ) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_HANDLE_WAIT_MANY,
+                sources.as_mut_ptr() as usize,
+                sources.len(),
+                timeout_ns as usize,
+            )
+        }
+    }
+
     /// Grant a capability handle to another process.
     pub fn handle_grant(handle: usize, target_pid: usize) -> error::Result<usize> {
         unsafe { syscall2(number::SYS_HANDLE_GRANT, handle, target_pid) }
@@ -911,6 +929,19 @@ pub mod call {
         unsafe {
             syscall2(
                 number::SYS_IPC_SEND,
+                port_handle,
+                msg as *const data::IpcMessage as usize,
+            )
+        }
+    }
+
+    /// Send a message through an IPC port without blocking.
+    ///
+    /// Returns `Err(Error::Again)` if the port queue is full.
+    pub fn ipc_try_send(port_handle: usize, msg: &data::IpcMessage) -> error::Result<usize> {
+        unsafe {
+            syscall2(
+                number::SYS_IPC_TRY_SEND,
                 port_handle,
                 msg as *const data::IpcMessage as usize,
             )

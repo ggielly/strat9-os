@@ -11,7 +11,8 @@ GDB = "gdb"
 QEMU_GDB_PORT = "1234"
 STRAT9_PROFILE = "debug"
 STRAT9_TAP_IFACE = "strat9tap0"
-STRAT9_UPLINK_IFACE = "eth0"
+STRAT9_UPLINK_IFACE = "auto"
+STRAT9_NET_MODE = "auto"
 
 # =============================================================================
 # Build Tasks - Bootloader & Toolchain
@@ -200,10 +201,13 @@ dependencies = [
     "strate-fs-ramfs-release",
     "strate-init-release",
     "strate-console-admin-release",
+    "strate-input-release",
     "s9vm-console-release",
     "s9vm-vmm-release",
     "s9vm-guest-release",
     "strate-graphical-release",
+    "strate-display-release",
+    "display-client-release",
     "strate-net-release",
     "strate-bus-release",
     "strate-iommu-release",
@@ -259,10 +263,13 @@ dependencies = [
     "strate-fs-ramfs-release",
     "strate-init-release",
     "strate-console-admin-release",
+    "strate-input-release",
     "s9vm-console-release",
     "s9vm-vmm-release",
     "s9vm-guest-release",
     "strate-graphical-release",
+    "strate-display-release",
+    "display-client-release",
     "strate-net-release",
     "strate-bus-release",
     "strate-iommu-release",
@@ -291,10 +298,13 @@ dependencies = [
     "strate-fs-ramfs-release",
     "strate-init-release",
     "strate-console-admin-release",
+    "strate-input-release",
     "s9vm-console-release",
     "s9vm-vmm-release",
     "s9vm-guest-release",
     "strate-graphical-release",
+    "strate-display-release",
+    "display-client-release",
     "strate-net-release",
     "strate-bus-release",
     "strate-iommu-release",
@@ -311,6 +321,39 @@ env = { STRAT9_IMAGE_BASENAME = "strat9-os", STRAT9_PROFILE = "release", STRAT9_
 script_runner = "@shell"
 script = ['''
 bash tools/scripts/create-uboot-image.sh
+''']
+
+# =============================================================================
+# Networking tasks (host <-> QEMU guest IP, Linux only)
+# =============================================================================
+
+[tasks.net-setup]
+description = "Create routed TAP (DHCP/NAT) so the host can reach QEMU guests by IP"
+script_runner = "@shell"
+script = ['''
+bash tools/scripts/net-tap-routed.sh setup
+''']
+
+[tasks.net-check]
+description = "Verify routed TAP networking; optional guest IP: cargo make net-check -- <guest-ip>"
+script_runner = "@shell"
+script = ['''
+if [ -n "${CARGO_MAKE_TASK_ARGS:-}" ]; then
+    set -- $(printf '%s' "$CARGO_MAKE_TASK_ARGS" | tr ';' ' ')
+    if [ "$1" = "--" ]; then
+        shift
+    fi
+    bash tools/scripts/net-tap-routed.sh check "$@"
+else
+    bash tools/scripts/net-tap-routed.sh check
+fi
+''']
+
+[tasks.net-teardown]
+description = "Remove routed TAP, dnsmasq and iptables rules"
+script_runner = "@shell"
+script = ['''
+bash tools/scripts/net-tap-routed.sh teardown
 ''']
 
 # =============================================================================
@@ -345,6 +388,41 @@ else
         echo "Or run through the kvm group: sg kvm -c 'cargo make run-gui-smp-release'"
     fi
 fi
+# Networking: QEMU user-mode (SLIRP) has no host->guest IP path. When the
+# routed TAP from `cargo make net-setup` is already up with an IPv4 address,
+# attach the e1000 NIC to it; otherwise keep dual user-mode networking.
+net_mode="${STRAT9_NET_MODE:-auto}"
+tap_iface="${STRAT9_TAP_IFACE:-strat9tap0}"
+use_tap=0
+if [ "$net_mode" = "user" ]; then
+    echo "QEMU network: user-mode (forced by STRAT9_NET_MODE=user)"
+else
+    if [ "$net_mode" != "tap" ] && [ "$net_mode" != "auto" ]; then
+        echo "QEMU network: unknown STRAT9_NET_MODE='$net_mode', using auto" >&2
+    fi
+    if ip link show "$tap_iface" >/dev/null 2>&1 \
+        && ip link show "$tap_iface" | head -n 1 | grep -q '<[^>]*UP[^>]*>' \
+        && ip -4 addr show dev "$tap_iface" 2>/dev/null | grep -q 'inet '; then
+        dhcp_ok=0
+        if ss -H -lun 2>/dev/null | grep -q ':67'; then
+            dhcp_ok=1
+        fi
+        if [ "$dhcp_ok" = 1 ]; then
+            use_tap=1
+            echo "QEMU network: routed TAP '$tap_iface' (host can reach guest by IP)"
+        else
+            echo "QEMU network: routed TAP present but no DHCP server on :67; guest will not get an IP — run 'cargo make net-setup'" >&2
+        fi
+    else
+        echo "QEMU network: user-mode SLIRP; the host cannot reach the guest by IP." >&2
+        echo "QEMU network: run 'cargo make net-setup' and retry for a routed TAP." >&2
+    fi
+fi
+if [ "$use_tap" = 1 ]; then
+    net1_args="-device e1000,netdev=net1,mac=52:54:00:12:34:56 -netdev tap,id=net1,ifname=$tap_iface,script=no,downscript=no"
+else
+    net1_args="-device e1000,netdev=net1 -netdev user,id=net1,hostfwd=tcp::2323-:23"
+fi
 # OVMF writes to its NVRAM store; boot from a scratch copy so the packaged file stays pristine.
 [ -f build/OVMF_VARS.fd ] || cp /usr/share/OVMF/OVMF_VARS_4M.fd build/OVMF_VARS.fd
 ${QEMU} \
@@ -362,8 +440,7 @@ ${QEMU} \
     -display gtk,gl=on \
     -device virtio-net-pci,netdev=net0 \
     -netdev user,id=net0,hostfwd=tcp::2222-:22 \
-    -device e1000,netdev=net1 \
-    -netdev user,id=net1,hostfwd=tcp::2323-:23 \
+    $net1_args \
     -serial stdio \
     -device intel-iommu \
     -no-reboot
@@ -618,10 +695,13 @@ dependencies = [
     "strate-fs-ramfs-release",
     "strate-init-release",
     "strate-console-admin-release",
+    "strate-input-release",
     "s9vm-console-release",
     "s9vm-vmm-release",
     "s9vm-guest-release",
     "strate-graphical-release",
+    "strate-display-release",
+    "display-client-release",
     "strate-net-release",
     "strate-bus-release",
     "strate-iommu-release",
@@ -649,10 +729,13 @@ dependencies = [
     "strate-fs-ramfs-release",
     "strate-init-release",
     "strate-console-admin-release",
+    "strate-input-release",
     "s9vm-console-release",
     "s9vm-vmm-release",
     "s9vm-guest-release",
     "strate-graphical-release",
+    "strate-display-release",
+    "display-client-release",
     "strate-net-release",
     "strate-bus-release",
     "strate-iommu-release",
@@ -993,6 +1076,22 @@ args = [
     "build-std-features=compiler-builtins-mem",
 ]
 
+
+[tasks.strate-input-release]
+description = "Build the input server (release)"
+cwd = "workspace/components/strate-input"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
 [tasks.s9vm-console-release]
 description = "Build s9vm userspace console (release)"
 cwd = "workspace/components/s9vm-console"
@@ -1041,6 +1140,36 @@ args = [
 [tasks.strate-graphical-release]
 description = "Build graphical display server (release)"
 cwd = "workspace/components/strate-graphical"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.strate-display-release]
+description = "Build the native display server (release)"
+cwd = "workspace/components/strate-display"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.display-client-release]
+description = "Build the display demo client (release)"
+cwd = "workspace/components/display-client"
 command = "cargo"
 args = [
     "build",

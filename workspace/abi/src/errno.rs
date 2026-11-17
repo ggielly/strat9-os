@@ -70,6 +70,9 @@ pub const EACCES: usize = 13;
 /// Bad address (invalid pointer in syscall argument).
 pub const EFAULT: usize = 14;
 
+/// Device or resource busy (e.g. `/dev/input` already has an exclusive reader).
+pub const EBUSY: usize = 16;
+
 /// File exists (O_CREAT | O_EXCL on existing file).
 pub const EEXIST: usize = 17;
 

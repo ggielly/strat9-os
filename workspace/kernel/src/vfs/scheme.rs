@@ -261,6 +261,14 @@ pub trait Scheme: Send + Sync {
         let _ = path;
         Err(SyscallError::NotImplemented)
     }
+
+    /// Report readiness for one open file.
+    ///
+    /// `events` is a `WAIT_EVENT_*` mask; the returned mask uses the same bits
+    /// and only sets those that are both requested and currently satisfied.
+    fn poll(&self, _file_id: u64, _events: u32) -> Result<u64, SyscallError> {
+        Err(SyscallError::NotImplemented)
+    }
 }
 
 /// Type-erased Scheme reference.
@@ -283,6 +291,8 @@ pub const DEV_NETFS: u64 = 8;
 pub const DEV_CHAR_FS: u64 = 9;
 pub const DEV_INPUT: u64 = 10;
 pub const DEV_THREADFS: u64 = 11;
+/// Base `st_dev` for userspace (IPC) schemes: `DEV_IPC_BASE + port id`.
+pub const DEV_IPC_BASE: u64 = 0x100;
 
 /// Finalize pseudo-filesystem stats with a stable device identity and
 /// synthetic timestamps.
@@ -304,6 +314,8 @@ pub fn finalize_pseudo_stat(mut st: FileStat, st_dev: u64, st_rdev: u64) -> File
 pub struct IpcScheme {
     port_id: PortId,
     open_file_flags: SpinLock<BTreeMap<u64, FileFlags>>,
+    /// Size reported by the server at open time (`None` = unknown/streaming).
+    open_file_sizes: SpinLock<BTreeMap<u64, Option<u64>>>,
     /// Per-fid bulk rings mapped into the scheme server.
     bulk: SpinLock<BTreeMap<u64, Arc<BulkHandle>>>,
 }
@@ -314,6 +326,7 @@ impl IpcScheme {
         IpcScheme {
             port_id,
             open_file_flags: SpinLock::new(BTreeMap::new()),
+            open_file_sizes: SpinLock::new(BTreeMap::new()),
             bulk: SpinLock::new(BTreeMap::new()),
         }
     }
@@ -398,12 +411,34 @@ impl IpcScheme {
     }
 }
 
+/// Upper bound for non-streaming scheme IPC (open, close, readdir, ...).
+const META_CALL_TIMEOUT_NS: u64 = 15_000_000_000;
+
 impl IpcScheme {
     /// Perform a synchronous IPC call: send `msg` to the server port and block
     /// the current task until the server calls `ipc_reply`.  This mirrors
     /// `sys_ipc_call` exactly so that `sys_ipc_reply` can correctly route the
     /// reply back to us via `reply::deliver_reply`.
-    fn call(&self, mut msg: IpcMessage) -> Result<IpcMessage, SyscallError> {
+    ///
+    /// Bounded by [`META_CALL_TIMEOUT_NS`]: open/close/readdir/create/... are
+    /// never supposed to block, so a server that is dead, wedged or never
+    /// recv's (e.g. it panicked after binding its mount) yields `ETIMEDOUT`
+    /// instead of freezing the caller forever. Data transfers that may block
+    /// by design (`read`/`write`) use [`Self::call_blocking`].
+    fn call(&self, msg: IpcMessage) -> Result<IpcMessage, SyscallError> {
+        self.call_inner(msg, Some(META_CALL_TIMEOUT_NS))
+    }
+
+    /// Same as [`Self::call`] but waits for the reply without a time limit.
+    fn call_blocking(&self, msg: IpcMessage) -> Result<IpcMessage, SyscallError> {
+        self.call_inner(msg, None)
+    }
+
+    fn call_inner(
+        &self,
+        mut msg: IpcMessage,
+        timeout_ns: Option<u64>,
+    ) -> Result<IpcMessage, SyscallError> {
         let task_id = crate::process::current_task_id().ok_or(SyscallError::PermissionDenied)?;
 
         // Stamp our task-id so the server knows where to deliver the reply.
@@ -416,7 +451,19 @@ impl IpcScheme {
         // a potentially long sleep.
         drop(port);
 
-        Ok(crate::ipc::reply::wait_for_reply(task_id, port_owner))
+        match timeout_ns {
+            None => Ok(crate::ipc::reply::wait_for_reply(task_id, port_owner)),
+            Some(ns) => crate::ipc::reply::wait_for_reply_timeout(task_id, port_owner, ns)
+                .ok_or_else(|| {
+                    log::warn!(
+                        "vfs: IPC scheme call to port {} (owner {:?}) timed out after {} ms",
+                        self.port_id,
+                        port_owner,
+                        ns / 1_000_000
+                    );
+                    SyscallError::TimedOut
+                }),
+        }
     }
 
     /// Allocate a bulk ring, map it into the server, and announce it.
@@ -453,6 +500,9 @@ impl Scheme for IpcScheme {
         let file_flags = reply.file_flags;
         let flags = FileFlags::from_bits_truncate(file_flags);
         self.remember_open_flags(file_id, flags);
+        self.open_file_sizes
+            .lock()
+            .insert(file_id, if size == u64::MAX { None } else { Some(size) });
 
         // Stream handles get a bulk ring: one RPC can then move up to 32 KiB.
         if flags.contains(FileFlags::CHUNK_READ) && flags.contains(FileFlags::CHUNK_WRITE) {
@@ -468,13 +518,55 @@ impl Scheme for IpcScheme {
         })
     }
 
+    /// Metadata synthesized from what the server reported at open time.
+    ///
+    /// The userspace scheme protocol has no STAT opcode, so without this every
+    /// `stat`/`ls -l` on a served scheme (`/net`, `/bus`, ext4/xfs strates...)
+    /// failed with ENOSYS. The server only tells us whether the handle is a
+    /// directory and, optionally, its size; everything else gets neutral
+    /// defaults. A real STAT opcode can later override this per server.
+    fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
+        let flags = self
+            .open_file_flags
+            .lock()
+            .get(&file_id)
+            .copied()
+            .ok_or(SyscallError::BadHandle)?;
+        let size = self
+            .open_file_sizes
+            .lock()
+            .get(&file_id)
+            .copied()
+            .flatten()
+            .unwrap_or(0);
+        let is_dir = flags.contains(FileFlags::DIRECTORY);
+        let (mode, nlink, size) = if is_dir {
+            (0o040755, 2, 0)
+        } else {
+            (0o100644, 1, size)
+        };
+        Ok(finalize_pseudo_stat(
+            FileStat {
+                st_ino: file_id,
+                st_mode: mode,
+                st_nlink: nlink,
+                st_size: size,
+                st_blksize: 4096,
+                st_blocks: (size + 511) / 512,
+                ..FileStat::zeroed()
+            },
+            DEV_IPC_BASE + self.port_id.as_u64(),
+            0,
+        ))
+    }
+
     /// Performs the read operation.
     fn read(&self, file_id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, SyscallError> {
         if buf.len() > IpcMessage::READ_INLINE_CAPACITY {
             if let Some(bulk) = self.bulk_for(file_id) {
                 let count = core::cmp::min(buf.len(), bulk.size()) as u32;
                 let msg = Self::build_read_msg(file_id, offset, count);
-                let reply = self.call(msg)?;
+                let reply = self.call_blocking(msg)?;
                 Self::parse_status(&reply)?;
                 let n = get_u32(&reply.payload, 4).ok_or(SyscallError::IoError)? as usize;
                 let n = core::cmp::min(n, count as usize);
@@ -498,7 +590,7 @@ impl Scheme for IpcScheme {
         while total < buf.len() {
             let request_len = core::cmp::min(buf.len() - total, chunk_size);
             let msg = Self::build_read_msg(file_id, current_offset, request_len as u32);
-            let reply = self.call(msg)?;
+            let reply = self.call_blocking(msg)?;
 
             Self::parse_status(&reply)?;
 
@@ -534,7 +626,7 @@ impl Scheme for IpcScheme {
                 // Inline data is empty; the length tells the server to read
                 // the payload from the bulk ring.
                 put_u16(&mut msg.payload, 16, n as u16);
-                let reply = self.call(msg)?;
+                let reply = self.call_blocking(msg)?;
                 Self::parse_status(&reply)?;
                 let written = get_u32(&reply.payload, 4).ok_or(SyscallError::IoError)? as usize;
                 return Ok(core::cmp::min(written, n));
@@ -560,7 +652,7 @@ impl Scheme for IpcScheme {
             let request_len = core::cmp::min(buf.len() - total, chunk_size);
             let (msg, packed) =
                 Self::build_write_msg(file_id, current_offset, &buf[total..total + request_len])?;
-            let reply = self.call(msg)?;
+            let reply = self.call_blocking(msg)?;
 
             Self::parse_status(&reply)?;
 
@@ -591,6 +683,7 @@ impl Scheme for IpcScheme {
         let reply = self.call(msg)?;
         Self::parse_status(&reply)?;
         self.take_open_flags(file_id);
+        self.open_file_sizes.lock().remove(&file_id);
         Ok(())
     }
 

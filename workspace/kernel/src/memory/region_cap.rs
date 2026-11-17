@@ -151,6 +151,17 @@ impl MemoryRegionRegistry {
                 }
             }
             handles.push(mapping.handle);
+            if let Err(error) = ownership_table().mark_shared(mapping.handle) {
+                log::warn!(
+                    "memory: failed to mark exported region start={:#x} block={:#x}/{} shared: {:?}",
+                    start,
+                    mapping.handle.base.as_u64(),
+                    mapping.handle.order,
+                    error
+                );
+                Self::rollback_registered_handles(&handles, handle_cap);
+                return Err(RegionCapError::InconsistentState);
+            }
             mapping_cap_ids.push(mapping.cap_id);
         }
 

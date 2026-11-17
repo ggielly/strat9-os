@@ -66,8 +66,14 @@ pub fn sys_ipc_create_port(_flags: u64) -> Result<u64, SyscallError> {
     Ok(cap_id.as_u64())
 }
 
-/// SYS_IPC_SEND: send one IPC message to a port.
-pub fn sys_ipc_send(port_handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
+/// Resolve a send-capable port handle and build the message to deliver.
+///
+/// Shared by `SYS_IPC_SEND` and `SYS_IPC_TRY_SEND` so both apply the identical
+/// capability checks and badge injection.
+fn prepare_send(
+    port_handle: u64,
+    msg_ptr: u64,
+) -> Result<(alloc::sync::Arc<port::Port>, IpcMessage), SyscallError> {
     silo::enforce_cap_for_current_task(port_handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &*task.process.capabilities.get() };
@@ -94,14 +100,31 @@ pub fn sys_ipc_send(port_handle: u64, msg_ptr: u64) -> Result<u64, SyscallError>
     // P1 fix: inject capability badge instead of raw task ID.
     msg.sender = cap.badge;
 
+    let port_id = PortId::from_u64(cap.resource as u64);
+    let port_obj = port::get_port(port_id).ok_or(SyscallError::BadHandle)?;
+    Ok((port_obj, msg))
+}
+
+/// SYS_IPC_SEND: send one IPC message to a port.
+pub fn sys_ipc_send(port_handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
+    let (port_obj, msg) = prepare_send(port_handle, msg_ptr)?;
+
     // `msg.flags` is user protocol data only. It is deliberately not used to
     // carry a security label: the field otherwise acquires three incompatible
     // meanings (user flags, capability handle, label), which caused ordinary
     // sends to be interpreted as capability transfers on receive.
-
-    let port_id = PortId::from_u64(cap.resource as u64);
-    let port_obj = port::get_port(port_id).ok_or(SyscallError::BadHandle)?;
     port_obj.send(msg).map_err(SyscallError::from)?;
+    Ok(0)
+}
+
+/// SYS_IPC_TRY_SEND: send one IPC message to a port without blocking.
+///
+/// Returns `EAGAIN` (`SyscallError::Again`) when the port queue is full; the
+/// 16-slot capacity is unchanged.
+pub fn sys_ipc_try_send(port_handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
+    let (port_obj, msg) = prepare_send(port_handle, msg_ptr)?;
+    // `From<IpcError>` maps `WouldBlock` to `SyscallError::Again`.
+    port_obj.try_send(msg).map_err(SyscallError::from)?;
     Ok(0)
 }
 

@@ -28,7 +28,9 @@ use core::{
     panic::PanicInfo,
     sync::atomic::{AtomicU32, Ordering},
 };
-use strat9_syscall::{call, number};
+use strat9_syscall::{call, data::TimeSpec, number};
+use input_client::{Client, Poll};
+use input_protocol::{INPUT_EVENT_TEXT, INPUT_TEXT_LEN};
 
 // ---------------------------------------------------------------------------
 // I/O helpers
@@ -120,45 +122,126 @@ impl LineBuf {
         }
     }
 
-    /// Returns this value as str.
+    /// Returns this value as str, or an empty string if the bytes are not
+    /// valid UTF-8 (a partial multi-byte sequence must not reach `dispatch`).
     fn as_str(&self) -> &str {
-        unsafe { core::str::from_utf8_unchecked(&self.buf[..self.len]) }
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
     }
 }
 
 // ---------------------------------------------------------------------------
-// Read one line from stdin (fd 0) with echo
+// Read one line from inputd with echo
 // ---------------------------------------------------------------------------
 
+/// Total bytes one `InputBatch` can carry in TEXT records.
+const INPUT_PENDING_MAX: usize = 16 * INPUT_TEXT_LEN;
+/// Attempts to reach `inputd` before giving up this round (~1 s at 20 ms).
+const INPUT_OPEN_ATTEMPTS: u32 = 50;
+
+/// Sleeps for `milliseconds` without requiring an allocator.
+fn sleep_ms(milliseconds: u64) {
+    let request = TimeSpec {
+        tv_sec: (milliseconds / 1000) as i64,
+        tv_nsec: ((milliseconds % 1000) * 1_000_000) as i64,
+    };
+    let mut remaining = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if call::nanosleep(&request, &mut remaining).is_err() {
+        let _ = call::sched_yield();
+    }
+}
+
+/// Subscribes to `inputd` with a bounded retry.
+///
+/// Returns `None` when the server stays absent so the caller can retry later
+/// instead of wedging the whole shell. On success the rescue console takes
+/// input focus once, so it becomes usable as soon as `inputd` is ready.
+fn open_input() -> Option<Client> {
+    let mut logged = false;
+    for _ in 0..INPUT_OPEN_ATTEMPTS {
+        if let Some(client) = Client::open(1) {
+            let _ = client.request_focus();
+            return Some(client);
+        }
+        if !logged {
+            write_str("[console-admin] waiting for inputd (/srv/input)...\n");
+            logged = true;
+        }
+        sleep_ms(20);
+    }
+    None
+}
+
 /// Reads line.
-fn read_line(line: &mut LineBuf) {
+fn read_line(input: &mut Option<Client>, line: &mut LineBuf) {
     line.clear();
-    let mut byte = [0u8; 1];
+    if input.is_none() {
+        *input = open_input();
+    }
+    let Some(client) = input.as_mut() else {
+        write_str("[console-admin] inputd unavailable; retry the command later\n");
+        return;
+    };
+    let mut pending = [0u8; INPUT_PENDING_MAX];
+    let mut pending_len = 0usize;
+    let mut pending_pos = 0usize;
+
     loop {
-        match call::read(0, &mut byte) {
-            Ok(1) => {
-                let b = byte[0];
-                match b {
-                    b'\n' | b'\r' => {
-                        write_str("\n");
-                        return;
+        // Apply buffered text bytes first so no byte is lost mid-line.
+        while pending_pos < pending_len {
+            let b = pending[pending_pos];
+            pending_pos += 1;
+            match b {
+                b'\n' | b'\r' => {
+                    write_str("\n");
+                    return;
+                }
+                0x7F | 0x08 => {
+                    if line.pop() {
+                        write_str("\x08 \x08");
                     }
-                    0x7F | 0x08 => {
-                        if line.pop() {
-                            write_str("\x08 \x08");
+                }
+                0x20..=0xFF if line.push(b) => {
+                    // Accept UTF-8 continuation/lead bytes too: inputd emits
+                    // complete TEXT records (AltGr, dead keys); `as_str`
+                    // rejects an incomplete line before dispatch.
+                    let _ = call::write(1, &[b]);
+                }
+                _ => {}
+            }
+        }
+        pending_len = 0;
+        pending_pos = 0;
+
+        match client.poll() {
+            Poll::Batch(batch) => {
+                for record in batch.records() {
+                    if record.event.event_type != INPUT_EVENT_TEXT {
+                        continue;
+                    }
+                    let len = (record.event.value.max(0) as usize).min(INPUT_TEXT_LEN);
+                    for &byte in &record.text[..len] {
+                        if pending_len < INPUT_PENDING_MAX {
+                            pending[pending_len] = byte;
+                            pending_len += 1;
                         }
                     }
-                    0x20..=0x7E if line.push(b) => {
-                        let _ = call::write(1, &byte);
-                    }
-                    _ => {}
                 }
             }
-            Ok(_) => {
+            // Resynchronise: nothing to replay for a line editor.
+            Poll::Reset { .. } => {}
+            Poll::Empty => {
                 let _ = call::sched_yield();
             }
-            Err(_) => {
-                let _ = call::sched_yield();
+            Poll::Error => {
+                // Drop the dead subscription; the next line re-opens it.
+                if let Some(dead) = input.take() {
+                    dead.close();
+                }
+                write_str("[console-admin] lost inputd; retry the command later\n");
+                return;
             }
         }
     }
@@ -573,10 +656,20 @@ fn panic(info: &PanicInfo) -> ! {
         write_str("[console-admin] Ready (IPC mode : use chevron shell to interact).\n");
         write_str("============================================================\n");
 
-        // TODO: replace with IPC event loop once IPC channels are wired up.
-        // For now, idle so we don't steal keyboard input from the chevron shell.
+        // Jalon 3: the rescue console now reads text events from inputd
+        // (/srv/input), never /dev/input. Each line reuses the same fixed
+        // buffer and dispatch table.
+        let mut input: Option<Client> = None;
         loop {
-            let _ = call::sched_yield();
+            prompt();
+            let mut line = LineBuf::new();
+            read_line(&mut input, &mut line);
+            if line.len == 0 {
+                // inputd absent or the line was empty: avoid a busy prompt.
+                sleep_ms(20);
+                continue;
+            }
+            dispatch(line.as_str());
         }
     }
 }

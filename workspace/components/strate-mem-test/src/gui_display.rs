@@ -31,12 +31,12 @@
 //!
 //! Questions answered (see `doc/GUI_AUDIT_2026-11.md`, section "Preuve 3"):
 //!
-//! * D1  Is a second writable open refused while an owner exists?
+//! * D1  Is a second writable open refused (EBUSY) while an owner exists?
 //! * D2  Can a non-owner present (`DMG2`)? (must be refused)
-//! * D3  When the owner closes but another writable handle remains, does
-//!       presentation rights move to the remaining holder?
-//! * D4  After the handle is closed, does an old writable mapping of the
-//!       framebuffer still work?
+//! * D3  When the owner closes, is ownership released so another process can
+//!       take it and present (no stale `OWNER_PID`)?
+//! * D4  After the handle is closed, can an old writable mapping still write
+//!       the live (new-generation) screen?
 //! * D5  Can any process open `/dev/display/snapshot`?
 
 #![no_std]
@@ -68,6 +68,18 @@ fn present_probe(damage_fd: usize) -> u8 {
     match call::write(damage_fd, &dmg2_empty()) {
         Ok(_) => 0,
         Err(Error::PermissionDenied) => 1,
+        Err(_) => 2,
+    }
+}
+
+/// 0 = opened, 1 = Busy (another owner), 2 = other error.
+fn open_class(path: &str, flags: u32) -> u8 {
+    match call::open(path, flags) {
+        Ok(fd) => {
+            let _ = call::close(fd);
+            0
+        }
+        Err(Error::Busy) => 1,
         Err(_) => 2,
     }
 }
@@ -110,20 +122,44 @@ fn d4(ctx: &mut Ctx) {
             return;
         }
     };
+    let label = "D4 an old writable mapping can write the live screen after handle close";
     match reap(child) {
-        Some(Exit::Code(0)) => gap(
-            ctx,
-            "D4 old writable mapping still works after handle close",
-            true,
-            "mapping outlives ownership; a former owner can write the screen",
-        ),
-        Some(Exit::Signal(s)) => {
+        // The child wrote 0x01 through the stale mapping. Reopen the screen
+        // writable (new generation) and snapshot it: the parent owns the
+        // display, so the snapshot path is allowed.
+        Some(Exit::Code(0)) => {
+            let Ok(h) = call::open("/dev/display/0.0", O_RDWR) else {
+                inconclusive(ctx, "D4", "reopen failed");
+                return;
+            };
+            let snap = call::open("/dev/display/snapshot", O_RDONLY);
+            let mut first = [0u8; 1];
+            let n = match snap {
+                Ok(fd) => {
+                    let n = call::read(fd, &mut first).unwrap_or(0);
+                    let _ = call::close(fd);
+                    n
+                }
+                Err(_) => 0,
+            };
+            let _ = call::close(h);
+            if n == 0 {
+                inconclusive(ctx, "D4", "cannot snapshot the new screen");
+                return;
+            }
             gap(
                 ctx,
-                "D4 old writable mapping still works after handle close",
-                false,
-                "write faulted",
+                label,
+                first[0] == 0x01,
+                if first[0] == 0x01 {
+                    "stale mapping reached the new screen"
+                } else {
+                    "fresh zeroed screen; stale mapping did not reach it"
+                },
             );
+        }
+        Some(Exit::Signal(s)) => {
+            gap(ctx, label, false, "write faulted");
             log("[gui_display] info signal=");
             log_u64(s as u64);
             log("\n");
@@ -144,40 +180,64 @@ fn d4(ctx: &mut Ctx) {
 fn d5(ctx: &mut Ctx) {
     section(ctx, "D5: /dev/display/snapshot access");
     let child = match call::fork() {
-        Ok(0) => {
-            let ok = call::open("/dev/display/snapshot", O_RDONLY);
-            call::exit(if ok.is_ok() { 0 } else { 1 })
-        }
+        Ok(0) => match call::open("/dev/display/snapshot", O_RDONLY) {
+            Ok(fd) => {
+                let _ = call::close(fd);
+                call::exit(0)
+            }
+            Err(Error::PermissionDenied) => call::exit(1),
+            Err(_) => call::exit(2),
+        },
         Ok(p) => p,
         Err(_) => {
             check(ctx, "fork", false, "");
             return;
         }
     };
-    gap(
-        ctx,
-        "D5 an arbitrary process can open the full-screen snapshot",
-        reap(child) == Some(Exit::Code(0)),
-        "no ownership/capability gate in the scheme",
-    );
+    let label = "D5 an arbitrary process can open the full-screen snapshot";
+    match reap(child) {
+        Some(Exit::Code(0)) => gap(
+            ctx,
+            label,
+            true,
+            "snapshot open succeeded without ownership",
+        ),
+        Some(Exit::Code(1)) => gap(ctx, label, false, "non-owner snapshot open refused"),
+        Some(_) => inconclusive(ctx, "D5", "unexpected open error"),
+        None => inconclusive(ctx, "D5", "reap failed"),
+    }
 }
 
 /// Child body for D1-D3.
 fn d123_child(to_parent: usize, from_parent: usize) -> ! {
-    let h2 = call::open("/dev/display/0.0", O_RDWR);
+    // The child inherited the parent's writable screen fd across fork.
+    // Drop it first: otherwise it keeps the OpenFile (and the ownership
+    // reference) alive, so the parent's close would never release the screen.
+    if let Some(inherited) = recv_u64(from_parent) {
+        let _ = call::close(inherited as usize);
+    }
+    // D1: a second writable open must be refused with EBUSY while the parent
+    // owns the screen. `open_class` closes the handle if it unexpectedly
+    // succeeded, so the child holds no ownership when D3 runs.
+    let h2_class = open_class("/dev/display/0.0", O_RDWR);
     let dmg = call::open("/dev/display/damage", O_RDWR);
     let w1 = match dmg {
         Ok(fd) => present_probe(fd),
         Err(_) => 2,
     };
-    let _ = send_u8(to_parent, h2.is_ok() as u8);
+    let _ = send_u8(to_parent, h2_class);
     let _ = send_u8(to_parent, w1);
     // Wait until the parent closed its handle.
     let _ = recv_u8(from_parent);
-    let w2 = match dmg {
-        Ok(fd) => present_probe(fd),
-        Err(_) => 2,
+    // D3: the owner is gone, so the kernel owns the display again and this
+    // process can take ownership. Read info first, then open writable.
+    let owner_kernel = kernel_owns_display().unwrap_or(false);
+    let h3 = call::open("/dev/display/0.0", O_RDWR);
+    let w2 = match (&h3, dmg) {
+        (Ok(_), Ok(fd)) => present_probe(fd),
+        _ => 2,
     };
+    let _ = send_u8(to_parent, owner_kernel as u8);
     let _ = send_u8(to_parent, w2);
     call::exit(0)
 }
@@ -223,30 +283,37 @@ fn d123(ctx: &mut Ctx) {
     };
     let _ = call::close(p2c_r);
     let _ = call::close(c2p_w);
+    // Hand the inherited writable fd to the child so it can drop its copy.
+    let _ = send_u64(p2c_w, h1 as u64);
 
-    let h2_ok = recv_u8(c2p_r);
+    let h2_class = recv_u8(c2p_r);
     let w1 = recv_u8(c2p_r);
     gap(
         ctx,
         "D1 a second process can open the screen writable while an owner exists",
-        h2_ok == Some(1),
-        "writable opens are reference-counted, not exclusive",
+        h2_class != Some(1),
+        match h2_class {
+            Some(1) => "second writable open refused with EBUSY",
+            Some(0) => "second writable open succeeded: ownership is shared",
+            _ => "second writable open failed with an unexpected error",
+        },
     );
     check(ctx, "D2 non-owner DMG2 is refused", w1 == Some(1), "");
 
-    // Owner releases; the child still holds a writable handle.
+    // Owner releases; the child should be able to take ownership in turn.
     let _ = call::close(h1);
     let _ = send_u8(p2c_w, 1);
+    let owner_kernel = recv_u8(c2p_r);
     let w2 = recv_u8(c2p_r);
     gap(
         ctx,
-        "D3 presentation rights do NOT move to the remaining writable holder",
-        w2 == Some(1),
-        match w2 {
-            Some(0) => "ownership transferred",
-            Some(1) => {
-                "OWNER_PID stays the closed owner: the screen is unusable until all handles close"
-            }
+        "D3 ownership is released on close and the next process can present",
+        !(owner_kernel == Some(1) && w2 == Some(0)),
+        match (owner_kernel, w2) {
+            (Some(1), Some(0)) => "OWNER_PID cleared; new owner presents",
+            (Some(0), _) => "OWNER_PID still set after the owner closed",
+            (_, Some(1)) => "new owner cannot present: stale OWNER_PID",
+            (_, Some(0)) => "new owner presents",
             _ => "unexpected result",
         },
     );
@@ -265,8 +332,11 @@ pub extern "C" fn _start() -> ! {
     let mut ctx = Ctx::new("gui_display");
     match kernel_owns_display() {
         Some(true) => {
-            d4(&mut ctx);
+            // D5 first: it needs a non-owner child, before D4's parent ever
+            // becomes the owner. D4 then closes its writable handle before
+            // returning, leaving no owner for D1-D3.
             d5(&mut ctx);
+            d4(&mut ctx);
             d123(&mut ctx);
         }
         Some(false) => inconclusive(

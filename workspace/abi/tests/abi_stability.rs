@@ -31,9 +31,9 @@
 
 use strat9_abi::{
     data::{
-        FileStat, IpcMessage, SiloGrantDesc, Stat, TimeSpec, IPC_MESSAGE_ALIGN, IPC_MESSAGE_SIZE,
-        IPC_PAYLOAD_CAPACITY, SILO_GRANT_ACCESS_WRITE, SILO_GRANT_DMA, SILO_GRANT_IRQ,
-        SILO_GRANT_PATH, SILO_GRANT_PCI,
+        FileStat, IpcMessage, SiloGrantDesc, Stat, TimeSpec, WaitSource, IPC_MESSAGE_ALIGN,
+        IPC_MESSAGE_SIZE, IPC_PAYLOAD_CAPACITY, SILO_GRANT_ACCESS_WRITE, SILO_GRANT_DMA,
+        SILO_GRANT_IRQ, SILO_GRANT_PATH, SILO_GRANT_PCI,
     },
     errno,
     ipc::IPC_HANDSHAKE_MAGIC,
@@ -56,6 +56,7 @@ const GOLDEN_SYSCALLS: &[(&str, usize)] = &[
     ("SYS_HANDLE_GRANT", SYS_HANDLE_GRANT),
     ("SYS_HANDLE_REVOKE", SYS_HANDLE_REVOKE),
     ("SYS_HANDLE_INFO", SYS_HANDLE_INFO),
+    ("SYS_HANDLE_WAIT_MANY", SYS_HANDLE_WAIT_MANY),
     ("SYS_MMAP", SYS_MMAP),
     ("SYS_MUNMAP", SYS_MUNMAP),
     ("SYS_BRK", SYS_BRK),
@@ -75,6 +76,7 @@ const GOLDEN_SYSCALLS: &[(&str, usize)] = &[
     ("SYS_IPC_UNBIND_PORT", SYS_IPC_UNBIND_PORT),
     ("SYS_IPC_TRY_RECV", SYS_IPC_TRY_RECV),
     ("SYS_IPC_CONNECT", SYS_IPC_CONNECT),
+    ("SYS_IPC_TRY_SEND", SYS_IPC_TRY_SEND),
     ("SYS_IPC_RING_CREATE", SYS_IPC_RING_CREATE),
     ("SYS_IPC_RING_MAP", SYS_IPC_RING_MAP),
     ("SYS_CHAN_CREATE", SYS_CHAN_CREATE),
@@ -315,7 +317,7 @@ fn syscall_table_is_exhaustive() {
     // table, this count check fails and forces a conscious review.
     assert_eq!(
         GOLDEN_SYSCALLS.len(),
-        210,
+        212,
         "golden table out of sync: add new SYS_* consts AND their pinned values"
     );
 }
@@ -338,6 +340,7 @@ fn syscall_range_groups_are_respected() {
         SYS_HANDLE_GRANT,
         SYS_HANDLE_REVOKE,
         SYS_HANDLE_INFO,
+        SYS_HANDLE_WAIT_MANY,
     ] {
         assert!(in_range(n, 0, 99), "handle syscall {} out of 0..99", n);
     }
@@ -389,6 +392,9 @@ fn struct_sizes_are_pinned() {
     assert_eq!(PAYLOAD_CAPACITY, 1008);
 
     assert_eq!(size_of::<TimeSpec>(), 16);
+
+    // WaitSource: kind(4)+events(4)+id(8)+revents(8), no padding.
+    assert_eq!(size_of::<WaitSource>(), 24);
 
     // Legacy stat kept for compat: 120 bytes per doc comment.
     assert_eq!(size_of::<Stat>(), 120);
@@ -451,6 +457,7 @@ fn errno_values_are_unique() {
         errno::ENOMEM,
         errno::EACCES,
         errno::EFAULT,
+        errno::EBUSY,
         errno::EEXIST,
         errno::ENOTDIR,
         errno::EISDIR,
@@ -474,5 +481,5 @@ fn errno_values_are_unique() {
     for &e in ERRNOS {
         assert!(set.insert(e), "duplicated errno value {}", e);
     }
-    assert_eq!(set.len(), 31);
+    assert_eq!(set.len(), 32);
 }

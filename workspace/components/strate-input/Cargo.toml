@@ -9,7 +9,16 @@ description = "Input server for strat9-os. Reads raw scancodes from /dev/input/k
 [[bin]]
 name = "input-server"
 path = "src/main.rs"
+# The binary is a freestanding `no_std`/`no_main` image for
+# x86_64-unknown-none; its panic handler cannot link against the host test
+# harness, so host tests only cover the library.
+test = false
 
 [dependencies]
 strat9-syscall = { path = "../syscall", features = ["userspace"] }
 strat9-keymap = { path = "../keymap" }
+input-protocol = { path = "../input-protocol" }
+
+[lib]
+name = "strate_input"
+path = "src/lib.rs"

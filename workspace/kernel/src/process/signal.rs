@@ -748,16 +748,46 @@ pub fn send_signal(
     Ok(())
 }
 
-/// Check if the current task has any pending signals.
+/// Check if the current task has any pending signal that would actually be
+/// delivered.
 ///
 /// Used by blocking syscalls to determine if they should return EINTR.
+/// Signals with an ignore disposition (SIG_IGN or a default-ignore signal such
+/// as SIGCHLD) are excluded: they are consumed by the delivery path on return
+/// to userspace and must not spuriously interrupt waits.
 pub fn has_pending_signals() -> bool {
     use crate::process::current_task_clone;
 
     if let Some(task) = current_task_clone() {
-        let pending = &task.pending_signals;
-        let blocked = &task.blocked_signals;
-        pending.unblocked(blocked) != 0
+        let pending = task.pending_signals.unblocked(&task.blocked_signals);
+        if pending == 0 {
+            return false;
+        }
+        // SAFETY: signal_actions is per-process and only mutated under the
+        // process lock; reading it here mirrors the delivery path below.
+        let actions = unsafe { &*task.process.signal_actions.get() };
+        for bit in 1..64u32 {
+            if pending & (1u64 << bit) == 0 {
+                continue;
+            }
+            let Some(signal) = Signal::from_u32(bit) else {
+                continue;
+            };
+            let action = actions[bit as usize];
+            if action.is_ignore() {
+                continue;
+            }
+            if action.is_default()
+                && matches!(
+                    signal.default_action(),
+                    DefaultAction::Ign | DefaultAction::Cont
+                )
+            {
+                continue;
+            }
+            return true;
+        }
+        false
     } else {
         false
     }

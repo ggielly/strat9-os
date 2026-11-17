@@ -64,6 +64,7 @@ fn errno_values_match_linux() {
     assert_eq!(errno::ENOMEM, 12);
     assert_eq!(errno::EACCES, 13);
     assert_eq!(errno::EFAULT, 14);
+    assert_eq!(errno::EBUSY, 16);
     assert_eq!(errno::EEXIST, 17);
     assert_eq!(errno::ENOTDIR, 20);
     assert_eq!(errno::EISDIR, 21);
@@ -100,6 +101,7 @@ fn all_errno_values_fit_detection_window() {
         errno::ENOMEM,
         errno::EACCES,
         errno::EFAULT,
+        errno::EBUSY,
         errno::EEXIST,
         errno::ENOTDIR,
         errno::EISDIR,

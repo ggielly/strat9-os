@@ -1,0 +1,21 @@
+[package]
+name = "display-client"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+description = "no_std client library for the strat9-os native display server (display-protocol v1, Annexe A), plus a demo client."
+
+[lib]
+name = "display_client"
+path = "src/lib.rs"
+
+[[bin]]
+name = "display-demo"
+path = "src/bin/demo.rs"
+# Freestanding no_std/no_main image: it cannot link the host test harness.
+test = false
+
+[dependencies]
+display-protocol = { path = "../display-protocol" }
+strat9-syscall = { path = "../syscall", features = ["userspace"] }

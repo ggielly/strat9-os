@@ -45,7 +45,7 @@ use super::{
 use crate::{
     async_io::syscall as async_sys,
     capability::{release_capability, CapId, CapPermissions, ResourceType},
-    memory::{UserSliceRead, UserSliceWrite},
+    memory::{UserSliceRead, UserSliceReadWrite, UserSliceWrite},
     process::current_task_clone,
     silo,
 };
@@ -133,6 +133,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_HANDLE_GRANT => sys_handle_grant(arg1, arg2),
         SYS_HANDLE_REVOKE => sys_handle_revoke(arg1),
         SYS_HANDLE_INFO => sys_handle_info(arg1, arg2),
+        SYS_HANDLE_WAIT_MANY => sys_handle_wait_many(arg1, arg2, arg3),
 
         // Memory management (block 100-199)
         SYS_MMAP => super::mmap::sys_mmap(arg1, arg2, arg3 as u32, arg4 as u32, frame.r8, frame.r9),
@@ -215,6 +216,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         // IPC port syscalls ================================================
         SYS_IPC_CREATE_PORT => ipc_port::sys_ipc_create_port(arg1),
         SYS_IPC_SEND => ipc_port::sys_ipc_send(arg1, arg2),
+        SYS_IPC_TRY_SEND => ipc_port::sys_ipc_try_send(arg1, arg2),
         SYS_IPC_RECV => ipc_port::sys_ipc_recv(arg1, arg2),
         SYS_IPC_TRY_RECV => ipc_port::sys_ipc_try_recv(arg1, arg2),
         SYS_IPC_CONNECT => ipc_port::sys_ipc_connect(arg1, arg2),
@@ -700,21 +702,17 @@ fn poll_handle_events(handle: u64) -> Result<u64, SyscallError> {
     }
 }
 
-/// Performs the sys handle wait operation.
-fn sys_handle_wait(handle: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
-    crate::silo::enforce_cap_for_current_task(handle)?;
-
-    let check_ready = || -> Result<u64, SyscallError> {
-        let events = poll_handle_events(handle)?;
-        if events != 0 {
-            Ok(events)
-        } else {
-            Err(SyscallError::Again)
-        }
-    };
-
+/// Polls `probe` until it returns `Ok`, re-polling every 10 ms while blocked.
+///
+/// `timeout_ns` is 0 for a single non-blocking probe, `u64::MAX` to wait
+/// forever. No lock is held across the block: `probe` re-acquires what it
+/// needs on each attempt.
+fn wait_for_ready<T>(
+    timeout_ns: u64,
+    probe: impl Fn() -> Result<T, SyscallError>,
+) -> Result<T, SyscallError> {
     if timeout_ns == 0 {
-        return check_ready();
+        return probe();
     }
 
     let deadline = if timeout_ns == u64::MAX {
@@ -724,8 +722,8 @@ fn sys_handle_wait(handle: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
     };
 
     loop {
-        if let Ok(events) = check_ready() {
-            return Ok(events);
+        if let Ok(ready) = probe() {
+            return Ok(ready);
         }
 
         if crate::process::has_pending_signals() {
@@ -750,6 +748,86 @@ fn sys_handle_wait(handle: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
             task.wake_deadline_ns.store(0, Ordering::Relaxed);
         }
     }
+}
+
+/// Performs the sys handle wait operation.
+fn sys_handle_wait(handle: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
+    crate::silo::enforce_cap_for_current_task(handle)?;
+
+    wait_for_ready(timeout_ns, || {
+        let events = poll_handle_events(handle)?;
+        if events != 0 {
+            Ok(events)
+        } else {
+            Err(SyscallError::Again)
+        }
+    })
+}
+
+/// `size_of::<WaitSource>()`: kind(u32) + events(u32) + id(u64) + revents(u64).
+const WAIT_SOURCE_SIZE: usize = 24;
+/// Upper bound on entries accepted by one `SYS_HANDLE_WAIT_MANY` call.
+const WAIT_SOURCE_MAX: u64 = 64;
+
+/// Decodes one `WaitSource` entry from its little-endian wire form.
+fn wait_source_from_bytes(bytes: &[u8]) -> strat9_abi::data::WaitSource {
+    strat9_abi::data::WaitSource {
+        kind: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        events: u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+        id: u64::from_le_bytes([
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        ]),
+        revents: 0,
+    }
+}
+
+/// SYS_HANDLE_WAIT_MANY (7): wait for readiness on handles and file
+/// descriptors at once.
+///
+/// Returns the index of the first ready entry after writing its `revents`,
+/// or `-ETIMEDOUT` when the timeout expires.
+fn sys_handle_wait_many(list_ptr: u64, count: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
+    use strat9_abi::data::{WAIT_SOURCE_FD, WAIT_SOURCE_HANDLE};
+
+    if count == 0 || count > WAIT_SOURCE_MAX || list_ptr == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let byte_len = count as usize * WAIT_SOURCE_SIZE;
+    let list = UserSliceReadWrite::new(list_ptr, byte_len)?;
+
+    let mut raw = alloc::vec![0u8; byte_len];
+    list.copy_to(&mut raw);
+    let mut sources = alloc::vec::Vec::with_capacity(count as usize);
+    for entry in raw.chunks_exact(WAIT_SOURCE_SIZE) {
+        sources.push(wait_source_from_bytes(entry));
+    }
+
+    let check_ready = || -> Result<usize, SyscallError> {
+        for (i, source) in sources.iter().enumerate() {
+            let revents = match source.kind {
+                WAIT_SOURCE_HANDLE => poll_handle_events(source.id)?,
+                WAIT_SOURCE_FD => {
+                    let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+                    let fd_table = unsafe { &*task.process.fd_table.get() };
+                    let fd = u32::try_from(source.id).map_err(|_| SyscallError::InvalidArgument)?;
+                    fd_table.get(fd)?.poll(source.events)?
+                }
+                _ => return Err(SyscallError::InvalidArgument),
+            } & (source.events as u64);
+            if revents != 0 {
+                // revents is the last field of the 24-byte entry.
+                let out = UserSliceWrite::new(
+                    list_ptr + (i * WAIT_SOURCE_SIZE + WAIT_SOURCE_SIZE - 8) as u64,
+                    core::mem::size_of::<u64>(),
+                )?;
+                out.copy_from(&revents.to_le_bytes());
+                return Ok(i);
+            }
+        }
+        Err(SyscallError::Again)
+    };
+
+    wait_for_ready(timeout_ns, check_ready).map(|index| index as u64)
 }
 
 /// Performs the sys handle grant operation.

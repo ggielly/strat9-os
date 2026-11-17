@@ -1,0 +1,15 @@
+[package]
+name = "input-client"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+description = "Client library for the strat9-os input server (`inputd`), speaking the A.5 `input-protocol`."
+
+[lib]
+name = "input_client"
+path = "src/lib.rs"
+
+[dependencies]
+input-protocol = { path = "../input-protocol" }
+strat9-syscall = { path = "../syscall", features = ["userspace"] }

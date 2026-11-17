@@ -214,6 +214,11 @@ impl OpenFile {
     pub fn scheme(&self) -> &DynScheme {
         &self.scheme
     }
+
+    /// Report poll readiness for this file (`WAIT_EVENT_*` mask).
+    pub fn poll(&self, events: u32) -> Result<u64, SyscallError> {
+        self.scheme.poll(self.file_id, events)
+    }
 }
 
 impl Drop for OpenFile {

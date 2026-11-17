@@ -72,6 +72,15 @@ fn try_init<D: BusDriver + 'static>(
     name: &str,
     mut driver: D,
 ) -> Option<(String, Box<dyn BusDriver>)> {
+    // Every driver except the software-only generic bus is a SoC/devicetree
+    // bus that needs a platform-provided MMIO base, but `init_all()` has none
+    // (it always passes 0). On x86_64 there is no such hardware: initialising
+    // them touches MMIO at base 0, trips the `MmioRegion` assertion and kills
+    // the whole strate, taking `/bus`, `/srv/strate-bus/default` and every
+    // silo that requires them (e.g. the network stack) down with it.
+    if cfg!(target_arch = "x86_64") && name != "simple-pm-bus" {
+        return None;
+    }
     if !driver.probe() {
         let msg = alloc::format!("[bus] {}: probe failed (no hardware detected)\n", name);
         let _ = call::debug_log(msg.as_bytes());
