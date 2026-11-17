@@ -211,13 +211,15 @@ pub fn set_kernel_stack_for(cpu_index: usize, stack_top: VirtAddr) {
         let tss = &raw mut *TSS[cpu_index].as_mut_ptr();
         let old_stack_top = (*tss).privilege_stack_table[0];
         (*tss).privilege_stack_table[0] = stack_top;
-        crate::e9_println!(
-            "[tss-set] cpu={} old={:#x} new={:#x} caller={}:{}",
-            cpu_index,
-            old_stack_top.as_u64(),
-            stack_top.as_u64(),
-            caller.file(),
-            caller.line()
-        );
+        if crate::debug_cfg::E9_TRACE_TSS {
+            crate::e9_println!(
+                "[tss-set] cpu={} old={:#x} new={:#x} caller={}:{}",
+                cpu_index,
+                old_stack_top.as_u64(),
+                stack_top.as_u64(),
+                caller.file(),
+                caller.line()
+            );
+        }
     }
 }

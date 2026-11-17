@@ -94,15 +94,15 @@ class InitfsPackagingTests(unittest.TestCase):
         self.assertEqual(marker.read_bytes(), b"preserved")
 
     def test_test_modules_are_required_only_when_selected(self):
-        self.assertEqual(len(self.populate()), 14)
+        self.assertEqual(len(self.populate()), 21)
         self.validate(0)
         result = self.validate(1, ok=False)
         self.assertIn("test_pid", result.stderr)
         names = self.populate(include_tests=True)
-        self.assertEqual(len(names), 22)
+        self.assertEqual(len(names), 32)
         self.bash('strat9_validate_module_sources "$1" "$2" 1; strat9_copy_modules "$1" "$3"',
                   self.release, MANIFEST, self.destination)
-        self.assertEqual(len(list(self.destination.iterdir())), 22)
+        self.assertEqual(len(list(self.destination.iterdir())), 32)
         self.validate(2, ok=False)
 
     def test_empty_wrong_class_or_wrong_endian_modules_fail(self):

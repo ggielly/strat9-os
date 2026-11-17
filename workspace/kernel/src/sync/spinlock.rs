@@ -249,6 +249,10 @@ static DEBUG_TRACE_WATCH_ADDRS: [AtomicUsize; DEBUG_TRACE_WATCH_SLOTS] =
 /// Register a lock address for E9 trace. Returns the slot index (0..7),
 /// or `None` if all slots are in use.
 pub fn debug_set_trace_lock_addr(addr: usize) -> Option<usize> {
+    // Disabled by default: with no registered slot, acquire/release emit nothing.
+    if !crate::debug_cfg::E9_TRACE_LOCKS {
+        return None;
+    }
     for (i, slot) in DEBUG_TRACE_WATCH_ADDRS.iter().enumerate() {
         if slot.load(Ordering::Relaxed) == usize::MAX {
             slot.store(addr, Ordering::Relaxed);

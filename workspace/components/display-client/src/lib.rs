@@ -76,6 +76,89 @@ const SEND_RETRIES: usize = 4;
 /// Bound on events consumed while waiting for a specific reply.
 const MATCH_TRIES: usize = 64;
 
+/// A.6: at most this many buffers may be live per session.
+const MAX_SESSION_BUFFERS: usize = 16;
+
+/// One imported buffer mapping owned by this client.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Mapping {
+    buffer: u64,
+    surface: u64,
+    /// User virtual address returned by `mem_region_map`.
+    addr: usize,
+    /// Mapped length in bytes.
+    len: usize,
+    /// Capability handle transferred in `BUFFER_CREATED`.
+    region_handle: u64,
+}
+
+/// Fixed-capacity mapping table; allocation-free and syscall-free so it can be
+/// exercised on the host.
+#[derive(Debug)]
+struct Mappings {
+    entries: [Option<Mapping>; MAX_SESSION_BUFFERS],
+}
+
+impl Mappings {
+    const fn new() -> Self {
+        Self {
+            entries: [None; MAX_SESSION_BUFFERS],
+        }
+    }
+
+    /// Track `mapping`; returns `false` when the table is full.
+    fn insert(&mut self, mapping: Mapping) -> bool {
+        for slot in self.entries.iter_mut() {
+            if slot.is_none() {
+                *slot = Some(mapping);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn remove_buffer(&mut self, buffer: u64) -> Option<Mapping> {
+        let slot = self
+            .entries
+            .iter_mut()
+            .find(|slot| matches!(slot, Some(mapping) if mapping.buffer == buffer))?;
+        slot.take()
+    }
+
+    /// Hand every mapping of `surface` to `release`, leaving other surfaces.
+    fn take_surface(&mut self, surface: u64, mut release: impl FnMut(Mapping)) {
+        for slot in self.entries.iter_mut() {
+            if matches!(slot, Some(mapping) if mapping.surface == surface) {
+                if let Some(mapping) = slot.take() {
+                    release(mapping);
+                }
+            }
+        }
+    }
+
+    /// Hand every mapping to `release`, emptying the table.
+    fn clear(&mut self, mut release: impl FnMut(Mapping)) {
+        for slot in self.entries.iter_mut() {
+            if let Some(mapping) = slot.take() {
+                release(mapping);
+            }
+        }
+    }
+}
+
+/// Unmap then close the region handle of an imported buffer.
+///
+/// SAFETY: the mapping was created by `mem_region_map` for this client and is
+/// not used after this call.
+fn release_mapping(mapping: Mapping) {
+    if mapping.len != 0 {
+        // SAFETY: `addr`/`len` describe a live mapping created by
+        // `mem_region_map` in `alloc_buffer`; it is unmapped exactly once here.
+        let _ = unsafe { call::funmap(mapping.addr, mapping.len) };
+    }
+    close_handle(mapping.region_handle as usize);
+}
+
 /// One server-to-client event, decoded into owned fixed-size data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -180,14 +263,21 @@ impl Buffer {
     }
 
     /// Read-only view of `stride * height` bytes.
+    ///
+    /// The memory is released by [`Client::destroy_buffer`],
+    /// [`Client::destroy_surface`] or [`Client::close`]: this accessor is
+    /// invalid afterwards even if the `Buffer` value is still held.
     pub fn pixels(&self) -> &[u8] {
         // SAFETY: `addr` is the base of a region the kernel mapped for this
         // process with the length validated in `alloc_buffer`; the mapping is
-        // live for at least as long as this `Buffer` value can be used.
+        // live until the owning `Client` destroys the buffer or closes.
         unsafe { slice::from_raw_parts(self.addr as *const u8, self.pixel_len()) }
     }
 
     /// Writable view of `stride * height` bytes.
+    ///
+    /// Same lifetime rule as [`Buffer::pixels`]: invalid after the owning
+    /// `Client` destroys the buffer, its surface, or closes.
     pub fn pixels_mut(&mut self) -> &mut [u8] {
         // SAFETY: same mapping as `pixels`; `&mut self` guarantees exclusive
         // access to this buffer value for the returned lifetime.
@@ -204,6 +294,7 @@ pub struct Client {
     path: [u8; CLIENT_PATH_MAX],
     path_len: u8,
     next_request: u64,
+    mappings: Mappings,
 }
 
 impl Client {
@@ -284,6 +375,7 @@ impl Client {
             path,
             path_len,
             next_request: 2,
+            mappings: Mappings::new(),
         };
         let deadline = now_ns().saturating_add(timeout_ns);
         for _ in 0..MATCH_TRIES {
@@ -412,14 +504,37 @@ impl Client {
                     if call::mem_region_map(region_handle as usize, 0, &mut addr).is_err()
                         || addr == 0
                     {
+                        // No mapping exists, but the imported handle does.
+                        close_handle(region_handle as usize);
                         self.destroy_buffer(buffer);
                         return None;
                     }
                     // A.4: the buffer stays `ImportPending` until the client
                     // reports the mapping result. Without this the first commit
                     // would be rejected as BAD_STATE.
-                    if !self.import_ok(buffer) {
+                    let mapping = Mapping {
+                        buffer,
+                        surface,
+                        addr,
+                        len: region_len as usize,
+                        region_handle,
+                    };
+                    if !self.mappings.insert(mapping) {
+                        // A.6 cap reached: give the mapping and the server-side
+                        // buffer back instead of leaking them.
+                        release_mapping(mapping);
                         self.destroy_buffer(buffer);
+                        Self::debug(b"display-client: mapping table full");
+                        return None;
+                    }
+                    if !self.import_ok(buffer) {
+                        // The core removes the buffer itself when the import
+                        // fails, so `destroy_buffer` may answer ERROR; release
+                        // the client mapping unconditionally to avoid a leak.
+                        self.destroy_buffer(buffer);
+                        if let Some(mapping) = self.mappings.remove_buffer(buffer) {
+                            release_mapping(mapping);
+                        }
                         return None;
                     }
                     return Some(Buffer {
@@ -475,16 +590,21 @@ impl Client {
             commit.rect_count = damage.len() as u16;
         }
 
-        let request = self.request(Opcode::COMMIT, surface, &Body::Commit(commit))?;
+        let Some(request) = self.request(Opcode::COMMIT, surface, &Body::Commit(commit)) else {
+            Self::debug(b"display-client: commit send failed");
+            return None;
+        };
         let deadline = now_ns().saturating_add(REQUEST_TIMEOUT_NS);
         let mut result = CommitResult::default();
         let mut failed = false;
         for _ in 0..MATCH_TRIES {
             let now = now_ns();
             if now >= deadline {
+                Self::debug(b"display-client: commit timeout");
                 return None;
             }
             let Some((header, event)) = self.frame(deadline - now) else {
+                Self::debug(b"display-client: commit recv failed");
                 return None;
             };
             match event {
@@ -506,11 +626,15 @@ impl Client {
                     result.acknowledged = status == 0;
                     return if failed { None } else { Some(result) };
                 }
-                Event::Error { .. } if header.request_id == request => return None,
+                Event::Error { .. } if header.request_id == request => {
+                    Self::debug(b"display-client: commit rejected");
+                    return None;
+                }
                 Event::Error { .. } => failed = true,
                 _ => {}
             }
         }
+        Self::debug(b"display-client: commit no ack");
         None
     }
 
@@ -542,6 +666,9 @@ impl Client {
     }
 
     /// `DESTROY_BUFFER`; returns `true` on `BUFFER_DESTROYED`.
+    ///
+    /// On confirmation the imported mapping (if tracked) is unmapped and its
+    /// region handle closed, so any [`Buffer`] value for it becomes invalid.
     pub fn destroy_buffer(&mut self, buffer: u64) -> bool {
         let Some(request) = self.request(Opcode::DESTROY_BUFFER, buffer, &Body::DestroyBuffer)
         else {
@@ -557,6 +684,9 @@ impl Client {
                 return false;
             };
             if header.opcode == Opcode::BUFFER_DESTROYED.value() && header.object_id == buffer {
+                if let Some(mapping) = self.mappings.remove_buffer(buffer) {
+                    release_mapping(mapping);
+                }
                 return true;
             }
             if header.opcode == Opcode::ERROR.value() && header.request_id == request {
@@ -567,6 +697,9 @@ impl Client {
     }
 
     /// `DESTROY_SURFACE`; returns `true` on `SURFACE_DESTROYED`.
+    ///
+    /// On confirmation every mapping imported for `surface` is unmapped and its
+    /// region handle closed, invalidating the associated [`Buffer`] values.
     pub fn destroy_surface(&mut self, surface: u64) -> bool {
         let Some(request) = self.request(Opcode::DESTROY_SURFACE, surface, &Body::DestroySurface)
         else {
@@ -582,6 +715,7 @@ impl Client {
                 return false;
             };
             if header.opcode == Opcode::SURFACE_DESTROYED.value() && header.object_id == surface {
+                self.mappings.take_surface(surface, release_mapping);
                 return true;
             }
             if header.opcode == Opcode::ERROR.value() && header.request_id == request {
@@ -591,9 +725,11 @@ impl Client {
         false
     }
 
-    /// Send `GOODBYE`, unbind the event path and close both ports.
+    /// Send `GOODBYE`, release every remaining imported mapping, unbind the
+    /// event path and close both ports.
     pub fn close(mut self) {
         let _ = self.request(Opcode::GOODBYE, 0, &Body::Goodbye);
+        self.mappings.clear(release_mapping);
         self.cleanup();
     }
 
@@ -1170,5 +1306,84 @@ mod tests {
         };
         assert!(done.present_submitted());
         assert!(!FrameDone { flags: 0, ..done }.present_submitted());
+    }
+
+    fn mapping(buffer: u64, surface: u64, addr: usize, len: usize) -> Mapping {
+        Mapping {
+            buffer,
+            surface,
+            addr,
+            len,
+            region_handle: buffer + 0x100,
+        }
+    }
+
+    #[test]
+    fn mappings_insert_and_remove_by_buffer() {
+        let mut mappings = Mappings::new();
+        assert!(mappings.insert(mapping(1, 10, 0x1000, 4096)));
+        assert!(mappings.insert(mapping(2, 10, 0x2000, 4096)));
+
+        assert_eq!(mappings.remove_buffer(1), Some(mapping(1, 10, 0x1000, 4096)));
+        assert_eq!(mappings.remove_buffer(1), None);
+        assert_eq!(mappings.remove_buffer(2).map(|m| m.buffer), Some(2));
+
+        let mut remaining = 0;
+        mappings.clear(|_| remaining += 1);
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn mappings_take_surface_is_selective() {
+        let mut mappings = Mappings::new();
+        assert!(mappings.insert(mapping(1, 10, 0x1000, 4096)));
+        assert!(mappings.insert(mapping(2, 10, 0x2000, 4096)));
+        assert!(mappings.insert(mapping(3, 20, 0x3000, 4096)));
+
+        let mut taken = Vec::new();
+        mappings.take_surface(10, |m| taken.push(m));
+        assert_eq!(taken, [mapping(1, 10, 0x1000, 4096), mapping(2, 10, 0x2000, 4096)]);
+        assert_eq!(mappings.remove_buffer(1), None);
+        assert_eq!(mappings.remove_buffer(3).map(|m| m.buffer), Some(3));
+
+        let mut taken = Vec::new();
+        mappings.take_surface(10, |m| taken.push(m));
+        assert!(taken.is_empty());
+    }
+
+    #[test]
+    fn mappings_full_table_rejects() {
+        let mut mappings = Mappings::new();
+        for index in 0..MAX_SESSION_BUFFERS {
+            assert!(mappings.insert(mapping(index as u64, 1, 0x1000, 4096)));
+        }
+        assert!(!mappings.insert(mapping(99, 1, 0x9000, 4096)));
+
+        let mut count = 0;
+        mappings.clear(|_| count += 1);
+        assert_eq!(count, MAX_SESSION_BUFFERS);
+    }
+
+    #[test]
+    fn mappings_track_zero_length_entries() {
+        let mut mappings = Mappings::new();
+        assert!(mappings.insert(mapping(7, 3, 0x4000, 0)));
+        assert_eq!(mappings.remove_buffer(7), Some(mapping(7, 3, 0x4000, 0)));
+        assert_eq!(mappings.remove_buffer(7), None);
+    }
+
+    #[test]
+    fn mappings_clear_returns_every_entry() {
+        let mut mappings = Mappings::new();
+        for index in 0..3u64 {
+            assert!(mappings.insert(mapping(index, index + 1, 0x1000, 4096)));
+        }
+        let mut buffers = Vec::new();
+        mappings.clear(|m| buffers.push(m.buffer));
+        assert_eq!(buffers, [0, 1, 2]);
+
+        let mut count = 0;
+        mappings.clear(|_| count += 1);
+        assert_eq!(count, 0);
     }
 }

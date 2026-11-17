@@ -7,7 +7,7 @@ authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
 description = "Display server for strat9-os. Manages windows, composites to framebuffer, routes input."
 
 [[bin]]
-name = "display-server"
+name = "graphical-server"
 path = "src/main.rs"
 
 [dependencies]

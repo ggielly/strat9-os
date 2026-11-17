@@ -154,22 +154,30 @@ pub extern "C" fn _start() -> ! {
 
         if !buf.is_empty() {
             had_events = true;
+            // A focus slot is cleared before `focused` is updated in the
+            // subscribe paths; keep the loop panic-free anyway (a panic here
+            // would kill the only input service).
+            if focused.is_some_and(|index| subscribers[index].is_none()) {
+                focused = None;
+                refocus(&mut subscribers, &mut focused, &mut seq);
+            }
             if let Some(index) = focused {
-                let subscriber = subscribers[index].unwrap();
-                match send_batch(subscriber.port, &buf, subscriber.focus_epoch) {
-                    Ok(()) => {}
-                    Err(err) if err.is_retryable() => {
-                        // Queue full: drop this batch and remember the loss.
-                        if !overflow {
-                            overflow = true;
-                            log(b"[input-server] subscriber queue full, dropping\n");
+                if let Some(subscriber) = subscribers[index] {
+                    match send_batch(subscriber.port, &buf, subscriber.focus_epoch) {
+                        Ok(()) => {}
+                        Err(err) if err.is_retryable() => {
+                            // Queue full: drop this batch and remember the loss.
+                            if !overflow {
+                                overflow = true;
+                                log(b"[input-server] subscriber queue full, dropping\n");
+                            }
                         }
-                    }
-                    Err(_) => {
-                        // BadHandle/NotFound/...: the client is gone.
-                        subscribers[index] = None;
-                        focused = None;
-                        refocus(&mut subscribers, &mut focused, &mut seq);
+                        Err(_) => {
+                            // BadHandle/NotFound/...: the client is gone.
+                            subscribers[index] = None;
+                            focused = None;
+                            refocus(&mut subscribers, &mut focused, &mut seq);
+                        }
                     }
                 }
             }

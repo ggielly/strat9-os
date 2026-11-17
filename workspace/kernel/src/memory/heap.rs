@@ -353,16 +353,36 @@ impl SlabState {
                 } else {
                     0
                 };
+                let task = crate::process::current_task_clone();
+                let task_name = task.as_ref().map(|t| t.name.as_str()).unwrap_or("<none>");
                 crate::serial_println!(
-                    "\x1b[1;31m[HEAP] USE-AFTER-FREE: slab[{}] block={:#x} off={} bytes=[{:02x} {:02x} {:02x} {:02x}]\x1b[0m",
+                    "\x1b[1;31m[HEAP] USE-AFTER-FREE: slab[{}] block={:#x} off={} bytes=[{:02x} {:02x} {:02x} {:02x}] task={}\x1b[0m",
                     slab_size,
                     block as u64,
                     off,
                     b0,
                     b1,
                     b2,
-                    b3
+                    b3,
+                    task_name
                 );
+                // Best-effort frame-pointer walk of the allocating stack.
+                let mut rbp: u64;
+                unsafe {
+                    core::arch::asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack, preserves_flags));
+                }
+                for depth in 0..8 {
+                    if rbp == 0 {
+                        break;
+                    }
+                    let ret = unsafe { core::ptr::read_volatile((rbp + 8) as *const u64) };
+                    let next = unsafe { core::ptr::read_volatile(rbp as *const u64) };
+                    crate::serial_println!("[HEAP] UAF-BT[{}] ret={:#x}", depth, ret);
+                    if next <= rbp {
+                        break;
+                    }
+                    rbp = next;
+                }
             }
             if slab_size >= 12 {
                 let canary = *(block.add(slab_size - 4) as *const u32);

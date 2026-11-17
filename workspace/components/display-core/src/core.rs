@@ -737,16 +737,18 @@ impl<B: Backend> DisplayCore<B> {
             }
         }
 
-        let mut rects = [Rect::default(); MAX_RECTS];
         let count = commit.rect_count as usize;
-        rects[..count].copy_from_slice(&commit.rects[..count]);
 
         let surface = session.surfaces[surface_slot]
             .as_mut()
             .ok_or(CoreError::NoSurface)?;
         let damage = if surface.full_damage_next || commit.is_full_damage() {
+            // Full commits are the common first frame: do not build the
+            // 32-rectangle array (512 bytes) on the stack for them.
             Damage::Full
         } else {
+            let mut rects = [Rect::default(); MAX_RECTS];
+            rects[..count].copy_from_slice(&commit.rects[..count]);
             Damage::Rects {
                 count: count as u8,
                 rects,

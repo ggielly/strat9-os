@@ -605,6 +605,7 @@ fn read_user_mapped_bytes(
     let mut copied = 0usize;
     let mut cached_page_vaddr: u64 = u64::MAX;
     let mut cached_hhdm: usize = 0;
+    let mut cached_paddr: u64 = 0;
     // SMAP: temporarily disable supervisor-mode access prevention while
     // reading from user-space pages through the HHDM.
     crate::arch::stac();
@@ -622,14 +623,23 @@ fn read_user_mapped_bytes(
                 crate::arch::clac();
                 return Err("Translated physical address is null");
             }
-            let hhdm_ptr = crate::memory::phys_to_virt(paddr) as *const u8;
+            // `translate()` returns the full physical address, page offset
+            // included: keep only the page base here, `page_off` is added
+            // again below for the exact byte.
+            let hhdm_ptr = crate::memory::phys_to_virt(paddr & !0xFFF) as *const u8;
             if hhdm_ptr.is_null() {
                 crate::arch::clac();
                 return Err("HHDM-mapped source is null");
             }
             cached_page_vaddr = page_vaddr;
+            cached_paddr = paddr;
             cached_hhdm = hhdm_ptr as usize;
         }
+        assert_eq!(
+            cached_hhdm as u64 + page_off as u64,
+            crate::memory::phys_to_virt(cached_paddr),
+            "user-mapped read must target the translated byte"
+        );
 
         let src = cached_hhdm as *const u8;
         // SAFETY: src points to mapped physical memory via HHDM.
@@ -666,6 +676,7 @@ fn write_user_mapped_bytes(
     let mut written = 0usize;
     let mut cached_page_vaddr: u64 = u64::MAX;
     let mut cached_hhdm: usize = 0;
+    let mut cached_paddr: u64 = 0;
     // SMAP: temporarily disable supervisor-mode access prevention while
     // writing to user-space pages through the HHDM.
     crate::arch::stac();
@@ -683,15 +694,23 @@ fn write_user_mapped_bytes(
                 crate::arch::clac();
                 return Err("Translated physical address is null");
             }
-            crate::memory::heap::trace_phys_log(b'W', paddr & !0xFFF, vaddr);
-            let hhdm_ptr = crate::memory::phys_to_virt(paddr) as *mut u8;
+            // `translate()` returns the full physical address, page offset
+            // included: keep only the page base here, `page_off` is added
+            // again below for the exact byte.
+            let hhdm_ptr = crate::memory::phys_to_virt(paddr & !0xFFF) as *mut u8;
             if hhdm_ptr.is_null() {
                 crate::arch::clac();
                 return Err("HHDM-mapped destination is null");
             }
             cached_page_vaddr = page_vaddr;
+            cached_paddr = paddr;
             cached_hhdm = hhdm_ptr as usize;
         }
+        assert_eq!(
+            cached_hhdm as u64 + page_off as u64,
+            crate::memory::phys_to_virt(cached_paddr),
+            "user-mapped write must target the translated byte"
+        );
 
         let dst = cached_hhdm as *mut u8;
         // SAFETY: destination points to mapped user frame through HHDM.
@@ -2117,12 +2136,6 @@ fn map_user_stack(
         VmaType::Stack,
         VmaPageSize::Small,
     )?;
-    for i in 0..stack_pages {
-        let vaddr = stack_base + (i as u64) * 4096;
-        if let Some(phys) = user_as.translate(VirtAddr::new(vaddr)) {
-            crate::memory::heap::trace_phys_log(b'S', phys.as_u64(), vaddr);
-        }
-    }
     // Guard page: a single unmapped page below the stack.  Any stack
     // underflow (push past the bottom) hits this and faults.  The page
     // is intentionally left unmapped : no VMA, no PTE.

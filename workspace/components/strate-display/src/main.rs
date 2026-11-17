@@ -31,12 +31,12 @@
 //! - `allocate` maps an anonymous page-aligned region, exports it with
 //!   `mem_region_export` and grants it to the client's `HELLO` pid.
 //! - `present` copies only the commit's damage rectangles from the client
-//!   region into a static private backbuffer (bounded reads, no long-lived
+//!   region into a private anonymous backbuffer (bounded reads, no long-lived
 //!   `&[u8]` over client memory), then writes the same rows to the mapped
 //!   framebuffer (write-only) and sends one `DMG2` record for display 0.
 //!
 //! Assumptions of this first slice: XRGB8888 native screen, one surface at
-//! `(0, 0)`, screen `stride * height <= 4 MiB` (the static backbuffer).
+//! `(0, 0)`; the backbuffer is one screen-sized anonymous mapping.
 //!
 //! ## Resize
 //!
@@ -75,8 +75,9 @@ const PAGE_SIZE: usize = 4096;
 const RECV_BUDGET: usize = 16;
 /// Idle sleep, in nanoseconds.
 const IDLE_NS: u64 = 2_000_000;
-/// Log the counters every this many idle/served iterations.
-const LOG_EVERY: u64 = 512;
+/// Log the counters every this many idle/served iterations (2 ms idle sleep:
+/// about 60 s). A shorter period floods the serial line for no new evidence.
+const LOG_EVERY: u64 = 30_000;
 /// Retries of a transiently full client port.
 const SEND_RETRIES: usize = 2;
 
@@ -423,7 +424,8 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
 
             if slot.is_none() {
                 if opcode != Opcode::HELLO.value() {
-                    // A.1: only HELLO may open a session.
+                    // A.1: only HELLO may open a session. Ignore silently: a
+                    // log line here would let one peer flood the serial line.
                     continue;
                 }
                 let Some(client_port) = connect_event_port(&msg.payload[HEADER_LEN..len]) else {
@@ -433,7 +435,14 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
                 log_text(b"display-server: HELLO accepted");
                 slot = peers.iter().position(|entry| entry.is_none());
                 let Some(slot) = slot else {
-                    let _ = call::handle_close(client_port);
+                    // No adapter slot: let the core answer `ERROR QUOTA` on
+                    // the event port instead of dropping the HELLO silently.
+                    let mut refused = PeerTransport {
+                        port: client_port,
+                        dead: false,
+                    };
+                    let _ = server.handle(peer, &msg.payload[..len], &mut refused);
+                    refused.close();
                     continue;
                 };
                 peers[slot] = Some((
@@ -453,15 +462,27 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
                 let _ = server.disconnect(peer);
             }
             if gone {
+                let stats = server.core().stats();
+                log(&format_args!(
+                    "display-server: drop peer dead={} session={} sessions={} surfaces={} buffers={} used_bytes={}",
+                    dead,
+                    server.session_of(peer).is_some(),
+                    stats.sessions,
+                    stats.surfaces,
+                    stats.buffers,
+                    stats.used_bytes
+                ));
                 if let Some((_, mut transport)) = peers[slot].take() {
                     transport.close();
                 }
             }
-            // The client mapping dies with its process; freed here so a
-            // client crash never grows the region count.
-            while let Some(region) = server.take_retired() {
-                server.free_retired(region);
-            }
+        }
+
+        // The client mapping dies with its process; freed once per iteration
+        // (including after a dead-peer disconnect, which retires regions) so
+        // an idle server never keeps them alive.
+        while let Some(region) = server.take_retired() {
+            server.free_retired(region);
         }
 
         // Exactly one bump per iteration. With two `wrapping_add(1)` calls the

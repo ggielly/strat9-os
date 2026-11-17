@@ -50,6 +50,21 @@ pub fn set_quiet(enabled: bool) {
 }
 
 // ---------------------------------------------------------------------------
+// Hot-path QEMU debugcon (port 0xe9) tracing
+// ---------------------------------------------------------------------------
+
+/// Trace every `TSS.rsp0` update (`[tss-set] ...`), i.e. once per context
+/// switch.  Each byte is a port-I/O VM exit, so leaving this on makes
+/// single-CPU guests (and everything running in them, e.g. telnetd) crawl.
+pub const E9_TRACE_TSS: bool = false;
+
+/// Emit one byte on port 0xe9 for every acquire/release of the spinlocks
+/// registered with `debug_set_trace_lock_addr` (buddy, slab...).  These locks
+/// are taken thousands of times per second.  Only useful when chasing a lock
+/// race with the QEMU debugcon open.
+pub const E9_TRACE_LOCKS: bool = false;
+
+// ---------------------------------------------------------------------------
 // VGA live debug output
 // ---------------------------------------------------------------------------
 
