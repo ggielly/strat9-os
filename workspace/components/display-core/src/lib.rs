@@ -30,10 +30,12 @@
 //! decoded [`Commit`](display_protocol::Commit) body and the damage
 //! rectangles.
 //!
-//! No allocation, no `unsafe`, fixed capacities, deterministic results.
+//! No allocation, fixed capacities, deterministic results. The only `unsafe`
+//! is the audited in-place initializer ([`DisplayCore::init_at`]) that avoids a
+//! whole-state temporary on a small user stack.
 
 #![no_std]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 #[cfg(test)]
 extern crate std;

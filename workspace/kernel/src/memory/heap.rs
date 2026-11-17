@@ -150,11 +150,17 @@ const REDZONE_TAIL: usize = 8;
 // Blocks start at offset SLAB_HEADER_SIZE within the page.
 // ---------------------------------------------------------------------------
 
+/// Magic stamped into every live slab page header.  Zeroed when the page is
+/// reclaimed to the buddy allocator, so a deallocation aimed at a page that is
+/// no longer owned by this slab class is rejected instead of corrupting an
+/// unrelated page.
+const SLAB_PAGE_MAGIC: u32 = 0x5A9B_C0DE;
+
 /// Header at the base of each 4 KiB page dedicated to a slab class.
 ///
 /// Page layout:
 /// ```text
-/// [0 .. SLAB_HEADER_SIZE)   SlabPageHeader  (24 bytes)
+/// [0 .. SLAB_HEADER_SIZE)   SlabPageHeader  (32 bytes)
 /// [SLAB_HEADER_SIZE .. 4096) slab blocks, each SLAB_SIZES[ci] bytes
 /// ```
 ///
@@ -164,14 +170,18 @@ const REDZONE_TAIL: usize = 8;
 /// (`free_count == total_blocks`).
 #[repr(C)]
 struct SlabPageHeader {
-    /// Next page in the partial list for this class (null = end of list).
-    next_partial: *mut SlabPageHeader,
-    /// Head of the intra-page free-block chain (null = page is full).
-    free_head: *mut u8,
+    /// [`SLAB_PAGE_MAGIC`] while the page belongs to a slab class.
+    magic: u32,
     /// Free blocks currently in this page.
     free_count: u32,
     /// Total blocks this page can hold (constant per class after refill).
     total_blocks: u32,
+    /// Padding keeping the pointer fields 8-byte aligned.
+    _reserved: u32,
+    /// Next page in the partial list for this class (null = end of list).
+    next_partial: *mut SlabPageHeader,
+    /// Head of the intra-page free-block chain (null = page is full).
+    free_head: *mut u8,
 }
 
 // SAFETY: only accessed under SLAB_ALLOC spinlock.
@@ -181,9 +191,291 @@ unsafe impl Sync for SlabPageHeader {}
 /// Byte offset at which slab blocks begin within each slab page.
 const SLAB_HEADER_SIZE: usize = core::mem::size_of::<SlabPageHeader>();
 
+// ---------------------------------------------------------------------------
+// Slab diagnostics (poison build only)
+// ---------------------------------------------------------------------------
+
+/// Depth of the frame-pointer walk recorded for slab events.
+const TRACE_FRAMES: usize = 4;
+/// Number of recent frees remembered for use-after-free forensics.
+const FREE_LOG_LEN: usize = 1024;
+
+/// One recently freed slab block, with the return-address chain of the free.
+#[derive(Clone, Copy)]
+struct FreeTrace {
+    ptr: u64,
+    ci: u8,
+    frames: [u64; TRACE_FRAMES],
+}
+
+impl FreeTrace {
+    const EMPTY: Self = Self {
+        ptr: 0,
+        ci: 0,
+        frames: [0; TRACE_FRAMES],
+    };
+}
+
+struct FreeLog {
+    next: usize,
+    entries: [FreeTrace; FREE_LOG_LEN],
+}
+
+static FREE_LOG: SpinLock<FreeLog> = SpinLock::new(FreeLog {
+    next: 0,
+    entries: [FreeTrace::EMPTY; FREE_LOG_LEN],
+});
+
+/// Walks the frame-pointer chain and returns the first `TRACE_FRAMES` return
+/// addresses. Best-effort diagnostic only: a corrupt stack yields zeros.
+#[inline(never)]
+fn capture_frames() -> [u64; TRACE_FRAMES] {
+    let mut rbp: u64;
+    // SAFETY: reading RBP only; the walk below validates pointer monotonicity.
+    unsafe {
+        core::arch::asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack, preserves_flags));
+    }
+    let mut out = [0u64; TRACE_FRAMES];
+    let mut depth = 0;
+    while depth < TRACE_FRAMES && rbp != 0 {
+        // SAFETY: rbp+8 holds the saved return address of a frame-pointer frame.
+        let ret = unsafe { core::ptr::read_volatile((rbp + 8) as *const u64) };
+        if ret == 0 {
+            break;
+        }
+        out[depth] = ret;
+        // SAFETY: rbp holds the caller frame pointer.
+        let next = unsafe { core::ptr::read_volatile(rbp as *const u64) };
+        if next <= rbp {
+            break;
+        }
+        rbp = next;
+        depth += 1;
+    }
+    out
+}
+
+fn print_frames(frames: &[u64; TRACE_FRAMES]) {
+    for (depth, ret) in frames.iter().enumerate() {
+        if *ret == 0 {
+            break;
+        }
+        crate::serial_println!("[HEAP]   bt[{}] ret={:#x}", depth, ret);
+    }
+}
+
+/// Prints a best-effort backtrace for heap/buddy diagnostics.
+pub(crate) fn dump_backtrace() {
+    print_frames(&capture_frames());
+}
+
+// TEMPORARY diagnostic: physical page under investigation (heap UAF). Reused by
+// the buddy/slab/ELF-stack traces to reconstruct one page's lifecycle.
+pub(crate) const TRACE_PHYS: u64 = 0x3761_9000;
+
+/// Number of lifecycle events kept for [`TRACE_PHYS`].
+pub(crate) const PHYS_TRACE_LEN: usize = 64;
+
+#[derive(Clone, Copy)]
+struct PhysTraceEvent {
+    tag: u8,
+    phys: u64,
+    extra: u64,
+    /// Return address of the first non-heap frame (best effort).
+    caller: u64,
+}
+
+impl PhysTraceEvent {
+    const EMPTY: Self = Self {
+        tag: 0,
+        phys: 0,
+        extra: 0,
+        caller: 0,
+    };
+}
+
+struct PhysTraceBuffer {
+    next: usize,
+    events: [PhysTraceEvent; PHYS_TRACE_LEN],
+}
+
+static PHYS_TRACE: SpinLock<PhysTraceBuffer> = SpinLock::new(PhysTraceBuffer {
+    next: 0,
+    events: [PhysTraceEvent::EMPTY; PHYS_TRACE_LEN],
+});
+
+/// Records a lifecycle event for [`TRACE_PHYS`]. No effect for other pages.
+///
+/// Uses an in-memory ring instead of serial output so the history survives
+/// interleaved multi-CPU logging.
+pub(crate) fn trace_phys_log(tag: u8, phys: u64, extra: u64) {
+    if phys != TRACE_PHYS {
+        return;
+    }
+    let frames = capture_frames();
+    let mut buffer = PHYS_TRACE.lock();
+    let index = buffer.next % PHYS_TRACE_LEN;
+    buffer.next = buffer.next.wrapping_add(1);
+    buffer.events[index] = PhysTraceEvent {
+        tag,
+        phys,
+        extra,
+        caller: frames[1],
+    };
+}
+
+fn phys_trace_tag_name(tag: u8) -> &'static str {
+    match tag {
+        b'F' => "buddy.free_cached",
+        b'I' => "buddy.free_internal",
+        b'P' => "buddy.alloc_pop",
+        b'G' => "buddy.alloc_global",
+        b'A' => "frame.alloc",
+        b'R' => "slab.refill",
+        b'C' => "slab.reclaim",
+        b'S' => "stack.page",
+        b'W' => "elf.write_to_slab",
+        _ => "?",
+    }
+}
+
+/// Dumps the [`TRACE_PHYS`] lifecycle history (ordered) to the serial console.
+pub(crate) fn dump_phys_trace() {
+    let Some(buffer) = PHYS_TRACE.try_lock() else {
+        return;
+    };
+    crate::serial_println!(
+        "[TRACE-PHYS] history for {:#x} ({} events)",
+        TRACE_PHYS,
+        buffer.next.min(PHYS_TRACE_LEN)
+    );
+    let start = buffer.next.saturating_sub(PHYS_TRACE_LEN);
+    for seq in start..buffer.next {
+        let event = buffer.events[seq % PHYS_TRACE_LEN];
+        if event.phys != TRACE_PHYS {
+            continue;
+        }
+        crate::serial_println!(
+            "[TRACE-PHYS] #{} {} extra={:#x} caller={:#x}",
+            seq,
+            phys_trace_tag_name(event.tag),
+            event.extra,
+            event.caller
+        );
+    }
+}
+
+/// Returns `true` when `phys` is the base of a slab page that is still live.
+///
+/// The buddy allocator must never recycle such a page: the slab keeps using its
+/// blocks after the page is handed to another owner.
+pub(crate) fn slab_page_is_live(phys: u64, order: u8) -> bool {
+    if !HEAP_POISON_ENABLED || order != 0 {
+        return false;
+    }
+    let virt = super::phys_to_virt(phys) as *const u32;
+    // SAFETY: `phys` came from the allocator and is HHDM-mapped for a full page.
+    unsafe { core::ptr::read_volatile(virt) == SLAB_PAGE_MAGIC }
+}
+
+/// Records a block returning to a class free list (diagnostic ring).
+fn record_slab_free(ptr: *mut u8, ci: usize) {
+    let frames = capture_frames();
+    let mut log = FREE_LOG.lock();
+    let index = log.next % FREE_LOG_LEN;
+    log.next = log.next.wrapping_add(1);
+    log.entries[index] = FreeTrace {
+        ptr: ptr as u64,
+        ci: ci as u8,
+        frames,
+    };
+}
+
+/// Prints the most recent frees of `ptr` when it is handed out dirty.
+fn dump_previous_frees(ptr: *mut u8) {
+    let log = FREE_LOG.lock();
+    let mut shown = 0usize;
+    for age in 0..FREE_LOG_LEN {
+        let index = (log.next + FREE_LOG_LEN - 1 - age) % FREE_LOG_LEN;
+        let entry = log.entries[index];
+        if entry.ptr != ptr as u64 {
+            continue;
+        }
+        crate::serial_println!(
+            "[HEAP] UAF-PREV-FREE ci={} age={} (frames = free site)",
+            SLAB_SIZES[entry.ci as usize],
+            age
+        );
+        print_frames(&entry.frames);
+        shown += 1;
+        if shown == 3 {
+            break;
+        }
+    }
+    if shown == 0 {
+        crate::serial_println!("[HEAP] UAF-PREV-FREE none recorded");
+    }
+}
+
+/// Byte offset of the first block inside a slab page for class `ci`.
+#[inline]
+fn slab_blocks_offset(ci: usize) -> usize {
+    let align = slab_class_alignment(ci);
+    (SLAB_HEADER_SIZE + align - 1) & !(align - 1)
+}
+
+/// Reports a deallocation that does not match the owning slab page.///
+/// Returns `true` when the page is a live slab page of this class and the free
+/// can proceed; `false` means the block must be leaked rather than corrupting
+/// an unrelated page.
+fn slab_dealloc_is_sane(
+    ci: usize,
+    ptr: *mut u8,
+    dup: bool,
+    geometric: bool,
+) -> bool {
+    let slab_size = SLAB_SIZES[ci];
+    let page_base = (ptr as usize) & !0xFFF;
+    let header = page_base as *mut SlabPageHeader;
+    // SAFETY: page_base is the base of the page that contained the block.
+    let (magic, free_count, total_blocks) =
+        unsafe { ((*header).magic, (*header).free_count, (*header).total_blocks) };
+    let expected_blocks = slab_blocks_per_page(ci);
+    let owned = magic == SLAB_PAGE_MAGIC && total_blocks as usize == expected_blocks;
+    if !owned {
+        crate::serial_println!(
+            "\x1b[1;31m[HEAP] FOREIGN FREE: slab[{}] block={:#x} page={:#x} magic={:#x} total={} expected={}\x1b[0m",
+            slab_size,
+            ptr as u64,
+            page_base as u64,
+            magic,
+            total_blocks,
+            expected_blocks
+        );
+    } else if dup || !geometric || free_count >= total_blocks {
+        crate::serial_println!(
+            "\x1b[1;31m[HEAP] SLAB FREE ANOMALY: slab[{}] block={:#x} page={:#x} dup={} geometric={} free_count={} total={}\x1b[0m",
+            slab_size,
+            ptr as u64,
+            page_base as u64,
+            dup,
+            geometric,
+            free_count,
+            total_blocks
+        );
+    } else {
+        return true;
+    }
+    let task = crate::process::current_task_clone();
+    let task_name = task.as_ref().map(|t| t.name.as_str()).unwrap_or("<none>");
+    crate::serial_println!("[HEAP] free site task={}", task_name);
+    print_frames(&capture_frames());
+    owned && !dup && geometric && free_count < total_blocks
+}
+
 // Compile-time invariants.
 const _: () = assert!(
-    SLAB_HEADER_SIZE == 24,
+    SLAB_HEADER_SIZE == 32,
     "SlabPageHeader size changed : update docs"
 );
 const _: () = assert!(
@@ -257,15 +549,29 @@ impl SlabState {
             Err(_) => return, // OOM : alloc_block will see null partial and return null
         };
         SLAB_PAGES_ALLOCATED.fetch_add(1, AtomicOrdering::Relaxed);
+        trace_phys_log(b'R', frame.start_address.as_u64(), ci as u64);
 
         let page_virt = super::phys_to_virt(frame.start_address.as_u64()) as *mut u8;
 
         // Initialise page header at byte 0.
         let header = page_virt as *mut SlabPageHeader;
+        if HEAP_POISON_ENABLED {
+            if let Some(other) = self.page_owner_class(header) {
+                crate::serial_println!(
+                    "\x1b[1;31m[HEAP] SLAB REFILL LIVE PAGE: page={:#x} new_ci={} old_ci={}\x1b[0m",
+                    frame.start_address.as_u64(),
+                    slab_size,
+                    SLAB_SIZES[other]
+                );
+                print_frames(&capture_frames());
+            }
+        }
+        (*header).magic = SLAB_PAGE_MAGIC;
         (*header).next_partial = ptr::null_mut();
         (*header).free_head = ptr::null_mut();
         (*header).free_count = 0;
         (*header).total_blocks = num_blocks as u32;
+        (*header)._reserved = 0;
 
         // Carve blocks starting at an alignment-respecting offset, highest index first so
         // the lowest-address block ends up at the head (cosmetic only).
@@ -353,16 +659,36 @@ impl SlabState {
                 } else {
                     0
                 };
+                let task = crate::process::current_task_clone();
+                let task_name = task
+                    .as_ref()
+                    .map(|t| t.name.as_str())
+                    .unwrap_or("<none>");
                 crate::serial_println!(
-                    "\x1b[1;31m[HEAP] USE-AFTER-FREE: slab[{}] block={:#x} off={} bytes=[{:02x} {:02x} {:02x} {:02x}]\x1b[0m",
+                    "\x1b[1;31m[HEAP] USE-AFTER-FREE: slab[{}] block={:#x} off={} bytes=[{:02x} {:02x} {:02x} {:02x}] task={}\x1b[0m",
                     slab_size,
                     block as u64,
                     off,
                     b0,
                     b1,
                     b2,
-                    b3
+                    b3,
+                    task_name
                 );
+                let mut rbp: u64;
+                unsafe {
+                    core::arch::asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack, preserves_flags));
+                }
+                for depth in 0..8 {
+                    if rbp == 0 { break; }
+                    let ret = unsafe { core::ptr::read_volatile((rbp + 8) as *const u64) };
+                    let next = unsafe { core::ptr::read_volatile(rbp as *const u64) };
+                    crate::serial_println!("[HEAP] UAF-BT[{}] ret={:#x}", depth, ret);
+                    if next <= rbp { break; }
+                    rbp = next;
+                }
+                dump_previous_frees(block);
+                dump_phys_trace();
             }
             if slab_size >= 12 {
                 let canary = *(block.add(slab_size - 4) as *const u32);
@@ -381,6 +707,25 @@ impl SlabState {
         block
     }
 
+    /// Returns the class index whose partial list still contains `page`, if any.
+    ///
+    /// Diagnostic helper: a page handed out by the buddy allocator must never be
+    /// reachable from a class free list.
+    unsafe fn page_owner_class(&self, page: *mut SlabPageHeader) -> Option<usize> {
+        for (ci, head) in self.partial_pages.iter().copied().enumerate() {
+            let mut cur = head;
+            let mut steps = 0usize;
+            while !cur.is_null() && steps < 4096 {
+                if cur == page {
+                    return Some(ci);
+                }
+                cur = (*cur).next_partial;
+                steps += 1;
+            }
+        }
+        None
+    }
+
     /// Return `ptr` to its slab page and reclaim the page to the buddy
     /// allocator if it becomes fully empty.
     // SAFETY: caller holds the slab lock; `ptr` came from this allocator and
@@ -393,7 +738,42 @@ impl SlabState {
     ) {
         let slab_size = SLAB_SIZES[ci];
 
+        let page_base = (ptr as usize) & !0xFFF;
+        let header = page_base as *mut SlabPageHeader;
+
+        // Validate the deallocation against the page that owns `ptr` before
+        // touching any allocator state.  A double free, a layout mismatch, or a
+        // free aimed at a page that has been reclaimed to the buddy allocator
+        // would otherwise corrupt an unrelated page (silently in release
+        // builds).  On a mismatch the block is leaked instead.
         if HEAP_POISON_ENABLED {
+            let offset = ptr as usize - page_base;
+            let blocks_offset = slab_blocks_offset(ci);
+            let geometric = offset >= blocks_offset
+                && (offset - blocks_offset) % slab_size == 0
+                && (offset - blocks_offset) / slab_size < slab_blocks_per_page(ci);
+            let mut dup = false;
+            if (*header).magic == SLAB_PAGE_MAGIC
+                && (*header).total_blocks as usize == slab_blocks_per_page(ci)
+            {
+                let mut cur = (*header).free_head;
+                let mut steps = 0usize;
+                while !cur.is_null() && steps <= (*header).total_blocks as usize {
+                    if cur == ptr {
+                        dup = true;
+                        break;
+                    }
+                    cur = *(cur as *const *mut u8);
+                    steps += 1;
+                }
+            }
+            if !slab_dealloc_is_sane(ci, ptr, dup, geometric) {
+                return;
+            }
+        }
+
+        if HEAP_POISON_ENABLED {
+            record_slab_free(ptr, ci);
             if slab_size >= 12 {
                 let cp = ptr.add(slab_size - 4) as *mut u32;
                 assert_eq!(
@@ -410,9 +790,6 @@ impl SlabState {
         }
 
         // Locate the page header: round ptr down to 4 KiB boundary.
-        let page_base = (ptr as usize) & !0xFFF;
-        let header = page_base as *mut SlabPageHeader;
-
         let was_full = (*header).free_count == 0;
 
         // Push block onto the page's intra-page free list.
@@ -428,8 +805,22 @@ impl SlabState {
 
         // Reclaim fully-empty pages to the buddy allocator.
         if (*header).free_count == (*header).total_blocks {
-            self.remove_from_partial(header, ci);
+            if !self.remove_from_partial(header, ci) {
+                // The page is not linked in this class's partial list: freeing it
+                // would hand a slab-owned page to the buddy allocator. Keep the
+                // page (leaked) instead of corrupting the heap.
+                crate::serial_println!(
+                    "\x1b[1;31m[HEAP] SLAB RECLAIM UNLINK FAILED: slab[{}] page={:#x} free_count={} total={}\x1b[0m",
+                    slab_size,
+                    page_base as u64,
+                    (*header).free_count,
+                    (*header).total_blocks
+                );
+                print_frames(&capture_frames());
+                return;
+            }
             let phys = super::virt_to_phys(page_base as u64);
+            trace_phys_log(b'C', phys, ci as u64);
             // Zero the header before freeing to catch accidental reuse.
             core::ptr::write_bytes(header as *mut u8, 0, SLAB_HEADER_SIZE);
             let frame = memory::frame::PhysFrame {
@@ -441,13 +832,15 @@ impl SlabState {
     }
 
     /// Unlink `page` from `partial_pages[ci]`.  O(n) in partial-list length.
-    // SAFETY: caller holds the slab lock; `page` is a valid SlabPageHeader
-    // linked in this class's partial list.
-    unsafe fn remove_from_partial(&mut self, page: *mut SlabPageHeader, ci: usize) {
+    ///
+    /// Returns `false` when the page was not linked: freeing it in that case
+    /// would return a page that a class may still hand out.
+    // SAFETY: caller holds the slab lock; `page` is a valid SlabPageHeader.
+    unsafe fn remove_from_partial(&mut self, page: *mut SlabPageHeader, ci: usize) -> bool {
         if self.partial_pages[ci] == page {
             self.partial_pages[ci] = (*page).next_partial;
             (*page).next_partial = ptr::null_mut();
-            return;
+            return true;
         }
         let mut cur = self.partial_pages[ci];
         while !cur.is_null() {
@@ -455,15 +848,11 @@ impl SlabState {
             if next == page {
                 (*cur).next_partial = (*page).next_partial;
                 (*page).next_partial = ptr::null_mut();
-                return;
+                return true;
             }
             cur = next;
         }
-        debug_assert!(
-            false,
-            "remove_from_partial: page {:p} not found in class {} list",
-            page, ci
-        );
+        false
     }
 }
 

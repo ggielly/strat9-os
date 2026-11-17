@@ -74,8 +74,9 @@ impl NetworkStrate {
                 };
                 let mut overflow = None;
                 if let Some(state_mut) = self.tcp_listeners.get_mut(&file_id) {
+                    // `eof` is deliberately left untouched: a pending EOF for
+                    // the previous session must still reach the reader.
                     state_mut.socket = fresh;
-                    state_mut.eof = false;
                     if state_mut.session.is_none() {
                         state_mut.session = Some(accepted);
                     } else if !state_mut.push_backlog(accepted) {
@@ -136,7 +137,6 @@ impl NetworkStrate {
                 if let Some(handle) = next {
                     if let Some(state_mut) = self.tcp_listeners.get_mut(&file_id) {
                         state_mut.session = Some(handle);
-                        state_mut.eof = false;
                     }
                     continue;
                 }
@@ -175,10 +175,21 @@ impl NetworkStrate {
             return reply_read(sender, &[]);
         }
 
-        let eof_seen = self.service_tcp_listener(file_id);
+        let _ = self.service_tcp_listener(file_id);
         let Some(state) = self.tcp_listeners.get(&file_id).copied() else {
             return IpcMessage::error_reply(sender, -104);
         };
+
+        // A session ended since the last read (possibly reaped by the main
+        // loop, which cannot deliver the EOF itself).  Report it exactly once,
+        // even when the next queued connection is already promoted, so the
+        // reader resets its per-connection state.
+        if state.eof {
+            if let Some(state_mut) = self.tcp_listeners.get_mut(&file_id) {
+                state_mut.eof = false;
+            }
+            return reply_read(sender, &[]);
+        }
 
         if let Some(session) = state.session {
             let socket = self.sockets.get_mut::<tcp::Socket>(session);
@@ -204,12 +215,6 @@ impl NetworkStrate {
             return IpcMessage::error_reply(sender, -11);
         }
 
-        if eof_seen {
-            if let Some(state_mut) = self.tcp_listeners.get_mut(&file_id) {
-                state_mut.eof = false;
-            }
-            return reply_read(sender, &[]);
-        }
         // Healthy listener with no client yet.
         IpcMessage::error_reply(sender, -11)
     }

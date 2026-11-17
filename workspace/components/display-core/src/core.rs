@@ -31,6 +31,8 @@
 //! [`DisplayCore::take_retired`]; the server frees them once the client mapping
 //! is revoked. [`Drop`] frees whatever is still live or retired.
 
+use core::{mem::MaybeUninit, ptr};
+
 use display_protocol::{Commit, Rect, FLAG_FULL_DAMAGE};
 
 use crate::{
@@ -236,6 +238,62 @@ impl<B: Backend> DisplayCore<B> {
             surface_gen: [1; MAX_SURFACES_PER_SESSION],
             buffer_gen: [1; MAX_BUFFERS_PER_SESSION],
             retired: [const { None }; MAX_RETIRED_REGIONS],
+        }
+    }
+
+    /// Initialise `this` in place, without building a `Self` temporary.
+    ///
+    /// [`DisplayCore::new`] returns the whole (~44 KiB) state machine by value,
+    /// which overflows a 64 KiB user stack when the caller stores it in a
+    /// static (`Option<Server<..>>` needs a second copy). This constructor
+    /// writes every field of `this` exactly once through [`ptr::write`], so the
+    /// largest stack temporary is one [`Option<Session>`] slot, and only the
+    /// caller-owned storage is filled.
+    ///
+    /// Call it once on a fresh [`MaybeUninit`]; it returns the now-initialised
+    /// core.
+    #[allow(unsafe_code)]
+    pub fn init_at(this: &mut MaybeUninit<Self>, backend: B) -> &mut Self {
+        // SAFETY: `this` is valid for writes of `Self`, and `write_in` writes
+        // every field exactly once before the value is observed.
+        unsafe {
+            Self::write_in(this.as_mut_ptr(), backend);
+            // SAFETY: every field was initialised by `write_in` just above.
+            this.assume_init_mut()
+        }
+    }
+
+    /// Write every field of `this` in place; the sole `unsafe` of this crate.
+    ///
+    /// Split out so [`DisplayCore::init_at`] and
+    /// [`Server::init_at`](crate::Server::init_at) share one audited writer.
+    #[allow(unsafe_code)]
+    pub(crate) unsafe fn write_in(this: *mut Self, backend: B) {
+        // SAFETY: `this` points to caller-owned, writable, properly aligned
+        // storage for `Self`; each field is written exactly once.
+        unsafe {
+            ptr::write(ptr::addr_of_mut!((*this).backend), backend);
+
+            let sessions = ptr::addr_of_mut!((*this).sessions).cast::<Option<Session>>();
+            for index in 0..MAX_SESSIONS {
+                sessions.add(index).write(None);
+            }
+            let retired = ptr::addr_of_mut!((*this).retired).cast::<Option<RetiredRegion>>();
+            for index in 0..MAX_RETIRED_REGIONS {
+                retired.add(index).write(None);
+            }
+            let session_gen = ptr::addr_of_mut!((*this).session_gen).cast::<u32>();
+            for index in 0..MAX_SESSIONS {
+                session_gen.add(index).write(1);
+            }
+            let surface_gen = ptr::addr_of_mut!((*this).surface_gen).cast::<u32>();
+            for index in 0..MAX_SURFACES_PER_SESSION {
+                surface_gen.add(index).write(1);
+            }
+            let buffer_gen = ptr::addr_of_mut!((*this).buffer_gen).cast::<u32>();
+            for index in 0..MAX_BUFFERS_PER_SESSION {
+                buffer_gen.add(index).write(1);
+            }
         }
     }
 

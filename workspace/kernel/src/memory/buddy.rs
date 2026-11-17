@@ -2374,6 +2374,11 @@ fn alloc_order0_cached(migratetype: Migratetype) -> Result<PhysFrame, AllocError
     {
         let mut cache = LOCAL_FRAME_CACHES[local_cache_slot(cpu_idx, migratetype)].lock();
         if let Some(frame) = cache.pop() {
+            crate::memory::heap::trace_phys_log(
+                b'P',
+                frame.start_address.as_u64(),
+                0,
+            );
             BuddyAllocator::mark_block_allocated(frame.start_address.as_u64(), 0, migratetype);
             local_cached_dec_phys(frame.start_address.as_u64(), migratetype);
             return Ok(frame);
@@ -2408,6 +2413,11 @@ fn alloc_order0_cached(migratetype: Migratetype) -> Result<PhysFrame, AllocError
 }
 
 fn free_order0_cached(frame: PhysFrame, migratetype: Migratetype) {
+    crate::memory::heap::trace_phys_log(
+        b'F',
+        frame.start_address.as_u64(),
+        migratetype as u64,
+    );
     // NOTE: O(2^order) MetaSlot scan : acceptable here because order is always 0
     // (single-page check) on this hot path.
     //
@@ -2527,7 +2537,15 @@ pub fn alloc_migratetype(
 
                 global.unlock();
                 let _ = drain_local_caches_to_global(usize::MAX, &mut global);
-                global.alloc_with_migratetype(order, migratetype)
+                let r = global.alloc_with_migratetype(order, migratetype);
+                if let Ok(f) = &r {
+                    crate::memory::heap::trace_phys_log(
+                        b'G',
+                        f.start_address.as_u64(),
+                        order as u64,
+                    );
+                }
+                r
             }
             Err(e) => Err(e),
         }
@@ -2539,6 +2557,20 @@ pub fn alloc_migratetype(
 /// `_token` is a compile-time proof that interrupts are disabled on the calling CPU.
 pub fn free(_token: &IrqDisabledToken, frame: PhysFrame, order: u8) {
     let migratetype = BuddyAllocator::block_migratetype(frame.start_address.as_u64());
+
+    // A live slab page must never reach the buddy: the slab keeps using its
+    // blocks after the frame is handed to another owner (user stack, DMA, …).
+    // Legitimate slab reclamation zeroes the page header before freeing, so a
+    // live magic here means a stray/duplicate free of a page the slab owns.
+    if crate::memory::heap::slab_page_is_live(frame.start_address.as_u64(), order) {
+        crate::serial_println!(
+            "\x1b[1;31m[buddy] FREE OF LIVE SLAB PAGE: phys={:#x} order={}\x1b[0m",
+            frame.start_address.as_u64(),
+            order
+        );
+        crate::memory::heap::dump_backtrace();
+        return;
+    }
 
     // Public free-entry guard only: internal drain/spill paths
     // (`free_phys_batch`, `drain_local_caches_*`) legitimately re-free frames
@@ -2578,6 +2610,11 @@ impl FrameAllocator for BuddyAllocator {
 
     /// Performs the free operation.
     fn free(&mut self, frame: PhysFrame, order: u8, token: &IrqDisabledToken) {
+        crate::memory::heap::trace_phys_log(
+            b'I',
+            frame.start_address.as_u64(),
+            order as u64,
+        );
         let cpu_idx = crate::arch::percpu::current_cpu_index();
         if ALLOC_IN_PROGRESS[cpu_idx].swap(true, core::sync::atomic::Ordering::Acquire) {
             panic!("Recursive deallocation detected on CPU {}!", cpu_idx);

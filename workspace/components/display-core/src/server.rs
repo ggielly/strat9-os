@@ -79,6 +79,8 @@
 //! error is reported and the credit stays consumed) or when a caller drives
 //! [`DisplayCore`] directly.
 
+use core::{mem::MaybeUninit, ptr};
+
 use display_protocol::{
     constants::{
         ERROR_BAD_FLAGS, ERROR_BAD_FORMAT, ERROR_BAD_LENGTH, ERROR_BAD_OBJECT, ERROR_BAD_STATE,
@@ -172,6 +174,32 @@ impl<B: Backend> Server<B> {
             core: DisplayCore::new(backend),
             peers: [None; MAX_SESSIONS],
             peer_features: [0; MAX_SESSIONS],
+        }
+    }
+
+    /// Initialise `this` in place, without a large stack temporary.
+    ///
+    /// Same purpose as [`DisplayCore::init_at`], for the whole server: the core
+    /// array and the peer tables are written field by field into `this`, so a
+    /// 64 KiB user stack is enough to host the (~54 KiB) state machine in a
+    /// static. Call it once on a fresh [`MaybeUninit`].
+    #[allow(unsafe_code)]
+    pub fn init_at(this: &mut MaybeUninit<Self>, backend: B) -> &mut Self {
+        let base = this.as_mut_ptr();
+        // SAFETY: `base` is valid for writes of `Self`; every field is written
+        // exactly once and `init_at` is documented as single-shot.
+        unsafe {
+            DisplayCore::<B>::write_in(ptr::addr_of_mut!((*base).core), backend);
+            let peers = ptr::addr_of_mut!((*base).peers).cast::<Option<PeerSlot>>();
+            for index in 0..MAX_SESSIONS {
+                peers.add(index).write(None);
+            }
+            let features = ptr::addr_of_mut!((*base).peer_features).cast::<u32>();
+            for index in 0..MAX_SESSIONS {
+                features.add(index).write(0);
+            }
+            // SAFETY: all fields were initialised just above.
+            this.assume_init_mut()
         }
     }
 
@@ -996,6 +1024,20 @@ mod tests {
             rects: [Rect::default(); display_protocol::MAX_RECTS],
         };
         frame(Opcode::COMMIT, surface, request_id, &Body::Commit(commit))
+    }
+
+    #[test]
+    fn init_at_matches_new() {
+        // Regression: the in-place initializer must produce an empty server
+        // that accepts the normal HELLO flow, without `Server::new`.
+        let mut slot = core::mem::MaybeUninit::<Server<FakeBackend>>::uninit();
+        let server = Server::init_at(&mut slot, FakeBackend::new());
+        assert_eq!(server.core().stats(), crate::CoreStats::default());
+        let mut transport = FakeTransport::default();
+        let peer = PeerId::new(90);
+        hello(server, &mut transport, peer);
+        assert_eq!(server.peer_pid(peer), Some(HELLO_PID));
+        assert_eq!(server.core().stats().sessions, 1);
     }
 
     #[test]

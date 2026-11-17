@@ -38,6 +38,14 @@
 //! Assumptions of this first slice: XRGB8888 native screen, one surface at
 //! `(0, 0)`, screen `stride * height <= 4 MiB` (the static backbuffer).
 //!
+//! ## Resize
+//!
+//! Protocol v1 has no `CONFIGURE` *request*: `CONFIGURE` is a server event and
+//! the only producer would be a backend-driven resize. The server therefore
+//! never invents one; a client resizes by creating a new surface, as
+//! `display-demo` does. The core exposes `set_configure` for a future
+//! backend-driven path.
+//!
 //! Fixed capacities, no global allocator, no panic on wire input.
 
 #![no_std]
@@ -46,7 +54,7 @@
 use core::{fmt::Write as _, panic::PanicInfo, slice};
 
 use display_backend::{encode, encoded_len, SharedPixels};
-use display_core::{Backend, BufferId, BufferState, PeerId, RegionHandle, Server, SurfaceId, Transport};
+use display_core::{Backend, PeerId, RegionHandle, Server, SurfaceId, Transport};
 use display_protocol::{Body, Header, Opcode, Rect, HEADER_LEN, MAX_RECTS};
 use strat9_syscall::{
     call,
@@ -72,6 +80,7 @@ const LOG_EVERY: u64 = 512;
 /// Retries of a transiently full client port.
 const SEND_RETRIES: usize = 2;
 
+const PROT_NONE: usize = 0;
 const PROT_READ_WRITE: usize = 3;
 const MAP_SHARED: usize = 1;
 const MAP_PRIVATE: usize = 2;
@@ -137,6 +146,27 @@ impl Backend for DisplayBackend {
         }
         let len = (stride as usize).checked_mul(height as usize).ok_or(())?;
         let len = len.checked_add(PAGE_SIZE - 1).ok_or(())? & !(PAGE_SIZE - 1);
+        // Guard page before the buffer. The kernel's `reserve_region` merges a
+        // new anonymous VMA into a preceding one with identical attributes, so
+        // a buffer mapped right after the private backbuffer (or the previous
+        // buffer) is folded into that VMA; `mem_region_export(addr)` then fails
+        // EINVAL because there is no VMA that starts at `addr`. A one-page
+        // PROT_NONE mapping in between gives the buffer a neighbour with
+        // different attributes, keeping its own VMA and exportable base.
+        let guard = match unsafe {
+            syscall6(
+                number::SYS_MMAP,
+                0,
+                PAGE_SIZE,
+                PROT_NONE,
+                MAP_PRIVATE | MAP_ANONYMOUS,
+                0,
+                0,
+            )
+        } {
+            Ok(addr) if addr != 0 => Some(addr),
+            _ => None,
+        };
         let addr = unsafe {
             syscall6(
                 number::SYS_MMAP,
@@ -149,9 +179,15 @@ impl Backend for DisplayBackend {
             )
         }
         .map_err(|_| {
+            if let Some(guard) = guard {
+                let _ = unsafe { call::funmap(guard, PAGE_SIZE) };
+            }
             log_text(b"display-server: buffer mmap failed");
             ()
         })?;
+        if let Some(guard) = guard {
+            let _ = unsafe { call::funmap(guard, PAGE_SIZE) };
+        }
         if addr == 0 {
             log_text(b"display-server: buffer mmap null");
             return Err(());
@@ -219,18 +255,25 @@ impl Backend for DisplayBackend {
             }
         };
         if region.width > self.screen.width || region.height > self.screen.height {
+            log(&format_args!(
+                "display-server: present: region {}x{} exceeds screen {}x{}",
+                region.width, region.height, self.screen.width, self.screen.height
+            ));
             return Err(());
         }
         // Bounded view over client shared memory: never borrows it past the
         // copy, and copy_damage validates every rect before writing.
-        let source = unsafe {
-            slice::from_raw_parts(
-                region.addr as *const u8,
-                region.stride as usize * region.height as usize,
-            )
-        };
-        let pixels = SharedPixels::new(source, region.width, region.height, region.stride)
-            .map_err(|_| ())?;
+        let source_len = region.stride as usize * region.height as usize;
+        let source = unsafe { slice::from_raw_parts(region.addr as *const u8, source_len) };
+        let pixels = SharedPixels::new(source, region.width, region.height, region.stride).map_err(
+            |error| {
+                log(&format_args!(
+                    "display-server: present: SharedPixels {:?} addr={:#x} len={} {}x{} stride={}",
+                    error, region.addr, source_len, region.width, region.height, region.stride
+                ));
+                ()
+            },
+        )?;
         // SAFETY: the backbuffer is a private anonymous mapping of exactly
         // `back_len` bytes owned by this single-threaded server.
         let backbuffer =
@@ -340,16 +383,20 @@ impl Transport for PeerTransport {
 }
 
 /// The core state machine (~54 KiB) lives in `.bss`: the user stack is 64 KiB.
-static mut SERVER: Option<Server<DisplayBackend>> = None;
+/// Built in place through [`Server::init_at`] so no whole-state temporary is
+/// pushed on the stack.
+static mut SERVER: core::mem::MaybeUninit<Server<DisplayBackend>> =
+    core::mem::MaybeUninit::uninit();
 
 fn main_loop(server_port: usize, display: Screen) -> ! {
+    let backend = DisplayBackend::new(display);
     // SAFETY: single-threaded process, initialised once before the loop and
-    // never aliased: `server` below is the only reference.
-    let mut backend = DisplayBackend::new(display);
-    unsafe {
-        *core::ptr::addr_of_mut!(SERVER) = Some(Server::new(backend));
-    }
-    let server = unsafe { (*core::ptr::addr_of_mut!(SERVER)).as_mut().expect("server") };
+    // never aliased: `server` below is the only reference. `init_at` fills the
+    // static in place.
+    let server = unsafe {
+        let slot = &mut *core::ptr::addr_of_mut!(SERVER);
+        Server::init_at(slot, backend)
+    };
     let mut peers: [Option<(PeerId, PeerTransport)>; MAX_PEERS] = [const { None }; MAX_PEERS];
     let mut iterations: u64 = 0;
     log_text(b"display-server: loop");
@@ -417,6 +464,11 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
             }
         }
 
+        // Exactly one bump per iteration. With two `wrapping_add(1)` calls the
+        // release build eliminated this liveness branch as dead code (the
+        // counter only ever took even values and LLVM folded `% 128`), so the
+        // dead-peer poll silently never ran. Keep one increment and verify the
+        // "peer gone" log survives `--release`.
         iterations = iterations.wrapping_add(1);
         if iterations % 128 == 0 {
             // Liveness: a destroyed client port fails the zero-timeout wait;
@@ -428,12 +480,18 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
                 else {
                     continue;
                 };
-                if call::handle_wait_timeout(port, 0).is_err() {
-                    log_text(b"display-server: peer gone");
+                let wait = call::handle_wait_timeout(port, 0);
+                if wait.is_err() {
+                    log(&format_args!("display-server: peer gone"));
                     let _ = server.disconnect(peer);
                     if let Some((_, mut transport)) = peers[index].take() {
                         transport.close();
                     }
+                    let stats = server.core().stats();
+                    log(&format_args!(
+                        "display-server: peer gone disconnect: sessions={} surfaces={} buffers={} used_bytes={}",
+                        stats.sessions, stats.surfaces, stats.buffers, stats.used_bytes
+                    ));
                 }
             }
         }
@@ -446,7 +504,6 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
             let _ = call::nanosleep(&request, &mut remaining);
         }
 
-        iterations = iterations.wrapping_add(1);
         if iterations % LOG_EVERY == 0 {
             let stats = server.core().stats();
             log(&format_args!(
@@ -697,6 +754,10 @@ fn log(args: &core::fmt::Arguments<'_>) {
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     log_text(b"display-server: strate-display v0.1.0");
+    log(&format_args!(
+        "display-server: pid={}",
+        call::getpid().unwrap_or(0)
+    ));
     let screen = open_screen();
     let server_port = match call::ipc_create_port(0) {
         Ok(port) => port,

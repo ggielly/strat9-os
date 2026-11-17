@@ -26,6 +26,12 @@
 //! a full frame, then animates a 16x16 white square for 120 frames using
 //! damage-rect commits. Handles `CONFIGURE` by allocating a new buffer and
 //! `CLOSE_REQUEST` by closing the session.
+//!
+//! Protocol v1 has no resize *request*: `CONFIGURE` is a server-to-client
+//! event, and only a backend-driven configure (not reachable here) would emit
+//! it. Resizing is client-initiated by creating a new surface, so the demo
+//! resize block below does exactly that; the `Event::Configure` arm stays
+//! correct for a future server that emits it.
 
 #![no_std]
 #![no_main]
@@ -61,6 +67,7 @@ pub extern "C" fn _start() -> ! {
         }
     };
     log(b"[display-demo] connected\n");
+    log_pid(client.pid());
 
     let surface = match create_surface(&mut client, WIDTH, HEIGHT) {
         Some(surface) => surface,
@@ -160,8 +167,11 @@ pub extern "C" fn _start() -> ! {
                 }
             }
             log(b"[display-demo] resized frame presented\n");
+            // The resized buffer is the surface's current image: destroying it
+            // first is BAD_STATE. Destroy the old surface (retires its two
+            // buffers) and the resized surface (retires its current buffer).
             let _ = client.destroy_surface(surface);
-            let _ = client.destroy_buffer(buffer.buffer.id);
+            let _ = client.destroy_surface(resized);
             log(b"[display-demo] resized surface closed\n");
         }
     }
@@ -212,7 +222,7 @@ fn handle_event(
     event: Event,
 ) -> bool {
     match event {
-        Event::Configure { width, height, .. } => {
+        Event::Configure { serial: configure_serial, width, height, .. } => {
             log(b"[display-demo] configure\n");
             let old_id = view.buffer.id;
             let Some(mut buffer) = client.alloc_buffer(surface, width, height, width * 4) else {
@@ -222,7 +232,9 @@ fn handle_event(
             fill_gradient(&mut buffer);
             draw_square_at(&mut buffer, 8, 8);
             *commit_id += 1;
-            if let Some(result) = client.commit(surface, buffer.id, &[], true, *serial, *commit_id)
+            // A commit after CONFIGURE must acknowledge that configure serial.
+            if let Some(result) =
+                client.commit(surface, buffer.id, &[], true, configure_serial, *commit_id)
             {
                 if let Some(frame) = result.frame {
                     *serial = frame.serial;
@@ -335,6 +347,32 @@ fn sleep_ms(ms: u64) {
     };
     let mut rem = TimeSpec::zero();
     let _ = call::nanosleep(&req, &mut rem);
+}
+
+fn log_pid(pid: u32) {
+    let prefix = b"[display-demo] pid=";
+    let mut line = [0u8; 40];
+    let mut len = prefix.len();
+    line[..len].copy_from_slice(prefix);
+    let mut digits = [0u8; 10];
+    let mut count = 0usize;
+    let mut value = pid;
+    loop {
+        digits[count] = b'0' + (value % 10) as u8;
+        count += 1;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    while count > 0 {
+        count -= 1;
+        line[len] = digits[count];
+        len += 1;
+    }
+    line[len] = b'\n';
+    len += 1;
+    let _ = call::write(2, &line[..len]);
 }
 
 fn log(text: &[u8]) {

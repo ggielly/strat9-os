@@ -122,7 +122,7 @@ pub const USER_ADDR_MAX: u64 = crate::memory::userslice::USER_SPACE_END;
 ///
 /// This is the *default*: the loader accepts a per-process stack size via
 /// [`load_and_run_elf_with_stack`] (issue #64).
-pub const USER_STACK_PAGES: usize = 32;
+pub const USER_STACK_PAGES: usize = 16;
 /// Lower bound on a per-process user stack (4 pages = 16 KiB): the boot
 /// stack layout alone (argv/envp/auxv + guard margins) needs at least one
 /// page, and tiny stacks would fault immediately.
@@ -683,6 +683,7 @@ fn write_user_mapped_bytes(
                 crate::arch::clac();
                 return Err("Translated physical address is null");
             }
+            crate::memory::heap::trace_phys_log(b'W', paddr & !0xFFF, vaddr);
             let hhdm_ptr = crate::memory::phys_to_virt(paddr) as *mut u8;
             if hhdm_ptr.is_null() {
                 crate::arch::clac();
@@ -2116,6 +2117,12 @@ fn map_user_stack(
         VmaType::Stack,
         VmaPageSize::Small,
     )?;
+    for i in 0..stack_pages {
+        let vaddr = stack_base + (i as u64) * 4096;
+        if let Some(phys) = user_as.translate(VirtAddr::new(vaddr)) {
+            crate::memory::heap::trace_phys_log(b'S', phys.as_u64(), vaddr);
+        }
+    }
     // Guard page: a single unmapped page below the stack.  Any stack
     // underflow (push past the bottom) hits this and faults.  The page
     // is intentionally left unmapped : no VMA, no PTE.
