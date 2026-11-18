@@ -2273,6 +2273,26 @@ pub fn get_allocator() -> &'static SpinLock<Option<BuddyAllocator>> {
     &BUDDY_ALLOCATOR
 }
 
+/// Snapshot of managed physical memory in bytes, for `/proc/meminfo`.
+///
+/// Returns `(total_bytes, free_bytes)`, or `(0, 0)` when the allocator is not
+/// initialised yet (early boot). Takes the global allocator lock only to read
+/// accounting counters and performs no allocation, so it is safe from the
+/// procfs read path (IRQ state is handled by the lock's default `IrqDisabled`
+/// guardian).
+pub fn meminfo_bytes() -> (u64, u64) {
+    let guard = get_allocator().lock();
+    let Some(alloc) = guard.as_ref() else {
+        return (0, 0);
+    };
+    let (total_pages, allocated_pages) = alloc.page_totals();
+    let free_pages = total_pages.saturating_sub(allocated_pages);
+    (
+        (total_pages as u64).saturating_mul(PAGE_SIZE),
+        (free_pages as u64).saturating_mul(PAGE_SIZE),
+    )
+}
+
 fn refill_local_cache(
     cpu_idx: usize,
     global: &mut OnDemandGlobalLock,

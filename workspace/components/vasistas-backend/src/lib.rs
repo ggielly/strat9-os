@@ -71,7 +71,9 @@
 extern crate std;
 
 pub mod dmg2;
+pub mod layout;
 pub mod pixels;
 
 pub use dmg2::{encode, encoded_len, Dmg2Error, DMG2_HEADER, DMG2_MAX_RECTS, DMG2_RECORD};
+pub use layout::clip_to_screen;
 pub use pixels::{DamageStats, PixelError, SharedPixels};

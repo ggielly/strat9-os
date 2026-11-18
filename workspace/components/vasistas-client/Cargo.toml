@@ -1,17 +1,17 @@
 [package]
-name = "lucarne"
+name = "vasistas-client"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
-description = "no_std Lucarne client library for the strat9-os Vasistas display server (Vasistas protocol v1, Annexe A), plus a demo client."
+description = "no_std Vasistas client SDK for the strat9-os Vasistas display server (Vasistas protocol v1, Annexe A), plus a demo client."
 
 [lib]
-name = "lucarne"
+name = "vasistas_client"
 path = "src/lib.rs"
 
 [[bin]]
-name = "lucarne-demo"
+name = "vasistas-demo"
 path = "src/bin/demo.rs"
 # Freestanding no_std/no_main image: it cannot link the host test harness.
 test = false

@@ -48,7 +48,7 @@ extern crate std;
 use core::slice;
 
 use vasistas_protocol::{
-    constants::FRAME_DONE_PRESENT_SUBMITTED, Body, Commit, Header, Opcode, Rect,
+    constants::FRAME_DONE_PRESENT_SUBMITTED, Body, Commit, Header, InputBatch, Opcode, Rect,
     FEATURE_PRESENT_FEEDBACK, FLAG_FULL_DAMAGE, FORMAT_XRGB8888, HEADER_LEN, IMPORT_OK,
     MAX_MESSAGE_BYTES, MAX_RECTS,
 };
@@ -159,6 +159,17 @@ fn release_mapping(mapping: Mapping) {
     close_handle(mapping.region_handle as usize);
 }
 
+/// Current geometry of the single output (A.3.1 `OUTPUT_INFO`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutputInfo {
+    pub output: u64,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub format: u32,
+    pub scale: u32,
+}
+
 /// One server-to-client event, decoded into owned fixed-size data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -208,6 +219,34 @@ pub enum Event {
     Ack {
         status: u32,
         request_id: u64,
+    },
+    /// A.3.1 `INPUT_BATCH`: up to [`vasistas_protocol::MAX_INPUT_RECORDS`]
+    /// input records for `surface`, with the focus epoch that produced them.
+    ///
+    /// A malformed batch is reported as [`Event::Other`], never as a panic.
+    InputBatch {
+        surface: u64,
+        focus_epoch: u32,
+        batch: InputBatch,
+    },
+    /// A.3.1 `INPUT_RESET`: the client must resynchronise its input state.
+    InputReset {
+        surface: u64,
+        focus_epoch: u32,
+        reason: u32,
+    },
+    /// A.3.1 `OUTPUT_INFO`: geometry of the output `output` (single output 0).
+    OutputInfo {
+        output: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: u32,
+        scale: u32,
+    },
+    /// A.3.1 `OUTPUT_REMOVED`: output `output` is no longer available.
+    OutputRemoved {
+        output: u64,
     },
     /// Valid frame whose body carries nothing this client models.
     Other,
@@ -295,6 +334,9 @@ pub struct Client {
     path_len: u8,
     next_request: u64,
     mappings: Mappings,
+    /// Last `OUTPUT_INFO`, recorded even when a synchronous request helper
+    /// consumes the event before the caller sees it.
+    output: Option<OutputInfo>,
 }
 
 impl Client {
@@ -306,7 +348,7 @@ impl Client {
         let event = match call::ipc_create_port(0) {
             Ok(event) => event,
             Err(error) => {
-                let _ = call::write(2, b"lucarne: create_port failed: ");
+                let _ = call::write(2, b"vasistas-client: create_port failed: ");
                 let _ = call::write(2, error.name().as_bytes());
                 let _ = call::write(2, b"\n");
                 return None;
@@ -330,7 +372,7 @@ impl Client {
         };
         let bound_path = &path[..path_len as usize];
         if call::ipc_bind_port(event, bound_path).is_err() {
-            Self::debug(b"lucarne: bind event path failed");
+            Self::debug(b"vasistas-client: bind event path failed");
             close_handle(event);
             return None;
         }
@@ -338,7 +380,7 @@ impl Client {
         let server = match call::ipc_connect(server_path) {
             Ok(server) => server,
             Err(_) => {
-                Self::debug(b"lucarne: connect server failed");
+                Self::debug(b"vasistas-client: connect server failed");
                 let _ = call::ipc_unbind_port(bound_path);
                 close_handle(event);
                 return None;
@@ -355,12 +397,12 @@ impl Client {
                 minor: vasistas_protocol::VERSION_MINOR,
                 features: FEATURE_PRESENT_FEEDBACK,
                 pid,
-                name: b"lucarne-demo",
+                name: b"vasistas-demo",
                 path: bound_path,
             },
         );
         if !hello_ok {
-            Self::debug(b"lucarne: HELLO send failed");
+            Self::debug(b"vasistas-client: HELLO send failed");
             let _ = call::ipc_unbind_port(bound_path);
             close_handle(server);
             close_handle(event);
@@ -376,6 +418,7 @@ impl Client {
             path_len,
             next_request: 2,
             mappings: Mappings::new(),
+            output: None,
         };
         let deadline = now_ns().saturating_add(timeout_ns);
         for _ in 0..MATCH_TRIES {
@@ -393,7 +436,7 @@ impl Client {
                 None => break,
             }
         }
-        Self::debug(b"lucarne: WELCOME timeout");
+        Self::debug(b"vasistas-client: WELCOME timeout");
         client.cleanup();
         None
     }
@@ -411,6 +454,15 @@ impl Client {
     /// Session id assigned by `WELCOME`.
     pub fn session(&self) -> u64 {
         self.session
+    }
+
+    /// Geometry of the single output announced by `OUTPUT_INFO`, if received.
+    ///
+    /// Recorded by [`Client::recv`] even when a synchronous helper
+    /// ([`Client::create_surface`], [`Client::alloc_buffer`], ...) consumed the
+    /// event while waiting for its own reply.
+    pub fn output(&self) -> Option<OutputInfo> {
+        self.output
     }
 
     /// Path this client bound for its event port.
@@ -524,7 +576,7 @@ impl Client {
                         // buffer back instead of leaking them.
                         release_mapping(mapping);
                         self.destroy_buffer(buffer);
-                        Self::debug(b"lucarne: mapping table full");
+                        Self::debug(b"vasistas-client: mapping table full");
                         return None;
                     }
                     if !self.import_ok(buffer) {
@@ -591,7 +643,7 @@ impl Client {
         }
 
         let Some(request) = self.request(Opcode::COMMIT, surface, &Body::Commit(commit)) else {
-            Self::debug(b"lucarne: commit send failed");
+            Self::debug(b"vasistas-client: commit send failed");
             return None;
         };
         let deadline = now_ns().saturating_add(REQUEST_TIMEOUT_NS);
@@ -600,11 +652,11 @@ impl Client {
         for _ in 0..MATCH_TRIES {
             let now = now_ns();
             if now >= deadline {
-                Self::debug(b"lucarne: commit timeout");
+                Self::debug(b"vasistas-client: commit timeout");
                 return None;
             }
             let Some((header, event)) = self.frame(deadline - now) else {
-                Self::debug(b"lucarne: commit recv failed");
+                Self::debug(b"vasistas-client: commit recv failed");
                 return None;
             };
             match event {
@@ -627,14 +679,14 @@ impl Client {
                     return if failed { None } else { Some(result) };
                 }
                 Event::Error { .. } if header.request_id == request => {
-                    Self::debug(b"lucarne: commit rejected");
+                    Self::debug(b"vasistas-client: commit rejected");
                     return None;
                 }
                 Event::Error { .. } => failed = true,
                 _ => {}
             }
         }
-        Self::debug(b"lucarne: commit no ack");
+        Self::debug(b"vasistas-client: commit no ack");
         None
     }
 
@@ -766,14 +818,44 @@ impl Client {
         loop {
             match call::ipc_try_recv(self.event, &mut msg) {
                 Ok(_) => {
-                    if let Some(frame) = decode_frame(&msg.payload) {
-                        return Some(frame);
+                    if let Some((header, event)) = decode_frame(&msg.payload) {
+                        self.record_output(&event);
+                        return Some((header, event));
                     }
                 }
                 Err(Error::Interrupted) => continue,
                 Err(Error::Again) => return None,
                 Err(_) => return None,
             }
+        }
+    }
+
+    /// Keep the latest `OUTPUT_INFO`/`OUTPUT_REMOVED` state.
+    fn record_output(&mut self, event: &Event) {
+        match *event {
+            Event::OutputInfo {
+                output,
+                width,
+                height,
+                stride,
+                format,
+                scale,
+            } => {
+                self.output = Some(OutputInfo {
+                    output,
+                    width,
+                    height,
+                    stride,
+                    format,
+                    scale,
+                });
+            }
+            Event::OutputRemoved { output } => {
+                if matches!(self.output, Some(info) if info.output == output) {
+                    self.output = None;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -890,9 +972,26 @@ fn decode_frame(payload: &[u8]) -> Option<(Header, Event)> {
         return None;
     }
     let (header, body) = Header::decode_message(&payload[..total]).ok()?;
-    let body = Body::decode(header.opcode, header.object_id, body).ok()?;
-    let event = map_event(&header, &body);
+    let event = match Body::decode(header.opcode, header.object_id, body) {
+        Ok(body) => map_event(&header, &body),
+        // Input and output events carry bulk/global state; a body the protocol
+        // rejects is surfaced as `Other` instead of being dropped, so the
+        // caller's event loop keeps running and never sees a partially applied
+        // event.
+        Err(_) if is_input_opcode(header.opcode) || is_output_opcode(header.opcode) => Event::Other,
+        Err(_) => return None,
+    };
     Some((header, event))
+}
+
+/// True for the server-to-client input events (A.3.1/A.5).
+fn is_input_opcode(opcode: u16) -> bool {
+    opcode == Opcode::INPUT_BATCH.value() || opcode == Opcode::INPUT_RESET.value()
+}
+
+/// True for the server-to-client output events (A.3.1).
+fn is_output_opcode(opcode: u16) -> bool {
+    opcode == Opcode::OUTPUT_INFO.value() || opcode == Opcode::OUTPUT_REMOVED.value()
 }
 
 fn map_event(header: &Header, body: &Body<'_>) -> Event {
@@ -967,6 +1066,33 @@ fn map_event(header: &Header, body: &Body<'_>) -> Event {
             status,
             request_id: header.request_id,
         },
+        Body::InputBatch(batch) => Event::InputBatch {
+            surface: header.object_id,
+            focus_epoch: batch.focus_epoch,
+            batch,
+        },
+        Body::InputReset { focus_epoch, reason } => Event::InputReset {
+            surface: header.object_id,
+            focus_epoch,
+            reason,
+        },
+        Body::OutputInfo {
+            width,
+            height,
+            stride,
+            format,
+            scale,
+        } => Event::OutputInfo {
+            output: header.object_id,
+            width,
+            height,
+            stride,
+            format,
+            scale,
+        },
+        Body::OutputRemoved => Event::OutputRemoved {
+            output: header.object_id,
+        },
         _ => Event::Other,
     }
 }
@@ -987,6 +1113,12 @@ fn close_handle(handle: usize) {
 mod tests {
     use super::*;
     use std::vec::Vec;
+    use vasistas_protocol::{
+        InputRecord, INPUT_EVENT_FOCUS_GAINED, INPUT_EVENT_FOCUS_LOST, INPUT_EVENT_KEY,
+        INPUT_EVENT_POINTER_BUTTON, INPUT_EVENT_POINTER_MOTION, INPUT_EVENT_TEXT,
+        INPUT_FLAG_ABSOLUTE, INPUT_RESET_RESYNC, INPUT_RESET_SERVICE_CHANGED, INPUT_TEXT_LEN,
+        MAX_INPUT_RECORDS,
+    };
 
     fn frame(opcode: Opcode, object_id: u64, request_id: u64, body: &Body<'_>) -> Vec<u8> {
         let mut out = [0u8; MAX_MESSAGE];
@@ -1018,7 +1150,7 @@ mod tests {
                 minor: 0,
                 features: FEATURE_PRESENT_FEEDBACK,
                 pid: 42,
-                name: b"lucarne-demo",
+                name: b"vasistas-demo",
                 path: b"/srv/vasistas/c/42",
             },
         );
@@ -1033,7 +1165,7 @@ mod tests {
                 minor: 0,
                 features: FEATURE_PRESENT_FEEDBACK,
                 pid: 42,
-                name: b"lucarne-demo",
+                name: b"vasistas-demo",
                 path: b"/srv/vasistas/c/42",
             }
         );
@@ -1306,6 +1438,291 @@ mod tests {
         };
         assert!(done.present_submitted());
         assert!(!FrameDone { flags: 0, ..done }.present_submitted());
+    }
+
+    fn record(
+        event_type: u16,
+        code: u16,
+        value: i32,
+        flags: u32,
+        text: [u8; INPUT_TEXT_LEN],
+    ) -> InputRecord {
+        InputRecord {
+            timestamp_ns: 0x0102_0304_0506_0708,
+            sequence: 9,
+            device_id: 3,
+            event_type,
+            code,
+            value,
+            flags,
+            text,
+        }
+    }
+
+    fn batch_body(records: &[InputRecord], focus_epoch: u32) -> InputBatch {
+        let mut batch = InputBatch::default();
+        batch.focus_epoch = focus_epoch;
+        batch.count = records.len() as u16;
+        batch.records[..records.len()].copy_from_slice(records);
+        batch
+    }
+
+    #[test]
+    fn input_batch_zero_records_maps() {
+        let message = frame(
+            Opcode::INPUT_BATCH,
+            7,
+            0,
+            &Body::InputBatch(batch_body(&[], 12)),
+        );
+        let (header, event) = decode_frame(&message).expect("frame decodes");
+        assert_eq!(header.object_id, 7);
+        match event {
+            Event::InputBatch {
+                surface,
+                focus_epoch,
+                batch,
+            } => {
+                assert_eq!(surface, 7);
+                assert_eq!(focus_epoch, 12);
+                assert_eq!(batch.count, 0);
+                assert!(batch.records().is_empty());
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn input_batch_single_key_record_maps() {
+        let records = [record(INPUT_EVENT_KEY, 30, 1, 0, [0; INPUT_TEXT_LEN])];
+        let message = frame(
+            Opcode::INPUT_BATCH,
+            0x40,
+            0,
+            &Body::InputBatch(batch_body(&records, 3)),
+        );
+        let (_, event) = decode_frame(&message).expect("frame decodes");
+        match event {
+            Event::InputBatch {
+                surface,
+                focus_epoch,
+                batch,
+            } => {
+                assert_eq!(surface, 0x40);
+                assert_eq!(focus_epoch, 3);
+                assert_eq!(batch.count, 1);
+                let decoded = batch.records();
+                assert_eq!(decoded.len(), 1);
+                assert_eq!(decoded[0], records[0]);
+                assert_eq!(decoded[0].event_type, INPUT_EVENT_KEY);
+                assert_eq!(decoded[0].code, 30);
+                assert_eq!(decoded[0].value, 1);
+                assert_eq!(decoded[0].timestamp_ns, 0x0102_0304_0506_0708);
+                assert_eq!(decoded[0].sequence, 9);
+                assert_eq!(decoded[0].device_id, 3);
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn input_batch_full_sixteen_records_maps() {
+        let mut text = [0u8; INPUT_TEXT_LEN];
+        text[..2].copy_from_slice(b"ok");
+        let mut records = [InputRecord::default(); MAX_INPUT_RECORDS];
+        records[0] = record(INPUT_EVENT_KEY, 30, 1, 0, [0; INPUT_TEXT_LEN]);
+        records[1] = record(INPUT_EVENT_TEXT, 0, 2, 0, text);
+        records[2] = record(
+            INPUT_EVENT_POINTER_MOTION,
+            5,
+            -7,
+            INPUT_FLAG_ABSOLUTE,
+            [0; INPUT_TEXT_LEN],
+        );
+        records[3] = record(INPUT_EVENT_POINTER_BUTTON, 1, 1, 0, [0; INPUT_TEXT_LEN]);
+        records[4] = record(INPUT_EVENT_FOCUS_GAINED, 0, 0, 0, [0; INPUT_TEXT_LEN]);
+        records[5] = record(INPUT_EVENT_FOCUS_LOST, 0, 0, 0, [0; INPUT_TEXT_LEN]);
+        for (index, slot) in records.iter_mut().enumerate().skip(6) {
+            *slot = record(INPUT_EVENT_KEY, 100 + index as u16, index as i32, 0, [0; INPUT_TEXT_LEN]);
+        }
+        let batch = batch_body(&records, 0xdead_beef);
+        // 16 records still fit one datagram (8 + 16 * 48 + header).
+        let message = frame(Opcode::INPUT_BATCH, 7, 0, &Body::InputBatch(batch));
+        assert!(message.len() <= MAX_MESSAGE);
+
+        let (_, event) = decode_frame(&message).expect("frame decodes");
+        match event {
+            Event::InputBatch {
+                surface,
+                focus_epoch,
+                batch: decoded,
+            } => {
+                assert_eq!(surface, 7);
+                assert_eq!(focus_epoch, 0xdead_beef);
+                assert_eq!(decoded.count, MAX_INPUT_RECORDS as u16);
+                assert_eq!(decoded, batch);
+                let decoded = decoded.records();
+                assert_eq!(decoded.len(), MAX_INPUT_RECORDS);
+                assert_eq!(decoded[0].event_type, INPUT_EVENT_KEY);
+                assert_eq!(decoded[1].event_type, INPUT_EVENT_TEXT);
+                assert_eq!(decoded[1].value, 2);
+                assert_eq!(&decoded[1].text[..2], b"ok");
+                assert_eq!(decoded[2].event_type, INPUT_EVENT_POINTER_MOTION);
+                assert_eq!(decoded[2].value, -7);
+                assert_eq!(decoded[2].flags, INPUT_FLAG_ABSOLUTE);
+                assert_eq!(decoded[4].event_type, INPUT_EVENT_FOCUS_GAINED);
+                assert_eq!(decoded[5].event_type, INPUT_EVENT_FOCUS_LOST);
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn input_reset_maps_reason_and_epoch() {
+        for reason in [INPUT_RESET_RESYNC, INPUT_RESET_SERVICE_CHANGED] {
+            let message = frame(
+                Opcode::INPUT_RESET,
+                0x21,
+                0,
+                &Body::InputReset {
+                    focus_epoch: 0x0102_0304,
+                    reason,
+                },
+            );
+            let (_, event) = decode_frame(&message).expect("frame decodes");
+            assert_eq!(
+                event,
+                Event::InputReset {
+                    surface: 0x21,
+                    focus_epoch: 0x0102_0304,
+                    reason,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn output_events_map_to_owned_events() {
+        let message = frame(
+            Opcode::OUTPUT_INFO,
+            1,
+            0,
+            &Body::OutputInfo {
+                width: 800,
+                height: 600,
+                stride: 3200,
+                format: FORMAT_XRGB8888,
+                scale: 1,
+            },
+        );
+        assert_eq!(
+            decode_frame(&message).unwrap().1,
+            Event::OutputInfo {
+                output: 1,
+                width: 800,
+                height: 600,
+                stride: 3200,
+                format: FORMAT_XRGB8888,
+                scale: 1,
+            }
+        );
+
+        let message = frame(Opcode::OUTPUT_REMOVED, 1, 0, &Body::OutputRemoved);
+        assert_eq!(
+            decode_frame(&message).unwrap().1,
+            Event::OutputRemoved { output: 1 }
+        );
+    }
+
+    #[test]
+    fn malformed_output_frames_map_to_other() {
+        // A.3.1 output objects must be non-zero.
+        let zero_object = frame(
+            Opcode::OUTPUT_INFO,
+            0,
+            0,
+            &Body::OutputInfo {
+                width: 800,
+                height: 600,
+                stride: 3200,
+                format: FORMAT_XRGB8888,
+                scale: 1,
+            },
+        );
+        let (header, event) = decode_frame(&zero_object).expect("header still decodes");
+        assert_eq!(header.object_id, 0);
+        assert_eq!(event, Event::Other);
+
+        // Reserved field must be zero.
+        let mut bad = frame(
+            Opcode::OUTPUT_INFO,
+            1,
+            0,
+            &Body::OutputInfo {
+                width: 800,
+                height: 600,
+                stride: 3200,
+                format: FORMAT_XRGB8888,
+                scale: 1,
+            },
+        );
+        bad[HEADER_LEN + 20] = 1;
+        let (_, event) = decode_frame(&bad).expect("header still decodes");
+        assert_eq!(event, Event::Other);
+    }
+
+    #[test]
+    fn malformed_input_frames_map_to_other() {
+        // Truncated: `count = 2` announced but only the fixed body arrived.
+        let mut truncated = frame(
+            Opcode::INPUT_BATCH,
+            7,
+            0,
+            &Body::InputBatch(batch_body(&[], 1)),
+        );
+        truncated[HEADER_LEN] = 2;
+        let (_, event) = decode_frame(&truncated).expect("header still decodes");
+        assert_eq!(event, Event::Other);
+
+        // 17 records: the protocol decoder rejects the count, not this client.
+        let mut too_many = frame(
+            Opcode::INPUT_BATCH,
+            7,
+            0,
+            &Body::InputBatch(batch_body(&[], 1)),
+        );
+        too_many[HEADER_LEN] = MAX_INPUT_RECORDS as u8 + 1;
+        assert!(Body::decode(Opcode::INPUT_BATCH.value(), 7, &too_many[HEADER_LEN..]).is_err());
+        let (_, event) = decode_frame(&too_many).expect("header still decodes");
+        assert_eq!(event, Event::Other);
+
+        // INPUT_RESET with an undefined reason.
+        let mut bad_reason = frame(
+            Opcode::INPUT_RESET,
+            7,
+            0,
+            &Body::InputReset {
+                focus_epoch: 1,
+                reason: INPUT_RESET_RESYNC,
+            },
+        );
+        bad_reason[HEADER_LEN + 4] = 9;
+        let (_, event) = decode_frame(&bad_reason).expect("header still decodes");
+        assert_eq!(event, Event::Other);
+
+        // Input events are bound to a surface: object 0 is rejected.
+        let zero_object = frame(
+            Opcode::INPUT_RESET,
+            0,
+            0,
+            &Body::InputReset {
+                focus_epoch: 1,
+                reason: INPUT_RESET_SERVICE_CHANGED,
+            },
+        );
+        let (header, event) = decode_frame(&zero_object).expect("header still decodes");
+        assert_eq!(header.object_id, 0);
+        assert_eq!(event, Event::Other);
     }
 
     fn mapping(buffer: u64, surface: u64, addr: usize, len: usize) -> Mapping {

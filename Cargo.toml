@@ -58,7 +58,7 @@ members = [
     "workspace/components/input-client",
     "workspace/components/vasistas-core",
     "workspace/components/vasistas-backend",
-    "workspace/components/lucarne",
+    "workspace/components/vasistas-client",
     "workspace/components/vasistas",
 ]
 exclude = [

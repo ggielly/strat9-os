@@ -139,6 +139,33 @@ impl<'a> SharedPixels<'a> {
         Ok(self.copy_rows(x, y, w, h, dst, dst_stride))
     }
 
+    /// Copy the surface-local `rect` into `dst` at frame position
+    /// `(dst_x, dst_y)`.
+    ///
+    /// Unlike [`SharedPixels::copy_rect`], the destination offset is explicit:
+    /// the server places a surface's damage at the surface's screen origin in
+    /// its private backbuffer. The source stays surface-local, so a rect is
+    /// never read outside the client surface.
+    pub fn copy_rect_to(
+        &self,
+        rect: Rect,
+        dst_x: u32,
+        dst_y: u32,
+        dst: &mut [u8],
+        dst_stride: u32,
+    ) -> Result<u64, PixelError> {
+        let (x, y, w, h) = self.check_rect(rect)?;
+        check_dst(dst_x, dst_y, w, h, dst_stride, dst.len())?;
+        let row_bytes = w as usize * 4;
+        for row in 0..h {
+            let src_off = (y + row) as usize * self.stride as usize + x as usize * 4;
+            let dst_off = (dst_y + row) as usize * dst_stride as usize + dst_x as usize * 4;
+            dst[dst_off..dst_off + row_bytes]
+                .copy_from_slice(&self.bytes[src_off..src_off + row_bytes]);
+        }
+        Ok(row_bytes as u64 * h as u64)
+    }
+
     /// Copy every rect of `damage` into `dst`, or copy nothing.
     ///
     /// Every rectangle and the destination geometry are validated before the
@@ -359,6 +386,50 @@ mod tests {
         let mut dst = vec![0u8; 64];
         assert_eq!(view.copy_rect(rect(0, 0, 4, 4), &mut dst, 16), Ok(64));
         assert_eq!(dst, src);
+    }
+
+    #[test]
+    fn copy_rect_to_places_pixels_at_the_destination_offset() {
+        let src = source(4, 4, 16);
+        let view = SharedPixels::new(&src, 4, 4, 16).unwrap();
+        // 8x4 destination frame; copy the 2x2 source block at (2, 1) to (5, 2).
+        let mut dst = vec![0u8; 8 * 4 * 4];
+        assert_eq!(
+            view.copy_rect_to(rect(2, 1, 2, 2), 5, 2, &mut dst, 8 * 4),
+            Ok(2 * 2 * 4)
+        );
+        for row in 0..2u32 {
+            for col in 0..2u32 {
+                let off = ((2 + row) * 8 * 4 + (5 + col) * 4) as usize;
+                assert_eq!(dst[off], ((row + 1) % 256) as u8, "row marker");
+                assert_eq!(dst[off + 1], ((col + 2) % 256) as u8, "col marker");
+                assert_eq!(dst[off + 2], 0xEE);
+                assert_eq!(dst[off + 3], 0xEE);
+            }
+        }
+        // Only the placed block was written.
+        assert_eq!(dst.iter().filter(|byte| **byte != 0).count(), 2 * 2 * 4);
+    }
+
+    #[test]
+    fn copy_rect_to_validates_the_source_and_destination() {
+        let src = source(4, 4, 16);
+        let view = SharedPixels::new(&src, 4, 4, 16).unwrap();
+        let mut dst = vec![0u8; 16 * 4];
+        // Source rect outside the surface.
+        assert_eq!(
+            view.copy_rect_to(rect(3, 0, 2, 1), 0, 0, &mut dst, 16),
+            Err(PixelError::OutOfBounds)
+        );
+        // Destination offsets outside the frame.
+        assert_eq!(
+            view.copy_rect_to(rect(0, 0, 2, 1), 3, 0, &mut dst, 16),
+            Err(PixelError::BadStride)
+        );
+        assert_eq!(
+            view.copy_rect_to(rect(0, 0, 2, 1), 0, 4, &mut dst, 16),
+            Err(PixelError::ShortBuffer)
+        );
     }
 
     #[test]

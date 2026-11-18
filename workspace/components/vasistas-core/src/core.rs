@@ -42,7 +42,8 @@ use crate::{
         SurfaceId,
     },
     FORMAT_XRGB8888, MAX_BUFFERS_PER_SESSION, MAX_RECTS, MAX_RETIRED_REGIONS, MAX_SESSIONS,
-    MAX_SURFACES_PER_SESSION, MAX_SURFACE_DIM, MAX_TITLE, PIXEL_QUOTA_BYTES,
+    MAX_SURFACES_PER_SESSION, MAX_SURFACE_DIM, MAX_TITLE, PIXEL_QUOTA_BYTES, TILE_COLUMNS,
+    TILE_HEIGHT, TILE_WIDTH,
 };
 
 /// Aggregate resource counters of a [`DisplayCore`].
@@ -119,6 +120,9 @@ pub struct DisplayCore<B: Backend> {
     buffer_gen: [u32; MAX_BUFFERS_PER_SESSION],
     /// Regions awaiting an explicit [`Backend::free`] (bounded).
     retired: [Option<RetiredRegion>; MAX_RETIRED_REGIONS],
+    /// Server-wide pixel budget in bytes, across every session; `0` disables
+    /// the check (A.6).
+    global_budget: usize,
 }
 
 /// Ids pack a slot index and a 32-bit generation; generations wrap after
@@ -141,6 +145,26 @@ fn rect_in_bounds(rect: &Rect, width: u32, height: u32) -> bool {
         && rect.h > 0
         && rect.x as i64 + rect.w as i64 <= width as i64
         && rect.y as i64 + rect.h as i64 <= height as i64
+}
+
+/// Screen-space origin of the session occupying `slot` of the tile grid.
+///
+/// `slot` is the session's index in the fixed session table, so `slot 0` is the
+/// top-left tile and `slot 7` the bottom-right one. Tiles are disjoint.
+fn tile_origin(slot: usize) -> (u32, u32) {
+    let slot = slot as u32;
+    (
+        (slot % TILE_COLUMNS) * TILE_WIDTH,
+        (slot / TILE_COLUMNS) * TILE_HEIGHT,
+    )
+}
+
+/// True when the screen point `(x, y)` falls inside `surface`'s origin tile.
+fn tile_contains(surface: &Surface, x: u32, y: u32) -> bool {
+    x >= surface.x
+        && x - surface.x < TILE_WIDTH
+        && y >= surface.y
+        && y - surface.y < TILE_HEIGHT
 }
 
 /// Merge commit damage into the accumulated surface damage.
@@ -238,6 +262,7 @@ impl<B: Backend> DisplayCore<B> {
             surface_gen: [1; MAX_SURFACES_PER_SESSION],
             buffer_gen: [1; MAX_BUFFERS_PER_SESSION],
             retired: [const { None }; MAX_RETIRED_REGIONS],
+            global_budget: 0,
         }
     }
 
@@ -294,6 +319,7 @@ impl<B: Backend> DisplayCore<B> {
             for index in 0..MAX_BUFFERS_PER_SESSION {
                 buffer_gen.add(index).write(1);
             }
+            ptr::addr_of_mut!((*this).global_budget).write(0);
         }
     }
 
@@ -381,8 +407,11 @@ impl<B: Backend> DisplayCore<B> {
             .ok_or(CoreError::Limit)?;
         let id = SurfaceId::from_slot(slot, surface_gen[slot]);
         surface_gen[slot] = next_generation(surface_gen[slot]);
+        let (x, y) = tile_origin(index);
         session.surfaces[slot] = Some(Surface {
             id,
+            x,
+            y,
             width,
             height,
             format,
@@ -502,7 +531,8 @@ impl<B: Backend> DisplayCore<B> {
     /// 4. `width * 4` does not overflow;
     /// 5. `stride >= width * 4` and `stride % 4 == 0` (4-byte pixels);
     /// 6. per-surface buffer count;
-    /// 7. session pixel quota.
+    /// 7. session pixel quota;
+    /// 8. server-wide pixel budget (A.6), when enabled.
     ///
     /// `stride * height` is charged to the session quota.
     pub fn allocate_buffer(
@@ -515,6 +545,8 @@ impl<B: Backend> DisplayCore<B> {
         stride: u32,
     ) -> Result<BufferId, CoreError> {
         let index = self.session_slot(session_id)?;
+        let global_budget = self.global_budget;
+        let total_used = self.total_used_bytes();
         let session = self.sessions[index].as_mut().ok_or(CoreError::NoSession)?;
         let surface_slot = surface_index(session, surface_id)?;
         let (surface_width, surface_height, surface_format) = {
@@ -554,6 +586,9 @@ impl<B: Backend> DisplayCore<B> {
             .checked_add(bytes)
             .ok_or(CoreError::Quota)?;
         if used > PIXEL_QUOTA_BYTES {
+            return Err(CoreError::Quota);
+        }
+        if global_budget != 0 && total_used.saturating_add(bytes) > global_budget {
             return Err(CoreError::Quota);
         }
         let slot = session
@@ -830,7 +865,7 @@ impl<B: Backend> DisplayCore<B> {
         surface_id: SurfaceId,
     ) -> Result<(), CoreError> {
         let index = self.session_slot(session_id)?;
-        let (region, damage, width, height, commit_id, acked_serial) = {
+        let (region, damage, width, height, commit_id, acked_serial, origin_x, origin_y) = {
             let session = self.sessions[index].as_ref().ok_or(CoreError::NoSession)?;
             let surface_slot = surface_index(session, surface_id)?;
             let surface = session.surfaces[surface_slot]
@@ -851,6 +886,8 @@ impl<B: Backend> DisplayCore<B> {
                 buffer.height,
                 surface.last_commit_id,
                 surface.acked_serial,
+                surface.x,
+                surface.y,
             )
         };
 
@@ -877,7 +914,7 @@ impl<B: Backend> DisplayCore<B> {
         };
 
         self.backend
-            .present(surface_id, region, slice)
+            .present(surface_id, region, slice, origin_x, origin_y)
             .map_err(|_| CoreError::BackendError)?;
 
         let session = self.sessions[index].as_mut().ok_or(CoreError::NoSession)?;
@@ -946,6 +983,26 @@ impl<B: Backend> DisplayCore<B> {
             .used_bytes)
     }
 
+    /// Set the server-wide pixel budget in bytes; `0` disables the check.
+    pub fn set_global_budget(&mut self, bytes: usize) {
+        self.global_budget = bytes;
+    }
+
+    /// Server-wide pixel budget in bytes (`0` = disabled).
+    pub fn global_budget(&self) -> usize {
+        self.global_budget
+    }
+
+    /// Saturating sum of `used_bytes` over every live session.
+    pub fn total_used_bytes(&self) -> usize {
+        self.sessions
+            .iter()
+            .flatten()
+            .fold(0usize, |total, session| {
+                total.saturating_add(session.used_bytes)
+            })
+    }
+
     /// Number of live sessions.
     pub fn session_count(&self) -> usize {
         self.sessions
@@ -998,6 +1055,46 @@ impl<B: Backend> DisplayCore<B> {
         session.surfaces[slot].as_ref().ok_or(CoreError::NoSurface)
     }
 
+    /// Screen-space origin of `surface_id`'s tile.
+    ///
+    /// Every surface of a session shares the session's tile origin. Fails with
+    /// the usual stale/foreign-handle errors ([`CoreError::BadObject`],
+    /// [`CoreError::NoSession`], [`CoreError::NoSurface`]).
+    pub fn surface_origin(
+        &self,
+        session_id: SessionId,
+        surface_id: SurfaceId,
+    ) -> Result<(u32, u32), CoreError> {
+        let surface = self.surface(session_id, surface_id)?;
+        Ok((surface.x, surface.y))
+    }
+
+    /// Topmost surface whose origin tile contains the screen point `(x, y)`.
+    ///
+    /// Tiles are disjoint, so a point maps to at most one session. Sessions are
+    /// scanned from the highest slot down, and within a session the highest
+    /// surface slot wins, so the topmost surface is returned even when it
+    /// extends past its tile. A surface with a current image is preferred over
+    /// one created but never committed; destroyed surfaces are ignored.
+    pub fn surface_at(&self, x: u32, y: u32) -> Option<(SessionId, SurfaceId)> {
+        for session in self.sessions.iter().rev().flatten() {
+            let mut fallback = None;
+            for surface in session.surfaces.iter().rev().flatten() {
+                if surface.destroyed || !tile_contains(surface, x, y) {
+                    continue;
+                }
+                if surface.current.is_some() {
+                    return Some((session.id, surface.id));
+                }
+                fallback.get_or_insert(surface.id);
+            }
+            if let Some(id) = fallback {
+                return Some((session.id, id));
+            }
+        }
+        None
+    }
+
     /// Read a buffer record.
     pub fn buffer(&self, session_id: SessionId, buffer_id: BufferId) -> Result<&Buffer, CoreError> {
         let index = self.session_slot(session_id)?;
@@ -1043,7 +1140,7 @@ impl<B: Backend> Drop for DisplayCore<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{RegionHandle, MAX_RECTS, MAX_SESSIONS, PIXEL_QUOTA_BYTES};
+    use crate::{RegionHandle, MAX_RECTS, MAX_SESSIONS, PIXEL_QUOTA_BYTES, TILE_ROWS};
     use vasistas_protocol::{FLAG_FULL_DAMAGE, MAX_RECTS as PROTOCOL_MAX_RECTS};
 
     #[derive(Default)]
@@ -1055,6 +1152,8 @@ mod tests {
         last_damage: usize,
         last_region: u64,
         last_rects: [Rect; MAX_RECTS],
+        last_x: u32,
+        last_y: u32,
         fail_allocation: bool,
     }
 
@@ -1086,12 +1185,16 @@ mod tests {
             _surface: SurfaceId,
             region: RegionHandle,
             damage: &[Rect],
+            x: u32,
+            y: u32,
         ) -> Result<(), Self::Error> {
             self.presents += 1;
             self.last_damage = damage.len();
             let count = damage.len().min(MAX_RECTS);
             self.last_rects[..count].copy_from_slice(&damage[..count]);
             self.last_region = region.raw();
+            self.last_x = x;
+            self.last_y = y;
             Ok(())
         }
     }
@@ -1123,6 +1226,8 @@ mod tests {
             _surface: SurfaceId,
             _region: RegionHandle,
             _damage: &[Rect],
+            _x: u32,
+            _y: u32,
         ) -> Result<(), Self::Error> {
             Ok(())
         }
@@ -1529,6 +1634,69 @@ mod tests {
         core.import_result(session, failing, false).unwrap();
         assert_eq!(core.used_bytes(session).unwrap(), 4);
         assert!(core.buffer(session, failing).is_err());
+    }
+
+    #[test]
+    fn global_budget_is_shared_and_refunded() {
+        const MIB: usize = 1024 * 1024;
+        let mut core = DisplayCore::new(Fake::default());
+        let first = core.create_session().unwrap();
+        let second = core.create_session().unwrap();
+        assert_eq!(core.global_budget(), 0, "budget starts disabled");
+        // Per-session quotas stay 8 MiB; the server-wide budget is 9 MiB.
+        core.set_global_budget(9 * MIB);
+        assert_eq!(core.global_budget(), 9 * MIB);
+        let surface_a = core
+            .create_surface(first, 1024, 1024, FORMAT_XRGB8888, 0)
+            .unwrap();
+        let surface_b = core
+            .create_surface(second, 1024, 1024, FORMAT_XRGB8888, 0)
+            .unwrap();
+        let buffer_a = core
+            .allocate_buffer(first, surface_a, 1024, 1024, FORMAT_XRGB8888, 4096)
+            .unwrap();
+        let buffer_b = core
+            .allocate_buffer(second, surface_b, 1024, 1024, FORMAT_XRGB8888, 4096)
+            .unwrap();
+        assert_eq!(core.total_used_bytes(), 8 * MIB);
+
+        // A third 4 MiB buffer crosses the global budget: rejected, and both
+        // sessions keep their charge.
+        assert_eq!(
+            core.allocate_buffer(first, surface_a, 1024, 1024, FORMAT_XRGB8888, 4096),
+            Err(CoreError::Quota)
+        );
+        assert_eq!(core.used_bytes(first).unwrap(), 4 * MIB);
+        assert_eq!(core.used_bytes(second).unwrap(), 4 * MIB);
+        assert_eq!(core.total_used_bytes(), 8 * MIB);
+
+        // Destroying a buffer refunds the global budget.
+        core.import_result(first, buffer_a, true).unwrap();
+        core.destroy_buffer(first, buffer_a).unwrap();
+        assert_eq!(core.total_used_bytes(), 4 * MIB);
+        let recycled = core
+            .allocate_buffer(first, surface_a, 1024, 1024, FORMAT_XRGB8888, 4096)
+            .unwrap();
+        assert_eq!(core.total_used_bytes(), 8 * MIB);
+        core.import_result(first, recycled, true).unwrap();
+        let _ = buffer_b;
+
+        // Zero disables the check: both sessions reach their 8 MiB quota,
+        // i.e. 16 MiB total, well past the 9 MiB budget.
+        core.set_global_budget(0);
+        let extra_a = core
+            .create_surface(first, 1024, 1024, FORMAT_XRGB8888, 0)
+            .unwrap();
+        let extra_b = core
+            .create_surface(second, 1024, 1024, FORMAT_XRGB8888, 0)
+            .unwrap();
+        assert!(core
+            .allocate_buffer(first, extra_a, 1024, 1024, FORMAT_XRGB8888, 4096)
+            .is_ok());
+        assert!(core
+            .allocate_buffer(second, extra_b, 1024, 1024, FORMAT_XRGB8888, 4096)
+            .is_ok());
+        assert_eq!(core.total_used_bytes(), 16 * MIB);
     }
 
     #[test]
@@ -2408,6 +2576,8 @@ mod tests {
             _surface: SurfaceId,
             _region: RegionHandle,
             damage: &[Rect],
+            _x: u32,
+            _y: u32,
         ) -> Result<(), Self::Error> {
             for rect in damage {
                 let x0 = rect.x as usize;
@@ -2468,5 +2638,186 @@ mod tests {
         core.commit(session, surface, &full2).unwrap();
         core.present_current(session, surface).unwrap();
         assert_eq!(core.backend.front, core.backend.src);
+    }
+
+    #[test]
+    fn session_slots_map_to_tile_origins() {
+        let mut core = DisplayCore::new(Fake::default());
+        let mut sessions = [None; MAX_SESSIONS];
+        for slot in sessions.iter_mut() {
+            *slot = Some(core.create_session().unwrap());
+        }
+        for (slot, session) in sessions.iter().enumerate() {
+            let session = session.expect("session created");
+            let surface = add_surface(&mut core, session);
+            let expected = (
+                (slot as u32 % TILE_COLUMNS) * TILE_WIDTH,
+                (slot as u32 / TILE_COLUMNS) * TILE_HEIGHT,
+            );
+            assert_eq!(
+                core.surface_origin(session, surface),
+                Ok(expected),
+                "slot {slot}"
+            );
+            let record = core.surface(session, surface).unwrap();
+            assert_eq!((record.x, record.y), expected, "surface record slot {slot}");
+        }
+        assert_eq!(
+            (TILE_COLUMNS, TILE_ROWS),
+            (4, 2),
+            "the grid must cover MAX_SESSIONS"
+        );
+        let last_session = sessions[MAX_SESSIONS - 1].unwrap();
+        let last_surface = core
+            .create_surface(last_session, W, H, FORMAT_XRGB8888, 0)
+            .unwrap();
+        assert_eq!(
+            core.surface_origin(last_session, last_surface),
+            Ok((1200, 300)),
+            "slot 7 is the bottom-right tile"
+        );
+
+        // Every surface of one session shares the session origin.
+        let session = sessions[5].unwrap();
+        let a = add_surface(&mut core, session);
+        let b = add_surface(&mut core, session);
+        assert_eq!(core.surface_origin(session, a), Ok((400, 300)));
+        assert_eq!(core.surface_origin(session, b), Ok((400, 300)));
+    }
+
+    #[test]
+    fn surface_origin_rejects_stale_and_foreign_ids() {
+        let mut core = DisplayCore::new(Fake::default());
+        let session = core.create_session().unwrap();
+        let first = add_surface(&mut core, session);
+        core.destroy_surface(session, first).unwrap();
+        let second = add_surface(&mut core, session);
+        assert_ne!(first, second, "surface slot reuse bumps the generation");
+        assert_eq!(
+            core.surface_origin(session, first),
+            Err(CoreError::BadObject),
+            "destroyed surface handle is stale"
+        );
+        // Unknown raw handles never resolve.
+        assert_eq!(
+            core.surface_origin(session, SurfaceId::from_raw(0)),
+            Err(CoreError::BadObject)
+        );
+        assert_eq!(
+            core.surface_origin(session, SurfaceId::from_raw(u64::MAX)),
+            Err(CoreError::BadObject)
+        );
+
+        // A closed session's handle is stale even after the slot is reused.
+        core.close_session(session).unwrap();
+        let fresh = core.create_session().unwrap();
+        assert_ne!(session, fresh);
+        assert_eq!(
+            core.surface_origin(session, second),
+            Err(CoreError::BadObject)
+        );
+        assert_eq!(
+            core.surface_origin(fresh, second),
+            Err(CoreError::NoSurface),
+            "the reused session slot has no surface yet"
+        );
+    }
+
+    #[test]
+    fn surface_at_maps_points_to_tiles() {
+        let mut core = DisplayCore::new(Fake::default());
+        let mut sessions = [None; MAX_SESSIONS];
+        let mut surfaces = [None; MAX_SESSIONS];
+        for slot in 0..MAX_SESSIONS {
+            let session = core.create_session().unwrap();
+            sessions[slot] = Some(session);
+            surfaces[slot] = Some(add_surface(&mut core, session));
+        }
+        for slot in 0..MAX_SESSIONS {
+            let (x, y) = tile_origin(slot);
+            let expected = (sessions[slot].unwrap(), surfaces[slot].unwrap());
+            assert_eq!(core.surface_at(x, y), Some(expected), "slot {slot} origin");
+            assert_eq!(
+                core.surface_at(x + TILE_WIDTH - 1, y + TILE_HEIGHT - 1),
+                Some(expected),
+                "slot {slot} last pixel"
+            );
+        }
+        // Half-open tiles: the right edge of slot 0 is the first pixel of slot 1.
+        assert_eq!(
+            core.surface_at(TILE_WIDTH - 1, 0),
+            Some((sessions[0].unwrap(), surfaces[0].unwrap()))
+        );
+        assert_eq!(
+            core.surface_at(TILE_WIDTH, 0),
+            Some((sessions[1].unwrap(), surfaces[1].unwrap()))
+        );
+        // The bottom edge of the top row is the first pixel of the bottom row.
+        assert_eq!(
+            core.surface_at(0, TILE_HEIGHT),
+            Some((sessions[4].unwrap(), surfaces[4].unwrap()))
+        );
+        // Outside the tile grid.
+        assert_eq!(core.surface_at(TILE_COLUMNS * TILE_WIDTH, 0), None);
+        assert_eq!(core.surface_at(0, TILE_ROWS * TILE_HEIGHT), None);
+        assert_eq!(core.surface_at(u32::MAX, u32::MAX), None);
+    }
+
+    #[test]
+    fn surface_at_prefers_current_image_and_skips_destroyed() {
+        let (mut core, session) = new_core();
+        let first = add_surface(&mut core, session);
+        let second = add_surface(&mut core, session);
+        let buffer = add_buffer(&mut core, session, first);
+        core.commit(session, first, &commit_body(buffer, 0, 1))
+            .unwrap();
+        assert_eq!(
+            core.surface_at(1, 1),
+            Some((session, first)),
+            "the surface with a current image wins over a higher empty slot"
+        );
+
+        core.frame_done(session, first, buffer, 1).unwrap();
+        core.destroy_surface(session, second).unwrap();
+        assert_eq!(core.surface_at(1, 1), Some((session, first)));
+
+        // No image anywhere: the highest live surface slot still wins.
+        let (mut core, session) = new_core();
+        let lower = add_surface(&mut core, session);
+        let upper = add_surface(&mut core, session);
+        assert_eq!(core.surface_at(1, 1), Some((session, upper)));
+        core.destroy_surface(session, upper).unwrap();
+        assert_eq!(core.surface_at(1, 1), Some((session, lower)));
+    }
+
+    #[test]
+    fn present_current_forwards_the_surface_origin() {
+        let mut core = DisplayCore::new(Fake::default());
+        let mut last = None;
+        for _ in 0..MAX_SESSIONS {
+            last = Some(core.create_session().unwrap());
+        }
+        let session = last.unwrap();
+        let surface = add_surface(&mut core, session);
+        let buffer = add_buffer(&mut core, session, surface);
+        core.commit(session, surface, &commit_body(buffer, 0, 1))
+            .unwrap();
+        core.present_current(session, surface).unwrap();
+        assert_eq!(core.backend().presents, 1);
+        assert_eq!(
+            (core.backend().last_x, core.backend().last_y),
+            (1200, 300),
+            "slot 7 tile origin is forwarded to the backend"
+        );
+        assert_eq!(
+            core.backend().last_rects[0],
+            Rect {
+                x: 0,
+                y: 0,
+                w: W,
+                h: H
+            },
+            "damage rects stay surface-local"
+        );
     }
 }

@@ -183,17 +183,16 @@ impl ProcScheme {
     }
 
     /// Generate /proc/meminfo content
+    ///
+    /// Values come from the buddy frame allocator. A `(0, 0)` snapshot means
+    /// the allocator is not initialised yet (early boot): fall back to the
+    /// historical 256 MiB placeholder instead of reporting a bogus 0 total.
     fn get_meminfo(&self) -> String {
-        // Simplified meminfo for now
-        let mut output = String::new();
-        let _ = writeln!(output, "MemTotal:       {:>10} kB", 262144); // 256 MB default
-        let _ = writeln!(output, "MemFree:        {:>10} kB", 131072);
-        let _ = writeln!(output, "MemUsed:        {:>10} kB", 131072);
-        let _ = writeln!(output, "Buffers:               0 kB");
-        let _ = writeln!(output, "Cached:                0 kB");
-        let _ = writeln!(output, "SwapTotal:             0 kB");
-        let _ = writeln!(output, "SwapFree:              0 kB");
-        output
+        let (total, free) = crate::memory::buddy::meminfo_bytes();
+        if total == 0 {
+            return crate::vfs::meminfo::format_meminfo(256 * 1024 * 1024, 128 * 1024 * 1024);
+        }
+        crate::vfs::meminfo::format_meminfo(total, free)
     }
 
     /// Generate /proc/version content

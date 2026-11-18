@@ -36,10 +36,11 @@
 #![no_std]
 #![no_main]
 
+use core::fmt::Write as _;
 use core::panic::PanicInfo;
 
-use lucarne::{Client, Event};
-use vasistas_protocol::Rect;
+use vasistas_client::{Client, Event};
+use vasistas_protocol::{INPUT_EVENT_FOCUS_GAINED, INPUT_EVENT_FOCUS_LOST};
 use strat9_syscall::{call, data::TimeSpec};
 
 const WIDTH: u32 = 320;
@@ -52,40 +53,57 @@ const FRAMES: u32 = 120;
 const CONNECT_TIMEOUT_NS: u64 = 100_000_000;
 
 struct View {
-    buffer: lucarne::Buffer,
+    buffer: vasistas_client::Buffer,
     width: u32,
     height: u32,
 }
 
+/// Event logging: proves delivery without leaking input contents. Pure
+/// pointer-motion batches are dropped so a moving pointer cannot flood the
+/// serial line; every other batch is logged, and each focus transition once.
+/// The single output geometry is logged exactly once.
+#[derive(Default)]
+struct EventLog {
+    /// Last logged focus state: `Some(true)` gained, `Some(false)` lost.
+    focus: Option<bool>,
+    /// Set once `OUTPUT_INFO` has been logged.
+    output: bool,
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    log(b"[lucarne-demo] waiting for /srv/vasistas\n");
+    log(b"[vasistas-demo] waiting for /srv/vasistas\n");
     let mut client = loop {
         match Client::connect(b"/srv/vasistas", CONNECT_TIMEOUT_NS) {
             Some(client) => break client,
             None => sleep_ms(50),
         }
     };
-    log(b"[lucarne-demo] connected\n");
+    log(b"[vasistas-demo] connected\n");
     log_pid(client.pid());
+    let mut event_log = EventLog::default();
 
     let surface = match create_surface(&mut client, WIDTH, HEIGHT) {
         Some(surface) => surface,
-        None => fatal(b"[lucarne-demo] create_surface failed\n"),
+        None => fatal(b"[vasistas-demo] create_surface failed\n"),
     };
 
     let mut view = match alloc_view(&mut client, surface, WIDTH, HEIGHT) {
         Some(view) => view,
-        None => fatal(b"[lucarne-demo] alloc_buffer failed\n"),
+        None => fatal(b"[vasistas-demo] alloc_buffer failed\n"),
     };
     let mut other = match alloc_view(&mut client, surface, WIDTH, HEIGHT) {
         Some(view) => view,
-        None => fatal(b"[lucarne-demo] second alloc_buffer failed\n"),
+        None => fatal(b"[vasistas-demo] second alloc_buffer failed\n"),
     };
     fill_gradient(&mut view.buffer);
     draw_square_at(&mut view.buffer, 8, 8);
     fill_gradient(&mut other.buffer);
     draw_square_at(&mut other.buffer, 8, 8);
+
+    // `OUTPUT_INFO` arrives right after `WELCOME`; a synchronous helper may
+    // have consumed it, so read the geometry recorded by the client.
+    log_output_once(&client, &mut event_log);
 
     let mut serial = 0u64;
     let mut commit_id = 1u64;
@@ -94,13 +112,13 @@ pub extern "C" fn _start() -> ! {
             if let Some(frame) = result.frame {
                 serial = frame.serial;
                 if !frame.present_submitted() {
-                    log(b"[lucarne-demo] first frame not submitted\n");
+                    log(b"[vasistas-demo] first frame not submitted\n");
                 }
             }
         }
-        None => fatal(b"[lucarne-demo] first commit failed\n"),
+        None => fatal(b"[vasistas-demo] first commit failed\n"),
     }
-    log(b"[lucarne-demo] first frame presented\n");
+    log(b"[vasistas-demo] first frame presented\n");
 
     let mut x = 8i32;
     let mut y = 8i32;
@@ -117,6 +135,7 @@ pub extern "C" fn _start() -> ! {
                         &mut view,
                         &mut serial,
                         &mut commit_id,
+                        &mut event_log,
                         event,
                     ) {
                         finish(client);
@@ -147,12 +166,12 @@ pub extern "C" fn _start() -> ! {
                     core::mem::swap(&mut view, &mut other);
                 }
             }
-            None => log(b"[lucarne-demo] commit failed\n"),
+            None => log(b"[vasistas-demo] commit failed\n"),
         }
         sleep_ms(16);
     }
 
-    log(b"[lucarne-demo] animation done\n");
+    log(b"[vasistas-demo] animation done\n");
     // Resize: create a new surface with a different geometry, present one
     // full frame, then destroy the old surface. This exercises surface
     // creation/destruction, quota refund and the second surface slot.
@@ -166,13 +185,13 @@ pub extern "C" fn _start() -> ! {
                     serial = frame.serial;
                 }
             }
-            log(b"[lucarne-demo] resized frame presented\n");
+            log(b"[vasistas-demo] resized frame presented\n");
             // The resized buffer is the surface's current image: destroying it
             // first is BAD_STATE. Destroy the old surface (retires its two
             // buffers) and the resized surface (retires its current buffer).
             let _ = client.destroy_surface(surface);
             let _ = client.destroy_surface(resized);
-            log(b"[lucarne-demo] resized surface closed\n");
+            log(b"[vasistas-demo] resized surface closed\n");
         }
     }
     finish(client)
@@ -183,6 +202,21 @@ fn finish(client: Client) -> ! {
     call::exit(0)
 }
 
+/// Log the single output geometry once, from the client's recorded state or
+/// from a live `OUTPUT_INFO` event.
+fn log_output_once(client: &Client, event_log: &mut EventLog) {
+    if event_log.output {
+        return;
+    }
+    if let Some(info) = client.output() {
+        event_log.output = true;
+        log_args(format_args!(
+            "[vasistas-demo] output info {}x{} stride={} scale={}\n",
+            info.width, info.height, info.stride, info.scale
+        ));
+    }
+}
+
 fn fatal(message: &[u8]) -> ! {
     log(message);
     call::exit(1)
@@ -190,7 +224,7 @@ fn fatal(message: &[u8]) -> ! {
 
 fn create_surface(client: &mut Client, width: u32, height: u32) -> Option<u64> {
     for _ in 0..100 {
-        if let Some(surface) = client.create_surface(width, height, b"lucarne-demo") {
+        if let Some(surface) = client.create_surface(width, height, b"vasistas-demo") {
             return Some(surface);
         }
         sleep_ms(10);
@@ -219,14 +253,44 @@ fn handle_event(
     view: &mut View,
     serial: &mut u64,
     commit_id: &mut u64,
+    event_log: &mut EventLog,
     event: Event,
 ) -> bool {
     match event {
+        Event::InputBatch { batch, .. } => {
+            let mut relevant = false;
+            let mut focus_log: Option<&'static [u8]> = None;
+            for record in batch.records() {
+                match record.event_type {
+                    vasistas_protocol::INPUT_EVENT_POINTER_MOTION => {}
+                    INPUT_EVENT_FOCUS_GAINED | INPUT_EVENT_FOCUS_LOST => {
+                        relevant = true;
+                        let gained = record.event_type == INPUT_EVENT_FOCUS_GAINED;
+                        if event_log.focus != Some(gained) {
+                            event_log.focus = Some(gained);
+                            focus_log = Some(if gained {
+                                b"[vasistas-demo] focus gained\n"
+                            } else {
+                                b"[vasistas-demo] focus lost\n"
+                            });
+                        }
+                    }
+                    _ => relevant = true,
+                }
+            }
+            if relevant {
+                log(b"[vasistas-demo] input batch\n");
+            }
+            if let Some(line) = focus_log {
+                log(line);
+            }
+            true
+        }
         Event::Configure { serial: configure_serial, width, height, .. } => {
-            log(b"[lucarne-demo] configure\n");
+            log(b"[vasistas-demo] configure\n");
             let old_id = view.buffer.id;
             let Some(mut buffer) = client.alloc_buffer(surface, width, height, width * 4) else {
-                log(b"[lucarne-demo] resize alloc failed\n");
+                log(b"[vasistas-demo] resize alloc failed\n");
                 return false;
             };
             fill_gradient(&mut buffer);
@@ -248,11 +312,15 @@ fn handle_event(
             true
         }
         Event::CloseRequest { .. } => {
-            log(b"[lucarne-demo] close requested\n");
+            log(b"[vasistas-demo] close requested\n");
             false
         }
+        Event::OutputInfo { .. } => {
+            log_output_once(client, event_log);
+            true
+        }
         Event::Error { .. } => {
-            log(b"[lucarne-demo] server error event\n");
+            log(b"[vasistas-demo] server error event\n");
             true
         }
         _ => true,
@@ -285,7 +353,7 @@ fn bounce(x: &mut i32, y: &mut i32, dx: &mut i32, dy: &mut i32, width: u32, heig
     }
 }
 
-fn fill_gradient(buffer: &mut lucarne::Buffer) {
+fn fill_gradient(buffer: &mut vasistas_client::Buffer) {
     let width = buffer.width as usize;
     let height = buffer.height as usize;
     let stride = buffer.stride as usize;
@@ -299,7 +367,7 @@ fn fill_gradient(buffer: &mut lucarne::Buffer) {
     }
 }
 
-fn fill_gradient_rect(buffer: &mut lucarne::Buffer, x: i32, y: i32, w: u32, h: u32) {
+fn fill_gradient_rect(buffer: &mut vasistas_client::Buffer, x: i32, y: i32, w: u32, h: u32) {
     let width = buffer.width as i32;
     let height = buffer.height as i32;
     let stride = buffer.stride as usize;
@@ -317,7 +385,7 @@ fn fill_gradient_rect(buffer: &mut lucarne::Buffer, x: i32, y: i32, w: u32, h: u
     }
 }
 
-fn draw_square_at(buffer: &mut lucarne::Buffer, x: i32, y: i32) {
+fn draw_square_at(buffer: &mut vasistas_client::Buffer, x: i32, y: i32) {
     let width = buffer.width as i32;
     let height = buffer.height as i32;
     let stride = buffer.stride as usize;
@@ -350,7 +418,7 @@ fn sleep_ms(ms: u64) {
 }
 
 fn log_pid(pid: u32) {
-    let prefix = b"[lucarne-demo] pid=";
+    let prefix = b"[vasistas-demo] pid=";
     let mut line = [0u8; 40];
     let mut len = prefix.len();
     line[..len].copy_from_slice(prefix);
@@ -379,7 +447,30 @@ fn log(text: &[u8]) {
     let _ = call::write(2, text);
 }
 
+/// Fixed-size, allocation-free formatted log line.
+fn log_args(args: core::fmt::Arguments<'_>) {
+    struct Line {
+        buffer: [u8; 96],
+        len: usize,
+    }
+    impl core::fmt::Write for Line {
+        fn write_str(&mut self, text: &str) -> core::fmt::Result {
+            let room = self.buffer.len() - self.len;
+            let count = room.min(text.len());
+            self.buffer[self.len..self.len + count].copy_from_slice(&text.as_bytes()[..count]);
+            self.len += count;
+            Ok(())
+        }
+    }
+    let mut line = Line {
+        buffer: [0; 96],
+        len: 0,
+    };
+    let _ = line.write_fmt(args);
+    let _ = call::write(2, &line.buffer[..line.len]);
+}
+
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    call::handle_panic("lucarne-demo", info)
+    call::handle_panic("vasistas-demo", info)
 }

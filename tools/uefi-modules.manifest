@@ -14,7 +14,7 @@ base strate-fs-ramfs strate-fs-ramfs-release
 base strate-wasm strate-wasm-release
 base strate-webrtc strate-webrtc-release
 base vasistas vasistas-release
-base lucarne-demo lucarne-release
+base vasistas-demo vasistas-client-release
 base dhcp-client dhcp-client-release
 base ping ping-release
 base telnetd telnetd-release

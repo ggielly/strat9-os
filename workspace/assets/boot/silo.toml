@@ -43,14 +43,25 @@ binary = "/initfs/vasistas"
 type = "elf"
 
 [[silos]]
-name = "lucarne-demo"
+name = "vasistas-demo"
 family = "SYS"
 mode = "706"
 sid = 42
 requires = ["/srv/vasistas"]
 [[silos.strates]]
-name = "lucarne-demo"
-binary = "/initfs/lucarne-demo"
+name = "vasistas-demo"
+binary = "/initfs/vasistas-demo"
+type = "elf"
+
+[[silos]]
+name = "vasistas-demo2"
+family = "SYS"
+mode = "706"
+sid = 42
+requires = ["/srv/vasistas"]
+[[silos.strates]]
+name = "vasistas-demo2"
+binary = "/initfs/vasistas-demo"
 type = "elf"
 
 [[silos]]

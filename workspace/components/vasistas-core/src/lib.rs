@@ -55,6 +55,22 @@ pub use types::{
 /// Maximum concurrent sessions (A.6).
 pub const MAX_SESSIONS: usize = 8;
 
+/// Tile grid columns on the screen: session slots 0..3 on the top row, 4..7
+/// on the bottom row. Width times [`TILE_COLUMNS`] is the screen width.
+pub const TILE_COLUMNS: u32 = 4;
+
+/// Tile grid rows on the screen.
+pub const TILE_ROWS: u32 = 2;
+
+/// Width in pixels of one session tile.
+pub const TILE_WIDTH: u32 = 400;
+
+/// Height in pixels of one session tile.
+pub const TILE_HEIGHT: u32 = 300;
+
+/// The tile grid must cover every session slot exactly.
+const _: () = assert!(TILE_COLUMNS * TILE_ROWS == MAX_SESSIONS as u32);
+
 /// Maximum surfaces per session (A.6).
 pub const MAX_SURFACES_PER_SESSION: usize = 4;
 

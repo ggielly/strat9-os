@@ -81,12 +81,23 @@ pub trait Backend {
     /// Present `region` on `surface` with `damage` since the last present.
     ///
     /// `damage` is a single full-surface rect for a full presentation, sized to
-    /// the current buffer. The slice is borrowed for the call only: it must not
-    /// be retained past the return.
+    /// the current buffer. The rects are **surface-local**; `x` and `y` are the
+    /// surface's screen-space origin, so the backend translates each rect by
+    /// them and clips to the screen before copying. The slice is borrowed for
+    /// the call only: it must not be retained past the return.
     fn present(
         &mut self,
         surface: SurfaceId,
         region: RegionHandle,
         damage: &[Rect],
+        x: u32,
+        y: u32,
     ) -> Result<(), Self::Error>;
+
+    /// Select the software cursor shape (A.3.1 `SET_CURSOR_SHAPE`).
+    ///
+    /// `shape` is already validated to `0..=2`; backends that do not paint a
+    /// cursor may ignore it. The default keeps existing backends source- and
+    /// behavior-compatible.
+    fn set_cursor_shape(&mut self, _shape: u32) {}
 }

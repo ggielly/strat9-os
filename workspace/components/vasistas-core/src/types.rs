@@ -172,6 +172,10 @@ pub struct Buffer {
 pub struct Surface {
     /// Stable handle, generation included.
     pub id: SurfaceId,
+    /// Screen-space origin x, from the owning session's tile.
+    pub x: u32,
+    /// Screen-space origin y, from the owning session's tile.
+    pub y: u32,
     /// Current pixel width.
     pub width: u32,
     /// Current pixel height.

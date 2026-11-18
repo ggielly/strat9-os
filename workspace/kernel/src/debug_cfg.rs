@@ -122,7 +122,7 @@ pub const SERIAL_ENABLED: bool = true;
 /// shootdown IPIs, so every mapping waits 10M cycles per CPU and the hardware
 /// stage (USB/Bluetooth) is never reached. Single-CPU boot is enough to test
 /// the Bluetooth path. Re-enable once AP/IPI bring-up is fixed.
-pub const SMP_ENABLED: bool = false;
+pub const SMP_ENABLED: bool = true;
 
 /// Run the storage drivers (VirtIO-blk, AHCI, NVMe) during the hardware stage.
 ///

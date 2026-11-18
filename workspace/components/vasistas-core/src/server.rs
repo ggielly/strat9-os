@@ -208,6 +208,26 @@ impl<B: Backend> Server<B> {
         &self.core
     }
 
+    /// Set the server-wide pixel budget in bytes (A.6); `0` disables it.
+    ///
+    /// Applies to the next `ALLOC_BUFFER`; existing buffers are never revoked.
+    pub fn set_global_budget(&mut self, bytes: usize) {
+        self.core.set_global_budget(bytes);
+    }
+
+    /// Borrow the backend, for adapter-side state (software cursor).
+    pub fn backend(&self) -> &B {
+        self.core.backend()
+    }
+
+    /// Mutably borrow the backend.
+    ///
+    /// Same trusted escape hatch as [`DisplayCore::backend_mut`]: never free,
+    /// reuse or reallocate a region the core still owns.
+    pub fn backend_mut(&mut self) -> &mut B {
+        self.core.backend_mut()
+    }
+
     /// Pop one retired region awaiting an explicit free.
     ///
     /// The server must first revoke/unmap the client's mapping of
@@ -558,10 +578,12 @@ impl<B: Backend> Server<B> {
                     Err(error) => send_error(transport, object, request_id, core_code(error)),
                 }
             }
-            Body::SetCursorShape { .. } => {
+            Body::SetCursorShape { shape } => {
                 if object != 0 {
                     return send_error(transport, object, request_id, ERROR_BAD_OBJECT);
                 }
+                // The protocol decoder already restricts `shape` to 0..=2.
+                self.core.backend_mut().set_cursor_shape(shape);
                 ack(transport, object, request_id)
             }
             Body::SetTitle { .. } | Body::RequestWindowAction { .. } => {
@@ -749,7 +771,9 @@ fn core_code(error: CoreError) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vasistas_protocol::{Rect, FEATURES_KNOWN, FLAG_FULL_DAMAGE};
+    use vasistas_protocol::{
+        Rect, CURSOR_SHAPE_POINTER, FEATURES_KNOWN, FLAG_FULL_DAMAGE,
+    };
     use std::vec::Vec;
 
     use crate::backend::RegionHandle;
@@ -760,6 +784,8 @@ mod tests {
         presents: u32,
         frees: u32,
         fail_present: bool,
+        /// Last shape passed to `set_cursor_shape`, if any.
+        cursor_shape: Option<u32>,
     }
 
     impl FakeBackend {
@@ -770,6 +796,7 @@ mod tests {
                 presents: 0,
                 frees: 0,
                 fail_present: false,
+                cursor_shape: None,
             }
         }
     }
@@ -802,12 +829,18 @@ mod tests {
             _surface: SurfaceId,
             _region: RegionHandle,
             _damage: &[Rect],
+            _x: u32,
+            _y: u32,
         ) -> Result<(), Self::Error> {
             if self.fail_present {
                 return Err(());
             }
             self.presents += 1;
             Ok(())
+        }
+
+        fn set_cursor_shape(&mut self, shape: u32) {
+            self.cursor_shape = Some(shape);
         }
     }
 
@@ -1038,6 +1071,38 @@ mod tests {
         hello(server, &mut transport, peer);
         assert_eq!(server.peer_pid(peer), Some(HELLO_PID));
         assert_eq!(server.core().stats().sessions, 1);
+    }
+
+    #[test]
+    fn global_budget_is_enforced_on_allocation() {
+        let mut server = Server::new(FakeBackend::new());
+        let mut transport = FakeTransport::default();
+        let peer = PeerId::new(81);
+        hello(&mut server, &mut transport, peer);
+        // One 64x32 buffer is 8 KiB: allow exactly one.
+        let buffer_bytes = 64 * 4 * 32;
+        server.set_global_budget(buffer_bytes as usize);
+        let surface = create_surface(&mut server, &mut transport, peer, 2, 64, 32);
+        let (buffer, _) = alloc_buffer(&mut server, &mut transport, peer, surface, 3, 64, 32);
+        import_ok(&mut server, &mut transport, peer, buffer, 4);
+
+        let message = frame(
+            Opcode::ALLOC_BUFFER,
+            surface,
+            5,
+            &Body::AllocBuffer {
+                width: 64,
+                height: 32,
+                format: 0,
+                flags: 0,
+                stride: 64 * 4,
+            },
+        );
+        server.handle(peer, &message, &mut transport).expect("alloc");
+        let reply = transport.messages.pop().expect("error reply");
+        assert_eq!(error_code_of(&reply), ERROR_QUOTA);
+        assert_eq!(server.core().stats().used_bytes, buffer_bytes as usize);
+        assert_eq!(server.core().stats().buffers, 1);
     }
 
     #[test]
@@ -1725,6 +1790,55 @@ mod tests {
             .handle(peer, &message, &mut transport)
             .expect("cursor");
         assert_eq!(error_code_of(&transport.messages[0]), ERROR_BAD_OBJECT);
+    }
+
+    #[test]
+    fn set_cursor_shape_reaches_backend_and_acks() {
+        let mut server = Server::new(FakeBackend::new());
+        let mut transport = FakeTransport::default();
+        let peer = PeerId::new(32);
+        hello(&mut server, &mut transport, peer);
+
+        let message = frame(
+            Opcode::SET_CURSOR_SHAPE,
+            0,
+            5,
+            &Body::SetCursorShape {
+                shape: CURSOR_SHAPE_POINTER,
+            },
+        );
+        server
+            .handle(peer, &message, &mut transport)
+            .expect("cursor");
+        assert_eq!(
+            server.core().backend().cursor_shape,
+            Some(CURSOR_SHAPE_POINTER)
+        );
+        assert_eq!(transport.messages.len(), 1);
+        let (header, body) = parse(&transport.messages[0]);
+        assert_eq!(header.opcode, Opcode::ACK.value());
+        assert_eq!(header.request_id, 5);
+        assert_eq!(body, Body::Ack { status: 0 });
+
+        // An out-of-range shape is rejected by the protocol, never forwarded.
+        transport.messages.clear();
+        let mut bad = frame(
+            Opcode::SET_CURSOR_SHAPE,
+            0,
+            6,
+            &Body::SetCursorShape {
+                shape: CURSOR_SHAPE_POINTER,
+            },
+        );
+        bad[HEADER_LEN] = (CURSOR_SHAPE_POINTER + 1) as u8;
+        server
+            .handle(peer, &bad, &mut transport)
+            .expect("bad cursor");
+        assert_eq!(
+            server.core().backend().cursor_shape,
+            Some(CURSOR_SHAPE_POINTER)
+        );
+        assert_eq!(error_code_of(&transport.messages[0]), ERROR_BAD_LENGTH);
     }
 
     #[test]

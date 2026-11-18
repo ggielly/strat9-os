@@ -16,4 +16,6 @@ test = false
 vasistas-core = { path = "../vasistas-core" }
 vasistas-protocol = { path = "../vasistas-protocol" }
 vasistas-backend = { path = "../vasistas-backend" }
+input-client = { path = "../input-client" }
+input-protocol = { path = "../input-protocol" }
 strat9-syscall = { path = "../syscall", features = ["userspace"] }

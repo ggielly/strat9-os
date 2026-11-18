@@ -550,14 +550,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lucarne"
-version = "0.1.0"
-dependencies = [
- "strat9-syscall",
- "vasistas-protocol",
-]
-
-[[package]]
 name = "managed"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1386,6 +1378,8 @@ checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
 name = "vasistas"
 version = "0.1.0"
 dependencies = [
+ "input-client",
+ "input-protocol",
  "strat9-syscall",
  "vasistas-backend",
  "vasistas-core",
@@ -1397,6 +1391,14 @@ name = "vasistas-backend"
 version = "0.1.0"
 dependencies = [
  "vasistas-core",
+ "vasistas-protocol",
+]
+
+[[package]]
+name = "vasistas-client"
+version = "0.1.0"
+dependencies = [
+ "strat9-syscall",
  "vasistas-protocol",
 ]
 

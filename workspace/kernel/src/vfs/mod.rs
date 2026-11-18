@@ -55,6 +55,7 @@ pub mod file;
 pub mod input_scheme;
 pub mod ipcfs;
 pub mod log_scheme;
+pub mod meminfo;
 pub mod mount;
 pub use bulk::BulkHandle;
 pub mod pipe;

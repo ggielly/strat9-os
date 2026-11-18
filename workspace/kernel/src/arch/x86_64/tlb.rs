@@ -381,6 +381,24 @@ fn dispatch_op(op: TlbOp) {
         return;
     }
 
+    {
+        use core::sync::atomic::AtomicU32;
+        static DIAG_BUDGET: AtomicU32 = AtomicU32::new(12);
+        if DIAG_BUDGET
+            .try_update(Ordering::AcqRel, Ordering::Relaxed, |b| b.checked_sub(1))
+            .is_ok()
+        {
+            crate::serial_force_println!(
+                "[tlb-diag] dispatch self={} self_apic={} target0={} target1={} count={}",
+                crate::arch::x86_64::percpu::current_cpu_index(),
+                crate::arch::x86_64::apic::lapic_id(),
+                targets[0],
+                if count > 1 { targets[1] } else { 0 },
+                count,
+            );
+        }
+    }
+
     // `(apic_id, cpu_idx, seq)` for each target that was successfully queued.
     // An IPI is sent, and an acknowledgement awaited, only for entries here :
     // sending to, or waiting on, an AP whose queue was skipped would waste
@@ -638,6 +656,17 @@ fn wait_for_acks(targets: &[(u32, usize, u64)]) {
         }
 
         if !success {
+            crate::serial_force_println!(
+                "[tlb-diag] timeout self={} target={} apic={} seq={} req0={} done0={} req1={} done1={}",
+                my_cpu,
+                cpu_idx,
+                apic_id,
+                seq,
+                TLB_REQ[0].load(Ordering::Acquire),
+                TLB_DONE[0].load(Ordering::Acquire),
+                TLB_REQ[1].load(Ordering::Acquire),
+                TLB_DONE[1].load(Ordering::Acquire),
+            );
             panic!(
                 "TLB shootdown timeout: cpu={} seq={} done={} retried={}",
                 cpu_idx,
