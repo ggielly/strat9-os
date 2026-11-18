@@ -119,7 +119,8 @@ pub(crate) fn classify_kernel_heap_backend(layout: Layout) -> KernelHeapBackend 
 // =============================================================================
 // CRITICAL: slab corruption detection
 //
-// Set HEAP_POISON_ENABLED to true during debugging of heap-corruption crashes.
+// Build with `--features heap-poison` when debugging heap-corruption crashes
+// (off by default: it re-reads/rewrites whole blocks on every alloc/free).
 // When enabled:
 //   - Every block carved by refill() is filled with POISON_BYTE in bytes [8..N-4]
 //     and stamped with SLAB_CANARY in the last 4 bytes.
@@ -135,7 +136,7 @@ pub(crate) fn classify_kernel_heap_backend(layout: Layout) -> KernelHeapBackend 
 //
 // Cost: one memset + canary write per alloc/dealloc for slab classes.
 // =============================================================================
-const HEAP_POISON_ENABLED: bool = true;
+const HEAP_POISON_ENABLED: bool = cfg!(feature = "heap-poison");
 /// Byte pattern written to the body of freed slab blocks.
 const POISON_BYTE: u8 = 0xDE;
 /// Canary word placed at the last 4 bytes of each slab block.

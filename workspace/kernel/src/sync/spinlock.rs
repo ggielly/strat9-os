@@ -282,6 +282,9 @@ pub fn debug_set_trace_slab_addr(addr: usize) {
 /// Emit an E9 byte for each matching trace slot (acquire = uppercase, release = lowercase).
 #[inline]
 fn emit_trace_e9(lock_addr: usize, tag_offset: u8) {
+    if !crate::debug_cfg::E9_TRACE_LOCKS {
+        return;
+    }
     for (i, slot) in DEBUG_TRACE_WATCH_ADDRS.iter().enumerate() {
         if slot.load(Ordering::Relaxed) == lock_addr {
             let ch = b'A' + tag_offset + (i as u8);
@@ -369,6 +372,9 @@ impl<'a, T: ?Sized, G: Guardian> Drop for SpinLockGuard<'a, T, G> {
         // Race/corruption diagnostic: E9 trace when watched locks are released.
         // Use lowercase tags to distinguish release from acquire.
         for (i, slot) in DEBUG_TRACE_WATCH_ADDRS.iter().enumerate() {
+            if !crate::debug_cfg::E9_TRACE_LOCKS {
+                break;
+            }
             if slot.load(Ordering::Relaxed) == lock_addr {
                 let ch = b'a' + (i as u8);
                 // F10: see acquire-side note above.

@@ -53,6 +53,13 @@ pub fn set_quiet(enabled: bool) {
 // Hot-path QEMU debugcon (port 0xe9) tracing
 // ---------------------------------------------------------------------------
 
+/// Master switch for the QEMU debugcon (port 0xe9) markers: `e9_mark!`,
+/// `e9_print!` and `e9_println!`.  Each byte is a port-I/O VM exit (1-2 us
+/// under KVM), and some markers sit in hot paths (CR3 switch, preemption,
+/// entropy, buddy/frame alloc).  Keep `false` unless chasing an early-boot
+/// hang with `-debugcon stdio`; the macros then compile to nothing.
+pub const E9_TRACE: bool = false;
+
 /// Trace every `TSS.rsp0` update (`[tss-set] ...`), i.e. once per context
 /// switch.  Each byte is a port-I/O VM exit, so leaving this on makes
 /// single-CPU guests (and everything running in them, e.g. telnetd) crawl.

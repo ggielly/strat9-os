@@ -29,12 +29,16 @@ use core::fmt;
 macro_rules! e9_mark {
     ($byte:expr) => {
         {
-            #[cfg(target_arch = "x86_64")]
-            unsafe {
-                core::arch::asm!("out 0xe9, al", in("al") $byte, options(nomem, nostack));
-            }
-            #[cfg(not(target_arch = "x86_64"))]
-            {
+            if $crate::debug_cfg::E9_TRACE {
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    core::arch::asm!("out 0xe9, al", in("al") $byte, options(nomem, nostack));
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    let _ = $byte;
+                }
+            } else {
                 let _ = $byte;
             }
         }
@@ -59,8 +63,10 @@ impl fmt::Write for QemuDebug {
 macro_rules! e9_print {
     ($($arg:tt)*) => {
         {
-            use core::fmt::Write;
-            let _ = write!($crate::debug::QemuDebug, $($arg)*);
+            if $crate::debug_cfg::E9_TRACE {
+                use core::fmt::Write;
+                let _ = write!($crate::debug::QemuDebug, $($arg)*);
+            }
         }
     };
 }
@@ -68,12 +74,12 @@ macro_rules! e9_print {
 #[macro_export]
 macro_rules! e9_println {
     () => {
-        if !$crate::debug_cfg::is_quiet() {
+        if $crate::debug_cfg::E9_TRACE && !$crate::debug_cfg::is_quiet() {
             $crate::e9_print!("\n");
         }
     };
     ($($arg:tt)*) => {
-        if !$crate::debug_cfg::is_quiet() {
+        if $crate::debug_cfg::E9_TRACE && !$crate::debug_cfg::is_quiet() {
             $crate::e9_print!("{}\n", format_args!($($arg)*));
         }
     };

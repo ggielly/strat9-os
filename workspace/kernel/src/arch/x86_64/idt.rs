@@ -421,7 +421,7 @@ extern "C" fn lapic_timer_inner(
     // Heartbeat: single byte only. e9_println!/format_args in IRQ can cause issues.
     let from_ring3 = (frame.iret_cs & 3) == 3;
     if from_ring3 && (ticks < 5 || ticks % 100 == 0) {
-        unsafe { core::arch::asm!("mov al, 0x48; out 0xe9, al", out("al") _) } // 'H'
+        if crate::debug_cfg::E9_TRACE { unsafe { core::arch::asm!("mov al, 0x48; out 0xe9, al", out("al") _) } } // 'H'
     }
     crate::process::scheduler::timer_tick();
     crate::arch::x86_64::speaker::speaker_tick();
@@ -458,7 +458,7 @@ extern "C" fn lapic_timer_inner(
         {
             if decision.next_rsp != 0 {
                 // TEMP DEBUG: dump the resume iret frame (rip/rsp) before switching.
-                unsafe {
+                if crate::debug_cfg::E9_TRACE { unsafe {
                     let base = decision.next_rsp;
                     let iret_rip = *(base as *const u64).add(15); // after 15 GPRs
                     let iret_rsp = *(base as *const u64).add(18); // rip,cs,rflags,rsp
@@ -475,7 +475,7 @@ extern "C" fn lapic_timer_inner(
                         core::arch::asm!("out 0xe9, al", in("al") nib, options(nomem, nostack));
                     }
                     core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
-                }
+                } }
                 return decision;
             }
         }
@@ -2150,10 +2150,9 @@ extern "x86-interrupt" fn legacy_timer_handler(stack_frame: InterruptStackFrame)
     // NOTE: serial_force_println! (formatted format_args!) can hang this IRQ
     // handler (known vtable issue) : a hung timer handler kills all
     // preemption. The tick counter itself is the trace: E9 raw pulses only.
-    let ticks = crate::process::scheduler::ticks();
-    unsafe {
+    if crate::debug_cfg::E9_TRACE { unsafe {
         core::arch::asm!("out 0xe9, al", in("al") b't', options(nomem, nostack));
-    }
+    } }
 
     // Increment tick counter
     crate::process::scheduler::timer_tick();
@@ -2192,20 +2191,19 @@ extern "x86-interrupt" fn lapic_timer_handler(stack_frame: InterruptStackFrame) 
     let cs = stack_frame.code_segment.0;
     let _gs = SwapGsGuard::new((cs & 3) == 3);
     let cpu = crate::arch::x86_64::percpu::current_cpu_index();
-    let ticks = crate::process::scheduler::ticks();
     // Trace first 10 ticks per CPU unconditionally to confirm timer fires
     // after Ring-3 entry, then one-per-100 heartbeat to avoid flooding.
-    unsafe {
+    if crate::debug_cfg::E9_TRACE { unsafe {
         // Raw pulse only : formatted prints hang the IRQ handler.
         core::arch::asm!("out 0xe9, al", in("al") b'T', options(nomem, nostack));
-    }
+    } }
 
     // serial_force_println holds FORCE_LOCK (IRQ-disabled spinlock) while writing
     // to the UART. At 115200 baud each byte takes ~87 µs; a 60-char message is
     // ~5 ms of IRQs-off time : long enough to miss ticks and corrupt scheduling.
     // Keep serial output out of the hot IRQ path; use e9 port (µs-range) instead.
     crate::process::scheduler::timer_tick();
-    unsafe { core::arch::asm!("mov al, '1'; out 0xe9, al", out("al") _) };
+    if crate::debug_cfg::E9_TRACE { unsafe { core::arch::asm!("mov al, '1'; out 0xe9, al", out("al") _) } };
     super::apic::eoi();
     // IMPORTANT:
     // Do not run `maybe_preempt()` directly from a Ring-3-origin timer IRQ.
@@ -2228,10 +2226,10 @@ extern "x86-interrupt" fn lapic_timer_handler(stack_frame: InterruptStackFrame) 
 /// PS/2 Mouse IRQ12 handler.
 extern "x86-interrupt" fn mouse_handler(_stack_frame: InterruptStackFrame) {
     // TEMP DEBUG: mouse IRQ pulse on E9.
-    unsafe {
+    if crate::debug_cfg::E9_TRACE { unsafe {
         core::arch::asm!("out 0xe9, al", in("al") b'M', options(nomem, nostack));
         core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
-    }
+    } }
     crate::arch::x86_64::mouse::handle_irq();
     // PS/2 mouse IRQ12 is intentionally kept on the remapped legacy PIC path.
     // Even when LAPIC/IOAPIC are active for timer/IPI traffic, this source must
@@ -2243,11 +2241,11 @@ extern "x86-interrupt" fn mouse_handler(_stack_frame: InterruptStackFrame) {
 extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
     let raw = unsafe { super::io::inb(0x60) };
     // TEMP DEBUG: echo every scancode byte on the E9 port.
-    unsafe {
+    if crate::debug_cfg::E9_TRACE { unsafe {
         core::arch::asm!("out 0xe9, al", in("al") b'K', options(nomem, nostack));
         core::arch::asm!("out 0xe9, al", in("al") raw, options(nomem, nostack));
         core::arch::asm!("out 0xe9, al", in("al") b'\n', options(nomem, nostack));
-    }
+    } }
 
     // Feed scancode + TSC low bits into the entropy pool.
     crate::entropy::add_entropy(1, (raw as u64) ^ super::rdtsc());
