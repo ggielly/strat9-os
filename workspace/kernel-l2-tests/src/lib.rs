@@ -98,6 +98,9 @@ pub mod process {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct TaskId(pub u64);
 
+    /// Mirror of kernel `Pid` (also used as thread-group id).
+    pub type Pid = u32;
+
     impl TaskId {
         pub fn new() -> Self {
             static NEXT_ID: AtomicU64 = AtomicU64::new(0);

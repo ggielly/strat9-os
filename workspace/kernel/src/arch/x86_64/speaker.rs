@@ -183,10 +183,39 @@ pub fn beep_warn() {
 // Boot crescendo : each phase plays a higher pitch
 // =========================================================================
 
+/// Whether the blocking boot beeps should play.
+///
+/// Off when `debug_cfg::BOOT_BEEPS` is `false`, and always off under a
+/// hypervisor (CPUID.1:ECX[31]): a VM has no speaker, so each beep would only
+/// burn its busy-wait (~100 ms per phase, ~700 ms for the jingle).
+fn boot_beeps_enabled() -> bool {
+    use core::sync::atomic::AtomicU8;
+    // 0 = unknown, 1 = enabled, 2 = disabled
+    static STATE: AtomicU8 = AtomicU8::new(0);
+    match STATE.load(Ordering::Relaxed) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    let on = crate::debug_cfg::BOOT_BEEPS && !running_under_hypervisor();
+    STATE.store(if on { 1 } else { 2 }, Ordering::Relaxed);
+    on
+}
+
+/// CPUID.1:ECX bit 31 ("hypervisor present"), set by KVM/QEMU/VMware/Hyper-V.
+fn running_under_hypervisor() -> bool {
+    // SAFETY: CPUID leaf 1 is available on every x86_64 CPU.
+    let ecx = unsafe { core::arch::x86_64::__cpuid(1).ecx };
+    ecx & (1 << 31) != 0
+}
+
 /// Play a crescendo beep for boot phase N.
 /// Each successive phase uses a higher frequency so you can identify
 /// the last completed phase by pitch alone.
 pub fn beep_phase(phase: u8) {
+    if !boot_beeps_enabled() {
+        return;
+    }
     const PHASE_FREQS: [u32; 24] = [
         // Boot fundamentals (1-6)
         262, // 1: Kernel entry (C4)
@@ -238,6 +267,9 @@ pub fn beep_panic() {
 
 /// Startup jingle : ascending notes (happy boot).
 pub fn beep_startup() {
+    if !boot_beeps_enabled() {
+        return;
+    }
     let notes: [(u32, u32); 5] = [
         (523, 80),   // C5
         (659, 80),   // E5

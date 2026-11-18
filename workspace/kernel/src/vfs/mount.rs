@@ -25,7 +25,7 @@
 //! Maps path prefixes to schemes (like Plan 9 namespaces).
 
 use super::scheme::DynScheme;
-use crate::syscall::error::SyscallError;
+use crate::{process::Pid, syscall::error::SyscallError};
 use alloc::{string::String, vec::Vec};
 use spin::{Lazy, RwLock};
 
@@ -36,6 +36,8 @@ struct Mount {
     prefix: String,
     /// Scheme handling this mount.
     scheme: DynScheme,
+    /// Binder identity (task tgid) for mounts created by `SYS_IPC_BIND_PORT`.
+    owner: Option<Pid>,
 }
 
 /// Global mount table.
@@ -52,17 +54,18 @@ impl MountTable {
     /// Mount a scheme at a path prefix.
     ///
     /// Returns an error if the prefix is already mounted.
-    pub fn mount(&mut self, prefix: &str, scheme: DynScheme) -> Result<(), SyscallError> {
+    pub fn mount(
+        &mut self,
+        prefix: &str,
+        scheme: DynScheme,
+        owner: Option<Pid>,
+    ) -> Result<(), SyscallError> {
         if prefix.is_empty() || !prefix.starts_with('/') {
             return Err(SyscallError::InvalidArgument);
         }
 
         // Normalize path (remove trailing slash except for root)
-        let prefix = if prefix.len() > 1 && prefix.ends_with('/') {
-            &prefix[..prefix.len() - 1]
-        } else {
-            prefix
-        };
+        let prefix = normalize(prefix);
 
         // Check for duplicate mount
         if self.mounts.iter().any(|m| m.prefix == prefix) {
@@ -72,6 +75,7 @@ impl MountTable {
         self.mounts.push(Mount {
             prefix: String::from(prefix),
             scheme,
+            owner,
         });
 
         // Sort by prefix length (longest first) for correct resolution
@@ -86,19 +90,21 @@ impl MountTable {
     /// Used by strate hot-restart: a new instance takes over the namespace
     /// entry atomically.  Callers must enforce the policy (only a `NET`/`DRV`
     /// silo may replace `/net`, for example).
-    pub fn mount_replace(&mut self, prefix: &str, scheme: DynScheme) -> Result<(), SyscallError> {
+    pub fn mount_replace(
+        &mut self,
+        prefix: &str,
+        scheme: DynScheme,
+        owner: Option<Pid>,
+    ) -> Result<(), SyscallError> {
         if prefix.is_empty() || !prefix.starts_with('/') {
             return Err(SyscallError::InvalidArgument);
         }
-        let prefix = if prefix.len() > 1 && prefix.ends_with('/') {
-            &prefix[..prefix.len() - 1]
-        } else {
-            prefix
-        };
+        let prefix = normalize(prefix);
         self.mounts.retain(|m| m.prefix.as_str() != prefix);
         self.mounts.push(Mount {
             prefix: String::from(prefix),
             scheme,
+            owner,
         });
         self.mounts
             .sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
@@ -107,6 +113,7 @@ impl MountTable {
 
     /// Unmount a path prefix.
     pub fn unmount(&mut self, prefix: &str) -> Result<(), SyscallError> {
+        let prefix = normalize(prefix);
         let pos = self
             .mounts
             .iter()
@@ -114,6 +121,21 @@ impl MountTable {
             .ok_or(SyscallError::BadHandle)?;
         self.mounts.remove(pos);
         Ok(())
+    }
+
+    /// Recorded owner of `prefix`: outer `None` means "not mounted", inner
+    /// `None` means mounted by the kernel/shell (untracked).
+    pub fn owner_of(&self, prefix: &str) -> Option<Option<Pid>> {
+        let prefix = normalize(prefix);
+        self.mounts
+            .iter()
+            .find(|m| m.prefix == prefix)
+            .map(|m| m.owner)
+    }
+
+    /// Remove every mount owned by `owner` (last-thread exit cleanup).
+    pub fn unmount_owned_by(&mut self, owner: Pid) {
+        self.mounts.retain(|m| m.owner != Some(owner));
     }
 
     /// Resolve a path to (scheme, relative_path).
@@ -160,21 +182,44 @@ impl MountTable {
     }
 }
 
+/// Strip a trailing slash (except from root) for mount table lookups.
+fn normalize(prefix: &str) -> &str {
+    if prefix.len() > 1 && prefix.ends_with('/') {
+        &prefix[..prefix.len() - 1]
+    } else {
+        prefix
+    }
+}
+
 static GLOBAL_MOUNTS: Lazy<RwLock<MountTable>> = Lazy::new(|| RwLock::new(MountTable::new()));
 
 /// Mount a scheme at a global path.
-pub fn mount(prefix: &str, scheme: DynScheme) -> Result<(), SyscallError> {
-    GLOBAL_MOUNTS.write().mount(prefix, scheme)
+pub fn mount(prefix: &str, scheme: DynScheme, owner: Option<Pid>) -> Result<(), SyscallError> {
+    GLOBAL_MOUNTS.write().mount(prefix, scheme, owner)
 }
 
 /// Mount, replacing an existing prefix (strate hot-restart).
-pub fn mount_replace(prefix: &str, scheme: DynScheme) -> Result<(), SyscallError> {
-    GLOBAL_MOUNTS.write().mount_replace(prefix, scheme)
+pub fn mount_replace(
+    prefix: &str,
+    scheme: DynScheme,
+    owner: Option<Pid>,
+) -> Result<(), SyscallError> {
+    GLOBAL_MOUNTS.write().mount_replace(prefix, scheme, owner)
 }
 
 /// Unmount a global path.
 pub fn unmount(prefix: &str) -> Result<(), SyscallError> {
     GLOBAL_MOUNTS.write().unmount(prefix)
+}
+
+/// Recorded owner of a global mount point (see `MountTable::owner_of`).
+pub fn owner_of(prefix: &str) -> Option<Option<Pid>> {
+    GLOBAL_MOUNTS.read().owner_of(prefix)
+}
+
+/// Remove every global mount owned by `owner`.
+pub fn unmount_owned_by(owner: Pid) {
+    GLOBAL_MOUNTS.write().unmount_owned_by(owner);
 }
 
 /// Resolve a path using the global mount table.
@@ -226,7 +271,7 @@ impl Namespace {
 
     /// Performs the mount operation.
     pub fn mount(&mut self, prefix: &str, scheme: DynScheme) -> Result<(), SyscallError> {
-        self.mounts.mount(prefix, scheme)
+        self.mounts.mount(prefix, scheme, None)
     }
 
     /// Performs the unmount operation.

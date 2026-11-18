@@ -34,7 +34,7 @@ use crate::{
         reply,
     },
     memory::{UserSliceRead, UserSliceWrite},
-    process::current_task_clone,
+    process::{current_task_clone, Pid},
     silo,
 };
 
@@ -417,16 +417,37 @@ pub fn sys_ipc_bind_port(
     let scheme = alloc::sync::Arc::new(crate::vfs::IpcScheme::new(PortId::from_u64(
         cap.resource as u64,
     )));
+    // Binder identity: the tgid that owns this binding.
+    let owner = task.tgid;
+    let ns_owner = crate::namespace::owner_of(path);
+    let mount_owner = crate::vfs::owner_of(path);
+    // A live foreign owner keeps the path; the current task or a dead owner
+    // may be replaced (hot restart of a crashed client).
+    let live_foreign = |o: &Option<Pid>| {
+        matches!(o, Some(o) if *o != owner && crate::process::tgid_is_alive(*o))
+    };
+    let takeover = [ns_owner, mount_owner.flatten()]
+        .iter()
+        .flatten()
+        .any(|o| *o == owner || !crate::process::tgid_is_alive(*o));
     // Hot-restart: a strate may take over its own namespace entry.  Other
     // paths keep the "no duplicate mount" rule so a random silo cannot
     // hijack an arbitrary service.
-    if path == "/net" || path.starts_with("/srv/strate-") {
-        crate::vfs::mount_replace(path, scheme)?;
+    let special = path == "/net" || path.starts_with("/srv/strate-");
+    if !special
+        && [ns_owner, mount_owner.flatten()]
+            .iter()
+            .any(live_foreign)
+    {
+        return Err(SyscallError::AlreadyExists);
+    }
+    if special || takeover {
+        crate::vfs::mount_replace(path, scheme, Some(owner))?;
         let _ = crate::namespace::unbind(path);
     } else {
-        crate::vfs::mount(path, scheme)?;
+        crate::vfs::mount(path, scheme, Some(owner))?;
     }
-    let _ = crate::namespace::bind(path, cap.resource as u64);
+    crate::namespace::bind(path, cap.resource as u64, owner)?;
     let _ = silo::set_current_silo_label_from_path(path);
 
     // Bootstrap convenience: if a privileged userspace server binds root `/`
@@ -515,8 +536,11 @@ pub fn sys_ipc_bind_port(
 }
 
 /// SYS_IPC_UNBIND_PORT: remove a namespace binding.
+///
+/// Allowed for the binder (same task tgid) or a silo admin; a live foreign
+/// owner is refused. Absent paths are a no-op so an at-exit cleanup or a
+/// retrying client stays idempotent.
 pub fn sys_ipc_unbind_port(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError> {
-    silo::require_silo_admin()?;
     if path_ptr == 0 || path_len == 0 {
         return Err(SyscallError::Fault);
     }
@@ -527,7 +551,27 @@ pub fn sys_ipc_unbind_port(path_ptr: u64, path_len: u64) -> Result<u64, SyscallE
     let user = UserSliceRead::new(path_ptr, path_len as usize)?;
     let bytes = user.read_to_vec();
     let path = core::str::from_utf8(&bytes).map_err(SyscallError::from)?;
+
+    let admin = silo::require_silo_admin().is_ok();
+    let caller = current_task_clone().map(|task| task.tgid);
+    let ns_owner = crate::namespace::owner_of(path);
+    let mount_owner = crate::vfs::owner_of(path);
+    if ns_owner.is_none() && mount_owner.is_none() {
+        return Ok(0);
+    }
+    let recorded = ns_owner.or(mount_owner.flatten());
+    let permitted = admin
+        || match (recorded, caller) {
+            (Some(owner), Some(caller)) if owner == caller => true,
+            // Reclaim a binding whose owner died (crashed server/client).
+            (Some(owner), _) => !crate::process::tgid_is_alive(owner),
+            // Kernel/untracked mount: admin only.
+            (None, _) => false,
+        };
+    if !permitted {
+        return Err(SyscallError::PermissionDenied);
+    }
     let _ = crate::namespace::unbind(path);
-    crate::vfs::unmount(path)?;
+    let _ = crate::vfs::unmount(path);
     Ok(0)
 }

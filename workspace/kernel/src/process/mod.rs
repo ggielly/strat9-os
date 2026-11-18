@@ -84,7 +84,8 @@ pub use scheduler::{
     reset_scheduler_metrics, resume_task, schedule, schedule_on_cpu, scheduler_metrics_snapshot,
     set_process_group, set_task_sched_policy, set_task_wake_deadline,
     set_verbose as set_scheduler_verbose, sleep_current_task_ticks,
-    state_snapshot as scheduler_state_snapshot, suspend_task, task_count, try_wait_child,
+    state_snapshot as scheduler_state_snapshot, suspend_task, task_count, tgid_is_alive,
+    try_wait_child,
     verbose_enabled as scheduler_verbose_enabled, wake_task, wake_task_here, yield_task,
     CpuUsageSnapshot, SchedulerMetricsSnapshot, SchedulerStateSnapshot, WaitChildResult,
 };

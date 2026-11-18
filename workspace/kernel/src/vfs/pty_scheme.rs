@@ -280,7 +280,7 @@ static PTY_SCHEME: SpinLock<Option<Arc<PtyScheme>>> = SpinLock::new(None);
 pub fn init_pty_scheme() {
     let scheme = Arc::new(PtyScheme::new());
     *PTY_SCHEME.lock() = Some(scheme.clone());
-    let _ = super::mount::mount("/dev/pts", scheme);
+    let _ = super::mount::mount("/dev/pts", scheme, None);
 }
 
 /// Get a reference to the global PTY scheme instance.

@@ -192,7 +192,12 @@ pub(super) fn check_wake_deadlines(current_time_ns: u64) {
 
         for id in to_wake.iter().copied().take(count) {
             if let Some(blocked_task) = blocked.remove(&id) {
-                blocked_task.wake_deadline_ns.store(0, Ordering::Relaxed);
+                // Keep the deadline so a contended re-insert below still wakes
+                // on a later tick; clearing it here would strand a deadline-only
+                // sleeper (e.g. nanosleep, which has no wait queue) forever.
+                let deadline = blocked_task
+                    .wake_deadline_ns
+                    .swap(0, Ordering::Relaxed);
                 blocked_task.set_state(TaskState::Ready);
 
                 // --- CPU placement: prefer last_cpu, then home_cpu ---
@@ -237,6 +242,7 @@ pub(super) fn check_wake_deadlines(current_time_ns: u64) {
                     None => {
                         // LOCAL lock contended : re-insert into BLOCKED_TASKS
                         // so the next tick retries this wake.
+                        blocked_task.wake_deadline_ns.store(deadline, Ordering::Relaxed);
                         blocked_task.set_state(TaskState::Blocked);
                         blocked.insert(id, blocked_task);
                     }

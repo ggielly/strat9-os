@@ -832,8 +832,8 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
             let _ = server.handle(peer, &msg.payload[..len], transport);
             // A.3.1 `OUTPUT_INFO`: the adapter knows the output geometry and
             // the peer slot was just created, so announce it exactly once per
-            // `HELLO` (object_id is the output, never 0 per A.3.1).
-            if new_peer {
+            // successful `HELLO` (object_id is the output, never 0 per A.3.1).
+            if new_peer && server.session_of(peer).is_some() {
                 let _ = send_event(
                     transport,
                     Opcode::OUTPUT_INFO,

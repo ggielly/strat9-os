@@ -441,7 +441,7 @@ pub(super) fn cmd_mount_impl(args: &[String]) -> Result<(), ShellError> {
         return Ok(());
     }
 
-    match vfs::mount(&target, scheme) {
+    match vfs::mount(&target, scheme, None) {
         Ok(()) => shell_println!("mount: {} mounted on {}", source, target),
         Err(e) => shell_println!("mount: {} -> {} failed: {:?}", source, target, e),
     }

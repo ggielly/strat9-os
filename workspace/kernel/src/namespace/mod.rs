@@ -26,14 +26,25 @@
 
 pub mod v2;
 
-use crate::{sync::SpinLock, syscall::error::SyscallError};
+use crate::{
+    process::Pid,
+    sync::SpinLock,
+    syscall::error::SyscallError,
+};
 use alloc::{
     collections::BTreeMap,
     string::{String, ToString},
 };
 
+/// One namespace entry plus the thread group that bound it.
+struct Binding {
+    port_id: u64,
+    /// Binder identity: the owning task's thread-group id.
+    owner: Pid,
+}
+
 struct Namespace {
-    bindings: BTreeMap<String, u64>,
+    bindings: BTreeMap<String, Binding>,
 }
 
 impl Namespace {
@@ -48,12 +59,15 @@ impl Namespace {
 static NAMESPACE: SpinLock<Namespace> = SpinLock::new(Namespace::new());
 
 /// Performs the bind operation.
-pub fn bind(path: &str, port_id: u64) -> Result<(), SyscallError> {
+///
+/// `owner` is the binder identity (task tgid); it authorises a later
+/// [`unbind`] and lets [`bind`] take over a stale entry.
+pub fn bind(path: &str, port_id: u64, owner: Pid) -> Result<(), SyscallError> {
     if path.is_empty() || !path.starts_with('/') {
         return Err(SyscallError::InvalidArgument);
     }
     let mut ns = NAMESPACE.lock();
-    ns.bindings.insert(path.to_string(), port_id);
+    ns.bindings.insert(path.to_string(), Binding { port_id, owner });
     Ok(())
 }
 
@@ -64,10 +78,26 @@ pub fn unbind(path: &str) -> Result<(), SyscallError> {
     Ok(())
 }
 
+/// Return the recorded owner of `path`, or `None` when it is not bound.
+pub fn owner_of(path: &str) -> Option<Pid> {
+    NAMESPACE.lock().bindings.get(path).map(|b| b.owner)
+}
+
+/// Remove every binding owned by `owner` (called on last-thread exit).
+pub fn release_owned_by(owner: Pid) {
+    NAMESPACE
+        .lock()
+        .bindings
+        .retain(|_, binding| binding.owner != owner);
+}
+
 /// List all current namespace bindings (path -> port_id).
 pub fn list_all_bindings() -> alloc::vec::Vec<(String, u64)> {
     let ns = NAMESPACE.lock();
-    ns.bindings.iter().map(|(k, v)| (k.clone(), *v)).collect()
+    ns.bindings
+        .iter()
+        .map(|(k, v)| (k.clone(), v.port_id))
+        .collect()
 }
 
 /// Resolve a path to the longest matching prefix.
@@ -75,20 +105,20 @@ pub fn list_all_bindings() -> alloc::vec::Vec<(String, u64)> {
 /// Returns (port_id, remaining_path).
 pub fn resolve(path: &str) -> Option<(u64, String)> {
     let ns = NAMESPACE.lock();
-    let mut best: Option<(&String, &u64)> = None;
-    for (prefix, port) in ns.bindings.iter() {
+    let mut best: Option<(&String, &Binding)> = None;
+    for (prefix, binding) in ns.bindings.iter() {
         if path.starts_with(prefix) {
             // Ensure prefix boundary (exact match or next char is '/')
             if path.len() == prefix.len() || path.as_bytes().get(prefix.len()) == Some(&b'/') {
                 match best {
                     Some((best_prefix, _)) if best_prefix.len() >= prefix.len() => {}
-                    _ => best = Some((prefix, port)),
+                    _ => best = Some((prefix, binding)),
                 }
             }
         }
     }
-    best.map(|(prefix, port)| {
+    best.map(|(prefix, binding)| {
         let remaining = path[prefix.len()..].to_string();
-        (*port, remaining)
+        (binding.port_id, remaining)
     })
 }

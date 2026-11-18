@@ -320,6 +320,12 @@ pub fn translate(addr: VirtAddr) -> Option<PhysAddr> {
 }
 
 fn translate_via_active_page_tables(addr: VirtAddr) -> Option<PhysAddr> {
+    translate_via_active_page_tables_sized(addr).map(|(phys, _)| phys)
+}
+
+/// Same walk as [`translate_via_active_page_tables`], also returning the size in
+/// bytes of the leaf page that maps `addr` (4 KiB, 2 MiB or 1 GiB).
+fn translate_via_active_page_tables_sized(addr: VirtAddr) -> Option<(PhysAddr, u64)> {
     let hhdm = crate::memory::hhdm_offset();
     let (level_4_frame, _) = Cr3::read();
 
@@ -336,8 +342,9 @@ fn translate_via_active_page_tables(addr: VirtAddr) -> Option<PhysAddr> {
             return None;
         }
         if l3e & 0x80 != 0 {
-            return Some(PhysAddr::new(
-                (l3e & 0x000F_FFFF_C000_0000) + (addr.as_u64() & 0x3FFF_FFFF),
+            return Some((
+                PhysAddr::new((l3e & 0x000F_FFFF_C000_0000) + (addr.as_u64() & 0x3FFF_FFFF)),
+                1 << 30,
             ));
         }
 
@@ -347,8 +354,9 @@ fn translate_via_active_page_tables(addr: VirtAddr) -> Option<PhysAddr> {
             return None;
         }
         if l2e & 0x80 != 0 {
-            return Some(PhysAddr::new(
-                (l2e & 0x000F_FFFF_FFE0_0000) + (addr.as_u64() & 0x1F_FFFF),
+            return Some((
+                PhysAddr::new((l2e & 0x000F_FFFF_FFE0_0000) + (addr.as_u64() & 0x1F_FFFF)),
+                1 << 21,
             ));
         }
 
@@ -358,8 +366,9 @@ fn translate_via_active_page_tables(addr: VirtAddr) -> Option<PhysAddr> {
             return None;
         }
 
-        Some(PhysAddr::new(
-            (l1e & 0x000F_FFFF_FFFF_F000) + (addr.as_u64() & 0xFFF),
+        Some((
+            PhysAddr::new((l1e & 0x000F_FFFF_FFFF_F000) + (addr.as_u64() & 0xFFF)),
+            4096,
         ))
     }
 }
@@ -381,14 +390,19 @@ pub fn is_hhdm_range_mapped_now(phys_base: u64, size: u64) -> bool {
     let mut phys = start;
     while phys < end {
         let virt = VirtAddr::new(crate::memory::phys_to_virt(phys));
-        let mapped = match translate_via_active_page_tables(virt) {
+        let (mapped, page_size) = match translate_via_active_page_tables_sized(virt) {
             Some(m) => m,
             None => return false,
         };
         if mapped.as_u64() != phys {
             return false;
         }
-        phys = phys.saturating_add(4096);
+        // A 2 MiB / 1 GiB leaf maps the rest of its extent linearly, so every
+        // 4 KiB page up to the end of this leaf is mapped identically: skip it
+        // instead of re-walking the tables once per page (a 2 GiB region was
+        // ~500k walks, repeated by boot_alloc's binary search).
+        let remaining_in_page = page_size - (virt.as_u64() & (page_size - 1));
+        phys = phys.saturating_add(remaining_in_page);
     }
     crate::e9_mark!(b'+');
     true

@@ -122,14 +122,14 @@ fn spinlock_guard_writes_are_visible_after_release() {
 
 #[test]
 fn namespace_bind_resolve_roundtrip() {
-    namespace::bind("/net", 7).expect("bind /net");
+    namespace::bind("/net", 7, 100).expect("bind /net");
     let (port, remaining) = namespace::resolve("/net/tcp").expect("resolve /net/tcp");
     assert_eq!(port, 7);
     // resolve() returns (port, remaining-path-after-prefix).
     assert_eq!(remaining, "/tcp");
 
     // Longest-prefix wins: bind a deeper prefix and check it shadows.
-    namespace::bind("/net/tcp", 8).expect("bind /net/tcp");
+    namespace::bind("/net/tcp", 8, 100).expect("bind /net/tcp");
     let (port2, remaining2) = namespace::resolve("/net/tcp/secure").expect("deep resolve");
     assert_eq!(port2, 8);
     assert_eq!(remaining2, "/secure");
@@ -137,7 +137,7 @@ fn namespace_bind_resolve_roundtrip() {
 
 #[test]
 fn namespace_unbind_removes_binding() {
-    namespace::bind("/tmp-test", 99).expect("bind");
+    namespace::bind("/tmp-test", 99, 100).expect("bind");
     assert!(namespace::unbind("/tmp-test").is_ok());
     assert!(namespace::resolve("/tmp-test").is_none());
     // Unbinding again must fail with BadHandle-like error, not panic.
@@ -146,16 +146,41 @@ fn namespace_unbind_removes_binding() {
 
 #[test]
 fn namespace_rejects_invalid_paths() {
-    assert!(namespace::bind("", 1).is_err(), "empty path accepted");
+    assert!(namespace::bind("", 1, 100).is_err(), "empty path accepted");
     assert!(
-        namespace::bind("relative", 1).is_err(),
+        namespace::bind("relative", 1, 100).is_err(),
         "relative path accepted"
     );
 }
 
 #[test]
 fn namespace_list_contains_bindings() {
-    namespace::bind("/list-probe", 5).expect("bind");
+    namespace::bind("/list-probe", 5, 100).expect("bind");
     let all = namespace::list_all_bindings();
     assert!(all.iter().any(|(p, port)| p == "/list-probe" && *port == 5));
+}
+
+#[test]
+fn namespace_tracks_binder_identity() {
+    namespace::bind("/own-probe", 11, 4242).expect("bind");
+    assert_eq!(namespace::owner_of("/own-probe"), Some(4242));
+    // Rebinding replaces the owner (hot restart of the same path).
+    namespace::bind("/own-probe", 12, 4243).expect("rebind");
+    assert_eq!(namespace::owner_of("/own-probe"), Some(4243));
+    assert_eq!(namespace::owner_of("/absent-probe"), None);
+    namespace::unbind("/own-probe").expect("unbind");
+}
+
+#[test]
+fn namespace_release_owned_by_removes_only_that_owner() {
+    namespace::bind("/owner-a/one", 1, 7001).expect("bind a1");
+    namespace::bind("/owner-a/two", 2, 7001).expect("bind a2");
+    namespace::bind("/owner-b/one", 3, 7002).expect("bind b1");
+
+    namespace::release_owned_by(7001);
+
+    assert!(namespace::resolve("/owner-a/one").is_none());
+    assert!(namespace::resolve("/owner-a/two").is_none());
+    assert!(namespace::resolve("/owner-b/one").is_some());
+    namespace::unbind("/owner-b/one").expect("cleanup b1");
 }

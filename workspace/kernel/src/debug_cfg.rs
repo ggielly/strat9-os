@@ -118,10 +118,14 @@ pub const SERIAL_ENABLED: bool = true;
 
 /// Bring up the application processors.
 ///
-/// Disabled temporarily: on the Lenovo X13 the APs never acknowledge TLB
-/// shootdown IPIs, so every mapping waits 10M cycles per CPU and the hardware
-/// stage (USB/Bluetooth) is never reached. Single-CPU boot is enough to test
-/// the Bluetooth path. Re-enable once AP/IPI bring-up is fixed.
+/// Enabled: the TLB shootdown IPI acknowledgement path is now verified (APs run
+/// the vector-0xF0 handler on QEMU with `-smp 2`), and the initiator waits for
+/// each online target instead of panicking on a fixed 10 ms deadline, so a
+/// target inside a long IRQ-off section no longer aborts the boot.
+///
+/// Note for bare-metal bring-up (Lenovo X13): a CPU that never acknowledges a
+/// shootdown now blocks the initiator rather than panicking; flip this back to
+/// `false` if hardware AP/IPI delivery turns out to be broken.
 pub const SMP_ENABLED: bool = true;
 
 /// Run the storage drivers (VirtIO-blk, AHCI, NVMe) during the hardware stage.
@@ -140,6 +144,16 @@ pub const BT_ENABLED: bool = false;
 /// Pause a few seconds after the USB/BT summary so the early xHCI lines can be
 /// photographed on real hardware (no serial console on the X13).
 pub const USB_BOOT_PAUSE: bool = false;
+
+/// Blocking PC-speaker boot beeps (`beep_phase`, `beep_startup`).
+///
+/// Each phase beep busy-waits ~100 ms on the PIT and the startup jingle ~700 ms,
+/// i.e. ~2.3 s of a ~3.5 s kernel boot.  They are the only progress indicator on
+/// machines without a serial console (Lenovo X13), so they stay enabled on bare
+/// metal.  They are always skipped under a hypervisor (QEMU/KVM has no speaker
+/// by default) regardless of this flag.  Set to `false` to silence them on
+/// hardware too.  `beep_panic` is unaffected.
+pub const BOOT_BEEPS: bool = true;
 
 // ---------------------------------------------------------------------------
 // Future debug flags : TODO

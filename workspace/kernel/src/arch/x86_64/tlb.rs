@@ -381,24 +381,6 @@ fn dispatch_op(op: TlbOp) {
         return;
     }
 
-    {
-        use core::sync::atomic::AtomicU32;
-        static DIAG_BUDGET: AtomicU32 = AtomicU32::new(12);
-        if DIAG_BUDGET
-            .try_update(Ordering::AcqRel, Ordering::Relaxed, |b| b.checked_sub(1))
-            .is_ok()
-        {
-            crate::serial_force_println!(
-                "[tlb-diag] dispatch self={} self_apic={} target0={} target1={} count={}",
-                crate::arch::x86_64::percpu::current_cpu_index(),
-                crate::arch::x86_64::apic::lapic_id(),
-                targets[0],
-                if count > 1 { targets[1] } else { 0 },
-                count,
-            );
-        }
-    }
-
     // `(apic_id, cpu_idx, seq)` for each target that was successfully queued.
     // An IPI is sent, and an acknowledgement awaited, only for entries here :
     // sending to, or waiting on, an AP whose queue was skipped would waste
@@ -597,36 +579,60 @@ fn collect_tlb_targets(targets: &mut [u32]) -> usize {
 
 /// Wait for generation acknowledgements from the given targets.
 ///
-/// Each entry is `(apic_id, cpu_idx, seq)` captured at queue time.  The wait is
-/// bounded by a 10 ms TSC deadline rather than a fixed spin count, so a fast
-/// CPU is not forced to spin far longer than intended.  While waiting, this
-/// CPU services its *own* mailbox if a request is pending : otherwise two
-/// initiators with interrupts disabled would spin forever, each waiting for the
-/// other's IPI handler that can never run.
+/// Each entry is `(apic_id, cpu_idx, seq)` captured at queue time.
 ///
-/// An IPI can be lost (e.g. the target is in a long IRQ-off section when the
-/// APIC coalesces the edge), so if half the budget elapses without an ack the
-/// IPI is re-sent once.  Only a full-budget expiry panics.
+/// The wait is **not** bounded by a wall-clock deadline.  A target that is
+/// running a long IRQ-off critical section cannot take the IPI until it
+/// reaches an interruptible point (or polls its mailbox via
+/// [`service_pending_local`]), and under TCG that window easily exceeds any
+/// fixed budget.  Timing out and panicking there is a false positive : the
+/// target is alive and will flush its TLB as soon as it makes progress.
+///
+/// Progress is still guaranteed in the two-initiator case: while waiting, this
+/// CPU drains its *own* mailbox if a request is pending, so two initiators
+/// with interrupts disabled each answer the other instead of deadlocking.
+///
+/// The IPI is re-sent periodically because a fixed vector can be coalesced
+/// while the target's IRR already has the vector pending; the resend costs
+/// nothing when the target is simply slow.  A target that leaves the online
+/// set is skipped : it must have flushed before retiring (see
+/// `percpu::mark_tlb_ready_current` / `clear_online`).
 fn wait_for_acks(targets: &[(u32, usize, u64)]) {
-    const TIMEOUT_MS: u64 = 10;
-    // Cycles to spin when the TSC frequency is not yet known (tsc_khz() == 0).
-    const FALLBACK_SPINS: u64 = 10_000_000;
+    // Re-send interval; long enough not to spam a busy target's APIC.
+    const RESEND_MS: u64 = 2;
+    // One diagnostic warning if a target takes this long; never fatal.
+    const WARN_MS: u64 = 250;
+    // Spin counts used when the TSC frequency is not yet known.
+    const FALLBACK_RESEND_SPINS: u64 = 2_000_000;
+    const FALLBACK_WARN_SPINS: u64 = 200_000_000;
 
-    // TSC ticks for the deadline: tsc_khz() is kHz, so 1 ms == tsc_khz ticks.
+    // tsc_khz() is kHz, so 1 ms == tsc_khz() ticks.
     let tsc_khz = crate::arch::x86_64::boot_timestamp::tsc_khz();
-    let budget = tsc_khz.saturating_mul(TIMEOUT_MS);
-    let retry_at = budget / 2;
+    let resend = tsc_khz.saturating_mul(RESEND_MS);
+    let warn_at = tsc_khz.saturating_mul(WARN_MS);
     let my_cpu = current_cpu_index();
 
     for &(apic_id, cpu_idx, seq) in targets {
         let start = crate::arch::x86_64::rdtsc();
-        let mut retried = false;
-        let mut spun: u64 = 0;
-        let mut success = false;
+        let mut last_send = start;
+        let mut spins: u64 = 0;
+        let mut warned = false;
 
         loop {
             if TLB_DONE[cpu_idx].load(Ordering::Acquire) >= seq {
-                success = true;
+                break;
+            }
+
+            // The target retired from the online set while we were waiting.
+            // It flushes its own TLB before clearing readiness, so there is
+            // nothing left to wait for.
+            if !crate::arch::x86_64::percpu::tlb_ready(cpu_idx) {
+                log::warn!(
+                    "TLB shootdown: cpu {} left the online set before acking seq {} (done {})",
+                    cpu_idx,
+                    seq,
+                    TLB_DONE[cpu_idx].load(Ordering::Acquire),
+                );
                 break;
             }
 
@@ -636,44 +642,37 @@ fn wait_for_acks(targets: &[(u32, usize, u64)]) {
                 drain_local_queue();
             }
 
-            if budget == 0 {
-                // No TSC deadline available: bounded spin fallback.
-                spun += 1;
-                if spun >= FALLBACK_SPINS {
-                    break;
+            if tsc_khz == 0 {
+                spins += 1;
+                if spins % FALLBACK_RESEND_SPINS == 0 {
+                    send_tlb_ipi(apic_id);
+                }
+                if !warned && spins >= FALLBACK_WARN_SPINS {
+                    warned = true;
+                    log::warn!(
+                        "TLB shootdown: cpu {} still not acked seq {} (done {}), continuing",
+                        cpu_idx,
+                        seq,
+                        TLB_DONE[cpu_idx].load(Ordering::Acquire),
+                    );
                 }
             } else {
-                let elapsed = crate::arch::x86_64::rdtsc().wrapping_sub(start);
-                if elapsed >= budget {
-                    break;
-                }
-                if !retried && elapsed >= retry_at {
+                let now = crate::arch::x86_64::rdtsc();
+                if now.wrapping_sub(last_send) >= resend {
                     send_tlb_ipi(apic_id);
-                    retried = true;
+                    last_send = now;
+                }
+                if !warned && now.wrapping_sub(start) >= warn_at {
+                    warned = true;
+                    log::warn!(
+                        "TLB shootdown: cpu {} still not acked seq {} (done {}), continuing",
+                        cpu_idx,
+                        seq,
+                        TLB_DONE[cpu_idx].load(Ordering::Acquire),
+                    );
                 }
             }
             core::hint::spin_loop();
-        }
-
-        if !success {
-            crate::serial_force_println!(
-                "[tlb-diag] timeout self={} target={} apic={} seq={} req0={} done0={} req1={} done1={}",
-                my_cpu,
-                cpu_idx,
-                apic_id,
-                seq,
-                TLB_REQ[0].load(Ordering::Acquire),
-                TLB_DONE[0].load(Ordering::Acquire),
-                TLB_REQ[1].load(Ordering::Acquire),
-                TLB_DONE[1].load(Ordering::Acquire),
-            );
-            panic!(
-                "TLB shootdown timeout: cpu={} seq={} done={} retried={}",
-                cpu_idx,
-                seq,
-                TLB_DONE[cpu_idx].load(Ordering::Acquire),
-                retried,
-            );
         }
     }
 }

@@ -141,6 +141,15 @@ impl CpuInfo {
 static HOST_CPU: SpinLock<Option<CpuInfo>> = SpinLock::new(None);
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Lock-free copy of `CpuInfo::features.contains(XSAVE)`, published by
+/// `init()` before `INITIALIZED` becomes true and never cleared.
+///
+/// The context-switch path (`do_switch_context`, `do_restore_first_task`,
+/// `normalized_xcr0`) must not acquire `HOST_CPU` with interrupts disabled, so
+/// it reads this flag instead. Invariant: `INITIALIZED == true` implies this
+/// flag already holds the frozen boot CPU's XSAVE capability.
+static USES_XSAVE: AtomicBool = AtomicBool::new(false);
+
 /// Lock-free cache of the host's default XCR0 mask, written once during
 /// `init()`.  Used by `normalized_xcr0()` in the context-switch hot path
 /// to avoid acquiring the `HOST_CPU` spinlock with interrupts disabled.
@@ -218,6 +227,12 @@ pub fn init() {
     PROFILE_AREA_SIZE.store(profile_size, Ordering::Release);
 
     crate::e9_mark!(b'J');
+    // Publish the lock-free XSAVE flag before INITIALIZED so a reader that
+    // observes INITIALIZED == true also observes the correct capability.
+    USES_XSAVE.store(
+        info.features.contains(CpuFeatures::XSAVE),
+        Ordering::Release,
+    );
     *HOST_CPU.lock() = Some(info);
     crate::e9_mark!(b'K');
     HOST_DEFAULT_XCR0_CACHE.store(default_xcr0, Ordering::Release);
@@ -233,13 +248,13 @@ pub fn host() -> CpuInfo {
         .expect("cpuid::init() not called yet")
 }
 
-/// Whether XSAVE is supported by the host.
+/// Whether the boot CPU supports XSAVE.
+///
+/// Lock-free: reads the flag published by `init()`. Safe to call from the
+/// context-switch path, which runs with interrupts disabled and must not
+/// acquire `HOST_CPU`.
 pub fn host_uses_xsave() -> bool {
-    INITIALIZED.load(Ordering::Acquire)
-        && HOST_CPU
-            .lock()
-            .as_ref()
-            .map_or(false, |h| h.features.contains(CpuFeatures::XSAVE))
+    INITIALIZED.load(Ordering::Acquire) && USES_XSAVE.load(Ordering::Acquire)
 }
 
 /// Detect CPU features by interrogating CPUID leaves.

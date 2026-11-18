@@ -28,6 +28,12 @@ const PENDING_SILO_CLEANUPS_CAPACITY: usize = 256;
 static PENDING_SILO_CLEANUPS: SpinLock<FixedQueue<TaskId, PENDING_SILO_CLEANUPS_CAPACITY>> =
     SpinLock::new(FixedQueue::new());
 
+/// Thread groups whose namespace/VFS bindings must be released at a safe
+/// point (the reap path holds the scheduler lock, where VFS access is
+/// forbidden).
+static PENDING_BINDING_CLEANUPS: SpinLock<FixedQueue<Pid, PENDING_SILO_CLEANUPS_CAPACITY>> =
+    SpinLock::new(FixedQueue::new());
+
 /// Mark the current task as Dead and yield to the scheduler.
 ///
 /// Called by SYS_PROC_EXIT. The task will not be re-queued because
@@ -89,6 +95,13 @@ pub fn exit_current_task(exit_code: i32) -> ! {
             // forever. Queued/pending callers get an error reply instead.
             // Idempotent with `cleanup_task_resources` at reap time.
             crate::ipc::port::cleanup_ports_for_task(task.id);
+
+            // -- namespace/VFS bindings owned by this thread group --
+            // Drop them now so a crashed client cannot leave an EEXIST path
+            // behind for its next incarnation. Idempotent with the reap-time
+            // cleanup below; bounded by the binding/mount table sizes.
+            crate::namespace::release_owned_by(task.tgid);
+            crate::vfs::unmount_owned_by(task.tgid);
         }
     }
 
@@ -488,6 +501,19 @@ pub fn get_task_ids_in_tgid(tgid: Pid) -> alloc::vec::Vec<TaskId> {
     };
     restore_flags(saved_flags);
     out
+}
+
+/// True when at least one task of thread group `tgid` is still tracked.
+///
+/// Dead-owner detection for namespace bindings: a reaped tgid owns nothing.
+pub fn tgid_is_alive(tgid: Pid) -> bool {
+    let saved_flags = save_flags_and_cli();
+    let alive = GLOBAL_SCHED_STATE
+        .lock()
+        .as_ref()
+        .is_some_and(|sched| sched.all_tasks.values().any(|task| task.tgid == tgid));
+    restore_flags(saved_flags);
+    alive
 }
 
 /// Set process group id for `target_pid` (or current if `None`).
@@ -1452,6 +1478,17 @@ fn queue_silo_cleanup(task_id: TaskId) {
 }
 
 pub fn flush_deferred_silo_cleanups() {
+    // Binding owners are queued only from the reap path, which holds the
+    // scheduler lock; release the mount/namespace tables outside any lock.
+    let mut bindings = FixedQueue::<Pid, PENDING_SILO_CLEANUPS_CAPACITY>::new();
+    if let Some(mut guard) = PENDING_BINDING_CLEANUPS.try_lock() {
+        core::mem::swap(&mut *guard, &mut bindings);
+    }
+    while let Some(tgid) = bindings.pop_front() {
+        crate::namespace::release_owned_by(tgid);
+        crate::vfs::unmount_owned_by(tgid);
+    }
+
     let mut guard = match PENDING_SILO_CLEANUPS.try_lock() {
         Some(g) => g,
         None => return, // Lock held by preempted task or other CPU, skip safely
@@ -1487,6 +1524,17 @@ pub(crate) fn cleanup_task_resources(task: &Arc<Task>) {
 
     // Last reference to the process: release every v2 handle it holds.
     crate::ipc::v2::cleanup_process(&task.process);
+
+    // Namespace/VFS bindings owned by this thread group (normally already
+    // released by `exit_current_task`; queued here for kill/reap paths, which
+    // run under the scheduler lock where VFS access is forbidden).
+    let mut queued = PENDING_BINDING_CLEANUPS.lock();
+    if queued.push_back(task.tgid).is_err() {
+        log::error!(
+            "[ipc] pending binding cleanup queue full; tgid {} bindings leaked",
+            task.tgid
+        );
+    }
 
     unsafe {
         (&mut *task.process.fd_table.get()).close_all();

@@ -75,7 +75,10 @@ use core::fmt::Write;
 pub use blkdev_scheme::BlkDevScheme;
 pub use fd::{FileDescriptorTable, STDERR, STDIN, STDOUT};
 pub use file::OpenFile;
-pub use mount::{list_mounts, mount, mount_count, mount_replace, resolve, unmount, Namespace};
+pub use mount::{
+    list_mounts, mount, mount_count, mount_replace, owner_of, resolve, unmount, unmount_owned_by,
+    Namespace,
+};
 pub use pipe::PipeScheme;
 pub use procfs::ProcScheme;
 pub use ramfs_scheme::RamfsScheme;
@@ -1392,7 +1395,7 @@ pub fn init() {
     // Must be mounted before any other scheme so that longest-prefix resolution
     // falls back to "/" for paths not covered by a more specific mount point.
     let rootfs = alloc::sync::Arc::new(RamfsScheme::new());
-    if let Err(e) = mount::mount("/", rootfs.clone()) {
+    if let Err(e) = mount::mount("/", rootfs.clone(), None) {
         log::error!("[VFS] Failed to mount /: {:?}", e);
     } else {
         // Populate the standard POSIX directory skeleton.
@@ -1518,7 +1521,7 @@ pub fn init() {
     let kernel_scheme = Arc::new(kernel_scheme);
 
     // Mount /sys
-    if let Err(e) = mount::mount("/sys", kernel_scheme.clone()) {
+    if let Err(e) = mount::mount("/sys", kernel_scheme.clone(), None) {
         log::error!("[VFS] Failed to mount /sys: {:?}", e);
     } else {
         log::info!("[VFS] Mounted /sys (kernel scheme)");
@@ -1532,7 +1535,7 @@ pub fn init() {
         log::info!("[VFS] Registered proc scheme");
     }
 
-    if let Err(e) = mount::mount("/proc", proc_scheme) {
+    if let Err(e) = mount::mount("/proc", proc_scheme, None) {
         log::error!("[VFS] Failed to mount /proc: {:?}", e);
     } else {
         log::info!("[VFS] Mounted /proc (procfs)");
@@ -1540,14 +1543,14 @@ pub fn init() {
 
     // Mount /thread : Plan 9 style thread control files (ThreadsScheme)
     let threads = Arc::new(threads_scheme::ThreadsScheme::new());
-    if let Err(e) = mount::mount("/thread", threads) {
+    if let Err(e) = mount::mount("/thread", threads, None) {
         log::error!("[VFS] Failed to mount /thread: {:?}", e);
     } else {
         log::info!("[VFS] Mounted /thread (threads scheme)");
     }
 
     let ipc_scheme = Arc::new(ipcfs::IpcControlScheme::new());
-    if let Err(e) = mount::mount("/ipc", ipc_scheme) {
+    if let Err(e) = mount::mount("/ipc", ipc_scheme, None) {
         log::error!("[VFS] Failed to mount /ipc: {:?}", e);
     } else {
         log::info!("[VFS] Mounted /ipc (kernel ipc control scheme)");
@@ -1557,7 +1560,7 @@ pub fn init() {
     // The scheme is registered regardless of whether a disk is present:
     // device files appear dynamically when the hardware is available.
     let dev_scheme = Arc::new(BlkDevScheme::new());
-    if let Err(e) = mount::mount("/dev", dev_scheme) {
+    if let Err(e) = mount::mount("/dev", dev_scheme, None) {
         log::error!("[VFS] Failed to mount /dev: {:?}", e);
     } else {
         log::info!("[VFS] Mounted /dev (block-device scheme)");
@@ -1581,7 +1584,7 @@ pub fn init() {
 
     // Console scheme (/dev/console) : backs stdin/stdout/stderr for ELF processes
     let console = console_scheme::init_console_scheme();
-    if let Err(e) = mount::mount("/dev/console", console) {
+    if let Err(e) = mount::mount("/dev/console", console, None) {
         log::error!("[VFS] Failed to mount /dev/console: {:?}", e);
     } else {
         log::info!("[VFS] Mounted /dev/console (serial + keyboard)");
@@ -1593,7 +1596,7 @@ pub fn init() {
 
     // Input scheme (/dev/input) : raw keyboard and mouse events for userspace Input Server
     let input_scheme = Arc::new(input_scheme::InputScheme::new());
-    if let Err(e) = mount::mount("/dev/input", input_scheme) {
+    if let Err(e) = mount::mount("/dev/input", input_scheme, None) {
         log::error!("[VFS] Failed to mount /dev/input: {:?}", e);
     } else {
         log::info!("[VFS] Mounted /dev/input (raw keyboard + mouse events)");

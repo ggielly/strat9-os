@@ -123,7 +123,7 @@ pub fn get_scheme(name: &str) -> Option<DynScheme> {
 /// Mount a registered scheme at a path
 pub fn mount_scheme(name: &str, path: &str) -> Result<(), SyscallError> {
     let scheme = get_scheme(name).ok_or(SyscallError::BadHandle)?;
-    crate::vfs::mount::mount(path, scheme)
+    crate::vfs::mount::mount(path, scheme, None)
 }
 
 /// Initialize built-in schemes
