@@ -550,6 +550,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lucarne"
+version = "0.1.0"
+dependencies = [
+ "alloc-freelist",
+ "input-protocol",
+ "strat9-syscall",
+ "terminal-core",
+ "vasistas-client",
+ "vasistas-protocol",
+]
+
+[[package]]
 name = "managed"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1059,7 +1071,7 @@ dependencies = [
  "input-client",
  "input-protocol",
  "strat9-syscall",
- "vte",
+ "terminal-core",
 ]
 
 [[package]]
@@ -1245,6 +1257,13 @@ version = "0.1.0"
 dependencies = [
  "alloc-freelist",
  "strat9-syscall",
+]
+
+[[package]]
+name = "terminal-core"
+version = "0.1.0"
+dependencies = [
+ "vte",
 ]
 
 [[package]]

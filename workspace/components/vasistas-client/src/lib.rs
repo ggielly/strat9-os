@@ -198,6 +198,15 @@ pub enum Event {
         width: u32,
         height: u32,
     },
+    /// A.3.1 `GEOMETRY`: geometry as applied by the server (clamped position).
+    Geometry {
+        surface: u64,
+        serial: u64,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
     FrameDone {
         buffer: u64,
         commit_id: u64,
@@ -603,6 +612,202 @@ impl Client {
                 _ => {}
             }
         }
+        None
+    }
+
+    /// Ask the server to resize `surface` (`REQUEST_RESIZE`).
+    ///
+    /// Returns the `CONFIGURE` event the server emitted, whose `serial` must
+    /// be acknowledged by the next commit's `ack_serial`. Buffers allocated
+    /// for the old size stay valid but are rejected at commit until reallocated.
+    pub fn request_resize(&mut self, surface: u64, width: u32, height: u32) -> Option<(u64, u32, u32)> {
+        let Some(request) = self.request(
+            Opcode::REQUEST_RESIZE,
+            surface,
+            &Body::RequestResize {
+                width,
+                height,
+                format: FORMAT_XRGB8888,
+            },
+        ) else {
+            Self::debug(b"vasistas-client: resize send failed");
+            return None;
+        };
+        let deadline = now_ns().saturating_add(REQUEST_TIMEOUT_NS);
+        let mut configure = None;
+        let mut acknowledged = false;
+        for _ in 0..MATCH_TRIES {
+            let now = now_ns();
+            if now >= deadline {
+                Self::debug(b"vasistas-client: resize timeout");
+                return None;
+            }
+            let Some((header, event)) = self.frame(deadline - now) else {
+                return None;
+            };
+            match event {
+                Event::Configure {
+                    serial,
+                    width,
+                    height,
+                    ..
+                } => configure = Some((serial, width, height)),
+                Event::Ack { status, request_id } if request_id == request => {
+                    if status != 0 {
+                        Self::debug(b"vasistas-client: resize rejected");
+                        return None;
+                    }
+                    // The server emits CONFIGURE after the ACK; keep reading
+                    // until both halves of the answer have arrived.
+                    acknowledged = true;
+                    if configure.is_some() {
+                        return configure;
+                    }
+                }
+                Event::Error { .. } if header.request_id == request => {
+                    Self::debug(b"vasistas-client: resize rejected");
+                    return None;
+                }
+                _ => {}
+            }
+            if acknowledged && configure.is_some() {
+                return configure;
+            }
+        }
+        Self::debug(b"vasistas-client: resize no ack");
+        None
+    }
+
+    /// Ask the server to move `surface` to `(x, y)` with a new size
+    /// (`SET_GEOMETRY`); the server clamps the position to the output.
+    ///
+    /// Returns the `GEOMETRY` event the server emitted after the `ACK`
+    /// (serial, final x, final y, width, height); the serial must be
+    /// acknowledged by the next commit's `ack_serial`. Buffers of the old size
+    /// are then rejected at commit until reallocated.
+    pub fn set_geometry(
+        &mut self,
+        surface: u64,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> Option<(u64, i32, i32, u32, u32)> {
+        let Some(request) = self.request(
+            Opcode::SET_GEOMETRY,
+            surface,
+            &Body::SetGeometry {
+                x,
+                y,
+                width,
+                height,
+                format: FORMAT_XRGB8888,
+            },
+        ) else {
+            Self::debug(b"vasistas-client: set_geometry send failed");
+            return None;
+        };
+        let deadline = now_ns().saturating_add(REQUEST_TIMEOUT_NS);
+        let mut geometry = None;
+        let mut acknowledged = false;
+        for _ in 0..MATCH_TRIES {
+            let now = now_ns();
+            if now >= deadline {
+                Self::debug(b"vasistas-client: set_geometry timeout");
+                return None;
+            }
+            let Some((header, event)) = self.frame(deadline - now) else {
+                return None;
+            };
+            match event {
+                Event::Geometry {
+                    serial,
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => geometry = Some((serial, x, y, width, height)),
+                Event::Ack { status, request_id } if request_id == request => {
+                    if status != 0 {
+                        Self::debug(b"vasistas-client: set_geometry rejected");
+                        return None;
+                    }
+                    // The server emits GEOMETRY after the ACK; keep reading
+                    // until both halves of the answer have arrived.
+                    acknowledged = true;
+                    if geometry.is_some() {
+                        return geometry;
+                    }
+                }
+                Event::Error { .. } if header.request_id == request => {
+                    Self::debug(b"vasistas-client: set_geometry rejected");
+                    return None;
+                }
+                _ => {}
+            }
+            if acknowledged && geometry.is_some() {
+                return geometry;
+            }
+        }
+        Self::debug(b"vasistas-client: set_geometry no geometry");
+        None
+    }
+
+    /// Send `REQUEST_WINDOW_ACTION` for `surface` and wait for its `ACK`.
+    ///
+    /// `None` on a send failure, timeout or `ERROR`. `Some(None)` when the
+    /// action was acknowledged without a `GEOMETRY` event (MINIMIZE, RESTORE,
+    /// RAISE, LOWER); `Some(Some((serial, x, y, w, h)))` when a `GEOMETRY`
+    /// event arrived before or with the `ACK` (MAXIMIZE).
+    pub fn window_action(
+        &mut self,
+        surface: u64,
+        action: u32,
+    ) -> Option<Option<(u64, i32, i32, u32, u32)>> {
+        let Some(request) = self.request(
+            Opcode::REQUEST_WINDOW_ACTION,
+            surface,
+            &Body::RequestWindowAction { action },
+        ) else {
+            Self::debug(b"vasistas-client: window_action send failed");
+            return None;
+        };
+        let deadline = now_ns().saturating_add(REQUEST_TIMEOUT_NS);
+        let mut geometry = None;
+        for _ in 0..MATCH_TRIES {
+            let now = now_ns();
+            if now >= deadline {
+                Self::debug(b"vasistas-client: window_action timeout");
+                return None;
+            }
+            let Some((header, event)) = self.frame(deadline - now) else {
+                return None;
+            };
+            match event {
+                Event::Geometry {
+                    serial,
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => geometry = Some((serial, x, y, width, height)),
+                Event::Ack { status, request_id } if request_id == request => {
+                    if status != 0 {
+                        Self::debug(b"vasistas-client: window_action rejected");
+                        return None;
+                    }
+                    return Some(geometry);
+                }
+                Event::Error { .. } if header.request_id == request => {
+                    Self::debug(b"vasistas-client: window_action rejected");
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        Self::debug(b"vasistas-client: window_action no ack");
         None
     }
 
@@ -1039,6 +1244,21 @@ fn map_event(header: &Header, body: &Body<'_>) -> Event {
             width,
             height,
         },
+        Body::Geometry {
+            serial,
+            x,
+            y,
+            width,
+            height,
+            ..
+        } => Event::Geometry {
+            surface: header.object_id,
+            serial,
+            x,
+            y,
+            width,
+            height,
+        },
         Body::FrameDone {
             buffer,
             commit_id,
@@ -1369,6 +1589,37 @@ mod tests {
             Event::CloseRequest {
                 surface: 5,
                 reason: vasistas_protocol::CLOSE_REASON_REQUESTED,
+            }
+        );
+    }
+
+    #[test]
+    fn geometry_maps_to_owned_event() {
+        let message = frame(
+            Opcode::GEOMETRY,
+            5,
+            0,
+            &Body::Geometry {
+                serial: 3,
+                x: -4,
+                y: 9,
+                width: 320,
+                height: 240,
+                format: FORMAT_XRGB8888,
+                flags: 0,
+            },
+        );
+        let (header, event) = decode_frame(&message).expect("frame decodes");
+        assert_eq!(header.request_id, 0, "spontaneous event");
+        assert_eq!(
+            event,
+            Event::Geometry {
+                surface: 5,
+                serial: 3,
+                x: -4,
+                y: 9,
+                width: 320,
+                height: 240,
             }
         );
     }

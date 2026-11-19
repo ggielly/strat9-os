@@ -33,6 +33,9 @@
 //! * A6  Does `SYS_POLL` actually wait / report readiness?
 //! * A7  Does a non-blocking `ipc_try_send` report `EAGAIN` on a full queue?
 //! * A8  Is `/dev/input` readable by a single reader only? (second open => `EBUSY`)
+//! * A9  Does `SYS_HANDLE_GRANT_TO` deliver to the port owner (never a
+//!       caller-named PID), narrow rights to the requested mask, refuse
+//!       unknown bits and refuse a dead endpoint?
 
 #![no_std]
 #![no_main]
@@ -446,6 +449,173 @@ fn a8_input_exclusive(ctx: &mut Ctx) {
     }
 }
 
+fn a9_grant_to_endpoint(ctx: &mut Ctx) {
+    section(ctx, "A9: SYS_HANDLE_GRANT_TO (grant via endpoint)");
+    use strat9_syscall::{
+        data::HandleInfo,
+        number,
+        syscall6,
+    };
+
+    const PROT_READ: usize = 1;
+    const PROT_WRITE: usize = 2;
+    const MAP_PRIVATE: usize = 1 << 1;
+    const MAP_ANON: usize = 1 << 5;
+    const REGION_LEN: usize = 2 * 4096;
+
+    // Export a real region, as the display server does for a client buffer.
+    let region = unsafe {
+        syscall6(
+            number::SYS_MMAP,
+            0,
+            REGION_LEN,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANON,
+            0,
+            0,
+        )
+    }
+    .ok()
+    .and_then(|base| {
+        // Touch every page so the mapping has effective frames to export.
+        unsafe { (base as *mut u8).write_volatile(0) };
+        unsafe { ((base + REGION_LEN - 1) as *mut u8).write_volatile(0) };
+        call::mem_region_export(base).ok()
+    });
+    let Some(region) = region else {
+        check(ctx, "A9 mmap + mem_region_export", false, "");
+        return;
+    };
+
+    let Ok((rd, wr)) = call::pipe() else {
+        check(ctx, "A9 pipe", false, "");
+        return;
+    };
+    let (rd, wr) = (rd as usize, wr as usize);
+
+    // Child: owns an endpoint port, hands its capability to the parent, then
+    // reports the permissions of the handle the parent granted to it.
+    let child = match call::fork() {
+        Ok(0) => {
+            let Ok(endpoint) = call::ipc_create_port(0) else {
+                call::exit(1)
+            };
+            let Ok(parent) = call::getppid() else {
+                call::exit(1)
+            };
+            // Cooperative bootstrap only: the child names its parent once.
+            // The returned id is the PARENT-side handle: ids are globally
+            // monotone, so sending it lets the parent address its own table.
+            let parent_side = match call::handle_grant(endpoint, parent) {
+                Ok(id) => id as u64,
+                Err(_) => call::exit(1),
+            };
+            if !send_u64(wr, parent_side) {
+                call::exit(1)
+            }
+            let Some(granted) = recv_u64(rd) else {
+                call::exit(1)
+            };
+            let mut info = HandleInfo {
+                resource_type: 0,
+                permissions: 0,
+                resource: 0,
+            };
+            let perms = match call::handle_info(granted as usize, &mut info) {
+                Ok(_) => info.permissions,
+                Err(_) => 0xff,
+            };
+            if !send_u64(wr, perms as u64) {
+                call::exit(1)
+            }
+            call::exit(0)
+        }
+        Ok(pid) => pid,
+        Err(_) => {
+            check(ctx, "A9 fork", false, "");
+            return;
+        }
+    };
+
+    let Some(endpoint) = recv_u64(rd) else {
+        check(ctx, "A9 receive endpoint capability", false, "");
+        return;
+    };
+    let endpoint = endpoint as usize;
+    let rights = number::CAP_RIGHT_READ | number::CAP_RIGHT_WRITE;
+
+    // Unknown rights bits must be rejected without touching the target.
+    let bad = call::handle_grant_to(region, endpoint, number::CAP_RIGHT_ALL | 0x20);
+    check(
+        ctx,
+        "A9 unknown rights bits are refused",
+        bad.is_err(),
+        match bad {
+            Err(e) => e.name(),
+            Ok(_) => "grant accepted with invented bits",
+        },
+    );
+
+    // An empty mask is a caller error, not a zero-right capability.
+    let empty = call::handle_grant_to(region, endpoint, 0);
+    check(
+        ctx,
+        "A9 an empty rights mask is refused",
+        empty.is_err(),
+        match empty {
+            Ok(_) => "granted a capability with no rights",
+            Err(e) => e.name(),
+        },
+    );
+
+    // The grant goes to the endpoint owner; the returned id lands in the
+    // child's capability table.
+    let granted = call::handle_grant_to(region, endpoint, rights);
+    let Ok(granted) = granted else {
+        check(ctx, "A9 grant to endpoint owner", false, "");
+        let _ = reap(child);
+        return;
+    };
+    if !send_u64(wr, granted as u64) {
+        check(ctx, "A9 send granted id", false, "");
+        return;
+    }
+    let perms = recv_u64(rd);
+    let _ = reap(child);
+    check(
+        ctx,
+        "A9 grant to endpoint reaches the port owner",
+        perms.is_some() && perms != Some(0xff),
+        "",
+    );
+    check(
+        ctx,
+        "A9 granted rights are narrowed to the mask",
+        perms == Some((number::CAP_RIGHT_READ | number::CAP_RIGHT_WRITE) as u64),
+        match perms {
+            Some(_) => "",
+            None => "no permission report from the child",
+        },
+    );
+
+    // A reaped owner leaves a dead endpoint: the grant must be refused
+    // instead of leaking the handle into an arbitrary task.
+    sleep_ms(50);
+    let dead = call::handle_grant_to(region, endpoint, rights);
+    check(
+        ctx,
+        "A9 grant to a dead endpoint is refused",
+        dead.is_err(),
+        match dead {
+            Ok(_) => "grant succeeded after the owner died",
+            Err(e) => e.name(),
+        },
+    );
+    let _ = call::handle_close(region);
+    let _ = call::close(rd);
+    let _ = call::close(wr);
+}
+
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     call::handle_panic("gui-authority", info)
@@ -460,5 +630,6 @@ pub extern "C" fn _start() -> ! {
     a6_wait_many(&mut ctx);
     a7_try_send(&mut ctx);
     a8_input_exclusive(&mut ctx);
+    a9_grant_to_endpoint(&mut ctx);
     call::exit(summary(&ctx))
 }

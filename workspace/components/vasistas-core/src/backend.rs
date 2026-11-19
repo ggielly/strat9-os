@@ -23,10 +23,9 @@
 //! Presentation backend boundary (A.4: metadata and presentation only).
 //!
 //! The core never touches pixels. A backend turns a buffer descriptor into an
-//! opaque region, frees it, and presents the current region of a surface with
-//! the damage accumulated since the previous presentation.
+//! opaque region, frees it, and composites the current images of the z order
+//! over the screen's dirty rectangles.
 
-use crate::types::SurfaceId;
 use vasistas_protocol::Rect;
 
 /// Opaque handle to a backend-allocated pixel region.
@@ -46,6 +45,18 @@ impl RegionHandle {
     pub const fn raw(self) -> u64 {
         self.0
     }
+}
+
+/// One compositable surface image; the bottom-to-top order is given by the
+/// slice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Layer {
+    /// Region holding the surface's current image.
+    pub region: RegionHandle,
+    /// Screen-space origin x of the image.
+    pub x: u32,
+    /// Screen-space origin y of the image.
+    pub y: u32,
 }
 
 /// Allocation and presentation operations the core delegates to.
@@ -78,21 +89,12 @@ pub trait Backend {
     /// [`DisplayCore::take_retired`]: crate::DisplayCore::take_retired
     fn free(&mut self, region: RegionHandle);
 
-    /// Present `region` on `surface` with `damage` since the last present.
+    /// Composite `bottom_to_top` over the screen-space dirty `rects`.
     ///
-    /// `damage` is a single full-surface rect for a full presentation, sized to
-    /// the current buffer. The rects are **surface-local**; `x` and `y` are the
-    /// surface's screen-space origin, so the backend translates each rect by
-    /// them and clips to the screen before copying. The slice is borrowed for
-    /// the call only: it must not be retained past the return.
-    fn present(
-        &mut self,
-        surface: SurfaceId,
-        region: RegionHandle,
-        damage: &[Rect],
-        x: u32,
-        y: u32,
-    ) -> Result<(), Self::Error>;
+    /// `rects` are already clipped to the output; the backend copies, for each
+    /// rect, every layer's intersection in slice order (the last layer paints
+    /// on top). The slices are borrowed for the call only.
+    fn composite(&mut self, bottom_to_top: &[Layer], rects: &[Rect]) -> Result<(), Self::Error>;
 
     /// Select the software cursor shape (A.3.1 `SET_CURSOR_SHAPE`).
     ///

@@ -58,8 +58,10 @@ pub struct OwnerEntry {
     pub caps: SmallVec<[CapId; 4]>,
     /// Temporary non-capability pins held while publishing or revoking a mapping.
     pub transient_refs: u32,
-    /// Block was exported as a shared region and must not be COW-cloned.
-    pub shared: bool,
+    /// Live exports covering the block; while nonzero the block must not be
+    /// COW-cloned. A counter, not a flag: two exports of the same block
+    /// (or two pages of one block) each add and remove one reference.
+    pub shared_refs: u32,
 }
 
 /// Errors returned by the ownership layer.
@@ -153,7 +155,7 @@ impl OwnershipTable {
                 refcount: 1,
                 caps: smallvec![cap_id],
                 transient_refs: 0,
-                shared: false,
+                shared_refs: 0,
             },
         );
         Self::sync_meta(handle, 1);
@@ -180,7 +182,7 @@ impl OwnershipTable {
                     refcount: 1,
                     caps: smallvec![cap_id],
                     transient_refs: 0,
-                    shared: false,
+                    shared_refs: 0,
                 },
             );
             Self::sync_meta(handle, 1);
@@ -315,20 +317,32 @@ impl OwnershipTable {
         self.entries.lock().get(&handle).cloned()
     }
 
-    /// Marks a block as exported/shared so COW cloning keeps it writable and shared.
+    /// Marks a block as covered by one live export so COW cloning keeps it
+    /// writable and shared. Each call must be paired with one
+    /// [`OwnershipTable::clear_shared`].
     pub fn mark_shared(&self, handle: BlockHandle) -> Result<(), OwnerError> {
         let mut entries = self.entries.lock();
         let entry = entries.get_mut(&handle).ok_or(OwnerError::NotFound)?;
-        entry.shared = true;
+        entry.shared_refs = entry.shared_refs.saturating_add(1);
         Ok(())
     }
 
-    /// Returns whether the block was marked as exported/shared.
+    /// Drops one live export mark. Saturating: a mark lost to an earlier
+    /// block free (entry removed) is a no-op, so a stale clear can never
+    /// underflow into re-enabling sharing for a foreign block.
+    pub fn clear_shared(&self, handle: BlockHandle) {
+        let mut entries = self.entries.lock();
+        if let Some(entry) = entries.get_mut(&handle) {
+            entry.shared_refs = entry.shared_refs.saturating_sub(1);
+        }
+    }
+
+    /// Returns whether the block is covered by a live export.
     pub fn is_shared(&self, handle: BlockHandle) -> bool {
         self.entries
             .lock()
             .get(&handle)
-            .is_some_and(|entry| entry.shared)
+            .is_some_and(|entry| entry.shared_refs > 0)
     }
 
     /// Returns the live handle whose base physical address matches `base`, if any.

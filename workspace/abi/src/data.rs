@@ -197,6 +197,10 @@ pub const WAIT_SOURCE_FD: u32 = 1;
 pub const WAIT_EVENT_READABLE: u32 = 1 << 0;
 /// `WaitSource.events` / `revents`: writable (bit 1).
 pub const WAIT_EVENT_WRITABLE: u32 = 1 << 1;
+/// `WaitSource.events` / `revents`: peer hung up / handle no longer resolvable
+/// (bit 2). A port whose owner died is reported as hangup instead of failing
+/// the whole wait, so a server can drop the peer without polling.
+pub const WAIT_EVENT_HANGUP: u32 = 1 << 2;
 
 /// One entry of the `SYS_HANDLE_WAIT_MANY` list.
 ///

@@ -166,6 +166,19 @@ impl Scheme for InputScheme {
         Ok(())
     }
 
+    /// Metadata without claiming a reader: `stat`/`ls` must not steal or
+    /// release the exclusive claim held by the actual reader.
+    fn stat_by_path(&self, path: &str) -> Result<FileStat, SyscallError> {
+        let file_id = match path {
+            "kbd" | "keyboard" => KBD_FILE_ID,
+            "mouse" => MOUSE_FILE_ID,
+            "text" => TEXT_FILE_ID,
+            "" | "/" => 0,
+            _ => return Err(SyscallError::NotFound),
+        };
+        self.stat(file_id)
+    }
+
     fn stat(&self, file_id: u64) -> Result<FileStat, SyscallError> {
         let (mode, size) = match file_id {
             KBD_FILE_ID | TEXT_FILE_ID => (0o020000 | 0o444, 0u64), // S_IFCHR | r--r--r--

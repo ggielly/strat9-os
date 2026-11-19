@@ -600,16 +600,22 @@ fn collect_tlb_targets(targets: &mut [u32]) -> usize {
 fn wait_for_acks(targets: &[(u32, usize, u64)]) {
     // Re-send interval; long enough not to spam a busy target's APIC.
     const RESEND_MS: u64 = 2;
-    // One diagnostic warning if a target takes this long; never fatal.
+    // One diagnostic warning if a target takes this long.
     const WARN_MS: u64 = 250;
+    // Hard bound: a target that never acks is a lost CPU or a kernel bug.
+    // Continuing would silently leave stale TLB entries, so panic with the
+    // diagnostic instead of hanging forever.
+    const HANG_MS: u64 = 1_000;
     // Spin counts used when the TSC frequency is not yet known.
     const FALLBACK_RESEND_SPINS: u64 = 2_000_000;
     const FALLBACK_WARN_SPINS: u64 = 200_000_000;
+    const FALLBACK_HANG_SPINS: u64 = 2_000_000_000;
 
     // tsc_khz() is kHz, so 1 ms == tsc_khz() ticks.
     let tsc_khz = crate::arch::x86_64::boot_timestamp::tsc_khz();
     let resend = tsc_khz.saturating_mul(RESEND_MS);
     let warn_at = tsc_khz.saturating_mul(WARN_MS);
+    let hang_at = tsc_khz.saturating_mul(HANG_MS);
     let my_cpu = current_cpu_index();
 
     for &(apic_id, cpu_idx, seq) in targets {
@@ -656,6 +662,14 @@ fn wait_for_acks(targets: &[(u32, usize, u64)]) {
                         TLB_DONE[cpu_idx].load(Ordering::Acquire),
                     );
                 }
+                if spins >= FALLBACK_HANG_SPINS {
+                    panic!(
+                        "TLB shootdown timeout: cpu={} seq={} done={} retried=true",
+                        cpu_idx,
+                        seq,
+                        TLB_DONE[cpu_idx].load(Ordering::Acquire),
+                    );
+                }
             } else {
                 let now = crate::arch::x86_64::rdtsc();
                 if now.wrapping_sub(last_send) >= resend {
@@ -666,6 +680,14 @@ fn wait_for_acks(targets: &[(u32, usize, u64)]) {
                     warned = true;
                     log::warn!(
                         "TLB shootdown: cpu {} still not acked seq {} (done {}), continuing",
+                        cpu_idx,
+                        seq,
+                        TLB_DONE[cpu_idx].load(Ordering::Acquire),
+                    );
+                }
+                if now.wrapping_sub(start) >= hang_at {
+                    panic!(
+                        "TLB shootdown timeout: cpu={} seq={} done={} retried=true",
                         cpu_idx,
                         seq,
                         TLB_DONE[cpu_idx].load(Ordering::Acquire),

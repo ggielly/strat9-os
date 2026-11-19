@@ -16,6 +16,12 @@ path = "src/bin/demo.rs"
 # Freestanding no_std/no_main image: it cannot link the host test harness.
 test = false
 
+[[bin]]
+name = "vasistas-stress"
+path = "src/bin/stress.rs"
+# Freestanding no_std/no_main image: it cannot link the host test harness.
+test = false
+
 [dependencies]
 vasistas-protocol = { path = "../vasistas-protocol" }
 strat9-syscall = { path = "../syscall", features = ["userspace"] }

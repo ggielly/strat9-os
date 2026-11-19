@@ -228,6 +228,15 @@ impl Client {
         self.focus_epoch
     }
 
+    /// Raw capability handle of the private event port.
+    ///
+    /// Exposed so a single-threaded event loop can include it in
+    /// `SYS_HANDLE_WAIT_MANY` instead of polling. The handle stays owned by
+    /// this client and must not be closed by the caller.
+    pub fn port_handle(&self) -> usize {
+        self.port
+    }
+
     /// Non-blocking receive. Decodes at most one batch or reset per call.
     pub fn poll(&mut self) -> Poll {
         let mut msg = IpcMessage::new(0);

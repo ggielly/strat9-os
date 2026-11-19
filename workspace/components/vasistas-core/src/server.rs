@@ -69,7 +69,7 @@
 //! `ACK`/`ERROR`. This layer echoes it in `WELCOME` too (it answers `HELLO`
 //! directly) and keeps `0` on the other events (`PONG`, `SURFACE_CREATED`,
 //! `SURFACE_DESTROYED`, `BUFFER_CREATED`, `BUFFER_DESTROYED`, `FRAME_DONE`,
-//! `BUFFER_RELEASE`).
+//! `BUFFER_RELEASE`, `GEOMETRY`).
 //!
 //! ## Commit credit
 //!
@@ -96,7 +96,6 @@ use crate::{
     core::{CommitOutcome, CoreError, DisplayCore},
     types::{BufferId, SessionId, SurfaceId},
     MAX_BUFFERS_PER_SESSION, MAX_BUFFERS_PER_SURFACE, MAX_SESSIONS, MAX_SURFACES_PER_SESSION,
-    PIXEL_QUOTA_BYTES,
 };
 
 /// Compile-time message capacity of one datagram (A.1).
@@ -134,10 +133,12 @@ pub trait Transport {
     /// Send `message`, one whole protocol frame.
     fn send(&mut self, message: &[u8]);
 
-    /// Grant `server_region` (the backend's exported memory handle) to
-    /// `client_pid`; return the capability id as seen by the client, or
-    /// `None` when the grant fails. The core never interprets either value.
-    fn transfer_region(&mut self, server_region: u64, client_pid: u32) -> Option<u64>;
+    /// Grant `server_region` (the backend's exported memory handle) to this
+    /// peer, narrowed to read/write; return the capability id as seen by the
+    /// client, or `None` when the grant fails. The transport owns the target
+    /// endpoint, so no client-supplied PID is involved. The core never
+    /// interprets either value.
+    fn transfer_region(&mut self, server_region: u64) -> Option<u64>;
 }
 
 /// Failure that prevented the server from answering at all.
@@ -206,6 +207,11 @@ impl<B: Backend> Server<B> {
     /// The core, for diagnostics.
     pub fn core(&self) -> &DisplayCore<B> {
         &self.core
+    }
+
+    /// Mutable core access, for startup policy (per-session quota).
+    pub fn core_mut(&mut self) -> &mut DisplayCore<B> {
+        &mut self.core
     }
 
     /// Set the server-wide pixel budget in bytes (A.6); `0` disables it.
@@ -404,7 +410,7 @@ impl<B: Backend> Server<B> {
                 max_surfaces: MAX_SURFACES_PER_SESSION as u16,
                 max_buffers_per_surface: MAX_BUFFERS_PER_SURFACE as u16,
                 max_buffers_per_session: MAX_BUFFERS_PER_SESSION as u16,
-                pixel_quota_bytes: PIXEL_QUOTA_BYTES as u64,
+                pixel_quota_bytes: self.core.pixel_quota() as u64,
                 session: session.raw(),
             },
         )
@@ -491,10 +497,6 @@ impl<B: Backend> Server<B> {
                 ..
             } => {
                 let surface = SurfaceId::from_raw(object);
-                let pid = match self.session_pid(session) {
-                    Some(pid) => pid,
-                    None => return send_error(transport, object, request_id, ERROR_BAD_STATE),
-                };
                 match self
                     .core
                     .allocate_buffer(session, surface, width, height, format, stride)
@@ -514,7 +516,7 @@ impl<B: Backend> Server<B> {
                                 return send_error(transport, object, request_id, core_code(error));
                             }
                         };
-                        let region_handle = match transport.transfer_region(record.6, pid) {
+                        let region_handle = match transport.transfer_region(record.6) {
                             Some(handle) => handle,
                             None => {
                                 // The client never learns about the buffer:
@@ -586,7 +588,100 @@ impl<B: Backend> Server<B> {
                 self.core.backend_mut().set_cursor_shape(shape);
                 ack(transport, object, request_id)
             }
-            Body::SetTitle { .. } | Body::RequestWindowAction { .. } => {
+            Body::RequestResize {
+                width,
+                height,
+                format,
+            } => {
+                let surface = SurfaceId::from_raw(object);
+                match self
+                    .core
+                    .set_configure(session, surface, width, height, format)
+                {
+                    Ok(serial) => {
+                        ack(transport, object, request_id)?;
+                        // Spontaneous event, emitted after the ACK so a
+                        // synchronous client sees the ACK first and then
+                        // reads CONFIGURE without racing request helpers.
+                        send(
+                            transport,
+                            Opcode::CONFIGURE,
+                            object,
+                            0,
+                            &Body::Configure {
+                                serial,
+                                width,
+                                height,
+                                format,
+                                flags: 0,
+                            },
+                        )
+                    }
+                    Err(error) => send_error(transport, object, request_id, core_code(error)),
+                }
+            }
+            Body::SetGeometry {
+                x,
+                y,
+                width,
+                height,
+                format,
+            } => {
+                let surface = SurfaceId::from_raw(object);
+                match self
+                    .core
+                    .set_geometry(session, surface, x, y, width, height, format)
+                {
+                    Ok(outcome) => {
+                        ack(transport, object, request_id)?;
+                        // Spontaneous event, after the ACK, like CONFIGURE.
+                        send(
+                            transport,
+                            Opcode::GEOMETRY,
+                            object,
+                            0,
+                            &Body::Geometry {
+                                serial: outcome.serial,
+                                x: outcome.x as i32,
+                                y: outcome.y as i32,
+                                width: outcome.width,
+                                height: outcome.height,
+                                format: crate::FORMAT_XRGB8888,
+                                flags: 0,
+                            },
+                        )
+                    }
+                    Err(error) => send_error(transport, object, request_id, core_code(error)),
+                }
+            }
+            Body::RequestWindowAction { action } => {
+                let surface = SurfaceId::from_raw(object);
+                match self.core.window_action(session, surface, action) {
+                    Ok(Some(outcome)) => {
+                        ack(transport, object, request_id)?;
+                        // MAXIMIZE reports the applied geometry, after the
+                        // ACK, like a SET_GEOMETRY answer.
+                        send(
+                            transport,
+                            Opcode::GEOMETRY,
+                            object,
+                            0,
+                            &Body::Geometry {
+                                serial: outcome.serial,
+                                x: outcome.x as i32,
+                                y: outcome.y as i32,
+                                width: outcome.width,
+                                height: outcome.height,
+                                format: crate::FORMAT_XRGB8888,
+                                flags: 0,
+                            },
+                        )
+                    }
+                    Ok(None) => ack(transport, object, request_id),
+                    Err(error) => send_error(transport, object, request_id, core_code(error)),
+                }
+            }
+            Body::SetTitle { .. } => {
                 match self.core.surface(session, SurfaceId::from_raw(object)) {
                     Ok(_) => ack(transport, object, request_id),
                     Err(error) => send_error(transport, object, request_id, core_code(error)),
@@ -772,11 +867,12 @@ fn core_code(error: CoreError) -> u32 {
 mod tests {
     use super::*;
     use vasistas_protocol::{
-        Rect, CURSOR_SHAPE_POINTER, FEATURES_KNOWN, FLAG_FULL_DAMAGE,
+        Rect, CURSOR_SHAPE_POINTER, FEATURES_KNOWN, FLAG_FULL_DAMAGE, WINDOW_ACTION_MAXIMIZE,
+        WINDOW_ACTION_RAISE,
     };
     use std::vec::Vec;
 
-    use crate::backend::RegionHandle;
+    use crate::backend::{Layer, RegionHandle};
 
     struct FakeBackend {
         next_region: u64,
@@ -824,13 +920,10 @@ mod tests {
             self.frees += 1;
         }
 
-        fn present(
+        fn composite(
             &mut self,
-            _surface: SurfaceId,
-            _region: RegionHandle,
-            _damage: &[Rect],
-            _x: u32,
-            _y: u32,
+            _bottom_to_top: &[Layer],
+            _rects: &[Rect],
         ) -> Result<(), Self::Error> {
             if self.fail_present {
                 return Err(());
@@ -846,8 +939,8 @@ mod tests {
 
     struct FakeTransport {
         messages: Vec<Vec<u8>>,
-        /// `(server_region, client_pid, returned_handle)` per grant attempt.
-        transfers: Vec<(u64, u32, u64)>,
+        /// `(server_region, returned_handle)` per grant attempt.
+        transfers: Vec<(u64, u64)>,
         next_handle: u64,
         fail_transfer: bool,
     }
@@ -868,14 +961,14 @@ mod tests {
             self.messages.push(message.to_vec());
         }
 
-        fn transfer_region(&mut self, server_region: u64, client_pid: u32) -> Option<u64> {
+        fn transfer_region(&mut self, server_region: u64) -> Option<u64> {
             if self.fail_transfer {
-                self.transfers.push((server_region, client_pid, 0));
+                self.transfers.push((server_region, 0));
                 return None;
             }
             let handle = self.next_handle;
             self.next_handle += 1;
-            self.transfers.push((server_region, client_pid, handle));
+            self.transfers.push((server_region, handle));
             Some(handle)
         }
     }
@@ -1012,7 +1105,7 @@ mod tests {
                 assert_ne!(region_handle, 0);
                 let transfer = transport.transfers.last().copied().expect("grant recorded");
                 assert_ne!(transfer.0, 0, "server region is the backend handle");
-                assert_eq!(region_handle, transfer.2, "handle is the transferred one");
+                assert_eq!(region_handle, transfer.1, "handle is the transferred one");
             }
             other => panic!("expected BUFFER_CREATED, got {:?}", other),
         }
@@ -1254,7 +1347,7 @@ mod tests {
         let (first, first_len) =
             alloc_buffer(&mut server, &mut transport, peer, surface, 3, 64, 32);
         assert_eq!(first_len, 64 * 4 * 32);
-        assert_eq!(transport.transfers.last().expect("granted").1, HELLO_PID);
+        assert!(transport.transfers.last().is_some(), "grant recorded");
         import_ok(&mut server, &mut transport, peer, first, 4);
 
         // First commit: FRAME_DONE then ACK, no release.
@@ -1351,10 +1444,7 @@ mod tests {
             .expect("alloc");
         assert_eq!(transport.messages.len(), 1, "no BUFFER_CREATED");
         assert_eq!(error_code_of(&transport.messages[0]), ERROR_INTERNAL);
-        assert_eq!(
-            transport.transfers.last().expect("grant attempted").1,
-            HELLO_PID
-        );
+        assert!(transport.transfers.last().is_some(), "grant attempted");
 
         // The other session is unaffected by the failed grant.
         transport.fail_transfer = false;
@@ -1896,5 +1986,298 @@ mod tests {
         assert_eq!(freed, 2);
         assert_eq!(server.core().backend().frees, 2);
         assert!(server.take_retired().is_none());
+    }
+    #[test]
+    fn request_resize_acks_then_configures_and_gates_commits() {
+        let mut server = Server::new(FakeBackend::new());
+        let mut transport = FakeTransport::default();
+        let peer = PeerId::new(9);
+        hello(&mut server, &mut transport, peer);
+        let session = server.session_of(peer).expect("session");
+        let surface = create_surface(&mut server, &mut transport, peer, 2, 64, 32);
+        let (old_buffer, _) = alloc_buffer(&mut server, &mut transport, peer, surface, 3, 64, 32);
+        import_ok(&mut server, &mut transport, peer, old_buffer, 4);
+
+        // Resize: ACK first, then the spontaneous CONFIGURE.
+        let message = frame(
+            Opcode::REQUEST_RESIZE,
+            surface,
+            9,
+            &Body::RequestResize {
+                width: 400,
+                height: 240,
+                format: crate::FORMAT_XRGB8888,
+            },
+        );
+        server
+            .handle(peer, &message, &mut transport)
+            .expect("resize");
+        assert_eq!(transport.messages.len(), 2, "ACK then CONFIGURE");
+        let (ack_header, ack_body) = parse(&transport.messages[0]);
+        assert_eq!(ack_header.opcode, Opcode::ACK.value());
+        assert_eq!(ack_header.object_id, surface);
+        assert_eq!(ack_header.request_id, 9);
+        assert_eq!(ack_body, Body::Ack { status: 0 });
+        let (cfg_header, cfg_body) = parse(&transport.messages[1]);
+        assert_eq!(cfg_header.opcode, Opcode::CONFIGURE.value());
+        assert_eq!(cfg_header.object_id, surface);
+        assert_eq!(cfg_header.request_id, 0, "spontaneous event");
+        match cfg_body {
+            Body::Configure {
+                serial,
+                width,
+                height,
+                format,
+                flags,
+            } => {
+                assert_eq!(serial, 1, "first configure serial");
+                assert_eq!(
+                    (width, height, format, flags),
+                    (400, 240, crate::FORMAT_XRGB8888, 0)
+                );
+            }
+            other => panic!("expected CONFIGURE, got {:?}", other),
+        }
+        let record = server
+            .core()
+            .surface(session, SurfaceId::from_raw(surface))
+            .expect("surface");
+        assert_eq!((record.width, record.height), (400, 240));
+
+        // The old-size buffer no longer matches: commit is BAD_LENGTH.
+        transport.messages.clear();
+        let commit = commit_frame(surface, old_buffer, 1, 5, 10);
+        server.handle(peer, &commit, &mut transport).expect("old");
+        assert_eq!(transport.messages.len(), 1);
+        assert_eq!(error_code_of(&transport.messages[0]), ERROR_BAD_LENGTH);
+
+        // A matching buffer committed with the configure serial is accepted.
+        let (buffer, _) = alloc_buffer(&mut server, &mut transport, peer, surface, 11, 400, 240);
+        import_ok(&mut server, &mut transport, peer, buffer, 12);
+        transport.messages.clear();
+        let commit = commit_frame(surface, buffer, 1, 6, 13);
+        server.handle(peer, &commit, &mut transport).expect("new");
+        let acks: Vec<_> = transport
+            .messages
+            .iter()
+            .map(|m| parse(m))
+            .filter(|(h, _)| h.opcode == Opcode::ACK.value())
+            .collect();
+        assert_eq!(acks.len(), 1, "commit accepted after configure serial");
+    }
+
+    #[test]
+    fn request_resize_foreign_surface_is_rejected() {
+        let mut server = Server::new(FakeBackend::new());
+        let mut transport = FakeTransport::default();
+        let peer = PeerId::new(10);
+        hello(&mut server, &mut transport, peer);
+        let message = frame(
+            Opcode::REQUEST_RESIZE,
+            0xdead_beef,
+            3,
+            &Body::RequestResize {
+                width: 8,
+                height: 8,
+                format: crate::FORMAT_XRGB8888,
+            },
+        );
+        server
+            .handle(peer, &message, &mut transport)
+            .expect("dispatch");
+        assert_eq!(transport.messages.len(), 1);
+        assert_eq!(error_code_of(&transport.messages[0]), ERROR_BAD_OBJECT);
+    }
+
+    #[test]
+    fn set_geometry_acks_then_geometry_with_clamped_position() {
+        let mut server = Server::new(FakeBackend::new());
+        let mut transport = FakeTransport::default();
+        let peer = PeerId::new(11);
+        hello(&mut server, &mut transport, peer);
+        let session = server.session_of(peer).expect("session");
+        let surface = create_surface(&mut server, &mut transport, peer, 2, 64, 32);
+
+        // A far-off-screen request: the answer echoes the clamped position.
+        let message = frame(
+            Opcode::SET_GEOMETRY,
+            surface,
+            9,
+            &Body::SetGeometry {
+                x: -100,
+                y: 5000,
+                width: 320,
+                height: 240,
+                format: crate::FORMAT_XRGB8888,
+            },
+        );
+        server
+            .handle(peer, &message, &mut transport)
+            .expect("geometry");
+        assert_eq!(transport.messages.len(), 2, "ACK then GEOMETRY");
+        let (ack_header, ack_body) = parse(&transport.messages[0]);
+        assert_eq!(ack_header.opcode, Opcode::ACK.value());
+        assert_eq!(ack_header.object_id, surface);
+        assert_eq!(ack_header.request_id, 9);
+        assert_eq!(ack_body, Body::Ack { status: 0 });
+        let (geo_header, geo_body) = parse(&transport.messages[1]);
+        assert_eq!(geo_header.opcode, Opcode::GEOMETRY.value());
+        assert_eq!(geo_header.object_id, surface);
+        assert_eq!(geo_header.request_id, 0, "spontaneous event");
+        match geo_body {
+            Body::Geometry {
+                serial,
+                x,
+                y,
+                width,
+                height,
+                format,
+                flags,
+            } => {
+                assert_eq!(serial, 1, "first geometry serial");
+                assert_eq!((x, y), (0, 599), "clamped to the output");
+                assert_eq!(
+                    (width, height, format, flags),
+                    (320, 240, crate::FORMAT_XRGB8888, 0)
+                );
+            }
+            other => panic!("expected GEOMETRY, got {:?}", other),
+        }
+        let record = server
+            .core()
+            .surface(session, SurfaceId::from_raw(surface))
+            .expect("surface");
+        assert_eq!(
+            (record.x, record.y, record.width, record.height),
+            (0, 599, 320, 240)
+        );
+
+        // The serial gates commits, like a CONFIGURE serial.
+        transport.messages.clear();
+        let (buffer, _) = alloc_buffer(&mut server, &mut transport, peer, surface, 11, 320, 240);
+        import_ok(&mut server, &mut transport, peer, buffer, 12);
+        let commit = commit_frame(surface, buffer, 0, 1, 13);
+        server.handle(peer, &commit, &mut transport).expect("old");
+        assert_eq!(error_code_of(&transport.messages[0]), ERROR_BAD_STATE);
+        transport.messages.clear();
+        let commit = commit_frame(surface, buffer, 1, 1, 14);
+        server.handle(peer, &commit, &mut transport).expect("new");
+        let (header, _) = parse(&transport.messages[0]);
+        assert_eq!(header.opcode, Opcode::FRAME_DONE.value());
+    }
+
+    #[test]
+    fn set_geometry_foreign_surface_is_rejected() {
+        let mut server = Server::new(FakeBackend::new());
+        let mut transport = FakeTransport::default();
+        let peer = PeerId::new(12);
+        hello(&mut server, &mut transport, peer);
+        let message = frame(
+            Opcode::SET_GEOMETRY,
+            0xdead_beef,
+            3,
+            &Body::SetGeometry {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+                format: crate::FORMAT_XRGB8888,
+            },
+        );
+        server
+            .handle(peer, &message, &mut transport)
+            .expect("dispatch");
+        assert_eq!(transport.messages.len(), 1);
+        assert_eq!(error_code_of(&transport.messages[0]), ERROR_BAD_OBJECT);
+    }
+
+    #[test]
+    fn window_action_maximize_acks_then_geometry() {
+        let mut server = Server::new(FakeBackend::new());
+        let mut transport = FakeTransport::default();
+        let peer = PeerId::new(13);
+        hello(&mut server, &mut transport, peer);
+        let surface = create_surface(&mut server, &mut transport, peer, 2, 64, 32);
+
+        let message = frame(
+            Opcode::REQUEST_WINDOW_ACTION,
+            surface,
+            9,
+            &Body::RequestWindowAction {
+                action: WINDOW_ACTION_MAXIMIZE,
+            },
+        );
+        server
+            .handle(peer, &message, &mut transport)
+            .expect("maximize");
+        assert_eq!(transport.messages.len(), 2, "ACK then GEOMETRY");
+        let (ack_header, ack_body) = parse(&transport.messages[0]);
+        assert_eq!(ack_header.opcode, Opcode::ACK.value());
+        assert_eq!(ack_header.object_id, surface);
+        assert_eq!(ack_header.request_id, 9);
+        assert_eq!(ack_body, Body::Ack { status: 0 });
+        let (geo_header, geo_body) = parse(&transport.messages[1]);
+        assert_eq!(geo_header.opcode, Opcode::GEOMETRY.value());
+        assert_eq!(geo_header.object_id, surface);
+        assert_eq!(geo_header.request_id, 0, "spontaneous event");
+        match geo_body {
+            Body::Geometry { serial, x, y, .. } => {
+                assert_eq!(serial, 1);
+                assert_eq!((x, y), (0, 0));
+            }
+            other => panic!("expected GEOMETRY, got {:?}", other),
+        }
+        let session = server.session_of(peer).expect("session");
+        let record = server
+            .core()
+            .surface(session, SurfaceId::from_raw(surface))
+            .expect("surface");
+        assert_eq!(
+            (record.x, record.y, record.width, record.height),
+            (0, 0, 4 * 400, 2 * 300),
+            "maximized to the default tile-grid output"
+        );
+    }
+
+    #[test]
+    fn window_action_raise_acks_only() {
+        let mut server = Server::new(FakeBackend::new());
+        let mut transport = FakeTransport::default();
+        let peer = PeerId::new(14);
+        hello(&mut server, &mut transport, peer);
+        let surface = create_surface(&mut server, &mut transport, peer, 2, 64, 32);
+
+        let message = frame(
+            Opcode::REQUEST_WINDOW_ACTION,
+            surface,
+            5,
+            &Body::RequestWindowAction {
+                action: WINDOW_ACTION_RAISE,
+            },
+        );
+        server
+            .handle(peer, &message, &mut transport)
+            .expect("raise");
+        assert_eq!(transport.messages.len(), 1, "no GEOMETRY for RAISE");
+        let (header, body) = parse(&transport.messages[0]);
+        assert_eq!(header.opcode, Opcode::ACK.value());
+        assert_eq!(header.object_id, surface);
+        assert_eq!(header.request_id, 5);
+        assert_eq!(body, Body::Ack { status: 0 });
+
+        // A foreign surface is still rejected.
+        transport.messages.clear();
+        let message = frame(
+            Opcode::REQUEST_WINDOW_ACTION,
+            0xdead_beef,
+            6,
+            &Body::RequestWindowAction {
+                action: WINDOW_ACTION_RAISE,
+            },
+        );
+        server
+            .handle(peer, &message, &mut transport)
+            .expect("foreign");
+        assert_eq!(error_code_of(&transport.messages[0]), ERROR_BAD_OBJECT);
     }
 }

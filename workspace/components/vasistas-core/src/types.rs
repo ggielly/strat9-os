@@ -144,6 +144,21 @@ impl Default for Damage {
     }
 }
 
+/// Result of a geometry change: what the GEOMETRY event must echo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GeometryOutcome {
+    /// New configure serial, to be acknowledged by the next commit.
+    pub serial: u64,
+    /// Final clamped screen-space origin x.
+    pub x: u32,
+    /// Final clamped screen-space origin y.
+    pub y: u32,
+    /// Final width.
+    pub width: u32,
+    /// Final height.
+    pub height: u32,
+}
+
 /// One imported-or-not client buffer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Buffer {
@@ -196,6 +211,9 @@ pub struct Surface {
     pub full_damage_next: bool,
     /// Set when the surface is destroyed.
     pub destroyed: bool,
+    /// Hidden by `MINIMIZE`: skipped by picking and composition until
+    /// `RESTORE`.
+    pub hidden: bool,
     /// Damage of the last accepted commit.
     pub damage: Damage,
     /// Damage accumulated since the last successful presentation.

@@ -49,6 +49,8 @@ members = [
     "workspace/components/strate-web-admin",
     "workspace/components/musl-compat",
     "workspace/components/strate-console",
+    "workspace/components/terminal-core",
+    "workspace/components/lucarne",
     "workspace/components/s9vm-console",
     "workspace/components/s9vm-vmm",
     "workspace/components/strate-iommu",

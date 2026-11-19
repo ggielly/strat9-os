@@ -48,10 +48,10 @@
 
 use core::panic::PanicInfo;
 use input_protocol::{
-    Focus, InputBatch, InputRecord, NormalizedEvent, Subscribe, FOCUS_FIXED_LEN,
-    INPUTD_MSG_BATCH, INPUTD_MSG_FOCUS, INPUTD_MSG_SUBSCRIBE, INPUT_EVENT_FOCUS_GAINED,
-    INPUT_EVENT_FOCUS_LOST, INPUT_TEXT_LEN, MAX_FOCUS_PATH, MAX_SUBSCRIBE_PATH,
-    SUBSCRIBE_FIXED_LEN,
+    Focus, InputBatch, InputRecord, NormalizedEvent, Reset, Subscribe, FOCUS_FIXED_LEN,
+    INPUTD_MSG_BATCH, INPUTD_MSG_FOCUS, INPUTD_MSG_RESET, INPUTD_MSG_SUBSCRIBE,
+    INPUT_EVENT_FOCUS_GAINED, INPUT_EVENT_FOCUS_LOST, INPUT_TEXT_LEN, MAX_FOCUS_PATH,
+    MAX_SUBSCRIBE_PATH, RESET_REASON_RESYNC, SUBSCRIBE_FIXED_LEN,
 };
 use strate_input::{mouse_packet, EventBuffer, KbdNormalizer};
 use strat9_syscall::{
@@ -166,11 +166,15 @@ pub extern "C" fn _start() -> ! {
                     match send_batch(subscriber.port, &buf, subscriber.focus_epoch) {
                         Ok(()) => {}
                         Err(err) if err.is_retryable() => {
-                            // Queue full: drop this batch and remember the loss.
+                            // Queue full: the batch is dropped, so the
+                            // subscriber's input state is stale. Tell it to
+                            // resynchronise instead of losing the change
+                            // silently.
                             if !overflow {
                                 overflow = true;
                                 log(b"[input-server] subscriber queue full, dropping\n");
                             }
+                            let _ = send_reset(subscriber.port, subscriber.focus_epoch);
                         }
                         Err(_) => {
                             // BadHandle/NotFound/...: the client is gone.
@@ -392,6 +396,22 @@ fn send_batch(port: usize, buf: &EventBuffer, focus_epoch: u32) -> Result<(), Er
 fn send_batch_obj(port: usize, batch: &InputBatch) -> Result<(), Error> {
     let mut msg = IpcMessage::new(INPUTD_MSG_BATCH as u32);
     batch
+        .encode(&mut msg.payload)
+        .map_err(|_| Error::InvalidArgument)?;
+    call::ipc_try_send(port, &msg).map(|_| ())
+}
+
+/// Tell one subscriber to resynchronise: a batch was dropped because its
+/// queue was full, so its input state is stale. The reset is best effort —
+/// a full queue may swallow it too, and the client resynchronises on the
+/// next successful message either way.
+fn send_reset(port: usize, focus_epoch: u32) -> Result<(), Error> {
+    let reset = Reset {
+        focus_epoch,
+        reason: RESET_REASON_RESYNC,
+    };
+    let mut msg = IpcMessage::new(INPUTD_MSG_RESET as u32);
+    reset
         .encode(&mut msg.payload)
         .map_err(|_| Error::InvalidArgument)?;
     call::ipc_try_send(port, &msg).map(|_| ())

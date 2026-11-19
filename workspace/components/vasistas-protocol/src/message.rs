@@ -37,7 +37,9 @@
 //! - Messages whose primary object is a surface, buffer or output reject
 //!   `object_id == 0` with [`DecodeError::BadObject`]. `ACK`/`ERROR` accept
 //!   any object, and the connection-scoped messages accept any value (only
-//!   the non-zero requirement is enforced, not a zero requirement).
+//!   the non-zero requirement is enforced, not a zero requirement). The
+//!   `GEOMETRY` event is the one surface exception: it carries its surface
+//!   without requiring a non-zero `object_id`.
 //!
 //! ## Resolved ambiguities in A.3.1
 //!
@@ -45,7 +47,8 @@
 //! `FRAME_DONE.flags` (it only mentions that `PRESENT_FEEDBACK` is reported
 //! when negotiated). Per the general "unknown flag ⇒ `BAD_FLAGS`
 //! convention, both fields are therefore required to be zero until the
-//! specification defines their bits. This is flagged, not invented.
+//! specification defines their bits; `GEOMETRY.flags` (v1 extension) keeps
+//! the same rule. This is flagged, not invented.
 
 use crate::commit::Commit;
 use crate::constants::*;
@@ -192,6 +195,23 @@ pub enum Body<'a> {
     SetCursorShape {
         shape: u32,
     },
+    /// Ask the server to move `surface` to a new size. The server answers
+    /// with `ACK` then a `CONFIGURE` event whose serial is acknowledged by the
+    /// next `COMMIT.ack_serial`.
+    RequestResize {
+        width: u32,
+        height: u32,
+        format: u32,
+    },
+    /// Ask the server to move `surface` to `x`,`y` and resize it. The server
+    /// clamps the position; the codec accepts the full `i32` range.
+    SetGeometry {
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        format: u32,
+    },
     AllocBuffer {
         width: u32,
         height: u32,
@@ -251,6 +271,16 @@ pub enum Body<'a> {
     SurfaceDestroyed,
     CloseRequest {
         reason: u32,
+    },
+    /// Geometry as applied by the server. `flags` has no defined bits yet.
+    Geometry {
+        serial: u64,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        format: u32,
+        flags: u32,
     },
     BufferCreated {
         surface: u64,
@@ -322,6 +352,24 @@ impl core::fmt::Debug for Body<'_> {
                 .debug_struct("SetCursorShape")
                 .field("shape", shape)
                 .finish(),
+            Body::RequestResize {
+                width,
+                height,
+                format,
+            } => f
+                .debug_struct("RequestResize")
+                .field("width", width)
+                .field("height", height)
+                .field("format", format)
+                .finish(),
+            Body::SetGeometry { x, y, width, height, format } => f
+                .debug_struct("SetGeometry")
+                .field("x", x)
+                .field("y", y)
+                .field("width", width)
+                .field("height", height)
+                .field("format", format)
+                .finish(),
             Body::AllocBuffer { width, height, format, flags, stride } => f
                 .debug_struct("AllocBuffer")
                 .field("width", width)
@@ -383,6 +431,16 @@ impl core::fmt::Debug for Body<'_> {
             Body::CloseRequest { reason } => f
                 .debug_struct("CloseRequest")
                 .field("reason", reason)
+                .finish(),
+            Body::Geometry { serial, x, y, width, height, format, flags } => f
+                .debug_struct("Geometry")
+                .field("serial", serial)
+                .field("x", x)
+                .field("y", y)
+                .field("width", width)
+                .field("height", height)
+                .field("format", format)
+                .field("flags", flags)
                 .finish(),
             Body::BufferCreated { surface, width, height, format, stride, region_len, region_handle } => f
                 .debug_struct("BufferCreated")
@@ -606,7 +664,7 @@ impl<'a> Body<'a> {
                 exact(body, 8)?;
                 check_reserved32(body, 4)?;
                 let action = rd32(body, 0);
-                if !(WINDOW_ACTION_MINIMIZE..=WINDOW_ACTION_MAXIMIZE).contains(&action) {
+                if !(WINDOW_ACTION_MINIMIZE..=WINDOW_ACTION_LOWER).contains(&action) {
                     return Err(DecodeError::BadValue);
                 }
                 Ok(Body::RequestWindowAction { action })
@@ -619,6 +677,46 @@ impl<'a> Body<'a> {
                     return Err(DecodeError::BadValue);
                 }
                 Ok(Body::SetCursorShape { shape })
+            }
+            Opcode::REQUEST_RESIZE => {
+                require_object(object_id)?;
+                exact(body, 16)?;
+                check_reserved32(body, 12)?;
+                let width = rd32(body, 0);
+                let height = rd32(body, 4);
+                if !(1..=MAX_SURFACE_DIM).contains(&width) || !(1..=MAX_SURFACE_DIM).contains(&height)
+                {
+                    return Err(DecodeError::BadValue);
+                }
+                if rd32(body, 8) != FORMAT_XRGB8888 {
+                    return Err(DecodeError::BadValue);
+                }
+                Ok(Body::RequestResize {
+                    width,
+                    height,
+                    format: FORMAT_XRGB8888,
+                })
+            }
+            Opcode::SET_GEOMETRY => {
+                require_object(object_id)?;
+                exact(body, 24)?;
+                check_reserved32(body, 20)?;
+                let width = rd32(body, 8);
+                let height = rd32(body, 12);
+                if !(1..=MAX_SURFACE_DIM).contains(&width) || !(1..=MAX_SURFACE_DIM).contains(&height)
+                {
+                    return Err(DecodeError::BadValue);
+                }
+                if rd32(body, 16) != FORMAT_XRGB8888 {
+                    return Err(DecodeError::BadValue);
+                }
+                Ok(Body::SetGeometry {
+                    x: rd32(body, 0) as i32,
+                    y: rd32(body, 4) as i32,
+                    width,
+                    height,
+                    format: FORMAT_XRGB8888,
+                })
             }
             Opcode::ALLOC_BUFFER => {
                 require_object(object_id)?;
@@ -779,6 +877,21 @@ impl<'a> Body<'a> {
                     return Err(DecodeError::BadValue);
                 }
                 Ok(Body::CloseRequest { reason })
+            }
+            // No require_object: the event carries its surface, zero or not.
+            Opcode::GEOMETRY => {
+                exact(body, 32)?;
+                let flags = rd32(body, 28);
+                check_flags(flags, 0)?;
+                Ok(Body::Geometry {
+                    serial: rd64(body, 0),
+                    x: rd32(body, 8) as i32,
+                    y: rd32(body, 12) as i32,
+                    width: rd32(body, 16),
+                    height: rd32(body, 20),
+                    format: rd32(body, 24),
+                    flags,
+                })
             }
             Opcode::BUFFER_CREATED => {
                 require_object(object_id)?;
@@ -975,7 +1088,7 @@ impl<'a> Body<'a> {
                 Ok(len)
             }
             Body::RequestWindowAction { action } => {
-                if !(WINDOW_ACTION_MINIMIZE..=WINDOW_ACTION_MAXIMIZE).contains(action) {
+                if !(WINDOW_ACTION_MINIMIZE..=WINDOW_ACTION_LOWER).contains(action) {
                     return Err(DecodeError::BadValue);
                 }
                 ensure(out, 8)?;
@@ -991,6 +1104,46 @@ impl<'a> Body<'a> {
                 wr32(out, 0, *shape);
                 wr32(out, 4, 0);
                 Ok(8)
+            }
+            Body::RequestResize {
+                width,
+                height,
+                format,
+            } => {
+                if !(1..=MAX_SURFACE_DIM).contains(width)
+                    || !(1..=MAX_SURFACE_DIM).contains(height)
+                    || *format != FORMAT_XRGB8888
+                {
+                    return Err(DecodeError::BadValue);
+                }
+                ensure(out, 16)?;
+                wr32(out, 0, *width);
+                wr32(out, 4, *height);
+                wr32(out, 8, *format);
+                wr32(out, 12, 0);
+                Ok(16)
+            }
+            Body::SetGeometry {
+                x,
+                y,
+                width,
+                height,
+                format,
+            } => {
+                if !(1..=MAX_SURFACE_DIM).contains(width)
+                    || !(1..=MAX_SURFACE_DIM).contains(height)
+                    || *format != FORMAT_XRGB8888
+                {
+                    return Err(DecodeError::BadValue);
+                }
+                ensure(out, 24)?;
+                wr32(out, 0, *x as u32);
+                wr32(out, 4, *y as u32);
+                wr32(out, 8, *width);
+                wr32(out, 12, *height);
+                wr32(out, 16, *format);
+                wr32(out, 20, 0);
+                Ok(24)
             }
             Body::AllocBuffer {
                 width,
@@ -1159,6 +1312,26 @@ impl<'a> Body<'a> {
                 wr32(out, 4, 0);
                 Ok(8)
             }
+            Body::Geometry {
+                serial,
+                x,
+                y,
+                width,
+                height,
+                format,
+                flags,
+            } => {
+                check_flags(*flags, 0)?;
+                ensure(out, 32)?;
+                wr64(out, 0, *serial);
+                wr32(out, 8, *x as u32);
+                wr32(out, 12, *y as u32);
+                wr32(out, 16, *width);
+                wr32(out, 20, *height);
+                wr32(out, 24, *format);
+                wr32(out, 28, *flags);
+                Ok(32)
+            }
             Body::BufferCreated {
                 surface,
                 width,
@@ -1290,7 +1463,7 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
 
-    const ALL_OPCODES: [Opcode; 30] = [
+    const ALL_OPCODES: [Opcode; 33] = [
         Opcode::HELLO,
         Opcode::PING,
         Opcode::GOODBYE,
@@ -1299,6 +1472,8 @@ mod tests {
         Opcode::SET_TITLE,
         Opcode::REQUEST_WINDOW_ACTION,
         Opcode::SET_CURSOR_SHAPE,
+        Opcode::REQUEST_RESIZE,
+        Opcode::SET_GEOMETRY,
         Opcode::ALLOC_BUFFER,
         Opcode::IMPORT_RESULT,
         Opcode::DESTROY_BUFFER,
@@ -1313,6 +1488,7 @@ mod tests {
         Opcode::CONFIGURE,
         Opcode::SURFACE_DESTROYED,
         Opcode::CLOSE_REQUEST,
+        Opcode::GEOMETRY,
         Opcode::BUFFER_CREATED,
         Opcode::BUFFER_RELEASE,
         Opcode::BUFFER_DESTROYED,
@@ -1333,6 +1509,8 @@ mod tests {
             Body::SetTitle { .. } => Opcode::SET_TITLE.value(),
             Body::RequestWindowAction { .. } => Opcode::REQUEST_WINDOW_ACTION.value(),
             Body::SetCursorShape { .. } => Opcode::SET_CURSOR_SHAPE.value(),
+            Body::RequestResize { .. } => Opcode::REQUEST_RESIZE.value(),
+            Body::SetGeometry { .. } => Opcode::SET_GEOMETRY.value(),
             Body::AllocBuffer { .. } => Opcode::ALLOC_BUFFER.value(),
             Body::ImportResult { .. } => Opcode::IMPORT_RESULT.value(),
             Body::DestroyBuffer => Opcode::DESTROY_BUFFER.value(),
@@ -1347,6 +1525,7 @@ mod tests {
             Body::Configure { .. } => Opcode::CONFIGURE.value(),
             Body::SurfaceDestroyed => Opcode::SURFACE_DESTROYED.value(),
             Body::CloseRequest { .. } => Opcode::CLOSE_REQUEST.value(),
+            Body::Geometry { .. } => Opcode::GEOMETRY.value(),
             Body::BufferCreated { .. } => Opcode::BUFFER_CREATED.value(),
             Body::BufferRelease { .. } => Opcode::BUFFER_RELEASE.value(),
             Body::BufferDestroyed => Opcode::BUFFER_DESTROYED.value(),
@@ -1384,6 +1563,7 @@ mod tests {
                 | Opcode::ACK
                 | Opcode::WELCOME
                 | Opcode::PONG
+                | Opcode::GEOMETRY
         )
     }
 
@@ -1504,6 +1684,30 @@ mod tests {
             Body::SetCursorShape {
                 shape: CURSOR_SHAPE_POINTER,
             },
+            Body::RequestResize {
+                width: 1,
+                height: 1,
+                format: FORMAT_XRGB8888,
+            },
+            Body::RequestResize {
+                width: MAX_SURFACE_DIM,
+                height: MAX_SURFACE_DIM,
+                format: FORMAT_XRGB8888,
+            },
+            Body::SetGeometry {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+                format: FORMAT_XRGB8888,
+            },
+            Body::SetGeometry {
+                x: i32::MIN,
+                y: i32::MAX,
+                width: MAX_SURFACE_DIM,
+                height: MAX_SURFACE_DIM,
+                format: FORMAT_XRGB8888,
+            },
             Body::AllocBuffer {
                 width: 1,
                 height: 1,
@@ -1580,6 +1784,24 @@ mod tests {
             },
             Body::CloseRequest {
                 reason: CLOSE_REASON_SHUTDOWN,
+            },
+            Body::Geometry {
+                serial: 0,
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+                format: FORMAT_XRGB8888,
+                flags: 0,
+            },
+            Body::Geometry {
+                serial: u64::MAX,
+                x: i32::MIN,
+                y: i32::MAX,
+                width: MAX_SURFACE_DIM,
+                height: MAX_SURFACE_DIM,
+                format: FORMAT_XRGB8888,
+                flags: 0,
             },
             Body::BufferCreated {
                 surface: 1,
@@ -2215,5 +2437,247 @@ mod tests {
             }
         );
         assert!(!text.contains("very-secret-detail"));
+    }
+
+    #[test]
+    fn request_resize_body_is_exact_and_validated() {
+        let body = Body::RequestResize {
+            width: 400,
+            height: 240,
+            format: FORMAT_XRGB8888,
+        };
+        let mut out = [0u8; 16];
+        assert_eq!(body.encode(&mut out), Ok(16));
+        assert_eq!(
+            Body::decode(Opcode::REQUEST_RESIZE.value(), 7, &out),
+            Ok(body)
+        );
+
+        // Truncated and over-long bodies are rejected.
+        assert_eq!(
+            Body::decode(Opcode::REQUEST_RESIZE.value(), 7, &out[..15]),
+            Err(DecodeError::Truncated)
+        );
+        let mut long = [0u8; 17];
+        long[..16].copy_from_slice(&out);
+        assert_eq!(
+            Body::decode(Opcode::REQUEST_RESIZE.value(), 7, &long),
+            Err(DecodeError::SizeMismatch)
+        );
+
+        // Reserved word must stay zero.
+        let mut reserved = out;
+        reserved[12..16].copy_from_slice(&1u32.to_le_bytes());
+        assert_eq!(
+            Body::decode(Opcode::REQUEST_RESIZE.value(), 7, &reserved),
+            Err(DecodeError::ReservedNonZero)
+        );
+
+        // Zero dimension and foreign format are rejected.
+        let mut zero = out;
+        zero[0..4].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(
+            Body::decode(Opcode::REQUEST_RESIZE.value(), 7, &zero),
+            Err(DecodeError::BadValue)
+        );
+        let mut format = out;
+        format[8..12].copy_from_slice(&1u32.to_le_bytes());
+        assert_eq!(
+            Body::decode(Opcode::REQUEST_RESIZE.value(), 7, &format),
+            Err(DecodeError::BadValue)
+        );
+
+        // Object id 0 is refused: the resize targets a surface.
+        assert_eq!(
+            Body::decode(Opcode::REQUEST_RESIZE.value(), 0, &out),
+            Err(DecodeError::BadObject)
+        );
+    }
+
+    #[test]
+    fn window_action_raise_and_lower_are_valid() {
+        for action in [WINDOW_ACTION_RAISE, WINDOW_ACTION_LOWER] {
+            let body = Body::RequestWindowAction { action };
+            let mut out = [0u8; 8];
+            assert_eq!(body.encode(&mut out), Ok(8));
+            assert_eq!(
+                Body::decode(Opcode::REQUEST_WINDOW_ACTION.value(), 7, &out),
+                Ok(body)
+            );
+        }
+
+        // The widened range stops at LOWER, on both sides.
+        let mut beyond = [0u8; 8];
+        beyond[0..4].copy_from_slice(&(WINDOW_ACTION_LOWER + 1).to_le_bytes());
+        assert_eq!(
+            Body::decode(Opcode::REQUEST_WINDOW_ACTION.value(), 7, &beyond),
+            Err(DecodeError::BadValue)
+        );
+        let beyond_body = Body::RequestWindowAction {
+            action: WINDOW_ACTION_LOWER + 1,
+        };
+        assert_eq!(beyond_body.encode(&mut [0u8; 8]), Err(DecodeError::BadValue));
+    }
+
+    #[test]
+    fn set_geometry_and_geometry_bodies_are_validated() {
+        assert!(Opcode::GEOMETRY.is_event());
+        assert!(!Opcode::SET_GEOMETRY.is_event());
+
+        // Clean roundtrip with negative coordinates, both directions.
+        let set = Body::SetGeometry {
+            x: -5,
+            y: -17,
+            width: 320,
+            height: 240,
+            format: FORMAT_XRGB8888,
+        };
+        let mut set_wire = [0u8; 24];
+        assert_eq!(set.encode(&mut set_wire), Ok(24));
+        assert_eq!(
+            Body::decode(Opcode::SET_GEOMETRY.value(), 7, &set_wire),
+            Ok(set)
+        );
+        let extreme = Body::SetGeometry {
+            x: i32::MIN,
+            y: i32::MAX,
+            width: 1,
+            height: 1,
+            format: FORMAT_XRGB8888,
+        };
+        assert_eq!(extreme.encode(&mut set_wire), Ok(24));
+        assert_eq!(
+            Body::decode(Opcode::SET_GEOMETRY.value(), 7, &set_wire),
+            Ok(extreme)
+        );
+
+        let geometry = Body::Geometry {
+            serial: 9,
+            x: -5,
+            y: -17,
+            width: 320,
+            height: 240,
+            format: FORMAT_XRGB8888,
+            flags: 0,
+        };
+        let mut geometry_wire = [0u8; 32];
+        assert_eq!(geometry.encode(&mut geometry_wire), Ok(32));
+        assert_eq!(
+            Body::decode(Opcode::GEOMETRY.value(), 7, &geometry_wire),
+            Ok(geometry)
+        );
+
+        // Exact length: truncation and one trailing byte.
+        assert_eq!(
+            Body::decode(Opcode::SET_GEOMETRY.value(), 7, &set_wire[..23]),
+            Err(DecodeError::Truncated)
+        );
+        let mut set_long = [0u8; 25];
+        set_long[..24].copy_from_slice(&set_wire);
+        assert_eq!(
+            Body::decode(Opcode::SET_GEOMETRY.value(), 7, &set_long),
+            Err(DecodeError::SizeMismatch)
+        );
+        assert_eq!(
+            Body::decode(Opcode::GEOMETRY.value(), 7, &geometry_wire[..31]),
+            Err(DecodeError::Truncated)
+        );
+        let mut geometry_long = [0u8; 33];
+        geometry_long[..32].copy_from_slice(&geometry_wire);
+        assert_eq!(
+            Body::decode(Opcode::GEOMETRY.value(), 7, &geometry_long),
+            Err(DecodeError::SizeMismatch)
+        );
+
+        // Reserved word must stay zero.
+        let mut reserved = set_wire;
+        reserved[20] = 1;
+        assert_eq!(
+            Body::decode(Opcode::SET_GEOMETRY.value(), 7, &reserved),
+            Err(DecodeError::ReservedNonZero)
+        );
+
+        // Bad flags on GEOMETRY yield the same error as on CONFIGURE.
+        let mut flagged = geometry_wire;
+        flagged[28] = 1;
+        let mut configure = [0u8; 24];
+        configure[20] = 1;
+        assert_eq!(
+            Body::decode(Opcode::CONFIGURE.value(), 7, &configure),
+            Err(DecodeError::BadFlags)
+        );
+        assert_eq!(
+            Body::decode(Opcode::GEOMETRY.value(), 7, &flagged),
+            Err(DecodeError::BadFlags)
+        );
+        assert_eq!(
+            Body::Geometry {
+                serial: 0,
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+                format: FORMAT_XRGB8888,
+                flags: 1,
+            }
+            .encode(&mut [0u8; 32]),
+            Err(DecodeError::BadFlags)
+        );
+
+        // Object id 0 is refused: SET_GEOMETRY targets a surface.
+        assert_eq!(
+            Body::decode(Opcode::SET_GEOMETRY.value(), 0, &set_wire),
+            Err(DecodeError::BadObject)
+        );
+        // GEOMETRY carries its surface and accepts object 0.
+        assert_eq!(
+            Body::decode(Opcode::GEOMETRY.value(), 0, &geometry_wire),
+            Ok(geometry)
+        );
+
+        // Dimensions out of range and foreign formats are rejected.
+        let mut zero_width = set_wire;
+        zero_width[8..12].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(
+            Body::decode(Opcode::SET_GEOMETRY.value(), 7, &zero_width),
+            Err(DecodeError::BadValue)
+        );
+        let mut too_tall = set_wire;
+        too_tall[12..16].copy_from_slice(&(MAX_SURFACE_DIM + 1).to_le_bytes());
+        assert_eq!(
+            Body::decode(Opcode::SET_GEOMETRY.value(), 7, &too_tall),
+            Err(DecodeError::BadValue)
+        );
+        let mut bad_format = set_wire;
+        bad_format[16..20].copy_from_slice(&1u32.to_le_bytes());
+        assert_eq!(
+            Body::decode(Opcode::SET_GEOMETRY.value(), 7, &bad_format),
+            Err(DecodeError::BadValue)
+        );
+        for invalid in [
+            Body::SetGeometry {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 1,
+                format: FORMAT_XRGB8888,
+            },
+            Body::SetGeometry {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: MAX_SURFACE_DIM + 1,
+                format: FORMAT_XRGB8888,
+            },
+            Body::SetGeometry {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+                format: 1,
+            },
+        ] {
+            assert_eq!(invalid.encode(&mut [0u8; 24]), Err(DecodeError::BadValue));
+        }
     }
 }

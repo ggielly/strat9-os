@@ -15,4 +15,4 @@ strat9-syscall = { path = "../syscall", features = ["userspace"] }
 alloc-freelist = { path = "../alloc-freelist" }
 input-client = { path = "../input-client" }
 input-protocol = { path = "../input-protocol" }
-vte = { version = "0.15", default-features = false }
+terminal-core = { path = "../terminal-core" }

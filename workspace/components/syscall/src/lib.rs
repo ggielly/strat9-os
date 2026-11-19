@@ -827,6 +827,25 @@ pub mod call {
         unsafe { syscall2(number::SYS_HANDLE_GRANT, handle, target_pid) }
     }
 
+    /// Grant a capability to the owner of `endpoint`, narrowed to `rights`.
+    ///
+    /// The target is the kernel-resolved owner of the IPC port, so no PID is
+    /// trusted and a reused PID cannot receive the handle.
+    pub fn handle_grant_to(
+        handle: usize,
+        endpoint: usize,
+        rights: u32,
+    ) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_HANDLE_GRANT_TO,
+                handle,
+                endpoint,
+                rights as usize,
+            )
+        }
+    }
+
     /// Revoke a capability handle.
     pub fn handle_revoke(handle: usize) -> error::Result<usize> {
         unsafe { syscall1(number::SYS_HANDLE_REVOKE, handle) }

@@ -33,7 +33,7 @@
 
 use alloc::vec::Vec;
 
-use crate::scrollback::Cell;
+use terminal_core::Cell;
 use strat9_syscall::{call, number, syscall6};
 
 const GLYPH_W: usize = 8;
@@ -48,7 +48,7 @@ const MAX_DAMAGE_RECTS: usize = 8;
 /// Number of cached coloured glyph tiles (atlas).
 const GLYPH_CACHE: usize = 32;
 
-static FONT_8X16: [[u8; 16]; 95] = include!("font_data.rs");
+use terminal_core::font_data::FONT_8X16;
 
 pub struct Renderer {
     fb_fd: usize,

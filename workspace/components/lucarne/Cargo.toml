@@ -1,0 +1,22 @@
+[package]
+name = "lucarne"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+description = "Lucarne desktop: GUI terminal on a Vasistas surface (Jalon 5)."
+
+[[bin]]
+name = "lucarne"
+path = "src/main.rs"
+# Freestanding no_std/no_main image: it cannot link the host test harness.
+test = false
+
+[dependencies]
+terminal-core = { path = "../terminal-core" }
+vasistas-client = { path = "../vasistas-client" }
+# `Client::commit` takes its damage rects as `vasistas_protocol::Rect`.
+vasistas-protocol = { path = "../vasistas-protocol" }
+strat9-syscall = { path = "../syscall", features = ["userspace"] }
+alloc-freelist = { path = "../alloc-freelist" }
+input-protocol = { path = "../input-protocol" }

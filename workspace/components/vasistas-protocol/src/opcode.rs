@@ -39,6 +39,8 @@ impl Opcode {
     pub const SET_TITLE: Opcode = Opcode(0x0012);
     pub const REQUEST_WINDOW_ACTION: Opcode = Opcode(0x0013);
     pub const SET_CURSOR_SHAPE: Opcode = Opcode(0x0014);
+    pub const REQUEST_RESIZE: Opcode = Opcode(0x0015);
+    pub const SET_GEOMETRY: Opcode = Opcode(0x0016);
     pub const ALLOC_BUFFER: Opcode = Opcode(0x0020);
     pub const IMPORT_RESULT: Opcode = Opcode(0x0021);
     pub const DESTROY_BUFFER: Opcode = Opcode(0x0022);
@@ -55,6 +57,7 @@ impl Opcode {
     pub const CONFIGURE: Opcode = Opcode(0x8011);
     pub const SURFACE_DESTROYED: Opcode = Opcode(0x8012);
     pub const CLOSE_REQUEST: Opcode = Opcode(0x8013);
+    pub const GEOMETRY: Opcode = Opcode(0x8014);
     pub const BUFFER_CREATED: Opcode = Opcode(0x8020);
     pub const BUFFER_RELEASE: Opcode = Opcode(0x8021);
     pub const BUFFER_DESTROYED: Opcode = Opcode(0x8022);

@@ -29,15 +29,12 @@ extern crate alloc;
 use core::{alloc::Layout, panic::PanicInfo};
 use strat9_syscall::{call, data::TimeSpec};
 
-mod ansi;
 mod input;
 mod renderer;
-mod scrollback;
-mod terminal;
 
 use input::InputHandler;
 use renderer::Renderer;
-use terminal::TerminalCore;
+use terminal_core::TerminalCore;
 
 const DEFAULT_FG: u32 = 0xE2E8F0;
 const DEFAULT_BG: u32 = 0x12161E;

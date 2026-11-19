@@ -92,3 +92,18 @@ impl CircularBuffer {
         line.len = copy_len;
     }
 }
+
+/// Host-test observers: the shipped consoles only append to the buffer, so
+/// no read access exists in real builds.
+#[cfg(test)]
+impl CircularBuffer {
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Copy of the `back`-th stored line, 0 being the most recent.
+    pub fn line_from_end(&self, back: usize) -> ScrollLine {
+        debug_assert!(back < self.count);
+        self.lines[(self.head + self.count - 1 - back) % SCROLLBACK_LINES]
+    }
+}

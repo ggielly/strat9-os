@@ -1,0 +1,14 @@
+[package]
+name = "terminal-core"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Guillaume Gielly <guillaume@gielly.fr>"]
+description = "Host-testable terminal engine for strat9-os consoles: text grid, cursor, line editing, scrollback, ANSI dispatch over vte, and the shared 8x16 bitmap font."
+
+[lib]
+name = "terminal_core"
+path = "src/lib.rs"
+
+[dependencies]
+vte = { version = "0.15", default-features = false }

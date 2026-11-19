@@ -65,6 +65,17 @@ binary = "/initfs/vasistas-demo"
 type = "elf"
 
 [[silos]]
+name = "lucarne"
+family = "SYS"
+mode = "706"
+sid = 42
+requires = ["/srv/vasistas"]
+[[silos.strates]]
+name = "lucarne"
+binary = "/initfs/lucarne"
+type = "elf"
+
+[[silos]]
 name = "s9vm-console"
 family = "SYS"
 mode = "706"

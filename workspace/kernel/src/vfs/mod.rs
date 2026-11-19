@@ -430,13 +430,10 @@ pub fn fstat(fd: u32) -> Result<FileStat, SyscallError> {
     file.stat()
 }
 
-/// stat by path (opens, stats, closes).
+/// stat by path (scheme-specific; the default opens, stats and closes).
 pub fn stat_path(path: &str) -> Result<FileStat, SyscallError> {
     let (scheme, relative_path) = mount::resolve(path)?;
-    let open_result = scheme.open(&relative_path, OpenFlags::READ)?;
-    let result = scheme.stat(open_result.file_id);
-    let _ = scheme.close(open_result.file_id);
-    result
+    scheme.stat_by_path(&relative_path)
 }
 
 /// Read directory entries from an open directory fd.

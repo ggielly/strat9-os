@@ -33,17 +33,20 @@
 
 use core::{mem::MaybeUninit, ptr};
 
-use vasistas_protocol::{Commit, Rect, FLAG_FULL_DAMAGE};
+use vasistas_protocol::{
+    Commit, Rect, FLAG_FULL_DAMAGE, WINDOW_ACTION_LOWER, WINDOW_ACTION_MAXIMIZE,
+    WINDOW_ACTION_MINIMIZE, WINDOW_ACTION_RAISE, WINDOW_ACTION_RESTORE,
+};
 
 use crate::{
-    backend::{Backend, RegionHandle},
+    backend::{Backend, Layer, RegionHandle},
     types::{
-        Buffer, BufferId, BufferState, Damage, RetiredRegion, Session, SessionId, Surface,
-        SurfaceId,
+        Buffer, BufferId, BufferState, Damage, GeometryOutcome, RetiredRegion, Session, SessionId,
+        Surface, SurfaceId,
     },
-    FORMAT_XRGB8888, MAX_BUFFERS_PER_SESSION, MAX_RECTS, MAX_RETIRED_REGIONS, MAX_SESSIONS,
-    MAX_SURFACES_PER_SESSION, MAX_SURFACE_DIM, MAX_TITLE, PIXEL_QUOTA_BYTES, TILE_COLUMNS,
-    TILE_HEIGHT, TILE_WIDTH,
+    FORMAT_XRGB8888, MAX_BUFFERS_PER_SESSION, MAX_RECTS, MAX_RETIRED_REGIONS, MAX_SCREEN_DIRTY,
+    MAX_SESSIONS, MAX_SURFACES_PER_SESSION, MAX_SURFACE_DIM, MAX_TITLE, MAX_Z, PIXEL_QUOTA_BYTES,
+    TILE_COLUMNS, TILE_HEIGHT, TILE_ROWS, TILE_WIDTH,
 };
 
 /// Aggregate resource counters of a [`DisplayCore`].
@@ -123,6 +126,22 @@ pub struct DisplayCore<B: Backend> {
     /// Server-wide pixel budget in bytes, across every session; `0` disables
     /// the check (A.6).
     global_budget: usize,
+    /// Per-session pixel quota in bytes (A.6), derived from the output size by
+    /// the server when it is larger than [`PIXEL_QUOTA_BYTES`].
+    pixel_quota: usize,
+    /// Screen-space width of the single output.
+    output_width: u32,
+    /// Screen-space height of the single output.
+    output_height: u32,
+    /// Z order, topmost first; the first `zlen` entries are live.
+    zlist: [(SessionId, SurfaceId); MAX_Z],
+    /// Number of live z-order entries.
+    zlen: usize,
+    /// Screen rects dirtied since the last repaint; the first
+    /// `screen_dirty_len` entries are live.
+    screen_dirty: [Rect; MAX_SCREEN_DIRTY],
+    /// Number of live screen-damage rects.
+    screen_dirty_len: usize,
 }
 
 /// Ids pack a slot index and a 32-bit generation; generations wrap after
@@ -159,12 +178,35 @@ fn tile_origin(slot: usize) -> (u32, u32) {
     )
 }
 
-/// True when the screen point `(x, y)` falls inside `surface`'s origin tile.
-fn tile_contains(surface: &Surface, x: u32, y: u32) -> bool {
-    x >= surface.x
-        && x - surface.x < TILE_WIDTH
-        && y >= surface.y
-        && y - surface.y < TILE_HEIGHT
+/// Screen-space rect currently covered by `surface`.
+fn surface_rect(surface: &Surface) -> Rect {
+    Rect {
+        x: surface.x as i32,
+        y: surface.y as i32,
+        w: surface.width,
+        h: surface.height,
+    }
+}
+
+/// Intersection of `rect` with the `width x height` output, `None` if empty.
+fn clip_rect(rect: &Rect, width: u32, height: u32) -> Option<Rect> {
+    let x0 = rect.x.max(0) as i64;
+    let y0 = rect.y.max(0) as i64;
+    let x1 = (rect.x as i64)
+        .saturating_add(rect.w as i64)
+        .min(width as i64);
+    let y1 = (rect.y as i64)
+        .saturating_add(rect.h as i64)
+        .min(height as i64);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some(Rect {
+        x: x0 as i32,
+        y: y0 as i32,
+        w: (x1 - x0) as u32,
+        h: (y1 - y0) as u32,
+    })
 }
 
 /// Merge commit damage into the accumulated surface damage.
@@ -263,6 +305,13 @@ impl<B: Backend> DisplayCore<B> {
             buffer_gen: [1; MAX_BUFFERS_PER_SESSION],
             retired: [const { None }; MAX_RETIRED_REGIONS],
             global_budget: 0,
+            pixel_quota: PIXEL_QUOTA_BYTES,
+            output_width: TILE_COLUMNS * TILE_WIDTH,
+            output_height: TILE_ROWS * TILE_HEIGHT,
+            zlist: [(SessionId::from_raw(0), SurfaceId::from_raw(0)); MAX_Z],
+            zlen: 0,
+            screen_dirty: [Rect { x: 0, y: 0, w: 0, h: 0 }; MAX_SCREEN_DIRTY],
+            screen_dirty_len: 0,
         }
     }
 
@@ -320,7 +369,31 @@ impl<B: Backend> DisplayCore<B> {
                 buffer_gen.add(index).write(1);
             }
             ptr::addr_of_mut!((*this).global_budget).write(0);
+            ptr::addr_of_mut!((*this).pixel_quota).write(PIXEL_QUOTA_BYTES);
+            ptr::addr_of_mut!((*this).output_width).write(TILE_COLUMNS * TILE_WIDTH);
+            ptr::addr_of_mut!((*this).output_height).write(TILE_ROWS * TILE_HEIGHT);
+            let zlist =
+                ptr::addr_of_mut!((*this).zlist).cast::<(SessionId, SurfaceId)>();
+            for index in 0..MAX_Z {
+                zlist.add(index).write((SessionId::from_raw(0), SurfaceId::from_raw(0)));
+            }
+            ptr::addr_of_mut!((*this).zlen).write(0);
+            let screen_dirty = ptr::addr_of_mut!((*this).screen_dirty).cast::<Rect>();
+            for index in 0..MAX_SCREEN_DIRTY {
+                screen_dirty.add(index).write(Rect::default());
+            }
+            ptr::addr_of_mut!((*this).screen_dirty_len).write(0);
         }
+    }
+
+    /// Per-session pixel quota currently enforced.
+    pub fn pixel_quota(&self) -> usize {
+        self.pixel_quota
+    }
+
+    /// Set the per-session quota; never below [`PIXEL_QUOTA_BYTES`].
+    pub fn set_pixel_quota(&mut self, quota: usize) {
+        self.pixel_quota = quota.max(PIXEL_QUOTA_BYTES);
     }
 
     /// Borrow the backend, for tests and diagnostics.
@@ -366,7 +439,22 @@ impl<B: Backend> DisplayCore<B> {
                 retire_region(&mut self.retired, session_id, buffer.id, buffer.region)?;
             }
         }
+        // Capture every surface before the session is dropped: each leaves
+        // the z order and the visible ones repaint the area they covered.
+        let mut removed = [(SurfaceId::from_raw(0), false, Rect::default());
+            MAX_SURFACES_PER_SESSION];
+        let mut removed_len = 0usize;
+        for surface in session.surfaces.iter().flatten() {
+            removed[removed_len] = (surface.id, surface.hidden, surface_rect(surface));
+            removed_len += 1;
+        }
         self.sessions[index] = None;
+        for (id, hidden, rect) in &removed[..removed_len] {
+            self.z_remove(session_id, *id);
+            if !hidden {
+                self.push_screen_dirty(*rect);
+            }
+        }
         Ok(())
     }
 
@@ -422,11 +510,13 @@ impl<B: Backend> DisplayCore<B> {
             last_commit_id: 0,
             full_damage_next: true,
             destroyed: false,
+            hidden: false,
             damage: Damage::Full,
             pending_damage: Damage::Full,
             presented_commit: 0,
             presented_serial: 0,
         });
+        self.z_insert_front(session_id, id);
         Ok(id)
     }
 
@@ -444,14 +534,15 @@ impl<B: Backend> DisplayCore<B> {
         let index = self.session_slot(session_id)?;
         let session = self.sessions[index].as_mut().ok_or(CoreError::NoSession)?;
         let surface_slot = surface_index(session, surface_id)?;
-        {
+        let (hidden, rect) = {
             let surface = session.surfaces[surface_slot]
                 .as_ref()
                 .ok_or(CoreError::NoSurface)?;
             if surface.destroyed || surface.credit == 0 {
                 return Err(CoreError::BadState);
             }
-        }
+            (surface.hidden, surface_rect(surface))
+        };
         let mut doomed = [false; MAX_BUFFERS_PER_SESSION];
         let mut freed = 0usize;
         for (slot, buffer) in session.buffers.iter().enumerate() {
@@ -478,6 +569,12 @@ impl<B: Backend> DisplayCore<B> {
         }
         session.used_bytes = new_used;
         session.surfaces[surface_slot] = None;
+        // The destroyed surface leaves the z order; the area it covered
+        // repaints when it was visible.
+        self.z_remove(session_id, surface_id);
+        if !hidden {
+            self.push_screen_dirty(rect);
+        }
         Ok(())
     }
 
@@ -520,6 +617,271 @@ impl<B: Backend> DisplayCore<B> {
         Ok(serial)
     }
 
+    /// Set the screen-space size of the single output; never below 1.
+    pub fn set_output_size(&mut self, width: u32, height: u32) {
+        self.output_width = width.max(1);
+        self.output_height = height.max(1);
+    }
+
+    /// Move `surface` to `(x, y)` with a new size, bumping its configure
+    /// serial (`SET_GEOMETRY`).
+    ///
+    /// The position is clamped into the output and the final values are
+    /// reported; the serial is the same counter as
+    /// [`set_configure`](DisplayCore::set_configure) and is acknowledged by the
+    /// next commit. The next accepted commit reports full damage; the covered
+    /// and revealed screen areas are queued for repaint and the surface is
+    /// raised.
+    pub fn set_geometry(
+        &mut self,
+        session_id: SessionId,
+        surface_id: SurfaceId,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        format: u32,
+    ) -> Result<GeometryOutcome, CoreError> {
+        let index = self.session_slot(session_id)?;
+        let session = self.sessions[index].as_mut().ok_or(CoreError::NoSession)?;
+        let slot = surface_index(session, surface_id)?;
+        check_dimensions(width, height)?;
+        check_format(format)?;
+        let x_max = (self.output_width - 1).min(i32::MAX as u32) as i32;
+        let y_max = (self.output_height - 1).min(i32::MAX as u32) as i32;
+        let x_final = x.clamp(0, x_max) as u32;
+        let y_final = y.clamp(0, y_max) as u32;
+        let (serial, old_rect) = {
+            let surface = session.surfaces[slot]
+                .as_ref()
+                .ok_or(CoreError::NoSurface)?;
+            if surface.destroyed {
+                return Err(CoreError::BadState);
+            }
+            (
+                surface
+                    .configure_serial
+                    .checked_add(1)
+                    .ok_or(CoreError::BadState)?,
+                surface_rect(surface),
+            )
+        };
+        {
+            let surface = session.surfaces[slot]
+                .as_mut()
+                .ok_or(CoreError::NoSurface)?;
+            surface.x = x_final;
+            surface.y = y_final;
+            surface.width = width;
+            surface.height = height;
+            surface.configure_serial = serial;
+            surface.full_damage_next = true;
+        }
+        // The covered and the revealed areas repaint, in that order.
+        self.push_screen_dirty(old_rect);
+        self.z_move_to_front(session_id, surface_id);
+        self.push_screen_dirty(Rect {
+            x: x_final as i32,
+            y: y_final as i32,
+            w: width,
+            h: height,
+        });
+        Ok(GeometryOutcome {
+            serial,
+            x: x_final,
+            y: y_final,
+            width,
+            height,
+        })
+    }
+
+    /// Apply a window action (`REQUEST_WINDOW_ACTION`).
+    ///
+    /// `MINIMIZE` hides the surface until `RESTORE`; both queue the covered
+    /// area for repaint, `RESTORE` also raises. `MAXIMIZE` is the
+    /// [`set_geometry`](DisplayCore::set_geometry) logic applied to the whole
+    /// output and reports the new geometry. `RAISE`/`LOWER` reorder the z
+    /// order and queue the covered area. Acknowledged actions that change no
+    /// geometry return `Ok(None)`.
+    pub fn window_action(
+        &mut self,
+        session_id: SessionId,
+        surface_id: SurfaceId,
+        action: u32,
+    ) -> Result<Option<GeometryOutcome>, CoreError> {
+        let index = self.session_slot(session_id)?;
+        let session = self.sessions[index].as_mut().ok_or(CoreError::NoSession)?;
+        let slot = surface_index(session, surface_id)?;
+        let (format, rect) = {
+            let surface = session.surfaces[slot]
+                .as_ref()
+                .ok_or(CoreError::NoSurface)?;
+            if surface.destroyed {
+                return Err(CoreError::BadState);
+            }
+            (surface.format, surface_rect(surface))
+        };
+        match action {
+            WINDOW_ACTION_MINIMIZE => {
+                let surface = session.surfaces[slot]
+                    .as_mut()
+                    .ok_or(CoreError::NoSurface)?;
+                surface.hidden = true;
+                self.push_screen_dirty(rect);
+                Ok(None)
+            }
+            WINDOW_ACTION_RESTORE => {
+                let surface = session.surfaces[slot]
+                    .as_mut()
+                    .ok_or(CoreError::NoSurface)?;
+                surface.hidden = false;
+                self.z_move_to_front(session_id, surface_id);
+                self.push_screen_dirty(rect);
+                Ok(None)
+            }
+            WINDOW_ACTION_MAXIMIZE => self
+                .set_geometry(
+                    session_id,
+                    surface_id,
+                    0,
+                    0,
+                    self.output_width,
+                    self.output_height,
+                    format,
+                )
+                .map(Some),
+            WINDOW_ACTION_RAISE => {
+                self.z_move_to_front(session_id, surface_id);
+                self.push_screen_dirty(rect);
+                Ok(None)
+            }
+            WINDOW_ACTION_LOWER => {
+                self.z_move_to_back(session_id, surface_id);
+                self.push_screen_dirty(rect);
+                Ok(None)
+            }
+            // The decoder already restricts the action range.
+            _ => Err(CoreError::BadState),
+        }
+    }
+
+    /// Queue `rect`, clipped to the output, for the next screen repaint.
+    ///
+    /// A full queue collapses to the single whole-output rect, which covers
+    /// everything previously queued.
+    fn push_screen_dirty(&mut self, rect: Rect) {
+        let Some(clipped) = clip_rect(&rect, self.output_width, self.output_height) else {
+            return;
+        };
+        if self.screen_dirty_len == MAX_SCREEN_DIRTY {
+            self.screen_dirty[0] = Rect {
+                x: 0,
+                y: 0,
+                w: self.output_width,
+                h: self.output_height,
+            };
+            self.screen_dirty_len = 1;
+        } else {
+            self.screen_dirty[self.screen_dirty_len] = clipped;
+            self.screen_dirty_len += 1;
+        }
+    }
+
+    /// Take the accumulated screen-damage rects, clearing the set.
+    pub fn take_screen_dirty(&mut self) -> ([Rect; MAX_SCREEN_DIRTY], usize) {
+        let rects = self.screen_dirty;
+        let len = self.screen_dirty_len;
+        self.screen_dirty_len = 0;
+        (rects, len)
+    }
+
+    /// Put `surface` on top of the z order (surface creation).
+    fn z_insert_front(&mut self, session: SessionId, surface: SurfaceId) {
+        if self.zlen == MAX_Z {
+            return;
+        }
+        self.zlist.copy_within(0..self.zlen, 1);
+        self.zlist[0] = (session, surface);
+        self.zlen += 1;
+    }
+
+    /// Drop `surface` from the z order (destroy, session close).
+    fn z_remove(&mut self, session: SessionId, surface: SurfaceId) {
+        let Some(index) = (0..self.zlen).find(|slot| self.zlist[*slot] == (session, surface))
+        else {
+            return;
+        };
+        self.zlist.copy_within(index + 1..self.zlen, index);
+        self.zlen -= 1;
+    }
+
+    /// Move `surface` to the top of the z order.
+    fn z_move_to_front(&mut self, session: SessionId, surface: SurfaceId) {
+        let Some(index) = (0..self.zlen).find(|slot| self.zlist[*slot] == (session, surface))
+        else {
+            return;
+        };
+        if index == 0 {
+            return;
+        }
+        let entry = self.zlist[index];
+        self.zlist.copy_within(0..index, 1);
+        self.zlist[0] = entry;
+    }
+
+    /// Move `surface` to the bottom of the z order.
+    fn z_move_to_back(&mut self, session: SessionId, surface: SurfaceId) {
+        let Some(index) = (0..self.zlen).find(|slot| self.zlist[*slot] == (session, surface))
+        else {
+            return;
+        };
+        if index == self.zlen - 1 {
+            return;
+        }
+        let entry = self.zlist[index];
+        self.zlist.copy_within(index + 1..self.zlen, index);
+        self.zlist[self.zlen - 1] = entry;
+    }
+
+    /// Compositable layers of the z order, bottom first.
+    ///
+    /// Hidden surfaces and surfaces without a current buffer are skipped; each
+    /// entry is the current buffer's region at the surface's screen origin.
+    pub fn layers_bottom_to_top(&self) -> ([Layer; MAX_Z], usize) {
+        let mut layers = [Layer {
+            region: RegionHandle::new(0),
+            x: 0,
+            y: 0,
+        }; MAX_Z];
+        let mut count = 0usize;
+        for &(session_id, surface_id) in self.zlist[..self.zlen].iter().rev() {
+            let Some(session) = self.sessions.iter().flatten().find(|s| s.id == session_id)
+            else {
+                continue;
+            };
+            let Some(surface) = session.surfaces.iter().flatten().find(|s| s.id == surface_id)
+            else {
+                continue;
+            };
+            if surface.hidden {
+                continue;
+            }
+            let Some(current) = surface.current else {
+                continue;
+            };
+            let Some(buffer) = session.buffers.iter().flatten().find(|b| b.id == current) else {
+                continue;
+            };
+            layers[count] = Layer {
+                region: buffer.region,
+                x: surface.x,
+                y: surface.y,
+            };
+            count += 1;
+        }
+        (layers, count)
+    }
+
     /// Allocate a buffer for `surface` and start its import.
     ///
     /// Checks run in a fixed order, so a request with several defects always
@@ -546,6 +908,7 @@ impl<B: Backend> DisplayCore<B> {
     ) -> Result<BufferId, CoreError> {
         let index = self.session_slot(session_id)?;
         let global_budget = self.global_budget;
+        let pixel_quota = self.pixel_quota;
         let total_used = self.total_used_bytes();
         let session = self.sessions[index].as_mut().ok_or(CoreError::NoSession)?;
         let surface_slot = surface_index(session, surface_id)?;
@@ -585,7 +948,7 @@ impl<B: Backend> DisplayCore<B> {
             .used_bytes
             .checked_add(bytes)
             .ok_or(CoreError::Quota)?;
-        if used > PIXEL_QUOTA_BYTES {
+        if used > pixel_quota {
             return Err(CoreError::Quota);
         }
         if global_budget != 0 && total_used.saturating_add(bytes) > global_budget {
@@ -853,19 +1216,21 @@ impl<B: Backend> DisplayCore<B> {
 
     /// Present the surface's current buffer once per accepted commit.
     ///
-    /// Presents the accumulated pending damage, using the **current buffer's**
-    /// dimensions (a configure may have changed the surface since the commit).
-    /// Stored rects are revalidated against those dimensions; a stale
-    /// out-of-bounds rect yields [`CoreError::BadDimensions`] before the backend
-    /// is called. Repeated calls without a new commit return
-    /// [`CoreError::BadState`].
+    /// Composites every layer of the z order over the pending damage of the
+    /// surface, translated to screen space and clipped to the output. Full
+    /// damage covers the current buffer's dimensions (a configure may have
+    /// changed the surface since the commit); stored rects are revalidated
+    /// against those dimensions and a stale out-of-bounds rect yields
+    /// [`CoreError::BadDimensions`] before the backend is called. When no rect
+    /// survives the clipping the backend is not called at all. Repeated calls
+    /// without a new commit return [`CoreError::BadState`].
     pub fn present_current(
         &mut self,
         session_id: SessionId,
         surface_id: SurfaceId,
     ) -> Result<(), CoreError> {
         let index = self.session_slot(session_id)?;
-        let (region, damage, width, height, commit_id, acked_serial, origin_x, origin_y) = {
+        let (damage, width, height, commit_id, acked_serial, origin_x, origin_y) = {
             let session = self.sessions[index].as_ref().ok_or(CoreError::NoSession)?;
             let surface_slot = surface_index(session, surface_id)?;
             let surface = session.surfaces[surface_slot]
@@ -880,7 +1245,6 @@ impl<B: Backend> DisplayCore<B> {
                 .as_ref()
                 .ok_or(CoreError::NoBuffer)?;
             (
-                buffer.region,
                 surface.pending_damage,
                 buffer.width,
                 buffer.height,
@@ -891,31 +1255,52 @@ impl<B: Backend> DisplayCore<B> {
             )
         };
 
-        let full = [Rect {
-            x: 0,
-            y: 0,
-            w: width,
-            h: height,
-        }];
-        let stored = match damage {
-            Damage::Full => [Rect::default(); MAX_RECTS],
-            Damage::Rects { count, rects } => {
-                for rect in &rects[..count as usize] {
+        let mut rects = [Rect::default(); MAX_RECTS];
+        let mut rect_count = 0usize;
+        match damage {
+            Damage::Full => {
+                let full = Rect {
+                    x: origin_x as i32,
+                    y: origin_y as i32,
+                    w: width,
+                    h: height,
+                };
+                if let Some(clipped) = clip_rect(&full, self.output_width, self.output_height) {
+                    rects[rect_count] = clipped;
+                    rect_count += 1;
+                }
+            }
+            Damage::Rects { count, rects: stored } => {
+                for rect in &stored[..count as usize] {
                     if !rect_in_bounds(rect, width, height) {
                         return Err(CoreError::BadDimensions);
                     }
                 }
-                rects
+                for rect in &stored[..count as usize] {
+                    let screen = Rect {
+                        x: rect.x.saturating_add(origin_x as i32),
+                        y: rect.y.saturating_add(origin_y as i32),
+                        w: rect.w,
+                        h: rect.h,
+                    };
+                    if let Some(clipped) =
+                        clip_rect(&screen, self.output_width, self.output_height)
+                    {
+                        rects[rect_count] = clipped;
+                        rect_count += 1;
+                    }
+                }
             }
-        };
-        let slice: &[Rect] = match damage {
-            Damage::Full => &full,
-            Damage::Rects { count, .. } => &stored[..count as usize],
-        };
+        }
 
-        self.backend
-            .present(surface_id, region, slice, origin_x, origin_y)
-            .map_err(|_| CoreError::BackendError)?;
+        if rect_count > 0 {
+            // Copy the layers out first: the backend borrow must not overlap
+            // the core state the layers were built from.
+            let (layers, layer_len) = self.layers_bottom_to_top();
+            self.backend
+                .composite(&layers[..layer_len], &rects[..rect_count])
+                .map_err(|_| CoreError::BackendError)?;
+        }
 
         let session = self.sessions[index].as_mut().ok_or(CoreError::NoSession)?;
         let surface_slot = surface_index(session, surface_id)?;
@@ -1069,27 +1454,30 @@ impl<B: Backend> DisplayCore<B> {
         Ok((surface.x, surface.y))
     }
 
-    /// Topmost surface whose origin tile contains the screen point `(x, y)`.
+    /// Topmost surface whose geometry contains the screen point `(x, y)`.
     ///
-    /// Tiles are disjoint, so a point maps to at most one session. Sessions are
-    /// scanned from the highest slot down, and within a session the highest
-    /// surface slot wins, so the topmost surface is returned even when it
-    /// extends past its tile. A surface with a current image is preferred over
-    /// one created but never committed; destroyed surfaces are ignored.
+    /// Walks the z order from the top; the first non-hidden surface covering
+    /// the point wins, with or without a current image. Destroyed surfaces
+    /// never stay in the z order, so they cannot be picked.
     pub fn surface_at(&self, x: u32, y: u32) -> Option<(SessionId, SurfaceId)> {
-        for session in self.sessions.iter().rev().flatten() {
-            let mut fallback = None;
-            for surface in session.surfaces.iter().rev().flatten() {
-                if surface.destroyed || !tile_contains(surface, x, y) {
-                    continue;
-                }
-                if surface.current.is_some() {
-                    return Some((session.id, surface.id));
-                }
-                fallback.get_or_insert(surface.id);
+        for &(session_id, surface_id) in self.zlist[..self.zlen].iter() {
+            let Some(session) = self.sessions.iter().flatten().find(|s| s.id == session_id)
+            else {
+                continue;
+            };
+            let Some(surface) = session.surfaces.iter().flatten().find(|s| s.id == surface_id)
+            else {
+                continue;
+            };
+            if surface.hidden {
+                continue;
             }
-            if let Some(id) = fallback {
-                return Some((session.id, id));
+            if x >= surface.x
+                && x - surface.x < surface.width
+                && y >= surface.y
+                && y - surface.y < surface.height
+            {
+                return Some((session_id, surface_id));
             }
         }
         None
@@ -1150,10 +1538,8 @@ mod tests {
         frees: u32,
         presents: u32,
         last_damage: usize,
-        last_region: u64,
+        last_layers: usize,
         last_rects: [Rect; MAX_RECTS],
-        last_x: u32,
-        last_y: u32,
         fail_allocation: bool,
     }
 
@@ -1180,21 +1566,16 @@ mod tests {
             self.frees += 1;
         }
 
-        fn present(
+        fn composite(
             &mut self,
-            _surface: SurfaceId,
-            region: RegionHandle,
-            damage: &[Rect],
-            x: u32,
-            y: u32,
+            bottom_to_top: &[Layer],
+            rects: &[Rect],
         ) -> Result<(), Self::Error> {
             self.presents += 1;
-            self.last_damage = damage.len();
-            let count = damage.len().min(MAX_RECTS);
-            self.last_rects[..count].copy_from_slice(&damage[..count]);
-            self.last_region = region.raw();
-            self.last_x = x;
-            self.last_y = y;
+            self.last_damage = rects.len();
+            self.last_layers = bottom_to_top.len();
+            let count = rects.len().min(MAX_RECTS);
+            self.last_rects[..count].copy_from_slice(&rects[..count]);
             Ok(())
         }
     }
@@ -1221,13 +1602,10 @@ mod tests {
         fn free(&mut self, _region: RegionHandle) {
             self.frees.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
-        fn present(
+        fn composite(
             &mut self,
-            _surface: SurfaceId,
-            _region: RegionHandle,
-            _damage: &[Rect],
-            _x: u32,
-            _y: u32,
+            _bottom_to_top: &[Layer],
+            _rects: &[Rect],
         ) -> Result<(), Self::Error> {
             Ok(())
         }
@@ -1575,6 +1953,40 @@ mod tests {
             Err(CoreError::BadSerial)
         );
         assert_eq!(core.surface(session, surface).unwrap().acked_serial, 2);
+    }
+
+    #[test]
+    fn pixel_quota_derives_from_output_and_keeps_its_floor() {
+        let mut core = DisplayCore::new(Fake::default());
+        let session = core.create_session().unwrap();
+        let surface = core
+            .create_surface(session, 1600, 1200, FORMAT_XRGB8888, 0)
+            .unwrap();
+        let stride = 1600u32 * 4;
+        let frame = (stride as u64 * 1200) as usize;
+
+        // Default quota (8 MiB) fits one full-screen buffer but not two.
+        core.allocate_buffer(session, surface, 1600, 1200, FORMAT_XRGB8888, stride)
+            .unwrap();
+        assert_eq!(core.used_bytes(session).unwrap(), frame);
+        assert!(
+            matches!(
+                core.allocate_buffer(session, surface, 1600, 1200, FORMAT_XRGB8888, stride),
+                Err(CoreError::Quota)
+            ),
+            "8 MiB cannot host a full-screen ping-pong pair"
+        );
+
+        // A quota derived from the output (two full-screen buffers) admits
+        // the pair, and never drops below the 8 MiB floor.
+        core.set_pixel_quota(frame * 2);
+        assert_eq!(core.pixel_quota(), frame * 2);
+        core.allocate_buffer(session, surface, 1600, 1200, FORMAT_XRGB8888, stride)
+            .unwrap();
+        assert_eq!(core.used_bytes(session).unwrap(), frame * 2);
+
+        core.set_pixel_quota(0);
+        assert_eq!(core.pixel_quota(), PIXEL_QUOTA_BYTES, "floor holds");
     }
 
     #[test]
@@ -2548,6 +2960,9 @@ mod tests {
     struct PixelBackend {
         src: [u32; (W as usize) * (H as usize)],
         front: [u32; (W as usize) * (H as usize)],
+        /// Dimensions of the last allocated region; every test region is W x H.
+        region_w: u32,
+        region_h: u32,
     }
 
     impl Default for PixelBackend {
@@ -2555,6 +2970,8 @@ mod tests {
             Self {
                 src: [0; (W as usize) * (H as usize)],
                 front: [0; (W as usize) * (H as usize)],
+                region_w: 0,
+                region_h: 0,
             }
         }
     }
@@ -2563,31 +2980,49 @@ mod tests {
         type Error = ();
         fn allocate(
             &mut self,
-            _width: u32,
-            _height: u32,
+            width: u32,
+            height: u32,
             _stride: u32,
             _format: u32,
         ) -> Result<RegionHandle, Self::Error> {
+            self.region_w = width;
+            self.region_h = height;
             Ok(RegionHandle::new(1))
         }
         fn free(&mut self, _region: RegionHandle) {}
-        fn present(
+        fn composite(
             &mut self,
-            _surface: SurfaceId,
-            _region: RegionHandle,
-            damage: &[Rect],
-            _x: u32,
-            _y: u32,
+            bottom_to_top: &[Layer],
+            rects: &[Rect],
         ) -> Result<(), Self::Error> {
-            for rect in damage {
-                let x0 = rect.x as usize;
-                let y0 = rect.y as usize;
-                let w = rect.w as usize;
-                let h = rect.h as usize;
-                for y in y0..y0 + h {
-                    for x in x0..x0 + w {
-                        let index = y * W as usize + x;
-                        self.front[index] = self.src[index];
+            for rect in rects {
+                for layer in bottom_to_top {
+                    // Intersection of the dirty rect with the layer's bounds;
+                    // the screen-sized front buffer clips everything else.
+                    let lx = layer.x as i64;
+                    let ly = layer.y as i64;
+                    let x0 = (rect.x as i64).max(lx);
+                    let y0 = (rect.y as i64).max(ly);
+                    let x1 = ((rect.x as i64) + rect.w as i64)
+                        .min(lx + self.region_w as i64);
+                    let y1 = ((rect.y as i64) + rect.h as i64)
+                        .min(ly + self.region_h as i64);
+                    if x0 < 0
+                        || y0 < 0
+                        || x1 <= x0
+                        || y1 <= y0
+                        || x1 > W as i64
+                        || y1 > H as i64
+                    {
+                        continue;
+                    }
+                    for y in y0..y1 {
+                        for x in x0..x1 {
+                            let src_index =
+                                ((y - ly) * self.region_w as i64 + (x - lx)) as usize;
+                            let dst_index = (y * W as i64 + x) as usize;
+                            self.front[dst_index] = self.src[src_index];
+                        }
                     }
                 }
             }
@@ -2738,16 +3173,14 @@ mod tests {
             let expected = (sessions[slot].unwrap(), surfaces[slot].unwrap());
             assert_eq!(core.surface_at(x, y), Some(expected), "slot {slot} origin");
             assert_eq!(
-                core.surface_at(x + TILE_WIDTH - 1, y + TILE_HEIGHT - 1),
+                core.surface_at(x + W - 1, y + H - 1),
                 Some(expected),
                 "slot {slot} last pixel"
             );
         }
-        // Half-open tiles: the right edge of slot 0 is the first pixel of slot 1.
-        assert_eq!(
-            core.surface_at(TILE_WIDTH - 1, 0),
-            Some((sessions[0].unwrap(), surfaces[0].unwrap()))
-        );
+        // Half-open geometry: the pixel past a surface belongs to no one
+        // until the next tile's origin.
+        assert_eq!(core.surface_at(W, 0), None);
         assert_eq!(
             core.surface_at(TILE_WIDTH, 0),
             Some((sessions[1].unwrap(), surfaces[1].unwrap()))
@@ -2764,7 +3197,7 @@ mod tests {
     }
 
     #[test]
-    fn surface_at_prefers_current_image_and_skips_destroyed() {
+    fn surface_at_follows_z_order_and_skips_destroyed() {
         let (mut core, session) = new_core();
         let first = add_surface(&mut core, session);
         let second = add_surface(&mut core, session);
@@ -2773,15 +3206,15 @@ mod tests {
             .unwrap();
         assert_eq!(
             core.surface_at(1, 1),
-            Some((session, first)),
-            "the surface with a current image wins over a higher empty slot"
+            Some((session, second)),
+            "the z order decides picking, with or without a current image"
         );
 
         core.frame_done(session, first, buffer, 1).unwrap();
         core.destroy_surface(session, second).unwrap();
         assert_eq!(core.surface_at(1, 1), Some((session, first)));
 
-        // No image anywhere: the highest live surface slot still wins.
+        // No image anywhere: the topmost live surface still wins.
         let (mut core, session) = new_core();
         let lower = add_surface(&mut core, session);
         let upper = add_surface(&mut core, session);
@@ -2804,20 +3237,268 @@ mod tests {
             .unwrap();
         core.present_current(session, surface).unwrap();
         assert_eq!(core.backend().presents, 1);
-        assert_eq!(
-            (core.backend().last_x, core.backend().last_y),
-            (1200, 300),
-            "slot 7 tile origin is forwarded to the backend"
-        );
+        assert_eq!(core.backend().last_layers, 1, "one compositable layer");
         assert_eq!(
             core.backend().last_rects[0],
             Rect {
-                x: 0,
-                y: 0,
+                x: 1200,
+                y: 300,
                 w: W,
                 h: H
             },
-            "damage rects stay surface-local"
+            "slot 7 tile origin is folded into the screen-space damage rect"
+        );
+    }
+
+    #[test]
+    fn set_geometry_clamps_and_reports_final_values() {
+        let (mut core, session) = new_core();
+        let surface = add_surface(&mut core, session);
+        let outcome = core
+            .set_geometry(session, surface, -8, 5000, 16, 16, FORMAT_XRGB8888)
+            .unwrap();
+        assert_eq!(
+            outcome,
+            GeometryOutcome {
+                serial: 1,
+                x: 0,
+                y: TILE_ROWS * TILE_HEIGHT - 1,
+                width: 16,
+                height: 16,
+            }
+        );
+        let record = core.surface(session, surface).unwrap();
+        assert_eq!((record.x, record.y, record.width, record.height), (0, 599, 16, 16));
+        assert_eq!(record.configure_serial, 1);
+        assert!(record.full_damage_next);
+
+        // The upper clamp bounds use the last output pixel.
+        let outcome = core
+            .set_geometry(session, surface, 5000, -1, 8, 8, FORMAT_XRGB8888)
+            .unwrap();
+        assert_eq!(
+            outcome,
+            GeometryOutcome {
+                serial: 2,
+                x: TILE_COLUMNS * TILE_WIDTH - 1,
+                y: 0,
+                width: 8,
+                height: 8,
+            }
+        );
+
+        // Validation follows the set_configure rules and conventions.
+        assert_eq!(
+            core.set_geometry(session, surface, 0, 0, 0, 8, FORMAT_XRGB8888),
+            Err(CoreError::BadDimensions)
+        );
+        assert_eq!(
+            core.set_geometry(session, surface, 0, 0, 8, 8, 1),
+            Err(CoreError::BadFormat)
+        );
+        assert_eq!(
+            core.set_geometry(
+                session,
+                SurfaceId::from_raw(0xdead_beef),
+                0,
+                0,
+                8,
+                8,
+                FORMAT_XRGB8888
+            ),
+            Err(CoreError::BadObject)
+        );
+    }
+
+    #[test]
+    fn set_geometry_serial_gates_commits() {
+        let (mut core, session) = new_core();
+        let surface = add_surface(&mut core, session);
+        let buffer = add_buffer(&mut core, session, surface);
+        let stale = add_buffer(&mut core, session, surface);
+        core.commit(session, surface, &commit_body(buffer, 0, 1))
+            .unwrap();
+        core.frame_done(session, surface, buffer, 1).unwrap();
+
+        let outcome = core
+            .set_geometry(session, surface, 4, 6, 16, 16, FORMAT_XRGB8888)
+            .unwrap();
+        // The old serial is rejected, whatever the buffer.
+        assert_eq!(
+            core.commit(session, surface, &commit_body(stale, 0, 2)),
+            Err(CoreError::BadSerial)
+        );
+        // The new serial is accepted only with a matching buffer size.
+        assert_eq!(
+            core.commit(session, surface, &commit_body(stale, outcome.serial, 2)),
+            Err(CoreError::BadDimensions)
+        );
+        let fresh = core
+            .allocate_buffer(session, surface, 16, 16, FORMAT_XRGB8888, 16 * 4)
+            .unwrap();
+        core.import_result(session, fresh, true).unwrap();
+        core.commit(session, surface, &commit_body(fresh, outcome.serial, 2))
+            .unwrap();
+        assert_eq!(
+            core.surface(session, surface).unwrap().acked_serial,
+            outcome.serial
+        );
+    }
+
+    #[test]
+    fn minimize_hides_and_restore_returns() {
+        let (mut core, session) = new_core();
+        let surface = add_surface(&mut core, session);
+        let buffer = add_buffer(&mut core, session, surface);
+        core.commit(session, surface, &commit_body(buffer, 0, 1))
+            .unwrap();
+
+        assert_eq!(core.surface_at(1, 1), Some((session, surface)));
+        let (_, len) = core.layers_bottom_to_top();
+        assert_eq!(len, 1);
+
+        assert_eq!(
+            core.window_action(session, surface, WINDOW_ACTION_MINIMIZE),
+            Ok(None)
+        );
+        assert!(core.surface(session, surface).unwrap().hidden);
+        assert_eq!(core.surface_at(1, 1), None, "hidden surfaces are not picked");
+        let (_, len) = core.layers_bottom_to_top();
+        assert_eq!(len, 0, "hidden surfaces are not composited");
+        let (rects, count) = core.take_screen_dirty();
+        assert_eq!(count, 1, "the covered area repaints");
+        assert_eq!(rects[0], Rect { x: 0, y: 0, w: W, h: H });
+
+        assert_eq!(
+            core.window_action(session, surface, WINDOW_ACTION_RESTORE),
+            Ok(None)
+        );
+        assert!(!core.surface(session, surface).unwrap().hidden);
+        assert_eq!(core.surface_at(1, 1), Some((session, surface)));
+        let (_, len) = core.layers_bottom_to_top();
+        assert_eq!(len, 1);
+        assert_eq!(core.take_screen_dirty().1, 1, "restore repaints");
+    }
+
+    #[test]
+    fn maximize_returns_output_geometry_and_bumps_serial() {
+        let (mut core, session) = new_core();
+        let surface = add_surface(&mut core, session);
+        core.set_output_size(640, 480);
+        let outcome = core
+            .window_action(session, surface, WINDOW_ACTION_MAXIMIZE)
+            .unwrap()
+            .expect("MAXIMIZE reports geometry");
+        assert_eq!(
+            outcome,
+            GeometryOutcome {
+                serial: 1,
+                x: 0,
+                y: 0,
+                width: 640,
+                height: 480,
+            }
+        );
+        let record = core.surface(session, surface).unwrap();
+        assert_eq!((record.x, record.y, record.width, record.height), (0, 0, 640, 480));
+        assert_eq!(record.configure_serial, 1);
+        // The covered and the revealed rects are queued, in that order.
+        let (rects, count) = core.take_screen_dirty();
+        assert_eq!(count, 2);
+        assert_eq!(rects[0], Rect { x: 0, y: 0, w: W, h: H });
+        assert_eq!(rects[1], Rect { x: 0, y: 0, w: 640, h: 480 });
+    }
+
+    #[test]
+    fn raise_and_lower_reorder_overlapping_surfaces() {
+        let (mut core, session) = new_core();
+        let bottom = add_surface(&mut core, session);
+        let top = add_surface(&mut core, session);
+        // Both surfaces sit on the same tile: the z order decides picking.
+        assert_eq!(
+            core.surface_at(1, 1),
+            Some((session, top)),
+            "the surface created last is on top"
+        );
+
+        assert_eq!(
+            core.window_action(session, bottom, WINDOW_ACTION_RAISE),
+            Ok(None)
+        );
+        assert_eq!(core.surface_at(1, 1), Some((session, bottom)));
+
+        assert_eq!(
+            core.window_action(session, bottom, WINDOW_ACTION_LOWER),
+            Ok(None)
+        );
+        assert_eq!(core.surface_at(1, 1), Some((session, top)));
+    }
+
+    #[test]
+    fn layers_bottom_to_top_is_reversed_z() {
+        let (mut core, session) = new_core();
+        let a = add_surface(&mut core, session);
+        let _b = add_surface(&mut core, session);
+        let c = add_surface(&mut core, session);
+        let buffer_a = add_buffer(&mut core, session, a);
+        core.commit(session, a, &commit_body(buffer_a, 0, 1))
+            .unwrap();
+        let buffer_c = add_buffer(&mut core, session, c);
+        core.commit(session, c, &commit_body(buffer_c, 0, 1))
+            .unwrap();
+
+        let (layers, len) = core.layers_bottom_to_top();
+        assert_eq!(len, 2, "only surfaces with a current image composite");
+        // The z order is c, b, a top first: the reversed walk yields a, c.
+        assert_eq!(layers[0].region.raw(), 0, "bottom layer is the first created");
+        assert_eq!(layers[1].region.raw(), 1, "top layer is the last created");
+        assert_eq!((layers[0].x, layers[0].y), (0, 0));
+
+        // Raising a flips the compositing order.
+        core.window_action(session, a, WINDOW_ACTION_RAISE).unwrap();
+        let (layers, len) = core.layers_bottom_to_top();
+        assert_eq!(len, 2);
+        assert_eq!(layers[0].region.raw(), 1);
+        assert_eq!(layers[1].region.raw(), 0);
+    }
+
+    #[test]
+    fn screen_dirty_drains_destroy_dirties_and_collapses() {
+        let (mut core, session) = new_core();
+        let surface = add_surface(&mut core, session);
+        assert_eq!(core.take_screen_dirty().1, 0, "starts empty");
+
+        // A move queues the covered and the revealed rect.
+        core.set_geometry(session, surface, 40, 20, 8, 8, FORMAT_XRGB8888)
+            .unwrap();
+        let (rects, count) = core.take_screen_dirty();
+        assert_eq!(count, 2);
+        assert_eq!(rects[0], Rect { x: 0, y: 0, w: W, h: H });
+        assert_eq!(rects[1], Rect { x: 40, y: 20, w: W, h: H });
+        assert_eq!(core.take_screen_dirty().1, 0, "take drains");
+
+        // Destroying a visible surface queues its covered rect once.
+        core.destroy_surface(session, surface).unwrap();
+        let (rects, count) = core.take_screen_dirty();
+        assert_eq!(count, 1);
+        assert_eq!(rects[0], Rect { x: 40, y: 20, w: W, h: H });
+
+        // An overfull queue collapses to the whole output.
+        let surface = add_surface(&mut core, session);
+        for _ in 0..MAX_SCREEN_DIRTY + 1 {
+            core.window_action(session, surface, WINDOW_ACTION_MINIMIZE)
+                .unwrap();
+        }
+        let (rects, count) = core.take_screen_dirty();
+        assert_eq!(count, 1, "the whole set collapses to one rect");
+        assert_eq!(
+            rects[0],
+            Rect {
+                x: 0,
+                y: 0,
+                w: TILE_COLUMNS * TILE_WIDTH,
+                h: TILE_ROWS * TILE_HEIGHT,
+            }
         );
     }
 }

@@ -207,6 +207,7 @@ dependencies = [
     "s9vm-guest-release",
     "vasistas-release",
     "vasistas-client-release",
+    "lucarne-release",
     "strate-net-release",
     "strate-bus-release",
     "strate-iommu-release",
@@ -268,6 +269,7 @@ dependencies = [
     "s9vm-guest-release",
     "vasistas-release",
     "vasistas-client-release",
+    "lucarne-release",
     "strate-net-release",
     "strate-bus-release",
     "strate-iommu-release",
@@ -302,6 +304,7 @@ dependencies = [
     "s9vm-guest-release",
     "vasistas-release",
     "vasistas-client-release",
+    "lucarne-release",
     "strate-net-release",
     "strate-bus-release",
     "strate-iommu-release",
@@ -698,6 +701,7 @@ dependencies = [
     "s9vm-guest-release",
     "vasistas-release",
     "vasistas-client-release",
+    "lucarne-release",
     "strate-net-release",
     "strate-bus-release",
     "strate-iommu-release",
@@ -731,6 +735,7 @@ dependencies = [
     "s9vm-guest-release",
     "vasistas-release",
     "vasistas-client-release",
+    "lucarne-release",
     "strate-net-release",
     "strate-bus-release",
     "strate-iommu-release",
@@ -1165,6 +1170,21 @@ args = [
 [tasks.vasistas-client-release]
 description = "Build the Vasistas client SDK + demo (release)"
 cwd = "workspace/components/vasistas-client"
+command = "cargo"
+args = [
+    "build",
+    "--target",
+    "x86_64-unknown-none",
+    "--release",
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "build-std-features=compiler-builtins-mem",
+]
+
+[tasks.lucarne-release]
+description = "Build the Lucarne desktop terminal (release)"
+cwd = "workspace/components/lucarne"
 command = "cargo"
 args = [
     "build",

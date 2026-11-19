@@ -131,6 +131,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_HANDLE_CLOSE => sys_handle_close(arg1),
         SYS_HANDLE_WAIT => sys_handle_wait(arg1, arg2),
         SYS_HANDLE_GRANT => sys_handle_grant(arg1, arg2),
+        SYS_HANDLE_GRANT_TO => sys_handle_grant_to(arg1, arg2, arg3 as u32),
         SYS_HANDLE_REVOKE => sys_handle_revoke(arg1),
         SYS_HANDLE_INFO => sys_handle_info(arg1, arg2),
         SYS_HANDLE_WAIT_MANY => sys_handle_wait_many(arg1, arg2, arg3),
@@ -606,6 +607,7 @@ fn sys_handle_duplicate(handle: u64, rights: u64) -> Result<u64, SyscallError> {
 
 const HANDLE_EVENT_READABLE: u64 = 1 << 0;
 const HANDLE_EVENT_WRITABLE: u64 = 1 << 1;
+const HANDLE_EVENT_HANGUP: u64 = 1 << 2;
 
 /// Performs the poll handle events operation.
 fn poll_handle_events(handle: u64) -> Result<u64, SyscallError> {
@@ -788,7 +790,7 @@ fn wait_source_from_bytes(bytes: &[u8]) -> strat9_abi::data::WaitSource {
 /// Returns the index of the first ready entry after writing its `revents`,
 /// or `-ETIMEDOUT` when the timeout expires.
 fn sys_handle_wait_many(list_ptr: u64, count: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
-    use strat9_abi::data::{WAIT_SOURCE_FD, WAIT_SOURCE_HANDLE};
+    use strat9_abi::data::{WAIT_EVENT_HANGUP, WAIT_SOURCE_FD, WAIT_SOURCE_HANDLE};
 
     if count == 0 || count > WAIT_SOURCE_MAX || list_ptr == 0 {
         return Err(SyscallError::InvalidArgument);
@@ -806,12 +808,30 @@ fn sys_handle_wait_many(list_ptr: u64, count: u64, timeout_ns: u64) -> Result<u6
     let check_ready = || -> Result<usize, SyscallError> {
         for (i, source) in sources.iter().enumerate() {
             let revents = match source.kind {
-                WAIT_SOURCE_HANDLE => poll_handle_events(source.id)?,
+                WAIT_SOURCE_HANDLE => match poll_handle_events(source.id) {
+                    Ok(events) => events,
+                    // A port/channel whose owner died is a hangup, not a
+                    // failure of the whole wait: let the caller drop it.
+                    Err(SyscallError::BadHandle | SyscallError::Pipe)
+                        if source.events & WAIT_EVENT_HANGUP != 0 =>
+                    {
+                        HANDLE_EVENT_HANGUP
+                    }
+                    Err(error) => return Err(error),
+                },
                 WAIT_SOURCE_FD => {
                     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
                     let fd_table = unsafe { &*task.process.fd_table.get() };
                     let fd = u32::try_from(source.id).map_err(|_| SyscallError::InvalidArgument)?;
-                    fd_table.get(fd)?.poll(source.events)?
+                    match fd_table.get(fd).and_then(|file| file.poll(source.events)) {
+                        Ok(events) => events,
+                        Err(SyscallError::BadHandle | SyscallError::Pipe)
+                            if source.events & WAIT_EVENT_HANGUP != 0 =>
+                        {
+                            HANDLE_EVENT_HANGUP
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
                 _ => return Err(SyscallError::InvalidArgument),
             } & (source.events as u64);
@@ -852,6 +872,55 @@ fn sys_handle_grant(handle: u64, target_pid: u64) -> Result<u64, SyscallError> {
     };
 
     let target = crate::process::get_task_by_pid(pid).ok_or(SyscallError::NotFound)?;
+    let target_caps = unsafe { &*target.process.capabilities.get() };
+    let new_id = insert_capability_with_retention(target_caps, granted)?;
+    Ok(new_id.as_u64())
+}
+
+/// Grant `handle` to the owner of the IPC port `endpoint`, with `rights`.
+///
+/// The target is resolved from the kernel port registry, never from a
+/// caller-supplied PID: a stale or reused PID cannot redirect the grant. The
+/// granted rights are the intersection of `rights` and the source handle's
+/// rights, so this call can only narrow a capability.
+fn sys_handle_grant_to(handle: u64, endpoint: u64, rights: u32) -> Result<u64, SyscallError> {
+    if rights == 0 || rights & !CAP_RIGHT_ALL != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    crate::silo::enforce_cap_for_current_task(handle)?;
+    crate::silo::enforce_silo_may_grant()?;
+
+    let source = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let (granted, owner) = {
+        let caps = unsafe { &*source.process.capabilities.get() };
+        let cap = caps
+            .get(CapId::from_raw(handle))
+            .ok_or(SyscallError::BadHandle)?;
+        if !cap.permissions.grant {
+            return Err(SyscallError::PermissionDenied);
+        }
+        let endpoint_cap = caps
+            .get(CapId::from_raw(endpoint))
+            .ok_or(SyscallError::BadHandle)?;
+        if endpoint_cap.resource_type != ResourceType::IpcPort {
+            return Err(SyscallError::BadHandle);
+        }
+        let port = crate::ipc::port::get_port(PortId::from_u64(endpoint_cap.resource as u64))
+            .ok_or(SyscallError::BadHandle)?;
+        let narrowed = CapPermissions {
+            read: rights & CAP_RIGHT_READ != 0,
+            write: rights & CAP_RIGHT_WRITE != 0,
+            execute: rights & CAP_RIGHT_EXECUTE != 0,
+            grant: rights & CAP_RIGHT_GRANT != 0,
+            revoke: rights & CAP_RIGHT_REVOKE != 0,
+        };
+        let mut dup = cap.clone();
+        dup.id = CapId::new();
+        dup.permissions = dup.permissions.intersection(&narrowed);
+        (dup, port.owner)
+    };
+
+    let target = crate::process::get_task_by_id(owner).ok_or(SyscallError::NotFound)?;
     let target_caps = unsafe { &*target.process.capabilities.get() };
     let new_id = insert_capability_with_retention(target_caps, granted)?;
     Ok(new_id.as_u64())

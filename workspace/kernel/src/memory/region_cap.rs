@@ -105,6 +105,10 @@ impl MemoryRegionRegistry {
 
     fn rollback_registered_handles(handles: &[BlockHandle], handle_cap: CapId) {
         for handle in handles.iter().copied() {
+            // Every handle in `handles` was successfully marked shared before
+            // the failure, so each mark is dropped here alongside the
+            // mapping identity it was publishing.
+            ownership_table().clear_shared(handle);
             if let Some(block) = unregister_mapping_identity(handle, handle_cap) {
                 release_owned_block(block);
             }
@@ -159,7 +163,11 @@ impl MemoryRegionRegistry {
                     mapping.handle.order,
                     error
                 );
-                Self::rollback_registered_handles(&handles, handle_cap);
+                // `handles[index]` was pushed but NOT marked (the call above
+                // failed), so its mark must not be rolled back: clear the
+                // marks of the successfully marked prefix only.
+                let marked = &handles[..handles.len() - 1];
+                Self::rollback_registered_handles(marked, handle_cap);
                 return Err(RegionCapError::InconsistentState);
             }
             mapping_cap_ids.push(mapping.cap_id);
@@ -351,6 +359,14 @@ impl MemoryRegionRegistry {
                 .remove(&resource_id)
                 .ok_or(RegionCapError::NotFound)?
         };
+
+        // Last capability: the export is gone, so drop its shared marks.
+        // Blocks already freed by the unregistrations above have no entry
+        // left and the clear is a no-op; blocks still owned by the exporter
+        // become COW-cloneable again, which is the pre-export behaviour.
+        for handle in &entry.handles {
+            ownership_table().clear_shared(*handle);
+        }
 
         let mut revoked_mappings = 0usize;
         for cap_id in entry.mapping_cap_ids {

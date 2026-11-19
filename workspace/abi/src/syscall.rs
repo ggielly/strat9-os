@@ -71,6 +71,35 @@ pub const SYS_HANDLE_GRANT: usize = 4;
 /// if no other references exist.
 pub const SYS_HANDLE_REVOKE: usize = 5;
 
+/// Grant a handle through an IPC endpoint instead of a PID.
+///
+/// - `handle`: capability to grant (must carry the `grant` right)
+/// - `endpoint`: IPC port capability whose owner receives the handle
+/// - `rights`: `CAP_RIGHT_*` mask; the granted handle never gets more rights
+///   than the source handle. Unknown bits are rejected.
+///
+/// The target is the owner of the port, never a caller-supplied PID, so the
+/// grant cannot be redirected to an unrelated or reused process. Returns the
+/// new handle id as seen by the receiver.
+pub const SYS_HANDLE_GRANT_TO: usize = 212;
+
+/// `SYS_HANDLE_GRANT_TO` rights mask: read.
+pub const CAP_RIGHT_READ: u32 = 1 << 0;
+/// `SYS_HANDLE_GRANT_TO` rights mask: write.
+pub const CAP_RIGHT_WRITE: u32 = 1 << 1;
+/// `SYS_HANDLE_GRANT_TO` rights mask: execute.
+pub const CAP_RIGHT_EXECUTE: u32 = 1 << 2;
+/// `SYS_HANDLE_GRANT_TO` rights mask: re-grant.
+pub const CAP_RIGHT_GRANT: u32 = 1 << 3;
+/// `SYS_HANDLE_GRANT_TO` rights mask: revoke.
+pub const CAP_RIGHT_REVOKE: u32 = 1 << 4;
+/// Every right accepted by `SYS_HANDLE_GRANT_TO`.
+pub const CAP_RIGHT_ALL: u32 = CAP_RIGHT_READ
+    | CAP_RIGHT_WRITE
+    | CAP_RIGHT_EXECUTE
+    | CAP_RIGHT_GRANT
+    | CAP_RIGHT_REVOKE;
+
 /// Query information about a capability handle.
 ///
 /// - `handle`: capability to query

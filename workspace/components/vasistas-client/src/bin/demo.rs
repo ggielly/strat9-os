@@ -172,25 +172,25 @@ pub extern "C" fn _start() -> ! {
     }
 
     log(b"[vasistas-demo] animation done\n");
-    // Resize: create a new surface with a different geometry, present one
-    // full frame, then destroy the old surface. This exercises surface
-    // creation/destruction, quota refund and the second surface slot.
-    if let Some(resized) = create_surface(&mut client, 400, 240) {
-        if let Some(mut buffer) = alloc_view(&mut client, resized, 400, 240) {
+    // Resize through REQUEST_RESIZE: the server answers ACK + CONFIGURE, the
+    // old ping-pong buffers keep their size and a fresh buffer matches the
+    // new geometry, committed with the configure serial.
+    if let Some((configure_serial, width, height)) = client.request_resize(surface, 400, 240) {
+        log_args(format_args!(
+            "[vasistas-demo] configure serial={} size={}x{}\n",
+            configure_serial,
+            width,
+            height
+        ));
+        if let Some(mut buffer) = alloc_view(&mut client, surface, 400, 240) {
             fill_gradient(&mut buffer.buffer);
             draw_square_at(&mut buffer.buffer, 24, 24);
             commit_id += 1;
-            if let Some(result) = client.commit(resized, buffer.buffer.id, &[], true, serial, commit_id) {
-                if let Some(frame) = result.frame {
-                    serial = frame.serial;
-                }
-            }
+            let _ = client.commit(surface, buffer.buffer.id, &[], true, configure_serial, commit_id);
             log(b"[vasistas-demo] resized frame presented\n");
             // The resized buffer is the surface's current image: destroying it
-            // first is BAD_STATE. Destroy the old surface (retires its two
-            // buffers) and the resized surface (retires its current buffer).
+            // first is BAD_STATE. Destroying the surface retires every buffer.
             let _ = client.destroy_surface(surface);
-            let _ = client.destroy_surface(resized);
             log(b"[vasistas-demo] resized surface closed\n");
         }
     }
@@ -362,24 +362,6 @@ fn fill_gradient(buffer: &mut vasistas_client::Buffer) {
         for x in 0..width {
             let color = gradient_color(x as u32, y as u32, width as u32, height as u32);
             let offset = y * stride + x * 4;
-            pixels[offset..offset + 4].copy_from_slice(&color.to_le_bytes());
-        }
-    }
-}
-
-fn fill_gradient_rect(buffer: &mut vasistas_client::Buffer, x: i32, y: i32, w: u32, h: u32) {
-    let width = buffer.width as i32;
-    let height = buffer.height as i32;
-    let stride = buffer.stride as usize;
-    let x0 = x.max(0);
-    let y0 = y.max(0);
-    let x1 = (x + w as i32).min(width);
-    let y1 = (y + h as i32).min(height);
-    let pixels = buffer.pixels_mut();
-    for yy in y0..y1 {
-        for xx in x0..x1 {
-            let color = gradient_color(xx as u32, yy as u32, width as u32, height as u32);
-            let offset = yy as usize * stride + xx as usize * 4;
             pixels[offset..offset + 4].copy_from_slice(&color.to_le_bytes());
         }
     }

@@ -45,11 +45,12 @@ pub mod core;
 pub mod server;
 pub mod types;
 
-pub use backend::{Backend, RegionHandle};
+pub use backend::{Backend, Layer, RegionHandle};
 pub use core::{CommitOutcome, CoreError, CoreStats, DisplayCore};
 pub use server::{PeerId, Server, ServerError, Transport};
 pub use types::{
-    Buffer, BufferId, BufferState, Damage, RetiredRegion, Session, SessionId, Surface, SurfaceId,
+    Buffer, BufferId, BufferState, Damage, GeometryOutcome, RetiredRegion, Session, SessionId,
+    Surface, SurfaceId,
 };
 
 /// Maximum concurrent sessions (A.6).
@@ -73,6 +74,13 @@ const _: () = assert!(TILE_COLUMNS * TILE_ROWS == MAX_SESSIONS as u32);
 
 /// Maximum surfaces per session (A.6).
 pub const MAX_SURFACES_PER_SESSION: usize = 4;
+
+/// Maximum z-order entries: one per possible live surface.
+pub const MAX_Z: usize = MAX_SESSIONS * MAX_SURFACES_PER_SESSION;
+
+/// Maximum queued screen-damage rects before the set collapses to the whole
+/// output.
+pub const MAX_SCREEN_DIRTY: usize = 16;
 
 /// Maximum buffers per session (A.6).
 pub const MAX_BUFFERS_PER_SESSION: usize = 16;

@@ -30,16 +30,19 @@
 //!
 //! - `allocate` maps an anonymous page-aligned region, exports it with
 //!   `mem_region_export` and grants it to the client's `HELLO` pid.
-//! - `present` copies only the commit's damage rectangles from the client
-//!   region into a private anonymous backbuffer at the surface's screen origin
-//!   (bounded reads, no long-lived `&[u8]` over client memory), then writes the
-//!   same rows to the mapped framebuffer (write-only) and sends one `DMG2`
-//!   record for display 0.
+//! - `composite` repaints each dirty screen rect layer by layer, bottom
+//!   first: every intersecting row is copied from the layer's own mapping into
+//!   the private anonymous backbuffer and into the mapped framebuffer at the
+//!   same screen offset (bounded reads, checked offsets, no long-lived `&[u8]`
+//!   over the mapping), the software cursor is repaired over the framebuffer
+//!   when the rect covered it, and one `DMG2` record per rect reports the
+//!   damage for display 0.
 //!
 //! Assumptions of this slice: XRGB8888 native screen. `vasistas-core` places
-//! each session in a fixed tile of the screen (4 columns x 2 rows); each damage
-//! rect is surface-local and is translated, clipped to the screen and copied by
-//! `present`. The backbuffer is one screen-sized anonymous mapping.
+//! each session in a fixed tile of the screen (4 columns x 2 rows) and hands
+//! the backend screen-space rects already clipped to the output; `composite`
+//! paints them bottom layer first. The backbuffer is one screen-sized
+//! anonymous mapping.
 //!
 //! ## Resize
 //!
@@ -71,15 +74,17 @@ use input_protocol::{
     NormalizedEvent, INPUT_EVENT_KEY, INPUT_EVENT_POINTER_AXIS, INPUT_EVENT_POINTER_BUTTON,
     INPUT_EVENT_POINTER_MOTION, INPUT_EVENT_TEXT,
 };
-use vasistas_backend::{clip_to_screen, encode, SharedPixels};
-use vasistas_core::{Backend, PeerId, RegionHandle, SessionId, Server, SurfaceId, Transport};
+use vasistas_backend::encode;
+use vasistas_core::{
+    Backend, Layer, PeerId, RegionHandle, SessionId, Server, SurfaceId, Transport,
+};
 use vasistas_protocol::{
     Body, Header, InputBatch, InputRecord, Opcode, Rect, HEADER_LEN, INPUT_EVENT_FOCUS_GAINED,
     INPUT_EVENT_FOCUS_LOST, INPUT_FLAG_ABSOLUTE, MAX_MESSAGE_BYTES, MAX_RECTS,
 };
 use strat9_syscall::{
     call,
-    data::{IpcMessage, TimeSpec},
+    data::{IpcMessage, TimeSpec, WaitSource, WAIT_EVENT_HANGUP, WAIT_EVENT_READABLE, WAIT_SOURCE_HANDLE},
     error::Error,
     number, syscall6,
 };
@@ -454,146 +459,112 @@ impl Backend for DisplayBackend {
         }
     }
 
-    fn present(
-        &mut self,
-        _surface: SurfaceId,
-        handle: RegionHandle,
-        damage: &[Rect],
-        origin_x: u32,
-        origin_y: u32,
-    ) -> Result<(), Self::Error> {
-        if damage.len() > MAX_RECTS {
-            log_text(b"vasistas: present: too many rects");
-            return Err(());
-        }
-        let region = match self.region(handle) {
-            Some(region) => *region,
-            None => {
-                log_text(b"vasistas: present: region missing");
-                return Err(());
-            }
-        };
-        // Bounded view over client shared memory: never borrows it past the
-        // copy, and copy_rect_to validates every rect before writing.
-        let source_len = region.stride as usize * region.height as usize;
-        let source = unsafe { slice::from_raw_parts(region.addr as *const u8, source_len) };
-        let pixels = SharedPixels::new(source, region.width, region.height, region.stride).map_err(
-            |error| {
-                log(&format_args!(
-                    "vasistas: present: SharedPixels {:?} addr={:#x} len={} {}x{} stride={}",
-                    error, region.addr, source_len, region.width, region.height, region.stride
-                ));
-                ()
-            },
-        )?;
-        // SAFETY: the backbuffer is a private anonymous mapping of exactly
-        // `back_len` bytes owned by this single-threaded server.
-        let backbuffer =
-            unsafe { slice::from_raw_parts_mut(self.screen.back as *mut u8, self.screen.back_len) };
-
-        // Damage rects are surface-local: translate each one to screen space,
-        // clip it to the screen, and copy only the visible part from the client
-        // region to its screen position in the private backbuffer. Surfaces
-        // larger than their tile therefore only paint the visible part.
-        let mut screen_rects = [Rect::default(); MAX_RECTS];
-        let mut count = 0usize;
-        for rect in damage {
-            let Some(screen) = clip_to_screen(
-                *rect,
-                origin_x,
-                origin_y,
-                self.screen.width,
-                self.screen.height,
-            ) else {
-                continue;
-            };
-            let local = Rect {
-                x: (screen.x as i64 - origin_x as i64) as i32,
-                y: (screen.y as i64 - origin_y as i64) as i32,
-                w: screen.w,
-                h: screen.h,
-            };
-            pixels
-                .copy_rect_to(
-                    local,
-                    screen.x as u32,
-                    screen.y as u32,
-                    backbuffer,
-                    self.screen.stride,
-                )
-                .map_err(|_| {
-                    log_text(b"vasistas: present: copy_rect_to failed");
-                    ()
-                })?;
-            screen_rects[count] = screen;
-            count += 1;
-        }
-        if count == 0 {
-            // Every rect was clipped away: nothing to show, nothing to ack.
-            return Ok(());
-        }
-        let screen_rects = &screen_rects[..count];
-
-        // Write-only copy of the damaged rows to the mapped framebuffer. All
-        // offsets are absolute (already in screen space) and checked in u64.
+    fn composite(&mut self, bottom_to_top: &[Layer], rects: &[Rect]) -> Result<(), Self::Error> {
         let stride = self.screen.stride as usize;
-        for rect in screen_rects {
-            let x = rect.x as u32 as u64 * 4;
-            let y = rect.y as u32 as u64;
-            let row_bytes = rect.w as usize * 4;
-            for row in 0..rect.h as u64 {
-                let offset = (y + row)
-                    .checked_mul(stride as u64)
-                    .and_then(|offset| offset.checked_add(x))
-                    .ok_or(())?;
-                let offset = usize::try_from(offset).map_err(|_| ())?;
-                let end = offset.checked_add(row_bytes).ok_or(())?;
-                let src = backbuffer.get(offset..end).ok_or(())?;
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        src.as_ptr(),
-                        (self.screen.fb as *mut u8).add(offset),
-                        row_bytes,
-                    );
+        for rect in rects {
+            // Guard: the core clips every rect to the output, so anything
+            // empty or out of bounds is skipped silently, never failed.
+            if rect.w == 0
+                || rect.h == 0
+                || rect.x < 0
+                || rect.y < 0
+                || rect.x as u64 + rect.w as u64 > self.screen.width as u64
+                || rect.y as u64 + rect.h as u64 > self.screen.height as u64
+            {
+                continue;
+            }
+            for layer in bottom_to_top {
+                // A handle missing from the regions table is skipped
+                // silently: a log per frame would flood the serial line.
+                let Some(region) = self.region(layer.region) else {
+                    continue;
+                };
+                let region = *region;
+                let Some(hit) = rect_intersect(
+                    *rect,
+                    Rect {
+                        x: layer.x as i32,
+                        y: layer.y as i32,
+                        w: region.width,
+                        h: region.height,
+                    },
+                ) else {
+                    continue;
+                };
+                // Bounded view over the layer's own mapping: the server owns
+                // the mapping, so no `SharedPixels` wrapper is needed, and
+                // the view never outlives this layer's copy.
+                // SAFETY: `allocate` mapped `region.len` bytes (>=
+                // `source_len`) at `region.addr` and the entry is still live
+                // in the regions table.
+                let source_len = region.stride as usize * region.height as usize;
+                let source = unsafe { slice::from_raw_parts(region.addr as *const u8, source_len) };
+                let source_stride = region.stride as u64;
+                let row_bytes = hit.w as usize * 4;
+                let source_x = (hit.x - layer.x as i32) as u64 * 4;
+                let dest_x = hit.x as u64 * 4;
+                // Copy the intersecting rows into the private backbuffer and
+                // into the mapped framebuffer (identical screen layout, one
+                // offset). All offsets are checked in u64 before any raw
+                // pointer is formed.
+                for row in hit.y as u64..hit.y as u64 + hit.h as u64 {
+                    let source_end = (row - layer.y as u64)
+                        .checked_mul(source_stride)
+                        .and_then(|offset| offset.checked_add(source_x))
+                        .and_then(|offset| offset.checked_add(row_bytes as u64));
+                    let dest_end = row
+                        .checked_mul(stride as u64)
+                        .and_then(|offset| offset.checked_add(dest_x))
+                        .and_then(|offset| offset.checked_add(row_bytes as u64));
+                    let (source_end, dest_end) = match (source_end, dest_end) {
+                        // Unreachable for a validated rect over a live
+                        // region; skip the row instead of failing the frame.
+                        (Some(source_end), Some(dest_end)) => (source_end, dest_end),
+                        _ => continue,
+                    };
+                    if source_end > source.len() as u64 || dest_end > self.screen.back_len as u64 {
+                        continue;
+                    }
+                    let source_start = (source_end - row_bytes as u64) as usize;
+                    let dest_start = (dest_end - row_bytes as u64) as usize;
+                    let Some(src) = source.get(source_start..source_start + row_bytes) else {
+                        continue;
+                    };
+                    // SAFETY: the destination rows of the private backbuffer
+                    // (`back_len` bytes) and of the mapped framebuffer (same
+                    // size) were bounds-checked above; neither aliases the
+                    // source mapping, and this server is single-threaded.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            src.as_ptr(),
+                            (self.screen.back as *mut u8).add(dest_start),
+                            row_bytes,
+                        );
+                        core::ptr::copy_nonoverlapping(
+                            src.as_ptr(),
+                            (self.screen.fb as *mut u8).add(dest_start),
+                            row_bytes,
+                        );
+                    }
                 }
             }
-        }
-
-        // Paint the cursor before the damage message: the kernel copies only
-        // the damaged rectangles to the scanout, so every painted pixel must
-        // be covered. The cursor rectangle joins the damage when the commit's
-        // rectangles do not already cover it.
-        let cursor = self.cursor_rect(self.cursor_x, self.cursor_y);
-        if let Some(rect) = cursor {
-            self.paint_cursor(self.cursor_x, self.cursor_y, rect);
-            self.cursor_drawn = true;
-        }
-        let mut damaged = [Rect::default(); MAX_RECTS];
-        damaged[..count].copy_from_slice(screen_rects);
-        let mut damaged_len = count;
-        if let Some(rect) = cursor {
-            if !screen_rects.iter().any(|outer| rect_contains(*outer, rect)) {
-                if damaged_len < MAX_RECTS {
-                    damaged[damaged_len] = rect;
-                    damaged_len += 1;
-                } else {
-                    // Damage is full: widening the last rect only copies more.
-                    damaged[damaged_len - 1] = rect_union(damaged[damaged_len - 1], rect);
+            // Composite overwrote the framebuffer with cursor-free content:
+            // repaint the cursor when this rect covered it, and join its
+            // rectangle to the damage so the scanout shows it again.
+            let mut damaged = [*rect, Rect::default()];
+            let mut damaged_len = 1usize;
+            if self.cursor_drawn {
+                if let Some(cursor) = self.cursor_rect(self.cursor_x, self.cursor_y) {
+                    if rect_intersect(*rect, cursor).is_some() {
+                        self.paint_cursor(self.cursor_x, self.cursor_y, cursor);
+                        damaged[1] = cursor;
+                        damaged_len = 2;
+                    }
                 }
             }
+            // One `DMG2` record per rect, never per layer.
+            self.send_damage(&damaged[..damaged_len]);
         }
-
-        let mut message = [0u8; 8 + MAX_RECTS * 8];
-        let len = encode(0, &damaged[..damaged_len], &mut message).map_err(|_| {
-            log_text(b"vasistas: present: dmg2 encode failed");
-            ()
-        })?;
-        call::write(self.screen.damage_fd, &message[..len]).map_err(|error| {
-            let _ = call::write(2, b"vasistas: present: damage write failed: ");
-            let _ = call::write(2, error.name().as_bytes());
-            let _ = call::write(2, b"\n");
-            ()
-        })?;
         Ok(())
     }
 
@@ -721,8 +692,12 @@ impl Transport for PeerTransport {
         self.flush();
     }
 
-    fn transfer_region(&mut self, server_region: u64, client_pid: u32) -> Option<u64> {
-        match call::handle_grant(server_region as usize, client_pid as usize) {
+    fn transfer_region(&mut self, server_region: u64) -> Option<u64> {
+        // Grant to the owner of this peer's event port: the kernel resolves
+        // the target, so `HELLO.pid` is never used and cannot be redirected to
+        // a reused PID. Read/write only: no execute, no re-grant, no revoke.
+        let rights = number::CAP_RIGHT_READ | number::CAP_RIGHT_WRITE;
+        match call::handle_grant_to(server_region as usize, self.port, rights) {
             Ok(handle) => Some(handle as u64),
             Err(error) => {
                 let _ = call::write(2, b"vasistas: grant failed: ");
@@ -734,15 +709,37 @@ impl Transport for PeerTransport {
     }
 }
 
+/// Shared static without `static mut` (whose references are UB-prone and
+/// deny-by-default in edition 2024). The server process is single-threaded,
+/// so the `Sync` impl is sound: only one execution context ever exists.
+struct StaticCell<T>(core::cell::UnsafeCell<T>);
+
+// SAFETY: `vasistas` is strictly single-threaded (no thread_create call, no
+// interrupt handlers in userspace); the cell is only ever accessed from the
+// one thread that runs `main_loop`.
+unsafe impl<T> Sync for StaticCell<T> {}
+
+impl<T> StaticCell<T> {
+    const fn new(value: T) -> Self {
+        Self(core::cell::UnsafeCell::new(value))
+    }
+
+    /// Raw pointer to the cell contents; the caller owns the aliasing rules.
+    fn as_ptr(&self) -> *mut T {
+        self.0.get()
+    }
+}
+
 /// The core state machine (~54 KiB) lives in `.bss`: the user stack is 64 KiB.
 /// Built in place through [`Server::init_at`] so no whole-state temporary is
 /// pushed on the stack.
-static mut SERVER: core::mem::MaybeUninit<Server<DisplayBackend>> =
-    core::mem::MaybeUninit::uninit();
+static SERVER: StaticCell<core::mem::MaybeUninit<Server<DisplayBackend>>> =
+    StaticCell::new(core::mem::MaybeUninit::uninit());
 
 /// Peer table, in `.bss` beside [`SERVER`]: each transport owns a 64 KiB reply
 /// queue and the user stack is 64 KiB, so it cannot be a local.
-static mut PEERS: [Option<(PeerId, PeerTransport)>; MAX_PEERS] = [const { None }; MAX_PEERS];
+static PEERS: StaticCell<[Option<(PeerId, PeerTransport)>; MAX_PEERS]> =
+    StaticCell::new([const { None }; MAX_PEERS]);
 
 fn main_loop(server_port: usize, display: Screen) -> ! {
     let back_len = display.back_len;
@@ -753,15 +750,21 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
     // SAFETY: single-threaded process, initialised once before the loop and
     // never aliased: `server` below is the only reference. `init_at` fills the
     // static in place.
-    let server = unsafe {
-        let slot = &mut *core::ptr::addr_of_mut!(SERVER);
-        Server::init_at(slot, backend)
-    };
+    let server = unsafe { Server::init_at(&mut *SERVER.as_ptr(), backend) };
     // SAFETY: same single-threaded contract as `SERVER`; `peers` is the only
     // reference to the static and lives for the whole loop.
     let peers: &mut [Option<(PeerId, PeerTransport)>; MAX_PEERS] =
-        unsafe { &mut *core::ptr::addr_of_mut!(PEERS) };
+        unsafe { &mut *PEERS.as_ptr() };
     install_global_budget(server, back_len);
+    // A.6: a ping-pong pair at output size must fit, so a full-screen client
+    // is not capped below two buffers by the fixed 8 MiB floor.
+    let output_pixels = (output_stride as usize).saturating_mul(output_height as usize);
+    server
+        .core_mut()
+        .set_pixel_quota(output_pixels.saturating_mul(2));
+    // The core clamps geometry and clips damage to the output: give it the
+    // real screen size, not the tile-grid default.
+    server.core_mut().set_output_size(output_width, output_height);
     let mut iterations: u64 = 0;
     let mut focused: Option<(SessionId, SurfaceId)> = None;
     // Vasistas is the active display server: it subscribes and takes input
@@ -784,7 +787,66 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
     log_text(b"vasistas: loop");
 
     loop {
-        let mut served = 0usize;
+        // Block on every source at once: the server port, each peer's event
+        // port (readable or hung up) and inputd. No userspace liveness poll:
+        // a dead client's port turns into WAIT_EVENT_HANGUP and the peer is
+        // dropped below. IDLE_NS is the composition deadline.
+        let mut sources = [WaitSource::default(); MAX_PEERS + 2];
+        let mut map = [usize::MAX; MAX_PEERS + 2];
+        let mut count = 1usize;
+        sources[0] = WaitSource {
+            kind: WAIT_SOURCE_HANDLE,
+            events: WAIT_EVENT_READABLE,
+            id: server_port as u64,
+            revents: 0,
+        };
+        for (slot, entry) in peers.iter().enumerate() {
+            let Some((_, transport)) = entry else {
+                continue;
+            };
+            sources[count] = WaitSource {
+                kind: WAIT_SOURCE_HANDLE,
+                events: WAIT_EVENT_READABLE | WAIT_EVENT_HANGUP,
+                id: transport.port as u64,
+                revents: 0,
+            };
+            map[count] = slot;
+            count += 1;
+        }
+        let input_slot = input.as_ref().map(|client| {
+            sources[count] = WaitSource {
+                kind: WAIT_SOURCE_HANDLE,
+                events: WAIT_EVENT_READABLE | WAIT_EVENT_HANGUP,
+                id: client.port_handle() as u64,
+                revents: 0,
+            };
+            count += 1;
+            count - 1
+        });
+        let mut input_failed = false;
+        if let Ok(ready) = call::handle_wait_many(&mut sources[..count], IDLE_NS) {
+            if sources[ready].revents & WAIT_EVENT_HANGUP as u64 != 0 {
+                if Some(ready) == input_slot {
+                    input_failed = true;
+                } else if let Some(index) = map.get(ready).copied().filter(|slot| *slot != usize::MAX) {
+                    if let Some((peer, _)) = peers[index].as_ref() {
+                        log(&format_args!("vasistas: peer gone"));
+                        let peer = *peer;
+                        let peer_session = server.session_of(peer);
+                        let _ = server.disconnect(peer);
+                        forget_focus(&mut focused, peer_session);
+                        if let Some((_, mut transport)) = peers[index].take() {
+                            transport.close();
+                        }
+                        let stats = server.core().stats();
+                        log(&format_args!(
+                            "vasistas: peer gone disconnect: sessions={} surfaces={} buffers={} used_bytes={}",
+                            stats.sessions, stats.surfaces, stats.buffers, stats.used_bytes
+                        ));
+                    }
+                }
+            }
+        }
         for _ in 0..RECV_BUDGET {
             let mut msg = IpcMessage::new(0);
             match call::ipc_try_recv(server_port, &mut msg) {
@@ -794,8 +856,6 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
                 Err(Error::Again | Error::Interrupted) => break,
                 Err(_) => break,
             }
-            served += 1;
-
             let Some((opcode, len)) = frame_shape(&msg.payload) else {
                 log_text(b"vasistas: bad frame");
                 continue;
@@ -888,6 +948,29 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
             drop_peer(server, peers, &mut focused, index, true);
         }
 
+        // Geometry changes (move/minimize/restore/maximize/raise/lower) mark
+        // screen rects dirty; repaint them once per turn, bottom layer first.
+        let (dirty, dirty_len) = server.core_mut().take_screen_dirty();
+        if dirty_len > 0 {
+            let (layers, layers_len) = server.core_mut().layers_bottom_to_top();
+            // Layers and rects were copied out, so the backend borrow cannot
+            // alias the core state they were built from.
+            let _ = server
+                .core_mut()
+                .backend_mut()
+                .composite(&layers[..layers_len], &dirty[..dirty_len]);
+        }
+
+        // A focused surface hidden by MINIMIZE can no longer take input:
+        // report FOCUS_LOST once and forget the focus.
+        if let Some((session, surface)) = focused {
+            if matches!(server.core().surface(session, surface), Ok(record) if record.hidden) {
+                send_focus(server, peers, (session, surface), INPUT_EVENT_FOCUS_LOST, focus_epoch);
+                focused = None;
+                log(&format_args!("vasistas: focus lost: surface hidden"));
+            }
+        }
+
         // The client mapping dies with its process; freed once per iteration
         // (including after a dead-peer disconnect, which retires regions) so
         // an idle server never keeps them alive.
@@ -896,7 +979,6 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
         }
 
         // Input (A.5): at most `RECV_BUDGET` pending batches per turn.
-        let mut input_failed = false;
         if let Some(client) = input.as_mut() {
             for _ in 0..RECV_BUDGET {
                 match client.poll() {
@@ -953,48 +1035,7 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
             input = None;
         }
 
-        // Exactly one bump per iteration. With two `wrapping_add(1)` calls the
-        // release build eliminated this liveness branch as dead code (the
-        // counter only ever took even values and LLVM folded `% 128`), so the
-        // dead-peer poll silently never ran. Keep one increment and verify the
-        // "peer gone" log survives `--release`.
         iterations = iterations.wrapping_add(1);
-        if iterations % 128 == 0 {
-            // Liveness: a destroyed client port fails the zero-timeout wait;
-            // a live empty port reports WRITABLE.
-            for index in 0..MAX_PEERS {
-                let Some((peer, port)) = peers[index]
-                    .as_ref()
-                    .map(|(peer, transport)| (*peer, transport.port))
-                else {
-                    continue;
-                };
-                let wait = call::handle_wait_timeout(port, 0);
-                if wait.is_err() {
-                    log(&format_args!("vasistas: peer gone"));
-                    let peer_session = server.session_of(peer);
-                    let _ = server.disconnect(peer);
-                    forget_focus(&mut focused, peer_session);
-                    if let Some((_, mut transport)) = peers[index].take() {
-                        transport.close();
-                    }
-                    let stats = server.core().stats();
-                    log(&format_args!(
-                        "vasistas: peer gone disconnect: sessions={} surfaces={} buffers={} used_bytes={}",
-                        stats.sessions, stats.surfaces, stats.buffers, stats.used_bytes
-                    ));
-                }
-            }
-        }
-        if served == 0 {
-            let request = TimeSpec {
-                tv_sec: 0,
-                tv_nsec: IDLE_NS as i64,
-            };
-            let mut remaining = TimeSpec::zero();
-            let _ = call::nanosleep(&request, &mut remaining);
-        }
-
         if iterations % LOG_EVERY == 0 {
             let stats = server.core().stats();
             log(&format_args!(
@@ -1030,26 +1071,21 @@ fn peer_slot(peers: &[Option<(PeerId, PeerTransport)>; MAX_PEERS], peer: PeerId)
         .position(|entry| matches!(entry, Some((known, _)) if *known == peer))
 }
 
-/// Set when `outer` covers every pixel of `inner`.
-fn rect_contains(outer: Rect, inner: Rect) -> bool {
-    inner.x >= outer.x
-        && inner.y >= outer.y
-        && (inner.x as i64 + inner.w as i64) <= (outer.x as i64 + outer.w as i64)
-        && (inner.y as i64 + inner.h as i64) <= (outer.y as i64 + outer.h as i64)
-}
-
-/// Smallest rectangle covering both inputs.
-fn rect_union(a: Rect, b: Rect) -> Rect {
-    let x0 = a.x.min(b.x) as i64;
-    let y0 = a.y.min(b.y) as i64;
-    let x1 = (a.x as i64 + a.w as i64).max(b.x as i64 + b.w as i64);
-    let y1 = (a.y as i64 + a.h as i64).max(b.y as i64 + b.h as i64);
-    Rect {
+/// Overlapping part of two rects, `None` when they are disjoint.
+fn rect_intersect(a: Rect, b: Rect) -> Option<Rect> {
+    let x0 = (a.x as i64).max(b.x as i64);
+    let y0 = (a.y as i64).max(b.y as i64);
+    let x1 = (a.x as i64 + a.w as i64).min(b.x as i64 + b.w as i64);
+    let y1 = (a.y as i64 + a.h as i64).min(b.y as i64 + b.h as i64);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some(Rect {
         x: x0 as i32,
         y: y0 as i32,
         w: (x1 - x0) as u32,
         h: (y1 - y0) as u32,
-    }
+    })
 }
 
 /// `object_id` of a complete frame whose total length is `len`.

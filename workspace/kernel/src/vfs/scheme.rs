@@ -224,6 +224,18 @@ pub trait Scheme: Send + Sync {
         Err(SyscallError::NotImplemented)
     }
 
+    /// Get metadata by path without opening the file.
+    ///
+    /// Schemes with open side effects (an exclusive device claim, for
+    /// example) override this; the default preserves the historic
+    /// open/stat/close sequence.
+    fn stat_by_path(&self, path: &str) -> Result<FileStat, SyscallError> {
+        let open_result = self.open(path, OpenFlags::READ)?;
+        let result = self.stat(open_result.file_id);
+        let _ = self.close(open_result.file_id);
+        result
+    }
+
     /// Read directory entries from an open directory handle.
     fn readdir(&self, file_id: u64) -> Result<Vec<DirEntry>, SyscallError> {
         let _ = file_id;

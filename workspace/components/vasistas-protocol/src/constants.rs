@@ -34,6 +34,10 @@ pub const WINDOW_ACTION_MINIMIZE: u32 = 1;
 pub const WINDOW_ACTION_RESTORE: u32 = 2;
 /// `REQUEST_WINDOW_ACTION` action: maximize.
 pub const WINDOW_ACTION_MAXIMIZE: u32 = 3;
+/// `REQUEST_WINDOW_ACTION` action: raise.
+pub const WINDOW_ACTION_RAISE: u32 = 4;
+/// `REQUEST_WINDOW_ACTION` action: lower.
+pub const WINDOW_ACTION_LOWER: u32 = 5;
 
 /// `SET_CURSOR_SHAPE` shape: default arrow.
 pub const CURSOR_SHAPE_DEFAULT: u32 = 0;
