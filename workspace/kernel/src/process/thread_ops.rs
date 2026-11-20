@@ -331,6 +331,7 @@ fn build_user_thread_task(
         rt_degraded: core::sync::atomic::AtomicBool::new(
             parent.rt_degraded.load(Ordering::Relaxed),
         ),
+        rt_overruns: core::sync::atomic::AtomicU64::new(0),
         fair_wait_ticks: core::sync::atomic::AtomicU64::new(0),
     });
 

@@ -135,6 +135,7 @@ impl Scheme for IpcControlScheme {
             let id = semaphore::create_semaphore(initial).map_err(|e| match e {
                 semaphore::SemaphoreError::InvalidValue => SyscallError::InvalidArgument,
                 semaphore::SemaphoreError::WouldBlock => SyscallError::Again,
+                semaphore::SemaphoreError::TimedOut => SyscallError::TimedOut,
                 semaphore::SemaphoreError::Destroyed => SyscallError::Pipe,
                 semaphore::SemaphoreError::NotFound => SyscallError::NotFound,
                 semaphore::SemaphoreError::Interrupted => SyscallError::Interrupted,
@@ -211,6 +212,7 @@ impl Scheme for IpcControlScheme {
                     "post" => sem.post().map_err(|_| SyscallError::Pipe)?,
                     "wait" => sem.wait().map_err(|e| match e {
                         semaphore::SemaphoreError::WouldBlock => SyscallError::Again,
+                        semaphore::SemaphoreError::TimedOut => SyscallError::TimedOut,
                         semaphore::SemaphoreError::Destroyed => SyscallError::Pipe,
                         semaphore::SemaphoreError::InvalidValue => SyscallError::InvalidArgument,
                         semaphore::SemaphoreError::NotFound => SyscallError::NotFound,
@@ -218,6 +220,7 @@ impl Scheme for IpcControlScheme {
                     })?,
                     "trywait" => sem.try_wait().map_err(|e| match e {
                         semaphore::SemaphoreError::WouldBlock => SyscallError::Again,
+                        semaphore::SemaphoreError::TimedOut => SyscallError::TimedOut,
                         semaphore::SemaphoreError::Destroyed => SyscallError::Pipe,
                         semaphore::SemaphoreError::InvalidValue => SyscallError::InvalidArgument,
                         semaphore::SemaphoreError::NotFound => SyscallError::NotFound,

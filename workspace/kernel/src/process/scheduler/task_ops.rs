@@ -672,7 +672,14 @@ pub fn set_task_sched_policy(id: TaskId, policy: crate::process::sched::SchedPol
             let cpu_index = sched.task_cpu.get(&id).copied().unwrap_or(0);
             let task = match sched.all_tasks.get(&id).cloned() {
                 Some(t) => t,
-                None => return false,
+                None => {
+                    // Restore the interrupt state before bailing out: an early
+                    // return through the lock guard alone would leave IRQs
+                    // disabled on this CPU.
+                    drop(scheduler);
+                    restore_flags(saved_flags);
+                    return false;
+                }
             };
             task.set_sched_policy(policy);
             let class = sched.class_table.class_for_task(&task);

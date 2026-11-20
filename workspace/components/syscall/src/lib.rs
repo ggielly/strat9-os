@@ -604,6 +604,43 @@ pub mod call {
         unsafe { syscall0(number::SYS_PROC_YIELD) }
     }
 
+    /// Change the calling task's scheduling policy and priority.
+    ///
+    /// `policy` is one of `number::SCHED_POLICY_{FAIR,RR,FIFO,IDLE}`.
+    /// `priority` is a Nice value (-20..=19) for Fair, an RT priority
+    /// (0..=99) for RR/FIFO, and ignored for Idle. Becoming real-time
+    /// requires silo-admin capability.
+    pub fn sched_set(policy: u32, priority: i32) -> error::Result<usize> {
+        unsafe {
+            syscall2(
+                number::SYS_SCHED_SET,
+                policy as usize,
+                priority as u32 as usize,
+            )
+        }
+    }
+
+    /// Read the calling task's policy/priority as
+    /// `(policy) | ((priority as i32 as u32) << 32)`.
+    pub fn sched_get() -> error::Result<usize> {
+        unsafe { syscall0(number::SYS_SCHED_GET) }
+    }
+
+    /// Set the calling task's soft CPU affinity mask (`0` = all CPUs).
+    pub fn sched_setaffinity(mask: u64) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_SCHED_SETAFFINITY, mask as usize) }
+    }
+
+    /// Read the calling task's soft CPU affinity mask.
+    pub fn sched_getaffinity() -> error::Result<usize> {
+        unsafe { syscall0(number::SYS_SCHED_GETAFFINITY) }
+    }
+
+    /// Fill `info` with scheduling statistics for the calling task.
+    pub fn sched_info(info: &mut data::SchedInfo) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_SCHED_INFO, info as *mut data::SchedInfo as usize) }
+    }
+
     /// Fork the current process.
     ///
     /// Returns child PID in parent, and 0 in child.
@@ -945,11 +982,22 @@ pub mod call {
 
     /// Send a message through an IPC port.
     pub fn ipc_send(port_handle: usize, msg: &data::IpcMessage) -> error::Result<usize> {
+        ipc_send_timeout(port_handle, msg, 0)
+    }
+
+    /// Send a message through an IPC port, giving up after `timeout_ns`
+    /// (`0` = wait forever). Returns `Error::TimedOut` on expiry.
+    pub fn ipc_send_timeout(
+        port_handle: usize,
+        msg: &data::IpcMessage,
+        timeout_ns: usize,
+    ) -> error::Result<usize> {
         unsafe {
-            syscall2(
+            syscall3(
                 number::SYS_IPC_SEND,
                 port_handle,
                 msg as *const data::IpcMessage as usize,
+                timeout_ns,
             )
         }
     }
@@ -969,11 +1017,23 @@ pub mod call {
 
     /// Receive a message from an IPC port (blocking).
     pub fn ipc_recv(port_handle: usize, msg: &mut data::IpcMessage) -> error::Result<usize> {
+        ipc_recv_timeout(port_handle, msg, 0)
+    }
+
+    /// Receive a message from an IPC port, giving up after `timeout_ns`
+    /// (`0` = wait forever). Returns `Error::TimedOut` on expiry, and
+    /// `Error::Pipe` if the port's owner is gone.
+    pub fn ipc_recv_timeout(
+        port_handle: usize,
+        msg: &mut data::IpcMessage,
+        timeout_ns: usize,
+    ) -> error::Result<usize> {
         unsafe {
-            syscall2(
+            syscall3(
                 number::SYS_IPC_RECV,
                 port_handle,
                 msg as *mut data::IpcMessage as usize,
+                timeout_ns,
             )
         }
     }
@@ -1002,11 +1062,23 @@ pub mod call {
     ///
     /// On return the message buffer is overwritten with the reply.
     pub fn ipc_call(port_handle: usize, msg: &mut data::IpcMessage) -> error::Result<usize> {
+        ipc_call_timeout(port_handle, msg, 0)
+    }
+
+    /// Send a message and wait at most `timeout_ns` for the reply
+    /// (`0` = wait forever). On timeout the reply slot is closed and a late
+    /// server reply fails with `Error::Pipe`.
+    pub fn ipc_call_timeout(
+        port_handle: usize,
+        msg: &mut data::IpcMessage,
+        timeout_ns: usize,
+    ) -> error::Result<usize> {
         unsafe {
-            syscall2(
+            syscall3(
                 number::SYS_IPC_CALL,
                 port_handle,
                 msg as *mut data::IpcMessage as usize,
+                timeout_ns,
             )
         }
     }
@@ -1074,22 +1146,44 @@ pub mod call {
 
     /// Send a message into a channel (blocking if full).
     pub fn chan_send(chan_handle: usize, msg: &data::IpcMessage) -> error::Result<usize> {
+        chan_send_timeout(chan_handle, msg, 0)
+    }
+
+    /// Send a message into a channel, giving up after `timeout_ns`
+    /// (`0` = wait forever).
+    pub fn chan_send_timeout(
+        chan_handle: usize,
+        msg: &data::IpcMessage,
+        timeout_ns: usize,
+    ) -> error::Result<usize> {
         unsafe {
-            syscall2(
+            syscall3(
                 number::SYS_CHAN_SEND,
                 chan_handle,
                 msg as *const data::IpcMessage as usize,
+                timeout_ns,
             )
         }
     }
 
     /// Receive a message from a channel (blocking if empty).
     pub fn chan_recv(chan_handle: usize, msg: &mut data::IpcMessage) -> error::Result<usize> {
+        chan_recv_timeout(chan_handle, msg, 0)
+    }
+
+    /// Receive a message from a channel, giving up after `timeout_ns`
+    /// (`0` = wait forever).
+    pub fn chan_recv_timeout(
+        chan_handle: usize,
+        msg: &mut data::IpcMessage,
+        timeout_ns: usize,
+    ) -> error::Result<usize> {
         unsafe {
-            syscall2(
+            syscall3(
                 number::SYS_CHAN_RECV,
                 chan_handle,
                 msg as *mut data::IpcMessage as usize,
+                timeout_ns,
             )
         }
     }

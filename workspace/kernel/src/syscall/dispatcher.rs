@@ -39,8 +39,8 @@ use crate::ipc::{channel, port, semaphore, shared_ring, ChanId, PortId, RingId, 
 
 use super::{
     chan, debug, error::SyscallError, exec::sys_execve, fork::sys_fork, iommu, ipc_port, ipc_ring,
-    ipc_v2, net, numbers::*, pci, process as proc_sys, semaphore as sem_handler, transport, vmm,
-    volume, SyscallFrame,
+    ipc_v2, net, numbers::*, pci, process as proc_sys, sched, semaphore as sem_handler, transport,
+    vmm, volume, SyscallFrame,
 };
 use crate::{
     async_io::syscall as async_sys,
@@ -179,6 +179,12 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         SYS_THREAD_JOIN => proc_sys::sys_thread_join(arg1, arg2, arg3),
         SYS_THREAD_EXIT => proc_sys::sys_thread_exit(arg1),
         SYS_UNAME => sys_uname(arg1),
+        //  Scheduling (345-349) ================================================
+        SYS_SCHED_SET => sched::sys_sched_set(arg1, arg2),
+        SYS_SCHED_GET => sched::sys_sched_get(),
+        SYS_SCHED_SETAFFINITY => sched::sys_sched_setaffinity(arg1),
+        SYS_SCHED_GETAFFINITY => sched::sys_sched_getaffinity(),
+        SYS_SCHED_INFO => sched::sys_sched_info(arg1),
         //  Thread lifecycle (333-334) ===========================================
         SYS_SET_TID_ADDRESS => proc_sys::sys_set_tid_address(arg1),
         SYS_EXIT_GROUP => proc_sys::sys_exit_group(arg1),
@@ -216,12 +222,12 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
 
         // IPC port syscalls ================================================
         SYS_IPC_CREATE_PORT => ipc_port::sys_ipc_create_port(arg1),
-        SYS_IPC_SEND => ipc_port::sys_ipc_send(arg1, arg2),
+        SYS_IPC_SEND => ipc_port::sys_ipc_send(arg1, arg2, arg3),
         SYS_IPC_TRY_SEND => ipc_port::sys_ipc_try_send(arg1, arg2),
-        SYS_IPC_RECV => ipc_port::sys_ipc_recv(arg1, arg2),
+        SYS_IPC_RECV => ipc_port::sys_ipc_recv(arg1, arg2, arg3),
         SYS_IPC_TRY_RECV => ipc_port::sys_ipc_try_recv(arg1, arg2),
         SYS_IPC_CONNECT => ipc_port::sys_ipc_connect(arg1, arg2),
-        SYS_IPC_CALL => ipc_port::sys_ipc_call(arg1, arg2),
+        SYS_IPC_CALL => ipc_port::sys_ipc_call(arg1, arg2, arg3),
         SYS_IPC_REPLY => ipc_port::sys_ipc_reply(arg1),
         SYS_IPC_BIND_PORT => ipc_port::sys_ipc_bind_port(arg1, arg2, arg3),
         SYS_IPC_UNBIND_PORT => ipc_port::sys_ipc_unbind_port(arg1, arg2),
@@ -232,7 +238,7 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
 
         // Semaphore syscalls ================================================
         SYS_SEM_CREATE => sem_handler::sys_sem_create(arg1),
-        SYS_SEM_WAIT => sem_handler::sys_sem_wait(arg1),
+        SYS_SEM_WAIT => sem_handler::sys_sem_wait(arg1, arg2),
         SYS_SEM_TRYWAIT => sem_handler::sys_sem_trywait(arg1),
         SYS_SEM_POST => sem_handler::sys_sem_post(arg1),
         SYS_SEM_CLOSE => sem_handler::sys_sem_close(arg1),
@@ -280,8 +286,8 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
 
         // Typed MPMC sync-channel (IPC-02) ==================================
         SYS_CHAN_CREATE => chan::sys_chan_create(arg1),
-        SYS_CHAN_SEND => chan::sys_chan_send(arg1, arg2),
-        SYS_CHAN_RECV => chan::sys_chan_recv(arg1, arg2),
+        SYS_CHAN_SEND => chan::sys_chan_send(arg1, arg2, arg3),
+        SYS_CHAN_RECV => chan::sys_chan_recv(arg1, arg2, arg3),
         SYS_CHAN_TRY_RECV => chan::sys_chan_try_recv(arg1, arg2),
         SYS_CHAN_CLOSE => chan::sys_chan_close(arg1),
         SYS_MODULE_LOAD => silo::sys_module_load(arg1, arg2),

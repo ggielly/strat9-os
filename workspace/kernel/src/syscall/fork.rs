@@ -341,6 +341,7 @@ fn build_child_task(
                 .rt_degraded
                 .load(core::sync::atomic::Ordering::Relaxed),
         ),
+        rt_overruns: AtomicU64::new(0),
         fair_wait_ticks: AtomicU64::new(0),
     });
 

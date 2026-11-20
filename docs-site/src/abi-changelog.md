@@ -22,6 +22,21 @@ boot when it does not match exactly.
 | 4 | BSS virtual range fields |
 | 5 | `MemoryKind::Bad` (4) and `MemoryKind::AcpiNvs` (5); layout unchanged (132 bytes) |
 
+## 0.5 — scheduling syscalls and IPC timeouts
+
+Backward-compatible additions (`ABI_VERSION_MINOR = 5`).
+
+- **Added:** syscalls `SYS_SCHED_SET(345)`, `SYS_SCHED_GET(346)`,
+  `SYS_SCHED_SETAFFINITY(347)`, `SYS_SCHED_GETAFFINITY(348)`,
+  `SYS_SCHED_INFO(349)`; `data::SchedInfo` (80 bytes) and
+  `SCHED_INFO_FLAG_RT_DEGRADED`; policy constants `SCHED_POLICY_*`.
+- **Changed (arguments only):** `SYS_IPC_SEND/RECV/CALL`,
+  `SYS_CHAN_SEND/RECV` and `SYS_SEM_WAIT` take a relative `timeout_ns`
+  (`0` = wait forever) in a previously-unused argument register. Existing
+  callers that pass `0` keep the old blocking semantics.
+- **Changed (error):** a `SYS_IPC_REPLY` whose reply slot was cancelled
+  (timeout, dead client) now returns `EPIPE` instead of `EBADF`.
+
 ## Planned: ABI 1.0 : IPC v2
 
 Incompatible change, hence a **major** bump (`ABI_VERSION_MAJOR = 1`).

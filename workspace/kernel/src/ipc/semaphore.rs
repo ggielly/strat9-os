@@ -42,6 +42,8 @@ impl SemId {
 pub enum SemaphoreError {
     #[error("would block")]
     WouldBlock,
+    #[error("operation timed out")]
+    TimedOut,
     #[error("semaphore destroyed")]
     Destroyed,
     #[error("invalid initial value")]
@@ -70,7 +72,15 @@ impl PosixSemaphore {
 
     /// Performs the wait operation.
     pub fn wait(&self) -> Result<(), SemaphoreError> {
-        self.waitq.wait_until(|| {
+        self.wait_deadline(None)
+    }
+
+    /// Wait with a deadline on the scheduler clock (`None` waits forever).
+    ///
+    /// Returns [`SemaphoreError::TimedOut`] if the deadline passes while the
+    /// count is still zero.
+    pub fn wait_deadline(&self, deadline_ns: Option<u64>) -> Result<(), SemaphoreError> {
+        let result = self.waitq.wait_until_deadline(deadline_ns, || {
             // P2 fix: check for pending signals to avoid livelock.
             if crate::process::signal::has_pending_signals() {
                 return Some(Err(SemaphoreError::Interrupted));
@@ -91,7 +101,8 @@ impl PosixSemaphore {
                 Ok(_) => Some(Ok(())),
                 Err(_) => None,
             }
-        })
+        });
+        result.unwrap_or(Err(SemaphoreError::TimedOut))
     }
 
     /// Attempts to wait.

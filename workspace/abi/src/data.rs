@@ -743,6 +743,46 @@ impl SiloConfig {
 
 // ── Static assertions ──────────────────────────────────────────────────────
 
+/// Scheduling statistics returned by `SYS_SCHED_INFO` for the calling task.
+///
+/// `policy` uses the `SCHED_POLICY_*` values from [`crate::syscall`], and
+/// `priority` is the class-specific priority (Nice for Fair, 0..=99 for RT).
+///
+/// `run_time_ns` is sampled from the scheduler tick counter, so its
+/// resolution is one tick (`1e9 / TIMER_HZ` ns).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SchedInfo {
+    /// Current policy (`SCHED_POLICY_*`).
+    pub policy: u32,
+    /// Task state (0 = ready, 1 = running, 2 = blocked, 3 = dead).
+    pub state: u32,
+    /// Class-specific priority (sign-extended i32).
+    pub priority: i32,
+    /// Status flags (`SCHED_INFO_FLAG_*`).
+    pub flags: u32,
+    /// Soft CPU affinity mask (0 = no restriction).
+    pub affinity_mask: u64,
+    /// Total time this task has been running, in nanoseconds.
+    pub run_time_ns: u64,
+    /// Total scheduler ticks charged to this task.
+    pub ticks: u64,
+    /// Fair-class virtual runtime.
+    pub vruntime: u64,
+    /// Remaining ticks in the current real-time budget period.
+    pub rt_budget_remaining: u64,
+    /// Number of times the real-time budget was exhausted.
+    pub rt_overruns: u64,
+    /// Ticks spent waiting in the Fair run queue without being picked.
+    pub fair_wait_ticks: u64,
+    /// Absolute wake deadline on the scheduler clock (0 = none armed).
+    pub wake_deadline_ns: u64,
+}
+
+/// `SchedInfo::flags`: the task exhausted its real-time budget and is
+/// temporarily scheduled as Fair until the period expires.
+pub const SCHED_INFO_FLAG_RT_DEGRADED: u32 = 1 << 0;
+
 macro_rules! assert_abi_struct {
     ($t:ty, $size:expr, $align:expr) => {
         static_assertions::assert_eq_size!($t, [u8; $size]);
@@ -764,3 +804,4 @@ assert_abi_struct!(MemoryRegionInfo, 24, 8);
 assert_abi_struct!(PciAddress, 4, 4);
 assert_abi_struct!(PciProbeCriteria, 12, 4);
 assert_abi_struct!(PciDeviceInfo, 16, 4);
+assert_abi_struct!(SchedInfo, 80, 8);

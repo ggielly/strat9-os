@@ -216,6 +216,7 @@ impl From<crate::ipc::port::IpcError> for SyscallError {
             IpcError::NotOwner => SyscallError::PermissionDenied,
             IpcError::PortDestroyed => SyscallError::Pipe,
             IpcError::WouldBlock => SyscallError::Again,
+            IpcError::TimedOut => SyscallError::TimedOut,
             IpcError::Interrupted => SyscallError::Interrupted,
         }
     }
@@ -242,6 +243,7 @@ impl From<crate::ipc::channel::ChannelError> for SyscallError {
         use crate::ipc::channel::ChannelError;
         match err {
             ChannelError::WouldBlock => SyscallError::Again,
+            ChannelError::TimedOut => SyscallError::TimedOut,
             ChannelError::Disconnected => SyscallError::Pipe,
             ChannelError::Interrupted => SyscallError::Interrupted,
         }

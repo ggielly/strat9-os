@@ -89,6 +89,22 @@ pub fn scheduler_clock_ns() -> u64 {
     crate::process::scheduler::ticks().saturating_mul(crate::arch::timer::NS_PER_TICK)
 }
 
+/// Convert a relative timeout (nanoseconds) to an absolute deadline on the
+/// scheduler clock.
+///
+/// `timeout_ns == 0` means "no timeout" and yields `None`; this is the
+/// convention shared by every timed blocking syscall (`SYS_IPC_*`,
+/// `SYS_CHAN_*`, `SYS_SEM_WAIT`), so callers that do not pass a timeout
+/// keep the historical wait-forever behaviour.
+#[inline]
+pub fn deadline_after_ns(timeout_ns: u64) -> Option<u64> {
+    if timeout_ns == 0 {
+        None
+    } else {
+        Some(scheduler_clock_ns().saturating_add(timeout_ns))
+    }
+}
+
 //  WaitQueue ========================================
 
 /// A FIFO queue of tasks waiting for an event.

@@ -72,6 +72,7 @@ pub fn sys_sem_create(initial: u64) -> Result<u64, SyscallError> {
     let sem_id = semaphore::create_semaphore(initial).map_err(|e| match e {
         semaphore::SemaphoreError::InvalidValue => SyscallError::InvalidArgument,
         semaphore::SemaphoreError::WouldBlock => SyscallError::Again,
+        semaphore::SemaphoreError::TimedOut => SyscallError::TimedOut,
         semaphore::SemaphoreError::Destroyed => SyscallError::Pipe,
         semaphore::SemaphoreError::NotFound => SyscallError::NotFound,
         semaphore::SemaphoreError::Interrupted => SyscallError::Interrupted,
@@ -93,14 +94,18 @@ pub fn sys_sem_create(initial: u64) -> Result<u64, SyscallError> {
     Ok(cap_id.as_u64())
 }
 
-/// SYS_SEM_WAIT: decrement the semaphore (blocking if zero).
-pub fn sys_sem_wait(handle: u64) -> Result<u64, SyscallError> {
+/// SYS_SEM_WAIT: decrement the semaphore.
+///
+/// `timeout_ns == 0` waits forever; otherwise returns `ETIMEDOUT` if the
+/// semaphore is still unavailable when the deadline passes.
+pub fn sys_sem_wait(handle: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
     let sem_id = resolve_sem(handle, true)?;
     semaphore::get_semaphore(sem_id)
         .ok_or(SyscallError::BadHandle)?
-        .wait()
+        .wait_deadline(crate::sync::deadline_after_ns(timeout_ns))
         .map_err(|e| match e {
             semaphore::SemaphoreError::WouldBlock => SyscallError::Again,
+            semaphore::SemaphoreError::TimedOut => SyscallError::TimedOut,
             semaphore::SemaphoreError::Destroyed => SyscallError::Pipe,
             semaphore::SemaphoreError::Interrupted => SyscallError::Interrupted,
             _ => SyscallError::IoError,
@@ -129,6 +134,7 @@ pub fn sys_sem_post(handle: u64) -> Result<u64, SyscallError> {
         .post()
         .map_err(|e| match e {
             semaphore::SemaphoreError::WouldBlock => SyscallError::Again,
+            semaphore::SemaphoreError::TimedOut => SyscallError::TimedOut,
             semaphore::SemaphoreError::Destroyed => SyscallError::Pipe,
             _ => SyscallError::IoError,
         })?;

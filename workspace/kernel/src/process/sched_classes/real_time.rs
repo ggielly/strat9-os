@@ -248,7 +248,11 @@ impl SchedClassRq for RealTimeClassRq {
         // If budget exhausted, mark degraded.  The task will be skipped
         // in pick_next until its period expires.
         if new_remaining == 0 && consumed > 0 {
-            task.rt_degraded.store(true, Ordering::Relaxed);
+            // Count the transition only once per budget period, not on every
+            // tick: `rt_degraded` stays set until the period is replenished.
+            if !task.rt_degraded.swap(true, Ordering::Relaxed) {
+                task.rt_overruns.fetch_add(1, Ordering::Relaxed);
+            }
             return true; // Preempt immediately.
         }
 

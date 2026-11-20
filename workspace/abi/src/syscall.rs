@@ -231,27 +231,32 @@ pub const SYS_IPC_CREATE_PORT: usize = 200;
 ///
 /// - `port_handle`: capability handle of the target port
 /// - `msg_ptr`: pointer to the message data
-/// - `msg_len`: length of the message in bytes
+/// - `timeout_ns`: relative timeout in nanoseconds (`0` = wait forever)
 ///
-/// Blocks if the port's message queue is full.
+/// Blocks if the port's message queue is full, and returns `-ETIMEDOUT` if
+/// `timeout_ns` elapses before space becomes available.
 pub const SYS_IPC_SEND: usize = 201;
 
 /// Receive a message from an IPC port.
 ///
 /// - `port_handle`: capability handle of the port
 /// - `buf_ptr`: buffer to receive the message
-/// - `buf_len`: size of the buffer
+/// - `timeout_ns`: relative timeout in nanoseconds (`0` = wait forever)
 ///
-/// Blocks until a message is available. Returns the number of bytes received.
+/// Blocks until a message is available, or returns `-ETIMEDOUT` once the
+/// timeout elapses. A timeout is distinct from a dead server (`-EPIPE`).
 pub const SYS_IPC_RECV: usize = 202;
 
 /// Synchronous RPC: send a message and wait for a reply.
 ///
 /// - `port_handle`: capability handle of the target port
-/// - `msg_ptr`: pointer to the request message
-/// - `msg_len`: length of the request
+/// - `msg_ptr`: pointer to the request message (also receives the reply)
+/// - `timeout_ns`: relative reply timeout in nanoseconds (`0` = wait forever)
 ///
-/// Blocks until the server replies. Returns the number of bytes in the reply.
+/// Blocks until the server replies, or returns `-ETIMEDOUT` once the timeout
+/// elapses. On timeout the reply slot is closed: a late `SYS_IPC_REPLY` from
+/// the server fails with `-EPIPE` instead of being delivered to a task that
+/// has moved on.
 /// Equivalent to `SYS_IPC_SEND` + `SYS_IPC_RECV` with automatic reply routing.
 pub const SYS_IPC_CALL: usize = 203;
 
@@ -333,16 +338,19 @@ pub const SYS_CHAN_CREATE: usize = 220;
 ///
 /// - `handle`: channel handle
 /// - `msg_ptr`: pointer to the message data
+/// - `timeout_ns`: relative timeout in nanoseconds (`0` = wait forever)
 ///
-/// Blocks until space is available in the channel buffer.
+/// Blocks until space is available in the channel buffer, or returns
+/// `-ETIMEDOUT` once the timeout elapses.
 pub const SYS_CHAN_SEND: usize = 221;
 
 /// Receive a message from a typed channel (blocks if empty).
 ///
 /// - `handle`: channel handle
 /// - `msg_ptr`: buffer to receive the message
+/// - `timeout_ns`: relative timeout in nanoseconds (`0` = wait forever)
 ///
-/// Blocks until a message is available.
+/// Blocks until a message is available, or returns `-ETIMEDOUT`.
 pub const SYS_CHAN_RECV: usize = 222;
 
 /// Non-blocking receive from a typed channel.
@@ -373,6 +381,10 @@ pub const SYS_SEM_CREATE: usize = 230;
 /// Decrement (wait on) a semaphore. Blocks if the count is zero.
 ///
 /// - `handle`: semaphore handle
+/// - `timeout_ns`: relative timeout in nanoseconds (`0` = wait forever)
+///
+/// Returns `-ETIMEDOUT` if the timeout elapses before the semaphore becomes
+/// available.
 pub const SYS_SEM_WAIT: usize = 231;
 
 /// Non-blocking decrement (trywait) on a semaphore.
@@ -889,6 +901,65 @@ pub const SYS_THREAD_EXIT: usize = 343;
 ///
 /// Returns `0` on success.
 pub const SYS_UNAME: usize = 344;
+
+// ── Block 345-349: Scheduling ──────────────────────────────────────────────
+//
+// Exposes the per-task scheduling policy that the kernel already applies
+// internally (`SchedPolicy`: Fair/Nice, RealTime RR/FIFO, Idle). Policy
+// values are integers rather than a single opaque enum so that the ranges
+// (Nice -20..=19, RT 0..=99) remain visible to userspace.
+
+/// Fair scheduling policy (CFS-like); `priority` is a Nice value.
+pub const SCHED_POLICY_FAIR: u32 = 0;
+/// Real-time round-robin; `priority` is an RT priority in `0..=99`.
+pub const SCHED_POLICY_RR: u32 = 1;
+/// Real-time FIFO; `priority` is an RT priority in `0..=99`.
+pub const SCHED_POLICY_FIFO: u32 = 2;
+/// Idle-only policy; `priority` is ignored.
+pub const SCHED_POLICY_IDLE: u32 = 3;
+
+/// Change the scheduling policy/priority of the calling task.
+///
+/// - `policy`: one of `SCHED_POLICY_{FAIR,RR,FIFO,IDLE}`
+/// - `priority`: Nice value (`-20..=19`) for `FAIR`, RT priority (`0..=99`)
+///   for `RR`/`FIFO`, ignored for `IDLE`. Passed as a signed 32-bit value
+///   in the low half of the argument.
+///
+/// Returns `0` on success. Raises the calling task's eligibility
+/// immediately: it is requeued in the class matching the new policy.
+/// Elevating to a real-time policy requires silo-admin capability; lowering
+/// to `FAIR`/`IDLE` is always allowed.
+pub const SYS_SCHED_SET: usize = 345;
+
+/// Read the scheduling policy/priority of the calling task.
+///
+/// Returns a packed value: low 32 bits = policy
+/// (`SCHED_POLICY_*`), high 32 bits = priority as a sign-extended i32
+/// (Nice for `FAIR`, RT priority for `RR`/`FIFO`, 0 for `IDLE`).
+pub const SYS_SCHED_GET: usize = 346;
+
+/// Set the soft CPU affinity mask of the calling task.
+///
+/// - `mask`: bit N set = CPU N allowed. `0` removes the restriction.
+///
+/// Bits at or above the platform CPU count are rejected with `-EINVAL`.
+/// Returns `0` on success.
+pub const SYS_SCHED_SETAFFINITY: usize = 347;
+
+/// Get the soft CPU affinity mask of the calling task.
+///
+/// Returns the mask (`0` means "no restriction"). The value is exactly what
+/// was passed to `SYS_SCHED_SETAFFINITY`.
+pub const SYS_SCHED_GETAFFINITY: usize = 348;
+
+/// Read scheduling statistics for the calling task.
+///
+/// - `out_ptr`: pointer to a [`crate::data::SchedInfo`] structure.
+///
+/// Returns `0` on success, `-EFAULT` if `out_ptr` is not writable.
+/// The structure exposes the fields used to diagnose priority inversion and
+/// real-time budget overruns without kernel instrumentation.
+pub const SYS_SCHED_INFO: usize = 349;
 
 /// Architecture-specific process control.
 ///

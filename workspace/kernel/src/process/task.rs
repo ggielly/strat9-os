@@ -394,6 +394,10 @@ pub struct Task {
     /// Whether this RT task has exhausted its budget and is temporarily
     /// degraded (treated as Fair) until the period expires.
     pub rt_degraded: AtomicBool,
+    /// Number of times this task exhausted its real-time budget (`R10`).
+    /// Exposed through `SYS_SCHED_INFO`; a growing counter means the system
+    /// is not meeting its deadline budget for this task.
+    pub rt_overruns: AtomicU64,
 
     // ── Fair starvation protection ────────────────────────────────────────
     /// Ticks this task has spent waiting in the Fair run queue without being
@@ -1095,6 +1099,7 @@ impl Task {
             rt_budget_remaining: AtomicU64::new(0),
             rt_budget_period_start: AtomicU64::new(0),
             rt_degraded: AtomicBool::new(false),
+            rt_overruns: AtomicU64::new(0),
             fair_wait_ticks: AtomicU64::new(0),
         });
         task.seed_kernel_interrupt_frame_from_context();
@@ -1178,6 +1183,7 @@ impl Task {
             rt_budget_remaining: AtomicU64::new(0),
             rt_budget_period_start: AtomicU64::new(0),
             rt_degraded: AtomicBool::new(false),
+            rt_overruns: AtomicU64::new(0),
             fair_wait_ticks: AtomicU64::new(0),
         }))
     }

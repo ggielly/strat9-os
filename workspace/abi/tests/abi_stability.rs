@@ -31,9 +31,9 @@
 
 use strat9_abi::{
     data::{
-        FileStat, IpcMessage, SiloGrantDesc, Stat, TimeSpec, WaitSource, IPC_MESSAGE_ALIGN,
-        IPC_MESSAGE_SIZE, IPC_PAYLOAD_CAPACITY, SILO_GRANT_ACCESS_WRITE, SILO_GRANT_DMA,
-        SILO_GRANT_IRQ, SILO_GRANT_PATH, SILO_GRANT_PCI,
+        FileStat, IpcMessage, SchedInfo, SiloGrantDesc, Stat, TimeSpec, WaitSource,
+        IPC_MESSAGE_ALIGN, IPC_MESSAGE_SIZE, IPC_PAYLOAD_CAPACITY, SILO_GRANT_ACCESS_WRITE,
+        SILO_GRANT_DMA, SILO_GRANT_IRQ, SILO_GRANT_PATH, SILO_GRANT_PCI,
     },
     errno,
     ipc::IPC_HANDSHAKE_MAGIC,
@@ -146,6 +146,11 @@ const GOLDEN_SYSCALLS: &[(&str, usize)] = &[
     ("SYS_THREAD_JOIN", SYS_THREAD_JOIN),
     ("SYS_THREAD_EXIT", SYS_THREAD_EXIT),
     ("SYS_UNAME", SYS_UNAME),
+    ("SYS_SCHED_SET", SYS_SCHED_SET),
+    ("SYS_SCHED_GET", SYS_SCHED_GET),
+    ("SYS_SCHED_SETAFFINITY", SYS_SCHED_SETAFFINITY),
+    ("SYS_SCHED_GETAFFINITY", SYS_SCHED_GETAFFINITY),
+    ("SYS_SCHED_INFO", SYS_SCHED_INFO),
     ("SYS_ARCH_PRCTL", SYS_ARCH_PRCTL),
     ("SYS_TGKILL", SYS_TGKILL),
     ("SYS_RT_SIGRETURN", SYS_RT_SIGRETURN),
@@ -318,7 +323,7 @@ fn syscall_table_is_exhaustive() {
     // table, this count check fails and forces a conscious review.
     assert_eq!(
         GOLDEN_SYSCALLS.len(),
-        213,
+        218,
         "golden table out of sync: add new SYS_* consts AND their pinned values"
     );
 }
@@ -400,6 +405,16 @@ fn struct_sizes_are_pinned() {
     // Legacy stat kept for compat: 120 bytes per doc comment.
     assert_eq!(size_of::<Stat>(), 120);
     assert_eq!(size_of::<InlineBlobHeader>(), 4);
+}
+
+#[test]
+fn sched_info_layout_is_pinned() {
+    assert_eq!(size_of::<SchedInfo>(), 80);
+    assert_eq!(align_of::<SchedInfo>(), 8);
+    assert_eq!(core::mem::offset_of!(SchedInfo, policy), 0);
+    assert_eq!(core::mem::offset_of!(SchedInfo, priority), 8);
+    assert_eq!(core::mem::offset_of!(SchedInfo, affinity_mask), 16);
+    assert_eq!(core::mem::offset_of!(SchedInfo, wake_deadline_ns), 72);
 }
 
 #[test]

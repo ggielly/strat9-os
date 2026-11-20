@@ -199,6 +199,7 @@ pub fn create_user_test_task() {
         rt_budget_remaining: core::sync::atomic::AtomicU64::new(0),
         rt_budget_period_start: core::sync::atomic::AtomicU64::new(0),
         rt_degraded: core::sync::atomic::AtomicBool::new(false),
+        rt_overruns: core::sync::atomic::AtomicU64::new(0),
         fair_wait_ticks: core::sync::atomic::AtomicU64::new(0),
     });
 

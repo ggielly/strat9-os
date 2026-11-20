@@ -77,6 +77,8 @@ const RECEIVERS_CLOSED: u8 = 1 << 1;
 pub enum ChannelError {
     #[error("would block")]
     WouldBlock,
+    #[error("operation timed out")]
+    TimedOut,
     #[error("channel disconnected")]
     Disconnected,
     #[error("interrupted by signal")]
@@ -410,9 +412,18 @@ impl SyncChan {
     /// Returns `Err(`[`ChannelError::Disconnected`]`)` if the channel has
     /// been destroyed while the sender was blocked.
     pub fn send(&self, msg: IpcMessage) -> Result<(), ChannelError> {
+        self.send_deadline(msg, None)
+    }
+
+    /// Send with a deadline on the scheduler clock (`None` waits forever).
+    pub fn send_deadline(
+        &self,
+        msg: IpcMessage,
+        deadline_ns: Option<u64>,
+    ) -> Result<(), ChannelError> {
         let mut pending = Some(msg);
 
-        let result = self.send_waitq.wait_until(|| {
+        let result = self.send_waitq.wait_until_deadline(deadline_ns, || {
             // P2 fix: check for pending signals to avoid livelock.
             if crate::process::signal::has_pending_signals() {
                 pending.take();
@@ -434,6 +445,7 @@ impl SyncChan {
             // queue lock released here
         });
 
+        let result = result.unwrap_or(Err(ChannelError::TimedOut));
         if result.is_ok() {
             self.recv_waitq.wake_one();
         }
@@ -462,7 +474,12 @@ impl SyncChan {
     /// Returns `Err(`[`ChannelError::Disconnected`]`)` if the channel was
     /// destroyed while the receiver was blocked.
     pub fn recv(&self) -> Result<IpcMessage, ChannelError> {
-        let result = self.recv_waitq.wait_until(|| {
+        self.recv_deadline(None)
+    }
+
+    /// Receive with a deadline on the scheduler clock (`None` waits forever).
+    pub fn recv_deadline(&self, deadline_ns: Option<u64>) -> Result<IpcMessage, ChannelError> {
+        let result = self.recv_waitq.wait_until_deadline(deadline_ns, || {
             let msg_opt = self.queue.pop();
             if let Some(msg) = msg_opt {
                 return Some(Ok(msg));
@@ -477,6 +494,7 @@ impl SyncChan {
             None
         });
 
+        let result = result.unwrap_or(Err(ChannelError::TimedOut));
         if result.is_ok() {
             self.send_waitq.wake_one();
         }

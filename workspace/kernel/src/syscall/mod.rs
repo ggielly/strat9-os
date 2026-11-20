@@ -55,6 +55,7 @@ pub mod poll;
 pub mod process;
 pub mod random;
 pub mod robust_list;
+pub mod sched;
 pub mod semaphore;
 pub mod signal;
 pub mod time;

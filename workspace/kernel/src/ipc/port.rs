@@ -71,6 +71,8 @@ pub enum IpcError {
     PortDestroyed,
     #[error("port queue full")]
     WouldBlock,
+    #[error("operation timed out")]
+    TimedOut,
     #[error("interrupted by signal")]
     Interrupted,
 }
@@ -110,7 +112,17 @@ impl Port {
     /// Returns `Err(IpcError::PortDestroyed)` if the port is destroyed while
     /// the sender is blocked.
     pub fn send(&self, msg: IpcMessage) -> Result<(), IpcError> {
-        let result = self.send_waitq.wait_until(|| {
+        self.send_deadline(msg, None)
+    }
+
+    /// Send a message, giving up at `deadline_ns` on the scheduler clock.
+    ///
+    /// `None` waits forever. On expiry the caller is removed from the wait
+    /// queue (the deadline mechanism wakes it, then `wait_until_deadline`
+    /// unregisters it) and [`IpcError::TimedOut`] is returned, so a missing
+    /// receiver cannot block a sender forever.
+    pub fn send_deadline(&self, msg: IpcMessage, deadline_ns: Option<u64>) -> Result<(), IpcError> {
+        let result = self.send_waitq.wait_until_deadline(deadline_ns, || {
             // P2 fix: check for pending signals to avoid livelock.
             if crate::process::signal::has_pending_signals() {
                 return Some(Err(IpcError::Interrupted));
@@ -123,6 +135,7 @@ impl Port {
                 Err(_) => None,
             }
         });
+        let result = result.unwrap_or(Err(IpcError::TimedOut));
         if result.is_ok() {
             self.recv_waitq.wake_one();
         }
@@ -135,7 +148,17 @@ impl Port {
     /// Returns `Err(IpcError::PortDestroyed)` if the port is destroyed while
     /// the receiver is blocked.
     pub fn recv(&self) -> Result<IpcMessage, IpcError> {
-        let result = self.recv_waitq.wait_until(|| {
+        self.recv_deadline(None)
+    }
+
+    /// Receive a message, giving up at `deadline_ns` on the scheduler clock.
+    ///
+    /// `None` waits forever. On expiry the caller is unregistered and
+    /// [`IpcError::TimedOut`] is returned; a message that arrived at the
+    /// same instant is still preferred (the condition is re-checked once
+    /// after the deadline).
+    pub fn recv_deadline(&self, deadline_ns: Option<u64>) -> Result<IpcMessage, IpcError> {
+        let result = self.recv_waitq.wait_until_deadline(deadline_ns, || {
             if let Some(msg) = self.queue.pop() {
                 return Some(Ok(msg));
             }
@@ -148,6 +171,7 @@ impl Port {
             }
             None
         });
+        let result = result.unwrap_or(Err(IpcError::TimedOut));
         if result.is_ok() {
             self.send_waitq.wake_one();
         }
