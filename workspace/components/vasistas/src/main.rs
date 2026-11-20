@@ -104,6 +104,10 @@ const IDLE_NS: u64 = 2_000_000;
 /// Log the counters every this many idle/served iterations (2 ms idle sleep:
 /// about 60 s). A shorter period floods the serial line for no new evidence.
 const LOG_EVERY: u64 = 30_000;
+/// Consecutive ready-but-unserved turns before the loop backs off.
+const STALL_LIMIT: u32 = 4;
+/// Back-off sleep once [`STALL_LIMIT`] is reached, in nanoseconds.
+const STALL_SLEEP_NS: u64 = 1_000_000;
 /// Queued replies per peer before the newest is dropped (Jalon 5).
 const PEER_QUEUE_FRAMES: usize = 8;
 /// Largest complete wire message, equal to `IpcMessage::PAYLOAD_CAPACITY`.
@@ -785,12 +789,24 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
     };
     let mut focus_epoch = input.as_ref().map_or(0, |client| client.focus_epoch());
     log_text(b"vasistas: loop");
+    // Consecutive wakeups that reported a ready source but served nothing.
+    let mut stalled: u32 = 0;
+    let mut stall_logged = false;
+    let mut last_stats = (usize::MAX, usize::MAX, usize::MAX, usize::MAX);
+    let mut last_stats_iter: u64 = 0;
 
     loop {
         // Block on every source at once: the server port, each peer's event
-        // port (readable or hung up) and inputd. No userspace liveness poll:
-        // a dead client's port turns into WAIT_EVENT_HANGUP and the peer is
-        // dropped below. IDLE_NS is the composition deadline.
+        // port (hangup only) and inputd. No userspace liveness poll: a dead
+        // client's port turns into WAIT_EVENT_HANGUP and the peer is dropped
+        // below. IDLE_NS is the composition deadline.
+        //
+        // Peer event ports are never read by this server: they are the
+        // clients' inbound queues, and the server only writes replies into
+        // them. Asking for WAIT_EVENT_READABLE on them made the wait return
+        // as soon as a reply (WELCOME, ACK, INPUT_BATCH...) was queued, i.e.
+        // on the server's own writes, so the loop spun at ~500k turns/s and
+        // starved every other task. Only a hangup is meaningful here.
         let mut sources = [WaitSource::default(); MAX_PEERS + 2];
         let mut map = [usize::MAX; MAX_PEERS + 2];
         let mut count = 1usize;
@@ -806,7 +822,7 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
             };
             sources[count] = WaitSource {
                 kind: WAIT_SOURCE_HANDLE,
-                events: WAIT_EVENT_READABLE | WAIT_EVENT_HANGUP,
+                events: WAIT_EVENT_HANGUP,
                 id: transport.port as u64,
                 revents: 0,
             };
@@ -824,8 +840,11 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
             count - 1
         });
         let mut input_failed = false;
-        if let Ok(ready) = call::handle_wait_many(&mut sources[..count], IDLE_NS) {
+        let mut served_hangup = false;
+        let wait = call::handle_wait_many(&mut sources[..count], IDLE_NS);
+        if let Ok(ready) = wait {
             if sources[ready].revents & WAIT_EVENT_HANGUP as u64 != 0 {
+                served_hangup = true;
                 if Some(ready) == input_slot {
                     input_failed = true;
                 } else if let Some(index) = map.get(ready).copied().filter(|slot| *slot != usize::MAX) {
@@ -847,12 +866,13 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
                 }
             }
         }
+        let mut drained = 0usize;
         for _ in 0..RECV_BUDGET {
             let mut msg = IpcMessage::new(0);
             match call::ipc_try_recv(server_port, &mut msg) {
                 // SYS_IPC_TRY_RECV always returns 0: the payload is the
                 // fixed-size IpcMessage, its own header gives the length.
-                Ok(_) => {}
+                Ok(_) => drained += 1,
                 Err(Error::Again | Error::Interrupted) => break,
                 Err(_) => break,
             }
@@ -979,11 +999,13 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
         }
 
         // Input (A.5): at most `RECV_BUDGET` pending batches per turn.
+        let mut input_events = 0usize;
         if let Some(client) = input.as_mut() {
             for _ in 0..RECV_BUDGET {
                 match client.poll() {
                     Poll::Empty => break,
                     Poll::Error => {
+                        input_events += 1;
                         // Malformed payload or failed port: the adapter drops
                         // the input client (the port is lost), so report
                         // SERVICE_CHANGED and release display focus. A batch
@@ -1004,6 +1026,7 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
                         focus_epoch: epoch,
                         reason,
                     } => {
+                        input_events += 1;
                         // Keep focus, adopt the new epoch the input server
                         // expects and forward the reset reason.
                         focus_epoch = epoch;
@@ -1016,6 +1039,7 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
                         );
                     }
                     Poll::Batch(batch) => {
+                        input_events += 1;
                         for record in batch.records() {
                             handle_input(
                                 server,
@@ -1035,13 +1059,41 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
             input = None;
         }
 
+        // Spin guard: a ready wait that served nothing means the readiness
+        // was stale or a source cannot be drained here (kernel glitch or a
+        // source this loop does not own). Never let that starve the machine:
+        // after a few turns back off with a bounded sleep.
+        if wait.is_ok() && drained == 0 && input_events == 0 && !served_hangup {
+            stalled += 1;
+            if stalled >= STALL_LIMIT {
+                stalled = 0;
+                if !stall_logged {
+                    log_text(b"vasistas: wait ready without progress, throttling");
+                    stall_logged = true;
+                }
+                let request = TimeSpec {
+                    tv_sec: 0,
+                    tv_nsec: STALL_SLEEP_NS as i64,
+                };
+                let _ = call::nanosleep(&request, &mut TimeSpec::zero());
+            }
+        } else {
+            stalled = 0;
+        }
+
         iterations = iterations.wrapping_add(1);
-        if iterations % LOG_EVERY == 0 {
-            let stats = server.core().stats();
+        // Counters are diagnostic: report a change immediately, otherwise at
+        // most once per idle period. Logging every fixed number of turns
+        // turns a busy loop into a serial flood.
+        let stats = server.core().stats();
+        let snapshot = (stats.sessions, stats.surfaces, stats.buffers, stats.used_bytes);
+        if snapshot != last_stats || iterations.wrapping_sub(last_stats_iter) >= LOG_EVERY {
             log(&format_args!(
                 "vasistas: sessions={} surfaces={} buffers={} used_bytes={}",
                 stats.sessions, stats.surfaces, stats.buffers, stats.used_bytes
             ));
+            last_stats = snapshot;
+            last_stats_iter = iterations;
         }
     }
 }

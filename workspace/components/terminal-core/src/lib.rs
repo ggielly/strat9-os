@@ -68,6 +68,25 @@ mod tests {
     }
 
     #[test]
+    fn init_in_place_matches_new_without_a_big_stack_frame() {
+        // Heap-allocate the slot: the point of the in-place constructor is
+        // that callers never reserve the ~3 MiB ring on their stack.
+        let mut slot = std::boxed::Box::<TerminalCore>::new_uninit();
+        // SAFETY: `new_uninit` allocated writable, aligned storage for one
+        // `TerminalCore`; `init_in_place` initialises every field.
+        let term = unsafe {
+            TerminalCore::init_in_place(slot.as_mut_ptr(), 80, 25, FG, BG);
+            slot.assume_init()
+        };
+        assert_eq!(term.cols, 80);
+        assert_eq!(term.rows, 25);
+        assert_eq!(term.scroll_bottom, 25);
+        assert_eq!(term.screen[0][0].ch, b' ' as u32);
+        assert_eq!(term.screen[0][0].fg, FG);
+        assert_eq!(term.scrollback.len(), 0);
+    }
+
+    #[test]
     fn typed_text_appears_at_cursor_and_advances_it() {
         with_term(80, 24, |term| {
             // An empty chunk produces no action and reports no change.

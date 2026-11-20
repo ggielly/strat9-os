@@ -53,24 +53,66 @@ pub struct TerminalCore {
 
 impl TerminalCore {
     pub fn new(cols: usize, rows: usize, default_fg: u32, default_bg: u32) -> Self {
+        let mut this = core::mem::MaybeUninit::<Self>::uninit();
+        // SAFETY: `this` is aligned writable storage for one `TerminalCore`.
+        unsafe {
+            Self::init_in_place(this.as_mut_ptr(), cols, rows, default_fg, default_bg);
+            this.assume_init()
+        }
+    }
+
+    /// Write a fresh terminal directly into `ptr`, without forming a
+    /// [`TerminalCore`] temporary.
+    ///
+    /// The visible grid plus the scrollback ring is several MiB, so returning
+    /// a value reserves that much stack in the caller. A process with a small
+    /// stack (`lucarne` on the kernel's 64 KiB user stack) owns a `.bss` slot
+    /// and initialises it through here.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must point to writable, properly aligned storage for one
+    /// `TerminalCore`. Any previous value is overwritten without being
+    /// dropped, so the caller must not hand over a live terminal.
+    pub unsafe fn init_in_place(
+        ptr: *mut Self,
+        cols: usize,
+        rows: usize,
+        default_fg: u32,
+        default_bg: u32,
+    ) {
         let blank = Cell::blank(default_fg, default_bg);
-        TerminalCore {
-            cols,
-            rows,
-            cursor_row: 0,
-            cursor_col: 0,
-            scroll_top: 0,
-            scroll_bottom: rows,
-            screen: [[blank; MAX_COLS]; MAX_ROWS],
-            fg: default_fg,
-            bg: default_bg,
-            bold: false,
-            inverse: false,
-            default_fg,
-            default_bg,
-            scrollback: CircularBuffer::new(cols, default_fg, default_bg),
-            ansi: AnsiParser::new(),
-            actions: alloc::vec::Vec::new(),
+        // SAFETY: caller guarantees `ptr` is valid for writes.
+        unsafe {
+            core::ptr::addr_of_mut!((*ptr).cols).write(cols);
+            core::ptr::addr_of_mut!((*ptr).rows).write(rows);
+            core::ptr::addr_of_mut!((*ptr).cursor_row).write(0);
+            core::ptr::addr_of_mut!((*ptr).cursor_col).write(0);
+            core::ptr::addr_of_mut!((*ptr).scroll_top).write(0);
+            core::ptr::addr_of_mut!((*ptr).scroll_bottom).write(rows);
+            core::ptr::addr_of_mut!((*ptr).fg).write(default_fg);
+            core::ptr::addr_of_mut!((*ptr).bg).write(default_bg);
+            core::ptr::addr_of_mut!((*ptr).bold).write(false);
+            core::ptr::addr_of_mut!((*ptr).inverse).write(false);
+            core::ptr::addr_of_mut!((*ptr).default_fg).write(default_fg);
+            core::ptr::addr_of_mut!((*ptr).default_bg).write(default_bg);
+            // Fill the grid row by row: a whole-grid temporary is ~200 KiB,
+            // already larger than the smallest supported stack.
+            let screen = core::ptr::addr_of_mut!((*ptr).screen) as *mut [Cell; MAX_COLS];
+            for row in 0..MAX_ROWS {
+                let cells = screen.add(row) as *mut Cell;
+                for col in 0..MAX_COLS {
+                    cells.add(col).write(blank);
+                }
+            }
+            CircularBuffer::init_in_place(
+                core::ptr::addr_of_mut!((*ptr).scrollback),
+                cols,
+                default_fg,
+                default_bg,
+            );
+            core::ptr::addr_of_mut!((*ptr).ansi).write(AnsiParser::new());
+            core::ptr::addr_of_mut!((*ptr).actions).write(alloc::vec::Vec::new());
         }
     }
 

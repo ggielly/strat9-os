@@ -36,7 +36,7 @@
 
 extern crate alloc;
 
-use core::{alloc::Layout, panic::PanicInfo};
+use core::{alloc::Layout, cell::UnsafeCell, mem::MaybeUninit, panic::PanicInfo};
 
 use input_protocol::{
     INPUT_EVENT_FOCUS_GAINED, INPUT_EVENT_FOCUS_LOST, INPUT_EVENT_TEXT, INPUT_TEXT_LEN,
@@ -95,6 +95,27 @@ fn alloc_error(_layout: Layout) -> ! {
 fn panic(info: &PanicInfo) -> ! {
     call::handle_panic("lucarne", info);
 }
+
+/// `TerminalCore` embeds the visible grid and a 1000-line scrollback ring
+/// (~3.3 MiB). The kernel user stack is 64 KiB, so it must live in `.bss`:
+/// a stack local makes `_start`'s prologue probe megabytes below the stack
+/// and fault before the first pixel is drawn.
+struct StaticCell<T>(UnsafeCell<T>);
+
+// SAFETY: `lucarne` is single-threaded; this cell is only touched by `_start`.
+unsafe impl<T> Sync for StaticCell<T> {}
+
+impl<T> StaticCell<T> {
+    const fn new(value: T) -> Self {
+        Self(UnsafeCell::new(value))
+    }
+
+    fn as_ptr(&self) -> *mut T {
+        self.0.get()
+    }
+}
+
+static TERM: StaticCell<MaybeUninit<TerminalCore>> = StaticCell::new(MaybeUninit::uninit());
 
 /// The two ping-pong buffers plus the commit bookkeeping the server tracks.
 struct Stage {
@@ -159,14 +180,20 @@ pub extern "C" fn _start() -> ! {
         None => fatal(b"[lucarne] second alloc_buffer failed\n"),
     };
 
-    let mut term = TerminalCore::new(COLS, ROWS, DEFAULT_FG, DEFAULT_BG);
+    // SAFETY: single-threaded process; `TERM` is initialised exactly once,
+    // here, before `term` is used, and never aliased elsewhere.
+    let term: &mut TerminalCore = unsafe {
+        let slot = TERM.as_ptr() as *mut TerminalCore;
+        TerminalCore::init_in_place(slot, COLS, ROWS, DEFAULT_FG, DEFAULT_BG);
+        &mut *slot
+    };
     let banner = b"\n\
         \x1b[1;36m========================================\x1b[0m\n\
         \x1b[1;36m  lucarne terminal\x1b[0m\n\
         \x1b[1;36m========================================\x1b[0m\n\
         \x1b[90mType 'help' for commands.\x1b[0m\n\n";
     term.process_bytes(banner);
-    renderer::render_screen(&mut front, &term, true);
+    renderer::render_screen(&mut front, term, true);
 
     // First frame: full damage, nothing acknowledged yet (serial 0).
     let mut serial = 0u64;
@@ -231,7 +258,7 @@ pub extern "C" fn _start() -> ! {
                         let dirty = term.process_bytes(&pending[..pending_len]);
                         pending_len = 0;
                         if dirty {
-                            renderer::render_screen(&mut stage.back, &term, cursor_visible);
+                            renderer::render_screen(&mut stage.back, term, cursor_visible);
                             stage.present(&mut client, surface, &[], true);
                         }
                     }
@@ -264,12 +291,12 @@ pub extern "C" fn _start() -> ! {
                 if stage.stale {
                     // A commit failed earlier: resynchronize with a whole-grid
                     // repaint instead of trusting the cursor-cell rect.
-                    renderer::render_screen(&mut stage.back, &term, cursor_visible);
+                    renderer::render_screen(&mut stage.back, term, cursor_visible);
                     stage.present(&mut client, surface, &[], true);
                 } else {
                     let row = term.cursor_row;
                     let col = term.cursor_col;
-                    renderer::render_cell(&mut stage.back, &term, row, col, cursor_visible);
+                    renderer::render_cell(&mut stage.back, term, row, col, cursor_visible);
                     let damage = [Rect {
                         x: (col * CELL_W) as i32,
                         y: (row * CELL_H) as i32,

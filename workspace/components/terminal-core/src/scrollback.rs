@@ -78,6 +78,39 @@ impl CircularBuffer {
         }
     }
 
+    /// Write a fresh ring directly into `this`, one line at a time.
+    ///
+    /// The ring is ~3 MiB. Returning it from [`CircularBuffer::new`] forces
+    /// the caller to reserve that much stack; callers with a small stack
+    /// (`lucarne` runs on the kernel's 64 KiB user stack) initialise a `.bss`
+    /// slot through here instead.
+    ///
+    /// # Safety
+    ///
+    /// `this` must point to writable, properly aligned storage for one
+    /// `CircularBuffer`. Any previous value is overwritten without being
+    /// dropped, so the caller must not hand over a live buffer.
+    pub unsafe fn init_in_place(this: *mut Self, cols: usize, fg: u32, bg: u32) {
+        let blank = Cell::blank(fg, bg);
+        // SAFETY: caller guarantees `this` is valid for writes.
+        unsafe {
+            core::ptr::addr_of_mut!((*this).head).write(0);
+            core::ptr::addr_of_mut!((*this).count).write(0);
+            core::ptr::addr_of_mut!((*this)._cols).write(cols);
+            core::ptr::addr_of_mut!((*this)._default_fg).write(fg);
+            core::ptr::addr_of_mut!((*this)._default_bg).write(bg);
+            let lines = core::ptr::addr_of_mut!((*this).lines) as *mut ScrollLine;
+            for index in 0..SCROLLBACK_LINES {
+                let line = lines.add(index);
+                core::ptr::addr_of_mut!((*line).len).write(0);
+                let cells = core::ptr::addr_of_mut!((*line).cells) as *mut Cell;
+                for col in 0..MAX_COLS {
+                    cells.add(col).write(blank);
+                }
+            }
+        }
+    }
+
     /// Push a completed line into the ring buffer.
     pub fn push_line(&mut self, cells: &[Cell], len: usize) {
         let idx = (self.head + self.count) % SCROLLBACK_LINES;
