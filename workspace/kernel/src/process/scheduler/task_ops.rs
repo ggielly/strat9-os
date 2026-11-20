@@ -783,6 +783,19 @@ pub fn block_current_task() {
                     None
                 } else {
                     current.set_state(TaskState::Blocked);
+                    current.begin_block();
+                    if crate::trace::enabled(crate::trace::category::SCHED_BLOCK) {
+                        crate::trace::record(
+                            crate::trace::category::SCHED_BLOCK,
+                            crate::trace::TraceKind::SchedBlock,
+                            0,
+                            crate::trace::TraceTaskCtx::from_task(current.as_ref()),
+                            0,
+                            0,
+                            current.id.as_u64(),
+                            0,
+                        );
+                    }
                     // Record home CPU so wake_task can route without GLOBAL.
                     current
                         .home_cpu
@@ -860,6 +873,19 @@ fn wake_task_with(id: TaskId, here: bool) -> bool {
         lockdep_acquire(LockRank::Blocked, None);
         let mut blocked = super::BLOCKED_TASKS.lock();
         if let Some(task) = blocked.remove(&id) {
+            task.end_block();
+            if crate::trace::enabled(crate::trace::category::SCHED_WAKE) {
+                crate::trace::record(
+                    crate::trace::category::SCHED_WAKE,
+                    crate::trace::TraceKind::SchedWake,
+                    0,
+                    crate::trace::TraceTaskCtx::from_task(task.as_ref()),
+                    0,
+                    0,
+                    task.id.as_u64(),
+                    0,
+                );
+            }
             task.set_state(TaskState::Ready);
 
             // --- CPU placement: directed (this CPU), else last_cpu, then home_cpu ---
@@ -1050,6 +1076,7 @@ pub fn suspend_task(id: TaskId) -> bool {
                     task.home_cpu
                         .store(ci, core::sync::atomic::Ordering::Relaxed);
                     lockdep_acquire(LockRank::Blocked, None);
+                    task.begin_block();
                     super::BLOCKED_TASKS.lock().insert(task.id, task.clone());
                     lockdep_release(LockRank::Blocked);
                 }
@@ -1101,6 +1128,19 @@ pub fn resume_task(id: TaskId) -> bool {
         lockdep_acquire(LockRank::Blocked, None);
         let mut blocked = super::BLOCKED_TASKS.lock();
         if let Some(task) = blocked.remove(&id) {
+            task.end_block();
+            if crate::trace::enabled(crate::trace::category::SCHED_WAKE) {
+                crate::trace::record(
+                    crate::trace::category::SCHED_WAKE,
+                    crate::trace::TraceKind::SchedWake,
+                    0,
+                    crate::trace::TraceTaskCtx::from_task(task.as_ref()),
+                    0,
+                    0,
+                    task.id.as_u64(),
+                    0,
+                );
+            }
             task.set_state(TaskState::Ready);
 
             // --- CPU placement: prefer last_cpu, then home_cpu ---
@@ -1321,6 +1361,7 @@ pub fn kill_task(id: TaskId) -> bool {
             if !killed {
                 lockdep_acquire(LockRank::Blocked, None);
                 if let Some(task) = super::BLOCKED_TASKS.lock().remove(&id) {
+                    task.end_block();
                     lockdep_release(LockRank::Blocked);
                     let task_pid = task.pid;
                     let _ = sched.clear_task_wake_deadline_locked(id);

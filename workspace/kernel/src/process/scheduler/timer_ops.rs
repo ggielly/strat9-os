@@ -192,6 +192,19 @@ pub(super) fn check_wake_deadlines(current_time_ns: u64) {
 
         for id in to_wake.iter().copied().take(count) {
             if let Some(blocked_task) = blocked.remove(&id) {
+                blocked_task.end_block();
+                if crate::trace::enabled(crate::trace::category::SCHED_WAKE) {
+                    crate::trace::record(
+                        crate::trace::category::SCHED_WAKE,
+                        crate::trace::TraceKind::SchedWake,
+                        0,
+                        crate::trace::TraceTaskCtx::from_task(blocked_task.as_ref()),
+                        0,
+                        0,
+                        blocked_task.id.as_u64(),
+                        0,
+                    );
+                }
                 // Keep the deadline so a contended re-insert below still wakes
                 // on a later tick; clearing it here would strand a deadline-only
                 // sleeper (e.g. nanosleep, which has no wait queue) forever.
@@ -244,6 +257,7 @@ pub(super) fn check_wake_deadlines(current_time_ns: u64) {
                         // so the next tick retries this wake.
                         blocked_task.wake_deadline_ns.store(deadline, Ordering::Relaxed);
                         blocked_task.set_state(TaskState::Blocked);
+                        blocked_task.begin_block();
                         blocked.insert(id, blocked_task);
                     }
                 }

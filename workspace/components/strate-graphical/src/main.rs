@@ -34,10 +34,15 @@ extern crate alloc;
 
 use alloc::{format, vec, vec::Vec};
 use core::{alloc::Layout, panic::PanicInfo};
-use strat9_syscall::{call, data::TimeSpec, number, syscall6};
+use fbsurface::{Rect as FbRect, RectSet as FbRectSet};
 use input_client::{Client, Poll};
 use input_protocol::{
     INPUT_EVENT_POINTER_AXIS, INPUT_EVENT_POINTER_BUTTON, INPUT_EVENT_POINTER_MOTION,
+};
+use strat9_syscall::{
+    call,
+    data::{TimeSpec, WaitSource, WAIT_EVENT_READABLE, WAIT_SOURCE_HANDLE},
+    number, syscall6,
 };
 
 // ---------------------------------------------------------------------------
@@ -115,10 +120,36 @@ impl Buffer {
         let y2 = y.min(self.h);
         let rw = rw.min(self.w.saturating_sub(x2));
         let rh = rh.min(self.h.saturating_sub(y2));
+        if rw == 0 || rh == 0 {
+            return;
+        }
+        let packed = self.pack(c);
+        if b == 4 {
+            // Whole-pixel 32-bit stores: one branch per row instead of one
+            // per pixel, which lets LLVM vectorise the inner loop.
+            for row in y2..y2 + rh {
+                let offset = (row * self.stride + x2 * 4) as usize;
+                let line = unsafe { self.ptr.add(offset) as *mut u32 };
+                for col in 0..rw as usize {
+                    // SAFETY: the row is inside the validated buffer and the
+                    // store is unaligned by construction.
+                    unsafe {
+                        core::ptr::write_unaligned(line.add(col), packed);
+                    }
+                }
+            }
+            return;
+        }
+        // 24 bpp: write the three-byte pattern per pixel.
+        let pattern = [packed as u8, (packed >> 8) as u8, (packed >> 16) as u8];
         for row in y2..y2 + rh {
-            for col in x2..x2 + rw {
-                let o = (row * self.stride + col * b) as usize;
-                self.store(o, c);
+            let offset = (row * self.stride + x2 * b) as usize;
+            let line = unsafe { self.ptr.add(offset) };
+            for col in 0..rw as usize {
+                // SAFETY: the pixel is inside the validated buffer.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(pattern.as_ptr(), line.add(col * 3), 3);
+                }
             }
         }
     }
@@ -664,48 +695,35 @@ fn write_rect_packet(
     matches!(call::write(dfd as usize, scratch), Ok(_))
 }
 
-/// Present only the given rectangle, then send the matching partial damage
-/// command. Returns true when the pixel write succeeded.
-fn present_rect(
-    dfd: u32,
-    dmg_fd: u32,
-    buf: &Buffer,
-    scratch: &mut Vec<u8>,
-    x: u32,
-    y: u32,
-    w: u32,
-    h: u32,
-) -> bool {
-    // With a mapped surface the pixels are already in the display frames;
-    // only the damage notification is needed.
-    let ok = buf.mapped || write_rect_packet(dfd, buf, scratch, x, y, w, h);
-    if ok {
-        send_damage(dmg_fd, x, y, w, h);
-    }
-    ok
-}
+/// Maximum damage rectangles coalesced per presented frame. The kernel accepts
+/// up to 1024; 32 is plenty for a drag (two bands) plus the cursor.
+const MAX_DAMAGE_RECTS: usize = 32;
 
 /// Compare the freshly composited frame against the previously presented one
-/// and return the bounding box of differing pixels (or None if identical).
+/// and return every changed span, coalesced.
 ///
-/// Rows are compared in u64 chunks; only changed rows are scanned byte-wise
-/// for the exact horizontal extent. Cost is ~one RAM pass over unchanged
-/// frames (~3 MB memcmp), far below the syscall+blit it avoids.
-fn damage_bbox(
+/// Rows are compared in u64 chunks; changed rows are scanned byte-wise for the
+/// exact horizontal extent and inserted as one-pixel-high rectangles. The
+/// [`RectSet`] merges vertically adjacent spans with the same extent, so a
+/// diagonal drag yields a handful of rectangles instead of one screen-sized
+/// bounding box. When the set fills, it merges the least-growing entry: the
+/// result can cover clean pixels (overdraw) but never omit a dirty one.
+fn damage_rects(
     prev: &[u8],
     cur: &[u8],
     stride: usize,
+    width: u32,
     height: usize,
     bpp_bytes: usize,
-) -> Option<(u32, u32, u32, u32)> {
-    if prev.len() != cur.len() || prev.len() < stride * height {
-        return Some((0, 0, u32::MAX, u32::MAX)); // size mismatch: force full
+) -> FbRectSet<MAX_DAMAGE_RECTS> {
+    let mut damage = FbRectSet::<MAX_DAMAGE_RECTS>::empty();
+    if bpp_bytes == 0 || stride % bpp_bytes != 0 || width == 0 {
+        return damage;
     }
-
-    let mut min_row: usize = usize::MAX;
-    let mut max_row: usize = 0;
-    let mut min_col: usize = usize::MAX;
-    let mut max_col: usize = 0;
+    if prev.len() != cur.len() || prev.len() < stride * height {
+        damage.include(FbRect::new(0, 0, width, height as u32));
+        return damage;
+    }
 
     for row in 0..height {
         let start = row * stride;
@@ -736,7 +754,7 @@ fn damage_bbox(
             continue;
         }
 
-        // Locate exact extent on this row.
+        // Locate the exact extent on this row, in whole pixels.
         let mut rmin = stride;
         let mut rmax = 0usize;
         for col in 0..stride {
@@ -750,31 +768,35 @@ fn damage_bbox(
         if rmin > rmax {
             continue;
         }
-        if row < min_row {
-            min_row = row;
+        let pmin = (rmin / bpp_bytes) as u32;
+        let pmax = ((rmax / bpp_bytes) as u32).min(width - 1);
+        if pmin > pmax {
+            continue;
         }
-        if row > max_row {
-            max_row = row;
-        }
-        let pmin = rmin / bpp_bytes;
-        let pmax = rmax / bpp_bytes;
-        if pmin < min_col {
-            min_col = pmin;
-        }
-        if pmax > max_col {
-            max_col = pmax;
-        }
+        damage.include(FbRect::new(pmin, row as u32, pmax - pmin + 1, 1));
     }
+    damage
+}
 
-    if min_row == usize::MAX {
-        return None;
+/// Send every rectangle of `damage` in a single `DMG2` message.
+fn send_damage_multi(dmg_fd: u32, damage: &FbRectSet<MAX_DAMAGE_RECTS>) {
+    if damage.is_empty() {
+        return;
     }
-    Some((
-        min_col as u32,
-        min_row as u32,
-        (max_col - min_col + 1) as u32,
-        (max_row - min_row + 1) as u32,
-    ))
+    let count = damage.len().min(MAX_DAMAGE_RECTS);
+    let mut msg = [0u8; 8 + MAX_DAMAGE_RECTS * 8];
+    msg[0..4].copy_from_slice(b"DMG2");
+    msg[4..6].copy_from_slice(&(count as u16).to_le_bytes());
+    msg[6..8].copy_from_slice(&0u16.to_le_bytes());
+    for (index, rect) in damage.iter().take(count).enumerate() {
+        let off = 8 + index * 8;
+        msg[off..off + 2].copy_from_slice(&(rect.x as u16).to_le_bytes());
+        msg[off + 2..off + 4].copy_from_slice(&(rect.y as u16).to_le_bytes());
+        msg[off + 4..off + 6].copy_from_slice(&(rect.w as u16).to_le_bytes());
+        msg[off + 6..off + 8].copy_from_slice(&(rect.h as u16).to_le_bytes());
+    }
+    let len = 8 + count * 8;
+    let _ = call::write(dmg_fd as usize, &msg[..len]);
 }
 
 /// Copy one rect worth of rows from `cur` into `prev` after presentation.
@@ -845,7 +867,10 @@ pub extern "C" fn _start() -> ! {
             e
         )),
     }
-    log(&format!("[graphical-server] screen: {}x{} bpp={}", w, h, bpp));
+    log(&format!(
+        "[graphical-server] screen: {}x{} bpp={}",
+        w, h, bpp
+    ));
 
     // Step 2: Open display framebuffer. This takes framebuffer ownership, so
     // it must happen before clear/damage writes are permitted.
@@ -1051,40 +1076,69 @@ pub extern "C" fn _start() -> ! {
 
         // Nothing changed: skip compositing AND presenting entirely. The
         // diff below would find no damage anyway, but skipping composite
-        // also saves the full offscreen redraw.
+        // also saves the full offscreen redraw. Block on the input port
+        // instead of spinning: a batch/reset wakes the loop, and the
+        // timeout is only a housekeeping deadline.
         if !need_redraw {
             skipped_frames += 1;
-            let _ = call::sched_yield();
+            // Block on the input port instead of spinning. The wait does not
+            // consume the message: the next iteration's `poll` drains it.
+            let mut source = [WaitSource {
+                kind: WAIT_SOURCE_HANDLE,
+                events: WAIT_EVENT_READABLE,
+                id: input.port_handle() as u64,
+                revents: 0,
+            }];
+            let _ = call::handle_wait_many(&mut source, 16_000_000);
             continue;
         }
 
-        // Composite into the offscreen buffer, then present only the
-        // rectangle that actually differs from the last presented frame.
+        // Composite into the offscreen buffer, then present every rectangle
+        // that actually differs from the last presented frame.
         srv.composite();
 
         let bpp_bytes = (srv.buf.bpp / 8) as usize;
         let cur = unsafe { core::slice::from_raw_parts(srv.buf.ptr, fb_sz) };
-        match damage_bbox(
+        let damage = damage_rects(
             &prev_frame,
             cur,
             srv.buf.stride as usize,
+            srv.buf.w,
             srv.buf.h as usize,
             bpp_bytes,
-        ) {
-            None => {}
-            Some((x, y, w, h)) => {
-                let sent = present_rect(
-                    dfd as u32,
-                    dmg_fd as u32,
-                    &srv.buf,
-                    &mut packet_scratch,
-                    x,
-                    y,
-                    w,
-                    h,
-                );
-                if sent {
-                    sync_prev_rect(&mut prev_frame, cur, srv.buf.stride as usize, y, h);
+        );
+        if !damage.is_empty() {
+            // With a mapped surface the pixels are already in the display
+            // frame; only the damage notification is needed. Otherwise upload
+            // each changed rectangle through the scheme first.
+            let mut uploaded = true;
+            if !srv.buf.mapped {
+                for rect in damage.iter() {
+                    if !write_rect_packet(
+                        dfd as u32,
+                        &srv.buf,
+                        &mut packet_scratch,
+                        rect.x,
+                        rect.y,
+                        rect.w,
+                        rect.h,
+                    ) {
+                        uploaded = false;
+                        break;
+                    }
+                }
+            }
+            if uploaded {
+                // One DMG2 for the whole frame instead of one per rect.
+                send_damage_multi(dmg_fd as u32, &damage);
+                for rect in damage.iter() {
+                    sync_prev_rect(
+                        &mut prev_frame,
+                        cur,
+                        srv.buf.stride as usize,
+                        rect.y,
+                        rect.h,
+                    );
                 }
             }
         }
@@ -1097,9 +1151,6 @@ pub extern "C" fn _start() -> ! {
                 frame_count, skipped_frames
             ));
         }
-
-        // Yield
-        let _ = call::sched_yield();
     }
 }
 

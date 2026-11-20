@@ -517,7 +517,7 @@ fn test_handles(ctx: &mut Ctx) {
         call::handle_wait_timeout(sem, 0),
     );
     let _ = check_ok(ctx, "SYS_SEM_WAIT consume token", unsafe {
-        syscall2(number::SYS_SEM_WAIT, sem, 0)
+        syscall1(number::SYS_SEM_WAIT, sem)
     });
     check_expect_err(
         ctx,

@@ -302,11 +302,16 @@ fn build_user_thread_task(
         itimers: crate::process::timer::ITimers::new(),
         wake_pending: core::sync::atomic::AtomicBool::new(false),
         wake_deadline_ns: core::sync::atomic::AtomicU64::new(0),
+        created_ns: crate::sync::scheduler_clock_ns(),
+        blocked_ns_total: core::sync::atomic::AtomicU64::new(0),
+        block_started_ns: core::sync::atomic::AtomicU64::new(0),
         trampoline_entry: core::sync::atomic::AtomicU64::new(0),
         trampoline_stack_top: core::sync::atomic::AtomicU64::new(0),
         trampoline_arg0: core::sync::atomic::AtomicU64::new(0),
         ticks: core::sync::atomic::AtomicU64::new(0),
-        sched_policy: SyncUnsafeCell::new(parent.sched_policy()),
+        sched_policy: core::sync::atomic::AtomicU32::new(
+            parent.sched_policy().to_raw(),
+        ),
         home_cpu: core::sync::atomic::AtomicUsize::new(usize::MAX),
         last_cpu: core::sync::atomic::AtomicUsize::new(usize::MAX),
         affinity_mask: core::sync::atomic::AtomicU64::new(

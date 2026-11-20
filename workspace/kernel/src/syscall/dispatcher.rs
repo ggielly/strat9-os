@@ -39,8 +39,8 @@ use crate::ipc::{channel, port, semaphore, shared_ring, ChanId, PortId, RingId, 
 
 use super::{
     chan, debug, error::SyscallError, exec::sys_execve, fork::sys_fork, iommu, ipc_port, ipc_ring,
-    ipc_v2, net, numbers::*, pci, process as proc_sys, sched, semaphore as sem_handler, transport,
-    vmm, volume, SyscallFrame,
+    ipc_v2, net, numbers::*, pci, process as proc_sys, sched, semaphore as sem_handler, trace,
+    transport, vmm, volume, SyscallFrame,
 };
 use crate::{
     async_io::syscall as async_sys,
@@ -88,6 +88,28 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
     let arg4 = frame.r10;
     let arg5 = frame.r8;
     let _arg6 = frame.r9;
+
+    // Syscall tracing. The mask is checked first so the common (disabled)
+    // path does not even take the scheduler lock to build a context.
+    let trace_ctx = if crate::trace::enabled(crate::trace::category::SYSCALL_ALL) {
+        crate::process::current_task_clone()
+            .map(|t| crate::trace::TraceTaskCtx::from_task(t.as_ref()))
+            .unwrap_or_else(crate::trace::TraceTaskCtx::empty)
+    } else {
+        crate::trace::TraceTaskCtx::empty()
+    };
+    if crate::trace::enabled(crate::trace::category::SYSCALL_ENTER) {
+        crate::trace::record(
+            crate::trace::category::SYSCALL_ENTER,
+            crate::trace::TraceKind::SyscallEnter,
+            0,
+            trace_ctx,
+            0,
+            0,
+            syscall_num as u64,
+            0,
+        );
+    }
 
     // Rate-limited trace with relaxed-count optimisation.
     //
@@ -222,12 +244,15 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
 
         // IPC port syscalls ================================================
         SYS_IPC_CREATE_PORT => ipc_port::sys_ipc_create_port(arg1),
-        SYS_IPC_SEND => ipc_port::sys_ipc_send(arg1, arg2, arg3),
+        SYS_IPC_SEND => ipc_port::sys_ipc_send(arg1, arg2),
+        SYS_IPC_SEND_TIMEOUT => ipc_port::sys_ipc_send_timeout(arg1, arg2, arg3),
         SYS_IPC_TRY_SEND => ipc_port::sys_ipc_try_send(arg1, arg2),
-        SYS_IPC_RECV => ipc_port::sys_ipc_recv(arg1, arg2, arg3),
+        SYS_IPC_RECV => ipc_port::sys_ipc_recv(arg1, arg2),
+        SYS_IPC_RECV_TIMEOUT => ipc_port::sys_ipc_recv_timeout(arg1, arg2, arg3),
         SYS_IPC_TRY_RECV => ipc_port::sys_ipc_try_recv(arg1, arg2),
         SYS_IPC_CONNECT => ipc_port::sys_ipc_connect(arg1, arg2),
-        SYS_IPC_CALL => ipc_port::sys_ipc_call(arg1, arg2, arg3),
+        SYS_IPC_CALL => ipc_port::sys_ipc_call(arg1, arg2),
+        SYS_IPC_CALL_TIMEOUT => ipc_port::sys_ipc_call_timeout(arg1, arg2, arg3),
         SYS_IPC_REPLY => ipc_port::sys_ipc_reply(arg1),
         SYS_IPC_BIND_PORT => ipc_port::sys_ipc_bind_port(arg1, arg2, arg3),
         SYS_IPC_UNBIND_PORT => ipc_port::sys_ipc_unbind_port(arg1, arg2),
@@ -238,7 +263,8 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
 
         // Semaphore syscalls ================================================
         SYS_SEM_CREATE => sem_handler::sys_sem_create(arg1),
-        SYS_SEM_WAIT => sem_handler::sys_sem_wait(arg1, arg2),
+        SYS_SEM_WAIT => sem_handler::sys_sem_wait(arg1),
+        SYS_SEM_WAIT_TIMEOUT => sem_handler::sys_sem_wait_timeout(arg1, arg2),
         SYS_SEM_TRYWAIT => sem_handler::sys_sem_trywait(arg1),
         SYS_SEM_POST => sem_handler::sys_sem_post(arg1),
         SYS_SEM_CLOSE => sem_handler::sys_sem_close(arg1),
@@ -286,8 +312,10 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
 
         // Typed MPMC sync-channel (IPC-02) ==================================
         SYS_CHAN_CREATE => chan::sys_chan_create(arg1),
-        SYS_CHAN_SEND => chan::sys_chan_send(arg1, arg2, arg3),
-        SYS_CHAN_RECV => chan::sys_chan_recv(arg1, arg2, arg3),
+        SYS_CHAN_SEND => chan::sys_chan_send(arg1, arg2),
+        SYS_CHAN_SEND_TIMEOUT => chan::sys_chan_send_timeout(arg1, arg2, arg3),
+        SYS_CHAN_RECV => chan::sys_chan_recv(arg1, arg2),
+        SYS_CHAN_RECV_TIMEOUT => chan::sys_chan_recv_timeout(arg1, arg2, arg3),
         SYS_CHAN_TRY_RECV => chan::sys_chan_try_recv(arg1, arg2),
         SYS_CHAN_CLOSE => chan::sys_chan_close(arg1),
         SYS_MODULE_LOAD => silo::sys_module_load(arg1, arg2),
@@ -420,6 +448,8 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         }
         SYS_DEBUG_LOG => debug::sys_debug_log(arg1, arg2),
         SYS_GETRANDOM => super::random::sys_getrandom(arg1, arg2 as usize, arg3 as u32),
+        SYS_TRACE_CTL => trace::sys_trace_ctl(arg1, arg2),
+        SYS_TRACE_READ => trace::sys_trace_read(arg1, arg2, arg3),
         SYS_SET_ROBUST_LIST => super::robust_list::sys_set_robust_list(arg1, arg2 as usize),
         SYS_GET_ROBUST_LIST => super::robust_list::sys_get_robust_list(arg1 as i64, arg2, arg3),
 
@@ -455,6 +485,23 @@ pub extern "C" fn __strat9_syscall_dispatch(frame: &mut SyscallFrame) -> u64 {
         }
     };
     //=============================================================================================================================
+
+    if crate::trace::enabled(crate::trace::category::SYSCALL_EXIT) {
+        let raw_result = match result {
+            Ok(value) => value,
+            Err(error) => error.to_raw(),
+        };
+        crate::trace::record(
+            crate::trace::category::SYSCALL_EXIT,
+            crate::trace::TraceKind::SyscallExit,
+            0,
+            trace_ctx,
+            0,
+            0,
+            syscall_num as u64,
+            raw_result,
+        );
+    }
 
     match result {
         Ok(val) => {

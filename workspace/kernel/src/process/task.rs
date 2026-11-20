@@ -328,6 +328,14 @@ pub struct Task {
     /// Sleep deadline in nanoseconds (monotonic). If non-zero, the task
     /// is sleeping until this time. Checked by the scheduler to auto-wake.
     pub wake_deadline_ns: AtomicU64,
+    /// Monotonic creation timestamp (scheduler clock, nanoseconds).
+    /// Used to derive ready time for `SYS_SCHED_INFO`.
+    pub created_ns: u64,
+    /// Total time spent blocked, in nanoseconds.
+    pub blocked_ns_total: AtomicU64,
+    /// Timestamp at which the task entered the blocked state (0 = not
+    /// blocked). Cleared and folded into `blocked_ns_total` on wake.
+    pub block_started_ns: AtomicU64,
     /// Program break (end of heap), in bytes. 0 = not yet initialised.
     /// Lazily set to `BRK_BASE` on the first `sys_brk` call.
     /// mmap_hint: next candidate virtual address for anonymous mmap allocations
@@ -339,8 +347,10 @@ pub struct Task {
     pub trampoline_arg0: AtomicU64,
     /// Total CPU ticks consumed by this task
     pub ticks: AtomicU64,
-    /// Scheduling policy (Fair, RealTime, Idle)
-    pub sched_policy: SyncUnsafeCell<crate::process::sched::SchedPolicy>,
+    /// Scheduling policy (Fair, RealTime, Idle), packed as a single atomic
+    /// word (`SchedPolicy::to_raw`/`from_raw`). Atomic because the shell or
+    /// another CPU can read it while the task changes it.
+    pub sched_policy: AtomicU32,
     /// Home CPU index for this task. Set when the task is first scheduled
     /// or explicitly assigned. Used by `wake_task()` to route to the correct
     /// per-CPU runqueue without acquiring `GLOBAL_SCHED_STATE`.
@@ -500,13 +510,33 @@ impl Task {
 
     /// Get the current scheduling policy of the task
     pub fn sched_policy(&self) -> crate::process::sched::SchedPolicy {
-        unsafe { *self.sched_policy.get() }
+        crate::process::sched::SchedPolicy::from_raw(self.sched_policy.load(Ordering::Relaxed))
     }
 
     /// Set the scheduling policy of the task
     pub fn set_sched_policy(&self, policy: crate::process::sched::SchedPolicy) {
-        unsafe {
-            *self.sched_policy.get() = policy;
+        self.sched_policy.store(policy.to_raw(), Ordering::Relaxed);
+    }
+
+    /// Mark the start of a blocked interval (no-op if already marked).
+    pub fn begin_block(&self) {
+        self.block_started_ns.store(
+            crate::sync::scheduler_clock_ns(),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Fold the current blocked interval into `blocked_ns_total`.
+    ///
+    /// Safe to call on a task that was not blocked: a zero start is ignored.
+    pub fn end_block(&self) {
+        let started = self.block_started_ns.swap(0, Ordering::Relaxed);
+        if started != 0 {
+            let now = crate::sync::scheduler_clock_ns();
+            let delta = now.saturating_sub(started);
+            if delta != 0 {
+                self.blocked_ns_total.fetch_add(delta, Ordering::Relaxed);
+            }
         }
     }
 
@@ -1078,11 +1108,14 @@ impl Task {
             itimers: super::timer::ITimers::new(),
             wake_pending: AtomicBool::new(false),
             wake_deadline_ns: AtomicU64::new(0),
+            created_ns: crate::sync::scheduler_clock_ns(),
+            blocked_ns_total: AtomicU64::new(0),
+            block_started_ns: AtomicU64::new(0),
             trampoline_entry: AtomicU64::new(0),
             trampoline_stack_top: AtomicU64::new(0),
             trampoline_arg0: AtomicU64::new(0),
             ticks: AtomicU64::new(0),
-            sched_policy: SyncUnsafeCell::new(Self::default_sched_policy(priority)),
+            sched_policy: AtomicU32::new(Self::default_sched_policy(priority).to_raw()),
             home_cpu: AtomicUsize::new(usize::MAX),
             last_cpu: AtomicUsize::new(usize::MAX),
             affinity_mask: AtomicU64::new(0),
@@ -1162,11 +1195,14 @@ impl Task {
             itimers: super::timer::ITimers::new(),
             wake_pending: AtomicBool::new(false),
             wake_deadline_ns: AtomicU64::new(0),
+            created_ns: crate::sync::scheduler_clock_ns(),
+            blocked_ns_total: AtomicU64::new(0),
+            block_started_ns: AtomicU64::new(0),
             trampoline_entry: AtomicU64::new(0),
             trampoline_stack_top: AtomicU64::new(0),
             trampoline_arg0: AtomicU64::new(0),
             ticks: AtomicU64::new(0),
-            sched_policy: SyncUnsafeCell::new(Self::default_sched_policy(priority)),
+            sched_policy: AtomicU32::new(Self::default_sched_policy(priority).to_raw()),
             home_cpu: AtomicUsize::new(usize::MAX),
             last_cpu: AtomicUsize::new(usize::MAX),
             affinity_mask: AtomicU64::new(0),

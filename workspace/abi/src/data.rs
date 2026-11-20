@@ -777,11 +777,66 @@ pub struct SchedInfo {
     pub fair_wait_ticks: u64,
     /// Absolute wake deadline on the scheduler clock (0 = none armed).
     pub wake_deadline_ns: u64,
+    /// Total time spent in the Blocked state, in nanoseconds.
+    pub blocked_time_ns: u64,
+    /// Derived time spent Ready-but-not-running, in nanoseconds.
+    ///
+    /// Computed as `now - created - run_time - blocked_time`; it includes
+    /// time spent queued in a run queue and is approximate to one tick.
+    pub ready_time_ns: u64,
 }
 
 /// `SchedInfo::flags`: the task exhausted its real-time budget and is
 /// temporarily scheduled as Fair until the period expires.
 pub const SCHED_INFO_FLAG_RT_DEGRADED: u32 = 1 << 0;
+
+/// One kernel trace event, as returned by `SYS_TRACE_READ`.
+///
+/// This is the stable ABI mirror of the kernel's internal `TraceEvent`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TraceRecord {
+    /// Monotonic global sequence number (orders events across CPUs).
+    pub seq: u64,
+    /// Scheduler ticks at the time of the event.
+    pub ticks: u64,
+    /// CPU index.
+    pub cpu: u16,
+    /// Event kind (`TraceKind` in the kernel).
+    pub kind: u16,
+    /// Reserved, zero.
+    pub reserved: u32,
+    /// Category bitmask that produced this event.
+    pub category: u64,
+    /// Event-specific flags.
+    pub flags: u64,
+    /// Kernel task id.
+    pub task_id: u64,
+    /// Process id (0 = kernel task/unknown).
+    pub pid: u32,
+    /// Thread id (0 = unknown).
+    pub tid: u32,
+    /// Address-space CR3 (0 for non-memory events).
+    pub cr3: u64,
+    /// Instruction pointer.
+    pub rip: u64,
+    /// Virtual address / primary payload.
+    pub vaddr: u64,
+    /// First generic argument.
+    pub arg0: u64,
+    /// Second generic argument.
+    pub arg1: u64,
+}
+
+/// Global trace statistics, written by `SYS_TRACE_CTL(TRACE_CTL_STATS)`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TraceStats {
+    /// Events successfully stored in per-CPU rings.
+    pub stored: u64,
+    /// Events dropped because a ring was contended.
+    pub dropped: u64,
+}
 
 macro_rules! assert_abi_struct {
     ($t:ty, $size:expr, $align:expr) => {
@@ -804,4 +859,6 @@ assert_abi_struct!(MemoryRegionInfo, 24, 8);
 assert_abi_struct!(PciAddress, 4, 4);
 assert_abi_struct!(PciProbeCriteria, 12, 4);
 assert_abi_struct!(PciDeviceInfo, 16, 4);
-assert_abi_struct!(SchedInfo, 80, 8);
+assert_abi_struct!(SchedInfo, 96, 8);
+assert_abi_struct!(TraceRecord, 96, 8);
+assert_abi_struct!(TraceStats, 16, 8);

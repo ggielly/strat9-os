@@ -322,6 +322,19 @@ impl GlobalSchedState {
             lockdep_acquire(LockRank::Blocked, None);
             let mut blocked = super::BLOCKED_TASKS.lock();
             if let Some(task) = blocked.remove(&id) {
+                task.end_block();
+                if crate::trace::enabled(crate::trace::category::SCHED_WAKE) {
+                    crate::trace::record(
+                        crate::trace::category::SCHED_WAKE,
+                        crate::trace::TraceKind::SchedWake,
+                        0,
+                        crate::trace::TraceTaskCtx::from_task(task.as_ref()),
+                        0,
+                        0,
+                        task.id.as_u64(),
+                        0,
+                    );
+                }
                 task.set_state(TaskState::Ready);
 
                 // --- CPU placement: prefer last_cpu (cache warmth), then home_cpu ---

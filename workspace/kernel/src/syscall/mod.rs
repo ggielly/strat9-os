@@ -59,6 +59,7 @@ pub mod sched;
 pub mod semaphore;
 pub mod signal;
 pub mod time;
+pub mod trace;
 pub mod transport;
 pub mod vmm;
 pub mod volume;

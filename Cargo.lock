@@ -1119,6 +1119,7 @@ name = "strate-graphical"
 version = "0.1.0"
 dependencies = [
  "alloc-freelist",
+ "fbsurface",
  "input-client",
  "input-protocol",
  "strat9-syscall",

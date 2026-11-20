@@ -38,7 +38,7 @@ use crate::{
     process::{
         current_task_clone,
         sched::{nice::Nice, real_time::RealTimePriority, SchedPolicy},
-        set_task_sched_policy,
+        set_task_sched_policy, Task, TaskPriority,
     },
 };
 
@@ -51,8 +51,15 @@ use strat9_abi::{
 ///
 /// The priority travels in the low 32 bits of the argument and is
 /// interpreted as a signed `i32` so that Nice values below zero survive the
-/// register-width round trip.
-fn decode_policy(policy: u32, priority: i32) -> Result<SchedPolicy, SyscallError> {
+/// register-width round trip. The upper 32 bits must be a valid sign
+/// extension, otherwise the caller is guessing and gets `EINVAL`.
+fn decode_policy(policy: u32, priority: u64) -> Result<SchedPolicy, SyscallError> {
+    let high = priority >> 32;
+    if high != 0 && high != u32::MAX as u64 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let priority = priority as u32 as i32;
+
     match policy {
         SCHED_POLICY_FAIR => {
             if !(-20..=19).contains(&priority) {
@@ -76,6 +83,32 @@ fn decode_policy(policy: u32, priority: i32) -> Result<SchedPolicy, SyscallError
     }
 }
 
+/// Whether `new` gives more CPU entitlement than the task was created with.
+///
+/// The creation [`TaskPriority`] is the delegation ceiling: a task may lower
+/// itself freely (longer Nice, Idle, lower RT priority) but needs an
+/// administrative capability to go above it. This closes the `Nice -20`
+/// starvation hole without trapping a task that temporarily lowered itself:
+/// it can always return to its ceiling.
+fn exceeds_priority_ceiling(base: TaskPriority, new: SchedPolicy) -> bool {
+    use SchedPolicy::*;
+    match (Task::default_sched_policy(base), new) {
+        // Idle is always a downgrade.
+        (_, Idle) => false,
+        // Real-time created tasks may use any Fair value or lower RT prio.
+        (RealTimeRR { .. } | RealTimeFifo { .. }, Fair(_)) => false,
+        (
+            RealTimeRR { prio: b } | RealTimeFifo { prio: b },
+            RealTimeRR { prio: n } | RealTimeFifo { prio: n },
+        ) => n.get() > b.get(),
+        // Fair tasks may move to a greater (lower-priority) Nice value only.
+        (Fair(b), Fair(n)) => n.value().get() < b.value().get(),
+        (Fair(_), RealTimeRR { .. } | RealTimeFifo { .. }) => true,
+        // Idle-created tasks need a capability to become Fair or RT.
+        (Idle, Fair(_) | RealTimeRR { .. } | RealTimeFifo { .. }) => true,
+    }
+}
+
 /// Encode a kernel [`SchedPolicy`] back into the `(policy, priority)` wire
 /// representation used by `SYS_SCHED_GET`.
 fn encode_policy(policy: SchedPolicy) -> (u32, i32) {
@@ -91,52 +124,86 @@ fn encode_policy(policy: SchedPolicy) -> (u32, i32) {
 pub fn sys_sched_set(policy: u64, priority: u64) -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let policy = u32::try_from(policy).map_err(|_| SyscallError::InvalidArgument)?;
-    let priority = priority as u32 as i32;
     let new_policy = decode_policy(policy, priority)?;
 
-    // Elevating to real time is privileged until a dedicated capability
-    // resource exists (R11). Staying at or dropping to a lower class is
-    // always permitted.
-    let already_rt = matches!(
-        task.sched_policy(),
-        SchedPolicy::RealTimeRR { .. } | SchedPolicy::RealTimeFifo { .. }
-    );
-    if matches!(
-        new_policy,
-        SchedPolicy::RealTimeRR { .. } | SchedPolicy::RealTimeFifo { .. }
-    ) && !already_rt
-    {
+    // The creation priority is the delegation ceiling. Raising above it —
+    // including any negative Nice value or a higher RT priority — requires
+    // an administrative capability until a dedicated scheduling capability
+    // resource exists.
+    if exceeds_priority_ceiling(task.priority, new_policy) {
         crate::silo::require_silo_admin()?;
     }
 
     if !set_task_sched_policy(task.id, new_policy) {
-        return Err(SyscallError::NotFound);
+        return Err(SyscallError::NoSuchProcess);
     }
+
+    // Apply the new class immediately instead of waiting for the next tick:
+    // a task switching to RT should not keep running behind Fair work.
+    crate::process::yield_task();
     Ok(0)
 }
 
 /// `SYS_SCHED_GET(346)`: read the calling task's policy and priority.
 ///
-/// Returns `(policy as u32) | ((priority as i32 as u32 as u64) << 32)`.
+/// Returns `(policy as u32) | (priority_byte << 32)`. For Fair, the byte is
+/// Nice offset by 20 (`0` = -20, `20` = 0, `39` = 19); for RT it is the
+/// priority (`0..=99`); Idle reports `0`. Keeping the sign out of bit 63
+/// means the packed return can never be mistaken for an errno by a generic
+/// syscall wrapper.
 pub fn sys_sched_get() -> Result<u64, SyscallError> {
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let (policy, priority) = encode_policy(task.sched_policy());
-    Ok((policy as u64) | ((priority as u32 as u64) << 32))
+    let priority_byte = if policy == SCHED_POLICY_FAIR {
+        (priority + 20) as u8
+    } else {
+        priority as u8
+    };
+    Ok((policy as u64) | ((priority_byte as u64) << 32))
+}
+
+/// The mask of CPUs currently online, as a 64-bit affinity mask.
+fn online_cpu_mask() -> u64 {
+    let mut online = [0usize; crate::arch::percpu::MAX_CPUS];
+    let n = crate::arch::percpu::online_cpu_indices(&mut online);
+    online[..n].iter().fold(0u64, |mask, &cpu| {
+        if cpu < u64::BITS as usize {
+            mask | (1u64 << cpu)
+        } else {
+            mask
+        }
+    })
 }
 
 /// `SYS_SCHED_SETAFFINITY(347)`: replace the calling task's soft CPU mask.
 ///
-/// `0` clears the restriction (all CPUs allowed). Bits outside the platform
-/// CPU range are rejected rather than silently truncated.
+/// `0` restores the silo default (or "all CPUs" for a task outside a silo).
+///
+/// The request is checked against the online CPU mask and against the silo's
+/// configured partition: a task can narrow its affinity but cannot widen it
+/// beyond what the silo was granted.
 pub fn sys_sched_setaffinity(mask: u64) -> Result<u64, SyscallError> {
-    let max_cpus = crate::arch::percpu::MAX_CPUS;
-    if max_cpus < 64 && (mask >> max_cpus) != 0 {
+    let online = online_cpu_mask();
+    if mask != 0 && (mask & !online != 0 || mask & online == 0) {
         return Err(SyscallError::InvalidArgument);
     }
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
+    let allowed = crate::silo::allowed_cpu_affinity_for_task(task.id);
+    let effective = if allowed == 0 {
+        mask
+    } else if mask == 0 {
+        // Clearing within a partitioned silo means "silo default", never
+        // "every CPU".
+        allowed
+    } else if mask & !allowed != 0 {
+        return Err(SyscallError::PermissionDenied);
+    } else {
+        mask
+    };
+
     task.affinity_mask
-        .store(mask, core::sync::atomic::Ordering::Release);
+        .store(effective, core::sync::atomic::Ordering::Release);
     Ok(0)
 }
 
@@ -155,6 +222,15 @@ pub fn sys_sched_info(out_ptr: u64) -> Result<u64, SyscallError> {
 
     let (policy, priority) = encode_policy(task.sched_policy());
     let ticks = task.ticks.load(core::sync::atomic::Ordering::Relaxed);
+    let run_time_ns = ticks.saturating_mul(crate::arch::timer::NS_PER_TICK);
+    let blocked_time_ns = task
+        .blocked_ns_total
+        .load(core::sync::atomic::Ordering::Relaxed);
+    let now = crate::sync::scheduler_clock_ns();
+    let ready_time_ns = now
+        .saturating_sub(task.created_ns)
+        .saturating_sub(run_time_ns)
+        .saturating_sub(blocked_time_ns);
     let mut info = SchedInfo {
         policy,
         state: task.state.load(core::sync::atomic::Ordering::Relaxed) as u32,
@@ -163,7 +239,7 @@ pub fn sys_sched_info(out_ptr: u64) -> Result<u64, SyscallError> {
         affinity_mask: task
             .affinity_mask
             .load(core::sync::atomic::Ordering::Relaxed),
-        run_time_ns: ticks.saturating_mul(crate::arch::timer::NS_PER_TICK),
+        run_time_ns,
         ticks,
         vruntime: task.vruntime.load(core::sync::atomic::Ordering::Relaxed),
         rt_budget_remaining: task
@@ -176,6 +252,8 @@ pub fn sys_sched_info(out_ptr: u64) -> Result<u64, SyscallError> {
         wake_deadline_ns: task
             .wake_deadline_ns
             .load(core::sync::atomic::Ordering::Relaxed),
+        blocked_time_ns,
+        ready_time_ns,
     };
     if task.rt_degraded.load(core::sync::atomic::Ordering::Relaxed) {
         info.flags |= SCHED_INFO_FLAG_RT_DEGRADED;

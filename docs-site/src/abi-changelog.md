@@ -22,18 +22,27 @@ boot when it does not match exactly.
 | 4 | BSS virtual range fields |
 | 5 | `MemoryKind::Bad` (4) and `MemoryKind::AcpiNvs` (5); layout unchanged (132 bytes) |
 
-## 0.5 — scheduling syscalls and IPC timeouts
+## 0.5 - scheduling syscalls and IPC timeouts
 
 Backward-compatible additions (`ABI_VERSION_MINOR = 5`).
 
 - **Added:** syscalls `SYS_SCHED_SET(345)`, `SYS_SCHED_GET(346)`,
   `SYS_SCHED_SETAFFINITY(347)`, `SYS_SCHED_GETAFFINITY(348)`,
-  `SYS_SCHED_INFO(349)`; `data::SchedInfo` (80 bytes) and
+  `SYS_SCHED_INFO(349)`; `data::SchedInfo` (96 bytes) and
   `SCHED_INFO_FLAG_RT_DEGRADED`; policy constants `SCHED_POLICY_*`.
-- **Changed (arguments only):** `SYS_IPC_SEND/RECV/CALL`,
-  `SYS_CHAN_SEND/RECV` and `SYS_SEM_WAIT` take a relative `timeout_ns`
-  (`0` = wait forever) in a previously-unused argument register. Existing
-  callers that pass `0` keep the old blocking semantics.
+- **Added (timed variants):** `SYS_IPC_SEND_TIMEOUT(213)`,
+  `SYS_IPC_RECV_TIMEOUT(214)`, `SYS_IPC_CALL_TIMEOUT(215)`,
+  `SYS_CHAN_SEND_TIMEOUT(225)`, `SYS_CHAN_RECV_TIMEOUT(226)`,
+  `SYS_SEM_WAIT_TIMEOUT(235)`, all taking a relative `timeout_ns`
+  (`0` = wait forever).
+- **Added (tracing):** `SYS_TRACE_CTL(602)`, `SYS_TRACE_READ(603)`,
+  `data::TraceRecord` (96 bytes), `data::TraceStats` (16 bytes), and the
+  `TRACE_CTL_*` / `TRACE_CAT_*` constants. Both calls require silo-admin.
+- **Unchanged:** `SYS_IPC_SEND/RECV/CALL`, `SYS_CHAN_SEND/RECV` and
+  `SYS_SEM_WAIT` keep their existing signatures and blocking semantics.
+  The timed variants were given new numbers on purpose: a pre-0.5 binary
+  calling the old syscalls never has to be reinterpreted as passing a
+  timeout (an unused argument register is undefined, not zero).
 - **Changed (error):** a `SYS_IPC_REPLY` whose reply slot was cancelled
   (timeout, dead client) now returns `EPIPE` instead of `EBADF`.
 

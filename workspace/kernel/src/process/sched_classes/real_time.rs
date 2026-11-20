@@ -63,7 +63,7 @@ impl RealTimePriority {
     }
 
     /// Performs the get operation.
-    pub fn get(self) -> u8 {
+    pub const fn get(self) -> u8 {
         self.0
     }
 }

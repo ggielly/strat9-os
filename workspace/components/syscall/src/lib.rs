@@ -621,7 +621,7 @@ pub mod call {
     }
 
     /// Read the calling task's policy/priority as
-    /// `(policy) | ((priority as i32 as u32) << 32)`.
+    /// `policy | (priority_byte << 32)`. Fair priority is Nice + 20.
     pub fn sched_get() -> error::Result<usize> {
         unsafe { syscall0(number::SYS_SCHED_GET) }
     }
@@ -982,7 +982,13 @@ pub mod call {
 
     /// Send a message through an IPC port.
     pub fn ipc_send(port_handle: usize, msg: &data::IpcMessage) -> error::Result<usize> {
-        ipc_send_timeout(port_handle, msg, 0)
+        unsafe {
+            syscall2(
+                number::SYS_IPC_SEND,
+                port_handle,
+                msg as *const data::IpcMessage as usize,
+            )
+        }
     }
 
     /// Send a message through an IPC port, giving up after `timeout_ns`
@@ -994,7 +1000,7 @@ pub mod call {
     ) -> error::Result<usize> {
         unsafe {
             syscall3(
-                number::SYS_IPC_SEND,
+                number::SYS_IPC_SEND_TIMEOUT,
                 port_handle,
                 msg as *const data::IpcMessage as usize,
                 timeout_ns,
@@ -1017,7 +1023,13 @@ pub mod call {
 
     /// Receive a message from an IPC port (blocking).
     pub fn ipc_recv(port_handle: usize, msg: &mut data::IpcMessage) -> error::Result<usize> {
-        ipc_recv_timeout(port_handle, msg, 0)
+        unsafe {
+            syscall2(
+                number::SYS_IPC_RECV,
+                port_handle,
+                msg as *mut data::IpcMessage as usize,
+            )
+        }
     }
 
     /// Receive a message from an IPC port, giving up after `timeout_ns`
@@ -1030,7 +1042,7 @@ pub mod call {
     ) -> error::Result<usize> {
         unsafe {
             syscall3(
-                number::SYS_IPC_RECV,
+                number::SYS_IPC_RECV_TIMEOUT,
                 port_handle,
                 msg as *mut data::IpcMessage as usize,
                 timeout_ns,
@@ -1062,12 +1074,19 @@ pub mod call {
     ///
     /// On return the message buffer is overwritten with the reply.
     pub fn ipc_call(port_handle: usize, msg: &mut data::IpcMessage) -> error::Result<usize> {
-        ipc_call_timeout(port_handle, msg, 0)
+        unsafe {
+            syscall2(
+                number::SYS_IPC_CALL,
+                port_handle,
+                msg as *mut data::IpcMessage as usize,
+            )
+        }
     }
 
     /// Send a message and wait at most `timeout_ns` for the reply
-    /// (`0` = wait forever). On timeout the reply slot is closed and a late
-    /// server reply fails with `Error::Pipe`.
+    /// (`0` = wait forever). The deadline covers both the blocking send and
+    /// the reply wait. On timeout the reply slot is closed and a late server
+    /// reply fails with `Error::Pipe`.
     pub fn ipc_call_timeout(
         port_handle: usize,
         msg: &mut data::IpcMessage,
@@ -1075,7 +1094,7 @@ pub mod call {
     ) -> error::Result<usize> {
         unsafe {
             syscall3(
-                number::SYS_IPC_CALL,
+                number::SYS_IPC_CALL_TIMEOUT,
                 port_handle,
                 msg as *mut data::IpcMessage as usize,
                 timeout_ns,
@@ -1146,7 +1165,13 @@ pub mod call {
 
     /// Send a message into a channel (blocking if full).
     pub fn chan_send(chan_handle: usize, msg: &data::IpcMessage) -> error::Result<usize> {
-        chan_send_timeout(chan_handle, msg, 0)
+        unsafe {
+            syscall2(
+                number::SYS_CHAN_SEND,
+                chan_handle,
+                msg as *const data::IpcMessage as usize,
+            )
+        }
     }
 
     /// Send a message into a channel, giving up after `timeout_ns`
@@ -1158,7 +1183,7 @@ pub mod call {
     ) -> error::Result<usize> {
         unsafe {
             syscall3(
-                number::SYS_CHAN_SEND,
+                number::SYS_CHAN_SEND_TIMEOUT,
                 chan_handle,
                 msg as *const data::IpcMessage as usize,
                 timeout_ns,
@@ -1168,7 +1193,13 @@ pub mod call {
 
     /// Receive a message from a channel (blocking if empty).
     pub fn chan_recv(chan_handle: usize, msg: &mut data::IpcMessage) -> error::Result<usize> {
-        chan_recv_timeout(chan_handle, msg, 0)
+        unsafe {
+            syscall2(
+                number::SYS_CHAN_RECV,
+                chan_handle,
+                msg as *mut data::IpcMessage as usize,
+            )
+        }
     }
 
     /// Receive a message from a channel, giving up after `timeout_ns`
@@ -1180,7 +1211,7 @@ pub mod call {
     ) -> error::Result<usize> {
         unsafe {
             syscall3(
-                number::SYS_CHAN_RECV,
+                number::SYS_CHAN_RECV_TIMEOUT,
                 chan_handle,
                 msg as *mut data::IpcMessage as usize,
                 timeout_ns,
@@ -1204,6 +1235,35 @@ pub mod call {
     /// Close and destroy a channel.
     pub fn chan_close(chan_handle: usize) -> error::Result<usize> {
         unsafe { syscall1(number::SYS_CHAN_CLOSE, chan_handle) }
+    }
+
+    // ===========================================================================
+    // IPC : Semaphores (block 230-235)
+    // ===========================================================================
+
+    /// Create a counting semaphore with `initial` tokens.
+    pub fn sem_create(initial: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_SEM_CREATE, initial) }
+    }
+
+    /// Wait (decrement) a semaphore, blocking while it is zero.
+    pub fn sem_wait(handle: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_SEM_WAIT, handle) }
+    }
+
+    /// Wait on a semaphore with a timeout in nanoseconds (`0` = forever).
+    pub fn sem_wait_timeout(handle: usize, timeout_ns: usize) -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_SEM_WAIT_TIMEOUT, handle, timeout_ns) }
+    }
+
+    /// Post (increment) a semaphore.
+    pub fn sem_post(handle: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_SEM_POST, handle) }
+    }
+
+    /// Close a semaphore handle.
+    pub fn sem_close(handle: usize) -> error::Result<usize> {
+        unsafe { syscall1(number::SYS_SEM_CLOSE, handle) }
     }
 
     /// Enumerate PCI devices matching `criteria`.
@@ -1549,6 +1609,58 @@ pub mod call {
                 buf.as_ptr() as usize,
                 buf.len(),
                 flags as usize,
+            )
+        }
+    }
+
+    // ========================================================================
+    // Kernel tracing (block 602-603)
+    // ========================================================================
+
+    /// Configure the kernel trace mask. Requires silo-admin capability.
+    ///
+    /// Returns the previous mask.
+    pub fn trace_set_mask(mask: u64) -> error::Result<usize> {
+        unsafe {
+            syscall2(
+                number::SYS_TRACE_CTL,
+                number::TRACE_CTL_SET_MASK as usize,
+                mask as usize,
+            )
+        }
+    }
+
+    /// Read the current kernel trace mask (silo-admin only).
+    pub fn trace_get_mask() -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_TRACE_CTL, number::TRACE_CTL_GET_MASK as usize, 0) }
+    }
+
+    /// Clear all kernel trace rings (silo-admin only).
+    pub fn trace_clear() -> error::Result<usize> {
+        unsafe { syscall2(number::SYS_TRACE_CTL, number::TRACE_CTL_CLEAR as usize, 0) }
+    }
+
+    /// Read global trace statistics (silo-admin only).
+    pub fn trace_stats(out: &mut data::TraceStats) -> error::Result<usize> {
+        unsafe {
+            syscall2(
+                number::SYS_TRACE_CTL,
+                number::TRACE_CTL_STATS as usize,
+                out as *mut data::TraceStats as usize,
+            )
+        }
+    }
+
+    /// Copy trace records into `out` (silo-admin only).
+    ///
+    /// Returns the number of records written.
+    pub fn trace_read(out: &mut [data::TraceRecord]) -> error::Result<usize> {
+        unsafe {
+            syscall3(
+                number::SYS_TRACE_READ,
+                out.as_mut_ptr() as usize,
+                out.len(),
+                0,
             )
         }
     }

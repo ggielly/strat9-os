@@ -15,3 +15,4 @@ strat9-syscall = { path = "../syscall", features = ["userspace"] }
 alloc-freelist = { path = "../alloc-freelist" }
 input-client = { path = "../input-client" }
 input-protocol = { path = "../input-protocol" }
+fbsurface = { path = "../../libs/fbsurface" }

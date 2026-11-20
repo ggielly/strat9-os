@@ -40,6 +40,25 @@ pub mod category {
     pub const MEM_COW: u64 = 1 << 3;
     pub const MEM_COPY: u64 = 1 << 4;
     pub const MEM_ALL: u64 = MEM_PF | MEM_MAP | MEM_UNMAP | MEM_COW | MEM_COPY;
+
+    pub const IPC_SEND: u64 = 1 << 8;
+    pub const IPC_RECV: u64 = 1 << 9;
+    pub const IPC_CALL: u64 = 1 << 10;
+    pub const IPC_REPLY: u64 = 1 << 11;
+    pub const IPC_ALL: u64 = IPC_SEND | IPC_RECV | IPC_CALL | IPC_REPLY;
+
+    pub const SCHED_BLOCK: u64 = 1 << 16;
+    pub const SCHED_WAKE: u64 = 1 << 17;
+    pub const SCHED_SWITCH: u64 = 1 << 18;
+    pub const SCHED_ALL: u64 = SCHED_BLOCK | SCHED_WAKE | SCHED_SWITCH;
+
+    pub const SYSCALL_ENTER: u64 = 1 << 24;
+    pub const SYSCALL_EXIT: u64 = 1 << 25;
+    pub const SYSCALL_ALL: u64 = SYSCALL_ENTER | SYSCALL_EXIT;
+
+    pub const IRQ_ENTER: u64 = 1 << 32;
+    pub const IRQ_EXIT: u64 = 1 << 33;
+    pub const IRQ_ALL: u64 = IRQ_ENTER | IRQ_EXIT;
 }
 
 #[repr(u16)]
@@ -51,6 +70,17 @@ pub enum TraceKind {
     MemUnmap = 3,
     MemCow = 4,
     MemCopy = 5,
+    IpcSend = 6,
+    IpcRecv = 7,
+    IpcCall = 8,
+    IpcReply = 9,
+    SchedBlock = 10,
+    SchedWake = 11,
+    SchedSwitch = 12,
+    SyscallEnter = 13,
+    SyscallExit = 14,
+    IrqEnter = 15,
+    IrqExit = 16,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -105,6 +135,19 @@ impl TraceTaskCtx {
             task_id: 0,
             pid: 0,
             tid: 0,
+            cr3: 0,
+        }
+    }
+
+    /// Build a context from a task without touching its address space.
+    ///
+    /// `cr3` stays 0 for non-memory events so IPC/scheduling tracing does not
+    /// pay for an address-space lookup on the hot path.
+    pub fn from_task(task: &crate::process::Task) -> Self {
+        Self {
+            task_id: task.id.as_u64(),
+            pid: task.pid,
+            tid: task.tid,
             cr3: 0,
         }
     }
@@ -339,6 +382,17 @@ pub fn kind_name(kind: u16) -> &'static str {
         x if x == TraceKind::MemUnmap as u16 => "mem_unmap",
         x if x == TraceKind::MemCow as u16 => "mem_cow",
         x if x == TraceKind::MemCopy as u16 => "mem_copy",
+        x if x == TraceKind::IpcSend as u16 => "ipc_send",
+        x if x == TraceKind::IpcRecv as u16 => "ipc_recv",
+        x if x == TraceKind::IpcCall as u16 => "ipc_call",
+        x if x == TraceKind::IpcReply as u16 => "ipc_reply",
+        x if x == TraceKind::SchedBlock as u16 => "sched_block",
+        x if x == TraceKind::SchedWake as u16 => "sched_wake",
+        x if x == TraceKind::SchedSwitch as u16 => "sched_switch",
+        x if x == TraceKind::SyscallEnter as u16 => "syscall_enter",
+        x if x == TraceKind::SyscallExit as u16 => "syscall_exit",
+        x if x == TraceKind::IrqEnter as u16 => "irq_enter",
+        x if x == TraceKind::IrqExit as u16 => "irq_exit",
         _ => "unknown",
     }
 }

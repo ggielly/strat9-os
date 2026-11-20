@@ -31,9 +31,9 @@
 
 use strat9_abi::{
     data::{
-        FileStat, IpcMessage, SchedInfo, SiloGrantDesc, Stat, TimeSpec, WaitSource,
-        IPC_MESSAGE_ALIGN, IPC_MESSAGE_SIZE, IPC_PAYLOAD_CAPACITY, SILO_GRANT_ACCESS_WRITE,
-        SILO_GRANT_DMA, SILO_GRANT_IRQ, SILO_GRANT_PATH, SILO_GRANT_PCI,
+        FileStat, IpcMessage, SchedInfo, SiloGrantDesc, Stat, TimeSpec, TraceRecord, TraceStats,
+        WaitSource, IPC_MESSAGE_ALIGN, IPC_MESSAGE_SIZE, IPC_PAYLOAD_CAPACITY,
+        SILO_GRANT_ACCESS_WRITE, SILO_GRANT_DMA, SILO_GRANT_IRQ, SILO_GRANT_PATH, SILO_GRANT_PCI,
     },
     errno,
     ipc::IPC_HANDSHAKE_MAGIC,
@@ -79,15 +79,21 @@ const GOLDEN_SYSCALLS: &[(&str, usize)] = &[
     ("SYS_IPC_TRY_SEND", SYS_IPC_TRY_SEND),
     ("SYS_IPC_RING_CREATE", SYS_IPC_RING_CREATE),
     ("SYS_IPC_RING_MAP", SYS_IPC_RING_MAP),
+    ("SYS_IPC_SEND_TIMEOUT", SYS_IPC_SEND_TIMEOUT),
+    ("SYS_IPC_RECV_TIMEOUT", SYS_IPC_RECV_TIMEOUT),
+    ("SYS_IPC_CALL_TIMEOUT", SYS_IPC_CALL_TIMEOUT),
     ("SYS_CHAN_CREATE", SYS_CHAN_CREATE),
     ("SYS_CHAN_SEND", SYS_CHAN_SEND),
     ("SYS_CHAN_RECV", SYS_CHAN_RECV),
     ("SYS_CHAN_TRY_RECV", SYS_CHAN_TRY_RECV),
     ("SYS_CHAN_CLOSE", SYS_CHAN_CLOSE),
+    ("SYS_CHAN_SEND_TIMEOUT", SYS_CHAN_SEND_TIMEOUT),
+    ("SYS_CHAN_RECV_TIMEOUT", SYS_CHAN_RECV_TIMEOUT),
     ("SYS_SEM_CREATE", SYS_SEM_CREATE),
     ("SYS_SEM_WAIT", SYS_SEM_WAIT),
     ("SYS_SEM_TRYWAIT", SYS_SEM_TRYWAIT),
     ("SYS_SEM_POST", SYS_SEM_POST),
+    ("SYS_SEM_WAIT_TIMEOUT", SYS_SEM_WAIT_TIMEOUT),
     ("SYS_SEM_CLOSE", SYS_SEM_CLOSE),
     ("SYS_PCI_ENUM", SYS_PCI_ENUM),
     ("SYS_PCI_CFG_READ", SYS_PCI_CFG_READ),
@@ -208,6 +214,8 @@ const GOLDEN_SYSCALLS: &[(&str, usize)] = &[
     ("SYS_CLOCK_NANOSLEEP", SYS_CLOCK_NANOSLEEP),
     ("SYS_DEBUG_LOG", SYS_DEBUG_LOG),
     ("SYS_GETRANDOM", SYS_GETRANDOM),
+    ("SYS_TRACE_CTL", SYS_TRACE_CTL),
+    ("SYS_TRACE_READ", SYS_TRACE_READ),
     ("SYS_SET_ROBUST_LIST", SYS_SET_ROBUST_LIST),
     ("SYS_GET_ROBUST_LIST", SYS_GET_ROBUST_LIST),
     ("SYS_MODULE_LOAD", SYS_MODULE_LOAD),
@@ -323,7 +331,7 @@ fn syscall_table_is_exhaustive() {
     // table, this count check fails and forces a conscious review.
     assert_eq!(
         GOLDEN_SYSCALLS.len(),
-        218,
+        226,
         "golden table out of sync: add new SYS_* consts AND their pinned values"
     );
 }
@@ -409,12 +417,26 @@ fn struct_sizes_are_pinned() {
 
 #[test]
 fn sched_info_layout_is_pinned() {
-    assert_eq!(size_of::<SchedInfo>(), 80);
+    assert_eq!(size_of::<SchedInfo>(), 96);
     assert_eq!(align_of::<SchedInfo>(), 8);
     assert_eq!(core::mem::offset_of!(SchedInfo, policy), 0);
     assert_eq!(core::mem::offset_of!(SchedInfo, priority), 8);
     assert_eq!(core::mem::offset_of!(SchedInfo, affinity_mask), 16);
     assert_eq!(core::mem::offset_of!(SchedInfo, wake_deadline_ns), 72);
+    assert_eq!(core::mem::offset_of!(SchedInfo, blocked_time_ns), 80);
+    assert_eq!(core::mem::offset_of!(SchedInfo, ready_time_ns), 88);
+}
+
+#[test]
+fn trace_record_layout_is_pinned() {
+    assert_eq!(size_of::<TraceRecord>(), 96);
+    assert_eq!(align_of::<TraceRecord>(), 8);
+    assert_eq!(core::mem::offset_of!(TraceRecord, seq), 0);
+    assert_eq!(core::mem::offset_of!(TraceRecord, cpu), 16);
+    assert_eq!(core::mem::offset_of!(TraceRecord, category), 24);
+    assert_eq!(core::mem::offset_of!(TraceRecord, rip), 64);
+    assert_eq!(core::mem::offset_of!(TraceRecord, arg1), 88);
+    assert_eq!(size_of::<TraceStats>(), 16);
 }
 
 #[test]

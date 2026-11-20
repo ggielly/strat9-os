@@ -1432,6 +1432,22 @@ pub fn require_silo_admin() -> Result<(), SyscallError> {
     }
 }
 
+/// Return the CPU affinity partition configured for the silo owning `task`,
+/// or `0` when the task is not in a silo or the silo has no restriction.
+///
+/// Used by `SYS_SCHED_SETAFFINITY` to prevent a task from widening its
+/// affinity beyond the silo's partition.
+pub fn allowed_cpu_affinity_for_task(task: crate::process::TaskId) -> u64 {
+    let mgr = SILO_MANAGER.lock();
+    let Some(silo_id) = mgr.silo_for_task(task) else {
+        return 0;
+    };
+    match mgr.get(silo_id) {
+        Ok(silo) => silo.config.cpu_affinity_mask,
+        Err(_) => 0,
+    }
+}
+
 /// Resolve a capability handle to its resource id, checking resource type
 /// and required permissions.
 fn resolve_resource_handle(

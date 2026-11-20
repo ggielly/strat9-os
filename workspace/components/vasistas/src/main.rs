@@ -74,19 +74,22 @@ use input_protocol::{
     NormalizedEvent, INPUT_EVENT_KEY, INPUT_EVENT_POINTER_AXIS, INPUT_EVENT_POINTER_BUTTON,
     INPUT_EVENT_POINTER_MOTION, INPUT_EVENT_TEXT,
 };
-use vasistas_backend::encode;
+use strat9_syscall::{
+    call,
+    data::{
+        IpcMessage, TimeSpec, WaitSource, WAIT_EVENT_HANGUP, WAIT_EVENT_READABLE,
+        WAIT_SOURCE_HANDLE,
+    },
+    error::Error,
+    number, syscall6,
+};
+use vasistas_backend::{encode, intersects, DamageSet, Region as OcclusionRegion};
 use vasistas_core::{
-    Backend, Layer, PeerId, RegionHandle, SessionId, Server, SurfaceId, Transport,
+    Backend, Layer, PeerId, RegionHandle, Server, SessionId, SurfaceId, Transport,
 };
 use vasistas_protocol::{
     Body, Header, InputBatch, InputRecord, Opcode, Rect, HEADER_LEN, INPUT_EVENT_FOCUS_GAINED,
     INPUT_EVENT_FOCUS_LOST, INPUT_FLAG_ABSOLUTE, MAX_MESSAGE_BYTES, MAX_RECTS,
-};
-use strat9_syscall::{
-    call,
-    data::{IpcMessage, TimeSpec, WaitSource, WAIT_EVENT_HANGUP, WAIT_EVENT_READABLE, WAIT_SOURCE_HANDLE},
-    error::Error,
-    number, syscall6,
 };
 
 /// Server namespace path (A.1).
@@ -99,11 +102,13 @@ const MAX_REGIONS: usize = 128;
 const PAGE_SIZE: usize = 4096;
 /// Receive budget per loop iteration (A.7: bounded work per turn).
 const RECV_BUDGET: usize = 16;
-/// Idle sleep, in nanoseconds.
-const IDLE_NS: u64 = 2_000_000;
-/// Log the counters every this many idle/served iterations (2 ms idle sleep:
+/// Idle wait, in nanoseconds: the frame deadline when no event arrives. A
+/// commit wakes the server port immediately, so this only paces housekeeping
+/// (peer-queue flush, retired-region cleanup) at ~60 Hz instead of spinning.
+const IDLE_NS: u64 = 16_000_000;
+/// Log the counters every this many idle/served iterations (16 ms idle sleep:
 /// about 60 s). A shorter period floods the serial line for no new evidence.
-const LOG_EVERY: u64 = 30_000;
+const LOG_EVERY: u64 = 3_750;
 /// Consecutive ready-but-unserved turns before the loop backs off.
 const STALL_LIMIT: u32 = 4;
 /// Back-off sleep once [`STALL_LIMIT`] is reached, in nanoseconds.
@@ -114,6 +119,15 @@ const PEER_QUEUE_FRAMES: usize = 8;
 const MAX_MESSAGE: usize = 1008;
 /// Software cursor side, in pixels (hotspot at the top-left corner).
 const CURSOR_SIZE: u32 = 16;
+/// One 16x16 XRGB8888 save-under buffer (the only copy kept to restore the
+/// pixels hidden by the software cursor).
+const CURSOR_SAVE_BYTES: usize = (CURSOR_SIZE * CURSOR_SIZE * 4) as usize;
+/// Maximum damage rectangles coalesced into one `DMG2` message. Matches the
+/// protocol commit cap, well below the kernel's 1024-rect limit.
+const MAX_DAMAGE_RECTS: usize = MAX_RECTS;
+/// Occlusion-region capacity per damage rect. Overflow degrades to a superset
+/// (overdraw, never a hole), so a small value is safe.
+const REGION_CAPACITY: usize = 32;
 /// A.3.1 object id of the single output. A.3.1 reserves object 0 for
 /// connection-scoped messages, so the only output is numbered 1.
 const DISPLAY_OUTPUT_ID: u64 = 1;
@@ -207,9 +221,6 @@ struct Region {
 /// The screen this server owns (`fb` is a mapped user address).
 struct Screen {
     fb: usize,
-    /// Private composited frame (anonymous mmap), sized `stride * height`.
-    back: usize,
-    back_len: usize,
     width: u32,
     height: u32,
     stride: u32,
@@ -227,6 +238,11 @@ struct DisplayBackend {
     cursor_shape: u32,
     /// Set once the cursor has been painted over the framebuffer.
     cursor_drawn: bool,
+    /// Pixels hidden by the software cursor, restored before any composite or
+    /// cursor move. Replaces the old full-screen backbuffer.
+    cursor_save: [u8; CURSOR_SAVE_BYTES],
+    /// Set while `cursor_save` holds the pixels under the painted cursor.
+    cursor_saved: bool,
 }
 
 impl DisplayBackend {
@@ -238,6 +254,8 @@ impl DisplayBackend {
             screen,
             regions: [None; MAX_REGIONS],
             cursor_drawn: false,
+            cursor_save: [0; CURSOR_SAVE_BYTES],
+            cursor_saved: false,
         }
     }
 
@@ -267,21 +285,52 @@ impl DisplayBackend {
         })
     }
 
-    /// Copy `rect` (screen space) from the cursor-free backbuffer to the
-    /// framebuffer. Never reads the framebuffer.
-    fn restore_rect(&mut self, rect: Rect) {
+    /// Save the framebuffer pixels under `rect` (the cursor rectangle) so the
+    /// cursor can be erased later without keeping a full-screen backbuffer.
+    fn save_cursor(&mut self, rect: Rect) {
         let stride = self.screen.stride as usize;
         let row_bytes = rect.w as usize * 4;
+        let mut offset = 0usize;
         for row in rect.y as usize..(rect.y as u32 + rect.h) as usize {
-            let offset = row * stride + rect.x as usize * 4;
+            let src = row * stride + rect.x as usize * 4;
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    (self.screen.back as *const u8).add(offset),
-                    (self.screen.fb as *mut u8).add(offset),
+                    (self.screen.fb as *const u8).add(src),
+                    self.cursor_save.as_mut_ptr().add(offset),
                     row_bytes,
                 );
             }
+            offset += row_bytes;
         }
+        self.cursor_saved = true;
+    }
+
+    /// Restore the pixels hidden by the painted cursor, if any.
+    ///
+    /// Leaves the framebuffer cursor-free and the cursor marked as not drawn.
+    fn restore_cursor(&mut self) {
+        if !self.cursor_saved {
+            self.cursor_drawn = false;
+            return;
+        }
+        if let Some(rect) = self.cursor_rect(self.cursor_x, self.cursor_y) {
+            let stride = self.screen.stride as usize;
+            let row_bytes = rect.w as usize * 4;
+            let mut offset = 0usize;
+            for row in rect.y as usize..(rect.y as u32 + rect.h) as usize {
+                let dst = row * stride + rect.x as usize * 4;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        self.cursor_save.as_ptr().add(offset),
+                        (self.screen.fb as *mut u8).add(dst),
+                        row_bytes,
+                    );
+                }
+                offset += row_bytes;
+            }
+        }
+        self.cursor_saved = false;
+        self.cursor_drawn = false;
     }
 
     /// Paint the selected cursor shape over the framebuffer, clipped to `rect`.
@@ -295,13 +344,27 @@ impl DisplayBackend {
                 if style == 0 {
                     continue;
                 }
-                let color = if style == 1 { 0x0000_0000u32 } else { 0x00FF_FFFFu32 };
+                let color = if style == 1 {
+                    0x0000_0000u32
+                } else {
+                    0x00FF_FFFFu32
+                };
                 let offset = row as usize * stride + col as usize * 4;
                 unsafe {
                     core::ptr::write_unaligned((self.screen.fb as *mut u32).add(offset / 4), color);
                 }
             }
         }
+    }
+
+    /// Save-under then draw the cursor at its current position.
+    fn paint_cursor_now(&mut self) {
+        let Some(rect) = self.cursor_rect(self.cursor_x, self.cursor_y) else {
+            return;
+        };
+        self.save_cursor(rect);
+        self.paint_cursor(self.cursor_x, self.cursor_y, rect);
+        self.cursor_drawn = true;
     }
 
     /// Clamp `(x, y)` to the screen, restore the old cursor, paint the new one
@@ -319,36 +382,113 @@ impl DisplayBackend {
         } else {
             None
         };
-        if let Some(rect) = old {
-            self.restore_rect(rect);
-        }
+        self.restore_cursor();
         self.cursor_x = x;
         self.cursor_y = y;
-        let mut rects = [Rect::default(); 2];
-        let mut count = 0usize;
+        let new = self.cursor_rect(x, y);
+        self.paint_cursor_now();
+        let mut damage = DamageSet::<MAX_DAMAGE_RECTS>::empty();
         if let Some(rect) = old {
-            rects[count] = rect;
-            count += 1;
+            damage.include(rect);
         }
-        if let Some(rect) = self.cursor_rect(x, y) {
-            self.paint_cursor(x, y, rect);
-            if count == 0 || rects[0] != rect {
-                rects[count] = rect;
-                count += 1;
-            }
+        if let Some(rect) = new {
+            damage.include(rect);
         }
-        self.cursor_drawn = true;
-        self.send_damage(&rects[..count]);
+        self.send_damage_set(&damage);
         (x, y)
     }
 
-    fn send_damage(&mut self, rects: &[Rect]) {
-        if rects.is_empty() {
+    /// Send one `DMG2` message for a coalesced damage set.
+    fn send_damage_set(&mut self, damage: &DamageSet<MAX_DAMAGE_RECTS>) {
+        if damage.is_empty() {
             return;
         }
-        let mut message = [0u8; 8 + MAX_RECTS * 8];
-        if let Ok(len) = encode(0, rects, &mut message) {
+        let mut rects = [Rect::default(); MAX_DAMAGE_RECTS];
+        let mut count = 0usize;
+        for rect in damage.iter() {
+            rects[count] = rect;
+            count += 1;
+        }
+        let mut message = [0u8; 8 + MAX_DAMAGE_RECTS * 8];
+        if let Ok(len) = encode(0, &rects[..count], &mut message) {
             let _ = call::write(self.screen.damage_fd, &message[..len]);
+        }
+    }
+
+    fn send_damage(&mut self, rects: &[Rect]) {
+        let mut damage = DamageSet::<MAX_DAMAGE_RECTS>::empty();
+        for rect in rects {
+            if rect.w == 0 || rect.h == 0 || rect.x < 0 || rect.y < 0 {
+                continue;
+            }
+            damage.include(*rect);
+        }
+        self.send_damage_set(&damage);
+    }
+
+    /// Copy the visible pieces of one layer into the mapped framebuffer.
+    ///
+    /// Only one destination copy is made: the old private backbuffer is gone,
+    /// replaced by the 16x16 cursor save-under.
+    fn copy_visible(
+        &mut self,
+        layer: Layer,
+        region: Region,
+        visible: &OcclusionRegion<REGION_CAPACITY>,
+        stride: usize,
+        fb_len: u64,
+    ) {
+        // Bounded view over the layer's own mapping: the server owns the
+        // mapping, so no `SharedPixels` wrapper is needed, and the view never
+        // outlives this layer's copy.
+        // SAFETY: `allocate` mapped `region.len` bytes (>= `source_len`) at
+        // `region.addr` and the entry is still live in the regions table.
+        let source_len = region.stride as usize * region.height as usize;
+        let source = unsafe { slice::from_raw_parts(region.addr as *const u8, source_len) };
+        let source_stride = region.stride as u64;
+
+        for hit in visible.iter() {
+            let row_bytes = hit.w as usize * 4;
+            let source_x = (hit.x as i64 - layer.x as i64) * 4;
+            if source_x < 0 {
+                continue;
+            }
+            let source_x = source_x as u64;
+            let dest_x = hit.x as u64 * 4;
+            for row in hit.y as u64..hit.y as u64 + hit.h as u64 {
+                let source_end = (row - layer.y as u64)
+                    .checked_mul(source_stride)
+                    .and_then(|offset| offset.checked_add(source_x))
+                    .and_then(|offset| offset.checked_add(row_bytes as u64));
+                let dest_end = row
+                    .checked_mul(stride as u64)
+                    .and_then(|offset| offset.checked_add(dest_x))
+                    .and_then(|offset| offset.checked_add(row_bytes as u64));
+                let (source_end, dest_end) = match (source_end, dest_end) {
+                    // Unreachable for a validated rect over a live region;
+                    // skip the row instead of failing the frame.
+                    (Some(source_end), Some(dest_end)) => (source_end, dest_end),
+                    _ => continue,
+                };
+                if source_end > source.len() as u64 || dest_end > fb_len {
+                    continue;
+                }
+                let source_start = (source_end - row_bytes as u64) as usize;
+                let dest_start = (dest_end - row_bytes as u64) as usize;
+                let Some(src) = source.get(source_start..source_start + row_bytes) else {
+                    continue;
+                };
+                // SAFETY: the destination row was bounds-checked against the
+                // mapped framebuffer (`fb_len`), it does not alias the source
+                // mapping, and this server is single-threaded.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        src.as_ptr(),
+                        (self.screen.fb as *mut u8).add(dest_start),
+                        row_bytes,
+                    );
+                }
+            }
         }
     }
 }
@@ -465,6 +605,20 @@ impl Backend for DisplayBackend {
 
     fn composite(&mut self, bottom_to_top: &[Layer], rects: &[Rect]) -> Result<(), Self::Error> {
         let stride = self.screen.stride as usize;
+        let fb_len = (self.screen.stride as u64) * (self.screen.height as u64);
+        let cursor_was_drawn = self.cursor_drawn;
+        // Work on a cursor-free framebuffer: the pixels copied under the
+        // cursor are the real content, and the save-under stays valid.
+        self.restore_cursor();
+
+        let mut damage = DamageSet::<MAX_DAMAGE_RECTS>::empty();
+        let cursor = if cursor_was_drawn {
+            self.cursor_rect(self.cursor_x, self.cursor_y)
+        } else {
+            None
+        };
+        let mut cursor_hit = false;
+
         for rect in rects {
             // Guard: the core clips every rect to the output, so anything
             // empty or out of bounds is skipped silently, never failed.
@@ -477,98 +631,53 @@ impl Backend for DisplayBackend {
             {
                 continue;
             }
-            for layer in bottom_to_top {
+            let screen_rect = *rect;
+            damage.include(screen_rect);
+            if let Some(cursor) = cursor {
+                if intersects(screen_rect, cursor) {
+                    cursor_hit = true;
+                }
+            }
+
+            // Occlusion culling (Photon's region model): paint top-to-bottom
+            // and shrink `visited` by each layer, so a covered window is not
+            // copied at all. Pixels already covered never reach the blit.
+            let mut visited = OcclusionRegion::<REGION_CAPACITY>::from_rect(screen_rect);
+            for layer in bottom_to_top.iter().rev() {
+                if visited.is_empty() {
+                    break;
+                }
                 // A handle missing from the regions table is skipped
                 // silently: a log per frame would flood the serial line.
                 let Some(region) = self.region(layer.region) else {
                     continue;
                 };
                 let region = *region;
-                let Some(hit) = rect_intersect(
-                    *rect,
-                    Rect {
-                        x: layer.x as i32,
-                        y: layer.y as i32,
-                        w: region.width,
-                        h: region.height,
-                    },
-                ) else {
-                    continue;
+                let layer_rect = Rect {
+                    x: layer.x as i32,
+                    y: layer.y as i32,
+                    w: region.width,
+                    h: region.height,
                 };
-                // Bounded view over the layer's own mapping: the server owns
-                // the mapping, so no `SharedPixels` wrapper is needed, and
-                // the view never outlives this layer's copy.
-                // SAFETY: `allocate` mapped `region.len` bytes (>=
-                // `source_len`) at `region.addr` and the entry is still live
-                // in the regions table.
-                let source_len = region.stride as usize * region.height as usize;
-                let source = unsafe { slice::from_raw_parts(region.addr as *const u8, source_len) };
-                let source_stride = region.stride as u64;
-                let row_bytes = hit.w as usize * 4;
-                let source_x = (hit.x - layer.x as i32) as u64 * 4;
-                let dest_x = hit.x as u64 * 4;
-                // Copy the intersecting rows into the private backbuffer and
-                // into the mapped framebuffer (identical screen layout, one
-                // offset). All offsets are checked in u64 before any raw
-                // pointer is formed.
-                for row in hit.y as u64..hit.y as u64 + hit.h as u64 {
-                    let source_end = (row - layer.y as u64)
-                        .checked_mul(source_stride)
-                        .and_then(|offset| offset.checked_add(source_x))
-                        .and_then(|offset| offset.checked_add(row_bytes as u64));
-                    let dest_end = row
-                        .checked_mul(stride as u64)
-                        .and_then(|offset| offset.checked_add(dest_x))
-                        .and_then(|offset| offset.checked_add(row_bytes as u64));
-                    let (source_end, dest_end) = match (source_end, dest_end) {
-                        // Unreachable for a validated rect over a live
-                        // region; skip the row instead of failing the frame.
-                        (Some(source_end), Some(dest_end)) => (source_end, dest_end),
-                        _ => continue,
-                    };
-                    if source_end > source.len() as u64 || dest_end > self.screen.back_len as u64 {
-                        continue;
-                    }
-                    let source_start = (source_end - row_bytes as u64) as usize;
-                    let dest_start = (dest_end - row_bytes as u64) as usize;
-                    let Some(src) = source.get(source_start..source_start + row_bytes) else {
-                        continue;
-                    };
-                    // SAFETY: the destination rows of the private backbuffer
-                    // (`back_len` bytes) and of the mapped framebuffer (same
-                    // size) were bounds-checked above; neither aliases the
-                    // source mapping, and this server is single-threaded.
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            src.as_ptr(),
-                            (self.screen.back as *mut u8).add(dest_start),
-                            row_bytes,
-                        );
-                        core::ptr::copy_nonoverlapping(
-                            src.as_ptr(),
-                            (self.screen.fb as *mut u8).add(dest_start),
-                            row_bytes,
-                        );
-                    }
+                let visible = visited.intersect_rect(layer_rect);
+                if !visible.is_empty() {
+                    self.copy_visible(*layer, region, &visible, stride, fb_len);
                 }
+                visited.subtract(layer_rect);
             }
-            // Composite overwrote the framebuffer with cursor-free content:
-            // repaint the cursor when this rect covered it, and join its
-            // rectangle to the damage so the scanout shows it again.
-            let mut damaged = [*rect, Rect::default()];
-            let mut damaged_len = 1usize;
-            if self.cursor_drawn {
-                if let Some(cursor) = self.cursor_rect(self.cursor_x, self.cursor_y) {
-                    if rect_intersect(*rect, cursor).is_some() {
-                        self.paint_cursor(self.cursor_x, self.cursor_y, cursor);
-                        damaged[1] = cursor;
-                        damaged_len = 2;
-                    }
-                }
-            }
-            // One `DMG2` record per rect, never per layer.
-            self.send_damage(&damaged[..damaged_len]);
         }
+
+        // Put the cursor back on top. It is only re-damaged when composition
+        // actually overwrote its pixels.
+        if cursor_was_drawn {
+            self.paint_cursor_now();
+            if cursor_hit {
+                if let Some(cursor) = cursor {
+                    damage.include(cursor);
+                }
+            }
+        }
+        self.send_damage_set(&damage);
         Ok(())
     }
 
@@ -579,17 +688,16 @@ impl Backend for DisplayBackend {
         if shape == self.cursor_shape {
             return;
         }
+        let was_drawn = self.cursor_drawn;
+        self.restore_cursor();
         self.cursor_shape = shape;
-        // Repaint immediately when the cursor is already visible: restore the
-        // pixels under the old shape, draw the new one, damage the rectangle.
-        if !self.cursor_drawn {
+        if !was_drawn {
             return;
         }
         let Some(rect) = self.cursor_rect(self.cursor_x, self.cursor_y) else {
             return;
         };
-        self.restore_rect(rect);
-        self.paint_cursor(self.cursor_x, self.cursor_y, rect);
+        self.paint_cursor_now();
         self.send_damage(&[rect]);
     }
 }
@@ -674,9 +782,14 @@ impl Transport for PeerTransport {
         }
         if let Ok((header, body)) = Header::decode_message(message) {
             if header.opcode == Opcode::ERROR.value() {
-                if let Ok(Body::Error { code, .. }) = Body::decode(header.opcode, header.object_id, body) {
+                if let Ok(Body::Error { code, .. }) =
+                    Body::decode(header.opcode, header.object_id, body)
+                {
                     let _ = call::write(2, b"vasistas: wire ERROR code=");
-                    let mut line = Line { buffer: [0; 192], len: 0 };
+                    let mut line = Line {
+                        buffer: [0; 192],
+                        len: 0,
+                    };
                     let _ = line.write_fmt(format_args!("{}\n", code));
                     let _ = call::write(2, &line.buffer[..line.len]);
                 }
@@ -746,7 +859,6 @@ static PEERS: StaticCell<[Option<(PeerId, PeerTransport)>; MAX_PEERS]> =
     StaticCell::new([const { None }; MAX_PEERS]);
 
 fn main_loop(server_port: usize, display: Screen) -> ! {
-    let back_len = display.back_len;
     let output_width = display.width;
     let output_height = display.height;
     let output_stride = display.stride;
@@ -757,9 +869,8 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
     let server = unsafe { Server::init_at(&mut *SERVER.as_ptr(), backend) };
     // SAFETY: same single-threaded contract as `SERVER`; `peers` is the only
     // reference to the static and lives for the whole loop.
-    let peers: &mut [Option<(PeerId, PeerTransport)>; MAX_PEERS] =
-        unsafe { &mut *PEERS.as_ptr() };
-    install_global_budget(server, back_len);
+    let peers: &mut [Option<(PeerId, PeerTransport)>; MAX_PEERS] = unsafe { &mut *PEERS.as_ptr() };
+    install_global_budget(server);
     // A.6: a ping-pong pair at output size must fit, so a full-screen client
     // is not capped below two buffers by the fixed 8 MiB floor.
     let output_pixels = (output_stride as usize).saturating_mul(output_height as usize);
@@ -768,7 +879,9 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
         .set_pixel_quota(output_pixels.saturating_mul(2));
     // The core clamps geometry and clips damage to the output: give it the
     // real screen size, not the tile-grid default.
-    server.core_mut().set_output_size(output_width, output_height);
+    server
+        .core_mut()
+        .set_output_size(output_width, output_height);
     let mut iterations: u64 = 0;
     let mut focused: Option<(SessionId, SurfaceId)> = None;
     // Vasistas is the active display server: it subscribes and takes input
@@ -847,7 +960,9 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
                 served_hangup = true;
                 if Some(ready) == input_slot {
                     input_failed = true;
-                } else if let Some(index) = map.get(ready).copied().filter(|slot| *slot != usize::MAX) {
+                } else if let Some(index) =
+                    map.get(ready).copied().filter(|slot| *slot != usize::MAX)
+                {
                     if let Some((peer, _)) = peers[index].as_ref() {
                         log(&format_args!("vasistas: peer gone"));
                         let peer = *peer;
@@ -985,7 +1100,13 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
         // report FOCUS_LOST once and forget the focus.
         if let Some((session, surface)) = focused {
             if matches!(server.core().surface(session, surface), Ok(record) if record.hidden) {
-                send_focus(server, peers, (session, surface), INPUT_EVENT_FOCUS_LOST, focus_epoch);
+                send_focus(
+                    server,
+                    peers,
+                    (session, surface),
+                    INPUT_EVENT_FOCUS_LOST,
+                    focus_epoch,
+                );
                 focused = None;
                 log(&format_args!("vasistas: focus lost: surface hidden"));
             }
@@ -1086,7 +1207,12 @@ fn main_loop(server_port: usize, display: Screen) -> ! {
         // most once per idle period. Logging every fixed number of turns
         // turns a busy loop into a serial flood.
         let stats = server.core().stats();
-        let snapshot = (stats.sessions, stats.surfaces, stats.buffers, stats.used_bytes);
+        let snapshot = (
+            stats.sessions,
+            stats.surfaces,
+            stats.buffers,
+            stats.used_bytes,
+        );
         if snapshot != last_stats || iterations.wrapping_sub(last_stats_iter) >= LOG_EVERY {
             log(&format_args!(
                 "vasistas: sessions={} surfaces={} buffers={} used_bytes={}",
@@ -1121,23 +1247,6 @@ fn peer_slot(peers: &[Option<(PeerId, PeerTransport)>; MAX_PEERS], peer: PeerId)
     peers
         .iter()
         .position(|entry| matches!(entry, Some((known, _)) if *known == peer))
-}
-
-/// Overlapping part of two rects, `None` when they are disjoint.
-fn rect_intersect(a: Rect, b: Rect) -> Option<Rect> {
-    let x0 = (a.x as i64).max(b.x as i64);
-    let y0 = (a.y as i64).max(b.y as i64);
-    let x1 = (a.x as i64 + a.w as i64).min(b.x as i64 + b.w as i64);
-    let y1 = (a.y as i64 + a.h as i64).min(b.y as i64 + b.h as i64);
-    if x1 <= x0 || y1 <= y0 {
-        return None;
-    }
-    Some(Rect {
-        x: x0 as i32,
-        y: y0 as i32,
-        w: (x1 - x0) as u32,
-        h: (y1 - y0) as u32,
-    })
 }
 
 /// `object_id` of a complete frame whose total length is `len`.
@@ -1211,12 +1320,7 @@ fn peer_index(
 ///
 /// Returns `false` when the body cannot be encoded, so the caller can ignore a
 /// diagnostic failure. `request_id` is always `0` (A.3.1 events).
-fn send_event(
-    transport: &mut PeerTransport,
-    opcode: Opcode,
-    object: u64,
-    body: &Body<'_>,
-) -> bool {
+fn send_event(transport: &mut PeerTransport, opcode: Opcode, object: u64, body: &Body<'_>) -> bool {
     let mut message = [0u8; MAX_MESSAGE_BYTES as usize];
     let Ok(body_len) = body.encode(&mut message[HEADER_LEN..]) else {
         return false;
@@ -1246,7 +1350,12 @@ fn send_batch(
     let Some((_, transport)) = peers[index].as_mut() else {
         return;
     };
-    let _ = send_event(transport, Opcode::INPUT_BATCH, object, &Body::InputBatch(*batch));
+    let _ = send_event(
+        transport,
+        Opcode::INPUT_BATCH,
+        object,
+        &Body::InputBatch(*batch),
+    );
 }
 
 /// A.3.1 `INPUT_RESET`: tell the focused surface's client to resynchronise.
@@ -1496,14 +1605,13 @@ fn kilobytes(value: &str) -> Option<u64> {
 /// Keeps a system reserve, the private backbuffer and a rescue reserve out of
 /// the budget, and never goes below [`MIN_GLOBAL_BUDGET_BYTES`]. Unavailable
 /// or unparsable meminfo leaves the budget disabled (`0`).
-fn install_global_budget(server: &mut Server<DisplayBackend>, back_len: usize) {
+fn install_global_budget(server: &mut Server<DisplayBackend>) {
     let Some(available) = mem_available_bytes() else {
         log_text(b"vasistas: global budget disabled (meminfo unavailable)");
         return;
     };
     let budget = available
         .saturating_sub(SYSTEM_RESERVE_BYTES)
-        .saturating_sub(back_len as u64)
         .saturating_sub(RESCUE_RESERVE_BYTES)
         .max(MIN_GLOBAL_BUDGET_BYTES);
     server.set_global_budget(budget as usize);
@@ -1570,33 +1678,12 @@ fn open_screen() -> Screen {
             halt();
         }
     };
-    // Private composited frame: anonymous, page-aligned, zero-filled. No
-    // static BSS (a 1600x1200 screen alone is 7.7 MiB).
-    let back = match unsafe {
-        syscall6(
-            number::SYS_MMAP,
-            0,
-            size,
-            PROT_READ_WRITE,
-            MAP_PRIVATE | MAP_ANONYMOUS,
-            0,
-            0,
-        )
-    } {
-        Ok(addr) if addr != 0 => addr,
-        _ => {
-            log_text(b"vasistas: FATAL: backbuffer mmap failed");
-            halt();
-        }
-    };
     log(&format_args!(
-        "vasistas: framebuffer mapped ({} bytes), backbuffer mapped",
+        "vasistas: framebuffer mapped ({} bytes)",
         size
     ));
     Screen {
         fb,
-        back,
-        back_len: size,
         width,
         height,
         stride,

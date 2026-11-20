@@ -178,6 +178,47 @@ fn test_dynamic_policy_switch() -> bool {
     done && SWITCH_WORKER_HITS.load(Ordering::Relaxed) > 0
 }
 
+/// Verify the packed policy encoding round-trips every class/range endpoint.
+fn test_policy_encoding_roundtrip() -> bool {
+    use crate::process::sched::{nice::Nice, real_time::RealTimePriority, SchedPolicy};
+
+    let cases = [
+        SchedPolicy::Fair(Nice::new(-20)),
+        SchedPolicy::Fair(Nice::new(-1)),
+        SchedPolicy::Fair(Nice::new(0)),
+        SchedPolicy::Fair(Nice::new(19)),
+        SchedPolicy::RealTimeRR {
+            prio: RealTimePriority::new(0),
+        },
+        SchedPolicy::RealTimeRR {
+            prio: RealTimePriority::new(99),
+        },
+        SchedPolicy::RealTimeFifo {
+            prio: RealTimePriority::new(50),
+        },
+        SchedPolicy::Idle,
+    ];
+
+    let policies_ok = cases
+        .iter()
+        .all(|policy| SchedPolicy::from_raw(policy.to_raw()) == *policy);
+    let deadline_ok =
+        crate::sync::deadline_after_ns(0).is_none() && crate::sync::deadline_after_ns(1).is_some();
+    policies_ok && deadline_ok
+}
+
+/// Verify the trace mask is readable, writable and restore-safe.
+fn test_trace_mask_roundtrip() -> bool {
+    let saved = crate::trace::mask();
+    let test = crate::trace::category::SCHED_ALL | crate::trace::category::IPC_CALL;
+    crate::trace::set_mask(test);
+    let ok = crate::trace::mask() == test
+        && crate::trace::enabled(crate::trace::category::SCHED_BLOCK)
+        && !crate::trace::enabled(crate::trace::category::MEM_PF);
+    crate::trace::set_mask(saved);
+    ok
+}
+
 /// Performs the test config validation reject operation.
 fn test_config_validation_reject() -> bool {
     let mut t1 = scheduler_class_table();
@@ -263,6 +304,18 @@ extern "C" fn scheduler_test_main() -> ! {
     sched_test_log(format_args!(
         "case=ready-task-migration result={}",
         if s4 { "ok" } else { "FAIL" }
+    ));
+
+    let s5 = test_policy_encoding_roundtrip();
+    sched_test_log(format_args!(
+        "case=policy-encoding-roundtrip result={}",
+        if s5 { "ok" } else { "FAIL" }
+    ));
+
+    let s6 = test_trace_mask_roundtrip();
+    sched_test_log(format_args!(
+        "case=trace-mask-roundtrip result={}",
+        if s6 { "ok" } else { "FAIL" }
     ));
 
     log_scheduler_state("test-end");

@@ -119,6 +119,18 @@ pub fn wait_for_reply_timeout(
     wait_for_reply_deadline(task_id, waiting_on, Some(deadline))
 }
 
+/// Like [`wait_for_reply`], but gives up at an absolute scheduler deadline.
+///
+/// `None` waits forever. This is the primitive used by timed IPC calls so a
+/// single deadline can cover both the blocking send and the reply wait.
+pub fn wait_for_reply_until(
+    task_id: TaskId,
+    waiting_on: TaskId,
+    deadline_ns: Option<u64>,
+) -> Option<IpcMessage> {
+    wait_for_reply_deadline(task_id, waiting_on, deadline_ns)
+}
+
 fn wait_for_reply_deadline(
     task_id: TaskId,
     waiting_on: TaskId,
@@ -292,6 +304,21 @@ pub fn deliver_reply(
             slot_msg.replace(msg);
             let wq = waitq.clone();
             drop(registry);
+            if crate::trace::enabled(crate::trace::category::IPC_REPLY) {
+                crate::trace::record(
+                    crate::trace::category::IPC_REPLY,
+                    crate::trace::TraceKind::IpcReply,
+                    0,
+                    crate::trace::TraceTaskCtx {
+                        task_id: target.as_u64(),
+                        ..crate::trace::TraceTaskCtx::empty()
+                    },
+                    0,
+                    0,
+                    target.as_u64(),
+                    responder.as_u64(),
+                );
+            }
             wq.wake_one();
             Ok(())
         }

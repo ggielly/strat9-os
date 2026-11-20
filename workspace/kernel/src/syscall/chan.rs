@@ -99,7 +99,16 @@ pub fn sys_chan_create(capacity: u64) -> Result<u64, SyscallError> {
 /// the receiver sees only the badge of the delegation chain, never the
 /// sender's global identity.  A sender cannot forge the badge because the
 /// kernel overwrites `msg.sender` after reading the message from user-space.
-pub fn sys_chan_send(handle: u64, msg_ptr: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
+pub fn sys_chan_send(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
+    sys_chan_send_timeout(handle, msg_ptr, 0)
+}
+
+/// SYS_CHAN_SEND_TIMEOUT (225): send with a bounded wait for space.
+pub fn sys_chan_send_timeout(
+    handle: u64,
+    msg_ptr: u64,
+    timeout_ns: u64,
+) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
 
     let user_slice = UserSliceRead::new(msg_ptr, MSG_SIZE).map_err(SyscallError::from)?;
@@ -135,7 +144,16 @@ pub fn sys_chan_send(handle: u64, msg_ptr: u64, timeout_ns: u64) -> Result<u64, 
 
 /// SYS_CHAN_RECV (222): receive one `IpcMessage`, blocking if empty.
 
-pub fn sys_chan_recv(handle: u64, msg_ptr: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
+pub fn sys_chan_recv(handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
+    sys_chan_recv_timeout(handle, msg_ptr, 0)
+}
+
+/// SYS_CHAN_RECV_TIMEOUT (226): receive with a bounded wait.
+pub fn sys_chan_recv_timeout(
+    handle: u64,
+    msg_ptr: u64,
+    timeout_ns: u64,
+) -> Result<u64, SyscallError> {
     crate::silo::enforce_cap_for_current_task(handle)?;
 
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;

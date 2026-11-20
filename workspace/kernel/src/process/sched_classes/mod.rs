@@ -296,6 +296,36 @@ impl SchedPolicy {
             Self::Idle => SchedPolicyKind::Idle,
         }
     }
+
+    /// Pack the policy into a single `u32` so it can live in an atomic.
+    ///
+    /// Layout: bits 16-17 = kind, bits 0-7 = class-specific value (Nice as
+    /// `i8`, RT priority, or 0 for Idle). A single word makes concurrent
+    /// readers (scheduler, `SYS_SCHED_INFO`, shell) see a consistent pair
+    /// instead of a torn read of a `SyncUnsafeCell`.
+    pub const fn to_raw(self) -> u32 {
+        match self {
+            Self::Fair(nice) => ((nice.value().get() as u8) as u32) | (0 << 16),
+            Self::RealTimeRR { prio } => (prio.get() as u32) | (1 << 16),
+            Self::RealTimeFifo { prio } => (prio.get() as u32) | (2 << 16),
+            Self::Idle => 3 << 16,
+        }
+    }
+
+    /// Unpack a value produced by [`to_raw`](Self::to_raw).
+    pub fn from_raw(raw: u32) -> Self {
+        let value = raw as u8;
+        match (raw >> 16) & 0x3 {
+            0 => Self::Fair(nice::Nice::new(value as i8)),
+            1 => Self::RealTimeRR {
+                prio: real_time::RealTimePriority::new(value),
+            },
+            2 => Self::RealTimeFifo {
+                prio: real_time::RealTimePriority::new(value),
+            },
+            _ => Self::Idle,
+        }
+    }
 }
 
 impl SchedPolicyKind {

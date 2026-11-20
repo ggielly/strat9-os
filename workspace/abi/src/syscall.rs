@@ -231,33 +231,25 @@ pub const SYS_IPC_CREATE_PORT: usize = 200;
 ///
 /// - `port_handle`: capability handle of the target port
 /// - `msg_ptr`: pointer to the message data
-/// - `timeout_ns`: relative timeout in nanoseconds (`0` = wait forever)
 ///
-/// Blocks if the port's message queue is full, and returns `-ETIMEDOUT` if
-/// `timeout_ns` elapses before space becomes available.
+/// Blocks if the port's message queue is full.
 pub const SYS_IPC_SEND: usize = 201;
 
 /// Receive a message from an IPC port.
 ///
 /// - `port_handle`: capability handle of the port
 /// - `buf_ptr`: buffer to receive the message
-/// - `timeout_ns`: relative timeout in nanoseconds (`0` = wait forever)
 ///
-/// Blocks until a message is available, or returns `-ETIMEDOUT` once the
-/// timeout elapses. A timeout is distinct from a dead server (`-EPIPE`).
+/// Blocks until a message is available. Returns 0 on success.
 pub const SYS_IPC_RECV: usize = 202;
 
 /// Synchronous RPC: send a message and wait for a reply.
 ///
 /// - `port_handle`: capability handle of the target port
-/// - `msg_ptr`: pointer to the request message (also receives the reply)
-/// - `timeout_ns`: relative reply timeout in nanoseconds (`0` = wait forever)
+/// - `msg_ptr`: pointer to the request message
 ///
-/// Blocks until the server replies, or returns `-ETIMEDOUT` once the timeout
-/// elapses. On timeout the reply slot is closed: a late `SYS_IPC_REPLY` from
-/// the server fails with `-EPIPE` instead of being delivered to a task that
-/// has moved on.
-/// Equivalent to `SYS_IPC_SEND` + `SYS_IPC_RECV` with automatic reply routing.
+/// Blocks until the server replies. Equivalent to `SYS_IPC_SEND` +
+/// `SYS_IPC_RECV` with automatic reply routing.
 pub const SYS_IPC_CALL: usize = 203;
 
 /// Reply to the current IPC call.
@@ -324,6 +316,27 @@ pub const SYS_IPC_RING_CREATE: usize = 210;
 /// Returns the mapped virtual address.
 pub const SYS_IPC_RING_MAP: usize = 211;
 
+/// Send a message with a bounded wait for queue space.
+///
+/// Same as [`SYS_IPC_SEND`] plus a `timeout_ns` argument. `0` waits forever.
+/// Returns `-ETIMEDOUT` if the port's queue stays full past the deadline.
+/// Kept as a separate number so pre-0.5 binaries that call `SYS_IPC_SEND`
+/// with only two arguments cannot be misread as passing a timeout.
+pub const SYS_IPC_SEND_TIMEOUT: usize = 213;
+
+/// Receive a message with a bounded wait.
+///
+/// Same as [`SYS_IPC_RECV`] plus `timeout_ns` (`0` = forever). Returns
+/// `-ETIMEDOUT` on expiry, distinct from `-EPIPE` (dead port).
+pub const SYS_IPC_RECV_TIMEOUT: usize = 214;
+
+/// Synchronous RPC with a single end-to-end deadline.
+///
+/// Same as [`SYS_IPC_CALL`] plus `timeout_ns` (`0` = forever), which covers
+/// both the blocking send and the wait for the reply. On expiry the reply
+/// slot is closed and a late `SYS_IPC_REPLY` fails with `-EPIPE`.
+pub const SYS_IPC_CALL_TIMEOUT: usize = 215;
+
 // ── Block 220-224: Typed Channels (MPMC) ───────────────────────────────────
 
 /// Create a typed MPMC channel.
@@ -338,19 +351,16 @@ pub const SYS_CHAN_CREATE: usize = 220;
 ///
 /// - `handle`: channel handle
 /// - `msg_ptr`: pointer to the message data
-/// - `timeout_ns`: relative timeout in nanoseconds (`0` = wait forever)
 ///
-/// Blocks until space is available in the channel buffer, or returns
-/// `-ETIMEDOUT` once the timeout elapses.
+/// Blocks until space is available in the channel buffer.
 pub const SYS_CHAN_SEND: usize = 221;
 
 /// Receive a message from a typed channel (blocks if empty).
 ///
 /// - `handle`: channel handle
 /// - `msg_ptr`: buffer to receive the message
-/// - `timeout_ns`: relative timeout in nanoseconds (`0` = wait forever)
 ///
-/// Blocks until a message is available, or returns `-ETIMEDOUT`.
+/// Blocks until a message is available.
 pub const SYS_CHAN_RECV: usize = 222;
 
 /// Non-blocking receive from a typed channel.
@@ -369,6 +379,16 @@ pub const SYS_CHAN_TRY_RECV: usize = 223;
 /// pending senders/receivers receive `EPIPE`.
 pub const SYS_CHAN_CLOSE: usize = 224;
 
+/// Send into a typed channel with a bounded wait for space.
+///
+/// Same as [`SYS_CHAN_SEND`] plus `timeout_ns` (`0` = forever).
+pub const SYS_CHAN_SEND_TIMEOUT: usize = 225;
+
+/// Receive from a typed channel with a bounded wait.
+///
+/// Same as [`SYS_CHAN_RECV`] plus `timeout_ns` (`0` = forever).
+pub const SYS_CHAN_RECV_TIMEOUT: usize = 226;
+
 // ── Block 230-234: Semaphores ───────────────────────────────────────────────
 
 /// Create a POSIX counting semaphore.
@@ -381,10 +401,6 @@ pub const SYS_SEM_CREATE: usize = 230;
 /// Decrement (wait on) a semaphore. Blocks if the count is zero.
 ///
 /// - `handle`: semaphore handle
-/// - `timeout_ns`: relative timeout in nanoseconds (`0` = wait forever)
-///
-/// Returns `-ETIMEDOUT` if the timeout elapses before the semaphore becomes
-/// available.
 pub const SYS_SEM_WAIT: usize = 231;
 
 /// Non-blocking decrement (trywait) on a semaphore.
@@ -398,6 +414,12 @@ pub const SYS_SEM_TRYWAIT: usize = 232;
 ///
 /// - `handle`: semaphore handle
 pub const SYS_SEM_POST: usize = 233;
+
+/// Wait on a semaphore with a bounded wait.
+///
+/// Same as [`SYS_SEM_WAIT`] plus `timeout_ns` (`0` = forever). Returns
+/// `-ETIMEDOUT` if the count is still zero at expiry.
+pub const SYS_SEM_WAIT_TIMEOUT: usize = 235;
 
 /// Close a semaphore handle.
 ///
@@ -933,9 +955,10 @@ pub const SYS_SCHED_SET: usize = 345;
 
 /// Read the scheduling policy/priority of the calling task.
 ///
-/// Returns a packed value: low 32 bits = policy
-/// (`SCHED_POLICY_*`), high 32 bits = priority as a sign-extended i32
-/// (Nice for `FAIR`, RT priority for `RR`/`FIFO`, 0 for `IDLE`).
+/// Returns a packed value: low 32 bits = policy (`SCHED_POLICY_*`), bits
+/// 32-39 = priority. For `FAIR` the priority is Nice offset by 20
+/// (`0` = -20, `20` = 0, `39` = 19); for `RR`/`FIFO` it is the RT priority
+/// (`0..=99`); `IDLE` reports 0. The sign is never encoded in bit 63.
 pub const SYS_SCHED_GET: usize = 346;
 
 /// Set the soft CPU affinity mask of the calling task.
@@ -1644,6 +1667,78 @@ pub const SYS_DEBUG_LOG: usize = 600;
 ///
 /// Returns the number of bytes written. Uses RDRAND/RDSEED when available.
 pub const SYS_GETRANDOM: usize = 601;
+
+// ── Block 602-609: kernel tracing ──────────────────────────────────────────
+//
+// The kernel already records per-CPU events for memory management. These
+// syscalls expose the IPC/scheduling/IRQ/syscall categories to an
+// administrative tracing daemon. All calls require silo-admin capability:
+// trace records contain kernel RIPs, task ids and wake deadlines.
+
+/// Configure or query the kernel trace subsystem.
+///
+/// - `cmd`: `TRACE_CTL_*`
+/// - `arg`: command-specific (mask, or pointer to [`crate::data::TraceStats`])
+///
+/// Returns the previous mask for `SET_MASK`, the current mask for `GET_MASK`,
+/// and `0` otherwise.
+pub const SYS_TRACE_CTL: usize = 602;
+
+/// Copy trace events to userspace.
+///
+/// - `out_ptr`: pointer to an array of [`crate::data::TraceRecord`]
+/// - `max_records`: capacity of the array (clamped by the kernel)
+/// - `flags`: reserved, must be 0
+///
+/// Returns the number of records written. Events are ordered by global
+/// sequence number; the oldest per-CPU events may have been overwritten by
+/// the ring buffer.
+pub const SYS_TRACE_READ: usize = 603;
+
+/// `SYS_TRACE_CTL` command: set the trace mask to `arg`, return the old mask.
+pub const TRACE_CTL_SET_MASK: u32 = 0;
+/// `SYS_TRACE_CTL` command: read the current trace mask.
+pub const TRACE_CTL_GET_MASK: u32 = 1;
+/// `SYS_TRACE_CTL` command: clear all per-CPU trace rings.
+pub const TRACE_CTL_CLEAR: u32 = 2;
+/// `SYS_TRACE_CTL` command: write [`crate::data::TraceStats`] to `arg`.
+pub const TRACE_CTL_STATS: u32 = 3;
+
+/// Trace category: IPC send.
+pub const TRACE_CAT_IPC_SEND: u64 = 1 << 8;
+/// Trace category: IPC receive.
+pub const TRACE_CAT_IPC_RECV: u64 = 1 << 9;
+/// Trace category: synchronous IPC call.
+pub const TRACE_CAT_IPC_CALL: u64 = 1 << 10;
+/// Trace category: IPC reply.
+pub const TRACE_CAT_IPC_REPLY: u64 = 1 << 11;
+/// Trace category: any IPC event.
+pub const TRACE_CAT_IPC_ALL: u64 =
+    TRACE_CAT_IPC_SEND | TRACE_CAT_IPC_RECV | TRACE_CAT_IPC_CALL | TRACE_CAT_IPC_REPLY;
+
+/// Trace category: a task blocks.
+pub const TRACE_CAT_SCHED_BLOCK: u64 = 1 << 16;
+/// Trace category: a task is woken.
+pub const TRACE_CAT_SCHED_WAKE: u64 = 1 << 17;
+/// Trace category: a context switch.
+pub const TRACE_CAT_SCHED_SWITCH: u64 = 1 << 18;
+/// Trace category: any scheduling event.
+pub const TRACE_CAT_SCHED_ALL: u64 =
+    TRACE_CAT_SCHED_BLOCK | TRACE_CAT_SCHED_WAKE | TRACE_CAT_SCHED_SWITCH;
+
+/// Trace category: syscall entry (payload: syscall number).
+pub const TRACE_CAT_SYSCALL_ENTER: u64 = 1 << 24;
+/// Trace category: syscall exit (payload: raw return value).
+pub const TRACE_CAT_SYSCALL_EXIT: u64 = 1 << 25;
+/// Trace category: any syscall event.
+pub const TRACE_CAT_SYSCALL_ALL: u64 = TRACE_CAT_SYSCALL_ENTER | TRACE_CAT_SYSCALL_EXIT;
+
+/// Trace category: interrupt entry.
+pub const TRACE_CAT_IRQ_ENTER: u64 = 1 << 32;
+/// Trace category: interrupt exit.
+pub const TRACE_CAT_IRQ_EXIT: u64 = 1 << 33;
+/// Trace category: any IRQ event.
+pub const TRACE_CAT_IRQ_ALL: u64 = TRACE_CAT_IRQ_ENTER | TRACE_CAT_IRQ_EXIT;
 
 /// Set the robust futex list head for the current thread.
 ///

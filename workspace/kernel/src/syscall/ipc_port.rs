@@ -106,10 +106,19 @@ fn prepare_send(
 }
 
 /// SYS_IPC_SEND: send one IPC message to a port.
+pub fn sys_ipc_send(port_handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
+    sys_ipc_send_timeout(port_handle, msg_ptr, 0)
+}
+
+/// SYS_IPC_SEND_TIMEOUT: send with a bounded wait for queue space.
 ///
 /// `timeout_ns == 0` waits forever; otherwise the send fails with
 /// `ETIMEDOUT` if the port's queue stays full past the deadline.
-pub fn sys_ipc_send(port_handle: u64, msg_ptr: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
+pub fn sys_ipc_send_timeout(
+    port_handle: u64,
+    msg_ptr: u64,
+    timeout_ns: u64,
+) -> Result<u64, SyscallError> {
     let (port_obj, msg) = prepare_send(port_handle, msg_ptr)?;
 
     // `msg.flags` is user protocol data only. It is deliberately not used to
@@ -117,6 +126,20 @@ pub fn sys_ipc_send(port_handle: u64, msg_ptr: u64, timeout_ns: u64) -> Result<u
     // meanings (user flags, capability handle, label), which caused ordinary
     // sends to be interpreted as capability transfers on receive.
     let deadline = crate::sync::deadline_after_ns(timeout_ns);
+    if crate::trace::enabled(crate::trace::category::IPC_SEND) {
+        if let Some(task) = current_task_clone() {
+            crate::trace::record(
+                crate::trace::category::IPC_SEND,
+                crate::trace::TraceKind::IpcSend,
+                0,
+                crate::trace::TraceTaskCtx::from_task(task.as_ref()),
+                0,
+                port_obj.id.as_u64(),
+                task.id.as_u64(),
+                timeout_ns,
+            );
+        }
+    }
     port_obj
         .send_deadline(msg, deadline)
         .map_err(SyscallError::from)?;
@@ -135,11 +158,20 @@ pub fn sys_ipc_try_send(port_handle: u64, msg_ptr: u64) -> Result<u64, SyscallEr
 }
 
 /// SYS_IPC_RECV: block until a message is received from a port.
+pub fn sys_ipc_recv(port_handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
+    sys_ipc_recv_timeout(port_handle, msg_ptr, 0)
+}
+
+/// SYS_IPC_RECV_TIMEOUT: receive with a bounded wait.
 ///
 /// `timeout_ns == 0` waits forever; otherwise returns `ETIMEDOUT` once the
 /// deadline passes. A timeout is reported separately from a destroyed port
 /// (`EPIPE`), so a server can distinguish "no request yet" from "server gone".
-pub fn sys_ipc_recv(port_handle: u64, msg_ptr: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
+pub fn sys_ipc_recv_timeout(
+    port_handle: u64,
+    msg_ptr: u64,
+    timeout_ns: u64,
+) -> Result<u64, SyscallError> {
     silo::enforce_cap_for_current_task(port_handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &*task.process.capabilities.get() };
@@ -163,6 +195,18 @@ pub fn sys_ipc_recv(port_handle: u64, msg_ptr: u64, timeout_ns: u64) -> Result<u
 
     let port_id = PortId::from_u64(cap.resource as u64);
     let port_obj = port::get_port(port_id).ok_or(SyscallError::BadHandle)?;
+    if crate::trace::enabled(crate::trace::category::IPC_RECV) {
+        crate::trace::record(
+            crate::trace::category::IPC_RECV,
+            crate::trace::TraceKind::IpcRecv,
+            0,
+            crate::trace::TraceTaskCtx::from_task(task.as_ref()),
+            0,
+            port_id.as_u64(),
+            task.id.as_u64(),
+            timeout_ns,
+        );
+    }
     let mut msg = port_obj
         .recv_deadline(crate::sync::deadline_after_ns(timeout_ns))
         .map_err(SyscallError::from)?;
@@ -284,10 +328,32 @@ pub fn sys_ipc_connect(path_ptr: u64, path_len: u64) -> Result<u64, SyscallError
 }
 
 /// SYS_IPC_CALL: synchronous RPC : send + block until reply arrives.
+pub fn sys_ipc_call(port_handle: u64, msg_ptr: u64) -> Result<u64, SyscallError> {
+    ipc_call_impl(port_handle, msg_ptr, None)
+}
+
+/// SYS_IPC_CALL_TIMEOUT: synchronous RPC with one end-to-end deadline.
 ///
-/// `timeout_ns == 0` waits forever. On timeout the reply slot is closed
-/// (a late server reply then fails with `EPIPE`) and `ETIMEDOUT` is returned.
-pub fn sys_ipc_call(port_handle: u64, msg_ptr: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
+/// The same deadline bounds the blocking send and the wait for the reply.
+/// On timeout the reply slot is closed (a late server reply then fails with
+/// `EPIPE`) and `ETIMEDOUT` is returned.
+pub fn sys_ipc_call_timeout(
+    port_handle: u64,
+    msg_ptr: u64,
+    timeout_ns: u64,
+) -> Result<u64, SyscallError> {
+    ipc_call_impl(
+        port_handle,
+        msg_ptr,
+        crate::sync::deadline_after_ns(timeout_ns),
+    )
+}
+
+fn ipc_call_impl(
+    port_handle: u64,
+    msg_ptr: u64,
+    deadline: Option<u64>,
+) -> Result<u64, SyscallError> {
     silo::enforce_cap_for_current_task(port_handle)?;
     let task = current_task_clone().ok_or(SyscallError::PermissionDenied)?;
     let caps = unsafe { &*task.process.capabilities.get() };
@@ -334,13 +400,25 @@ pub fn sys_ipc_call(port_handle: u64, msg_ptr: u64, timeout_ns: u64) -> Result<u
     let port_id = PortId::from_u64(cap.resource as u64);
     let port_obj = port::get_port(port_id).ok_or(SyscallError::BadHandle)?;
     let port_owner = port_obj.owner;
-    port_obj.send(msg).map_err(SyscallError::from)?;
+    if crate::trace::enabled(crate::trace::category::IPC_CALL) {
+        crate::trace::record(
+            crate::trace::category::IPC_CALL,
+            crate::trace::TraceKind::IpcCall,
+            0,
+            crate::trace::TraceTaskCtx::from_task(task.as_ref()),
+            0,
+            port_id.as_u64(),
+            task.id.as_u64(),
+            port_owner.as_u64(),
+        );
+    }
+    port_obj
+        .send_deadline(msg, deadline)
+        .map_err(SyscallError::from)?;
 
-    let reply_msg = if timeout_ns == 0 {
-        reply::wait_for_reply(task.id, port_owner)
-    } else {
-        reply::wait_for_reply_timeout(task.id, port_owner, timeout_ns)
-            .ok_or(SyscallError::TimedOut)?
+    let reply_msg = match reply::wait_for_reply_until(task.id, port_owner, deadline) {
+        Some(msg) => msg,
+        None => return Err(SyscallError::TimedOut),
     };
     let mut out_buf = [0u8; MSG_SIZE];
     crate::ipc::message::ipc_message_to_raw(&reply_msg, &mut out_buf);

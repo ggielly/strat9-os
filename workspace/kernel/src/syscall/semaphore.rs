@@ -94,11 +94,16 @@ pub fn sys_sem_create(initial: u64) -> Result<u64, SyscallError> {
     Ok(cap_id.as_u64())
 }
 
-/// SYS_SEM_WAIT: decrement the semaphore.
+/// SYS_SEM_WAIT: decrement the semaphore (blocking if zero).
+pub fn sys_sem_wait(handle: u64) -> Result<u64, SyscallError> {
+    sys_sem_wait_timeout(handle, 0)
+}
+
+/// SYS_SEM_WAIT_TIMEOUT (235): wait with a bounded deadline.
 ///
 /// `timeout_ns == 0` waits forever; otherwise returns `ETIMEDOUT` if the
 /// semaphore is still unavailable when the deadline passes.
-pub fn sys_sem_wait(handle: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
+pub fn sys_sem_wait_timeout(handle: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
     let sem_id = resolve_sem(handle, true)?;
     semaphore::get_semaphore(sem_id)
         .ok_or(SyscallError::BadHandle)?

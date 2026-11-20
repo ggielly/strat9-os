@@ -390,6 +390,19 @@ pub(crate) fn publish_current_task(
     CPU_CLASS[cpu_index].store(value, Ordering::Relaxed);
     let ticks = core::ptr::addr_of!(task.ticks) as usize;
     CPU_CURRENT_TICKS[cpu_index].store(ticks, Ordering::Release);
+
+    if crate::trace::enabled(crate::trace::category::SCHED_SWITCH) {
+        crate::trace::record(
+            crate::trace::category::SCHED_SWITCH,
+            crate::trace::TraceKind::SchedSwitch,
+            value as u64,
+            crate::trace::TraceTaskCtx::from_task(task),
+            0,
+            0,
+            cpu_index as u64,
+            task.id.as_u64(),
+        );
+    }
 }
 static CPU_SWITCH_COUNT: [AtomicU64; crate::arch::percpu::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::percpu::MAX_CPUS];
